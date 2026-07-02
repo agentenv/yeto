@@ -42,7 +42,12 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Decoupled DiLoCo learner")
     p.add_argument("--model", required=True, help="HF model id or alias (gemma4|deepseek4flash)")
     p.add_argument("--data", required=True, help="HF dataset id")
-    p.add_argument("--syncer", required=True, help="host:port of the syncer")
+    p.add_argument(
+        "--syncer",
+        required=True,
+        help="host:port of the syncer, or 'none' for a standalone DDP "
+        "baseline (no DiLoCo; stops at --max-local-steps)",
+    )
     p.add_argument("--learner-id", type=int, required=True)
     p.add_argument("--num-learners", type=int, required=True)
     p.add_argument("--loss-function", default="cross_entropy")
@@ -159,7 +164,7 @@ def main(argv=None) -> None:
 
     wire_dtype = DTYPE_BF16 if args.wire_dtype == "bf16" else DTYPE_F32
     client = None
-    if rank == 0:
+    if rank == 0 and args.syncer != "none":
         host, port = args.syncer.rsplit(":", 1)
         client = SyncerClient(
             (host, int(port)), args.learner_id, layout, wire_dtype, args.wan_streams
@@ -180,7 +185,8 @@ def main(argv=None) -> None:
         target.save_pretrained(save_dir)
         tokenizer.save_pretrained(save_dir)
         log.info("saved model to %s", save_dir)
-        client.close()
+        if client is not None:
+            client.close()
     if world > 1:
         dist.barrier()
         dist.destroy_process_group()
@@ -246,7 +252,7 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
 
             # --- fragment sync at the step boundary (never blocks) ---
             actions = []  # (fid, version, flat_f32) applied this boundary
-            if rank == 0:
+            if rank == 0 and client is not None:
                 client.check_health()
                 # 1. answer pulls whose fragment has made progress
                 pending_pulls.extend(client.drain_pulls())
