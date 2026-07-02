@@ -1,9 +1,12 @@
-# Learner ↔ Syncer wire protocol (v1)
+# Learner ↔ Syncer wire protocol (v2)
 
 Transport: one persistent TCP connection per learner to the syncer. All
-integers little-endian. Tensors are raw contiguous bytes in the declared dtype.
-The syncer never blocks learners: learners push fragments on schedule and
-apply broadcast fragments whenever they arrive.
+integers little-endian. Tensors are raw contiguous bytes in the declared dtype
+(fragment = concatenation of its tensors, in layout order).
+
+The design follows Decoupled DiLoCo (arXiv 2604.21428) Algorithms 1–2: the
+syncer owns the global step `t` and drives a pull-based, per-fragment sync
+schedule; learners never block on the WAN.
 
 ## Framing
 
@@ -15,30 +18,41 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
 
 | type | name           | direction        | payload |
 |------|----------------|------------------|---------|
-| 1    | HELLO          | learner → syncer | learner_id:u32, num_fragments:u32, dtype:u8 (1=f32, 2=bf16), numel per fragment: u64 × num_fragments |
-| 2    | INIT_PARAMS    | learner → syncer | fragment_id:u32, tensor bytes (initial Θ_p^(0); only learner 0 sends; syncer ignores if already initialized) |
-| 3    | PUSH_FRAGMENT  | learner → syncer | learner_id:u32, fragment_id:u32, base_version:u64 (global step t of the Θ_p this delta is anchored to), steps:u32 (c^steps), tokens:u64 (c^tokens), tensor bytes (θ_m,p current value) |
-| 4    | BCAST_FRAGMENT | syncer → learner | fragment_id:u32, version:u64 (new global step t), tensor bytes (Θ_p^(t)) |
-| 5    | HEARTBEAT      | learner → syncer | learner_id:u32, local_step:u64 |
-| 6    | SHUTDOWN       | either           | empty |
+| 1    | HELLO          | learner → syncer | learner_id:u32, dtype:u8 (1=f32, 2=bf16), num_fragments:u32, then per fragment: merge_mode:u8 (0=avg, 1=rda), num_tensors:u32, numel:u64 × num_tensors |
+| 2    | INIT_PARAMS    | learner → syncer | fragment_id:u32, tensor bytes (Θ_p^(0)); learner 0 sends all fragments once; syncer ignores if already initialized |
+| 3    | PULL_REQ       | syncer → learner | fragment_id:u32, global_step:u64 |
+| 4    | PUSH_FRAGMENT  | learner → syncer | learner_id:u32, fragment_id:u32, global_step:u64 (echoed from PULL_REQ), local_step:u64, c_steps:u32, c_tokens:u64, tensor bytes (current θ_m,p) |
+| 5    | BCAST_FRAGMENT | syncer → learner | fragment_id:u32, version:u64 (new global step t), tensor bytes (Θ_p^(t)) |
+| 6    | HEARTBEAT      | learner → syncer | learner_id:u32, local_step:u64 |
+| 7    | SHUTDOWN       | syncer → learner | empty (training reached T global steps) |
 
 ## Semantics
 
-- **Fragments**: the model's parameters are partitioned into `P` contiguous
-  fragments (groups of tensors, flattened). Fragment `p` syncs on the
-  round-robin schedule `t mod H == t_p` where `t_p = p * H / P` (double
-  buffering: `P = H` gives one fragment per outer step slot).
-- **Push**: when a learner's per-fragment inner-step counter reaches the
-  fragment's schedule point, it pushes θ_m,p plus its counters and keeps
-  training (no blocking).
-- **Merge**: the syncer waits for a quorum of `K` pushes for fragment `p`
-  (plus an optional grace window), computes per-learner deltas
-  Δ_m,p = Θ_p(anchor) − θ_m,p, merges them with token/step-weighted RDA,
-  applies the Nesterov outer step, bumps the fragment version, and broadcasts.
-- **Apply**: learners apply BCAST_FRAGMENT between inner steps and reset that
-  fragment's counters. Stale pushes (base_version older than the syncer's
-  current fragment version) are down-weighted or dropped per config.
-- **Recovery**: a (re)connecting learner sends HELLO; the syncer replies with
-  BCAST_FRAGMENT for all fragments at the current version.
-
-Merge math internals are computed in f32 on the syncer regardless of wire dtype.
+- **Fragments**: trainable parameters are partitioned into `P` fragments by
+  balanced greedy bin-packing over tensors (paper Appendix C). Embedding-like
+  tensors go to their own fragment with merge_mode=avg; everything else uses
+  RDA. All learners must declare identical layouts in HELLO.
+- **Schedule**: syncer global step `t = 1..T`; at each step exactly one
+  fragment `p = (t-1) mod P` syncs (P = H round-robin, double-buffered).
+- **Pull**: syncer sends PULL_REQ(p, t) to all connected learners. A learner
+  answers at its next inner-step boundary, and only once `c_steps[p] ≥ 1`
+  (this self-clocks the syncer to learner pace). Responses carry the counters
+  `c_steps[p]`, `c_tokens[p]` accumulated since the learner last *received*
+  fragment p.
+- **Quorum + grace**: syncer waits for `K` PUSHes for round `t`, then a grace
+  window (γ · slack, approximated by a configurable duration) to admit
+  stragglers, then merges. Late PUSHes for an already-merged round are dropped.
+- **Merge**: per-learner outer gradient Δ_m,p = Θ_p(prev) − θ_m,p, anchored at
+  the syncer's own previous fragment value. Learner weights
+  w_m = c_tokens² / c_steps (quantity × quality). merge_mode=avg: weighted
+  mean of deltas. merge_mode=rda: per-tensor radial-directional averaging —
+  weighted mean of norms × normalized weighted mean of unit directions
+  (φ(0) := 0; degenerate direction falls back to weighted mean).
+- **Outer step**: SGD with Nesterov momentum on the syncer, f32 state,
+  per-fragment: buf ← μ·buf + Δ; Θ ← Θ − lr·(Δ + μ·buf).
+- **Broadcast**: BCAST_FRAGMENT(p, t) to all connected learners. Learners
+  overwrite the fragment (α = 0), reset that fragment's counters, and adopt
+  `t` as their global step.
+- **Recovery**: a (re)connecting learner sends HELLO; syncer replies with
+  BCAST_FRAGMENT for every initialized fragment at the current version.
+- Merge math runs in f32 on the syncer regardless of wire dtype.
