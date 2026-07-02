@@ -51,6 +51,10 @@ python3 train.py \
 entry per learner. E.g. `aws:4x8xa100@us-east-2` = one learner cluster of
 4 nodes × 8×A100 in us-east-2.
 
+Learners run on **spot instances by default** (pass `--on-demand` to opt
+out); the syncer VM is always on-demand — it is the cheap, stateful
+coordinator, and its checkpoint/resume covers learner preemptions.
+
 ## Design notes
 
 - **Merging** (paper §3.2, App. D.2): per-learner outer gradient

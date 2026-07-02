@@ -47,7 +47,18 @@ def parse_args(argv=None):
     diloco.add_argument("--wan-streams", type=int, default=4, help="parallel TCP streams per learner")
 
     infra = p.add_argument_group("infrastructure")
-    infra.add_argument("--spot", action="store_true", help="use spot instances for learners")
+    infra.add_argument(
+        "--spot",
+        action="store_true",
+        default=True,
+        help="use spot instances for learners (default)",
+    )
+    infra.add_argument(
+        "--on-demand",
+        dest="spot",
+        action="store_false",
+        help="use on-demand instances for learners instead of spot",
+    )
     infra.add_argument("--disk-size", type=int, default=512, help="learner disk (GB)")
     infra.add_argument(
         "--learner-cpus",
