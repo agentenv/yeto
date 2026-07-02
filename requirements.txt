@@ -1,6 +1,7 @@
 # Learner-node dependencies. transformers is pinned for DeepSeek-V4-Flash
 # compatibility (its remote code is incompatible with transformers 5.x).
-torch>=2.4
+# <2.9: cu13x wheels (torch>=2.9) need driver >=580; cloud AMIs ship 535 (CUDA 12.2).
+torch>=2.4,<2.9
 transformers==4.57.1
 datasets>=3.0
 peft>=0.14

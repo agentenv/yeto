@@ -112,6 +112,12 @@ def main(argv=None) -> None:
         device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", 0)))
         torch.cuda.set_device(device)
     else:
+        if os.environ.get("SKYPILOT_NUM_GPUS_PER_NODE", "0") != "0":
+            raise RuntimeError(
+                "GPUs were provisioned but torch.cuda.is_available() is False "
+                f"(torch {torch.__version__}); check the torch wheel's CUDA "
+                "version against the node's driver instead of training on CPU"
+            )
         device = torch.device("cpu")
 
     log.info("loading model %s (%s)", args.model, args.tuning)
