@@ -45,9 +45,9 @@ def main() -> int:
         )
     )
     job_id, _handle = sky.stream_and_get(
-        sky.launch(task, cluster_name="cmp-ddp", retry_until_up=True)
+        sky.launch(task, cluster_name="cmp-ddp-g5", retry_until_up=True)
     )
-    return sky.tail_logs("cmp-ddp", job_id, follow=True)
+    return sky.tail_logs("cmp-ddp-g5", job_id, follow=True)
 
 
 if __name__ == "__main__":
