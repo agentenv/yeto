@@ -122,6 +122,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         sky.Resources(
             infra=infra,
             accelerators=spec.accelerators,
+            cpus=args.learner_cpus,
             use_spot=args.spot,
             disk_size=args.disk_size,
         )

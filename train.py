@@ -49,6 +49,11 @@ def parse_args(argv=None):
     infra = p.add_argument_group("infrastructure")
     infra.add_argument("--spot", action="store_true", help="use spot instances for learners")
     infra.add_argument("--disk-size", type=int, default=512, help="learner disk (GB)")
+    infra.add_argument(
+        "--learner-cpus",
+        default=None,
+        help="vCPU hint per learner node (e.g. '8+') to steer instance selection",
+    )
     infra.add_argument("--syncer-region", default="us-west-2")
     infra.add_argument("--syncer-memory", type=int, default=32, help="syncer RAM (GB)")
     infra.add_argument("--cluster-prefix", default="diloco")
