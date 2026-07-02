@@ -79,7 +79,11 @@ def parse_args(argv=None):
         default=None,
         help="vCPU hint per learner node (e.g. '8+') to steer instance selection",
     )
-    infra.add_argument("--syncer-region", default="us-west-2")
+    infra.add_argument(
+        "--syncer-region",
+        default="us-west-2",
+        help="syncer VM placement: 'region' (AWS) or 'cloud/region', e.g. gcp/us-central1",
+    )
     infra.add_argument("--syncer-memory", type=int, default=32, help="syncer RAM (GB)")
     infra.add_argument("--cluster-prefix", default="diloco")
     infra.add_argument("--keep", action="store_true", help="do not tear down clusters at the end")

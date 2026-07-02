@@ -58,9 +58,11 @@ def make_syncer_task(args, num_learners: int):
         run=cmd,
         file_mounts={"~/diloco-syncer": str(binary)},
     )
+    # --syncer-region accepts "region" (AWS assumed) or "cloud/region".
+    infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
     task.set_resources(
         sky.Resources(
-            infra=f"aws/{args.syncer_region}",
+            infra=infra,
             cpus="8+",
             memory=f"{args.syncer_memory}+",
             ports=[SYNCER_PORT],
