@@ -40,7 +40,9 @@ def main() -> int:
             disk_size=256,
         )
     )
-    job_id, _handle = sky.stream_and_get(sky.launch(task, cluster_name="cmp-ddp"))
+    job_id, _handle = sky.stream_and_get(
+        sky.launch(task, cluster_name="cmp-ddp", retry_until_up=True)
+    )
     return sky.tail_logs("cmp-ddp", job_id, follow=True)
 
 
