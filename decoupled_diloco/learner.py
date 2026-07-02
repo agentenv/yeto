@@ -26,7 +26,7 @@ import torch.distributed as dist
 
 from .data import build_packed_dataset
 from .fragments import FragmentLayout, build_layout
-from .losses import sft_loss
+from .losses import load_custom_loss, load_pickled_loss, sft_loss
 from .protocol import DTYPE_BF16, DTYPE_F32, SyncerClient
 from .tensor_io import apply_fragment, pack_fragment, unpack_fragment
 
@@ -202,6 +202,13 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
     # per-token mean gradient.
     loss_divisor = args.micro_batch_size * args.grad_accum * args.seq_len
 
+    if args.loss_function.startswith("pickle:"):
+        compute_loss = load_pickled_loss(args.loss_function)
+    elif args.loss_function.startswith("custom:"):
+        compute_loss = load_custom_loss(args.loss_function)
+    else:
+        compute_loss = lambda logits, ids: sft_loss(logits, ids, args.loss_function)  # noqa: E731
+
     shutdown = False
     epoch = 0
     t_last = time.monotonic()
@@ -213,7 +220,7 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
         for batch in loader:
             input_ids = batch.to(device, non_blocking=True)
             out = model(input_ids=input_ids)
-            loss, _ = sft_loss(out.logits, input_ids, args.loss_function)
+            loss, _ = compute_loss(out.logits, input_ids)
             (loss / loss_divisor).backward()
             accum += 1
             if accum < args.grad_accum:

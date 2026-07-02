@@ -70,6 +70,28 @@ def make_syncer_task(args, num_learners: int):
     return task
 
 
+PICKLED_LOSS_FILE = ".diloco_loss.pkl"
+
+
+def resolve_loss_function(loss_function) -> str:
+    """Return the --loss-function string to pass to learners.
+
+    A callable or a ``custom:<file.py>`` spec is loaded here (failing fast
+    before any cloud spend), pickled by value into the workdir, and shipped
+    to learners as ``pickle:.diloco_loss.pkl``. Named losses pass through.
+    """
+    from .losses import dump_pickled_loss, load_custom_loss
+
+    if callable(loss_function):
+        fn = loss_function
+    elif isinstance(loss_function, str) and loss_function.startswith("custom:"):
+        fn = load_custom_loss(loss_function)
+    else:
+        return loss_function
+    dump_pickled_loss(fn, REPO_ROOT / PICKLED_LOSS_FILE)
+    return f"pickle:{PICKLED_LOSS_FILE}"
+
+
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
     import sky
 
@@ -109,6 +131,13 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
 
     if os.environ.get("HF_TOKEN"):
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    file_mounts = None
+    if args.loss_function.startswith("pickle:"):
+        # The pickled loss is gitignored, so the workdir sync skips it;
+        # mount it into the workdir explicitly.
+        file_mounts = {
+            f"~/sky_workdir/{PICKLED_LOSS_FILE}": str(REPO_ROOT / PICKLED_LOSS_FILE)
+        }
     task = sky.Task(
         name=f"diloco-learner-{learner_id}",
         setup="pip install -q -r requirements.txt",
@@ -116,6 +145,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         envs=envs,
         num_nodes=spec.num_nodes,
         workdir=str(REPO_ROOT),
+        file_mounts=file_mounts,
     )
     infra = f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud
     resources_kwargs = {}
@@ -173,6 +203,7 @@ def run(args) -> int:
 
     specs = parse_gpu_spec(args.gpu)
     num_learners = len(specs)
+    args.loss_function = resolve_loss_function(args.loss_function)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
     clusters: list[str] = []

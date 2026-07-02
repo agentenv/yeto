@@ -66,6 +66,51 @@ def dro(
     return -(target_logprobs * advantages - 0.5 * beta * kl_sq).sum()
 
 
+def load_custom_loss(spec: str):
+    """Load a user-supplied loss from a ``custom:<file.py>[:<fn>]`` spec.
+
+    The file must define ``<fn>`` (default name: ``loss_fn``) with signature
+    ``fn(logits, input_ids) -> (loss, num_tokens)``. Because the learner owns
+    the forward pass, the callable receives full logits — no extra forward
+    pass or logprob round-trip is needed. The file must live inside the repo
+    so the workdir sync ships it to every learner.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    body = spec.split(":", 1)[1]
+    path, _, fn_name = body.partition(":")
+    fn_name = fn_name or "loss_fn"
+    file = Path(path)
+    if not file.exists():
+        raise FileNotFoundError(f"custom loss file {path!r} not found")
+    module_spec = importlib.util.spec_from_file_location("diloco_custom_loss", file)
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    fn = getattr(module, fn_name, None)
+    if fn is None:
+        raise AttributeError(f"{path} does not define {fn_name}()")
+    return fn
+
+
+def dump_pickled_loss(fn, path) -> None:
+    """Serialize a loss callable by value (closures included) for shipping
+    to learners via the workdir sync. Requires matching library versions on
+    both ends, which the pinned requirements.txt provides."""
+    import cloudpickle
+
+    with open(path, "wb") as f:
+        cloudpickle.dump(fn, f)
+
+
+def load_pickled_loss(spec: str):
+    """Load a loss callable from a ``pickle:<file>`` spec."""
+    import pickle
+
+    with open(spec.split(":", 1)[1], "rb") as f:
+        return pickle.load(f)
+
+
 def sft_loss(
     logits: torch.Tensor, labels: torch.Tensor, loss_function: str = "cross_entropy"
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -74,12 +119,14 @@ def sft_loss(
     logits: (B, T, V); labels: (B, T) with -100 on masked positions.
     Returns (loss, num_target_tokens). Only cross_entropy is meaningful for
     SFT; RL losses need sampling_logprobs/advantages, which an offline chat
-    dataset does not carry.
+    dataset does not carry. For anything else, use a custom loss
+    (``--loss-function custom:file.py``).
     """
     if loss_function != "cross_entropy":
         raise ValueError(
             f"loss function {loss_function!r} requires sampling logprobs and "
-            f"advantages (RL data); SFT datasets support only cross_entropy"
+            f"advantages (RL data); SFT datasets support cross_entropy or a "
+            f"custom:<file.py> loss"
         )
     shift_logits = logits[:, :-1].float()
     shift_labels = labels[:, 1:]

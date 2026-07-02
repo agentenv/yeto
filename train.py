@@ -25,7 +25,21 @@ def parse_args(argv=None):
     )
     p.add_argument("--model", required=True, help="model alias (gemma4|deepseek4flash) or HF id")
     p.add_argument("--data", required=True, help="HF dataset id (messages-format chat traces)")
-    p.add_argument("--loss-function", choices=LOSS_FUNCTIONS, default="cross_entropy")
+    def loss_spec(value: str) -> str:
+        if value in LOSS_FUNCTIONS or value.startswith(("custom:", "pickle:")):
+            return value
+        raise argparse.ArgumentTypeError(
+            f"expected one of {LOSS_FUNCTIONS} or custom:<file.py>[:<fn>]"
+        )
+
+    p.add_argument(
+        "--loss-function",
+        type=loss_spec,
+        default="cross_entropy",
+        help=f"one of {'|'.join(LOSS_FUNCTIONS)}, or custom:<file.py>[:<fn>] "
+        "defining fn(logits, input_ids) -> (loss, num_tokens); the callable "
+        "is pickled by value and shipped to all learners",
+    )
 
     tune = p.add_argument_group("fine-tuning")
     tune.add_argument("--tuning", choices=["lora", "full"], default="lora")

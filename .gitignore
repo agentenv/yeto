@@ -13,3 +13,4 @@ logs/
 .env
 wandb/
 syncer/target/
+.diloco_loss.pkl

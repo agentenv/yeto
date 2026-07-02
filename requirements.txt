@@ -9,3 +9,4 @@ accelerate>=1.0
 sentencepiece
 protobuf
 hf_transfer
+cloudpickle
