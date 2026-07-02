@@ -1,8 +1,15 @@
 # Learner ↔ Syncer wire protocol (v2)
 
-Transport: one persistent TCP connection per learner to the syncer. All
-integers little-endian. Tensors are raw contiguous bytes in the declared dtype
-(fragment = concatenation of its tensors, in layout order).
+Transport: a **connection group** of `1 + S` persistent TCP sockets per
+learner (stream 0 = control, streams 1..S = data). A single cross-region TCP
+stream is congestion-window-limited; striping large payloads across parallel
+streams multiplies WAN throughput (the GridFTP trick). gRPC was considered
+and rejected: protobuf encode/copy and HTTP/2 framing sit exactly on the bulk
+tensor path and add overhead without adding anything the 7-message control
+plane needs.
+
+All integers little-endian. Tensors are raw contiguous bytes in the declared
+dtype (fragment = concatenation of its tensors, in layout order).
 
 The design follows Decoupled DiLoCo (arXiv 2604.21428) Algorithms 1–2: the
 syncer owns the global step `t` and drives a pull-based, per-fragment sync
@@ -25,6 +32,21 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
 | 5    | BCAST_FRAGMENT | syncer → learner | fragment_id:u32, version:u64 (new global step t), tensor bytes (Θ_p^(t)) |
 | 6    | HEARTBEAT      | learner → syncer | learner_id:u32, local_step:u64 |
 | 7    | SHUTDOWN       | syncer → learner | empty (training reached T global steps) |
+| 8    | DATA_HELLO     | learner → syncer | learner_id:u32, stream_idx:u16 (attaches this socket to the learner's group as a data stream) |
+| 9    | CHUNK          | either           | msg_id:u64, total_len:u64, offset:u64, bytes (slice of an inner frame) |
+
+## Striping
+
+- HELLO (on stream 0) carries `num_streams:u16` after the layout; the learner
+  then opens that many extra sockets, each introduced by DATA_HELLO.
+- Small messages (HELLO, PULL_REQ, HEARTBEAT, SHUTDOWN) travel unchunked on
+  stream 0.
+- Large messages (INIT_PARAMS, PUSH_FRAGMENT, BCAST_FRAGMENT) are serialized
+  as a normal inner frame, split into fixed-size chunks (4 MiB), and the
+  chunks are sent round-robin across the data streams wrapped in CHUNK
+  envelopes. `msg_id` increases monotonically per sender per group; the
+  receiver reassembles by (group, msg_id) and parses the inner frame when all
+  bytes arrived. With zero data streams, large messages go on stream 0.
 
 ## Semantics
 

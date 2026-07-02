@@ -1,16 +1,19 @@
 //! Wire protocol (see docs/PROTOCOL.md). Little-endian framing over TCP.
 
 use anyhow::{bail, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 pub const MAGIC: u32 = 0xD170_C0DE;
 
 pub const MSG_HELLO: u8 = 1;
 pub const MSG_INIT_PARAMS: u8 = 2;
-pub const MSG_PUSH_FRAGMENT: u8 = 3;
-pub const MSG_BCAST_FRAGMENT: u8 = 4;
-pub const MSG_HEARTBEAT: u8 = 5;
-pub const MSG_SHUTDOWN: u8 = 6;
+pub const MSG_PULL_REQ: u8 = 3;
+pub const MSG_PUSH_FRAGMENT: u8 = 4;
+pub const MSG_BCAST_FRAGMENT: u8 = 5;
+pub const MSG_HEARTBEAT: u8 = 6;
+pub const MSG_SHUTDOWN: u8 = 7;
+pub const MSG_DATA_HELLO: u8 = 8;
+pub const MSG_CHUNK: u8 = 9;
 
 pub const DTYPE_F32: u8 = 1;
 pub const DTYPE_BF16: u8 = 2;
@@ -39,21 +42,6 @@ pub async fn read_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Frame> {
     Ok(Frame { msg_type, payload })
 }
 
-pub async fn write_frame<W: AsyncWriteExt + Unpin>(
-    w: &mut W,
-    msg_type: u8,
-    payload: &[u8],
-) -> Result<()> {
-    let mut header = [0u8; 13];
-    header[0..4].copy_from_slice(&MAGIC.to_le_bytes());
-    header[4] = msg_type;
-    header[5..13].copy_from_slice(&(payload.len() as u64).to_le_bytes());
-    w.write_all(&header).await?;
-    w.write_all(payload).await?;
-    w.flush().await?;
-    Ok(())
-}
-
 /// Cursor helpers for parsing payloads.
 pub struct Reader<'a>(pub &'a [u8]);
 
@@ -62,6 +50,9 @@ impl<'a> Reader<'a> {
         let (v, rest) = self.0.split_first().ok_or_else(|| anyhow::anyhow!("eof"))?;
         self.0 = rest;
         Ok(*v)
+    }
+    pub fn u16(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into()?))
     }
     pub fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into()?))

@@ -142,6 +142,7 @@ name = "diloco-syncer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "half",
  "tokio",
