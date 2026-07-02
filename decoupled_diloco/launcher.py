@@ -224,7 +224,10 @@ def run(args) -> int:
             name = f"{prefix}-l{m}-{spec.region or spec.cloud}"
             task = make_learner_task(args, spec, m, num_learners, syncer_addr)
             print(f"[launcher] launching learner {m} on {spec} as {name}")
-            rids[name] = (m, sky.launch(task, cluster_name=name))
+            rids[name] = (
+                m,
+                sky.launch(task, cluster_name=name, retry_until_up=args.retry_until_up),
+            )
 
         results = {}
         errors = {}

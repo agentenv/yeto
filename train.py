@@ -83,6 +83,11 @@ def parse_args(argv=None):
     infra.add_argument("--syncer-memory", type=int, default=32, help="syncer RAM (GB)")
     infra.add_argument("--cluster-prefix", default="diloco")
     infra.add_argument("--keep", action="store_true", help="do not tear down clusters at the end")
+    infra.add_argument(
+        "--retry-until-up",
+        action="store_true",
+        help="keep retrying learner provisioning until capacity is found",
+    )
     return p.parse_args(argv)
 
 
