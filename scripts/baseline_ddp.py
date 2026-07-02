@@ -36,6 +36,9 @@ def main() -> int:
         sky.Resources(
             infra="aws/us-west-2",
             accelerators="L4:4",
+            # Pinned: the other L4:4 type (g6.24xlarge, 96 vCPUs) exceeds the
+            # account's 64-vCPU G-spot quota and can never provision.
+            instance_type="g6.12xlarge",
             use_spot=True,
             disk_size=256,
         )
