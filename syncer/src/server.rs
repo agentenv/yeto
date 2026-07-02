@@ -188,12 +188,16 @@ async fn handle_connection(stream: TcpStream, registry: Registry, event_tx: mpsc
             let mut r = Reader(&first.payload);
             let learner_id = r.u32()?;
             let _stream_idx = r.u16()?;
-            let group = registry
-                .lock()
-                .unwrap()
-                .get(&learner_id)
-                .cloned()
-                .with_context(|| format!("DATA_HELLO for unknown learner {learner_id}"))?;
+            // The control socket's HELLO may still be in flight; wait for it.
+            let mut group = None;
+            for _ in 0..200 {
+                group = registry.lock().unwrap().get(&learner_id).cloned();
+                if group.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let group = group.with_context(|| format!("DATA_HELLO for unknown learner {learner_id}"))?;
             let (tx, rx) = mpsc::channel::<OutFrame>(WRITER_QUEUE);
             tokio::spawn(writer_task(wr, rx));
             group.data.lock().unwrap().push(tx);
