@@ -174,13 +174,21 @@ class SyncerClient:
         self,
         fragment_id: int,
         global_step: int,
+        base_version: int,
         local_step: int,
         c_steps: int,
         c_tokens: int,
         tensor_bytes: bytes,
     ) -> None:
         head = struct.pack(
-            "<IIQQIQ", self.learner_id, fragment_id, global_step, local_step, c_steps, c_tokens
+            "<IIQQQIQ",
+            self.learner_id,
+            fragment_id,
+            global_step,
+            base_version,
+            local_step,
+            c_steps,
+            c_tokens,
         )
         self._send_large(MSG_PUSH_FRAGMENT, head + tensor_bytes)
 

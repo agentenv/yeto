@@ -50,6 +50,8 @@ def make_syncer_task(args, num_learners: int):
         f" --total-steps {args.total_steps}"
         f" --outer-lr {args.outer_lr}"
         f" --outer-momentum {args.outer_momentum}"
+        f" --checkpoint-path ~/diloco-state.ckpt --resume"
+        f" --event-tape ~/diloco-tape.jsonl"
     )
     task = sky.Task(
         name="diloco-syncer",

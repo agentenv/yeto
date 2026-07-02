@@ -28,7 +28,7 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
 | 1    | HELLO          | learner → syncer | learner_id:u32, dtype:u8 (1=f32, 2=bf16), num_fragments:u32, then per fragment: merge_mode:u8 (0=avg, 1=rda), num_tensors:u32, numel:u64 × num_tensors |
 | 2    | INIT_PARAMS    | learner → syncer | fragment_id:u32, tensor bytes (Θ_p^(0)); learner 0 sends all fragments once; syncer ignores if already initialized |
 | 3    | PULL_REQ       | syncer → learner | fragment_id:u32, global_step:u64 |
-| 4    | PUSH_FRAGMENT  | learner → syncer | learner_id:u32, fragment_id:u32, global_step:u64 (echoed from PULL_REQ), local_step:u64, c_steps:u32, c_tokens:u64, tensor bytes (current θ_m,p) |
+| 4    | PUSH_FRAGMENT  | learner → syncer | learner_id:u32, fragment_id:u32, global_step:u64 (echoed from PULL_REQ), base_version:u64 (version of this fragment the learner last applied), local_step:u64, c_steps:u32, c_tokens:u64, tensor bytes (current θ_m,p) |
 | 5    | BCAST_FRAGMENT | syncer → learner | fragment_id:u32, version:u64 (new global step t), tensor bytes (Θ_p^(t)) |
 | 6    | HEARTBEAT      | learner → syncer | learner_id:u32, local_step:u64 |
 | 7    | SHUTDOWN       | syncer → learner | empty (training reached T global steps) |
@@ -76,5 +76,26 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
   overwrite the fragment (α = 0), reset that fragment's counters, and adopt
   `t` as their global step.
 - **Recovery**: a (re)connecting learner sends HELLO; syncer replies with
-  BCAST_FRAGMENT for every initialized fragment at the current version.
+  BCAST_FRAGMENT for every initialized fragment at that fragment's version.
 - Merge math runs in f32 on the syncer regardless of wire dtype.
+
+## Consistent snapshots
+
+The paper (Appendix E.1/E.2) uses vector clocks plus Chandy-Lamport markers
+because its syncer is M-way sharded with in-flight inter-shard messages. Here
+the syncer is a single sequential actor, so the marker algorithm degenerates:
+between rounds (after broadcasting step t, before pulling t+1) the channel
+state is irrelevant to global correctness, and a checkpoint at that quiescent
+cut is consistent by construction. The snapshot persists:
+
+- global step t and per-fragment versions,
+- global parameters Θ and outer (Nesterov) momentum,
+- the cumulative merged-token/step ledger per learner.
+
+Learner consistency on restore follows the paper's E.3 argument: a learner
+(re)connecting after a syncer restart receives the full fragment rebroadcast,
+bounding its staleness by one sync cycle H. Pushes anchored at a base_version
+older than the syncer's previous version for that fragment are logged as
+stale (the weight formula already compensates; detection is for the event
+tape). Every merge appends a JSONL event-tape record: step, fragment,
+responders with base versions, weights, token counts.

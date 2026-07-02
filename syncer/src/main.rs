@@ -37,6 +37,18 @@ struct Args {
     /// Optional path to dump the final global parameters (flat f32 binary).
     #[arg(long)]
     final_state: Option<std::path::PathBuf>,
+    /// Consistent-snapshot file (params, momentum, versions, ledger).
+    #[arg(long)]
+    checkpoint_path: Option<std::path::PathBuf>,
+    /// Write the snapshot every N outer steps (0 disables).
+    #[arg(long, default_value_t = 8)]
+    checkpoint_every: u64,
+    /// Resume from --checkpoint-path if it exists.
+    #[arg(long, default_value_t = false)]
+    resume: bool,
+    /// JSONL event tape (one record per merge).
+    #[arg(long)]
+    event_tape: Option<std::path::PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -57,6 +69,10 @@ fn main() -> anyhow::Result<()> {
         outer_lr: args.outer_lr,
         outer_momentum: args.outer_momentum,
         final_state: args.final_state,
+        checkpoint_path: args.checkpoint_path,
+        checkpoint_every: args.checkpoint_every,
+        resume: args.resume,
+        event_tape: args.event_tape,
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

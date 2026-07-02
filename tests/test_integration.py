@@ -68,6 +68,7 @@ class ToyLearner(threading.Thread):
             p.requires_grad_(True)
         steps_total = 0
         steps_at_reset = [0] * self.layout.num_fragments
+        versions = [0] * self.layout.num_fragments
         pending = []
         t0 = time.monotonic()
         while not self.client.shutdown.is_set():
@@ -92,6 +93,7 @@ class ToyLearner(threading.Thread):
                 self.client.push_fragment(
                     fid,
                     pull.global_step,
+                    versions[fid],
                     steps_total,
                     c_steps,
                     c_steps * 128,  # tokens: uniform rate
@@ -103,6 +105,7 @@ class ToyLearner(threading.Thread):
                 flat_new = unpack_fragment(frag, bc.data, DTYPE_BF16)
                 apply_fragment(frag, flat_new, self.params)
                 steps_at_reset[bc.fragment_id] = steps_total
+                versions[bc.fragment_id] = bc.version
             time.sleep(0.005)  # ~5ms inner step
         self.client.close()
 

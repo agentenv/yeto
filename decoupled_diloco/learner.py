@@ -187,6 +187,7 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
     tokens_total = 0
     steps_at_reset = [0] * layout.num_fragments
     tokens_at_reset = [0] * layout.num_fragments
+    fragment_versions = [0] * layout.num_fragments  # last applied version per fragment
     pending_pulls: list = []  # pulls deferred until c_steps >= 1
     global_step = 0
     tokens_per_inner_step = world * args.micro_batch_size * args.grad_accum * args.seq_len
@@ -247,6 +248,7 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
                     client.push_fragment(
                         fid,
                         pull.global_step,
+                        fragment_versions[fid],
                         steps_total,
                         c_steps,
                         c_tokens,
@@ -273,12 +275,14 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
                     if rank == 0:
                         steps_at_reset[fid] = steps_total
                         tokens_at_reset[fid] = tokens_total
+                        fragment_versions[fid] = version
                     global_step = max(global_step, version)
             else:
                 for fid, version, flat in actions:
                     apply_fragment(layout.fragments[fid], flat.to(device), params)
                     steps_at_reset[fid] = steps_total
                     tokens_at_reset[fid] = tokens_total
+                    fragment_versions[fid] = version
                     global_step = max(global_step, version)
 
             if shutdown:

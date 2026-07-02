@@ -33,6 +33,13 @@ pub struct Config {
     pub outer_lr: f32,
     pub outer_momentum: f32,
     pub final_state: Option<std::path::PathBuf>,
+    /// Consistent-snapshot file; written every `checkpoint_every` rounds at
+    /// the quiescent cut between rounds, resumed from when `resume` is set.
+    pub checkpoint_path: Option<std::path::PathBuf>,
+    pub checkpoint_every: u64,
+    pub resume: bool,
+    /// JSONL event tape: one record per merge.
+    pub event_tape: Option<std::path::PathBuf>,
 }
 
 struct OutFrame {
@@ -113,6 +120,7 @@ struct Push {
     learner_id: u32,
     fragment_id: u32,
     global_step: u64,
+    base_version: u64,
     c_steps: u32,
     c_tokens: u64,
     values: Vec<f32>,
@@ -302,13 +310,22 @@ async fn dispatch_inner(group: &Arc<Group>, msg_type: u8, payload: &[u8], event_
             let learner_id = r.u32()?;
             let fragment_id = r.u32()?;
             let global_step = r.u64()?;
+            let base_version = r.u64()?;
             let _local_step = r.u64()?;
             let c_steps = r.u32()?;
             let c_tokens = r.u64()?;
             let mut values = Vec::new();
             decode_tensor(group.dtype, r.rest(), &mut values)?;
             event_tx
-                .send(Event::Push(Push { learner_id, fragment_id, global_step, c_steps, c_tokens, values }))
+                .send(Event::Push(Push {
+                    learner_id,
+                    fragment_id,
+                    global_step,
+                    base_version,
+                    c_steps,
+                    c_tokens,
+                    values,
+                }))
                 .await
                 .ok();
         }
@@ -322,10 +339,10 @@ async fn dispatch_inner(group: &Arc<Group>, msg_type: u8, payload: &[u8], event_
 
 async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Registry) -> Result<()> {
     let mut state: Option<GlobalState> = None;
-    let mut version: u64 = 0;
 
-    // Phase 1: wait until every fragment is initialized and all expected
-    // learners have connected (late joiners are still served afterwards).
+    // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
+    // a resumed checkpoint) and all expected learners have connected (late
+    // joiners are still served afterwards).
     info!(expected = cfg.learners, "waiting for learners and INIT_PARAMS");
     loop {
         let connected = registry.lock().unwrap().len() as u32;
@@ -339,7 +356,14 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
                 if state.is_none() {
                     // Layout comes from the HELLO of the first learner.
                     // (All learners must build identical layouts.)
-                    state = Some(new_state_for(&group, &cfg)?);
+                    let mut st = new_state_for(&group, &cfg)?;
+                    if cfg.resume {
+                        if let Some(path) = cfg.checkpoint_path.as_ref().filter(|p| p.exists()) {
+                            st.load_checkpoint(path)?;
+                            info!(step = st.global_step, "resumed from checkpoint");
+                        }
+                    }
+                    state = Some(st);
                 }
             }
             Event::Init { fragment_id, values } => {
@@ -356,12 +380,12 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
     let mut st = state.unwrap();
     let num_fragments = st.layout.fragments.len() as u64;
 
-    // Send everyone the initial global parameters so all learners start
-    // bit-identical (also serves recovery for late joiners below).
-    broadcast_all_fragments(&st, version, &registry).await;
+    // Send everyone the initial (or resumed) global parameters so all
+    // learners start bit-identical (also serves recovery for late joiners).
+    broadcast_all_fragments(&st, &registry).await;
 
     // Phase 2: the outer loop. One fragment per global step, round-robin.
-    for t in 1..=cfg.total_steps {
+    for t in (st.global_step + 1)..=cfg.total_steps {
         let p = ((t - 1) % num_fragments) as usize;
         let round_start = Instant::now();
         let pull = {
@@ -410,7 +434,7 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
                     }
                     Event::Hello { group } => {
                         // Rejoining learner: catch it up to the current state.
-                        send_all_fragments(&st, version, &group).await;
+                        send_all_fragments(&st, &group).await;
                     }
                     Event::Init { .. } => {} // already initialized; ignore
                     Event::Disconnected { learner_id } => {
@@ -422,27 +446,51 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
         }
 
         let (mut learners, mut weights, mut ids) = (Vec::new(), Vec::new(), Vec::new());
+        let prev_version = st.versions[p];
         for (id, push) in &pushes {
+            if push.base_version < prev_version {
+                // The learner had not yet applied this fragment's last merge;
+                // its delta is anchored further back. The weight formula
+                // compensates (larger c_steps); recorded for the event tape.
+                warn!(learner_id = id, step = t, base = push.base_version, expected = prev_version,
+                      "stale push admitted");
+            }
             learners.push(push.values.as_slice());
             weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
             ids.push(*id);
         }
         let gnorm = st.merge_and_step(p, &learners, &weights)?;
-        version = t;
+        st.versions[p] = t;
+        st.global_step = t;
+        for push in pushes.values() {
+            st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
+        }
 
         // Broadcast the updated fragment.
-        let payload = encode_bcast(&st, p, version)?;
+        let payload = encode_bcast(&st, p)?;
         for g in current_groups(&registry) {
             let _ = g.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
         }
+        let ms = round_start.elapsed().as_millis() as u64;
         info!(
             step = t,
             fragment = p,
             responders = ?ids,
             gnorm = format!("{gnorm:.4}"),
-            ms = round_start.elapsed().as_millis() as u64,
+            ms,
             "outer step"
         );
+        if let Some(tape) = &cfg.event_tape {
+            append_tape(tape, t, p, &pushes, &weights, gnorm, ms);
+        }
+        // Quiescent cut: round t is fully applied and broadcast, round t+1
+        // has not begun — the snapshot is consistent by construction.
+        if let Some(path) = &cfg.checkpoint_path {
+            if cfg.checkpoint_every > 0 && t % cfg.checkpoint_every == 0 {
+                st.save_checkpoint(path)?;
+                info!(step = t, path = %path.display(), "checkpoint written");
+            }
+        }
     }
 
     if let Some(path) = &cfg.final_state {
@@ -471,15 +519,15 @@ fn current_groups(registry: &Registry) -> Vec<Arc<Group>> {
     registry.lock().unwrap().values().cloned().collect()
 }
 
-async fn broadcast_all_fragments(st: &GlobalState, version: u64, registry: &Registry) {
+async fn broadcast_all_fragments(st: &GlobalState, registry: &Registry) {
     for g in current_groups(registry) {
-        send_all_fragments(st, version, &g).await;
+        send_all_fragments(st, &g).await;
     }
 }
 
-async fn send_all_fragments(st: &GlobalState, version: u64, group: &Arc<Group>) {
+async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>) {
     for p in 0..st.layout.fragments.len() {
-        match encode_bcast(st, p, version) {
+        match encode_bcast(st, p) {
             Ok(payload) => {
                 let _ = group.send_large(MSG_BCAST_FRAGMENT, payload).await;
             }
@@ -488,15 +536,54 @@ async fn send_all_fragments(st: &GlobalState, version: u64, group: &Arc<Group>) 
     }
 }
 
-fn encode_bcast(st: &GlobalState, p: usize, version: u64) -> Result<bytes::Bytes> {
+fn encode_bcast(st: &GlobalState, p: usize) -> Result<bytes::Bytes> {
     // All learners share one dtype (validated at HELLO); use the state dtype.
     let mut body = Vec::new();
     encode_tensor(st.wire_dtype, &st.params[p], &mut body)?;
     let mut payload = Vec::with_capacity(12 + body.len());
     payload.extend_from_slice(&(p as u32).to_le_bytes());
-    payload.extend_from_slice(&version.to_le_bytes());
+    payload.extend_from_slice(&st.versions[p].to_le_bytes());
     payload.extend_from_slice(&body);
     Ok(bytes::Bytes::from(payload))
+}
+
+/// One JSONL record per merge: the event tape.
+fn append_tape(
+    path: &std::path::Path,
+    step: u64,
+    fragment: usize,
+    pushes: &HashMap<u32, Push>,
+    _weights: &[f64],
+    gnorm: f64,
+    ms: u64,
+) {
+    use std::io::Write;
+    let mut responders: Vec<String> = pushes
+        .values()
+        .map(|p| {
+            format!(
+                "{{\"id\":{},\"base_version\":{},\"c_steps\":{},\"c_tokens\":{},\"weight\":{}}}",
+                p.learner_id,
+                p.base_version,
+                p.c_steps,
+                p.c_tokens,
+                crate::merge::learner_weight(p.c_tokens, p.c_steps)
+            )
+        })
+        .collect();
+    responders.sort();
+    let line = format!(
+        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}]}}\n",
+        responders.join(",")
+    );
+    let res = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+    if let Err(e) = res {
+        warn!("event tape write failed: {e}");
+    }
 }
 
 fn dump_state(st: &GlobalState, path: &std::path::Path) -> Result<()> {

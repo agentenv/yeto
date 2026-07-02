@@ -47,6 +47,14 @@ impl Layout {
     }
 }
 
+/// Cumulative per-learner merge accounting (the "event-tape ledger").
+#[derive(Clone, Copy, Default)]
+pub struct LearnerLedger {
+    pub merges: u64,
+    pub steps: u64,
+    pub tokens: u64,
+}
+
 pub struct GlobalState {
     pub layout: Layout,
     /// Θ_p, flat f32 per fragment (concatenated tensors in layout order).
@@ -54,6 +62,11 @@ pub struct GlobalState {
     /// Nesterov momentum buffers, same shape as params.
     momentum: Vec<Vec<f32>>,
     pub initialized: Vec<bool>,
+    /// Global step at which each fragment was last merged (its version).
+    pub versions: Vec<u64>,
+    /// Last completed global step t (checkpoint cut point).
+    pub global_step: u64,
+    pub ledger: std::collections::BTreeMap<u32, LearnerLedger>,
     pub outer_lr: f32,
     pub outer_momentum: f32,
     /// Dtype used on the wire (from HELLO); merge math stays f32.
@@ -65,7 +78,19 @@ impl GlobalState {
         let params: Vec<Vec<f32>> = layout.fragments.iter().map(|f| vec![0.0; f.numel()]).collect();
         let momentum = params.clone();
         let initialized = vec![false; layout.fragments.len()];
-        Self { layout, params, momentum, initialized, outer_lr, outer_momentum, wire_dtype }
+        let versions = vec![0; layout.fragments.len()];
+        Self {
+            layout,
+            params,
+            momentum,
+            initialized,
+            versions,
+            global_step: 0,
+            ledger: Default::default(),
+            outer_lr,
+            outer_momentum,
+            wire_dtype,
+        }
     }
 
     pub fn all_initialized(&self) -> bool {
@@ -81,6 +106,13 @@ impl GlobalState {
             self.initialized[fid] = true;
         }
         Ok(())
+    }
+
+    pub fn record_merge(&mut self, learner_id: u32, c_steps: u32, c_tokens: u64) {
+        let e = self.ledger.entry(learner_id).or_default();
+        e.merges += 1;
+        e.steps += c_steps as u64;
+        e.tokens += c_tokens;
     }
 
     /// Merge learner copies of fragment `fid` and apply the outer step.
@@ -119,6 +151,83 @@ impl GlobalState {
     }
 }
 
+const CKPT_MAGIC: u32 = 0xD170_5A7E;
+
+impl GlobalState {
+    /// Persist a consistent snapshot. Called only at the quiescent cut
+    /// between rounds (see docs/PROTOCOL.md "Consistent snapshots").
+    /// Written to `<path>.tmp` then renamed, so a crash mid-write never
+    /// corrupts the previous checkpoint.
+    pub fn save_checkpoint(&self, path: &std::path::Path) -> Result<()> {
+        use std::io::Write;
+        let tmp = path.with_extension("tmp");
+        {
+            let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+            f.write_all(&CKPT_MAGIC.to_le_bytes())?;
+            f.write_all(&self.global_step.to_le_bytes())?;
+            f.write_all(&(self.params.len() as u32).to_le_bytes())?;
+            for p in 0..self.params.len() {
+                f.write_all(&self.versions[p].to_le_bytes())?;
+                f.write_all(&(self.params[p].len() as u64).to_le_bytes())?;
+                for v in &self.params[p] {
+                    f.write_all(&v.to_le_bytes())?;
+                }
+                for v in &self.momentum[p] {
+                    f.write_all(&v.to_le_bytes())?;
+                }
+            }
+            f.write_all(&(self.ledger.len() as u32).to_le_bytes())?;
+            for (id, l) in &self.ledger {
+                f.write_all(&id.to_le_bytes())?;
+                f.write_all(&l.merges.to_le_bytes())?;
+                f.write_all(&l.steps.to_le_bytes())?;
+                f.write_all(&l.tokens.to_le_bytes())?;
+            }
+            f.flush()?;
+        }
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Restore params/momentum/versions/step/ledger from a snapshot.
+    /// The layout (from HELLO) must match the checkpointed fragment shapes.
+    pub fn load_checkpoint(&mut self, path: &std::path::Path) -> Result<()> {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        std::fs::File::open(path)?.read_to_end(&mut buf)?;
+        let mut r = Reader(&buf);
+        if r.u32()? != CKPT_MAGIC {
+            bail!("bad checkpoint magic");
+        }
+        self.global_step = r.u64()?;
+        let np = r.u32()? as usize;
+        if np != self.params.len() {
+            bail!("checkpoint has {np} fragments, layout has {}", self.params.len());
+        }
+        for p in 0..np {
+            self.versions[p] = r.u64()?;
+            let numel = r.u64()? as usize;
+            if numel != self.params[p].len() {
+                bail!("checkpoint fragment {p} numel {numel} != layout {}", self.params[p].len());
+            }
+            for slot in [&mut self.params[p], &mut self.momentum[p]] {
+                for v in slot.iter_mut() {
+                    *v = f32::from_le_bytes(r.take(4)?.try_into()?);
+                }
+            }
+            self.initialized[p] = true;
+        }
+        let nl = r.u32()? as usize;
+        self.ledger.clear();
+        for _ in 0..nl {
+            let id = r.u32()?;
+            let l = LearnerLedger { merges: r.u64()?, steps: r.u64()?, tokens: r.u64()? };
+            self.ledger.insert(id, l);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +262,31 @@ mod tests {
         assert!(g > 0.0);
         // Θ − 1.0·(Θ − θ) = θ
         assert_eq!(st.params[0], vec![0.0; 4]);
+    }
+
+    #[test]
+    fn checkpoint_roundtrip() {
+        let dir = std::env::temp_dir().join("diloco-ckpt-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+        let mut st = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32);
+        st.init_fragment(0, vec![1.5; 4]).unwrap();
+        st.init_fragment(1, vec![-2.0; 4]).unwrap();
+        let learner = vec![0.0f32; 4];
+        st.merge_and_step(0, &[&learner], &[1.0]).unwrap();
+        st.global_step = 7;
+        st.versions[0] = 7;
+        st.record_merge(3, 12, 4096);
+        st.save_checkpoint(&path).unwrap();
+
+        let mut st2 = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32);
+        st2.load_checkpoint(&path).unwrap();
+        assert_eq!(st2.global_step, 7);
+        assert_eq!(st2.versions, vec![7, 0]);
+        assert_eq!(st2.params, st.params);
+        assert!(st2.all_initialized());
+        assert_eq!(st2.ledger.get(&3).unwrap().tokens, 4096);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
