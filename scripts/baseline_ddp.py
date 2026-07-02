@@ -35,11 +35,11 @@ def main() -> int:
     task.set_resources(
         sky.Resources(
             infra="aws/us-west-2",
-            # A10G (g5) over L4 (g6): same 24GB Ampere class, far deeper spot
-            # pools. g5.12xlarge (48 vCPUs) fits the 64-vCPU G-spot quota;
-            # the larger 4xA10G type (g5.24xlarge, 96 vCPUs) would not.
-            accelerators="A10G:4",
-            instance_type="g5.12xlarge",
+            # Chosen by live spot placement scores (g6.12xlarge scored 3/10
+            # at x1 vs 1/10 for all g5/A10G sizes); also the only 4-GPU type
+            # under the 64-vCPU G-spot quota.
+            accelerators="L4:4",
+            instance_type="g6.12xlarge",
             use_spot=True,
             disk_size=256,
         )

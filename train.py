@@ -80,6 +80,11 @@ def parse_args(argv=None):
         help="vCPU hint per learner node (e.g. '8+') to steer instance selection",
     )
     infra.add_argument(
+        "--learner-instance-type",
+        default=None,
+        help="pin learner nodes to an exact instance type (e.g. gr6.4xlarge)",
+    )
+    infra.add_argument(
         "--syncer-region",
         default="us-west-2",
         help="syncer VM placement: 'region' (AWS) or 'cloud/region', e.g. gcp/us-central1",

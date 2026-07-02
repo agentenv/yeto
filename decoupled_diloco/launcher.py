@@ -162,6 +162,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             infra=infra,
             accelerators=spec.accelerators,
             cpus=args.learner_cpus,
+            instance_type=args.learner_instance_type,
             use_spot=args.spot,
             disk_size=args.disk_size,
             **resources_kwargs,
