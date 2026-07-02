@@ -71,7 +71,13 @@ def build_packed_dataset(
 ) -> PackedDataset:
     from datasets import load_dataset
 
-    ds = load_dataset(dataset_name, split=split)
+    try:
+        ds = load_dataset(dataset_name, split=split)
+    except Exception:
+        # Raw JSONL with heterogeneous schemas (e.g. message content that is
+        # sometimes a string, sometimes content blocks) breaks arrow schema
+        # inference; the Hub's parquet conversion is normalized.
+        ds = load_dataset(dataset_name, revision="refs/convert/parquet", split=split)
     token_stream: list[int] = []
     rows_used = 0
     for i in range(len(ds)):
