@@ -52,6 +52,13 @@ def parse_args(argv=None):
     p.add_argument("--num-learners", type=int, required=True)
     p.add_argument("--loss-function", default="cross_entropy")
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
+    p.add_argument(
+        "--shard",
+        choices=["ddp", "fsdp"],
+        default="ddp",
+        help="multi-GPU strategy; fsdp is only supported with --syncer none "
+        "(synchronous baseline)",
+    )
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
     p.add_argument("--seq-len", type=int, default=2048)
@@ -153,7 +160,24 @@ def main(argv=None) -> None:
     )
     log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)
 
-    if world > 1:
+    if args.shard == "fsdp":
+        if args.syncer != "none":
+            raise ValueError("--shard fsdp is only supported with --syncer none")
+        import functools
+
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+
+        model = FSDP(
+            model,
+            auto_wrap_policy=functools.partial(
+                size_based_auto_wrap_policy, min_num_params=1_000_000
+            ),
+            use_orig_params=True,  # required for LoRA's mixed requires_grad
+            device_id=device,
+        )
+        params = trainable_params(model)
+    elif world > 1:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index])
         params = trainable_params(model.module)
 
@@ -179,12 +203,17 @@ def main(argv=None) -> None:
     run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank, world, device)
 
     if rank == 0:
-        save_dir = args.output_dir
-        os.makedirs(save_dir, exist_ok=True)
-        target = model.module if world > 1 else model
-        target.save_pretrained(save_dir)
-        tokenizer.save_pretrained(save_dir)
-        log.info("saved model to %s", save_dir)
+        if args.shard == "fsdp":
+            # Gathering a full state dict from shards is not needed for the
+            # baseline-comparison use of this mode.
+            log.info("skipping checkpoint save in fsdp baseline mode")
+        else:
+            save_dir = args.output_dir
+            os.makedirs(save_dir, exist_ok=True)
+            target = model.module if world > 1 else model
+            target.save_pretrained(save_dir)
+            tokenizer.save_pretrained(save_dir)
+            log.info("saved model to %s", save_dir)
         if client is not None:
             client.close()
     if world > 1:
@@ -232,7 +261,10 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
             if accum < args.grad_accum:
                 continue
             accum = 0
-            torch.nn.utils.clip_grad_norm_(params.values(), 1.0)
+            if args.shard == "fsdp":
+                model.clip_grad_norm_(1.0)
+            else:
+                torch.nn.utils.clip_grad_norm_(params.values(), 1.0)
             opt.step()
             sched.step()
             opt.zero_grad(set_to_none=True)
