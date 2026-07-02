@@ -35,8 +35,7 @@ Nesterov step, and broadcasts fragments back.
   Nesterov outer optimizer.
 - **`decoupled_diloco/`** — Python package: learner training loop
   (HF transformers + AdamW inner steps, background fragment push/pull),
-  data loading, loss functions, GPU-spec parsing, SkyPilot
-  orchestration.
+  data loading, loss functions, GPU-spec parsing, SkyPilot orchestration.
 
 ## Usage
 
