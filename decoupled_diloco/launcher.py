@@ -118,6 +118,13 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         workdir=str(REPO_ROOT),
     )
     infra = f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud
+    resources_kwargs = {}
+    if spec.num_nodes > 1:
+        # Multi-node learner: inner DDP all-reduce crosses the node fabric,
+        # so request the cloud's RDMA-class interconnect (EFA on AWS,
+        # GPUDirect on GCP). Single-node clusters stay on NVLink and don't
+        # need it.
+        resources_kwargs["network_tier"] = "best"
     task.set_resources(
         sky.Resources(
             infra=infra,
@@ -125,6 +132,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             cpus=args.learner_cpus,
             use_spot=args.spot,
             disk_size=args.disk_size,
+            **resources_kwargs,
         )
     )
     return task
