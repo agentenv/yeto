@@ -13,4 +13,3 @@ logs/
 .env
 wandb/
 syncer/target/
-Cargo.lock
