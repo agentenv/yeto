@@ -1,0 +1,10 @@
+# Learner-node dependencies. transformers is pinned for DeepSeek-V4-Flash
+# compatibility (its remote code is incompatible with transformers 5.x).
+torch>=2.4
+transformers==4.57.1
+datasets>=3.0
+peft>=0.14
+accelerate>=1.0
+sentencepiece
+protobuf
+hf_transfer
