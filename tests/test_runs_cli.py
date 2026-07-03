@@ -19,7 +19,12 @@ def tmp_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
 
 
-LAUNCH_ARGS = ["--gpu", "aws:8xa100@us-east-2", "--model", "gemma4", "--data", "org/ds"]
+# These tests exercise the local controller mode (a detached worker on this
+# machine); head mode is covered by test_head_mode.py.
+LAUNCH_ARGS = [
+    "--gpu", "aws:8xa100@us-east-2", "--model", "gemma4", "--data", "org/ds",
+    "--controller", "local",
+]
 
 
 def make_args_dict(name="run1"):

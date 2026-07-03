@@ -8,16 +8,21 @@ Example:
         --data armand0e/claude-fable-5-claude-code \
         --loss-function cross_entropy
 
-`launch` follows SkyPilot's UX: it detaches — the run executes in a
-background worker while the CLI streams its log, and Ctrl-C detaches
-instead of killing anything. Re-attach with `yeto logs <run>`, inspect
-with `yeto status`, stop with `yeto down <run>`. Runs are named by
-`--cluster-prefix`. Bare flags (`yeto --gpu ...`) still work and are
-treated as `yeto launch ...`.
+`launch` follows SkyPilot's UX: it detaches — by default
+(`--controller head`) the run is handed to one small on-demand head VM
+that hosts both the syncer and the fleet controller, so this machine is
+not needed after submission; `--controller local` instead runs a
+detached worker on this machine. Either way the CLI streams the run's
+log and Ctrl-C detaches instead of killing anything. Re-attach with
+`yeto logs <run>`, inspect with `yeto status`, stop with
+`yeto down <run>`. Runs are named by `--cluster-prefix`. Bare flags
+(`yeto --gpu ...`) still work and are treated as `yeto launch ...`.
 """
 
 import argparse
+import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -27,7 +32,7 @@ import time
 from . import runs
 from .losses import LOSS_FUNCTIONS
 
-SUBCOMMANDS = ("launch", "status", "logs", "down", "_worker")
+SUBCOMMANDS = ("launch", "status", "logs", "down", "_worker", "_head")
 
 
 def _add_launch_args(p: argparse.ArgumentParser) -> None:
@@ -130,6 +135,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="syncer VM placement: 'region' (AWS) or 'cloud/region', e.g. gcp/us-central1",
     )
     infra.add_argument("--syncer-memory", type=int, default=32, help="syncer RAM (GB)")
+    infra.add_argument(
+        "--controller",
+        choices=["head", "local"],
+        default="head",
+        help="where the run's controller lives: 'head' (default) provisions "
+        "one small on-demand VM that hosts both the syncer and the fleet "
+        "controller, so this machine is not needed after submission; "
+        "'local' runs a detached worker on this machine plus a separate "
+        "syncer VM (this machine must stay up for the whole run)",
+    )
     infra.add_argument("--cluster-prefix", default="yeto", help="cluster name prefix; also the run's name")
     infra.add_argument("--keep", action="store_true", help="do not tear down clusters at the end")
     infra.add_argument(
@@ -192,6 +207,10 @@ def build_parser() -> argparse.ArgumentParser:
     # Internal: the detached background worker `launch` spawns.
     worker = sub.add_parser("_worker")
     worker.add_argument("run")
+
+    # Internal: the controller job that runs ON the head VM (head mode).
+    head = sub.add_parser("_head")
+    head.add_argument("args_json", help="JSON-serialized launch args")
     return p
 
 
@@ -277,6 +296,8 @@ def cmd_launch(args) -> int:
             file=sys.stderr,
         )
         return 1
+    if getattr(args, "controller", "local") == "head":
+        return cmd_launch_head(args)
 
     args_dict = {k: v for k, v in vars(args).items() if k != "command"}
     runs.create_run(name, args_dict)
@@ -293,6 +314,218 @@ def cmd_launch(args) -> int:
     state, code = _final_state(runs.load_run(name) or {"name": name})
     print(f"[yeto] run '{name}' finished: {state} (exit code {code})")
     return code
+
+
+# ---------------------------------------------------------------------------
+# head controller mode: launch submission (runs locally) + _head (runs on
+# the head VM). Modeled on SkyPilot's managed-jobs controller: one small
+# on-demand VM hosts both the syncer process and the fleet controller, so
+# the submitting machine can go away right after `yeto launch` returns.
+
+HEAD_SETUP_PIP = (
+    'pip install -q "skypilot[aws]>=0.12" && '
+    "pip install -q torch --index-url https://download.pytorch.org/whl/cpu && "
+    "pip install -q cloudpickle transformers==4.57.1"
+)
+
+
+def _serializable_args(args) -> dict:
+    """vars(args) restricted to JSON-serializable launch flags, with the
+    controller mode pinned to 'head' (this dict is what `_head` replays)."""
+    out = {}
+    for k, v in vars(args).items():
+        if k == "command":
+            continue
+        try:
+            json.dumps(v)
+        except (TypeError, ValueError):
+            continue
+        out[k] = v
+    out["controller"] = "head"
+    return out
+
+
+def _make_head_task(args, syncer_binary):
+    """The head VM's provisioning task: repo workdir, syncer binary, cloud
+    credentials, and the pickled loss (when used) — no run command; the
+    controller job is exec'd separately once the head's IP is known."""
+    import sky
+
+    from .launcher import PICKLED_LOSS_FILE, REPO_ROOT, SYNCER_PORT, WAN_TUNING
+
+    file_mounts = {"~/yeto-syncer": str(syncer_binary)}
+    aws_creds = os.path.expanduser("~/.aws")
+    if os.path.isdir(aws_creds):
+        # Same pattern as sky's jobs controller: ship the local credentials
+        # so the head can launch, recover, and tear down learner clusters.
+        file_mounts["~/.aws"] = aws_creds
+    else:
+        print(
+            "[yeto] WARNING: ~/.aws not found; the head will have no cloud "
+            "credentials and cannot launch or tear down learner clusters.",
+            file=sys.stderr,
+        )
+    if args.loss_function.startswith("pickle:"):
+        # The pickled loss is gitignored, so the workdir sync skips it;
+        # mount it into the head's workdir explicitly (the head re-mounts
+        # it onto learners from there).
+        file_mounts[f"~/sky_workdir/{PICKLED_LOSS_FILE}"] = str(
+            REPO_ROOT / PICKLED_LOSS_FILE
+        )
+    task = sky.Task(
+        name="yeto-head",
+        setup=f"{WAN_TUNING}; {HEAD_SETUP_PIP}",
+        workdir=str(REPO_ROOT),
+        file_mounts=file_mounts,
+    )
+    # Same placement grammar as the syncer VM: 'region' (AWS) or 'cloud/region'.
+    infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
+    task.set_resources(
+        sky.Resources(
+            infra=infra,
+            cpus="8+",
+            memory=f"{args.syncer_memory}+",
+            ports=[SYNCER_PORT],
+            use_spot=False,
+        )
+    )
+    return task
+
+
+def _sky_launch_head(task, cluster: str):
+    """Provision the head cluster; returns the launch handle."""
+    import sky
+
+    _job_id, handle = sky.stream_and_get(sky.launch(task, cluster_name=cluster))
+    return handle
+
+
+def _sky_exec_head(task, cluster: str) -> int:
+    """Submit the controller job on the (already-provisioned) head."""
+    import sky
+
+    job_id, _handle = sky.stream_and_get(sky.exec(task, cluster_name=cluster))
+    return job_id
+
+
+def _sky_tail_logs(cluster: str, job_id: int, follow: bool):
+    import sky
+
+    return sky.tail_logs(cluster, job_id, follow=follow, preload_content=False)
+
+
+def _stream_head_logs(cluster: str, job_id: int, follow: bool = True) -> None:
+    """Print a head job's log lines; KeyboardInterrupt passes through to
+    the caller — Ctrl-C means "stop streaming", never "stop the run"."""
+    for line in _sky_tail_logs(cluster, job_id, follow):
+        if line is None:
+            break
+        sys.stdout.write(line if line.endswith("\n") else line + "\n")
+        sys.stdout.flush()
+
+
+def _record_head_result(name: str, cluster: str, job_id: int) -> None:
+    """Best-effort: map the head job's terminal status into the registry."""
+    try:
+        import sky
+
+        status = sky.get(sky.job_status(cluster, [job_id])).get(job_id)
+        if status is None or not status.is_terminal():
+            return
+        state = runs.SUCCEEDED if "SUCCEEDED" in str(status) else runs.FAILED
+    except Exception:
+        return
+    runs.update_run(name, state=state, finished_at=time.time())
+
+
+def cmd_launch_head(args) -> int:
+    """Submit a head-controlled run: provision one small on-demand VM that
+    hosts both the syncer and the fleet controller, hand it the launch
+    args, and stream its log (Ctrl-C detaches; the run keeps going without
+    this machine)."""
+    import sky
+
+    from . import launcher
+    from .gpu_spec import parse_gpu_spec
+
+    name = args.cluster_prefix
+    head_cluster = f"{name}-head"
+    specs = parse_gpu_spec(args.gpu)
+    # Resolve the loss BEFORE serializing: a custom:<file.py> spec becomes
+    # pickle:<file> here, and the pickle is file-mounted onto the head.
+    args.loss_function = launcher.resolve_loss_function(args.loss_function)
+    binary = launcher.build_syncer_binary()
+
+    args_dict = _serializable_args(args)
+    runs.create_run(name, args_dict)
+    learner_names = launcher.learner_cluster_names(name, specs)
+    runs.update_run(
+        name,
+        controller="head",
+        head_cluster=head_cluster,
+        clusters=[head_cluster] + learner_names,
+    )
+
+    print(f"[yeto] provisioning head cluster {head_cluster} in {args.syncer_region}")
+    handle = _sky_launch_head(_make_head_task(args, binary), head_cluster)
+    head_ip = handle.head_ip
+    print(f"[yeto] head is up at {head_ip}; submitting the controller job")
+
+    envs = {"SYNCER_PUBLIC_IP": str(head_ip)}
+    if os.environ.get("HF_TOKEN"):
+        envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    job_task = sky.Task(
+        name="yeto-head-job",
+        run=(
+            "cd ~/sky_workdir && PYTHONPATH=~/sky_workdir "
+            f"python3 -m yeto.cli _head {shlex.quote(json.dumps(args_dict))}"
+        ),
+        envs=envs,
+    )
+    job_id = _sky_exec_head(job_task, head_cluster)
+    runs.update_run(name, state=runs.SUBMITTED, head_job_id=job_id)
+    print(f"[yeto] run '{name}' submitted: job {job_id} on {head_cluster}.")
+    print("[yeto] this machine is no longer needed; the head supervises the fleet.")
+    print("[yeto] streaming head logs — Ctrl-C detaches, the run keeps going.\n", flush=True)
+    try:
+        _stream_head_logs(head_cluster, job_id, follow=True)
+    except KeyboardInterrupt:
+        _print_detach_hints(name)
+        return 0
+    except Exception as e:
+        # A dropped stream is not a dropped run: the head keeps going.
+        print(f"\n[yeto] log stream lost ({e}); the run continues on the head.")
+        _print_detach_hints(name)
+        return 0
+    _record_head_result(name, head_cluster, job_id)
+    print(
+        f"[yeto] head job ended; the head cluster {head_cluster} is still up — "
+        f"tear everything down with: yeto down {name}"
+    )
+    return 0
+
+
+def cmd_head(payload: str) -> int:
+    """Controller job, running ON the head VM: start the syncer as a local
+    subprocess, then supervise the learner fleet until the run ends."""
+    from . import launcher
+    from .gpu_spec import parse_gpu_spec
+
+    args = argparse.Namespace(**json.loads(payload))
+    num_learners = len(parse_gpu_spec(args.gpu))
+    syncer = launcher.LocalSyncer(args, num_learners)
+    syncer.start()
+    syncer.start_log_forwarder()
+    try:
+        code = launcher.run(args, local_syncer=syncer)
+    except BaseException:
+        import traceback
+
+        traceback.print_exc()
+        return 1
+    finally:
+        syncer.stop()
+    return int(code or 0)
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +632,14 @@ def cmd_status() -> int:
     for row in [header] + rows:
         lead = "  ".join(row[i].ljust(widths[i]) for i in range(4))
         print(f"{lead}  {row[4]}")
+    for meta in metas:
+        # Head-mode runs are supervised on their head VM; the registry only
+        # has the state as of submission/teardown.
+        if meta.get("controller") == "head" and meta.get("state") != runs.DOWN:
+            print(
+                f"[yeto] '{meta.get('name')}' is controlled from "
+                f"{meta.get('head_cluster')}; live state: yeto logs {meta.get('name')}"
+            )
     return 0
 
 
@@ -413,6 +654,21 @@ def cmd_logs(args) -> int:
         known = ", ".join(m.get("name", "?") for m in runs.list_runs()) or "(none)"
         print(f"[yeto] unknown run '{name}'. Known runs: {known}", file=sys.stderr)
         return 1
+    if meta.get("controller") == "head" and meta.get("head_job_id") is not None:
+        # Head-mode run: the launcher log lives on the head VM; stream it.
+        head_cluster, head_job = meta["head_cluster"], meta["head_job_id"]
+        try:
+            _stream_head_logs(head_cluster, head_job, follow=not args.no_follow)
+        except KeyboardInterrupt:
+            _print_detach_hints(name)
+            return 0
+        except Exception as e:
+            print(
+                f"[yeto] cannot stream job {head_job} from {head_cluster}: {e}",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
     try:
         _stream_log(name, follow=not args.no_follow)
     except KeyboardInterrupt:
@@ -521,6 +777,8 @@ def main(argv=None) -> int:
         return cmd_down(args)
     if args.command == "_worker":
         return cmd_worker(args.run)
+    if args.command == "_head":
+        return cmd_head(args.args_json)
     parser.print_help()
     return 0
 

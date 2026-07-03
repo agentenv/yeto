@@ -27,10 +27,16 @@ RUNS_DIR = Path(os.environ.get("YETO_RUNS_DIR") or "~/.yeto/runs").expanduser()
 # Run states recorded in meta.json. A live worker pid overrides the
 # recorded state for display purposes (see the status command).
 PENDING = "PENDING"
+SUBMITTED = "SUBMITTED"  # head controller mode: run handed off to the head VM
 RUNNING = "RUNNING"
 SUCCEEDED = "SUCCEEDED"
 FAILED = "FAILED"
 DOWN = "DOWN"
+
+# Head-controller-mode runs additionally record `controller` ("head"),
+# `head_cluster` and `head_job_id` via update_run. Local-mode entries
+# (and entries written by older versions) simply lack those keys; readers
+# use meta.get(...), so both formats coexist in the same registry.
 
 
 def run_dir(name: str) -> Path:

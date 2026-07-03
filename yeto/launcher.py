@@ -18,6 +18,7 @@ Flow:
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import sys
@@ -57,12 +58,12 @@ def build_syncer_binary() -> Path:
     return binary
 
 
-def make_syncer_task(args, num_learners: int):
-    import sky
-
-    binary = build_syncer_binary()
-    cmd = (
-        f"chmod +x ~/yeto-syncer && ~/yeto-syncer"
+def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
+    """The syncer invocation shared by the syncer-cluster task (local
+    controller mode) and the head-node subprocess (head controller mode).
+    --resume makes any restart pick up from the on-disk checkpoint."""
+    return (
+        f"{binary}"
         f" --port {SYNCER_PORT}"
         f" --learners {num_learners}"
         f" --quorum {args.quorum}"
@@ -73,6 +74,13 @@ def make_syncer_task(args, num_learners: int):
         f" --checkpoint-path ~/yeto-state.ckpt --resume"
         f" --event-tape ~/yeto-tape.jsonl"
     )
+
+
+def make_syncer_task(args, num_learners: int):
+    import sky
+
+    binary = build_syncer_binary()
+    cmd = "chmod +x ~/yeto-syncer && " + syncer_command(args, num_learners)
     task = sky.Task(
         name="yeto-syncer",
         setup=WAN_TUNING,
@@ -154,8 +162,6 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         "LEARNER_ID": str(learner_id),
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
     }
-    import os
-
     if os.environ.get("HF_TOKEN"):
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
     if spec.num_nodes > 1:
@@ -202,6 +208,12 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         )
     )
     return task
+
+
+def learner_cluster_names(prefix: str, specs: list[ClusterSpec]) -> list[str]:
+    """Deterministic learner cluster names for a run: computable from the
+    launch args alone, so the CLI can record them before provisioning."""
+    return [f"{prefix}-l{m}-{spec.region or spec.cloud}" for m, spec in enumerate(specs)]
 
 
 def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
@@ -287,6 +299,85 @@ class SkySDKOps:
         time.sleep(seconds)
 
 
+class LocalSyncer:
+    """The syncer as a subprocess of the head node's controller job.
+
+    In head controller mode the syncer binary is file-mounted onto the head
+    VM and runs right next to the controller, instead of on a separate
+    cluster. Its stdout/stderr go to a log file (appended across restarts)
+    that a background thread forwards into this process's stdout with a
+    "[syncer]" prefix, so the head job's log stream carries the syncer's
+    output. `probe`/`restart` plug into FleetController: a dead subprocess
+    is simply restarted, and --resume (already in the command line) makes
+    it pick up from its on-disk checkpoint.
+    """
+
+    def __init__(
+        self,
+        args,
+        num_learners: int,
+        binary: str = "~/yeto-syncer",
+        log_file: str = "~/yeto-syncer.log",
+    ):
+        self.command = syncer_command(args, num_learners, binary=binary)
+        self.binary = os.path.expanduser(binary)
+        self.log_file = os.path.expanduser(log_file)
+        self.proc: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        if os.path.exists(self.binary):
+            os.chmod(self.binary, 0o755)
+        log_f = open(self.log_file, "ab")
+        try:
+            # shell=True so the ~ paths in the command expand.
+            self.proc = subprocess.Popen(
+                self.command,
+                shell=True,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+            )
+        finally:
+            log_f.close()  # Popen holds its own duplicate of the fd
+        print(f"[launcher] syncer subprocess started (pid {self.proc.pid})", flush=True)
+
+    def probe(self) -> str | None:
+        """None if the subprocess is healthy, else a reason string."""
+        if self.proc is None:
+            return "syncer subprocess was never started"
+        code = self.proc.poll()
+        if code is None:
+            return None
+        return f"syncer subprocess exited with code {code}"
+
+    def restart(self) -> None:
+        self.start()
+
+    def stop(self) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+
+    def start_log_forwarder(self) -> None:
+        """Tail the syncer's log file into our stdout, forever (daemon)."""
+
+        def _forward():
+            while not os.path.exists(self.log_file):
+                time.sleep(0.5)
+            with open(self.log_file, "r", errors="replace") as f:
+                while True:
+                    line = f.readline()
+                    if line:
+                        print(f"[syncer] {line.rstrip()}", flush=True)
+                    else:
+                        time.sleep(0.5)
+
+        threading.Thread(target=_forward, daemon=True).start()
+
+
 # FleetController states.
 RUNNING = "running"
 RECOVERING = "recovering"
@@ -322,6 +413,18 @@ class FleetController:
     run command). recover_timeout <= 0 disables recovery: a failed learner
     is torn down on the spot.
 
+    The syncer can be supervised in one of two ways:
+
+    * as a cluster (local controller mode): pass ``syncer=(name, task,
+      job_id)`` and it goes through the running/recovering cycle above,
+      relaunched via sky like a learner but never abandoned;
+    * as a subprocess of this process (head controller mode): pass
+      ``syncer_probe``/``syncer_restart`` callables instead — ``probe()``
+      returns None while healthy or a reason string when dead, at which
+      point ``restart()`` is invoked (the syncer resumes from its local
+      checkpoint). A local syncer is likewise never abandoned, and there
+      is no syncer cluster to tear down.
+
     At most one relaunch attempt is in flight per cluster, each in a
     background thread so one slow re-provision never blocks polling the
     others; `thread_cls` exists so tests can substitute a synchronous stub.
@@ -330,16 +433,20 @@ class FleetController:
     def __init__(
         self,
         learners: dict,
-        syncer: tuple,
+        syncer: tuple | None,
         sky_ops,
         poll_interval: float,
         recover_timeout: float,
         on_relaunch=None,
         thread_cls=threading.Thread,
+        syncer_probe=None,
+        syncer_restart=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
-        (name, task, job_id). `on_relaunch(name, new_job_id)` is called after
-        every successful relaunch (production spawns a new log tail)."""
+        (name, task, job_id) for a cluster syncer, or None with
+        `syncer_probe`/`syncer_restart` callables for a subprocess syncer.
+        `on_relaunch(name, new_job_id)` is called after every successful
+        cluster relaunch (production spawns a new log tail)."""
         self.ops = sky_ops
         self.poll_interval = poll_interval
         self.recover_timeout = recover_timeout
@@ -349,8 +456,16 @@ class FleetController:
             name: self._make_record(name, task, job_id)
             for name, (task, job_id) in learners.items()
         }
-        syncer_name, syncer_task, syncer_job = syncer
-        self.syncer = self._make_record(syncer_name, syncer_task, syncer_job)
+        if syncer_probe is not None:
+            if syncer_restart is None:
+                raise ValueError("syncer_probe requires syncer_restart")
+            self.syncer = None
+            self.syncer_probe = syncer_probe
+            self.syncer_restart = syncer_restart
+        else:
+            syncer_name, syncer_task, syncer_job = syncer
+            self.syncer = self._make_record(syncer_name, syncer_task, syncer_job)
+            self.syncer_probe = self.syncer_restart = None
         self.downed_clusters: set = set()
 
     @staticmethod
@@ -372,7 +487,10 @@ class FleetController:
         (after downing the syncer) if every learner was abandoned.
         """
         while True:
-            self._poll(self.syncer, is_syncer=True)
+            if self.syncer is not None:
+                self._poll(self.syncer, is_syncer=True)
+            else:
+                self._poll_local_syncer()
             for rec in self.learners.values():
                 self._poll(rec, is_syncer=False)
             if all(r["state"] in (DONE, ABANDONED) for r in self.learners.values()):
@@ -381,13 +499,38 @@ class FleetController:
         exit_codes = {name: rec["exit"] for name, rec in self.learners.items()}
         print(f"[launcher] learner jobs finished: {exit_codes}")
         if not any(rec["state"] == DONE for rec in self.learners.values()):
-            print(
-                "[launcher] ERROR: all learners abandoned; tearing down the syncer",
-                file=sys.stderr,
-            )
-            self._down(self.syncer["name"])
+            if self.syncer is not None:
+                print(
+                    "[launcher] ERROR: all learners abandoned; tearing down the syncer",
+                    file=sys.stderr,
+                )
+                self._down(self.syncer["name"])
+            else:
+                print(
+                    "[launcher] ERROR: all learners abandoned",
+                    file=sys.stderr,
+                )
             raise RuntimeError("all learners abandoned; nothing left to train")
         return exit_codes
+
+    def _poll_local_syncer(self) -> None:
+        """Subprocess syncer: never abandoned — a dead process is restarted
+        on the spot (it resumes from its local checkpoint)."""
+        reason = self.syncer_probe()
+        if reason is None:
+            return
+        print(
+            f"[launcher] syncer: {reason}; restarting the local syncer "
+            "(resumes from its checkpoint)",
+            file=sys.stderr,
+        )
+        try:
+            self.syncer_restart()
+        except Exception as e:
+            print(
+                f"[launcher] syncer restart failed: {e}; retrying next poll",
+                file=sys.stderr,
+            )
 
     def _poll(self, rec, is_syncer: bool) -> None:
         if rec["state"] == RUNNING:
@@ -517,7 +660,7 @@ class FleetController:
             print(f"[launcher] teardown of {name} failed: {e}", file=sys.stderr)
 
 
-def run(args, on_clusters=None) -> int:
+def run(args, on_clusters=None, local_syncer=None) -> int:
     """Provision and supervise the fleet; returns the run's exit code.
 
     `on_clusters`, if given, is called once with the full list of cluster
@@ -526,35 +669,45 @@ def run(args, on_clusters=None) -> int:
     CLI's run registry) can record them for status/teardown even if the
     launch dies mid-provision. Optional and best-effort: existing callers
     need not pass it, and a failing hook never aborts the run.
+
+    `local_syncer` switches on head controller mode: this process is
+    running ON the head VM, the syncer is the given LocalSyncer subprocess
+    (already started by the caller), and no separate syncer cluster is
+    launched — learners connect to this host's public IP
+    ($SYNCER_PUBLIC_IP, injected by the submitting CLI).
     """
     import sky
 
+    head_mode = local_syncer is not None
     specs = parse_gpu_spec(args.gpu)
     num_learners = len(specs)
     args.loss_function = resolve_loss_function(args.loss_function)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
-    syncer_cluster = f"{prefix}-syncer"
-    learner_names = [
-        f"{prefix}-l{m}-{spec.region or spec.cloud}" for m, spec in enumerate(specs)
-    ]
+    syncer_cluster = None if head_mode else f"{prefix}-syncer"
+    learner_names = learner_cluster_names(prefix, specs)
     if on_clusters is not None:
         try:
-            on_clusters([syncer_cluster] + learner_names)
+            on_clusters(([] if head_mode else [syncer_cluster]) + learner_names)
         except Exception as e:
             print(f"[launcher] on_clusters hook failed: {e}", file=sys.stderr)
     clusters: list[str] = []
     controller = None
 
     try:
-        # 1. Syncer.
-        print(f"[launcher] launching syncer cluster {syncer_cluster} in {args.syncer_region}")
-        syncer_task = make_syncer_task(args, num_learners)
-        rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
-        syncer_job, syncer_handle = sky.stream_and_get(rid)
-        clusters.append(syncer_cluster)
-        syncer_addr = f"{syncer_handle.head_ip}:{SYNCER_PORT}"
-        print(f"[launcher] syncer up at {syncer_addr}")
+        # 1. Syncer: a subprocess on this host (head mode) or its own VM.
+        if head_mode:
+            syncer_task = syncer_job = None
+            syncer_addr = f"{os.environ['SYNCER_PUBLIC_IP']}:{SYNCER_PORT}"
+            print(f"[launcher] syncer runs on this head node at {syncer_addr}")
+        else:
+            print(f"[launcher] launching syncer cluster {syncer_cluster} in {args.syncer_region}")
+            syncer_task = make_syncer_task(args, num_learners)
+            rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
+            syncer_job, syncer_handle = sky.stream_and_get(rid)
+            clusters.append(syncer_cluster)
+            syncer_addr = f"{syncer_handle.head_ip}:{SYNCER_PORT}"
+            print(f"[launcher] syncer up at {syncer_addr}")
 
         # 2. Learners, in parallel.
         tasks = {}
@@ -601,17 +754,20 @@ def run(args, on_clusters=None) -> int:
             label = "syncer" if name == syncer_cluster else name
             threading.Thread(target=_tail, args=(name, job_id, label), daemon=True).start()
 
-        spawn_tail(syncer_cluster, syncer_job)
+        if not head_mode:
+            spawn_tail(syncer_cluster, syncer_job)
         for name, (job_id, _handle) in results.items():
             spawn_tail(name, job_id)
 
         controller = FleetController(
             learners={name: (tasks[name], job_id) for name, (job_id, _h) in results.items()},
-            syncer=(syncer_cluster, syncer_task, syncer_job),
+            syncer=None if head_mode else (syncer_cluster, syncer_task, syncer_job),
             sky_ops=SkySDKOps(),
             poll_interval=args.controller_poll,
             recover_timeout=args.recover_timeout,
             on_relaunch=spawn_tail,
+            syncer_probe=local_syncer.probe if head_mode else None,
+            syncer_restart=local_syncer.restart if head_mode else None,
         )
         exit_codes = controller.run()
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
@@ -639,3 +795,20 @@ def run(args, on_clusters=None) -> int:
                     sky.get(sky.down(name))
                 except Exception as e:
                     print(f"[launcher] teardown of {name} failed: {e}", file=sys.stderr)
+        if head_mode:
+            # The head VM cannot reliably tear itself down (the teardown
+            # would kill this very process mid-flight), so it stays up.
+            head_cluster = f"{prefix}-head"
+            if args.keep:
+                print(
+                    f"[launcher] run finished; clusters left up: "
+                    f"{remaining + [head_cluster]}; tear everything down "
+                    f"with: yeto down {prefix}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[launcher] run finished; tear down the head with: "
+                    f"yeto down {prefix}",
+                    flush=True,
+                )

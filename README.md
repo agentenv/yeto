@@ -47,10 +47,13 @@ yeto launch \
   --loss-function cross_entropy
 ```
 
-`launch` detaches (SkyPilot-style): the run executes in a background
-worker while the CLI streams its log, and **Ctrl-C detaches** — the run
-and its clusters keep going. Runs are named by `--cluster-prefix`
-(default `yeto`); runs require an explicit subcommand.
+`launch` provisions a small on-demand **head VM** that hosts both the
+syncer and the fleet controller (SkyPilot managed-jobs style): the
+submitting machine is free to disconnect the moment submission finishes,
+and **Ctrl-C merely detaches** from the log stream. Runs are named by
+`--cluster-prefix` (default `yeto`). `--controller local` keeps the
+controller on your host instead. The head VM stays up after the run
+until you `yeto down <run>`.
 
 ```bash
 yeto status                # table of known runs
