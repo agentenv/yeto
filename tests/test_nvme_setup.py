@@ -23,7 +23,11 @@ def _run(tmp_path, lsblk_out, mounted=False):
         f.chmod(f.stat().st_mode | stat.S_IEXEC)
 
     stub("mountpoint", f"exit {0 if mounted else 1}\n")
-    stub("lsblk", f"cat <<'OUT'\n{lsblk_out}\nOUT\n")
+    stub(
+        "lsblk",
+        '[[ "$*" == *MOUNTPOINT* ]] && exit 0\n'
+        f"cat <<'OUT'\n{lsblk_out}\nOUT\n",
+    )
     stub("sudo", f'echo "sudo $*" >> {log}\nexit 0\n')  # log, never execute
     stub("whoami", "echo tester\n")
     proc = subprocess.run(
@@ -116,3 +120,40 @@ def test_failed_mount_reports_and_stays_on_boot_disk(tmp_path):
     )
     assert proc.returncode == 0
     assert "staying on the boot disk" in proc.stderr
+
+
+def test_image_mounted_nvme_is_reused_via_bind_mount(tmp_path):
+    # DLAMI-style: the image already assembled + mounted the instance
+    # store; we must bind-mount it, never mkfs busy devices.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    log = tmp_path / "log"
+    if log.exists():
+        log.unlink()
+    import os as _os
+    import stat as _stat
+
+    def stub(name, body):
+        f = bin_dir / name
+        f.write_text("#!/bin/bash\n" + body)
+        f.chmod(f.stat().st_mode | _stat.S_IEXEC)
+
+    stub("mountpoint", "exit 1\n")
+    stub(
+        "lsblk",
+        '[[ "$*" == *MOUNTPOINT* ]] && { echo /opt/dlami/nvme; exit 0; }\n'
+        "echo 'nvme1n1 Amazon EC2 NVMe Instance Storage'\n",
+    )
+    stub("sudo", f'echo "sudo $*" >> {log}\nexit 0\n')
+    stub("whoami", "echo tester\n")
+    proc = subprocess.run(
+        ["bash", "-c", NVME_SETUP],
+        env={**_os.environ, "PATH": f"{bin_dir}:{_os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+    )
+    logtext = log.read_text()
+    assert proc.returncode == 0
+    assert "mount --bind /opt/dlami/nvme /opt/yeto-nvme" in logtext
+    assert "mkfs" not in logtext and "mdadm" not in logtext
+    assert "reusing image-mounted NVMe" in proc.stdout

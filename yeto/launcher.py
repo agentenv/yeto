@@ -68,7 +68,23 @@ else
     'Instance Storage|nvme_card|EphemeralDisk|NVMe Direct Disk' \
     | awk '{print "/dev/"$1}')
   N=$(printf '%s\\n' "$DEVS" | grep -c /dev || true)
-  if [ "$N" -eq 0 ]; then
+  # Some images (e.g. AWS DLAMIs) already RAID and mount the instance
+  # store themselves; reuse that filesystem via bind-mount rather than
+  # fighting busy devices with mkfs.
+  EXISTING=""
+  for d in $DEVS; do
+    mp=$(lsblk -rno MOUNTPOINT "$d" 2>/dev/null | grep -m1 '^/' || true)
+    if [ -n "$mp" ]; then EXISTING="$mp"; break; fi
+  done
+  if [ -n "$EXISTING" ]; then
+    sudo mkdir -p /opt/yeto-nvme
+    if sudo mount --bind "$EXISTING" /opt/yeto-nvme; then
+      sudo chown "$(whoami)" /opt/yeto-nvme
+      echo "[yeto-setup] reusing image-mounted NVMe at $EXISTING via /opt/yeto-nvme"
+    else
+      echo "[yeto-setup] NVMe setup failed; staying on the boot disk" >&2
+    fi
+  elif [ "$N" -eq 0 ]; then
     echo "[yeto-setup] no local ephemeral NVMe; HF cache stays on the boot disk"
   else
     sudo mkdir -p /opt/yeto-nvme
