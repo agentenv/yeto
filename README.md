@@ -80,7 +80,11 @@ enforced with a spot-price margin (`--price-margin`, default 15%) because
 catalog prices are estimates. Signals are fetched in one parallel wave and
 cached for an hour; rejected candidates are listed with reasons, `--json`
 emits a machine-readable plan, `--regions all` searches every catalog
-region.
+region. With RunPod credentials present, RunPod pods join the candidate
+pool — no quotas there, so live per-GPU stock levels gate and cap those
+shapes instead (`--clouds` to control). Unfetchable capacity signals are
+assumed best-case with a warning; `--strict-capacity-check` rejects them
+and `--skip-capacity-check` plans on quota + price alone.
 
 Learners run on **spot instances by default** (pass `--on-demand` to opt
 out); the syncer VM is always on-demand — it is the cheap, stateful

@@ -47,9 +47,11 @@ class Candidate:
     # of measured (default non-strict planning); rendering marks these.
     assumed: bool = False
     # Per-candidate island cap (None = unlimited). Used when the placement
-    # score is only verified up to some aggregate capacity: the shape stays
-    # plannable at the verified size instead of being dropped outright.
+    # score is only verified up to some aggregate capacity (AWS) or stock
+    # is limited (RunPod): the shape stays plannable at the safe size
+    # instead of being dropped outright.
     max_count: int | None = None
+    cloud: str = "aws"  # lowercase sky cloud name
 
 
 @dataclass

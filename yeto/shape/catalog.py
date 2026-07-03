@@ -31,16 +31,17 @@ PEAK_TFLOPS_BF16: dict[str, float] = {
 
 @dataclass(frozen=True)
 class Offering:
-    """One (GPU, instance type, region) row from the AWS catalog."""
+    """One (GPU, instance type, region) row from a cloud catalog."""
 
     gpu: str  # sky accelerator name, e.g. "A100-80GB"
-    instance_type: str  # e.g. "p4de.24xlarge"
+    instance_type: str  # e.g. "p4de.24xlarge" / "8x_H100_SECURE"
     gpus_per_node: int
     vcpus: int
     region: str
     spot_price: float | None  # $/hr per node
     on_demand_price: float | None
     gpu_mem_gb: int  # from launcher.GPU_MEM_GB
+    cloud: str = "aws"  # lowercase sky cloud name
 
 
 def efa_capable(instance_type: str) -> bool:
@@ -85,12 +86,15 @@ def effective_tflops(off: Offering, nodes: int, score: int | None) -> float:
     )
 
 
-def _fetch_raw(regions: list[str], gpus: list[str] | None) -> dict[str, list[Any]]:
+def _fetch_raw(
+    regions: list[str] | None, gpus: list[str] | None, clouds: tuple[str, ...]
+) -> dict[str, list[Any]]:
     """The raw sky catalog call, factored out so tests can monkeypatch it.
 
-    Sky's local catalog is a full dump, so we fetch everything for AWS and
-    filter in `_to_rows` — that keeps this function a pure I/O boundary
-    (regions/gpus are accepted for signature symmetry with the cache key).
+    Sky's local catalog is a full dump, so we fetch everything for the
+    requested clouds and filter in `_to_rows` — that keeps this function a
+    pure I/O boundary (regions/gpus are accepted for signature symmetry
+    with the cache key).
     """
     del regions, gpus  # filtering happens downstream, see docstring
     try:
@@ -100,7 +104,7 @@ def _fetch_raw(regions: list[str], gpus: list[str] | None) -> dict[str, list[Any
             "yeto shape needs SkyPilot's catalog to price instances; "
             "install it with `pip install skypilot[aws]`"
         ) from exc
-    return sky_catalog.list_accelerators(gpus_only=True, clouds="aws", all_regions=True)
+    return sky_catalog.list_accelerators(gpus_only=True, clouds=list(clouds), all_regions=True)
 
 
 def _to_rows(
@@ -122,7 +126,10 @@ def _to_rows(
         for info in infos:
             if info.instance_type is None:
                 continue
-            if want_regions is not None and info.region not in want_regions:
+            cloud = str(getattr(info, "cloud", None) or "aws").lower()
+            # --regions means AWS regions; other clouds (RunPod country
+            # codes, etc.) have their own geography and pass unfiltered.
+            if cloud == "aws" and want_regions is not None and info.region not in want_regions:
                 continue
             if not info.accelerator_count or int(info.accelerator_count) < 1:
                 continue  # fractional-GPU shapes are useless for training
@@ -136,30 +143,37 @@ def _to_rows(
                     "spot_price": info.spot_price,
                     "on_demand_price": info.price,
                     "gpu_mem_gb": launcher.GPU_MEM_GB[gpu],
+                    "cloud": cloud,
                 }
             )
     return rows
 
 
 def list_offerings(
-    regions: list[str] | None, gpus: list[str] | None = None, cache: Any = None
+    regions: list[str] | None,
+    gpus: list[str] | None = None,
+    cache: Any = None,
+    clouds: tuple[str, ...] = ("aws",),
 ) -> list[Offering]:
-    """All AWS offerings for the requested GPUs/regions (regions=None means
-    every region in the catalog), deterministically ordered so plans are
-    reproducible run-to-run.
+    """All offerings for the requested clouds/GPUs/regions (regions=None
+    means every AWS region; non-AWS clouds are never region-filtered),
+    deterministically ordered so plans are reproducible run-to-run.
 
     `cache` is any object with `.get_or(key, fetch)` (e.g. shape.cache's
     disk cache) — the sky catalog dump is slow to load, so callers doing
     repeated planning pass one; None always fetches fresh.
     """
     def fetch() -> list[dict[str, Any]]:
-        return _to_rows(_fetch_raw(regions, gpus), regions, gpus)
+        return _to_rows(_fetch_raw(regions, gpus, clouds), regions, gpus)
 
     region_part = ",".join(sorted(regions)) if regions is not None else "*"
-    key = f"catalog:aws:{region_part}:" + ",".join(sorted(gpus or []))
+    key = (
+        f"catalog:v2:{','.join(sorted(clouds))}:{region_part}:"
+        + ",".join(sorted(gpus or []))
+    )
     rows = cache.get_or(key, fetch) if cache is not None else fetch()
     offerings = [Offering(**row) for row in rows]
     # Biggest nodes first within a (gpu, region) group: the planner prefers
     # fewer, fatter nodes (fewer network hops per island).
-    offerings.sort(key=lambda o: (o.gpu, o.region, -o.gpus_per_node, o.instance_type))
+    offerings.sort(key=lambda o: (o.cloud, o.gpu, o.region, -o.gpus_per_node, o.instance_type))
     return offerings

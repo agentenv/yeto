@@ -85,7 +85,7 @@ def _fake_raw():
 
 
 def test_list_offerings_filters_converts_and_sorts(monkeypatch):
-    monkeypatch.setattr(catalog, "_fetch_raw", lambda regions, gpus: _fake_raw())
+    monkeypatch.setattr(catalog, "_fetch_raw", lambda regions, gpus, clouds: _fake_raw())
 
     offs = list_offerings(["us-east-1"])
     # K80 (not in PEAK_TFLOPS_BF16), eu-west-1, and the None instance_type
@@ -105,7 +105,7 @@ def test_list_offerings_filters_converts_and_sorts(monkeypatch):
 
 
 def test_list_offerings_gpu_filter(monkeypatch):
-    monkeypatch.setattr(catalog, "_fetch_raw", lambda regions, gpus: _fake_raw())
+    monkeypatch.setattr(catalog, "_fetch_raw", lambda regions, gpus, clouds: _fake_raw())
     offs = list_offerings(["us-east-1"], gpus=["H100"])
     assert [o.gpu for o in offs] == ["H100"]
 
@@ -123,7 +123,7 @@ class FakeCache:
 def test_list_offerings_uses_cache(monkeypatch):
     calls = {"n": 0}
 
-    def counting_fetch(regions, gpus):
+    def counting_fetch(regions, gpus, clouds):
         calls["n"] += 1
         return _fake_raw()
 
@@ -133,7 +133,7 @@ def test_list_offerings_uses_cache(monkeypatch):
     b = list_offerings(["us-east-1"], gpus=["A100-80GB"], cache=fake)
     assert calls["n"] == 1  # second call served from the fake cache
     assert a == b
-    assert list(fake.store) == ["catalog:aws:us-east-1:A100-80GB"]
+    assert list(fake.store) == ["catalog:v2:aws:us-east-1:A100-80GB"]
 
 
 def test_peak_tflops_keys_subset_of_launcher_mem_table():

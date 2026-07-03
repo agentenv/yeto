@@ -300,6 +300,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="reject shapes whose placement score cannot be fetched instead "
         "of assuming the best score with a warning (the default)",
     )
+    shape.add_argument(
+        "--clouds",
+        default=None,
+        help="comma-separated clouds to plan across (default: aws, plus "
+        "runpod when its credentials are present)",
+    )
     shape.add_argument("--max-islands", type=int, default=16, help="cap on learner islands (syncer fan-out)")
     shape.add_argument(
         "--weights-gb",
@@ -911,6 +917,7 @@ def cmd_shape(args) -> int:
             head_cost=args.head_cost,
             skip_capacity_check=args.skip_capacity_check,
             strict_capacity_check=args.strict_capacity_check,
+            clouds=args.clouds.split(",") if args.clouds else None,
         )
     except (ValueError, RuntimeError) as e:
         print(f"[yeto] shape failed: {e}", file=sys.stderr)

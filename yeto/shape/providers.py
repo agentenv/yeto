@@ -86,6 +86,135 @@ def _family_quota_code(instance_type: str, use_spot: bool) -> str | None:
     return None
 
 
+# sky accelerator name -> RunPod GPU type id (their GraphQL identifiers).
+_RUNPOD_GPU_IDS = {
+    "A100-80GB": "NVIDIA A100 80GB PCIe",
+    "H100": "NVIDIA H100 80GB HBM3",
+    "H200": "NVIDIA H200",
+    "B200": "NVIDIA B200",
+    "L40S": "NVIDIA L40S",
+    "L4": "NVIDIA L4",
+    "A40": "NVIDIA A40",
+}
+# RunPod has no quotas — the binding constraint is machine stock. Their API
+# reports a coarse stockStatus per (GPU type, count); map it onto the same
+# 1-10 pseudo-score scale the AWS placement score uses so one gate serves
+# both clouds. Null stock (sold out / not offered at that count) is a
+# *measured* zero, not an unknown.
+STOCK_SCORE = {"High": 9, "Medium": 6, "Low": 3}
+
+
+def runpod_available() -> bool:
+    """True when RunPod credentials exist (config file or env var)."""
+    import os
+
+    return bool(os.environ.get("RUNPOD_API_KEY")) or os.path.exists(
+        os.path.expanduser("~/.runpod/config.toml")
+    )
+
+
+class RunPodProviders:
+    """Stock signals for RunPod secure-cloud pods (parallel + cached).
+
+    Stock moves faster than quota ceilings, so entries cache for 15 minutes
+    rather than the default hour.
+    """
+
+    def __init__(self, cache, max_workers: int = 8):
+        self._cache = cache
+        self._max_workers = max_workers
+        self.warnings: list[str] = []
+        self._warn_lock = threading.Lock()
+
+    def _warn(self, msg: str) -> None:
+        with self._warn_lock:
+            if msg not in self.warnings:
+                self.warnings.append(msg)
+
+    def stock_scores(self, asks: list[tuple[str, int]]) -> dict[tuple[str, int], int | None]:
+        """(sky gpu name, gpus per pod) -> pseudo-score.
+
+        0 = measured out-of-stock; None = signal unavailable (API failure /
+        unmapped GPU) — callers apply the same assumed/strict policy as for
+        AWS placement scores.
+        """
+        out: dict[tuple[str, int], int | None] = {}
+
+        def one(ask: tuple[str, int]) -> None:
+            gpu, count = ask
+            gpu_id = _RUNPOD_GPU_IDS.get(gpu)
+            if gpu_id is None:
+                self._warn(f"no RunPod GPU id mapping for {gpu}; stock unknown")
+                out[ask] = None
+                return
+            try:
+                status = self._cache.get_or(
+                    f"runpod-stock:{gpu_id}:{count}",
+                    lambda: self._fetch_stock(gpu_id, count),
+                    ttl=900,
+                )
+            except Exception as exc:  # noqa: BLE001 - degrade, don't crash planning
+                self._warn(f"runpod stock check failed for {gpu} x{count}: {exc}")
+                out[ask] = None
+                return
+            out[ask] = STOCK_SCORE.get(status, 0) if status is not None else 0
+
+        with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
+            list(pool.map(one, asks))
+        return out
+
+    def _fetch_stock(self, gpu_id: str, count: int) -> str | None:
+        """One GraphQL lookup: secure-cloud stockStatus for `count` GPUs.
+
+        Returns RunPod's literal status string ("High"/"Medium"/"Low") or
+        None when the type/count combination is not stocked at all.
+        """
+        import json
+        import urllib.request
+
+        query = {
+            "query": (
+                'query { gpuTypes(input: {id: "%s"}) { lowestPrice(input: '
+                "{gpuCount: %d, secureCloud: true}) { stockStatus } } }"
+            )
+            % (gpu_id, count)
+        }
+        req = urllib.request.Request(
+            "https://api.runpod.io/graphql",
+            data=json.dumps(query).encode(),
+            headers={
+                "Content-Type": "application/json",
+                # Query-param auth 403s on current RunPod; Bearer works.
+                "Authorization": f"Bearer {_runpod_api_key()}",
+                # Cloudflare rejects the default Python-urllib user agent.
+                "User-Agent": "yeto-shape/1.0",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.load(resp)
+        types = payload.get("data", {}).get("gpuTypes") or []
+        if not types:
+            return None
+        price = types[0].get("lowestPrice") or {}
+        return price.get("stockStatus")
+
+
+def _runpod_api_key() -> str:
+    """API key from the env or ~/.runpod/config.toml (sky's auth source)."""
+    import os
+    import re
+
+    key = os.environ.get("RUNPOD_API_KEY")
+    if key:
+        return key
+    path = os.path.expanduser("~/.runpod/config.toml")
+    with open(path, encoding="utf-8") as f:
+        m = re.search(r'api_key\s*=\s*"([^"]+)"', f.read())
+    if not m:
+        raise RuntimeError(f"no api_key found in {path}")
+    return m.group(1)
+
+
 @dataclass(frozen=True)
 class QuotaKey:
     """One (region, quota-code) service-quota lookup."""

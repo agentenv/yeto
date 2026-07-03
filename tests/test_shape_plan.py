@@ -69,10 +69,11 @@ US_REGIONS = ["us-west-2", "us-east-2"]
 
 @pytest.fixture()
 def fake_env(monkeypatch):
-    def offerings(regions, gpus, cache):
+    def offerings(regions, gpus, cache, clouds=("aws",)):
         out = [o for o in OFFERINGS if not gpus or o.gpu in gpus]
+        out = [o for o in out if o.cloud in clouds]
         if regions is not None:
-            out = [o for o in out if o.region in regions]
+            out = [o for o in out if o.cloud != "aws" or o.region in regions]
         return out
 
     monkeypatch.setattr(plan_mod, "list_offerings", offerings)
@@ -80,7 +81,7 @@ def fake_env(monkeypatch):
     return FakeAws(QUOTAS, SCORES, CODES)
 
 
-def _shape(fake, budget, regions=US_REGIONS, price_margin=0.0, **kw):
+def _shape(fake, budget, regions=US_REGIONS, price_margin=0.0, clouds=("aws",), **kw):
     return plan_mod.build_shape(
         model="gemma4",
         budget=budget,
@@ -88,6 +89,7 @@ def _shape(fake, budget, regions=US_REGIONS, price_margin=0.0, **kw):
         cache_enabled=False,
         providers=fake,
         price_margin=price_margin,
+        clouds=list(clouds),
         **kw,
     )
 
@@ -275,7 +277,7 @@ def test_dominated_and_unsupported_shapes_never_ask_for_scores(fake_env, monkeyp
         Offering("H200", "p5e.48xlarge", 8, 192, "us-east-2", 90.0, 150.0, 141),
     ]
     monkeypatch.setattr(
-        plan_mod, "list_offerings", lambda regions, gpus, cache: OFFERINGS + extra
+        plan_mod, "list_offerings", lambda regions, gpus, cache, clouds=("aws",): OFFERINGS + extra
     )
     fake = FakeAws(QUOTAS, SCORES, {**CODES, "p5.4xlarge": "L-417A185B", "p3.16xlarge": "L-7212CCBC", "p5e.48xlarge": "L-417A185B"})
     result = _shape(fake, budget=40.0)
@@ -316,3 +318,98 @@ def test_unmapped_quota_code_fails_closed(fake_env):
     assert result.plan.counts == {}
     reasons = {r.key: r.reason for r in result.rejections}
     assert "no quota mapping for p5.48xlarge" in reasons["aws:8xh100@us-east-2"]
+
+
+RUNPOD_OFFERINGS = [
+    Offering("H100", "8x_H100_SECURE", 8, 128, "CA", 19.12, 23.12, 80, cloud="runpod"),
+    Offering("B200", "8x_B200_SECURE", 8, 224, "CA", 43.92, 47.12, 180, cloud="runpod"),
+]
+
+
+class FakeRunPod:
+    def __init__(self, stock):
+        self._stock = stock  # {(gpu, gpus_per_node): pseudo-score | None}
+        self.warnings = []
+        self.asks = []
+
+    def stock_scores(self, asks):
+        self.asks.extend(asks)
+        return {a: self._stock.get(a) for a in asks}
+
+
+@pytest.fixture()
+def multi_cloud_env(monkeypatch):
+    def offerings(regions, gpus, cache, clouds=("aws",)):
+        out = [o for o in OFFERINGS + RUNPOD_OFFERINGS if not gpus or o.gpu in gpus]
+        out = [o for o in out if o.cloud in clouds]
+        if regions is not None:
+            out = [o for o in out if o.cloud != "aws" or o.region in regions]
+        return out
+
+    monkeypatch.setattr(plan_mod, "list_offerings", offerings)
+    monkeypatch.setattr(plan_mod, "model_weights_gb", lambda model, override, cache: override or 66.0)
+    return FakeAws(QUOTAS, SCORES, CODES)
+
+
+def test_runpod_high_stock_competes_without_quota_or_score_asks(multi_cloud_env):
+    rp = FakeRunPod({("H100", 8): 9, ("B200", 8): 9})
+    result = _shape(
+        multi_cloud_env, budget=500.0, clouds=("aws", "runpod"), runpod_providers=rp
+    )
+    assert ("H100", 8) in rp.asks  # stock was consulted
+    assert not any(t.startswith("8x_") for t, _ in multi_cloud_env.score_asks)  # no AWS score asks for pods
+    keys = set(result.plan.counts)
+    assert any(k.startswith("runpod:") for k in keys)
+    # RunPod candidates carry no quota bucket.
+    rp_cand = next(c for c in result.candidates if c.cloud == "runpod")
+    assert rp_cand.quota_bucket is None
+
+
+def test_runpod_stock_levels_gate_and_cap(multi_cloud_env):
+    # Medium stock (6) fails the default >7 gate...
+    rp = FakeRunPod({("H100", 8): 6, ("B200", 8): 0})
+    result = _shape(multi_cloud_env, budget=500.0, clouds=("aws", "runpod"), runpod_providers=rp)
+    reasons = {r.key: r.reason for r in result.rejections}
+    assert "stock score 6 ≤ 7" in reasons["runpod:8xh100@CA"]
+    assert "sold out" in reasons["runpod:8xb200@CA"]
+    # ...but passes at --min-score 5 with the Medium cap of 4 islands.
+    rp = FakeRunPod({("H100", 8): 6, ("B200", 8): 0})
+    result = _shape(
+        multi_cloud_env, budget=5000.0, clouds=("aws", "runpod"),
+        runpod_providers=rp, min_score=5, gpus=["H100"],
+    )
+    assert result.plan.counts.get("runpod:8xh100@CA") == 4
+
+
+def test_runpod_unfetchable_stock_follows_score_policy(multi_cloud_env):
+    rp = FakeRunPod({})  # every ask -> None
+    result = _shape(multi_cloud_env, budget=500.0, clouds=("aws", "runpod"), runpod_providers=rp)
+    assumed = [c for c in result.candidates if c.cloud == "runpod" and c.assumed]
+    assert assumed  # planned optimistically with a warning
+    strict = _shape(
+        multi_cloud_env, budget=500.0, clouds=("aws", "runpod"),
+        runpod_providers=rp, strict_capacity_check=True,
+    )
+    reasons = {r.key: r.reason for r in strict.rejections}
+    assert "stock score unavailable" in reasons["runpod:8xh100@CA"]
+
+
+def test_runpod_multi_node_islands_rejected(multi_cloud_env):
+    rp = FakeRunPod({("H100", 8): 9})
+    result = _shape(
+        multi_cloud_env, budget=500.0, clouds=("runpod",),
+        runpod_providers=rp, weights_gb_override=568.0, gpus=["H100"],
+    )
+    reasons = {r.key: r.reason for r in result.rejections}
+    assert "multi-node islands unsupported on runpod" in reasons["runpod:2x8xh100@CA"]
+
+
+def test_runpod_launch_key_parses_in_gpu_grammar(multi_cloud_env):
+    from yeto.gpu_spec import parse_gpu_spec
+
+    rp = FakeRunPod({("H100", 8): 9, ("B200", 8): 9})
+    result = _shape(multi_cloud_env, budget=500.0, clouds=("aws", "runpod"), runpod_providers=rp)
+    rp_keys = [k for k in result.plan.counts if k.startswith("runpod:")]
+    assert rp_keys
+    (spec,) = parse_gpu_spec(rp_keys[0])
+    assert spec.cloud == "runpod" and spec.gpus_per_node == 8

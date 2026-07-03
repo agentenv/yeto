@@ -24,7 +24,13 @@ from .cache import TTLCache
 from .catalog import Offering, effective_tflops, list_offerings
 from .ilp import Candidate, Plan, solve
 from .memory import fits, min_nodes, model_weights_gb
-from .providers import AwsProviders, QuotaKey, credentials_available
+from .providers import (
+    AwsProviders,
+    QuotaKey,
+    RunPodProviders,
+    credentials_available,
+    runpod_available,
+)
 
 DEFAULT_REGIONS = ["us-east-1", "us-east-2", "us-west-1", "us-west-2"]
 HEAD_COST_PER_HOUR = 0.40  # small on-demand CPU VM hosting syncer + controller
@@ -64,7 +70,13 @@ class ShapeResult:
 def _candidate_key(off: Offering, nodes: int) -> str:
     gpu = _GPU_FLAG_NAME.get(off.gpu, off.gpu.lower())
     prefix = f"{nodes}x" if nodes > 1 else ""
-    return f"aws:{prefix}{off.gpus_per_node}x{gpu}@{off.region}"
+    return f"{off.cloud}:{prefix}{off.gpus_per_node}x{gpu}@{off.region}"
+
+
+# RunPod stock pseudo-score -> max islands of that shape. Stock is a coarse
+# signal, so the caps are deliberately blunt: plenty (High) is uncapped,
+# Medium supports a few, Low means grab one if it wins.
+_STOCK_CAPS = {9: None, 6: 4, 3: 1}
 
 
 def build_shape(
@@ -83,10 +95,19 @@ def build_shape(
     head_cost: float = HEAD_COST_PER_HOUR,
     skip_capacity_check: bool = False,
     strict_capacity_check: bool = False,
+    clouds: list[str] | None = None,
+    runpod_providers: RunPodProviders | None = None,
 ) -> ShapeResult:
-    """Compute the fleet plan. `providers` is injectable for tests.
+    """Compute the fleet plan. `providers`/`runpod_providers` are injectable
+    for tests.
+
+    clouds: None -> aws, plus runpod when its credentials are present.
+    RunPod has no quotas; its binding constraint is machine stock, mapped
+    onto the same 1-10 pseudo-score scale as AWS placement scores (High=9,
+    Medium=6, Low=3, sold out=0) and gated/capped accordingly.
 
     regions: None -> DEFAULT_REGIONS; ["all"] -> every region in the catalog.
+    Regions are AWS geography; RunPod offerings are never region-filtered.
 
     Score-availability policy: measured scores always gate normally. When a
     score cannot be fetched (throttled, daily config budget spent), the
@@ -102,6 +123,9 @@ def build_shape(
         )
     cache = TTLCache(enabled=cache_enabled)
     aws = providers or AwsProviders(cache)
+    if clouds is None:
+        clouds = ["aws"] + (["runpod"] if runpod_available() else [])
+    rp = runpod_providers or (RunPodProviders(cache) if "runpod" in clouds else None)
     if regions is None:
         regions = DEFAULT_REGIONS
     catalog_regions = None if regions == ["all"] else regions
@@ -109,22 +133,26 @@ def build_shape(
     # Static-ish facts: weight size (hub, cached) + catalog (sky, cached).
     with ThreadPoolExecutor(max_workers=2) as pool:
         weights_f = pool.submit(model_weights_gb, model, weights_gb_override, cache)
-        offerings_f = pool.submit(list_offerings, catalog_regions, gpus, cache)
+        offerings_f = pool.submit(list_offerings, catalog_regions, gpus, cache, tuple(sorted(clouds)))
         weights = weights_f.result()
         offerings = offerings_f.result()
-    regions = sorted({o.region for o in offerings}) if catalog_regions is None else regions
+    regions = (
+        sorted({o.region for o in offerings if o.cloud == "aws"})
+        if catalog_regions is None
+        else regions
+    )
 
     # Several instance types can expose the same (gpu, count, region) shape
     # (e.g. g6e.xlarge vs g6e.2xlarge, both 1xL40S); keep the cheapest —
     # the others are strictly dominated for our purposes.
-    cheapest: dict[tuple[str, int, str], Offering] = {}
+    cheapest: dict[tuple[str, str, int, str], Offering] = {}
     for off in offerings:
         if off.spot_price is None:
             continue
-        k = (off.gpu, off.gpus_per_node, off.region)
+        k = (off.cloud, off.gpu, off.gpus_per_node, off.region)
         if k not in cheapest or off.spot_price < cheapest[k].spot_price:
             cheapest[k] = off
-    offerings = sorted(cheapest.values(), key=lambda o: (o.gpu, o.region, -o.gpus_per_node))
+    offerings = sorted(cheapest.values(), key=lambda o: (o.cloud, o.gpu, o.region, -o.gpus_per_node))
 
     # Island shapes: exactly min_nodes per offering — larger islands only
     # lose (worse placement odds, bigger failure blast radius, multi-node
@@ -146,19 +174,21 @@ def build_shape(
     # dominates (better MFU, better placement odds, same GPUs); islands
     # pricier than the whole budget can never be planned; and the scores API
     # rejects the p3 family outright.
-    best_shape: dict[tuple[str, str], tuple[Offering, int]] = {}
+    best_shape: dict[tuple[str, str, str], tuple[Offering, int]] = {}
     for off, nodes in sized_all:
-        k = (off.gpu, off.region)
+        k = (off.cloud, off.gpu, off.region)
         cur = best_shape.get(k)
         if cur is None or (nodes, -off.gpus_per_node) < (cur[1], -cur[0].gpus_per_node):
             best_shape[k] = (off, nodes)
     sized = []
     for off, nodes in sized_all:
         key = _candidate_key(off, nodes)
-        if best_shape[(off.gpu, off.region)][0] is not off:
+        if best_shape[(off.cloud, off.gpu, off.region)][0] is not off:
             rejections.append(Rejection(key, "dominated by a fatter-node island of the same GPU"))
         elif off.spot_price * nodes > budget - head_cost:
             rejections.append(Rejection(key, f"one island (${off.spot_price * nodes:.2f}/hr) exceeds the budget"))
+        elif off.cloud != "aws" and nodes > 1:
+            rejections.append(Rejection(key, f"multi-node islands unsupported on {off.cloud}"))
         elif off.instance_type.startswith("p3."):
             rejections.append(Rejection(key, "placement scores unsupported for the p3 family"))
         else:
@@ -170,6 +200,8 @@ def build_shape(
     # shapes that could actually launch.
     quota_keys: dict[tuple[Offering, int], QuotaKey | None] = {}
     for off, nodes in sized:
+        if off.cloud != "aws":
+            continue  # RunPod has no quota system; stock gates it below
         code = aws.quota_code(off.instance_type, use_spot=True)
         quota_keys[(off, nodes)] = QuotaKey(off.region, code) if code else None
     unique_quotas = sorted({k for k in quota_keys.values() if k}, key=lambda k: (k.region, k.code))
@@ -183,6 +215,9 @@ def build_shape(
     quota_ok: list[tuple[Offering, int]] = []
     for off, nodes in sized:
         key = _candidate_key(off, nodes)
+        if off.cloud != "aws":
+            quota_ok.append((off, nodes))
+            continue
         qk = quota_keys[(off, nodes)]
         if qk is None:
             # Every AWS shape must land in a known quota bucket; treating an
@@ -217,7 +252,9 @@ def build_shape(
     # optimistic TFLOPs/$ any offering gives them, query the top
     # MAX_SCORE_ASKS, and reject the tail explicitly rather than silently
     # burning the daily config budget.
-    unique_asks = sorted({(off.instance_type, nodes) for off, nodes in quota_ok})
+    unique_asks = sorted(
+        {(off.instance_type, nodes) for off, nodes in quota_ok if off.cloud == "aws"}
+    )
     if not skip_capacity_check and len(unique_asks) > MAX_SCORE_ASKS:
         def ask_value(ask: tuple[str, int]) -> float:
             itype, nodes = ask
@@ -232,7 +269,7 @@ def build_shape(
         unique_asks = sorted(ranked[:MAX_SCORE_ASKS])
         kept = []
         for off, nodes in quota_ok:
-            if (off.instance_type, nodes) in skipped:
+            if off.cloud == "aws" and (off.instance_type, nodes) in skipped:
                 rejections.append(
                     Rejection(_candidate_key(off, nodes), "score not queried (daily config budget; low TFLOPs/$)")
                 )
@@ -240,28 +277,52 @@ def build_shape(
                 kept.append((off, nodes))
         quota_ok = kept
 
-    # Wave 2: placement scores, spent only on launchable shapes. The region
-    # list stays the caller's full stable list so cache keys (and AWS's
-    # config identity) do not churn run-to-run.
-    scores = {} if skip_capacity_check else aws.placement_scores(unique_asks, regions)
+    # Wave 2: capacity signals, spent only on launchable shapes — AWS
+    # placement scores (region list stays the caller's full stable list so
+    # cache keys and AWS's config identity do not churn) alongside RunPod
+    # stock, which has no config budget but the same gating semantics.
+    stock_asks = sorted(
+        {(off.gpu, off.gpus_per_node) for off, nodes in quota_ok if off.cloud == "runpod"}
+    )
+    scores: dict = {}
+    stock: dict = {}
+    if not skip_capacity_check:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            scores_f = pool.submit(aws.placement_scores, unique_asks, regions) if unique_asks else None
+            stock_f = pool.submit(rp.stock_scores, stock_asks) if rp and stock_asks else None
+            scores = scores_f.result() if scores_f else {}
+            stock = stock_f.result() if stock_f else {}
 
     candidates: list[Candidate] = []
     assumed_keys: list[str] = []
+    stock_caps: dict[str, int | None] = {}
     for off, nodes in quota_ok:
         key = _candidate_key(off, nodes)
-        qk = quota_keys[(off, nodes)]
-        score = scores.get((off.instance_type, nodes, off.region))
+        if off.cloud == "aws":
+            qk = quota_keys[(off, nodes)]
+            score = scores.get((off.instance_type, nodes, off.region))
+            kind = "placement"
+        else:
+            qk = None
+            score = stock.get((off.gpu, off.gpus_per_node))
+            kind = "stock"
+            if score == 0:
+                # Unlike an unfetchable score, sold-out is a measurement.
+                rejections.append(Rejection(key, "runpod stock: sold out at this GPU count"))
+                continue
         assumed = False
         if min_score > 0 and not skip_capacity_check:
             if score is None:
                 if strict_capacity_check:
-                    rejections.append(Rejection(key, "placement score unavailable (--strict-capacity-check)"))
+                    rejections.append(Rejection(key, f"{kind} score unavailable (--strict-capacity-check)"))
                     continue
                 assumed = True
                 assumed_keys.append(key)
             elif score <= min_score:
-                rejections.append(Rejection(key, f"placement score {score} ≤ {min_score}"))
+                rejections.append(Rejection(key, f"{kind} score {score} ≤ {min_score}"))
                 continue
+        if off.cloud != "aws" and score is not None:
+            stock_caps[key] = _STOCK_CAPS.get(score, 1)
         candidates.append(
             Candidate(
                 key=key,
@@ -278,6 +339,7 @@ def build_shape(
                 quota_bucket=(qk.region, qk.code) if qk else None,
                 score=score,
                 assumed=assumed,
+                cloud=off.cloud,
             )
         )
 
@@ -287,8 +349,13 @@ def build_shape(
     # its single-island score is verified — it is capped at the largest count
     # whose capacity checked out, and the plan is re-solved (bounded loop).
     by_key = {c.key: c for c in candidates}
-    verified: dict[str, int] = {c.key: 1 for c in candidates}  # islands with a known-good score
-    caps: dict[str, int | None] = {c.key: None for c in candidates}
+    # AWS shapes start verified at one island (their single-island score was
+    # measured or assumed); RunPod shapes have no aggregate re-check concept,
+    # so they start fully verified and are bounded by their stock caps.
+    verified: dict[str, int] = {
+        c.key: (1 if c.cloud == "aws" else max_islands) for c in candidates
+    }
+    caps: dict[str, int | None] = {c.key: stock_caps.get(c.key) for c in candidates}
     cap_notes: list[str] = []
     plan = Plan(counts={}, total_tflops=0.0, total_cost=head_cost, binding=["budget"])
     for _ in range(3):
@@ -360,6 +427,7 @@ def build_shape(
         candidates=candidates,
         rejections=rejections,
         warnings=list(getattr(aws, "warnings", []))
+        + list(getattr(rp, "warnings", []) if rp else [])
         + cap_notes
         + (
             [
@@ -416,6 +484,7 @@ def to_json_dict(result: ShapeResult, model: str, budget: float, tuning: str, da
             {
                 "key": key,
                 "count": n,
+                "cloud": by_key[key].cloud,
                 "region": by_key[key].region,
                 "instance_type": by_key[key].instance_type,
                 "nodes": by_key[key].nodes,
@@ -455,7 +524,12 @@ def render(result: ShapeResult, model: str, budget: float, tuning: str, data: st
         )
         for key, n in sorted(plan.counts.items()):
             c = by_key[key]
-            shown = f"~{ASSUMED_PLACEMENT_SCORE} (assumed)" if c.assumed else str(c.score)
+            if c.assumed:
+                shown = f"~{ASSUMED_PLACEMENT_SCORE} (assumed)"
+            elif c.cloud != "aws":
+                shown = f"stock≈{c.score}"
+            else:
+                shown = str(c.score)
             out.append(
                 f"  {n}x {key}  spot est ${c.price_per_hour:.2f}/hr/island  "
                 f"score {shown}  {c.eff_tflops:.1f} TFLOPs/island"
