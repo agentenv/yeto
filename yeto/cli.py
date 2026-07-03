@@ -32,7 +32,7 @@ import time
 from . import runs
 from .losses import LOSS_FUNCTIONS
 
-SUBCOMMANDS = ("launch", "status", "logs", "down", "_worker", "_head")
+SUBCOMMANDS = ("launch", "shape", "status", "logs", "down", "_worker", "_head")
 
 
 def _add_launch_args(p: argparse.ArgumentParser) -> None:
@@ -236,6 +236,43 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_launch_args(launch)
+
+    shape = sub.add_parser(
+        "shape",
+        help="compute the best fleet plan for a model and budget",
+        description="Maximize effective training FLOPs under a $/hr budget, "
+        "AWS spot quotas, and spot placement scores; prints the plan and the "
+        "matching `yeto launch` line. Signals are fetched in parallel and "
+        "cached for 1 hour.",
+    )
+    shape.add_argument("--model", required=True, help="model alias or HF id")
+    shape.add_argument("--budget", type=float, required=True, help="fleet budget in $/hr (includes head VM)")
+    shape.add_argument("--tuning", choices=["lora", "full"], default="lora")
+    shape.add_argument("--seq-len", type=int, default=2048)
+    shape.add_argument(
+        "--regions",
+        default=None,
+        help="comma-separated AWS regions to consider (default: us-east-1,us-east-2,us-west-1,us-west-2)",
+    )
+    shape.add_argument(
+        "--gpus",
+        default=None,
+        help="comma-separated GPU allowlist in sky names (e.g. A100,A100-80GB,H100); default: all known",
+    )
+    shape.add_argument(
+        "--min-score",
+        type=int,
+        default=7,
+        help="require spot placement score strictly greater than this (0 disables)",
+    )
+    shape.add_argument("--max-islands", type=int, default=16, help="cap on learner islands (syncer fan-out)")
+    shape.add_argument(
+        "--weights-gb",
+        type=float,
+        default=None,
+        help="override the model weight size estimate (bf16 GB)",
+    )
+    shape.add_argument("--no-cache", action="store_true", help="bypass the 1h signal cache")
 
     sub.add_parser("status", help="table of known runs")
 
@@ -817,6 +854,29 @@ def cmd_down(args) -> int:
 # ---------------------------------------------------------------------------
 
 
+def cmd_shape(args) -> int:
+    from .shape.plan import build_shape, render
+
+    try:
+        result = build_shape(
+            model=args.model,
+            budget=args.budget,
+            tuning=args.tuning,
+            seq_len=args.seq_len,
+            regions=args.regions.split(",") if args.regions else None,
+            gpus=args.gpus.split(",") if args.gpus else None,
+            min_score=args.min_score,
+            max_islands=args.max_islands,
+            weights_gb_override=args.weights_gb,
+            cache_enabled=not args.no_cache,
+        )
+    except (ValueError, RuntimeError) as e:
+        print(f"[yeto] shape failed: {e}", file=sys.stderr)
+        return 1
+    print(render(result, args.model, args.budget, args.tuning, args.min_score))
+    return 0 if result.plan.counts else 1
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
@@ -826,6 +886,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.command == "launch":
         return cmd_launch(args)
+    if args.command == "shape":
+        return cmd_shape(args)
     if args.command == "status":
         return cmd_status()
     if args.command == "logs":
