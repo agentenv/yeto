@@ -44,6 +44,14 @@ def parse_args(argv=None):
     tune = p.add_argument_group("fine-tuning")
     tune.add_argument("--tuning", choices=["lora", "full"], default="lora")
     tune.add_argument(
+        "--shard",
+        choices=["ddp", "fsdp"],
+        default="ddp",
+        help="per-learner multi-GPU strategy; fsdp shards the frozen base "
+        "across the learner's GPUs/nodes (lora only) so the model no "
+        "longer has to fit on one GPU",
+    )
+    tune.add_argument(
         "--train-on",
         choices=["assistant", "all"],
         default="assistant",

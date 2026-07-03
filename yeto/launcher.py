@@ -110,6 +110,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f" --num-learners {num_learners}"
         f" --loss-function {args.loss_function}"
         f" --train-on {args.train_on}"
+        f" --shard {args.shard}"
         f" --tuning {args.tuning}"
         f" --lora-r {args.lora_r}"
         f" --seq-len {args.seq_len}"
