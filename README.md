@@ -1,14 +1,19 @@
-# Decoupled DiLoCo on SkyPilot
+# Yeto
 
-Multi-region fine-tuning using **Decoupled DiLoCo** ([arXiv 2604.21428](https://arxiv.org/abs/2604.21428)),
-launched across clouds/regions with the [SkyPilot](https://skypilot.co) Python SDK.
+**Yeto** is an efficient, low-cost post-training tool: it fine-tunes language
+models across cheap, geographically scattered GPU clusters (spot instances,
+mixed regions, mixed clouds) launched with the [SkyPilot](https://skypilot.co)
+SDK.
 
-Decoupled DiLoCo decomposes training into `M` independent **learners** (one per
-region/cluster) coordinated by a central **syncer**. Learners run inner
-optimization (AdamW) on their data shard and never block on peers; the syncer
-asynchronously pulls per-fragment pseudo-gradients from a quorum of `K ≤ M`
-learners, merges them (weighted radial-directional averaging), applies an outer
-Nesterov step, and broadcasts fragments back.
+Instead of lock-step synchronous training — where every GPU waits for the
+slowest node and one preemption stalls the world — Yeto splits work across
+`M` independent **learners** (one per cluster) coordinated by a central
+**syncer**. Learners run local AdamW steps on their own data shard and never
+block on peers; the syncer asynchronously pulls per-fragment weight deltas
+from a quorum of `K ≤ M` learners, merges them (token-weighted
+radial-directional averaging), applies a Nesterov outer step, and broadcasts
+the result. Slow, preempted, or late-joining learners neither stall training
+nor lose their work.
 
 ## Architecture
 
@@ -30,12 +35,12 @@ Nesterov step, and broadcasts fragments back.
 - **`train.py`** — CLI entrypoint. Parses the `--gpu` spec, launches one
   SkyPilot cluster per learner plus a syncer VM, wires up IPs/ports, streams logs.
 - **`syncer/`** — Rust implementation of the latency-sensitive syncer:
-  async TCP server, per-fragment sync schedule (interval `H`, offsets `t_p`),
-  quorum-`K` gather with grace window, token/step-weighted RDA merge,
-  Nesterov outer optimizer.
-- **`decoupled_diloco/`** — Python package: learner training loop
-  (HF transformers + AdamW inner steps, background fragment push/pull),
-  data loading, loss functions, GPU-spec parsing, SkyPilot orchestration.
+  async TCP server, per-fragment sync schedule (interval `H`, round-robin
+  offsets), quorum-`K` gather with grace window, token/step-weighted RDA
+  merge, Nesterov outer optimizer, consistent checkpoints, JSONL event tape.
+- **`yeto/`** — Python package: learner training loop (HF transformers +
+  AdamW inner steps, background fragment push/pull), data loading, loss
+  functions, GPU-spec parsing, SkyPilot orchestration.
 
 ## Usage
 
@@ -57,17 +62,17 @@ coordinator, and its checkpoint/resume covers learner preemptions.
 
 ## Design notes
 
-- **Merging** (paper §3.2, App. D.2): per-learner outer gradient
-  Δ_m,p = Θ_p(prev) − θ_m,p anchored at the syncer's previous fragment;
-  weights w_m = c_tokens²/c_steps; weighted RDA per tensor on non-embedding
-  fragments, direct averaging on the embedding fragment.
+- **Merging**: per-learner outer gradient Δ_m,p = Θ_p(prev) − θ_m,p anchored
+  at the syncer's previous fragment value; learner weights
+  w_m = c_tokens²/c_steps (quantity × quality); weighted RDA per tensor on
+  non-embedding fragments, direct averaging on the embedding fragment (whose
+  deltas lack the near-orthogonality that motivates RDA).
 - **Transport**: custom binary framing over parallel TCP streams (control on
   stream 0; 4 MiB chunks striped across data streams). gRPC was evaluated and
   rejected — protobuf copies and HTTP/2 framing sit on the bulk tensor path.
 - **Snapshots**: the single-actor syncer checkpoints at the quiescent cut
   between rounds (params, momentum, per-fragment versions, merged-token
-  ledger) — Chandy-Lamport degenerates to this when there is one syncer
-  shard. `--resume` restores; a JSONL event tape records every merge.
+  ledger). `--resume` restores; a JSONL event tape records every merge.
 - **Fine-tuning**: `--tuning lora` (default) syncs only adapter weights —
   fragments are megabytes, so the syncer and WAN stay cheap even for large
   models. `--tuning full` syncs everything.

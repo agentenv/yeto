@@ -1,9 +1,9 @@
-"""Balanced tensor fragmentation (paper Appendix C).
+"""Balanced tensor fragmentation.
 
 Trainable tensors are packed into P fragments by greedy number partitioning:
 iterate over tensors in descending size order, placing each into the fragment
 with the smallest running total. Embedding-like tensors are isolated into
-their own fragment merged with direct averaging (the paper found embedding
+their own fragment merged with direct averaging (embedding
 outer gradients lack the near-orthogonality that motivates RDA); all other
 fragments use radial-directional averaging.
 

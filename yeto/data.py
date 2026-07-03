@@ -7,7 +7,7 @@ chat template when it accepts the row, otherwise a plain fallback), tokenized
 as one long stream per row, and packed into fixed-length blocks.
 
 Sharding: row i belongs to learner (i mod num_learners), giving disjoint data
-shards D_m as the paper assumes.
+shards D_m.
 """
 
 from __future__ import annotations

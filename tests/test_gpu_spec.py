@@ -1,6 +1,6 @@
 import pytest
 
-from decoupled_diloco.gpu_spec import ClusterSpec, parse_gpu_spec
+from yeto.gpu_spec import ClusterSpec, parse_gpu_spec
 
 
 def test_single_node_entry():

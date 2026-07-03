@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decoupled DiLoCo fine-tuning across clouds/regions via SkyPilot.
+"""Yeto: efficient, low-cost post-training across clouds/regions via SkyPilot.
 
 Example:
     python3 train.py \
@@ -12,7 +12,7 @@ Example:
 import argparse
 import sys
 
-from decoupled_diloco.losses import LOSS_FUNCTIONS
+from yeto.losses import LOSS_FUNCTIONS
 
 
 def parse_args(argv=None):
@@ -50,15 +50,15 @@ def parse_args(argv=None):
     tune.add_argument("--inner-lr", type=float, default=3e-4)
     tune.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
 
-    diloco = p.add_argument_group("decoupled diloco")
-    diloco.add_argument("--total-steps", type=int, default=64, help="outer steps T (one fragment each)")
-    diloco.add_argument("--fragments", type=int, default=8, help="fragments P (= sync interval H)")
-    diloco.add_argument("--quorum", type=int, default=1, help="minimum learners per outer step (K)")
-    diloco.add_argument("--grace-ms", type=int, default=1000, help="grace window after quorum")
-    diloco.add_argument("--outer-lr", type=float, default=0.7)
-    diloco.add_argument("--outer-momentum", type=float, default=0.9)
-    diloco.add_argument("--wire-dtype", choices=["bf16", "f32"], default="bf16")
-    diloco.add_argument("--wan-streams", type=int, default=4, help="parallel TCP streams per learner")
+    sync = p.add_argument_group("async sync")
+    sync.add_argument("--total-steps", type=int, default=64, help="outer steps T (one fragment each)")
+    sync.add_argument("--fragments", type=int, default=8, help="fragments P (= sync interval H)")
+    sync.add_argument("--quorum", type=int, default=1, help="minimum learners per outer step (K)")
+    sync.add_argument("--grace-ms", type=int, default=1000, help="grace window after quorum")
+    sync.add_argument("--outer-lr", type=float, default=0.7)
+    sync.add_argument("--outer-momentum", type=float, default=0.9)
+    sync.add_argument("--wire-dtype", choices=["bf16", "f32"], default="bf16")
+    sync.add_argument("--wan-streams", type=int, default=4, help="parallel TCP streams per learner")
 
     infra = p.add_argument_group("infrastructure")
     infra.add_argument(
@@ -90,7 +90,7 @@ def parse_args(argv=None):
         help="syncer VM placement: 'region' (AWS) or 'cloud/region', e.g. gcp/us-central1",
     )
     infra.add_argument("--syncer-memory", type=int, default=32, help="syncer RAM (GB)")
-    infra.add_argument("--cluster-prefix", default="diloco")
+    infra.add_argument("--cluster-prefix", default="yeto")
     infra.add_argument("--keep", action="store_true", help="do not tear down clusters at the end")
     infra.add_argument(
         "--retry-until-up",
@@ -102,7 +102,7 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    from decoupled_diloco.launcher import run
+    from yeto.launcher import run
 
     return run(args)
 

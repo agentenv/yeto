@@ -148,8 +148,8 @@ class SyncerClient:
         for i, s in enumerate(self._socks):
             q: queue.Queue[bytes | None] = queue.Queue(maxsize=256)
             self._queues.append(q)
-            threading.Thread(target=self._send_loop, args=(s, q), name=f"diloco-send-{i}", daemon=True).start()
-            threading.Thread(target=self._recv_loop, args=(s,), name=f"diloco-recv-{i}", daemon=True).start()
+            threading.Thread(target=self._send_loop, args=(s, q), name=f"yeto-send-{i}", daemon=True).start()
+            threading.Thread(target=self._recv_loop, args=(s,), name=f"yeto-recv-{i}", daemon=True).start()
 
     def close(self) -> None:
         for q in self._queues:

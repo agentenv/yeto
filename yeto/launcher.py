@@ -31,7 +31,7 @@ MODEL_WEIGHT_GB = {"deepseek4flash": 568, "gemma4": 66}
 
 
 def build_syncer_binary() -> Path:
-    binary = REPO_ROOT / "syncer/target/release/diloco-syncer"
+    binary = REPO_ROOT / "syncer/target/release/yeto-syncer"
     print("[launcher] building syncer (cargo build --release)...")
     subprocess.run(["cargo", "build", "--release"], cwd=REPO_ROOT / "syncer", check=True)
     return binary
@@ -42,7 +42,7 @@ def make_syncer_task(args, num_learners: int):
 
     binary = build_syncer_binary()
     cmd = (
-        f"chmod +x ~/diloco-syncer && ~/diloco-syncer"
+        f"chmod +x ~/yeto-syncer && ~/yeto-syncer"
         f" --port {SYNCER_PORT}"
         f" --learners {num_learners}"
         f" --quorum {args.quorum}"
@@ -50,13 +50,13 @@ def make_syncer_task(args, num_learners: int):
         f" --total-steps {args.total_steps}"
         f" --outer-lr {args.outer_lr}"
         f" --outer-momentum {args.outer_momentum}"
-        f" --checkpoint-path ~/diloco-state.ckpt --resume"
-        f" --event-tape ~/diloco-tape.jsonl"
+        f" --checkpoint-path ~/yeto-state.ckpt --resume"
+        f" --event-tape ~/yeto-tape.jsonl"
     )
     task = sky.Task(
-        name="diloco-syncer",
+        name="yeto-syncer",
         run=cmd,
-        file_mounts={"~/diloco-syncer": str(binary)},
+        file_mounts={"~/yeto-syncer": str(binary)},
     )
     # --syncer-region accepts "region" (AWS assumed) or "cloud/region".
     infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
@@ -72,7 +72,7 @@ def make_syncer_task(args, num_learners: int):
     return task
 
 
-PICKLED_LOSS_FILE = ".diloco_loss.pkl"
+PICKLED_LOSS_FILE = ".yeto_loss.pkl"
 
 
 def resolve_loss_function(loss_function) -> str:
@@ -80,7 +80,7 @@ def resolve_loss_function(loss_function) -> str:
 
     A callable or a ``custom:<file.py>`` spec is loaded here (failing fast
     before any cloud spend), pickled by value into the workdir, and shipped
-    to learners as ``pickle:.diloco_loss.pkl``. Named losses pass through.
+    to learners as ``pickle:.yeto_loss.pkl``. Named losses pass through.
     """
     from .losses import dump_pickled_loss, load_custom_loss
 
@@ -113,7 +113,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f" --fragments {args.fragments}"
         f" --wire-dtype {args.wire_dtype}"
         f" --wan-streams {args.wan_streams}"
-        f" --output-dir ~/diloco-output"
+        f" --output-dir ~/yeto-output"
     )
     if args.max_rows:
         learner_flags += f" --max-rows {args.max_rows}"
@@ -122,7 +122,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         "torchrun --nnodes=$SKYPILOT_NUM_NODES --node_rank=$SKYPILOT_NODE_RANK "
         "--nproc_per_node=$SKYPILOT_NUM_GPUS_PER_NODE "
         "--master_addr=$MASTER_ADDR --master_port=29500 "
-        f"-m decoupled_diloco.learner{learner_flags}"
+        f"-m yeto.learner{learner_flags}"
     )
     envs = {
         "SYNCER_ADDR": syncer_addr,
@@ -145,7 +145,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             f"~/sky_workdir/{PICKLED_LOSS_FILE}": str(REPO_ROOT / PICKLED_LOSS_FILE)
         }
     task = sky.Task(
-        name=f"diloco-learner-{learner_id}",
+        name=f"yeto-learner-{learner_id}",
         setup="pip install -q -r requirements.txt",
         run=run,
         envs=envs,
@@ -291,8 +291,8 @@ def run(args) -> int:
 
         learner0 = next(n for n in results if "-l0-" in n)
         print(
-            f"[launcher] fine-tuned model saved on {learner0}:~/diloco-output\n"
-            f"  fetch with: scp -r {learner0}:diloco-output ./"
+            f"[launcher] fine-tuned model saved on {learner0}:~/yeto-output\n"
+            f"  fetch with: scp -r {learner0}:yeto-output ./"
         )
         return 1 if failed else 0
     finally:

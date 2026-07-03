@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from decoupled_diloco import losses
+from yeto import losses
 
 
 def test_cross_entropy_matches_nll():

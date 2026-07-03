@@ -84,7 +84,7 @@ def load_custom_loss(spec: str):
     file = Path(path)
     if not file.exists():
         raise FileNotFoundError(f"custom loss file {path!r} not found")
-    module_spec = importlib.util.spec_from_file_location("diloco_custom_loss", file)
+    module_spec = importlib.util.spec_from_file_location("yeto_custom_loss", file)
     module = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(module)
     fn = getattr(module, fn_name, None)

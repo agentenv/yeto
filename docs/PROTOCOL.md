@@ -11,9 +11,8 @@ plane needs.
 All integers little-endian. Tensors are raw contiguous bytes in the declared
 dtype (fragment = concatenation of its tensors, in layout order).
 
-The design follows Decoupled DiLoCo (arXiv 2604.21428) Algorithms 1–2: the
-syncer owns the global step `t` and drives a pull-based, per-fragment sync
-schedule; learners never block on the WAN.
+The syncer owns the global step `t` and drives a pull-based, per-fragment
+sync schedule; learners never block on the WAN.
 
 ## Framing
 
@@ -51,7 +50,7 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
 ## Semantics
 
 - **Fragments**: trainable parameters are partitioned into `P` fragments by
-  balanced greedy bin-packing over tensors (paper Appendix C). Embedding-like
+  balanced greedy bin-packing over tensors. Embedding-like
   tensors go to their own fragment with merge_mode=avg; everything else uses
   RDA. All learners must declare identical layouts in HELLO.
 - **Schedule**: syncer global step `t = 1..T`; at each step exactly one
@@ -81,9 +80,9 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
 
 ## Consistent snapshots
 
-The paper (Appendix E.1/E.2) uses vector clocks plus Chandy-Lamport markers
-because its syncer is M-way sharded with in-flight inter-shard messages. Here
-the syncer is a single sequential actor, so the marker algorithm degenerates:
+A sharded coordinator would need vector clocks plus Chandy-Lamport markers to
+snapshot consistently across in-flight inter-shard messages. Here the syncer
+is a single sequential actor, so the marker algorithm degenerates:
 between rounds (after broadcasting step t, before pulling t+1) the channel
 state is irrelevant to global correctness, and a checkpoint at that quiescent
 cut is consistent by construction. The snapshot persists:
@@ -92,7 +91,7 @@ cut is consistent by construction. The snapshot persists:
 - global parameters Θ and outer (Nesterov) momentum,
 - the cumulative merged-token/step ledger per learner.
 
-Learner consistency on restore follows the paper's E.3 argument: a learner
+Learner consistency on restore holds because recovery is idempotent: a learner
 (re)connecting after a syncer restart receives the full fragment rebroadcast,
 bounding its staleness by one sync cycle H. Pushes anchored at a base_version
 older than the syncer's previous version for that fragment are logged as

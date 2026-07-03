@@ -1,4 +1,4 @@
-from decoupled_diloco.fragments import MERGE_AVG, MERGE_RDA, build_layout
+from yeto.fragments import MERGE_AVG, MERGE_RDA, build_layout
 
 
 TENSORS = [

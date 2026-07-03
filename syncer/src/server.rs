@@ -1,7 +1,7 @@
 //! Async TCP server implementing the syncer side of docs/PROTOCOL.md:
 //! per-learner connection groups (control stream + striped data streams),
 //! chunk reassembly, and the pull-driven quorum/grace merge scheduler
-//! (Algorithm 2 of the paper).
+//! at the core of the training loop.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

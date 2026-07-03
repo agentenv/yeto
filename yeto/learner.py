@@ -1,4 +1,4 @@
-"""Decoupled DiLoCo learner (Algorithm 1): inner AdamW optimization with
+"""Yeto learner: inner AdamW optimization with
 non-blocking fragment sync against the Rust syncer.
 
 Runs standalone (single GPU/CPU) or under torchrun (DDP across the GPUs and
@@ -39,14 +39,14 @@ MODEL_ALIASES = {
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Decoupled DiLoCo learner")
+    p = argparse.ArgumentParser(description="Yeto learner")
     p.add_argument("--model", required=True, help="HF model id or alias (gemma4|deepseek4flash)")
     p.add_argument("--data", required=True, help="HF dataset id")
     p.add_argument(
         "--syncer",
         required=True,
         help="host:port of the syncer, or 'none' for a standalone DDP "
-        "baseline (no DiLoCo; stops at --max-local-steps)",
+        "baseline (no async sync; stops at --max-local-steps)",
     )
     p.add_argument("--learner-id", type=int, required=True)
     p.add_argument("--num-learners", type=int, required=True)

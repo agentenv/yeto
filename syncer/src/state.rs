@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn checkpoint_roundtrip() {
-        let dir = std::env::temp_dir().join("diloco-ckpt-test");
+        let dir = std::env::temp_dir().join("yeto-ckpt-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.ckpt");
         let mut st = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32);

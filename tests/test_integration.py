@@ -1,7 +1,7 @@
 """End-to-end test: real Rust syncer + two learner clients on localhost.
 
 Each learner runs Adam inner steps on a quadratic f_m(w) = ||w - target_m||²
-over its own target; Decoupled DiLoCo should drive the global parameters
+over its own target; the async merge should drive the global parameters
 toward the mean of the targets. Exercises HELLO layout exchange, INIT,
 striped chunk transfer, pull/push with counters, RDA+Avg merging, the
 Nesterov outer step, broadcasts, and SHUTDOWN.
@@ -16,16 +16,16 @@ from pathlib import Path
 import pytest
 import torch
 
-from decoupled_diloco.fragments import build_layout
-from decoupled_diloco.protocol import DTYPE_BF16, SyncerClient
-from decoupled_diloco.tensor_io import apply_fragment, pack_fragment, unpack_fragment
+from yeto.fragments import build_layout
+from yeto.protocol import DTYPE_BF16, SyncerClient
+from yeto.tensor_io import apply_fragment, pack_fragment, unpack_fragment
 
 ROOT = Path(__file__).resolve().parent.parent
 DIM = 4096  # large enough to require striping across several chunks at bf16? (4KB) — small but exercises the full path
 
 
 def build_syncer() -> Path:
-    binary = ROOT / "syncer/target/debug/diloco-syncer"
+    binary = ROOT / "syncer/target/debug/yeto-syncer"
     subprocess.run(["cargo", "build", "-q"], cwd=ROOT / "syncer", check=True)
     assert binary.exists()
     return binary
@@ -50,6 +50,10 @@ class ToyLearner(threading.Thread):
         self.client = SyncerClient(
             ("127.0.0.1", port), learner_id, layout, DTYPE_BF16, num_streams=2
         )
+        # Snapshot at the last applied broadcast: the learner keeps taking
+        # local steps between the final merge and SHUTDOWN arriving, so
+        # post-loop params include unmerged local drift.
+        self.synced: dict[str, torch.Tensor] = {}
         self.exc: BaseException | None = None
 
     def run(self):
@@ -106,6 +110,7 @@ class ToyLearner(threading.Thread):
                 apply_fragment(frag, flat_new, self.params)
                 steps_at_reset[bc.fragment_id] = steps_total
                 versions[bc.fragment_id] = bc.version
+                self.synced = {k: v.detach().clone() for k, v in self.params.items()}
             time.sleep(0.005)  # ~5ms inner step
         self.client.close()
 
@@ -152,13 +157,14 @@ def test_two_learners_converge_to_mean():
         rc = proc.wait(timeout=30)
         assert rc == 0, "syncer exited nonzero"
 
-        # After DiLoCo merging, both learners' post-broadcast fragments came
+        # After merging, both learners' post-broadcast fragments came
         # from the same global params; with opposite targets, the merged
-        # motion cancels and global params stay near 0 while each learner's
-        # local drift is bounded. Check the learners ended much closer to the
-        # consensus (0) than to their own targets.
+        # motion cancels and the synced state stays near 0. Check the last
+        # broadcast state stayed much closer to the consensus (0) than to
+        # either learner's own target.
         for l in learners:
-            flat = torch.cat([p.detach().reshape(-1) for p in l.params.values()])
+            assert l.synced, "learner never received a broadcast"
+            flat = torch.cat([p.reshape(-1) for p in l.synced.values()])
             dist_to_own_target = (flat - l.target).norm()
             # Pure local training would reach its own target (dist -> 0).
             assert dist_to_own_target > 0.5 * l.target.norm(), (
@@ -173,7 +179,7 @@ def test_two_learners_converge_to_mean():
 
 @pytest.mark.timeout(180)
 def test_single_learner_roundtrip():
-    """M=1, K=1: degenerates to streaming DiLoCo; must run to completion."""
+    """M=1, K=1: a single self-syncing learner; must run to completion."""
     binary = build_syncer()
     port = free_port()
     named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]

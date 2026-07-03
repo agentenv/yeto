@@ -5,7 +5,7 @@ mod state;
 
 use clap::Parser;
 
-/// Decoupled DiLoCo syncer: pull-driven fragment merging (weighted RDA/Avg)
+/// Yeto syncer: pull-driven fragment merging (weighted RDA/Avg)
 /// with an SGD+Nesterov outer optimizer. See docs/PROTOCOL.md.
 #[derive(Parser)]
 #[command(version)]
@@ -28,10 +28,10 @@ struct Args {
     /// Total number of outer steps T (each syncs one fragment).
     #[arg(long)]
     total_steps: u64,
-    /// Outer learning rate (DiLoCo lineage default).
+    /// Outer learning rate.
     #[arg(long, default_value_t = 0.7)]
     outer_lr: f32,
-    /// Outer Nesterov momentum (DiLoCo lineage default).
+    /// Outer Nesterov momentum.
     #[arg(long, default_value_t = 0.9)]
     outer_momentum: f32,
     /// Optional path to dump the final global parameters (flat f32 binary).

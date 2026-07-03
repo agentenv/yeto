@@ -1,23 +1,20 @@
-//! Merge math from "Decoupled DiLoCo" (arXiv 2604.21428).
+//! Merge math for asynchronous multi-learner training.
 //!
 //! Per-learner outer gradient for fragment p: Δ_m = Θ_p(prev) − θ_m,p, i.e.
-//! anchored at the syncer's own previous global fragment (Appendix D.2).
-//! Learner weights w_m = c_tokens · (c_tokens / c_steps) — quantity × quality
-//! (Section 3.2). Merging is either weighted direct averaging (embedding
+//! anchored at the syncer's own previous global fragment.
+//! Learner weights w_m = c_tokens · (c_tokens / c_steps) — quantity ×
+//! quality. Merging is either weighted direct averaging (embedding
 //! fragment) or weighted radial-directional averaging, RDA (everything else):
 //!
 //!   RDA({v_m, w_m}) = (Σ w_m ‖v_m‖ / Σ w_m) · φ(Σ w_m φ(v_m) / Σ w_m)
 //!
-//! with φ(x) = x/‖x‖ and φ(0) := 0. (The paper prints the radial factor as
-//! `Σ w v / Σ w`, a vector — dimensionally inconsistent; the weighted mean of
-//! norms is the intended reading.) RDA keeps the merged norm invariant to the
+//! with φ(x) = x/‖x‖ and φ(0) := 0. RDA keeps the merged norm invariant to the
 //! number of learners: near-orthogonal same-norm deltas would otherwise
 //! shrink as R/√M and force outer-lr retuning. Applied per tensor within a
 //! fragment. Degenerate mean direction falls back to direct averaging.
 //!
 //! Outer optimizer: SGD with Nesterov momentum, state held here on the
-//! syncer. Values lr=0.7, μ=0.9 follow the DiLoCo lineage defaults (the
-//! decoupled paper publishes no numbers).
+//! syncer, with defaults lr=0.7 and μ=0.9.
 
 /// w_m = c_tokens² / c_steps ("quantity × quality").
 pub fn learner_weight(c_tokens: u64, c_steps: u32) -> f64 {
