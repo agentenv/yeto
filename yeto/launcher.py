@@ -7,8 +7,13 @@ Flow:
   3. launch all learner clusters in parallel (each pinned to its cloud/region
      from the --gpu spec), with the repo synced as the workdir and the syncer
      address passed via env;
-  4. stream all job logs with per-cluster prefixes until the learners exit;
-  5. tear everything down (unless --keep).
+  4. stream all job logs with per-cluster prefixes while a fleet controller
+     polls job/cluster health, re-provisions failed or preempted clusters
+     with their original spec, and abandons (tears down) any learner that
+     cannot be restored within --recover-timeout — the run continues with
+     the shrunken fleet;
+  5. tear everything down (unless --keep; abandoned learners are always
+     torn down).
 """
 
 from __future__ import annotations
@@ -212,6 +217,289 @@ def _tail(cluster: str, job_id: int, prefix: str) -> int:
             time.sleep(5)
 
 
+class SkySDKOps:
+    """Thin adapter over the sky SDK: the only surface FleetController needs.
+
+    Tests inject a fake with the same methods. Any sky call here may raise
+    (e.g. the cluster no longer exists); the controller treats exceptions
+    from job_status/cluster_up as "cluster gone".
+    """
+
+    def job_status(self, cluster: str, job_id: int):
+        import sky
+
+        return sky.get(sky.job_status(cluster, [job_id])).get(job_id)
+
+    def cluster_up(self, cluster: str) -> bool:
+        import sky
+
+        records = sky.get(sky.status(cluster_names=[cluster]))
+        if not records:
+            return False
+        record = records[0]
+        status = (
+            record.get("status")
+            if isinstance(record, dict)
+            else getattr(record, "status", None)
+        )
+        return status == sky.ClusterStatus.UP
+
+    def relaunch(self, task, cluster: str):
+        """Re-provision `cluster` (same spec) and submit `task` as a new job.
+
+        Blocking; returns the new job id, or None if provisioning failed.
+        """
+        import sky
+
+        try:
+            job_id, _handle = sky.get(sky.launch(task, cluster_name=cluster))
+            return job_id
+        except Exception as e:
+            print(f"[launcher] relaunch of {cluster} failed: {e}", file=sys.stderr)
+            return None
+
+    def down(self, cluster: str) -> None:
+        import sky
+
+        sky.get(sky.down(cluster))
+
+    def now(self) -> float:
+        return time.monotonic()
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+
+# FleetController states.
+RUNNING = "running"
+RECOVERING = "recovering"
+DONE = "done"
+ABANDONED = "abandoned"
+
+
+class _RelaunchAttempt:
+    """Result slot for one background relaunch attempt."""
+
+    def __init__(self):
+        self.result = None  # new job id, or None if provisioning failed
+        self.finished = False
+
+
+class FleetController:
+    """Supervises the syncer + learner fleet after the initial launch.
+
+    Per-learner state machine (evaluated once per poll):
+
+        running    --(job terminal-not-SUCCEEDED, or cluster not UP)--> recovering
+        recovering --(relaunch returns a new job id)------------------> running
+        recovering --(recover_timeout exceeded)-----------------------> abandoned
+        running    --(job SUCCEEDED)----------------------------------> done
+
+    An abandoned learner's cluster is torn down immediately (even with
+    --keep) and the run continues with the remaining fleet: the syncer's
+    quorum design tolerates missing learners, and a learner that comes back
+    later is caught up by the syncer's full rebroadcast. The syncer follows
+    the same running/recovering cycle but is never abandoned — past the
+    timeout it keeps retrying and logs an error every poll (its relaunch
+    resumes from the on-VM checkpoint via the --resume flag already in its
+    run command). recover_timeout <= 0 disables recovery: a failed learner
+    is torn down on the spot.
+
+    At most one relaunch attempt is in flight per cluster, each in a
+    background thread so one slow re-provision never blocks polling the
+    others; `thread_cls` exists so tests can substitute a synchronous stub.
+    """
+
+    def __init__(
+        self,
+        learners: dict,
+        syncer: tuple,
+        sky_ops,
+        poll_interval: float,
+        recover_timeout: float,
+        on_relaunch=None,
+        thread_cls=threading.Thread,
+    ):
+        """`learners` maps cluster name -> (task, job_id); `syncer` is
+        (name, task, job_id). `on_relaunch(name, new_job_id)` is called after
+        every successful relaunch (production spawns a new log tail)."""
+        self.ops = sky_ops
+        self.poll_interval = poll_interval
+        self.recover_timeout = recover_timeout
+        self.on_relaunch = on_relaunch
+        self.thread_cls = thread_cls
+        self.learners = {
+            name: self._make_record(name, task, job_id)
+            for name, (task, job_id) in learners.items()
+        }
+        syncer_name, syncer_task, syncer_job = syncer
+        self.syncer = self._make_record(syncer_name, syncer_task, syncer_job)
+        self.downed_clusters: set = set()
+
+    @staticmethod
+    def _make_record(name, task, job_id):
+        return {
+            "name": name,
+            "task": task,
+            "job_id": job_id,
+            "state": RUNNING,
+            "failed_at": None,
+            "attempt": None,
+            "exit": None,
+        }
+
+    def run(self) -> dict:
+        """Poll until every learner is done or abandoned.
+
+        Returns {learner name: final status string}; raises RuntimeError
+        (after downing the syncer) if every learner was abandoned.
+        """
+        while True:
+            self._poll(self.syncer, is_syncer=True)
+            for rec in self.learners.values():
+                self._poll(rec, is_syncer=False)
+            if all(r["state"] in (DONE, ABANDONED) for r in self.learners.values()):
+                break
+            self.ops.sleep(self.poll_interval)
+        exit_codes = {name: rec["exit"] for name, rec in self.learners.items()}
+        print(f"[launcher] learner jobs finished: {exit_codes}")
+        if not any(rec["state"] == DONE for rec in self.learners.values()):
+            print(
+                "[launcher] ERROR: all learners abandoned; tearing down the syncer",
+                file=sys.stderr,
+            )
+            self._down(self.syncer["name"])
+            raise RuntimeError("all learners abandoned; nothing left to train")
+        return exit_codes
+
+    def _poll(self, rec, is_syncer: bool) -> None:
+        if rec["state"] == RUNNING:
+            verdict, status = self._probe(rec)
+            if verdict is None:
+                return  # healthy
+            if verdict == "succeeded":
+                rec["state"] = DONE
+                rec["exit"] = str(status)
+                print(f"[launcher] {rec['name']} job finished: {status}")
+            else:
+                self._enter_recovering(rec, verdict, is_syncer)
+        elif rec["state"] == RECOVERING:
+            self._drive_recovery(rec, is_syncer)
+
+    def _probe(self, rec):
+        """Classify a running cluster: (None, status) if healthy,
+        ("succeeded", status), or (failure reason, status)."""
+        name, job_id = rec["name"], rec["job_id"]
+        try:
+            status = self.ops.job_status(name, job_id)
+        except Exception as e:
+            return f"job status unavailable ({e})", None
+        if status is not None and status.is_terminal():
+            if "SUCCEEDED" in str(status):
+                return "succeeded", status
+            return f"job ended as {status}", status
+        try:
+            up = self.ops.cluster_up(name)
+        except Exception as e:
+            return f"cluster status unavailable ({e})", status
+        if not up:
+            return "cluster is not UP (preempted or deleted)", status
+        return None, status
+
+    def _enter_recovering(self, rec, reason: str, is_syncer: bool) -> None:
+        rec["state"] = RECOVERING
+        rec["failed_at"] = self.ops.now()
+        print(
+            f"[launcher] {rec['name']}: {reason}; starting recovery "
+            f"(timeout {self.recover_timeout}s)",
+            file=sys.stderr,
+        )
+        if not is_syncer and self.recover_timeout <= 0:
+            self._abandon(rec, 0.0)
+            return
+        self._drive_recovery(rec, is_syncer)
+
+    def _drive_recovery(self, rec, is_syncer: bool) -> None:
+        attempt = rec["attempt"]
+        if attempt is not None and attempt.finished:
+            rec["attempt"] = None
+            if attempt.result is not None:
+                rec["job_id"] = attempt.result
+                rec["state"] = RUNNING
+                rec["failed_at"] = None
+                print(
+                    f"[launcher] {rec['name']} recovered: relaunched as job "
+                    f"{attempt.result}"
+                )
+                if self.on_relaunch is not None:
+                    self.on_relaunch(rec["name"], attempt.result)
+                return
+            print(
+                f"[launcher] relaunch attempt for {rec['name']} failed; will retry",
+                file=sys.stderr,
+            )
+        elapsed = self.ops.now() - rec["failed_at"]
+        if self.recover_timeout <= 0 or elapsed > self.recover_timeout:
+            if is_syncer:
+                # The syncer is never abandoned: without it no learner can
+                # make outer progress, so keep trying and complain loudly.
+                print(
+                    f"[launcher] ERROR: syncer unrecovered for {elapsed:.0f}s "
+                    f"(recover timeout {self.recover_timeout}s exceeded); "
+                    "still retrying — learners cannot sync until it returns",
+                    file=sys.stderr,
+                )
+            else:
+                self._abandon(rec, elapsed)
+                return
+        if rec["attempt"] is None:
+            rec["attempt"] = self._start_relaunch(rec)
+
+    def _start_relaunch(self, rec) -> _RelaunchAttempt:
+        attempt = _RelaunchAttempt()
+        name, task = rec["name"], rec["task"]
+
+        def _run():
+            try:
+                attempt.result = self.ops.relaunch(task, name)
+            except Exception as e:
+                print(f"[launcher] relaunch of {name} raised: {e}", file=sys.stderr)
+                attempt.result = None
+            finally:
+                attempt.finished = True
+            if attempt.result is not None and rec["state"] == ABANDONED:
+                # Abandoned while this attempt was in flight, but the
+                # relaunch re-provisioned the cluster anyway: tear it back
+                # down so nothing is left running unattended.
+                self._down(name, force=True)
+
+        thread = self.thread_cls(target=_run, daemon=True)
+        thread.start()
+        return attempt
+
+    def _abandon(self, rec, elapsed: float) -> None:
+        rec["state"] = ABANDONED
+        rec["exit"] = f"ABANDONED after {elapsed:.0f}s"
+        self._down(rec["name"])
+        remaining = sum(1 for r in self.learners.values() if r["state"] != ABANDONED)
+        print(
+            f"[launcher] LEARNER {rec['name']} ABANDONED after {elapsed:.0f}s "
+            f"(could not recover within {self.recover_timeout}s); "
+            f"fleet continues with {remaining} learner(s)",
+            file=sys.stderr,
+        )
+
+    def _down(self, name: str, force: bool = False) -> None:
+        if name in self.downed_clusters and not force:
+            return
+        self.downed_clusters.add(name)
+        print(f"[launcher] tearing down {name}")
+        try:
+            self.ops.down(name)
+        except Exception as e:
+            print(f"[launcher] teardown of {name} failed: {e}", file=sys.stderr)
+
+
 def run(args) -> int:
     import sky
 
@@ -221,22 +509,26 @@ def run(args) -> int:
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
     clusters: list[str] = []
+    controller = None
 
     try:
         # 1. Syncer.
         syncer_cluster = f"{prefix}-syncer"
         print(f"[launcher] launching syncer cluster {syncer_cluster} in {args.syncer_region}")
-        rid = sky.launch(make_syncer_task(args, num_learners), cluster_name=syncer_cluster)
+        syncer_task = make_syncer_task(args, num_learners)
+        rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
         syncer_job, syncer_handle = sky.stream_and_get(rid)
         clusters.append(syncer_cluster)
         syncer_addr = f"{syncer_handle.head_ip}:{SYNCER_PORT}"
         print(f"[launcher] syncer up at {syncer_addr}")
 
         # 2. Learners, in parallel.
+        tasks = {}
         rids = {}
         for m, spec in enumerate(specs):
             name = f"{prefix}-l{m}-{spec.region or spec.cloud}"
             task = make_learner_task(args, spec, m, num_learners, syncer_addr)
+            tasks[name] = task
             print(f"[launcher] launching learner {m} on {spec} as {name}")
             rids[name] = (
                 m,
@@ -268,41 +560,46 @@ def run(args) -> int:
                 print(f"[launcher] ERROR launching {name}: {e}", file=sys.stderr)
             raise RuntimeError(f"{len(errors)} learner cluster(s) failed to provision")
 
-        # 3. Stream logs until the learners finish.
-        tails = [threading.Thread(target=_tail, args=(syncer_cluster, syncer_job, "syncer"), daemon=True)]
-        waiters = []
-        for name, (job_id, _handle) in results.items():
-            t = threading.Thread(target=_tail, args=(name, job_id, name), daemon=True)
-            tails.append(t)
-            waiters.append((name, job_id))
-        for t in tails:
-            t.start()
+        # 3. Stream logs while the fleet controller polls health, recovers
+        #    failed/preempted clusters, and abandons learners that stay down
+        #    past --recover-timeout.
+        def spawn_tail(name: str, job_id: int) -> None:
+            label = "syncer" if name == syncer_cluster else name
+            threading.Thread(target=_tail, args=(name, job_id, label), daemon=True).start()
 
-        exit_codes = {}
-        for name, job_id in waiters:
-            # tail_logs with follow returns the exit code when not iterating;
-            # poll job status instead so tails stay independent.
-            while True:
-                statuses = sky.get(sky.job_status(name, [job_id]))
-                status = statuses.get(job_id)
-                if status is not None and status.is_terminal():
-                    exit_codes[name] = str(status)
-                    break
-                time.sleep(20)
-        print(f"[launcher] learner jobs finished: {exit_codes}")
+        spawn_tail(syncer_cluster, syncer_job)
+        for name, (job_id, _handle) in results.items():
+            spawn_tail(name, job_id)
+
+        controller = FleetController(
+            learners={name: (tasks[name], job_id) for name, (job_id, _h) in results.items()},
+            syncer=(syncer_cluster, syncer_task, syncer_job),
+            sky_ops=SkySDKOps(),
+            poll_interval=args.controller_poll,
+            recover_timeout=args.recover_timeout,
+            on_relaunch=spawn_tail,
+        )
+        exit_codes = controller.run()
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
 
-        learner0 = next(n for n in results if "-l0-" in n)
+        # Fetch instructions: prefer learner 0, else any learner that
+        # finished (abandoned clusters are already gone).
+        done = [n for n, s in exit_codes.items() if "SUCCEEDED" in s]
+        source = next((n for n in done if "-l0-" in n), done[0])
         print(
-            f"[launcher] fine-tuned model saved on {learner0}:~/yeto-output\n"
-            f"  fetch with: scp -r {learner0}:yeto-output ./"
+            f"[launcher] fine-tuned model saved on {source}:~/yeto-output\n"
+            f"  fetch with: scp -r {source}:yeto-output ./"
         )
         return 1 if failed else 0
     finally:
+        # Clusters the controller already tore down (abandoned learners, or
+        # the syncer after a total loss) are skipped — even with --keep.
+        downed = controller.downed_clusters if controller is not None else set()
+        remaining = [c for c in clusters if c not in downed]
         if args.keep:
-            print(f"[launcher] keeping clusters: {clusters}")
+            print(f"[launcher] keeping clusters: {remaining}")
         else:
-            for name in clusters:
+            for name in remaining:
                 print(f"[launcher] tearing down {name}")
                 try:
                     sky.get(sky.down(name))

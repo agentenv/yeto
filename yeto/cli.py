@@ -115,6 +115,20 @@ def parse_args(argv=None):
         action="store_true",
         help="keep retrying learner provisioning until capacity is found",
     )
+    infra.add_argument(
+        "--recover-timeout",
+        type=int,
+        default=1200,
+        help="seconds to keep re-provisioning a failed/preempted learner before "
+        "tearing it down and continuing with the remaining fleet (0 tears the "
+        "learner down on its first failure; the syncer is always recovered)",
+    )
+    infra.add_argument(
+        "--controller-poll",
+        type=int,
+        default=30,
+        help="fleet-controller health poll interval (seconds)",
+    )
     return p.parse_args(argv)
 
 
