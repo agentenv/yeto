@@ -38,7 +38,9 @@ Yeto's asynchronous synchronization algorithm is based on **Decoupled DiLoCo**
 ## Usage
 
 ```bash
-python3 train.py \
+pip install "yeto[launcher] @ ."      # or: python3 train.py ... from a checkout
+
+yeto \
   --gpu aws:8xa100@us-east-2,aws:8xa100@us-east-1,aws:8xa100@us-west-2 \
   --model deepseek4flash \
   --data armand0e/claude-fable-5-claude-code \
@@ -72,8 +74,16 @@ coordinator, and its checkpoint/resume covers learner preemptions.
 - **Model sizing**: `deepseek4flash` (DeepSeek-V4-Flash, 284B MoE) needs
   ~568 GB for frozen bf16 weights — more than 8×A100-40GB (320 GB); use
   ≥16×80GB GPUs per learner, or pick `gemma4` (12B) / any smaller HF id.
-- Learner auto-reconnect after a syncer restart is not implemented yet;
-  restart learners after resuming a syncer from checkpoint.
+- **Loss masking**: `--train-on assistant` (default) puts loss only on
+  assistant-message tokens (plus the closing EOS); `--train-on all` trains
+  on every token. Tokenization streams asynchronously in DataLoader workers
+  (`--tokenize preload` to materialize upfront).
+- **Resilience**: learners reconnect automatically through syncer restarts
+  and WAN drops (exponential backoff; work continues locally during the
+  outage and re-merges after the post-reconnect rebroadcast). The syncer
+  checkpoint is the single durable source of truth — recover a model from it
+  with `yeto-export --checkpoint yeto-state.ckpt --model <id> --output-dir out/`
+  even if every learner is gone.
 
 ## Testing
 

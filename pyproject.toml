@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yeto"
+version = "0.1.0"
+description = "Efficient, low-cost post-training across clouds and regions"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    # <2.9: cu13x wheels need driver >=580; cloud AMIs ship 535 (CUDA 12.2).
+    "torch>=2.4,<2.9",
+    "transformers==4.57.1",
+    "datasets>=3.0",
+    "peft>=0.14",
+    "accelerate>=1.0",
+    "sentencepiece",
+    "protobuf",
+    "cloudpickle",
+]
+
+[project.optional-dependencies]
+launcher = ["skypilot[aws]>=0.12"]
+dev = ["pytest", "pytest-timeout"]
+
+[project.scripts]
+yeto = "yeto.cli:main"
+yeto-export = "yeto.export:main"
+
+[tool.setuptools]
+packages = ["yeto"]
