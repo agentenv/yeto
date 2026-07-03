@@ -322,10 +322,20 @@ def cmd_launch(args) -> int:
 # on-demand VM hosts both the syncer process and the fleet controller, so
 # the submitting machine can go away right after `yeto launch` returns.
 
+# The readiness marker exists because SkyPilot detaches setup: sky.launch
+# can return while these installs are still running, and an exec'd job would
+# race them. Setup touches the marker only if every install succeeded; the
+# head job waits for it (bounded) before importing anything.
+HEAD_READY_MARKER = "~/.yeto_head_ready"
 HEAD_SETUP_PIP = (
     'pip install -q "skypilot[aws]>=0.12" && '
     "pip install -q torch --index-url https://download.pytorch.org/whl/cpu && "
-    "pip install -q cloudpickle transformers==4.57.1"
+    "pip install -q cloudpickle transformers==4.57.1 && "
+    f"touch {HEAD_READY_MARKER}"
+)
+HEAD_WAIT_READY = (
+    f"for i in $(seq 1 180); do [ -f {HEAD_READY_MARKER} ] && break; sleep 5; done; "
+    f"[ -f {HEAD_READY_MARKER} ] || {{ echo 'head setup never completed' >&2; exit 1; }}"
 )
 
 
@@ -477,6 +487,7 @@ def cmd_launch_head(args) -> int:
     job_task = sky.Task(
         name="yeto-head-job",
         run=(
+            f"{HEAD_WAIT_READY}; "
             "cd ~/sky_workdir && PYTHONPATH=~/sky_workdir "
             f"python3 -m yeto.cli _head {shlex.quote(json.dumps(args_dict))}"
         ),
