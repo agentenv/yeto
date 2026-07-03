@@ -130,9 +130,11 @@ def resolve_loss_function(loss_function) -> str:
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
     import sky
 
+    from .datasource import learner_data_arg, learner_file_mounts
+
     learner_flags = (
         f" --model {shlex.quote(args.model)}"
-        f" --data {shlex.quote(args.data)}"
+        f" --data {shlex.quote(learner_data_arg(args.data))}"
         f" --syncer $SYNCER_ADDR"
         f" --learner-id $LEARNER_ID"
         f" --num-learners {num_learners}"
@@ -174,13 +176,14 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         # Surface NCCL's chosen transport in the job logs so an EFA-less
         # fallback to TCP sockets is visible, not silent.
         envs["NCCL_DEBUG"] = "INFO"
-    file_mounts = None
+    # Non-HF --data sources (local paths, s3://, gs://, ...) ride sky's
+    # file_mounts onto every learner; see yeto/datasource.py.
+    file_mounts = dict(learner_file_mounts(args.data)) or None
     if args.loss_function.startswith("pickle:"):
         # The pickled loss is gitignored, so the workdir sync skips it;
         # mount it into the workdir explicitly.
-        file_mounts = {
-            f"~/sky_workdir/{PICKLED_LOSS_FILE}": str(REPO_ROOT / PICKLED_LOSS_FILE)
-        }
+        file_mounts = file_mounts or {}
+        file_mounts[f"~/sky_workdir/{PICKLED_LOSS_FILE}"] = str(REPO_ROOT / PICKLED_LOSS_FILE)
     task = sky.Task(
         name=f"yeto-learner-{learner_id}",
         setup=f"{WAN_TUNING}; pip install -q -r requirements.txt",

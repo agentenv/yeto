@@ -61,7 +61,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="auto-fleet only: launch the planned fleet without asking",
     )
     p.add_argument("--model", required=True, help="model alias (see yeto/models.py: gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...) or any HF id")
-    p.add_argument("--data", required=True, help="HF dataset id (messages-format chat traces)")
+    p.add_argument(
+        "--data",
+        required=True,
+        help="fine-tuning data: HF dataset id, local path (dir/file of "
+        "jsonl/json/parquet or a save_to_disk dir), or a cloud URI "
+        "(s3://, gs://, r2://, ...) — non-HF sources are shipped to learners "
+        "via SkyPilot file mounts; rows are messages-format chat traces",
+    )
     def loss_spec(value: str) -> str:
         if value in LOSS_FUNCTIONS or value.startswith(("custom:", "pickle:")):
             return value
@@ -564,15 +571,16 @@ def _serializable_args(args) -> dict:
     return out
 
 
-def _make_head_task(args, syncer_binary):
+def _make_head_task(args, syncer_binary, extra_mounts: dict | None = None):
     """The head VM's provisioning task: repo workdir, syncer binary, cloud
-    credentials, and the pickled loss (when used) — no run command; the
-    controller job is exec'd separately once the head's IP is known."""
+    credentials, staged local --data, and the pickled loss (when used) — no
+    run command; the controller job is exec'd separately once the head's IP
+    is known."""
     import sky
 
     from .launcher import PICKLED_LOSS_FILE, REPO_ROOT, SYNCER_PORT, WAN_TUNING
 
-    file_mounts = {"~/yeto-syncer": str(syncer_binary)}
+    file_mounts = {"~/yeto-syncer": str(syncer_binary), **(extra_mounts or {})}
     aws_creds = os.path.expanduser("~/.aws")
     if os.path.isdir(aws_creds):
         # Same pattern as sky's jobs controller: ship the local credentials
@@ -673,6 +681,11 @@ def cmd_launch_head(args) -> int:
     # Resolve the loss BEFORE serializing: a custom:<file.py> spec becomes
     # pickle:<file> here, and the pickle is file-mounted onto the head.
     args.loss_function = launcher.resolve_loss_function(args.loss_function)
+    # Likewise stage a local --data path: it is rsynced onto the head, and
+    # the rewritten path makes the head's launcher mount it onto learners.
+    from .datasource import head_stage
+
+    args.data, data_mounts = head_stage(args.data)
     binary = launcher.build_syncer_binary()
 
     args_dict = _serializable_args(args)
@@ -686,7 +699,7 @@ def cmd_launch_head(args) -> int:
     )
 
     print(f"[yeto] provisioning head cluster {head_cluster} in {args.syncer_region}")
-    handle = _sky_launch_head(_make_head_task(args, binary), head_cluster)
+    handle = _sky_launch_head(_make_head_task(args, binary, data_mounts), head_cluster)
     head_ip = handle.head_ip
     print(f"[yeto] head is up at {head_ip}; submitting the controller job")
 

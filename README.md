@@ -1,14 +1,13 @@
 # Yeto
 
-**Yeto** is an efficient, low-cost post-training tool: it fine-tunes language
-models across cheap, geographically scattered GPU clusters (spot instances,
-mixed regions, mixed clouds) launched with the [SkyPilot](https://skypilot.co)
-SDK.
-
-Yeto's asynchronous synchronization algorithm is based on **Decoupled DiLoCo**
-([Douillard et al., arXiv 2604.21428](https://arxiv.org/abs/2604.21428)).
-
-## Architecture
+**Yeto** fine-tunes language models across cheap, geographically scattered
+GPU capacity — spot instances, mixed regions, mixed clouds — via the
+[SkyPilot](https://skypilot.co) SDK. Its asynchronous synchronization is
+based on **Decoupled DiLoCo**
+([Douillard et al., arXiv 2604.21428](https://arxiv.org/abs/2604.21428)):
+a Rust syncer merges parameter fragments from independent learner islands
+(quorum + adaptive grace, token-weighted RDA, Nesterov outer step), so slow
+links and preempted islands never block training.
 
 ```
                  ┌──────────────────────────────┐
@@ -19,84 +18,47 @@ Yeto's asynchronous synchronization algorithm is based on **Decoupled DiLoCo**
                         │  TCP (binary framing, WAN)
         ┌───────────────┤               ├───────────────┐
  ┌──────┴──────┐  ┌─────┴───────┐  ┌────┴────────┐
- │ learner 0   │  │ learner 1   │  │ learner 2   │   … one per --gpu entry
- │ us-east-2   │  │ us-east-1   │  │ us-west-2   │
- │ 8×A100 node │  │ 8×A100 node │  │ 8×A100 node │   (PyTorch, AdamW inner opt)
+ │ learner 0   │  │ learner 1   │  │ learner 2   │   … one island per --gpu entry
+ │ us-east-2   │  │ us-east-1   │  │ runpod:CA   │   (PyTorch, AdamW inner opt)
  └─────────────┘  └─────────────┘  └─────────────┘
 ```
-
-- **`yeto` CLI** — parses the `--gpu` spec, launches one
-  SkyPilot cluster per learner plus a syncer VM, wires up IPs/ports, streams logs.
-- **`syncer/`** — Rust implementation of the latency-sensitive syncer:
-  async TCP server, per-fragment sync schedule (interval `H`, round-robin
-  offsets), quorum-`K` gather with grace window, token/step-weighted RDA
-  merge, Nesterov outer optimizer, consistent checkpoints, JSONL event tape.
-- **`yeto/`** — Python package: learner training loop (HF transformers +
-  AdamW inner steps, background fragment push/pull), data loading, loss
-  functions, GPU-spec parsing, SkyPilot orchestration.
 
 ## Usage
 
 ```bash
 pip install "yeto[launcher] @ ."
 
-yeto launch \
-  --gpu aws:8xa100@us-east-2,aws:8xa100@us-east-1,aws:8xa100@us-west-2 \
-  --model deepseek4flash \
-  --data armand0e/claude-fable-5-claude-code \
-  --loss-function cross_entropy
+# pick the fleet yourself…
+yeto launch --gpu aws:8xa100@us-east-2,runpod:8xh100@CA \
+  --model qwen35-9b --data org/chat-traces
+
+# …or let the planner pick it (budget $/hr and/or a TFLOPs target)
+yeto launch --model qwen35-9b --data org/chat-traces --budget 40 --confirm
+
+yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
 ```
 
-`launch` provisions a small on-demand **head VM** that hosts both the
-syncer and the fleet controller (SkyPilot managed-jobs style): the
-submitting machine is free to disconnect the moment submission finishes,
-and **Ctrl-C merely detaches** from the log stream. Runs are named by
-`--cluster-prefix` (default `yeto`). `--controller local` keeps the
-controller on your host instead. The head VM stays up after the run
-until you `yeto down <run>`.
-
-```bash
-yeto status                # table of known runs
-yeto logs <run>            # re-attach to a run's log stream (--no-follow to dump)
-yeto down <run>            # stop the run's worker and tear down its clusters
-```
-
-`--gpu` grammar: `cloud:[nodes x]<count>x<gpu>@region`, comma-separated; one
-entry per learner. E.g. `aws:4x8xa100@us-east-2` = one learner cluster of
-4 nodes × 8×A100 in us-east-2.
-
-Don't want to pick the fleet yourself? `yeto shape` computes it:
-
-```console
-yeto shape --model gemma4 --budget 40 --data <hf-dataset> [--apply]
-```
-
-maximizes effective training FLOPs under your $/hr budget, your account's
-remaining spot quotas (limit minus what is already running), and spot
-placement scores (> 7 by default), then prints the matching `yeto launch`
-line — `--apply` runs it. Island sizes come from an FSDP memory model of the
-model's bf16 footprint (fp8/fp32 checkpoints are normalized). Budgets are
-enforced with a spot-price margin (`--price-margin`, default 15%) because
-catalog prices are estimates. Signals are fetched in one parallel wave and
-cached for an hour; rejected candidates are listed with reasons, `--json`
-emits a machine-readable plan, `--regions all` searches every catalog
-region. With RunPod credentials present, RunPod pods join the candidate
-pool — no quotas there, so live per-GPU stock levels gate and cap those
-shapes instead (`--clouds` to control). Unfetchable capacity signals are
-assumed best-case with a warning; `--strict-capacity-check` rejects them
-and `--skip-capacity-check` plans on quota + price alone.
-
-Learners run on **spot instances by default** (pass `--on-demand` to opt
-out); the syncer VM is always on-demand — it is the cheap, stateful
-coordinator, and its checkpoint/resume covers learner preemptions.
+- `--gpu` grammar: `cloud:[nodes x]<count>x<gpu>[@region]`, one entry per
+  learner island.
+- Omitting `--gpu` invokes `yeto shape`: an exact solver maximizes effective
+  TFLOPs under your budget (or minimizes cost to reach `--flops`), subject to
+  live spot quotas minus usage, spot placement scores, RunPod stock, and an
+  FSDP memory model of the model. Run `yeto shape` directly to see the plan,
+  rejected shapes with reasons, and the launch line without launching.
+- `--data`: HF dataset id, local path (jsonl/json/parquet or `save_to_disk`
+  dir), or cloud URI (`s3://`, `gs://`, `r2://`, …) — non-HF sources ship to
+  learners via SkyPilot file mounts.
+- `--model`: any HF id (private repos work with `HF_TOKEN`), or an alias
+  below.
+- Learners default to spot; the head VM (syncer + fleet controller) is a
+  small on-demand box whose checkpoint/resume absorbs preemptions. The
+  submitting machine can disconnect after launch.
 
 ## Supported models
 
-Any Hugging Face model id works with `--model`; the aliases below are
-sugar (single source: `yeto/models.py` — this table is generated from it
-and a test keeps them in sync). "bf16 GB" is the frozen-base footprint the
-planner sizes islands and disks from; "(Hub)" means the size is resolved
-from safetensors metadata at plan time.
+Aliases are sugar over `yeto/models.py` (this table is generated from it;
+a test keeps them in sync). "bf16 GB" is the frozen-base footprint used for
+island/disk sizing; "(Hub)" resolves from safetensors metadata at plan time.
 
 | alias | Hugging Face id | bf16 GB |
 |---|---|---|
@@ -147,11 +109,11 @@ from safetensors metadata at plan time.
 | `vibethinker-15b` | `WeiboAI/VibeThinker-1.5B` | 3 |
 | `vibethinker-3b` | `WeiboAI/VibeThinker-3B` | 6 |
 
-## Design notes
+## Docs
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the merge math, transport,
-q4 wire format, snapshots, and resilience notes, and
-[docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire protocol.
+[docs/DESIGN.md](docs/DESIGN.md) — merge math, blending, adaptive grace,
+delta correction, q4 wire format, snapshots, resilience.
+[docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
 
 ## Testing
 

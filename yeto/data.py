@@ -72,9 +72,16 @@ def render_conversation(tokenizer, messages: list[dict], tools: list | None) -> 
 
 def load_rows(dataset_name, split: str = "train"):
     """Load the raw dataset; a pre-materialized sequence passes through
-    unchanged (used by tests)."""
+    unchanged (used by tests). Accepts an HF dataset id or a local path —
+    cloud sources arrive as local paths via the launcher's sky file mounts
+    (see yeto/datasource.py)."""
     if not isinstance(dataset_name, str):
         return dataset_name
+    import os
+
+    path = os.path.expanduser(dataset_name)
+    if os.path.exists(path):
+        return _load_local(path, split)
     from datasets import load_dataset
 
     try:
@@ -84,6 +91,36 @@ def load_rows(dataset_name, split: str = "train"):
         # sometimes a string, sometimes content blocks) breaks arrow schema
         # inference; the Hub's parquet conversion is normalized.
         return load_dataset(dataset_name, revision="refs/convert/parquet", split=split)
+
+
+_LOCAL_FORMATS = {".jsonl": "json", ".json": "json", ".parquet": "parquet"}
+
+
+def _load_local(path: str, split: str):
+    """A save_to_disk directory, a directory of jsonl/json/parquet files, or
+    a single such file."""
+    import glob
+    import os
+
+    from datasets import load_dataset, load_from_disk
+
+    if os.path.isdir(path):
+        if os.path.exists(os.path.join(path, "dataset_info.json")) or os.path.exists(
+            os.path.join(path, "dataset_dict.json")
+        ):
+            ds = load_from_disk(path)
+            if hasattr(ds, "keys"):  # DatasetDict: pick the split, else the only one
+                return ds[split] if split in ds else next(iter(ds.values()))
+            return ds
+        for ext, fmt in _LOCAL_FORMATS.items():
+            files = sorted(glob.glob(os.path.join(path, f"*{ext}")))
+            if files:
+                return load_dataset(fmt, data_files=files, split="train")
+        raise ValueError(f"{path}: no dataset_info.json and no *.jsonl/*.json/*.parquet files")
+    ext = os.path.splitext(path)[1]
+    if ext not in _LOCAL_FORMATS:
+        raise ValueError(f"{path}: unsupported data file type {ext!r} (use jsonl/json/parquet)")
+    return load_dataset(_LOCAL_FORMATS[ext], data_files=[path], split="train")
 
 
 TRAIN_ON_CHOICES = ("assistant", "all")

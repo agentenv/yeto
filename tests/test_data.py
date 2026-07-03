@@ -148,3 +148,29 @@ def test_train_on_rejects_unknown_mode():
         StreamingPackedBlocks([CHAT_ROW], FakeTokenizer(), 0, 1, seq_len=7, train_on="user")
     with pytest.raises(ValueError):
         build_packed_dataset([CHAT_ROW] * 2, FakeTokenizer(), 0, 1, seq_len=7, train_on="user")
+
+
+def test_load_rows_local_jsonl(tmp_path):
+    import json as _json
+
+    from yeto.data import load_rows
+
+    f = tmp_path / "rows.jsonl"
+    rows = [{"messages": [{"role": "user", "content": f"hi {i}"}]} for i in range(3)]
+    f.write_text("\n".join(_json.dumps(r) for r in rows))
+    ds = load_rows(str(f))
+    assert len(ds) == 3 and ds[0]["messages"][0]["content"] == "hi 0"
+    # A directory of jsonl files loads the same way.
+    ds = load_rows(str(tmp_path))
+    assert len(ds) == 3
+
+
+def test_load_rows_local_rejects_unknown_extension(tmp_path):
+    import pytest as _pytest
+
+    from yeto.data import load_rows
+
+    f = tmp_path / "rows.csv"
+    f.write_text("a,b\n")
+    with _pytest.raises(ValueError, match="unsupported data file type"):
+        load_rows(str(f))
