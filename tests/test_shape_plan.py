@@ -147,14 +147,44 @@ def test_aggregate_capacity_score_recheck_caps_not_drops(fake_env):
     assert any("capped at 1 island" in w for w in result.warnings)
 
 
-def test_aggregate_recheck_caps_when_score_unavailable(fake_env):
-    # A throttled/unknown aggregate score must degrade to the verified
-    # capacity, never trust the unknown and never drop the shape.
+def test_aggregate_recheck_assumes_when_score_unavailable(fake_env):
+    # Default policy: an unfetchable aggregate score is assumed best-case
+    # with a warning; the plan keeps both islands.
     scores = {k: v for k, v in SCORES.items() if k != ("p5.48xlarge", 2, "us-east-2")}
     fake = FakeAws(QUOTAS, scores, CODES)
     result = _shape(fake, budget=80.0)
+    assert result.plan.counts["aws:8xh100@us-east-2"] == 2
+    assert any("score unavailable" in w and "assumed 10" in w for w in result.warnings)
+
+
+def test_strict_aggregate_recheck_caps_when_score_unavailable(fake_env):
+    # --strict-capacity-check restores the conservative behavior: degrade to
+    # the verified capacity rather than trust an unknown.
+    scores = {k: v for k, v in SCORES.items() if k != ("p5.48xlarge", 2, "us-east-2")}
+    fake = FakeAws(QUOTAS, scores, CODES)
+    result = _shape(fake, budget=80.0, strict_capacity_check=True)
     assert result.plan.counts["aws:8xh100@us-east-2"] == 1
-    assert any("score unavailable" in w and "capped" in w for w in result.warnings)
+    assert any("capped at 1 island" in w for w in result.warnings)
+
+
+def test_unavailable_single_island_score_assumed_by_default(fake_env):
+    # p4de's score is missing entirely: default plans it with an assumed
+    # score of 10 (goodput 0.98) and a warning; strict rejects it.
+    scores = {k: v for k, v in SCORES.items() if k[0] != "p4de.24xlarge"}
+    fake = FakeAws(QUOTAS, scores, CODES)
+    result = _shape(fake, budget=20.0, gpus=["A100-80GB"])
+    (c,) = result.plan.counts
+    cand = next(x for x in result.candidates if x.key == c)
+    assert cand.assumed and cand.score is None
+    assert cand.eff_tflops == pytest.approx(8 * 312 * 0.35 * 0.98)
+    assert any("assumed 10" in w and "--strict-capacity-check" in w for w in result.warnings)
+    text = plan_mod.render(result, "gemma4", 20.0, "lora")
+    assert "~10 (assumed)" in text
+
+    strict = _shape(fake, budget=20.0, gpus=["A100-80GB"], strict_capacity_check=True)
+    assert strict.plan.counts == {}
+    reasons = {r.key: r.reason for r in strict.rejections}
+    assert "unavailable (--strict-capacity-check)" in reasons["aws:8xa100-80gb@us-west-2"]
 
 
 def test_aggregate_recheck_passes_when_score_holds(fake_env):
@@ -217,6 +247,15 @@ def test_missing_credentials_is_a_clear_error(fake_env, monkeypatch):
     monkeypatch.setattr(plan_mod, "credentials_available", lambda: False)
     with pytest.raises(RuntimeError, match="credentials"):
         plan_mod.build_shape(model="gemma4", budget=40.0, providers=None)
+
+
+def test_skip_capacity_check_makes_zero_score_calls(fake_env):
+    result = _shape(fake_env, budget=80.0, skip_capacity_check=True)
+    assert fake_env.score_asks == []  # not one config consumed
+    # Quota + budget still apply; even the score-1 p4d shape is plannable now.
+    assert result.plan.counts  # a plan exists
+    assert all(c.score is None for c in result.candidates)
+    assert any("capacity checks skipped" in w for w in result.warnings)
 
 
 def test_no_plan_when_budget_below_head(fake_env):

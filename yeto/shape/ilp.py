@@ -43,6 +43,9 @@ class Candidate:
     eff_tflops: float  # per island
     quota_bucket: tuple[str, str] | None  # (region, quota_code); None = uncapped
     score: int | None  # spot placement score, informational
+    # True when the score was unavailable and optimistically assumed instead
+    # of measured (default non-strict planning); rendering marks these.
+    assumed: bool = False
     # Per-candidate island cap (None = unlimited). Used when the placement
     # score is only verified up to some aggregate capacity: the shape stays
     # plannable at the verified size instead of being dropped outright.

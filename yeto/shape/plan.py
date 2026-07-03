@@ -32,6 +32,10 @@ DEFAULT_PRICE_MARGIN = 0.15  # catalog spot prices are stale-ish; budget with he
 # AWS allows ~50 *distinct* placement-score configurations per day; spend
 # them on the shapes most likely to win and say so for the rest.
 MAX_SCORE_ASKS = 24
+# When a score fetch fails (throttled, daily config budget spent), default
+# planning assumes the best score rather than rejecting the shape; the plan
+# carries a warning and --strict-capacity-check restores rejection.
+ASSUMED_PLACEMENT_SCORE = 10
 
 # sky accelerator name -> the lowercase name the --gpu grammar accepts.
 _GPU_FLAG_NAME = {v: k for k, v in _GPU_CANONICAL.items()}
@@ -77,10 +81,18 @@ def build_shape(
     providers: AwsProviders | None = None,
     price_margin: float = DEFAULT_PRICE_MARGIN,
     head_cost: float = HEAD_COST_PER_HOUR,
+    skip_capacity_check: bool = False,
+    strict_capacity_check: bool = False,
 ) -> ShapeResult:
     """Compute the fleet plan. `providers` is injectable for tests.
 
     regions: None -> DEFAULT_REGIONS; ["all"] -> every region in the catalog.
+
+    Score-availability policy: measured scores always gate normally. When a
+    score cannot be fetched (throttled, daily config budget spent), the
+    default assumes ASSUMED_PLACEMENT_SCORE with a warning;
+    strict_capacity_check rejects such shapes instead, and
+    skip_capacity_check makes no score API calls at all (quota + price only).
     """
     t0 = time.monotonic()
     if providers is None and not credentials_available():
@@ -201,7 +213,7 @@ def build_shape(
     # MAX_SCORE_ASKS, and reject the tail explicitly rather than silently
     # burning the daily config budget.
     unique_asks = sorted({(off.instance_type, nodes) for off, nodes in quota_ok})
-    if len(unique_asks) > MAX_SCORE_ASKS:
+    if not skip_capacity_check and len(unique_asks) > MAX_SCORE_ASKS:
         def ask_value(ask: tuple[str, int]) -> float:
             itype, nodes = ask
             return max(
@@ -226,18 +238,23 @@ def build_shape(
     # Wave 2: placement scores, spent only on launchable shapes. The region
     # list stays the caller's full stable list so cache keys (and AWS's
     # config identity) do not churn run-to-run.
-    scores = aws.placement_scores(unique_asks, regions)
+    scores = {} if skip_capacity_check else aws.placement_scores(unique_asks, regions)
 
     candidates: list[Candidate] = []
+    assumed_keys: list[str] = []
     for off, nodes in quota_ok:
         key = _candidate_key(off, nodes)
         qk = quota_keys[(off, nodes)]
         score = scores.get((off.instance_type, nodes, off.region))
-        if min_score > 0:
+        assumed = False
+        if min_score > 0 and not skip_capacity_check:
             if score is None:
-                rejections.append(Rejection(key, "placement score unavailable"))
-                continue
-            if score <= min_score:
+                if strict_capacity_check:
+                    rejections.append(Rejection(key, "placement score unavailable (--strict-capacity-check)"))
+                    continue
+                assumed = True
+                assumed_keys.append(key)
+            elif score <= min_score:
                 rejections.append(Rejection(key, f"placement score {score} ≤ {min_score}"))
                 continue
         candidates.append(
@@ -250,9 +267,12 @@ def build_shape(
                 gpus_per_node=off.gpus_per_node,
                 vcpus_per_island=off.vcpus * nodes,
                 price_per_hour=off.spot_price * nodes,
-                eff_tflops=effective_tflops(off, nodes, score),
+                eff_tflops=effective_tflops(
+                    off, nodes, ASSUMED_PLACEMENT_SCORE if assumed else score
+                ),
                 quota_bucket=(qk.region, qk.code) if qk else None,
                 score=score,
+                assumed=assumed,
             )
         )
 
@@ -272,6 +292,8 @@ def build_shape(
             for c in candidates
         ]
         plan = solve(inflated, budget, quota_limits, max_islands, head_cost)
+        if skip_capacity_check:
+            break  # no scores were fetched; there is nothing to re-verify
         recheck = sorted(
             {
                 (by_key[key].instance_type, n * by_key[key].nodes)
@@ -288,7 +310,14 @@ def build_shape(
             if n <= verified[key] or caps[key] is not None:
                 continue
             s = agg_scores.get((c.instance_type, n * c.nodes, c.region))
-            if s is not None and s > min_score:
+            if s is None and not strict_capacity_check:
+                # Unfetchable at aggregate size: assume the best, say so.
+                verified[key] = n
+                cap_notes.append(
+                    f"{key}: score unavailable at {n * c.nodes}-node aggregate "
+                    f"capacity; assumed {ASSUMED_PLACEMENT_SCORE}"
+                )
+            elif s is not None and s > min_score:
                 verified[key] = n
             else:
                 caps[key] = verified[key]
@@ -299,7 +328,12 @@ def build_shape(
 
     # Anything still unverified after the bounded loop gets pinned to its
     # verified capacity — a plan must never rely on an unchecked score.
-    leftover = [k for k, n in plan.counts.items() if n > verified[k] and caps[k] is None]
+    # (Not applicable when capacity checks were skipped wholesale.)
+    leftover = (
+        []
+        if skip_capacity_check
+        else [k for k, n in plan.counts.items() if n > verified[k] and caps[k] is None]
+    )
     if leftover:
         for k in leftover:
             caps[k] = verified[k]
@@ -320,7 +354,22 @@ def build_shape(
         plan=plan,
         candidates=candidates,
         rejections=rejections,
-        warnings=list(getattr(aws, "warnings", [])) + cap_notes,
+        warnings=list(getattr(aws, "warnings", []))
+        + cap_notes
+        + (
+            [
+                f"placement score unavailable for {len(assumed_keys)} shape(s) "
+                f"(e.g. {assumed_keys[0]}); assumed {ASSUMED_PLACEMENT_SCORE} — "
+                "pass --strict-capacity-check to reject them instead"
+            ]
+            if assumed_keys
+            else []
+        )
+        + (
+            ["capacity checks skipped: plan is not verified against spot obtainability"]
+            if skip_capacity_check
+            else []
+        ),
         weights_gb=weights,
         shard=shard,
         est_cost=est_cost,
@@ -366,6 +415,7 @@ def to_json_dict(result: ShapeResult, model: str, budget: float, tuning: str, da
                 "instance_type": by_key[key].instance_type,
                 "nodes": by_key[key].nodes,
                 "score": by_key[key].score,
+                "score_assumed": by_key[key].assumed,
                 "est_price_per_hour": by_key[key].price_per_hour,
                 "eff_tflops": by_key[key].eff_tflops,
             }
@@ -400,9 +450,10 @@ def render(result: ShapeResult, model: str, budget: float, tuning: str, data: st
         )
         for key, n in sorted(plan.counts.items()):
             c = by_key[key]
+            shown = f"~{ASSUMED_PLACEMENT_SCORE} (assumed)" if c.assumed else str(c.score)
             out.append(
                 f"  {n}x {key}  spot est ${c.price_per_hour:.2f}/hr/island  "
-                f"score {c.score}  {c.eff_tflops:.1f} TFLOPs/island"
+                f"score {shown}  {c.eff_tflops:.1f} TFLOPs/island"
             )
         out.append(f"  head: on-demand CPU VM  ${result.head_cost:.2f}/hr")
     if plan.binding:

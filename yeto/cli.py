@@ -284,7 +284,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-score",
         type=int,
         default=7,
-        help="require spot placement score strictly greater than this (0 disables)",
+        help="require spot placement score strictly greater than this "
+        "(0 keeps fetching scores but stops gating on them)",
+    )
+    shape.add_argument(
+        "--skip-capacity-check",
+        action="store_true",
+        help="plan on quota + price alone with NO placement-score API calls "
+        "(useful when the daily score-config budget is exhausted; the plan "
+        "is not verified against spot obtainability)",
+    )
+    shape.add_argument(
+        "--strict-capacity-check",
+        action="store_true",
+        help="reject shapes whose placement score cannot be fetched instead "
+        "of assuming the best score with a warning (the default)",
     )
     shape.add_argument("--max-islands", type=int, default=16, help="cap on learner islands (syncer fan-out)")
     shape.add_argument(
@@ -895,6 +909,8 @@ def cmd_shape(args) -> int:
             cache_enabled=not args.no_cache,
             price_margin=args.price_margin,
             head_cost=args.head_cost,
+            skip_capacity_check=args.skip_capacity_check,
+            strict_capacity_check=args.strict_capacity_check,
         )
     except (ValueError, RuntimeError) as e:
         print(f"[yeto] shape failed: {e}", file=sys.stderr)
