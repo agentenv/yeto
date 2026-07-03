@@ -48,6 +48,58 @@ WAN_TUNING = (
     "'net.ipv4.tcp_wmem=4096 131072 67108864' 2>/dev/null || true"
 )
 
+# GPU nodes (p4/p5/p6, g5/g6) ship terabytes of local instance-store NVMe
+# that sky leaves untouched, while the EBS root's default throughput
+# (~125 MB/s) turns a 300 GB weight download into a ~40-minute disk stall.
+# Stripe every instance-store device into RAID0 at /opt/yeto-nvme and point
+# the HF caches there (NVME_ENV below, applied in setup AND run). Instance
+# store is ephemeral by design — exactly right for a re-downloadable cache;
+# durable state (checkpoints, outputs) stays on EBS. Idempotent: a
+# recovery relaunch on a node that already has the mount skips everything.
+# Ephemeral local-disk model strings per cloud: AWS instance store, GCP
+# local SSD, Azure temp/local NVMe. Allowlist by model (never "anything
+# unmounted") so a persistent data disk is never wiped. RunPod pods need
+# nothing here — their container volume is already local-NVMe-backed.
+NVME_SETUP = """
+if mountpoint -q /opt/yeto-nvme; then
+  echo "[yeto-setup] NVMe scratch already mounted"
+else
+  DEVS=$(lsblk -dno NAME,MODEL | grep -Ei \
+    'Instance Storage|nvme_card|EphemeralDisk|NVMe Direct Disk' \
+    | awk '{print "/dev/"$1}')
+  N=$(printf '%s\\n' "$DEVS" | grep -c /dev || true)
+  if [ "$N" -eq 0 ]; then
+    echo "[yeto-setup] no local ephemeral NVMe; HF cache stays on the boot disk"
+  else
+    sudo mkdir -p /opt/yeto-nvme
+    if [ "$N" -ge 2 ]; then
+      command -v mdadm >/dev/null || sudo apt-get -qq install -y mdadm
+      sudo mdadm --create /dev/md0 --level=0 --force --run --raid-devices="$N" $DEVS
+      DEV=/dev/md0
+    else
+      DEV=$DEVS
+    fi
+    if sudo mkfs.ext4 -q -F "$DEV" && sudo mount -o noatime "$DEV" /opt/yeto-nvme; then
+      sudo chown "$(whoami)" /opt/yeto-nvme
+      echo "[yeto-setup] striped $N NVMe device(s) at /opt/yeto-nvme"
+    else
+      echo "[yeto-setup] NVMe setup failed; staying on the boot disk" >&2
+    fi
+  fi
+fi
+"""
+
+# Route HF model/dataset caches to the NVMe scratch when it is REALLY
+# mounted (a failed stripe must never divert the cache into a plain dir on
+# the small boot disk); `|| true` keeps NVMe-less nodes working. Used by
+# both the setup shell (so the background prefetch lands on NVMe) and the
+# run command (so from_pretrained reads from it).
+NVME_ENV = (
+    "mountpoint -q /opt/yeto-nvme && export HF_HOME=/opt/yeto-nvme/hf "
+    "HF_HUB_CACHE=/opt/yeto-nvme/hf/hub "
+    "HF_DATASETS_CACHE=/opt/yeto-nvme/hf/datasets || true"
+)
+
 # Pick the torch wheel on the node from what the HARDWARE requires (GPU
 # compute capability) and what the HOST supports (driver version):
 # Blackwell (SM100+) only has kernels in cu128 wheels (torch >= 2.7),
@@ -211,6 +263,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     if args.max_rows:
         learner_flags += f" --max-rows {args.max_rows}"
     run = (
+        f"{NVME_ENV}\n"
         'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
         "torchrun --nnodes=$SKYPILOT_NUM_NODES --node_rank=$SKYPILOT_NODE_RANK "
         "--nproc_per_node=$SKYPILOT_NUM_GPUS_PER_NODE "
@@ -236,9 +289,29 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         # mount it into the workdir explicitly.
         file_mounts = file_mounts or {}
         file_mounts[f"~/sky_workdir/{PICKLED_LOSS_FILE}"] = str(REPO_ROOT / PICKLED_LOSS_FILE)
+    # Kick the weight download off in the background at the END of setup:
+    # it overlaps sky's remaining bookkeeping and races ahead of the run
+    # command, which then finds a warm (or warming — hf resumes) cache.
+    # hf_transfer multi-streams the download; NVMe absorbs it at GB/s.
+    from .models import resolve_variant
+
+    repo = resolve_variant(args.model, getattr(args, "base_dtype", "bf16"))
+    prefetch = (
+        f"(nohup huggingface-cli download {shlex.quote(repo)} "
+        ">/tmp/hf-prefetch.log 2>&1 &) || true"
+    )
     task = sky.Task(
         name=f"yeto-learner-{learner_id}",
-        setup="\n".join([WAN_TUNING, TORCH_SETUP, "pip install -q -r requirements.txt"]),
+        setup="\n".join(
+            [
+                WAN_TUNING,
+                NVME_SETUP,
+                NVME_ENV,
+                TORCH_SETUP,
+                "pip install -q -r requirements.txt",
+                prefetch,
+            ]
+        ),
         run=run,
         envs=envs,
         num_nodes=spec.num_nodes,
