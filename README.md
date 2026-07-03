@@ -25,7 +25,7 @@ Yeto's asynchronous synchronization algorithm is based on **Decoupled DiLoCo**
  └─────────────┘  └─────────────┘  └─────────────┘
 ```
 
-- **`train.py`** — CLI entrypoint. Parses the `--gpu` spec, launches one
+- **`yeto` CLI** — parses the `--gpu` spec, launches one
   SkyPilot cluster per learner plus a syncer VM, wires up IPs/ports, streams logs.
 - **`syncer/`** — Rust implementation of the latency-sensitive syncer:
   async TCP server, per-fragment sync schedule (interval `H`, round-robin
@@ -38,7 +38,7 @@ Yeto's asynchronous synchronization algorithm is based on **Decoupled DiLoCo**
 ## Usage
 
 ```bash
-pip install "yeto[launcher] @ ."      # or: python3 train.py ... from a checkout
+pip install "yeto[launcher] @ ."
 
 yeto launch \
   --gpu aws:8xa100@us-east-2,aws:8xa100@us-east-1,aws:8xa100@us-west-2 \
@@ -50,7 +50,7 @@ yeto launch \
 `launch` detaches (SkyPilot-style): the run executes in a background
 worker while the CLI streams its log, and **Ctrl-C detaches** — the run
 and its clusters keep going. Runs are named by `--cluster-prefix`
-(default `yeto`); bare flags (`yeto --gpu ...`) still mean `launch`.
+(default `yeto`); runs require an explicit subcommand.
 
 ```bash
 yeto status                # table of known runs

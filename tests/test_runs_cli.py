@@ -137,27 +137,6 @@ def test_launch_ctrl_c_detaches_with_exit_code_zero(monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# backward compatibility: bare flags mean `launch`
-
-
-def test_bare_flags_are_rewritten_to_launch(monkeypatch):
-    seen = {}
-
-    def fake_launch(args):
-        seen["args"] = args
-        return 0
-
-    monkeypatch.setattr(cli, "cmd_launch", fake_launch)
-    rc = cli.main([*LAUNCH_ARGS, "--cluster-prefix", "compat"])
-    assert rc == 0
-    args = seen["args"]
-    assert args.command == "launch"
-    assert args.gpu == "aws:8xa100@us-east-2"
-    assert args.model == "gemma4"
-    assert args.cluster_prefix == "compat"
-
-
-# ---------------------------------------------------------------------------
 # _worker: state recording around yeto.launcher.run
 
 

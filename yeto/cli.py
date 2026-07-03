@@ -506,10 +506,6 @@ def cmd_down(args) -> int:
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # Backward compatibility: `yeto --gpu ...` (and `python3 train.py ...`)
-    # predate subcommands; a leading flag means `launch`.
-    if argv and argv[0].startswith("-"):
-        argv.insert(0, "launch")
     parser = build_parser()
     if not argv:
         parser.print_help()
