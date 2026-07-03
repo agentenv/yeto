@@ -337,11 +337,30 @@ def main(argv=None) -> None:
             # reduces the ignored params' grads, so run_inner_loop all-reduces
             # them at each optimizer-step boundary.
             peft_model = model
+            # Quantized checkpoints (fp8/fp4 variants) mix dtypes inside one
+            # module: e4m3fn weights next to e8m0 block scales and bf16 norms.
+            # A FlatParameter group must be uniform-dtype, so shard only the
+            # dominant dtype (the quantized weights) and replicate the rest
+            # with the adapters — scales and norms are a few percent of the
+            # model.
+            ignored = list(params.values())
+            frozen = [p for p in model.parameters() if not p.requires_grad]
+            dtype_bytes: dict = {}
+            for p in frozen:
+                dtype_bytes[p.dtype] = dtype_bytes.get(p.dtype, 0) + p.numel() * p.element_size()
+            if len(dtype_bytes) > 1:
+                shard_dtype = max(dtype_bytes, key=dtype_bytes.get)
+                ignored.extend(p for p in frozen if p.dtype != shard_dtype)
+                log.info(
+                    "mixed base dtypes %s: sharding %s, replicating the rest",
+                    sorted(str(d) for d in dtype_bytes),
+                    shard_dtype,
+                )
             model = FSDP(
                 model,
                 auto_wrap_policy=wrap_policy,
                 use_orig_params=True,
-                ignored_states=list(params.values()),
+                ignored_states=ignored,
                 device_id=device,
             )
             wrapped = {

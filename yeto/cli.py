@@ -602,7 +602,7 @@ HEAD_READY_MARKER = "~/.yeto_head_ready"
 HEAD_SETUP_PIP = (
     'pip install -q "skypilot[aws,gcp]>=0.12" && '
     "pip install -q torch --index-url https://download.pytorch.org/whl/cpu && "
-    "pip install -q cloudpickle transformers==4.57.1 && "
+    "pip install -q cloudpickle transformers==5.13.0 && "
     f"touch {HEAD_READY_MARKER}"
 )
 HEAD_WAIT_READY = (
