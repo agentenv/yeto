@@ -35,3 +35,19 @@ def test_no_region_and_case():
 def test_rejects_bad_entries(bad):
     with pytest.raises(ValueError):
         parse_gpu_spec(bad)
+
+
+def test_parse_image_spec():
+    import pytest
+
+    from yeto.launcher import parse_image_spec
+
+    assert parse_image_spec(None) is None
+    assert parse_image_spec("skypilot:gpu-ubuntu-2204") == "skypilot:gpu-ubuntu-2204"
+    assert parse_image_spec("ami-0abc") == "ami-0abc"
+    assert parse_image_spec("us-east-2=ami-a,us-west-2=ami-b") == {
+        "us-east-2": "ami-a",
+        "us-west-2": "ami-b",
+    }
+    with pytest.raises(ValueError, match="region=image-id"):
+        parse_image_spec("us-east-2=,broken")

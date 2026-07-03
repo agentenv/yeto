@@ -240,6 +240,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="pin learner nodes to an exact instance type (e.g. gr6.4xlarge)",
     )
     infra.add_argument(
+        "--learner-image",
+        default=None,
+        help="override the machine image for learner nodes: a cloud image id "
+        "(ami-..., GCP image path), a sky tag (skypilot:gpu-ubuntu-2204), a "
+        "docker: image, or comma-separated region=id pairs for multi-region "
+        "fleets (e.g. us-east-2=ami-aaa,us-west-2=ami-bbb). Escape hatch for "
+        "stale default images, e.g. pre-Blackwell drivers on p6",
+    )
+    infra.add_argument(
         "--syncer-region",
         default="us-west-2",
         help="syncer VM placement: 'region' (AWS) or 'cloud/region', e.g. gcp/us-central1",

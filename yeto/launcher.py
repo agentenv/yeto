@@ -260,6 +260,24 @@ def resolve_loss_function(loss_function) -> str:
     return f"pickle:{PICKLED_LOSS_FILE}"
 
 
+def parse_image_spec(value: str | None):
+    """--learner-image: a single image id/tag applied everywhere, or
+    comma-separated region=id pairs -> the region dict sky expects."""
+    if not value:
+        return None
+    if "=" not in value:
+        return value
+    images = {}
+    for pair in value.split(","):
+        region, _, image = pair.partition("=")
+        if not region or not image:
+            raise ValueError(
+                f"bad --learner-image entry {pair!r}; expected region=image-id"
+            )
+        images[region.strip()] = image.strip()
+    return images
+
+
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
     import sky
 
@@ -351,6 +369,9 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     )
     infra = f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud
     resources_kwargs = {}
+    image = parse_image_spec(getattr(args, "learner_image", None))
+    if image is not None:
+        resources_kwargs["image_id"] = image
     if spec.num_nodes > 1:
         # Multi-node learner: inner DDP all-reduce crosses the node fabric,
         # so request the cloud's RDMA-class interconnect (EFA on AWS,
