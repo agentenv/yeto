@@ -98,6 +98,13 @@ def parse_args(argv=None):
         "that fits VRAM at startup and shrinks --grad-accum to keep the "
         "effective batch constant",
     )
+    p.add_argument(
+        "--gradient-checkpointing",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="recompute activations in backward; 'auto' enables it when the "
+        "loaded base already occupies more than half of VRAM",
+    )
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--inner-lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=0.01)
@@ -307,6 +314,24 @@ def main(argv=None) -> None:
 
     log.info("loading model %s (%s)", args.model, args.tuning)
     model, tokenizer = load_model_and_tokenizer(args, device)
+
+    grad_ckpt = args.gradient_checkpointing == "on"
+    if args.gradient_checkpointing == "auto" and device.type == "cuda":
+        # The base is fully on-device here (load ends with model.to(device)),
+        # so free memory directly reflects what activations must fit into.
+        free, total = torch.cuda.mem_get_info(device)
+        grad_ckpt = free < total / 2
+    if grad_ckpt:
+        # Non-reentrant checkpointing composes with FSDP and peft; the input
+        # grad hook keeps the graph alive from the embeddings down to the
+        # first adapter when the base is frozen.
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        if args.tuning == "lora":
+            model.enable_input_require_grads()
+        log.info("gradient checkpointing enabled")
+
     params = trainable_params(model)
     layout = build_layout(
         [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
