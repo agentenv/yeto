@@ -63,8 +63,9 @@ def parse_args(argv=None):
         "--shard",
         choices=["ddp", "fsdp"],
         default="ddp",
-        help="multi-GPU strategy; fsdp is only supported with --syncer none "
-        "(synchronous baseline)",
+        help="multi-GPU strategy; fsdp+lora shards only the frozen base "
+        "(adapters stay replicated, any --syncer works); fsdp+full is only "
+        "supported with --syncer none (synchronous baseline)",
     )
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
@@ -108,12 +109,13 @@ def load_model_and_tokenizer(args, device):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     model_id = MODEL_ALIASES.get(args.model, args.model)
-    # fsdp: originals stay fp32 (uniform dtype for flat-param groups, fp32
-    # optimizer state) and MixedPrecision computes/communicates in bf16.
-    # ddp/single: frozen base in bf16; peft leaves LoRA adapters in fp32,
-    # which keeps AdamW's exp_avg_sq in fp32 — a bf16 second moment is too
-    # noisy. Wire packing casts to the wire dtype either way.
-    if args.shard == "fsdp" or device.type != "cuda":
+    # fsdp+full: originals stay fp32 (uniform dtype for flat-param groups,
+    # fp32 optimizer state) and MixedPrecision computes/communicates in bf16.
+    # ddp/single and fsdp+lora: frozen base in bf16; peft leaves LoRA
+    # adapters in fp32, which keeps AdamW's exp_avg_sq in fp32 — a bf16
+    # second moment is too noisy. Wire packing casts to the wire dtype
+    # either way.
+    if (args.shard == "fsdp" and args.tuning == "full") or device.type != "cuda":
         dtype = torch.float32
     else:
         dtype = torch.bfloat16
@@ -139,6 +141,38 @@ def trainable_params(model) -> dict[str, torch.Tensor]:
     return {n: p for n, p in model.named_parameters() if p.requires_grad}
 
 
+# Module-path segments FSDP (and activation checkpointing) may splice into
+# parameter FQNs. Fragment layouts are keyed by name, so names must be
+# identical across shard modes — an fsdp-lora learner and a ddp-lora learner
+# have to be able to join the same syncer.
+_WRAPPER_PREFIXES = ("_fsdp_wrapped_module.", "_checkpoint_wrapped_module.")
+
+
+def normalize_param_name(name: str) -> str:
+    """Strip wrapper-inserted module path segments from a parameter FQN."""
+    for prefix in _WRAPPER_PREFIXES:
+        name = name.replace(prefix, "")
+    return name
+
+
+def allreduce_trainable_grads(params, world: int) -> None:
+    """All-reduce (SUM) each param's grad in place and divide by world.
+
+    FSDP leaves params passed via ignored_states unmanaged, so the replicated
+    LoRA adapter grads are never reduced; calling this at optimizer-step
+    boundaries (before clipping) reproduces DDP-mean semantics — each rank
+    normalizes its loss by its own trained-token count, and SUM/world of
+    those grads is the cross-rank mean. No-op when world <= 1; params whose
+    grad is None are skipped.
+    """
+    if world <= 1:
+        return
+    for p in params:
+        if p.grad is not None:
+            dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+            p.grad.div_(world)
+
+
 def main(argv=None) -> None:
     args = parse_args(argv)
     rank, world = setup_distributed()
@@ -159,6 +193,12 @@ def main(argv=None) -> None:
                 "version against the node's driver instead of training on CPU"
             )
         device = torch.device("cpu")
+
+    if args.shard == "fsdp" and device.type != "cuda":
+        raise RuntimeError(
+            "--shard fsdp requires a CUDA accelerator (torch FSDP cannot "
+            "shard on cpu); use --shard ddp or run on GPUs"
+        )
 
     log.info("loading model %s (%s)", args.model, args.tuning)
     model, tokenizer = load_model_and_tokenizer(args, device)
@@ -219,34 +259,68 @@ def main(argv=None) -> None:
         )
         log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)
 
+    peft_model = None  # unwrapped peft handle, kept for fsdp+lora save
     if args.shard == "fsdp":
-        if args.syncer != "none":
-            raise ValueError("--shard fsdp is only supported with --syncer none")
         import functools
 
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
         from torch.distributed.fsdp import MixedPrecision
         from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 
-        mixed_precision = None
-        if device.type == "cuda":
-            # fp32 originals (and optimizer state); bf16 compute and
-            # all-gather; fp32 gradient reduction.
-            mixed_precision = MixedPrecision(
-                param_dtype=torch.bfloat16,
-                reduce_dtype=torch.float32,
-                buffer_dtype=torch.bfloat16,
+        wrap_policy = functools.partial(size_based_auto_wrap_policy, min_num_params=1_000_000)
+        if args.tuning == "lora":
+            # Hybrid sharding: only the frozen bf16 base is sharded. The LoRA
+            # adapter params go in ignored_states, so FSDP never flattens or
+            # shards them — they stay ordinary replicated per-rank fp32
+            # tensors, and fragment pack/apply/INIT works on them unchanged.
+            # No MixedPrecision: the base is already bf16 and frozen; the
+            # adapters keep fp32 grads and optimizer state. FSDP also never
+            # reduces the ignored params' grads, so run_inner_loop all-reduces
+            # them at each optimizer-step boundary.
+            peft_model = model
+            model = FSDP(
+                model,
+                auto_wrap_policy=wrap_policy,
+                use_orig_params=True,
+                ignored_states=list(params.values()),
+                device_id=device,
             )
-        model = FSDP(
-            model,
-            auto_wrap_policy=functools.partial(
-                size_based_auto_wrap_policy, min_num_params=1_000_000
-            ),
-            use_orig_params=True,  # required for LoRA's mixed requires_grad
-            mixed_precision=mixed_precision,
-            device_id=device if device.type == "cuda" else None,
-        )
-        params = trainable_params(model)
+            wrapped = {
+                normalize_param_name(n): p for n, p in model.named_parameters() if p.requires_grad
+            }
+            # The fragment layout was built from pre-wrap names; they must
+            # survive wrapping bit-identically so this learner speaks the
+            # same layout as ddp/single-GPU learners on the same syncer.
+            if set(wrapped) != set(params):
+                raise RuntimeError(
+                    "FSDP wrapping changed trainable parameter names; layout "
+                    "would diverge from other learners. Mismatch sample: "
+                    f"{sorted(set(wrapped) ^ set(params))[:5]}"
+                )
+            params = wrapped
+        else:
+            if args.syncer != "none":
+                raise ValueError(
+                    "--shard fsdp with --tuning full: full-parameter sync "
+                    "from sharded state is unsupported; use lora or ddp"
+                )
+            mixed_precision = None
+            if device.type == "cuda":
+                # fp32 originals (and optimizer state); bf16 compute and
+                # all-gather; fp32 gradient reduction.
+                mixed_precision = MixedPrecision(
+                    param_dtype=torch.bfloat16,
+                    reduce_dtype=torch.float32,
+                    buffer_dtype=torch.bfloat16,
+                )
+            model = FSDP(
+                model,
+                auto_wrap_policy=wrap_policy,
+                use_orig_params=True,  # keep named originals for the optimizer
+                mixed_precision=mixed_precision,
+                device_id=device if device.type == "cuda" else None,
+            )
+            params = trainable_params(model)
     elif world > 1:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index])
         params = trainable_params(model.module)
@@ -273,15 +347,25 @@ def main(argv=None) -> None:
     run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank, world, device)
 
     if rank == 0:
-        if args.shard == "fsdp":
+        if args.shard == "fsdp" and args.tuning == "full":
             # Gathering a full state dict from shards is not needed for the
             # baseline-comparison use of this mode.
             log.info("skipping checkpoint save in fsdp baseline mode")
         else:
             save_dir = args.output_dir
             os.makedirs(save_dir, exist_ok=True)
-            target = model.module if world > 1 else model
-            target.save_pretrained(save_dir)
+            if args.shard == "fsdp":
+                # fsdp+lora: the adapters are replicated ordinary tensors in
+                # `params`, so hand save_pretrained an explicit state dict
+                # through the unwrapped peft handle — no sharded base param
+                # is ever gathered or touched.
+                peft_model.save_pretrained(
+                    save_dir,
+                    state_dict={n: p.detach().cpu() for n, p in params.items()},
+                )
+            else:
+                target = model.module if world > 1 else model
+                target.save_pretrained(save_dir)
             tokenizer.save_pretrained(save_dir)
             log.info("saved model to %s", save_dir)
         if client is not None:
@@ -334,7 +418,15 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
             if accum < args.grad_accum:
                 continue
             accum = 0
-            if args.shard == "fsdp":
+            if args.shard == "fsdp" and args.tuning == "lora":
+                # The adapters are FSDP-ignored, so their grads were never
+                # reduced; average them across ranks before clipping. After
+                # this the replicated params/grads are identical on every
+                # rank, so a plain clip over them is correct (the sharded
+                # base is frozen and contributes no grads).
+                allreduce_trainable_grads(params.values(), world)
+                torch.nn.utils.clip_grad_norm_(params.values(), 1.0)
+            elif args.shard == "fsdp":
                 model.clip_grad_norm_(1.0)
             else:
                 torch.nn.utils.clip_grad_norm_(params.values(), 1.0)
