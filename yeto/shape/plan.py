@@ -184,28 +184,33 @@ def build_shape(
     for off, nodes in sized:
         key = _candidate_key(off, nodes)
         qk = quota_keys[(off, nodes)]
-        if qk is not None:
-            limit = quotas.get(qk)
-            if limit is None:
-                rejections.append(Rejection(key, f"quota {qk.code}@{qk.region} unavailable"))
-                continue
-            used = usage.get(qk, 0.0)
-            room = limit - used
-            if room <= 0:
-                rejections.append(
-                    Rejection(key, f"no spot quota room ({used:.0f}/{limit:.0f} vCPUs in use, {qk.code}@{qk.region})")
+        if qk is None:
+            # Every AWS shape must land in a known quota bucket; treating an
+            # unmapped type as unlimited once planned 16 P5 islands against a
+            # 128-vCPU quota. (Uncapped buckets are reserved for on-prem.)
+            rejections.append(Rejection(key, f"no quota mapping for {off.instance_type}"))
+            continue
+        limit = quotas.get(qk)
+        if limit is None:
+            rejections.append(Rejection(key, f"quota {qk.code}@{qk.region} unavailable"))
+            continue
+        used = usage.get(qk, 0.0)
+        room = limit - used
+        if room <= 0:
+            rejections.append(
+                Rejection(key, f"no spot quota room ({used:.0f}/{limit:.0f} vCPUs in use, {qk.code}@{qk.region})")
+            )
+            continue
+        if off.vcpus * nodes > room:
+            rejections.append(
+                Rejection(
+                    key,
+                    f"one island needs {off.vcpus * nodes} vCPUs > remaining quota "
+                    f"{room:.0f} ({used:.0f}/{limit:.0f} in use)",
                 )
-                continue
-            if off.vcpus * nodes > room:
-                rejections.append(
-                    Rejection(
-                        key,
-                        f"one island needs {off.vcpus * nodes} vCPUs > remaining quota "
-                        f"{room:.0f} ({used:.0f}/{limit:.0f} in use)",
-                    )
-                )
-                continue
-            quota_limits[(qk.region, qk.code)] = room
+            )
+            continue
+        quota_limits[(qk.region, qk.code)] = room
         quota_ok.append((off, nodes))
 
     # Ask-budget pruning on the quota survivors: rank asks by the best

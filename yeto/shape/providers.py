@@ -57,6 +57,35 @@ def _client_error_code(exc: Exception) -> str | None:
     return None
 
 
+# EC2 vCPU quota codes by instance-family prefix (spot verified against
+# `aws service-quotas list-service-quotas` 2026-07; longest prefix wins so
+# "dl1" resolves to DL, not the standard D bucket).
+_SPOT_FAMILY_CODES = {
+    "dl": "L-85EED4F7",  # All DL Spot
+    "inf": "L-B5D1601B",  # All Inf Spot
+    "trn": "L-6B0D517C",  # All Trn Spot
+    "vt": "L-3819A6DF",  # All G and VT Spot
+    "p": "L-7212CCBC",  # All P Spot (p2..p5en share one bucket)
+    "g": "L-3819A6DF",  # All G and VT Spot
+    "f": "L-88CF9481",  # All F Spot
+    "x": "L-E3A00192",  # All X Spot
+    **{k: "L-34B43A08" for k in ("a", "c", "d", "h", "i", "m", "r", "t", "z")},
+}
+_ONDEMAND_FAMILY_CODES = {
+    "p": "L-417A185B",  # Running On-Demand P instances
+    "g": "L-DB2E81BA",  # Running On-Demand G and VT instances
+}
+
+
+def _family_quota_code(instance_type: str, use_spot: bool) -> str | None:
+    family = instance_type.split(".")[0].lower()
+    table = _SPOT_FAMILY_CODES if use_spot else _ONDEMAND_FAMILY_CODES
+    for prefix in sorted(table, key=len, reverse=True):
+        if family.startswith(prefix):
+            return table[prefix]
+    return None
+
+
 @dataclass(frozen=True)
 class QuotaKey:
     """One (region, quota-code) service-quota lookup."""
@@ -108,19 +137,25 @@ class AwsProviders:
             self._warn(f"{what} failed for {target}: {exc}")
 
     def quota_code(self, instance_type: str, use_spot: bool) -> str | None:
-        """Map an instance type to its EC2 vCPU quota code via sky's catalog.
+        """Map an instance type to its EC2 vCPU quota code.
 
-        SkyPilot already ships the instance-family -> quota-code table, so we
-        reuse it instead of duplicating the mapping. Any failure (sky missing,
-        unknown instance type) returns None: the caller then simply cannot
-        quota-check that type, which is not fatal.
+        SkyPilot ships an instance-type -> quota-code table which we try
+        first, but it has gaps (no p5 rows as of sky 0.12 — that gap once
+        made a planner treat P5 spot as unlimited). The fallback derives the
+        code from the instance family letter(s), matching AWS's actual quota
+        buckets ("All P Spot Instance Requests" covers p2..p5en alike).
+        None means genuinely unmappable; callers must treat that as
+        un-launchable, not unlimited.
         """
         try:
             from sky.catalog import aws_catalog
 
-            return aws_catalog.get_quota_code(instance_type, use_spot)
+            code = aws_catalog.get_quota_code(instance_type, use_spot)
+            if code:
+                return code
         except Exception:
-            return None
+            pass
+        return _family_quota_code(instance_type, use_spot)
 
     def quotas(self, keys: list[QuotaKey]) -> dict[QuotaKey, float | None]:
         """Fetch quota values for all keys in parallel; failures map to None.

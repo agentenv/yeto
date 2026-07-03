@@ -305,3 +305,14 @@ def test_score_ask_budget_caps_queries(fake_env, monkeypatch):
     assert len(set(fake_env.score_asks)) == 1
     reasons = {r.key: r.reason for r in result.rejections}
     assert any("daily config budget" in v for v in reasons.values())
+
+
+def test_unmapped_quota_code_fails_closed(fake_env):
+    # An instance type with no quota mapping must be rejected, not treated
+    # as unlimited (the bug that once planned 16 P5 islands on 128 vCPUs).
+    codes = {k: v for k, v in CODES.items() if k != "p5.48xlarge"}
+    fake = FakeAws(QUOTAS, SCORES, codes)
+    result = _shape(fake, budget=500.0, gpus=["H100"])
+    assert result.plan.counts == {}
+    reasons = {r.key: r.reason for r in result.rejections}
+    assert "no quota mapping for p5.48xlarge" in reasons["aws:8xh100@us-east-2"]

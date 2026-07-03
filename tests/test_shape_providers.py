@@ -275,4 +275,27 @@ def test_quota_code_survives_import_failure(providers, monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", failing_import)
-    assert providers.quota_code("p4d.24xlarge", True) is None
+    # Without sky, the family fallback still answers for known families...
+    assert providers.quota_code("p4d.24xlarge", True) == "L-7212CCBC"
+    # ...and unknown families stay None (callers fail closed).
+    assert providers.quota_code("uq99.8xlarge", True) is None
+
+
+def test_family_quota_code_fallback_covers_sky_gaps():
+    from yeto.shape.providers import _family_quota_code
+
+    # sky 0.12 has no p5 rows; the family fallback must map all P variants
+    # to the shared "All P Spot" bucket (there is no separate P5 spot quota).
+    assert _family_quota_code("p5.48xlarge", True) == "L-7212CCBC"
+    assert _family_quota_code("p5en.48xlarge", True) == "L-7212CCBC"
+    assert _family_quota_code("p4d.24xlarge", True) == "L-7212CCBC"
+    # Longest-prefix wins: dl is DL, not the standard D bucket.
+    assert _family_quota_code("dl1.24xlarge", True) == "L-85EED4F7"
+    assert _family_quota_code("d3.xlarge", True) == "L-34B43A08"
+    assert _family_quota_code("g6e.48xlarge", True) == "L-3819A6DF"
+    assert _family_quota_code("vt1.24xlarge", True) == "L-3819A6DF"
+    # Unknown family -> None (callers fail closed).
+    assert _family_quota_code("uq99.8xlarge", True) is None
+    # On-demand mappings for the families we can name.
+    assert _family_quota_code("p5.48xlarge", False) == "L-417A185B"
+    assert _family_quota_code("m7i.large", False) is None
