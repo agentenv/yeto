@@ -9,8 +9,11 @@ plus the two aliases this project started with.
 
 MODEL_WEIGHT_GB is the bf16 footprint (2 bytes/param, MoE = total params,
 which is what the frozen base occupies under fsdp) used for offline island
-sizing and disk provisioning; keep it keyed by alias and in sync with
-MODEL_ALIASES (tests enforce the subset relation).
+sizing and disk provisioning. Every weight key must be an alias (tests
+enforce it), but an alias MAY omit its weight: planning then falls through
+to the Hub safetensors-metadata path, which is the honest choice when a
+model's parameter count is unconfirmed — never guess a size into this
+table.
 """
 
 from __future__ import annotations
@@ -44,10 +47,25 @@ MODEL_ALIASES = {
     "kimi-k26": "moonshotai/Kimi-K2.6",
     # DeepSeek
     "deepseek31": "deepseek-ai/DeepSeek-V3.1",
+    "deepseek-r1": "deepseek-ai/DeepSeek-R1",
+    "deepseek4pro": "deepseek-ai/DeepSeek-V4-Pro",
     # NVIDIA Nemotron 3
     "nemotron3-nano": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "nemotron3-super": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     "nemotron3-ultra": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+    # GLM (z.ai)
+    "glm45-air": "zai-org/GLM-4.5-Air",
+    "glm46": "zai-org/GLM-4.6",
+    "glm52": "zai-org/GLM-5.2",
+    # Llama 4 MoE
+    "llama4-scout": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "llama4-maverick": "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
+    # coding / misc frontier
+    "qwen3-coder-480b": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    "minimax-m2": "MiniMaxAI/MiniMax-M2",
+    "minimax-m3": "MiniMaxAI/MiniMax-M3",  # size via Hub metadata
+    "kimi-k27-code": "moonshotai/Kimi-K2.7-Code",  # size via Hub metadata
+    "mistral-small3": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
 }
 
 MODEL_WEIGHT_GB = {
@@ -73,9 +91,19 @@ MODEL_WEIGHT_GB = {
     "kimi-k25": 2060,
     "kimi-k26": 2060,
     "deepseek31": 1343,
+    "deepseek-r1": 1343,
+    "deepseek4pro": 3200,  # 1.6T-total / 49B-active MoE
     "nemotron3-nano": 61,
     "nemotron3-super": 240,
     "nemotron3-ultra": 1100,
+    "glm45-air": 212,
+    "glm46": 714,
+    "glm52": 1488,  # 744B MoE
+    "llama4-scout": 218,  # 109B total / 17B active
+    "llama4-maverick": 800,  # 400B total / 17B active
+    "qwen3-coder-480b": 960,
+    "minimax-m2": 460,  # 230B total / 10B active
+    "mistral-small3": 48,
 }
 
 

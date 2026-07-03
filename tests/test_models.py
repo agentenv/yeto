@@ -1,15 +1,17 @@
-"""Alias-table consistency: one source of truth, weights for every alias."""
+"""Alias-table consistency: one source of truth for model sugar."""
 
 from yeto.models import MODEL_ALIASES, MODEL_WEIGHT_GB, resolve
 
 
-def test_every_alias_has_a_weight():
-    assert set(MODEL_ALIASES) == set(MODEL_WEIGHT_GB)
+def test_every_weight_key_is_an_alias():
+    # Aliases may omit a weight (planning falls back to Hub metadata), but a
+    # weight entry without an alias is dead data.
+    assert set(MODEL_WEIGHT_GB) <= set(MODEL_ALIASES)
 
 
 def test_weights_are_plausible_bf16_footprints():
     for alias, gb in MODEL_WEIGHT_GB.items():
-        assert 1 <= gb <= 3000, f"{alias}: {gb} GB looks wrong"
+        assert 1 <= gb <= 3500, f"{alias}: {gb} GB looks wrong"
 
 
 def test_resolve():
