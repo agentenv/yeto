@@ -38,15 +38,12 @@ from .tensor_io import (
 
 log = logging.getLogger("learner")
 
-MODEL_ALIASES = {
-    "gemma4": "google/gemma-4-12B-it",
-    "deepseek4flash": "deepseek-ai/DeepSeek-V4-Flash",
-}
+from .models import MODEL_ALIASES  # single source; see yeto/models.py
 
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Yeto learner")
-    p.add_argument("--model", required=True, help="HF model id or alias (gemma4|deepseek4flash)")
+    p.add_argument("--model", required=True, help="HF model id or an alias from yeto/models.py (gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...)")
     p.add_argument("--data", required=True, help="HF dataset id")
     p.add_argument(
         "--syncer",

@@ -141,7 +141,7 @@ def parse_args(argv=None):
         "model/adapter directory.",
     )
     p.add_argument("--checkpoint", required=True, help="path to the syncer checkpoint file")
-    p.add_argument("--model", required=True, help="HF model id or alias (gemma4|deepseek4flash)")
+    p.add_argument("--model", required=True, help="HF model id or an alias from yeto/models.py (gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...)")
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)

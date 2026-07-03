@@ -1,0 +1,84 @@
+"""Model alias table: the single source for supported-model sugar.
+
+Every command that takes --model accepts either an alias below or ANY raw
+Hugging Face id (aliases are convenience, not a gate — arbitrary ids get
+their weight size from the Hub's safetensors metadata at plan time). The
+lineup mirrors the common open-weights fine-tuning roster as of 2026-07:
+Qwen 3/3.5/3.6, Llama 3.x, gpt-oss, Kimi K2.x, DeepSeek, Nemotron 3,
+plus the two aliases this project started with.
+
+MODEL_WEIGHT_GB is the bf16 footprint (2 bytes/param, MoE = total params,
+which is what the frozen base occupies under fsdp) used for offline island
+sizing and disk provisioning; keep it keyed by alias and in sync with
+MODEL_ALIASES (tests enforce the subset relation).
+"""
+
+from __future__ import annotations
+
+MODEL_ALIASES = {
+    # existing project aliases
+    "gemma4": "google/gemma-4-12B-it",
+    "deepseek4flash": "deepseek-ai/DeepSeek-V4-Flash",
+    # Qwen dense + MoE
+    "qwen3-8b": "Qwen/Qwen3-8B",
+    "qwen35-4b": "Qwen/Qwen3.5-4B",
+    "qwen35-9b": "Qwen/Qwen3.5-9B",
+    "qwen35-9b-base": "Qwen/Qwen3.5-9B-Base",
+    "qwen35-35b-a3b": "Qwen/Qwen3.5-35B-A3B-Base",
+    "qwen35-397b-a17b": "Qwen/Qwen3.5-397B-A17B",
+    "qwen36-27b": "Qwen/Qwen3.6-27B",
+    "qwen36-35b-a3b": "Qwen/Qwen3.6-35B-A3B",
+    # Llama
+    "llama32-1b": "meta-llama/Llama-3.2-1B",
+    "llama32-3b": "meta-llama/Llama-3.2-3B",
+    "llama31-8b": "meta-llama/Llama-3.1-8B",
+    "llama31-8b-it": "meta-llama/Llama-3.1-8B-Instruct",
+    "llama31-70b": "meta-llama/Llama-3.1-70B",
+    "llama33-70b-it": "meta-llama/Llama-3.3-70B-Instruct",
+    # gpt-oss
+    "gptoss-20b": "openai/gpt-oss-20b",
+    "gptoss-120b": "openai/gpt-oss-120b",
+    # Kimi
+    "kimi-k2-thinking": "moonshotai/Kimi-K2-Thinking",
+    "kimi-k25": "moonshotai/Kimi-K2.5",
+    "kimi-k26": "moonshotai/Kimi-K2.6",
+    # DeepSeek
+    "deepseek31": "deepseek-ai/DeepSeek-V3.1",
+    # NVIDIA Nemotron 3
+    "nemotron3-nano": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "nemotron3-super": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "nemotron3-ultra": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+}
+
+MODEL_WEIGHT_GB = {
+    "gemma4": 66,
+    "deepseek4flash": 568,
+    "qwen3-8b": 17,
+    "qwen35-4b": 8,
+    "qwen35-9b": 18,
+    "qwen35-9b-base": 18,
+    "qwen35-35b-a3b": 70,
+    "qwen35-397b-a17b": 794,
+    "qwen36-27b": 54,
+    "qwen36-35b-a3b": 70,
+    "llama32-1b": 3,
+    "llama32-3b": 7,
+    "llama31-8b": 16,
+    "llama31-8b-it": 16,
+    "llama31-70b": 141,
+    "llama33-70b-it": 141,
+    "gptoss-20b": 42,
+    "gptoss-120b": 234,
+    "kimi-k2-thinking": 2060,
+    "kimi-k25": 2060,
+    "kimi-k26": 2060,
+    "deepseek31": 1343,
+    "nemotron3-nano": 61,
+    "nemotron3-super": 240,
+    "nemotron3-ultra": 1100,
+}
+
+
+def resolve(model: str) -> str:
+    """Alias -> HF id; raw HF ids pass through unchanged."""
+    return MODEL_ALIASES.get(model, model)

@@ -60,7 +60,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="auto-fleet only: launch the planned fleet without asking",
     )
-    p.add_argument("--model", required=True, help="model alias (gemma4|deepseek4flash) or HF id")
+    p.add_argument("--model", required=True, help="model alias (see yeto/models.py: gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...) or any HF id")
     p.add_argument("--data", required=True, help="HF dataset id (messages-format chat traces)")
     def loss_spec(value: str) -> str:
         if value in LOSS_FUNCTIONS or value.startswith(("custom:", "pickle:")):

@@ -12,13 +12,9 @@ from __future__ import annotations
 import math
 from typing import Any
 
-# Mirrors yeto/learner.py MODEL_ALIASES. Copied (2 entries) rather than
-# imported: learner.py pulls in torch at module level, which planning code
-# must never pay for. Keep in sync.
-MODEL_ALIASES = {
-    "gemma4": "google/gemma-4-12B-it",
-    "deepseek4flash": "deepseek-ai/DeepSeek-V4-Flash",
-}
+# Single-source alias table; yeto/models.py has no heavy dependencies, so
+# planning code can import it directly (learner/launcher re-export it).
+from ..models import MODEL_ALIASES
 
 # Per-GPU shard multiplier over bf16 weight bytes. lora: only the frozen
 # bf16 base is sharded (adapters are negligible and replicated). full:
@@ -87,14 +83,14 @@ def model_weights_gb(
     if override is not None:
         return float(override)
 
-    from yeto import launcher  # sky inside launcher is lazy; safe to import
+    from ..models import MODEL_WEIGHT_GB
 
     model_id = MODEL_ALIASES.get(model, model)
-    if model in launcher.MODEL_WEIGHT_GB:
-        return float(launcher.MODEL_WEIGHT_GB[model])
+    if model in MODEL_WEIGHT_GB:
+        return float(MODEL_WEIGHT_GB[model])
     for alias, hf_id in MODEL_ALIASES.items():
-        if hf_id == model_id and alias in launcher.MODEL_WEIGHT_GB:
-            return float(launcher.MODEL_WEIGHT_GB[alias])
+        if hf_id == model_id and alias in MODEL_WEIGHT_GB:
+            return float(MODEL_WEIGHT_GB[alias])
 
     def fetch() -> float:
         try:
