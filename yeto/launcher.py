@@ -48,6 +48,22 @@ WAN_TUNING = (
     "'net.ipv4.tcp_wmem=4096 131072 67108864' 2>/dev/null || true"
 )
 
+# Pick the torch wheel on the node, per driver generation: Blackwell nodes
+# (SM100, driver >= 570) need cu128 kernels that only torch >= 2.7 ships,
+# while Ampere/Hopper AMIs run driver 535, whose ceiling is cu121-era
+# wheels (cu128 silently loses the GPUs: torch.cuda.is_available() ->
+# False). Runs BEFORE `pip install -r requirements.txt` so dependency
+# resolution sees torch as already satisfied instead of pulling a default
+# wheel. Best-effort driver parse falls back to the widest-compat cu121.
+TORCH_SETUP = (
+    'DRV=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1); '
+    'if [ -n "$DRV" ] && [ "$DRV" -ge 570 ] 2>/dev/null; then '
+    'pip install -q "torch==2.8.*" --index-url https://download.pytorch.org/whl/cu128; '
+    "else "
+    'pip install -q "torch==2.5.1" --index-url https://download.pytorch.org/whl/cu121; '
+    "fi"
+)
+
 # Rough per-GPU training capacity sanity check (bf16 LoRA, GB).
 GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48}
 from .models import MODEL_WEIGHT_GB  # single source; see yeto/models.py
@@ -189,7 +205,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         file_mounts[f"~/sky_workdir/{PICKLED_LOSS_FILE}"] = str(REPO_ROOT / PICKLED_LOSS_FILE)
     task = sky.Task(
         name=f"yeto-learner-{learner_id}",
-        setup=f"{WAN_TUNING}; pip install -q -r requirements.txt",
+        setup=f"{WAN_TUNING}; {TORCH_SETUP}; pip install -q -r requirements.txt",
         run=run,
         envs=envs,
         num_nodes=spec.num_nodes,
