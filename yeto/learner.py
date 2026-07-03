@@ -345,59 +345,58 @@ def main(argv=None) -> None:
 
     peft_model = None  # unwrapped peft handle, kept for fsdp+lora save
     if args.shard == "fsdp":
-        import functools
-
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        from torch.distributed.fsdp import MixedPrecision
-        from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
-
-        wrap_policy = functools.partial(size_based_auto_wrap_policy, min_num_params=1_000_000)
         if args.tuning == "lora":
-            # Hybrid sharding: only the frozen bf16 base is sharded. The LoRA
-            # adapter params go in ignored_states, so FSDP never flattens or
-            # shards them — they stay ordinary replicated per-rank fp32
-            # tensors, and fragment pack/apply/INIT works on them unchanged.
-            # No MixedPrecision: the base is already bf16 and frozen; the
-            # adapters keep fp32 grads and optimizer state. FSDP also never
-            # reduces the ignored params' grads, so run_inner_loop all-reduces
-            # them at each optimizer-step boundary.
+            # Hybrid sharding via FSDP2 (fully_shard): the frozen base is
+            # sharded per-parameter as DTensors — no flattening, so the mixed
+            # dtypes of quantized checkpoints (int8/e4m3fn weight storage,
+            # e8m0 block scales, bf16 norms) shard as-is. The LoRA adapters
+            # go in ignored_params: they stay ordinary replicated per-rank
+            # fp32 tensors, fragment pack/apply/INIT works on them unchanged,
+            # and run_inner_loop all-reduces their grads at each optimizer-
+            # step boundary (fully_shard never sees them). e8m0 scales are
+            # also ignored — NCCL has no mapping for that dtype, and they are
+            # a rounding error of the model's bytes.
+            try:
+                from torch.distributed.fsdp import fully_shard
+            except ImportError as exc:  # pre-2.7 torch (old-driver nodes)
+                raise RuntimeError(
+                    "--shard fsdp with --tuning lora needs torch>=2.7 "
+                    "(fully_shard with ignored_params); this node's driver "
+                    "capped torch below that — use --shard ddp here"
+                ) from exc
+
             peft_model = model
-            # Quantized checkpoints (fp8/fp4 variants) mix dtypes inside one
-            # module — int8/e4m3fn weight storage next to e8m0 block scales
-            # and bf16 norms. A FlatParameter group must be uniform-dtype,
-            # integer storage cannot be flattened at all, and the unshard
-            # all-gather rejects dtypes NCCL has no mapping for (e8m0fnu).
-            # Shard only the largest NCCL-collective-safe floating dtype and
-            # replicate the rest with the adapters; the replicated bulk must
-            # therefore fit per-GPU, which the shape planner's memory model
-            # already assumes for quantized bases.
-            nccl_safe = {
-                torch.bfloat16,
-                torch.float16,
-                torch.float32,
-                torch.float8_e4m3fn,
-                torch.float8_e5m2,
-            }
-            ignored = list(params.values())
-            frozen = [p for p in model.parameters() if not p.requires_grad]
-            dtype_bytes: dict = {}
-            for p in frozen:
-                dtype_bytes[p.dtype] = dtype_bytes.get(p.dtype, 0) + p.numel() * p.element_size()
-            float_bytes = {d: b for d, b in dtype_bytes.items() if d in nccl_safe}
-            shard_dtype = max(float_bytes, key=float_bytes.get) if float_bytes else None
-            if len(dtype_bytes) > 1 or shard_dtype is None:
-                ignored.extend(p for p in frozen if p.dtype != shard_dtype)
-                log.info(
-                    "mixed base dtypes %s: sharding %s, replicating the rest",
-                    sorted(str(d) for d in dtype_bytes),
-                    shard_dtype,
-                )
-            model = FSDP(
-                model,
-                auto_wrap_policy=wrap_policy,
-                use_orig_params=True,
-                ignored_states=ignored,
-                device_id=device,
+            ignored = set(params.values())
+            e8m0 = getattr(torch, "float8_e8m0fnu", None)
+            if e8m0 is not None:
+                ignored |= {p for p in model.parameters() if p.dtype == e8m0}
+            # Shard each transformer block separately (comm/compute overlap,
+            # one block unsharded at a time); the root call picks up whatever
+            # sits outside the blocks (embeddings, final norm, lm_head). Only
+            # the OUTERMOST ModuleLists are treated as blocks — descending
+            # would give every MoE expert its own tiny all-gather group.
+            def outer_module_lists(root):
+                found = []
+
+                def visit(m):
+                    for child in m.children():
+                        if isinstance(child, torch.nn.ModuleList) and len(child) >= 2:
+                            found.append(child)
+                        else:
+                            visit(child)
+
+                visit(root)
+                return found
+
+            blocks = [b for ml in outer_module_lists(model) for b in ml]
+            for block in blocks:
+                block_ignored = ignored & set(block.parameters())
+                fully_shard(block, ignored_params=block_ignored)
+            fully_shard(model, ignored_params=ignored)
+            log.info(
+                "fully_shard: %d blocks sharded per-parameter, %d params replicated",
+                len(blocks),
+                len(ignored),
             )
             wrapped = {
                 normalize_param_name(n): p for n, p in model.named_parameters() if p.requires_grad
@@ -413,6 +412,15 @@ def main(argv=None) -> None:
                 )
             params = wrapped
         else:
+            import functools
+
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+            from torch.distributed.fsdp import MixedPrecision
+            from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+
+            wrap_policy = functools.partial(
+                size_based_auto_wrap_policy, min_num_params=1_000_000
+            )
             if args.syncer != "none":
                 raise ValueError(
                     "--shard fsdp with --tuning full: full-parameter sync "
