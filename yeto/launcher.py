@@ -48,7 +48,7 @@ WAN_TUNING = (
 )
 
 # Rough per-GPU training capacity sanity check (bf16 LoRA, GB).
-GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48}
+GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48}
 MODEL_WEIGHT_GB = {"deepseek4flash": 568, "gemma4": 66}
 
 
