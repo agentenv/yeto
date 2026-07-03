@@ -11,7 +11,7 @@ def test_every_weight_key_is_an_alias():
 
 def test_weights_are_plausible_bf16_footprints():
     for alias, gb in MODEL_WEIGHT_GB.items():
-        assert 1 <= gb <= 3500, f"{alias}: {gb} GB looks wrong"
+        assert 0.4 <= gb <= 3500, f"{alias}: {gb} GB looks wrong"
 
 
 def test_resolve():
@@ -35,3 +35,14 @@ def test_shape_memory_uses_the_shared_aliases():
     from yeto.shape import memory
 
     assert memory.MODEL_ALIASES is MODEL_ALIASES
+
+
+def test_readme_table_matches_alias_table():
+    import pathlib
+    import re
+
+    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
+    table_aliases = set(re.findall(r"^\| `([a-z0-9\-]+)` \| `", readme, flags=re.M))
+    assert table_aliases == set(MODEL_ALIASES), (
+        "README model table is out of sync with yeto/models.py — regenerate it"
+    )

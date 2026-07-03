@@ -90,52 +90,68 @@ Learners run on **spot instances by default** (pass `--on-demand` to opt
 out); the syncer VM is always on-demand — it is the cheap, stateful
 coordinator, and its checkpoint/resume covers learner preemptions.
 
+## Supported models
+
+Any Hugging Face model id works with `--model`; the aliases below are
+sugar (single source: `yeto/models.py` — this table is generated from it
+and a test keeps them in sync). "bf16 GB" is the frozen-base footprint the
+planner sizes islands and disks from; "(Hub)" means the size is resolved
+from safetensors metadata at plan time.
+
+| alias | Hugging Face id | bf16 GB |
+|---|---|---|
+| `gemma4` | `google/gemma-4-12B-it` | 66 |
+| `deepseek4flash` | `deepseek-ai/DeepSeek-V4-Flash` | 568 |
+| `qwen3-8b` | `Qwen/Qwen3-8B` | 17 |
+| `qwen35-4b` | `Qwen/Qwen3.5-4B` | 8 |
+| `qwen35-9b` | `Qwen/Qwen3.5-9B` | 18 |
+| `qwen35-9b-base` | `Qwen/Qwen3.5-9B-Base` | 18 |
+| `qwen35-35b-a3b` | `Qwen/Qwen3.5-35B-A3B-Base` | 70 |
+| `qwen35-397b-a17b` | `Qwen/Qwen3.5-397B-A17B` | 794 |
+| `qwen36-27b` | `Qwen/Qwen3.6-27B` | 54 |
+| `qwen36-35b-a3b` | `Qwen/Qwen3.6-35B-A3B` | 70 |
+| `llama32-1b` | `meta-llama/Llama-3.2-1B` | 3 |
+| `llama32-3b` | `meta-llama/Llama-3.2-3B` | 7 |
+| `llama31-8b` | `meta-llama/Llama-3.1-8B` | 16 |
+| `llama31-8b-it` | `meta-llama/Llama-3.1-8B-Instruct` | 16 |
+| `llama31-70b` | `meta-llama/Llama-3.1-70B` | 141 |
+| `llama33-70b-it` | `meta-llama/Llama-3.3-70B-Instruct` | 141 |
+| `gptoss-20b` | `openai/gpt-oss-20b` | 42 |
+| `gptoss-120b` | `openai/gpt-oss-120b` | 234 |
+| `kimi-k2-thinking` | `moonshotai/Kimi-K2-Thinking` | 2060 |
+| `kimi-k25` | `moonshotai/Kimi-K2.5` | 2060 |
+| `kimi-k26` | `moonshotai/Kimi-K2.6` | 2060 |
+| `deepseek31` | `deepseek-ai/DeepSeek-V3.1` | 1343 |
+| `deepseek-r1` | `deepseek-ai/DeepSeek-R1` | 1343 |
+| `deepseek4pro` | `deepseek-ai/DeepSeek-V4-Pro` | 3200 |
+| `nemotron3-nano` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | 61 |
+| `nemotron3-super` | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16` | 240 |
+| `nemotron3-ultra` | `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16` | 1100 |
+| `glm45-air` | `zai-org/GLM-4.5-Air` | 212 |
+| `glm46` | `zai-org/GLM-4.6` | 714 |
+| `glm52` | `zai-org/GLM-5.2` | 1488 |
+| `llama4-scout` | `meta-llama/Llama-4-Scout-17B-16E-Instruct` | 218 |
+| `llama4-maverick` | `meta-llama/Llama-4-Maverick-17B-128E-Instruct` | 800 |
+| `qwen3-coder-480b` | `Qwen/Qwen3-Coder-480B-A35B-Instruct` | 960 |
+| `minimax-m2` | `MiniMaxAI/MiniMax-M2` | 460 |
+| `minimax-m3` | `MiniMaxAI/MiniMax-M3` | (Hub) |
+| `kimi-k27-code` | `moonshotai/Kimi-K2.7-Code` | (Hub) |
+| `mistral-small3` | `mistralai/Mistral-Small-3.2-24B-Instruct-2506` | 48 |
+| `ornith-9b` | `deepreinforce-ai/Ornith-1.0-9B` | 19 |
+| `ornith-31b` | `deepreinforce-ai/Ornith-1.0-31B` | 62 |
+| `ornith-35b` | `deepreinforce-ai/Ornith-1.0-35B` | 70 |
+| `ornith-397b` | `deepreinforce-ai/Ornith-1.0-397B-FP8` | 794 |
+| `lfm25-230m` | `LiquidAI/LFM2.5-230M` | 0.5 |
+| `lfm25-1b` | `LiquidAI/LFM2.5-1B` | 2 |
+| `lfm25-8b-a1b` | `LiquidAI/LFM2.5-8B-A1B` | 17 |
+| `vibethinker-15b` | `WeiboAI/VibeThinker-1.5B` | 3 |
+| `vibethinker-3b` | `WeiboAI/VibeThinker-3B` | 6 |
+
 ## Design notes
 
-- **Merging**: per-learner outer gradient Δ_m,p = Θ_p(prev) − θ_m,p anchored
-  at the syncer's previous fragment value; learner weights
-  w_m = c_tokens²/c_steps (quantity × quality); weighted RDA per tensor on
-  non-embedding fragments, direct averaging on the embedding fragment (whose
-  deltas lack the near-orthogonality that motivates RDA).
-- **Broadcast blending**: learners apply a merged fragment as
-  θ ← α·θ_local + (1−α)·Θ_global (`--merge-alpha`, default 0.5) instead of
-  overwriting, keeping the inner steps taken while the merge was in flight
-  (Streaming DiLoCo / HALoS; at large fleets prefer α=0 — Decoupled DiLoCo's
-  ablation found overwrite wins as M grows).
-- **Adaptive grace**: the post-quorum straggler window sizes itself to the
-  learners' compute slack each round (γ·(τ·ξ_step − ξ_quorum − ξ_sync),
-  capped by `--grace-ms`), instead of a fixed wait.
-- **Delta correction**: stale learner deltas that oppose the outer momentum
-  are shrunk/reoriented per tensor before merging (HeLoCo;
-  `--delta-correction none` disables).
-- **Transport**: custom binary framing over parallel TCP streams (control on
-  stream 0; 4 MiB chunks striped across data streams). gRPC was evaluated and
-  rejected — protobuf copies and HTTP/2 framing sit on the bulk tensor path.
-- **Q4 pushes**: `--wire-dtype q4` sends learner pushes as blockwise 4-bit
-  E3M0 deltas against the last received broadcast (~3.9× less learner egress
-  than bf16); broadcasts and init stay bf16. See docs/PROTOCOL.md.
-- **Fragment patterns**: `--fragment-pattern binpack` (default,
-  size-balanced) or `strided` (transformer layer i → fragment i mod P,
-  interleaving depth across fragments as in Streaming DiLoCo).
-- **Snapshots**: the single-actor syncer checkpoints at the quiescent cut
-  between rounds (params, momentum, per-fragment versions, merged-token
-  ledger). `--resume` restores; a JSONL event tape records every merge.
-- **Fine-tuning**: `--tuning lora` (default) syncs only adapter weights —
-  fragments are megabytes, so the syncer and WAN stay cheap even for large
-  models. `--tuning full` syncs everything.
-- **Model sizing**: `deepseek4flash` (DeepSeek-V4-Flash, 284B MoE) needs
-  ~568 GB for frozen bf16 weights — more than 8×A100-40GB (320 GB); use
-  ≥16×80GB GPUs per learner, or pick `gemma4` (12B) / any smaller HF id.
-- **Loss masking**: `--train-on assistant` (default) puts loss only on
-  assistant-message tokens (plus the closing EOS); `--train-on all` trains
-  on every token. Tokenization streams asynchronously in DataLoader workers
-  (`--tokenize preload` to materialize upfront).
-- **Resilience**: learners reconnect automatically through syncer restarts
-  and WAN drops (exponential backoff; work continues locally during the
-  outage and re-merges after the post-reconnect rebroadcast). The syncer
-  checkpoint is the single durable source of truth — recover a model from it
-  with `yeto-export --checkpoint yeto-state.ckpt --model <id> --output-dir out/`
-  even if every learner is gone.
+See [docs/DESIGN.md](docs/DESIGN.md) for the merge math, transport,
+q4 wire format, snapshots, and resilience notes, and
+[docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire protocol.
 
 ## Testing
 

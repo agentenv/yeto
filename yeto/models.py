@@ -66,6 +66,18 @@ MODEL_ALIASES = {
     "minimax-m3": "MiniMaxAI/MiniMax-M3",  # size via Hub metadata
     "kimi-k27-code": "moonshotai/Kimi-K2.7-Code",  # size via Hub metadata
     "mistral-small3": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+    # Ornith (DeepReinforce agentic-coding family, MIT)
+    "ornith-9b": "deepreinforce-ai/Ornith-1.0-9B",
+    "ornith-31b": "deepreinforce-ai/Ornith-1.0-31B",
+    "ornith-35b": "deepreinforce-ai/Ornith-1.0-35B",
+    "ornith-397b": "deepreinforce-ai/Ornith-1.0-397B-FP8",  # fp8 checkpoint; bf16 at load
+    # Liquid AI LFM2.5 (edge/on-device)
+    "lfm25-230m": "LiquidAI/LFM2.5-230M",
+    "lfm25-1b": "LiquidAI/LFM2.5-1B",
+    "lfm25-8b-a1b": "LiquidAI/LFM2.5-8B-A1B",
+    # VibeThinker (small reasoning)
+    "vibethinker-15b": "WeiboAI/VibeThinker-1.5B",
+    "vibethinker-3b": "WeiboAI/VibeThinker-3B",
 }
 
 MODEL_WEIGHT_GB = {
@@ -104,6 +116,15 @@ MODEL_WEIGHT_GB = {
     "qwen3-coder-480b": 960,
     "minimax-m2": 460,  # 230B total / 10B active
     "mistral-small3": 48,
+    "ornith-9b": 19,
+    "ornith-31b": 62,
+    "ornith-35b": 70,  # MoE total
+    "ornith-397b": 794,  # 397B MoE; fp8 checkpoint, bf16 footprint
+    "lfm25-230m": 0.5,
+    "lfm25-1b": 2,
+    "lfm25-8b-a1b": 17,
+    "vibethinker-15b": 3,
+    "vibethinker-3b": 6,
 }
 
 
