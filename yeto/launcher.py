@@ -111,6 +111,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f" --grad-accum {args.grad_accum}"
         f" --inner-lr {args.inner_lr}"
         f" --fragments {args.fragments}"
+        f" --tokenize {args.tokenize}"
+        f" --stream-workers {args.stream_workers}"
         f" --wire-dtype {args.wire_dtype}"
         f" --wan-streams {args.wan_streams}"
         f" --output-dir ~/yeto-output"

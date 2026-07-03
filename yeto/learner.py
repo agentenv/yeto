@@ -24,7 +24,7 @@ import time
 import torch
 import torch.distributed as dist
 
-from .data import build_packed_dataset
+from .data import StreamingPackedBlocks, build_packed_dataset
 from .fragments import FragmentLayout, build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
 from .protocol import DTYPE_BF16, DTYPE_F32, SyncerClient
@@ -71,6 +71,19 @@ def parse_args(argv=None):
     p.add_argument("--wire-dtype", choices=["bf16", "f32"], default="bf16")
     p.add_argument("--wan-streams", type=int, default=4)
     p.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
+    p.add_argument(
+        "--tokenize",
+        choices=["stream", "preload"],
+        default="stream",
+        help="stream: tokenize asynchronously in DataLoader workers (default); "
+        "preload: materialize all blocks before training",
+    )
+    p.add_argument(
+        "--stream-workers",
+        type=int,
+        default=2,
+        help="DataLoader worker processes tokenizing ahead (stream mode)",
+    )
     p.add_argument("--max-local-steps", type=int, default=1_000_000, help="safety stop")
     p.add_argument("--output-dir", default="checkpoints/out")
     p.add_argument("--device", default=None)
@@ -151,22 +164,46 @@ def main(argv=None) -> None:
         sum(p.numel() for p in params.values()) * 2 / 1e6,
     )
 
-    dataset = build_packed_dataset(
-        args.data, tokenizer, args.learner_id, args.num_learners, args.seq_len, args.max_rows
-    )
-    sampler = None
-    if world > 1:
-        from torch.utils.data.distributed import DistributedSampler
+    if args.tokenize == "stream":
+        dataset = StreamingPackedBlocks(
+            args.data,
+            tokenizer,
+            args.learner_id,
+            args.num_learners,
+            args.seq_len,
+            args.max_rows,
+            rank=rank,
+            world=world,
+        )
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=args.micro_batch_size,
+            num_workers=args.stream_workers,
+            prefetch_factor=4 if args.stream_workers > 0 else None,
+            persistent_workers=args.stream_workers > 0,
+        )
+        log.info(
+            "streaming tokenization: %d worker(s) packing %d-token blocks ahead of training",
+            args.stream_workers,
+            args.seq_len,
+        )
+    else:
+        dataset = build_packed_dataset(
+            args.data, tokenizer, args.learner_id, args.num_learners, args.seq_len, args.max_rows
+        )
+        sampler = None
+        if world > 1:
+            from torch.utils.data.distributed import DistributedSampler
 
-        sampler = DistributedSampler(dataset, num_replicas=world, rank=rank)
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=args.micro_batch_size,
-        sampler=sampler,
-        shuffle=sampler is None,
-        drop_last=True,
-    )
-    log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)
+            sampler = DistributedSampler(dataset, num_replicas=world, rank=rank)
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=args.micro_batch_size,
+            sampler=sampler,
+            shuffle=sampler is None,
+            drop_last=True,
+        )
+        log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)
 
     if args.shard == "fsdp":
         if args.syncer != "none":

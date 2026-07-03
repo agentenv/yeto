@@ -49,6 +49,18 @@ def parse_args(argv=None):
     tune.add_argument("--grad-accum", type=int, default=4)
     tune.add_argument("--inner-lr", type=float, default=3e-4)
     tune.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
+    tune.add_argument(
+        "--tokenize",
+        choices=["stream", "preload"],
+        default="stream",
+        help="stream: async tokenization in DataLoader workers (default); preload: all upfront",
+    )
+    tune.add_argument(
+        "--stream-workers",
+        type=int,
+        default=2,
+        help="tokenizer worker processes per learner rank (stream mode)",
+    )
 
     sync = p.add_argument_group("async sync")
     sync.add_argument("--total-steps", type=int, default=64, help="outer steps T (one fragment each)")
