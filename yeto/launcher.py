@@ -123,13 +123,44 @@ torch_cuda_ok() { python3 -c 'import torch,sys; sys.exit(0 if torch.cuda.is_avai
 if torch_cuda_ok; then
   echo "[yeto-setup] existing torch already sees CUDA; keeping it"
 else
+  if ! nvidia-smi -L >/dev/null 2>&1; then
+    if lspci 2>/dev/null | grep -qi nvidia; then
+      # An NVIDIA device exists but the resident driver cannot drive it —
+      # e.g. sky's default AMI ships 535, which predates Blackwell and
+      # never loads against B200 silicon. Install the newest -open driver
+      # (SM100+ REQUIRES the open kernel modules) and give DKMS time.
+      echo "[yeto-setup] NVIDIA GPU present but driver not working; installing an open-module driver"
+      sudo apt-get -qq update
+      sudo apt-get -yqq install "linux-headers-$(uname -r)" >/dev/null 2>&1 || true
+      for pkg in nvidia-driver-580-open nvidia-driver-575-open nvidia-driver-570-open; do
+        if sudo apt-get -yqq install "$pkg" >/dev/null 2>&1; then
+          echo "[yeto-setup] installed $pkg"
+          break
+        fi
+      done
+      sudo modprobe nvidia 2>/dev/null || true
+    fi
+    tries=0
+    until nvidia-smi -L >/dev/null 2>&1; do
+      tries=$((tries+1))
+      if [ "$tries" -ge 24 ]; then
+        echo "[yeto-setup] ERROR: NVIDIA driver not ready after 120s (install failed or no GPU)" >&2
+        exit 1
+      fi
+      sleep 5
+    done
+  fi
   CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1)
   DRV=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1)
   echo "[yeto-setup] GPU compute cap ${CAP:-unknown}.x, driver ${DRV:-unknown}"
-  if [ -z "$CAP" ] || [ -z "$DRV" ]; then
-    echo "[yeto-setup] ERROR: nvidia-smi gave no GPU info; cannot select a torch wheel" >&2
+  case "$CAP" in ''|*[!0-9]*)
+    echo "[yeto-setup] ERROR: unparseable GPU compute capability: '$CAP'" >&2
     exit 1
-  fi
+  ;; esac
+  case "$DRV" in ''|*[!0-9]*)
+    echo "[yeto-setup] ERROR: unparseable NVIDIA driver version: '$DRV'" >&2
+    exit 1
+  ;; esac
   if [ "$CAP" -ge 10 ] && [ "$DRV" -lt 570 ]; then
     echo "[yeto-setup] ERROR: SM${CAP}x GPU needs cu128 (driver >= 570) but driver is $DRV" >&2
     exit 1
