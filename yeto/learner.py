@@ -419,6 +419,19 @@ def main(argv=None) -> None:
                 visit(root)
                 return found
 
+            # fully_shard cannot shard a frozen integer-storage param: it
+            # rebuilds each sharded param as an nn.Parameter, which requires a
+            # floating dtype. Quantized checkpoints store weights as int8, so
+            # sharding them needs a different strategy; replicate instead.
+            to_shard = [p for p in model.parameters() if p not in ignored]
+            non_float = {str(p.dtype) for p in to_shard if not p.dtype.is_floating_point}
+            if non_float:
+                raise RuntimeError(
+                    "--shard fsdp cannot shard this base: it has frozen "
+                    f"integer-storage weights {sorted(non_float)} (a quantized "
+                    "checkpoint). Use --shard ddp to replicate the base per GPU "
+                    "(works when it fits in one GPU's memory)."
+                )
             blocks = [b for ml in outer_module_lists(model) for b in ml]
             for block in blocks:
                 block_ignored = ignored & set(block.parameters())
@@ -474,6 +487,17 @@ def main(argv=None) -> None:
                 device_id=device if device.type == "cuda" else None,
             )
             params = trainable_params(model)
+    elif args.tuning == "lora":
+        # Frozen-base LoRA, base replicated per rank and left UNWRAPPED. The
+        # base contributes no gradients, so it needs no DDP reducer; the
+        # adapters are ordinary replicated tensors whose grads
+        # allreduce_trainable_grads averages at each optimizer step. Wrapping
+        # the base in DDP would be wrong anyway — DDP's init-time param
+        # broadcast cannot communicate a quantized base's dtypes (int8 weight
+        # storage, e8m0 block scales). Requires the base to fit per-GPU;
+        # --shard fsdp shards it when it does not. peft_model marks the LoRA
+        # save path (explicit adapter state dict, no base gather).
+        peft_model = model
     elif world > 1:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index])
         params = trainable_params(model.module)
@@ -570,11 +594,11 @@ def main(argv=None) -> None:
         else:
             save_dir = args.output_dir
             os.makedirs(save_dir, exist_ok=True)
-            if args.shard == "fsdp":
-                # fsdp+lora: the adapters are replicated ordinary tensors in
-                # `params`, so hand save_pretrained an explicit state dict
-                # through the unwrapped peft handle — no sharded base param
-                # is ever gathered or touched.
+            if peft_model is not None:
+                # lora (fsdp-sharded or replicated base): the adapters are
+                # replicated ordinary tensors in `params`, so hand
+                # save_pretrained an explicit state dict through the unwrapped
+                # peft handle — the frozen base is never gathered or touched.
                 peft_model.save_pretrained(
                     save_dir,
                     state_dict={n: p.detach().cpu() for n, p in params.items()},
@@ -640,12 +664,13 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
             if accum < args.grad_accum:
                 continue
             accum = 0
-            if args.shard == "fsdp" and args.tuning == "lora":
-                # The adapters are FSDP-ignored, so their grads were never
-                # reduced; average them across ranks before clipping. After
-                # this the replicated params/grads are identical on every
-                # rank, so a plain clip over them is correct (the sharded
-                # base is frozen and contributes no grads).
+            if args.tuning == "lora":
+                # The adapters are never grad-synced by a wrapper — fsdp+lora
+                # ignores them, the replicated path has no wrapper — so average
+                # them across ranks before clipping (no-op at world==1). After
+                # this the replicated params/grads are identical on every rank,
+                # so a plain clip over them is correct (the frozen base
+                # contributes no grads).
                 allreduce_trainable_grads(params.values(), world)
                 torch.nn.utils.clip_grad_norm_(params.values(), 1.0)
             elif args.shard == "fsdp":
