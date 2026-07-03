@@ -88,7 +88,15 @@ def load_model_and_tokenizer(args, device):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     model_id = MODEL_ALIASES.get(args.model, args.model)
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    # fsdp: originals stay fp32 (uniform dtype for flat-param groups, fp32
+    # optimizer state) and MixedPrecision computes/communicates in bf16.
+    # ddp/single: frozen base in bf16; peft leaves LoRA adapters in fp32,
+    # which keeps AdamW's exp_avg_sq in fp32 — a bf16 second moment is too
+    # noisy. Wire packing casts to the wire dtype either way.
+    if args.shard == "fsdp" or device.type != "cuda":
+        dtype = torch.float32
+    else:
+        dtype = torch.bfloat16
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_id, torch_dtype=dtype, trust_remote_code=True
@@ -103,10 +111,6 @@ def load_model_and_tokenizer(args, device):
             task_type="CAUSAL_LM",
         )
         model = get_peft_model(model, lora)
-        # peft creates adapters in fp32; unify with the base dtype (FSDP's
-        # flat-param groups require uniform dtype, and it keeps both sync
-        # strategies numerically identical).
-        model.to(dtype)
     model.to(device)
     return model, tokenizer
 
@@ -170,15 +174,26 @@ def main(argv=None) -> None:
         import functools
 
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        from torch.distributed.fsdp import MixedPrecision
         from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 
+        mixed_precision = None
+        if device.type == "cuda":
+            # fp32 originals (and optimizer state); bf16 compute and
+            # all-gather; fp32 gradient reduction.
+            mixed_precision = MixedPrecision(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.float32,
+                buffer_dtype=torch.bfloat16,
+            )
         model = FSDP(
             model,
             auto_wrap_policy=functools.partial(
                 size_based_auto_wrap_policy, min_num_params=1_000_000
             ),
             use_orig_params=True,  # required for LoRA's mixed requires_grad
-            device_id=device,
+            mixed_precision=mixed_precision,
+            device_id=device if device.type == "cuda" else None,
         )
         params = trainable_params(model)
     elif world > 1:
