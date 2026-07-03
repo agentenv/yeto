@@ -30,6 +30,21 @@ from .gpu_spec import ClusterSpec, parse_gpu_spec
 SYNCER_PORT = 29400
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# WAN transport tuning applied to every node at setup: BBR keeps throughput
+# up on lossy long-RTT paths, and raised buffer ceilings let kernel
+# auto-tuning grow windows to high-BDP sizes (we deliberately do NOT set
+# per-socket SO_SNDBUF/SO_RCVBUF — static values disable auto-tuning).
+# Every line is best-effort: restricted kernels just keep their defaults.
+WAN_TUNING = (
+    "sudo modprobe tcp_bbr 2>/dev/null || true; "
+    "sudo sysctl -qw net.core.default_qdisc=fq "
+    "net.ipv4.tcp_congestion_control=bbr 2>/dev/null || true; "
+    "sudo sysctl -qw net.core.rmem_max=67108864 net.core.wmem_max=67108864 "
+    "2>/dev/null || true; "
+    "sudo sysctl -qw 'net.ipv4.tcp_rmem=4096 131072 67108864' "
+    "'net.ipv4.tcp_wmem=4096 131072 67108864' 2>/dev/null || true"
+)
+
 # Rough per-GPU training capacity sanity check (bf16 LoRA, GB).
 GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48}
 MODEL_WEIGHT_GB = {"deepseek4flash": 568, "gemma4": 66}
@@ -60,6 +75,7 @@ def make_syncer_task(args, num_learners: int):
     )
     task = sky.Task(
         name="yeto-syncer",
+        setup=WAN_TUNING,
         run=cmd,
         file_mounts={"~/yeto-syncer": str(binary)},
     )
@@ -155,7 +171,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         }
     task = sky.Task(
         name=f"yeto-learner-{learner_id}",
-        setup="pip install -q -r requirements.txt",
+        setup=f"{WAN_TUNING}; pip install -q -r requirements.txt",
         run=run,
         envs=envs,
         num_nodes=spec.num_nodes,
