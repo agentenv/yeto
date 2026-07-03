@@ -338,19 +338,27 @@ def main(argv=None) -> None:
             # them at each optimizer-step boundary.
             peft_model = model
             # Quantized checkpoints (fp8/fp4 variants) mix dtypes inside one
-            # module — e4m3fn or int8-stored weights next to e8m0 block scales
-            # and bf16 norms — and a FlatParameter group must be uniform-dtype
-            # AND floating-point (integer storage tensors cannot be flattened
-            # at all). Shard only the largest floating dtype and replicate the
-            # rest with the adapters; the replicated bulk must therefore fit
-            # per-GPU, which the shape planner's memory model already assumes
-            # for quantized bases.
+            # module — int8/e4m3fn weight storage next to e8m0 block scales
+            # and bf16 norms. A FlatParameter group must be uniform-dtype,
+            # integer storage cannot be flattened at all, and the unshard
+            # all-gather rejects dtypes NCCL has no mapping for (e8m0fnu).
+            # Shard only the largest NCCL-collective-safe floating dtype and
+            # replicate the rest with the adapters; the replicated bulk must
+            # therefore fit per-GPU, which the shape planner's memory model
+            # already assumes for quantized bases.
+            nccl_safe = {
+                torch.bfloat16,
+                torch.float16,
+                torch.float32,
+                torch.float8_e4m3fn,
+                torch.float8_e5m2,
+            }
             ignored = list(params.values())
             frozen = [p for p in model.parameters() if not p.requires_grad]
             dtype_bytes: dict = {}
             for p in frozen:
                 dtype_bytes[p.dtype] = dtype_bytes.get(p.dtype, 0) + p.numel() * p.element_size()
-            float_bytes = {d: b for d, b in dtype_bytes.items() if d.is_floating_point}
+            float_bytes = {d: b for d, b in dtype_bytes.items() if d in nccl_safe}
             shard_dtype = max(float_bytes, key=float_bytes.get) if float_bytes else None
             if len(dtype_bytes) > 1 or shard_dtype is None:
                 ignored.extend(p for p in frozen if p.dtype != shard_dtype)
