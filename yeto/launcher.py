@@ -342,11 +342,16 @@ class LocalSyncer:
         print(f"[launcher] syncer subprocess started (pid {self.proc.pid})", flush=True)
 
     def probe(self) -> str | None:
-        """None if the subprocess is healthy, else a reason string."""
+        """None if the subprocess is healthy, else a reason string.
+
+        Exit code 0 means the syncer completed its total steps — terminal
+        success, not a failure to recover from (restarting would resume at
+        the final step, instantly re-complete, and loop until the learners
+        report done)."""
         if self.proc is None:
             return "syncer subprocess was never started"
         code = self.proc.poll()
-        if code is None:
+        if code is None or code == 0:
             return None
         return f"syncer subprocess exited with code {code}"
 
