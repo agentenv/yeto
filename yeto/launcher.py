@@ -48,21 +48,54 @@ WAN_TUNING = (
     "'net.ipv4.tcp_wmem=4096 131072 67108864' 2>/dev/null || true"
 )
 
-# Pick the torch wheel on the node, per driver generation: Blackwell nodes
-# (SM100, driver >= 570) need cu128 kernels that only torch >= 2.7 ships,
-# while Ampere/Hopper AMIs run driver 535, whose ceiling is cu121-era
-# wheels (cu128 silently loses the GPUs: torch.cuda.is_available() ->
-# False). Runs BEFORE `pip install -r requirements.txt` so dependency
-# resolution sees torch as already satisfied instead of pulling a default
-# wheel. Best-effort driver parse falls back to the widest-compat cu121.
-TORCH_SETUP = (
-    'DRV=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1); '
-    'if [ -n "$DRV" ] && [ "$DRV" -ge 570 ] 2>/dev/null; then '
-    'pip install -q "torch==2.8.*" --index-url https://download.pytorch.org/whl/cu128; '
-    "else "
-    'pip install -q "torch==2.5.1" --index-url https://download.pytorch.org/whl/cu121; '
-    "fi"
-)
+# Pick the torch wheel on the node from what the HARDWARE requires (GPU
+# compute capability) and what the HOST supports (driver version):
+# Blackwell (SM100+) only has kernels in cu128 wheels (torch >= 2.7),
+# which need driver >= 570; Ampere/Hopper AMIs run driver 535, whose
+# ceiling is cu121-era wheels — a mismatched wheel does not error, it
+# silently drops the GPUs (torch.cuda.is_available() -> False).
+#
+# Robustness properties, each one paid for by a prior incident:
+#  * decision by compute cap first — a driver-only heuristic mis-selects
+#    when the parse fails on a Blackwell node;
+#  * hard, loud failures at SETUP time (impossible combos, missing
+#    nvidia-smi, and a post-install is_available() verification) so a bad
+#    node dies in provisioning logs instead of crash-looping the fleet
+#    controller through job restarts;
+#  * idempotent: a recovery relaunch whose torch already sees CUDA skips
+#    the reinstall entirely;
+#  * runs BEFORE `pip install -r requirements.txt` so resolution treats
+#    torch as satisfied instead of dragging in a default wheel.
+TORCH_SETUP = """
+torch_cuda_ok() { python3 -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; }
+if torch_cuda_ok; then
+  echo "[yeto-setup] existing torch already sees CUDA; keeping it"
+else
+  CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1)
+  DRV=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1)
+  echo "[yeto-setup] GPU compute cap ${CAP:-unknown}.x, driver ${DRV:-unknown}"
+  if [ -z "$CAP" ] || [ -z "$DRV" ]; then
+    echo "[yeto-setup] ERROR: nvidia-smi gave no GPU info; cannot select a torch wheel" >&2
+    exit 1
+  fi
+  if [ "$CAP" -ge 10 ] && [ "$DRV" -lt 570 ]; then
+    echo "[yeto-setup] ERROR: SM${CAP}x GPU needs cu128 (driver >= 570) but driver is $DRV" >&2
+    exit 1
+  fi
+  if [ "$CAP" -ge 10 ] || [ "$DRV" -ge 570 ]; then
+    pip install -q "torch==2.8.*" --index-url https://download.pytorch.org/whl/cu128
+  elif [ "$DRV" -ge 525 ]; then
+    pip install -q "torch==2.5.1" --index-url https://download.pytorch.org/whl/cu121
+  else
+    echo "[yeto-setup] ERROR: driver $DRV predates CUDA 12 (need >= 525)" >&2
+    exit 1
+  fi
+  if ! torch_cuda_ok; then
+    echo "[yeto-setup] ERROR: freshly installed torch cannot see the GPUs" >&2
+    exit 1
+  fi
+fi
+"""
 
 # Rough per-GPU training capacity sanity check (bf16 LoRA, GB).
 GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48}
@@ -205,7 +238,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         file_mounts[f"~/sky_workdir/{PICKLED_LOSS_FILE}"] = str(REPO_ROOT / PICKLED_LOSS_FILE)
     task = sky.Task(
         name=f"yeto-learner-{learner_id}",
-        setup=f"{WAN_TUNING}; {TORCH_SETUP}; pip install -q -r requirements.txt",
+        setup="\n".join([WAN_TUNING, TORCH_SETUP, "pip install -q -r requirements.txt"]),
         run=run,
         envs=envs,
         num_nodes=spec.num_nodes,
