@@ -44,6 +44,28 @@ class Offering:
     cloud: str = "aws"  # lowercase sky cloud name
 
 
+# Frozen-base storage dtypes each GPU generation supports. Hardware-native
+# constraint per compute capability: fp4 needs SM100+ (Blackwell), fp8 needs
+# SM89+ (Ada/Hopper), bf16 needs SM80+ (Ampere). V100/T4 predate bf16 and
+# are excluded from all three — they were never viable training targets here.
+SUPPORTED_BASE_DTYPES: dict[str, tuple[str, ...]] = {
+    "A100": ("bf16",),
+    "A100-80GB": ("bf16",),
+    "A10G": ("bf16",),
+    "L4": ("bf16", "fp8"),
+    "L40S": ("bf16", "fp8"),
+    "H100": ("bf16", "fp8"),
+    "H200": ("bf16", "fp8"),
+    "B200": ("bf16", "fp8", "fp4"),
+    "V100": (),
+    "T4": (),
+}
+
+
+def supports_base_dtype(gpu: str, base_dtype: str) -> bool:
+    return base_dtype in SUPPORTED_BASE_DTYPES.get(gpu, ())
+
+
 def efa_capable(instance_type: str) -> bool:
     """True for the p4d/p4de/p5 families — the only AWS GPU instances with
     EFA fabric, i.e. the only ones where multi-node data-parallel training

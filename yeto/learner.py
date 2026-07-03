@@ -72,6 +72,14 @@ def parse_args(argv=None):
     )
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
+    p.add_argument(
+        "--base-dtype",
+        choices=["bf16", "fp8", "fp4"],
+        default="bf16",
+        help="frozen-base checkpoint dtype (lora only; fp4 needs SM100+, "
+        "fp8 SM89+): resolves aliases to repos published in that dtype — "
+        "yeto never quantizes weights itself",
+    )
     p.add_argument("--seq-len", type=int, default=2048)
     p.add_argument("--micro-batch-size", type=int, default=1)
     p.add_argument("--grad-accum", type=int, default=1)
@@ -132,7 +140,15 @@ def setup_distributed() -> tuple[int, int]:
 def load_model_and_tokenizer(args, device):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    model_id = MODEL_ALIASES.get(args.model, args.model)
+    from .models import resolve_variant
+
+    # A non-bf16 base dtype resolves to a checkpoint PUBLISHED in that dtype
+    # (official quantization, and a 2-4x smaller download); yeto never
+    # quantizes weights itself. transformers picks the scheme up from the
+    # repo's own quantization config. The shape planner enforces hardware
+    # gates (catalog.SUPPORTED_BASE_DTYPES: fp4 SM100+, fp8 SM89+).
+    base_dtype = getattr(args, "base_dtype", "bf16")
+    model_id = resolve_variant(args.model, base_dtype)
     # fsdp+full: originals stay fp32 (uniform dtype for flat-param groups,
     # fp32 optimizer state) and MixedPrecision computes/communicates in bf16.
     # ddp/single and fsdp+lora: frozen base in bf16; peft leaves LoRA
@@ -143,6 +159,11 @@ def load_model_and_tokenizer(args, device):
         dtype = torch.float32
     else:
         dtype = torch.bfloat16
+    if base_dtype != "bf16":
+        if args.tuning != "lora":
+            raise ValueError("--base-dtype fp8/fp4 requires --tuning lora (frozen base only)")
+        if device.type != "cuda":
+            raise ValueError("--base-dtype fp8/fp4 requires CUDA")
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_id, torch_dtype=dtype, trust_remote_code=True

@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 
 from ..gpu_spec import _GPU_CANONICAL
 from .cache import TTLCache
-from .catalog import Offering, effective_tflops, list_offerings
+from .catalog import Offering, effective_tflops, list_offerings, supports_base_dtype
 from .ilp import Candidate, Plan, solve
 from .memory import fits, min_nodes, model_weights_gb
 from .providers import (
@@ -65,6 +65,7 @@ class ShapeResult:
     price_margin: float
     head_cost: float
     fetch_seconds: float
+    base_dtype: str = "bf16"  # frozen-base storage dtype the plan assumed
 
 
 def _candidate_key(off: Offering, nodes: int) -> str:
@@ -98,6 +99,7 @@ def build_shape(
     clouds: list[str] | None = None,
     runpod_providers: RunPodProviders | None = None,
     target_tflops: float | None = None,
+    base_dtype: str = "bf16",
 ) -> ShapeResult:
     """Compute the fleet plan. `providers`/`runpod_providers` are injectable
     for tests.
@@ -168,7 +170,14 @@ def build_shape(
     rejections: list[Rejection] = []
     sized_all: list[tuple[Offering, int]] = []
     for off in offerings:
-        nodes = min_nodes(weights, tuning, off.gpu_mem_gb, off.gpus_per_node, seq_len)
+        if not supports_base_dtype(off.gpu, base_dtype):
+            rejections.append(
+                Rejection(_candidate_key(off, 1), f"base dtype {base_dtype} unsupported on {off.gpu}")
+            )
+            continue
+        nodes = min_nodes(
+            weights, tuning, off.gpu_mem_gb, off.gpus_per_node, seq_len, base_dtype=base_dtype
+        )
         if nodes is None:
             rejections.append(
                 Rejection(_candidate_key(off, 1), f"model does not fit (≤8 nodes of {off.gpus_per_node}x{off.gpu})")
@@ -429,7 +438,12 @@ def build_shape(
         next(o.gpu_mem_gb for o, _ in sized if o.instance_type == by_key[k].instance_type and o.region == by_key[k].region)
         for k in plan.counts
     ]
-    shard = "ddp" if planned_mems and all(fits(weights, tuning, m, 1, seq_len) for m in planned_mems) else "fsdp"
+    shard = (
+        "ddp"
+        if planned_mems
+        and all(fits(weights, tuning, m, 1, seq_len, base_dtype=base_dtype) for m in planned_mems)
+        else "fsdp"
+    )
     return ShapeResult(
         plan=plan,
         candidates=candidates,
@@ -457,6 +471,7 @@ def build_shape(
         price_margin=price_margin,
         head_cost=head_cost,
         fetch_seconds=time.monotonic() - t0,
+        base_dtype=base_dtype,
     )
 
 
@@ -469,7 +484,7 @@ def launch_argv(result: ShapeResult, model: str, tuning: str, data: str) -> list
     # Learner disk must hold the HF weight cache plus headroom; the 512 GB
     # launch default silently underfits big models.
     disk_gb = max(512, int(result.weights_gb * 1.5) + 100)
-    return [
+    argv = [
         "launch",
         "--gpu", ",".join(entries),
         "--model", model,
@@ -478,6 +493,9 @@ def launch_argv(result: ShapeResult, model: str, tuning: str, data: str) -> list
         "--disk-size", str(disk_gb),
         "--data", data,
     ]
+    if result.base_dtype != "bf16":
+        argv += ["--base-dtype", result.base_dtype]
+    return argv
 
 
 def to_json_dict(result: ShapeResult, model: str, budget: float, tuning: str, data: str | None) -> dict:

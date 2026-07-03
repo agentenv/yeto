@@ -230,3 +230,32 @@ def test_hub_zero_bytes_points_at_weights_gb_flag(monkeypatch):
     monkeypatch.setattr(memory, "_fetch_hub_weights", lambda model_id: 0.0)
     with pytest.raises(ValueError, match="--weights-gb"):
         model_weights_gb("acme/empty-model")
+
+
+def test_base_dtype_shrinks_footprint():
+    from yeto.shape.memory import fits, min_nodes
+
+    # 568 GB on one 8x80GB node: bf16 fails (79 > 73.6), fp8 fits
+    # (568*0.53/8 + 8 = 45.6), fp4 fits with lots of room.
+    assert not fits(568, "lora", 80, 8)
+    assert fits(568, "lora", 80, 8, base_dtype="fp8")
+    assert fits(568, "lora", 80, 8, base_dtype="fp4")
+    assert min_nodes(568, "lora", 80, 8, base_dtype="fp8") == 1
+
+
+def test_quantized_base_requires_lora():
+    import pytest as _pytest
+
+    from yeto.shape.memory import fits
+
+    with _pytest.raises(ValueError, match="requires --tuning lora"):
+        fits(66, "full", 80, 8, base_dtype="fp8")
+
+
+def test_unknown_base_dtype_rejected():
+    import pytest as _pytest
+
+    from yeto.shape.memory import fits
+
+    with _pytest.raises(ValueError, match="unknown base dtype"):
+        fits(66, "lora", 80, 8, base_dtype="int3")

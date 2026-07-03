@@ -102,6 +102,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="which tokens carry loss: assistant-message tokens only (default) or every token",
     )
     tune.add_argument("--lora-r", type=int, default=16)
+    tune.add_argument(
+        "--base-dtype",
+        choices=["bf16", "fp8", "fp4"],
+        default="bf16",
+        help="frozen-base checkpoint dtype (lora only): resolves to a repo "
+        "PUBLISHED in that dtype (yeto never quantizes weights itself; see "
+        "MODEL_VARIANTS in yeto/models.py). fp8 halves, fp4 quarters base "
+        "memory and download; hardware-gated (fp4: SM100+, fp8: SM89+). "
+        "Unrelated to --wire-dtype sync compression",
+    )
     tune.add_argument("--seq-len", type=int, default=2048)
     tune.add_argument("--micro-batch-size", type=int, default=1)
     tune.add_argument("--grad-accum", type=int, default=4)
@@ -280,6 +290,13 @@ def build_parser() -> argparse.ArgumentParser:
         "with --budget for 'cheapest plan reaching the target under a cap')",
     )
     shape.add_argument("--tuning", choices=["lora", "full"], default="lora")
+    shape.add_argument(
+        "--base-dtype",
+        choices=["bf16", "fp8", "fp4"],
+        default="bf16",
+        help="frozen-base storage dtype to plan for (lora only); shrinks "
+        "islands but gates GPUs by capability (fp4: B200; fp8: SM89+)",
+    )
     shape.add_argument("--seq-len", type=int, default=2048)
     shape.add_argument("--data", default=None, help="HF dataset id (fills the launch line; required with --apply)")
     shape.add_argument(
@@ -464,6 +481,7 @@ def _resolve_auto_fleet(args) -> int:
             target_tflops=args.flops,
             tuning=args.tuning,
             seq_len=args.seq_len,
+            base_dtype=args.base_dtype,
         )
     except (ValueError, RuntimeError) as e:
         print(f"[yeto] fleet planning failed: {e}", file=sys.stderr)
@@ -1020,6 +1038,7 @@ def cmd_shape(args) -> int:
             strict_capacity_check=args.strict_capacity_check,
             clouds=args.clouds.split(",") if args.clouds else None,
             target_tflops=args.flops,
+            base_dtype=args.base_dtype,
         )
     except (ValueError, RuntimeError) as e:
         print(f"[yeto] shape failed: {e}", file=sys.stderr)

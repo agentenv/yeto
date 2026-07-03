@@ -427,3 +427,24 @@ def test_target_flops_mode_minimizes_cost(fake_env):
 def test_objective_required(fake_env):
     with pytest.raises(ValueError, match="--budget and/or --flops"):
         _shape(fake_env, budget=None)
+
+
+def test_base_dtype_gates_gpus_and_flows_to_launch_line(fake_env, monkeypatch):
+    b200 = Offering("B200", "p6-b200.48xlarge", 8, 192, "us-east-2", 11.4, 113.9, 180)
+    monkeypatch.setattr(
+        plan_mod,
+        "list_offerings",
+        lambda regions, gpus, cache, clouds=("aws",): OFFERINGS + [b200],
+    )
+    fake = FakeAws(
+        QUOTAS,
+        {**SCORES, ("p6-b200.48xlarge", 1, "us-east-2"): 9},
+        {**CODES, "p6-b200.48xlarge": "L-7212CCBC"},
+    )
+    result = _shape(fake, budget=40.0, base_dtype="fp4")
+    reasons = {r.key: r.reason for r in result.rejections}
+    assert "base dtype fp4 unsupported on H100" in reasons["aws:8xh100@us-east-2"]
+    assert "base dtype fp4 unsupported on A100-80GB" in reasons["aws:8xa100-80gb@us-west-2"]
+    assert list(result.plan.counts) == ["aws:8xb200@us-east-2"]
+    argv = plan_mod.launch_argv(result, "gemma4", "lora", "org/data")
+    assert argv[argv.index("--base-dtype") + 1] == "fp4"

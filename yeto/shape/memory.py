@@ -17,11 +17,17 @@ from typing import Any
 from ..models import MODEL_ALIASES
 
 # Per-GPU shard multiplier over bf16 weight bytes. lora: only the frozen
-# bf16 base is sharded (adapters are negligible and replicated). full:
+# base is sharded (adapters are negligible and replicated). full:
 # learner.py's fsdp-full keeps fp32 originals + fp32 optimizer state
 # (see the dtype comment there) — fp32 master + grad + Adam m,v is
 # ~16 bytes/param vs the 2 bytes/param the bf16 weight figure measures.
 _TUNING_FACTOR = {"lora": 1.0, "full": 8.0}
+
+# Frozen-base storage dtype multiplier over the bf16 figure (lora only —
+# a quantized base cannot be a full-tuning master copy). fp8/fp4 include
+# ~6% for blockwise scale tensors. The wire q4 format is unrelated: it
+# compresses trainable-delta traffic, not base storage.
+_BASE_DTYPE_FACTOR = {"bf16": 1.0, "fp8": 0.53, "fp4": 0.28}
 
 
 def _fetch_hub_param_count(model_id: str) -> int:
@@ -123,20 +129,29 @@ def fits(
     gpu_mem_gb: int,
     total_gpus: int,
     seq_len: int = 2048,
+    base_dtype: str = "bf16",
 ) -> bool:
     """Does the FSDP-sharded footprint fit on each GPU of the island?
 
     shard = weights / total_gpus, scaled by the tuning-mode factor (see
-    _TUNING_FACTOR). Overhead: 2 GB CUDA context/fragmentation plus a
-    ~6 GB-at-2048 activation estimate (micro-batch 1, scales linearly
-    with sequence length). We only claim 92% of the card — allocator
-    fragmentation and transient all-gather buffers eat the rest.
+    _TUNING_FACTOR) and the frozen-base storage dtype (_BASE_DTYPE_FACTOR;
+    lora only — a quantized base cannot hold full-tuning master weights).
+    Overhead: 2 GB CUDA context/fragmentation plus a ~6 GB-at-2048
+    activation estimate (micro-batch 1, scales linearly with sequence
+    length). We only claim 92% of the card — allocator fragmentation and
+    transient all-gather buffers eat the rest.
     """
     try:
         factor = _TUNING_FACTOR[tuning]
     except KeyError:
         raise ValueError(f"unknown tuning mode {tuning!r} (expected 'lora' or 'full')")
-    shard_gb = weights_gb / total_gpus * factor
+    try:
+        dtype_factor = _BASE_DTYPE_FACTOR[base_dtype]
+    except KeyError:
+        raise ValueError(f"unknown base dtype {base_dtype!r} (expected bf16/fp8/fp4)")
+    if base_dtype != "bf16" and tuning != "lora":
+        raise ValueError("--base-dtype fp8/fp4 requires --tuning lora (frozen base only)")
+    shard_gb = weights_gb / total_gpus * factor * dtype_factor
     overhead_gb = 2.0 + 6.0 * (seq_len / 2048)
     return shard_gb + overhead_gb <= 0.92 * gpu_mem_gb
 
@@ -148,6 +163,7 @@ def min_nodes(
     gpus_per_node: int,
     seq_len: int = 2048,
     max_nodes: int = 8,
+    base_dtype: str = "bf16",
 ) -> int | None:
     """Smallest island (in nodes) that fits the model; None if even
     max_nodes does not.
@@ -159,6 +175,6 @@ def min_nodes(
     with island size. Want more compute? Add islands, not nodes.
     """
     for n in range(1, max_nodes + 1):
-        if fits(weights_gb, tuning, gpu_mem_gb, n * gpus_per_node, seq_len):
+        if fits(weights_gb, tuning, gpu_mem_gb, n * gpus_per_node, seq_len, base_dtype):
             return n
     return None

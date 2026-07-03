@@ -140,3 +140,16 @@ def test_peak_tflops_keys_subset_of_launcher_mem_table():
     from yeto import launcher
 
     assert set(PEAK_TFLOPS_BF16) <= set(launcher.GPU_MEM_GB)
+
+
+def test_base_dtype_capability_table():
+    from yeto.shape.catalog import PEAK_TFLOPS_BF16, SUPPORTED_BASE_DTYPES, supports_base_dtype
+
+    assert supports_base_dtype("B200", "fp4")
+    assert not supports_base_dtype("H100", "fp4")  # fp4 is SM100+ only
+    assert supports_base_dtype("H100", "fp8")
+    assert not supports_base_dtype("A100", "fp8")  # Ampere predates fp8
+    assert supports_base_dtype("A100", "bf16")
+    assert not supports_base_dtype("V100", "bf16")  # pre-Ampere
+    # Every GPU we price has a capability entry.
+    assert set(PEAK_TFLOPS_BF16) <= set(SUPPORTED_BASE_DTYPES)
