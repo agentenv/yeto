@@ -24,6 +24,7 @@ import time
 import torch
 import torch.distributed as dist
 
+from .autobatch import int_or_auto, rebalance_grad_accum, resolve_micro_batch_size
 from .data import StreamingPackedBlocks, build_packed_dataset
 from .fragments import FragmentLayout, build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
@@ -89,7 +90,14 @@ def parse_args(argv=None):
         "yeto never quantizes weights itself",
     )
     p.add_argument("--seq-len", type=int, default=2048)
-    p.add_argument("--micro-batch-size", type=int, default=1)
+    p.add_argument(
+        "--micro-batch-size",
+        type=int_or_auto,
+        default="auto",
+        help="per-GPU micro batch; 'auto' (default) probes the largest size "
+        "that fits VRAM at startup and shrinks --grad-accum to keep the "
+        "effective batch constant",
+    )
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--inner-lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=0.01)
@@ -310,54 +318,6 @@ def main(argv=None) -> None:
         sum(p.numel() for p in params.values()) * 2 / 1e6,
     )
 
-    if args.tokenize == "stream":
-        dataset = StreamingPackedBlocks(
-            args.data,
-            tokenizer,
-            args.learner_id,
-            args.num_learners,
-            args.seq_len,
-            args.max_rows,
-            rank=rank,
-            world=world,
-            train_on=args.train_on,
-        )
-        loader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=args.micro_batch_size,
-            num_workers=args.stream_workers,
-            prefetch_factor=4 if args.stream_workers > 0 else None,
-            persistent_workers=args.stream_workers > 0,
-        )
-        log.info(
-            "streaming tokenization: %d worker(s) packing %d-token blocks ahead of training",
-            args.stream_workers,
-            args.seq_len,
-        )
-    else:
-        dataset = build_packed_dataset(
-            args.data,
-            tokenizer,
-            args.learner_id,
-            args.num_learners,
-            args.seq_len,
-            args.max_rows,
-            train_on=args.train_on,
-        )
-        sampler = None
-        if world > 1:
-            from torch.utils.data.distributed import DistributedSampler
-
-            sampler = DistributedSampler(dataset, num_replicas=world, rank=rank)
-        loader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=args.micro_batch_size,
-            sampler=sampler,
-            shuffle=sampler is None,
-            drop_last=True,
-        )
-        log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)
-
     peft_model = None  # unwrapped peft handle, kept for fsdp+lora save
     if args.shard == "fsdp":
         import functools
@@ -428,6 +388,69 @@ def main(argv=None) -> None:
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / max(1, args.warmup_steps))
     )
+
+    # Resolve the micro batch AFTER wrapping and optimizer construction
+    # (memory-accurate) and BEFORE the loader/syncer exist (nothing counts
+    # the probe). See yeto/autobatch.py.
+    requested_mb = args.micro_batch_size
+    args.micro_batch_size = resolve_micro_batch_size(
+        args, model, params, opt, tokenizer, device, world
+    )
+    if requested_mb == "auto":
+        args.grad_accum = rebalance_grad_accum(args.grad_accum, args.micro_batch_size)
+        log.info(
+            "auto micro-batch: %d per GPU (grad-accum -> %d)",
+            args.micro_batch_size,
+            args.grad_accum,
+        )
+
+    if args.tokenize == "stream":
+        dataset = StreamingPackedBlocks(
+            args.data,
+            tokenizer,
+            args.learner_id,
+            args.num_learners,
+            args.seq_len,
+            args.max_rows,
+            rank=rank,
+            world=world,
+            train_on=args.train_on,
+        )
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=args.micro_batch_size,
+            num_workers=args.stream_workers,
+            prefetch_factor=4 if args.stream_workers > 0 else None,
+            persistent_workers=args.stream_workers > 0,
+        )
+        log.info(
+            "streaming tokenization: %d worker(s) packing %d-token blocks ahead of training",
+            args.stream_workers,
+            args.seq_len,
+        )
+    else:
+        dataset = build_packed_dataset(
+            args.data,
+            tokenizer,
+            args.learner_id,
+            args.num_learners,
+            args.seq_len,
+            args.max_rows,
+            train_on=args.train_on,
+        )
+        sampler = None
+        if world > 1:
+            from torch.utils.data.distributed import DistributedSampler
+
+            sampler = DistributedSampler(dataset, num_replicas=world, rank=rank)
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=args.micro_batch_size,
+            sampler=sampler,
+            shuffle=sampler is None,
+            drop_last=True,
+        )
+        log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)
 
     wire_dtype = {"bf16": DTYPE_BF16, "f32": DTYPE_F32, "q4": DTYPE_Q4}[args.wire_dtype]
     client = None

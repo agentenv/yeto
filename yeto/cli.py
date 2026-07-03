@@ -129,7 +129,20 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "Unrelated to --wire-dtype sync compression",
     )
     tune.add_argument("--seq-len", type=int, default=2048)
-    tune.add_argument("--micro-batch-size", type=int, default=1)
+
+    def int_or_auto(value: str):
+        # duplicated from yeto/autobatch.py: importing it would pull torch
+        # into the CLI path.
+        return value if value == "auto" else int(value)
+
+    tune.add_argument(
+        "--micro-batch-size",
+        type=int_or_auto,
+        default="auto",
+        help="per-GPU micro batch; 'auto' (default) probes the largest size "
+        "that fits each learner's VRAM at startup and shrinks --grad-accum "
+        "to keep the effective batch constant",
+    )
     tune.add_argument("--grad-accum", type=int, default=4)
     tune.add_argument("--inner-lr", type=float, default=3e-4)
     tune.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
