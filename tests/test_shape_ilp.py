@@ -12,6 +12,8 @@ from __future__ import annotations
 import itertools
 import random
 
+import pytest
+
 from yeto.shape.ilp import Candidate, Plan, solve
 
 
@@ -197,3 +199,64 @@ def test_max_count_caps_a_candidate():
     )
     plan = solve([a], budget=100.0, quota_limits={}, max_islands=16, head_cost=0.0)
     assert plan.counts == {"capped": 1}
+
+
+def _tcand(key, tflops, price, **kw):
+    return Candidate(
+        key=key, region="r", gpu="G", instance_type="t-" + key, nodes=1,
+        gpus_per_node=8, vcpus_per_island=96, price_per_hour=price,
+        eff_tflops=tflops, quota_bucket=None, score=9, **kw,
+    )
+
+
+def test_target_mode_minimizes_cost_then_maximizes_tflops():
+    a = _tcand("a", 100.0, 10.0)  # 10 TFLOPs/$
+    b = _tcand("b", 60.0, 5.0)  # 12 TFLOPs/$
+    plan = solve([a, b], budget=None, quota_limits={}, head_cost=0.0, target_tflops=100.0)
+    # 2xB reaches 120 for the same $10 as 1xA's 100: cost ties, TFLOPs wins.
+    assert plan.counts == {"b": 2}
+    assert plan.total_cost == pytest.approx(10.0)
+
+
+def test_target_mode_with_budget_cap():
+    a = _tcand("a", 100.0, 10.0)
+    plan = solve([a], budget=10.5, quota_limits={}, head_cost=0.5, target_tflops=150.0)
+    # Reaching 150 needs 2xA ($20) but the cap allows only $10 of islands.
+    assert plan.counts == {}
+    assert plan.binding == ["target-flops"]
+
+
+def test_target_mode_unreachable_reports_binding():
+    a = _tcand("a", 10.0, 1.0)
+    plan = solve([a], budget=None, quota_limits={}, max_islands=3, head_cost=0.0, target_tflops=1000.0)
+    assert plan.counts == {} and plan.binding == ["target-flops"]
+
+
+def test_target_mode_brute_force_cross_check():
+    import itertools
+    import random
+
+    rng = random.Random(1)
+    for _ in range(25):
+        cands = [
+            _tcand(f"c{i}", rng.uniform(10, 500), rng.uniform(0.5, 30))
+            for i in range(rng.randint(3, 5))
+        ]
+        max_islands = 5
+        target = rng.uniform(50, 900)
+        best = None  # (cost, -tflops)
+        for combo in itertools.product(range(max_islands + 1), repeat=len(cands)):
+            if sum(combo) > max_islands:
+                continue
+            tflops = sum(x * c.eff_tflops for x, c in zip(combo, cands))
+            if tflops + 1e-9 < target:
+                continue
+            cost = sum(x * c.price_per_hour for x, c in zip(combo, cands))
+            key = (round(cost, 9), -round(tflops, 9))
+            if best is None or key < best:
+                best = key
+        plan = solve(cands, budget=None, quota_limits={}, max_islands=max_islands, head_cost=0.0, target_tflops=target)
+        if best is None:
+            assert plan.counts == {}
+        else:
+            assert (round(plan.total_cost, 9), -round(plan.total_tflops, 9)) == best

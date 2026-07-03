@@ -78,18 +78,27 @@ def _tiebreak(counts: dict[str, int]) -> tuple[list[str], list[tuple[str, int]]]
 
 def solve(
     candidates: list[Candidate],
-    budget: float,
+    budget: float | None,
     quota_limits: dict[tuple[str, str], float],
     max_islands: int = 16,
     head_cost: float = 0.40,
+    target_tflops: float | None = None,
 ) -> Plan:
-    """Solve the fleet ILP exactly.
+    """Solve the fleet ILP exactly, in one of two objective modes.
 
-    `budget` is total $/hr including the head VM, so islands only get
-    `budget - head_cost` to spend.  Returns an empty plan (counts={}) with
-    binding explaining why when nothing fits — callers render the message.
+    Budget mode (target_tflops=None): lexicographically maximize TFLOPs,
+    then minimize cost, subject to `budget` ($/hr total including the head
+    VM, so islands only get `budget - head_cost` to spend).
+
+    Target mode (target_tflops set): minimize cost subject to total TFLOPs
+    >= target (then maximize TFLOPs among cost-optimal plans). `budget` may
+    be None (uncapped) or double as an additional cap.
+
+    Returns an empty plan (counts={}) with binding explaining why when
+    nothing fits — callers render the message.
     """
-    room = budget - head_cost
+    room = (budget - head_cost) if budget is not None else math.inf
+    fail_binding = ["target-flops"] if target_tflops is not None else ["budget"]
     if room <= 0:
         # The head VM alone exhausts the budget; nothing can launch.
         return Plan(counts={}, total_tflops=0.0, total_cost=0.0, binding=["budget"])
@@ -102,7 +111,7 @@ def solve(
         if c.eff_tflops > 0 and c.price_per_hour <= room + _EPS
     ]
     if not usable:
-        return Plan(counts={}, total_tflops=0.0, total_cost=0.0, binding=["budget"])
+        return Plan(counts={}, total_tflops=0.0, total_cost=0.0, binding=list(fail_binding))
 
     # Best value-per-dollar first so the greedy-ish DFS finds a strong
     # incumbent immediately; key as secondary sort keeps order deterministic.
@@ -124,45 +133,70 @@ def solve(
         suffix_ratio[i] = max(suffix_ratio[i + 1], 0.0 if math.isinf(r) else r)
         suffix_tflops[i] = max(suffix_tflops[i + 1], order[i].eff_tflops)
 
+    # Budget mode maximizes (tflops, -cost) and the empty plan is a valid
+    # incumbent; target mode maximizes (-cost, tflops) over plans meeting
+    # the target, so it starts with no incumbent at all.
     best_counts: dict[str, int] = {}
     best_tflops = 0.0
     best_cost = 0.0
-    best_key = (0.0, -0.0)  # (round(tflops, 9), -round(cost, 9)), maximized
+    best_found = target_tflops is None
+    best_key = (0.0, -0.0)
 
     cur_counts: dict[str, int] = {}
     quota_used: dict[tuple[str, str], float] = {}
 
     def consider(tflops: float, cost: float) -> None:
-        nonlocal best_counts, best_tflops, best_cost, best_key
-        key = (round(tflops, 9), -round(cost, 9))
-        if key > best_key or (
-            key == best_key and _tiebreak(cur_counts) < _tiebreak(best_counts)
+        nonlocal best_counts, best_tflops, best_cost, best_key, best_found
+        if target_tflops is not None:
+            if tflops + _EPS < target_tflops:
+                return
+            key = (-round(cost, 9), round(tflops, 9))
+        else:
+            key = (round(tflops, 9), -round(cost, 9))
+        if (
+            not best_found
+            or key > best_key
+            or (key == best_key and _tiebreak(cur_counts) < _tiebreak(best_counts))
         ):
             best_counts = dict(cur_counts)
             best_tflops, best_cost, best_key = tflops, cost, key
+            best_found = True
 
     def dfs(i: int, budget_left: float, islands_left: int, tflops: float, cost: float) -> None:
         if i == n or islands_left == 0:
             consider(tflops, cost)
             return
-        bound = min(
-            math.inf if suffix_free[i] else tflops + budget_left * suffix_ratio[i],
-            tflops + islands_left * suffix_tflops[i],
+        max_more = min(
+            math.inf if suffix_free[i] else budget_left * suffix_ratio[i],
+            islands_left * suffix_tflops[i],
         )
-        bound_r = round(bound, 9)
-        if bound_r < best_key[0]:
-            return
-        if bound_r == best_key[0] and round(cost, 9) > -best_key[1]:
-            # Cannot beat the incumbent's TFLOPs, and cost only grows from
-            # here (prices >= 0), so cost cannot beat it either.  Equal cost
-            # keeps exploring so the key tie-break stays authoritative.
-            return
+        if target_tflops is not None:
+            if round(tflops + max_more, 9) < target_tflops - _EPS:
+                return  # the target is unreachable from here
+            extra = max(0.0, target_tflops - tflops)
+            if extra > 0:
+                # Admissible lower bound on the cost still needed to reach
+                # the target: buy the deficit at the best remaining rate.
+                lb = 0.0 if suffix_free[i] else extra / suffix_ratio[i]
+            else:
+                lb = 0.0
+            if best_found and round(cost + lb, 9) > -best_key[0]:
+                return  # cannot get cheaper than the incumbent
+        else:
+            bound_r = round(tflops + max_more, 9)
+            if bound_r < best_key[0]:
+                return
+            if bound_r == best_key[0] and round(cost, 9) > -best_key[1]:
+                # Cannot beat the incumbent's TFLOPs, and cost only grows from
+                # here (prices >= 0), so cost cannot beat it either.  Equal cost
+                # keeps exploring so the key tie-break stays authoritative.
+                return
 
         c = order[i]
         ub = islands_left
         if c.max_count is not None:
             ub = min(ub, c.max_count)
-        if c.price_per_hour > 0:
+        if c.price_per_hour > 0 and not math.isinf(budget_left):
             ub = min(ub, int((budget_left + _EPS) // c.price_per_hour))
         cap = quota_limits.get(c.quota_bucket) if c.quota_bucket is not None else None
         if cap is not None and c.vcpus_per_island > 0:
@@ -192,13 +226,17 @@ def solve(
 
     dfs(0, room, max_islands, 0.0, 0.0)
 
+    if not best_found:
+        # Target mode with an unreachable target: no feasible plan exists.
+        return Plan(counts={}, total_tflops=0.0, total_cost=0.0, binding=["target-flops"])
+
     counts = dict(sorted(best_counts.items()))
     total_cost = best_cost + head_cost if counts else 0.0
 
     # Report which constraints are tight so callers can explain the plan
     # ("add quota in us-east-2 to grow", "raise the budget", ...).
     binding: list[str] = []
-    if min(c.price_per_hour for c in usable) > (budget - total_cost) + _EPS:
+    if budget is not None and min(c.price_per_hour for c in usable) > (budget - total_cost) + _EPS:
         binding.append("budget")
     by_key = {c.key: c for c in usable}
     bucket_used: dict[tuple[str, str], float] = {}

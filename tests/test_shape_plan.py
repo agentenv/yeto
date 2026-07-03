@@ -413,3 +413,17 @@ def test_runpod_launch_key_parses_in_gpu_grammar(multi_cloud_env):
     assert rp_keys
     (spec,) = parse_gpu_spec(rp_keys[0])
     assert spec.cloud == "runpod" and spec.gpus_per_node == 8
+
+
+def test_target_flops_mode_minimizes_cost(fake_env):
+    # 700 TFLOPs is reachable by one p4de island ($15) — far cheaper than
+    # the H100 island ($34) that budget mode would pick.
+    result = _shape(fake_env, budget=None, target_tflops=700.0)
+    assert result.plan.counts == {"aws:8xa100-80gb@us-west-2": 1}
+    text = plan_mod.render(result, "gemma4", None, "lora", target_tflops=700.0)
+    assert "target ≥ 700 TFLOPs" in text
+
+
+def test_objective_required(fake_env):
+    with pytest.raises(ValueError, match="--budget and/or --flops"):
+        _shape(fake_env, budget=None)

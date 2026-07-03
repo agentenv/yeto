@@ -38,9 +38,27 @@ SUBCOMMANDS = ("launch", "shape", "status", "logs", "down", "_worker", "_head")
 def _add_launch_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--gpu",
-        required=True,
+        default=None,
         help="comma-separated learner clusters: cloud:[NODESx]COUNTxGPU[@region], "
-        "e.g. aws:4x8xa100@us-east-2,gcp:8xa100@us-central1",
+        "e.g. aws:4x8xa100@us-east-2,gcp:8xa100@us-central1. Omit to plan the "
+        "fleet automatically from --budget and/or --flops (yeto shape)",
+    )
+    p.add_argument(
+        "--budget",
+        type=float,
+        default=None,
+        help="auto-fleet only: $/hr budget for the planner (rejects --gpu)",
+    )
+    p.add_argument(
+        "--flops",
+        type=float,
+        default=None,
+        help="auto-fleet only: target effective TFLOPs for the planner (rejects --gpu)",
+    )
+    p.add_argument(
+        "--confirm",
+        action="store_true",
+        help="auto-fleet only: launch the planned fleet without asking",
     )
     p.add_argument("--model", required=True, help="model alias (gemma4|deepseek4flash) or HF id")
     p.add_argument("--data", required=True, help="HF dataset id (messages-format chat traces)")
@@ -246,7 +264,14 @@ def build_parser() -> argparse.ArgumentParser:
         "cached for 1 hour.",
     )
     shape.add_argument("--model", required=True, help="model alias or HF id")
-    shape.add_argument("--budget", type=float, required=True, help="fleet budget in $/hr (includes head VM)")
+    shape.add_argument("--budget", type=float, default=None, help="fleet budget in $/hr (includes head VM)")
+    shape.add_argument(
+        "--flops",
+        type=float,
+        default=None,
+        help="target effective TFLOPs: minimize cost to reach it (combine "
+        "with --budget for 'cheapest plan reaching the target under a cap')",
+    )
     shape.add_argument("--tuning", choices=["lora", "full"], default="lora")
     shape.add_argument("--seq-len", type=int, default=2048)
     shape.add_argument("--data", default=None, help="HF dataset id (fills the launch line; required with --apply)")
@@ -408,7 +433,67 @@ def _print_detach_hints(name: str) -> None:
     )
 
 
+def _fleet_args_error(args) -> str | None:
+    """Validate the --gpu / --budget / --flops combination."""
+    if args.gpu is not None and (args.budget is not None or args.flops is not None):
+        return "--budget/--flops belong to auto-fleet planning; drop them or drop --gpu"
+    if args.gpu is None and args.budget is None and args.flops is None:
+        return "pass --gpu, or --budget and/or --flops for an auto-planned fleet"
+    return None
+
+
+def _resolve_auto_fleet(args) -> int:
+    """Plan the fleet with yeto shape, show it, confirm, and fill args.gpu.
+
+    Runs BEFORE the launch args are serialized, so head-mode replays see the
+    resolved fleet and never re-plan. Returns 0 to proceed, nonzero to stop.
+    """
+    from .shape.plan import build_shape, render
+
+    try:
+        result = build_shape(
+            model=args.model,
+            budget=args.budget,
+            target_tflops=args.flops,
+            tuning=args.tuning,
+            seq_len=args.seq_len,
+        )
+    except (ValueError, RuntimeError) as e:
+        print(f"[yeto] fleet planning failed: {e}", file=sys.stderr)
+        return 1
+    print(render(result, args.model, args.budget, args.tuning, args.data, target_tflops=args.flops))
+    if not result.plan.counts:
+        return 1
+    entries: list[str] = []
+    for key, n in sorted(result.plan.counts.items()):
+        entries.extend([key] * n)
+    args.gpu = ",".join(entries)
+    args.shard = result.shard
+    args.disk_size = max(args.disk_size, int(result.weights_gb * 1.5) + 100)
+    if not args.confirm:
+        if not sys.stdin.isatty():
+            print(
+                "[yeto] auto-planned fleet needs confirmation; pass --confirm "
+                "to launch non-interactively",
+                file=sys.stderr,
+            )
+            return 1
+        answer = input(f"[yeto] launch this fleet (--gpu {args.gpu})? [y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            print("[yeto] aborted; nothing launched")
+            return 2
+    return 0
+
+
 def cmd_launch(args) -> int:
+    error = _fleet_args_error(args)
+    if error:
+        print(f"[yeto] {error}", file=sys.stderr)
+        return 1
+    if args.gpu is None:
+        code = _resolve_auto_fleet(args)
+        if code:
+            return 0 if code == 2 else code  # user said no: clean exit
     name = args.cluster_prefix
     existing = runs.load_run(name)
     if existing is not None and runs.is_alive(existing.get("pid")):
@@ -901,6 +986,9 @@ def cmd_shape(args) -> int:
     if args.apply and not args.data:
         print("[yeto] --apply needs --data <hf-dataset>", file=sys.stderr)
         return 1
+    if args.budget is None and args.flops is None:
+        print("[yeto] pass --budget and/or --flops", file=sys.stderr)
+        return 1
     try:
         result = build_shape(
             model=args.model,
@@ -918,6 +1006,7 @@ def cmd_shape(args) -> int:
             skip_capacity_check=args.skip_capacity_check,
             strict_capacity_check=args.strict_capacity_check,
             clouds=args.clouds.split(",") if args.clouds else None,
+            target_tflops=args.flops,
         )
     except (ValueError, RuntimeError) as e:
         print(f"[yeto] shape failed: {e}", file=sys.stderr)
@@ -925,7 +1014,7 @@ def cmd_shape(args) -> int:
     if args.json:
         print(json.dumps(to_json_dict(result, args.model, args.budget, args.tuning, args.data), indent=2))
     else:
-        print(render(result, args.model, args.budget, args.tuning, args.data))
+        print(render(result, args.model, args.budget, args.tuning, args.data, target_tflops=args.flops))
     if not result.plan.counts:
         return 1
     if args.apply:

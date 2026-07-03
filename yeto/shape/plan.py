@@ -81,7 +81,7 @@ _STOCK_CAPS = {9: None, 6: 4, 3: 1}
 
 def build_shape(
     model: str,
-    budget: float,
+    budget: float | None = None,
     tuning: str = "lora",
     seq_len: int = 2048,
     regions: list[str] | None = None,
@@ -97,9 +97,15 @@ def build_shape(
     strict_capacity_check: bool = False,
     clouds: list[str] | None = None,
     runpod_providers: RunPodProviders | None = None,
+    target_tflops: float | None = None,
 ) -> ShapeResult:
     """Compute the fleet plan. `providers`/`runpod_providers` are injectable
     for tests.
+
+    Exactly one objective input is required: `budget` (maximize TFLOPs under
+    a $/hr cap) or `target_tflops` (minimize cost to reach a throughput
+    target); passing both means "cheapest plan reaching the target, capped
+    at the budget".
 
     clouds: None -> aws, plus runpod when its credentials are present.
     RunPod has no quotas; its binding constraint is machine stock, mapped
@@ -116,6 +122,8 @@ def build_shape(
     skip_capacity_check makes no score API calls at all (quota + price only).
     """
     t0 = time.monotonic()
+    if budget is None and target_tflops is None:
+        raise ValueError("pass --budget and/or --flops: the plan needs an objective")
     if providers is None and not credentials_available():
         raise RuntimeError(
             "AWS credentials not found — quota and placement-score signals "
@@ -185,7 +193,7 @@ def build_shape(
         key = _candidate_key(off, nodes)
         if best_shape[(off.cloud, off.gpu, off.region)][0] is not off:
             rejections.append(Rejection(key, "dominated by a fatter-node island of the same GPU"))
-        elif off.spot_price * nodes > budget - head_cost:
+        elif budget is not None and off.spot_price * nodes > budget - head_cost:
             rejections.append(Rejection(key, f"one island (${off.spot_price * nodes:.2f}/hr) exceeds the budget"))
         elif off.cloud != "aws" and nodes > 1:
             rejections.append(Rejection(key, f"multi-node islands unsupported on {off.cloud}"))
@@ -363,7 +371,7 @@ def build_shape(
             replace(c, price_per_hour=c.price_per_hour * (1 + price_margin), max_count=caps[c.key])
             for c in candidates
         ]
-        plan = solve(inflated, budget, quota_limits, max_islands, head_cost)
+        plan = solve(inflated, budget, quota_limits, max_islands, head_cost, target_tflops)
         if skip_capacity_check:
             break  # no scores were fetched; there is nothing to re-verify
         recheck = sorted(
@@ -414,7 +422,7 @@ def build_shape(
             replace(c, price_per_hour=c.price_per_hour * (1 + price_margin), max_count=caps[c.key])
             for c in candidates
         ]
-        plan = solve(inflated, budget, quota_limits, max_islands, head_cost)
+        plan = solve(inflated, budget, quota_limits, max_islands, head_cost, target_tflops)
 
     est_cost = head_cost + sum(by_key[k].price_per_hour * n for k, n in plan.counts.items())
     planned_mems = [
@@ -509,18 +517,30 @@ def to_json_dict(result: ShapeResult, model: str, budget: float, tuning: str, da
     }
 
 
-def render(result: ShapeResult, model: str, budget: float, tuning: str, data: str | None = None) -> str:
+def render(
+    result: ShapeResult,
+    model: str,
+    budget: float | None,
+    tuning: str,
+    data: str | None = None,
+    target_tflops: float | None = None,
+) -> str:
     """Human-readable plan + the ready-to-run launch line."""
     plan, out = result.plan, []
     by_key = {c.key: c for c in result.candidates}
+    objective = (
+        f"budget ${budget:.2f}/hr" if budget is not None else f"target ≥ {target_tflops:.0f} TFLOPs"
+    )
+    if budget is not None and target_tflops is not None:
+        objective = f"target ≥ {target_tflops:.0f} TFLOPs within ${budget:.2f}/hr"
     if not plan.counts:
-        out.append(f"no feasible plan under ${budget:.2f}/hr (weights ~{result.weights_gb:.0f} GB bf16, {tuning})")
+        out.append(f"no feasible plan for {objective} (weights ~{result.weights_gb:.0f} GB bf16, {tuning})")
     else:
         islands = sum(plan.counts.values())
         out.append(
             f"plan: {islands} island(s), {plan.total_tflops:.1f} effective TFLOPs, "
             f"est ${result.est_cost:.2f}/hr — ≤ ${plan.total_cost:.2f}/hr with "
-            f"{result.price_margin:.0%} spot-price margin (budget ${budget:.2f}/hr)"
+            f"{result.price_margin:.0%} spot-price margin ({objective})"
         )
         for key, n in sorted(plan.counts.items()):
             c = by_key[key]
