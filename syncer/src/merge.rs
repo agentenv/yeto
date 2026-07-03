@@ -101,6 +101,76 @@ pub fn nesterov_step(params: &mut [f32], buf: &mut [f32], delta: &[f32], lr: f32
     }
 }
 
+/// HeLoCo per-tensor directional correction (arXiv 2606.00271, Alg. 1).
+///
+/// Applied server-side to each learner's outer delta, per tensor, before
+/// merging: a stale delta can carry components that oppose the current
+/// global trajectory. With û = Δ/‖Δ‖, v̂ = m/‖m‖, c = û·v̂ and
+/// conf = ‖Δ‖ / (‖Δ‖ + κ‖m‖ + ε):
+///
+/// * c ≥ c_ok       — well aligned, pass through;
+/// * c < 0          — shrink the opposing component:
+///                    Δ ← Δ − β·c·‖Δ‖·v̂ with β = min(k_s·(−c)·conf, β_max);
+/// * 0 ≤ c < c_ok   — rotate toward the momentum, preserving magnitude:
+///                    ũ = (1−λ)û + λv̂, Δ ← ‖Δ‖·ũ/max(‖ũ‖, ε)
+///                    with λ = min(k_d·(1−c)·conf, 1).
+///
+/// Near-zero Δ or momentum (< ε norm) skips the correction — early rounds
+/// with an empty momentum buffer pass through untouched.
+#[derive(Clone, Copy, Debug)]
+pub struct Heloco {
+    pub c_ok: f64,
+    pub k_s: f64,
+    pub k_d: f64,
+    pub beta_max: f64,
+    pub kappa: f64,
+    pub eps: f64,
+}
+
+impl Default for Heloco {
+    fn default() -> Self {
+        // Table 3 of the paper.
+        Self { c_ok: 0.2, k_s: 0.5, k_d: 1.0, beta_max: 0.5, kappa: 3.0, eps: 1e-8 }
+    }
+}
+
+pub fn heloco_correct(delta: &mut [f32], momentum: &[f32], h: &Heloco) {
+    debug_assert_eq!(delta.len(), momentum.len());
+    let du = delta.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    let dm = momentum.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    if du < h.eps || dm < h.eps {
+        return;
+    }
+    let dot: f64 = delta.iter().zip(momentum).map(|(d, m)| *d as f64 * *m as f64).sum();
+    let c = dot / (du * dm);
+    if c >= h.c_ok {
+        return;
+    }
+    let conf = du / (du + h.kappa * dm + h.eps);
+    if c < 0.0 {
+        let beta = (h.k_s * (-c) * conf).min(h.beta_max);
+        // Δ − β·c·‖Δ‖·v̂ (c < 0, so this adds a positive momentum component).
+        let coef = (-beta * c * du / dm) as f32;
+        for (d, m) in delta.iter_mut().zip(momentum) {
+            *d += coef * *m;
+        }
+    } else {
+        let lambda = (h.k_d * (1.0 - c) * conf).min(1.0);
+        // ũ = (1−λ)û + λv̂, then rescale to the original magnitude.
+        let (wu, wv) = ((1.0 - lambda) / du, lambda / dm);
+        let mut norm_sq = 0.0f64;
+        for (d, m) in delta.iter_mut().zip(momentum) {
+            let t = wu * *d as f64 + wv * *m as f64;
+            *d = t as f32;
+            norm_sq += t * t;
+        }
+        let scale = (du / norm_sq.sqrt().max(h.eps)) as f32;
+        for d in delta.iter_mut() {
+            *d *= scale;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +248,69 @@ mod tests {
         let mut out = [0.0f32; 1];
         merge_rda(&anchor, &[&l0, &l1], &[1.0, 1.0], &mut out);
         assert!(out[0].abs() < 1e-6);
+    }
+
+    fn cosine(a: &[f32], b: &[f32]) -> f64 {
+        let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
+        dot / (norm(a) * norm(b))
+    }
+
+    #[test]
+    fn heloco_aligned_passes_through() {
+        let h = Heloco::default();
+        let mut d = [1.0f32, 0.1];
+        let orig = d;
+        heloco_correct(&mut d, &[1.0, 0.0], &h); // cos ≈ 0.995 ≥ c_ok
+        assert_eq!(d, orig);
+    }
+
+    #[test]
+    fn heloco_zero_momentum_is_noop() {
+        let h = Heloco::default();
+        let mut d = [-3.0f32, 4.0];
+        let orig = d;
+        heloco_correct(&mut d, &[0.0, 0.0], &h);
+        assert_eq!(d, orig);
+    }
+
+    #[test]
+    fn heloco_anti_aligned_reduces_opposition() {
+        let h = Heloco::default();
+        let m = [1.0f32, 0.0];
+        let mut d = [-2.0f32, 0.5];
+        let before = cosine(&d, &m);
+        heloco_correct(&mut d, &m, &h);
+        let after = cosine(&d, &m);
+        assert!(after > before, "cosine {before} -> {after} did not improve");
+        // Shrinkage is bounded: the delta cannot flip past the momentum.
+        assert!(d[0] < 0.0 || d[0].abs() < 2.0);
+    }
+
+    #[test]
+    fn heloco_weakly_aligned_preserves_magnitude() {
+        let h = Heloco::default();
+        let m = [1.0f32, 0.0];
+        let mut d = [0.1f32, 1.0]; // cos ≈ 0.0995, in [0, c_ok)
+        let mag = norm(&d);
+        let before = cosine(&d, &m);
+        heloco_correct(&mut d, &m, &h);
+        assert!((norm(&d) - mag).abs() < 1e-5, "magnitude changed: {mag} -> {}", norm(&d));
+        assert!(cosine(&d, &m) > before);
+    }
+
+    #[test]
+    fn heloco_confidence_damps_correction_under_large_momentum() {
+        let h = Heloco::default();
+        let mut small_m = [-1.0f32, 0.2];
+        let mut large_m = small_m;
+        heloco_correct(&mut small_m, &[0.1, 0.0], &h);
+        heloco_correct(&mut large_m, &[100.0, 0.0], &h);
+        // Same directions, but huge momentum norm → low confidence → weaker
+        // correction (closer to the original delta).
+        let orig = [-1.0f32, 0.2];
+        let moved_small: f64 = small_m.iter().zip(&orig).map(|(a, b)| (a - b).abs() as f64).sum();
+        let moved_large: f64 = large_m.iter().zip(&orig).map(|(a, b)| (a - b).abs() as f64).sum();
+        assert!(moved_large < moved_small);
     }
 
     #[test]

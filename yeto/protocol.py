@@ -49,6 +49,10 @@ MSG_CHUNK = 9
 
 DTYPE_F32 = 1
 DTYPE_BF16 = 2
+# Session dtype 3: PUSH_FRAGMENT payloads are block-quantized 4-bit E3M0
+# *deltas* against the fragment value at base_version; INIT_PARAMS and
+# BCAST_FRAGMENT stay bf16 (see bulk_dtype and docs/PROTOCOL.md v3).
+DTYPE_Q4 = 3
 
 CHUNK_SIZE = 4 * 1024 * 1024
 
@@ -58,6 +62,15 @@ RECONNECT_DIAL_TIMEOUT = 20.0
 
 _HEADER = struct.Struct("<IBQ")  # magic, type, payload length
 _CHUNK_HEAD = struct.Struct("<QQQ")  # msg_id, total_len, offset
+
+
+def bulk_dtype(dtype: int) -> int:
+    """Dtype of INIT_PARAMS/BCAST_FRAGMENT tensors for a session dtype.
+
+    Q4 applies only to push deltas (small dynamic range); full parameter
+    payloads would not survive 4 bits, so they travel as bf16.
+    """
+    return DTYPE_BF16 if dtype == DTYPE_Q4 else dtype
 
 
 def write_frame(sock: socket.socket, msg_type: int, payload: bytes) -> None:

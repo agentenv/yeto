@@ -17,6 +17,19 @@ pub const MSG_CHUNK: u8 = 9;
 
 pub const DTYPE_F32: u8 = 1;
 pub const DTYPE_BF16: u8 = 2;
+/// Session dtype 3: PUSH_FRAGMENT payloads are block-quantized 4-bit E3M0
+/// *deltas* against the fragment value at base_version; INIT_PARAMS and
+/// BCAST_FRAGMENT travel as bf16 (see `bulk_dtype`, docs/PROTOCOL.md v3).
+pub const DTYPE_Q4: u8 = 3;
+
+/// Values per q4 scale block (f32 absmax scale + 128 nibble bytes each).
+pub const Q4_BLOCK: usize = 256;
+
+/// Dtype of INIT_PARAMS/BCAST_FRAGMENT tensors for a session dtype: q4
+/// applies only to push deltas; full parameter payloads stay bf16.
+pub fn bulk_dtype(dtype: u8) -> u8 {
+    if dtype == DTYPE_Q4 { DTYPE_BF16 } else { dtype }
+}
 
 /// Hard cap on a single frame; a fragment of a very large model can still be
 /// hundreds of MB, but anything past this is a corrupt length prefix.
@@ -123,6 +136,52 @@ pub fn encode_tensor(dtype: u8, vals: &[f32], out: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
+/// Decode a q4 delta payload (yeto/tensor_io.py `quantize_q4`) into f32s.
+///
+/// Per block of `Q4_BLOCK` values: f32 absmax scale, then 128 bytes of
+/// packed nibbles (two values per byte, low nibble first). Nibble: bit 3 =
+/// sign, bits 0-2 = level; level 0 is exactly zero, level L in 1..=7
+/// decodes to sign * 2^(L-7) * scale. The last block is zero-padded to
+/// `Q4_BLOCK`; `numel` truncates the tail.
+pub fn decode_q4(bytes: &[u8], numel: usize, out: &mut Vec<f32>) -> Result<()> {
+    let blocks = numel.div_ceil(Q4_BLOCK);
+    let block_bytes = 4 + Q4_BLOCK / 2;
+    if bytes.len() != blocks * block_bytes {
+        bail!(
+            "q4 payload has {} bytes, expected {} for {numel} values",
+            bytes.len(),
+            blocks * block_bytes
+        );
+    }
+    // 2^(level-7) for level 1..=7; level 0 handled as exact zero.
+    const LUT: [f32; 8] = [
+        0.0,
+        1.0 / 64.0,
+        1.0 / 32.0,
+        1.0 / 16.0,
+        1.0 / 8.0,
+        1.0 / 4.0,
+        1.0 / 2.0,
+        1.0,
+    ];
+    out.clear();
+    out.reserve(numel);
+    for (b, chunk) in bytes.chunks_exact(block_bytes).enumerate() {
+        let scale = f32::from_le_bytes(chunk[..4].try_into().unwrap());
+        let base = b * Q4_BLOCK;
+        for (i, byte) in chunk[4..].iter().enumerate() {
+            for (j, nibble) in [byte & 0x0F, byte >> 4].into_iter().enumerate() {
+                if base + i * 2 + j >= numel {
+                    return Ok(());
+                }
+                let mag = LUT[(nibble & 0x07) as usize] * scale;
+                out.push(if nibble >= 8 { -mag } else { mag });
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +204,48 @@ mod tests {
         let mut back = Vec::new();
         decode_tensor(DTYPE_BF16, &bytes, &mut back).unwrap();
         assert_eq!(vals, back); // all exactly representable in bf16
+    }
+
+    /// Golden vector matching yeto/tensor_io.py quantize_q4 output for
+    /// [1.0, -0.5, 0.25, 0.0] (tests/test_tensor_io.py cross-checks the
+    /// same bytes from the Python encoder).
+    #[test]
+    fn q4_golden_vector() {
+        let mut bytes = vec![0u8; 132];
+        bytes[..4].copy_from_slice(&1.0f32.to_le_bytes()); // block scale
+        bytes[4] = 0xE7; // 1.0 -> level 7; -0.5 -> sign|level 6
+        bytes[5] = 0x05; // 0.25 -> level 5; 0.0 -> 0
+        let mut out = Vec::new();
+        decode_q4(&bytes, 4, &mut out).unwrap();
+        assert_eq!(out, vec![1.0f32, -0.5, 0.25, 0.0]);
+    }
+
+    #[test]
+    fn q4_multi_block_and_truncation() {
+        // 300 values -> 2 blocks; only the first value of block 2 is set.
+        let mut bytes = vec![0u8; 2 * 132];
+        bytes[..4].copy_from_slice(&2.0f32.to_le_bytes());
+        bytes[4] = 0x07; // 2.0 * 2^0 = 2.0
+        bytes[132..136].copy_from_slice(&4.0f32.to_le_bytes());
+        bytes[136] = 0x0E; // -(4.0 * 2^-1) = -2.0
+        let mut out = Vec::new();
+        decode_q4(&bytes, 300, &mut out).unwrap();
+        assert_eq!(out.len(), 300);
+        assert_eq!(out[0], 2.0);
+        assert_eq!(out[256], -2.0);
+        assert!(out[1..256].iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn q4_rejects_bad_length() {
+        let mut out = Vec::new();
+        assert!(decode_q4(&[0u8; 131], 4, &mut out).is_err());
+    }
+
+    #[test]
+    fn bulk_dtype_maps_q4_to_bf16() {
+        assert_eq!(bulk_dtype(DTYPE_Q4), DTYPE_BF16);
+        assert_eq!(bulk_dtype(DTYPE_BF16), DTYPE_BF16);
+        assert_eq!(bulk_dtype(DTYPE_F32), DTYPE_F32);
     }
 }

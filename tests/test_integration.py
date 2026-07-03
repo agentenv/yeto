@@ -17,8 +17,14 @@ import pytest
 import torch
 
 from yeto.fragments import build_layout
-from yeto.protocol import DTYPE_BF16, SyncerClient
-from yeto.tensor_io import apply_fragment, pack_fragment, unpack_fragment
+from yeto.protocol import DTYPE_BF16, DTYPE_Q4, SyncerClient, bulk_dtype
+from yeto.tensor_io import (
+    apply_fragment,
+    fragment_flat,
+    pack_fragment,
+    quantize_q4,
+    unpack_fragment,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 DIM = 4096  # large enough to require striping across several chunks at bf16? (4KB) — small but exercises the full path
@@ -38,17 +44,24 @@ def free_port() -> int:
 
 
 class ToyLearner(threading.Thread):
-    def __init__(self, learner_id: int, port: int, target: torch.Tensor, layout):
+    def __init__(self, learner_id: int, port: int, target: torch.Tensor, layout, dtype=DTYPE_BF16):
         super().__init__(daemon=True)
         self.learner_id = learner_id
         self.target = target
         self.layout = layout
+        self.dtype = dtype
         self.params = {
             "model.embed.weight": torch.zeros(DIM // 4),
             "model.body.weight": torch.zeros(DIM),
         }
+        # Q4 pushes are deltas against the last received global value.
+        self.anchors = (
+            [fragment_flat(f, self.params) for f in layout.fragments]
+            if dtype == DTYPE_Q4
+            else None
+        )
         self.client = SyncerClient(
-            ("127.0.0.1", port), learner_id, layout, DTYPE_BF16, num_streams=2
+            ("127.0.0.1", port), learner_id, layout, dtype, num_streams=2
         )
         # Snapshot at the last applied broadcast: the learner keeps taking
         # local steps between the final merge and SHUTDOWN arriving, so
@@ -66,7 +79,9 @@ class ToyLearner(threading.Thread):
         self.client.start()
         if self.learner_id == 0:
             for fid, frag in enumerate(self.layout.fragments):
-                self.client.send_init(fid, pack_fragment(frag, self.params, DTYPE_BF16))
+                self.client.send_init(
+                    fid, pack_fragment(frag, self.params, bulk_dtype(self.dtype))
+                )
         opt = torch.optim.Adam(list(self.params.values()), lr=0.05)
         for p in self.params.values():
             p.requires_grad_(True)
@@ -94,6 +109,11 @@ class ToyLearner(threading.Thread):
                     still.append(pull)
                     continue
                 c_steps = steps_total - steps_at_reset[fid]
+                frag = self.layout.fragments[fid]
+                if self.anchors is not None:
+                    payload = quantize_q4(fragment_flat(frag, self.params) - self.anchors[fid])
+                else:
+                    payload = pack_fragment(frag, self.params, self.dtype)
                 self.client.push_fragment(
                     fid,
                     pull.global_step,
@@ -101,12 +121,14 @@ class ToyLearner(threading.Thread):
                     steps_total,
                     c_steps,
                     c_steps * 128,  # tokens: uniform rate
-                    pack_fragment(self.layout.fragments[fid], self.params, DTYPE_BF16),
+                    payload,
                 )
             pending = still
             for bc in self.client.drain_updates():
                 frag = self.layout.fragments[bc.fragment_id]
-                flat_new = unpack_fragment(frag, bc.data, DTYPE_BF16)
+                flat_new = unpack_fragment(frag, bc.data, bulk_dtype(self.dtype))
+                if self.anchors is not None:
+                    self.anchors[bc.fragment_id] = flat_new.clone()
                 apply_fragment(frag, flat_new, self.params)
                 steps_at_reset[bc.fragment_id] = steps_total
                 versions[bc.fragment_id] = bc.version
@@ -174,6 +196,39 @@ def test_two_learners_converge_to_mean():
         if proc.poll() is None:
             proc.kill()
         out = proc.stdout.read() if proc.stdout else ""
+        print(out[-3000:])
+
+
+@pytest.mark.timeout(180)
+def test_single_learner_roundtrip_q4():
+    """Q4 session: INIT/BCAST in bf16, pushes as 4-bit deltas the Rust
+    syncer reconstructs from Θ(base_version) + δ. Must converge like bf16."""
+    binary = build_syncer()
+    port = free_port()
+    named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
+    layout = build_layout(named, 3)
+    proc = subprocess.Popen(
+        [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
+         "--grace-ms", "50", "--total-steps", "9"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        target = torch.ones(DIM + DIM // 4)
+        l = ToyLearner(0, port, target, layout, dtype=DTYPE_Q4)
+        l.start()
+        l.join(timeout=120)
+        assert not l.is_alive()
+        if l.exc:
+            raise l.exc
+        assert proc.wait(timeout=30) == 0
+        assert l.synced, "learner never received a broadcast"
+        flat = torch.cat([p.detach().reshape(-1) for p in l.params.values()])
+        assert (flat - target).norm() < target.norm(), "no progress toward target"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        out = proc.stdout.read() if proc.stdout else ""
+        assert "stale q4 delta dropped" not in out, "steady-state q4 push was dropped"
         print(out[-3000:])
 
 

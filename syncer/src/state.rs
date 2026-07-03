@@ -71,6 +71,9 @@ pub struct GlobalState {
     pub outer_momentum: f32,
     /// Dtype used on the wire (from HELLO); merge math stays f32.
     pub wire_dtype: u8,
+    /// HeLoCo per-tensor directional correction of learner deltas against
+    /// the outer momentum before merging (None disables).
+    pub delta_correction: Option<merge::Heloco>,
 }
 
 impl GlobalState {
@@ -90,6 +93,7 @@ impl GlobalState {
             outer_lr,
             outer_momentum,
             wire_dtype,
+            delta_correction: None,
         }
     }
 
@@ -125,6 +129,40 @@ impl GlobalState {
                 bail!("push for fragment {fid} from entry {i} has {} values, expected {numel}", l.len());
             }
         }
+        // HeLoCo: correct each learner's outer delta against the outer
+        // momentum, per tensor, before merging (stale deltas can oppose the
+        // current global trajectory). Materializes corrected copies so the
+        // anchor-based merge below stays unchanged.
+        let corrected: Vec<Vec<f32>>;
+        let learners: Vec<&[f32]> = if let Some(h) = self.delta_correction {
+            let anchor = &self.params[fid];
+            let momentum = &self.momentum[fid];
+            corrected = learners
+                .iter()
+                .map(|l| {
+                    let mut vals = l.to_vec();
+                    let mut off = 0usize;
+                    for &tn in &frag.tensor_numels {
+                        let tn = tn as usize;
+                        let mut d: Vec<f32> = anchor[off..off + tn]
+                            .iter()
+                            .zip(&vals[off..off + tn])
+                            .map(|(a, v)| a - v)
+                            .collect();
+                        merge::heloco_correct(&mut d, &momentum[off..off + tn], &h);
+                        for (i, di) in d.iter().enumerate() {
+                            vals[off + i] = anchor[off + i] - di;
+                        }
+                        off += tn;
+                    }
+                    vals
+                })
+                .collect();
+            corrected.iter().map(|v| v.as_slice()).collect()
+        } else {
+            learners.to_vec()
+        };
+        let learners = learners.as_slice();
         let anchor = &self.params[fid];
         let mut delta = vec![0.0f32; numel];
         // Merge per tensor slice within the fragment.
@@ -287,6 +325,37 @@ mod tests {
         assert!(st2.all_initialized());
         assert_eq!(st2.ledger.get(&3).unwrap().tokens, 4096);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn heloco_correction_damps_anti_aligned_learner() {
+        // Two identical states with warm momentum; the learner's delta
+        // opposes it. With correction the outer step must move less far
+        // in the opposing direction than without.
+        let mk = || {
+            let mut st = GlobalState::new(layout2(), 1.0, 0.0, crate::protocol::DTYPE_F32);
+            st.init_fragment(0, vec![0.0; 4]).unwrap();
+            st.init_fragment(1, vec![0.0; 4]).unwrap();
+            // Warm the momentum: a learner pulling params down (delta +1).
+            st.merge_and_step(0, &[&[-1.0f32; 4][..]], &[1.0]).unwrap();
+            st
+        };
+        let mut plain = mk();
+        let mut corrected = mk();
+        corrected.delta_correction = Some(merge::Heloco::default());
+        // Now a learner pulling the opposite way (delta anchored at current params).
+        let opposing: Vec<f32> = plain.params[0].iter().map(|p| p + 3.0).collect();
+        plain.merge_and_step(0, &[&opposing], &[1.0]).unwrap();
+        let opposing2: Vec<f32> = corrected.params[0].iter().map(|p| p + 3.0).collect();
+        corrected.merge_and_step(0, &[&opposing2], &[1.0]).unwrap();
+        // The opposing learner drags params up; the correction shrinks the
+        // anti-aligned delta, so the corrected state moves up less.
+        assert!(
+            corrected.params[0][0] < plain.params[0][0],
+            "corrected {} !< plain {}",
+            corrected.params[0][0],
+            plain.params[0][0]
+        );
     }
 
     #[test]

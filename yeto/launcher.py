@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -68,6 +69,9 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --learners {num_learners}"
         f" --quorum {args.quorum}"
         f" --grace-ms {args.grace_ms}"
+        f" --grace-gamma {args.grace_gamma}"
+        f" --grace-tau {args.grace_tau}"
+        f" --delta-correction {args.delta_correction}"
         f" --total-steps {args.total_steps}"
         f" --outer-lr {args.outer_lr}"
         f" --outer-momentum {args.outer_momentum}"
@@ -142,6 +146,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f" --grad-accum {args.grad_accum}"
         f" --inner-lr {args.inner_lr}"
         f" --fragments {args.fragments}"
+        f" --fragment-pattern {args.fragment_pattern}"
+        f" --merge-alpha {args.merge_alpha}"
         f" --tokenize {args.tokenize}"
         f" --stream-workers {args.stream_workers}"
         f" --wire-dtype {args.wire_dtype}"
@@ -323,19 +329,27 @@ class LocalSyncer:
         self.binary = os.path.expanduser(binary)
         self.log_file = os.path.expanduser(log_file)
         self.proc: subprocess.Popen | None = None
+        # The log file persists across controller jobs on a reused head;
+        # forward only what this controller's syncer writes, not history.
+        self._log_offset = os.path.getsize(self.log_file) if os.path.exists(self.log_file) else 0
 
     def start(self) -> None:
         if os.path.exists(self.binary):
             os.chmod(self.binary, 0o755)
         log_f = open(self.log_file, "ab")
         try:
-            # shell=True so the ~ paths in the command expand.
+            # shell=True so the ~ paths in the command expand. The shell may
+            # fork rather than exec the binary, so terminate() on the Popen
+            # pid alone can orphan the syncer, which then holds the port
+            # across controller restarts; start_new_session gives the whole
+            # tree its own process group for stop() to kill.
             self.proc = subprocess.Popen(
                 self.command,
                 shell=True,
                 stdout=log_f,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
+                start_new_session=True,
             )
         finally:
             log_f.close()  # Popen holds its own duplicate of the fd
@@ -360,11 +374,22 @@ class LocalSyncer:
 
     def stop(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
-            self.proc.terminate()
+            self._signal_tree(signal.SIGTERM)
             try:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                self.proc.kill()
+                self._signal_tree(signal.SIGKILL)
+
+    def _signal_tree(self, sig: int) -> None:
+        """Signal the syncer's whole process group (see start()), falling
+        back to the direct child."""
+        try:
+            os.killpg(self.proc.pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                self.proc.send_signal(sig)
+            except OSError:
+                pass
 
     def start_log_forwarder(self) -> None:
         """Tail the syncer's log file into our stdout, forever (daemon)."""
@@ -373,6 +398,7 @@ class LocalSyncer:
             while not os.path.exists(self.log_file):
                 time.sleep(0.5)
             with open(self.log_file, "r", errors="replace") as f:
+                f.seek(self._log_offset)
                 while True:
                     line = f.readline()
                     if line:

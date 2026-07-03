@@ -129,8 +129,8 @@ def validate_against_layout(ckpt: Checkpoint, layout: FragmentLayout) -> None:
     if problems:
         raise ValueError(
             "checkpoint does not match the rebuilt fragment layout; make sure "
-            "--model, --tuning, --lora-r and --fragments match the training "
-            "run: " + "; ".join(problems)
+            "--model, --tuning, --lora-r, --fragments and --fragment-pattern "
+            "match the training run: " + "; ".join(problems)
         )
 
 
@@ -146,6 +146,12 @@ def parse_args(argv=None):
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
     p.add_argument("--fragments", type=int, default=8, help="P used during training")
+    p.add_argument(
+        "--fragment-pattern",
+        choices=["binpack", "strided"],
+        default="binpack",
+        help="fragment pattern used during training",
+    )
     p.add_argument("--output-dir", required=True)
     p.add_argument("--device", default="cpu")
     return p.parse_args(argv)
@@ -172,7 +178,9 @@ def main(argv=None) -> None:
     )
     model, tokenizer = load_model_and_tokenizer(learner_args, device)
     params = trainable_params(model)
-    layout = build_layout([(n, p.numel()) for n, p in params.items()], args.fragments)
+    layout = build_layout(
+        [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
+    )
 
     validate_against_layout(ckpt, layout)
 

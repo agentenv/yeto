@@ -27,8 +27,14 @@ import torch.distributed as dist
 from .data import StreamingPackedBlocks, build_packed_dataset
 from .fragments import FragmentLayout, build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
-from .protocol import DTYPE_BF16, DTYPE_F32, SyncerClient
-from .tensor_io import apply_fragment, pack_fragment, unpack_fragment
+from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
+from .tensor_io import (
+    apply_fragment,
+    fragment_flat,
+    pack_fragment,
+    quantize_q4,
+    unpack_fragment,
+)
 
 log = logging.getLogger("learner")
 
@@ -76,7 +82,28 @@ def parse_args(argv=None):
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--warmup-steps", type=int, default=10)
     p.add_argument("--fragments", type=int, default=8, help="P (= H, round-robin)")
-    p.add_argument("--wire-dtype", choices=["bf16", "f32"], default="bf16")
+    p.add_argument(
+        "--fragment-pattern",
+        choices=["binpack", "strided"],
+        default="binpack",
+        help="how tensors are grouped into fragments: size-balanced bin-packing "
+        "or depth-interleaved transformer layers (layer i -> fragment i mod P)",
+    )
+    p.add_argument(
+        "--merge-alpha",
+        type=float,
+        default=0.5,
+        help="local weight when applying a broadcast fragment: "
+        "θ ← α·θ_local + (1−α)·θ_global; 0 overwrites, 0.5 keeps the inner "
+        "steps taken while the merge was in flight (Streaming DiLoCo / HALoS)",
+    )
+    p.add_argument(
+        "--wire-dtype",
+        choices=["bf16", "f32", "q4"],
+        default="bf16",
+        help="tensor encoding on the WAN; q4 sends pushes as 4-bit E3M0 "
+        "block-quantized deltas (broadcasts stay bf16)",
+    )
     p.add_argument("--wan-streams", type=int, default=4)
     p.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
     p.add_argument(
@@ -200,10 +227,15 @@ def main(argv=None) -> None:
             "shard on cpu); use --shard ddp or run on GPUs"
         )
 
+    if not 0.0 <= args.merge_alpha < 1.0:
+        raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
+
     log.info("loading model %s (%s)", args.model, args.tuning)
     model, tokenizer = load_model_and_tokenizer(args, device)
     params = trainable_params(model)
-    layout = build_layout([(n, p.numel()) for n, p in params.items()], args.fragments)
+    layout = build_layout(
+        [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
+    )
     log.info(
         "%d trainable tensors -> %d fragments (%.1f MB total)",
         len(params),
@@ -330,7 +362,7 @@ def main(argv=None) -> None:
         opt, lambda s: min(1.0, (s + 1) / max(1, args.warmup_steps))
     )
 
-    wire_dtype = DTYPE_BF16 if args.wire_dtype == "bf16" else DTYPE_F32
+    wire_dtype = {"bf16": DTYPE_BF16, "f32": DTYPE_F32, "q4": DTYPE_Q4}[args.wire_dtype]
     client = None
     if rank == 0 and args.syncer != "none":
         host, port = args.syncer.rsplit(":", 1)
@@ -341,7 +373,7 @@ def main(argv=None) -> None:
         log.info("connected to syncer at %s", args.syncer)
         if args.learner_id == 0:
             for fid, frag in enumerate(layout.fragments):
-                client.send_init(fid, pack_fragment(frag, params, wire_dtype))
+                client.send_init(fid, pack_fragment(frag, params, bulk_dtype(wire_dtype)))
             log.info("sent INIT_PARAMS for %d fragments", layout.num_fragments)
 
     run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank, world, device)
@@ -385,6 +417,12 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
     fragment_versions = [0] * layout.num_fragments  # last applied version per fragment
     pending_pulls: list = []  # pulls deferred until c_steps >= 1
     global_step = 0
+    # Q4 pushes are deltas anchored at the last *received* global value per
+    # fragment; before any broadcast that is the base-model value, which every
+    # learner loads identically (and learner 0 sends as INIT_PARAMS).
+    anchors: list[torch.Tensor] | None = None
+    if rank == 0 and client is not None and client.dtype == DTYPE_Q4:
+        anchors = [fragment_flat(frag, params).cpu() for frag in layout.fragments]
     # c_tokens counts RAW tokens processed (throughput proxy for merge
     # weighting), not the subset of loss-weighted tokens.
     tokens_per_inner_step = world * args.micro_batch_size * args.grad_accum * args.seq_len
@@ -461,6 +499,11 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
                         still_pending.append(pull)
                         continue
                     c_tokens = tokens_total - tokens_at_reset[fid]
+                    if anchors is not None:
+                        delta = fragment_flat(layout.fragments[fid], params).cpu() - anchors[fid]
+                        payload = quantize_q4(delta)
+                    else:
+                        payload = pack_fragment(layout.fragments[fid], params, client.dtype)
                     client.push_fragment(
                         fid,
                         pull.global_step,
@@ -468,12 +511,18 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
                         steps_total,
                         c_steps,
                         c_tokens,
-                        pack_fragment(layout.fragments[fid], params, client.dtype),
+                        payload,
                     )
                 pending_pulls = still_pending
                 # 2. apply received global fragments
                 for bc in client.drain_updates():
-                    flat = unpack_fragment(layout.fragments[bc.fragment_id], bc.data, client.dtype)
+                    flat = unpack_fragment(
+                        layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
+                    )
+                    if anchors is not None:
+                        # The anchor is the raw global value (pre-blend), so
+                        # the syncer can reconstruct pushes from Θ(version)+δ.
+                        anchors[bc.fragment_id] = flat.clone()
                     actions.append((bc.fragment_id, bc.version, flat))
                 shutdown = client.shutdown.is_set()
 
@@ -487,6 +536,12 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
                 for fid, version, flat in actions:
                     flat = flat.to(device)
                     dist.broadcast(flat, src=0)
+                    # α-blend: keep a share of the inner steps taken while the
+                    # merge was in flight. Ranks hold identical params, so
+                    # blending after the broadcast stays consistent.
+                    if args.merge_alpha > 0:
+                        local = fragment_flat(layout.fragments[fid], params)
+                        flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
                     apply_fragment(layout.fragments[fid], flat, params)
                     if rank == 0:
                         steps_at_reset[fid] = steps_total
@@ -495,7 +550,11 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
                     global_step = max(global_step, version)
             else:
                 for fid, version, flat in actions:
-                    apply_fragment(layout.fragments[fid], flat.to(device), params)
+                    flat = flat.to(device)
+                    if args.merge_alpha > 0:
+                        local = fragment_flat(layout.fragments[fid], params)
+                        flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
+                    apply_fragment(layout.fragments[fid], flat, params)
                     steps_at_reset[fid] = steps_total
                     tokens_at_reset[fid] = tokens_total
                     fragment_versions[fid] = version

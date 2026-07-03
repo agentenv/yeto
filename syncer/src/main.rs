@@ -19,9 +19,19 @@ struct Args {
     /// Minimum quorum of learners per outer step (K).
     #[arg(long, default_value_t = 1)]
     quorum: u32,
-    /// Grace window after quorum is reached, in milliseconds.
+    /// Upper bound on the post-quorum grace window, in milliseconds. The
+    /// actual wait adapts per round to the learners' compute slack.
     #[arg(long, default_value_t = 1000)]
     grace_ms: u64,
+    /// Safety margin on the computed grace slack (γ < 1).
+    #[arg(long, default_value_t = 0.8)]
+    grace_gamma: f64,
+    /// Compute-overlap budget for the grace window, in learner inner steps (τ).
+    #[arg(long, default_value_t = 2.0)]
+    grace_tau: f64,
+    /// Pre-merge learner-delta correction: "heloco" or "none".
+    #[arg(long, default_value = "heloco")]
+    delta_correction: String,
     /// Give up waiting for quorum and re-send the pull after this long.
     #[arg(long, default_value_t = 900)]
     quorum_timeout_s: u64,
@@ -59,11 +69,19 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    let delta_correction = match args.delta_correction.as_str() {
+        "heloco" => true,
+        "none" => false,
+        other => anyhow::bail!("--delta-correction must be 'heloco' or 'none', got {other:?}"),
+    };
     let cfg = server::Config {
         port: args.port,
         learners: args.learners,
         quorum: args.quorum,
         grace_ms: args.grace_ms,
+        grace_gamma: args.grace_gamma,
+        grace_tau: args.grace_tau,
+        delta_correction,
         quorum_timeout_s: args.quorum_timeout_s,
         total_steps: args.total_steps,
         outer_lr: args.outer_lr,

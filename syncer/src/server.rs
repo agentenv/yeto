@@ -27,7 +27,15 @@ pub struct Config {
     pub port: u16,
     pub learners: u32,
     pub quorum: u32,
+    /// Upper bound on the grace window; the actual wait adapts per round
+    /// (see `adaptive_grace`).
     pub grace_ms: u64,
+    /// Safety margin γ < 1 on the computed slack.
+    pub grace_gamma: f64,
+    /// Compute-overlap budget τ, in learner inner steps.
+    pub grace_tau: f64,
+    /// HeLoCo per-tensor delta correction before merging.
+    pub delta_correction: bool,
     pub quorum_timeout_s: u64,
     pub total_steps: u64,
     pub outer_lr: f32,
@@ -121,9 +129,52 @@ struct Push {
     fragment_id: u32,
     global_step: u64,
     base_version: u64,
+    local_step: u64,
     c_steps: u32,
     c_tokens: u64,
     values: Vec<f32>,
+}
+
+/// Decoupled DiLoCo's adaptive grace window (arXiv 2604.21428 Eq. 3): after
+/// quorum, wait for stragglers only within the slack the learners' compute
+/// overlap leaves free — γ · (τ·ξ_step − ξ_quorum − ξ_sync), clamped to
+/// [0, cap]. With no step-time estimate yet, fall back to the full cap.
+fn adaptive_grace(
+    tau: f64,
+    gamma: f64,
+    step_secs: Option<f64>,
+    quorum_secs: f64,
+    sync_secs: f64,
+    cap: Duration,
+) -> Duration {
+    let Some(step) = step_secs else { return cap };
+    let slack = tau * step - quorum_secs - sync_secs;
+    Duration::from_secs_f64((gamma * slack).max(0.0)).min(cap)
+}
+
+/// Per-learner inner-step duration estimated from consecutive pushes
+/// (each push carries the learner's local_step).
+#[derive(Default)]
+struct StepRates(HashMap<u32, (Option<Instant>, u64, Option<f64>)>);
+
+impl StepRates {
+    fn note(&mut self, learner_id: u32, local_step: u64, now: Instant) {
+        let entry = self.0.entry(learner_id).or_insert((None, 0, None));
+        if let Some(prev) = entry.0 {
+            if local_step > entry.1 {
+                let secs = now.duration_since(prev).as_secs_f64() / (local_step - entry.1) as f64;
+                entry.2 = Some(secs);
+            }
+        }
+        *entry = (Some(now), local_step, entry.2);
+    }
+
+    /// Slowest learner's estimated step time, if any estimate exists.
+    fn max_step_secs(&self) -> Option<f64> {
+        self.0.values().filter_map(|(_, _, e)| *e).fold(None, |acc, v| {
+            Some(acc.map_or(v, |a: f64| a.max(v)))
+        })
+    }
 }
 
 type Registry = Arc<Mutex<HashMap<u32, Arc<Group>>>>;
@@ -302,7 +353,7 @@ async fn dispatch_inner(group: &Arc<Group>, msg_type: u8, payload: &[u8], event_
             let mut r = Reader(payload);
             let fragment_id = r.u32()?;
             let mut values = Vec::new();
-            decode_tensor(group.dtype, r.rest(), &mut values)?;
+            decode_tensor(bulk_dtype(group.dtype), r.rest(), &mut values)?;
             event_tx.send(Event::Init { fragment_id, values }).await.ok();
         }
         MSG_PUSH_FRAGMENT => {
@@ -311,17 +362,29 @@ async fn dispatch_inner(group: &Arc<Group>, msg_type: u8, payload: &[u8], event_
             let fragment_id = r.u32()?;
             let global_step = r.u64()?;
             let base_version = r.u64()?;
-            let _local_step = r.u64()?;
+            let local_step = r.u64()?;
             let c_steps = r.u32()?;
             let c_tokens = r.u64()?;
             let mut values = Vec::new();
-            decode_tensor(group.dtype, r.rest(), &mut values)?;
+            if group.dtype == DTYPE_Q4 {
+                // Q4 pushes carry the *delta* against base_version; the
+                // scheduler reconstructs θ = Θ(base_version) + δ.
+                let frag = group
+                    .layout
+                    .fragments
+                    .get(fragment_id as usize)
+                    .with_context(|| format!("push for unknown fragment {fragment_id}"))?;
+                decode_q4(r.rest(), frag.numel(), &mut values)?;
+            } else {
+                decode_tensor(group.dtype, r.rest(), &mut values)?;
+            }
             event_tx
                 .send(Event::Push(Push {
                     learner_id,
                     fragment_id,
                     global_step,
                     base_version,
+                    local_step,
                     c_steps,
                     c_tokens,
                     values,
@@ -379,6 +442,8 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
     }
     let mut st = state.unwrap();
     let num_fragments = st.layout.fragments.len() as u64;
+    let mut step_rates = StepRates::default();
+    let mut last_sync_secs = 0.0f64; // previous round's merge+broadcast time
 
     // Send everyone the initial (or resumed) global parameters so all
     // learners start bit-identical (also serves recovery for late joiners).
@@ -409,7 +474,15 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
                 break; // everyone answered; no reason to wait
             }
             if pushes.len() >= k && grace_deadline.is_none() {
-                grace_deadline = Some(Instant::now() + Duration::from_millis(cfg.grace_ms));
+                let grace = adaptive_grace(
+                    cfg.grace_tau,
+                    cfg.grace_gamma,
+                    step_rates.max_step_secs(),
+                    round_start.elapsed().as_secs_f64(),
+                    last_sync_secs,
+                    Duration::from_millis(cfg.grace_ms),
+                );
+                grace_deadline = Some(Instant::now() + grace);
             }
             let deadline = grace_deadline.unwrap_or(quorum_deadline);
             let timeout = deadline.saturating_duration_since(Instant::now());
@@ -428,6 +501,7 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
                 Ok(None) => bail!("event channel closed"),
                 Ok(Some(ev)) => match ev {
                     Event::Push(push) => {
+                        step_rates.note(push.learner_id, push.local_step, Instant::now());
                         if push.fragment_id as usize == p && push.global_step == t {
                             pushes.insert(push.learner_id, push);
                         } // else: stale response from an earlier round; drop
@@ -445,8 +519,28 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
             }
         }
 
-        let (mut learners, mut weights, mut ids) = (Vec::new(), Vec::new(), Vec::new());
         let prev_version = st.versions[p];
+        if st.wire_dtype == DTYPE_Q4 {
+            // Q4 pushes are deltas anchored at the learner's base_version;
+            // reconstruction needs Θ at that exact version, and the syncer
+            // only holds the current value. A matching base is the steady
+            // state (learners anchor on the last broadcast); anything older
+            // is unreconstructable and dropped.
+            pushes.retain(|id, push| {
+                if push.base_version != prev_version {
+                    warn!(learner_id = id, step = t, base = push.base_version,
+                          expected = prev_version, "stale q4 delta dropped");
+                    return false;
+                }
+                true
+            });
+            for push in pushes.values_mut() {
+                for (v, a) in push.values.iter_mut().zip(&st.params[p]) {
+                    *v += *a;
+                }
+            }
+        }
+        let (mut learners, mut weights, mut ids) = (Vec::new(), Vec::new(), Vec::new());
         for (id, push) in &pushes {
             if push.base_version < prev_version {
                 // The learner had not yet applied this fragment's last merge;
@@ -459,6 +553,7 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
             weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
             ids.push(*id);
         }
+        let sync_start = Instant::now();
         let gnorm = st.merge_and_step(p, &learners, &weights)?;
         st.versions[p] = t;
         st.global_step = t;
@@ -471,6 +566,7 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
         for g in current_groups(&registry) {
             let _ = g.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
         }
+        last_sync_secs = sync_start.elapsed().as_secs_f64();
         let ms = round_start.elapsed().as_millis() as u64;
         info!(
             step = t,
@@ -507,12 +603,16 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
 }
 
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
-    Ok(GlobalState::new(
+    let mut st = GlobalState::new(
         group.layout.clone(),
         cfg.outer_lr,
         cfg.outer_momentum,
         group.dtype,
-    ))
+    );
+    if cfg.delta_correction {
+        st.delta_correction = Some(crate::merge::Heloco::default());
+    }
+    Ok(st)
 }
 
 fn current_groups(registry: &Registry) -> Vec<Arc<Group>> {
@@ -538,8 +638,9 @@ async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>) {
 
 fn encode_bcast(st: &GlobalState, p: usize) -> Result<bytes::Bytes> {
     // All learners share one dtype (validated at HELLO); use the state dtype.
+    // Broadcasts are full parameters, so a q4 session still sends bf16.
     let mut body = Vec::new();
-    encode_tensor(st.wire_dtype, &st.params[p], &mut body)?;
+    encode_tensor(bulk_dtype(st.wire_dtype), &st.params[p], &mut body)?;
     let mut payload = Vec::with_capacity(12 + body.len());
     payload.extend_from_slice(&(p as u32).to_le_bytes());
     payload.extend_from_slice(&st.versions[p].to_le_bytes());
@@ -597,4 +698,57 @@ fn dump_state(st: &GlobalState, path: &std::path::Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CAP: Duration = Duration::from_millis(1000);
+
+    #[test]
+    fn grace_falls_back_to_cap_without_estimate() {
+        assert_eq!(adaptive_grace(2.0, 0.8, None, 0.1, 0.1, CAP), CAP);
+    }
+
+    #[test]
+    fn grace_uses_gamma_scaled_slack() {
+        // slack = 2·1.0 − 0.5 − 0.5 = 1.0s; γ=0.8 → 800ms, under the 1s cap.
+        let g = adaptive_grace(2.0, 0.8, Some(1.0), 0.5, 0.5, CAP);
+        assert!((g.as_secs_f64() - 0.8).abs() < 1e-9, "got {g:?}");
+    }
+
+    #[test]
+    fn grace_clamps_to_zero_and_cap() {
+        // Negative slack → no grace.
+        assert_eq!(adaptive_grace(2.0, 0.8, Some(0.1), 1.0, 1.0, CAP), Duration::ZERO);
+        // Huge slack → capped.
+        assert_eq!(adaptive_grace(2.0, 0.8, Some(60.0), 0.0, 0.0, CAP), CAP);
+    }
+
+    #[test]
+    fn step_rates_estimate_from_consecutive_pushes() {
+        let mut rates = StepRates::default();
+        let t0 = Instant::now();
+        rates.note(1, 100, t0);
+        assert_eq!(rates.max_step_secs(), None); // one sample: no estimate yet
+        rates.note(1, 110, t0 + Duration::from_secs(5));
+        let est = rates.max_step_secs().unwrap();
+        assert!((est - 0.5).abs() < 1e-9, "10 steps over 5s = 0.5 s/step, got {est}");
+        // A slower learner dominates the estimate.
+        rates.note(2, 10, t0);
+        rates.note(2, 12, t0 + Duration::from_secs(4));
+        assert!((rates.max_step_secs().unwrap() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn step_rates_survive_learner_restart() {
+        let mut rates = StepRates::default();
+        let t0 = Instant::now();
+        rates.note(1, 100, t0);
+        rates.note(1, 5, t0 + Duration::from_secs(1)); // local_step went backwards
+        assert_eq!(rates.max_step_secs(), None);
+        rates.note(1, 15, t0 + Duration::from_secs(6));
+        assert!((rates.max_step_secs().unwrap() - 0.5).abs() < 1e-9);
+    }
 }

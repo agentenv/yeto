@@ -99,10 +99,56 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     sync.add_argument("--total-steps", type=int, default=64, help="outer steps T (one fragment each)")
     sync.add_argument("--fragments", type=int, default=8, help="fragments P (= sync interval H)")
     sync.add_argument("--quorum", type=int, default=1, help="minimum learners per outer step (K)")
-    sync.add_argument("--grace-ms", type=int, default=1000, help="grace window after quorum")
+    sync.add_argument(
+        "--grace-ms",
+        type=int,
+        default=1000,
+        help="cap on the post-quorum grace window; the actual wait adapts "
+        "per round to the learners' compute slack",
+    )
+    sync.add_argument(
+        "--grace-gamma",
+        type=float,
+        default=0.8,
+        help="safety margin on the adaptive grace slack (γ < 1)",
+    )
+    sync.add_argument(
+        "--grace-tau",
+        type=float,
+        default=2.0,
+        help="compute-overlap budget for the grace window, in inner steps (τ)",
+    )
+    sync.add_argument(
+        "--delta-correction",
+        choices=["heloco", "none"],
+        default="heloco",
+        help="pre-merge correction of learner deltas against the outer "
+        "momentum (HeLoCo, arXiv 2606.00271); shrinks/reorients stale "
+        "deltas that oppose the global trajectory",
+    )
     sync.add_argument("--outer-lr", type=float, default=0.7)
     sync.add_argument("--outer-momentum", type=float, default=0.9)
-    sync.add_argument("--wire-dtype", choices=["bf16", "f32"], default="bf16")
+    sync.add_argument(
+        "--fragment-pattern",
+        choices=["binpack", "strided"],
+        default="binpack",
+        help="fragment grouping: size-balanced bin-packing or depth-interleaved "
+        "transformer layers (Streaming DiLoCo strided pattern)",
+    )
+    sync.add_argument(
+        "--merge-alpha",
+        type=float,
+        default=0.5,
+        help="local weight when a learner applies a broadcast fragment "
+        "(0 = overwrite, 0.5 = keep half the in-flight local progress)",
+    )
+    sync.add_argument(
+        "--wire-dtype",
+        choices=["bf16", "f32", "q4"],
+        default="bf16",
+        help="WAN tensor encoding; q4 sends pushes as 4-bit E3M0 block-quantized "
+        "deltas (~4x less learner egress; broadcasts stay bf16)",
+    )
     sync.add_argument("--wan-streams", type=int, default=4, help="parallel TCP streams per learner")
 
     infra = p.add_argument_group("infrastructure")

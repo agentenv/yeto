@@ -1,7 +1,10 @@
 # Learner-node dependencies. transformers is pinned for DeepSeek-V4-Flash
 # compatibility (its remote code is incompatible with transformers 5.x).
-# <2.9: cu13x wheels (torch>=2.9) need driver >=580; cloud AMIs ship 535 (CUDA 12.2).
-torch>=2.4,<2.9
+# torch is pinned to cu121 wheels: cloud AMIs ship driver 535 (CUDA 12.2),
+# and newer default wheels need newer drivers (cu128/torch 2.8 needs >=570,
+# cu13x/torch 2.9 needs >=580) — torch.cuda.is_available() just goes False.
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1+cu121
 transformers==4.57.1
 datasets>=3.0
 peft>=0.14
