@@ -5,15 +5,8 @@ models across cheap, geographically scattered GPU clusters (spot instances,
 mixed regions, mixed clouds) launched with the [SkyPilot](https://skypilot.co)
 SDK.
 
-Instead of lock-step synchronous training — where every GPU waits for the
-slowest node and one preemption stalls the world — Yeto splits work across
-`M` independent **learners** (one per cluster) coordinated by a central
-**syncer**. Learners run local AdamW steps on their own data shard and never
-block on peers; the syncer asynchronously pulls per-fragment weight deltas
-from a quorum of `K ≤ M` learners, merges them (token-weighted
-radial-directional averaging), applies a Nesterov outer step, and broadcasts
-the result. Slow, preempted, or late-joining learners neither stall training
-nor lose their work.
+Yeto's asynchronous synchronization algorithm is based on **Decoupled DiLoCo**
+([Douillard et al., arXiv 2604.21428](https://arxiv.org/abs/2604.21428)).
 
 ## Architecture
 
