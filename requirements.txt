@@ -9,6 +9,8 @@
 # so pip resolves the packages below against it instead of dragging in a
 # default wheel.
 transformers==5.13.0
+# transformers' finegrained-fp8 forward hard-requires this exact range.
+kernels>=0.15.2,<0.16
 datasets>=3.0
 peft>=0.14
 accelerate>=1.0
