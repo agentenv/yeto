@@ -56,27 +56,58 @@ def test_sft_loss_rejects_rl_losses():
         losses.sft_loss(torch.randn(1, 2, 4), torch.tensor([[1, 2]]), "ppo")
 
 
+def test_sft_loss_weighted_equals_label_masking():
+    torch.manual_seed(0)
+    logits = torch.randn(2, 5, 11)
+    labels = torch.randint(0, 11, (2, 5))
+    weights = (torch.rand(2, 5) > 0.5).float()
+    masked = labels.masked_fill(weights == 0, -100)
+    weighted_loss, weighted_n = losses.sft_loss(logits, labels, weights=weights)
+    masked_loss, masked_n = losses.sft_loss(logits, masked)
+    assert torch.isclose(weighted_loss, masked_loss)
+    assert weighted_n == masked_n
+
+
+def test_sft_loss_counts_positive_weights_after_shift():
+    torch.manual_seed(0)
+    logits = torch.randn(1, 4, 10)
+    labels = torch.tensor([[5, 3, 6, 7]])
+    weights = torch.tensor([[1.0, 1.0, 0.0, 1.0]])  # position 0 shifts away
+    loss, n = losses.sft_loss(logits, labels, weights=weights)
+    assert n == 2  # shifted weights [1, 0, 1]
+    assert loss > 0
+
+
+def test_sft_loss_zero_weights_contribute_nothing():
+    logits = torch.randn(1, 3, 5)
+    labels = torch.tensor([[1, 2, 3]])
+    loss, n = losses.sft_loss(logits, labels, weights=torch.zeros(1, 3))
+    assert n == 0
+    assert loss == 0
+
+
 def test_custom_loss_from_file(tmp_path):
     f = tmp_path / "my_loss.py"
     f.write_text(
-        "def loss_fn(logits, input_ids):\n"
-        "    return logits.sum() * 0, input_ids.numel()\n"
+        "def loss_fn(logits, input_ids, weights):\n"
+        "    return logits.sum() * 0, int((weights > 0).sum())\n"
     )
     fn = losses.load_custom_loss(f"custom:{f}")
-    loss, n = fn(torch.randn(1, 4, 8), torch.zeros(1, 4, dtype=torch.long))
-    assert loss == 0 and n == 4
+    weights = torch.tensor([[1.0, 1.0, 0.0, 1.0]])
+    loss, n = fn(torch.randn(1, 4, 8), torch.zeros(1, 4, dtype=torch.long), weights)
+    assert loss == 0 and n == 3
 
 
 def test_pickled_loss_roundtrip_with_closure(tmp_path):
     scale = 2.5  # captured by value — plain pickle could not ship this
 
-    def weighted(logits, input_ids):
-        return logits.float().pow(2).sum() * scale, input_ids.numel()
+    def weighted(logits, input_ids, weights):
+        return logits.float().pow(2).sum() * scale, int(weights.sum())
 
     path = tmp_path / "loss.pkl"
     losses.dump_pickled_loss(weighted, path)
     fn = losses.load_pickled_loss(f"pickle:{path}")
     logits = torch.ones(1, 2, 3)
-    loss, n = fn(logits, torch.zeros(1, 2, dtype=torch.long))
+    loss, n = fn(logits, torch.zeros(1, 2, dtype=torch.long), torch.ones(1, 2))
     assert torch.isclose(loss, torch.tensor(6 * 2.5))
     assert n == 2

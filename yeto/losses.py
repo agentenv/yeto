@@ -70,10 +70,13 @@ def load_custom_loss(spec: str):
     """Load a user-supplied loss from a ``custom:<file.py>[:<fn>]`` spec.
 
     The file must define ``<fn>`` (default name: ``loss_fn``) with signature
-    ``fn(logits, input_ids) -> (loss, num_tokens)``. Because the learner owns
-    the forward pass, the callable receives full logits — no extra forward
-    pass or logprob round-trip is needed. The file must live inside the repo
-    so the workdir sync ships it to every learner.
+    ``fn(logits, input_ids, weights) -> (loss, num_tokens)``, where ``weights``
+    is a (B, T) float tensor of per-token loss weights aligned with
+    ``input_ids`` (e.g. 1.0 on assistant tokens, 0.0 elsewhere with
+    --train-on assistant). Because the learner owns the forward pass, the
+    callable receives full logits — no extra forward pass or logprob
+    round-trip is needed. The file must live inside the repo so the workdir
+    sync ships it to every learner.
     """
     import importlib.util
     from pathlib import Path
@@ -112,14 +115,22 @@ def load_pickled_loss(spec: str):
 
 
 def sft_loss(
-    logits: torch.Tensor, labels: torch.Tensor, loss_function: str = "cross_entropy"
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    loss_function: str = "cross_entropy",
+    weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Supervised loss for causal LM training.
 
-    logits: (B, T, V); labels: (B, T) with -100 on masked positions.
-    Returns (loss, num_target_tokens). Only cross_entropy is meaningful for
-    SFT; RL losses need sampling_logprobs/advantages, which an offline chat
-    dataset does not carry. For anything else, use a custom loss
+    logits: (B, T, V); labels: (B, T) with -100 on masked positions;
+    weights: optional (B, T) per-token loss weights aligned with labels.
+    Weights are shifted alongside the labels, so weights[t] scales the loss
+    of predicting token t; weight-0 positions contribute nothing. Returns
+    (loss, num_target_tokens) where num_target_tokens counts positions with
+    weight > 0 after the shift (all unmasked positions when weights is None).
+    Only cross_entropy is meaningful for SFT; RL losses need
+    sampling_logprobs/advantages, which an offline chat dataset does not
+    carry. For anything else, use a custom loss
     (``--loss-function custom:file.py``).
     """
     if loss_function != "cross_entropy":
@@ -131,9 +142,12 @@ def sft_loss(
     shift_logits = logits[:, :-1].float()
     shift_labels = labels[:, 1:]
     mask = shift_labels != -100
-    n_tokens = mask.sum()
     safe_labels = shift_labels.masked_fill(~mask, 0)
     logprobs = torch.log_softmax(shift_logits, dim=-1)
     target_logprobs = logprobs.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
-    loss = cross_entropy(target_logprobs, mask.to(logprobs.dtype))
+    w = mask.to(logprobs.dtype)
+    if weights is not None:
+        w = w * weights[:, 1:].to(logprobs.dtype)
+    n_tokens = (w > 0).sum()
+    loss = cross_entropy(target_logprobs, w)
     return loss, n_tokens

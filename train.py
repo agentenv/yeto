@@ -37,12 +37,18 @@ def parse_args(argv=None):
         type=loss_spec,
         default="cross_entropy",
         help=f"one of {'|'.join(LOSS_FUNCTIONS)}, or custom:<file.py>[:<fn>] "
-        "defining fn(logits, input_ids) -> (loss, num_tokens); the callable "
-        "is pickled by value and shipped to all learners",
+        "defining fn(logits, input_ids, weights) -> (loss, num_tokens); the "
+        "callable is pickled by value and shipped to all learners",
     )
 
     tune = p.add_argument_group("fine-tuning")
     tune.add_argument("--tuning", choices=["lora", "full"], default="lora")
+    tune.add_argument(
+        "--train-on",
+        choices=["assistant", "all"],
+        default="assistant",
+        help="which tokens carry loss: assistant-message tokens only (default) or every token",
+    )
     tune.add_argument("--lora-r", type=int, default=16)
     tune.add_argument("--seq-len", type=int, default=2048)
     tune.add_argument("--micro-batch-size", type=int, default=1)

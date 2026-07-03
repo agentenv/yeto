@@ -51,6 +51,13 @@ def parse_args(argv=None):
     p.add_argument("--learner-id", type=int, required=True)
     p.add_argument("--num-learners", type=int, required=True)
     p.add_argument("--loss-function", default="cross_entropy")
+    p.add_argument(
+        "--train-on",
+        choices=["assistant", "all"],
+        default="assistant",
+        help="which tokens carry loss: assistant-message tokens only "
+        "(default) or every token",
+    )
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument(
         "--shard",
@@ -174,6 +181,7 @@ def main(argv=None) -> None:
             args.max_rows,
             rank=rank,
             world=world,
+            train_on=args.train_on,
         )
         loader = torch.utils.data.DataLoader(
             dataset,
@@ -189,7 +197,13 @@ def main(argv=None) -> None:
         )
     else:
         dataset = build_packed_dataset(
-            args.data, tokenizer, args.learner_id, args.num_learners, args.seq_len, args.max_rows
+            args.data,
+            tokenizer,
+            args.learner_id,
+            args.num_learners,
+            args.seq_len,
+            args.max_rows,
+            train_on=args.train_on,
         )
         sampler = None
         if world > 1:
@@ -287,18 +301,16 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
     fragment_versions = [0] * layout.num_fragments  # last applied version per fragment
     pending_pulls: list = []  # pulls deferred until c_steps >= 1
     global_step = 0
+    # c_tokens counts RAW tokens processed (throughput proxy for merge
+    # weighting), not the subset of loss-weighted tokens.
     tokens_per_inner_step = world * args.micro_batch_size * args.grad_accum * args.seq_len
-    # DDP averages gradients across ranks, so normalizing each rank's
-    # sum-over-tokens loss by its *own* token count yields the global
-    # per-token mean gradient.
-    loss_divisor = args.micro_batch_size * args.grad_accum * args.seq_len
 
     if args.loss_function.startswith("pickle:"):
         compute_loss = load_pickled_loss(args.loss_function)
     elif args.loss_function.startswith("custom:"):
         compute_loss = load_custom_loss(args.loss_function)
     else:
-        compute_loss = lambda logits, ids: sft_loss(logits, ids, args.loss_function)  # noqa: E731
+        compute_loss = lambda logits, ids, w: sft_loss(logits, ids, args.loss_function, w)  # noqa: E731
 
     shutdown = False
     epoch = 0
@@ -308,11 +320,16 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
             loader.sampler.set_epoch(epoch)
         accum = 0
         opt.zero_grad(set_to_none=True)
-        for batch in loader:
-            input_ids = batch.to(device, non_blocking=True)
+        for input_ids, weights in loader:
+            input_ids = input_ids.to(device, non_blocking=True)
+            weights = weights.to(device, non_blocking=True)
             out = model(input_ids=input_ids)
-            loss, _ = compute_loss(out.logits, input_ids)
-            (loss / loss_divisor).backward()
+            loss, _ = compute_loss(out.logits, input_ids, weights)
+            # DDP averages gradients across ranks, so normalizing each rank's
+            # sum-over-tokens loss by its *own* trained-token count yields
+            # (approximately) the global per-trained-token mean gradient.
+            trained_tokens = weights.sum().clamp(min=1.0)
+            (loss / (trained_tokens * args.grad_accum)).backward()
             accum += 1
             if accum < args.grad_accum:
                 continue
@@ -334,7 +351,7 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
                     "local_step=%d global_step=%d loss/token=%.4f (%.2f s/step)",
                     steps_total,
                     global_step,
-                    loss.item() / (args.micro_batch_size * args.seq_len),
+                    loss.item() / trained_tokens.item(),  # per trained token
                     dt / 10,
                 )
 
