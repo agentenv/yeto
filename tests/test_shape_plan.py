@@ -248,6 +248,16 @@ def test_dominated_and_unsupported_shapes_never_ask_for_scores(fake_env, monkeyp
     assert "exceeds the budget" in reasons["aws:8xh200@us-east-2"]
 
 
+def test_quota_dead_shapes_never_consume_score_asks(fake_env):
+    # Placement-score configurations are a scarce daily resource: a shape
+    # that quota already rules out must be filtered BEFORE the score wave.
+    fake = FakeAws(QUOTAS, SCORES, CODES, usage={("us-east-2", "L-417A185B"): 384.0})
+    _shape(fake, budget=500.0)
+    assert "p5.48xlarge" not in {t for t, _ in fake.score_asks}
+    # Sanity: quota-alive shapes still get their asks.
+    assert ("p4de.24xlarge", 1) in fake.score_asks
+
+
 def test_score_ask_budget_caps_queries(fake_env, monkeypatch):
     monkeypatch.setattr(plan_mod, "MAX_SCORE_ASKS", 1)
     result = _shape(fake_env, budget=40.0)

@@ -152,48 +152,23 @@ def build_shape(
         else:
             sized.append((off, nodes))
 
-    # One parallel wave for the three AWS signal families.
+    # Wave 1: quota limits + current usage. These APIs are effectively
+    # unlimited, while placement-score *configurations* are capped per day —
+    # so quota filtering runs first and scores are only ever requested for
+    # shapes that could actually launch.
     quota_keys: dict[tuple[Offering, int], QuotaKey | None] = {}
     for off, nodes in sized:
         code = aws.quota_code(off.instance_type, use_spot=True)
         quota_keys[(off, nodes)] = QuotaKey(off.region, code) if code else None
     unique_quotas = sorted({k for k in quota_keys.values() if k}, key=lambda k: (k.region, k.code))
-    unique_asks = sorted({(off.instance_type, nodes) for off, nodes in sized})
-    if len(unique_asks) > MAX_SCORE_ASKS:
-        # Rank asks by the best optimistic TFLOPs/$ any offering gives them,
-        # query the top MAX_SCORE_ASKS, and reject the tail explicitly rather
-        # than silently burning the daily config budget.
-        def ask_value(ask: tuple[str, int]) -> float:
-            itype, nodes = ask
-            return max(
-                effective_tflops(off, n, 10) / (off.spot_price * n)
-                for off, n in sized
-                if off.instance_type == itype and n == nodes
-            )
-
-        ranked = sorted(unique_asks, key=ask_value, reverse=True)
-        skipped = set(ranked[MAX_SCORE_ASKS:])
-        unique_asks = sorted(ranked[:MAX_SCORE_ASKS])
-        kept_sized = []
-        for off, nodes in sized:
-            if (off.instance_type, nodes) in skipped:
-                rejections.append(
-                    Rejection(_candidate_key(off, nodes), "score not queried (daily config budget; low TFLOPs/$)")
-                )
-            else:
-                kept_sized.append((off, nodes))
-        sized = kept_sized
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         quotas_f = pool.submit(aws.quotas, unique_quotas)
         usage_f = pool.submit(aws.quota_usage, unique_quotas)
-        scores_f = pool.submit(aws.placement_scores, unique_asks, regions)
         quotas = quotas_f.result()
         usage = usage_f.result()
-        scores = scores_f.result()
 
-    # Filter into solver candidates against *remaining* quota (limit − usage).
-    candidates: list[Candidate] = []
     quota_limits: dict[tuple[str, str], float] = {}
+    quota_ok: list[tuple[Offering, int]] = []
     for off, nodes in sized:
         key = _candidate_key(off, nodes)
         qk = quota_keys[(off, nodes)]
@@ -219,6 +194,44 @@ def build_shape(
                 )
                 continue
             quota_limits[(qk.region, qk.code)] = room
+        quota_ok.append((off, nodes))
+
+    # Ask-budget pruning on the quota survivors: rank asks by the best
+    # optimistic TFLOPs/$ any offering gives them, query the top
+    # MAX_SCORE_ASKS, and reject the tail explicitly rather than silently
+    # burning the daily config budget.
+    unique_asks = sorted({(off.instance_type, nodes) for off, nodes in quota_ok})
+    if len(unique_asks) > MAX_SCORE_ASKS:
+        def ask_value(ask: tuple[str, int]) -> float:
+            itype, nodes = ask
+            return max(
+                effective_tflops(off, n, 10) / (off.spot_price * n)
+                for off, n in quota_ok
+                if off.instance_type == itype and n == nodes
+            )
+
+        ranked = sorted(unique_asks, key=ask_value, reverse=True)
+        skipped = set(ranked[MAX_SCORE_ASKS:])
+        unique_asks = sorted(ranked[:MAX_SCORE_ASKS])
+        kept = []
+        for off, nodes in quota_ok:
+            if (off.instance_type, nodes) in skipped:
+                rejections.append(
+                    Rejection(_candidate_key(off, nodes), "score not queried (daily config budget; low TFLOPs/$)")
+                )
+            else:
+                kept.append((off, nodes))
+        quota_ok = kept
+
+    # Wave 2: placement scores, spent only on launchable shapes. The region
+    # list stays the caller's full stable list so cache keys (and AWS's
+    # config identity) do not churn run-to-run.
+    scores = aws.placement_scores(unique_asks, regions)
+
+    candidates: list[Candidate] = []
+    for off, nodes in quota_ok:
+        key = _candidate_key(off, nodes)
+        qk = quota_keys[(off, nodes)]
         score = scores.get((off.instance_type, nodes, off.region))
         if min_score > 0:
             if score is None:
