@@ -193,7 +193,7 @@ def test_launch_head_records_registry(fake_sky, monkeypatch, capsys):
     assert head_task.file_mounts["~/yeto-syncer"] == "/fake/yeto-syncer"
     assert head_task.resources.kwargs["use_spot"] is False
     assert head_task.resources.kwargs["infra"] == "aws/us-west-2"
-    assert 'pip install -q "skypilot[aws]>=0.12"' in head_task.setup
+    assert 'pip install -q "skypilot[aws,gcp]>=0.12"' in head_task.setup
     (exec_cluster, job_task), = fake_sky["execs"]
     assert exec_cluster == "h1-head"
     assert job_task.envs["SYNCER_PUBLIC_IP"] == "203.0.113.7"

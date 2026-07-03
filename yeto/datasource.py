@@ -16,15 +16,29 @@ from __future__ import annotations
 
 import os
 
-CLOUD_SCHEMES = ("s3://", "gs://", "r2://", "cos://", "oci://")
+# Fallback scheme list for environments without sky (learner nodes import
+# nothing from here, but belt-and-braces); with sky importable, detection
+# delegates to sky's own registry and covers every store it supports.
+CLOUD_SCHEMES = ("s3://", "gs://", "r2://", "cos://", "oci://", "azure://", "nebius://")
 LEARNER_DATA_PATH = "~/yeto-data"
 HEAD_DATA_PATH = "~/yeto-data-src"
 
 
+def _is_cloud_url(data: str) -> bool:
+    try:
+        from sky.data import data_utils
+
+        return bool(data_utils.is_cloud_store_url(data))
+    except Exception:
+        return data.startswith(CLOUD_SCHEMES)
+
+
 def kind(data: str) -> str:
-    """"hf" | "cloud" | "local". Anything path-shaped (or that exists on this
-    machine) is local; HF ids never start with /, ./, ../ or ~."""
-    if data.startswith(CLOUD_SCHEMES):
+    """"hf" | "cloud" | "local". Cloud detection is sky's own predicate
+    (any object store SkyPilot can mount). Anything path-shaped (or that
+    exists on this machine) is local; HF ids never start with /, ./, ../
+    or ~."""
+    if _is_cloud_url(data):
         return "cloud"
     if data.startswith(("/", "./", "../", "~")) or os.path.exists(os.path.expanduser(data)):
         return "local"

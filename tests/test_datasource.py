@@ -47,3 +47,10 @@ def test_head_stage_rewrites_local_paths(tmp_path):
     # The rewritten path is itself classified local, so the head's launcher
     # performs the second hop onto learners.
     assert kind(rewritten) == "local"
+
+
+def test_cloud_detection_covers_all_sky_stores():
+    # Detection delegates to sky's registry, so any store sky supports is a
+    # valid --data source, not just the hand-rolled fallback tuple.
+    for uri in ("s3://b/x", "gs://b/x", "r2://b/x", "oci://b/x"):
+        assert kind(uri) == "cloud", uri

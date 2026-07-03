@@ -62,6 +62,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument("--model", required=True, help="model alias (see yeto/models.py: gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...) or any HF id")
     p.add_argument(
+        "--output",
+        default=None,
+        help="where the fine-tuned model lands: any sky-supported object "
+        "store URI (s3://, gs://, r2://, oci://, ...) or hf://org/repo "
+        "(the head uploads and then TERMINATES ITSELF — a "
+        "fully self-cleaning run), or a local path / omitted (artifact "
+        "stays on the head, which is kept up)",
+    )
+    p.add_argument(
         "--data",
         required=True,
         help="fine-tuning data: HF dataset id, local path (dir/file of "
@@ -569,7 +578,7 @@ def cmd_launch(args) -> int:
 # head job waits for it (bounded) before importing anything.
 HEAD_READY_MARKER = "~/.yeto_head_ready"
 HEAD_SETUP_PIP = (
-    'pip install -q "skypilot[aws]>=0.12" && '
+    'pip install -q "skypilot[aws,gcp]>=0.12" && '
     "pip install -q torch --index-url https://download.pytorch.org/whl/cpu && "
     "pip install -q cloudpickle transformers==4.57.1 && "
     f"touch {HEAD_READY_MARKER}"
@@ -611,6 +620,10 @@ def _make_head_task(args, syncer_binary, extra_mounts: dict | None = None):
         # Same pattern as sky's jobs controller: ship the local credentials
         # so the head can launch, recover, and tear down learner clusters.
         file_mounts["~/.aws"] = aws_creds
+    gcloud_creds = os.path.expanduser("~/.config/gcloud")
+    if os.path.isdir(gcloud_creds):
+        # Enables gs:// --output uploads from the head (ADC).
+        file_mounts["~/.config/gcloud"] = gcloud_creds
     else:
         print(
             "[yeto] WARNING: ~/.aws not found; the head will have no cloud "
@@ -783,7 +796,16 @@ def cmd_head(payload: str) -> int:
         return 1
     finally:
         syncer.stop()
-    return int(code or 0)
+    code = int(code or 0)
+    # A clean run whose output went to a remote destination leaves nothing
+    # of value on this VM: self-terminate for a fully self-cleaning run.
+    # Any failure (including delivery failure, code 2) keeps the head up so
+    # the fetched model and syncer checkpoint stay recoverable.
+    from . import delivery
+
+    if code == 0 and delivery.is_remote(getattr(args, "output", None)):
+        delivery.self_terminate(f"{args.cluster_prefix}-head")
+    return code
 
 
 # ---------------------------------------------------------------------------

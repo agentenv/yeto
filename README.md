@@ -46,8 +46,12 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
   FSDP memory model of the model. Run `yeto shape` directly to see the plan,
   rejected shapes with reasons, and the launch line without launching.
 - `--data`: HF dataset id, local path (jsonl/json/parquet or `save_to_disk`
-  dir), or cloud URI (`s3://`, `gs://`, `r2://`, …) — non-HF sources ship to
+  dir), or any sky-supported object-store URI — non-HF sources ship to
   learners via SkyPilot file mounts.
+- `--output`: any sky-supported store URI or `hf://org/repo` — the head
+  fetches the model from the winning learner, uploads it, and **terminates
+  itself** (fully self-cleaning run). Local path or omitted: the artifact
+  stays on the head and the head is kept up.
 - `--model`: any HF id (private repos work with `HF_TOKEN`), or an alias
   below.
 - Learners default to spot; the head VM (syncer + fleet controller) is a

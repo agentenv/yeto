@@ -27,6 +27,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import delivery
 from .gpu_spec import ClusterSpec, parse_gpu_spec
 
 SYNCER_PORT = 29400
@@ -808,14 +809,40 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         exit_codes = controller.run()
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
 
-        # Fetch instructions: prefer learner 0, else any learner that
-        # finished (abandoned clusters are already gone).
+        # Secure the artifact BEFORE the finally block tears learners down:
+        # fetch ~/yeto-output from the winning learner onto this machine
+        # (the head, or the local worker), then deliver to --output.
         done = [n for n, s in exit_codes.items() if "SUCCEEDED" in s]
+        if not done:
+            print("[launcher] no learner succeeded; recover from the syncer "
+                  "checkpoint with yeto-export", file=sys.stderr)
+            return 1
         source = next((n for n in done if "-l0-" in n), done[0])
-        print(
-            f"[launcher] fine-tuned model saved on {source}:~/yeto-output\n"
-            f"  fetch with: scp -r {source}:yeto-output ./"
+        output = getattr(args, "output", None)
+        local_dest = (
+            os.path.expanduser(output)
+            if output and delivery.kind(output) == "local" and not head_mode
+            else os.path.expanduser("~/yeto-output")
         )
+        os.makedirs(local_dest, exist_ok=True)
+        try:
+            subprocess.run(delivery.fetch_cmd(source, local_dest), check=True)
+            print(f"[launcher] fine-tuned model fetched to {local_dest}")
+        except subprocess.CalledProcessError as e:
+            print(
+                f"[launcher] fetching {source}:~/yeto-output failed ({e}); "
+                "recover from the syncer checkpoint with yeto-export",
+                file=sys.stderr,
+            )
+            return 2
+        if delivery.is_remote(output):
+            try:
+                delivery.deliver(output, local_dest)
+                print(f"[launcher] output uploaded to {output}")
+            except Exception as e:
+                print(f"[launcher] upload to {output} failed: {e}; the model "
+                      f"remains at {local_dest}", file=sys.stderr)
+                return 2
         return 1 if failed else 0
     finally:
         # Clusters the controller already tore down (abandoned learners, or
@@ -832,8 +859,11 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                 except Exception as e:
                     print(f"[launcher] teardown of {name} failed: {e}", file=sys.stderr)
         if head_mode:
-            # The head VM cannot reliably tear itself down (the teardown
-            # would kill this very process mid-flight), so it stays up.
+            # The head VM cannot tear itself down here (the teardown would
+            # kill this very process mid-flight). With a remote --output the
+            # caller (cmd_head) self-terminates via the EC2 API after this
+            # returns cleanly; otherwise the head stays up so the fetched
+            # model and syncer checkpoint remain reachable.
             head_cluster = f"{prefix}-head"
             if args.keep:
                 print(
@@ -842,9 +872,12 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     f"with: yeto down {prefix}",
                     flush=True,
                 )
+            elif delivery.is_remote(getattr(args, "output", None)):
+                print("[launcher] run finished; head will self-terminate "
+                      "after delivery", flush=True)
             else:
                 print(
-                    f"[launcher] run finished; tear down the head with: "
-                    f"yeto down {prefix}",
+                    f"[launcher] run finished; model + checkpoint live on the "
+                    f"head — tear it down with: yeto down {prefix}",
                     flush=True,
                 )
