@@ -634,7 +634,13 @@ def _make_head_task(args, syncer_binary, extra_mounts: dict | None = None):
     is known."""
     import sky
 
-    from .launcher import PICKLED_LOSS_FILE, REPO_ROOT, SYNCER_PORT, WAN_TUNING
+    from .launcher import (
+        HF_TOKEN_PATH,
+        PICKLED_LOSS_FILE,
+        REPO_ROOT,
+        SYNCER_PORT,
+        WAN_TUNING,
+    )
 
     file_mounts = {"~/yeto-syncer": str(syncer_binary), **(extra_mounts or {})}
     aws_creds = os.path.expanduser("~/.aws")
@@ -646,6 +652,11 @@ def _make_head_task(args, syncer_binary, extra_mounts: dict | None = None):
     if os.path.isdir(gcloud_creds):
         # Enables gs:// --output uploads from the head (ADC).
         file_mounts["~/.config/gcloud"] = gcloud_creds
+    hf_token = os.path.expanduser(HF_TOKEN_PATH)
+    if os.path.isfile(hf_token):
+        # The head re-mounts the token onto learners (authenticated Hub
+        # quota, gated models) and needs it itself for --output hf.
+        file_mounts[HF_TOKEN_PATH] = hf_token
     else:
         print(
             "[yeto] WARNING: ~/.aws not found; the head will have no cloud "

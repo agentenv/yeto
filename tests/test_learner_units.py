@@ -141,3 +141,37 @@ def test_attention_target_regex_matches_common_archs():
         assert re.fullmatch(_ATTENTION_TARGETS, name), name
     for name in frozen:
         assert not re.fullmatch(_ATTENTION_TARGETS, name), name
+
+
+def test_offline_first_uses_cache_hit():
+    from yeto.learner import _from_pretrained_offline_first
+
+    calls = []
+
+    class Factory:
+        @staticmethod
+        def from_pretrained(model_id, **kw):
+            calls.append(kw)
+            if not kw.get("local_files_only"):
+                raise AssertionError("went online despite cache hit")
+            return "cached-model"
+
+    assert _from_pretrained_offline_first(Factory, "org/model", trust_remote_code=True) == "cached-model"
+    assert calls == [{"local_files_only": True, "trust_remote_code": True}]
+
+
+def test_offline_first_falls_back_online_on_cold_cache():
+    from yeto.learner import _from_pretrained_offline_first
+
+    calls = []
+
+    class Factory:
+        @staticmethod
+        def from_pretrained(model_id, **kw):
+            calls.append(kw)
+            if kw.get("local_files_only"):
+                raise OSError("not cached")
+            return "downloaded-model"
+
+    assert _from_pretrained_offline_first(Factory, "org/model") == "downloaded-model"
+    assert [c.get("local_files_only") for c in calls] == [True, None]

@@ -116,6 +116,17 @@ NVME_ENV = (
     "HF_DATASETS_CACHE=/opt/yeto-nvme/hf/datasets || true"
 )
 
+# huggingface_hub reads the token from $HF_HOME/token, so a token mounted
+# to the default location must follow HF_HOME when NVME_ENV moves it.
+# Authenticated Hub requests get a 1000-req/5-min per-IP quota vs 500
+# anonymous — 8 ranks resolving configs and fp8 kernels burn through the
+# anonymous one in a few crash-loop cycles.
+HF_TOKEN_PATH = "~/.cache/huggingface/token"
+HF_TOKEN_ENV = (
+    '[ -f ~/.cache/huggingface/token ] && [ -n "$HF_HOME" ] && '
+    "mkdir -p $HF_HOME && cp -n ~/.cache/huggingface/token $HF_HOME/token || true"
+)
+
 # Pick the torch wheel on the node from what the HARDWARE requires (GPU
 # compute capability) and what the HOST supports (driver version):
 # Blackwell (SM100+) only has kernels in cu128 wheels (torch >= 2.7),
@@ -381,6 +392,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         learner_flags += f" --max-rows {args.max_rows}"
     run = (
         f"{NVME_ENV}\n"
+        f"{HF_TOKEN_ENV}\n"
         'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
         "torchrun --nnodes=$SKYPILOT_NUM_NODES --node_rank=$SKYPILOT_NODE_RANK "
         "--nproc_per_node=$SKYPILOT_NUM_GPUS_PER_NODE "
@@ -406,6 +418,14 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         # mount it into the workdir explicitly.
         file_mounts = file_mounts or {}
         file_mounts[f"~/sky_workdir/{PICKLED_LOSS_FILE}"] = str(REPO_ROOT / PICKLED_LOSS_FILE)
+    # Ride the launching machine's HF token onto every learner: anonymous
+    # Hub quota is half the authenticated one and shared per-IP, and a
+    # gated/private --model needs the token outright. HF_TOKEN_ENV then
+    # copies it wherever NVME_ENV points HF_HOME.
+    local_token = os.path.expanduser(HF_TOKEN_PATH)
+    if os.path.isfile(local_token):
+        file_mounts = file_mounts or {}
+        file_mounts[HF_TOKEN_PATH] = local_token
     # Kick the weight download off in the background at the END of setup:
     # it overlaps sky's remaining bookkeeping and races ahead of the run
     # command, which then finds a warm (or warming — hf resumes) cache.
@@ -424,6 +444,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
                 WAN_TUNING,
                 NVME_SETUP,
                 NVME_ENV,
+                HF_TOKEN_ENV,
                 TORCH_SETUP,
                 "pip install -q -r requirements.txt",
                 prefetch,

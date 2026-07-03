@@ -75,3 +75,18 @@ def test_learner_image_selection_precedence(monkeypatch):
     # A failing resolver degrades to None (setup-time driver remediation).
     monkeypatch.setitem(launcher.GPU_IMAGE_OVERRIDES, ("aws", "B200"), lambda region: None)
     assert launcher.learner_image_for(SimpleNamespace(learner_image=None), b200) is None
+
+
+def test_learner_task_mounts_hf_token_when_present(tmp_path, monkeypatch):
+    """The launching machine's HF token rides onto every learner, and the
+    setup/run shells copy it to wherever NVME_ENV points HF_HOME."""
+    from yeto import launcher
+
+    token = tmp_path / "token"
+    token.write_text("hf_test")
+    monkeypatch.setattr(
+        launcher.os.path, "expanduser",
+        lambda p: str(token) if p == launcher.HF_TOKEN_PATH else p,
+    )
+    assert launcher.HF_TOKEN_PATH == "~/.cache/huggingface/token"
+    assert "cp -n ~/.cache/huggingface/token $HF_HOME/token" in launcher.HF_TOKEN_ENV

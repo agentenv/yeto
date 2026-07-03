@@ -160,6 +160,20 @@ def setup_distributed() -> tuple[int, int]:
     return 0, 1
 
 
+def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
+    """Try the local cache before touching the Hub.
+
+    A cache hit costs zero API requests; torchrun's 8 ranks otherwise each
+    revalidate every config/tokenizer file per crash-loop cycle, which adds
+    up against the Hub's per-IP rate limit. A cold cache (fresh spot node)
+    falls back to a normal online load.
+    """
+    try:
+        return factory.from_pretrained(model_id, local_files_only=True, **kwargs)
+    except Exception:
+        return factory.from_pretrained(model_id, **kwargs)
+
+
 def load_model_and_tokenizer(args, device):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -187,9 +201,9 @@ def load_model_and_tokenizer(args, device):
             raise ValueError("--base-dtype fp8/fp4 requires --tuning lora (frozen base only)")
         if device.type != "cuda":
             raise ValueError("--base-dtype fp8/fp4 requires CUDA")
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id, torch_dtype=dtype, trust_remote_code=True
+    tokenizer = _from_pretrained_offline_first(AutoTokenizer, model_id, trust_remote_code=True)
+    model = _from_pretrained_offline_first(
+        AutoModelForCausalLM, model_id, torch_dtype=dtype, trust_remote_code=True
     )
     if args.tuning == "lora":
         from peft import LoraConfig, get_peft_model
@@ -331,6 +345,23 @@ def main(argv=None) -> None:
         if args.tuning == "lora":
             model.enable_input_require_grads()
         log.info("gradient checkpointing enabled")
+
+    if device.type == "cuda":
+        # One tiny forward on each node's local rank 0 before anyone else
+        # computes: transformers resolves quantization kernels (e.g.
+        # deep-gemm for fp8) lazily at first forward, with Hub API calls
+        # and a download. Doing it once per node keeps the other ranks'
+        # first forward a pure cache hit instead of 8 concurrent
+        # resolutions. Must run BEFORE sharding — a single-rank forward
+        # through a wrapped model would hang on its collectives.
+        if int(os.environ.get("LOCAL_RANK", "0")) == 0:
+            try:
+                with torch.inference_mode():
+                    model(input_ids=torch.tensor([[1]], device=device))
+            except Exception as exc:  # the probe will surface real errors
+                log.warning("kernel pre-warm forward failed: %s", exc)
+        if world > 1:
+            dist.barrier()
 
     params = trainable_params(model)
     layout = build_layout(
