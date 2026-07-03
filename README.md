@@ -40,11 +40,22 @@ Yeto's asynchronous synchronization algorithm is based on **Decoupled DiLoCo**
 ```bash
 pip install "yeto[launcher] @ ."      # or: python3 train.py ... from a checkout
 
-yeto \
+yeto launch \
   --gpu aws:8xa100@us-east-2,aws:8xa100@us-east-1,aws:8xa100@us-west-2 \
   --model deepseek4flash \
   --data armand0e/claude-fable-5-claude-code \
   --loss-function cross_entropy
+```
+
+`launch` detaches (SkyPilot-style): the run executes in a background
+worker while the CLI streams its log, and **Ctrl-C detaches** — the run
+and its clusters keep going. Runs are named by `--cluster-prefix`
+(default `yeto`); bare flags (`yeto --gpu ...`) still mean `launch`.
+
+```bash
+yeto status                # table of known runs
+yeto logs <run>            # re-attach to a run's log stream (--no-follow to dump)
+yeto down <run>            # stop the run's worker and tear down its clusters
 ```
 
 `--gpu` grammar: `cloud:[nodes x]<count>x<gpu>@region`, comma-separated; one

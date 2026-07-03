@@ -517,7 +517,16 @@ class FleetController:
             print(f"[launcher] teardown of {name} failed: {e}", file=sys.stderr)
 
 
-def run(args) -> int:
+def run(args, on_clusters=None) -> int:
+    """Provision and supervise the fleet; returns the run's exit code.
+
+    `on_clusters`, if given, is called once with the full list of cluster
+    names for this run (syncer first). Names are deterministic from the
+    args, so the callback fires before provisioning starts — callers (the
+    CLI's run registry) can record them for status/teardown even if the
+    launch dies mid-provision. Optional and best-effort: existing callers
+    need not pass it, and a failing hook never aborts the run.
+    """
     import sky
 
     specs = parse_gpu_spec(args.gpu)
@@ -525,12 +534,20 @@ def run(args) -> int:
     args.loss_function = resolve_loss_function(args.loss_function)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
+    syncer_cluster = f"{prefix}-syncer"
+    learner_names = [
+        f"{prefix}-l{m}-{spec.region or spec.cloud}" for m, spec in enumerate(specs)
+    ]
+    if on_clusters is not None:
+        try:
+            on_clusters([syncer_cluster] + learner_names)
+        except Exception as e:
+            print(f"[launcher] on_clusters hook failed: {e}", file=sys.stderr)
     clusters: list[str] = []
     controller = None
 
     try:
         # 1. Syncer.
-        syncer_cluster = f"{prefix}-syncer"
         print(f"[launcher] launching syncer cluster {syncer_cluster} in {args.syncer_region}")
         syncer_task = make_syncer_task(args, num_learners)
         rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
@@ -543,7 +560,7 @@ def run(args) -> int:
         tasks = {}
         rids = {}
         for m, spec in enumerate(specs):
-            name = f"{prefix}-l{m}-{spec.region or spec.cloud}"
+            name = learner_names[m]
             task = make_learner_task(args, spec, m, num_learners, syncer_addr)
             tasks[name] = task
             print(f"[launcher] launching learner {m} on {spec} as {name}")
