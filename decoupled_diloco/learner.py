@@ -340,7 +340,7 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
                     fragment_versions[fid] = version
                     global_step = max(global_step, version)
 
-            if shutdown:
+            if shutdown or steps_total >= args.max_local_steps:
                 break
         epoch += 1
     log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
