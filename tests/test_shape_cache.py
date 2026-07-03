@@ -107,6 +107,61 @@ def test_in_flight_dedup(tmp_path):
     assert results == ["shared"] * 8
 
 
+def test_per_call_ttl_overrides_default(tmp_path, monkeypatch):
+    now = {"t": 1000.0}
+    monkeypatch.setattr(cache_mod, "_now", lambda: now["t"])
+    c = TTLCache(path=tmp_path / "c.json", ttl=100.0)
+    fresh_fetch, fresh_calls = _counting_fetch("slow-moving")
+    stale_fetch, stale_calls = _counting_fetch("fast-moving")
+    c.get_or("limits", fresh_fetch)  # instance default: 100s
+    c.get_or("usage", stale_fetch, ttl=5.0)
+    now["t"] += 6.0  # past the override, well within the default
+    c.get_or("limits", fresh_fetch)
+    c.get_or("usage", stale_fetch, ttl=5.0)
+    assert fresh_calls["n"] == 1  # default ttl: still cached
+    assert stale_calls["n"] == 2  # 5s override: expired independently
+    # ttl=None means the instance default, not "expired".
+    c.get_or("usage", stale_fetch, ttl=None)
+    assert stale_calls["n"] == 2
+
+
+def test_merge_on_save_across_instances(tmp_path):
+    path = tmp_path / "c.json"
+    TTLCache(path=path).get_or("key1", lambda: 1)
+    TTLCache(path=path).get_or("key2", lambda: 2)
+    third = TTLCache(path=path)
+    fetch, calls = _counting_fetch()
+    assert third.get_or("key1", fetch) == 1
+    assert third.get_or("key2", fetch) == 2
+    assert calls["n"] == 0
+
+
+def test_save_creates_lock_file(tmp_path):
+    path = tmp_path / "c.json"
+    TTLCache(path=path).get_or("k", lambda: 1)
+    assert (tmp_path / "c.json.lock").exists()
+
+
+def test_interleaved_instance_writes_preserve_both_keys(tmp_path):
+    """Two live instances writing in turn must not clobber each other.
+
+    Both instances load the (empty) file before either saves, so without
+    merge-on-save the second write would drop the first instance's entry.
+    """
+    path = tmp_path / "c.json"
+    a = TTLCache(path=path)
+    b = TTLCache(path=path)
+    a.get_or("k1", lambda: "from-a")
+    b.get_or("k2", lambda: "from-b")
+    on_disk = json.loads(path.read_text())
+    assert set(on_disk) == {"k1", "k2"}
+    fetch, calls = _counting_fetch()
+    fresh = TTLCache(path=path)
+    assert fresh.get_or("k1", fetch) == "from-a"
+    assert fresh.get_or("k2", fetch) == "from-b"
+    assert calls["n"] == 0
+
+
 def test_save_drops_expired_entries(tmp_path, monkeypatch):
     now = {"t": 1000.0}
     monkeypatch.setattr(cache_mod, "_now", lambda: now["t"])

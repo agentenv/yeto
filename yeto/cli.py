@@ -249,10 +249,31 @@ def build_parser() -> argparse.ArgumentParser:
     shape.add_argument("--budget", type=float, required=True, help="fleet budget in $/hr (includes head VM)")
     shape.add_argument("--tuning", choices=["lora", "full"], default="lora")
     shape.add_argument("--seq-len", type=int, default=2048)
+    shape.add_argument("--data", default=None, help="HF dataset id (fills the launch line; required with --apply)")
+    shape.add_argument(
+        "--apply",
+        action="store_true",
+        help="launch the computed plan immediately (hands off to `yeto launch`)",
+    )
+    shape.add_argument("--json", action="store_true", help="emit the plan as JSON instead of text")
     shape.add_argument(
         "--regions",
         default=None,
-        help="comma-separated AWS regions to consider (default: us-east-1,us-east-2,us-west-1,us-west-2)",
+        help="comma-separated AWS regions, or 'all' for every catalog region "
+        "(default: us-east-1,us-east-2,us-west-1,us-west-2)",
+    )
+    shape.add_argument(
+        "--price-margin",
+        type=float,
+        default=0.15,
+        help="headroom applied to catalog spot prices when enforcing the "
+        "budget (they are estimates and move)",
+    )
+    shape.add_argument(
+        "--head-cost",
+        type=float,
+        default=0.40,
+        help="assumed $/hr for the head VM in budget math",
     )
     shape.add_argument(
         "--gpus",
@@ -855,8 +876,11 @@ def cmd_down(args) -> int:
 
 
 def cmd_shape(args) -> int:
-    from .shape.plan import build_shape, render
+    from .shape.plan import build_shape, launch_argv, render, to_json_dict
 
+    if args.apply and not args.data:
+        print("[yeto] --apply needs --data <hf-dataset>", file=sys.stderr)
+        return 1
     try:
         result = build_shape(
             model=args.model,
@@ -869,12 +893,22 @@ def cmd_shape(args) -> int:
             max_islands=args.max_islands,
             weights_gb_override=args.weights_gb,
             cache_enabled=not args.no_cache,
+            price_margin=args.price_margin,
+            head_cost=args.head_cost,
         )
     except (ValueError, RuntimeError) as e:
         print(f"[yeto] shape failed: {e}", file=sys.stderr)
         return 1
-    print(render(result, args.model, args.budget, args.tuning, args.min_score))
-    return 0 if result.plan.counts else 1
+    if args.json:
+        print(json.dumps(to_json_dict(result, args.model, args.budget, args.tuning, args.data), indent=2))
+    else:
+        print(render(result, args.model, args.budget, args.tuning, args.data))
+    if not result.plan.counts:
+        return 1
+    if args.apply:
+        print("[yeto] applying plan — handing off to `yeto launch`", flush=True)
+        return main(launch_argv(result, args.model, args.tuning, args.data))
+    return 0
 
 
 def main(argv=None) -> int:

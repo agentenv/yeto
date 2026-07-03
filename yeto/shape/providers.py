@@ -15,10 +15,46 @@ SDK installed.
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from yeto.shape.cache import TTLCache
+
+# ClientError codes AWS uses for rate limiting; these mean "back off and
+# retry", not "misconfigured", so they get a friendlier warning.
+_THROTTLE_CODES = {
+    "RequestLimitExceeded",
+    "Throttling",
+    "ThrottlingException",
+    "TooManyRequestsException",
+}
+
+
+def credentials_available() -> bool:
+    """True iff boto3 imports and can resolve AWS credentials locally.
+
+    Only walks the local credential chain (env vars, config files, cached
+    tokens) — no network call — so callers can cheaply skip the AWS signal
+    fan-out entirely when it would just produce a wall of auth failures.
+    """
+    try:
+        import boto3
+
+        return boto3.session.Session().get_credentials() is not None
+    except Exception:
+        return False
+
+
+def _client_error_code(exc: Exception) -> str | None:
+    """Extract the AWS error code from a botocore ClientError, else None."""
+    try:
+        from botocore.exceptions import ClientError
+    except ImportError:
+        return None
+    if isinstance(exc, ClientError):
+        return exc.response.get("Error", {}).get("Code", "")
+    return None
 
 
 @dataclass(frozen=True)
@@ -35,6 +71,41 @@ class AwsProviders:
     def __init__(self, cache: TTLCache, max_workers: int = 16) -> None:
         self.cache = cache
         self.max_workers = max_workers
+        # Human-readable notes about degraded signals (throttling, auth
+        # failures, missing boto3); the CLI surfaces these after shaping so
+        # a silent None never masks "AWS rate-limited us".
+        self.warnings: list[str] = []
+        self._warn_lock = threading.Lock()
+
+    def _warn(self, message: str, once: bool = False) -> None:
+        """Append a warning; fetches run on a thread pool, hence the lock."""
+        with self._warn_lock:
+            if once and message in self.warnings:
+                return
+            self.warnings.append(message)
+
+    def _note_failure(
+        self, exc: Exception, what: str, target: str, hint: str = ""
+    ) -> None:
+        """Record why a fetch failed, distinguishing throttling from errors.
+
+        Throttling is transient and common when shaping large fleets, so it
+        gets an actionable retry message; other AWS errors surface their
+        code; a missing boto3 collapses to one warning for the whole run.
+        """
+        if isinstance(exc, ImportError):
+            self._warn("boto3 unavailable; AWS signals disabled", once=True)
+            return
+        code = _client_error_code(exc)
+        if code in _THROTTLE_CODES:
+            self._warn(
+                f"{what} throttled for {target}; results may be incomplete"
+                f" — retry in a few minutes{hint}"
+            )
+        elif code is not None:
+            self._warn(f"{what} failed for {target}: {code}")
+        else:
+            self._warn(f"{what} failed for {target}: {exc}")
 
     def quota_code(self, instance_type: str, use_spot: bool) -> str | None:
         """Map an instance type to its EC2 vCPU quota code via sky's catalog.
@@ -64,7 +135,8 @@ class AwsProviders:
                     f"aws-quota:{key.region}:{key.code}",
                     lambda: self._fetch_quota(key),
                 )
-            except Exception:
+            except Exception as exc:
+                self._note_failure(exc, "quotas", f"{key.code} in {key.region}")
                 return None
 
         if not keys:
@@ -91,7 +163,13 @@ class AwsProviders:
                 return self.cache.get_or(
                     key, lambda: self._fetch_scores(itype, count, regions)
                 )
-            except Exception:
+            except Exception as exc:
+                self._note_failure(
+                    exc,
+                    "placement scores",
+                    f"{itype} x{count}",
+                    hint=" or pass --min-score 0",
+                )
                 return {}
 
         results: dict[tuple[str, int, str], int | None] = {}
@@ -104,6 +182,37 @@ class AwsProviders:
             for region in regions:
                 results[(itype, count, region)] = scores.get(region)
         return results
+
+    def quota_usage(self, keys: list[QuotaKey]) -> dict[QuotaKey, float]:
+        """Fetch currently-consumed spot vCPUs per quota bucket.
+
+        Quota *limits* only bound what could run; planners need limit minus
+        what is already running to know the true headroom. One fetch per
+        distinct region covers every bucket in it, and usage moves much
+        faster than limits, so it is cached under a short 5-minute TTL. A
+        failed region degrades to 0.0 for its keys (plus a warning) — the
+        planner then just trusts the raw limit, as before.
+        """
+        if not keys:
+            return {}
+        regions = sorted({key.region for key in keys})
+
+        def one(region: str) -> dict[str, float]:
+            try:
+                return self.cache.get_or(
+                    f"aws-usage:{region}",
+                    lambda: self._fetch_usage(region),
+                    ttl=300.0,
+                )
+            except Exception as exc:
+                self._note_failure(exc, "spot usage", region)
+                return {}
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            per_region = dict(zip(regions, pool.map(one, regions)))
+        return {
+            key: per_region[key.region].get(key.code, 0.0) for key in keys
+        }
 
     def _fetch_quota(self, key: QuotaKey) -> float:
         """One service-quotas API call. Raises on any failure (never cached)."""
@@ -127,3 +236,33 @@ class AwsProviders:
             RegionNames=regions,
         )
         return {e["Region"]: e["Score"] for e in resp["SpotPlacementScores"]}
+
+    def _fetch_usage(self, region: str) -> dict[str, float]:
+        """Sum running spot vCPUs per quota code in one region.
+
+        Paginated describe-instances over pending/running instances; only
+        spot instances count against spot quota buckets. Raises on any
+        failure (never cached).
+        """
+        import boto3
+
+        client = boto3.client("ec2", region_name=region)
+        pages = client.get_paginator("describe_instances").paginate(
+            Filters=[
+                {"Name": "instance-state-name", "Values": ["pending", "running"]}
+            ]
+        )
+        usage: dict[str, float] = {}
+        for page in pages:
+            for reservation in page.get("Reservations", []):
+                for inst in reservation.get("Instances", []):
+                    if inst.get("InstanceLifecycle") != "spot":
+                        continue
+                    cpu = inst.get("CpuOptions") or {}
+                    vcpus = float(
+                        cpu.get("CoreCount", 0) * cpu.get("ThreadsPerCore", 0)
+                    )
+                    code = self.quota_code(inst["InstanceType"], use_spot=True)
+                    if code is not None:
+                        usage[code] = usage.get(code, 0.0) + vcpus
+        return usage

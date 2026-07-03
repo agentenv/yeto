@@ -1,11 +1,17 @@
-"""Tests for the AWS quota/score providers (no network, no boto3 needed)."""
+"""Tests for the AWS quota/score/usage providers (no network calls)."""
 
 from __future__ import annotations
 
 import pytest
 
 from yeto.shape.cache import TTLCache
-from yeto.shape.providers import AwsProviders, QuotaKey
+from yeto.shape.providers import AwsProviders, QuotaKey, credentials_available
+
+
+def _client_error(code: str):
+    from botocore.exceptions import ClientError
+
+    return ClientError({"Error": {"Code": code}}, "op")
 
 
 @pytest.fixture
@@ -87,6 +93,162 @@ def test_placement_scores_failed_call_yields_none(providers, monkeypatch):
     # Failure is not cached: a second call retries the fetch.
     providers.placement_scores([("p4d.24xlarge", 1)], regions)
     assert calls["n"] == 2
+
+
+def test_quota_usage_fan_out_and_bucket_mapping(providers, monkeypatch):
+    keys = [
+        QuotaKey("us-east-1", "L-7212CCBC"),
+        QuotaKey("us-east-1", "L-3819A6DF"),
+        QuotaKey("us-west-2", "L-7212CCBC"),
+        QuotaKey("us-west-2", "L-UNSEEN"),
+    ]
+    fetched: list[str] = []
+
+    def fake_fetch(region: str) -> dict[str, float]:
+        fetched.append(region)
+        return {
+            "us-east-1": {"L-7212CCBC": 96.0, "L-3819A6DF": 8.0},
+            "us-west-2": {"L-7212CCBC": 32.0},
+        }[region]
+
+    monkeypatch.setattr(providers, "_fetch_usage", fake_fetch)
+
+    result = providers.quota_usage(keys)
+    assert result == {
+        keys[0]: 96.0,
+        keys[1]: 8.0,
+        keys[2]: 32.0,
+        keys[3]: 0.0,  # bucket absent from the region dict
+    }
+    assert sorted(fetched) == ["us-east-1", "us-west-2"]  # one per region
+    assert providers.warnings == []
+
+
+def test_quota_usage_empty(providers):
+    assert providers.quota_usage([]) == {}
+
+
+def test_quota_usage_failed_region_zero_and_warning(providers, monkeypatch):
+    keys = [
+        QuotaKey("us-east-1", "L-7212CCBC"),
+        QuotaKey("eu-west-1", "L-7212CCBC"),
+    ]
+
+    def fake_fetch(region: str) -> dict[str, float]:
+        if region == "eu-west-1":
+            raise _client_error("AccessDenied")
+        return {"L-7212CCBC": 96.0}
+
+    monkeypatch.setattr(providers, "_fetch_usage", fake_fetch)
+
+    result = providers.quota_usage(keys)
+    assert result == {keys[0]: 96.0, keys[1]: 0.0}
+    assert len(providers.warnings) == 1
+    assert "eu-west-1" in providers.warnings[0]
+    assert "AccessDenied" in providers.warnings[0]
+
+
+def test_quota_usage_cached_with_short_ttl(providers, monkeypatch):
+    class RecordingCache:
+        def __init__(self):
+            self.ttls: list[float | None] = []
+
+        def get_or(self, key, fetch, ttl=None):
+            self.ttls.append(ttl)
+            return fetch()
+
+    cache = RecordingCache()
+    providers.cache = cache
+    monkeypatch.setattr(providers, "_fetch_usage", lambda region: {})
+    providers.quota_usage([QuotaKey("us-east-1", "L-7212CCBC")])
+    assert cache.ttls == [300.0]
+
+
+def test_throttled_scores_warn_and_yield_none(providers, monkeypatch):
+    def fake_fetch(itype, count, regs):
+        raise _client_error("RequestLimitExceeded")
+
+    monkeypatch.setattr(providers, "_fetch_scores", fake_fetch)
+
+    result = providers.placement_scores([("p5.48xlarge", 2)], ["us-east-1"])
+    assert result == {("p5.48xlarge", 2, "us-east-1"): None}
+    assert len(providers.warnings) == 1
+    assert "throttled" in providers.warnings[0]
+    assert "p5.48xlarge x2" in providers.warnings[0]
+    assert "--min-score 0" in providers.warnings[0]
+
+
+def test_throttled_quota_warns(providers, monkeypatch):
+    def fake_fetch(key):
+        raise _client_error("ThrottlingException")
+
+    monkeypatch.setattr(providers, "_fetch_quota", fake_fetch)
+
+    result = providers.quotas([QuotaKey("us-east-1", "L-7212CCBC")])
+    assert result == {QuotaKey("us-east-1", "L-7212CCBC"): None}
+    assert len(providers.warnings) == 1
+    assert "throttled" in providers.warnings[0]
+    assert "us-east-1" in providers.warnings[0]
+
+
+def test_non_throttle_client_error_warns_with_code(providers, monkeypatch):
+    def fake_fetch(key):
+        raise _client_error("UnauthorizedOperation")
+
+    monkeypatch.setattr(providers, "_fetch_quota", fake_fetch)
+
+    providers.quotas([QuotaKey("us-east-1", "L-7212CCBC")])
+    assert len(providers.warnings) == 1
+    assert "UnauthorizedOperation" in providers.warnings[0]
+    assert "throttled" not in providers.warnings[0]
+
+
+def test_boto3_missing_single_warning(providers, monkeypatch):
+    def fake_fetch(key):
+        raise ImportError("No module named 'boto3'")
+
+    monkeypatch.setattr(providers, "_fetch_quota", fake_fetch)
+
+    keys = [
+        QuotaKey("us-east-1", "L-7212CCBC"),
+        QuotaKey("us-west-2", "L-7212CCBC"),
+    ]
+    result = providers.quotas(keys)
+    assert result == {keys[0]: None, keys[1]: None}
+    assert providers.warnings == ["boto3 unavailable; AWS signals disabled"]
+
+
+def test_credentials_available_true(monkeypatch):
+    class FakeSession:
+        def get_credentials(self):
+            return object()
+
+    import boto3
+
+    monkeypatch.setattr(boto3.session, "Session", FakeSession)
+    assert credentials_available() is True
+
+
+def test_credentials_available_false_without_credentials(monkeypatch):
+    class FakeSession:
+        def get_credentials(self):
+            return None
+
+    import boto3
+
+    monkeypatch.setattr(boto3.session, "Session", FakeSession)
+    assert credentials_available() is False
+
+
+def test_credentials_available_false_on_error(monkeypatch):
+    class FakeSession:
+        def get_credentials(self):
+            raise RuntimeError("no config")
+
+    import boto3
+
+    monkeypatch.setattr(boto3.session, "Session", FakeSession)
+    assert credentials_available() is False
 
 
 def test_quota_code(providers):

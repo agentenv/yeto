@@ -28,9 +28,29 @@ MODEL_ALIASES = {
 _TUNING_FACTOR = {"lora": 1.0, "full": 8.0}
 
 
+def _fetch_hub_param_count(model_id: str) -> int:
+    """Total parameter count from the Hub's safetensors metadata.
+
+    `parameter_count` is a per-dtype dict (e.g. {"F8_E4M3": 283e9,
+    "BF16": 1e6}); we want the sum regardless of stored dtype. Raises on
+    any problem (missing metadata, gated repo, zero params) so the caller
+    can fall back. Factored out so tests can monkeypatch it.
+    """
+    from huggingface_hub import HfApi
+
+    meta = HfApi().get_safetensors_metadata(model_id)
+    total = sum(meta.parameter_count.values())
+    if total <= 0:
+        raise ValueError(
+            f"safetensors metadata for {model_id!r} lists no parameters"
+        )
+    return int(total)
+
+
 def _fetch_hub_weights(model_id: str) -> float:
-    """Sum the .safetensors shard sizes on the Hub — the exact bytes the
-    learner will load. Factored out so tests can monkeypatch it."""
+    """Sum the .safetensors shard sizes on the Hub — the *stored* bytes,
+    uncorrected for dtype. Fallback only: prefer _fetch_hub_param_count,
+    which is dtype-independent. Factored out so tests can monkeypatch it."""
     from huggingface_hub import HfApi
 
     info = HfApi().model_info(model_id, files_metadata=True)
@@ -45,8 +65,20 @@ def _fetch_hub_weights(model_id: str) -> float:
 def model_weights_gb(
     model: str, override: float | None = None, cache: Any = None
 ) -> float:
-    """Weight size in GB: explicit override > launcher's known-model table
-    (accepts alias or resolved HF id) > Hugging Face Hub metadata query.
+    """bf16-equivalent weight size in GB — what the training job must fit.
+
+    Precedence: explicit override > launcher's known-model table (accepts
+    alias or resolved HF id) > Hugging Face Hub metadata query.
+
+    The learner always materializes the frozen base in bf16 (see
+    load_model_and_tokenizer in yeto/learner.py), so the figure we need is
+    total_param_count * 2 bytes — *not* the checkpoint's stored size: an
+    fp8 checkpoint (common for large MoEs) under-reports the bf16 footprint
+    by 2x and an fp32 one over-reports by 2x. The Hub path therefore
+    prefers parameter counts from the safetensors metadata; only when that
+    is unavailable does it fall back to summing stored .safetensors bytes,
+    which is exact for bf16 checkpoints and a dtype-uncorrected estimate
+    otherwise.
 
     `cache` is any object with `.get_or(key, fetch)`; the Hub answer for a
     model id never changes mid-project, so caching it avoids a network
@@ -65,7 +97,10 @@ def model_weights_gb(
             return float(launcher.MODEL_WEIGHT_GB[alias])
 
     def fetch() -> float:
-        return _fetch_hub_weights(model_id)
+        try:
+            return _fetch_hub_param_count(model_id) * 2 / 1e9
+        except Exception:
+            return _fetch_hub_weights(model_id)
 
     try:
         gb = (

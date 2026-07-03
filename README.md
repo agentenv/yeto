@@ -65,6 +65,23 @@ yeto down <run>            # stop the run's worker and tear down its clusters
 entry per learner. E.g. `aws:4x8xa100@us-east-2` = one learner cluster of
 4 nodes × 8×A100 in us-east-2.
 
+Don't want to pick the fleet yourself? `yeto shape` computes it:
+
+```console
+yeto shape --model gemma4 --budget 40 --data <hf-dataset> [--apply]
+```
+
+maximizes effective training FLOPs under your $/hr budget, your account's
+remaining spot quotas (limit minus what is already running), and spot
+placement scores (> 7 by default), then prints the matching `yeto launch`
+line — `--apply` runs it. Island sizes come from an FSDP memory model of the
+model's bf16 footprint (fp8/fp32 checkpoints are normalized). Budgets are
+enforced with a spot-price margin (`--price-margin`, default 15%) because
+catalog prices are estimates. Signals are fetched in one parallel wave and
+cached for an hour; rejected candidates are listed with reasons, `--json`
+emits a machine-readable plan, `--regions all` searches every catalog
+region.
+
 Learners run on **spot instances by default** (pass `--on-demand` to opt
 out); the syncer VM is always on-demand — it is the cheap, stateful
 coordinator, and its checkpoint/resume covers learner preemptions.

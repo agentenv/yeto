@@ -110,7 +110,7 @@ def _to_rows(
     the identical path back to Offerings)."""
     from yeto import launcher  # heavy module; sky inside it is lazy
 
-    want_regions = set(regions)
+    want_regions = set(regions) if regions is not None else None  # None = all
     want_gpus = set(gpus) if gpus else None
     rows: list[dict[str, Any]] = []
     for gpu, infos in raw.items():
@@ -119,7 +119,9 @@ def _to_rows(
         if want_gpus is not None and gpu not in want_gpus:
             continue
         for info in infos:
-            if info.instance_type is None or info.region not in want_regions:
+            if info.instance_type is None:
+                continue
+            if want_regions is not None and info.region not in want_regions:
                 continue
             if not info.accelerator_count or int(info.accelerator_count) < 1:
                 continue  # fractional-GPU shapes are useless for training
@@ -139,10 +141,11 @@ def _to_rows(
 
 
 def list_offerings(
-    regions: list[str], gpus: list[str] | None = None, cache: Any = None
+    regions: list[str] | None, gpus: list[str] | None = None, cache: Any = None
 ) -> list[Offering]:
-    """All AWS offerings for the requested GPUs/regions, deterministically
-    ordered so plans are reproducible run-to-run.
+    """All AWS offerings for the requested GPUs/regions (regions=None means
+    every region in the catalog), deterministically ordered so plans are
+    reproducible run-to-run.
 
     `cache` is any object with `.get_or(key, fetch)` (e.g. shape.cache's
     disk cache) — the sky catalog dump is slow to load, so callers doing
@@ -151,12 +154,8 @@ def list_offerings(
     def fetch() -> list[dict[str, Any]]:
         return _to_rows(_fetch_raw(regions, gpus), regions, gpus)
 
-    key = (
-        "catalog:aws:"
-        + ",".join(sorted(regions))
-        + ":"
-        + ",".join(sorted(gpus or []))
-    )
+    region_part = ",".join(sorted(regions)) if regions is not None else "*"
+    key = f"catalog:aws:{region_part}:" + ",".join(sorted(gpus or []))
     rows = cache.get_or(key, fetch) if cache is not None else fetch()
     offerings = [Offering(**row) for row in rows]
     # Biggest nodes first within a (gpu, region) group: the planner prefers

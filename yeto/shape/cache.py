@@ -9,6 +9,7 @@ and is trivially inspectable/deletable by the user.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import threading
@@ -48,18 +49,23 @@ class TTLCache:
         self._data: dict[str, list] = {}  # key -> [unix_ts, value]
         self._loaded = False
 
-    def get_or(self, key: str, fetch: Callable[[], Any]) -> Any:
+    def get_or(
+        self, key: str, fetch: Callable[[], Any], ttl: float | None = None
+    ) -> Any:
         """Return the cached value for `key`, or fetch, cache, and return it.
 
-        A raising fetch propagates and caches nothing, so transient API
-        failures are retried on the next call rather than pinned for a TTL.
+        `ttl` overrides the instance default for this call only — some
+        signals (e.g. quota *usage*) must be fresher than others (quota
+        *limits*). A raising fetch propagates and caches nothing, so
+        transient API failures are retried on the next call rather than
+        pinned for a TTL.
         """
         if not self.enabled:
             return fetch()
 
         with self._lock:
             self._ensure_loaded()
-            hit, value = self._lookup(key)
+            hit, value = self._lookup(key, ttl)
             if hit:
                 return value
             key_lock = self._key_locks.setdefault(key, threading.Lock())
@@ -68,7 +74,7 @@ class TTLCache:
         # parallel; the per-key lock ensures a single fetch per missing key.
         with key_lock:
             with self._lock:
-                hit, value = self._lookup(key)
+                hit, value = self._lookup(key, ttl)
                 if hit:  # another thread fetched while we waited
                     return value
             value = fetch()
@@ -87,10 +93,11 @@ class TTLCache:
             except OSError:
                 pass
 
-    def _lookup(self, key: str) -> tuple[bool, Any]:
+    def _lookup(self, key: str, ttl: float | None = None) -> tuple[bool, Any]:
         """Return (hit, value) for a fresh entry. Caller holds `_lock`."""
+        max_age = self.ttl if ttl is None else ttl
         entry = self._data.get(key)
-        if entry is not None and _now() - entry[0] < self.ttl:
+        if entry is not None and _now() - entry[0] < max_age:
             return True, entry[1]
         return False, None
 
@@ -107,15 +114,35 @@ class TTLCache:
             self._data = {}
 
     def _save(self) -> None:
-        """Atomically persist fresh entries. Caller holds `_lock`.
+        """Merge-and-persist fresh entries atomically. Caller holds `_lock`.
 
+        Concurrent yeto processes share the cache file, so a blind write
+        would clobber whatever another process cached since we loaded. We
+        instead hold an OS file lock (`flock` on `<path>.lock`), re-read the
+        current file, and merge our in-memory entries over it — our fresh
+        entries win on conflict; entries only present on disk survive.
         Expired entries are dropped at save time so the file does not grow
-        without bound; the tmp-then-replace dance keeps a concurrent reader
-        from ever seeing a half-written file.
+        without bound; the tmp-then-replace dance keeps a (lock-free)
+        concurrent reader from ever seeing a half-written file.
         """
         now = _now()
-        fresh = {k: v for k, v in self._data.items() if now - v[0] < self.ttl}
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(fresh))
-        os.replace(tmp, self.path)
+        lock_path = self.path.with_name(self.path.name + ".lock")
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                on_disk: dict[str, list] = {}
+                try:
+                    raw = json.loads(self.path.read_text())
+                    if isinstance(raw, dict):
+                        on_disk = raw
+                except (OSError, ValueError):
+                    pass
+                merged = {**on_disk, **self._data}
+                fresh = {k: v for k, v in merged.items() if now - v[0] < self.ttl}
+                tmp = self.path.with_name(self.path.name + ".tmp")
+                tmp.write_text(json.dumps(fresh))
+                os.replace(tmp, self.path)
+                self._data = merged
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)

@@ -187,3 +187,13 @@ def test_plan_dataclass_shape() -> None:
     plan = solve([], budget=10.0, quota_limits={})
     assert isinstance(plan, Plan)
     assert plan.counts == {}
+
+
+def test_max_count_caps_a_candidate():
+    a = Candidate(
+        key="capped", region="r", gpu="G", instance_type="t", nodes=1,
+        gpus_per_node=8, vcpus_per_island=96, price_per_hour=1.0,
+        eff_tflops=100.0, quota_bucket=None, score=9, max_count=1,
+    )
+    plan = solve([a], budget=100.0, quota_limits={}, max_islands=16, head_cost=0.0)
+    assert plan.counts == {"capped": 1}

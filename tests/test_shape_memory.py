@@ -47,7 +47,15 @@ def _forbid_hub(monkeypatch):
     def boom(model_id):
         raise AssertionError(f"hub fetch called for {model_id}")
 
+    monkeypatch.setattr(memory, "_fetch_hub_param_count", boom)
     monkeypatch.setattr(memory, "_fetch_hub_weights", boom)
+
+
+def _no_param_metadata(monkeypatch):
+    def no_meta(model_id):
+        raise OSError("no safetensors metadata")
+
+    monkeypatch.setattr(memory, "_fetch_hub_param_count", no_meta)
 
 
 def test_override_wins(monkeypatch):
@@ -72,6 +80,9 @@ def test_hub_fetch_sums_safetensors_sizes(monkeypatch):
     ]
 
     class FakeApi:
+        def get_safetensors_metadata(self, model_id):
+            raise OSError("no safetensors metadata")
+
         def model_info(self, model_id, files_metadata=False):
             assert files_metadata
             return SimpleNamespace(siblings=siblings)
@@ -82,7 +93,102 @@ def test_hub_fetch_sums_safetensors_sizes(monkeypatch):
     assert model_weights_gb("acme/unknown-model") == 8.0
 
 
+def test_hub_param_count_sums_all_dtypes(monkeypatch):
+    # e.g. an fp8-stored MoE with a handful of bf16 tensors
+    counts = {"F8_E4M3": 283_000_000_000, "BF16": 1_000_000}
+
+    class FakeApi:
+        def get_safetensors_metadata(self, model_id):
+            assert model_id == "acme/fp8-moe"
+            return SimpleNamespace(parameter_count=counts)
+
+    fake_hub = SimpleNamespace(HfApi=FakeApi)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    assert memory._fetch_hub_param_count("acme/fp8-moe") == 283_001_000_000
+
+
+def test_fp8_checkpoint_reports_bf16_footprint(monkeypatch):
+    # 100e9 params stored in fp8 would byte-sum to ~100 GB; the learner
+    # loads bf16, so the planner must see 200 GB.
+    monkeypatch.setattr(
+        memory, "_fetch_hub_param_count", lambda model_id: 100_000_000_000
+    )
+    monkeypatch.setattr(
+        memory,
+        "_fetch_hub_weights",
+        lambda model_id: pytest.fail("byte-sum fallback should not run"),
+    )
+    assert model_weights_gb("acme/fp8-moe") == 200.0
+
+
+def test_fp32_checkpoint_reports_bf16_footprint(monkeypatch):
+    # 10e9 params stored in fp32 would byte-sum to ~40 GB; bf16 is 20 GB.
+    monkeypatch.setattr(
+        memory, "_fetch_hub_param_count", lambda model_id: 10_000_000_000
+    )
+    assert model_weights_gb("acme/fp32-model") == 20.0
+
+
+def test_metadata_failure_falls_back_to_byte_sum(monkeypatch):
+    _no_param_metadata(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_bytes(model_id):
+        calls["n"] += 1
+        return 42.0
+
+    monkeypatch.setattr(memory, "_fetch_hub_weights", fake_bytes)
+    assert model_weights_gb("acme/no-metadata-model") == 42.0
+    assert calls["n"] == 1
+
+
+def test_both_hub_paths_failing_points_at_weights_gb_flag(monkeypatch):
+    _no_param_metadata(monkeypatch)
+
+    def fake_bytes(model_id):
+        raise OSError("401 gated repo")
+
+    monkeypatch.setattr(memory, "_fetch_hub_weights", fake_bytes)
+    with pytest.raises(ValueError, match="--weights-gb"):
+        model_weights_gb("acme/gated-model")
+
+
+def test_override_beats_table_beats_hub(monkeypatch):
+    _forbid_hub(monkeypatch)
+    # override wins even for a model the launcher table knows
+    assert model_weights_gb("gemma4", override=1.0) == 1.0
+    # table wins over the (forbidden) hub for aliases and resolved ids
+    assert model_weights_gb("gemma4") == 66.0
+    assert model_weights_gb("google/gemma-4-12B-it") == 66.0
+
+
+def test_cache_wraps_param_count_path(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_count(model_id):
+        calls["n"] += 1
+        return 100_000_000_000
+
+    monkeypatch.setattr(memory, "_fetch_hub_param_count", fake_count)
+
+    class FakeCache:
+        def __init__(self):
+            self.store = {}
+
+        def get_or(self, key, fetch):
+            if key not in self.store:
+                self.store[key] = fetch()
+            return self.store[key]
+
+    cache = FakeCache()
+    assert model_weights_gb("acme/fp8-moe", cache=cache) == 200.0
+    assert model_weights_gb("acme/fp8-moe", cache=cache) == 200.0
+    assert calls["n"] == 1
+    assert list(cache.store) == ["hf-weights:acme/fp8-moe"]
+
+
 def test_unknown_model_uses_hub_fetch_and_cache(monkeypatch):
+    _no_param_metadata(monkeypatch)
     calls = {"n": 0}
 
     def fake_fetch(model_id):
@@ -109,6 +215,8 @@ def test_unknown_model_uses_hub_fetch_and_cache(monkeypatch):
 
 
 def test_hub_failure_points_at_weights_gb_flag(monkeypatch):
+    _no_param_metadata(monkeypatch)
+
     def fake_fetch(model_id):
         raise OSError("401 gated repo")
 
@@ -118,6 +226,7 @@ def test_hub_failure_points_at_weights_gb_flag(monkeypatch):
 
 
 def test_hub_zero_bytes_points_at_weights_gb_flag(monkeypatch):
+    _no_param_metadata(monkeypatch)
     monkeypatch.setattr(memory, "_fetch_hub_weights", lambda model_id: 0.0)
     with pytest.raises(ValueError, match="--weights-gb"):
         model_weights_gb("acme/empty-model")

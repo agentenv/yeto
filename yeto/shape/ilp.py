@@ -43,6 +43,10 @@ class Candidate:
     eff_tflops: float  # per island
     quota_bucket: tuple[str, str] | None  # (region, quota_code); None = uncapped
     score: int | None  # spot placement score, informational
+    # Per-candidate island cap (None = unlimited). Used when the placement
+    # score is only verified up to some aggregate capacity: the shape stays
+    # plannable at the verified size instead of being dropped outright.
+    max_count: int | None = None
 
 
 @dataclass
@@ -151,6 +155,8 @@ def solve(
 
         c = order[i]
         ub = islands_left
+        if c.max_count is not None:
+            ub = min(ub, c.max_count)
         if c.price_per_hour > 0:
             ub = min(ub, int((budget_left + _EPS) // c.price_per_hour))
         cap = quota_limits.get(c.quota_bucket) if c.quota_bucket is not None else None
