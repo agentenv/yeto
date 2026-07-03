@@ -103,6 +103,10 @@ def load_model_and_tokenizer(args, device):
             task_type="CAUSAL_LM",
         )
         model = get_peft_model(model, lora)
+        # peft creates adapters in fp32; unify with the base dtype (FSDP's
+        # flat-param groups require uniform dtype, and it keeps both sync
+        # strategies numerically identical).
+        model.to(dtype)
     model.to(device)
     return model, tokenizer
 
