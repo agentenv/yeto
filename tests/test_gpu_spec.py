@@ -51,3 +51,27 @@ def test_parse_image_spec():
     }
     with pytest.raises(ValueError, match="region=image-id"):
         parse_image_spec("us-east-2=,broken")
+
+
+def test_learner_image_selection_precedence(monkeypatch):
+    from types import SimpleNamespace
+
+    from yeto import launcher
+    from yeto.gpu_spec import ClusterSpec
+
+    b200 = ClusterSpec("aws", "us-east-2", 1, 8, "B200")
+    a100 = ClusterSpec("aws", "us-east-2", 1, 8, "A100")
+    monkeypatch.setitem(
+        launcher.GPU_IMAGE_OVERRIDES, ("aws", "B200"), lambda region: f"ami-blackwell-{region}"
+    )
+    # Internal table applies for B200...
+    args = SimpleNamespace(learner_image=None)
+    assert launcher.learner_image_for(args, b200) == "ami-blackwell-us-east-2"
+    # ...not for GPUs the provider default drives fine...
+    assert launcher.learner_image_for(args, a100) is None
+    # ...and an explicit flag always wins.
+    args = SimpleNamespace(learner_image="ami-user")
+    assert launcher.learner_image_for(args, b200) == "ami-user"
+    # A failing resolver degrades to None (setup-time driver remediation).
+    monkeypatch.setitem(launcher.GPU_IMAGE_OVERRIDES, ("aws", "B200"), lambda region: None)
+    assert launcher.learner_image_for(SimpleNamespace(learner_image=None), b200) is None

@@ -260,6 +260,58 @@ def resolve_loss_function(loss_function) -> str:
     return f"pickle:{PICKLED_LOSS_FILE}"
 
 
+# AWS keeps this SSM parameter pointing at the CURRENT Deep Learning Base
+# OSS-NVIDIA-driver AMI per region (open kernel modules, Blackwell-ready),
+# so resolving at launch time needs no region x AMI table of our own.
+_DLAMI_SSM_PARAM = (
+    "/aws/service/deeplearning/ami/x86_64/"
+    "base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id"
+)
+
+
+def resolve_blackwell_image(region: str) -> str | None:
+    """Current Blackwell-capable DLAMI for a region, or None (callers then
+    rely on the setup-time driver remediation instead)."""
+    try:
+        import boto3
+
+        ssm = boto3.client("ssm", region_name=region)
+        return ssm.get_parameter(Name=_DLAMI_SSM_PARAM)["Parameter"]["Value"]
+    except Exception as e:  # noqa: BLE001 - degrade to driver remediation
+        print(
+            f"[launcher] could not resolve a Blackwell DLAMI for {region} ({e}); "
+            "relying on setup-time driver install",
+            file=sys.stderr,
+        )
+        return None
+
+
+# Internal image-override table: (cloud, GPU) pairs whose provider-default
+# image is known stale/broken, mapped to a `region -> image id` resolver.
+# First entry earned in production: sky's pinned AMI ships driver 535,
+# which never binds to SM100 silicon. Extend here as new GPU generations
+# outpace provider image pins; an explicit --learner-image always wins,
+# and a resolver returning None degrades to the setup-time driver install.
+GPU_IMAGE_OVERRIDES: dict[tuple[str, str], object] = {
+    ("aws", "B200"): resolve_blackwell_image,
+}
+
+
+def learner_image_for(args, spec: ClusterSpec):
+    """The image for a learner cluster: explicit flag > internal override
+    table > None (provider default + setup-time remediation)."""
+    explicit = parse_image_spec(getattr(args, "learner_image", None))
+    if explicit is not None:
+        return explicit
+    resolver = GPU_IMAGE_OVERRIDES.get((spec.cloud, spec.gpu))
+    if resolver is None or not spec.region:
+        return None
+    image = resolver(spec.region)
+    if image:
+        print(f"[launcher] {spec.gpu} learner: pinning image {image} ({spec.region})")
+    return image
+
+
 def parse_image_spec(value: str | None):
     """--learner-image: a single image id/tag applied everywhere, or
     comma-separated region=id pairs -> the region dict sky expects."""
@@ -369,7 +421,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     )
     infra = f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud
     resources_kwargs = {}
-    image = parse_image_spec(getattr(args, "learner_image", None))
+    image = learner_image_for(args, spec)
     if image is not None:
         resources_kwargs["image_id"] = image
     if spec.num_nodes > 1:
