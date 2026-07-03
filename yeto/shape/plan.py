@@ -336,12 +336,16 @@ def launch_argv(result: ShapeResult, model: str, tuning: str, data: str) -> list
     entries: list[str] = []
     for key, n in sorted(result.plan.counts.items()):
         entries.extend([key] * n)
+    # Learner disk must hold the HF weight cache plus headroom; the 512 GB
+    # launch default silently underfits big models.
+    disk_gb = max(512, int(result.weights_gb * 1.5) + 100)
     return [
         "launch",
         "--gpu", ",".join(entries),
         "--model", model,
         "--tuning", tuning,
         "--shard", result.shard,
+        "--disk-size", str(disk_gb),
         "--data", data,
     ]
 
