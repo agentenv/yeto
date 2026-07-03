@@ -145,6 +145,12 @@ def parse_args(argv=None):
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
+    p.add_argument(
+        "--lora-targets",
+        choices=["auto", "attention", "all-linear"],
+        default="auto",
+        help="adapter placement used during training (layout must match)",
+    )
     p.add_argument("--fragments", type=int, default=8, help="P used during training")
     p.add_argument(
         "--fragment-pattern",
@@ -175,6 +181,7 @@ def main(argv=None) -> None:
         shard="ddp",
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
+        lora_targets=args.lora_targets,
     )
     model, tokenizer = load_model_and_tokenizer(learner_args, device)
     params = trainable_params(model)

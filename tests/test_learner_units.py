@@ -104,3 +104,40 @@ def test_allreduce_skips_none_grads(monkeypatch):
     assert len(calls) == 1
     assert without_grad.grad is None
     assert torch.allclose(with_grad.grad, torch.ones(3))  # 2.0 (sum stub is id) / 2
+
+
+def test_lora_targets_resolution():
+    from types import SimpleNamespace
+
+    from yeto.learner import _ATTENTION_TARGETS, is_moe_config, resolve_lora_targets
+
+    dense = SimpleNamespace()
+    moe = SimpleNamespace(n_routed_experts=256)
+    assert not is_moe_config(dense) and is_moe_config(moe)
+    # auto: attention for MoE, all-linear for dense.
+    assert resolve_lora_targets("auto", moe) == _ATTENTION_TARGETS
+    assert resolve_lora_targets("auto", dense) == "all-linear"
+    assert resolve_lora_targets("attention", dense) == _ATTENTION_TARGETS
+    assert resolve_lora_targets("all-linear", moe) == "all-linear"  # warned, honored
+
+
+def test_attention_target_regex_matches_common_archs():
+    import re
+
+    from yeto.learner import _ATTENTION_TARGETS
+
+    matching = [
+        "model.layers.3.self_attn.q_proj",
+        "model.layers.3.self_attn.o_proj",
+        "model.layers.9.self_attn.kv_a_proj_with_mqa",  # DeepSeek MLA
+        "model.layers.9.self_attn.q_b_proj",
+    ]
+    frozen = [
+        "model.layers.3.mlp.experts.17.up_proj",  # routed expert
+        "model.layers.3.mlp.gate",  # router
+        "lm_head",
+    ]
+    for name in matching:
+        assert re.fullmatch(_ATTENTION_TARGETS, name), name
+    for name in frozen:
+        assert not re.fullmatch(_ATTENTION_TARGETS, name), name

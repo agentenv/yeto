@@ -103,6 +103,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     tune.add_argument("--lora-r", type=int, default=16)
     tune.add_argument(
+        "--lora-targets",
+        choices=["auto", "attention", "all-linear"],
+        default="auto",
+        help="adapter placement: attention-only, every linear, or auto "
+        "(attention for MoE — router and routed experts stay frozen)",
+    )
+    tune.add_argument(
         "--base-dtype",
         choices=["bf16", "fp8", "fp4"],
         default="bf16",

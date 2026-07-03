@@ -144,6 +144,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f" --tuning {args.tuning}"
         f" --base-dtype {getattr(args, 'base_dtype', 'bf16')}"
         f" --lora-r {args.lora_r}"
+        f" --lora-targets {getattr(args, 'lora_targets', 'auto')}"
         f" --seq-len {args.seq_len}"
         f" --micro-batch-size {args.micro_batch_size}"
         f" --grad-accum {args.grad_accum}"

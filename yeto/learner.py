@@ -73,6 +73,14 @@ def parse_args(argv=None):
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
     p.add_argument(
+        "--lora-targets",
+        choices=["auto", "attention", "all-linear"],
+        default="auto",
+        help="which linears get adapters: attention projections only, every "
+        "linear, or auto (attention for MoE models — keeps router and routed "
+        "experts frozen and fragments small; all-linear for dense models)",
+    )
+    p.add_argument(
         "--base-dtype",
         choices=["bf16", "fp8", "fp4"],
         default="bf16",
@@ -174,12 +182,53 @@ def load_model_and_tokenizer(args, device):
         lora = LoraConfig(
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
-            target_modules="all-linear",
+            target_modules=resolve_lora_targets(
+                getattr(args, "lora_targets", "auto"), model.config
+            ),
             task_type="CAUSAL_LM",
         )
         model = get_peft_model(model, lora)
     model.to(device)
     return model, tokenizer
+
+
+# Attention projection names across the architectures we run (Llama/Qwen/
+# Gemma-style q/k/v/o, fused qkv variants, DeepSeek's low-rank q_a/q_b and
+# kv_a/kv_b split). peft treats a string target as a regex fullmatch on the
+# module path.
+_ATTENTION_TARGETS = (
+    r".*\.(q_proj|k_proj|v_proj|o_proj|qkv_proj|out_proj"
+    r"|q_a_proj|q_b_proj|kv_a_proj_with_mqa|kv_b_proj)$"
+)
+# Config attributes that mark a mixture-of-experts architecture.
+_MOE_CONFIG_MARKERS = ("n_routed_experts", "num_experts", "num_local_experts")
+
+
+def is_moe_config(config) -> bool:
+    return any(getattr(config, a, None) for a in _MOE_CONFIG_MARKERS)
+
+
+def resolve_lora_targets(choice: str, config) -> str:
+    """Map --lora-targets onto a peft target_modules spec.
+
+    MoE default is attention-only: "all-linear" would put adapters on every
+    routed expert (most of a big MoE's parameters — fragments balloon from
+    megabytes to gigabytes) AND on the router gate, whose load-balancing
+    aux_loss we do not train against. Freezing router + experts is the
+    established MoE fine-tuning recipe; anyone overriding gets a loud
+    warning rather than a silent foot-gun.
+    """
+    if choice == "auto":
+        return _ATTENTION_TARGETS if is_moe_config(config) else "all-linear"
+    if choice == "attention":
+        return _ATTENTION_TARGETS
+    if choice == "all-linear" and is_moe_config(config):
+        log.warning(
+            "--lora-targets all-linear on a MoE model adapts every routed "
+            "expert and the router gate (whose aux_loss is not trained); "
+            "fragments will be huge — prefer --lora-targets attention"
+        )
+    return "all-linear"
 
 
 def trainable_params(model) -> dict[str, torch.Tensor]:
