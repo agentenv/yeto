@@ -133,6 +133,10 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
 
     if os.environ.get("HF_TOKEN"):
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    if spec.num_nodes > 1:
+        # Surface NCCL's chosen transport in the job logs so an EFA-less
+        # fallback to TCP sockets is visible, not silent.
+        envs["NCCL_DEBUG"] = "INFO"
     file_mounts = None
     if args.loss_function.startswith("pickle:"):
         # The pickled loss is gitignored, so the workdir sync skips it;
@@ -155,7 +159,11 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         # Multi-node learner: inner DDP all-reduce crosses the node fabric,
         # so request the cloud's RDMA-class interconnect (EFA on AWS,
         # GPUDirect on GCP). Single-node clusters stay on NVLink and don't
-        # need it.
+        # need it. On AWS this also swaps in the EFA-ready DLAMI; SkyPilot
+        # installs no EFA software itself, and if the pinned AMI is missing
+        # NCCL silently falls back to TCP — NCCL_DEBUG below makes the
+        # chosen transport visible in the job logs (look for
+        # "NET/OFI Selected Provider is efa").
         resources_kwargs["network_tier"] = "best"
     task.set_resources(
         sky.Resources(
