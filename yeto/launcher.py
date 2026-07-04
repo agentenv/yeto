@@ -324,12 +324,25 @@ GPU_IMAGE_OVERRIDES: dict[tuple[str, str], object] = {
 }
 
 
+# The Megatron backend runs INSIDE an NGC container that ships the whole
+# stack prebuilt (torch + Transformer Engine + megatron-core + megatron-bridge)
+# — the pip-on-DLAMI install proved intractable (two shakedowns; see
+# docs/MEGATRON.md). sky runs the task in this container via `image_id:
+# docker:...`; the host still supplies the GPU kernel driver, so B200 needs
+# sky's default AWS docker host AMI to carry driver >=570 open-kernel (the one
+# integration unknown that still needs a live B200 check). NeMo images ship
+# megatron-bridge; pull requires nvcr.io auth (an NGC key on the host).
+MEGATRON_IMAGE = "docker:nvcr.io/nvidia/nemo:25.09"
+
+
 def learner_image_for(args, spec: ClusterSpec):
-    """The image for a learner cluster: explicit flag > internal override
-    table > None (provider default + setup-time remediation)."""
+    """The image for a learner cluster: explicit flag > megatron container >
+    internal override table > None (provider default + setup-time remediation)."""
     explicit = parse_image_spec(getattr(args, "learner_image", None))
     if explicit is not None:
         return explicit
+    if getattr(args, "island_backend", "torch") == "megatron":
+        return MEGATRON_IMAGE
     resolver = GPU_IMAGE_OVERRIDES.get((spec.cloud, spec.gpu))
     if resolver is None or not spec.region:
         return None
@@ -423,8 +436,6 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         learner_flags += f" --max-rows {args.max_rows}"
 
     backend = getattr(args, "island_backend", "torch")
-    setup_steps = [WAN_TUNING, NVME_SETUP, NVME_ENV, HF_TOKEN_ENV, TORCH_SETUP,
-                   "pip install -q -r requirements.txt"]
     if backend == "megatron":
         gpus = spec.num_nodes * spec.gpus_per_node
         tp = max(1, getattr(args, "tensor_parallel", 1))
@@ -437,10 +448,24 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             f" --pipeline-parallel {pp}"
         )
         entrypoint = "yeto.megatron.learner"
-        setup_steps.append(MEGATRON_SETUP)
+        # Inside the NGC container the whole training stack (torch, TE,
+        # megatron-core, bridge) is already present, so skip TORCH_SETUP and
+        # MEGATRON_SETUP. NVME_SETUP is a host RAID operation that can't run in
+        # a container, so it's skipped too (HF cache lands on the container's
+        # disk — slower download, but correct; wiring the host instance-store
+        # through to the container is a follow-up). Only yeto's pure-python
+        # deps that the container may lack are added, --no-deps so they never
+        # perturb the container's pinned torch/TE/transformers.
+        setup_steps = [
+            WAN_TUNING,
+            HF_TOKEN_ENV,
+            "pip install -q --no-deps datasets peft hf_transfer cloudpickle sentencepiece",
+        ]
     else:
         learner_flags += f" --shard {args.shard}"
         entrypoint = "yeto.learner"
+        setup_steps = [WAN_TUNING, NVME_SETUP, NVME_ENV, HF_TOKEN_ENV, TORCH_SETUP,
+                       "pip install -q -r requirements.txt"]
 
     run = (
         f"{NVME_ENV}\n"

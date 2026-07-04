@@ -56,12 +56,30 @@ def test_torch_backend_uses_shard_and_torch_learner():
     assert "megatron-core" not in task.setup
 
 
-def test_megatron_backend_swaps_entrypoint_parallelism_and_deps():
-    task = make_learner_task(_args(island_backend="megatron"), _SPEC, 0, 1, "1.2.3.4:29400")
+def test_megatron_backend_swaps_entrypoint_and_runs_in_the_ngc_container():
+    from yeto.launcher import MEGATRON_IMAGE, learner_image_for
+
+    args = _args(island_backend="megatron")
+    task = make_learner_task(args, _SPEC, 0, 1, "1.2.3.4:29400")
     assert "-m yeto.megatron.learner" in task.run
     assert "--island-backend megatron" in task.run
     assert "--shard" not in task.run  # megatron has its own parallelism
-    assert "megatron-core" in task.setup
+    # The stack lives in the NGC container, so setup does NOT install torch or
+    # the megatron stack, nor RAID the NVMe (a host op).
+    assert "megatron" not in task.setup
+    assert "TORCH_SETUP" not in task.setup and "torch==" not in task.setup
+    assert "mdadm" not in task.setup
+    # The island runs inside the container image.
+    assert learner_image_for(args, _SPEC) == MEGATRON_IMAGE
+    assert MEGATRON_IMAGE.startswith("docker:")
+
+
+def test_torch_backend_does_not_use_the_megatron_container():
+    from yeto.launcher import MEGATRON_IMAGE, learner_image_for
+
+    # A torch B200 island keeps its DLAMI pin, never the megatron container.
+    img = learner_image_for(_args(island_backend="torch"), _SPEC)
+    assert img != MEGATRON_IMAGE
 
 
 def test_expert_parallel_defaults_to_filling_the_island():

@@ -99,25 +99,37 @@ Blocked by **infrastructure, not trainer logic**:
   way.** AutoBridge (the entire HF→mcore weight import) depends on it, so the
   backend cannot run from a pip-on-DLAMI install.
 
-**Update — the DLAMI install IS fixable (reverse-engineered free, locally).**
-The bridge failure was a chain of mundane build-env issues, not a fundamental
-blocker:
-1. default build isolation → the build subprocess can't see torch → use
-   `--no-build-isolation`;
-2. then the env lacks `wheel` → `pip install wheel setuptools packaging` first;
-3. bridge's `setup.py` shells out to `nvcc` for the CUDA "bare metal version"
-   (undefined-NameError without it) → put `/usr/local/cuda/bin` on PATH (the
-   DLAMI has the toolkit).
+**Decision: run the island inside an NGC container, not a pip-built DLAMI.**
+Two shakedowns proved the pip-on-DLAMI stack is intractable: `transformer-engine`'s
+pytorch bindings source-build (and default to the wrong CUDA core, cu13 vs our
+cu128), and `megatron-bridge` has no wheel and its `setup.py` build is fragile
+(build isolation hides torch; needs nvcc on PATH; multi-python-env confusion).
+NVIDIA already solves all of this in the **NeMo container** (ships torch + TE +
+megatron-core + megatron-bridge, mutually consistent).
 
-`MEGATRON_SETUP` now encodes exactly this. Unvalidated on hardware (the nvcc
-step can only be exercised on a CUDA node), but it's the cheapest bet — one
-B200 validation cycle — before the heavier container path. A prebuilt NGC/NeMo
-image via `--learner-image docker:...` remains the more robust option; note it
-has its own wrinkle on B200 (the host AMI must carry the driver-595 open kernel
-modules, which sky's default docker host may not).
+`--island-backend megatron` now defaults its image to `MEGATRON_IMAGE`
+(`docker:nvcr.io/nvidia/nemo:25.09`); sky runs the island inside it. The
+container-path setup skips `TORCH_SETUP`/`MEGATRON_SETUP`/`NVME_SETUP` (the
+stack is prebuilt; NVMe RAID is a host op) and installs only yeto's pure-python
+deps `--no-deps` so they can't perturb the container's pinned torch/TE/transformers.
 
-Open risk regardless of install path: **the transformers-version tension** —
-megatron-bridge pins a narrow `transformers` range that conflicts with our
-5.13.0 (needed for the newest arches). Bridge uses transformers only for
-config/tokenizer, and its own model code for conversion, so its pin may be
-fine — but this is unverified.
+Remaining integration checklist (each needs doing/verifying, some need one B200):
+1. **NGC auth** — `nvcr.io/nvidia/nemo` requires a docker login with an NGC API
+   key on the host; wire that into provisioning (sky registry-auth config).
+2. **B200 host driver** — a container shares the host's GPU kernel driver, so
+   the host needs driver ≥570 open-kernel for B200. sky picks its own docker
+   host AMI (a recent AWS DL Base GPU AMI); whether that carries the open-kernel
+   595 is the one thing only a live B200 launch confirms.
+3. **In-container NVMe** — the host instance-store isn't mounted into the
+   container yet, so the model download uses the container disk (slower). Pass
+   the NVMe through as a volume for the fast path.
+4. **transformers-version tension** — the container's bridge-pinned transformers
+   vs the newest-arch needs; bridge uses transformers only for config/tokenizer,
+   so its pin is likely fine, but unverified.
+5. **Validation** — the trainer itself (`AutoBridge` signatures, forward args,
+   the DiLoCo bridge under real EP) is still unrun; a live B200 cycle in the
+   working container is the real test.
+
+This is a real, multi-step infra effort — not a config flag. The foundation
+(container image + container-aware setup) is wired; the checklist above is the
+work to make an actual V4-flash-class run go.
