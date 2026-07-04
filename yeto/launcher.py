@@ -357,14 +357,21 @@ def parse_image_spec(value: str | None):
     return images
 
 
-# The Megatron island backend needs Megatron-Core + Transformer Engine on
-# top of the torch already installed by TORCH_SETUP. These have prebuilt
-# wheels for cu12.x; apex is optional (mcore falls back to non-fused kernels
-# without it). A production deployment would instead pin an NGC PyTorch image
-# that ships all three prebuilt — that path plugs in via --learner-image.
+# The Megatron island backend needs, on top of the cu128 torch from
+# TORCH_SETUP: Transformer Engine (FP8 + MoE grouped GEMM + Blackwell),
+# megatron-core, and megatron-bridge (HF->mcore import + LoRA-on-MoE). Two
+# fragilities the research flagged: (1) mcore/bridge's [te] extra hard-codes
+# the CUDA-13 TE flavor, so install core_cu12 explicitly against cu128 torch;
+# (2) bridge pins a narrow transformers range, so let it resolve transformers
+# rather than our 5.13.0 pin. apex is no longer required (TE provides the
+# fused kernels). Production should instead pin an NGC PyTorch image with all
+# of this prebuilt via --learner-image; this pip path is the from-scratch
+# fallback and is best-effort (a failure disables --island-backend megatron,
+# it does not abort a torch-backend island).
 MEGATRON_SETUP = (
-    "pip install -q megatron-core transformer-engine[pytorch] "
-    "|| echo '[yeto-setup] megatron/TE install failed; --island-backend megatron unavailable' >&2"
+    "{ pip install -q --no-build-isolation 'transformer-engine[pytorch,core_cu12]' && "
+    "pip install -q megatron-core megatron-bridge ; } "
+    "|| echo '[yeto-setup] megatron stack install failed; --island-backend megatron unavailable' >&2"
 )
 
 

@@ -65,9 +65,21 @@ enumeration are Megatron-specific.
 - ✅ `--island-backend {torch,megatron}` selector + `--expert/tensor/pipeline-parallel`
   (defaults EP to fill the island).
 - ✅ Megatron island task: `yeto.megatron.learner` entrypoint, megatron-core +
-  transformer-engine setup deps (NGC image via `--learner-image` for prod).
-- ⏳ `yeto/megatron/learner.py`: parallel-state init, mcore model + HF import,
-  LoRA attach, inner forward/backward loop, adapter enumeration → DiLoCo sync.
+  megatron-bridge + transformer-engine (`core_cu12`) setup deps (NGC image via
+  `--learner-image` for prod).
+- ✅ `yeto/megatron/learner.py` (first implementation): parallel-state init,
+  `AutoBridge` HF→mcore import, `LoRA(share_expert_adapters=True)` attach +
+  freeze, mcore DDP + `DistributedOptimizer`, `get_forward_backward_func` inner
+  loop, adapter enumeration (`linear_in`/`linear_out`), and the DiLoCo sync
+  reusing yeto's `build_layout`/`pack_fragment`/`apply_fragment`/`SyncerClient`
+  with the torch learner's exact counter + α-blend semantics.
 - ⏳ Shape planner EP-aware sizing (megatron fits far larger MoE than FSDP2).
-- ⏳ Validation: Megatron-Core is GPU/multi-node only; the trainer needs a live
-  multi-node B200 run to validate and iterate.
+- ⏳ **TP>1 / PP>1** adapter gather (guarded with a clear error today; TP shards
+  `linear_in`/`linear_out`, PP splits adapters across stages).
+- ⏳ **Validation**: Megatron-Core is GPU/multi-node only, so the trainer is
+  written against the researched API but UNVALIDATED — it needs a live
+  multi-node B200 run to shake out, exactly as the torch backend needed the
+  gemma4 smokes. Assumptions to verify first: `AutoBridge.to_megatron_model` /
+  `save_hf_pretrained` signatures, the mcore `GPTModel` forward args
+  (position_ids/labels), and the transformers-version tension (bridge pins a
+  narrow range vs our 5.13.0).
