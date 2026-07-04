@@ -257,6 +257,28 @@ def eval_loss_per_token(model_id: str, adapter_dir: Path | None, eval_file: Path
     return total_loss / max(total_tokens, 1.0)
 
 
+def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float:
+    """Score in a child process so the model's VRAM is released on exit —
+    an in-process eval would keep the base resident on GPU 0 and starve the
+    next arm's learners (found the hard way on a 4xL40S box)."""
+    cmd = [
+        sys.executable, __file__, "--eval-only",
+        "--model", args.model,
+        "--data", str(eval_file),
+        "--seq-len", str(args.seq_len),
+        "--device", args.device,
+    ]
+    if adapter_dir is not None:
+        cmd += ["--adapter-dir", str(adapter_dir)]
+    out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    for line in reversed(out.stdout.splitlines()):
+        if line.startswith("EVAL_LOSS "):
+            return float(line.split()[1])
+    raise RuntimeError(
+        f"eval subprocess failed ({out.returncode}):\n{out.stdout[-800:]}\n{out.stderr[-800:]}"
+    )
+
+
 def run_baseline(args, work: Path) -> tuple[Path, float]:
     arm_dir = work / "baseline"
     steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, 1,
@@ -371,7 +393,17 @@ def main() -> int:
     p.add_argument("--work-dir", type=Path, default=REPO_ROOT / "compare-work")
     p.add_argument("--report-dir", type=Path, default=REPO_ROOT / "compare-report")
     p.add_argument("--dry-run", action="store_true", help="print the plan; run nothing")
+    # Internal: scoring runs as a child process so VRAM is freed on exit.
+    p.add_argument("--eval-only", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--adapter-dir", type=Path, default=None, help=argparse.SUPPRESS)
     args = p.parse_args()
+
+    if args.eval_only:
+        loss = eval_loss_per_token(
+            args.model, args.adapter_dir, Path(args.data), args.seq_len, args.device
+        )
+        print(f"EVAL_LOSS {loss:.6f}")
+        return 0
 
     arms = select_arms(args.settings)
     world = max(1, args.learner_gpus)
@@ -404,21 +436,21 @@ def main() -> int:
     print(f"[compare] {n_train} train rows, {args.eval_rows} eval rows")
 
     records = []
-    base = eval_loss_per_token(args.model, None, evalf, args.seq_len, args.device)
+    base = eval_in_subprocess(args, None, evalf)
     records.append({"arm": "base (untrained)", "m": 0, "wall_s": 0.0, "eval_loss": base})
-    print(f"[compare] base eval loss/token: {base:.4f}")
+    print(f"[compare] base eval loss/token: {base:.4f}", flush=True)
 
     adapters, wall = run_baseline(args, args.work_dir)
-    bl = eval_loss_per_token(args.model, adapters, evalf, args.seq_len, args.device)
+    bl = eval_in_subprocess(args, adapters, evalf)
     records.append({"arm": "baseline (sync)", "m": 1, "wall_s": round(wall, 1), "eval_loss": bl})
-    print(f"[compare] baseline eval loss/token: {bl:.4f} ({wall:.0f}s)")
+    print(f"[compare] baseline eval loss/token: {bl:.4f} ({wall:.0f}s)", flush=True)
 
     for arm in arms:
         adapters, wall = run_diloco(args, arm, args.work_dir)
-        loss = eval_loss_per_token(args.model, adapters, evalf, args.seq_len, args.device)
+        loss = eval_in_subprocess(args, adapters, evalf)
         records.append({"arm": arm.name, "m": arm.m, "wall_s": round(wall, 1),
                         "eval_loss": loss})
-        print(f"[compare] {arm.name} eval loss/token: {loss:.4f} ({wall:.0f}s)")
+        print(f"[compare] {arm.name} eval loss/token: {loss:.4f} ({wall:.0f}s)", flush=True)
 
     args.report_dir.mkdir(parents=True, exist_ok=True)
     with open(args.report_dir / "results.jsonl", "w") as f:
