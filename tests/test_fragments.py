@@ -100,3 +100,14 @@ def test_strided_shrinks_empty_bins():
 def test_unknown_pattern_rejected():
     with pytest.raises(ValueError):
         build_layout(TENSORS, 4, pattern="zigzag")
+
+
+def test_avg_regex_groups_vector_like_tensors():
+    layout = build_layout(
+        [("block.norm.weight", 8), ("block.attn.lora_A.weight", 32), ("block.attn.lora_B.weight", 32)],
+        3,
+        avg_name_regex=r"(^|\.)(norm|bias)(\.|$)",
+    )
+    assert layout.fragments[0].merge_mode == MERGE_AVG
+    assert layout.fragments[0].tensors == [("block.norm.weight", 8)]
+    assert all(f.merge_mode == MERGE_RDA for f in layout.fragments[1:])

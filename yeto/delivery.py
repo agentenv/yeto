@@ -34,10 +34,10 @@ def is_remote(output: str | None) -> bool:
     return kind(output) in ("store", "hf")
 
 
-def fetch_cmd(source_cluster: str, dest_dir: str) -> list[str]:
+def fetch_cmd(source_cluster: str, dest_dir: str, remote_dir: str = "yeto-output") -> list[str]:
     """rsync the winning learner's output onto this machine (the head or
     the local worker) via the ssh alias sky wrote when launching it."""
-    return ["rsync", "-az", f"{source_cluster}:yeto-output/", f"{dest_dir}/"]
+    return ["rsync", "-az", f"{source_cluster}:{remote_dir.rstrip('/')}/", f"{dest_dir}/"]
 
 
 def deliver(output: str, src_dir: str) -> None:

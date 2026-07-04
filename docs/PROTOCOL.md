@@ -24,7 +24,7 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
 
 | type | name           | direction        | payload |
 |------|----------------|------------------|---------|
-| 1    | HELLO          | learner → syncer | learner_id:u32, dtype:u8 (1=f32, 2=bf16, 3=q4), num_fragments:u32, then per fragment: merge_mode:u8 (0=avg, 1=rda), num_tensors:u32, numel:u64 × num_tensors |
+| 1    | HELLO          | learner → syncer | learner_id:u32, dtype:u8 (1=f32, 2=bf16, 3=q4), num_fragments:u32, then per fragment: merge_mode:u8 (0=avg, 1=rda), num_tensors:u32, numel:u64 × num_tensors, num_streams:u16, optional layout_meta_len:u32 + UTF-8 JSON |
 | 2    | INIT_PARAMS    | learner → syncer | fragment_id:u32, tensor bytes (Θ_p^(0)); learner 0 sends all fragments once; syncer ignores if already initialized |
 | 3    | PULL_REQ       | syncer → learner | fragment_id:u32, global_step:u64 |
 | 4    | PUSH_FRAGMENT  | learner → syncer | learner_id:u32, fragment_id:u32, global_step:u64 (echoed from PULL_REQ), base_version:u64 (version of this fragment the learner last applied), local_step:u64, c_steps:u32, c_tokens:u64, tensor bytes (current θ_m,p; under dtype=q4: the q4-encoded delta θ_m,p − Θ_p(base_version)) |
@@ -36,8 +36,11 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
 
 ## Striping
 
-- HELLO (on stream 0) carries `num_streams:u16` after the layout; the learner
-  then opens that many extra sockets, each introduced by DATA_HELLO.
+- HELLO (on stream 0) carries `num_streams:u16` after the layout; protocol-v3
+  learners may append `layout_meta_len:u32` and a UTF-8 JSON layout manifest
+  after it. Older learners stop at `num_streams`, so no metadata means the
+  original v2 layout. The learner then opens that many extra sockets, each
+  introduced by DATA_HELLO.
 - Small messages (HELLO, PULL_REQ, HEARTBEAT, SHUTDOWN) travel unchunked on
   stream 0.
 - Large messages (INIT_PARAMS, PUSH_FRAGMENT, BCAST_FRAGMENT) are serialized
@@ -55,6 +58,10 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
   Streaming DiLoCo pattern: layer i → fragment i mod P). Embedding-like
   tensors go to their own fragment with merge_mode=avg; everything else uses
   RDA. All learners must declare identical layouts in HELLO.
+- **Layout metadata**: when present, every learner in a run must send identical
+  JSON metadata. The syncer stores it with checkpoints so export can validate
+  tensor names/shapes, task, trainable policy, merge policy, and base checkpoint
+  hash instead of relying only on command-line flags.
 - **Schedule**: syncer global step `t = 1..T`; at each step exactly one
   fragment `p = (t-1) mod P` syncs (P = H round-robin, double-buffered).
 - **Pull**: syncer sends PULL_REQ(p, t) to all connected learners. A learner
@@ -130,6 +137,8 @@ cut is consistent by construction. The snapshot persists:
 - global step t and per-fragment versions,
 - global parameters Θ and outer (Nesterov) momentum,
 - the cumulative merged-token/step ledger per learner.
+- optional layout metadata JSON appended after the ledger as
+  `layout_meta_len:u32 + bytes`.
 
 Learner consistency on restore holds because recovery is idempotent: a learner
 (re)connecting after a syncer restart receives the full fragment rebroadcast,

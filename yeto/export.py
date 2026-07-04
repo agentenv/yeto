@@ -28,14 +28,15 @@ only matters when the syncer itself resumes from the checkpoint.
 from __future__ import annotations
 
 import argparse
+import json
 import struct
 from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 
-from .fragments import FragmentLayout, build_layout
-from .tensor_io import apply_fragment
+from .backends import all_backends, get_backend
+from .fragments import FragmentLayout
 
 CKPT_MAGIC = 0xD170_5A7E
 
@@ -48,6 +49,8 @@ class Checkpoint:
     fragments: list[tuple[int, torch.Tensor, torch.Tensor]]
     # learner_id -> (merges, steps, tokens)
     ledger: dict[int, tuple[int, int, int]]
+    # Optional protocol-v3 layout/task metadata appended after the v2 payload.
+    layout_meta: dict | None = None
 
 
 def parse_checkpoint(path: str | Path) -> Checkpoint:
@@ -91,13 +94,25 @@ def parse_checkpoint(path: str | Path) -> Checkpoint:
         )
         ledger[learner_id] = (merges, steps, tokens)
 
+    layout_meta = None
     if off != len(data):
-        raise ValueError(
-            f"{path}: {len(data) - off} trailing bytes after the checkpoint "
-            f"payload (parsed {off} of {len(data)}); file corrupt or from an "
-            "incompatible syncer version"
-        )
-    return Checkpoint(global_step, fragments, ledger)
+        remaining = len(data) - off
+        if remaining < 4:
+            raise ValueError(
+                f"{path}: {remaining} trailing bytes after the checkpoint "
+                f"payload (parsed {off} of {len(data)}); file corrupt or from an "
+                "incompatible syncer version"
+            )
+        (meta_len,) = struct.unpack("<I", take(4, "layout_meta_len"))
+        if off + meta_len != len(data):
+            raise ValueError(
+                f"{path}: trailing bytes do not form a valid layout metadata block "
+                f"(declared {meta_len} bytes, have {len(data) - off})"
+            )
+        raw_meta = take(meta_len, "layout_meta")
+        if raw_meta:
+            layout_meta = json.loads(raw_meta.decode("utf-8"))
+    return Checkpoint(global_step, fragments, ledger, layout_meta)
 
 
 def _read_f32(raw: bytes) -> torch.Tensor:
@@ -140,17 +155,9 @@ def parse_args(argv=None):
         description="Export a syncer checkpoint into a Hugging Face "
         "model/adapter directory.",
     )
+    # Shared across tasks; per-task flags come from the registered backends.
+    p.add_argument("--task", choices=[b.name for b in all_backends()], default="lm")
     p.add_argument("--checkpoint", required=True, help="path to the syncer checkpoint file")
-    p.add_argument("--model", required=True, help="HF model id or an alias from yeto/models.py (gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...)")
-    p.add_argument("--tuning", choices=["lora", "full"], default="lora")
-    p.add_argument("--lora-r", type=int, default=16)
-    p.add_argument("--lora-alpha", type=int, default=32)
-    p.add_argument(
-        "--lora-targets",
-        choices=["auto", "attention", "all-linear"],
-        default="auto",
-        help="adapter placement used during training (layout must match)",
-    )
     p.add_argument("--fragments", type=int, default=8, help="P used during training")
     p.add_argument(
         "--fragment-pattern",
@@ -160,64 +167,14 @@ def parse_args(argv=None):
     )
     p.add_argument("--output-dir", required=True)
     p.add_argument("--device", default="cpu")
+    for backend in all_backends():
+        backend.add_export_cli_args(p)
     return p.parse_args(argv)
 
 
 def main(argv=None) -> None:
     args = parse_args(argv)
-
-    ckpt = parse_checkpoint(args.checkpoint)
-
-    # Imported lazily: parse_checkpoint must stay usable without transformers.
-    from .learner import load_model_and_tokenizer, trainable_params
-
-    device = torch.device(args.device)
-    # Mirror the learner's model construction exactly so the trainable tensor
-    # set (and therefore the fragment layout) is identical. shard="ddp" keeps
-    # the single-process (non-FSDP) dtype path.
-    learner_args = argparse.Namespace(
-        model=args.model,
-        tuning=args.tuning,
-        shard="ddp",
-        lora_r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_targets=args.lora_targets,
-    )
-    model, tokenizer = load_model_and_tokenizer(learner_args, device)
-    params = trainable_params(model)
-    layout = build_layout(
-        [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
-    )
-
-    validate_against_layout(ckpt, layout)
-
-    for frag, (_, flat_params, _) in zip(layout.fragments, ckpt.fragments):
-        apply_fragment(frag, flat_params, params)
-
-    out = Path(args.output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(out)
-    tokenizer.save_pretrained(out)
-
-    print(f"exported checkpoint at global_step={ckpt.global_step} to {out}")
-    print(
-        f"applied {layout.num_fragments} fragments "
-        f"({sum(p.numel() for _, p, _ in ckpt.fragments)} params) "
-        f"onto {len(params)} trainable tensors ({args.tuning})"
-    )
-    if ckpt.ledger:
-        total_merges = sum(m for m, _, _ in ckpt.ledger.values())
-        total_steps = sum(s for _, s, _ in ckpt.ledger.values())
-        total_tokens = sum(t for _, _, t in ckpt.ledger.values())
-        print(
-            f"ledger: {len(ckpt.ledger)} learners, {total_merges} merges, "
-            f"{total_steps} steps, {total_tokens} tokens"
-        )
-        for lid in sorted(ckpt.ledger):
-            merges, steps, tokens = ckpt.ledger[lid]
-            print(f"  learner {lid}: merges={merges} steps={steps} tokens={tokens}")
-    else:
-        print("ledger: empty")
+    return get_backend(args.task).export(args)
 
 
 if __name__ == "__main__":

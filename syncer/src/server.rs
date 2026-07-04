@@ -64,6 +64,7 @@ struct Group {
     learner_id: u32,
     dtype: u8,
     layout: Layout,
+    layout_meta: Option<String>,
     control: mpsc::Sender<OutFrame>,
     data: Mutex<Vec<mpsc::Sender<OutFrame>>>,
     msg_id: AtomicU64,
@@ -220,12 +221,23 @@ async fn handle_connection(stream: TcpStream, registry: Registry, event_tx: mpsc
             let num_fragments = r.u32()?;
             let layout = Layout::decode(&mut r, num_fragments)?;
             let num_streams = r.u16()?;
+            let layout_meta = if r.0.is_empty() {
+                None
+            } else {
+                let n = r.u32()? as usize;
+                let bytes = r.take(n)?;
+                if !r.0.is_empty() {
+                    bail!("trailing bytes after HELLO layout metadata");
+                }
+                Some(String::from_utf8(bytes.to_vec())?)
+            };
             let (tx, rx) = mpsc::channel::<OutFrame>(WRITER_QUEUE);
             tokio::spawn(writer_task(wr, rx));
             let group = Arc::new(Group {
                 learner_id,
                 dtype,
                 layout,
+                layout_meta,
                 control: tx,
                 data: Mutex::new(Vec::new()),
                 msg_id: AtomicU64::new(0),
@@ -423,10 +435,15 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
                     if cfg.resume {
                         if let Some(path) = cfg.checkpoint_path.as_ref().filter(|p| p.exists()) {
                             st.load_checkpoint(path)?;
+                            if st.layout_meta != group.layout_meta {
+                                bail!("checkpoint layout metadata does not match HELLO metadata");
+                            }
                             info!(step = st.global_step, "resumed from checkpoint");
                         }
                     }
                     state = Some(st);
+                } else if let Some(st) = &state {
+                    validate_group_compatible(st, &group)?;
                 }
             }
             Event::Init { fragment_id, values } => {
@@ -508,6 +525,7 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
                     }
                     Event::Hello { group } => {
                         // Rejoining learner: catch it up to the current state.
+                        validate_group_compatible(&st, &group)?;
                         send_all_fragments(&st, &group).await;
                     }
                     Event::Init { .. } => {} // already initialized; ignore
@@ -605,6 +623,7 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     let mut st = GlobalState::new(
         group.layout.clone(),
+        group.layout_meta.clone(),
         cfg.outer_lr,
         cfg.outer_momentum,
         group.dtype,
@@ -613,6 +632,19 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }
     Ok(st)
+}
+
+fn validate_group_compatible(st: &GlobalState, group: &Arc<Group>) -> Result<()> {
+    if st.wire_dtype != group.dtype {
+        bail!("learner {} dtype differs from established syncer state", group.learner_id);
+    }
+    if st.layout != group.layout {
+        bail!("learner {} fragment layout differs from established syncer state", group.learner_id);
+    }
+    if st.layout_meta != group.layout_meta {
+        bail!("learner {} layout metadata differs from established syncer state", group.learner_id);
+    }
+    Ok(())
 }
 
 fn current_groups(registry: &Registry) -> Vec<Arc<Group>> {

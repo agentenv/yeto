@@ -57,6 +57,7 @@ pub struct LearnerLedger {
 
 pub struct GlobalState {
     pub layout: Layout,
+    pub layout_meta: Option<String>,
     /// Θ_p, flat f32 per fragment (concatenated tensors in layout order).
     pub params: Vec<Vec<f32>>,
     /// Nesterov momentum buffers, same shape as params.
@@ -77,13 +78,20 @@ pub struct GlobalState {
 }
 
 impl GlobalState {
-    pub fn new(layout: Layout, outer_lr: f32, outer_momentum: f32, wire_dtype: u8) -> Self {
+    pub fn new(
+        layout: Layout,
+        layout_meta: Option<String>,
+        outer_lr: f32,
+        outer_momentum: f32,
+        wire_dtype: u8,
+    ) -> Self {
         let params: Vec<Vec<f32>> = layout.fragments.iter().map(|f| vec![0.0; f.numel()]).collect();
         let momentum = params.clone();
         let initialized = vec![false; layout.fragments.len()];
         let versions = vec![0; layout.fragments.len()];
         Self {
             layout,
+            layout_meta,
             params,
             momentum,
             initialized,
@@ -221,6 +229,11 @@ impl GlobalState {
                 f.write_all(&l.steps.to_le_bytes())?;
                 f.write_all(&l.tokens.to_le_bytes())?;
             }
+            if let Some(meta) = &self.layout_meta {
+                let bytes = meta.as_bytes();
+                f.write_all(&(bytes.len() as u32).to_le_bytes())?;
+                f.write_all(bytes)?;
+            }
             f.flush()?;
         }
         std::fs::rename(&tmp, path)?;
@@ -262,6 +275,20 @@ impl GlobalState {
             let l = LearnerLedger { merges: r.u64()?, steps: r.u64()?, tokens: r.u64()? };
             self.ledger.insert(id, l);
         }
+        if !r.0.is_empty() {
+            let n = r.u32()? as usize;
+            let bytes = r.take(n)?;
+            if !r.0.is_empty() {
+                bail!("checkpoint has trailing bytes after layout metadata");
+            }
+            let meta = String::from_utf8(bytes.to_vec())?;
+            if let Some(current) = &self.layout_meta {
+                if current != &meta {
+                    bail!("checkpoint layout metadata does not match HELLO metadata");
+                }
+            }
+            self.layout_meta = Some(meta);
+        }
         Ok(())
     }
 }
@@ -281,7 +308,7 @@ mod tests {
 
     #[test]
     fn init_once() {
-        let mut st = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32);
+        let mut st = GlobalState::new(layout2(), None, 0.7, 0.9, crate::protocol::DTYPE_F32);
         st.init_fragment(0, vec![1.0; 4]).unwrap();
         st.init_fragment(0, vec![2.0; 4]).unwrap(); // ignored
         assert_eq!(st.params[0], vec![1.0; 4]);
@@ -292,7 +319,7 @@ mod tests {
 
     #[test]
     fn merge_moves_toward_learners() {
-        let mut st = GlobalState::new(layout2(), 1.0, 0.0, crate::protocol::DTYPE_F32); // plain SGD lr=1 = weight averaging
+        let mut st = GlobalState::new(layout2(), None, 1.0, 0.0, crate::protocol::DTYPE_F32); // plain SGD lr=1 = weight averaging
         st.init_fragment(0, vec![1.0; 4]).unwrap();
         st.init_fragment(1, vec![1.0; 4]).unwrap();
         let learner = vec![0.0f32; 4];
@@ -307,7 +334,7 @@ mod tests {
         let dir = std::env::temp_dir().join("yeto-ckpt-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.ckpt");
-        let mut st = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32);
+        let mut st = GlobalState::new(layout2(), Some("{\"task\":\"nava\"}".to_string()), 0.7, 0.9, crate::protocol::DTYPE_F32);
         st.init_fragment(0, vec![1.5; 4]).unwrap();
         st.init_fragment(1, vec![-2.0; 4]).unwrap();
         let learner = vec![0.0f32; 4];
@@ -317,13 +344,14 @@ mod tests {
         st.record_merge(3, 12, 4096);
         st.save_checkpoint(&path).unwrap();
 
-        let mut st2 = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32);
+        let mut st2 = GlobalState::new(layout2(), Some("{\"task\":\"nava\"}".to_string()), 0.7, 0.9, crate::protocol::DTYPE_F32);
         st2.load_checkpoint(&path).unwrap();
         assert_eq!(st2.global_step, 7);
         assert_eq!(st2.versions, vec![7, 0]);
         assert_eq!(st2.params, st.params);
         assert!(st2.all_initialized());
         assert_eq!(st2.ledger.get(&3).unwrap().tokens, 4096);
+        assert_eq!(st2.layout_meta.as_deref(), Some("{\"task\":\"nava\"}"));
         std::fs::remove_file(&path).ok();
     }
 
@@ -333,7 +361,7 @@ mod tests {
         // opposes it. With correction the outer step must move less far
         // in the opposing direction than without.
         let mk = || {
-            let mut st = GlobalState::new(layout2(), 1.0, 0.0, crate::protocol::DTYPE_F32);
+            let mut st = GlobalState::new(layout2(), None, 1.0, 0.0, crate::protocol::DTYPE_F32);
             st.init_fragment(0, vec![0.0; 4]).unwrap();
             st.init_fragment(1, vec![0.0; 4]).unwrap();
             // Warm the momentum: a learner pulling params down (delta +1).
@@ -360,7 +388,7 @@ mod tests {
 
     #[test]
     fn size_mismatch_rejected() {
-        let mut st = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32);
+        let mut st = GlobalState::new(layout2(), None, 0.7, 0.9, crate::protocol::DTYPE_F32);
         assert!(st.init_fragment(0, vec![1.0; 3]).is_err());
         let learner = vec![0.0f32; 3];
         assert!(st.merge_and_step(0, &[&learner], &[1.0]).is_err());

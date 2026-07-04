@@ -30,7 +30,7 @@ import threading
 import time
 
 from . import runs
-from .losses import LOSS_FUNCTIONS
+from .backends import all_backends, backend_names, default_task, get_backend
 
 SUBCOMMANDS = ("launch", "shape", "status", "logs", "down", "_worker", "_head")
 
@@ -60,7 +60,12 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="auto-fleet only: launch the planned fleet without asking",
     )
-    p.add_argument("--model", required=True, help="model alias (see yeto/models.py: gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...) or any HF id")
+    p.add_argument(
+        "--task",
+        choices=backend_names(),
+        default=default_task(),
+        help="training task backend (see yeto/backends/)",
+    )
     p.add_argument(
         "--output",
         default=None,
@@ -70,101 +75,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "fully self-cleaning run), or a local path / omitted (artifact "
         "stays on the head, which is kept up)",
     )
+    # Sharding is shared across tasks (torch LM and NAVA both honor it;
+    # the megatron engine has its own parallelism and ignores it).
     p.add_argument(
-        "--data",
-        required=True,
-        help="fine-tuning data: HF dataset id, local path (dir/file of "
-        "jsonl/json/parquet or a save_to_disk dir), or a cloud URI "
-        "(s3://, gs://, r2://, ...) — non-HF sources are shipped to learners "
-        "via SkyPilot file mounts; rows are messages-format chat traces",
-    )
-    def loss_spec(value: str) -> str:
-        if value in LOSS_FUNCTIONS or value.startswith(("custom:", "pickle:")):
-            return value
-        raise argparse.ArgumentTypeError(
-            f"expected one of {LOSS_FUNCTIONS} or custom:<file.py>[:<fn>]"
-        )
-
-    p.add_argument(
-        "--loss-function",
-        type=loss_spec,
-        default="cross_entropy",
-        help=f"one of {'|'.join(LOSS_FUNCTIONS)}, or custom:<file.py>[:<fn>] "
-        "defining fn(logits, input_ids, weights) -> (loss, num_tokens); the "
-        "callable is pickled by value and shipped to all learners",
-    )
-
-    tune = p.add_argument_group("fine-tuning")
-    tune.add_argument("--tuning", choices=["lora", "full"], default="lora")
-    tune.add_argument(
         "--shard",
         choices=["ddp", "fsdp"],
         default="ddp",
         help="torch backend multi-GPU strategy; fsdp shards the frozen base "
         "across the learner's GPUs/nodes (lora only) so the model no "
         "longer has to fit on one GPU",
-    )
-    tune.add_argument(
-        "--island-backend",
-        choices=["torch", "megatron"],
-        default="torch",
-        help="per-island trainer: 'torch' (FSDP2/DDP; any bf16 model that "
-        "fits the island) or 'megatron' (Megatron-Core expert/tensor/pipeline "
-        "parallelism, for large MoE whose experts must be sharded across the "
-        "island). Both speak the same DiLoCo adapter sync to the syncer",
-    )
-    tune.add_argument(
-        "--expert-parallel",
-        type=int,
-        default=None,
-        help="megatron backend: expert-parallel degree (default fills the "
-        "island: gpus_per_island / (tensor-parallel x pipeline-parallel))",
-    )
-    tune.add_argument("--tensor-parallel", type=int, default=1, help="megatron backend: TP degree")
-    tune.add_argument("--pipeline-parallel", type=int, default=1, help="megatron backend: PP degree")
-    tune.add_argument(
-        "--train-on",
-        choices=["assistant", "all"],
-        default="assistant",
-        help="which tokens carry loss: assistant-message tokens only (default) or every token",
-    )
-    tune.add_argument("--lora-r", type=int, default=16)
-    tune.add_argument(
-        "--lora-targets",
-        choices=["auto", "attention", "all-linear"],
-        default="auto",
-        help="adapter placement: attention-only, every linear, or auto "
-        "(attention for MoE — router and routed experts stay frozen)",
-    )
-    tune.add_argument("--seq-len", type=int, default=2048)
-
-    def int_or_auto(value: str):
-        # duplicated from yeto/autobatch.py: importing it would pull torch
-        # into the CLI path.
-        return value if value == "auto" else int(value)
-
-    tune.add_argument(
-        "--micro-batch-size",
-        type=int_or_auto,
-        default="auto",
-        help="per-GPU micro batch; 'auto' (default) probes the largest size "
-        "that fits each learner's VRAM at startup and shrinks --grad-accum "
-        "to keep the effective batch constant",
-    )
-    tune.add_argument("--grad-accum", type=int, default=4)
-    tune.add_argument("--inner-lr", type=float, default=3e-4)
-    tune.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
-    tune.add_argument(
-        "--tokenize",
-        choices=["stream", "preload"],
-        default="stream",
-        help="stream: async tokenization in DataLoader workers (default); preload: all upfront",
-    )
-    tune.add_argument(
-        "--stream-workers",
-        type=int,
-        default=2,
-        help="tokenizer worker processes per learner rank (stream mode)",
     )
 
     sync = p.add_argument_group("async sync")
@@ -249,12 +168,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     infra.add_argument(
         "--learner-image",
+        "--runtime-image",
+        dest="learner_image",
         default=None,
         help="override the machine image for learner nodes: a cloud image id "
         "(ami-..., GCP image path), a sky tag (skypilot:gpu-ubuntu-2204), a "
         "docker: image, or comma-separated region=id pairs for multi-region "
         "fleets (e.g. us-east-2=ami-aaa,us-west-2=ami-bbb). Escape hatch for "
-        "stale default images, e.g. pre-Blackwell drivers on p6",
+        "stale default images or NAVA CUDA/flash-attn runtimes. "
+        "--runtime-image is kept as a backward-compatible alias",
     )
     infra.add_argument(
         "--syncer-region",
@@ -293,6 +215,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default=30,
         help="fleet-controller health poll interval (seconds)",
     )
+
+    # Per-task flag groups (LM fine-tuning, NAVA fine-tuning, ...). Each
+    # registered backend contributes its own group, so a new task adds its
+    # flags here without editing this function.
+    for backend in all_backends():
+        backend.add_launch_cli_args(p)
+
 
 
 def parse_args(argv=None):
@@ -498,6 +427,15 @@ def _print_detach_hints(name: str) -> None:
 
 def _fleet_args_error(args) -> str | None:
     """Validate the --gpu / --budget / --flops combination."""
+    backend = get_backend(getattr(args, "task", None))
+    if not backend.supports_auto_fleet:
+        if args.gpu is None:
+            return f"--task {backend.name} requires --gpu; auto-fleet planning is LM-only"
+        if args.budget is not None or args.flops is not None:
+            return (
+                f"--budget/--flops auto-fleet planning is LM-only; pass an "
+                f"explicit --gpu for --task {backend.name}"
+            )
     if args.gpu is not None and (args.budget is not None or args.flops is not None):
         return "--budget/--flops belong to auto-fleet planning; drop them or drop --gpu"
     if args.gpu is None and args.budget is None and args.flops is None:
@@ -548,7 +486,21 @@ def _resolve_auto_fleet(args) -> int:
     return 0
 
 
+def _validate_launch_args(args) -> bool:
+    backend = get_backend(getattr(args, "task", None))
+    errors = backend.validate(args)
+    if errors:
+        for e in errors:
+            print(f"[yeto] {e}", file=sys.stderr)
+        return False
+    for w in backend.warnings(args):
+        print(f"[yeto] {w}", file=sys.stderr)
+    return True
+
+
 def cmd_launch(args) -> int:
+    if not _validate_launch_args(args):
+        return 1
     error = _fleet_args_error(args)
     if error:
         print(f"[yeto] {error}", file=sys.stderr)
@@ -643,6 +595,8 @@ def _make_head_task(args, syncer_binary, extra_mounts: dict | None = None):
     )
 
     file_mounts = {"~/yeto-syncer": str(syncer_binary), **(extra_mounts or {})}
+    # A task backend may need a local checkout (e.g. NAVA) mounted onto the head.
+    file_mounts.update(get_backend(getattr(args, "task", None)).head_file_mounts(args))
     aws_creds = os.path.expanduser("~/.aws")
     if os.path.isdir(aws_creds):
         # Same pattern as sky's jobs controller: ship the local credentials
@@ -756,7 +710,9 @@ def cmd_launch_head(args) -> int:
     # the rewritten path makes the head's launcher mount it onto learners.
     from .datasource import head_stage
 
-    args.data, data_mounts = head_stage(args.data)
+    data_mounts = {}
+    if getattr(args, "data", None):
+        args.data, data_mounts = head_stage(args.data)
     binary = launcher.build_syncer_binary()
 
     args_dict = _serializable_args(args)
@@ -816,6 +772,9 @@ def cmd_head(payload: str) -> int:
     from .gpu_spec import parse_gpu_spec
 
     args = argparse.Namespace(**json.loads(payload))
+    # Rewrite submitter-local paths (e.g. NAVA's checkout) to their head-VM
+    # location before learner tasks are built from them.
+    get_backend(getattr(args, "task", None)).rewrite_for_head(args)
     num_learners = len(parse_gpu_spec(args.gpu))
     syncer = launcher.LocalSyncer(args, num_learners)
     syncer.start()

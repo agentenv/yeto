@@ -129,6 +129,56 @@ LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
 delta correction, q4 wire format, snapshots, resilience.
 [docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
 
+## NAVA fine-tuning
+
+Yeto can also launch NAVA fine-tuning jobs with the same async syncer. The
+NAVA path keeps NAVA's own pipeline, VAE, dataset, and loss code as the source
+of truth, while Yeto handles multi-cluster orchestration and synchronizes the
+trainable NAVA parameters at fragment boundaries.
+
+```bash
+yeto-nava-prepare-labels \
+  --input s3://bucket/path/clip_s3_labels.json.gz \
+  --output s3://bucket/path/train.nava.jsonl \
+  --caption-field composed \
+  --min-duration 2 \
+  --max-duration 10
+
+yeto launch \
+  --task nava \
+  --gpu aws:8xh100@us-west-2,aws:8xh100@us-east-2 \
+  --runtime-image docker:yeto-nava:torch2.8-cu128-flashattn \
+  --nava-root /path/to/NAVA \
+  --nava-config configs/nava.yaml \
+  --nava-ckpt s3://bucket/nava/NAVA.safetensors \
+  --nava-assets-uri s3://bucket/nava/assets/ \
+  --nava-data s3://bucket/path/train.nava.jsonl \
+  --nava-tuning lora \
+  --nava-lora-r 16 \
+  --fragments 32 \
+  --wire-dtype bf16
+
+yeto-export \
+  --task nava \
+  --checkpoint yeto-state.ckpt \
+  --nava-root /path/to/NAVA \
+  --nava-config configs/nava.yaml \
+  --base-ckpt s3://bucket/nava/NAVA.safetensors \
+  --output-dir ./nava_adapter \
+  --format both
+```
+
+The production default is `--nava-tuning lora`: NAVA's frozen base is sharded
+inside each learner cluster and only replicated adapter weights are sent over
+the WAN. Full-parameter NAVA sync is exposed behind `--nava-full-sync gather`
+for high-memory environments; it is intentionally explicit because the syncer
+must hold full f32 parameters plus momentum. NAVA learners append layout
+metadata to the syncer checkpoint (tensor names/shapes, merge policy, trainable
+policy, base checkpoint hash), so `yeto-export --task nava` can validate that
+export flags match the run before writing an adapter or merged checkpoint. S3
+clip labels are converted into NAVA JSONL before training, with strict
+trainability/quality/age-safety filtering by default.
+
 ## Testing
 
     python3 -m pytest tests/          # includes a real syncer+learner loop
