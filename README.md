@@ -137,3 +137,14 @@ learner islands (`yeto launch --external-learners`, cross Mac↔NVIDIA runs).
 
     python3 -m pytest tests/          # includes a real syncer+learner loop
     (cd syncer && cargo test)
+
+Two heavier harnesses (both support `--dry-run`):
+
+    # smoke every supported model with the auto fleet planner, tiered by
+    # size; sequential, self-cleaning, writes a pass/fail report
+    python scripts/smoke_models.py --tier small --dry-run
+
+    # quality check: async DiLoCo vs a synchronous baseline at a fixed
+    # token budget, scored by held-out eval loss across settings presets
+    # (M, merge-alpha, q4 wire, serial rounds, no-heloco, strided)
+    python scripts/compare_diloco.py --data <chat.jsonl> --settings all --dry-run
