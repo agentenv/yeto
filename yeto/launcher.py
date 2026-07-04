@@ -357,11 +357,21 @@ def resolve_blackwell_image(region: str) -> str | None:
 # Internal image-override table: (cloud, GPU) pairs whose provider-default
 # image is known stale/broken, mapped to a `region -> image id` resolver.
 # First entry earned in production: sky's pinned AMI ships driver 535,
-# which never binds to SM100 silicon. Extend here as new GPU generations
-# outpace provider image pins; an explicit --learner-image always wins,
-# and a resolver returning None degrades to the setup-time driver install.
+# which never binds to SM100 silicon. Second class earned the same way:
+# NVSwitch instances (p4d/p4de A100, p5 H100, p5e H200) need
+# nvidia-fabricmanager running before CUDA will initialize at all
+# (cudaGetDeviceCount -> Error 802), and sky's pinned AMI does not ship it;
+# the DL Base GPU AMI does, preinstalled and enabled. Extend here as new
+# GPU generations outpace provider image pins; an explicit --learner-image
+# always wins, and a resolver returning None degrades to the setup-time
+# driver install.
 GPU_IMAGE_OVERRIDES: dict[tuple[str, str], object] = {
     ("aws", "B200"): resolve_blackwell_image,
+    # NVSwitch (fabric manager required); same current DL Base GPU AMI.
+    ("aws", "A100"): resolve_blackwell_image,
+    ("aws", "A100-80GB"): resolve_blackwell_image,
+    ("aws", "H100"): resolve_blackwell_image,
+    ("aws", "H200"): resolve_blackwell_image,
 }
 
 
