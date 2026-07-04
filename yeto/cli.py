@@ -91,6 +91,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     sync.add_argument("--fragments", type=int, default=8, help="fragments P (= sync interval H)")
     sync.add_argument("--quorum", type=int, default=1, help="minimum learners per outer step (K)")
     sync.add_argument(
+        "--external-learners",
+        type=int,
+        default=0,
+        help="extra learner slots for machines the launcher cannot provision "
+        "(e.g. a Mac running yeto.mlx.learner). The syncer waits for "
+        "cloud learners + this many manual joins; the launch log prints the "
+        "join command with the reserved --learner-id values",
+    )
+    sync.add_argument(
         "--grace-ms",
         type=int,
         default=1000,
@@ -108,6 +117,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         type=float,
         default=2.0,
         help="compute-overlap budget for the grace window, in inner steps (τ)",
+    )
+    sync.add_argument(
+        "--pipeline",
+        type=int,
+        default=2,
+        help="fragment sync rounds in flight at once (Decoupled DiLoCo's "
+        "'two fragments in flight' at τ=2); 1 = serial rounds. Clamped to "
+        "--fragments",
     )
     sync.add_argument(
         "--delta-correction",

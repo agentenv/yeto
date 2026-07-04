@@ -101,6 +101,18 @@ class ToyLearner(threading.Thread):
             loss.backward()
             opt.step()
             steps_total += 1
+            # Apply broadcasts before answering pulls, mirroring the real
+            # learners: a pipelined syncer's next pull for a fragment can
+            # overtake the broadcast that closed its previous round.
+            for bc in self.client.drain_updates():
+                frag = self.layout.fragments[bc.fragment_id]
+                flat_new = unpack_fragment(frag, bc.data, bulk_dtype(self.dtype))
+                if self.anchors is not None:
+                    self.anchors[bc.fragment_id] = flat_new.clone()
+                apply_fragment(frag, flat_new, self.params)
+                steps_at_reset[bc.fragment_id] = steps_total
+                versions[bc.fragment_id] = bc.version
+                self.synced = {k: v.detach().clone() for k, v in self.params.items()}
             pending.extend(self.client.drain_pulls())
             still = []
             for pull in pending:
@@ -124,15 +136,6 @@ class ToyLearner(threading.Thread):
                     payload,
                 )
             pending = still
-            for bc in self.client.drain_updates():
-                frag = self.layout.fragments[bc.fragment_id]
-                flat_new = unpack_fragment(frag, bc.data, bulk_dtype(self.dtype))
-                if self.anchors is not None:
-                    self.anchors[bc.fragment_id] = flat_new.clone()
-                apply_fragment(frag, flat_new, self.params)
-                steps_at_reset[bc.fragment_id] = steps_total
-                versions[bc.fragment_id] = bc.version
-                self.synced = {k: v.detach().clone() for k, v in self.params.items()}
             time.sleep(0.005)  # ~5ms inner step
         self.client.close()
 
@@ -234,14 +237,16 @@ def test_single_learner_roundtrip_q4():
 
 @pytest.mark.timeout(180)
 def test_single_learner_roundtrip():
-    """M=1, K=1: a single self-syncing learner; must run to completion."""
+    """M=1, K=1: a single self-syncing learner; must run to completion.
+    Runs with --pipeline 1 so the serial-round path stays covered (the
+    other tests exercise the default pipelined scheduler)."""
     binary = build_syncer()
     port = free_port()
     named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
     layout = build_layout(named, 3)
     proc = subprocess.Popen(
         [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
-         "--grace-ms", "50", "--total-steps", "9"],
+         "--grace-ms", "50", "--total-steps", "9", "--pipeline", "1"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     try:
