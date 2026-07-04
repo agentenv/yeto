@@ -1,0 +1,85 @@
+"""The --island-backend selector: the torch and megatron backends share the
+DiLoCo/LoRA/data flags but differ in the intra-island parallelism, entrypoint,
+and setup deps."""
+
+import argparse
+
+from yeto.gpu_spec import ClusterSpec
+from yeto.launcher import make_learner_task
+
+
+def _args(**over):
+    base = dict(
+        model="gemma4",
+        data="org/data",
+        loss_function="cross_entropy",
+        train_on="assistant",
+        shard="fsdp",
+        tuning="lora",
+        lora_r=16,
+        lora_targets="auto",
+        seq_len=2048,
+        micro_batch_size="auto",
+        grad_accum=4,
+        inner_lr=3e-4,
+        fragments=8,
+        fragment_pattern="binpack",
+        merge_alpha=0.5,
+        tokenize="stream",
+        stream_workers=2,
+        wire_dtype="q4",
+        wan_streams=4,
+        max_rows=None,
+        island_backend="torch",
+        expert_parallel=None,
+        tensor_parallel=1,
+        pipeline_parallel=1,
+        learner_image=None,
+        learner_cpus=None,
+        learner_instance_type=None,
+        spot=True,
+        disk_size=512,
+        retry_until_up=True,
+    )
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+_SPEC = ClusterSpec(cloud="aws", region="us-east-2", num_nodes=1, gpus_per_node=8, gpu="B200")
+
+
+def test_torch_backend_uses_shard_and_torch_learner():
+    task = make_learner_task(_args(island_backend="torch"), _SPEC, 0, 1, "1.2.3.4:29400")
+    assert "-m yeto.learner" in task.run
+    assert "--shard fsdp" in task.run
+    assert "--island-backend" not in task.run
+    assert "megatron-core" not in task.setup
+
+
+def test_megatron_backend_swaps_entrypoint_parallelism_and_deps():
+    task = make_learner_task(_args(island_backend="megatron"), _SPEC, 0, 1, "1.2.3.4:29400")
+    assert "-m yeto.megatron.learner" in task.run
+    assert "--island-backend megatron" in task.run
+    assert "--shard" not in task.run  # megatron has its own parallelism
+    assert "megatron-core" in task.setup
+
+
+def test_expert_parallel_defaults_to_filling_the_island():
+    # 1 node x 8 GPUs, tp=1, pp=1 -> ep should fill the island (8).
+    task = make_learner_task(_args(island_backend="megatron"), _SPEC, 0, 1, "a:1")
+    assert "--expert-parallel 8" in task.run
+
+
+def test_expert_parallel_respects_tp_pp_and_override():
+    # tp=2, pp=2 over 8 GPUs -> auto ep = 8 // 4 = 2.
+    task = make_learner_task(
+        _args(island_backend="megatron", tensor_parallel=2, pipeline_parallel=2), _SPEC, 0, 1, "a:1"
+    )
+    assert "--expert-parallel 2" in task.run
+    assert "--tensor-parallel 2" in task.run
+    assert "--pipeline-parallel 2" in task.run
+    # explicit override wins
+    task2 = make_learner_task(
+        _args(island_backend="megatron", expert_parallel=4), _SPEC, 0, 1, "a:1"
+    )
+    assert "--expert-parallel 4" in task2.run

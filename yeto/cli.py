@@ -100,10 +100,28 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--shard",
         choices=["ddp", "fsdp"],
         default="ddp",
-        help="per-learner multi-GPU strategy; fsdp shards the frozen base "
+        help="torch backend multi-GPU strategy; fsdp shards the frozen base "
         "across the learner's GPUs/nodes (lora only) so the model no "
         "longer has to fit on one GPU",
     )
+    tune.add_argument(
+        "--island-backend",
+        choices=["torch", "megatron"],
+        default="torch",
+        help="per-island trainer: 'torch' (FSDP2/DDP; any bf16 model that "
+        "fits the island) or 'megatron' (Megatron-Core expert/tensor/pipeline "
+        "parallelism, for large MoE whose experts must be sharded across the "
+        "island). Both speak the same DiLoCo adapter sync to the syncer",
+    )
+    tune.add_argument(
+        "--expert-parallel",
+        type=int,
+        default=None,
+        help="megatron backend: expert-parallel degree (default fills the "
+        "island: gpus_per_island / (tensor-parallel x pipeline-parallel))",
+    )
+    tune.add_argument("--tensor-parallel", type=int, default=1, help="megatron backend: TP degree")
+    tune.add_argument("--pipeline-parallel", type=int, default=1, help="megatron backend: PP degree")
     tune.add_argument(
         "--train-on",
         choices=["assistant", "all"],

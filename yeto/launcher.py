@@ -357,11 +357,24 @@ def parse_image_spec(value: str | None):
     return images
 
 
+# The Megatron island backend needs Megatron-Core + Transformer Engine on
+# top of the torch already installed by TORCH_SETUP. These have prebuilt
+# wheels for cu12.x; apex is optional (mcore falls back to non-fused kernels
+# without it). A production deployment would instead pin an NGC PyTorch image
+# that ships all three prebuilt — that path plugs in via --learner-image.
+MEGATRON_SETUP = (
+    "pip install -q megatron-core transformer-engine[pytorch] "
+    "|| echo '[yeto-setup] megatron/TE install failed; --island-backend megatron unavailable' >&2"
+)
+
+
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
     import sky
 
     from .datasource import learner_data_arg, learner_file_mounts
 
+    # Flags shared by both island backends. The DiLoCo sync, LoRA, data, and
+    # loss are identical; only the intra-island parallelism differs.
     learner_flags = (
         f" --model {shlex.quote(args.model)}"
         f" --data {shlex.quote(learner_data_arg(args.data))}"
@@ -370,7 +383,6 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f" --num-learners {num_learners}"
         f" --loss-function {args.loss_function}"
         f" --train-on {args.train_on}"
-        f" --shard {args.shard}"
         f" --tuning {args.tuning}"
         f" --lora-r {args.lora_r}"
         f" --lora-targets {getattr(args, 'lora_targets', 'auto')}"
@@ -389,6 +401,27 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     )
     if args.max_rows:
         learner_flags += f" --max-rows {args.max_rows}"
+
+    backend = getattr(args, "island_backend", "torch")
+    setup_steps = [WAN_TUNING, NVME_SETUP, NVME_ENV, HF_TOKEN_ENV, TORCH_SETUP,
+                   "pip install -q -r requirements.txt"]
+    if backend == "megatron":
+        gpus = spec.num_nodes * spec.gpus_per_node
+        tp = max(1, getattr(args, "tensor_parallel", 1))
+        pp = max(1, getattr(args, "pipeline_parallel", 1))
+        ep = getattr(args, "expert_parallel", None) or max(1, gpus // (tp * pp))
+        learner_flags += (
+            f" --island-backend megatron"
+            f" --expert-parallel {ep}"
+            f" --tensor-parallel {tp}"
+            f" --pipeline-parallel {pp}"
+        )
+        entrypoint = "yeto.megatron.learner"
+        setup_steps.append(MEGATRON_SETUP)
+    else:
+        learner_flags += f" --shard {args.shard}"
+        entrypoint = "yeto.learner"
+
     run = (
         f"{NVME_ENV}\n"
         f"{HF_TOKEN_ENV}\n"
@@ -396,7 +429,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         "torchrun --nnodes=$SKYPILOT_NUM_NODES --node_rank=$SKYPILOT_NODE_RANK "
         "--nproc_per_node=$SKYPILOT_NUM_GPUS_PER_NODE "
         "--master_addr=$MASTER_ADDR --master_port=29500 "
-        f"-m yeto.learner{learner_flags}"
+        f"-m {entrypoint}{learner_flags}"
     )
     envs = {
         "SYNCER_ADDR": syncer_addr,
@@ -438,17 +471,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     )
     task = sky.Task(
         name=f"yeto-learner-{learner_id}",
-        setup="\n".join(
-            [
-                WAN_TUNING,
-                NVME_SETUP,
-                NVME_ENV,
-                HF_TOKEN_ENV,
-                TORCH_SETUP,
-                "pip install -q -r requirements.txt",
-                prefetch,
-            ]
-        ),
+        setup="\n".join(setup_steps + [prefetch]),
         run=run,
         envs=envs,
         num_nodes=spec.num_nodes,
