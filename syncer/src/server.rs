@@ -1,7 +1,10 @@
 //! Async TCP server implementing the syncer side of docs/PROTOCOL.md:
 //! per-learner connection groups (control stream + striped data streams),
 //! chunk reassembly, and the pull-driven quorum/grace merge scheduler
-//! at the core of the training loop.
+//! at the core of the training loop. Rounds are pipelined: up to
+//! `Config::pipeline` fragments are in flight at once (arXiv 2604.21428's
+//! "two fragments in flight"), so a slow quorum on one fragment never
+//! delays pulling the next.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -34,6 +37,13 @@ pub struct Config {
     pub grace_gamma: f64,
     /// Compute-overlap budget τ, in learner inner steps.
     pub grace_tau: f64,
+    /// Fragment rounds in flight at once (the paper's "two fragments in
+    /// flight" at τ=2). While one round sits in its quorum/grace window,
+    /// the next fragment's pull is already out — sync latency overlaps
+    /// learner compute instead of serializing with it. 1 = serial rounds.
+    /// Clamped to the fragment count so concurrent rounds always target
+    /// distinct fragments.
+    pub pipeline: u32,
     /// HeLoCo per-tensor delta correction before merging.
     pub delta_correction: bool,
     pub quorum_timeout_s: u64,
@@ -153,9 +163,16 @@ fn adaptive_grace(
 }
 
 /// Per-learner inner-step duration estimated from consecutive pushes
-/// (each push carries the learner's local_step).
+/// (each push carries the learner's local_step), smoothed with an EMA as
+/// the paper prescribes for the grace-window inputs (arXiv 2604.21428,
+/// "ξ_step, ξ_quorum, ξ_sync can be tracked via exponential moving
+/// averages") — a single push interval is too noisy to size the grace
+/// window on its own.
 #[derive(Default)]
 struct StepRates(HashMap<u32, (Option<Instant>, u64, Option<f64>)>);
+
+/// EMA smoothing: new estimate = α·sample + (1−α)·previous.
+const STEP_EMA_ALPHA: f64 = 0.5;
 
 impl StepRates {
     fn note(&mut self, learner_id: u32, local_step: u64, now: Instant) {
@@ -163,7 +180,10 @@ impl StepRates {
         if let Some(prev) = entry.0 {
             if local_step > entry.1 {
                 let secs = now.duration_since(prev).as_secs_f64() / (local_step - entry.1) as f64;
-                entry.2 = Some(secs);
+                entry.2 = Some(match entry.2 {
+                    Some(ema) => STEP_EMA_ALPHA * secs + (1.0 - STEP_EMA_ALPHA) * ema,
+                    None => secs, // first sample seeds the EMA
+                });
             }
         }
         *entry = (Some(now), local_step, entry.2);
@@ -449,143 +469,127 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
     // learners start bit-identical (also serves recovery for late joiners).
     broadcast_all_fragments(&st, &registry).await;
 
-    // Phase 2: the outer loop. One fragment per global step, round-robin.
-    for t in (st.global_step + 1)..=cfg.total_steps {
-        let p = ((t - 1) % num_fragments) as usize;
-        let round_start = Instant::now();
-        let pull = {
-            let mut b = Vec::with_capacity(12);
-            b.extend_from_slice(&(p as u32).to_le_bytes());
-            b.extend_from_slice(&t.to_le_bytes());
-            bytes::Bytes::from(b)
-        };
-        for g in current_groups(&registry) {
-            let _ = g.send_small(MSG_PULL_REQ, pull.clone()).await;
+    // Phase 2: the outer loop. One fragment per global step, round-robin,
+    // with up to `pipeline` rounds in flight at once: while round t sits in
+    // its quorum/grace window, round t+1's pull is already out, so sync
+    // latency overlaps learner compute (the paper's τ=2 "two fragments in
+    // flight"). Depth is clamped to the fragment count, so concurrent
+    // rounds always target DISTINCT fragments and every merge touches
+    // disjoint params/momentum. Rounds may complete out of order; versions
+    // are per fragment and global_step advances monotonically.
+    let depth = (cfg.pipeline.max(1) as u64).min(num_fragments) as usize;
+    let mut next_t = st.global_step + 1;
+    let mut inflight: Vec<Round> = Vec::new();
+    while next_t <= cfg.total_steps || !inflight.is_empty() {
+        // Keep the pipeline full.
+        while inflight.len() < depth && next_t <= cfg.total_steps {
+            let t = next_t;
+            next_t += 1;
+            let p = ((t - 1) % num_fragments) as usize;
+            let pull = {
+                let mut b = Vec::with_capacity(12);
+                b.extend_from_slice(&(p as u32).to_le_bytes());
+                b.extend_from_slice(&t.to_le_bytes());
+                bytes::Bytes::from(b)
+            };
+            for g in current_groups(&registry) {
+                let _ = g.send_small(MSG_PULL_REQ, pull.clone()).await;
+            }
+            inflight.push(Round {
+                t,
+                p,
+                pull,
+                started: Instant::now(),
+                quorum_deadline: Instant::now() + Duration::from_secs(cfg.quorum_timeout_s),
+                grace_deadline: None,
+                pushes: HashMap::new(),
+            });
         }
 
-        // Gather pushes for round t: quorum K, then grace window.
-        let mut pushes: HashMap<u32, Push> = HashMap::new();
-        let quorum_deadline = Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
-        let mut grace_deadline: Option<Instant> = None;
-        loop {
-            let connected = registry.lock().unwrap().len();
-            let k = (cfg.quorum as usize).min(connected.max(1));
-            if pushes.len() >= connected.max(1) {
-                break; // everyone answered; no reason to wait
-            }
-            if pushes.len() >= k && grace_deadline.is_none() {
+        let connected = registry.lock().unwrap().len();
+        let k = (cfg.quorum as usize).min(connected.max(1));
+
+        // Arm the grace window of any round that just reached quorum.
+        for r in inflight.iter_mut() {
+            if r.pushes.len() >= k && r.grace_deadline.is_none() {
                 let grace = adaptive_grace(
                     cfg.grace_tau,
                     cfg.grace_gamma,
                     step_rates.max_step_secs(),
-                    round_start.elapsed().as_secs_f64(),
+                    r.started.elapsed().as_secs_f64(),
                     last_sync_secs,
                     Duration::from_millis(cfg.grace_ms),
                 );
-                grace_deadline = Some(Instant::now() + grace);
-            }
-            let deadline = grace_deadline.unwrap_or(quorum_deadline);
-            let timeout = deadline.saturating_duration_since(Instant::now());
-            if timeout.is_zero() {
-                if pushes.is_empty() {
-                    warn!(step = t, "quorum timeout with zero pushes; re-sending pull");
-                    for g in current_groups(&registry) {
-                        let _ = g.send_small(MSG_PULL_REQ, pull.clone()).await;
-                    }
-                    continue;
-                }
-                break;
-            }
-            match tokio::time::timeout(timeout, events.recv()).await {
-                Err(_) => continue, // deadline hit; loop re-evaluates
-                Ok(None) => bail!("event channel closed"),
-                Ok(Some(ev)) => match ev {
-                    Event::Push(push) => {
-                        step_rates.note(push.learner_id, push.local_step, Instant::now());
-                        if push.fragment_id as usize == p && push.global_step == t {
-                            pushes.insert(push.learner_id, push);
-                        } // else: stale response from an earlier round; drop
-                    }
-                    Event::Hello { group } => {
-                        // Rejoining learner: catch it up to the current state.
-                        send_all_fragments(&st, &group).await;
-                    }
-                    Event::Init { .. } => {} // already initialized; ignore
-                    Event::Disconnected { learner_id } => {
-                        warn!(learner_id, step = t, "learner disconnected");
-                        pushes.remove(&learner_id);
-                    }
-                },
+                r.grace_deadline = Some(Instant::now() + grace);
             }
         }
 
-        let prev_version = st.versions[p];
-        if st.wire_dtype == DTYPE_Q4 {
-            // Q4 pushes are deltas anchored at the learner's base_version;
-            // reconstruction needs Θ at that exact version, and the syncer
-            // only holds the current value. A matching base is the steady
-            // state (learners anchor on the last broadcast); anything older
-            // is unreconstructable and dropped.
-            pushes.retain(|id, push| {
-                if push.base_version != prev_version {
-                    warn!(learner_id = id, step = t, base = push.base_version,
-                          expected = prev_version, "stale q4 delta dropped");
-                    return false;
-                }
-                true
-            });
-            for push in pushes.values_mut() {
-                for (v, a) in push.values.iter_mut().zip(&st.params[p]) {
-                    *v += *a;
-                }
+        // Complete every round that is ready: all connected learners
+        // answered, or its (grace or quorum) deadline expired with at
+        // least one push. A quorum timeout with zero pushes re-pulls.
+        let now = Instant::now();
+        let mut completed_any = false;
+        let mut i = 0;
+        while i < inflight.len() {
+            let deadline = inflight[i].grace_deadline.unwrap_or(inflight[i].quorum_deadline);
+            let expired = now >= deadline;
+            if inflight[i].pushes.len() >= connected.max(1)
+                || (expired && !inflight[i].pushes.is_empty())
+            {
+                let round = inflight.remove(i);
+                complete_round(&cfg, &mut st, &registry, &mut last_sync_secs, round).await?;
+                completed_any = true;
+                continue;
             }
-        }
-        let (mut learners, mut weights, mut ids) = (Vec::new(), Vec::new(), Vec::new());
-        for (id, push) in &pushes {
-            if push.base_version < prev_version {
-                // The learner had not yet applied this fragment's last merge;
-                // its delta is anchored further back. The weight formula
-                // compensates (larger c_steps); recorded for the event tape.
-                warn!(learner_id = id, step = t, base = push.base_version, expected = prev_version,
-                      "stale push admitted");
+            if expired {
+                let r = &mut inflight[i];
+                warn!(step = r.t, "quorum timeout with zero pushes; re-sending pull");
+                for g in current_groups(&registry) {
+                    let _ = g.send_small(MSG_PULL_REQ, r.pull.clone()).await;
+                }
+                r.quorum_deadline = Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
             }
-            learners.push(push.values.as_slice());
-            weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
-            ids.push(*id);
+            i += 1;
         }
-        let sync_start = Instant::now();
-        let gnorm = st.merge_and_step(p, &learners, &weights)?;
-        st.versions[p] = t;
-        st.global_step = t;
-        for push in pushes.values() {
-            st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
+        if completed_any {
+            continue; // refill the pipeline before waiting again
+        }
+        if inflight.is_empty() {
+            continue; // everything launched has completed; loop re-evaluates
         }
 
-        // Broadcast the updated fragment.
-        let payload = encode_bcast(&st, p)?;
-        for g in current_groups(&registry) {
-            let _ = g.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
-        }
-        last_sync_secs = sync_start.elapsed().as_secs_f64();
-        let ms = round_start.elapsed().as_millis() as u64;
-        info!(
-            step = t,
-            fragment = p,
-            responders = ?ids,
-            gnorm = format!("{gnorm:.4}"),
-            ms,
-            "outer step"
-        );
-        if let Some(tape) = &cfg.event_tape {
-            append_tape(tape, t, p, &pushes, &weights, gnorm, ms);
-        }
-        // Quiescent cut: round t is fully applied and broadcast, round t+1
-        // has not begun — the snapshot is consistent by construction.
-        if let Some(path) = &cfg.checkpoint_path {
-            if cfg.checkpoint_every > 0 && t % cfg.checkpoint_every == 0 {
-                st.save_checkpoint(path)?;
-                info!(step = t, path = %path.display(), "checkpoint written");
-            }
+        // Wait for the next event or the earliest in-flight deadline.
+        let earliest = inflight
+            .iter()
+            .map(|r| r.grace_deadline.unwrap_or(r.quorum_deadline))
+            .min()
+            .expect("inflight is non-empty");
+        let timeout = earliest.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(timeout, events.recv()).await {
+            Err(_) => continue, // deadline hit; loop re-evaluates
+            Ok(None) => bail!("event channel closed"),
+            Ok(Some(ev)) => match ev {
+                Event::Push(push) => {
+                    step_rates.note(push.learner_id, push.local_step, Instant::now());
+                    // Route to the in-flight round the pull came from.
+                    if let Some(r) = inflight.iter_mut().find(|r| {
+                        r.t == push.global_step && r.p == push.fragment_id as usize
+                    }) {
+                        r.pushes.insert(push.learner_id, push);
+                    } // else: stale response from a completed round; drop
+                }
+                Event::Hello { group } => {
+                    // Rejoining learner: catch it up to the current state.
+                    send_all_fragments(&st, &group).await;
+                }
+                Event::Init { .. } => {} // already initialized; ignore
+                Event::Disconnected { learner_id } => {
+                    warn!(learner_id, "learner disconnected");
+                    for r in inflight.iter_mut() {
+                        r.pushes.remove(&learner_id);
+                    }
+                }
+            },
         }
     }
 
@@ -599,6 +603,107 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
     info!("training complete after {} outer steps", cfg.total_steps);
     // Give writer tasks a moment to flush the shutdown frames.
     tokio::time::sleep(Duration::from_secs(2)).await;
+    return Ok(());
+}
+
+/// One in-flight sync round: the pull for fragment `p` at global step `t`
+/// and the pushes gathered so far.
+struct Round {
+    t: u64,
+    p: usize,
+    pull: bytes::Bytes,
+    started: Instant,
+    quorum_deadline: Instant,
+    grace_deadline: Option<Instant>,
+    pushes: HashMap<u32, Push>,
+}
+
+/// Merge a gathered round, apply the outer step, broadcast, and record it.
+/// Called from the single scheduler task, so merges are serialized even
+/// with several rounds in flight; concurrent rounds target distinct
+/// fragments, so each merge touches disjoint params/momentum.
+async fn complete_round(
+    cfg: &Config,
+    st: &mut GlobalState,
+    registry: &Registry,
+    last_sync_secs: &mut f64,
+    round: Round,
+) -> Result<()> {
+    let Round { t, p, started, mut pushes, .. } = round;
+    let prev_version = st.versions[p];
+    if st.wire_dtype == DTYPE_Q4 {
+        // Q4 pushes are deltas anchored at the learner's base_version;
+        // reconstruction needs Θ at that exact version, and the syncer
+        // only holds the current value. A matching base is the steady
+        // state (learners anchor on the last broadcast); anything older
+        // is unreconstructable and dropped.
+        pushes.retain(|id, push| {
+            if push.base_version != prev_version {
+                warn!(learner_id = id, step = t, base = push.base_version,
+                      expected = prev_version, "stale q4 delta dropped");
+                return false;
+            }
+            true
+        });
+        for push in pushes.values_mut() {
+            for (v, a) in push.values.iter_mut().zip(&st.params[p]) {
+                *v += *a;
+            }
+        }
+    }
+    let (mut learners, mut weights, mut ids) = (Vec::new(), Vec::new(), Vec::new());
+    for (id, push) in &pushes {
+        if push.base_version < prev_version {
+            // The learner had not yet applied this fragment's last merge;
+            // its delta is anchored further back. The weight formula
+            // compensates (larger c_steps); recorded for the event tape.
+            warn!(learner_id = id, step = t, base = push.base_version, expected = prev_version,
+                  "stale push admitted");
+        }
+        learners.push(push.values.as_slice());
+        weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
+        ids.push(*id);
+    }
+    let sync_start = Instant::now();
+    let gnorm = st.merge_and_step(p, &learners, &weights)?;
+    st.versions[p] = t;
+    // Pipelined rounds can complete out of order; the global step only
+    // moves forward.
+    st.global_step = st.global_step.max(t);
+    for push in pushes.values() {
+        st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
+    }
+
+    // Broadcast the updated fragment.
+    let payload = encode_bcast(st, p)?;
+    for g in current_groups(registry) {
+        let _ = g.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
+    }
+    *last_sync_secs = sync_start.elapsed().as_secs_f64();
+    let ms = started.elapsed().as_millis() as u64;
+    info!(
+        step = t,
+        fragment = p,
+        responders = ?ids,
+        gnorm = format!("{gnorm:.4}"),
+        ms,
+        "outer step"
+    );
+    if let Some(tape) = &cfg.event_tape {
+        // Records land in completion order, which under pipelining is not
+        // necessarily step order.
+        append_tape(tape, t, p, &pushes, &weights, gnorm, ms);
+    }
+    // Consistent cut: this round is fully applied and broadcast, and every
+    // other in-flight round is still gathering (it has not touched state).
+    // A crash-resume loses those gathers; their fragments simply merge on
+    // a later cycle, which the quorum design already tolerates.
+    if let Some(path) = &cfg.checkpoint_path {
+        if cfg.checkpoint_every > 0 && t % cfg.checkpoint_every == 0 {
+            st.save_checkpoint(path)?;
+            info!(step = t, path = %path.display(), "checkpoint written");
+        }
+    }
     Ok(())
 }
 
@@ -739,6 +844,19 @@ mod tests {
         rates.note(2, 10, t0);
         rates.note(2, 12, t0 + Duration::from_secs(4));
         assert!((rates.max_step_secs().unwrap() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn step_rates_smooth_with_ema() {
+        let mut rates = StepRates::default();
+        let t0 = Instant::now();
+        rates.note(1, 0, t0);
+        rates.note(1, 10, t0 + Duration::from_secs(5)); // seeds EMA at 0.5 s/step
+        // A one-off 10x-slower interval (2 steps over 10s = 5.0 s/step sample)
+        // must not replace the estimate wholesale: EMA -> 0.5·5.0 + 0.5·0.5.
+        rates.note(1, 12, t0 + Duration::from_secs(15));
+        let est = rates.max_step_secs().unwrap();
+        assert!((est - 2.75).abs() < 1e-9, "EMA of 0.5 then 5.0 should be 2.75, got {est}");
     }
 
     #[test]

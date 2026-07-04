@@ -233,6 +233,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --grace-ms {args.grace_ms}"
         f" --grace-gamma {args.grace_gamma}"
         f" --grace-tau {args.grace_tau}"
+        f" --pipeline {getattr(args, 'pipeline', 2)}"
         f" --delta-correction {args.delta_correction}"
         f" --total-steps {args.total_steps}"
         f" --outer-lr {args.outer_lr}"

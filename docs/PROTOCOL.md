@@ -56,12 +56,19 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
   tensors go to their own fragment with merge_mode=avg; everything else uses
   RDA. All learners must declare identical layouts in HELLO.
 - **Schedule**: syncer global step `t = 1..T`; at each step exactly one
-  fragment `p = (t-1) mod P` syncs (P = H round-robin, double-buffered).
+  fragment `p = (t-1) mod P` syncs (P = H round-robin). Up to `--pipeline`
+  rounds are in flight at once (default 2, Decoupled DiLoCo's "two fragments
+  in flight"), always targeting distinct fragments; rounds may complete out
+  of order (per-fragment versions, monotonic global step).
 - **Pull**: syncer sends PULL_REQ(p, t) to all connected learners. A learner
   answers at its next inner-step boundary, and only once `c_steps[p] ≥ 1`
   (this self-clocks the syncer to learner pace). Responses carry the counters
   `c_steps[p]`, `c_tokens[p]` accumulated since the learner last *received*
-  fragment p.
+  fragment p. At each boundary the learner applies received broadcasts
+  BEFORE answering pulls: with pipelined rounds, the pull opening fragment
+  p's next round (control stream) can overtake the broadcast that closed its
+  previous one (data streams), and answering first would push a stale
+  base_version.
 - **Quorum + grace**: syncer waits for `K` PUSHes for round `t`, then an
   adaptive grace window to admit stragglers, then merges. The window is
   γ · (τ·ξ_step − ξ_quorum − ξ_sync) clamped to [0, `--grace-ms`]: wait only
@@ -122,10 +129,13 @@ INIT_PARAMS and BCAST_FRAGMENT travel as bf16 (`bulk_dtype`).
 
 A sharded coordinator would need vector clocks plus Chandy-Lamport markers to
 snapshot consistently across in-flight inter-shard messages. Here the syncer
-is a single sequential actor, so the marker algorithm degenerates:
-between rounds (after broadcasting step t, before pulling t+1) the channel
-state is irrelevant to global correctness, and a checkpoint at that quiescent
-cut is consistent by construction. The snapshot persists:
+is a single sequential actor, so the marker algorithm degenerates: state only
+changes when a round completes (merge + broadcast, serialized in one task),
+so a checkpoint at any completion is consistent by construction — other
+pipelined rounds are still gathering and have not touched state. A
+crash-resume loses those in-flight gathers; their fragments simply merge on
+a later cycle, which the quorum design already tolerates. The snapshot
+persists:
 
 - global step t and per-fragment versions,
 - global parameters Θ and outer (Nesterov) momentum,
