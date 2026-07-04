@@ -78,7 +78,7 @@ MODEL_ALIASES = {
     "ornith-397b": "deepreinforce-ai/Ornith-1.0-397B",  # official non-FP8 (bf16) repo
     # Liquid AI LFM2.5 (edge/on-device)
     "lfm25-230m": "LiquidAI/LFM2.5-230M",
-    "lfm25-1b": "LiquidAI/LFM2.5-1B",
+    "lfm25-1b": "LiquidAI/LFM2.5-1.2B-Instruct",
     "lfm25-8b-a1b": "LiquidAI/LFM2.5-8B-A1B",
     # VibeThinker (small reasoning)
     "vibethinker-15b": "WeiboAI/VibeThinker-1.5B",
@@ -146,7 +146,7 @@ MODEL_WEIGHT_GB = {
     "ornith-35b": 70,  # MoE total
     "ornith-397b": 794,  # 397B MoE; fp8 checkpoint, bf16 footprint
     "lfm25-230m": 0.5,
-    "lfm25-1b": 2,
+    "lfm25-1b": 3,  # 1.2B bf16
     "lfm25-8b-a1b": 17,
     "vibethinker-15b": 3,
     "vibethinker-3b": 6,
