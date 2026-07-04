@@ -447,6 +447,10 @@ def main() -> int:
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
     p.add_argument("--eval-rows", type=int, default=64, help="held-out rows for scoring")
+    p.add_argument("--round-interval-ms", type=int, default=None,
+                   help="override the round-launch floor of throttled presets "
+                   "(m2h24): the right value is H * step_time / fragments, and "
+                   "step time depends on hardware")
     p.add_argument("--baseline-loss", type=float, default=None,
                    help="skip the synchronous baseline arm and compare against "
                    "this eval loss/token (from a previous run with the same "
@@ -477,6 +481,11 @@ def main() -> int:
         return 0
 
     arms = select_arms(args.settings)
+    if args.round_interval_ms is not None:
+        from dataclasses import replace as _replace
+
+        arms = [_replace(a, round_interval_ms=args.round_interval_ms)
+                if a.round_interval_ms else a for a in arms]
     world = max(1, args.learner_gpus)
     base_steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, 1, world)
     print(f"[compare] model={args.model} budget={args.token_budget} tokens "
