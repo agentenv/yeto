@@ -61,14 +61,21 @@ def test_learner_image_selection_precedence(monkeypatch):
 
     b200 = ClusterSpec("aws", "us-east-2", 1, 8, "B200")
     a100 = ClusterSpec("aws", "us-east-2", 1, 8, "A100")
+    a10g = ClusterSpec("aws", "us-east-2", 1, 1, "A10G")
     monkeypatch.setitem(
         launcher.GPU_IMAGE_OVERRIDES, ("aws", "B200"), lambda region: f"ami-blackwell-{region}"
     )
-    # Internal table applies for B200...
+    monkeypatch.setitem(
+        launcher.GPU_IMAGE_OVERRIDES, ("aws", "A100"), lambda region: f"ami-nvswitch-{region}"
+    )
+    # Internal table applies for B200 (driver floor) and A100 (NVSwitch
+    # fabric manager; sky's AMI lacks it -> CUDA Error 802 on p4d)...
     args = SimpleNamespace(learner_image=None)
     assert launcher.learner_image_for(args, b200) == "ami-blackwell-us-east-2"
-    # ...not for GPUs the provider default drives fine...
-    assert launcher.learner_image_for(args, a100) is None
+    assert launcher.learner_image_for(args, a100) == "ami-nvswitch-us-east-2"
+    # ...not for GPUs the provider default drives fine (no NVSwitch, no
+    # exotic driver floor)...
+    assert launcher.learner_image_for(args, a10g) is None
     # ...and an explicit flag always wins.
     args = SimpleNamespace(learner_image="ami-user")
     assert launcher.learner_image_for(args, b200) == "ami-user"
