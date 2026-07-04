@@ -26,6 +26,7 @@ check_health only raises once reconnection has been given up for good.
 from __future__ import annotations
 
 import itertools
+import json
 import queue
 import socket
 import struct
@@ -96,12 +97,27 @@ def read_frame(sock: socket.socket) -> tuple[int, bytes]:
     return msg_type, _read_exact(sock, length)
 
 
-def encode_hello(learner_id: int, dtype: int, layout: FragmentLayout, num_streams: int) -> bytes:
+def encode_hello(
+    learner_id: int,
+    dtype: int,
+    layout: FragmentLayout,
+    num_streams: int,
+    layout_metadata: dict | bytes | str | None = None,
+) -> bytes:
     parts = [struct.pack("<IBI", learner_id, dtype, layout.num_fragments)]
     for frag in layout.fragments:
         parts.append(struct.pack("<BI", frag.merge_mode, len(frag.tensors)))
         parts.append(struct.pack(f"<{len(frag.tensors)}Q", *(n for _, n in frag.tensors)))
     parts.append(struct.pack("<H", num_streams))
+    if layout_metadata is not None:
+        if isinstance(layout_metadata, bytes):
+            meta = layout_metadata
+        elif isinstance(layout_metadata, str):
+            meta = layout_metadata.encode("utf-8")
+        else:
+            meta = json.dumps(layout_metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        parts.append(struct.pack("<I", len(meta)))
+        parts.append(meta)
     return b"".join(parts)
 
 
@@ -133,6 +149,7 @@ class SyncerClient:
         layout: FragmentLayout,
         dtype: int = DTYPE_BF16,
         num_streams: int = 4,
+        layout_metadata: dict | bytes | str | None = None,
         connect_timeout: float = 900.0,
         max_reconnects: int | None = None,
     ):
@@ -141,6 +158,7 @@ class SyncerClient:
         self.layout = layout
         self.dtype = dtype
         self.num_streams = num_streams
+        self.layout_metadata = layout_metadata
         self.connect_timeout = connect_timeout
         self.max_reconnects = max_reconnects
         self._queues: list[queue.Queue[bytes | None]] = []
@@ -201,7 +219,15 @@ class SyncerClient:
         try:
             control = self._connect_one() if patient else self._dial(RECONNECT_DIAL_TIMEOUT)
             write_frame(
-                control, MSG_HELLO, encode_hello(self.learner_id, self.dtype, self.layout, self.num_streams)
+                control,
+                MSG_HELLO,
+                encode_hello(
+                    self.learner_id,
+                    self.dtype,
+                    self.layout,
+                    self.num_streams,
+                    self.layout_metadata,
+                ),
             )
             socks.append(control)
             for idx in range(self.num_streams):

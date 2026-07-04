@@ -41,6 +41,16 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
 - **Fine-tuning**: `--tuning lora` (default) syncs only adapter weights —
   fragments are megabytes, so the syncer and WAN stay cheap even for large
   models. `--tuning full` syncs everything.
+- **Task backends**: what yeto trains is a plug-in. The sync core (syncer,
+  fragments, wire protocol, fleet orchestration) is task-agnostic; each *task*
+  registers a `TaskBackend` (`yeto/backends/`) that owns its CLI flags,
+  validation, learner-task construction, fit warnings, and export, reached
+  through `get_backend(--task)`. `lm` (text LMs, the default) and `nava`
+  (multimodal diffusion — a self-contained package under `yeto/nava/`) ship
+  today. Within `lm` the intra-island trainer is a second plug-in, an
+  `IslandEngine` (`--island-backend torch|megatron`; see docs/MEGATRON.md). A
+  new task or engine registers itself with no edits to the CLI, launcher, or
+  export dispatch.
 - **Model sizing**: `deepseek4flash` (DeepSeek-V4-Flash, 284B MoE) needs
   ~568 GB for frozen bf16 weights — more than 8×A100-40GB (320 GB); use
   ≥16×80GB GPUs per learner, or pick `gemma4` (12B) / any smaller HF id.

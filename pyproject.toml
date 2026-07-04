@@ -27,10 +27,14 @@ launcher = ["skypilot[aws]>=0.12"]
 # the wire/data path is shared with the CUDA learners.
 mlx = ["mlx>=0.31", "mlx-lm>=0.29"]
 dev = ["pytest", "pytest-timeout"]
+nava = ["boto3>=1.28", "PyYAML>=6", "safetensors>=0.4"]
 
 [project.scripts]
 yeto = "yeto.cli:main"
 yeto-export = "yeto.export:main"
+yeto-nava-prepare-labels = "yeto.nava.labels:main"
 
-[tool.setuptools]
-packages = ["yeto"]
+[tool.setuptools.packages.find]
+# Discover yeto and its subpackages (backends, nava, megatron, shape) so a
+# non-editable install ships them too.
+include = ["yeto*"]
