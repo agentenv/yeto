@@ -87,6 +87,10 @@ class Arm:
     # (H~2), far off the outer optimizer's H~24 design point; a WAN spaces
     # them naturally. 0 = unthrottled.
     round_interval_ms: int = 0
+    # Adaptive H target (--sync-interval-steps). The SYNCER defaults this to
+    # 24; comparison arms default it OFF so each arm's sync frequency is an
+    # explicit experimental variable, not an ambient default.
+    sync_interval_steps: float = 0.0
 
 
 PRESETS: dict[str, Arm] = {
@@ -103,11 +107,10 @@ PRESETS: dict[str, Arm] = {
     # baseline where stock m2 lagged, the gap was outer-optimizer gain at
     # off-design sync intervals, not asynchrony itself.
     "avg": Arm("avg", outer_lr=1.0, outer_momentum=0.0, merge_alpha=0.0),
-    # Stock DiLoCo at its design-point sync interval: a 56 s launch floor
-    # gives H ~= 24 inner steps per fragment at ~9.4 s/step with P=4
-    # (H = P * interval / step_time). Scale the interval when the model or
-    # hardware changes step time materially.
-    "m2h24": Arm("m2h24", round_interval_ms=56_000),
+    # Stock DiLoCo at its design-point sync interval, via the syncer's
+    # adaptive throttle (H = 24 inner steps per fragment, sized from the
+    # measured step time — hardware-independent).
+    "m2h24": Arm("m2h24", sync_interval_steps=24.0),
 }
 
 
@@ -202,6 +205,7 @@ def syncer_command(arm: Arm, port: int, arm_dir: Path, total_steps: int) -> list
         "--checkpoint-every", "1",
         "--event-tape", str(arm_dir / "tape.jsonl"),
         "--min-round-interval-ms", str(arm.round_interval_ms),
+        "--sync-interval-steps", str(arm.sync_interval_steps),
     ]
 
 

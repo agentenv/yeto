@@ -31,7 +31,9 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   outer optimizer (Nesterov 0.7/0.9) over-drives correlated deltas and costs
   ~+9% (α=0 overwrite makes it far worse; merge reduced to plain averaging
   recovers to ~+3%). WAN round latency yields large H by itself; for
-  low-latency fleets set `--min-round-interval-ms` ≈ H·ξ_step/P with H≈24.
+  low-latency fleets the syncer self-throttles to `--sync-interval-steps`
+  (default H=24, sized from the measured learner step time; 0 disables),
+  with `--min-round-interval-ms` as a manual floor on top.
 - **Delta correction**: stale learner deltas that oppose the outer momentum
   are shrunk/reoriented per tensor before merging (HeLoCo;
   `--delta-correction none` disables).

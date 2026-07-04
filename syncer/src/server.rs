@@ -51,6 +51,15 @@ pub struct Config {
     /// collapses to a step or two, over-driving the outer optimizer.
     /// 0 = unthrottled.
     pub min_round_interval_ms: u64,
+    /// Target sync interval H, in inner steps per fragment. The launch
+    /// floor adapts to the measured learner step time:
+    /// interval = H·ξ_step/P, so each fragment re-merges after ~H steps of
+    /// the slowest learner. Inactive until a step-time estimate exists and
+    /// wherever natural round latency already exceeds it (any real WAN);
+    /// measured on gemma4/Lean: H≈2 costs ~+9% eval loss vs synchronous,
+    /// H≈24 (the paper's design point) matches it. 0 disables; the manual
+    /// min_round_interval_ms floor applies on top.
+    pub sync_interval_steps: f64,
     /// HeLoCo per-tensor delta correction before merging.
     pub delta_correction: bool,
     pub quorum_timeout_s: u64,
@@ -171,6 +180,25 @@ fn adaptive_grace(
     let Some(step) = step_secs else { return cap };
     let slack = tau * step - quorum_secs - sync_secs;
     Duration::from_secs_f64((gamma * slack).max(0.0)).min(cap)
+}
+
+/// Round-launch floor: the manual ms floor, raised to H·ξ_step/P once a
+/// learner step-time estimate exists (each fragment then re-merges after
+/// ~H inner steps of the slowest learner). Anywhere natural round latency
+/// exceeds this — any real WAN — the floor never binds.
+fn launch_interval(
+    manual_floor: Duration,
+    h_target: f64,
+    num_fragments: usize,
+    step_secs: Option<f64>,
+) -> Duration {
+    let adaptive = match step_secs {
+        Some(step) if h_target > 0.0 => {
+            Duration::from_secs_f64(h_target * step / num_fragments.max(1) as f64)
+        }
+        _ => Duration::ZERO,
+    };
+    manual_floor.max(adaptive)
 }
 
 /// Per-learner inner-step duration estimated from consecutive pushes
@@ -548,7 +576,7 @@ async fn scheduler(
     // disjoint params/momentum. Rounds may complete out of order; versions
     // are per fragment and global_step advances monotonically.
     let depth = (cfg.pipeline.max(1) as u64).min(num_fragments) as usize;
-    let interval = Duration::from_millis(cfg.min_round_interval_ms);
+    let manual_floor = Duration::from_millis(cfg.min_round_interval_ms);
     let mut next_launch = Instant::now(); // earliest allowed next round launch
     let mut next_t = st.global_step + 1;
     let mut inflight: Vec<Round> = Vec::new();
@@ -558,7 +586,13 @@ async fn scheduler(
             && next_t <= cfg.total_steps
             && Instant::now() >= next_launch
         {
-            next_launch = Instant::now() + interval;
+            next_launch = Instant::now()
+                + launch_interval(
+                    manual_floor,
+                    cfg.sync_interval_steps,
+                    num_fragments as usize,
+                    step_rates.max_step_secs(),
+                );
             let t = next_t;
             next_t += 1;
             let p = ((t - 1) % num_fragments) as usize;
@@ -958,6 +992,22 @@ mod tests {
         );
         // Huge slack → capped.
         assert_eq!(adaptive_grace(2.0, 0.8, Some(60.0), 0.0, 0.0, CAP), CAP);
+    }
+
+    #[test]
+    fn launch_interval_adapts_to_step_time() {
+        let floor = Duration::from_millis(100);
+        // No estimate yet: manual floor only.
+        assert_eq!(launch_interval(floor, 24.0, 4, None), floor);
+        // Estimate present: H*step/P = 24*1.0/4 = 6s dominates the floor.
+        assert_eq!(
+            launch_interval(floor, 24.0, 4, Some(1.0)),
+            Duration::from_secs_f64(6.0)
+        );
+        // Fast steps: adaptive floor (24*0.005/4 = 30ms) below manual -> manual wins.
+        assert_eq!(launch_interval(floor, 24.0, 4, Some(0.005)), floor);
+        // H target disabled: manual floor only.
+        assert_eq!(launch_interval(floor, 0.0, 4, Some(1.0)), floor);
     }
 
     #[test]
