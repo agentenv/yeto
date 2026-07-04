@@ -641,35 +641,17 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
                 )
 
             # --- fragment sync at the step boundary (never blocks) ---
+            # Broadcasts are applied BEFORE pulls are answered: with the
+            # syncer's pipelined rounds, the pull for a fragment's next
+            # round (control stream) can overtake the broadcast that closed
+            # its previous round (data streams). Answering first would push
+            # a stale base_version; applying first resets the fragment's
+            # counters, so the self-clock defers the answer one step and it
+            # then carries the fresh anchor.
             actions = []  # (fid, version, flat_f32) applied this boundary
             if rank == 0 and client is not None:
                 client.check_health()
-                # 1. answer pulls whose fragment has made progress
-                pending_pulls.extend(client.drain_pulls())
-                still_pending = []
-                for pull in pending_pulls:
-                    fid = pull.fragment_id
-                    c_steps = steps_total - steps_at_reset[fid]
-                    if c_steps < 1:
-                        still_pending.append(pull)
-                        continue
-                    c_tokens = tokens_total - tokens_at_reset[fid]
-                    if anchors is not None:
-                        delta = fragment_flat(layout.fragments[fid], params).cpu() - anchors[fid]
-                        payload = quantize_q4(delta)
-                    else:
-                        payload = pack_fragment(layout.fragments[fid], params, client.dtype)
-                    client.push_fragment(
-                        fid,
-                        pull.global_step,
-                        fragment_versions[fid],
-                        steps_total,
-                        c_steps,
-                        c_tokens,
-                        payload,
-                    )
-                pending_pulls = still_pending
-                # 2. apply received global fragments
+                # 1. collect received global fragments
                 for bc in client.drain_updates():
                     flat = unpack_fragment(
                         layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
@@ -714,6 +696,34 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
                     tokens_at_reset[fid] = tokens_total
                     fragment_versions[fid] = version
                     global_step = max(global_step, version)
+
+            # 2. answer pulls whose fragment has made progress since the
+            # (just-applied) broadcasts.
+            if rank == 0 and client is not None:
+                pending_pulls.extend(client.drain_pulls())
+                still_pending = []
+                for pull in pending_pulls:
+                    fid = pull.fragment_id
+                    c_steps = steps_total - steps_at_reset[fid]
+                    if c_steps < 1:
+                        still_pending.append(pull)
+                        continue
+                    c_tokens = tokens_total - tokens_at_reset[fid]
+                    if anchors is not None:
+                        delta = fragment_flat(layout.fragments[fid], params).cpu() - anchors[fid]
+                        payload = quantize_q4(delta)
+                    else:
+                        payload = pack_fragment(layout.fragments[fid], params, client.dtype)
+                    client.push_fragment(
+                        fid,
+                        pull.global_step,
+                        fragment_versions[fid],
+                        steps_total,
+                        c_steps,
+                        c_tokens,
+                        payload,
+                    )
+                pending_pulls = still_pending
 
             if shutdown or steps_total >= args.max_local_steps:
                 break

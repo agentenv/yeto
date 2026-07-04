@@ -14,7 +14,15 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   ablation found overwrite wins as M grows).
 - **Adaptive grace**: the post-quorum straggler window sizes itself to the
   learners' compute slack each round (γ·(τ·ξ_step − ξ_quorum − ξ_sync),
-  capped by `--grace-ms`), instead of a fixed wait.
+  capped by `--grace-ms`), instead of a fixed wait. The ξ estimates are
+  EMA-smoothed per learner, as the paper prescribes.
+- **Pipelined rounds**: up to `--pipeline` fragment rounds are in flight at
+  once (default 2 — Decoupled DiLoCo's "two fragments in flight" at τ=2), so
+  one fragment's quorum/grace/WAN latency never delays pulling the next.
+  Concurrent rounds always target distinct fragments (depth is clamped to
+  P); merges stay serialized in one scheduler task; rounds may complete out
+  of order (per-fragment versions, monotonic global step). `--pipeline 1`
+  recovers serial rounds.
 - **Delta correction**: stale learner deltas that oppose the outer momentum
   are shrunk/reoriented per tensor before merging (HeLoCo;
   `--delta-correction none` disables).
