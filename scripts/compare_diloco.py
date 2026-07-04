@@ -257,6 +257,38 @@ def eval_loss_per_token(model_id: str, adapter_dir: Path | None, eval_file: Path
     return total_loss / max(total_tokens, 1.0)
 
 
+def wait_for_free_gpus(device: str, limit_mb: int = 2000, timeout_s: int = 180) -> None:
+    """Block until no compute process holds more than `limit_mb` on any GPU.
+
+    Arms and evals run strictly one after another, but a just-exited CUDA
+    process's memory is not always released by the driver the instant
+    subprocess.run returns — spawning the next arm into that window OOMs
+    (observed on 4xL40S: the eval child's 25 GB were still resident when
+    the baseline learner loaded). Fails loudly with the offending pids.
+    """
+    if not device.startswith("cuda"):
+        return
+    deadline = time.monotonic() + timeout_s
+    while True:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,used_gpu_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        holders = []
+        for line in out.splitlines():
+            pid, mem = (v.strip() for v in line.split(","))
+            if mem.isdigit() and int(mem) > limit_mb:
+                holders.append(f"pid {pid}: {int(mem)} MiB")
+        if not holders:
+            return
+        if time.monotonic() > deadline:
+            raise RuntimeError(
+                f"GPUs still occupied after {timeout_s}s: {'; '.join(holders)}"
+            )
+        time.sleep(3)
+
+
 def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float:
     """Score in a child process so the model's VRAM is released on exit —
     an in-process eval would keep the base resident on GPU 0 and starve the
@@ -270,6 +302,7 @@ def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float
     ]
     if adapter_dir is not None:
         cmd += ["--adapter-dir", str(adapter_dir)]
+    wait_for_free_gpus(args.device)
     out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     for line in reversed(out.stdout.splitlines()):
         if line.startswith("EVAL_LOSS "):
@@ -285,6 +318,7 @@ def run_baseline(args, work: Path) -> tuple[Path, float]:
                       world=max(1, args.learner_gpus))
     cmd = learner_command(args, arm_dir, learner_id=0, num_learners=1,
                           syncer="none", max_steps=steps, arm=None)
+    wait_for_free_gpus(args.device)
     t0 = time.monotonic()
     run_checked(cmd, arm_dir / "learner.log", env=gpu_env(0, args.learner_gpus))
     return arm_dir / "learner-0", time.monotonic() - t0
@@ -303,6 +337,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
         syncer_command(arm, port, arm_dir, total_steps=steps * arm.m * 4),
         stdout=open(arm_dir / "syncer.log", "w"), stderr=subprocess.STDOUT,
     )
+    wait_for_free_gpus(args.device)
     t0 = time.monotonic()
     learners = []
     try:
