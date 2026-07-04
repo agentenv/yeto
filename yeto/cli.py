@@ -200,6 +200,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="compute-overlap budget for the grace window, in inner steps (τ)",
     )
     sync.add_argument(
+        "--pipeline",
+        type=int,
+        default=2,
+        help="fragment sync rounds in flight at once (Decoupled DiLoCo's "
+        "'two fragments in flight' at τ=2); 1 = serial rounds. Clamped to "
+        "--fragments",
+    )
+    sync.add_argument(
         "--delta-correction",
         choices=["heloco", "none"],
         default="heloco",

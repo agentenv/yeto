@@ -300,28 +300,12 @@ def _run_inner_loop(
         tokens_total += tokens_per_inner_step
 
         # --- fragment sync at the step boundary (never blocks) ---
+        # Broadcasts apply BEFORE pulls are answered (see yeto/learner.py:
+        # a pipelined syncer's next pull can overtake the previous round's
+        # broadcast; answering first would push a stale base_version).
         actions = []
         if rank == 0 and client is not None:
             client.check_health()
-            pending_pulls.extend(client.drain_pulls())
-            still_pending = []
-            for pull in pending_pulls:
-                fid = pull.fragment_id
-                c_steps = steps_total - steps_at_reset[fid]
-                if c_steps < 1:
-                    still_pending.append(pull)
-                    continue
-                c_tokens = tokens_total - tokens_at_reset[fid]
-                if anchors is not None:
-                    delta = fragment_flat(layout.fragments[fid], params).cpu() - anchors[fid]
-                    payload = quantize_q4(delta)
-                else:
-                    payload = pack_fragment(layout.fragments[fid], params, client.dtype)
-                client.push_fragment(
-                    fid, pull.global_step, fragment_versions[fid], steps_total,
-                    c_steps, c_tokens, payload,
-                )
-            pending_pulls = still_pending
             for bc in client.drain_updates():
                 flat = unpack_fragment(
                     layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
@@ -350,6 +334,27 @@ def _run_inner_loop(
             tokens_at_reset[fid] = tokens_total
             fragment_versions[fid] = version
             global_step = max(global_step, version)
+
+        if rank == 0 and client is not None:
+            pending_pulls.extend(client.drain_pulls())
+            still_pending = []
+            for pull in pending_pulls:
+                fid = pull.fragment_id
+                c_steps = steps_total - steps_at_reset[fid]
+                if c_steps < 1:
+                    still_pending.append(pull)
+                    continue
+                c_tokens = tokens_total - tokens_at_reset[fid]
+                if anchors is not None:
+                    delta = fragment_flat(layout.fragments[fid], params).cpu() - anchors[fid]
+                    payload = quantize_q4(delta)
+                else:
+                    payload = pack_fragment(layout.fragments[fid], params, client.dtype)
+                client.push_fragment(
+                    fid, pull.global_step, fragment_versions[fid], steps_total,
+                    c_steps, c_tokens, payload,
+                )
+            pending_pulls = still_pending
     log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
 
 

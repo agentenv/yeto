@@ -29,6 +29,10 @@ struct Args {
     /// Compute-overlap budget for the grace window, in learner inner steps (τ).
     #[arg(long, default_value_t = 2.0)]
     grace_tau: f64,
+    /// Fragment rounds in flight at once ("two fragments in flight" at the
+    /// paper's τ=2); 1 = serial rounds. Clamped to the fragment count.
+    #[arg(long, default_value_t = 2)]
+    pipeline: u32,
     /// Pre-merge learner-delta correction: "heloco" or "none".
     #[arg(long, default_value = "heloco")]
     delta_correction: String,
@@ -81,6 +85,7 @@ fn main() -> anyhow::Result<()> {
         grace_ms: args.grace_ms,
         grace_gamma: args.grace_gamma,
         grace_tau: args.grace_tau,
+        pipeline: args.pipeline,
         delta_correction,
         quorum_timeout_s: args.quorum_timeout_s,
         total_steps: args.total_steps,
