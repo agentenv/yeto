@@ -108,12 +108,20 @@ LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
 | `ornith-9b` | `deepreinforce-ai/Ornith-1.0-9B` | 19 |
 | `ornith-31b` | `deepreinforce-ai/Ornith-1.0-31B` | 62 |
 | `ornith-35b` | `deepreinforce-ai/Ornith-1.0-35B` | 70 |
-| `ornith-397b` | `deepreinforce-ai/Ornith-1.0-397B-FP8` | 794 |
+| `ornith-397b` | `deepreinforce-ai/Ornith-1.0-397B` | 794 |
 | `lfm25-230m` | `LiquidAI/LFM2.5-230M` | 0.5 |
 | `lfm25-1b` | `LiquidAI/LFM2.5-1B` | 2 |
 | `lfm25-8b-a1b` | `LiquidAI/LFM2.5-8B-A1B` | 17 |
 | `vibethinker-15b` | `WeiboAI/VibeThinker-1.5B` | 3 |
 | `vibethinker-3b` | `WeiboAI/VibeThinker-3B` | 6 |
+| `deepseek4flash-bf16` | `RedHatAI/DeepSeek-V4-Flash-BF16` | 568 |
+| `deepseek31-bf16` | `unsloth/DeepSeek-V3.1-BF16` | 1343 |
+| `deepseek-r1-bf16` | `unsloth/DeepSeek-R1-BF16` | 1343 |
+| `gptoss-20b-bf16` | `axolotl-ai-co/gpt-oss-20b-dequantized` | 42 |
+| `gptoss-120b-bf16` | `axolotl-ai-co/gpt-oss-120b-dequantized` | 234 |
+| `kimi-k2-thinking-bf16` | `unsloth/Kimi-K2-Thinking-BF16` | 2060 |
+| `deepseek31-base-bf16` | `unsloth/DeepSeek-V3.1-Base-BF16` | 1343 |
+| `kimi-k2-base-bf16` | `unsloth/Kimi-K2-Base-BF16` | 2060 |
 
 ## Docs
 

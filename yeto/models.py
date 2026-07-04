@@ -75,7 +75,7 @@ MODEL_ALIASES = {
     "ornith-9b": "deepreinforce-ai/Ornith-1.0-9B",
     "ornith-31b": "deepreinforce-ai/Ornith-1.0-31B",
     "ornith-35b": "deepreinforce-ai/Ornith-1.0-35B",
-    "ornith-397b": "deepreinforce-ai/Ornith-1.0-397B-FP8",  # fp8 checkpoint; bf16 at load
+    "ornith-397b": "deepreinforce-ai/Ornith-1.0-397B",  # official non-FP8 (bf16) repo
     # Liquid AI LFM2.5 (edge/on-device)
     "lfm25-230m": "LiquidAI/LFM2.5-230M",
     "lfm25-1b": "LiquidAI/LFM2.5-1B",
@@ -83,6 +83,26 @@ MODEL_ALIASES = {
     # VibeThinker (small reasoning)
     "vibethinker-15b": "WeiboAI/VibeThinker-1.5B",
     "vibethinker-3b": "WeiboAI/VibeThinker-3B",
+    # bf16-trainable checkpoints for models whose official repo is quantized-
+    # only (an fp8/mxfp4 forward has no backward — see
+    # load_model_and_tokenizer). These community/vendor dequantizations were
+    # verified to ship real torch safetensors and NO quantization_config, so
+    # the current FSDP2/DDP backend can LoRA/full-tune them.
+    "deepseek4flash-bf16": "RedHatAI/DeepSeek-V4-Flash-BF16",
+    "deepseek31-bf16": "unsloth/DeepSeek-V3.1-BF16",
+    "deepseek-r1-bf16": "unsloth/DeepSeek-R1-BF16",
+    "gptoss-20b-bf16": "axolotl-ai-co/gpt-oss-20b-dequantized",
+    "gptoss-120b-bf16": "axolotl-ai-co/gpt-oss-120b-dequantized",
+    "kimi-k2-thinking-bf16": "unsloth/Kimi-K2-Thinking-BF16",
+    # Base (pre-instruct) bf16 checkpoints, for continued pretraining or SFT
+    # that builds the chat behavior itself rather than adapting an already-
+    # aligned assistant. Pick these over the instruct aliases above when you
+    # want a clean, unaligned substrate.
+    "deepseek31-base-bf16": "unsloth/DeepSeek-V3.1-Base-BF16",
+    "kimi-k2-base-bf16": "unsloth/Kimi-K2-Base-BF16",
+    # deepseek4pro has no clean dequantized checkpoint yet (official is fp8,
+    # community bf16s carry a residual quantization_config) — dequantize the
+    # fp8 repo yourself and pass the path via --model.
 }
 
 MODEL_WEIGHT_GB = {
@@ -130,6 +150,15 @@ MODEL_WEIGHT_GB = {
     "lfm25-8b-a1b": 17,
     "vibethinker-15b": 3,
     "vibethinker-3b": 6,
+    # bf16-trainable dequantizations (same param counts as their fp8 originals)
+    "deepseek4flash-bf16": 568,
+    "deepseek31-bf16": 1343,
+    "deepseek31-base-bf16": 1343,
+    "deepseek-r1-bf16": 1343,
+    "gptoss-20b-bf16": 42,
+    "gptoss-120b-bf16": 234,
+    "kimi-k2-thinking-bf16": 2060,
+    "kimi-k2-base-bf16": 2060,
 }
 
 
