@@ -99,10 +99,25 @@ Blocked by **infrastructure, not trainer logic**:
   way.** AutoBridge (the entire HF→mcore weight import) depends on it, so the
   backend cannot run from a pip-on-DLAMI install.
 
-**Conclusion: the megatron backend needs an NGC PyTorch container image**
-(`nvcr.io/nvidia/pytorch:25.06-py3` — torch 2.8 / CUDA 12.9 / TE 2.4, ships
-megatron-core + TE + bridge prebuilt), wired via `--learner-image docker:...`.
-That is the next real chunk of work: sky docker-image support, plus reworking
-the island setup (the NGC image brings its own torch/CUDA, so `TORCH_SETUP` is
-skipped; NVMe + HF token still apply). Until then `--island-backend megatron`
-brings up an island whose stack is incomplete (bridge missing).
+**Update — the DLAMI install IS fixable (reverse-engineered free, locally).**
+The bridge failure was a chain of mundane build-env issues, not a fundamental
+blocker:
+1. default build isolation → the build subprocess can't see torch → use
+   `--no-build-isolation`;
+2. then the env lacks `wheel` → `pip install wheel setuptools packaging` first;
+3. bridge's `setup.py` shells out to `nvcc` for the CUDA "bare metal version"
+   (undefined-NameError without it) → put `/usr/local/cuda/bin` on PATH (the
+   DLAMI has the toolkit).
+
+`MEGATRON_SETUP` now encodes exactly this. Unvalidated on hardware (the nvcc
+step can only be exercised on a CUDA node), but it's the cheapest bet — one
+B200 validation cycle — before the heavier container path. A prebuilt NGC/NeMo
+image via `--learner-image docker:...` remains the more robust option; note it
+has its own wrinkle on B200 (the host AMI must carry the driver-595 open kernel
+modules, which sky's default docker host may not).
+
+Open risk regardless of install path: **the transformers-version tension** —
+megatron-bridge pins a narrow `transformers` range that conflicts with our
+5.13.0 (needed for the newest arches). Bridge uses transformers only for
+config/tokenizer, and its own model code for conversion, so its pin may be
+fine — but this is unverified.

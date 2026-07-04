@@ -368,19 +368,23 @@ def parse_image_spec(value: str | None):
 # of this prebuilt via --learner-image; this pip path is the from-scratch
 # fallback and is best-effort (a failure disables --island-backend megatron,
 # it does not abort a torch-backend island).
-# SHAKEDOWN FINDING (mega1, 2026-07-04): pip-on-DLAMI installs megatron-core
-# and Transformer Engine cleanly ONLY via the prebuilt wheel
-# `transformer-engine-cu12` — `transformer-engine[pytorch]` triggers a source
-# build whose subprocess can't see torch and fails. But **megatron-bridge has
-# no prebuilt wheel and its source build fails the same way**, and AutoBridge
-# (the whole HF->mcore import path) needs it. So the megatron backend requires
-# an NGC PyTorch image that ships megatron-core + TE + bridge prebuilt, plugged
-# in via `--learner-image docker:nvcr.io/nvidia/pytorch:25.06-py3` (torch 2.8 /
-# CUDA 12.9 / TE 2.4). This pip line covers core + TE for development but does
-# NOT make the backend runnable on its own — see docs/MEGATRON.md.
+# The megatron stack on the DLAMI (reverse-engineered from the mega1 shakedown
+# + a free local repro). Each step addresses a real failure mode:
+#  * Transformer Engine: the prebuilt `transformer-engine-cu12` wheel — the
+#    `[pytorch]` extra source-builds and its subprocess can't see torch.
+#  * megatron-bridge: no wheel, must build from source, which needs (a) torch
+#    importable at build time -> `--no-build-isolation`, (b) `wheel`+setuptools
+#    in the env, and (c) `nvcc` on PATH (its setup.py shells out to nvcc for
+#    the CUDA "bare metal version"; without it the build NameErrors). The
+#    DLAMI ships CUDA at /usr/local/cuda.
+# A prebuilt NGC/NeMo image via --learner-image is still the more robust path;
+# this makes the DLAMI work without one. See docs/MEGATRON.md.
 MEGATRON_SETUP = (
-    "pip install -q megatron-core transformer-engine-cu12 "
-    "|| echo '[yeto-setup] megatron core/TE install failed' >&2"
+    "export PATH=/usr/local/cuda/bin:$PATH; "
+    "pip install -q wheel setuptools packaging && "
+    "pip install -q megatron-core transformer-engine-cu12 && "
+    "pip install -q --no-build-isolation megatron-bridge "
+    "|| echo '[yeto-setup] megatron stack install failed; --island-backend megatron unavailable' >&2"
 )
 
 
