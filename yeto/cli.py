@@ -818,7 +818,15 @@ def cmd_head(payload: str) -> int:
     # the fetched model and syncer checkpoint stay recoverable.
     from . import delivery
 
-    if code == 0 and delivery.is_remote(getattr(args, "output", None)):
+    # Self-terminate only when the run is clean AND every learner cluster was
+    # cloud-verified terminated (launcher.run sets _teardown_incomplete
+    # otherwise). Once the head is gone nothing can reach an orphaned learner
+    # via sky, so a leaked instance must keep the head alive as its lifeline.
+    if (
+        code == 0
+        and delivery.is_remote(getattr(args, "output", None))
+        and not getattr(args, "_teardown_incomplete", False)
+    ):
         delivery.self_terminate(f"{args.cluster_prefix}-head")
     return code
 

@@ -564,7 +564,7 @@ class SkySDKOps:
     def down(self, cluster: str) -> None:
         import sky
 
-        sky.get(sky.down(cluster))
+        terminate_and_verify(sky, cluster)
 
     def now(self) -> float:
         return time.monotonic()
@@ -959,6 +959,91 @@ class FleetController:
             print(f"[launcher] teardown of {name} failed: {e}", file=sys.stderr)
 
 
+def _cloud_live_instances_probe(cluster: str):
+    """A zero-arg callable that queries the CLOUD (not sky's state DB) for a
+    cluster's non-terminated instances, returning their ids. Captured BEFORE
+    sky.down, because down deletes the cluster record we need to build the
+    query. Returns None when the cluster can't be cloud-verified — never
+    provisioned, or a cloud whose sky implementation predates the provision
+    status API — in which case callers trust sky.down. Cloud-agnostic: sky's
+    provision.query_instances routes to each cloud's own implementation.
+    """
+    try:
+        from sky import clouds, global_user_state
+        from sky import provision as provision_lib
+
+        record = global_user_state.get_cluster_from_name(cluster)
+        if record is None or record.get("handle") is None:
+            return None
+        handle = record["handle"]
+        cloud = handle.launched_resources.cloud
+        if cloud is None or cloud.STATUS_VERSION < clouds.StatusVersion.SKYPILOT:
+            return None
+        cloud_name = repr(cloud)
+        name = handle.cluster_name
+        name_on_cloud = handle.cluster_name_on_cloud
+        provider_config = global_user_state.get_cluster_yaml_dict(handle.cluster_yaml)["provider"]
+
+        def live():
+            found = provision_lib.query_instances(
+                cloud_name, name, name_on_cloud, provider_config,
+                non_terminated_only=True,
+            )
+            # A None status means terminated/terminating; a real status means
+            # the instance is still up (or stopped) — i.e. an orphan.
+            return [iid for iid, (st, _reason) in found.items() if st is not None]
+
+        return live
+    except Exception as e:  # any sky-internals drift -> fall back to trusting down
+        print(f"[launcher] cannot set up cloud verification for {cluster}: {e}", file=sys.stderr)
+        return None
+
+
+def terminate_and_verify(sky, cluster, *, probe="auto", attempts=4, sleep_fn=time.sleep) -> bool:
+    """sky.down a cluster and CONFIRM at the cloud level that no instance
+    survives, retrying the down while the cloud still reports live ones.
+
+    sky.down has been observed to report success while a spot instance
+    lingers (state DB and cloud diverge). In head-controller mode the head's
+    sky is the ONLY thing that can reach the learner clusters, so a silent
+    orphan is unrecoverable once the head is gone — hence verify here, before
+    the head relinquishes control. Returns True iff the cluster is confirmed
+    gone, or can't be cloud-verified (then we trust sky.down).
+    """
+    if probe == "auto":
+        probe = _cloud_live_instances_probe(cluster)
+
+    def _down():
+        try:
+            sky.get(sky.down(cluster))
+        except Exception as e:
+            print(f"[launcher] sky.down({cluster}) error: {e}", file=sys.stderr)
+
+    _down()
+    if probe is None:
+        return True
+    for i in range(attempts):
+        try:
+            live = probe()
+        except Exception as e:
+            print(f"[launcher] cloud verify of {cluster} failed ({e}); trusting sky.down",
+                  file=sys.stderr)
+            return True
+        if not live:
+            return True
+        print(
+            f"[launcher] {cluster}: {len(live)} instance(s) still live after down "
+            f"({','.join(map(str, live))}); retrying teardown ({i + 1}/{attempts})",
+            file=sys.stderr,
+        )
+        sleep_fn(min(30, 5 * (i + 1)))
+        _down()
+    try:
+        return not probe()
+    except Exception:
+        return True
+
+
 def run(args, on_clusters=None, local_syncer=None) -> int:
     """Provision and supervise the fleet; returns the run's exit code.
 
@@ -1114,12 +1199,21 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         if args.keep:
             print(f"[launcher] keeping clusters: {remaining}")
         else:
+            unverified = []
             for name in remaining:
                 print(f"[launcher] tearing down {name}")
-                try:
-                    sky.get(sky.down(name))
-                except Exception as e:
-                    print(f"[launcher] teardown of {name} failed: {e}", file=sys.stderr)
+                if not terminate_and_verify(sky, name):
+                    unverified.append(name)
+            if unverified:
+                # The head must NOT self-terminate: it is the only thing that
+                # can still reach these orphaned learner clusters via sky.
+                args._teardown_incomplete = True
+                print(
+                    f"[launcher] WARNING: could not confirm termination of "
+                    f"{unverified}; leaving the head up so they stay reachable. "
+                    f"Terminate them from the cloud console, then: yeto down {prefix}",
+                    file=sys.stderr,
+                )
         if head_mode:
             # The head VM cannot tear itself down here (the teardown would
             # kill this very process mid-flight). With a remote --output the
