@@ -101,15 +101,41 @@ def select_arms(spec: str) -> list[Arm]:
     return [PRESETS[n] for n in names]
 
 
-def steps_for(token_budget: int, mbs: int, seq_len: int, learners: int) -> int:
-    """Inner steps per learner so the arm consumes ~token_budget in total."""
-    return max(1, math.ceil(token_budget / (mbs * seq_len * learners)))
+def steps_for(token_budget: int, mbs: int, seq_len: int, learners: int,
+              world: int = 1) -> int:
+    """Inner steps per learner so the arm consumes ~token_budget in total.
+    `world` is the DDP/FSDP ranks per learner: every rank processes its own
+    micro-batch per step, so tokens/step scale by world."""
+    return max(1, math.ceil(token_budget / (mbs * seq_len * learners * world)))
+
+
+def gpu_env(learner_id: int, gpus_per_learner: int) -> dict[str, str] | None:
+    """CUDA_VISIBLE_DEVICES block for one learner: learner i owns GPUs
+    [i*g, (i+1)*g). None when GPU partitioning is off."""
+    if gpus_per_learner <= 0:
+        return None
+    lo = learner_id * gpus_per_learner
+    import os
+
+    env = dict(os.environ)
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in range(lo, lo + gpus_per_learner))
+    return env
 
 
 def learner_command(args, arm_dir: Path, *, learner_id: int, num_learners: int,
                     syncer: str, max_steps: int, arm: Arm | None) -> list[str]:
-    cmd = [
-        sys.executable, "-m", "yeto.learner",
+    if args.learner_gpus > 1:
+        # Multi-GPU learner: torchrun ranks over this learner's GPU block
+        # (models whose frozen base exceeds one GPU need --shard fsdp).
+        cmd = [
+            sys.executable, "-m", "torch.distributed.run",
+            f"--nproc_per_node={args.learner_gpus}",
+            f"--master_port={free_port()}",
+            "-m", "yeto.learner",
+        ]
+    else:
+        cmd = [sys.executable, "-m", "yeto.learner"]
+    cmd += [
         "--model", args.model,
         "--data", str(arm_dir.parent / "train.jsonl"),
         "--syncer", syncer,
@@ -124,9 +150,13 @@ def learner_command(args, arm_dir: Path, *, learner_id: int, num_learners: int,
         "--inner-lr", str(args.inner_lr),
         "--max-local-steps", str(max_steps),
         "--tokenize", "preload",
-        "--device", args.device,
+        "--shard", args.shard,
         "--output-dir", str(arm_dir / f"learner-{learner_id}"),
     ]
+    if args.learner_gpus <= 1:
+        # torchrun ranks pick their own cuda device from LOCAL_RANK;
+        # single-process learners take the explicit one.
+        cmd += ["--device", args.device]
     if arm is not None:
         cmd += [
             "--fragments", str(arm.fragments),
@@ -202,8 +232,11 @@ def eval_loss_per_token(model_id: str, adapter_dir: Path | None, eval_file: Path
 
     resolved = resolve(model_id)
     tok = AutoTokenizer.from_pretrained(resolved, trust_remote_code=True)
+    # bf16 on accelerators (a 10B+ base in fp32 would not fit one GPU);
+    # fp32 on cpu, where bf16 matmuls are slow and memory is plentiful.
+    dtype = torch.float32 if device == "cpu" else torch.bfloat16
     model = AutoModelForCausalLM.from_pretrained(
-        resolved, dtype=torch.float32, trust_remote_code=True
+        resolved, dtype=dtype, trust_remote_code=True
     )
     if adapter_dir is not None:
         from peft import PeftModel
@@ -226,18 +259,20 @@ def eval_loss_per_token(model_id: str, adapter_dir: Path | None, eval_file: Path
 
 def run_baseline(args, work: Path) -> tuple[Path, float]:
     arm_dir = work / "baseline"
-    steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, 1)
+    steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, 1,
+                      world=max(1, args.learner_gpus))
     cmd = learner_command(args, arm_dir, learner_id=0, num_learners=1,
                           syncer="none", max_steps=steps, arm=None)
     t0 = time.monotonic()
-    run_checked(cmd, arm_dir / "learner.log")
+    run_checked(cmd, arm_dir / "learner.log", env=gpu_env(0, args.learner_gpus))
     return arm_dir / "learner-0", time.monotonic() - t0
 
 
 def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
     arm_dir = work / arm.name
     arm_dir.mkdir(parents=True, exist_ok=True)
-    steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, arm.m)
+    steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, arm.m,
+                      world=max(1, args.learner_gpus))
     port = free_port()
     # Generous round ceiling: learners stop at their token budget, and the
     # syncer is terminated once they exit; the checkpoint (written every
@@ -253,7 +288,10 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             cmd = learner_command(args, arm_dir, learner_id=i, num_learners=arm.m,
                                   syncer=f"127.0.0.1:{port}", max_steps=steps, arm=arm)
             log = open(arm_dir / f"learner-{i}.log", "w")
-            learners.append(subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT))
+            learners.append(subprocess.Popen(
+                cmd, cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT,
+                env=gpu_env(i, args.learner_gpus),
+            ))
         for proc in learners:
             rc = proc.wait(timeout=args.arm_timeout_min * 60)
             if rc != 0:
@@ -288,10 +326,12 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
     return export_dir, wall
 
 
-def run_checked(cmd: list[str], log: Path) -> None:
+def run_checked(cmd: list[str], log: Path, env: dict | None = None) -> None:
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "w") as f:
-        rc = subprocess.run(cmd, cwd=REPO_ROOT, stdout=f, stderr=subprocess.STDOUT).returncode
+        rc = subprocess.run(
+            cmd, cwd=REPO_ROOT, stdout=f, stderr=subprocess.STDOUT, env=env
+        ).returncode
     if rc != 0:
         tail = "\n".join(log.read_text().splitlines()[-6:])
         raise RuntimeError(f"command failed ({rc}): {' '.join(cmd)}\n{tail}")
@@ -320,6 +360,13 @@ def main() -> int:
     p.add_argument("--eval-rows", type=int, default=64, help="held-out rows for scoring")
     p.add_argument("--max-rows", type=int, default=None, help="cap training rows")
     p.add_argument("--device", default="cpu", help="learner/eval device (cpu, mps, cuda)")
+    p.add_argument("--shard", choices=["ddp", "fsdp"], default="ddp",
+                   help="multi-GPU strategy inside a learner (fsdp shards the "
+                   "frozen base when it exceeds one GPU)")
+    p.add_argument("--learner-gpus", type=int, default=0,
+                   help="GPUs per learner; learner i owns the GPU block "
+                   "[i*g, (i+1)*g) and runs under torchrun when g > 1. "
+                   "0 = single process on --device")
     p.add_argument("--arm-timeout-min", type=int, default=120)
     p.add_argument("--work-dir", type=Path, default=REPO_ROOT / "compare-work")
     p.add_argument("--report-dir", type=Path, default=REPO_ROOT / "compare-report")
@@ -327,17 +374,29 @@ def main() -> int:
     args = p.parse_args()
 
     arms = select_arms(args.settings)
-    base_steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, 1)
+    world = max(1, args.learner_gpus)
+    base_steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, 1, world)
     print(f"[compare] model={args.model} budget={args.token_budget} tokens "
-          f"(baseline: {base_steps} steps of {args.micro_batch_size}x{args.seq_len})")
+          f"(baseline: {base_steps} steps of {args.micro_batch_size}x{args.seq_len}"
+          f"{f' x{world} ranks' if world > 1 else ''})")
     for arm in arms:
-        s = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, arm.m)
+        s = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, arm.m, world)
         print(f"  {arm.name:<10} M={arm.m} {s} steps/learner "
               f"P={arm.fragments} alpha={arm.merge_alpha} wire={arm.wire_dtype} "
               f"pipeline={arm.pipeline} correction={arm.delta_correction}")
     if args.dry_run:
         return 0
 
+    if args.learner_gpus > 0:
+        import torch
+
+        need = max(arm.m for arm in arms) * args.learner_gpus
+        have = torch.cuda.device_count()
+        if have < need:
+            raise SystemExit(
+                f"largest arm needs {need} GPUs ({args.learner_gpus} per learner) "
+                f"but only {have} are visible"
+            )
     ensure_syncer()
     if args.work_dir.exists():
         shutil.rmtree(args.work_dir)

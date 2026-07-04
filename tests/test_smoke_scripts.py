@@ -86,12 +86,33 @@ def test_token_budget_split_is_fair_across_learners():
     b4 = compare.steps_for(1_000_000, 2, 512, 4)
     assert b1 == 977 and b4 == 245  # ceil semantics
     assert compare.steps_for(1, 2, 512, 8) == 1  # never zero steps
+    # DDP/FSDP ranks multiply tokens per step, so steps shrink by world too.
+    assert compare.steps_for(1_000_000, 2, 512, 1, world=2) == 489
+
+
+def test_multi_gpu_learner_uses_torchrun_and_gpu_blocks():
+    args = SimpleNamespace(
+        model="gemma4", lora_r=16, lora_alpha=32, seq_len=512,
+        micro_batch_size=1, inner_lr=3e-4, device="cuda",
+        shard="fsdp", learner_gpus=2,
+    )
+    cmd = compare.learner_command(
+        args, Path("/tmp/w/m2"), learner_id=1, num_learners=2,
+        syncer="127.0.0.1:1", max_steps=10, arm=compare.PRESETS["m2"],
+    )
+    assert "torch.distributed.run" in cmd and "--nproc_per_node=2" in cmd
+    assert "--device" not in cmd  # torchrun ranks pick cuda from LOCAL_RANK
+    assert cmd[cmd.index("--shard") + 1] == "fsdp"
+    env = compare.gpu_env(1, 2)
+    assert env["CUDA_VISIBLE_DEVICES"] == "2,3"  # learner 1 owns the 2nd block
+    assert compare.gpu_env(0, 0) is None
 
 
 def test_learner_command_arm_overrides():
     args = SimpleNamespace(
         model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=512,
         micro_batch_size=2, inner_lr=3e-4, device="cpu",
+        shard="ddp", learner_gpus=0,
     )
     arm = compare.PRESETS["q4"]
     cmd = compare.learner_command(
