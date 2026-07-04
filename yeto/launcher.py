@@ -119,7 +119,7 @@ NVME_ENV = (
 # huggingface_hub reads the token from $HF_HOME/token, so a token mounted
 # to the default location must follow HF_HOME when NVME_ENV moves it.
 # Authenticated Hub requests get a 1000-req/5-min per-IP quota vs 500
-# anonymous — 8 ranks resolving configs and fp8 kernels burn through the
+# anonymous — 8 ranks each revalidating configs/tokenizers burn through the
 # anonymous one in a few crash-loop cycles.
 HF_TOKEN_PATH = "~/.cache/huggingface/token"
 HF_TOKEN_ENV = (
@@ -372,7 +372,6 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f" --train-on {args.train_on}"
         f" --shard {args.shard}"
         f" --tuning {args.tuning}"
-        f" --base-dtype {getattr(args, 'base_dtype', 'bf16')}"
         f" --lora-r {args.lora_r}"
         f" --lora-targets {getattr(args, 'lora_targets', 'auto')}"
         f" --seq-len {args.seq_len}"
@@ -430,9 +429,9 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     # it overlaps sky's remaining bookkeeping and races ahead of the run
     # command, which then finds a warm (or warming — hf resumes) cache.
     # hf_transfer multi-streams the download; NVMe absorbs it at GB/s.
-    from .models import resolve_variant
+    from .models import resolve
 
-    repo = resolve_variant(args.model, getattr(args, "base_dtype", "bf16"))
+    repo = resolve(args.model)
     prefetch = (
         f"(nohup huggingface-cli download {shlex.quote(repo)} "
         ">/tmp/hf-prefetch.log 2>&1 &) || true"

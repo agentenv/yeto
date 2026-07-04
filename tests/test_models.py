@@ -48,19 +48,8 @@ def test_readme_table_matches_alias_table():
     )
 
 
-def test_resolve_variant_uses_published_checkpoints_only():
-    import pytest
+def test_resolve_passes_aliases_and_raw_ids():
+    from yeto.models import resolve
 
-    from yeto.models import resolve_variant
-
-    # bf16: plain alias resolution.
-    assert resolve_variant("gemma4", "bf16") == "google/gemma-4-12B-it"
-    # Known published variants (native fp8 / mxfp4 repos).
-    assert resolve_variant("deepseek4flash", "fp8") == "deepseek-ai/DeepSeek-V4-Flash"
-    assert resolve_variant("gptoss-120b", "fp4") == "openai/gpt-oss-120b"
-    assert resolve_variant("ornith-397b", "fp8") == "deepreinforce-ai/Ornith-1.0-397B-FP8"
-    # No published checkpoint known -> refuse rather than quantize.
-    with pytest.raises(ValueError, match="does not quantize"):
-        resolve_variant("gemma4", "fp4")
-    # Raw HF ids pass through on the caller's word.
-    assert resolve_variant("org/custom-fp4-repo", "fp4") == "org/custom-fp4-repo"
+    assert resolve("gemma4") == "google/gemma-4-12B-it"
+    assert resolve("org/custom-repo") == "org/custom-repo"

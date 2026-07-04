@@ -44,26 +44,13 @@ class Offering:
     cloud: str = "aws"  # lowercase sky cloud name
 
 
-# Frozen-base storage dtypes each GPU generation supports. Hardware-native
-# constraint per compute capability: fp4 needs SM100+ (Blackwell), fp8 needs
-# SM89+ (Ada/Hopper), bf16 needs SM80+ (Ampere). V100/T4 predate bf16 and
-# are excluded from all three — they were never viable training targets here.
-SUPPORTED_BASE_DTYPES: dict[str, tuple[str, ...]] = {
-    "A100": ("bf16",),
-    "A100-80GB": ("bf16",),
-    "A10G": ("bf16",),
-    "L4": ("bf16", "fp8"),
-    "L40S": ("bf16", "fp8"),
-    "H100": ("bf16", "fp8"),
-    "H200": ("bf16", "fp8"),
-    "B200": ("bf16", "fp8", "fp4"),
-    "V100": (),
-    "T4": (),
-}
+# GPUs that predate bf16 (SM80/Ampere): the base is always trained in bf16,
+# so these were never viable training targets here and are gated out.
+_NO_BF16 = frozenset({"V100", "T4"})
 
 
-def supports_base_dtype(gpu: str, base_dtype: str) -> bool:
-    return base_dtype in SUPPORTED_BASE_DTYPES.get(gpu, ())
+def supports_bf16(gpu: str) -> bool:
+    return gpu not in _NO_BF16
 
 
 def efa_capable(instance_type: str) -> bool:

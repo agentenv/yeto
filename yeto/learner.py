@@ -81,14 +81,6 @@ def parse_args(argv=None):
         "linear, or auto (attention for MoE models — keeps router and routed "
         "experts frozen and fragments small; all-linear for dense models)",
     )
-    p.add_argument(
-        "--base-dtype",
-        choices=["bf16", "fp8", "fp4"],
-        default="bf16",
-        help="frozen-base checkpoint dtype (lora only; fp4 needs SM100+, "
-        "fp8 SM89+): resolves aliases to repos published in that dtype — "
-        "yeto never quantizes weights itself",
-    )
     p.add_argument("--seq-len", type=int, default=2048)
     p.add_argument(
         "--micro-batch-size",
@@ -177,15 +169,13 @@ def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
 def load_model_and_tokenizer(args, device):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from .models import resolve_variant
+    from .models import resolve
 
-    # A non-bf16 base dtype resolves to a checkpoint PUBLISHED in that dtype
-    # (official quantization, and a 2-4x smaller download); yeto never
-    # quantizes weights itself. transformers picks the scheme up from the
-    # repo's own quantization config. The shape planner enforces hardware
-    # gates (catalog.SUPPORTED_BASE_DTYPES: fp4 SM100+, fp8 SM89+).
-    base_dtype = getattr(args, "base_dtype", "bf16")
-    model_id = resolve_variant(args.model, base_dtype)
+    # The base is always loaded in bf16 (all-float, so FSDP2 shards it and
+    # gradients flow through it). Natively-quantized checkpoints (fp8 MoE,
+    # mxfp4) are an inference format whose forward kernels have no backward,
+    # so training loads bf16 weights and never the packed low-precision ones.
+    model_id = resolve(args.model)
     # fsdp+full: originals stay fp32 (uniform dtype for flat-param groups,
     # fp32 optimizer state) and MixedPrecision computes/communicates in bf16.
     # ddp/single and fsdp+lora: frozen base in bf16; peft leaves LoRA
@@ -196,11 +186,6 @@ def load_model_and_tokenizer(args, device):
         dtype = torch.float32
     else:
         dtype = torch.bfloat16
-    if base_dtype != "bf16":
-        if args.tuning != "lora":
-            raise ValueError("--base-dtype fp8/fp4 requires --tuning lora (frozen base only)")
-        if device.type != "cuda":
-            raise ValueError("--base-dtype fp8/fp4 requires CUDA")
     tokenizer = _from_pretrained_offline_first(AutoTokenizer, model_id, trust_remote_code=True)
     model = _from_pretrained_offline_first(
         AutoModelForCausalLM, model_id, torch_dtype=dtype, trust_remote_code=True
@@ -346,23 +331,6 @@ def main(argv=None) -> None:
             model.enable_input_require_grads()
         log.info("gradient checkpointing enabled")
 
-    if device.type == "cuda":
-        # One tiny forward on each node's local rank 0 before anyone else
-        # computes: transformers resolves quantization kernels (e.g.
-        # deep-gemm for fp8) lazily at first forward, with Hub API calls
-        # and a download. Doing it once per node keeps the other ranks'
-        # first forward a pure cache hit instead of 8 concurrent
-        # resolutions. Must run BEFORE sharding — a single-rank forward
-        # through a wrapped model would hang on its collectives.
-        if int(os.environ.get("LOCAL_RANK", "0")) == 0:
-            try:
-                with torch.inference_mode():
-                    model(input_ids=torch.tensor([[1]], device=device))
-            except Exception as exc:  # the probe will surface real errors
-                log.warning("kernel pre-warm forward failed: %s", exc)
-        if world > 1:
-            dist.barrier()
-
     params = trainable_params(model)
     layout = build_layout(
         [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
@@ -377,16 +345,12 @@ def main(argv=None) -> None:
     peft_model = None  # unwrapped peft handle, kept for fsdp+lora save
     if args.shard == "fsdp":
         if args.tuning == "lora":
-            # Hybrid sharding via FSDP2 (fully_shard): the frozen base is
-            # sharded per-parameter as DTensors — no flattening, so the mixed
-            # dtypes of quantized checkpoints (int8/e4m3fn weight storage,
-            # e8m0 block scales, bf16 norms) shard as-is. The LoRA adapters
-            # go in ignored_params: they stay ordinary replicated per-rank
-            # fp32 tensors, fragment pack/apply/INIT works on them unchanged,
-            # and run_inner_loop all-reduces their grads at each optimizer-
-            # step boundary (fully_shard never sees them). e8m0 scales are
-            # also ignored — NCCL has no mapping for that dtype, and they are
-            # a rounding error of the model's bytes.
+            # FSDP2 (fully_shard) shards the frozen bf16 base per-parameter as
+            # DTensors — no flat-param groups. The LoRA adapters go in
+            # ignored_params: they stay ordinary replicated per-rank fp32
+            # tensors, so fragment pack/apply/INIT works on them unchanged and
+            # run_inner_loop all-reduces their grads at each optimizer-step
+            # boundary (fully_shard never sees them).
             try:
                 from torch.distributed.fsdp import fully_shard
             except ImportError as exc:  # pre-2.7 torch (old-driver nodes)
@@ -398,9 +362,6 @@ def main(argv=None) -> None:
 
             peft_model = model
             ignored = set(params.values())
-            e8m0 = getattr(torch, "float8_e8m0fnu", None)
-            if e8m0 is not None:
-                ignored |= {p for p in model.parameters() if p.dtype == e8m0}
             # Shard each transformer block separately (comm/compute overlap,
             # one block unsharded at a time); the root call picks up whatever
             # sits outside the blocks (embeddings, final norm, lm_head). Only
@@ -419,19 +380,6 @@ def main(argv=None) -> None:
                 visit(root)
                 return found
 
-            # fully_shard cannot shard a frozen integer-storage param: it
-            # rebuilds each sharded param as an nn.Parameter, which requires a
-            # floating dtype. Quantized checkpoints store weights as int8, so
-            # sharding them needs a different strategy; replicate instead.
-            to_shard = [p for p in model.parameters() if p not in ignored]
-            non_float = {str(p.dtype) for p in to_shard if not p.dtype.is_floating_point}
-            if non_float:
-                raise RuntimeError(
-                    "--shard fsdp cannot shard this base: it has frozen "
-                    f"integer-storage weights {sorted(non_float)} (a quantized "
-                    "checkpoint). Use --shard ddp to replicate the base per GPU "
-                    "(works when it fits in one GPU's memory)."
-                )
             blocks = [b for ml in outer_module_lists(model) for b in ml]
             for block in blocks:
                 block_ignored = ignored & set(block.parameters())
@@ -491,12 +439,10 @@ def main(argv=None) -> None:
         # Frozen-base LoRA, base replicated per rank and left UNWRAPPED. The
         # base contributes no gradients, so it needs no DDP reducer; the
         # adapters are ordinary replicated tensors whose grads
-        # allreduce_trainable_grads averages at each optimizer step. Wrapping
-        # the base in DDP would be wrong anyway — DDP's init-time param
-        # broadcast cannot communicate a quantized base's dtypes (int8 weight
-        # storage, e8m0 block scales). Requires the base to fit per-GPU;
-        # --shard fsdp shards it when it does not. peft_model marks the LoRA
-        # save path (explicit adapter state dict, no base gather).
+        # allreduce_trainable_grads averages at each optimizer step. Requires
+        # the base to fit per-GPU; --shard fsdp shards it when it does not.
+        # peft_model marks the LoRA save path (explicit adapter state dict,
+        # no base gather).
         peft_model = model
     elif world > 1:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index])

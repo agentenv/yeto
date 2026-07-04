@@ -14,6 +14,11 @@ enforce it), but an alias MAY omit its weight: planning then falls through
 to the Hub safetensors-metadata path, which is the honest choice when a
 model's parameter count is unconfirmed — never guess a size into this
 table.
+
+The base is always trained in bf16. Some frontier checkpoints are published
+only in a native low-precision format (DeepSeek fp8, gpt-oss mxfp4); those
+are inference artifacts whose forward kernels have no backward, so training
+materializes bf16 weights and the bf16 footprint above is the right sizing.
 """
 
 from __future__ import annotations
@@ -128,45 +133,6 @@ MODEL_WEIGHT_GB = {
 }
 
 
-# Pre-quantized repo variants per alias. yeto NEVER quantizes weights
-# itself — a non-bf16 --base-dtype must resolve to a checkpoint published
-# in that dtype (official schemes, smaller downloads). Several frontier
-# repos are natively quantized, so the "variant" is the same repo:
-# DeepSeek ships fp8 checkpoints, gpt-oss ships mxfp4.
-MODEL_VARIANTS: dict[str, dict[str, str]] = {
-    "deepseek4flash": {"fp8": "deepseek-ai/DeepSeek-V4-Flash"},  # native fp8
-    "deepseek4pro": {"fp8": "deepseek-ai/DeepSeek-V4-Pro"},  # native fp8
-    "deepseek31": {"fp8": "deepseek-ai/DeepSeek-V3.1"},  # native fp8
-    "deepseek-r1": {"fp8": "deepseek-ai/DeepSeek-R1"},  # native fp8
-    "gptoss-20b": {"fp4": "openai/gpt-oss-20b"},  # native mxfp4
-    "gptoss-120b": {"fp4": "openai/gpt-oss-120b"},  # native mxfp4
-    "ornith-397b": {"fp8": "deepreinforce-ai/Ornith-1.0-397B-FP8"},
-}
-
-
 def resolve(model: str) -> str:
     """Alias -> HF id; raw HF ids pass through unchanged."""
     return MODEL_ALIASES.get(model, model)
-
-
-def resolve_variant(model: str, base_dtype: str) -> str:
-    """HF id for (model, frozen-base dtype).
-
-    bf16 is the alias table itself. For fp8/fp4, aliases resolve through
-    MODEL_VARIANTS — if no published checkpoint in that dtype is known,
-    raise instead of quantizing: pass the quantized repo id directly via
-    --model in that case. Raw HF ids pass through on the caller's word
-    that the repo matches the declared dtype.
-    """
-    if base_dtype == "bf16":
-        return resolve(model)
-    if model in MODEL_ALIASES:
-        variant = MODEL_VARIANTS.get(model, {}).get(base_dtype)
-        if variant is None:
-            raise ValueError(
-                f"no published {base_dtype} checkpoint known for {model!r}; "
-                "yeto does not quantize weights itself — pass the quantized "
-                "repo id directly via --model"
-            )
-        return variant
-    return model

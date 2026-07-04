@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 
 from ..gpu_spec import _GPU_CANONICAL
 from .cache import TTLCache
-from .catalog import Offering, effective_tflops, list_offerings, supports_base_dtype
+from .catalog import Offering, effective_tflops, list_offerings, supports_bf16
 from .ilp import Candidate, Plan, solve
 from .memory import fits, min_nodes, model_weights_gb
 from .providers import (
@@ -65,7 +65,6 @@ class ShapeResult:
     price_margin: float
     head_cost: float
     fetch_seconds: float
-    base_dtype: str = "bf16"  # frozen-base storage dtype the plan assumed
 
 
 def _candidate_key(off: Offering, nodes: int) -> str:
@@ -99,7 +98,6 @@ def build_shape(
     clouds: list[str] | None = None,
     runpod_providers: RunPodProviders | None = None,
     target_tflops: float | None = None,
-    base_dtype: str = "bf16",
 ) -> ShapeResult:
     """Compute the fleet plan. `providers`/`runpod_providers` are injectable
     for tests.
@@ -170,13 +168,13 @@ def build_shape(
     rejections: list[Rejection] = []
     sized_all: list[tuple[Offering, int]] = []
     for off in offerings:
-        if not supports_base_dtype(off.gpu, base_dtype):
+        if not supports_bf16(off.gpu):
             rejections.append(
-                Rejection(_candidate_key(off, 1), f"base dtype {base_dtype} unsupported on {off.gpu}")
+                Rejection(_candidate_key(off, 1), f"{off.gpu} predates bf16 training")
             )
             continue
         nodes = min_nodes(
-            weights, tuning, off.gpu_mem_gb, off.gpus_per_node, seq_len, base_dtype=base_dtype
+            weights, tuning, off.gpu_mem_gb, off.gpus_per_node, seq_len
         )
         if nodes is None:
             rejections.append(
@@ -441,7 +439,7 @@ def build_shape(
     shard = (
         "ddp"
         if planned_mems
-        and all(fits(weights, tuning, m, 1, seq_len, base_dtype=base_dtype) for m in planned_mems)
+        and all(fits(weights, tuning, m, 1, seq_len) for m in planned_mems)
         else "fsdp"
     )
     return ShapeResult(
@@ -471,7 +469,6 @@ def build_shape(
         price_margin=price_margin,
         head_cost=head_cost,
         fetch_seconds=time.monotonic() - t0,
-        base_dtype=base_dtype,
     )
 
 
@@ -493,8 +490,6 @@ def launch_argv(result: ShapeResult, model: str, tuning: str, data: str) -> list
         "--disk-size", str(disk_gb),
         "--data", data,
     ]
-    if result.base_dtype != "bf16":
-        argv += ["--base-dtype", result.base_dtype]
     return argv
 
 

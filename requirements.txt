@@ -1,6 +1,7 @@
-# Learner-node dependencies. transformers is pinned to the first release
-# whose native arch registry covers deepseek_v4 (the checkpoint ships no
-# remote code, so the arch must be in-library).
+# Learner-node dependencies. transformers is pinned to a release whose
+# native arch registry covers the current frontier models (deepseek_v4,
+# qwen3, gpt_oss, gemma4) — several ship no remote code, so the arch must
+# be in-library.
 # torch is NOT listed here: the wheel must match the node's driver AND the
 # GPU generation (Blackwell/SM100 needs cu128, which needs driver >=570;
 # Ampere/Hopper AMIs ship driver 535, whose ceiling is cu121-era wheels
@@ -9,8 +10,6 @@
 # so pip resolves the packages below against it instead of dragging in a
 # default wheel.
 transformers==5.13.0
-# transformers' finegrained-fp8 forward hard-requires this exact range.
-kernels>=0.15.2,<0.16
 datasets>=3.0
 peft>=0.14
 accelerate>=1.0

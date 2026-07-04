@@ -1,7 +1,7 @@
 """Auto micro-batch sizing: probe the largest per-GPU batch that fits.
 
 Static micro-batch defaults leave most of a big card idle (a B200 running
-an fp8-sharded base has >100 GB free at micro-batch 1). No offline formula
+an FSDP-sharded base has plenty free at micro-batch 1). No offline formula
 gets activation memory right — it depends on the attention implementation,
 MoE routing spikes, checkpointing policy, and allocator behavior — so we
 probe at startup: double the batch until a real fwd/bwd/step OOMs and keep
