@@ -2,7 +2,9 @@
 
 Flow:
   1. build the Rust syncer locally (release) — the binary is file-mounted to
-     a cheap CPU VM whose TCP port is opened to the learners;
+     a cheap CPU VM whose TCP port is opened to the learners; a submitter
+     that is not x86_64 Linux (e.g. a Mac) instead has the VM build the
+     syncer from the synced repo (SYNCER_REMOTE_BUILD);
   2. launch the syncer cluster, read its head public IP;
   3. launch all learner clusters in parallel (each pinned to its cloud/region
      from the --gpu spec), with the repo synced as the workdir and the syncer
@@ -240,8 +242,46 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
     )
 
 
+# The syncer VM is x86_64 Linux; a binary built on any other submitting
+# machine (macOS arm64 in particular) is an Exec-format-error away from a
+# silent dead fleet, so cross builds happen ON the VM from the synced repo.
+# rustup + a release build of the syncer adds ~2-4 min to syncer provision.
+SYNCER_REMOTE_BUILD = (
+    'if ! command -v cc >/dev/null; then sudo apt-get update -qq && '
+    "sudo apt-get install -y -qq build-essential; fi\n"
+    "command -v ~/.cargo/bin/cargo >/dev/null || "
+    "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal -q\n"
+    "~/.cargo/bin/cargo build --release --quiet "
+    "--manifest-path ~/sky_workdir/syncer/Cargo.toml\n"
+    "cp ~/sky_workdir/syncer/target/release/yeto-syncer ~/yeto-syncer"
+)
+
+
 def make_syncer_task(args, num_learners: int):
+    import platform
+
     import sky
+
+    cross = (platform.system(), platform.machine()) != ("Linux", "x86_64")
+    if cross:
+        print("[launcher] non-x86-Linux submitter: building the syncer on the syncer VM")
+        task = sky.Task(
+            name="yeto-syncer",
+            setup=WAN_TUNING + "\n" + SYNCER_REMOTE_BUILD,
+            run=syncer_command(args, num_learners),
+            workdir=str(REPO_ROOT),
+        )
+        infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
+        task.set_resources(
+            sky.Resources(
+                infra=infra,
+                cpus="8+",
+                memory=f"{args.syncer_memory}+",
+                ports=[SYNCER_PORT],
+                use_spot=False,
+            )
+        )
+        return task
 
     binary = build_syncer_binary()
     cmd = "chmod +x ~/yeto-syncer && " + syncer_command(args, num_learners)
@@ -1132,7 +1172,12 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
 
     head_mode = local_syncer is not None
     specs = parse_gpu_spec(args.gpu)
-    num_learners = len(specs)
+    # External learners (machines sky cannot provision — e.g. Macs running
+    # yeto.mlx.learner) get the ids AFTER the cloud learners; the syncer
+    # counts them in --learners and its port is already public, so they
+    # simply dial in with the printed join command.
+    external = max(0, getattr(args, "external_learners", 0) or 0)
+    num_learners = len(specs) + external
     args.loss_function = resolve_loss_function(args.loss_function)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
@@ -1160,6 +1205,24 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             clusters.append(syncer_cluster)
             syncer_addr = f"{syncer_handle.head_ip}:{SYNCER_PORT}"
             print(f"[launcher] syncer up at {syncer_addr}")
+
+        if external:
+            for x in range(external):
+                print(
+                    f"[launcher] external learner slot {len(specs) + x}: join with\n"
+                    f"    python -m yeto.mlx.learner --model {args.model} "
+                    f"--data {args.data} --syncer {syncer_addr} "
+                    f"--learner-id {len(specs) + x} --num-learners {num_learners} "
+                    f"--tuning {args.tuning} --lora-r {args.lora_r} "
+                    f"--lora-targets {getattr(args, 'lora_targets', 'auto')} "
+                    f"--seq-len {args.seq_len} --fragments {args.fragments} "
+                    f"--fragment-pattern {args.fragment_pattern} "
+                    f"--merge-alpha {args.merge_alpha} --wire-dtype {args.wire_dtype}"
+                )
+            print(
+                f"[launcher] the syncer will wait for all {num_learners} learners "
+                f"({len(specs)} cloud + {external} external) before training starts"
+            )
 
         # 2. Learners, in parallel.
         tasks = {}

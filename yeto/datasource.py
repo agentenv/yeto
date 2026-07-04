@@ -45,9 +45,20 @@ def kind(data: str) -> str:
     return "hf"
 
 
+def _mount_target(data: str) -> str:
+    """Mount path for a non-HF source: LEARNER_DATA_PATH, keeping a single
+    file's extension. data._load_local detects the format from the path, so
+    mounting chat.jsonl at a bare ~/yeto-data would make every learner fail
+    with 'unsupported data file type'. Directories (and extensionless cloud
+    prefixes) keep the bare path."""
+    if kind(data) == "local" and os.path.isdir(os.path.expanduser(data)):
+        return LEARNER_DATA_PATH
+    return LEARNER_DATA_PATH + os.path.splitext(data.rstrip("/"))[1]
+
+
 def learner_data_arg(data: str) -> str:
     """What the learner's --data should be once mounts are in place."""
-    return data if kind(data) == "hf" else LEARNER_DATA_PATH
+    return data if kind(data) == "hf" else _mount_target(data)
 
 
 def learner_file_mounts(data: str) -> dict[str, str]:
@@ -56,8 +67,8 @@ def learner_file_mounts(data: str) -> dict[str, str]:
     if k == "hf":
         return {}
     if k == "cloud":
-        return {LEARNER_DATA_PATH: data}
-    return {LEARNER_DATA_PATH: os.path.expanduser(data)}
+        return {_mount_target(data): data}
+    return {_mount_target(data): os.path.expanduser(data)}
 
 
 def head_stage(data: str) -> tuple[str, dict[str, str]]:
@@ -69,5 +80,10 @@ def head_stage(data: str) -> tuple[str, dict[str, str]]:
     reachable from the head directly.
     """
     if kind(data) == "local":
-        return HEAD_DATA_PATH, {HEAD_DATA_PATH: os.path.expanduser(data)}
+        # Keep a single file's extension for the same reason as _mount_target;
+        # the head's second hop then re-derives the same learner mount from it.
+        target = HEAD_DATA_PATH
+        if not os.path.isdir(os.path.expanduser(data)):
+            target += os.path.splitext(data.rstrip("/"))[1]
+        return target, {target: os.path.expanduser(data)}
     return data, {}

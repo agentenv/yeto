@@ -12,7 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     # <2.9: cu13x wheels need driver >=580; cloud AMIs ship 535 (CUDA 12.2).
     "torch>=2.4,<2.9",
-    "transformers==4.57.1",
+    "transformers==5.13.0",  # keep in lockstep with requirements.txt
     "datasets>=3.0",
     "peft>=0.14",
     "accelerate>=1.0",
@@ -23,6 +23,9 @@ dependencies = [
 
 [project.optional-dependencies]
 launcher = ["skypilot[aws]>=0.12"]
+# Apple-silicon island backend (yeto.mlx.learner); torch stays required —
+# the wire/data path is shared with the CUDA learners.
+mlx = ["mlx>=0.31", "mlx-lm>=0.29"]
 dev = ["pytest", "pytest-timeout"]
 
 [project.scripts]

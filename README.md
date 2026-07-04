@@ -110,7 +110,7 @@ LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
 | `ornith-35b` | `deepreinforce-ai/Ornith-1.0-35B` | 70 |
 | `ornith-397b` | `deepreinforce-ai/Ornith-1.0-397B` | 794 |
 | `lfm25-230m` | `LiquidAI/LFM2.5-230M` | 0.5 |
-| `lfm25-1b` | `LiquidAI/LFM2.5-1B` | 2 |
+| `lfm25-1b` | `LiquidAI/LFM2.5-1.2B-Instruct` | 3 |
 | `lfm25-8b-a1b` | `LiquidAI/LFM2.5-8B-A1B` | 17 |
 | `vibethinker-15b` | `WeiboAI/VibeThinker-1.5B` | 3 |
 | `vibethinker-3b` | `WeiboAI/VibeThinker-3B` | 6 |
@@ -128,6 +128,10 @@ LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
 [docs/DESIGN.md](docs/DESIGN.md) — merge math, blending, adaptive grace,
 delta correction, q4 wire format, snapshots, resilience.
 [docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
+[docs/MEGATRON.md](docs/MEGATRON.md) — the Megatron-Core island backend (EP
+for 1T-class MoE).
+[docs/MLX.md](docs/MLX.md) — the Apple-silicon island backend: Macs as
+learner islands (`yeto launch --external-learners`, cross Mac↔NVIDIA runs).
 
 ## Testing
 
