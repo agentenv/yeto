@@ -101,7 +101,7 @@ def test_truncated(tmp_path):
 def test_layout_metadata_block_is_parsed(tmp_path):
     params = fake_params()
     layout = build_layout([(n, p.numel()) for n, p in params.items()], 4)
-    blobs = [(fid, flat_fragment(frag, params), torch.zeros(frag.numel())) for fid, frag in enumerate(layout.fragments)]
+    blobs = [(fid, flat_fragment(frag, params), torch.zeros(frag.numel)) for fid, frag in enumerate(layout.fragments)]
     meta = {"task": "nava", "fragments": []}
     path = tmp_path / "syncer-meta.ckpt"
     path.write_bytes(checkpoint_bytes_with_meta(3, blobs, LEDGER, meta))
