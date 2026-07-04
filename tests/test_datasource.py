@@ -34,8 +34,26 @@ def test_local_paths_by_shape_and_existence(tmp_path):
     existing.write_text("{}\n")
     for d in ("/abs/path", "./rel", "../up", "~/home-ish", str(existing)):
         assert kind(d) == "local", d
-    assert learner_data_arg(str(existing)) == LEARNER_DATA_PATH
-    assert learner_file_mounts(str(existing)) == {LEARNER_DATA_PATH: str(existing)}
+    # A single file keeps its extension on the mount target — the learner's
+    # format detection reads it from the path (a bare ~/yeto-data fails with
+    # "unsupported data file type").
+    assert learner_data_arg(str(existing)) == LEARNER_DATA_PATH + ".jsonl"
+    assert learner_file_mounts(str(existing)) == {
+        LEARNER_DATA_PATH + ".jsonl": str(existing)
+    }
+    # Directories mount at the bare path.
+    src_dir = tmp_path / "traces"
+    src_dir.mkdir()
+    assert learner_data_arg(str(src_dir)) == LEARNER_DATA_PATH
+    assert learner_file_mounts(str(src_dir)) == {LEARNER_DATA_PATH: str(src_dir)}
+
+
+def test_head_stage_keeps_single_file_extension(tmp_path):
+    src = tmp_path / "rows.parquet"
+    src.write_text("")
+    rewritten, mounts = head_stage(str(src))
+    assert rewritten == HEAD_DATA_PATH + ".parquet"
+    assert mounts == {HEAD_DATA_PATH + ".parquet": str(src)}
 
 
 def test_head_stage_rewrites_local_paths(tmp_path):

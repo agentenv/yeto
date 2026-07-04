@@ -172,6 +172,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     sync.add_argument("--fragments", type=int, default=8, help="fragments P (= sync interval H)")
     sync.add_argument("--quorum", type=int, default=1, help="minimum learners per outer step (K)")
     sync.add_argument(
+        "--external-learners",
+        type=int,
+        default=0,
+        help="extra learner slots for machines the launcher cannot provision "
+        "(e.g. a Mac running yeto.mlx.learner). The syncer waits for "
+        "cloud learners + this many manual joins; the launch log prints the "
+        "join command with the reserved --learner-id values",
+    )
+    sync.add_argument(
         "--grace-ms",
         type=int,
         default=1000,
