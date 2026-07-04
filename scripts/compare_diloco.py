@@ -269,19 +269,29 @@ def wait_for_free_gpus(device: str, limit_mb: int = 2000, timeout_s: int = 180) 
     if not device.startswith("cuda"):
         return
     deadline = time.monotonic() + timeout_s
+    last = ""
     while True:
         out = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=pid,used_gpu_memory",
+            ["nvidia-smi", "--query-compute-apps=pid,process_name,used_gpu_memory",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True,
         ).stdout.strip()
         holders = []
         for line in out.splitlines():
-            pid, mem = (v.strip() for v in line.split(","))
-            if mem.isdigit() and int(mem) > limit_mb:
-                holders.append(f"pid {pid}: {int(mem)} MiB")
+            parts = [v.strip() for v in line.split(",")]
+            if len(parts) < 3:
+                continue
+            pid, name, mem = parts[0], parts[1], parts[-1]
+            # Drivers that report [N/A] per-process memory would otherwise
+            # slip a fully-loaded process past the numeric check — ANY
+            # listed compute app counts as occupying the GPU.
+            if not mem.isdigit() or int(mem) > limit_mb:
+                holders.append(f"pid {pid} ({name}): {mem} MiB")
         if not holders:
             return
+        if last != "; ".join(holders):
+            last = "; ".join(holders)
+            print(f"[compare] waiting for GPUs to drain: {last}", flush=True)
         if time.monotonic() > deadline:
             raise RuntimeError(
                 f"GPUs still occupied after {timeout_s}s: {'; '.join(holders)}"
@@ -304,6 +314,9 @@ def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float
         cmd += ["--adapter-dir", str(adapter_dir)]
     wait_for_free_gpus(args.device)
     out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    # The child has exited, but the driver may release its VRAM lazily;
+    # don't hand the GPUs to the next arm until it is actually gone.
+    wait_for_free_gpus(args.device)
     for line in reversed(out.stdout.splitlines()):
         if line.startswith("EVAL_LOSS "):
             return float(line.split()[1])
