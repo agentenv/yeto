@@ -44,6 +44,13 @@ pub struct Config {
     /// Clamped to the fragment count so concurrent rounds always target
     /// distinct fragments.
     pub pipeline: u32,
+    /// Lower bound on the time between consecutive round LAUNCHES (ms).
+    /// On a WAN, round latency naturally spaces merges many inner steps
+    /// apart (the sync interval H the algorithm is tuned for); on a LAN or
+    /// localhost, rounds complete as fast as learners answer and H
+    /// collapses to a step or two, over-driving the outer optimizer.
+    /// 0 = unthrottled.
+    pub min_round_interval_ms: u64,
     /// HeLoCo per-tensor delta correction before merging.
     pub delta_correction: bool,
     pub quorum_timeout_s: u64,
@@ -478,11 +485,17 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
     // disjoint params/momentum. Rounds may complete out of order; versions
     // are per fragment and global_step advances monotonically.
     let depth = (cfg.pipeline.max(1) as u64).min(num_fragments) as usize;
+    let interval = Duration::from_millis(cfg.min_round_interval_ms);
+    let mut next_launch = Instant::now(); // earliest allowed next round launch
     let mut next_t = st.global_step + 1;
     let mut inflight: Vec<Round> = Vec::new();
     while next_t <= cfg.total_steps || !inflight.is_empty() {
-        // Keep the pipeline full.
-        while inflight.len() < depth && next_t <= cfg.total_steps {
+        // Keep the pipeline full (throttled by min_round_interval_ms).
+        while inflight.len() < depth
+            && next_t <= cfg.total_steps
+            && Instant::now() >= next_launch
+        {
+            next_launch = Instant::now() + interval;
             let t = next_t;
             next_t += 1;
             let p = ((t - 1) % num_fragments) as usize;
@@ -554,16 +567,20 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
         if completed_any {
             continue; // refill the pipeline before waiting again
         }
-        if inflight.is_empty() {
-            continue; // everything launched has completed; loop re-evaluates
-        }
-
-        // Wait for the next event or the earliest in-flight deadline.
-        let earliest = inflight
+        // Wait for the next event, the earliest in-flight deadline, or the
+        // launch throttle opening (whichever comes first). Without the
+        // throttle term an empty pipeline would spin; without in-flight
+        // deadlines a throttled launch would oversleep.
+        let mut earliest = inflight
             .iter()
             .map(|r| r.grace_deadline.unwrap_or(r.quorum_deadline))
-            .min()
-            .expect("inflight is non-empty");
+            .min();
+        if inflight.len() < depth && next_t <= cfg.total_steps {
+            earliest = Some(earliest.map_or(next_launch, |d| d.min(next_launch)));
+        }
+        let Some(earliest) = earliest else {
+            continue; // everything launched has completed; loop re-evaluates
+        };
         let timeout = earliest.saturating_duration_since(Instant::now());
         match tokio::time::timeout(timeout, events.recv()).await {
             Err(_) => continue, // deadline hit; loop re-evaluates

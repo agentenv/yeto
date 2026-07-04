@@ -33,6 +33,11 @@ struct Args {
     /// paper's τ=2); 1 = serial rounds. Clamped to the fragment count.
     #[arg(long, default_value_t = 2)]
     pipeline: u32,
+    /// Lower bound on time between consecutive round launches, in ms. WAN
+    /// latency spaces merges naturally; on LAN/localhost this emulates the
+    /// sync interval H the outer optimizer is tuned for. 0 = unthrottled.
+    #[arg(long, default_value_t = 0)]
+    min_round_interval_ms: u64,
     /// Pre-merge learner-delta correction: "heloco" or "none".
     #[arg(long, default_value = "heloco")]
     delta_correction: String,
@@ -86,6 +91,7 @@ fn main() -> anyhow::Result<()> {
         grace_gamma: args.grace_gamma,
         grace_tau: args.grace_tau,
         pipeline: args.pipeline,
+        min_round_interval_ms: args.min_round_interval_ms,
         delta_correction,
         quorum_timeout_s: args.quorum_timeout_s,
         total_steps: args.total_steps,

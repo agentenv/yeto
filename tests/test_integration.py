@@ -236,6 +236,37 @@ def test_single_learner_roundtrip_q4():
 
 
 @pytest.mark.timeout(180)
+def test_min_round_interval_paces_rounds():
+    """--min-round-interval-ms throttles round launches: 6 rounds with a
+    250 ms floor cannot finish faster than the 5 enforced gaps (lower-bound
+    assert, so slow machines cannot make it flaky)."""
+    binary = build_syncer()
+    port = free_port()
+    named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
+    layout = build_layout(named, 3)
+    proc = subprocess.Popen(
+        [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
+         "--grace-ms", "50", "--total-steps", "6", "--min-round-interval-ms", "250"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        t0 = time.monotonic()
+        l = ToyLearner(0, port, torch.ones(DIM + DIM // 4), layout)
+        l.start()
+        l.join(timeout=120)
+        assert not l.is_alive()
+        if l.exc:
+            raise l.exc
+        assert proc.wait(timeout=30) == 0
+        elapsed = time.monotonic() - t0
+        assert elapsed >= 1.0, f"rounds not paced: finished in {elapsed:.2f}s"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        print((proc.stdout.read() if proc.stdout else "")[-2000:])
+
+
+@pytest.mark.timeout(180)
 def test_single_learner_roundtrip():
     """M=1, K=1: a single self-syncing learner; must run to completion.
     Runs with --pipeline 1 so the serial-round path stays covered (the

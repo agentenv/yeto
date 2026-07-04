@@ -33,6 +33,8 @@ Presets (--settings, comma-separated or 'all'):
   serial    --pipeline 1 (pre-pipelining scheduler behavior)
   noheloco  delta correction off (pure paper Alg. 2)
   strided   depth-interleaved fragments
+  avg       merge = plain weighted averaging (outer lr 1.0, mu 0, alpha 0)
+  m2h24     stock DiLoCo throttled to its design-point sync interval (H~24)
 
 Runs locally on one box (CPU by default; --device mps/cuda where torch
 supports it): the syncer is the real Rust binary, the learners are real
@@ -80,6 +82,11 @@ class Arm:
     quorum: int | None = None  # None -> all M learners each round
     outer_lr: float = 0.7
     outer_momentum: float = 0.9
+    # Floor on time between round launches (--min-round-interval-ms). On
+    # localhost rounds otherwise complete every couple of learner steps
+    # (H~2), far off the outer optimizer's H~24 design point; a WAN spaces
+    # them naturally. 0 = unthrottled.
+    round_interval_ms: int = 0
 
 
 PRESETS: dict[str, Arm] = {
@@ -90,6 +97,17 @@ PRESETS: dict[str, Arm] = {
     "serial": Arm("serial", pipeline=1),
     "noheloco": Arm("noheloco", delta_correction="none"),
     "strided": Arm("strided", fragment_pattern="strided"),
+    # Merge reduced to plain weighted parameter averaging: no outer
+    # momentum, full step, overwrite broadcasts. At high merge frequency
+    # this approximates synchronous training — if THIS arm matches the
+    # baseline where stock m2 lagged, the gap was outer-optimizer gain at
+    # off-design sync intervals, not asynchrony itself.
+    "avg": Arm("avg", outer_lr=1.0, outer_momentum=0.0, merge_alpha=0.0),
+    # Stock DiLoCo at its design-point sync interval: a 56 s launch floor
+    # gives H ~= 24 inner steps per fragment at ~9.4 s/step with P=4
+    # (H = P * interval / step_time). Scale the interval when the model or
+    # hardware changes step time materially.
+    "m2h24": Arm("m2h24", round_interval_ms=56_000),
 }
 
 
@@ -183,6 +201,7 @@ def syncer_command(arm: Arm, port: int, arm_dir: Path, total_steps: int) -> list
         "--checkpoint-path", str(arm_dir / "state.ckpt"),
         "--checkpoint-every", "1",
         "--event-tape", str(arm_dir / "tape.jsonl"),
+        "--min-round-interval-ms", str(arm.round_interval_ms),
     ]
 
 
@@ -428,6 +447,10 @@ def main() -> int:
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
     p.add_argument("--eval-rows", type=int, default=64, help="held-out rows for scoring")
+    p.add_argument("--baseline-loss", type=float, default=None,
+                   help="skip the synchronous baseline arm and compare against "
+                   "this eval loss/token (from a previous run with the same "
+                   "model, data, seed and budget)")
     p.add_argument("--max-rows", type=int, default=None, help="cap training rows")
     p.add_argument("--device", default="cpu", help="learner/eval device (cpu, mps, cuda)")
     p.add_argument("--shard", choices=["ddp", "fsdp"], default="ddp",
@@ -488,10 +511,17 @@ def main() -> int:
     records.append({"arm": "base (untrained)", "m": 0, "wall_s": 0.0, "eval_loss": base})
     print(f"[compare] base eval loss/token: {base:.4f}", flush=True)
 
-    adapters, wall = run_baseline(args, args.work_dir)
-    bl = eval_in_subprocess(args, adapters, evalf)
-    records.append({"arm": "baseline (sync)", "m": 1, "wall_s": round(wall, 1), "eval_loss": bl})
-    print(f"[compare] baseline eval loss/token: {bl:.4f} ({wall:.0f}s)", flush=True)
+    if args.baseline_loss is not None:
+        bl = args.baseline_loss
+        records.append({"arm": "baseline (sync, injected)", "m": 1, "wall_s": 0.0,
+                        "eval_loss": bl})
+        print(f"[compare] baseline eval loss/token: {bl:.4f} (injected)", flush=True)
+    else:
+        adapters, wall = run_baseline(args, args.work_dir)
+        bl = eval_in_subprocess(args, adapters, evalf)
+        records.append({"arm": "baseline (sync)", "m": 1, "wall_s": round(wall, 1),
+                        "eval_loss": bl})
+        print(f"[compare] baseline eval loss/token: {bl:.4f} ({wall:.0f}s)", flush=True)
 
     for arm in arms:
         adapters, wall = run_diloco(args, arm, args.work_dir)
