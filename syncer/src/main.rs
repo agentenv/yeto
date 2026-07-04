@@ -38,6 +38,13 @@ struct Args {
     /// sync interval H the outer optimizer is tuned for. 0 = unthrottled.
     #[arg(long, default_value_t = 0)]
     min_round_interval_ms: u64,
+    /// Target sync interval H (inner steps per fragment between merges):
+    /// the launch floor adapts to the measured learner step time
+    /// (H·ξ_step/P). Never binds where WAN round latency already exceeds
+    /// it. 0 disables. Default 24 — the paper's design point; measured to
+    /// match synchronous training where H≈2 costs ~+9%.
+    #[arg(long, default_value_t = 24.0)]
+    sync_interval_steps: f64,
     /// Pre-merge learner-delta correction: "heloco" or "none".
     #[arg(long, default_value = "heloco")]
     delta_correction: String,
@@ -92,6 +99,7 @@ fn main() -> anyhow::Result<()> {
         grace_tau: args.grace_tau,
         pipeline: args.pipeline,
         min_round_interval_ms: args.min_round_interval_ms,
+        sync_interval_steps: args.sync_interval_steps,
         delta_correction,
         quorum_timeout_s: args.quorum_timeout_s,
         total_steps: args.total_steps,

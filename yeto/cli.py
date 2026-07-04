@@ -200,6 +200,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="compute-overlap budget for the grace window, in inner steps (τ)",
     )
     sync.add_argument(
+        "--sync-interval-steps",
+        type=float,
+        default=24.0,
+        help="target sync interval H (inner steps per fragment between "
+        "merges); the syncer adapts its round pacing to the measured "
+        "learner step time. Never binds where WAN latency already spaces "
+        "rounds wider. 0 disables",
+    )
+    sync.add_argument(
         "--pipeline",
         type=int,
         default=2,

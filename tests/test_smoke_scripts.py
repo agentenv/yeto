@@ -134,3 +134,8 @@ def test_syncer_command_quorum_defaults_to_all_learners():
     assert cmd[cmd.index("--quorum") + 1] == "4"
     assert cmd[cmd.index("--checkpoint-every") + 1] == "1"
     assert cmd[cmd.index("--pipeline") + 1] == "2"
+    # Experiment arms control sync frequency explicitly: the syncer's
+    # adaptive H default is off for probe arms, on (24) only for m2h24.
+    assert cmd[cmd.index("--sync-interval-steps") + 1] == "0.0"
+    h24 = compare.syncer_command(compare.PRESETS["m2h24"], 1, Path("/tmp/w/h"), total_steps=1)
+    assert h24[h24.index("--sync-interval-steps") + 1] == "24.0"
