@@ -378,10 +378,31 @@ def run_inner_loop(
             )
 
         # --- fragment sync at the step boundary (never blocks) ---
+        # Broadcasts apply BEFORE pulls are answered (same ordering as
+        # yeto.learner): the pipelined syncer's pull opening a fragment's
+        # next round (control stream) can overtake the broadcast that
+        # closed its previous one (data streams); answering first would
+        # push a stale base_version. Applying first resets the fragment's
+        # counters, so the self-clock defers the answer one step.
         if client is None:
             continue
         client.check_health()
         snap = None  # torch view of the adapters, built lazily per boundary
+        for bc in client.drain_updates():
+            fid = bc.fragment_id
+            flat = unpack_fragment(layout.fragments[fid], bc.data, bulk_dtype(client.dtype))
+            if anchors is not None:
+                anchors[fid] = flat.clone()
+            if args.merge_alpha > 0:
+                snap = snap if snap is not None else torch_adapters(model, registry)
+                local = fragment_flat(layout.fragments[fid], snap)
+                flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
+            write_fragment(model, layout.fragments[fid], flat, registry)
+            steps_at_reset[fid] = steps_total
+            tokens_at_reset[fid] = tokens_total
+            fragment_versions[fid] = bc.version
+            global_step = max(global_step, bc.version)
+        snap = None  # writes above invalidate the lazy snapshot
         pending_pulls.extend(client.drain_pulls())
         still_pending = []
         for pull in pending_pulls:
@@ -407,20 +428,6 @@ def run_inner_loop(
                 payload,
             )
         pending_pulls = still_pending
-        for bc in client.drain_updates():
-            fid = bc.fragment_id
-            flat = unpack_fragment(layout.fragments[fid], bc.data, bulk_dtype(client.dtype))
-            if anchors is not None:
-                anchors[fid] = flat.clone()
-            if args.merge_alpha > 0:
-                snap = snap if snap is not None else torch_adapters(model, registry)
-                local = fragment_flat(layout.fragments[fid], snap)
-                flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
-            write_fragment(model, layout.fragments[fid], flat, registry)
-            steps_at_reset[fid] = steps_total
-            tokens_at_reset[fid] = tokens_total
-            fragment_versions[fid] = bc.version
-            global_step = max(global_step, bc.version)
         shutdown = client.shutdown.is_set()
     mx.eval(model.parameters())
     log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
