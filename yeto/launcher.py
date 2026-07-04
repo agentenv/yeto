@@ -368,10 +368,19 @@ def parse_image_spec(value: str | None):
 # of this prebuilt via --learner-image; this pip path is the from-scratch
 # fallback and is best-effort (a failure disables --island-backend megatron,
 # it does not abort a torch-backend island).
+# SHAKEDOWN FINDING (mega1, 2026-07-04): pip-on-DLAMI installs megatron-core
+# and Transformer Engine cleanly ONLY via the prebuilt wheel
+# `transformer-engine-cu12` — `transformer-engine[pytorch]` triggers a source
+# build whose subprocess can't see torch and fails. But **megatron-bridge has
+# no prebuilt wheel and its source build fails the same way**, and AutoBridge
+# (the whole HF->mcore import path) needs it. So the megatron backend requires
+# an NGC PyTorch image that ships megatron-core + TE + bridge prebuilt, plugged
+# in via `--learner-image docker:nvcr.io/nvidia/pytorch:25.06-py3` (torch 2.8 /
+# CUDA 12.9 / TE 2.4). This pip line covers core + TE for development but does
+# NOT make the backend runnable on its own — see docs/MEGATRON.md.
 MEGATRON_SETUP = (
-    "{ pip install -q --no-build-isolation 'transformer-engine[pytorch,core_cu12]' && "
-    "pip install -q megatron-core megatron-bridge ; } "
-    "|| echo '[yeto-setup] megatron stack install failed; --island-backend megatron unavailable' >&2"
+    "pip install -q megatron-core transformer-engine-cu12 "
+    "|| echo '[yeto-setup] megatron core/TE install failed' >&2"
 )
 
 

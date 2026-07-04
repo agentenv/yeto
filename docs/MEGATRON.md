@@ -83,3 +83,26 @@ enumeration are Megatron-specific.
   `save_hf_pretrained` signatures, the mcore `GPTModel` forward args
   (position_ids/labels), and the transformers-version tension (bridge pins a
   narrow range vs our 5.13.0).
+
+## Shakedown finding (run `mega1`, qwen35-35b-a3b on 1×8×B200, 2026-07-04)
+
+Validated: the trainer **code imports and advances correctly** through
+`megatron.core`, Transformer Engine, mcore DDP + optimizer, into `main()` and
+as far as `_build_model`'s `from megatron.bridge import AutoBridge` — i.e. the
+module structure and the mcore/TE half are sound.
+
+Blocked by **infrastructure, not trainer logic**:
+- `megatron-core` and Transformer Engine install cleanly, but ONLY via the
+  **prebuilt** `transformer-engine-cu12` wheel — `transformer-engine[pytorch]`
+  triggers a source build whose subprocess can't see torch and fails.
+- **`megatron-bridge` has no prebuilt wheel and its source build fails the same
+  way.** AutoBridge (the entire HF→mcore weight import) depends on it, so the
+  backend cannot run from a pip-on-DLAMI install.
+
+**Conclusion: the megatron backend needs an NGC PyTorch container image**
+(`nvcr.io/nvidia/pytorch:25.06-py3` — torch 2.8 / CUDA 12.9 / TE 2.4, ships
+megatron-core + TE + bridge prebuilt), wired via `--learner-image docker:...`.
+That is the next real chunk of work: sky docker-image support, plus reworking
+the island setup (the NGC image brings its own torch/CUDA, so `TORCH_SETUP` is
+skipped; NVMe + HF token still apply). Until then `--island-backend megatron`
+brings up an island whose stack is incomplete (bridge missing).
