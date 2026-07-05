@@ -18,6 +18,12 @@ from .. import launcher
 from ..backends.base import TaskBackend, register_backend
 
 
+def _int_or_auto(value: str):
+    # duplicated from yeto/autobatch.py: importing it would pull torch into the
+    # CLI path (see yeto/backends/lm.py for the same guard).
+    return value if value == "auto" else int(value)
+
+
 class NavaBackend(TaskBackend):
     name = "nava"
     supports_auto_fleet = False
@@ -37,6 +43,13 @@ class NavaBackend(TaskBackend):
         )
         nava.add_argument("--nava-data-weights", default=None)
         nava.add_argument("--nava-data-cache", default="/local_nvme/yeto-nava-cache")
+        nava.add_argument(
+            "--nava-predownload-uris",
+            default=None,
+            help="s3:// or local newline list of clip URIs to pre-fetch into "
+            "--nava-data-cache during learner setup (before torchrun), so "
+            "training reads clips from local disk instead of streaming",
+        )
         nava.add_argument(
             "--nava-modality",
             choices=["text_to_av", "text_to_audio", "text_to_video", "text_to_image"],
@@ -64,7 +77,8 @@ class NavaBackend(TaskBackend):
             action="store_true",
             help="build/install flash-attn during learner setup; prefer --learner-image in production",
         )
-        nava.add_argument("--nava-batch-size", type=int, default=None)
+        nava.add_argument("--nava-batch-size", type=_int_or_auto, default=None,
+                          help="per-GPU micro-batch, or 'auto' to probe the largest that fits")
         nava.add_argument("--nava-grad-accum", type=int, default=None)
         nava.add_argument("--nava-lr", type=float, default=None)
         nava.add_argument("--nava-weight-decay", type=float, default=None)
@@ -159,6 +173,15 @@ class NavaBackend(TaskBackend):
             setup_parts.append("pip install -q flash-attn --no-build-isolation")
         if assets_cmd:
             setup_parts.append(assets_cmd)
+        if args.nava_predownload_uris:
+            # Pull the selected clips into the resolver cache before torchrun, so
+            # the first training step reads from local disk (no S3 streaming).
+            setup_parts.append(
+                "python -m yeto.nava.pre_download_clips"
+                f" --uri-list {shlex.quote(args.nava_predownload_uris)}"
+                f" --cache-dir {shlex.quote(args.nava_data_cache)}"
+                " --workers 48"
+            )
         setup = "; ".join(part for part in setup_parts if part)
 
         flags = (
@@ -224,6 +247,12 @@ class NavaBackend(TaskBackend):
         }
         if os.environ.get("HF_TOKEN"):
             envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
+        # Forward auto-batch probe tuning (VRAM headroom + batch ceiling) so the
+        # submitter's values reach the learner; the probe falls back to safe
+        # defaults (0.80 / 8) when unset.
+        for var in ("YETO_NAVA_PROBE_MEM_FRACTION", "YETO_NAVA_MAX_MICRO_BATCH"):
+            if os.environ.get(var):
+                envs[var] = os.environ[var]
         if spec.num_nodes > 1:
             envs["NCCL_DEBUG"] = "INFO"
 

@@ -20,8 +20,10 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 
+from ..autobatch import int_or_auto, rebalance_grad_accum
 from ..fragments import build_layout
 from ..layout_metadata import build_layout_metadata
+from .autobatch_nava import resolve_nava_micro_batch
 from .labels import prepare_labels
 from .lora import LoRAConfig, patch_lora, save_lora_adapter
 from .utils import install_nava_uri_resolver, materialize_uri, sha256_uri
@@ -70,7 +72,8 @@ def parse_args(argv=None):
     p.add_argument("--nava-init-timeout", type=float, default=1800.0)
     p.add_argument("--shard", choices=["ddp", "fsdp"], default="fsdp")
 
-    p.add_argument("--nava-batch-size", type=int, default=None)
+    p.add_argument("--nava-batch-size", type=int_or_auto, default=None,
+                   help="per-GPU micro-batch, or 'auto' to probe the largest that fits")
     p.add_argument("--nava-grad-accum", type=int, default=None)
     p.add_argument("--nava-lr", type=float, default=None)
     p.add_argument("--nava-weight-decay", type=float, default=None)
@@ -155,8 +158,10 @@ def load_state_dict(path: str, cache_dir: str | None = None) -> dict[str, torch.
 
 def _apply_config_overrides(cfg: dict, args) -> dict:
     cfg = json.loads(json.dumps(cfg))  # cheap deep copy of YAML primitives
-    if args.nava_batch_size is not None:
-        cfg["batch_size"] = args.nava_batch_size
+    if args.nava_batch_size not in (None, "auto"):
+        # 'auto' is resolved later by the probe (needs the built pipeline); leave
+        # cfg["batch_size"] at its config default until then.
+        cfg["batch_size"] = int(args.nava_batch_size)
     if args.nava_grad_accum is not None:
         cfg["grad_accum_steps"] = args.nava_grad_accum
     if args.nava_lr is not None:
@@ -690,8 +695,24 @@ def main(argv=None) -> None:
         args, pipe, params, layout, client, rank, world, device
     )
 
-    loader = build_dataloader(args, cfg, pipe, rank, world)
     opt = torch.optim.AdamW(params.values(), lr=float(cfg["lr"]), weight_decay=float(cfg.get("weight_decay", 0.0)))
+    if args.nava_batch_size == "auto":
+        # Probe the largest per-GPU micro-batch that fits (NAVA has no LM-style
+        # probe otherwise), then shrink grad-accum to hold the effective batch the
+        # flags implied at micro-batch 1. Needs the built pipeline + optimizer.
+        best = resolve_nava_micro_batch(
+            args,
+            lambda c: build_dataloader(args, c, pipe, rank, world),
+            pipe, params, opt, cfg, device, world, initial_global_step,
+        )
+        cfg["batch_size"] = best
+        cfg["grad_accum_steps"] = rebalance_grad_accum(int(cfg.get("grad_accum_steps", 1)), best)
+        if rank == 0:
+            log.info(
+                "NAVA auto-batch: micro=%d grad_accum=%d (effective/GPU=%d)",
+                best, cfg["grad_accum_steps"], best * cfg["grad_accum_steps"],
+            )
+    loader = build_dataloader(args, cfg, pipe, rank, world)
     from nava_src.utils.scheduler import WarmupCosineAnnealingLR
 
     # Drive the LR schedule off the syncer's global_step (the outer-step
