@@ -82,6 +82,15 @@ def parse_args(argv=None):
     p.add_argument("--nava-save-every", type=int, default=100, help="rank0 local learner-state checkpoint interval")
     p.add_argument("--nava-learner-state-dir", default=None)
 
+    p.add_argument(
+        "--total-steps",
+        type=int,
+        default=64,
+        help="syncer outer-step horizon T. The LR schedule tracks the "
+        "syncer's global_step over [0, T], so it is identical across "
+        "learners and survives Spot preemption (re-acquired from the syncer "
+        "on reconnect). Ignored for --syncer none, which uses local steps.",
+    )
     p.add_argument("--fragments", type=int, default=32)
     p.add_argument("--fragment-policy", choices=["balanced"], default="balanced")
     p.add_argument("--wire-dtype", choices=["bf16", "f32"], default="bf16")
@@ -685,7 +694,32 @@ def main(argv=None) -> None:
     opt = torch.optim.AdamW(params.values(), lr=float(cfg["lr"]), weight_decay=float(cfg.get("weight_decay", 0.0)))
     from nava_src.utils.scheduler import WarmupCosineAnnealingLR
 
-    sched = WarmupCosineAnnealingLR(opt, warmup_steps=int(cfg.get("warmup_steps", 0)), max_steps=int(cfg["max_steps"]), eta_min=float(cfg["lr"]) * 0.05)
+    # Drive the LR schedule off the syncer's global_step (the outer-step
+    # clock), not this process's local step count. global_step is broadcast
+    # by the syncer and re-acquired on every (re)connect, so a learner
+    # relaunched after a Spot preemption resumes its LR at the right phase
+    # instead of re-warming up from zero — and both learners always share one
+    # schedule (they observe the same global_step). warmup_steps and the
+    # cosine horizon are therefore in GLOBAL (outer) steps here. With
+    # --syncer none there is no global clock, so fall back to local steps.
+    use_global_clock = args.syncer != "none"
+    warmup = int(cfg.get("warmup_steps", 0))
+    lr_horizon = int(args.total_steps) if use_global_clock else int(cfg["max_steps"])
+    sched = WarmupCosineAnnealingLR(
+        opt,
+        warmup_steps=warmup,
+        max_steps=max(lr_horizon, warmup + 1),
+        eta_min=float(cfg["lr"]) * 0.05,
+    )
+
+    def set_lr_from_clock(clock: int) -> None:
+        # Position the schedule at `clock` and apply the resulting LR. NAVA's
+        # WarmupCosineAnnealingLR.get_lr() is a pure function of last_epoch, so
+        # this is idempotent and preemption-safe (no reliance on how many times
+        # .step() has been called locally).
+        sched.last_epoch = int(clock)
+        for pg, lr in zip(opt.param_groups, sched.get_lr()):
+            pg["lr"] = float(lr)
 
     steps_total = 0
     units_total = 0
@@ -699,6 +733,10 @@ def main(argv=None) -> None:
     max_steps = int(cfg["max_steps"])
     max_norm = float(cfg.get("max_grad_norm", 1.0))
     log_every = int(cfg.get("log_every", 20))
+
+    # Seed the LR from the resumed clock so a relaunched learner starts at the
+    # correct schedule phase (a fresh run resolves to the warmup start).
+    set_lr_from_clock(counters[6] if use_global_clock else counters[0])
 
     pipe.model.train()
     opt.zero_grad(set_to_none=True)
@@ -720,16 +758,25 @@ def main(argv=None) -> None:
                 allreduce_grads(params.values(), world)
             torch.nn.utils.clip_grad_norm_(params.values(), max_norm)
             opt.step()
-            sched.step()
             opt.zero_grad(set_to_none=True)
             counters[0] += 1
             counters[1] += batch_units(batch, world)
             if rank == 0 and counters[0] % log_every == 0:
                 dt = max(1e-9, time.monotonic() - t_last)
                 t_last = time.monotonic()
-                log.info("local_step=%d global_step=%d loss=%.4f units/s=%.1f", counters[0], counters[6], loss_acc / log_every, counters[1] / dt)
+                log.info(
+                    "local_step=%d global_step=%d loss=%.4f lr=%.2e units/s=%.1f",
+                    counters[0],
+                    counters[6],
+                    loss_acc / log_every,
+                    opt.param_groups[0]["lr"],
+                    counters[1] / dt,
+                )
                 loss_acc = 0.0
             shutdown = run_sync_boundary(args, pipe, params, layout, client, rank, world, device, counters)
+            # Re-base the LR on the (possibly just-advanced) global clock; the
+            # merge inside the sync boundary is what moves global_step forward.
+            set_lr_from_clock(counters[6] if use_global_clock else counters[0])
             if rank == 0 and args.nava_save_every > 0 and counters[0] % args.nava_save_every == 0:
                 save_learner_state(args, opt, sched, counters, layout_meta, batch)
             if shutdown or counters[0] >= max_steps:

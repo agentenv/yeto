@@ -183,6 +183,7 @@ class NavaBackend(TaskBackend):
             f" --nava-merge-avg-regex {shlex.quote(args.nava_merge_avg_regex)}"
             f" --nava-init-timeout {args.nava_init_timeout}"
             f" --shard {args.shard}"
+            f" --total-steps {args.total_steps}"
             f" --fragments {args.fragments}"
             f" --wire-dtype {args.wire_dtype}"
             f" --wan-streams {args.wan_streams}"
