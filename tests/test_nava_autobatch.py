@@ -29,7 +29,7 @@ def test_explicit_size_skips_probe(monkeypatch):
 
     monkeypatch.setattr(autobatch_nava, "_probe_once", boom)
     got = autobatch_nava.resolve_nava_micro_batch(
-        _args(2), None, None, _opt(), {"batch_size": 3}, SimpleNamespace(type="cpu"), 1, 0
+        _args(2), None, None, None, _opt(), {"batch_size": 3}, SimpleNamespace(type="cpu"), 1, 0
     )
     assert got == 3
 
@@ -38,7 +38,7 @@ def test_cpu_returns_one_without_probe(monkeypatch):
     monkeypatch.setattr(autobatch_nava, "_probe_once",
                         lambda *a: (_ for _ in ()).throw(AssertionError))
     got = autobatch_nava.resolve_nava_micro_batch(
-        _args("auto"), None, None, _opt(), {"batch_size": 1}, SimpleNamespace(type="cpu"), 1, 0
+        _args("auto"), None, None, None, _opt(), {"batch_size": 1}, SimpleNamespace(type="cpu"), 1, 0
     )
     assert got == 1
 
@@ -54,7 +54,7 @@ def test_probe_doubles_until_oom_and_keeps_last_passing(monkeypatch):
     monkeypatch.setattr(autobatch_nava, "_probe_once", probe)
     _no_cuda_side_effects(monkeypatch)
     got = autobatch_nava.resolve_nava_micro_batch(
-        _args("auto"), None, None, _opt(), {"batch_size": 1}, SimpleNamespace(type="cuda"), 1, 0
+        _args("auto"), None, None, None, _opt(), {"batch_size": 1}, SimpleNamespace(type="cuda"), 1, 0
     )
     assert got == 4
     assert tried == [1, 2, 4, 8]
@@ -67,7 +67,7 @@ def test_oom_at_one_falls_back_to_one(monkeypatch):
     monkeypatch.setattr(autobatch_nava, "_probe_once", probe)
     _no_cuda_side_effects(monkeypatch)
     got = autobatch_nava.resolve_nava_micro_batch(
-        _args("auto"), None, None, _opt(), {"batch_size": 1}, SimpleNamespace(type="cuda"), 1, 0
+        _args("auto"), None, None, None, _opt(), {"batch_size": 1}, SimpleNamespace(type="cuda"), 1, 0
     )
     assert got == 1  # max(1, best); a size-1 OOM still trains (surfaces at step 0)
 
@@ -80,7 +80,7 @@ def test_non_oom_error_stops_probe(monkeypatch):
     monkeypatch.setattr(autobatch_nava, "_probe_once", probe)
     _no_cuda_side_effects(monkeypatch)
     got = autobatch_nava.resolve_nava_micro_batch(
-        _args("auto"), None, None, _opt(), {"batch_size": 1}, SimpleNamespace(type="cuda"), 1, 0
+        _args("auto"), None, None, None, _opt(), {"batch_size": 1}, SimpleNamespace(type="cuda"), 1, 0
     )
     assert got == 2  # keeps the last size that passed before the non-OOM failure
 
@@ -93,7 +93,7 @@ def test_ceiling_caps_the_result(monkeypatch):
                         lambda *a: tried.append(a[5]))  # a[5] == size
     _no_cuda_side_effects(monkeypatch)
     got = autobatch_nava.resolve_nava_micro_batch(
-        _args("auto"), None, None, _opt(), {"batch_size": 1}, SimpleNamespace(type="cuda"), 1, 0
+        _args("auto"), None, None, None, _opt(), {"batch_size": 1}, SimpleNamespace(type="cuda"), 1, 0
     )
     assert got == 4          # never exceeds the ceiling
     assert tried == [1, 2, 4]  # stops probing at the ceiling
@@ -110,7 +110,7 @@ def test_probe_reserves_headroom_then_restores(monkeypatch):
                         lambda *a: (_ for _ in ()).throw(torch.cuda.OutOfMemoryError("x"))
                         if a[5] > 2 else None)
     got = autobatch_nava.resolve_nava_micro_batch(
-        _args("auto"), None, None, _opt(), {"batch_size": 1}, SimpleNamespace(type="cuda"), 1, 0
+        _args("auto"), None, None, None, _opt(), {"batch_size": 1}, SimpleNamespace(type="cuda"), 1, 0
     )
     assert got == 2
     assert calls[0] == 0.8   # reserved headroom during probing
