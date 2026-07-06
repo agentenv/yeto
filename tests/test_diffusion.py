@@ -1,5 +1,6 @@
 import argparse
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -195,6 +196,63 @@ def test_diffusion_cache_metadata_records_contract(tmp_path):
     learner.validate_diffusion_cache_metadata(meta, args)
     with pytest.raises(ValueError, match="column 'latents'"):
         learner.validate_diffusion_cache_metadata(meta, _args(cache_latents=True, latent_column="latent_tensor"))
+
+
+def test_diffusion_autobatch_doubles_until_oom(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    sizes = []
+
+    def probe(pipe, params, opt, rows, args, device, micro_batch, adapter=None):
+        del pipe, params, opt, rows, args, device, adapter
+        sizes.append(micro_batch)
+        if micro_batch >= 8:
+            raise torch.cuda.OutOfMemoryError("synthetic")
+
+    monkeypatch.setattr(learner, "_probe_diffusion_once", probe)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    opt = SimpleNamespace(zero_grad=lambda set_to_none=True: None)
+    args = _args(
+        data=[{"latents": [0.0], "prompt_embeds": [[0.0]]}],
+        cache_latents=True,
+        cache_text_embeds=True,
+        micro_batch_size="auto",
+    )
+
+    got = learner.resolve_diffusion_micro_batch_size(
+        args,
+        None,
+        {},
+        opt,
+        SimpleNamespace(type="cuda"),
+        rank=0,
+        world=1,
+    )
+
+    assert got == 4
+    assert sizes == [1, 2, 4, 8]
+
+
+def test_diffusion_autobatch_cpu_returns_one_without_probe(monkeypatch):
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    monkeypatch.setattr(
+        learner,
+        "_probe_diffusion_once",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("probe must not run")),
+    )
+    got = learner.resolve_diffusion_micro_batch_size(
+        _args(micro_batch_size="auto"),
+        None,
+        {},
+        None,
+        SimpleNamespace(type="cpu"),
+        rank=0,
+        world=1,
+    )
+    assert got == 1
 
 
 def test_diffusion_adapter_file_factory(tmp_path):

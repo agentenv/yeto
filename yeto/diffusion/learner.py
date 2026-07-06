@@ -49,6 +49,8 @@ DIFFUSION_CACHE_METADATA_FILE = "yeto_diffusion_cache.json"
 DIFFUSION_ADAPTER_METADATA_FILE = "yeto_diffusion_adapter.json"
 DIFFUSION_CACHE_SCHEMA_VERSION = 1
 DIFFUSION_ADAPTER_SCHEMA_VERSION = 1
+_MAX_DIFFUSION_MICRO_BATCH = 256
+_DIFFUSION_PROBE_ITERATIONS = 2
 
 _ATTENTION_TARGETS = [
     "to_q",
@@ -523,6 +525,33 @@ def _collate_rows(rows):
     return rows
 
 
+def _data_root_for(dataset_name) -> str | None:
+    if not isinstance(dataset_name, str):
+        return None
+    path = Path(os.path.expanduser(dataset_name))
+    if not path.exists():
+        return None
+    return str(path if path.is_dir() else path.parent)
+
+
+def _prepare_probe_rows(args, rank: int, world: int) -> list[dict]:
+    ds = load_rows(args.data)
+    shard = _learner_rows(len(ds), args.learner_id, args.num_learners, args.max_rows)
+    my_rows = shard[rank::world]
+    if not my_rows:
+        raise ValueError(f"learner {args.learner_id} rank {rank}: no rows left for autobatch probe")
+    data_root = _data_root_for(args.data)
+    rows = [dict(ds[my_rows[0]])]
+    if data_root is not None:
+        for row in rows:
+            row["__yeto_data_root__"] = data_root
+    return rows
+
+
+def _repeat_probe_rows(rows: list[dict], micro_batch: int) -> list[dict]:
+    return [dict(rows[i % len(rows)]) for i in range(micro_batch)]
+
+
 def _tensor_from_value(
     value: Any,
     device=None,
@@ -909,6 +938,61 @@ def compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0, adapt
     return flow_matching_loss(pred, target, timesteps)
 
 
+def _probe_diffusion_once(pipe, params, opt, rows, args, device, micro_batch: int, adapter=None) -> None:
+    for _ in range(_DIFFUSION_PROBE_ITERATIONS):
+        probe_rows = _repeat_probe_rows(rows, micro_batch)
+        loss, denom = compute_diffusion_loss(pipe, probe_rows, args, device, adapter=adapter)
+        (loss / denom.clamp(min=1)).backward()
+        with torch.no_grad():
+            for p in params.values():
+                if p.grad is not None:
+                    p.grad.zero_()
+        opt.step()
+        opt.zero_grad(set_to_none=True)
+
+
+def resolve_diffusion_micro_batch_size(
+    args,
+    pipe,
+    params,
+    opt,
+    device,
+    rank: int,
+    world: int,
+    adapter=None,
+) -> int:
+    """Probe the largest diffusion micro batch that fits the current latent shape."""
+    if args.micro_batch_size != "auto":
+        return int(args.micro_batch_size)
+    if device.type != "cuda":
+        return 1
+
+    probe_rows = _prepare_probe_rows(args, rank, world)
+    best, size = 0, 1
+    while size <= _MAX_DIFFUSION_MICRO_BATCH:
+        ok = True
+        try:
+            _probe_diffusion_once(pipe, params, opt, probe_rows, args, device, size, adapter)
+        except torch.cuda.OutOfMemoryError:
+            ok = False
+        opt.zero_grad(set_to_none=True)
+        torch.cuda.empty_cache()
+        if world > 1:
+            flag = torch.tensor([1.0 if ok else 0.0], device=device)
+            dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+            ok = flag.item() > 0
+        if not ok:
+            break
+        best = size
+        size *= 2
+    if best == 0:
+        raise RuntimeError(
+            "diffusion model does not fit even micro-batch 1 for the probed "
+            "latent shape; lower resolution/frames or use a bigger island"
+        )
+    return best
+
+
 def diffusion_adapter_metadata(
     args,
     pipe,
@@ -1032,12 +1116,19 @@ def main(argv=None) -> None:
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / max(1, args.warmup_steps))
     )
-    if args.micro_batch_size == "auto":
-        log.info("diffusion autobatch probe is not yet enabled; using micro-batch 1")
-        args.micro_batch_size = 1
+    requested_mb = args.micro_batch_size
+    args.micro_batch_size = resolve_diffusion_micro_batch_size(
+        args, pipe, params, opt, device, rank, world, adapter
+    )
+    if requested_mb == "auto":
+        args.grad_accum = rebalance_grad_accum(args.grad_accum, args.micro_batch_size)
+        log.info(
+            "auto diffusion micro-batch: %d per GPU (grad-accum -> %d)",
+            args.micro_batch_size,
+            args.grad_accum,
+        )
     else:
-        args.micro_batch_size = int(args.micro_batch_size)
-    args.grad_accum = rebalance_grad_accum(args.grad_accum, args.micro_batch_size)
+        args.grad_accum = rebalance_grad_accum(args.grad_accum, args.micro_batch_size)
 
     dataset = StreamingDiffusionRows(
         args.data,
