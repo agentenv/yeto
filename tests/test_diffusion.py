@@ -1,4 +1,5 @@
 import argparse
+import json
 
 import pytest
 
@@ -113,6 +114,65 @@ def test_flow_matching_loss_counts_elements():
     assert denom == 6
 
 
+def test_cached_manifest_contract_reads_tensors_and_metadata(tmp_path):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    torch.save(torch.zeros(1, 2, 2), tmp_path / "lat0.pt")
+    rows = [
+        {
+            "__yeto_data_root__": str(tmp_path),
+            "latents": "lat0.pt",
+            "prompt_embeds": [[1.0, 2.0]],
+            "pooled_prompt_embeds": [0.5, 0.25],
+            "prompt_attention_mask": [1],
+        },
+        {
+            "__yeto_data_root__": str(tmp_path),
+            "latents": torch.ones(1, 2, 2),
+            "prompt_embeds": [[3.0, 4.0]],
+            "pooled_prompt_embeds": [0.75, 1.0],
+            "prompt_attention_mask": [1],
+        },
+    ]
+    args = _args(cache_latents=True, cache_text_embeds=True)
+
+    latents = learner.encode_latents(None, rows, args, torch.device("cpu"), torch.float32)
+    cond = learner.encode_prompt_embeds(None, rows, args, torch.device("cpu"), torch.float32)
+
+    assert tuple(latents.latents.shape) == (2, 1, 2, 2)
+    assert latents.latent_num_frames is None
+    assert latents.latent_height == 2
+    assert latents.latent_width == 2
+    assert tuple(cond.prompt_embeds.shape) == (2, 1, 2)
+    assert tuple(cond.pooled_prompt_embeds.shape) == (2, 2)
+    assert tuple(cond.attention_mask.shape) == (2, 1)
+
+
+def test_cached_manifest_contract_reports_missing_columns():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    args = _args(cache_latents=True, cache_text_embeds=True)
+    rows = [{"prompt_embeds": [[1.0, 2.0]]}]
+
+    with pytest.raises(KeyError, match="--cache-latents needs column 'latents'"):
+        learner.encode_latents(None, rows, args, torch.device("cpu"), torch.float32)
+
+    mixed_optional_rows = [
+        {"prompt_embeds": [[1.0, 2.0]], "pooled_prompt_embeds": [1.0]},
+        {"prompt_embeds": [[3.0, 4.0]]},
+    ]
+    with pytest.raises(KeyError, match="pooled_prompt_embeds.*some rows"):
+        learner.encode_prompt_embeds(
+            None,
+            mixed_optional_rows,
+            args,
+            torch.device("cpu"),
+            torch.float32,
+        )
+
+
 def test_diffusion_adapter_file_factory(tmp_path):
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
@@ -129,6 +189,102 @@ def test_diffusion_adapter_file_factory(tmp_path):
 
     adapter = learner.load_diffusion_adapter(f"{adapter_file}:make_adapter")
     assert adapter.marker == "loaded"
+
+
+def test_tiny_diffusion_learner_smoke_cached_manifest(tmp_path):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    adapter_file = tmp_path / "tiny_adapter.py"
+    adapter_file.write_text(
+        "import torch\n"
+        "\n"
+        "class TinyScheduler:\n"
+        "    class config:\n"
+        "        num_train_timesteps = 4\n"
+        "        prediction_type = 'epsilon'\n"
+        "\n"
+        "    def add_noise(self, latents, noise, timesteps):\n"
+        "        del timesteps\n"
+        "        return latents + 0.1 * noise\n"
+        "\n"
+        "class TinyDenoiser(torch.nn.Module):\n"
+        "    def __init__(self):\n"
+        "        super().__init__()\n"
+        "        self.proj = torch.nn.Linear(4, 4)\n"
+        "\n"
+        "    def forward(self, hidden_states, timestep, encoder_hidden_states=None, return_dict=False):\n"
+        "        del timestep, return_dict\n"
+        "        cond = encoder_hidden_states.mean(dim=1, keepdim=True)\n"
+        "        return self.proj(hidden_states + cond)\n"
+        "\n"
+        "class TinyPipe:\n"
+        "    def __init__(self):\n"
+        "        self.transformer = TinyDenoiser()\n"
+        "        self.scheduler = TinyScheduler()\n"
+        "        self.components = {'transformer': self.transformer}\n"
+        "\n"
+        "    def to(self, device):\n"
+        "        self.transformer.to(device)\n"
+        "        return self\n"
+        "\n"
+        "def make_adapter():\n"
+        "    class Adapter:\n"
+        "        def load_pipeline(self, args, device):\n"
+        "            del args, device\n"
+        "            return TinyPipe()\n"
+        "    return Adapter()\n"
+    )
+    for i in range(2):
+        torch.save(torch.full((4,), float(i)), tmp_path / f"latents_{i}.pt")
+        torch.save(torch.ones(4) * (i + 1), tmp_path / f"prompt_{i}.pt")
+    data = tmp_path / "data.jsonl"
+    with data.open("w", encoding="utf-8") as f:
+        for i in range(2):
+            f.write(
+                json.dumps(
+                    {
+                        "latents": f"latents_{i}.pt",
+                        "prompt_embeds": f"prompt_{i}.pt",
+                    }
+                )
+                + "\n"
+            )
+    out = tmp_path / "out"
+
+    learner.main(
+        [
+            "--model",
+            "tiny",
+            "--data",
+            str(data),
+            "--syncer",
+            "none",
+            "--learner-id",
+            "0",
+            "--num-learners",
+            "1",
+            "--tuning",
+            "full",
+            "--cache-latents",
+            "--cache-text-embeds",
+            "--diffusion-adapter",
+            f"{adapter_file}:make_adapter",
+            "--micro-batch-size",
+            "2",
+            "--stream-workers",
+            "0",
+            "--fragments",
+            "1",
+            "--max-local-steps",
+            "1",
+            "--output-dir",
+            str(out),
+        ]
+    )
+
+    state = torch.load(out / "trainable_state.pt", map_location="cpu")
+    assert "transformer.proj.weight" in state
 
 
 def test_denoise_forward_filters_kwargs_by_signature():

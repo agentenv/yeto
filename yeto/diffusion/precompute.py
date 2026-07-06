@@ -3,6 +3,8 @@
 Writes a local JSONL manifest whose tensor columns point at ``.pt`` files.
 Training can consume the manifest with ``--cache-latents`` and/or
 ``--cache-text-embeds``; these cache flags are opt-in, not the learner default.
+The cached contract is ``latents`` for latent caches, ``prompt_embeds`` for
+text caches, plus optional pooled/mask tensors and latent shape metadata.
 """
 
 from __future__ import annotations
@@ -117,7 +119,7 @@ def main(argv=None) -> int:
                     path = lat_dir / f"{index:08d}.pt"
                     torch.save(latents[b], path)
                     item[args.latent_column] = str(path.relative_to(out))
-                    if latents[b].ndim >= 4:
+                    if latents[b].ndim >= 3:
                         item["latent_height"] = int(latents[b].shape[-2])
                         item["latent_width"] = int(latents[b].shape[-1])
                     if latents[b].ndim == 4:

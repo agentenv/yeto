@@ -38,6 +38,13 @@ from ..tensor_io import (
 
 log = logging.getLogger("diffusion-learner")
 
+# Cached manifest contract:
+#   required with --cache-latents: latents
+#   required with --cache-text-embeds: prompt_embeds
+#   optional: pooled_prompt_embeds, prompt_attention_mask, latent_num_frames,
+#             latent_height, latent_width
+_CACHE_TENSOR_SUFFIXES = (".pt", ".pth", ".npy")
+
 _ATTENTION_TARGETS = [
     "to_q",
     "to_k",
@@ -384,7 +391,13 @@ def _collate_rows(rows):
     return rows
 
 
-def _tensor_from_value(value: Any, device=None, dtype=None, base_dir: str | None = None) -> torch.Tensor:
+def _tensor_from_value(
+    value: Any,
+    device=None,
+    dtype=None,
+    base_dir: str | None = None,
+    context: str = "cached tensor",
+) -> torch.Tensor:
     if isinstance(value, torch.Tensor):
         tensor = value
     elif isinstance(value, (list, tuple)):
@@ -394,29 +407,78 @@ def _tensor_from_value(value: Any, device=None, dtype=None, base_dir: str | None
         if not path.is_absolute() and base_dir:
             path = Path(base_dir) / path
         if path.suffix in (".pt", ".pth"):
+            if not path.exists():
+                raise FileNotFoundError(f"{context}: tensor file {str(path)!r} does not exist")
             tensor = torch.load(path, map_location="cpu")
         elif path.suffix == ".npy":
+            if not path.exists():
+                raise FileNotFoundError(f"{context}: tensor file {str(path)!r} does not exist")
             import numpy as np
 
             tensor = torch.from_numpy(np.load(path))
         else:
-            raise ValueError(f"unsupported cached tensor path {value!r}")
+            raise ValueError(
+                f"{context}: unsupported tensor path {value!r}; "
+                f"expected one of {_CACHE_TENSOR_SUFFIXES}"
+            )
     else:
-        raise TypeError(f"cannot convert {type(value).__name__} to tensor")
+        raise TypeError(f"{context}: cannot convert {type(value).__name__} to tensor")
     if dtype is not None and tensor.is_floating_point():
         tensor = tensor.to(dtype=dtype)
     return tensor.to(device) if device is not None else tensor
 
 
-def _stack_column(rows, column: str, device, dtype) -> torch.Tensor | None:
+def _stack_column(
+    rows,
+    column: str,
+    device,
+    dtype,
+    *,
+    required: bool = False,
+    flag: str | None = None,
+) -> torch.Tensor | None:
     values = [row.get(column) for row in rows]
-    if any(v is None for v in values):
-        return None
+    missing = [i for i, value in enumerate(values) if value is None]
+    if missing:
+        if required:
+            where = ", ".join(str(i) for i in missing[:8])
+            raise KeyError(
+                f"{flag or 'cached diffusion tensors'} needs column {column!r} "
+                f"on every row; missing in batch row(s) {where}"
+            )
+        if len(missing) == len(rows):
+            return None
+        where = ", ".join(str(i) for i in missing[:8])
+        raise KeyError(
+            f"optional cached diffusion column {column!r} is present only on "
+            f"some rows; missing in batch row(s) {where}"
+        )
+    context = f"cached diffusion column {column!r}"
     tensors = [
-        _tensor_from_value(v, dtype=dtype, base_dir=row.get("__yeto_data_root__"))
+        _tensor_from_value(
+            v,
+            dtype=dtype,
+            base_dir=row.get("__yeto_data_root__"),
+            context=context,
+        )
         for row, v in zip(rows, values)
     ]
-    return torch.stack(tensors).to(device)
+    try:
+        stacked = torch.stack(tensors)
+    except RuntimeError as exc:
+        shapes = [tuple(t.shape) for t in tensors]
+        raise ValueError(
+            f"{context} tensors must have identical shapes within a batch; got {shapes}"
+        ) from exc
+    return stacked.to(device)
+
+
+def _metadata_int(row: dict, *names: str) -> int | None:
+    for name in names:
+        value = row.get(name)
+        if value is not None:
+            return int(value)
+    return None
 
 
 def _open_image(value, base_dir: str | None = None):
@@ -478,10 +540,16 @@ def _latent_meta(rows, latents: torch.Tensor) -> tuple[int | None, int | None, i
     if latents.ndim == 5:
         return int(latents.shape[2]), int(latents.shape[3]), int(latents.shape[4])
     first = rows[0] if rows else {}
+    if latents.ndim == 4:
+        return (
+            _metadata_int(first, "latent_num_frames", "frames", "num_frames"),
+            int(latents.shape[2]),
+            int(latents.shape[3]),
+        )
     return (
-        first.get("latent_num_frames", first.get("frames", first.get("num_frames"))),
-        first.get("latent_height", first.get("height")),
-        first.get("latent_width", first.get("width")),
+        _metadata_int(first, "latent_num_frames", "frames", "num_frames"),
+        _metadata_int(first, "latent_height", "height"),
+        _metadata_int(first, "latent_width", "width"),
     )
 
 
@@ -489,9 +557,14 @@ def encode_latents(pipe, rows, args, device, dtype, adapter=None) -> LatentBatch
     if adapter is not None and hasattr(adapter, "encode_latents"):
         return adapter.encode_latents(pipe, rows, args, device, dtype)
     if args.cache_latents:
-        latents = _stack_column(rows, args.latent_column, device, dtype)
-        if latents is None:
-            raise KeyError(f"--cache-latents needs column {args.latent_column!r}")
+        latents = _stack_column(
+            rows,
+            args.latent_column,
+            device,
+            dtype,
+            required=True,
+            flag="--cache-latents",
+        )
         return LatentBatch(latents, *_latent_meta(rows, latents))
     if not hasattr(pipe, "vae") or pipe.vae is None:
         raise RuntimeError("raw diffusion rows need a pipeline VAE, or pass --cache-latents")
@@ -561,9 +634,14 @@ def encode_prompt_embeds(pipe, rows, args, device, dtype, adapter=None):
     if adapter is not None and hasattr(adapter, "encode_prompt_embeds"):
         return adapter.encode_prompt_embeds(pipe, rows, args, device, dtype)
     if args.cache_text_embeds:
-        prompt_embeds = _stack_column(rows, args.text_embeds_column, device, dtype)
-        if prompt_embeds is None:
-            raise KeyError(f"--cache-text-embeds needs column {args.text_embeds_column!r}")
+        prompt_embeds = _stack_column(
+            rows,
+            args.text_embeds_column,
+            device,
+            dtype,
+            required=True,
+            flag="--cache-text-embeds",
+        )
         pooled = _stack_column(rows, args.pooled_text_embeds_column, device, dtype)
         mask = _stack_column(rows, args.text_attention_mask_column, device, None)
         return TextConditioning(prompt_embeds, pooled, mask)
