@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.gpu_spec import ClusterSpec
-from yeto.launcher import make_learner_task
+from yeto.launcher import make_diffusion_sample_task, make_learner_task
 from yeto.models import (
     DIFFUSION_MODEL_ALIASES,
     resolve,
@@ -448,3 +448,65 @@ def test_launcher_passes_diffusion_adapter_hook():
     assert "--diffusion-adapter my_adapter:make" in task.run
     assert "--diffusion-family" not in task.run
     assert "libsndfile1" not in task.setup
+
+
+def _sample_args(tmp_path, **over):
+    adapter_dir = tmp_path / "adapter"
+    adapter_dir.mkdir()
+    base = dict(
+        gpu="aws:1xa100@us-east-2",
+        adapter_dir=str(adapter_dir),
+        output=None,
+        prompt="a cat",
+        data=None,
+        prompt_column="prompt",
+        seed_column=None,
+        max_rows=None,
+        model=None,
+        diffusion_adapter=None,
+        dtype="auto",
+        num_inference_steps=30,
+        guidance_scale=None,
+        height=None,
+        width=None,
+        num_frames=None,
+        seed=None,
+        fps=8,
+        spot=True,
+        disk_size=256,
+        learner_cpus=None,
+        learner_instance_type=None,
+        learner_image=None,
+        cluster_prefix="sample",
+        keep=False,
+        retry_until_up=False,
+        controller_poll=30,
+    )
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def test_diffusion_sample_task_uses_yeto_sample_and_mounts_data(tmp_path):
+    data = tmp_path / "prompts.jsonl"
+    data.write_text('{"prompt":"p"}\n', encoding="utf-8")
+    args = _sample_args(
+        tmp_path,
+        prompt=None,
+        data=str(data),
+        max_rows=2,
+        seed=123,
+        diffusion_adapter="hooks:make",
+    )
+
+    task = make_diffusion_sample_task(args, _SPEC)
+
+    assert "python3 -m yeto.diffusion.sample" in task.run
+    assert "--adapter-dir" in task.run and "~/yeto-adapter" in task.run
+    assert "--data" in task.run and "~/yeto-data.jsonl" in task.run
+    assert "--output-dir" in task.run and "~/yeto-output" in task.run
+    assert "--max-rows 2" in task.run
+    assert "--seed 123" in task.run
+    assert "--diffusion-adapter hooks:make" in task.run
+    assert task.file_mounts["~/yeto-adapter"] == args.adapter_dir
+    assert task.file_mounts["~/yeto-data.jsonl"] == str(data)
+    assert "diffusers" in task.setup

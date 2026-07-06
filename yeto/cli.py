@@ -32,7 +32,16 @@ import time
 from . import runs
 from .losses import LOSS_FUNCTIONS
 
-SUBCOMMANDS = ("launch", "shape", "status", "logs", "down", "_worker", "_head")
+SUBCOMMANDS = (
+    "launch",
+    "shape",
+    "sample-diffusion",
+    "status",
+    "logs",
+    "down",
+    "_worker",
+    "_head",
+)
 
 
 def _add_launch_args(p: argparse.ArgumentParser) -> None:
@@ -370,13 +379,57 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def _add_diffusion_sample_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--gpu", required=True, help="single GPU cluster, e.g. aws:1xt4@us-west-2")
+    p.add_argument("--adapter-dir", required=True, help="local directory or cloud URI with a Yeto diffusion adapter artifact")
+    p.add_argument(
+        "--output",
+        default=None,
+        help="local directory or remote URI for generated samples; omitted keeps them under ~/yeto-output",
+    )
+    source = p.add_argument_group("sample source")
+    source.add_argument("--prompt", default=None, help="single prompt to sample")
+    source.add_argument("--data", default=None, help="HF/local/cloud prompt dataset for batch sampling")
+    source.add_argument("--prompt-column", default="prompt")
+    source.add_argument("--seed-column", default=None)
+    source.add_argument("--max-rows", type=int, default=None)
+
+    model = p.add_argument_group("diffusion")
+    model.add_argument("--model", default=None, help="optional base model override")
+    model.add_argument(
+        "--diffusion-adapter",
+        default=None,
+        help="optional module:factory or file.py:factory hook for non-standard artifacts",
+    )
+    model.add_argument("--dtype", choices=["auto", "bf16", "fp16", "f32"], default="auto")
+    model.add_argument("--num-inference-steps", type=int, default=30)
+    model.add_argument("--guidance-scale", type=float, default=None)
+    model.add_argument("--height", type=int, default=None)
+    model.add_argument("--width", type=int, default=None)
+    model.add_argument("--num-frames", type=int, default=None)
+    model.add_argument("--seed", type=int, default=None)
+    model.add_argument("--fps", type=int, default=8)
+
+    infra = p.add_argument_group("infrastructure")
+    infra.add_argument("--spot", action="store_true", default=True, help="use a spot instance (default)")
+    infra.add_argument("--on-demand", dest="spot", action="store_false", help="use on-demand instead of spot")
+    infra.add_argument("--disk-size", type=int, default=256, help="sampler disk (GB)")
+    infra.add_argument("--learner-cpus", default=None, help="vCPU hint for the sampler node")
+    infra.add_argument("--learner-instance-type", default=None, help="pin sampler node to an instance type")
+    infra.add_argument("--learner-image", default=None, help="override the sampler machine image")
+    infra.add_argument("--cluster-prefix", default="yeto-sample", help="cluster name prefix")
+    infra.add_argument("--keep", action="store_true", help="do not tear down the sampler cluster")
+    infra.add_argument("--retry-until-up", action="store_true", help="keep retrying provisioning until capacity is found")
+    infra.add_argument("--controller-poll", type=int, default=30, help="job status poll interval (seconds)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="yeto",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = p.add_subparsers(dest="command", metavar="{launch,status,logs,down}")
+    sub = p.add_subparsers(dest="command", metavar="{launch,shape,sample-diffusion,status,logs,down}")
 
     launch = sub.add_parser(
         "launch",
@@ -470,6 +523,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="override the model weight size estimate (bf16 GB)",
     )
     shape.add_argument("--no-cache", action="store_true", help="bypass the 1h signal cache")
+
+    sample = sub.add_parser(
+        "sample-diffusion",
+        help="run diffusion adapter sampling on a SkyPilot GPU task",
+    )
+    _add_diffusion_sample_args(sample)
 
     sub.add_parser("status", help="table of known runs")
 
@@ -658,6 +717,19 @@ def cmd_launch(args) -> int:
     state, code = _final_state(runs.load_run(name) or {"name": name})
     print(f"[yeto] run '{name}' finished: {state} (exit code {code})")
     return code
+
+
+def cmd_sample_diffusion(args) -> int:
+    if bool(args.prompt) == bool(args.data):
+        print("[yeto] pass exactly one of --prompt or --data", file=sys.stderr)
+        return 1
+    try:
+        from .launcher import run_diffusion_sample
+
+        return run_diffusion_sample(args)
+    except ValueError as e:
+        print(f"[yeto] {e}", file=sys.stderr)
+        return 1
 
 
 # ---------------------------------------------------------------------------
@@ -1207,6 +1279,8 @@ def main(argv=None) -> int:
         return cmd_launch(args)
     if args.command == "shape":
         return cmd_shape(args)
+    if args.command == "sample-diffusion":
+        return cmd_sample_diffusion(args)
     if args.command == "status":
         return cmd_status()
     if args.command == "logs":

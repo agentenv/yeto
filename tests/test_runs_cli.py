@@ -204,6 +204,50 @@ def test_worker_unknown_run(capsys):
 
 
 # ---------------------------------------------------------------------------
+# diffusion sampling command
+
+
+def test_sample_diffusion_requires_one_prompt_source(capsys):
+    base = ["sample-diffusion", "--gpu", "aws:1xt4", "--adapter-dir", "adapter"]
+
+    assert cli.main(base) == 1
+    assert "exactly one" in capsys.readouterr().err
+    assert cli.main(base + ["--prompt", "p", "--data", "org/ds"]) == 1
+    assert "exactly one" in capsys.readouterr().err
+
+
+def test_sample_diffusion_dispatches_to_launcher(monkeypatch):
+    import yeto.launcher
+
+    seen = {}
+
+    def fake_run(args):
+        seen["args"] = args
+        return 0
+
+    monkeypatch.setattr(yeto.launcher, "run_diffusion_sample", fake_run)
+
+    rc = cli.main(
+        [
+            "sample-diffusion",
+            "--gpu",
+            "aws:1xt4@us-west-2",
+            "--adapter-dir",
+            "s3://bucket/adapter",
+            "--prompt",
+            "a cat",
+            "--output",
+            "samples",
+        ]
+    )
+
+    assert rc == 0
+    assert seen["args"].prompt == "a cat"
+    assert seen["args"].adapter_dir == "s3://bucket/adapter"
+    assert seen["args"].output == "samples"
+
+
+# ---------------------------------------------------------------------------
 # down: dead worker, recorded clusters torn down via stubbed sky
 
 
