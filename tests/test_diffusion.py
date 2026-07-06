@@ -4,7 +4,12 @@ import pytest
 
 from yeto.gpu_spec import ClusterSpec
 from yeto.launcher import make_learner_task
-from yeto.models import DIFFUSION_MODEL_ALIASES, resolve, resolve_model_kind
+from yeto.models import (
+    DIFFUSION_MODEL_ALIASES,
+    resolve,
+    resolve_diffusion_family,
+    resolve_model_kind,
+)
 
 
 _SPEC = ClusterSpec(cloud="aws", region="us-east-2", num_nodes=1, gpus_per_node=1, gpu="A100")
@@ -45,23 +50,34 @@ def _args(**over):
         retry_until_up=True,
         cache_latents=False,
         cache_text_embeds=False,
+        diffusion_family="auto",
         image_column="image",
+        video_column="video",
         prompt_column="prompt",
         latent_column="latents",
         text_embeds_column="prompt_embeds",
+        text_attention_mask_column="prompt_attention_mask",
         pooled_text_embeds_column="pooled_prompt_embeds",
         height=None,
         width=None,
         num_frames=None,
+        frame_rate=25,
+        bucket_by_shape=False,
+        nava_root=None,
+        nava_config="configs/nava.yaml",
+        nava_checkpoint=None,
     )
     base.update(over)
     return argparse.Namespace(**base)
 
 
 def test_diffusion_aliases_resolve_and_infer_kind():
-    assert {"wan22", "ltx-video", "flux", "sd35"} <= set(DIFFUSION_MODEL_ALIASES)
+    assert {"wan22", "ltx-video", "flux", "sd35", "nava"} <= set(DIFFUSION_MODEL_ALIASES)
     assert resolve("sd35") == DIFFUSION_MODEL_ALIASES["sd35"]
     assert resolve_model_kind("flux") == "diffusion"
+    assert resolve_diffusion_family("ltx-video") == "ltx"
+    assert resolve_diffusion_family("wan22") == "wan"
+    assert resolve_diffusion_family("nava") == "nava"
     assert resolve_model_kind("org/custom", "diffusion") == "diffusion"
     assert resolve_model_kind("org/custom") == "causal-lm"
 
@@ -103,6 +119,27 @@ def test_flow_matching_loss_counts_elements():
     assert denom == 6
 
 
+def test_nava_lora_patches_only_backbone_blocks():
+    torch = pytest.importorskip("torch")
+    nn = torch.nn
+    from yeto.diffusion.nava_lora import LoRALinear, patch_lora
+
+    class TinyNava(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backbone = nn.Module()
+            self.backbone.double_blocks = nn.ModuleList([
+                nn.ModuleDict({"self_attn": nn.ModuleDict({"q": nn.Linear(4, 4)})})
+            ])
+            self.other = nn.Linear(4, 4)
+
+    model = TinyNava()
+    cfg = patch_lora(model, r=2, alpha=4, target="auto")
+    assert cfg.patched_modules == ["backbone.double_blocks.0.self_attn.q"]
+    assert isinstance(model.backbone.double_blocks[0]["self_attn"]["q"], LoRALinear)
+    assert not model.other.weight.requires_grad
+
+
 def test_launcher_routes_diffusion_to_diffusion_learner_and_opt_in_caches():
     args = _args(cache_latents=True, cache_text_embeds=True, height=512, width=512)
     task = make_learner_task(args, _SPEC, 0, 1, "1.2.3.4:29400")
@@ -112,3 +149,25 @@ def test_launcher_routes_diffusion_to_diffusion_learner_and_opt_in_caches():
     assert "--height 512" in task.run and "--width 512" in task.run
     assert "diffusers" in task.setup
     assert "--train-on" not in task.run and "--seq-len" not in task.run
+    assert "--tokenize" not in task.run
+
+
+def test_launcher_routes_specific_video_families():
+    ltx = make_learner_task(_args(model="ltx-video", bucket_by_shape=True), _SPEC, 0, 1, "a:1")
+    assert "--diffusion-family ltx" in ltx.run
+    assert "--bucket-by-shape" in ltx.run
+    assert "--text-attention-mask-column prompt_attention_mask" in ltx.run
+    wan = make_learner_task(_args(model="wan22", frame_rate=24), _SPEC, 0, 1, "a:1")
+    assert "--diffusion-family wan" in wan.run
+    assert "--frame-rate 24" in wan.run
+
+
+def test_launcher_mounts_nava_root(tmp_path):
+    root = tmp_path / "NAVA"
+    root.mkdir()
+    args = _args(model="nava", nava_root=str(root), nava_checkpoint=None)
+    task = make_learner_task(args, _SPEC, 0, 1, "a:1")
+    assert "--diffusion-family nava" in task.run
+    assert "--nava-root ~/yeto-nava" in task.run
+    assert task.file_mounts["~/yeto-nava"] == str(root)
+    assert "libsndfile1" in task.setup

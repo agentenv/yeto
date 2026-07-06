@@ -178,6 +178,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
 
     diffusion = p.add_argument_group("diffusion")
     diffusion.add_argument(
+        "--diffusion-family",
+        choices=["auto", "generic", "ltx", "wan", "nava"],
+        default="auto",
+        help="diffusion adapter family; auto infers from aliases such as "
+        "ltx-video, wan22, and nava",
+    )
+    diffusion.add_argument(
         "--cache-latents",
         action="store_true",
         help="diffusion only: read precomputed VAE latents from --latent-column "
@@ -191,13 +198,20 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "(off by default)",
     )
     diffusion.add_argument("--image-column", default="image", help="diffusion raw media column")
+    diffusion.add_argument("--video-column", default="video", help="diffusion raw video column")
     diffusion.add_argument("--prompt-column", default="prompt", help="diffusion prompt column")
     diffusion.add_argument("--latent-column", default="latents", help="diffusion cached latent column")
     diffusion.add_argument("--text-embeds-column", default="prompt_embeds", help="diffusion cached prompt-embedding column")
+    diffusion.add_argument("--text-attention-mask-column", default="prompt_attention_mask", help="diffusion cached text attention-mask column")
     diffusion.add_argument("--pooled-text-embeds-column", default="pooled_prompt_embeds", help="diffusion cached pooled-embedding column")
     diffusion.add_argument("--height", type=int, default=None, help="diffusion image/video height override")
     diffusion.add_argument("--width", type=int, default=None, help="diffusion image/video width override")
     diffusion.add_argument("--num-frames", type=int, default=None, help="diffusion video frame count for bucketed datasets")
+    diffusion.add_argument("--frame-rate", type=int, default=25, help="diffusion video frame rate for LTX/WAN micro-conditioning")
+    diffusion.add_argument("--bucket-by-shape", action="store_true", help="diffusion only: batch rows by (frames, height, width)")
+    diffusion.add_argument("--nava-root", default=None, help="NAVA checkout root; defaults to $YETO_NAVA_ROOT")
+    diffusion.add_argument("--nava-config", default="configs/nava.yaml", help="NAVA config path, relative to --nava-root when not absolute")
+    diffusion.add_argument("--nava-checkpoint", default=None, help="optional NAVA checkpoint (.pt/.ckpt/.safetensors) to initialize")
 
     sync = p.add_argument_group("async sync")
     sync.add_argument("--total-steps", type=int, default=64, help="outer steps T (one fragment each)")
@@ -819,6 +833,18 @@ def cmd_launch_head(args) -> int:
     from .datasource import head_stage
 
     args.data, data_mounts = head_stage(args.data)
+    from .models import resolve_diffusion_family, resolve_model_kind
+
+    if (
+        resolve_model_kind(args.model, getattr(args, "model_kind", "auto")) == "diffusion"
+        and resolve_diffusion_family(args.model, getattr(args, "diffusion_family", "auto")) == "nava"
+    ):
+        if getattr(args, "nava_root", None) and os.path.exists(os.path.expanduser(args.nava_root)):
+            data_mounts["~/yeto-nava"] = os.path.abspath(os.path.expanduser(args.nava_root))
+            args.nava_root = "~/yeto-nava"
+        if getattr(args, "nava_checkpoint", None) and os.path.exists(os.path.expanduser(args.nava_checkpoint)):
+            data_mounts["~/yeto-nava-checkpoint"] = os.path.abspath(os.path.expanduser(args.nava_checkpoint))
+            args.nava_checkpoint = "~/yeto-nava-checkpoint"
     binary = launcher.build_syncer_binary()
 
     args_dict = _serializable_args(args)

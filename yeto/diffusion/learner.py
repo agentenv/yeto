@@ -14,6 +14,7 @@ import logging
 import os
 import random
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,7 @@ from ..autobatch import int_or_auto, rebalance_grad_accum
 from ..data import _learner_rows, load_rows
 from ..fragments import build_layout
 from ..losses import flow_matching_loss
-from ..models import resolve
+from ..models import resolve, resolve_diffusion_family
 from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
 from ..tensor_io import (
     apply_fragment,
@@ -67,7 +68,27 @@ _DIFFUSION_LORA_TARGETS = {
     "ltx-video": _ATTENTION_TARGETS + _MLP_TARGETS,
     "wan22": _ATTENTION_TARGETS + _MLP_TARGETS,
 }
-_TRAINABLE_ATTRS = ("transformer", "transformer_2", "unet")
+_FAMILY_LORA_TARGETS = {
+    "generic": _ATTENTION_TARGETS + _MLP_TARGETS,
+    "ltx": _ATTENTION_TARGETS + _MLP_TARGETS,
+    "wan": _ATTENTION_TARGETS + _MLP_TARGETS,
+}
+_TRAINABLE_ATTRS = ("transformer", "transformer_2", "unet", "model")
+
+
+@dataclass
+class LatentBatch:
+    latents: torch.Tensor
+    latent_num_frames: int | None = None
+    latent_height: int | None = None
+    latent_width: int | None = None
+
+
+@dataclass
+class TextConditioning:
+    prompt_embeds: torch.Tensor | None
+    pooled_prompt_embeds: torch.Tensor | None = None
+    attention_mask: torch.Tensor | None = None
 
 
 def parse_args(argv=None):
@@ -80,6 +101,7 @@ def parse_args(argv=None):
     p.add_argument("--loss-function", default="flow_matching")
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument("--shard", choices=["ddp", "fsdp"], default="ddp")
+    p.add_argument("--diffusion-family", choices=["auto", "generic", "ltx", "wan", "nava"], default="auto")
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
     p.add_argument("--lora-targets", choices=["auto", "attention", "all-linear"], default="auto")
@@ -99,13 +121,20 @@ def parse_args(argv=None):
     p.add_argument("--cache-latents", action="store_true", default=False)
     p.add_argument("--cache-text-embeds", action="store_true", default=False)
     p.add_argument("--image-column", default="image")
+    p.add_argument("--video-column", default="video")
     p.add_argument("--prompt-column", default="prompt")
     p.add_argument("--latent-column", default="latents")
     p.add_argument("--text-embeds-column", default="prompt_embeds")
+    p.add_argument("--text-attention-mask-column", default="prompt_attention_mask")
     p.add_argument("--pooled-text-embeds-column", default="pooled_prompt_embeds")
     p.add_argument("--height", type=int, default=None)
     p.add_argument("--width", type=int, default=None)
     p.add_argument("--num-frames", type=int, default=None)
+    p.add_argument("--frame-rate", type=int, default=25)
+    p.add_argument("--bucket-by-shape", action="store_true", default=False)
+    p.add_argument("--nava-root", default=None)
+    p.add_argument("--nava-config", default="configs/nava.yaml")
+    p.add_argument("--nava-checkpoint", default=None)
     p.add_argument("--output-dir", default="checkpoints/diffusion-out")
     p.add_argument("--device", default=None)
     return p.parse_args(argv)
@@ -125,13 +154,13 @@ def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
         return factory.from_pretrained(model_id, **kwargs)
 
 
-def resolve_lora_targets(choice: str, model: str):
+def resolve_lora_targets(choice: str, model: str, family: str = "generic"):
     """Map the public LoRA target flag to PEFT target_modules for DiTs."""
     if choice == "all-linear":
         return "all-linear"
     if choice == "attention":
         return _ATTENTION_TARGETS
-    return _DIFFUSION_LORA_TARGETS.get(model, _ATTENTION_TARGETS + _MLP_TARGETS)
+    return _DIFFUSION_LORA_TARGETS.get(model, _FAMILY_LORA_TARGETS.get(family, _ATTENTION_TARGETS + _MLP_TARGETS))
 
 
 def _trainable_module_items(pipe) -> list[tuple[str, torch.nn.Module]]:
@@ -146,6 +175,9 @@ def _freeze_modules(pipe) -> None:
 
 
 def load_pipeline(args, device):
+    args.diffusion_family = resolve_diffusion_family(args.model, args.diffusion_family)
+    if args.diffusion_family == "nava":
+        return load_nava_pipeline(args, device)
     from diffusers import DiffusionPipeline
 
     model_id = resolve(args.model)
@@ -164,7 +196,7 @@ def load_pipeline(args, device):
             lora = LoraConfig(
                 r=args.lora_r,
                 lora_alpha=args.lora_alpha,
-                target_modules=resolve_lora_targets(args.lora_targets, args.model),
+                target_modules=resolve_lora_targets(args.lora_targets, args.model, args.diffusion_family),
             )
             setattr(pipe, name, get_peft_model(module, lora))
     else:
@@ -173,6 +205,76 @@ def load_pipeline(args, device):
     pipe.to(device)
     for _, module in _trainable_module_items(pipe):
         module.train()
+    return pipe
+
+
+def _import_from_string(path: str):
+    import importlib
+
+    module, _, name = path.rpartition(".")
+    return getattr(importlib.import_module(module), name)
+
+
+def _resolve_nava_path(path: str, root: str | None) -> str:
+    expanded = os.path.expanduser(path)
+    if os.path.isabs(expanded) or root is None:
+        return expanded
+    return os.path.join(root, expanded)
+
+
+def _load_state_dict(path: str):
+    if path.endswith(".safetensors"):
+        from safetensors.torch import load_file
+
+        return load_file(path, device="cpu")
+    obj = torch.load(path, map_location="cpu")
+    return obj.get("state_dict", obj) if isinstance(obj, dict) else obj
+
+
+def load_nava_pipeline(args, device):
+    import sys
+
+    import yaml
+
+    root = args.nava_root or os.environ.get("YETO_NAVA_ROOT")
+    if root:
+        root = os.path.abspath(os.path.expanduser(root))
+        if root not in sys.path:
+            sys.path.insert(0, root)
+    cfg_path = _resolve_nava_path(args.nava_config, root)
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    if "video" in cfg.get("modality", "") and "audio" in cfg.get("modality", ""):
+        cfg["init_from_meta"] = True
+    pipe_cls = _import_from_string(cfg["pipeline"])
+    pipe = pipe_cls.create(
+        model_id=cfg.get("model_id", ""),
+        use_bf16=cfg["use_bf16"],
+        audio_latent_ch=cfg["audio_latent_ch"],
+        video_latent_ch=cfg["video_latent_ch"],
+        lambda_ddpm=cfg["lambda_ddpm"],
+        cfg=cfg,
+        device=device,
+    )
+    dtype = torch.bfloat16 if cfg.get("use_bf16", True) else torch.float16
+    pipe.model.to(device=device, dtype=dtype)
+    if args.nava_checkpoint:
+        ckpt = _resolve_nava_path(args.nava_checkpoint, root)
+        missing, unexpected = pipe.model.load_state_dict(_load_state_dict(ckpt), strict=False)
+        if missing or unexpected:
+            log.info("loaded NAVA checkpoint with missing=%d unexpected=%d", len(missing), len(unexpected))
+    if args.tuning == "lora":
+        from .nava_lora import patch_lora
+
+        patch_lora(
+            pipe.model,
+            r=args.lora_r,
+            alpha=args.lora_alpha,
+            target=args.lora_targets,
+        )
+    elif args.tuning == "full":
+        pipe.model.requires_grad_(True)
+    pipe.switch_training_mode()
     return pipe
 
 
@@ -263,6 +365,8 @@ class StreamingDiffusionRows(IterableDataset):
         dataset_name,
         learner_id: int,
         num_learners: int,
+        micro_batch_size: int = 1,
+        bucket_by_shape: bool = False,
         max_rows: int | None = None,
         rank: int = 0,
         world: int = 1,
@@ -272,6 +376,8 @@ class StreamingDiffusionRows(IterableDataset):
         self.dataset_name = dataset_name
         self.learner_id = learner_id
         self.num_learners = num_learners
+        self.micro_batch_size = micro_batch_size
+        self.bucket_by_shape = bucket_by_shape
         self.max_rows = max_rows
         self.rank = rank
         self.world = world
@@ -297,6 +403,7 @@ class StreamingDiffusionRows(IterableDataset):
                 f"learner {self.learner_id} rank {self.rank} worker {worker_id}: no rows left"
             )
         rng = random.Random(self.seed + consumer)
+        buckets: dict[tuple, list[dict]] = {}
         while True:
             order = my_rows[:]
             rng.shuffle(order)
@@ -304,7 +411,23 @@ class StreamingDiffusionRows(IterableDataset):
                 row = dict(ds[i])
                 if data_root is not None:
                     row["__yeto_data_root__"] = str(data_root)
-                yield row
+                if not self.bucket_by_shape:
+                    yield row
+                    continue
+                key = _shape_key(row)
+                bucket = buckets.setdefault(key, [])
+                bucket.append(row)
+                if len(bucket) >= self.micro_batch_size:
+                    yield bucket[: self.micro_batch_size]
+                    del bucket[: self.micro_batch_size]
+
+
+def _shape_key(row: dict) -> tuple:
+    return (
+        row.get("latent_num_frames", row.get("frames", row.get("num_frames"))),
+        row.get("latent_height", row.get("height")),
+        row.get("latent_width", row.get("width")),
+    )
 
 
 def _collate_rows(rows):
@@ -361,6 +484,28 @@ def _open_image(value, base_dir: str | None = None):
     raise TypeError(f"unsupported image value {type(value).__name__}")
 
 
+def _open_video_frames(value, base_dir: str | None = None):
+    if isinstance(value, (list, tuple)):
+        return [_open_image(v, base_dir) for v in value]
+    if isinstance(value, str):
+        path = Path(os.path.expanduser(value))
+        if not path.is_absolute() and base_dir:
+            path = Path(base_dir) / path
+        if path.is_dir():
+            files = sorted(
+                p for p in path.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")
+            )
+            return [_open_image(str(p)) for p in files]
+        try:
+            import imageio.v3 as iio
+        except ImportError as exc:
+            raise RuntimeError("raw video files need imageio installed, or pass frame paths / --cache-latents") from exc
+        from PIL import Image
+
+        return [Image.fromarray(frame).convert("RGB") for frame in iio.imiter(path)]
+    raise TypeError(f"unsupported video value {type(value).__name__}")
+
+
 def _manual_preprocess(images, height: int | None, width: int | None) -> torch.Tensor:
     import numpy as np
 
@@ -373,19 +518,62 @@ def _manual_preprocess(images, height: int | None, width: int | None) -> torch.T
     return torch.stack(tensors)
 
 
-def encode_latents(pipe, rows, args, device, dtype) -> torch.Tensor:
+def _manual_preprocess_video(videos, height: int | None, width: int | None) -> torch.Tensor:
+    # videos: list[list[PIL]] -> (B, C, F, H, W)
+    frames = [_manual_preprocess(video, height, width).permute(1, 0, 2, 3) for video in videos]
+    return torch.stack(frames)
+
+
+def _latent_meta(rows, latents: torch.Tensor) -> tuple[int | None, int | None, int | None]:
+    if latents.ndim == 5:
+        return int(latents.shape[2]), int(latents.shape[3]), int(latents.shape[4])
+    first = rows[0] if rows else {}
+    return (
+        first.get("latent_num_frames", first.get("frames", first.get("num_frames"))),
+        first.get("latent_height", first.get("height")),
+        first.get("latent_width", first.get("width")),
+    )
+
+
+def _prepare_ltx_latents(pipe, latents: torch.Tensor, rows) -> LatentBatch:
+    frames, height, width = _latent_meta(rows, latents)
+    if latents.ndim == 5:
+        if hasattr(pipe, "_normalize_latents") and hasattr(pipe, "vae"):
+            latents = pipe._normalize_latents(
+                latents,
+                pipe.vae.latents_mean,
+                pipe.vae.latents_std,
+                pipe.vae.config.scaling_factor,
+            )
+        if hasattr(pipe, "_pack_latents"):
+            latents = pipe._pack_latents(
+                latents,
+                getattr(pipe, "transformer_spatial_patch_size", 1),
+                getattr(pipe, "transformer_temporal_patch_size", 1),
+            )
+    return LatentBatch(latents, frames, height, width)
+
+
+def encode_latents(pipe, rows, args, device, dtype) -> LatentBatch:
     if args.cache_latents:
         latents = _stack_column(rows, args.latent_column, device, dtype)
         if latents is None:
             raise KeyError(f"--cache-latents needs column {args.latent_column!r}")
-        return latents
+        if args.diffusion_family == "ltx":
+            return _prepare_ltx_latents(pipe, latents, rows)
+        return LatentBatch(latents, *_latent_meta(rows, latents))
     if not hasattr(pipe, "vae") or pipe.vae is None:
         raise RuntimeError("raw diffusion rows need a pipeline VAE, or pass --cache-latents")
-    images = [_open_image(row[args.image_column], row.get("__yeto_data_root__")) for row in rows]
-    if hasattr(pipe, "image_processor"):
-        pixels = pipe.image_processor.preprocess(images, height=args.height, width=args.width)
+    if any(args.video_column in row for row in rows):
+        videos = [_open_video_frames(row[args.video_column], row.get("__yeto_data_root__")) for row in rows]
+        pixels = _manual_preprocess_video(videos, args.height, args.width)
     else:
-        pixels = _manual_preprocess(images, args.height, args.width)
+        images = [_open_image(row[args.image_column], row.get("__yeto_data_root__")) for row in rows]
+        pixels = (
+            pipe.image_processor.preprocess(images, height=args.height, width=args.width)
+            if hasattr(pipe, "image_processor")
+            else _manual_preprocess(images, args.height, args.width)
+        )
     pixels = pixels.to(device=device, dtype=dtype)
     with torch.no_grad():
         encoded = pipe.vae.encode(pixels)
@@ -393,7 +581,9 @@ def encode_latents(pipe, rows, args, device, dtype) -> torch.Tensor:
         scale = getattr(getattr(pipe.vae, "config", None), "scaling_factor", 1.0)
         shift = getattr(getattr(pipe.vae, "config", None), "shift_factor", 0.0)
         latents = (latents - shift) * scale
-    return latents
+    if args.diffusion_family == "ltx":
+        return _prepare_ltx_latents(pipe, latents, rows)
+    return LatentBatch(latents, *_latent_meta(rows, latents))
 
 
 def _call_encode_prompt(pipe, prompts, device):
@@ -412,21 +602,30 @@ def _call_encode_prompt(pipe, prompts, device):
         kwargs["device"] = device
     if "num_images_per_prompt" in params:
         kwargs["num_images_per_prompt"] = 1
+    if "num_videos_per_prompt" in params:
+        kwargs["num_videos_per_prompt"] = 1
     if "do_classifier_free_guidance" in params:
         kwargs["do_classifier_free_guidance"] = False
     with torch.no_grad():
         out = pipe.encode_prompt(**kwargs)
     if isinstance(out, dict):
-        return out.get("prompt_embeds"), out.get("pooled_prompt_embeds")
+        return TextConditioning(
+            out.get("prompt_embeds"),
+            out.get("pooled_prompt_embeds"),
+            out.get("prompt_attention_mask"),
+        )
     if isinstance(out, tuple):
         prompt_embeds = out[0]
+        attention_mask = out[1] if len(out) > 1 and torch.is_tensor(out[1]) and out[1].ndim == 2 else None
         pooled = None
         for value in out[1:]:
             if torch.is_tensor(value) and value.ndim == 2:
+                if value is attention_mask:
+                    continue
                 pooled = value
                 break
-        return prompt_embeds, pooled
-    return out, None
+        return TextConditioning(prompt_embeds, pooled, attention_mask)
+    return TextConditioning(out)
 
 
 def encode_prompt_embeds(pipe, rows, args, device, dtype):
@@ -435,12 +634,14 @@ def encode_prompt_embeds(pipe, rows, args, device, dtype):
         if prompt_embeds is None:
             raise KeyError(f"--cache-text-embeds needs column {args.text_embeds_column!r}")
         pooled = _stack_column(rows, args.pooled_text_embeds_column, device, dtype)
-        return prompt_embeds, pooled
+        mask = _stack_column(rows, args.text_attention_mask_column, device, None)
+        return TextConditioning(prompt_embeds, pooled, mask)
     prompts = [str(row.get(args.prompt_column, "")) for row in rows]
-    prompt_embeds, pooled = _call_encode_prompt(pipe, prompts, device)
-    prompt_embeds = prompt_embeds.to(device=device, dtype=dtype) if prompt_embeds is not None else None
-    pooled = pooled.to(device=device, dtype=dtype) if pooled is not None else None
-    return prompt_embeds, pooled
+    cond = _call_encode_prompt(pipe, prompts, device)
+    cond.prompt_embeds = cond.prompt_embeds.to(device=device, dtype=dtype) if cond.prompt_embeds is not None else None
+    cond.pooled_prompt_embeds = cond.pooled_prompt_embeds.to(device=device, dtype=dtype) if cond.pooled_prompt_embeds is not None else None
+    cond.attention_mask = cond.attention_mask.to(device=device) if cond.attention_mask is not None else None
+    return cond
 
 
 def _num_train_timesteps(scheduler) -> int:
@@ -453,7 +654,8 @@ def _match_dims(values: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return values
 
 
-def add_noise_and_target(pipe, latents: torch.Tensor):
+def add_noise_and_target(pipe, batch: LatentBatch):
+    latents = batch.latents
     scheduler = getattr(pipe, "scheduler", None)
     if scheduler is None:
         raise RuntimeError("diffusion pipeline has no scheduler")
@@ -470,7 +672,7 @@ def add_noise_and_target(pipe, latents: torch.Tensor):
         indices = timesteps.clamp(max=sigmas.numel() - 1)
         sigma = _match_dims(sigmas[indices], latents)
         noisy = (1.0 - sigma) * latents + sigma * noise
-        return noisy, noise - latents, timesteps
+        return LatentBatch(noisy, batch.latent_num_frames, batch.latent_height, batch.latent_width), noise - latents, timesteps
     if hasattr(scheduler, "add_noise"):
         noisy = scheduler.add_noise(latents, noise, timesteps)
         pred_type = getattr(getattr(scheduler, "config", None), "prediction_type", "epsilon")
@@ -478,7 +680,7 @@ def add_noise_and_target(pipe, latents: torch.Tensor):
             target = scheduler.get_velocity(latents, noise, timesteps)
         else:
             target = noise
-        return noisy, target, timesteps
+        return LatentBatch(noisy, batch.latent_num_frames, batch.latent_height, batch.latent_width), target, timesteps
     raise RuntimeError("scheduler must provide sigmas or add_noise()")
 
 
@@ -487,6 +689,15 @@ def _first_trainable_module(pipe) -> torch.nn.Module:
     if not modules:
         raise RuntimeError("no trainable diffusion module loaded")
     return modules[0][1]
+
+
+def _select_trainable_module(pipe, family: str, timesteps: torch.Tensor) -> torch.nn.Module:
+    if family == "wan" and getattr(pipe, "transformer_2", None) is not None:
+        ratio = getattr(getattr(pipe, "config", None), "boundary_ratio", None)
+        if ratio is not None:
+            n = getattr(getattr(pipe.scheduler, "config", None), "num_train_timesteps", 1000)
+            return pipe.transformer_2 if timesteps.float().mean().item() < float(ratio) * n else pipe.transformer
+    return _first_trainable_module(pipe)
 
 
 def _extract_model_output(out):
@@ -501,40 +712,81 @@ def _extract_model_output(out):
     raise TypeError(f"cannot extract tensor from model output {type(out).__name__}")
 
 
-def denoise_forward(pipe, noisy, timesteps, prompt_embeds, pooled):
-    model = _first_trainable_module(pipe)
+def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning, args):
+    model = _select_trainable_module(pipe, args.diffusion_family, timesteps)
     inspect_model = getattr(model, "module", model)
     sig = inspect.signature(inspect_model.forward)
     params = sig.parameters
     kwargs = {}
     if "hidden_states" in params:
-        kwargs["hidden_states"] = noisy
+        kwargs["hidden_states"] = noisy.latents
     elif "sample" in params:
-        kwargs["sample"] = noisy
+        kwargs["sample"] = noisy.latents
     else:
-        kwargs[next(iter(params))] = noisy
+        kwargs[next(iter(params))] = noisy.latents
     if "timestep" in params:
         kwargs["timestep"] = timesteps
     elif "timesteps" in params:
         kwargs["timesteps"] = timesteps
-    if "encoder_hidden_states" in params and prompt_embeds is not None:
-        kwargs["encoder_hidden_states"] = prompt_embeds
-    if "pooled_projections" in params and pooled is not None:
-        kwargs["pooled_projections"] = pooled
-    if "pooled_prompt_embeds" in params and pooled is not None:
-        kwargs["pooled_prompt_embeds"] = pooled
+    if "encoder_hidden_states" in params and cond.prompt_embeds is not None:
+        kwargs["encoder_hidden_states"] = cond.prompt_embeds
+    if "encoder_attention_mask" in params:
+        kwargs["encoder_attention_mask"] = cond.attention_mask
+    if "pooled_projections" in params and cond.pooled_prompt_embeds is not None:
+        kwargs["pooled_projections"] = cond.pooled_prompt_embeds
+    if "pooled_prompt_embeds" in params and cond.pooled_prompt_embeds is not None:
+        kwargs["pooled_prompt_embeds"] = cond.pooled_prompt_embeds
+    if "num_frames" in params and noisy.latent_num_frames is not None:
+        kwargs["num_frames"] = int(noisy.latent_num_frames)
+    if "height" in params and noisy.latent_height is not None:
+        kwargs["height"] = int(noisy.latent_height)
+    if "width" in params and noisy.latent_width is not None:
+        kwargs["width"] = int(noisy.latent_width)
+    if "rope_interpolation_scale" in params and args.diffusion_family == "ltx":
+        kwargs["rope_interpolation_scale"] = (
+            getattr(pipe, "vae_temporal_compression_ratio", 1) / max(1, args.frame_rate),
+            getattr(pipe, "vae_spatial_compression_ratio", 1),
+            getattr(pipe, "vae_spatial_compression_ratio", 1),
+        )
     if "return_dict" in params:
         kwargs["return_dict"] = False
     out = model(**kwargs)
     return _extract_model_output(out)
 
 
-def compute_diffusion_loss(pipe, rows, args, device):
+def _maybe_tensor_column(rows, *names, device=None, dtype=None):
+    for name in names:
+        value = _stack_column(rows, name, device, dtype)
+        if value is not None:
+            return value
+    return None
+
+
+def _nava_batch_from_rows(rows, args, device):
+    video = _maybe_tensor_column(rows, "video_latents", args.latent_column, device=device)
+    audio = _maybe_tensor_column(rows, "audio_latents", device=device)
+    image = _maybe_tensor_column(rows, "image_latents", device=device)
+    spk = [row.get("spk_embs", []) for row in rows]
+    thw = [row.get("t_h_w", row.get("t_h_w_list")) for row in rows]
+    return {
+        "captions": [str(row.get("caption", row.get(args.prompt_column, ""))) for row in rows],
+        "audio_latents": audio,
+        "video_latents": video,
+        "image_latents": image,
+        "spk_embs": spk,
+        "t_h_w_list": thw if any(x is not None for x in thw) else None,
+    }
+
+
+def compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0):
+    if args.diffusion_family == "nava":
+        loss, _logs = pipe.forward(_nava_batch_from_rows(rows, args, device), global_step=global_step)
+        return loss, torch.ones((), device=device)
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     latents = encode_latents(pipe, rows, args, device, dtype)
-    prompt_embeds, pooled = encode_prompt_embeds(pipe, rows, args, device, dtype)
+    cond = encode_prompt_embeds(pipe, rows, args, device, dtype)
     noisy, target, timesteps = add_noise_and_target(pipe, latents)
-    pred = denoise_forward(pipe, noisy, timesteps, prompt_embeds, pooled)
+    pred = denoise_forward(pipe, noisy, timesteps, cond, args)
     if args.loss_function != "flow_matching":
         raise ValueError("diffusion learner currently supports --loss-function flow_matching")
     return flow_matching_loss(pred, target, timesteps)
@@ -551,6 +803,12 @@ def save_adapters(pipe, output_dir: str) -> None:
             saved = True
     if not saved and hasattr(pipe, "save_lora_weights"):
         pipe.save_lora_weights(str(out))
+        saved = True
+    if not saved:
+        torch.save(
+            {n: p.detach().cpu() for n, p in trainable_params(pipe).items()},
+            out / "trainable_state.pt",
+        )
 
 
 def main(argv=None) -> None:
@@ -602,15 +860,17 @@ def main(argv=None) -> None:
         args.data,
         args.learner_id,
         args.num_learners,
+        args.micro_batch_size,
+        args.bucket_by_shape,
         args.max_rows,
         rank=rank,
         world=world,
     )
     loader = DataLoader(
         dataset,
-        batch_size=args.micro_batch_size,
+        batch_size=None if args.bucket_by_shape else args.micro_batch_size,
         num_workers=args.stream_workers,
-        collate_fn=_collate_rows,
+        collate_fn=None if args.bucket_by_shape else _collate_rows,
         pin_memory=device.type == "cuda",
     )
 
@@ -642,7 +902,7 @@ def main(argv=None) -> None:
     t_last = time.monotonic()
     opt.zero_grad(set_to_none=True)
     for rows in loader:
-        loss, denom = compute_diffusion_loss(pipe, rows, args, device)
+        loss, denom = compute_diffusion_loss(pipe, rows, args, device, global_step=global_step)
         (loss / (denom.clamp(min=1) * args.grad_accum)).backward()
         accum += 1
         if accum < args.grad_accum:

@@ -110,6 +110,15 @@ DIFFUSION_MODEL_ALIASES = {
     "sd35": "stabilityai/stable-diffusion-3.5-large",
     "ltx-video": "Lightricks/LTX-Video",
     "wan22": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+    "nava": "nava",
+}
+
+DIFFUSION_MODEL_FAMILIES = {
+    "flux": "generic",
+    "sd35": "generic",
+    "ltx-video": "ltx",
+    "wan22": "wan",
+    "nava": "nava",
 }
 
 MODEL_KINDS = {
@@ -184,3 +193,19 @@ def resolve_model_kind(model: str, requested: str = "auto") -> str:
     if requested != "auto":
         return requested
     return MODEL_KINDS.get(model, "causal-lm")
+
+
+def resolve_diffusion_family(model: str, requested: str = "auto") -> str:
+    """Return the diffusion adapter family for a model alias or repo id."""
+    if requested != "auto":
+        return requested
+    if model in DIFFUSION_MODEL_FAMILIES:
+        return DIFFUSION_MODEL_FAMILIES[model]
+    lowered = model.lower()
+    if "ltx" in lowered:
+        return "ltx"
+    if "wan" in lowered:
+        return "wan"
+    if "nava" in lowered:
+        return "nava"
+    return "generic"
