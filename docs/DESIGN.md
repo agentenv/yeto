@@ -2,6 +2,16 @@
 
 Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
 
+## Core architecture
+
+Yeto separates the synchronization core from task runtimes. The launcher,
+fragment layout, Rust syncer, recovery controller, and delivery path are shared.
+Task backends provide CLI flags, validation, learner task construction, runtime
+images, and export behavior. The default `lm` backend owns language-model
+fine-tuning and its island engines (`torch`, `megatron`). The `diffusion`
+backend owns a generic DiLoCo loop and delegates framework-specific model/data/
+trainable/export behavior to components such as `nava`. See docs/BACKENDS.md.
+
 - **Merging**: per-learner outer gradient Δ_m,p = Θ_p(prev) − θ_m,p anchored
   at the syncer's previous fragment value; learner weights
   w_m = c_tokens²/c_steps (quantity × quality); weighted RDA per tensor on
@@ -45,23 +55,19 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   than bf16); broadcasts and init stay bf16. See docs/PROTOCOL.md.
 - **Fragment patterns**: `--fragment-pattern binpack` (default,
   size-balanced) or `strided` (transformer layer i → fragment i mod P,
-  interleaving depth across fragments as in Streaming DiLoCo).
+  interleaving depth across fragments as in Streaming DiLoCo). Backends may
+  mark additional tensor names for direct averaging (for example small
+  bias/norm/modulation tensors) while preserving the same merge modes on every
+  learner through layout metadata.
 - **Snapshots**: the single-actor syncer checkpoints at the quiescent cut
   between rounds (params, momentum, per-fragment versions, merged-token
-  ledger). `--resume` restores; a JSONL event tape records every merge.
-- **Fine-tuning**: `--tuning lora` (default) syncs only adapter weights —
-  fragments are megabytes, so the syncer and WAN stay cheap even for large
-  models. `--tuning full` syncs everything.
-- **Task backends**: what yeto trains is a plug-in. The sync core (syncer,
-  fragments, wire protocol, fleet orchestration) is task-agnostic; each *task*
-  registers a `TaskBackend` (`yeto/backends/`) that owns its CLI flags,
-  validation, learner-task construction, fit warnings, and export, reached
-  through `get_backend(--task)`. `lm` (text LMs, the default) and `nava`
-  (multimodal diffusion — a self-contained package under `yeto/nava/`) ship
-  today. Within `lm` the intra-island trainer is a second plug-in, an
-  `IslandEngine` (`--island-backend torch|megatron`; see docs/MEGATRON.md). A
-  new task or engine registers itself with no edits to the CLI, launcher, or
-  export dispatch.
+  ledger, and optional layout/task metadata). `--resume` restores; a JSONL
+  event tape records every merge.
+- **Fine-tuning**: LM runs use `--tuning lora` (default) to sync only adapter
+  weights — fragments are megabytes, so the syncer and WAN stay cheap even for
+  large models. `--tuning full` syncs everything. Diffusion components expose
+  their own trainable policy through `--adapter` (`lora`, `full`, or `regex`)
+  and pass the resulting tensor set to the same sync core.
 - **Model sizing**: `deepseek4flash` (DeepSeek-V4-Flash, 284B MoE) needs
   ~568 GB for frozen bf16 weights — more than 8×A100-40GB (320 GB); use
   ≥16×80GB GPUs per learner, or pick `gemma4` (12B) / any smaller HF id.

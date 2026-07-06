@@ -84,6 +84,7 @@ def validate_layout_metadata(
     params: Mapping[str, torch.Tensor],
     *,
     expected_task: str | None = None,
+    expected_component: str | None = None,
     base_checkpoint_sha256: str | None = None,
     allow_base_mismatch: bool = False,
 ) -> None:
@@ -92,6 +93,10 @@ def validate_layout_metadata(
         return
     if expected_task is not None and meta.get("task") != expected_task:
         raise ValueError(f"checkpoint task {meta.get('task')!r} != expected {expected_task!r}")
+    if expected_component is not None and meta.get("component") != expected_component:
+        raise ValueError(
+            f"checkpoint component {meta.get('component')!r} != expected {expected_component!r}"
+        )
     expected_hash = meta.get("layout_hash")
     if expected_hash and expected_hash != layout_metadata_hash(meta, include_hash=False):
         raise ValueError("checkpoint layout metadata hash is invalid")

@@ -80,10 +80,10 @@ def build_layout(
     """Partition (name, numel) pairs into at most `num_fragments` fragments.
 
     Embedding-like tensors share one avg-merged fragment; callers may add a
-    regex for other vector-like tensors (e.g. NAVA bias/norm/modulation).
-    The rest go into the remaining fragments with RDA, placed by ``pattern``
-    (see module docstring). If there are fewer non-embedding tensors than
-    bins, the fragment count shrinks.
+    regex for other vector-like tensors (for example diffusion bias/norm
+    tensors). The rest go into the remaining fragments with RDA, placed by
+    ``pattern`` (see module docstring). If there are fewer non-embedding
+    tensors than bins, the fragment count shrinks.
     """
     if num_fragments < 1:
         raise ValueError("num_fragments must be >= 1")

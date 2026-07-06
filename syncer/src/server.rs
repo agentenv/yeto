@@ -101,10 +101,7 @@ struct Group {
 impl Group {
     async fn send_small(&self, msg_type: u8, payload: bytes::Bytes) -> Result<()> {
         self.control
-            .send(OutFrame {
-                msg_type,
-                parts: vec![payload],
-            })
+            .send(OutFrame { msg_type, parts: vec![payload] })
             .await
             .map_err(|_| anyhow::anyhow!("learner {} control stream closed", self.learner_id))
     }
@@ -230,10 +227,9 @@ impl StepRates {
 
     /// Slowest learner's estimated step time, if any estimate exists.
     fn max_step_secs(&self) -> Option<f64> {
-        self.0
-            .values()
-            .filter_map(|(_, _, e)| *e)
-            .fold(None, |acc, v| Some(acc.map_or(v, |a: f64| a.max(v))))
+        self.0.values().filter_map(|(_, _, e)| *e).fold(None, |acc, v| {
+            Some(acc.map_or(v, |a: f64| a.max(v)))
+        })
     }
 }
 
@@ -268,11 +264,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     scheduler(cfg, event_rx, registry).await
 }
 
-async fn handle_connection(
-    stream: TcpStream,
-    registry: Registry,
-    event_tx: mpsc::Sender<Event>,
-) -> Result<()> {
+async fn handle_connection(stream: TcpStream, registry: Registry, event_tx: mpsc::Sender<Event>) -> Result<()> {
     stream.set_nodelay(true)?;
     let (mut rd, wr) = stream.into_split();
     let first = read_frame(&mut rd).await?;
@@ -308,14 +300,9 @@ async fn handle_connection(
                 reasm: Mutex::new(HashMap::new()),
             });
             registry.lock().unwrap().insert(learner_id, group.clone());
-            info!(
-                learner_id,
-                num_streams, "learner connected (layout: {} fragments)", num_fragments
-            );
+            info!(learner_id, num_streams, "learner connected (layout: {} fragments)", num_fragments);
             event_tx
-                .send(Event::Hello {
-                    group: group.clone(),
-                })
+                .send(Event::Hello { group: group.clone() })
                 .await
                 .ok();
             let res = read_loop(&mut rd, &group, &event_tx).await;
@@ -336,8 +323,7 @@ async fn handle_connection(
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            let group =
-                group.with_context(|| format!("DATA_HELLO for unknown learner {learner_id}"))?;
+            let group = group.with_context(|| format!("DATA_HELLO for unknown learner {learner_id}"))?;
             let (tx, rx) = mpsc::channel::<OutFrame>(WRITER_QUEUE);
             tokio::spawn(writer_task(wr, rx));
             group.data.lock().unwrap().push(tx);
@@ -375,11 +361,7 @@ async fn writer_task(mut wr: OwnedWriteHalf, mut rx: mpsc::Receiver<OutFrame>) {
     }
 }
 
-async fn read_loop(
-    rd: &mut (impl tokio::io::AsyncReadExt + Unpin),
-    group: &Arc<Group>,
-    event_tx: &mpsc::Sender<Event>,
-) -> Result<()> {
+async fn read_loop(rd: &mut (impl tokio::io::AsyncReadExt + Unpin), group: &Arc<Group>, event_tx: &mpsc::Sender<Event>) -> Result<()> {
     loop {
         let frame = read_frame(rd).await?;
         match frame.msg_type {
@@ -403,10 +385,9 @@ fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<Frame>> {
         bail!("chunk overflow");
     }
     let mut reasm = group.reasm.lock().unwrap();
-    let entry = reasm.entry(msg_id).or_insert_with(|| PartialMsg {
-        buf: vec![0; total],
-        filled: 0,
-    });
+    let entry = reasm
+        .entry(msg_id)
+        .or_insert_with(|| PartialMsg { buf: vec![0; total], filled: 0 });
     entry.buf[offset..offset + data.len()].copy_from_slice(data);
     entry.filled += data.len();
     if entry.filled < total {
@@ -430,31 +411,17 @@ fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<Frame>> {
     if payload.len() != len {
         bail!("inner frame length mismatch");
     }
-    Ok(Some(Frame {
-        msg_type,
-        payload: payload.to_vec(),
-    }))
+    Ok(Some(Frame { msg_type, payload: payload.to_vec() }))
 }
 
-async fn dispatch_inner(
-    group: &Arc<Group>,
-    msg_type: u8,
-    payload: &[u8],
-    event_tx: &mpsc::Sender<Event>,
-) -> Result<()> {
+async fn dispatch_inner(group: &Arc<Group>, msg_type: u8, payload: &[u8], event_tx: &mpsc::Sender<Event>) -> Result<()> {
     match msg_type {
         MSG_INIT_PARAMS => {
             let mut r = Reader(payload);
             let fragment_id = r.u32()?;
             let mut values = Vec::new();
             decode_tensor(bulk_dtype(group.dtype), r.rest(), &mut values)?;
-            event_tx
-                .send(Event::Init {
-                    fragment_id,
-                    values,
-                })
-                .await
-                .ok();
+            event_tx.send(Event::Init { fragment_id, values }).await.ok();
         }
         MSG_PUSH_FRAGMENT => {
             let mut r = Reader(payload);
@@ -493,30 +460,20 @@ async fn dispatch_inner(
                 .ok();
         }
         MSG_HEARTBEAT => {}
-        t => bail!(
-            "unexpected message type {t} from learner {}",
-            group.learner_id
-        ),
+        t => bail!("unexpected message type {t} from learner {}", group.learner_id),
     }
     Ok(())
 }
 
 // --- scheduler -------------------------------------------------------------
 
-async fn scheduler(
-    cfg: Config,
-    mut events: mpsc::Receiver<Event>,
-    registry: Registry,
-) -> Result<()> {
+async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Registry) -> Result<()> {
     let mut state: Option<GlobalState> = None;
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
     // a resumed checkpoint) and all expected learners have connected (late
     // joiners are still served afterwards).
-    info!(
-        expected = cfg.learners,
-        "waiting for learners and INIT_PARAMS"
-    );
+    info!(expected = cfg.learners, "waiting for learners and INIT_PARAMS");
     loop {
         let connected = registry.lock().unwrap().len() as u32;
         if let Some(st) = &state {
@@ -544,10 +501,7 @@ async fn scheduler(
                     validate_group_compatible(st, &group)?;
                 }
             }
-            Event::Init {
-                fragment_id,
-                values,
-            } => {
+            Event::Init { fragment_id, values } => {
                 let st = state.as_mut().context("INIT before HELLO")?;
                 st.init_fragment(fragment_id as usize, values)?;
                 if st.all_initialized() {
@@ -641,9 +595,7 @@ async fn scheduler(
         let mut completed_any = false;
         let mut i = 0;
         while i < inflight.len() {
-            let deadline = inflight[i]
-                .grace_deadline
-                .unwrap_or(inflight[i].quorum_deadline);
+            let deadline = inflight[i].grace_deadline.unwrap_or(inflight[i].quorum_deadline);
             let expired = now >= deadline;
             if inflight[i].pushes.len() >= connected.max(1)
                 || (expired && !inflight[i].pushes.is_empty())
@@ -655,10 +607,7 @@ async fn scheduler(
             }
             if expired {
                 let r = &mut inflight[i];
-                warn!(
-                    step = r.t,
-                    "quorum timeout with zero pushes; re-sending pull"
-                );
+                warn!(step = r.t, "quorum timeout with zero pushes; re-sending pull");
                 for g in current_groups(&registry) {
                     let _ = g.send_small(MSG_PULL_REQ, r.pull.clone()).await;
                 }
@@ -691,10 +640,9 @@ async fn scheduler(
                 Event::Push(push) => {
                     step_rates.note(push.learner_id, push.local_step, Instant::now());
                     // Route to the in-flight round the pull came from.
-                    if let Some(r) = inflight
-                        .iter_mut()
-                        .find(|r| r.t == push.global_step && r.p == push.fragment_id as usize)
-                    {
+                    if let Some(r) = inflight.iter_mut().find(|r| {
+                        r.t == push.global_step && r.p == push.fragment_id as usize
+                    }) {
                         r.pushes.insert(push.learner_id, push);
                     } // else: stale response from a completed round; drop
                 }
@@ -750,13 +698,7 @@ async fn complete_round(
     last_sync_secs: &mut f64,
     round: Round,
 ) -> Result<()> {
-    let Round {
-        t,
-        p,
-        started,
-        mut pushes,
-        ..
-    } = round;
+    let Round { t, p, started, mut pushes, .. } = round;
     let prev_version = st.versions[p];
     if st.wire_dtype == DTYPE_Q4 {
         // Q4 pushes are deltas anchored at the learner's base_version;
@@ -766,13 +708,8 @@ async fn complete_round(
         // is unreconstructable and dropped.
         pushes.retain(|id, push| {
             if push.base_version != prev_version {
-                warn!(
-                    learner_id = id,
-                    step = t,
-                    base = push.base_version,
-                    expected = prev_version,
-                    "stale q4 delta dropped"
-                );
+                warn!(learner_id = id, step = t, base = push.base_version,
+                      expected = prev_version, "stale q4 delta dropped");
                 return false;
             }
             true
@@ -789,13 +726,8 @@ async fn complete_round(
             // The learner had not yet applied this fragment's last merge;
             // its delta is anchored further back. The weight formula
             // compensates (larger c_steps); recorded for the event tape.
-            warn!(
-                learner_id = id,
-                step = t,
-                base = push.base_version,
-                expected = prev_version,
-                "stale push admitted"
-            );
+            warn!(learner_id = id, step = t, base = push.base_version, expected = prev_version,
+                  "stale push admitted");
         }
         learners.push(push.values.as_slice());
         weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
@@ -860,22 +792,13 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
 
 fn validate_group_compatible(st: &GlobalState, group: &Arc<Group>) -> Result<()> {
     if st.wire_dtype != group.dtype {
-        bail!(
-            "learner {} dtype differs from established syncer state",
-            group.learner_id
-        );
+        bail!("learner {} dtype differs from established syncer state", group.learner_id);
     }
     if st.layout != group.layout {
-        bail!(
-            "learner {} fragment layout differs from established syncer state",
-            group.learner_id
-        );
+        bail!("learner {} fragment layout differs from established syncer state", group.learner_id);
     }
     if st.layout_meta != group.layout_meta {
-        bail!(
-            "learner {} layout metadata differs from established syncer state",
-            group.learner_id
-        );
+        bail!("learner {} layout metadata differs from established syncer state", group.learner_id);
     }
     Ok(())
 }
@@ -986,10 +909,7 @@ mod tests {
     #[test]
     fn grace_clamps_to_zero_and_cap() {
         // Negative slack → no grace.
-        assert_eq!(
-            adaptive_grace(2.0, 0.8, Some(0.1), 1.0, 1.0, CAP),
-            Duration::ZERO
-        );
+        assert_eq!(adaptive_grace(2.0, 0.8, Some(0.1), 1.0, 1.0, CAP), Duration::ZERO);
         // Huge slack → capped.
         assert_eq!(adaptive_grace(2.0, 0.8, Some(60.0), 0.0, 0.0, CAP), CAP);
     }
@@ -1018,10 +938,7 @@ mod tests {
         assert_eq!(rates.max_step_secs(), None); // one sample: no estimate yet
         rates.note(1, 110, t0 + Duration::from_secs(5));
         let est = rates.max_step_secs().unwrap();
-        assert!(
-            (est - 0.5).abs() < 1e-9,
-            "10 steps over 5s = 0.5 s/step, got {est}"
-        );
+        assert!((est - 0.5).abs() < 1e-9, "10 steps over 5s = 0.5 s/step, got {est}");
         // A slower learner dominates the estimate.
         rates.note(2, 10, t0);
         rates.note(2, 12, t0 + Duration::from_secs(4));
@@ -1034,14 +951,11 @@ mod tests {
         let t0 = Instant::now();
         rates.note(1, 0, t0);
         rates.note(1, 10, t0 + Duration::from_secs(5)); // seeds EMA at 0.5 s/step
-                                                        // A one-off 10x-slower interval (2 steps over 10s = 5.0 s/step sample)
-                                                        // must not replace the estimate wholesale: EMA -> 0.5·5.0 + 0.5·0.5.
+        // A one-off 10x-slower interval (2 steps over 10s = 5.0 s/step sample)
+        // must not replace the estimate wholesale: EMA -> 0.5·5.0 + 0.5·0.5.
         rates.note(1, 12, t0 + Duration::from_secs(15));
         let est = rates.max_step_secs().unwrap();
-        assert!(
-            (est - 2.75).abs() < 1e-9,
-            "EMA of 0.5 then 5.0 should be 2.75, got {est}"
-        );
+        assert!((est - 2.75).abs() < 1e-9, "EMA of 0.5 then 5.0 should be 2.75, got {est}");
     }
 
     #[test]

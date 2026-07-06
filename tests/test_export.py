@@ -1,7 +1,7 @@
 """Tests for yeto.export checkpoint parsing (no network, no HF model)."""
 
-import struct
 import json
+import struct
 
 import pytest
 import torch
@@ -44,11 +44,6 @@ def checkpoint_bytes(global_step, blobs, ledger, magic=CKPT_MAGIC):
     for lid, (merges, steps, tokens) in ledger.items():
         buf += struct.pack("<IQQQ", lid, merges, steps, tokens)
     return bytes(buf)
-
-
-def checkpoint_bytes_with_meta(global_step, blobs, ledger, meta):
-    raw = json.dumps(meta, sort_keys=True).encode("utf-8")
-    return checkpoint_bytes(global_step, blobs, ledger) + struct.pack("<I", len(raw)) + raw
 
 
 def make_checkpoint(tmp_path, params, num_fragments=4, global_step=42, magic=CKPT_MAGIC):
@@ -98,20 +93,6 @@ def test_truncated(tmp_path):
         parse_checkpoint(path)
 
 
-def test_layout_metadata_block_is_parsed(tmp_path):
-    params = fake_params()
-    layout = build_layout([(n, p.numel()) for n, p in params.items()], 4)
-    blobs = [(fid, flat_fragment(frag, params), torch.zeros(frag.numel)) for fid, frag in enumerate(layout.fragments)]
-    meta = {"task": "nava", "fragments": []}
-    path = tmp_path / "syncer-meta.ckpt"
-    path.write_bytes(checkpoint_bytes_with_meta(3, blobs, LEDGER, meta))
-
-    ckpt = parse_checkpoint(path)
-
-    assert ckpt.global_step == 3
-    assert ckpt.layout_meta == meta
-
-
 def test_numel_mismatch_raises(tmp_path):
     params = fake_params()
     path, _, _ = make_checkpoint(tmp_path, params, num_fragments=4)
@@ -150,3 +131,14 @@ def test_apply_parsed_fragments_restores_params(tmp_path):
         apply_fragment(frag, flat, target)
     for name in params:
         assert torch.equal(target[name], params[name]), name
+
+
+def test_checkpoint_optional_layout_metadata(tmp_path):
+    params = fake_params()
+    path, _, _ = make_checkpoint(tmp_path, params)
+    meta = {"task": "diffusion", "component": "nava", "fragments": []}
+    raw_meta = json.dumps(meta).encode('utf-8')
+    raw = path.read_bytes() + struct.pack("<I", len(raw_meta)) + raw_meta
+    path.write_bytes(raw)
+    ckpt = parse_checkpoint(path)
+    assert ckpt.layout_meta == meta

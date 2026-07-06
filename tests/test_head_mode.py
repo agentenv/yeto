@@ -164,6 +164,30 @@ def test_cmd_head_reconstructs_args_and_starts_syncer(monkeypatch):
     assert args.controller == "head"
 
 
+def test_cmd_head_counts_external_learners(monkeypatch):
+    seen = {}
+
+    class FakeLocalSyncer:
+        def __init__(self, args, num_learners):
+            seen["num_learners"] = num_learners
+
+        def start(self):
+            pass
+
+        def start_log_forwarder(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(launcher, "LocalSyncer", FakeLocalSyncer)
+    monkeypatch.setattr(launcher, "run", lambda *a, **kw: 0)
+
+    ns = cli.parse_args(LAUNCH_ARGS + ["--external-learners", "1"])
+    assert cli.main(["_head", json.dumps(cli._serializable_args(ns))]) == 0
+    assert seen["num_learners"] == 3
+
+
 # ---------------------------------------------------------------------------
 # cmd_launch in head mode: registry recording with sky stubbed
 
@@ -202,6 +226,21 @@ def test_launch_head_records_registry(fake_sky, monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "yeto down h1" in out
+
+
+def test_launch_head_remote_builds_syncer_for_non_linux_x86(fake_sky, monkeypatch):
+    monkeypatch.setattr(launcher, "needs_remote_syncer_build", lambda: True)
+    monkeypatch.setattr(
+        launcher,
+        "build_syncer_binary",
+        lambda: pytest.fail("remote syncer build must not build locally"),
+    )
+
+    assert cli.main(["launch", *LAUNCH_ARGS, "--cluster-prefix", "hremote"]) == 0
+
+    (_, head_task), = fake_sky["launches"]
+    assert "~/yeto-syncer" not in head_task.file_mounts
+    assert "cargo build --release --quiet" in head_task.setup
 
 
 def test_launch_head_mounts_aws_credentials_when_present(

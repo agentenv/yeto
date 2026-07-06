@@ -1,28 +1,10 @@
-"""Export a syncer checkpoint as a usable Hugging Face model/adapter.
+"""Export a syncer checkpoint as a task-specific fine-tuned artifact.
 
 The syncer's binary checkpoint holds the authoritative global params (plus
 outer momentum and the merge ledger), so a run can be recovered even if every
-learner is gone. This module has two layers:
-
-  * :func:`parse_checkpoint` — decode the binary format written by the Rust
-    syncer (``syncer/src/state.rs``) into a :class:`Checkpoint`.
-  * a CLI (``python3 -m yeto.export``) that loads the base model exactly as a
-    learner would, rebuilds the deterministic fragment layout over the
-    trainable params, overwrites them with the checkpointed values, and saves
-    the result with ``save_pretrained``.
-
-Binary layout (all little-endian):
-
-    magic          u32  (0xD170_5A7E)
-    global_step    u64
-    num_fragments  u32
-    per fragment:  version u64, numel u64, numel x f32 params,
-                   numel x f32 momentum
-    ledger_count   u32
-    per entry:     learner_id u32, merges u64, steps u64, tokens u64
-
-The outer momentum is parsed (and validated) but not needed for export; it
-only matters when the syncer itself resumes from the checkpoint.
+learner is gone. Export dispatches to the selected task backend (``lm`` or a
+component-backed ``diffusion`` run), while :func:`parse_checkpoint` remains a
+small binary decoder usable in tests without loading model runtimes.
 """
 
 from __future__ import annotations
@@ -33,9 +15,6 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 
-import torch
-
-from .backends import all_backends, get_backend
 from .fragments import FragmentLayout
 
 CKPT_MAGIC = 0xD170_5A7E
@@ -49,7 +28,7 @@ class Checkpoint:
     fragments: list[tuple[int, torch.Tensor, torch.Tensor]]
     # learner_id -> (merges, steps, tokens)
     ledger: dict[int, tuple[int, int, int]]
-    # Optional protocol-v3 layout/task metadata appended after the v2 payload.
+    # Optional layout/task metadata appended after the legacy payload.
     layout_meta: dict | None = None
 
 
@@ -116,19 +95,16 @@ def parse_checkpoint(path: str | Path) -> Checkpoint:
 
 
 def _read_f32(raw: bytes) -> torch.Tensor:
+    import torch
+
     # bytearray copy: torch.frombuffer would otherwise alias the read-only
-    # bytes object. Checkpoints are little-endian f32, matching torch's
-    # layout on every supported platform.
+    # bytes object. Checkpoints are little-endian f32, matching torch's layout
+    # on every supported platform.
     return torch.frombuffer(bytearray(raw), dtype=torch.float32)
 
 
 def validate_against_layout(ckpt: Checkpoint, layout: FragmentLayout) -> None:
-    """Hard-error unless the checkpoint's fragments match the rebuilt layout.
-
-    The layout is a pure function of the trainable tensor set and
-    ``--fragments``, so any mismatch means the export flags (--model,
-    --tuning, --lora-r, --fragments) differ from the ones the run used.
-    """
+    """Hard-error unless the checkpoint's fragments match the rebuilt layout."""
     problems = []
     if len(ckpt.fragments) != layout.num_fragments:
         problems.append(
@@ -144,19 +120,16 @@ def validate_against_layout(ckpt: Checkpoint, layout: FragmentLayout) -> None:
     if problems:
         raise ValueError(
             "checkpoint does not match the rebuilt fragment layout; make sure "
-            "--model, --tuning, --lora-r, --fragments and --fragment-pattern "
-            "match the training run: " + "; ".join(problems)
+            "the model/component, trainable policy, fragments, and fragment "
+            "pattern match the training run: " + "; ".join(problems)
         )
 
 
-def parse_args(argv=None):
-    p = argparse.ArgumentParser(
-        prog="python3 -m yeto.export",
-        description="Export a syncer checkpoint into a Hugging Face "
-        "model/adapter directory.",
-    )
-    # Shared across tasks; per-task flags come from the registered backends.
-    p.add_argument("--task", choices=[b.name for b in all_backends()], default="lm")
+def _add_common_export_args(p: argparse.ArgumentParser) -> None:
+    from .backends import backend_names
+
+    p.add_argument("--task", choices=backend_names(), default=None)
+    p.add_argument("--model", required=False, help="model alias; structured aliases select export backend defaults")
     p.add_argument("--checkpoint", required=True, help="path to the syncer checkpoint file")
     p.add_argument("--fragments", type=int, default=8, help="P used during training")
     p.add_argument(
@@ -167,14 +140,43 @@ def parse_args(argv=None):
     )
     p.add_argument("--output-dir", required=True)
     p.add_argument("--device", default="cpu")
-    for backend in all_backends():
-        backend.add_export_cli_args(p)
+
+
+def _selected_export_task(argv) -> str | None:
+    from .backends import backend_names, default_task
+    from .models import inferred_task
+
+    base = argparse.ArgumentParser(add_help=False)
+    base.add_argument("--task", choices=backend_names(), default=None)
+    base.add_argument("--model", required=False)
+    ns, _ = base.parse_known_args(argv)
+    if ns.task:
+        return ns.task
+    return inferred_task(ns.model, default_task())
+
+
+def parse_args(argv=None):
+    argv = None if argv is None else list(argv)
+    from .backends import get_backend
+
+    task = _selected_export_task(argv)
+    p = argparse.ArgumentParser(
+        prog="python3 -m yeto.export",
+        description="Export a syncer checkpoint into a task-specific artifact directory.",
+    )
+    _add_common_export_args(p)
+    p.set_defaults(task=task)
+    get_backend(task).add_export_cli_args(p)
     return p.parse_args(argv)
 
 
 def main(argv=None) -> None:
     args = parse_args(argv)
-    return get_backend(args.task).export(args)
+    from .backends import get_backend
+
+    backend = get_backend(args.task)
+    backend.normalize_args(args)
+    return backend.export(args)
 
 
 if __name__ == "__main__":

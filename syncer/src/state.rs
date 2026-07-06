@@ -334,7 +334,8 @@ mod tests {
         let dir = std::env::temp_dir().join("yeto-ckpt-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.ckpt");
-        let mut st = GlobalState::new(layout2(), Some("{\"task\":\"nava\"}".to_string()), 0.7, 0.9, crate::protocol::DTYPE_F32);
+        let meta = "{\"task\":\"diffusion\",\"component\":\"example\"}".to_string();
+        let mut st = GlobalState::new(layout2(), Some(meta.clone()), 0.7, 0.9, crate::protocol::DTYPE_F32);
         st.init_fragment(0, vec![1.5; 4]).unwrap();
         st.init_fragment(1, vec![-2.0; 4]).unwrap();
         let learner = vec![0.0f32; 4];
@@ -344,14 +345,14 @@ mod tests {
         st.record_merge(3, 12, 4096);
         st.save_checkpoint(&path).unwrap();
 
-        let mut st2 = GlobalState::new(layout2(), Some("{\"task\":\"nava\"}".to_string()), 0.7, 0.9, crate::protocol::DTYPE_F32);
+        let mut st2 = GlobalState::new(layout2(), Some(meta.clone()), 0.7, 0.9, crate::protocol::DTYPE_F32);
         st2.load_checkpoint(&path).unwrap();
         assert_eq!(st2.global_step, 7);
         assert_eq!(st2.versions, vec![7, 0]);
         assert_eq!(st2.params, st.params);
         assert!(st2.all_initialized());
         assert_eq!(st2.ledger.get(&3).unwrap().tokens, 4096);
-        assert_eq!(st2.layout_meta.as_deref(), Some("{\"task\":\"nava\"}"));
+        assert_eq!(st2.layout_meta.as_deref(), Some(meta.as_str()));
         std::fs::remove_file(&path).ok();
     }
 
