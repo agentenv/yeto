@@ -457,21 +457,25 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     import sky
 
     from .datasource import learner_data_arg, learner_file_mounts
+    from .models import resolve_model_kind
 
-    # Flags shared by both island backends. The DiLoCo sync, LoRA, data, and
-    # loss are identical; only the intra-island parallelism differs.
-    learner_flags = (
+    model_kind = resolve_model_kind(args.model, getattr(args, "model_kind", "auto"))
+    loss_function = args.loss_function
+    if model_kind == "diffusion" and loss_function == "cross_entropy":
+        loss_function = "flow_matching"
+
+    # Flags shared by all learners. The DiLoCo sync, LoRA, and data source
+    # shape are identical; the per-task forward/loss loop differs.
+    common_flags = (
         f" --model {shlex.quote(args.model)}"
         f" --data {shlex.quote(learner_data_arg(args.data))}"
         f" --syncer $SYNCER_ADDR"
         f" --learner-id $LEARNER_ID"
         f" --num-learners {num_learners}"
-        f" --loss-function {args.loss_function}"
-        f" --train-on {args.train_on}"
+        f" --loss-function {loss_function}"
         f" --tuning {args.tuning}"
         f" --lora-r {args.lora_r}"
         f" --lora-targets {getattr(args, 'lora_targets', 'auto')}"
-        f" --seq-len {args.seq_len}"
         f" --micro-batch-size {args.micro_batch_size}"
         f" --grad-accum {args.grad_accum}"
         f" --inner-lr {args.inner_lr}"
@@ -484,11 +488,51 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f" --wan-streams {args.wan_streams}"
         f" --output-dir ~/yeto-output"
     )
+    learner_flags = common_flags
+    if model_kind == "causal-lm":
+        learner_flags += (
+            f" --train-on {args.train_on}"
+            f" --seq-len {args.seq_len}"
+            f" --tokenize {args.tokenize}"
+            f" --stream-workers {args.stream_workers}"
+        )
+    else:
+        if getattr(args, "island_backend", "torch") != "torch":
+            raise ValueError("diffusion model-kind uses the torch island backend, not megatron")
+        learner_flags += (
+            f" --shard {args.shard}"
+            f" --image-column {shlex.quote(args.image_column)}"
+            f" --prompt-column {shlex.quote(args.prompt_column)}"
+            f" --latent-column {shlex.quote(args.latent_column)}"
+            f" --text-embeds-column {shlex.quote(args.text_embeds_column)}"
+            f" --pooled-text-embeds-column {shlex.quote(args.pooled_text_embeds_column)}"
+        )
+        if getattr(args, "cache_latents", False):
+            learner_flags += " --cache-latents"
+        if getattr(args, "cache_text_embeds", False):
+            learner_flags += " --cache-text-embeds"
+        if args.height:
+            learner_flags += f" --height {args.height}"
+        if args.width:
+            learner_flags += f" --width {args.width}"
+        if args.num_frames:
+            learner_flags += f" --num-frames {args.num_frames}"
     if args.max_rows:
         learner_flags += f" --max-rows {args.max_rows}"
 
     backend = getattr(args, "island_backend", "torch")
-    if backend == "megatron":
+    if model_kind == "diffusion":
+        entrypoint = "yeto.diffusion.learner"
+        setup_steps = [
+            WAN_TUNING,
+            NVME_SETUP,
+            NVME_ENV,
+            HF_TOKEN_ENV,
+            TORCH_SETUP,
+            "pip install -q -r requirements.txt",
+            "pip install -q 'diffusers>=0.35' safetensors pillow",
+        ]
+    elif backend == "megatron":
         gpus = spec.num_nodes * spec.gpus_per_node
         tp = max(1, getattr(args, "tensor_parallel", 1))
         pp = max(1, getattr(args, "pipeline_parallel", 1))

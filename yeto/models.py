@@ -105,6 +105,18 @@ MODEL_ALIASES = {
     # fp8 repo yourself and pass the path via --model.
 }
 
+DIFFUSION_MODEL_ALIASES = {
+    "flux": "black-forest-labs/FLUX.1-dev",
+    "sd35": "stabilityai/stable-diffusion-3.5-large",
+    "ltx-video": "Lightricks/LTX-Video",
+    "wan22": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+}
+
+MODEL_KINDS = {
+    **{alias: "causal-lm" for alias in MODEL_ALIASES},
+    **{alias: "diffusion" for alias in DIFFUSION_MODEL_ALIASES},
+}
+
 MODEL_WEIGHT_GB = {
     "gemma4": 66,
     "deepseek4flash": 568,
@@ -164,4 +176,11 @@ MODEL_WEIGHT_GB = {
 
 def resolve(model: str) -> str:
     """Alias -> HF id; raw HF ids pass through unchanged."""
-    return MODEL_ALIASES.get(model, model)
+    return MODEL_ALIASES.get(model, DIFFUSION_MODEL_ALIASES.get(model, model))
+
+
+def resolve_model_kind(model: str, requested: str = "auto") -> str:
+    """Return ``causal-lm`` or ``diffusion`` for a launch request."""
+    if requested != "auto":
+        return requested
+    return MODEL_KINDS.get(model, "causal-lm")

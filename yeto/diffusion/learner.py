@@ -1,0 +1,758 @@
+"""Diffusion learner: LoRA training with Yeto fragment synchronization.
+
+The distributed/sync half mirrors ``yeto.learner``. The task-specific half is
+image/video diffusion: load a diffusers pipeline, freeze VAE/text encoders,
+train LoRA adapters on the transformer/UNet denoiser, and compute a denoising
+MSE loss on sampled timesteps.
+"""
+
+from __future__ import annotations
+
+import argparse
+import inspect
+import logging
+import os
+import random
+import time
+from pathlib import Path
+from typing import Any
+
+import torch
+import torch.distributed as dist
+from torch.utils.data import DataLoader, IterableDataset
+
+from ..autobatch import int_or_auto, rebalance_grad_accum
+from ..data import _learner_rows, load_rows
+from ..fragments import build_layout
+from ..losses import flow_matching_loss
+from ..models import resolve
+from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
+from ..tensor_io import (
+    apply_fragment,
+    fragment_flat,
+    pack_fragment,
+    quantize_q4,
+    unpack_fragment,
+)
+
+log = logging.getLogger("diffusion-learner")
+
+_ATTENTION_TARGETS = [
+    "to_q",
+    "to_k",
+    "to_v",
+    "to_out.0",
+    "add_q_proj",
+    "add_k_proj",
+    "add_v_proj",
+    "to_add_out",
+    "q",
+    "k",
+    "v",
+    "o",
+]
+_MLP_TARGETS = [
+    "ff.net.0.proj",
+    "ff.net.2",
+    "ff_context.net.0.proj",
+    "ff_context.net.2",
+    "proj_mlp",
+    "proj_out",
+    "linear_1",
+    "linear_2",
+]
+_DIFFUSION_LORA_TARGETS = {
+    "flux": _ATTENTION_TARGETS + _MLP_TARGETS,
+    "sd35": _ATTENTION_TARGETS + _MLP_TARGETS,
+    "ltx-video": _ATTENTION_TARGETS + _MLP_TARGETS,
+    "wan22": _ATTENTION_TARGETS + _MLP_TARGETS,
+}
+_TRAINABLE_ATTRS = ("transformer", "transformer_2", "unet")
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description="Yeto diffusion learner")
+    p.add_argument("--model", required=True, help="diffusers repo id or alias from yeto.models")
+    p.add_argument("--data", required=True, help="HF dataset id or local latent/media manifest")
+    p.add_argument("--syncer", required=True, help="host:port, or 'none' for standalone")
+    p.add_argument("--learner-id", type=int, required=True)
+    p.add_argument("--num-learners", type=int, required=True)
+    p.add_argument("--loss-function", default="flow_matching")
+    p.add_argument("--tuning", choices=["lora", "full"], default="lora")
+    p.add_argument("--shard", choices=["ddp", "fsdp"], default="ddp")
+    p.add_argument("--lora-r", type=int, default=16)
+    p.add_argument("--lora-alpha", type=int, default=32)
+    p.add_argument("--lora-targets", choices=["auto", "attention", "all-linear"], default="auto")
+    p.add_argument("--micro-batch-size", type=int_or_auto, default="auto")
+    p.add_argument("--grad-accum", type=int, default=1)
+    p.add_argument("--inner-lr", type=float, default=3e-4)
+    p.add_argument("--weight-decay", type=float, default=0.01)
+    p.add_argument("--warmup-steps", type=int, default=10)
+    p.add_argument("--fragments", type=int, default=8)
+    p.add_argument("--fragment-pattern", choices=["binpack", "strided"], default="binpack")
+    p.add_argument("--merge-alpha", type=float, default=0.5)
+    p.add_argument("--wire-dtype", choices=["bf16", "f32", "q4"], default="bf16")
+    p.add_argument("--wan-streams", type=int, default=4)
+    p.add_argument("--max-rows", type=int, default=None)
+    p.add_argument("--max-local-steps", type=int, default=1_000_000)
+    p.add_argument("--stream-workers", type=int, default=2)
+    p.add_argument("--cache-latents", action="store_true", default=False)
+    p.add_argument("--cache-text-embeds", action="store_true", default=False)
+    p.add_argument("--image-column", default="image")
+    p.add_argument("--prompt-column", default="prompt")
+    p.add_argument("--latent-column", default="latents")
+    p.add_argument("--text-embeds-column", default="prompt_embeds")
+    p.add_argument("--pooled-text-embeds-column", default="pooled_prompt_embeds")
+    p.add_argument("--height", type=int, default=None)
+    p.add_argument("--width", type=int, default=None)
+    p.add_argument("--num-frames", type=int, default=None)
+    p.add_argument("--output-dir", default="checkpoints/diffusion-out")
+    p.add_argument("--device", default=None)
+    return p.parse_args(argv)
+
+
+def setup_distributed() -> tuple[int, int]:
+    if "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
+        dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
+        return dist.get_rank(), dist.get_world_size()
+    return 0, 1
+
+
+def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
+    try:
+        return factory.from_pretrained(model_id, local_files_only=True, **kwargs)
+    except Exception:
+        return factory.from_pretrained(model_id, **kwargs)
+
+
+def resolve_lora_targets(choice: str, model: str):
+    """Map the public LoRA target flag to PEFT target_modules for DiTs."""
+    if choice == "all-linear":
+        return "all-linear"
+    if choice == "attention":
+        return _ATTENTION_TARGETS
+    return _DIFFUSION_LORA_TARGETS.get(model, _ATTENTION_TARGETS + _MLP_TARGETS)
+
+
+def _trainable_module_items(pipe) -> list[tuple[str, torch.nn.Module]]:
+    return [(name, getattr(pipe, name)) for name in _TRAINABLE_ATTRS if hasattr(pipe, name)]
+
+
+def _freeze_modules(pipe) -> None:
+    for value in getattr(pipe, "components", {}).values():
+        if isinstance(value, torch.nn.Module):
+            value.requires_grad_(False)
+            value.eval()
+
+
+def load_pipeline(args, device):
+    from diffusers import DiffusionPipeline
+
+    model_id = resolve(args.model)
+    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    pipe = _from_pretrained_offline_first(DiffusionPipeline, model_id, torch_dtype=dtype)
+    _freeze_modules(pipe)
+    modules = _trainable_module_items(pipe)
+    if not modules:
+        raise RuntimeError(
+            f"{model_id} has no trainable diffusion module named one of {_TRAINABLE_ATTRS}"
+        )
+    if args.tuning == "lora":
+        from peft import LoraConfig, get_peft_model
+
+        for name, module in modules:
+            lora = LoraConfig(
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                target_modules=resolve_lora_targets(args.lora_targets, args.model),
+            )
+            setattr(pipe, name, get_peft_model(module, lora))
+    else:
+        for _, module in modules:
+            module.requires_grad_(True)
+    pipe.to(device)
+    for _, module in _trainable_module_items(pipe):
+        module.train()
+    return pipe
+
+
+def trainable_params(pipe) -> dict[str, torch.Tensor]:
+    params: dict[str, torch.Tensor] = {}
+    for module_name, module in _trainable_module_items(pipe):
+        for name, p in module.named_parameters():
+            if p.requires_grad:
+                params[f"{module_name}.{normalize_param_name(name)}"] = p
+    return params
+
+
+_WRAPPER_PREFIXES = ("_fsdp_wrapped_module.", "_checkpoint_wrapped_module.", "module.")
+
+
+def normalize_param_name(name: str) -> str:
+    for prefix in _WRAPPER_PREFIXES:
+        name = name.replace(prefix, "")
+    return name
+
+
+def allreduce_trainable_grads(params, world: int) -> None:
+    if world <= 1:
+        return
+    for p in params:
+        if p.grad is not None:
+            dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+            p.grad.div_(world)
+
+
+def _outer_module_lists(root):
+    found = []
+
+    def visit(m):
+        for child in m.children():
+            if isinstance(child, torch.nn.ModuleList) and len(child) >= 2:
+                found.append(child)
+            else:
+                visit(child)
+
+    visit(root)
+    return found
+
+
+def maybe_wrap_for_distributed(pipe, args, params, rank: int, world: int, device):
+    if args.shard == "fsdp":
+        if device.type != "cuda":
+            raise RuntimeError("diffusion --shard fsdp requires CUDA")
+        if args.tuning == "full" and args.syncer != "none":
+            raise ValueError(
+                "diffusion --shard fsdp with --tuning full cannot sync sharded "
+                "full parameters; use LoRA or --shard ddp"
+            )
+        try:
+            from torch.distributed.fsdp import fully_shard
+        except ImportError as exc:
+            raise RuntimeError("diffusion --shard fsdp needs torch>=2.7") from exc
+        ignored = set(params.values()) if args.tuning == "lora" else set()
+        for _, module in _trainable_module_items(pipe):
+            blocks = [b for ml in _outer_module_lists(module) for b in ml]
+            for block in blocks:
+                block_ignored = ignored & set(block.parameters())
+                fully_shard(block, ignored_params=block_ignored)
+            fully_shard(module, ignored_params=ignored & set(module.parameters()))
+        wrapped = trainable_params(pipe)
+        if args.tuning == "lora" and set(wrapped) != set(params):
+            diff = sorted(set(wrapped) ^ set(params))[:8]
+            raise RuntimeError(f"FSDP changed diffusion adapter names; layout would diverge: {diff}")
+        return wrapped
+    if world > 1 and args.tuning != "lora":
+        for name, module in _trainable_module_items(pipe):
+            setattr(
+                pipe,
+                name,
+                torch.nn.parallel.DistributedDataParallel(
+                    module,
+                    device_ids=[device.index] if device.type == "cuda" else None,
+                    find_unused_parameters=False,
+                ),
+            )
+        return trainable_params(pipe)
+    return params
+
+
+class StreamingDiffusionRows(IterableDataset):
+    def __init__(
+        self,
+        dataset_name,
+        learner_id: int,
+        num_learners: int,
+        max_rows: int | None = None,
+        rank: int = 0,
+        world: int = 1,
+        seed: int = 0,
+        split: str = "train",
+    ):
+        self.dataset_name = dataset_name
+        self.learner_id = learner_id
+        self.num_learners = num_learners
+        self.max_rows = max_rows
+        self.rank = rank
+        self.world = world
+        self.seed = seed
+        self.split = split
+
+    def __iter__(self):
+        ds = load_rows(self.dataset_name, self.split)
+        data_root = None
+        if isinstance(self.dataset_name, str):
+            path = Path(os.path.expanduser(self.dataset_name))
+            if path.exists():
+                data_root = path if path.is_dir() else path.parent
+        info = torch.utils.data.get_worker_info()
+        worker_id = info.id if info else 0
+        num_workers = info.num_workers if info else 1
+        shard = _learner_rows(len(ds), self.learner_id, self.num_learners, self.max_rows)
+        consumer = self.rank * num_workers + worker_id
+        consumers = self.world * num_workers
+        my_rows = shard[consumer::consumers]
+        if not my_rows:
+            raise ValueError(
+                f"learner {self.learner_id} rank {self.rank} worker {worker_id}: no rows left"
+            )
+        rng = random.Random(self.seed + consumer)
+        while True:
+            order = my_rows[:]
+            rng.shuffle(order)
+            for i in order:
+                row = dict(ds[i])
+                if data_root is not None:
+                    row["__yeto_data_root__"] = str(data_root)
+                yield row
+
+
+def _collate_rows(rows):
+    return rows
+
+
+def _tensor_from_value(value: Any, device=None, dtype=None, base_dir: str | None = None) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        tensor = value
+    elif isinstance(value, (list, tuple)):
+        tensor = torch.tensor(value)
+    elif isinstance(value, str):
+        path = Path(os.path.expanduser(value))
+        if not path.is_absolute() and base_dir:
+            path = Path(base_dir) / path
+        if path.suffix in (".pt", ".pth"):
+            tensor = torch.load(path, map_location="cpu")
+        elif path.suffix == ".npy":
+            import numpy as np
+
+            tensor = torch.from_numpy(np.load(path))
+        else:
+            raise ValueError(f"unsupported cached tensor path {value!r}")
+    else:
+        raise TypeError(f"cannot convert {type(value).__name__} to tensor")
+    if dtype is not None and tensor.is_floating_point():
+        tensor = tensor.to(dtype=dtype)
+    return tensor.to(device) if device is not None else tensor
+
+
+def _stack_column(rows, column: str, device, dtype) -> torch.Tensor | None:
+    values = [row.get(column) for row in rows]
+    if any(v is None for v in values):
+        return None
+    tensors = [
+        _tensor_from_value(v, dtype=dtype, base_dir=row.get("__yeto_data_root__"))
+        for row, v in zip(rows, values)
+    ]
+    return torch.stack(tensors).to(device)
+
+
+def _open_image(value, base_dir: str | None = None):
+    from PIL import Image
+
+    if isinstance(value, Image.Image):
+        return value.convert("RGB")
+    if isinstance(value, str):
+        path = Path(os.path.expanduser(value))
+        if not path.is_absolute() and base_dir:
+            path = Path(base_dir) / path
+        return Image.open(path).convert("RGB")
+    if isinstance(value, dict) and "path" in value:
+        return _open_image(value["path"], base_dir).convert("RGB")
+    raise TypeError(f"unsupported image value {type(value).__name__}")
+
+
+def _manual_preprocess(images, height: int | None, width: int | None) -> torch.Tensor:
+    import numpy as np
+
+    tensors = []
+    for img in images:
+        if height and width:
+            img = img.resize((width, height))
+        arr = torch.from_numpy(np.array(img)).float() / 127.5 - 1.0
+        tensors.append(arr.permute(2, 0, 1))
+    return torch.stack(tensors)
+
+
+def encode_latents(pipe, rows, args, device, dtype) -> torch.Tensor:
+    if args.cache_latents:
+        latents = _stack_column(rows, args.latent_column, device, dtype)
+        if latents is None:
+            raise KeyError(f"--cache-latents needs column {args.latent_column!r}")
+        return latents
+    if not hasattr(pipe, "vae") or pipe.vae is None:
+        raise RuntimeError("raw diffusion rows need a pipeline VAE, or pass --cache-latents")
+    images = [_open_image(row[args.image_column], row.get("__yeto_data_root__")) for row in rows]
+    if hasattr(pipe, "image_processor"):
+        pixels = pipe.image_processor.preprocess(images, height=args.height, width=args.width)
+    else:
+        pixels = _manual_preprocess(images, args.height, args.width)
+    pixels = pixels.to(device=device, dtype=dtype)
+    with torch.no_grad():
+        encoded = pipe.vae.encode(pixels)
+        latents = encoded.latent_dist.sample() if hasattr(encoded, "latent_dist") else encoded[0]
+        scale = getattr(getattr(pipe.vae, "config", None), "scaling_factor", 1.0)
+        shift = getattr(getattr(pipe.vae, "config", None), "shift_factor", 0.0)
+        latents = (latents - shift) * scale
+    return latents
+
+
+def _call_encode_prompt(pipe, prompts, device):
+    if not hasattr(pipe, "encode_prompt"):
+        raise RuntimeError("raw prompts need pipeline.encode_prompt(), or pass --cache-text-embeds")
+    sig = inspect.signature(pipe.encode_prompt)
+    kwargs = {}
+    params = sig.parameters
+    if "prompt" in params:
+        kwargs["prompt"] = prompts
+    if "prompt_2" in params:
+        kwargs["prompt_2"] = prompts
+    if "prompt_3" in params:
+        kwargs["prompt_3"] = prompts
+    if "device" in params:
+        kwargs["device"] = device
+    if "num_images_per_prompt" in params:
+        kwargs["num_images_per_prompt"] = 1
+    if "do_classifier_free_guidance" in params:
+        kwargs["do_classifier_free_guidance"] = False
+    with torch.no_grad():
+        out = pipe.encode_prompt(**kwargs)
+    if isinstance(out, dict):
+        return out.get("prompt_embeds"), out.get("pooled_prompt_embeds")
+    if isinstance(out, tuple):
+        prompt_embeds = out[0]
+        pooled = None
+        for value in out[1:]:
+            if torch.is_tensor(value) and value.ndim == 2:
+                pooled = value
+                break
+        return prompt_embeds, pooled
+    return out, None
+
+
+def encode_prompt_embeds(pipe, rows, args, device, dtype):
+    if args.cache_text_embeds:
+        prompt_embeds = _stack_column(rows, args.text_embeds_column, device, dtype)
+        if prompt_embeds is None:
+            raise KeyError(f"--cache-text-embeds needs column {args.text_embeds_column!r}")
+        pooled = _stack_column(rows, args.pooled_text_embeds_column, device, dtype)
+        return prompt_embeds, pooled
+    prompts = [str(row.get(args.prompt_column, "")) for row in rows]
+    prompt_embeds, pooled = _call_encode_prompt(pipe, prompts, device)
+    prompt_embeds = prompt_embeds.to(device=device, dtype=dtype) if prompt_embeds is not None else None
+    pooled = pooled.to(device=device, dtype=dtype) if pooled is not None else None
+    return prompt_embeds, pooled
+
+
+def _num_train_timesteps(scheduler) -> int:
+    return int(getattr(getattr(scheduler, "config", None), "num_train_timesteps", 1000))
+
+
+def _match_dims(values: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    while values.ndim < target.ndim:
+        values = values.view(*values.shape, *([1] * (target.ndim - values.ndim)))
+    return values
+
+
+def add_noise_and_target(pipe, latents: torch.Tensor):
+    scheduler = getattr(pipe, "scheduler", None)
+    if scheduler is None:
+        raise RuntimeError("diffusion pipeline has no scheduler")
+    noise = torch.randn_like(latents)
+    timesteps = torch.randint(
+        0,
+        _num_train_timesteps(scheduler),
+        (latents.shape[0],),
+        device=latents.device,
+        dtype=torch.long,
+    )
+    if hasattr(scheduler, "sigmas"):
+        sigmas = scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)
+        indices = timesteps.clamp(max=sigmas.numel() - 1)
+        sigma = _match_dims(sigmas[indices], latents)
+        noisy = (1.0 - sigma) * latents + sigma * noise
+        return noisy, noise - latents, timesteps
+    if hasattr(scheduler, "add_noise"):
+        noisy = scheduler.add_noise(latents, noise, timesteps)
+        pred_type = getattr(getattr(scheduler, "config", None), "prediction_type", "epsilon")
+        if pred_type == "v_prediction" and hasattr(scheduler, "get_velocity"):
+            target = scheduler.get_velocity(latents, noise, timesteps)
+        else:
+            target = noise
+        return noisy, target, timesteps
+    raise RuntimeError("scheduler must provide sigmas or add_noise()")
+
+
+def _first_trainable_module(pipe) -> torch.nn.Module:
+    modules = _trainable_module_items(pipe)
+    if not modules:
+        raise RuntimeError("no trainable diffusion module loaded")
+    return modules[0][1]
+
+
+def _extract_model_output(out):
+    if torch.is_tensor(out):
+        return out
+    if isinstance(out, tuple):
+        return out[0]
+    for attr in ("sample", "prev_sample"):
+        value = getattr(out, attr, None)
+        if value is not None:
+            return value
+    raise TypeError(f"cannot extract tensor from model output {type(out).__name__}")
+
+
+def denoise_forward(pipe, noisy, timesteps, prompt_embeds, pooled):
+    model = _first_trainable_module(pipe)
+    inspect_model = getattr(model, "module", model)
+    sig = inspect.signature(inspect_model.forward)
+    params = sig.parameters
+    kwargs = {}
+    if "hidden_states" in params:
+        kwargs["hidden_states"] = noisy
+    elif "sample" in params:
+        kwargs["sample"] = noisy
+    else:
+        kwargs[next(iter(params))] = noisy
+    if "timestep" in params:
+        kwargs["timestep"] = timesteps
+    elif "timesteps" in params:
+        kwargs["timesteps"] = timesteps
+    if "encoder_hidden_states" in params and prompt_embeds is not None:
+        kwargs["encoder_hidden_states"] = prompt_embeds
+    if "pooled_projections" in params and pooled is not None:
+        kwargs["pooled_projections"] = pooled
+    if "pooled_prompt_embeds" in params and pooled is not None:
+        kwargs["pooled_prompt_embeds"] = pooled
+    if "return_dict" in params:
+        kwargs["return_dict"] = False
+    out = model(**kwargs)
+    return _extract_model_output(out)
+
+
+def compute_diffusion_loss(pipe, rows, args, device):
+    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    latents = encode_latents(pipe, rows, args, device, dtype)
+    prompt_embeds, pooled = encode_prompt_embeds(pipe, rows, args, device, dtype)
+    noisy, target, timesteps = add_noise_and_target(pipe, latents)
+    pred = denoise_forward(pipe, noisy, timesteps, prompt_embeds, pooled)
+    if args.loss_function != "flow_matching":
+        raise ValueError("diffusion learner currently supports --loss-function flow_matching")
+    return flow_matching_loss(pred, target, timesteps)
+
+
+def save_adapters(pipe, output_dir: str) -> None:
+    out = Path(os.path.expanduser(output_dir))
+    out.mkdir(parents=True, exist_ok=True)
+    saved = False
+    for name, module in _trainable_module_items(pipe):
+        module = getattr(module, "module", module)
+        if hasattr(module, "save_pretrained"):
+            module.save_pretrained(out / name)
+            saved = True
+    if not saved and hasattr(pipe, "save_lora_weights"):
+        pipe.save_lora_weights(str(out))
+
+
+def main(argv=None) -> None:
+    args = parse_args(argv)
+    rank, world = setup_distributed()
+    logging.basicConfig(
+        level=logging.INFO,
+        format=f"%(asctime)s diffusion{args.learner_id}.r{rank} %(levelname)s %(message)s",
+    )
+    if args.device:
+        device = torch.device(args.device)
+    elif torch.cuda.is_available():
+        device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", 0)))
+        torch.cuda.set_device(device)
+    else:
+        device = torch.device("cpu")
+
+    if not 0.0 <= args.merge_alpha < 1.0:
+        raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
+
+    log.info("loading diffusion model %s (%s)", args.model, args.tuning)
+    pipe = load_pipeline(args, device)
+    params = trainable_params(pipe)
+    if not params:
+        raise RuntimeError("no trainable diffusion parameters; check --lora-targets")
+    params = maybe_wrap_for_distributed(pipe, args, params, rank, world, device)
+    layout = build_layout(
+        [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
+    )
+    log.info(
+        "%d trainable tensors -> %d fragments (%.1f MB total)",
+        len(params),
+        layout.num_fragments,
+        sum(p.numel() for p in params.values()) * 2 / 1e6,
+    )
+
+    opt = torch.optim.AdamW(params.values(), lr=args.inner_lr, weight_decay=args.weight_decay)
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        opt, lambda s: min(1.0, (s + 1) / max(1, args.warmup_steps))
+    )
+    if args.micro_batch_size == "auto":
+        log.info("diffusion autobatch probe is not yet enabled; using micro-batch 1")
+        args.micro_batch_size = 1
+    else:
+        args.micro_batch_size = int(args.micro_batch_size)
+    args.grad_accum = rebalance_grad_accum(args.grad_accum, args.micro_batch_size)
+
+    dataset = StreamingDiffusionRows(
+        args.data,
+        args.learner_id,
+        args.num_learners,
+        args.max_rows,
+        rank=rank,
+        world=world,
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=args.micro_batch_size,
+        num_workers=args.stream_workers,
+        collate_fn=_collate_rows,
+        pin_memory=device.type == "cuda",
+    )
+
+    wire_dtype = {"bf16": DTYPE_BF16, "f32": DTYPE_F32, "q4": DTYPE_Q4}[args.wire_dtype]
+    client = None
+    if rank == 0 and args.syncer != "none":
+        host, port = args.syncer.rsplit(":", 1)
+        client = SyncerClient((host, int(port)), args.learner_id, layout, wire_dtype, args.wan_streams)
+        client.start()
+        log.info("connected to syncer at %s", args.syncer)
+        if args.learner_id == 0:
+            for fid, frag in enumerate(layout.fragments):
+                client.send_init(fid, pack_fragment(frag, params, bulk_dtype(wire_dtype)))
+            log.info("sent INIT_PARAMS for %d fragments", layout.num_fragments)
+
+    steps_total = 0
+    units_total = 0
+    steps_at_reset = [0] * layout.num_fragments
+    units_at_reset = [0] * layout.num_fragments
+    fragment_versions = [0] * layout.num_fragments
+    pending_pulls: list = []
+    global_step = 0
+    anchors: list[torch.Tensor] | None = None
+    if rank == 0 and client is not None and client.dtype == DTYPE_Q4:
+        anchors = [fragment_flat(frag, params).cpu() for frag in layout.fragments]
+
+    shutdown = False
+    accum = 0
+    t_last = time.monotonic()
+    opt.zero_grad(set_to_none=True)
+    for rows in loader:
+        loss, denom = compute_diffusion_loss(pipe, rows, args, device)
+        (loss / (denom.clamp(min=1) * args.grad_accum)).backward()
+        accum += 1
+        if accum < args.grad_accum:
+            continue
+        accum = 0
+        if args.tuning == "lora":
+            allreduce_trainable_grads(params.values(), world)
+            torch.nn.utils.clip_grad_norm_(params.values(), 1.0)
+        elif args.shard == "fsdp" and hasattr(_first_trainable_module(pipe), "clip_grad_norm_"):
+            _first_trainable_module(pipe).clip_grad_norm_(1.0)
+        else:
+            torch.nn.utils.clip_grad_norm_(params.values(), 1.0)
+        opt.step()
+        sched.step()
+        opt.zero_grad(set_to_none=True)
+        steps_total += 1
+        units_total += world * args.micro_batch_size * args.grad_accum
+
+        if steps_total % 10 == 0 and rank == 0:
+            dt = time.monotonic() - t_last
+            t_last = time.monotonic()
+            log.info(
+                "local_step=%d global_step=%d loss/elem=%.6f (%.2f s/step)",
+                steps_total,
+                global_step,
+                loss.item() / max(1, denom.item()),
+                dt / 10,
+            )
+
+        actions = []
+        if rank == 0 and client is not None:
+            client.check_health()
+            for bc in client.drain_updates():
+                flat = unpack_fragment(
+                    layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
+                )
+                if anchors is not None:
+                    anchors[bc.fragment_id] = flat.clone()
+                actions.append((bc.fragment_id, bc.version, flat))
+            shutdown = client.shutdown.is_set()
+
+        if world > 1:
+            meta = [(f, v) for f, v, _ in actions] if rank == 0 else None
+            box = [meta, shutdown]
+            dist.broadcast_object_list(box, src=0)
+            meta, shutdown = box
+            if rank != 0:
+                actions = [(f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta]
+            for fid, version, flat in actions:
+                flat = flat.to(device)
+                dist.broadcast(flat, src=0)
+                if args.merge_alpha > 0:
+                    local = fragment_flat(layout.fragments[fid], params)
+                    flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
+                apply_fragment(layout.fragments[fid], flat, params)
+                if rank == 0:
+                    steps_at_reset[fid] = steps_total
+                    units_at_reset[fid] = units_total
+                    fragment_versions[fid] = version
+                global_step = max(global_step, version)
+        else:
+            for fid, version, flat in actions:
+                flat = flat.to(device)
+                if args.merge_alpha > 0:
+                    local = fragment_flat(layout.fragments[fid], params)
+                    flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
+                apply_fragment(layout.fragments[fid], flat, params)
+                steps_at_reset[fid] = steps_total
+                units_at_reset[fid] = units_total
+                fragment_versions[fid] = version
+                global_step = max(global_step, version)
+
+        if rank == 0 and client is not None:
+            pending_pulls.extend(client.drain_pulls())
+            still_pending = []
+            for pull in pending_pulls:
+                fid = pull.fragment_id
+                c_steps = steps_total - steps_at_reset[fid]
+                if c_steps < 1:
+                    still_pending.append(pull)
+                    continue
+                c_units = units_total - units_at_reset[fid]
+                if anchors is not None:
+                    delta = fragment_flat(layout.fragments[fid], params).cpu() - anchors[fid]
+                    payload = quantize_q4(delta)
+                else:
+                    payload = pack_fragment(layout.fragments[fid], params, client.dtype)
+                client.push_fragment(
+                    fid,
+                    pull.global_step,
+                    fragment_versions[fid],
+                    steps_total,
+                    c_steps,
+                    c_units,
+                    payload,
+                )
+            pending_pulls = still_pending
+
+        if shutdown or steps_total >= args.max_local_steps:
+            break
+
+    if rank == 0:
+        save_adapters(pipe, args.output_dir)
+        if client is not None:
+            client.close()
+    if world > 1:
+        dist.barrier()
+        dist.destroy_process_group()
+    log.info("diffusion loop done at local_step=%d global_step=%d", steps_total, global_step)
+
+
+if __name__ == "__main__":
+    main()

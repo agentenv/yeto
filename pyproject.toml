@@ -26,11 +26,13 @@ launcher = ["skypilot[aws]>=0.12"]
 # Apple-silicon island backend (yeto.mlx.learner); torch stays required —
 # the wire/data path is shared with the CUDA learners.
 mlx = ["mlx>=0.31", "mlx-lm>=0.29"]
+diffusion = ["diffusers>=0.35", "safetensors", "pillow"]
 dev = ["pytest", "pytest-timeout"]
 
 [project.scripts]
 yeto = "yeto.cli:main"
 yeto-export = "yeto.export:main"
+yeto-diffusion-precompute = "yeto.diffusion.precompute:main"
 
-[tool.setuptools]
-packages = ["yeto"]
+[tool.setuptools.packages.find]
+include = ["yeto*"]

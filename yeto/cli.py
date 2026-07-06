@@ -60,7 +60,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="auto-fleet only: launch the planned fleet without asking",
     )
-    p.add_argument("--model", required=True, help="model alias (see yeto/models.py: gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...) or any HF id")
+    p.add_argument("--model", required=True, help="model alias (see yeto/models.py: gemma4, qwen35-9b, llama31-8b, gptoss-120b, flux, sd35, ...) or any HF id")
+    p.add_argument(
+        "--model-kind",
+        choices=["auto", "causal-lm", "diffusion"],
+        default="auto",
+        help="training loop selector; auto infers diffusion for diffusion aliases, "
+        "otherwise uses the causal-LM learner",
+    )
     p.add_argument(
         "--output",
         default=None,
@@ -90,8 +97,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         type=loss_spec,
         default="cross_entropy",
         help=f"one of {'|'.join(LOSS_FUNCTIONS)}, or custom:<file.py>[:<fn>] "
-        "defining fn(logits, input_ids, weights) -> (loss, num_tokens); the "
-        "callable is pickled by value and shipped to all learners",
+        "defining fn(logits, input_ids, weights) -> (loss, num_tokens). "
+        "Diffusion launches default cross_entropy to flow_matching in the "
+        "learner task. Custom callables are pickled by value and shipped to "
+        "all learners",
     )
 
     tune = p.add_argument_group("fine-tuning")
@@ -166,6 +175,29 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default=2,
         help="tokenizer worker processes per learner rank (stream mode)",
     )
+
+    diffusion = p.add_argument_group("diffusion")
+    diffusion.add_argument(
+        "--cache-latents",
+        action="store_true",
+        help="diffusion only: read precomputed VAE latents from --latent-column "
+        "instead of encoding media in the training loop (off by default)",
+    )
+    diffusion.add_argument(
+        "--cache-text-embeds",
+        action="store_true",
+        help="diffusion only: read precomputed text embeddings from "
+        "--text-embeds-column instead of encoding prompts in the training loop "
+        "(off by default)",
+    )
+    diffusion.add_argument("--image-column", default="image", help="diffusion raw media column")
+    diffusion.add_argument("--prompt-column", default="prompt", help="diffusion prompt column")
+    diffusion.add_argument("--latent-column", default="latents", help="diffusion cached latent column")
+    diffusion.add_argument("--text-embeds-column", default="prompt_embeds", help="diffusion cached prompt-embedding column")
+    diffusion.add_argument("--pooled-text-embeds-column", default="pooled_prompt_embeds", help="diffusion cached pooled-embedding column")
+    diffusion.add_argument("--height", type=int, default=None, help="diffusion image/video height override")
+    diffusion.add_argument("--width", type=int, default=None, help="diffusion image/video width override")
+    diffusion.add_argument("--num-frames", type=int, default=None, help="diffusion video frame count for bucketed datasets")
 
     sync = p.add_argument_group("async sync")
     sync.add_argument("--total-steps", type=int, default=64, help="outer steps T (one fragment each)")
@@ -524,10 +556,14 @@ def _print_detach_hints(name: str) -> None:
 
 def _fleet_args_error(args) -> str | None:
     """Validate the --gpu / --budget / --flops combination."""
+    from .models import resolve_model_kind
+
     if args.gpu is not None and (args.budget is not None or args.flops is not None):
         return "--budget/--flops belong to auto-fleet planning; drop them or drop --gpu"
     if args.gpu is None and args.budget is None and args.flops is None:
         return "pass --gpu, or --budget and/or --flops for an auto-planned fleet"
+    if args.gpu is None and resolve_model_kind(args.model, args.model_kind) == "diffusion":
+        return "diffusion launch currently requires --gpu; auto-fleet sizing is causal-LM only"
     return None
 
 
