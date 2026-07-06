@@ -143,6 +143,46 @@ def test_save_frame_output_directory(tmp_path):
     assert all(p.exists() for p in saved)
 
 
+def test_resolve_sample_data_arg_preserves_non_string_and_non_cloud(monkeypatch):
+    rows = [{"prompt": "p"}]
+    assert sample.resolve_sample_data_arg(rows) is rows
+
+    import yeto.datasource as datasource
+
+    seen = []
+
+    def fake_kind(data):
+        seen.append(data)
+        return "hf"
+
+    monkeypatch.setattr(datasource, "kind", fake_kind)
+
+    assert sample.resolve_sample_data_arg("owner/dataset") == "owner/dataset"
+    assert seen == ["owner/dataset"]
+
+
+def test_resolve_sample_data_arg_uses_existing_cloud_mount(monkeypatch, tmp_path):
+    import yeto.datasource as datasource
+
+    mounted = tmp_path / "mounted.jsonl"
+    mounted.write_text('{"prompt":"p"}\n', encoding="utf-8")
+    monkeypatch.setattr(datasource, "kind", lambda data: "cloud")
+    monkeypatch.setattr(datasource, "learner_data_arg", lambda data: str(mounted))
+
+    assert sample.resolve_sample_data_arg("s3://bucket/prompts.jsonl") == str(mounted)
+
+
+def test_resolve_sample_data_arg_rejects_unmounted_cloud(monkeypatch, tmp_path):
+    import yeto.datasource as datasource
+
+    missing = tmp_path / "missing.jsonl"
+    monkeypatch.setattr(datasource, "kind", lambda data: "cloud")
+    monkeypatch.setattr(datasource, "learner_data_arg", lambda data: str(missing))
+
+    with pytest.raises(ValueError, match="cloud data source"):
+        sample.resolve_sample_data_arg("s3://bucket/prompts.jsonl")
+
+
 def test_batch_sample_writes_manifest(monkeypatch, tmp_path):
     Image = pytest.importorskip("PIL.Image")
     calls = []

@@ -21,7 +21,7 @@ def parse_args(argv=None):
     p.add_argument("--adapter-dir", required=True, help="directory written by yeto.diffusion.learner")
     p.add_argument("--prompt", default=None)
     p.add_argument("--output", default=None, help="single-sample output image file or frame directory")
-    p.add_argument("--data", default=None, help="HF/local prompt dataset for batch sampling")
+    p.add_argument("--data", default=None, help="HF/local/cloud-mounted prompt dataset for batch sampling")
     p.add_argument("--prompt-column", default="prompt")
     p.add_argument("--seed-column", default=None)
     p.add_argument("--max-rows", type=int, default=None)
@@ -218,9 +218,28 @@ def run_sample(pipe, args, meta: dict, adapter=None):
     return pipe(**kwargs)
 
 
+def resolve_sample_data_arg(data):
+    """Match learner data semantics without adding a diffusion storage layer."""
+    if not isinstance(data, str):
+        return data
+    from ..datasource import kind, learner_data_arg
+
+    data_kind = kind(data)
+    if data_kind != "cloud":
+        return data
+    mounted = learner_data_arg(data)
+    if os.path.exists(os.path.expanduser(mounted)):
+        return mounted
+    raise ValueError(
+        f"{data!r} is a cloud data source; run sampling in a SkyPilot/Yeto task "
+        f"that mounts it at {mounted!r}, or pass a local path/HF dataset id"
+    )
+
+
 def iter_prompt_rows(data, prompt_column: str, max_rows: int | None = None):
     from ..data import load_rows
 
+    data = resolve_sample_data_arg(data)
     ds = load_rows(data)
     limit = len(ds) if max_rows is None else min(len(ds), max_rows)
     for i in range(limit):
