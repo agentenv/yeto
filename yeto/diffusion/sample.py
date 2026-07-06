@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from ..models import resolve
@@ -18,8 +19,14 @@ DIFFUSION_ADAPTER_SCHEMA_VERSION = 1
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Sample from a Yeto diffusion adapter artifact")
     p.add_argument("--adapter-dir", required=True, help="directory written by yeto.diffusion.learner")
-    p.add_argument("--prompt", required=True)
-    p.add_argument("--output", required=True, help="output image file or frame directory")
+    p.add_argument("--prompt", default=None)
+    p.add_argument("--output", default=None, help="single-sample output image file or frame directory")
+    p.add_argument("--data", default=None, help="HF/local prompt dataset for batch sampling")
+    p.add_argument("--prompt-column", default="prompt")
+    p.add_argument("--seed-column", default=None)
+    p.add_argument("--max-rows", type=int, default=None)
+    p.add_argument("--output-dir", default=None, help="batch-sampling output directory")
+    p.add_argument("--manifest", default=None, help="batch JSONL manifest path")
     p.add_argument("--model", default=None, help="optional base model override")
     p.add_argument(
         "--diffusion-adapter",
@@ -36,6 +43,17 @@ def parse_args(argv=None):
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--fps", type=int, default=8)
     return p.parse_args(argv)
+
+
+def validate_args(args) -> None:
+    if args.data:
+        if not args.output_dir:
+            raise ValueError("--data batch sampling needs --output-dir")
+        if args.output:
+            raise ValueError("--data batch sampling writes per-row files under --output-dir; omit --output")
+        return
+    if not args.prompt or not args.output:
+        raise ValueError("single-sample mode needs --prompt and --output, or pass --data --output-dir")
 
 
 def read_adapter_metadata(adapter_dir: str | Path) -> dict:
@@ -200,6 +218,52 @@ def run_sample(pipe, args, meta: dict, adapter=None):
     return pipe(**kwargs)
 
 
+def iter_prompt_rows(data, prompt_column: str, max_rows: int | None = None):
+    from ..data import load_rows
+
+    ds = load_rows(data)
+    limit = len(ds) if max_rows is None else min(len(ds), max_rows)
+    for i in range(limit):
+        row = dict(ds[i])
+        if prompt_column not in row:
+            raise KeyError(f"batch sampling row {i} has no prompt column {prompt_column!r}")
+        yield i, row, str(row[prompt_column])
+
+
+def _row_seed(args, row: dict, index: int) -> int | None:
+    if args.seed_column and row.get(args.seed_column) is not None:
+        return int(row[args.seed_column])
+    return None if args.seed is None else int(args.seed) + index
+
+
+def _sample_args_for_row(args, prompt: str, seed: int | None):
+    values = vars(args).copy()
+    values["prompt"] = prompt
+    values["seed"] = seed
+    return SimpleNamespace(**values)
+
+
+def generation_args(args) -> dict:
+    fields = (
+        "num_inference_steps",
+        "guidance_scale",
+        "height",
+        "width",
+        "num_frames",
+        "fps",
+    )
+    return {name: getattr(args, name, None) for name in fields if getattr(args, name, None) is not None}
+
+
+def artifact_summary(meta: dict) -> dict:
+    return {
+        "model": meta.get("model"),
+        "resolved_model": meta.get("resolved_model"),
+        "tuning": meta.get("tuning"),
+        "trainable_modules": meta.get("trainable_modules") or [],
+    }
+
+
 def _primary_output(value: Any):
     if isinstance(value, dict):
         for key in ("images", "frames", "videos"):
@@ -234,6 +298,8 @@ def save_sample_output(sample, output_path: str | Path, *, fps: int = 8) -> list
     value = _primary_output(sample)
     path = Path(os.path.expanduser(str(output_path)))
     if _is_pil_image(value):
+        if not path.suffix:
+            path = path.with_suffix(".png")
         path.parent.mkdir(parents=True, exist_ok=True)
         value.save(path)
         return [path]
@@ -251,6 +317,8 @@ def save_sample_output(sample, output_path: str | Path, *, fps: int = 8) -> list
             path.parent.mkdir(parents=True, exist_ok=True)
             iio.imwrite(path, [np.array(frame) for frame in frames], fps=fps)
             return [path]
+        if path.suffix:
+            path = path.with_suffix("")
         path.mkdir(parents=True, exist_ok=True)
         saved = []
         for i, frame in enumerate(frames):
@@ -262,9 +330,55 @@ def save_sample_output(sample, output_path: str | Path, *, fps: int = 8) -> list
     raise TypeError(f"cannot save diffusion output of type {type(value).__name__}")
 
 
+def _relative_paths(paths: list[Path], root: Path) -> list[str]:
+    out = []
+    for path in paths:
+        try:
+            out.append(str(path.relative_to(root)))
+        except ValueError:
+            out.append(str(path))
+    return out
+
+
+def batch_sample(pipe, args, meta: dict, adapter=None) -> list[dict]:
+    out_dir = Path(os.path.expanduser(args.output_dir))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = Path(os.path.expanduser(args.manifest)) if args.manifest else out_dir / "samples.jsonl"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+
+    records = []
+    with manifest.open("w", encoding="utf-8") as f:
+        for index, row, prompt in iter_prompt_rows(args.data, args.prompt_column, args.max_rows):
+            seed = _row_seed(args, row, index)
+            row_args = _sample_args_for_row(args, prompt, seed)
+            output_prefix = out_dir / f"sample_{index:06d}.png"
+            output = run_sample(pipe, row_args, meta, adapter)
+            saved = save_sample_output(output, output_prefix, fps=args.fps)
+            record = {
+                "index": index,
+                "prompt": prompt,
+                "seed": seed,
+                "output_paths": _relative_paths(saved, out_dir),
+                "adapter_dir": str(args.adapter_dir),
+                "artifact": artifact_summary(meta),
+                "generation": generation_args(args),
+            }
+            if args.seed_column and args.seed_column in row:
+                record["seed_column"] = args.seed_column
+            f.write(json.dumps(record, sort_keys=True) + "\n")
+            records.append(record)
+    return records
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
+    validate_args(args)
     pipe, meta, adapter = load_artifact_pipeline(args.adapter_dir, args)
+    if args.data:
+        records = batch_sample(pipe, args, meta, adapter)
+        manifest = args.manifest or str(Path(os.path.expanduser(args.output_dir)) / "samples.jsonl")
+        print(f"[yeto] wrote {len(records)} diffusion sample record(s) to {manifest}")
+        return 0
     output = run_sample(pipe, args, meta, adapter)
     saved = save_sample_output(output, args.output, fps=args.fps)
     print(f"[yeto] wrote {len(saved)} diffusion sample file(s) to {args.output}")
