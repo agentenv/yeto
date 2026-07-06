@@ -1,6 +1,6 @@
 """Alias-table consistency: one source of truth for model sugar."""
 
-from yeto.models import MODEL_ALIASES, MODEL_WEIGHT_GB, resolve
+from yeto.models import MODEL_ALIASES, MODEL_SPECS, MODEL_WEIGHT_GB, resolve
 
 
 def test_every_weight_key_is_an_alias():
@@ -42,10 +42,20 @@ def test_readme_table_matches_alias_table():
     import re
 
     readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
-    table_aliases = set(re.findall(r"^\| `([a-z0-9\-]+)` \| `", readme, flags=re.M))
+    lm_section = readme.split("### Language-model aliases", 1)[1].split("### Component aliases", 1)[0]
+    table_aliases = set(re.findall(r"^\| `([a-z0-9\-]+)` \| `", lm_section, flags=re.M))
     assert table_aliases == set(MODEL_ALIASES), (
         "README model table is out of sync with yeto/models.py — regenerate it"
     )
+
+
+def test_readme_lists_structured_model_specs():
+    import pathlib
+
+    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
+    component_section = readme.split("### Component aliases", 1)[1].split("## Docs", 1)[0]
+    for alias in MODEL_SPECS:
+        assert f"`{alias}`" in component_section
 
 
 def test_resolve_passes_aliases_and_raw_ids():
