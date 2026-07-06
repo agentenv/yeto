@@ -112,6 +112,7 @@ def test_diffusion_backend_builds_component_learner_without_nava_task_flags(monk
     assert "--base-checkpoint '~/yeto-base-checkpoint'" in task.run
     assert "--lora-targets mmdit-all-linear" in task.run
     assert "--nava-" not in task.run
+    assert "torch_cuda_ok" in task.setup
     assert "pre_download" not in task.setup
     assert task.file_mounts["~/yeto-component"] == str(tmp_path / "NAVA")
     assert task.file_mounts["~/yeto-base-checkpoint"] == str(tmp_path / "base.safetensors")

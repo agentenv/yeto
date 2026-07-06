@@ -277,6 +277,7 @@ class DiffusionBackend(TaskBackend):
             launcher.NVME_SETUP,
             launcher.NVME_ENV,
             launcher.HF_TOKEN_ENV,
+            launcher.TORCH_SETUP,
             "pip install -q -r requirements.txt",
             "pip install -q PyYAML safetensors",
             *comp.setup_steps(args),
