@@ -173,6 +173,30 @@ def test_cached_manifest_contract_reports_missing_columns():
         )
 
 
+def test_diffusion_cache_metadata_records_contract(tmp_path):
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    args = _args(
+        cache_latents=True,
+        cache_text_embeds=True,
+        data=str(tmp_path / "data.jsonl"),
+    )
+    learner.write_diffusion_cache_metadata(tmp_path, args, row_count=3)
+
+    meta = learner.read_diffusion_cache_metadata(str(tmp_path / "data.jsonl"))
+    assert meta["kind"] == "yeto.diffusion.cache"
+    assert meta["schema_version"] == learner.DIFFUSION_CACHE_SCHEMA_VERSION
+    assert meta["row_count"] == 3
+    assert meta["cache"] == {"latents": True, "text_embeds": True}
+    assert meta["columns"]["latents"] == "latents"
+    assert meta["relative_paths"] is True
+
+    learner.validate_diffusion_cache_metadata(meta, args)
+    with pytest.raises(ValueError, match="column 'latents'"):
+        learner.validate_diffusion_cache_metadata(meta, _args(cache_latents=True, latent_column="latent_tensor"))
+
+
 def test_diffusion_adapter_file_factory(tmp_path):
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
@@ -286,6 +310,12 @@ def test_tiny_diffusion_learner_smoke_cached_manifest(tmp_path):
 
     state = torch.load(out / "trainable_state.pt", map_location="cpu")
     assert "transformer.proj.weight" in state
+    meta = json.loads((out / learner.DIFFUSION_ADAPTER_METADATA_FILE).read_text(encoding="utf-8"))
+    assert meta["kind"] == "yeto.diffusion.adapter"
+    assert meta["model"] == "tiny"
+    assert meta["cache"] == {"latents": True, "text_embeds": True}
+    assert meta["trainable_modules"] == ["transformer"]
+    assert meta["trainable_tensor_count"] == len(state)
 
 
 def test_denoise_forward_filters_kwargs_by_signature():

@@ -142,6 +142,7 @@ def main(argv=None) -> int:
                     item[args.pooled_text_embeds_column] = str(path.relative_to(out))
                 f.write(json.dumps(item) + "\n")
                 index += 1
+    learner.write_diffusion_cache_metadata(out, args, row_count=index)
     print(f"[yeto] wrote {index} cached diffusion rows to {manifest}")
     return 0
 

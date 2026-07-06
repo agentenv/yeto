@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import logging
 import os
 import random
@@ -44,6 +45,10 @@ log = logging.getLogger("diffusion-learner")
 #   optional: pooled_prompt_embeds, prompt_attention_mask, latent_num_frames,
 #             latent_height, latent_width
 _CACHE_TENSOR_SUFFIXES = (".pt", ".pth", ".npy")
+DIFFUSION_CACHE_METADATA_FILE = "yeto_diffusion_cache.json"
+DIFFUSION_ADAPTER_METADATA_FILE = "yeto_diffusion_adapter.json"
+DIFFUSION_CACHE_SCHEMA_VERSION = 1
+DIFFUSION_ADAPTER_SCHEMA_VERSION = 1
 
 _ATTENTION_TARGETS = [
     "to_q",
@@ -85,6 +90,133 @@ class TextConditioning:
     prompt_embeds: torch.Tensor | None
     pooled_prompt_embeds: torch.Tensor | None = None
     attention_mask: torch.Tensor | None = None
+
+
+def _cache_columns(args) -> dict[str, str]:
+    return {
+        "image": getattr(args, "image_column", "image"),
+        "video": getattr(args, "video_column", "video"),
+        "prompt": getattr(args, "prompt_column", "prompt"),
+        "latents": getattr(args, "latent_column", "latents"),
+        "prompt_embeds": getattr(args, "text_embeds_column", "prompt_embeds"),
+        "prompt_attention_mask": getattr(
+            args,
+            "text_attention_mask_column",
+            "prompt_attention_mask",
+        ),
+        "pooled_prompt_embeds": getattr(
+            args,
+            "pooled_text_embeds_column",
+            "pooled_prompt_embeds",
+        ),
+    }
+
+
+def _cache_flags(args) -> dict[str, bool]:
+    return {
+        "latents": bool(getattr(args, "cache_latents", False)),
+        "text_embeds": bool(getattr(args, "cache_text_embeds", False)),
+    }
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def diffusion_cache_metadata(
+    args,
+    *,
+    data_file: str = "data.jsonl",
+    row_count: int | None = None,
+) -> dict:
+    meta = {
+        "kind": "yeto.diffusion.cache",
+        "schema_version": DIFFUSION_CACHE_SCHEMA_VERSION,
+        "data_file": data_file,
+        "model": getattr(args, "model", None),
+        "resolved_model": (
+            resolve(getattr(args, "model", "")) if getattr(args, "model", None) else None
+        ),
+        "diffusion_adapter": getattr(args, "diffusion_adapter", None),
+        "cache": _cache_flags(args),
+        "columns": _cache_columns(args),
+        "relative_paths": True,
+        "tensor_suffixes": list(_CACHE_TENSOR_SUFFIXES),
+        "shape": {
+            "height": getattr(args, "height", None),
+            "width": getattr(args, "width", None),
+            "num_frames": getattr(args, "num_frames", None),
+        },
+    }
+    if row_count is not None:
+        meta["row_count"] = int(row_count)
+    return meta
+
+
+def write_diffusion_cache_metadata(
+    output_dir: str | Path,
+    args,
+    *,
+    row_count: int | None = None,
+) -> None:
+    out = Path(os.path.expanduser(str(output_dir)))
+    out.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        out / DIFFUSION_CACHE_METADATA_FILE,
+        diffusion_cache_metadata(args, row_count=row_count),
+    )
+
+
+def read_diffusion_cache_metadata(dataset_name) -> dict | None:
+    if not isinstance(dataset_name, str):
+        return None
+    path = Path(os.path.expanduser(dataset_name))
+    if not path.exists():
+        return None
+    root = path if path.is_dir() else path.parent
+    meta_path = root / DIFFUSION_CACHE_METADATA_FILE
+    if not meta_path.exists():
+        return None
+    return json.loads(meta_path.read_text(encoding="utf-8"))
+
+
+def validate_diffusion_cache_metadata(meta: dict, args) -> None:
+    if meta.get("kind") != "yeto.diffusion.cache":
+        raise ValueError(
+            f"{DIFFUSION_CACHE_METADATA_FILE}: expected kind 'yeto.diffusion.cache', "
+            f"got {meta.get('kind')!r}"
+        )
+    if meta.get("schema_version") != DIFFUSION_CACHE_SCHEMA_VERSION:
+        raise ValueError(
+            f"{DIFFUSION_CACHE_METADATA_FILE}: unsupported schema_version "
+            f"{meta.get('schema_version')!r}"
+        )
+    cache = meta.get("cache") or {}
+    if getattr(args, "cache_latents", False) and not cache.get("latents"):
+        raise ValueError(
+            f"{DIFFUSION_CACHE_METADATA_FILE}: dataset was not written with latent caches"
+        )
+    if getattr(args, "cache_text_embeds", False) and not cache.get("text_embeds"):
+        raise ValueError(
+            f"{DIFFUSION_CACHE_METADATA_FILE}: dataset was not written with text-embed caches"
+        )
+    columns = meta.get("columns") or {}
+    required_keys = []
+    if getattr(args, "cache_latents", False):
+        required_keys.append("latents")
+    if getattr(args, "cache_text_embeds", False):
+        required_keys.extend(
+            ["prompt_embeds", "prompt_attention_mask", "pooled_prompt_embeds"]
+        )
+    current_columns = _cache_columns(args)
+    for key in required_keys:
+        current = current_columns[key]
+        recorded = columns.get(key)
+        if recorded is not None and recorded != current:
+            raise ValueError(
+                f"{DIFFUSION_CACHE_METADATA_FILE}: column {key!r} is {recorded!r} "
+                f"in the dataset but learner is using {current!r}"
+            )
 
 
 def parse_args(argv=None):
@@ -777,15 +909,68 @@ def compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0, adapt
     return flow_matching_loss(pred, target, timesteps)
 
 
-def save_adapters(pipe, output_dir: str, adapter=None) -> None:
+def diffusion_adapter_metadata(
+    args,
+    pipe,
+    adapter=None,
+    params: dict[str, torch.Tensor] | None = None,
+) -> dict:
+    modules = [name for name, _ in _trainable_module_items(pipe, adapter)]
+    meta = {
+        "kind": "yeto.diffusion.adapter",
+        "schema_version": DIFFUSION_ADAPTER_SCHEMA_VERSION,
+        "model": getattr(args, "model", None),
+        "resolved_model": (
+            resolve(getattr(args, "model", "")) if getattr(args, "model", None) else None
+        ),
+        "diffusion_adapter": getattr(args, "diffusion_adapter", None),
+        "tuning": getattr(args, "tuning", None),
+        "trainable_modules": modules,
+        "cache": _cache_flags(args),
+        "columns": _cache_columns(args),
+    }
+    if getattr(args, "tuning", None) == "lora":
+        meta["lora"] = {
+            "r": getattr(args, "lora_r", None),
+            "alpha": getattr(args, "lora_alpha", None),
+            "targets": getattr(args, "lora_targets", None),
+            "resolved_targets": resolve_lora_targets(
+                getattr(args, "lora_targets", "auto"),
+                getattr(args, "model", None),
+            ),
+        }
+    if params is not None:
+        meta["trainable_tensor_count"] = len(params)
+        meta["trainable_numel"] = int(sum(p.numel() for p in params.values()))
+    return meta
+
+
+def write_diffusion_adapter_metadata(
+    output_dir: str | Path,
+    args,
+    pipe,
+    adapter=None,
+    params: dict[str, torch.Tensor] | None = None,
+) -> None:
+    out = Path(os.path.expanduser(str(output_dir)))
+    out.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        out / DIFFUSION_ADAPTER_METADATA_FILE,
+        diffusion_adapter_metadata(args, pipe, adapter, params),
+    )
+
+
+def save_adapters(pipe, output_dir: str, adapter=None, args=None, params=None) -> None:
+    out = Path(os.path.expanduser(output_dir))
+    out.mkdir(parents=True, exist_ok=True)
     if adapter is not None:
         for name in ("save_adapters", "save"):
             fn = getattr(adapter, name, None)
             if fn is not None:
                 fn(pipe, output_dir)
+                if args is not None:
+                    write_diffusion_adapter_metadata(out, args, pipe, adapter, params)
                 return
-    out = Path(os.path.expanduser(output_dir))
-    out.mkdir(parents=True, exist_ok=True)
     saved = False
     for name, module in _trainable_module_items(pipe, adapter):
         module = getattr(module, "module", module)
@@ -800,6 +985,8 @@ def save_adapters(pipe, output_dir: str, adapter=None) -> None:
             {n: p.detach().cpu() for n, p in trainable_params(pipe, adapter).items()},
             out / "trainable_state.pt",
         )
+    if args is not None:
+        write_diffusion_adapter_metadata(out, args, pipe, adapter, params)
 
 
 def main(argv=None) -> None:
@@ -819,6 +1006,10 @@ def main(argv=None) -> None:
 
     if not 0.0 <= args.merge_alpha < 1.0:
         raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
+    cache_meta = read_diffusion_cache_metadata(args.data)
+    if cache_meta is not None:
+        validate_diffusion_cache_metadata(cache_meta, args)
+        log.info("loaded diffusion cache metadata from %s", args.data)
 
     adapter = load_diffusion_adapter(args.diffusion_adapter)
     log.info("loading diffusion model %s (%s)", args.model, args.tuning)
@@ -997,7 +1188,7 @@ def main(argv=None) -> None:
             break
 
     if rank == 0:
-        save_adapters(pipe, args.output_dir, adapter)
+        save_adapters(pipe, args.output_dir, adapter, args=args, params=params)
         if client is not None:
             client.close()
     if world > 1:
