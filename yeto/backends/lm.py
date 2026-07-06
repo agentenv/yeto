@@ -14,9 +14,8 @@ import shlex
 import sys
 
 from .. import launcher
+from ..loss_specs import LOSS_FUNCTIONS
 from .base import IslandEngine, TaskBackend, engine_names, get_engine, register_backend, register_engine
-
-LOSS_FUNCTIONS = ("cross_entropy", "importance_sampling", "ppo", "cispo", "dro")
 
 
 # ---------------------------------------------------------------------------
@@ -108,21 +107,6 @@ class LMBackend(TaskBackend):
 
     def add_launch_cli_args(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
-            "--model",
-            required=False,
-            help="LM model alias (see yeto/models.py: gemma4, qwen35-9b, "
-            "llama31-8b, gptoss-120b, ...) or any HF id; required for --task lm",
-        )
-        parser.add_argument(
-            "--data",
-            required=False,
-            help="fine-tuning data: HF dataset id, local path (dir/file of "
-            "jsonl/json/parquet or a save_to_disk dir), or a cloud URI "
-            "(s3://, gs://, r2://, ...) — non-HF sources are shipped to learners "
-            "via SkyPilot file mounts; rows are messages-format chat traces; "
-            "required for --task lm",
-        )
-        parser.add_argument(
             "--loss-function",
             type=_loss_spec,
             default="cross_entropy",
@@ -191,11 +175,6 @@ class LMBackend(TaskBackend):
         )
 
     def add_export_cli_args(self, parser: argparse.ArgumentParser) -> None:
-        parser.add_argument(
-            "--model",
-            required=False,
-            help="HF model id or an alias from yeto/models.py; required for --task lm",
-        )
         parser.add_argument("--tuning", choices=["lora", "full"], default="lora")
         parser.add_argument("--lora-r", type=int, default=16)
         parser.add_argument("--lora-alpha", type=int, default=32)

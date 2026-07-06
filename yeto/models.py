@@ -23,6 +23,49 @@ materializes bf16 weights and the bf16 footprint above is the right sizing.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """Structured model alias for non-LM backends.
+
+    LM aliases stay in MODEL_ALIASES for backward compatibility. Specs are for
+    aliases whose name selects a backend/component and optional defaults.
+    """
+
+    task: str
+    component: str | None = None
+    component_config: str | None = None
+    component_root: str | None = None
+    component_root_env: str | None = None
+    base_checkpoint: str | None = None
+    base_checkpoint_env: str | None = None
+    data_format: str | None = None
+    adapter: str | None = None
+    lora_targets: str | None = None
+    learner_image: str | None = None
+    learner_image_env: str | None = None
+
+
+MODEL_SPECS = {
+    # NAVA is exposed as a diffusion component alias, not as its own task.
+    # Runtime-specific paths are intentionally environment-driven so Yeto core
+    # does not bake in a one-off checkpoint, dataset prefix, or local checkout path.
+    "nava": ModelSpec(
+        task="diffusion",
+        component="nava",
+        component_config="configs/nava.yaml",
+        component_root_env="YETO_NAVA_ROOT",
+        base_checkpoint_env="YETO_NAVA_BASE_CHECKPOINT",
+        data_format="jsonl",
+        adapter="lora",
+        lora_targets="mmdit-all-linear",
+        learner_image_env="YETO_NAVA_LEARNER_IMAGE",
+    ),
+}
+
+
 MODEL_ALIASES = {
     # existing project aliases
     "gemma4": "google/gemma-4-12B-it",
@@ -165,3 +208,12 @@ MODEL_WEIGHT_GB = {
 def resolve(model: str) -> str:
     """Alias -> HF id; raw HF ids pass through unchanged."""
     return MODEL_ALIASES.get(model, model)
+
+
+def get_model_spec(model: str | None) -> ModelSpec | None:
+    return MODEL_SPECS.get(model or "")
+
+
+def inferred_task(model: str | None, default: str = "lm") -> str:
+    spec = get_model_spec(model)
+    return spec.task if spec is not None else default

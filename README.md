@@ -1,8 +1,9 @@
 # Yeto
 
-**Yeto** fine-tunes language models across cheap, geographically scattered
-GPU capacity — spot instances, mixed regions, mixed clouds — via the
-[SkyPilot](https://skypilot.co) SDK. Its asynchronous synchronization is
+**Yeto** fine-tunes language models, plus component-backed diffusion models,
+across cheap, geographically scattered GPU capacity — spot instances, mixed
+regions, mixed clouds — via the [SkyPilot](https://skypilot.co) SDK. Its
+asynchronous synchronization is
 based on **Decoupled DiLoCo**
 ([Douillard et al., arXiv 2604.21428](https://arxiv.org/abs/2604.21428)):
 a Rust syncer merges parameter fragments from independent learner islands
@@ -28,12 +29,18 @@ links and preempted islands never block training.
 ```bash
 pip install "yeto[launcher] @ ."
 
-# pick the fleet yourself…
+# Language models: pick the fleet yourself...
 yeto launch --gpu aws:8xa100@us-east-2,runpod:8xh100@CA \
   --model qwen35-9b --data org/chat-traces
 
-# …or let the planner pick it (budget $/hr and/or a TFLOPs target)
+# ...or let the LM planner pick it (budget $/hr and/or a TFLOPs target)
 yeto launch --model qwen35-9b --data org/chat-traces --budget 40 --confirm
+
+# Diffusion components use an explicit fleet and component/runtime inputs.
+pip install "yeto[launcher,diffusion] @ ."
+YETO_NAVA_BASE_CHECKPOINT=/models/nava/base.safetensors \
+YETO_NAVA_ROOT=/opt/NAVA \
+yeto launch --gpu aws:8xa100@us-east-2 --model nava --data /data/nava/train.jsonl
 
 yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
 ```
@@ -52,8 +59,9 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
   fetches the model from the winning learner, uploads it, and **terminates
   itself** (fully self-cleaning run). Local path or omitted: the artifact
   stays on the head and the head is kept up.
-- `--model`: any HF id (private repos work with `HF_TOKEN`), or an alias
-  below.
+- `--model`: any HF id (private repos work with `HF_TOKEN`), a language-model
+  alias below, or a structured alias such as `nava` that selects a non-LM
+  backend/component.
 - Learners default to spot; the head VM (syncer + fleet controller) is a
   small on-demand box whose checkpoint/resume absorbs preemptions. The
   submitting machine can disconnect after launch.
@@ -127,61 +135,13 @@ LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
 
 [docs/DESIGN.md](docs/DESIGN.md) — merge math, blending, adaptive grace,
 delta correction, q4 wire format, snapshots, resilience.
+[docs/BACKENDS.md](docs/BACKENDS.md) — task backends, diffusion components,
+and NAVA LoRA launch/export behavior.
 [docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
 [docs/MEGATRON.md](docs/MEGATRON.md) — the Megatron-Core island backend (EP
 for 1T-class MoE).
 [docs/MLX.md](docs/MLX.md) — the Apple-silicon island backend: Macs as
 learner islands (`yeto launch --external-learners`, cross Mac↔NVIDIA runs).
-
-## NAVA fine-tuning
-
-Yeto can also launch NAVA fine-tuning jobs with the same async syncer. The
-NAVA path keeps NAVA's own pipeline, VAE, dataset, and loss code as the source
-of truth, while Yeto handles multi-cluster orchestration and synchronizes the
-trainable NAVA parameters at fragment boundaries.
-
-```bash
-yeto-nava-prepare-labels \
-  --input s3://bucket/path/clip_s3_labels.json.gz \
-  --output s3://bucket/path/train.nava.jsonl \
-  --caption-field composed \
-  --min-duration 2 \
-  --max-duration 10
-
-yeto launch \
-  --task nava \
-  --gpu aws:8xh100@us-west-2,aws:8xh100@us-east-2 \
-  --runtime-image docker:yeto-nava:torch2.8-cu128-flashattn \
-  --nava-root /path/to/NAVA \
-  --nava-config configs/nava.yaml \
-  --nava-ckpt s3://bucket/nava/NAVA.safetensors \
-  --nava-assets-uri s3://bucket/nava/assets/ \
-  --nava-data s3://bucket/path/train.nava.jsonl \
-  --nava-tuning lora \
-  --nava-lora-r 16 \
-  --fragments 32 \
-  --wire-dtype bf16
-
-yeto-export \
-  --task nava \
-  --checkpoint yeto-state.ckpt \
-  --nava-root /path/to/NAVA \
-  --nava-config configs/nava.yaml \
-  --base-ckpt s3://bucket/nava/NAVA.safetensors \
-  --output-dir ./nava_adapter \
-  --format both
-```
-
-The production default is `--nava-tuning lora`: NAVA's frozen base is sharded
-inside each learner cluster and only replicated adapter weights are sent over
-the WAN. Full-parameter NAVA sync is exposed behind `--nava-full-sync gather`
-for high-memory environments; it is intentionally explicit because the syncer
-must hold full f32 parameters plus momentum. NAVA learners append layout
-metadata to the syncer checkpoint (tensor names/shapes, merge policy, trainable
-policy, base checkpoint hash), so `yeto-export --task nava` can validate that
-export flags match the run before writing an adapter or merged checkpoint. S3
-clip labels are converted into NAVA JSONL before training, with strict
-trainability/quality/age-safety filtering by default.
 
 ## Testing
 

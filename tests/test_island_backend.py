@@ -3,6 +3,10 @@ DiLoCo/LoRA/data flags but differ in the intra-island parallelism, entrypoint,
 and setup deps."""
 
 import argparse
+import sys
+import types
+
+import pytest
 
 from yeto.gpu_spec import ClusterSpec
 from yeto.launcher import make_learner_task
@@ -46,6 +50,37 @@ def _args(**over):
 
 
 _SPEC = ClusterSpec(cloud="aws", region="us-east-2", num_nodes=1, gpus_per_node=8, gpu="B200")
+
+
+class FakeTask:
+    def __init__(
+        self, name=None, setup=None, run=None, envs=None,
+        num_nodes=1, workdir=None, file_mounts=None,
+    ):
+        self.name = name
+        self.setup = setup
+        self.run = run
+        self.envs = envs
+        self.num_nodes = num_nodes
+        self.workdir = workdir
+        self.file_mounts = file_mounts
+        self.resources = None
+
+    def set_resources(self, resources):
+        self.resources = resources
+
+
+class FakeResources:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+@pytest.fixture(autouse=True)
+def fake_sky(monkeypatch):
+    sky = types.ModuleType("sky")
+    sky.Task = FakeTask
+    sky.Resources = FakeResources
+    monkeypatch.setitem(sys.modules, "sky", sky)
 
 
 def test_torch_backend_uses_shard_and_torch_learner():

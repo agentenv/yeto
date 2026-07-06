@@ -259,13 +259,16 @@ SYNCER_REMOTE_BUILD = (
 )
 
 
-def make_syncer_task(args, num_learners: int):
+def needs_remote_syncer_build() -> bool:
     import platform
 
+    return (platform.system(), platform.machine()) != ("Linux", "x86_64")
+
+
+def make_syncer_task(args, num_learners: int):
     import sky
 
-    cross = (platform.system(), platform.machine()) != ("Linux", "x86_64")
-    if cross:
+    if needs_remote_syncer_build():
         print("[launcher] non-x86-Linux submitter: building the syncer on the syncer VM")
         task = sky.Task(
             name="yeto-syncer",
@@ -461,77 +464,10 @@ MEGATRON_SETUP = (
 
 
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
-    """Build a learner island task by dispatching to the run's task backend.
-
-    The task-specific construction (LM vs NAVA, torch vs megatron engine)
-    lives in yeto/backends/; this generic launcher only orchestrates the
-    fleet. See yeto.backends.get_backend.
-    """
+    """Build a learner island task by dispatching to the run's task backend."""
     from .backends import get_backend
 
     return get_backend(getattr(args, "task", None)).build_learner_task(
-        args, spec, learner_id, num_learners, syncer_addr
-    )
-
-
-def _quote_optional_flag(name: str, value) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return f" {name}" if value else ""
-    return f" {name} {shlex.quote(str(value))}"
-
-
-def _remote_nava_path(path: str, nava_mount: str = "~/NAVA") -> str:
-    if path.startswith(("s3://", "http://", "https://", "/", "~")):
-        return path
-    return f"{nava_mount.rstrip('/')}/{path}"
-
-
-def _is_local_existing_path(path: str | None) -> bool:
-    if not path or path.startswith(("s3://", "http://", "https://")):
-        return False
-    return os.path.exists(os.path.expanduser(path))
-
-
-def _s3_sync_command(src: str | None, dest: str) -> str:
-    if not src:
-        return ""
-    # Use boto3 instead of assuming awscli is installed in the image.
-    script = (
-        "python - <<'PY'\n"
-        "import boto3, os\n"
-        "from urllib.parse import urlparse\n"
-        f"src={src!r}; dest={dest!r}\n"
-        "p=urlparse(src); assert p.scheme=='s3'\n"
-        "bucket=p.netloc; prefix=p.path.lstrip('/').rstrip('/')\n"
-        "os.makedirs(dest, exist_ok=True)\n"
-        "s3=boto3.client('s3')\n"
-        "token=None\n"
-        "while True:\n"
-        "    kw={'Bucket': bucket, 'Prefix': prefix + '/'}\n"
-        "    if token: kw['ContinuationToken']=token\n"
-        "    resp=s3.list_objects_v2(**kw)\n"
-        "    for obj in resp.get('Contents', []):\n"
-        "        key=obj['Key']; rel=key[len(prefix):].lstrip('/')\n"
-        "        if not rel: continue\n"
-        "        out=os.path.join(dest, rel); os.makedirs(os.path.dirname(out), exist_ok=True)\n"
-        "        if not os.path.exists(out) or os.path.getsize(out) != obj.get('Size', -1):\n"
-        "            s3.download_file(bucket, key, out)\n"
-        "    if not resp.get('IsTruncated'): break\n"
-        "    token=resp.get('NextContinuationToken')\n"
-        "PY"
-    )
-    return script
-
-
-def make_nava_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
-    """Backward-compatible entry point for the NAVA learner task; the
-    implementation lives in yeto.nava.backend.NavaBackend.
-    """
-    from .backends import get_backend
-
-    return get_backend("nava").build_learner_task(
         args, spec, learner_id, num_learners, syncer_addr
     )
 
@@ -1108,13 +1044,12 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
 
     head_mode = local_syncer is not None
     specs = parse_gpu_spec(args.gpu)
-    # External learners (machines sky cannot provision — e.g. Macs running
-    # yeto.mlx.learner) get the ids AFTER the cloud learners; the syncer
-    # counts them in --learners and its port is already public, so they
-    # simply dial in with the printed join command.
+    # External learners (machines sky cannot provision, e.g. Macs running
+    # yeto.mlx.learner) get ids after the cloud learners and dial the syncer.
     external = max(0, getattr(args, "external_learners", 0) or 0)
     num_learners = len(specs) + external
-    args.loss_function = resolve_loss_function(args.loss_function)
+    if hasattr(args, "loss_function"):
+        args.loss_function = resolve_loss_function(args.loss_function)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
     syncer_cluster = None if head_mode else f"{prefix}-syncer"
@@ -1224,8 +1159,8 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
 
         # Secure the artifact BEFORE the finally block tears learners down:
-        # fetch the learner's output dir onto this machine (the head, or the
-        # local worker), then deliver to --output.
+        # fetch the task backend's output dir from the winning learner onto
+        # this machine (the head, or the local worker), then deliver to --output.
         done = [n for n, s in exit_codes.items() if "SUCCEEDED" in s]
         if not done:
             print("[launcher] no learner succeeded; recover from the syncer "

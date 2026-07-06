@@ -5,8 +5,7 @@ Example:
     yeto launch \
         --gpu aws:8xa100@us-east-2,aws:8xa100@us-east-1,aws:8xa100@us-west-2 \
         --model deepseek4flash \
-        --data armand0e/claude-fable-5-claude-code \
-        --loss-function cross_entropy
+        --data armand0e/claude-fable-5-claude-code
 
 `launch` follows SkyPilot's UX: it detaches — by default
 (`--controller head`) the run is handed to one small on-demand head VM
@@ -30,12 +29,13 @@ import threading
 import time
 
 from . import runs
-from .backends import all_backends, backend_names, default_task, get_backend
 
 SUBCOMMANDS = ("launch", "shape", "status", "logs", "down", "_worker", "_head")
 
 
-def _add_launch_args(p: argparse.ArgumentParser) -> None:
+def _add_launch_common_args(p: argparse.ArgumentParser, task_default: str | None = None) -> None:
+    from .backends import backend_names
+
     p.add_argument(
         "--gpu",
         default=None,
@@ -63,8 +63,19 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--task",
         choices=backend_names(),
-        default=default_task(),
-        help="training task backend (see yeto/backends/)",
+        default=task_default,
+        help="training task backend",
+    )
+    p.add_argument(
+        "--model",
+        required=False,
+        help="model alias or raw model id; structured aliases such as 'nava' "
+        "select their backend/component defaults",
+    )
+    p.add_argument(
+        "--data",
+        required=False,
+        help="fine-tuning data source consumed by the selected backend",
     )
     p.add_argument(
         "--output",
@@ -75,15 +86,12 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "fully self-cleaning run), or a local path / omitted (artifact "
         "stays on the head, which is kept up)",
     )
-    # Sharding is shared across tasks (torch LM and NAVA both honor it;
-    # the megatron engine has its own parallelism and ignores it).
     p.add_argument(
         "--shard",
         choices=["ddp", "fsdp"],
         default="ddp",
-        help="torch backend multi-GPU strategy; fsdp shards the frozen base "
-        "across the learner's GPUs/nodes (lora only) so the model no "
-        "longer has to fit on one GPU",
+        help="torch backend multi-GPU strategy; fsdp shards frozen model state "
+        "across the learner's GPUs/nodes when the selected task supports it",
     )
 
     sync = p.add_argument_group("async sync")
@@ -140,8 +148,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         choices=["heloco", "none"],
         default="heloco",
         help="pre-merge correction of learner deltas against the outer "
-        "momentum (HeLoCo, arXiv 2606.00271); shrinks/reorients stale "
-        "deltas that oppose the global trajectory",
+        "momentum (HeLoCo, arXiv 2606.00271)",
     )
     sync.add_argument("--outer-lr", type=float, default=0.7)
     sync.add_argument("--outer-momentum", type=float, default=0.9)
@@ -150,7 +157,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         choices=["binpack", "strided"],
         default="binpack",
         help="fragment grouping: size-balanced bin-packing or depth-interleaved "
-        "transformer layers (Streaming DiLoCo strided pattern)",
+        "transformer/block layers",
     )
     sync.add_argument(
         "--merge-alpha",
@@ -163,7 +170,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--wire-dtype",
         choices=["bf16", "f32", "q4"],
         default="bf16",
-        help="WAN tensor encoding; q4 sends pushes as 4-bit E3M0 block-quantized "
+        help="WAN tensor encoding; q4 sends pushes as 4-bit block-quantized "
         "deltas (~4x less learner egress; broadcasts stay bf16)",
     )
     sync.add_argument("--wan-streams", type=int, default=4, help="parallel TCP streams per learner")
@@ -197,12 +204,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--runtime-image",
         dest="learner_image",
         default=None,
-        help="override the machine image for learner nodes: a cloud image id "
-        "(ami-..., GCP image path), a sky tag (skypilot:gpu-ubuntu-2204), a "
-        "docker: image, or comma-separated region=id pairs for multi-region "
-        "fleets (e.g. us-east-2=ami-aaa,us-west-2=ami-bbb). Escape hatch for "
-        "stale default images or NAVA CUDA/flash-attn runtimes. "
-        "--runtime-image is kept as a backward-compatible alias",
+        help="override the machine image for learner nodes: a cloud image id, "
+        "a sky tag, docker: image, or comma-separated region=id pairs",
     )
     infra.add_argument(
         "--syncer-region",
@@ -214,11 +217,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--controller",
         choices=["head", "local"],
         default="head",
-        help="where the run's controller lives: 'head' (default) provisions "
-        "one small on-demand VM that hosts both the syncer and the fleet "
-        "controller, so this machine is not needed after submission; "
-        "'local' runs a detached worker on this machine plus a separate "
-        "syncer VM (this machine must stay up for the whole run)",
+        help="where the run's controller lives: 'head' provisions one small "
+        "on-demand VM; 'local' runs a detached worker on this machine",
     )
     infra.add_argument("--cluster-prefix", default="yeto", help="cluster name prefix; also the run's name")
     infra.add_argument("--keep", action="store_true", help="do not tear down clusters at the end")
@@ -232,8 +232,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         type=int,
         default=1200,
         help="seconds to keep re-provisioning a failed/preempted learner before "
-        "tearing it down and continuing with the remaining fleet (0 tears the "
-        "learner down on its first failure; the syncer is always recovered)",
+        "tearing it down and continuing with the remaining fleet",
     )
     infra.add_argument(
         "--controller-poll",
@@ -242,22 +241,36 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="fleet-controller health poll interval (seconds)",
     )
 
-    # Per-task flag groups (LM fine-tuning, NAVA fine-tuning, ...). Each
-    # registered backend contributes its own group, so a new task adds its
-    # flags here without editing this function.
-    for backend in all_backends():
-        backend.add_launch_cli_args(p)
 
+def _add_launch_args(p: argparse.ArgumentParser, task_name: str | None = None) -> None:
+    from .backends import default_task, get_backend
+
+    selected = task_name or default_task()
+    _add_launch_common_args(p, selected)
+    get_backend(selected).add_launch_cli_args(p)
+
+
+def _selected_launch_task(argv) -> str | None:
+    from .backends import default_task
+    from .models import inferred_task
+
+    base = argparse.ArgumentParser(add_help=False)
+    _add_launch_common_args(base, task_default=None)
+    ns, _ = base.parse_known_args(argv)
+    if ns.task:
+        return ns.task
+    return inferred_task(ns.model, default_task())
 
 
 def parse_args(argv=None):
     """Parse launch flags only (kept for callers that predate subcommands)."""
+    argv = list(sys.argv[1:] if argv is None else argv)
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    _add_launch_args(p)
+    _add_launch_args(p, _selected_launch_task(argv))
     return p.parse_args(argv)
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(task_name: str | None = None) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="yeto",
         description=__doc__,
@@ -271,7 +284,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    _add_launch_args(launch)
+    _add_launch_args(launch, task_name)
 
     shape = sub.add_parser(
         "shape",
@@ -309,8 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--price-margin",
         type=float,
         default=0.15,
-        help="headroom applied to catalog spot prices when enforcing the "
-        "budget (they are estimates and move)",
+        help="headroom applied to catalog spot prices when enforcing the budget",
     )
     shape.add_argument(
         "--head-cost",
@@ -333,21 +345,17 @@ def build_parser() -> argparse.ArgumentParser:
     shape.add_argument(
         "--skip-capacity-check",
         action="store_true",
-        help="plan on quota + price alone with NO placement-score API calls "
-        "(useful when the daily score-config budget is exhausted; the plan "
-        "is not verified against spot obtainability)",
+        help="plan on quota + price alone with NO placement-score API calls",
     )
     shape.add_argument(
         "--strict-capacity-check",
         action="store_true",
-        help="reject shapes whose placement score cannot be fetched instead "
-        "of assuming the best score with a warning (the default)",
+        help="reject shapes whose placement score cannot be fetched instead of assuming the best score with a warning",
     )
     shape.add_argument(
         "--clouds",
         default=None,
-        help="comma-separated clouds to plan across (default: aws, plus "
-        "runpod when its credentials are present)",
+        help="comma-separated clouds to plan across (default: aws, plus runpod when its credentials are present)",
     )
     shape.add_argument("--max-islands", type=int, default=16, help="cap on learner islands (syncer fan-out)")
     shape.add_argument(
@@ -371,11 +379,9 @@ def build_parser() -> argparse.ArgumentParser:
     down = sub.add_parser("down", help="stop a run's worker and tear down its clusters")
     down.add_argument("run", help="run name (its --cluster-prefix)")
 
-    # Internal: the detached background worker `launch` spawns.
     worker = sub.add_parser("_worker")
     worker.add_argument("run")
 
-    # Internal: the controller job that runs ON the head VM (head mode).
     head = sub.add_parser("_head")
     head.add_argument("args_json", help="JSON-serialized launch args")
     return p
@@ -453,6 +459,8 @@ def _print_detach_hints(name: str) -> None:
 
 def _fleet_args_error(args) -> str | None:
     """Validate the --gpu / --budget / --flops combination."""
+    from .backends import get_backend
+
     backend = get_backend(getattr(args, "task", None))
     if not backend.supports_auto_fleet:
         if args.gpu is None:
@@ -513,6 +521,8 @@ def _resolve_auto_fleet(args) -> int:
 
 
 def _validate_launch_args(args) -> bool:
+    from .backends import get_backend
+
     backend = get_backend(getattr(args, "task", None))
     errors = backend.validate(args)
     if errors:
@@ -524,7 +534,14 @@ def _validate_launch_args(args) -> bool:
     return True
 
 
+def _normalize_launch_args(args) -> None:
+    from .backends import get_backend
+
+    get_backend(getattr(args, "task", None)).normalize_args(args)
+
+
 def cmd_launch(args) -> int:
+    _normalize_launch_args(args)
     if not _validate_launch_args(args):
         return 1
     error = _fleet_args_error(args)
@@ -617,11 +634,18 @@ def _make_head_task(args, syncer_binary, extra_mounts: dict | None = None):
         PICKLED_LOSS_FILE,
         REPO_ROOT,
         SYNCER_PORT,
+        SYNCER_REMOTE_BUILD,
         WAN_TUNING,
     )
 
-    file_mounts = {"~/yeto-syncer": str(syncer_binary), **(extra_mounts or {})}
-    # A task backend may need a local checkout (e.g. NAVA) mounted onto the head.
+    file_mounts = dict(extra_mounts or {})
+    setup_steps = [WAN_TUNING]
+    if syncer_binary is None:
+        setup_steps.append(SYNCER_REMOTE_BUILD)
+    else:
+        file_mounts["~/yeto-syncer"] = str(syncer_binary)
+    from .backends import get_backend
+
     file_mounts.update(get_backend(getattr(args, "task", None)).head_file_mounts(args))
     aws_creds = os.path.expanduser("~/.aws")
     if os.path.isdir(aws_creds):
@@ -643,7 +667,7 @@ def _make_head_task(args, syncer_binary, extra_mounts: dict | None = None):
             "credentials and cannot launch or tear down learner clusters.",
             file=sys.stderr,
         )
-    if args.loss_function.startswith("pickle:"):
+    if (getattr(args, "loss_function", "") or "").startswith("pickle:"):
         # The pickled loss is gitignored, so the workdir sync skips it;
         # mount it into the head's workdir explicitly (the head re-mounts
         # it onto learners from there).
@@ -652,7 +676,7 @@ def _make_head_task(args, syncer_binary, extra_mounts: dict | None = None):
         )
     task = sky.Task(
         name="yeto-head",
-        setup=f"{WAN_TUNING}; {HEAD_SETUP_PIP}",
+        setup="\n".join(setup_steps + [HEAD_SETUP_PIP]),
         workdir=str(REPO_ROOT),
         file_mounts=file_mounts,
     )
@@ -729,9 +753,10 @@ def cmd_launch_head(args) -> int:
     name = args.cluster_prefix
     head_cluster = f"{name}-head"
     specs = parse_gpu_spec(args.gpu)
-    # Resolve the loss BEFORE serializing: a custom:<file.py> spec becomes
-    # pickle:<file> here, and the pickle is file-mounted onto the head.
-    args.loss_function = launcher.resolve_loss_function(args.loss_function)
+    # Resolve the loss BEFORE serializing for LM runs: custom:<file.py>
+    # becomes pickle:<file> here, and the pickle is file-mounted onto the head.
+    if hasattr(args, "loss_function"):
+        args.loss_function = launcher.resolve_loss_function(args.loss_function)
     # Likewise stage a local --data path: it is rsynced onto the head, and
     # the rewritten path makes the head's launcher mount it onto learners.
     from .datasource import head_stage
@@ -739,7 +764,9 @@ def cmd_launch_head(args) -> int:
     data_mounts = {}
     if getattr(args, "data", None):
         args.data, data_mounts = head_stage(args.data)
-    binary = launcher.build_syncer_binary()
+    binary = (
+        None if launcher.needs_remote_syncer_build() else launcher.build_syncer_binary()
+    )
 
     args_dict = _serializable_args(args)
     runs.create_run(name, args_dict)
@@ -798,10 +825,12 @@ def cmd_head(payload: str) -> int:
     from .gpu_spec import parse_gpu_spec
 
     args = argparse.Namespace(**json.loads(payload))
-    # Rewrite submitter-local paths (e.g. NAVA's checkout) to their head-VM
-    # location before learner tasks are built from them.
+    from .backends import get_backend
+
     get_backend(getattr(args, "task", None)).rewrite_for_head(args)
-    num_learners = len(parse_gpu_spec(args.gpu))
+    num_learners = len(parse_gpu_spec(args.gpu)) + max(
+        0, getattr(args, "external_learners", 0) or 0
+    )
     syncer = launcher.LocalSyncer(args, num_learners)
     syncer.start()
     syncer.start_log_forwarder()
@@ -1111,10 +1140,18 @@ def cmd_shape(args) -> int:
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    parser = build_parser()
     if not argv:
+        parser = build_parser()
         parser.print_help()
         return 0
+    if argv[0] == "launch":
+        parser = build_parser(_selected_launch_task(argv[1:]))
+    elif argv[0] not in SUBCOMMANDS and argv[0].startswith("--"):
+        # Backward-compatible bare launch flags: `yeto --gpu ...`.
+        parser = build_parser(_selected_launch_task(argv))
+        argv = ["launch", *argv]
+    else:
+        parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "launch":
         return cmd_launch(args)

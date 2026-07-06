@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from yeto.nava.lora import LoRALinear, patch_lora, trainable_lora_state_dict
+from yeto.components.nava.lora import LoRALinear, patch_lora, trainable_lora_state_dict
 
 
 class TinyNavaLike(nn.Module):
@@ -17,7 +17,7 @@ class TinyNavaLike(nn.Module):
         return self.backbone.double_blocks[0]["self_attn"]["q"](x) + self.other(x)
 
 
-def test_patch_lora_only_targets_backbone_blocks():
+def test_patch_lora_only_targets_nava_backbone_blocks():
     model = TinyNavaLike()
     cfg = patch_lora(model, r=2, alpha=4, target="mmdit-all-linear")
 
@@ -27,10 +27,8 @@ def test_patch_lora_only_targets_backbone_blocks():
     assert not model.other.weight.requires_grad
     assert patched.lora_A.weight.requires_grad
     assert patched.lora_B.weight.requires_grad
-    sd = trainable_lora_state_dict(model)
-    assert sorted(sd) == [
+    assert sorted(trainable_lora_state_dict(model)) == [
         "backbone.double_blocks.0.self_attn.q.lora_A.weight",
         "backbone.double_blocks.0.self_attn.q.lora_B.weight",
     ]
-    y = model(torch.randn(2, 4))
-    assert y.shape == (2, 4)
+    assert model(torch.randn(2, 4)).shape == (2, 4)

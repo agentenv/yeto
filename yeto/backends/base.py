@@ -5,9 +5,10 @@ orchestration in :mod:`yeto.launcher`) is task-agnostic: it merges fragments
 from learner islands and knows nothing about *what* those islands train. A
 **task backend** is the adapter that teaches yeto how to train one kind of
 model — the CLI surface it needs, how to build its learner task, how to
-export its checkpoint. ``lm`` (text LMs) and ``nava`` (multimodal diffusion)
-are two such backends; a third registers by adding a module here and calling
-:func:`register_backend`, touching no central ``if task == ...`` dispatch.
+export its checkpoint. ``lm`` (text LMs) and ``diffusion`` (component-backed
+diffusion models) are built-ins; another backend registers by adding a module
+that calls :func:`register_backend`, touching no central ``if task == ...``
+dispatch.
 
 Within the ``lm`` task the *island engine* is a second, orthogonal axis: the
 intra-island trainer (``torch`` FSDP/DDP vs ``megatron`` expert parallelism).
@@ -126,6 +127,9 @@ class TaskBackend:
     def warnings(self, args) -> list[str]:
         """Non-fatal warnings for the given launch args."""
         return []
+
+    def normalize_args(self, args) -> None:
+        """Fill backend defaults after the full command line is parsed."""
 
     # -- orchestration hooks ------------------------------------------------
 
