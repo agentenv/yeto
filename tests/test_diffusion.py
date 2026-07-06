@@ -7,7 +7,6 @@ from yeto.launcher import make_learner_task
 from yeto.models import (
     DIFFUSION_MODEL_ALIASES,
     resolve,
-    resolve_diffusion_family,
     resolve_model_kind,
 )
 
@@ -50,7 +49,7 @@ def _args(**over):
         retry_until_up=True,
         cache_latents=False,
         cache_text_embeds=False,
-        diffusion_family="auto",
+        diffusion_adapter=None,
         image_column="image",
         video_column="video",
         prompt_column="prompt",
@@ -61,11 +60,7 @@ def _args(**over):
         height=None,
         width=None,
         num_frames=None,
-        frame_rate=25,
         bucket_by_shape=False,
-        nava_root=None,
-        nava_config="configs/nava.yaml",
-        nava_checkpoint=None,
     )
     base.update(over)
     return argparse.Namespace(**base)
@@ -74,10 +69,8 @@ def _args(**over):
 def test_diffusion_aliases_resolve_and_infer_kind():
     assert {"wan22", "ltx-video", "flux", "sd35", "nava"} <= set(DIFFUSION_MODEL_ALIASES)
     assert resolve("sd35") == DIFFUSION_MODEL_ALIASES["sd35"]
+    assert resolve("nava") == "baidu/NAVA"
     assert resolve_model_kind("flux") == "diffusion"
-    assert resolve_diffusion_family("ltx-video") == "ltx"
-    assert resolve_diffusion_family("wan22") == "wan"
-    assert resolve_diffusion_family("nava") == "nava"
     assert resolve_model_kind("org/custom", "diffusion") == "diffusion"
     assert resolve_model_kind("org/custom") == "causal-lm"
 
@@ -95,10 +88,11 @@ def test_diffusion_learner_parse_cache_defaults_are_off():
     ])
     assert args.cache_latents is False
     assert args.cache_text_embeds is False
+    assert args.diffusion_adapter is None
     assert args.loss_function == "flow_matching"
 
 
-def test_diffusion_lora_targets_are_dit_names():
+def test_diffusion_lora_targets_are_generic_dit_names():
     pytest.importorskip("torch")
     from yeto.diffusion import learner
 
@@ -119,25 +113,64 @@ def test_flow_matching_loss_counts_elements():
     assert denom == 6
 
 
-def test_nava_lora_patches_only_backbone_blocks():
+def test_diffusion_adapter_file_factory(tmp_path):
     torch = pytest.importorskip("torch")
-    nn = torch.nn
-    from yeto.diffusion.nava_lora import LoRALinear, patch_lora
+    from yeto.diffusion import learner
 
-    class TinyNava(nn.Module):
+    del torch
+    adapter_file = tmp_path / "adapter.py"
+    adapter_file.write_text(
+        "class Adapter:\n"
+        "    marker = 'loaded'\n"
+        "\n"
+        "def make_adapter():\n"
+        "    return Adapter()\n"
+    )
+
+    adapter = learner.load_diffusion_adapter(f"{adapter_file}:make_adapter")
+    assert adapter.marker == "loaded"
+
+
+def test_denoise_forward_filters_kwargs_by_signature():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.backbone = nn.Module()
-            self.backbone.double_blocks = nn.ModuleList([
-                nn.ModuleDict({"self_attn": nn.ModuleDict({"q": nn.Linear(4, 4)})})
-            ])
-            self.other = nn.Linear(4, 4)
+            self.seen = None
 
-    model = TinyNava()
-    cfg = patch_lora(model, r=2, alpha=4, target="auto")
-    assert cfg.patched_modules == ["backbone.double_blocks.0.self_attn.q"]
-    assert isinstance(model.backbone.double_blocks[0]["self_attn"]["q"], LoRALinear)
-    assert not model.other.weight.requires_grad
+        def forward(
+            self,
+            hidden_states,
+            timestep,
+            encoder_hidden_states=None,
+            pooled_projections=None,
+            height=None,
+            return_dict=False,
+        ):
+            self.seen = {
+                "hidden_states": hidden_states,
+                "timestep": timestep,
+                "encoder_hidden_states": encoder_hidden_states,
+                "pooled_projections": pooled_projections,
+                "height": height,
+                "return_dict": return_dict,
+            }
+            return hidden_states + 1
+
+    pipe = argparse.Namespace(transformer=TinyDenoiser())
+    noisy = learner.LatentBatch(torch.zeros(2, 3), latent_height=8, latent_width=8)
+    cond = learner.TextConditioning(
+        torch.ones(2, 4),
+        pooled_prompt_embeds=torch.ones(2, 5),
+        attention_mask=torch.ones(2, 4),
+    )
+    out = learner.denoise_forward(pipe, noisy, torch.tensor([1, 2]), cond, argparse.Namespace())
+    assert torch.equal(out, torch.ones(2, 3))
+    assert pipe.transformer.seen["height"] == 8
+    assert "width" not in pipe.transformer.seen
+    assert pipe.transformer.seen["return_dict"] is False
 
 
 def test_launcher_routes_diffusion_to_diffusion_learner_and_opt_in_caches():
@@ -148,26 +181,25 @@ def test_launcher_routes_diffusion_to_diffusion_learner_and_opt_in_caches():
     assert "--cache-latents" in task.run and "--cache-text-embeds" in task.run
     assert "--height 512" in task.run and "--width 512" in task.run
     assert "diffusers" in task.setup
+    assert "--diffusion-family" not in task.run
     assert "--train-on" not in task.run and "--seq-len" not in task.run
     assert "--tokenize" not in task.run
 
 
-def test_launcher_routes_specific_video_families():
+def test_launcher_routes_video_aliases_without_model_family_flags():
     ltx = make_learner_task(_args(model="ltx-video", bucket_by_shape=True), _SPEC, 0, 1, "a:1")
-    assert "--diffusion-family ltx" in ltx.run
+    assert "--model ltx-video" in ltx.run
+    assert "--diffusion-family" not in ltx.run
     assert "--bucket-by-shape" in ltx.run
     assert "--text-attention-mask-column prompt_attention_mask" in ltx.run
-    wan = make_learner_task(_args(model="wan22", frame_rate=24), _SPEC, 0, 1, "a:1")
-    assert "--diffusion-family wan" in wan.run
-    assert "--frame-rate 24" in wan.run
+    wan = make_learner_task(_args(model="wan22"), _SPEC, 0, 1, "a:1")
+    assert "--model wan22" in wan.run
+    assert "--diffusion-family" not in wan.run
 
 
-def test_launcher_mounts_nava_root(tmp_path):
-    root = tmp_path / "NAVA"
-    root.mkdir()
-    args = _args(model="nava", nava_root=str(root), nava_checkpoint=None)
+def test_launcher_passes_diffusion_adapter_hook():
+    args = _args(model="nava", diffusion_adapter="my_adapter:make")
     task = make_learner_task(args, _SPEC, 0, 1, "a:1")
-    assert "--diffusion-family nava" in task.run
-    assert "--nava-root ~/yeto-nava" in task.run
-    assert task.file_mounts["~/yeto-nava"] == str(root)
-    assert "libsndfile1" in task.setup
+    assert "--diffusion-adapter my_adapter:make" in task.run
+    assert "--diffusion-family" not in task.run
+    assert "libsndfile1" not in task.setup

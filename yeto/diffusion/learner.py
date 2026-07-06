@@ -26,7 +26,7 @@ from ..autobatch import int_or_auto, rebalance_grad_accum
 from ..data import _learner_rows, load_rows
 from ..fragments import build_layout
 from ..losses import flow_matching_loss
-from ..models import resolve, resolve_diffusion_family
+from ..models import resolve
 from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
 from ..tensor_io import (
     apply_fragment,
@@ -62,17 +62,6 @@ _MLP_TARGETS = [
     "linear_1",
     "linear_2",
 ]
-_DIFFUSION_LORA_TARGETS = {
-    "flux": _ATTENTION_TARGETS + _MLP_TARGETS,
-    "sd35": _ATTENTION_TARGETS + _MLP_TARGETS,
-    "ltx-video": _ATTENTION_TARGETS + _MLP_TARGETS,
-    "wan22": _ATTENTION_TARGETS + _MLP_TARGETS,
-}
-_FAMILY_LORA_TARGETS = {
-    "generic": _ATTENTION_TARGETS + _MLP_TARGETS,
-    "ltx": _ATTENTION_TARGETS + _MLP_TARGETS,
-    "wan": _ATTENTION_TARGETS + _MLP_TARGETS,
-}
 _TRAINABLE_ATTRS = ("transformer", "transformer_2", "unet", "model")
 
 
@@ -101,7 +90,11 @@ def parse_args(argv=None):
     p.add_argument("--loss-function", default="flow_matching")
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument("--shard", choices=["ddp", "fsdp"], default="ddp")
-    p.add_argument("--diffusion-family", choices=["auto", "generic", "ltx", "wan", "nava"], default="auto")
+    p.add_argument(
+        "--diffusion-adapter",
+        default=None,
+        help="optional module:factory or file.py:factory hook for non-standard diffusion repos",
+    )
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
     p.add_argument("--lora-targets", choices=["auto", "attention", "all-linear"], default="auto")
@@ -130,11 +123,7 @@ def parse_args(argv=None):
     p.add_argument("--height", type=int, default=None)
     p.add_argument("--width", type=int, default=None)
     p.add_argument("--num-frames", type=int, default=None)
-    p.add_argument("--frame-rate", type=int, default=25)
     p.add_argument("--bucket-by-shape", action="store_true", default=False)
-    p.add_argument("--nava-root", default=None)
-    p.add_argument("--nava-config", default="configs/nava.yaml")
-    p.add_argument("--nava-checkpoint", default=None)
     p.add_argument("--output-dir", default="checkpoints/diffusion-out")
     p.add_argument("--device", default=None)
     return p.parse_args(argv)
@@ -154,16 +143,42 @@ def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
         return factory.from_pretrained(model_id, **kwargs)
 
 
-def resolve_lora_targets(choice: str, model: str, family: str = "generic"):
+def resolve_lora_targets(choice: str, model: str | None = None):
     """Map the public LoRA target flag to PEFT target_modules for DiTs."""
+    del model
     if choice == "all-linear":
         return "all-linear"
     if choice == "attention":
         return _ATTENTION_TARGETS
-    return _DIFFUSION_LORA_TARGETS.get(model, _FAMILY_LORA_TARGETS.get(family, _ATTENTION_TARGETS + _MLP_TARGETS))
+    return _ATTENTION_TARGETS + _MLP_TARGETS
 
 
-def _trainable_module_items(pipe) -> list[tuple[str, torch.nn.Module]]:
+def load_diffusion_adapter(spec: str | None):
+    """Load an optional user adapter without baking model families into Yeto."""
+    if not spec:
+        return None
+    import importlib
+    import importlib.util
+
+    target, sep, factory_name = spec.partition(":")
+    if not sep or not target or not factory_name:
+        raise ValueError("--diffusion-adapter must be module:factory or file.py:factory")
+    if target.endswith(".py") or os.path.sep in target:
+        path = Path(os.path.expanduser(target))
+        module_spec = importlib.util.spec_from_file_location("yeto_diffusion_adapter", path)
+        if module_spec is None or module_spec.loader is None:
+            raise ImportError(f"cannot import diffusion adapter from {target!r}")
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+    else:
+        module = importlib.import_module(target)
+    factory = getattr(module, factory_name)
+    return factory() if callable(factory) else factory
+
+
+def _trainable_module_items(pipe, adapter=None) -> list[tuple[str, torch.nn.Module]]:
+    if adapter is not None and hasattr(adapter, "trainable_module_items"):
+        return list(adapter.trainable_module_items(pipe))
     return [(name, getattr(pipe, name)) for name in _TRAINABLE_ATTRS if hasattr(pipe, name)]
 
 
@@ -174,18 +189,21 @@ def _freeze_modules(pipe) -> None:
             value.eval()
 
 
-def load_pipeline(args, device):
-    args.diffusion_family = resolve_diffusion_family(args.model, args.diffusion_family)
-    if args.diffusion_family == "nava":
-        return load_nava_pipeline(args, device)
-    from diffusers import DiffusionPipeline
+def load_pipeline(args, device, adapter=None):
+    if adapter is not None and hasattr(adapter, "load_pipeline"):
+        pipe = adapter.load_pipeline(args, device)
+    else:
+        from diffusers import DiffusionPipeline
 
-    model_id = resolve(args.model)
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    pipe = _from_pretrained_offline_first(DiffusionPipeline, model_id, torch_dtype=dtype)
+        model_id = resolve(args.model)
+        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        pipe = _from_pretrained_offline_first(DiffusionPipeline, model_id, torch_dtype=dtype)
+    if adapter is not None and hasattr(adapter, "prepare_model"):
+        return adapter.prepare_model(pipe, args, device)
     _freeze_modules(pipe)
-    modules = _trainable_module_items(pipe)
+    modules = _trainable_module_items(pipe, adapter)
     if not modules:
+        model_id = resolve(args.model)
         raise RuntimeError(
             f"{model_id} has no trainable diffusion module named one of {_TRAINABLE_ATTRS}"
         )
@@ -196,91 +214,23 @@ def load_pipeline(args, device):
             lora = LoraConfig(
                 r=args.lora_r,
                 lora_alpha=args.lora_alpha,
-                target_modules=resolve_lora_targets(args.lora_targets, args.model, args.diffusion_family),
+                target_modules=resolve_lora_targets(args.lora_targets, args.model),
             )
             setattr(pipe, name, get_peft_model(module, lora))
     else:
         for _, module in modules:
             module.requires_grad_(True)
     pipe.to(device)
-    for _, module in _trainable_module_items(pipe):
+    for _, module in _trainable_module_items(pipe, adapter):
         module.train()
     return pipe
 
 
-def _import_from_string(path: str):
-    import importlib
-
-    module, _, name = path.rpartition(".")
-    return getattr(importlib.import_module(module), name)
-
-
-def _resolve_nava_path(path: str, root: str | None) -> str:
-    expanded = os.path.expanduser(path)
-    if os.path.isabs(expanded) or root is None:
-        return expanded
-    return os.path.join(root, expanded)
-
-
-def _load_state_dict(path: str):
-    if path.endswith(".safetensors"):
-        from safetensors.torch import load_file
-
-        return load_file(path, device="cpu")
-    obj = torch.load(path, map_location="cpu")
-    return obj.get("state_dict", obj) if isinstance(obj, dict) else obj
-
-
-def load_nava_pipeline(args, device):
-    import sys
-
-    import yaml
-
-    root = args.nava_root or os.environ.get("YETO_NAVA_ROOT")
-    if root:
-        root = os.path.abspath(os.path.expanduser(root))
-        if root not in sys.path:
-            sys.path.insert(0, root)
-    cfg_path = _resolve_nava_path(args.nava_config, root)
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-    if "video" in cfg.get("modality", "") and "audio" in cfg.get("modality", ""):
-        cfg["init_from_meta"] = True
-    pipe_cls = _import_from_string(cfg["pipeline"])
-    pipe = pipe_cls.create(
-        model_id=cfg.get("model_id", ""),
-        use_bf16=cfg["use_bf16"],
-        audio_latent_ch=cfg["audio_latent_ch"],
-        video_latent_ch=cfg["video_latent_ch"],
-        lambda_ddpm=cfg["lambda_ddpm"],
-        cfg=cfg,
-        device=device,
-    )
-    dtype = torch.bfloat16 if cfg.get("use_bf16", True) else torch.float16
-    pipe.model.to(device=device, dtype=dtype)
-    if args.nava_checkpoint:
-        ckpt = _resolve_nava_path(args.nava_checkpoint, root)
-        missing, unexpected = pipe.model.load_state_dict(_load_state_dict(ckpt), strict=False)
-        if missing or unexpected:
-            log.info("loaded NAVA checkpoint with missing=%d unexpected=%d", len(missing), len(unexpected))
-    if args.tuning == "lora":
-        from .nava_lora import patch_lora
-
-        patch_lora(
-            pipe.model,
-            r=args.lora_r,
-            alpha=args.lora_alpha,
-            target=args.lora_targets,
-        )
-    elif args.tuning == "full":
-        pipe.model.requires_grad_(True)
-    pipe.switch_training_mode()
-    return pipe
-
-
-def trainable_params(pipe) -> dict[str, torch.Tensor]:
+def trainable_params(pipe, adapter=None) -> dict[str, torch.Tensor]:
+    if adapter is not None and hasattr(adapter, "trainable_params"):
+        return dict(adapter.trainable_params(pipe))
     params: dict[str, torch.Tensor] = {}
-    for module_name, module in _trainable_module_items(pipe):
+    for module_name, module in _trainable_module_items(pipe, adapter):
         for name, p in module.named_parameters():
             if p.requires_grad:
                 params[f"{module_name}.{normalize_param_name(name)}"] = p
@@ -319,7 +269,7 @@ def _outer_module_lists(root):
     return found
 
 
-def maybe_wrap_for_distributed(pipe, args, params, rank: int, world: int, device):
+def maybe_wrap_for_distributed(pipe, args, params, rank: int, world: int, device, adapter=None):
     if args.shard == "fsdp":
         if device.type != "cuda":
             raise RuntimeError("diffusion --shard fsdp requires CUDA")
@@ -333,19 +283,19 @@ def maybe_wrap_for_distributed(pipe, args, params, rank: int, world: int, device
         except ImportError as exc:
             raise RuntimeError("diffusion --shard fsdp needs torch>=2.7") from exc
         ignored = set(params.values()) if args.tuning == "lora" else set()
-        for _, module in _trainable_module_items(pipe):
+        for _, module in _trainable_module_items(pipe, adapter):
             blocks = [b for ml in _outer_module_lists(module) for b in ml]
             for block in blocks:
                 block_ignored = ignored & set(block.parameters())
                 fully_shard(block, ignored_params=block_ignored)
             fully_shard(module, ignored_params=ignored & set(module.parameters()))
-        wrapped = trainable_params(pipe)
+        wrapped = trainable_params(pipe, adapter)
         if args.tuning == "lora" and set(wrapped) != set(params):
             diff = sorted(set(wrapped) ^ set(params))[:8]
             raise RuntimeError(f"FSDP changed diffusion adapter names; layout would diverge: {diff}")
         return wrapped
     if world > 1 and args.tuning != "lora":
-        for name, module in _trainable_module_items(pipe):
+        for name, module in _trainable_module_items(pipe, adapter):
             setattr(
                 pipe,
                 name,
@@ -355,7 +305,7 @@ def maybe_wrap_for_distributed(pipe, args, params, rank: int, world: int, device
                     find_unused_parameters=False,
                 ),
             )
-        return trainable_params(pipe)
+        return trainable_params(pipe, adapter)
     return params
 
 
@@ -535,32 +485,13 @@ def _latent_meta(rows, latents: torch.Tensor) -> tuple[int | None, int | None, i
     )
 
 
-def _prepare_ltx_latents(pipe, latents: torch.Tensor, rows) -> LatentBatch:
-    frames, height, width = _latent_meta(rows, latents)
-    if latents.ndim == 5:
-        if hasattr(pipe, "_normalize_latents") and hasattr(pipe, "vae"):
-            latents = pipe._normalize_latents(
-                latents,
-                pipe.vae.latents_mean,
-                pipe.vae.latents_std,
-                pipe.vae.config.scaling_factor,
-            )
-        if hasattr(pipe, "_pack_latents"):
-            latents = pipe._pack_latents(
-                latents,
-                getattr(pipe, "transformer_spatial_patch_size", 1),
-                getattr(pipe, "transformer_temporal_patch_size", 1),
-            )
-    return LatentBatch(latents, frames, height, width)
-
-
-def encode_latents(pipe, rows, args, device, dtype) -> LatentBatch:
+def encode_latents(pipe, rows, args, device, dtype, adapter=None) -> LatentBatch:
+    if adapter is not None and hasattr(adapter, "encode_latents"):
+        return adapter.encode_latents(pipe, rows, args, device, dtype)
     if args.cache_latents:
         latents = _stack_column(rows, args.latent_column, device, dtype)
         if latents is None:
             raise KeyError(f"--cache-latents needs column {args.latent_column!r}")
-        if args.diffusion_family == "ltx":
-            return _prepare_ltx_latents(pipe, latents, rows)
         return LatentBatch(latents, *_latent_meta(rows, latents))
     if not hasattr(pipe, "vae") or pipe.vae is None:
         raise RuntimeError("raw diffusion rows need a pipeline VAE, or pass --cache-latents")
@@ -581,8 +512,6 @@ def encode_latents(pipe, rows, args, device, dtype) -> LatentBatch:
         scale = getattr(getattr(pipe.vae, "config", None), "scaling_factor", 1.0)
         shift = getattr(getattr(pipe.vae, "config", None), "shift_factor", 0.0)
         latents = (latents - shift) * scale
-    if args.diffusion_family == "ltx":
-        return _prepare_ltx_latents(pipe, latents, rows)
     return LatentBatch(latents, *_latent_meta(rows, latents))
 
 
@@ -628,7 +557,9 @@ def _call_encode_prompt(pipe, prompts, device):
     return TextConditioning(out)
 
 
-def encode_prompt_embeds(pipe, rows, args, device, dtype):
+def encode_prompt_embeds(pipe, rows, args, device, dtype, adapter=None):
+    if adapter is not None and hasattr(adapter, "encode_prompt_embeds"):
+        return adapter.encode_prompt_embeds(pipe, rows, args, device, dtype)
     if args.cache_text_embeds:
         prompt_embeds = _stack_column(rows, args.text_embeds_column, device, dtype)
         if prompt_embeds is None:
@@ -684,20 +615,11 @@ def add_noise_and_target(pipe, batch: LatentBatch):
     raise RuntimeError("scheduler must provide sigmas or add_noise()")
 
 
-def _first_trainable_module(pipe) -> torch.nn.Module:
-    modules = _trainable_module_items(pipe)
+def _first_trainable_module(pipe, adapter=None) -> torch.nn.Module:
+    modules = _trainable_module_items(pipe, adapter)
     if not modules:
         raise RuntimeError("no trainable diffusion module loaded")
     return modules[0][1]
-
-
-def _select_trainable_module(pipe, family: str, timesteps: torch.Tensor) -> torch.nn.Module:
-    if family == "wan" and getattr(pipe, "transformer_2", None) is not None:
-        ratio = getattr(getattr(pipe, "config", None), "boundary_ratio", None)
-        if ratio is not None:
-            n = getattr(getattr(pipe.scheduler, "config", None), "num_train_timesteps", 1000)
-            return pipe.transformer_2 if timesteps.float().mean().item() < float(ratio) * n else pipe.transformer
-    return _first_trainable_module(pipe)
 
 
 def _extract_model_output(out):
@@ -712,8 +634,9 @@ def _extract_model_output(out):
     raise TypeError(f"cannot extract tensor from model output {type(out).__name__}")
 
 
-def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning, args):
-    model = _select_trainable_module(pipe, args.diffusion_family, timesteps)
+def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning, args, adapter=None):
+    del args
+    model = _first_trainable_module(pipe, adapter)
     inspect_model = getattr(model, "module", model)
     sig = inspect.signature(inspect_model.forward)
     params = sig.parameters
@@ -723,7 +646,15 @@ def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning,
     elif "sample" in params:
         kwargs["sample"] = noisy.latents
     else:
-        kwargs[next(iter(params))] = noisy.latents
+        positional = [
+            name
+            for name, param in params.items()
+            if param.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        if not positional:
+            raise TypeError(f"{type(inspect_model).__name__}.forward has no latent input parameter")
+        kwargs[positional[0]] = noisy.latents
     if "timestep" in params:
         kwargs["timestep"] = timesteps
     elif "timesteps" in params:
@@ -742,61 +673,43 @@ def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning,
         kwargs["height"] = int(noisy.latent_height)
     if "width" in params and noisy.latent_width is not None:
         kwargs["width"] = int(noisy.latent_width)
-    if "rope_interpolation_scale" in params and args.diffusion_family == "ltx":
-        kwargs["rope_interpolation_scale"] = (
-            getattr(pipe, "vae_temporal_compression_ratio", 1) / max(1, args.frame_rate),
-            getattr(pipe, "vae_spatial_compression_ratio", 1),
-            getattr(pipe, "vae_spatial_compression_ratio", 1),
-        )
     if "return_dict" in params:
         kwargs["return_dict"] = False
     out = model(**kwargs)
     return _extract_model_output(out)
 
 
-def _maybe_tensor_column(rows, *names, device=None, dtype=None):
-    for name in names:
-        value = _stack_column(rows, name, device, dtype)
-        if value is not None:
-            return value
-    return None
-
-
-def _nava_batch_from_rows(rows, args, device):
-    video = _maybe_tensor_column(rows, "video_latents", args.latent_column, device=device)
-    audio = _maybe_tensor_column(rows, "audio_latents", device=device)
-    image = _maybe_tensor_column(rows, "image_latents", device=device)
-    spk = [row.get("spk_embs", []) for row in rows]
-    thw = [row.get("t_h_w", row.get("t_h_w_list")) for row in rows]
-    return {
-        "captions": [str(row.get("caption", row.get(args.prompt_column, ""))) for row in rows],
-        "audio_latents": audio,
-        "video_latents": video,
-        "image_latents": image,
-        "spk_embs": spk,
-        "t_h_w_list": thw if any(x is not None for x in thw) else None,
-    }
-
-
-def compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0):
-    if args.diffusion_family == "nava":
-        loss, _logs = pipe.forward(_nava_batch_from_rows(rows, args, device), global_step=global_step)
-        return loss, torch.ones((), device=device)
+def compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0, adapter=None):
+    if adapter is not None:
+        for name in ("compute_loss", "training_step"):
+            fn = getattr(adapter, name, None)
+            if fn is None:
+                continue
+            out = fn(pipe, rows, args, device, global_step)
+            if isinstance(out, tuple) and len(out) == 2:
+                return out
+            return out, torch.ones((), device=device)
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    latents = encode_latents(pipe, rows, args, device, dtype)
-    cond = encode_prompt_embeds(pipe, rows, args, device, dtype)
+    latents = encode_latents(pipe, rows, args, device, dtype, adapter)
+    cond = encode_prompt_embeds(pipe, rows, args, device, dtype, adapter)
     noisy, target, timesteps = add_noise_and_target(pipe, latents)
-    pred = denoise_forward(pipe, noisy, timesteps, cond, args)
+    pred = denoise_forward(pipe, noisy, timesteps, cond, args, adapter)
     if args.loss_function != "flow_matching":
         raise ValueError("diffusion learner currently supports --loss-function flow_matching")
     return flow_matching_loss(pred, target, timesteps)
 
 
-def save_adapters(pipe, output_dir: str) -> None:
+def save_adapters(pipe, output_dir: str, adapter=None) -> None:
+    if adapter is not None:
+        for name in ("save_adapters", "save"):
+            fn = getattr(adapter, name, None)
+            if fn is not None:
+                fn(pipe, output_dir)
+                return
     out = Path(os.path.expanduser(output_dir))
     out.mkdir(parents=True, exist_ok=True)
     saved = False
-    for name, module in _trainable_module_items(pipe):
+    for name, module in _trainable_module_items(pipe, adapter):
         module = getattr(module, "module", module)
         if hasattr(module, "save_pretrained"):
             module.save_pretrained(out / name)
@@ -806,7 +719,7 @@ def save_adapters(pipe, output_dir: str) -> None:
         saved = True
     if not saved:
         torch.save(
-            {n: p.detach().cpu() for n, p in trainable_params(pipe).items()},
+            {n: p.detach().cpu() for n, p in trainable_params(pipe, adapter).items()},
             out / "trainable_state.pt",
         )
 
@@ -829,12 +742,13 @@ def main(argv=None) -> None:
     if not 0.0 <= args.merge_alpha < 1.0:
         raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
 
+    adapter = load_diffusion_adapter(args.diffusion_adapter)
     log.info("loading diffusion model %s (%s)", args.model, args.tuning)
-    pipe = load_pipeline(args, device)
-    params = trainable_params(pipe)
+    pipe = load_pipeline(args, device, adapter)
+    params = trainable_params(pipe, adapter)
     if not params:
         raise RuntimeError("no trainable diffusion parameters; check --lora-targets")
-    params = maybe_wrap_for_distributed(pipe, args, params, rank, world, device)
+    params = maybe_wrap_for_distributed(pipe, args, params, rank, world, device, adapter)
     layout = build_layout(
         [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
     )
@@ -902,7 +816,7 @@ def main(argv=None) -> None:
     t_last = time.monotonic()
     opt.zero_grad(set_to_none=True)
     for rows in loader:
-        loss, denom = compute_diffusion_loss(pipe, rows, args, device, global_step=global_step)
+        loss, denom = compute_diffusion_loss(pipe, rows, args, device, global_step=global_step, adapter=adapter)
         (loss / (denom.clamp(min=1) * args.grad_accum)).backward()
         accum += 1
         if accum < args.grad_accum:
@@ -911,8 +825,8 @@ def main(argv=None) -> None:
         if args.tuning == "lora":
             allreduce_trainable_grads(params.values(), world)
             torch.nn.utils.clip_grad_norm_(params.values(), 1.0)
-        elif args.shard == "fsdp" and hasattr(_first_trainable_module(pipe), "clip_grad_norm_"):
-            _first_trainable_module(pipe).clip_grad_norm_(1.0)
+        elif args.shard == "fsdp" and hasattr(_first_trainable_module(pipe, adapter), "clip_grad_norm_"):
+            _first_trainable_module(pipe, adapter).clip_grad_norm_(1.0)
         else:
             torch.nn.utils.clip_grad_norm_(params.values(), 1.0)
         opt.step()
@@ -1005,7 +919,7 @@ def main(argv=None) -> None:
             break
 
     if rank == 0:
-        save_adapters(pipe, args.output_dir)
+        save_adapters(pipe, args.output_dir, adapter)
         if client is not None:
             client.close()
     if world > 1:

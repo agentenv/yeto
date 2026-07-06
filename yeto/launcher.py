@@ -457,12 +457,9 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     import sky
 
     from .datasource import learner_data_arg, learner_file_mounts
-    from .models import resolve_diffusion_family, resolve_model_kind
+    from .models import resolve_model_kind
 
     model_kind = resolve_model_kind(args.model, getattr(args, "model_kind", "auto"))
-    diffusion_family = resolve_diffusion_family(
-        args.model, getattr(args, "diffusion_family", "auto")
-    )
     loss_function = args.loss_function
     if model_kind == "diffusion" and loss_function == "cross_entropy":
         loss_function = "flow_matching"
@@ -502,7 +499,6 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             raise ValueError("diffusion model-kind uses the torch island backend, not megatron")
         learner_flags += (
             f" --shard {args.shard}"
-            f" --diffusion-family {diffusion_family}"
             f" --image-column {shlex.quote(args.image_column)}"
             f" --video-column {shlex.quote(args.video_column)}"
             f" --prompt-column {shlex.quote(args.prompt_column)}"
@@ -511,8 +507,9 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             f" --text-attention-mask-column {shlex.quote(args.text_attention_mask_column)}"
             f" --pooled-text-embeds-column {shlex.quote(args.pooled_text_embeds_column)}"
             f" --stream-workers {args.stream_workers}"
-            f" --frame-rate {args.frame_rate}"
         )
+        if getattr(args, "diffusion_adapter", None):
+            learner_flags += f" --diffusion-adapter {shlex.quote(args.diffusion_adapter)}"
         if getattr(args, "cache_latents", False):
             learner_flags += " --cache-latents"
         if getattr(args, "cache_text_embeds", False):
@@ -525,12 +522,6 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             learner_flags += f" --width {args.width}"
         if args.num_frames:
             learner_flags += f" --num-frames {args.num_frames}"
-        if getattr(args, "nava_root", None):
-            learner_flags += f" --nava-root {shlex.quote(args.nava_root)}"
-        if getattr(args, "nava_config", None):
-            learner_flags += f" --nava-config {shlex.quote(args.nava_config)}"
-        if getattr(args, "nava_checkpoint", None):
-            learner_flags += f" --nava-checkpoint {shlex.quote(args.nava_checkpoint)}"
     if args.max_rows:
         learner_flags += f" --max-rows {args.max_rows}"
 
@@ -544,13 +535,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             HF_TOKEN_ENV,
             TORCH_SETUP,
             "pip install -q -r requirements.txt",
-            "pip install -q 'diffusers>=0.35' safetensors pillow imageio pyyaml",
+            "pip install -q 'diffusers>=0.35' safetensors pillow imageio",
         ]
-        if diffusion_family == "nava":
-            setup_steps.append(
-                "sudo apt-get update -y >/dev/null 2>&1 && "
-                "sudo apt-get install -y ffmpeg libsndfile1 >/dev/null 2>&1 || true"
-            )
     elif backend == "megatron":
         gpus = spec.num_nodes * spec.gpus_per_node
         tp = max(1, getattr(args, "tensor_parallel", 1))
@@ -605,21 +591,6 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     # Non-HF --data sources (local paths, s3://, gs://, ...) ride sky's
     # file_mounts onto every learner; see yeto/datasource.py.
     file_mounts = dict(learner_file_mounts(args.data)) or None
-    if model_kind == "diffusion" and diffusion_family == "nava":
-        if getattr(args, "nava_root", None) and os.path.exists(os.path.expanduser(args.nava_root)):
-            file_mounts = file_mounts or {}
-            file_mounts["~/yeto-nava"] = os.path.abspath(os.path.expanduser(args.nava_root))
-            learner_flags = learner_flags.replace(
-                f" --nava-root {shlex.quote(args.nava_root)}",
-                " --nava-root ~/yeto-nava",
-            )
-        if getattr(args, "nava_checkpoint", None) and os.path.exists(os.path.expanduser(args.nava_checkpoint)):
-            file_mounts = file_mounts or {}
-            file_mounts["~/yeto-nava-checkpoint"] = os.path.abspath(os.path.expanduser(args.nava_checkpoint))
-            learner_flags = learner_flags.replace(
-                f" --nava-checkpoint {shlex.quote(args.nava_checkpoint)}",
-                " --nava-checkpoint ~/yeto-nava-checkpoint",
-            )
     if args.loss_function.startswith("pickle:"):
         # The pickled loss is gitignored, so the workdir sync skips it;
         # mount it into the workdir explicitly.
@@ -640,14 +611,10 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     from .models import resolve
 
     repo = resolve(args.model)
-    prefetch = "true"
-    if not (model_kind == "diffusion" and diffusion_family == "nava"):
-        prefetch = (
-            f"(nohup huggingface-cli download {shlex.quote(repo)} "
-            ">/tmp/hf-prefetch.log 2>&1 &) || true"
-        )
-    # NAVA local-path mounts may rewrite learner_flags after the first run
-    # string was assembled.
+    prefetch = (
+        f"(nohup huggingface-cli download {shlex.quote(repo)} "
+        ">/tmp/hf-prefetch.log 2>&1 &) || true"
+    )
     run = (
         f"{NVME_ENV}\n"
         f"{HF_TOKEN_ENV}\n"

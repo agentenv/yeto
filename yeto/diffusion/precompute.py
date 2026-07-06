@@ -24,7 +24,11 @@ def parse_args(argv=None):
     p.add_argument("--model", required=True)
     p.add_argument("--data", required=True)
     p.add_argument("--output", required=True, help="local output directory for manifest + tensors")
-    p.add_argument("--diffusion-family", choices=["auto", "generic", "ltx", "wan", "nava"], default="auto")
+    p.add_argument(
+        "--diffusion-adapter",
+        default=None,
+        help="optional module:factory or file.py:factory hook for non-standard diffusion repos",
+    )
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--max-rows", type=int, default=None)
     p.add_argument("--cache-latents", action="store_true", default=False)
@@ -39,10 +43,6 @@ def parse_args(argv=None):
     p.add_argument("--height", type=int, default=None)
     p.add_argument("--width", type=int, default=None)
     p.add_argument("--num-frames", type=int, default=None)
-    p.add_argument("--frame-rate", type=int, default=25)
-    p.add_argument("--nava-root", default=None)
-    p.add_argument("--nava-config", default="configs/nava.yaml")
-    p.add_argument("--nava-checkpoint", default=None)
     p.add_argument("--device", default=None)
     return p.parse_args(argv)
 
@@ -69,7 +69,8 @@ def main(argv=None) -> int:
     args.lora_r = 16
     args.lora_alpha = 32
     args.lora_targets = "auto"
-    pipe = learner.load_pipeline(args, device)
+    adapter = learner.load_diffusion_adapter(args.diffusion_adapter)
+    pipe = learner.load_pipeline(args, device, adapter)
     ds = load_rows(args.data)
     data_root = None
     data_path = Path(os.path.expanduser(args.data))
@@ -99,13 +100,13 @@ def main(argv=None) -> int:
             if args.cache_latents:
                 old = args.cache_latents
                 args.cache_latents = False
-                latent_batch = learner.encode_latents(pipe, rows, args, device, dtype)
+                latent_batch = learner.encode_latents(pipe, rows, args, device, dtype, adapter)
                 latents = latent_batch.latents.detach().cpu()
                 args.cache_latents = old
             if args.cache_text_embeds:
                 old = args.cache_text_embeds
                 args.cache_text_embeds = False
-                cond = learner.encode_prompt_embeds(pipe, rows, args, device, dtype)
+                cond = learner.encode_prompt_embeds(pipe, rows, args, device, dtype, adapter)
                 prompt_embeds = cond.prompt_embeds.detach().cpu() if cond.prompt_embeds is not None else None
                 pooled = cond.pooled_prompt_embeds.detach().cpu() if cond.pooled_prompt_embeds is not None else None
                 mask = cond.attention_mask.detach().cpu() if cond.attention_mask is not None else None
