@@ -104,6 +104,21 @@ def test_diffusion_lora_targets_are_generic_dit_names():
     assert learner.resolve_lora_targets("all-linear", "sd35") == "all-linear"
 
 
+def test_diffusion_dtype_matches_cuda_bf16_support(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    assert learner.diffusion_torch_dtype(SimpleNamespace(type="cpu")) is torch.float32
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (7, 5))
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: True)
+    assert learner.diffusion_torch_dtype(SimpleNamespace(type="cuda")) is torch.float16
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (8, 0))
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: False)
+    assert learner.diffusion_torch_dtype(SimpleNamespace(type="cuda")) is torch.float16
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: True)
+    assert learner.diffusion_torch_dtype(SimpleNamespace(type="cuda")) is torch.bfloat16
+
+
 def test_flow_matching_loss_counts_elements():
     torch = pytest.importorskip("torch")
     from yeto.losses import flow_matching_loss
@@ -280,6 +295,7 @@ def test_tiny_diffusion_learner_smoke_cached_manifest(tmp_path):
     adapter_file = tmp_path / "tiny_adapter.py"
     adapter_file.write_text(
         "import torch\n"
+        "from yeto.diffusion.learner import diffusion_torch_dtype\n"
         "\n"
         "class TinyScheduler:\n"
         "    class config:\n"
@@ -307,7 +323,7 @@ def test_tiny_diffusion_learner_smoke_cached_manifest(tmp_path):
         "        self.components = {'transformer': self.transformer}\n"
         "\n"
         "    def to(self, device):\n"
-        "        dtype = torch.bfloat16 if torch.device(device).type == 'cuda' else torch.float32\n"
+        "        dtype = diffusion_torch_dtype(torch.device(device))\n"
         "        self.transformer.to(device=device, dtype=dtype)\n"
         "        return self\n"
         "\n"
@@ -416,6 +432,41 @@ def test_denoise_forward_filters_kwargs_by_signature():
     assert pipe.transformer.seen["height"] == 8
     assert "width" not in pipe.transformer.seen
     assert pipe.transformer.seen["return_dict"] is False
+
+
+def test_denoise_forward_inspects_wrapped_base_model_signature():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(self, hidden_states, timestep, encoder_hidden_states=None, return_dict=False):
+            self.seen = (hidden_states, timestep, encoder_hidden_states, return_dict)
+            return hidden_states + 1
+
+    class Wrapper(torch.nn.Module):
+        def __init__(self, base):
+            super().__init__()
+            self.base = base
+
+        def get_base_model(self):
+            return self.base
+
+        def forward(self, *args, **kwargs):
+            return self.base(*args, **kwargs)
+
+    base = TinyDenoiser()
+    pipe = argparse.Namespace(transformer=Wrapper(base))
+    noisy = learner.LatentBatch(torch.zeros(1, 2))
+    cond = learner.TextConditioning(torch.ones(1, 2))
+
+    out = learner.denoise_forward(pipe, noisy, torch.tensor([1]), cond, argparse.Namespace())
+
+    assert torch.equal(out, torch.ones(1, 2))
+    assert base.seen[2] is cond.prompt_embeds
 
 
 def test_launcher_routes_diffusion_to_diffusion_learner_and_opt_in_caches():

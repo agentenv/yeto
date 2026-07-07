@@ -90,7 +90,7 @@ def main(argv=None) -> int:
         txt_dir.mkdir(exist_ok=True)
 
     manifest = out / "data.jsonl"
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    dtype = learner.diffusion_torch_dtype(device)
     index = 0
     with manifest.open("w", encoding="utf-8") as f:
         for rows in loader:

@@ -91,7 +91,11 @@ def _select_device(device: str | None):
 def _torch_dtype(dtype: str, device):
     import torch
 
-    if dtype == "bf16" or (dtype == "auto" and device.type == "cuda"):
+    if dtype == "auto":
+        from .learner import diffusion_torch_dtype
+
+        return diffusion_torch_dtype(device)
+    if dtype == "bf16":
         return torch.bfloat16
     if dtype == "fp16":
         return torch.float16

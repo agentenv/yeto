@@ -173,9 +173,12 @@ def read_diffusion_cache_metadata(dataset_name) -> dict | None:
     if not isinstance(dataset_name, str):
         return None
     path = Path(os.path.expanduser(dataset_name))
-    if not path.exists():
+    if path.exists():
+        root = path if path.is_dir() else path.parent
+    elif path.parent.exists():
+        root = path.parent
+    else:
         return None
-    root = path if path.is_dir() else path.parent
     meta_path = root / DIFFUSION_CACHE_METADATA_FILE
     if not meta_path.exists():
         return None
@@ -284,6 +287,25 @@ def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
         return factory.from_pretrained(model_id, **kwargs)
 
 
+def diffusion_torch_dtype(device) -> torch.dtype:
+    if device.type != "cuda":
+        return torch.float32
+    get_capability = getattr(torch.cuda, "get_device_capability", None)
+    if get_capability is not None:
+        try:
+            major, _ = get_capability(device)
+        except (AssertionError, RuntimeError, TypeError):
+            try:
+                major, _ = get_capability()
+            except (AssertionError, RuntimeError, TypeError):
+                major = None
+        if major is not None and major < 8:
+            return torch.float16
+    if getattr(torch.cuda, "is_bf16_supported", lambda: False)():
+        return torch.bfloat16
+    return torch.float16
+
+
 def resolve_lora_targets(choice: str, model: str | None = None):
     """Map the public LoRA target flag to PEFT target_modules for DiTs."""
     del model
@@ -337,7 +359,7 @@ def load_pipeline(args, device, adapter=None):
         from diffusers import DiffusionPipeline
 
         model_id = resolve(args.model)
-        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        dtype = diffusion_torch_dtype(device)
         pipe = _from_pretrained_offline_first(DiffusionPipeline, model_id, torch_dtype=dtype)
     if adapter is not None and hasattr(adapter, "prepare_model"):
         return adapter.prepare_model(pipe, args, device)
@@ -536,10 +558,18 @@ def _data_root_for(dataset_name) -> str | None:
 
 def _prepare_probe_rows(args, rank: int, world: int) -> list[dict]:
     ds = load_rows(args.data)
-    shard = _learner_rows(len(ds), args.learner_id, args.num_learners, args.max_rows)
+    shard = _learner_rows(
+        len(ds),
+        getattr(args, "learner_id", 0),
+        getattr(args, "num_learners", 1),
+        args.max_rows,
+    )
     my_rows = shard[rank::world]
     if not my_rows:
-        raise ValueError(f"learner {args.learner_id} rank {rank}: no rows left for autobatch probe")
+        raise ValueError(
+            f"learner {getattr(args, 'learner_id', 0)} rank {rank}: "
+            "no rows left for autobatch probe"
+        )
     data_root = _data_root_for(args.data)
     rows = [dict(ds[my_rows[0]])]
     if data_root is not None:
@@ -873,10 +903,36 @@ def _extract_model_output(out):
     raise TypeError(f"cannot extract tensor from model output {type(out).__name__}")
 
 
+def _signature_model_for_forward(model: torch.nn.Module) -> torch.nn.Module:
+    inspect_model = getattr(model, "module", model)
+    candidates = [inspect_model]
+    get_base_model = getattr(inspect_model, "get_base_model", None)
+    if callable(get_base_model):
+        try:
+            candidates.append(get_base_model())
+        except TypeError:
+            pass
+    base_model = getattr(inspect_model, "base_model", None)
+    if base_model is not None:
+        candidates.append(getattr(base_model, "model", base_model))
+
+    for candidate in candidates:
+        params = inspect.signature(candidate.forward).parameters
+        positional = [
+            name
+            for name, param in params.items()
+            if param.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        if "hidden_states" in params or "sample" in params or positional:
+            return candidate
+    return inspect_model
+
+
 def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning, args, adapter=None):
     del args
     model = _first_trainable_module(pipe, adapter)
-    inspect_model = getattr(model, "module", model)
+    inspect_model = _signature_model_for_forward(model)
     sig = inspect.signature(inspect_model.forward)
     params = sig.parameters
     kwargs = {}
@@ -928,7 +984,7 @@ def compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0, adapt
             if isinstance(out, tuple) and len(out) == 2:
                 return out
             return out, torch.ones((), device=device)
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    dtype = diffusion_torch_dtype(device)
     latents = encode_latents(pipe, rows, args, device, dtype, adapter)
     cond = encode_prompt_embeds(pipe, rows, args, device, dtype, adapter)
     noisy, target, timesteps = add_noise_and_target(pipe, latents)
