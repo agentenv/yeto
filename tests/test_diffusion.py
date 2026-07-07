@@ -375,6 +375,112 @@ def test_diffusion_adapter_file_factory(tmp_path):
     assert adapter.marker == "loaded"
 
 
+def test_nava_adapter_factory_and_row_conversion(tmp_path):
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+    from yeto.diffusion.adapters import nava
+
+    adapter = learner.load_diffusion_adapter("yeto.diffusion.adapters.nava:make_adapter")
+    assert isinstance(adapter, nava.NavaAdapter)
+
+    args = SimpleNamespace(
+        video_column="video",
+        prompt_column="prompt",
+        width=None,
+        height=None,
+        num_frames=120,
+    )
+    row = {
+        "__yeto_data_root__": str(tmp_path),
+        "video": "clip.mp4",
+        "prompt": "a caption",
+        "duration": 5.0,
+        "height": 720,
+        "width": 1280,
+    }
+
+    got = nava._nava_json_row(row, args)
+
+    assert got["text_list"][0]["text"] == "a caption"
+    assert got["video_info"][0]["data_path"] == str(tmp_path / "clip.mp4")
+    assert got["video_info"][0]["duration"] == 5.0
+    assert got["video_info"][0]["image_height"] == 720
+    assert got["video_info"][0]["image_width"] == 1280
+
+    no_duration = {
+        "__yeto_data_root__": str(tmp_path),
+        "video": "clip2.mp4",
+        "prompt": "another caption",
+    }
+    assert nava._nava_json_row(no_duration, args)["video_info"][0]["duration"] == 5.0
+
+
+def test_nava_adapter_direct_latent_training_step():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion.adapters.nava import make_adapter
+
+    class TinyNavaPipe:
+        def __init__(self):
+            self.model = torch.nn.Linear(1, 1)
+            self.cfg = {"data": {}}
+            self.seen = None
+
+        def forward(self, batch, global_step=None):
+            self.seen = (batch, global_step)
+            return self.model(torch.ones(1, 1)).sum(), {"ddpm": torch.ones(())}
+
+    rows = [
+        {
+            "captions": "one",
+            "audio_latents": torch.ones(3, 8),
+            "video_latents": torch.ones(2, 4, 5, 6),
+            "spk_embs": [],
+        },
+        {
+            "captions": "two",
+            "audio_latents": torch.ones(3, 8),
+            "video_latents": torch.ones(2, 4, 5, 6),
+            "spk_embs": [],
+        },
+    ]
+    pipe = TinyNavaPipe()
+    adapter = make_adapter()
+
+    loss, denom = adapter.training_step(
+        pipe,
+        rows,
+        SimpleNamespace(micro_batch_size=2),
+        torch.device("cpu"),
+        global_step=7,
+    )
+
+    batch, global_step = pipe.seen
+    assert loss.ndim == 0
+    assert denom.item() == 1
+    assert global_step == 7
+    assert batch["captions"] == ["one", "two"]
+    assert batch["t_h_w_list"] == [(2, 4, 5), (2, 4, 5)]
+
+
+def test_nava_adapter_raw_state_save_and_load(tmp_path):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion.adapters.nava import make_adapter
+
+    adapter = make_adapter()
+    pipe = SimpleNamespace(model=torch.nn.Linear(2, 2))
+    with torch.no_grad():
+        pipe.model.weight.fill_(3.0)
+        pipe.model.bias.fill_(4.0)
+
+    adapter.save_adapters(pipe, tmp_path)
+
+    assert (tmp_path / "model_state.pt").exists()
+    loaded = SimpleNamespace(model=torch.nn.Linear(2, 2))
+    adapter.load_adapters(loaded, tmp_path, {}, SimpleNamespace())
+    assert torch.allclose(loaded.model.weight, torch.full_like(loaded.model.weight, 3.0))
+    assert torch.allclose(loaded.model.bias, torch.full_like(loaded.model.bias, 4.0))
+
+
 def test_tiny_diffusion_learner_smoke_cached_manifest(tmp_path):
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
