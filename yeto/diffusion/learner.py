@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import io
 import json
 import logging
 import os
@@ -682,14 +683,18 @@ def _open_image(value, base_dir: str | None = None):
         if not path.is_absolute() and base_dir:
             path = Path(base_dir) / path
         return Image.open(path).convert("RGB")
-    if isinstance(value, dict) and "path" in value:
-        return _open_image(value["path"], base_dir).convert("RGB")
+    if isinstance(value, dict) and value.get("bytes") is not None:
+        return Image.open(io.BytesIO(value["bytes"])).convert("RGB")
+    if isinstance(value, dict) and value.get("path") is not None:
+        return _open_image(value["path"], base_dir)
     raise TypeError(f"unsupported image value {type(value).__name__}")
 
 
 def _open_video_frames(value, base_dir: str | None = None):
     if isinstance(value, (list, tuple)):
         return [_open_image(v, base_dir) for v in value]
+    if isinstance(value, dict) and "path" in value:
+        return _open_video_frames(value["path"], base_dir)
     if isinstance(value, str):
         path = Path(os.path.expanduser(value))
         if not path.is_absolute() and base_dir:
@@ -725,6 +730,41 @@ def _manual_preprocess_video(videos, height: int | None, width: int | None) -> t
     # videos: list[list[PIL]] -> (B, C, F, H, W)
     frames = [_manual_preprocess(video, height, width).permute(1, 0, 2, 3) for video in videos]
     return torch.stack(frames)
+
+
+def _preprocess_with_processor(processor, images, *, height: int | None, width: int | None):
+    sig = inspect.signature(processor.preprocess)
+    params = sig.parameters
+    accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    kwargs = {}
+    if height is not None and ("height" in params or accepts_kwargs):
+        kwargs["height"] = height
+    if width is not None and ("width" in params or accepts_kwargs):
+        kwargs["width"] = width
+    return processor.preprocess(images, **kwargs)
+
+
+def _extract_latents(encoded) -> torch.Tensor:
+    if hasattr(encoded, "latent_dist"):
+        return encoded.latent_dist.sample()
+    value = getattr(encoded, "latents", None)
+    if value is not None:
+        return value
+    if isinstance(encoded, (tuple, list)):
+        return encoded[0]
+    if torch.is_tensor(encoded):
+        return encoded
+    raise TypeError(f"cannot extract latents from VAE output {type(encoded).__name__}")
+
+
+def _call_vae_encode(vae, pixels: torch.Tensor):
+    sig = inspect.signature(vae.encode)
+    params = sig.parameters
+    if "sample" in params:
+        return vae.encode(sample=pixels)
+    if "x" in params:
+        return vae.encode(x=pixels)
+    return vae.encode(pixels)
 
 
 def _latent_meta(rows, latents: torch.Tensor) -> tuple[int | None, int | None, int | None]:
@@ -765,14 +805,14 @@ def encode_latents(pipe, rows, args, device, dtype, adapter=None) -> LatentBatch
     else:
         images = [_open_image(row[args.image_column], row.get("__yeto_data_root__")) for row in rows]
         pixels = (
-            pipe.image_processor.preprocess(images, height=args.height, width=args.width)
+            _preprocess_with_processor(pipe.image_processor, images, height=args.height, width=args.width)
             if hasattr(pipe, "image_processor")
             else _manual_preprocess(images, args.height, args.width)
         )
     pixels = pixels.to(device=device, dtype=dtype)
     with torch.no_grad():
-        encoded = pipe.vae.encode(pixels)
-        latents = encoded.latent_dist.sample() if hasattr(encoded, "latent_dist") else encoded[0]
+        encoded = _call_vae_encode(pipe.vae, pixels)
+        latents = _extract_latents(encoded)
         scale = getattr(getattr(pipe.vae, "config", None), "scaling_factor", 1.0)
         shift = getattr(getattr(pipe.vae, "config", None), "shift_factor", 0.0)
         latents = (latents - shift) * scale

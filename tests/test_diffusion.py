@@ -1,4 +1,5 @@
 import argparse
+import io
 import json
 from types import SimpleNamespace
 
@@ -390,6 +391,190 @@ def test_tiny_diffusion_learner_smoke_cached_manifest(tmp_path):
     assert meta["cache"] == {"latents": True, "text_embeds": True}
     assert meta["trainable_modules"] == ["transformer"]
     assert meta["trainable_tensor_count"] == len(state)
+
+
+def test_open_image_accepts_hf_image_bytes_dict():
+    Image = pytest.importorskip("PIL.Image")
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    buf = io.BytesIO()
+    Image.new("RGB", (2, 2), color="red").save(buf, format="PNG")
+
+    got = learner._open_image({"bytes": buf.getvalue(), "path": None})
+
+    assert got.mode == "RGB"
+    assert got.size == (2, 2)
+
+
+def test_raw_image_lora_adapter_round_trip(monkeypatch, tmp_path):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("peft")
+    Image = pytest.importorskip("PIL.Image")
+    from yeto.diffusion import learner, sample
+
+    adapter_file = tmp_path / "raw_adapter.py"
+    adapter_file.write_text(
+        "from types import SimpleNamespace\n"
+        "import torch\n"
+        "from yeto.diffusion.learner import diffusion_torch_dtype\n"
+        "\n"
+        "class TinyLatentDist:\n"
+        "    def __init__(self, latents):\n"
+        "        self.latents = latents\n"
+        "    def sample(self):\n"
+        "        return self.latents\n"
+        "\n"
+        "class TinyVAE(torch.nn.Module):\n"
+        "    class config:\n"
+        "        scaling_factor = 1.0\n"
+        "        shift_factor = 0.0\n"
+        "    def encode(self, sample):\n"
+        "        flat = sample.mean(dim=(2, 3))\n"
+        "        latents = torch.nn.functional.pad(flat, (0, 4 - flat.shape[1]))[:, :4]\n"
+        "        return SimpleNamespace(latent_dist=TinyLatentDist(latents))\n"
+        "\n"
+        "class TinyDenoiser(torch.nn.Module):\n"
+        "    def __init__(self):\n"
+        "        super().__init__()\n"
+        "        self.to_q = torch.nn.Linear(4, 4)\n"
+        "    def forward(self, hidden_states, timestep, encoder_hidden_states=None, return_dict=False):\n"
+        "        del timestep, return_dict\n"
+        "        cond = encoder_hidden_states\n"
+        "        if cond.ndim > hidden_states.ndim:\n"
+        "            cond = cond.mean(dim=1)\n"
+        "        return self.to_q(hidden_states + cond)\n"
+        "\n"
+        "class TinyScheduler:\n"
+        "    class config:\n"
+        "        num_train_timesteps = 4\n"
+        "        prediction_type = 'epsilon'\n"
+        "    def add_noise(self, latents, noise, timesteps):\n"
+        "        del timesteps\n"
+        "        return latents + 0.1 * noise\n"
+        "\n"
+        "class TinyPipe:\n"
+        "    def __init__(self):\n"
+        "        self.vae = TinyVAE()\n"
+        "        self.transformer = TinyDenoiser()\n"
+        "        self.scheduler = TinyScheduler()\n"
+        "        self.components = {'vae': self.vae, 'transformer': self.transformer}\n"
+        "    def encode_prompt(self, prompt, device=None, num_images_per_prompt=1, do_classifier_free_guidance=False):\n"
+        "        del num_images_per_prompt, do_classifier_free_guidance\n"
+        "        vals = [[float(len(p)), 1.0, 0.0, 0.0] for p in prompt]\n"
+        "        return torch.tensor(vals, device=device or 'cpu')\n"
+        "    def to(self, device):\n"
+        "        dtype = diffusion_torch_dtype(torch.device(device))\n"
+        "        self.vae.to(device=device, dtype=dtype)\n"
+        "        self.transformer.to(device=device, dtype=dtype)\n"
+        "        return self\n"
+        "\n"
+        "def make_adapter():\n"
+        "    class Adapter:\n"
+        "        def load_pipeline(self, args, device):\n"
+        "            del args, device\n"
+        "            return TinyPipe()\n"
+        "    return Adapter()\n"
+    )
+    for i, color in enumerate(("red", "blue")):
+        Image.new("RGB", (2, 2), color=color).save(tmp_path / f"img_{i}.png")
+    data = tmp_path / "data.jsonl"
+    with data.open("w", encoding="utf-8") as f:
+        for i in range(2):
+            f.write(json.dumps({"image": f"img_{i}.png", "prompt": f"prompt {i}"}) + "\n")
+    out = tmp_path / "out"
+
+    learner.main(
+        [
+            "--model",
+            "tiny",
+            "--data",
+            str(data),
+            "--syncer",
+            "none",
+            "--learner-id",
+            "0",
+            "--num-learners",
+            "1",
+            "--tuning",
+            "lora",
+            "--lora-r",
+            "2",
+            "--lora-alpha",
+            "4",
+            "--diffusion-adapter",
+            f"{adapter_file}:make_adapter",
+            "--micro-batch-size",
+            "2",
+            "--stream-workers",
+            "0",
+            "--fragments",
+            "1",
+            "--max-local-steps",
+            "1",
+            "--output-dir",
+            str(out),
+        ]
+    )
+
+    meta = json.loads((out / learner.DIFFUSION_ADAPTER_METADATA_FILE).read_text(encoding="utf-8"))
+    assert meta["cache"] == {"latents": False, "text_embeds": False}
+    assert (out / "transformer" / "adapter_config.json").exists()
+
+    class TinySampleDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.to_q = torch.nn.Linear(4, 4)
+
+        def forward(self, hidden_states, **kwargs):
+            del kwargs
+            return self.to_q(hidden_states)
+
+    class TinySamplePipe:
+        def __init__(self):
+            self.transformer = TinySampleDenoiser()
+            self.components = {"transformer": self.transformer}
+            self.moved_to = None
+            self.evaluated = False
+
+        def to(self, device):
+            self.moved_to = device
+            self.transformer.to(device)
+            return self
+
+        def eval(self):
+            self.evaluated = True
+
+        def __call__(self, prompt, **kwargs):
+            del prompt, kwargs
+            return {"images": [Image.new("RGB", (1, 1), color="green")]}
+
+    monkeypatch.setattr(sample, "_load_base_pipeline", lambda model_id, device, dtype: TinySamplePipe())
+    pipe, loaded_meta, adapter = sample.load_artifact_pipeline(
+        out,
+        SimpleNamespace(model=None, diffusion_adapter=None, device="cpu", dtype="auto"),
+    )
+
+    assert loaded_meta["model"] == "tiny"
+    assert adapter is not None
+    assert hasattr(pipe.transformer, "peft_config")
+    assert pipe.evaluated is True
+    sampled = sample.run_sample(
+        pipe,
+        SimpleNamespace(
+            prompt="a prompt",
+            num_inference_steps=None,
+            guidance_scale=None,
+            height=None,
+            width=None,
+            num_frames=None,
+            seed=None,
+            device="cpu",
+        ),
+        loaded_meta,
+        adapter,
+    )
+    assert sampled["images"][0].size == (1, 1)
 
 
 def test_denoise_forward_filters_kwargs_by_signature():
