@@ -539,7 +539,11 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
                 b.extend_from_slice(&t.to_le_bytes());
                 bytes::Bytes::from(b)
             };
-            for g in current_groups(&registry) {
+            let groups = current_groups(&registry);
+            let mut expected_learners: Vec<u32> = groups.iter().map(|g| g.learner_id).collect();
+            expected_learners.sort_unstable();
+            let launch_quorum = (cfg.quorum as usize).min(expected_learners.len().max(1));
+            for g in groups {
                 let _ = g.send_small(MSG_PULL_REQ, pull.clone()).await;
             }
             inflight.push(Round {
@@ -547,8 +551,12 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
                 p,
                 pull,
                 started: Instant::now(),
+                expected_learners,
                 quorum_deadline: Instant::now() + Duration::from_secs(cfg.quorum_timeout_s),
                 grace_deadline: None,
+                quorum_size: launch_quorum,
+                quorum_ms: None,
+                grace_ms: None,
                 pushes: HashMap::new(),
             });
         }
@@ -568,6 +576,9 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
                     Duration::from_millis(cfg.grace_ms),
                 );
                 r.grace_deadline = Some(Instant::now() + grace);
+                r.quorum_size = k;
+                r.quorum_ms = Some(r.started.elapsed().as_millis() as u64);
+                r.grace_ms = Some(grace.as_millis() as u64);
             }
         }
 
@@ -664,8 +675,12 @@ struct Round {
     p: usize,
     pull: bytes::Bytes,
     started: Instant,
+    expected_learners: Vec<u32>,
     quorum_deadline: Instant,
     grace_deadline: Option<Instant>,
+    quorum_size: usize,
+    quorum_ms: Option<u64>,
+    grace_ms: Option<u64>,
     pushes: HashMap<u32, Push>,
 }
 
@@ -680,7 +695,17 @@ async fn complete_round(
     last_sync_secs: &mut f64,
     round: Round,
 ) -> Result<()> {
-    let Round { t, p, started, mut pushes, .. } = round;
+    let Round {
+        t,
+        p,
+        started,
+        expected_learners,
+        quorum_size,
+        quorum_ms,
+        grace_ms,
+        mut pushes,
+        ..
+    } = round;
     let prev_version = st.versions[p];
     if st.wire_dtype == DTYPE_Q4 {
         // Q4 pushes are deltas anchored at the learner's base_version;
@@ -731,6 +756,7 @@ async fn complete_round(
         let _ = g.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
     }
     *last_sync_secs = sync_start.elapsed().as_secs_f64();
+    let sync_ms = (*last_sync_secs * 1000.0).round() as u64;
     let ms = started.elapsed().as_millis() as u64;
     info!(
         step = t,
@@ -743,7 +769,8 @@ async fn complete_round(
     if let Some(tape) = &cfg.event_tape {
         // Records land in completion order, which under pipelining is not
         // necessarily step order.
-        append_tape(tape, t, p, &pushes, &weights, gnorm, ms);
+        append_tape(tape, t, p, &expected_learners, quorum_size, quorum_ms, grace_ms,
+                    sync_ms, &pushes, gnorm, ms);
     }
     // Consistent cut: this round is fully applied and broadcast, and every
     // other in-flight round is still gathering (it has not touched state).
@@ -809,28 +836,51 @@ fn append_tape(
     path: &std::path::Path,
     step: u64,
     fragment: usize,
+    expected_learners: &[u32],
+    quorum: usize,
+    quorum_ms: Option<u64>,
+    grace_ms: Option<u64>,
+    sync_ms: u64,
     pushes: &HashMap<u32, Push>,
-    _weights: &[f64],
     gnorm: f64,
     ms: u64,
 ) {
     use std::io::Write;
+    let mut responded: Vec<u32> = pushes.keys().copied().collect();
+    responded.sort_unstable();
+    let missed_grace: Vec<u32> = expected_learners
+        .iter()
+        .copied()
+        .filter(|id| !pushes.contains_key(id))
+        .collect();
+    let weight_sum: f64 = pushes
+        .values()
+        .map(|p| crate::merge::learner_weight(p.c_tokens, p.c_steps))
+        .sum();
     let mut responders: Vec<String> = pushes
         .values()
         .map(|p| {
+            let weight = crate::merge::learner_weight(p.c_tokens, p.c_steps);
+            let contribution = if weight_sum > 0.0 { weight / weight_sum } else { 0.0 };
             format!(
-                "{{\"id\":{},\"base_version\":{},\"c_steps\":{},\"c_tokens\":{},\"weight\":{}}}",
+                "{{\"id\":{},\"base_version\":{},\"c_steps\":{},\"c_tokens\":{},\"weight\":{},\"contribution\":{}}}",
                 p.learner_id,
                 p.base_version,
                 p.c_steps,
                 p.c_tokens,
-                crate::merge::learner_weight(p.c_tokens, p.c_steps)
+                weight,
+                contribution
             )
         })
         .collect();
     responders.sort();
+    let quorum_ms = json_opt_u64(quorum_ms);
+    let grace_ms = json_opt_u64(grace_ms);
     let line = format!(
-        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}]}}\n",
+        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"responded\":{},\"missed_grace\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms},\"responders\":[{}]}}\n",
+        json_ids(expected_learners),
+        json_ids(&responded),
+        json_ids(&missed_grace),
         responders.join(",")
     );
     let res = std::fs::OpenOptions::new()
@@ -841,6 +891,17 @@ fn append_tape(
     if let Err(e) = res {
         warn!("event tape write failed: {e}");
     }
+}
+
+fn json_ids(ids: &[u32]) -> String {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    let body = ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    format!("[{body}]")
+}
+
+fn json_opt_u64(value: Option<u64>) -> String {
+    value.map_or_else(|| "null".to_string(), |v| v.to_string())
 }
 
 fn dump_state(st: &GlobalState, path: &std::path::Path) -> Result<()> {
@@ -935,5 +996,53 @@ mod tests {
         assert_eq!(rates.max_step_secs(), None);
         rates.note(1, 15, t0 + Duration::from_secs(6));
         assert!((rates.max_step_secs().unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn event_tape_records_rendezvous_metrics() {
+        let path = std::env::temp_dir().join(format!(
+            "yeto-event-tape-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut pushes = std::collections::HashMap::new();
+        pushes.insert(
+            0,
+            Push {
+                learner_id: 0,
+                fragment_id: 1,
+                global_step: 7,
+                base_version: 3,
+                local_step: 99,
+                c_steps: 4,
+                c_tokens: 40,
+                values: vec![1.0],
+            },
+        );
+        append_tape(
+            &path,
+            7,
+            1,
+            &[0, 1],
+            2,
+            Some(11),
+            Some(22),
+            33,
+            &pushes,
+            0.5,
+            44,
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(text.contains("\"expected\":[0,1]"));
+        assert!(text.contains("\"responded\":[0]"));
+        assert!(text.contains("\"missed_grace\":[1]"));
+        assert!(text.contains("\"quorum_ms\":11"));
+        assert!(text.contains("\"grace_ms\":22"));
+        assert!(text.contains("\"sync_ms\":33"));
+        assert!(text.contains("\"contribution\":1"));
     }
 }
