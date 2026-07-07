@@ -487,6 +487,10 @@ class StreamingDiffusionRows(IterableDataset):
         world: int = 1,
         seed: int = 0,
         split: str = "train",
+        cache_latents: bool = False,
+        target_num_frames: int | None = None,
+        target_height: int | None = None,
+        target_width: int | None = None,
     ):
         self.dataset_name = dataset_name
         self.learner_id = learner_id
@@ -498,6 +502,10 @@ class StreamingDiffusionRows(IterableDataset):
         self.world = world
         self.seed = seed
         self.split = split
+        self.cache_latents = cache_latents
+        self.num_frames = target_num_frames
+        self.height = target_height
+        self.width = target_width
 
     def __iter__(self):
         ds = load_rows(self.dataset_name, self.split)
@@ -529,7 +537,7 @@ class StreamingDiffusionRows(IterableDataset):
                 if not self.bucket_by_shape:
                     yield row
                     continue
-                key = _shape_key(row)
+                key = _shape_key(row, self)
                 bucket = buckets.setdefault(key, [])
                 bucket.append(row)
                 if len(bucket) >= self.micro_batch_size:
@@ -537,12 +545,53 @@ class StreamingDiffusionRows(IterableDataset):
                     del bucket[: self.micro_batch_size]
 
 
-def _shape_key(row: dict) -> tuple:
+def _shape_metadata_int(row: dict, *names: str) -> int | None:
+    for name in names:
+        value = row.get(name)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _row_shape_key(row: dict, args=None) -> tuple[int | None, int | None, int | None]:
+    if args is not None and getattr(args, "cache_latents", False):
+        return (
+            _shape_metadata_int(row, "latent_num_frames", "frames", "num_frames"),
+            _shape_metadata_int(row, "latent_height", "height"),
+            _shape_metadata_int(row, "latent_width", "width"),
+        )
     return (
-        row.get("latent_num_frames", row.get("frames", row.get("num_frames"))),
-        row.get("latent_height", row.get("height")),
-        row.get("latent_width", row.get("width")),
+        _shape_metadata_int(row, "frames", "num_frames", "latent_num_frames"),
+        _shape_metadata_int(row, "height", "latent_height"),
+        _shape_metadata_int(row, "width", "latent_width"),
     )
+
+
+def _shape_key(row: dict, args=None) -> tuple[int | None, int | None, int | None]:
+    frames, height, width = _row_shape_key(row, args)
+    if args is not None:
+        frames = getattr(args, "num_frames", None) or frames
+        height = getattr(args, "height", None) or height
+        width = getattr(args, "width", None) or width
+    return frames, height, width
+
+
+def _batch_shape_key(rows: list[dict], args) -> tuple[int | None, int | None, int | None]:
+    if not rows:
+        return None, None, None
+    key = _shape_key(rows[0], args)
+    mismatched = [shape for shape in (_shape_key(row, args) for row in rows[1:]) if shape != key]
+    if mismatched:
+        shapes = [key, *mismatched[:7]]
+        raise ValueError(
+            "diffusion rows in a micro-batch must share target shape; "
+            f"got {shapes}. Use --bucket-by-shape or set --height/--width/--num-frames."
+        )
+    return key
 
 
 def _collate_rows(rows):
@@ -583,7 +632,7 @@ def _prepare_probe_batches(args, rank: int, world: int) -> list[list[dict]]:
     seen_shapes = set()
     for i in my_rows:
         row = dict(ds[i])
-        key = _shape_key(row)
+        key = _shape_key(row, args)
         if key in seen_shapes:
             continue
         seen_shapes.add(key)
@@ -746,10 +795,43 @@ def _manual_preprocess(images, height: int | None, width: int | None) -> torch.T
     return torch.stack(tensors)
 
 
-def _manual_preprocess_video(videos, height: int | None, width: int | None) -> torch.Tensor:
+def _fit_video_frames(frames, num_frames: int | None):
+    if not frames:
+        raise ValueError("raw video contains no frames")
+    if num_frames is None:
+        return list(frames)
+    if num_frames <= 0:
+        raise ValueError(f"target video frame count must be positive, got {num_frames}")
+    source_frames = len(frames)
+    if source_frames == num_frames:
+        return list(frames)
+    if source_frames < num_frames:
+        return [*frames, *([frames[-1]] * (num_frames - source_frames))]
+    if num_frames == 1:
+        return [frames[source_frames // 2]]
+    last = source_frames - 1
+    return [frames[round(i * last / (num_frames - 1))] for i in range(num_frames)]
+
+
+def _manual_preprocess_video(
+    videos,
+    height: int | None,
+    width: int | None,
+    num_frames: int | None = None,
+) -> torch.Tensor:
     # videos: list[list[PIL]] -> (B, C, F, H, W)
-    frames = [_manual_preprocess(video, height, width).permute(1, 0, 2, 3) for video in videos]
-    return torch.stack(frames)
+    frames = [
+        _manual_preprocess(_fit_video_frames(video, num_frames), height, width).permute(1, 0, 2, 3)
+        for video in videos
+    ]
+    try:
+        return torch.stack(frames)
+    except RuntimeError as exc:
+        shapes = [tuple(t.shape) for t in frames]
+        raise ValueError(
+            "raw video tensors must have identical shapes within a batch; "
+            f"got {shapes}. Use --bucket-by-shape or set --height/--width/--num-frames."
+        ) from exc
 
 
 def _preprocess_with_processor(processor, images, *, height: int | None, width: int | None):
@@ -844,15 +926,21 @@ def encode_latents(pipe, rows, args, device, dtype, adapter=None) -> LatentBatch
         return LatentBatch(latents, *_latent_meta(rows, latents))
     if not hasattr(pipe, "vae") or pipe.vae is None:
         raise RuntimeError("raw diffusion rows need a pipeline VAE, or pass --cache-latents")
+    target_frames, target_height, target_width = _batch_shape_key(rows, args)
     if any(args.video_column in row for row in rows):
         videos = [_open_video_frames(row[args.video_column], row.get("__yeto_data_root__")) for row in rows]
-        pixels = _manual_preprocess_video(videos, args.height, args.width)
+        pixels = _manual_preprocess_video(videos, target_height, target_width, target_frames)
     else:
         images = [_open_image(row[args.image_column], row.get("__yeto_data_root__")) for row in rows]
         pixels = (
-            _preprocess_with_processor(pipe.image_processor, images, height=args.height, width=args.width)
+            _preprocess_with_processor(
+                pipe.image_processor,
+                images,
+                height=target_height,
+                width=target_width,
+            )
             if hasattr(pipe, "image_processor")
-            else _manual_preprocess(images, args.height, args.width)
+            else _manual_preprocess(images, target_height, target_width)
         )
     pixels = pixels.to(device=device, dtype=dtype)
     with torch.no_grad():
@@ -1133,13 +1221,17 @@ def _probe_max_micro_batch(
         best = size
         size *= 2
     if best == 0:
-        shape = _shape_key(probe_rows[0]) if probe_rows else None
+        shape = _shape_key(probe_rows[0], args) if probe_rows else None
         raise RuntimeError(
             "diffusion model does not fit even micro-batch 1 for probed "
             f"shape {shape}; lower resolution/frames or use a bigger island"
         )
     if rank == 0 and getattr(args, "bucket_by_shape", False):
-        log.info("auto diffusion micro-batch probe shape %s -> %d", _shape_key(probe_rows[0]), best)
+        log.info(
+            "auto diffusion micro-batch probe shape %s -> %d",
+            _shape_key(probe_rows[0], args),
+            best,
+        )
     return best
 
 
@@ -1316,6 +1408,10 @@ def main(argv=None) -> None:
         args.max_rows,
         rank=rank,
         world=world,
+        cache_latents=args.cache_latents,
+        target_num_frames=args.num_frames,
+        target_height=args.height,
+        target_width=args.width,
     )
     loader = DataLoader(
         dataset,

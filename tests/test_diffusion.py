@@ -302,6 +302,40 @@ def test_diffusion_autobatch_bucket_by_shape_uses_smallest_fit(monkeypatch):
     ]
 
 
+def test_diffusion_shape_key_uses_cli_target_over_source_metadata():
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    args = _args(height=256, width=256, num_frames=121)
+    row = {"height": 720, "width": 1280, "num_frames": 300}
+
+    assert learner._shape_key(row, args) == (121, 256, 256)
+
+
+def test_streaming_diffusion_rows_bucket_uses_target_shape_over_source_metadata():
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    dataset = learner.StreamingDiffusionRows(
+        [
+            {"video": "a.mp4", "height": 720, "width": 1280, "num_frames": 300},
+            {"video": "b.mp4", "height": 854, "width": 480, "num_frames": 125},
+        ],
+        learner_id=0,
+        num_learners=1,
+        micro_batch_size=2,
+        bucket_by_shape=True,
+        target_num_frames=121,
+        target_height=256,
+        target_width=256,
+    )
+
+    batch = next(iter(dataset))
+
+    assert len(batch) == 2
+    assert {row["video"] for row in batch} == {"a.mp4", "b.mp4"}
+
+
 def test_diffusion_autobatch_cpu_returns_one_without_probe(monkeypatch):
     pytest.importorskip("torch")
     from yeto.diffusion import learner
@@ -459,6 +493,18 @@ def test_open_image_accepts_hf_image_bytes_dict():
     assert got.size == (2, 2)
 
 
+def test_fit_video_frames_samples_and_pads_deterministically():
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    frames = list(range(5))
+
+    assert learner._fit_video_frames(frames, None) == frames
+    assert learner._fit_video_frames(frames, 3) == [0, 2, 4]
+    assert learner._fit_video_frames(frames, 1) == [2]
+    assert learner._fit_video_frames([0, 1], 4) == [0, 1, 1, 1]
+
+
 def test_raw_video_encode_uses_pipeline_pack_latents(tmp_path):
     torch = pytest.importorskip("torch")
     Image = pytest.importorskip("PIL.Image")
@@ -520,6 +566,69 @@ def test_raw_video_encode_uses_pipeline_pack_latents(tmp_path):
     assert tuple(got.latents.shape) == (1, 30, 4)
     assert (got.latent_num_frames, got.latent_height, got.latent_width) == (2, 3, 5)
     assert pipe.seen_pack == ((1, 4, 2, 3, 5), 1, 1)
+
+
+def test_raw_video_encode_fits_variable_frame_counts_to_target_shape(tmp_path):
+    torch = pytest.importorskip("torch")
+    Image = pytest.importorskip("PIL.Image")
+    from yeto.diffusion import learner
+
+    for name, count in (("short", 2), ("long", 5)):
+        clip = tmp_path / name
+        clip.mkdir()
+        for i in range(count):
+            Image.new("RGB", (6, 8), color=(i * 20, 0, 0)).save(clip / f"frame_{i:03d}.png")
+
+    class TinyLatentDist:
+        def __init__(self, latents):
+            self.latents = latents
+
+        def sample(self):
+            return self.latents
+
+    class TinyVAE(torch.nn.Module):
+        class config:
+            scaling_factor = 1.0
+            shift_factor = 0.0
+
+        def __init__(self):
+            super().__init__()
+            self.seen_shape = None
+
+        def encode(self, sample):
+            self.seen_shape = tuple(sample.shape)
+            latents = torch.ones(
+                sample.shape[0],
+                4,
+                sample.shape[2],
+                2,
+                2,
+                device=sample.device,
+                dtype=sample.dtype,
+            )
+            return SimpleNamespace(latent_dist=TinyLatentDist(latents))
+
+    class TinyPipe:
+        def __init__(self):
+            self.vae = TinyVAE()
+
+    pipe = TinyPipe()
+    rows = [
+        {"video": "short", "__yeto_data_root__": str(tmp_path)},
+        {"video": "long", "__yeto_data_root__": str(tmp_path)},
+    ]
+
+    got = learner.encode_latents(
+        pipe,
+        rows,
+        _args(height=4, width=4, num_frames=3),
+        torch.device("cpu"),
+        torch.float32,
+    )
+
+    assert pipe.vae.seen_shape == (2, 3, 3, 4, 4)
+    assert tuple(got.latents.shape) == (2, 4, 3, 2, 2)
+    assert (got.latent_num_frames, got.latent_height, got.latent_width) == (3, 2, 2)
 
 
 def test_raw_image_lora_adapter_round_trip(monkeypatch, tmp_path):
