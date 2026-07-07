@@ -250,6 +250,58 @@ def test_diffusion_autobatch_doubles_until_oom(monkeypatch):
     assert sizes == [1, 2, 4, 8]
 
 
+def test_diffusion_autobatch_bucket_by_shape_uses_smallest_fit(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    probes = []
+
+    def probe(pipe, params, opt, rows, args, device, micro_batch, adapter=None):
+        del pipe, params, opt, args, device, adapter
+        shape = learner._shape_key(rows[0])
+        probes.append((shape, micro_batch))
+        if shape == (None, 128, 128) and micro_batch >= 4:
+            raise torch.cuda.OutOfMemoryError("synthetic large shape")
+        if micro_batch >= 8:
+            raise torch.cuda.OutOfMemoryError("synthetic small shape")
+
+    monkeypatch.setattr(learner, "_probe_diffusion_once", probe)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    opt = SimpleNamespace(zero_grad=lambda set_to_none=True: None)
+    args = _args(
+        data=[
+            {"height": 64, "width": 64, "latents": [0.0], "prompt_embeds": [[0.0]]},
+            {"height": 64, "width": 64, "latents": [0.0], "prompt_embeds": [[0.0]]},
+            {"height": 128, "width": 128, "latents": [0.0], "prompt_embeds": [[0.0]]},
+        ],
+        cache_latents=True,
+        cache_text_embeds=True,
+        bucket_by_shape=True,
+        micro_batch_size="auto",
+    )
+
+    got = learner.resolve_diffusion_micro_batch_size(
+        args,
+        None,
+        {},
+        opt,
+        SimpleNamespace(type="cuda"),
+        rank=0,
+        world=1,
+    )
+
+    assert got == 2
+    assert probes == [
+        ((None, 64, 64), 1),
+        ((None, 64, 64), 2),
+        ((None, 64, 64), 4),
+        ((None, 64, 64), 8),
+        ((None, 128, 128), 1),
+        ((None, 128, 128), 2),
+        ((None, 128, 128), 4),
+    ]
+
+
 def test_diffusion_autobatch_cpu_returns_one_without_probe(monkeypatch):
     pytest.importorskip("torch")
     from yeto.diffusion import learner

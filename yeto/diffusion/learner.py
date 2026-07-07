@@ -52,6 +52,7 @@ DIFFUSION_CACHE_SCHEMA_VERSION = 1
 DIFFUSION_ADAPTER_SCHEMA_VERSION = 1
 _MAX_DIFFUSION_MICRO_BATCH = 256
 _DIFFUSION_PROBE_ITERATIONS = 2
+_MAX_DIFFUSION_PROBE_SHAPES = 8
 
 _ATTENTION_TARGETS = [
     "to_q",
@@ -557,7 +558,7 @@ def _data_root_for(dataset_name) -> str | None:
     return str(path if path.is_dir() else path.parent)
 
 
-def _prepare_probe_rows(args, rank: int, world: int) -> list[dict]:
+def _prepare_probe_batches(args, rank: int, world: int) -> list[list[dict]]:
     ds = load_rows(args.data)
     shard = _learner_rows(
         len(ds),
@@ -572,11 +573,30 @@ def _prepare_probe_rows(args, rank: int, world: int) -> list[dict]:
             "no rows left for autobatch probe"
         )
     data_root = _data_root_for(args.data)
-    rows = [dict(ds[my_rows[0]])]
-    if data_root is not None:
-        for row in rows:
+    if not getattr(args, "bucket_by_shape", False):
+        rows = [dict(ds[my_rows[0]])]
+        if data_root is not None:
+            rows[0]["__yeto_data_root__"] = data_root
+        return [rows]
+
+    probe_batches: list[list[dict]] = []
+    seen_shapes = set()
+    for i in my_rows:
+        row = dict(ds[i])
+        key = _shape_key(row)
+        if key in seen_shapes:
+            continue
+        seen_shapes.add(key)
+        if data_root is not None:
             row["__yeto_data_root__"] = data_root
-    return rows
+        probe_batches.append([row])
+        if len(probe_batches) >= _MAX_DIFFUSION_PROBE_SHAPES:
+            break
+    return probe_batches
+
+
+def _prepare_probe_rows(args, rank: int, world: int) -> list[dict]:
+    return _prepare_probe_batches(args, rank, world)[0]
 
 
 def _repeat_probe_rows(rows: list[dict], micro_batch: int) -> list[dict]:
@@ -1075,7 +1095,16 @@ def _probe_diffusion_once(pipe, params, opt, rows, args, device, micro_batch: in
         opt.zero_grad(set_to_none=True)
 
 
-def resolve_diffusion_micro_batch_size(
+def _resolve_probe_batch_count(probe_batches: list[list[dict]], device, world: int) -> int:
+    count = len(probe_batches)
+    if world <= 1:
+        return count
+    value = torch.tensor([count], device=device, dtype=torch.long)
+    dist.all_reduce(value, op=dist.ReduceOp.MAX)
+    return int(value.item())
+
+
+def _probe_max_micro_batch(
     args,
     pipe,
     params,
@@ -1083,15 +1112,9 @@ def resolve_diffusion_micro_batch_size(
     device,
     rank: int,
     world: int,
+    probe_rows: list[dict],
     adapter=None,
 ) -> int:
-    """Probe the largest diffusion micro batch that fits the current latent shape."""
-    if args.micro_batch_size != "auto":
-        return int(args.micro_batch_size)
-    if device.type != "cuda":
-        return 1
-
-    probe_rows = _prepare_probe_rows(args, rank, world)
     best, size = 0, 1
     while size <= _MAX_DIFFUSION_MICRO_BATCH:
         ok = True
@@ -1110,10 +1133,40 @@ def resolve_diffusion_micro_batch_size(
         best = size
         size *= 2
     if best == 0:
+        shape = _shape_key(probe_rows[0]) if probe_rows else None
         raise RuntimeError(
-            "diffusion model does not fit even micro-batch 1 for the probed "
-            "latent shape; lower resolution/frames or use a bigger island"
+            "diffusion model does not fit even micro-batch 1 for probed "
+            f"shape {shape}; lower resolution/frames or use a bigger island"
         )
+    if rank == 0 and getattr(args, "bucket_by_shape", False):
+        log.info("auto diffusion micro-batch probe shape %s -> %d", _shape_key(probe_rows[0]), best)
+    return best
+
+
+def resolve_diffusion_micro_batch_size(
+    args,
+    pipe,
+    params,
+    opt,
+    device,
+    rank: int,
+    world: int,
+    adapter=None,
+) -> int:
+    """Probe the largest diffusion micro batch that fits the current latent shape."""
+    if args.micro_batch_size != "auto":
+        return int(args.micro_batch_size)
+    if device.type != "cuda":
+        return 1
+
+    probe_batches = _prepare_probe_batches(args, rank, world)
+    max_batches = _resolve_probe_batch_count(probe_batches, device, world)
+    while len(probe_batches) < max_batches:
+        probe_batches.append(probe_batches[-1])
+    best = min(
+        _probe_max_micro_batch(args, pipe, params, opt, device, rank, world, rows, adapter)
+        for rows in probe_batches
+    )
     return best
 
 
