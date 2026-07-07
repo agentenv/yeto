@@ -254,6 +254,7 @@ def main(argv=None) -> None:
     log.info("loading model %s (mlx, %s)", args.model, args.tuning)
     model, tokenizer, hf_config = load_model_and_tokenizer(args)
     registry = attach_lora(model, hf_config, args.lora_targets, args.lora_r, args.lora_alpha)
+    model.train()
     mx.eval(model.parameters())
 
     from ..fragments import build_layout
