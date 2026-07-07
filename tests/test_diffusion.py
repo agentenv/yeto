@@ -407,6 +407,69 @@ def test_open_image_accepts_hf_image_bytes_dict():
     assert got.size == (2, 2)
 
 
+def test_raw_video_encode_uses_pipeline_pack_latents(tmp_path):
+    torch = pytest.importorskip("torch")
+    Image = pytest.importorskip("PIL.Image")
+    from yeto.diffusion import learner
+
+    clip = tmp_path / "clip"
+    clip.mkdir()
+    for i in range(2):
+        Image.new("RGB", (4, 4), color=("red" if i == 0 else "blue")).save(
+            clip / f"frame_{i:03d}.png"
+        )
+
+    class TinyLatentDist:
+        def __init__(self, latents):
+            self.latents = latents
+
+        def sample(self):
+            return self.latents
+
+    class TinyVAE(torch.nn.Module):
+        class config:
+            scaling_factor = 1.0
+            shift_factor = None
+
+        def encode(self, sample):
+            latents = torch.ones(
+                sample.shape[0],
+                4,
+                2,
+                3,
+                5,
+                device=sample.device,
+                dtype=sample.dtype,
+            )
+            return SimpleNamespace(latent_dist=TinyLatentDist(latents))
+
+    class TinyTransformer(torch.nn.Module):
+        config = SimpleNamespace(patch_size=1, patch_size_t=1)
+
+    class TinyPipe:
+        def __init__(self):
+            self.vae = TinyVAE()
+            self.transformer = TinyTransformer()
+            self.seen_pack = None
+
+        def _pack_latents(self, latents, patch_size=1, patch_size_t=1):
+            self.seen_pack = (tuple(latents.shape), patch_size, patch_size_t)
+            return latents.flatten(2).transpose(1, 2)
+
+    pipe = TinyPipe()
+    got = learner.encode_latents(
+        pipe,
+        [{"video": "clip", "__yeto_data_root__": str(tmp_path)}],
+        _args(height=4, width=4),
+        torch.device("cpu"),
+        torch.float32,
+    )
+
+    assert tuple(got.latents.shape) == (1, 30, 4)
+    assert (got.latent_num_frames, got.latent_height, got.latent_width) == (2, 3, 5)
+    assert pipe.seen_pack == ((1, 4, 2, 3, 5), 1, 1)
+
+
 def test_raw_image_lora_adapter_round_trip(monkeypatch, tmp_path):
     torch = pytest.importorskip("torch")
     pytest.importorskip("peft")

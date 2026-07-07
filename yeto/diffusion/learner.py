@@ -784,6 +784,31 @@ def _latent_meta(rows, latents: torch.Tensor) -> tuple[int | None, int | None, i
     )
 
 
+def _maybe_pack_latents(pipe, latents: torch.Tensor) -> torch.Tensor:
+    pack = getattr(pipe, "_pack_latents", None) or getattr(pipe, "pack_latents", None)
+    if pack is None:
+        return latents
+    sig = inspect.signature(pack)
+    params = sig.parameters
+    kwargs = {}
+    transformer_config = getattr(getattr(pipe, "transformer", None), "config", None)
+    if "patch_size" in params:
+        kwargs["patch_size"] = getattr(transformer_config, "patch_size", None) or 1
+    if "patch_size_t" in params:
+        kwargs["patch_size_t"] = getattr(transformer_config, "patch_size_t", None) or 1
+    if "batch_size" in params:
+        kwargs["batch_size"] = int(latents.shape[0])
+    if "num_channels_latents" in params:
+        kwargs["num_channels_latents"] = int(latents.shape[1])
+    if "height" in params:
+        kwargs["height"] = int(latents.shape[-2])
+    if "width" in params:
+        kwargs["width"] = int(latents.shape[-1])
+    if "num_frames" in params and latents.ndim == 5:
+        kwargs["num_frames"] = int(latents.shape[2])
+    return pack(latents, **kwargs)
+
+
 def encode_latents(pipe, rows, args, device, dtype, adapter=None) -> LatentBatch:
     if adapter is not None and hasattr(adapter, "encode_latents"):
         return adapter.encode_latents(pipe, rows, args, device, dtype)
@@ -817,7 +842,9 @@ def encode_latents(pipe, rows, args, device, dtype, adapter=None) -> LatentBatch
         scale = getattr(vae_config, "scaling_factor", None) or 1.0
         shift = getattr(vae_config, "shift_factor", None) or 0.0
         latents = (latents - shift) * scale
-    return LatentBatch(latents, *_latent_meta(rows, latents))
+    meta = _latent_meta(rows, latents)
+    latents = _maybe_pack_latents(pipe, latents)
+    return LatentBatch(latents, *meta)
 
 
 def _call_encode_prompt(pipe, prompts, device):
