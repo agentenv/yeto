@@ -813,8 +813,9 @@ def encode_latents(pipe, rows, args, device, dtype, adapter=None) -> LatentBatch
     with torch.no_grad():
         encoded = _call_vae_encode(pipe.vae, pixels)
         latents = _extract_latents(encoded)
-        scale = getattr(getattr(pipe.vae, "config", None), "scaling_factor", 1.0)
-        shift = getattr(getattr(pipe.vae, "config", None), "shift_factor", 0.0)
+        vae_config = getattr(pipe.vae, "config", None)
+        scale = getattr(vae_config, "scaling_factor", None) or 1.0
+        shift = getattr(vae_config, "shift_factor", None) or 0.0
         latents = (latents - shift) * scale
     return LatentBatch(latents, *_latent_meta(rows, latents))
 
