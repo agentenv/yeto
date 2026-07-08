@@ -46,6 +46,27 @@ def _add_python_path(path: str | None) -> None:
         sys.path.insert(0, path)
 
 
+def _patch_nava_tokenizer_padding() -> None:
+    from nava_src.models.nava.modules import tokenizers
+
+    cls = tokenizers.HuggingfaceTokenizer
+    if getattr(cls, "_yeto_pad_token_patch", False):
+        return
+    original_init = cls.__init__
+
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        tokenizer = self.tokenizer
+        if getattr(tokenizer, "pad_token", None) is None:
+            for token in (tokenizer.eos_token, tokenizer.unk_token, "<pad>", "</s>", "<unk>"):
+                if token is not None and tokenizer.convert_tokens_to_ids(token) is not None:
+                    tokenizer.pad_token = token
+                    break
+
+    cls.__init__ = patched_init
+    cls._yeto_pad_token_patch = True
+
+
 def _load_yaml(path: str) -> dict:
     import yaml
 
@@ -247,6 +268,7 @@ class NavaAdapter:
 
     def load_pipeline(self, args, device):
         _add_python_path(self.nava_root)
+        _patch_nava_tokenizer_padding()
         from nava_src.pipeline_nava import AudioVideoPipeline
 
         cfg = self._config(args)
