@@ -1327,10 +1327,87 @@ def _num_train_timesteps(scheduler) -> int:
     return int(getattr(getattr(scheduler, "config", None), "num_train_timesteps", 1000))
 
 
+def _scheduler_tensor(value, device, dtype=None) -> torch.Tensor | None:
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        tensor = value
+    elif isinstance(value, (list, tuple)):
+        tensor = torch.tensor(value)
+    else:
+        return None
+    tensor = tensor.to(device=device)
+    if dtype is not None and tensor.is_floating_point():
+        tensor = tensor.to(dtype=dtype)
+    return tensor
+
+
+def _scheduler_step_count(scheduler) -> int:
+    count = _num_train_timesteps(scheduler)
+    for name in ("timesteps", "sigmas"):
+        value = getattr(scheduler, name, None)
+        if torch.is_tensor(value) or isinstance(value, (list, tuple)):
+            count = min(count, len(value))
+    return max(1, int(count))
+
+
+def _sample_scheduler_timesteps(scheduler, batch: int, device) -> tuple[torch.Tensor, torch.Tensor]:
+    indices = torch.randint(
+        0,
+        _scheduler_step_count(scheduler),
+        (batch,),
+        device=device,
+        dtype=torch.long,
+    )
+    scheduler_timesteps = _scheduler_tensor(getattr(scheduler, "timesteps", None), device)
+    if scheduler_timesteps is None:
+        return indices, indices
+    return indices, scheduler_timesteps[indices.clamp(max=scheduler_timesteps.numel() - 1)]
+
+
 def _match_dims(values: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     while values.ndim < target.ndim:
         values = values.view(*values.shape, *([1] * (target.ndim - values.ndim)))
     return values
+
+
+def _call_scheduler_method(fn, positional: tuple, values: dict[str, Any]):
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return fn(*positional)
+    kwargs = {}
+    for name, param in sig.parameters.items():
+        if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.VAR_POSITIONAL):
+            return fn(*positional)
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            continue
+        if name in values:
+            kwargs[name] = values[name]
+        elif param.default is inspect.Parameter.empty:
+            return fn(*positional)
+    try:
+        return fn(**kwargs)
+    except TypeError:
+        return fn(*positional)
+
+
+def _scale_model_input(scheduler, noisy: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+    fn = getattr(scheduler, "scale_model_input", None)
+    if not callable(fn):
+        return noisy
+    return _call_scheduler_method(
+        fn,
+        (noisy, timesteps),
+        {
+            "sample": noisy,
+            "samples": noisy,
+            "latents": noisy,
+            "timestep": timesteps,
+            "timesteps": timesteps,
+            "t": timesteps,
+        },
+    )
 
 
 def add_noise_and_target(pipe, batch: LatentBatch):
@@ -1339,24 +1416,62 @@ def add_noise_and_target(pipe, batch: LatentBatch):
     if scheduler is None:
         raise RuntimeError("diffusion pipeline has no scheduler")
     noise = torch.randn_like(latents)
-    timesteps = torch.randint(
-        0,
-        _num_train_timesteps(scheduler),
-        (latents.shape[0],),
-        device=latents.device,
-        dtype=torch.long,
-    )
-    if hasattr(scheduler, "sigmas"):
-        sigmas = scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)
-        indices = timesteps.clamp(max=sigmas.numel() - 1)
+    indices, timesteps = _sample_scheduler_timesteps(scheduler, int(latents.shape[0]), latents.device)
+    scale_noise = getattr(scheduler, "scale_noise", None)
+    if callable(scale_noise):
+        noisy = _call_scheduler_method(
+            scale_noise,
+            (latents, timesteps, noise),
+            {
+                "sample": latents,
+                "samples": latents,
+                "latents": latents,
+                "original_samples": latents,
+                "timestep": timesteps,
+                "timesteps": timesteps,
+                "noise": noise,
+            },
+        )
+        noisy = _scale_model_input(scheduler, noisy, timesteps)
+        return LatentBatch(noisy, batch.latent_num_frames, batch.latent_height, batch.latent_width), noise - latents, timesteps
+    sigmas = _scheduler_tensor(getattr(scheduler, "sigmas", None), latents.device, latents.dtype)
+    if sigmas is not None:
+        indices = indices.clamp(max=sigmas.numel() - 1)
         sigma = _match_dims(sigmas[indices], latents)
         noisy = (1.0 - sigma) * latents + sigma * noise
+        noisy = _scale_model_input(scheduler, noisy, timesteps)
         return LatentBatch(noisy, batch.latent_num_frames, batch.latent_height, batch.latent_width), noise - latents, timesteps
     if hasattr(scheduler, "add_noise"):
-        noisy = scheduler.add_noise(latents, noise, timesteps)
+        noisy = _call_scheduler_method(
+            scheduler.add_noise,
+            (latents, noise, timesteps),
+            {
+                "original_samples": latents,
+                "sample": latents,
+                "samples": latents,
+                "latents": latents,
+                "noise": noise,
+                "timestep": timesteps,
+                "timesteps": timesteps,
+            },
+        )
+        noisy = _scale_model_input(scheduler, noisy, timesteps)
         pred_type = getattr(getattr(scheduler, "config", None), "prediction_type", "epsilon")
         if pred_type == "v_prediction" and hasattr(scheduler, "get_velocity"):
-            target = scheduler.get_velocity(latents, noise, timesteps)
+            target = _call_scheduler_method(
+                scheduler.get_velocity,
+                (latents, noise, timesteps),
+                {
+                    "sample": latents,
+                    "samples": latents,
+                    "latents": latents,
+                    "noise": noise,
+                    "timestep": timesteps,
+                    "timesteps": timesteps,
+                },
+            )
+        elif pred_type == "sample":
+            target = latents
         else:
             target = noise
         return LatentBatch(noisy, batch.latent_num_frames, batch.latent_height, batch.latent_width), target, timesteps

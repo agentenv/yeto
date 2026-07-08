@@ -154,6 +154,121 @@ def test_flow_matching_loss_counts_elements():
     assert denom == 6
 
 
+def test_add_noise_uses_scheduler_timesteps_sigmas_and_scale_model_input(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    monkeypatch.setattr(
+        torch,
+        "randint",
+        lambda low, high, size, device=None, dtype=None: torch.tensor([1, 2], device=device, dtype=dtype),
+    )
+    monkeypatch.setattr(torch, "randn_like", lambda x: torch.full_like(x, 2.0))
+
+    class TinyScheduler:
+        class config:
+            num_train_timesteps = 4
+
+        sigmas = torch.tensor([0.0, 0.25, 0.75, 1.0])
+        timesteps = torch.tensor([1000.0, 700.0, 300.0, 0.0])
+
+        def __init__(self):
+            self.seen = None
+
+        def scale_model_input(self, sample, timestep):
+            self.seen = (sample.clone(), timestep.clone())
+            return sample + 10.0
+
+    scheduler = TinyScheduler()
+    pipe = argparse.Namespace(scheduler=scheduler)
+    batch = learner.LatentBatch(torch.zeros(2, 1))
+
+    noisy, target, timesteps = learner.add_noise_and_target(pipe, batch)
+
+    assert torch.equal(timesteps, torch.tensor([700.0, 300.0]))
+    assert torch.allclose(scheduler.seen[0], torch.tensor([[0.5], [1.5]]))
+    assert torch.equal(scheduler.seen[1], timesteps)
+    assert torch.allclose(noisy.latents, torch.tensor([[10.5], [11.5]]))
+    assert torch.allclose(target, torch.full((2, 1), 2.0))
+
+
+def test_add_noise_prefers_scheduler_scale_noise(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    monkeypatch.setattr(
+        torch,
+        "randint",
+        lambda low, high, size, device=None, dtype=None: torch.tensor([0, 2], device=device, dtype=dtype),
+    )
+    monkeypatch.setattr(torch, "randn_like", torch.ones_like)
+
+    class TinyScheduler:
+        class config:
+            num_train_timesteps = 3
+
+        timesteps = torch.tensor([10.0, 20.0, 30.0])
+
+        def __init__(self):
+            self.called = False
+
+        def scale_noise(self, sample, timestep, noise):
+            self.called = True
+            return sample + noise + timestep.view(-1, 1)
+
+        def add_noise(self, original_samples, noise, timesteps):
+            del original_samples, noise, timesteps
+            raise AssertionError("scale_noise should be used before add_noise")
+
+    scheduler = TinyScheduler()
+    pipe = argparse.Namespace(scheduler=scheduler)
+    latents = torch.tensor([[2.0], [4.0]])
+
+    noisy, target, timesteps = learner.add_noise_and_target(pipe, learner.LatentBatch(latents))
+
+    assert scheduler.called is True
+    assert torch.equal(timesteps, torch.tensor([10.0, 30.0]))
+    assert torch.allclose(noisy.latents, torch.tensor([[13.0], [35.0]]))
+    assert torch.allclose(target, torch.tensor([[-1.0], [-3.0]]))
+
+
+def test_add_noise_uses_named_add_noise_and_sample_prediction_target(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    monkeypatch.setattr(
+        torch,
+        "randint",
+        lambda low, high, size, device=None, dtype=None: torch.tensor([1, 2], device=device, dtype=dtype),
+    )
+    monkeypatch.setattr(torch, "randn_like", lambda x: torch.full_like(x, 3.0))
+
+    class TinyScheduler:
+        class config:
+            num_train_timesteps = 3
+            prediction_type = "sample"
+
+        def __init__(self):
+            self.seen = None
+
+        def add_noise(self, original_samples, noise, timesteps):
+            self.seen = (original_samples, noise, timesteps)
+            return original_samples + 5.0 * noise
+
+    scheduler = TinyScheduler()
+    pipe = argparse.Namespace(scheduler=scheduler)
+    latents = torch.tensor([[2.0], [4.0]])
+
+    noisy, target, timesteps = learner.add_noise_and_target(pipe, learner.LatentBatch(latents))
+
+    assert torch.equal(timesteps, torch.tensor([1, 2]))
+    assert scheduler.seen[0] is latents
+    assert torch.equal(scheduler.seen[1], torch.full_like(latents, 3.0))
+    assert scheduler.seen[2] is timesteps
+    assert torch.allclose(noisy.latents, torch.tensor([[17.0], [19.0]]))
+    assert target is latents
+
+
 def test_cached_manifest_contract_reads_tensors_and_metadata(tmp_path):
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
