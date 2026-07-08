@@ -387,11 +387,15 @@ GPU_IMAGE_OVERRIDES: dict[tuple[str, str], object] = {
 MEGATRON_IMAGE = "docker:nvcr.io/nvidia/nemo:25.09"
 
 
-def learner_image_for(args, spec: ClusterSpec):
+def learner_image_for(args, spec: ClusterSpec, learner_id: int | None = None):
     """The image for a learner cluster: explicit flag > megatron container >
     internal override table > None (provider default + setup-time remediation)."""
     explicit = parse_image_spec(getattr(args, "learner_image", None))
     if explicit is not None:
+        if isinstance(explicit, dict) and learner_id is not None:
+            for key in (str(learner_id), f"l{learner_id}"):
+                if key in explicit:
+                    return explicit[key]
         return explicit
     if getattr(args, "island_backend", "torch") == "megatron":
         return MEGATRON_IMAGE
@@ -406,19 +410,22 @@ def learner_image_for(args, spec: ClusterSpec):
 
 def parse_image_spec(value: str | None):
     """--learner-image: a single image id/tag applied everywhere, or
-    comma-separated region=id pairs -> the region dict sky expects."""
+    comma-separated region=id pairs -> the region dict sky expects. Numeric
+    keys are learner ids and are resolved before region keys; this covers
+    providers where a saved OS volume is not a reusable image."""
     if not value:
         return None
     if "=" not in value:
         return value
     images = {}
     for pair in value.split(","):
-        region, _, image = pair.partition("=")
-        if not region or not image:
+        key, _, image = pair.partition("=")
+        if not key or not image:
             raise ValueError(
-                f"bad --learner-image entry {pair!r}; expected region=image-id"
+                f"bad --learner-image entry {pair!r}; expected region=image-id "
+                "or learner-id=image-id"
             )
-        images[region.strip()] = image.strip()
+        images[key.strip()] = image.strip()
     return images
 
 
@@ -638,7 +645,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     )
     infra = f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud
     resources_kwargs = {}
-    image = learner_image_for(args, spec)
+    image = learner_image_for(args, spec, learner_id)
     if image is not None:
         resources_kwargs["image_id"] = image
     if spec.num_nodes > 1:
