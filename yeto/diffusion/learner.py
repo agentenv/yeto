@@ -917,6 +917,7 @@ _PROMPT_DICT_STANDARD_KEYS = {
     "negative_prompt_embeds",
     "pooled_prompt_embeds",
     "negative_pooled_prompt_embeds",
+    "prompt_embeds_mask",
     "prompt_attention_mask",
     "negative_prompt_attention_mask",
     "attention_mask",
@@ -932,13 +933,32 @@ _DENOISER_STANDARD_PARAMS = {
     "encoder_hidden_states",
     "encoder_attention_mask",
     "encoder_hidden_states_mask",
+    "attention_mask",
+    "hidden_states_masks",
     "pooled_projections",
     "pooled_prompt_embeds",
     "pooled_embeds",
+    "img_ids",
+    "txt_ids",
+    "img_shapes",
+    "img_sizes",
+    "guidance",
+    "attention_kwargs",
+    "joint_attention_kwargs",
+    "controlnet_block_samples",
+    "controlnet_single_block_samples",
+    "controlnet_blocks_repeat",
+    "additional_t_cond",
     "num_frames",
     "height",
     "width",
     "return_dict",
+}
+
+_PROMPT_EXTRA_ALIASES = {
+    "prompt_embeds_t5": "encoder_hidden_states_t5",
+    "prompt_embeds_llama3": "encoder_hidden_states_llama3",
+    "prompt_embeds_llama": "encoder_hidden_states_llama3",
 }
 
 
@@ -1083,16 +1103,18 @@ def _conditioning_from_tuple(out: tuple, forward_params) -> TextConditioning:
 def _conditioning_from_dict(out: dict) -> TextConditioning:
     mask = None
     for name in (
+        "prompt_embeds_mask",
         "prompt_attention_mask",
         "attention_mask",
         "encoder_attention_mask",
         "encoder_hidden_states_mask",
+        "hidden_states_masks",
     ):
         if out.get(name) is not None:
             mask = out[name]
             break
     extra = {
-        name: value
+        _PROMPT_EXTRA_ALIASES.get(name, name): value
         for name, value in out.items()
         if name not in _PROMPT_DICT_STANDARD_KEYS and value is not None
     }
@@ -1299,8 +1321,167 @@ def _signature_model_for_forward(model: torch.nn.Module) -> torch.nn.Module:
     return inspect_model
 
 
+def _call_optional_pipeline_helper(pipe, names: tuple[str, ...], values: dict[str, Any]):
+    for name in names:
+        fn = getattr(pipe, name, None)
+        if not callable(fn):
+            continue
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            continue
+        kwargs = {}
+        missing = False
+        for param_name, param in sig.parameters.items():
+            if param.kind not in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ):
+                continue
+            if param_name in values:
+                if values[param_name] is None and param.default is inspect.Parameter.empty:
+                    missing = True
+                    break
+                if values[param_name] is not None:
+                    kwargs[param_name] = values[param_name]
+            elif param.default is inspect.Parameter.empty:
+                missing = True
+                break
+        if missing:
+            continue
+        try:
+            return fn(**kwargs)
+        except TypeError:
+            log.debug("ignoring incompatible diffusion pipeline helper %s", name, exc_info=True)
+    return None
+
+
+def _latent_token_grid(noisy: LatentBatch) -> tuple[int, int, int] | None:
+    latents = noisy.latents
+    frames = int(noisy.latent_num_frames or 1)
+    height = noisy.latent_height
+    width = noisy.latent_width
+
+    if latents.ndim == 5:
+        return int(latents.shape[2]), int(latents.shape[3]), int(latents.shape[4])
+    if latents.ndim == 4:
+        return 1, int(latents.shape[2]), int(latents.shape[3])
+    if latents.ndim != 3:
+        return None
+
+    tokens = int(latents.shape[1])
+    if height and width:
+        height = int(height)
+        width = int(width)
+        if frames * height * width == tokens:
+            return frames, height, width
+        for scale in range(1, 9):
+            if height % scale or width % scale:
+                continue
+            h = height // scale
+            w = width // scale
+            if frames * h * w == tokens:
+                return frames, h, w
+
+    # Fall back to a 2D factorization when only packed token count is known.
+    side = int(tokens**0.5)
+    for h in range(side, 0, -1):
+        if tokens % h == 0:
+            return 1, h, tokens // h
+    return None
+
+
+def _make_image_ids(noisy: LatentBatch, dtype) -> torch.Tensor | None:
+    grid = _latent_token_grid(noisy)
+    if grid is None:
+        return None
+    frames, height, width = grid
+    frame_ids = torch.arange(frames, device=noisy.latents.device, dtype=dtype)
+    row_ids = torch.arange(height, device=noisy.latents.device, dtype=dtype)
+    col_ids = torch.arange(width, device=noisy.latents.device, dtype=dtype)
+    coords = torch.stack(
+        torch.meshgrid(frame_ids, row_ids, col_ids, indexing="ij"),
+        dim=-1,
+    )
+    return coords.reshape(-1, 3)
+
+
+def _make_text_ids(cond: TextConditioning, fallback, dtype) -> torch.Tensor | None:
+    source = cond.prompt_embeds
+    if source is None:
+        return None
+    seq_len = int(source.shape[1] if source.ndim >= 3 else source.shape[0])
+    return torch.zeros(seq_len, 3, device=fallback.device, dtype=dtype)
+
+
+def _shape_records(noisy: LatentBatch, *, image: bool) -> list[tuple[int, ...]] | None:
+    grid = _latent_token_grid(noisy)
+    if grid is None:
+        return None
+    frames, height, width = grid
+    batch = int(noisy.latents.shape[0])
+    shape = (height, width) if image else (frames, height, width)
+    return [shape for _ in range(batch)]
+
+
+def _guidance_value(pipe, args, noisy: LatentBatch) -> torch.Tensor:
+    value = getattr(args, "guidance_scale", None)
+    if value is None:
+        value = _param_default(getattr(pipe, "__call__", None), "guidance_scale")
+    if not isinstance(value, (int, float)):
+        value = 1.0
+    return torch.full(
+        (int(noisy.latents.shape[0]),),
+        float(value),
+        device=noisy.latents.device,
+        dtype=noisy.latents.dtype,
+    )
+
+
+def _auto_fill_denoiser_kwargs(pipe, noisy: LatentBatch, cond: TextConditioning, args, params, kwargs) -> None:
+    values = {
+        "batch_size": int(noisy.latents.shape[0]),
+        "height": (_latent_token_grid(noisy) or (None, None, None))[1],
+        "width": (_latent_token_grid(noisy) or (None, None, None))[2],
+        "device": noisy.latents.device,
+        "dtype": noisy.latents.dtype,
+    }
+
+    if "img_ids" in params and "img_ids" not in kwargs:
+        helper_ids = _call_optional_pipeline_helper(
+            pipe,
+            ("_prepare_latent_image_ids", "prepare_latent_image_ids"),
+            values,
+        )
+        kwargs["img_ids"] = helper_ids if helper_ids is not None else _make_image_ids(noisy, noisy.latents.dtype)
+
+    if "txt_ids" in params and "txt_ids" not in kwargs:
+        kwargs["txt_ids"] = _make_text_ids(cond, noisy.latents, noisy.latents.dtype)
+
+    if "img_shapes" in params and "img_shapes" not in kwargs:
+        kwargs["img_shapes"] = _shape_records(noisy, image=False)
+
+    if "img_sizes" in params and "img_sizes" not in kwargs:
+        kwargs["img_sizes"] = _shape_records(noisy, image=True)
+
+    if "guidance" in params and "guidance" not in kwargs:
+        kwargs["guidance"] = _guidance_value(pipe, args, noisy)
+
+    if "attention_mask" in params and "attention_mask" not in kwargs:
+        kwargs["attention_mask"] = cond.attention_mask
+
+    if "encoder_hidden_states_mask" in params and "encoder_hidden_states_mask" not in kwargs:
+        kwargs["encoder_hidden_states_mask"] = cond.attention_mask
+
+    if "hidden_states_masks" in params and "hidden_states_masks" not in kwargs:
+        kwargs["hidden_states_masks"] = cond.attention_mask
+
+    for name in list(kwargs):
+        if kwargs[name] is None:
+            kwargs.pop(name)
+
+
 def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning, args, adapter=None):
-    del args
     model = _first_trainable_module(pipe, adapter)
     inspect_model = _signature_model_for_forward(model)
     sig = inspect.signature(inspect_model.forward)
@@ -1347,6 +1528,7 @@ def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning,
         kwargs["width"] = int(noisy.latent_width)
     if "return_dict" in params:
         kwargs["return_dict"] = False
+    _auto_fill_denoiser_kwargs(pipe, noisy, cond, args, params, kwargs)
     out = model(**kwargs)
     return _extract_model_output(out)
 

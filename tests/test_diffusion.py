@@ -1076,6 +1076,157 @@ def test_prompt_conditioning_extra_fields_are_signature_filtered():
     assert "ignored_by_forward" not in pipe.transformer.seen
 
 
+def test_denoise_forward_auto_fills_token_ids_guidance_and_attention_mask():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(
+            self,
+            hidden_states,
+            timestep,
+            encoder_hidden_states=None,
+            pooled_projections=None,
+            img_ids=None,
+            txt_ids=None,
+            guidance=None,
+            attention_mask=None,
+            return_dict=False,
+        ):
+            self.seen = {
+                "hidden_states": hidden_states,
+                "timestep": timestep,
+                "encoder_hidden_states": encoder_hidden_states,
+                "pooled_projections": pooled_projections,
+                "img_ids": img_ids,
+                "txt_ids": txt_ids,
+                "guidance": guidance,
+                "attention_mask": attention_mask,
+                "return_dict": return_dict,
+            }
+            return hidden_states + 1
+
+    class TinyPipe:
+        def __init__(self):
+            self.transformer = TinyDenoiser()
+
+        def __call__(self, prompt=None, guidance_scale=4.5):
+            del prompt, guidance_scale
+
+    pipe = TinyPipe()
+    noisy = learner.LatentBatch(torch.zeros(2, 4, 8), latent_height=4, latent_width=4)
+    mask = torch.ones(2, 5, dtype=torch.long)
+    cond = learner.TextConditioning(
+        torch.ones(2, 5, 8),
+        pooled_prompt_embeds=torch.ones(2, 8),
+        attention_mask=mask,
+    )
+
+    out = learner.denoise_forward(pipe, noisy, torch.tensor([1, 2]), cond, argparse.Namespace())
+
+    assert torch.equal(out, torch.ones(2, 4, 8))
+    assert torch.equal(
+        pipe.transformer.seen["img_ids"],
+        torch.tensor([[0, 0, 0], [0, 0, 1], [0, 1, 0], [0, 1, 1]], dtype=noisy.latents.dtype),
+    )
+    assert tuple(pipe.transformer.seen["txt_ids"].shape) == (5, 3)
+    assert torch.equal(pipe.transformer.seen["txt_ids"], torch.zeros(5, 3))
+    assert torch.equal(pipe.transformer.seen["guidance"], torch.full((2,), 4.5))
+    assert pipe.transformer.seen["attention_mask"] is mask
+
+
+def test_denoise_forward_prefers_pipeline_image_id_helper():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(self, hidden_states, timestep, img_ids=None):
+            del timestep
+            self.seen = img_ids
+            return hidden_states
+
+    class TinyPipe:
+        def __init__(self):
+            self.transformer = TinyDenoiser()
+
+        def _prepare_latent_image_ids(self, batch_size, height, width, device, dtype):
+            del batch_size, height, width
+            return torch.full((4, 3), 7, device=device, dtype=dtype)
+
+    pipe = TinyPipe()
+    noisy = learner.LatentBatch(torch.zeros(1, 4, 8), latent_height=4, latent_width=4)
+    cond = learner.TextConditioning(torch.ones(1, 2, 8))
+
+    learner.denoise_forward(pipe, noisy, torch.tensor([1]), cond, argparse.Namespace())
+
+    assert torch.equal(pipe.transformer.seen, torch.full((4, 3), 7, dtype=noisy.latents.dtype))
+
+
+def test_denoise_forward_auto_fills_shape_and_mask_aliases():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(
+            self,
+            hidden_states,
+            timestep,
+            encoder_hidden_states_t5=None,
+            encoder_hidden_states_llama3=None,
+            encoder_hidden_states_mask=None,
+            hidden_states_masks=None,
+            img_shapes=None,
+            img_sizes=None,
+            return_dict=False,
+        ):
+            self.seen = {
+                "hidden_states": hidden_states,
+                "timestep": timestep,
+                "encoder_hidden_states_t5": encoder_hidden_states_t5,
+                "encoder_hidden_states_llama3": encoder_hidden_states_llama3,
+                "encoder_hidden_states_mask": encoder_hidden_states_mask,
+                "hidden_states_masks": hidden_states_masks,
+                "img_shapes": img_shapes,
+                "img_sizes": img_sizes,
+                "return_dict": return_dict,
+            }
+            return hidden_states + 1
+
+    pipe = argparse.Namespace(transformer=TinyDenoiser())
+    noisy = learner.LatentBatch(torch.zeros(2, 12, 8), latent_num_frames=3, latent_height=4, latent_width=4)
+    mask = torch.ones(2, 6, dtype=torch.long)
+    cond = learner.TextConditioning(
+        None,
+        attention_mask=mask,
+        extra={
+            "encoder_hidden_states_t5": torch.ones(2, 6, 8),
+            "encoder_hidden_states_llama3": torch.ones(2, 4, 8),
+        },
+    )
+
+    out = learner.denoise_forward(pipe, noisy, torch.tensor([1, 2]), cond, argparse.Namespace())
+
+    assert torch.equal(out, torch.ones(2, 12, 8))
+    assert pipe.transformer.seen["encoder_hidden_states_t5"] is cond.extra["encoder_hidden_states_t5"]
+    assert pipe.transformer.seen["encoder_hidden_states_llama3"] is cond.extra["encoder_hidden_states_llama3"]
+    assert pipe.transformer.seen["encoder_hidden_states_mask"] is mask
+    assert pipe.transformer.seen["hidden_states_masks"] is mask
+    assert pipe.transformer.seen["img_shapes"] == [(3, 2, 2), (3, 2, 2)]
+    assert pipe.transformer.seen["img_sizes"] == [(2, 2), (2, 2)]
+
+
 def test_denoise_forward_inspects_wrapped_base_model_signature():
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
