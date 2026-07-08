@@ -1170,6 +1170,81 @@ def test_cached_text_embeds_include_signature_extra_columns():
     assert cond.extra["position_ids"].dtype == torch.long
 
 
+def test_raw_prompt_rows_include_signature_tensor_extra_columns():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(
+            self,
+            hidden_states,
+            timestep,
+            encoder_hidden_states=None,
+            audio_hidden_states=None,
+            audio_encoder_hidden_states=None,
+            condition_mask=None,
+            text_note=None,
+        ):
+            del timestep
+            self.seen = {
+                "encoder_hidden_states": encoder_hidden_states,
+                "audio_hidden_states": audio_hidden_states,
+                "audio_encoder_hidden_states": audio_encoder_hidden_states,
+                "condition_mask": condition_mask,
+                "text_note": text_note,
+            }
+            return hidden_states + 1
+
+    class TinyPipe:
+        def __init__(self):
+            self.transformer = TinyDenoiser()
+
+        def encode_prompt(self, prompt, device=None):
+            return torch.ones(len(prompt), 2, 4, device=device)
+
+    pipe = TinyPipe()
+    rows = [
+        {
+            "prompt": "a",
+            "audio_hidden_states": [[1.0, 2.0]],
+            "audio_encoder_hidden_states": [[3.0, 4.0]],
+            "condition_mask": [1, 0],
+            "text_note": "not a tensor",
+        },
+        {
+            "prompt": "b",
+            "audio_hidden_states": [[5.0, 6.0]],
+            "audio_encoder_hidden_states": [[7.0, 8.0]],
+            "condition_mask": [0, 1],
+            "text_note": "still not a tensor",
+        },
+    ]
+
+    cond = learner.encode_prompt_embeds(pipe, rows, _args(), torch.device("cpu"), torch.float32)
+    assert set(cond.extra) == {"audio_hidden_states", "audio_encoder_hidden_states", "condition_mask"}
+    assert tuple(cond.extra["audio_hidden_states"].shape) == (2, 1, 2)
+    assert tuple(cond.extra["audio_encoder_hidden_states"].shape) == (2, 1, 2)
+    assert cond.extra["condition_mask"].dtype == torch.long
+
+    out = learner.denoise_forward(
+        pipe,
+        learner.LatentBatch(torch.zeros(2, 3)),
+        torch.tensor([1, 2]),
+        cond,
+        argparse.Namespace(),
+    )
+
+    assert torch.equal(out, torch.ones(2, 3))
+    assert pipe.transformer.seen["audio_hidden_states"] is cond.extra["audio_hidden_states"]
+    assert pipe.transformer.seen["audio_encoder_hidden_states"] is cond.extra["audio_encoder_hidden_states"]
+    assert pipe.transformer.seen["condition_mask"] is cond.extra["condition_mask"]
+    assert pipe.transformer.seen["text_note"] is None
+
+
 def test_denoise_forward_auto_fills_token_ids_guidance_and_attention_mask():
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner

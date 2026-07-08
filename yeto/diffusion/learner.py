@@ -987,6 +987,28 @@ def _conditioning_column_candidates(name: str):
             yield source
 
 
+def _is_numeric_sequence(value) -> bool:
+    if isinstance(value, (str, bytes)):
+        return False
+    if isinstance(value, (int, float, bool)):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(_is_numeric_sequence(item) for item in value)
+    return False
+
+
+def _is_tensor_like_conditioning_value(value) -> bool:
+    if value is None:
+        return False
+    if torch.is_tensor(value):
+        return True
+    if isinstance(value, (list, tuple)):
+        return _is_numeric_sequence(value)
+    if isinstance(value, str):
+        return Path(os.path.expanduser(value)).suffix.lower() in _CACHE_TENSOR_SUFFIXES
+    return False
+
+
 def _is_required_param(params, name: str) -> bool:
     param = params.get(name)
     return param is not None and param.default is inspect.Parameter.empty
@@ -1229,11 +1251,22 @@ def _call_encode_prompt(
     return TextConditioning(out)
 
 
-def _stack_cached_conditioning_extras(pipe, rows, device, dtype, adapter=None) -> dict[str, Any]:
+def _stack_row_conditioning_extras(
+    pipe,
+    rows,
+    device,
+    dtype,
+    adapter=None,
+    *,
+    existing: set[str] | None = None,
+) -> dict[str, Any]:
     extra = {}
+    existing = existing or set()
     for name in _conditioning_extra_param_names(_denoiser_forward_params(pipe, adapter)):
+        if name in existing:
+            continue
         for column in _conditioning_column_candidates(name):
-            if not any(row.get(column) is not None for row in rows):
+            if not any(_is_tensor_like_conditioning_value(row.get(column)) for row in rows):
                 continue
             extra[name] = _stack_column(
                 rows,
@@ -1260,7 +1293,7 @@ def encode_prompt_embeds(pipe, rows, args, device, dtype, adapter=None, latents:
         )
         pooled = _stack_column(rows, args.pooled_text_embeds_column, device, dtype)
         mask = _stack_column(rows, args.text_attention_mask_column, device, None)
-        extra = _stack_cached_conditioning_extras(pipe, rows, device, dtype, adapter)
+        extra = _stack_row_conditioning_extras(pipe, rows, device, dtype, adapter)
         return TextConditioning(prompt_embeds, pooled, mask, extra)
     prompts = [str(row.get(args.prompt_column, "")) for row in rows]
     cond = _call_encode_prompt(
@@ -1277,6 +1310,16 @@ def encode_prompt_embeds(pipe, rows, args, device, dtype, adapter=None, latents:
     cond.pooled_prompt_embeds = cond.pooled_prompt_embeds.to(device=device, dtype=dtype) if cond.pooled_prompt_embeds is not None else None
     cond.attention_mask = cond.attention_mask.to(device=device) if cond.attention_mask is not None else None
     cond.extra = {k: _move_conditioning_value(v, device, dtype) for k, v in cond.extra.items()}
+    cond.extra.update(
+        _stack_row_conditioning_extras(
+            pipe,
+            rows,
+            device,
+            dtype,
+            adapter,
+            existing=set(cond.extra),
+        )
+    )
     return cond
 
 
