@@ -1076,6 +1076,100 @@ def test_prompt_conditioning_extra_fields_are_signature_filtered():
     assert "ignored_by_forward" not in pipe.transformer.seen
 
 
+def test_encode_prompt_maps_signature_prompt_variants_from_rows():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyPipe:
+        def __init__(self):
+            self.seen = None
+
+        def encode_prompt(
+            self,
+            prompt,
+            prompt_2,
+            prompt_4,
+            negative_prompt,
+            negative_prompt_2=None,
+            do_classifier_free_guidance=False,
+            device=None,
+        ):
+            self.seen = {
+                "prompt": prompt,
+                "prompt_2": prompt_2,
+                "prompt_4": prompt_4,
+                "negative_prompt": negative_prompt,
+                "negative_prompt_2": negative_prompt_2,
+                "do_classifier_free_guidance": do_classifier_free_guidance,
+            }
+            return torch.ones(len(prompt), 2, 3, device=device)
+
+    pipe = TinyPipe()
+    rows = [
+        {
+            "prompt": "base a",
+            "prompt_2": "second a",
+            "prompt_4": "fourth a",
+            "negative_prompt": "neg a",
+        },
+        {"prompt": "base b", "negative_prompt_2": "neg2 b"},
+    ]
+
+    cond = learner.encode_prompt_embeds(pipe, rows, _args(), torch.device("cpu"), torch.float32)
+
+    assert tuple(cond.prompt_embeds.shape) == (2, 2, 3)
+    assert pipe.seen["prompt"] == ["base a", "base b"]
+    assert pipe.seen["prompt_2"] == ["second a", "base b"]
+    assert pipe.seen["prompt_4"] == ["fourth a", "base b"]
+    assert pipe.seen["negative_prompt"] == ["neg a", ""]
+    assert pipe.seen["negative_prompt_2"] == ["", "neg2 b"]
+    assert pipe.seen["do_classifier_free_guidance"] is False
+
+
+def test_cached_text_embeds_include_signature_extra_columns():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def forward(
+            self,
+            hidden_states,
+            timestep,
+            encoder_hidden_states=None,
+            encoder_hidden_states_t5=None,
+            position_ids=None,
+        ):
+            del hidden_states, timestep, encoder_hidden_states, encoder_hidden_states_t5, position_ids
+
+    pipe = argparse.Namespace(transformer=TinyDenoiser())
+    rows = [
+        {
+            "prompt_embeds": [[1.0, 2.0]],
+            "prompt_embeds_t5": [[3.0, 4.0]],
+            "position_ids": [0, 1],
+        },
+        {
+            "prompt_embeds": [[5.0, 6.0]],
+            "prompt_embeds_t5": [[7.0, 8.0]],
+            "position_ids": [2, 3],
+        },
+    ]
+
+    cond = learner.encode_prompt_embeds(
+        pipe,
+        rows,
+        _args(cache_text_embeds=True),
+        torch.device("cpu"),
+        torch.float32,
+    )
+
+    assert tuple(cond.prompt_embeds.shape) == (2, 1, 2)
+    assert set(cond.extra) == {"encoder_hidden_states_t5", "position_ids"}
+    assert tuple(cond.extra["encoder_hidden_states_t5"].shape) == (2, 1, 2)
+    assert tuple(cond.extra["position_ids"].shape) == (2, 2)
+    assert cond.extra["position_ids"].dtype == torch.long
+
+
 def test_denoise_forward_auto_fills_token_ids_guidance_and_attention_mask():
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner

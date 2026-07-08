@@ -962,6 +962,31 @@ _PROMPT_EXTRA_ALIASES = {
 }
 
 
+def _is_numbered_param(name: str, prefix: str) -> bool:
+    return name.startswith(prefix) and name[len(prefix) :].isdigit()
+
+
+def _prompt_values_for_param(name: str, rows, prompts: list[str]) -> list[str] | None:
+    if name == "prompt":
+        return prompts
+    if _is_numbered_param(name, "prompt_"):
+        if not rows:
+            return prompts
+        return [str(row.get(name, prompt)) for row, prompt in zip(rows, prompts)]
+    if name == "negative_prompt" or _is_numbered_param(name, "negative_prompt_"):
+        if not any(row.get(name) is not None for row in rows):
+            return None
+        return [str(row.get(name) or "") for row in rows]
+    return None
+
+
+def _conditioning_column_candidates(name: str):
+    yield name
+    for source, target in _PROMPT_EXTRA_ALIASES.items():
+        if target == name:
+            yield source
+
+
 def _is_required_param(params, name: str) -> bool:
     param = params.get(name)
     return param is not None and param.default is inspect.Parameter.empty
@@ -1155,12 +1180,13 @@ def _call_encode_prompt(
     sig = inspect.signature(pipe.encode_prompt)
     kwargs = {}
     params = sig.parameters
-    if "prompt" in params:
-        kwargs["prompt"] = prompts
-    if "prompt_2" in params:
-        kwargs["prompt_2"] = prompts
-    if "prompt_3" in params:
-        kwargs["prompt_3"] = prompts
+    for name in params:
+        values = _prompt_values_for_param(name, rows or [], prompts)
+        if values is not None:
+            kwargs[name] = values
+        elif name == "negative_prompt" or _is_numbered_param(name, "negative_prompt_"):
+            if _is_required_param(params, name):
+                kwargs[name] = ["" for _ in prompts]
     if "device" in params:
         kwargs["device"] = device
     if "dtype" in params and dtype is not None:
@@ -1203,6 +1229,23 @@ def _call_encode_prompt(
     return TextConditioning(out)
 
 
+def _stack_cached_conditioning_extras(pipe, rows, device, dtype, adapter=None) -> dict[str, Any]:
+    extra = {}
+    for name in _conditioning_extra_param_names(_denoiser_forward_params(pipe, adapter)):
+        for column in _conditioning_column_candidates(name):
+            if not any(row.get(column) is not None for row in rows):
+                continue
+            extra[name] = _stack_column(
+                rows,
+                column,
+                device,
+                dtype,
+                flag="--cache-text-embeds",
+            )
+            break
+    return extra
+
+
 def encode_prompt_embeds(pipe, rows, args, device, dtype, adapter=None, latents: LatentBatch | None = None):
     if adapter is not None and hasattr(adapter, "encode_prompt_embeds"):
         return adapter.encode_prompt_embeds(pipe, rows, args, device, dtype)
@@ -1217,7 +1260,8 @@ def encode_prompt_embeds(pipe, rows, args, device, dtype, adapter=None, latents:
         )
         pooled = _stack_column(rows, args.pooled_text_embeds_column, device, dtype)
         mask = _stack_column(rows, args.text_attention_mask_column, device, None)
-        return TextConditioning(prompt_embeds, pooled, mask)
+        extra = _stack_cached_conditioning_extras(pipe, rows, device, dtype, adapter)
+        return TextConditioning(prompt_embeds, pooled, mask, extra)
     prompts = [str(row.get(args.prompt_column, "")) for row in rows]
     cond = _call_encode_prompt(
         pipe,
