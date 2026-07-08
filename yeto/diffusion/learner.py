@@ -16,7 +16,7 @@ import logging
 import os
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +94,7 @@ class TextConditioning:
     prompt_embeds: torch.Tensor | None
     pooled_prompt_embeds: torch.Tensor | None = None
     attention_mask: torch.Tensor | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 def _cache_columns(args) -> dict[str, str]:
@@ -955,7 +956,222 @@ def encode_latents(pipe, rows, args, device, dtype, adapter=None) -> LatentBatch
     return LatentBatch(latents, *meta)
 
 
-def _call_encode_prompt(pipe, prompts, device):
+_PROMPT_DICT_STANDARD_KEYS = {
+    "prompt_embeds",
+    "negative_prompt_embeds",
+    "pooled_prompt_embeds",
+    "negative_pooled_prompt_embeds",
+    "prompt_attention_mask",
+    "negative_prompt_attention_mask",
+    "attention_mask",
+    "encoder_attention_mask",
+    "encoder_hidden_states_mask",
+}
+
+_DENOISER_STANDARD_PARAMS = {
+    "hidden_states",
+    "sample",
+    "timestep",
+    "timesteps",
+    "encoder_hidden_states",
+    "encoder_attention_mask",
+    "encoder_hidden_states_mask",
+    "pooled_projections",
+    "pooled_prompt_embeds",
+    "pooled_embeds",
+    "num_frames",
+    "height",
+    "width",
+    "return_dict",
+}
+
+
+def _is_required_param(params, name: str) -> bool:
+    param = params.get(name)
+    return param is not None and param.default is inspect.Parameter.empty
+
+
+def _param_default(fn, name: str):
+    try:
+        param = inspect.signature(fn).parameters.get(name)
+    except (TypeError, ValueError):
+        return None
+    if param is None or param.default is inspect.Parameter.empty:
+        return None
+    return param.default
+
+
+def _tokenizer_max_sequence_length(pipe) -> int | None:
+    for name in ("tokenizer", "tokenizer_2", "tokenizer_3", "tokenizer_4"):
+        value = getattr(getattr(pipe, name, None), "model_max_length", None)
+        if isinstance(value, int) and 0 < value < 1_000_000:
+            return value
+    return None
+
+
+def _infer_max_sequence_length(pipe, args=None) -> int | None:
+    explicit = getattr(args, "max_sequence_length", None)
+    if explicit is not None:
+        return int(explicit)
+    default = _param_default(getattr(pipe, "__call__", None), "max_sequence_length")
+    if isinstance(default, int):
+        return default
+    return _tokenizer_max_sequence_length(pipe)
+
+
+def _infer_vae_scale_factor(pipe) -> int | None:
+    value = getattr(pipe, "vae_scale_factor", None)
+    if isinstance(value, int) and value > 0:
+        return value
+    block_out = getattr(getattr(getattr(pipe, "vae", None), "config", None), "block_out_channels", None)
+    if block_out:
+        return 2 ** (len(block_out) - 1)
+    return None
+
+
+def _patch_size_2d(pipe) -> tuple[int, int]:
+    config = getattr(getattr(pipe, "transformer", None), "config", None)
+    patch = getattr(config, "patch_size", None) or 1
+    if isinstance(patch, (tuple, list)):
+        return int(patch[0] or 1), int((patch[1] if len(patch) > 1 else patch[0]) or 1)
+    return int(patch), int(patch)
+
+
+def _latent_grid_shape(pipe, latents: LatentBatch | None) -> tuple[int | None, int | None]:
+    if latents is None or latents.latent_height is None or latents.latent_width is None:
+        return None, None
+    patch_h, patch_w = _patch_size_2d(pipe)
+    return max(1, int(latents.latent_height) // max(1, patch_h)), max(
+        1, int(latents.latent_width) // max(1, patch_w)
+    )
+
+
+def _raw_pixel_shape(rows, args, pipe, latents: LatentBatch | None) -> tuple[int | None, int | None]:
+    if getattr(args, "height", None) is not None and getattr(args, "width", None) is not None:
+        return int(args.height), int(args.width)
+    if rows and not getattr(args, "cache_latents", False):
+        _, height, width = _batch_shape_key(rows, args)
+        if height is not None and width is not None:
+            return int(height), int(width)
+    scale = _infer_vae_scale_factor(pipe)
+    if scale is not None and latents is not None and latents.latent_height is not None and latents.latent_width is not None:
+        return int(latents.latent_height) * scale, int(latents.latent_width) * scale
+    return None, None
+
+
+def _denoiser_forward_params(pipe, adapter=None):
+    try:
+        model = _first_trainable_module(pipe, adapter)
+    except RuntimeError:
+        return {}
+    inspect_model = _signature_model_for_forward(model)
+    return inspect.signature(inspect_model.forward).parameters
+
+
+def _latent_input_param_name(params) -> str | None:
+    if "hidden_states" in params:
+        return "hidden_states"
+    if "sample" in params:
+        return "sample"
+    for name, param in params.items():
+        if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+            return name
+    return None
+
+
+def _conditioning_extra_param_names(params) -> list[str]:
+    reserved = set(_DENOISER_STANDARD_PARAMS)
+    latent_name = _latent_input_param_name(params)
+    if latent_name is not None:
+        reserved.add(latent_name)
+    return [
+        name
+        for name, param in params.items()
+        if name not in reserved
+        and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    ]
+
+
+def _take_first(values: list[Any], predicate):
+    for idx, value in enumerate(values):
+        if predicate(value):
+            return values.pop(idx)
+    return None
+
+
+def _is_float_2d_tensor(value) -> bool:
+    return torch.is_tensor(value) and value.ndim == 2 and torch.is_floating_point(value)
+
+
+def _is_mask_tensor(value) -> bool:
+    return torch.is_tensor(value) and value.ndim == 2 and not torch.is_floating_point(value)
+
+
+def _conditioning_from_tuple(out: tuple, forward_params) -> TextConditioning:
+    values = list(out)
+    prompt_embeds = values.pop(0) if values else None
+    pooled = None
+    mask = None
+    if any(name in forward_params for name in ("pooled_projections", "pooled_prompt_embeds", "pooled_embeds")):
+        pooled = _take_first(values, _is_float_2d_tensor)
+    if any(name in forward_params for name in ("encoder_attention_mask", "encoder_hidden_states_mask")):
+        mask = _take_first(values, _is_mask_tensor)
+    extra = {
+        name: value
+        for name, value in zip(_conditioning_extra_param_names(forward_params), values)
+        if value is not None
+    }
+    return TextConditioning(prompt_embeds, pooled, mask, extra)
+
+
+def _conditioning_from_dict(out: dict) -> TextConditioning:
+    mask = None
+    for name in (
+        "prompt_attention_mask",
+        "attention_mask",
+        "encoder_attention_mask",
+        "encoder_hidden_states_mask",
+    ):
+        if out.get(name) is not None:
+            mask = out[name]
+            break
+    extra = {
+        name: value
+        for name, value in out.items()
+        if name not in _PROMPT_DICT_STANDARD_KEYS and value is not None
+    }
+    return TextConditioning(
+        out.get("prompt_embeds"),
+        out.get("pooled_prompt_embeds"),
+        mask,
+        extra,
+    )
+
+
+def _move_conditioning_value(value, device, dtype):
+    if torch.is_tensor(value):
+        if torch.is_floating_point(value) or torch.is_complex(value):
+            return value.to(device=device, dtype=dtype)
+        return value.to(device=device)
+    if isinstance(value, dict):
+        return {k: _move_conditioning_value(v, device, dtype) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_move_conditioning_value(v, device, dtype) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_move_conditioning_value(v, device, dtype) for v in value)
+    return value
+
+
+def _call_encode_prompt(
+    pipe,
+    prompts,
+    device,
+    args=None,
+    rows=None,
+    latents: LatentBatch | None = None,
+    dtype=None,
+    adapter=None,
+):
     if not hasattr(pipe, "encode_prompt"):
         raise RuntimeError("raw prompts need pipeline.encode_prompt(), or pass --cache-text-embeds")
     sig = inspect.signature(pipe.encode_prompt)
@@ -969,35 +1185,47 @@ def _call_encode_prompt(pipe, prompts, device):
         kwargs["prompt_3"] = prompts
     if "device" in params:
         kwargs["device"] = device
+    if "dtype" in params and dtype is not None:
+        kwargs["dtype"] = dtype
     if "num_images_per_prompt" in params:
         kwargs["num_images_per_prompt"] = 1
     if "num_videos_per_prompt" in params:
         kwargs["num_videos_per_prompt"] = 1
     if "do_classifier_free_guidance" in params:
         kwargs["do_classifier_free_guidance"] = False
+    height, width = _raw_pixel_shape(rows, args, pipe, latents)
+    if "height" in params and height is not None:
+        kwargs["height"] = height
+    if "width" in params and width is not None:
+        kwargs["width"] = width
+    grid_h, grid_w = _latent_grid_shape(pipe, latents)
+    if "grid_h" in params:
+        if grid_h is None and _is_required_param(params, "grid_h"):
+            raise RuntimeError("pipeline.encode_prompt() requires grid_h, but latent height is unavailable")
+        if grid_h is not None:
+            kwargs["grid_h"] = grid_h
+    if "grid_w" in params:
+        if grid_w is None and _is_required_param(params, "grid_w"):
+            raise RuntimeError("pipeline.encode_prompt() requires grid_w, but latent width is unavailable")
+        if grid_w is not None:
+            kwargs["grid_w"] = grid_w
+    if "max_sequence_length" in params:
+        max_sequence_length = _infer_max_sequence_length(pipe, args)
+        if max_sequence_length is not None and (
+            _is_required_param(params, "max_sequence_length")
+            or getattr(args, "max_sequence_length", None) is not None
+        ):
+            kwargs["max_sequence_length"] = max_sequence_length
     with torch.no_grad():
         out = pipe.encode_prompt(**kwargs)
     if isinstance(out, dict):
-        return TextConditioning(
-            out.get("prompt_embeds"),
-            out.get("pooled_prompt_embeds"),
-            out.get("prompt_attention_mask"),
-        )
+        return _conditioning_from_dict(out)
     if isinstance(out, tuple):
-        prompt_embeds = out[0]
-        attention_mask = out[1] if len(out) > 1 and torch.is_tensor(out[1]) and out[1].ndim == 2 else None
-        pooled = None
-        for value in out[1:]:
-            if torch.is_tensor(value) and value.ndim == 2:
-                if value is attention_mask:
-                    continue
-                pooled = value
-                break
-        return TextConditioning(prompt_embeds, pooled, attention_mask)
+        return _conditioning_from_tuple(out, _denoiser_forward_params(pipe, adapter))
     return TextConditioning(out)
 
 
-def encode_prompt_embeds(pipe, rows, args, device, dtype, adapter=None):
+def encode_prompt_embeds(pipe, rows, args, device, dtype, adapter=None, latents: LatentBatch | None = None):
     if adapter is not None and hasattr(adapter, "encode_prompt_embeds"):
         return adapter.encode_prompt_embeds(pipe, rows, args, device, dtype)
     if args.cache_text_embeds:
@@ -1013,10 +1241,20 @@ def encode_prompt_embeds(pipe, rows, args, device, dtype, adapter=None):
         mask = _stack_column(rows, args.text_attention_mask_column, device, None)
         return TextConditioning(prompt_embeds, pooled, mask)
     prompts = [str(row.get(args.prompt_column, "")) for row in rows]
-    cond = _call_encode_prompt(pipe, prompts, device)
+    cond = _call_encode_prompt(
+        pipe,
+        prompts,
+        device,
+        args=args,
+        rows=rows,
+        latents=latents,
+        dtype=dtype,
+        adapter=adapter,
+    )
     cond.prompt_embeds = cond.prompt_embeds.to(device=device, dtype=dtype) if cond.prompt_embeds is not None else None
     cond.pooled_prompt_embeds = cond.pooled_prompt_embeds.to(device=device, dtype=dtype) if cond.pooled_prompt_embeds is not None else None
     cond.attention_mask = cond.attention_mask.to(device=device) if cond.attention_mask is not None else None
+    cond.extra = {k: _move_conditioning_value(v, device, dtype) for k, v in cond.extra.items()}
     return cond
 
 
@@ -1134,10 +1372,17 @@ def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning,
         kwargs["encoder_hidden_states"] = cond.prompt_embeds
     if "encoder_attention_mask" in params:
         kwargs["encoder_attention_mask"] = cond.attention_mask
+    if "encoder_hidden_states_mask" in params:
+        kwargs["encoder_hidden_states_mask"] = cond.attention_mask
     if "pooled_projections" in params and cond.pooled_prompt_embeds is not None:
         kwargs["pooled_projections"] = cond.pooled_prompt_embeds
     if "pooled_prompt_embeds" in params and cond.pooled_prompt_embeds is not None:
         kwargs["pooled_prompt_embeds"] = cond.pooled_prompt_embeds
+    if "pooled_embeds" in params and cond.pooled_prompt_embeds is not None:
+        kwargs["pooled_embeds"] = cond.pooled_prompt_embeds
+    for name, value in cond.extra.items():
+        if name in params and name not in kwargs and value is not None:
+            kwargs[name] = value
     if "num_frames" in params and noisy.latent_num_frames is not None:
         kwargs["num_frames"] = int(noisy.latent_num_frames)
     if "height" in params and noisy.latent_height is not None:
@@ -1162,7 +1407,7 @@ def compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0, adapt
             return out, torch.ones((), device=device)
     dtype = diffusion_torch_dtype(device)
     latents = encode_latents(pipe, rows, args, device, dtype, adapter)
-    cond = encode_prompt_embeds(pipe, rows, args, device, dtype, adapter)
+    cond = encode_prompt_embeds(pipe, rows, args, device, dtype, adapter, latents)
     noisy, target, timesteps = add_noise_and_target(pipe, latents)
     pred = denoise_forward(pipe, noisy, timesteps, cond, args, adapter)
     if args.loss_function != "flow_matching":

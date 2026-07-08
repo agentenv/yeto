@@ -108,7 +108,7 @@ def main(argv=None) -> int:
             if args.cache_text_embeds:
                 old = args.cache_text_embeds
                 args.cache_text_embeds = False
-                cond = learner.encode_prompt_embeds(pipe, rows, args, device, dtype, adapter)
+                cond = learner.encode_prompt_embeds(pipe, rows, args, device, dtype, adapter, latent_batch)
                 prompt_embeds = cond.prompt_embeds.detach().cpu() if cond.prompt_embeds is not None else None
                 pooled = cond.pooled_prompt_embeds.detach().cpu() if cond.pooled_prompt_embeds is not None else None
                 mask = cond.attention_mask.detach().cpu() if cond.attention_mask is not None else None

@@ -949,6 +949,91 @@ def test_denoise_forward_filters_kwargs_by_signature():
     assert pipe.transformer.seen["return_dict"] is False
 
 
+def test_prompt_conditioning_extra_fields_are_signature_filtered():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyConfig:
+        patch_size = 2
+
+    class TinyDenoiser(torch.nn.Module):
+        config = TinyConfig()
+
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(
+            self,
+            hidden_states,
+            timestep,
+            encoder_hidden_states=None,
+            position_ids=None,
+            segment_ids=None,
+            indicator=None,
+            return_dict=False,
+        ):
+            self.seen = {
+                "hidden_states": hidden_states,
+                "timestep": timestep,
+                "encoder_hidden_states": encoder_hidden_states,
+                "position_ids": position_ids,
+                "segment_ids": segment_ids,
+                "indicator": indicator,
+                "return_dict": return_dict,
+            }
+            return hidden_states + 1
+
+    class TinyPipe:
+        def __init__(self):
+            self.transformer = TinyDenoiser()
+            self.prompt_seen = None
+
+        def __call__(self, prompt=None, max_sequence_length=77):
+            del prompt, max_sequence_length
+
+        def encode_prompt(self, prompt, grid_h, grid_w, max_sequence_length, device=None):
+            self.prompt_seen = {
+                "prompt": prompt,
+                "grid_h": grid_h,
+                "grid_w": grid_w,
+                "max_sequence_length": max_sequence_length,
+            }
+            batch = len(prompt)
+            return (
+                torch.ones(batch, 2, 4, device=device),
+                torch.arange(2, device=device).repeat(batch, 1),
+                torch.arange(2, device=device).repeat(batch, 1) + 10,
+                torch.ones(batch, 2, dtype=torch.long, device=device),
+            )
+
+    pipe = TinyPipe()
+    rows = [{"prompt": "a"}, {"prompt": "b"}]
+    latents = learner.LatentBatch(torch.zeros(2, 4, 16, 8), latent_height=16, latent_width=8)
+
+    cond = learner.encode_prompt_embeds(
+        pipe,
+        rows,
+        _args(),
+        torch.device("cpu"),
+        torch.float32,
+        latents=latents,
+    )
+    cond.extra["ignored_by_forward"] = torch.tensor([1])
+    noisy = learner.LatentBatch(torch.zeros(2, 3), latent_height=16, latent_width=8)
+    out = learner.denoise_forward(pipe, noisy, torch.tensor([1, 2]), cond, argparse.Namespace())
+
+    assert torch.equal(out, torch.ones(2, 3))
+    assert pipe.prompt_seen["grid_h"] == 8
+    assert pipe.prompt_seen["grid_w"] == 4
+    assert pipe.prompt_seen["max_sequence_length"] == 77
+    assert set(cond.extra) == {"position_ids", "segment_ids", "indicator", "ignored_by_forward"}
+    assert torch.equal(pipe.transformer.seen["position_ids"], cond.extra["position_ids"])
+    assert torch.equal(pipe.transformer.seen["segment_ids"], cond.extra["segment_ids"])
+    assert torch.equal(pipe.transformer.seen["indicator"], cond.extra["indicator"])
+    assert "ignored_by_forward" not in pipe.transformer.seen
+
+
 def test_denoise_forward_inspects_wrapped_base_model_signature():
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
