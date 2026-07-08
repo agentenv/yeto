@@ -27,10 +27,11 @@ launcher = ["skypilot[aws]>=0.12"]
 # the wire/data path is shared with the CUDA learners.
 mlx = ["mlx>=0.31", "mlx-lm>=0.29"]
 dev = ["pytest", "pytest-timeout"]
+diffusion = ["PyYAML>=6", "safetensors>=0.4"]
 
 [project.scripts]
 yeto = "yeto.cli:main"
 yeto-export = "yeto.export:main"
 
-[tool.setuptools]
-packages = ["yeto"]
+[tool.setuptools.packages.find]
+include = ["yeto*"]

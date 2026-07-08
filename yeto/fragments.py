@@ -71,33 +71,43 @@ class FragmentLayout:
 
 
 def build_layout(
-    named_numels: list[tuple[str, int]], num_fragments: int, pattern: str = "binpack"
+    named_numels: list[tuple[str, int]],
+    num_fragments: int,
+    pattern: str = "binpack",
+    *,
+    avg_name_regex: str | None = None,
 ) -> FragmentLayout:
     """Partition (name, numel) pairs into at most `num_fragments` fragments.
 
-    Embedding-like tensors share one avg-merged fragment; the rest go into
-    the remaining fragments with RDA, placed by ``pattern`` (see module
-    docstring). If there are fewer non-embedding tensors than bins, the
-    fragment count shrinks.
+    Embedding-like tensors share one avg-merged fragment; callers may add a
+    regex for other vector-like tensors (for example diffusion bias/norm
+    tensors). The rest go into the remaining fragments with RDA, placed by
+    ``pattern`` (see module docstring). If there are fewer non-embedding
+    tensors than bins, the fragment count shrinks.
     """
     if num_fragments < 1:
         raise ValueError("num_fragments must be >= 1")
     if pattern not in FRAGMENT_PATTERNS:
         raise ValueError(f"pattern must be one of {FRAGMENT_PATTERNS}, got {pattern!r}")
-    embed = sorted(
-        ((n, s) for n, s in named_numels if is_embedding_name(n)),
+    avg_rx = re.compile(avg_name_regex) if avg_name_regex else None
+
+    def use_avg(name: str) -> bool:
+        return is_embedding_name(name) or (avg_rx is not None and bool(avg_rx.search(name)))
+
+    avg = sorted(
+        ((n, s) for n, s in named_numels if use_avg(n)),
         key=lambda x: (-x[1], x[0]),
     )
     rest = sorted(
-        ((n, s) for n, s in named_numels if not is_embedding_name(n)),
+        ((n, s) for n, s in named_numels if not use_avg(n)),
         key=lambda x: (-x[1], x[0]),
     )
-    if not embed and not rest:
+    if not avg and not rest:
         raise ValueError("no tensors to fragment")
 
     fragments: list[Fragment] = []
-    if embed:
-        fragments.append(Fragment(MERGE_AVG, embed))
+    if avg:
+        fragments.append(Fragment(MERGE_AVG, avg))
 
     n_bins = max(1, min(num_fragments - len(fragments), len(rest))) if rest else 0
     bins = [Fragment(MERGE_RDA) for _ in range(n_bins)]

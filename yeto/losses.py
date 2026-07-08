@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 
-LOSS_FUNCTIONS = ("cross_entropy", "importance_sampling", "ppo", "cispo", "dro")
+from .loss_specs import LOSS_FUNCTIONS
 
 
 def cross_entropy(target_logprobs: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:

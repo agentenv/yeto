@@ -259,13 +259,16 @@ SYNCER_REMOTE_BUILD = (
 )
 
 
-def make_syncer_task(args, num_learners: int):
+def needs_remote_syncer_build() -> bool:
     import platform
 
+    return (platform.system(), platform.machine()) != ("Linux", "x86_64")
+
+
+def make_syncer_task(args, num_learners: int):
     import sky
 
-    cross = (platform.system(), platform.machine()) != ("Linux", "x86_64")
-    if cross:
+    if needs_remote_syncer_build():
         print("[launcher] non-x86-Linux submitter: building the syncer on the syncer VM")
         task = sky.Task(
             name="yeto-syncer",
@@ -317,14 +320,16 @@ def resolve_loss_function(loss_function) -> str:
     before any cloud spend), pickled by value into the workdir, and shipped
     to learners as ``pickle:.yeto_loss.pkl``. Named losses pass through.
     """
-    from .losses import dump_pickled_loss, load_custom_loss
-
     if callable(loss_function):
         fn = loss_function
     elif isinstance(loss_function, str) and loss_function.startswith("custom:"):
+        from .losses import load_custom_loss
+
         fn = load_custom_loss(loss_function)
     else:
         return loss_function
+    from .losses import dump_pickled_loss
+
     dump_pickled_loss(fn, REPO_ROOT / PICKLED_LOSS_FILE)
     return f"pickle:{PICKLED_LOSS_FILE}"
 
@@ -390,11 +395,16 @@ MEGATRON_IMAGE = "docker:nvcr.io/nvidia/nemo:25.09"
 def learner_image_for(args, spec: ClusterSpec):
     """The image for a learner cluster: explicit flag > megatron container >
     internal override table > None (provider default + setup-time remediation)."""
-    explicit = parse_image_spec(getattr(args, "learner_image", None))
+    explicit = parse_image_spec(
+        getattr(args, "learner_image", None) or getattr(args, "runtime_image", None)
+    )
     if explicit is not None:
         return explicit
-    if getattr(args, "island_backend", "torch") == "megatron":
-        return MEGATRON_IMAGE
+    from .backends import get_backend
+
+    override = get_backend(getattr(args, "task", None)).image_override(args, spec)
+    if override is not None:
+        return override
     resolver = GPU_IMAGE_OVERRIDES.get((spec.cloud, spec.gpu))
     if resolver is None or not spec.region:
         return None
@@ -454,154 +464,12 @@ MEGATRON_SETUP = (
 
 
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
-    import sky
+    """Build a learner island task by dispatching to the run's task backend."""
+    from .backends import get_backend
 
-    from .datasource import learner_data_arg, learner_file_mounts
-
-    # Flags shared by both island backends. The DiLoCo sync, LoRA, data, and
-    # loss are identical; only the intra-island parallelism differs.
-    learner_flags = (
-        f" --model {shlex.quote(args.model)}"
-        f" --data {shlex.quote(learner_data_arg(args.data))}"
-        f" --syncer $SYNCER_ADDR"
-        f" --learner-id $LEARNER_ID"
-        f" --num-learners {num_learners}"
-        f" --loss-function {args.loss_function}"
-        f" --train-on {args.train_on}"
-        f" --tuning {args.tuning}"
-        f" --lora-r {args.lora_r}"
-        f" --lora-targets {getattr(args, 'lora_targets', 'auto')}"
-        f" --seq-len {args.seq_len}"
-        f" --micro-batch-size {args.micro_batch_size}"
-        f" --grad-accum {args.grad_accum}"
-        f" --inner-lr {args.inner_lr}"
-        f" --fragments {args.fragments}"
-        f" --fragment-pattern {args.fragment_pattern}"
-        f" --merge-alpha {args.merge_alpha}"
-        f" --tokenize {args.tokenize}"
-        f" --stream-workers {args.stream_workers}"
-        f" --wire-dtype {args.wire_dtype}"
-        f" --wan-streams {args.wan_streams}"
-        f" --output-dir ~/yeto-output"
+    return get_backend(getattr(args, "task", None)).build_learner_task(
+        args, spec, learner_id, num_learners, syncer_addr
     )
-    if args.max_rows:
-        learner_flags += f" --max-rows {args.max_rows}"
-
-    backend = getattr(args, "island_backend", "torch")
-    if backend == "megatron":
-        gpus = spec.num_nodes * spec.gpus_per_node
-        tp = max(1, getattr(args, "tensor_parallel", 1))
-        pp = max(1, getattr(args, "pipeline_parallel", 1))
-        ep = getattr(args, "expert_parallel", None) or max(1, gpus // (tp * pp))
-        learner_flags += (
-            f" --island-backend megatron"
-            f" --expert-parallel {ep}"
-            f" --tensor-parallel {tp}"
-            f" --pipeline-parallel {pp}"
-        )
-        entrypoint = "yeto.megatron.learner"
-        # Inside the NGC container the whole training stack (torch, TE,
-        # megatron-core, bridge) is already present, so skip TORCH_SETUP and
-        # MEGATRON_SETUP. NVME_SETUP is a host RAID operation that can't run in
-        # a container, so it's skipped too (HF cache lands on the container's
-        # disk — slower download, but correct; wiring the host instance-store
-        # through to the container is a follow-up). Only yeto's pure-python
-        # deps that the container may lack are added, --no-deps so they never
-        # perturb the container's pinned torch/TE/transformers.
-        setup_steps = [
-            WAN_TUNING,
-            HF_TOKEN_ENV,
-            "pip install -q --no-deps datasets peft hf_transfer cloudpickle sentencepiece",
-        ]
-    else:
-        learner_flags += f" --shard {args.shard}"
-        entrypoint = "yeto.learner"
-        setup_steps = [WAN_TUNING, NVME_SETUP, NVME_ENV, HF_TOKEN_ENV, TORCH_SETUP,
-                       "pip install -q -r requirements.txt"]
-
-    run = (
-        f"{NVME_ENV}\n"
-        f"{HF_TOKEN_ENV}\n"
-        'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
-        "torchrun --nnodes=$SKYPILOT_NUM_NODES --node_rank=$SKYPILOT_NODE_RANK "
-        "--nproc_per_node=$SKYPILOT_NUM_GPUS_PER_NODE "
-        "--master_addr=$MASTER_ADDR --master_port=29500 "
-        f"-m {entrypoint}{learner_flags}"
-    )
-    envs = {
-        "SYNCER_ADDR": syncer_addr,
-        "LEARNER_ID": str(learner_id),
-        "HF_HUB_ENABLE_HF_TRANSFER": "1",
-    }
-    if os.environ.get("HF_TOKEN"):
-        envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
-    if spec.num_nodes > 1:
-        # Surface NCCL's chosen transport in the job logs so an EFA-less
-        # fallback to TCP sockets is visible, not silent.
-        envs["NCCL_DEBUG"] = "INFO"
-    # Non-HF --data sources (local paths, s3://, gs://, ...) ride sky's
-    # file_mounts onto every learner; see yeto/datasource.py.
-    file_mounts = dict(learner_file_mounts(args.data)) or None
-    if args.loss_function.startswith("pickle:"):
-        # The pickled loss is gitignored, so the workdir sync skips it;
-        # mount it into the workdir explicitly.
-        file_mounts = file_mounts or {}
-        file_mounts[f"~/sky_workdir/{PICKLED_LOSS_FILE}"] = str(REPO_ROOT / PICKLED_LOSS_FILE)
-    # Ride the launching machine's HF token onto every learner: anonymous
-    # Hub quota is half the authenticated one and shared per-IP, and a
-    # gated/private --model needs the token outright. HF_TOKEN_ENV then
-    # copies it wherever NVME_ENV points HF_HOME.
-    local_token = os.path.expanduser(HF_TOKEN_PATH)
-    if os.path.isfile(local_token):
-        file_mounts = file_mounts or {}
-        file_mounts[HF_TOKEN_PATH] = local_token
-    # Kick the weight download off in the background at the END of setup:
-    # it overlaps sky's remaining bookkeeping and races ahead of the run
-    # command, which then finds a warm (or warming — hf resumes) cache.
-    # hf_transfer multi-streams the download; NVMe absorbs it at GB/s.
-    from .models import resolve
-
-    repo = resolve(args.model)
-    prefetch = (
-        f"(nohup huggingface-cli download {shlex.quote(repo)} "
-        ">/tmp/hf-prefetch.log 2>&1 &) || true"
-    )
-    task = sky.Task(
-        name=f"yeto-learner-{learner_id}",
-        setup="\n".join(setup_steps + [prefetch]),
-        run=run,
-        envs=envs,
-        num_nodes=spec.num_nodes,
-        workdir=str(REPO_ROOT),
-        file_mounts=file_mounts,
-    )
-    infra = f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud
-    resources_kwargs = {}
-    image = learner_image_for(args, spec)
-    if image is not None:
-        resources_kwargs["image_id"] = image
-    if spec.num_nodes > 1:
-        # Multi-node learner: inner DDP all-reduce crosses the node fabric,
-        # so request the cloud's RDMA-class interconnect (EFA on AWS,
-        # GPUDirect on GCP). Single-node clusters stay on NVLink and don't
-        # need it. On AWS this also swaps in the EFA-ready DLAMI; SkyPilot
-        # installs no EFA software itself, and if the pinned AMI is missing
-        # NCCL silently falls back to TCP — NCCL_DEBUG below makes the
-        # chosen transport visible in the job logs (look for
-        # "NET/OFI Selected Provider is efa").
-        resources_kwargs["network_tier"] = "best"
-    task.set_resources(
-        sky.Resources(
-            infra=infra,
-            accelerators=spec.accelerators,
-            cpus=args.learner_cpus,
-            instance_type=args.learner_instance_type,
-            use_spot=args.spot,
-            disk_size=args.disk_size,
-            **resources_kwargs,
-        )
-    )
-    return task
 
 
 def learner_cluster_names(prefix: str, specs: list[ClusterSpec]) -> list[str]:
@@ -611,17 +479,9 @@ def learner_cluster_names(prefix: str, specs: list[ClusterSpec]) -> list[str]:
 
 
 def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
-    weight_gb = MODEL_WEIGHT_GB.get(args.model)
-    if weight_gb is None:
-        return
-    for spec in specs:
-        vram = GPU_MEM_GB.get(spec.gpu, 0) * spec.total_gpus
-        if vram < weight_gb:
-            print(
-                f"[launcher] WARNING: {spec} has ~{vram} GB VRAM but {args.model} "
-                f"needs ~{weight_gb} GB for frozen bf16 weights alone — expect OOM.",
-                file=sys.stderr,
-            )
+    from .backends import get_backend
+
+    get_backend(getattr(args, "task", None)).warn_if_wont_fit(args, specs)
 
 
 def _tail(cluster: str, job_id: int, prefix: str) -> int:
@@ -1184,13 +1044,12 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
 
     head_mode = local_syncer is not None
     specs = parse_gpu_spec(args.gpu)
-    # External learners (machines sky cannot provision — e.g. Macs running
-    # yeto.mlx.learner) get the ids AFTER the cloud learners; the syncer
-    # counts them in --learners and its port is already public, so they
-    # simply dial in with the printed join command.
+    # External learners (machines sky cannot provision, e.g. Macs running
+    # yeto.mlx.learner) get ids after the cloud learners and dial the syncer.
     external = max(0, getattr(args, "external_learners", 0) or 0)
     num_learners = len(specs) + external
-    args.loss_function = resolve_loss_function(args.loss_function)
+    if hasattr(args, "loss_function"):
+        args.loss_function = resolve_loss_function(args.loss_function)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
     syncer_cluster = None if head_mode else f"{prefix}-syncer"
@@ -1300,27 +1159,30 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
 
         # Secure the artifact BEFORE the finally block tears learners down:
-        # fetch ~/yeto-output from the winning learner onto this machine
-        # (the head, or the local worker), then deliver to --output.
+        # fetch the task backend's output dir from the winning learner onto
+        # this machine (the head, or the local worker), then deliver to --output.
         done = [n for n, s in exit_codes.items() if "SUCCEEDED" in s]
         if not done:
             print("[launcher] no learner succeeded; recover from the syncer "
                   "checkpoint with yeto-export", file=sys.stderr)
             return 1
         source = next((n for n in done if "-l0-" in n), done[0])
+        from .backends import get_backend
+
+        output_dir = get_backend(getattr(args, "task", None)).output_dir
         output = getattr(args, "output", None)
         local_dest = (
             os.path.expanduser(output)
             if output and delivery.kind(output) == "local" and not head_mode
-            else os.path.expanduser("~/yeto-output")
+            else os.path.expanduser(f"~/{output_dir}")
         )
         os.makedirs(local_dest, exist_ok=True)
         try:
-            subprocess.run(delivery.fetch_cmd(source, local_dest), check=True)
+            subprocess.run(delivery.fetch_cmd(source, local_dest, output_dir), check=True)
             print(f"[launcher] fine-tuned model fetched to {local_dest}")
         except subprocess.CalledProcessError as e:
             print(
-                f"[launcher] fetching {source}:~/yeto-output failed ({e}); "
+                f"[launcher] fetching {source}:~/{output_dir} failed ({e}); "
                 "recover from the syncer checkpoint with yeto-export",
                 file=sys.stderr,
             )
