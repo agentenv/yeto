@@ -128,50 +128,6 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def diffusion_cache_metadata(
-    args,
-    *,
-    data_file: str = "data.jsonl",
-    row_count: int | None = None,
-) -> dict:
-    meta = {
-        "kind": "yeto.diffusion.cache",
-        "schema_version": DIFFUSION_CACHE_SCHEMA_VERSION,
-        "data_file": data_file,
-        "model": getattr(args, "model", None),
-        "resolved_model": (
-            resolve(getattr(args, "model", "")) if getattr(args, "model", None) else None
-        ),
-        "diffusion_adapter": getattr(args, "diffusion_adapter", None),
-        "cache": _cache_flags(args),
-        "columns": _cache_columns(args),
-        "relative_paths": True,
-        "tensor_suffixes": list(_CACHE_TENSOR_SUFFIXES),
-        "shape": {
-            "height": getattr(args, "height", None),
-            "width": getattr(args, "width", None),
-            "num_frames": getattr(args, "num_frames", None),
-        },
-    }
-    if row_count is not None:
-        meta["row_count"] = int(row_count)
-    return meta
-
-
-def write_diffusion_cache_metadata(
-    output_dir: str | Path,
-    args,
-    *,
-    row_count: int | None = None,
-) -> None:
-    out = Path(os.path.expanduser(str(output_dir)))
-    out.mkdir(parents=True, exist_ok=True)
-    _write_json(
-        out / DIFFUSION_CACHE_METADATA_FILE,
-        diffusion_cache_metadata(args, row_count=row_count),
-    )
-
-
 def read_diffusion_cache_metadata(dataset_name) -> dict | None:
     if not isinstance(dataset_name, str):
         return None

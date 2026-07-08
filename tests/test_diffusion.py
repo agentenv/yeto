@@ -213,7 +213,7 @@ def test_cached_manifest_contract_reports_missing_columns():
         )
 
 
-def test_diffusion_cache_metadata_records_contract(tmp_path):
+def test_diffusion_cache_metadata_validates_external_contract(tmp_path):
     pytest.importorskip("torch")
     from yeto.diffusion import learner
 
@@ -222,7 +222,26 @@ def test_diffusion_cache_metadata_records_contract(tmp_path):
         cache_text_embeds=True,
         data=str(tmp_path / "data.jsonl"),
     )
-    learner.write_diffusion_cache_metadata(tmp_path, args, row_count=3)
+    meta_path = tmp_path / learner.DIFFUSION_CACHE_METADATA_FILE
+    meta_path.write_text(
+        json.dumps(
+            {
+                "kind": "yeto.diffusion.cache",
+                "schema_version": learner.DIFFUSION_CACHE_SCHEMA_VERSION,
+                "row_count": 3,
+                "cache": {"latents": True, "text_embeds": True},
+                "columns": {
+                    "latents": "latents",
+                    "prompt_embeds": "prompt_embeds",
+                    "prompt_attention_mask": "prompt_attention_mask",
+                    "pooled_prompt_embeds": "pooled_prompt_embeds",
+                },
+                "relative_paths": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     meta = learner.read_diffusion_cache_metadata(str(tmp_path / "data.jsonl"))
     assert meta["kind"] == "yeto.diffusion.cache"

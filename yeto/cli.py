@@ -196,15 +196,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     diffusion.add_argument(
         "--cache-latents",
         action="store_true",
-        help="diffusion only: read precomputed VAE latents from --latent-column "
-        "instead of encoding media in the training loop (off by default)",
+        help="diffusion only: read cached VAE latents from --latent-column "
+        "instead of encoding media in the training loop (off by default; "
+        "Yeto no longer provides a built-in cache precompute step)",
     )
     diffusion.add_argument(
         "--cache-text-embeds",
         action="store_true",
-        help="diffusion only: read precomputed text embeddings from "
+        help="diffusion only: read cached text embeddings from "
         "--text-embeds-column instead of encoding prompts in the training loop "
-        "(off by default)",
+        "(off by default; Yeto no longer provides a built-in cache precompute step)",
     )
     diffusion.add_argument("--image-column", default="image", help="diffusion raw media column")
     diffusion.add_argument("--video-column", default="video", help="diffusion raw video column")
