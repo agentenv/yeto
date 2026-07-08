@@ -16,6 +16,7 @@ import logging
 import os
 import random
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -338,13 +339,19 @@ def load_pipeline(args, device, adapter=None):
     if args.tuning == "lora":
         from peft import LoraConfig, get_peft_model
 
+        peft_kwargs = {}
+        try:
+            if "autocast_adapter_dtype" in inspect.signature(get_peft_model).parameters:
+                peft_kwargs["autocast_adapter_dtype"] = False
+        except (TypeError, ValueError):
+            pass
         for name, module in modules:
             lora = LoraConfig(
                 r=args.lora_r,
                 lora_alpha=args.lora_alpha,
                 target_modules=resolve_lora_targets(args.lora_targets, args.model),
             )
-            setattr(pipe, name, get_peft_model(module, lora))
+            setattr(pipe, name, get_peft_model(module, lora, **peft_kwargs))
     else:
         for _, module in modules:
             module.requires_grad_(True)
@@ -872,6 +879,196 @@ def _maybe_pack_latents(pipe, latents: torch.Tensor) -> torch.Tensor:
     if "num_frames" in params and latents.ndim == 5:
         kwargs["num_frames"] = int(latents.shape[2])
     return pack(latents, **kwargs)
+
+
+def _module_config(module):
+    candidates = [module]
+    get_base_model = getattr(module, "get_base_model", None)
+    if callable(get_base_model):
+        try:
+            candidates.append(get_base_model())
+        except TypeError:
+            pass
+    base_model = getattr(module, "base_model", None)
+    if base_model is not None:
+        candidates.append(getattr(base_model, "model", base_model))
+    for candidate in candidates:
+        config = getattr(candidate, "config", None)
+        if config is not None:
+            return config
+    return None
+
+
+def _first_trainable_config(pipe, adapter=None):
+    for _, module in _trainable_module_items(pipe, adapter):
+        config = _module_config(module)
+        if config is not None:
+            return config
+    return None
+
+
+def _config_value(config, name: str):
+    if config is None:
+        return None
+    if isinstance(config, dict):
+        return config.get(name)
+    return getattr(config, name, None)
+
+
+def _patch_tuple(value, dims: int) -> tuple[int, ...]:
+    if value is None:
+        return (1,) * dims
+    if isinstance(value, int):
+        return (int(value),) * dims
+    values = tuple(int(v) for v in value)
+    if len(values) >= dims:
+        return values[-dims:]
+    return ((1,) * (dims - len(values))) + values
+
+
+def _patchify_latents(latents: torch.Tensor, patch: tuple[int, ...]) -> torch.Tensor | None:
+    if latents.ndim == 4:
+        ph, pw = patch
+        bsz, channels, height, width = latents.shape
+        if height % ph or width % pw:
+            return None
+        return (
+            latents.reshape(bsz, channels, height // ph, ph, width // pw, pw)
+            .permute(0, 2, 4, 1, 3, 5)
+            .reshape(bsz, (height // ph) * (width // pw), channels * ph * pw)
+        )
+    if latents.ndim == 5:
+        pt, ph, pw = patch
+        bsz, channels, frames, height, width = latents.shape
+        if frames % pt or height % ph or width % pw:
+            return None
+        return (
+            latents.reshape(
+                bsz,
+                channels,
+                frames // pt,
+                pt,
+                height // ph,
+                ph,
+                width // pw,
+                pw,
+            )
+            .permute(0, 2, 4, 6, 1, 3, 5, 7)
+            .reshape(
+                bsz,
+                (frames // pt) * (height // ph) * (width // pw),
+                channels * pt * ph * pw,
+            )
+        )
+    return None
+
+
+def _patchify_for_model_input(pipe, latents: torch.Tensor, adapter=None) -> torch.Tensor | None:
+    if latents.ndim == 3:
+        return latents
+    if latents.ndim not in (4, 5):
+        return None
+    config = _first_trainable_config(pipe, adapter)
+    input_channels = _config_value(config, "in_channels")
+    patch = getattr(pipe, "patch_size", None) or _config_value(config, "patch_size")
+    dims = latents.ndim - 2
+    for candidate in [_patch_tuple(patch, dims), *(_candidate_patch_tuples(latents, input_channels) or [])]:
+        packed = _patchify_latents(latents, candidate)
+        if packed is None:
+            continue
+        if input_channels is None or int(packed.shape[-1]) == int(input_channels):
+            return packed
+    return None
+
+
+def _candidate_patch_tuples(latents: torch.Tensor, input_channels) -> list[tuple[int, ...]]:
+    if input_channels is None or latents.ndim not in (4, 5):
+        return []
+    channels = int(latents.shape[1])
+    target = int(input_channels)
+    if target % channels:
+        return []
+    factor = target // channels
+    candidates = []
+    if latents.ndim == 4:
+        _, _, height, width = latents.shape
+        for ph in range(1, min(8, height) + 1):
+            if height % ph:
+                continue
+            for pw in range(1, min(8, width) + 1):
+                if width % pw == 0 and ph * pw == factor:
+                    candidates.append((ph, pw))
+    else:
+        _, _, frames, height, width = latents.shape
+        for pt in range(1, min(8, frames) + 1):
+            if frames % pt:
+                continue
+            for ph in range(1, min(8, height) + 1):
+                if height % ph:
+                    continue
+                for pw in range(1, min(8, width) + 1):
+                    if width % pw == 0 and pt * ph * pw == factor:
+                        candidates.append((pt, ph, pw))
+    return candidates
+
+
+def _image_token_mask_from_conditioning(
+    cond: TextConditioning,
+    batch_size: int,
+    seq_len: int,
+    image_tokens: int,
+    device,
+) -> torch.Tensor:
+    indicator = cond.extra.get("indicator")
+    if torch.is_tensor(indicator) and indicator.ndim == 2 and tuple(indicator.shape) == (batch_size, seq_len):
+        last_value = indicator[:, -1:].to(device=indicator.device)
+        mask = indicator.eq(last_value)
+        if torch.all(mask.sum(dim=1) == image_tokens):
+            return mask.to(device=device)
+    mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+    mask[:, -image_tokens:] = True
+    return mask
+
+
+def _align_latents_to_conditioning_sequence(
+    pipe,
+    latents: LatentBatch,
+    cond: TextConditioning,
+    adapter=None,
+) -> tuple[LatentBatch, torch.Tensor | None]:
+    prompt_embeds = cond.prompt_embeds
+    if prompt_embeds is None or prompt_embeds.ndim != 3:
+        return latents, None
+    tokens = _patchify_for_model_input(pipe, latents.latents, adapter)
+    if tokens is None or tokens.ndim != 3:
+        return latents, None
+    batch_size, image_tokens, token_dim = tokens.shape
+    seq_len = int(prompt_embeds.shape[1])
+    if int(prompt_embeds.shape[0]) != batch_size or seq_len < image_tokens:
+        return LatentBatch(tokens, latents.latent_num_frames, latents.latent_height, latents.latent_width), None
+    if seq_len == image_tokens:
+        return LatentBatch(tokens, latents.latent_num_frames, latents.latent_height, latents.latent_width), None
+
+    mask = _image_token_mask_from_conditioning(
+        cond,
+        batch_size,
+        seq_len,
+        image_tokens,
+        tokens.device,
+    )
+    packed = torch.zeros(
+        batch_size,
+        seq_len,
+        token_dim,
+        device=tokens.device,
+        dtype=tokens.dtype,
+    )
+    for idx in range(batch_size):
+        packed[idx, mask[idx]] = tokens[idx]
+    return (
+        LatentBatch(packed, latents.latent_num_frames, latents.latent_height, latents.latent_width),
+        mask.to(device=tokens.device, dtype=tokens.dtype),
+    )
 
 
 def encode_latents(pipe, rows, args, device, dtype, adapter=None) -> LatentBatch:
@@ -1781,7 +1978,11 @@ def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning,
     if "return_dict" in params:
         kwargs["return_dict"] = False
     _auto_fill_denoiser_kwargs(pipe, noisy, cond, args, params, kwargs)
-    out = model(**kwargs)
+    autocast = nullcontext()
+    if noisy.latents.is_cuda and noisy.latents.dtype in (torch.float16, torch.bfloat16):
+        autocast = torch.autocast(device_type="cuda", dtype=noisy.latents.dtype)
+    with autocast:
+        out = model(**kwargs)
     return _extract_model_output(out)
 
 
@@ -1798,11 +1999,25 @@ def compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0, adapt
     dtype = diffusion_torch_dtype(device)
     latents = encode_latents(pipe, rows, args, device, dtype, adapter)
     cond = encode_prompt_embeds(pipe, rows, args, device, dtype, adapter, latents)
+    latents, sequence_loss_mask = _align_latents_to_conditioning_sequence(
+        pipe,
+        latents,
+        cond,
+        adapter,
+    )
     noisy, target, timesteps = add_noise_and_target(pipe, latents)
     pred = denoise_forward(pipe, noisy, timesteps, cond, args, adapter)
     if args.loss_function != "flow_matching":
         raise ValueError("diffusion learner currently supports --loss-function flow_matching")
     weights = diffusion_loss_weights(pipe, timesteps, target, args)
+    if sequence_loss_mask is not None:
+        if weights is None:
+            weights = sequence_loss_mask
+        else:
+            weights = weights.to(device=sequence_loss_mask.device, dtype=sequence_loss_mask.dtype)
+            while weights.ndim < sequence_loss_mask.ndim:
+                weights = weights.view(*weights.shape, *([1] * (sequence_loss_mask.ndim - weights.ndim)))
+            weights = weights * sequence_loss_mask
     return flow_matching_loss(pred, target, timesteps, weights)
 
 

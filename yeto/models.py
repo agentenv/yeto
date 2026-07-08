@@ -113,7 +113,7 @@ DIFFUSION_MODEL_ALIASES = {
     "chroma1-hd": "lodestones/Chroma1-HD",
     "hidream-i1-dev": "HiDream-ai/HiDream-I1-Dev",
     "hidream-i1-full": "HiDream-ai/HiDream-I1-Full",
-    "ideogram4": "ideogram-ai/ideogram-v4",
+    "ideogram4": "ideogram-ai/ideogram-4-nf4-diffusers",
     "qwen-image": "Qwen/Qwen-Image",
     "qwen-image-2512": "Qwen/Qwen-Image-2512",
     "sd35": "stabilityai/stable-diffusion-3.5-large",

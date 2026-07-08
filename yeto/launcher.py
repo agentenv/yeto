@@ -548,7 +548,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             HF_TOKEN_ENV,
             TORCH_SETUP,
             "pip install -q -r requirements.txt",
-            "pip install -q 'diffusers>=0.35' safetensors pillow 'imageio[ffmpeg]'",
+            "pip install -q 'diffusers>=0.35' safetensors pillow 'imageio[ffmpeg]' 'bitsandbytes>=0.46.1'",
         ]
     elif backend == "megatron":
         gpus = spec.num_nodes * spec.gpus_per_node
@@ -742,7 +742,7 @@ def make_diffusion_sample_task(args, spec: ClusterSpec):
         HF_TOKEN_ENV,
         TORCH_SETUP,
         "pip install -q -r requirements.txt",
-        "pip install -q 'diffusers>=0.35' safetensors pillow 'imageio[ffmpeg]'",
+        "pip install -q 'diffusers>=0.35' safetensors pillow 'imageio[ffmpeg]' 'bitsandbytes>=0.46.1'",
     ]
     run = f"{NVME_ENV}\n{HF_TOKEN_ENV}\nmkdir -p {DIFFUSION_SAMPLE_OUTPUT_DIR}\n{sample_cmd}"
     envs = {"HF_HUB_ENABLE_HF_TRANSFER": "1"}

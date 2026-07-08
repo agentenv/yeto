@@ -92,7 +92,7 @@ def test_diffusion_aliases_resolve_and_infer_kind():
         "wan22",
     } <= set(DIFFUSION_MODEL_ALIASES)
     assert resolve("sd35") == DIFFUSION_MODEL_ALIASES["sd35"]
-    assert resolve("ideogram4") == "ideogram-ai/ideogram-v4"
+    assert resolve("ideogram4") == "ideogram-ai/ideogram-4-nf4-diffusers"
     assert resolve("qwen-image") == "Qwen/Qwen-Image"
     assert resolve("hunyuan-video") == "hunyuanvideo-community/HunyuanVideo"
     assert resolve("nava") == "baidu/NAVA"
@@ -1616,6 +1616,33 @@ def test_denoise_forward_auto_fills_shape_and_mask_aliases():
     assert pipe.transformer.seen["hidden_states_masks"] is mask
     assert pipe.transformer.seen["img_shapes"] == [(3, 2, 2), (3, 2, 2)]
     assert pipe.transformer.seen["img_sizes"] == [(2, 2), (2, 2)]
+
+
+def test_packed_sequence_conditioning_patchifies_image_latents():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        config = SimpleNamespace(in_channels=8, patch_size=2)
+
+    pipe = SimpleNamespace(transformer=TinyDenoiser(), patch_size=2)
+    latents = learner.LatentBatch(torch.arange(32, dtype=torch.float32).reshape(1, 2, 4, 4))
+    cond = learner.TextConditioning(
+        torch.zeros(1, 7, 16),
+        extra={"indicator": torch.tensor([[0, 3, 3, 2, 2, 2, 2]])},
+    )
+
+    aligned, mask = learner._align_latents_to_conditioning_sequence(pipe, latents, cond)
+
+    assert tuple(aligned.latents.shape) == (1, 7, 8)
+    assert torch.equal(mask, torch.tensor([[False, False, False, True, True, True, True]]))
+    assert torch.equal(aligned.latents[:, :3], torch.zeros(1, 3, 8))
+    expected_tokens = (
+        latents.latents.reshape(1, 2, 2, 2, 2, 2)
+        .permute(0, 2, 4, 1, 3, 5)
+        .reshape(1, 4, 8)
+    )
+    assert torch.equal(aligned.latents[:, 3:], expected_tokens)
 
 
 def test_denoise_forward_inspects_wrapped_base_model_signature():
