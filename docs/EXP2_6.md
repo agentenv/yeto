@@ -156,6 +156,31 @@ Recommended next steps:
 4. Try multiple anchor batches or anchor ensembles to reduce split sensitivity.
 5. Only rerun exact model replay after a cheap group-local diagnostic shows stronger within-group concordance.
 
+## EXP2.7 Follow-Up
+
+EXP2.7 split the local group analysis into reusable feature-building and policy-grid stages:
+
+```text
+scripts/build_group_local_features.py
+scripts/replay_group_local_policy_grid.py
+scripts/aggregate_group_local_results.py
+docs/EXP2_7.md
+```
+
+Result on the existing artifacts: still no-go for online ProbeCommit.
+
+| Metric | EXP2.7 local value |
+|---|---:|
+| Complete groups | 614 |
+| Mean held-out gain vs token-weighted | 0.000062 |
+| Negative-rate relative drop | 0.037 |
+| Strict-negative relative drop | 0.064 |
+| Oracle-positive headroom captured | -0.276 |
+| Act rate | 0.483 |
+| Gate pass | false |
+
+The tooling is ready for denser captures, but the existing score family still fails the group-local evidence gate.
+
 ## Exact Command
 
 ```bash

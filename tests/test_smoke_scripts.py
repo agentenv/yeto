@@ -22,6 +22,8 @@ compare = _load("compare_diloco")
 calibrate = _load("calibrate_fragment_score")
 replay_merge = _load("replay_merge_utility")
 group_local = _load("replay_group_local_probecommit")
+build_group_features = _load("build_group_local_features")
+policy_grid = _load("replay_group_local_policy_grid")
 
 
 def test_every_alias_has_a_tier():
@@ -428,3 +430,71 @@ def test_group_local_tuner_excludes_oracle_actions():
     selected = [split["test_result"]["actions"] for split in result["splits"]]
     assert all("oracle_positive" not in actions for actions in selected)
     assert result["aggregate"]["mean_gain_vs_token"] == 0.01
+
+
+def test_exp27_feature_and_policy_grid_helpers_exclude_oracles():
+    candidates = [
+        {
+            "learner_id": 0,
+            "probe_grad_dot": 1.0,
+            "calibrated_score": 0.9,
+            "utility": 0.02,
+            "bad": False,
+            "bad_strict": False,
+            "weight": 1.0,
+        },
+        {
+            "learner_id": 1,
+            "probe_grad_dot": -1.0,
+            "calibrated_score": 0.2,
+            "utility": -0.01,
+            "bad": True,
+            "bad_strict": True,
+            "weight": 1.0,
+        },
+    ]
+    stats = build_group_features._field_stats(candidates, "probe_grad_dot")
+    assert stats["top1_learner"] == 0
+    assert stats["bottom1_learner"] == 1
+    assert stats["score_entropy"] < 1.0
+
+    feature_row = {
+        "seed": 1,
+        "scores": {"probe_grad_dot": stats},
+        "agreement": {},
+        "actions": {
+            "token_weighted": {
+                "utility": 0.0,
+                "negative": False,
+                "strict_negative": False,
+                "selected_mass": 1.0,
+                "selected_count": 2,
+            },
+            "anchor_drop_bottom25": {
+                "utility": 0.01,
+                "negative": False,
+                "strict_negative": False,
+                "selected_mass": 0.5,
+                "selected_count": 1,
+            },
+            "oracle_positive": {
+                "utility": 10.0,
+                "negative": False,
+                "strict_negative": False,
+                "selected_mass": 0.5,
+                "selected_count": 1,
+            },
+        },
+    }
+    # Fill deployable action aliases required by baseline grid evaluation.
+    for action in policy_grid.DEPLOYABLE_ACTIONS:
+        feature_row["actions"].setdefault(action, feature_row["actions"]["token_weighted"])
+    rules = policy_grid.candidate_rules([feature_row], ["probe_grad_dot"])
+    assert all("oracle" not in rule.name and "random" not in rule.name for rule in rules)
+    drop = policy_grid.Rule(
+        "drop",
+        "drop25_if_spread",
+        "probe_grad_dot",
+        {"spread": 0.1},
+    )
+    assert policy_grid.decide(drop, feature_row) == "anchor_drop_bottom25"
