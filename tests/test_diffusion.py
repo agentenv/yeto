@@ -70,10 +70,33 @@ def _args(**over):
 
 
 def test_diffusion_aliases_resolve_and_infer_kind():
-    assert {"wan22", "ltx-video", "flux", "sd35", "nava"} <= set(DIFFUSION_MODEL_ALIASES)
+    assert {
+        "chroma1-base",
+        "chroma1-hd",
+        "flux",
+        "flux-schnell",
+        "flux2-dev",
+        "hidream-i1-dev",
+        "hidream-i1-full",
+        "hunyuan-video",
+        "ideogram4",
+        "ltx-video",
+        "ltx2-video",
+        "motif-video",
+        "nava",
+        "qwen-image",
+        "qwen-image-2512",
+        "sd35",
+        "wan22",
+    } <= set(DIFFUSION_MODEL_ALIASES)
     assert resolve("sd35") == DIFFUSION_MODEL_ALIASES["sd35"]
+    assert resolve("ideogram4") == "ideogram-ai/ideogram-v4"
+    assert resolve("qwen-image") == "Qwen/Qwen-Image"
+    assert resolve("hunyuan-video") == "hunyuanvideo-community/HunyuanVideo"
     assert resolve("nava") == "baidu/NAVA"
     assert resolve_model_kind("flux") == "diffusion"
+    assert resolve_model_kind("ideogram4") == "diffusion"
+    assert resolve_model_kind("qwen-image") == "diffusion"
     assert resolve_model_kind("org/custom", "diffusion") == "diffusion"
     assert resolve_model_kind("org/custom") == "causal-lm"
 

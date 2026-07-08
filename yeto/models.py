@@ -107,8 +107,20 @@ MODEL_ALIASES = {
 
 DIFFUSION_MODEL_ALIASES = {
     "flux": "black-forest-labs/FLUX.1-dev",
+    "flux-schnell": "black-forest-labs/FLUX.1-schnell",
+    "flux2-dev": "black-forest-labs/FLUX.2-dev",
+    "chroma1-base": "lodestones/Chroma1-Base",
+    "chroma1-hd": "lodestones/Chroma1-HD",
+    "hidream-i1-dev": "HiDream-ai/HiDream-I1-Dev",
+    "hidream-i1-full": "HiDream-ai/HiDream-I1-Full",
+    "ideogram4": "ideogram-ai/ideogram-v4",
+    "qwen-image": "Qwen/Qwen-Image",
+    "qwen-image-2512": "Qwen/Qwen-Image-2512",
     "sd35": "stabilityai/stable-diffusion-3.5-large",
     "ltx-video": "Lightricks/LTX-Video",
+    "ltx2-video": "Lightricks/LTX-2",
+    "hunyuan-video": "hunyuanvideo-community/HunyuanVideo",
+    "motif-video": "Motif-Technologies/Motif-Video-2B",
     "wan22": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
     "nava": "baidu/NAVA",
 }
