@@ -18,6 +18,7 @@ from typing import Any
 
 import torch
 
+from .base import DiffusionAdapter
 from ..learner import diffusion_torch_dtype
 from ...models import resolve
 
@@ -202,7 +203,7 @@ def _latent_channels(pipe, name: str, default: int) -> int:
     )
 
 
-class NavaAdapter:
+class NavaAdapter(DiffusionAdapter):
     def __init__(
         self,
         *,

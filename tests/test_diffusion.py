@@ -132,6 +132,46 @@ def test_diffusion_lora_targets_are_generic_dit_names():
     assert learner.resolve_lora_targets("all-linear", "sd35") == "all-linear"
 
 
+def test_diffusion_adapter_base_is_marker_not_hook_provider():
+    pytest.importorskip("torch")
+    from yeto.diffusion.adapters import DiffusionAdapter, DiffusionAdapterProtocol
+    from yeto.diffusion.adapters.nava import NavaAdapter
+
+    marker = DiffusionAdapter()
+    assert not hasattr(marker, "load_pipeline")
+    assert not hasattr(marker, "training_step")
+    assert hasattr(DiffusionAdapterProtocol, "load_pipeline")
+    assert issubclass(NavaAdapter, DiffusionAdapter)
+
+
+def test_diffusion_adapter_template_loads():
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+    from yeto.diffusion.adapters.base import DiffusionAdapter
+    from yeto.diffusion.adapters import template
+
+    adapter = learner.load_diffusion_adapter("yeto.diffusion.adapters.template:make_adapter")
+
+    assert isinstance(adapter, DiffusionAdapter)
+    assert hasattr(adapter, "training_step")
+    assert not hasattr(adapter, "save_adapters")
+
+    load_only = template.make_adapter(mode="load-only")
+    assert hasattr(load_only, "load_pipeline")
+    assert not hasattr(load_only, "training_step")
+    assert not hasattr(load_only, "encode_latents")
+
+    encoding = template.make_adapter(mode="encoding")
+    assert hasattr(encoding, "encode_latents")
+    assert hasattr(encoding, "encode_prompt_embeds")
+    assert not hasattr(encoding, "training_step")
+
+    sampling = template.make_adapter(mode="sampling")
+    assert hasattr(sampling, "save_adapters")
+    assert hasattr(sampling, "load_sample_pipeline")
+    assert hasattr(sampling, "sample")
+
+
 def test_diffusion_dtype_matches_cuda_bf16_support(monkeypatch):
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
