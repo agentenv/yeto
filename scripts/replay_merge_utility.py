@@ -8,6 +8,7 @@ import importlib.util
 import json
 import math
 import random
+import re
 import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -105,6 +106,8 @@ def _candidate_weight(candidate: CandidateEval, mode: str) -> float:
     base = float(candidate.row.get("weight", candidate.row.get("c_tokens", 1.0)))
     if mode == "token":
         return base
+    if mode == "uniform":
+        return 1.0
     if mode == "freshness":
         return base * max(candidate.freshness, 0.0)
     if mode == "hand":
@@ -184,6 +187,67 @@ def _policy_result(
     }
 
 
+def _random_policy_result(
+    *,
+    name: str,
+    candidates: list[CandidateEval],
+    selected_count: int,
+    mode: str,
+    trials: int,
+    rng: random.Random,
+    current_flat: torch.Tensor,
+    outer_lr: float,
+    model,
+    batches,
+    compute_loss,
+    frag,
+    params,
+    base_loss: float,
+    base_by_batch: list[float],
+    device,
+) -> dict:
+    selected_count = max(0, min(len(candidates), selected_count))
+    utilities = []
+    strict_values = []
+    if trials <= 0:
+        trials = 1
+    for _ in range(trials):
+        selected = rng.sample(candidates, selected_count) if selected_count else []
+        result = _policy_result(
+            name=name,
+            selected=selected,
+            current_flat=current_flat,
+            mode=mode,
+            outer_lr=outer_lr,
+            model=model,
+            batches=batches,
+            compute_loss=compute_loss,
+            frag=frag,
+            params=params,
+            base_loss=base_loss,
+            base_by_batch=base_by_batch,
+            device=device,
+        )
+        utilities.append(float(result[f"{name}_utility"]))
+        strict_values.append(result[f"{name}_strict_negative"])
+    mean = sum(utilities) / len(utilities)
+    var = sum((u - mean) ** 2 for u in utilities) / len(utilities)
+    strict_known = [v for v in strict_values if v is not None]
+    strict_rate = (
+        sum(1 for v in strict_known if v) / len(strict_known) if strict_known else None
+    )
+    return {
+        f"{name}_utility": mean,
+        f"{name}_utility_mean": mean,
+        f"{name}_utility_std": math.sqrt(var),
+        f"{name}_negative": mean < 0.0,
+        f"{name}_strict_negative": None if strict_rate is None else strict_rate > 0.5,
+        f"{name}_strict_negative_rate": strict_rate,
+        f"{name}_selected_count": selected_count,
+        f"{name}_trials": trials,
+    }
+
+
 def _topk_count(n: int, explicit: int | None, frac: float) -> int:
     if n <= 0:
         return 0
@@ -210,18 +274,49 @@ def _jsonable(value):
     return value
 
 
+def _infer_seed(*paths: Path | None) -> int | None:
+    for path in paths:
+        if path is None:
+            continue
+        match = re.search(r"seed(\d+)", str(path))
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _record_key(record: dict) -> tuple[str, int, int]:
+    return (
+        str(record.get("state_checkpoint", "")),
+        int(record["step"]),
+        int(record["fragment"]),
+    )
+
+
+def _read_existing_records(path: Path | None) -> list[dict]:
+    if path is None or not path.exists():
+        return []
+    rows = []
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
 def summarize(records: list[dict]) -> dict:
     if not records:
         raise SystemExit("no replay records")
     policies = [
         "token_weighted",
+        "uniform",
         "freshness_weighted",
         "hand_score_weighted",
         "oracle_positive",
         "oracle_topk",
         "oracle_drop_strict_bad",
         "random_positive_count",
-        "random_drop_strict_bad_count",
+        "random_drop_strict_count",
     ]
     policy_summary = {}
     for policy in policies:
@@ -261,8 +356,19 @@ def summarize(records: list[dict]) -> dict:
             for r in records
         ],
     }
+    random_headrooms = {
+        "random_positive_count_minus_token": [
+            float(r["random_positive_count_utility"]) - float(r["token_weighted_utility"])
+            for r in records
+        ],
+        "random_drop_strict_count_minus_token": [
+            float(r["random_drop_strict_count_utility"]) - float(r["token_weighted_utility"])
+            for r in records
+        ],
+    }
     return {
         "records": len(records),
+        "seeds": sorted({int(r["seed"]) for r in records if r.get("seed") is not None}),
         "candidate_count_mean": sum(float(r["candidate_count"]) for r in records) / len(records),
         "individual_bad_rate_mean": sum(float(r["individual_bad_rate"]) for r in records)
         / len(records),
@@ -286,6 +392,16 @@ def summarize(records: list[dict]) -> dict:
             }
             for name, values in headrooms.items()
         },
+        "random_headroom": {
+            name: {
+                "mean": sum(values) / len(values),
+                "p05": _quantile(values, 0.05),
+                "p50": _quantile(values, 0.50),
+                "p95": _quantile(values, 0.95),
+                "positive_rate": sum(1 for v in values if v > 0.0) / len(values),
+            }
+            for name, values in random_headrooms.items()
+        },
     }
 
 
@@ -300,6 +416,12 @@ def replay(args) -> list[dict]:
         rng = random.Random(args.sample_seed)
         groups = rng.sample(groups, args.max_groups)
         groups.sort(key=lambda g: (int(g[0]["step"]), int(g[0]["fragment"])))
+    if getattr(args, "_skip_keys", None):
+        groups = [group for group in groups if _record_key({
+            "state_checkpoint": group[0]["state_checkpoint"],
+            "step": group[0]["step"],
+            "fragment": group[0]["fragment"],
+        }) not in args._skip_keys]
 
     device = torch.device(args.device)
     learner_args = argparse.Namespace(
@@ -330,7 +452,8 @@ def replay(args) -> list[dict]:
 
     was_training = model.training
     try:
-        for group in groups:
+        total_groups = len(groups)
+        for idx, group in enumerate(groups, start=1):
             first = group[0]
             state_path = _resolve(root, first["state_checkpoint"])
             if current_state_path != state_path:
@@ -422,6 +545,7 @@ def replay(args) -> list[dict]:
 
             out = {
                 "schema": "merge_utility_replay_v1",
+                "seed": args.seed,
                 "step": int(first["step"]),
                 "syncer_global_step": int(first["syncer_global_step"]),
                 "fragment": fid,
@@ -447,13 +571,12 @@ def replay(args) -> list[dict]:
             }
             policies = [
                 ("token_weighted", candidates, "token"),
+                ("uniform", candidates, "uniform"),
                 ("freshness_weighted", candidates, "freshness"),
                 ("hand_score_weighted", candidates, "hand"),
                 ("oracle_positive", positive, "token"),
                 ("oracle_topk", topk, "token"),
                 ("oracle_drop_strict_bad", not_strict_bad, "token"),
-                ("random_positive_count", random_positive, "token"),
-                ("random_drop_strict_bad_count", random_not_strict, "token"),
             ]
             for name, selected, mode in policies:
                 out.update(
@@ -473,7 +596,70 @@ def replay(args) -> list[dict]:
                         device=device,
                     )
                 )
+            out.update(
+                _random_policy_result(
+                    name="random_positive_count",
+                    candidates=candidates,
+                    selected_count=len(random_positive),
+                    mode="token",
+                    trials=args.random_trials,
+                    rng=rng,
+                    current_flat=current_flat,
+                    outer_lr=args.probe_outer_lr,
+                    model=model,
+                    batches=batches,
+                    compute_loss=compute_loss,
+                    frag=frag,
+                    params=params,
+                    base_loss=current_base_loss,
+                    base_by_batch=current_base_by_batch,
+                    device=device,
+                )
+            )
+            out.update(
+                _random_policy_result(
+                    name="random_drop_strict_count",
+                    candidates=candidates,
+                    selected_count=len(random_not_strict),
+                    mode="token",
+                    trials=args.random_trials,
+                    rng=rng,
+                    current_flat=current_flat,
+                    outer_lr=args.probe_outer_lr,
+                    model=model,
+                    batches=batches,
+                    compute_loss=compute_loss,
+                    frag=frag,
+                    params=params,
+                    base_loss=current_base_loss,
+                    base_by_batch=current_base_by_batch,
+                    device=device,
+                )
+            )
+            out["oracle_positive_headroom"] = (
+                float(out["oracle_positive_utility"]) - float(out["token_weighted_utility"])
+            )
+            out["oracle_topk_headroom"] = (
+                float(out["oracle_topk_utility"]) - float(out["token_weighted_utility"])
+            )
+            out["oracle_drop_strict_bad_headroom"] = (
+                float(out["oracle_drop_strict_bad_utility"])
+                - float(out["token_weighted_utility"])
+            )
             records.append(out)
+            sink = getattr(args, "_record_sink", None)
+            if sink is not None:
+                sink.write(json.dumps(_jsonable(out), sort_keys=True, allow_nan=False) + "\n")
+                sink.flush()
+            if args.progress_every and (
+                idx == 1 or idx % args.progress_every == 0 or idx == total_groups
+            ):
+                print(
+                    f"[replay] {idx}/{total_groups} groups "
+                    f"step={out['step']} fragment={out['fragment']}",
+                    file=sys.stderr,
+                    flush=True,
+                )
     finally:
         model.train(was_training)
     return records
@@ -501,13 +687,18 @@ def parse_args(argv=None):
     p.add_argument("--probe-max-rows", type=int, default=256)
     p.add_argument("--probe-outer-lr", type=float, default=1.0)
     p.add_argument("--probe-freshness-scale", type=float, default=24.0)
+    p.add_argument("--all-groups", action="store_true", help="process every complete group")
     p.add_argument("--max-groups", type=int, default=None)
     p.add_argument("--min-candidates", type=int, default=1)
     p.add_argument("--sample-seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=None)
     p.add_argument("--oracle-topk", type=int, default=None)
     p.add_argument("--oracle-topk-frac", type=float, default=0.5)
-    p.add_argument("--out", type=Path, default=None)
-    p.add_argument("--summary-out", type=Path, default=None)
+    p.add_argument("--random-trials", type=int, default=1)
+    p.add_argument("--resume", action="store_true")
+    p.add_argument("--progress-every", type=int, default=0)
+    p.add_argument("--out", "--out-jsonl", dest="out", type=Path, default=None)
+    p.add_argument("--summary-out", "--out-summary", dest="summary_out", type=Path, default=None)
     return p.parse_args(argv)
 
 
@@ -516,12 +707,16 @@ def main(argv=None) -> int:
     root = args.capture_dir or args.index.parent
     out = args.out or root / "merge_utility_replay.jsonl"
     summary_out = args.summary_out or root / "merge_utility_summary.json"
-    records = replay(args)
+    args.seed = args.seed if args.seed is not None else _infer_seed(root, args.data, out)
+    existing = _read_existing_records(out) if args.resume else []
+    args._skip_keys = {_record_key(r) for r in existing}
     out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("w") as f:
-        for record in records:
-            f.write(json.dumps(_jsonable(record), sort_keys=True, allow_nan=False) + "\n")
-    summary = summarize(records)
+    mode = "a" if args.resume and existing else "w"
+    with out.open(mode) as f:
+        args._record_sink = f
+        records = replay(args)
+    all_records = existing + records
+    summary = summarize(all_records)
     text = json.dumps(_jsonable(summary), indent=2, sort_keys=True, allow_nan=False) + "\n"
     summary_out.write_text(text)
     print(text, end="")
