@@ -218,6 +218,18 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     diffusion.add_argument("--width", type=int, default=None, help="diffusion image/video width override")
     diffusion.add_argument("--num-frames", type=int, default=None, help="diffusion video frame count for bucketed datasets")
     diffusion.add_argument("--bucket-by-shape", action="store_true", help="diffusion only: batch rows by (frames, height, width)")
+    diffusion.add_argument(
+        "--diffusion-loss-weighting",
+        choices=["none", "linear", "sigma", "snr", "min-snr"],
+        default="none",
+        help="diffusion only: optional timestep weighting for flow-matching MSE",
+    )
+    diffusion.add_argument(
+        "--diffusion-min-snr-gamma",
+        type=float,
+        default=5.0,
+        help="diffusion only: gamma for --diffusion-loss-weighting min-snr",
+    )
 
     sync = p.add_argument_group("async sync")
     sync.add_argument("--total-steps", type=int, default=64, help="outer steps T (one fragment each)")

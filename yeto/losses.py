@@ -70,6 +70,7 @@ def flow_matching_loss(
     model_output: torch.Tensor,
     target: torch.Tensor,
     timestep: torch.Tensor,
+    weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Rectified-flow diffusion loss: MSE against the velocity target.
 
@@ -78,6 +79,12 @@ def flow_matching_loss(
     """
     del timestep
     per_elem = (model_output.float() - target.float()).pow(2)
+    if weights is not None:
+        weights = weights.to(device=per_elem.device, dtype=per_elem.dtype)
+        while weights.ndim < per_elem.ndim:
+            weights = weights.view(*weights.shape, *([1] * (per_elem.ndim - weights.ndim)))
+        per_elem = per_elem * weights
+        return per_elem.sum(), weights.expand_as(per_elem).sum().clamp(min=1)
     loss = per_elem.sum()
     return loss, torch.tensor(per_elem.numel(), device=per_elem.device)
 

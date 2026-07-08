@@ -214,6 +214,12 @@ def parse_args(argv=None):
     p.add_argument("--max-rows", type=int, default=None)
     p.add_argument("--max-local-steps", type=int, default=1_000_000)
     p.add_argument("--stream-workers", type=int, default=2)
+    p.add_argument(
+        "--diffusion-loss-weighting",
+        choices=["none", "linear", "sigma", "snr", "min-snr"],
+        default="none",
+    )
+    p.add_argument("--diffusion-min-snr-gamma", type=float, default=5.0)
     p.add_argument("--cache-latents", action="store_true", default=False)
     p.add_argument("--cache-text-embeds", action="store_true", default=False)
     p.add_argument("--image-column", default="image")
@@ -1410,6 +1416,50 @@ def _scale_model_input(scheduler, noisy: torch.Tensor, timesteps: torch.Tensor) 
     )
 
 
+def _scheduler_sigmas_for_timesteps(scheduler, timesteps: torch.Tensor, dtype) -> torch.Tensor | None:
+    sigmas = _scheduler_tensor(getattr(scheduler, "sigmas", None), timesteps.device, dtype)
+    if sigmas is None:
+        return None
+    scheduler_timesteps = _scheduler_tensor(getattr(scheduler, "timesteps", None), timesteps.device)
+    indices = None
+    if scheduler_timesteps is not None:
+        matches = scheduler_timesteps.reshape(1, -1) == timesteps.reshape(-1, 1)
+        if bool(matches.any(dim=1).all()):
+            indices = matches.float().argmax(dim=1).long()
+    if indices is None and not torch.is_floating_point(timesteps):
+        indices = timesteps.long()
+    if indices is None:
+        return None
+    return sigmas[indices.clamp(min=0, max=sigmas.numel() - 1)]
+
+
+def diffusion_loss_weights(pipe, timesteps: torch.Tensor, target: torch.Tensor, args) -> torch.Tensor | None:
+    scheme = getattr(args, "diffusion_loss_weighting", "none")
+    if scheme in (None, "none"):
+        return None
+    timesteps_f = timesteps.to(device=target.device, dtype=torch.float32)
+    if scheme == "linear":
+        denom = max(1, _num_train_timesteps(getattr(pipe, "scheduler", None)))
+        return (timesteps_f / float(denom)).clamp(min=1e-3)
+
+    scheduler = getattr(pipe, "scheduler", None)
+    sigmas = _scheduler_sigmas_for_timesteps(scheduler, timesteps, torch.float32) if scheduler is not None else None
+    if sigmas is None:
+        raise RuntimeError(
+            f"--diffusion-loss-weighting {scheme} needs scheduler.sigmas aligned with timesteps"
+        )
+    sigmas = sigmas.to(device=target.device, dtype=torch.float32).clamp(min=1e-6)
+    if scheme == "sigma":
+        return sigmas.square()
+    snr = sigmas.reciprocal().square()
+    if scheme == "snr":
+        return snr
+    if scheme == "min-snr":
+        gamma = float(getattr(args, "diffusion_min_snr_gamma", 5.0))
+        return torch.minimum(snr, torch.full_like(snr, gamma)) / snr.clamp(min=1e-6)
+    raise ValueError(f"unknown --diffusion-loss-weighting {scheme!r}")
+
+
 def add_noise_and_target(pipe, batch: LatentBatch):
     latents = batch.latents
     scheduler = getattr(pipe, "scheduler", None)
@@ -1752,7 +1802,8 @@ def compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0, adapt
     pred = denoise_forward(pipe, noisy, timesteps, cond, args, adapter)
     if args.loss_function != "flow_matching":
         raise ValueError("diffusion learner currently supports --loss-function flow_matching")
-    return flow_matching_loss(pred, target, timesteps)
+    weights = diffusion_loss_weights(pipe, timesteps, target, args)
+    return flow_matching_loss(pred, target, timesteps, weights)
 
 
 def _probe_diffusion_once(pipe, params, opt, rows, args, device, micro_batch: int, adapter=None) -> None:
@@ -1866,6 +1917,11 @@ def diffusion_adapter_metadata(
         "trainable_modules": modules,
         "cache": _cache_flags(args),
         "columns": _cache_columns(args),
+        "loss": {
+            "function": getattr(args, "loss_function", None),
+            "weighting": getattr(args, "diffusion_loss_weighting", "none"),
+            "min_snr_gamma": getattr(args, "diffusion_min_snr_gamma", None),
+        },
     }
     if getattr(args, "tuning", None) == "lora":
         meta["lora"] = {

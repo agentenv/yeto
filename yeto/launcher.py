@@ -526,6 +526,9 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             learner_flags += " --cache-text-embeds"
         if getattr(args, "bucket_by_shape", False):
             learner_flags += " --bucket-by-shape"
+        if getattr(args, "diffusion_loss_weighting", "none") != "none":
+            learner_flags += f" --diffusion-loss-weighting {args.diffusion_loss_weighting}"
+            learner_flags += f" --diffusion-min-snr-gamma {args.diffusion_min_snr_gamma}"
         if args.height:
             learner_flags += f" --height {args.height}"
         if args.width:

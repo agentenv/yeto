@@ -64,6 +64,8 @@ def _args(**over):
         width=None,
         num_frames=None,
         bucket_by_shape=False,
+        diffusion_loss_weighting="none",
+        diffusion_min_snr_gamma=5.0,
     )
     base.update(over)
     return argparse.Namespace(**base)
@@ -116,6 +118,8 @@ def test_diffusion_learner_parse_cache_defaults_are_off():
     assert args.cache_text_embeds is False
     assert args.diffusion_adapter is None
     assert args.loss_function == "flow_matching"
+    assert args.diffusion_loss_weighting == "none"
+    assert args.diffusion_min_snr_gamma == 5.0
 
 
 def test_diffusion_lora_targets_are_generic_dit_names():
@@ -152,6 +156,68 @@ def test_flow_matching_loss_counts_elements():
     loss, denom = flow_matching_loss(pred, target, torch.tensor([1, 2]))
     assert loss == 6
     assert denom == 6
+
+
+def test_flow_matching_loss_applies_optional_weights():
+    torch = pytest.importorskip("torch")
+    from yeto.losses import flow_matching_loss
+
+    pred = torch.zeros(2, 3)
+    target = torch.ones(2, 3)
+    loss, denom = flow_matching_loss(pred, target, torch.tensor([1, 2]), torch.tensor([1.0, 2.0]))
+
+    assert loss == 9
+    assert denom == 9
+
+
+def test_diffusion_loss_weights_use_scheduler_sigmas():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyScheduler:
+        class config:
+            num_train_timesteps = 4
+
+        sigmas = torch.tensor([1.0, 0.5])
+        timesteps = torch.tensor([10.0, 20.0])
+
+    pipe = argparse.Namespace(scheduler=TinyScheduler())
+    timesteps = torch.tensor([10.0, 20.0])
+    target = torch.zeros(2, 1)
+
+    assert learner.diffusion_loss_weights(pipe, timesteps, target, _args()) is None
+    sigma = learner.diffusion_loss_weights(
+        pipe,
+        timesteps,
+        target,
+        _args(diffusion_loss_weighting="sigma"),
+    )
+    assert torch.allclose(sigma, torch.tensor([1.0, 0.25]))
+    min_snr = learner.diffusion_loss_weights(
+        pipe,
+        timesteps,
+        target,
+        _args(diffusion_loss_weighting="min-snr", diffusion_min_snr_gamma=2.0),
+    )
+    assert torch.allclose(min_snr, torch.tensor([1.0, 0.5]))
+
+
+def test_diffusion_loss_weights_linear_uses_normalized_timesteps():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyScheduler:
+        class config:
+            num_train_timesteps = 4
+
+    weights = learner.diffusion_loss_weights(
+        argparse.Namespace(scheduler=TinyScheduler()),
+        torch.tensor([1, 2]),
+        torch.zeros(2, 1),
+        _args(diffusion_loss_weighting="linear"),
+    )
+
+    assert torch.allclose(weights, torch.tensor([0.25, 0.5]))
 
 
 def test_add_noise_uses_scheduler_timesteps_sigmas_and_scale_model_input(monkeypatch):
@@ -738,6 +804,7 @@ def test_tiny_diffusion_learner_smoke_cached_manifest(tmp_path):
     assert meta["kind"] == "yeto.diffusion.adapter"
     assert meta["model"] == "tiny"
     assert meta["cache"] == {"latents": True, "text_embeds": True}
+    assert meta["loss"] == {"function": "flow_matching", "weighting": "none", "min_snr_gamma": 5.0}
     assert meta["trainable_modules"] == ["transformer"]
     assert meta["trainable_tensor_count"] == len(state)
 
@@ -1554,9 +1621,32 @@ def test_launcher_routes_diffusion_to_diffusion_learner_and_opt_in_caches():
     assert "--cache-latents" in task.run and "--cache-text-embeds" in task.run
     assert "--height 512" in task.run and "--width 512" in task.run
     assert "diffusers" in task.setup
+    assert "--diffusion-loss-weighting" not in task.run
     assert "--diffusion-family" not in task.run
     assert "--train-on" not in task.run and "--seq-len" not in task.run
     assert "--tokenize" not in task.run
+
+
+def test_launcher_passes_diffusion_loss_weighting_only_for_diffusion():
+    task = make_learner_task(
+        _args(diffusion_loss_weighting="min-snr", diffusion_min_snr_gamma=3.0),
+        _SPEC,
+        0,
+        1,
+        "a:1",
+    )
+    assert "--diffusion-loss-weighting min-snr" in task.run
+    assert "--diffusion-min-snr-gamma 3.0" in task.run
+    assert "--train-on" not in task.run
+    lm_task = make_learner_task(
+        _args(model="gemma4", diffusion_loss_weighting="min-snr"),
+        _SPEC,
+        0,
+        1,
+        "a:1",
+    )
+    assert "--diffusion-loss-weighting" not in lm_task.run
+    assert "--train-on assistant" in lm_task.run
 
 
 def test_launcher_routes_video_aliases_without_model_family_flags():
