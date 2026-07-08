@@ -132,6 +132,19 @@ def test_diffusion_lora_targets_are_generic_dit_names():
     assert learner.resolve_lora_targets("all-linear", "sd35") == "all-linear"
 
 
+def test_diffusion_trainable_modules_skip_none_placeholders():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    pipe = SimpleNamespace(
+        transformer=torch.nn.Linear(2, 2),
+        transformer_2=None,
+        unet="not a module",
+    )
+
+    assert learner._trainable_module_items(pipe) == [("transformer", pipe.transformer)]
+
+
 def test_diffusion_adapter_base_is_marker_not_hook_provider():
     pytest.importorskip("torch")
     from yeto.diffusion.adapters import DiffusionAdapter, DiffusionAdapterProtocol
@@ -1643,6 +1656,23 @@ def test_packed_sequence_conditioning_patchifies_image_latents():
         .reshape(1, 4, 8)
     )
     assert torch.equal(aligned.latents[:, 3:], expected_tokens)
+
+
+def test_text_only_conditioning_does_not_patchify_video_latents():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        config = SimpleNamespace(in_channels=32, patch_size=(1, 2, 2))
+
+    pipe = SimpleNamespace(transformer=TinyDenoiser())
+    latents = learner.LatentBatch(torch.zeros(1, 8, 3, 8, 8))
+    cond = learner.TextConditioning(torch.zeros(1, 5, 16))
+
+    aligned, mask = learner._align_latents_to_conditioning_sequence(pipe, latents, cond)
+
+    assert aligned is latents
+    assert mask is None
 
 
 def test_denoise_forward_inspects_wrapped_base_model_signature():

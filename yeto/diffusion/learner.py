@@ -308,7 +308,11 @@ def load_diffusion_adapter(spec: str | None):
 def _trainable_module_items(pipe, adapter=None) -> list[tuple[str, torch.nn.Module]]:
     if adapter is not None and hasattr(adapter, "trainable_module_items"):
         return list(adapter.trainable_module_items(pipe))
-    return [(name, getattr(pipe, name)) for name in _TRAINABLE_ATTRS if hasattr(pipe, name)]
+    return [
+        (name, module)
+        for name in _TRAINABLE_ATTRS
+        if isinstance((module := getattr(pipe, name, None)), torch.nn.Module)
+    ]
 
 
 def _freeze_modules(pipe) -> None:
@@ -1044,10 +1048,8 @@ def _align_latents_to_conditioning_sequence(
         return latents, None
     batch_size, image_tokens, token_dim = tokens.shape
     seq_len = int(prompt_embeds.shape[1])
-    if int(prompt_embeds.shape[0]) != batch_size or seq_len < image_tokens:
-        return LatentBatch(tokens, latents.latent_num_frames, latents.latent_height, latents.latent_width), None
-    if seq_len == image_tokens:
-        return LatentBatch(tokens, latents.latent_num_frames, latents.latent_height, latents.latent_width), None
+    if int(prompt_embeds.shape[0]) != batch_size or seq_len <= image_tokens:
+        return latents, None
 
     mask = _image_token_mask_from_conditioning(
         cond,
