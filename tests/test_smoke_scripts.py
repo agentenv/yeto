@@ -21,6 +21,7 @@ smoke = _load("smoke_models")
 compare = _load("compare_diloco")
 calibrate = _load("calibrate_fragment_score")
 replay_merge = _load("replay_merge_utility")
+group_local = _load("replay_group_local_probecommit")
 
 
 def test_every_alias_has_a_tier():
@@ -327,3 +328,103 @@ def test_replay_merge_summary_reports_headroom():
         ]
     )
     assert [[r["learner_id"] for r in group] for group in groups] == [[0, 1], [1]]
+
+
+def test_group_local_tuner_excludes_oracle_actions():
+    def candidate(seed, step, fragment, learner, score, utility):
+        return {
+            "seed": seed,
+            "pull_step": step,
+            "fragment": fragment,
+            "learner_id": learner,
+            "probe_grad_dot": score,
+            "calibrated_score": score,
+            "freshness": 1.0,
+            "combined_score": score,
+            "utility": utility,
+            "bad": utility < 0,
+            "bad_strict": utility < -0.001,
+            "weight": 1.0,
+        }
+
+    feature_groups = []
+    policy_groups = []
+    for seed in [1, 2, 3]:
+        for step in range(4):
+            rows = [
+                candidate(seed, step, 0, 0, 0.9, 0.02),
+                candidate(seed, step, 0, 1, 0.1, -0.01),
+            ]
+            stats = {"probe_grad_dot": group_local.group_stats(rows, "probe_grad_dot")}
+            replay = {
+                "token_weighted_utility": 0.0,
+                "token_weighted_negative": False,
+                "token_weighted_strict_negative": False,
+                "token_weighted_selected_mass": 1.0,
+                "token_weighted_selected_count": 2,
+                "freshness_weighted_utility": 0.0,
+                "freshness_weighted_negative": False,
+                "freshness_weighted_strict_negative": False,
+                "freshness_weighted_selected_mass": 1.0,
+                "freshness_weighted_selected_count": 2,
+                "anchor_drop_bottom25_utility": 0.01,
+                "anchor_drop_bottom25_negative": False,
+                "anchor_drop_bottom25_strict_negative": False,
+                "anchor_drop_bottom25_selected_mass": 0.5,
+                "anchor_drop_bottom25_selected_count": 1,
+                "anchor_positive_threshold_utility": 0.01,
+                "anchor_positive_threshold_negative": False,
+                "anchor_positive_threshold_strict_negative": False,
+                "anchor_positive_threshold_selected_mass": 0.5,
+                "anchor_positive_threshold_selected_count": 1,
+                "anchor_shrink_utility": 0.0,
+                "anchor_shrink_negative": False,
+                "anchor_shrink_strict_negative": False,
+                "anchor_shrink_selected_mass": 1.0,
+                "anchor_shrink_selected_count": 2,
+                "probecommit_v1_utility": 0.01,
+                "probecommit_v1_negative": False,
+                "probecommit_v1_strict_negative": False,
+                "probecommit_v1_selected_mass": 0.5,
+                "probecommit_v1_selected_count": 1,
+                # Oracle is deliberately much better. The tuner must not select it.
+                "oracle_positive_utility": 10.0,
+                "oracle_positive_negative": False,
+                "oracle_positive_strict_negative": False,
+                "oracle_positive_selected_mass": 0.5,
+                "oracle_positive_selected_count": 1,
+                "oracle_topk_utility": 10.0,
+                "oracle_topk_negative": False,
+                "oracle_topk_strict_negative": False,
+                "oracle_topk_selected_mass": 0.5,
+                "oracle_topk_selected_count": 1,
+                "random_probecommit_count_utility": 0.0,
+                "random_probecommit_count_negative": False,
+                "random_probecommit_count_strict_negative": False,
+                "random_probecommit_count_selected_mass": 0.5,
+                "random_probecommit_count_selected_count": 1,
+            }
+            feature_groups.append(
+                {
+                    "seed": seed,
+                    "step": step,
+                    "fragment": 0,
+                    "candidate_count": 2,
+                    "candidates": rows,
+                    "stats": stats,
+                    "replay": replay,
+                }
+            )
+            policy_groups.append(replay)
+
+    rules = group_local.candidate_rules(feature_groups, ["probe_grad_dot"])
+    assert all("oracle" not in rule.name and "random" not in rule.name for rule in rules)
+    result = group_local.heldout_seed_replay(
+        feature_groups,
+        ["probe_grad_dot"],
+        negative_penalty=0.0,
+        strict_penalty=0.0,
+    )
+    selected = [split["test_result"]["actions"] for split in result["splits"]]
+    assert all("oracle_positive" not in actions for actions in selected)
+    assert result["aggregate"]["mean_gain_vs_token"] == 0.01

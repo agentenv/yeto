@@ -353,6 +353,37 @@ Concrete next offline actions:
 5. Test abstain/wait policies that avoid acting when group-local score separation is weak.
 6. Increase anchor diversity or use multiple small anchor batches to reduce sensitivity to the 64-row anchor split.
 
+## EXP2.6 Follow-Up
+
+EXP2.6 implemented the first group-local offline replay over the existing EXP2.5 artifacts. It joins calibrated candidate records with exact policy replay rows, tunes abstain/drop/shrink rules on train seeds, and evaluates the selected rule on the held-out seed.
+
+Result: still no-go for online ProbeCommit.
+
+| Metric | EXP2.6 value |
+|---|---:|
+| Joined complete groups | 614 |
+| Mean test utility gain vs token-weighted | 0.000114 |
+| All held-out seeds positive gain | true |
+| Negative-rate relative drop | 0.044 |
+| Strict-negative relative drop | 0.125 |
+| Oracle-positive headroom captured | -0.256 |
+| Selected mass | 0.882 |
+| Gate pass | false |
+
+The key finding is unchanged but sharper: group-local confidence rules produce small positive utility gains, but they do not recover oracle headroom and they do not reduce negative merges enough. The current score is still too weak under the syncer decision geometry.
+
+Full report:
+
+```text
+docs/EXP2_6.md
+```
+
+New script:
+
+```text
+scripts/replay_group_local_probecommit.py
+```
+
 ## Known Limitations
 
 - The capture cadence produced only 195 to 211 complete groups per seed. This is a full replay of the available captures, but it is not enough for the preferred group-count gate.
