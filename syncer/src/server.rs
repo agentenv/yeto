@@ -74,6 +74,12 @@ pub struct Config {
     pub resume: bool,
     /// JSONL event tape: one record per merge.
     pub event_tape: Option<std::path::PathBuf>,
+    /// Optional offline probe capture directory. When enabled, complete_round
+    /// writes a pre-merge syncer checkpoint and admitted candidate fragment
+    /// tensors before applying the outer step.
+    pub probe_capture_dir: Option<std::path::PathBuf>,
+    /// Capture every Nth outer step. 0 disables capture.
+    pub probe_capture_every: u64,
 }
 
 struct OutFrame {
@@ -582,10 +588,7 @@ async fn scheduler(
     let mut inflight: Vec<Round> = Vec::new();
     while next_t <= cfg.total_steps || !inflight.is_empty() {
         // Keep the pipeline full (throttled by min_round_interval_ms).
-        while inflight.len() < depth
-            && next_t <= cfg.total_steps
-            && Instant::now() >= next_launch
-        {
+        while inflight.len() < depth && next_t <= cfg.total_steps && Instant::now() >= next_launch {
             next_launch = Instant::now()
                 + launch_interval(
                     manual_floor,
@@ -783,6 +786,7 @@ async fn complete_round(
             }
         }
     }
+    capture_round_candidates(cfg, st, p, t, prev_version, &pushes)?;
     let (mut learners, mut weights, mut ids) = (Vec::new(), Vec::new(), Vec::new());
     for (id, push) in &pushes {
         if push.base_version < prev_version {
@@ -841,6 +845,126 @@ async fn complete_round(
             info!(step = t, path = %path.display(), "checkpoint written");
         }
     }
+    Ok(())
+}
+
+fn capture_round_candidates(
+    cfg: &Config,
+    st: &GlobalState,
+    fragment: usize,
+    step: u64,
+    prev_version: u64,
+    pushes: &HashMap<u32, Push>,
+) -> Result<()> {
+    let Some(root) = &cfg.probe_capture_dir else {
+        return Ok(());
+    };
+    if cfg.probe_capture_every == 0 || step % cfg.probe_capture_every != 0 {
+        return Ok(());
+    }
+    if pushes.is_empty() {
+        return Ok(());
+    }
+    let state_dir = root.join("states");
+    let candidate_dir = root.join("candidates");
+    std::fs::create_dir_all(&state_dir)?;
+    std::fs::create_dir_all(&candidate_dir)?;
+    let state_name = format!("state_before_step_{step:08}.ckpt");
+    let state_path = state_dir.join(&state_name);
+    st.save_checkpoint(&state_path)?;
+
+    for push in pushes.values() {
+        if push.values.len() != st.params[fragment].len() {
+            bail!(
+                "capture candidate step {step} fragment {fragment} learner {}: got {} values, expected {}",
+                push.learner_id,
+                push.values.len(),
+                st.params[fragment].len()
+            );
+        }
+        let candidate_name = format!(
+            "candidate_step_{step:08}_fragment_{fragment:04}_learner_{:04}.f32",
+            push.learner_id
+        );
+        let candidate_path = candidate_dir.join(&candidate_name);
+        write_f32_file(&candidate_path, &push.values)?;
+        append_probe_index(
+            root,
+            step,
+            fragment,
+            prev_version,
+            st.global_step,
+            push,
+            &state_name,
+            &candidate_name,
+        )?;
+    }
+    Ok(())
+}
+
+fn write_f32_file(path: &std::path::Path, values: &[f32]) -> Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        for v in values {
+            f.write_all(&v.to_le_bytes())?;
+        }
+        f.flush()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn append_probe_index(
+    root: &std::path::Path,
+    step: u64,
+    fragment: usize,
+    current_fragment_version: u64,
+    syncer_global_step: u64,
+    push: &Push,
+    state_name: &str,
+    candidate_name: &str,
+) -> Result<()> {
+    use std::io::Write;
+    let index = root.join("index.jsonl");
+    let line = format!(
+        concat!(
+            "{{",
+            "\"schema\":\"syncer_probe_capture_v1\",",
+            "\"oracle_scope\":\"syncer_current_global_pending_offline\",",
+            "\"step\":{step},",
+            "\"syncer_global_step\":{syncer_global_step},",
+            "\"fragment\":{fragment},",
+            "\"current_fragment_version\":{current_fragment_version},",
+            "\"learner_id\":{learner_id},",
+            "\"base_version\":{base_version},",
+            "\"local_step\":{local_step},",
+            "\"c_steps\":{c_steps},",
+            "\"c_tokens\":{c_tokens},",
+            "\"weight\":{weight},",
+            "\"state_checkpoint\":\"states/{state_name}\",",
+            "\"candidate_f32\":\"candidates/{candidate_name}\"",
+            "}}\n"
+        ),
+        step = step,
+        syncer_global_step = syncer_global_step,
+        fragment = fragment,
+        current_fragment_version = current_fragment_version,
+        learner_id = push.learner_id,
+        base_version = push.base_version,
+        local_step = push.local_step,
+        c_steps = push.c_steps,
+        c_tokens = push.c_tokens,
+        weight = crate::merge::learner_weight(push.c_tokens, push.c_steps),
+        state_name = state_name,
+        candidate_name = candidate_name,
+    );
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(index)?
+        .write_all(line.as_bytes())?;
     Ok(())
 }
 

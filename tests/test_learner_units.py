@@ -106,6 +106,34 @@ def test_allreduce_skips_none_grads(monkeypatch):
     assert torch.allclose(with_grad.grad, torch.ones(3))  # 2.0 (sum stub is id) / 2
 
 
+def test_fragment_probe_signal_helpers_are_stable():
+    from yeto.learner import _cosine, _sigmoid
+
+    assert abs(_sigmoid(0.0) - 0.5) < 1e-12
+    assert _sigmoid(100.0) > 1.0 - 1e-12
+    assert _sigmoid(-100.0) < 1e-12
+    assert abs(_cosine(torch.tensor([1.0, 0.0]), torch.tensor([2.0, 0.0])) - 1.0) < 1e-12
+    assert abs(_cosine(torch.tensor([1.0, 0.0]), torch.tensor([0.0, 1.0]))) < 1e-12
+    assert _cosine(torch.zeros(2), torch.ones(2)) == 0.0
+
+
+def test_pack_flat_matches_pack_fragment():
+    from types import SimpleNamespace
+
+    from yeto.protocol import DTYPE_BF16, DTYPE_F32
+    from yeto.tensor_io import fragment_flat, pack_flat, pack_fragment, unpack_fragment
+
+    frag = SimpleNamespace(tensors=[("a", 2), ("b", 1)], numel=3)
+    params = {
+        "a": torch.tensor([1.25, -2.5], dtype=torch.float32),
+        "b": torch.tensor([3.75], dtype=torch.float32),
+    }
+    flat = fragment_flat(frag, params)
+    for dtype in (DTYPE_F32, DTYPE_BF16):
+        assert pack_flat(flat, dtype) == pack_fragment(frag, params, dtype)
+        assert torch.allclose(unpack_fragment(frag, pack_flat(flat, dtype), dtype), flat)
+
+
 def test_lora_targets_resolution():
     from types import SimpleNamespace
 

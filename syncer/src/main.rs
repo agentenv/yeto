@@ -75,13 +75,22 @@ struct Args {
     /// JSONL event tape (one record per merge).
     #[arg(long)]
     event_tape: Option<std::path::PathBuf>,
+    /// Optional directory for offline syncer-current fragment probes.
+    /// When set, the syncer writes one pre-merge checkpoint per sampled
+    /// round, one f32 candidate-fragment file per admitted responder, and
+    /// an index.jsonl tying them together.
+    #[arg(long)]
+    probe_capture_dir: Option<std::path::PathBuf>,
+    /// Capture every Nth outer step when --probe-capture-dir is set.
+    /// 0 disables capture even if the directory is present.
+    #[arg(long, default_value_t = 1)]
+    probe_capture_every: u64,
 }
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let args = Args::parse();
@@ -110,6 +119,8 @@ fn main() -> anyhow::Result<()> {
         checkpoint_every: args.checkpoint_every,
         resume: args.resume,
         event_tape: args.event_tape,
+        probe_capture_dir: args.probe_capture_dir,
+        probe_capture_every: args.probe_capture_every,
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

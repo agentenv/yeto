@@ -28,10 +28,10 @@ Presets (--settings, comma-separated or 'all'):
 
   m2        M=2, everything default (bf16 wire, alpha 0.5, pipelined)
   m4        M=4
-  alpha0    broadcasts overwrite (paper's recommendation at large M)
+  alpha0    broadcasts overwrite (large-M recommendation)
   q4        4-bit E3M0 delta pushes on the wire
   serial    --pipeline 1 (pre-pipelining scheduler behavior)
-  noheloco  delta correction off (pure paper Alg. 2)
+  noheloco  delta correction off (pure Alg. 2)
   strided   depth-interleaved fragments
   avg       merge = plain weighted averaging (outer lr 1.0, mu 0, alpha 0)
   m2h24     stock DiLoCo throttled to its design-point sync interval (H~24)
@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import shutil
 import socket
 import subprocess
@@ -96,6 +97,7 @@ class Arm:
 PRESETS: dict[str, Arm] = {
     "m2": Arm("m2"),
     "m4": Arm("m4", m=4),
+    "m12": Arm("m12", m=12, fragments=12, quorum=6),
     "alpha0": Arm("alpha0", merge_alpha=0.0),
     "q4": Arm("q4", wire_dtype="q4"),
     "serial": Arm("serial", pipeline=1),
@@ -130,17 +132,39 @@ def steps_for(token_budget: int, mbs: int, seq_len: int, learners: int,
     return max(1, math.ceil(token_budget / (mbs * seq_len * learners * world)))
 
 
-def gpu_env(learner_id: int, gpus_per_learner: int) -> dict[str, str] | None:
+def _float_list_value(spec: str, idx: int) -> float:
+    vals = [float(v.strip()) for v in spec.split(",") if v.strip()]
+    if not vals:
+        return 0.0
+    return vals[idx % len(vals)]
+
+
+def learner_env(args, learner_id: int) -> dict[str, str] | None:
     """CUDA_VISIBLE_DEVICES block for one learner: learner i owns GPUs
     [i*g, (i+1)*g). None when GPU partitioning is off."""
-    if gpus_per_learner <= 0:
-        return None
-    lo = learner_id * gpus_per_learner
     import os
 
     env = dict(os.environ)
-    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in range(lo, lo + gpus_per_learner))
+    learner_gpus = getattr(args, "learner_gpus", 0)
+    gpu_slots = getattr(args, "gpu_slots", 0)
+    if learner_gpus <= 0:
+        if gpu_slots > 0 and args.device.startswith("cuda"):
+            env["CUDA_VISIBLE_DEVICES"] = str(learner_id % gpu_slots)
+            return env
+        return None
+    lo = learner_id * learner_gpus
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in range(lo, lo + learner_gpus))
     return env
+
+
+def gpu_env(learner_id: int, gpus_per_learner: int) -> dict[str, str] | None:
+    """Compatibility wrapper used by pure-logic tests."""
+    if gpus_per_learner <= 0:
+        return None
+    return learner_env(
+        argparse.Namespace(device="cuda", learner_gpus=gpus_per_learner, gpu_slots=0),
+        learner_id,
+    )
 
 
 def learner_command(args, arm_dir: Path, *, learner_id: int, num_learners: int,
@@ -179,18 +203,61 @@ def learner_command(args, arm_dir: Path, *, learner_id: int, num_learners: int,
         # single-process learners take the explicit one.
         cmd += ["--device", args.device]
     if arm is not None:
+        step_sleep = _float_list_value(getattr(args, "learner_step_sleep_ms", "0"), learner_id)
+        push_delay = _float_list_value(getattr(args, "learner_push_delay_ms", "0"), learner_id)
+        delay_jitter_ms = getattr(args, "learner_delay_jitter_ms", 0.0)
+        if step_sleep or push_delay or delay_jitter_ms:
+            cmd += [
+                "--debug-step-sleep-ms", str(step_sleep),
+                "--debug-push-delay-ms", str(push_delay),
+                "--debug-delay-jitter-ms", str(delay_jitter_ms),
+            ]
+        fixed_window_tokens = getattr(args, "fixed_window_tokens", 0)
+        fixed_window_microsteps = getattr(args, "fixed_window_microsteps", 0)
+        if fixed_window_tokens:
+            cmd += ["--fixed-window-tokens", str(fixed_window_tokens)]
+        if fixed_window_microsteps:
+            cmd += ["--fixed-window-microsteps", str(fixed_window_microsteps)]
+        if getattr(args, "pad_to_fixed_window_tokens", False):
+            cmd += ["--pad-to-fixed-window-tokens"]
+        if getattr(args, "freeze_delta_before_delay", False):
+            cmd += ["--freeze-delta-before-delay"]
         cmd += [
             "--fragments", str(arm.fragments),
             "--fragment-pattern", arm.fragment_pattern,
             "--merge-alpha", str(arm.merge_alpha),
             "--wire-dtype", arm.wire_dtype,
         ]
+        if getattr(args, "probe_data", None):
+            probe_data = (
+                str(arm_dir.parent / "eval.jsonl")
+                if args.probe_data == "eval"
+                else str(args.probe_data)
+            )
+            cmd += [
+                "--probe-data", probe_data,
+                "--probe-log", str(arm_dir / f"fragment_probe_learner_{learner_id}.jsonl"),
+                "--probe-every", str(args.probe_every),
+                "--probe-batches", str(args.probe_batches),
+                "--probe-batch-size", str(args.probe_batch_size),
+                "--probe-max-rows", str(args.probe_max_rows),
+                "--probe-outer-lr", str(args.probe_outer_lr),
+                "--probe-freshness-scale", str(args.probe_freshness_scale),
+            ]
     return cmd
 
 
-def syncer_command(arm: Arm, port: int, arm_dir: Path, total_steps: int) -> list[str]:
+def syncer_command(
+    arm: Arm,
+    port: int,
+    arm_dir: Path,
+    total_steps: int,
+    *,
+    probe_capture: bool = False,
+    probe_capture_every: int = 1,
+) -> list[str]:
     # The syncer takes no fragment count: the layout arrives in HELLO.
-    return [
+    cmd = [
         str(SYNCER_BIN),
         "--port", str(port),
         "--learners", str(arm.m),
@@ -207,6 +274,12 @@ def syncer_command(arm: Arm, port: int, arm_dir: Path, total_steps: int) -> list
         "--min-round-interval-ms", str(arm.round_interval_ms),
         "--sync-interval-steps", str(arm.sync_interval_steps),
     ]
+    if probe_capture:
+        cmd += [
+            "--probe-capture-dir", str(arm_dir / "syncer_probe"),
+            "--probe-capture-every", str(probe_capture_every),
+        ]
+    return cmd
 
 
 def free_port() -> int:
@@ -215,7 +288,13 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def split_data(data: str, work: Path, eval_rows: int, max_rows: int | None) -> tuple[Path, Path, int]:
+def split_data(
+    data: str,
+    work: Path,
+    eval_rows: int,
+    max_rows: int | None,
+    shuffle_seed: int | None = None,
+) -> tuple[Path, Path, int]:
     """Materialize --data as train.jsonl / eval.jsonl under `work`.
 
     The eval split comes off the END of the row stream so every arm trains
@@ -230,6 +309,9 @@ def split_data(data: str, work: Path, eval_rows: int, max_rows: int | None) -> t
     if n <= eval_rows:
         raise SystemExit(f"--data has {n} usable rows; need > --eval-rows {eval_rows}")
     work.mkdir(parents=True, exist_ok=True)
+    idxs = list(range(n))
+    if shuffle_seed is not None:
+        random.Random(shuffle_seed).shuffle(idxs)
 
     def dump(path: Path, idxs) -> None:
         with open(path, "w") as f:
@@ -238,8 +320,8 @@ def split_data(data: str, work: Path, eval_rows: int, max_rows: int | None) -> t
                 f.write(json.dumps({k: row[k] for k in ("messages", "tools") if k in row}) + "\n")
 
     train, evalf = work / "train.jsonl", work / "eval.jsonl"
-    dump(train, range(n - eval_rows))
-    dump(evalf, range(n - eval_rows, n))
+    dump(train, idxs[: n - eval_rows])
+    dump(evalf, idxs[n - eval_rows :])
     return train, evalf, n - eval_rows
 
 
@@ -252,12 +334,13 @@ def eval_loss_per_token(model_id: str, adapter_dir: Path | None, eval_file: Path
     from yeto.data import build_packed_dataset
     from yeto.losses import sft_loss
     from yeto.models import resolve
+    from yeto.learner import accelerator_model_dtype
 
     resolved = resolve(model_id)
     tok = AutoTokenizer.from_pretrained(resolved, trust_remote_code=True)
-    # bf16 on accelerators (a 10B+ base in fp32 would not fit one GPU);
-    # fp32 on cpu, where bf16 matmuls are slow and memory is plentiful.
-    dtype = torch.float32 if device == "cpu" else torch.bfloat16
+    # Keep eval dtype aligned with learner loading. T4-class CUDA devices do
+    # not have native bf16, so using bf16 there creates a very slow path.
+    dtype = accelerator_model_dtype(torch.device(device))
     model = AutoModelForCausalLM.from_pretrained(
         resolved, dtype=dtype, trust_remote_code=True
     )
@@ -356,7 +439,7 @@ def run_baseline(args, work: Path) -> tuple[Path, float]:
                           syncer="none", max_steps=steps, arm=None)
     wait_for_free_gpus(args.device)
     t0 = time.monotonic()
-    run_checked(cmd, arm_dir / "learner.log", env=gpu_env(0, args.learner_gpus))
+    run_checked(cmd, arm_dir / "learner.log", env=learner_env(args, 0))
     return arm_dir / "learner-0", time.monotonic() - t0
 
 
@@ -370,7 +453,14 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
     # syncer is terminated once they exit; the checkpoint (written every
     # round) carries the merged params up to the last completed round.
     syncer = subprocess.Popen(
-        syncer_command(arm, port, arm_dir, total_steps=steps * arm.m * 4),
+        syncer_command(
+            arm,
+            port,
+            arm_dir,
+            total_steps=steps * arm.m * 4,
+            probe_capture=getattr(args, "syncer_probe_capture", False),
+            probe_capture_every=getattr(args, "syncer_probe_capture_every", 1),
+        ),
         stdout=open(arm_dir / "syncer.log", "w"), stderr=subprocess.STDOUT,
     )
     wait_for_free_gpus(args.device)
@@ -383,7 +473,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             log = open(arm_dir / f"learner-{i}.log", "w")
             learners.append(subprocess.Popen(
                 cmd, cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT,
-                env=gpu_env(i, args.learner_gpus),
+                env=learner_env(args, i),
             ))
         for proc in learners:
             rc = proc.wait(timeout=args.arm_timeout_min * 60)
@@ -460,6 +550,13 @@ def main() -> int:
                    "this eval loss/token (from a previous run with the same "
                    "model, data, seed and budget)")
     p.add_argument("--max-rows", type=int, default=None, help="cap training rows")
+    p.add_argument(
+        "--shuffle-rows-seed",
+        type=int,
+        default=None,
+        help="deterministically shuffle rows before train/eval split; useful "
+        "when row-index learner sharding would otherwise preserve dataset order",
+    )
     p.add_argument("--device", default="cpu", help="learner/eval device (cpu, mps, cuda)")
     p.add_argument("--shard", choices=["ddp", "fsdp"], default="ddp",
                    help="multi-GPU strategy inside a learner (fsdp shards the "
@@ -468,7 +565,51 @@ def main() -> int:
                    help="GPUs per learner; learner i owns the GPU block "
                    "[i*g, (i+1)*g) and runs under torchrun when g > 1. "
                    "0 = single process on --device")
+    p.add_argument("--gpu-slots", type=int, default=0,
+                   help="when --learner-gpus 0 and --device cuda, assign "
+                   "single-process learners round-robin over this many GPUs")
+    p.add_argument("--learner-step-sleep-ms", default="0",
+                   help="comma-separated per-learner sleep after each optimizer step")
+    p.add_argument("--learner-push-delay-ms", default="0",
+                   help="comma-separated per-learner sleep before each fragment push")
+    p.add_argument("--learner-delay-jitter-ms", type=float, default=0.0,
+                   help="uniform [0, jitter] ms added to each debug sleep")
+    p.add_argument("--fixed-window-tokens", type=int, default=0,
+                   help="answer async pulls from snapshots taken after this "
+                   "many post-reset learner tokens")
+    p.add_argument("--fixed-window-microsteps", type=int, default=0,
+                   help="answer async pulls from snapshots taken after this "
+                   "many post-reset optimizer steps")
+    p.add_argument("--pad-to-fixed-window-tokens", action="store_true",
+                   help="accepted for fixed-token experiment configs; windows "
+                   "round to whole optimizer steps")
+    p.add_argument("--freeze-delta-before-delay", action="store_true",
+                   help="materialize fragment payloads before push delay stress")
     p.add_argument("--arm-timeout-min", type=int, default=120)
+    p.add_argument(
+        "--probe-data",
+        default=None,
+        help="optional held-out data for fragment utility probe in async arms; "
+        "use 'eval' to reuse this script's held-out eval split",
+    )
+    p.add_argument("--probe-every", type=int, default=1)
+    p.add_argument("--probe-batches", type=int, default=2)
+    p.add_argument("--probe-batch-size", type=int, default=1)
+    p.add_argument("--probe-max-rows", type=int, default=64)
+    p.add_argument("--probe-outer-lr", type=float, default=1.0)
+    p.add_argument("--probe-freshness-scale", type=float, default=24.0)
+    p.add_argument(
+        "--syncer-probe-capture",
+        action="store_true",
+        help="capture pre-merge syncer checkpoints and candidate fragments "
+        "for offline syncer-current utility probes",
+    )
+    p.add_argument(
+        "--syncer-probe-capture-every",
+        type=int,
+        default=1,
+        help="capture every Nth outer step when --syncer-probe-capture is set",
+    )
     p.add_argument("--work-dir", type=Path, default=REPO_ROOT / "compare-work")
     p.add_argument("--report-dir", type=Path, default=REPO_ROOT / "compare-report")
     p.add_argument("--dry-run", action="store_true", help="print the plan; run nothing")
@@ -503,20 +644,28 @@ def main() -> int:
     if args.dry_run:
         return 0
 
-    if args.learner_gpus > 0:
+    if args.learner_gpus > 0 and args.gpu_slots > 0:
+        raise SystemExit("--gpu-slots is only valid when --learner-gpus is 0")
+    if args.learner_gpus > 0 or args.gpu_slots > 0:
         import torch
 
-        need = max(arm.m for arm in arms) * args.learner_gpus
+        need = (
+            max(arm.m for arm in arms) * args.learner_gpus
+            if args.learner_gpus > 0
+            else args.gpu_slots
+        )
         have = torch.cuda.device_count()
         if have < need:
             raise SystemExit(
-                f"largest arm needs {need} GPUs ({args.learner_gpus} per learner) "
+                f"largest arm needs {need} visible GPU(s) "
                 f"but only {have} are visible"
             )
     ensure_syncer()
     if args.work_dir.exists():
         shutil.rmtree(args.work_dir)
-    train, evalf, n_train = split_data(args.data, args.work_dir, args.eval_rows, args.max_rows)
+    train, evalf, n_train = split_data(
+        args.data, args.work_dir, args.eval_rows, args.max_rows, args.shuffle_rows_seed
+    )
     print(f"[compare] {n_train} train rows, {args.eval_rows} eval rows")
 
     records = []

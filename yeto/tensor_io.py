@@ -35,6 +35,12 @@ def pack_fragment(frag: Fragment, params: dict[str, torch.Tensor], dtype: int) -
     return wire.view(torch.uint8).numpy().tobytes()
 
 
+def pack_flat(flat: torch.Tensor, dtype: int) -> bytes:
+    """Encode an already-flattened f32 fragment tensor into wire bytes."""
+    wire = flat.detach().float().to(_WIRE_TORCH[dtype]).contiguous().cpu()
+    return wire.view(torch.uint8).numpy().tobytes()
+
+
 def unpack_fragment(frag: Fragment, data: bytes, dtype: int) -> torch.Tensor:
     """Decode wire bytes into a flat f32 tensor of the fragment's numel."""
     raw = torch.frombuffer(bytearray(data), dtype=torch.uint8)
