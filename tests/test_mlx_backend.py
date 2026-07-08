@@ -94,6 +94,10 @@ def test_canonical_name_mapping():
         canonical_name("model.layers.7.self_attn.q_proj.lora_A")
         == "base_model.model.model.layers.7.self_attn.q_proj.lora_A.default.weight"
     )
+    assert (
+        canonical_name("language_model.model.layers.7.linear_attn.in_proj_qkv.lora_B")
+        == "base_model.model.model.layers.7.linear_attn.in_proj_qkv.lora_B.default.weight"
+    )
 
 
 def test_pack_write_roundtrip_and_blend():
