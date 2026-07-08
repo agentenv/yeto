@@ -26,12 +26,54 @@ def test_fetch_cmd_uses_sky_ssh_alias():
     ]
 
 
-def test_deliver_object_store_goes_through_sky_storage(monkeypatch):
+def test_deliver_s3_goes_through_aws_cli(monkeypatch):
     calls = []
-    monkeypatch.setattr(delivery, "_upload_sky", lambda output, src: calls.append((output, src)))
+    monkeypatch.setattr(delivery, "_upload_s3", lambda output, src: calls.append((output, src)))
+    monkeypatch.setattr(
+        delivery,
+        "_upload_sky",
+        lambda output, src: pytest.fail(f"unexpected sky upload: {output}"),
+    )
     delivery.deliver("s3://bucket/prefix/x", "/tmp/model")
+    assert calls == [("s3://bucket/prefix/x", "/tmp/model")]
+
+
+def test_deliver_non_s3_object_store_goes_through_sky_storage(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        delivery,
+        "_upload_s3",
+        lambda output, src: pytest.fail(f"unexpected s3 upload: {output}"),
+    )
+    monkeypatch.setattr(delivery, "_upload_sky", lambda output, src: calls.append((output, src)))
     delivery.deliver("gs://b", "/tmp/model")
-    assert calls == [("s3://bucket/prefix/x", "/tmp/model"), ("gs://b", "/tmp/model")]
+    assert calls == [("gs://b", "/tmp/model")]
+
+
+def test_upload_s3_uses_aws_sync(monkeypatch):
+    calls = []
+    monkeypatch.setattr(delivery.shutil, "which", lambda cmd: "/usr/bin/aws")
+    monkeypatch.setattr(
+        delivery.subprocess,
+        "run",
+        lambda cmd, check: calls.append((cmd, check)),
+    )
+
+    delivery._upload_s3("s3://bucket/models/run1/", "/tmp/model")
+
+    assert calls == [
+        (
+            [
+                "aws",
+                "s3",
+                "sync",
+                "/tmp/model",
+                "s3://bucket/models/run1",
+                "--only-show-errors",
+            ],
+            True,
+        )
+    ]
 
 
 def test_upload_sky_resolves_store_type_from_uri(monkeypatch):
@@ -50,9 +92,9 @@ def test_upload_sky_resolves_store_type_from_uri(monkeypatch):
             created["synced"] = True
 
     monkeypatch.setattr(sky_data, "Storage", FakeStorage)
-    delivery._upload_sky("s3://bucket/models/run1", "/tmp/model")
+    delivery._upload_sky("gs://bucket/models/run1", "/tmp/model")
     assert created["name"] == "bucket" and created["sub"] == "models/run1"
-    assert created["store"].name == "S3" and created["synced"]
+    assert created["store"].name == "GCS" and created["synced"]
 
 
 def test_deliver_rejects_local(monkeypatch):
