@@ -197,8 +197,8 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         forward_kwargs=("hidden_states", "timestep", "encoder_hidden_states", "encoder_hidden_states_mask", "img_shapes"),
         output_alignment="pipeline _unpack_latents helper",
         status="needs-real-validation",
-        gaps=("generic prompt mask forwarding and output unpack are implemented; AWS g6e run did not complete model download",),
-        evidence=("AWS g6e Qwen-Image download attempt stopped after stalled incomplete shards", "diffusers examples/dreambooth/train_dreambooth_lora_qwen_image.py"),
+        gaps=("generic prompt mask forwarding and output unpack are implemented; full Qwen-Image exceeded single L40S 46GB before training",),
+        evidence=("AWS g6e.16xlarge Qwen-Image bf16 load OOM at pipe.to(cuda)", "diffusers examples/dreambooth/train_dreambooth_lora_qwen_image.py"),
     ),
     "qwen-image-2512": _cap(
         family="Qwen Image",
@@ -222,9 +222,9 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         scheduler=_FLOW_MATCH,
         forward_kwargs=("hidden_states", "timestep", "encoder_hidden_states", "pooled_projections"),
         output_alignment="direct latent output",
-        status="needs-real-validation",
-        gaps=("real SD3.5 LoRA GPU validation blocked by gated HF access for the test token",),
-        evidence=("AWS g6e SD3.5 load attempt returned gated-repo 403", "diffusers examples/dreambooth/train_dreambooth_lora_sd3.py"),
+        status="generic-covered",
+        gaps=("production-quality recipe validation still pending",),
+        evidence=("AWS g6e.16xlarge SD3.5 raw-image 20-step LoRA train/backward/save/reload", "diffusers examples/dreambooth/train_dreambooth_lora_sd3.py"),
     ),
     "ltx-video": _cap(
         family="LTX Video",
@@ -236,8 +236,8 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         forward_kwargs=("hidden_states", "timestep", "encoder_hidden_states", "encoder_attention_mask", "rope_interpolation_scale"),
         output_alignment="packed-token target",
         status="generic-covered",
-        gaps=("production-length LTX validation should be repeated after generic packed timestep shaping",),
-        evidence=("A6000 LTX raw-video train/save/reload/sample", "finetrainers LTXVideoModelSpecification"),
+        gaps=("production-quality recipe validation still pending",),
+        evidence=("AWS g6e.16xlarge LTX raw-video 49-frame 20-step LoRA train/backward/save/reload", "A6000 LTX raw-video train/save/reload/sample", "finetrainers LTXVideoModelSpecification"),
     ),
     "ltx2-video": _cap(
         family="LTX2 Video",
@@ -382,7 +382,7 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         output_alignment="adapter-defined",
         status="adapter-required",
         adapter_boundary="NAVA training uses package-specific audio/video pipeline behavior outside public Diffusers contracts.",
-        evidence=("yeto.diffusion.adapters.nava", "A6000/A100 NAVA adapter validation"),
+        evidence=("yeto.diffusion.adapters.nava", "AWS g6e.16xlarge NAVA 33-frame r16/a32 20-step LoRA train/backward/save/reload", "A6000/A100 NAVA adapter validation"),
     ),
 }
 
