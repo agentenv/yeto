@@ -755,6 +755,11 @@ def test_buffered_replay_policy_subset_is_validated():
     with pytest.raises(SystemExit):
         buffered_robust.parse_args(base + ["--policies", "oracle_positive"])
 
+    tuned = buffered_nesterov.parse_args(
+        base + ["--policies", "current_outer_lr100,current_outer_lr150"]
+    )
+    assert tuned.policies == ("current_outer_lr100", "current_outer_lr150")
+
 
 def test_buffered_nesterov_matches_syncer_equation():
     import torch
