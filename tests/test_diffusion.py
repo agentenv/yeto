@@ -1659,6 +1659,7 @@ def test_denoise_forward_auto_fills_token_ids_guidance_and_attention_mask():
         def __init__(self):
             super().__init__()
             self.seen = None
+            self.config = SimpleNamespace(guidance_embeds=True)
 
         def forward(
             self,
@@ -1712,6 +1713,45 @@ def test_denoise_forward_auto_fills_token_ids_guidance_and_attention_mask():
     assert torch.equal(pipe.transformer.seen["txt_ids"], torch.zeros(5, 3))
     assert torch.equal(pipe.transformer.seen["guidance"], torch.full((2,), 4.5))
     assert pipe.transformer.seen["attention_mask"] is mask
+
+
+def test_denoise_forward_does_not_auto_fill_optional_guidance_without_config():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(self, hidden_states, timestep, pooled_projections=None, guidance=None):
+            del timestep, pooled_projections
+            self.seen = guidance
+            return hidden_states + 1
+
+    class TinyPipe:
+        def __init__(self):
+            self.transformer = TinyDenoiser()
+
+        def __call__(self, prompt=None, guidance_scale=4.5):
+            del prompt, guidance_scale
+
+    pipe = TinyPipe()
+    cond = learner.TextConditioning(
+        torch.ones(2, 5, 8),
+        pooled_prompt_embeds=torch.ones(2, 8),
+    )
+
+    out = learner.denoise_forward(
+        pipe,
+        learner.LatentBatch(torch.zeros(2, 4, 8), latent_height=4, latent_width=4),
+        torch.tensor([1, 2]),
+        cond,
+        argparse.Namespace(),
+    )
+
+    assert torch.equal(out, torch.ones(2, 4, 8))
+    assert pipe.transformer.seen is None
 
 
 def test_denoise_forward_prefers_pipeline_image_id_helper():
@@ -1904,7 +1944,7 @@ def test_text_only_conditioning_does_not_patchify_video_latents():
 
     pipe = SimpleNamespace(transformer=TinyDenoiser())
     latents = learner.LatentBatch(torch.zeros(1, 8, 3, 8, 8))
-    cond = learner.TextConditioning(torch.zeros(1, 5, 16))
+    cond = learner.TextConditioning(torch.zeros(1, 96, 16))
 
     aligned, mask = learner._align_latents_to_conditioning_sequence(pipe, latents, cond)
 

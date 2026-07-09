@@ -1044,6 +1044,9 @@ def _align_latents_to_conditioning_sequence(
     cond: TextConditioning,
     adapter=None,
 ) -> tuple[LatentBatch, torch.Tensor | None]:
+    indicator = cond.extra.get("indicator")
+    if not torch.is_tensor(indicator):
+        return latents, None
     prompt_embeds = cond.prompt_embeds
     if prompt_embeds is None or prompt_embeds.ndim != 3:
         return latents, None
@@ -2010,6 +2013,16 @@ def _guidance_value(pipe, args, noisy: LatentBatch) -> torch.Tensor:
     )
 
 
+def _auto_guidance_enabled(pipe, params) -> bool:
+    if "guidance" not in params:
+        return False
+    if _is_required_param(params, "guidance"):
+        return True
+    config = _first_trainable_config(pipe)
+    guidance_embeds = _config_value(config, "guidance_embeds")
+    return bool(guidance_embeds)
+
+
 def _numeric_attr(obj, *names: str):
     for name in names:
         value = getattr(obj, name, None)
@@ -2092,7 +2105,7 @@ def _auto_fill_denoiser_kwargs(pipe, noisy: LatentBatch, cond: TextConditioning,
     if "img_sizes" in params and "img_sizes" not in kwargs:
         kwargs["img_sizes"] = _shape_records(noisy, image=True)
 
-    if "guidance" in params and "guidance" not in kwargs:
+    if _auto_guidance_enabled(pipe, params) and "guidance" not in kwargs:
         kwargs["guidance"] = _guidance_value(pipe, args, noisy)
 
     if "rope_interpolation_scale" in params and "rope_interpolation_scale" not in kwargs:
