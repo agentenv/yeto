@@ -76,10 +76,6 @@ def test_diffusion_aliases_resolve_and_infer_kind():
     assert {
         "chroma1-base",
         "chroma1-hd",
-        "cogvideox-2b",
-        "cogvideox-5b",
-        "cogvideox15-5b",
-        "cogview4-6b",
         "flux",
         "flux-schnell",
         "flux2-dev",
@@ -88,8 +84,6 @@ def test_diffusion_aliases_resolve_and_infer_kind():
         "hunyuan-video",
         "ideogram4",
         "ltx-video",
-        "ltx2-video",
-        "motif-video",
         "nava",
         "qwen-image",
         "qwen-image-2512",
@@ -126,7 +120,7 @@ def test_diffusion_capability_matrix_covers_aliases():
         assert cap.modalities
         assert cap.forward_kwargs
     assert "nava" in aliases_by_status("adapter-required")
-    assert "cogvideox-2b" in aliases_by_status("generic-gap")
+    assert aliases_by_status("generic-gap") == ()
     assert "flux" in aliases_by_status("needs-real-validation")
     assert "wan22" in aliases_by_status("needs-real-validation")
     assert "| `wan22` |" in format_capability_table(("wan22",))
@@ -173,6 +167,73 @@ def test_diffusion_trainable_modules_skip_none_placeholders():
     )
 
     assert learner._trainable_module_items(pipe) == [("transformer", pipe.transformer)]
+
+
+def test_diffusion_parameter_effects_reports_fps_only_when_signature_uses_it():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class PlainDenoiser(torch.nn.Module):
+        def forward(self, hidden_states, timestep):
+            del timestep
+            return hidden_states
+
+    class RopeDenoiser(torch.nn.Module):
+        def forward(self, hidden_states, timestep, rope_interpolation_scale=None):
+            del timestep, rope_interpolation_scale
+            return hidden_states
+
+    class FrameRateDenoiser(torch.nn.Module):
+        def forward(self, hidden_states, timestep, frame_rate=None):
+            del timestep, frame_rate
+            return hidden_states
+
+    args = _args(fps=24)
+
+    plain = learner.diffusion_parameter_effects(SimpleNamespace(transformer=PlainDenoiser()), args)
+    assert f"--prompt-column: read raw prompts from column {args.prompt_column!r}" in plain.active
+    assert plain.ignored == [
+        "--fps: denoiser forward signature has no temporal rope/conditioning field"
+    ]
+
+    rope = learner.diffusion_parameter_effects(SimpleNamespace(transformer=RopeDenoiser()), args)
+    assert "--fps: used to derive rope_interpolation_scale for the denoiser" in rope.active
+    assert not rope.ignored
+
+    frame_rate = learner.diffusion_parameter_effects(SimpleNamespace(transformer=FrameRateDenoiser()), args)
+    assert "--fps: forwarded to the matching denoiser temporal-conditioning field" in frame_rate.active
+    assert not frame_rate.ignored
+
+
+def test_diffusion_parameter_effects_keeps_data_flags_generic():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def forward(self, hidden_states, timestep):
+            del timestep
+            return hidden_states
+
+    args = _args(
+        cache_latents=True,
+        cache_text_embeds=True,
+        bucket_by_shape=True,
+        height=512,
+        width=512,
+        num_frames=49,
+        diffusion_loss_weighting="min-snr",
+    )
+    report = learner.diffusion_parameter_effects(SimpleNamespace(transformer=TinyDenoiser()), args)
+
+    assert "--latent-column: read cached latents from column 'latents'" in report.active
+    assert "--text-embeds-column: read cached prompt embeddings from 'prompt_embeds'" in report.active
+    assert "--cache-latents: read latent tensors from the dataset; raw media is not VAE-encoded" in report.active
+    assert "--cache-text-embeds: read text embeddings from the dataset; prompts are not text-encoded" in report.active
+    assert "--bucket-by-shape: groups rows by target (frames, height, width) before batching" in report.active
+    assert "--height/--width: target shape metadata; cached latents are not resized" in report.active
+    assert "--num-frames: target frame-count metadata; cached latents are not resampled" in report.active
+    assert "--diffusion-loss-weighting: applies min-snr timestep weights" in report.active
+    assert not report.ignored
 
 
 def test_diffusion_multi_denoiser_routes_by_boundary_timestep():
@@ -1482,6 +1543,98 @@ def test_prompt_conditioning_extra_fields_are_signature_filtered():
     assert "ignored_by_forward" not in pipe.transformer.seen
 
 
+def test_prompt_conditioning_tuple_maps_to_text_signature_without_standard_encoder():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(
+            self,
+            hidden_states,
+            timesteps,
+            encoder_hidden_states_t5=None,
+            encoder_hidden_states_llama3=None,
+            pooled_embeds=None,
+            return_dict=False,
+        ):
+            self.seen = {
+                "encoder_hidden_states_t5": encoder_hidden_states_t5,
+                "encoder_hidden_states_llama3": encoder_hidden_states_llama3,
+                "pooled_embeds": pooled_embeds,
+                "return_dict": return_dict,
+            }
+            return hidden_states + 1
+
+    class TinyPipe:
+        def __init__(self):
+            self.transformer = TinyDenoiser()
+
+        def encode_prompt(self, prompt, device=None):
+            batch = len(prompt)
+            return (
+                torch.full((batch, 2, 4), 1.0, device=device),
+                torch.full((batch, 3, 4), 2.0, device=device),
+                torch.full((batch, 4), 3.0, device=device),
+            )
+
+    pipe = TinyPipe()
+    cond = learner.encode_prompt_embeds(
+        pipe,
+        [{"prompt": "a"}, {"prompt": "b"}],
+        _args(),
+        torch.device("cpu"),
+        torch.float32,
+    )
+    out = learner.denoise_forward(
+        pipe,
+        learner.LatentBatch(torch.zeros(2, 5)),
+        torch.tensor([1, 2]),
+        cond,
+        argparse.Namespace(),
+    )
+
+    assert torch.equal(out, torch.ones(2, 5))
+    assert cond.prompt_embeds is None
+    assert set(cond.extra) == {"encoder_hidden_states_t5", "encoder_hidden_states_llama3"}
+    assert torch.equal(pipe.transformer.seen["encoder_hidden_states_t5"], torch.full((2, 2, 4), 1.0))
+    assert torch.equal(pipe.transformer.seen["encoder_hidden_states_llama3"], torch.full((2, 3, 4), 2.0))
+    assert torch.equal(pipe.transformer.seen["pooled_embeds"], torch.full((2, 4), 3.0))
+    assert pipe.transformer.seen["return_dict"] is False
+
+
+def test_denoise_forward_maps_single_prompt_tensor_to_text_signature_extra():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(self, hidden_states, timestep, encoder_hidden_states_t5=None):
+            del timestep
+            self.seen = encoder_hidden_states_t5
+            return hidden_states + 1
+
+    pipe = argparse.Namespace(transformer=TinyDenoiser())
+    cond = learner.TextConditioning(torch.ones(1, 2, 4))
+
+    out = learner.denoise_forward(
+        pipe,
+        learner.LatentBatch(torch.zeros(1, 3)),
+        torch.tensor([1]),
+        cond,
+        argparse.Namespace(),
+    )
+
+    assert torch.equal(out, torch.ones(1, 3))
+    assert pipe.transformer.seen is cond.prompt_embeds
+
+
 def test_encode_prompt_maps_signature_prompt_variants_from_rows():
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
@@ -1802,6 +1955,7 @@ def test_denoise_forward_auto_fills_shape_and_mask_aliases():
             encoder_hidden_states_llama3=None,
             encoder_hidden_states_mask=None,
             hidden_states_masks=None,
+            prompt_embeds_mask=None,
             img_shapes=None,
             img_sizes=None,
             return_dict=False,
@@ -1813,6 +1967,7 @@ def test_denoise_forward_auto_fills_shape_and_mask_aliases():
                 "encoder_hidden_states_llama3": encoder_hidden_states_llama3,
                 "encoder_hidden_states_mask": encoder_hidden_states_mask,
                 "hidden_states_masks": hidden_states_masks,
+                "prompt_embeds_mask": prompt_embeds_mask,
                 "img_shapes": img_shapes,
                 "img_sizes": img_sizes,
                 "return_dict": return_dict,
@@ -1838,8 +1993,92 @@ def test_denoise_forward_auto_fills_shape_and_mask_aliases():
     assert pipe.transformer.seen["encoder_hidden_states_llama3"] is cond.extra["encoder_hidden_states_llama3"]
     assert pipe.transformer.seen["encoder_hidden_states_mask"] is mask
     assert pipe.transformer.seen["hidden_states_masks"] is mask
+    assert pipe.transformer.seen["prompt_embeds_mask"] is mask
     assert pipe.transformer.seen["img_shapes"] == [(3, 2, 2), (3, 2, 2)]
     assert pipe.transformer.seen["img_sizes"] == [(2, 2), (2, 2)]
+
+
+def test_denoise_forward_auto_fills_rotary_size_and_fps_signature_fields():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+            self.config = SimpleNamespace(patch_size=2, patch_size_t=1, attention_head_dim=8)
+
+        def forward(
+            self,
+            hidden_states,
+            timestep,
+            image_rotary_emb=None,
+            original_size=None,
+            target_size=None,
+            crop_coords=None,
+            frame_rate=None,
+            return_dict=False,
+        ):
+            del timestep
+            self.seen = {
+                "image_rotary_emb": image_rotary_emb,
+                "original_size": original_size,
+                "target_size": target_size,
+                "crop_coords": crop_coords,
+                "frame_rate": frame_rate,
+                "return_dict": return_dict,
+            }
+            return hidden_states + 1
+
+    class TinyPipe:
+        vae_scale_factor = 8
+
+        def __init__(self):
+            self.transformer = TinyDenoiser()
+            self.helper_seen = None
+
+        def __call__(self, prompt=None, frame_rate=12):
+            del prompt, frame_rate
+
+        def _prepare_rotary_positional_embeddings(
+            self,
+            height,
+            width,
+            num_frames,
+            device,
+            patch_size=None,
+            patch_size_t=None,
+            attention_head_dim=None,
+        ):
+            self.helper_seen = {
+                "height": height,
+                "width": width,
+                "num_frames": num_frames,
+                "patch_size": patch_size,
+                "patch_size_t": patch_size_t,
+                "attention_head_dim": attention_head_dim,
+            }
+            return (torch.ones(1, device=device), torch.zeros(1, device=device))
+
+    pipe = TinyPipe()
+    noisy = learner.LatentBatch(torch.zeros(2, 3, 4, 8, 8), latent_num_frames=4, latent_height=8, latent_width=8)
+    out = learner.denoise_forward(pipe, noisy, torch.tensor([1, 2]), learner.TextConditioning(None), _args(fps=24))
+
+    assert torch.equal(out, torch.ones_like(noisy.latents))
+    assert pipe.helper_seen == {
+        "height": 64,
+        "width": 64,
+        "num_frames": 4,
+        "patch_size": 2,
+        "patch_size_t": 1,
+        "attention_head_dim": 8,
+    }
+    assert torch.equal(pipe.transformer.seen["image_rotary_emb"][0], torch.ones(1))
+    assert torch.equal(pipe.transformer.seen["original_size"], torch.tensor([[64.0, 64.0], [64.0, 64.0]]))
+    assert torch.equal(pipe.transformer.seen["target_size"], torch.tensor([[64.0, 64.0], [64.0, 64.0]]))
+    assert torch.equal(pipe.transformer.seen["crop_coords"], torch.zeros(2, 2))
+    assert pipe.transformer.seen["frame_rate"] == 24
+    assert pipe.transformer.seen["return_dict"] is False
 
 
 def test_denoise_forward_shapes_packed_timesteps_for_rope_signature():

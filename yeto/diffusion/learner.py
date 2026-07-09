@@ -1327,6 +1327,18 @@ def _conditioning_extra_param_names(params) -> list[str]:
     ]
 
 
+def _is_text_embedding_param_name(name: str) -> bool:
+    return (
+        name.startswith("encoder_hidden_states_")
+        or (name.startswith("prompt_embeds_") and not name.endswith("_mask"))
+        or (name.startswith("text_embeds_") and not name.endswith("_mask"))
+    )
+
+
+def _text_embedding_extra_param_names(params) -> list[str]:
+    return [name for name in _conditioning_extra_param_names(params) if _is_text_embedding_param_name(name)]
+
+
 def _take_first(values: list[Any], predicate):
     for idx, value in enumerate(values):
         if predicate(value):
@@ -1344,7 +1356,11 @@ def _is_mask_tensor(value) -> bool:
 
 def _conditioning_from_tuple(out: tuple, forward_params) -> TextConditioning:
     values = list(out)
-    prompt_embeds = values.pop(0) if values else None
+    extra_names = _conditioning_extra_param_names(forward_params)
+    text_extra_names = [name for name in extra_names if _is_text_embedding_param_name(name)]
+    prompt_embeds = None
+    if values and ("encoder_hidden_states" in forward_params or not text_extra_names):
+        prompt_embeds = values.pop(0)
     pooled = None
     mask = None
     if any(name in forward_params for name in ("pooled_projections", "pooled_prompt_embeds", "pooled_embeds")):
@@ -1353,7 +1369,7 @@ def _conditioning_from_tuple(out: tuple, forward_params) -> TextConditioning:
         mask = _take_first(values, _is_mask_tensor)
     extra = {
         name: value
-        for name, value in zip(_conditioning_extra_param_names(forward_params), values)
+        for name, value in zip(extra_names, values)
         if value is not None
     }
     return TextConditioning(prompt_embeds, pooled, mask, extra)
@@ -1999,6 +2015,37 @@ def _shape_records(noisy: LatentBatch, *, image: bool) -> list[tuple[int, ...]] 
     return [shape for _ in range(batch)]
 
 
+def _pixel_shape_from_latents(pipe, noisy: LatentBatch, args) -> tuple[int | None, int | None]:
+    if getattr(args, "height", None) is not None and getattr(args, "width", None) is not None:
+        return int(args.height), int(args.width)
+    if noisy.latent_height is None or noisy.latent_width is None:
+        return None, None
+    scale = _vae_scale_factor(pipe)
+    return int(noisy.latent_height) * scale, int(noisy.latent_width) * scale
+
+
+def _size_conditioning_tensor(
+    noisy: LatentBatch,
+    height: int | None,
+    width: int | None,
+) -> torch.Tensor | None:
+    if height is None or width is None:
+        return None
+    return torch.tensor(
+        [[int(height), int(width)]],
+        device=noisy.latents.device,
+        dtype=noisy.latents.dtype,
+    ).repeat(int(noisy.latents.shape[0]), 1)
+
+
+def _crop_conditioning_tensor(noisy: LatentBatch) -> torch.Tensor:
+    return torch.zeros(
+        (int(noisy.latents.shape[0]), 2),
+        device=noisy.latents.device,
+        dtype=noisy.latents.dtype,
+    )
+
+
 def _guidance_value(pipe, args, noisy: LatentBatch) -> torch.Tensor:
     value = getattr(args, "guidance_scale", None)
     if value is None:
@@ -2079,11 +2126,107 @@ def _shape_denoiser_timesteps(timesteps, noisy: LatentBatch, params):
     return timesteps.view(-1, 1, 1).expand(-1, int(noisy.latents.shape[1]), -1)
 
 
+@dataclass
+class DiffusionParameterReport:
+    active: list[str] = field(default_factory=list)
+    ignored: list[str] = field(default_factory=list)
+
+
+def _denoiser_forward_param_names(pipe, adapter=None) -> set[str]:
+    names = set()
+    for _, module in _trainable_module_items(pipe, adapter):
+        try:
+            sig = inspect.signature(_signature_model_for_forward(module).forward)
+        except (TypeError, ValueError):
+            continue
+        names.update(sig.parameters)
+    return names
+
+
+def diffusion_parameter_effects(pipe, args, adapter=None) -> DiffusionParameterReport:
+    """Describe user-facing diffusion flags that are active or ignored.
+
+    This stays generic: it inspects the loaded pipeline/adapter and denoiser
+    signatures instead of branching on model names.
+    """
+
+    params = _denoiser_forward_param_names(pipe, adapter)
+    report = DiffusionParameterReport()
+
+    if getattr(args, "diffusion_adapter", None):
+        report.active.append("--diffusion-adapter: external adapter owns model-specific loading/step behavior")
+    if adapter is None:
+        if getattr(args, "cache_latents", False):
+            report.active.append(f"--latent-column: read cached latents from column {args.latent_column!r}")
+        else:
+            report.active.append(
+                f"--image-column/--video-column: read raw media from columns "
+                f"{args.image_column!r}/{args.video_column!r} when present"
+            )
+        if getattr(args, "cache_text_embeds", False):
+            report.active.append(f"--text-embeds-column: read cached prompt embeddings from {args.text_embeds_column!r}")
+            report.active.append(
+                f"--text-attention-mask-column/--pooled-text-embeds-column: "
+                f"optional cached text fields {args.text_attention_mask_column!r}/"
+                f"{args.pooled_text_embeds_column!r}"
+            )
+        else:
+            report.active.append(f"--prompt-column: read raw prompts from column {args.prompt_column!r}")
+    else:
+        report.active.append("--prompt/media/cache column flags: available to the diffusion adapter")
+    if getattr(args, "cache_latents", False):
+        report.active.append("--cache-latents: read latent tensors from the dataset; raw media is not VAE-encoded")
+    if getattr(args, "cache_text_embeds", False):
+        report.active.append("--cache-text-embeds: read text embeddings from the dataset; prompts are not text-encoded")
+    if getattr(args, "bucket_by_shape", False):
+        report.active.append("--bucket-by-shape: groups rows by target (frames, height, width) before batching")
+    if getattr(args, "diffusion_loss_weighting", "none") != "none":
+        report.active.append(
+            f"--diffusion-loss-weighting: applies {args.diffusion_loss_weighting} timestep weights"
+        )
+        if getattr(args, "diffusion_loss_weighting", "none") == "min-snr":
+            report.active.append(f"--diffusion-min-snr-gamma: min-snr gamma is {args.diffusion_min_snr_gamma}")
+    elif getattr(args, "diffusion_min_snr_gamma", 5.0) != 5.0:
+        report.ignored.append("--diffusion-min-snr-gamma: only used with --diffusion-loss-weighting min-snr")
+
+    if getattr(args, "height", None) is not None or getattr(args, "width", None) is not None:
+        if getattr(args, "cache_latents", False):
+            report.active.append("--height/--width: target shape metadata; cached latents are not resized")
+        else:
+            report.active.append("--height/--width: resize raw image/video rows before VAE encoding")
+    if getattr(args, "num_frames", None) is not None:
+        if getattr(args, "cache_latents", False):
+            report.active.append("--num-frames: target frame-count metadata; cached latents are not resampled")
+        else:
+            report.active.append("--num-frames: sample or fit raw video rows to the target frame count")
+    if getattr(args, "fps", None) is not None:
+        if adapter is not None:
+            report.active.append("--fps: available to the diffusion adapter")
+        elif "rope_interpolation_scale" in params:
+            report.active.append("--fps: used to derive rope_interpolation_scale for the denoiser")
+        elif "frame_rate" in params or "fps" in params:
+            report.active.append("--fps: forwarded to the matching denoiser temporal-conditioning field")
+        else:
+            report.ignored.append("--fps: denoiser forward signature has no temporal rope/conditioning field")
+
+    return report
+
+
+def log_diffusion_parameter_effects(pipe, args, adapter=None) -> None:
+    report = diffusion_parameter_effects(pipe, args, adapter)
+    for item in report.active:
+        log.info("diffusion parameter active: %s", item)
+    for item in report.ignored:
+        log.warning("diffusion parameter ignored: %s", item)
+
+
 def _auto_fill_denoiser_kwargs(pipe, noisy: LatentBatch, cond: TextConditioning, args, params, kwargs) -> None:
+    grid = _latent_token_grid(noisy) or (None, None, None)
+    pixel_height, pixel_width = _pixel_shape_from_latents(pipe, noisy, args)
     values = {
         "batch_size": int(noisy.latents.shape[0]),
-        "height": (_latent_token_grid(noisy) or (None, None, None))[1],
-        "width": (_latent_token_grid(noisy) or (None, None, None))[2],
+        "height": grid[1],
+        "width": grid[2],
         "device": noisy.latents.device,
         "dtype": noisy.latents.dtype,
     }
@@ -2105,20 +2248,57 @@ def _auto_fill_denoiser_kwargs(pipe, noisy: LatentBatch, cond: TextConditioning,
     if "img_sizes" in params and "img_sizes" not in kwargs:
         kwargs["img_sizes"] = _shape_records(noisy, image=True)
 
+    if "image_rotary_emb" in params and "image_rotary_emb" not in kwargs:
+        config = _first_trainable_config(pipe)
+        kwargs["image_rotary_emb"] = _call_optional_pipeline_helper(
+            pipe,
+            ("_prepare_rotary_positional_embeddings", "prepare_rotary_positional_embeddings"),
+            {
+                "height": pixel_height,
+                "width": pixel_width,
+                "num_frames": noisy.latent_num_frames or grid[0],
+                "device": noisy.latents.device,
+                "dtype": noisy.latents.dtype,
+                "vae_scale_factor_spatial": _vae_scale_factor(pipe),
+                "patch_size": _config_value(config, "patch_size"),
+                "patch_size_t": _config_value(config, "patch_size_t"),
+                "attention_head_dim": _config_value(config, "attention_head_dim"),
+            },
+        )
+
+    size_tensor = None
+    if any(name in params and name not in kwargs for name in ("original_size", "target_size")):
+        size_tensor = _size_conditioning_tensor(noisy, pixel_height, pixel_width)
+    if "original_size" in params and "original_size" not in kwargs:
+        kwargs["original_size"] = size_tensor
+    if "target_size" in params and "target_size" not in kwargs:
+        kwargs["target_size"] = size_tensor
+    if "crop_coords" in params and "crop_coords" not in kwargs:
+        kwargs["crop_coords"] = _crop_conditioning_tensor(noisy)
+    if "crops_coords_top_left" in params and "crops_coords_top_left" not in kwargs:
+        kwargs["crops_coords_top_left"] = _crop_conditioning_tensor(noisy)
+
     if _auto_guidance_enabled(pipe, params) and "guidance" not in kwargs:
         kwargs["guidance"] = _guidance_value(pipe, args, noisy)
 
     if "rope_interpolation_scale" in params and "rope_interpolation_scale" not in kwargs:
         kwargs["rope_interpolation_scale"] = _rope_interpolation_scale(pipe, args)
 
-    if "attention_mask" in params and "attention_mask" not in kwargs:
-        kwargs["attention_mask"] = cond.attention_mask
+    frame_rate = _frame_rate_for_rope(pipe, args)
+    if "frame_rate" in params and "frame_rate" not in kwargs:
+        kwargs["frame_rate"] = frame_rate
+    if "fps" in params and "fps" not in kwargs:
+        kwargs["fps"] = frame_rate
 
-    if "encoder_hidden_states_mask" in params and "encoder_hidden_states_mask" not in kwargs:
-        kwargs["encoder_hidden_states_mask"] = cond.attention_mask
-
-    if "hidden_states_masks" in params and "hidden_states_masks" not in kwargs:
-        kwargs["hidden_states_masks"] = cond.attention_mask
+    for name in (
+        "attention_mask",
+        "encoder_hidden_states_mask",
+        "hidden_states_masks",
+        "prompt_embeds_mask",
+        "prompt_attention_mask",
+    ):
+        if name in params and name not in kwargs:
+            kwargs[name] = cond.attention_mask
 
     for name in list(kwargs):
         if kwargs[name] is None:
@@ -2150,6 +2330,11 @@ def _denoise_forward_one(pipe, model, noisy: LatentBatch, timesteps, cond: TextC
         kwargs["timesteps"] = _shape_denoiser_timesteps(timesteps, noisy, params)
     if "encoder_hidden_states" in params and cond.prompt_embeds is not None:
         kwargs["encoder_hidden_states"] = cond.prompt_embeds
+    elif cond.prompt_embeds is not None:
+        for name in _text_embedding_extra_param_names(params):
+            if name not in kwargs:
+                kwargs[name] = cond.prompt_embeds
+                break
     if "encoder_attention_mask" in params:
         kwargs["encoder_attention_mask"] = cond.attention_mask
     if "encoder_hidden_states_mask" in params:
@@ -2561,6 +2746,7 @@ def main(argv=None) -> None:
     adapter = load_diffusion_adapter(args.diffusion_adapter)
     log.info("loading diffusion model %s (%s)", args.model, args.tuning)
     pipe = load_pipeline(args, device, adapter)
+    log_diffusion_parameter_effects(pipe, args, adapter)
     params = trainable_params(pipe, adapter)
     if not params:
         raise RuntimeError("no trainable diffusion parameters; check --lora-targets")
