@@ -577,3 +577,27 @@ oracle deployable actions have headroom;
 small anchor/action-probe policies do not reliably recover that headroom;
 conservative high-mass gating does not solve the safety problem.
 ```
+
+## EXP2.14 Action Rank Agreement
+
+I also ran a direct anchor-vs-oracle action-rank diagnostic over the three EXP2.9 replay files. The full write-up is in `docs/EXP2_14.md`.
+
+Primary result:
+
+| Metric | Value |
+|---|---:|
+| Records | 614 |
+| Mean Spearman | -0.005 |
+| Mean pairwise concordance | 0.497 |
+| Anchor top-1 matches oracle top-1 | 0.254 |
+| Anchor top-1 gain vs token | -0.000038 |
+| Anchor top-1 negative rate | 0.393 |
+| Headroom captured | -0.057 |
+
+This confirms the failure mode:
+
+```text
+the anchor split is not ranking deployable actions in the same order as the disjoint oracle split.
+```
+
+This explains why both EXP2.9 direct action probing and EXP2.13 conservative gating failed. The next useful work must collect denser scale measurements with more anchor batches or repeated anchor splits; tuning more policies on the existing SmolLM2 replay records is unlikely to help.
