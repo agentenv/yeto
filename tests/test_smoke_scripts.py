@@ -32,6 +32,7 @@ buffered_robust = _load("replay_buffered_robust_syncer")
 buffered_nesterov = _load("replay_buffered_nesterov_syncer")
 buffered_nesterov_agg = _load("aggregate_buffered_nesterov")
 lr_action_probe = _load("analyze_lr_action_probe")
+anchor_gradient_syncer = _load("replay_anchor_gradient_syncer")
 
 
 def test_every_alias_has_a_tier():
@@ -854,3 +855,63 @@ def test_lr_action_probe_margin_falls_back_to_fixed_lr():
     se = {"lr40": 0.02, "lr50": 0.02, "lr60": 0.02}
     assert lr_action_probe._choice(utility, se, actions, "lr50", 0.0) == "lr40"
     assert lr_action_probe._choice(utility, se, actions, "lr50", 1.0) == "lr50"
+
+
+def test_anchor_gradient_tensor_norm_matching_is_per_tensor():
+    import torch
+
+    frag = SimpleNamespace(tensors=[("left", 2), ("right", 2)])
+    source = torch.tensor([3.0, 4.0, 0.0, 2.0])
+    target = torch.tensor([6.0, 8.0, 5.0, 12.0])
+    matched = anchor_gradient_syncer._tensor_normmatch(source, target, frag)
+    assert torch.allclose(matched[:2].norm(), target[:2].norm())
+    assert torch.allclose(matched[2:].norm(), target[2:].norm())
+    assert torch.allclose(matched[:2] / matched[:2].norm(), source[:2] / source[:2].norm())
+
+
+def test_anchor_gradient_pcgrad_removes_tensor_conflict():
+    import torch
+
+    frag = SimpleNamespace(tensors=[("only", 2)])
+    baseline = torch.tensor([1.0, 0.0])
+    anchor = torch.tensor([-1.0, 1.0])
+    corrected, conflict_fraction = anchor_gradient_syncer._pcgrad(baseline, anchor, frag)
+    assert conflict_fraction == 1.0
+    assert torch.dot(corrected, anchor).item() >= -1e-6
+    assert torch.allclose(corrected.norm(), baseline.norm())
+
+
+def test_anchor_gradient_manifest_overlap_is_rejected():
+    import pytest
+
+    with pytest.raises(SystemExit, match="content overlap"):
+        anchor_gradient_syncer._validate_manifest({"overlap_count": 1})
+    anchor_gradient_syncer._validate_manifest({"overlap_count": 0})
+
+
+def test_anchor_gradient_policy_subset_is_validated():
+    base = [
+        "--capture-dir",
+        "/tmp/capture",
+        "--model",
+        "qwen35-9b",
+        "--anchor-data",
+        "/tmp/anchor.jsonl",
+        "--oracle-data",
+        "/tmp/oracle.jsonl",
+        "--split-manifest-out",
+        "/tmp/split.json",
+        "--out-jsonl",
+        "/tmp/out.jsonl",
+        "--out-summary",
+        "/tmp/out.json",
+    ]
+    args = anchor_gradient_syncer.parse_args(
+        base + ["--policies", "anchor_blend05,anchor_pcgrad_normmatch,anchor_blend05"]
+    )
+    assert args.policies == ("anchor_blend05", "anchor_pcgrad_normmatch")
+
+    import pytest
+
+    with pytest.raises(SystemExit):
+        anchor_gradient_syncer.parse_args(base + ["--policies", "token_weighted"])
