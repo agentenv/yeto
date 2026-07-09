@@ -61,6 +61,13 @@ POLICIES = (
     "buffer_transport_huber_age8",
     "buffer_transport_wcoordmed25_age4",
     "buffer_transport_wcoordmed50_age4",
+    "buffer_group_ema10",
+    "buffer_group_ema25",
+    "buffer_group_ema40",
+    "buffer_group_transport25",
+    "buffer_group_guard25",
+    "buffer_group_clip25",
+    "buffer_group_coord_midpoint",
 )
 
 
@@ -386,6 +393,115 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
     return out, info
 
 
+def _group_policy(
+    policy: str,
+    rounds: list[list[soft.Candidate]],
+    momentum: torch.Tensor,
+    frag,
+) -> tuple[torch.Tensor, dict]:
+    group_updates = [_production_merge_update(group, momentum, frag) for group in rounds]
+    current = group_updates[-1]
+    history = group_updates[:-1]
+    ages = [_mean([candidate.age for candidate in group]) for group in rounds]
+    if not history:
+        return current, {
+            "selected_count": len(rounds[-1]),
+            "selected_mass": 1.0,
+            "fresh_effective_share": 1.0,
+            "history_effective_share": 0.0,
+            "normalized_effective_sample_size": 1.0,
+            "mean_age": ages[-1],
+            "p95_age": ages[-1],
+            "guard_active_fraction": 0.0,
+        }
+
+    if policy == "buffer_group_coord_midpoint":
+        merged = _coordinate_midpoint_median(group_updates)
+        fresh_share = 1.0 / len(group_updates)
+        guard_fraction = 0.0
+    else:
+        match = re.fullmatch(r"buffer_group_ema(\d+)", policy)
+        alpha = float(match.group(1)) / 100.0 if match else 0.25
+        history_weights = [math.exp(-(age - ages[-1]) / 4.0) for age in ages[:-1]]
+        history_mean = _weighted(history, history_weights)
+        guard_fraction = 0.0
+        if policy == "buffer_group_clip25":
+            clipped = torch.empty_like(history_mean)
+            offset = 0
+            for numel in _tensor_numels(frag):
+                end = offset + numel
+                old_slice = history_mean[offset:end]
+                current_slice = current[offset:end]
+                scale = min(
+                    1.0,
+                    1.5 * float(current_slice.norm().item()) / max(float(old_slice.norm().item()), 1e-12),
+                )
+                clipped[offset:end] = old_slice * scale
+                offset = end
+            history_mean = clipped
+        if policy == "buffer_group_transport25":
+            transported = torch.empty_like(history_mean)
+            offset = 0
+            relative_age = max(0.0, _mean(ages[:-1]) - ages[-1])
+            rho = 1.0 - math.exp(-relative_age / 4.0)
+            for numel in _tensor_numels(frag):
+                end = offset + numel
+                old_slice = history_mean[offset:end]
+                current_slice = current[offset:end]
+                momentum_slice = momentum[offset:end]
+                norm = float(momentum_slice.norm().item())
+                if norm < 1e-12:
+                    transported[offset:end] = old_slice
+                else:
+                    direction = -momentum_slice / norm
+                    old_projection = float(torch.dot(old_slice, direction).item())
+                    current_projection = float(torch.dot(current_slice, direction).item())
+                    transported[offset:end] = (
+                        old_slice + rho * (current_projection - old_projection) * direction
+                    )
+                offset = end
+            history_mean = transported
+        merged = current.mul(1.0 - alpha).add(history_mean, alpha=alpha)
+        if policy == "buffer_group_guard25":
+            guarded = merged.clone()
+            active = 0
+            offset = 0
+            tensor_numels = _tensor_numels(frag)
+            for numel in tensor_numels:
+                end = offset + numel
+                momentum_slice = momentum[offset:end]
+                norm = float(momentum_slice.norm().item())
+                if norm >= 1e-12:
+                    direction = -momentum_slice / norm
+                    current_projection = float(torch.dot(current[offset:end], direction).item())
+                    merged_projection = float(torch.dot(guarded[offset:end], direction).item())
+                    if merged_projection < current_projection:
+                        guarded[offset:end].add_(
+                            direction, alpha=current_projection - merged_projection
+                        )
+                        active += 1
+                offset = end
+            merged = guarded
+            guard_fraction = active / max(len(tensor_numels), 1)
+        fresh_share = 1.0 - alpha
+
+    effective = [fresh_share]
+    if history:
+        effective.extend([(1.0 - fresh_share) / len(history)] * len(history))
+    ess = 1.0 / sum(weight * weight for weight in effective)
+    return merged, {
+        "selected_count": sum(len(group) for group in rounds),
+        "selected_mass": 1.0,
+        "fresh_effective_share": fresh_share,
+        "history_effective_share": 1.0 - fresh_share,
+        "effective_sample_size": ess,
+        "normalized_effective_sample_size": ess / len(effective),
+        "mean_age": _mean(ages),
+        "p95_age": _quantile(ages, 0.95),
+        "guard_active_fraction": guard_fraction,
+    }
+
+
 def _utility_se(base_by_batch: list[float], trial_by_batch: list[float]) -> float | None:
     utilities = [base - trial for base, trial in zip(base_by_batch, trial_by_batch)]
     if len(utilities) < 2:
@@ -523,6 +639,13 @@ def replay(args) -> list[dict]:
                 for buffered_round in buffers[fid]
                 for item in buffered_round
             ]
+            history_rounds = [
+                [
+                    _buffered_candidate(item, current, momentum, current_version)
+                    for item in buffered_round
+                ]
+                for buffered_round in buffers[fid]
+            ]
 
             baseline_update = _production_merge_update(current_candidates, momentum, frag)
             baseline_trial = _nesterov_trial(
@@ -575,10 +698,13 @@ def replay(args) -> list[dict]:
                 "token_weighted_next_state_step_relative_error": step_rel_error,
             }
             for policy in args.policies:
-                policy_candidates = (
-                    current_candidates if policy.startswith("current_") else history
-                )
-                update, info = _aggregate(policy, policy_candidates, momentum, frag, args)
+                if policy.startswith("buffer_group_"):
+                    update, info = _group_policy(policy, history_rounds, momentum, frag)
+                else:
+                    policy_candidates = (
+                        current_candidates if policy.startswith("current_") else history
+                    )
+                    update, info = _aggregate(policy, policy_candidates, momentum, frag, args)
                 trial = _nesterov_trial(current, momentum, update, args.outer_lr, args.outer_momentum)
                 utility, utility_se = _eval(
                     model, batches, compute_loss, frag, params, current, trial,

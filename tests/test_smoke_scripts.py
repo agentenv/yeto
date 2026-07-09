@@ -769,3 +769,31 @@ def test_coordinate_midpoint_median_is_sign_equivariant():
     negated = buffered_nesterov._coordinate_midpoint_median([-value for value in values])
     assert median.item() == 7.0
     assert torch.equal(negated, -median)
+
+
+def test_buffered_group_ema_keeps_current_round_dominant():
+    import torch
+    from yeto.fragments import MERGE_AVG
+
+    def candidate(value, age):
+        update = torch.tensor([float(value)])
+        return buffered_robust.soft.Candidate(
+            row={},
+            tensor=update,
+            update=update,
+            weight=1.0,
+            age=float(age),
+            norm=abs(float(value)),
+            align=0.0,
+        )
+
+    frag = SimpleNamespace(tensors=[("x", 1)], merge_mode=MERGE_AVG)
+    merged, info = buffered_nesterov._group_policy(
+        "buffer_group_ema25",
+        [[candidate(1.0, 4)], [candidate(3.0, 0)]],
+        torch.zeros(1),
+        frag,
+    )
+    assert torch.allclose(merged, torch.tensor([2.5]))
+    assert info["fresh_effective_share"] == 0.75
+    assert info["history_effective_share"] == 0.25
