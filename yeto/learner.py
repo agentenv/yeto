@@ -72,6 +72,12 @@ def parse_args(argv=None):
     )
     p.add_argument("--learner-id", type=int, required=True)
     p.add_argument("--num-learners", type=int, required=True)
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="base RNG seed; learner id and distributed rank are mixed in deterministically",
+    )
     p.add_argument("--loss-function", default="cross_entropy")
     p.add_argument(
         "--train-on",
@@ -611,6 +617,11 @@ class FragmentUtilityProbe:
 def main(argv=None) -> None:
     args = parse_args(argv)
     rank, world = setup_distributed()
+    process_seed = int(args.seed) + 1009 * int(args.learner_id) + int(rank)
+    random.seed(process_seed)
+    torch.manual_seed(process_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(process_seed)
     logging.basicConfig(
         level=logging.INFO,
         format=f"%(asctime)s learner{args.learner_id}.r{rank} %(levelname)s %(message)s",
@@ -652,6 +663,7 @@ def main(argv=None) -> None:
         raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
 
     log.info("loading model %s (%s)", args.model, args.tuning)
+    log.info("rng seed=%d", process_seed)
     model, tokenizer = load_model_and_tokenizer(args, device)
 
     grad_ckpt = args.gradient_checkpointing == "on"

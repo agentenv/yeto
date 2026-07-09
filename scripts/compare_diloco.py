@@ -217,6 +217,7 @@ def learner_command(args, arm_dir: Path, *, learner_id: int, num_learners: int,
         "--syncer", syncer,
         "--learner-id", str(learner_id),
         "--num-learners", str(num_learners),
+        "--seed", str(getattr(args, "training_seed", 0)),
         "--tuning", "lora",
         "--lora-r", str(args.lora_r),
         "--lora-alpha", str(args.lora_alpha),
@@ -624,6 +625,12 @@ def main() -> int:
         default=None,
         help="deterministically shuffle rows before train/eval split; useful "
         "when row-index learner sharding would otherwise preserve dataset order",
+    )
+    p.add_argument(
+        "--training-seed",
+        type=int,
+        default=0,
+        help="base learner RNG seed; keep equal across compared arms",
     )
     p.add_argument("--device", default="cpu", help="learner/eval device (cpu, mps, cuda)")
     p.add_argument("--shard", choices=["ddp", "fsdp"], default="ddp",
