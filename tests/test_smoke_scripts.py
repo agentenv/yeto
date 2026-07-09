@@ -28,6 +28,7 @@ hard_search = _load("search_group_local_policy")
 action_probe = _load("replay_action_probe_policy")
 action_probe_agg = _load("aggregate_action_probe_results")
 action_stability = _load("analyze_action_probe_stability")
+buffered_robust = _load("replay_buffered_robust_syncer")
 
 
 def test_every_alias_has_a_tier():
@@ -696,3 +697,31 @@ def test_action_probe_stability_uses_anchor_batch_utilities():
         "token_weighted": 1,
     }
     assert result["top1_policy"]["mean_gain_vs_token"] == 0.01
+
+
+def test_buffered_replay_policy_subset_is_validated():
+    base = [
+        "--capture-dir",
+        "/tmp/capture",
+        "--model",
+        "qwen35-9b",
+        "--data",
+        "/tmp/eval.jsonl",
+        "--out-jsonl",
+        "/tmp/out.jsonl",
+        "--out-summary",
+        "/tmp/out.json",
+    ]
+    args = buffered_robust.parse_args(
+        base
+        + [
+            "--policies",
+            "buffer_coord_median,buffer_coord_median_blend25,buffer_coord_median",
+        ]
+    )
+    assert args.policies == ("buffer_coord_median", "buffer_coord_median_blend25")
+
+    import pytest
+
+    with pytest.raises(SystemExit):
+        buffered_robust.parse_args(base + ["--policies", "oracle_positive"])

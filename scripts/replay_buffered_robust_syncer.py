@@ -316,7 +316,7 @@ def replay(args) -> list[dict]:
                 "token_weighted_selected_mass": 1.0,
                 "token_weighted_gain_vs_token": 0.0,
             }
-            for policy in POLICIES[1:]:
+            for policy in args.policies:
                 update, info = _aggregate(policy, buffered, momentum)
                 utility, utility_se = _eval(
                     model, batches, compute_loss, frag, params, current, current + update,
@@ -341,16 +341,21 @@ def replay(args) -> list[dict]:
     return records
 
 
-def summarize(records: list[dict]) -> dict:
+def summarize(records: list[dict], evaluated_policies: tuple[str, ...] | None = None) -> dict:
     if not records:
         raise SystemExit("no buffered replay records")
+    evaluated_policies = evaluated_policies or tuple(
+        policy for policy in POLICIES if f"{policy}_utility" in records[0]
+    )
+    if "token_weighted" not in evaluated_policies:
+        evaluated_policies = ("token_weighted", *evaluated_policies)
     token_neg = _mean([1.0 if row["token_weighted_negative"] else 0.0 for row in records])
     token_strict = _mean([
         1.0 if row["token_weighted_strict_negative"] else 0.0
         for row in records if row["token_weighted_strict_negative"] is not None
     ])
     policies = {}
-    for policy in POLICIES:
+    for policy in evaluated_policies:
         gains = [float(row[f"{policy}_gain_vs_token"]) for row in records]
         utilities = [float(row[f"{policy}_utility"]) for row in records]
         neg = _mean([1.0 if row[f"{policy}_negative"] else 0.0 for row in records])
@@ -371,7 +376,10 @@ def summarize(records: list[dict]) -> dict:
             "mean_age": _mean([float(row.get(f"{policy}_mean_age", 0.0)) for row in records]),
             "p95_age": _mean([float(row.get(f"{policy}_p95_age", 0.0)) for row in records]),
         }
-    best = max(POLICIES[1:], key=lambda policy: policies[policy]["mean_gain_vs_token"])
+    non_token = [policy for policy in evaluated_policies if policy != "token_weighted"]
+    if not non_token:
+        raise SystemExit("at least one non-token policy must be evaluated")
+    best = max(non_token, key=lambda policy: policies[policy]["mean_gain_vs_token"])
     return {
         "schema": "buffered_robust_syncer_summary_v1",
         "records": len(records),
@@ -411,13 +419,26 @@ def parse_args(argv=None):
     parser.add_argument("--probe-batch-size", type=int, default=1)
     parser.add_argument("--probe-max-rows", type=int, default=128)
     parser.add_argument("--buffer-size", type=int, default=8)
+    parser.add_argument(
+        "--policies",
+        default=",".join(POLICIES[1:]),
+        help="Comma-separated non-token policies to evaluate (default: all).",
+    )
     parser.add_argument("--min-candidates", type=int, default=2)
     parser.add_argument("--max-groups", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--progress-every", type=int, default=10)
     parser.add_argument("--out-jsonl", required=True, type=Path)
     parser.add_argument("--out-summary", required=True, type=Path)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    requested = tuple(dict.fromkeys(part.strip() for part in args.policies.split(",") if part.strip()))
+    unknown = sorted(set(requested) - set(POLICIES[1:]))
+    if unknown:
+        parser.error(f"unknown buffered policies: {','.join(unknown)}")
+    if not requested:
+        parser.error("--policies must contain at least one non-token policy")
+    args.policies = requested
+    return args
 
 
 def main(argv=None) -> int:
@@ -428,7 +449,7 @@ def main(argv=None) -> int:
     with args.out_jsonl.open("w") as sink:
         args._sink = sink
         records = replay(args)
-    summary = summarize(records)
+    summary = summarize(records, ("token_weighted", *args.policies))
     args.out_summary.write_text(json.dumps(_jsonable(summary), indent=2, sort_keys=True, allow_nan=False) + "\n")
     print(json.dumps(_jsonable(summary), indent=2, sort_keys=True, allow_nan=False))
     return 0
