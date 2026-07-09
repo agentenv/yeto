@@ -30,6 +30,7 @@ action_probe_agg = _load("aggregate_action_probe_results")
 action_stability = _load("analyze_action_probe_stability")
 buffered_robust = _load("replay_buffered_robust_syncer")
 buffered_nesterov = _load("replay_buffered_nesterov_syncer")
+buffered_nesterov_agg = _load("aggregate_buffered_nesterov")
 
 
 def test_every_alias_has_a_tier():
@@ -797,3 +798,13 @@ def test_buffered_group_ema_keeps_current_round_dominant():
     assert torch.allclose(merged, torch.tensor([2.5]))
     assert info["fresh_effective_share"] == 0.75
     assert info["history_effective_share"] == 0.25
+
+
+def test_buffered_nesterov_aggregate_merges_policy_partitions(tmp_path):
+    shared = {"seed": 59, "step": 5, "fragment": 0, "token_weighted_utility": 0.1}
+    left = tmp_path / "left.jsonl"
+    right = tmp_path / "right.jsonl"
+    left.write_text(json.dumps({**shared, "policy_a_utility": 0.2}) + "\n")
+    right.write_text(json.dumps({**shared, "policy_b_utility": 0.3}) + "\n")
+    rows = buffered_nesterov_agg.merge_records([left, right])
+    assert rows == [{**shared, "policy_a_utility": 0.2, "policy_b_utility": 0.3}]
