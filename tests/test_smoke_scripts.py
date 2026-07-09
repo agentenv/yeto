@@ -1037,4 +1037,26 @@ def test_fragment_lr_profile_selects_action_by_fragment():
     expected = (0.075 + 0.050 + 0.025 + 0.040) / 4
     baseline = 0.050
     assert math.isclose(result["mean_utility"], expected)
-    assert math.isclose(result["mean_gain_vs_fixed_lr50"], expected - baseline)
+    assert math.isclose(result["mean_gain_vs_fixed_lr"], expected - baseline)
+
+
+def test_fragment_lr_profile_accepts_custom_action_grid(tmp_path):
+    args = fragment_lr_profiles.parse_args(
+        [
+            "--replays",
+            str(tmp_path / "replay.jsonl"),
+            "--actions",
+            "50,80,100,125,150",
+            "--baseline-action",
+            "100",
+            "--no-default-profiles",
+            "--profile",
+            "soft=125,100,50,80",
+            "--out-json",
+            str(tmp_path / "out.json"),
+            "--out-md",
+            str(tmp_path / "out.md"),
+        ]
+    )
+    assert args.actions == (50, 80, 100, 125, 150)
+    assert args.profiles == {"soft": (125, 100, 50, 80)}

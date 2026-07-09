@@ -39,7 +39,7 @@ def _same(left, right) -> bool:
     return left == right
 
 
-def merge_records(paths: list[Path]) -> list[dict]:
+def merge_records(paths: list[Path], actions: tuple[int, ...] = ACTIONS) -> list[dict]:
     merged: dict[tuple[int, int, int], dict] = {}
     for path in paths:
         for row in _read_jsonl(path):
@@ -52,7 +52,7 @@ def merge_records(paths: list[Path]) -> list[dict]:
                     )
                 target[field] = value
     records = [merged[key] for key in sorted(merged)]
-    required = [f"current_outer_lr{action}_utility" for action in ACTIONS]
+    required = [f"current_outer_lr{action}_utility" for action in actions]
     for field in required:
         missing = sum(field not in row for row in records)
         if missing:
@@ -82,7 +82,11 @@ def _action_field(action: int, suffix: str) -> str:
     return f"current_outer_lr{action}_{suffix}"
 
 
-def evaluate_profile(rows: list[dict], profile: tuple[int, ...]) -> dict:
+def evaluate_profile(
+    rows: list[dict],
+    profile: tuple[int, ...],
+    baseline_action: int = BASELINE_ACTION,
+) -> dict:
     utilities = []
     baseline_utilities = []
     token_utilities = []
@@ -97,7 +101,7 @@ def evaluate_profile(rows: list[dict], profile: tuple[int, ...]) -> dict:
             )
         action = profile[fragment]
         utility = float(row[_action_field(action, "utility")])
-        baseline = float(row[_action_field(BASELINE_ACTION, "utility")])
+        baseline = float(row[_action_field(baseline_action, "utility")])
         utilities.append(utility)
         baseline_utilities.append(baseline)
         token_utilities.append(float(row["token_weighted_utility"]))
@@ -107,12 +111,12 @@ def evaluate_profile(rows: list[dict], profile: tuple[int, ...]) -> dict:
             strict_negative.append(bool(strict))
         gains.append(utility - baseline)
     baseline_negative = _mean(
-        row[_action_field(BASELINE_ACTION, "negative")] for row in rows
+        row[_action_field(baseline_action, "negative")] for row in rows
     )
     baseline_strict = _mean(
-        row[_action_field(BASELINE_ACTION, "strict_negative")]
+        row[_action_field(baseline_action, "strict_negative")]
         for row in rows
-        if row.get(_action_field(BASELINE_ACTION, "strict_negative")) is not None
+        if row.get(_action_field(baseline_action, "strict_negative")) is not None
     )
     negative_rate = _mean(negative)
     strict_rate = _mean(strict_negative)
@@ -120,19 +124,19 @@ def evaluate_profile(rows: list[dict], profile: tuple[int, ...]) -> dict:
         "records": len(rows),
         "profile": list(profile),
         "mean_utility": _mean(utilities),
-        "mean_gain_vs_fixed_lr50": _mean(gains),
+        "mean_gain_vs_fixed_lr": _mean(gains),
         "mean_gain_vs_global_lr035": _mean(
             utility - token for utility, token in zip(utilities, token_utilities)
         ),
-        "gain_positive_rate_vs_fixed_lr50": _mean(gain > 0.0 for gain in gains),
+        "gain_positive_rate_vs_fixed_lr": _mean(gain > 0.0 for gain in gains),
         "negative_rate": negative_rate,
-        "negative_rate_relative_drop_vs_fixed_lr50": (
+        "negative_rate_relative_drop_vs_fixed_lr": (
             None
             if baseline_negative <= 0.0
             else (baseline_negative - negative_rate) / baseline_negative
         ),
         "strict_negative_rate": strict_rate,
-        "strict_negative_rate_relative_drop_vs_fixed_lr50": (
+        "strict_negative_rate_relative_drop_vs_fixed_lr": (
             None
             if baseline_strict <= 0.0
             else (baseline_strict - strict_rate) / baseline_strict
@@ -144,6 +148,7 @@ def _bootstrap(
     by_seed: dict[int, list[dict]],
     profile: tuple[int, ...],
     *,
+    baseline_action: int,
     block_size: int,
     replicates: int,
     seed: int,
@@ -162,7 +167,11 @@ def _bootstrap(
         for blocks in blocks_by_seed.values():
             sampled = [rng.choice(blocks) for _ in range(len(blocks))]
             rows = [row for block in sampled for row in block]
-            seed_gains.append(evaluate_profile(rows, profile)["mean_gain_vs_fixed_lr50"])
+            seed_gains.append(
+                evaluate_profile(rows, profile, baseline_action)[
+                    "mean_gain_vs_fixed_lr"
+                ]
+            )
         samples.append(_mean(seed_gains))
     return {
         "low": _quantile(samples, 0.025),
@@ -171,7 +180,7 @@ def _bootstrap(
     }
 
 
-def _fragment_table(by_seed: dict[int, list[dict]]) -> dict:
+def _fragment_table(by_seed: dict[int, list[dict]], actions: tuple[int, ...]) -> dict:
     table = {}
     fragments = sorted({int(row["fragment"]) for rows in by_seed.values() for row in rows})
     for fragment in fragments:
@@ -180,7 +189,7 @@ def _fragment_table(by_seed: dict[int, list[dict]]) -> dict:
             subset = [row for row in rows if int(row["fragment"]) == fragment]
             means = {
                 str(action): _mean(row[_action_field(action, "utility")] for row in subset)
-                for action in ACTIONS
+                for action in actions
             }
             best = max(means, key=means.get)
             table[str(fragment)][str(seed)] = {
@@ -195,6 +204,8 @@ def analyze(
     records: list[dict],
     *,
     profiles: dict[str, tuple[int, ...]],
+    actions: tuple[int, ...] = ACTIONS,
+    baseline_action: int = BASELINE_ACTION,
     block_size: int,
     replicates: int,
     bootstrap_seed: int,
@@ -205,31 +216,32 @@ def analyze(
     results = {}
     for name, profile in profiles.items():
         per_seed = {
-            str(seed): evaluate_profile(rows, profile)
+            str(seed): evaluate_profile(rows, profile, baseline_action)
             for seed, rows in sorted(by_seed.items())
         }
-        gains = [row["mean_gain_vs_fixed_lr50"] for row in per_seed.values()]
+        gains = [row["mean_gain_vs_fixed_lr"] for row in per_seed.values()]
         results[name] = {
             "profile": list(profile),
-            "seed_balanced_mean_gain_vs_fixed_lr50": _mean(gains),
+            "seed_balanced_mean_gain_vs_fixed_lr": _mean(gains),
             "all_seeds_positive": all(gain > 0.0 for gain in gains),
             "per_seed": per_seed,
             "paired_block_bootstrap_95": _bootstrap(
                 by_seed,
                 profile,
+                baseline_action=baseline_action,
                 block_size=block_size,
                 replicates=replicates,
                 seed=bootstrap_seed,
             ),
         }
-    best = max(results, key=lambda name: results[name]["seed_balanced_mean_gain_vs_fixed_lr50"])
+    best = max(results, key=lambda name: results[name]["seed_balanced_mean_gain_vs_fixed_lr"])
     return {
         "schema": "fragment_lr_profile_analysis_v1",
         "records": len(records),
         "seeds": sorted(by_seed),
-        "baseline_action": BASELINE_ACTION,
+        "baseline_action": baseline_action,
         "profiles": results,
-        "fragment_action_table": _fragment_table(by_seed),
+        "fragment_action_table": _fragment_table(by_seed, actions),
         "best_profile": best,
         "gate": {
             "best_all_seeds_positive": results[best]["all_seeds_positive"],
@@ -261,14 +273,14 @@ def markdown(result: dict) -> str:
     for name, row in result["profiles"].items():
         ci = row["paired_block_bootstrap_95"]
         seed_gains = ", ".join(
-            f"{seed}:{_fmt(seed_row['mean_gain_vs_fixed_lr50'])}"
+            f"{seed}:{_fmt(seed_row['mean_gain_vs_fixed_lr'])}"
             for seed, seed_row in row["per_seed"].items()
         )
         lines.append(
             "| `{}` | `{}` | {} | {} | {} | [{}, {}] | {} |".format(
                 name,
                 ",".join(str(value) for value in row["profile"]),
-                _fmt(row["seed_balanced_mean_gain_vs_fixed_lr50"]),
+                _fmt(row["seed_balanced_mean_gain_vs_fixed_lr"]),
                 seed_gains,
                 row["all_seeds_positive"],
                 _fmt(ci["low"]),
@@ -292,16 +304,23 @@ def markdown(result: dict) -> str:
     return "\n".join(lines)
 
 
-def parse_profiles(specs: list[str]) -> dict[str, tuple[int, ...]]:
-    profiles = dict(PROFILES)
+def parse_profiles(
+    specs: list[str],
+    *,
+    actions: tuple[int, ...],
+    include_defaults: bool,
+) -> dict[str, tuple[int, ...]]:
+    profiles = dict(PROFILES) if include_defaults else {}
     for spec in specs:
         if "=" not in spec:
             raise SystemExit(f"invalid --profile {spec!r}; expected name=a,b,c,d")
         name, raw = spec.split("=", 1)
         values = tuple(int(part.strip()) for part in raw.split(",") if part.strip())
-        if not name or not values or any(value not in ACTIONS for value in values):
+        if not name or not values or any(value not in actions for value in values):
             raise SystemExit(f"invalid --profile {spec!r}")
         profiles[name] = values
+    if not profiles:
+        raise SystemExit("at least one LR profile is required")
     return profiles
 
 
@@ -309,6 +328,9 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--replays", nargs="+", required=True, type=Path)
     parser.add_argument("--profile", action="append", default=[])
+    parser.add_argument("--actions", default=",".join(str(value) for value in ACTIONS))
+    parser.add_argument("--baseline-action", type=int, default=BASELINE_ACTION)
+    parser.add_argument("--no-default-profiles", action="store_true")
     parser.add_argument("--block-size", type=int, default=4)
     parser.add_argument("--bootstrap-replicates", type=int, default=5000)
     parser.add_argument("--bootstrap-seed", type=int, default=20260709)
@@ -317,15 +339,26 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.block_size < 1 or args.bootstrap_replicates < 1:
         parser.error("block size and bootstrap replicates must be positive")
-    args.profiles = parse_profiles(args.profile)
+    args.actions = tuple(
+        dict.fromkeys(int(part.strip()) for part in args.actions.split(",") if part.strip())
+    )
+    if not args.actions or args.baseline_action not in args.actions:
+        parser.error("--actions must include --baseline-action")
+    args.profiles = parse_profiles(
+        args.profile,
+        actions=args.actions,
+        include_defaults=not args.no_default_profiles,
+    )
     return args
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
     result = analyze(
-        merge_records(args.replays),
+        merge_records(args.replays, args.actions),
         profiles=args.profiles,
+        actions=args.actions,
+        baseline_action=args.baseline_action,
         block_size=args.block_size,
         replicates=args.bootstrap_replicates,
         bootstrap_seed=args.bootstrap_seed,
