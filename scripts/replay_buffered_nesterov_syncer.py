@@ -91,7 +91,13 @@ POLICIES = (
     "buffer_group_ema10",
     "buffer_group_ema25",
     "buffer_group_ema40",
+    "buffer_group_ema10_normmatch",
+    "buffer_group_transport10",
+    "buffer_group_transport15",
+    "buffer_group_transport20",
     "buffer_group_transport25",
+    "buffer_group_transport10_normmatch",
+    "buffer_group_transport25_normmatch",
     "buffer_group_guard25",
     "buffer_group_clip25",
     "buffer_group_coord_midpoint",
@@ -629,8 +635,11 @@ def _group_policy(
         fresh_share = 1.0 / len(group_updates)
         guard_fraction = 0.0
     else:
-        match = re.fullmatch(r"buffer_group_ema(\d+)", policy)
-        alpha = float(match.group(1)) / 100.0 if match else 0.25
+        mix = re.fullmatch(
+            r"buffer_group_(ema|transport)(\d+)(_normmatch)?", policy
+        )
+        alpha = float(mix.group(2)) / 100.0 if mix else 0.25
+        normmatch = bool(mix and mix.group(3))
         history_weights = [math.exp(-(age - ages[-1]) / 4.0) for age in ages[:-1]]
         history_mean = _weighted(history, history_weights)
         guard_fraction = 0.0
@@ -648,7 +657,7 @@ def _group_policy(
                 clipped[offset:end] = old_slice * scale
                 offset = end
             history_mean = clipped
-        if policy == "buffer_group_transport25":
+        if mix and mix.group(1) == "transport":
             transported = torch.empty_like(history_mean)
             offset = 0
             relative_age = max(0.0, _mean(ages[:-1]) - ages[-1])
@@ -671,6 +680,8 @@ def _group_policy(
                 offset = end
             history_mean = transported
         merged = current.mul(1.0 - alpha).add(history_mean, alpha=alpha)
+        if normmatch:
+            merged = _match_tensor_norms(merged, current, frag)
         if policy == "buffer_group_guard25":
             guarded = merged.clone()
             active = 0

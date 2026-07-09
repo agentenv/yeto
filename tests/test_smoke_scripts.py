@@ -813,6 +813,62 @@ def test_buffered_group_ema_keeps_current_round_dominant():
     assert info["history_effective_share"] == 0.25
 
 
+def test_buffered_group_transport_supports_smaller_history_share():
+    import math
+    import torch
+    from yeto.fragments import MERGE_AVG
+
+    def candidate(value, age):
+        update = torch.tensor([float(value)])
+        return buffered_robust.soft.Candidate(
+            row={},
+            tensor=update,
+            update=update,
+            weight=1.0,
+            age=float(age),
+            norm=abs(float(value)),
+            align=0.0,
+        )
+
+    frag = SimpleNamespace(tensors=[("x", 1)], merge_mode=MERGE_AVG)
+    merged, info = buffered_nesterov._group_policy(
+        "buffer_group_transport10",
+        [[candidate(1.0, 4)], [candidate(3.0, 0)]],
+        torch.zeros(1),
+        frag,
+    )
+    assert torch.allclose(merged, torch.tensor([2.8]))
+    assert info["fresh_effective_share"] == 0.9
+    assert math.isclose(info["history_effective_share"], 0.1)
+
+
+def test_buffered_group_normmatch_preserves_current_tensor_norm():
+    import torch
+    from yeto.fragments import MERGE_AVG
+
+    def candidate(update, age):
+        return buffered_robust.soft.Candidate(
+            row={},
+            tensor=update,
+            update=update,
+            weight=1.0,
+            age=float(age),
+            norm=float(update.norm().item()),
+            align=0.0,
+        )
+
+    current = torch.tensor([3.0, 0.0])
+    frag = SimpleNamespace(tensors=[("x", 2)], merge_mode=MERGE_AVG)
+    merged, _ = buffered_nesterov._group_policy(
+        "buffer_group_transport25_normmatch",
+        [[candidate(torch.tensor([0.0, 2.0]), 4)], [candidate(current, 0)]],
+        torch.zeros(2),
+        frag,
+    )
+    assert torch.allclose(merged.norm(), current.norm())
+    assert not torch.allclose(merged, current)
+
+
 def test_consensus_rda_retains_disagreement_magnitude():
     import math
     import torch
