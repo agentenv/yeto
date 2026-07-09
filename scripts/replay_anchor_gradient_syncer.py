@@ -259,7 +259,9 @@ def replay(args) -> tuple[list[dict], dict]:
             oracle_base, oracle_base_by_batch = ag.syncer_eval._losses(
                 model, oracle_batches, compute_loss
             )
-            ag._anchor_gradient(model, anchor_batches, compute_loss)
+            anchor_loss, anchor_tokens = ag._anchor_gradient(
+                model, anchor_batches, compute_loss
+            )
 
             fid = int(first["fragment"])
             frag = layout.fragments[fid]
@@ -279,6 +281,8 @@ def replay(args) -> tuple[list[dict], dict]:
                 )
             baseline_update = bn._production_merge_update(candidates, momentum, frag)
             baseline_delta = -baseline_update
+            anchor_gradient_norm = float(anchor_gradient.norm().item())
+            baseline_delta_norm = float(baseline_delta.norm().item())
             baseline_trial = bn._nesterov_trial(
                 current,
                 momentum,
@@ -304,6 +308,15 @@ def replay(args) -> tuple[list[dict], dict]:
                 "step": int(first["step"]),
                 "fragment": fid,
                 "candidate_count": len(candidates),
+                "anchor_loss": anchor_loss,
+                "anchor_tokens": anchor_tokens,
+                "anchor_gradient_norm": anchor_gradient_norm,
+                "baseline_delta_norm": baseline_delta_norm,
+                "anchor_gradient_norm_ratio": anchor_gradient_norm
+                / max(baseline_delta_norm, 1e-12),
+                "anchor_gradient_cosine_to_baseline": bn.soft._cosine(
+                    anchor_gradient, baseline_delta
+                ),
                 "oracle_base_loss": oracle_base,
                 "token_weighted_utility": baseline_utility,
                 "token_weighted_utility_se": baseline_se,
@@ -409,6 +422,10 @@ def summarize(records: list[dict], policies: tuple[str, ...]) -> dict:
             "anchor_gradient_cosine": _mean(
                 row.get(f"{policy}_anchor_gradient_cosine", 0.0) for row in records
             ),
+            "conflict_tensor_fraction": _mean(
+                row.get(f"{policy}_conflict_tensor_fraction", 0.0)
+                for row in records
+            ),
         }
     non_token = [policy for policy in policies if policy != "token_weighted"]
     best = max(non_token, key=lambda policy: results[policy]["mean_gain_vs_token"])
@@ -418,6 +435,12 @@ def summarize(records: list[dict], policies: tuple[str, ...]) -> dict:
         "seeds": sorted({int(row["seed"]) for row in records}),
         "baseline_negative_rate": baseline_neg,
         "baseline_strict_negative_rate": baseline_strict,
+        "anchor_gradient_norm_ratio": _mean(
+            row.get("anchor_gradient_norm_ratio") for row in records
+        ),
+        "anchor_gradient_cosine_to_baseline": _mean(
+            row.get("anchor_gradient_cosine_to_baseline") for row in records
+        ),
         "policies": results,
         "best_non_token_policy": best,
         "gate": {

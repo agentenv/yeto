@@ -185,6 +185,9 @@ def aggregate(records: list[dict], *, block_size: int, replicates: int, bootstra
             "delta_cosine_to_baseline": _mean(
                 row["delta_cosine_to_baseline"] for row in seed_rows
             ),
+            "conflict_tensor_fraction": _mean(
+                row["conflict_tensor_fraction"] for row in seed_rows
+            ),
             "paired_block_bootstrap_95": ci,
         }
     non_token = [policy for policy in policies if policy != "token_weighted"]
@@ -226,9 +229,9 @@ def markdown(result: dict) -> str:
     lines.append(f"- Best non-token policy: `{result['best_non_token_policy']}`")
     lines.append("")
     lines.append(
-        "| Policy | Mean gain | Seed gains | Neg drop | Strict drop | Norm ratio | Cosine | Bootstrap 95% | P(gain>0) |"
+        "| Policy | Mean gain | Seed gains | Neg drop | Strict drop | Norm ratio | Cosine | Conflict tensors | Bootstrap 95% | P(gain>0) |"
     )
-    lines.append("|---|---:|---|---:|---:|---:|---:|---:|---:|")
+    lines.append("|---|---:|---|---:|---:|---:|---:|---:|---:|---:|")
     for policy, row in result["policies"].items():
         ci = row["paired_block_bootstrap_95"]
         interval = "n/a" if ci is None else f"[{_fmt(ci['low'])}, {_fmt(ci['high'])}]"
@@ -237,7 +240,7 @@ def markdown(result: dict) -> str:
             f"{seed}:{_fmt(gain)}" for seed, gain in row["per_seed_gain"].items()
         )
         lines.append(
-            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
                 policy,
                 _fmt(row["seed_balanced_mean_gain_vs_token"]),
                 seed_gains,
@@ -245,6 +248,7 @@ def markdown(result: dict) -> str:
                 _fmt(row["strict_negative_rate_relative_drop"], 3),
                 _fmt(row["delta_norm_ratio"], 3),
                 _fmt(row["delta_cosine_to_baseline"], 3),
+                _fmt(row["conflict_tensor_fraction"], 3),
                 interval,
                 probability,
             )
