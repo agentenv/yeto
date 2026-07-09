@@ -67,6 +67,9 @@ POLICIES = (
     "current_consensus_rda_linear",
     "current_consensus_rda_affine50",
     "current_consensus_rda_floor50",
+    "current_consensus_outer_lr_p1",
+    "current_consensus_outer_lr_p15",
+    "current_consensus_outer_lr_p2",
     "current_coord_midpoint_raw",
     "current_coord_midpoint_heloco",
     "current_coord_midpoint_normmatch",
@@ -317,6 +320,35 @@ def _consensus_rda_update(
     return out, _mean(scales)
 
 
+def _direction_consensus(
+    candidates: list[soft.Candidate],
+    momentum: torch.Tensor,
+    frag,
+) -> float:
+    corrected = [
+        _heloco_per_tensor(candidate.update, momentum, _tensor_numels(frag))
+        for candidate in candidates
+    ]
+    weights = [candidate.weight for candidate in candidates]
+    total_weight = sum(max(weight, 0.0) for weight in weights)
+    weighted_consensus = 0.0
+    total_numel = 0
+    offset = 0
+    for numel in _tensor_numels(frag):
+        end = offset + numel
+        direction = torch.zeros_like(corrected[0][offset:end])
+        for update, weight in zip(corrected, weights):
+            update_slice = update[offset:end]
+            norm = float(update_slice.norm().item())
+            if weight > 0.0 and norm > 1e-12:
+                direction.add_(update_slice, alpha=weight / max(total_weight, 1e-12) / norm)
+        consensus = min(1.0, max(0.0, float(direction.norm().item())))
+        weighted_consensus += consensus * numel
+        total_numel += numel
+        offset = end
+    return weighted_consensus / max(total_numel, 1)
+
+
 def _match_tensor_norms(source: torch.Tensor, target: torch.Tensor, frag) -> torch.Tensor:
     out = torch.empty_like(source)
     offset = 0
@@ -472,6 +504,14 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
         )
         info["consensus_scale"] = consensus_scale
         return update, info
+    match = re.fullmatch(r"current_consensus_outer_lr_p(1|15|2)", policy)
+    if match:
+        info.update(_weight_stats(weights, relative_ages))
+        consensus = _direction_consensus(candidates, momentum, frag)
+        power = {"1": 1.0, "15": 1.5, "2": 2.0}[match.group(1)]
+        info["consensus_scale"] = consensus
+        info["outer_lr_multiplier"] = max(0.05, consensus**power)
+        return production, info
     if policy in {"current_coord_midpoint_raw", "buffer_coord_midpoint_raw"}:
         info.update(_weight_stats(weights, relative_ages))
         return _coordinate_midpoint_median(updates), info
