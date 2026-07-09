@@ -65,6 +65,7 @@ pub struct Config {
     pub quorum_timeout_s: u64,
     pub total_steps: u64,
     pub outer_lr: f32,
+    pub outer_lr_by_fragment: Option<Vec<f32>>,
     pub outer_momentum: f32,
     pub final_state: Option<std::path::PathBuf>,
     /// Consistent-snapshot file; written every `checkpoint_every` rounds at
@@ -976,6 +977,16 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
         cfg.outer_momentum,
         group.dtype,
     );
+    if let Some(rates) = &cfg.outer_lr_by_fragment {
+        if rates.len() != group.layout.fragments.len() {
+            bail!(
+                "--outer-lr-by-fragment has {} values, layout has {} fragments",
+                rates.len(),
+                group.layout.fragments.len()
+            );
+        }
+        st.outer_lr_by_fragment = Some(rates.clone());
+    }
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }

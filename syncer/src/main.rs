@@ -57,6 +57,10 @@ struct Args {
     /// Outer learning rate.
     #[arg(long, default_value_t = 0.7)]
     outer_lr: f32,
+    /// Optional comma-separated learning rates, one per fragment. When set,
+    /// these replace --outer-lr for the corresponding fragment.
+    #[arg(long)]
+    outer_lr_by_fragment: Option<String>,
     /// Outer Nesterov momentum.
     #[arg(long, default_value_t = 0.9)]
     outer_momentum: f32,
@@ -99,6 +103,11 @@ fn main() -> anyhow::Result<()> {
         "none" => false,
         other => anyhow::bail!("--delta-correction must be 'heloco' or 'none', got {other:?}"),
     };
+    let outer_lr_by_fragment = args
+        .outer_lr_by_fragment
+        .as_deref()
+        .map(parse_outer_lr_by_fragment)
+        .transpose()?;
     let cfg = server::Config {
         port: args.port,
         learners: args.learners,
@@ -113,6 +122,7 @@ fn main() -> anyhow::Result<()> {
         quorum_timeout_s: args.quorum_timeout_s,
         total_steps: args.total_steps,
         outer_lr: args.outer_lr,
+        outer_lr_by_fragment,
         outer_momentum: args.outer_momentum,
         final_state: args.final_state,
         checkpoint_path: args.checkpoint_path,
@@ -126,4 +136,38 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(server::run(cfg))
+}
+
+fn parse_outer_lr_by_fragment(spec: &str) -> anyhow::Result<Vec<f32>> {
+    let values: Vec<f32> = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            part.parse::<f32>()
+                .map_err(|err| anyhow::anyhow!("invalid fragment outer LR {part:?}: {err}"))
+        })
+        .collect::<anyhow::Result<_>>()?;
+    if values.is_empty() {
+        anyhow::bail!("--outer-lr-by-fragment must contain at least one value");
+    }
+    if values.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+        anyhow::bail!("--outer-lr-by-fragment values must be finite and > 0");
+    }
+    Ok(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_outer_lr_by_fragment;
+
+    #[test]
+    fn parses_fragment_outer_learning_rates() {
+        assert_eq!(
+            parse_outer_lr_by_fragment("0.2625, 0.175,0.0875,0.14").unwrap(),
+            vec![0.2625, 0.175, 0.0875, 0.14]
+        );
+        assert!(parse_outer_lr_by_fragment("0.2,-0.1").is_err());
+        assert!(parse_outer_lr_by_fragment("").is_err());
+    }
 }

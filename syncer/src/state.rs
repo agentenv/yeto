@@ -69,6 +69,7 @@ pub struct GlobalState {
     pub global_step: u64,
     pub ledger: std::collections::BTreeMap<u32, LearnerLedger>,
     pub outer_lr: f32,
+    pub outer_lr_by_fragment: Option<Vec<f32>>,
     pub outer_momentum: f32,
     /// Dtype used on the wire (from HELLO); merge math stays f32.
     pub wire_dtype: u8,
@@ -99,6 +100,7 @@ impl GlobalState {
             global_step: 0,
             ledger: Default::default(),
             outer_lr,
+            outer_lr_by_fragment: None,
             outer_momentum,
             wire_dtype,
             delta_correction: None,
@@ -186,11 +188,16 @@ impl GlobalState {
             off += tn;
         }
         let gnorm = delta.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+        let outer_lr = self
+            .outer_lr_by_fragment
+            .as_ref()
+            .map(|rates| rates[fid])
+            .unwrap_or(self.outer_lr);
         merge::nesterov_step(
             &mut self.params[fid],
             &mut self.momentum[fid],
             &delta,
-            self.outer_lr,
+            outer_lr,
             self.outer_momentum,
         );
         Ok(gnorm)
@@ -327,6 +334,17 @@ mod tests {
         assert!(g > 0.0);
         // Θ − 1.0·(Θ − θ) = θ
         assert_eq!(st.params[0], vec![0.0; 4]);
+    }
+
+    #[test]
+    fn fragment_outer_lr_overrides_global_rate() {
+        let mut st = GlobalState::new(layout2(), None, 1.0, 0.0, crate::protocol::DTYPE_F32);
+        st.outer_lr_by_fragment = Some(vec![0.5, 1.0]);
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![1.0; 4]).unwrap();
+        let learner = vec![0.0f32; 4];
+        st.merge_and_step(0, &[&learner], &[1.0]).unwrap();
+        assert_eq!(st.params[0], vec![0.5; 4]);
     }
 
     #[test]

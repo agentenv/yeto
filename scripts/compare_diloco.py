@@ -82,6 +82,7 @@ class Arm:
     delta_correction: str = "heloco"
     quorum: int | None = None  # None -> all M learners each round
     outer_lr: float = 0.7
+    outer_lr_by_fragment: str | None = None
     outer_momentum: float = 0.9
     # Floor on time between round launches (--min-round-interval-ms). On
     # localhost rounds otherwise complete every couple of learner steps
@@ -304,6 +305,8 @@ def syncer_command(
         "--min-round-interval-ms", str(arm.round_interval_ms),
         "--sync-interval-steps", str(arm.sync_interval_steps),
     ]
+    if arm.outer_lr_by_fragment:
+        cmd += ["--outer-lr-by-fragment", arm.outer_lr_by_fragment]
     if probe_capture:
         cmd += [
             "--probe-capture-dir", str(arm_dir / "syncer_probe"),
@@ -676,6 +679,11 @@ def main() -> int:
         default=None,
         help="override outer Nesterov momentum for every selected async arm",
     )
+    p.add_argument(
+        "--outer-lr-by-fragment",
+        default=None,
+        help="comma-separated per-fragment outer learning rates for every selected async arm",
+    )
     p.add_argument("--probe-freshness-scale", type=float, default=24.0)
     p.add_argument(
         "--syncer-probe-capture",
@@ -705,13 +713,22 @@ def main() -> int:
         return 0
 
     arms = select_arms(args.settings)
-    if args.outer_lr is not None or args.outer_momentum is not None:
+    if (
+        args.outer_lr is not None
+        or args.outer_lr_by_fragment is not None
+        or args.outer_momentum is not None
+    ):
         from dataclasses import replace as _replace
 
         arms = [
             _replace(
                 arm,
                 outer_lr=arm.outer_lr if args.outer_lr is None else args.outer_lr,
+                outer_lr_by_fragment=(
+                    arm.outer_lr_by_fragment
+                    if args.outer_lr_by_fragment is None
+                    else args.outer_lr_by_fragment
+                ),
                 outer_momentum=(
                     arm.outer_momentum
                     if args.outer_momentum is None

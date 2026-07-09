@@ -106,6 +106,19 @@ def test_compare_outer_optimizer_override_is_explicit():
     assert cmd[cmd.index("--outer-momentum") + 1] == "0.8"
 
 
+def test_syncer_command_supports_fragment_outer_learning_rates():
+    from dataclasses import replace
+
+    tuned = replace(
+        compare.PRESETS["m4"],
+        outer_lr=0.175,
+        outer_lr_by_fragment="0.2625,0.175,0.0875,0.14",
+    )
+    cmd = compare.syncer_command(tuned, 1234, Path("/tmp/w/m4"), total_steps=100)
+    index = cmd.index("--outer-lr-by-fragment")
+    assert cmd[index + 1] == "0.2625,0.175,0.0875,0.14"
+
+
 def test_token_budget_split_is_fair_across_learners():
     # Same budget, M learners -> per-learner steps shrink by ~M.
     b1 = compare.steps_for(1_000_000, 2, 512, 1)
