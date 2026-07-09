@@ -56,6 +56,9 @@ POLICIES = (
     "buffer_consensus_a2",
     "buffer_geomedian",
     "buffer_coord_median",
+    "buffer_coord_median_blend25",
+    "buffer_coord_median_blend50",
+    "buffer_coord_trim1",
     "buffer_heloco",
 )
 
@@ -142,14 +145,20 @@ def _utility_se(base_by_batch: list[float], trial_by_batch: list[float]) -> floa
     return math.sqrt(var / len(values))
 
 
-def _candidate(row: dict, tensor: torch.Tensor, current: torch.Tensor, momentum: torch.Tensor) -> soft.Candidate:
+def _candidate(
+    row: dict,
+    tensor: torch.Tensor,
+    current: torch.Tensor,
+    momentum: torch.Tensor,
+    current_version: int,
+) -> soft.Candidate:
     update = tensor - current
     return soft.Candidate(
         row=row,
         tensor=tensor,
         update=update,
         weight=soft._candidate_weight(row),
-        age=max(0.0, float(row.get("current_fragment_version", row["step"])) - float(row.get("base_version", row["step"]))),
+        age=max(0.0, float(current_version) - float(row.get("base_version", current_version))),
         norm=float(update.norm().item()),
         align=soft._cosine(update, -momentum),
     )
@@ -203,8 +212,16 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
         weights = [weight * math.exp(-alpha * (1.0 - cosine)) for weight, cosine in zip(weights, agreement)]
     if policy == "buffer_geomedian":
         return _geomedian(updates, weights), info
-    if policy == "buffer_coord_median":
-        return torch.stack(updates).median(dim=0).values, info
+    if policy in {"buffer_coord_median", "buffer_coord_median_blend25", "buffer_coord_median_blend50"}:
+        median = torch.stack(updates).median(dim=0).values
+        if policy == "buffer_coord_median":
+            return median, info
+        token = _weighted(updates, weights)
+        blend = 0.25 if policy.endswith("blend25") else 0.50
+        return token.mul(1.0 - blend).add(median, alpha=blend), info
+    if policy == "buffer_coord_trim1" and len(updates) >= 5:
+        stacked = torch.stack(updates).sort(dim=0).values
+        return stacked[1:-1].mean(dim=0), info
     if policy == "buffer_heloco":
         updates = [soft._heloco_update(update, momentum) for update in updates]
     if policy == "buffer_rda_clip_m1":
@@ -264,14 +281,18 @@ def replay(args) -> list[dict]:
             frag = layout.fragments[fid]
             current = current_ckpt.fragments[fid][1]
             momentum = current_ckpt.fragments[fid][2]
+            current_version = int(current_ckpt.fragments[fid][0])
             current_candidates = []
             for row in group:
                 tensor = _read_f32(_resolve(root, row["candidate_f32"]), frag.numel)
-                current_candidates.append(_candidate(row, tensor, current, momentum))
+                current_candidates.append(_candidate(row, tensor, current, momentum, current_version))
                 buffers[fid].append(Buffered(row=row, tensor=tensor))
             if len(buffers[fid]) < args.buffer_size:
                 continue
-            buffered = [_candidate(item.row, item.tensor, current, momentum) for item in buffers[fid]]
+            buffered = [
+                _candidate(item.row, item.tensor, current, momentum, current_version)
+                for item in buffers[fid]
+            ]
             baseline_update, baseline_info = _aggregate("buffer_token", current_candidates, momentum)
             token_utility, token_se = _eval(
                 model, batches, compute_loss, frag, params, current, current + baseline_update,
