@@ -55,6 +55,9 @@ POLICIES = (
     "current_token_scale50",
     "current_token_scale75",
     "current_token_scale90",
+    "current_outer_lr50",
+    "current_outer_lr75",
+    "current_outer_lr90",
     "current_avg_heloco",
     "current_coord_midpoint_heloco",
     "current_coord_midpoint_normmatch",
@@ -396,6 +399,11 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
     if match:
         info.update(_weight_stats(weights, relative_ages))
         return production * (float(match.group(1)) / 100.0), info
+    match = re.fullmatch(r"current_outer_lr(\d+)", policy)
+    if match:
+        info.update(_weight_stats(weights, relative_ages))
+        info["outer_lr_multiplier"] = float(match.group(1)) / 100.0
+        return production, info
     if policy == "current_avg_heloco":
         info.update(_weight_stats(weights, relative_ages))
         return _production_avg_update(candidates, momentum, frag), info
@@ -789,7 +797,13 @@ def replay(args) -> list[dict]:
                 info["baseline_update_norm"] = baseline_norm
                 info["update_to_baseline_norm_ratio"] = update_norm / max(baseline_norm, 1e-12)
                 info["update_cosine_to_baseline"] = soft._cosine(update, baseline_update)
-                trial = _nesterov_trial(current, momentum, update, args.outer_lr, args.outer_momentum)
+                trial = _nesterov_trial(
+                    current,
+                    momentum,
+                    update,
+                    args.outer_lr * float(info.get("outer_lr_multiplier", 1.0)),
+                    args.outer_momentum,
+                )
                 utility, utility_se = _eval(
                     model, batches, compute_loss, frag, params, current, trial,
                     base_loss, base_by_batch, device,
@@ -858,6 +872,9 @@ def summarize(records: list[dict], policies: tuple[str, ...]) -> dict:
             ]),
             "update_cosine_to_baseline": _mean([
                 float(row.get(f"{policy}_update_cosine_to_baseline", 1.0)) for row in records
+            ]),
+            "outer_lr_multiplier": _mean([
+                float(row.get(f"{policy}_outer_lr_multiplier", 1.0)) for row in records
             ]),
         }
     parameter_errors = [
