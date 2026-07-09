@@ -916,7 +916,10 @@ def _config_value(config, name: str):
         return None
     if isinstance(config, dict):
         return config.get(name)
-    return getattr(config, name, None)
+    try:
+        return config[name]
+    except (KeyError, TypeError):
+        return getattr(config, name, None)
 
 
 def _patch_tuple(value, dims: int) -> tuple[int, ...]:
@@ -1734,6 +1737,107 @@ def _first_trainable_module(pipe, adapter=None) -> torch.nn.Module:
     return modules[0][1]
 
 
+def _denoiser_boundary_timestep(pipe) -> float | None:
+    config = getattr(pipe, "config", None)
+    boundary = _config_value(config, "boundary_timestep")
+    if boundary is None:
+        boundary = getattr(pipe, "boundary_timestep", None)
+    if boundary is not None:
+        try:
+            return float(boundary)
+        except (TypeError, ValueError):
+            return None
+
+    ratio = _config_value(config, "boundary_ratio")
+    if ratio is None:
+        ratio = getattr(pipe, "boundary_ratio", None)
+    if ratio is None:
+        return None
+    try:
+        ratio = float(ratio)
+    except (TypeError, ValueError):
+        return None
+    scheduler = getattr(pipe, "scheduler", None)
+    return ratio * float(_num_train_timesteps(scheduler))
+
+
+def _sample_timestep_values(timesteps: torch.Tensor, batch: int) -> torch.Tensor | None:
+    if not torch.is_tensor(timesteps):
+        return None
+    if timesteps.ndim == 0:
+        return timesteps.reshape(1).expand(batch)
+    if int(timesteps.shape[0]) != batch:
+        return None
+    if timesteps.ndim == 1:
+        return timesteps
+    return timesteps.reshape(batch, -1)[:, 0]
+
+
+def _denoiser_routes(
+    pipe,
+    modules: list[tuple[str, torch.nn.Module]],
+    timesteps: torch.Tensor,
+    batch: int,
+) -> list[tuple[str, torch.nn.Module, torch.Tensor | None]]:
+    if len(modules) < 2:
+        return [(modules[0][0], modules[0][1], None)]
+    boundary = _denoiser_boundary_timestep(pipe)
+    values = _sample_timestep_values(timesteps, batch)
+    if boundary is None or values is None:
+        return [(modules[0][0], modules[0][1], None)]
+
+    high = torch.nonzero(values >= boundary, as_tuple=False).flatten()
+    low = torch.nonzero(values < boundary, as_tuple=False).flatten()
+    routes = []
+    if high.numel():
+        routes.append((modules[0][0], modules[0][1], high))
+    if low.numel():
+        routes.append((modules[1][0], modules[1][1], low))
+    return routes or [(modules[0][0], modules[0][1], None)]
+
+
+def _is_full_batch_indices(indices: torch.Tensor | None, batch: int) -> bool:
+    if indices is None:
+        return True
+    if int(indices.numel()) != batch:
+        return False
+    return bool(torch.equal(indices, torch.arange(batch, device=indices.device)))
+
+
+def _slice_batch_value(value, indices: torch.Tensor, batch: int):
+    if torch.is_tensor(value):
+        if value.ndim > 0 and int(value.shape[0]) == batch:
+            return value.index_select(0, indices.to(device=value.device))
+        return value
+    if isinstance(value, list) and len(value) == batch:
+        return [value[int(i)] for i in indices.detach().cpu().tolist()]
+    if isinstance(value, tuple) and len(value) == batch:
+        return tuple(value[int(i)] for i in indices.detach().cpu().tolist())
+    return value
+
+
+def _slice_latent_batch(batch: LatentBatch, indices: torch.Tensor) -> LatentBatch:
+    return LatentBatch(
+        batch.latents.index_select(0, indices.to(device=batch.latents.device)),
+        batch.latent_num_frames,
+        batch.latent_height,
+        batch.latent_width,
+    )
+
+
+def _slice_text_conditioning(cond: TextConditioning, indices: torch.Tensor, batch: int) -> TextConditioning:
+    return TextConditioning(
+        _slice_batch_value(cond.prompt_embeds, indices, batch),
+        _slice_batch_value(cond.pooled_prompt_embeds, indices, batch),
+        _slice_batch_value(cond.attention_mask, indices, batch),
+        {name: _slice_batch_value(value, indices, batch) for name, value in cond.extra.items()},
+    )
+
+
+def _slice_timesteps(timesteps: torch.Tensor, indices: torch.Tensor, batch: int):
+    return _slice_batch_value(timesteps, indices, batch)
+
+
 def _extract_model_output(out):
     if torch.is_tensor(out):
         return out
@@ -1932,8 +2036,7 @@ def _auto_fill_denoiser_kwargs(pipe, noisy: LatentBatch, cond: TextConditioning,
             kwargs.pop(name)
 
 
-def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning, args, adapter=None):
-    model = _first_trainable_module(pipe, adapter)
+def _denoise_forward_one(pipe, model, noisy: LatentBatch, timesteps, cond: TextConditioning, args):
     inspect_model = _signature_model_for_forward(model)
     sig = inspect.signature(inspect_model.forward)
     params = sig.parameters
@@ -1986,6 +2089,31 @@ def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning,
     with autocast:
         out = model(**kwargs)
     return _extract_model_output(out)
+
+
+def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning, args, adapter=None):
+    modules = _trainable_module_items(pipe, adapter)
+    if not modules:
+        raise RuntimeError("no trainable diffusion module loaded")
+    batch = int(noisy.latents.shape[0])
+    routes = _denoiser_routes(pipe, modules, timesteps, batch)
+    if len(routes) == 1 and _is_full_batch_indices(routes[0][2], batch):
+        return _denoise_forward_one(pipe, routes[0][1], noisy, timesteps, cond, args)
+
+    chunks: list[tuple[torch.Tensor, torch.Tensor]] = []
+    for _, model, indices in routes:
+        if indices is None:
+            indices = torch.arange(batch, device=noisy.latents.device)
+        part_noisy = _slice_latent_batch(noisy, indices)
+        part_cond = _slice_text_conditioning(cond, indices, batch)
+        part_timesteps = _slice_timesteps(timesteps, indices, batch)
+        chunks.append((indices, _denoise_forward_one(pipe, model, part_noisy, part_timesteps, part_cond, args)))
+
+    first = chunks[0][1]
+    output = first.new_empty((batch, *first.shape[1:]))
+    for indices, chunk in chunks:
+        output.index_copy_(0, indices.to(device=output.device), chunk)
+    return output
 
 
 def compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0, adapter=None):

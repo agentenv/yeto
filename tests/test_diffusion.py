@@ -125,7 +125,8 @@ def test_diffusion_capability_matrix_covers_aliases():
         assert cap.modalities
         assert cap.forward_kwargs
     assert "nava" in aliases_by_status("adapter-required")
-    assert "wan22" in aliases_by_status("generic-gap")
+    assert "flux" in aliases_by_status("generic-gap")
+    assert "wan22" in aliases_by_status("needs-real-validation")
     assert "| `wan22` |" in format_capability_table(("wan22",))
 
 
@@ -169,6 +170,74 @@ def test_diffusion_trainable_modules_skip_none_placeholders():
     )
 
     assert learner._trainable_module_items(pipe) == [("transformer", pipe.transformer)]
+
+
+def test_diffusion_multi_denoiser_routes_by_boundary_timestep():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self, offset):
+            super().__init__()
+            self.offset = offset
+            self.seen = []
+
+        def forward(self, hidden_states, timestep, encoder_hidden_states=None, return_dict=False):
+            del return_dict
+            self.seen.append((hidden_states.detach().clone(), timestep.detach().clone(), encoder_hidden_states))
+            return (hidden_states + self.offset,)
+
+    high = TinyDenoiser(1.0)
+    low = TinyDenoiser(2.0)
+    pipe = SimpleNamespace(
+        transformer=high,
+        transformer_2=low,
+        scheduler=SimpleNamespace(config=SimpleNamespace(num_train_timesteps=1000)),
+        config=SimpleNamespace(boundary_ratio=0.5),
+    )
+    noisy = learner.LatentBatch(torch.zeros(4, 2))
+    timesteps = torch.tensor([750.0, 250.0, 600.0, 100.0])
+    prompt_embeds = torch.arange(4 * 3 * 2, dtype=torch.float32).reshape(4, 3, 2)
+    cond = learner.TextConditioning(prompt_embeds)
+
+    out = learner.denoise_forward(pipe, noisy, timesteps, cond, _args())
+
+    assert torch.equal(out[:, 0], torch.tensor([1.0, 2.0, 1.0, 2.0]))
+    assert torch.equal(high.seen[0][1], torch.tensor([750.0, 600.0]))
+    assert torch.equal(low.seen[0][1], torch.tensor([250.0, 100.0]))
+    assert torch.equal(high.seen[0][2], prompt_embeds[[0, 2]])
+    assert torch.equal(low.seen[0][2], prompt_embeds[[1, 3]])
+
+
+def test_diffusion_multi_denoiser_uses_second_model_for_low_noise_batch():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self, offset):
+            super().__init__()
+            self.offset = offset
+
+        def forward(self, hidden_states, timestep, return_dict=False):
+            del timestep, return_dict
+            return (hidden_states + self.offset,)
+
+    pipe = SimpleNamespace(
+        transformer=TinyDenoiser(1.0),
+        transformer_2=TinyDenoiser(2.0),
+        scheduler=SimpleNamespace(config=SimpleNamespace(num_train_timesteps=1000)),
+        config=SimpleNamespace(boundary_ratio=0.5),
+    )
+
+    out = learner.denoise_forward(
+        pipe,
+        learner.LatentBatch(torch.zeros(2, 1)),
+        torch.tensor([100.0, 200.0]),
+        learner.TextConditioning(None),
+        _args(),
+    )
+
+    assert torch.equal(out, torch.full((2, 1), 2.0))
 
 
 def test_diffusion_adapter_base_is_marker_not_hook_provider():

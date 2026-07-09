@@ -314,8 +314,8 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         scheduler=_FLOW_MATCH,
         forward_kwargs=("hidden_states", "timestep", "encoder_hidden_states"),
         output_alignment="direct latent output",
-        status="generic-gap",
-        gaps=("multi-denoiser timestep routing is not implemented",),
+        status="needs-real-validation",
+        gaps=("generic multi-denoiser routing is implemented; real Wan2.2 validation is pending",),
         evidence=("Wan2.2 config/source inspection",),
     ),
     "cogvideox-2b": _cap(
