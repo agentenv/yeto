@@ -25,6 +25,8 @@ group_local = _load("replay_group_local_probecommit")
 build_group_features = _load("build_group_local_features")
 policy_grid = _load("replay_group_local_policy_grid")
 hard_search = _load("search_group_local_policy")
+action_probe = _load("replay_action_probe_policy")
+action_probe_agg = _load("aggregate_action_probe_results")
 
 
 def test_every_alias_has_a_tier():
@@ -531,3 +533,82 @@ def test_hard_search_deployable_oracle_excludes_oracles():
     choices = hard_search.deployable_oracle_choices([row])
     assert choices == ["anchor_drop_bottom25"]
     assert all("oracle" not in action for action in hard_search.DEPLOYABLE_ACTIONS)
+
+
+def test_action_probe_deployable_selection_excludes_oracles():
+    record = {
+        "token_weighted_anchor_utility": 0.0,
+        "anchor_drop_bottom25_anchor_utility": 0.1,
+        "oracle_positive_anchor_utility": 100.0,
+    }
+    action, utility, margin = action_probe.selected_action_by_anchor(
+        record, ("token_weighted", "anchor_drop_bottom25")
+    )
+    assert action == "anchor_drop_bottom25"
+    assert utility == 0.1
+    assert margin == 0.1
+    assert all("oracle" not in action for action in action_probe.DEFAULT_DEPLOYABLE_ACTIONS)
+
+
+def test_action_probe_manifest_overlap_is_rejected():
+    import pytest
+
+    with pytest.raises(SystemExit):
+        action_probe.validate_manifest({"overlap_count": 1}, require_disjoint=True)
+    action_probe.validate_manifest({"overlap_count": 0}, require_disjoint=True)
+
+
+def test_action_probe_margin_gated_fallback():
+    record = {
+        "token_weighted_anchor_utility": 0.10,
+        "anchor_drop_bottom25_anchor_utility": 0.1002,
+    }
+    assert (
+        action_probe.margin_gated_choice(
+            record, ("token_weighted", "anchor_drop_bottom25"), margin=0.001
+        )
+        == "token_weighted"
+    )
+    assert (
+        action_probe.margin_gated_choice(
+            record, ("token_weighted", "anchor_drop_bottom25"), margin=0.0001
+        )
+        == "anchor_drop_bottom25"
+    )
+
+
+def test_action_probe_aggregate_rejects_missing_seed():
+    import pytest
+
+    summary = {
+        "records": 1,
+        "seeds": [53],
+        "policies": {
+            "action_probe_top1": {
+                "mean_gain_vs_token": 0.1,
+                "negative_rate_relative_drop": 0.1,
+                "strict_negative_rate_relative_drop": 0.1,
+                "oracle_positive_headroom_captured": 0.1,
+                "selected_mass_mean": 1.0,
+                "chosen_action_distribution": {"anchor_drop_bottom25": 1},
+            },
+            "action_probe_margin_gated": {
+                "mean_gain_vs_token": 0.1,
+                "negative_rate_relative_drop": 0.1,
+                "strict_negative_rate_relative_drop": 0.1,
+                "oracle_positive_headroom_captured": 0.1,
+                "selected_mass_mean": 1.0,
+                "chosen_action_distribution": {"anchor_drop_bottom25": 1},
+            },
+            "action_probe_risk_aware": {
+                "mean_gain_vs_token": 0.1,
+                "negative_rate_relative_drop": 0.1,
+                "strict_negative_rate_relative_drop": 0.1,
+                "oracle_positive_headroom_captured": 0.1,
+                "selected_mass_mean": 1.0,
+                "chosen_action_distribution": {"anchor_drop_bottom25": 1},
+            },
+        },
+    }
+    with pytest.raises(SystemExit):
+        action_probe_agg.aggregate([summary], expected_seeds=[53, 67])

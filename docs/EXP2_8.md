@@ -172,6 +172,16 @@ The most useful next question is:
 
 > Can better current-state measurements identify which deployable action to take, given that deployable action headroom clearly exists?
 
+## Follow-Up: EXP2.9
+
+EXP2.9 tested that question with direct action-probe replay:
+
+```text
+docs/EXP2_9.md
+```
+
+The result is still no-go. A two-batch anchor probe does not choose deployable actions that generalize to the disjoint oracle split, even though deployable-action oracle headroom remains large.
+
 ## Commands
 
 Default hard search:
