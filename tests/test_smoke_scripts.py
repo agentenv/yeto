@@ -33,6 +33,7 @@ buffered_nesterov = _load("replay_buffered_nesterov_syncer")
 buffered_nesterov_agg = _load("aggregate_buffered_nesterov")
 lr_action_probe = _load("analyze_lr_action_probe")
 anchor_gradient_syncer = _load("replay_anchor_gradient_syncer")
+anchor_gradient_agg = _load("aggregate_anchor_gradient_syncer")
 
 
 def test_every_alias_has_a_tier():
@@ -915,3 +916,26 @@ def test_anchor_gradient_policy_subset_is_validated():
 
     with pytest.raises(SystemExit):
         anchor_gradient_syncer.parse_args(base + ["--policies", "token_weighted"])
+
+
+def test_anchor_gradient_aggregate_merges_policy_partitions(tmp_path):
+    shared = {
+        "schema": "anchor_gradient_syncer_replay_v1",
+        "seed": 59,
+        "step": 5,
+        "fragment": 0,
+        "token_weighted_utility": 0.1,
+        "token_weighted_gain_vs_token": 0.0,
+    }
+    left = tmp_path / "left.jsonl"
+    right = tmp_path / "right.jsonl"
+    left.write_text(json.dumps({**shared, "anchor_blend05_utility": 0.2}) + "\n")
+    right.write_text(json.dumps({**shared, "anchor_pcgrad_normmatch_utility": 0.3}) + "\n")
+    rows = anchor_gradient_agg.merge_records([left, right])
+    assert rows == [
+        {
+            **shared,
+            "anchor_blend05_utility": 0.2,
+            "anchor_pcgrad_normmatch_utility": 0.3,
+        }
+    ]
