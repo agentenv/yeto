@@ -542,3 +542,38 @@ The most promising direction is a conservative safety-first policy rather than m
 3. Optimize for negative-rate drop first, mean utility second.
 4. Replicate Qwen3.5-9B seed31 with denser groups before any online run.
 5. If safety still fails, pivot to a measurement/diagnostic contribution rather than an online policy claim.
+
+## EXP2.13 Conservative Safety-First Search
+
+I ran the conservative safety-first replay on the existing EXP2.9 action-probe artifacts. This is still offline-only; no online training was started. The full write-up is in `docs/EXP2_13.md`, and the primary artifacts are:
+
+```text
+scripts/search_conservative_action_probe.py
+experiment-results/EXP2/probecommit-offline/exp2_13_conservative/conservative_search.json
+experiment-results/EXP2/probecommit-offline/exp2_13_conservative/conservative_search.md
+```
+
+The search used held-out-seed splits and tried high-confidence gain, safety-veto, shrink-veto, and risk-LCB variants while penalizing selected mass below `0.85`.
+
+Aggregate result:
+
+| Metric | Value |
+|---|---:|
+| Records | 614 |
+| Mean gain vs token | 0.0000176 |
+| Negative-rate relative drop | 0.017 |
+| Strict-negative-rate relative drop | 0.073 |
+| Oracle-positive headroom captured | -0.128 |
+| Selected mass | 0.939 |
+
+Decision: do not start online ProbeCommit from this policy family. Conservative gating fixes selected mass but not action quality. Seed 67 remains the blocker: it has negative held-out gain, negative-rate regression, and strongly negative headroom capture.
+
+The updated conclusion is:
+
+```text
+bad fragments exist;
+bad mass can hurt token-weighted merge;
+oracle deployable actions have headroom;
+small anchor/action-probe policies do not reliably recover that headroom;
+conservative high-mass gating does not solve the safety problem.
+```
