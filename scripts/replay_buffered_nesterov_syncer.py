@@ -70,6 +70,9 @@ POLICIES = (
     "current_consensus_outer_lr_p1",
     "current_consensus_outer_lr_p15",
     "current_consensus_outer_lr_p2",
+    "current_avg_norm_outer_lr",
+    "current_median_norm_outer_lr",
+    "current_median_norm_outer_lr_p15",
     "current_coord_midpoint_raw",
     "current_coord_midpoint_heloco",
     "current_coord_midpoint_normmatch",
@@ -496,6 +499,12 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
     if policy == "current_avg_heloco":
         info.update(_weight_stats(weights, relative_ages))
         return _production_avg_update(candidates, momentum, frag), info
+    if policy == "current_avg_norm_outer_lr":
+        info.update(_weight_stats(weights, relative_ages))
+        average = _production_avg_update(candidates, momentum, frag)
+        ratio = float(average.norm().item()) / max(float(production.norm().item()), 1e-12)
+        info["outer_lr_multiplier"] = max(0.05, min(1.0, ratio))
+        return production, info
     match = re.fullmatch(r"current_consensus_rda_(sqrt|linear|affine50|floor50)", policy)
     if match:
         info.update(_weight_stats(weights, relative_ages))
@@ -534,6 +543,15 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
             blend = float(policy.removeprefix("current_coord_midpoint_blend")) / 100.0
             return production.mul(1.0 - blend).add(median, alpha=blend), info
         return median, info
+    if policy in {"current_median_norm_outer_lr", "current_median_norm_outer_lr_p15"}:
+        corrected = [_heloco_per_tensor(update, momentum, _tensor_numels(frag)) for update in updates]
+        median = _coordinate_midpoint_median(corrected)
+        info.update(_weight_stats(weights, relative_ages))
+        ratio = float(median.norm().item()) / max(float(production.norm().item()), 1e-12)
+        if policy.endswith("p15"):
+            ratio = ratio**1.5
+        info["outer_lr_multiplier"] = max(0.05, min(1.0, ratio))
+        return production, info
     if policy == "current_geomedian_heloco":
         corrected = [_heloco_per_tensor(update, momentum, _tensor_numels(frag)) for update in updates]
         info.update(_weight_stats(weights, relative_ages))
