@@ -1,0 +1,165 @@
+name: exp2-12-qwen4b-p4de
+
+resources:
+  infra: aws/us-west-2
+  instance_type: p4de.24xlarge
+  accelerators: A100-80GB:8
+  use_spot: true
+  disk_size: 1024
+
+file_mounts:
+  ~/.aws: ~/.aws
+
+workdir: .
+
+setup: |
+  set -euxo pipefail
+  if ! command -v cargo >/dev/null 2>&1; then
+    curl https://sh.rustup.rs -sSf | sh -s -- -y
+  fi
+  . "$HOME/.cargo/env" || true
+  python -m pip install -U pip
+  python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+  python -m pip install -r requirements.txt awscli
+  python -m pip install -e . --no-deps
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+    sudo modprobe nvidia_uvm || true
+    if ! systemctl list-unit-files | grep -q '^nvidia-fabricmanager'; then
+      sudo apt-get update
+      sudo apt-get install -y nvidia-fabricmanager-535 || \
+        sudo apt-get install -y cuda-drivers-fabricmanager-535 || \
+        sudo apt-get install -y nvidia-fabricmanager || true
+    fi
+    sudo systemctl enable nvidia-fabricmanager || true
+    sudo systemctl restart nvidia-fabricmanager || sudo service nvidia-fabricmanager restart || true
+    for i in $(seq 1 36); do
+      if python -c 'import torch; print("cuda_available", torch.cuda.is_available()); print("device_count", torch.cuda.device_count()); assert torch.cuda.is_available() and torch.cuda.device_count() > 0; print("capability", torch.cuda.get_device_capability(0))'
+      then
+        break
+      fi
+      if [ "$i" -eq 36 ]; then
+        echo "[yeto-setup] CUDA did not initialize after Fabric Manager restart" >&2
+        nvidia-smi || true
+        systemctl status nvidia-fabricmanager --no-pager || true
+        exit 1
+      fi
+      sleep 5
+      sudo systemctl restart nvidia-fabricmanager || sudo service nvidia-fabricmanager restart || true
+    done
+  fi
+  cargo build --release -q --manifest-path syncer/Cargo.toml
+
+run: |
+  set -euxo pipefail
+  . "$HOME/.cargo/env" || true
+  export PYTHONUNBUFFERED=1
+  export TOKENIZERS_PARALLELISM=false
+  EXP_ROOT="experiment-results/EXP2/scale-qwen35-4b-p4de-m4"
+  rm -rf "$EXP_ROOT"
+  mkdir -p "$EXP_ROOT"
+
+  python scripts/compare_diloco.py \
+    --model qwen35-4b \
+    --data trl-lib/Capybara \
+    --settings m4 \
+    --token-budget 1000000 \
+    --seq-len 128 \
+    --micro-batch-size 1 \
+    --inner-lr 0.001 \
+    --lora-r 2 \
+    --lora-alpha 4 \
+    --eval-rows 256 \
+    --max-rows 5000 \
+    --shuffle-rows-seed 17 \
+    --device cuda \
+    --learner-gpus 1 \
+    --fixed-window-tokens 8192 \
+    --fixed-window-microsteps 64 \
+    --pad-to-fixed-window-tokens \
+    --freeze-delta-before-delay \
+    --learner-push-delay-ms 0,100,200,300 \
+    --learner-delay-jitter-ms 20 \
+    --probe-data eval \
+    --probe-every 1 \
+    --probe-batches 2 \
+    --probe-batch-size 1 \
+    --probe-max-rows 128 \
+    --syncer-probe-capture \
+    --syncer-probe-capture-every 1 \
+    --work-dir "$EXP_ROOT/work" \
+    --report-dir "$EXP_ROOT/report"
+
+  python scripts/evaluate_anchor_gradient_features.py \
+    --capture-dir "$EXP_ROOT/work/m4/syncer_probe" \
+    --model qwen35-4b \
+    --data "$EXP_ROOT/work/eval.jsonl" \
+    --seq-len 128 \
+    --lora-r 2 \
+    --lora-alpha 4 \
+    --fragments 4 \
+    --anchor-batches 2 \
+    --anchor-batch-size 1 \
+    --anchor-max-rows 64 \
+    --oracle-batches 8 \
+    --oracle-batch-size 1 \
+    --oracle-max-rows 192 \
+    --disjoint-anchor-oracle \
+    --device cuda \
+    --split-manifest-out "$EXP_ROOT/disjoint_split_manifest.json" \
+    --out-jsonl "$EXP_ROOT/anchor_gradient_disjoint.jsonl" \
+    --out-summary "$EXP_ROOT/anchor_gradient_disjoint_summary.json"
+
+  python scripts/replay_probecommit_policy.py \
+    --capture-dir "$EXP_ROOT/work/m4/syncer_probe" \
+    --features "$EXP_ROOT/anchor_gradient_disjoint.jsonl" \
+    --split-manifest "$EXP_ROOT/disjoint_split_manifest.json" \
+    --model qwen35-4b \
+    --data "$EXP_ROOT/work/eval.jsonl" \
+    --seq-len 128 \
+    --lora-r 2 \
+    --lora-alpha 4 \
+    --fragments 4 \
+    --oracle-batches 8 \
+    --oracle-batch-size 1 \
+    --oracle-max-rows 192 \
+    --device cuda \
+    --out-jsonl "$EXP_ROOT/policy_replay.jsonl" \
+    --out-summary "$EXP_ROOT/policy_replay_summary.json"
+
+  python scripts/replay_action_probe_policy.py \
+    --capture-dir "$EXP_ROOT/work/m4/syncer_probe" \
+    --features "$EXP_ROOT/anchor_gradient_disjoint.jsonl" \
+    --policy-replay "$EXP_ROOT/policy_replay.jsonl" \
+    --split-manifest "$EXP_ROOT/disjoint_split_manifest.json" \
+    --model qwen35-4b \
+    --data "$EXP_ROOT/work/eval.jsonl" \
+    --seq-len 128 \
+    --lora-r 2 \
+    --lora-alpha 4 \
+    --fragments 4 \
+    --anchor-batches 8 \
+    --anchor-batch-size 1 \
+    --anchor-max-rows 64 \
+    --oracle-batches 8 \
+    --oracle-batch-size 1 \
+    --oracle-max-rows 192 \
+    --disjoint-anchor-oracle \
+    --oracle-source precomputed \
+    --device cuda \
+    --anchor-deployable-only \
+    --include-anchor-batch-utilities \
+    --out-jsonl "$EXP_ROOT/action_probe_8batch_replay.jsonl" \
+    --out-summary "$EXP_ROOT/action_probe_8batch_summary.json" \
+    --out-md "$EXP_ROOT/action_probe_8batch_summary.md"
+
+  python scripts/analyze_action_probe_stability.py \
+    --replays "$EXP_ROOT/action_probe_8batch_replay.jsonl" \
+    --batch-sizes 2 4 8 \
+    --subsets-per-size 12 \
+    --margin 0.0005 \
+    --out-json "$EXP_ROOT/action_probe_stability.json" \
+    --out-md "$EXP_ROOT/action_probe_stability.md"
+
+  tar -czf /tmp/exp2_12_qwen35_4b_p4de_m4.tgz "$EXP_ROOT"
+  aws s3 cp /tmp/exp2_12_qwen35_4b_p4de_m4.tgz s3://yeto-exp-artifacts-533462777468-us-west-2/EXP2/exp2_12_qwen35_4b_p4de_m4.tgz

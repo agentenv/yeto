@@ -503,3 +503,42 @@ temporary EC2 key pair: deleted
 temporary SSH ingress rule: removed
 temporary S3 bucket and objects: deleted
 ```
+
+## EXP2.12 Scale Stress Follow-up
+
+After EXP2.5-2.11 showed that small-model group-local policies were brittle, I ran a manual p4de scale sweep on Qwen/Gemma models to test whether the failure was a tiny-model artifact. The p4de instance used a manual DLAMI rather than Sky because the Sky-selected p4de image had a broken CUDA/NVSwitch stack. The full compact table is in `experiment-results/EXP2/scale_policy_summary.md`.
+
+### Setup
+
+- Instance: manual AWS `p4de.24xlarge`, 8x A100 80GB, DLAMI with working Fabric Manager.
+- Data: `trl-lib/Capybara`.
+- Models: `qwen35-4b`, `qwen35-9b`, `qwen3-8b`, `gemma4`.
+- Stress: fixed-token windows with freeze-before-delay push.
+- Policies: token-weighted baseline, anchor/drop/reweight variants, direct action-probe variants, candidate-probe variants, oracle references.
+
+### Main Scale Findings
+
+| Run | Records | Best deployable result | Gate status |
+|---|---:|---|---|
+| Qwen3.5-9B seed31 | 16 | `action_probe_risk_aware`: gain `+0.00197`, headroom captured `40.9%`, selected mass `0.781` | Closest signal; fails negative/drop safety gates. |
+| Qwen3.5-9B seed43 | 20 | No replicate: best action-probe gain only `+0.000132`, headroom captured negative | Does not replicate seed31. |
+| Gemma4 long | 52 | `action_probe_top1`: gain `+0.02011`, selected mass `0.854`, headroom captured `38.6%` | Strong mean utility; still misses headroom threshold and safety gates. |
+| Gemma4 restricted action sweep | 52 | `action_probe_top1`: gain `+0.01505`, selected mass `0.936`, headroom captured `19.1%` | Mean utility robust; safety/headroom weak. |
+| Qwen3-8B | 15 | `metadata_calibrated`: gain `+0.00604`, headroom captured `73.3%` in policy replay | Not an action-probe win; safety unchanged. |
+| Qwen3.5-4B fast | 20 | Several small positive gains around `+0.001` | Positive but headroom capture often negative. |
+
+### Decision
+
+Do not start online ProbeCommit yet.
+
+The scale runs show the policy problem is not purely a tiny-model artifact: Gemma4 and Qwen3.5-9B both show deployable actions with meaningful one-step utility gain, and the best Qwen3.5-9B action-probe run crossed the mean-gain and headroom-capture thresholds. However, the signal did not replicate on Qwen3.5-9B seed43, and the strongest Gemma4 run still failed the safety gates. The remaining blocker is not finding mean utility; it is reducing negative/strict-negative merge rate reliably across seeds.
+
+### Next Direction
+
+The most promising direction is a conservative safety-first policy rather than more broad action search:
+
+1. Use action-probe only as a veto/shrink rule, not as top-1 action selection.
+2. Keep selected mass high (`>=0.85`) unless anchor evidence is very strong.
+3. Optimize for negative-rate drop first, mean utility second.
+4. Replicate Qwen3.5-9B seed31 with denser groups before any online run.
+5. If safety still fails, pivot to a measurement/diagnostic contribution rather than an online policy claim.

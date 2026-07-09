@@ -147,13 +147,43 @@ def learner_env(args, learner_id: int) -> dict[str, str] | None:
     env = dict(os.environ)
     learner_gpus = getattr(args, "learner_gpus", 0)
     gpu_slots = getattr(args, "gpu_slots", 0)
+    gpu_offset = getattr(args, "gpu_offset", 0)
     if learner_gpus <= 0:
         if gpu_slots > 0 and args.device.startswith("cuda"):
-            env["CUDA_VISIBLE_DEVICES"] = str(learner_id % gpu_slots)
+            env["CUDA_VISIBLE_DEVICES"] = str(gpu_offset + (learner_id % gpu_slots))
             return env
         return None
     lo = learner_id * learner_gpus
-    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in range(lo, lo + learner_gpus))
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_offset + g) for g in range(lo, lo + learner_gpus))
+    return env
+
+
+def assigned_gpu_ids(args, arms: list[Arm] | None = None) -> list[int] | None:
+    """Physical GPU ids owned by this compare invocation, or None for all."""
+    if not getattr(args, "device", "").startswith("cuda"):
+        return None
+    learner_gpus = getattr(args, "learner_gpus", 0)
+    gpu_slots = getattr(args, "gpu_slots", 0)
+    gpu_offset = getattr(args, "gpu_offset", 0)
+    if learner_gpus > 0:
+        if arms is None:
+            arms = select_arms(args.settings)
+        need = max([1] + [arm.m for arm in arms]) * learner_gpus
+    elif gpu_slots > 0:
+        need = gpu_slots
+    else:
+        return None
+    return list(range(gpu_offset, gpu_offset + need))
+
+
+def eval_env(args) -> dict[str, str] | None:
+    ids = assigned_gpu_ids(args)
+    if not ids:
+        return None
+    import os
+
+    env = dict(os.environ)
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in ids)
     return env
 
 
@@ -363,7 +393,12 @@ def eval_loss_per_token(model_id: str, adapter_dir: Path | None, eval_file: Path
     return total_loss / max(total_tokens, 1.0)
 
 
-def wait_for_free_gpus(device: str, limit_mb: int = 2000, timeout_s: int = 180) -> None:
+def wait_for_free_gpus(
+    device: str,
+    limit_mb: int = 2000,
+    timeout_s: int = 180,
+    gpu_ids: list[int] | None = None,
+) -> None:
     """Block until no compute process holds more than `limit_mb` on any GPU.
 
     Arms and evals run strictly one after another, but a just-exited CUDA
@@ -374,20 +409,48 @@ def wait_for_free_gpus(device: str, limit_mb: int = 2000, timeout_s: int = 180) 
     """
     if not device.startswith("cuda"):
         return
+    target_uuids: set[str] | None = None
+    if gpu_ids is not None:
+        gpu_out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        index_to_uuid = {}
+        for line in gpu_out.splitlines():
+            parts = [v.strip() for v in line.split(",")]
+            if len(parts) >= 2 and parts[0].isdigit():
+                index_to_uuid[int(parts[0])] = parts[1]
+        missing = [i for i in gpu_ids if i not in index_to_uuid]
+        if missing:
+            raise RuntimeError(
+                f"cannot map GPU id(s) {missing} from nvidia-smi output"
+            )
+        target_uuids = {index_to_uuid[i] for i in gpu_ids}
     deadline = time.monotonic() + timeout_s
     last = ""
     while True:
+        query = (
+            "gpu_uuid,pid,process_name,used_gpu_memory"
+            if target_uuids is not None
+            else "pid,process_name,used_gpu_memory"
+        )
         out = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=pid,process_name,used_gpu_memory",
-             "--format=csv,noheader,nounits"],
+            ["nvidia-smi", f"--query-compute-apps={query}", "--format=csv,noheader,nounits"],
             capture_output=True, text=True,
         ).stdout.strip()
         holders = []
         for line in out.splitlines():
             parts = [v.strip() for v in line.split(",")]
-            if len(parts) < 3:
-                continue
-            pid, name, mem = parts[0], parts[1], parts[-1]
+            if target_uuids is not None:
+                if len(parts) < 4:
+                    continue
+                uuid, pid, name, mem = parts[0], parts[1], parts[2], parts[-1]
+                if uuid not in target_uuids:
+                    continue
+            else:
+                if len(parts) < 3:
+                    continue
+                pid, name, mem = parts[0], parts[1], parts[-1]
             # Drivers that report [N/A] per-process memory would otherwise
             # slip a fully-loaded process past the numeric check — ANY
             # listed compute app counts as occupying the GPU.
@@ -418,11 +481,13 @@ def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float
     ]
     if adapter_dir is not None:
         cmd += ["--adapter-dir", str(adapter_dir)]
-    wait_for_free_gpus(args.device)
-    out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    wait_for_free_gpus(args.device, gpu_ids=assigned_gpu_ids(args))
+    out = subprocess.run(
+        cmd, cwd=REPO_ROOT, capture_output=True, text=True, env=eval_env(args)
+    )
     # The child has exited, but the driver may release its VRAM lazily;
     # don't hand the GPUs to the next arm until it is actually gone.
-    wait_for_free_gpus(args.device)
+    wait_for_free_gpus(args.device, gpu_ids=assigned_gpu_ids(args))
     for line in reversed(out.stdout.splitlines()):
         if line.startswith("EVAL_LOSS "):
             return float(line.split()[1])
@@ -437,7 +502,7 @@ def run_baseline(args, work: Path) -> tuple[Path, float]:
                       world=max(1, args.learner_gpus))
     cmd = learner_command(args, arm_dir, learner_id=0, num_learners=1,
                           syncer="none", max_steps=steps, arm=None)
-    wait_for_free_gpus(args.device)
+    wait_for_free_gpus(args.device, gpu_ids=assigned_gpu_ids(args))
     t0 = time.monotonic()
     run_checked(cmd, arm_dir / "learner.log", env=learner_env(args, 0))
     return arm_dir / "learner-0", time.monotonic() - t0
@@ -463,7 +528,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
         ),
         stdout=open(arm_dir / "syncer.log", "w"), stderr=subprocess.STDOUT,
     )
-    wait_for_free_gpus(args.device)
+    wait_for_free_gpus(args.device, gpu_ids=assigned_gpu_ids(args))
     t0 = time.monotonic()
     learners = []
     try:
@@ -568,6 +633,8 @@ def main() -> int:
     p.add_argument("--gpu-slots", type=int, default=0,
                    help="when --learner-gpus 0 and --device cuda, assign "
                    "single-process learners round-robin over this many GPUs")
+    p.add_argument("--gpu-offset", type=int, default=0,
+                   help="first physical GPU id to assign when partitioning learners")
     p.add_argument("--learner-step-sleep-ms", default="0",
                    help="comma-separated per-learner sleep after each optimizer step")
     p.add_argument("--learner-push-delay-ms", default="0",
@@ -655,10 +722,11 @@ def main() -> int:
             else args.gpu_slots
         )
         have = torch.cuda.device_count()
-        if have < need:
+        if args.gpu_offset + need > have:
             raise SystemExit(
-                f"largest arm needs {need} visible GPU(s) "
-                f"but only {have} are visible"
+                f"largest arm needs physical GPU ids "
+                f"{args.gpu_offset}..{args.gpu_offset + need - 1} "
+                f"but only {have} visible GPU(s) exist"
             )
     ensure_syncer()
     if args.work_dir.exists():
@@ -704,7 +772,7 @@ def main() -> int:
         "|---|---|---|---|---|",
     ]
     for r in records:
-        delta = "—" if r["arm"].startswith(("base", "baseline")) else (
+        delta = "—" if r["arm"].startswith(("base", "baseline")) or bl == 0 else (
             f"{100 * (r['eval_loss'] - bl) / bl:+.2f}%"
         )
         md.append(f"| {r['arm']} | {r['m'] or '—'} | {r['wall_s']:.0f} "

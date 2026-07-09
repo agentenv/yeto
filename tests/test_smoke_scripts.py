@@ -118,6 +118,49 @@ def test_multi_gpu_learner_uses_torchrun_and_gpu_blocks():
     assert compare.gpu_env(0, 0) is None
 
 
+def test_compare_gpu_assignment_respects_offset_and_slots():
+    args = SimpleNamespace(
+        device="cuda", learner_gpus=2, gpu_slots=0, gpu_offset=4, settings="m2,m4"
+    )
+    assert compare.assigned_gpu_ids(args) == [4, 5, 6, 7, 8, 9, 10, 11]
+    assert compare.learner_env(args, 1)["CUDA_VISIBLE_DEVICES"] == "6,7"
+    assert compare.eval_env(args)["CUDA_VISIBLE_DEVICES"] == "4,5,6,7,8,9,10,11"
+
+    args = SimpleNamespace(
+        device="cuda", learner_gpus=0, gpu_slots=3, gpu_offset=5, settings="m2"
+    )
+    assert compare.assigned_gpu_ids(args) == [5, 6, 7]
+    assert compare.learner_env(args, 4)["CUDA_VISIBLE_DEVICES"] == "6"
+    assert compare.eval_env(args)["CUDA_VISIBLE_DEVICES"] == "5,6,7"
+
+
+def test_compare_gpu_wait_filters_to_assigned_gpus(monkeypatch, capsys):
+    class Result:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    compute_queries = {"n": 0}
+
+    def fake_run(cmd, **kwargs):
+        if "--query-gpu=index,uuid" in cmd:
+            return Result("0, GPU-a\n1, GPU-b\n")
+        if "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory" in cmd:
+            compute_queries["n"] += 1
+            if compute_queries["n"] == 1:
+                return Result("GPU-a, 111, python, 9000\nGPU-b, 222, python, 9000\n")
+            return Result("")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(compare.subprocess, "run", fake_run)
+    monkeypatch.setattr(compare.time, "sleep", lambda _: None)
+
+    compare.wait_for_free_gpus("cuda", timeout_s=1, gpu_ids=[1])
+
+    out = capsys.readouterr().out
+    assert "222" in out
+    assert "111" not in out
+
+
 def test_learner_command_arm_overrides():
     args = SimpleNamespace(
         model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=512,
