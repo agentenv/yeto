@@ -29,6 +29,7 @@ action_probe = _load("replay_action_probe_policy")
 action_probe_agg = _load("aggregate_action_probe_results")
 action_stability = _load("analyze_action_probe_stability")
 buffered_robust = _load("replay_buffered_robust_syncer")
+buffered_nesterov = _load("replay_buffered_nesterov_syncer")
 
 
 def test_every_alias_has_a_tier():
@@ -725,3 +726,46 @@ def test_buffered_replay_policy_subset_is_validated():
 
     with pytest.raises(SystemExit):
         buffered_robust.parse_args(base + ["--policies", "oracle_positive"])
+
+
+def test_buffered_nesterov_matches_syncer_equation():
+    import torch
+
+    current = torch.tensor([1.0])
+    momentum = torch.tensor([0.2])
+    merged_update = torch.tensor([-0.5])
+    trial = buffered_nesterov._nesterov_trial(
+        current, momentum, merged_update, outer_lr=0.7, outer_momentum=0.9
+    )
+    delta = -merged_update
+    next_momentum = 0.9 * momentum + delta
+    expected = current - 0.7 * (delta + 0.9 * next_momentum)
+    assert torch.allclose(trial, expected)
+
+
+def test_buffered_transport_caps_history_without_dropping_candidates():
+    import torch
+
+    updates = [torch.tensor([1.0]), torch.tensor([1.2]), torch.tensor([-4.0]), torch.tensor([-3.0])]
+    merged, stats = buffered_nesterov._transport_slice(
+        updates,
+        [1.0, 1.0, 1.0, 1.0],
+        [0.0, 0.0, 4.0, 4.0],
+        torch.tensor([-1.0]),
+        tau=4.0,
+        history_cap=0.30,
+        mode="mean",
+    )
+    assert stats["history_effective_share"] <= 0.300001
+    assert stats["normalized_effective_sample_size"] > 0.5
+    assert merged.item() >= 1.1 - 1e-6  # guard cannot trail the fresh mean on -momentum
+
+
+def test_coordinate_midpoint_median_is_sign_equivariant():
+    import torch
+
+    values = [torch.tensor([float(value)]) for value in range(0, 16, 2)]
+    median = buffered_nesterov._coordinate_midpoint_median(values)
+    negated = buffered_nesterov._coordinate_midpoint_median([-value for value in values])
+    assert median.item() == 7.0
+    assert torch.equal(negated, -median)
