@@ -433,20 +433,32 @@ def _buffered_candidate(
 def replay(args) -> list[dict]:
     root = args.capture_dir or args.index.parent
     index = args.index or root / "index.jsonl"
-    groups = buffered._group_rows(buffered._read_jsonl(index), 1)
-    for group in groups:
+    all_groups = buffered._group_rows(buffered._read_jsonl(index), 1)
+    incomplete = []
+    for group in all_groups:
         learners = [int(row["learner_id"]) for row in group]
         if len(learners) != len(set(learners)):
             raise SystemExit(
                 f"duplicate learner in step={group[0]['step']} fragment={group[0]['fragment']}"
             )
         if args.expected_candidates and len(group) != args.expected_candidates:
-            raise SystemExit(
-                f"incomplete group step={group[0]['step']} fragment={group[0]['fragment']}: "
-                f"got {len(group)}, expected {args.expected_candidates}"
-            )
-    if not args.expected_candidates:
-        groups = [group for group in groups if len(group) >= args.min_candidates]
+            incomplete.append(group)
+    if incomplete and not args.drop_incomplete_groups:
+        first = incomplete[0]
+        raise SystemExit(
+            f"incomplete group step={first[0]['step']} fragment={first[0]['fragment']}: "
+            f"got {len(first)}, expected {args.expected_candidates}; "
+            "pass --drop-incomplete-groups only when these are known terminal partial rounds"
+        )
+    groups = [
+        group
+        for group in all_groups
+        if (
+            len(group) == args.expected_candidates
+            if args.expected_candidates
+            else len(group) >= args.min_candidates
+        )
+    ]
     if args.max_groups is not None:
         groups = groups[: args.max_groups]
 
@@ -472,7 +484,7 @@ def replay(args) -> list[dict]:
     buffers: dict[int, deque[list[Buffered]]] = defaultdict(
         lambda: deque(maxlen=args.buffer_rounds)
     )
-    next_states = _next_state_paths(groups, root) if args.validate_next_state else {}
+    next_states = _next_state_paths(all_groups, root) if args.validate_next_state else {}
     current_state_path = None
     current_ckpt = None
     base_loss = 0.0
@@ -547,6 +559,7 @@ def replay(args) -> list[dict]:
                 "fragment": fid,
                 "state_checkpoint": first["state_checkpoint"],
                 "candidate_count": len(current_candidates),
+                "dropped_incomplete_group_count": len(incomplete),
                 "buffer_rounds": len(buffers[fid]),
                 "buffer_size": len(history),
                 "base_loss": base_loss,
@@ -648,6 +661,7 @@ def summarize(records: list[dict], policies: tuple[str, ...]) -> dict:
     return {
         "schema": "buffered_nesterov_syncer_summary_v1",
         "records": len(records),
+        "dropped_incomplete_group_count": int(records[0]["dropped_incomplete_group_count"]),
         "seeds": sorted({int(row["seed"]) for row in records if row.get("seed") is not None}),
         "buffer_rounds": int(records[0]["buffer_rounds"]),
         "buffer_size": int(records[0]["buffer_size"]),
@@ -703,6 +717,7 @@ def parse_args(argv=None):
     parser.add_argument("--outer-momentum", type=float, default=0.9)
     parser.add_argument("--min-candidates", type=int, default=2)
     parser.add_argument("--expected-candidates", type=int, default=0)
+    parser.add_argument("--drop-incomplete-groups", action="store_true")
     parser.add_argument("--max-groups", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--progress-every", type=int, default=10)
