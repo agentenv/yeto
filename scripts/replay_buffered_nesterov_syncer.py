@@ -59,6 +59,7 @@ POLICIES = (
     "current_outer_lr75",
     "current_outer_lr90",
     "current_avg_heloco",
+    "current_coord_midpoint_raw",
     "current_coord_midpoint_heloco",
     "current_coord_midpoint_normmatch",
     "current_rda_median_norm",
@@ -407,7 +408,7 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
     if policy == "current_avg_heloco":
         info.update(_weight_stats(weights, relative_ages))
         return _production_avg_update(candidates, momentum, frag), info
-    if policy == "buffer_coord_midpoint_raw":
+    if policy in {"current_coord_midpoint_raw", "buffer_coord_midpoint_raw"}:
         info.update(_weight_stats(weights, relative_ages))
         return _coordinate_midpoint_median(updates), info
     if policy in {
