@@ -92,8 +92,8 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         scheduler=_FLOW_MATCH,
         forward_kwargs=("hidden_states", "timestep", "encoder_hidden_states", "pooled_projections", "txt_ids", "img_ids", "guidance"),
         output_alignment="pipeline _unpack_latents helper",
-        status="generic-gap",
-        gaps=("output unpack/alignment needs real Flux validation",),
+        status="needs-real-validation",
+        gaps=("generic output unpack/alignment is implemented; real Flux validation is pending",),
         evidence=("diffusers examples/dreambooth/train_dreambooth_lora_flux.py", "finetrainers FluxModelSpecification"),
     ),
     "flux-schnell": _cap(
@@ -118,8 +118,8 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         scheduler=_FLOW_MATCH,
         forward_kwargs=("hidden_states", "timestep", "encoder_hidden_states", "txt_ids", "img_ids", "guidance"),
         output_alignment="pipeline _unpack_latents_with_ids helper",
-        status="generic-gap",
-        gaps=("generic output unpack with ids is not implemented",),
+        status="needs-real-validation",
+        gaps=("generic output unpack with ids is implemented; real Flux2 validation is pending",),
         evidence=("diffusers examples/dreambooth/train_dreambooth_lora_flux2.py",),
     ),
     "chroma1-base": _cap(
@@ -196,8 +196,8 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         scheduler=_FLOW_MATCH,
         forward_kwargs=("hidden_states", "timestep", "encoder_hidden_states", "encoder_hidden_states_mask", "img_shapes"),
         output_alignment="pipeline _unpack_latents helper",
-        status="generic-gap",
-        gaps=("prompt mask padding/packing and output unpack need real validation",),
+        status="needs-real-validation",
+        gaps=("generic prompt mask forwarding and output unpack are implemented; real Qwen Image validation is pending",),
         evidence=("diffusers examples/dreambooth/train_dreambooth_lora_qwen_image.py",),
     ),
     "qwen-image-2512": _cap(
@@ -209,8 +209,8 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         scheduler=_FLOW_MATCH,
         forward_kwargs=("hidden_states", "timestep", "encoder_hidden_states", "encoder_hidden_states_mask", "img_shapes"),
         output_alignment="pipeline _unpack_latents helper",
-        status="generic-gap",
-        gaps=("prompt mask padding/packing and output unpack need real validation",),
+        status="needs-real-validation",
+        gaps=("generic prompt mask forwarding and output unpack are implemented; real Qwen Image validation is pending",),
         evidence=("diffusers examples/dreambooth/train_dreambooth_lora_qwen_image.py",),
     ),
     "sd35": _cap(

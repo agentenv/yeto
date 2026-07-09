@@ -125,7 +125,8 @@ def test_diffusion_capability_matrix_covers_aliases():
         assert cap.modalities
         assert cap.forward_kwargs
     assert "nava" in aliases_by_status("adapter-required")
-    assert "flux" in aliases_by_status("generic-gap")
+    assert "cogvideox-2b" in aliases_by_status("generic-gap")
+    assert "flux" in aliases_by_status("needs-real-validation")
     assert "wan22" in aliases_by_status("needs-real-validation")
     assert "| `wan22` |" in format_capability_table(("wan22",))
 
@@ -238,6 +239,79 @@ def test_diffusion_multi_denoiser_uses_second_model_for_low_noise_batch():
     )
 
     assert torch.equal(out, torch.full((2, 1), 2.0))
+
+
+def test_diffusion_aligns_packed_output_with_pipeline_unpack_helper():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyPipe:
+        vae_scale_factor = 1
+
+        @staticmethod
+        def _unpack_latents(latents, height, width, vae_scale_factor):
+            assert (height, width, vae_scale_factor) == (2, 2, 1)
+            return latents.reshape(latents.shape[0], 1, 2, 2)
+
+    pred = torch.arange(8, dtype=torch.float32).reshape(2, 4, 1)
+    target = torch.zeros(2, 1, 2, 2)
+    noisy = learner.LatentBatch(pred, latent_height=2, latent_width=2)
+
+    aligned_pred, aligned_target = learner._align_prediction_and_target(
+        TinyPipe(),
+        pred,
+        target,
+        noisy,
+        learner.TextConditioning(None),
+    )
+
+    assert torch.equal(aligned_pred, pred.reshape(2, 1, 2, 2))
+    assert aligned_target is target
+
+
+def test_diffusion_aligns_extra_output_tokens_to_target_tokens():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    pred = torch.arange(10, dtype=torch.float32).reshape(2, 5, 1)
+    target = torch.zeros(2, 3, 1)
+
+    aligned_pred, aligned_target = learner._align_prediction_and_target(
+        SimpleNamespace(),
+        pred,
+        target,
+        learner.LatentBatch(pred),
+        learner.TextConditioning(None),
+    )
+
+    assert torch.equal(aligned_pred, pred[:, :3])
+    assert aligned_target is target
+
+
+def test_diffusion_unpack_with_ids_crops_extra_output_tokens():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyPipe:
+        @staticmethod
+        def _unpack_latents_with_ids(x, x_ids):
+            assert x.shape[1] == x_ids.shape[1] == 4
+            return x.reshape(x.shape[0], 1, 2, 2)
+
+    pred = torch.arange(10, dtype=torch.float32).reshape(2, 5, 1)
+    target = torch.zeros(2, 1, 2, 2)
+    x_ids = torch.zeros(2, 4, 4)
+
+    aligned_pred, aligned_target = learner._align_prediction_and_target(
+        TinyPipe(),
+        pred,
+        target,
+        learner.LatentBatch(pred, latent_height=2, latent_width=2),
+        learner.TextConditioning(None, extra={"x_ids": x_ids}),
+    )
+
+    assert torch.equal(aligned_pred, pred[:, :4].reshape(2, 1, 2, 2))
+    assert aligned_target is target
 
 
 def test_diffusion_adapter_base_is_marker_not_hook_provider():

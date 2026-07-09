@@ -1961,6 +1961,22 @@ def _make_image_ids(noisy: LatentBatch, dtype) -> torch.Tensor | None:
     return coords.reshape(-1, 3)
 
 
+def _make_batched_image_ids(noisy: LatentBatch, dtype) -> torch.Tensor | None:
+    grid = _latent_token_grid(noisy)
+    if grid is None:
+        return None
+    frames, height, width = grid
+    frame_ids = torch.arange(frames, device=noisy.latents.device, dtype=dtype)
+    row_ids = torch.arange(height, device=noisy.latents.device, dtype=dtype)
+    col_ids = torch.arange(width, device=noisy.latents.device, dtype=dtype)
+    layer_ids = torch.arange(1, device=noisy.latents.device, dtype=dtype)
+    coords = torch.stack(
+        torch.meshgrid(frame_ids, row_ids, col_ids, layer_ids, indexing="ij"),
+        dim=-1,
+    ).reshape(-1, 4)
+    return coords.unsqueeze(0).expand(int(noisy.latents.shape[0]), -1, -1)
+
+
 def _make_text_ids(cond: TextConditioning, fallback, dtype) -> torch.Tensor | None:
     source = cond.prompt_embeds
     if source is None:
@@ -2116,6 +2132,115 @@ def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning,
     return output
 
 
+def _vae_scale_factor(pipe) -> int:
+    for name in ("vae_scale_factor", "vae_scale_factor_spatial"):
+        value = getattr(pipe, name, None)
+        if isinstance(value, int) and value > 0:
+            return value
+    vae_config = getattr(getattr(pipe, "vae", None), "config", None)
+    blocks = getattr(vae_config, "block_out_channels", None)
+    if isinstance(blocks, (list, tuple)) and len(blocks) > 1:
+        return 2 ** (len(blocks) - 1)
+    return 8
+
+
+def _normalize_unpacked_output(value):
+    if torch.is_tensor(value):
+        return value
+    if isinstance(value, (list, tuple)) and value and all(torch.is_tensor(v) for v in value):
+        shapes = {tuple(v.shape) for v in value}
+        if len(shapes) == 1:
+            return torch.stack(list(value), dim=0)
+    return None
+
+
+def _image_ids_for_unpack(noisy: LatentBatch, cond: TextConditioning, dtype) -> torch.Tensor | None:
+    for name in ("x_ids", "img_ids", "image_ids", "latent_ids"):
+        value = cond.extra.get(name)
+        if torch.is_tensor(value):
+            return value
+    return _make_batched_image_ids(noisy, dtype)
+
+
+def _unpack_values(pipe, tensor: torch.Tensor, target: torch.Tensor, noisy: LatentBatch, cond: TextConditioning):
+    scale = _vae_scale_factor(pipe)
+    height = noisy.latent_height
+    width = noisy.latent_width
+    if height is None and target.ndim >= 4:
+        height = int(target.shape[-2])
+    if width is None and target.ndim >= 4:
+        width = int(target.shape[-1])
+    pixel_height = int(height) * scale if height is not None else None
+    pixel_width = int(width) * scale if width is not None else None
+    x_ids = _image_ids_for_unpack(noisy, cond, tensor.dtype)
+    helper_tensor = tensor
+    if torch.is_tensor(x_ids) and tensor.ndim == 3 and x_ids.ndim >= 2:
+        token_count = int(x_ids.shape[-2])
+        if tensor.shape[1] >= token_count:
+            helper_tensor = tensor[:, :token_count]
+    return {
+        "latents": helper_tensor,
+        "x": helper_tensor,
+        "height": pixel_height,
+        "width": pixel_width,
+        "vae_scale_factor": scale,
+        "x_ids": x_ids,
+        "img_ids": x_ids,
+        "image_ids": x_ids,
+    }
+
+
+def _try_unpack_to_shape(
+    pipe,
+    tensor: torch.Tensor,
+    target: torch.Tensor,
+    noisy: LatentBatch,
+    cond: TextConditioning,
+) -> torch.Tensor | None:
+    values = _unpack_values(pipe, tensor, target, noisy, cond)
+    for names in (
+        ("_unpack_latents_with_ids", "unpack_latents_with_ids"),
+        ("_unpack_latents", "unpack_latents"),
+    ):
+        try:
+            unpacked = _call_optional_pipeline_helper(pipe, names, values)
+        except (RuntimeError, ValueError):
+            log.debug("ignoring incompatible diffusion unpack helper %s", names, exc_info=True)
+            continue
+        unpacked = _normalize_unpacked_output(unpacked)
+        if torch.is_tensor(unpacked) and tuple(unpacked.shape) == tuple(target.shape):
+            return unpacked.to(device=target.device, dtype=target.dtype)
+    return None
+
+
+def _align_prediction_and_target(
+    pipe,
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    noisy: LatentBatch,
+    cond: TextConditioning,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if tuple(pred.shape) == tuple(target.shape):
+        return pred, target
+    if (
+        pred.ndim == target.ndim == 3
+        and pred.shape[0] == target.shape[0]
+        and pred.shape[2:] == target.shape[2:]
+        and pred.shape[1] >= target.shape[1]
+    ):
+        pred = pred[:, : target.shape[1]]
+        if tuple(pred.shape) == tuple(target.shape):
+            return pred, target
+
+    unpacked_pred = _try_unpack_to_shape(pipe, pred, target, noisy, cond)
+    if unpacked_pred is not None:
+        return unpacked_pred, target
+    unpacked_target = _try_unpack_to_shape(pipe, target, pred, noisy, cond)
+    if unpacked_target is not None:
+        return pred, unpacked_target
+    return pred, target
+
+
 def compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0, adapter=None):
     if adapter is not None:
         for name in ("compute_loss", "training_step"):
@@ -2137,6 +2262,7 @@ def compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0, adapt
     )
     noisy, target, timesteps = add_noise_and_target(pipe, latents)
     pred = denoise_forward(pipe, noisy, timesteps, cond, args, adapter)
+    pred, target = _align_prediction_and_target(pipe, pred, target, noisy, cond)
     if args.loss_function != "flow_matching":
         raise ValueError("diffusion learner currently supports --loss-function flow_matching")
     weights = diffusion_loss_weights(pipe, timesteps, target, args)
