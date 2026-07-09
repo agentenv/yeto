@@ -664,6 +664,18 @@ def main() -> int:
     p.add_argument("--probe-batch-size", type=int, default=1)
     p.add_argument("--probe-max-rows", type=int, default=64)
     p.add_argument("--probe-outer-lr", type=float, default=1.0)
+    p.add_argument(
+        "--outer-lr",
+        type=float,
+        default=None,
+        help="override the outer learning rate for every selected async arm",
+    )
+    p.add_argument(
+        "--outer-momentum",
+        type=float,
+        default=None,
+        help="override outer Nesterov momentum for every selected async arm",
+    )
     p.add_argument("--probe-freshness-scale", type=float, default=24.0)
     p.add_argument(
         "--syncer-probe-capture",
@@ -693,6 +705,21 @@ def main() -> int:
         return 0
 
     arms = select_arms(args.settings)
+    if args.outer_lr is not None or args.outer_momentum is not None:
+        from dataclasses import replace as _replace
+
+        arms = [
+            _replace(
+                arm,
+                outer_lr=arm.outer_lr if args.outer_lr is None else args.outer_lr,
+                outer_momentum=(
+                    arm.outer_momentum
+                    if args.outer_momentum is None
+                    else args.outer_momentum
+                ),
+            )
+            for arm in arms
+        ]
     if args.round_interval_ms is not None:
         from dataclasses import replace as _replace
 

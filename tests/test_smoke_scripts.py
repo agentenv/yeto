@@ -93,6 +93,16 @@ def test_compare_presets_cover_core_axes():
     assert compare.PRESETS["q4"].wire_dtype == "q4"
 
 
+def test_compare_outer_optimizer_override_is_explicit():
+    from dataclasses import replace
+
+    arm = compare.PRESETS["m4"]
+    tuned = replace(arm, outer_lr=0.35, outer_momentum=0.8)
+    cmd = compare.syncer_command(tuned, 1234, Path("/tmp/w/m4"), total_steps=100)
+    assert cmd[cmd.index("--outer-lr") + 1] == "0.35"
+    assert cmd[cmd.index("--outer-momentum") + 1] == "0.8"
+
+
 def test_token_budget_split_is_fair_across_learners():
     # Same budget, M learners -> per-learner steps shrink by ~M.
     b1 = compare.steps_for(1_000_000, 2, 512, 1)
