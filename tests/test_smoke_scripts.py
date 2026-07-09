@@ -24,6 +24,7 @@ replay_merge = _load("replay_merge_utility")
 group_local = _load("replay_group_local_probecommit")
 build_group_features = _load("build_group_local_features")
 policy_grid = _load("replay_group_local_policy_grid")
+hard_search = _load("search_group_local_policy")
 
 
 def test_every_alias_has_a_tier():
@@ -498,3 +499,35 @@ def test_exp27_feature_and_policy_grid_helpers_exclude_oracles():
         {"spread": 0.1},
     )
     assert policy_grid.decide(drop, feature_row) == "anchor_drop_bottom25"
+
+
+def test_hard_search_deployable_oracle_excludes_oracles():
+    row = {
+        "seed": 1,
+        "step": 1,
+        "fragment": 0,
+        "candidate_count": 2,
+        "scores": {},
+        "agreement": {},
+        "actions": {},
+    }
+    for action in hard_search.DEPLOYABLE_ACTIONS:
+        row["actions"][action] = {
+            "utility": 0.0,
+            "negative": False,
+            "strict_negative": False,
+            "selected_mass": 1.0,
+            "selected_count": 2,
+        }
+    row["actions"]["anchor_drop_bottom25"]["utility"] = 0.1
+    row["actions"]["oracle_positive"] = {
+        "utility": 10.0,
+        "negative": False,
+        "strict_negative": False,
+        "selected_mass": 0.5,
+        "selected_count": 1,
+    }
+    row["actions"]["oracle_topk"] = dict(row["actions"]["oracle_positive"])
+    choices = hard_search.deployable_oracle_choices([row])
+    assert choices == ["anchor_drop_bottom25"]
+    assert all("oracle" not in action for action in hard_search.DEPLOYABLE_ACTIONS)

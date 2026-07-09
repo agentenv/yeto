@@ -160,6 +160,16 @@ EXP2.7 local scaffold passes as tooling, but not as method evidence. The group-l
 
 The next useful work is denser capture and stronger score evidence, not online training.
 
+## Follow-Up: EXP2.8
+
+EXP2.8 searched harder over the same group-local feature rows with a supervised held-out-seed kNN action selector. The result did not change the online decision:
+
+```text
+docs/EXP2_8.md
+```
+
+The harder search found substantial deployable-action oracle headroom, but the current features still could not select the right action reliably across held-out seeds. This narrows the failure mode: the deployable action set has useful actions, but the present group-local measurements are not sufficient for transferable action selection.
+
 ## Dense-Capture Gate
 
 Before any online run, the next capture stage should meet:
