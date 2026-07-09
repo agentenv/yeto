@@ -31,6 +31,7 @@ action_stability = _load("analyze_action_probe_stability")
 buffered_robust = _load("replay_buffered_robust_syncer")
 buffered_nesterov = _load("replay_buffered_nesterov_syncer")
 buffered_nesterov_agg = _load("aggregate_buffered_nesterov")
+lr_action_probe = _load("analyze_lr_action_probe")
 
 
 def test_every_alias_has_a_tier():
@@ -845,3 +846,11 @@ def test_buffered_nesterov_aggregate_merges_policy_partitions(tmp_path):
     right.write_text(json.dumps({**shared, "policy_b_utility": 0.3}) + "\n")
     rows = buffered_nesterov_agg.merge_records([left, right])
     assert rows == [{**shared, "policy_a_utility": 0.2, "policy_b_utility": 0.3}]
+
+
+def test_lr_action_probe_margin_falls_back_to_fixed_lr():
+    actions = ("lr40", "lr50", "lr60")
+    utility = {"lr40": 0.11, "lr50": 0.10, "lr60": 0.09}
+    se = {"lr40": 0.02, "lr50": 0.02, "lr60": 0.02}
+    assert lr_action_probe._choice(utility, se, actions, "lr50", 0.0) == "lr40"
+    assert lr_action_probe._choice(utility, se, actions, "lr50", 1.0) == "lr50"
