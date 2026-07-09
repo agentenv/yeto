@@ -55,10 +55,18 @@ POLICIES = (
     "current_token_scale50",
     "current_token_scale75",
     "current_token_scale90",
+    "current_outer_lr25",
+    "current_outer_lr35",
+    "current_outer_lr40",
     "current_outer_lr50",
+    "current_outer_lr60",
     "current_outer_lr75",
     "current_outer_lr90",
     "current_avg_heloco",
+    "current_consensus_rda_sqrt",
+    "current_consensus_rda_linear",
+    "current_consensus_rda_affine50",
+    "current_consensus_rda_floor50",
     "current_coord_midpoint_raw",
     "current_coord_midpoint_heloco",
     "current_coord_midpoint_normmatch",
@@ -261,6 +269,54 @@ def _production_avg_update(candidates: list[soft.Candidate], momentum: torch.Ten
     return _weighted(updates, [candidate.weight for candidate in candidates])
 
 
+def _consensus_rda_update(
+    candidates: list[soft.Candidate],
+    momentum: torch.Tensor,
+    frag,
+    mode: str,
+) -> tuple[torch.Tensor, float]:
+    corrected = [
+        _heloco_per_tensor(candidate.update, momentum, _tensor_numels(frag))
+        for candidate in candidates
+    ]
+    weights = [candidate.weight for candidate in candidates]
+    if frag.merge_mode == MERGE_AVG:
+        return _weighted(corrected, weights), 1.0
+    out = torch.empty_like(corrected[0])
+    scales = []
+    offset = 0
+    for numel in _tensor_numels(frag):
+        end = offset + numel
+        slices = [update[offset:end] for update in corrected]
+        total = sum(max(weight, 0.0) for weight in weights)
+        norms = [float(update.norm().item()) for update in slices]
+        radial = sum(max(weight, 0.0) * norm for weight, norm in zip(weights, norms)) / max(total, 1e-12)
+        direction = torch.zeros_like(slices[0])
+        for update, weight, norm in zip(slices, weights, norms):
+            if weight > 0.0 and norm > 1e-12:
+                direction.add_(update, alpha=weight / max(total, 1e-12) / norm)
+        consensus = min(1.0, max(0.0, float(direction.norm().item())))
+        if consensus < 1e-12:
+            out[offset:end] = _weighted(slices, weights)
+            scales.append(0.0)
+            offset = end
+            continue
+        if mode == "sqrt":
+            scale = math.sqrt(consensus)
+        elif mode == "linear":
+            scale = consensus
+        elif mode == "affine50":
+            scale = 0.5 + 0.5 * consensus
+        elif mode == "floor50":
+            scale = max(0.5, consensus)
+        else:
+            raise ValueError(mode)
+        out[offset:end] = direction * (radial * scale / consensus)
+        scales.append(scale)
+        offset = end
+    return out, _mean(scales)
+
+
 def _match_tensor_norms(source: torch.Tensor, target: torch.Tensor, frag) -> torch.Tensor:
     out = torch.empty_like(source)
     offset = 0
@@ -408,6 +464,14 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
     if policy == "current_avg_heloco":
         info.update(_weight_stats(weights, relative_ages))
         return _production_avg_update(candidates, momentum, frag), info
+    match = re.fullmatch(r"current_consensus_rda_(sqrt|linear|affine50|floor50)", policy)
+    if match:
+        info.update(_weight_stats(weights, relative_ages))
+        update, consensus_scale = _consensus_rda_update(
+            candidates, momentum, frag, match.group(1)
+        )
+        info["consensus_scale"] = consensus_scale
+        return update, info
     if policy in {"current_coord_midpoint_raw", "buffer_coord_midpoint_raw"}:
         info.update(_weight_stats(weights, relative_ages))
         return _coordinate_midpoint_median(updates), info
@@ -876,6 +940,9 @@ def summarize(records: list[dict], policies: tuple[str, ...]) -> dict:
             ]),
             "outer_lr_multiplier": _mean([
                 float(row.get(f"{policy}_outer_lr_multiplier", 1.0)) for row in records
+            ]),
+            "consensus_scale": _mean([
+                float(row.get(f"{policy}_consensus_scale", 1.0)) for row in records
             ]),
         }
     parameter_errors = [

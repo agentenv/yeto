@@ -800,6 +800,33 @@ def test_buffered_group_ema_keeps_current_round_dominant():
     assert info["history_effective_share"] == 0.25
 
 
+def test_consensus_rda_retains_disagreement_magnitude():
+    import math
+    import torch
+    from yeto.fragments import MERGE_RDA
+
+    def candidate(update):
+        return buffered_robust.soft.Candidate(
+            row={},
+            tensor=update,
+            update=update,
+            weight=1.0,
+            age=0.0,
+            norm=float(update.norm().item()),
+            align=0.0,
+        )
+
+    candidates = [candidate(torch.tensor([1.0, 0.0])), candidate(torch.tensor([0.0, 1.0]))]
+    frag = SimpleNamespace(tensors=[("x", 2)], merge_mode=MERGE_RDA)
+    linear, scale = buffered_nesterov._consensus_rda_update(
+        candidates, torch.zeros(2), frag, "linear"
+    )
+    baseline = buffered_nesterov._production_merge_update(candidates, torch.zeros(2), frag)
+    assert math.isclose(scale, math.sqrt(0.5), rel_tol=1e-6)
+    assert linear.norm() < baseline.norm()
+    assert torch.allclose(linear, torch.tensor([0.5, 0.5]), atol=1e-6)
+
+
 def test_buffered_nesterov_aggregate_merges_policy_partitions(tmp_path):
     shared = {"seed": 59, "step": 5, "fragment": 0, "token_weighted_utility": 0.1}
     left = tmp_path / "left.jsonl"
