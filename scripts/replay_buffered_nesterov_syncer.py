@@ -348,7 +348,7 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
         info.update(_weight_stats(weights, relative_ages))
         return _coordinate_midpoint_median(corrected), info
 
-    match = re.fullmatch(r"buffer_transport_(age|huber)(\d+)", policy)
+    match = re.fullmatch(r"buffer_transport_(age|huber_age)(\d+)", policy)
     if match:
         mode = "mean" if match.group(1) == "age" else "huber"
         tau = float(match.group(2))
