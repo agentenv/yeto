@@ -118,16 +118,10 @@ DIFFUSION_MODEL_ALIASES = {
     "qwen-image-2512": "Qwen/Qwen-Image-2512",
     "sd35": "stabilityai/stable-diffusion-3.5-large",
     "ltx-video": "Lightricks/LTX-Video",
-    "ltx2-video": "Lightricks/LTX-2",
     "hunyuan-video": "hunyuanvideo-community/HunyuanVideo",
-    "motif-video": "Motif-Technologies/Motif-Video-2B",
     "wan21-t2v-1.3b": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
     "wan21-t2v-14b": "Wan-AI/Wan2.1-T2V-14B-Diffusers",
     "wan22": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-    "cogvideox-2b": "THUDM/CogVideoX-2b",
-    "cogvideox-5b": "THUDM/CogVideoX-5B",
-    "cogvideox15-5b": "THUDM/CogVideoX1.5-5B",
-    "cogview4-6b": "THUDM/CogView4-6B",
     "nava": "baidu/NAVA",
 }
 
