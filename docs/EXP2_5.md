@@ -638,3 +638,35 @@ Action-rank agreement:
 Decision: still do not go online. The 9B run rules out the easiest tiny-model explanation because candidate-level signal and oracle action headroom persist, but deployable action selection still fails under disjoint evaluation.
 
 The manual p4de instance used for this run was terminated after artifacts were pulled.
+
+## EXP2.16 Repeated-Anchor Batch-Consensus Search
+
+I then tested the obvious rescue hypothesis from EXP2.15:
+
+```text
+Maybe one anchor split is too noisy, but repeated anchor-batch consensus can safely decide when to act.
+```
+
+The full write-up is in `docs/EXP2_16.md`.
+
+Result:
+
+| Dataset | Records | Mean gain vs token | Negative drop | Strict drop | Headroom captured | Selected mass | Gate |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Qwen3.5-9B dense | 104 | -0.000434 | 0.000 | 0.333 | 0.162 | 0.998 | fail |
+| SmolLM2 8-batch | 614 | -0.0000227 | -0.0119 | 0.0313 | -0.277 | 0.975 | fail |
+
+Decision: repeated-anchor consensus does not make the current action-selection family online-ready. It is safer and higher-mass than aggressive top-1 action probing, but it still fails held-out utility gain and negative-rate reduction.
+
+The current conclusion is now sharper:
+
+```text
+bad equal-token fragments are real;
+bad mass can hurt token-weighted merges;
+oracle deployable actions have headroom;
+candidate-level anchor-gradient can help;
+but current anchor/probe measurements do not solve group-level action selection,
+even with repeated anchor-batch consensus.
+```
+
+The next useful direction is no longer "search harder thresholds." It is to step back toward prior-art-supported syncer dynamics: soft stale correction, age decay, buffered robust aggregation, and delayed-Nesterov-style outer updates.
