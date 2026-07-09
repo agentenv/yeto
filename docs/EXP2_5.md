@@ -601,3 +601,40 @@ the anchor split is not ranking deployable actions in the same order as the disj
 ```
 
 This explains why both EXP2.9 direct action probing and EXP2.13 conservative gating failed. The next useful work must collect denser scale measurements with more anchor batches or repeated anchor splits; tuning more policies on the existing SmolLM2 replay records is unlikely to help.
+
+## EXP2.15 Qwen3.5-9B Dense Offline Stress
+
+I ran a harder manual p4de follow-up on `qwen35-9b` with m4 learners and denser captured groups. The full write-up is in `docs/EXP2_15.md`.
+
+Setup:
+
+```text
+model: qwen35-9b
+data: trl-lib/Capybara
+settings: m4
+seeds: 31, 43
+groups replayed: 52 per seed
+```
+
+Main aggregate result:
+
+| Policy | Gain vs token | Negative drop | Strict drop | Headroom captured | Selected mass |
+|---|---:|---:|---:|---:|---:|
+| action_probe_top1 | -0.001541 | -0.250 | 0.333 | 0.198 | 0.932 |
+| action_probe_margin_gated | -0.001201 | -0.500 | 0.333 | 0.046 | 0.942 |
+| action_probe_risk_aware | -0.001525 | -0.250 | 0.333 | 0.195 | 0.932 |
+| best_deployable_oracle | 0.002487 | 0.583 | n/a | 0.699 | 0.960 |
+| oracle_positive | 0.000568 | 1.000 | 1.000 | 1.000 | 0.721 |
+
+Action-rank agreement:
+
+| Metric | Value |
+|---|---:|
+| Mean Spearman | 0.039 |
+| Pairwise concordance | 0.521 |
+| Top-1 oracle match | 0.250 |
+| Anchor top-1 gain vs token | -0.001541 |
+
+Decision: still do not go online. The 9B run rules out the easiest tiny-model explanation because candidate-level signal and oracle action headroom persist, but deployable action selection still fails under disjoint evaluation.
+
+The manual p4de instance used for this run was terminated after artifacts were pulled.
