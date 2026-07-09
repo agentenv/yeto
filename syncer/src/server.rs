@@ -761,25 +761,12 @@ async fn complete_round(
         ..
     } = round;
     let prev_version = st.versions[p];
+    drop_stale_pushes(&mut pushes, prev_version, st.wire_dtype, t);
     if st.wire_dtype == DTYPE_Q4 {
         // Q4 pushes are deltas anchored at the learner's base_version;
         // reconstruction needs Θ at that exact version, and the syncer
-        // only holds the current value. A matching base is the steady
-        // state (learners anchor on the last broadcast); anything older
-        // is unreconstructable and dropped.
-        pushes.retain(|id, push| {
-            if push.base_version != prev_version {
-                warn!(
-                    learner_id = id,
-                    step = t,
-                    base = push.base_version,
-                    expected = prev_version,
-                    "stale q4 delta dropped"
-                );
-                return false;
-            }
-            true
-        });
+        // only holds the current value. `drop_stale_pushes` guarantees
+        // that every remaining push matches the current fragment version.
         for push in pushes.values_mut() {
             for (v, a) in push.values.iter_mut().zip(&st.params[p]) {
                 *v += *a;
@@ -789,24 +776,22 @@ async fn complete_round(
     capture_round_candidates(cfg, st, p, t, prev_version, &pushes)?;
     let (mut learners, mut weights, mut ids) = (Vec::new(), Vec::new(), Vec::new());
     for (id, push) in &pushes {
-        if push.base_version < prev_version {
-            // The learner had not yet applied this fragment's last merge;
-            // its delta is anchored further back. The weight formula
-            // compensates (larger c_steps); recorded for the event tape.
-            warn!(
-                learner_id = id,
-                step = t,
-                base = push.base_version,
-                expected = prev_version,
-                "stale push admitted"
-            );
-        }
         learners.push(push.values.as_slice());
         weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
         ids.push(*id);
     }
     let sync_start = Instant::now();
-    let gnorm = st.merge_and_step(p, &learners, &weights)?;
+    let gnorm = if learners.is_empty() {
+        warn!(
+            step = t,
+            fragment = p,
+            prev_version,
+            "round had no fresh pushes after stale-drop filter; rebroadcasting current fragment"
+        );
+        0.0
+    } else {
+        st.merge_and_step(p, &learners, &weights)?
+    };
     st.versions[p] = t;
     // Pipelined rounds can complete out of order; the global step only
     // moves forward.
@@ -846,6 +831,37 @@ async fn complete_round(
         }
     }
     Ok(())
+}
+
+fn drop_stale_pushes(
+    pushes: &mut HashMap<u32, Push>,
+    prev_version: u64,
+    wire_dtype: u8,
+    step: u64,
+) {
+    pushes.retain(|id, push| {
+        if push.base_version == prev_version {
+            return true;
+        }
+        if wire_dtype == DTYPE_Q4 {
+            warn!(
+                learner_id = id,
+                step,
+                base = push.base_version,
+                expected = prev_version,
+                "stale q4 delta dropped"
+            );
+        } else {
+            warn!(
+                learner_id = id,
+                step,
+                base = push.base_version,
+                expected = prev_version,
+                "stale push dropped"
+            );
+        }
+        false
+    });
 }
 
 fn capture_round_candidates(
@@ -1095,6 +1111,19 @@ mod tests {
 
     const CAP: Duration = Duration::from_millis(1000);
 
+    fn push(id: u32, base_version: u64) -> Push {
+        Push {
+            learner_id: id,
+            fragment_id: 0,
+            global_step: 7,
+            base_version,
+            local_step: 10,
+            c_steps: 1,
+            c_tokens: 128,
+            values: vec![0.0],
+        }
+    }
+
     #[test]
     fn grace_falls_back_to_cap_without_estimate() {
         assert_eq!(adaptive_grace(2.0, 0.8, None, 0.1, 0.1, CAP), CAP);
@@ -1132,6 +1161,30 @@ mod tests {
         assert_eq!(launch_interval(floor, 24.0, 4, Some(0.005)), floor);
         // H target disabled: manual floor only.
         assert_eq!(launch_interval(floor, 0.0, 4, Some(1.0)), floor);
+    }
+
+    #[test]
+    fn stale_full_pushes_are_dropped_before_merge() {
+        let mut pushes = HashMap::new();
+        pushes.insert(1, push(1, 4));
+        pushes.insert(2, push(2, 5));
+
+        drop_stale_pushes(&mut pushes, 5, DTYPE_BF16, 9);
+
+        assert_eq!(pushes.len(), 1);
+        assert!(pushes.contains_key(&2));
+    }
+
+    #[test]
+    fn stale_q4_pushes_use_same_freshness_gate() {
+        let mut pushes = HashMap::new();
+        pushes.insert(1, push(1, 4));
+        pushes.insert(2, push(2, 6));
+
+        drop_stale_pushes(&mut pushes, 6, DTYPE_Q4, 9);
+
+        assert_eq!(pushes.len(), 1);
+        assert!(pushes.contains_key(&2));
     }
 
     #[test]
