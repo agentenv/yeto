@@ -75,6 +75,10 @@ def test_diffusion_aliases_resolve_and_infer_kind():
     assert {
         "chroma1-base",
         "chroma1-hd",
+        "cogvideox-2b",
+        "cogvideox-5b",
+        "cogvideox15-5b",
+        "cogview4-6b",
         "flux",
         "flux-schnell",
         "flux2-dev",
@@ -89,6 +93,8 @@ def test_diffusion_aliases_resolve_and_infer_kind():
         "qwen-image",
         "qwen-image-2512",
         "sd35",
+        "wan21-t2v-1.3b",
+        "wan21-t2v-14b",
         "wan22",
     } <= set(DIFFUSION_MODEL_ALIASES)
     assert resolve("sd35") == DIFFUSION_MODEL_ALIASES["sd35"]
@@ -101,6 +107,26 @@ def test_diffusion_aliases_resolve_and_infer_kind():
     assert resolve_model_kind("qwen-image") == "diffusion"
     assert resolve_model_kind("org/custom", "diffusion") == "diffusion"
     assert resolve_model_kind("org/custom") == "causal-lm"
+
+
+def test_diffusion_capability_matrix_covers_aliases():
+    from yeto.diffusion.capabilities import (
+        DIFFUSION_CAPABILITIES,
+        VALID_CAPABILITY_STATUSES,
+        aliases_by_status,
+        format_capability_table,
+    )
+
+    assert set(DIFFUSION_CAPABILITIES) == set(DIFFUSION_MODEL_ALIASES)
+    for alias, cap in DIFFUSION_CAPABILITIES.items():
+        assert cap.status in VALID_CAPABILITY_STATUSES, alias
+        assert cap.family
+        assert cap.pipeline
+        assert cap.modalities
+        assert cap.forward_kwargs
+    assert "nava" in aliases_by_status("adapter-required")
+    assert "wan22" in aliases_by_status("generic-gap")
+    assert "| `wan22` |" in format_capability_table(("wan22",))
 
 
 def test_diffusion_learner_parse_cache_defaults_are_off():
