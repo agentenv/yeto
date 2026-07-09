@@ -34,6 +34,7 @@ buffered_nesterov_agg = _load("aggregate_buffered_nesterov")
 lr_action_probe = _load("analyze_lr_action_probe")
 anchor_gradient_syncer = _load("replay_anchor_gradient_syncer")
 anchor_gradient_agg = _load("aggregate_anchor_gradient_syncer")
+fragment_lr_profiles = _load("analyze_fragment_lr_profiles")
 
 
 def test_every_alias_has_a_tier():
@@ -1008,3 +1009,27 @@ def test_anchor_gradient_aggregate_merges_policy_partitions(tmp_path):
             "anchor_pcgrad_normmatch_utility": 0.3,
         }
     ]
+
+
+def test_fragment_lr_profile_selects_action_by_fragment():
+    import math
+
+    rows = []
+    for fragment in range(4):
+        row = {
+            "seed": 59,
+            "step": fragment + 1,
+            "fragment": fragment,
+            "token_weighted_utility": 0.0,
+        }
+        for action in fragment_lr_profiles.ACTIONS:
+            utility = float(action) / 1000.0
+            row[f"current_outer_lr{action}_utility"] = utility
+            row[f"current_outer_lr{action}_negative"] = False
+            row[f"current_outer_lr{action}_strict_negative"] = False
+        rows.append(row)
+    result = fragment_lr_profiles.evaluate_profile(rows, (75, 50, 25, 40))
+    expected = (0.075 + 0.050 + 0.025 + 0.040) / 4
+    baseline = 0.050
+    assert math.isclose(result["mean_utility"], expected)
+    assert math.isclose(result["mean_gain_vs_fixed_lr50"], expected - baseline)
