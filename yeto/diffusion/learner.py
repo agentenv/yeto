@@ -233,6 +233,7 @@ def parse_args(argv=None):
     p.add_argument("--height", type=int, default=None)
     p.add_argument("--width", type=int, default=None)
     p.add_argument("--num-frames", type=int, default=None)
+    p.add_argument("--fps", type=float, default=None)
     p.add_argument("--bucket-by-shape", action="store_true", default=False)
     p.add_argument("--output-dir", default="checkpoints/diffusion-out")
     p.add_argument("--device", default=None)
@@ -2009,6 +2010,62 @@ def _guidance_value(pipe, args, noisy: LatentBatch) -> torch.Tensor:
     )
 
 
+def _numeric_attr(obj, *names: str):
+    for name in names:
+        value = getattr(obj, name, None)
+        if isinstance(value, (int, float)) and value > 0:
+            return value
+    return None
+
+
+def _vae_temporal_scale_factor(pipe) -> int:
+    value = _numeric_attr(
+        pipe,
+        "vae_temporal_compression_ratio",
+        "vae_scale_factor_temporal",
+        "temporal_compression_ratio",
+    )
+    if value is not None:
+        return int(value)
+    vae = getattr(pipe, "vae", None)
+    value = _numeric_attr(vae, "temporal_compression_ratio", "vae_scale_factor_temporal")
+    if value is not None:
+        return int(value)
+    config = getattr(vae, "config", None)
+    value = _numeric_attr(config, "temporal_compression_ratio", "vae_scale_factor_temporal")
+    return int(value) if value is not None else 1
+
+
+def _frame_rate_for_rope(pipe, args) -> float | None:
+    value = getattr(args, "fps", None)
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    for name in ("frame_rate", "fps"):
+        value = _param_default(getattr(pipe, "__call__", None), name)
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+    return None
+
+
+def _rope_interpolation_scale(pipe, args) -> tuple[float, float, float] | None:
+    frame_rate = _frame_rate_for_rope(pipe, args)
+    if frame_rate is None:
+        return None
+    temporal = _vae_temporal_scale_factor(pipe)
+    spatial = _vae_scale_factor(pipe)
+    return (float(temporal) / frame_rate, float(spatial), float(spatial))
+
+
+def _shape_denoiser_timesteps(timesteps, noisy: LatentBatch, params):
+    if not torch.is_tensor(timesteps) or timesteps.ndim != 1:
+        return timesteps
+    if noisy.latents.ndim != 3 or int(timesteps.shape[0]) != int(noisy.latents.shape[0]):
+        return timesteps
+    if "rope_interpolation_scale" not in params:
+        return timesteps
+    return timesteps.view(-1, 1, 1).expand(-1, int(noisy.latents.shape[1]), -1)
+
+
 def _auto_fill_denoiser_kwargs(pipe, noisy: LatentBatch, cond: TextConditioning, args, params, kwargs) -> None:
     values = {
         "batch_size": int(noisy.latents.shape[0]),
@@ -2037,6 +2094,9 @@ def _auto_fill_denoiser_kwargs(pipe, noisy: LatentBatch, cond: TextConditioning,
 
     if "guidance" in params and "guidance" not in kwargs:
         kwargs["guidance"] = _guidance_value(pipe, args, noisy)
+
+    if "rope_interpolation_scale" in params and "rope_interpolation_scale" not in kwargs:
+        kwargs["rope_interpolation_scale"] = _rope_interpolation_scale(pipe, args)
 
     if "attention_mask" in params and "attention_mask" not in kwargs:
         kwargs["attention_mask"] = cond.attention_mask
@@ -2072,9 +2132,9 @@ def _denoise_forward_one(pipe, model, noisy: LatentBatch, timesteps, cond: TextC
             raise TypeError(f"{type(inspect_model).__name__}.forward has no latent input parameter")
         kwargs[positional[0]] = noisy.latents
     if "timestep" in params:
-        kwargs["timestep"] = timesteps
+        kwargs["timestep"] = _shape_denoiser_timesteps(timesteps, noisy, params)
     elif "timesteps" in params:
-        kwargs["timesteps"] = timesteps
+        kwargs["timesteps"] = _shape_denoiser_timesteps(timesteps, noisy, params)
     if "encoder_hidden_states" in params and cond.prompt_embeds is not None:
         kwargs["encoder_hidden_states"] = cond.prompt_embeds
     if "encoder_attention_mask" in params:
@@ -2133,11 +2193,20 @@ def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning,
 
 
 def _vae_scale_factor(pipe) -> int:
-    for name in ("vae_scale_factor", "vae_scale_factor_spatial"):
+    for name in ("vae_scale_factor", "vae_scale_factor_spatial", "vae_spatial_compression_ratio"):
         value = getattr(pipe, name, None)
         if isinstance(value, int) and value > 0:
             return value
+    vae = getattr(pipe, "vae", None)
+    for name in ("spatial_compression_ratio", "vae_scale_factor_spatial"):
+        value = getattr(vae, name, None)
+        if isinstance(value, int) and value > 0:
+            return value
     vae_config = getattr(getattr(pipe, "vae", None), "config", None)
+    for name in ("spatial_compression_ratio", "vae_scale_factor_spatial"):
+        value = getattr(vae_config, name, None)
+        if isinstance(value, int) and value > 0:
+            return value
     blocks = getattr(vae_config, "block_out_channels", None)
     if isinstance(blocks, (list, tuple)) and len(blocks) > 1:
         return 2 ** (len(blocks) - 1)

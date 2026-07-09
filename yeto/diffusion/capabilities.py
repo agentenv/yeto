@@ -236,7 +236,7 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         forward_kwargs=("hidden_states", "timestep", "encoder_hidden_states", "encoder_attention_mask", "rope_interpolation_scale"),
         output_alignment="packed-token target",
         status="generic-covered",
-        gaps=("per-token timestep/sigma shaping should be hardened from static specs",),
+        gaps=("production-length LTX validation should be repeated after generic packed timestep shaping",),
         evidence=("A6000 LTX raw-video train/save/reload/sample", "finetrainers LTXVideoModelSpecification"),
     ),
     "ltx2-video": _cap(

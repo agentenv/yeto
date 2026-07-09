@@ -63,6 +63,7 @@ def _args(**over):
         height=None,
         width=None,
         num_frames=None,
+        fps=None,
         bucket_by_shape=False,
         diffusion_loss_weighting="none",
         diffusion_min_snr_gamma=5.0,
@@ -148,6 +149,7 @@ def test_diffusion_learner_parse_cache_defaults_are_off():
     assert args.loss_function == "flow_matching"
     assert args.diffusion_loss_weighting == "none"
     assert args.diffusion_min_snr_gamma == 5.0
+    assert args.fps is None
 
 
 def test_diffusion_lora_targets_are_generic_dit_names():
@@ -1800,6 +1802,72 @@ def test_denoise_forward_auto_fills_shape_and_mask_aliases():
     assert pipe.transformer.seen["img_sizes"] == [(2, 2), (2, 2)]
 
 
+def test_denoise_forward_shapes_packed_timesteps_for_rope_signature():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(self, hidden_states, timestep, rope_interpolation_scale=None, return_dict=False):
+            self.seen = {
+                "timestep": timestep,
+                "rope_interpolation_scale": rope_interpolation_scale,
+                "return_dict": return_dict,
+            }
+            return hidden_states + 1
+
+    class TinyPipe:
+        vae_temporal_compression_ratio = 8
+        vae_spatial_compression_ratio = 32
+
+        def __init__(self):
+            self.transformer = TinyDenoiser()
+
+        def __call__(self, prompt=None, frame_rate=25):
+            del prompt, frame_rate
+
+    pipe = TinyPipe()
+    noisy = learner.LatentBatch(torch.zeros(2, 4, 8), latent_num_frames=1, latent_height=2, latent_width=2)
+
+    out = learner.denoise_forward(pipe, noisy, torch.tensor([10, 20]), learner.TextConditioning(None), _args())
+
+    expected_timesteps = torch.tensor([10, 20]).view(2, 1, 1).expand(2, 4, 1)
+    assert torch.equal(out, torch.ones(2, 4, 8))
+    assert torch.equal(pipe.transformer.seen["timestep"], expected_timesteps)
+    assert pipe.transformer.seen["rope_interpolation_scale"] == pytest.approx((8 / 25, 32, 32))
+    assert pipe.transformer.seen["return_dict"] is False
+
+
+def test_denoise_forward_keeps_packed_timesteps_1d_without_rope_signature():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(self, hidden_states, timestep, return_dict=False):
+            del return_dict
+            self.seen = timestep
+            return hidden_states + 1
+
+    pipe = argparse.Namespace(transformer=TinyDenoiser())
+
+    learner.denoise_forward(
+        pipe,
+        learner.LatentBatch(torch.zeros(2, 4, 8), latent_height=2, latent_width=2),
+        torch.tensor([10, 20]),
+        learner.TextConditioning(None),
+        _args(),
+    )
+
+    assert torch.equal(pipe.transformer.seen, torch.tensor([10, 20]))
+
+
 def test_packed_sequence_conditioning_patchifies_image_latents():
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
@@ -1880,12 +1948,13 @@ def test_denoise_forward_inspects_wrapped_base_model_signature():
 
 
 def test_launcher_routes_diffusion_to_diffusion_learner_and_opt_in_caches():
-    args = _args(cache_latents=True, cache_text_embeds=True, height=512, width=512)
+    args = _args(cache_latents=True, cache_text_embeds=True, height=512, width=512, fps=25)
     task = make_learner_task(args, _SPEC, 0, 1, "1.2.3.4:29400")
     assert "-m yeto.diffusion.learner" in task.run
     assert "--loss-function flow_matching" in task.run
     assert "--cache-latents" in task.run and "--cache-text-embeds" in task.run
     assert "--height 512" in task.run and "--width 512" in task.run
+    assert "--fps 25" in task.run
     assert "diffusers" in task.setup
     assert "--diffusion-loss-weighting" not in task.run
     assert "--diffusion-family" not in task.run

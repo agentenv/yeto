@@ -535,6 +535,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             learner_flags += f" --width {args.width}"
         if args.num_frames:
             learner_flags += f" --num-frames {args.num_frames}"
+        if getattr(args, "fps", None):
+            learner_flags += f" --fps {args.fps}"
     if args.max_rows:
         learner_flags += f" --max-rows {args.max_rows}"
 
