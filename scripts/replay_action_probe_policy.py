@@ -253,6 +253,8 @@ def _copy_oracle_metrics(record: dict, replay: dict, actions: tuple[str, ...]) -
             key = f"{action}_{suffix}"
             if key in replay:
                 record[f"{action}_oracle_{suffix}"] = replay[key]
+                if suffix in {"selected_count", "selected_mass", "outer_lr_multiplier"}:
+                    record.setdefault(f"{action}_{suffix}", replay[key])
 
 
 def _eval_action_scope(
@@ -274,31 +276,40 @@ def _eval_action_scope(
     all_candidates: list[dict],
     args,
 ) -> dict:
-    result = rpp._eval_policy(
-        name=action,
-        selected=selected,
+    weight_policy = _weight_policy(action)
+    merged = rpp._merged_flat(
         current_flat=current_flat,
+        candidate_rows=selected,
         candidate_tensors=candidate_tensors,
-        policy_for_weights=_weight_policy(action),
+        policy=weight_policy,
         score_field=args.score_field,
         tau=args.tau,
         threshold=args.threshold,
-        outer_lr=outer_lr,
-        model=model,
-        batches=batches,
-        compute_loss=compute_loss,
-        frag=frag,
-        params=params,
-        base_loss=base_loss,
-        base_by_batch=base_by_batch,
-        device=device,
-        all_candidates=all_candidates,
     )
+    trial = current_flat + outer_lr * (merged - current_flat)
+    rpp.apply_fragment(frag, trial.to(device), params)
+    trial_loss, trial_by_batch = syncer_eval._losses(model, batches, compute_loss)
+    rpp.apply_fragment(frag, current_flat.to(device), params)
+    utility = base_loss - trial_loss
+    utility_se = rpp._utility_se(base_by_batch, trial_by_batch)
+    result = {
+        f"{action}_utility": utility,
+        f"{action}_utility_se": utility_se,
+        f"{action}_negative": utility < 0.0,
+        f"{action}_strict_negative": None if utility_se is None else utility + utility_se < 0.0,
+        f"{action}_selected_count": len(selected),
+        f"{action}_selected_mass": rpp._selected_mass(selected, all_candidates),
+        f"{action}_outer_lr_multiplier": outer_lr,
+    }
     out = {}
     for key, value in result.items():
         prefix = f"{action}_"
         assert key.startswith(prefix)
         out[f"{action}_{scope}_{key[len(prefix):]}"] = value
+    if scope == "anchor" and args.include_anchor_batch_utilities:
+        out[f"{action}_{scope}_batch_utilities"] = [
+            float(base - trial) for base, trial in zip(base_by_batch, trial_by_batch)
+        ]
     return out
 
 
@@ -314,6 +325,7 @@ def replay(args) -> tuple[list[dict], dict]:
     deployable = tuple(args.deployable_actions)
     references = tuple(action for action in REFERENCE_ACTIONS if action in rpp.POLICIES)
     evaluated_actions = tuple(dict.fromkeys((*deployable, *references)))
+    anchor_actions = deployable if args.anchor_deployable_only else evaluated_actions
     oracle_replay = load_oracle_replay(args.policy_replay)
     oracle_source = args.oracle_source
     if oracle_source == "auto":
@@ -420,7 +432,7 @@ def replay(args) -> tuple[list[dict], dict]:
                 record["oracle_base_loss"] = oracle_base_loss
 
             selections: dict[str, tuple[list[dict], float]] = {}
-            for action in evaluated_actions:
+            for action in anchor_actions:
                 selected, outer_lr = rpp._policy_candidates(
                     policy=action,
                     candidates=group,
@@ -459,6 +471,17 @@ def replay(args) -> tuple[list[dict], dict]:
                 _copy_oracle_metrics(record, replay_row, evaluated_actions)
             else:
                 for action in evaluated_actions:
+                    if action not in selections:
+                        selected, outer_lr = rpp._policy_candidates(
+                            policy=action,
+                            candidates=group,
+                            score_field=args.score_field,
+                            percentile=args.drop_percentile,
+                            threshold=args.threshold,
+                            min_selected_mass=args.min_selected_mass,
+                            rng=rng,
+                        )
+                        selections[action] = (selected, outer_lr)
                     selected, outer_lr = selections[action]
                     record.update(
                         _eval_action_scope(
@@ -800,6 +823,8 @@ def parse_args(argv=None):
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--include-extra-actions", action="store_true")
     p.add_argument("--deployable-actions", nargs="+", default=None)
+    p.add_argument("--anchor-deployable-only", action="store_true")
+    p.add_argument("--include-anchor-batch-utilities", action="store_true")
     p.add_argument("--random-trials", type=int, default=200)
     p.add_argument("--progress-every", type=int, default=0)
     p.add_argument("--out-jsonl", required=True, type=Path)

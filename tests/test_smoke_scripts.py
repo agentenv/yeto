@@ -27,6 +27,7 @@ policy_grid = _load("replay_group_local_policy_grid")
 hard_search = _load("search_group_local_policy")
 action_probe = _load("replay_action_probe_policy")
 action_probe_agg = _load("aggregate_action_probe_results")
+action_stability = _load("analyze_action_probe_stability")
 
 
 def test_every_alias_has_a_tier():
@@ -612,3 +613,43 @@ def test_action_probe_aggregate_rejects_missing_seed():
     }
     with pytest.raises(SystemExit):
         action_probe_agg.aggregate([summary], expected_seeds=[53, 67])
+
+
+def test_action_probe_stability_uses_anchor_batch_utilities():
+    actions = ("token_weighted", "anchor_drop_bottom25")
+    records = [
+        {
+            "token_weighted_anchor_batch_utilities": [0.0, 0.0, 0.0, 0.0],
+            "anchor_drop_bottom25_anchor_batch_utilities": [0.01, 0.01, 0.01, 0.01],
+            "token_weighted_oracle_utility": 0.0,
+            "token_weighted_oracle_negative": False,
+            "token_weighted_oracle_strict_negative": False,
+            "token_weighted_selected_mass": 1.0,
+            "anchor_drop_bottom25_oracle_utility": 0.02,
+            "anchor_drop_bottom25_oracle_negative": False,
+            "anchor_drop_bottom25_oracle_strict_negative": False,
+            "anchor_drop_bottom25_selected_mass": 0.5,
+            "oracle_positive_oracle_utility": 0.03,
+        },
+        {
+            "token_weighted_anchor_batch_utilities": [0.02, 0.02, 0.02, 0.02],
+            "anchor_drop_bottom25_anchor_batch_utilities": [0.0, 0.0, 0.0, 0.0],
+            "token_weighted_oracle_utility": 0.01,
+            "token_weighted_oracle_negative": False,
+            "token_weighted_oracle_strict_negative": False,
+            "token_weighted_selected_mass": 1.0,
+            "anchor_drop_bottom25_oracle_utility": -0.01,
+            "anchor_drop_bottom25_oracle_negative": True,
+            "anchor_drop_bottom25_oracle_strict_negative": True,
+            "anchor_drop_bottom25_selected_mass": 0.5,
+            "oracle_positive_oracle_utility": 0.02,
+        },
+    ]
+    result = action_stability.evaluate_subset(records, actions, (0, 1), margin=0.005)
+    assert result["top1_action_agreement"] == 1.0
+    assert result["pairwise_concordance"] == 1.0
+    assert result["top1_policy"]["chosen_action_distribution"] == {
+        "anchor_drop_bottom25": 1,
+        "token_weighted": 1,
+    }
+    assert result["top1_policy"]["mean_gain_vs_token"] == 0.01
