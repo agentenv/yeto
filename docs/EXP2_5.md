@@ -670,3 +670,32 @@ even with repeated anchor-batch consensus.
 ```
 
 The next useful direction is no longer "search harder thresholds." It is to step back toward prior-art-supported syncer dynamics: soft stale correction, age decay, buffered robust aggregation, and delayed-Nesterov-style outer updates.
+
+## EXP2.17 Soft Robust Syncer Replay
+
+I implemented the first policy-rescue pivot: soft robust syncer replay without anchor/probe action selection. The full write-up is in `docs/EXP2_17.md`.
+
+New scripts:
+
+```text
+scripts/replay_soft_robust_syncer.py
+scripts/aggregate_soft_robust_syncer.py
+```
+
+This first screen ran on the first 24 SmolLM2 groups per seed, 72 groups total. It used CPU locally because MPS corrupted probe weights during transfer and produced invalid zero/nonsensical losses.
+
+Aggregate:
+
+| Policy | Mean gain vs token | Seeds positive | Negative drop | Strict drop | Selected mass |
+|---|---:|---:|---:|---:|---:|
+| `norm_clip_m1` | -0.00000615 | 1/3 | 0.000 | 0.056 | 1.000 |
+| `heloco_avg` | -0.0000376 | 1/3 | 0.000 | 0.093 | 1.000 |
+| `trim_norm_high1` | 0.000114 | 3/3 | -0.061 | 0.148 | 0.846 |
+| `medoid` | 0.000293 | 1/3 | 0.061 | 0.222 | 0.154 |
+
+Decision: still do not go online. The positive-gain policies are low-mass or unsafe; the high-mass soft policies are neutral to slightly negative. This makes the next hypothesis narrower:
+
+```text
+unbuffered m12 groups are too small/noisy for robust statistics;
+the next policy-rescue attempt should test buffered norm-clipped aggregation.
+```
