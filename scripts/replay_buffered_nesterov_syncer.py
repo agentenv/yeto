@@ -52,7 +52,16 @@ from yeto.tensor_io import apply_fragment  # noqa: E402
 
 POLICIES = (
     "token_weighted",
+    "current_token_scale50",
+    "current_token_scale75",
+    "current_token_scale90",
+    "current_avg_heloco",
     "current_coord_midpoint_heloco",
+    "current_coord_midpoint_normmatch",
+    "current_rda_median_norm",
+    "current_coord_midpoint_blend25",
+    "current_coord_midpoint_blend50",
+    "current_geomedian_heloco",
     "buffer_coord_midpoint_raw",
     "buffer_coord_midpoint_heloco",
     "buffer_transport_age4",
@@ -240,6 +249,46 @@ def _production_merge_update(candidates: list[soft.Candidate], momentum: torch.T
     return out
 
 
+def _production_avg_update(candidates: list[soft.Candidate], momentum: torch.Tensor, frag) -> torch.Tensor:
+    updates = [
+        _heloco_per_tensor(candidate.update, momentum, _tensor_numels(frag))
+        for candidate in candidates
+    ]
+    return _weighted(updates, [candidate.weight for candidate in candidates])
+
+
+def _match_tensor_norms(source: torch.Tensor, target: torch.Tensor, frag) -> torch.Tensor:
+    out = torch.empty_like(source)
+    offset = 0
+    for numel in _tensor_numels(frag):
+        end = offset + numel
+        source_slice = source[offset:end]
+        source_norm = float(source_slice.norm().item())
+        target_norm = float(target[offset:end].norm().item())
+        if source_norm < 1e-12:
+            out[offset:end] = source_slice
+        else:
+            out[offset:end] = source_slice * (target_norm / source_norm)
+        offset = end
+    return out
+
+
+def _geomedian_per_tensor(
+    updates: list[torch.Tensor],
+    weights: list[float],
+    frag,
+) -> torch.Tensor:
+    out = torch.empty_like(updates[0])
+    offset = 0
+    for numel in _tensor_numels(frag):
+        end = offset + numel
+        out[offset:end] = buffered._geomedian(
+            [update[offset:end] for update in updates], weights
+        )
+        offset = end
+    return out
+
+
 def _nesterov_trial(
     current: torch.Tensor,
     momentum: torch.Tensor,
@@ -340,13 +389,42 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
         "mean_age": _mean(ages),
         "p95_age": _quantile(ages, 0.95),
     }
+    production = None
+    if policy.startswith("current_"):
+        production = _production_merge_update(candidates, momentum, frag)
+    match = re.fullmatch(r"current_token_scale(\d+)", policy)
+    if match:
+        info.update(_weight_stats(weights, relative_ages))
+        return production * (float(match.group(1)) / 100.0), info
+    if policy == "current_avg_heloco":
+        info.update(_weight_stats(weights, relative_ages))
+        return _production_avg_update(candidates, momentum, frag), info
     if policy == "buffer_coord_midpoint_raw":
         info.update(_weight_stats(weights, relative_ages))
         return _coordinate_midpoint_median(updates), info
-    if policy in {"current_coord_midpoint_heloco", "buffer_coord_midpoint_heloco"}:
+    if policy in {
+        "current_coord_midpoint_heloco",
+        "current_coord_midpoint_normmatch",
+        "current_rda_median_norm",
+        "current_coord_midpoint_blend25",
+        "current_coord_midpoint_blend50",
+        "buffer_coord_midpoint_heloco",
+    }:
+        corrected = [_heloco_per_tensor(update, momentum, _tensor_numels(frag)) for update in updates]
+        median = _coordinate_midpoint_median(corrected)
+        info.update(_weight_stats(weights, relative_ages))
+        if policy == "current_coord_midpoint_normmatch":
+            return _match_tensor_norms(median, production, frag), info
+        if policy == "current_rda_median_norm":
+            return _match_tensor_norms(production, median, frag), info
+        if policy.startswith("current_coord_midpoint_blend"):
+            blend = float(policy.removeprefix("current_coord_midpoint_blend")) / 100.0
+            return production.mul(1.0 - blend).add(median, alpha=blend), info
+        return median, info
+    if policy == "current_geomedian_heloco":
         corrected = [_heloco_per_tensor(update, momentum, _tensor_numels(frag)) for update in updates]
         info.update(_weight_stats(weights, relative_ages))
-        return _coordinate_midpoint_median(corrected), info
+        return _geomedian_per_tensor(corrected, weights, frag), info
 
     match = re.fullmatch(r"buffer_transport_(age|huber_age)(\d+)", policy)
     if match:
@@ -705,6 +783,12 @@ def replay(args) -> list[dict]:
                         current_candidates if policy.startswith("current_") else history
                     )
                     update, info = _aggregate(policy, policy_candidates, momentum, frag, args)
+                baseline_norm = float(baseline_update.norm().item())
+                update_norm = float(update.norm().item())
+                info["update_norm"] = update_norm
+                info["baseline_update_norm"] = baseline_norm
+                info["update_to_baseline_norm_ratio"] = update_norm / max(baseline_norm, 1e-12)
+                info["update_cosine_to_baseline"] = soft._cosine(update, baseline_update)
                 trial = _nesterov_trial(current, momentum, update, args.outer_lr, args.outer_momentum)
                 utility, utility_se = _eval(
                     model, batches, compute_loss, frag, params, current, trial,
@@ -768,6 +852,12 @@ def summarize(records: list[dict], policies: tuple[str, ...]) -> dict:
             ]),
             "history_effective_share": _mean([
                 float(row.get(f"{policy}_history_effective_share", 0.0)) for row in records
+            ]),
+            "update_to_baseline_norm_ratio": _mean([
+                float(row.get(f"{policy}_update_to_baseline_norm_ratio", 1.0)) for row in records
+            ]),
+            "update_cosine_to_baseline": _mean([
+                float(row.get(f"{policy}_update_cosine_to_baseline", 1.0)) for row in records
             ]),
         }
     parameter_errors = [
