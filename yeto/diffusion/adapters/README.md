@@ -52,7 +52,7 @@ it is not the standard shape every future adapter should copy.
 Stable requirements:
 
 - trainable module names and trainable parameter keys must be deterministic
-  across learners and restarts;
+  across learners, restarts, and syncer-checkpoint export;
 - loss denominators must be scalar tensors on the training device;
 - adapters must not start launchers, syncers, storage uploads, or cross-learner
   communication. Yeto owns orchestration and DiLoCo sync.

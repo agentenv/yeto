@@ -31,7 +31,7 @@ Integration modes:
 Stable sync contract:
 
 - ``trainable_module_items`` names and ``trainable_params`` keys must be stable
-  across all learners and across restarts.
+  across all learners, restarts, and syncer-checkpoint export.
 - Returned loss denominators must be scalar tensors on the training device.
 - Adapter hooks should not start launchers, syncers, storage uploads, or
   cross-learner communication. Yeto owns orchestration and DiLoCo sync.

@@ -32,6 +32,7 @@ dev = ["pytest", "pytest-timeout"]
 [project.scripts]
 yeto = "yeto.cli:main"
 yeto-export = "yeto.export:main"
+yeto-diffusion-export = "yeto.diffusion.export:main"
 yeto-diffusion-sample = "yeto.diffusion.sample:main"
 
 [tool.setuptools.packages.find]

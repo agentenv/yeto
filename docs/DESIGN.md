@@ -63,6 +63,7 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
 - **Resilience**: learners reconnect automatically through syncer restarts
   and WAN drops (exponential backoff; work continues locally during the
   outage and re-merges after the post-reconnect rebroadcast). The syncer
-  checkpoint is the single durable source of truth — recover a model from it
-  with `yeto-export --checkpoint yeto-state.ckpt --model <id> --output-dir out/`
-  even if every learner is gone.
+  checkpoint is the single durable source of truth. Recover a causal LM with
+  `yeto-export --checkpoint yeto-state.ckpt --model <id> --output-dir out/`,
+  or use `yeto-diffusion-export` with the same checkpoint/model/output flags
+  for a diffusion adapter, even if every learner is gone.
