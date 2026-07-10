@@ -1206,6 +1206,72 @@ def split_data(
     return train, evalf, n - eval_rows
 
 
+def validate_materialized_anchor_disjointness(
+    *,
+    anchor_hashes: set[str],
+    data_files: dict[str, Path],
+    summary_path: Path,
+    manifest_sha256: str,
+    anchor_data_sha256: str,
+) -> dict:
+    """Fail if the exact materialized train/eval rows overlap the anchor."""
+
+    from yeto.action_probe import canonical_anchor_hash
+
+    files = {}
+    all_overlaps = set()
+    for label, path in data_files.items():
+        row_hashes = []
+        try:
+            lines = path.read_text().splitlines()
+        except OSError as exc:
+            raise RuntimeError(f"cannot read materialized {label} data {path}: {exc}") from exc
+        for line_number, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"{path}:{line_number}: invalid materialized data JSON: {exc}"
+                ) from exc
+            if not isinstance(row, dict):
+                raise RuntimeError(f"{path}:{line_number}: expected a JSON object")
+            row_hashes.append(canonical_anchor_hash(row))
+        overlap = sorted(anchor_hashes.intersection(row_hashes))
+        all_overlaps.update(overlap)
+        files[label] = {
+            "path": str(path),
+            "row_count": len(row_hashes),
+            "unique_canonical_count": len(set(row_hashes)),
+            "overlap_count": len(overlap),
+            "overlap_hashes": overlap,
+        }
+
+    summary = {
+        "schema": "materialized_anchor_overlap_v1",
+        "manifest_sha256": manifest_sha256,
+        "anchor_data_sha256": anchor_data_sha256,
+        "anchor_unique_canonical_count": len(anchor_hashes),
+        "files": files,
+        "overlap_count": len(all_overlaps),
+        "verified_zero_overlap": not all_overlaps,
+    }
+    try:
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot write materialized anchor-overlap summary {summary_path}: {exc}"
+        ) from exc
+    if all_overlaps:
+        raise RuntimeError(
+            "materialized probe run data overlaps the action-probe anchor: "
+            f"{len(all_overlaps)} canonical row(s); see {summary_path}"
+        )
+    return summary
+
+
 def eval_loss_per_token(
     model_id: str,
     adapter_dir: Path | None,
@@ -1960,6 +2026,17 @@ def main() -> int:
     train, evalf, n_train = split_data(
         args.data, args.work_dir, args.eval_rows, args.max_rows, args.shuffle_rows_seed
     )
+    if probe_arms:
+        from yeto.action_probe import load_anchor_manifest
+
+        anchor_manifest = load_anchor_manifest(args.action_probe_anchor_manifest)
+        validate_materialized_anchor_disjointness(
+            anchor_hashes=set(anchor_manifest.canonical_hashes),
+            data_files={"train": train, "eval": evalf},
+            summary_path=args.report_dir.parent / "anchor_overlap_check.json",
+            manifest_sha256=anchor_manifest.manifest_sha256,
+            anchor_data_sha256=anchor_manifest.data_sha256,
+        )
     print(f"[compare] {n_train} train rows, {args.eval_rows} eval rows")
 
     records = []

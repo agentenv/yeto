@@ -590,3 +590,58 @@ def test_reproducibility_metadata_write_failure_is_clear(tmp_path, monkeypatch):
         compare.persist_reproducibility_metadata(
             blocked_root / "report", ["compare"]
         )
+
+
+def test_materialized_anchor_disjointness_writes_verified_summary(tmp_path):
+    from yeto.action_probe import canonical_anchor_hash
+
+    anchor_row = {"messages": [{"role": "user", "content": "anchor"}]}
+    train_row = {"messages": [{"role": "user", "content": "train"}]}
+    eval_row = {"messages": [{"role": "user", "content": "eval"}]}
+    train_path = tmp_path / "train.jsonl"
+    eval_path = tmp_path / "eval.jsonl"
+    train_path.write_text(json.dumps(train_row) + "\n")
+    eval_path.write_text(json.dumps(eval_row) + "\n")
+    summary_path = tmp_path / "anchor_overlap_check.json"
+
+    summary = compare.validate_materialized_anchor_disjointness(
+        anchor_hashes={canonical_anchor_hash(anchor_row)},
+        data_files={"train": train_path, "eval": eval_path},
+        summary_path=summary_path,
+        manifest_sha256="a" * 64,
+        anchor_data_sha256="b" * 64,
+    )
+
+    assert summary["verified_zero_overlap"] is True
+    assert summary["overlap_count"] == 0
+    assert summary["files"]["train"]["row_count"] == 1
+    assert summary["files"]["eval"]["row_count"] == 1
+    assert json.loads(summary_path.read_text()) == summary
+
+
+def test_materialized_anchor_disjointness_fails_and_preserves_evidence(tmp_path):
+    from yeto.action_probe import canonical_anchor_hash
+
+    anchor_row = {"messages": [{"role": "user", "content": "shared"}]}
+    train_path = tmp_path / "train.jsonl"
+    eval_path = tmp_path / "eval.jsonl"
+    train_path.write_text(json.dumps(anchor_row) + "\n")
+    eval_path.write_text(
+        json.dumps({"messages": [{"role": "user", "content": "eval"}]})
+        + "\n"
+    )
+    summary_path = tmp_path / "anchor_overlap_check.json"
+
+    with pytest.raises(RuntimeError, match="overlaps the action-probe anchor"):
+        compare.validate_materialized_anchor_disjointness(
+            anchor_hashes={canonical_anchor_hash(anchor_row)},
+            data_files={"train": train_path, "eval": eval_path},
+            summary_path=summary_path,
+            manifest_sha256="a" * 64,
+            anchor_data_sha256="b" * 64,
+        )
+
+    summary = json.loads(summary_path.read_text())
+    assert summary["verified_zero_overlap"] is False
+    assert summary["overlap_count"] == 1
+    assert summary["files"]["train"]["overlap_count"] == 1
