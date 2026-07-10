@@ -55,6 +55,13 @@ pub struct LearnerLedger {
     pub tokens: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MergeStats {
+    /// L2 norm of the merged pseudo-gradient before the outer optimizer.
+    pub gnorm: f64,
+    pub outer: merge::OuterStepStats,
+}
+
 pub struct GlobalState {
     pub layout: Layout,
     pub layout_meta: Option<String>,
@@ -134,8 +141,13 @@ impl GlobalState {
     }
 
     /// Merge learner copies of fragment `fid` and apply the outer step.
-    /// Returns the l2 norm of the merged outer gradient (for logging).
-    pub fn merge_and_step(&mut self, fid: usize, learners: &[&[f32]], weights: &[f64]) -> Result<f64> {
+    /// The returned `gnorm` remains the pre-optimizer merged-delta norm.
+    pub fn merge_and_step(
+        &mut self,
+        fid: usize,
+        learners: &[&[f32]],
+        weights: &[f64],
+    ) -> Result<MergeStats> {
         let frag = &self.layout.fragments[fid];
         let numel = frag.numel();
         for (i, l) in learners.iter().enumerate() {
@@ -197,7 +209,7 @@ impl GlobalState {
             .as_ref()
             .map(|rates| rates[fid])
             .unwrap_or(self.outer_lr);
-        match self.outer_optimizer {
+        let outer = match self.outer_optimizer {
             merge::OuterOptimizer::Nesterov => merge::nesterov_step(
                 &mut self.params[fid],
                 &mut self.momentum[fid],
@@ -220,8 +232,8 @@ impl GlobalState {
                 self.outer_momentum,
                 self.outer_restart_cos_threshold,
             ),
-        }
-        Ok(gnorm)
+        };
+        Ok(MergeStats { gnorm, outer })
     }
 }
 
@@ -351,8 +363,8 @@ mod tests {
         st.init_fragment(0, vec![1.0; 4]).unwrap();
         st.init_fragment(1, vec![1.0; 4]).unwrap();
         let learner = vec![0.0f32; 4];
-        let g = st.merge_and_step(0, &[&learner], &[1.0]).unwrap();
-        assert!(g > 0.0);
+        let stats = st.merge_and_step(0, &[&learner], &[1.0]).unwrap();
+        assert!(stats.gnorm > 0.0);
         // Θ − 1.0·(Θ − θ) = θ
         assert_eq!(st.params[0], vec![0.0; 4]);
     }
@@ -363,12 +375,18 @@ mod tests {
         assert_eq!(st.outer_optimizer, merge::OuterOptimizer::Nesterov);
         st.init_fragment(0, vec![1.0; 4]).unwrap();
         st.init_fragment(1, vec![0.0; 4]).unwrap();
-        st.merge_and_step(0, &[&[0.5f32; 4]], &[1.0]).unwrap();
+        let stats = st.merge_and_step(0, &[&[0.5f32; 4]], &[1.0]).unwrap();
         let expected = 1.0 - 0.7 * (0.5 + 0.9 * 0.5);
         for value in &st.params[0] {
             assert!((*value - expected).abs() < 1e-6);
         }
         assert_eq!(st.momentum[0], vec![0.5; 4]);
+        assert!((stats.gnorm - 1.0).abs() < 1e-12);
+        let expected_step_norm = 2.0 * (0.7f32 * (0.5 + 0.9 * 0.5)) as f64;
+        assert!((stats.outer.applied_step_norm - expected_step_norm).abs() < 1e-6);
+        assert_eq!(stats.outer.direction_delta_cosine, Some(1.0));
+        assert_eq!(stats.outer.history_current_norm_ratio, Some(0.0));
+        assert!(!stats.outer.restarted);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::protocol::*;
-use crate::state::{GlobalState, Layout};
+use crate::state::{GlobalState, Layout, MergeStats};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -830,7 +830,7 @@ async fn complete_round(
         ids.push(*id);
     }
     let sync_start = Instant::now();
-    let gnorm = st.merge_and_step(p, &learners, &weights)?;
+    let merge_stats = st.merge_and_step(p, &learners, &weights)?;
     st.versions[p] = t;
     // Pipelined rounds can complete out of order; the global step only
     // moves forward.
@@ -850,14 +850,14 @@ async fn complete_round(
         step = t,
         fragment = p,
         responders = ?ids,
-        gnorm = format!("{gnorm:.4}"),
+        gnorm = format!("{:.4}", merge_stats.gnorm),
         ms,
         "outer step"
     );
     if let Some(tape) = &cfg.event_tape {
         // Records land in completion order, which under pipelining is not
         // necessarily step order.
-        append_tape(tape, t, p, &pushes, &weights, gnorm, ms);
+        append_tape(tape, t, p, &pushes, &weights, &merge_stats, ms);
     }
     // Consistent cut: this round is fully applied and broadcast, and every
     // other in-flight round is still gathering (it has not touched state).
@@ -1080,10 +1080,39 @@ fn append_tape(
     fragment: usize,
     pushes: &HashMap<u32, Push>,
     _weights: &[f64],
-    gnorm: f64,
+    stats: &MergeStats,
     ms: u64,
 ) {
     use std::io::Write;
+    let line = format_tape_line(step, fragment, pushes, stats, ms);
+    let res = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+    if let Err(e) = res {
+        warn!("event tape write failed: {e}");
+    }
+}
+
+fn optional_json_number(value: Option<f64>) -> String {
+    match value {
+        Some(value) if value.is_finite() => value.to_string(),
+        _ => "null".to_string(),
+    }
+}
+
+fn json_number(value: f64) -> String {
+    optional_json_number(value.is_finite().then_some(value))
+}
+
+fn format_tape_line(
+    step: u64,
+    fragment: usize,
+    pushes: &HashMap<u32, Push>,
+    stats: &MergeStats,
+    ms: u64,
+) -> String {
     let mut responders: Vec<String> = pushes
         .values()
         .map(|p| {
@@ -1098,18 +1127,16 @@ fn append_tape(
         })
         .collect();
     responders.sort();
-    let line = format!(
-        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}]}}\n",
-        responders.join(",")
-    );
-    let res = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut f| f.write_all(line.as_bytes()));
-    if let Err(e) = res {
-        warn!("event tape write failed: {e}");
-    }
+    let outer = stats.outer;
+    let gnorm = json_number(stats.gnorm);
+    let outer_step_norm = json_number(outer.applied_step_norm);
+    let outer_direction_cosine = optional_json_number(outer.direction_delta_cosine);
+    let outer_history_current_ratio = optional_json_number(outer.history_current_norm_ratio);
+    format!(
+        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{}}}\n",
+        responders.join(","),
+        outer.restarted
+    )
 }
 
 fn dump_state(st: &GlobalState, path: &std::path::Path) -> Result<()> {
@@ -1130,6 +1157,68 @@ mod tests {
     use super::*;
 
     const CAP: Duration = Duration::from_millis(1000);
+
+    fn merge_stats(
+        gnorm: f64,
+        applied_step_norm: f64,
+        direction_delta_cosine: Option<f64>,
+        history_current_norm_ratio: Option<f64>,
+        restarted: bool,
+    ) -> MergeStats {
+        MergeStats {
+            gnorm,
+            outer: crate::merge::OuterStepStats {
+                applied_step_norm,
+                direction_delta_cosine,
+                history_current_norm_ratio,
+                restarted,
+            },
+        }
+    }
+
+    #[test]
+    fn event_tape_line_preserves_old_fields_and_adds_outer_stats() {
+        let mut pushes = HashMap::new();
+        pushes.insert(
+            4,
+            Push {
+                learner_id: 4,
+                fragment_id: 2,
+                global_step: 9,
+                base_version: 7,
+                local_step: 21,
+                c_steps: 10,
+                c_tokens: 100,
+                values: Vec::new(),
+            },
+        );
+        let stats = merge_stats(2.5, 0.75, Some(-0.25), Some(3.0), true);
+        let line = format_tape_line(9, 2, &pushes, &stats, 17);
+
+        assert!(
+            line.starts_with("{\"step\":9,\"fragment\":2,\"gnorm\":2.5,\"ms\":17,\"responders\":[")
+        );
+        assert!(line.contains(
+            "{\"id\":4,\"base_version\":7,\"c_steps\":10,\"c_tokens\":100,\"weight\":1000}"
+        ));
+        assert!(line.contains("\"outer_step_norm\":0.75"));
+        assert!(line.contains("\"outer_direction_cosine\":-0.25"));
+        assert!(line.contains("\"outer_history_current_ratio\":3"));
+        assert!(line.contains("\"outer_restarted\":true"));
+        assert!(line.ends_with("}\n"));
+    }
+
+    #[test]
+    fn event_tape_uses_null_for_undefined_outer_ratios() {
+        let stats = merge_stats(0.0, 0.0, None, None, false);
+        let line = format_tape_line(1, 0, &HashMap::new(), &stats, 0);
+        assert!(line.contains("\"gnorm\":0"));
+        assert!(line.contains("\"outer_step_norm\":0"));
+        assert!(line.contains("\"outer_direction_cosine\":null"));
+        assert!(line.contains("\"outer_history_current_ratio\":null"));
+        assert!(line.contains("\"outer_restarted\":false"));
+        assert!(!line.contains("NaN"));
+    }
 
     #[test]
     fn grace_falls_back_to_cap_without_estimate() {

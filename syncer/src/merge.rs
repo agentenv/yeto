@@ -62,6 +62,22 @@ impl FromStr for OuterOptimizer {
     }
 }
 
+/// Diagnostics for one applied outer-optimizer step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OuterStepStats {
+    /// L2 norm of the parameter displacement, `lr * optimizer_direction`.
+    pub applied_step_norm: f64,
+    /// Cosine between the optimizer direction and the current merged delta.
+    /// Undefined when either vector has zero norm.
+    pub direction_delta_cosine: Option<f64>,
+    /// L2 norm of the optimizer's history contribution divided by the L2
+    /// norm of its current-delta contribution. Undefined when the current
+    /// contribution has zero norm.
+    pub history_current_norm_ratio: Option<f64>,
+    /// Whether restarted EMA discarded nonzero history on this commit.
+    pub restarted: bool,
+}
+
 /// w_m = c_tokens² / c_steps ("quantity × quality").
 pub fn learner_weight(c_tokens: u64, c_steps: u32) -> f64 {
     if c_steps == 0 {
@@ -140,11 +156,47 @@ pub fn merge_rda(anchor: &[f32], learners: &[&[f32]], weights: &[f64], out: &mut
 
 /// SGD + Nesterov momentum treating `delta` as the gradient:
 /// buf ← μ·buf + Δ;  θ ← θ − lr·(Δ + μ·buf).
-pub fn nesterov_step(params: &mut [f32], buf: &mut [f32], delta: &[f32], lr: f32, mu: f32) {
+pub fn nesterov_step(
+    params: &mut [f32],
+    buf: &mut [f32],
+    delta: &[f32],
+    lr: f32,
+    mu: f32,
+) -> OuterStepStats {
+    let mut step_norm_sq = 0.0;
+    let mut direction_norm_sq = 0.0;
+    let mut delta_norm_sq = 0.0;
+    let mut direction_delta_dot = 0.0;
+    let mut history_norm_sq = 0.0;
+    let mut current_norm_sq = 0.0;
     for ((p, b), d) in params.iter_mut().zip(buf.iter_mut()).zip(delta) {
+        let previous_buffer = *b;
         *b = mu * *b + *d;
-        *p -= lr * (*d + mu * *b);
+        let direction = *d + mu * *b;
+        let step = lr * direction;
+        *p -= step;
+
+        let direction = direction as f64;
+        let delta = *d as f64;
+        let step = step as f64;
+        let history = (mu * (mu * previous_buffer)) as f64;
+        let current = (*d + mu * *d) as f64;
+        step_norm_sq += step * step;
+        direction_norm_sq += direction * direction;
+        delta_norm_sq += delta * delta;
+        direction_delta_dot += direction * delta;
+        history_norm_sq += history * history;
+        current_norm_sq += current * current;
     }
+    finish_outer_step_stats(
+        step_norm_sq,
+        direction_norm_sq,
+        delta_norm_sq,
+        direction_delta_dot,
+        history_norm_sq,
+        current_norm_sq,
+        false,
+    )
 }
 
 fn norm_sq(values: &[f32]) -> f64 {
@@ -171,22 +223,109 @@ fn update_normalized_ema(
     }
 }
 
-fn apply_buffer(params: &mut [f32], buf: &[f32], lr: f32) {
-    for (p, b) in params.iter_mut().zip(buf) {
-        *p -= lr * *b;
+fn apply_buffer(params: &mut [f32], buf: &[f32], delta: &[f32], lr: f32) -> (f64, f64, f64) {
+    let mut step_norm_sq = 0.0;
+    let mut direction_norm_sq = 0.0;
+    let mut direction_delta_dot = 0.0;
+    for ((p, b), d) in params.iter_mut().zip(buf).zip(delta) {
+        let step = lr * *b;
+        *p -= step;
+        let step = step as f64;
+        let direction = *b as f64;
+        step_norm_sq += step * step;
+        direction_norm_sq += direction * direction;
+        direction_delta_dot += direction * *d as f64;
     }
+    (step_norm_sq, direction_norm_sq, direction_delta_dot)
+}
+
+fn finish_outer_step_stats(
+    step_norm_sq: f64,
+    direction_norm_sq: f64,
+    delta_norm_sq: f64,
+    direction_delta_dot: f64,
+    history_norm_sq: f64,
+    current_norm_sq: f64,
+    restarted: bool,
+) -> OuterStepStats {
+    let direction_delta_cosine = if direction_norm_sq > 0.0
+        && delta_norm_sq > 0.0
+        && direction_norm_sq.is_finite()
+        && delta_norm_sq.is_finite()
+        && direction_delta_dot.is_finite()
+    {
+        let cosine = direction_delta_dot / (direction_norm_sq * delta_norm_sq).sqrt();
+        cosine.is_finite().then(|| cosine.clamp(-1.0, 1.0))
+    } else {
+        None
+    };
+    let history_current_norm_ratio =
+        if current_norm_sq > 0.0 && current_norm_sq.is_finite() && history_norm_sq.is_finite() {
+            let ratio = (history_norm_sq / current_norm_sq).sqrt();
+            ratio.is_finite().then_some(ratio)
+        } else {
+            None
+        };
+    OuterStepStats {
+        applied_step_norm: step_norm_sq.sqrt(),
+        direction_delta_cosine,
+        history_current_norm_ratio,
+        restarted,
+    }
+}
+
+fn ema_contribution_norms(
+    previous_buffer_norm_sq: f64,
+    delta_norm_sq: f64,
+    beta: f32,
+    initialized_from_delta: bool,
+) -> (f64, f64) {
+    if initialized_from_delta {
+        return (0.0, delta_norm_sq);
+    }
+    let history_scale = beta as f64;
+    let current_scale = (1.0f32 - beta) as f64;
+    (
+        history_scale * history_scale * previous_buffer_norm_sq,
+        current_scale * current_scale * delta_norm_sq,
+    )
 }
 
 /// Unit-gain exponential moving average of the merged pseudo-gradient.
 /// A zero buffer initializes from the first nonzero delta, avoiding the
 /// usual EMA warmup attenuation.
-pub fn normalized_ema_step(params: &mut [f32], buf: &mut [f32], delta: &[f32], lr: f32, beta: f32) {
+pub fn normalized_ema_step(
+    params: &mut [f32],
+    buf: &mut [f32],
+    delta: &[f32],
+    lr: f32,
+    beta: f32,
+) -> OuterStepStats {
     debug_assert_eq!(params.len(), buf.len());
     debug_assert_eq!(buf.len(), delta.len());
     let buf_is_zero = is_zero(buf);
     let delta_is_zero = is_zero(delta);
+    let previous_buffer_norm_sq = norm_sq(buf);
+    let delta_norm_sq = norm_sq(delta);
+    let initialized_from_delta = buf_is_zero && !delta_is_zero;
     update_normalized_ema(buf, delta, beta, buf_is_zero, delta_is_zero);
-    apply_buffer(params, buf, lr);
+    let (step_norm_sq, direction_norm_sq, direction_delta_dot) =
+        apply_buffer(params, buf, delta, lr);
+    let (history_norm_sq, current_norm_sq) = ema_contribution_norms(
+        previous_buffer_norm_sq,
+        delta_norm_sq,
+        beta,
+        initialized_from_delta,
+    );
+    finish_outer_step_stats(
+        step_norm_sq,
+        direction_norm_sq,
+        delta_norm_sq,
+        direction_delta_dot,
+        history_norm_sq,
+        current_norm_sq,
+        false,
+    )
 }
 
 /// Normalized EMA with a gradient-restart criterion. When both vectors are
@@ -200,7 +339,7 @@ pub fn restarted_ema_step(
     lr: f32,
     beta: f32,
     threshold: f32,
-) {
+) -> OuterStepStats {
     debug_assert_eq!(params.len(), buf.len());
     debug_assert_eq!(buf.len(), delta.len());
     let buf_norm_sq = norm_sq(buf);
@@ -219,15 +358,22 @@ pub fn restarted_ema_step(
     if restart {
         buf.copy_from_slice(delta);
     } else {
-        update_normalized_ema(
-            buf,
-            delta,
-            beta,
-            buf_norm_sq == 0.0,
-            delta_norm_sq == 0.0,
-        );
+        update_normalized_ema(buf, delta, beta, buf_norm_sq == 0.0, delta_norm_sq == 0.0);
     }
-    apply_buffer(params, buf, lr);
+    let initialized_from_delta = restart || (buf_norm_sq == 0.0 && delta_norm_sq > 0.0);
+    let (step_norm_sq, direction_norm_sq, direction_delta_dot) =
+        apply_buffer(params, buf, delta, lr);
+    let (history_norm_sq, current_norm_sq) =
+        ema_contribution_norms(buf_norm_sq, delta_norm_sq, beta, initialized_from_delta);
+    finish_outer_step_stats(
+        step_norm_sq,
+        direction_norm_sq,
+        delta_norm_sq,
+        direction_delta_dot,
+        history_norm_sq,
+        current_norm_sq,
+        restart,
+    )
 }
 
 /// HeLoCo per-tensor directional correction (arXiv 2606.00271, Alg. 1).
@@ -306,6 +452,13 @@ mod tests {
 
     fn norm(v: &[f32]) -> f64 {
         v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt()
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "got {actual}, expected {expected}"
+        );
     }
 
     #[test]
@@ -447,25 +600,69 @@ mod tests {
         // One step from zero state: buf = Δ; θ -= lr(Δ + μΔ) = lr(1+μ)Δ.
         let mut p = [1.0f32];
         let mut buf = [0.0f32];
-        nesterov_step(&mut p, &mut buf, &[0.5], 0.7, 0.9);
+        let stats = nesterov_step(&mut p, &mut buf, &[0.5], 0.7, 0.9);
         assert!((p[0] - (1.0 - 0.7 * (0.5 + 0.9 * 0.5))).abs() < 1e-6);
         assert!((buf[0] - 0.5).abs() < 1e-6);
+        assert_close(stats.applied_step_norm, (0.7f32 * 0.95) as f64);
+        assert_close(stats.direction_delta_cosine.unwrap(), 1.0);
+        assert_eq!(stats.history_current_norm_ratio, Some(0.0));
+        assert!(!stats.restarted);
+    }
+
+    #[test]
+    fn nesterov_stats_separate_history_and_current_contributions() {
+        let mut p = [0.0f32];
+        let mut buf = [2.0f32];
+        let stats = nesterov_step(&mut p, &mut buf, &[1.0], 0.25, 0.5);
+        assert_eq!(buf, [2.0]);
+        assert_eq!(p, [-0.5]);
+        assert_close(stats.applied_step_norm, 0.5);
+        assert_close(stats.direction_delta_cosine.unwrap(), 1.0);
+        // direction = (1 + mu) * delta + mu^2 * previous_buffer.
+        assert_close(stats.history_current_norm_ratio.unwrap(), 0.5 / 1.5);
+        assert!(!stats.restarted);
+    }
+
+    #[test]
+    fn nesterov_zero_delta_leaves_direction_ratios_undefined() {
+        let mut p = [1.0f32];
+        let mut buf = [2.0f32];
+        let stats = nesterov_step(&mut p, &mut buf, &[0.0], 0.25, 0.5);
+        assert_eq!(buf, [1.0]);
+        assert_eq!(p, [0.875]);
+        assert_close(stats.applied_step_norm, 0.125);
+        assert_eq!(stats.direction_delta_cosine, None);
+        assert_eq!(stats.history_current_norm_ratio, None);
+        assert!(!stats.restarted);
     }
 
     #[test]
     fn normalized_ema_matches_reference() {
         let mut p = [1.0f32, -1.0];
         let mut buf = [0.0f32, 0.0];
-        normalized_ema_step(&mut p, &mut buf, &[0.5, -0.25], 0.2, 0.8);
+        let first = normalized_ema_step(&mut p, &mut buf, &[0.5, -0.25], 0.2, 0.8);
         assert_eq!(buf, [0.5, -0.25]);
         assert!((p[0] - 0.9).abs() < 1e-6);
         assert!((p[1] + 0.95).abs() < 1e-6);
+        assert_close(first.applied_step_norm, norm(&[0.1, -0.05]));
+        assert_close(first.direction_delta_cosine.unwrap(), 1.0);
+        assert_eq!(first.history_current_norm_ratio, Some(0.0));
+        assert!(!first.restarted);
 
-        normalized_ema_step(&mut p, &mut buf, &[1.0, 0.75], 0.2, 0.8);
+        let second = normalized_ema_step(&mut p, &mut buf, &[1.0, 0.75], 0.2, 0.8);
         assert!((buf[0] - 0.6).abs() < 1e-6);
         assert!((buf[1] + 0.05).abs() < 1e-6);
         assert!((p[0] - 0.78).abs() < 1e-6);
         assert!((p[1] + 0.94).abs() < 1e-6);
+        assert_close(second.applied_step_norm, norm(&[0.12, -0.01]));
+        assert_close(
+            second.direction_delta_cosine.unwrap(),
+            cosine(&buf, &[1.0, 0.75]),
+        );
+        let expected_ratio =
+            (0.8f32 as f64 * norm(&[0.5, -0.25])) / ((1.0f32 - 0.8) as f64 * norm(&[1.0, 0.75]));
+        assert_close(second.history_current_norm_ratio.unwrap(), expected_ratio);
+        assert!(!second.restarted);
     }
 
     #[test]
@@ -480,26 +677,51 @@ mod tests {
     }
 
     #[test]
+    fn normalized_ema_zero_delta_leaves_direction_ratios_undefined() {
+        let mut p = [1.0f32];
+        let mut buf = [1.0f32];
+        let stats = normalized_ema_step(&mut p, &mut buf, &[0.0], 0.5, 0.5);
+        assert_eq!(buf, [0.5]);
+        assert_eq!(p, [0.75]);
+        assert_close(stats.applied_step_norm, 0.25);
+        assert_eq!(stats.direction_delta_cosine, None);
+        assert_eq!(stats.history_current_norm_ratio, None);
+        assert!(!stats.restarted);
+    }
+
+    #[test]
     fn restarted_ema_discards_conflicting_history() {
         let mut p = [0.0f32, 0.0];
         let mut buf = [1.0f32, 0.0];
-        restarted_ema_step(&mut p, &mut buf, &[-2.0, 0.0], 0.25, 0.9, 0.0);
+        let stats = restarted_ema_step(&mut p, &mut buf, &[-2.0, 0.0], 0.25, 0.9, 0.0);
         assert_eq!(buf, [-2.0, 0.0]);
         assert_eq!(p, [0.5, 0.0]);
+        assert_close(stats.applied_step_norm, 0.5);
+        assert_close(stats.direction_delta_cosine.unwrap(), 1.0);
+        assert_eq!(stats.history_current_norm_ratio, Some(0.0));
+        assert!(stats.restarted);
     }
 
     #[test]
     fn restarted_ema_handles_zero_norms_deterministically() {
         let mut p = [1.0f32];
         let mut buf = [0.0f32];
-        restarted_ema_step(&mut p, &mut buf, &[0.0], 1.0, 0.5, 0.0);
+        let empty = restarted_ema_step(&mut p, &mut buf, &[0.0], 1.0, 0.5, 0.0);
         assert_eq!(buf, [0.0]);
         assert_eq!(p, [1.0]);
+        assert_eq!(empty.applied_step_norm, 0.0);
+        assert_eq!(empty.direction_delta_cosine, None);
+        assert_eq!(empty.history_current_norm_ratio, None);
+        assert!(!empty.restarted);
 
         buf[0] = 1.0;
-        restarted_ema_step(&mut p, &mut buf, &[0.0], 1.0, 0.5, 0.0);
+        let decayed = restarted_ema_step(&mut p, &mut buf, &[0.0], 1.0, 0.5, 0.0);
         assert_eq!(buf, [0.5]);
         assert_eq!(p, [0.5]);
+        assert_close(decayed.applied_step_norm, 0.5);
+        assert_eq!(decayed.direction_delta_cosine, None);
+        assert_eq!(decayed.history_current_norm_ratio, None);
+        assert!(!decayed.restarted);
     }
 
     #[test]
