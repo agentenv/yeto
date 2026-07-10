@@ -126,6 +126,50 @@ def select_arms(spec: str) -> list[Arm]:
     return [PRESETS[n] for n in names]
 
 
+def apply_arm_overrides(
+    arms: list[Arm],
+    *,
+    outer_lr: float | None = None,
+    outer_lr_by_fragment: str | None = None,
+    outer_momentum: float | None = None,
+    delta_correction: str | None = None,
+) -> list[Arm]:
+    """Apply CLI-wide async-arm overrides without mutating presets."""
+    if all(
+        value is None
+        for value in (
+            outer_lr,
+            outer_lr_by_fragment,
+            outer_momentum,
+            delta_correction,
+        )
+    ):
+        return arms
+
+    from dataclasses import replace
+
+    return [
+        replace(
+            arm,
+            outer_lr=arm.outer_lr if outer_lr is None else outer_lr,
+            outer_lr_by_fragment=(
+                arm.outer_lr_by_fragment
+                if outer_lr_by_fragment is None
+                else outer_lr_by_fragment
+            ),
+            outer_momentum=(
+                arm.outer_momentum if outer_momentum is None else outer_momentum
+            ),
+            delta_correction=(
+                arm.delta_correction
+                if delta_correction is None
+                else delta_correction
+            ),
+        )
+        for arm in arms
+    ]
+
+
 def steps_for(token_budget: int, mbs: int, seq_len: int, learners: int,
               world: int = 1) -> int:
     """Inner steps per learner so the arm consumes ~token_budget in total.
@@ -735,6 +779,12 @@ def main() -> int:
         help="override outer Nesterov momentum for every selected async arm",
     )
     p.add_argument(
+        "--delta-correction",
+        choices=["heloco", "none"],
+        default=None,
+        help="override delta correction for every selected async arm",
+    )
+    p.add_argument(
         "--outer-lr-by-fragment",
         default=None,
         help="comma-separated per-fragment outer learning rates for every selected async arm",
@@ -772,31 +822,13 @@ def main() -> int:
         print(f"EVAL_LOSS {loss:.6f}")
         return 0
 
-    arms = select_arms(args.settings)
-    if (
-        args.outer_lr is not None
-        or args.outer_lr_by_fragment is not None
-        or args.outer_momentum is not None
-    ):
-        from dataclasses import replace as _replace
-
-        arms = [
-            _replace(
-                arm,
-                outer_lr=arm.outer_lr if args.outer_lr is None else args.outer_lr,
-                outer_lr_by_fragment=(
-                    arm.outer_lr_by_fragment
-                    if args.outer_lr_by_fragment is None
-                    else args.outer_lr_by_fragment
-                ),
-                outer_momentum=(
-                    arm.outer_momentum
-                    if args.outer_momentum is None
-                    else args.outer_momentum
-                ),
-            )
-            for arm in arms
-        ]
+    arms = apply_arm_overrides(
+        select_arms(args.settings),
+        outer_lr=args.outer_lr,
+        outer_lr_by_fragment=args.outer_lr_by_fragment,
+        outer_momentum=args.outer_momentum,
+        delta_correction=args.delta_correction,
+    )
     if args.round_interval_ms is not None:
         from dataclasses import replace as _replace
 

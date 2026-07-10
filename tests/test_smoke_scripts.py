@@ -107,6 +107,55 @@ def test_compare_outer_optimizer_override_is_explicit():
     assert cmd[cmd.index("--outer-momentum") + 1] == "0.8"
 
 
+def test_compare_delta_correction_override_applies_to_every_selected_arm():
+    original = compare.select_arms("m4,q4")
+    overridden = compare.apply_arm_overrides(original, delta_correction="none")
+
+    assert [arm.name for arm in overridden] == ["m4", "q4"]
+    assert all(arm.delta_correction == "none" for arm in overridden)
+    assert all(after is not before for before, after in zip(original, overridden))
+    assert compare.PRESETS["m4"].delta_correction == "heloco"
+    assert compare.PRESETS["q4"].delta_correction == "heloco"
+
+
+def test_compare_delta_correction_cli_overrides_m4(monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compare_diloco.py",
+            "--data",
+            "unused.jsonl",
+            "--settings",
+            "m4",
+            "--delta-correction",
+            "none",
+            "--dry-run",
+        ],
+    )
+
+    assert compare.main() == 0
+    out = capsys.readouterr().out
+    assert "m4" in out and "M=4" in out
+    assert "correction=none" in out
+
+
+def test_compare_arm_replacement_propagates_all_outer_overrides_to_syncer():
+    arm = compare.apply_arm_overrides(
+        [compare.PRESETS["m4"]],
+        outer_lr=0.175,
+        outer_momentum=0.5,
+        delta_correction="none",
+    )[0]
+
+    assert arm.m == 4
+    assert arm.fragments == compare.PRESETS["m4"].fragments
+    cmd = compare.syncer_command(arm, 1234, Path("/tmp/w/m4"), total_steps=40)
+    assert cmd[cmd.index("--outer-lr") + 1] == "0.175"
+    assert cmd[cmd.index("--outer-momentum") + 1] == "0.5"
+    assert cmd[cmd.index("--delta-correction") + 1] == "none"
+
+
 def test_syncer_command_supports_fragment_outer_learning_rates():
     from dataclasses import replace
 
