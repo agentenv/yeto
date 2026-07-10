@@ -3,6 +3,7 @@ SkyPilot. The registry is redirected to a temp dir; the launcher and the
 sky teardown call are stubbed."""
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -274,6 +275,44 @@ def test_status_shows_running_for_live_pid(capsys):
         ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("s2")
     )
     assert "RUNNING" in line
+
+
+def test_status_summarizes_event_tape(tmp_path, capsys):
+    tape = tmp_path / "events.jsonl"
+    records = [
+        {
+            "step": 1,
+            "fragment": 0,
+            "expected": [0, 1],
+            "responded": [0, 1],
+            "missed_grace": [],
+            "responders": [
+                {"id": 0, "c_steps": 2, "c_tokens": 20, "weight": 200.0},
+                {"id": 1, "c_steps": 2, "c_tokens": 20, "weight": 200.0},
+            ],
+        },
+        {
+            "step": 2,
+            "fragment": 1,
+            "expected": [0, 1],
+            "responded": [0],
+            "missed_grace": [1],
+            "responders": [
+                {"id": 0, "c_steps": 2, "c_tokens": 20, "weight": 200.0},
+            ],
+        },
+    ]
+    tape.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    assert cli.main(["status", "--tape", str(tape)]) == 0
+    out = capsys.readouterr().out
+    assert "TAPE" in out
+    assert "ROUNDS 2" in out
+    assert "MISSED 1 across 1 rounds" in out
+    assert "NODE  RESPONSES" in out
+    assert "0     2" in out
+    assert "1     1" in out
+    assert "step=2/frag=1: [1]" in out
 
 
 def test_logs_no_follow_dumps_log(capsys):

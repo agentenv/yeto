@@ -31,6 +31,7 @@ import time
 
 from . import runs
 from .losses import LOSS_FUNCTIONS
+from .status_metrics import render_tape_summary
 
 SUBCOMMANDS = ("launch", "shape", "status", "logs", "down", "_worker", "_head")
 
@@ -429,7 +430,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     shape.add_argument("--no-cache", action="store_true", help="bypass the 1h signal cache")
 
-    sub.add_parser("status", help="table of known runs")
+    status = sub.add_parser("status", help="table of known runs")
+    status.add_argument(
+        "--tape",
+        default=None,
+        help="also summarize a syncer event tape JSONL file",
+    )
 
     logs = sub.add_parser("logs", help="stream a run's launcher log (Ctrl-C detaches)")
     logs.add_argument("run", help="run name (its --cluster-prefix)")
@@ -951,42 +957,54 @@ def _display_clusters(clusters) -> str:
     return joined if len(joined) <= 40 else f"{len(clusters)} clusters"
 
 
-def cmd_status() -> int:
+def cmd_status(args) -> int:
     # Registry-only, by design: never calls the sky API, so it's instant.
     metas = runs.list_runs()
     if not metas:
-        print("No runs. Start one with: yeto launch --gpu ... --model ... --data ...")
-        return 0
-    header = ("NAME", "STATE", "STARTED", "CLUSTERS", "LOG")
-    rows = []
-    for meta in metas:
-        name = meta.get("name", "?")
-        state = (
-            runs.RUNNING
-            if runs.is_alive(meta.get("pid"))
-            else (meta.get("state") or "UNKNOWN")
-        )
-        rows.append(
-            (
-                name,
-                state,
-                _humanize_ago(meta.get("started_at")),
-                _display_clusters(meta.get("clusters")),
-                _last_log_line(name),
+        if not args.tape:
+            print("No runs. Start one with: yeto launch --gpu ... --model ... --data ...")
+            return 0
+    else:
+        header = ("NAME", "STATE", "STARTED", "CLUSTERS", "LOG")
+        rows = []
+        for meta in metas:
+            name = meta.get("name", "?")
+            state = (
+                runs.RUNNING
+                if runs.is_alive(meta.get("pid"))
+                else (meta.get("state") or "UNKNOWN")
             )
-        )
-    widths = [max(len(r[i]) for r in [header] + rows) for i in range(4)]
-    for row in [header] + rows:
-        lead = "  ".join(row[i].ljust(widths[i]) for i in range(4))
-        print(f"{lead}  {row[4]}")
-    for meta in metas:
-        # Head-mode runs are supervised on their head VM; the registry only
-        # has the state as of submission/teardown.
-        if meta.get("controller") == "head" and meta.get("state") != runs.DOWN:
-            print(
-                f"[yeto] '{meta.get('name')}' is controlled from "
-                f"{meta.get('head_cluster')}; live state: yeto logs {meta.get('name')}"
+            rows.append(
+                (
+                    name,
+                    state,
+                    _humanize_ago(meta.get("started_at")),
+                    _display_clusters(meta.get("clusters")),
+                    _last_log_line(name),
+                )
             )
+        widths = [max(len(r[i]) for r in [header] + rows) for i in range(4)]
+        for row in [header] + rows:
+            lead = "  ".join(row[i].ljust(widths[i]) for i in range(4))
+            print(f"{lead}  {row[4]}")
+        for meta in metas:
+            # Head-mode runs are supervised on their head VM; the registry only
+            # has the state as of submission/teardown.
+            if meta.get("controller") == "head" and meta.get("state") != runs.DOWN:
+                print(
+                    f"[yeto] '{meta.get('name')}' is controlled from "
+                    f"{meta.get('head_cluster')}; live state: yeto logs {meta.get('name')}"
+                )
+    if args.tape:
+        try:
+            for line in render_tape_summary(args.tape):
+                print(line)
+        except OSError as e:
+            print(f"[yeto] could not read event tape {args.tape}: {e}", file=sys.stderr)
+            return 1
+        except ValueError as e:
+            print(f"[yeto] could not parse event tape {args.tape}: {e}", file=sys.stderr)
+            return 1
     return 0
 
 
@@ -1162,7 +1180,7 @@ def main(argv=None) -> int:
     if args.command == "shape":
         return cmd_shape(args)
     if args.command == "status":
-        return cmd_status()
+        return cmd_status(args)
     if args.command == "logs":
         return cmd_logs(args)
     if args.command == "down":
