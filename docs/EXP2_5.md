@@ -393,7 +393,7 @@ scripts/replay_group_local_probecommit.py
 - The policy replay uses held-out calibrated feature files, but the main policy score is raw `probe_grad_dot`; calibrated policy variants should be tested separately.
 - Candidate-level AUROC is not sufficient. The current score is much weaker as a within-group ranker, which is the relevant objective for merge selection.
 - Utility and policy means differ between Task A and Task C because they use different probe row/batch settings.
-- No online training was started.
+- No online ProbeCommit-policy training was started in EXP2.5.
 
 ## Exact Commands
 
@@ -699,3 +699,59 @@ Decision: still do not go online. The positive-gain policies are low-mass or uns
 unbuffered m12 groups are too small/noisy for robust statistics;
 the next policy-rescue attempt should test buffered norm-clipped aggregation.
 ```
+
+## EXP2.18 Schedule-Locked Fragment-LR Validation
+
+The later Qwen3.5-9B campaign found that earlier endpoint comparisons mixed
+policy effects with unequal outer-step counts and partial tail commits.
+Locking every arm to 80 strict full-quorum groups reduced the static
+fragment-ID learning-rate advantage to about `0.001` versus its fixed mean-LR
+control. The full result is in `docs/EXP2_18.md`.
+
+## EXP2.19 Schedule-Locked Outer Optimizer
+
+The outer-optimizer pivot produced a small confirmed policy improvement. The
+full mechanism and artifact record is in `docs/EXP2_19.md`.
+
+First, in the earlier HeLoCo-plus-RDA screen, lowering Nesterov momentum from
+`0.9` to `0.5` at LR `0.175` improved the mean external holdout by `0.043388`
+across full-budget seeds 149 and 163. The later causal controls disabled delta
+correction. Under that protocol, plain SGD at LR `0.35`, which matches steady
+constant-direction gain, was not better: across untouched seeds 211 and 223 it
+regressed by `0.001463` on the primary mean and `0.001391` on an untouched
+512-row split.
+
+The mechanism was realized step scale. LR-0.35 SGD applied steps about 26%
+larger than short-memory Nesterov. Scaling memoryless SGD to LR `0.28` matched
+the realized step norm within 1% and improved every endpoint:
+
+| Result | Primary mean gain | Untouched gain |
+|---|---:|---:|
+| Seed 223 development | 0.003305 | 0.003869 |
+| Seed 239 fresh confirmation | 0.003563 | 0.003703 |
+| Two-seed mean | 0.003434 | 0.003786 |
+
+The seed-239-only strictly disjoint 512-row endpoint also improves by
+`0.003674`. Both final arms contain exactly 80 full-quorum groups, 20 commits
+per fragment, and byte-identical initial state plus first-window candidates.
+Normalized EMA with `beta=0.5`, `eta=0.35` is an exact practical tie and does
+not receive a confirmation run.
+
+Holdout B contains the same one canonical training duplicate in seeds 211,
+223, and 239, so it is not strictly training-disjoint. This affects both arms
+equally within each seed. Holdout A and both 512-row robustness endpoints have
+zero canonical training overlap, including the fresh seed-239 confirmation
+endpoint.
+
+Final decision for this exact Qwen schedule:
+
+```text
+outer optimizer: plain SGD
+outer LR:        0.28
+delta correction: none
+```
+
+The effect is modest and specific to the tested model, data, learner count,
+delay pattern, and horizon. It does not rescue candidate-level or group-level
+commit selection; it establishes a cleaner outer-optimizer baseline for any
+future online policy work.
