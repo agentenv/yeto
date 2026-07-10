@@ -78,6 +78,94 @@ pub struct OuterStepStats {
     pub restarted: bool,
 }
 
+/// Apply one configured outer-optimizer step.
+///
+/// Keeping the dispatch next to the optimizer implementations gives the
+/// state layer a single production path for both mutating commits and pure
+/// previews made from cloned parameter and buffer slices.
+pub fn apply_outer_step(
+    optimizer: OuterOptimizer,
+    params: &mut [f32],
+    buf: &mut [f32],
+    delta: &[f32],
+    lr: f32,
+    momentum: f32,
+    restart_cos_threshold: f32,
+) -> OuterStepStats {
+    match optimizer {
+        OuterOptimizer::Nesterov => nesterov_step(params, buf, delta, lr, momentum),
+        OuterOptimizer::NormalizedEma => normalized_ema_step(params, buf, delta, lr, momentum),
+        OuterOptimizer::RestartedEma => {
+            restarted_ema_step(params, buf, delta, lr, momentum, restart_cos_threshold)
+        }
+    }
+}
+
+/// Materialize the nominal f32 parameter displacement produced by an outer
+/// step after its optimizer buffer has been updated. This is the same vector
+/// whose norm is reported by `OuterStepStats::applied_step_norm`.
+pub fn materialize_applied_step(
+    optimizer: OuterOptimizer,
+    updated_buf: &[f32],
+    delta: &[f32],
+    lr: f32,
+    momentum: f32,
+) -> Vec<f32> {
+    debug_assert_eq!(updated_buf.len(), delta.len());
+    match optimizer {
+        OuterOptimizer::Nesterov => updated_buf
+            .iter()
+            .zip(delta)
+            .map(|(buf, value)| lr * (*value + momentum * *buf))
+            .collect(),
+        OuterOptimizer::NormalizedEma | OuterOptimizer::RestartedEma => {
+            updated_buf.iter().map(|buf| lr * *buf).collect()
+        }
+    }
+}
+
+/// Purely scale a nominal applied-step vector and apply it once to the same
+/// f32 base parameters used by the production outer step. Returning both the
+/// scaled vector and resulting parameters keeps action previews consistent on
+/// the f32 lattice instead of reconstructing a step from rounded parameters.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScaledAppliedStep {
+    pub params: Vec<f32>,
+    pub applied_step: Vec<f32>,
+    pub applied_step_norm: f64,
+}
+
+pub fn scale_applied_step(
+    base_params: &[f32],
+    applied_step: &[f32],
+    scalar: f64,
+) -> Option<ScaledAppliedStep> {
+    if base_params.len() != applied_step.len() || !scalar.is_finite() || scalar < 0.0 {
+        return None;
+    }
+    let mut params = Vec::with_capacity(base_params.len());
+    let mut scaled_step = Vec::with_capacity(applied_step.len());
+    let mut norm_sq = 0.0f64;
+    for (&base, &step) in base_params.iter().zip(applied_step) {
+        let scaled = (scalar * step as f64) as f32;
+        let param = base - scaled;
+        if !scaled.is_finite() || !param.is_finite() {
+            return None;
+        }
+        params.push(param);
+        scaled_step.push(scaled);
+        norm_sq += (scaled as f64).powi(2);
+    }
+    if !norm_sq.is_finite() {
+        return None;
+    }
+    Some(ScaledAppliedStep {
+        params,
+        applied_step: scaled_step,
+        applied_step_norm: norm_sq.sqrt(),
+    })
+}
+
 /// w_m = c_tokens² / c_steps ("quantity × quality").
 pub fn learner_weight(c_tokens: u64, c_steps: u32) -> f64 {
     if c_steps == 0 {
@@ -466,6 +554,22 @@ mod tests {
         assert_eq!(learner_weight(100, 10), 1000.0);
         assert_eq!(learner_weight(0, 10), 0.0);
         assert_eq!(learner_weight(100, 0), 0.0);
+    }
+
+    #[test]
+    fn applied_step_scaling_is_pure_and_f32_consistent() {
+        let scaled = scale_applied_step(&[100_000_000.0], &[-16.0], 1.0 / 16.0).unwrap();
+        assert_eq!(scaled.applied_step, vec![-1.0]);
+        assert_eq!(scaled.params, vec![100_000_000.0]);
+        assert_eq!(scaled.applied_step_norm, 1.0);
+
+        let zero = scale_applied_step(&[3.0, -2.0], &[1.0, -4.0], 0.0).unwrap();
+        assert_eq!(zero.applied_step, vec![0.0, -0.0]);
+        assert_eq!(zero.params, vec![3.0, -2.0]);
+        assert_eq!(zero.applied_step_norm, 0.0);
+        assert!(scale_applied_step(&[1.0], &[1.0], -1.0).is_none());
+        assert!(scale_applied_step(&[1.0], &[1.0], f64::NAN).is_none());
+        assert!(scale_applied_step(&[1.0], &[1.0, 2.0], 1.0).is_none());
     }
 
     #[test]

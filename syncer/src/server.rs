@@ -6,8 +6,8 @@
 //! "two fragments in flight"), so a slow quorum on one fragment never
 //! delays pulling the next.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,12 +18,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::action_probe::{self, ActionProbeClient, CommitPolicy, RetainedPreviews};
 use crate::protocol::*;
-use crate::state::{GlobalState, Layout, MergeStats};
+use crate::state::{GlobalState, Layout, MergeCandidate, MergeStats};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(180);
 const WRITER_QUEUE: usize = 128;
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub struct Config {
@@ -86,6 +88,12 @@ pub struct Config {
     pub probe_capture_dir: Option<std::path::PathBuf>,
     /// Capture every Nth outer step. 0 disables capture.
     pub probe_capture_every: u64,
+    /// Production commit policy. token_weighted retains the legacy mutating
+    /// merge path exactly; probe policies use sealed State previews.
+    pub commit_policy: CommitPolicy,
+    /// Sidecar contract and connection settings, present only for probe
+    /// policies.
+    pub action_probe: Option<action_probe::ClientConfig>,
 }
 
 struct OutFrame {
@@ -100,6 +108,8 @@ struct PartialMsg {
 
 struct Group {
     learner_id: u32,
+    connection_id: u64,
+    validated: AtomicBool,
     dtype: u8,
     layout: Layout,
     layout_meta: Option<String>,
@@ -162,12 +172,13 @@ impl Group {
 enum Event {
     Hello { group: Arc<Group> },
     Init { fragment_id: u32, values: Vec<f32> },
-    Push(Push),
-    Disconnected { learner_id: u32 },
+    Push { group: Arc<Group>, push: Push },
+    Disconnected { group: Arc<Group> },
 }
 
 struct Push {
     learner_id: u32,
+    connection_id: u64,
     fragment_id: u32,
     global_step: u64,
     base_version: u64,
@@ -175,6 +186,132 @@ struct Push {
     c_steps: u32,
     c_tokens: u64,
     values: Vec<f32>,
+}
+
+fn validate_push_identity(connection_learner_id: u32, payload_learner_id: u32) -> Result<()> {
+    if connection_learner_id != payload_learner_id {
+        bail!(
+            "push learner id {payload_learner_id} does not match connection learner id {connection_learner_id}"
+        );
+    }
+    Ok(())
+}
+
+fn validate_push_candidate(
+    push: &Push,
+    expected_step: u64,
+    expected_fragment: usize,
+    current_version: u64,
+    current_params: &[f32],
+    wire_dtype: u8,
+) -> Result<f64> {
+    if push.global_step != expected_step {
+        bail!(
+            "push from learner {} targets step {}, expected {expected_step}",
+            push.learner_id,
+            push.global_step
+        );
+    }
+    if push.fragment_id as usize != expected_fragment {
+        bail!(
+            "push from learner {} targets fragment {}, expected {expected_fragment}",
+            push.learner_id,
+            push.fragment_id
+        );
+    }
+    if push.values.len() != current_params.len() {
+        bail!(
+            "push from learner {} for fragment {expected_fragment} has {} values, expected {}",
+            push.learner_id,
+            push.values.len(),
+            current_params.len()
+        );
+    }
+    if push.values.iter().any(|value| !value.is_finite()) {
+        bail!(
+            "push from learner {} for fragment {expected_fragment} contains non-finite values",
+            push.learner_id
+        );
+    }
+    if push.base_version > current_version {
+        bail!(
+            "push from learner {} for fragment {expected_fragment} has future base version {}, current version is {current_version}",
+            push.learner_id,
+            push.base_version
+        );
+    }
+    if wire_dtype == DTYPE_Q4 && push.base_version != current_version {
+        bail!(
+            "q4 push from learner {} for fragment {expected_fragment} has stale base version {}, expected {current_version}",
+            push.learner_id,
+            push.base_version
+        );
+    }
+    if wire_dtype == DTYPE_Q4
+        && push
+            .values
+            .iter()
+            .zip(current_params)
+            .any(|(delta, anchor)| !(*delta + *anchor).is_finite())
+    {
+        bail!(
+            "q4 push from learner {} for fragment {expected_fragment} overflows during reconstruction",
+            push.learner_id
+        );
+    }
+    let weight = crate::merge::learner_weight(push.c_tokens, push.c_steps);
+    if !weight.is_finite() || weight <= 0.0 {
+        bail!(
+            "push from learner {} for fragment {expected_fragment} has non-positive weight {weight}",
+            push.learner_id
+        );
+    }
+    Ok(weight)
+}
+
+fn admit_push(round: &mut Round, push: Push, st: &GlobalState) -> Result<()> {
+    if round.pushes.contains_key(&push.learner_id) {
+        bail!(
+            "duplicate push from learner {} for step {} fragment {}",
+            push.learner_id,
+            round.t,
+            round.p
+        );
+    }
+    validate_push_candidate(
+        &push,
+        round.t,
+        round.p,
+        st.versions[round.p],
+        &st.params[round.p],
+        st.wire_dtype,
+    )?;
+    match round.pushes.entry(push.learner_id) {
+        Entry::Vacant(entry) => {
+            entry.insert(push);
+            Ok(())
+        }
+        Entry::Occupied(_) => unreachable!("duplicate checked before candidate validation"),
+    }
+}
+
+fn reserve_fragment(busy_fragments: &mut HashSet<usize>, fragment: usize) -> bool {
+    busy_fragments.insert(fragment)
+}
+
+fn ensure_fragment_version_advances(fragment: usize, current: u64, next: u64) -> Result<()> {
+    if next <= current {
+        bail!(
+            "fragment {fragment} version would not advance: current {current}, incoming round {next}"
+        );
+    }
+    Ok(())
+}
+
+fn sorted_push_ids(pushes: &HashMap<u32, Push>) -> Vec<u32> {
+    let mut ids: Vec<u32> = pushes.keys().copied().collect();
+    ids.sort_unstable();
+    ids
 }
 
 /// Decoupled DiLoCo's adaptive grace window (arXiv 2604.21428 Eq. 3): after
@@ -211,6 +348,40 @@ fn launch_interval(
         _ => Duration::ZERO,
     };
     manual_floor.max(adaptive)
+}
+
+fn next_fragment_steps(versions: &[u64]) -> Vec<u64> {
+    let num_fragments = versions.len() as u64;
+    debug_assert!(num_fragments > 0);
+    versions
+        .iter()
+        .enumerate()
+        .map(|(fragment, version)| {
+            if *version == 0 {
+                fragment as u64 + 1
+            } else {
+                version.saturating_add(num_fragments)
+            }
+        })
+        .collect()
+}
+
+fn next_launchable_round(
+    next_steps: &[u64],
+    busy_fragments: &HashSet<usize>,
+    total_steps: u64,
+) -> Option<(u64, usize)> {
+    next_steps
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(fragment, step)| *step <= total_steps && !busy_fragments.contains(fragment))
+        .map(|(fragment, step)| (step, fragment))
+        .min_by_key(|(step, _)| *step)
+}
+
+fn has_pending_rounds(next_steps: &[u64], total_steps: u64) -> bool {
+    next_steps.iter().any(|step| *step <= total_steps)
 }
 
 /// Per-learner inner-step duration estimated from consecutive pushes
@@ -250,6 +421,53 @@ impl StepRates {
 }
 
 type Registry = Arc<Mutex<HashMap<u32, Arc<Group>>>>;
+
+fn install_validated_group(registry: &Registry, group: Arc<Group>) -> Option<Arc<Group>> {
+    group.validated.store(true, Ordering::Release);
+    registry.lock().unwrap().insert(group.learner_id, group)
+}
+
+fn group_is_current(registry: &Registry, group: &Arc<Group>) -> bool {
+    registry
+        .lock()
+        .unwrap()
+        .get(&group.learner_id)
+        .is_some_and(|current| Arc::ptr_eq(current, group))
+}
+
+fn remove_group_if_current(registry: &Registry, group: &Arc<Group>) -> bool {
+    let mut registry = registry.lock().unwrap();
+    let is_current = registry
+        .get(&group.learner_id)
+        .is_some_and(|current| Arc::ptr_eq(current, group));
+    if is_current {
+        registry.remove(&group.learner_id);
+    }
+    is_current
+}
+
+fn validated_group_count(registry: &Registry) -> usize {
+    registry
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|group| group.validated.load(Ordering::Acquire))
+        .count()
+}
+
+fn current_connection_ids(registry: &Registry) -> HashMap<u32, u64> {
+    registry
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(learner_id, group)| {
+            group
+                .validated
+                .load(Ordering::Acquire)
+                .then_some((*learner_id, group.connection_id))
+        })
+        .collect()
+}
 
 pub async fn run(cfg: Config) -> Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", cfg.port))
@@ -310,6 +528,8 @@ async fn handle_connection(
             tokio::spawn(writer_task(wr, rx));
             let group = Arc::new(Group {
                 learner_id,
+                connection_id: NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
+                validated: AtomicBool::new(false),
                 dtype,
                 layout,
                 layout_meta,
@@ -319,7 +539,6 @@ async fn handle_connection(
                 rr: AtomicUsize::new(0),
                 reasm: Mutex::new(HashMap::new()),
             });
-            registry.lock().unwrap().insert(learner_id, group.clone());
             info!(
                 learner_id,
                 num_streams, "learner connected (layout: {} fragments)", num_fragments
@@ -331,8 +550,12 @@ async fn handle_connection(
                 .await
                 .ok();
             let res = read_loop(&mut rd, &group, &event_tx).await;
-            registry.lock().unwrap().remove(&learner_id);
-            event_tx.send(Event::Disconnected { learner_id }).await.ok();
+            event_tx
+                .send(Event::Disconnected {
+                    group: group.clone(),
+                })
+                .await
+                .ok();
             res
         }
         MSG_DATA_HELLO => {
@@ -471,6 +694,7 @@ async fn dispatch_inner(
         MSG_PUSH_FRAGMENT => {
             let mut r = Reader(payload);
             let learner_id = r.u32()?;
+            validate_push_identity(group.learner_id, learner_id)?;
             let fragment_id = r.u32()?;
             let global_step = r.u64()?;
             let base_version = r.u64()?;
@@ -491,16 +715,20 @@ async fn dispatch_inner(
                 decode_tensor(group.dtype, r.rest(), &mut values)?;
             }
             event_tx
-                .send(Event::Push(Push {
-                    learner_id,
-                    fragment_id,
-                    global_step,
-                    base_version,
-                    local_step,
-                    c_steps,
-                    c_tokens,
-                    values,
-                }))
+                .send(Event::Push {
+                    group: group.clone(),
+                    push: Push {
+                        learner_id,
+                        connection_id: group.connection_id,
+                        fragment_id,
+                        global_step,
+                        base_version,
+                        local_step,
+                        c_steps,
+                        c_tokens,
+                        values,
+                    },
+                })
                 .await
                 .ok();
         }
@@ -530,7 +758,7 @@ async fn scheduler(
         "waiting for learners and INIT_PARAMS"
     );
     loop {
-        let connected = registry.lock().unwrap().len() as u32;
+        let connected = validated_group_count(&registry) as u32;
         if let Some(st) = &state {
             if st.all_initialized() && connected >= cfg.learners {
                 break;
@@ -555,6 +783,12 @@ async fn scheduler(
                 } else if let Some(st) = &state {
                     validate_group_compatible(st, &group)?;
                 }
+                if install_validated_group(&registry, group.clone()).is_some() {
+                    warn!(
+                        learner_id = group.learner_id,
+                        "learner session replaced during init"
+                    );
+                }
             }
             Event::Init {
                 fragment_id,
@@ -566,12 +800,37 @@ async fn scheduler(
                     info!("global parameters initialized");
                 }
             }
-            Event::Push(_) => warn!("push before initialization; dropped"),
-            Event::Disconnected { learner_id } => warn!(learner_id, "disconnected during init"),
+            Event::Push { .. } => warn!("push before initialization; dropped"),
+            Event::Disconnected { group } => {
+                if remove_group_if_current(&registry, &group) {
+                    warn!(learner_id = group.learner_id, "disconnected during init");
+                }
+            }
         }
     }
     let mut st = state.unwrap();
-    let num_fragments = st.layout.fragments.len() as u64;
+    let num_fragments = st.layout.fragments.len();
+    if num_fragments == 0 {
+        bail!("syncer layout must contain at least one fragment");
+    }
+    let (mut action_probe_client, action_probe_unavailable) = if cfg.commit_policy.requires_probe()
+    {
+        match cfg.action_probe.clone() {
+            Some(client_config) => match ActionProbeClient::bind(client_config, &st) {
+                Ok(client) => (Some(client), None),
+                Err(error) => {
+                    warn!("action-probe disabled; all probe decisions will fall back to A0: {error:#}");
+                    (None, Some("probe_layout_or_config_error".to_owned()))
+                }
+            },
+            None => {
+                warn!("action-probe policy has no client configuration; all decisions will fall back to A0");
+                (None, Some("probe_not_configured".to_owned()))
+            }
+        }
+    } else {
+        (None, None)
+    };
     let mut step_rates = StepRates::default();
     let mut last_sync_secs = 0.0f64; // previous round's merge+broadcast time
 
@@ -583,28 +842,34 @@ async fn scheduler(
     // with up to `pipeline` rounds in flight at once: while round t sits in
     // its quorum/grace window, round t+1's pull is already out, so sync
     // latency overlaps learner compute (the paper's τ=2 "two fragments in
-    // flight"). Depth is clamped to the fragment count, so concurrent
-    // rounds always target DISTINCT fragments and every merge touches
-    // disjoint params/momentum. Rounds may complete out of order; versions
+    // flight"). Depth is clamped to the fragment count and busy-fragment
+    // tracking prevents a delayed fragment from being launched again after
+    // round-robin wraparound. Concurrent rounds therefore always target
+    // distinct params/momentum. Rounds may complete out of order; versions
     // are per fragment and global_step advances monotonically.
-    let depth = (cfg.pipeline.max(1) as u64).min(num_fragments) as usize;
+    let depth = (cfg.pipeline.max(1) as usize).min(num_fragments);
     let manual_floor = Duration::from_millis(cfg.min_round_interval_ms);
     let mut next_launch = Instant::now(); // earliest allowed next round launch
-    let mut next_t = st.global_step + 1;
+    let mut next_steps = next_fragment_steps(&st.versions);
     let mut inflight: Vec<Round> = Vec::new();
-    while next_t <= cfg.total_steps || !inflight.is_empty() {
+    let mut busy_fragments = HashSet::with_capacity(depth);
+    while has_pending_rounds(&next_steps, cfg.total_steps) || !inflight.is_empty() {
         // Keep the pipeline full (throttled by min_round_interval_ms).
-        while inflight.len() < depth && next_t <= cfg.total_steps && Instant::now() >= next_launch {
+        while inflight.len() < depth && Instant::now() >= next_launch {
+            let Some((t, p)) = next_launchable_round(&next_steps, &busy_fragments, cfg.total_steps)
+            else {
+                break;
+            };
+            let reserved = reserve_fragment(&mut busy_fragments, p);
+            debug_assert!(reserved, "launchable fragment was already marked busy");
+            next_steps[p] = t.saturating_add(num_fragments as u64);
             next_launch = Instant::now()
                 + launch_interval(
                     manual_floor,
                     cfg.sync_interval_steps,
-                    num_fragments as usize,
+                    num_fragments,
                     step_rates.max_step_secs(),
                 );
-            let t = next_t;
-            next_t += 1;
-            let p = ((t - 1) % num_fragments) as usize;
             let pull = {
                 let mut b = Vec::with_capacity(12);
                 b.extend_from_slice(&(p as u32).to_le_bytes());
@@ -625,12 +890,20 @@ async fn scheduler(
             });
         }
 
-        let connected = registry.lock().unwrap().len();
+        let current_connections = current_connection_ids(&registry);
+        let connected = current_connections.len();
         let k = if cfg.strict_quorum {
             cfg.quorum as usize
         } else {
             (cfg.quorum as usize).min(connected.max(1))
         };
+        prune_noncurrent_pushes(
+            &mut inflight,
+            &current_connections,
+            k,
+            Instant::now(),
+            Duration::from_secs(cfg.quorum_timeout_s),
+        );
 
         // Arm the grace window of any round that just reached quorum.
         for r in inflight.iter_mut() {
@@ -666,7 +939,18 @@ async fn scheduler(
                 expired,
             ) {
                 let round = inflight.remove(i);
-                complete_round(&cfg, &mut st, &registry, &mut last_sync_secs, round).await?;
+                let released = busy_fragments.remove(&round.p);
+                debug_assert!(released, "completed fragment was not marked busy");
+                complete_round(
+                    &cfg,
+                    &mut st,
+                    &registry,
+                    &mut last_sync_secs,
+                    &mut action_probe_client,
+                    action_probe_unavailable.as_deref(),
+                    round,
+                )
+                .await?;
                 completed_any = true;
                 continue;
             }
@@ -676,7 +960,7 @@ async fn scheduler(
                 for g in current_groups(&registry) {
                     let _ = g.send_small(MSG_PULL_REQ, r.pull.clone()).await;
                 }
-                r.quorum_deadline = Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
+                reset_round_wait(r, Instant::now(), Duration::from_secs(cfg.quorum_timeout_s));
             }
             i += 1;
         }
@@ -691,7 +975,9 @@ async fn scheduler(
             .iter()
             .map(|r| r.grace_deadline.unwrap_or(r.quorum_deadline))
             .min();
-        if inflight.len() < depth && next_t <= cfg.total_steps {
+        if inflight.len() < depth
+            && next_launchable_round(&next_steps, &busy_fragments, cfg.total_steps).is_some()
+        {
             earliest = Some(earliest.map_or(next_launch, |d| d.min(next_launch)));
         }
         let Some(earliest) = earliest else {
@@ -702,27 +988,63 @@ async fn scheduler(
             Err(_) => continue, // deadline hit; loop re-evaluates
             Ok(None) => bail!("event channel closed"),
             Ok(Some(ev)) => match ev {
-                Event::Push(push) => {
-                    step_rates.note(push.learner_id, push.local_step, Instant::now());
+                Event::Push { group, push } => {
+                    let learner_id = push.learner_id;
+                    let local_step = push.local_step;
+                    if push.connection_id != group.connection_id
+                        || !group.validated.load(Ordering::Acquire)
+                        || !group_is_current(&registry, &group)
+                    {
+                        warn!(
+                            learner_id,
+                            "push from stale or unvalidated session rejected"
+                        );
+                        continue;
+                    }
                     // Route to the in-flight round the pull came from.
                     if let Some(r) = inflight
                         .iter_mut()
                         .find(|r| r.t == push.global_step && r.p == push.fragment_id as usize)
                     {
-                        r.pushes.insert(push.learner_id, push);
+                        let step = r.t;
+                        let fragment = r.p;
+                        match admit_push(r, push, &st) {
+                            Ok(()) => {
+                                step_rates.note(learner_id, local_step, Instant::now());
+                            }
+                            Err(e) => warn!(learner_id, step, fragment, "push rejected: {e:#}"),
+                        }
                     } // else: stale response from a completed round; drop
                 }
                 Event::Hello { group } => {
                     // Rejoining learner: catch it up to the current state.
                     validate_group_compatible(&st, &group)?;
+                    if install_validated_group(&registry, group.clone()).is_some() {
+                        warn!(learner_id = group.learner_id, "learner session replaced");
+                    }
                     send_all_fragments(&st, &group).await;
                 }
                 Event::Init { .. } => {} // already initialized; ignore
-                Event::Disconnected { learner_id } => {
-                    warn!(learner_id, "learner disconnected");
-                    for r in inflight.iter_mut() {
-                        r.pushes.remove(&learner_id);
+                Event::Disconnected { group } => {
+                    if !remove_group_if_current(&registry, &group) {
+                        continue;
                     }
+                    let learner_id = group.learner_id;
+                    warn!(learner_id, "learner disconnected");
+                    let connected_now = validated_group_count(&registry);
+                    let quorum_now = if cfg.strict_quorum {
+                        cfg.quorum as usize
+                    } else {
+                        (cfg.quorum as usize).min(connected_now.max(1))
+                    };
+                    remove_connection_pushes(
+                        &mut inflight,
+                        learner_id,
+                        group.connection_id,
+                        quorum_now,
+                        Instant::now(),
+                        Duration::from_secs(cfg.quorum_timeout_s),
+                    );
                 }
             },
         }
@@ -738,7 +1060,7 @@ async fn scheduler(
     info!("training complete after {} outer steps", cfg.total_steps);
     // Give writer tasks a moment to flush the shutdown frames.
     tokio::time::sleep(Duration::from_secs(2)).await;
-    return Ok(());
+    Ok(())
 }
 
 fn round_completion_ready(
@@ -766,6 +1088,121 @@ struct Round {
     pushes: HashMap<u32, Push>,
 }
 
+fn reset_round_wait(round: &mut Round, now: Instant, timeout: Duration) {
+    round.grace_deadline = None;
+    round.quorum_deadline = now + timeout;
+}
+
+fn prune_noncurrent_pushes(
+    rounds: &mut [Round],
+    current_connections: &HashMap<u32, u64>,
+    quorum: usize,
+    now: Instant,
+    timeout: Duration,
+) {
+    for round in rounds {
+        let before = round.pushes.len();
+        round.pushes.retain(|learner_id, push| {
+            current_connections.get(learner_id) == Some(&push.connection_id)
+        });
+        if round.pushes.len() != before && round.pushes.len() < quorum {
+            reset_round_wait(round, now, timeout);
+        }
+    }
+}
+
+fn remove_connection_pushes(
+    rounds: &mut [Round],
+    learner_id: u32,
+    connection_id: u64,
+    quorum: usize,
+    now: Instant,
+    timeout: Duration,
+) {
+    for round in rounds {
+        let belongs_to_connection = round
+            .pushes
+            .get(&learner_id)
+            .is_some_and(|push| push.connection_id == connection_id);
+        if belongs_to_connection {
+            round.pushes.remove(&learner_id);
+        }
+        if belongs_to_connection && round.pushes.len() < quorum {
+            reset_round_wait(round, now, timeout);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CommitDecision {
+    policy: CommitPolicy,
+    selected_action: String,
+    committed_action: String,
+    fallback: bool,
+    fallback_reason: Option<String>,
+    probe_latency_ms: Option<f64>,
+    selected_mass: f64,
+    norm_scale: f64,
+    step_ratio: f64,
+    selected_multiplier: f64,
+    committed_multiplier: f64,
+    request_digest: Option<String>,
+}
+
+impl CommitDecision {
+    fn token_weighted() -> Self {
+        Self {
+            policy: CommitPolicy::TokenWeighted,
+            selected_action: "A0".to_owned(),
+            committed_action: "A0".to_owned(),
+            fallback: false,
+            fallback_reason: None,
+            probe_latency_ms: None,
+            selected_mass: 1.0,
+            norm_scale: 1.0,
+            step_ratio: 1.0,
+            selected_multiplier: 1.0,
+            committed_multiplier: 1.0,
+            request_digest: None,
+        }
+    }
+
+    fn probe_fallback(policy: CommitPolicy, reason: impl Into<String>) -> Self {
+        Self {
+            policy,
+            selected_action: "A0".to_owned(),
+            committed_action: "A0".to_owned(),
+            fallback: true,
+            fallback_reason: Some(reason.into()),
+            probe_latency_ms: None,
+            selected_mass: 1.0,
+            norm_scale: 1.0,
+            step_ratio: 1.0,
+            selected_multiplier: 1.0,
+            committed_multiplier: 1.0,
+            request_digest: None,
+        }
+    }
+}
+
+fn selected_preview_multiplier(previews: &RetainedPreviews, index: usize) -> f64 {
+    previews.metadata(index).step_scale.unwrap_or_else(|| {
+        if index == 0 {
+            1.0
+        } else {
+            previews.metadata(index).norm_multiplier
+        }
+    })
+}
+
+fn commit_preview_index(policy: CommitPolicy, selected_index: usize) -> usize {
+    if policy.is_shadow() {
+        0
+    } else {
+        selected_index
+    }
+}
+
 /// Merge a gathered round, apply the outer step, broadcast, and record it.
 /// Called from the single scheduler task, so merges are serialized even
 /// with several rounds in flight; concurrent rounds target distinct
@@ -775,6 +1212,8 @@ async fn complete_round(
     st: &mut GlobalState,
     registry: &Registry,
     last_sync_secs: &mut f64,
+    action_probe_client: &mut Option<ActionProbeClient>,
+    action_probe_unavailable: Option<&str>,
     round: Round,
 ) -> Result<()> {
     let Round {
@@ -785,25 +1224,24 @@ async fn complete_round(
         ..
     } = round;
     let prev_version = st.versions[p];
+    ensure_fragment_version_advances(p, prev_version, t)?;
+    if pushes.is_empty() {
+        bail!("round {t} fragment {p} has no admitted pushes");
+    }
+    for push in pushes.values() {
+        validate_push_candidate(push, t, p, prev_version, &st.params[p], st.wire_dtype)
+            .with_context(|| {
+                format!(
+                    "invalid admitted push from learner {} for step {t} fragment {p}",
+                    push.learner_id
+                )
+            })?;
+    }
     if st.wire_dtype == DTYPE_Q4 {
         // Q4 pushes are deltas anchored at the learner's base_version;
         // reconstruction needs Θ at that exact version, and the syncer
-        // only holds the current value. A matching base is the steady
-        // state (learners anchor on the last broadcast); anything older
-        // is unreconstructable and dropped.
-        pushes.retain(|id, push| {
-            if push.base_version != prev_version {
-                warn!(
-                    learner_id = id,
-                    step = t,
-                    base = push.base_version,
-                    expected = prev_version,
-                    "stale q4 delta dropped"
-                );
-                return false;
-            }
-            true
-        });
+        // only holds the current value. Admission already rejected every
+        // non-matching base before it could count toward quorum.
         for push in pushes.values_mut() {
             for (v, a) in push.values.iter_mut().zip(&st.params[p]) {
                 *v += *a;
@@ -811,8 +1249,10 @@ async fn complete_round(
         }
     }
     capture_round_candidates(cfg, st, p, t, prev_version, &pushes)?;
-    let (mut learners, mut weights, mut ids) = (Vec::new(), Vec::new(), Vec::new());
-    for (id, push) in &pushes {
+    let ids = sorted_push_ids(&pushes);
+    let (mut learners, mut weights) = (Vec::new(), Vec::new());
+    for id in &ids {
+        let push = pushes.get(id).expect("sorted id must exist in push map");
         if push.base_version < prev_version {
             // The learner had not yet applied this fragment's last merge;
             // its delta is anchored further back. The weight formula
@@ -827,15 +1267,147 @@ async fn complete_round(
         }
         learners.push(push.values.as_slice());
         weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
-        ids.push(*id);
     }
     let sync_start = Instant::now();
-    let merge_stats = st.merge_and_step(p, &learners, &weights)?;
-    st.versions[p] = t;
-    // Pipelined rounds can complete out of order; the global step only
-    // moves forward.
-    st.global_step = st.global_step.max(t);
-    for push in pushes.values() {
+    let (merge_stats, decision) = if cfg.commit_policy == CommitPolicy::TokenWeighted {
+        // Keep the legacy production path intact. In particular, do not
+        // replace this with preview+commit: token_weighted is the bit-for-bit
+        // baseline comparator for every probe experiment.
+        let merge_stats = st.merge_and_step(p, &learners, &weights)?;
+        st.versions[p] = t;
+        // Pipelined rounds can complete out of order; the global step only
+        // moves forward.
+        st.global_step = st.global_step.max(t);
+        (merge_stats, CommitDecision::token_weighted())
+    } else {
+        let candidates = ids
+            .iter()
+            .zip(&weights)
+            .map(|(id, &weight)| {
+                let push = pushes.get(id).expect("sorted id must exist in push map");
+                MergeCandidate::new(*id, push.values.as_slice(), weight)
+            })
+            .collect::<Vec<_>>();
+        let baseline = action_probe::build_baseline_preview(st, p, t, &candidates)?;
+
+        if cfg.commit_policy.is_leave_one_out() && candidates.len() != 4 {
+            let reason = format!("incomplete_group_{}_of_4", candidates.len());
+            let stats = st.commit_preview(baseline)?;
+            (
+                stats,
+                CommitDecision::probe_fallback(cfg.commit_policy, reason),
+            )
+        } else {
+            let retained = if cfg.commit_policy.is_leave_one_out() {
+                action_probe::build_leave_one_out_previews(st, p, t, &candidates, &baseline)
+                    .and_then(|alternatives| {
+                        RetainedPreviews::loo_v1(baseline.clone(), alternatives)
+                    })
+            } else {
+                let multipliers = cfg
+                    .commit_policy
+                    .step_scale_multipliers()
+                    .context("scalar probe policy is missing its frozen multiplier grid")?;
+                action_probe::build_scaled_full_group_previews(st, &baseline, multipliers)
+            };
+            match retained {
+                Err(error) => {
+                    warn!(
+                        step = t,
+                        fragment = p,
+                        "action preview construction failed closed to A0: {error:#}"
+                    );
+                    let stats = st.commit_preview(baseline)?;
+                    (
+                        stats,
+                        CommitDecision::probe_fallback(
+                            cfg.commit_policy,
+                            "preview_construction_error",
+                        ),
+                    )
+                }
+                Ok(mut preview_set) => {
+                    let mut decision = if let Some(reason) = action_probe_unavailable {
+                        CommitDecision::probe_fallback(cfg.commit_policy, reason)
+                    } else {
+                        let probe_started = Instant::now();
+                        let client = action_probe_client
+                            .as_mut()
+                            .expect("available action probe must have a client");
+                        match client.select(st, &preview_set, t, p).await {
+                            Ok(selection) => {
+                                let metadata = preview_set.metadata(selection.action_index);
+                                CommitDecision {
+                                    policy: cfg.commit_policy,
+                                    selected_action: selection.action_name,
+                                    committed_action: String::new(),
+                                    fallback: selection.action_index == 0,
+                                    fallback_reason: selection.fallback_reason,
+                                    probe_latency_ms: Some(
+                                        probe_started.elapsed().as_secs_f64() * 1000.0,
+                                    ),
+                                    selected_mass: metadata.selected_mass,
+                                    norm_scale: metadata.norm_multiplier,
+                                    step_ratio: metadata.step_norm_ratio,
+                                    selected_multiplier: selected_preview_multiplier(
+                                        &preview_set,
+                                        selection.action_index,
+                                    ),
+                                    committed_multiplier: 1.0,
+                                    request_digest: Some(selection.request_digest),
+                                }
+                            }
+                            Err(error) => {
+                                warn!(
+                                    step = t,
+                                    fragment = p,
+                                    "action probe failed closed to A0: {error}"
+                                );
+                                let mut fallback =
+                                    CommitDecision::probe_fallback(cfg.commit_policy, error.code());
+                                fallback.probe_latency_ms =
+                                    Some(probe_started.elapsed().as_secs_f64() * 1000.0);
+                                fallback.request_digest =
+                                    client.last_request_digest().map(str::to_owned);
+                                fallback
+                            }
+                        }
+                    };
+                    let selected_index =
+                        preview_set.index_of(&decision.selected_action).unwrap_or(0);
+                    let commit_index = commit_preview_index(cfg.commit_policy, selected_index);
+                    decision.committed_action = preview_set.name(commit_index).to_owned();
+                    decision.committed_multiplier =
+                        selected_preview_multiplier(&preview_set, commit_index);
+                    let stats = match st.commit_preview(preview_set.take(commit_index)) {
+                        Ok(stats) => stats,
+                        Err(error) if commit_index != 0 => {
+                            warn!(
+                                step = t,
+                                fragment = p,
+                                "selected preview was stale or invalid at commit; retrying exact A0: {error:#}"
+                            );
+                            decision.fallback = true;
+                            decision.fallback_reason =
+                                Some("selected_preview_commit_error".to_owned());
+                            decision.committed_action = "A0".to_owned();
+                            decision.committed_multiplier =
+                                selected_preview_multiplier(&preview_set, 0);
+                            st.commit_preview(preview_set.take(0)).with_context(|| {
+                                format!(
+                                    "step {t} fragment {p}: selected preview and A0 fallback both failed"
+                                )
+                            })?
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    (stats, decision)
+                }
+            }
+        }
+    };
+    for id in &ids {
+        let push = pushes.get(id).expect("sorted id must exist in push map");
         st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
     }
 
@@ -851,13 +1423,19 @@ async fn complete_round(
         fragment = p,
         responders = ?ids,
         gnorm = format!("{:.4}", merge_stats.gnorm),
+        policy = %decision.policy,
+        selected_action = %decision.selected_action,
+        committed_action = %decision.committed_action,
+        selected_multiplier = decision.selected_multiplier,
+        committed_multiplier = decision.committed_multiplier,
+        fallback = decision.fallback,
         ms,
         "outer step"
     );
     if let Some(tape) = &cfg.event_tape {
         // Records land in completion order, which under pipelining is not
         // necessarily step order.
-        append_tape(tape, t, p, &pushes, &weights, &merge_stats, ms);
+        append_tape(tape, t, p, &pushes, &weights, &merge_stats, &decision, ms);
     }
     // Consistent cut: this round is fully applied and broadcast, and every
     // other in-flight round is still gathering (it has not touched state).
@@ -1041,7 +1619,13 @@ fn validate_group_compatible(st: &GlobalState, group: &Arc<Group>) -> Result<()>
 }
 
 fn current_groups(registry: &Registry) -> Vec<Arc<Group>> {
-    registry.lock().unwrap().values().cloned().collect()
+    registry
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|group| group.validated.load(Ordering::Acquire))
+        .cloned()
+        .collect()
 }
 
 async fn broadcast_all_fragments(st: &GlobalState, registry: &Registry) {
@@ -1081,10 +1665,11 @@ fn append_tape(
     pushes: &HashMap<u32, Push>,
     _weights: &[f64],
     stats: &MergeStats,
+    decision: &CommitDecision,
     ms: u64,
 ) {
     use std::io::Write;
-    let line = format_tape_line(step, fragment, pushes, stats, ms);
+    let line = format_tape_line(step, fragment, pushes, stats, decision, ms);
     let res = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1106,11 +1691,18 @@ fn json_number(value: f64) -> String {
     optional_json_number(value.is_finite().then_some(value))
 }
 
+fn optional_json_string(value: Option<&str>) -> String {
+    value
+        .and_then(|value| serde_json::to_string(value).ok())
+        .unwrap_or_else(|| "null".to_owned())
+}
+
 fn format_tape_line(
     step: u64,
     fragment: usize,
     pushes: &HashMap<u32, Push>,
     stats: &MergeStats,
+    decision: &CommitDecision,
     ms: u64,
 ) -> String {
     let mut responders: Vec<String> = pushes
@@ -1132,10 +1724,22 @@ fn format_tape_line(
     let outer_step_norm = json_number(outer.applied_step_norm);
     let outer_direction_cosine = optional_json_number(outer.direction_delta_cosine);
     let outer_history_current_ratio = optional_json_number(outer.history_current_norm_ratio);
+    let policy = serde_json::to_string(&decision.policy.to_string()).unwrap();
+    let selected_action = serde_json::to_string(&decision.selected_action).unwrap();
+    let committed_action = serde_json::to_string(&decision.committed_action).unwrap();
+    let fallback_reason = optional_json_string(decision.fallback_reason.as_deref());
+    let probe_latency_ms = optional_json_number(decision.probe_latency_ms);
+    let selected_mass = json_number(decision.selected_mass);
+    let norm_scale = json_number(decision.norm_scale);
+    let step_ratio = json_number(decision.step_ratio);
+    let selected_multiplier = json_number(decision.selected_multiplier);
+    let committed_multiplier = json_number(decision.committed_multiplier);
+    let request_digest = optional_json_string(decision.request_digest.as_deref());
     format!(
-        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{}}}\n",
+        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}}}\n",
         responders.join(","),
-        outer.restarted
+        outer.restarted,
+        decision.fallback,
     )
 }
 
@@ -1176,6 +1780,298 @@ mod tests {
         }
     }
 
+    fn test_state(dtype: u8) -> GlobalState {
+        let layout = Layout {
+            fragments: vec![crate::state::FragmentInfo {
+                merge_mode: crate::state::MERGE_AVG,
+                tensor_numels: vec![2],
+            }],
+        };
+        let mut st = GlobalState::new(layout, None, 0.1, 0.0, dtype);
+        st.versions[0] = 7;
+        st
+    }
+
+    fn test_round() -> Round {
+        let now = Instant::now();
+        Round {
+            t: 9,
+            p: 0,
+            pull: bytes::Bytes::new(),
+            started: now,
+            quorum_deadline: now + Duration::from_secs(1),
+            grace_deadline: None,
+            pushes: HashMap::new(),
+        }
+    }
+
+    fn test_push(learner_id: u32) -> Push {
+        Push {
+            learner_id,
+            connection_id: 1,
+            fragment_id: 0,
+            global_step: 9,
+            base_version: 7,
+            local_step: 21,
+            c_steps: 10,
+            c_tokens: 100,
+            values: vec![1.0, 2.0],
+        }
+    }
+
+    fn test_group(learner_id: u32, validated: bool) -> Arc<Group> {
+        let (control, _control_rx) = mpsc::channel(1);
+        Arc::new(Group {
+            learner_id,
+            connection_id: NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
+            validated: AtomicBool::new(validated),
+            dtype: DTYPE_F32,
+            layout: test_state(DTYPE_F32).layout,
+            layout_meta: None,
+            control,
+            data: Mutex::new(Vec::new()),
+            msg_id: AtomicU64::new(0),
+            rr: AtomicUsize::new(0),
+            reasm: Mutex::new(HashMap::new()),
+        })
+    }
+
+    #[test]
+    fn push_identity_must_match_connection_identity() {
+        validate_push_identity(3, 3).unwrap();
+        let err = validate_push_identity(3, 4).unwrap_err().to_string();
+        assert!(err.contains("does not match connection learner id"));
+    }
+
+    #[test]
+    fn busy_fragment_cannot_be_reserved_twice() {
+        let mut busy = HashSet::new();
+        assert!(reserve_fragment(&mut busy, 2));
+        assert!(!reserve_fragment(&mut busy, 2));
+        assert!(busy.remove(&2));
+        assert!(reserve_fragment(&mut busy, 2));
+    }
+
+    #[test]
+    fn scheduler_skips_busy_fragment_without_launching_it_twice() {
+        let next_steps = vec![5, 6, 7, 8];
+        let mut busy = HashSet::from([0]);
+
+        assert_eq!(next_launchable_round(&next_steps, &busy, 20), Some((6, 1)));
+        assert!(reserve_fragment(&mut busy, 1));
+        assert_eq!(next_launchable_round(&next_steps, &busy, 20), Some((7, 2)));
+
+        assert!(busy.remove(&0));
+        assert_eq!(next_launchable_round(&next_steps, &busy, 20), Some((5, 0)));
+    }
+
+    #[test]
+    fn fragment_step_schedule_resumes_at_each_fragments_next_turn() {
+        assert_eq!(next_fragment_steps(&[0, 0, 0, 0]), vec![1, 2, 3, 4]);
+        assert_eq!(next_fragment_steps(&[5, 2, 3, 4]), vec![9, 6, 7, 8]);
+        assert_eq!(next_fragment_steps(&[1, 6, 7, 8]), vec![5, 10, 11, 12]);
+        assert!(has_pending_rounds(&[9, 6, 7, 8], 8));
+        assert!(!has_pending_rounds(&[9, 10, 11, 12], 8));
+    }
+
+    #[test]
+    fn fragment_version_must_advance_strictly() {
+        ensure_fragment_version_advances(2, 8, 9).unwrap();
+        assert!(ensure_fragment_version_advances(2, 8, 8).is_err());
+        assert!(ensure_fragment_version_advances(2, 8, 7).is_err());
+    }
+
+    #[test]
+    fn invalid_candidates_never_count_toward_quorum() {
+        let st = test_state(DTYPE_F32);
+        let mut invalid = Vec::new();
+
+        let mut wrong_shape = test_push(1);
+        wrong_shape.values.pop();
+        invalid.push(wrong_shape);
+
+        let mut non_finite = test_push(2);
+        non_finite.values[1] = f32::NAN;
+        invalid.push(non_finite);
+
+        let mut future_base = test_push(3);
+        future_base.base_version = 8;
+        invalid.push(future_base);
+
+        let mut zero_weight = test_push(4);
+        zero_weight.c_tokens = 0;
+        invalid.push(zero_weight);
+
+        for push in invalid {
+            let mut round = test_round();
+            assert!(admit_push(&mut round, push, &st).is_err());
+            assert!(round.pushes.is_empty());
+            assert!(!round_completion_ready(
+                round.pushes.len(),
+                4,
+                1,
+                true,
+                false
+            ));
+        }
+    }
+
+    #[test]
+    fn stale_q4_candidate_is_rejected_before_quorum() {
+        let st = test_state(DTYPE_Q4);
+        let mut round = test_round();
+        let mut push = test_push(1);
+        push.base_version = 6;
+
+        let err = admit_push(&mut round, push, &st).unwrap_err().to_string();
+        assert!(err.contains("stale base version"));
+        assert!(round.pushes.is_empty());
+    }
+
+    #[test]
+    fn q4_reconstruction_overflow_is_rejected_before_quorum() {
+        let mut st = test_state(DTYPE_Q4);
+        st.params[0][0] = f32::MAX;
+        let mut round = test_round();
+        let mut push = test_push(1);
+        push.values[0] = f32::MAX;
+
+        let err = admit_push(&mut round, push, &st).unwrap_err().to_string();
+        assert!(err.contains("overflows during reconstruction"));
+        assert!(round.pushes.is_empty());
+    }
+
+    #[test]
+    fn stale_full_tensor_candidate_remains_admissible() {
+        let st = test_state(DTYPE_F32);
+        let mut round = test_round();
+        let mut push = test_push(1);
+        push.base_version = 6;
+
+        admit_push(&mut round, push, &st).unwrap();
+        assert_eq!(round.pushes.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_push_is_rejected_without_replacement() {
+        let st = test_state(DTYPE_F32);
+        let mut round = test_round();
+        let first = test_push(2);
+        admit_push(&mut round, first, &st).unwrap();
+
+        let mut duplicate = test_push(2);
+        duplicate.values = vec![9.0, 9.0];
+        let err = admit_push(&mut round, duplicate, &st)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("duplicate push"));
+        assert_eq!(round.pushes.len(), 1);
+        assert_eq!(round.pushes.get(&2).unwrap().values, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn admitted_candidates_are_sorted_by_learner_id() {
+        let st = test_state(DTYPE_F32);
+        let mut round = test_round();
+        for learner_id in [10, 2, 7] {
+            admit_push(&mut round, test_push(learner_id), &st).unwrap();
+        }
+        assert_eq!(sorted_push_ids(&round.pushes), vec![2, 7, 10]);
+    }
+
+    #[test]
+    fn stale_connection_cannot_replace_or_disconnect_current_session() {
+        let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
+        let stale = test_group(3, true);
+        let current = test_group(3, true);
+        registry.lock().unwrap().insert(3, stale.clone());
+        registry.lock().unwrap().insert(3, current.clone());
+
+        assert!(!group_is_current(&registry, &stale));
+        assert!(group_is_current(&registry, &current));
+        assert!(!remove_group_if_current(&registry, &stale));
+        assert!(group_is_current(&registry, &current));
+        assert!(remove_group_if_current(&registry, &current));
+        assert!(!group_is_current(&registry, &current));
+    }
+
+    #[test]
+    fn stale_session_push_is_pruned_before_quorum_counting() {
+        let st = test_state(DTYPE_F32);
+        let mut round = test_round();
+        let now = Instant::now();
+        round.grace_deadline = Some(now + Duration::from_millis(1));
+        admit_push(&mut round, test_push(3), &st).unwrap();
+        assert_eq!(round.pushes.len(), 1);
+
+        let current_connections = HashMap::from([(3, 2)]);
+        prune_noncurrent_pushes(
+            std::slice::from_mut(&mut round),
+            &current_connections,
+            1,
+            now,
+            Duration::from_secs(3),
+        );
+
+        assert!(round.pushes.is_empty());
+        assert_eq!(round.grace_deadline, None);
+        assert_eq!(round.quorum_deadline, now + Duration::from_secs(3));
+    }
+
+    #[test]
+    fn delayed_disconnect_does_not_remove_replacement_sessions_push() {
+        let st = test_state(DTYPE_F32);
+        let mut round = test_round();
+        let mut current_push = test_push(3);
+        current_push.connection_id = 2;
+        admit_push(&mut round, current_push, &st).unwrap();
+        let now = Instant::now();
+
+        remove_connection_pushes(
+            std::slice::from_mut(&mut round),
+            3,
+            1,
+            1,
+            now,
+            Duration::from_secs(3),
+        );
+        assert_eq!(round.pushes.len(), 1);
+
+        remove_connection_pushes(
+            std::slice::from_mut(&mut round),
+            3,
+            2,
+            1,
+            now,
+            Duration::from_secs(3),
+        );
+        assert!(round.pushes.is_empty());
+    }
+
+    #[test]
+    fn unvalidated_connection_does_not_count_as_connected() {
+        let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
+        let group = test_group(3, false);
+        registry.lock().unwrap().insert(3, group.clone());
+        assert_eq!(validated_group_count(&registry), 0);
+
+        group.validated.store(true, Ordering::Release);
+        assert_eq!(validated_group_count(&registry), 1);
+    }
+
+    #[test]
+    fn retry_clears_expired_grace_deadline() {
+        let mut round = test_round();
+        let now = Instant::now();
+        round.grace_deadline = Some(now - Duration::from_millis(1));
+
+        reset_round_wait(&mut round, now, Duration::from_secs(3));
+
+        assert_eq!(round.grace_deadline, None);
+        assert_eq!(round.quorum_deadline, now + Duration::from_secs(3));
+    }
+
     #[test]
     fn event_tape_line_preserves_old_fields_and_adds_outer_stats() {
         let mut pushes = HashMap::new();
@@ -1183,6 +2079,7 @@ mod tests {
             4,
             Push {
                 learner_id: 4,
+                connection_id: 1,
                 fragment_id: 2,
                 global_step: 9,
                 base_version: 7,
@@ -1193,7 +2090,8 @@ mod tests {
             },
         );
         let stats = merge_stats(2.5, 0.75, Some(-0.25), Some(3.0), true);
-        let line = format_tape_line(9, 2, &pushes, &stats, 17);
+        let decision = CommitDecision::token_weighted();
+        let line = format_tape_line(9, 2, &pushes, &stats, &decision, 17);
 
         assert!(
             line.starts_with("{\"step\":9,\"fragment\":2,\"gnorm\":2.5,\"ms\":17,\"responders\":[")
@@ -1205,19 +2103,70 @@ mod tests {
         assert!(line.contains("\"outer_direction_cosine\":-0.25"));
         assert!(line.contains("\"outer_history_current_ratio\":3"));
         assert!(line.contains("\"outer_restarted\":true"));
+        assert!(line.contains("\"policy\":\"token_weighted\""));
+        assert!(line.contains("\"selected_action\":\"A0\""));
+        assert!(line.contains("\"committed_action\":\"A0\""));
+        assert!(line.contains("\"selected_multiplier\":1"));
+        assert!(line.contains("\"committed_multiplier\":1"));
+        assert!(line.contains("\"fallback\":false"));
+        assert!(line.contains("\"probe_latency_ms\":null"));
+        assert!(line.contains("\"selected_mass\":1"));
+        assert!(line.contains("\"norm_scale\":1"));
+        assert!(line.contains("\"step_ratio\":1"));
+        assert!(line.contains("\"request_digest\":null"));
         assert!(line.ends_with("}\n"));
     }
 
     #[test]
     fn event_tape_uses_null_for_undefined_outer_ratios() {
         let stats = merge_stats(0.0, 0.0, None, None, false);
-        let line = format_tape_line(1, 0, &HashMap::new(), &stats, 0);
+        let decision = CommitDecision::probe_fallback(CommitPolicy::ProbeLooV1, "probe_timeout");
+        let line = format_tape_line(1, 0, &HashMap::new(), &stats, &decision, 0);
         assert!(line.contains("\"gnorm\":0"));
         assert!(line.contains("\"outer_step_norm\":0"));
         assert!(line.contains("\"outer_direction_cosine\":null"));
         assert!(line.contains("\"outer_history_current_ratio\":null"));
         assert!(line.contains("\"outer_restarted\":false"));
+        assert!(line.contains("\"policy\":\"probe_loo_v1\""));
+        assert!(line.contains("\"fallback\":true"));
+        assert!(line.contains("\"fallback_reason\":\"probe_timeout\""));
         assert!(!line.contains("NaN"));
+    }
+
+    #[test]
+    fn scalar_shadow_commits_a0_while_active_commits_the_selected_preview() {
+        assert_eq!(commit_preview_index(CommitPolicy::ProbeLrShadow, 4), 0);
+        assert_eq!(commit_preview_index(CommitPolicy::ProbeLrV1, 4), 4);
+        assert_eq!(commit_preview_index(CommitPolicy::ProbeShadow, 3), 0);
+        assert_eq!(commit_preview_index(CommitPolicy::ProbeLooV1, 3), 3);
+    }
+
+    #[test]
+    fn event_tape_records_distinct_scalar_selection_and_commit_multipliers() {
+        let decision = CommitDecision {
+            policy: CommitPolicy::ProbeLrShadow,
+            selected_action: "A1".to_owned(),
+            committed_action: "A0".to_owned(),
+            fallback: false,
+            fallback_reason: None,
+            probe_latency_ms: Some(3.0),
+            selected_mass: 1.0,
+            norm_scale: 0.75,
+            step_ratio: 0.75,
+            selected_multiplier: 0.75,
+            committed_multiplier: 1.0,
+            request_digest: Some("a".repeat(64)),
+        };
+        let line = format_tape_line(
+            1,
+            0,
+            &HashMap::new(),
+            &merge_stats(1.0, 1.0, None, None, false),
+            &decision,
+            4,
+        );
+        assert!(line.contains("\"selected_multiplier\":0.75"));
+        assert!(line.contains("\"committed_multiplier\":1"));
     }
 
     #[test]

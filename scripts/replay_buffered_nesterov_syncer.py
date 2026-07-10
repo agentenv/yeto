@@ -119,12 +119,20 @@ class Buffered:
 
 
 def _mean(values: list[float]) -> float:
-    vals = [float(value) for value in values if value is not None and math.isfinite(float(value))]
+    vals = [
+        float(value)
+        for value in values
+        if value is not None and math.isfinite(float(value))
+    ]
     return sum(vals) / len(vals) if vals else float("nan")
 
 
 def _quantile(values: list[float], p: float) -> float:
-    vals = sorted(float(value) for value in values if value is not None and math.isfinite(float(value)))
+    vals = sorted(
+        float(value)
+        for value in values
+        if value is not None and math.isfinite(float(value))
+    )
     if not vals:
         return float("nan")
     return vals[max(0, min(len(vals) - 1, round(p * (len(vals) - 1))))]
@@ -151,7 +159,9 @@ def _infer_seed(*paths: Path | None) -> int | None:
 
 
 def _weighted(updates: list[torch.Tensor], weights: list[float]) -> torch.Tensor:
-    total = sum(max(float(weight), 0.0) for weight in weights if math.isfinite(float(weight)))
+    total = sum(
+        max(float(weight), 0.0) for weight in weights if math.isfinite(float(weight))
+    )
     if total <= 0.0:
         return torch.zeros_like(updates[0])
     out = torch.zeros_like(updates[0])
@@ -205,7 +215,9 @@ def _weighted_scalar_median(values: list[float], weights: list[float]) -> float:
     return float(pairs[-1][0])
 
 
-def _cap_history(weights: list[float], relative_ages: list[float], cap: float) -> list[float]:
+def _cap_history(
+    weights: list[float], relative_ages: list[float], cap: float
+) -> list[float]:
     out = [max(float(weight), 0.0) for weight in weights]
     fresh = sum(weight for weight, age in zip(out, relative_ages) if age <= 0.0)
     history = sum(weight for weight, age in zip(out, relative_ages) if age > 0.0)
@@ -214,14 +226,19 @@ def _cap_history(weights: list[float], relative_ages: list[float], cap: float) -
     allowed = cap / max(1.0 - cap, 1e-12) * fresh
     if history > allowed:
         scale = allowed / history
-        out = [weight if age <= 0.0 else weight * scale for weight, age in zip(out, relative_ages)]
+        out = [
+            weight if age <= 0.0 else weight * scale
+            for weight, age in zip(out, relative_ages)
+        ]
     return out
 
 
 def _weight_stats(weights: list[float], relative_ages: list[float]) -> dict:
     total = sum(max(weight, 0.0) for weight in weights)
     sq = sum(max(weight, 0.0) ** 2 for weight in weights)
-    fresh = sum(max(weight, 0.0) for weight, age in zip(weights, relative_ages) if age <= 0.0)
+    fresh = sum(
+        max(weight, 0.0) for weight, age in zip(weights, relative_ages) if age <= 0.0
+    )
     ess = 0.0 if sq <= 0.0 else total * total / sq
     return {
         "effective_sample_size": ess,
@@ -231,7 +248,9 @@ def _weight_stats(weights: list[float], relative_ages: list[float]) -> dict:
     }
 
 
-def _heloco_per_tensor(update: torch.Tensor, momentum: torch.Tensor, tensor_numels: list[int]) -> torch.Tensor:
+def _heloco_per_tensor(
+    update: torch.Tensor, momentum: torch.Tensor, tensor_numels: list[int]
+) -> torch.Tensor:
     out = update.clone()
     offset = 0
     for numel in tensor_numels:
@@ -250,7 +269,9 @@ def _rda(updates: list[torch.Tensor], weights: list[float]) -> torch.Tensor:
     if total <= 0.0:
         return torch.zeros_like(updates[0])
     norms = [float(update.norm().item()) for update in updates]
-    radial = sum(max(weight, 0.0) * norm for weight, norm in zip(weights, norms)) / total
+    radial = (
+        sum(max(weight, 0.0) * norm for weight, norm in zip(weights, norms)) / total
+    )
     direction = torch.zeros_like(updates[0])
     for update, weight, norm in zip(updates, weights, norms):
         if weight > 0.0 and norm > 0.0:
@@ -261,7 +282,9 @@ def _rda(updates: list[torch.Tensor], weights: list[float]) -> torch.Tensor:
     return direction.mul_(radial / norm)
 
 
-def _production_merge_update(candidates: list[soft.Candidate], momentum: torch.Tensor, frag) -> torch.Tensor:
+def _production_merge_update(
+    candidates: list[soft.Candidate], momentum: torch.Tensor, frag
+) -> torch.Tensor:
     updates = [
         _heloco_per_tensor(candidate.update, momentum, _tensor_numels(frag))
         for candidate in candidates
@@ -280,7 +303,9 @@ def _production_merge_update(candidates: list[soft.Candidate], momentum: torch.T
     return out
 
 
-def _production_avg_update(candidates: list[soft.Candidate], momentum: torch.Tensor, frag) -> torch.Tensor:
+def _production_avg_update(
+    candidates: list[soft.Candidate], momentum: torch.Tensor, frag
+) -> torch.Tensor:
     updates = [
         _heloco_per_tensor(candidate.update, momentum, _tensor_numels(frag))
         for candidate in candidates
@@ -309,7 +334,9 @@ def _consensus_rda_update(
         slices = [update[offset:end] for update in corrected]
         total = sum(max(weight, 0.0) for weight in weights)
         norms = [float(update.norm().item()) for update in slices]
-        radial = sum(max(weight, 0.0) * norm for weight, norm in zip(weights, norms)) / max(total, 1e-12)
+        radial = sum(
+            max(weight, 0.0) * norm for weight, norm in zip(weights, norms)
+        ) / max(total, 1e-12)
         direction = torch.zeros_like(slices[0])
         for update, weight, norm in zip(slices, weights, norms):
             if weight > 0.0 and norm > 1e-12:
@@ -357,7 +384,9 @@ def _direction_consensus(
             update_slice = update[offset:end]
             norm = float(update_slice.norm().item())
             if weight > 0.0 and norm > 1e-12:
-                direction.add_(update_slice, alpha=weight / max(total_weight, 1e-12) / norm)
+                direction.add_(
+                    update_slice, alpha=weight / max(total_weight, 1e-12) / norm
+                )
         consensus = min(1.0, max(0.0, float(direction.norm().item())))
         weighted_consensus += consensus * numel
         total_numel += numel
@@ -365,7 +394,9 @@ def _direction_consensus(
     return weighted_consensus / max(total_numel, 1)
 
 
-def _match_tensor_norms(source: torch.Tensor, target: torch.Tensor, frag) -> torch.Tensor:
+def _match_tensor_norms(
+    source: torch.Tensor, target: torch.Tensor, frag
+) -> torch.Tensor:
     out = torch.empty_like(source)
     offset = 0
     for numel in _tensor_numels(frag):
@@ -428,7 +459,9 @@ def _transport_slice(
 
     pnorm = float(momentum.norm().item())
     direction = None if pnorm < 1e-12 else -momentum / pnorm
-    fresh_projection = 0.0 if direction is None else float(torch.dot(fresh_mean, direction).item())
+    fresh_projection = (
+        0.0 if direction is None else float(torch.dot(fresh_mean, direction).item())
+    )
     transported = []
     transport_norms = []
     for update, age in zip(updates, relative_ages):
@@ -440,7 +473,10 @@ def _transport_slice(
         transported.append(moved)
         transport_norms.append(float((moved - update).norm().item()))
 
-    weights = [weight * math.exp(-age / tau) for weight, age in zip(base_weights, relative_ages)]
+    weights = [
+        weight * math.exp(-age / tau)
+        for weight, age in zip(base_weights, relative_ages)
+    ]
     weights = _cap_history(weights, relative_ages, history_cap)
     effective = list(weights)
     if mode == "mean":
@@ -456,7 +492,10 @@ def _transport_slice(
             center = weighted_sum.sub(update, alpha=weight).div(max(denom, 1e-12))
             distances.append(float((update - center).norm().item()))
         radius = max(_weighted_scalar_median(distances, effective), 1e-12)
-        huber = [max(0.5, min(1.0, 1.5 * radius / max(distance, 1e-12))) for distance in distances]
+        huber = [
+            max(0.5, min(1.0, 1.5 * radius / max(distance, 1e-12)))
+            for distance in distances
+        ]
         effective = _cap_history(
             [weight * factor for weight, factor in zip(effective, huber)],
             relative_ages,
@@ -485,7 +524,9 @@ def _transport_slice(
     return merged, stats
 
 
-def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Tensor, frag, args) -> tuple[torch.Tensor, dict]:
+def _aggregate(
+    policy: str, candidates: list[soft.Candidate], momentum: torch.Tensor, frag, args
+) -> tuple[torch.Tensor, dict]:
     updates = [candidate.update for candidate in candidates]
     weights = [candidate.weight for candidate in candidates]
     ages = [candidate.age for candidate in candidates]
@@ -515,10 +556,14 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
     if policy == "current_avg_norm_outer_lr":
         info.update(_weight_stats(weights, relative_ages))
         average = _production_avg_update(candidates, momentum, frag)
-        ratio = float(average.norm().item()) / max(float(production.norm().item()), 1e-12)
+        ratio = float(average.norm().item()) / max(
+            float(production.norm().item()), 1e-12
+        )
         info["outer_lr_multiplier"] = max(0.05, min(1.0, ratio))
         return production, info
-    match = re.fullmatch(r"current_consensus_rda_(sqrt|linear|affine50|floor50)", policy)
+    match = re.fullmatch(
+        r"current_consensus_rda_(sqrt|linear|affine50|floor50)", policy
+    )
     if match:
         info.update(_weight_stats(weights, relative_ages))
         update, consensus_scale = _consensus_rda_update(
@@ -545,7 +590,10 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
         "current_coord_midpoint_blend50",
         "buffer_coord_midpoint_heloco",
     }:
-        corrected = [_heloco_per_tensor(update, momentum, _tensor_numels(frag)) for update in updates]
+        corrected = [
+            _heloco_per_tensor(update, momentum, _tensor_numels(frag))
+            for update in updates
+        ]
         median = _coordinate_midpoint_median(corrected)
         info.update(_weight_stats(weights, relative_ages))
         if policy == "current_coord_midpoint_normmatch":
@@ -557,16 +605,24 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
             return production.mul(1.0 - blend).add(median, alpha=blend), info
         return median, info
     if policy in {"current_median_norm_outer_lr", "current_median_norm_outer_lr_p15"}:
-        corrected = [_heloco_per_tensor(update, momentum, _tensor_numels(frag)) for update in updates]
+        corrected = [
+            _heloco_per_tensor(update, momentum, _tensor_numels(frag))
+            for update in updates
+        ]
         median = _coordinate_midpoint_median(corrected)
         info.update(_weight_stats(weights, relative_ages))
-        ratio = float(median.norm().item()) / max(float(production.norm().item()), 1e-12)
+        ratio = float(median.norm().item()) / max(
+            float(production.norm().item()), 1e-12
+        )
         if policy.endswith("p15"):
             ratio = ratio**1.5
         info["outer_lr_multiplier"] = max(0.05, min(1.0, ratio))
         return production, info
     if policy == "current_geomedian_heloco":
-        corrected = [_heloco_per_tensor(update, momentum, _tensor_numels(frag)) for update in updates]
+        corrected = [
+            _heloco_per_tensor(update, momentum, _tensor_numels(frag))
+            for update in updates
+        ]
         info.update(_weight_stats(weights, relative_ages))
         return _geomedian_per_tensor(corrected, weights, frag), info
 
@@ -610,8 +666,12 @@ def _aggregate(policy: str, candidates: list[soft.Candidate], momentum: torch.Te
         "history_effective_share",
         "mean_transport_norm",
     ):
-        info[key] = sum(stats[key] * stats["numel"] for stats in slice_stats) / total_numel
-    info["guard_active_fraction"] = _mean([1.0 if stats["guard_active"] else 0.0 for stats in slice_stats])
+        info[key] = (
+            sum(stats[key] * stats["numel"] for stats in slice_stats) / total_numel
+        )
+    info["guard_active_fraction"] = _mean(
+        [1.0 if stats["guard_active"] else 0.0 for stats in slice_stats]
+    )
     return out, info
 
 
@@ -621,7 +681,9 @@ def _group_policy(
     momentum: torch.Tensor,
     frag,
 ) -> tuple[torch.Tensor, dict]:
-    group_updates = [_production_merge_update(group, momentum, frag) for group in rounds]
+    group_updates = [
+        _production_merge_update(group, momentum, frag) for group in rounds
+    ]
     current = group_updates[-1]
     history = group_updates[:-1]
     ages = [_mean([candidate.age for candidate in group]) for group in rounds]
@@ -642,9 +704,7 @@ def _group_policy(
         fresh_share = 1.0 / len(group_updates)
         guard_fraction = 0.0
     else:
-        mix = re.fullmatch(
-            r"buffer_group_(ema|transport)(\d+)(_normmatch)?", policy
-        )
+        mix = re.fullmatch(r"buffer_group_(ema|transport)(\d+)(_normmatch)?", policy)
         alpha = float(mix.group(2)) / 100.0 if mix else 0.25
         normmatch = bool(mix and mix.group(3))
         history_weights = [math.exp(-(age - ages[-1]) / 4.0) for age in ages[:-1]]
@@ -659,7 +719,9 @@ def _group_policy(
                 current_slice = current[offset:end]
                 scale = min(
                     1.0,
-                    1.5 * float(current_slice.norm().item()) / max(float(old_slice.norm().item()), 1e-12),
+                    1.5
+                    * float(current_slice.norm().item())
+                    / max(float(old_slice.norm().item()), 1e-12),
                 )
                 clipped[offset:end] = old_slice * scale
                 offset = end
@@ -680,9 +742,12 @@ def _group_policy(
                 else:
                     direction = -momentum_slice / norm
                     old_projection = float(torch.dot(old_slice, direction).item())
-                    current_projection = float(torch.dot(current_slice, direction).item())
+                    current_projection = float(
+                        torch.dot(current_slice, direction).item()
+                    )
                     transported[offset:end] = (
-                        old_slice + rho * (current_projection - old_projection) * direction
+                        old_slice
+                        + rho * (current_projection - old_projection) * direction
                     )
                 offset = end
             history_mean = transported
@@ -700,8 +765,12 @@ def _group_policy(
                 norm = float(momentum_slice.norm().item())
                 if norm >= 1e-12:
                     direction = -momentum_slice / norm
-                    current_projection = float(torch.dot(current[offset:end], direction).item())
-                    merged_projection = float(torch.dot(guarded[offset:end], direction).item())
+                    current_projection = float(
+                        torch.dot(current[offset:end], direction).item()
+                    )
+                    merged_projection = float(
+                        torch.dot(guarded[offset:end], direction).item()
+                    )
                     if merged_projection < current_projection:
                         guarded[offset:end].add_(
                             direction, alpha=current_projection - merged_projection
@@ -729,7 +798,9 @@ def _group_policy(
     }
 
 
-def _utility_se(base_by_batch: list[float], trial_by_batch: list[float]) -> float | None:
+def _utility_se(
+    base_by_batch: list[float], trial_by_batch: list[float]
+) -> float | None:
     utilities = [base - trial for base, trial in zip(base_by_batch, trial_by_batch)]
     if len(utilities) < 2:
         return None
@@ -738,7 +809,18 @@ def _utility_se(base_by_batch: list[float], trial_by_batch: list[float]) -> floa
     return math.sqrt(variance / len(utilities))
 
 
-def _eval(model, batches, compute_loss, frag, params, current, trial, base_loss, base_by_batch, device):
+def _eval(
+    model,
+    batches,
+    compute_loss,
+    frag,
+    params,
+    current,
+    trial,
+    base_loss,
+    base_by_batch,
+    device,
+):
     apply_fragment(frag, trial.to(device), params)
     trial_loss, trial_by_batch = syncer_eval._losses(model, batches, compute_loss)
     apply_fragment(frag, current.to(device), params)
@@ -746,7 +828,9 @@ def _eval(model, batches, compute_loss, frag, params, current, trial, base_loss,
     return utility, _utility_se(base_by_batch, trial_by_batch)
 
 
-def _next_state_paths(groups: list[list[dict]], root: Path) -> dict[tuple[int, int], Path]:
+def _next_state_paths(
+    groups: list[list[dict]], root: Path
+) -> dict[tuple[int, int], Path]:
     out = {}
     for group, next_group in zip(groups, groups[1:]):
         fid = int(group[0]["fragment"])
@@ -767,7 +851,11 @@ def _buffered_candidate(
         tensor=current + item.update,
         update=item.update,
         weight=item.weight,
-        age=max(0.0, float(current_version) - float(item.row.get("base_version", current_version))),
+        age=max(
+            0.0,
+            float(current_version)
+            - float(item.row.get("base_version", current_version)),
+        ),
         norm=float(item.update.norm().item()),
         align=soft._cosine(item.update, -momentum),
     )
@@ -822,12 +910,16 @@ def replay(args) -> list[dict]:
         args.fragment_pattern,
     )
     batches = syncer_eval._probe_batches(args, tokenizer, device)
-    compute_loss = lambda logits, ids, weights: sft_loss(logits, ids, args.loss_function, weights)  # noqa: E731
+
+    def compute_loss(logits, ids, weights):
+        return sft_loss(logits, ids, args.loss_function, weights)
 
     buffers: dict[int, deque[list[Buffered]]] = defaultdict(
         lambda: deque(maxlen=args.buffer_rounds)
     )
-    next_states = _next_state_paths(all_groups, root) if args.validate_next_state else {}
+    next_states = (
+        _next_state_paths(all_groups, root) if args.validate_next_state else {}
+    )
     current_state_path = None
     current_ckpt = None
     base_loss = 0.0
@@ -841,46 +933,71 @@ def replay(args) -> list[dict]:
             if state_path != current_state_path:
                 current_ckpt = parse_checkpoint(state_path)
                 syncer_eval._apply_checkpoint(current_ckpt, layout, params, device)
-                base_loss, base_by_batch = syncer_eval._losses(model, batches, compute_loss)
+                base_loss, base_by_batch = syncer_eval._losses(
+                    model, batches, compute_loss
+                )
                 current_state_path = state_path
             assert current_ckpt is not None
             fid = int(first["fragment"])
             frag = layout.fragments[fid]
             current = current_ckpt.fragments[fid][1]
             momentum = current_ckpt.fragments[fid][2]
+            merge_momentum = (
+                momentum
+                if args.delta_correction == "heloco"
+                else torch.zeros_like(momentum)
+            )
             current_version = int(current_ckpt.fragments[fid][0])
             current_candidates = []
             current_round = []
             for row in group:
-                tensor = buffered._read_f32(buffered._resolve(root, row["candidate_f32"]), frag.numel)
-                candidate = buffered._candidate(row, tensor, current, momentum, current_version)
+                tensor = buffered._read_f32(
+                    buffered._resolve(root, row["candidate_f32"]), frag.numel
+                )
+                candidate = buffered._candidate(
+                    row, tensor, current, merge_momentum, current_version
+                )
                 current_candidates.append(candidate)
                 current_round.append(
-                    Buffered(row=row, update=candidate.update.clone(), weight=candidate.weight)
+                    Buffered(
+                        row=row,
+                        update=candidate.update.clone(),
+                        weight=candidate.weight,
+                    )
                 )
             buffers[fid].append(current_round)
             if len(buffers[fid]) < args.buffer_rounds:
                 continue
             history = [
-                _buffered_candidate(item, current, momentum, current_version)
+                _buffered_candidate(item, current, merge_momentum, current_version)
                 for buffered_round in buffers[fid]
                 for item in buffered_round
             ]
             history_rounds = [
                 [
-                    _buffered_candidate(item, current, momentum, current_version)
+                    _buffered_candidate(item, current, merge_momentum, current_version)
                     for item in buffered_round
                 ]
                 for buffered_round in buffers[fid]
             ]
 
-            baseline_update = _production_merge_update(current_candidates, momentum, frag)
+            baseline_update = _production_merge_update(
+                current_candidates, merge_momentum, frag
+            )
             baseline_trial = _nesterov_trial(
                 current, momentum, baseline_update, args.outer_lr, args.outer_momentum
             )
             token_utility, token_se = _eval(
-                model, batches, compute_loss, frag, params, current, baseline_trial,
-                base_loss, base_by_batch, device,
+                model,
+                batches,
+                compute_loss,
+                frag,
+                params,
+                current,
+                baseline_trial,
+                base_loss,
+                base_by_batch,
+                device,
             )
             next_state_path = next_states.get((int(first["step"]), fid))
             rel_error = None
@@ -889,9 +1006,7 @@ def replay(args) -> list[dict]:
             if next_state_path is not None:
                 next_state = parse_checkpoint(next_state_path).fragments[fid][1]
                 absolute_error = float((baseline_trial - next_state).norm().item())
-                rel_error = absolute_error / max(
-                    float(next_state.norm().item()), 1e-12
-                )
+                rel_error = absolute_error / max(float(next_state.norm().item()), 1e-12)
                 step_rel_error = absolute_error / max(
                     float((next_state - current).norm().item()), 1e-12
                 )
@@ -916,7 +1031,9 @@ def replay(args) -> list[dict]:
                 "token_weighted_utility": token_utility,
                 "token_weighted_utility_se": token_se,
                 "token_weighted_negative": token_utility < 0.0,
-                "token_weighted_strict_negative": None if token_se is None else token_utility + token_se < 0.0,
+                "token_weighted_strict_negative": None
+                if token_se is None
+                else token_utility + token_se < 0.0,
                 "token_weighted_selected_count": len(current_candidates),
                 "token_weighted_selected_mass": 1.0,
                 "token_weighted_gain_vs_token": 0.0,
@@ -926,18 +1043,26 @@ def replay(args) -> list[dict]:
             }
             for policy in args.policies:
                 if policy.startswith("buffer_group_"):
-                    update, info = _group_policy(policy, history_rounds, momentum, frag)
+                    update, info = _group_policy(
+                        policy, history_rounds, merge_momentum, frag
+                    )
                 else:
                     policy_candidates = (
                         current_candidates if policy.startswith("current_") else history
                     )
-                    update, info = _aggregate(policy, policy_candidates, momentum, frag, args)
+                    update, info = _aggregate(
+                        policy, policy_candidates, merge_momentum, frag, args
+                    )
                 baseline_norm = float(baseline_update.norm().item())
                 update_norm = float(update.norm().item())
                 info["update_norm"] = update_norm
                 info["baseline_update_norm"] = baseline_norm
-                info["update_to_baseline_norm_ratio"] = update_norm / max(baseline_norm, 1e-12)
-                info["update_cosine_to_baseline"] = soft._cosine(update, baseline_update)
+                info["update_to_baseline_norm_ratio"] = update_norm / max(
+                    baseline_norm, 1e-12
+                )
+                info["update_cosine_to_baseline"] = soft._cosine(
+                    update, baseline_update
+                )
                 trial = _nesterov_trial(
                     current,
                     momentum,
@@ -946,21 +1071,35 @@ def replay(args) -> list[dict]:
                     args.outer_momentum,
                 )
                 utility, utility_se = _eval(
-                    model, batches, compute_loss, frag, params, current, trial,
-                    base_loss, base_by_batch, device,
+                    model,
+                    batches,
+                    compute_loss,
+                    frag,
+                    params,
+                    current,
+                    trial,
+                    base_loss,
+                    base_by_batch,
+                    device,
                 )
                 out[f"{policy}_utility"] = utility
                 out[f"{policy}_utility_se"] = utility_se
                 out[f"{policy}_negative"] = utility < 0.0
-                out[f"{policy}_strict_negative"] = None if utility_se is None else utility + utility_se < 0.0
+                out[f"{policy}_strict_negative"] = (
+                    None if utility_se is None else utility + utility_se < 0.0
+                )
                 out[f"{policy}_gain_vs_token"] = utility - token_utility
                 for key, value in info.items():
                     out[f"{policy}_{key}"] = value
             records.append(out)
             if args._sink is not None:
-                args._sink.write(json.dumps(_jsonable(out), sort_keys=True, allow_nan=False) + "\n")
+                args._sink.write(
+                    json.dumps(_jsonable(out), sort_keys=True, allow_nan=False) + "\n"
+                )
                 args._sink.flush()
-            if args.progress_every and (len(records) == 1 or len(records) % args.progress_every == 0):
+            if args.progress_every and (
+                len(records) == 1 or len(records) % args.progress_every == 0
+            ):
                 print(
                     f"[buffered-nesterov] records={len(records)} groups={group_idx}/{len(groups)} "
                     f"step={out['step']} fragment={fid}",
@@ -975,20 +1114,28 @@ def replay(args) -> list[dict]:
 def summarize(records: list[dict], policies: tuple[str, ...]) -> dict:
     if not records:
         raise SystemExit("no buffered Nesterov replay records")
-    token_neg = _mean([1.0 if row["token_weighted_negative"] else 0.0 for row in records])
-    token_strict = _mean([
-        1.0 if row["token_weighted_strict_negative"] else 0.0
-        for row in records if row["token_weighted_strict_negative"] is not None
-    ])
+    token_neg = _mean(
+        [1.0 if row["token_weighted_negative"] else 0.0 for row in records]
+    )
+    token_strict = _mean(
+        [
+            1.0 if row["token_weighted_strict_negative"] else 0.0
+            for row in records
+            if row["token_weighted_strict_negative"] is not None
+        ]
+    )
     results = {}
     for policy in policies:
         gains = [float(row[f"{policy}_gain_vs_token"]) for row in records]
         utilities = [float(row[f"{policy}_utility"]) for row in records]
         negative = _mean([1.0 if row[f"{policy}_negative"] else 0.0 for row in records])
-        strict = _mean([
-            1.0 if row[f"{policy}_strict_negative"] else 0.0
-            for row in records if row[f"{policy}_strict_negative"] is not None
-        ])
+        strict = _mean(
+            [
+                1.0 if row[f"{policy}_strict_negative"] else 0.0
+                for row in records
+                if row[f"{policy}_strict_negative"] is not None
+            ]
+        )
         results[policy] = {
             "mean_utility": _mean(utilities),
             "mean_gain_vs_token": _mean(gains),
@@ -996,50 +1143,81 @@ def summarize(records: list[dict], policies: tuple[str, ...]) -> dict:
             "gain_positive_rate": _mean([1.0 if gain > 0.0 else 0.0 for gain in gains]),
             "negative_rate": negative,
             "strict_negative_rate": strict,
-            "negative_rate_relative_drop": None if token_neg <= 0.0 else (token_neg - negative) / token_neg,
-            "strict_negative_rate_relative_drop": None if token_strict <= 0.0 else (token_strict - strict) / token_strict,
-            "selected_mass_mean": _mean([float(row.get(f"{policy}_selected_mass", 1.0)) for row in records]),
-            "normalized_effective_sample_size": _mean([
-                float(row.get(f"{policy}_normalized_effective_sample_size", 1.0)) for row in records
-            ]),
-            "fresh_effective_share": _mean([
-                float(row.get(f"{policy}_fresh_effective_share", 1.0)) for row in records
-            ]),
-            "history_effective_share": _mean([
-                float(row.get(f"{policy}_history_effective_share", 0.0)) for row in records
-            ]),
-            "update_to_baseline_norm_ratio": _mean([
-                float(row.get(f"{policy}_update_to_baseline_norm_ratio", 1.0)) for row in records
-            ]),
-            "update_cosine_to_baseline": _mean([
-                float(row.get(f"{policy}_update_cosine_to_baseline", 1.0)) for row in records
-            ]),
-            "outer_lr_multiplier": _mean([
-                float(row.get(f"{policy}_outer_lr_multiplier", 1.0)) for row in records
-            ]),
-            "consensus_scale": _mean([
-                float(row.get(f"{policy}_consensus_scale", 1.0)) for row in records
-            ]),
+            "negative_rate_relative_drop": None
+            if token_neg <= 0.0
+            else (token_neg - negative) / token_neg,
+            "strict_negative_rate_relative_drop": None
+            if token_strict <= 0.0
+            else (token_strict - strict) / token_strict,
+            "selected_mass_mean": _mean(
+                [float(row.get(f"{policy}_selected_mass", 1.0)) for row in records]
+            ),
+            "normalized_effective_sample_size": _mean(
+                [
+                    float(row.get(f"{policy}_normalized_effective_sample_size", 1.0))
+                    for row in records
+                ]
+            ),
+            "fresh_effective_share": _mean(
+                [
+                    float(row.get(f"{policy}_fresh_effective_share", 1.0))
+                    for row in records
+                ]
+            ),
+            "history_effective_share": _mean(
+                [
+                    float(row.get(f"{policy}_history_effective_share", 0.0))
+                    for row in records
+                ]
+            ),
+            "update_to_baseline_norm_ratio": _mean(
+                [
+                    float(row.get(f"{policy}_update_to_baseline_norm_ratio", 1.0))
+                    for row in records
+                ]
+            ),
+            "update_cosine_to_baseline": _mean(
+                [
+                    float(row.get(f"{policy}_update_cosine_to_baseline", 1.0))
+                    for row in records
+                ]
+            ),
+            "outer_lr_multiplier": _mean(
+                [
+                    float(row.get(f"{policy}_outer_lr_multiplier", 1.0))
+                    for row in records
+                ]
+            ),
+            "consensus_scale": _mean(
+                [float(row.get(f"{policy}_consensus_scale", 1.0)) for row in records]
+            ),
         }
     parameter_errors = [
         float(row["token_weighted_next_state_relative_error"])
-        for row in records if row.get("token_weighted_next_state_relative_error") is not None
+        for row in records
+        if row.get("token_weighted_next_state_relative_error") is not None
     ]
     step_errors = [
         float(row["token_weighted_next_state_step_relative_error"])
-        for row in records if row.get("token_weighted_next_state_step_relative_error") is not None
+        for row in records
+        if row.get("token_weighted_next_state_step_relative_error") is not None
     ]
     absolute_errors = [
         float(row["token_weighted_next_state_absolute_error"])
-        for row in records if row.get("token_weighted_next_state_absolute_error") is not None
+        for row in records
+        if row.get("token_weighted_next_state_absolute_error") is not None
     ]
     non_token = [policy for policy in policies if policy != "token_weighted"]
     best = max(non_token, key=lambda policy: results[policy]["mean_gain_vs_token"])
     return {
         "schema": "buffered_nesterov_syncer_summary_v1",
         "records": len(records),
-        "dropped_incomplete_group_count": int(records[0]["dropped_incomplete_group_count"]),
-        "seeds": sorted({int(row["seed"]) for row in records if row.get("seed") is not None}),
+        "dropped_incomplete_group_count": int(
+            records[0]["dropped_incomplete_group_count"]
+        ),
+        "seeds": sorted(
+            {int(row["seed"]) for row in records if row.get("seed") is not None}
+        ),
         "buffer_rounds": int(records[0]["buffer_rounds"]),
         "buffer_size": int(records[0]["buffer_size"]),
         "outer_lr": None,
@@ -1051,7 +1229,9 @@ def summarize(records: list[dict], policies: tuple[str, ...]) -> dict:
             "mean_absolute_error": _mean(absolute_errors),
             "max_absolute_error": max(absolute_errors) if absolute_errors else None,
             "mean_parameter_relative_error": _mean(parameter_errors),
-            "max_parameter_relative_error": max(parameter_errors) if parameter_errors else None,
+            "max_parameter_relative_error": max(parameter_errors)
+            if parameter_errors
+            else None,
             "mean_step_relative_error": _mean(step_errors),
             "p95_step_relative_error": _quantile(step_errors, 0.95),
             "max_step_relative_error": max(step_errors) if step_errors else None,
@@ -1059,10 +1239,17 @@ def summarize(records: list[dict], policies: tuple[str, ...]) -> dict:
         "policies": results,
         "best_non_token_policy": best,
         "gate": {
-            "baseline_replay_matches_next_state": bool(step_errors) and max(step_errors) < 1e-4,
+            "baseline_replay_matches_next_state": bool(step_errors)
+            and max(step_errors) < 1e-4,
             "best_mean_gain_positive": results[best]["mean_gain_vs_token"] > 0.0,
-            "best_negative_drop_nonnegative": (results[best]["negative_rate_relative_drop"] or 0.0) >= 0.0,
-            "best_strict_drop_nonnegative": (results[best]["strict_negative_rate_relative_drop"] or 0.0) >= 0.0,
+            "best_negative_drop_nonnegative": (
+                results[best]["negative_rate_relative_drop"] or 0.0
+            )
+            >= 0.0,
+            "best_strict_drop_nonnegative": (
+                results[best]["strict_negative_rate_relative_drop"] or 0.0
+            )
+            >= 0.0,
             "best_selected_mass_ge_0.95": results[best]["selected_mass_mean"] >= 0.95,
         },
     }
@@ -1080,9 +1267,13 @@ def parse_args(argv=None):
     parser.add_argument("--tuning", choices=["lora", "full"], default="lora")
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
-    parser.add_argument("--lora-targets", choices=["auto", "attention", "all-linear"], default="auto")
+    parser.add_argument(
+        "--lora-targets", choices=["auto", "attention", "all-linear"], default="auto"
+    )
     parser.add_argument("--fragments", type=int, default=4)
-    parser.add_argument("--fragment-pattern", choices=["binpack", "strided"], default="binpack")
+    parser.add_argument(
+        "--fragment-pattern", choices=["binpack", "strided"], default="binpack"
+    )
     parser.add_argument("--loss-function", default="cross_entropy")
     parser.add_argument("--train-on", choices=["assistant", "all"], default="assistant")
     parser.add_argument("--probe-batches", type=int, default=4)
@@ -1092,14 +1283,24 @@ def parse_args(argv=None):
     parser.add_argument("--history-cap", type=float, default=0.30)
     parser.add_argument("--outer-lr", type=float, default=0.7)
     parser.add_argument("--outer-momentum", type=float, default=0.9)
+    parser.add_argument(
+        "--delta-correction",
+        choices=["heloco", "none"],
+        default="heloco",
+        help="Match the captured production merge before applying replay policies.",
+    )
     parser.add_argument("--min-candidates", type=int, default=2)
     parser.add_argument("--expected-candidates", type=int, default=0)
     parser.add_argument("--drop-incomplete-groups", action="store_true")
     parser.add_argument("--max-groups", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--progress-every", type=int, default=10)
-    parser.add_argument("--validate-next-state", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--max-next-state-step-relative-error", type=float, default=1e-4)
+    parser.add_argument(
+        "--validate-next-state", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument(
+        "--max-next-state-step-relative-error", type=float, default=1e-4
+    )
     parser.add_argument(
         "--policies",
         default=",".join(POLICIES[1:]),
@@ -1108,7 +1309,9 @@ def parse_args(argv=None):
     parser.add_argument("--out-jsonl", required=True, type=Path)
     parser.add_argument("--out-summary", required=True, type=Path)
     args = parser.parse_args(argv)
-    requested = tuple(dict.fromkeys(part.strip() for part in args.policies.split(",") if part.strip()))
+    requested = tuple(
+        dict.fromkeys(part.strip() for part in args.policies.split(",") if part.strip())
+    )
     unknown = sorted(set(requested) - set(POLICIES[1:]))
     if unknown:
         parser.error(f"unknown buffered Nesterov policies: {','.join(unknown)}")
@@ -1129,7 +1332,11 @@ def parse_args(argv=None):
 def main(argv=None) -> int:
     args = parse_args(argv)
     root = args.capture_dir or args.index.parent
-    args.seed = args.seed if args.seed is not None else _infer_seed(root, args.data, args.out_jsonl)
+    args.seed = (
+        args.seed
+        if args.seed is not None
+        else _infer_seed(root, args.data, args.out_jsonl)
+    )
     args.out_jsonl.parent.mkdir(parents=True, exist_ok=True)
     with args.out_jsonl.open("w") as sink:
         args._sink = sink
@@ -1137,7 +1344,9 @@ def main(argv=None) -> int:
     summary = summarize(records, ("token_weighted", *args.policies))
     summary["outer_lr"] = args.outer_lr
     summary["outer_momentum"] = args.outer_momentum
-    args.out_summary.write_text(json.dumps(_jsonable(summary), indent=2, sort_keys=True, allow_nan=False) + "\n")
+    args.out_summary.write_text(
+        json.dumps(_jsonable(summary), indent=2, sort_keys=True, allow_nan=False) + "\n"
+    )
     print(json.dumps(_jsonable(summary), indent=2, sort_keys=True, allow_nan=False))
     return 0
 

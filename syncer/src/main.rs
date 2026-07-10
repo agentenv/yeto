@@ -1,3 +1,4 @@
+mod action_probe;
 mod merge;
 mod protocol;
 mod server;
@@ -100,6 +101,31 @@ struct Args {
     /// 0 disables capture even if the directory is present.
     #[arg(long, default_value_t = 1)]
     probe_capture_every: u64,
+    /// Commit policy: token_weighted preserves the production baseline;
+    /// probe_shadow evaluates A0-A4 but commits A0; probe_loo_v1 commits the
+    /// exact sidecar-selected LOO preview; probe_lr_shadow evaluates the
+    /// frozen step-scale grid but commits x1; probe_lr_v1 commits the exact
+    /// sidecar-selected scaled preview.
+    #[arg(long, default_value_t = action_probe::CommitPolicy::TokenWeighted)]
+    commit_policy: action_probe::CommitPolicy,
+    /// Persistent action-probe sidecar endpoint. Probe policies require a
+    /// numeric loopback address such as 127.0.0.1:49321.
+    #[arg(long = "action-probe-endpoint", alias = "probe-endpoint")]
+    action_probe_endpoint: Option<String>,
+    /// Hard end-to-end timeout for one sidecar request, in milliseconds.
+    #[arg(
+        long = "action-probe-timeout-ms",
+        alias = "probe-timeout-ms",
+        default_value_t = 30_000
+    )]
+    action_probe_timeout_ms: u64,
+    /// Stable run identity used by the sidecar's exact-retry cache.
+    #[arg(long = "action-probe-run-uuid", alias = "probe-run-uuid")]
+    action_probe_run_uuid: Option<String>,
+    /// JSON file containing the expected anchor/config/layout digests,
+    /// fragment tensor names, fragment pattern, and LoRA rank.
+    #[arg(long = "action-probe-expected-config", alias = "probe-expected-config")]
+    action_probe_expected_config: Option<std::path::PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -120,6 +146,7 @@ fn main() -> anyhow::Result<()> {
         .as_deref()
         .map(parse_outer_lr_by_fragment)
         .transpose()?;
+    let action_probe = action_probe_config(&args)?;
     let cfg = server::Config {
         port: args.port,
         learners: args.learners,
@@ -146,11 +173,46 @@ fn main() -> anyhow::Result<()> {
         event_tape: args.event_tape,
         probe_capture_dir: args.probe_capture_dir,
         probe_capture_every: args.probe_capture_every,
+        commit_policy: args.commit_policy,
+        action_probe,
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(server::run(cfg))
+}
+
+fn action_probe_config(args: &Args) -> anyhow::Result<Option<action_probe::ClientConfig>> {
+    if !args.commit_policy.requires_probe() {
+        return Ok(None);
+    }
+    if args.commit_policy.is_leave_one_out() && args.learners != 4 {
+        anyhow::bail!(
+            "{} requires exactly four configured learners for A1-A4 leave-one-out actions",
+            args.commit_policy
+        );
+    }
+    if args.action_probe_timeout_ms == 0 {
+        anyhow::bail!("--action-probe-timeout-ms must be positive");
+    }
+    let endpoint = args
+        .action_probe_endpoint
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("probe policies require --action-probe-endpoint"))?;
+    let run_uuid = args
+        .action_probe_run_uuid
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("probe policies require --action-probe-run-uuid"))?;
+    let expected = args
+        .action_probe_expected_config
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("probe policies require --action-probe-expected-config"))?;
+    Ok(Some(action_probe::ClientConfig::from_expected_file(
+        endpoint,
+        std::time::Duration::from_millis(args.action_probe_timeout_ms),
+        run_uuid,
+        expected,
+    )?))
 }
 
 fn parse_cosine_threshold(value: &str) -> Result<f32, String> {
@@ -192,7 +254,10 @@ fn parse_outer_lr_by_fragment(spec: &str) -> anyhow::Result<Vec<f32>> {
     if values.is_empty() {
         anyhow::bail!("--outer-lr-by-fragment must contain at least one value");
     }
-    if values.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+    if values
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
         anyhow::bail!("--outer-lr-by-fragment values must be finite and > 0");
     }
     Ok(values)
@@ -219,6 +284,91 @@ mod tests {
         assert_eq!(args.outer_optimizer, merge::OuterOptimizer::Nesterov);
         assert_eq!(args.outer_momentum, 0.9);
         assert_eq!(args.outer_restart_cos_threshold, 0.0);
+        assert_eq!(
+            args.commit_policy,
+            action_probe::CommitPolicy::TokenWeighted
+        );
+        assert!(action_probe_config(&args).unwrap().is_none());
+    }
+
+    #[test]
+    fn parses_action_probe_commit_policy_and_flags() {
+        let args = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "4",
+            "--total-steps",
+            "1",
+            "--commit-policy",
+            "probe_shadow",
+            "--action-probe-endpoint",
+            "127.0.0.1:49321",
+            "--action-probe-timeout-ms",
+            "2500",
+            "--action-probe-run-uuid",
+            "run-1",
+            "--action-probe-expected-config",
+            "/tmp/probe.json",
+        ])
+        .unwrap();
+        assert_eq!(args.commit_policy, action_probe::CommitPolicy::ProbeShadow);
+        assert_eq!(args.action_probe_timeout_ms, 2500);
+        assert_eq!(
+            args.action_probe_expected_config.as_deref(),
+            Some(std::path::Path::new("/tmp/probe.json"))
+        );
+
+        let scalar = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "2",
+            "--total-steps",
+            "1",
+            "--commit-policy",
+            "probe_lr_v1",
+            "--action-probe-endpoint",
+            "127.0.0.1:49321",
+            "--action-probe-run-uuid",
+            "run-lr",
+            "--action-probe-expected-config",
+            "/tmp/probe.json",
+        ])
+        .unwrap();
+        assert_eq!(scalar.commit_policy, action_probe::CommitPolicy::ProbeLrV1);
+        assert!(!scalar.commit_policy.is_leave_one_out());
+    }
+
+    #[test]
+    fn loo_probe_requires_four_learners_and_probe_policies_require_connection_contract() {
+        let missing = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "4",
+            "--total-steps",
+            "1",
+            "--commit-policy",
+            "probe_loo_v1",
+        ])
+        .unwrap();
+        assert!(action_probe_config(&missing)
+            .unwrap_err()
+            .to_string()
+            .contains("endpoint"));
+
+        let wrong_m = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "3",
+            "--total-steps",
+            "1",
+            "--commit-policy",
+            "probe_shadow",
+        ])
+        .unwrap();
+        assert!(action_probe_config(&wrong_m)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly four"));
     }
 
     #[test]

@@ -35,6 +35,10 @@ Presets (--settings, comma-separated or 'all'):
   strided   depth-interleaved fragments
   avg       merge = plain weighted averaging (outer lr 1.0, mu 0, alpha 0)
   m2h24     stock DiLoCo throttled to its design-point sync interval (H~24)
+  probe_shadow  four-responder exact LOO probe; always commit A0
+  probe_loo_v1  four-responder exact LOO probe; commit the selected preview
+  probe_lr_shadow  predeclared scalar probe; always commit x1 (A0)
+  probe_lr_v1  predeclared scalar probe; commit the selected scaled preview
 
 Runs locally on one box (CPU by default; --device mps/cuda where torch
 supports it): the syncer is the real Rust binary, the learners are real
@@ -59,6 +63,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,6 +72,17 @@ sys.path.insert(0, str(REPO_ROOT))
 
 SYNCER_BIN = REPO_ROOT / "syncer/target/release/yeto-syncer"
 OUTER_OPTIMIZERS = ("nesterov", "normalized-ema", "restarted-ema")
+COMMIT_POLICIES = (
+    "token_weighted",
+    "probe_shadow",
+    "probe_loo_v1",
+    "probe_lr_shadow",
+    "probe_lr_v1",
+)
+LOO_COMMIT_POLICIES = frozenset(("probe_shadow", "probe_loo_v1"))
+ACTION_PROBE_MIN_GAIN = 0.00025
+ACTION_PROBE_LCB_Z = 2.365
+ACTION_PROBE_MIN_WIN_RATE = 0.75
 
 
 @dataclass(frozen=True)
@@ -88,6 +104,7 @@ class Arm:
     outer_momentum: float = 0.9
     outer_optimizer: str = "nesterov"
     outer_restart_cos_threshold: float = 0.0
+    commit_policy: str = "token_weighted"
     # Floor on time between round launches (--min-round-interval-ms). On
     # localhost rounds otherwise complete every couple of learner steps
     # (H~2), far off the outer optimizer's H~24 design point; a WAN spaces
@@ -118,11 +135,47 @@ PRESETS: dict[str, Arm] = {
     # adaptive throttle (H = 24 inner steps per fragment, sized from the
     # measured step time — hardware-independent).
     "m2h24": Arm("m2h24", sync_interval_steps=24.0),
+    # Exact production leave-one-out actions. Both arms pay the same sidecar
+    # latency; shadow records the recommendation but commits A0.
+    "probe_shadow": Arm(
+        "probe_shadow",
+        m=4,
+        quorum=4,
+        strict_quorum=True,
+        commit_policy="probe_shadow",
+    ),
+    "probe_loo_v1": Arm(
+        "probe_loo_v1",
+        m=4,
+        quorum=4,
+        strict_quorum=True,
+        commit_policy="probe_loo_v1",
+    ),
+    # Scalar full-group actions use the predeclared selector grid from the
+    # completed offline replay: A0=x1 fallback, then x0.75/x1.125/x1.25/x1.5.
+    "probe_lr_shadow": Arm(
+        "probe_lr_shadow",
+        m=4,
+        quorum=4,
+        strict_quorum=True,
+        commit_policy="probe_lr_shadow",
+    ),
+    "probe_lr_v1": Arm(
+        "probe_lr_v1",
+        m=4,
+        quorum=4,
+        strict_quorum=True,
+        commit_policy="probe_lr_v1",
+    ),
 }
 
 
 def select_arms(spec: str) -> list[Arm]:
-    names = list(PRESETS) if spec == "all" else [s.strip() for s in spec.split(",") if s.strip()]
+    names = (
+        list(PRESETS)
+        if spec == "all"
+        else [s.strip() for s in spec.split(",") if s.strip()]
+    )
     unknown = [n for n in names if n not in PRESETS]
     if unknown:
         raise SystemExit(f"unknown presets: {unknown} (have {list(PRESETS)})")
@@ -138,6 +191,7 @@ def apply_arm_overrides(
     outer_optimizer: str | None = None,
     outer_restart_cos_threshold: float | None = None,
     delta_correction: str | None = None,
+    commit_policy: str | None = None,
 ) -> list[Arm]:
     """Apply CLI-wide async-arm overrides without mutating presets."""
     if all(
@@ -149,6 +203,7 @@ def apply_arm_overrides(
             outer_optimizer,
             outer_restart_cos_threshold,
             delta_correction,
+            commit_policy,
         )
     ):
         return arms
@@ -176,17 +231,19 @@ def apply_arm_overrides(
                 else outer_restart_cos_threshold
             ),
             delta_correction=(
-                arm.delta_correction
-                if delta_correction is None
-                else delta_correction
+                arm.delta_correction if delta_correction is None else delta_correction
+            ),
+            commit_policy=(
+                arm.commit_policy if commit_policy is None else commit_policy
             ),
         )
         for arm in arms
     ]
 
 
-def steps_for(token_budget: int, mbs: int, seq_len: int, learners: int,
-              world: int = 1) -> int:
+def steps_for(
+    token_budget: int, mbs: int, seq_len: int, learners: int, world: int = 1
+) -> int:
     """Inner steps per learner so the arm consumes ~token_budget in total.
     `world` is the DDP/FSDP ranks per learner: every rank processes its own
     micro-batch per step, so tokens/step scale by world."""
@@ -215,7 +272,9 @@ def learner_env(args, learner_id: int) -> dict[str, str] | None:
             return env
         return None
     lo = learner_id * learner_gpus
-    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_offset + g) for g in range(lo, lo + learner_gpus))
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(
+        str(gpu_offset + g) for g in range(lo, lo + learner_gpus)
+    )
     return env
 
 
@@ -235,6 +294,32 @@ def assigned_gpu_ids(args, arms: list[Arm] | None = None) -> list[int] | None:
     else:
         return None
     return list(range(gpu_offset, gpu_offset + need))
+
+
+def parse_gpu_ids(spec: str) -> list[int]:
+    try:
+        values = [int(part.strip()) for part in spec.split(",") if part.strip()]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "GPU ids must be a comma-separated integer list"
+        ) from exc
+    if (
+        not values
+        or any(value < 0 for value in values)
+        or len(set(values)) != len(values)
+    ):
+        raise argparse.ArgumentTypeError(
+            "GPU ids must be a non-empty unique nonnegative list"
+        )
+    return values
+
+
+def action_probe_env(args) -> dict[str, str]:
+    import os
+
+    env = dict(os.environ)
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu) for gpu in args.action_probe_gpus)
+    return env
 
 
 def eval_env(args) -> dict[str, str] | None:
@@ -258,51 +343,86 @@ def gpu_env(learner_id: int, gpus_per_learner: int) -> dict[str, str] | None:
     )
 
 
-def learner_command(args, arm_dir: Path, *, learner_id: int, num_learners: int,
-                    syncer: str, max_steps: int, arm: Arm | None) -> list[str]:
+def learner_command(
+    args,
+    arm_dir: Path,
+    *,
+    learner_id: int,
+    num_learners: int,
+    syncer: str,
+    max_steps: int,
+    arm: Arm | None,
+) -> list[str]:
     if args.learner_gpus > 1:
         # Multi-GPU learner: torchrun ranks over this learner's GPU block
         # (models whose frozen base exceeds one GPU need --shard fsdp).
         cmd = [
-            sys.executable, "-m", "torch.distributed.run",
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
             f"--nproc_per_node={args.learner_gpus}",
             f"--master_port={free_port()}",
-            "-m", "yeto.learner",
+            "-m",
+            "yeto.learner",
         ]
     else:
         cmd = [sys.executable, "-m", "yeto.learner"]
     cmd += [
-        "--model", args.model,
-        "--data", str(arm_dir.parent / "train.jsonl"),
-        "--syncer", syncer,
-        "--learner-id", str(learner_id),
-        "--num-learners", str(num_learners),
-        "--seed", str(getattr(args, "training_seed", 0)),
-        "--tuning", "lora",
-        "--lora-r", str(args.lora_r),
-        "--lora-alpha", str(args.lora_alpha),
-        "--seq-len", str(args.seq_len),
-        "--micro-batch-size", str(args.micro_batch_size),
-        "--grad-accum", "1",
-        "--inner-lr", str(args.inner_lr),
-        "--max-local-steps", str(max_steps),
-        "--tokenize", "preload",
-        "--shard", args.shard,
-        "--output-dir", str(arm_dir / f"learner-{learner_id}"),
+        "--model",
+        args.model,
+        "--data",
+        str(arm_dir.parent / "train.jsonl"),
+        "--syncer",
+        syncer,
+        "--learner-id",
+        str(learner_id),
+        "--num-learners",
+        str(num_learners),
+        "--seed",
+        str(getattr(args, "training_seed", 0)),
+        "--tuning",
+        "lora",
+        "--lora-r",
+        str(args.lora_r),
+        "--lora-alpha",
+        str(args.lora_alpha),
+        "--seq-len",
+        str(args.seq_len),
+        "--micro-batch-size",
+        str(args.micro_batch_size),
+        "--grad-accum",
+        "1",
+        "--inner-lr",
+        str(args.inner_lr),
+        "--max-local-steps",
+        str(max_steps),
+        "--tokenize",
+        "preload",
+        "--shard",
+        args.shard,
+        "--output-dir",
+        str(arm_dir / f"learner-{learner_id}"),
     ]
     if args.learner_gpus <= 1:
         # torchrun ranks pick their own cuda device from LOCAL_RANK;
         # single-process learners take the explicit one.
         cmd += ["--device", args.device]
     if arm is not None:
-        step_sleep = _float_list_value(getattr(args, "learner_step_sleep_ms", "0"), learner_id)
-        push_delay = _float_list_value(getattr(args, "learner_push_delay_ms", "0"), learner_id)
+        step_sleep = _float_list_value(
+            getattr(args, "learner_step_sleep_ms", "0"), learner_id
+        )
+        push_delay = _float_list_value(
+            getattr(args, "learner_push_delay_ms", "0"), learner_id
+        )
         delay_jitter_ms = getattr(args, "learner_delay_jitter_ms", 0.0)
         if step_sleep or push_delay or delay_jitter_ms:
             cmd += [
-                "--debug-step-sleep-ms", str(step_sleep),
-                "--debug-push-delay-ms", str(push_delay),
-                "--debug-delay-jitter-ms", str(delay_jitter_ms),
+                "--debug-step-sleep-ms",
+                str(step_sleep),
+                "--debug-push-delay-ms",
+                str(push_delay),
+                "--debug-delay-jitter-ms",
+                str(delay_jitter_ms),
             ]
         fixed_window_tokens = getattr(args, "fixed_window_tokens", 0)
         fixed_window_microsteps = getattr(args, "fixed_window_microsteps", 0)
@@ -315,10 +435,14 @@ def learner_command(args, arm_dir: Path, *, learner_id: int, num_learners: int,
         if getattr(args, "freeze_delta_before_delay", False):
             cmd += ["--freeze-delta-before-delay"]
         cmd += [
-            "--fragments", str(arm.fragments),
-            "--fragment-pattern", arm.fragment_pattern,
-            "--merge-alpha", str(arm.merge_alpha),
-            "--wire-dtype", arm.wire_dtype,
+            "--fragments",
+            str(arm.fragments),
+            "--fragment-pattern",
+            arm.fragment_pattern,
+            "--merge-alpha",
+            str(arm.merge_alpha),
+            "--wire-dtype",
+            arm.wire_dtype,
         ]
         if getattr(args, "probe_data", None):
             probe_data = (
@@ -327,14 +451,22 @@ def learner_command(args, arm_dir: Path, *, learner_id: int, num_learners: int,
                 else str(args.probe_data)
             )
             cmd += [
-                "--probe-data", probe_data,
-                "--probe-log", str(arm_dir / f"fragment_probe_learner_{learner_id}.jsonl"),
-                "--probe-every", str(args.probe_every),
-                "--probe-batches", str(args.probe_batches),
-                "--probe-batch-size", str(args.probe_batch_size),
-                "--probe-max-rows", str(args.probe_max_rows),
-                "--probe-outer-lr", str(args.probe_outer_lr),
-                "--probe-freshness-scale", str(args.probe_freshness_scale),
+                "--probe-data",
+                probe_data,
+                "--probe-log",
+                str(arm_dir / f"fragment_probe_learner_{learner_id}.jsonl"),
+                "--probe-every",
+                str(args.probe_every),
+                "--probe-batches",
+                str(args.probe_batches),
+                "--probe-batch-size",
+                str(args.probe_batch_size),
+                "--probe-max-rows",
+                str(args.probe_max_rows),
+                "--probe-outer-lr",
+                str(args.probe_outer_lr),
+                "--probe-freshness-scale",
+                str(args.probe_freshness_scale),
             ]
     return cmd
 
@@ -347,26 +479,48 @@ def syncer_command(
     *,
     probe_capture: bool = False,
     probe_capture_every: int = 1,
+    action_probe_endpoint: str | None = None,
+    action_probe_timeout_ms: int = 30_000,
+    action_probe_run_uuid: str | None = None,
+    action_probe_expected_config: Path | None = None,
 ) -> list[str]:
     # The syncer takes no fragment count: the layout arrives in HELLO.
     cmd = [
         str(SYNCER_BIN),
-        "--port", str(port),
-        "--learners", str(arm.m),
-        "--quorum", str(arm.quorum or arm.m),
-        "--grace-ms", "200",
-        "--total-steps", str(total_steps),
-        "--pipeline", str(arm.pipeline),
-        "--delta-correction", arm.delta_correction,
-        "--outer-lr", str(arm.outer_lr),
-        "--outer-momentum", str(arm.outer_momentum),
-        "--outer-optimizer", arm.outer_optimizer,
-        "--outer-restart-cos-threshold", str(arm.outer_restart_cos_threshold),
-        "--checkpoint-path", str(arm_dir / "state.ckpt"),
-        "--checkpoint-every", "1",
-        "--event-tape", str(arm_dir / "tape.jsonl"),
-        "--min-round-interval-ms", str(arm.round_interval_ms),
-        "--sync-interval-steps", str(arm.sync_interval_steps),
+        "--port",
+        str(port),
+        "--learners",
+        str(arm.m),
+        "--quorum",
+        str(arm.quorum or arm.m),
+        "--grace-ms",
+        "200",
+        "--total-steps",
+        str(total_steps),
+        "--pipeline",
+        str(arm.pipeline),
+        "--delta-correction",
+        arm.delta_correction,
+        "--outer-lr",
+        str(arm.outer_lr),
+        "--outer-momentum",
+        str(arm.outer_momentum),
+        "--outer-optimizer",
+        arm.outer_optimizer,
+        "--outer-restart-cos-threshold",
+        str(arm.outer_restart_cos_threshold),
+        "--checkpoint-path",
+        str(arm_dir / "state.ckpt"),
+        "--checkpoint-every",
+        "1",
+        "--event-tape",
+        str(arm_dir / "tape.jsonl"),
+        "--min-round-interval-ms",
+        str(arm.round_interval_ms),
+        "--sync-interval-steps",
+        str(arm.sync_interval_steps),
+        "--commit-policy",
+        arm.commit_policy,
     ]
     if arm.outer_lr_by_fragment:
         cmd += ["--outer-lr-by-fragment", arm.outer_lr_by_fragment]
@@ -374,10 +528,222 @@ def syncer_command(
         cmd += ["--strict-quorum"]
     if probe_capture:
         cmd += [
-            "--probe-capture-dir", str(arm_dir / "syncer_probe"),
-            "--probe-capture-every", str(probe_capture_every),
+            "--probe-capture-dir",
+            str(arm_dir / "syncer_probe"),
+            "--probe-capture-every",
+            str(probe_capture_every),
+        ]
+    if arm.commit_policy != "token_weighted":
+        missing = [
+            name
+            for name, value in (
+                ("action_probe_endpoint", action_probe_endpoint),
+                ("action_probe_run_uuid", action_probe_run_uuid),
+                ("action_probe_expected_config", action_probe_expected_config),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ValueError(
+                f"{arm.commit_policy} requires sidecar settings: {', '.join(missing)}"
+            )
+        cmd += [
+            "--action-probe-endpoint",
+            str(action_probe_endpoint),
+            "--action-probe-timeout-ms",
+            str(action_probe_timeout_ms),
+            "--action-probe-run-uuid",
+            str(action_probe_run_uuid),
+            "--action-probe-expected-config",
+            str(action_probe_expected_config),
         ]
     return cmd
+
+
+@dataclass
+class ActionProbeProcess:
+    process: subprocess.Popen
+    log_handle: object
+    endpoint: str
+    expected_config: Path
+    run_uuid: str
+
+
+def action_probe_command(args, arm: Arm, endpoint: str) -> list[str]:
+    local_gpus = ",".join(str(index) for index in range(len(args.action_probe_gpus)))
+    min_gain = getattr(args, "action_probe_min_gain", None)
+    lcb_z = getattr(args, "action_probe_lcb_z", None)
+    min_win_rate = getattr(args, "action_probe_min_win_rate", None)
+    return [
+        sys.executable,
+        "-m",
+        "yeto.action_probe_server",
+        "--listen",
+        endpoint,
+        "--model",
+        args.model,
+        "--anchor-manifest",
+        str(args.action_probe_anchor_manifest),
+        "--gpus",
+        local_gpus,
+        "--seq-len",
+        str(args.action_probe_seq_len),
+        "--panels",
+        str(args.action_probe_panels),
+        "--blocks-per-panel",
+        str(args.action_probe_blocks_per_panel),
+        "--lora-r",
+        str(args.lora_r),
+        "--lora-alpha",
+        str(args.lora_alpha),
+        "--lora-targets",
+        args.action_probe_lora_targets,
+        "--fragments",
+        str(arm.fragments),
+        "--fragment-pattern",
+        arm.fragment_pattern,
+        "--startup-timeout-s",
+        str(args.action_probe_startup_timeout_s),
+        "--request-timeout-s",
+        str(args.action_probe_timeout_s),
+        "--client-timeout-s",
+        str(max(args.action_probe_timeout_s + 5.0, args.action_probe_timeout_s * 2.0)),
+        "--min-gain",
+        str(ACTION_PROBE_MIN_GAIN if min_gain is None else min_gain),
+        "--lcb-z",
+        str(ACTION_PROBE_LCB_Z if lcb_z is None else lcb_z),
+        "--min-win-rate",
+        str(ACTION_PROBE_MIN_WIN_RATE if min_win_rate is None else min_win_rate),
+    ]
+
+
+def ping_action_probe(endpoint: str, timeout_s: float) -> dict:
+    from yeto.action_probe import PROTOCOL, recv_frame, send_frame
+
+    host, port_text = endpoint.rsplit(":", 1)
+    with socket.create_connection((host, int(port_text)), timeout=timeout_s) as client:
+        client.settimeout(timeout_s)
+        send_frame(client, {"protocol": PROTOCOL, "type": "ping"})
+        response = recv_frame(client, timeout_s=timeout_s).header
+    if response.get("protocol") != PROTOCOL or response.get("type") != "pong":
+        raise RuntimeError(f"action-probe readiness ping returned {response!r}")
+    if response.get("ok") is not True:
+        raise RuntimeError("action-probe readiness ping was not healthy")
+    return response
+
+
+def _read_action_probe_ready(log_path: Path, process, timeout_s: float) -> dict:
+    deadline = time.monotonic() + timeout_s
+    marker = "ACTION_PROBE_READY "
+    while time.monotonic() < deadline:
+        if log_path.exists():
+            for line in log_path.read_text(errors="replace").splitlines():
+                if line.startswith(marker):
+                    try:
+                        return json.loads(line[len(marker) :])
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError(
+                            f"malformed action-probe readiness record in {log_path}"
+                        ) from exc
+        rc = process.poll()
+        if rc is not None:
+            tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-12:])
+            raise RuntimeError(
+                f"action-probe sidecar exited {rc} before readiness:\n{tail}"
+            )
+        time.sleep(0.1)
+    raise RuntimeError(
+        f"action-probe sidecar did not become ready within {timeout_s}s; see {log_path}"
+    )
+
+
+def expected_probe_config(ready: dict, arm: Arm, args) -> dict:
+    backend = ready.get("backend")
+    if not isinstance(backend, dict) or backend.get("healthy") is not True:
+        raise RuntimeError("action-probe readiness record has no healthy backend")
+    workers = backend.get("workers")
+    if not isinstance(workers, list) or not workers:
+        raise RuntimeError("action-probe readiness record has no workers")
+    if any(worker.get("lora_r") != args.lora_r for worker in workers):
+        raise RuntimeError("action-probe workers do not match the learner LoRA rank")
+    fragment_layout = backend.get("fragment_layout")
+    if not isinstance(fragment_layout, dict) or len(fragment_layout) != arm.fragments:
+        raise RuntimeError("action-probe fragment layout does not match the arm")
+    return {
+        "protocol": ready.get("protocol"),
+        "anchor_manifest_sha256": backend.get("anchor_manifest_sha256"),
+        "anchor_tensors_sha256": backend.get("anchor_tensors_sha256"),
+        "probe_config_sha256": backend.get("probe_config_sha256"),
+        "layout_hash": backend.get("layout_hash"),
+        "fragment_pattern": arm.fragment_pattern,
+        "lora_r": args.lora_r,
+        "fragment_layout": fragment_layout,
+    }
+
+
+def launch_action_probe(args, arm: Arm, arm_dir: Path) -> ActionProbeProcess:
+    if arm.commit_policy == "token_weighted":
+        raise ValueError("token_weighted does not launch an action-probe sidecar")
+    port = free_port()
+    endpoint = f"127.0.0.1:{port}"
+    log_path = arm_dir / "action_probe.log"
+    log_handle = open(log_path, "w")
+    process = subprocess.Popen(
+        action_probe_command(args, arm, endpoint),
+        cwd=REPO_ROOT,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        env=action_probe_env(args),
+    )
+    try:
+        ready = _read_action_probe_ready(
+            log_path, process, args.action_probe_startup_timeout_s
+        )
+        if ready.get("protocol") != "yeto-action-probe-v1":
+            raise RuntimeError("action-probe sidecar reported an unexpected protocol")
+        if ready.get("listen") != endpoint:
+            raise RuntimeError(
+                f"action-probe sidecar bound {ready.get('listen')!r}, expected {endpoint!r}"
+            )
+        ping_action_probe(endpoint, min(10.0, args.action_probe_timeout_s))
+        config_path = arm_dir / "action_probe_expected.json"
+        config_path.write_text(
+            json.dumps(
+                expected_probe_config(ready, arm, args), indent=2, sort_keys=True
+            )
+            + "\n"
+        )
+        run_uuid = args.action_probe_run_uuid or str(uuid.uuid4())
+        return ActionProbeProcess(
+            process=process,
+            log_handle=log_handle,
+            endpoint=endpoint,
+            expected_config=config_path,
+            run_uuid=run_uuid,
+        )
+    except BaseException:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        log_handle.close()
+        raise
+
+
+def stop_action_probe(sidecar: ActionProbeProcess) -> None:
+    try:
+        if sidecar.process.poll() is None:
+            sidecar.process.terminate()
+        try:
+            sidecar.process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            sidecar.process.kill()
+            sidecar.process.wait(timeout=5)
+    finally:
+        sidecar.log_handle.close()
 
 
 def free_port() -> int:
@@ -415,7 +781,10 @@ def split_data(
         with open(path, "w") as f:
             for i in idxs:
                 row = ds[i]
-                f.write(json.dumps({k: row[k] for k in ("messages", "tools") if k in row}) + "\n")
+                f.write(
+                    json.dumps({k: row[k] for k in ("messages", "tools") if k in row})
+                    + "\n"
+                )
 
     train, evalf = work / "train.jsonl", work / "eval.jsonl"
     dump(train, idxs[: n - eval_rows])
@@ -423,8 +792,14 @@ def split_data(
     return train, evalf, n - eval_rows
 
 
-def eval_loss_per_token(model_id: str, adapter_dir: Path | None, eval_file: Path,
-                        seq_len: int, device: str, train_on: str = "assistant") -> float:
+def eval_loss_per_token(
+    model_id: str,
+    adapter_dir: Path | None,
+    eval_file: Path,
+    seq_len: int,
+    device: str,
+    train_on: str = "assistant",
+) -> float:
     """Held-out masked CE per trained token — the comparison metric."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -481,7 +856,8 @@ def wait_for_free_gpus(
     if gpu_ids is not None:
         gpu_out = subprocess.run(
             ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
         index_to_uuid = {}
         for line in gpu_out.splitlines():
@@ -490,9 +866,7 @@ def wait_for_free_gpus(
                 index_to_uuid[int(parts[0])] = parts[1]
         missing = [i for i in gpu_ids if i not in index_to_uuid]
         if missing:
-            raise RuntimeError(
-                f"cannot map GPU id(s) {missing} from nvidia-smi output"
-            )
+            raise RuntimeError(f"cannot map GPU id(s) {missing} from nvidia-smi output")
         target_uuids = {index_to_uuid[i] for i in gpu_ids}
     deadline = time.monotonic() + timeout_s
     last = ""
@@ -503,8 +877,13 @@ def wait_for_free_gpus(
             else "pid,process_name,used_gpu_memory"
         )
         out = subprocess.run(
-            ["nvidia-smi", f"--query-compute-apps={query}", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True,
+            [
+                "nvidia-smi",
+                f"--query-compute-apps={query}",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
         ).stdout.strip()
         holders = []
         for line in out.splitlines():
@@ -541,11 +920,17 @@ def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float
     an in-process eval would keep the base resident on GPU 0 and starve the
     next arm's learners (found the hard way on a 4xL40S box)."""
     cmd = [
-        sys.executable, __file__, "--eval-only",
-        "--model", args.model,
-        "--data", str(eval_file),
-        "--seq-len", str(args.seq_len),
-        "--device", args.device,
+        sys.executable,
+        __file__,
+        "--eval-only",
+        "--model",
+        args.model,
+        "--data",
+        str(eval_file),
+        "--seq-len",
+        str(args.seq_len),
+        "--device",
+        args.device,
     ]
     if adapter_dir is not None:
         cmd += ["--adapter-dir", str(adapter_dir)]
@@ -566,10 +951,22 @@ def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float
 
 def run_baseline(args, work: Path) -> tuple[Path, float]:
     arm_dir = work / "baseline"
-    steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, 1,
-                      world=max(1, args.learner_gpus))
-    cmd = learner_command(args, arm_dir, learner_id=0, num_learners=1,
-                          syncer="none", max_steps=steps, arm=None)
+    steps = steps_for(
+        args.token_budget,
+        args.micro_batch_size,
+        args.seq_len,
+        1,
+        world=max(1, args.learner_gpus),
+    )
+    cmd = learner_command(
+        args,
+        arm_dir,
+        learner_id=0,
+        num_learners=1,
+        syncer="none",
+        max_steps=steps,
+        arm=None,
+    )
     wait_for_free_gpus(args.device, gpu_ids=assigned_gpu_ids(args))
     t0 = time.monotonic()
     run_checked(cmd, arm_dir / "learner.log", env=learner_env(args, 0))
@@ -592,29 +989,67 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
     # Generous round ceiling: learners stop at their token budget, and the
     # syncer is terminated once they exit; the checkpoint (written every
     # round) carries the merged params up to the last completed round.
-    syncer = subprocess.Popen(
-        syncer_command(
-            arm,
-            port,
-            arm_dir,
-            total_steps=total_outer_steps,
-            probe_capture=getattr(args, "syncer_probe_capture", False),
-            probe_capture_every=getattr(args, "syncer_probe_capture_every", 1),
-        ),
-        stdout=open(arm_dir / "syncer.log", "w"), stderr=subprocess.STDOUT,
-    )
-    wait_for_free_gpus(args.device, gpu_ids=assigned_gpu_ids(args))
-    t0 = time.monotonic()
+    sidecar = None
+    syncer = None
+    syncer_log = None
+    t0 = None
     learners = []
+    learner_logs = []
     try:
+        if arm.commit_policy != "token_weighted":
+            wait_for_free_gpus(
+                "cuda",
+                gpu_ids=list(args.action_probe_gpus),
+                timeout_s=int(args.action_probe_startup_timeout_s),
+            )
+            sidecar = launch_action_probe(args, arm, arm_dir)
+        syncer_args = {}
+        if sidecar is not None:
+            syncer_args = {
+                "action_probe_endpoint": sidecar.endpoint,
+                "action_probe_timeout_ms": max(
+                    1, int(args.action_probe_timeout_s * 1000)
+                ),
+                "action_probe_run_uuid": sidecar.run_uuid,
+                "action_probe_expected_config": sidecar.expected_config,
+            }
+        syncer_log = open(arm_dir / "syncer.log", "w")
+        syncer = subprocess.Popen(
+            syncer_command(
+                arm,
+                port,
+                arm_dir,
+                total_steps=total_outer_steps,
+                probe_capture=getattr(args, "syncer_probe_capture", False),
+                probe_capture_every=getattr(args, "syncer_probe_capture_every", 1),
+                **syncer_args,
+            ),
+            stdout=syncer_log,
+            stderr=subprocess.STDOUT,
+        )
+        wait_for_free_gpus(args.device, gpu_ids=assigned_gpu_ids(args))
+        t0 = time.monotonic()
         for i in range(arm.m):
-            cmd = learner_command(args, arm_dir, learner_id=i, num_learners=arm.m,
-                                  syncer=f"127.0.0.1:{port}", max_steps=steps, arm=arm)
+            cmd = learner_command(
+                args,
+                arm_dir,
+                learner_id=i,
+                num_learners=arm.m,
+                syncer=f"127.0.0.1:{port}",
+                max_steps=steps,
+                arm=arm,
+            )
             log = open(arm_dir / f"learner-{i}.log", "w")
-            learners.append(subprocess.Popen(
-                cmd, cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT,
-                env=learner_env(args, i),
-            ))
+            learner_logs.append(log)
+            learners.append(
+                subprocess.Popen(
+                    cmd,
+                    cwd=REPO_ROOT,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    env=learner_env(args, i),
+                )
+            )
         for proc in learners:
             rc = proc.wait(timeout=args.arm_timeout_min * 60)
             if rc != 0:
@@ -627,23 +1062,50 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
         for proc in learners:
             if proc.poll() is None:
                 proc.terminate()
-        if syncer.poll() is None:
+        for proc in learners:
+            if proc.poll() is None:
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+        for log in learner_logs:
+            log.close()
+        if syncer is not None and syncer.poll() is None:
             syncer.terminate()
-        syncer.wait(timeout=30)
+        if syncer is not None:
+            try:
+                syncer.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                syncer.kill()
+                syncer.wait(timeout=5)
+        if syncer_log is not None:
+            syncer_log.close()
+        if sidecar is not None:
+            stop_action_probe(sidecar)
+    assert t0 is not None
     wall = time.monotonic() - t0
     ckpt = arm_dir / "state.ckpt"
     if not ckpt.exists():
-        raise RuntimeError(f"{arm.name}: no syncer checkpoint (no round completed); see {arm_dir}")
+        raise RuntimeError(
+            f"{arm.name}: no syncer checkpoint (no round completed); see {arm_dir}"
+        )
     if args.syncer_total_steps:
         tape_path = arm_dir / "tape.jsonl"
-        records = [json.loads(line) for line in tape_path.read_text().splitlines() if line.strip()]
+        records = [
+            json.loads(line)
+            for line in tape_path.read_text().splitlines()
+            if line.strip()
+        ]
         if len(records) != args.syncer_total_steps:
             raise RuntimeError(
                 f"{arm.name}: expected {args.syncer_total_steps} outer steps, "
                 f"event tape has {len(records)}"
             )
         if arm.strict_quorum:
-            partial = [r["step"] for r in records if len(r.get("responders", [])) != arm.m]
+            partial = [
+                r["step"] for r in records if len(r.get("responders", [])) != arm.m
+            ]
             if partial:
                 raise RuntimeError(
                     f"{arm.name}: strict-quorum run has partial responder groups "
@@ -653,16 +1115,27 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
     export_dir = arm_dir / "export"
     run_checked(
         [
-            sys.executable, "-m", "yeto.export",
-            "--checkpoint", str(ckpt),
-            "--model", args.model,
-            "--tuning", "lora",
-            "--lora-r", str(args.lora_r),
-            "--lora-alpha", str(args.lora_alpha),
-            "--fragments", str(arm.fragments),
-            "--fragment-pattern", arm.fragment_pattern,
-            "--output-dir", str(export_dir),
-            "--device", "cpu",
+            sys.executable,
+            "-m",
+            "yeto.export",
+            "--checkpoint",
+            str(ckpt),
+            "--model",
+            args.model,
+            "--tuning",
+            "lora",
+            "--lora-r",
+            str(args.lora_r),
+            "--lora-alpha",
+            str(args.lora_alpha),
+            "--fragments",
+            str(arm.fragments),
+            "--fragment-pattern",
+            arm.fragment_pattern,
+            "--output-dir",
+            str(export_dir),
+            "--device",
+            "cpu",
         ],
         arm_dir / "export.log",
     )
@@ -691,7 +1164,9 @@ def ensure_syncer() -> None:
     )
     if stale:
         print("[compare] building syncer (cargo build --release)")
-        subprocess.run(["cargo", "build", "--release", "-q"], cwd=syncer_dir, check=True)
+        subprocess.run(
+            ["cargo", "build", "--release", "-q"], cwd=syncer_dir, check=True
+        )
 
 
 def main() -> int:
@@ -699,24 +1174,42 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--model", default="lfm25-230m")
-    p.add_argument("--data", required=True, help="messages-format chat rows (HF id or local path)")
-    p.add_argument("--token-budget", type=int, default=500_000,
-                   help="total training tokens per arm (split across an arm's learners)")
-    p.add_argument("--settings", default="m2", help=f"comma list of {list(PRESETS)} or 'all'")
+    p.add_argument(
+        "--data", required=True, help="messages-format chat rows (HF id or local path)"
+    )
+    p.add_argument(
+        "--token-budget",
+        type=int,
+        default=500_000,
+        help="total training tokens per arm (split across an arm's learners)",
+    )
+    p.add_argument(
+        "--settings", default="m2", help=f"comma list of {list(PRESETS)} or 'all'"
+    )
     p.add_argument("--seq-len", type=int, default=512)
     p.add_argument("--micro-batch-size", type=int, default=2)
     p.add_argument("--inner-lr", type=float, default=3e-4)
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
-    p.add_argument("--eval-rows", type=int, default=64, help="held-out rows for scoring")
-    p.add_argument("--round-interval-ms", type=int, default=None,
-                   help="override the round-launch floor of throttled presets "
-                   "(m2h24): the right value is H * step_time / fragments, and "
-                   "step time depends on hardware")
-    p.add_argument("--baseline-loss", type=float, default=None,
-                   help="skip the synchronous baseline arm and compare against "
-                   "this eval loss/token (from a previous run with the same "
-                   "model, data, seed and budget)")
+    p.add_argument(
+        "--eval-rows", type=int, default=64, help="held-out rows for scoring"
+    )
+    p.add_argument(
+        "--round-interval-ms",
+        type=int,
+        default=None,
+        help="override the round-launch floor of throttled presets "
+        "(m2h24): the right value is H * step_time / fragments, and "
+        "step time depends on hardware",
+    )
+    p.add_argument(
+        "--baseline-loss",
+        type=float,
+        default=None,
+        help="skip the synchronous baseline arm and compare against "
+        "this eval loss/token (from a previous run with the same "
+        "model, data, seed and budget)",
+    )
     p.add_argument("--max-rows", type=int, default=None, help="cap training rows")
     p.add_argument(
         "--shuffle-rows-seed",
@@ -731,36 +1224,119 @@ def main() -> int:
         default=0,
         help="base learner RNG seed; keep equal across compared arms",
     )
-    p.add_argument("--device", default="cpu", help="learner/eval device (cpu, mps, cuda)")
-    p.add_argument("--shard", choices=["ddp", "fsdp"], default="ddp",
-                   help="multi-GPU strategy inside a learner (fsdp shards the "
-                   "frozen base when it exceeds one GPU)")
-    p.add_argument("--learner-gpus", type=int, default=0,
-                   help="GPUs per learner; learner i owns the GPU block "
-                   "[i*g, (i+1)*g) and runs under torchrun when g > 1. "
-                   "0 = single process on --device")
-    p.add_argument("--gpu-slots", type=int, default=0,
-                   help="when --learner-gpus 0 and --device cuda, assign "
-                   "single-process learners round-robin over this many GPUs")
-    p.add_argument("--gpu-offset", type=int, default=0,
-                   help="first physical GPU id to assign when partitioning learners")
-    p.add_argument("--learner-step-sleep-ms", default="0",
-                   help="comma-separated per-learner sleep after each optimizer step")
-    p.add_argument("--learner-push-delay-ms", default="0",
-                   help="comma-separated per-learner sleep before each fragment push")
-    p.add_argument("--learner-delay-jitter-ms", type=float, default=0.0,
-                   help="uniform [0, jitter] ms added to each debug sleep")
-    p.add_argument("--fixed-window-tokens", type=int, default=0,
-                   help="answer async pulls from snapshots taken after this "
-                   "many post-reset learner tokens")
-    p.add_argument("--fixed-window-microsteps", type=int, default=0,
-                   help="answer async pulls from snapshots taken after this "
-                   "many post-reset optimizer steps")
-    p.add_argument("--pad-to-fixed-window-tokens", action="store_true",
-                   help="accepted for fixed-token experiment configs; windows "
-                   "round to whole optimizer steps")
-    p.add_argument("--freeze-delta-before-delay", action="store_true",
-                   help="materialize fragment payloads before push delay stress")
+    p.add_argument(
+        "--device", default="cpu", help="learner/eval device (cpu, mps, cuda)"
+    )
+    p.add_argument(
+        "--shard",
+        choices=["ddp", "fsdp"],
+        default="ddp",
+        help="multi-GPU strategy inside a learner (fsdp shards the "
+        "frozen base when it exceeds one GPU)",
+    )
+    p.add_argument(
+        "--learner-gpus",
+        type=int,
+        default=0,
+        help="GPUs per learner; learner i owns the GPU block "
+        "[i*g, (i+1)*g) and runs under torchrun when g > 1. "
+        "0 = single process on --device",
+    )
+    p.add_argument(
+        "--gpu-slots",
+        type=int,
+        default=0,
+        help="when --learner-gpus 0 and --device cuda, assign "
+        "single-process learners round-robin over this many GPUs",
+    )
+    p.add_argument(
+        "--gpu-offset",
+        type=int,
+        default=0,
+        help="first physical GPU id to assign when partitioning learners",
+    )
+    p.add_argument(
+        "--action-probe-gpus",
+        type=parse_gpu_ids,
+        default=None,
+        help="comma-separated physical GPUs reserved exclusively for the persistent action-probe sidecar",
+    )
+    p.add_argument(
+        "--action-probe-anchor-manifest",
+        type=Path,
+        default=None,
+        help="verified disjoint anchor manifest consumed by action_probe_server",
+    )
+    p.add_argument("--action-probe-timeout-s", type=float, default=30.0)
+    p.add_argument("--action-probe-startup-timeout-s", type=float, default=1800.0)
+    p.add_argument("--action-probe-run-uuid", default=None)
+    p.add_argument(
+        "--action-probe-min-gain",
+        type=float,
+        default=None,
+        help=f"override the sidecar selector minimum gain (default {ACTION_PROBE_MIN_GAIN})",
+    )
+    p.add_argument(
+        "--action-probe-lcb-z",
+        type=float,
+        default=None,
+        help=f"override the sidecar selector LCB z score (default {ACTION_PROBE_LCB_Z})",
+    )
+    p.add_argument(
+        "--action-probe-min-win-rate",
+        type=float,
+        default=None,
+        help=f"override the sidecar selector panel win rate (default {ACTION_PROBE_MIN_WIN_RATE})",
+    )
+    p.add_argument("--action-probe-seq-len", type=int, default=128)
+    p.add_argument("--action-probe-panels", type=int, default=8)
+    p.add_argument("--action-probe-blocks-per-panel", type=int, default=2)
+    p.add_argument(
+        "--action-probe-lora-targets",
+        choices=["auto", "attention", "all-linear"],
+        default="auto",
+    )
+    p.add_argument(
+        "--learner-step-sleep-ms",
+        default="0",
+        help="comma-separated per-learner sleep after each optimizer step",
+    )
+    p.add_argument(
+        "--learner-push-delay-ms",
+        default="0",
+        help="comma-separated per-learner sleep before each fragment push",
+    )
+    p.add_argument(
+        "--learner-delay-jitter-ms",
+        type=float,
+        default=0.0,
+        help="uniform [0, jitter] ms added to each debug sleep",
+    )
+    p.add_argument(
+        "--fixed-window-tokens",
+        type=int,
+        default=0,
+        help="answer async pulls from snapshots taken after this "
+        "many post-reset learner tokens",
+    )
+    p.add_argument(
+        "--fixed-window-microsteps",
+        type=int,
+        default=0,
+        help="answer async pulls from snapshots taken after this "
+        "many post-reset optimizer steps",
+    )
+    p.add_argument(
+        "--pad-to-fixed-window-tokens",
+        action="store_true",
+        help="accepted for fixed-token experiment configs; windows "
+        "round to whole optimizer steps",
+    )
+    p.add_argument(
+        "--freeze-delta-before-delay",
+        action="store_true",
+        help="materialize fragment payloads before push delay stress",
+    )
     p.add_argument("--arm-timeout-min", type=int, default=120)
     p.add_argument(
         "--syncer-total-steps",
@@ -822,6 +1398,12 @@ def main() -> int:
         help="override delta correction for every selected async arm",
     )
     p.add_argument(
+        "--commit-policy",
+        choices=COMMIT_POLICIES,
+        default=None,
+        help="override the commit policy for every selected async arm",
+    )
+    p.add_argument(
         "--outer-lr-by-fragment",
         default=None,
         help="comma-separated per-fragment outer learning rates for every selected async arm",
@@ -850,7 +1432,9 @@ def main() -> int:
     if args.syncer_total_steps < 0 or args.learner_max_steps < 0:
         p.error("--syncer-total-steps and --learner-max-steps must be non-negative")
     if args.strict_quorum and args.syncer_total_steps == 0:
-        p.error("--strict-quorum requires --syncer-total-steps so learners do not disconnect first")
+        p.error(
+            "--strict-quorum requires --syncer-total-steps so learners do not disconnect first"
+        )
 
     if args.eval_only:
         loss = eval_loss_per_token(
@@ -867,46 +1451,98 @@ def main() -> int:
         outer_optimizer=args.outer_optimizer,
         outer_restart_cos_threshold=args.outer_restart_cos_threshold,
         delta_correction=args.delta_correction,
+        commit_policy=args.commit_policy,
     )
     if args.round_interval_ms is not None:
         from dataclasses import replace as _replace
 
-        arms = [_replace(a, round_interval_ms=args.round_interval_ms)
-                if a.round_interval_ms else a for a in arms]
+        arms = [
+            _replace(a, round_interval_ms=args.round_interval_ms)
+            if a.round_interval_ms
+            else a
+            for a in arms
+        ]
     if args.strict_quorum:
         from dataclasses import replace as _replace
 
         arms = [_replace(a, strict_quorum=True) for a in arms]
     world = max(1, args.learner_gpus)
-    base_steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, 1, world)
-    print(f"[compare] model={args.model} budget={args.token_budget} tokens "
-          f"(baseline: {base_steps} steps of {args.micro_batch_size}x{args.seq_len}"
-          f"{f' x{world} ranks' if world > 1 else ''})")
+    base_steps = steps_for(
+        args.token_budget, args.micro_batch_size, args.seq_len, 1, world
+    )
+    print(
+        f"[compare] model={args.model} budget={args.token_budget} tokens "
+        f"(baseline: {base_steps} steps of {args.micro_batch_size}x{args.seq_len}"
+        f"{f' x{world} ranks' if world > 1 else ''})"
+    )
     for arm in arms:
-        s = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, arm.m, world)
-        print(f"  {arm.name:<10} M={arm.m} {s} steps/learner "
-              f"P={arm.fragments} alpha={arm.merge_alpha} wire={arm.wire_dtype} "
-              f"pipeline={arm.pipeline} optimizer={arm.outer_optimizer} "
-              f"restart_cos={arm.outer_restart_cos_threshold} "
-              f"correction={arm.delta_correction}")
+        s = steps_for(
+            args.token_budget, args.micro_batch_size, args.seq_len, arm.m, world
+        )
+        print(
+            f"  {arm.name:<10} M={arm.m} {s} steps/learner "
+            f"P={arm.fragments} alpha={arm.merge_alpha} wire={arm.wire_dtype} "
+            f"pipeline={arm.pipeline} optimizer={arm.outer_optimizer} "
+            f"restart_cos={arm.outer_restart_cos_threshold} "
+            f"correction={arm.delta_correction} policy={arm.commit_policy}"
+        )
     if args.dry_run:
         return 0
 
     if args.learner_gpus > 0 and args.gpu_slots > 0:
         raise SystemExit("--gpu-slots is only valid when --learner-gpus is 0")
-    if args.learner_gpus > 0 or args.gpu_slots > 0:
+    probe_arms = [arm for arm in arms if arm.commit_policy != "token_weighted"]
+    if probe_arms:
+        if args.action_probe_gpus is None:
+            raise SystemExit("probe shadow/active arms require --action-probe-gpus")
+        if len(args.action_probe_gpus) > 4:
+            raise SystemExit("action_probe_server supports at most four probe GPUs")
+        if args.action_probe_anchor_manifest is None:
+            raise SystemExit(
+                "probe shadow/active arms require --action-probe-anchor-manifest"
+            )
+        if args.action_probe_timeout_s <= 0 or args.action_probe_startup_timeout_s <= 0:
+            raise SystemExit(
+                "action-probe request and startup timeouts must be positive"
+            )
+        if (
+            args.action_probe_seq_len <= 1
+            or args.action_probe_panels < 2
+            or args.action_probe_blocks_per_panel <= 0
+        ):
+            raise SystemExit(
+                "action-probe seq-len > 1, panels >= 2, and blocks-per-panel > 0 are required"
+            )
+        non_m4 = [
+            arm.name
+            for arm in probe_arms
+            if arm.commit_policy in LOO_COMMIT_POLICIES and arm.m != 4
+        ]
+        if non_m4:
+            raise SystemExit(
+                f"probe_loo_v1 requires exactly four learners; invalid arms: {non_m4}"
+            )
+        learner_ids = assigned_gpu_ids(args, arms)
+        if args.device.startswith("cuda") and learner_ids is None:
+            raise SystemExit(
+                "probe arms require --learner-gpus or --gpu-slots so learner and probe GPU sets can be proven disjoint"
+            )
+        overlap = sorted(set(learner_ids or ()) & set(args.action_probe_gpus))
+        if overlap:
+            raise SystemExit(
+                f"learner and action-probe GPU sets must be disjoint; overlap={overlap}"
+            )
+
+    if args.learner_gpus > 0 or args.gpu_slots > 0 or probe_arms:
         import torch
 
-        need = (
-            max(arm.m for arm in arms) * args.learner_gpus
-            if args.learner_gpus > 0
-            else args.gpu_slots
-        )
         have = torch.cuda.device_count()
-        if args.gpu_offset + need > have:
+        requested = list(assigned_gpu_ids(args, arms) or ())
+        if probe_arms:
+            requested.extend(args.action_probe_gpus)
+        if requested and max(requested) >= have:
             raise SystemExit(
-                f"largest arm needs physical GPU ids "
-                f"{args.gpu_offset}..{args.gpu_offset + need - 1} "
+                f"comparison needs physical GPU ids through {max(requested)} "
                 f"but only {have} visible GPU(s) exist"
             )
     ensure_syncer()
@@ -919,27 +1555,40 @@ def main() -> int:
 
     records = []
     base = eval_in_subprocess(args, None, evalf)
-    records.append({"arm": "base (untrained)", "m": 0, "wall_s": 0.0, "eval_loss": base})
+    records.append(
+        {"arm": "base (untrained)", "m": 0, "wall_s": 0.0, "eval_loss": base}
+    )
     print(f"[compare] base eval loss/token: {base:.4f}", flush=True)
 
     if args.baseline_loss is not None:
         bl = args.baseline_loss
-        records.append({"arm": "baseline (sync, injected)", "m": 1, "wall_s": 0.0,
-                        "eval_loss": bl})
+        records.append(
+            {"arm": "baseline (sync, injected)", "m": 1, "wall_s": 0.0, "eval_loss": bl}
+        )
         print(f"[compare] baseline eval loss/token: {bl:.4f} (injected)", flush=True)
     else:
         adapters, wall = run_baseline(args, args.work_dir)
         bl = eval_in_subprocess(args, adapters, evalf)
-        records.append({"arm": "baseline (sync)", "m": 1, "wall_s": round(wall, 1),
-                        "eval_loss": bl})
+        records.append(
+            {
+                "arm": "baseline (sync)",
+                "m": 1,
+                "wall_s": round(wall, 1),
+                "eval_loss": bl,
+            }
+        )
         print(f"[compare] baseline eval loss/token: {bl:.4f} ({wall:.0f}s)", flush=True)
 
     for arm in arms:
         adapters, wall = run_diloco(args, arm, args.work_dir)
         loss = eval_in_subprocess(args, adapters, evalf)
-        records.append({"arm": arm.name, "m": arm.m, "wall_s": round(wall, 1),
-                        "eval_loss": loss})
-        print(f"[compare] {arm.name} eval loss/token: {loss:.4f} ({wall:.0f}s)", flush=True)
+        records.append(
+            {"arm": arm.name, "m": arm.m, "wall_s": round(wall, 1), "eval_loss": loss}
+        )
+        print(
+            f"[compare] {arm.name} eval loss/token: {loss:.4f} ({wall:.0f}s)",
+            flush=True,
+        )
 
     args.report_dir.mkdir(parents=True, exist_ok=True)
     with open(args.report_dir / "results.jsonl", "w") as f:
@@ -953,11 +1602,15 @@ def main() -> int:
         "|---|---|---|---|---|",
     ]
     for r in records:
-        delta = "—" if r["arm"].startswith(("base", "baseline")) or bl == 0 else (
-            f"{100 * (r['eval_loss'] - bl) / bl:+.2f}%"
+        delta = (
+            "—"
+            if r["arm"].startswith(("base", "baseline")) or bl == 0
+            else (f"{100 * (r['eval_loss'] - bl) / bl:+.2f}%")
         )
-        md.append(f"| {r['arm']} | {r['m'] or '—'} | {r['wall_s']:.0f} "
-                  f"| {r['eval_loss']:.4f} | {delta} |")
+        md.append(
+            f"| {r['arm']} | {r['m'] or '—'} | {r['wall_s']:.0f} "
+            f"| {r['eval_loss']:.4f} | {delta} |"
+        )
     (args.report_dir / "report.md").write_text("\n".join(md) + "\n")
     print("\n".join(md))
     return 0
