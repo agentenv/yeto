@@ -9,6 +9,12 @@ use crate::protocol::Reader;
 pub const MERGE_AVG: u8 = 0;
 pub const MERGE_RDA: u8 = 1;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MergePolicy {
+    Production,
+    CoordMidpointNormmatch,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FragmentInfo {
     pub merge_mode: u8,
@@ -41,7 +47,10 @@ impl Layout {
             for _ in 0..num_tensors {
                 tensor_numels.push(r.u64()?);
             }
-            fragments.push(FragmentInfo { merge_mode, tensor_numels });
+            fragments.push(FragmentInfo {
+                merge_mode,
+                tensor_numels,
+            });
         }
         Ok(Layout { fragments })
     }
@@ -75,6 +84,8 @@ pub struct GlobalState {
     /// HeLoCo per-tensor directional correction of learner deltas against
     /// the outer momentum before merging (None disables).
     pub delta_correction: Option<merge::Heloco>,
+    /// Syncer-side aggregation rule applied after freshness filtering.
+    pub merge_policy: MergePolicy,
 }
 
 impl GlobalState {
@@ -85,7 +96,11 @@ impl GlobalState {
         outer_momentum: f32,
         wire_dtype: u8,
     ) -> Self {
-        let params: Vec<Vec<f32>> = layout.fragments.iter().map(|f| vec![0.0; f.numel()]).collect();
+        let params: Vec<Vec<f32>> = layout
+            .fragments
+            .iter()
+            .map(|f| vec![0.0; f.numel()])
+            .collect();
         let momentum = params.clone();
         let initialized = vec![false; layout.fragments.len()];
         let versions = vec![0; layout.fragments.len()];
@@ -102,6 +117,7 @@ impl GlobalState {
             outer_momentum,
             wire_dtype,
             delta_correction: None,
+            merge_policy: MergePolicy::Production,
         }
     }
 
@@ -111,7 +127,11 @@ impl GlobalState {
 
     pub fn init_fragment(&mut self, fid: usize, values: Vec<f32>) -> Result<()> {
         if values.len() != self.params[fid].len() {
-            bail!("init fragment {fid}: got {} values, expected {}", values.len(), self.params[fid].len());
+            bail!(
+                "init fragment {fid}: got {} values, expected {}",
+                values.len(),
+                self.params[fid].len()
+            );
         }
         if !self.initialized[fid] {
             self.params[fid] = values;
@@ -129,12 +149,20 @@ impl GlobalState {
 
     /// Merge learner copies of fragment `fid` and apply the outer step.
     /// Returns the l2 norm of the merged outer gradient (for logging).
-    pub fn merge_and_step(&mut self, fid: usize, learners: &[&[f32]], weights: &[f64]) -> Result<f64> {
+    pub fn merge_and_step(
+        &mut self,
+        fid: usize,
+        learners: &[&[f32]],
+        weights: &[f64],
+    ) -> Result<f64> {
         let frag = &self.layout.fragments[fid];
         let numel = frag.numel();
         for (i, l) in learners.iter().enumerate() {
             if l.len() != numel {
-                bail!("push for fragment {fid} from entry {i} has {} values, expected {numel}", l.len());
+                bail!(
+                    "push for fragment {fid} from entry {i} has {} values, expected {numel}",
+                    l.len()
+                );
             }
         }
         // HeLoCo: correct each learner's outer delta against the outer
@@ -172,20 +200,46 @@ impl GlobalState {
         };
         let learners = learners.as_slice();
         let anchor = &self.params[fid];
-        let mut delta = vec![0.0f32; numel];
+        let mut production_delta = vec![0.0f32; numel];
         // Merge per tensor slice within the fragment.
         let mut off = 0usize;
         for &tn in &frag.tensor_numels {
             let tn = tn as usize;
             let slice_learners: Vec<&[f32]> = learners.iter().map(|l| &l[off..off + tn]).collect();
-            let out = &mut delta[off..off + tn];
+            let out = &mut production_delta[off..off + tn];
             match frag.merge_mode {
-                MERGE_AVG => merge::merge_avg(&anchor[off..off + tn], &slice_learners, weights, out),
+                MERGE_AVG => {
+                    merge::merge_avg(&anchor[off..off + tn], &slice_learners, weights, out)
+                }
                 _ => merge::merge_rda(&anchor[off..off + tn], &slice_learners, weights, out),
             }
             off += tn;
         }
-        let gnorm = delta.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+        let delta = match self.merge_policy {
+            MergePolicy::Production => production_delta,
+            MergePolicy::CoordMidpointNormmatch => {
+                let mut robust_delta = vec![0.0f32; numel];
+                let mut off = 0usize;
+                for &tn in &frag.tensor_numels {
+                    let tn = tn as usize;
+                    let slice_learners: Vec<&[f32]> =
+                        learners.iter().map(|l| &l[off..off + tn]).collect();
+                    merge::merge_coord_midpoint_normmatch(
+                        &anchor[off..off + tn],
+                        &slice_learners,
+                        &production_delta[off..off + tn],
+                        &mut robust_delta[off..off + tn],
+                    );
+                    off += tn;
+                }
+                robust_delta
+            }
+        };
+        let gnorm = delta
+            .iter()
+            .map(|v| (*v as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
         merge::nesterov_step(
             &mut self.params[fid],
             &mut self.momentum[fid],
@@ -253,13 +307,19 @@ impl GlobalState {
         self.global_step = r.u64()?;
         let np = r.u32()? as usize;
         if np != self.params.len() {
-            bail!("checkpoint has {np} fragments, layout has {}", self.params.len());
+            bail!(
+                "checkpoint has {np} fragments, layout has {}",
+                self.params.len()
+            );
         }
         for p in 0..np {
             self.versions[p] = r.u64()?;
             let numel = r.u64()? as usize;
             if numel != self.params[p].len() {
-                bail!("checkpoint fragment {p} numel {numel} != layout {}", self.params[p].len());
+                bail!(
+                    "checkpoint fragment {p} numel {numel} != layout {}",
+                    self.params[p].len()
+                );
             }
             for slot in [&mut self.params[p], &mut self.momentum[p]] {
                 for v in slot.iter_mut() {
@@ -272,7 +332,11 @@ impl GlobalState {
         self.ledger.clear();
         for _ in 0..nl {
             let id = r.u32()?;
-            let l = LearnerLedger { merges: r.u64()?, steps: r.u64()?, tokens: r.u64()? };
+            let l = LearnerLedger {
+                merges: r.u64()?,
+                steps: r.u64()?,
+                tokens: r.u64()?,
+            };
             self.ledger.insert(id, l);
         }
         if !r.0.is_empty() {
@@ -300,8 +364,14 @@ mod tests {
     fn layout2() -> Layout {
         Layout {
             fragments: vec![
-                FragmentInfo { merge_mode: MERGE_AVG, tensor_numels: vec![4] },
-                FragmentInfo { merge_mode: MERGE_RDA, tensor_numels: vec![2, 2] },
+                FragmentInfo {
+                    merge_mode: MERGE_AVG,
+                    tensor_numels: vec![4],
+                },
+                FragmentInfo {
+                    merge_mode: MERGE_RDA,
+                    tensor_numels: vec![2, 2],
+                },
             ],
         }
     }
@@ -334,7 +404,13 @@ mod tests {
         let dir = std::env::temp_dir().join("yeto-ckpt-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.ckpt");
-        let mut st = GlobalState::new(layout2(), Some("{\"task\":\"nava\"}".to_string()), 0.7, 0.9, crate::protocol::DTYPE_F32);
+        let mut st = GlobalState::new(
+            layout2(),
+            Some("{\"task\":\"nava\"}".to_string()),
+            0.7,
+            0.9,
+            crate::protocol::DTYPE_F32,
+        );
         st.init_fragment(0, vec![1.5; 4]).unwrap();
         st.init_fragment(1, vec![-2.0; 4]).unwrap();
         let learner = vec![0.0f32; 4];
@@ -344,7 +420,13 @@ mod tests {
         st.record_merge(3, 12, 4096);
         st.save_checkpoint(&path).unwrap();
 
-        let mut st2 = GlobalState::new(layout2(), Some("{\"task\":\"nava\"}".to_string()), 0.7, 0.9, crate::protocol::DTYPE_F32);
+        let mut st2 = GlobalState::new(
+            layout2(),
+            Some("{\"task\":\"nava\"}".to_string()),
+            0.7,
+            0.9,
+            crate::protocol::DTYPE_F32,
+        );
         st2.load_checkpoint(&path).unwrap();
         assert_eq!(st2.global_step, 7);
         assert_eq!(st2.versions, vec![7, 0]);
@@ -384,6 +466,47 @@ mod tests {
             corrected.params[0][0],
             plain.params[0][0]
         );
+    }
+
+    #[test]
+    fn coord_midpoint_normmatch_changes_direction_but_keeps_production_norm() {
+        let anchor = vec![0.0f32; 4];
+        let learners = [
+            vec![-10.0f32, 0.0, 0.0, 0.0], // delta (10, 0, 0, 0)
+            vec![0.0f32, -10.0, 0.0, 0.0], // delta (0, 10, 0, 0)
+            vec![-1.0f32, -2.0, 0.0, 0.0], // midpoint direction (1, 2, 0, 0)
+        ];
+        let refs: Vec<&[f32]> = learners.iter().map(|v| v.as_slice()).collect();
+        let weights = [1.0, 1.0, 1.0];
+
+        let mut production =
+            GlobalState::new(layout2(), None, 1.0, 0.0, crate::protocol::DTYPE_F32);
+        production.init_fragment(0, anchor.clone()).unwrap();
+        production.init_fragment(1, anchor.clone()).unwrap();
+        production.merge_and_step(0, &refs, &weights).unwrap();
+
+        let mut robust = GlobalState::new(layout2(), None, 1.0, 0.0, crate::protocol::DTYPE_F32);
+        robust.merge_policy = MergePolicy::CoordMidpointNormmatch;
+        robust.init_fragment(0, anchor.clone()).unwrap();
+        robust.init_fragment(1, anchor).unwrap();
+        robust.merge_and_step(0, &refs, &weights).unwrap();
+
+        let production_delta: Vec<f32> = production.params[0].iter().map(|v| -v).collect();
+        let robust_delta: Vec<f32> = robust.params[0].iter().map(|v| -v).collect();
+        let production_norm = production_delta
+            .iter()
+            .map(|v| (*v as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let robust_norm = robust_delta
+            .iter()
+            .map(|v| (*v as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+
+        assert!((production_norm - robust_norm).abs() < 1e-5);
+        assert!((robust_delta[1] / robust_delta[0] - 2.0).abs() < 1e-5);
+        assert!((production_delta[1] / production_delta[0] - 2.0).abs() > 0.1);
     }
 
     #[test]

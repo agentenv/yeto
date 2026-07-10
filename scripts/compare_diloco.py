@@ -285,6 +285,7 @@ def syncer_command(
     *,
     probe_capture: bool = False,
     probe_capture_every: int = 1,
+    merge_policy: str = "production",
 ) -> list[str]:
     # The syncer takes no fragment count: the layout arrives in HELLO.
     cmd = [
@@ -296,6 +297,7 @@ def syncer_command(
         "--total-steps", str(total_steps),
         "--pipeline", str(arm.pipeline),
         "--delta-correction", arm.delta_correction,
+        "--merge-policy", merge_policy,
         "--outer-lr", str(arm.outer_lr),
         "--outer-momentum", str(arm.outer_momentum),
         "--checkpoint-path", str(arm_dir / "state.ckpt"),
@@ -525,6 +527,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             total_steps=steps * arm.m * 4,
             probe_capture=getattr(args, "syncer_probe_capture", False),
             probe_capture_every=getattr(args, "syncer_probe_capture_every", 1),
+            merge_policy=getattr(args, "syncer_merge_policy", "production"),
         ),
         stdout=open(arm_dir / "syncer.log", "w"), stderr=subprocess.STDOUT,
     )
@@ -688,6 +691,12 @@ def main() -> int:
         type=int,
         default=1,
         help="capture every Nth outer step when --syncer-probe-capture is set",
+    )
+    p.add_argument(
+        "--syncer-merge-policy",
+        default="production",
+        choices=["production", "coord-midpoint-normmatch"],
+        help="syncer aggregation policy for async arms",
     )
     p.add_argument("--work-dir", type=Path, default=REPO_ROOT / "compare-work")
     p.add_argument("--report-dir", type=Path, default=REPO_ROOT / "compare-report")

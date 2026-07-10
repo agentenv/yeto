@@ -4,6 +4,7 @@ mod server;
 mod state;
 
 use clap::Parser;
+use state::MergePolicy;
 
 /// Yeto syncer: pull-driven fragment merging (weighted RDA/Avg)
 /// with an SGD+Nesterov outer optimizer. See docs/PROTOCOL.md.
@@ -48,6 +49,10 @@ struct Args {
     /// Pre-merge learner-delta correction: "heloco" or "none".
     #[arg(long, default_value = "heloco")]
     delta_correction: String,
+    /// Fresh-push aggregation rule: "production" or
+    /// "coord-midpoint-normmatch".
+    #[arg(long, default_value = "production")]
+    merge_policy: String,
     /// Give up waiting for quorum and re-send the pull after this long.
     #[arg(long, default_value_t = 900)]
     quorum_timeout_s: u64,
@@ -99,6 +104,13 @@ fn main() -> anyhow::Result<()> {
         "none" => false,
         other => anyhow::bail!("--delta-correction must be 'heloco' or 'none', got {other:?}"),
     };
+    let merge_policy = match args.merge_policy.as_str() {
+        "production" => MergePolicy::Production,
+        "coord-midpoint-normmatch" => MergePolicy::CoordMidpointNormmatch,
+        other => anyhow::bail!(
+            "--merge-policy must be 'production' or 'coord-midpoint-normmatch', got {other:?}"
+        ),
+    };
     let cfg = server::Config {
         port: args.port,
         learners: args.learners,
@@ -110,6 +122,7 @@ fn main() -> anyhow::Result<()> {
         min_round_interval_ms: args.min_round_interval_ms,
         sync_interval_steps: args.sync_interval_steps,
         delta_correction,
+        merge_policy,
         quorum_timeout_s: args.quorum_timeout_s,
         total_steps: args.total_steps,
         outer_lr: args.outer_lr,

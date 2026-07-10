@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::protocol::*;
-use crate::state::{GlobalState, Layout};
+use crate::state::{GlobalState, Layout, MergePolicy};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -62,6 +62,8 @@ pub struct Config {
     pub sync_interval_steps: f64,
     /// HeLoCo per-tensor delta correction before merging.
     pub delta_correction: bool,
+    /// Aggregation policy for fresh learner pushes.
+    pub merge_policy: MergePolicy,
     pub quorum_timeout_s: u64,
     pub total_steps: u64,
     pub outer_lr: f32,
@@ -995,6 +997,7 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }
+    st.merge_policy = cfg.merge_policy;
     Ok(st)
 }
 

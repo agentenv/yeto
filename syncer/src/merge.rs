@@ -38,6 +38,14 @@ fn l2_norm(anchor: &[f32], learner: &[f32]) -> f64 {
         .sqrt()
 }
 
+fn norm(values: &[f32]) -> f64 {
+    values
+        .iter()
+        .map(|v| (*v as f64) * (*v as f64))
+        .sum::<f64>()
+        .sqrt()
+}
+
 /// Weighted direct averaging: out[i] = Σ_m w_m (anchor[i] − learner_m[i]) / Σ w.
 pub fn merge_avg(anchor: &[f32], learners: &[&[f32]], weights: &[f64], out: &mut [f32]) {
     let wsum: f64 = weights.iter().sum();
@@ -62,12 +70,7 @@ pub fn merge_rda(anchor: &[f32], learners: &[&[f32]], weights: &[f64], out: &mut
         return;
     }
     let norms: Vec<f64> = learners.iter().map(|l| l2_norm(anchor, l)).collect();
-    let radial: f64 = norms
-        .iter()
-        .zip(weights)
-        .map(|(n, w)| n * w)
-        .sum::<f64>()
-        / wsum;
+    let radial: f64 = norms.iter().zip(weights).map(|(n, w)| n * w).sum::<f64>() / wsum;
 
     // Weighted mean of unit directions, φ(0) := 0.
     out.fill(0.0);
@@ -80,7 +83,11 @@ pub fn merge_rda(anchor: &[f32], learners: &[&[f32]], weights: &[f64], out: &mut
             *o += coef * (*a - *l);
         }
     }
-    let mean_dir_norm = out.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
+    let mean_dir_norm = out
+        .iter()
+        .map(|v| (*v as f64) * (*v as f64))
+        .sum::<f64>()
+        .sqrt();
     if mean_dir_norm < 1e-12 {
         // Degenerate (all-zero or cancelling directions): fall back to Avg.
         merge_avg(anchor, learners, weights, out);
@@ -89,6 +96,45 @@ pub fn merge_rda(anchor: &[f32], learners: &[&[f32]], weights: &[f64], out: &mut
     let scale = (radial / mean_dir_norm) as f32;
     for o in out.iter_mut() {
         *o *= scale;
+    }
+}
+
+/// Coordinate-wise midpoint/median over learner deltas, with the resulting
+/// robust direction rescaled to the production merge norm for this tensor.
+pub fn merge_coord_midpoint_normmatch(
+    anchor: &[f32],
+    learners: &[&[f32]],
+    target_delta: &[f32],
+    out: &mut [f32],
+) {
+    if learners.is_empty() {
+        out.fill(0.0);
+        return;
+    }
+    debug_assert_eq!(anchor.len(), target_delta.len());
+    debug_assert_eq!(anchor.len(), out.len());
+    let mut coord = Vec::with_capacity(learners.len());
+    for i in 0..anchor.len() {
+        coord.clear();
+        for learner in learners {
+            coord.push(anchor[i] - learner[i]);
+        }
+        coord.sort_by(|a, b| a.total_cmp(b));
+        let mid = coord.len() / 2;
+        out[i] = if coord.len() % 2 == 0 {
+            0.5 * (coord[mid - 1] + coord[mid])
+        } else {
+            coord[mid]
+        };
+    }
+    let source_norm = norm(out);
+    if source_norm < 1e-12 {
+        return;
+    }
+    let target_norm = norm(target_delta);
+    let scale = (target_norm / source_norm) as f32;
+    for v in out.iter_mut() {
+        *v *= scale;
     }
 }
 
@@ -130,18 +176,37 @@ pub struct Heloco {
 impl Default for Heloco {
     fn default() -> Self {
         // Table 3 of the paper.
-        Self { c_ok: 0.2, k_s: 0.5, k_d: 1.0, beta_max: 0.5, kappa: 3.0, eps: 1e-8 }
+        Self {
+            c_ok: 0.2,
+            k_s: 0.5,
+            k_d: 1.0,
+            beta_max: 0.5,
+            kappa: 3.0,
+            eps: 1e-8,
+        }
     }
 }
 
 pub fn heloco_correct(delta: &mut [f32], momentum: &[f32], h: &Heloco) {
     debug_assert_eq!(delta.len(), momentum.len());
-    let du = delta.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
-    let dm = momentum.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    let du = delta
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let dm = momentum
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
     if du < h.eps || dm < h.eps {
         return;
     }
-    let dot: f64 = delta.iter().zip(momentum).map(|(d, m)| *d as f64 * *m as f64).sum();
+    let dot: f64 = delta
+        .iter()
+        .zip(momentum)
+        .map(|(d, m)| *d as f64 * *m as f64)
+        .sum();
     let c = dot / (du * dm);
     if c >= h.c_ok {
         return;
@@ -250,6 +315,35 @@ mod tests {
         assert!(out[0].abs() < 1e-6);
     }
 
+    #[test]
+    fn coord_midpoint_normmatch_uses_robust_direction_and_target_norm() {
+        let anchor = [0.0f32, 0.0];
+        let l0 = [-10.0f32, 0.0]; // delta (10, 0)
+        let l1 = [0.0f32, -10.0]; // delta (0, 10)
+        let l2 = [-1.0f32, -1.0]; // median delta (1, 1)
+        let target = [3.0f32, 4.0]; // norm 5
+        let mut out = [0.0f32; 2];
+
+        merge_coord_midpoint_normmatch(&anchor, &[&l0, &l1, &l2], &target, &mut out);
+
+        assert!((norm(&out) - 5.0).abs() < 1e-5);
+        assert!((out[0] - out[1]).abs() < 1e-6);
+        assert!(out[0] > 0.0);
+    }
+
+    #[test]
+    fn coord_midpoint_normmatch_midpoints_even_groups() {
+        let anchor = [0.0f32];
+        let l0 = [-2.0f32]; // delta 2
+        let l1 = [0.0f32]; // delta 0
+        let target = [3.0f32];
+        let mut out = [0.0f32; 1];
+
+        merge_coord_midpoint_normmatch(&anchor, &[&l0, &l1], &target, &mut out);
+
+        assert!((out[0] - 3.0).abs() < 1e-6);
+    }
+
     fn cosine(a: &[f32], b: &[f32]) -> f64 {
         let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
         dot / (norm(a) * norm(b))
@@ -294,7 +388,11 @@ mod tests {
         let mag = norm(&d);
         let before = cosine(&d, &m);
         heloco_correct(&mut d, &m, &h);
-        assert!((norm(&d) - mag).abs() < 1e-5, "magnitude changed: {mag} -> {}", norm(&d));
+        assert!(
+            (norm(&d) - mag).abs() < 1e-5,
+            "magnitude changed: {mag} -> {}",
+            norm(&d)
+        );
         assert!(cosine(&d, &m) > before);
     }
 
@@ -308,8 +406,16 @@ mod tests {
         // Same directions, but huge momentum norm → low confidence → weaker
         // correction (closer to the original delta).
         let orig = [-1.0f32, 0.2];
-        let moved_small: f64 = small_m.iter().zip(&orig).map(|(a, b)| (a - b).abs() as f64).sum();
-        let moved_large: f64 = large_m.iter().zip(&orig).map(|(a, b)| (a - b).abs() as f64).sum();
+        let moved_small: f64 = small_m
+            .iter()
+            .zip(&orig)
+            .map(|(a, b)| (a - b).abs() as f64)
+            .sum();
+        let moved_large: f64 = large_m
+            .iter()
+            .zip(&orig)
+            .map(|(a, b)| (a - b).abs() as f64)
+            .sum();
         assert!(moved_large < moved_small);
     }
 
