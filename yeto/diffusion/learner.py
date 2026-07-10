@@ -56,6 +56,7 @@ _MAX_DIFFUSION_MICRO_BATCH = 256
 _DIFFUSION_PROBE_ITERATIONS = 2
 _MAX_DIFFUSION_PROBE_SHAPES = 8
 _MAX_SEED = (1 << 63) - 1
+DIFFUSION_RESIZE_MODES = ("stretch", "center-crop")
 
 _ATTENTION_TARGETS = [
     "to_q",
@@ -301,6 +302,12 @@ def parse_args(argv=None):
     p.add_argument("--pooled-text-embeds-column", default="pooled_prompt_embeds")
     p.add_argument("--height", type=int, default=None)
     p.add_argument("--width", type=int, default=None)
+    p.add_argument(
+        "--resize-mode",
+        choices=DIFFUSION_RESIZE_MODES,
+        default="stretch",
+        help="raw media resize policy when height and width are set",
+    )
     p.add_argument("--num-frames", type=int, default=None)
     p.add_argument("--fps", type=float, default=None)
     p.add_argument("--bucket-by-shape", action="store_true", default=False)
@@ -832,13 +839,37 @@ def _open_video_frames(value, base_dir: str | None = None):
     raise TypeError(f"unsupported video value {type(value).__name__}")
 
 
-def _manual_preprocess(images, height: int | None, width: int | None) -> torch.Tensor:
+def _resize_media_image(image, height: int | None, width: int | None, resize_mode: str):
+    if resize_mode not in DIFFUSION_RESIZE_MODES:
+        raise ValueError(
+            f"resize_mode must be one of {DIFFUSION_RESIZE_MODES}, got {resize_mode!r}"
+        )
+    if not height or not width:
+        return image
+    if resize_mode == "stretch":
+        return image.resize((width, height))
+
+    source_width, source_height = image.size
+    scale = max(width / source_width, height / source_height)
+    resized_width = max(width, round(source_width * scale))
+    resized_height = max(height, round(source_height * scale))
+    resized = image.resize((resized_width, resized_height))
+    left = (resized_width - width) // 2
+    top = (resized_height - height) // 2
+    return resized.crop((left, top, left + width, top + height))
+
+
+def _manual_preprocess(
+    images,
+    height: int | None,
+    width: int | None,
+    resize_mode: str = "stretch",
+) -> torch.Tensor:
     import numpy as np
 
     tensors = []
     for img in images:
-        if height and width:
-            img = img.resize((width, height))
+        img = _resize_media_image(img, height, width, resize_mode)
         arr = torch.from_numpy(np.array(img)).float() / 127.5 - 1.0
         tensors.append(arr.permute(2, 0, 1))
     return torch.stack(tensors)
@@ -867,10 +898,16 @@ def _manual_preprocess_video(
     height: int | None,
     width: int | None,
     num_frames: int | None = None,
+    resize_mode: str = "stretch",
 ) -> torch.Tensor:
     # videos: list[list[PIL]] -> (B, C, F, H, W)
     frames = [
-        _manual_preprocess(_fit_video_frames(video, num_frames), height, width).permute(1, 0, 2, 3)
+        _manual_preprocess(
+            _fit_video_frames(video, num_frames),
+            height,
+            width,
+            resize_mode,
+        ).permute(1, 0, 2, 3)
         for video in videos
     ]
     try:
@@ -1170,21 +1207,32 @@ def encode_latents(pipe, rows, args, device, dtype, adapter=None) -> LatentBatch
     if not hasattr(pipe, "vae") or pipe.vae is None:
         raise RuntimeError("raw diffusion rows need a pipeline VAE, or pass --cache-latents")
     target_frames, target_height, target_width = _batch_shape_key(rows, args)
+    resize_mode = getattr(args, "resize_mode", "stretch")
     if any(args.video_column in row for row in rows):
         videos = [_open_video_frames(row[args.video_column], row.get("__yeto_data_root__")) for row in rows]
-        pixels = _manual_preprocess_video(videos, target_height, target_width, target_frames)
+        pixels = _manual_preprocess_video(
+            videos,
+            target_height,
+            target_width,
+            target_frames,
+            resize_mode,
+        )
     else:
         images = [_open_image(row[args.image_column], row.get("__yeto_data_root__")) for row in rows]
-        pixels = (
-            _preprocess_with_processor(
+        if hasattr(pipe, "image_processor"):
+            if resize_mode == "center-crop":
+                images = [
+                    _resize_media_image(image, target_height, target_width, resize_mode)
+                    for image in images
+                ]
+            pixels = _preprocess_with_processor(
                 pipe.image_processor,
                 images,
                 height=target_height,
                 width=target_width,
             )
-            if hasattr(pipe, "image_processor")
-            else _manual_preprocess(images, target_height, target_width)
-        )
+        else:
+            pixels = _manual_preprocess(images, target_height, target_width, resize_mode)
     pixels = pixels.to(device=device, dtype=dtype)
     with torch.no_grad():
         encoded = _call_vae_encode(pipe.vae, pixels)
@@ -2258,6 +2306,16 @@ def diffusion_parameter_effects(pipe, args, adapter=None) -> DiffusionParameterR
         report.active.append("--cache-text-embeds: read text embeddings from the dataset; prompts are not text-encoded")
     if getattr(args, "bucket_by_shape", False):
         report.active.append("--bucket-by-shape: groups rows by target (frames, height, width) before batching")
+    resize_mode = getattr(args, "resize_mode", "stretch")
+    if resize_mode != "stretch":
+        if adapter is not None:
+            report.active.append("--resize-mode: available to the diffusion adapter")
+        elif getattr(args, "cache_latents", False):
+            report.ignored.append("--resize-mode: cached latents bypass raw media resizing")
+        else:
+            report.active.append(
+                f"--resize-mode: {resize_mode} raw media before VAE encoding"
+            )
     if getattr(args, "diffusion_loss_weighting", "none") != "none":
         report.active.append(
             f"--diffusion-loss-weighting: applies {args.diffusion_loss_weighting} timestep weights"

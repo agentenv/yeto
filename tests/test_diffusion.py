@@ -63,6 +63,7 @@ def _args(**over):
         pooled_text_embeds_column="pooled_prompt_embeds",
         height=None,
         width=None,
+        resize_mode="stretch",
         num_frames=None,
         fps=None,
         bucket_by_shape=False,
@@ -147,6 +148,7 @@ def test_diffusion_learner_parse_cache_defaults_are_off():
     assert args.diffusion_loss_weighting == "none"
     assert args.diffusion_min_snr_gamma == 5.0
     assert args.fps is None
+    assert args.resize_mode == "stretch"
     assert args.seed is None
 
 
@@ -163,10 +165,13 @@ def test_launch_cli_parses_diffusion_seed_without_a_generic_lm_seed():
             "aws:1xt4@us-west-2",
             "--diffusion-seed",
             "123",
+            "--resize-mode",
+            "center-crop",
         ]
     )
 
     assert args.diffusion_seed == 123
+    assert args.resize_mode == "center-crop"
     assert not hasattr(args, "seed")
 
 
@@ -1242,6 +1247,34 @@ def test_fit_video_frames_samples_and_pads_deterministically():
     assert learner._fit_video_frames(frames, 3) == [0, 2, 4]
     assert learner._fit_video_frames(frames, 1) == [2]
     assert learner._fit_video_frames([0, 1], 4) == [0, 1, 1, 1]
+
+
+def test_diffusion_center_crop_resize_preserves_aspect_ratio():
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    events = []
+
+    class FakeImage:
+        def __init__(self, size):
+            self.size = size
+
+        def resize(self, size):
+            events.append(("resize", size))
+            return FakeImage(size)
+
+        def crop(self, box):
+            events.append(("crop", box))
+            return FakeImage((box[2] - box[0], box[3] - box[1]))
+
+    got = learner._resize_media_image(FakeImage((4, 2)), 2, 2, "center-crop")
+
+    assert got.size == (2, 2)
+    assert events == [("resize", (4, 2)), ("crop", (1, 0, 3, 2))]
+
+    events.clear()
+    learner._resize_media_image(FakeImage((4, 2)), 2, 2, "stretch")
+    assert events == [("resize", (2, 2))]
 
 
 def test_raw_video_encode_uses_pipeline_pack_latents(tmp_path):
@@ -2363,6 +2396,18 @@ def test_launcher_routes_diffusion_to_diffusion_learner_and_opt_in_caches():
     assert "--diffusion-family" not in task.run
     assert "--train-on" not in task.run and "--seq-len" not in task.run
     assert "--tokenize" not in task.run
+
+
+def test_launcher_passes_diffusion_resize_mode():
+    task = make_learner_task(
+        _args(height=512, width=512, resize_mode="center-crop"),
+        _SPEC,
+        0,
+        1,
+        "1.2.3.4:29400",
+    )
+
+    assert "--resize-mode center-crop" in task.run
 
 
 def test_launcher_passes_diffusion_loss_weighting_only_for_diffusion():

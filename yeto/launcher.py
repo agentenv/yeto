@@ -516,6 +516,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             f" --text-embeds-column {shlex.quote(args.text_embeds_column)}"
             f" --text-attention-mask-column {shlex.quote(args.text_attention_mask_column)}"
             f" --pooled-text-embeds-column {shlex.quote(args.pooled_text_embeds_column)}"
+            f" --resize-mode {shlex.quote(getattr(args, 'resize_mode', 'stretch'))}"
             f" --stream-workers {args.stream_workers}"
         )
         if getattr(args, "diffusion_adapter", None):
