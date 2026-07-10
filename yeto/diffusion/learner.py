@@ -9,6 +9,7 @@ MSE loss on sampled timesteps.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import inspect
 import io
 import json
@@ -16,7 +17,7 @@ import logging
 import os
 import random
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,7 @@ DIFFUSION_ADAPTER_SCHEMA_VERSION = 1
 _MAX_DIFFUSION_MICRO_BATCH = 256
 _DIFFUSION_PROBE_ITERATIONS = 2
 _MAX_DIFFUSION_PROBE_SHAPES = 8
+_MAX_SEED = (1 << 63) - 1
 
 _ATTENTION_TARGETS = [
     "to_q",
@@ -80,6 +82,67 @@ _MLP_TARGETS = [
     "linear_2",
 ]
 _TRAINABLE_ATTRS = ("transformer", "transformer_2", "unet", "model")
+
+
+def derive_diffusion_seed(base_seed: int, *parts) -> int:
+    """Derive a stable RNG stream seed without relying on Python's hash()."""
+    digest = hashlib.blake2b(digest_size=8, person=b"yeto-diffusion")
+    for value in (base_seed, *parts):
+        raw = str(value).encode("utf-8")
+        digest.update(len(raw).to_bytes(4, "little"))
+        digest.update(raw)
+    return int.from_bytes(digest.digest(), "little") % _MAX_SEED
+
+
+def diffusion_eval_seed(base_seed: int, row_key, repetition: int = 0) -> int:
+    """Stable per-row seed for paired held-out diffusion evaluation."""
+    return derive_diffusion_seed(base_seed, "eval", row_key, repetition)
+
+
+def seed_diffusion_rng(seed: int) -> None:
+    """Seed process RNGs used by diffusion model construction and training."""
+    seed = int(seed) % _MAX_SEED
+    random.seed(seed)
+    try:
+        import numpy as np
+    except ImportError:
+        pass
+    else:
+        np.random.seed(seed % (1 << 32))
+    torch.manual_seed(seed)
+
+
+@contextmanager
+def isolated_diffusion_rng(seed: int | None):
+    """Temporarily seed diffusion RNGs and restore the caller's RNG states.
+
+    This makes paired loss evaluation repeatable without perturbing a running
+    training stream. It controls random inputs, not nondeterministic CUDA
+    kernels.
+    """
+    if seed is None:
+        yield
+        return
+
+    python_state = random.getstate()
+    numpy_module = None
+    numpy_state = None
+    try:
+        import numpy as np
+    except ImportError:
+        pass
+    else:
+        numpy_module = np
+        numpy_state = np.random.get_state()
+    cuda_devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+    with torch.random.fork_rng(devices=cuda_devices):
+        seed_diffusion_rng(seed)
+        try:
+            yield
+        finally:
+            random.setstate(python_state)
+            if numpy_module is not None:
+                numpy_module.random.set_state(numpy_state)
 
 
 @dataclass
@@ -216,6 +279,12 @@ def parse_args(argv=None):
     p.add_argument("--max-local-steps", type=int, default=1_000_000)
     p.add_argument("--stream-workers", type=int, default=2)
     p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="diffusion RNG seed for reproducible LoRA init, data order, timesteps, and noise",
+    )
+    p.add_argument(
         "--diffusion-loss-weighting",
         choices=["none", "linear", "sigma", "snr", "min-snr"],
         default="none",
@@ -332,6 +401,11 @@ def load_pipeline(args, device, adapter=None):
         model_id = resolve(args.model)
         dtype = diffusion_torch_dtype(device)
         pipe = _from_pretrained_offline_first(DiffusionPipeline, model_id, torch_dtype=dtype)
+    if getattr(args, "seed", None) is not None:
+        # Base loading may consume a cache-dependent amount of RNG. Reset at
+        # the trainable-model boundary so LoRA initialization still matches
+        # across learners that took different local/offline load paths.
+        seed_diffusion_rng(args.seed)
     if adapter is not None and hasattr(adapter, "prepare_model"):
         return adapter.prepare_model(pipe, args, device)
     _freeze_modules(pipe)
@@ -2155,6 +2229,10 @@ def diffusion_parameter_effects(pipe, args, adapter=None) -> DiffusionParameterR
 
     if getattr(args, "diffusion_adapter", None):
         report.active.append("--diffusion-adapter: external adapter owns model-specific loading/step behavior")
+    if getattr(args, "seed", None) is not None:
+        report.active.append(
+            "--seed/--diffusion-seed: reproducible model initialization, data order, timesteps, and noise"
+        )
     if adapter is None:
         if getattr(args, "cache_latents", False):
             report.active.append(f"--latent-column: read cached latents from column {args.latent_column!r}")
@@ -2508,7 +2586,21 @@ def _align_prediction_and_target(
     return pred, target
 
 
-def compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0, adapter=None):
+def compute_diffusion_loss(
+    pipe,
+    rows,
+    args,
+    device,
+    global_step: int = 0,
+    adapter=None,
+    rng_seed: int | None = None,
+):
+    """Compute one diffusion loss, optionally under an isolated eval seed."""
+    with isolated_diffusion_rng(rng_seed):
+        return _compute_diffusion_loss(pipe, rows, args, device, global_step, adapter)
+
+
+def _compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0, adapter=None):
     if adapter is not None:
         for name in ("compute_loss", "training_step"):
             fn = getattr(adapter, name, None)
@@ -2661,6 +2753,8 @@ def diffusion_adapter_metadata(
             "min_snr_gamma": getattr(args, "diffusion_min_snr_gamma", None),
         },
     }
+    if getattr(args, "seed", None) is not None:
+        meta["seed"] = int(args.seed)
     if getattr(args, "tuning", None) == "lora":
         meta["lora"] = {
             "r": getattr(args, "lora_r", None),
@@ -2736,6 +2830,10 @@ def main(argv=None) -> None:
     else:
         device = torch.device("cpu")
 
+    if args.seed is not None:
+        seed_diffusion_rng(args.seed)
+        log.info("diffusion model initialization seed=%d", args.seed)
+
     if not 0.0 <= args.merge_alpha < 1.0:
         raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
     cache_meta = read_diffusion_cache_metadata(args.data)
@@ -2779,6 +2877,21 @@ def main(argv=None) -> None:
     else:
         args.grad_accum = rebalance_grad_accum(args.grad_accum, args.micro_batch_size)
 
+    data_seed = 0
+    loader_generator = None
+    if args.seed is not None:
+        train_seed = derive_diffusion_seed(args.seed, "train", args.learner_id, rank)
+        data_seed = derive_diffusion_seed(args.seed, "data", args.learner_id, rank)
+        loader_seed = derive_diffusion_seed(args.seed, "loader", args.learner_id, rank)
+        seed_diffusion_rng(train_seed)
+        loader_generator = torch.Generator().manual_seed(loader_seed)
+        log.info(
+            "diffusion training RNG seed=%d data_seed=%d loader_seed=%d",
+            train_seed,
+            data_seed,
+            loader_seed,
+        )
+
     dataset = StreamingDiffusionRows(
         args.data,
         args.learner_id,
@@ -2792,6 +2905,7 @@ def main(argv=None) -> None:
         target_num_frames=args.num_frames,
         target_height=args.height,
         target_width=args.width,
+        seed=data_seed,
     )
     loader = DataLoader(
         dataset,
@@ -2799,6 +2913,7 @@ def main(argv=None) -> None:
         num_workers=args.stream_workers,
         collate_fn=None if args.bucket_by_shape else _collate_rows,
         pin_memory=device.type == "cuda",
+        generator=loader_generator,
     )
 
     wire_dtype = {"bf16": DTYPE_BF16, "f32": DTYPE_F32, "q4": DTYPE_Q4}[args.wire_dtype]

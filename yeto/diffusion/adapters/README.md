@@ -53,6 +53,8 @@ Stable requirements:
 
 - trainable module names and trainable parameter keys must be deterministic
   across learners, restarts, and syncer-checkpoint export;
+- adapter randomness should use the process RNGs seeded by Yeto rather than
+  creating unseeded generators when reproducible diffusion runs are requested;
 - loss denominators must be scalar tensors on the training device;
 - adapters must not start launchers, syncers, storage uploads, or cross-learner
   communication. Yeto owns orchestration and DiLoCo sync.

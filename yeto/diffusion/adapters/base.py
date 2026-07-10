@@ -32,6 +32,8 @@ Stable sync contract:
 
 - ``trainable_module_items`` names and ``trainable_params`` keys must be stable
   across all learners, restarts, and syncer-checkpoint export.
+- Adapter randomness should use the process RNGs seeded by Yeto rather than
+  creating unseeded generators when reproducible diffusion runs are requested.
 - Returned loss denominators must be scalar tensors on the training device.
 - Adapter hooks should not start launchers, syncers, storage uploads, or
   cross-learner communication. Yeto owns orchestration and DiLoCo sync.

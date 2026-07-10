@@ -1,6 +1,7 @@
 import argparse
 import io
 import json
+import random
 from types import SimpleNamespace
 
 import pytest
@@ -65,6 +66,8 @@ def _args(**over):
         num_frames=None,
         fps=None,
         bucket_by_shape=False,
+        diffusion_seed=None,
+        seed=None,
         diffusion_loss_weighting="none",
         diffusion_min_snr_gamma=5.0,
     )
@@ -144,6 +147,108 @@ def test_diffusion_learner_parse_cache_defaults_are_off():
     assert args.diffusion_loss_weighting == "none"
     assert args.diffusion_min_snr_gamma == 5.0
     assert args.fps is None
+    assert args.seed is None
+
+
+def test_launch_cli_parses_diffusion_seed_without_a_generic_lm_seed():
+    from yeto.cli import parse_args
+
+    args = parse_args(
+        [
+            "--model",
+            "sd35",
+            "--data",
+            "org/ds",
+            "--gpu",
+            "aws:1xt4@us-west-2",
+            "--diffusion-seed",
+            "123",
+        ]
+    )
+
+    assert args.diffusion_seed == 123
+    assert not hasattr(args, "seed")
+
+
+def test_diffusion_seed_derivation_is_stable_and_separates_eval_rows():
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    assert learner.derive_diffusion_seed(17, "train", 2, 3) == learner.derive_diffusion_seed(
+        17, "train", 2, 3
+    )
+    assert learner.derive_diffusion_seed(17, "train", 2, 3) != learner.derive_diffusion_seed(
+        17, "train", 2, 4
+    )
+    assert learner.diffusion_eval_seed(17, "row-a", 0) != learner.diffusion_eval_seed(
+        17, "row-a", 1
+    )
+    assert learner.diffusion_eval_seed(17, "row-a", 0) != learner.diffusion_eval_seed(
+        17, "row-b", 0
+    )
+
+
+def test_seeded_diffusion_loss_is_repeatable_and_restores_caller_rng():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class RandomLossAdapter:
+        def compute_loss(self, pipe, rows, args, device, global_step):
+            del pipe, rows, args, global_step
+            return torch.rand((), device=device) + random.random(), torch.ones((), device=device)
+
+    device = torch.device("cpu")
+    adapter = RandomLossAdapter()
+    args = SimpleNamespace()
+
+    torch.manual_seed(91)
+    random.seed(91)
+    torch.rand(())
+    random.random()
+    expected_torch = torch.rand(())
+    expected_python = random.random()
+
+    torch.manual_seed(91)
+    random.seed(91)
+    torch.rand(())
+    random.random()
+    first, _ = learner.compute_diffusion_loss(
+        None, [], args, device, adapter=adapter, rng_seed=1234
+    )
+    second, _ = learner.compute_diffusion_loss(
+        None, [], args, device, adapter=adapter, rng_seed=1234
+    )
+    different, _ = learner.compute_diffusion_loss(
+        None, [], args, device, adapter=adapter, rng_seed=1235
+    )
+
+    assert torch.equal(first, second)
+    assert not torch.equal(first, different)
+    assert torch.equal(torch.rand(()), expected_torch)
+    assert random.random() == expected_python
+
+
+def test_load_pipeline_reseeds_before_external_adapter_preparation():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class Adapter:
+        def load_pipeline(self, args, device):
+            del args, device
+            torch.rand(7)
+            return SimpleNamespace()
+
+        def prepare_model(self, pipe, args, device):
+            del args, device
+            pipe.initialized = torch.rand(())
+            return pipe
+
+    args = SimpleNamespace(model="tiny", seed=456)
+    first = learner.load_pipeline(args, torch.device("cpu"), Adapter())
+    torch.rand(19)
+    second = learner.load_pipeline(args, torch.device("cpu"), Adapter())
+
+    assert torch.equal(first.initialized, second.initialized)
 
 
 def test_diffusion_lora_targets_are_generic_dit_names():
@@ -221,6 +326,7 @@ def test_diffusion_parameter_effects_keeps_data_flags_generic():
         height=512,
         width=512,
         num_frames=49,
+        seed=123,
         diffusion_loss_weighting="min-snr",
     )
     report = learner.diffusion_parameter_effects(SimpleNamespace(transformer=TinyDenoiser()), args)
@@ -233,6 +339,7 @@ def test_diffusion_parameter_effects_keeps_data_flags_generic():
     assert "--height/--width: target shape metadata; cached latents are not resized" in report.active
     assert "--num-frames: target frame-count metadata; cached latents are not resampled" in report.active
     assert "--diffusion-loss-weighting: applies min-snr timestep weights" in report.active
+    assert any(item.startswith("--seed/--diffusion-seed:") for item in report.active)
     assert not report.ignored
 
 
@@ -989,7 +1096,7 @@ def test_nava_adapter_raw_state_save_and_load(tmp_path):
     assert torch.allclose(loaded.model.bias, torch.full_like(loaded.model.bias, 4.0))
 
 
-def test_tiny_diffusion_learner_smoke_cached_manifest(tmp_path):
+def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
 
@@ -1050,48 +1157,65 @@ def test_tiny_diffusion_learner_smoke_cached_manifest(tmp_path):
                 )
                 + "\n"
             )
-    out = tmp_path / "out"
-
-    learner.main(
-        [
-            "--model",
-            "tiny",
-            "--data",
-            str(data),
-            "--syncer",
-            "none",
-            "--learner-id",
-            "0",
-            "--num-learners",
-            "1",
-            "--tuning",
-            "full",
-            "--cache-latents",
-            "--cache-text-embeds",
-            "--diffusion-adapter",
-            f"{adapter_file}:make_adapter",
-            "--micro-batch-size",
-            "2",
-            "--stream-workers",
-            "0",
-            "--fragments",
-            "1",
-            "--max-local-steps",
-            "1",
-            "--output-dir",
-            str(out),
-        ]
-    )
+    out = tmp_path / "first"
+    argv = [
+        "--model",
+        "tiny",
+        "--data",
+        str(data),
+        "--syncer",
+        "none",
+        "--learner-id",
+        "0",
+        "--num-learners",
+        "1",
+        "--tuning",
+        "full",
+        "--cache-latents",
+        "--cache-text-embeds",
+        "--diffusion-adapter",
+        f"{adapter_file}:make_adapter",
+        "--micro-batch-size",
+        "2",
+        "--stream-workers",
+        "0",
+        "--seed",
+        "123",
+        "--fragments",
+        "1",
+        "--max-local-steps",
+        "1",
+        "--output-dir",
+        str(out),
+    ]
+    learner.main(argv)
 
     state = torch.load(out / "trainable_state.pt", map_location="cpu")
     assert "transformer.proj.weight" in state
-    meta = json.loads((out / learner.DIFFUSION_ADAPTER_METADATA_FILE).read_text(encoding="utf-8"))
+    meta = json.loads(
+        (out / learner.DIFFUSION_ADAPTER_METADATA_FILE).read_text(encoding="utf-8")
+    )
     assert meta["kind"] == "yeto.diffusion.adapter"
     assert meta["model"] == "tiny"
+    assert meta["seed"] == 123
     assert meta["cache"] == {"latents": True, "text_embeds": True}
-    assert meta["loss"] == {"function": "flow_matching", "weighting": "none", "min_snr_gamma": 5.0}
+    assert meta["loss"] == {
+        "function": "flow_matching",
+        "weighting": "none",
+        "min_snr_gamma": 5.0,
+    }
     assert meta["trainable_modules"] == ["transformer"]
     assert meta["trainable_tensor_count"] == len(state)
+
+    second_out = tmp_path / "second"
+    second_argv = argv.copy()
+    second_argv[second_argv.index("--output-dir") + 1] = str(second_out)
+    learner.main(second_argv)
+    second_state = torch.load(second_out / "trainable_state.pt", map_location="cpu")
+
+    assert state.keys() == second_state.keys()
+    for name in state:
+        assert torch.equal(state[name], second_state[name]), name
 
 
 def test_open_image_accepts_hf_image_bytes_dict():
@@ -2261,6 +2385,26 @@ def test_launcher_passes_diffusion_loss_weighting_only_for_diffusion():
     )
     assert "--diffusion-loss-weighting" not in lm_task.run
     assert "--train-on assistant" in lm_task.run
+
+
+def test_launcher_passes_seed_only_to_diffusion_learner():
+    task = make_learner_task(
+        _args(diffusion_seed=123),
+        _SPEC,
+        0,
+        1,
+        "a:1",
+    )
+    assert " --seed 123" in task.run
+
+    lm_task = make_learner_task(
+        _args(model="gemma4", diffusion_seed=123),
+        _SPEC,
+        0,
+        1,
+        "a:1",
+    )
+    assert " --seed " not in lm_task.run
 
 
 def test_launcher_routes_video_aliases_without_model_family_flags():

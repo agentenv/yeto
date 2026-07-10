@@ -520,6 +520,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         )
         if getattr(args, "diffusion_adapter", None):
             learner_flags += f" --diffusion-adapter {shlex.quote(args.diffusion_adapter)}"
+        if getattr(args, "diffusion_seed", None) is not None:
+            learner_flags += f" --seed {args.diffusion_seed}"
         if getattr(args, "cache_latents", False):
             learner_flags += " --cache-latents"
         if getattr(args, "cache_text_embeds", False):

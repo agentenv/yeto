@@ -220,6 +220,12 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     diffusion.add_argument("--fps", type=float, default=None, help="diffusion video frame rate for model conditioning")
     diffusion.add_argument("--bucket-by-shape", action="store_true", help="diffusion only: batch rows by (frames, height, width)")
     diffusion.add_argument(
+        "--diffusion-seed",
+        type=int,
+        default=None,
+        help="diffusion only: reproducible model initialization, data order, timestep sampling, and noise",
+    )
+    diffusion.add_argument(
         "--diffusion-loss-weighting",
         choices=["none", "linear", "sigma", "snr", "min-snr"],
         default="none",
