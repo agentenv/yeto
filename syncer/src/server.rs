@@ -63,6 +63,9 @@ pub struct Config {
     /// HeLoCo per-tensor delta correction before merging.
     pub delta_correction: bool,
     pub quorum_timeout_s: u64,
+    /// Require the configured quorum even after learners disconnect, and do
+    /// not commit under-quorum rounds on timeout.
+    pub strict_quorum: bool,
     pub total_steps: u64,
     pub outer_lr: f32,
     pub outer_lr_by_fragment: Option<Vec<f32>>,
@@ -621,7 +624,11 @@ async fn scheduler(
         }
 
         let connected = registry.lock().unwrap().len();
-        let k = (cfg.quorum as usize).min(connected.max(1));
+        let k = if cfg.strict_quorum {
+            cfg.quorum as usize
+        } else {
+            (cfg.quorum as usize).min(connected.max(1))
+        };
 
         // Arm the grace window of any round that just reached quorum.
         for r in inflight.iter_mut() {
@@ -638,9 +645,9 @@ async fn scheduler(
             }
         }
 
-        // Complete every round that is ready: all connected learners
-        // answered, or its (grace or quorum) deadline expired with at
-        // least one push. A quorum timeout with zero pushes re-pulls.
+        // Complete every round that is ready. Adaptive mode may commit a
+        // non-empty partial round at its deadline; strict mode requires the
+        // configured quorum and re-pulls until it arrives.
         let now = Instant::now();
         let mut completed_any = false;
         let mut i = 0;
@@ -649,9 +656,13 @@ async fn scheduler(
                 .grace_deadline
                 .unwrap_or(inflight[i].quorum_deadline);
             let expired = now >= deadline;
-            if inflight[i].pushes.len() >= connected.max(1)
-                || (expired && !inflight[i].pushes.is_empty())
-            {
+            if round_completion_ready(
+                inflight[i].pushes.len(),
+                connected,
+                k,
+                cfg.strict_quorum,
+                expired,
+            ) {
                 let round = inflight.remove(i);
                 complete_round(&cfg, &mut st, &registry, &mut last_sync_secs, round).await?;
                 completed_any = true;
@@ -659,10 +670,7 @@ async fn scheduler(
             }
             if expired {
                 let r = &mut inflight[i];
-                warn!(
-                    step = r.t,
-                    "quorum timeout with zero pushes; re-sending pull"
-                );
+                warn!(step = r.t, "round not ready at deadline; re-sending pull");
                 for g in current_groups(&registry) {
                     let _ = g.send_small(MSG_PULL_REQ, r.pull.clone()).await;
                 }
@@ -729,6 +737,19 @@ async fn scheduler(
     // Give writer tasks a moment to flush the shutdown frames.
     tokio::time::sleep(Duration::from_secs(2)).await;
     return Ok(());
+}
+
+fn round_completion_ready(
+    pushes: usize,
+    connected: usize,
+    quorum: usize,
+    strict_quorum: bool,
+    expired: bool,
+) -> bool {
+    if strict_quorum {
+        return pushes >= quorum;
+    }
+    pushes >= connected.max(1) || (expired && pushes > 0)
 }
 
 /// One in-flight sync round: the pull for fragment `p` at global step `t`
@@ -1143,6 +1164,20 @@ mod tests {
         assert_eq!(launch_interval(floor, 24.0, 4, Some(0.005)), floor);
         // H target disabled: manual floor only.
         assert_eq!(launch_interval(floor, 0.0, 4, Some(1.0)), floor);
+    }
+
+    #[test]
+    fn strict_quorum_never_completes_an_under_quorum_tail() {
+        assert!(!round_completion_ready(1, 1, 4, true, false));
+        assert!(!round_completion_ready(1, 1, 4, true, true));
+        assert!(round_completion_ready(4, 4, 4, true, false));
+    }
+
+    #[test]
+    fn adaptive_quorum_preserves_disconnect_and_timeout_behavior() {
+        assert!(round_completion_ready(1, 1, 1, false, false));
+        assert!(round_completion_ready(1, 4, 4, false, true));
+        assert!(!round_completion_ready(1, 4, 4, false, false));
     }
 
     #[test]

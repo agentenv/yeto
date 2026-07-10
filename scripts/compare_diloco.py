@@ -81,6 +81,7 @@ class Arm:
     pipeline: int = 2
     delta_correction: str = "heloco"
     quorum: int | None = None  # None -> all M learners each round
+    strict_quorum: bool = False
     outer_lr: float = 0.7
     outer_lr_by_fragment: str | None = None
     outer_momentum: float = 0.9
@@ -308,6 +309,8 @@ def syncer_command(
     ]
     if arm.outer_lr_by_fragment:
         cmd += ["--outer-lr-by-fragment", arm.outer_lr_by_fragment]
+    if arm.strict_quorum:
+        cmd += ["--strict-quorum"]
     if probe_capture:
         cmd += [
             "--probe-capture-dir", str(arm_dir / "syncer_probe"),
@@ -515,8 +518,15 @@ def run_baseline(args, work: Path) -> tuple[Path, float]:
 def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
     arm_dir = work / arm.name
     arm_dir.mkdir(parents=True, exist_ok=True)
-    steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, arm.m,
-                      world=max(1, args.learner_gpus))
+    budget_steps = steps_for(
+        args.token_budget,
+        args.micro_batch_size,
+        args.seq_len,
+        arm.m,
+        world=max(1, args.learner_gpus),
+    )
+    steps = args.learner_max_steps or budget_steps
+    total_outer_steps = args.syncer_total_steps or (budget_steps * arm.m * 4)
     port = free_port()
     # Generous round ceiling: learners stop at their token budget, and the
     # syncer is terminated once they exit; the checkpoint (written every
@@ -526,7 +536,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             arm,
             port,
             arm_dir,
-            total_steps=steps * arm.m * 4,
+            total_steps=total_outer_steps,
             probe_capture=getattr(args, "syncer_probe_capture", False),
             probe_capture_every=getattr(args, "syncer_probe_capture_every", 1),
         ),
@@ -548,16 +558,36 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             rc = proc.wait(timeout=args.arm_timeout_min * 60)
             if rc != 0:
                 raise RuntimeError(f"{arm.name}: a learner exited {rc}; see {arm_dir}")
+        if args.syncer_total_steps:
+            rc = syncer.wait(timeout=30)
+            if rc != 0:
+                raise RuntimeError(f"{arm.name}: syncer exited {rc}; see {arm_dir}")
     finally:
         for proc in learners:
             if proc.poll() is None:
                 proc.terminate()
-        syncer.terminate()
+        if syncer.poll() is None:
+            syncer.terminate()
         syncer.wait(timeout=30)
     wall = time.monotonic() - t0
     ckpt = arm_dir / "state.ckpt"
     if not ckpt.exists():
         raise RuntimeError(f"{arm.name}: no syncer checkpoint (no round completed); see {arm_dir}")
+    if args.syncer_total_steps:
+        tape_path = arm_dir / "tape.jsonl"
+        records = [json.loads(line) for line in tape_path.read_text().splitlines() if line.strip()]
+        if len(records) != args.syncer_total_steps:
+            raise RuntimeError(
+                f"{arm.name}: expected {args.syncer_total_steps} outer steps, "
+                f"event tape has {len(records)}"
+            )
+        if arm.strict_quorum:
+            partial = [r["step"] for r in records if len(r.get("responders", [])) != arm.m]
+            if partial:
+                raise RuntimeError(
+                    f"{arm.name}: strict-quorum run has partial responder groups "
+                    f"at steps {partial[:8]}"
+                )
     # Export the merged global parameters to a peft adapter dir.
     export_dir = arm_dir / "export"
     run_checked(
@@ -664,6 +694,24 @@ def main() -> int:
                    help="materialize fragment payloads before push delay stress")
     p.add_argument("--arm-timeout-min", type=int, default=120)
     p.add_argument(
+        "--syncer-total-steps",
+        type=int,
+        default=0,
+        help="finish async arms after exactly this many outer steps; 0 keeps "
+        "the learner-budget-driven ceiling",
+    )
+    p.add_argument(
+        "--learner-max-steps",
+        type=int,
+        default=0,
+        help="maximum local steps per async learner; 0 derives it from the token budget",
+    )
+    p.add_argument(
+        "--strict-quorum",
+        action="store_true",
+        help="require the configured quorum for every merge and reject partial timeout/tail commits",
+    )
+    p.add_argument(
         "--probe-data",
         default=None,
         help="optional held-out data for fragment utility probe in async arms; "
@@ -712,6 +760,11 @@ def main() -> int:
     p.add_argument("--adapter-dir", type=Path, default=None, help=argparse.SUPPRESS)
     args = p.parse_args()
 
+    if args.syncer_total_steps < 0 or args.learner_max_steps < 0:
+        p.error("--syncer-total-steps and --learner-max-steps must be non-negative")
+    if args.strict_quorum and args.syncer_total_steps == 0:
+        p.error("--strict-quorum requires --syncer-total-steps so learners do not disconnect first")
+
     if args.eval_only:
         loss = eval_loss_per_token(
             args.model, args.adapter_dir, Path(args.data), args.seq_len, args.device
@@ -749,6 +802,10 @@ def main() -> int:
 
         arms = [_replace(a, round_interval_ms=args.round_interval_ms)
                 if a.round_interval_ms else a for a in arms]
+    if args.strict_quorum:
+        from dataclasses import replace as _replace
+
+        arms = [_replace(a, strict_quorum=True) for a in arms]
     world = max(1, args.learner_gpus)
     base_steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, 1, world)
     print(f"[compare] model={args.model} budget={args.token_budget} tokens "

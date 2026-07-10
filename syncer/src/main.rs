@@ -51,6 +51,10 @@ struct Args {
     /// Give up waiting for quorum and re-send the pull after this long.
     #[arg(long, default_value_t = 900)]
     quorum_timeout_s: u64,
+    /// Never lower the configured quorum after disconnects and never commit
+    /// a partial round when its timeout expires.
+    #[arg(long, default_value_t = false)]
+    strict_quorum: bool,
     /// Total number of outer steps T (each syncs one fragment).
     #[arg(long)]
     total_steps: u64,
@@ -120,6 +124,7 @@ fn main() -> anyhow::Result<()> {
         sync_interval_steps: args.sync_interval_steps,
         delta_correction,
         quorum_timeout_s: args.quorum_timeout_s,
+        strict_quorum: args.strict_quorum,
         total_steps: args.total_steps,
         outer_lr: args.outer_lr,
         outer_lr_by_fragment,

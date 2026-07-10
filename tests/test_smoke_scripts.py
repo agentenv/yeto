@@ -120,6 +120,14 @@ def test_syncer_command_supports_fragment_outer_learning_rates():
     assert cmd[index + 1] == "0.2625,0.175,0.0875,0.14"
 
 
+def test_syncer_command_supports_strict_quorum():
+    from dataclasses import replace
+
+    tuned = replace(compare.PRESETS["m4"], strict_quorum=True)
+    cmd = compare.syncer_command(tuned, 1234, Path("/tmp/w/m4"), total_steps=80)
+    assert "--strict-quorum" in cmd
+
+
 def test_token_budget_split_is_fair_across_learners():
     # Same budget, M learners -> per-learner steps shrink by ~M.
     b1 = compare.steps_for(1_000_000, 2, 512, 1)
