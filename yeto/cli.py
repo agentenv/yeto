@@ -144,7 +144,25 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "deltas that oppose the global trajectory",
     )
     sync.add_argument("--outer-lr", type=float, default=0.7)
-    sync.add_argument("--outer-momentum", type=float, default=0.9)
+    sync.add_argument(
+        "--outer-momentum",
+        type=float,
+        default=0.9,
+        help="Nesterov momentum, or beta for normalized EMA outer optimizers",
+    )
+    sync.add_argument(
+        "--outer-optimizer",
+        choices=["nesterov", "normalized-ema", "restarted-ema"],
+        default="nesterov",
+        help="syncer outer optimizer; nesterov preserves the existing behavior",
+    )
+    sync.add_argument(
+        "--outer-restart-cos-threshold",
+        type=float,
+        default=0.0,
+        help="restarted-ema resets history when cosine(current, previous EMA) "
+        "is at or below this value",
+    )
     sync.add_argument(
         "--fragment-pattern",
         choices=["binpack", "strided"],

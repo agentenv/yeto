@@ -70,6 +70,8 @@ pub struct Config {
     pub outer_lr: f32,
     pub outer_lr_by_fragment: Option<Vec<f32>>,
     pub outer_momentum: f32,
+    pub outer_optimizer: crate::merge::OuterOptimizer,
+    pub outer_restart_cos_threshold: f32,
     pub final_state: Option<std::path::PathBuf>,
     /// Consistent-snapshot file; written every `checkpoint_every` rounds at
     /// the quiescent cut between rounds, resumed from when `resume` is set.
@@ -1008,6 +1010,8 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
         }
         st.outer_lr_by_fragment = Some(rates.clone());
     }
+    st.outer_optimizer = cfg.outer_optimizer;
+    st.outer_restart_cos_threshold = cfg.outer_restart_cos_threshold;
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }

@@ -66,6 +66,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 SYNCER_BIN = REPO_ROOT / "syncer/target/release/yeto-syncer"
+OUTER_OPTIMIZERS = ("nesterov", "normalized-ema", "restarted-ema")
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,8 @@ class Arm:
     outer_lr: float = 0.7
     outer_lr_by_fragment: str | None = None
     outer_momentum: float = 0.9
+    outer_optimizer: str = "nesterov"
+    outer_restart_cos_threshold: float = 0.0
     # Floor on time between round launches (--min-round-interval-ms). On
     # localhost rounds otherwise complete every couple of learner steps
     # (H~2), far off the outer optimizer's H~24 design point; a WAN spaces
@@ -132,6 +135,8 @@ def apply_arm_overrides(
     outer_lr: float | None = None,
     outer_lr_by_fragment: str | None = None,
     outer_momentum: float | None = None,
+    outer_optimizer: str | None = None,
+    outer_restart_cos_threshold: float | None = None,
     delta_correction: str | None = None,
 ) -> list[Arm]:
     """Apply CLI-wide async-arm overrides without mutating presets."""
@@ -141,6 +146,8 @@ def apply_arm_overrides(
             outer_lr,
             outer_lr_by_fragment,
             outer_momentum,
+            outer_optimizer,
+            outer_restart_cos_threshold,
             delta_correction,
         )
     ):
@@ -159,6 +166,14 @@ def apply_arm_overrides(
             ),
             outer_momentum=(
                 arm.outer_momentum if outer_momentum is None else outer_momentum
+            ),
+            outer_optimizer=(
+                arm.outer_optimizer if outer_optimizer is None else outer_optimizer
+            ),
+            outer_restart_cos_threshold=(
+                arm.outer_restart_cos_threshold
+                if outer_restart_cos_threshold is None
+                else outer_restart_cos_threshold
             ),
             delta_correction=(
                 arm.delta_correction
@@ -345,6 +360,8 @@ def syncer_command(
         "--delta-correction", arm.delta_correction,
         "--outer-lr", str(arm.outer_lr),
         "--outer-momentum", str(arm.outer_momentum),
+        "--outer-optimizer", arm.outer_optimizer,
+        "--outer-restart-cos-threshold", str(arm.outer_restart_cos_threshold),
         "--checkpoint-path", str(arm_dir / "state.ckpt"),
         "--checkpoint-every", "1",
         "--event-tape", str(arm_dir / "tape.jsonl"),
@@ -664,9 +681,17 @@ def run_checked(cmd: list[str], log: Path, env: dict | None = None) -> None:
 
 
 def ensure_syncer() -> None:
-    if not SYNCER_BIN.exists():
+    syncer_dir = REPO_ROOT / "syncer"
+    build_inputs = [syncer_dir / "Cargo.toml", syncer_dir / "Cargo.lock"]
+    build_inputs.extend(sorted((syncer_dir / "src").rglob("*.rs")))
+    binary_mtime = SYNCER_BIN.stat().st_mtime_ns if SYNCER_BIN.exists() else None
+    stale = binary_mtime is None or any(
+        path.is_file() and path.stat().st_mtime_ns > binary_mtime
+        for path in build_inputs
+    )
+    if stale:
         print("[compare] building syncer (cargo build --release)")
-        subprocess.run(["cargo", "build", "--release", "-q"], cwd=REPO_ROOT / "syncer", check=True)
+        subprocess.run(["cargo", "build", "--release", "-q"], cwd=syncer_dir, check=True)
 
 
 def main() -> int:
@@ -776,7 +801,19 @@ def main() -> int:
         "--outer-momentum",
         type=float,
         default=None,
-        help="override outer Nesterov momentum for every selected async arm",
+        help="override outer Nesterov momentum or EMA beta for every selected async arm",
+    )
+    p.add_argument(
+        "--outer-optimizer",
+        choices=OUTER_OPTIMIZERS,
+        default=None,
+        help="override the outer optimizer for every selected async arm",
+    )
+    p.add_argument(
+        "--outer-restart-cos-threshold",
+        type=float,
+        default=None,
+        help="override the restarted-EMA cosine threshold for every selected async arm",
     )
     p.add_argument(
         "--delta-correction",
@@ -827,6 +864,8 @@ def main() -> int:
         outer_lr=args.outer_lr,
         outer_lr_by_fragment=args.outer_lr_by_fragment,
         outer_momentum=args.outer_momentum,
+        outer_optimizer=args.outer_optimizer,
+        outer_restart_cos_threshold=args.outer_restart_cos_threshold,
         delta_correction=args.delta_correction,
     )
     if args.round_interval_ms is not None:
@@ -847,7 +886,9 @@ def main() -> int:
         s = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, arm.m, world)
         print(f"  {arm.name:<10} M={arm.m} {s} steps/learner "
               f"P={arm.fragments} alpha={arm.merge_alpha} wire={arm.wire_dtype} "
-              f"pipeline={arm.pipeline} correction={arm.delta_correction}")
+              f"pipeline={arm.pipeline} optimizer={arm.outer_optimizer} "
+              f"restart_cos={arm.outer_restart_cos_threshold} "
+              f"correction={arm.delta_correction}")
     if args.dry_run:
         return 0
 

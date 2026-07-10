@@ -6,7 +6,7 @@ mod state;
 use clap::Parser;
 
 /// Yeto syncer: pull-driven fragment merging (weighted RDA/Avg)
-/// with an SGD+Nesterov outer optimizer. See docs/PROTOCOL.md.
+/// with a selectable outer optimizer. See docs/PROTOCOL.md.
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -65,9 +65,16 @@ struct Args {
     /// these replace --outer-lr for the corresponding fragment.
     #[arg(long)]
     outer_lr_by_fragment: Option<String>,
-    /// Outer Nesterov momentum.
+    /// Outer Nesterov momentum, or beta for normalized EMA variants.
     #[arg(long, default_value_t = 0.9)]
     outer_momentum: f32,
+    /// Outer optimizer: nesterov, normalized-ema, or restarted-ema.
+    #[arg(long, default_value_t = merge::OuterOptimizer::Nesterov)]
+    outer_optimizer: merge::OuterOptimizer,
+    /// Restart EMA history when cosine(current delta, previous EMA) is at or
+    /// below this threshold. Used only by restarted-ema.
+    #[arg(long, default_value_t = 0.0, value_parser = parse_cosine_threshold)]
+    outer_restart_cos_threshold: f32,
     /// Optional path to dump the final global parameters (flat f32 binary).
     #[arg(long)]
     final_state: Option<std::path::PathBuf>,
@@ -102,6 +109,7 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    validate_outer_optimizer(args.outer_optimizer, args.outer_momentum)?;
     let delta_correction = match args.delta_correction.as_str() {
         "heloco" => true,
         "none" => false,
@@ -129,6 +137,8 @@ fn main() -> anyhow::Result<()> {
         outer_lr: args.outer_lr,
         outer_lr_by_fragment,
         outer_momentum: args.outer_momentum,
+        outer_optimizer: args.outer_optimizer,
+        outer_restart_cos_threshold: args.outer_restart_cos_threshold,
         final_state: args.final_state,
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,
@@ -141,6 +151,32 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(server::run(cfg))
+}
+
+fn parse_cosine_threshold(value: &str) -> Result<f32, String> {
+    let threshold = value
+        .parse::<f32>()
+        .map_err(|err| format!("invalid cosine threshold {value:?}: {err}"))?;
+    if !threshold.is_finite() || !(-1.0..=1.0).contains(&threshold) {
+        return Err(format!(
+            "cosine threshold must be finite and in [-1, 1], got {value:?}"
+        ));
+    }
+    Ok(threshold)
+}
+
+fn validate_outer_optimizer(
+    optimizer: merge::OuterOptimizer,
+    outer_momentum: f32,
+) -> anyhow::Result<()> {
+    if optimizer.uses_normalized_ema()
+        && (!outer_momentum.is_finite() || !(0.0..1.0).contains(&outer_momentum))
+    {
+        anyhow::bail!(
+            "--outer-momentum is beta for {optimizer} and must be finite and in [0, 1), got {outer_momentum}"
+        );
+    }
+    Ok(())
 }
 
 fn parse_outer_lr_by_fragment(spec: &str) -> anyhow::Result<Vec<f32>> {
@@ -164,7 +200,7 @@ fn parse_outer_lr_by_fragment(spec: &str) -> anyhow::Result<Vec<f32>> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_outer_lr_by_fragment;
+    use super::*;
 
     #[test]
     fn parses_fragment_outer_learning_rates() {
@@ -174,5 +210,44 @@ mod tests {
         );
         assert!(parse_outer_lr_by_fragment("0.2,-0.1").is_err());
         assert!(parse_outer_lr_by_fragment("").is_err());
+    }
+
+    #[test]
+    fn cli_defaults_to_existing_nesterov_behavior() {
+        let args =
+            Args::try_parse_from(["yeto-syncer", "--learners", "1", "--total-steps", "1"]).unwrap();
+        assert_eq!(args.outer_optimizer, merge::OuterOptimizer::Nesterov);
+        assert_eq!(args.outer_momentum, 0.9);
+        assert_eq!(args.outer_restart_cos_threshold, 0.0);
+    }
+
+    #[test]
+    fn parses_outer_optimizer_contract() {
+        for (name, expected) in [
+            ("nesterov", merge::OuterOptimizer::Nesterov),
+            ("normalized-ema", merge::OuterOptimizer::NormalizedEma),
+            ("restarted-ema", merge::OuterOptimizer::RestartedEma),
+        ] {
+            let args = Args::try_parse_from([
+                "yeto-syncer",
+                "--learners",
+                "1",
+                "--total-steps",
+                "1",
+                "--outer-optimizer",
+                name,
+            ])
+            .unwrap();
+            assert_eq!(args.outer_optimizer, expected);
+        }
+    }
+
+    #[test]
+    fn validates_ema_beta_and_restart_threshold() {
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::NormalizedEma, 0.9).is_ok());
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::RestartedEma, 1.0).is_err());
+        assert_eq!(parse_cosine_threshold("-0.25").unwrap(), -0.25);
+        assert!(parse_cosine_threshold("1.1").is_err());
+        assert!(parse_cosine_threshold("NaN").is_err());
     }
 }

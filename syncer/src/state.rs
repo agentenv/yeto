@@ -60,7 +60,7 @@ pub struct GlobalState {
     pub layout_meta: Option<String>,
     /// Θ_p, flat f32 per fragment (concatenated tensors in layout order).
     pub params: Vec<Vec<f32>>,
-    /// Nesterov momentum buffers, same shape as params.
+    /// Outer-optimizer buffers, same shape as params.
     momentum: Vec<Vec<f32>>,
     pub initialized: Vec<bool>,
     /// Global step at which each fragment was last merged (its version).
@@ -71,6 +71,8 @@ pub struct GlobalState {
     pub outer_lr: f32,
     pub outer_lr_by_fragment: Option<Vec<f32>>,
     pub outer_momentum: f32,
+    pub outer_optimizer: merge::OuterOptimizer,
+    pub outer_restart_cos_threshold: f32,
     /// Dtype used on the wire (from HELLO); merge math stays f32.
     pub wire_dtype: u8,
     /// HeLoCo per-tensor directional correction of learner deltas against
@@ -102,6 +104,8 @@ impl GlobalState {
             outer_lr,
             outer_lr_by_fragment: None,
             outer_momentum,
+            outer_optimizer: merge::OuterOptimizer::Nesterov,
+            outer_restart_cos_threshold: 0.0,
             wire_dtype,
             delta_correction: None,
         }
@@ -193,13 +197,30 @@ impl GlobalState {
             .as_ref()
             .map(|rates| rates[fid])
             .unwrap_or(self.outer_lr);
-        merge::nesterov_step(
-            &mut self.params[fid],
-            &mut self.momentum[fid],
-            &delta,
-            outer_lr,
-            self.outer_momentum,
-        );
+        match self.outer_optimizer {
+            merge::OuterOptimizer::Nesterov => merge::nesterov_step(
+                &mut self.params[fid],
+                &mut self.momentum[fid],
+                &delta,
+                outer_lr,
+                self.outer_momentum,
+            ),
+            merge::OuterOptimizer::NormalizedEma => merge::normalized_ema_step(
+                &mut self.params[fid],
+                &mut self.momentum[fid],
+                &delta,
+                outer_lr,
+                self.outer_momentum,
+            ),
+            merge::OuterOptimizer::RestartedEma => merge::restarted_ema_step(
+                &mut self.params[fid],
+                &mut self.momentum[fid],
+                &delta,
+                outer_lr,
+                self.outer_momentum,
+                self.outer_restart_cos_threshold,
+            ),
+        }
         Ok(gnorm)
     }
 }
@@ -337,6 +358,20 @@ mod tests {
     }
 
     #[test]
+    fn default_outer_optimizer_regresses_to_nesterov() {
+        let mut st = GlobalState::new(layout2(), None, 0.7, 0.9, crate::protocol::DTYPE_F32);
+        assert_eq!(st.outer_optimizer, merge::OuterOptimizer::Nesterov);
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![0.0; 4]).unwrap();
+        st.merge_and_step(0, &[&[0.5f32; 4]], &[1.0]).unwrap();
+        let expected = 1.0 - 0.7 * (0.5 + 0.9 * 0.5);
+        for value in &st.params[0] {
+            assert!((*value - expected).abs() < 1e-6);
+        }
+        assert_eq!(st.momentum[0], vec![0.5; 4]);
+    }
+
+    #[test]
     fn fragment_outer_lr_overrides_global_rate() {
         let mut st = GlobalState::new(layout2(), None, 1.0, 0.0, crate::protocol::DTYPE_F32);
         st.outer_lr_by_fragment = Some(vec![0.5, 1.0]);
@@ -370,6 +405,30 @@ mod tests {
         assert!(st2.all_initialized());
         assert_eq!(st2.ledger.get(&3).unwrap().tokens, 4096);
         assert_eq!(st2.layout_meta.as_deref(), Some("{\"task\":\"nava\"}"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn legacy_checkpoint_load_preserves_runtime_outer_policy() {
+        let dir = std::env::temp_dir().join("yeto-ckpt-outer-policy-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+
+        let mut legacy = GlobalState::new(layout2(), None, 0.7, 0.9, crate::protocol::DTYPE_F32);
+        legacy.init_fragment(0, vec![1.0; 4]).unwrap();
+        legacy.init_fragment(1, vec![0.0; 4]).unwrap();
+        legacy.merge_and_step(0, &[&[0.0f32; 4]], &[1.0]).unwrap();
+        legacy.save_checkpoint(&path).unwrap();
+
+        let mut resumed = GlobalState::new(layout2(), None, 0.2, 0.8, crate::protocol::DTYPE_F32);
+        resumed.outer_optimizer = merge::OuterOptimizer::RestartedEma;
+        resumed.outer_restart_cos_threshold = -0.25;
+        resumed.load_checkpoint(&path).unwrap();
+
+        assert_eq!(resumed.params, legacy.params);
+        assert_eq!(resumed.momentum, legacy.momentum);
+        assert_eq!(resumed.outer_optimizer, merge::OuterOptimizer::RestartedEma);
+        assert_eq!(resumed.outer_restart_cos_threshold, -0.25);
         std::fs::remove_file(&path).ok();
     }
 

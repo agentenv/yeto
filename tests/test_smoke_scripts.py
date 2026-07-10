@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,10 +102,43 @@ def test_compare_outer_optimizer_override_is_explicit():
     from dataclasses import replace
 
     arm = compare.PRESETS["m4"]
-    tuned = replace(arm, outer_lr=0.35, outer_momentum=0.8)
+    tuned = replace(
+        arm,
+        outer_lr=0.35,
+        outer_momentum=0.8,
+        outer_optimizer="restarted-ema",
+        outer_restart_cos_threshold=-0.25,
+    )
     cmd = compare.syncer_command(tuned, 1234, Path("/tmp/w/m4"), total_steps=100)
     assert cmd[cmd.index("--outer-lr") + 1] == "0.35"
     assert cmd[cmd.index("--outer-momentum") + 1] == "0.8"
+    assert cmd[cmd.index("--outer-optimizer") + 1] == "restarted-ema"
+    assert cmd[cmd.index("--outer-restart-cos-threshold") + 1] == "-0.25"
+
+
+def test_compare_outer_optimizer_defaults_match_syncer_defaults():
+    arm = compare.PRESETS["m4"]
+
+    assert arm.outer_optimizer == "nesterov"
+    assert arm.outer_restart_cos_threshold == 0.0
+    cmd = compare.syncer_command(arm, 1234, Path("/tmp/w/m4"), total_steps=40)
+    assert cmd[cmd.index("--outer-optimizer") + 1] == "nesterov"
+    assert cmd[cmd.index("--outer-restart-cos-threshold") + 1] == "0.0"
+
+
+def test_compare_outer_optimizer_override_applies_to_every_selected_arm():
+    original = compare.select_arms("m4,q4")
+    overridden = compare.apply_arm_overrides(
+        original,
+        outer_optimizer="normalized-ema",
+        outer_restart_cos_threshold=-0.1,
+    )
+
+    assert all(arm.outer_optimizer == "normalized-ema" for arm in overridden)
+    assert all(arm.outer_restart_cos_threshold == -0.1 for arm in overridden)
+    assert all(after is not before for before, after in zip(original, overridden))
+    assert compare.PRESETS["m4"].outer_optimizer == "nesterov"
+    assert compare.PRESETS["m4"].outer_restart_cos_threshold == 0.0
 
 
 def test_compare_delta_correction_override_applies_to_every_selected_arm():
@@ -130,6 +164,10 @@ def test_compare_delta_correction_cli_overrides_m4(monkeypatch, capsys):
             "m4",
             "--delta-correction",
             "none",
+            "--outer-optimizer",
+            "restarted-ema",
+            "--outer-restart-cos-threshold",
+            "-0.25",
             "--dry-run",
         ],
     )
@@ -137,7 +175,31 @@ def test_compare_delta_correction_cli_overrides_m4(monkeypatch, capsys):
     assert compare.main() == 0
     out = capsys.readouterr().out
     assert "m4" in out and "M=4" in out
+    assert "optimizer=restarted-ema" in out
+    assert "restart_cos=-0.25" in out
     assert "correction=none" in out
+
+
+def test_compare_outer_optimizer_cli_rejects_invalid_choice(monkeypatch, capsys):
+    import pytest
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compare_diloco.py",
+            "--data",
+            "unused.jsonl",
+            "--outer-optimizer",
+            "ema",
+            "--dry-run",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        compare.main()
+    assert exc_info.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_compare_arm_replacement_propagates_all_outer_overrides_to_syncer():
@@ -302,6 +364,78 @@ def test_syncer_command_can_enable_probe_capture():
     )
     assert cmd[cmd.index("--probe-capture-dir") + 1] == "/tmp/w/m12/syncer_probe"
     assert cmd[cmd.index("--probe-capture-every") + 1] == "3"
+
+
+def test_ensure_syncer_rebuilds_when_rust_source_is_newer(
+    tmp_path, monkeypatch, capsys
+):
+    syncer_dir = tmp_path / "syncer"
+    source_dir = syncer_dir / "src"
+    binary = syncer_dir / "target" / "release" / "yeto-syncer"
+    source_dir.mkdir(parents=True)
+    binary.parent.mkdir(parents=True)
+    inputs = [
+        syncer_dir / "Cargo.toml",
+        syncer_dir / "Cargo.lock",
+        source_dir / "main.rs",
+    ]
+    for path in [*inputs, binary]:
+        path.write_text("test")
+
+    old_ns = 1_000_000_000
+    binary_ns = 2_000_000_000
+    for path in inputs:
+        os.utime(path, ns=(old_ns, old_ns))
+    os.utime(binary, ns=(binary_ns, binary_ns))
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+
+    monkeypatch.setattr(compare, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(compare, "SYNCER_BIN", binary)
+    monkeypatch.setattr(compare.subprocess, "run", fake_run)
+
+    compare.ensure_syncer()
+    assert calls == []
+    assert capsys.readouterr().out == ""
+
+    stale_ns = 3_000_000_000
+    os.utime(inputs[-1], ns=(stale_ns, stale_ns))
+    compare.ensure_syncer()
+
+    assert calls == [
+        (
+            ["cargo", "build", "--release", "-q"],
+            {"cwd": syncer_dir, "check": True},
+        )
+    ]
+    assert capsys.readouterr().out == (
+        "[compare] building syncer (cargo build --release)\n"
+    )
+
+
+def test_compare_eval_only_does_not_build_syncer(monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compare_diloco.py",
+            "--data",
+            "unused.jsonl",
+            "--eval-only",
+        ],
+    )
+    monkeypatch.setattr(compare, "eval_loss_per_token", lambda *args: 1.25)
+
+    def unexpected_syncer_build():
+        raise AssertionError("unexpected syncer build")
+
+    monkeypatch.setattr(compare, "ensure_syncer", unexpected_syncer_build)
+
+    assert compare.main() == 0
+    assert capsys.readouterr().out == "EVAL_LOSS 1.250000\n"
 
 
 def test_calibrate_fragment_score_writes_heldout_split(tmp_path):

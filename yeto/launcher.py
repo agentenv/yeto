@@ -239,6 +239,9 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --total-steps {args.total_steps}"
         f" --outer-lr {args.outer_lr}"
         f" --outer-momentum {args.outer_momentum}"
+        f" --outer-optimizer {getattr(args, 'outer_optimizer', 'nesterov')}"
+        f" --outer-restart-cos-threshold "
+        f"{getattr(args, 'outer_restart_cos_threshold', 0.0)}"
         f" --checkpoint-path ~/yeto-state.ckpt --resume"
         f" --event-tape ~/yeto-tape.jsonl"
     )

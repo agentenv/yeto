@@ -13,8 +13,54 @@
 //! shrink as R/√M and force outer-lr retuning. Applied per tensor within a
 //! fragment. Degenerate mean direction falls back to direct averaging.
 //!
-//! Outer optimizer: SGD with Nesterov momentum, state held here on the
-//! syncer, with defaults lr=0.7 and μ=0.9.
+//! Outer optimizer state is held on the syncer. Nesterov remains the default;
+//! normalized EMA variants are available for gain-controlled experiments.
+
+use std::fmt;
+use std::str::FromStr;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OuterOptimizer {
+    #[default]
+    Nesterov,
+    NormalizedEma,
+    RestartedEma,
+}
+
+impl OuterOptimizer {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Nesterov => "nesterov",
+            Self::NormalizedEma => "normalized-ema",
+            Self::RestartedEma => "restarted-ema",
+        }
+    }
+
+    pub const fn uses_normalized_ema(self) -> bool {
+        matches!(self, Self::NormalizedEma | Self::RestartedEma)
+    }
+}
+
+impl fmt::Display for OuterOptimizer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for OuterOptimizer {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "nesterov" => Ok(Self::Nesterov),
+            "normalized-ema" => Ok(Self::NormalizedEma),
+            "restarted-ema" => Ok(Self::RestartedEma),
+            other => Err(format!(
+                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema; got {other:?}"
+            )),
+        }
+    }
+}
 
 /// w_m = c_tokens² / c_steps ("quantity × quality").
 pub fn learner_weight(c_tokens: u64, c_steps: u32) -> f64 {
@@ -99,6 +145,89 @@ pub fn nesterov_step(params: &mut [f32], buf: &mut [f32], delta: &[f32], lr: f32
         *b = mu * *b + *d;
         *p -= lr * (*d + mu * *b);
     }
+}
+
+fn norm_sq(values: &[f32]) -> f64 {
+    values.iter().map(|value| (*value as f64).powi(2)).sum()
+}
+
+fn is_zero(values: &[f32]) -> bool {
+    values.iter().all(|value| *value == 0.0)
+}
+
+fn update_normalized_ema(
+    buf: &mut [f32],
+    delta: &[f32],
+    beta: f32,
+    buf_is_zero: bool,
+    delta_is_zero: bool,
+) {
+    if buf_is_zero && !delta_is_zero {
+        buf.copy_from_slice(delta);
+        return;
+    }
+    for (b, d) in buf.iter_mut().zip(delta) {
+        *b = beta * *b + (1.0 - beta) * *d;
+    }
+}
+
+fn apply_buffer(params: &mut [f32], buf: &[f32], lr: f32) {
+    for (p, b) in params.iter_mut().zip(buf) {
+        *p -= lr * *b;
+    }
+}
+
+/// Unit-gain exponential moving average of the merged pseudo-gradient.
+/// A zero buffer initializes from the first nonzero delta, avoiding the
+/// usual EMA warmup attenuation.
+pub fn normalized_ema_step(params: &mut [f32], buf: &mut [f32], delta: &[f32], lr: f32, beta: f32) {
+    debug_assert_eq!(params.len(), buf.len());
+    debug_assert_eq!(buf.len(), delta.len());
+    let buf_is_zero = is_zero(buf);
+    let delta_is_zero = is_zero(delta);
+    update_normalized_ema(buf, delta, beta, buf_is_zero, delta_is_zero);
+    apply_buffer(params, buf, lr);
+}
+
+/// Normalized EMA with a gradient-restart criterion. When both vectors are
+/// nonzero and their cosine is at or below `threshold`, history is discarded
+/// and the current delta becomes the full buffer. A zero delta follows the
+/// ordinary EMA decay; a zero buffer initializes exactly as above.
+pub fn restarted_ema_step(
+    params: &mut [f32],
+    buf: &mut [f32],
+    delta: &[f32],
+    lr: f32,
+    beta: f32,
+    threshold: f32,
+) {
+    debug_assert_eq!(params.len(), buf.len());
+    debug_assert_eq!(buf.len(), delta.len());
+    let buf_norm_sq = norm_sq(buf);
+    let delta_norm_sq = norm_sq(delta);
+    let restart = if buf_norm_sq > 0.0 && delta_norm_sq > 0.0 {
+        let dot: f64 = buf
+            .iter()
+            .zip(delta)
+            .map(|(b, d)| *b as f64 * *d as f64)
+            .sum();
+        let cosine = (dot / (buf_norm_sq * delta_norm_sq).sqrt()).clamp(-1.0, 1.0);
+        cosine <= threshold as f64
+    } else {
+        false
+    };
+    if restart {
+        buf.copy_from_slice(delta);
+    } else {
+        update_normalized_ema(
+            buf,
+            delta,
+            beta,
+            buf_norm_sq == 0.0,
+            delta_norm_sq == 0.0,
+        );
+    }
+    apply_buffer(params, buf, lr);
 }
 
 /// HeLoCo per-tensor directional correction (arXiv 2606.00271, Alg. 1).
@@ -321,5 +450,63 @@ mod tests {
         nesterov_step(&mut p, &mut buf, &[0.5], 0.7, 0.9);
         assert!((p[0] - (1.0 - 0.7 * (0.5 + 0.9 * 0.5))).abs() < 1e-6);
         assert!((buf[0] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normalized_ema_matches_reference() {
+        let mut p = [1.0f32, -1.0];
+        let mut buf = [0.0f32, 0.0];
+        normalized_ema_step(&mut p, &mut buf, &[0.5, -0.25], 0.2, 0.8);
+        assert_eq!(buf, [0.5, -0.25]);
+        assert!((p[0] - 0.9).abs() < 1e-6);
+        assert!((p[1] + 0.95).abs() < 1e-6);
+
+        normalized_ema_step(&mut p, &mut buf, &[1.0, 0.75], 0.2, 0.8);
+        assert!((buf[0] - 0.6).abs() < 1e-6);
+        assert!((buf[1] + 0.05).abs() < 1e-6);
+        assert!((p[0] - 0.78).abs() < 1e-6);
+        assert!((p[1] + 0.94).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normalized_ema_has_unit_gain_from_first_constant_gradient() {
+        let mut p = [2.0f32];
+        let mut buf = [0.0f32];
+        for step in 1..=5 {
+            normalized_ema_step(&mut p, &mut buf, &[0.5], 0.2, 0.9);
+            assert!((buf[0] - 0.5).abs() < 1e-6);
+            assert!((p[0] - (2.0 - step as f32 * 0.1)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn restarted_ema_discards_conflicting_history() {
+        let mut p = [0.0f32, 0.0];
+        let mut buf = [1.0f32, 0.0];
+        restarted_ema_step(&mut p, &mut buf, &[-2.0, 0.0], 0.25, 0.9, 0.0);
+        assert_eq!(buf, [-2.0, 0.0]);
+        assert_eq!(p, [0.5, 0.0]);
+    }
+
+    #[test]
+    fn restarted_ema_handles_zero_norms_deterministically() {
+        let mut p = [1.0f32];
+        let mut buf = [0.0f32];
+        restarted_ema_step(&mut p, &mut buf, &[0.0], 1.0, 0.5, 0.0);
+        assert_eq!(buf, [0.0]);
+        assert_eq!(p, [1.0]);
+
+        buf[0] = 1.0;
+        restarted_ema_step(&mut p, &mut buf, &[0.0], 1.0, 0.5, 0.0);
+        assert_eq!(buf, [0.5]);
+        assert_eq!(p, [0.5]);
+    }
+
+    #[test]
+    fn outer_optimizer_names_are_strict() {
+        assert_eq!("nesterov".parse(), Ok(OuterOptimizer::Nesterov));
+        assert_eq!("normalized-ema".parse(), Ok(OuterOptimizer::NormalizedEma));
+        assert_eq!("restarted-ema".parse(), Ok(OuterOptimizer::RestartedEma));
+        assert!("ema".parse::<OuterOptimizer>().is_err());
     }
 }
