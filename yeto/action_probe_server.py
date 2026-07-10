@@ -60,6 +60,27 @@ from .action_probe import (
 
 log = logging.getLogger("action-probe")
 
+ACTION_PROBE_DECISION_PREFIX = "ACTION_PROBE_DECISION "
+
+
+def _log_successful_decision(
+    response: dict[str, Any], selection: SelectionConfig
+) -> None:
+    """Emit one canonical audit record for a successful evaluation response."""
+
+    if response.get("type") != "evaluate_result" or response.get("ok") is not True:
+        return
+    evidence = dict(response)
+    evidence["selection_config"] = asdict(selection)
+    encoded = json.dumps(
+        evidence,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+    log.info("%s%s", ACTION_PROBE_DECISION_PREFIX, encoded)
+
 
 @dataclass(frozen=True)
 class ReplicaConfig:
@@ -838,6 +859,7 @@ class ActionProbeEngine:
                 response = copy.deepcopy(cached_response)
                 response["cache_hit"] = True
                 response["retry_lookup_ms"] = (time.perf_counter() - started) * 1000.0
+                _log_successful_decision(response, self.selection)
                 return response
             if request.anchor_manifest_sha256 != self.backend.anchor_manifest_sha256:
                 raise RequestValidationError(
@@ -932,6 +954,7 @@ class ActionProbeEngine:
             # Verify JSON finiteness before caching or sending a decision.
             json.dumps(response, allow_nan=False)
             self._cache_response(key, frame.digest, response)
+            _log_successful_decision(response, self.selection)
             return response
         except Exception as exc:
             log.exception("action-probe request failed closed")
