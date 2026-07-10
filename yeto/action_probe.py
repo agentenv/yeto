@@ -1126,13 +1126,17 @@ def select_paired_lcb(
     *,
     eligible_actions: Sequence[str] | None = None,
     baseline_losses_by_action: Mapping[str, Sequence[float]] | None = None,
+    action_multipliers: Mapping[str, float] | None = None,
 ) -> SelectionResult:
     """Select an action by deterministic paired-panel confidence bounds.
 
     Gain is ``loss(A0) - loss(Ai)``.  A nonbaseline action must have a
     positive LCB, mean gain at least ``min_gain``, and the configured panel
     win rate.  Any malformed/non-finite input returns A0 rather than raising.
-    Ties are broken by LCB, mean gain, win rate, then the fixed action order.
+    Ties are broken by LCB, mean gain, and win rate. Scalar actions may also
+    provide their multipliers, in which case ties prefer the multiplier
+    closest to 1.0 and then the lower multiplier. Other action families retain
+    the fixed action order.
     """
 
     try:
@@ -1158,6 +1162,23 @@ def select_paired_lcb(
         )
         if not allowed <= set(ACTION_NAMES[1:]):
             raise ValueError("eligible_actions contains an invalid action")
+        normalized_multipliers = None
+        if action_multipliers is not None:
+            if set(action_multipliers) != set(ACTION_NAMES[1:]):
+                raise ValueError("action_multipliers must contain A1-A4")
+            normalized_multipliers = {
+                action: float(action_multipliers[action])
+                for action in ACTION_NAMES[1:]
+            }
+            if any(
+                not math.isfinite(multiplier) or multiplier <= 0
+                for multiplier in normalized_multipliers.values()
+            ):
+                raise ValueError("action_multipliers contains an invalid value")
+            if len(set(normalized_multipliers.values())) != len(
+                normalized_multipliers
+            ):
+                raise ValueError("action_multipliers contains duplicates")
         if baseline_losses_by_action is None:
             paired_baselines = {
                 action: normalized[BASELINE_ACTION] for action in ACTION_NAMES[1:]
@@ -1223,16 +1244,28 @@ def select_paired_lcb(
     eligible = [stat for stat in stats if stat.eligible]
     if not eligible:
         return SelectionResult(BASELINE_ACTION, "no_action_passed", tuple(stats))
-    action_rank = {action: index for index, action in enumerate(ACTION_NAMES)}
-    winner = max(
-        eligible,
-        key=lambda stat: (
-            stat.lcb,
-            stat.mean_gain,
-            stat.win_rate,
-            -action_rank[stat.action],
-        ),
-    )
+    if normalized_multipliers is not None:
+        winner = max(
+            eligible,
+            key=lambda stat: (
+                stat.lcb,
+                stat.mean_gain,
+                stat.win_rate,
+                -abs(normalized_multipliers[stat.action] - 1.0),
+                -normalized_multipliers[stat.action],
+            ),
+        )
+    else:
+        action_rank = {action: index for index, action in enumerate(ACTION_NAMES)}
+        winner = max(
+            eligible,
+            key=lambda stat: (
+                stat.lcb,
+                stat.mean_gain,
+                stat.win_rate,
+                -action_rank[stat.action],
+            ),
+        )
     return SelectionResult(winner.action, None, tuple(stats))
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import socket
 import threading
@@ -39,6 +40,7 @@ from yeto.action_probe_server import (
     ActionProbeEngine,
     ActionProbeTCPService,
     _parse_listen,
+    _probe_config_sha256,
 )
 from yeto.data import build_packed_dataset
 
@@ -359,6 +361,49 @@ def test_paired_lcb_selects_deterministically_and_falls_back():
     assert strict.selected_action == "A0"
     assert strict.fallback_reason == "no_action_passed"
 
+    tied = {action: [1.0] * 8 for action in ACTION_NAMES}
+    for action in ACTION_NAMES[1:]:
+        tied[action] = [0.999] * 8
+    assert select_paired_lcb(tied).selected_action == "A1"
+
+
+def test_probe_config_digest_binds_all_selection_thresholds():
+    static_config = {"protocol": PROTOCOL, "panels": 8, "model": "fixture"}
+    baseline = SelectionConfig()
+    variants = (
+        SelectionConfig(
+            min_gain=baseline.min_gain + 0.0001,
+            lcb_z=baseline.lcb_z,
+            min_win_rate=baseline.min_win_rate,
+            min_panels=baseline.min_panels,
+        ),
+        SelectionConfig(
+            min_gain=baseline.min_gain,
+            lcb_z=baseline.lcb_z + 0.1,
+            min_win_rate=baseline.min_win_rate,
+            min_panels=baseline.min_panels,
+        ),
+        SelectionConfig(
+            min_gain=baseline.min_gain,
+            lcb_z=baseline.lcb_z,
+            min_win_rate=baseline.min_win_rate + 0.05,
+            min_panels=baseline.min_panels,
+        ),
+        SelectionConfig(
+            min_gain=baseline.min_gain,
+            lcb_z=baseline.lcb_z,
+            min_win_rate=baseline.min_win_rate,
+            min_panels=baseline.min_panels + 1,
+        ),
+    )
+
+    baseline_digest = _probe_config_sha256(static_config, baseline)
+
+    assert all(
+        _probe_config_sha256(static_config, variant) != baseline_digest
+        for variant in variants
+    )
+
 
 class FakeTokenizer:
     bos_token_id = 1
@@ -632,9 +677,10 @@ class FakeBackend:
     probe_config_sha256 = PROBE_CONFIG_DIGEST
     layout_hash = LAYOUT_DIGEST
 
-    def __init__(self, *, fail=False):
+    def __init__(self, *, fail=False, values=None):
         self.calls = 0
         self.fail = fail
+        self.values = values
 
     def describe(self):
         return {"kind": "fake"}
@@ -644,7 +690,7 @@ class FakeBackend:
         self.calls += 1
         if self.fail:
             raise RuntimeError("synthetic evaluator failure")
-        values = {
+        values = self.values or {
             "A0": [1.0] * 8,
             "A1": [0.999] * 8,
             "A2": [1.001] * 8,
@@ -737,6 +783,49 @@ def test_engine_uses_a0_as_the_step_scale_pairing_and_fallback():
     )
     assert fallback["selected_action"] == "A0"
     assert fallback["selected_action_metadata"]["step_scale"] == 0.875
+
+
+def test_equal_statistics_scalar_tie_matches_offline_multiplier_order():
+    scales = (1.0, 1.25, 1.5, 0.5, 0.75)
+    metadata = _valid_step_scale_metadata(scales)
+    values = {"A0": [1.0] * 8}
+    values.update({action: [0.999] * 8 for action in ACTION_NAMES[1:]})
+    engine = ActionProbeEngine(FakeBackend(values=values))
+
+    response = engine.handle(
+        decode_frame(
+            _request_bytes(
+                request_id="scalar-tie",
+                action_family=STEP_SCALE_ACTION_FAMILY,
+                action_metadata=metadata,
+            )
+        )
+    )
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "action_probe_offline_tie", root / "scripts" / "replay_exact_lr_probe.py"
+    )
+    offline = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(offline)
+    offline_result = offline.select_multiplier(
+        {
+            metadata[action]["step_scale"]: values[action]
+            for action in ACTION_NAMES
+        },
+        scales,
+        min_gain=engine.selection.min_gain,
+        lcb_z=engine.selection.lcb_z,
+        min_win_rate=engine.selection.min_win_rate,
+        min_panels=engine.selection.min_panels,
+    )
+
+    assert offline_result["chosen_multiplier"] == 0.75
+    assert response["selected_action"] == "A4"
+    assert response["selected_action_metadata"]["step_scale"] == offline_result[
+        "chosen_multiplier"
+    ]
 
 
 def test_engine_fails_closed_on_backend_error():

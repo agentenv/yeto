@@ -58,14 +58,18 @@ import argparse
 import json
 import math
 import random
+import re
+import shlex
 import shutil
 import socket
 import subprocess
 import sys
 import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -83,6 +87,26 @@ LOO_COMMIT_POLICIES = frozenset(("probe_shadow", "probe_loo_v1"))
 ACTION_PROBE_MIN_GAIN = 0.00025
 ACTION_PROBE_LCB_Z = 2.365
 ACTION_PROBE_MIN_WIN_RATE = 0.75
+ACTION_PROBE_ACTIONS = ("A0", "A1", "A2", "A3", "A4")
+ACTION_PROBE_SHADOW_POLICIES = frozenset(("probe_shadow", "probe_lr_shadow"))
+ACTION_PROBE_ACTIVE_POLICIES = frozenset(("probe_loo_v1", "probe_lr_v1"))
+ACTION_PROBE_SCALAR_MULTIPLIERS = {
+    action: multiplier
+    for action, multiplier in zip(
+        ACTION_PROBE_ACTIONS, (1.0, 0.75, 1.125, 1.25, 1.5)
+    )
+}
+ACTION_PROBE_DIGEST_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
+ACTION_PROBE_SUMMARY_FILENAME = "action_probe_run_summary.json"
+ACTION_PROBE_TRANSPORT_CONFIG_FALLBACK_REASONS = frozenset(
+    ("preview_construction_error", "protocol_error", "unsafe_probe_response")
+)
+ACTION_PROBE_TRANSPORT_CONFIG_FALLBACK_PREFIXES = (
+    "action_probe_",
+    "config_",
+    "probe_",
+    "transport_",
+)
 
 
 @dataclass(frozen=True)
@@ -746,10 +770,400 @@ def stop_action_probe(sidecar: ActionProbeProcess) -> None:
         sidecar.log_handle.close()
 
 
+def _load_event_tape(arm: Arm, tape_path: Path) -> list[dict]:
+    try:
+        lines = tape_path.read_text().splitlines()
+    except OSError as exc:
+        raise RuntimeError(f"{arm.name}: cannot read event tape {tape_path}: {exc}") from exc
+
+    def reject_nonfinite(value: str):
+        raise ValueError(f"non-finite JSON constant {value}")
+
+    records = []
+    for line_number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line, parse_constant=reject_nonfinite)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"{arm.name}: malformed event tape JSON at line {line_number}: {exc}"
+            ) from exc
+        if not isinstance(record, dict):
+            raise RuntimeError(
+                f"{arm.name}: event tape line {line_number} is not a JSON object"
+            )
+        records.append(record)
+    return records
+
+
+def validate_event_tape_records(
+    arm: Arm, records: list[dict], *, expected_steps: int = 0
+) -> None:
+    if expected_steps and len(records) != expected_steps:
+        raise RuntimeError(
+            f"{arm.name}: expected {expected_steps} outer steps, "
+            f"event tape has {len(records)}"
+        )
+
+    probe_policy = arm.commit_policy != "token_weighted"
+    if not (arm.strict_quorum or probe_policy):
+        return
+    expected_responders = list(range(arm.m))
+    mode = "probe" if probe_policy else "strict-quorum"
+    for index, record in enumerate(records, 1):
+        if not isinstance(record, dict):
+            raise RuntimeError(
+                f"{arm.name}: {mode} event tape record {index} is not an object"
+            )
+        responders = record.get("responders")
+        step = record.get("step", "?")
+        if not isinstance(responders, list):
+            raise RuntimeError(
+                f"{arm.name}: {mode} run has malformed responders at step {step}: "
+                "responders must be a list"
+            )
+        responder_ids = []
+        for position, responder in enumerate(responders):
+            if not isinstance(responder, dict):
+                raise RuntimeError(
+                    f"{arm.name}: {mode} run has malformed responder {position} "
+                    f"at step {step}: expected an object, got {responder!r}"
+                )
+            missing = [
+                field
+                for field in ("id", "base_version", "c_steps", "c_tokens", "weight")
+                if field not in responder
+            ]
+            if missing:
+                raise RuntimeError(
+                    f"{arm.name}: {mode} run has malformed responder {position} "
+                    f"at step {step}: missing {missing}"
+                )
+            responder_id = responder["id"]
+            base_version = responder["base_version"]
+            c_steps = responder["c_steps"]
+            c_tokens = responder["c_tokens"]
+            if (
+                isinstance(responder_id, bool)
+                or not isinstance(responder_id, int)
+                or responder_id < 0
+            ):
+                raise RuntimeError(
+                    f"{arm.name}: {mode} run has malformed responder {position} "
+                    f"at step {step}: id must be a non-negative integer"
+                )
+            if (
+                isinstance(base_version, bool)
+                or not isinstance(base_version, int)
+                or base_version < 0
+            ):
+                raise RuntimeError(
+                    f"{arm.name}: {mode} run has malformed responder {position} "
+                    f"at step {step}: base_version must be a non-negative integer"
+                )
+            for field, value in (("c_steps", c_steps), ("c_tokens", c_tokens)):
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise RuntimeError(
+                        f"{arm.name}: {mode} run has malformed responder {position} "
+                        f"at step {step}: {field} must be a positive integer"
+                    )
+            weight = responder["weight"]
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+                raise RuntimeError(
+                    f"{arm.name}: {mode} run has malformed responder {position} "
+                    f"at step {step}: weight must be a positive finite number"
+                )
+            try:
+                weight_number = float(weight)
+                expected_weight = float(c_tokens) ** 2 / c_steps
+            except OverflowError:
+                raise RuntimeError(
+                    f"{arm.name}: {mode} run has malformed responder {position} "
+                    f"at step {step}: weight fields overflow"
+                ) from None
+            if not math.isfinite(weight_number) or weight_number <= 0 or not math.isclose(
+                weight_number, expected_weight, rel_tol=1e-12, abs_tol=0.0
+            ):
+                raise RuntimeError(
+                    f"{arm.name}: {mode} run has malformed responder {position} "
+                    f"at step {step}: weight {weight_number!r} does not match "
+                    f"c_tokens^2/c_steps ({expected_weight!r})"
+                )
+            responder_ids.append(responder_id)
+        normalized_ids = sorted(responder_ids)
+        if normalized_ids != expected_responders:
+            raise RuntimeError(
+                f"{arm.name}: {mode} run has invalid responders at step {step}: "
+                f"expected IDs {expected_responders}, got {normalized_ids}"
+            )
+
+
+def _probe_record_error(
+    arm: Arm, index: int, record: dict, message: str
+) -> NoReturn:
+    step = record.get("step", "?")
+    fragment = record.get("fragment", "?")
+    raise RuntimeError(
+        f"{arm.name}: malformed action-probe record {index} "
+        f"(step={step}, fragment={fragment}): {message}"
+    )
+
+
+def _positive_finite_probe_number(
+    arm: Arm, index: int, record: dict, field: str
+) -> float:
+    value = record.get(field)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _probe_record_error(
+            arm, index, record, f"{field} must be a positive finite number"
+        )
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        _probe_record_error(
+            arm, index, record, f"{field} must be a positive finite number"
+        )
+    if not math.isfinite(number) or number <= 0:
+        _probe_record_error(
+            arm, index, record, f"{field} must be a positive finite number"
+        )
+    return number
+
+
+def _probe_percentile(values: list[float], quantile: float) -> float:
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * quantile
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def _is_transport_or_config_fallback(reason: str) -> bool:
+    return reason in ACTION_PROBE_TRANSPORT_CONFIG_FALLBACK_REASONS or reason.startswith(
+        ACTION_PROBE_TRANSPORT_CONFIG_FALLBACK_PREFIXES
+    )
+
+
+def validate_action_probe_run(
+    arm: Arm,
+    records: list[dict],
+    arm_dir: Path,
+    *,
+    expected_steps: int = 0,
+) -> dict:
+    policy = arm.commit_policy
+    probe_policies = ACTION_PROBE_SHADOW_POLICIES | ACTION_PROBE_ACTIVE_POLICIES
+    if policy not in probe_policies:
+        raise ValueError(f"{policy} is not an action-probe commit policy")
+
+    validate_event_tape_records(arm, records, expected_steps=expected_steps)
+    if not records:
+        raise RuntimeError(f"{arm.name}: action-probe event tape has no records")
+
+    selected_counts: Counter[str] = Counter()
+    committed_counts: Counter[str] = Counter()
+    fallback_reasons: Counter[str] = Counter()
+    latencies = []
+    fallback_count = 0
+    transport_config_fallback_count = 0
+
+    for index, record in enumerate(records, 1):
+        if record.get("policy") != policy:
+            _probe_record_error(
+                arm,
+                index,
+                record,
+                f"policy must be {policy!r}, got {record.get('policy')!r}",
+            )
+
+        selected_action = record.get("selected_action")
+        committed_action = record.get("committed_action")
+        if selected_action not in ACTION_PROBE_ACTIONS:
+            _probe_record_error(
+                arm, index, record, f"unknown selected_action {selected_action!r}"
+            )
+        if committed_action not in ACTION_PROBE_ACTIONS:
+            _probe_record_error(
+                arm, index, record, f"unknown committed_action {committed_action!r}"
+            )
+
+        selected_multiplier = _positive_finite_probe_number(
+            arm, index, record, "selected_multiplier"
+        )
+        committed_multiplier = _positive_finite_probe_number(
+            arm, index, record, "committed_multiplier"
+        )
+        latency = _positive_finite_probe_number(
+            arm, index, record, "probe_latency_ms"
+        )
+        request_digest = record.get("request_digest")
+        if not isinstance(request_digest, str) or not ACTION_PROBE_DIGEST_RE.fullmatch(
+            request_digest
+        ):
+            _probe_record_error(
+                arm, index, record, "request_digest must be exactly 64 hexadecimal characters"
+            )
+
+        fallback = record.get("fallback")
+        fallback_reason = record.get("fallback_reason")
+        if not isinstance(fallback, bool):
+            _probe_record_error(arm, index, record, "fallback must be boolean")
+        if fallback_reason is not None and (
+            not isinstance(fallback_reason, str)
+            or not fallback_reason
+            or len(fallback_reason) > 256
+        ):
+            _probe_record_error(
+                arm,
+                index,
+                record,
+                "fallback_reason must be null or a non-empty string of at most 256 characters",
+            )
+        if fallback != (selected_action == "A0"):
+            _probe_record_error(
+                arm,
+                index,
+                record,
+                "fallback must be true exactly when A0 is selected",
+            )
+        if fallback and fallback_reason is None:
+            _probe_record_error(
+                arm, index, record, "an A0 fallback must include fallback_reason"
+            )
+        if not fallback and fallback_reason is not None:
+            _probe_record_error(
+                arm, index, record, "a selected alternative cannot carry fallback_reason"
+            )
+
+        if selected_action == "A0" and selected_multiplier != 1.0:
+            _probe_record_error(
+                arm, index, record, "A0 selected_multiplier must be exactly 1.0"
+            )
+        if policy in ("probe_lr_shadow", "probe_lr_v1"):
+            expected_multiplier = ACTION_PROBE_SCALAR_MULTIPLIERS[selected_action]
+            if selected_multiplier != expected_multiplier:
+                _probe_record_error(
+                    arm,
+                    index,
+                    record,
+                    f"{selected_action} selected_multiplier must be exactly "
+                    f"{expected_multiplier} for {policy}",
+                )
+
+        if policy in ACTION_PROBE_SHADOW_POLICIES:
+            if committed_action != "A0" or committed_multiplier != 1.0:
+                _probe_record_error(
+                    arm,
+                    index,
+                    record,
+                    "shadow policy must commit exactly A0 with multiplier 1.0",
+                )
+        elif (
+            committed_action != selected_action
+            or committed_multiplier != selected_multiplier
+        ):
+            _probe_record_error(
+                arm,
+                index,
+                record,
+                "active policy must commit exactly the selected action and multiplier",
+            )
+
+        selected_counts[selected_action] += 1
+        committed_counts[committed_action] += 1
+        latencies.append(latency)
+        if fallback:
+            fallback_count += 1
+            fallback_reasons[fallback_reason] += 1
+            if _is_transport_or_config_fallback(fallback_reason):
+                transport_config_fallback_count += 1
+
+    def ordered_counts(counts: Counter[str]) -> dict[str, int]:
+        return {action: counts[action] for action in ACTION_PROBE_ACTIONS if counts[action]}
+
+    summary = {
+        "arm": arm.name,
+        "policy": policy,
+        "record_count": len(records),
+        "fallback_count": fallback_count,
+        "fallback_reason_counts": dict(sorted(fallback_reasons.items())),
+        "transport_config_fallback_count": transport_config_fallback_count,
+        "selected_action_counts": ordered_counts(selected_counts),
+        "committed_action_counts": ordered_counts(committed_counts),
+        "probe_latency_ms": {
+            "mean": sum(latencies) / len(latencies),
+            "p95": _probe_percentile(latencies, 0.95),
+        },
+    }
+    summary_path = arm_dir / ACTION_PROBE_SUMMARY_FILENAME
+    try:
+        summary_path.write_text(
+            json.dumps(summary, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"{arm.name}: cannot write action-probe run summary {summary_path}: {exc}"
+        ) from exc
+    if transport_config_fallback_count == len(records):
+        reasons = ", ".join(
+            f"{reason}={count}" for reason, count in sorted(fallback_reasons.items())
+        )
+        raise RuntimeError(
+            f"{arm.name}: all {len(records)} action-probe decisions were "
+            f"transport/config fallbacks ({reasons})"
+        )
+    return summary
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _git_metadata(command: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        return f"unavailable: {shlex.join(command)}: {exc}\n"
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
+        return (
+            f"unavailable: {shlex.join(command)} exited {result.returncode}: "
+            f"{detail}\n"
+        )
+    return result.stdout
+
+
+def persist_reproducibility_metadata(
+    report_dir: Path, argv: list[str] | None = None
+) -> Path:
+    """Write replay command and current git state beside the report directory."""
+    run_root = report_dir.parent
+    command_text = shlex.join(list(sys.argv if argv is None else argv)) + "\n"
+    commit_text = _git_metadata(["git", "rev-parse", "HEAD"])
+    diff_text = _git_metadata(["git", "diff"])
+    try:
+        run_root.mkdir(parents=True, exist_ok=True)
+        (run_root / "command.sh").write_text(command_text)
+        (run_root / "git_commit.txt").write_text(commit_text)
+        (run_root / "git_diff.patch").write_text(diff_text)
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot write reproducibility metadata under {run_root}: {exc}"
+        ) from exc
+    return run_root
 
 
 def split_data(
@@ -1090,27 +1504,21 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
         raise RuntimeError(
             f"{arm.name}: no syncer checkpoint (no round completed); see {arm_dir}"
         )
-    if args.syncer_total_steps:
+    probe_policy = arm.commit_policy != "token_weighted"
+    if args.syncer_total_steps or arm.strict_quorum or probe_policy:
         tape_path = arm_dir / "tape.jsonl"
-        records = [
-            json.loads(line)
-            for line in tape_path.read_text().splitlines()
-            if line.strip()
-        ]
-        if len(records) != args.syncer_total_steps:
-            raise RuntimeError(
-                f"{arm.name}: expected {args.syncer_total_steps} outer steps, "
-                f"event tape has {len(records)}"
+        records = _load_event_tape(arm, tape_path)
+        if probe_policy:
+            validate_action_probe_run(
+                arm,
+                records,
+                arm_dir,
+                expected_steps=args.syncer_total_steps,
             )
-        if arm.strict_quorum:
-            partial = [
-                r["step"] for r in records if len(r.get("responders", [])) != arm.m
-            ]
-            if partial:
-                raise RuntimeError(
-                    f"{arm.name}: strict-quorum run has partial responder groups "
-                    f"at steps {partial[:8]}"
-                )
+        else:
+            validate_event_tape_records(
+                arm, records, expected_steps=args.syncer_total_steps
+            )
     # Export the merged global parameters to a peft adapter dir.
     export_dir = arm_dir / "export"
     run_checked(
@@ -1545,6 +1953,7 @@ def main() -> int:
                 f"comparison needs physical GPU ids through {max(requested)} "
                 f"but only {have} visible GPU(s) exist"
             )
+    persist_reproducibility_metadata(args.report_dir)
     ensure_syncer()
     if args.work_dir.exists():
         shutil.rmtree(args.work_dir)

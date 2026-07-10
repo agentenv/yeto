@@ -39,6 +39,7 @@ from .action_probe import (
     BASELINE_ACTION,
     LEAVE_ONE_OUT_ACTION_FAMILY,
     PROTOCOL,
+    STEP_SCALE_ACTION_FAMILY,
     SUPPORTED_ACTION_FAMILIES,
     ActionProbeReplica,
     EvaluateRequest,
@@ -76,6 +77,15 @@ class ReplicaConfig:
     fragments: int = 4
     fragment_pattern: str = "binpack"
     cache_dir: str | None = None
+    selection: SelectionConfig = SelectionConfig()
+
+
+def _probe_config_sha256(
+    static_config: dict[str, Any], selection: SelectionConfig
+) -> str:
+    bound_config = dict(static_config)
+    bound_config["selection"] = asdict(selection)
+    return probe_config_digest(bound_config)
 
 
 def _load_replica(config: ReplicaConfig) -> ActionProbeReplica:
@@ -200,7 +210,7 @@ def _load_replica(config: ReplicaConfig) -> ActionProbeReplica:
         "transformers_version": transformers.__version__,
         "peft_version": peft.__version__,
     }
-    config_digest = probe_config_digest(static_config)
+    config_digest = _probe_config_sha256(static_config, config.selection)
     return ActionProbeReplica(
         model,
         panels,
@@ -346,6 +356,7 @@ class WorkerPoolBackend:
                 config.lora_targets,
                 config.fragments,
                 config.fragment_pattern,
+                config.selection,
             )
             for config in configs
         }
@@ -865,6 +876,14 @@ class ActionProbeEngine:
                 self.selection,
                 eligible_actions=eligible_actions,
                 baseline_losses_by_action=backend_result.get("paired_baseline_losses"),
+                action_multipliers=(
+                    {
+                        action: request.action_metadata[action]["step_scale"]
+                        for action in ACTION_NAMES[1:]
+                    }
+                    if request.action_family == STEP_SCALE_ACTION_FAMILY
+                    else None
+                ),
             )
             total_ms = (time.perf_counter() - started) * 1000.0
             response = {
@@ -1120,6 +1139,7 @@ def main(argv=None) -> int:
             fragments=args.fragments,
             fragment_pattern=args.fragment_pattern,
             cache_dir=args.cache_dir,
+            selection=selection,
         )
         for gpu in args.gpus
     ]

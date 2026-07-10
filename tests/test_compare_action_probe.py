@@ -64,6 +64,77 @@ def _ready(endpoint="127.0.0.1:49000"):
     }
 
 
+_UNSET = object()
+
+
+def _responder_objects(ids=(0, 1, 2, 3)):
+    c_steps = 64
+    c_tokens = 8192
+    return [
+        {
+            "id": learner_id,
+            "base_version": 0,
+            "c_steps": c_steps,
+            "c_tokens": c_tokens,
+            "weight": c_tokens**2 / c_steps,
+        }
+        for learner_id in ids
+    ]
+
+
+def _probe_record(
+    policy,
+    *,
+    step=1,
+    selected_action="A1",
+    selected_multiplier=_UNSET,
+    committed_action=_UNSET,
+    committed_multiplier=_UNSET,
+    fallback=_UNSET,
+    fallback_reason=_UNSET,
+    latency_ms=10.0,
+    digest_char="a",
+    responders=None,
+):
+    if selected_multiplier is _UNSET:
+        if policy in ("probe_lr_shadow", "probe_lr_v1"):
+            selected_multiplier = compare.ACTION_PROBE_SCALAR_MULTIPLIERS[
+                selected_action
+            ]
+        else:
+            selected_multiplier = 1.0 if selected_action == "A0" else 1.1
+    if committed_action is _UNSET:
+        committed_action = (
+            "A0"
+            if policy in compare.ACTION_PROBE_SHADOW_POLICIES
+            else selected_action
+        )
+    if committed_multiplier is _UNSET:
+        committed_multiplier = (
+            1.0
+            if policy in compare.ACTION_PROBE_SHADOW_POLICIES
+            else selected_multiplier
+        )
+    if fallback is _UNSET:
+        fallback = selected_action == "A0"
+    if fallback_reason is _UNSET:
+        fallback_reason = "no_action_passed" if fallback else None
+    return {
+        "step": step,
+        "fragment": (step - 1) % 4,
+        "responders": _responder_objects() if responders is None else responders,
+        "policy": policy,
+        "selected_action": selected_action,
+        "committed_action": committed_action,
+        "selected_multiplier": selected_multiplier,
+        "committed_multiplier": committed_multiplier,
+        "fallback": fallback,
+        "fallback_reason": fallback_reason,
+        "probe_latency_ms": latency_ms,
+        "request_digest": digest_char * 64,
+    }
+
+
 def test_probe_shadow_and_active_syncer_commands_carry_exact_contract(tmp_path):
     config = tmp_path / "expected.json"
     config.write_text("{}\n")
@@ -284,3 +355,238 @@ def test_cli_accepts_primary_scalar_probe_policies_in_dry_run(monkeypatch):
         ],
     )
     assert compare.main() == 0
+
+
+def test_probe_run_validation_writes_compact_summary_and_allows_abstention(
+    tmp_path,
+):
+    arm = compare.PRESETS["probe_shadow"]
+    records = [
+        _probe_record(
+            arm.commit_policy,
+            step=1,
+            selected_action="A2",
+            selected_multiplier=1.2,
+            latency_ms=10.0,
+            digest_char="a",
+        ),
+        _probe_record(
+            arm.commit_policy,
+            step=2,
+            selected_action="A0",
+            latency_ms=30.0,
+            digest_char="b",
+        ),
+    ]
+
+    summary = compare.validate_action_probe_run(
+        arm, records, tmp_path, expected_steps=2
+    )
+    summary_path = tmp_path / compare.ACTION_PROBE_SUMMARY_FILENAME
+    assert json.loads(summary_path.read_text()) == summary
+    assert len(summary_path.read_text().splitlines()) == 1
+    assert summary["fallback_count"] == 1
+    assert summary["fallback_reason_counts"] == {"no_action_passed": 1}
+    assert summary["selected_action_counts"] == {"A0": 1, "A2": 1}
+    assert summary["committed_action_counts"] == {"A0": 2}
+    assert summary["probe_latency_ms"]["mean"] == pytest.approx(20.0)
+    assert summary["probe_latency_ms"]["p95"] == pytest.approx(29.0)
+
+
+@pytest.mark.parametrize(
+    ("policy", "updates", "message"),
+    [
+        (
+            "probe_shadow",
+            {"committed_action": "A1", "committed_multiplier": 1.1},
+            "shadow policy",
+        ),
+        (
+            "probe_loo_v1",
+            {"committed_action": "A0", "committed_multiplier": 1.0},
+            "active policy",
+        ),
+        (
+            "probe_loo_v1",
+            {"committed_action": "A1", "committed_multiplier": 1.2},
+            "active policy",
+        ),
+    ],
+)
+def test_probe_run_validation_enforces_commit_contract(
+    tmp_path, policy, updates, message
+):
+    record = _probe_record(policy)
+    record.update(updates)
+    with pytest.raises(RuntimeError, match=message):
+        compare.validate_action_probe_run(compare.PRESETS[policy], [record], tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("policy", "probe_lr_v1"),
+        ("probe_latency_ms", 0.0),
+        ("probe_latency_ms", float("inf")),
+        ("request_digest", "g" * 64),
+    ],
+)
+def test_probe_run_validation_rejects_malformed_records(tmp_path, field, value):
+    arm = compare.PRESETS["probe_shadow"]
+    record = _probe_record(arm.commit_policy)
+    record[field] = value
+    with pytest.raises(RuntimeError, match="malformed action-probe record"):
+        compare.validate_action_probe_run(arm, [record], tmp_path)
+
+
+def test_scalar_probe_record_must_match_predeclared_action_multiplier(tmp_path):
+    arm = compare.PRESETS["probe_lr_v1"]
+    record = _probe_record(
+        arm.commit_policy,
+        selected_action="A2",
+        selected_multiplier=1.2,
+        committed_multiplier=1.2,
+    )
+    with pytest.raises(RuntimeError, match="selected_multiplier must be exactly 1.125"):
+        compare.validate_action_probe_run(arm, [record], tmp_path)
+
+
+def test_probe_run_validation_enforces_full_responder_group(tmp_path):
+    arm = compare.PRESETS["probe_shadow"]
+    record = _probe_record(
+        arm.commit_policy, responders=_responder_objects((0, 1, 2))
+    )
+    with pytest.raises(RuntimeError, match="invalid responders"):
+        compare.validate_action_probe_run(arm, [record], tmp_path)
+
+
+def test_event_tape_validation_normalizes_real_responder_object_shape():
+    arm = compare.PRESETS["probe_shadow"]
+    record = _probe_record(
+        arm.commit_policy, responders=_responder_objects((2, 0, 3, 1))
+    )
+    compare.validate_event_tape_records(arm, [record], expected_steps=1)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda responders: responders[0].pop("weight"),
+        lambda responders: responders[0].update(weight=-1.0),
+        lambda responders: responders[0].update(c_steps=0),
+    ],
+)
+def test_event_tape_validation_rejects_malformed_responder_objects(mutation):
+    arm = compare.PRESETS["probe_shadow"]
+    responders = _responder_objects()
+    mutation(responders)
+    record = _probe_record(arm.commit_policy, responders=responders)
+    with pytest.raises(RuntimeError, match="malformed responder"):
+        compare.validate_event_tape_records(arm, [record])
+
+
+def test_probe_run_validation_rejects_all_transport_fallbacks(tmp_path):
+    arm = compare.PRESETS["probe_loo_v1"]
+    records = [
+        _probe_record(
+            arm.commit_policy,
+            step=1,
+            selected_action="A0",
+            fallback_reason="probe_timeout",
+            digest_char="a",
+        ),
+        _probe_record(
+            arm.commit_policy,
+            step=2,
+            selected_action="A0",
+            fallback_reason="probe_io_error",
+            digest_char="b",
+        ),
+    ]
+    with pytest.raises(RuntimeError, match="all 2 .*transport/config fallbacks"):
+        compare.validate_action_probe_run(arm, records, tmp_path)
+    summary = json.loads(
+        (tmp_path / compare.ACTION_PROBE_SUMMARY_FILENAME).read_text()
+    )
+    assert summary["fallback_count"] == 2
+    assert summary["transport_config_fallback_count"] == 2
+
+
+def test_probe_run_validation_allows_all_no_action_passed_abstentions(tmp_path):
+    arm = compare.PRESETS["probe_lr_v1"]
+    records = [
+        _probe_record(
+            arm.commit_policy,
+            step=1,
+            selected_action="A0",
+            digest_char="a",
+        ),
+        _probe_record(
+            arm.commit_policy,
+            step=2,
+            selected_action="A0",
+            digest_char="b",
+        ),
+    ]
+    summary = compare.validate_action_probe_run(arm, records, tmp_path)
+    assert summary["fallback_count"] == 2
+    assert summary["fallback_reason_counts"] == {"no_action_passed": 2}
+    assert summary["transport_config_fallback_count"] == 0
+
+
+def test_reproducibility_metadata_records_command_commit_and_diff(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        stdout = "commit-123\n" if command[1] == "rev-parse" else "diff body\n"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(compare.subprocess, "run", fake_run)
+    report_dir = tmp_path / "run" / "report"
+    argv = ["scripts/compare_diloco.py", "--data", "rows with spaces.jsonl"]
+    run_root = compare.persist_reproducibility_metadata(report_dir, argv)
+
+    assert run_root == report_dir.parent
+    assert (run_root / "command.sh").read_text() == compare.shlex.join(argv) + "\n"
+    assert (run_root / "git_commit.txt").read_text() == "commit-123\n"
+    assert (run_root / "git_diff.patch").read_text() == "diff body\n"
+    assert [call[0] for call in calls] == [
+        ["git", "rev-parse", "HEAD"],
+        ["git", "diff"],
+    ]
+    assert all(call[1]["cwd"] == compare.REPO_ROOT for call in calls)
+
+
+def test_reproducibility_metadata_records_git_failure_without_failing(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        compare.subprocess,
+        "run",
+        lambda command, **kwargs: SimpleNamespace(
+            returncode=128, stdout="", stderr="not a git repository"
+        ),
+    )
+    report_dir = tmp_path / "run" / "report"
+    run_root = compare.persist_reproducibility_metadata(report_dir, ["compare"])
+    assert "unavailable:" in (run_root / "git_commit.txt").read_text()
+    assert "unavailable:" in (run_root / "git_diff.patch").read_text()
+
+
+def test_reproducibility_metadata_write_failure_is_clear(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        compare.subprocess,
+        "run",
+        lambda command, **kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+    blocked_root = tmp_path / "blocked"
+    blocked_root.write_text("not a directory")
+    with pytest.raises(RuntimeError, match="cannot write reproducibility metadata"):
+        compare.persist_reproducibility_metadata(
+            blocked_root / "report", ["compare"]
+        )
