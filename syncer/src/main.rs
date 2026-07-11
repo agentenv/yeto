@@ -49,8 +49,7 @@ struct Args {
     /// Pre-merge learner-delta correction: "heloco" or "none".
     #[arg(long, default_value = "heloco")]
     delta_correction: String,
-    /// Fresh-push aggregation rule: "production" or
-    /// "coord-midpoint-normmatch".
+    /// Fresh-push aggregation rule.
     #[arg(long, default_value = "production")]
     merge_policy: String,
     /// Give up waiting for quorum and re-send the pull after this long.
@@ -107,9 +106,11 @@ fn main() -> anyhow::Result<()> {
     let merge_policy = match args.merge_policy.as_str() {
         "production" => MergePolicy::Production,
         "coord-midpoint-normmatch" => MergePolicy::CoordMidpointNormmatch,
-        other => anyhow::bail!(
-            "--merge-policy must be 'production' or 'coord-midpoint-normmatch', got {other:?}"
-        ),
+        "consensus-rda-sqrt" => MergePolicy::ConsensusRdaSqrt,
+        "consensus-rda-linear" => MergePolicy::ConsensusRdaLinear,
+        "consensus-rda-affine50" => MergePolicy::ConsensusRdaAffine50,
+        "consensus-rda-floor50" => MergePolicy::ConsensusRdaFloor50,
+        other => anyhow::bail!("unknown --merge-policy {other:?}"),
     };
     let cfg = server::Config {
         port: args.port,

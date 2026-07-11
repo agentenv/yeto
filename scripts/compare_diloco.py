@@ -695,7 +695,14 @@ def main() -> int:
     p.add_argument(
         "--syncer-merge-policy",
         default="production",
-        choices=["production", "coord-midpoint-normmatch"],
+        choices=[
+            "production",
+            "coord-midpoint-normmatch",
+            "consensus-rda-sqrt",
+            "consensus-rda-linear",
+            "consensus-rda-affine50",
+            "consensus-rda-floor50",
+        ],
         help="syncer aggregation policy for async arms",
     )
     p.add_argument("--work-dir", type=Path, default=REPO_ROOT / "compare-work")

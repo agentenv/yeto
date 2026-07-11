@@ -46,6 +46,14 @@ fn norm(values: &[f32]) -> f64 {
         .sqrt()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConsensusScale {
+    Sqrt,
+    Linear,
+    Affine50,
+    Floor50,
+}
+
 /// Weighted direct averaging: out[i] = Σ_m w_m (anchor[i] − learner_m[i]) / Σ w.
 pub fn merge_avg(anchor: &[f32], learners: &[&[f32]], weights: &[f64], out: &mut [f32]) {
     let wsum: f64 = weights.iter().sum();
@@ -97,6 +105,51 @@ pub fn merge_rda(anchor: &[f32], learners: &[&[f32]], weights: &[f64], out: &mut
     for o in out.iter_mut() {
         *o *= scale;
     }
+}
+
+/// RDA with a consensus-dependent radial scale. Consensus is the norm of the
+/// weighted mean unit direction; low agreement damps that tensor's update.
+pub fn merge_consensus_rda(
+    anchor: &[f32],
+    learners: &[&[f32]],
+    weights: &[f64],
+    scale_mode: ConsensusScale,
+    out: &mut [f32],
+) -> f64 {
+    let wsum: f64 = weights.iter().sum();
+    if wsum <= 0.0 {
+        out.fill(0.0);
+        return 0.0;
+    }
+    let norms: Vec<f64> = learners.iter().map(|l| l2_norm(anchor, l)).collect();
+    let radial: f64 = norms.iter().zip(weights).map(|(n, w)| n * w).sum::<f64>() / wsum;
+
+    out.fill(0.0);
+    for ((learner, &w), &n) in learners.iter().zip(weights).zip(&norms) {
+        if n <= 1e-12 {
+            continue;
+        }
+        let coef = (w / wsum / n) as f32;
+        for ((o, a), l) in out.iter_mut().zip(anchor).zip(*learner) {
+            *o += coef * (*a - *l);
+        }
+    }
+    let consensus = norm(out).clamp(0.0, 1.0);
+    if consensus < 1e-12 {
+        merge_avg(anchor, learners, weights, out);
+        return 0.0;
+    }
+    let scale = match scale_mode {
+        ConsensusScale::Sqrt => consensus.sqrt(),
+        ConsensusScale::Linear => consensus,
+        ConsensusScale::Affine50 => 0.5 + 0.5 * consensus,
+        ConsensusScale::Floor50 => consensus.max(0.5),
+    };
+    let factor = (radial * scale / consensus) as f32;
+    for o in out.iter_mut() {
+        *o *= factor;
+    }
+    scale
 }
 
 /// Coordinate-wise midpoint/median over learner deltas, with the resulting
@@ -313,6 +366,55 @@ mod tests {
         let mut out = [0.0f32; 1];
         merge_rda(&anchor, &[&l0, &l1], &[1.0, 1.0], &mut out);
         assert!(out[0].abs() < 1e-6);
+    }
+
+    #[test]
+    fn consensus_rda_floor50_damps_low_agreement() {
+        let anchor = [0.0f32, 0.0];
+        let l0 = [-2.0f32, 0.0]; // delta (2, 0)
+        let l1 = [0.0f32, -2.0]; // delta (0, 2)
+        let mut rda = [0.0f32; 2];
+        let mut out = [0.0f32; 2];
+
+        merge_rda(&anchor, &[&l0, &l1], &[1.0, 1.0], &mut rda);
+        let scale = merge_consensus_rda(
+            &anchor,
+            &[&l0, &l1],
+            &[1.0, 1.0],
+            ConsensusScale::Floor50,
+            &mut out,
+        );
+
+        assert!(scale > 0.5 && scale < 1.0);
+        assert!((norm(&out) - norm(&rda) * scale).abs() < 1e-5);
+        assert!((out[0] - out[1]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn consensus_rda_affine50_is_gentler_than_linear() {
+        let anchor = [0.0f32, 0.0];
+        let l0 = [-2.0f32, 0.0];
+        let l1 = [0.0f32, -2.0];
+        let mut linear = [0.0f32; 2];
+        let mut affine = [0.0f32; 2];
+
+        let linear_scale = merge_consensus_rda(
+            &anchor,
+            &[&l0, &l1],
+            &[1.0, 1.0],
+            ConsensusScale::Linear,
+            &mut linear,
+        );
+        let affine_scale = merge_consensus_rda(
+            &anchor,
+            &[&l0, &l1],
+            &[1.0, 1.0],
+            ConsensusScale::Affine50,
+            &mut affine,
+        );
+
+        assert!(affine_scale > linear_scale);
+        assert!(norm(&affine) > norm(&linear));
     }
 
     #[test]

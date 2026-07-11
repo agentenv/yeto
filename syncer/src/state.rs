@@ -13,6 +13,10 @@ pub const MERGE_RDA: u8 = 1;
 pub enum MergePolicy {
     Production,
     CoordMidpointNormmatch,
+    ConsensusRdaSqrt,
+    ConsensusRdaLinear,
+    ConsensusRdaAffine50,
+    ConsensusRdaFloor50,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -217,6 +221,42 @@ impl GlobalState {
         }
         let delta = match self.merge_policy {
             MergePolicy::Production => production_delta,
+            MergePolicy::ConsensusRdaSqrt
+            | MergePolicy::ConsensusRdaLinear
+            | MergePolicy::ConsensusRdaAffine50
+            | MergePolicy::ConsensusRdaFloor50 => {
+                let mut consensus_delta = vec![0.0f32; numel];
+                let scale_mode = match self.merge_policy {
+                    MergePolicy::ConsensusRdaSqrt => merge::ConsensusScale::Sqrt,
+                    MergePolicy::ConsensusRdaLinear => merge::ConsensusScale::Linear,
+                    MergePolicy::ConsensusRdaAffine50 => merge::ConsensusScale::Affine50,
+                    MergePolicy::ConsensusRdaFloor50 => merge::ConsensusScale::Floor50,
+                    _ => unreachable!(),
+                };
+                let mut off = 0usize;
+                for &tn in &frag.tensor_numels {
+                    let tn = tn as usize;
+                    let slice_learners: Vec<&[f32]> =
+                        learners.iter().map(|l| &l[off..off + tn]).collect();
+                    let out = &mut consensus_delta[off..off + tn];
+                    match frag.merge_mode {
+                        MERGE_AVG => {
+                            merge::merge_avg(&anchor[off..off + tn], &slice_learners, weights, out)
+                        }
+                        _ => {
+                            merge::merge_consensus_rda(
+                                &anchor[off..off + tn],
+                                &slice_learners,
+                                weights,
+                                scale_mode,
+                                out,
+                            );
+                        }
+                    }
+                    off += tn;
+                }
+                consensus_delta
+            }
             MergePolicy::CoordMidpointNormmatch => {
                 let mut robust_delta = vec![0.0f32; numel];
                 let mut off = 0usize;
@@ -507,6 +547,34 @@ mod tests {
         assert!((production_norm - robust_norm).abs() < 1e-5);
         assert!((robust_delta[1] / robust_delta[0] - 2.0).abs() < 1e-5);
         assert!((production_delta[1] / production_delta[0] - 2.0).abs() > 0.1);
+    }
+
+    #[test]
+    fn consensus_rda_floor50_damps_rda_fragment() {
+        let anchor = vec![0.0f32; 4];
+        let learners = [vec![-2.0f32, 0.0, -2.0, 0.0], vec![0.0f32, -2.0, 0.0, -2.0]];
+        let refs: Vec<&[f32]> = learners.iter().map(|v| v.as_slice()).collect();
+        let weights = [1.0, 1.0];
+
+        let mut production =
+            GlobalState::new(layout2(), None, 1.0, 0.0, crate::protocol::DTYPE_F32);
+        production.init_fragment(0, anchor.clone()).unwrap();
+        production.init_fragment(1, anchor.clone()).unwrap();
+        production.merge_and_step(1, &refs, &weights).unwrap();
+
+        let mut consensus = GlobalState::new(layout2(), None, 1.0, 0.0, crate::protocol::DTYPE_F32);
+        consensus.merge_policy = MergePolicy::ConsensusRdaFloor50;
+        consensus.init_fragment(0, anchor.clone()).unwrap();
+        consensus.init_fragment(1, anchor).unwrap();
+        consensus.merge_and_step(1, &refs, &weights).unwrap();
+
+        let production_delta: Vec<f32> = production.params[1].iter().map(|v| -v).collect();
+        let consensus_delta: Vec<f32> = consensus.params[1].iter().map(|v| -v).collect();
+        let norm = |v: &[f32]| v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+
+        assert!(norm(&consensus_delta) < norm(&production_delta));
+        assert!((consensus_delta[0] - consensus_delta[1]).abs() < 1e-6);
+        assert!((consensus_delta[2] - consensus_delta[3]).abs() < 1e-6);
     }
 
     #[test]
