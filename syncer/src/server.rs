@@ -1785,6 +1785,7 @@ mod tests {
             fragments: vec![crate::state::FragmentInfo {
                 merge_mode: crate::state::MERGE_AVG,
                 tensor_numels: vec![2],
+                tensor_shapes: None,
             }],
         };
         let mut st = GlobalState::new(layout, None, 0.1, 0.0, dtype);

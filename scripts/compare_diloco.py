@@ -35,6 +35,7 @@ Presets (--settings, comma-separated or 'all'):
   strided   depth-interleaved fragments
   avg       merge = plain weighted averaging (outer lr 1.0, mu 0, alpha 0)
   m2h24     stock DiLoCo throttled to its design-point sync interval (H~24)
+  iso       IsoLoCo: Iso-C isotropic aggregation on matrix fragments
   probe_shadow  four-responder exact LOO probe; always commit A0
   probe_loo_v1  four-responder exact LOO probe; commit the selected preview
   probe_lr_shadow  predeclared scalar probe; always commit x1 (A0)
@@ -123,6 +124,9 @@ class Arm:
     m: int = 2  # learner islands
     fragments: int = 4
     fragment_pattern: str = "binpack"
+    # Aggregation for non-embedding (matrix) fragments: "rda" (default) or
+    # "iso" (Iso-C-style isotropic aggregation, IsoLoCo, arXiv 2607.03011).
+    matrix_merge: str = "rda"
     merge_alpha: float = 0.5
     wire_dtype: str = "bf16"
     pipeline: int = 2
@@ -169,6 +173,9 @@ PRESETS: dict[str, Arm] = {
     # adaptive throttle (H = 24 inner steps per fragment, sized from the
     # measured step time — hardware-independent).
     "m2h24": Arm("m2h24", sync_interval_steps=24.0),
+    # IsoLoCo (arXiv 2607.03011): Iso-C isotropic aggregation on the matrix
+    # fragments, composed with the default Nesterov outer optimizer.
+    "iso": Arm("iso", matrix_merge="iso"),
     # Exact production leave-one-out actions. Both arms pay the same sidecar
     # latency; shadow records the recommendation but commits A0.
     "probe_shadow": Arm(
@@ -226,6 +233,7 @@ def apply_arm_overrides(
     outer_restart_cos_threshold: float | None = None,
     delta_correction: str | None = None,
     commit_policy: str | None = None,
+    matrix_merge: str | None = None,
 ) -> list[Arm]:
     """Apply CLI-wide async-arm overrides without mutating presets."""
     if all(
@@ -238,6 +246,7 @@ def apply_arm_overrides(
             outer_restart_cos_threshold,
             delta_correction,
             commit_policy,
+            matrix_merge,
         )
     ):
         return arms
@@ -247,6 +256,7 @@ def apply_arm_overrides(
     return [
         replace(
             arm,
+            matrix_merge=arm.matrix_merge if matrix_merge is None else matrix_merge,
             outer_lr=arm.outer_lr if outer_lr is None else outer_lr,
             outer_lr_by_fragment=(
                 arm.outer_lr_by_fragment
@@ -484,6 +494,10 @@ def learner_command(
             "--wire-dtype",
             arm.wire_dtype,
         ]
+        if arm.matrix_merge != "rda":
+            # Only non-default values are passed, keeping baseline learner
+            # command lines byte-identical to the pre-iso harness.
+            cmd += ["--matrix-merge", arm.matrix_merge]
         if getattr(args, "probe_data", None):
             probe_data = (
                 str(arm_dir.parent / "eval.jsonl")
@@ -1922,6 +1936,13 @@ def main() -> int:
         help="override delta correction for every selected async arm",
     )
     p.add_argument(
+        "--matrix-merge",
+        choices=["rda", "iso"],
+        default=None,
+        help="override matrix-fragment aggregation (rda or Iso-C 'iso') "
+        "for every selected async arm",
+    )
+    p.add_argument(
         "--commit-policy",
         choices=COMMIT_POLICIES,
         default=None,
@@ -1996,6 +2017,7 @@ def main() -> int:
         outer_restart_cos_threshold=args.outer_restart_cos_threshold,
         delta_correction=args.delta_correction,
         commit_policy=args.commit_policy,
+        matrix_merge=args.matrix_merge,
     )
     if args.round_interval_ms is not None:
         from dataclasses import replace as _replace

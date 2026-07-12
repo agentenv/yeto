@@ -34,7 +34,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from .fragments import FragmentLayout
+from .fragments import MERGE_ISO, FragmentLayout
 
 MAGIC = 0xD170C0DE
 
@@ -108,6 +108,11 @@ def encode_hello(
     for frag in layout.fragments:
         parts.append(struct.pack("<BI", frag.merge_mode, len(frag.tensors)))
         parts.append(struct.pack(f"<{len(frag.tensors)}Q", *(n for _, n in frag.tensors)))
+        if frag.merge_mode == MERGE_ISO:
+            # Iso fragments append (rows, cols) per tensor so the syncer can
+            # take the 2D view; avg/RDA keep the original wire format.
+            dims = [d for name, _ in frag.tensors for d in frag.shapes[name]]
+            parts.append(struct.pack(f"<{len(dims)}Q", *dims))
     parts.append(struct.pack("<H", num_streams))
     if layout_metadata is not None:
         if isinstance(layout_metadata, bytes):

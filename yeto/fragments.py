@@ -15,7 +15,13 @@ Two patterns partition the trainable tensors into P fragments:
 Either way, embedding-like tensors are isolated into their own fragment
 merged with direct averaging (embedding outer gradients lack the
 near-orthogonality that motivates RDA); all other fragments use
-radial-directional averaging.
+radial-directional averaging by default. ``matrix_merge="iso"`` switches
+those matrix fragments to Iso-C-style isotropic aggregation (IsoLoCo,
+arXiv 2607.03011): the syncer direct-averages the per-tensor deltas and
+flattens the singular-value spectrum of each averaged matrix to its mean.
+Iso needs each tensor's 2D shape (carried in HELLO); tensors that are not
+2D matrices join the direct-averaged fragment, matching the paper's rule
+that non-matrix parameters skip the isotropic correction.
 
 The layout must be identical on every learner, so packing is deterministic:
 ties break on tensor name and fragment index.
@@ -28,6 +34,10 @@ from dataclasses import dataclass, field
 
 MERGE_AVG = 0
 MERGE_RDA = 1
+MERGE_ISO = 2
+
+# CLI value -> merge mode for the non-embedding (matrix) fragments.
+MATRIX_MERGE_MODES = {"rda": MERGE_RDA, "iso": MERGE_ISO}
 
 _EMBED_MARKERS = ("embed", "wte", "wpe", "lm_head", "shared.weight")
 
@@ -52,6 +62,9 @@ def layer_index(name: str) -> int | None:
 class Fragment:
     merge_mode: int
     tensors: list[tuple[str, int]] = field(default_factory=list)  # (name, numel)
+    # {name: (rows, cols)}, populated exactly for MERGE_ISO fragments (the
+    # syncer needs the 2D view; avg/RDA operate on flat slices).
+    shapes: dict[str, tuple[int, int]] | None = None
 
     @property
     def numel(self) -> int:
@@ -76,23 +89,39 @@ def build_layout(
     pattern: str = "binpack",
     *,
     avg_name_regex: str | None = None,
+    matrix_merge: str = "rda",
+    named_shapes: dict[str, tuple[int, ...]] | None = None,
 ) -> FragmentLayout:
     """Partition (name, numel) pairs into at most `num_fragments` fragments.
 
     Embedding-like tensors share one avg-merged fragment; callers may add a
     regex for other vector-like tensors (e.g. NAVA bias/norm/modulation).
-    The rest go into the remaining fragments with RDA, placed by ``pattern``
-    (see module docstring). If there are fewer non-embedding tensors than
-    bins, the fragment count shrinks.
+    The rest go into the remaining fragments with ``matrix_merge`` (RDA by
+    default, or Iso-C-style "iso"), placed by ``pattern`` (see module
+    docstring). If there are fewer non-embedding tensors than bins, the
+    fragment count shrinks. Iso requires ``named_shapes`` (full torch shapes
+    keyed by name); tensors without a 2D shape fall back to the avg
+    fragment.
     """
     if num_fragments < 1:
         raise ValueError("num_fragments must be >= 1")
     if pattern not in FRAGMENT_PATTERNS:
         raise ValueError(f"pattern must be one of {FRAGMENT_PATTERNS}, got {pattern!r}")
+    if matrix_merge not in MATRIX_MERGE_MODES:
+        raise ValueError(
+            f"matrix_merge must be one of {tuple(MATRIX_MERGE_MODES)}, got {matrix_merge!r}"
+        )
+    matrix_mode = MATRIX_MERGE_MODES[matrix_merge]
+    if matrix_mode == MERGE_ISO and named_shapes is None:
+        raise ValueError('matrix_merge="iso" requires named_shapes')
     avg_rx = re.compile(avg_name_regex) if avg_name_regex else None
 
     def use_avg(name: str) -> bool:
-        return is_embedding_name(name) or (avg_rx is not None and bool(avg_rx.search(name)))
+        if is_embedding_name(name) or (avg_rx is not None and bool(avg_rx.search(name))):
+            return True
+        # Iso operates on 2D matrices only; the paper leaves non-matrix
+        # parameters to plain averaging.
+        return matrix_mode == MERGE_ISO and len(named_shapes.get(name, ())) != 2
 
     avg = sorted(
         ((n, s) for n, s in named_numels if use_avg(n)),
@@ -110,7 +139,7 @@ def build_layout(
         fragments.append(Fragment(MERGE_AVG, avg))
 
     n_bins = max(1, min(num_fragments - len(fragments), len(rest))) if rest else 0
-    bins = [Fragment(MERGE_RDA) for _ in range(n_bins)]
+    bins = [Fragment(matrix_mode) for _ in range(n_bins)]
     if pattern == "strided" and n_bins > 0:
         layered = [(n, s) for n, s in rest if layer_index(n) is not None]
         loose = [(n, s) for n, s in rest if layer_index(n) is None]
@@ -124,4 +153,11 @@ def build_layout(
         target = min(bins, key=lambda b: b.numel)  # min() is stable: first-smallest wins
         target.tensors.append((name, numel))
     fragments.extend(b for b in bins if b.tensors)  # strided can leave bins empty
+    if matrix_mode == MERGE_ISO:
+        for frag in fragments:
+            if frag.merge_mode == MERGE_ISO:
+                frag.shapes = {
+                    name: (int(named_shapes[name][0]), int(named_shapes[name][1]))
+                    for name, _ in frag.tensors
+                }
     return FragmentLayout(fragments)

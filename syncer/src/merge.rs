@@ -13,6 +13,14 @@
 //! shrink as R/√M and force outer-lr retuning. Applied per tensor within a
 //! fragment. Degenerate mean direction falls back to direct averaging.
 //!
+//! A third opt-in mode, Iso-C-style isotropic aggregation ("iso", IsoLoCo,
+//! arXiv 2607.03011), direct-averages the per-tensor deltas and then
+//! flattens the singular-value spectrum of the averaged matrix to its mean:
+//! Δ ← σ̄·U·Vᵀ with SVD(Δ) = U·diag(σ)·Vᵀ and σ̄ = mean(σ). See `merge_iso`.
+//!
+//! Outer optimizer state is held on the syncer. Nesterov remains the default;
+//! normalized EMA variants are available for gain-controlled experiments.
+//!
 //! Outer optimizer state is held on the syncer. Nesterov remains the default;
 //! normalized EMA variants are available for gain-controlled experiments.
 
@@ -463,6 +471,191 @@ pub fn merge_rda(anchor: &[f32], learners: &[&[f32]], weights: &[f64], out: &mut
     }
 }
 
+/// Relative cutoff below which a singular value of the averaged delta is
+/// treated as zero by the iso transform. Directions in the numerical null
+/// space are dropped rather than inflated to σ̄ (their singular vectors are
+/// arbitrary); the paper's ablation attributes the gain to clipping HIGH
+/// singular values down to the mean, which this preserves exactly.
+const ISO_SINGULAR_VALUE_RTOL: f64 = 1e-9;
+/// Cyclic-Jacobi sweep budget for the Gram eigendecomposition. Convergence
+/// is quadratic; small LoRA-side Gram matrices settle in a handful of
+/// sweeps, and the loop exits early on a converged off-diagonal.
+const ISO_JACOBI_MAX_SWEEPS: usize = 64;
+
+/// Iso-C-style isotropic aggregation over one tensor slice (IsoLoCo,
+/// arXiv 2607.03011, Alg. 2; Iso-C from the isotropic model-merging line).
+/// The learner deltas are direct-averaged (weighted, like `merge_avg`) and
+/// the averaged pseudo-gradient, viewed as a `rows`×`cols` row-major
+/// matrix Δ with SVD Δ = U·diag(σ)·Vᵀ, is replaced by the
+/// spectrally-flattened
+///
+///   Δ_iso = σ̄·U·Vᵀ,  σ̄ = (1/min(rows,cols))·Σ_k σ_k,
+///
+/// equivalently the whitening transform σ̄·(ΔΔᵀ)^(-1/2)·Δ (pseudo-inverse
+/// square root). Computed exactly on the Gram matrix of the SMALLER side in
+/// f64 — O(min² ·max) plus an O(min³) Jacobi eigendecomposition — so cost
+/// stays proportional to the LoRA rank, not the full matrix. A shape whose
+/// product does not match the slice keeps the plain weighted average
+/// (callers validate shapes at HELLO decode; this is a deterministic
+/// safety net). The outer optimizer (Nesterov by default) is applied by the
+/// caller, which is exactly the paper's IsoLoCo composition.
+pub fn merge_iso(
+    anchor: &[f32],
+    learners: &[&[f32]],
+    weights: &[f64],
+    rows: usize,
+    cols: usize,
+    out: &mut [f32],
+) {
+    merge_avg(anchor, learners, weights, out);
+    if rows == 0 || cols == 0 || rows.saturating_mul(cols) != out.len() {
+        return;
+    }
+    iso_flatten_spectrum(out, rows, cols);
+}
+
+/// Replace the `rows`×`cols` row-major matrix `m` (in place) by σ̄·U·Vᵀ,
+/// dropping numerically-null directions (see `ISO_SINGULAR_VALUE_RTOL`).
+/// σ̄ averages over all min(rows, cols) singular values, zeros included,
+/// matching the paper's σ̄ = (1/r)Σσ_k with r = min(m, n). A zero matrix is
+/// left untouched.
+pub fn iso_flatten_spectrum(m: &mut [f32], rows: usize, cols: usize) {
+    debug_assert_eq!(rows * cols, m.len());
+    let k = rows.min(cols);
+    if k == 0 {
+        return;
+    }
+    let values: Vec<f64> = m.iter().map(|value| *value as f64).collect();
+    // Gram matrix of the smaller side: G = ΔΔᵀ when rows ≤ cols (k = rows),
+    // else G = ΔᵀΔ (k = cols). Eigenvectors of G are the corresponding
+    // singular vectors; eigenvalues are σ².
+    let gram_on_rows = rows <= cols;
+    let mut gram = vec![0.0f64; k * k];
+    for i in 0..k {
+        for j in i..k {
+            let mut acc = 0.0f64;
+            if gram_on_rows {
+                for c in 0..cols {
+                    acc += values[i * cols + c] * values[j * cols + c];
+                }
+            } else {
+                for r in 0..rows {
+                    acc += values[r * cols + i] * values[r * cols + j];
+                }
+            }
+            gram[i * k + j] = acc;
+            gram[j * k + i] = acc;
+        }
+    }
+    let mut basis = vec![0.0f64; k * k];
+    jacobi_eigh(&mut gram, &mut basis, k);
+    let sigmas: Vec<f64> = (0..k).map(|i| gram[i * k + i].max(0.0).sqrt()).collect();
+    let sigma_max = sigmas.iter().cloned().fold(0.0f64, f64::max);
+    if sigma_max <= 0.0 {
+        return; // zero delta: nothing to whiten
+    }
+    let sigma_bar = sigmas.iter().sum::<f64>() / k as f64;
+    let cutoff = sigma_max * ISO_SINGULAR_VALUE_RTOL;
+    // W = Q·diag(σ̄/σ_k or 0)·Qᵀ, the scaled (pseudo-)whitening matrix.
+    let mut whiten = vec![0.0f64; k * k];
+    for j in 0..k {
+        if sigmas[j] <= cutoff {
+            continue;
+        }
+        let gain = sigma_bar / sigmas[j];
+        for a in 0..k {
+            let qa = basis[a * k + j] * gain;
+            if qa == 0.0 {
+                continue;
+            }
+            for b in 0..k {
+                whiten[a * k + b] += qa * basis[b * k + j];
+            }
+        }
+    }
+    // Δ_iso = W·Δ (rows ≤ cols) or Δ·W (cols < rows).
+    if gram_on_rows {
+        for c in 0..cols {
+            for r in 0..k {
+                let mut acc = 0.0f64;
+                for t in 0..k {
+                    acc += whiten[r * k + t] * values[t * cols + c];
+                }
+                m[r * cols + c] = acc as f32;
+            }
+        }
+    } else {
+        for r in 0..rows {
+            for c in 0..k {
+                let mut acc = 0.0f64;
+                for t in 0..k {
+                    acc += values[r * cols + t] * whiten[t * k + c];
+                }
+                m[r * cols + c] = acc as f32;
+            }
+        }
+    }
+}
+
+/// Deterministic cyclic-Jacobi eigendecomposition of the symmetric matrix
+/// `g` (k×k, row-major, overwritten; eigenvalues end up on its diagonal).
+/// `q` receives the orthonormal eigenvectors as COLUMNS: g_in = Q·Λ·Qᵀ.
+fn jacobi_eigh(g: &mut [f64], q: &mut [f64], k: usize) {
+    for i in 0..k {
+        for j in 0..k {
+            q[i * k + j] = if i == j { 1.0 } else { 0.0 };
+        }
+    }
+    for _ in 0..ISO_JACOBI_MAX_SWEEPS {
+        let mut off_sq = 0.0f64;
+        let mut diag_sq = 0.0f64;
+        for i in 0..k {
+            diag_sq += g[i * k + i] * g[i * k + i];
+            for j in i + 1..k {
+                off_sq += g[i * k + j] * g[i * k + j];
+            }
+        }
+        if off_sq <= diag_sq.max(f64::MIN_POSITIVE) * 1e-30 {
+            break;
+        }
+        for p in 0..k {
+            for r in p + 1..k {
+                let gpr = g[p * k + r];
+                if gpr == 0.0 {
+                    continue;
+                }
+                // Rotation zeroing g[p][r] (Golub & Van Loan 8.4).
+                let tau = (g[r * k + r] - g[p * k + p]) / (2.0 * gpr);
+                let t = if tau >= 0.0 {
+                    1.0 / (tau + (1.0 + tau * tau).sqrt())
+                } else {
+                    1.0 / (tau - (1.0 + tau * tau).sqrt())
+                };
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = t * c;
+                for i in 0..k {
+                    let gip = g[i * k + p];
+                    let gir = g[i * k + r];
+                    g[i * k + p] = c * gip - s * gir;
+                    g[i * k + r] = s * gip + c * gir;
+                }
+                for i in 0..k {
+                    let gpi = g[p * k + i];
+                    let gri = g[r * k + i];
+                    g[p * k + i] = c * gpi - s * gri;
+                    g[r * k + i] = s * gpi + c * gri;
+                }
+                for i in 0..k {
+                    let qip = q[i * k + p];
+                    let qir = q[i * k + r];
+                    q[i * k + p] = c * qip - s * qir;
+                    q[i * k + r] = s * qip + c * qir;
+                }
+            }
+        }
+    }
+}
+
 /// SGD + Nesterov momentum treating `delta` as the gradient:
 /// buf ← μ·buf + Δ;  θ ← θ − lr·(Δ + μ·buf).
 pub fn nesterov_step(
@@ -861,6 +1054,163 @@ mod tests {
         let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
         dot / (norm(a) * norm(b))
     }
+
+    /// A·Aᵀ of a rows×cols row-major matrix, in f64.
+    fn gram(a: &[f32], rows: usize, cols: usize) -> Vec<f64> {
+        let mut g = vec![0.0f64; rows * rows];
+        for i in 0..rows {
+            for j in 0..rows {
+                g[i * rows + j] = (0..cols)
+                    .map(|c| a[i * cols + c] as f64 * a[j * cols + c] as f64)
+                    .sum();
+            }
+        }
+        g
+    }
+
+    #[test]
+    fn iso_flattens_diagonal_spectrum_to_mean_singular_value() {
+        // Alg. 2 step 2 on an axis-aligned 2x2 delta diag(3, 1): U = V = I,
+        // sigma = {3, 1}, sigma_bar = 2 -> Delta_iso = diag(2, 2). Learner
+        // values are anchor - delta so the merged delta is exactly diag(3, 1).
+        let anchor = [0.0f32; 4];
+        let learner = [-3.0f32, 0.0, 0.0, -1.0];
+        let mut out = [0.0f32; 4];
+        merge_iso(&anchor, &[&learner], &[1.0], 2, 2, &mut out);
+        for (o, e) in out.iter().zip([2.0f32, 0.0, 0.0, 2.0]) {
+            assert!((o - e).abs() < 1e-6, "got {out:?}");
+        }
+    }
+
+    #[test]
+    fn iso_matches_sigma_bar_u_vt_on_rectangular_matrices() {
+        // 2x3 (Gram on rows): Delta = [[1,0,0],[0,2,0]], sigma = {2, 1},
+        // sigma_bar = 1.5 -> 1.5*U*V^T = [[1.5,0,0],[0,1.5,0]].
+        let anchor = [0.0f32; 6];
+        let learner = [-1.0f32, 0.0, 0.0, 0.0, -2.0, 0.0];
+        let mut out = [0.0f32; 6];
+        merge_iso(&anchor, &[&learner], &[2.5], 2, 3, &mut out);
+        for (o, e) in out.iter().zip([1.5f32, 0.0, 0.0, 0.0, 1.5, 0.0]) {
+            assert!((o - e).abs() < 1e-6, "got {out:?}");
+        }
+        // 3x2 (Gram on cols, the transposed branch): same spectrum.
+        let learner_t = [-1.0f32, 0.0, 0.0, -2.0, 0.0, 0.0];
+        let mut out_t = [0.0f32; 6];
+        merge_iso(&anchor, &[&learner_t], &[1.0], 3, 2, &mut out_t);
+        for (o, e) in out_t.iter().zip([1.5f32, 0.0, 0.0, 1.5, 0.0, 0.0]) {
+            assert!((o - e).abs() < 1e-6, "got {out_t:?}");
+        }
+    }
+
+    #[test]
+    fn iso_rotated_svd_is_reconstructed_exactly() {
+        // Delta = R(30 deg) * diag(3, 1): U = R, V = I, sigma_bar = 2, so
+        // Delta_iso = 2*R = [[sqrt(3), -1], [1, sqrt(3)]].
+        let h = 3.0f64.sqrt() / 2.0;
+        let delta = [3.0 * h, -0.5, 3.0 * 0.5, h];
+        let anchor = [0.0f32; 4];
+        let learner: Vec<f32> = delta.iter().map(|d| -*d as f32).collect();
+        let mut out = [0.0f32; 4];
+        merge_iso(&anchor, &[&learner[..]], &[1.0], 2, 2, &mut out);
+        let expected = [3.0f64.sqrt(), -1.0, 1.0, 3.0f64.sqrt()];
+        for (o, e) in out.iter().zip(expected) {
+            assert!((*o as f64 - e).abs() < 1e-6, "got {out:?}");
+        }
+    }
+
+    #[test]
+    fn iso_output_spectrum_is_isotropic_and_aligned() {
+        // Full-rank deterministic 3x4 input: the output must satisfy
+        // M' M'^T = sigma_bar^2 * I (all singular values equal) and
+        // <M', M>_F = ||M'||_F^2 (M' = sigma_bar*U*V^T aligns with M's
+        // singular basis). Both checks are basis-free, so they hold no
+        // matter how the SVD is computed internally.
+        let anchor = [0.0f32; 12];
+        let delta = [
+            2.0f32, -1.0, 0.5, 3.0, //
+            0.25, 4.0, -2.0, 1.0, //
+            -1.5, 0.75, 3.5, -0.5,
+        ];
+        let learner: Vec<f32> = delta.iter().map(|d| -d).collect();
+        let mut out = [0.0f32; 12];
+        merge_iso(&anchor, &[&learner[..]], &[1.0], 3, 4, &mut out);
+        let g = gram(&out, 3, 4);
+        let sigma_bar_sq = (g[0] + g[4] + g[8]) / 3.0;
+        assert!(sigma_bar_sq > 0.0);
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { sigma_bar_sq } else { 0.0 };
+                assert!(
+                    (g[i * 3 + j] - expected).abs() < 1e-4 * sigma_bar_sq,
+                    "gram {g:?}"
+                );
+            }
+        }
+        let inner: f64 = out
+            .iter()
+            .zip(delta)
+            .map(|(o, d)| *o as f64 * d as f64)
+            .sum();
+        let out_norm_sq: f64 = out.iter().map(|o| (*o as f64).powi(2)).sum();
+        assert!((inner - out_norm_sq).abs() < 1e-4 * out_norm_sq);
+        // Idempotence: an already-isotropic matrix is a fixed point.
+        let mut again = out;
+        iso_flatten_spectrum(&mut again, 3, 4);
+        for (a, o) in again.iter().zip(out) {
+            assert!((a - o).abs() < 1e-5 * sigma_bar_sq.sqrt() as f32);
+        }
+    }
+
+    #[test]
+    fn iso_weighted_average_feeds_the_transform() {
+        // Weighted direct average first (house weighting, a documented
+        // deviation from the paper's uniform 1/R mean): deltas diag(4, 0)
+        // and diag(0, 4) at weights (3, 1) average to diag(3, 1), which
+        // flattens to diag(2, 2) as in the diagonal test.
+        let anchor = [0.0f32; 4];
+        let l0 = [-4.0f32, 0.0, 0.0, 0.0];
+        let l1 = [0.0f32, 0.0, 0.0, -4.0];
+        let mut out = [0.0f32; 4];
+        merge_iso(&anchor, &[&l0, &l1], &[3.0, 1.0], 2, 2, &mut out);
+        for (o, e) in out.iter().zip([2.0f32, 0.0, 0.0, 2.0]) {
+            assert!((o - e).abs() < 1e-6, "got {out:?}");
+        }
+    }
+
+    #[test]
+    fn iso_rank_deficient_null_directions_are_dropped_not_inflated() {
+        // Rank-1 2x2 delta diag(2, 0): sigma = {2, 0}, sigma_bar = 1 (zeros
+        // count toward the mean, per the paper). The null direction has an
+        // arbitrary singular vector, so it is dropped rather than filled:
+        // Delta_iso = diag(1, 0). Documented deviation.
+        let anchor = [0.0f32; 4];
+        let learner = [-2.0f32, 0.0, 0.0, 0.0];
+        let mut out = [0.0f32; 4];
+        merge_iso(&anchor, &[&learner], &[1.0], 2, 2, &mut out);
+        for (o, e) in out.iter().zip([1.0f32, 0.0, 0.0, 0.0]) {
+            assert!((o - e).abs() < 1e-6, "got {out:?}");
+        }
+    }
+
+    #[test]
+    fn iso_vector_and_zero_deltas_are_stable() {
+        // A 1xN delta has a single singular value, so sigma_bar equals it
+        // and the transform is the identity (the paper leaves non-matrix
+        // parameters untouched; a degenerate matrix shape agrees).
+        let anchor = [0.0f32, 0.0];
+        let learner = [-3.0f32, -4.0];
+        let mut out = [0.0f32; 2];
+        merge_iso(&anchor, &[&learner], &[1.0], 1, 2, &mut out);
+        assert!((out[0] - 3.0).abs() < 1e-6 && (out[1] - 4.0).abs() < 1e-6);
+        // Zero delta stays exactly zero.
+        let zero_learner = [0.0f32, 0.0];
+        merge_iso(&anchor, &[&zero_learner], &[1.0], 2, 1, &mut out);
+        assert_eq!(out, [0.0, 0.0]);
+        // Shape/product mismatch keeps the plain weighted average.
+        merge_iso(&anchor, &[&learner], &[1.0], 3, 5, &mut out);
+        assert_eq!(out, [3.0, 4.0]);
+    }
+
 
     #[test]
     fn heloco_aligned_passes_through() {

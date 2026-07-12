@@ -134,6 +134,17 @@ def parse_args(argv=None):
         "or depth-interleaved transformer layers (layer i -> fragment i mod P)",
     )
     p.add_argument(
+        "--matrix-merge",
+        choices=["rda", "iso"],
+        default="rda",
+        help="syncer aggregation for non-embedding (matrix) fragments: "
+        "rda = weighted radial-directional averaging (default); "
+        "iso = Iso-C-style isotropic aggregation (IsoLoCo, arXiv 2607.03011) "
+        "— average the per-tensor deltas, then flatten each averaged "
+        "matrix's singular-value spectrum to its mean; non-2D tensors join "
+        "the direct-averaged fragment",
+    )
+    p.add_argument(
         "--merge-alpha",
         type=float,
         default=0.5,
@@ -810,7 +821,11 @@ def main(argv=None) -> None:
 
     params = trainable_params(model)
     layout = build_layout(
-        [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
+        [(n, p.numel()) for n, p in params.items()],
+        args.fragments,
+        args.fragment_pattern,
+        matrix_merge=args.matrix_merge,
+        named_shapes={n: tuple(p.shape) for n, p in params.items()},
     )
     log.info(
         "%d trainable tensors -> %d fragments (%.1f MB total)",

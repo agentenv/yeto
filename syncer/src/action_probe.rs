@@ -1596,10 +1596,12 @@ mod tests {
                 FragmentInfo {
                     merge_mode: MERGE_AVG,
                     tensor_numels: vec![4],
+                    tensor_shapes: None,
                 },
                 FragmentInfo {
                     merge_mode: MERGE_AVG,
                     tensor_numels: vec![4],
+                    tensor_shapes: None,
                 },
             ],
         };
