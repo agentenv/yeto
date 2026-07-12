@@ -238,11 +238,16 @@ fn validate_outer_optimizer(
             "--outer-momentum is beta for {optimizer} and must be finite and in [0, 1), got {outer_momentum}"
         );
     }
-    // rho-adaptive v2 does not consume --outer-momentum: mu_star, rho_ref,
-    // the EMA beta, and the gain bounds are compile-time constants in
-    // merge.rs. The flag is still validated as finite so a typo does not
-    // silently ride along into logs and tapes.
-    if optimizer == merge::OuterOptimizer::RhoAdaptive && !outer_momentum.is_finite() {
+    // rho-adaptive v2 and capped-nesterov do not consume --outer-momentum:
+    // their constants (mu_star/rho_ref/gain bounds, and mu_max/tau_perp/
+    // release beta respectively) are compile-time constants in merge.rs.
+    // The flag is still validated as finite so a typo does not silently
+    // ride along into logs and tapes.
+    if matches!(
+        optimizer,
+        merge::OuterOptimizer::RhoAdaptive | merge::OuterOptimizer::CappedNesterov
+    ) && !outer_momentum.is_finite()
+    {
         anyhow::bail!(
             "--outer-momentum is unused by {optimizer} but must still be finite, got {outer_momentum}"
         );
@@ -386,6 +391,7 @@ mod tests {
             ("nesterov", merge::OuterOptimizer::Nesterov),
             ("normalized-ema", merge::OuterOptimizer::NormalizedEma),
             ("restarted-ema", merge::OuterOptimizer::RestartedEma),
+            ("capped-nesterov", merge::OuterOptimizer::CappedNesterov),
         ] {
             let args = Args::try_parse_from([
                 "yeto-syncer",
@@ -405,6 +411,8 @@ mod tests {
     fn validates_ema_beta_and_restart_threshold() {
         assert!(validate_outer_optimizer(merge::OuterOptimizer::NormalizedEma, 0.9).is_ok());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::RestartedEma, 1.0).is_err());
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::CappedNesterov, 0.9).is_ok());
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::CappedNesterov, f32::NAN).is_err());
         assert_eq!(parse_cosine_threshold("-0.25").unwrap(), -0.25);
         assert!(parse_cosine_threshold("1.1").is_err());
         assert!(parse_cosine_threshold("NaN").is_err());

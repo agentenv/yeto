@@ -26,6 +26,7 @@ pub enum OuterOptimizer {
     NormalizedEma,
     RestartedEma,
     RhoAdaptive,
+    CappedNesterov,
 }
 
 impl OuterOptimizer {
@@ -35,6 +36,7 @@ impl OuterOptimizer {
             Self::NormalizedEma => "normalized-ema",
             Self::RestartedEma => "restarted-ema",
             Self::RhoAdaptive => "rho-adaptive",
+            Self::CappedNesterov => "capped-nesterov",
         }
     }
 
@@ -58,8 +60,9 @@ impl FromStr for OuterOptimizer {
             "normalized-ema" => Ok(Self::NormalizedEma),
             "restarted-ema" => Ok(Self::RestartedEma),
             "rho-adaptive" => Ok(Self::RhoAdaptive),
+            "capped-nesterov" => Ok(Self::CappedNesterov),
             other => Err(format!(
-                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive; got {other:?}"
+                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov; got {other:?}"
             )),
         }
     }
@@ -87,8 +90,10 @@ pub struct OuterStepStats {
 /// state layer a single production path for both mutating commits and pure
 /// previews made from cloned parameter and buffer slices. `rho_ema` is the
 /// rho-adaptive controller's persistent scalar state (see
-/// `rho_adaptive_step`); the other optimizers leave it untouched, exactly as
-/// they leave each other's buffer conventions alone.
+/// `rho_adaptive_step`) and `capped_mu` is the capped-Nesterov controller's
+/// persistent effective momentum (see `capped_nesterov_step`); the other
+/// optimizers leave them untouched, exactly as they leave each other's
+/// buffer conventions alone.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_outer_step(
     optimizer: OuterOptimizer,
@@ -99,6 +104,7 @@ pub fn apply_outer_step(
     momentum: f32,
     restart_cos_threshold: f32,
     rho_ema: &mut f32,
+    capped_mu: &mut f32,
 ) -> OuterStepStats {
     match optimizer {
         OuterOptimizer::Nesterov => nesterov_step(params, buf, delta, lr, momentum),
@@ -107,12 +113,20 @@ pub fn apply_outer_step(
             restarted_ema_step(params, buf, delta, lr, momentum, restart_cos_threshold)
         }
         OuterOptimizer::RhoAdaptive => rho_adaptive_step(params, buf, delta, lr, rho_ema),
+        OuterOptimizer::CappedNesterov => {
+            capped_nesterov_step(params, buf, delta, lr, capped_mu)
+        }
     }
 }
 
 /// Materialize the nominal f32 parameter displacement produced by an outer
 /// step after its optimizer buffer has been updated. This is the same vector
 /// whose norm is reported by `OuterStepStats::applied_step_norm`.
+///
+/// For `CappedNesterov` the caller must pass the EFFECTIVE per-commit
+/// momentum written back by `capped_nesterov_step` (the updated persistent
+/// scalar), not the CLI momentum; with that value the Nesterov branch is
+/// bit-identical to the applied step.
 pub fn materialize_applied_step(
     optimizer: OuterOptimizer,
     updated_buf: &[f32],
@@ -122,7 +136,7 @@ pub fn materialize_applied_step(
 ) -> Vec<f32> {
     debug_assert_eq!(updated_buf.len(), delta.len());
     match optimizer {
-        OuterOptimizer::Nesterov => updated_buf
+        OuterOptimizer::Nesterov | OuterOptimizer::CappedNesterov => updated_buf
             .iter()
             .zip(delta)
             .map(|(buf, value)| lr * (*value + momentum * *buf))
@@ -225,6 +239,110 @@ pub fn rho_adaptive_step(
         history_current_norm_ratio: Some(rho),
         restarted: false,
     }
+}
+
+/// Capped-Nesterov (frozen controller spec, 2026-07-12): design-point
+/// momentum, also the pointwise ceiling on the effective momentum.
+pub const CAPPED_NESTEROV_MU_MAX: f64 = 0.9;
+/// Transverse budget: mu_t^2 * r_t <= TAU_PERP caps the norm of the
+/// history's delta-orthogonal contribution at TAU_PERP * |delta_t|.
+pub const CAPPED_NESTEROV_TAU_PERP: f64 = 1.0;
+/// Floor on the relative transverse residual r_t before inverting it; keeps
+/// mu_perp finite (and inert, ~1e6) when the buffer is parallel to delta.
+pub const CAPPED_NESTEROV_R_EPS: f64 = 1e-12;
+/// One-sided release EMA weight on the previous effective momentum. Caps
+/// bind instantly (min with the cap); release toward a loosened cap is
+/// smoothed with this beta.
+pub const CAPPED_NESTEROV_EMA_BETA: f64 = 0.9;
+/// Fresh controller state starts at the design-point momentum. Like the
+/// rho-adaptive EMA this scalar is NOT part of the checkpoint format; a
+/// restore behaves like tuned Nesterov until the caps re-bind.
+pub const CAPPED_NESTEROV_INITIAL_MU: f32 = CAPPED_NESTEROV_MU_MAX as f32;
+
+/// Per-commit momentum cap from the realized buffer/delta geometry
+/// (c_t = <b_{t-1}, delta_t> / |delta_t|^2, r_t = |b_{t-1} - c_t delta_t| /
+/// |delta_t|), before the release EMA:
+///
+///   mu_par : largest mu in [0, mu_max] with mu + mu^2 * [c_t]_+ <= mu_max,
+///            i.e. the positive root of [c_t]_+ mu^2 + mu - mu_max = 0,
+///            mu_par = (sqrt(1 + 4 [c_t]_+ mu_max) - 1) / (2 [c_t]_+)
+///            (mu_max itself when [c_t]_+ = 0) — caps the aligned gain
+///            A_t = 1 + mu + mu^2 c_t at 1 + mu_max for amplifying history;
+///   mu_perp: sqrt(tau_perp / max(r_t, eps)) — caps the transverse
+///            contribution mu^2 r_t |delta| at tau_perp |delta|;
+///   cap    = min(mu_max, mu_par, mu_perp).
+///
+/// Sign-reversal guard: if A_t(cap) < 0 (possible only for strongly negative
+/// c_t, where A_t is a downward parabola in mu with A_t(0) = 1), the cap is
+/// zeroed — since A_t(0) = 1 > 0 and A_t(cap) >= 0 imply A_t >= 0 on all of
+/// [0, cap], the guard keeps every admissible mu on the descent side.
+pub fn capped_nesterov_cap(c_t: f64, r_t: f64) -> f64 {
+    let c_plus = c_t.max(0.0);
+    let mu_par = if c_plus > 0.0 {
+        ((1.0 + 4.0 * c_plus * CAPPED_NESTEROV_MU_MAX).sqrt() - 1.0) / (2.0 * c_plus)
+    } else {
+        CAPPED_NESTEROV_MU_MAX
+    };
+    let mu_perp = (CAPPED_NESTEROV_TAU_PERP / r_t.max(CAPPED_NESTEROV_R_EPS)).sqrt();
+    let cap = CAPPED_NESTEROV_MU_MAX.min(mu_par).min(mu_perp);
+    if 1.0 + cap + cap * cap * c_t < 0.0 {
+        0.0
+    } else {
+        cap
+    }
+}
+
+/// Capped-Nesterov step. Standard Nesterov recursion, but the momentum is
+/// chosen per commit from the realized geometry of the buffer against the
+/// merged delta instead of being a fixed CLI constant (`--outer-momentum` is
+/// not consumed; the constants above are compile-time). Per commit:
+///
+///   c_t = <b_{t-1}, delta_t> / |delta_t|^2,
+///   r_t = |b_{t-1} - c_t delta_t| / |delta_t|      (both 0 when delta = 0),
+///   cap = capped_nesterov_cap(c_t, r_t),
+///   mu_t = min(cap, beta * mu_{t-1} + (1 - beta) * cap)   (one-sided EMA),
+///   b_t = mu_t b_{t-1} + delta_t;  d_t = delta_t + mu_t b_t;
+///   theta -= lr * d_t.
+///
+/// `mu_prev` is the persistent effective momentum (per fragment, init
+/// CAPPED_NESTEROV_INITIAL_MU, threaded like the rho-adaptive `rho_ema`); it
+/// is updated to mu_t before the step so callers can hand the exact applied
+/// momentum to `materialize_applied_step`. mu_t is rounded to f32 once and
+/// the update is delegated to `nesterov_step`, so the applied step and all
+/// `OuterStepStats` conventions are bit-for-bit those of plain Nesterov at
+/// momentum mu_t.
+pub fn capped_nesterov_step(
+    params: &mut [f32],
+    buf: &mut [f32],
+    delta: &[f32],
+    lr: f32,
+    mu_prev: &mut f32,
+) -> OuterStepStats {
+    let mut dot = 0.0f64;
+    let mut buf_norm_sq = 0.0f64;
+    let mut delta_norm_sq = 0.0f64;
+    for (b, d) in buf.iter().zip(delta) {
+        dot += *b as f64 * *d as f64;
+        buf_norm_sq += (*b as f64).powi(2);
+        delta_norm_sq += (*d as f64).powi(2);
+    }
+    let (c_t, r_t) = if delta_norm_sq > 0.0 {
+        let c = dot / delta_norm_sq;
+        // |b - c*delta|^2 expands to |b|^2 - c*<b, delta> at the projection
+        // coefficient; clamp at 0 against cancellation when b ~ c*delta.
+        let r = ((buf_norm_sq - c * dot).max(0.0) / delta_norm_sq).sqrt();
+        (c, r)
+    } else {
+        // No measurable geometry (zero delta): caps stay inactive and the
+        // EMA relaxes toward mu_max, mirroring rho-adaptive's unmeasured
+        // commits.
+        (0.0, 0.0)
+    };
+    let cap = capped_nesterov_cap(c_t, r_t);
+    let released =
+        CAPPED_NESTEROV_EMA_BETA * *mu_prev as f64 + (1.0 - CAPPED_NESTEROV_EMA_BETA) * cap;
+    *mu_prev = cap.min(released) as f32;
+    nesterov_step(params, buf, delta, lr, *mu_prev)
 }
 
 /// Purely scale a nominal applied-step vector and apply it once to the same
@@ -1022,6 +1140,182 @@ mod tests {
     }
 
     #[test]
+    fn capped_nesterov_zero_buffer_first_step_runs_at_mu_max() {
+        // b_0 = 0 gives no measurable geometry: dot = 0 so c_1 = 0 and
+        // r_1 = 0. Then mu_par = mu_max (c_plus = 0), mu_perp =
+        // sqrt(tau_perp/eps) = 1e6 (inactive), cap = mu_max = 0.9,
+        // A(0.9) = 1.9 > 0 (guard idle). EMA path from mu_prev = 0.9:
+        // released = 0.9*0.9 + 0.1*0.9 = 0.9, mu_1 = min(0.9, 0.9) = 0.9.
+        // The commit is exactly plain Nesterov at mu_max from zero state:
+        // b_1 = delta, step = lr*(1 + 0.9)*delta = 0.19*delta.
+        let mut p = [1.0f32, -1.0];
+        let mut buf = [0.0f32, 0.0];
+        let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+        let stats = capped_nesterov_step(&mut p, &mut buf, &[0.5, 2.0], 0.1, &mut mu);
+        assert!((mu as f64 - 0.9).abs() < 1e-7);
+        assert_eq!(buf, [0.5, 2.0]);
+        assert!((p[0] as f64 - (1.0 - 0.19 * 0.5)).abs() < 1e-6);
+        assert!((p[1] as f64 - (-1.0 - 0.19 * 2.0)).abs() < 1e-6);
+        // Stats keep the plain-Nesterov conventions.
+        let delta_norm = (0.5f64 * 0.5 + 4.0).sqrt();
+        assert!((stats.applied_step_norm - 0.19 * delta_norm).abs() < 1e-6);
+        assert_close(stats.direction_delta_cosine.unwrap(), 1.0);
+        assert_eq!(stats.history_current_norm_ratio, Some(0.0));
+        assert!(!stats.restarted);
+    }
+
+    #[test]
+    fn capped_nesterov_three_step_hand_computed_sequence() {
+        // Deterministic 3-step audit at lr = 0.1, theta_0 = 0, b_0 = 0,
+        // mu_prev = 0.9 (production initialization); mu_max = 0.9,
+        // tau_perp = 1, release beta = 0.9.
+        //
+        // t=1, delta_1 = [1, 0]: zero buffer -> c_1 = 0, r_1 = 0, all caps
+        //   inactive, cap = 0.9; released = 0.9*0.9 + 0.1*0.9 = 0.9;
+        //   mu_1 = 0.9. Nesterov: b_1 = [1, 0], d_1 = 1.9*[1, 0],
+        //   step_1 = [0.19, 0], theta_1 = [-0.19, 0].
+        // t=2, delta_2 = [1, 0] (fully aligned history):
+        //   c_2 = <[1,0],[1,0]>/1 = 1, r_2 = 0. Aligned cap binds:
+        //   mu_par solves mu + mu^2 = 0.9, mu_par = (sqrt(1 + 4*0.9) - 1)/2
+        //         = (sqrt(4.6) - 1)/2 = 0.57238053...
+        //   (check: 0.57238053 + 0.57238053^2 = 0.9). cap = mu_par;
+        //   released = 0.9*0.9 + 0.1*0.57238053 = 0.86723805 > cap, so the
+        //   cap binds instantly (one-sided): mu_2 = 0.57238053.
+        //   By construction A_2 = 1 + mu_2 + mu_2^2*c_2 = 1 + 0.9 = 1.9, so
+        //   d_2 = A_2*delta_2 = [1.9, 0]: the aligned cap holds the applied
+        //   step at exactly the (1+mu_max) design gain.
+        //   b_2 = mu_2*[1,0] + [1,0] = [1.57238053, 0],
+        //   step_2 = [0.19, 0], theta_2 = [-0.38, 0].
+        // t=3, delta_3 = [0, 1] (orthogonal history):
+        //   c_3 = 0, r_3 = |b_2|/|delta_3| = 1.57238053. Transverse cap:
+        //   mu_perp = sqrt(1/1.57238053) = 0.79748276...; cap = 0.79748276.
+        //   released = 0.9*0.57238053 + 0.1*0.79748276 = 0.59489075 < cap,
+        //   so the release EMA binds (smooth recovery): mu_3 = 0.59489075.
+        //   b_3 = mu_3*[1.57238053, 0] + [0, 1] = [0.93539497, 1],
+        //   d_3 = [0, 1] + mu_3*b_3 = [0.55645437, 1.59489075],
+        //   step_3 = [0.05564544, 0.15948908],
+        //   theta_3 = [-0.43564544, -0.15948908].
+        let lr = 0.1f32;
+        let mut p = [0.0f32, 0.0];
+        let mut buf = [0.0f32, 0.0];
+        let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+        let tol = 1e-5f64;
+
+        let s1 = capped_nesterov_step(&mut p, &mut buf, &[1.0, 0.0], lr, &mut mu);
+        assert!((mu as f64 - 0.9).abs() < 1e-7);
+        assert_eq!(buf, [1.0, 0.0]);
+        assert!((p[0] as f64 + 0.19).abs() < tol && p[1] == 0.0);
+        assert!((s1.applied_step_norm - 0.19).abs() < tol);
+        assert_eq!(s1.history_current_norm_ratio, Some(0.0));
+
+        let s2 = capped_nesterov_step(&mut p, &mut buf, &[1.0, 0.0], lr, &mut mu);
+        let mu2 = ((1.0f64 + 4.0 * 0.9).sqrt() - 1.0) / 2.0;
+        assert!((mu as f64 - mu2).abs() < 1e-7);
+        // The one-sided min bound the EMA path from above at t=2.
+        assert!(0.9 * 0.9 + 0.1 * mu2 > mu2);
+        assert!((buf[0] as f64 - (1.0 + mu2)).abs() < tol && buf[1] == 0.0);
+        assert!((p[0] as f64 + 0.38).abs() < tol && p[1] == 0.0);
+        assert!((s2.applied_step_norm - 0.19).abs() < tol);
+        // history/current ratio keeps the Nesterov convention:
+        // mu^2*|b_1| / ((1+mu)*|delta_2|).
+        let expected_ratio = mu2 * mu2 / (1.0 + mu2);
+        assert!((s2.history_current_norm_ratio.unwrap() - expected_ratio).abs() < tol);
+
+        let s3 = capped_nesterov_step(&mut p, &mut buf, &[0.0, 1.0], lr, &mut mu);
+        let cap3 = (1.0f64 / (1.0 + mu2)).sqrt();
+        let mu3 = 0.9 * mu2 + (1.0 - 0.9) * cap3;
+        // The release EMA binds from below at t=3.
+        assert!(mu3 < cap3);
+        assert!((mu as f64 - mu3).abs() < 1e-7);
+        let b3 = [mu3 * (1.0 + mu2), 1.0];
+        assert!((buf[0] as f64 - b3[0]).abs() < tol && (buf[1] as f64 - 1.0).abs() < tol);
+        let d3 = [mu3 * b3[0], 1.0 + mu3 * b3[1]];
+        assert!((p[0] as f64 + (0.38 + 0.1 * d3[0])).abs() < tol);
+        assert!((p[1] as f64 + 0.1 * d3[1]).abs() < tol);
+        let d3_norm = (d3[0] * d3[0] + d3[1] * d3[1]).sqrt();
+        assert!((s3.applied_step_norm - 0.1 * d3_norm).abs() < tol);
+    }
+
+    #[test]
+    fn capped_nesterov_high_transverse_residual_binds_mu_perp() {
+        // b = [0, 10], delta = [1, 0]: c = 0 (orthogonal), r = |b|/|delta|
+        // = 10. mu_par = mu_max = 0.9; mu_perp = sqrt(tau_perp/10)
+        // = sqrt(0.1) = 0.31622777; cap = 0.31622777, far below the EMA path
+        // (0.9*0.9 + 0.1*cap = 0.84162278), so the transverse cap binds:
+        // mu = sqrt(0.1). The step's delta-orthogonal component is then
+        // mu^2*b = 0.1*[0, 10] with norm exactly tau_perp*|delta| = 1.
+        let mut p = [0.0f32, 0.0];
+        let mut buf = [0.0f32, 10.0];
+        let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+        let stats = capped_nesterov_step(&mut p, &mut buf, &[1.0, 0.0], 1.0, &mut mu);
+        let expected_mu = 0.1f64.sqrt();
+        assert!((mu as f64 - expected_mu).abs() < 1e-7);
+        // b_new = mu*[0, 10] + [1, 0]; d = delta + mu*b_new
+        //       = [1 + mu, 10*mu^2] = [1.31622777, 1.0].
+        assert!((buf[0] as f64 - 1.0).abs() < 1e-6);
+        assert!((buf[1] as f64 - 10.0 * expected_mu).abs() < 1e-5);
+        assert!((p[0] as f64 + (1.0 + expected_mu)).abs() < 1e-6);
+        assert!((p[1] as f64 + 1.0).abs() < 1e-5);
+        // history/current ratio, Nesterov convention:
+        // mu^2*|b_prev| / ((1+mu)*|delta|) = 1 / (1 + mu).
+        let expected_ratio = 1.0 / (1.0 + expected_mu);
+        assert!((stats.history_current_norm_ratio.unwrap() - expected_ratio).abs() < 1e-6);
+    }
+
+    #[test]
+    fn capped_nesterov_negative_c_guard_and_smooth_release() {
+        // Mildly negative c keeps full momentum: b = [-0.5, 0],
+        // delta = [1, 0]: c = -0.5, c_plus = 0 -> mu_par = 0.9; b = c*delta
+        // exactly, so r = 0 -> mu_perp inactive; cap = 0.9;
+        // A(0.9) = 1 + 0.9 + 0.81*(-0.5) = 1.495 > 0 -> no guard; mu = 0.9.
+        let mut p = [0.0f32, 0.0];
+        let mut buf = [-0.5f32, 0.0];
+        let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+        capped_nesterov_step(&mut p, &mut buf, &[1.0, 0.0], 0.1, &mut mu);
+        assert!((mu as f64 - 0.9).abs() < 1e-7);
+
+        // Strongly negative c flips the aligned gain sign: b = [-10, 0],
+        // delta = [1, 0]: c = -10, cap before the guard = 0.9,
+        // A(0.9) = 1.9 + 0.81*(-10) = -6.2 < 0 -> guard zeroes the cap;
+        // mu = min(0, 0.9*0.9 + 0.1*0) = 0. The commit degrades to plain
+        // SGD and the buffer restarts from the delta (b = 0*b + delta).
+        let mut p = [0.0f32, 0.0];
+        let mut buf = [-10.0f32, 0.0];
+        let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+        let stats = capped_nesterov_step(&mut p, &mut buf, &[1.0, 0.0], 0.1, &mut mu);
+        assert_eq!(mu, 0.0);
+        assert_eq!(buf, [1.0, 0.0]);
+        assert!((p[0] as f64 + 0.1).abs() < 1e-7 && p[1] == 0.0);
+        assert_close(stats.applied_step_norm, 0.1);
+        assert_eq!(stats.history_current_norm_ratio, Some(0.0));
+
+        // Release is smooth, not a jump back to mu_max: next commit with
+        // delta = [0, 1] sees c = 0, r = |[1,0]|/1 = 1 -> mu_perp = 1,
+        // cap = 0.9; mu = min(0.9, 0.9*0 + 0.1*0.9) = 0.09.
+        let _ = capped_nesterov_step(&mut p, &mut buf, &[0.0, 1.0], 0.1, &mut mu);
+        assert!((mu as f64 - 0.09).abs() < 1e-7);
+    }
+
+    #[test]
+    fn capped_nesterov_step_is_bit_identical_to_materialized_step() {
+        // Same requirement the state layer enforces on every preview commit:
+        // materialize_applied_step with the updated buffer and the effective
+        // momentum written by the step must reproduce the applied step
+        // bit-for-bit on the f32 lattice.
+        let base = [0.25f32, -1.5, 3.0];
+        let mut p = base;
+        let mut buf = [0.5f32, 1.0, -2.0];
+        let delta = [1.0f32, -0.5, 0.25];
+        let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+        capped_nesterov_step(&mut p, &mut buf, &delta, 0.3, &mut mu);
+        let step =
+            materialize_applied_step(OuterOptimizer::CappedNesterov, &buf, &delta, 0.3, mu);
+        for ((b, s), after) in base.iter().zip(&step).zip(&p) {
+            assert_eq!((b - s).to_bits(), after.to_bits());
+        }
+    }
+
+    #[test]
     fn nesterov_zero_delta_leaves_direction_ratios_undefined() {
         let mut p = [1.0f32];
         let mut buf = [2.0f32];
@@ -1127,6 +1421,7 @@ mod tests {
         assert_eq!("nesterov".parse(), Ok(OuterOptimizer::Nesterov));
         assert_eq!("normalized-ema".parse(), Ok(OuterOptimizer::NormalizedEma));
         assert_eq!("restarted-ema".parse(), Ok(OuterOptimizer::RestartedEma));
+        assert_eq!("capped-nesterov".parse(), Ok(OuterOptimizer::CappedNesterov));
         assert!("ema".parse::<OuterOptimizer>().is_err());
     }
 }
