@@ -450,7 +450,7 @@ def test_compare_eval_only_does_not_build_syncer(monkeypatch, capsys):
             "--eval-only",
         ],
     )
-    monkeypatch.setattr(compare, "eval_loss_per_token", lambda *args: 1.25)
+    monkeypatch.setattr(compare, "eval_loss_per_token", lambda *args, **kwargs: 1.25)
 
     def unexpected_syncer_build():
         raise AssertionError("unexpected syncer build")

@@ -425,7 +425,7 @@ def learner_command(
         "--seed",
         str(getattr(args, "training_seed", 0)),
         "--tuning",
-        args.tuning,
+        getattr(args, "tuning", "lora"),
         "--lora-r",
         str(args.lora_r),
         "--lora-alpha",
@@ -1450,7 +1450,7 @@ def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float
         "--device",
         args.device,
         "--tuning",
-        args.tuning,
+        getattr(args, "tuning", "lora"),
     ]
     if adapter_dir is not None:
         cmd += ["--adapter-dir", str(adapter_dir)]
