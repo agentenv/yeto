@@ -251,9 +251,36 @@ A probe-free controller measuring $\rho$ online (buffer stores the previously ap
 
 Never worse than second-best at any horizon; never catastrophic; ties the best arm at $H=64$ (+0.0004). Worst-case cross-horizon regret: rho-adaptive 0.008 vs 0.013 ($\mu=0$), 0.011 ($\mu=0.5$), 0.086 ($\mu=0.9$) — roughly half the best fixed policy's, with zero per-horizon tuning. This is explicitly a *development screen*: the controller was designed after seeing the fixed grid on the same seed, and its $\kappa=2$ rule was calibrated on the wrong $\rho$ convention (Box 1), which explains its 0.008 give-back at $H=16$. The frozen v2 (capped-Nesterov Candidate 2: $\mu_{\max}=0.9$, transverse cap $\tau_\perp=1.0$, sign-reversal guard, one-sided release EMA, $\eta = 0.28/1.9 \approx 0.147$; pointwise bound $A^2 \le 4.61$) is specified and pending (Section 4.10).
 
-### 4.7 [PLACEHOLDER] Blind prediction test (preregistered seed-251 $\mu=0.9$ cells)
+### 4.7 Preliminary out-of-sample consistency (seed-251 target cells)
 
-**Spec:** measured seed-251 losses at ($H{=}16,\mu{=}0.9$) and ($H{=}256,\mu{=}0.9$) against the frozen predictions 1.4356 and 1.4132, ordering gap 0.0224, sibling penalties +0.0780 / +0.0473, plus the $H{=}64$ $\mu{=}0.5$ $\eta{=}0.28$ cell vs predicted 1.3869 — one table, pass/fail per preregistered ordering/gap, with competing-model (aligned-only, single-term) predictions alongside.
+This is **preliminary out-of-sample consistency**, not a decisive validation. The registered decisive test is specified at the end of this section (§4.7.1) and remains pending. Three new seed-251 target losses — ($H{=}16,\mu{=}0.9$), ($H{=}256,\mu{=}0.9$), and ($H{=}64,\mu{=}0.5,\eta{=}0.28$) — supply five preregistered contrasts against the two-term law's frozen predictions:
+
+| Preregistered contrast | Two-term pred | Observed | Obs − pred |
+|---|---:|---:|---:|
+| H16 $\mu{=}.9$ − H16 $\mu{=}0$ | +0.0780 | +0.0846 | +0.0066 |
+| H256 $\mu{=}.9$ − H256 $\mu{=}.5$ | +0.0473 | +0.0346 | −0.0126 |
+| H16 $\mu{=}.9$ − H256 $\mu{=}.9$ (cross-$H$) | +0.0224 | +0.0366 | +0.0142 |
+| H64 $\mu{=}.5$ $\eta{=}.28$ − $\mu{=}.5$ $\eta{=}.175$ | +0.0216 | +0.0164 | −0.0052 |
+| H64 $\mu{=}.5$ $\eta{=}.28$ − $\mu{=}0$ $\eta{=}.175$ | +0.0204 | +0.0200 | −0.0004 |
+
+All five **contrast directions are correct (5/5)**; contrast MAE 0.0078, RMSE 0.0093 — on the scale of the development-fit pointwise RMSE (0.0090). The two-term law also outpredicts the two named alternatives in aggregate: five-gap MAE 0.0078 (two-term) vs 0.0286 (aligned-only) vs 0.0274 (superseded single-term); e.g. aligned-only predicts only +0.0104 for the observed +0.0846 H16 penalty, and the single-term law gets the cross-$H$ ordering sign wrong.
+
+Three caveats keep this preliminary. (i) **Sibling-control contamination:** seed 251 was *not* an untouched seed when these predictions were scored — it had already supplied the H16/H256 $\mu\in\{0,.5\}$ sibling controls (EXP2.27), so the large per-seed intercept offset ($\approx{+}0.27$) and horizon behavior were already visible; this is a blind *target-cell* holdout conditional on a partially observed seed, not a fresh-seed prospective test, and the within-$H$ seed-offset defense does not protect the cross-$H$ ordering. (ii) **No frozen tolerance and only three new losses:** the five contrasts reuse only three target losses, so they are not five independent confirmations; two gaps still miss by 0.013–0.014. (iii) **No uncertainty:** these are 64-row endpoint means with no paired bootstrap or across-seed interval. Absolute levels were explicitly *not* claimed (seed-223 intercepts were reused), and are not defended here.
+
+#### 4.7.1 [PLACEHOLDER] Registered decisive test (untouched seed 307)
+
+**Spec (frozen; full protocol in `docs/EXP2_37.md`).** A single untouched seed (shuffle/training 307/307307), every cell launched only after externally timestamped preregistration, with a **frozen acceptance band of $\pm 0.018$ ($2\times$ development-fit RMSE)** and predictions listed for all three competing models (two-term, aligned-only, superseded single-term):
+
+1. **Seven-cell contrast block** reproducing all five contrasts above without importing any control from a previously seen seed: H16 $(\mu{=}0,\eta{=}.175)$, $(\mu{=}.9,\eta{=}.175)$; H256 $(\mu{=}.5,\eta{=}.175)$, $(\mu{=}.9,\eta{=}.175)$; H64 $(\mu{=}0,\eta{=}.175)$, $(\mu{=}.5,\eta{=}.175)$, $(\mu{=}.5,\eta{=}.28)$.
+2. **Matched-$\eta_{\mathrm{eff}}$ $\mu$-triads** that isolate the variance term $v$ by holding the aligned effective step $\approx 0.28$ across $\mu\in\{0,.5,.9\}$:
+
+   | $H$ | $\mu{=}0$ $\eta$ | $\mu{=}.5$ matched $\eta$ | $\mu{=}.9$ matched $\eta$ |
+   |---:|---:|---:|---:|
+   | 16 | 0.2800 | 0.1651 | 0.0992 |
+   | 64 | 0.2800 | 0.1782 | 0.1296 |
+   | 256 | 0.2800 | 0.1752 | 0.1230 |
+
+   Here the aligned-overstep term is held constant, so any systematic loss increase with $\mu$ must come from the predicted $A^2_{\mathrm{RMS}}$ variance term; the two-term law predicts a monotone $v\,\Delta\log A^2_{\mathrm{RMS}}$ rise, while aligned-only predicts $\approx 0$.
 
 ### 4.8 [PLACEHOLDER] Single-learner noise floor (E1)
 
@@ -267,9 +294,17 @@ Never worse than second-best at any horizon; never catastrophic; ties the best a
 
 **Spec:** dev-screen table like 4.6 for frozen Candidate 2 ($\mu_{\max}{=}0.9,\tau_\perp{=}1.0,\eta{=}0.147$) vs Candidate 1 gain-normalizer vs rho-adaptive-v2 scalar baseline — per-H losses, worst-case regret, realized $A^2$ vs the ≤4.61 bound.
 
-### 4.11 [PLACEHOLDER] Buffer-orientation intervention (causality)
+### 4.11 Buffer-orientation intervention (open-loop rollout)
 
-**Spec:** one-step paired eval-loss deltas for same-norm momentum buffers at real / aligned / orthogonal / anti-aligned / random-rotated orientations from a common checkpoint — one bar figure; kill criterion if orientation does not order the damage.
+**One-step screen [PLACEHOLDER].** Paired eval-loss deltas for same-norm momentum buffers at real / aligned / orthogonal / anti-aligned / random-rotated orientations from a common checkpoint — one bar figure; kill criterion if orientation does not order the damage. Pending.
+
+**Eight-commit open-loop rollout.** To probe whether the one-step orientation effect persists across a horizon, we reorient the initial Nesterov buffer $b_0$ and replay eight consecutive same-fragment commits, feeding *the same factually captured pseudo-gradient sequence* $g_{1:8}$ to every variant (`scripts/replay_buffer_orientation_multistep.py`). This is deliberately an **open-loop sensitivity analysis conditional on one factual sequence of eight captured pseudo-gradients**: future deltas and other-fragment parameters are *not* regenerated counterfactually, so the principal closed-loop path (buffer $\to$ parameters $\to$ future learner updates) is intentionally blocked. State the estimand plainly:
+
+> Reorienting the initial Nesterov buffer produced horizon-dependent oracle-loss responses at six selected branch points. The aligned variant was locally favorable after one replayed commit but had higher commit-8 loss than the factual-buffer variant at five of six branches. The anti-aligned variant had the highest aggregate loss, rejecting the preregistered *monotone* orientation ordering. **Because future deltas and other-fragment parameters were not regenerated counterfactually, this experiment does not estimate the closed-loop effect of buffer orientation on training.**
+
+The result demonstrates that the effect of initial buffer orientation can **reverse with replay horizon under a fixed delta path**; it is consistent with eventual overshoot by the aligned variant, and it **falsifies a simple monotone mapping** from aligned gain or displacement magnitude to oracle harm. The six-branch effect estimate is **exploratory and descriptive**. This is consistent with the exact open-loop algebra: with fixed $g_{1:N}$, $\theta_N^{(v)}-\theta_N^{(0)} = -\eta\,\beta_N\,b_0^{(v)}$ with $\beta_N=\mu^2(1-\mu^N)/(1-\mu)$ ($\beta_8\approx 4.613$ at $\mu{=}0.9$), which fixes step *geometry* but supplies no monotone relation between displacement norm, aligned gain, and nonlinear oracle loss — so displacement cannot rank the endpoints.
+
+We deliberately do **not** claim: that buffer alignment causally causes the closed-loop $\mu{=}0.9$ degradation; that aligned buffers are the worst training policy after eight commits; that the exact decomposition predicts anti-aligned best or worst; that the five-variant ordering was validated; that the effect is significant at "$3.2\sigma$"; or that multi-step feedback explains the reversal (feedback was removed by construction). On statistics: the six branches come from one deterministically sampled trajectory sharing an oracle and possibly overlapping windows — they are repeated observations within one experimental unit, not independent runs, so the naive $\bar d/\mathrm{SE}\approx 3.2$ is at most a Student-$t$ with 5 df (two-sided $p\approx 0.024$), and a sign test on 5/6 gives one-sided $p\approx 0.109$. The decisive follow-up is a genuine **closed-loop** branch experiment (reorient $b_0$, advance all fragments in commit order, regenerate learner candidates from each variant's parameters under common seeds, recompute HeLoCo and merging from each variant's buffer), with independent capture seeds — not branch positions — as the inferential units.
 
 ### 4.12 [PLACEHOLDER] Full-parameter phase map (SmolLM2-135M)
 
@@ -282,6 +317,10 @@ Never worse than second-best at any horizon; never catastrophic; ties the best a
 ### 4.14 [PLACEHOLDER] Dynamic-H / elastic synchronization
 
 **Spec:** wall-clock and FLOPs to target loss under bandwidth variation and worker churn, frozen controller vs best fixed policies vs per-H tuned oracle — the systems-payoff figure.
+
+### 4.15 Iso-C aggregation check (EXP2.33) — reporting-precision artifact, resolved
+
+The Iso-C (IsoLoCo, arXiv 2607.03011) $\mu{=}0$ arm at $\eta{=}0.28$ reported a 64-row eval loss of **1.359852**, coincident to all six printed decimals with the EXP2.23 RDA $\mu{=}0$/$\eta{=}0.28$ baseline. This looked like a routing collapse (Iso-C silently averaging like RDA). Direct checkpoint comparison rejects that reading: the two `work/m4/state.ckpt` files are **not identical** (distinct MD5; 40.24M of 43.28M bytes differ; over the 10.82M-float payload $\max|\Delta|{=}0.080$, $\mathrm{mean}|\Delta|{=}0.0076$, rms $0.0071$ vs $0.0117$, zero floats exactly equal). Iso-C's spectrum-flattening ran and produced a materially different merged state; a source audit found no ISO$\to$RDA fallback path (invalid layouts fail loudly, and the only `merge_iso` degenerate branch is direct averaging, made unreachable by the Rust HELLO shape check). The six-decimal tie is a **reporting-precision coincidence**: the evaluator rounds loss to six decimals before it is captured (no unrounded value survives in any artifact), and a rank-2 LoRA adapter is a small enough perturbation on the frozen 9B base that sizeable weight-space differences move the 64-row eval loss below $10^{-6}$. Two harness follow-ups are owed and unrelated to the mechanism: record `matrix_merge` in the plan/result/tape/checkpoint metadata (an overridden `m4` arm is currently indistinguishable from an RDA `m4` arm after the fact), and report raw loss at $\geq 12$ significant digits so Iso-C and RDA can be separated numerically.
 
 ## 5 Related work
 
@@ -301,6 +340,11 @@ Never worse than second-best at any horizon; never catastrophic; ties the best a
 - **"Sync" is vanilla-schedule, not lockstep.** Learners do not barrier; staleness is bounded by commit latency, not zero. The DiLoCo design point ($H\approx 500$ full-finetune) differs from our 16–256-microstep LoRA windows; the crossover location is a claim about this cadence and budget.
 - **Cross-hardware numerics.** Arms span A100/cu121 and Blackwell/cu128; all decisive matched comparisons are same-environment, but bf16 kernel differences alone flip 2/80 borderline one-step signs — itself evidence for how small per-decision signals are.
 - **Controller status.** v1 results are a same-seed development screen with a known miscalibration; no frozen-controller fresh-seed evidence exists yet. The wall claim is about affordable probes for closely spaced merge actions after early training, not about selection in general (early-training selection demonstrably works, 56–84% headroom).
+- **Stationary-kernel assumptions.** The geometric-kernel closed forms ($\mathbb{E}[A_t]$, $A^2_{\mathrm{RMS}}$) assume a zero-mean wide-sense-stationary process in stationary/infinite-history operation. Production kernels are only approximately geometric, delta norms are nonstationary, and runs have only 20–320 commits; the transition to the distinct stationary-loss regime the theory derives is not characterized here. These are approximations, not identities, at production cadence.
+- **Measurement-wall generality.** The captured-headroom-vs-probe curve comes from a single $H{=}64$, seed-223 capture; EXP2.25 flags $H{=}16/256$ behavior as future work, and "any affordable probe" is undefined absent an explicit evaluation-cost-versus-training-step accounting. The 8-panel saturation is a claim about this one capture.
+- **Negative-merge mechanism unidentified.** The 0.36–0.39 negative-merge rate is not yet separated into merge interference vs ordinary stochastic one-step noise; the single-learner noise-floor control (Section 4.8) is required before attributing negative merges to merging itself, and the schedule-inherent heading overreaches until it runs.
+- **Imperfect interventions in the decomposition grid.** The EXP2.24 realized-norm match overshot its target by 9.6%, and the new $\mu{=}0.9$ arms packed all four learners onto one GPU while the reference arms used four GPUs — so the decomposition grid mixes an imperfect scale match with a schedule/overshoot and hardware-packing difference, beyond the bf16 cross-generation caveat already noted.
+- **Controller-bound conditions.** The $A^2\le 4.61$ capped-Nesterov bound holds only under THEORY.md's stated conditions — nonzero delta (zero-delta commits can apply an unbounded history-only step and are outside the bound), exact real arithmetic (f32 rounding can nudge the effective $\mu$ past the f64 cap), per-fragment interpretation, and a valid controller-state invariant that is assumed rather than enforced. The current bound is a specification, not yet a checked closed-loop guarantee.
 
 ## Reproducibility
 
