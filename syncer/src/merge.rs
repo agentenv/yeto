@@ -171,9 +171,11 @@ pub fn rho_adaptive_step(
     let scale = (1.0 / (1.0 - mu_eff * rho).max(0.25)) as f32;
     let mut step_norm_sq = 0.0f64;
     for ((p, b), d) in params.iter_mut().zip(buf.iter_mut()).zip(delta) {
-        let step = lr * scale * *d;
-        *p -= step;
+        // Write the buffer first and derive the step from it so this path
+        // is bit-identical to materialize_applied_step's lr * buf.
         *b = scale * *d;
+        let step = lr * *b;
+        *p -= step;
         step_norm_sq += (step as f64).powi(2);
     }
     OuterStepStats {
