@@ -25,6 +25,7 @@ pub enum OuterOptimizer {
     Nesterov,
     NormalizedEma,
     RestartedEma,
+    RhoAdaptive,
 }
 
 impl OuterOptimizer {
@@ -33,6 +34,7 @@ impl OuterOptimizer {
             Self::Nesterov => "nesterov",
             Self::NormalizedEma => "normalized-ema",
             Self::RestartedEma => "restarted-ema",
+            Self::RhoAdaptive => "rho-adaptive",
         }
     }
 
@@ -55,8 +57,9 @@ impl FromStr for OuterOptimizer {
             "nesterov" => Ok(Self::Nesterov),
             "normalized-ema" => Ok(Self::NormalizedEma),
             "restarted-ema" => Ok(Self::RestartedEma),
+            "rho-adaptive" => Ok(Self::RhoAdaptive),
             other => Err(format!(
-                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema; got {other:?}"
+                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive; got {other:?}"
             )),
         }
     }
@@ -98,6 +101,7 @@ pub fn apply_outer_step(
         OuterOptimizer::RestartedEma => {
             restarted_ema_step(params, buf, delta, lr, momentum, restart_cos_threshold)
         }
+        OuterOptimizer::RhoAdaptive => rho_adaptive_step(params, buf, delta, lr, momentum),
     }
 }
 
@@ -121,6 +125,63 @@ pub fn materialize_applied_step(
         OuterOptimizer::NormalizedEma | OuterOptimizer::RestartedEma => {
             updated_buf.iter().map(|buf| lr * *buf).collect()
         }
+        // The amplification scale depends on the pre-update buffer (the
+        // previous merged delta), which is gone after the step. Action-probe
+        // previews are unsupported for rho-adaptive; the unscaled SGD step
+        // is returned so callers see a well-defined vector.
+        OuterOptimizer::RhoAdaptive => delta.iter().map(|value| lr * *value).collect(),
+    }
+}
+
+/// Rho-adaptive memoryless step. `buf` stores the PREVIOUS merged delta,
+/// not momentum. Each commit measures the round-to-round direction
+/// autocorrelation rho = cos(delta, buf) and applies the outer step that a
+/// Nesterov buffer with mu_eff = clamp(2*(1 - rho), 0, mu_max) would have
+/// produced in steady state on a rho-correlated direction:
+///
+///   theta <- theta - lr / (1 - mu_eff * rho) * delta
+///
+/// High persistence (rho -> 1) yields mu_eff -> 0 and recovers plain SGD;
+/// decorrelated rounds earn a bounded step-scale boost. `mu_max` arrives via
+/// the `--outer-momentum` argument. `OuterStepStats` reuse for diagnostics:
+/// `history_current_norm_ratio` reports RHO (not a norm ratio) for this
+/// optimizer.
+pub fn rho_adaptive_step(
+    params: &mut [f32],
+    buf: &mut [f32],
+    delta: &[f32],
+    lr: f32,
+    mu_max: f32,
+) -> OuterStepStats {
+    let mut dot = 0.0f64;
+    let mut buf_norm_sq = 0.0f64;
+    let mut delta_norm_sq = 0.0f64;
+    for (b, d) in buf.iter().zip(delta) {
+        dot += *b as f64 * *d as f64;
+        buf_norm_sq += (*b as f64).powi(2);
+        delta_norm_sq += (*d as f64).powi(2);
+    }
+    let rho = if buf_norm_sq > 0.0 && delta_norm_sq > 0.0 {
+        (dot / (buf_norm_sq.sqrt() * delta_norm_sq.sqrt())).clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let mu_eff = (2.0 * (1.0 - rho)).clamp(0.0, mu_max as f64);
+    // Denominator floor bounds the amplification at 4x even if mu_max * rho
+    // approaches 1; negative rho dampens (denominator > 1).
+    let scale = (1.0 / (1.0 - mu_eff * rho).max(0.25)) as f32;
+    let mut step_norm_sq = 0.0f64;
+    for ((p, b), d) in params.iter_mut().zip(buf.iter_mut()).zip(delta) {
+        let step = lr * scale * *d;
+        *p -= step;
+        *b = *d;
+        step_norm_sq += (step as f64).powi(2);
+    }
+    OuterStepStats {
+        applied_step_norm: step_norm_sq.sqrt(),
+        direction_delta_cosine: Some(1.0),
+        history_current_norm_ratio: Some(rho),
+        restarted: false,
     }
 }
 
@@ -648,6 +709,39 @@ mod tests {
         let orig = d;
         heloco_correct(&mut d, &[1.0, 0.0], &h); // cos ≈ 0.995 ≥ c_ok
         assert_eq!(d, orig);
+    }
+
+    #[test]
+    fn rho_adaptive_first_step_is_plain_sgd_and_stores_delta() {
+        let mut params = vec![1.0, 1.0];
+        let mut buf = vec![0.0, 0.0];
+        let stats = rho_adaptive_step(&mut params, &mut buf, &[0.5, -0.5], 0.1, 0.9);
+        // zero buffer -> rho treated as 0 -> scale exactly 1
+        assert!((params[0] - (1.0 - 0.05)).abs() < 1e-7);
+        assert!((params[1] - (1.0 + 0.05)).abs() < 1e-7);
+        assert_eq!(buf, vec![0.5, -0.5]);
+        assert_eq!(stats.history_current_norm_ratio, Some(0.0));
+    }
+
+    #[test]
+    fn rho_adaptive_persistent_direction_recovers_sgd_and_reports_rho() {
+        let mut params = vec![0.0, 0.0];
+        let mut buf = vec![1.0, 0.0];
+        // identical direction: rho = 1 -> mu_eff = 0 -> plain SGD step
+        let stats = rho_adaptive_step(&mut params, &mut buf, &[1.0, 0.0], 0.1, 0.9);
+        assert!((params[0] + 0.1).abs() < 1e-7);
+        assert_eq!(stats.history_current_norm_ratio, Some(1.0));
+    }
+
+    #[test]
+    fn rho_adaptive_anticorrelated_direction_dampens() {
+        let mut params = vec![0.0];
+        let mut buf = vec![1.0];
+        // rho = -1 -> mu_eff clamps to mu_max -> scale = 1/(1+mu_max) < 1
+        let stats = rho_adaptive_step(&mut params, &mut buf, &[-1.0], 0.1, 0.9);
+        let expected = 0.1 / (1.0 + 0.9);
+        assert!((params[0] - expected).abs() < 1e-6);
+        assert_eq!(stats.history_current_norm_ratio, Some(-1.0));
     }
 
     #[test]

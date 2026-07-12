@@ -238,6 +238,13 @@ fn validate_outer_optimizer(
             "--outer-momentum is beta for {optimizer} and must be finite and in [0, 1), got {outer_momentum}"
         );
     }
+    if optimizer == merge::OuterOptimizer::RhoAdaptive
+        && (!outer_momentum.is_finite() || !(0.0..1.0).contains(&outer_momentum))
+    {
+        anyhow::bail!(
+            "--outer-momentum is mu_max for {optimizer} and must be finite and in [0, 1), got {outer_momentum}"
+        );
+    }
     Ok(())
 }
 

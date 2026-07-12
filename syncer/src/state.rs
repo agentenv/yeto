@@ -1088,6 +1088,7 @@ impl GlobalState {
             merge::OuterOptimizer::Nesterov => 0,
             merge::OuterOptimizer::NormalizedEma => 1,
             merge::OuterOptimizer::RestartedEma => 2,
+            merge::OuterOptimizer::RhoAdaptive => 3,
         });
         match self.delta_correction {
             None => mix(0),
