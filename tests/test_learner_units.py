@@ -203,3 +203,102 @@ def test_offline_first_falls_back_online_on_cold_cache():
 
     assert _from_pretrained_offline_first(Factory, "org/model") == "downloaded-model"
     assert [c.get("local_files_only") for c in calls] == [True, None]
+
+
+# --- release_lagged_broadcast (--debug-broadcast-lag-commits) --------------
+
+
+def test_lag_fifo_holds_first_k_then_releases_in_order():
+    from yeto.learner import release_lagged_broadcast
+
+    queue: list = []
+    released = [
+        release_lagged_broadcast(queue, (v, f"flat{v}"), 2) for v in range(1, 7)
+    ]
+    # Warmup: the first K=2 broadcasts are held; from then on each arrival
+    # releases exactly the one K commits behind it, in arrival order.
+    assert released == [
+        None,
+        None,
+        (1, "flat1"),
+        (2, "flat2"),
+        (3, "flat3"),
+        (4, "flat4"),
+    ]
+    # Steady state keeps exactly K queued (the newest K arrivals).
+    assert queue == [(5, "flat5"), (6, "flat6")]
+
+
+def test_lag_fifo_k1_steady_state_is_one_commit_old():
+    from yeto.learner import release_lagged_broadcast
+
+    queue: list = []
+    assert release_lagged_broadcast(queue, (1, "a"), 1) is None
+    for v in range(2, 6):
+        # Broadcast v arriving releases v-1: the applied base is always
+        # exactly one commit behind the newest known commit.
+        assert release_lagged_broadcast(queue, (v, "x"), 1)[0] == v - 1
+    assert len(queue) == 1 and queue[0][0] == 5
+
+
+def test_lag_fifo_zero_lag_passes_through_immediately():
+    from yeto.learner import release_lagged_broadcast
+
+    queue: list = []
+    for v in range(1, 4):
+        assert release_lagged_broadcast(queue, (v, "x"), 0) == (v, "x")
+    assert queue == []
+
+
+# --- --debug-broadcast-lag-commits argument validation ---------------------
+
+_LEARNER_REQUIRED_ARGV = [
+    "--model", "m",
+    "--data", "d",
+    "--syncer", "none",
+    "--learner-id", "0",
+    "--num-learners", "1",
+]
+
+
+def test_lag_flag_defaults_to_zero():
+    from yeto.learner import parse_args
+
+    args = parse_args(_LEARNER_REQUIRED_ARGV)
+    assert args.debug_broadcast_lag_commits == 0
+
+
+def test_lag_flag_requires_fixed_response_window():
+    import pytest
+
+    from yeto.learner import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(_LEARNER_REQUIRED_ARGV + ["--debug-broadcast-lag-commits", "1"])
+    # Either fixed-window flavor satisfies the requirement.
+    args = parse_args(
+        _LEARNER_REQUIRED_ARGV
+        + ["--debug-broadcast-lag-commits", "1", "--fixed-window-microsteps", "64"]
+    )
+    assert args.debug_broadcast_lag_commits == 1
+    args = parse_args(
+        _LEARNER_REQUIRED_ARGV
+        + ["--debug-broadcast-lag-commits", "4", "--fixed-window-tokens", "8192"]
+    )
+    assert args.debug_broadcast_lag_commits == 4
+
+
+def test_lag_flag_rejects_negative():
+    import pytest
+
+    from yeto.learner import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(_LEARNER_REQUIRED_ARGV + ["--debug-broadcast-lag-commits", "-1"])
+
+
+def test_lag_flag_zero_needs_no_window():
+    from yeto.learner import parse_args
+
+    args = parse_args(_LEARNER_REQUIRED_ARGV + ["--debug-broadcast-lag-commits", "0"])
+    assert args.debug_broadcast_lag_commits == 0

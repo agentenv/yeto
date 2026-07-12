@@ -143,6 +143,10 @@ class Arm:
 PRESETS: dict[str, Arm] = {
     "m2": Arm("m2"),
     "m4": Arm("m4", m=4),
+    # E1 noise-floor control: one learner behind the identical syncer stack
+    # (fragments, fixed windows, outer step, probe capture) with quorum
+    # defaulting to 1. Every "merge" is a single learner's window delta.
+    "m1": Arm("m1", m=1),
     "m12": Arm("m12", m=12, fragments=12, quorum=6),
     "alpha0": Arm("alpha0", merge_alpha=0.0),
     "q4": Arm("q4", wire_dtype="q4"),
@@ -458,6 +462,9 @@ def learner_command(
             cmd += ["--pad-to-fixed-window-tokens"]
         if getattr(args, "freeze_delta_before_delay", False):
             cmd += ["--freeze-delta-before-delay"]
+        lag_commits = int(getattr(args, "learner_broadcast_lag_commits", 0))
+        if lag_commits > 0:
+            cmd += ["--debug-broadcast-lag-commits", str(lag_commits)]
         cmd += [
             "--fragments",
             str(arm.fragments),
@@ -1785,6 +1792,13 @@ def main() -> int:
         type=float,
         default=0.0,
         help="uniform [0, jitter] ms added to each debug sleep",
+    )
+    p.add_argument(
+        "--learner-broadcast-lag-commits",
+        type=int,
+        default=0,
+        help="EXP: every learner applies each fragment broadcast only after "
+        "this many newer commits for that fragment (K-commits-old base)",
     )
     p.add_argument(
         "--fixed-window-tokens",

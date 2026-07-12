@@ -258,7 +258,26 @@ def parse_args(argv=None):
         help="EXP/stress only: materialize payload/probe snapshot before "
         "applying --debug-push-delay-ms",
     )
-    return p.parse_args(argv)
+    p.add_argument(
+        "--debug-broadcast-lag-commits",
+        type=int,
+        default=0,
+        help="EXP/stress only: hold each fragment broadcast in a "
+        "per-fragment FIFO and apply it only once this many newer "
+        "broadcasts for that fragment have arrived, so local windows are "
+        "computed against a K-commits-old global state",
+    )
+    args = p.parse_args(argv)
+    if args.debug_broadcast_lag_commits < 0:
+        p.error("--debug-broadcast-lag-commits must be >= 0")
+    if args.debug_broadcast_lag_commits > 0 and not (
+        args.fixed_window_microsteps > 0 or args.fixed_window_tokens > 0
+    ):
+        p.error(
+            "--debug-broadcast-lag-commits requires a fixed response "
+            "window so window resets can move to push time"
+        )
+    return args
 
 
 def setup_distributed() -> tuple[int, int]:
@@ -410,6 +429,20 @@ def _cosine(a: torch.Tensor, b: torch.Tensor) -> float:
     if denom < 1e-12:
         return 0.0
     return float(torch.dot(a, b).item() / denom)
+
+
+def release_lagged_broadcast(queue: list, item, lag_commits: int):
+    """EXP staleness control (--debug-broadcast-lag-commits).
+
+    Append the newly received broadcast to the fragment's FIFO and release
+    the one `lag_commits` behind the newest arrival, or None while the queue
+    is still warming up. With lag_commits == 0 the item passes straight
+    through, preserving current behavior.
+    """
+    queue.append(item)
+    if len(queue) <= lag_commits:
+        return None
+    return queue.pop(0)
 
 
 def _debug_sleep(base_ms: float, jitter_ms: float) -> None:
@@ -925,6 +958,10 @@ def run_inner_loop(
     steps_at_reset = [0] * layout.num_fragments
     tokens_at_reset = [0] * layout.num_fragments
     fragment_versions = [0] * layout.num_fragments  # last applied version per fragment
+    lag_commits = max(0, int(getattr(args, "debug_broadcast_lag_commits", 0)))
+    lagged_broadcasts: list[list] | None = (
+        [[] for _ in range(layout.num_fragments)] if lag_commits > 0 else None
+    )
     pending_pulls: list = []  # pulls deferred until c_steps >= 1
     global_step = 0
     # Q4 pushes are deltas anchored at the last *received* global value per
@@ -1056,13 +1093,26 @@ def run_inner_loop(
                     flat = unpack_fragment(
                         layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
                     )
+                    version = bc.version
+                    if lagged_broadcasts is not None:
+                        # EXP: explicit version-staleness control. Queue the
+                        # broadcast; release the one K commits behind the
+                        # newest arrival for this fragment.
+                        released = release_lagged_broadcast(
+                            lagged_broadcasts[bc.fragment_id],
+                            (bc.version, flat),
+                            lag_commits,
+                        )
+                        if released is None:
+                            continue
+                        version, flat = released
                     if anchors is not None:
                         if probe is not None:
                             probe.note_broadcast(bc.fragment_id, anchors[bc.fragment_id], flat)
                         # The anchor is the raw global value (pre-blend), so
                         # the syncer can reconstruct pushes from Θ(version)+δ.
                         anchors[bc.fragment_id] = flat.clone()
-                    actions.append((bc.fragment_id, bc.version, flat))
+                    actions.append((bc.fragment_id, version, flat))
                 shutdown = client.shutdown.is_set()
 
             if world > 1:
@@ -1083,11 +1133,12 @@ def run_inner_loop(
                         flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
                     apply_fragment(layout.fragments[fid], flat, params)
                     if rank == 0:
-                        steps_at_reset[fid] = steps_total
-                        tokens_at_reset[fid] = tokens_total
                         fragment_versions[fid] = version
-                        if fixed_window_snapshots is not None:
-                            fixed_window_snapshots[fid] = None
+                        if lagged_broadcasts is None:
+                            steps_at_reset[fid] = steps_total
+                            tokens_at_reset[fid] = tokens_total
+                            if fixed_window_snapshots is not None:
+                                fixed_window_snapshots[fid] = None
                     global_step = max(global_step, version)
             else:
                 for fid, version, flat in actions:
@@ -1096,11 +1147,15 @@ def run_inner_loop(
                         local = fragment_flat(layout.fragments[fid], params)
                         flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
                     apply_fragment(layout.fragments[fid], flat, params)
-                    steps_at_reset[fid] = steps_total
-                    tokens_at_reset[fid] = tokens_total
                     fragment_versions[fid] = version
-                    if fixed_window_snapshots is not None:
-                        fixed_window_snapshots[fid] = None
+                    if lagged_broadcasts is None:
+                        # Lag mode moves window resets to push time; the
+                        # deliberately late application must not restart or
+                        # invalidate the in-flight window.
+                        steps_at_reset[fid] = steps_total
+                        tokens_at_reset[fid] = tokens_total
+                        if fixed_window_snapshots is not None:
+                            fixed_window_snapshots[fid] = None
                     global_step = max(global_step, version)
 
             # 2. answer pulls whose fragment has made progress since the
@@ -1158,6 +1213,14 @@ def run_inner_loop(
                         c_tokens,
                         payload,
                     )
+                    if lagged_broadcasts is not None:
+                        # Lag mode: restart the fixed window at push time so
+                        # every commit carries a fresh full window even while
+                        # its broadcast is still queued.
+                        steps_at_reset[fid] = local_step_for_push
+                        tokens_at_reset[fid] += c_tokens
+                        if fixed_window_snapshots is not None:
+                            fixed_window_snapshots[fid] = None
                 pending_pulls = still_pending
 
             if shutdown or steps_total >= args.max_local_steps:
