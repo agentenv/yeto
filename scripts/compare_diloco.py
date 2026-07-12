@@ -415,7 +415,7 @@ def learner_command(
         "--seed",
         str(getattr(args, "training_seed", 0)),
         "--tuning",
-        "lora",
+        args.tuning,
         "--lora-r",
         str(args.lora_r),
         "--lora-alpha",
@@ -517,6 +517,7 @@ def syncer_command(
     arm_dir: Path,
     total_steps: int,
     *,
+    checkpoint_every: int = 1,
     probe_capture: bool = False,
     probe_capture_every: int = 1,
     action_probe_endpoint: str | None = None,
@@ -552,7 +553,7 @@ def syncer_command(
         "--checkpoint-path",
         str(arm_dir / "state.ckpt"),
         "--checkpoint-every",
-        "1",
+        str(checkpoint_every),
         "--event-tape",
         str(arm_dir / "tape.jsonl"),
         "--min-round-interval-ms",
@@ -1295,6 +1296,7 @@ def eval_loss_per_token(
     seq_len: int,
     device: str,
     train_on: str = "assistant",
+    tuning: str = "lora",
 ) -> float:
     """Held-out masked CE per trained token — the comparison metric."""
     import torch
@@ -1310,13 +1312,19 @@ def eval_loss_per_token(
     # Keep eval dtype aligned with learner loading. T4-class CUDA devices do
     # not have native bf16, so using bf16 there creates a very slow path.
     dtype = accelerator_model_dtype(torch.device(device))
-    model = AutoModelForCausalLM.from_pretrained(
-        resolved, dtype=dtype, trust_remote_code=True
-    )
-    if adapter_dir is not None:
-        from peft import PeftModel
+    if adapter_dir is not None and tuning == "full":
+        # Full-parameter export is a complete model directory, not an adapter.
+        model = AutoModelForCausalLM.from_pretrained(
+            str(adapter_dir), dtype=dtype, trust_remote_code=True
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            resolved, dtype=dtype, trust_remote_code=True
+        )
+        if adapter_dir is not None:
+            from peft import PeftModel
 
-        model = PeftModel.from_pretrained(model, str(adapter_dir))
+            model = PeftModel.from_pretrained(model, str(adapter_dir))
     model.to(device).eval()
     ds = build_packed_dataset(str(eval_file), tok, 0, 1, seq_len, train_on=train_on)
     total_loss, total_tokens = 0.0, 0.0
@@ -1427,6 +1435,8 @@ def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float
         str(args.seq_len),
         "--device",
         args.device,
+        "--tuning",
+        args.tuning,
     ]
     if adapter_dir is not None:
         cmd += ["--adapter-dir", str(adapter_dir)]
@@ -1516,6 +1526,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                 port,
                 arm_dir,
                 total_steps=total_outer_steps,
+                checkpoint_every=getattr(args, "syncer_checkpoint_every", 1),
                 probe_capture=getattr(args, "syncer_probe_capture", False),
                 probe_capture_every=getattr(args, "syncer_probe_capture_every", 1),
                 **syncer_args,
@@ -1551,7 +1562,10 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             if rc != 0:
                 raise RuntimeError(f"{arm.name}: a learner exited {rc}; see {arm_dir}")
         if args.syncer_total_steps:
-            rc = syncer.wait(timeout=30)
+            # Full-parameter models leave the syncer a sizable merge +
+            # checkpoint backlog after learners disconnect; a 30s wait
+            # killed a healthy SmolLM2-135M full-tune run.
+            rc = syncer.wait(timeout=900)
             if rc != 0:
                 raise RuntimeError(f"{arm.name}: syncer exited {rc}; see {arm_dir}")
     finally:
@@ -1613,7 +1627,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             "--model",
             args.model,
             "--tuning",
-            "lora",
+            args.tuning,
             "--lora-r",
             str(args.lora_r),
             "--lora-alpha",
@@ -1679,6 +1693,12 @@ def main() -> int:
     p.add_argument("--seq-len", type=int, default=512)
     p.add_argument("--micro-batch-size", type=int, default=2)
     p.add_argument("--inner-lr", type=float, default=3e-4)
+    p.add_argument(
+        "--tuning",
+        choices=["lora", "full"],
+        default="lora",
+        help="learner tuning mode; 'full' trains and exports every parameter",
+    )
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
     p.add_argument(
@@ -1914,6 +1934,14 @@ def main() -> int:
     )
     p.add_argument("--probe-freshness-scale", type=float, default=24.0)
     p.add_argument(
+        "--syncer-checkpoint-every",
+        type=int,
+        default=1,
+        help="syncer checkpoint cadence in outer steps; raise for large "
+        "(full-parameter) states where a per-step ~1GB write throttles the "
+        "syncer (the final step is checkpointed when total steps divide it)",
+    )
+    p.add_argument(
         "--syncer-probe-capture",
         action="store_true",
         help="capture pre-merge syncer checkpoints and candidate fragments "
@@ -1949,7 +1977,12 @@ def main() -> int:
 
     if args.eval_only:
         loss = eval_loss_per_token(
-            args.model, args.adapter_dir, Path(args.data), args.seq_len, args.device
+            args.model,
+            args.adapter_dir,
+            Path(args.data),
+            args.seq_len,
+            args.device,
+            tuning=args.tuning,
         )
         print(f"EVAL_LOSS {loss:.6f}")
         return 0
