@@ -8,11 +8,14 @@ use crate::protocol::Reader;
 
 pub const MERGE_AVG: u8 = 0;
 pub const MERGE_RDA: u8 = 1;
+pub const MERGE_ISO: u8 = 2;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FragmentInfo {
     pub merge_mode: u8,
     pub tensor_numels: Vec<u64>,
+    /// Per-tensor (rows, cols) matrix shapes, present exactly for MERGE_ISO.
+    pub tensor_shapes: Option<Vec<(u64, u64)>>,
 }
 
 impl FragmentInfo {
@@ -33,7 +36,7 @@ impl Layout {
         let mut fragments = Vec::with_capacity(num_fragments as usize);
         for _ in 0..num_fragments {
             let merge_mode = r.u8()?;
-            if merge_mode > MERGE_RDA {
+            if merge_mode > MERGE_ISO {
                 bail!("bad merge mode {merge_mode}");
             }
             let num_tensors = r.u32()?;
@@ -41,7 +44,25 @@ impl Layout {
             for _ in 0..num_tensors {
                 tensor_numels.push(r.u64()?);
             }
-            fragments.push(FragmentInfo { merge_mode, tensor_numels });
+            let tensor_shapes = if merge_mode == MERGE_ISO {
+                let mut shapes = Vec::with_capacity(num_tensors as usize);
+                for &numel in &tensor_numels {
+                    let rows = r.u64()?;
+                    let cols = r.u64()?;
+                    if rows == 0 || cols == 0 || rows.checked_mul(cols) != Some(numel) {
+                        bail!("bad iso tensor shape {rows}x{cols} for numel {numel}");
+                    }
+                    shapes.push((rows, cols));
+                }
+                Some(shapes)
+            } else {
+                None
+            };
+            fragments.push(FragmentInfo {
+                merge_mode,
+                tensor_numels,
+                tensor_shapes,
+            });
         }
         Ok(Layout { fragments })
     }
@@ -167,13 +188,34 @@ impl GlobalState {
         let mut delta = vec![0.0f32; numel];
         // Merge per tensor slice within the fragment.
         let mut off = 0usize;
-        for &tn in &frag.tensor_numels {
+        for (tensor_index, &tn) in frag.tensor_numels.iter().enumerate() {
             let tn = tn as usize;
             let slice_learners: Vec<&[f32]> = learners.iter().map(|l| &l[off..off + tn]).collect();
             let out = &mut delta[off..off + tn];
             match frag.merge_mode {
                 MERGE_AVG => merge::merge_avg(&anchor[off..off + tn], &slice_learners, weights, out),
-                _ => merge::merge_rda(&anchor[off..off + tn], &slice_learners, weights, out),
+                MERGE_RDA => merge::merge_rda(&anchor[off..off + tn], &slice_learners, weights, out),
+                MERGE_ISO => {
+                    let (rows, cols) = frag
+                        .tensor_shapes
+                        .as_ref()
+                        .and_then(|shapes| shapes.get(tensor_index))
+                        .copied()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "fragment {fid}: iso merge missing shape for tensor {tensor_index}"
+                            )
+                        })?;
+                    merge::merge_iso(
+                        &anchor[off..off + tn],
+                        &slice_learners,
+                        weights,
+                        rows as usize,
+                        cols as usize,
+                        out,
+                    );
+                }
+                mode => bail!("fragment {fid}: unsupported merge mode {mode}"),
             }
             off += tn;
         }
@@ -273,8 +315,16 @@ mod tests {
     fn layout2() -> Layout {
         Layout {
             fragments: vec![
-                FragmentInfo { merge_mode: MERGE_AVG, tensor_numels: vec![4] },
-                FragmentInfo { merge_mode: MERGE_RDA, tensor_numels: vec![2, 2] },
+                FragmentInfo {
+                    merge_mode: MERGE_AVG,
+                    tensor_numels: vec![4],
+                    tensor_shapes: None,
+                },
+                FragmentInfo {
+                    merge_mode: MERGE_RDA,
+                    tensor_numels: vec![2, 2],
+                    tensor_shapes: None,
+                },
             ],
         }
     }
@@ -300,6 +350,63 @@ mod tests {
         assert!(g > 0.0);
         // Θ − 1.0·(Θ − θ) = θ
         assert_eq!(st.params[0], vec![0.0; 4]);
+    }
+
+    #[test]
+    fn layout_decode_reads_iso_shapes_and_validates_them() {
+        let mut bytes = Vec::new();
+        bytes.push(MERGE_RDA);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&4u64.to_le_bytes());
+        bytes.push(MERGE_ISO);
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&4u64.to_le_bytes());
+        bytes.extend_from_slice(&6u64.to_le_bytes());
+        for dim in [2u64, 2, 2, 3] {
+            bytes.extend_from_slice(&dim.to_le_bytes());
+        }
+        let mut r = crate::protocol::Reader(&bytes);
+        let layout = Layout::decode(&mut r, 2).unwrap();
+        assert_eq!(layout.fragments[0].merge_mode, MERGE_RDA);
+        assert_eq!(layout.fragments[0].tensor_shapes, None);
+        assert_eq!(layout.fragments[1].merge_mode, MERGE_ISO);
+        assert_eq!(layout.fragments[1].tensor_shapes, Some(vec![(2, 2), (2, 3)]));
+
+        let mut bad = Vec::new();
+        bad.push(MERGE_ISO);
+        bad.extend_from_slice(&1u32.to_le_bytes());
+        bad.extend_from_slice(&4u64.to_le_bytes());
+        bad.extend_from_slice(&2u64.to_le_bytes());
+        bad.extend_from_slice(&3u64.to_le_bytes());
+        let mut r = crate::protocol::Reader(&bad);
+        assert!(Layout::decode(&mut r, 1).is_err());
+
+        let mut short = Vec::new();
+        short.push(MERGE_ISO);
+        short.extend_from_slice(&1u32.to_le_bytes());
+        short.extend_from_slice(&4u64.to_le_bytes());
+        short.extend_from_slice(&2u64.to_le_bytes());
+        let mut r = crate::protocol::Reader(&short);
+        assert!(Layout::decode(&mut r, 1).is_err());
+    }
+
+    #[test]
+    fn iso_fragment_merges_with_flattened_spectrum() {
+        let layout = Layout {
+            fragments: vec![FragmentInfo {
+                merge_mode: MERGE_ISO,
+                tensor_numels: vec![4],
+                tensor_shapes: Some(vec![(2, 2)]),
+            }],
+        };
+        let mut st = GlobalState::new(layout, 1.0, 0.0, crate::protocol::DTYPE_F32);
+        st.init_fragment(0, vec![0.0; 4]).unwrap();
+        let learner = [-3.0f32, 0.0, 0.0, -1.0];
+        let g = st.merge_and_step(0, &[&learner], &[1.0]).unwrap();
+        for (value, expected) in st.params[0].iter().zip([-2.0f32, 0.0, 0.0, -2.0]) {
+            assert!((value - expected).abs() < 1e-6, "params {:?}", st.params[0]);
+        }
+        assert!((g - 2.0 * 2.0f64.sqrt()).abs() < 1e-6);
     }
 
     #[test]

@@ -33,6 +33,7 @@ Presets (--settings, comma-separated or 'all'):
   serial    --pipeline 1 (pre-pipelining scheduler behavior)
   noheloco  delta correction off (pure paper Alg. 2)
   strided   depth-interleaved fragments
+  iso       Iso-C isotropic matrix aggregation
   avg       merge = plain weighted averaging (outer lr 1.0, mu 0, alpha 0)
   m2h24     stock DiLoCo throttled to its design-point sync interval (H~24)
 
@@ -75,6 +76,7 @@ class Arm:
     m: int = 2  # learner islands
     fragments: int = 4
     fragment_pattern: str = "binpack"
+    matrix_merge: str = "rda"
     merge_alpha: float = 0.5
     wire_dtype: str = "bf16"
     pipeline: int = 2
@@ -101,6 +103,7 @@ PRESETS: dict[str, Arm] = {
     "serial": Arm("serial", pipeline=1),
     "noheloco": Arm("noheloco", delta_correction="none"),
     "strided": Arm("strided", fragment_pattern="strided"),
+    "iso": Arm("iso", matrix_merge="iso"),
     # Merge reduced to plain weighted parameter averaging: no outer
     # momentum, full step, overwrite broadcasts. At high merge frequency
     # this approximates synchronous training — if THIS arm matches the
@@ -182,6 +185,7 @@ def learner_command(args, arm_dir: Path, *, learner_id: int, num_learners: int,
         cmd += [
             "--fragments", str(arm.fragments),
             "--fragment-pattern", arm.fragment_pattern,
+            "--matrix-merge", arm.matrix_merge,
             "--merge-alpha", str(arm.merge_alpha),
             "--wire-dtype", arm.wire_dtype,
         ]
@@ -411,6 +415,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             "--lora-alpha", str(args.lora_alpha),
             "--fragments", str(arm.fragments),
             "--fragment-pattern", arm.fragment_pattern,
+            "--matrix-merge", arm.matrix_merge,
             "--output-dir", str(export_dir),
             "--device", "cpu",
         ],
@@ -499,7 +504,8 @@ def main() -> int:
         s = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, arm.m, world)
         print(f"  {arm.name:<10} M={arm.m} {s} steps/learner "
               f"P={arm.fragments} alpha={arm.merge_alpha} wire={arm.wire_dtype} "
-              f"pipeline={arm.pipeline} correction={arm.delta_correction}")
+              f"merge={arm.matrix_merge} pipeline={arm.pipeline} "
+              f"correction={arm.delta_correction}")
     if args.dry_run:
         return 0
 
