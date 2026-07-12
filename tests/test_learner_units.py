@@ -302,3 +302,31 @@ def test_lag_flag_zero_needs_no_window():
 
     args = parse_args(_LEARNER_REQUIRED_ARGV + ["--debug-broadcast-lag-commits", "0"])
     assert args.debug_broadcast_lag_commits == 0
+
+
+def test_lag_flag_rejects_q4_wire_dtype():
+    # Lag mode pushes old base_versions; the syncer rejects q4 deltas whose
+    # base is not current, so the combination would stall the fragment.
+    import pytest
+
+    from yeto.learner import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            _LEARNER_REQUIRED_ARGV
+            + [
+                "--debug-broadcast-lag-commits", "1",
+                "--fixed-window-microsteps", "64",
+                "--wire-dtype", "q4",
+            ]
+        )
+    # bf16 (default) and f32 remain accepted.
+    args = parse_args(
+        _LEARNER_REQUIRED_ARGV
+        + [
+            "--debug-broadcast-lag-commits", "1",
+            "--fixed-window-microsteps", "64",
+            "--wire-dtype", "f32",
+        ]
+    )
+    assert args.debug_broadcast_lag_commits == 1

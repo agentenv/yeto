@@ -277,6 +277,11 @@ def parse_args(argv=None):
             "--debug-broadcast-lag-commits requires a fixed response "
             "window so window resets can move to push time"
         )
+    if args.debug_broadcast_lag_commits > 0 and args.wire_dtype == "q4":
+        # Lag mode pushes deliberately old base_versions; the syncer rejects
+        # every q4 delta whose base is not current (validate_push_candidate),
+        # so the first lagged push would stall the fragment forever.
+        p.error("--debug-broadcast-lag-commits is incompatible with --wire-dtype q4")
     return args
 
 
@@ -958,7 +963,7 @@ def run_inner_loop(
     steps_at_reset = [0] * layout.num_fragments
     tokens_at_reset = [0] * layout.num_fragments
     fragment_versions = [0] * layout.num_fragments  # last applied version per fragment
-    lag_commits = max(0, int(getattr(args, "debug_broadcast_lag_commits", 0)))
+    lag_commits = max(0, int(getattr(args, "debug_broadcast_lag_commits", 0) or 0))
     lagged_broadcasts: list[list] | None = (
         [[] for _ in range(layout.num_fragments)] if lag_commits > 0 else None
     )
