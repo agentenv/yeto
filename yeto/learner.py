@@ -1338,9 +1338,17 @@ def run_inner_loop(
                     if lagged_broadcasts is not None:
                         # Lag mode: restart the fixed window at push time so
                         # every commit carries a fresh full window even while
-                        # its broadcast is still queued.
-                        steps_at_reset[fid] = local_step_for_push
-                        tokens_at_reset[fid] += c_tokens
+                        # its broadcast is still queued. Anchor the restart
+                        # at the CURRENT local step (matching the non-lag
+                        # broadcast-time reset), not at the snapshot's step:
+                        # backdating to local_step_for_push let a late pull
+                        # leave steps_total - steps_at_reset already past the
+                        # next window, materializing oversized windows
+                        # (c_steps > target; EXP2.29B k1 gate failure).
+                        # Steps trained between snapshot and push drop out of
+                        # window accounting, exactly as in non-lag mode.
+                        steps_at_reset[fid] = steps_total
+                        tokens_at_reset[fid] = tokens_total
                         if fixed_window_snapshots is not None:
                             fixed_window_snapshots[fid] = None
                     if fixed_window_schedule is not None:
