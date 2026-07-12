@@ -85,7 +85,11 @@ pub struct OuterStepStats {
 ///
 /// Keeping the dispatch next to the optimizer implementations gives the
 /// state layer a single production path for both mutating commits and pure
-/// previews made from cloned parameter and buffer slices.
+/// previews made from cloned parameter and buffer slices. `rho_ema` is the
+/// rho-adaptive controller's persistent scalar state (see
+/// `rho_adaptive_step`); the other optimizers leave it untouched, exactly as
+/// they leave each other's buffer conventions alone.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_outer_step(
     optimizer: OuterOptimizer,
     params: &mut [f32],
@@ -94,6 +98,7 @@ pub fn apply_outer_step(
     lr: f32,
     momentum: f32,
     restart_cos_threshold: f32,
+    rho_ema: &mut f32,
 ) -> OuterStepStats {
     match optimizer {
         OuterOptimizer::Nesterov => nesterov_step(params, buf, delta, lr, momentum),
@@ -101,7 +106,7 @@ pub fn apply_outer_step(
         OuterOptimizer::RestartedEma => {
             restarted_ema_step(params, buf, delta, lr, momentum, restart_cos_threshold)
         }
-        OuterOptimizer::RhoAdaptive => rho_adaptive_step(params, buf, delta, lr, momentum),
+        OuterOptimizer::RhoAdaptive => rho_adaptive_step(params, buf, delta, lr, rho_ema),
     }
 }
 
@@ -130,27 +135,61 @@ pub fn materialize_applied_step(
     }
 }
 
-/// Rho-adaptive memoryless step. `buf` stores the previously APPLIED
-/// direction, `scale * delta` (not momentum); since the amplification scale
-/// is always positive, the stored direction has the same orientation as the
-/// previous merged delta and the measured autocorrelation is unaffected. Each commit measures the round-to-round direction
-/// autocorrelation rho = cos(delta, buf) and applies the outer step that a
-/// Nesterov buffer with mu_eff = clamp(2*(1 - rho), 0, mu_max) would have
-/// produced in steady state on a rho-correlated direction:
+/// Reference momentum whose tuned behavior the v2 controller reproduces at
+/// the reference autocorrelation.
+pub const RHO_ADAPTIVE_MU_STAR: f64 = 0.5;
+/// Compile-time reference autocorrelation: at rho_hat = RHO_ADAPTIVE_RHO_REF
+/// the gain is exactly 1 and the step matches the tuned mu_star baseline.
+pub const RHO_ADAPTIVE_RHO_REF: f64 = 0.5;
+/// EMA smoothing of the per-commit rho measurement (half-life one commit).
+pub const RHO_ADAPTIVE_EMA_BETA: f64 = 0.5;
+/// Hard bounds on the applied step-scale gain.
+pub const RHO_ADAPTIVE_GAIN_MIN: f64 = 0.5;
+pub const RHO_ADAPTIVE_GAIN_MAX: f64 = 2.0;
+/// Fresh controller state starts at the reference autocorrelation so the
+/// first commit (and the first commit after a checkpoint restore, which does
+/// not persist this scalar) applies exactly the tuned baseline step.
+pub const RHO_ADAPTIVE_INITIAL_RHO_EMA: f32 = RHO_ADAPTIVE_RHO_REF as f32;
+
+/// v2 gain from the corrected aligned-amplification law (docs/EXP2_25.md
+/// Correction): a Nesterov buffer with momentum mu on a rho-persistent
+/// direction amplifies the aligned step by a(rho) = 1 + mu/(1 - mu*rho).
+/// The controller targets the effective step a well-calibrated mu_star
+/// setting would produce at the measured persistence, normalized so the
+/// reference point is gain 1:
 ///
-///   theta <- theta - lr / (1 - mu_eff * rho) * delta
+///   g(rho_hat) = a(rho_hat) / a(rho_ref),  clamped to [GAIN_MIN, GAIN_MAX].
+pub fn rho_adaptive_gain(rho_hat: f64) -> f64 {
+    let amplification = |rho: f64| 1.0 + RHO_ADAPTIVE_MU_STAR / (1.0 - RHO_ADAPTIVE_MU_STAR * rho);
+    (amplification(rho_hat) / amplification(RHO_ADAPTIVE_RHO_REF))
+        .clamp(RHO_ADAPTIVE_GAIN_MIN, RHO_ADAPTIVE_GAIN_MAX)
+}
+
+/// Rho-adaptive step, v2. `buf` stores the previously APPLIED direction,
+/// `scale * delta` (not momentum); since the gain is always positive, the
+/// stored direction has the same orientation as the previous merged delta
+/// and the measured autocorrelation is unaffected. Each commit measures the
+/// round-to-round direction autocorrelation rho = cos(delta, buf), folds it
+/// into the persistent EMA `rho_ema` (beta = RHO_ADAPTIVE_EMA_BETA; commits
+/// without a measurement — zero buffer or zero delta — leave the EMA
+/// unchanged), and applies
 ///
-/// High persistence (rho -> 1) yields mu_eff -> 0 and recovers plain SGD;
-/// decorrelated rounds earn a bounded step-scale boost. `mu_max` arrives via
-/// the `--outer-momentum` argument. `OuterStepStats` reuse for diagnostics:
-/// `history_current_norm_ratio` reports RHO (not a norm ratio) for this
-/// optimizer.
+///   theta <- theta - lr * g(rho_ema) * delta
+///
+/// with g from `rho_adaptive_gain`. Unlike v1's
+/// mu_eff = clamp(2(1-rho), 0, mu_max) heuristic (calibrated on the wrong
+/// rho convention; see docs/EXP2_26.md), v2 directly targets the effective
+/// step of a tuned mu_star baseline under the corrected law: g == 1 at
+/// rho_ema = rho_ref, mild amplification for persistent directions, mild
+/// damping for anti-persistent ones. `--outer-momentum` is not consumed.
+/// `OuterStepStats` reuse for diagnostics: `history_current_norm_ratio`
+/// reports the per-commit RHO (not a norm ratio) for this optimizer.
 pub fn rho_adaptive_step(
     params: &mut [f32],
     buf: &mut [f32],
     delta: &[f32],
     lr: f32,
-    mu_max: f32,
+    rho_ema: &mut f32,
 ) -> OuterStepStats {
     let mut dot = 0.0f64;
     let mut buf_norm_sq = 0.0f64;
@@ -160,15 +199,17 @@ pub fn rho_adaptive_step(
         buf_norm_sq += (*b as f64).powi(2);
         delta_norm_sq += (*d as f64).powi(2);
     }
-    let rho = if buf_norm_sq > 0.0 && delta_norm_sq > 0.0 {
+    let measured = buf_norm_sq > 0.0 && delta_norm_sq > 0.0;
+    let rho = if measured {
         (dot / (buf_norm_sq.sqrt() * delta_norm_sq.sqrt())).clamp(-1.0, 1.0)
     } else {
         0.0
     };
-    let mu_eff = (2.0 * (1.0 - rho)).clamp(0.0, mu_max as f64);
-    // Denominator floor bounds the amplification at 4x even if mu_max * rho
-    // approaches 1; negative rho dampens (denominator > 1).
-    let scale = (1.0 / (1.0 - mu_eff * rho).max(0.25)) as f32;
+    if measured {
+        *rho_ema = (RHO_ADAPTIVE_EMA_BETA * *rho_ema as f64
+            + (1.0 - RHO_ADAPTIVE_EMA_BETA) * rho) as f32;
+    }
+    let scale = rho_adaptive_gain(*rho_ema as f64) as f32;
     let mut step_norm_sq = 0.0f64;
     for ((p, b), d) in params.iter_mut().zip(buf.iter_mut()).zip(delta) {
         // Write the buffer first and derive the step from it so this path
@@ -716,21 +757,29 @@ mod tests {
     fn rho_adaptive_first_step_is_plain_sgd_and_stores_delta() {
         let mut params = vec![1.0, 1.0];
         let mut buf = vec![0.0, 0.0];
-        let stats = rho_adaptive_step(&mut params, &mut buf, &[0.5, -0.5], 0.1, 0.9);
-        // zero buffer -> rho treated as 0 -> scale exactly 1
+        let mut rho_ema = RHO_ADAPTIVE_INITIAL_RHO_EMA;
+        let stats = rho_adaptive_step(&mut params, &mut buf, &[0.5, -0.5], 0.1, &mut rho_ema);
+        // zero buffer -> no measurement -> rho_ema stays at rho_ref -> gain
+        // exactly 1, i.e. the tuned-baseline (plain SGD) step
         assert!((params[0] - (1.0 - 0.05)).abs() < 1e-7);
         assert!((params[1] - (1.0 + 0.05)).abs() < 1e-7);
         assert_eq!(buf, vec![0.5, -0.5]);
+        assert_eq!(rho_ema, RHO_ADAPTIVE_INITIAL_RHO_EMA);
         assert_eq!(stats.history_current_norm_ratio, Some(0.0));
     }
 
     #[test]
-    fn rho_adaptive_persistent_direction_recovers_sgd_and_reports_rho() {
+    fn rho_adaptive_persistent_direction_amplifies_per_corrected_law() {
         let mut params = vec![0.0, 0.0];
         let mut buf = vec![1.0, 0.0];
-        // identical direction: rho = 1 -> mu_eff = 0 -> plain SGD step
-        let stats = rho_adaptive_step(&mut params, &mut buf, &[1.0, 0.0], 0.1, 0.9);
-        assert!((params[0] + 0.1).abs() < 1e-7);
+        let mut rho_ema = RHO_ADAPTIVE_INITIAL_RHO_EMA;
+        // identical direction: rho = 1 -> rho_ema = 0.5*0.5 + 0.5*1 = 0.75
+        // g(0.75) = a(0.75)/a(0.5) = 1.8/(5/3) = 1.08
+        let stats = rho_adaptive_step(&mut params, &mut buf, &[1.0, 0.0], 0.1, &mut rho_ema);
+        assert!((rho_ema - 0.75).abs() < 1e-7);
+        assert!((params[0] + 0.108).abs() < 1e-6);
+        // buffer stores the applied (scaled) direction
+        assert!((buf[0] - 1.08).abs() < 1e-6);
         assert_eq!(stats.history_current_norm_ratio, Some(1.0));
     }
 
@@ -738,13 +787,46 @@ mod tests {
     fn rho_adaptive_anticorrelated_direction_dampens() {
         let mut params = vec![0.0];
         let mut buf = vec![1.0];
-        // rho = -1 -> mu_eff clamps to mu_max -> scale = 1/(1+mu_max) < 1
-        let stats = rho_adaptive_step(&mut params, &mut buf, &[-1.0], 0.1, 0.9);
-        let expected = 0.1 / (1.0 + 0.9);
-        assert!((params[0] - expected).abs() < 1e-6);
+        let mut rho_ema = RHO_ADAPTIVE_INITIAL_RHO_EMA;
+        // rho = -1 -> rho_ema = 0.5*0.5 - 0.5 = -0.25
+        // g(-0.25) = a(-0.25)/a(0.5) = (13/9)/(5/3) = 13/15 < 1
+        let stats = rho_adaptive_step(&mut params, &mut buf, &[-1.0], 0.1, &mut rho_ema);
+        let gain = 13.0 / 15.0;
+        assert!((rho_ema + 0.25).abs() < 1e-7);
+        assert!((params[0] - 0.1 * gain).abs() < 1e-6);
         assert_eq!(stats.history_current_norm_ratio, Some(-1.0));
         // buffer stores the applied (scaled) direction
-        assert!((buf[0] + 1.0 / 1.9).abs() < 1e-6);
+        assert!((buf[0] + gain as f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rho_adaptive_gain_matches_corrected_law_and_is_bounded() {
+        // Reference point reproduces the tuned baseline exactly.
+        assert_eq!(rho_adaptive_gain(RHO_ADAPTIVE_RHO_REF), 1.0);
+        // Closed forms: a(1) = 2, a(-1) = 4/3, a(0.5) = 5/3.
+        assert!((rho_adaptive_gain(1.0) - 1.2).abs() < 1e-12);
+        assert!((rho_adaptive_gain(-1.0) - 0.8).abs() < 1e-12);
+        // Monotone increasing in persistence over the valid range.
+        assert!(rho_adaptive_gain(1.0) > rho_adaptive_gain(0.5));
+        assert!(rho_adaptive_gain(0.5) > rho_adaptive_gain(-1.0));
+        // Hard bounds hold even for degenerate inputs (a(2) diverges).
+        assert_eq!(rho_adaptive_gain(2.0), RHO_ADAPTIVE_GAIN_MAX);
+        assert!(rho_adaptive_gain(100.0) >= RHO_ADAPTIVE_GAIN_MIN);
+    }
+
+    #[test]
+    fn rho_adaptive_ema_converges_and_gain_saturates() {
+        let mut params = vec![0.0];
+        let mut buf = vec![1.0];
+        let mut rho_ema = RHO_ADAPTIVE_INITIAL_RHO_EMA;
+        for _ in 0..20 {
+            let stats = rho_adaptive_step(&mut params, &mut buf, &[1.0], 0.1, &mut rho_ema);
+            assert_eq!(stats.history_current_norm_ratio, Some(1.0));
+        }
+        // Persistent direction: rho_ema -> 1 and the gain saturates at
+        // a(1)/a(0.5) = 1.2, well inside the [0.5, 2.0] hard bounds.
+        assert!((rho_ema - 1.0).abs() < 1e-4);
+        assert!((buf[0] - 1.2).abs() < 1e-4);
     }
 
     #[test]

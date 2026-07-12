@@ -190,6 +190,9 @@ pub struct ActionPreview {
     selected_weight_mass: f64,
     resulting_params: Vec<f32>,
     resulting_optimizer_buffer: Vec<f32>,
+    /// Rho-adaptive EMA value after this step; unchanged for the other
+    /// optimizers. Installed alongside the buffer on commit.
+    resulting_rho_ema: f32,
     applied_step: Vec<f32>,
     stats: MergeStats,
     step_scale: f64,
@@ -341,6 +344,7 @@ fn compute_action_fingerprint(preview: &ActionPreview) -> [u64; 2] {
     mix_optional_f64(&mut hash, preview.stats.outer.direction_delta_cosine);
     mix_optional_f64(&mut hash, preview.stats.outer.history_current_norm_ratio);
     mix_action_fingerprint(&mut hash, preview.stats.outer.restarted as u64);
+    mix_action_fingerprint(&mut hash, preview.resulting_rho_ema.to_bits() as u64);
     for values in [
         preview.resulting_params.as_slice(),
         preview.resulting_optimizer_buffer.as_slice(),
@@ -361,6 +365,13 @@ pub struct GlobalState {
     pub params: Vec<Vec<f32>>,
     /// Outer-optimizer buffers, same shape as params.
     momentum: Vec<Vec<f32>>,
+    /// Per-fragment rho-adaptive EMA of the measured round-to-round delta
+    /// autocorrelation. Only the rho-adaptive optimizer reads or writes it.
+    /// Deliberately NOT checkpointed (the on-disk format is shared with
+    /// yeto/export.py): with beta 0.5 its half-life is one commit, so a
+    /// restore behaves like the tuned baseline for one commit and then
+    /// re-converges.
+    rho_ema: Vec<f32>,
     pub initialized: Vec<bool>,
     /// Global step at which each fragment was last merged (its version).
     pub versions: Vec<u64>,
@@ -397,6 +408,7 @@ impl GlobalState {
             .map(|f| vec![0.0; f.numel()])
             .collect();
         let momentum = params.clone();
+        let rho_ema = vec![merge::RHO_ADAPTIVE_INITIAL_RHO_EMA; layout.fragments.len()];
         let initialized = vec![false; layout.fragments.len()];
         let versions = vec![0; layout.fragments.len()];
         let state_epochs = vec![0; layout.fragments.len()];
@@ -405,6 +417,7 @@ impl GlobalState {
             layout_meta,
             params,
             momentum,
+            rho_ema,
             initialized,
             versions,
             global_step: 0,
@@ -552,6 +565,7 @@ impl GlobalState {
         }
         let mut resulting_params = self.params[fid].clone();
         let mut resulting_optimizer_buffer = self.momentum[fid].clone();
+        let mut resulting_rho_ema = self.rho_ema[fid];
         let outer = merge::apply_outer_step(
             self.outer_optimizer,
             &mut resulting_params,
@@ -560,6 +574,7 @@ impl GlobalState {
             outer_lr,
             self.outer_momentum,
             self.outer_restart_cos_threshold,
+            &mut resulting_rho_ema,
         );
         let applied_step = merge::materialize_applied_step(
             self.outer_optimizer,
@@ -574,6 +589,7 @@ impl GlobalState {
             || resulting_optimizer_buffer
                 .iter()
                 .any(|value| !value.is_finite())
+            || !resulting_rho_ema.is_finite()
             || applied_step.iter().any(|value| !value.is_finite())
             || !outer.applied_step_norm.is_finite()
             || outer
@@ -597,6 +613,7 @@ impl GlobalState {
             selected_weight_mass: aggregate.selected_weight_mass,
             resulting_params,
             resulting_optimizer_buffer,
+            resulting_rho_ema,
             applied_step,
             stats: MergeStats {
                 gnorm: aggregate.gnorm,
@@ -979,6 +996,7 @@ impl GlobalState {
                 .iter()
                 .any(|value| !value.is_finite())
             || preview.applied_step.iter().any(|value| !value.is_finite())
+            || !preview.resulting_rho_ema.is_finite()
             || !preview.stats.gnorm.is_finite()
             || preview.stats.gnorm < 0.0
             || !preview.stats.outer.applied_step_norm.is_finite()
@@ -1068,6 +1086,7 @@ impl GlobalState {
         for value in &self.momentum[fid] {
             mix(value.to_bits() as u64);
         }
+        mix(self.rho_ema[fid].to_bits() as u64);
         match &self.outer_lr_by_fragment {
             None => {
                 mix(0);
@@ -1115,12 +1134,14 @@ impl GlobalState {
         let ActionPreview {
             resulting_params,
             resulting_optimizer_buffer,
+            resulting_rho_ema,
             stats,
             ..
         } = preview;
         let next_epoch = self.next_state_epoch(fid)?;
         self.params[fid] = resulting_params;
         self.momentum[fid] = resulting_optimizer_buffer;
+        self.rho_ema[fid] = resulting_rho_ema;
         self.state_epochs[fid] = next_epoch;
         Ok(stats)
     }
@@ -1209,6 +1230,9 @@ impl GlobalState {
                     *v = f32::from_le_bytes(r.take(4)?.try_into()?);
                 }
             }
+            // The rho-adaptive EMA is not part of the checkpoint format;
+            // restore to the reference so resumed runs are deterministic.
+            self.rho_ema[p] = merge::RHO_ADAPTIVE_INITIAL_RHO_EMA;
             self.initialized[p] = true;
             self.state_epochs[p] = next_epoch;
         }

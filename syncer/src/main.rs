@@ -238,11 +238,13 @@ fn validate_outer_optimizer(
             "--outer-momentum is beta for {optimizer} and must be finite and in [0, 1), got {outer_momentum}"
         );
     }
-    if optimizer == merge::OuterOptimizer::RhoAdaptive
-        && (!outer_momentum.is_finite() || !(0.0..1.0).contains(&outer_momentum))
-    {
+    // rho-adaptive v2 does not consume --outer-momentum: mu_star, rho_ref,
+    // the EMA beta, and the gain bounds are compile-time constants in
+    // merge.rs. The flag is still validated as finite so a typo does not
+    // silently ride along into logs and tapes.
+    if optimizer == merge::OuterOptimizer::RhoAdaptive && !outer_momentum.is_finite() {
         anyhow::bail!(
-            "--outer-momentum is mu_max for {optimizer} and must be finite and in [0, 1), got {outer_momentum}"
+            "--outer-momentum is unused by {optimizer} but must still be finite, got {outer_momentum}"
         );
     }
     Ok(())
