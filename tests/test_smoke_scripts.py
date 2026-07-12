@@ -340,6 +340,29 @@ def test_learner_command_arm_overrides():
     assert "--debug-push-delay-ms" not in base
 
 
+def test_learner_command_forwards_fixed_window_schedule():
+    args = SimpleNamespace(
+        model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=128,
+        micro_batch_size=1, inner_lr=3e-4, device="cpu",
+        shard="ddp", learner_gpus=0, tuning="lora",
+        fixed_window_schedule="0:16,160:256,170:16,330:256",
+        training_seed=223223,
+    )
+    arm = compare.PRESETS["m4"]
+    cmd = compare.learner_command(
+        args, Path("/tmp/w/m4"), learner_id=0, num_learners=4,
+        syncer="127.0.0.1:1", max_steps=10, arm=arm,
+    )
+    assert (
+        cmd[cmd.index("--fixed-window-schedule") + 1] == "0:16,160:256,170:16,330:256"
+    )
+    base = compare.learner_command(
+        args, Path("/tmp/w/baseline"), learner_id=0, num_learners=1,
+        syncer="none", max_steps=10, arm=None,
+    )
+    assert "--fixed-window-schedule" not in base
+
+
 def test_syncer_command_quorum_defaults_to_all_learners():
     arm = compare.PRESETS["m4"]
     cmd = compare.syncer_command(arm, 1234, Path("/tmp/w/m4"), total_steps=100)

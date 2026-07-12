@@ -253,6 +253,16 @@ def parse_args(argv=None):
         "to whole optimizer steps because the learner trains packed blocks",
     )
     p.add_argument(
+        "--fixed-window-schedule",
+        default=None,
+        help="EXP: online sync-horizon changes as 'commit1:h1,commit2:h2,...'"
+        " — after this learner has answered commitN pulls (local commit"
+        " index, counted across fragments) the fixed response window becomes"
+        " hN microsteps (hN * tokens-per-step raw tokens). Before the first"
+        " entry the --fixed-window-microsteps/--fixed-window-tokens window"
+        " applies. Enables fixed-window mode by itself.",
+    )
+    p.add_argument(
         "--freeze-delta-before-delay",
         action="store_true",
         help="EXP/stress only: materialize payload/probe snapshot before "
@@ -268,10 +278,19 @@ def parse_args(argv=None):
         "computed against a K-commits-old global state",
     )
     args = p.parse_args(argv)
+    if args.fixed_window_schedule is not None:
+        try:
+            args.fixed_window_schedule = parse_fixed_window_schedule(
+                args.fixed_window_schedule
+            )
+        except ValueError as exc:
+            p.error(f"--fixed-window-schedule: {exc}")
     if args.debug_broadcast_lag_commits < 0:
         p.error("--debug-broadcast-lag-commits must be >= 0")
     if args.debug_broadcast_lag_commits > 0 and not (
-        args.fixed_window_microsteps > 0 or args.fixed_window_tokens > 0
+        args.fixed_window_microsteps > 0
+        or args.fixed_window_tokens > 0
+        or args.fixed_window_schedule is not None
     ):
         p.error(
             "--debug-broadcast-lag-commits requires a fixed response "
@@ -448,6 +467,74 @@ def release_lagged_broadcast(queue: list, item, lag_commits: int):
     if len(queue) <= lag_commits:
         return None
     return queue.pop(0)
+
+
+def parse_fixed_window_schedule(spec: str) -> list[tuple[int, int]]:
+    """Parse ``--fixed-window-schedule`` "commit1:h1,commit2:h2,...".
+
+    Each entry switches the fixed response window to ``h`` microsteps once
+    this learner has answered ``commit`` pulls (its LOCAL commit index,
+    counted across all fragments). The window's token target follows
+    automatically: a window of h microsteps spans h * tokens_per_inner_step
+    raw tokens, and every push self-describes its window via c_steps and
+    c_tokens, so the syncer needs no schedule of its own.
+
+    Commit indices must be non-negative and strictly increasing; window
+    sizes must be >= 1. Raises ValueError on malformed specs.
+    """
+    entries: list[tuple[int, int]] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        commit_str, sep, h_str = part.partition(":")
+        if not sep:
+            raise ValueError(f"schedule entry {part!r} must be 'commit:window'")
+        try:
+            commit, h = int(commit_str), int(h_str)
+        except ValueError as exc:
+            raise ValueError(f"schedule entry {part!r} must be integers") from exc
+        if commit < 0:
+            raise ValueError(f"schedule commit index must be >= 0, got {commit}")
+        if h < 1:
+            raise ValueError(f"schedule window must be >= 1 microstep, got {h}")
+        if entries and commit <= entries[-1][0]:
+            raise ValueError(
+                f"schedule commit indices must be strictly increasing, "
+                f"got {commit} after {entries[-1][0]}"
+            )
+        entries.append((commit, h))
+    if not entries:
+        raise ValueError("fixed-window schedule must contain at least one entry")
+    return entries
+
+
+def scheduled_window_steps(
+    schedule: list[tuple[int, int]] | None, base_steps: int, local_commits: int
+) -> int:
+    """Window size (microsteps) in effect after `local_commits` answered
+    pulls: the last schedule entry at or before that index, else the base
+    window. With no schedule this is always the base — the default path."""
+    if not schedule:
+        return base_steps
+    steps = base_steps
+    for commit, h in schedule:
+        if commit > local_commits:
+            break
+        steps = h
+    return steps
+
+
+def invalidate_undersized_snapshots(
+    snapshots: list[dict | None], window_steps: int
+) -> None:
+    """Drop cached fixed-window snapshots that no longer fill the (grown)
+    window; they are recaptured once the fragment accumulates enough steps.
+    Snapshots that already satisfy the new window stay valid — c_steps and
+    c_tokens self-describe every push, so a shrink never strands a pull."""
+    for fid, snap in enumerate(snapshots):
+        if snap is not None and int(snap["c_steps"]) < window_steps:
+            snapshots[fid] = None
 
 
 def _debug_sleep(base_ms: float, jitter_ms: float) -> None:
@@ -988,18 +1075,33 @@ def run_inner_loop(
             fixed_window_steps,
             math.ceil(args.fixed_window_tokens / max(tokens_per_inner_step, 1)),
         )
-    fixed_window_enabled = args.fixed_window_microsteps > 0 or args.fixed_window_tokens > 0
+    # Online sync-horizon schedule (--fixed-window-schedule): the window in
+    # effect is a function of this learner's local commit index (answered
+    # pulls, across fragments). None keeps the constant-window path.
+    fixed_window_schedule = getattr(args, "fixed_window_schedule", None)
+    local_commits = 0
+    answered_rounds: set[tuple[int, int]] = set()  # (fid, pull step) dedupe
+    base_fixed_window_steps = fixed_window_steps
+    fixed_window_steps = scheduled_window_steps(
+        fixed_window_schedule, base_fixed_window_steps, local_commits
+    )
+    fixed_window_enabled = (
+        args.fixed_window_microsteps > 0
+        or args.fixed_window_tokens > 0
+        or fixed_window_schedule is not None
+    )
     fixed_window_snapshots: list[dict | None] | None = (
         [None] * layout.num_fragments if fixed_window_enabled else None
     )
     if fixed_window_enabled and rank == 0:
         log.info(
             "fixed response window enabled: %d step(s), %d token(s)/step, "
-            "target tokens=%d, target microsteps=%d",
+            "target tokens=%d, target microsteps=%d, schedule=%s",
             fixed_window_steps,
             tokens_per_inner_step,
             args.fixed_window_tokens,
             args.fixed_window_microsteps,
+            fixed_window_schedule,
         )
 
     if args.loss_function.startswith("pickle:"):
@@ -1226,6 +1328,32 @@ def run_inner_loop(
                         tokens_at_reset[fid] += c_tokens
                         if fixed_window_snapshots is not None:
                             fixed_window_snapshots[fid] = None
+                    if fixed_window_schedule is not None:
+                        # Advance the local commit index once per distinct
+                        # round (re-sent pulls answer again but don't count)
+                        # and switch the window when the schedule says so.
+                        round_key = (fid, pull.global_step)
+                        if round_key not in answered_rounds:
+                            answered_rounds.add(round_key)
+                            local_commits += 1
+                            new_window = scheduled_window_steps(
+                                fixed_window_schedule,
+                                base_fixed_window_steps,
+                                local_commits,
+                            )
+                            if new_window != fixed_window_steps:
+                                log.info(
+                                    "fixed-window schedule: local commit %d "
+                                    "switches window %d -> %d microstep(s)",
+                                    local_commits,
+                                    fixed_window_steps,
+                                    new_window,
+                                )
+                                fixed_window_steps = new_window
+                                if fixed_window_snapshots is not None:
+                                    invalidate_undersized_snapshots(
+                                        fixed_window_snapshots, new_window
+                                    )
                 pending_pulls = still_pending
 
             if shutdown or steps_total >= args.max_local_steps:

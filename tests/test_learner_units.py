@@ -330,3 +330,125 @@ def test_lag_flag_rejects_q4_wire_dtype():
         ]
     )
     assert args.debug_broadcast_lag_commits == 1
+
+
+# --- --fixed-window-schedule (online sync-horizon changes) ------------------
+
+
+def test_schedule_parser_accepts_demo_spec():
+    from yeto.learner import parse_fixed_window_schedule
+
+    assert parse_fixed_window_schedule("0:16,160:256,170:16,330:256") == [
+        (0, 16),
+        (160, 256),
+        (170, 16),
+        (330, 256),
+    ]
+
+
+def test_schedule_parser_tolerates_whitespace_and_trailing_comma():
+    from yeto.learner import parse_fixed_window_schedule
+
+    assert parse_fixed_window_schedule(" 0:16 , 10:256 ,") == [(0, 16), (10, 256)]
+
+
+def test_schedule_parser_rejects_malformed_specs():
+    import pytest
+
+    from yeto.learner import parse_fixed_window_schedule
+
+    for bad in (
+        "",  # no entries
+        ",,",  # only separators
+        "16",  # missing colon
+        "a:16",  # non-integer commit
+        "0:h",  # non-integer window
+        "-1:16",  # negative commit index
+        "0:0",  # window below one microstep
+        "10:16,10:256",  # equal commit indices
+        "10:16,5:256",  # decreasing commit indices
+    ):
+        with pytest.raises(ValueError):
+            parse_fixed_window_schedule(bad)
+
+
+def test_scheduled_window_steps_follows_phases():
+    from yeto.learner import scheduled_window_steps
+
+    schedule = [(0, 16), (160, 256), (170, 16), (330, 256)]
+    assert scheduled_window_steps(None, 64, 0) == 64  # no schedule -> base
+    assert scheduled_window_steps(schedule, 64, 0) == 16
+    assert scheduled_window_steps(schedule, 64, 159) == 16
+    assert scheduled_window_steps(schedule, 64, 160) == 256
+    assert scheduled_window_steps(schedule, 64, 169) == 256
+    assert scheduled_window_steps(schedule, 64, 170) == 16
+    assert scheduled_window_steps(schedule, 64, 330) == 256
+    assert scheduled_window_steps(schedule, 64, 10_000) == 256
+
+
+def test_scheduled_window_steps_uses_base_before_first_entry():
+    from yeto.learner import scheduled_window_steps
+
+    schedule = [(5, 256)]
+    assert scheduled_window_steps(schedule, 16, 0) == 16
+    assert scheduled_window_steps(schedule, 16, 4) == 16
+    assert scheduled_window_steps(schedule, 16, 5) == 256
+
+
+def test_window_growth_invalidates_undersized_snapshots_only():
+    from yeto.learner import invalidate_undersized_snapshots
+
+    snapshots = [
+        {"c_steps": 16, "flat": "a"},  # too small for the grown window
+        {"c_steps": 256, "flat": "b"},  # already fills it
+        None,  # nothing cached yet
+    ]
+    invalidate_undersized_snapshots(snapshots, 256)
+    assert snapshots[0] is None
+    assert snapshots[1] == {"c_steps": 256, "flat": "b"}
+    assert snapshots[2] is None
+
+
+def test_window_shrink_keeps_existing_snapshots():
+    from yeto.learner import invalidate_undersized_snapshots
+
+    snapshots = [{"c_steps": 256, "flat": "a"}, {"c_steps": 300, "flat": "b"}]
+    invalidate_undersized_snapshots(snapshots, 16)
+    assert snapshots == [
+        {"c_steps": 256, "flat": "a"},
+        {"c_steps": 300, "flat": "b"},
+    ]
+
+
+def test_schedule_flag_defaults_off_and_parses_into_pairs():
+    from yeto.learner import parse_args
+
+    args = parse_args(_LEARNER_REQUIRED_ARGV)
+    assert args.fixed_window_schedule is None
+    args = parse_args(
+        _LEARNER_REQUIRED_ARGV + ["--fixed-window-schedule", "0:16,160:256"]
+    )
+    assert args.fixed_window_schedule == [(0, 16), (160, 256)]
+
+
+def test_schedule_flag_rejects_malformed_spec_at_parse_time():
+    import pytest
+
+    from yeto.learner import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(_LEARNER_REQUIRED_ARGV + ["--fixed-window-schedule", "10:16,5:8"])
+
+
+def test_schedule_flag_satisfies_lag_mode_window_requirement():
+    from yeto.learner import parse_args
+
+    args = parse_args(
+        _LEARNER_REQUIRED_ARGV
+        + [
+            "--debug-broadcast-lag-commits", "1",
+            "--fixed-window-schedule", "0:16",
+        ]
+    )
+    assert args.debug_broadcast_lag_commits == 1
+    assert args.fixed_window_schedule == [(0, 16)]

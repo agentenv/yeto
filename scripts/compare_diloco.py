@@ -464,6 +464,9 @@ def learner_command(
             cmd += ["--fixed-window-tokens", str(fixed_window_tokens)]
         if fixed_window_microsteps:
             cmd += ["--fixed-window-microsteps", str(fixed_window_microsteps)]
+        fixed_window_schedule = getattr(args, "fixed_window_schedule", None)
+        if fixed_window_schedule:
+            cmd += ["--fixed-window-schedule", str(fixed_window_schedule)]
         if getattr(args, "pad_to_fixed_window_tokens", False):
             cmd += ["--pad-to-fixed-window-tokens"]
         if getattr(args, "freeze_delta_before_delay", False):
@@ -1827,6 +1830,13 @@ def main() -> int:
         "round to whole optimizer steps",
     )
     p.add_argument(
+        "--fixed-window-schedule",
+        default=None,
+        help="EXP: per-learner online sync-horizon schedule "
+        "'commit1:h1,commit2:h2,...' forwarded to every async learner "
+        "(see yeto.learner --fixed-window-schedule)",
+    )
+    p.add_argument(
         "--freeze-delta-before-delay",
         action="store_true",
         help="materialize fragment payloads before push delay stress",
@@ -1925,6 +1935,13 @@ def main() -> int:
 
     if args.syncer_total_steps < 0 or args.learner_max_steps < 0:
         p.error("--syncer-total-steps and --learner-max-steps must be non-negative")
+    if args.fixed_window_schedule is not None:
+        from yeto.learner import parse_fixed_window_schedule
+
+        try:  # fail before any arm spends GPU time on a malformed schedule
+            parse_fixed_window_schedule(args.fixed_window_schedule)
+        except ValueError as exc:
+            p.error(f"--fixed-window-schedule: {exc}")
     if args.strict_quorum and args.syncer_total_steps == 0:
         p.error(
             "--strict-quorum requires --syncer-total-steps so learners do not disconnect first"
