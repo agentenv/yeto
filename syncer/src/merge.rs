@@ -122,19 +122,18 @@ pub fn materialize_applied_step(
             .zip(delta)
             .map(|(buf, value)| lr * (*value + momentum * *buf))
             .collect(),
-        OuterOptimizer::NormalizedEma | OuterOptimizer::RestartedEma => {
+        OuterOptimizer::NormalizedEma
+        | OuterOptimizer::RestartedEma
+        | OuterOptimizer::RhoAdaptive => {
             updated_buf.iter().map(|buf| lr * *buf).collect()
         }
-        // The amplification scale depends on the pre-update buffer (the
-        // previous merged delta), which is gone after the step. Action-probe
-        // previews are unsupported for rho-adaptive; the unscaled SGD step
-        // is returned so callers see a well-defined vector.
-        OuterOptimizer::RhoAdaptive => delta.iter().map(|value| lr * *value).collect(),
     }
 }
 
-/// Rho-adaptive memoryless step. `buf` stores the PREVIOUS merged delta,
-/// not momentum. Each commit measures the round-to-round direction
+/// Rho-adaptive memoryless step. `buf` stores the previously APPLIED
+/// direction, `scale * delta` (not momentum); since the amplification scale
+/// is always positive, the stored direction has the same orientation as the
+/// previous merged delta and the measured autocorrelation is unaffected. Each commit measures the round-to-round direction
 /// autocorrelation rho = cos(delta, buf) and applies the outer step that a
 /// Nesterov buffer with mu_eff = clamp(2*(1 - rho), 0, mu_max) would have
 /// produced in steady state on a rho-correlated direction:
@@ -174,7 +173,7 @@ pub fn rho_adaptive_step(
     for ((p, b), d) in params.iter_mut().zip(buf.iter_mut()).zip(delta) {
         let step = lr * scale * *d;
         *p -= step;
-        *b = *d;
+        *b = scale * *d;
         step_norm_sq += (step as f64).powi(2);
     }
     OuterStepStats {
@@ -742,6 +741,8 @@ mod tests {
         let expected = 0.1 / (1.0 + 0.9);
         assert!((params[0] - expected).abs() < 1e-6);
         assert_eq!(stats.history_current_norm_ratio, Some(-1.0));
+        // buffer stores the applied (scaled) direction
+        assert!((buf[0] + 1.0 / 1.9).abs() < 1e-6);
     }
 
     #[test]
