@@ -75,7 +75,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 SYNCER_BIN = REPO_ROOT / "syncer/target/release/yeto-syncer"
-OUTER_OPTIMIZERS = ("nesterov", "normalized-ema", "restarted-ema")
+OUTER_OPTIMIZERS = ("nesterov", "normalized-ema", "restarted-ema", "rho-adaptive")
 COMMIT_POLICIES = (
     "token_weighted",
     "probe_shadow",
