@@ -907,6 +907,121 @@ mod tests {
     }
 
     #[test]
+    fn nesterov_three_step_hand_computed_sequence() {
+        // Deterministic 3-step audit at mu = 0.9, lr = 0.1, theta_0 = 0,
+        // b_0 = 0 (production initialization). Recursion under test:
+        //   b_t = mu*b_{t-1} + delta_t
+        //   d_t = delta_t + mu*b_t = (1+mu)*delta_t + mu^2*b_{t-1}
+        //   theta_t = theta_{t-1} - lr*d_t
+        //
+        // t=1, delta_1 = [1, 2]:
+        //   b_1 = [1, 2]
+        //   d_1 = (1+mu)*delta_1 = [1.9, 3.8]      (zero history)
+        //   step_1 = [0.19, 0.38], theta_1 = [-0.19, -0.38]
+        //   |step_1| = (1+mu)*lr*|delta_1| = 0.19*sqrt(5)
+        // t=2, delta_2 = [0.5, -1]:
+        //   b_2 = 0.9*[1, 2] + [0.5, -1] = [1.4, 0.8]
+        //   d_2 = [0.5, -1] + 0.9*[1.4, 0.8] = [1.76, -0.28]
+        //   cross-check via the two-term form:
+        //     (1+mu)*delta_2 + mu^2*b_1 = [0.95+0.81, -1.9+1.62] = [1.76, -0.28]
+        //   step_2 = [0.176, -0.028], theta_2 = [-0.366, -0.352]
+        // t=3, delta_3 = [2, 0]:
+        //   b_3 = 0.9*[1.4, 0.8] + [2, 0] = [3.26, 0.72]
+        //   d_3 = [2, 0] + 0.9*[3.26, 0.72] = [4.934, 0.648]
+        //   step_3 = [0.4934, 0.0648], theta_3 = [-0.8594, -0.4168]
+        let mu = 0.9f32;
+        let lr = 0.1f32;
+        let mut p = [0.0f32, 0.0];
+        let mut buf = [0.0f32, 0.0];
+        let tol = 1e-5f64;
+
+        let s1 = nesterov_step(&mut p, &mut buf, &[1.0, 2.0], lr, mu);
+        assert!((buf[0] - 1.0).abs() < tol as f32 && (buf[1] - 2.0).abs() < tol as f32);
+        assert!((p[0] as f64 + 0.19).abs() < tol && (p[1] as f64 + 0.38).abs() < tol);
+        // Explicit first-step factor: |step_1| == (1+mu)*lr*|delta_1|.
+        let delta1_norm = 5.0f64.sqrt();
+        assert!((s1.applied_step_norm - 1.9 * 0.1 * delta1_norm).abs() < tol);
+        assert_eq!(s1.history_current_norm_ratio, Some(0.0));
+
+        let s2 = nesterov_step(&mut p, &mut buf, &[0.5, -1.0], lr, mu);
+        assert!((buf[0] as f64 - 1.4).abs() < tol && (buf[1] as f64 - 0.8).abs() < tol);
+        assert!((p[0] as f64 + 0.366).abs() < tol && (p[1] as f64 + 0.352).abs() < tol);
+        // Exact identity check at t=2 (documented in OPTIMIZER_SEMANTICS.md):
+        //   c_2 = <b_1, delta_2>/|delta_2|^2 = (0.5 - 2)/1.25 = -1.2
+        //   A_2 = 1 + mu + mu^2*c_2 = 1.9 - 0.972 = 0.928
+        //   b_1 - c_2*delta_2 = [1.6, 0.8], r_2 = sqrt(3.2/1.25) = 1.6
+        //   d_2 = A_2*delta_2 + mu^2*[1.6, 0.8]
+        //       = [0.464, -0.928] + [1.296, 0.648] = [1.76, -0.28]  (matches)
+        let d2_norm = (1.76f64 * 1.76 + 0.28 * 0.28).sqrt();
+        assert!((s2.applied_step_norm - 0.1 * d2_norm).abs() < tol);
+        // history/current ratio = mu^2*|b_1| / ((1+mu)*|delta_2|)
+        let expected_ratio = 0.81 * 5.0f64.sqrt() / (1.9 * 1.25f64.sqrt());
+        assert!((s2.history_current_norm_ratio.unwrap() - expected_ratio).abs() < tol);
+
+        let s3 = nesterov_step(&mut p, &mut buf, &[2.0, 0.0], lr, mu);
+        assert!((buf[0] as f64 - 3.26).abs() < tol && (buf[1] as f64 - 0.72).abs() < tol);
+        assert!((p[0] as f64 + 0.8594).abs() < tol && (p[1] as f64 + 0.4168).abs() < tol);
+        let d3_norm = (4.934f64 * 4.934 + 0.648 * 0.648).sqrt();
+        assert!((s3.applied_step_norm - 0.1 * d3_norm).abs() < tol);
+    }
+
+    #[test]
+    fn rho_adaptive_three_step_hand_computed_sequence() {
+        // Deterministic 3-step audit of the implemented rho-adaptive
+        // semantics (v2; v1's mu_eff heuristic was retired in EXP2_26) at
+        // lr = 0.1, theta_0 = 0, b_0 = 0, rho_ema_0 = rho_ref = 0.5.
+        // Per commit: rho_t = cos(delta_t, b_{t-1}) (unmeasured when either
+        // is zero), rho_ema <- 0.5*rho_ema + 0.5*rho_t (only when measured),
+        // s_t = clamp(a(rho_ema)/a(0.5), 0.5, 2) with a(r) = 1 + 0.5/(1-0.5r),
+        // theta -= lr*s_t*delta_t, b <- s_t*delta_t.
+        //
+        // t=1, delta_1 = [1, 2]: b_0 = 0 -> unmeasured, rho_ema stays 0.5,
+        //   s_1 = 1. step = [0.1, 0.2], theta_1 = [-0.1, -0.2], b_1 = [1, 2].
+        // t=2, delta_2 = [2, 4] (parallel, rho = 1):
+        //   rho_ema = 0.5*0.5 + 0.5*1 = 0.75
+        //   s_2 = a(0.75)/a(0.5) = 1.8/(5/3) = 1.08
+        //   b_2 = 1.08*[2, 4] = [2.16, 4.32], step = [0.216, 0.432]
+        //   theta_2 = [-0.316, -0.632]
+        // t=3, delta_3 = [-1, -2] (anti-parallel, rho = -1):
+        //   rho_ema = 0.5*0.75 - 0.5 = -0.125
+        //   s_3 = a(-0.125)/a(0.5) = (1 + 8/17)/(5/3) = 15/17
+        //   b_3 = -(15/17)*[1, 2], step = [-1.5/17, -3/17]
+        //   theta_3 = [-0.316 + 1.5/17, -0.632 + 3/17]
+        let lr = 0.1f32;
+        let mut p = [0.0f32, 0.0];
+        let mut buf = [0.0f32, 0.0];
+        let mut rho_ema = RHO_ADAPTIVE_INITIAL_RHO_EMA;
+        let tol = 1e-6f64;
+
+        let s1 = rho_adaptive_step(&mut p, &mut buf, &[1.0, 2.0], lr, &mut rho_ema);
+        assert_eq!(rho_ema, 0.5);
+        assert!((p[0] as f64 + 0.1).abs() < tol && (p[1] as f64 + 0.2).abs() < tol);
+        assert_eq!(buf, [1.0, 2.0]);
+        assert_eq!(s1.history_current_norm_ratio, Some(0.0));
+        assert!((s1.applied_step_norm - 0.1 * 5.0f64.sqrt()).abs() < tol);
+
+        let s2 = rho_adaptive_step(&mut p, &mut buf, &[2.0, 4.0], lr, &mut rho_ema);
+        assert!((rho_ema as f64 - 0.75).abs() < tol);
+        assert!((buf[0] as f64 - 2.16).abs() < tol && (buf[1] as f64 - 4.32).abs() < tol);
+        assert!((p[0] as f64 + 0.316).abs() < tol && (p[1] as f64 + 0.632).abs() < tol);
+        assert!((s2.history_current_norm_ratio.unwrap() - 1.0).abs() < tol);
+        assert!((s2.applied_step_norm - 0.1 * 1.08 * 20.0f64.sqrt()).abs() < 1e-5);
+
+        let s3 = rho_adaptive_step(&mut p, &mut buf, &[-1.0, -2.0], lr, &mut rho_ema);
+        let gain3 = 15.0 / 17.0;
+        assert!((rho_ema as f64 + 0.125).abs() < tol);
+        assert!(
+            (buf[0] as f64 + gain3).abs() < tol && (buf[1] as f64 + 2.0 * gain3).abs() < tol
+        );
+        assert!(
+            (p[0] as f64 + (0.316 - 0.1 * gain3)).abs() < tol
+                && (p[1] as f64 + (0.632 - 0.2 * gain3)).abs() < tol
+        );
+        assert!((s3.history_current_norm_ratio.unwrap() + 1.0).abs() < tol);
+        assert!((s3.applied_step_norm - 0.1 * gain3 * 5.0f64.sqrt()).abs() < tol);
+    }
+
+    #[test]
     fn nesterov_zero_delta_leaves_direction_ratios_undefined() {
         let mut p = [1.0f32];
         let mut buf = [2.0f32];
