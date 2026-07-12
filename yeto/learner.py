@@ -1069,6 +1069,18 @@ def run_inner_loop(
     lagged_broadcasts: list[list] | None = (
         [[] for _ in range(layout.num_fragments)] if lag_commits > 0 else None
     )
+    # Lag-mode determinism (EXP2.29B): post-warmup, a commit must respond
+    # with a window trained ENTIRELY on the released (K-stale) base. The
+    # apply of a released broadcast resets the window (below), and pulls are
+    # held until that apply has happened since the fragment's last push;
+    # otherwise a released broadcast racing the window fill leaves rows one
+    # extra commit stale (K+1) and windows that straddle the apply.
+    lag_released_ever: list[bool] | None = (
+        [False] * layout.num_fragments if lag_commits > 0 else None
+    )
+    lag_applied_since_push: list[bool] | None = (
+        [False] * layout.num_fragments if lag_commits > 0 else None
+    )
     pending_pulls: list = []  # pulls deferred until c_steps >= 1
     global_step = 0
     # Q4 pushes are deltas anchored at the last *received* global value per
@@ -1228,6 +1240,8 @@ def run_inner_loop(
                         if released is None:
                             continue
                         version, flat = released
+                        if lag_released_ever is not None:
+                            lag_released_ever[bc.fragment_id] = True
                     if anchors is not None:
                         if probe is not None:
                             probe.note_broadcast(bc.fragment_id, anchors[bc.fragment_id], flat)
@@ -1256,11 +1270,16 @@ def run_inner_loop(
                     apply_fragment(layout.fragments[fid], flat, params)
                     if rank == 0:
                         fragment_versions[fid] = version
-                        if lagged_broadcasts is None:
-                            steps_at_reset[fid] = steps_total
-                            tokens_at_reset[fid] = tokens_total
-                            if fixed_window_snapshots is not None:
-                                fixed_window_snapshots[fid] = None
+                        # Both modes restart the window at apply time. In lag
+                        # mode this starts the window that must be trained
+                        # entirely on the just-applied released (K-stale)
+                        # base; the matching pull is held until this apply.
+                        steps_at_reset[fid] = steps_total
+                        tokens_at_reset[fid] = tokens_total
+                        if fixed_window_snapshots is not None:
+                            fixed_window_snapshots[fid] = None
+                        if lag_applied_since_push is not None:
+                            lag_applied_since_push[fid] = True
                     global_step = max(global_step, version)
             else:
                 for fid, version, flat in actions:
@@ -1270,14 +1289,16 @@ def run_inner_loop(
                         flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
                     apply_fragment(layout.fragments[fid], flat, params)
                     fragment_versions[fid] = version
-                    if lagged_broadcasts is None:
-                        # Lag mode moves window resets to push time; the
-                        # deliberately late application must not restart or
-                        # invalidate the in-flight window.
-                        steps_at_reset[fid] = steps_total
-                        tokens_at_reset[fid] = tokens_total
-                        if fixed_window_snapshots is not None:
-                            fixed_window_snapshots[fid] = None
+                    # Both modes restart the window at apply time. In lag
+                    # mode this starts the window that must be trained
+                    # entirely on the just-applied released (K-stale) base;
+                    # the matching pull is held until this apply.
+                    steps_at_reset[fid] = steps_total
+                    tokens_at_reset[fid] = tokens_total
+                    if fixed_window_snapshots is not None:
+                        fixed_window_snapshots[fid] = None
+                    if lag_applied_since_push is not None:
+                        lag_applied_since_push[fid] = True
                     global_step = max(global_step, version)
 
             # 2. answer pulls whose fragment has made progress since the
@@ -1287,6 +1308,19 @@ def run_inner_loop(
                 still_pending = []
                 for pull in pending_pulls:
                     fid = pull.fragment_id
+                    if (
+                        lag_applied_since_push is not None
+                        and lag_released_ever is not None
+                        and lag_released_ever[fid]
+                        and not lag_applied_since_push[fid]
+                    ):
+                        # Lag mode, post-warmup: hold the pull until the
+                        # released broadcast for the previous round has been
+                        # applied (which restarts the window), so the
+                        # answered window is a full fresh window on the
+                        # K-stale base with a deterministic base_version.
+                        still_pending.append(pull)
+                        continue
                     if fixed_window_snapshots is not None:
                         snap = fixed_window_snapshots[fid]
                         if snap is None:
@@ -1351,6 +1385,8 @@ def run_inner_loop(
                         tokens_at_reset[fid] = tokens_total
                         if fixed_window_snapshots is not None:
                             fixed_window_snapshots[fid] = None
+                        if lag_applied_since_push is not None:
+                            lag_applied_since_push[fid] = False
                     if fixed_window_schedule is not None:
                         # Advance the local commit index once per distinct
                         # round (re-sent pulls answer again but don't count)
