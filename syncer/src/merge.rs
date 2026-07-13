@@ -273,9 +273,13 @@ pub const CAPPED_NESTEROV_INITIAL_MU: f32 = CAPPED_NESTEROV_MU_MAX as f32;
 ///
 ///   mu_par : largest mu in [0, mu_max] with mu + mu^2 * [c_t]_+ <= mu_max,
 ///            i.e. the positive root of [c_t]_+ mu^2 + mu - mu_max = 0,
-///            mu_par = (sqrt(1 + 4 [c_t]_+ mu_max) - 1) / (2 [c_t]_+)
-///            (mu_max itself when [c_t]_+ = 0) — caps the aligned gain
-///            A_t = 1 + mu + mu^2 c_t at 1 + mu_max for amplifying history;
+///            computed in the rationalized (numerically stable) form
+///            mu_par = 2 mu_max / (1 + sqrt(1 + 4 [c_t]_+ mu_max))
+///            (THEORY.md F1; equals mu_max at [c_t]_+ = 0 with no branch,
+///            and is continuous as c -> 0+ where the textbook root form
+///            (sqrt(1+4c mu_max)-1)/(2c) cancels catastrophically) — caps
+///            the aligned gain A_t = 1 + mu + mu^2 c_t at 1 + mu_max for
+///            amplifying history;
 ///   mu_perp: sqrt(tau_perp / max(r_t, eps)) — caps the transverse
 ///            contribution mu^2 r_t |delta| at tau_perp |delta|;
 ///   cap    = min(mu_max, mu_par, mu_perp).
@@ -286,11 +290,10 @@ pub const CAPPED_NESTEROV_INITIAL_MU: f32 = CAPPED_NESTEROV_MU_MAX as f32;
 /// [0, cap], the guard keeps every admissible mu on the descent side.
 pub fn capped_nesterov_cap(c_t: f64, r_t: f64) -> f64 {
     let c_plus = c_t.max(0.0);
-    let mu_par = if c_plus > 0.0 {
-        ((1.0 + 4.0 * c_plus * CAPPED_NESTEROV_MU_MAX).sqrt() - 1.0) / (2.0 * c_plus)
-    } else {
-        CAPPED_NESTEROV_MU_MAX
-    };
+    // Rationalized root: no cancellation for small c_plus and exact mu_max
+    // at c_plus = 0, so the c_plus = 0 case needs no separate branch.
+    let mu_par =
+        2.0 * CAPPED_NESTEROV_MU_MAX / (1.0 + (1.0 + 4.0 * c_plus * CAPPED_NESTEROV_MU_MAX).sqrt());
     let mu_perp = (CAPPED_NESTEROV_TAU_PERP / r_t.max(CAPPED_NESTEROV_R_EPS)).sqrt();
     let cap = CAPPED_NESTEROV_MU_MAX.min(mu_par).min(mu_perp);
     if 1.0 + cap + cap * cap * c_t < 0.0 {
@@ -1662,6 +1665,50 @@ mod tests {
             materialize_applied_step(OuterOptimizer::CappedNesterov, &buf, &delta, 0.3, mu);
         for ((b, s), after) in base.iter().zip(&step).zip(&p) {
             assert_eq!((b - s).to_bits(), after.to_bits());
+        }
+    }
+
+    #[test]
+    fn capped_nesterov_cap_mu_par_is_stable_and_continuous_at_small_c() {
+        // THEORY.md F1 regression: the textbook root form
+        // (sqrt(1+4c*mu_max)-1)/(2c) cancels catastrophically for small
+        // positive c (~0.555 at c = 2e-16; exactly 0 at c = 1e-20). The
+        // rationalized form must return mu_max in that regime, restoring
+        // the "largest admissible mu" spec and continuity at c -> 0+.
+        // r_t = 0 keeps mu_perp inert (~1e6).
+        assert_eq!(capped_nesterov_cap(0.0, 0.0), CAPPED_NESTEROV_MU_MAX);
+        for c in [1e-20f64, 2e-16, 1e-12, 1e-9] {
+            let cap = capped_nesterov_cap(c, 0.0);
+            assert!(
+                (cap - CAPPED_NESTEROV_MU_MAX).abs() < 1e-8,
+                "cap({c:e}) = {cap} should be ~mu_max"
+            );
+            // Still the exact root: never exceeds mu_max admissibility.
+            assert!(cap + cap * cap * c <= CAPPED_NESTEROV_MU_MAX + 1e-12);
+        }
+    }
+
+    #[test]
+    fn capped_nesterov_cap_mu_par_matches_root_at_moderate_c() {
+        // At c where the old form was accurate the rationalized form is
+        // algebraically identical: c = 1 gives the three-step-audit value
+        // mu_par = (sqrt(4.6) - 1)/2 = 0.57238053..., and the defining
+        // quadratic mu + mu^2 c = mu_max holds to f64 precision.
+        for c in [0.25f64, 0.5, 1.0, 2.0, 10.0] {
+            let cap = capped_nesterov_cap(c, 0.0);
+            assert!(
+                (cap + cap * cap * c - CAPPED_NESTEROV_MU_MAX).abs() < 1e-12,
+                "root property violated at c = {c}"
+            );
+        }
+        let audit = ((1.0f64 + 4.0 * CAPPED_NESTEROV_MU_MAX).sqrt() - 1.0) / 2.0;
+        assert!((capped_nesterov_cap(1.0, 0.0) - audit).abs() < 1e-15);
+        // Monotone nonincreasing in c (larger aligned gain -> tighter cap).
+        let mut prev = capped_nesterov_cap(0.0, 0.0);
+        for c in [1e-6f64, 1e-3, 0.1, 1.0, 10.0, 1e6] {
+            let cap = capped_nesterov_cap(c, 0.0);
+            assert!(cap <= prev + 1e-15);
+            prev = cap;
         }
     }
 
