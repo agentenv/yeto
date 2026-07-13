@@ -239,6 +239,91 @@ def test_two_learners_converge_to_mean():
 
 
 @pytest.mark.timeout(180)
+def test_version_matched_anchor_converges_and_logs_drift(tmp_path):
+    """EXP2.46 arm B: --version-matched-anchor differences each learner delta
+    against the retained global at its pushed base_version. The run must still
+    converge, and the event tape must carry per-push anchor-drift diagnostics
+    (with at least one push whose base version resolved in the retained
+    history)."""
+    import json
+
+    binary = build_syncer()
+    port = free_port()
+    total_steps = 30
+    tape = tmp_path / "tape.jsonl"
+    named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
+    layout = build_layout(named, 4)
+
+    proc = subprocess.Popen(
+        [
+            str(binary),
+            "--port", str(port),
+            "--learners", "2",
+            "--quorum", "2",
+            "--grace-ms", "200",
+            "--total-steps", str(total_steps),
+            "--outer-lr", "0.7",
+            "--outer-momentum", "0.9",
+            "--version-matched-anchor",
+            "--event-tape", str(tape),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        torch.manual_seed(0)
+        t_a = torch.randn(DIM + DIM // 4)
+        t_b = -t_a  # consensus optimum = 0
+        learners = [ToyLearner(0, port, t_a, layout), ToyLearner(1, port, t_b, layout)]
+        for learner in learners:
+            learner.start()
+        for learner in learners:
+            learner.join(timeout=120)
+            assert not learner.is_alive(), "learner did not finish"
+            if learner.exc:
+                raise learner.exc
+        assert proc.wait(timeout=30) == 0, "syncer exited nonzero"
+
+        # Version-matched merging still cancels opposite motions toward 0.
+        for learner in learners:
+            assert learner.synced, "learner never received a broadcast"
+            flat = torch.cat([p.reshape(-1) for p in learner.synced.values()])
+            assert (flat - learner.target).norm() > 0.5 * learner.target.norm(), (
+                "learner collapsed to its own target; merging had no effect"
+            )
+
+        # The tape carries anchor-drift instrumentation on every responder, and
+        # at least one push differenced against a resolved retained base.
+        lines = [json.loads(x) for x in tape.read_text().splitlines() if x.strip()]
+        assert lines, "event tape is empty"
+        responders = [r for line in lines for r in line["responders"]]
+        assert responders, "no responders recorded"
+        assert all("anchor_drift_norm" in r for r in responders), (
+            "instrumentation missing from a responder"
+        )
+        assert any(r["anchor_base_resolved"] for r in responders), (
+            "no push resolved its base version in the retained history"
+        )
+        # Every resolved push reports finite, non-negative drift/local norms and
+        # a ratio field (number or null, never NaN). The magnitude of the drift
+        # depends on inducing non-barrier staleness (covered by the syncer unit
+        # tests); here we assert the instrumentation is well-formed.
+        for r in responders:
+            if not r["anchor_base_resolved"]:
+                continue
+            assert r["anchor_drift_norm"] >= 0.0
+            assert r["local_delta_norm"] >= 0.0
+            assert "anchor_drift_ratio" in r
+            assert "anchor_drift_momentum_cos" in r
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        out = proc.stdout.read() if proc.stdout else ""
+        print(out[-3000:])
+
+
+@pytest.mark.timeout(180)
 def test_single_learner_roundtrip_q4():
     """Q4 session: INIT/BCAST in bf16, pushes as 4-bit deltas the Rust
     syncer reconstructs from Θ(base_version) + δ. Must converge like bf16."""

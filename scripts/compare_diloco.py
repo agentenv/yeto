@@ -547,6 +547,8 @@ def syncer_command(
     probe_capture: bool = False,
     probe_capture_every: int = 1,
     delta_norm_ref: float = 0.0,
+    version_matched_anchor: bool = False,
+    anchor_drift_log: bool = False,
     action_probe_endpoint: str | None = None,
     action_probe_timeout_ms: int = 30_000,
     action_probe_run_uuid: str | None = None,
@@ -597,6 +599,13 @@ def syncer_command(
         # flag is only emitted when active so default command lines (and the
         # syncer behavior behind them) stay byte-identical.
         cmd += ["--delta-norm-ref", str(delta_norm_ref)]
+    # EXP2.46 3-arm current-anchor control. --version-matched-anchor changes the
+    # merge (arms A/B); --anchor-drift-log only instruments (arm C). Both are
+    # emitted only when active so default command lines stay byte-identical.
+    if version_matched_anchor:
+        cmd += ["--version-matched-anchor"]
+    if anchor_drift_log and not version_matched_anchor:
+        cmd += ["--anchor-drift-log"]
     if arm.strict_quorum:
         cmd += ["--strict-quorum"]
     if probe_capture:
@@ -1562,6 +1571,8 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                 probe_capture=getattr(args, "syncer_probe_capture", False),
                 probe_capture_every=getattr(args, "syncer_probe_capture_every", 1),
                 delta_norm_ref=getattr(args, "delta_norm_ref", 0.0),
+                version_matched_anchor=getattr(args, "version_matched_anchor", False),
+                anchor_drift_log=getattr(args, "anchor_drift_log", False),
                 **syncer_args,
             ),
             stdout=syncer_log,
@@ -1902,6 +1913,23 @@ def main() -> int:
         "after pushing a fragment delta until the syncer's merged broadcast "
         "for that fragment returns, taking no inner steps while a merge is in "
         "flight. Off by default (non-barrier strict-quorum schedule).",
+    )
+    p.add_argument(
+        "--version-matched-anchor",
+        action="store_true",
+        help="EXP2.46: the syncer differences each learner's delta against the "
+        "retained global at the learner's pushed base_version (version-matched "
+        "anchoring, arms A/B) instead of the current global (current-anchor, arm "
+        "C). Implies --anchor-drift-log. Off by default = byte-identical "
+        "current-anchor.",
+    )
+    p.add_argument(
+        "--anchor-drift-log",
+        action="store_true",
+        help="EXP2.46: log per-push anchor-drift diagnostics (||anchor_drift||, "
+        "||true_local_delta||, ratio, cos(drift, outer momentum)) into the event "
+        "tape WITHOUT changing the merge (arm C). Implied by "
+        "--version-matched-anchor.",
     )
     p.add_argument("--arm-timeout-min", type=int, default=120)
     p.add_argument(

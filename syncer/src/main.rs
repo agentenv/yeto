@@ -88,6 +88,20 @@ struct Args {
     /// byte-identical to the production path).
     #[arg(long, default_value_t = 0.0, value_parser = parse_delta_norm_ref)]
     delta_norm_ref: f32,
+    /// EXP2.46 3-arm current-anchor causal control: difference each learner's
+    /// delta against the RETAINED global fragment value at the learner's pushed
+    /// base_version (version-matched anchoring, arms A/B) instead of the current
+    /// global (current-anchor, arm C). Retains the last few global snapshots per
+    /// fragment and implies --anchor-drift-log. Default false = byte-identical
+    /// current-anchor production path. See docs/ANCHOR_DRIFT_CONTROL.md.
+    #[arg(long, default_value_t = false)]
+    version_matched_anchor: bool,
+    /// EXP2.46: log per-push anchor-drift instrumentation into the event tape
+    /// (||anchor_drift||, ||true_local_delta||, their ratio, and cos(drift,
+    /// outer momentum)) WITHOUT changing the merge — the current-anchor arm
+    /// still reports the drift it injects. Implied by --version-matched-anchor.
+    #[arg(long, default_value_t = false)]
+    anchor_drift_log: bool,
     /// Optional path to dump the final global parameters (flat f32 binary).
     #[arg(long)]
     final_state: Option<std::path::PathBuf>,
@@ -179,6 +193,8 @@ fn main() -> anyhow::Result<()> {
         outer_optimizer: args.outer_optimizer,
         outer_restart_cos_threshold: args.outer_restart_cos_threshold,
         delta_norm_ref: args.delta_norm_ref,
+        version_matched_anchor: args.version_matched_anchor,
+        anchor_drift_instrument: args.version_matched_anchor || args.anchor_drift_log,
         final_state: args.final_state,
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,

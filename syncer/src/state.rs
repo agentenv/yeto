@@ -505,7 +505,31 @@ pub struct GlobalState {
     /// production path). `stats.gnorm` still reports the PRE-rescale merged
     /// delta norm.
     pub delta_norm_ref: f32,
+    /// EXP2.46 3-arm current-anchor causal control. When true, each learner's
+    /// delta is differenced against the RETAINED global fragment value at the
+    /// learner's pushed base_version (version-matched anchoring) rather than
+    /// the current global (current-anchor). Default false = byte-identical
+    /// current-anchor production path. See docs/ANCHOR_DRIFT_CONTROL.md.
+    pub version_matched_anchor: bool,
+    /// EXP2.46: retain prior global snapshots and compute per-push anchor-drift
+    /// instrumentation even when NOT version-matching, so the current-anchor
+    /// arm still reports the drift it injects into every delta. Implied by
+    /// `version_matched_anchor`.
+    pub anchor_drift_instrument: bool,
+    /// Bounded ring of prior committed global fragment snapshots per fragment,
+    /// keyed by the version they represent, newest at the back. Populated only
+    /// while anchor retention is enabled (else always empty -> zero cost and a
+    /// byte-identical path). Holds at most `ANCHOR_HISTORY_DEPTH` entries,
+    /// which covers the non-barrier overlap window (pipeline depth x quorum
+    /// grace); a base_version older than the window is reported unresolved and
+    /// falls back to the current anchor.
+    anchor_history: Vec<std::collections::VecDeque<(u64, Vec<f32>)>>,
 }
+
+/// EXP2.46: retained prior-global depth per fragment. The non-barrier overlap
+/// window (pipeline depth x in-flight rounds) never approaches this, so a
+/// learner's base version is always still resident when its push lands.
+const ANCHOR_HISTORY_DEPTH: usize = 8;
 
 impl GlobalState {
     pub fn new(
@@ -538,6 +562,9 @@ impl GlobalState {
         let initialized = vec![false; layout.fragments.len()];
         let versions = vec![0; layout.fragments.len()];
         let state_epochs = vec![0; layout.fragments.len()];
+        let anchor_history = (0..layout.fragments.len())
+            .map(|_| std::collections::VecDeque::new())
+            .collect();
         Self {
             layout,
             layout_meta,
@@ -563,6 +590,56 @@ impl GlobalState {
             wire_dtype,
             delta_correction: None,
             delta_norm_ref: 0.0,
+            version_matched_anchor: false,
+            anchor_drift_instrument: false,
+            anchor_history,
+        }
+    }
+
+    /// EXP2.46: is prior-global retention active? Retention feeds both
+    /// version-matched anchoring and current-anchor drift instrumentation.
+    pub fn anchor_retention_enabled(&self) -> bool {
+        self.version_matched_anchor || self.anchor_drift_instrument
+    }
+
+    /// EXP2.46: the global fragment value at `version` — the current params if
+    /// `version` is the current version, else a retained prior snapshot, else
+    /// None once the version has aged out of the bounded history.
+    pub fn anchor_at(&self, fid: usize, version: u64) -> Option<&[f32]> {
+        if version == self.versions[fid] {
+            return Some(&self.params[fid]);
+        }
+        self.anchor_history[fid]
+            .iter()
+            .rev()
+            .find(|(v, _)| *v == version)
+            .map(|(_, params)| params.as_slice())
+    }
+
+    /// EXP2.46: outer-momentum buffer of a fragment, for the anchor-drift /
+    /// momentum cosine diagnostic. Read-only.
+    pub fn momentum_fragment(&self, fid: usize) -> &[f32] {
+        &self.momentum[fid]
+    }
+
+    /// EXP2.46: retain the CURRENT global fragment snapshot (under its current
+    /// version) before an outer step overwrites it, so a push tagged at that
+    /// version can still be differenced against it. No-op unless retention is
+    /// enabled; the ring is bounded to `ANCHOR_HISTORY_DEPTH` (oldest evicted).
+    fn retain_anchor_snapshot(&mut self, fid: usize) {
+        if !self.anchor_retention_enabled() {
+            return;
+        }
+        let version = self.versions[fid];
+        let ring = &mut self.anchor_history[fid];
+        // A version is recorded once; a re-entrant install at the same version
+        // (which should not occur) refreshes rather than duplicates it.
+        if ring.back().map(|(v, _)| *v) == Some(version) {
+            return;
+        }
+        ring.push_back((version, self.params[fid].clone()));
+        while ring.len() > ANCHOR_HISTORY_DEPTH {
+            ring.pop_front();
         }
     }
 
@@ -1480,6 +1557,10 @@ impl GlobalState {
             ..
         } = preview;
         let next_epoch = self.next_state_epoch(fid)?;
+        // EXP2.46: snapshot the outgoing global under its current version before
+        // it is overwritten, so a later push tagged at that version can still be
+        // version-matched. No-op unless anchor retention is enabled.
+        self.retain_anchor_snapshot(fid);
         self.params[fid] = resulting_params;
         self.momentum[fid] = resulting_optimizer_buffer;
         self.rho_ema[fid] = resulting_rho_ema;
@@ -1666,6 +1747,68 @@ mod tests {
         assert!(!st.all_initialized());
         st.init_fragment(1, vec![0.0; 4]).unwrap();
         assert!(st.all_initialized());
+    }
+
+    // ---- EXP2.46 version-matched anchoring / anchor history ---------------
+
+    /// One f32 fragment of 4 params, lr 1 mu 0 (plain SGD = weight averaging),
+    /// used to exercise the anchor-history retention independent of the outer
+    /// optimizer.
+    fn anchor_state(instrument: bool) -> GlobalState {
+        let layout = Layout {
+            fragments: vec![FragmentInfo {
+                merge_mode: MERGE_AVG,
+                tensor_numels: vec![4],
+                tensor_shapes: None,
+            }],
+        };
+        let mut st = GlobalState::new(layout, None, 1.0, 0.0, crate::protocol::DTYPE_F32);
+        st.anchor_drift_instrument = instrument;
+        st
+    }
+
+    #[test]
+    fn anchor_history_retains_prior_global_when_enabled() {
+        let mut st = anchor_state(true);
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        // Merge to a fresh global; install snapshots (version 0, [1;4]) first.
+        st.merge_and_step(0, &[&vec![0.0f32; 4]], &[1.0]).unwrap();
+        st.versions[0] = 5; // the server bumps the version after merge_and_step
+        // Current version resolves to the live params.
+        assert_eq!(st.anchor_at(0, 5).unwrap(), &[0.0f32; 4]);
+        // The learner's base version resolves to the retained prior global.
+        assert_eq!(st.anchor_at(0, 0).unwrap(), &[1.0f32; 4]);
+        // An unknown intermediate version is unresolved.
+        assert!(st.anchor_at(0, 3).is_none());
+    }
+
+    #[test]
+    fn anchor_history_stays_empty_when_disabled() {
+        let mut st = anchor_state(false);
+        assert!(!st.anchor_retention_enabled());
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.merge_and_step(0, &[&vec![0.0f32; 4]], &[1.0]).unwrap();
+        st.versions[0] = 5;
+        assert!(st.anchor_history[0].is_empty());
+        // Current anchor still works; prior versions are simply unresolved.
+        assert_eq!(st.anchor_at(0, 5).unwrap(), &[0.0f32; 4]);
+        assert!(st.anchor_at(0, 0).is_none());
+    }
+
+    #[test]
+    fn anchor_history_is_bounded_and_evicts_oldest() {
+        let mut st = anchor_state(true);
+        st.init_fragment(0, vec![0.0; 4]).unwrap();
+        let total = ANCHOR_HISTORY_DEPTH as u64 + 3;
+        for v in 1..=total {
+            st.merge_and_step(0, &[&vec![0.0f32; 4]], &[1.0]).unwrap();
+            st.versions[0] = v;
+        }
+        // Recorded one snapshot per merge (versions 0..total-1), capped.
+        assert_eq!(st.anchor_history[0].len(), ANCHOR_HISTORY_DEPTH);
+        let oldest_kept = total - ANCHOR_HISTORY_DEPTH as u64;
+        assert!(st.anchor_at(0, oldest_kept).is_some());
+        assert!(st.anchor_at(0, oldest_kept - 1).is_none());
     }
 
     #[test]

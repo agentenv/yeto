@@ -78,6 +78,15 @@ pub struct Config {
     /// every merged delta to this L2 norm before the outer step. 0 = off
     /// (byte-identical production path). See `GlobalState::delta_norm_ref`.
     pub delta_norm_ref: f32,
+    /// EXP2.46 3-arm current-anchor causal control: difference each learner's
+    /// delta against the retained global at the learner's pushed base_version
+    /// (version-matched anchoring) instead of the current global. Default
+    /// false = byte-identical current-anchor. See docs/ANCHOR_DRIFT_CONTROL.md.
+    pub version_matched_anchor: bool,
+    /// EXP2.46: retain prior globals and log per-push anchor-drift diagnostics
+    /// even without version-matching (the current-anchor arm still reports the
+    /// drift it injects). Implied by `version_matched_anchor`.
+    pub anchor_drift_instrument: bool,
     pub final_state: Option<std::path::PathBuf>,
     /// Consistent-snapshot file; written every `checkpoint_every` rounds at
     /// the quiescent cut between rounds, resumed from when `resume` is set.
@@ -190,6 +199,73 @@ struct Push {
     c_steps: u32,
     c_tokens: u64,
     values: Vec<f32>,
+}
+
+/// EXP2.46 anchor-drift diagnostics for one push. The syncer differences a
+/// learner's upload against its CURRENT global; the learner trained from the
+/// global at `base_version`. `anchor_drift = current_global - base_global` is
+/// the version-mismatch contamination injected into the current-anchor delta
+/// (`server_delta = true_local_delta - anchor_drift`). See
+/// docs/ANCHOR_DRIFT_CONTROL.md.
+#[derive(Clone, Copy)]
+struct AnchorDrift {
+    /// ||current_global - learner_base_global||.
+    drift_norm: f64,
+    /// ||learner_upload - learner_base_global|| (the true local displacement).
+    local_delta_norm: f64,
+    /// drift_norm / local_delta_norm; None when the local delta is zero.
+    ratio: Option<f64>,
+    /// cos(anchor_drift, outer momentum buffer); None when either is zero.
+    momentum_cos: Option<f64>,
+    /// Whether the base version was still resident in the retained history.
+    /// When false the drift is unmeasured and version-matching falls back to
+    /// the current anchor for that push.
+    base_resolved: bool,
+}
+
+impl AnchorDrift {
+    const UNRESOLVED: AnchorDrift = AnchorDrift {
+        drift_norm: 0.0,
+        local_delta_norm: 0.0,
+        ratio: None,
+        momentum_cos: None,
+        base_resolved: false,
+    };
+}
+
+/// Compute the anchor-drift diagnostics for `push` against the current global
+/// of fragment `fid`, using `push.values` as the (already Q4-reconstructed)
+/// full learner upload. Must run BEFORE any version-matched re-anchoring so the
+/// local delta reflects the learner's true window update.
+fn compute_anchor_drift(st: &GlobalState, fid: usize, push: &Push) -> AnchorDrift {
+    let current = &st.params[fid];
+    let Some(base) = st.anchor_at(fid, push.base_version) else {
+        return AnchorDrift::UNRESOLVED;
+    };
+    let momentum = st.momentum_fragment(fid);
+    let (mut drift_sq, mut local_sq, mut dot_dm, mut mom_sq) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for i in 0..current.len() {
+        let drift = current[i] as f64 - base[i] as f64;
+        let local = push.values[i] as f64 - base[i] as f64;
+        let mom = momentum[i] as f64;
+        drift_sq += drift * drift;
+        local_sq += local * local;
+        dot_dm += drift * mom;
+        mom_sq += mom * mom;
+    }
+    let drift_norm = drift_sq.sqrt();
+    let local_delta_norm = local_sq.sqrt();
+    let ratio = (local_delta_norm > 0.0).then(|| drift_norm / local_delta_norm);
+    let mom_norm = mom_sq.sqrt();
+    let momentum_cos =
+        (drift_norm > 0.0 && mom_norm > 0.0).then(|| dot_dm / (drift_norm * mom_norm));
+    AnchorDrift {
+        drift_norm,
+        local_delta_norm,
+        ratio,
+        momentum_cos,
+        base_resolved: true,
+    }
 }
 
 fn validate_push_identity(connection_learner_id: u32, payload_learner_id: u32) -> Result<()> {
@@ -1253,6 +1329,36 @@ async fn complete_round(
         }
     }
     capture_round_candidates(cfg, st, p, t, prev_version, &pushes)?;
+    // EXP2.46: anchor-drift diagnostics + optional version-matched re-anchoring.
+    // Computed from the original uploads (post-Q4-reconstruction full models)
+    // BEFORE any re-anchoring, so the local delta reflects the true window
+    // update. Empty (and the whole block skipped) unless retention is enabled,
+    // keeping the default path byte-identical.
+    let anchor_drift: HashMap<u32, AnchorDrift> = if st.anchor_retention_enabled() {
+        let drift: HashMap<u32, AnchorDrift> = pushes
+            .values()
+            .map(|push| (push.learner_id, compute_anchor_drift(st, p, push)))
+            .collect();
+        if st.version_matched_anchor {
+            // Re-anchor each upload so the current-anchor merge yields the delta
+            // against the learner's OWN base: values' = values + (current -
+            // base). Then current - values' = base - values (the version-matched
+            // pseudo-gradient) for EVERY merge mode, without touching merge.rs.
+            // A push whose base aged out of history keeps the current anchor
+            // (its drift is reported unresolved).
+            for push in pushes.values_mut() {
+                let Some(base) = st.anchor_at(p, push.base_version) else {
+                    continue;
+                };
+                for (v, (c, b)) in push.values.iter_mut().zip(st.params[p].iter().zip(base)) {
+                    *v += *c - *b;
+                }
+            }
+        }
+        drift
+    } else {
+        HashMap::new()
+    };
     let ids = sorted_push_ids(&pushes);
     let (mut learners, mut weights) = (Vec::new(), Vec::new());
     for id in &ids {
@@ -1439,7 +1545,17 @@ async fn complete_round(
     if let Some(tape) = &cfg.event_tape {
         // Records land in completion order, which under pipelining is not
         // necessarily step order.
-        append_tape(tape, t, p, &pushes, &weights, &merge_stats, &decision, ms);
+        append_tape(
+            tape,
+            t,
+            p,
+            &pushes,
+            &weights,
+            &merge_stats,
+            &decision,
+            &anchor_drift,
+            ms,
+        );
     }
     // Consistent cut: this round is fully applied and broadcast, and every
     // other in-flight round is still gathering (it has not touched state).
@@ -1595,6 +1711,8 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     st.outer_optimizer = cfg.outer_optimizer;
     st.outer_restart_cos_threshold = cfg.outer_restart_cos_threshold;
     st.delta_norm_ref = cfg.delta_norm_ref;
+    st.version_matched_anchor = cfg.version_matched_anchor;
+    st.anchor_drift_instrument = cfg.anchor_drift_instrument;
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }
@@ -1663,6 +1781,7 @@ fn encode_bcast(st: &GlobalState, p: usize) -> Result<bytes::Bytes> {
 }
 
 /// One JSONL record per merge: the event tape.
+#[allow(clippy::too_many_arguments)]
 fn append_tape(
     path: &std::path::Path,
     step: u64,
@@ -1671,10 +1790,11 @@ fn append_tape(
     _weights: &[f64],
     stats: &MergeStats,
     decision: &CommitDecision,
+    anchor_drift: &HashMap<u32, AnchorDrift>,
     ms: u64,
 ) {
     use std::io::Write;
-    let line = format_tape_line(step, fragment, pushes, stats, decision, ms);
+    let line = format_tape_line(step, fragment, pushes, stats, decision, anchor_drift, ms);
     let res = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1702,25 +1822,40 @@ fn optional_json_string(value: Option<&str>) -> String {
         .unwrap_or_else(|| "null".to_owned())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn format_tape_line(
     step: u64,
     fragment: usize,
     pushes: &HashMap<u32, Push>,
     stats: &MergeStats,
     decision: &CommitDecision,
+    anchor_drift: &HashMap<u32, AnchorDrift>,
     ms: u64,
 ) -> String {
     let mut responders: Vec<String> = pushes
         .values()
         .map(|p| {
-            format!(
-                "{{\"id\":{},\"base_version\":{},\"c_steps\":{},\"c_tokens\":{},\"weight\":{}}}",
+            let head = format!(
+                "{{\"id\":{},\"base_version\":{},\"c_steps\":{},\"c_tokens\":{},\"weight\":{}",
                 p.learner_id,
                 p.base_version,
                 p.c_steps,
                 p.c_tokens,
                 crate::merge::learner_weight(p.c_tokens, p.c_steps)
-            )
+            );
+            // EXP2.46: append anchor-drift diagnostics only when instrumentation
+            // is active, so the default tape schema stays byte-identical.
+            match anchor_drift.get(&p.learner_id) {
+                None => format!("{head}}}"),
+                Some(d) => format!(
+                    "{head},\"anchor_drift_norm\":{},\"local_delta_norm\":{},\"anchor_drift_ratio\":{},\"anchor_drift_momentum_cos\":{},\"anchor_base_resolved\":{}}}",
+                    json_number(d.drift_norm),
+                    json_number(d.local_delta_norm),
+                    optional_json_number(d.ratio),
+                    optional_json_number(d.momentum_cos),
+                    d.base_resolved,
+                ),
+            }
         })
         .collect();
     responders.sort();
@@ -2097,7 +2232,7 @@ mod tests {
         );
         let stats = merge_stats(2.5, 0.75, Some(-0.25), Some(3.0), true);
         let decision = CommitDecision::token_weighted();
-        let line = format_tape_line(9, 2, &pushes, &stats, &decision, 17);
+        let line = format_tape_line(9, 2, &pushes, &stats, &decision, &HashMap::new(), 17);
 
         assert!(
             line.starts_with("{\"step\":9,\"fragment\":2,\"gnorm\":2.5,\"ms\":17,\"responders\":[")
@@ -2105,6 +2240,8 @@ mod tests {
         assert!(line.contains(
             "{\"id\":4,\"base_version\":7,\"c_steps\":10,\"c_tokens\":100,\"weight\":1000}"
         ));
+        // Without instrumentation the responder object carries no drift fields.
+        assert!(!line.contains("anchor_drift_norm"));
         assert!(line.contains("\"outer_step_norm\":0.75"));
         assert!(line.contains("\"outer_direction_cosine\":-0.25"));
         assert!(line.contains("\"outer_history_current_ratio\":3"));
@@ -2127,7 +2264,7 @@ mod tests {
     fn event_tape_uses_null_for_undefined_outer_ratios() {
         let stats = merge_stats(0.0, 0.0, None, None, false);
         let decision = CommitDecision::probe_fallback(CommitPolicy::ProbeLooV1, "probe_timeout");
-        let line = format_tape_line(1, 0, &HashMap::new(), &stats, &decision, 0);
+        let line = format_tape_line(1, 0, &HashMap::new(), &stats, &decision, &HashMap::new(), 0);
         assert!(line.contains("\"gnorm\":0"));
         assert!(line.contains("\"outer_step_norm\":0"));
         assert!(line.contains("\"outer_direction_cosine\":null"));
@@ -2136,6 +2273,114 @@ mod tests {
         assert!(line.contains("\"policy\":\"probe_loo_v1\""));
         assert!(line.contains("\"fallback\":true"));
         assert!(line.contains("\"fallback_reason\":\"probe_timeout\""));
+        assert!(!line.contains("NaN"));
+    }
+
+    // ---- EXP2.46 anchor-drift diagnostics / version-matched anchoring ------
+
+    /// One f32 fragment of 4, lr 1 mu 0 (plain SGD), with retention on and a
+    /// single prior global retained: base global v0 = [0;4], current global
+    /// v1 = [2;4] (a learner pushing [-2;4] moved it via the SGD step).
+    fn anchor_drift_state(version_matched: bool) -> GlobalState {
+        let layout = Layout {
+            fragments: vec![crate::state::FragmentInfo {
+                merge_mode: crate::state::MERGE_AVG,
+                tensor_numels: vec![4],
+                tensor_shapes: None,
+            }],
+        };
+        let mut st = GlobalState::new(layout, None, 1.0, 0.0, DTYPE_F32);
+        st.anchor_drift_instrument = true;
+        st.version_matched_anchor = version_matched;
+        st.init_fragment(0, vec![0.0; 4]).unwrap();
+        // Θ − (Θ − θ) = θ; a learner at [2;4] moves the global to [2;4] and
+        // install retains the prior global (version 0, [0;4]).
+        st.merge_and_step(0, &[&vec![2.0f32; 4]], &[1.0]).unwrap();
+        st.versions[0] = 1;
+        assert_eq!(st.params[0], vec![2.0f32; 4]);
+        assert_eq!(st.anchor_at(0, 0).unwrap(), &[0.0f32; 4]);
+        st
+    }
+
+    #[test]
+    fn anchor_drift_measures_norms_and_ratio_against_learner_base() {
+        let st = anchor_drift_state(false);
+        // Learner trained from base v0 = [0;4] and uploaded [3;4].
+        let mut push = test_push(1);
+        push.base_version = 0;
+        push.values = vec![3.0f32; 4];
+        let d = compute_anchor_drift(&st, 0, &push);
+        assert!(d.base_resolved);
+        // drift = current − base = [2;4] → 2·sqrt(4) = 4; local = [3;4] → 6.
+        assert!((d.drift_norm - 4.0).abs() < 1e-9);
+        assert!((d.local_delta_norm - 6.0).abs() < 1e-9);
+        assert!((d.ratio.unwrap() - 4.0 / 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn anchor_drift_is_zero_for_current_base() {
+        let st = anchor_drift_state(false);
+        let mut push = test_push(1);
+        push.base_version = 1; // the current version → no drift
+        push.values = vec![5.0f32; 4];
+        let d = compute_anchor_drift(&st, 0, &push);
+        assert!(d.base_resolved);
+        assert!(d.drift_norm.abs() < 1e-12);
+        assert!(d.momentum_cos.is_none()); // zero drift → undefined cosine
+    }
+
+    #[test]
+    fn anchor_drift_reports_unresolved_when_base_aged_out() {
+        let st = anchor_drift_state(false);
+        let mut push = test_push(1);
+        push.base_version = 99; // neither current nor retained
+        let d = compute_anchor_drift(&st, 0, &push);
+        assert!(!d.base_resolved);
+        assert!(d.ratio.is_none());
+    }
+
+    #[test]
+    fn version_matched_reanchor_yields_base_anchored_delta() {
+        // The re-anchoring identity used in complete_round: after
+        // values' = values + (current − base), the current-anchor merge delta
+        // (current − values') equals the version-matched delta (base − values).
+        let st = anchor_drift_state(true);
+        let base = st.anchor_at(0, 0).unwrap().to_vec();
+        let current = st.params[0].clone();
+        let original = vec![3.0f32; 4];
+        let mut values = original.clone();
+        for (v, (c, b)) in values.iter_mut().zip(current.iter().zip(&base)) {
+            *v += *c - *b;
+        }
+        for i in 0..4 {
+            let current_anchor_delta = current[i] - values[i];
+            let version_matched_delta = base[i] - original[i];
+            assert!((current_anchor_delta - version_matched_delta).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn event_tape_emits_anchor_drift_fields_when_instrumented() {
+        let mut pushes = HashMap::new();
+        pushes.insert(1, test_push(1));
+        let mut drift = HashMap::new();
+        drift.insert(
+            1u32,
+            AnchorDrift {
+                drift_norm: 4.0,
+                local_delta_norm: 6.0,
+                ratio: Some(4.0 / 6.0),
+                momentum_cos: Some(-0.5),
+                base_resolved: true,
+            },
+        );
+        let stats = merge_stats(1.0, 1.0, None, None, false);
+        let decision = CommitDecision::token_weighted();
+        let line = format_tape_line(9, 0, &pushes, &stats, &decision, &drift, 0);
+        assert!(line.contains("\"anchor_drift_norm\":4"));
+        assert!(line.contains("\"local_delta_norm\":6"));
+        assert!(line.contains("\"anchor_drift_momentum_cos\":-0.5"));
+        assert!(line.contains("\"anchor_base_resolved\":true"));
         assert!(!line.contains("NaN"));
     }
 
@@ -2169,6 +2414,7 @@ mod tests {
             &HashMap::new(),
             &merge_stats(1.0, 1.0, None, None, false),
             &decision,
+            &HashMap::new(),
             4,
         );
         assert!(line.contains("\"selected_multiplier\":0.75"));
