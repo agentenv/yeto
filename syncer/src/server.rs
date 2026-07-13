@@ -74,6 +74,10 @@ pub struct Config {
     pub outer_momentum: f32,
     pub outer_optimizer: crate::merge::OuterOptimizer,
     pub outer_restart_cos_threshold: f32,
+    /// CTTN's dimensionless transverse curvature budget.
+    pub cttn_rho: f32,
+    /// CTTN's internal damping momentum, independent of fallback momentum.
+    pub cttn_mu: f32,
     /// Post-merge renormalization for mediation-control experiments: rescale
     /// every merged delta to this L2 norm before the outer step. 0 = off
     /// (byte-identical production path). See `GlobalState::delta_norm_ref`.
@@ -1227,6 +1231,7 @@ struct CommitDecision {
     selected_multiplier: f64,
     committed_multiplier: f64,
     request_digest: Option<String>,
+    cttn_diagnostics: Option<action_probe::CttnDiagnostics>,
 }
 
 impl CommitDecision {
@@ -1244,6 +1249,7 @@ impl CommitDecision {
             selected_multiplier: 1.0,
             committed_multiplier: 1.0,
             request_digest: None,
+            cttn_diagnostics: None,
         }
     }
 
@@ -1261,6 +1267,7 @@ impl CommitDecision {
             selected_multiplier: 1.0,
             committed_multiplier: 1.0,
             request_digest: None,
+            cttn_diagnostics: None,
         }
     }
 }
@@ -1398,120 +1405,215 @@ async fn complete_round(
                 MergeCandidate::new(*id, push.values.as_slice(), weight)
             })
             .collect::<Vec<_>>();
-        let baseline = action_probe::build_baseline_preview(st, p, t, &candidates)?;
-
-        if cfg.commit_policy.is_leave_one_out() && candidates.len() != 4 {
-            let reason = format!("incomplete_group_{}_of_4", candidates.len());
-            let stats = st.commit_preview(baseline)?;
-            (
-                stats,
-                CommitDecision::probe_fallback(cfg.commit_policy, reason),
-            )
-        } else {
-            let retained = if cfg.commit_policy.is_leave_one_out() {
-                action_probe::build_leave_one_out_previews(st, p, t, &candidates, &baseline)
-                    .and_then(|alternatives| {
-                        RetainedPreviews::loo_v1(baseline.clone(), alternatives)
-                    })
+        if cfg.commit_policy == CommitPolicy::ProbeCttnV1 {
+            let aggregate = st.build_full_aggregate(p, &candidates)?;
+            let inputs = st.cttn_inputs(&aggregate, cfg.cttn_mu)?;
+            let baseline = st.preview_aggregate(&aggregate, t)?;
+            if let Some(reason) = action_probe_unavailable {
+                let stats = st.commit_preview(baseline)?;
+                (
+                    stats,
+                    CommitDecision::probe_fallback(cfg.commit_policy, reason),
+                )
             } else {
-                let multipliers = cfg
-                    .commit_policy
-                    .step_scale_multipliers()
-                    .context("scalar probe policy is missing its frozen multiplier grid")?;
-                action_probe::build_scaled_full_group_previews(st, &baseline, multipliers)
-            };
-            match retained {
-                Err(error) => {
-                    warn!(
-                        step = t,
-                        fragment = p,
-                        "action preview construction failed closed to A0: {error:#}"
-                    );
-                    let stats = st.commit_preview(baseline)?;
-                    (
-                        stats,
-                        CommitDecision::probe_fallback(
-                            cfg.commit_policy,
-                            "preview_construction_error",
-                        ),
+                let probe_started = Instant::now();
+                let client = action_probe_client
+                    .as_mut()
+                    .expect("available action probe must have a client");
+                match client
+                    .cttn_step(
+                        st,
+                        &aggregate,
+                        t,
+                        &inputs.g,
+                        &inputs.b,
+                        inputs.mu,
+                        cfg.cttn_rho,
+                        4,
                     )
-                }
-                Ok(mut preview_set) => {
-                    let mut decision = if let Some(reason) = action_probe_unavailable {
-                        CommitDecision::probe_fallback(cfg.commit_policy, reason)
-                    } else {
-                        let probe_started = Instant::now();
-                        let client = action_probe_client
-                            .as_mut()
-                            .expect("available action probe must have a client");
-                        match client.select(st, &preview_set, t, p).await {
-                            Ok(selection) => {
-                                let metadata = preview_set.metadata(selection.action_index);
+                    .await
+                {
+                    Ok(verified) => {
+                        let latency = probe_started.elapsed().as_secs_f64() * 1000.0;
+                        let diagnostics = verified.diagnostics;
+                        let request_digest = verified.request_digest;
+                        match st.commit_cttn_step(
+                            &aggregate,
+                            t,
+                            &verified.d,
+                            &verified.b_new,
+                            inputs.outer_lr,
+                        ) {
+                            Ok(stats) => (
+                                stats,
                                 CommitDecision {
                                     policy: cfg.commit_policy,
-                                    selected_action: selection.action_name,
-                                    committed_action: String::new(),
-                                    fallback: selection.action_index == 0,
-                                    fallback_reason: selection.fallback_reason,
-                                    probe_latency_ms: Some(
-                                        probe_started.elapsed().as_secs_f64() * 1000.0,
-                                    ),
-                                    selected_mass: metadata.selected_mass,
-                                    norm_scale: metadata.norm_multiplier,
-                                    step_ratio: metadata.step_norm_ratio,
-                                    selected_multiplier: selected_preview_multiplier(
-                                        &preview_set,
-                                        selection.action_index,
-                                    ),
+                                    selected_action: "CTTN".to_owned(),
+                                    committed_action: "CTTN".to_owned(),
+                                    fallback: false,
+                                    fallback_reason: None,
+                                    probe_latency_ms: Some(latency),
+                                    selected_mass: aggregate.selected_weight_mass(),
+                                    norm_scale: 1.0,
+                                    step_ratio: 1.0,
+                                    selected_multiplier: 1.0,
                                     committed_multiplier: 1.0,
-                                    request_digest: Some(selection.request_digest),
-                                }
-                            }
+                                    request_digest: Some(request_digest),
+                                    cttn_diagnostics: Some(diagnostics),
+                                },
+                            ),
                             Err(error) => {
                                 warn!(
                                     step = t,
                                     fragment = p,
-                                    "action probe failed closed to A0: {error}"
+                                    "CTTN commit failed closed to baseline: {error:#}"
                                 );
-                                let mut fallback =
-                                    CommitDecision::probe_fallback(cfg.commit_policy, error.code());
-                                fallback.probe_latency_ms =
-                                    Some(probe_started.elapsed().as_secs_f64() * 1000.0);
-                                fallback.request_digest =
-                                    client.last_request_digest().map(str::to_owned);
-                                fallback
+                                let stats = st.commit_preview(baseline)?;
+                                let mut decision = CommitDecision::probe_fallback(
+                                    cfg.commit_policy,
+                                    "cttn_commit_error",
+                                );
+                                decision.probe_latency_ms = Some(latency);
+                                decision.request_digest = Some(request_digest);
+                                (stats, decision)
                             }
                         }
-                    };
-                    let selected_index =
-                        preview_set.index_of(&decision.selected_action).unwrap_or(0);
-                    let commit_index = commit_preview_index(cfg.commit_policy, selected_index);
-                    decision.committed_action = preview_set.name(commit_index).to_owned();
-                    decision.committed_multiplier =
-                        selected_preview_multiplier(&preview_set, commit_index);
-                    let stats = match st.commit_preview(preview_set.take(commit_index)) {
-                        Ok(stats) => stats,
-                        Err(error) if commit_index != 0 => {
-                            warn!(
+                    }
+                    Err(error) => {
+                        warn!(
+                            step = t,
+                            fragment = p,
+                            "CTTN sidecar failed closed to baseline: {error}"
+                        );
+                        let stats = st.commit_preview(baseline)?;
+                        let mut decision =
+                            CommitDecision::probe_fallback(cfg.commit_policy, error.code());
+                        decision.probe_latency_ms =
+                            Some(probe_started.elapsed().as_secs_f64() * 1000.0);
+                        decision.request_digest = client.last_request_digest().map(str::to_owned);
+                        (stats, decision)
+                    }
+                }
+            }
+        } else {
+            let baseline = action_probe::build_baseline_preview(st, p, t, &candidates)?;
+
+            if cfg.commit_policy.is_leave_one_out() && candidates.len() != 4 {
+                let reason = format!("incomplete_group_{}_of_4", candidates.len());
+                let stats = st.commit_preview(baseline)?;
+                (
+                    stats,
+                    CommitDecision::probe_fallback(cfg.commit_policy, reason),
+                )
+            } else {
+                let retained = if cfg.commit_policy.is_leave_one_out() {
+                    action_probe::build_leave_one_out_previews(st, p, t, &candidates, &baseline)
+                        .and_then(|alternatives| {
+                            RetainedPreviews::loo_v1(baseline.clone(), alternatives)
+                        })
+                } else {
+                    let multipliers = cfg
+                        .commit_policy
+                        .step_scale_multipliers()
+                        .context("scalar probe policy is missing its frozen multiplier grid")?;
+                    action_probe::build_scaled_full_group_previews(st, &baseline, multipliers)
+                };
+                match retained {
+                    Err(error) => {
+                        warn!(
+                            step = t,
+                            fragment = p,
+                            "action preview construction failed closed to A0: {error:#}"
+                        );
+                        let stats = st.commit_preview(baseline)?;
+                        (
+                            stats,
+                            CommitDecision::probe_fallback(
+                                cfg.commit_policy,
+                                "preview_construction_error",
+                            ),
+                        )
+                    }
+                    Ok(mut preview_set) => {
+                        let mut decision = if let Some(reason) = action_probe_unavailable {
+                            CommitDecision::probe_fallback(cfg.commit_policy, reason)
+                        } else {
+                            let probe_started = Instant::now();
+                            let client = action_probe_client
+                                .as_mut()
+                                .expect("available action probe must have a client");
+                            match client.select(st, &preview_set, t, p).await {
+                                Ok(selection) => {
+                                    let metadata = preview_set.metadata(selection.action_index);
+                                    CommitDecision {
+                                        policy: cfg.commit_policy,
+                                        selected_action: selection.action_name,
+                                        committed_action: String::new(),
+                                        fallback: selection.action_index == 0,
+                                        fallback_reason: selection.fallback_reason,
+                                        probe_latency_ms: Some(
+                                            probe_started.elapsed().as_secs_f64() * 1000.0,
+                                        ),
+                                        selected_mass: metadata.selected_mass,
+                                        norm_scale: metadata.norm_multiplier,
+                                        step_ratio: metadata.step_norm_ratio,
+                                        selected_multiplier: selected_preview_multiplier(
+                                            &preview_set,
+                                            selection.action_index,
+                                        ),
+                                        committed_multiplier: 1.0,
+                                        request_digest: Some(selection.request_digest),
+                                        cttn_diagnostics: None,
+                                    }
+                                }
+                                Err(error) => {
+                                    warn!(
+                                        step = t,
+                                        fragment = p,
+                                        "action probe failed closed to A0: {error}"
+                                    );
+                                    let mut fallback = CommitDecision::probe_fallback(
+                                        cfg.commit_policy,
+                                        error.code(),
+                                    );
+                                    fallback.probe_latency_ms =
+                                        Some(probe_started.elapsed().as_secs_f64() * 1000.0);
+                                    fallback.request_digest =
+                                        client.last_request_digest().map(str::to_owned);
+                                    fallback
+                                }
+                            }
+                        };
+                        let selected_index =
+                            preview_set.index_of(&decision.selected_action).unwrap_or(0);
+                        let commit_index = commit_preview_index(cfg.commit_policy, selected_index);
+                        decision.committed_action = preview_set.name(commit_index).to_owned();
+                        decision.committed_multiplier =
+                            selected_preview_multiplier(&preview_set, commit_index);
+                        let stats = match st.commit_preview(preview_set.take(commit_index)) {
+                            Ok(stats) => stats,
+                            Err(error) if commit_index != 0 => {
+                                warn!(
                                 step = t,
                                 fragment = p,
                                 "selected preview was stale or invalid at commit; retrying exact A0: {error:#}"
                             );
-                            decision.fallback = true;
-                            decision.fallback_reason =
-                                Some("selected_preview_commit_error".to_owned());
-                            decision.committed_action = "A0".to_owned();
-                            decision.committed_multiplier =
-                                selected_preview_multiplier(&preview_set, 0);
-                            st.commit_preview(preview_set.take(0)).with_context(|| {
+                                decision.fallback = true;
+                                decision.fallback_reason =
+                                    Some("selected_preview_commit_error".to_owned());
+                                decision.committed_action = "A0".to_owned();
+                                decision.committed_multiplier =
+                                    selected_preview_multiplier(&preview_set, 0);
+                                st.commit_preview(preview_set.take(0)).with_context(|| {
                                 format!(
                                     "step {t} fragment {p}: selected preview and A0 fallback both failed"
                                 )
                             })?
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    (stats, decision)
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        (stats, decision)
+                    }
                 }
             }
         }
@@ -1875,8 +1977,22 @@ fn format_tape_line(
     let selected_multiplier = json_number(decision.selected_multiplier);
     let committed_multiplier = json_number(decision.committed_multiplier);
     let request_digest = optional_json_string(decision.request_digest.as_deref());
+    let cttn_diagnostics = decision.cttn_diagnostics.map_or_else(String::new, |diag| {
+        format!(
+            ",\"cttn_bind\":{},\"cttn_tau\":{},\"cttn_retention\":{},\"cttn_e_before\":{},\"cttn_e_after\":{},\"cttn_budget\":{},\"cttn_n_modes_90\":{},\"cttn_ritz_max\":{},\"cttn_loss\":{}",
+            diag.bind,
+            json_number(diag.tau),
+            json_number(diag.retention),
+            json_number(diag.e_before),
+            json_number(diag.e_after),
+            json_number(diag.budget),
+            diag.n_modes_90,
+            json_number(diag.ritz_max),
+            json_number(diag.loss),
+        )
+    });
     format!(
-        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}}}\n",
+        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}{cttn_diagnostics}}}\n",
         responders.join(","),
         outer.restarted,
         decision.fallback,
@@ -2407,6 +2523,7 @@ mod tests {
             selected_multiplier: 0.75,
             committed_multiplier: 1.0,
             request_digest: Some("a".repeat(64)),
+            cttn_diagnostics: None,
         };
         let line = format_tape_line(
             1,

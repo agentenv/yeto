@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::state::{ActionPreview, GlobalState, MergeCandidate, StepScaleBounds};
+use crate::state::{ActionPreview, AggregateDelta, GlobalState, MergeCandidate, StepScaleBounds};
 
 pub const PROTOCOL: &str = "yeto-action-probe-v1";
 const FRAME_MAGIC: &[u8; 8] = b"YETOAP01";
@@ -44,6 +44,7 @@ pub enum CommitPolicy {
     ProbeLooV1,
     ProbeLrShadow,
     ProbeLrV1,
+    ProbeCttnV1,
 }
 
 impl CommitPolicy {
@@ -75,6 +76,7 @@ impl fmt::Display for CommitPolicy {
             Self::ProbeLooV1 => "probe_loo_v1",
             Self::ProbeLrShadow => "probe_lr_shadow",
             Self::ProbeLrV1 => "probe_lr_v1",
+            Self::ProbeCttnV1 => "cttn_v1",
         })
     }
 }
@@ -89,8 +91,9 @@ impl FromStr for CommitPolicy {
             "probe_loo_v1" | "probe-loo-v1" => Ok(Self::ProbeLooV1),
             "probe_lr_shadow" | "probe-lr-shadow" => Ok(Self::ProbeLrShadow),
             "probe_lr_v1" | "probe-lr-v1" => Ok(Self::ProbeLrV1),
+            "cttn_v1" | "cttn-v1" => Ok(Self::ProbeCttnV1),
             _ => Err(format!(
-                "commit policy must be token_weighted, probe_shadow, probe_loo_v1, probe_lr_shadow, or probe_lr_v1; got {value:?}"
+                "commit policy must be token_weighted, probe_shadow, probe_loo_v1, probe_lr_shadow, probe_lr_v1, or cttn_v1; got {value:?}"
             )),
         }
     }
@@ -798,6 +801,27 @@ pub struct VerifiedSelection {
     pub request_digest: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CttnDiagnostics {
+    pub bind: bool,
+    pub tau: f64,
+    pub retention: f64,
+    pub e_before: f64,
+    pub e_after: f64,
+    pub budget: f64,
+    pub n_modes_90: u64,
+    pub ritz_max: f64,
+    pub loss: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifiedCttn {
+    pub d: Vec<f32>,
+    pub b_new: Vec<f32>,
+    pub diagnostics: CttnDiagnostics,
+    pub request_digest: String,
+}
+
 #[derive(Debug)]
 pub enum ProbeError {
     Timeout,
@@ -840,6 +864,57 @@ pub struct ActionProbeClient {
     layout: BoundLayout,
     stream: Option<TcpStream>,
     last_request_digest: Option<String>,
+}
+
+fn append_state_block(
+    state: &GlobalState,
+    layout: &BoundLayout,
+    payload: &mut Vec<u8>,
+) -> std::result::Result<(Vec<Value>, String), ProbeError> {
+    let mut state_specs = Vec::with_capacity(layout.state_tensors.len());
+    let mut state_hasher = Sha256::new();
+    for tensor in &layout.state_tensors {
+        let values = state
+            .params
+            .get(tensor.fragment_id)
+            .and_then(|fragment| {
+                fragment.get(tensor.offset..tensor.offset.saturating_add(tensor.numel))
+            })
+            .ok_or_else(|| {
+                ProbeError::Protocol(format!(
+                    "state tensor {:?} is outside fragment {}",
+                    tensor.name, tensor.fragment_id
+                ))
+            })?;
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(ProbeError::Protocol(format!(
+                "state tensor {:?} contains NaN or Inf",
+                tensor.name
+            )));
+        }
+        let raw = f32_bytes(values);
+        let offset = payload.len();
+        payload.extend_from_slice(&raw);
+        state_specs.push(json!({
+            "name": tensor.name,
+            "shape": tensor.shape,
+            "offset": offset,
+            "nbytes": raw.len(),
+            "sha256": sha256_hex(&raw),
+        }));
+        state_hasher.update(tensor.name.as_bytes());
+        state_hasher.update([0]);
+        let shape_json = canonical_json(&json!({"shape": tensor.shape})).map_err(|error| {
+            ProbeError::Protocol(format!("serialize state tensor shape: {error:#}"))
+        })?;
+        state_hasher.update(shape_json);
+        state_hasher.update([0]);
+        state_hasher.update(raw);
+    }
+    Ok((
+        state_specs,
+        digest_to_hex(state_hasher.finalize().as_slice()),
+    ))
 }
 
 impl ActionProbeClient {
@@ -888,6 +963,176 @@ impl ActionProbeClient {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn cttn_step(
+        &mut self,
+        state: &GlobalState,
+        aggregate: &AggregateDelta,
+        step: u64,
+        g: &[f32],
+        b: &[f32],
+        mu: f32,
+        rho: f32,
+        block_steps: u32,
+    ) -> std::result::Result<VerifiedCttn, ProbeError> {
+        self.last_request_digest = None;
+        let request =
+            self.build_cttn_request(state, aggregate, step, g, b, mu, rho, block_steps)?;
+        self.last_request_digest = Some(request.request_digest.clone());
+        let timeout = self.config.timeout;
+        let response = match tokio::time::timeout(timeout, self.roundtrip(&request.frame)).await {
+            Err(_) => {
+                self.stream = None;
+                return Err(ProbeError::Timeout);
+            }
+            Ok(Err(error)) => {
+                self.stream = None;
+                return Err(error);
+            }
+            Ok(Ok(response)) => response,
+        };
+        match verify_cttn_response(&response, &request, &self.config) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                self.stream = None;
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_cttn_request(
+        &self,
+        state: &GlobalState,
+        aggregate: &AggregateDelta,
+        step: u64,
+        g: &[f32],
+        b: &[f32],
+        mu: f32,
+        rho: f32,
+        block_steps: u32,
+    ) -> std::result::Result<WireCttnRequest, ProbeError> {
+        let fragment_id = aggregate.fragment_id();
+        if fragment_id >= self.layout.fragment_names.len() {
+            return Err(ProbeError::Protocol(format!(
+                "fragment {fragment_id} is outside bound probe layout"
+            )));
+        }
+        if aggregate.base_version() != state.versions[fragment_id] {
+            return Err(ProbeError::Protocol(
+                "CTTN aggregate is stale before serialization".to_owned(),
+            ));
+        }
+        let expected_numel = state.layout.fragments[fragment_id].numel();
+        if g.len() != expected_numel || b.len() != expected_numel {
+            return Err(ProbeError::Protocol(format!(
+                "CTTN vectors have lengths g={} b={}, expected {expected_numel}",
+                g.len(),
+                b.len()
+            )));
+        }
+        if g.iter().chain(b).any(|value| !value.is_finite()) {
+            return Err(ProbeError::Protocol(
+                "CTTN g or b contains NaN or Inf".to_owned(),
+            ));
+        }
+        if !mu.is_finite() || !(0.0..1.0).contains(&mu) {
+            return Err(ProbeError::Protocol(
+                "CTTN mu must be finite and in [0, 1)".to_owned(),
+            ));
+        }
+        if !rho.is_finite() || rho < 0.0 || block_steps == 0 {
+            return Err(ProbeError::Protocol(
+                "CTTN rho must be finite and non-negative and block_steps must be positive"
+                    .to_owned(),
+            ));
+        }
+
+        let request_id = format!(
+            "cttn-step-{step}-fragment-{fragment_id}-base-{}-epoch-{}",
+            aggregate.base_version(),
+            aggregate.base_state_epoch()
+        );
+        let mut payload = Vec::new();
+        let (state_specs, state_digest) = append_state_block(state, &self.layout, &mut payload)?;
+        let mut vector_specs = Map::new();
+        let mut vector_digests = Vec::with_capacity(2);
+        for (name, values) in [("g", g), ("b", b)] {
+            let raw = f32_bytes(values);
+            let digest = sha256_hex(&raw);
+            let offset = payload.len();
+            payload.extend_from_slice(&raw);
+            vector_specs.insert(
+                name.to_owned(),
+                json!({
+                    "offset": offset,
+                    "nbytes": raw.len(),
+                    "sha256": digest,
+                }),
+            );
+            vector_digests.push(digest);
+        }
+        if payload.len() > MAX_PAYLOAD_BYTES {
+            return Err(ProbeError::Protocol(format!(
+                "action-probe payload has {} bytes, limit is {MAX_PAYLOAD_BYTES}",
+                payload.len()
+            )));
+        }
+        vector_specs.insert("mu".to_owned(), json!(mu));
+        vector_specs.insert("rho".to_owned(), json!(rho));
+        vector_specs.insert("block_steps".to_owned(), json!(block_steps));
+
+        let header = json!({
+            "protocol": PROTOCOL,
+            "type": "cttn_step",
+            "request_id": request_id,
+            "run_uuid": self.config.run_uuid,
+            "step": step,
+            "fragment_id": fragment_id,
+            "base_version": aggregate.base_version(),
+            "state_epoch": aggregate.base_state_epoch(),
+            "fragment_versions": state.versions,
+            "layout_hash": self.config.expected.layout_hash,
+            "anchor_manifest_sha256": self.config.expected.anchor_manifest_sha256,
+            "probe_config_sha256": self.config.expected.probe_config_sha256,
+            "dtype": "f32le",
+            "state": {
+                "tensors": state_specs,
+                "sha256": state_digest,
+            },
+            "fragment": {
+                "tensor_names": self.layout.fragment_names[fragment_id],
+                "numel": expected_numel,
+            },
+            "cttn": Value::Object(vector_specs),
+        });
+        let header_bytes = canonical_json(&header)
+            .map_err(|error| ProbeError::Protocol(format!("serialize CTTN request: {error:#}")))?;
+        if header_bytes.is_empty() || header_bytes.len() > MAX_HEADER_BYTES {
+            return Err(ProbeError::Protocol(format!(
+                "action-probe header has {} bytes, limit is {MAX_HEADER_BYTES}",
+                header_bytes.len()
+            )));
+        }
+        let frame = encode_frame_parts(&header_bytes, &payload)
+            .map_err(|error| ProbeError::Protocol(format!("encode CTTN frame: {error:#}")))?;
+        let request_digest = sha256_hex(&frame);
+        Ok(WireCttnRequest {
+            frame,
+            request_id,
+            request_digest,
+            state_digest,
+            g_digest: vector_digests[0].clone(),
+            b_digest: vector_digests[1].clone(),
+            g: g.to_vec(),
+            step,
+            fragment_id,
+            base_version: aggregate.base_version(),
+            state_epoch: aggregate.base_state_epoch(),
+            fragment_versions: state.versions.clone(),
+        })
+    }
+
     fn build_request(
         &self,
         state: &GlobalState,
@@ -921,47 +1166,7 @@ impl ActionProbeClient {
         );
 
         let mut payload = Vec::new();
-        let mut state_specs = Vec::with_capacity(self.layout.state_tensors.len());
-        let mut state_hasher = Sha256::new();
-        for tensor in &self.layout.state_tensors {
-            let values = state
-                .params
-                .get(tensor.fragment_id)
-                .and_then(|fragment| {
-                    fragment.get(tensor.offset..tensor.offset.saturating_add(tensor.numel))
-                })
-                .ok_or_else(|| {
-                    ProbeError::Protocol(format!(
-                        "state tensor {:?} is outside fragment {}",
-                        tensor.name, tensor.fragment_id
-                    ))
-                })?;
-            if values.iter().any(|value| !value.is_finite()) {
-                return Err(ProbeError::Protocol(format!(
-                    "state tensor {:?} contains NaN or Inf",
-                    tensor.name
-                )));
-            }
-            let raw = f32_bytes(values);
-            let offset = payload.len();
-            payload.extend_from_slice(&raw);
-            state_specs.push(json!({
-                "name": tensor.name,
-                "shape": tensor.shape,
-                "offset": offset,
-                "nbytes": raw.len(),
-                "sha256": sha256_hex(&raw),
-            }));
-            state_hasher.update(tensor.name.as_bytes());
-            state_hasher.update([0]);
-            let shape_json = canonical_json(&json!({"shape": tensor.shape})).map_err(|error| {
-                ProbeError::Protocol(format!("serialize state tensor shape: {error:#}"))
-            })?;
-            state_hasher.update(shape_json);
-            state_hasher.update([0]);
-            state_hasher.update(raw);
-        }
-        let state_digest = digest_to_hex(state_hasher.finalize().as_slice());
+        let (state_specs, state_digest) = append_state_block(state, &self.layout, &mut payload)?;
 
         let expected_numel = state.layout.fragments[fragment_id].numel();
         let mut action_specs = Vec::with_capacity(5);
@@ -1138,9 +1343,245 @@ struct WireRequest {
     action_family: &'static str,
 }
 
+struct WireCttnRequest {
+    frame: Vec<u8>,
+    request_id: String,
+    request_digest: String,
+    state_digest: String,
+    g_digest: String,
+    b_digest: String,
+    g: Vec<f32>,
+    step: u64,
+    fragment_id: usize,
+    base_version: u64,
+    state_epoch: u64,
+    fragment_versions: Vec<u64>,
+}
+
 struct WireResponse {
     header: Vec<u8>,
     payload: Vec<u8>,
+}
+
+fn verify_cttn_response(
+    response: &WireResponse,
+    request: &WireCttnRequest,
+    config: &ClientConfig,
+) -> std::result::Result<VerifiedCttn, ProbeError> {
+    let root = strict_json(&response.header)
+        .map_err(|error| ProbeError::Protocol(format!("invalid response JSON: {error:#}")))?;
+    let object = root
+        .as_object()
+        .ok_or_else(|| ProbeError::Protocol("response JSON must be an object".to_owned()))?;
+    require_response_string(object, "protocol", PROTOCOL)?;
+    require_response_string(object, "type", "cttn_result")?;
+    require_response_string(object, "request_id", &request.request_id)?;
+    require_response_string(object, "run_uuid", &config.run_uuid)?;
+    require_response_string(object, "request_digest", &request.request_digest)?;
+    let ok = object
+        .get("ok")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| ProbeError::Protocol("response ok must be boolean".to_owned()))?;
+    if !ok {
+        let reason = object
+            .get("fallback_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("remote_fail_closed");
+        let error = object.get("error").and_then(Value::as_str).unwrap_or("");
+        return Err(ProbeError::Remote(format!("{reason}: {error}")));
+    }
+
+    require_response_string(object, "dtype", "f32le")?;
+    require_u64(object, "step", request.step)?;
+    require_u64(object, "fragment_id", request.fragment_id as u64)?;
+    require_u64(object, "base_version", request.base_version)?;
+    require_u64(object, "state_epoch", request.state_epoch)?;
+    let versions = object
+        .get("fragment_versions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ProbeError::Protocol("fragment_versions must be a list".to_owned()))?;
+    if versions.len() != request.fragment_versions.len()
+        || versions
+            .iter()
+            .zip(&request.fragment_versions)
+            .any(|(actual, expected)| actual.as_u64() != Some(*expected))
+    {
+        return Err(ProbeError::UnsafeResponse(
+            "response fragment_versions do not match the request".to_owned(),
+        ));
+    }
+
+    let (d, next_offset) =
+        parse_response_f32(&response.payload, object.get("d"), 0, request.g.len(), "d")?;
+    let (b_new, final_offset) = parse_response_f32(
+        &response.payload,
+        object.get("b_new"),
+        next_offset,
+        request.g.len(),
+        "b_new",
+    )?;
+    if final_offset != response.payload.len() {
+        return Err(ProbeError::UnsafeResponse(format!(
+            "CTTN response has {} unclaimed payload bytes",
+            response.payload.len() - final_offset
+        )));
+    }
+
+    let digests = object
+        .get("digests")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ProbeError::UnsafeResponse("missing response digests".to_owned()))?;
+    require_response_string(digests, "state_sha256", &request.state_digest)?;
+    require_response_string(digests, "g_sha256", &request.g_digest)?;
+    require_response_string(digests, "b_sha256", &request.b_digest)?;
+    require_response_string(
+        digests,
+        "anchor_manifest_sha256",
+        &config.expected.anchor_manifest_sha256,
+    )?;
+    require_response_string(
+        digests,
+        "anchor_tensors_sha256",
+        &config.expected.anchor_tensors_sha256,
+    )?;
+    require_response_string(
+        digests,
+        "probe_config_sha256",
+        &config.expected.probe_config_sha256,
+    )?;
+    require_response_string(digests, "layout_hash", &config.expected.layout_hash)?;
+
+    let diagnostics_object = object
+        .get("diagnostics")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ProbeError::Protocol("diagnostics must be an object".to_owned()))?;
+    let finite = |field: &str| -> std::result::Result<f64, ProbeError> {
+        diagnostics_object
+            .get(field)
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| ProbeError::Protocol(format!("diagnostics.{field} must be finite")))
+    };
+    let diagnostics = CttnDiagnostics {
+        bind: diagnostics_object
+            .get("bind")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| ProbeError::Protocol("diagnostics.bind must be boolean".to_owned()))?,
+        tau: finite("tau")?,
+        retention: finite("retention")?,
+        e_before: finite("e_before")?,
+        e_after: finite("e_after")?,
+        budget: finite("budget")?,
+        n_modes_90: diagnostics_object
+            .get("n_modes_90")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                ProbeError::Protocol("diagnostics.n_modes_90 must be non-negative".to_owned())
+            })?,
+        ritz_max: finite("ritz_max")?,
+        loss: finite("loss")?,
+    };
+    if diagnostics.tau < 0.0
+        || diagnostics.retention < 0.0
+        || diagnostics.e_before < 0.0
+        || diagnostics.e_after < 0.0
+        || diagnostics.budget < 0.0
+        || diagnostics.ritz_max < 0.0
+    {
+        return Err(ProbeError::UnsafeResponse(
+            "CTTN diagnostics contain a negative norm, energy, budget, or curvature".to_owned(),
+        ));
+    }
+
+    let gnorm_sq = request
+        .g
+        .iter()
+        .map(|value| {
+            let value = *value as f64;
+            value * value
+        })
+        .sum::<f64>();
+    if gnorm_sq > 0.0 {
+        let gnorm = gnorm_sq.sqrt();
+        let q_dot_d = request
+            .g
+            .iter()
+            .zip(&d)
+            .map(|(g, d)| *g as f64 * *d as f64)
+            .sum::<f64>()
+            / gnorm;
+        let tolerance = 1e-4 * gnorm.max(1e-12);
+        if !q_dot_d.is_finite() || (q_dot_d - gnorm).abs() > tolerance {
+            return Err(ProbeError::UnsafeResponse(format!(
+                "CTTN parallel-step invariant failed: q.d={q_dot_d}, ||g||={gnorm}, tolerance={tolerance}"
+            )));
+        }
+    }
+
+    Ok(VerifiedCttn {
+        d,
+        b_new,
+        diagnostics,
+        request_digest: request.request_digest.clone(),
+    })
+}
+
+fn parse_response_f32(
+    payload: &[u8],
+    spec: Option<&Value>,
+    expected_offset: usize,
+    expected_numel: usize,
+    name: &str,
+) -> std::result::Result<(Vec<f32>, usize), ProbeError> {
+    let spec = spec.and_then(Value::as_object).ok_or_else(|| {
+        ProbeError::Protocol(format!("response {name} descriptor must be an object"))
+    })?;
+    let offset = spec
+        .get("offset")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| ProbeError::Protocol(format!("response {name}.offset is invalid")))?;
+    let nbytes = spec
+        .get("nbytes")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0 && *value % 4 == 0)
+        .ok_or_else(|| ProbeError::Protocol(format!("response {name}.nbytes is invalid")))?;
+    if offset != expected_offset {
+        return Err(ProbeError::UnsafeResponse(format!(
+            "response {name} starts at {offset}, expected {expected_offset}"
+        )));
+    }
+    let end = offset
+        .checked_add(nbytes)
+        .ok_or_else(|| ProbeError::Protocol(format!("response {name} payload range overflows")))?;
+    if end > payload.len() || nbytes / 4 != expected_numel {
+        return Err(ProbeError::UnsafeResponse(format!(
+            "response {name} payload length does not match the fragment"
+        )));
+    }
+    let raw = &payload[offset..end];
+    let expected_digest = spec
+        .get("sha256")
+        .and_then(Value::as_str)
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| ProbeError::Protocol(format!("response {name}.sha256 is invalid")))?;
+    if sha256_hex(raw) != expected_digest.to_ascii_lowercase() {
+        return Err(ProbeError::UnsafeResponse(format!(
+            "response {name} SHA-256 mismatch"
+        )));
+    }
+    let mut values = Vec::with_capacity(expected_numel);
+    for chunk in raw.chunks_exact(4) {
+        let value = f32::from_le_bytes(chunk.try_into().expect("four-byte f32 chunk"));
+        if !value.is_finite() {
+            return Err(ProbeError::UnsafeResponse(format!(
+                "response {name} contains NaN or Inf"
+            )));
+        }
+        values.push(value);
+    }
+    Ok((values, end))
 }
 
 fn verify_response(
@@ -1747,7 +2188,10 @@ mod tests {
         assert_eq!(CommitPolicy::ProbeLooV1.to_string(), "probe_loo_v1");
         assert_eq!("probe-lr-shadow".parse(), Ok(CommitPolicy::ProbeLrShadow));
         assert_eq!("probe_lr_v1".parse(), Ok(CommitPolicy::ProbeLrV1));
+        assert_eq!("cttn-v1".parse(), Ok(CommitPolicy::ProbeCttnV1));
         assert!(CommitPolicy::ProbeLrShadow.is_shadow());
+        assert!(!CommitPolicy::ProbeCttnV1.is_shadow());
+        assert!(!CommitPolicy::ProbeCttnV1.is_leave_one_out());
         assert_eq!(
             CommitPolicy::ProbeLrV1.step_scale_multipliers(),
             Some(&LR_PREVIEW_MULTIPLIERS)
@@ -1845,6 +2289,55 @@ mod tests {
         );
         assert_eq!(header["fragment"]["actions"][1]["name"], "A1");
         assert_eq!(header["state"]["sha256"], request.state_digest);
+    }
+
+    #[test]
+    fn cttn_request_uses_fragment_order_and_state_then_g_then_b_payload() {
+        let (state, values) = state_and_candidates();
+        let config = ClientConfig {
+            endpoint: "127.0.0.1:1".parse().unwrap(),
+            timeout: Duration::from_secs(1),
+            run_uuid: "run-cttn".to_owned(),
+            expected: expected_for(&state),
+        };
+        let client = ActionProbeClient::bind(config, &state).unwrap();
+        let candidates = values
+            .iter()
+            .enumerate()
+            .map(|(index, values)| MergeCandidate::new(index as u32, values, 1.0))
+            .collect::<Vec<_>>();
+        let aggregate = state.build_full_aggregate(0, &candidates).unwrap();
+        let inputs = state.cttn_inputs(&aggregate, 0.9).unwrap();
+        let request = client
+            .build_cttn_request(
+                &state,
+                &aggregate,
+                5,
+                &inputs.g,
+                &inputs.b,
+                inputs.mu,
+                0.1,
+                4,
+            )
+            .unwrap();
+        let header_len = u32::from_be_bytes(request.frame[8..12].try_into().unwrap()) as usize;
+        let header = strict_json(&request.frame[20..20 + header_len]).unwrap();
+        let state_bytes: usize = header["state"]["tensors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|spec| spec["nbytes"].as_u64().unwrap() as usize)
+            .sum();
+        assert_eq!(header["type"], "cttn_step");
+        assert_eq!(header["fragment"]["tensor_names"], json!(client.layout.fragment_names[0]));
+        assert_eq!(header["cttn"]["g"]["offset"], state_bytes);
+        assert_eq!(
+            header["cttn"]["b"]["offset"],
+            state_bytes + inputs.g.len() * 4
+        );
+        assert_eq!(header["cttn"]["mu"], json!(inputs.mu));
+        assert_eq!(header["cttn"]["rho"], json!(0.1f32));
+        assert_eq!(header["cttn"]["block_steps"], 4);
     }
 
     #[test]

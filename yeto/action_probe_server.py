@@ -42,6 +42,7 @@ from .action_probe import (
     STEP_SCALE_ACTION_FAMILY,
     SUPPORTED_ACTION_FAMILIES,
     ActionProbeReplica,
+    CttnRequest,
     EvaluateRequest,
     EvaluationError,
     Frame,
@@ -49,7 +50,10 @@ from .action_probe import (
     RequestValidationError,
     SelectionConfig,
     build_anchor_panels,
+    build_cttn_result_frame,
+    decode_frame,
     load_anchor_manifest,
+    parse_cttn_request,
     parse_evaluate_request,
     probe_config_digest,
     recv_frame,
@@ -142,6 +146,7 @@ def _load_replica(config: ReplicaConfig) -> ActionProbeReplica:
         AutoModelForCausalLM,
         model_id,
         torch_dtype=accelerator_model_dtype(device),
+        attn_implementation="eager",
         **load_options,
     )
     lora = LoraConfig(
@@ -294,7 +299,8 @@ def _worker_main(connection: Connection, config: ReplicaConfig) -> None:
             continue
         if message.get("op") == "shutdown":
             break
-        if message.get("op") != "evaluate":
+        op = message.get("op")
+        if op not in ("evaluate", "cttn_step"):
             continue
         request_digest = str(message.get("request_digest", ""))
         try:
@@ -303,11 +309,18 @@ def _worker_main(connection: Connection, config: ReplicaConfig) -> None:
                 payload=message["payload"],
                 digest=request_digest,
             )
-            request = parse_evaluate_request(frame)
+            request = (
+                parse_cttn_request(frame)
+                if op == "cttn_step"
+                else parse_evaluate_request(frame)
+            )
             if request.request_digest != request_digest:
                 raise ProtocolError("worker request digest changed during dispatch")
-            actions = tuple(message["actions"])
-            result = replica.evaluate(request, actions)
+            if op == "cttn_step":
+                result = replica.cttn_step(request)
+            else:
+                actions = tuple(message["actions"])
+                result = replica.evaluate(request, actions)
             connection.send(
                 {
                     "type": "result",
@@ -723,6 +736,100 @@ class WorkerPoolBackend:
             "probe_config_sha256": self.probe_config_sha256,
         }
 
+    def cttn_step(self, frame: Frame, request: CttnRequest) -> dict[str, Any]:
+        """Run the HVP-heavy CTTN verb on exactly one persistent replica."""
+
+        if not self.healthy:
+            raise EvaluationError("action-probe worker pool is unhealthy")
+        if request.anchor_manifest_sha256 != self.anchor_manifest_sha256:
+            raise RequestValidationError(
+                "request anchor manifest does not match worker pool"
+            )
+        if request.probe_config_sha256 != self.probe_config_sha256:
+            raise RequestValidationError(
+                "request probe configuration does not match worker pool"
+            )
+        if request.layout_hash != self.layout_hash:
+            raise RequestValidationError(
+                "request fragment layout does not match worker pool"
+            )
+
+        worker = self._workers[0]
+        dispatch_started = time.perf_counter()
+        dispatch_error: list[Exception] = []
+
+        def dispatch() -> None:
+            try:
+                worker.connection.send(
+                    {
+                        "op": "cttn_step",
+                        "header": frame.header,
+                        "payload": frame.payload,
+                        "request_digest": frame.digest,
+                    }
+                )
+            except (BrokenPipeError, EOFError, OSError) as exc:
+                dispatch_error.append(exc)
+
+        thread = threading.Thread(target=dispatch, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + self.request_timeout_s
+        thread.join(max(0.0, deadline - time.monotonic()))
+        if thread.is_alive():
+            self._poison("CTTN IPC dispatch timeout")
+            thread.join(timeout=1)
+            raise EvaluationError("action-probe CTTN IPC dispatch timed out")
+        if dispatch_error:
+            self._poison(f"GPU {worker.config.gpu_id} CTTN dispatch failed")
+            raise EvaluationError(
+                f"GPU {worker.config.gpu_id} worker CTTN dispatch failed"
+            ) from dispatch_error[0]
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not wait([worker.connection], timeout=remaining):
+            self._poison("CTTN request timeout")
+            raise EvaluationError("action-probe CTTN request timed out")
+        try:
+            message = worker.connection.recv()
+        except (EOFError, OSError) as exc:
+            self._poison(f"GPU {worker.config.gpu_id} disconnected during CTTN")
+            raise EvaluationError(
+                f"GPU {worker.config.gpu_id} worker disconnected during CTTN"
+            ) from exc
+        if message.get("request_digest") != frame.digest:
+            self._poison(f"GPU {worker.config.gpu_id} returned a stale CTTN response")
+            raise EvaluationError("worker returned a stale or mismatched CTTN response")
+        if message.get("type") != "result":
+            if bool(message.get("tainted", True)):
+                self._poison("tainted GPU CTTN failure")
+                error_type = EvaluationError
+            else:
+                error_type = RequestValidationError
+            raise error_type(
+                f"action-probe CTTN worker failed: GPU {worker.config.gpu_id}: "
+                f"{message.get('error')}"
+            )
+        result = message["result"]
+        if result.get("state_sha256") != request.current_state_digest:
+            self._poison("CTTN worker state digest mismatch")
+            raise EvaluationError("CTTN worker returned a mismatched state digest")
+        if result.get("state_restored") is not True:
+            self._poison("CTTN worker did not restore the complete state")
+            raise EvaluationError("CTTN worker did not restore the complete state")
+        for field, expected in (
+            ("anchor_manifest_sha256", self.anchor_manifest_sha256),
+            ("anchor_tensors_sha256", self.anchor_tensors_sha256),
+            ("probe_config_sha256", self.probe_config_sha256),
+        ):
+            if result.get(field) != expected:
+                self._poison(f"CTTN worker {field} mismatch")
+                raise EvaluationError(f"CTTN worker returned a mismatched {field}")
+        return {
+            **result,
+            "gpu_id": worker.config.gpu_id,
+            "dispatch_total_ms": (time.perf_counter() - dispatch_started) * 1000.0,
+        }
+
     def close(self, *, force: bool = False) -> None:
         for worker in self._workers:
             if worker.process.is_alive() and not force:
@@ -782,6 +889,27 @@ def _error_response(
     }
 
 
+def _cttn_error_response(
+    frame: Frame,
+    error: Exception | str,
+    *,
+    error_code: str,
+    elapsed_ms: float,
+) -> dict[str, Any]:
+    header = frame.header
+    return {
+        "protocol": PROTOCOL,
+        "type": "cttn_result",
+        "request_id": header.get("request_id"),
+        "run_uuid": header.get("run_uuid"),
+        "request_digest": frame.digest,
+        "ok": False,
+        "fallback_reason": error_code,
+        "error": str(error)[:2048],
+        "timings_ms": {"total": elapsed_ms},
+    }
+
+
 class ActionProbeEngine:
     """Request validation, exact-retry cache, backend join, and selection."""
 
@@ -805,6 +933,7 @@ class ActionProbeEngine:
         backend = self.backend.describe() if hasattr(self.backend, "describe") else {}
         return {
             "protocol": PROTOCOL,
+            "supported_operations": ["evaluate", "cttn_step"],
             "supported_action_families": list(SUPPORTED_ACTION_FAMILIES),
             "selection": asdict(self.selection),
             "retry_cache_size": self.retry_cache_size,
@@ -824,7 +953,7 @@ class ActionProbeEngine:
         while len(self._cache) > self.retry_cache_size:
             self._cache.popitem(last=False)
 
-    def handle(self, frame: Frame) -> dict[str, Any]:
+    def handle(self, frame: Frame) -> tuple[dict[str, Any], bytes]:
         started = time.perf_counter()
         request: EvaluateRequest | None = None
         key: tuple[str, str] | None = None
@@ -833,7 +962,7 @@ class ActionProbeEngine:
             and frame.header.get("type") == "ping"
             and not frame.payload
         ):
-            return {
+            return ({
                 "protocol": PROTOCOL,
                 "type": "pong",
                 "ok": True,
@@ -841,7 +970,59 @@ class ActionProbeEngine:
                 "cache_hit": False,
                 "supported_action_families": list(SUPPORTED_ACTION_FAMILIES),
                 "service": self.describe(),
-            }
+            }, b"")
+
+        if frame.header.get("protocol") == PROTOCOL and frame.header.get("type") == "cttn_step":
+            try:
+                request_started = time.perf_counter()
+                cttn_request = parse_cttn_request(frame)
+                parse_ms = (time.perf_counter() - request_started) * 1000.0
+                if cttn_request.anchor_manifest_sha256 != self.backend.anchor_manifest_sha256:
+                    raise RequestValidationError(
+                        "request anchor manifest SHA-256 does not match service"
+                    )
+                if cttn_request.probe_config_sha256 != self.backend.probe_config_sha256:
+                    raise RequestValidationError(
+                        "request probe configuration SHA-256 does not match service"
+                    )
+                if cttn_request.layout_hash != self.backend.layout_hash:
+                    raise RequestValidationError(
+                        "request fragment layout SHA-256 does not match service"
+                    )
+                backend_result = self.backend.cttn_step(frame, cttn_request)
+                encoded = build_cttn_result_frame(
+                    cttn_request,
+                    backend_result["d"],
+                    backend_result["b_new"],
+                    backend_result["diagnostics"],
+                    anchor_tensors_sha256=backend_result[
+                        "anchor_tensors_sha256"
+                    ],
+                )
+                response = decode_frame(encoded)
+                response.header["timings_ms"] = {
+                    "parse": parse_ms,
+                    "dispatch_and_eval": backend_result.get("dispatch_total_ms"),
+                    "total": (time.perf_counter() - started) * 1000.0,
+                }
+                return response.header, response.payload
+            except Exception as exc:
+                log.exception("action-probe CTTN request failed closed")
+                if isinstance(exc, ProtocolError):
+                    code = "protocol_error"
+                elif isinstance(exc, RequestValidationError):
+                    code = "request_validation_error"
+                else:
+                    code = "evaluation_error"
+                return (
+                    _cttn_error_response(
+                        frame,
+                        exc,
+                        error_code=code,
+                        elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                    ),
+                    b"",
+                )
 
         try:
             parse_started = time.perf_counter()
@@ -860,7 +1041,7 @@ class ActionProbeEngine:
                 response["cache_hit"] = True
                 response["retry_lookup_ms"] = (time.perf_counter() - started) * 1000.0
                 _log_successful_decision(response, self.selection)
-                return response
+                return response, b""
             if request.anchor_manifest_sha256 != self.backend.anchor_manifest_sha256:
                 raise RequestValidationError(
                     "request anchor manifest SHA-256 does not match service"
@@ -955,7 +1136,7 @@ class ActionProbeEngine:
             json.dumps(response, allow_nan=False)
             self._cache_response(key, frame.digest, response)
             _log_successful_decision(response, self.selection)
-            return response
+            return response, b""
         except Exception as exc:
             log.exception("action-probe request failed closed")
             if isinstance(exc, ProtocolError):
@@ -973,7 +1154,7 @@ class ActionProbeEngine:
             )
             if request is not None and key is not None:
                 self._cache_response(key, frame.digest, response)
-            return response
+            return response, b""
 
 
 def _parse_listen(value: str) -> tuple[str, int]:
@@ -1103,9 +1284,9 @@ class ActionProbeTCPService:
                     "closing malformed/timed-out action-probe connection: %s", exc
                 )
                 return
-            response = self.engine.handle(frame)
+            response_header, response_payload = self.engine.handle(frame)
             try:
-                send_frame(connection, response)
+                send_frame(connection, response_header, response_payload)
             except (ProtocolError, OSError) as exc:
                 log.warning("failed to return action-probe response: %s", exc)
                 return

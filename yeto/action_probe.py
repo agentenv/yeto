@@ -437,6 +437,113 @@ def build_evaluate_frame(
     return encode_frame(header, bytes(payload))
 
 
+def build_cttn_request_frame(
+    *,
+    request_id: str,
+    run_uuid: str,
+    step: int,
+    fragment_id: int,
+    base_version: int,
+    state_epoch: int,
+    fragment_versions: Sequence[int],
+    layout_hash: str,
+    anchor_manifest_sha256: str,
+    probe_config_sha256: str,
+    current_state: Mapping[str, torch.Tensor],
+    fragment_names: Sequence[str],
+    g: torch.Tensor,
+    b: torch.Tensor,
+    mu: float,
+    rho: float,
+    block_steps: int = 4,
+) -> bytes:
+    """Build the exact ``cttn_step`` wire frame emitted by the Rust client."""
+
+    if not request_id or not run_uuid:
+        raise ProtocolError("request_id and run_uuid must be non-empty")
+    state_names = sorted(current_state)
+    if not state_names:
+        raise ProtocolError("current_state is empty")
+    if not fragment_names or len(set(fragment_names)) != len(fragment_names):
+        raise ProtocolError("fragment_names must be a non-empty unique sequence")
+    missing = [name for name in fragment_names if name not in current_state]
+    if missing:
+        raise ProtocolError(
+            f"fragment tensors are missing from current_state: {missing}"
+        )
+    fragment_numel = sum(int(current_state[name].numel()) for name in fragment_names)
+
+    payload = bytearray()
+    state_specs = []
+    for name in state_names:
+        tensor = current_state[name]
+        raw = _tensor_bytes(tensor)
+        state_specs.append(
+            {
+                "name": name,
+                "shape": [int(dim) for dim in tensor.shape],
+                "offset": len(payload),
+                "nbytes": len(raw),
+                "sha256": _sha256(raw),
+            }
+        )
+        payload.extend(raw)
+
+    cttn_specs: dict[str, Any] = {}
+    for name, tensor in (("g", g), ("b", b)):
+        flat = tensor.detach().reshape(-1)
+        if int(flat.numel()) != fragment_numel:
+            raise ProtocolError(
+                f"cttn.{name} has {flat.numel()} values, expected {fragment_numel}"
+            )
+        raw = _tensor_bytes(flat)
+        cttn_specs[name] = {
+            "offset": len(payload),
+            "nbytes": len(raw),
+            "sha256": _sha256(raw),
+        }
+        payload.extend(raw)
+
+    mu = _require_finite_float(mu, "cttn.mu")
+    rho = _require_finite_float(rho, "cttn.rho")
+    if not 0.0 <= mu < 1.0:
+        raise ProtocolError("cttn.mu must be in [0, 1)")
+    if rho < 0.0:
+        raise ProtocolError("cttn.rho must be non-negative")
+    block_steps = _require_int(block_steps, "cttn.block_steps", minimum=1)
+
+    header = {
+        "protocol": PROTOCOL,
+        "type": "cttn_step",
+        "request_id": request_id,
+        "run_uuid": run_uuid,
+        "step": int(step),
+        "fragment_id": int(fragment_id),
+        "base_version": int(base_version),
+        "state_epoch": int(state_epoch),
+        "fragment_versions": [int(version) for version in fragment_versions],
+        "layout_hash": layout_hash,
+        "anchor_manifest_sha256": anchor_manifest_sha256,
+        "probe_config_sha256": probe_config_sha256,
+        "dtype": "f32le",
+        "state": {
+            "tensors": state_specs,
+            "sha256": tensor_mapping_digest(current_state),
+        },
+        "fragment": {
+            "tensor_names": list(fragment_names),
+            "numel": fragment_numel,
+        },
+        "cttn": {
+            **cttn_specs,
+            "mu": mu,
+            "rho": rho,
+            "block_steps": block_steps,
+        },
+    }
+    return encode_frame(header, bytes(payload))
+
+
 @dataclass(frozen=True)
 class EvaluateRequest:
     request_id: str
@@ -457,6 +564,31 @@ class EvaluateRequest:
     action_digests: dict[str, str]
     action_eligibility: dict[str, bool]
     action_metadata: dict[str, dict[str, Any]]
+    request_digest: str
+
+
+@dataclass(frozen=True)
+class CttnRequest:
+    request_id: str
+    run_uuid: str
+    step: int
+    fragment_id: int
+    base_version: int
+    state_epoch: int
+    fragment_versions: tuple[int, ...]
+    layout_hash: str
+    anchor_manifest_sha256: str
+    probe_config_sha256: str
+    current_state: OrderedDict[str, torch.Tensor]
+    current_state_digest: str
+    fragment_names: tuple[str, ...]
+    g: torch.Tensor
+    b: torch.Tensor
+    g_digest: str
+    b_digest: str
+    mu: float
+    rho: float
+    block_steps: int
     request_digest: str
 
 
@@ -518,6 +650,47 @@ def _slice_f32(
     return tensor, end, digest
 
 
+def _parse_state_block(
+    frame: Frame,
+) -> tuple[OrderedDict[str, torch.Tensor], str, int]:
+    state = frame.header.get("state")
+    if not isinstance(state, Mapping) or not isinstance(state.get("tensors"), list):
+        raise ProtocolError("state.tensors must be a list")
+    if not state["tensors"]:
+        raise ProtocolError("state.tensors is empty")
+    current_state: OrderedDict[str, torch.Tensor] = OrderedDict()
+    offset = 0
+    for index, spec in enumerate(state["tensors"]):
+        if not isinstance(spec, Mapping):
+            raise ProtocolError(f"state.tensors[{index}] must be an object")
+        name = spec.get("name")
+        shape = spec.get("shape")
+        if not isinstance(name, str) or not name or name in current_state:
+            raise ProtocolError(f"invalid or duplicate state tensor name {name!r}")
+        if (
+            not isinstance(shape, list)
+            or not shape
+            or any(
+                isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0
+                for dim in shape
+            )
+        ):
+            raise ProtocolError(f"state tensor {name!r} has invalid shape {shape!r}")
+        flat, offset, _ = _slice_f32(frame.payload, spec, offset)
+        numel = math.prod(shape)
+        if flat.numel() != numel:
+            raise ProtocolError(
+                f"state tensor {name!r} has {flat.numel()} values, shape requires {numel}"
+            )
+        current_state[name] = flat.view(shape)
+
+    expected_state_digest = _require_digest(state.get("sha256"), "state.sha256")
+    actual_state_digest = tensor_mapping_digest(current_state)
+    if actual_state_digest != expected_state_digest:
+        raise ProtocolError("complete state SHA-256 mismatch")
+    return current_state, actual_state_digest, offset
+
+
 def parse_evaluate_request(frame: Frame) -> EvaluateRequest:
     header = frame.header
     if header.get("protocol") != PROTOCOL or header.get("type") != "evaluate":
@@ -558,41 +731,7 @@ def parse_evaluate_request(frame: Frame) -> EvaluateRequest:
             "base_version must equal fragment_versions[fragment_id] for the current state"
         )
 
-    state = header.get("state")
-    if not isinstance(state, Mapping) or not isinstance(state.get("tensors"), list):
-        raise ProtocolError("state.tensors must be a list")
-    if not state["tensors"]:
-        raise ProtocolError("state.tensors is empty")
-    current_state: OrderedDict[str, torch.Tensor] = OrderedDict()
-    offset = 0
-    for index, spec in enumerate(state["tensors"]):
-        if not isinstance(spec, Mapping):
-            raise ProtocolError(f"state.tensors[{index}] must be an object")
-        name = spec.get("name")
-        shape = spec.get("shape")
-        if not isinstance(name, str) or not name or name in current_state:
-            raise ProtocolError(f"invalid or duplicate state tensor name {name!r}")
-        if (
-            not isinstance(shape, list)
-            or not shape
-            or any(
-                isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0
-                for dim in shape
-            )
-        ):
-            raise ProtocolError(f"state tensor {name!r} has invalid shape {shape!r}")
-        flat, offset, _ = _slice_f32(frame.payload, spec, offset)
-        numel = math.prod(shape)
-        if flat.numel() != numel:
-            raise ProtocolError(
-                f"state tensor {name!r} has {flat.numel()} values, shape requires {numel}"
-            )
-        current_state[name] = flat.view(shape)
-
-    expected_state_digest = _require_digest(state.get("sha256"), "state.sha256")
-    actual_state_digest = tensor_mapping_digest(current_state)
-    if actual_state_digest != expected_state_digest:
-        raise ProtocolError("complete state SHA-256 mismatch")
+    current_state, actual_state_digest, offset = _parse_state_block(frame)
 
     fragment = header.get("fragment")
     if not isinstance(fragment, Mapping):
@@ -763,6 +902,182 @@ def parse_evaluate_request(frame: Frame) -> EvaluateRequest:
         action_metadata=action_metadata,
         request_digest=frame.digest,
     )
+
+
+def parse_cttn_request(frame: Frame) -> CttnRequest:
+    header = frame.header
+    if header.get("protocol") != PROTOCOL or header.get("type") != "cttn_step":
+        raise ProtocolError("not an action-probe cttn_step request")
+    if header.get("dtype") != "f32le":
+        raise ProtocolError("only little-endian f32 payloads are supported")
+    if sys.byteorder != "little":
+        raise ProtocolError("f32le action probing requires a little-endian host")
+
+    request_id = header.get("request_id")
+    run_uuid = header.get("run_uuid")
+    layout_hash = header.get("layout_hash")
+    for value, field in (
+        (request_id, "request_id"),
+        (run_uuid, "run_uuid"),
+        (layout_hash, "layout_hash"),
+    ):
+        if not isinstance(value, str) or not value:
+            raise ProtocolError(f"{field} must be a non-empty string")
+        if len(value) > 256:
+            raise ProtocolError(f"{field} exceeds the 256-character limit")
+    layout_hash = _require_digest(layout_hash, "layout_hash")
+
+    versions = header.get("fragment_versions")
+    if not isinstance(versions, list) or not versions:
+        raise ProtocolError("fragment_versions must be a non-empty list")
+    fragment_versions = tuple(
+        _require_int(value, f"fragment_versions[{index}]")
+        for index, value in enumerate(versions)
+    )
+    fragment_id = _require_int(header.get("fragment_id"), "fragment_id")
+    if fragment_id >= len(fragment_versions):
+        raise ProtocolError(
+            f"fragment_id {fragment_id} is outside {len(fragment_versions)} versions"
+        )
+    base_version = _require_int(header.get("base_version"), "base_version")
+    if base_version != fragment_versions[fragment_id]:
+        raise ProtocolError(
+            "base_version must equal fragment_versions[fragment_id] for the current state"
+        )
+
+    current_state, actual_state_digest, offset = _parse_state_block(frame)
+    fragment = header.get("fragment")
+    if not isinstance(fragment, Mapping):
+        raise ProtocolError("fragment must be an object")
+    names_value = fragment.get("tensor_names")
+    if not isinstance(names_value, list) or not names_value:
+        raise ProtocolError("fragment.tensor_names must be a non-empty list")
+    fragment_names = tuple(names_value)
+    if any(not isinstance(name, str) or not name for name in fragment_names):
+        raise ProtocolError("fragment.tensor_names contains an invalid name")
+    if len(set(fragment_names)) != len(fragment_names):
+        raise ProtocolError("fragment.tensor_names contains duplicates")
+    missing = [name for name in fragment_names if name not in current_state]
+    if missing:
+        raise ProtocolError(
+            f"fragment tensors are absent from complete state: {missing}"
+        )
+    fragment_numel = sum(int(current_state[name].numel()) for name in fragment_names)
+    if (
+        _require_int(fragment.get("numel"), "fragment.numel", minimum=1)
+        != fragment_numel
+    ):
+        raise ProtocolError("fragment.numel does not match fragment tensor shapes")
+
+    cttn = header.get("cttn")
+    if not isinstance(cttn, Mapping):
+        raise ProtocolError("cttn must be an object")
+    g, offset, g_digest = _slice_f32(frame.payload, cttn.get("g"), offset)
+    b, offset, b_digest = _slice_f32(frame.payload, cttn.get("b"), offset)
+    if g.numel() != fragment_numel or b.numel() != fragment_numel:
+        raise ProtocolError("cttn.g and cttn.b must match fragment.numel")
+    mu = _require_finite_float(cttn.get("mu"), "cttn.mu")
+    rho = _require_finite_float(cttn.get("rho"), "cttn.rho")
+    if not 0.0 <= mu < 1.0:
+        raise ProtocolError("cttn.mu must be in [0, 1)")
+    if rho < 0.0:
+        raise ProtocolError("cttn.rho must be non-negative")
+    block_steps = _require_int(cttn.get("block_steps"), "cttn.block_steps", minimum=1)
+    if offset != len(frame.payload):
+        raise ProtocolError(
+            f"payload has {len(frame.payload) - offset} unclaimed bytes"
+        )
+
+    return CttnRequest(
+        request_id=request_id,
+        run_uuid=run_uuid,
+        step=_require_int(header.get("step"), "step"),
+        fragment_id=fragment_id,
+        base_version=base_version,
+        state_epoch=_require_int(header.get("state_epoch"), "state_epoch"),
+        fragment_versions=fragment_versions,
+        layout_hash=layout_hash,
+        anchor_manifest_sha256=_require_digest(
+            header.get("anchor_manifest_sha256"), "anchor_manifest_sha256"
+        ),
+        probe_config_sha256=_require_digest(
+            header.get("probe_config_sha256"), "probe_config_sha256"
+        ),
+        current_state=current_state,
+        current_state_digest=actual_state_digest,
+        fragment_names=fragment_names,
+        g=g,
+        b=b,
+        g_digest=g_digest,
+        b_digest=b_digest,
+        mu=mu,
+        rho=rho,
+        block_steps=block_steps,
+        request_digest=frame.digest,
+    )
+
+
+def build_cttn_result_frame(
+    request: CttnRequest,
+    d: torch.Tensor,
+    b_new: torch.Tensor,
+    diagnostics: Mapping[str, Any],
+    *,
+    anchor_tensors_sha256: str,
+) -> bytes:
+    """Build a successful ``cttn_result`` frame with payload order ``d || b_new``."""
+
+    fragment_numel = int(request.g.numel())
+    payload = bytearray()
+    specs: dict[str, dict[str, Any]] = {}
+    for name, tensor in (("d", d), ("b_new", b_new)):
+        flat = tensor.detach().reshape(-1)
+        if int(flat.numel()) != fragment_numel:
+            raise ProtocolError(
+                f"{name} has {flat.numel()} values, expected {fragment_numel}"
+            )
+        raw = _tensor_bytes(flat)
+        specs[name] = {
+            "offset": len(payload),
+            "nbytes": len(raw),
+            "sha256": _sha256(raw),
+        }
+        payload.extend(raw)
+    diagnostics = dict(diagnostics)
+    try:
+        json.dumps(diagnostics, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ProtocolError(f"cttn diagnostics are not finite JSON: {exc}") from exc
+
+    header = {
+        "protocol": PROTOCOL,
+        "type": "cttn_result",
+        "request_id": request.request_id,
+        "run_uuid": request.run_uuid,
+        "step": request.step,
+        "fragment_id": request.fragment_id,
+        "base_version": request.base_version,
+        "state_epoch": request.state_epoch,
+        "fragment_versions": list(request.fragment_versions),
+        "request_digest": request.request_digest,
+        "ok": True,
+        "dtype": "f32le",
+        "d": specs["d"],
+        "b_new": specs["b_new"],
+        "diagnostics": diagnostics,
+        "digests": {
+            "state_sha256": request.current_state_digest,
+            "g_sha256": request.g_digest,
+            "b_sha256": request.b_digest,
+            "anchor_manifest_sha256": request.anchor_manifest_sha256,
+            "anchor_tensors_sha256": _require_digest(
+                anchor_tensors_sha256, "anchor_tensors_sha256"
+            ),
+            "probe_config_sha256": request.probe_config_sha256,
+            "layout_hash": request.layout_hash,
+        },
+    }
+    return encode_frame(header, bytes(payload))
 
 
 def canonical_anchor_row(row: Any, *, context: str = "row") -> dict[str, Any]:
@@ -1338,7 +1653,22 @@ class ActionProbeReplica:
             )
         self.model.eval()
 
-    def _validate_state(self, request: EvaluateRequest) -> None:
+    def _validate_request_identity(self, request: EvaluateRequest | CttnRequest) -> None:
+        if request.anchor_manifest_sha256 != self.anchor_manifest_sha256:
+            raise RequestValidationError("request targets a different anchor manifest")
+        if request.probe_config_sha256 != self.probe_config_sha256:
+            raise RequestValidationError(
+                "request targets a different probe configuration"
+            )
+        if request.layout_hash != self.layout_hash:
+            raise RequestValidationError("request targets a different fragment layout")
+        expected_fragment_names = self.fragment_layout.get(request.fragment_id)
+        if expected_fragment_names != request.fragment_names:
+            raise RequestValidationError(
+                f"fragment {request.fragment_id} tensor order does not match the evaluator layout"
+            )
+
+    def _validate_state(self, request: EvaluateRequest | CttnRequest) -> None:
         expected = set(self.params)
         provided = set(request.current_state)
         if expected != provided:
@@ -1386,19 +1716,7 @@ class ActionProbeReplica:
     def evaluate(
         self, request: EvaluateRequest, actions: Sequence[str]
     ) -> dict[str, Any]:
-        if request.anchor_manifest_sha256 != self.anchor_manifest_sha256:
-            raise RequestValidationError("request targets a different anchor manifest")
-        if request.probe_config_sha256 != self.probe_config_sha256:
-            raise RequestValidationError(
-                "request targets a different probe configuration"
-            )
-        if request.layout_hash != self.layout_hash:
-            raise RequestValidationError("request targets a different fragment layout")
-        expected_fragment_names = self.fragment_layout.get(request.fragment_id)
-        if expected_fragment_names != request.fragment_names:
-            raise RequestValidationError(
-                f"fragment {request.fragment_id} tensor order does not match the evaluator layout"
-            )
+        self._validate_request_identity(request)
         if not actions or any(action not in ACTION_NAMES for action in actions):
             raise RequestValidationError(f"invalid action assignment {list(actions)!r}")
         if len(set(actions)) != len(actions):
@@ -1479,5 +1797,85 @@ class ActionProbeReplica:
             "anchor_tensors_sha256": self.anchor_tensors_sha256,
             "probe_config_sha256": self.probe_config_sha256,
             "restore_ms": restore_ms,
+            "total_ms": (time.perf_counter() - started) * 1000.0,
+        }
+
+    def cttn_step(self, request: CttnRequest) -> dict[str, Any]:
+        """Compute one CTTN direction at the request's exact complete state."""
+
+        from .cttn_sidecar import cttn_sidecar_step
+
+        self._validate_request_identity(request)
+        self._validate_state(request)
+        started = time.perf_counter()
+        primary_error: Exception | None = None
+        restore_error: Exception | None = None
+        result = None
+        try:
+            self._apply_state(request.current_state)
+            if not self._state_is_exact(request.current_state):
+                raise EvaluationError("complete LoRA state did not apply exactly")
+            params = tuple(self.params[name] for name in request.fragment_names)
+            g = request.g.to(device=self.device, dtype=torch.float32)
+            b = request.b.to(device=self.device, dtype=torch.float32)
+            result = cttn_sidecar_step(
+                self.model,
+                params,
+                self.panels,
+                g,
+                b,
+                mu=request.mu,
+                rho=request.rho,
+                block_steps=request.block_steps,
+                loss_function=self.loss_function,
+            )
+            _sync_device(self.device)
+            if result.d.numel() != request.g.numel() or result.b_new.numel() != request.b.numel():
+                raise EvaluationError("CTTN sidecar returned a malformed vector length")
+            if not bool(torch.isfinite(result.d).all()) or not bool(
+                torch.isfinite(result.b_new).all()
+            ):
+                raise EvaluationError("CTTN sidecar returned NaN or Inf")
+            if not self._state_is_exact(request.current_state):
+                raise EvaluationError("CTTN sidecar mutated the complete model state")
+        except Exception as exc:
+            primary_error = exc
+        finally:
+            try:
+                self._apply_state(request.current_state)
+                _sync_device(self.device)
+                if not self._state_is_exact(request.current_state):
+                    raise EvaluationError("model state restoration was not exact")
+            except Exception as exc:
+                restore_error = exc
+        if restore_error is not None:
+            raise EvaluationError(
+                f"failed to restore current state: {restore_error}"
+            ) from restore_error
+        if primary_error is not None:
+            raise primary_error
+        assert result is not None
+        ritz = result.diag.ritz
+        diagnostics = {
+            "bind": bool(result.diag.bind),
+            "tau": float(result.diag.tau),
+            "retention": float(result.diag.norm_retention),
+            "e_before": float(result.diag.e_before),
+            "e_after": float(result.diag.e_after),
+            "budget": float(result.diag.budget),
+            "n_modes_90": int(result.diag.n_modes_90),
+            "ritz_max": float(ritz.max()) if getattr(ritz, "size", 0) else 0.0,
+            "loss": float(result.loss),
+        }
+        json.dumps(diagnostics, allow_nan=False)
+        return {
+            "d": result.d.detach().to(device="cpu", dtype=torch.float32),
+            "b_new": result.b_new.detach().to(device="cpu", dtype=torch.float32),
+            "diagnostics": diagnostics,
+            "state_sha256": request.current_state_digest,
+            "state_restored": True,
+            "anchor_manifest_sha256": self.anchor_manifest_sha256,
+            "anchor_tensors_sha256": self.anchor_tensors_sha256,
+            "probe_config_sha256": self.probe_config_sha256,
             "total_ms": (time.perf_counter() - started) * 1000.0,
         }

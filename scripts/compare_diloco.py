@@ -89,6 +89,7 @@ OUTER_OPTIMIZERS = (
     "block-rms",
     "block-yogi",
     "cheb-sgd",
+    "cttn",
 )
 # Matrix-fragment aggregation modes the harness understands (client-side
 # --matrix-merge). "worker-snr" is the memoryless cross-worker consensus merge.
@@ -99,6 +100,7 @@ COMMIT_POLICIES = (
     "probe_loo_v1",
     "probe_lr_shadow",
     "probe_lr_v1",
+    "cttn_v1",
 )
 LOO_COMMIT_POLICIES = frozenset(("probe_shadow", "probe_loo_v1"))
 ACTION_PROBE_MIN_GAIN = 0.00025
@@ -106,7 +108,9 @@ ACTION_PROBE_LCB_Z = 2.365
 ACTION_PROBE_MIN_WIN_RATE = 0.75
 ACTION_PROBE_ACTIONS = ("A0", "A1", "A2", "A3", "A4")
 ACTION_PROBE_SHADOW_POLICIES = frozenset(("probe_shadow", "probe_lr_shadow"))
-ACTION_PROBE_ACTIVE_POLICIES = frozenset(("probe_loo_v1", "probe_lr_v1"))
+ACTION_PROBE_ACTIVE_POLICIES = frozenset(
+    ("probe_loo_v1", "probe_lr_v1", "cttn_v1")
+)
 ACTION_PROBE_SCALAR_MULTIPLIERS = {
     action: multiplier
     for action, multiplier in zip(
@@ -263,36 +267,48 @@ def apply_arm_overrides(
 
     from dataclasses import replace
 
-    return [
-        replace(
-            arm,
-            matrix_merge=arm.matrix_merge if matrix_merge is None else matrix_merge,
-            outer_lr=arm.outer_lr if outer_lr is None else outer_lr,
-            outer_lr_by_fragment=(
-                arm.outer_lr_by_fragment
-                if outer_lr_by_fragment is None
-                else outer_lr_by_fragment
-            ),
-            outer_momentum=(
-                arm.outer_momentum if outer_momentum is None else outer_momentum
-            ),
-            outer_optimizer=(
-                arm.outer_optimizer if outer_optimizer is None else outer_optimizer
-            ),
-            outer_restart_cos_threshold=(
-                arm.outer_restart_cos_threshold
-                if outer_restart_cos_threshold is None
-                else outer_restart_cos_threshold
-            ),
-            delta_correction=(
-                arm.delta_correction if delta_correction is None else delta_correction
-            ),
-            commit_policy=(
-                arm.commit_policy if commit_policy is None else commit_policy
-            ),
+    normalized = []
+    for arm in arms:
+        selected_optimizer = (
+            arm.outer_optimizer if outer_optimizer is None else outer_optimizer
         )
-        for arm in arms
-    ]
+        selected_momentum = (
+            arm.outer_momentum if outer_momentum is None else outer_momentum
+        )
+        selected_policy = arm.commit_policy if commit_policy is None else commit_policy
+        if selected_optimizer == "cttn":
+            selected_policy = "cttn_v1"
+        if selected_policy == "cttn_v1":
+            if outer_momentum is None:
+                selected_momentum = 0.0
+        normalized.append(
+            replace(
+                arm,
+                matrix_merge=(
+                    arm.matrix_merge if matrix_merge is None else matrix_merge
+                ),
+                outer_lr=arm.outer_lr if outer_lr is None else outer_lr,
+                outer_lr_by_fragment=(
+                    arm.outer_lr_by_fragment
+                    if outer_lr_by_fragment is None
+                    else outer_lr_by_fragment
+                ),
+                outer_momentum=selected_momentum,
+                outer_optimizer=selected_optimizer,
+                outer_restart_cos_threshold=(
+                    arm.outer_restart_cos_threshold
+                    if outer_restart_cos_threshold is None
+                    else outer_restart_cos_threshold
+                ),
+                delta_correction=(
+                    arm.delta_correction
+                    if delta_correction is None
+                    else delta_correction
+                ),
+                commit_policy=selected_policy,
+            )
+        )
+    return normalized
 
 
 def steps_for(
@@ -553,8 +569,15 @@ def syncer_command(
     action_probe_timeout_ms: int = 30_000,
     action_probe_run_uuid: str | None = None,
     action_probe_expected_config: Path | None = None,
+    cttn_rho: float = 0.10,
 ) -> list[str]:
     # The syncer takes no fragment count: the layout arrives in HELLO.
+    cttn_pseudo_optimizer = arm.outer_optimizer == "cttn"
+    syncer_outer_optimizer = (
+        "nesterov" if cttn_pseudo_optimizer else arm.outer_optimizer
+    )
+    commit_policy = "cttn_v1" if cttn_pseudo_optimizer else arm.commit_policy
+    cttn_enabled = commit_policy == "cttn_v1"
     cmd = [
         str(SYNCER_BIN),
         "--port",
@@ -576,7 +599,7 @@ def syncer_command(
         "--outer-momentum",
         str(arm.outer_momentum),
         "--outer-optimizer",
-        arm.outer_optimizer,
+        syncer_outer_optimizer,
         "--outer-restart-cos-threshold",
         str(arm.outer_restart_cos_threshold),
         "--checkpoint-path",
@@ -590,8 +613,10 @@ def syncer_command(
         "--sync-interval-steps",
         str(arm.sync_interval_steps),
         "--commit-policy",
-        arm.commit_policy,
+        commit_policy,
     ]
+    if cttn_enabled:
+        cmd += ["--cttn-mu", "0.9", "--cttn-rho", str(cttn_rho)]
     if arm.outer_lr_by_fragment:
         cmd += ["--outer-lr-by-fragment", arm.outer_lr_by_fragment]
     if delta_norm_ref > 0.0:
@@ -615,7 +640,7 @@ def syncer_command(
             "--probe-capture-every",
             str(probe_capture_every),
         ]
-    if arm.commit_policy != "token_weighted":
+    if commit_policy != "token_weighted":
         missing = [
             name
             for name, value in (
@@ -627,7 +652,7 @@ def syncer_command(
         ]
         if missing:
             raise ValueError(
-                f"{arm.commit_policy} requires sidecar settings: {', '.join(missing)}"
+                f"{commit_policy} requires sidecar settings: {', '.join(missing)}"
             )
         cmd += [
             "--action-probe-endpoint",
@@ -1023,6 +1048,7 @@ def validate_action_probe_run(
     validate_event_tape_records(arm, records, expected_steps=expected_steps)
     if not records:
         raise RuntimeError(f"{arm.name}: action-probe event tape has no records")
+    action_names = ("A0", "CTTN") if policy == "cttn_v1" else ACTION_PROBE_ACTIONS
 
     selected_counts: Counter[str] = Counter()
     committed_counts: Counter[str] = Counter()
@@ -1042,11 +1068,11 @@ def validate_action_probe_run(
 
         selected_action = record.get("selected_action")
         committed_action = record.get("committed_action")
-        if selected_action not in ACTION_PROBE_ACTIONS:
+        if selected_action not in action_names:
             _probe_record_error(
                 arm, index, record, f"unknown selected_action {selected_action!r}"
             )
-        if committed_action not in ACTION_PROBE_ACTIONS:
+        if committed_action not in action_names:
             _probe_record_error(
                 arm, index, record, f"unknown committed_action {committed_action!r}"
             )
@@ -1113,6 +1139,30 @@ def validate_action_probe_run(
                     f"{selected_action} selected_multiplier must be exactly "
                     f"{expected_multiplier} for {policy}",
                 )
+        if policy == "cttn_v1" and not fallback:
+            if record.get("cttn_bind") not in (True, False):
+                _probe_record_error(
+                    arm, index, record, "successful CTTN record must include cttn_bind"
+                )
+            for field in (
+                "cttn_tau",
+                "cttn_retention",
+                "cttn_e_before",
+                "cttn_e_after",
+                "cttn_budget",
+                "cttn_ritz_max",
+                "cttn_loss",
+            ):
+                value = record.get(field)
+                if not isinstance(value, (int, float)) or not math.isfinite(value):
+                    _probe_record_error(
+                        arm, index, record, f"{field} must be a finite number"
+                    )
+            n_modes_90 = record.get("cttn_n_modes_90")
+            if not isinstance(n_modes_90, int) or isinstance(n_modes_90, bool) or n_modes_90 < 0:
+                _probe_record_error(
+                    arm, index, record, "cttn_n_modes_90 must be a non-negative integer"
+                )
 
         if policy in ACTION_PROBE_SHADOW_POLICIES:
             if committed_action != "A0" or committed_multiplier != 1.0:
@@ -1143,7 +1193,7 @@ def validate_action_probe_run(
                 transport_config_fallback_count += 1
 
     def ordered_counts(counts: Counter[str]) -> dict[str, int]:
-        return {action: counts[action] for action in ACTION_PROBE_ACTIONS if counts[action]}
+        return {action: counts[action] for action in action_names if counts[action]}
 
     summary = {
         "arm": arm.name,
@@ -1573,6 +1623,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                 delta_norm_ref=getattr(args, "delta_norm_ref", 0.0),
                 version_matched_anchor=getattr(args, "version_matched_anchor", False),
                 anchor_drift_log=getattr(args, "anchor_drift_log", False),
+                cttn_rho=getattr(args, "cttn_rho", 0.10),
                 **syncer_args,
             ),
             stdout=syncer_log,
@@ -1980,6 +2031,12 @@ def main() -> int:
         help="override the outer optimizer for every selected async arm",
     )
     p.add_argument(
+        "--cttn-rho",
+        type=float,
+        default=0.10,
+        help="CTTN dimensionless transverse curvature budget",
+    )
+    p.add_argument(
         "--outer-restart-cos-threshold",
         type=float,
         default=None,
@@ -2049,6 +2106,8 @@ def main() -> int:
 
     if args.syncer_total_steps < 0 or args.learner_max_steps < 0:
         p.error("--syncer-total-steps and --learner-max-steps must be non-negative")
+    if not math.isfinite(args.cttn_rho) or args.cttn_rho < 0.0:
+        p.error("--cttn-rho must be finite and non-negative")
     if args.fixed_window_schedule is not None:
         from yeto.learner import parse_fixed_window_schedule
 

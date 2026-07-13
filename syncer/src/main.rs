@@ -80,6 +80,13 @@ struct Args {
     /// below this threshold. Used only by restarted-ema.
     #[arg(long, default_value_t = 0.0, value_parser = parse_cosine_threshold)]
     outer_restart_cos_threshold: f32,
+    /// CTTN dimensionless transverse curvature budget.
+    #[arg(long, default_value_t = 0.10, value_parser = parse_cttn_rho)]
+    cttn_rho: f32,
+    /// CTTN internal damping momentum. This is independent of
+    /// --outer-momentum, which configures the fallback/control optimizer.
+    #[arg(long, default_value_t = 0.9, value_parser = parse_cttn_mu)]
+    cttn_mu: f32,
     /// Post-merge renormalization for mediation-control experiments
     /// (EXP2.39 norm-matched intervention): after the production merge,
     /// rescale the merged delta of every commit to this L2 norm (per
@@ -131,7 +138,8 @@ struct Args {
     /// probe_shadow evaluates A0-A4 but commits A0; probe_loo_v1 commits the
     /// exact sidecar-selected LOO preview; probe_lr_shadow evaluates the
     /// frozen step-scale grid but commits x1; probe_lr_v1 commits the exact
-    /// sidecar-selected scaled preview.
+    /// sidecar-selected scaled preview; cttn_v1 asks the sidecar to compute
+    /// the curvature-trust direction and commits it through the dedicated path.
     #[arg(long, default_value_t = action_probe::CommitPolicy::TokenWeighted)]
     commit_policy: action_probe::CommitPolicy,
     /// Persistent action-probe sidecar endpoint. Probe policies require a
@@ -192,6 +200,8 @@ fn main() -> anyhow::Result<()> {
         outer_momentum: args.outer_momentum,
         outer_optimizer: args.outer_optimizer,
         outer_restart_cos_threshold: args.outer_restart_cos_threshold,
+        cttn_rho: args.cttn_rho,
+        cttn_mu: args.cttn_mu,
         delta_norm_ref: args.delta_norm_ref,
         version_matched_anchor: args.version_matched_anchor,
         anchor_drift_instrument: args.version_matched_anchor || args.anchor_drift_log,
@@ -254,6 +264,30 @@ fn parse_delta_norm_ref(value: &str) -> Result<f32, String> {
         ));
     }
     Ok(reference)
+}
+
+fn parse_cttn_rho(value: &str) -> Result<f32, String> {
+    let rho = value
+        .parse::<f32>()
+        .map_err(|err| format!("invalid CTTN rho {value:?}: {err}"))?;
+    if !rho.is_finite() || rho < 0.0 {
+        return Err(format!(
+            "CTTN rho must be finite and non-negative, got {value:?}"
+        ));
+    }
+    Ok(rho)
+}
+
+fn parse_cttn_mu(value: &str) -> Result<f32, String> {
+    let mu = value
+        .parse::<f32>()
+        .map_err(|err| format!("invalid CTTN mu {value:?}: {err}"))?;
+    if !mu.is_finite() || !(0.0..1.0).contains(&mu) {
+        return Err(format!(
+            "CTTN mu must be finite and in [0, 1), got {value:?}"
+        ));
+    }
+    Ok(mu)
 }
 
 fn parse_cosine_threshold(value: &str) -> Result<f32, String> {
@@ -347,6 +381,8 @@ mod tests {
         assert_eq!(args.outer_optimizer, merge::OuterOptimizer::Nesterov);
         assert_eq!(args.outer_momentum, 0.9);
         assert_eq!(args.outer_restart_cos_threshold, 0.0);
+        assert_eq!(args.cttn_rho, 0.10);
+        assert_eq!(args.cttn_mu, 0.9);
         assert_eq!(args.delta_norm_ref, 0.0);
         assert_eq!(
             args.commit_policy,
@@ -400,6 +436,30 @@ mod tests {
         .unwrap();
         assert_eq!(scalar.commit_policy, action_probe::CommitPolicy::ProbeLrV1);
         assert!(!scalar.commit_policy.is_leave_one_out());
+
+        let cttn = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "2",
+            "--total-steps",
+            "1",
+            "--commit-policy",
+            "cttn_v1",
+            "--cttn-rho",
+            "0.2",
+            "--cttn-mu",
+            "0.8",
+            "--action-probe-endpoint",
+            "127.0.0.1:49321",
+            "--action-probe-run-uuid",
+            "run-cttn",
+            "--action-probe-expected-config",
+            "/tmp/probe.json",
+        ])
+        .unwrap();
+        assert_eq!(cttn.commit_policy, action_probe::CommitPolicy::ProbeCttnV1);
+        assert_eq!(cttn.cttn_rho, 0.2);
+        assert_eq!(cttn.cttn_mu, 0.8);
     }
 
     #[test]
