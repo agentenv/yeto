@@ -70,6 +70,21 @@ off-trajectory averaging, NOT shrinkage — survives the effective-LR control
 −1). Horizon tilt as predicted (grows as H shrinks). An order of magnitude below
 the product bar. Matches the spec's P≈14% + honest-negative note.
 
+### SCAFFOLD-lite inner control variates (exp2-51) — FAIL/KILL
+Δ = amount SCAFFOLD-lite's loss is BELOW the matched SGD-0.28 control (paired
+within each workload's own eval set; higher Δ = better). Correctness gate PASSED
+(control-arm zero-sum exactly 0.0/0.0 → implementation provably unbiased).
+| cell | SCAFFOLD | control | Δ (better by) |
+|------|----------|---------|---------------|
+| HET-H64 | 1.43882 | 1.45705 | +0.0182 (clears) |
+| H64-IID | 1.53250 | 1.54859 | +0.0161 |
+| H256-IID | 1.54791 | 1.54865 | +0.0007 (≈null) |
+Gate needs a >0.018 win on H256 AND heterogeneous. H256 is ~null (+0.0007) — the
+OPPOSITE of the design's grow-with-H prediction. The non-monotonicity (H64 +0.016
+→ H256 ~0) shows the H64-IID +0.016 was single-seed NOISE, not a horizon-tilted
+effect; true IID effect ≈0. Het +0.018 alone is insufficient → KILL. The
+implementation is clean (zero-sum verified), so the null is real, not a bug.
+
 ## Notes
 ¹ block-Yogi H256 lost to node preemption mid-run; conclusion robust without it.
 ² curvature-aware momentum and Iso-C are compared against their **same-node** SGD
