@@ -175,3 +175,159 @@ Scope caveats (honest): 2D and per-step (no multi-step/convergence claim);
 exact-arithmetic (no f32 rounding, cf. THEORY.md §0); `g_t = ∇L` in the model
 (the production pseudo-gradient-vs-gradient gap is THEORY.md Conjecture C.5); T4
 is a conditional (eigen-aligned, curvature-cap) sufficiency statement.
+
+---
+
+# Anchor-drift modules: two SEPARABLE mechanisms + the exact correction
+
+Status: 2026-07-13. Four new sorry-free modules
+(`lean-mechanism/LeanMechanism/{MergeSemantics,AnchorDrift,Counterexamples,Correction}.lean`),
+same toolchain, all built by `lake build` and independently
+`#print axioms`-checked to depend only on `[propext, Classical.choice,
+Quot.sound]` (R5 only `[propext]`). These machine-verify the docs/ANCHOR_DRIFT_CONTROL.md
+thesis that "native momentum poison" and "current-anchor contamination" are two
+distinct mechanisms, and prove the base-version correction exactly removes the
+second. Every merge definition was validated against the real Rust syncer by a
+golden trace (below); the Lean model is the update `merge.rs`/`server.rs`
+actually apply.
+
+## Semantics (both sign conventions, kept separate by name)
+Per-worker syncer **pseudo-gradient** is `δ = anchor − upload` (anchor MINUS
+learner; confirmed in `merge_avg`/`build_aggregate_from_subset`). Two anchors:
+current-anchor `δ_ca = current − upload` (PRODUCTION), version-matched
+`δ_vm = base − upload`; `anchorDrift = current − base`, so
+`δ_ca = δ_vm + anchorDrift`. The **local-delta** convention (learner movement
+`= upload − anchor`) gives `localCa = localVm − anchorDrift` — the exact form of
+docs/ANCHOR_DRIFT_CONTROL.md's `current_anchor_delta = true_local_delta − anchor_drift`.
+
+## MergeSemantics.lean — three state machines, equivalence condition ✅ sorry-free
+`MergeEvent {base, current, upload}`; `caDelta`, `vmDelta`, `anchorDrift`,
+`Barrier e := current = base`.
+| theorem | statement |
+|---|---|
+| `caDelta_eq_vmDelta_add_drift` | `caDelta = vmDelta + anchorDrift` (componentwise) |
+| `barrier_drift_zero` | `Barrier e → anchorDrift e = 0` |
+| `barrier_ca_eq_vm` | `Barrier e → caDelta e = vmDelta e` |
+| `ca_eq_vm_iff_no_drift` | `caDelta e = vmDelta e ↔ anchorDrift e = 0` (THE equivalence: the two streaming semantics agree exactly iff drift = 0) |
+
+## AnchorDrift.lean — the core identity + the 5 numbered results ✅ sorry-free
+`localVm`, `localCa`; `localCa_eq_localVm_sub_drift` is the core identity
+`localCa = localVm − anchorDrift`.
+| theorem | statement (turns prose into a theorem) |
+|---|---|
+| `R1_barrier_implies_no_drift` | barrier ⇒ `anchorDrift = 0` |
+| `R2_no_drift_ca_eq_vm` | `anchorDrift = 0` ⇒ current-anchor ≡ version-matched exactly |
+| `R3_quorum_not_no_drift` | ∃ event: full quorum yet `base_version < current_version` and `anchorDrift ≠ 0` (strict quorum does NOT imply drift 0) |
+| `R4_zero_delay_not_no_drift` | ∃ event: `injected_delay = 0` yet `anchorDrift ≠ 0` (zero injected delay does NOT imply drift 0) |
+| `R5_all_commit_not_same_version` | ∃ two committing workers with different `base_version` (all-commit does NOT imply all-same-version) |
+
+R3/R4/R5 are existence-of-counterexample-state theorems: quorum and
+zero-injected-delay both constrain PARTICIPATION, not VERSION agreement, so
+"strict-quorum but not barrier" carries nonzero anchor drift.
+
+## Counterexamples.lean — the two separable mechanisms ✅ sorry-free
+**(A) NATIVE momentum poison, compatible with barrier (drift = 0).** Reuses the
+T2 instance `H = diag(1,100)`, `θ = g = (1,0)`, transverse buffer `(0,1)`,
+`μ = 9/10`, matched SGD LR `57/200`. `cexA_barrier_no_drift` (this event has zero
+drift), `cexA_sgd_descends` (`−19551/80000 < 0`), `cexA_mom_ascends` (`+19749/40000
+> 0`). Shows the momentum mechanism can exist even under ORIGINAL barrier DiLoCo
+(zero staleness, zero overlap, zero drift) — a possibility, requiring `μ > 0` and
+a transverse buffer.
+**(B) ANCHOR-DRIFT poison, ZERO momentum (`μ = 0`).** `H = diag(1,4)`, `θ = (2,0)`,
+`δ_vm = (2,0)`, anchor drift `d = (0, 3/2)` (sharp direction), `δ_ca = (2, 3/2)`.
+`cexB_vm_descends` (`= −2`) / `cexB_vm_descends_neg`; `cexB_ca_ascends` (`= +5/2`)
+/ `cexB_ca_ascends_pos`; `cexB_only_drift_differs` (`δ_ca = δ_vm + (0,3/2)`).
+Identical worker updates / quorum / data / optimizer — ONLY swapping version-
+matched → current-anchor flips descent (`−2`) to ascent (`+5/2`), with **no
+momentum buffer at all**. This is why the two mechanisms are distinct: (A) needs
+momentum + transverse buffer + curvature even at zero drift; (B) needs only
+nonzero anchor drift, no momentum.
+
+**Parametric danger-threshold** (general `H`, `μ = 0`, `η = 1`):
+`drift_gap_identity`:
+`dL(δ_vm + d) − dL(δ_vm) = Bil H d (δ_vm − θ) + ½ Q H d`.
+(Sign note — genuine correction: the interaction is `dᵀH(δ_vm − θ)`, NOT the
+`dᵀH(θ − δ_vm)` first drafted; forced by the `θ ↦ θ − u` convention and
+`δ_ca = δ_vm + d`. Caught during the compile loop; the wrong sign is false, e.g.
+`H = I, θ = (1,0), δ_vm = 0, d = (1,0)`.) `drift_flip_threshold`: given the
+version-matched step descends, current-anchor ASCENDS iff
+`Bil H d (δ_vm − θ) + ½ Q H d > −dL(δ_vm)` (the descent margin). The flip depends
+on drift **direction and curvature**, not norm: a large drift in a flat direction
+is harmless; modest sharp-direction drift is catastrophic. → the GPU experiment
+should log this curvature-weighted interaction, not just `‖anchorDrift‖`.
+
+**Upgraded T3 (system-faithful indistinguishability).** `T3_upgrade_indistinguishable`,
+`T3_upgrade_controller_blind`. Existence of an INDISTINGUISHABLE PAIR: same merged
+delta `δ = (2, 3/2)` and same buffer `(0,0)`, but a version-matched instance
+(`H = I, θ = (2,3/2)`) descends `−25/8` while a current-anchor-contaminated
+instance (`H = diag(1,4), θ = (2,0)`) ascends `+5/2`. Any controller whose entire
+input is `(δ, buffer)` — hence gain `‖δ‖` and `cos(δ,buf)`, both functions of
+`(δ,buf)` — returns the same action on both, so gain/cosine alone cannot separate
+a safe true-local update from current-anchor contamination.
+Exact quantifiers (audited, deliberately NOT over-informing the comparator):
+(i) EXISTENCE of one bad pair, not an all-instances / worst-case lower bound;
+(ii) the controller sees ONLY `(δ, buffer)` — it is NOT given `H`, `θ`,
+`anchorDrift`, or `base_version`; (iii) fixed unit step `η = 1`, `μ = 0`, same
+applied step on both problems (no per-problem oracle LR tuning of the
+controller); (iv) ONE-step (no convergence/long-horizon claim); (v) gain and
+cosine are functions of `(δ,buf)`, so equal observable ⇒ equal gain/cosine. This
+strengthens Basic.lean's T3 from "scalar-cap suboptimality across a quadratic
+family" to "merged-delta gain/cosine cannot even distinguish current-anchor
+contamination from a safe update."
+
+## Correction.lean — base-version correction exactly recovers the true delta ✅ sorry-free
+| theorem | statement |
+|---|---|
+| `correction_recovers_vm` | `localCa + anchorDrift = localVm` (current_anchor_delta + anchor_drift = version_matched_local_delta — the task's exact identity) |
+| `correction_recovers_vm_pg` | `caDelta − anchorDrift = vmDelta` (pseudo-gradient form) |
+| `corrected_step_eq_vm_step` | `dL(θ, (δ_vm + d) − d) = dL(θ, δ_vm)` (correcting by −d gives exactly the version-matched loss change) |
+| `correction_safe` | the corrected step, being the version-matched step, inherits its descent |
+
+Product implication: if the GPU 3-arm control (docs/ANCHOR_DRIFT_CONTROL.md) finds
+current-anchor is the main source, the fix is NOT a fancier optimizer — it is
+learners uploading `base_version` so the syncer differences against the true base
+and recovers the exact true local delta. This is precisely the algebra of the
+in-progress Rust `--version-matched-anchor` flag (`server.rs`: re-anchor
+`upload' = upload + (current − base)`, so `current − upload' = base − upload`).
+
+## Lean ↔ Rust golden-trace consistency check (more load-bearing than another theorem)
+`scripts/lean_rust_golden_trace.py` (exact-rational reference) +
+`syncer/src/merge.rs::tests::anchor_drift_golden_trace_matches_lean_model` (drives
+the REAL production `merge_avg` + `nesterov_step`). A 2-dim / 2-worker / 3-commit
+trace (`η = μ = 1/2`, base `(0,0)`, `b_0 = 0`), all dyadic so f32 == exact and
+assertions are bit-exact `==`. **Verified against `merge.rs`/`state.rs` reality:**
+delta SIGN = anchor − learner; merge is weighted MEAN not sum (equal weights c1,
+1:3 weights c2); the exact Nesterov form `b_t = μ b_{t-1} + δ_t`,
+`d_t = δ_t + μ b_t`, `θ −= η d_t`, `b_0 = 0`; and WHERE current-anchor bites — at
+commit 3 a lagging worker (base `θ_1` while the server is at `θ_2`) makes the
+production current-anchor delta `(−7/64, 1/32)` differ from the version-matched
+delta `(−15/128, −3/64)` by exactly that worker's merge-weighted anchor drift
+(`½ · (1/64, 5/32)`). The Lean model, the Python reference, and BOTH Rust paths
+(production current-anchor; the WIP `--version-matched-anchor`) agree. **No
+discrepancy found** — the Lean theorems are about the update the syncer really
+applies. (Ground-truth check: `Δ = self.params[fid] − upload` with
+`self.params[fid]` the syncer's CURRENT global is the current-anchor locus;
+`nesterov_step` matches OPTIMIZER_SEMANTICS.md's recursion bit-for-bit; buffer
+init `b_0 = 0`; push-vs-commit versions gate admission but not the arithmetic.)
+
+## Proof status summary (anchor-drift modules)
+All 20 theorems below are proved, sorry-free, `#print axioms` = the three
+standard axioms (R5: `propext` only).
+
+| module | theorems |
+|---|---|
+| MergeSemantics | `caDelta_eq_vmDelta_add_drift`, `barrier_drift_zero`, `barrier_ca_eq_vm`, `ca_eq_vm_iff_no_drift` |
+| AnchorDrift | `localCa_eq_localVm_sub_drift`, `R1_barrier_implies_no_drift`, `R2_no_drift_ca_eq_vm`, `R3_quorum_not_no_drift`, `R4_zero_delay_not_no_drift`, `R5_all_commit_not_same_version` |
+| Counterexamples | `cexA_barrier_no_drift`, `cexA_sgd_descends`, `cexA_mom_ascends`, `cexB_vm_descends(_neg)`, `cexB_ca_ascends(_pos)`, `cexB_only_drift_differs`, `drift_gap_identity`, `drift_flip_threshold`, `T3_upgrade_indistinguishable`, `T3_upgrade_controller_blind` |
+| Correction | `correction_recovers_vm`, `correction_recovers_vm_pg`, `corrected_step_eq_vm_step`, `correction_safe` |
+
+Scope caveats (honest, same discipline as T1–T4): 2D and per-step (no
+multi-step/convergence); exact rational arithmetic (no f32 rounding); the
+memoryless (`μ = 0`) cases isolate the anchor-drift mechanism but the production
+optimizer carries momentum, which can only compound accumulated drift (THEORY.md
+§0, A.3); `dL` uses the exact quadratic loss change, and `g = Hθ` where a true
+gradient is invoked. Lean does NOT and must NOT adjudicate which mechanism
+dominates real training — that is the GPU 3-arm control's job
+(docs/ANCHOR_DRIFT_CONTROL.md). These modules prove the mechanisms are
+SEPARABLE and that the correction is EXACT; they do not claim current-anchor is
+the empirical culprit.
