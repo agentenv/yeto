@@ -53,7 +53,7 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-CKPT_MAGIC = 0x59544F53  # "SOTY" little-endian, see yeto/export.py
+CKPT_MAGIC = 0xD1705A7E  # syncer state snapshot magic, see syncer/src/state.rs
 CAND_RE = re.compile(r"candidate_step_(\d{8})_fragment_(\d{4})_learner_(\d{4})\.f32$")
 
 
