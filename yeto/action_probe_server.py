@@ -51,6 +51,7 @@ from .action_probe import (
     SelectionConfig,
     build_anchor_panels,
     build_cttn_result_frame,
+    build_cttn_shadow_result_frame,
     decode_frame,
     load_anchor_manifest,
     parse_cttn_request,
@@ -897,9 +898,11 @@ def _cttn_error_response(
     elapsed_ms: float,
 ) -> dict[str, Any]:
     header = frame.header
+    cttn = header.get("cttn")
+    shadow = isinstance(cttn, dict) and cttn.get("mode") == "shadow"
     return {
         "protocol": PROTOCOL,
-        "type": "cttn_result",
+        "type": "cttn_shadow_result" if shadow else "cttn_result",
         "request_id": header.get("request_id"),
         "run_uuid": header.get("run_uuid"),
         "request_digest": frame.digest,
@@ -990,15 +993,26 @@ class ActionProbeEngine:
                         "request fragment layout SHA-256 does not match service"
                     )
                 backend_result = self.backend.cttn_step(frame, cttn_request)
-                encoded = build_cttn_result_frame(
-                    cttn_request,
-                    backend_result["d"],
-                    backend_result["b_new"],
-                    backend_result["diagnostics"],
-                    anchor_tensors_sha256=backend_result[
-                        "anchor_tensors_sha256"
-                    ],
-                )
+                if cttn_request.mode == "shadow":
+                    encoded = build_cttn_shadow_result_frame(
+                        cttn_request,
+                        backend_result["z_matrix"],
+                        backend_result["z_scalar"],
+                        backend_result["diagnostics"],
+                        anchor_tensors_sha256=backend_result[
+                            "anchor_tensors_sha256"
+                        ],
+                    )
+                else:
+                    encoded = build_cttn_result_frame(
+                        cttn_request,
+                        backend_result["d"],
+                        backend_result["b_new"],
+                        backend_result["diagnostics"],
+                        anchor_tensors_sha256=backend_result[
+                            "anchor_tensors_sha256"
+                        ],
+                    )
                 response = decode_frame(encoded)
                 response.header["timings_ms"] = {
                     "parse": parse_ms,

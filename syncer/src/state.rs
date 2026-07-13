@@ -439,6 +439,10 @@ pub struct GlobalState {
     pub params: Vec<Vec<f32>>,
     /// Outer-optimizer buffers, same shape as params.
     momentum: Vec<Vec<f32>>,
+    /// Counterfactual mu=0.9 Nesterov buffer used only by CTTN shadow
+    /// diagnostics. It is updated from observed SGD pseudo-gradients and is
+    /// never consulted by the applied optimizer.
+    cttn_shadow_momentum: Vec<Vec<f32>>,
     /// Per-fragment rho-adaptive EMA of the measured round-to-round delta
     /// autocorrelation. Only the rho-adaptive optimizer reads or writes it.
     /// Deliberately NOT checkpointed (the on-disk format is shared with
@@ -553,6 +557,7 @@ impl GlobalState {
             .map(|f| vec![0.0; f.numel()])
             .collect();
         let momentum = params.clone();
+        let cttn_shadow_momentum = params.clone();
         let rho_ema = vec![merge::RHO_ADAPTIVE_INITIAL_RHO_EMA; layout.fragments.len()];
         let capped_mu = vec![merge::CAPPED_NESTEROV_INITIAL_MU; layout.fragments.len()];
         let capped_gain =
@@ -578,6 +583,7 @@ impl GlobalState {
             layout_meta,
             params,
             momentum,
+            cttn_shadow_momentum,
             rho_ema,
             capped_mu,
             capped_gain,
@@ -805,6 +811,27 @@ impl GlobalState {
         Ok(CttnInputs {
             g: self.post_renormalized_delta(fid, &aggregate.delta)?,
             b: self.momentum[fid].clone(),
+            outer_lr: self.outer_lr_for_fragment(fid)?,
+            mu,
+        })
+    }
+
+    /// Freeze shadow inputs using the independent counterfactual Nesterov
+    /// buffer rather than the applied optimizer's buffer.
+    pub fn cttn_shadow_inputs(&self, aggregate: &AggregateDelta, mu: f32) -> Result<CttnInputs> {
+        self.ensure_current_base(
+            aggregate.fragment_id,
+            aggregate.base_version,
+            aggregate.base_state_epoch,
+            aggregate.base_state_fingerprint,
+        )?;
+        let fid = aggregate.fragment_id;
+        if !mu.is_finite() || !(0.0..1.0).contains(&mu) {
+            bail!("fragment {fid}: CTTN shadow mu must be finite and in [0, 1)");
+        }
+        Ok(CttnInputs {
+            g: self.post_renormalized_delta(fid, &aggregate.delta)?,
+            b: self.cttn_shadow_momentum[fid].clone(),
             outer_lr: self.outer_lr_for_fragment(fid)?,
             mu,
         })
@@ -1060,6 +1087,37 @@ impl GlobalState {
         };
         preview.action_fingerprint = compute_action_fingerprint(&preview);
         self.commit_preview(preview)
+    }
+
+    /// Commit the CTTN shadow policy's applied action: exact plain SGD
+    /// (`d == g`) while independently advancing the counterfactual momentum
+    /// buffer `b <- mu*b + g`. No CTTN vector enters params or optimizer state.
+    pub fn commit_cttn_shadow_sgd(
+        &mut self,
+        aggregate: &AggregateDelta,
+        target_version: u64,
+        mu: f32,
+    ) -> Result<MergeStats> {
+        let inputs = self.cttn_shadow_inputs(aggregate, mu)?;
+        let fid = aggregate.fragment_id;
+        let next_shadow: Vec<f32> = inputs
+            .b
+            .iter()
+            .zip(&inputs.g)
+            .map(|(buffer, gradient)| mu * *buffer + *gradient)
+            .collect();
+        // Plain SGD's ordinary Nesterov(mu=0) storage is exactly g. Passing
+        // it here keeps the checkpointed applied-optimizer buffer conventional
+        // while the independent shadow buffer carries mu=0.9 history.
+        let stats = self.commit_cttn_step(
+            aggregate,
+            target_version,
+            &inputs.g,
+            &inputs.g,
+            inputs.outer_lr,
+        )?;
+        self.cttn_shadow_momentum[fid] = next_shadow;
+        Ok(stats)
     }
 
     /// Purely scale the applied parameter step of a complete full-group
@@ -1807,6 +1865,7 @@ impl GlobalState {
                     *v = f32::from_le_bytes(r.take(4)?.try_into()?);
                 }
             }
+            self.cttn_shadow_momentum[p].fill(0.0);
             // The rho-adaptive EMA and the capped-Nesterov-family effective
             // momentum and gc gain are not part of the checkpoint format;
             // restore to their references so resumed runs are deterministic.
@@ -2223,6 +2282,45 @@ mod tests {
         assert_eq!(st.momentum[0], b_new);
         assert_eq!(st.versions[0], 1);
         assert!((stats.outer.applied_step_norm - vector_norm(&d) * 0.25).abs() < 1e-7);
+    }
+
+    #[test]
+    fn cttn_shadow_commits_exact_sgd_and_keeps_independent_mu09_buffer() {
+        let mut st = GlobalState::new(layout2(), None, 0.28, 0.0, crate::protocol::DTYPE_F32);
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![1.0; 4]).unwrap();
+        let learner = [0.0f32, 2.0, -1.0, 3.0];
+        let aggregate = st
+            .build_full_aggregate(0, &[MergeCandidate::new(0, &learner, 1.0)])
+            .unwrap();
+        let inputs = st.cttn_shadow_inputs(&aggregate, 0.9).unwrap();
+        let before = st.params[0].clone();
+        st.commit_cttn_shadow_sgd(&aggregate, 1, 0.9).unwrap();
+        for index in 0..inputs.g.len() {
+            assert_eq!(
+                st.params[0][index].to_bits(),
+                (before[index] - 0.28 * inputs.g[index]).to_bits(),
+                "shadow d must equal g exactly"
+            );
+        }
+        assert_eq!(st.momentum[0], inputs.g);
+        assert_eq!(st.cttn_shadow_momentum[0], inputs.g);
+
+        let learner2 = [0.5f32, 1.5, -0.5, 2.5];
+        let aggregate2 = st
+            .build_full_aggregate(0, &[MergeCandidate::new(0, &learner2, 1.0)])
+            .unwrap();
+        let inputs2 = st.cttn_shadow_inputs(&aggregate2, 0.9).unwrap();
+        assert_eq!(inputs2.b, inputs.g);
+        st.commit_cttn_shadow_sgd(&aggregate2, 2, 0.9).unwrap();
+        let expected_shadow: Vec<f32> = inputs2
+            .b
+            .iter()
+            .zip(&inputs2.g)
+            .map(|(b, g)| 0.9 * *b + *g)
+            .collect();
+        assert_eq!(st.cttn_shadow_momentum[0], expected_shadow);
+        assert_eq!(st.momentum[0], inputs2.g);
     }
 
     #[test]

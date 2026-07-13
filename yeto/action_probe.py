@@ -512,8 +512,8 @@ def build_cttn_request_frame(
     if rho < 0.0:
         raise ProtocolError("cttn.rho must be non-negative")
     block_steps = _require_int(block_steps, "cttn.block_steps", minimum=1)
-    if mode not in ("matrix", "scalar"):
-        raise ProtocolError("cttn.mode must be matrix or scalar")
+    if mode not in ("matrix", "scalar", "shadow"):
+        raise ProtocolError("cttn.mode must be matrix, scalar, or shadow")
 
     header = {
         "protocol": PROTOCOL,
@@ -989,8 +989,8 @@ def parse_cttn_request(frame: Frame) -> CttnRequest:
         raise ProtocolError("cttn.rho must be non-negative")
     block_steps = _require_int(cttn.get("block_steps"), "cttn.block_steps", minimum=1)
     mode = cttn.get("mode", "matrix")
-    if mode not in ("matrix", "scalar"):
-        raise ProtocolError("cttn.mode must be matrix or scalar")
+    if mode not in ("matrix", "scalar", "shadow"):
+        raise ProtocolError("cttn.mode must be matrix, scalar, or shadow")
     if offset != len(frame.payload):
         raise ProtocolError(
             f"payload has {len(frame.payload) - offset} unclaimed bytes"
@@ -1076,6 +1076,64 @@ def build_cttn_result_frame(
         "dtype": "f32le",
         "d": specs["d"],
         "b_new": specs["b_new"],
+        "diagnostics": diagnostics,
+        "digests": {
+            "state_sha256": request.current_state_digest,
+            "g_sha256": request.g_digest,
+            "b_sha256": request.b_digest,
+            "anchor_manifest_sha256": request.anchor_manifest_sha256,
+            "anchor_tensors_sha256": _require_digest(
+                anchor_tensors_sha256, "anchor_tensors_sha256"
+            ),
+            "probe_config_sha256": request.probe_config_sha256,
+            "layout_hash": request.layout_hash,
+        },
+    }
+    return encode_frame(header, bytes(payload))
+
+
+def build_cttn_shadow_result_frame(
+    request: CttnRequest,
+    z_matrix: torch.Tensor,
+    z_scalar: torch.Tensor,
+    diagnostics: Mapping[str, Any],
+    *,
+    anchor_tensors_sha256: str,
+) -> bytes:
+    """Build a shadow result with payload order ``z_matrix || z_scalar``."""
+
+    fragment_numel = int(request.g.numel())
+    payload = bytearray()
+    specs: dict[str, dict[str, Any]] = {}
+    for name, tensor in (("z_matrix", z_matrix), ("z_scalar", z_scalar)):
+        flat = tensor.detach().reshape(-1)
+        if int(flat.numel()) != fragment_numel:
+            raise ProtocolError(
+                f"{name} has {flat.numel()} values, expected {fragment_numel}"
+            )
+        raw = _tensor_bytes(flat)
+        specs[name] = {
+            "offset": len(payload),
+            "nbytes": len(raw),
+            "sha256": _sha256(raw),
+        }
+        payload.extend(raw)
+    diagnostics = json.loads(json.dumps(dict(diagnostics), allow_nan=False))
+    header = {
+        "protocol": PROTOCOL,
+        "type": "cttn_shadow_result",
+        "request_id": request.request_id,
+        "run_uuid": request.run_uuid,
+        "step": request.step,
+        "fragment_id": request.fragment_id,
+        "base_version": request.base_version,
+        "state_epoch": request.state_epoch,
+        "fragment_versions": list(request.fragment_versions),
+        "request_digest": request.request_digest,
+        "ok": True,
+        "dtype": "f32le",
+        "z_matrix": specs["z_matrix"],
+        "z_scalar": specs["z_scalar"],
         "diagnostics": diagnostics,
         "digests": {
             "state_sha256": request.current_state_digest,
@@ -1815,7 +1873,7 @@ class ActionProbeReplica:
     def cttn_step(self, request: CttnRequest) -> dict[str, Any]:
         """Compute one CTTN direction at the request's exact complete state."""
 
-        from .cttn_sidecar import cttn_sidecar_step
+        from .cttn_sidecar import cttn_sidecar_shadow_step, cttn_sidecar_step
 
         self._validate_request_identity(request)
         self._validate_state(request)
@@ -1830,24 +1888,40 @@ class ActionProbeReplica:
             params = tuple(self.params[name] for name in request.fragment_names)
             g = request.g.to(device=self.device, dtype=torch.float32)
             b = request.b.to(device=self.device, dtype=torch.float32)
-            result = cttn_sidecar_step(
-                self.model,
-                params,
-                self.panels,
-                g,
-                b,
-                mu=request.mu,
-                rho=request.rho,
-                block_steps=request.block_steps,
-                loss_function=self.loss_function,
-                scalar_control=request.mode == "scalar",
-            )
+            if request.mode == "shadow":
+                result = cttn_sidecar_shadow_step(
+                    self.model,
+                    params,
+                    self.panels,
+                    g,
+                    b,
+                    mu=request.mu,
+                    rho=request.rho,
+                    block_steps=request.block_steps,
+                    loss_function=self.loss_function,
+                )
+            else:
+                result = cttn_sidecar_step(
+                    self.model,
+                    params,
+                    self.panels,
+                    g,
+                    b,
+                    mu=request.mu,
+                    rho=request.rho,
+                    block_steps=request.block_steps,
+                    loss_function=self.loss_function,
+                    scalar_control=request.mode == "scalar",
+                )
             _sync_device(self.device)
-            if result.d.numel() != request.g.numel() or result.b_new.numel() != request.b.numel():
+            vectors = (
+                (result.z_matrix, result.z_scalar)
+                if request.mode == "shadow"
+                else (result.d, result.b_new)
+            )
+            if any(vector.numel() != request.g.numel() for vector in vectors):
                 raise EvaluationError("CTTN sidecar returned a malformed vector length")
-            if not bool(torch.isfinite(result.d).all()) or not bool(
-                torch.isfinite(result.b_new).all()
-            ):
+            if any(not bool(torch.isfinite(vector).all()) for vector in vectors):
                 raise EvaluationError("CTTN sidecar returned NaN or Inf")
             if not self._state_is_exact(request.current_state):
                 raise EvaluationError("CTTN sidecar mutated the complete model state")
@@ -1868,6 +1942,38 @@ class ActionProbeReplica:
         if primary_error is not None:
             raise primary_error
         assert result is not None
+        if request.mode == "shadow":
+            def shadow_diagnostics(diag):
+                ritz = diag.ritz
+                tau = float(diag.tau)
+                return {
+                    "bind": bool(diag.bind),
+                    "tau": None if math.isinf(tau) and tau > 0.0 else tau,
+                    "retention": float(diag.norm_retention),
+                    "e_before": float(diag.e_before),
+                    "e_after": float(diag.e_after),
+                    "budget": float(diag.budget),
+                    "n_modes_90": int(diag.n_modes_90),
+                    "ritz_max": float(ritz.max()) if getattr(ritz, "size", 0) else 0.0,
+                    "loss": float(result.loss),
+                }
+
+            diagnostics = {
+                "matrix": shadow_diagnostics(result.matrix_diag),
+                "scalar": shadow_diagnostics(result.scalar_diag),
+            }
+            json.dumps(diagnostics, allow_nan=False)
+            return {
+                "z_matrix": result.z_matrix.detach().to(device="cpu", dtype=torch.float32),
+                "z_scalar": result.z_scalar.detach().to(device="cpu", dtype=torch.float32),
+                "diagnostics": diagnostics,
+                "state_sha256": request.current_state_digest,
+                "state_restored": True,
+                "anchor_manifest_sha256": self.anchor_manifest_sha256,
+                "anchor_tensors_sha256": self.anchor_tensors_sha256,
+                "probe_config_sha256": self.probe_config_sha256,
+                "total_ms": (time.perf_counter() - started) * 1000.0,
+            }
         ritz = result.diag.ritz
         tau = float(result.diag.tau)
         diagnostics = {

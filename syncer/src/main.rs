@@ -87,6 +87,10 @@ struct Args {
     /// --outer-momentum, which configures the fallback/control optimizer.
     #[arg(long, default_value_t = 0.9, value_parser = parse_cttn_mu)]
     cttn_mu: f32,
+    /// Number of stratified HVP samples for cttn_shadow_v1. With four
+    /// fragments, 32 gives eight fragment-local samples each.
+    #[arg(long, default_value_t = 32)]
+    cttn_shadow_samples: u32,
     /// Post-merge renormalization for mediation-control experiments
     /// (EXP2.39 norm-matched intervention): after the production merge,
     /// rescale the merged delta of every commit to this L2 norm (per
@@ -140,7 +144,8 @@ struct Args {
     /// frozen step-scale grid but commits x1; probe_lr_v1 commits the exact
     /// sidecar-selected scaled preview; cttn_v1 and cttn_scalar_v1 ask the
     /// sidecar to compute a matrix or scalar curvature-trust direction and
-    /// commit it through the dedicated path.
+    /// commit it through the dedicated path; cttn_shadow_v1 samples both
+    /// directions but always commits exact plain SGD.
     #[arg(long, default_value_t = action_probe::CommitPolicy::TokenWeighted)]
     commit_policy: action_probe::CommitPolicy,
     /// Persistent action-probe sidecar endpoint. Probe policies require a
@@ -171,6 +176,18 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
     validate_outer_optimizer(args.outer_optimizer, args.outer_momentum)?;
+    if args.commit_policy.is_cttn_shadow() {
+        if args.outer_optimizer != merge::OuterOptimizer::Nesterov
+            || args.outer_momentum.to_bits() != 0.0f32.to_bits()
+        {
+            anyhow::bail!(
+                "cttn_shadow_v1 requires --outer-optimizer nesterov --outer-momentum 0 (ordinary SGD)"
+            );
+        }
+        if args.resume {
+            anyhow::bail!("cttn_shadow_v1 does not support --resume because its diagnostic buffer is intentionally not checkpointed");
+        }
+    }
     let delta_correction = match args.delta_correction.as_str() {
         "heloco" => true,
         "none" => false,
@@ -203,6 +220,7 @@ fn main() -> anyhow::Result<()> {
         outer_restart_cos_threshold: args.outer_restart_cos_threshold,
         cttn_rho: args.cttn_rho,
         cttn_mu: args.cttn_mu,
+        cttn_shadow_samples: args.cttn_shadow_samples,
         delta_norm_ref: args.delta_norm_ref,
         version_matched_anchor: args.version_matched_anchor,
         anchor_drift_instrument: args.version_matched_anchor || args.anchor_drift_log,
@@ -385,6 +403,7 @@ mod tests {
         assert_eq!(args.outer_restart_cos_threshold, 0.0);
         assert_eq!(args.cttn_rho, 0.10);
         assert_eq!(args.cttn_mu, 0.9);
+        assert_eq!(args.cttn_shadow_samples, 32);
         assert_eq!(args.delta_norm_ref, 0.0);
         assert_eq!(
             args.commit_policy,
@@ -483,6 +502,29 @@ mod tests {
             scalar_cttn.commit_policy,
             action_probe::CommitPolicy::ProbeCttnScalarV1
         );
+
+        let shadow = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "4",
+            "--total-steps",
+            "40",
+            "--outer-momentum",
+            "0",
+            "--commit-policy",
+            "cttn_shadow_v1",
+            "--cttn-shadow-samples",
+            "32",
+            "--action-probe-endpoint",
+            "127.0.0.1:49321",
+            "--action-probe-run-uuid",
+            "run-cttn-shadow",
+            "--action-probe-expected-config",
+            "/tmp/probe.json",
+        ])
+        .unwrap();
+        assert_eq!(shadow.commit_policy, action_probe::CommitPolicy::CttnShadowV1);
+        assert_eq!(shadow.cttn_shadow_samples, 32);
     }
 
     #[test]

@@ -46,6 +46,7 @@ pub enum CommitPolicy {
     ProbeLrV1,
     ProbeCttnV1,
     ProbeCttnScalarV1,
+    CttnShadowV1,
 }
 
 impl CommitPolicy {
@@ -72,8 +73,13 @@ impl CommitPolicy {
         match self {
             Self::ProbeCttnV1 => Some("matrix"),
             Self::ProbeCttnScalarV1 => Some("scalar"),
+            Self::CttnShadowV1 => Some("shadow"),
             _ => None,
         }
+    }
+
+    pub const fn is_cttn_shadow(self) -> bool {
+        matches!(self, Self::CttnShadowV1)
     }
 }
 
@@ -87,6 +93,7 @@ impl fmt::Display for CommitPolicy {
             Self::ProbeLrV1 => "probe_lr_v1",
             Self::ProbeCttnV1 => "cttn_v1",
             Self::ProbeCttnScalarV1 => "cttn_scalar_v1",
+            Self::CttnShadowV1 => "cttn_shadow_v1",
         })
     }
 }
@@ -103,8 +110,9 @@ impl FromStr for CommitPolicy {
             "probe_lr_v1" | "probe-lr-v1" => Ok(Self::ProbeLrV1),
             "cttn_v1" | "cttn-v1" => Ok(Self::ProbeCttnV1),
             "cttn_scalar_v1" | "cttn-scalar-v1" => Ok(Self::ProbeCttnScalarV1),
+            "cttn_shadow_v1" | "cttn-shadow-v1" => Ok(Self::CttnShadowV1),
             _ => Err(format!(
-                "commit policy must be token_weighted, probe_shadow, probe_loo_v1, probe_lr_shadow, probe_lr_v1, cttn_v1, or cttn_scalar_v1; got {value:?}"
+                "commit policy must be token_weighted, probe_shadow, probe_loo_v1, probe_lr_shadow, probe_lr_v1, cttn_v1, cttn_scalar_v1, or cttn_shadow_v1; got {value:?}"
             )),
         }
     }
@@ -940,6 +948,15 @@ pub struct VerifiedCttn {
     pub request_digest: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifiedCttnShadow {
+    pub z_matrix: Vec<f32>,
+    pub z_scalar: Vec<f32>,
+    pub matrix_diagnostics: CttnDiagnostics,
+    pub scalar_diagnostics: CttnDiagnostics,
+    pub request_digest: String,
+}
+
 #[derive(Debug)]
 pub enum ProbeError {
     Timeout,
@@ -1124,6 +1141,44 @@ impl ActionProbeClient {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn cttn_shadow_step(
+        &mut self,
+        state: &GlobalState,
+        aggregate: &AggregateDelta,
+        step: u64,
+        g: &[f32],
+        b: &[f32],
+        mu: f32,
+        rho: f32,
+        block_steps: u32,
+    ) -> std::result::Result<VerifiedCttnShadow, ProbeError> {
+        self.last_request_digest = None;
+        let request = self.build_cttn_request(
+            state, aggregate, step, g, b, mu, rho, block_steps, "shadow",
+        )?;
+        self.last_request_digest = Some(request.request_digest.clone());
+        let timeout = self.config.timeout;
+        let response = match tokio::time::timeout(timeout, self.roundtrip(&request.frame)).await {
+            Err(_) => {
+                self.stream = None;
+                return Err(ProbeError::Timeout);
+            }
+            Ok(Err(error)) => {
+                self.stream = None;
+                return Err(error);
+            }
+            Ok(Ok(response)) => response,
+        };
+        match verify_cttn_shadow_response(&response, &request, &self.config) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                self.stream = None;
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn build_cttn_request(
         &self,
         state: &GlobalState,
@@ -1171,9 +1226,9 @@ impl ActionProbeClient {
                     .to_owned(),
             ));
         }
-        if !matches!(mode, "matrix" | "scalar") {
+        if !matches!(mode, "matrix" | "scalar" | "shadow") {
             return Err(ProbeError::Protocol(format!(
-                "CTTN mode must be matrix or scalar, got {mode:?}"
+                "CTTN mode must be matrix, scalar, or shadow, got {mode:?}"
             )));
         }
 
@@ -1685,6 +1740,210 @@ fn verify_cttn_response(
         diagnostics,
         request_digest: request.request_digest.clone(),
     })
+}
+
+fn verify_cttn_shadow_response(
+    response: &WireResponse,
+    request: &WireCttnRequest,
+    config: &ClientConfig,
+) -> std::result::Result<VerifiedCttnShadow, ProbeError> {
+    let root = strict_json(&response.header)
+        .map_err(|error| ProbeError::Protocol(format!("invalid response JSON: {error:#}")))?;
+    let object = root
+        .as_object()
+        .ok_or_else(|| ProbeError::Protocol("response JSON must be an object".to_owned()))?;
+    require_response_string(object, "protocol", PROTOCOL)?;
+    require_response_string(object, "type", "cttn_shadow_result")?;
+    require_response_string(object, "request_id", &request.request_id)?;
+    require_response_string(object, "run_uuid", &config.run_uuid)?;
+    require_response_string(object, "request_digest", &request.request_digest)?;
+    let ok = object
+        .get("ok")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| ProbeError::Protocol("response ok must be boolean".to_owned()))?;
+    if !ok {
+        let reason = object
+            .get("fallback_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("remote_fail_closed");
+        let error = object.get("error").and_then(Value::as_str).unwrap_or("");
+        return Err(ProbeError::Remote(format!("{reason}: {error}")));
+    }
+    require_response_string(object, "dtype", "f32le")?;
+    require_u64(object, "step", request.step)?;
+    require_u64(object, "fragment_id", request.fragment_id as u64)?;
+    require_u64(object, "base_version", request.base_version)?;
+    require_u64(object, "state_epoch", request.state_epoch)?;
+    let versions = object
+        .get("fragment_versions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ProbeError::Protocol("fragment_versions must be a list".to_owned()))?;
+    if versions.len() != request.fragment_versions.len()
+        || versions
+            .iter()
+            .zip(&request.fragment_versions)
+            .any(|(actual, expected)| actual.as_u64() != Some(*expected))
+    {
+        return Err(ProbeError::UnsafeResponse(
+            "response fragment_versions do not match the request".to_owned(),
+        ));
+    }
+
+    let (z_matrix, next_offset) = parse_response_f32(
+        &response.payload,
+        object.get("z_matrix"),
+        0,
+        request.g.len(),
+        "z_matrix",
+    )?;
+    let (z_scalar, final_offset) = parse_response_f32(
+        &response.payload,
+        object.get("z_scalar"),
+        next_offset,
+        request.g.len(),
+        "z_scalar",
+    )?;
+    if final_offset != response.payload.len() {
+        return Err(ProbeError::UnsafeResponse(format!(
+            "CTTN shadow response has {} unclaimed payload bytes",
+            response.payload.len() - final_offset
+        )));
+    }
+
+    let digests = object
+        .get("digests")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ProbeError::UnsafeResponse("missing response digests".to_owned()))?;
+    require_response_string(digests, "state_sha256", &request.state_digest)?;
+    require_response_string(digests, "g_sha256", &request.g_digest)?;
+    require_response_string(digests, "b_sha256", &request.b_digest)?;
+    require_response_string(
+        digests,
+        "anchor_manifest_sha256",
+        &config.expected.anchor_manifest_sha256,
+    )?;
+    require_response_string(
+        digests,
+        "anchor_tensors_sha256",
+        &config.expected.anchor_tensors_sha256,
+    )?;
+    require_response_string(
+        digests,
+        "probe_config_sha256",
+        &config.expected.probe_config_sha256,
+    )?;
+    require_response_string(digests, "layout_hash", &config.expected.layout_hash)?;
+
+    let diagnostics = object
+        .get("diagnostics")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ProbeError::Protocol("diagnostics must be an object".to_owned()))?;
+    let matrix_diagnostics = parse_shadow_cttn_diagnostics(diagnostics.get("matrix"), "matrix")?;
+    let scalar_diagnostics = parse_shadow_cttn_diagnostics(diagnostics.get("scalar"), "scalar")?;
+
+    let g_norm_sq = request
+        .g
+        .iter()
+        .map(|value| (*value as f64).powi(2))
+        .sum::<f64>();
+    for (name, z) in [("matrix", &z_matrix), ("scalar", &z_scalar)] {
+        let dot = request
+            .g
+            .iter()
+            .zip(z)
+            .map(|(g, z)| *g as f64 * *z as f64)
+            .sum::<f64>();
+        let z_norm_sq = z.iter().map(|value| (*value as f64).powi(2)).sum::<f64>();
+        let tolerance = 1024.0
+            * f32::EPSILON as f64
+            * request.g.len().max(1) as f64
+            * (g_norm_sq * z_norm_sq).sqrt().max(f64::MIN_POSITIVE);
+        if !dot.is_finite() || dot.abs() > tolerance {
+            return Err(ProbeError::UnsafeResponse(format!(
+                "CTTN shadow {name} z is not transverse: g.z={dot}, tolerance={tolerance}"
+            )));
+        }
+    }
+
+    Ok(VerifiedCttnShadow {
+        z_matrix,
+        z_scalar,
+        matrix_diagnostics,
+        scalar_diagnostics,
+        request_digest: request.request_digest.clone(),
+    })
+}
+
+fn parse_shadow_cttn_diagnostics(
+    value: Option<&Value>,
+    name: &str,
+) -> std::result::Result<CttnDiagnostics, ProbeError> {
+    let object = value.and_then(Value::as_object).ok_or_else(|| {
+        ProbeError::Protocol(format!("diagnostics.{name} must be an object"))
+    })?;
+    let finite = |field: &str| -> std::result::Result<f64, ProbeError> {
+        object
+            .get(field)
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| {
+                ProbeError::Protocol(format!(
+                    "diagnostics.{name}.{field} must be finite"
+                ))
+            })
+    };
+    let bind = object
+        .get("bind")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| ProbeError::Protocol(format!("diagnostics.{name}.bind must be boolean")))?;
+    let tau = match object.get("tau") {
+        Some(Value::Null) => None,
+        Some(value) => Some(value.as_f64().filter(|value| value.is_finite()).ok_or_else(
+            || ProbeError::Protocol(format!("diagnostics.{name}.tau must be finite or null")),
+        )?),
+        None => {
+            return Err(ProbeError::Protocol(format!(
+                "diagnostics.{name}.tau is required"
+            )))
+        }
+    };
+    let diagnostics = CttnDiagnostics {
+        bind,
+        tau,
+        retention: finite("retention")?,
+        e_before: finite("e_before")?,
+        e_after: finite("e_after")?,
+        budget: finite("budget")?,
+        n_modes_90: object
+            .get("n_modes_90")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                ProbeError::Protocol(format!(
+                    "diagnostics.{name}.n_modes_90 must be non-negative"
+                ))
+            })?,
+        ritz_max: finite("ritz_max")?,
+        loss: finite("loss")?,
+    };
+    if diagnostics.tau.is_some_and(|tau| tau < 0.0)
+        || diagnostics.retention < 0.0
+        || diagnostics.e_before < 0.0
+        || diagnostics.e_after < 0.0
+        || diagnostics.budget < 0.0
+        || diagnostics.ritz_max < 0.0
+    {
+        return Err(ProbeError::UnsafeResponse(format!(
+            "CTTN shadow diagnostics.{name} contains a negative value"
+        )));
+    }
+    if diagnostics.tau.is_none()
+        && (!diagnostics.bind || diagnostics.budget != 0.0 || diagnostics.e_after != 0.0)
+    {
+        return Err(ProbeError::UnsafeResponse(format!(
+            "diagnostics.{name}.tau may be null only for a binding zero-budget limit"
+        )));
+    }
+    Ok(diagnostics)
 }
 
 fn parse_response_f32(
@@ -2327,6 +2586,63 @@ mod tests {
         }
     }
 
+    fn cttn_shadow_response(
+        request: &WireCttnRequest,
+        config: &ClientConfig,
+        z_matrix: &[f32],
+        z_scalar: &[f32],
+    ) -> WireResponse {
+        let matrix_raw = f32_bytes(z_matrix);
+        let scalar_raw = f32_bytes(z_scalar);
+        let mut payload = matrix_raw.clone();
+        payload.extend_from_slice(&scalar_raw);
+        let diag = json!({
+            "bind": true,
+            "tau": 1.0,
+            "retention": 0.1,
+            "e_before": 1.0,
+            "e_after": 0.1,
+            "budget": 0.2,
+            "n_modes_90": 1,
+            "ritz_max": 2.0,
+            "loss": 1.5,
+        });
+        let header = json!({
+            "protocol": PROTOCOL,
+            "type": "cttn_shadow_result",
+            "request_id": request.request_id,
+            "run_uuid": config.run_uuid,
+            "step": request.step,
+            "fragment_id": request.fragment_id,
+            "base_version": request.base_version,
+            "state_epoch": request.state_epoch,
+            "fragment_versions": request.fragment_versions,
+            "request_digest": request.request_digest,
+            "ok": true,
+            "dtype": "f32le",
+            "z_matrix": {"offset": 0, "nbytes": matrix_raw.len(), "sha256": sha256_hex(&matrix_raw)},
+            "z_scalar": {
+                "offset": matrix_raw.len(),
+                "nbytes": scalar_raw.len(),
+                "sha256": sha256_hex(&scalar_raw),
+            },
+            "diagnostics": {"matrix": diag, "scalar": diag},
+            "digests": {
+                "state_sha256": request.state_digest,
+                "g_sha256": request.g_digest,
+                "b_sha256": request.b_digest,
+                "anchor_manifest_sha256": config.expected.anchor_manifest_sha256,
+                "anchor_tensors_sha256": config.expected.anchor_tensors_sha256,
+                "probe_config_sha256": config.expected.probe_config_sha256,
+                "layout_hash": config.expected.layout_hash,
+            },
+        });
+        WireResponse {
+            header: canonical_json(&header).unwrap(),
+            payload,
+        }
+    }
+
     fn previews(state: &GlobalState, values: &[Vec<f32>]) -> RetainedPreviews {
         let candidates = values
             .iter()
@@ -2433,6 +2749,10 @@ mod tests {
             "cttn-scalar-v1".parse(),
             Ok(CommitPolicy::ProbeCttnScalarV1)
         );
+        assert_eq!(
+            "cttn-shadow-v1".parse(),
+            Ok(CommitPolicy::CttnShadowV1)
+        );
         assert!(CommitPolicy::ProbeLrShadow.is_shadow());
         assert!(!CommitPolicy::ProbeCttnV1.is_shadow());
         assert!(!CommitPolicy::ProbeCttnV1.is_leave_one_out());
@@ -2441,6 +2761,8 @@ mod tests {
             CommitPolicy::ProbeCttnScalarV1.cttn_mode(),
             Some("scalar")
         );
+        assert_eq!(CommitPolicy::CttnShadowV1.cttn_mode(), Some("shadow"));
+        assert!(CommitPolicy::CttnShadowV1.is_cttn_shadow());
         assert_eq!(
             CommitPolicy::ProbeLrV1.step_scale_multipliers(),
             Some(&LR_PREVIEW_MULTIPLIERS)
@@ -2632,6 +2954,37 @@ mod tests {
             cttn_response(&request, &config, &reversed, json!(0.0), false, 1.0, 1.0);
         assert!(matches!(
             verify_cttn_response(&unsafe_direction, &request, &config),
+            Err(ProbeError::UnsafeResponse(_))
+        ));
+
+        let shadow_request = client
+            .build_cttn_request(
+                &state,
+                &aggregate,
+                5,
+                &inputs.g,
+                &inputs.b,
+                inputs.mu,
+                0.1,
+                4,
+                "shadow",
+            )
+            .unwrap();
+        let zero = vec![0.0f32; inputs.g.len()];
+        let shadow_response =
+            cttn_shadow_response(&shadow_request, &config, &zero, &zero);
+        let verified =
+            verify_cttn_shadow_response(&shadow_response, &shadow_request, &config).unwrap();
+        assert_eq!(verified.z_matrix, zero);
+        assert_eq!(verified.z_scalar, zero);
+        let unsafe_shadow = cttn_shadow_response(
+            &shadow_request,
+            &config,
+            &shadow_request.g,
+            &zero,
+        );
+        assert!(matches!(
+            verify_cttn_shadow_response(&unsafe_shadow, &shadow_request, &config),
             Err(ProbeError::UnsafeResponse(_))
         ));
     }

@@ -10,6 +10,7 @@ from yeto.action_probe import (
     _slice_f32,
     build_cttn_request_frame,
     build_cttn_result_frame,
+    build_cttn_shadow_result_frame,
     decode_frame,
     parse_cttn_request,
 )
@@ -98,6 +99,31 @@ def main() -> int:
         )
     )
     ok &= check("scalar control mode round-trips", scalar_request.mode == "scalar")
+    shadow_request = parse_cttn_request(
+        decode_frame(
+            build_cttn_request_frame(
+                request_id="cttn-shadow-wire-test",
+                run_uuid="run-wire-test",
+                step=9,
+                fragment_id=0,
+                base_version=8,
+                state_epoch=3,
+                fragment_versions=(8,),
+                layout_hash=digest("layout"),
+                anchor_manifest_sha256=digest("anchor"),
+                probe_config_sha256=digest("config"),
+                current_state=current_state,
+                fragment_names=fragment_names,
+                g=g,
+                b=b,
+                mu=0.9,
+                rho=0.1,
+                block_steps=4,
+                mode="shadow",
+            )
+        )
+    )
+    ok &= check("shadow mode round-trips", shadow_request.mode == "shadow")
 
     d = torch.tensor([0.4, -0.2, 0.9, 1.8, -2.7, 3.6], dtype=torch.float32)
     b_new = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=torch.float32)
@@ -146,6 +172,32 @@ def main() -> int:
         "zero-budget tau=+infinity is encoded as JSON null",
         zero_budget_response.header["diagnostics"]["tau"] is None,
     )
+
+    z_matrix = torch.tensor([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
+    z_scalar = 0.5 * z_matrix
+    shadow_response = decode_frame(
+        build_cttn_shadow_result_frame(
+            shadow_request,
+            z_matrix,
+            z_scalar,
+            {"matrix": diagnostics, "scalar": dict(diagnostics, retention=0.2)},
+            anchor_tensors_sha256=digest("anchor-tensors"),
+        )
+    )
+    parsed_matrix, offset, _ = _slice_f32(
+        shadow_response.payload, shadow_response.header["z_matrix"], 0
+    )
+    parsed_scalar, offset, _ = _slice_f32(
+        shadow_response.payload, shadow_response.header["z_scalar"], offset
+    )
+    print("CTTN shadow result wire round-trip:")
+    ok &= check(
+        "header type is cttn_shadow_result",
+        shadow_response.header["type"] == "cttn_shadow_result",
+    )
+    ok &= check("matrix z round-trips", torch.equal(parsed_matrix, z_matrix))
+    ok &= check("scalar z round-trips", torch.equal(parsed_scalar, z_scalar))
+    ok &= check("shadow payload is fully claimed", offset == len(shadow_response.payload))
 
     print(f"\n{'ALL PASS' if ok else 'FAILURES PRESENT'}")
     return 0 if ok else 1

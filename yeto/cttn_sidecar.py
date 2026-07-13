@@ -123,6 +123,21 @@ class CttnSidecarResult:
     loss: float              # panel-averaged held-out loss at the eval point
 
 
+@dataclass
+class CttnShadowSidecarResult:
+    z_matrix: torch.Tensor   # matrix-damped transverse momentum, fp32 [p]
+    z_scalar: torch.Tensor   # scalar-control transverse momentum, fp32 [p]
+    matrix_diag: object      # matrix CttnResult diagnostics
+    scalar_diag: object      # scalar-control CttnResult diagnostics
+    loss: float
+
+
+def _z_from_direction(g: torch.Tensor, d: torch.Tensor, mu: float) -> torch.Tensor:
+    if float(torch.linalg.vector_norm(g)) == 0.0 or mu == 0.0:
+        return torch.zeros_like(g, dtype=_WORK_DTYPE)
+    return ((d.to(_WORK_DTYPE) - g.to(_WORK_DTYPE)) / (mu * mu)).to(_WORK_DTYPE)
+
+
 def cttn_sidecar_step(
     model,
     params,
@@ -178,5 +193,60 @@ def cttn_sidecar_step(
             g, b, V, T, mu=mu, rho=rho, scalar_control=scalar_control
         )
         return CttnSidecarResult(d, b_new, res, loss_val)
+    finally:
+        release()
+
+
+def cttn_sidecar_shadow_step(
+    model,
+    params,
+    panels,
+    g: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    mu: float,
+    rho: float,
+    block_steps: int = 4,
+    loss_function: str = "cross_entropy",
+) -> CttnShadowSidecarResult:
+    """Compute matrix and scalar would-be z from one shared HVP sketch."""
+    dev = g.device
+    g = g.to(dtype=_WORK_DTYPE)
+    b = b.to(dtype=_WORK_DTYPE)
+    hvp, loss_val, release = make_hvp(
+        model, params, panels, loss_function=loss_function
+    )
+    try:
+        gn = float(torch.linalg.vector_norm(g))
+        if gn == 0.0:
+            V = torch.zeros(g.numel(), 1, device=dev, dtype=_WORK_DTYPE)
+            T = torch.zeros(1, 1, device=dev, dtype=_WORK_DTYPE)
+        else:
+            q = g / gn
+            r = b - q * torch.dot(q, b)
+            rnorm = float(torch.linalg.vector_norm(r))
+            if rnorm == 0.0:
+                V = torch.zeros(g.numel(), 1, device=dev, dtype=_WORK_DTYPE)
+                T = torch.zeros(1, 1, device=dev, dtype=_WORK_DTYPE)
+            else:
+                seed_np = _np_orth(
+                    [q.detach().cpu().numpy(), (r / rnorm).detach().cpu().numpy()]
+                )
+                Q0 = torch.tensor(seed_np, device=dev, dtype=_WORK_DTYPE)
+                V, T = block_lanczos_torch(hvp, Q0, block_steps)
+
+        d_matrix, _, matrix_diag = cttn_step_torch(
+            g, b, V, T, mu=mu, rho=rho, scalar_control=False
+        )
+        d_scalar, _, scalar_diag = cttn_step_torch(
+            g, b, V, T, mu=mu, rho=rho, scalar_control=True
+        )
+        return CttnShadowSidecarResult(
+            z_matrix=_z_from_direction(g, d_matrix, mu),
+            z_scalar=_z_from_direction(g, d_scalar, mu),
+            matrix_diag=matrix_diag,
+            scalar_diag=scalar_diag,
+            loss=loss_val,
+        )
     finally:
         release()
