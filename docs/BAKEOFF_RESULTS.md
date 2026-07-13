@@ -96,8 +96,54 @@ short-H helper in the campaign (cf. worker-SNR −0.0019, Iso-C −0.0078 at H16
 places it squarely in the unifying no-free-lunch pattern: consensus/spatial
 corrections help short-H, break/vanish at long-H. The gate hunted the payoff at
 long-H (null here) and used short-H only as a do-no-harm guard — where the actual
-+0.072 sat. Flagged for seed-replication of the short-H cells before it is
-claimed as a result; no extra compute spent yet (gate already decided).
++0.072 sat. Flagged for a short-H effective-LR control arm (NOT just a
+replication seed) before it is claimed as a mechanism result: the H16 gain is
+large AND opposite to the design's grow-with-H prediction — the signature of a
+merge-frequency (∝1/H) effective-LR/variance confound rather than the intended
+drift correction. The zero-sum gate already excludes a merge-level bias. No extra
+compute spent yet (gate already decided).
+
+### Guarded Chebyshev-SGD (exp2-48) — FAIL/wash
+Secant-gated Chebyshev acceleration on the outer step. Δ vs SGD-0.28
+(candidate − SGD; positive = worse). Raw eval loss/token, with a lag-shuffled
+control column:
+| cell | SGD-0.28 | cheb_guard | cheb_guard_shuffled |
+|------|----------|-----------|---------------------|
+| H16  | 1.3725   | 1.3733 (+0.0008) | 1.3713 |
+| H64  | 1.3559   | 1.3584 (+0.0025) | 1.3544 |
+| H256 | 1.3572   | n/a¹             | n/a¹  |
+cheb_guard is within ±0.0025 of SGD (worse at H16/H64), and the lag-shuffled
+control is marginally BETTER than the real arm → no real acceleration signal.
+Wash; never beats SGD. Confirmed again as the outer arm of the Muon factorial
+(exp2-50) under both inner optimizers.
+
+### Trust-Krylov secant trust-region (exp2-49) — no win at H16; H64/H256 in progress
+Low-rank secant (delayed-plant) trust region on the transverse component; norm
+PINNED to SGD so it cannot buy an effective-LR change. Raw eval loss/token:
+| cell | SGD-0.28 | trust_krylov | trust_krylov_shuffled |
+|------|----------|--------------|-----------------------|
+| H16  | 1.36643  | 1.36688 (+0.00045) | 1.36511 |
+| H64  | in progress | | |
+| H256 | in progress | | |
+No win at H16 (trust_krylov +0.00045 WORSE; real-vs-shuffled −0.00177, needs
+≥+0.009). Norm diagnostic: realized ‖d‖/‖g‖ = 0.2800 for all three arms (= the
+0.28 outer-LR); trust_krylov mean ‖d‖ 1.3387 is only +0.5% over SGD's 1.3322 —
+norm-pinning works, no step-size artifact, no norm-matched control warranted.
+
+### Muon inner-optimizer 2×2 factorial (exp2-50) — double-negative
+inner ∈ {AdamW, Muon} × outer ∈ {SGD-0.28, guarded-Chebyshev}. Raw eval
+loss/token (lower = better):
+| cell | AdamW+SGD | Muon+SGD | AdamW+Cheb | Muon+Cheb |
+|------|-----------|----------|------------|-----------|
+| H16  | 1.3936 | 1.4218 | 1.3963 | 1.4284 |
+| H64  | 1.3917 | 1.4306 | 1.3923 | 1.4350 |
+| H256 | 1.3979 | 1.4368 | in progress | in progress |
+| H64 inner-lr-hi (2.4e-3) | 1.3931 | 1.5417 | in progress | in progress |
+Muon-inner strictly worse than AdamW-inner at every horizon (+0.028/+0.039/+0.039;
++0.149 at high inner-LR where Muon nearly fails to train). Guarded-Chebyshev outer
+≈ SGD-0.28 outer under BOTH inner optimizers (worst gap +0.0066). MuLoCo's
+"inner optimizer changes the pseudo-gradient enough to flip the outer verdict"
+does not hold here; the outer-Chebyshev wash is confirmed under a 2nd inner opt.
 
 ## Notes
 ¹ block-Yogi H256 lost to node preemption mid-run; conclusion robust without it.

@@ -406,13 +406,59 @@ A second wave broadened the search beyond *outer* optimizers to the **inner opti
 
 | Candidate (axis) | H16 | H64 | H256 | verdict |
 |---|---:|---:|---:|---|
-| tail-time primal averaging (post-hoc) | −0.0059 | −0.0019 | ~0 | short-$H$ helper, $\ll$ bar → FAIL |
-| guarded Chebyshev-SGD (outer) | +0.0008 | +0.0025 | — | wash, never beats SGD → FAIL |
-| trust-Krylov secant TR (outer) | −0.0009 | in prog. | in prog. | noise so far; in progress |
-| Muon inner optimizer | +0.028 | +0.039 | +0.039 | strictly worse than AdamW-inner |
+| tail-time primal averaging (post-hoc) | −0.0059 | −0.0019 | −0.00001 | short-$H$ helper, $\ll$ bar → FAIL |
+| guarded Chebyshev-SGD (outer) | +0.0008 | +0.0025 | n/a⁴ | wash, never beats SGD → FAIL |
+| trust-Krylov secant TR (outer) | +0.00045 | in prog. | in prog. | no win at H16; in progress |
+| Muon inner optimizer | +0.0282 | +0.0389 | +0.0389 | strictly worse than AdamW-inner |
 | SCAFFOLD-lite control variates (inner) | **−0.0722** | −0.0161 | −0.0007 | gate FAIL (long-$H$ null); largest short-$H$ gain found |
 
-Two findings stand out. First, the **inner optimizer does not rescue the outer verdict**: a 2×2 factorial (inner $\in\{$AdamW, Muon$\}\times$ outer $\in\{$SGD-0.28, guarded-Chebyshev$\}$, exp2-50) shows Muon-inner strictly worse than AdamW-inner at every horizon — badly ($+0.149$) at high inner-LR, where Muon nearly fails to train — while guarded-Chebyshev $\approx$ SGD-0.28 under *both* inner optimizers. So "no cheap outer beats SGD" is stable across the inner-optimizer choice MuLoCo flags as decisive. Second, **SCAFFOLD-lite inner control variates** (endpoint-derived, no extra forward; control-arm zero-sum verified exactly $0.0/0.0$ → provably unbiased; exp2-51) *fails* the gate — H256 is null ($-0.0007$), the long-$H$ cell the mechanism predicted would gain most — yet shows a clean **monotonic short-horizon gain** ($-0.0722$/$-0.0161$/$-0.0007$ at $H{=}16/64/256$), the *opposite* tilt from its design and the **largest short-$H$ improvement in the entire campaign** (cf. worker-SNR $-0.0019$, Iso-C $-0.0078$ at $H{=}16$). A 3-point monotone trend with H16 at $\sim$8$\times$ the noise floor is not single-seed noise; it places SCAFFOLD-lite in the same no-free-lunch pattern as the first-wave spatial methods (consensus/spatial correction $\to$ helps short-$H$, null/broken long-$H$), just far stronger — flagged for fresh-seed replication of the short-$H$ cells before it is claimed. None of the five clears the product gate; the second wave *strengthens* the message — remove momentum, ship memoryless SGD-0.28.
+The exact per-arm eval losses (loss/token; each candidate paired against *its own* matched control, not cross-comparable across candidates — see ⁵):
+
+*tail-time primal averaging* (reconstructed from committed SGD-0.28 captures; $\theta_{\mathrm{out}}=0.5\theta_T+0.5\theta_{\mathrm{tail}}$):
+
+| cell | $\theta_{\mathrm{out}}$ | $\theta_T$ (SGD-0.28) | better by |
+|---|---:|---:|---:|
+| H16 | 1.352363 | 1.358285 | +0.0059 |
+| H64 | 1.357980 | 1.359852 | +0.0019 |
+| H256 | 1.371549 | 1.371557 | +0.00001 |
+
+*guarded Chebyshev-SGD* (exp2-48; lag-shuffled control column):
+
+| cell | SGD-0.28 | cheb_guard | cheb_guard (shuffled) |
+|---|---:|---:|---:|
+| H16 | 1.3725 | 1.3733 | 1.3713 |
+| H64 | 1.3559 | 1.3584 | 1.3544 |
+| H256 | 1.3572 | n/a⁴ | n/a⁴ |
+
+*trust-Krylov secant trust-region* (exp2-49; lag-shuffled control). Norm diagnostic at H16: realized $\lVert d\rVert/\lVert g\rVert = 0.2800$ for all three arms (= the outer-LR), and trust-Krylov's mean $\lVert d\rVert$ (1.3387) is 0.5% above SGD's (1.3322) — the norm-pinning holds, so curvature reshapes only the transverse component and there is no step-size confound to attribute:
+
+| cell | SGD-0.28 | trust_krylov | trust_krylov (shuffled) |
+|---|---:|---:|---:|
+| H16 | 1.36643 | 1.36688 | 1.36511 |
+| H64 | in progress | | |
+| H256 | in progress | | |
+
+*Muon inner-optimizer 2×2 factorial* (exp2-50; inner $\times$ outer):
+
+| cell | AdamW+SGD | Muon+SGD | AdamW+Cheb | Muon+Cheb |
+|---|---:|---:|---:|---:|
+| H16 | 1.3936 | 1.4218 | 1.3963 | 1.4284 |
+| H64 | 1.3917 | 1.4306 | 1.3923 | 1.4350 |
+| H256 | 1.3979 | 1.4368 | in progress | in progress |
+| H64 inner-LR-hi (2.4e-3) | 1.3931 | 1.5417 | in progress | in progress |
+
+*SCAFFOLD-lite inner control variates* (exp2-51; paired against a matched SGD-0.28 control arm in the same run; HET = heterogeneous data, ~45$\times$ per-worker length spread):
+
+| cell | SCAFFOLD-lite | matched control | better by |
+|---|---:|---:|---:|
+| H16-IID | 1.47322 | 1.54547 | +0.0722 |
+| H64-IID | 1.53250 | 1.54859 | +0.0161 |
+| H256-IID | 1.54791 | 1.54865 | +0.0007 |
+| HET-H64 | 1.43882 | 1.45705 | +0.0182 |
+
+Two findings stand out. First, the **inner optimizer does not rescue the outer verdict**: the 2×2 factorial shows Muon-inner strictly worse than AdamW-inner at every horizon — badly ($+0.149$) at high inner-LR, where Muon nearly fails to train — while guarded-Chebyshev $\approx$ SGD-0.28 under *both* inner optimizers (worst gap $+0.0066$). So "no cheap outer beats SGD" is stable across the inner-optimizer choice MuLoCo flags as decisive, and the outer-Chebyshev wash is confirmed under a second inner optimizer. Second, **SCAFFOLD-lite** (endpoint-derived control variates, no extra forward; control-arm zero-sum verified exactly $0.0/0.0$ → provably unbiased) *fails* the gate — H256 is null ($-0.0007$, within noise), the long-$H$ cell the mechanism predicted would gain most — yet shows a clean **monotonic short-horizon gain** ($-0.0722$/$-0.0161$/$-0.0007$ at $H{=}16/64/256$), the *opposite* tilt from its design and the **largest short-$H$ improvement in the entire campaign** (cf. worker-SNR $-0.0019$, Iso-C $-0.0078$ at $H{=}16$). A 3-point monotone ordering with H16 at $\sim$8$\times$ the noise floor is not single-seed noise; it places SCAFFOLD-lite in the same no-free-lunch pattern as the first-wave spatial methods (consensus/spatial correction $\to$ helps short-$H$, null/broken long-$H$), just far stronger. Because the H16 gain is large *and* opposite to the mechanism's own prediction — the signature of a possible short-$H$ effective-LR/variance confound (scaling with merge frequency $\propto 1/H$) rather than the intended drift correction — it is flagged for an effective-LR control arm at H16 before it is claimed as a mechanism result (the zero-sum gate already excludes a merge-level bias). None of the five clears the product gate; the second wave *strengthens* the message — remove momentum, ship memoryless SGD-0.28.
+
+⁴ cheb_guard's H256 cheb/shuffled arms did not land (as with block-Yogi H256); the wash verdict is robust from H16/H64 and the H256-under-Muon factorial. ⁵ Absolute losses are **not comparable across candidates**: tail-avg/cheb/trust-Krylov use the H-sweep config (losses ~1.35–1.37), Muon uses the m4 config (~1.39–1.54), and SCAFFOLD-lite runs in strict correctness mode (plain-SGD inner, LoRA-r2, ~1.47–1.55). Each $\Delta$ is within-run paired against that candidate's own matched SGD-0.28 control/anchor.
 
 ### 4.18 The theoretical lower bound: the CTTN oracle and an observability argument
 
