@@ -1733,7 +1733,23 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             # Full-parameter models leave the syncer a sizable merge +
             # checkpoint backlog after learners disconnect; a 30s wait
             # killed a healthy SmolLM2-135M full-tune run.
-            rc = syncer.wait(timeout=900)
+            #
+            # CTTN policies (esp. the shadow diagnostic) run real-Hessian
+            # block-Lanczos on held-out data in the sidecar. Much of that
+            # work is still draining when the learners disconnect, and each
+            # HVP sample is ~8 min, so the tail can take *hours*, not the
+            # flat 900s. A 900s cap force-killed a healthy shadow run at
+            # its m3 (M=3, 7813 steps/learner) segment. Scale the drain
+            # budget with the sample count for any CTTN HVP policy.
+            syncer_drain_timeout = 900
+            if arm.outer_optimizer in ("cttn", "cttn-scalar", "cttn-shadow"):
+                samples = getattr(args, "cttn_shadow_samples", 32) or 32
+                # ~15 min/sample ceiling (matches the per-probe
+                # action-probe-timeout) + generous margin; the syncer
+                # exits as soon as it is actually done, so this is only
+                # an upper bound on patience.
+                syncer_drain_timeout = max(900, samples * 900)
+            rc = syncer.wait(timeout=syncer_drain_timeout)
             if rc != 0:
                 raise RuntimeError(f"{arm.name}: syncer exited {rc}; see {arm_dir}")
     finally:
