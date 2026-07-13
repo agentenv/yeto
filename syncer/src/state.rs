@@ -215,9 +215,12 @@ pub struct ActionPreview {
     /// Rho-adaptive EMA value after this step; unchanged for the other
     /// optimizers. Installed alongside the buffer on commit.
     resulting_rho_ema: f32,
-    /// Capped-Nesterov effective momentum after this step; unchanged for the
-    /// other optimizers. Installed alongside the buffer on commit.
+    /// Capped-Nesterov-family effective momentum after this step; unchanged
+    /// for the other optimizers. Installed alongside the buffer on commit.
     resulting_capped_mu: f32,
+    /// Capped-Nesterov-gc applied step gain for this step; unchanged for the
+    /// other optimizers. Installed alongside the buffer on commit.
+    resulting_capped_gain: f32,
     applied_step: Vec<f32>,
     stats: MergeStats,
     step_scale: f64,
@@ -371,6 +374,7 @@ fn compute_action_fingerprint(preview: &ActionPreview) -> [u64; 2] {
     mix_action_fingerprint(&mut hash, preview.stats.outer.restarted as u64);
     mix_action_fingerprint(&mut hash, preview.resulting_rho_ema.to_bits() as u64);
     mix_action_fingerprint(&mut hash, preview.resulting_capped_mu.to_bits() as u64);
+    mix_action_fingerprint(&mut hash, preview.resulting_capped_gain.to_bits() as u64);
     for values in [
         preview.resulting_params.as_slice(),
         preview.resulting_optimizer_buffer.as_slice(),
@@ -398,12 +402,18 @@ pub struct GlobalState {
     /// restore behaves like the tuned baseline for one commit and then
     /// re-converges.
     rho_ema: Vec<f32>,
-    /// Per-fragment capped-Nesterov effective momentum after the most recent
-    /// commit (the one-sided release EMA state). Only the capped-nesterov
-    /// optimizer reads or writes it. Like `rho_ema` it is deliberately NOT
-    /// checkpointed: a restore re-initializes to the design-point mu_max and
-    /// the caps re-bind on the first measured commit.
+    /// Per-fragment capped-Nesterov-family effective momentum after the most
+    /// recent commit (the one-sided release EMA state). Only the
+    /// capped-nesterov family reads or writes it. Like `rho_ema` it is
+    /// deliberately NOT checkpointed: a restore re-initializes to the
+    /// design-point mu_max and the caps re-bind on the first measured commit.
     capped_mu: Vec<f32>,
+    /// Per-fragment capped-Nesterov-gc applied step gain after the most
+    /// recent commit. Only the gc variant writes it (it is recomputed per
+    /// commit, not consumed); kept per fragment so materialized previews and
+    /// diagnostics see the exact applied value. Not checkpointed, like
+    /// `capped_mu`.
+    capped_gain: Vec<f32>,
     pub initialized: Vec<bool>,
     /// Global step at which each fragment was last merged (its version).
     pub versions: Vec<u64>,
@@ -442,6 +452,8 @@ impl GlobalState {
         let momentum = params.clone();
         let rho_ema = vec![merge::RHO_ADAPTIVE_INITIAL_RHO_EMA; layout.fragments.len()];
         let capped_mu = vec![merge::CAPPED_NESTEROV_INITIAL_MU; layout.fragments.len()];
+        let capped_gain =
+            vec![merge::CAPPED_NESTEROV_GC_INITIAL_GAIN; layout.fragments.len()];
         let initialized = vec![false; layout.fragments.len()];
         let versions = vec![0; layout.fragments.len()];
         let state_epochs = vec![0; layout.fragments.len()];
@@ -452,6 +464,7 @@ impl GlobalState {
             momentum,
             rho_ema,
             capped_mu,
+            capped_gain,
             initialized,
             versions,
             global_step: 0,
@@ -601,6 +614,7 @@ impl GlobalState {
         let mut resulting_optimizer_buffer = self.momentum[fid].clone();
         let mut resulting_rho_ema = self.rho_ema[fid];
         let mut resulting_capped_mu = self.capped_mu[fid];
+        let mut resulting_capped_gain = self.capped_gain[fid];
         let outer = merge::apply_outer_step(
             self.outer_optimizer,
             &mut resulting_params,
@@ -611,22 +625,29 @@ impl GlobalState {
             self.outer_restart_cos_threshold,
             &mut resulting_rho_ema,
             &mut resulting_capped_mu,
+            &mut resulting_capped_gain,
         );
-        // Capped-Nesterov chooses its momentum per commit; materializing its
-        // step must use the effective value the step just wrote, not the CLI
-        // momentum, to stay bit-identical to the applied displacement.
-        let materialize_momentum =
-            if self.outer_optimizer == merge::OuterOptimizer::CappedNesterov {
-                resulting_capped_mu
-            } else {
-                self.outer_momentum
-            };
+        // The capped-Nesterov family chooses its momentum (and, for gc, its
+        // gain) per commit; materializing its step must use the effective
+        // values the step just wrote, not the CLI momentum, to stay
+        // bit-identical to the applied displacement.
+        let materialize_momentum = if matches!(
+            self.outer_optimizer,
+            merge::OuterOptimizer::CappedNesterov
+                | merge::OuterOptimizer::CappedNesterovGc
+                | merge::OuterOptimizer::CappedNesterovR
+        ) {
+            resulting_capped_mu
+        } else {
+            self.outer_momentum
+        };
         let applied_step = merge::materialize_applied_step(
             self.outer_optimizer,
             &resulting_optimizer_buffer,
             &aggregate.delta,
             outer_lr,
             materialize_momentum,
+            resulting_capped_gain,
         );
         let materialized_step_norm = flat_l2_norm(&applied_step);
         let norm_tolerance = 1e-6 * outer.applied_step_norm.abs().max(1.0);
@@ -636,6 +657,7 @@ impl GlobalState {
                 .any(|value| !value.is_finite())
             || !resulting_rho_ema.is_finite()
             || !resulting_capped_mu.is_finite()
+            || !resulting_capped_gain.is_finite()
             || applied_step.iter().any(|value| !value.is_finite())
             || !outer.applied_step_norm.is_finite()
             || outer
@@ -661,6 +683,7 @@ impl GlobalState {
             resulting_optimizer_buffer,
             resulting_rho_ema,
             resulting_capped_mu,
+            resulting_capped_gain,
             applied_step,
             stats: MergeStats {
                 gnorm: aggregate.gnorm,
@@ -1065,6 +1088,7 @@ impl GlobalState {
             || preview.applied_step.iter().any(|value| !value.is_finite())
             || !preview.resulting_rho_ema.is_finite()
             || !preview.resulting_capped_mu.is_finite()
+            || !preview.resulting_capped_gain.is_finite()
             || !preview.stats.gnorm.is_finite()
             || preview.stats.gnorm < 0.0
             || !preview.stats.outer.applied_step_norm.is_finite()
@@ -1165,6 +1189,7 @@ impl GlobalState {
         }
         mix(self.rho_ema[fid].to_bits() as u64);
         mix(self.capped_mu[fid].to_bits() as u64);
+        mix(self.capped_gain[fid].to_bits() as u64);
         match &self.outer_lr_by_fragment {
             None => {
                 mix(0);
@@ -1187,6 +1212,8 @@ impl GlobalState {
             merge::OuterOptimizer::RestartedEma => 2,
             merge::OuterOptimizer::RhoAdaptive => 3,
             merge::OuterOptimizer::CappedNesterov => 4,
+            merge::OuterOptimizer::CappedNesterovGc => 5,
+            merge::OuterOptimizer::CappedNesterovR => 6,
         });
         match self.delta_correction {
             None => mix(0),
@@ -1215,6 +1242,7 @@ impl GlobalState {
             resulting_optimizer_buffer,
             resulting_rho_ema,
             resulting_capped_mu,
+            resulting_capped_gain,
             stats,
             ..
         } = preview;
@@ -1223,6 +1251,7 @@ impl GlobalState {
         self.momentum[fid] = resulting_optimizer_buffer;
         self.rho_ema[fid] = resulting_rho_ema;
         self.capped_mu[fid] = resulting_capped_mu;
+        self.capped_gain[fid] = resulting_capped_gain;
         self.state_epochs[fid] = next_epoch;
         Ok(stats)
     }
@@ -1311,11 +1340,12 @@ impl GlobalState {
                     *v = f32::from_le_bytes(r.take(4)?.try_into()?);
                 }
             }
-            // The rho-adaptive EMA and the capped-Nesterov effective
-            // momentum are not part of the checkpoint format; restore to
-            // their references so resumed runs are deterministic.
+            // The rho-adaptive EMA and the capped-Nesterov-family effective
+            // momentum and gc gain are not part of the checkpoint format;
+            // restore to their references so resumed runs are deterministic.
             self.rho_ema[p] = merge::RHO_ADAPTIVE_INITIAL_RHO_EMA;
             self.capped_mu[p] = merge::CAPPED_NESTEROV_INITIAL_MU;
+            self.capped_gain[p] = merge::CAPPED_NESTEROV_GC_INITIAL_GAIN;
             self.initialized[p] = true;
             self.state_epochs[p] = next_epoch;
         }
@@ -1810,6 +1840,16 @@ mod tests {
                 0.0f32,
                 "capped-nesterov",
             ),
+            (
+                merge::OuterOptimizer::CappedNesterovGc,
+                0.0f32,
+                "capped-nesterov-gc",
+            ),
+            (
+                merge::OuterOptimizer::CappedNesterovR,
+                0.0f32,
+                "capped-nesterov-r",
+            ),
         ];
         for (optimizer, momentum, label) in cases {
             let mut st = GlobalState::new(
@@ -2089,6 +2129,8 @@ mod tests {
                 merge::OuterOptimizer::NormalizedEma,
                 merge::OuterOptimizer::RestartedEma,
                 merge::OuterOptimizer::CappedNesterov,
+                merge::OuterOptimizer::CappedNesterovGc,
+                merge::OuterOptimizer::CappedNesterovR,
             ] {
                 for use_heloco in [false, true] {
                     let make_state = || {
@@ -2135,6 +2177,7 @@ mod tests {
                     assert_eq!(compatibility.params, preview_path.params);
                     assert_eq!(compatibility.momentum, preview_path.momentum);
                     assert_eq!(compatibility.capped_mu, preview_path.capped_mu);
+                    assert_eq!(compatibility.capped_gain, preview_path.capped_gain);
                     assert_eq!(compatibility.state_epochs, preview_path.state_epochs);
                     assert_eq!(compatibility.versions, vec![0]);
                     assert_eq!(compatibility.global_step, 0);

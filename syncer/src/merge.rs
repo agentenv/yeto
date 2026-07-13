@@ -35,6 +35,8 @@ pub enum OuterOptimizer {
     RestartedEma,
     RhoAdaptive,
     CappedNesterov,
+    CappedNesterovGc,
+    CappedNesterovR,
 }
 
 impl OuterOptimizer {
@@ -45,6 +47,8 @@ impl OuterOptimizer {
             Self::RestartedEma => "restarted-ema",
             Self::RhoAdaptive => "rho-adaptive",
             Self::CappedNesterov => "capped-nesterov",
+            Self::CappedNesterovGc => "capped-nesterov-gc",
+            Self::CappedNesterovR => "capped-nesterov-r",
         }
     }
 
@@ -69,8 +73,10 @@ impl FromStr for OuterOptimizer {
             "restarted-ema" => Ok(Self::RestartedEma),
             "rho-adaptive" => Ok(Self::RhoAdaptive),
             "capped-nesterov" => Ok(Self::CappedNesterov),
+            "capped-nesterov-gc" => Ok(Self::CappedNesterovGc),
+            "capped-nesterov-r" => Ok(Self::CappedNesterovR),
             other => Err(format!(
-                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov; got {other:?}"
+                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov, capped-nesterov-gc, capped-nesterov-r; got {other:?}"
             )),
         }
     }
@@ -98,10 +104,11 @@ pub struct OuterStepStats {
 /// state layer a single production path for both mutating commits and pure
 /// previews made from cloned parameter and buffer slices. `rho_ema` is the
 /// rho-adaptive controller's persistent scalar state (see
-/// `rho_adaptive_step`) and `capped_mu` is the capped-Nesterov controller's
-/// persistent effective momentum (see `capped_nesterov_step`); the other
-/// optimizers leave them untouched, exactly as they leave each other's
-/// buffer conventions alone.
+/// `rho_adaptive_step`) and `capped_mu` is the shared capped-Nesterov-family
+/// persistent effective momentum (see `capped_nesterov_step`); `capped_gain`
+/// is the gain-compensated variant's applied step-scale (see
+/// `capped_nesterov_gc_step`). The other optimizers leave them untouched,
+/// exactly as they leave each other's buffer conventions alone.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_outer_step(
     optimizer: OuterOptimizer,
@@ -113,6 +120,7 @@ pub fn apply_outer_step(
     restart_cos_threshold: f32,
     rho_ema: &mut f32,
     capped_mu: &mut f32,
+    capped_gain: &mut f32,
 ) -> OuterStepStats {
     match optimizer {
         OuterOptimizer::Nesterov => nesterov_step(params, buf, delta, lr, momentum),
@@ -124,6 +132,12 @@ pub fn apply_outer_step(
         OuterOptimizer::CappedNesterov => {
             capped_nesterov_step(params, buf, delta, lr, capped_mu)
         }
+        OuterOptimizer::CappedNesterovGc => {
+            capped_nesterov_gc_step(params, buf, delta, lr, capped_mu, capped_gain)
+        }
+        OuterOptimizer::CappedNesterovR => {
+            capped_nesterov_r_step(params, buf, delta, lr, capped_mu)
+        }
     }
 }
 
@@ -131,23 +145,34 @@ pub fn apply_outer_step(
 /// step after its optimizer buffer has been updated. This is the same vector
 /// whose norm is reported by `OuterStepStats::applied_step_norm`.
 ///
-/// For `CappedNesterov` the caller must pass the EFFECTIVE per-commit
-/// momentum written back by `capped_nesterov_step` (the updated persistent
-/// scalar), not the CLI momentum; with that value the Nesterov branch is
-/// bit-identical to the applied step.
+/// For `CappedNesterov` and `CappedNesterovR` the caller must pass the
+/// EFFECTIVE per-commit momentum written back by the step (the updated
+/// persistent scalar), not the CLI momentum; with that value the Nesterov
+/// branch is bit-identical to the applied step. For `CappedNesterovGc` the
+/// caller must ALSO pass the applied gain written back by the step; the
+/// gc branch then reproduces `lr * (gain * (delta + mu * buf))`
+/// bit-for-bit. `gain` is ignored by every other optimizer.
 pub fn materialize_applied_step(
     optimizer: OuterOptimizer,
     updated_buf: &[f32],
     delta: &[f32],
     lr: f32,
     momentum: f32,
+    gain: f32,
 ) -> Vec<f32> {
     debug_assert_eq!(updated_buf.len(), delta.len());
     match optimizer {
-        OuterOptimizer::Nesterov | OuterOptimizer::CappedNesterov => updated_buf
+        OuterOptimizer::Nesterov
+        | OuterOptimizer::CappedNesterov
+        | OuterOptimizer::CappedNesterovR => updated_buf
             .iter()
             .zip(delta)
             .map(|(buf, value)| lr * (*value + momentum * *buf))
+            .collect(),
+        OuterOptimizer::CappedNesterovGc => updated_buf
+            .iter()
+            .zip(delta)
+            .map(|(buf, value)| lr * (gain * (*value + momentum * *buf)))
             .collect(),
         OuterOptimizer::NormalizedEma
         | OuterOptimizer::RestartedEma
@@ -267,6 +292,39 @@ pub const CAPPED_NESTEROV_EMA_BETA: f64 = 0.9;
 /// restore behaves like tuned Nesterov until the caps re-bind.
 pub const CAPPED_NESTEROV_INITIAL_MU: f32 = CAPPED_NESTEROV_MU_MAX as f32;
 
+/// Gain-compensated variant ("capped-nesterov-gc", EXP2.31 follow-up): the
+/// EXP2.31 matched pairs showed the frozen controller understeps whenever a
+/// cap binds — mu_t < mu_max makes the aligned gain A_t = 1 + mu_t +
+/// mu_t^2 c_t fall below the (1 + mu_max) design gain, so a run tuned for
+/// eta_eff = (1 + mu_max) * eta never reaches it. The gc variant keeps the
+/// caps (they exist to bound the transverse-variance harm) and restores the
+/// aligned effective LR by rescaling the applied step by
+///
+///   g_t = (1 + mu_max) / max(A_t, eps),  clamped to [GAIN_MIN, GAIN_MAX].
+///
+/// Since mu_t never exceeds the aligned cap, A_t <= 1 + mu_max and the raw
+/// gain is >= 1; the clamp bounds the boost when A_t collapses toward 0
+/// (strongly opposing history). Only the parameter displacement is scaled;
+/// the momentum buffer keeps the plain capped-Nesterov recursion, so the
+/// cap geometry (c_t, r_t) is identical to the frozen controller's.
+pub const CAPPED_NESTEROV_GC_GAIN_MIN: f64 = 0.5;
+pub const CAPPED_NESTEROV_GC_GAIN_MAX: f64 = 2.5;
+/// Floor on A_t before inverting it; with the clamp above any A_t below
+/// (1 + mu_max)/GAIN_MAX already saturates the gain, so this only guards
+/// the division.
+pub const CAPPED_NESTEROV_GC_A_EPS: f64 = 1e-12;
+/// Fresh gc gain state (a fragment that has never committed under gc has
+/// applied no rescale). Like `capped_mu` it is NOT checkpointed.
+pub const CAPPED_NESTEROV_GC_INITIAL_GAIN: f32 = 1.0;
+
+/// Relaxed transverse budget for the "capped-nesterov-r" variant. EXP2.31
+/// showed the transverse harm is threshold-like: negligible at energy
+/// amplification A2_RMS ~ 2.6, severe at ~ 10. With the A2 bound
+/// ~ (1 + mu_max)^2 + tau^2, tau = sqrt(6 - 1.9^2) = 1.55 targets a bound
+/// of ~6, comfortably below the harmful regime while releasing useful
+/// transverse history the tau = 1 budget discards.
+pub const CAPPED_NESTEROV_R_TAU_PERP: f64 = 1.55;
+
 /// Per-commit momentum cap from the realized buffer/delta geometry
 /// (c_t = <b_{t-1}, delta_t> / |delta_t|^2, r_t = |b_{t-1} - c_t delta_t| /
 /// |delta_t|), before the release EMA:
@@ -289,18 +347,62 @@ pub const CAPPED_NESTEROV_INITIAL_MU: f32 = CAPPED_NESTEROV_MU_MAX as f32;
 /// zeroed — since A_t(0) = 1 > 0 and A_t(cap) >= 0 imply A_t >= 0 on all of
 /// [0, cap], the guard keeps every admissible mu on the descent side.
 pub fn capped_nesterov_cap(c_t: f64, r_t: f64) -> f64 {
+    capped_nesterov_cap_with_tau(c_t, r_t, CAPPED_NESTEROV_TAU_PERP)
+}
+
+/// `capped_nesterov_cap` with an explicit transverse budget; the frozen
+/// controller uses `CAPPED_NESTEROV_TAU_PERP`, the relaxed "-r" variant
+/// `CAPPED_NESTEROV_R_TAU_PERP`. Everything else is shared.
+pub fn capped_nesterov_cap_with_tau(c_t: f64, r_t: f64, tau_perp: f64) -> f64 {
     let c_plus = c_t.max(0.0);
     // Rationalized root: no cancellation for small c_plus and exact mu_max
     // at c_plus = 0, so the c_plus = 0 case needs no separate branch.
     let mu_par =
         2.0 * CAPPED_NESTEROV_MU_MAX / (1.0 + (1.0 + 4.0 * c_plus * CAPPED_NESTEROV_MU_MAX).sqrt());
-    let mu_perp = (CAPPED_NESTEROV_TAU_PERP / r_t.max(CAPPED_NESTEROV_R_EPS)).sqrt();
+    let mu_perp = (tau_perp / r_t.max(CAPPED_NESTEROV_R_EPS)).sqrt();
     let cap = CAPPED_NESTEROV_MU_MAX.min(mu_par).min(mu_perp);
     if 1.0 + cap + cap * cap * c_t < 0.0 {
         0.0
     } else {
         cap
     }
+}
+
+/// Realized buffer/delta geometry shared by the capped-Nesterov family:
+/// c_t = <b_{t-1}, delta_t> / |delta_t|^2 and the relative transverse
+/// residual r_t = |b_{t-1} - c_t delta_t| / |delta_t| (both 0 when
+/// delta = 0, leaving the caps inactive).
+fn capped_nesterov_geometry(buf: &[f32], delta: &[f32]) -> (f64, f64) {
+    let mut dot = 0.0f64;
+    let mut buf_norm_sq = 0.0f64;
+    let mut delta_norm_sq = 0.0f64;
+    for (b, d) in buf.iter().zip(delta) {
+        dot += *b as f64 * *d as f64;
+        buf_norm_sq += (*b as f64).powi(2);
+        delta_norm_sq += (*d as f64).powi(2);
+    }
+    if delta_norm_sq > 0.0 {
+        let c = dot / delta_norm_sq;
+        // |b - c*delta|^2 expands to |b|^2 - c*<b, delta> at the projection
+        // coefficient; clamp at 0 against cancellation when b ~ c*delta.
+        let r = ((buf_norm_sq - c * dot).max(0.0) / delta_norm_sq).sqrt();
+        (c, r)
+    } else {
+        // No measurable geometry (zero delta): caps stay inactive and the
+        // EMA relaxes toward mu_max, mirroring rho-adaptive's unmeasured
+        // commits.
+        (0.0, 0.0)
+    }
+}
+
+/// Shared per-commit effective momentum of the capped-Nesterov family: the
+/// one-sided release EMA of the given cap against the persistent `mu_prev`
+/// (updated in place and returned).
+fn capped_nesterov_effective_mu(cap: f64, mu_prev: &mut f32) -> f32 {
+    let released =
+        CAPPED_NESTEROV_EMA_BETA * *mu_prev as f64 + (1.0 - CAPPED_NESTEROV_EMA_BETA) * cap;
+    *mu_prev = cap.min(released) as f32;
+    *mu_prev
 }
 
 /// Capped-Nesterov step. Standard Nesterov recursion, but the momentum is
@@ -329,31 +431,99 @@ pub fn capped_nesterov_step(
     lr: f32,
     mu_prev: &mut f32,
 ) -> OuterStepStats {
-    let mut dot = 0.0f64;
-    let mut buf_norm_sq = 0.0f64;
-    let mut delta_norm_sq = 0.0f64;
-    for (b, d) in buf.iter().zip(delta) {
-        dot += *b as f64 * *d as f64;
-        buf_norm_sq += (*b as f64).powi(2);
-        delta_norm_sq += (*d as f64).powi(2);
+    let (c_t, r_t) = capped_nesterov_geometry(buf, delta);
+    let mu = capped_nesterov_effective_mu(capped_nesterov_cap(c_t, r_t), mu_prev);
+    nesterov_step(params, buf, delta, lr, mu)
+}
+
+/// Capped-Nesterov with the relaxed transverse budget
+/// `CAPPED_NESTEROV_R_TAU_PERP` (see the constant's rationale). Identical to
+/// `capped_nesterov_step` in every other respect, including the `mu_prev`
+/// threading and the plain-Nesterov stats conventions.
+pub fn capped_nesterov_r_step(
+    params: &mut [f32],
+    buf: &mut [f32],
+    delta: &[f32],
+    lr: f32,
+    mu_prev: &mut f32,
+) -> OuterStepStats {
+    let (c_t, r_t) = capped_nesterov_geometry(buf, delta);
+    let cap = capped_nesterov_cap_with_tau(c_t, r_t, CAPPED_NESTEROV_R_TAU_PERP);
+    let mu = capped_nesterov_effective_mu(cap, mu_prev);
+    nesterov_step(params, buf, delta, lr, mu)
+}
+
+/// Gain-compensated capped-Nesterov (see `CAPPED_NESTEROV_GC_GAIN_MIN` for
+/// the rationale). The buffer recursion, cap geometry, and `mu_prev`
+/// threading are exactly `capped_nesterov_step`'s (transverse budget
+/// `CAPPED_NESTEROV_TAU_PERP`); only the applied parameter displacement is
+/// rescaled:
+///
+///   A_t = 1 + mu_t + mu_t^2 c_t,
+///   g_t = clamp((1 + mu_max) / max(A_t, eps), GAIN_MIN, GAIN_MAX),
+///   b_t = mu_t b_{t-1} + delta_t;  d_t = delta_t + mu_t b_t;
+///   theta -= lr * (g_t * d_t).
+///
+/// `gain` is the persistent applied-gain scalar, threaded like `mu_prev`
+/// (init `CAPPED_NESTEROV_GC_INITIAL_GAIN`); it is updated to g_t BEFORE
+/// the step so callers can hand the exact applied (f32-rounded) gain to
+/// `materialize_applied_step`, whose gc branch reproduces the applied step
+/// bit-for-bit. Stats keep the plain-Nesterov conventions with the step and
+/// direction scaled by g_t (the cosine and history/current ratio are
+/// invariant under the common positive scale).
+pub fn capped_nesterov_gc_step(
+    params: &mut [f32],
+    buf: &mut [f32],
+    delta: &[f32],
+    lr: f32,
+    mu_prev: &mut f32,
+    gain: &mut f32,
+) -> OuterStepStats {
+    let (c_t, r_t) = capped_nesterov_geometry(buf, delta);
+    let mu = capped_nesterov_effective_mu(capped_nesterov_cap(c_t, r_t), mu_prev);
+    // A_t from the f32-rounded effective momentum actually applied below.
+    let mu_f64 = mu as f64;
+    let a_t = 1.0 + mu_f64 + mu_f64 * mu_f64 * c_t;
+    *gain = (((1.0 + CAPPED_NESTEROV_MU_MAX) / a_t.max(CAPPED_NESTEROV_GC_A_EPS))
+        .clamp(CAPPED_NESTEROV_GC_GAIN_MIN, CAPPED_NESTEROV_GC_GAIN_MAX)) as f32;
+    let g = *gain;
+    let mut step_norm_sq = 0.0;
+    let mut direction_norm_sq = 0.0;
+    let mut delta_norm_sq = 0.0;
+    let mut direction_delta_dot = 0.0;
+    let mut history_norm_sq = 0.0;
+    let mut current_norm_sq = 0.0;
+    for ((p, b), d) in params.iter_mut().zip(buf.iter_mut()).zip(delta) {
+        let previous_buffer = *b;
+        *b = mu * *b + *d;
+        // Write the buffer first and derive the step from it in exactly the
+        // form of materialize_applied_step's gc branch so this path is
+        // bit-identical to lr * (gain * (delta + mu * buf)).
+        let direction = g * (*d + mu * *b);
+        let step = lr * direction;
+        *p -= step;
+
+        let direction = direction as f64;
+        let delta = *d as f64;
+        let step = step as f64;
+        let history = (g * (mu * (mu * previous_buffer))) as f64;
+        let current = (g * (*d + mu * *d)) as f64;
+        step_norm_sq += step * step;
+        direction_norm_sq += direction * direction;
+        delta_norm_sq += delta * delta;
+        direction_delta_dot += direction * delta;
+        history_norm_sq += history * history;
+        current_norm_sq += current * current;
     }
-    let (c_t, r_t) = if delta_norm_sq > 0.0 {
-        let c = dot / delta_norm_sq;
-        // |b - c*delta|^2 expands to |b|^2 - c*<b, delta> at the projection
-        // coefficient; clamp at 0 against cancellation when b ~ c*delta.
-        let r = ((buf_norm_sq - c * dot).max(0.0) / delta_norm_sq).sqrt();
-        (c, r)
-    } else {
-        // No measurable geometry (zero delta): caps stay inactive and the
-        // EMA relaxes toward mu_max, mirroring rho-adaptive's unmeasured
-        // commits.
-        (0.0, 0.0)
-    };
-    let cap = capped_nesterov_cap(c_t, r_t);
-    let released =
-        CAPPED_NESTEROV_EMA_BETA * *mu_prev as f64 + (1.0 - CAPPED_NESTEROV_EMA_BETA) * cap;
-    *mu_prev = cap.min(released) as f32;
-    nesterov_step(params, buf, delta, lr, *mu_prev)
+    finish_outer_step_stats(
+        step_norm_sq,
+        direction_norm_sq,
+        delta_norm_sq,
+        direction_delta_dot,
+        history_norm_sq,
+        current_norm_sq,
+        false,
+    )
 }
 
 /// Purely scale a nominal applied-step vector and apply it once to the same
@@ -1662,7 +1832,263 @@ mod tests {
         let mut mu = CAPPED_NESTEROV_INITIAL_MU;
         capped_nesterov_step(&mut p, &mut buf, &delta, 0.3, &mut mu);
         let step =
-            materialize_applied_step(OuterOptimizer::CappedNesterov, &buf, &delta, 0.3, mu);
+            materialize_applied_step(OuterOptimizer::CappedNesterov, &buf, &delta, 0.3, mu, 1.0);
+        for ((b, s), after) in base.iter().zip(&step).zip(&p) {
+            assert_eq!((b - s).to_bits(), after.to_bits());
+        }
+    }
+
+    #[test]
+    fn capped_nesterov_r_three_step_hand_computed_sequence() {
+        // Same deterministic scenario as the base three-step audit (lr = 0.1,
+        // theta_0 = 0, b_0 = 0, mu_prev = 0.9) but with the relaxed
+        // transverse budget tau_perp = 1.55. t=1 and t=2 involve no
+        // transverse residual (r_t = 0), so they are IDENTICAL to the frozen
+        // controller; the variants only part ways at t=3.
+        //
+        // t=1, delta_1 = [1, 0]: caps inactive, mu_1 = 0.9, b_1 = [1, 0],
+        //   step_1 = [0.19, 0], theta_1 = [-0.19, 0].
+        // t=2, delta_2 = [1, 0]: c_2 = 1, r_2 = 0; aligned cap binds at
+        //   mu_2 = (sqrt(4.6) - 1)/2 = 0.57238053; step_2 = [0.19, 0],
+        //   theta_2 = [-0.38, 0], b_2 = [1 + mu_2, 0].
+        // t=3, delta_3 = [0, 1]: c_3 = 0, r_3 = 1 + mu_2 = 1.57238053.
+        //   mu_perp = sqrt(1.55/1.57238053) = 0.99286744 > mu_max, so unlike
+        //   the tau = 1 budget (which capped at 0.79748276) the relaxed
+        //   transverse cap does NOT bind: cap = mu_max = 0.9. The release
+        //   EMA still binds from below:
+        //   mu_3 = 0.9*mu_2 + 0.1*0.9 = 0.60514248 < 0.9.
+        //   b_3 = mu_3*[1.57238053, 0] + [0, 1] = [0.95151846, 1],
+        //   d_3 = [0, 1] + mu_3*b_3 = [0.57580557, 1.60514248],
+        //   step_3 = [0.05758056, 0.16051425].
+        let lr = 0.1f32;
+        let mut p = [0.0f32, 0.0];
+        let mut buf = [0.0f32, 0.0];
+        let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+        let tol = 1e-5f64;
+
+        let s1 = capped_nesterov_r_step(&mut p, &mut buf, &[1.0, 0.0], lr, &mut mu);
+        assert!((mu as f64 - 0.9).abs() < 1e-7);
+        assert_eq!(buf, [1.0, 0.0]);
+        assert!((p[0] as f64 + 0.19).abs() < tol && p[1] == 0.0);
+        assert!((s1.applied_step_norm - 0.19).abs() < tol);
+
+        let s2 = capped_nesterov_r_step(&mut p, &mut buf, &[1.0, 0.0], lr, &mut mu);
+        let mu2 = ((1.0f64 + 4.0 * 0.9).sqrt() - 1.0) / 2.0;
+        assert!((mu as f64 - mu2).abs() < 1e-7);
+        assert!((buf[0] as f64 - (1.0 + mu2)).abs() < tol && buf[1] == 0.0);
+        assert!((p[0] as f64 + 0.38).abs() < tol && p[1] == 0.0);
+        assert!((s2.applied_step_norm - 0.19).abs() < tol);
+
+        let s3 = capped_nesterov_r_step(&mut p, &mut buf, &[0.0, 1.0], lr, &mut mu);
+        // Relaxed budget: mu_perp > mu_max, transverse cap inactive.
+        assert!((CAPPED_NESTEROV_R_TAU_PERP / (1.0 + mu2)).sqrt() > CAPPED_NESTEROV_MU_MAX);
+        let mu3 = 0.9 * mu2 + 0.1 * CAPPED_NESTEROV_MU_MAX;
+        assert!(mu3 < CAPPED_NESTEROV_MU_MAX);
+        assert!((mu as f64 - mu3).abs() < 1e-7);
+        let b3 = [mu3 * (1.0 + mu2), 1.0];
+        assert!((buf[0] as f64 - b3[0]).abs() < tol && (buf[1] as f64 - 1.0).abs() < tol);
+        let d3 = [mu3 * b3[0], 1.0 + mu3 * b3[1]];
+        assert!((p[0] as f64 + (0.38 + 0.1 * d3[0])).abs() < tol);
+        assert!((p[1] as f64 + 0.1 * d3[1]).abs() < tol);
+        let d3_norm = (d3[0] * d3[0] + d3[1] * d3[1]).sqrt();
+        assert!((s3.applied_step_norm - 0.1 * d3_norm).abs() < tol);
+        // Strictly more momentum than the frozen controller at this commit.
+        let frozen_mu3 = 0.9 * mu2 + 0.1 * (1.0f64 / (1.0 + mu2)).sqrt();
+        assert!(mu3 > frozen_mu3);
+    }
+
+    #[test]
+    fn capped_nesterov_r_transverse_cap_binds_at_relaxed_budget() {
+        // b = [0, 10], delta = [1, 0]: c = 0, r = 10. mu_perp =
+        // sqrt(1.55/10) = 0.39370039 (vs sqrt(0.1) = 0.31622777 at tau = 1),
+        // far below the EMA path (0.9*0.9 + 0.1*cap = 0.84937), so the
+        // relaxed transverse cap binds: mu = sqrt(0.155). The applied step's
+        // delta-orthogonal component is mu^2*b = 0.155*[0, 10] with norm
+        // exactly tau_perp*|delta| = 1.55.
+        let mut p = [0.0f32, 0.0];
+        let mut buf = [0.0f32, 10.0];
+        let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+        capped_nesterov_r_step(&mut p, &mut buf, &[1.0, 0.0], 1.0, &mut mu);
+        let expected_mu = (CAPPED_NESTEROV_R_TAU_PERP / 10.0).sqrt();
+        assert!((mu as f64 - expected_mu).abs() < 1e-7);
+        assert!(expected_mu > (CAPPED_NESTEROV_TAU_PERP / 10.0).sqrt());
+        // b_new = mu*[0, 10] + [1, 0]; d = delta + mu*b_new
+        //       = [1 + mu, 10*mu^2] = [1.39370039, 1.55].
+        assert!((buf[0] as f64 - 1.0).abs() < 1e-6);
+        assert!((buf[1] as f64 - 10.0 * expected_mu).abs() < 1e-5);
+        assert!((p[0] as f64 + (1.0 + expected_mu)).abs() < 1e-6);
+        assert!((p[1] as f64 + CAPPED_NESTEROV_R_TAU_PERP).abs() < 1e-5);
+    }
+
+    #[test]
+    fn capped_nesterov_r_step_is_bit_identical_to_materialized_step() {
+        let base = [0.25f32, -1.5, 3.0];
+        let mut p = base;
+        let mut buf = [0.5f32, 1.0, -2.0];
+        let delta = [1.0f32, -0.5, 0.25];
+        let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+        capped_nesterov_r_step(&mut p, &mut buf, &delta, 0.3, &mut mu);
+        let step = materialize_applied_step(
+            OuterOptimizer::CappedNesterovR,
+            &buf,
+            &delta,
+            0.3,
+            mu,
+            1.0,
+        );
+        for ((b, s), after) in base.iter().zip(&step).zip(&p) {
+            assert_eq!((b - s).to_bits(), after.to_bits());
+        }
+    }
+
+    #[test]
+    fn capped_nesterov_gc_three_step_hand_computed_sequence() {
+        // Same deterministic scenario as the base three-step audit (lr = 0.1,
+        // theta_0 = 0, b_0 = 0, mu_prev = 0.9, gain_0 = 1); caps are the
+        // frozen controller's (tau_perp = 1), so mu_t matches the base
+        // variant at every commit and only the applied displacement changes.
+        //
+        // t=1, delta_1 = [1, 0]: mu_1 = 0.9, A_1 = 1 + 0.9 = 1.9,
+        //   g_1 = 1.9/1.9 = 1: exactly the base step. b_1 = [1, 0],
+        //   step_1 = [0.19, 0], theta_1 = [-0.19, 0].
+        // t=2, delta_2 = [1, 0]: c_2 = 1, aligned cap binds at
+        //   mu_2 = 0.57238053 and by construction A_2 = 1 + mu_2 + mu_2^2
+        //   = 1.9, so g_2 = 1 again: when the aligned cap binds the frozen
+        //   controller already delivers the design gain and gc changes
+        //   nothing. step_2 = [0.19, 0], theta_2 = [-0.38, 0].
+        // t=3, delta_3 = [0, 1]: c_3 = 0, r_3 = 1.57238053; transverse cap
+        //   plus release EMA give mu_3 = 0.59489075 (base variant), and the
+        //   understeer appears: A_3 = 1 + mu_3 = 1.59489075 < 1.9. Gain
+        //   compensation restores it: g_3 = 1.9/1.59489075 = 1.19130347.
+        //   b_3 = mu_3*[1.57238053, 0] + [0, 1] = [0.93539497, 1],
+        //   d_3 = [0.55645437, 1.59489075],
+        //   applied direction g_3*d_3 = [0.66289245, 1.9] — the aligned
+        //   component is pinned at exactly (1 + mu_max) = 1.9.
+        //   step_3 = [0.06628925, 0.19].
+        let lr = 0.1f32;
+        let mut p = [0.0f32, 0.0];
+        let mut buf = [0.0f32, 0.0];
+        let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+        let mut gain = CAPPED_NESTEROV_GC_INITIAL_GAIN;
+        let tol = 1e-5f64;
+
+        let s1 = capped_nesterov_gc_step(&mut p, &mut buf, &[1.0, 0.0], lr, &mut mu, &mut gain);
+        assert!((mu as f64 - 0.9).abs() < 1e-7);
+        assert!((gain as f64 - 1.0).abs() < 1e-6);
+        assert_eq!(buf, [1.0, 0.0]);
+        assert!((p[0] as f64 + 0.19).abs() < tol && p[1] == 0.0);
+        assert!((s1.applied_step_norm - 0.19).abs() < tol);
+        assert_eq!(s1.history_current_norm_ratio, Some(0.0));
+
+        let s2 = capped_nesterov_gc_step(&mut p, &mut buf, &[1.0, 0.0], lr, &mut mu, &mut gain);
+        let mu2 = ((1.0f64 + 4.0 * 0.9).sqrt() - 1.0) / 2.0;
+        assert!((mu as f64 - mu2).abs() < 1e-7);
+        assert!((gain as f64 - 1.0).abs() < 1e-6);
+        assert!((buf[0] as f64 - (1.0 + mu2)).abs() < tol && buf[1] == 0.0);
+        assert!((p[0] as f64 + 0.38).abs() < tol && p[1] == 0.0);
+        assert!((s2.applied_step_norm - 0.19).abs() < tol);
+
+        let s3 = capped_nesterov_gc_step(&mut p, &mut buf, &[0.0, 1.0], lr, &mut mu, &mut gain);
+        let cap3 = (1.0f64 / (1.0 + mu2)).sqrt();
+        let mu3 = 0.9 * mu2 + 0.1 * cap3;
+        assert!((mu as f64 - mu3).abs() < 1e-7);
+        let g3 = 1.9 / (1.0 + mu3);
+        assert!((gain as f64 - g3).abs() < 1e-6);
+        let b3 = [mu3 * (1.0 + mu2), 1.0];
+        assert!((buf[0] as f64 - b3[0]).abs() < tol && (buf[1] as f64 - 1.0).abs() < tol);
+        let d3 = [g3 * mu3 * b3[0], g3 * (1.0 + mu3)];
+        // Aligned effective gain pinned at the design point.
+        assert!((d3[1] - 1.9).abs() < 1e-12);
+        assert!((p[0] as f64 + (0.38 + 0.1 * d3[0])).abs() < tol);
+        // theta_3[1] = -0.1 * 1.9 = -0.19: same aligned displacement as t=1.
+        assert!((p[1] as f64 + 0.19).abs() < tol);
+        let d3_norm = (d3[0] * d3[0] + d3[1] * d3[1]).sqrt();
+        assert!((s3.applied_step_norm - 0.1 * d3_norm).abs() < tol);
+    }
+
+    #[test]
+    fn capped_nesterov_gc_transverse_cap_binds_and_gain_compensates() {
+        // b = [0, 10], delta = [1, 0], lr = 1: transverse cap binds at
+        // mu = sqrt(0.1) exactly as in the base variant, which would leave
+        // the aligned gain at A = 1 + mu = 1.31622777 (understeer). The gc
+        // rescale g = 1.9/1.31622777 = 1.44351811 restores the aligned
+        // component to exactly 1.9; the transverse component becomes
+        // g*mu^2*|b| = 1.44351811 (scalar rescale scales both).
+        let mut p = [0.0f32, 0.0];
+        let mut buf = [0.0f32, 10.0];
+        let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+        let mut gain = CAPPED_NESTEROV_GC_INITIAL_GAIN;
+        capped_nesterov_gc_step(&mut p, &mut buf, &[1.0, 0.0], 1.0, &mut mu, &mut gain);
+        let expected_mu = 0.1f64.sqrt();
+        let expected_g = 1.9 / (1.0 + expected_mu);
+        assert!((mu as f64 - expected_mu).abs() < 1e-7);
+        assert!((gain as f64 - expected_g).abs() < 1e-6);
+        // Buffer keeps the plain capped-Nesterov recursion (no rescale).
+        assert!((buf[0] as f64 - 1.0).abs() < 1e-6);
+        assert!((buf[1] as f64 - 10.0 * expected_mu).abs() < 1e-5);
+        // Applied step: aligned component pinned at 1.9, transverse g*1.
+        assert!((p[0] as f64 + 1.9).abs() < 1e-5);
+        assert!((p[1] as f64 + expected_g).abs() < 1e-5);
+    }
+
+    #[test]
+    fn capped_nesterov_gc_gain_is_clamped_and_never_dampens() {
+        // Strongly opposing but guard-admissible history: b = [-1.45, 0.1],
+        // delta = [1, 0]: c = -1.45, r = 0.1. c_plus = 0 -> mu_par = 0.9;
+        // mu_perp = sqrt(1/0.1) = 3.16 (inactive); cap = 0.9;
+        // A(0.9) = 1.9 + 0.81*(-1.45) = 0.7255 > 0 (guard idle); EMA path
+        // stays at mu = 0.9. Raw gain 1.9/0.7255 = 2.61888 exceeds GAIN_MAX
+        // and must clamp to 2.5.
+        let mut p = [0.0f32, 0.0];
+        let mut buf = [-1.45f32, 0.1];
+        let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+        let mut gain = CAPPED_NESTEROV_GC_INITIAL_GAIN;
+        capped_nesterov_gc_step(&mut p, &mut buf, &[1.0, 0.0], 0.1, &mut mu, &mut gain);
+        assert!((mu as f64 - 0.9).abs() < 1e-7);
+        assert_eq!(gain as f64, CAPPED_NESTEROV_GC_GAIN_MAX);
+
+        // mu_t <= cap implies A_t <= 1 + mu_max on the admissible set, so
+        // the raw gain is always >= 1: gc only compensates understeer, it
+        // never dampens below the design step.
+        for (b, d) in [
+            ([2.0f32, 0.0], [1.0f32, 0.0]),   // aligned cap binds
+            ([0.0f32, 10.0], [1.0f32, 0.0]),  // transverse cap binds
+            ([0.0f32, 0.0], [1.0f32, 1.0]),   // fresh state
+            ([-10.0f32, 0.0], [1.0f32, 0.0]), // sign guard zeroes the cap
+        ] {
+            let mut p = [0.0f32, 0.0];
+            let mut buf = b;
+            let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+            let mut gain = CAPPED_NESTEROV_GC_INITIAL_GAIN;
+            capped_nesterov_gc_step(&mut p, &mut buf, &d, 0.1, &mut mu, &mut gain);
+            assert!(
+                gain as f64 >= 1.0 && gain as f64 <= CAPPED_NESTEROV_GC_GAIN_MAX,
+                "gain {gain} out of range for buffer {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn capped_nesterov_gc_step_is_bit_identical_to_materialized_step() {
+        // The gc branch of materialize_applied_step must reproduce the
+        // applied step bit-for-bit from the updated buffer, the effective
+        // momentum, AND the applied gain written back by the step.
+        let base = [0.25f32, -1.5, 3.0];
+        let mut p = base;
+        let mut buf = [0.5f32, 1.0, -2.0];
+        let delta = [1.0f32, -0.5, 0.25];
+        let mut mu = CAPPED_NESTEROV_INITIAL_MU;
+        let mut gain = CAPPED_NESTEROV_GC_INITIAL_GAIN;
+        capped_nesterov_gc_step(&mut p, &mut buf, &delta, 0.3, &mut mu, &mut gain);
+        assert!(gain > 1.0, "scenario must exercise a non-trivial gain");
+        let step = materialize_applied_step(
+            OuterOptimizer::CappedNesterovGc,
+            &buf,
+            &delta,
+            0.3,
+            mu,
+            gain,
+        );
         for ((b, s), after) in base.iter().zip(&step).zip(&p) {
             assert_eq!((b - s).to_bits(), after.to_bits());
         }
@@ -1819,6 +2245,15 @@ mod tests {
         assert_eq!("normalized-ema".parse(), Ok(OuterOptimizer::NormalizedEma));
         assert_eq!("restarted-ema".parse(), Ok(OuterOptimizer::RestartedEma));
         assert_eq!("capped-nesterov".parse(), Ok(OuterOptimizer::CappedNesterov));
+        assert_eq!(
+            "capped-nesterov-gc".parse(),
+            Ok(OuterOptimizer::CappedNesterovGc)
+        );
+        assert_eq!(
+            "capped-nesterov-r".parse(),
+            Ok(OuterOptimizer::CappedNesterovR)
+        );
         assert!("ema".parse::<OuterOptimizer>().is_err());
+        assert!("capped-nesterov-x".parse::<OuterOptimizer>().is_err());
     }
 }

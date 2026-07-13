@@ -82,6 +82,8 @@ OUTER_OPTIMIZERS = (
     "restarted-ema",
     "rho-adaptive",
     "capped-nesterov",
+    "capped-nesterov-gc",
+    "capped-nesterov-r",
 )
 COMMIT_POLICIES = (
     "token_weighted",

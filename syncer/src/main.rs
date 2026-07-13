@@ -238,14 +238,17 @@ fn validate_outer_optimizer(
             "--outer-momentum is beta for {optimizer} and must be finite and in [0, 1), got {outer_momentum}"
         );
     }
-    // rho-adaptive v2 and capped-nesterov do not consume --outer-momentum:
-    // their constants (mu_star/rho_ref/gain bounds, and mu_max/tau_perp/
-    // release beta respectively) are compile-time constants in merge.rs.
-    // The flag is still validated as finite so a typo does not silently
-    // ride along into logs and tapes.
+    // rho-adaptive v2 and the capped-nesterov family do not consume
+    // --outer-momentum: their constants (mu_star/rho_ref/gain bounds, and
+    // mu_max/tau_perp/release beta/gc gain bounds respectively) are
+    // compile-time constants in merge.rs. The flag is still validated as
+    // finite so a typo does not silently ride along into logs and tapes.
     if matches!(
         optimizer,
-        merge::OuterOptimizer::RhoAdaptive | merge::OuterOptimizer::CappedNesterov
+        merge::OuterOptimizer::RhoAdaptive
+            | merge::OuterOptimizer::CappedNesterov
+            | merge::OuterOptimizer::CappedNesterovGc
+            | merge::OuterOptimizer::CappedNesterovR
     ) && !outer_momentum.is_finite()
     {
         anyhow::bail!(
@@ -392,6 +395,8 @@ mod tests {
             ("normalized-ema", merge::OuterOptimizer::NormalizedEma),
             ("restarted-ema", merge::OuterOptimizer::RestartedEma),
             ("capped-nesterov", merge::OuterOptimizer::CappedNesterov),
+            ("capped-nesterov-gc", merge::OuterOptimizer::CappedNesterovGc),
+            ("capped-nesterov-r", merge::OuterOptimizer::CappedNesterovR),
         ] {
             let args = Args::try_parse_from([
                 "yeto-syncer",
@@ -413,6 +418,14 @@ mod tests {
         assert!(validate_outer_optimizer(merge::OuterOptimizer::RestartedEma, 1.0).is_err());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::CappedNesterov, 0.9).is_ok());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::CappedNesterov, f32::NAN).is_err());
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::CappedNesterovGc, 0.9).is_ok());
+        assert!(
+            validate_outer_optimizer(merge::OuterOptimizer::CappedNesterovGc, f32::NAN).is_err()
+        );
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::CappedNesterovR, 0.9).is_ok());
+        assert!(
+            validate_outer_optimizer(merge::OuterOptimizer::CappedNesterovR, f32::NAN).is_err()
+        );
         assert_eq!(parse_cosine_threshold("-0.25").unwrap(), -0.25);
         assert!(parse_cosine_threshold("1.1").is_err());
         assert!(parse_cosine_threshold("NaN").is_err());
