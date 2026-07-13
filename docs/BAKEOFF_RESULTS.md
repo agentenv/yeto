@@ -51,6 +51,25 @@ The directional worker-subspace variant, judged head-to-head against curv:
   quartic in delta scale → inverted binding), and the residual aligned
   capped-Nesterov still loses to SGD. Remaining arms in progress.
 
+## New candidates (Codex brainstorm/lit-research; docs/OTHER_OPTIMIZERS.md)
+Reviewed → fixed → re-reviewed before GPU. Results as they land.
+
+### Tail-time primal averaging (exp2-tailavg) — FAIL/KILL
+Token-weighted Polyak-Ruppert average of the final 25% of committed models,
+θ_out = 0.5·θ_T + 0.5·θ_tail. Reconstructed from EXISTING SGD-0.28 captures
+(H16 ← exp2-46 C-h16mu0, H64 ← vanilla-sync sgd028, H256 ← exp2-46 C-h256mu0);
+no new training.
+| cell | θ_out | θ_T (SGD-0.28) | Δ win |
+|------|-------|----------------|-------|
+| H16  | 1.352363 | 1.358285 | +0.0059 |
+| H64  | 1.357980 | 1.359852 | +0.0019 |
+| H256 | 1.371549 | 1.371557 | +0.00001 |
+Gate FAIL (need >0.018 on ≥2 cells; H16 <0.009 kill fires). The gain is GENUINE
+off-trajectory averaging, NOT shrinkage — survives the effective-LR control
+(beats the norm-matched-LR checkpoint at every cell; pullback cosine ≈ −0.40, not
+−1). Horizon tilt as predicted (grows as H shrinks). An order of magnitude below
+the product bar. Matches the spec's P≈14% + honest-negative note.
+
 ## Notes
 ¹ block-Yogi H256 lost to node preemption mid-run; conclusion robust without it.
 ² curvature-aware momentum and Iso-C are compared against their **same-node** SGD
