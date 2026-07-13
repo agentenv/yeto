@@ -74,6 +74,10 @@ pub struct Config {
     pub outer_momentum: f32,
     pub outer_optimizer: crate::merge::OuterOptimizer,
     pub outer_restart_cos_threshold: f32,
+    /// Post-merge renormalization for mediation-control experiments: rescale
+    /// every merged delta to this L2 norm before the outer step. 0 = off
+    /// (byte-identical production path). See `GlobalState::delta_norm_ref`.
+    pub delta_norm_ref: f32,
     pub final_state: Option<std::path::PathBuf>,
     /// Consistent-snapshot file; written every `checkpoint_every` rounds at
     /// the quiescent cut between rounds, resumed from when `resume` is set.
@@ -1590,6 +1594,7 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     }
     st.outer_optimizer = cfg.outer_optimizer;
     st.outer_restart_cos_threshold = cfg.outer_restart_cos_threshold;
+    st.delta_norm_ref = cfg.delta_norm_ref;
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }

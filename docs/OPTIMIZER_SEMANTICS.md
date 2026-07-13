@@ -86,6 +86,21 @@ actions, the post-scale norm); `direction_delta_cosine` = cos(d_t, δ_t);
   `--outer-momentum` is not consumed; ρ̄ is per fragment and resets to ½ on
   restore. `history_current_norm_ratio` reports the per-commit ρ_t here.
 
+## Post-merge renormalization (`--delta-norm-ref`, mediation controls)
+
+Opt-in control for mediation experiments (EXP2.39): with `--delta-norm-ref R`
+(R > 0), every merged delta is rescaled per fragment to L2 norm R **after**
+the production merge and **before** the outer-optimizer step:
+
+    δ_t ← (R / ‖δ_t‖) δ_t        (zero-norm δ left untouched)
+
+The scale is a single f32 deterministic from δ_t; the same rescaled slice
+feeds the applied step and its materialized preview, so previews stay
+bit-exact. The tape's `gnorm` still reports the PRE-rescale merged-delta
+norm (`outer_step_norm` reflects the rescaled step). Momentum buffers see
+only the rescaled delta. Default 0 = off, byte-identical production path.
+Tests: `delta_norm_ref_*` in `state.rs`.
+
 ## Boundaries that shape δ
 
 bf16 wire both ways: pushes quantize θ_m to bf16 before the f32 difference

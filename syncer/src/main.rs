@@ -76,6 +76,14 @@ struct Args {
     /// below this threshold. Used only by restarted-ema.
     #[arg(long, default_value_t = 0.0, value_parser = parse_cosine_threshold)]
     outer_restart_cos_threshold: f32,
+    /// Post-merge renormalization for mediation-control experiments
+    /// (EXP2.39 norm-matched intervention): after the production merge,
+    /// rescale the merged delta of every commit to this L2 norm (per
+    /// fragment) before the outer-optimizer step. The tape's gnorm still
+    /// reports the pre-rescale merged-delta norm. 0 disables (the default;
+    /// byte-identical to the production path).
+    #[arg(long, default_value_t = 0.0, value_parser = parse_delta_norm_ref)]
+    delta_norm_ref: f32,
     /// Optional path to dump the final global parameters (flat f32 binary).
     #[arg(long)]
     final_state: Option<std::path::PathBuf>,
@@ -166,6 +174,7 @@ fn main() -> anyhow::Result<()> {
         outer_momentum: args.outer_momentum,
         outer_optimizer: args.outer_optimizer,
         outer_restart_cos_threshold: args.outer_restart_cos_threshold,
+        delta_norm_ref: args.delta_norm_ref,
         final_state: args.final_state,
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,
@@ -213,6 +222,18 @@ fn action_probe_config(args: &Args) -> anyhow::Result<Option<action_probe::Clien
         run_uuid,
         expected,
     )?))
+}
+
+fn parse_delta_norm_ref(value: &str) -> Result<f32, String> {
+    let reference = value
+        .parse::<f32>()
+        .map_err(|err| format!("invalid delta norm reference {value:?}: {err}"))?;
+    if !reference.is_finite() || reference < 0.0 {
+        return Err(format!(
+            "delta norm reference must be finite and non-negative, got {value:?}"
+        ));
+    }
+    Ok(reference)
 }
 
 fn parse_cosine_threshold(value: &str) -> Result<f32, String> {
@@ -301,6 +322,7 @@ mod tests {
         assert_eq!(args.outer_optimizer, merge::OuterOptimizer::Nesterov);
         assert_eq!(args.outer_momentum, 0.9);
         assert_eq!(args.outer_restart_cos_threshold, 0.0);
+        assert_eq!(args.delta_norm_ref, 0.0);
         assert_eq!(
             args.commit_policy,
             action_probe::CommitPolicy::TokenWeighted
@@ -429,5 +451,36 @@ mod tests {
         assert_eq!(parse_cosine_threshold("-0.25").unwrap(), -0.25);
         assert!(parse_cosine_threshold("1.1").is_err());
         assert!(parse_cosine_threshold("NaN").is_err());
+    }
+
+    #[test]
+    fn parses_and_validates_delta_norm_ref() {
+        assert_eq!(parse_delta_norm_ref("0").unwrap(), 0.0);
+        assert_eq!(parse_delta_norm_ref("2.869").unwrap(), 2.869);
+        assert!(parse_delta_norm_ref("-0.1").is_err());
+        assert!(parse_delta_norm_ref("NaN").is_err());
+        assert!(parse_delta_norm_ref("inf").is_err());
+
+        let args = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "1",
+            "--total-steps",
+            "1",
+            "--delta-norm-ref",
+            "3.5",
+        ])
+        .unwrap();
+        assert_eq!(args.delta_norm_ref, 3.5);
+        assert!(Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "1",
+            "--total-steps",
+            "1",
+            "--delta-norm-ref",
+            "-1",
+        ])
+        .is_err());
     }
 }

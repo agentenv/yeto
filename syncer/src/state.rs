@@ -434,6 +434,16 @@ pub struct GlobalState {
     /// HeLoCo per-tensor directional correction of learner deltas against
     /// the outer momentum before merging (None disables).
     pub delta_correction: Option<merge::Heloco>,
+    /// Post-merge renormalization for mediation-control experiments
+    /// (EXP2.39): when > 0, the merged delta of every commit is rescaled to
+    /// this L2 norm (per fragment, after the production merge, before the
+    /// outer-optimizer step). The scale is deterministic from the delta
+    /// (R / ‖δ‖, computed once and shared by the step and its materialized
+    /// preview, so previews stay bit-exact). Zero-norm deltas are left
+    /// untouched. 0 = off (the default; byte-identical to the pre-flag
+    /// production path). `stats.gnorm` still reports the PRE-rescale merged
+    /// delta norm.
+    pub delta_norm_ref: f32,
 }
 
 impl GlobalState {
@@ -477,6 +487,7 @@ impl GlobalState {
             outer_restart_cos_threshold: 0.0,
             wire_dtype,
             delta_correction: None,
+            delta_norm_ref: 0.0,
         }
     }
 
@@ -610,6 +621,30 @@ impl GlobalState {
         if !self.outer_momentum.is_finite() || !self.outer_restart_cos_threshold.is_finite() {
             bail!("fragment {fid}: outer optimizer configuration is not finite");
         }
+        if !self.delta_norm_ref.is_finite() || self.delta_norm_ref < 0.0 {
+            bail!("fragment {fid}: delta-norm-ref must be finite and non-negative");
+        }
+        // Post-merge renormalization (mediation-control experiments): rescale
+        // the merged delta to L2 norm `delta_norm_ref` before the outer step.
+        // The scale is a single f32 deterministic from the delta; the SAME
+        // rescaled slice feeds both the applied step and the materialized
+        // preview below, so preview bit-exactness is preserved by
+        // construction. gnorm (aggregate.gnorm) keeps the pre-rescale norm.
+        let renormalized_delta: Option<Vec<f32>> = if self.delta_norm_ref > 0.0 {
+            let raw_norm = flat_l2_norm(&aggregate.delta);
+            if raw_norm > 0.0 {
+                let scale = (self.delta_norm_ref as f64 / raw_norm) as f32;
+                if !scale.is_finite() {
+                    bail!("fragment {fid}: delta-norm-ref rescale is not finite");
+                }
+                Some(aggregate.delta.iter().map(|value| scale * *value).collect())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let delta: &[f32] = renormalized_delta.as_deref().unwrap_or(&aggregate.delta);
         let mut resulting_params = self.params[fid].clone();
         let mut resulting_optimizer_buffer = self.momentum[fid].clone();
         let mut resulting_rho_ema = self.rho_ema[fid];
@@ -619,7 +654,7 @@ impl GlobalState {
             self.outer_optimizer,
             &mut resulting_params,
             &mut resulting_optimizer_buffer,
-            &aggregate.delta,
+            delta,
             outer_lr,
             self.outer_momentum,
             self.outer_restart_cos_threshold,
@@ -644,7 +679,7 @@ impl GlobalState {
         let applied_step = merge::materialize_applied_step(
             self.outer_optimizer,
             &resulting_optimizer_buffer,
-            &aggregate.delta,
+            delta,
             outer_lr,
             materialize_momentum,
             resulting_capped_gain,
@@ -1527,6 +1562,125 @@ mod tests {
         let learner = vec![0.0f32; 4];
         st.merge_and_step(0, &[&learner], &[1.0]).unwrap();
         assert_eq!(st.params[0], vec![0.5; 4]);
+    }
+
+    #[test]
+    fn delta_norm_ref_rescales_merged_delta_before_outer_step() {
+        // Raw merged delta [1,1,1,1] has norm 2; ref 1.0 halves it. lr 1,
+        // mu 0: params move by exactly the renormalized delta, gnorm keeps
+        // the PRE-rescale norm, and the momentum buffer receives the
+        // rescaled delta.
+        let mut st = GlobalState::new(layout2(), None, 1.0, 0.0, crate::protocol::DTYPE_F32);
+        st.delta_norm_ref = 1.0;
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![1.0; 4]).unwrap();
+        let learner = vec![0.0f32; 4];
+        let stats = st.merge_and_step(0, &[&learner], &[1.0]).unwrap();
+        assert!((stats.gnorm - 2.0).abs() < 1e-12, "gnorm is pre-rescale");
+        assert!((stats.outer.applied_step_norm - 1.0).abs() < 1e-7);
+        assert_eq!(st.params[0], vec![0.5; 4]);
+        assert_eq!(st.momentum[0], vec![0.5; 4]);
+    }
+
+    #[test]
+    fn delta_norm_ref_zero_is_identical_to_default_and_zero_delta_is_untouched() {
+        let mut plain = GlobalState::new(layout2(), None, 0.7, 0.9, crate::protocol::DTYPE_F32);
+        let mut explicit = GlobalState::new(layout2(), None, 0.7, 0.9, crate::protocol::DTYPE_F32);
+        explicit.delta_norm_ref = 0.0;
+        for st in [&mut plain, &mut explicit] {
+            st.init_fragment(0, vec![1.0; 4]).unwrap();
+            st.init_fragment(1, vec![1.0; 4]).unwrap();
+            st.merge_and_step(0, &[&[0.25f32, -0.5, 0.75, -1.0][..]], &[1.0])
+                .unwrap();
+            st.merge_and_step(0, &[&[0.5f32, 0.5, -0.25, 0.125][..]], &[2.0])
+                .unwrap();
+        }
+        assert_eq!(plain.params[0], explicit.params[0]);
+        assert_eq!(plain.momentum[0], explicit.momentum[0]);
+
+        // Zero merged delta with a positive ref: no rescale, no NaN, no step.
+        let mut st = GlobalState::new(layout2(), None, 0.7, 0.0, crate::protocol::DTYPE_F32);
+        st.delta_norm_ref = 3.0;
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![1.0; 4]).unwrap();
+        let stats = st.merge_and_step(0, &[&[1.0f32; 4][..]], &[1.0]).unwrap();
+        assert_eq!(stats.gnorm, 0.0);
+        assert_eq!(stats.outer.applied_step_norm, 0.0);
+        assert_eq!(st.params[0], vec![1.0; 4]);
+    }
+
+    #[test]
+    fn delta_norm_ref_momentum_buffer_compounds_on_rescaled_deltas() {
+        // Two commits under Nesterov mu 0.9, lr 1, both renormalized to norm
+        // 2 (their raw norms are 2 and 4, so scales are 1 and 0.5). Buffer
+        // and params must match the hand-computed recursion on the RESCALED
+        // deltas d1 = [1;4], d2 = [1;4]:
+        //   b1 = d1, step1 = d1 + 0.9 b1 = 1.9
+        //   b2 = 0.9 b1 + d2 = 1.9, step2 = d2 + 0.9 b2 = 2.71
+        let mut st = GlobalState::new(layout2(), None, 1.0, 0.9, crate::protocol::DTYPE_F32);
+        st.delta_norm_ref = 2.0;
+        st.init_fragment(0, vec![10.0; 4]).unwrap();
+        st.init_fragment(1, vec![10.0; 4]).unwrap();
+        st.merge_and_step(0, &[&[9.0f32; 4][..]], &[1.0]).unwrap();
+        for value in &st.params[0] {
+            assert!((*value - (10.0 - 1.9)).abs() < 1e-5, "{:?}", st.params[0]);
+        }
+        assert_eq!(st.momentum[0], vec![1.0; 4]);
+        // Learner sits 2.0 below the new anchor: raw delta [2;4], norm 4.
+        let learner2: Vec<f32> = st.params[0].iter().map(|value| value - 2.0).collect();
+        st.merge_and_step(0, &[learner2.as_slice()], &[1.0]).unwrap();
+        for value in &st.params[0] {
+            assert!(
+                (*value - (10.0 - 1.9 - 2.71)).abs() < 1e-4,
+                "{:?}",
+                st.params[0]
+            );
+        }
+        for value in &st.momentum[0] {
+            assert!((*value - 1.9).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn delta_norm_ref_preview_is_bit_exact_and_commits() {
+        // The rescaled delta feeds both the applied step and its
+        // materialization from the SAME slice, so a norm-matched preview is
+        // bit-identical to re-materializing from the updated buffer with the
+        // identically-recomputed scale (deterministic from the raw delta).
+        let mut st = GlobalState::new(layout2(), None, 0.7, 0.9, crate::protocol::DTYPE_F32);
+        st.delta_norm_ref = 1.5;
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![1.0; 4]).unwrap();
+        let learner = [0.25f32, -0.5, 0.75, 2.0];
+        let candidates = [MergeCandidate::new(0, &learner, 1.0)];
+        let aggregate = st.build_full_aggregate(0, &candidates).unwrap();
+        let preview = st.preview_aggregate(&aggregate, 1).unwrap();
+
+        let raw_norm = vector_norm(aggregate.delta());
+        let scale = (st.delta_norm_ref as f64 / raw_norm) as f32;
+        let scaled: Vec<f32> = aggregate.delta().iter().map(|value| scale * *value).collect();
+        assert!((vector_norm(&scaled) - 1.5).abs() < 1e-6);
+        let rematerialized = merge::materialize_applied_step(
+            merge::OuterOptimizer::Nesterov,
+            &preview.resulting_optimizer_buffer,
+            &scaled,
+            0.7,
+            0.9,
+            1.0,
+        );
+        assert_eq!(preview.applied_step, rematerialized, "bit-exact preview");
+        assert_eq!(preview.resulting_optimizer_buffer, scaled, "b1 = d1");
+
+        let params_before = st.params[0].clone();
+        let stats = st.commit_preview(preview.clone()).unwrap();
+        assert!((stats.gnorm - raw_norm).abs() < 1e-12);
+        for ((committed, before), step) in st.params[0]
+            .iter()
+            .zip(&params_before)
+            .zip(&preview.applied_step)
+        {
+            assert_eq!(*committed, before - step);
+        }
     }
 
     #[test]

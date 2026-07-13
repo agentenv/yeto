@@ -536,6 +536,7 @@ def syncer_command(
     checkpoint_every: int = 1,
     probe_capture: bool = False,
     probe_capture_every: int = 1,
+    delta_norm_ref: float = 0.0,
     action_probe_endpoint: str | None = None,
     action_probe_timeout_ms: int = 30_000,
     action_probe_run_uuid: str | None = None,
@@ -581,6 +582,11 @@ def syncer_command(
     ]
     if arm.outer_lr_by_fragment:
         cmd += ["--outer-lr-by-fragment", arm.outer_lr_by_fragment]
+    if delta_norm_ref > 0.0:
+        # Post-merge renormalization for mediation-control experiments; the
+        # flag is only emitted when active so default command lines (and the
+        # syncer behavior behind them) stay byte-identical.
+        cmd += ["--delta-norm-ref", str(delta_norm_ref)]
     if arm.strict_quorum:
         cmd += ["--strict-quorum"]
     if probe_capture:
@@ -1545,6 +1551,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                 checkpoint_every=getattr(args, "syncer_checkpoint_every", 1),
                 probe_capture=getattr(args, "syncer_probe_capture", False),
                 probe_capture_every=getattr(args, "syncer_probe_capture_every", 1),
+                delta_norm_ref=getattr(args, "delta_norm_ref", 0.0),
                 **syncer_args,
             ),
             stdout=syncer_log,
@@ -1963,6 +1970,15 @@ def main() -> int:
         help="syncer checkpoint cadence in outer steps; raise for large "
         "(full-parameter) states where a per-step ~1GB write throttles the "
         "syncer (the final step is checkpointed when total steps divide it)",
+    )
+    p.add_argument(
+        "--delta-norm-ref",
+        type=float,
+        default=0.0,
+        help="rescale every merged delta to this L2 norm after the "
+        "production merge and before the outer step (per fragment); "
+        "post-merge renormalization for mediation-control experiments. "
+        "0 = off (byte-identical production path)",
     )
     p.add_argument(
         "--syncer-probe-capture",

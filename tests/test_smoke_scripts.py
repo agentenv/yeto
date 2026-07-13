@@ -239,6 +239,23 @@ def test_syncer_command_supports_strict_quorum():
     assert "--strict-quorum" in cmd
 
 
+def test_syncer_command_supports_delta_norm_ref():
+    arm = compare.PRESETS["m4"]
+    # Default off: the flag must not appear, keeping production command
+    # lines byte-identical.
+    cmd = compare.syncer_command(arm, 1234, Path("/tmp/w/m4"), total_steps=80)
+    assert "--delta-norm-ref" not in cmd
+    cmd = compare.syncer_command(
+        arm, 1234, Path("/tmp/w/m4"), total_steps=80, delta_norm_ref=0.0
+    )
+    assert "--delta-norm-ref" not in cmd
+    # Active: forwarded verbatim to the syncer.
+    cmd = compare.syncer_command(
+        arm, 1234, Path("/tmp/w/m4"), total_steps=80, delta_norm_ref=2.869
+    )
+    assert cmd[cmd.index("--delta-norm-ref") + 1] == "2.869"
+
+
 def test_token_budget_split_is_fair_across_learners():
     # Same budget, M learners -> per-learner steps shrink by ~M.
     b1 = compare.steps_for(1_000_000, 2, 512, 1)
