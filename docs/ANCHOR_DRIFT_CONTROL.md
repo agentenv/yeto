@@ -90,3 +90,47 @@ current-anchor differencing as potential contributors.*
 Arms A/B/C × crossover corners {H16-mu0, H16-mu09, H256-mu0, H256-mu05},
 seed 223/223223 sync, capture ON, >=12sigdigit loss. S3 prefix
 exp2-46-anchorctl. On 1x RTXPRO6000 96GB or AWS p4d (fits 4 learners).
+
+## RESULTS (2026-07-13, AWS p4d spot, git 1258885; eta0.28 nesterov rda, lora
+## r2 a4, inner-lr 0.001, m4 strict-quorum, zero injected delay, seed 223/223223)
+
+Eval loss/token (full precision). Every arm logged drift_norm ≡ 0 (under strict
+quorum every push carries base_version == the fragment's current version, so
+current-anchor and version-matched differencing are operationally identical —
+this is EMPIRICAL to this fixed-window / apply-broadcast-before-pull scheduler,
+NOT a hard invariant of strict quorum; see the Codex caveat below).
+
+| arm | semantics                       | H16-mu0  | H16-mu0.9 | H256-mu0 | H256-mu0.5 |
+|-----|---------------------------------|----------|-----------|----------|------------|
+| A   | barrier + version-matched       | 1.361698 | 1.461825  | —        | —          |
+| B   | non-barrier + version-matched   | 1.360637 | 1.460016  | 1.370819 | 1.380580   |
+| C   | non-barrier + current-anchor    | 1.358285 | 1.457329  | 1.371557 | 1.381074   |
+
+(Arm A H256 corner + A-h16 higher-H cells not run: node hit its 5h cost-guard
+backstop after the A-h16 corner; barrier reference is corroborated by exp2-45.)
+
+### Conclusions (map to the interpretation table above)
+- **A ≈ B ≈ C at the H16 poison corner** (all ~1.460 vs ~1.360 mu0 baseline;
+  pairwise Δ ≤ 0.005 < noise floor 0.009). Row "A, B, C all show the poison"
+  ⇒ **outer-momentum pathology is DiLoCo-family-INTRINSIC.** The +0.100 H16
+  penalty appears under TRUE lockstep barrier DiLoCo with correct version-matched
+  deltas at zero injected delay.
+- **Confounder ruled out:** current-anchor (C) ≡ version-matched (B) at every
+  measured corner, with drift ≡ 0. Current-anchor differencing does NOT cause or
+  amplify the poison here.
+- **Horizon crossover, confounder-free:** momentum penalty collapses ~10× from
+  +0.100 (H16) to ~+0.01 (H256, ≈ 1 noise floor). Same sign across arms.
+- **Codex (gpt-5.6-sol) adversarial caveat, honored in claims:** "drift ≡ 0 by
+  construction under strict quorum" is too strong — strict 4-of-4 guarantees
+  participation, not freshness; a deeper pipeline could carry nonzero drift
+  without missing quorum. So the B≡C equivalence is EMPIRICAL to this scheduler.
+  The algebra it confirmed: delta_current − delta_matched == anchor_drift, so
+  drift ≡ 0 ⇒ B and C receive identical deltas. See also the Lean machine-check
+  that anchor-drift and native momentum are separable mechanisms (commit b10d69d).
+
+### Claim we can now make (strongest defensible form)
+The short-horizon outer-momentum poison appears under true lockstep barrier
+DiLoCo with correct version-matched delta semantics at zero injected delay.
+Network-induced staleness, non-barrier execution overlap, and current-anchor
+differencing are each ruled out as NECESSARY causes; the poison is native to
+outer momentum interacting with the short-horizon pseudo-gradient sequence.
