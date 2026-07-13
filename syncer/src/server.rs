@@ -64,6 +64,12 @@ pub struct Config {
     pub sync_interval_steps: f64,
     /// HeLoCo per-tensor delta correction before merging.
     pub delta_correction: bool,
+    /// SCAFFOLD-lite inner control variates (docs/OTHER_OPTIMIZERS.md #5). When
+    /// true, `complete_round` broadcasts the token-normalized mean control c for
+    /// each merged fragment (MSG_BCAST_CONTROL) so learners can correct their
+    /// inner gradients by (c_i - c). Does not touch the merge or outer step;
+    /// false (default) is byte-identical to the pre-scaffold path.
+    pub control_variate: bool,
     pub quorum_timeout_s: u64,
     /// Require the configured quorum even after learners disconnect, and do
     /// not commit under-quorum rounds on timeout.
@@ -1378,6 +1384,23 @@ async fn complete_round(
         learners.push(push.values.as_slice());
         weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
     }
+    // SCAFFOLD-lite mean control c, computed from the per-worker deltas BEFORE
+    // the merge overwrites the anchor (st.params[p]). c = sum_i(theta_i -
+    // anchor) / sum_i tokens_i is the token-normalized merged pseudo-move — the
+    // token-weighted mean of the learners' local controls (yeto/scaffold.py).
+    // Broadcast (below) as MSG_BCAST_CONTROL after the fragment. Uses raw
+    // c_tokens for token weighting, independent of the merge weight formula.
+    let control_mean: Option<Vec<f32>> = if cfg.control_variate {
+        let anchor = &st.params[p];
+        let tokens: Vec<u64> = ids
+            .iter()
+            .map(|id| pushes.get(id).expect("sorted id in push map").c_tokens)
+            .collect();
+        let mut m = vec![0.0f32; anchor.len()];
+        crate::merge::scaffold_mean_control(anchor, &learners, &tokens, &mut m).then_some(m)
+    } else {
+        None
+    };
     let sync_start = Instant::now();
     let (merge_stats, decision) = if cfg.commit_policy == CommitPolicy::TokenWeighted {
         // Keep the legacy production path intact. In particular, do not
@@ -1525,6 +1548,16 @@ async fn complete_round(
     let payload = encode_bcast(st, p)?;
     for g in current_groups(registry) {
         let _ = g.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
+    }
+    // SCAFFOLD-lite: broadcast the mean control c right after the fragment, at
+    // the same (new) version, so learners correct the next window's gradients.
+    if let Some(control) = control_mean {
+        let control_payload = encode_control(st, p, &control)?;
+        for g in current_groups(registry) {
+            let _ = g
+                .send_large(MSG_BCAST_CONTROL, control_payload.clone())
+                .await;
+        }
     }
     *last_sync_secs = sync_start.elapsed().as_secs_f64();
     let ms = started.elapsed().as_millis() as u64;
@@ -1773,6 +1806,21 @@ fn encode_bcast(st: &GlobalState, p: usize) -> Result<bytes::Bytes> {
     // Broadcasts are full parameters, so a q4 session still sends bf16.
     let mut body = Vec::new();
     encode_tensor(bulk_dtype(st.wire_dtype), &st.params[p], &mut body)?;
+    let mut payload = Vec::with_capacity(12 + body.len());
+    payload.extend_from_slice(&(p as u32).to_le_bytes());
+    payload.extend_from_slice(&st.versions[p].to_le_bytes());
+    payload.extend_from_slice(&body);
+    Ok(bytes::Bytes::from(payload))
+}
+
+/// Encode a SCAFFOLD-lite mean-control broadcast (MSG_BCAST_CONTROL): the same
+/// (fid u32, version u64, bf16 tensor) envelope as `encode_bcast`, carrying the
+/// control vector `c` instead of the fragment parameters. The version matches
+/// the fragment's post-merge version so a learner ties `c` to the global it
+/// just received.
+fn encode_control(st: &GlobalState, p: usize, control: &[f32]) -> Result<bytes::Bytes> {
+    let mut body = Vec::new();
+    encode_tensor(bulk_dtype(st.wire_dtype), control, &mut body)?;
     let mut payload = Vec::with_capacity(12 + body.len());
     payload.extend_from_slice(&(p as u32).to_le_bytes());
     payload.extend_from_slice(&st.versions[p].to_le_bytes());

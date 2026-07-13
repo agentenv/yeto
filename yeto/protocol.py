@@ -47,6 +47,12 @@ MSG_HEARTBEAT = 6
 MSG_SHUTDOWN = 7
 MSG_DATA_HELLO = 8
 MSG_CHUNK = 9
+# BCAST_CONTROL (SCAFFOLD-lite): the token-normalized mean control vector c for
+# one fragment, broadcast after its BCAST_FRAGMENT when the syncer runs with
+# --inner-control-variate scaffold_lite. Same envelope as BCAST_FRAGMENT
+# (fid u32, version u64, bf16 tensor bytes); off by default so non-scaffold
+# sessions never see it. See yeto/scaffold.py.
+MSG_BCAST_CONTROL = 10
 
 DTYPE_F32 = 1
 DTYPE_BF16 = 2
@@ -171,6 +177,9 @@ class SyncerClient:
         self._threads: list[threading.Thread] = []
         self._pulls: queue.Queue[PullRequest] = queue.Queue()
         self._bcasts: queue.Queue[BcastFragment] = queue.Queue()
+        # SCAFFOLD-lite mean-control broadcasts (MSG_BCAST_CONTROL). Empty and
+        # never fed unless the syncer runs with control variates enabled.
+        self._controls: queue.Queue[BcastFragment] = queue.Queue()
         self._reasm: dict[int, tuple[bytearray, list[int]]] = {}
         self._reasm_lock = threading.Lock()
         self._msg_id = itertools.count()
@@ -367,6 +376,11 @@ class SyncerClient:
     def drain_updates(self) -> list[BcastFragment]:
         return self._drain(self._bcasts)
 
+    def drain_controls(self) -> list[BcastFragment]:
+        """SCAFFOLD-lite mean-control (c) broadcasts received since the last
+        drain. Always empty unless the syncer has control variates enabled."""
+        return self._drain(self._controls)
+
     @staticmethod
     def _drain(q: queue.Queue) -> list:
         out = []
@@ -487,6 +501,9 @@ class SyncerClient:
         elif msg_type == MSG_BCAST_FRAGMENT:
             fid, version = struct.unpack_from("<IQ", payload)
             self._bcasts.put(BcastFragment(fid, version, payload[12:]))
+        elif msg_type == MSG_BCAST_CONTROL:
+            fid, version = struct.unpack_from("<IQ", payload)
+            self._controls.put(BcastFragment(fid, version, payload[12:]))
 
 
 def _close_socket(sock: socket.socket) -> None:

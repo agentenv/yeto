@@ -33,6 +33,7 @@ from .data import StreamingPackedBlocks, build_packed_dataset
 from .fragments import FragmentLayout, build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
 from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
+from .scaffold import grad_correction, local_control
 from .tensor_io import (
     apply_fragment,
     fragment_flat,
@@ -162,6 +163,19 @@ def parse_args(argv=None):
         default="bf16",
         help="tensor encoding on the WAN; q4 sends pushes as 4-bit E3M0 "
         "block-quantized deltas (broadcasts stay bf16)",
+    )
+    p.add_argument(
+        "--inner-control-variate",
+        choices=["none", "scaffold_lite"],
+        default="none",
+        help="SCAFFOLD-lite endpoint-derived inner control variates "
+        "(docs/OTHER_OPTIMIZERS.md #5). 'scaffold_lite' corrects every inner "
+        "gradient by (c_i - c): the worker keeps a token-normalized local "
+        "control c_i from its own window endpoint, the syncer broadcasts the "
+        "token-weighted mean control c, and the correction reduces cross-worker "
+        "client drift without an extra forward. Requires a syncer started with "
+        "the matching --inner-control-variate scaffold_lite. 'none' (default) "
+        "is byte-identical to the pre-scaffold loop.",
     )
     p.add_argument("--wan-streams", type=int, default=4)
     p.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
@@ -466,6 +480,28 @@ def allreduce_trainable_grads(params, world: int) -> None:
         if p.grad is not None:
             dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
             p.grad.div_(world)
+
+
+def apply_control_correction(
+    frag,
+    params: dict[str, torch.Tensor],
+    control_local: torch.Tensor,
+    control_mean: torch.Tensor,
+    tokens_per_step: float,
+    inner_lr: float,
+) -> None:
+    """SCAFFOLD-lite: add ``(c_i - c) * tokens_per_step / inner_lr`` onto this
+    fragment's parameter grads in place (the ``grad - c_i + c`` correction in
+    gradient units; see yeto/scaffold.py). Called after backward and before
+    grad clipping. Params whose grad is None (no backward this step) are
+    skipped. The controls are flat, in the fragment's layout order."""
+    delta = grad_correction(control_local, control_mean, tokens_per_step, inner_lr)
+    off = 0
+    for name, numel in frag.tensors:
+        p = params[name]
+        if p.grad is not None:
+            p.grad.add_(delta[off : off + numel].view_as(p).to(p.grad.dtype))
+        off += numel
 
 
 def _sigmoid(x: float) -> float:
@@ -835,6 +871,23 @@ def main(argv=None) -> None:
     if not 0.0 <= args.merge_alpha < 1.0:
         raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
 
+    if getattr(args, "inner_control_variate", "none") == "scaffold_lite":
+        if args.syncer == "none":
+            raise RuntimeError(
+                "--inner-control-variate scaffold_lite requires an async syncer "
+                "run (the mean control c is broadcast by the syncer)"
+            )
+        if world > 1:
+            # The control state (c_i, c) and the per-step grad correction live
+            # on the syncer-facing rank 0 only; a multi-rank learner would need
+            # every rank to hold identical corrected grads before clipping.
+            # Not implemented — the scaffold experiments run one process per
+            # learner (same constraint as --probe-data / --barrier-sync).
+            raise RuntimeError(
+                "--inner-control-variate scaffold_lite currently supports "
+                f"single-process learners (world size 1); world size is {world}"
+            )
+
     if getattr(args, "barrier_sync", False):
         if args.syncer == "none":
             raise RuntimeError("--barrier-sync requires an async syncer run")
@@ -1148,8 +1201,20 @@ def run_inner_loop(
     # so it can evaluate candidate deltas against the learner-known global
     # state. Before any broadcast the anchor is the base-model value, which
     # every learner loads identically (and learner 0 sends as INIT_PARAMS).
+    # SCAFFOLD-lite inner control variates (docs/OTHER_OPTIMIZERS.md #5,
+    # yeto/scaffold.py). Per fragment the learner keeps a token-normalized
+    # local control c_i (from its own window endpoint) and the syncer-broadcast
+    # mean control c; every inner step adds (c_i - c)*tokens_per_step/inner_lr
+    # to the fragment's grads before clipping. Both are None (and the loop is
+    # byte-identical to the default) unless enabled. Needs the raw per-fragment
+    # anchor, exactly like q4/probe, so it forces `anchors` on.
+    scaffold_on = getattr(args, "inner_control_variate", "none") == "scaffold_lite"
+    control_local: list[torch.Tensor | None] = [None] * layout.num_fragments  # c_i
+    control_mean: list[torch.Tensor | None] = [None] * layout.num_fragments  # c
     anchors: list[torch.Tensor] | None = None
-    if rank == 0 and client is not None and (client.dtype == DTYPE_Q4 or args.probe_data is not None):
+    if rank == 0 and client is not None and (
+        client.dtype == DTYPE_Q4 or args.probe_data is not None or scaffold_on
+    ):
         anchors = [fragment_flat(frag, params).cpu() for frag in layout.fragments]
     # c_tokens counts RAW tokens processed (throughput proxy for merge
     # weighting), not the subset of loss-weighted tokens.
@@ -1289,6 +1354,21 @@ def run_inner_loop(
             if accum < args.grad_accum:
                 continue
             accum = 0
+            if scaffold_on:
+                # SCAFFOLD-lite: correct each fragment's grad by (c_i - c)
+                # before clipping. Skips a fragment until both its local
+                # control (set at push time) and the syncer's mean control
+                # (received via BCAST_CONTROL) exist, so the first window per
+                # fragment runs uncorrected — exactly the state SCAFFOLD starts
+                # from. world==1 here (validated in main), so no cross-rank
+                # grad reconciliation is needed.
+                for fid, frag in enumerate(layout.fragments):
+                    c_i = control_local[fid]
+                    c = control_mean[fid]
+                    if c_i is not None and c is not None:
+                        apply_control_correction(
+                            frag, params, c_i, c, tokens_per_inner_step, args.inner_lr
+                        )
             if args.tuning == "lora":
                 # The adapters are never grad-synced by a wrapper — fsdp+lora
                 # ignores them, the replicated path has no wrapper — so average
@@ -1349,6 +1429,17 @@ def run_inner_loop(
                 client.check_health()
                 # 1. collect received global fragments
                 actions = drain_broadcast_actions()
+                if scaffold_on:
+                    # SCAFFOLD-lite: pick up the syncer's mean control c for
+                    # each fragment (broadcast right after its merged fragment).
+                    # The latest wins; it is on the same layout order as the
+                    # fragment, decoded from the bulk (bf16) dtype.
+                    for ctrl in client.drain_controls():
+                        control_mean[ctrl.fragment_id] = unpack_fragment(
+                            layout.fragments[ctrl.fragment_id],
+                            ctrl.data,
+                            bulk_dtype(client.dtype),
+                        ).to(device)
                 shutdown = client.shutdown.is_set()
 
             if world > 1:
@@ -1452,6 +1543,16 @@ def run_inner_loop(
                         c_tokens,
                         payload,
                     )
+                    if scaffold_on and anchors is not None and c_tokens > 0:
+                        # SCAFFOLD-lite: update this worker's token-normalized
+                        # local control c_i from the SAME window endpoint it
+                        # just pushed (no extra forward). The anchor is the raw
+                        # per-fragment global the window started from, matching
+                        # the (theta_i - A) the syncer differences for its mean
+                        # control c.
+                        control_local[fid] = local_control(
+                            anchors[fid], local_flat, c_tokens
+                        ).to(device)
                     if barrier_sync:
                         # True lockstep: record that this fragment's merge is
                         # in flight. The inner loop will not step again until a

@@ -137,6 +137,11 @@ class Arm:
     # Aggregation for non-embedding (matrix) fragments: "rda" (default) or
     # "iso" (Iso-C-style isotropic aggregation, IsoLoCo, arXiv 2607.03011).
     matrix_merge: str = "rda"
+    # SCAFFOLD-lite inner control variates (docs/OTHER_OPTIMIZERS.md #5):
+    # "none" (default) or "scaffold_lite". When on, the syncer broadcasts the
+    # token-normalized mean control c and learners correct their inner gradients
+    # by (c_i - c). Threaded to BOTH the learners and the syncer.
+    inner_control_variate: str = "none"
     merge_alpha: float = 0.5
     wire_dtype: str = "bf16"
     pipeline: int = 2
@@ -186,6 +191,19 @@ PRESETS: dict[str, Arm] = {
     # IsoLoCo (arXiv 2607.03011): Iso-C isotropic aggregation on the matrix
     # fragments, composed with the default Nesterov outer optimizer.
     "iso": Arm("iso", matrix_merge="iso"),
+    # SCAFFOLD-lite endpoint-derived inner control variates (candidate #5,
+    # docs/OTHER_OPTIMIZERS.md). Four-worker strict quorum (the setting where
+    # the outer optimizer already averages every worker) so any gain is pure
+    # drift correction. Pair against the SGD-0.28 baseline via
+    # --outer-optimizer / --outer-lr overrides; the decisive exp runs H64/H256/
+    # inner-lr-hi plus one heterogeneous-data workload.
+    "scaffold_lite": Arm(
+        "scaffold_lite",
+        m=4,
+        quorum=4,
+        strict_quorum=True,
+        inner_control_variate="scaffold_lite",
+    ),
     # Exact production leave-one-out actions. Both arms pay the same sidecar
     # latency; shadow records the recommendation but commits A0.
     "probe_shadow": Arm(
@@ -244,6 +262,7 @@ def apply_arm_overrides(
     delta_correction: str | None = None,
     commit_policy: str | None = None,
     matrix_merge: str | None = None,
+    inner_control_variate: str | None = None,
 ) -> list[Arm]:
     """Apply CLI-wide async-arm overrides without mutating presets."""
     if all(
@@ -257,6 +276,7 @@ def apply_arm_overrides(
             delta_correction,
             commit_policy,
             matrix_merge,
+            inner_control_variate,
         )
     ):
         return arms
@@ -289,6 +309,11 @@ def apply_arm_overrides(
             ),
             commit_policy=(
                 arm.commit_policy if commit_policy is None else commit_policy
+            ),
+            inner_control_variate=(
+                arm.inner_control_variate
+                if inner_control_variate is None
+                else inner_control_variate
             ),
         )
         for arm in arms
@@ -510,6 +535,10 @@ def learner_command(
             # Only non-default values are passed, keeping baseline learner
             # command lines byte-identical to the pre-iso harness.
             cmd += ["--matrix-merge", arm.matrix_merge]
+        if arm.inner_control_variate != "none":
+            # SCAFFOLD-lite: the learner keeps c_i and applies (c_i - c); the
+            # syncer (below) must run with the matching flag to broadcast c.
+            cmd += ["--inner-control-variate", arm.inner_control_variate]
         if getattr(args, "probe_data", None):
             probe_data = (
                 str(arm_dir.parent / "eval.jsonl")
@@ -592,6 +621,10 @@ def syncer_command(
         "--commit-policy",
         arm.commit_policy,
     ]
+    if arm.inner_control_variate != "none":
+        # SCAFFOLD-lite: the syncer must broadcast the mean control c (only
+        # emitted when active, so default command lines stay byte-identical).
+        cmd += ["--inner-control-variate", arm.inner_control_variate]
     if arm.outer_lr_by_fragment:
         cmd += ["--outer-lr-by-fragment", arm.outer_lr_by_fragment]
     if delta_norm_ref > 0.0:
@@ -2005,6 +2038,14 @@ def main() -> int:
         help="override the commit policy for every selected async arm",
     )
     p.add_argument(
+        "--inner-control-variate",
+        choices=["none", "scaffold_lite"],
+        default=None,
+        help="override SCAFFOLD-lite inner control variates for every selected "
+        "async arm (docs/OTHER_OPTIMIZERS.md #5); threaded to both the "
+        "learners and the syncer",
+    )
+    p.add_argument(
         "--outer-lr-by-fragment",
         default=None,
         help="comma-separated per-fragment outer learning rates for every selected async arm",
@@ -2087,6 +2128,7 @@ def main() -> int:
         delta_correction=args.delta_correction,
         commit_policy=args.commit_policy,
         matrix_merge=args.matrix_merge,
+        inner_control_variate=args.inner_control_variate,
     )
     if args.round_interval_ms is not None:
         from dataclasses import replace as _replace

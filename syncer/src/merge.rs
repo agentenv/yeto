@@ -1243,6 +1243,38 @@ fn l2_norm(anchor: &[f32], learner: &[f32]) -> f64 {
 }
 
 /// Weighted direct averaging: out[i] = Σ_m w_m (anchor[i] − learner_m[i]) / Σ w.
+/// SCAFFOLD-lite token-normalized mean control `c` for one fragment
+/// (docs/OTHER_OPTIMIZERS.md #5, yeto/scaffold.py). `out` receives
+/// `sum_i (learner_i - anchor) / sum_i tokens_i` — the token-weighted mean of
+/// the per-worker local controls `c_i = (theta_i - anchor) / tokens_i`, i.e.
+/// the token-normalized merged pseudo-move. This is computed from the SAME
+/// per-worker deltas the merge already forms, independent of the outer
+/// optimizer and the merge-weight formula. `learners` are the window endpoints
+/// `theta_i`, `tokens` their raw window token counts. Returns whether a control
+/// was produced (false when there are no tokens, leaving `out` untouched).
+pub fn scaffold_mean_control(
+    anchor: &[f32],
+    learners: &[&[f32]],
+    tokens: &[u64],
+    out: &mut [f32],
+) -> bool {
+    let total_tokens: f64 = tokens.iter().map(|&t| t as f64).sum();
+    if total_tokens <= 0.0 || learners.is_empty() {
+        return false;
+    }
+    out.fill(0.0);
+    for learner in learners {
+        for ((o, a), l) in out.iter_mut().zip(anchor).zip(*learner) {
+            *o += *l - *a;
+        }
+    }
+    let inv = (1.0 / total_tokens) as f32;
+    for o in out.iter_mut() {
+        *o *= inv;
+    }
+    true
+}
+
 pub fn merge_avg(anchor: &[f32], learners: &[&[f32]], weights: &[f64], out: &mut [f32]) {
     let wsum: f64 = weights.iter().sum();
     if wsum <= 0.0 {
@@ -3478,6 +3510,52 @@ mod tests {
         for (got, want) in out.iter().zip(&delta) {
             assert_close(*got as f64, *want as f64);
         }
+    }
+
+    // ---- SCAFFOLD-lite mean control ----
+
+    #[test]
+    fn scaffold_control_iid_workers_equals_common_control() {
+        // Identical endpoints (IID): the mean control equals every worker's own
+        // token-normalized control c_i = (theta - anchor) / tokens.
+        let anchor = [0.5f32, -1.0, 2.0];
+        let endpoint = vec![0.7f32, -1.4, 2.6]; // theta - anchor = [0.2,-0.4,0.6]
+        let learners_vec = vec![endpoint.clone(), endpoint.clone(), endpoint.clone(), endpoint];
+        let refs: Vec<&[f32]> = learners_vec.iter().map(Vec::as_slice).collect();
+        let tokens = [10u64, 10, 10, 10];
+        let mut out = vec![0.0f32; 3];
+        assert!(scaffold_mean_control(&anchor, &refs, &tokens, &mut out));
+        // Each c_i = delta / 10; the token-weighted mean is the same vector.
+        for (got, d) in out.iter().zip([0.2f32, -0.4, 0.6]) {
+            assert_close(*got as f64, (d / 10.0) as f64);
+        }
+    }
+
+    #[test]
+    fn scaffold_control_is_sum_deltas_over_sum_tokens() {
+        // Heterogeneous windows: c = sum_i(theta_i - anchor) / sum_i tokens_i,
+        // the token-weighted mean of the per-worker controls (yeto/scaffold.py).
+        let anchor = [0.0f32, 1.0];
+        let endpoints = [vec![1.0f32, 1.0], vec![-2.0f32, 4.0], vec![0.5f32, 0.0]];
+        let refs: Vec<&[f32]> = endpoints.iter().map(Vec::as_slice).collect();
+        let tokens = [16u64, 32, 8];
+        let mut out = vec![0.0f32; 2];
+        assert!(scaffold_mean_control(&anchor, &refs, &tokens, &mut out));
+        let total = 56.0f64;
+        // dim0: (1 + -2 + 0.5) / 56 ; dim1: (0 + 3 + -1) / 56
+        assert_close(out[0] as f64, -0.5 / total);
+        assert_close(out[1] as f64, 2.0 / total);
+    }
+
+    #[test]
+    fn scaffold_control_zero_tokens_returns_false() {
+        let anchor = [1.0f32, 2.0];
+        let endpoints = [vec![2.0f32, 3.0]];
+        let refs: Vec<&[f32]> = endpoints.iter().map(Vec::as_slice).collect();
+        let mut out = vec![9.0f32; 2];
+        assert!(!scaffold_mean_control(&anchor, &refs, &[0u64], &mut out));
+        // Untouched on the empty-window path.
+        assert_eq!(out, vec![9.0f32, 9.0f32]);
     }
 
     // ---- block second-moment optimizers ----

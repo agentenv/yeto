@@ -49,6 +49,14 @@ struct Args {
     /// Pre-merge learner-delta correction: "heloco" or "none".
     #[arg(long, default_value = "heloco")]
     delta_correction: String,
+    /// SCAFFOLD-lite inner control variates (docs/OTHER_OPTIMIZERS.md #5):
+    /// "none" (default) or "scaffold_lite". When enabled, after each fragment
+    /// merge the syncer broadcasts the token-normalized mean control c =
+    /// sum_i(theta_i - anchor) / sum_i tokens_i (MSG_BCAST_CONTROL), which
+    /// learners use to correct their inner gradients. Does not change the
+    /// merge or outer step; the default is byte-identical to before.
+    #[arg(long, default_value = "none")]
+    inner_control_variate: String,
     /// Give up waiting for quorum and re-send the pull after this long.
     #[arg(long, default_value_t = 900)]
     quorum_timeout_s: u64,
@@ -167,6 +175,13 @@ fn main() -> anyhow::Result<()> {
         "none" => false,
         other => anyhow::bail!("--delta-correction must be 'heloco' or 'none', got {other:?}"),
     };
+    let control_variate = match args.inner_control_variate.as_str() {
+        "scaffold_lite" => true,
+        "none" => false,
+        other => anyhow::bail!(
+            "--inner-control-variate must be 'none' or 'scaffold_lite', got {other:?}"
+        ),
+    };
     let outer_lr_by_fragment = args
         .outer_lr_by_fragment
         .as_deref()
@@ -184,6 +199,7 @@ fn main() -> anyhow::Result<()> {
         min_round_interval_ms: args.min_round_interval_ms,
         sync_interval_steps: args.sync_interval_steps,
         delta_correction,
+        control_variate,
         quorum_timeout_s: args.quorum_timeout_s,
         strict_quorum: args.strict_quorum,
         total_steps: args.total_steps,
