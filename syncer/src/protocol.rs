@@ -17,7 +17,7 @@ pub const MSG_CHUNK: u8 = 9;
 /// SCAFFOLD-lite (docs/OTHER_OPTIMIZERS.md #5): the token-normalized mean
 /// control vector `c` for one fragment, sent right after its BCAST_FRAGMENT
 /// when `--inner-control-variate scaffold_lite` is set. Same envelope as
-/// BCAST_FRAGMENT (fid u32, version u64, bf16 tensor bytes). Never emitted on
+/// BCAST_FRAGMENT (fid u32, version u64, bulk-wire tensor bytes). Never emitted on
 /// the default path, so learners that do not enable control variates ignore it.
 pub const MSG_BCAST_CONTROL: u8 = 10;
 

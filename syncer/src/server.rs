@@ -1335,6 +1335,39 @@ async fn complete_round(
         }
     }
     capture_round_candidates(cfg, st, p, t, prev_version, &pushes)?;
+    let ids = sorted_push_ids(&pushes);
+    // SCAFFOLD-lite mean control from the exact endpoint and exact retained
+    // base anchor of each admitted push. The old current-anchor calculation
+    // was only valid when every worker happened to share the current version;
+    // under asynchronous activation it broke sum_i(c_i - c) = 0. Requiring the
+    // per-push base here makes the identity explicit and fails closed if anchor
+    // history cannot resolve a version.
+    let control_mean: Option<Vec<f32>> = if cfg.control_variate {
+        let mut anchors = Vec::with_capacity(ids.len());
+        let mut endpoints = Vec::with_capacity(ids.len());
+        let mut tokens = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let push = pushes.get(id).expect("sorted id in push map");
+            anchors.push(st.anchor_at(p, push.base_version).with_context(|| {
+                format!(
+                    "SCAFFOLD step {t} fragment {p}: retained anchor for learner {} base version {} is unavailable",
+                    push.learner_id, push.base_version
+                )
+            })?);
+            endpoints.push(push.values.as_slice());
+            tokens.push(push.c_tokens);
+        }
+        let mut mean = vec![0.0f32; st.params[p].len()];
+        crate::merge::scaffold_mean_control_version_matched(
+            &anchors,
+            &endpoints,
+            &tokens,
+            &mut mean,
+        )
+        .then_some(mean)
+    } else {
+        None
+    };
     // EXP2.46: anchor-drift diagnostics + optional version-matched re-anchoring.
     // Computed from the original uploads (post-Q4-reconstruction full models)
     // BEFORE any re-anchoring, so the local delta reflects the true window
@@ -1365,7 +1398,6 @@ async fn complete_round(
     } else {
         HashMap::new()
     };
-    let ids = sorted_push_ids(&pushes);
     let (mut learners, mut weights) = (Vec::new(), Vec::new());
     for id in &ids {
         let push = pushes.get(id).expect("sorted id must exist in push map");
@@ -1384,23 +1416,6 @@ async fn complete_round(
         learners.push(push.values.as_slice());
         weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
     }
-    // SCAFFOLD-lite mean control c, computed from the per-worker deltas BEFORE
-    // the merge overwrites the anchor (st.params[p]). c = sum_i(theta_i -
-    // anchor) / sum_i tokens_i is the token-normalized merged pseudo-move — the
-    // token-weighted mean of the learners' local controls (yeto/scaffold.py).
-    // Broadcast (below) as MSG_BCAST_CONTROL after the fragment. Uses raw
-    // c_tokens for token weighting, independent of the merge weight formula.
-    let control_mean: Option<Vec<f32>> = if cfg.control_variate {
-        let anchor = &st.params[p];
-        let tokens: Vec<u64> = ids
-            .iter()
-            .map(|id| pushes.get(id).expect("sorted id in push map").c_tokens)
-            .collect();
-        let mut m = vec![0.0f32; anchor.len()];
-        crate::merge::scaffold_mean_control(anchor, &learners, &tokens, &mut m).then_some(m)
-    } else {
-        None
-    };
     let sync_start = Instant::now();
     let (merge_stats, decision) = if cfg.commit_policy == CommitPolicy::TokenWeighted {
         // Keep the legacy production path intact. In particular, do not
@@ -1814,7 +1829,7 @@ fn encode_bcast(st: &GlobalState, p: usize) -> Result<bytes::Bytes> {
 }
 
 /// Encode a SCAFFOLD-lite mean-control broadcast (MSG_BCAST_CONTROL): the same
-/// (fid u32, version u64, bf16 tensor) envelope as `encode_bcast`, carrying the
+/// (fid u32, version u64, bulk-wire tensor) envelope as `encode_bcast`, carrying the
 /// control vector `c` instead of the fragment parameters. The version matches
 /// the fragment's post-merge version so a learner ties `c` to the global it
 /// just received.

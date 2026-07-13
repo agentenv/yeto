@@ -13,12 +13,18 @@ properties the candidate must satisfy (docs/OTHER_OPTIMIZERS.md #5):
 
 import torch
 
+from yeto.fragments import MERGE_AVG, Fragment
+from yeto.protocol import DTYPE_F32
 from yeto.scaffold import (
+    VersionedControlPairs,
     effective_step_gradient,
     grad_correction,
     local_control,
     mean_control,
+    zero_sum_step_diagnostics,
 )
+from yeto.tensor_io import pack_flat, unpack_fragment
+from yeto.learner import apply_control_correction
 
 TOKENS_PER_STEP = 4096.0  # world * micro_batch * grad_accum * seq_len
 INNER_LR = 3e-4
@@ -216,3 +222,83 @@ def test_local_control_rejects_nonpositive_tokens():
         pass
     else:  # pragma: no cover
         raise AssertionError("expected ValueError for zero tokens")
+
+
+def test_version_paired_controls_never_cross_activate():
+    pairs = VersionedControlPairs()
+    local_v7 = torch.tensor([7.0])
+    local_v8 = torch.tensor([8.0])
+    mean_v7 = torch.tensor([70.0])
+    mean_v8 = torch.tensor([80.0])
+
+    # Local v8 can race ahead of mean v7. Neither mismatched combination is
+    # allowed to activate.
+    pairs.add_local(8, local_v8)
+    pairs.add_mean(7, mean_v7)
+    assert pairs.get(7) is None
+    assert pairs.get(8) is None
+
+    pairs.add_local(7, local_v7)
+    got7 = pairs.get(7)
+    assert got7 is not None
+    assert torch.equal(got7[0], local_v7)
+    assert torch.equal(got7[1], mean_v7)
+
+    pairs.add_mean(8, mean_v8)
+    got8 = pairs.get(8)
+    assert got8 is not None
+    assert torch.equal(got8[0], local_v8)
+    assert torch.equal(got8[1], mean_v8)
+
+    pairs.discard_before(8)
+    assert pairs.get(7) is None
+    assert pairs.get(8) is not None
+
+
+def test_real_f32_wire_plain_sgd_zero_sum(caplog):
+    """Real codec + torch.optim.SGD path, not a symbolic update equation."""
+    torch.manual_seed(4)
+    workers = 4
+    dim = 64
+    tokens = 16 * TOKENS_PER_STEP
+    frag = Fragment(MERGE_AVG, [("weight", dim)])
+
+    # Each worker can have a different retained base version/anchor. Both its
+    # local control and the server mean use the exact f32-transmitted endpoint
+    # and that push's exact base anchor.
+    anchors = [torch.randn(dim) for _ in range(workers)]
+    endpoints = [a + 1e-3 * torch.randn(dim) for a in anchors]
+    transmitted = [
+        unpack_fragment(frag, pack_flat(endpoint, DTYPE_F32), DTYPE_F32)
+        for endpoint in endpoints
+    ]
+    controls = [
+        local_control(anchor, endpoint, tokens)
+        for anchor, endpoint in zip(anchors, transmitted)
+    ]
+    mean = mean_control(controls, [tokens] * workers)
+    mean_on_wire = unpack_fragment(frag, pack_flat(mean, DTYPE_F32), DTYPE_F32)
+    parameters = [torch.nn.Parameter(torch.zeros(dim)) for _ in range(workers)]
+    optimizers = [torch.optim.SGD([p], lr=INNER_LR) for p in parameters]
+    before = [p.detach().clone() for p in parameters]
+    corrections = []
+    for parameter, optimizer, c_i in zip(parameters, optimizers, controls):
+        parameter.grad = torch.zeros_like(parameter)
+        correction = apply_control_correction(
+            frag,
+            {"weight": parameter},
+            c_i,
+            mean_on_wire,
+            TOKENS_PER_STEP,
+            INNER_LR,
+        )
+        corrections.append(correction)
+        optimizer.step()
+    after = [p.detach().clone() for p in parameters]
+
+    with caplog.at_level("INFO", logger="scaffold"):
+        diagnostics = zero_sum_step_diagnostics(corrections, before, after)
+    assert diagnostics["correction_sum_max_abs"] < 2e-6
+    assert diagnostics["displacement_sum_max_abs"] < 2e-9
+    assert "before_clip correction_sum_l2" in caplog.text
+    assert "after_step displacement_sum_l2" in caplog.text

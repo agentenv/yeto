@@ -1252,19 +1252,36 @@ fn l2_norm(anchor: &[f32], learner: &[f32]) -> f64 {
 /// optimizer and the merge-weight formula. `learners` are the window endpoints
 /// `theta_i`, `tokens` their raw window token counts. Returns whether a control
 /// was produced (false when there are no tokens, leaving `out` untouched).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn scaffold_mean_control(
     anchor: &[f32],
     learners: &[&[f32]],
     tokens: &[u64],
     out: &mut [f32],
 ) -> bool {
+    let anchors = vec![anchor; learners.len()];
+    scaffold_mean_control_version_matched(&anchors, learners, tokens, out)
+}
+
+/// Version-matched SCAFFOLD mean where every learner endpoint is differenced
+/// against the retained global at that push's own base version.
+pub fn scaffold_mean_control_version_matched(
+    anchors: &[&[f32]],
+    learners: &[&[f32]],
+    tokens: &[u64],
+    out: &mut [f32],
+) -> bool {
     let total_tokens: f64 = tokens.iter().map(|&t| t as f64).sum();
-    if total_tokens <= 0.0 || learners.is_empty() {
+    if total_tokens <= 0.0
+        || learners.is_empty()
+        || anchors.len() != learners.len()
+        || tokens.len() != learners.len()
+    {
         return false;
     }
     out.fill(0.0);
-    for learner in learners {
-        for ((o, a), l) in out.iter_mut().zip(anchor).zip(*learner) {
+    for (anchor, learner) in anchors.iter().zip(learners) {
+        for ((o, a), l) in out.iter_mut().zip(*anchor).zip(*learner) {
             *o += *l - *a;
         }
     }
@@ -3545,6 +3562,24 @@ mod tests {
         // dim0: (1 + -2 + 0.5) / 56 ; dim1: (0 + 3 + -1) / 56
         assert_close(out[0] as f64, -0.5 / total);
         assert_close(out[1] as f64, 2.0 / total);
+    }
+
+    #[test]
+    fn scaffold_control_uses_each_pushes_version_matched_anchor() {
+        let bases = [vec![1.0f32, 10.0], vec![-3.0f32, 4.0]];
+        let endpoints = [vec![3.0f32, 9.0], vec![1.0f32, 10.0]];
+        let base_refs: Vec<&[f32]> = bases.iter().map(Vec::as_slice).collect();
+        let endpoint_refs: Vec<&[f32]> = endpoints.iter().map(Vec::as_slice).collect();
+        let mut out = vec![0.0f32; 2];
+        assert!(scaffold_mean_control_version_matched(
+            &base_refs,
+            &endpoint_refs,
+            &[8, 8],
+            &mut out,
+        ));
+        // Per-push deltas are [2, -1] and [4, 6], divided by 16 total tokens.
+        assert_close(out[0] as f64, 6.0 / 16.0);
+        assert_close(out[1] as f64, 5.0 / 16.0);
     }
 
     #[test]

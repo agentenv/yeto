@@ -33,9 +33,10 @@ from .data import StreamingPackedBlocks, build_packed_dataset
 from .fragments import FragmentLayout, build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
 from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
-from .scaffold import grad_correction, local_control
+from .scaffold import VersionedControlPairs, grad_correction, local_control
 from .tensor_io import (
     apply_fragment,
+    dequantize_q4,
     fragment_flat,
     pack_flat,
     pack_fragment,
@@ -124,8 +125,21 @@ def parse_args(argv=None):
     )
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--inner-lr", type=float, default=3e-4)
+    p.add_argument(
+        "--inner-optimizer",
+        choices=["adamw", "sgd"],
+        default="adamw",
+        help="inner optimizer; plain SGD is required by the SCAFFOLD "
+        "zero-sum correctness mode",
+    )
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--warmup-steps", type=int, default=10)
+    p.add_argument(
+        "--grad-clip",
+        type=float,
+        default=1.0,
+        help="global gradient-norm cap; 0 disables clipping",
+    )
     p.add_argument("--fragments", type=int, default=8, help="P (= H, round-robin)")
     p.add_argument(
         "--fragment-pattern",
@@ -176,6 +190,24 @@ def parse_args(argv=None):
         "client drift without an extra forward. Requires a syncer started with "
         "the matching --inner-control-variate scaffold_lite. 'none' (default) "
         "is byte-identical to the pre-scaffold loop.",
+    )
+    p.add_argument(
+        "--scaffold-correctness-mode",
+        action="store_true",
+        help="require equal-window barrier synchronization, f32 wire, no "
+        "reconnect/lag, and constant-LR unclipped plain SGD",
+    )
+    p.add_argument(
+        "--scaffold-audit-path",
+        default=None,
+        help="correctness-mode output for one real pre-clip correction and "
+        "post-step correction-induced displacement",
+    )
+    p.add_argument(
+        "--max-reconnects",
+        type=int,
+        default=None,
+        help="maximum syncer reconnect attempts; 0 disables reconnects",
     )
     p.add_argument("--wan-streams", type=int, default=4)
     p.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
@@ -489,19 +521,23 @@ def apply_control_correction(
     control_mean: torch.Tensor,
     tokens_per_step: float,
     inner_lr: float,
-) -> None:
+) -> torch.Tensor:
     """SCAFFOLD-lite: add ``(c_i - c) * tokens_per_step / inner_lr`` onto this
     fragment's parameter grads in place (the ``grad - c_i + c`` correction in
     gradient units; see yeto/scaffold.py). Called after backward and before
     grad clipping. Params whose grad is None (no backward this step) are
     skipped. The controls are flat, in the fragment's layout order."""
     delta = grad_correction(control_local, control_mean, tokens_per_step, inner_lr)
+    applied = delta.clone()
     off = 0
     for name, numel in frag.tensors:
         p = params[name]
         if p.grad is not None:
             p.grad.add_(delta[off : off + numel].view_as(p).to(p.grad.dtype))
+        else:
+            applied[off : off + numel].zero_()
         off += numel
+    return applied
 
 
 def _sigmoid(x: float) -> float:
@@ -887,6 +923,57 @@ def main(argv=None) -> None:
                 "--inner-control-variate scaffold_lite currently supports "
                 f"single-process learners (world size 1); world size is {world}"
             )
+        if args.inner_optimizer != "sgd" or args.weight_decay != 0.0:
+            log.warning(
+                "SCAFFOLD-lite with %s/weight_decay=%g is experimental: the "
+                "gradient correction is not guaranteed unbiased outside "
+                "constant-LR plain SGD",
+                args.inner_optimizer,
+                args.weight_decay,
+            )
+
+    if getattr(args, "scaffold_correctness_mode", False):
+        violations = []
+        if args.inner_control_variate != "scaffold_lite":
+            violations.append("--inner-control-variate scaffold_lite")
+        if args.tuning != "lora":
+            violations.append("--tuning lora (fp32 trainable parameters)")
+        if args.inner_optimizer != "sgd":
+            violations.append("--inner-optimizer sgd")
+        if args.weight_decay != 0.0:
+            violations.append("--weight-decay 0")
+        if args.warmup_steps != 0:
+            violations.append("--warmup-steps 0")
+        if args.grad_clip != 0.0:
+            violations.append("--grad-clip 0")
+        if args.wire_dtype != "f32":
+            violations.append("--wire-dtype f32")
+        if args.merge_alpha != 0.0:
+            violations.append("--merge-alpha 0")
+        if not args.barrier_sync:
+            violations.append("--barrier-sync")
+        if args.debug_broadcast_lag_commits != 0:
+            violations.append("--debug-broadcast-lag-commits 0")
+        if (
+            args.debug_step_sleep_ms != 0.0
+            or args.debug_push_delay_ms != 0.0
+            or args.debug_delay_jitter_ms != 0.0
+        ):
+            violations.append("zero debug step/push delays and jitter")
+        if args.max_reconnects != 0:
+            violations.append("--max-reconnects 0")
+        if not args.scaffold_audit_path:
+            violations.append("--scaffold-audit-path")
+        if (
+            args.fixed_window_microsteps <= 0
+            or args.fixed_window_tokens != 0
+            or args.fixed_window_schedule is not None
+        ):
+            violations.append("one fixed positive --fixed-window-microsteps")
+        if violations:
+            raise RuntimeError(
+                "--scaffold-correctness-mode requires " + ", ".join(violations)
+            )
 
     if getattr(args, "barrier_sync", False):
         if args.syncer == "none":
@@ -1044,9 +1131,21 @@ def main(argv=None) -> None:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index])
         params = trainable_params(model.module)
 
-    opt = torch.optim.AdamW(params.values(), lr=args.inner_lr, weight_decay=args.weight_decay)
+    if args.inner_optimizer == "sgd":
+        opt = torch.optim.SGD(
+            params.values(), lr=args.inner_lr, weight_decay=args.weight_decay
+        )
+    else:
+        opt = torch.optim.AdamW(
+            params.values(), lr=args.inner_lr, weight_decay=args.weight_decay
+        )
     sched = torch.optim.lr_scheduler.LambdaLR(
-        opt, lambda s: min(1.0, (s + 1) / max(1, args.warmup_steps))
+        opt,
+        lambda s: (
+            1.0
+            if args.warmup_steps <= 0
+            else min(1.0, (s + 1) / args.warmup_steps)
+        ),
     )
 
     # Resolve the micro batch AFTER wrapping and optimizer construction
@@ -1117,7 +1216,12 @@ def main(argv=None) -> None:
     if rank == 0 and args.syncer != "none":
         host, port = args.syncer.rsplit(":", 1)
         client = SyncerClient(
-            (host, int(port)), args.learner_id, layout, wire_dtype, args.wan_streams
+            (host, int(port)),
+            args.learner_id,
+            layout,
+            wire_dtype,
+            args.wan_streams,
+            max_reconnects=args.max_reconnects,
         )
         client.start()
         log.info("connected to syncer at %s", args.syncer)
@@ -1196,6 +1300,7 @@ def run_inner_loop(
     # on the default non-barrier path.
     barrier_sync = bool(getattr(args, "barrier_sync", False))
     awaiting_broadcast: dict[int, int] = {}
+    awaiting_control: dict[int, int] = {}
     # Q4 pushes are deltas anchored at the last *received* global value per
     # fragment; the utility probe also needs these anchors for bf16/f32 runs
     # so it can evaluate candidate deltas against the learner-known global
@@ -1203,14 +1308,13 @@ def run_inner_loop(
     # every learner loads identically (and learner 0 sends as INIT_PARAMS).
     # SCAFFOLD-lite inner control variates (docs/OTHER_OPTIMIZERS.md #5,
     # yeto/scaffold.py). Per fragment the learner keeps a token-normalized
-    # local control c_i (from its own window endpoint) and the syncer-broadcast
-    # mean control c; every inner step adds (c_i - c)*tokens_per_step/inner_lr
-    # to the fragment's grads before clipping. Both are None (and the loop is
-    # byte-identical to the default) unless enabled. Needs the raw per-fragment
-    # anchor, exactly like q4/probe, so it forces `anchors` on.
+    # local control c_i (from its own wire-decoded window endpoint) and the
+    # syncer-broadcast mean control c. Push and control traffic are independent,
+    # so the two halves are keyed by the completed fragment version and are
+    # usable only as an exact-version pair. This also prevents a control that
+    # races ahead of its parameter broadcast from activating early.
     scaffold_on = getattr(args, "inner_control_variate", "none") == "scaffold_lite"
-    control_local: list[torch.Tensor | None] = [None] * layout.num_fragments  # c_i
-    control_mean: list[torch.Tensor | None] = [None] * layout.num_fragments  # c
+    control_pairs = [VersionedControlPairs() for _ in range(layout.num_fragments)]
     anchors: list[torch.Tensor] | None = None
     if rank == 0 and client is not None and (
         client.dtype == DTYPE_Q4 or args.probe_data is not None or scaffold_on
@@ -1316,6 +1420,8 @@ def run_inner_loop(
                 flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
             apply_fragment(layout.fragments[fid], flat, params)
             fragment_versions[fid] = version
+            if scaffold_on:
+                control_pairs[fid].discard_before(version)
             # Both modes restart the window at apply time. In lag mode this
             # starts the window that must be trained entirely on the
             # just-applied released (K-stale) base; the matching pull is held
@@ -1331,8 +1437,31 @@ def run_inner_loop(
             # learner may resume once every pushed fragment is released.
             if awaiting_broadcast:
                 barrier_release(awaiting_broadcast, fid, version)
+            target = awaiting_control.get(fid)
+            if target == version and control_pairs[fid].get(version) is not None:
+                awaiting_control.pop(fid, None)
+
+    def drain_scaffold_controls() -> None:
+        """Decode control broadcasts without ever cross-pairing versions."""
+        if not scaffold_on:
+            return
+        for ctrl in client.drain_controls():
+            mean = unpack_fragment(
+                layout.fragments[ctrl.fragment_id],
+                ctrl.data,
+                bulk_dtype(client.dtype),
+            ).to(device)
+            control_pairs[ctrl.fragment_id].add_mean(ctrl.version, mean)
+            target = awaiting_control.get(ctrl.fragment_id)
+            if (
+                target == ctrl.version
+                and fragment_versions[ctrl.fragment_id] == ctrl.version
+                and control_pairs[ctrl.fragment_id].get(ctrl.version) is not None
+            ):
+                awaiting_control.pop(ctrl.fragment_id, None)
 
     shutdown = False
+    scaffold_audit_written = False
     epoch = 0
     t_last = time.monotonic()
     while not shutdown and steps_total < args.max_local_steps:
@@ -1354,6 +1483,15 @@ def run_inner_loop(
             if accum < args.grad_accum:
                 continue
             accum = 0
+            audit_capture = bool(
+                args.scaffold_correctness_mode
+                and not scaffold_audit_written
+                and all(
+                    control_pairs[fid].get(fragment_versions[fid]) is not None
+                    for fid in range(layout.num_fragments)
+                )
+            )
+            audit_corrections: list[torch.Tensor] = []
             if scaffold_on:
                 # SCAFFOLD-lite: correct each fragment's grad by (c_i - c)
                 # before clipping. Skips a fragment until both its local
@@ -1363,12 +1501,32 @@ def run_inner_loop(
                 # from. world==1 here (validated in main), so no cross-rank
                 # grad reconciliation is needed.
                 for fid, frag in enumerate(layout.fragments):
-                    c_i = control_local[fid]
-                    c = control_mean[fid]
-                    if c_i is not None and c is not None:
-                        apply_control_correction(
+                    pair = control_pairs[fid].get(fragment_versions[fid])
+                    if pair is not None:
+                        c_i, c = pair
+                        applied_correction = apply_control_correction(
                             frag, params, c_i, c, tokens_per_inner_step, args.inner_lr
                         )
+                        if audit_capture:
+                            audit_corrections.append(applied_correction.detach().cpu())
+            if audit_capture:
+                correction_flat = torch.cat(audit_corrections)
+                corrected_grad_flat = torch.cat(
+                    [
+                        (
+                            params[name].grad.detach().reshape(-1).float().cpu()
+                            if params[name].grad is not None
+                            else torch.zeros(numel)
+                        )
+                        for frag in layout.fragments
+                        for name, numel in frag.tensors
+                    ]
+                )
+                raw_grad_flat = corrected_grad_flat - correction_flat
+                params_before_audit = torch.cat(
+                    [fragment_flat(frag, params).cpu() for frag in layout.fragments]
+                )
+                audit_lr = float(opt.param_groups[0]["lr"])
             if args.tuning == "lora":
                 # The adapters are never grad-synced by a wrapper — fsdp+lora
                 # ignores them, the replicated path has no wrapper — so average
@@ -1377,12 +1535,40 @@ def run_inner_loop(
                 # so a plain clip over them is correct (the frozen base
                 # contributes no grads).
                 allreduce_trainable_grads(params.values(), world)
-                torch.nn.utils.clip_grad_norm_(params.values(), 1.0)
+                if args.grad_clip > 0.0:
+                    torch.nn.utils.clip_grad_norm_(params.values(), args.grad_clip)
             elif args.shard == "fsdp":
-                model.clip_grad_norm_(1.0)
+                if args.grad_clip > 0.0:
+                    model.clip_grad_norm_(args.grad_clip)
             else:
-                torch.nn.utils.clip_grad_norm_(params.values(), 1.0)
+                if args.grad_clip > 0.0:
+                    torch.nn.utils.clip_grad_norm_(params.values(), args.grad_clip)
             opt.step()
+            if audit_capture:
+                params_after_audit = torch.cat(
+                    [fragment_flat(frag, params).cpu() for frag in layout.fragments]
+                )
+                actual_displacement = params_after_audit - params_before_audit
+                correction_displacement = actual_displacement + audit_lr * raw_grad_flat
+                audit_record = {
+                    "learner_id": int(args.learner_id),
+                    "local_step": int(steps_total),
+                    "correction_before_clip": correction_flat,
+                    "actual_displacement_after_step": actual_displacement,
+                    "correction_displacement_after_step": correction_displacement,
+                }
+                audit_path = os.path.abspath(args.scaffold_audit_path)
+                os.makedirs(os.path.dirname(audit_path), exist_ok=True)
+                torch.save(audit_record, audit_path)
+                log.info(
+                    "SCAFFOLD correctness audit learner=%d local_step=%d "
+                    "before_clip_correction_l2=%.9g after_step_correction_displacement_l2=%.9g",
+                    args.learner_id,
+                    steps_total,
+                    correction_flat.norm().item(),
+                    correction_displacement.norm().item(),
+                )
+                scaffold_audit_written = True
             sched.step()
             opt.zero_grad(set_to_none=True)
             steps_total += 1
@@ -1399,6 +1585,9 @@ def run_inner_loop(
                         continue
                     fixed_window_snapshots[snap_fid] = {
                         "flat": fragment_flat(layout.fragments[snap_fid], params).detach().cpu(),
+                        "anchor": (
+                            anchors[snap_fid].clone() if anchors is not None else None
+                        ),
                         "c_steps": snap_steps,
                         "c_tokens": tokens_total - tokens_at_reset[snap_fid],
                         "local_step": steps_total,
@@ -1429,17 +1618,7 @@ def run_inner_loop(
                 client.check_health()
                 # 1. collect received global fragments
                 actions = drain_broadcast_actions()
-                if scaffold_on:
-                    # SCAFFOLD-lite: pick up the syncer's mean control c for
-                    # each fragment (broadcast right after its merged fragment).
-                    # The latest wins; it is on the same layout order as the
-                    # fragment, decoded from the bulk (bf16) dtype.
-                    for ctrl in client.drain_controls():
-                        control_mean[ctrl.fragment_id] = unpack_fragment(
-                            layout.fragments[ctrl.fragment_id],
-                            ctrl.data,
-                            bulk_dtype(client.dtype),
-                        ).to(device)
+                drain_scaffold_controls()
                 shutdown = client.shutdown.is_set()
 
             if world > 1:
@@ -1501,6 +1680,7 @@ def run_inner_loop(
                             still_pending.append(pull)
                             continue
                         local_flat = snap["flat"]
+                        base_anchor_for_push = snap["anchor"]
                         c_steps = int(snap["c_steps"])
                         c_tokens = int(snap["c_tokens"])
                         local_step_for_push = int(snap["local_step"])
@@ -1512,6 +1692,9 @@ def run_inner_loop(
                             continue
                         c_tokens = tokens_total - tokens_at_reset[fid]
                         local_flat = fragment_flat(layout.fragments[fid], params).detach().cpu()
+                        base_anchor_for_push = (
+                            anchors[fid].clone() if anchors is not None else None
+                        )
                         local_step_for_push = steps_total
                         base_version_for_push = fragment_versions[fid]
                     if probe is not None:
@@ -1528,8 +1711,8 @@ def run_inner_loop(
                             local_flat=local_flat,
                             anchors=anchors,
                         )
-                    if anchors is not None and client.dtype == DTYPE_Q4:
-                        delta = local_flat - anchors[fid]
+                    if base_anchor_for_push is not None and client.dtype == DTYPE_Q4:
+                        delta = local_flat - base_anchor_for_push
                         payload = quantize_q4(delta)
                     else:
                         payload = pack_flat(local_flat, client.dtype)
@@ -1544,15 +1727,28 @@ def run_inner_loop(
                         payload,
                     )
                     if scaffold_on and anchors is not None and c_tokens > 0:
-                        # SCAFFOLD-lite: update this worker's token-normalized
-                        # local control c_i from the SAME window endpoint it
-                        # just pushed (no extra forward). The anchor is the raw
-                        # per-fragment global the window started from, matching
-                        # the (theta_i - A) the syncer differences for its mean
-                        # control c.
-                        control_local[fid] = local_control(
-                            anchors[fid], local_flat, c_tokens
-                        ).to(device)
+                        # Compute c_i from the exact per-push base anchor and
+                        # the endpoint after the same wire codec the syncer
+                        # consumes. This is essential for the exact-mean identity
+                        # (and is exact, not merely close, on the f32 correctness
+                        # wire).
+                        if base_anchor_for_push is None:
+                            raise RuntimeError("SCAFFOLD push is missing its base anchor")
+                        if client.dtype == DTYPE_Q4:
+                            transmitted_endpoint = (
+                                base_anchor_for_push
+                                + dequantize_q4(payload, layout.fragments[fid].numel)
+                            )
+                        else:
+                            transmitted_endpoint = unpack_fragment(
+                                layout.fragments[fid], payload, client.dtype
+                            )
+                        control_pairs[fid].add_local(
+                            pull.global_step,
+                            local_control(
+                                base_anchor_for_push, transmitted_endpoint, c_tokens
+                            ).to(device),
+                        )
                     if barrier_sync:
                         # True lockstep: record that this fragment's merge is
                         # in flight. The inner loop will not step again until a
@@ -1560,6 +1756,8 @@ def run_inner_loop(
                         # apply_broadcast_world1 clears the entry. Re-pushes of
                         # the same round just refresh the same base version.
                         awaiting_broadcast[fid] = base_version_for_push
+                        if scaffold_on:
+                            awaiting_control[fid] = pull.global_step
                     if lagged_broadcasts is not None:
                         # Lag mode: restart the fixed window at push time so
                         # every commit carries a fresh full window even while
@@ -1615,9 +1813,14 @@ def run_inner_loop(
                 # merged global. drain/apply reuse the boundary helpers so the
                 # applied state is bit-identical to a broadcast picked up at a
                 # step boundary. A no-op unless --barrier-sync pushed above.
-                while barrier_sync and awaiting_broadcast and not shutdown:
+                while (
+                    barrier_sync
+                    and (awaiting_broadcast or awaiting_control)
+                    and not shutdown
+                ):
                     client.check_health()
                     waited = drain_broadcast_actions()
+                    drain_scaffold_controls()
                     if waited:
                         apply_broadcast_world1(waited)
                     else:

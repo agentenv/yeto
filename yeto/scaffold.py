@@ -11,16 +11,16 @@ forward/backward pass.
 
 One token-normalized formula everywhere (no per-H tuning)
 --------------------------------------------------------
-Over a window a worker moves the fragment from the window-start anchor ``A`` to
-its endpoint ``theta_i`` while consuming ``T_i`` raw tokens. Define the
+Over a window a worker moves the fragment from its exact pushed base anchor
+``A_i`` to its endpoint ``theta_i`` while consuming ``T_i`` raw tokens. Define the
 worker's token-normalized control (units: parameter-move per token):
 
-    c_i = (theta_i - A) / T_i                                            (1)
+    c_i = (theta_i - A_i) / T_i                                          (1)
 
 The syncer holds every worker's endpoint and token count, so it forms the
 token-weighted mean control from the SAME per-worker deltas it already merges:
 
-    c   = ( sum_i (theta_i - A) ) / ( sum_i T_i )
+    c   = ( sum_i (theta_i - A_i) ) / ( sum_i T_i )
         = sum_i (T_i / sum_j T_j) * c_i                                  (2)
 
 i.e. ``c`` is the token-weighted mean of the ``c_i`` (equation 2 is exactly the
@@ -39,6 +39,21 @@ step of ``eta`` tokens moves the parameter by ``-eta * ghat``); SCAFFOLD's
 per-step correction ``ghat_c - ghat_i`` over ``tokens_per_step`` tokens is
 ``(ghat_c - ghat_i) * tokens_per_step = (c_i - c) * tokens_per_step / eta``.
 
+Correctness envelope
+--------------------
+The zero-sum/unbiased identity for (3) is an identity of constant-learning-rate
+plain SGD with equal token counts. It does *not* extend through AdamW, warmup,
+weight decay, or gradient clipping: Adam's second moment, independently evolved
+worker state, decoupled weight decay, and clipping are nonlinear transforms of
+the corrected gradient. The production learner therefore exposes an explicit
+plain-SGD correctness mode. The older AdamW/clipped path remains available as
+an experiment, but is deliberately not described as unbiased.
+
+Controls are also versioned. A learner may use a pair only when its local
+``c_i`` and the server mean ``c`` came from the same completed fragment round.
+This prevents an early local push or a late control broadcast from combining
+controls from different endpoints.
+
 Why token normalization (not per-step)
 --------------------------------------
 Normalizing by tokens (not by microstep count) makes ``c_i`` invariant to the
@@ -55,14 +70,48 @@ adds nothing to fix when there is no cross-worker drift.
 
 from __future__ import annotations
 
+import logging
+
 import torch
+
+log = logging.getLogger("scaffold")
 
 __all__ = [
     "local_control",
     "mean_control",
     "grad_correction",
     "effective_step_gradient",
+    "VersionedControlPairs",
+    "zero_sum_step_diagnostics",
 ]
+
+
+class VersionedControlPairs:
+    """Match local and mean controls atomically by fragment version."""
+
+    def __init__(self) -> None:
+        self._local: dict[int, torch.Tensor] = {}
+        self._mean: dict[int, torch.Tensor] = {}
+
+    def add_local(self, version: int, control: torch.Tensor) -> None:
+        self._local[int(version)] = control
+
+    def add_mean(self, version: int, control: torch.Tensor) -> None:
+        self._mean[int(version)] = control
+
+    def get(self, version: int) -> tuple[torch.Tensor, torch.Tensor] | None:
+        version = int(version)
+        local = self._local.get(version)
+        mean = self._mean.get(version)
+        if local is None or mean is None:
+            return None
+        return local, mean
+
+    def discard_before(self, version: int) -> None:
+        """Drop halves that can no longer match the applied fragment version."""
+        version = int(version)
+        self._local = {v: c for v, c in self._local.items() if v >= version}
+        self._mean = {v: c for v, c in self._mean.items() if v >= version}
 
 
 def local_control(
@@ -87,7 +136,7 @@ def mean_control(
 
     This is what the syncer broadcasts. Given per-worker controls ``c_i`` and
     their token counts ``T_i`` it returns ``sum_i T_i c_i / sum_i T_i``, which
-    equals ``sum_i (theta_i - A) / sum_i T_i`` — the token-normalized merged
+    equals ``sum_i (theta_i - A_i) / sum_i T_i`` — the token-normalized merged
     pseudo-move the syncer forms from the per-worker deltas it already has.
     """
     if len(controls) != len(token_counts):
@@ -137,3 +186,45 @@ def effective_step_gradient(
     return grad.detach().float() + grad_correction(
         local_c, mean_c, tokens_per_step, inner_lr
     )
+
+
+def zero_sum_step_diagnostics(
+    corrections: list[torch.Tensor],
+    parameters_before: list[torch.Tensor],
+    parameters_after: list[torch.Tensor],
+) -> dict[str, float]:
+    """Measure aggregate correction and real optimizer displacement.
+
+    Corrections are captured after gradient addition but before clipping, while
+    the parameter snapshots bracket the real ``opt.step()``. This is intended
+    for the equal-token, constant-LR plain-SGD correctness run.
+    """
+    if not corrections:
+        raise ValueError("need at least one worker correction")
+    if not (
+        len(corrections) == len(parameters_before) == len(parameters_after)
+    ):
+        raise ValueError("corrections and parameter snapshots must have equal length")
+    correction_sum = torch.stack([c.detach().float() for c in corrections]).sum(0)
+    displacement_sum = torch.stack(
+        [
+            after.detach().float() - before.detach().float()
+            for before, after in zip(parameters_before, parameters_after)
+        ]
+    ).sum(0)
+    diagnostics = {
+        "correction_sum_l2": float(correction_sum.norm().item()),
+        "correction_sum_max_abs": float(correction_sum.abs().max().item()),
+        "displacement_sum_l2": float(displacement_sum.norm().item()),
+        "displacement_sum_max_abs": float(displacement_sum.abs().max().item()),
+    }
+    log.info(
+        "SCAFFOLD plain-SGD zero-sum before_clip correction_sum_l2=%.9g "
+        "correction_sum_max_abs=%.9g after_step displacement_sum_l2=%.9g "
+        "displacement_sum_max_abs=%.9g",
+        diagnostics["correction_sum_l2"],
+        diagnostics["correction_sum_max_abs"],
+        diagnostics["displacement_sum_l2"],
+        diagnostics["displacement_sum_max_abs"],
+    )
+    return diagnostics

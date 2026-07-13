@@ -98,6 +98,54 @@ def test_compare_presets_cover_core_axes():
     assert compare.PRESETS["q4"].wire_dtype == "q4"
 
 
+def test_scaffold_lite_preset_is_plain_sgd_version_matched_correctness_run():
+    args = SimpleNamespace(
+        model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=512,
+        micro_batch_size=2, inner_lr=3e-4, device="cpu", shard="ddp",
+        learner_gpus=0, training_seed=123,
+    )
+    arm = compare.PRESETS["scaffold_lite"]
+    learner = compare.learner_command(
+        args, Path("/tmp/w/scaffold_lite"), learner_id=0, num_learners=4,
+        syncer="127.0.0.1:1", max_steps=128, arm=arm,
+    )
+    syncer = compare.syncer_command(
+        arm, 1234, Path("/tmp/w/scaffold_lite"), total_steps=8
+    )
+
+    assert arm.outer_lr == 0.28
+    assert arm.outer_momentum == 0.0
+    assert learner[learner.index("--merge-alpha") + 1] == "0.0"
+    assert learner[learner.index("--wire-dtype") + 1] == "f32"
+    assert learner[learner.index("--inner-optimizer") + 1] == "sgd"
+    assert learner[learner.index("--fixed-window-microsteps") + 1] == "64"
+    for flag in ("--barrier-sync", "--scaffold-correctness-mode"):
+        assert flag in learner
+    assert syncer[syncer.index("--outer-lr") + 1] == "0.28"
+    assert syncer[syncer.index("--outer-momentum") + 1] == "0.0"
+    assert "--version-matched-anchor" in syncer
+
+
+def test_default_arm_commands_do_not_gain_scaffold_flags():
+    args = SimpleNamespace(
+        model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=512,
+        micro_batch_size=2, inner_lr=3e-4, device="cpu", shard="ddp",
+        learner_gpus=0, training_seed=123,
+    )
+    arm = compare.PRESETS["m4"]
+    learner = compare.learner_command(
+        args, Path("/tmp/w/m4"), learner_id=0, num_learners=4,
+        syncer="127.0.0.1:1", max_steps=10, arm=arm,
+    )
+    syncer = compare.syncer_command(arm, 1234, Path("/tmp/w/m4"), total_steps=8)
+    for flag in (
+        "--inner-control-variate", "--scaffold-correctness-mode",
+        "--inner-optimizer", "--version-matched-anchor",
+    ):
+        assert flag not in learner
+        assert flag not in syncer
+
+
 def test_compare_outer_optimizer_override_is_explicit():
     from dataclasses import replace
 
@@ -264,6 +312,17 @@ def test_token_budget_split_is_fair_across_learners():
     assert compare.steps_for(1, 2, 512, 8) == 1  # never zero steps
     # DDP/FSDP ranks multiply tokens per step, so steps shrink by world too.
     assert compare.steps_for(1_000_000, 2, 512, 1, world=2) == 489
+
+
+def test_fixed_window_outer_steps_equalizes_completed_commits():
+    assert compare.fixed_window_outer_steps(256, 64, 4) == 16
+    assert compare.fixed_window_outer_steps(271, 64, 4) == 16
+    try:
+        compare.fixed_window_outer_steps(63, 64, 4)
+    except ValueError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("a budget shorter than H cannot complete a round")
 
 
 def test_multi_gpu_learner_uses_torchrun_and_gpu_blocks():

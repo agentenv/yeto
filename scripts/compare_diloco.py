@@ -142,6 +142,12 @@ class Arm:
     # token-normalized mean control c and learners correct their inner gradients
     # by (c_i - c). Threaded to BOTH the learners and the syncer.
     inner_control_variate: str = "none"
+    # Opt-in restrictions for the first SCAFFOLD correctness run. Keeping these
+    # on the arm avoids changing any existing/default command line.
+    scaffold_correctness_mode: bool = False
+    inner_optimizer: str = "adamw"
+    fixed_window_microsteps: int | None = None
+    version_matched_anchor: bool = False
     merge_alpha: float = 0.5
     wire_dtype: str = "bf16"
     pipeline: int = 2
@@ -194,15 +200,27 @@ PRESETS: dict[str, Arm] = {
     # SCAFFOLD-lite endpoint-derived inner control variates (candidate #5,
     # docs/OTHER_OPTIMIZERS.md). Four-worker strict quorum (the setting where
     # the outer optimizer already averages every worker) so any gain is pure
-    # drift correction. Pair against the SGD-0.28 baseline via
-    # --outer-optimizer / --outer-lr overrides; the decisive exp runs H64/H256/
-    # inner-lr-hi plus one heterogeneous-data workload.
+    # drift correction. The first run is intentionally narrow: f32 wire,
+    # overwrite merges, fixed H64, barrier synchronization, version-matched
+    # anchors, constant-LR unclipped inner SGD, and outer SGD-0.28 (Nesterov
+    # with momentum zero). The decisive follow-up can broaden the regime only
+    # after this real-path zero-sum audit passes.
     "scaffold_lite": Arm(
         "scaffold_lite",
         m=4,
+        fragments=4,
         quorum=4,
         strict_quorum=True,
         inner_control_variate="scaffold_lite",
+        scaffold_correctness_mode=True,
+        inner_optimizer="sgd",
+        fixed_window_microsteps=64,
+        version_matched_anchor=True,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=4,
+        outer_lr=0.28,
+        outer_momentum=0.0,
     ),
     # Exact production leave-one-out actions. Both arms pay the same sidecar
     # latency; shadow records the recommendation but commits A0.
@@ -327,6 +345,68 @@ def steps_for(
     `world` is the DDP/FSDP ranks per learner: every rank processes its own
     micro-batch per step, so tokens/step scale by world."""
     return max(1, math.ceil(token_budget / (mbs * seq_len * learners * world)))
+
+
+def fixed_window_outer_steps(learner_steps: int, window_steps: int, fragments: int) -> int:
+    """Exact complete fragment commits for a barrier-synchronous fixed-H arm."""
+    if learner_steps < window_steps:
+        raise ValueError(
+            f"learner budget {learner_steps} is shorter than fixed H={window_steps}"
+        )
+    return (learner_steps // window_steps) * fragments
+
+
+def validate_scaffold_correctness_audit(arm: Arm, arm_dir: Path) -> dict[str, float]:
+    """Aggregate the real learner-path zero-sum audit across synchronous workers."""
+    import torch
+
+    from yeto.scaffold import zero_sum_step_diagnostics
+
+    records = [
+        torch.load(
+            arm_dir / f"scaffold_audit_learner_{learner_id}.pt",
+            map_location="cpu",
+            weights_only=True,
+        )
+        for learner_id in range(arm.m)
+    ]
+    corrections = [record["correction_before_clip"] for record in records]
+    displacements = [
+        record["correction_displacement_after_step"] for record in records
+    ]
+    zeros = [torch.zeros_like(displacement) for displacement in displacements]
+    diagnostics = zero_sum_step_diagnostics(corrections, zeros, displacements)
+
+    correction_scale = max(float(c.abs().max().item()) for c in corrections)
+    displacement_scale = max(float(d.abs().max().item()) for d in displacements)
+    correction_tolerance = max(2e-6, 2e-5 * correction_scale)
+    displacement_tolerance = max(2e-7, 2e-4 * displacement_scale)
+    diagnostics.update(
+        {
+            "correction_tolerance": correction_tolerance,
+            "displacement_tolerance": displacement_tolerance,
+        }
+    )
+    (arm_dir / "scaffold_zero_sum.json").write_text(
+        json.dumps(diagnostics, sort_keys=True, indent=2) + "\n"
+    )
+    print(
+        "[compare] SCAFFOLD zero-sum "
+        f"before_clip max={diagnostics['correction_sum_max_abs']:.9g} "
+        f"after_step max={diagnostics['displacement_sum_max_abs']:.9g}",
+        flush=True,
+    )
+    if diagnostics["correction_sum_max_abs"] > correction_tolerance:
+        raise RuntimeError(
+            "SCAFFOLD pre-clip corrections are not zero-sum: "
+            f"{diagnostics['correction_sum_max_abs']} > {correction_tolerance}"
+        )
+    if diagnostics["displacement_sum_max_abs"] > displacement_tolerance:
+        raise RuntimeError(
+            "SCAFFOLD post-step correction displacements are not zero-sum: "
+            f"{diagnostics['displacement_sum_max_abs']} > {displacement_tolerance}"
+        )
+    return diagnostics
 
 
 def _float_list_value(spec: str, idx: int) -> float:
@@ -505,6 +585,8 @@ def learner_command(
             ]
         fixed_window_tokens = getattr(args, "fixed_window_tokens", 0)
         fixed_window_microsteps = getattr(args, "fixed_window_microsteps", 0)
+        if not fixed_window_microsteps and arm.fixed_window_microsteps is not None:
+            fixed_window_microsteps = arm.fixed_window_microsteps
         if fixed_window_tokens:
             cmd += ["--fixed-window-tokens", str(fixed_window_tokens)]
         if fixed_window_microsteps:
@@ -516,7 +598,7 @@ def learner_command(
             cmd += ["--pad-to-fixed-window-tokens"]
         if getattr(args, "freeze_delta_before_delay", False):
             cmd += ["--freeze-delta-before-delay"]
-        if getattr(args, "barrier_sync", False):
+        if getattr(args, "barrier_sync", False) or arm.scaffold_correctness_mode:
             cmd += ["--barrier-sync"]
         lag_commits = int(getattr(args, "learner_broadcast_lag_commits", 0))
         if lag_commits > 0:
@@ -539,6 +621,22 @@ def learner_command(
             # SCAFFOLD-lite: the learner keeps c_i and applies (c_i - c); the
             # syncer (below) must run with the matching flag to broadcast c.
             cmd += ["--inner-control-variate", arm.inner_control_variate]
+        if arm.scaffold_correctness_mode:
+            cmd += [
+                "--scaffold-correctness-mode",
+                "--inner-optimizer",
+                arm.inner_optimizer,
+                "--weight-decay",
+                "0",
+                "--warmup-steps",
+                "0",
+                "--grad-clip",
+                "0",
+                "--max-reconnects",
+                "0",
+                "--scaffold-audit-path",
+                str(arm_dir / f"scaffold_audit_learner_{learner_id}.pt"),
+            ]
         if getattr(args, "probe_data", None):
             probe_data = (
                 str(arm_dir.parent / "eval.jsonl")
@@ -635,9 +733,10 @@ def syncer_command(
     # EXP2.46 3-arm current-anchor control. --version-matched-anchor changes the
     # merge (arms A/B); --anchor-drift-log only instruments (arm C). Both are
     # emitted only when active so default command lines stay byte-identical.
-    if version_matched_anchor:
+    effective_version_matched = version_matched_anchor or arm.version_matched_anchor
+    if effective_version_matched:
         cmd += ["--version-matched-anchor"]
-    if anchor_drift_log and not version_matched_anchor:
+    if anchor_drift_log and not effective_version_matched:
         cmd += ["--anchor-drift-log"]
     if arm.strict_quorum:
         cmd += ["--strict-quorum"]
@@ -1564,7 +1663,23 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
         world=max(1, args.learner_gpus),
     )
     steps = args.learner_max_steps or budget_steps
-    total_outer_steps = args.syncer_total_steps or (budget_steps * arm.m * 4)
+    derived_exact_outer_steps = 0
+    if arm.scaffold_correctness_mode and not args.syncer_total_steps:
+        window = (
+            getattr(args, "fixed_window_microsteps", 0)
+            or arm.fixed_window_microsteps
+        )
+        if window is None:
+            raise RuntimeError("SCAFFOLD correctness arm requires a fixed H")
+        derived_exact_outer_steps = fixed_window_outer_steps(
+            steps, int(window), arm.fragments
+        )
+    total_outer_steps = (
+        args.syncer_total_steps
+        or derived_exact_outer_steps
+        or (budget_steps * arm.m * 4)
+    )
+    exact_outer_steps = args.syncer_total_steps or derived_exact_outer_steps
     port = free_port()
     # Generous round ceiling: learners stop at their token budget, and the
     # syncer is terminated once they exit; the checkpoint (written every
@@ -1638,13 +1753,15 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             rc = proc.wait(timeout=args.arm_timeout_min * 60)
             if rc != 0:
                 raise RuntimeError(f"{arm.name}: a learner exited {rc}; see {arm_dir}")
-        if args.syncer_total_steps:
+        if exact_outer_steps:
             # Full-parameter models leave the syncer a sizable merge +
             # checkpoint backlog after learners disconnect; a 30s wait
             # killed a healthy SmolLM2-135M full-tune run.
             rc = syncer.wait(timeout=900)
             if rc != 0:
                 raise RuntimeError(f"{arm.name}: syncer exited {rc}; see {arm_dir}")
+        if arm.scaffold_correctness_mode:
+            validate_scaffold_correctness_audit(arm, arm_dir)
     finally:
         for proc in learners:
             if proc.poll() is None:
@@ -1678,7 +1795,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             f"{arm.name}: no syncer checkpoint (no round completed); see {arm_dir}"
         )
     probe_policy = arm.commit_policy != "token_weighted"
-    if args.syncer_total_steps or arm.strict_quorum or probe_policy:
+    if exact_outer_steps or arm.strict_quorum or probe_policy:
         tape_path = arm_dir / "tape.jsonl"
         records = _load_event_tape(arm, tape_path)
         if probe_policy:
@@ -1686,11 +1803,11 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                 arm,
                 records,
                 arm_dir,
-                expected_steps=args.syncer_total_steps,
+                expected_steps=exact_outer_steps,
             )
         else:
             validate_event_tape_records(
-                arm, records, expected_steps=args.syncer_total_steps
+                arm, records, expected_steps=exact_outer_steps
             )
     # Export the merged global parameters to a peft adapter dir.
     export_dir = arm_dir / "export"

@@ -50,7 +50,7 @@ MSG_CHUNK = 9
 # BCAST_CONTROL (SCAFFOLD-lite): the token-normalized mean control vector c for
 # one fragment, broadcast after its BCAST_FRAGMENT when the syncer runs with
 # --inner-control-variate scaffold_lite. Same envelope as BCAST_FRAGMENT
-# (fid u32, version u64, bf16 tensor bytes); off by default so non-scaffold
+# (fid u32, version u64, bulk-wire tensor bytes); off by default so non-scaffold
 # sessions never see it. See yeto/scaffold.py.
 MSG_BCAST_CONTROL = 10
 

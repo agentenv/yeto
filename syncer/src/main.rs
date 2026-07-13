@@ -182,6 +182,11 @@ fn main() -> anyhow::Result<()> {
             "--inner-control-variate must be 'none' or 'scaffold_lite', got {other:?}"
         ),
     };
+    if control_variate && !args.version_matched_anchor {
+        anyhow::bail!(
+            "--inner-control-variate scaffold_lite requires --version-matched-anchor so every local/mean control uses the exact pushed base version"
+        );
+    }
     let outer_lr_by_fragment = args
         .outer_lr_by_fragment
         .as_deref()
