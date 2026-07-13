@@ -35,9 +35,12 @@ from dataclasses import dataclass, field
 MERGE_AVG = 0
 MERGE_RDA = 1
 MERGE_ISO = 2
+MERGE_WORKER_SNR = 3
 
-# CLI value -> merge mode for the non-embedding (matrix) fragments.
-MATRIX_MERGE_MODES = {"rda": MERGE_RDA, "iso": MERGE_ISO}
+# CLI value -> merge mode for the non-embedding (matrix) fragments. Worker-SNR
+# (cross-worker consensus shrink; see syncer merge::merge_worker_snr) carries no
+# per-tensor shapes on the wire, so it slots in like RDA.
+MATRIX_MERGE_MODES = {"rda": MERGE_RDA, "iso": MERGE_ISO, "worker-snr": MERGE_WORKER_SNR}
 
 _EMBED_MARKERS = ("embed", "wte", "wpe", "lm_head", "shared.weight")
 

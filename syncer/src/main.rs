@@ -69,7 +69,10 @@ struct Args {
     /// Outer Nesterov momentum, or beta for normalized EMA variants.
     #[arg(long, default_value_t = 0.9)]
     outer_momentum: f32,
-    /// Outer optimizer: nesterov, normalized-ema, or restarted-ema.
+    /// Outer optimizer: nesterov, normalized-ema, restarted-ema,
+    /// rho-adaptive, capped-nesterov[-gc|-r], block-rms, or block-yogi.
+    /// block-rms/block-yogi are memoryless (beta1=0) per-tensor second-moment
+    /// optimizers with a global norm-match back to the plain-SGD step.
     #[arg(long, default_value_t = merge::OuterOptimizer::Nesterov)]
     outer_optimizer: merge::OuterOptimizer,
     /// Restart EMA history when cosine(current delta, previous EMA) is at or
@@ -270,6 +273,8 @@ fn validate_outer_optimizer(
             | merge::OuterOptimizer::CappedNesterov
             | merge::OuterOptimizer::CappedNesterovGc
             | merge::OuterOptimizer::CappedNesterovR
+            | merge::OuterOptimizer::BlockRms
+            | merge::OuterOptimizer::BlockYogi
     ) && !outer_momentum.is_finite()
     {
         anyhow::bail!(

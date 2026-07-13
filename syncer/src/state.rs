@@ -9,6 +9,10 @@ use crate::protocol::Reader;
 pub const MERGE_AVG: u8 = 0;
 pub const MERGE_RDA: u8 = 1;
 pub const MERGE_ISO: u8 = 2;
+/// Worker-SNR consensus merge (see `merge::merge_worker_snr`). Like avg/RDA it
+/// carries no per-tensor shapes on the wire; unlike them it consumes all
+/// tensor blocks and the per-worker deltas at once.
+pub const MERGE_WORKER_SNR: u8 = 3;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FragmentInfo {
@@ -38,7 +42,7 @@ impl Layout {
         let mut fragments = Vec::with_capacity(num_fragments as usize);
         for _ in 0..num_fragments {
             let merge_mode = r.u8()?;
-            if merge_mode > MERGE_ISO {
+            if merge_mode > MERGE_WORKER_SNR {
                 bail!("bad merge mode {merge_mode}");
             }
             let num_tensors = r.u32()?;
@@ -221,6 +225,10 @@ pub struct ActionPreview {
     /// Capped-Nesterov-gc applied step gain for this step; unchanged for the
     /// other optimizers. Installed alongside the buffer on commit.
     resulting_capped_gain: f32,
+    /// Block second-moment (`block-rms`/`block-yogi`) per-tensor state after
+    /// this step; unchanged for the other optimizers. One entry per tensor in
+    /// the fragment. Installed alongside the buffer on commit.
+    resulting_block_v: Vec<f32>,
     applied_step: Vec<f32>,
     stats: MergeStats,
     step_scale: f64,
@@ -375,6 +383,10 @@ fn compute_action_fingerprint(preview: &ActionPreview) -> [u64; 2] {
     mix_action_fingerprint(&mut hash, preview.resulting_rho_ema.to_bits() as u64);
     mix_action_fingerprint(&mut hash, preview.resulting_capped_mu.to_bits() as u64);
     mix_action_fingerprint(&mut hash, preview.resulting_capped_gain.to_bits() as u64);
+    mix_action_fingerprint(&mut hash, preview.resulting_block_v.len() as u64);
+    for value in &preview.resulting_block_v {
+        mix_action_fingerprint(&mut hash, value.to_bits() as u64);
+    }
     for values in [
         preview.resulting_params.as_slice(),
         preview.resulting_optimizer_buffer.as_slice(),
@@ -414,6 +426,14 @@ pub struct GlobalState {
     /// diagnostics see the exact applied value. Not checkpointed, like
     /// `capped_mu`.
     capped_gain: Vec<f32>,
+    /// Per-fragment, per-tensor scalar second-moment state for the block
+    /// second-moment optimizers (`block-rms`/`block-yogi`). `block_v[fid]` has
+    /// one entry per tensor in fragment `fid`. Only those optimizers read or
+    /// write it; it holds no directional memory (a scalar per block). Like the
+    /// other outer-optimizer scalar states it is NOT part of the checkpoint
+    /// format; a restore re-initializes to zero and the EMAs re-warm on the
+    /// first measured commit.
+    block_v: Vec<Vec<f32>>,
     pub initialized: Vec<bool>,
     /// Global step at which each fragment was last merged (its version).
     pub versions: Vec<u64>,
@@ -464,6 +484,11 @@ impl GlobalState {
         let capped_mu = vec![merge::CAPPED_NESTEROV_INITIAL_MU; layout.fragments.len()];
         let capped_gain =
             vec![merge::CAPPED_NESTEROV_GC_INITIAL_GAIN; layout.fragments.len()];
+        let block_v = layout
+            .fragments
+            .iter()
+            .map(|f| vec![0.0f32; f.tensor_numels.len()])
+            .collect();
         let initialized = vec![false; layout.fragments.len()];
         let versions = vec![0; layout.fragments.len()];
         let state_epochs = vec![0; layout.fragments.len()];
@@ -475,6 +500,7 @@ impl GlobalState {
             rho_ema,
             capped_mu,
             capped_gain,
+            block_v,
             initialized,
             versions,
             global_step: 0,
@@ -650,6 +676,12 @@ impl GlobalState {
         let mut resulting_rho_ema = self.rho_ema[fid];
         let mut resulting_capped_mu = self.capped_mu[fid];
         let mut resulting_capped_gain = self.capped_gain[fid];
+        let mut resulting_block_v = self.block_v[fid].clone();
+        let tensor_numels: Vec<usize> = self.layout.fragments[fid]
+            .tensor_numels
+            .iter()
+            .map(|&n| n as usize)
+            .collect();
         let outer = merge::apply_outer_step(
             self.outer_optimizer,
             &mut resulting_params,
@@ -661,6 +693,8 @@ impl GlobalState {
             &mut resulting_rho_ema,
             &mut resulting_capped_mu,
             &mut resulting_capped_gain,
+            &tensor_numels,
+            &mut resulting_block_v,
         );
         // The capped-Nesterov family chooses its momentum (and, for gc, its
         // gain) per commit; materializing its step must use the effective
@@ -693,6 +727,7 @@ impl GlobalState {
             || !resulting_rho_ema.is_finite()
             || !resulting_capped_mu.is_finite()
             || !resulting_capped_gain.is_finite()
+            || resulting_block_v.iter().any(|value| !value.is_finite())
             || applied_step.iter().any(|value| !value.is_finite())
             || !outer.applied_step_norm.is_finite()
             || outer
@@ -719,6 +754,7 @@ impl GlobalState {
             resulting_rho_ema,
             resulting_capped_mu,
             resulting_capped_gain,
+            resulting_block_v,
             applied_step,
             stats: MergeStats {
                 gnorm: aggregate.gnorm,
@@ -1011,6 +1047,36 @@ impl GlobalState {
             .map(|candidate| candidate.weight)
             .collect();
         let mut delta = vec![0.0f32; frag.numel()];
+        // Worker-SNR consumes the per-worker deltas and every tensor block at
+        // once (its confidence shrink is per block, its norm-match is global),
+        // so it runs on the whole fragment instead of the per-tensor loop.
+        if frag.merge_mode == MERGE_WORKER_SNR {
+            let tensor_numels: Vec<usize> =
+                frag.tensor_numels.iter().map(|&n| n as usize).collect();
+            merge::merge_worker_snr(anchor, &learners, &weights, &tensor_numels, &mut delta);
+            let gnorm = delta
+                .iter()
+                .map(|value| (*value as f64).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            if !gnorm.is_finite() || delta.iter().any(|value| !value.is_finite()) {
+                bail!("fragment {fid}: aggregate delta is not finite");
+            }
+            return Ok(AggregateDelta {
+                fragment_id: fid,
+                base_version: self.versions[fid],
+                base_state_epoch: self.state_epochs[fid],
+                base_state_fingerprint: self.fragment_state_fingerprint(fid)?,
+                responder_ids: candidates
+                    .iter()
+                    .map(|candidate| candidate.responder_id)
+                    .collect(),
+                selected_weight,
+                selected_weight_mass: selected_weight / full_weight,
+                delta,
+                gnorm,
+            });
+        }
         let mut offset = 0usize;
         for (tensor_index, &tensor_numel) in frag.tensor_numels.iter().enumerate() {
             let tensor_numel = tensor_numel as usize;
@@ -1124,6 +1190,11 @@ impl GlobalState {
             || !preview.resulting_rho_ema.is_finite()
             || !preview.resulting_capped_mu.is_finite()
             || !preview.resulting_capped_gain.is_finite()
+            || preview.resulting_block_v.len() != self.layout.fragments[fid].tensor_numels.len()
+            || preview
+                .resulting_block_v
+                .iter()
+                .any(|value| !value.is_finite())
             || !preview.stats.gnorm.is_finite()
             || preview.stats.gnorm < 0.0
             || !preview.stats.outer.applied_step_norm.is_finite()
@@ -1225,6 +1296,10 @@ impl GlobalState {
         mix(self.rho_ema[fid].to_bits() as u64);
         mix(self.capped_mu[fid].to_bits() as u64);
         mix(self.capped_gain[fid].to_bits() as u64);
+        mix(self.block_v[fid].len() as u64);
+        for value in &self.block_v[fid] {
+            mix(value.to_bits() as u64);
+        }
         match &self.outer_lr_by_fragment {
             None => {
                 mix(0);
@@ -1249,6 +1324,8 @@ impl GlobalState {
             merge::OuterOptimizer::CappedNesterov => 4,
             merge::OuterOptimizer::CappedNesterovGc => 5,
             merge::OuterOptimizer::CappedNesterovR => 6,
+            merge::OuterOptimizer::BlockRms => 7,
+            merge::OuterOptimizer::BlockYogi => 8,
         });
         match self.delta_correction {
             None => mix(0),
@@ -1278,6 +1355,7 @@ impl GlobalState {
             resulting_rho_ema,
             resulting_capped_mu,
             resulting_capped_gain,
+            resulting_block_v,
             stats,
             ..
         } = preview;
@@ -1287,6 +1365,7 @@ impl GlobalState {
         self.rho_ema[fid] = resulting_rho_ema;
         self.capped_mu[fid] = resulting_capped_mu;
         self.capped_gain[fid] = resulting_capped_gain;
+        self.block_v[fid] = resulting_block_v;
         self.state_epochs[fid] = next_epoch;
         Ok(stats)
     }
@@ -2277,6 +2356,7 @@ mod tests {
             (MERGE_AVG, None),
             (MERGE_RDA, None),
             (MERGE_ISO, Some(vec![(1u64, 2u64), (2, 1)])),
+            (MERGE_WORKER_SNR, None),
         ] {
             for optimizer in [
                 merge::OuterOptimizer::Nesterov,
@@ -2285,6 +2365,8 @@ mod tests {
                 merge::OuterOptimizer::CappedNesterov,
                 merge::OuterOptimizer::CappedNesterovGc,
                 merge::OuterOptimizer::CappedNesterovR,
+                merge::OuterOptimizer::BlockRms,
+                merge::OuterOptimizer::BlockYogi,
             ] {
                 for use_heloco in [false, true] {
                     let make_state = || {
@@ -2332,6 +2414,7 @@ mod tests {
                     assert_eq!(compatibility.momentum, preview_path.momentum);
                     assert_eq!(compatibility.capped_mu, preview_path.capped_mu);
                     assert_eq!(compatibility.capped_gain, preview_path.capped_gain);
+                    assert_eq!(compatibility.block_v, preview_path.block_v);
                     assert_eq!(compatibility.state_epochs, preview_path.state_epochs);
                     assert_eq!(compatibility.versions, vec![0]);
                     assert_eq!(compatibility.global_step, 0);

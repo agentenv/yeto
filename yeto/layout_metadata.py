@@ -8,10 +8,15 @@ from typing import Mapping
 
 import torch
 
-from .fragments import FragmentLayout, MERGE_AVG, MERGE_ISO, MERGE_RDA
+from .fragments import FragmentLayout, MERGE_AVG, MERGE_ISO, MERGE_RDA, MERGE_WORKER_SNR
 
 LAYOUT_META_VERSION = 1
-MERGE_MODE_NAMES = {MERGE_AVG: "avg", MERGE_RDA: "rda", MERGE_ISO: "iso"}
+MERGE_MODE_NAMES = {
+    MERGE_AVG: "avg",
+    MERGE_RDA: "rda",
+    MERGE_ISO: "iso",
+    MERGE_WORKER_SNR: "worker-snr",
+}
 
 
 def build_layout_metadata(

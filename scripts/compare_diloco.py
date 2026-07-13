@@ -84,7 +84,12 @@ OUTER_OPTIMIZERS = (
     "capped-nesterov",
     "capped-nesterov-gc",
     "capped-nesterov-r",
+    "block-rms",
+    "block-yogi",
 )
+# Matrix-fragment aggregation modes the harness understands (client-side
+# --matrix-merge). "worker-snr" is the memoryless cross-worker consensus merge.
+MATRIX_MERGES = ("rda", "iso", "worker-snr")
 COMMIT_POLICIES = (
     "token_weighted",
     "probe_shadow",
@@ -1946,10 +1951,10 @@ def main() -> int:
     )
     p.add_argument(
         "--matrix-merge",
-        choices=["rda", "iso"],
+        choices=MATRIX_MERGES,
         default=None,
-        help="override matrix-fragment aggregation (rda or Iso-C 'iso') "
-        "for every selected async arm",
+        help="override matrix-fragment aggregation (rda, Iso-C 'iso', or "
+        "'worker-snr' cross-worker consensus) for every selected async arm",
     )
     p.add_argument(
         "--commit-policy",

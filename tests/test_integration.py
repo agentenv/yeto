@@ -308,6 +308,81 @@ def test_single_learner_roundtrip_iso():
 
 
 @pytest.mark.timeout(180)
+def test_two_learners_roundtrip_worker_snr():
+    """Worker-SNR consensus merge end to end: two learners HELLO a
+    matrix_merge="worker-snr" layout (merge mode 3, no per-tensor shapes on the
+    wire) and the Rust syncer merges through the cross-worker confidence shrink
+    + global norm-match path (merge::merge_worker_snr)."""
+    binary = build_syncer()
+    port = free_port()
+    named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
+    layout = build_layout(named, 4, matrix_merge="worker-snr")
+    assert any(f.merge_mode == 3 for f in layout.fragments), "no worker-snr fragment"
+    proc = subprocess.Popen(
+        [str(binary), "--port", str(port), "--learners", "2", "--quorum", "2",
+         "--grace-ms", "200", "--total-steps", "30",
+         "--outer-lr", "0.28", "--outer-momentum", "0"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        torch.manual_seed(0)
+        t_a = torch.randn(DIM + DIM // 4)
+        t_b = -t_a  # consensus optimum is 0
+        learners = [ToyLearner(0, port, t_a, layout), ToyLearner(1, port, t_b, layout)]
+        for l in learners:
+            l.start()
+        for l in learners:
+            l.join(timeout=120)
+            assert not l.is_alive(), "learner did not finish"
+            if l.exc:
+                raise l.exc
+        assert proc.wait(timeout=30) == 0, "syncer exited nonzero"
+        for l in learners:
+            assert l.synced, "learner never received a broadcast"
+            flat = torch.cat([p.reshape(-1) for p in l.synced.values()])
+            assert (flat - l.target).norm() > 0.5 * l.target.norm(), (
+                "learner collapsed to its own target; merging had no effect"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        print((proc.stdout.read() if proc.stdout else "")[-3000:])
+
+
+@pytest.mark.timeout(180)
+def test_single_learner_roundtrip_block_rms():
+    """block-rms outer optimizer end to end: memoryless per-tensor
+    second-moment step with a global norm-match, driven through the real
+    syncer binary (--outer-optimizer block-rms)."""
+    binary = build_syncer()
+    port = free_port()
+    named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
+    layout = build_layout(named, 3)
+    proc = subprocess.Popen(
+        [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
+         "--grace-ms", "50", "--total-steps", "9",
+         "--outer-optimizer", "block-rms", "--outer-lr", "0.5", "--outer-momentum", "0"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        target = torch.ones(DIM + DIM // 4)
+        l = ToyLearner(0, port, target, layout)
+        l.start()
+        l.join(timeout=120)
+        assert not l.is_alive()
+        if l.exc:
+            raise l.exc
+        assert proc.wait(timeout=30) == 0
+        assert l.synced, "learner never received a broadcast"
+        flat = torch.cat([p.detach().reshape(-1) for p in l.params.values()])
+        assert (flat - target).norm() < target.norm(), "no progress toward target"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        print((proc.stdout.read() if proc.stdout else "")[-3000:])
+
+
+@pytest.mark.timeout(180)
 def test_single_learner_roundtrip():
     """M=1, K=1: a single self-syncing learner; must run to completion.
     Runs with --pipeline 1 so the serial-round path stays covered (the

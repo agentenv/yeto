@@ -135,14 +135,18 @@ def parse_args(argv=None):
     )
     p.add_argument(
         "--matrix-merge",
-        choices=["rda", "iso"],
+        choices=["rda", "iso", "worker-snr"],
         default="rda",
         help="syncer aggregation for non-embedding (matrix) fragments: "
         "rda = weighted radial-directional averaging (default); "
         "iso = Iso-C-style isotropic aggregation (IsoLoCo, arXiv 2607.03011) "
         "— average the per-tensor deltas, then flatten each averaged "
         "matrix's singular-value spectrum to its mean; non-2D tensors join "
-        "the direct-averaged fragment",
+        "the direct-averaged fragment; "
+        "worker-snr = memoryless cross-worker consensus shrink — per tensor "
+        "block scale the mean delta by its signal-to-noise confidence "
+        "q = (|gbar|^2/d) / (|gbar|^2/d + sigma^2/M), then global norm-match "
+        "back to the plain-mean step norm",
     )
     p.add_argument(
         "--merge-alpha",

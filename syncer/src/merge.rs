@@ -37,6 +37,8 @@ pub enum OuterOptimizer {
     CappedNesterov,
     CappedNesterovGc,
     CappedNesterovR,
+    BlockRms,
+    BlockYogi,
 }
 
 impl OuterOptimizer {
@@ -49,6 +51,8 @@ impl OuterOptimizer {
             Self::CappedNesterov => "capped-nesterov",
             Self::CappedNesterovGc => "capped-nesterov-gc",
             Self::CappedNesterovR => "capped-nesterov-r",
+            Self::BlockRms => "block-rms",
+            Self::BlockYogi => "block-yogi",
         }
     }
 
@@ -75,8 +79,10 @@ impl FromStr for OuterOptimizer {
             "capped-nesterov" => Ok(Self::CappedNesterov),
             "capped-nesterov-gc" => Ok(Self::CappedNesterovGc),
             "capped-nesterov-r" => Ok(Self::CappedNesterovR),
+            "block-rms" => Ok(Self::BlockRms),
+            "block-yogi" => Ok(Self::BlockYogi),
             other => Err(format!(
-                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov, capped-nesterov-gc, capped-nesterov-r; got {other:?}"
+                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov, capped-nesterov-gc, capped-nesterov-r, block-rms, block-yogi; got {other:?}"
             )),
         }
     }
@@ -109,6 +115,12 @@ pub struct OuterStepStats {
 /// is the gain-compensated variant's applied step-scale (see
 /// `capped_nesterov_gc_step`). The other optimizers leave them untouched,
 /// exactly as they leave each other's buffer conventions alone.
+/// `tensor_numels` gives the per-tensor block boundaries of `delta` (their sum
+/// is `delta.len()`) and `block_v` is the per-tensor scalar second-moment state
+/// (one entry per tensor); both are consumed only by the block-second-moment
+/// optimizers (`block-rms`/`block-yogi`) and otherwise ignored, exactly as the
+/// scalar `rho_ema`/`capped_mu`/`capped_gain` states are left untouched by the
+/// optimizers that do not use them.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_outer_step(
     optimizer: OuterOptimizer,
@@ -121,6 +133,8 @@ pub fn apply_outer_step(
     rho_ema: &mut f32,
     capped_mu: &mut f32,
     capped_gain: &mut f32,
+    tensor_numels: &[usize],
+    block_v: &mut [f32],
 ) -> OuterStepStats {
     match optimizer {
         OuterOptimizer::Nesterov => nesterov_step(params, buf, delta, lr, momentum),
@@ -137,6 +151,12 @@ pub fn apply_outer_step(
         }
         OuterOptimizer::CappedNesterovR => {
             capped_nesterov_r_step(params, buf, delta, lr, capped_mu)
+        }
+        OuterOptimizer::BlockRms => {
+            block_second_moment_step(params, buf, delta, lr, tensor_numels, block_v, false)
+        }
+        OuterOptimizer::BlockYogi => {
+            block_second_moment_step(params, buf, delta, lr, tensor_numels, block_v, true)
         }
     }
 }
@@ -176,7 +196,9 @@ pub fn materialize_applied_step(
             .collect(),
         OuterOptimizer::NormalizedEma
         | OuterOptimizer::RestartedEma
-        | OuterOptimizer::RhoAdaptive => {
+        | OuterOptimizer::RhoAdaptive
+        | OuterOptimizer::BlockRms
+        | OuterOptimizer::BlockYogi => {
             updated_buf.iter().map(|buf| lr * *buf).collect()
         }
     }
@@ -526,6 +548,108 @@ pub fn capped_nesterov_gc_step(
     )
 }
 
+/// Block second-moment (beta1 = 0) outer optimizers, shared kernel for
+/// `block-rms` and `block-yogi`. No first-moment / directional memory: the
+/// only cross-round state is one scalar per tensor block, the second-moment
+/// EMA of the block's per-coordinate mean squared pseudo-gradient magnitude.
+pub const BLOCK_ADAPTIVE_BETA2: f64 = 0.95;
+/// Denominator floor for the per-block whitening `g / (sqrt(v) + eps)`.
+pub const BLOCK_ADAPTIVE_EPS: f64 = 1e-8;
+/// Denominator floor for the global norm-match back to the plain-SGD step norm.
+pub const BLOCK_ADAPTIVE_NORM_EPS: f64 = 1e-12;
+
+/// One block second-moment step (`yogi = false` -> RMS, `true` -> Yogi).
+///
+/// For each tensor block `l` (delimited by `tensor_numels`, summing to
+/// `delta.len()`), with `d_l` = block size and `s_l = ||g_l||^2 / d_l` the
+/// current mean squared magnitude:
+///
+///   RMS  : v_l <- beta2 v_l + (1 - beta2) s_l
+///   Yogi : v_l <- v_l - (1 - beta2) sign(v_l - s_l) s_l
+///   u_l  = g_l / (sqrt(v_l) + eps)
+///
+/// then a single GLOBAL norm-match restores the plain-SGD step norm,
+/// `u <- u * ||g|| / (||u|| + eps)`, and `theta <- theta - lr * u`. `v_l` is a
+/// scalar with NO direction memory; `block_v` (one entry per tensor) is updated
+/// in place. The whitened, norm-matched direction `u` is written into `buf` and
+/// the step is derived as `lr * buf`, so this path is bit-identical to
+/// `materialize_applied_step`'s `lr * buf` branch (as with the normalized-EMA
+/// and rho-adaptive optimizers). `--outer-momentum` is not consumed.
+pub fn block_second_moment_step(
+    params: &mut [f32],
+    buf: &mut [f32],
+    delta: &[f32],
+    lr: f32,
+    tensor_numels: &[usize],
+    block_v: &mut [f32],
+    yogi: bool,
+) -> OuterStepStats {
+    debug_assert_eq!(tensor_numels.iter().sum::<usize>(), delta.len());
+    debug_assert_eq!(tensor_numels.len(), block_v.len());
+    // Pass 1: per-block second-moment update and unnormalized whitened
+    // direction into `buf`; accumulate ||g|| and ||u|| for the global match.
+    let mut offset = 0usize;
+    let mut g_norm_sq = 0.0f64;
+    let mut u_norm_sq = 0.0f64;
+    for (block_index, &numel) in tensor_numels.iter().enumerate() {
+        let block = &delta[offset..offset + numel];
+        let block_norm_sq: f64 = block.iter().map(|value| (*value as f64).powi(2)).sum();
+        let s_l = if numel > 0 {
+            block_norm_sq / numel as f64
+        } else {
+            0.0
+        };
+        let v_prev = block_v[block_index] as f64;
+        let v_new = if yogi {
+            // v -= (1 - beta2) * sign(v - s) * s; equivalently move v toward s
+            // by (1-beta2)*s, with the additive (not multiplicative) Yogi
+            // update that resists variance blow-ups from large s.
+            let sign = (v_prev - s_l).signum();
+            (v_prev - (1.0 - BLOCK_ADAPTIVE_BETA2) * sign * s_l).max(0.0)
+        } else {
+            BLOCK_ADAPTIVE_BETA2 * v_prev + (1.0 - BLOCK_ADAPTIVE_BETA2) * s_l
+        };
+        block_v[block_index] = v_new as f32;
+        let denom = (v_new.sqrt() + BLOCK_ADAPTIVE_EPS) as f32;
+        for (b, d) in buf[offset..offset + numel].iter_mut().zip(block) {
+            let u = *d / denom;
+            *b = u;
+            u_norm_sq += (u as f64).powi(2);
+        }
+        g_norm_sq += block_norm_sq;
+        offset += numel;
+    }
+    // Global norm-match: rescale u back to the plain-SGD step norm ||g||.
+    let g_norm = g_norm_sq.sqrt();
+    let u_norm = u_norm_sq.sqrt();
+    let scale = (g_norm / (u_norm + BLOCK_ADAPTIVE_NORM_EPS)) as f32;
+    // Pass 2: apply u * scale via the buffer so `lr * buf` reproduces the step.
+    let mut step_norm_sq = 0.0f64;
+    let mut direction_norm_sq = 0.0f64;
+    let mut delta_norm_sq = 0.0f64;
+    let mut direction_delta_dot = 0.0f64;
+    for ((p, b), d) in params.iter_mut().zip(buf.iter_mut()).zip(delta) {
+        *b *= scale;
+        let step = lr * *b;
+        *p -= step;
+        let direction = *b as f64;
+        step_norm_sq += (step as f64).powi(2);
+        direction_norm_sq += direction * direction;
+        delta_norm_sq += (*d as f64).powi(2);
+        direction_delta_dot += direction * *d as f64;
+    }
+    // No history contribution (beta1 = 0): history/current ratio is 0.
+    finish_outer_step_stats(
+        step_norm_sq,
+        direction_norm_sq,
+        delta_norm_sq,
+        direction_delta_dot,
+        0.0,
+        delta_norm_sq,
+        false,
+    )
+}
+
 /// Purely scale a nominal applied-step vector and apply it once to the same
 /// f32 base parameters used by the production outer step. Returning both the
 /// scaled vector and resulting parameters keeps action previews consistent on
@@ -641,6 +765,95 @@ pub fn merge_rda(anchor: &[f32], learners: &[&[f32]], weights: &[f64], out: &mut
     let scale = (radial / mean_dir_norm) as f32;
     for o in out.iter_mut() {
         *o *= scale;
+    }
+}
+
+/// Denominator floor for the worker-SNR confidence and its global norm-match
+/// (see `merge_worker_snr`).
+pub const WORKER_SNR_EPS: f64 = 1e-12;
+
+/// Worker-SNR consensus merge over a whole fragment (the original
+/// contribution). Unlike avg/RDA/iso this needs the per-worker deltas AND all
+/// tensor blocks at once, because it shrinks each block by its cross-worker
+/// signal-to-noise ratio and then restores the plain-mean step norm GLOBALLY.
+///
+/// For each tensor block `l` (delimited by `tensor_numels`, summing to
+/// `anchor.len()`), with `M` workers, `d_l` = block size, unweighted mean
+/// delta `gbar_l = (1/M) sum_i (anchor - learner_i)` over the block, and
+/// unbiased cross-worker variance `sigma_l^2 = (1/(M-1)) sum_i ||delta_i -
+/// gbar_l||^2 / d_l` (0 when `M = 1`):
+///
+///   q_l = (||gbar_l||^2 / d_l) / (||gbar_l||^2 / d_l + sigma_l^2 / M + eps)
+///   u_l = q_l * gbar_l
+///
+/// High-consensus blocks (small sigma) keep `q_l ~ 1`; high-disagreement
+/// blocks are shrunk. A single global norm-match `u <- u * ||gbar|| /
+/// (||u|| + eps)` then restores the plain-mean merged-delta norm before the
+/// outer optimizer (plain SGD) runs. `M = 1` is the identity (`u = gbar`).
+/// `weights` are accepted for signature parity with the other merges but the
+/// consensus statistics are deliberately unweighted (every worker is one vote).
+pub fn merge_worker_snr(
+    anchor: &[f32],
+    learners: &[&[f32]],
+    _weights: &[f64],
+    tensor_numels: &[usize],
+    out: &mut [f32],
+) {
+    let m = learners.len();
+    if m == 0 {
+        out.fill(0.0);
+        return;
+    }
+    let inv_m = 1.0 / m as f64;
+    let mut offset = 0usize;
+    let mut gbar_norm_sq_total = 0.0f64;
+    let mut u_norm_sq_total = 0.0f64;
+    for &numel in tensor_numels {
+        let block = offset..offset + numel;
+        // gbar_l = unweighted mean delta over the block, written into out.
+        for j in block.clone() {
+            let mut sum = 0.0f64;
+            for learner in learners {
+                sum += (anchor[j] - learner[j]) as f64;
+            }
+            out[j] = (sum * inv_m) as f32;
+        }
+        let gbar_norm_sq: f64 = out[block.clone()]
+            .iter()
+            .map(|value| (*value as f64).powi(2))
+            .sum();
+        // Cross-worker variance: sigma^2 = (1/(M-1)) sum_i ||delta_i - gbar||^2 / d.
+        let sigma_sq = if m > 1 && numel > 0 {
+            let mut sum_sq_dev = 0.0f64;
+            for learner in learners {
+                for j in block.clone() {
+                    let dev = (anchor[j] - learner[j]) as f64 - out[j] as f64;
+                    sum_sq_dev += dev * dev;
+                }
+            }
+            sum_sq_dev / ((m - 1) as f64) / numel as f64
+        } else {
+            0.0
+        };
+        let mean_sq_gbar = if numel > 0 {
+            gbar_norm_sq / numel as f64
+        } else {
+            0.0
+        };
+        let q_l = mean_sq_gbar / (mean_sq_gbar + sigma_sq * inv_m + WORKER_SNR_EPS);
+        let q_l_f32 = q_l as f32;
+        for j in block.clone() {
+            let u = q_l_f32 * out[j];
+            out[j] = u;
+            u_norm_sq_total += (u as f64).powi(2);
+        }
+        gbar_norm_sq_total += gbar_norm_sq;
+        offset += numel;
+    }
+    // Global norm-match back to the plain-mean merged-delta norm ||gbar||.
+    let scale = (gbar_norm_sq_total.sqrt() / (u_norm_sq_total.sqrt() + WORKER_SNR_EPS)) as f32;
+    for value in out.iter_mut() {
+        *value *= scale;
     }
 }
 
@@ -2255,5 +2468,176 @@ mod tests {
         );
         assert!("ema".parse::<OuterOptimizer>().is_err());
         assert!("capped-nesterov-x".parse::<OuterOptimizer>().is_err());
+        assert_eq!("block-rms".parse(), Ok(OuterOptimizer::BlockRms));
+        assert_eq!("block-yogi".parse(), Ok(OuterOptimizer::BlockYogi));
+        assert_eq!(OuterOptimizer::BlockRms.to_string(), "block-rms");
+        assert_eq!(OuterOptimizer::BlockYogi.to_string(), "block-yogi");
+    }
+
+    // ---- worker-SNR merge mode ----
+
+    /// Build M per-worker learner vectors from a shared anchor and per-worker
+    /// deltas (learner_i = anchor - delta_i), the layout the merge consumes.
+    fn learners_from_deltas(anchor: &[f32], deltas: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        deltas
+            .iter()
+            .map(|d| anchor.iter().zip(d).map(|(a, di)| a - di).collect())
+            .collect()
+    }
+
+    #[test]
+    fn worker_snr_preserves_high_consensus_and_shrinks_high_disagreement() {
+        // Two tensor blocks of size 2. Block 0: all workers agree exactly
+        // (zero variance -> q ~ 1, kept). Block 1: same mean magnitude but the
+        // workers strongly disagree (large variance -> q < 1, shrunk). After
+        // the global norm-match, block 0 must retain (essentially) all of the
+        // global step energy and block 1 almost none.
+        let anchor = [0.0f32, 0.0, 0.0, 0.0];
+        let deltas = vec![
+            vec![1.0f32, 1.0, 3.0, -3.0],
+            vec![1.0f32, 1.0, -3.0, 3.0],
+            vec![1.0f32, 1.0, 3.0, -3.0],
+            vec![1.0f32, 1.0, -3.0, 3.0],
+        ];
+        let learners = learners_from_deltas(&anchor, &deltas);
+        let refs: Vec<&[f32]> = learners.iter().map(Vec::as_slice).collect();
+        let weights = vec![1.0; refs.len()];
+        let mut out = vec![0.0f32; 4];
+        merge_worker_snr(&anchor, &refs, &weights, &[2, 2], &mut out);
+
+        let consensus_energy = (out[0] as f64).powi(2) + (out[1] as f64).powi(2);
+        let disagree_energy = (out[2] as f64).powi(2) + (out[3] as f64).powi(2);
+        // gbar of block 1 is ~0 (workers cancel), so it is shrunk to nothing.
+        assert!(
+            disagree_energy < 1e-6,
+            "disagreement block not shrunk: {disagree_energy}"
+        );
+        assert!(consensus_energy > 1e-3, "consensus block lost energy");
+        // Norm-match restores the plain-mean merged-delta norm globally.
+        let gbar: Vec<f32> = (0..4)
+            .map(|j| deltas.iter().map(|d| d[j]).sum::<f32>() / deltas.len() as f32)
+            .collect();
+        assert_close(norm(&out), norm(&gbar));
+    }
+
+    #[test]
+    fn worker_snr_norm_match_is_exact() {
+        // Arbitrary asymmetric deltas across three tensor blocks; the merged
+        // output norm must equal the unweighted-mean delta norm exactly.
+        let anchor = [0.5f32, -1.0, 2.0, 0.0, -0.5, 1.5];
+        let deltas = vec![
+            vec![0.2f32, -0.4, 1.0, 0.3, -0.1, 0.7],
+            vec![0.6f32, 0.1, -0.2, 0.9, 0.4, -0.3],
+            vec![-0.1f32, 0.5, 0.3, -0.6, 0.2, 0.8],
+        ];
+        let learners = learners_from_deltas(&anchor, &deltas);
+        let refs: Vec<&[f32]> = learners.iter().map(Vec::as_slice).collect();
+        let weights = vec![1.0; refs.len()];
+        let mut out = vec![0.0f32; 6];
+        merge_worker_snr(&anchor, &refs, &weights, &[1, 2, 3], &mut out);
+        let gbar: Vec<f32> = (0..6)
+            .map(|j| deltas.iter().map(|d| d[j]).sum::<f32>() / deltas.len() as f32)
+            .collect();
+        assert_close(norm(&out), norm(&gbar));
+    }
+
+    #[test]
+    fn worker_snr_single_worker_is_identity() {
+        // M = 1: variance is 0, q ~ 1, norm-match cancels -> the single delta.
+        let anchor = [1.0f32, -2.0, 0.5, 3.0];
+        let delta = vec![0.3f32, -0.7, 0.2, 1.1];
+        let learners = learners_from_deltas(&anchor, &[delta.clone()]);
+        let refs: Vec<&[f32]> = learners.iter().map(Vec::as_slice).collect();
+        let mut out = vec![0.0f32; 4];
+        merge_worker_snr(&anchor, &refs, &[1.0], &[2, 2], &mut out);
+        for (got, want) in out.iter().zip(&delta) {
+            assert_close(*got as f64, *want as f64);
+        }
+    }
+
+    // ---- block second-moment optimizers ----
+
+    #[test]
+    fn block_rms_first_step_v_init_and_norm_match() {
+        // Fresh v = 0. Step 1 -> v_l = (1 - beta2) * ||g_l||^2 / d_l, and the
+        // global norm-matched applied step has norm lr * ||g||.
+        let lr = 0.28f32;
+        let delta = [3.0f32, 4.0, 1.0, 1.0]; // block 0 rms bigger than block 1
+        let numels = [2usize, 2];
+        let mut params = [0.0f32; 4];
+        let mut buf = [0.0f32; 4];
+        let mut block_v = [0.0f32; 2];
+        let stats =
+            block_second_moment_step(&mut params, &mut buf, &delta, lr, &numels, &mut block_v, false);
+        // v_0 = 0.05 * (9 + 16)/2 = 0.625 ; v_1 = 0.05 * (1 + 1)/2 = 0.05.
+        assert_close(block_v[0] as f64, 0.05 * 25.0 / 2.0);
+        assert_close(block_v[1] as f64, 0.05 * 2.0 / 2.0);
+        // Applied step norm == lr * ||delta|| (global norm-match).
+        let g_norm = norm(&delta);
+        assert_close(stats.applied_step_norm, lr as f64 * g_norm);
+        // beta1 = 0 -> no history contribution.
+        assert_eq!(stats.history_current_norm_ratio, Some(0.0));
+        // The relative allocation shifts energy toward the low-second-moment
+        // block: block 1 gets a larger share of the step than plain SGD.
+        let step0 = (params[0].powi(2) + params[1].powi(2)).sqrt();
+        let step1 = (params[2].powi(2) + params[3].powi(2)).sqrt();
+        let sgd0 = lr * (delta[0].powi(2) + delta[1].powi(2)).sqrt();
+        let sgd1 = lr * (delta[2].powi(2) + delta[3].powi(2)).sqrt();
+        assert!(step1 / step0 > sgd1 / sgd0, "block reallocation absent");
+    }
+
+    #[test]
+    fn block_rms_three_step_deterministic() {
+        // Deterministic 3-step trajectory of the per-block v EMA, checked
+        // against the closed-form recursion; the applied step norm stays
+        // lr*||g|| every step (global norm-match).
+        let lr = 0.5f32;
+        let numels = [2usize, 1];
+        let mut params = [0.0f32; 3];
+        let mut buf = [0.0f32; 3];
+        let mut block_v = [0.0f32; 2];
+        let deltas = [[1.0f32, 1.0, 2.0], [2.0f32, 0.0, 1.0], [0.0f32, 3.0, 4.0]];
+        let mut v0 = 0.0f64;
+        let mut v1 = 0.0f64;
+        for d in &deltas {
+            let s0 = (d[0].powi(2) + d[1].powi(2)) as f64 / 2.0;
+            let s1 = (d[2].powi(2)) as f64 / 1.0;
+            v0 = BLOCK_ADAPTIVE_BETA2 * v0 + (1.0 - BLOCK_ADAPTIVE_BETA2) * s0;
+            v1 = BLOCK_ADAPTIVE_BETA2 * v1 + (1.0 - BLOCK_ADAPTIVE_BETA2) * s1;
+            let stats = block_second_moment_step(
+                &mut params, &mut buf, d, lr, &numels, &mut block_v, false,
+            );
+            assert_close(block_v[0] as f64, v0);
+            assert_close(block_v[1] as f64, v1);
+            assert_close(stats.applied_step_norm, lr as f64 * norm(d));
+        }
+    }
+
+    #[test]
+    fn block_yogi_additive_update_and_norm_match() {
+        // Yogi additive update: with v_prev < s the sign is negative and v
+        // increases by (1 - beta2) * s (same magnitude as RMS on the first
+        // step from 0, since v_prev - s < 0). Norm-match holds.
+        let lr = 0.28f32;
+        let delta = [2.0f32, 0.0, 0.0, 6.0];
+        let numels = [2usize, 2];
+        let mut params = [0.0f32; 4];
+        let mut buf = [0.0f32; 4];
+        let mut block_v = [0.0f32; 2];
+        let stats =
+            block_second_moment_step(&mut params, &mut buf, &delta, lr, &numels, &mut block_v, true);
+        // First step from 0: sign(0 - s) = -1, v = (1 - beta2) * s (>= 0).
+        assert_close(block_v[0] as f64, 0.05 * 4.0 / 2.0);
+        assert_close(block_v[1] as f64, 0.05 * 36.0 / 2.0);
+        assert_close(stats.applied_step_norm, lr as f64 * norm(&delta));
+
+        // A second step with a SMALLER magnitude drives v DOWN (v_prev > s ->
+        // sign +1, additive decrease), the Yogi robustness property.
+        let small = [0.1f32, 0.0, 0.0, 0.1];
+        let v1_prev = block_v[1] as f64;
+        block_second_moment_step(
+            &mut params, &mut buf, &small, lr, &numels, &mut block_v, true,
+        );
+        assert!((block_v[1] as f64) < v1_prev, "yogi did not decrease v");
     }
 }
