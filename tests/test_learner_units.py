@@ -452,3 +452,71 @@ def test_schedule_flag_satisfies_lag_mode_window_requirement():
     )
     assert args.debug_broadcast_lag_commits == 1
     assert args.fixed_window_schedule == [(0, 16)]
+
+
+# --- --barrier-sync (true lockstep DiLoCo) ---------------------------------
+
+
+def test_barrier_release_clears_only_on_a_newer_version():
+    from yeto.learner import barrier_release
+
+    # Fragment 2 was pushed from base version 4; its merge lands as version 6.
+    awaiting = {2: 4}
+    assert barrier_release(awaiting, 2, 6) is True
+    assert awaiting == {}
+
+
+def test_barrier_release_ignores_stale_or_equal_broadcasts():
+    from yeto.learner import barrier_release
+
+    # A duplicate/echo of the base (version == base) or an older version does
+    # not release the barrier — the learner keeps blocking for the real merge.
+    awaiting = {0: 5}
+    assert barrier_release(awaiting, 0, 5) is False
+    assert barrier_release(awaiting, 0, 3) is False
+    assert awaiting == {0: 5}
+    # The genuine merge (strictly newer) then releases it.
+    assert barrier_release(awaiting, 0, 6) is True
+    assert awaiting == {}
+
+
+def test_barrier_release_noop_for_unwatched_fragment():
+    from yeto.learner import barrier_release
+
+    # A broadcast for a fragment the learner is not waiting on never blocks or
+    # raises, and leaves the outstanding waits untouched.
+    awaiting = {1: 2}
+    assert barrier_release(awaiting, 3, 99) is False
+    assert awaiting == {1: 2}
+
+
+def test_barrier_gate_serializes_a_pipelined_round():
+    """State-machine walk-through: two fragments pushed in one boundary
+    (pipeline depth 2) both arm the gate; the learner stays blocked until
+    BOTH merges return, then resumes — no inner step in between."""
+    from yeto.learner import barrier_release
+
+    awaiting: dict[int, int] = {}
+    # Learner pushed fragment 0 (base v0) and fragment 1 (base v0) this round.
+    awaiting[0] = 0
+    awaiting[1] = 0
+    assert awaiting  # gate closed -> inner loop must block
+
+    # Fragment 0's merge (round t=1) arrives first.
+    barrier_release(awaiting, 0, 1)
+    assert awaiting == {1: 0}  # still blocked on fragment 1
+
+    # Fragment 1's merge (round t=2) arrives.
+    barrier_release(awaiting, 1, 2)
+    assert not awaiting  # gate open -> learner resumes the next window
+
+
+def test_barrier_sync_flag_defaults_off_and_parses():
+    from yeto.learner import parse_args
+
+    assert parse_args(_LEARNER_REQUIRED_ARGV).barrier_sync is False
+    args = parse_args(
+        ["--model", "m", "--data", "d", "--syncer", "h:1", "--learner-id", "0",
+         "--num-learners", "1", "--barrier-sync"]
+    )
+    assert args.barrier_sync is True

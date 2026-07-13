@@ -292,6 +292,19 @@ def parse_args(argv=None):
         "broadcasts for that fragment have arrived, so local windows are "
         "computed against a K-commits-old global state",
     )
+    p.add_argument(
+        "--barrier-sync",
+        action="store_true",
+        help="EXP: true lockstep (barrier-synchronized) DiLoCo. After the "
+        "learner pushes a fragment delta in response to a pull it BLOCKS — "
+        "takes no further inner optimizer steps — until the syncer's merged "
+        "broadcast for that fragment (a strictly newer version) has arrived "
+        "and been applied, then resumes the next window from the merged "
+        "global. This reproduces original DiLoCo's (arXiv 2311.08105) "
+        "worker barrier, versus the default non-barrier strict-quorum "
+        "schedule where learners keep local-training while a merge is in "
+        "flight. Absent, behavior is byte-identical to the non-barrier loop.",
+    )
     args = p.parse_args(argv)
     if args.fixed_window_schedule is not None:
         try:
@@ -482,6 +495,26 @@ def release_lagged_broadcast(queue: list, item, lag_commits: int):
     if len(queue) <= lag_commits:
         return None
     return queue.pop(0)
+
+
+def barrier_release(awaiting: dict[int, int], fid: int, version: int) -> bool:
+    """True-lockstep (--barrier-sync) release rule.
+
+    ``awaiting`` maps a fragment id the learner has pushed to the base version
+    it pushed from; while the map is non-empty the inner loop takes no steps.
+    A broadcast for ``fid`` at ``version`` releases that fragment's barrier iff
+    it is strictly newer than the pushed base — i.e. it carries the merge of
+    the just-pushed window rather than a stale or duplicate copy (the syncer
+    advances a fragment's version on every commit, so the merge of round t is
+    always newer than the base t was computed against). Mutates ``awaiting``
+    in place and returns whether an entry was released; a no-op (False) when
+    the fragment is not awaiting or the broadcast is not newer.
+    """
+    base = awaiting.get(fid)
+    if base is not None and version > base:
+        del awaiting[fid]
+        return True
+    return False
 
 
 def parse_fixed_window_schedule(spec: str) -> list[tuple[int, int]]:
@@ -802,6 +835,20 @@ def main(argv=None) -> None:
     if not 0.0 <= args.merge_alpha < 1.0:
         raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
 
+    if getattr(args, "barrier_sync", False):
+        if args.syncer == "none":
+            raise RuntimeError("--barrier-sync requires an async syncer run")
+        if world > 1:
+            # The block-until-broadcast gate runs on the syncer-facing rank 0
+            # only; a multi-rank learner would need every rank to hold the
+            # collective in lockstep while rank 0 waits. Not implemented — the
+            # barrier experiments run one process per learner.
+            raise RuntimeError(
+                "--barrier-sync currently supports single-process learners "
+                "(world size 1); this learner has world size "
+                f"{world}. Use --gpu-slots / one process per learner."
+            )
+
     log.info("loading model %s (%s)", args.model, args.tuning)
     log.info("rng seed=%d", process_seed)
     model, tokenizer = load_model_and_tokenizer(args, device)
@@ -1087,6 +1134,15 @@ def run_inner_loop(
     )
     pending_pulls: list = []  # pulls deferred until c_steps >= 1
     global_step = 0
+    # True lockstep DiLoCo (--barrier-sync): after pushing a fragment delta,
+    # the learner blocks until the syncer's merged broadcast for that fragment
+    # arrives, taking no inner steps in between. `awaiting_broadcast` maps a
+    # pushed fragment id to the base version it pushed from; a broadcast for
+    # that fragment with a strictly newer version clears the entry, and the
+    # inner loop refuses to advance while any entry remains. Empty (and unused)
+    # on the default non-barrier path.
+    barrier_sync = bool(getattr(args, "barrier_sync", False))
+    awaiting_broadcast: dict[int, int] = {}
     # Q4 pushes are deltas anchored at the last *received* global value per
     # fragment; the utility probe also needs these anchors for bf16/f32 runs
     # so it can evaluate candidate deltas against the learner-known global
@@ -1145,6 +1201,71 @@ def run_inner_loop(
     probe = None
     if rank == 0 and client is not None and args.probe_data is not None:
         probe = FragmentUtilityProbe(args, model, params, layout, tokenizer, device, compute_loss)
+
+    def drain_broadcast_actions() -> list:
+        """Collect and unpack received global fragments (rank 0), updating
+        the probe/anchor and lag-FIFO state exactly as the step boundary
+        does. Returns the (fid, version, flat) list still to be applied.
+        Shared by the boundary and the --barrier-sync wait so both stay
+        bit-identical."""
+        acts = []
+        for bc in client.drain_updates():
+            flat = unpack_fragment(
+                layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
+            )
+            version = bc.version
+            if lagged_broadcasts is not None:
+                # EXP: explicit version-staleness control. Queue the
+                # broadcast; release the one K commits behind the newest
+                # arrival for this fragment.
+                released = release_lagged_broadcast(
+                    lagged_broadcasts[bc.fragment_id],
+                    (bc.version, flat),
+                    lag_commits,
+                )
+                if released is None:
+                    continue
+                version, flat = released
+                if lag_released_ever is not None:
+                    lag_released_ever[bc.fragment_id] = True
+            if anchors is not None:
+                if probe is not None:
+                    probe.note_broadcast(bc.fragment_id, anchors[bc.fragment_id], flat)
+                # The anchor is the raw global value (pre-blend), so the
+                # syncer can reconstruct pushes from Θ(version)+δ.
+                anchors[bc.fragment_id] = flat.clone()
+            acts.append((bc.fragment_id, version, flat))
+        return acts
+
+    def apply_broadcast_world1(acts: list) -> None:
+        """Apply collected fragments on the single-process path with the
+        α-blend, restart each fragment's window, and clear any barrier wait
+        the fragment now satisfies (a strictly newer version than the one it
+        was pushed from). This is the body of the boundary's world==1 branch,
+        reused verbatim by the --barrier-sync wait."""
+        nonlocal global_step
+        for fid, version, flat in acts:
+            flat = flat.to(device)
+            if args.merge_alpha > 0:
+                local = fragment_flat(layout.fragments[fid], params)
+                flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
+            apply_fragment(layout.fragments[fid], flat, params)
+            fragment_versions[fid] = version
+            # Both modes restart the window at apply time. In lag mode this
+            # starts the window that must be trained entirely on the
+            # just-applied released (K-stale) base; the matching pull is held
+            # until this apply.
+            steps_at_reset[fid] = steps_total
+            tokens_at_reset[fid] = tokens_total
+            if fixed_window_snapshots is not None:
+                fixed_window_snapshots[fid] = None
+            if lag_applied_since_push is not None:
+                lag_applied_since_push[fid] = True
+            global_step = max(global_step, version)
+            # Barrier release: this fragment's merge has come back, so the
+            # learner may resume once every pushed fragment is released.
+            if awaiting_broadcast:
+                barrier_release(awaiting_broadcast, fid, version)
 
     shutdown = False
     epoch = 0
@@ -1227,32 +1348,7 @@ def run_inner_loop(
             if rank == 0 and client is not None:
                 client.check_health()
                 # 1. collect received global fragments
-                for bc in client.drain_updates():
-                    flat = unpack_fragment(
-                        layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
-                    )
-                    version = bc.version
-                    if lagged_broadcasts is not None:
-                        # EXP: explicit version-staleness control. Queue the
-                        # broadcast; release the one K commits behind the
-                        # newest arrival for this fragment.
-                        released = release_lagged_broadcast(
-                            lagged_broadcasts[bc.fragment_id],
-                            (bc.version, flat),
-                            lag_commits,
-                        )
-                        if released is None:
-                            continue
-                        version, flat = released
-                        if lag_released_ever is not None:
-                            lag_released_ever[bc.fragment_id] = True
-                    if anchors is not None:
-                        if probe is not None:
-                            probe.note_broadcast(bc.fragment_id, anchors[bc.fragment_id], flat)
-                        # The anchor is the raw global value (pre-blend), so
-                        # the syncer can reconstruct pushes from Θ(version)+δ.
-                        anchors[bc.fragment_id] = flat.clone()
-                    actions.append((bc.fragment_id, version, flat))
+                actions = drain_broadcast_actions()
                 shutdown = client.shutdown.is_set()
 
             if world > 1:
@@ -1286,24 +1382,7 @@ def run_inner_loop(
                             lag_applied_since_push[fid] = True
                     global_step = max(global_step, version)
             else:
-                for fid, version, flat in actions:
-                    flat = flat.to(device)
-                    if args.merge_alpha > 0:
-                        local = fragment_flat(layout.fragments[fid], params)
-                        flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
-                    apply_fragment(layout.fragments[fid], flat, params)
-                    fragment_versions[fid] = version
-                    # Both modes restart the window at apply time. In lag
-                    # mode this starts the window that must be trained
-                    # entirely on the just-applied released (K-stale) base;
-                    # the matching pull is held until this apply.
-                    steps_at_reset[fid] = steps_total
-                    tokens_at_reset[fid] = tokens_total
-                    if fixed_window_snapshots is not None:
-                        fixed_window_snapshots[fid] = None
-                    if lag_applied_since_push is not None:
-                        lag_applied_since_push[fid] = True
-                    global_step = max(global_step, version)
+                apply_broadcast_world1(actions)
 
             # 2. answer pulls whose fragment has made progress since the
             # (just-applied) broadcasts.
@@ -1373,6 +1452,13 @@ def run_inner_loop(
                         c_tokens,
                         payload,
                     )
+                    if barrier_sync:
+                        # True lockstep: record that this fragment's merge is
+                        # in flight. The inner loop will not step again until a
+                        # broadcast newer than base_version_for_push lands and
+                        # apply_broadcast_world1 clears the entry. Re-pushes of
+                        # the same round just refresh the same base version.
+                        awaiting_broadcast[fid] = base_version_for_push
                     if lagged_broadcasts is not None:
                         # Lag mode: restart the fixed window at push time so
                         # every commit carries a fresh full window even while
@@ -1418,6 +1504,24 @@ def run_inner_loop(
                                         fixed_window_snapshots, new_window
                                     )
                 pending_pulls = still_pending
+
+                # --- true lockstep barrier (--barrier-sync) -----------------
+                # Having answered this round's pull(s), HARD-BLOCK until the
+                # syncer's merged broadcast for every pushed fragment has
+                # arrived and been applied. No inner optimizer steps run while
+                # a merge is in flight (original DiLoCo's worker barrier,
+                # arXiv 2311.08105); the next window then starts from the
+                # merged global. drain/apply reuse the boundary helpers so the
+                # applied state is bit-identical to a broadcast picked up at a
+                # step boundary. A no-op unless --barrier-sync pushed above.
+                while barrier_sync and awaiting_broadcast and not shutdown:
+                    client.check_health()
+                    waited = drain_broadcast_actions()
+                    if waited:
+                        apply_broadcast_world1(waited)
+                    else:
+                        time.sleep(0.002)
+                    shutdown = client.shutdown.is_set()
 
             if shutdown or steps_total >= args.max_local_steps:
                 break

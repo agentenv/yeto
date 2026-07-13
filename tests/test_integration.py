@@ -44,12 +44,27 @@ def free_port() -> int:
 
 
 class ToyLearner(threading.Thread):
-    def __init__(self, learner_id: int, port: int, target: torch.Tensor, layout, dtype=DTYPE_BF16):
+    def __init__(
+        self,
+        learner_id: int,
+        port: int,
+        target: torch.Tensor,
+        layout,
+        dtype=DTYPE_BF16,
+        barrier: bool = False,
+    ):
         super().__init__(daemon=True)
         self.learner_id = learner_id
         self.target = target
         self.layout = layout
         self.dtype = dtype
+        # --barrier-sync mode: after pushing a fragment the learner takes no
+        # inner step until that fragment's merge broadcast returns. Mirrors
+        # yeto.learner.run_inner_loop's barrier gate so the real Rust syncer's
+        # round scheduler is exercised under a true worker barrier.
+        self.barrier = barrier
+        self.stepped_while_blocked = False  # barrier-invariant violation flag
+        self._steps_before_block = 0
         self.params = {
             "model.embed.weight": torch.zeros(DIM // 4),
             "model.body.weight": torch.zeros(DIM),
@@ -85,6 +100,9 @@ class ToyLearner(threading.Thread):
         opt = torch.optim.Adam(list(self.params.values()), lr=0.05)
         for p in self.params.values():
             p.requires_grad_(True)
+        from yeto.learner import barrier_release
+
+        awaiting: dict[int, int] = {}  # barrier: fid -> pushed base version
         steps_total = 0
         steps_at_reset = [0] * self.layout.num_fragments
         versions = [0] * self.layout.num_fragments
@@ -94,13 +112,20 @@ class ToyLearner(threading.Thread):
             if time.monotonic() - t0 > 60:
                 raise TimeoutError("no SHUTDOWN within 60s")
             self.client.check_health()
-            # inner step on ||w - target||^2
-            opt.zero_grad()
-            flat = torch.cat([p.reshape(-1) for p in self.params.values()])
-            loss = ((flat - self.target) ** 2).sum()
-            loss.backward()
-            opt.step()
-            steps_total += 1
+            # Barrier gate: take an inner step only when not blocked awaiting a
+            # merge. While blocked we just drain/apply broadcasts below.
+            blocked = self.barrier and bool(awaiting)
+            if not blocked:
+                # inner step on ||w - target||^2
+                opt.zero_grad()
+                flat = torch.cat([p.reshape(-1) for p in self.params.values()])
+                loss = ((flat - self.target) ** 2).sum()
+                loss.backward()
+                opt.step()
+                steps_total += 1
+            elif steps_total != self._steps_before_block:
+                # Sanity: no inner step may advance while the gate is closed.
+                self.stepped_while_blocked = True
             # Apply broadcasts before answering pulls, mirroring the real
             # learners: a pipelined syncer's next pull for a fragment can
             # overtake the broadcast that closed its previous round.
@@ -113,6 +138,13 @@ class ToyLearner(threading.Thread):
                 steps_at_reset[bc.fragment_id] = steps_total
                 versions[bc.fragment_id] = bc.version
                 self.synced = {k: v.detach().clone() for k, v in self.params.items()}
+                if self.barrier:
+                    barrier_release(awaiting, bc.fragment_id, bc.version)
+            if self.barrier and awaiting:
+                # Stay blocked until every pushed fragment's merge returns.
+                self._steps_before_block = steps_total
+                time.sleep(0.005)
+                continue
             pending.extend(self.client.drain_pulls())
             still = []
             for pull in pending:
@@ -135,7 +167,11 @@ class ToyLearner(threading.Thread):
                     c_steps * 128,  # tokens: uniform rate
                     payload,
                 )
+                if self.barrier:
+                    awaiting[fid] = versions[fid]
             pending = still
+            if self.barrier and awaiting:
+                self._steps_before_block = steps_total
             time.sleep(0.005)  # ~5ms inner step
         self.client.close()
 
@@ -376,6 +412,54 @@ def test_single_learner_roundtrip_block_rms():
         assert l.synced, "learner never received a broadcast"
         flat = torch.cat([p.detach().reshape(-1) for p in l.params.values()])
         assert (flat - target).norm() < target.norm(), "no progress toward target"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        print((proc.stdout.read() if proc.stdout else "")[-3000:])
+
+
+@pytest.mark.timeout(180)
+def test_barrier_sync_strict_quorum_pipeline_converges():
+    """True lockstep (--barrier-sync) end to end against the real syncer, in
+    the exact scheduler regime the barrier experiments use: strict quorum,
+    m=2, pipeline depth 2. Each learner blocks after pushing a fragment until
+    that fragment's merge broadcast returns. Guards against the real risk of
+    the change — a deadlock between the barrier-blocked learners and the
+    syncer's pipelined strict-quorum rounds — and confirms merging still
+    drives both learners off their own targets toward the consensus (0)."""
+    binary = build_syncer()
+    port = free_port()
+    named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
+    layout = build_layout(named, 4)
+    proc = subprocess.Popen(
+        [str(binary), "--port", str(port), "--learners", "2", "--quorum", "2",
+         "--grace-ms", "200", "--total-steps", "24", "--pipeline", "2",
+         "--strict-quorum", "--outer-lr", "0.7", "--outer-momentum", "0.9"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        torch.manual_seed(0)
+        t_a = torch.randn(DIM + DIM // 4)
+        t_b = -t_a  # consensus optimum is 0
+        learners = [
+            ToyLearner(0, port, t_a, layout, barrier=True),
+            ToyLearner(1, port, t_b, layout, barrier=True),
+        ]
+        for l in learners:
+            l.start()
+        for l in learners:
+            l.join(timeout=120)
+            assert not l.is_alive(), "barrier learner deadlocked (never finished)"
+            if l.exc:
+                raise l.exc
+        assert proc.wait(timeout=30) == 0, "syncer exited nonzero"
+        for l in learners:
+            assert not l.stepped_while_blocked, "took an inner step while blocked"
+            assert l.synced, "learner never received a broadcast"
+            flat = torch.cat([p.reshape(-1) for p in l.synced.values()])
+            assert (flat - l.target).norm() > 0.5 * l.target.norm(), (
+                "learner collapsed to its own target; merging had no effect"
+            )
     finally:
         if proc.poll() is None:
             proc.kill()

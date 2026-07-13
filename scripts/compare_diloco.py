@@ -491,6 +491,8 @@ def learner_command(
             cmd += ["--pad-to-fixed-window-tokens"]
         if getattr(args, "freeze_delta_before_delay", False):
             cmd += ["--freeze-delta-before-delay"]
+        if getattr(args, "barrier_sync", False):
+            cmd += ["--barrier-sync"]
         lag_commits = int(getattr(args, "learner_broadcast_lag_commits", 0))
         if lag_commits > 0:
             cmd += ["--debug-broadcast-lag-commits", str(lag_commits)]
@@ -1891,6 +1893,15 @@ def main() -> int:
         "--freeze-delta-before-delay",
         action="store_true",
         help="materialize fragment payloads before push delay stress",
+    )
+    p.add_argument(
+        "--barrier-sync",
+        action="store_true",
+        help="EXP: true lockstep (barrier-synchronized) DiLoCo — forwarded to "
+        "every learner (see yeto.learner --barrier-sync). Each learner blocks "
+        "after pushing a fragment delta until the syncer's merged broadcast "
+        "for that fragment returns, taking no inner steps while a merge is in "
+        "flight. Off by default (non-barrier strict-quorum schedule).",
     )
     p.add_argument("--arm-timeout-min", type=int, default=120)
     p.add_argument(
