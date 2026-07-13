@@ -33,7 +33,16 @@ from . import runs
 from .losses import LOSS_FUNCTIONS
 from .status_metrics import render_tape_summary
 
-SUBCOMMANDS = ("launch", "shape", "status", "logs", "down", "_worker", "_head")
+SUBCOMMANDS = (
+    "launch",
+    "shape",
+    "sample-diffusion",
+    "status",
+    "logs",
+    "down",
+    "_worker",
+    "_head",
+)
 
 
 def _add_launch_args(p: argparse.ArgumentParser) -> None:
@@ -61,7 +70,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="auto-fleet only: launch the planned fleet without asking",
     )
-    p.add_argument("--model", required=True, help="model alias (see yeto/models.py: gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...) or any HF id")
+    p.add_argument("--model", required=True, help="model alias (see yeto/models.py: gemma4, qwen35-9b, llama31-8b, gptoss-120b, flux, sd35, ...) or any HF id")
+    p.add_argument(
+        "--model-kind",
+        choices=["auto", "causal-lm", "diffusion"],
+        default="auto",
+        help="training loop selector; auto infers diffusion for diffusion aliases, "
+        "otherwise uses the causal-LM learner",
+    )
     p.add_argument(
         "--output",
         default=None,
@@ -91,8 +107,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         type=loss_spec,
         default="cross_entropy",
         help=f"one of {'|'.join(LOSS_FUNCTIONS)}, or custom:<file.py>[:<fn>] "
-        "defining fn(logits, input_ids, weights) -> (loss, num_tokens); the "
-        "callable is pickled by value and shipped to all learners",
+        "defining fn(logits, input_ids, weights) -> (loss, num_tokens). "
+        "Diffusion launches default cross_entropy to flow_matching in the "
+        "learner task. Custom callables are pickled by value and shipped to "
+        "all learners",
     )
 
     tune = p.add_argument_group("fine-tuning")
@@ -166,6 +184,65 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         type=int,
         default=2,
         help="tokenizer worker processes per learner rank (stream mode)",
+    )
+
+    diffusion = p.add_argument_group("diffusion")
+    diffusion.add_argument(
+        "--diffusion-adapter",
+        default=None,
+        help="diffusion only: optional module:factory or file.py:factory hook "
+        "for repos whose training step is not covered by the generic "
+        "diffusers denoiser path",
+    )
+    diffusion.add_argument(
+        "--cache-latents",
+        action="store_true",
+        help="diffusion only: read cached VAE latents from --latent-column "
+        "instead of encoding media in the training loop (off by default; "
+        "Yeto no longer provides a built-in cache precompute step)",
+    )
+    diffusion.add_argument(
+        "--cache-text-embeds",
+        action="store_true",
+        help="diffusion only: read cached text embeddings from "
+        "--text-embeds-column instead of encoding prompts in the training loop "
+        "(off by default; Yeto no longer provides a built-in cache precompute step)",
+    )
+    diffusion.add_argument("--image-column", default="image", help="diffusion raw media column")
+    diffusion.add_argument("--video-column", default="video", help="diffusion raw video column")
+    diffusion.add_argument("--prompt-column", default="prompt", help="diffusion prompt column")
+    diffusion.add_argument("--latent-column", default="latents", help="diffusion cached latent column")
+    diffusion.add_argument("--text-embeds-column", default="prompt_embeds", help="diffusion cached prompt-embedding column")
+    diffusion.add_argument("--text-attention-mask-column", default="prompt_attention_mask", help="diffusion cached text attention-mask column")
+    diffusion.add_argument("--pooled-text-embeds-column", default="pooled_prompt_embeds", help="diffusion cached pooled-embedding column")
+    diffusion.add_argument("--height", type=int, default=None, help="diffusion image/video height override")
+    diffusion.add_argument("--width", type=int, default=None, help="diffusion image/video width override")
+    diffusion.add_argument(
+        "--resize-mode",
+        choices=["stretch", "center-crop"],
+        default="stretch",
+        help="diffusion raw media resize policy when height and width are set",
+    )
+    diffusion.add_argument("--num-frames", type=int, default=None, help="diffusion video frame count for bucketed datasets")
+    diffusion.add_argument("--fps", type=float, default=None, help="diffusion video frame rate for model conditioning")
+    diffusion.add_argument("--bucket-by-shape", action="store_true", help="diffusion only: batch rows by (frames, height, width)")
+    diffusion.add_argument(
+        "--diffusion-seed",
+        type=int,
+        default=None,
+        help="diffusion only: reproducible model initialization, data order, timestep sampling, and noise",
+    )
+    diffusion.add_argument(
+        "--diffusion-loss-weighting",
+        choices=["none", "linear", "sigma", "snr", "min-snr"],
+        default="none",
+        help="diffusion only: optional timestep weighting for flow-matching MSE",
+    )
+    diffusion.add_argument(
+        "--diffusion-min-snr-gamma",
+        type=float,
+        default=5.0,
+        help="diffusion only: gamma for --diffusion-loss-weighting min-snr",
     )
 
     sync = p.add_argument_group("async sync")
@@ -329,13 +406,57 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def _add_diffusion_sample_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--gpu", required=True, help="single GPU cluster, e.g. aws:1xt4@us-west-2")
+    p.add_argument("--adapter-dir", required=True, help="local directory or cloud URI with a Yeto diffusion adapter artifact")
+    p.add_argument(
+        "--output",
+        default=None,
+        help="local directory or remote URI for generated samples; omitted keeps them under ~/yeto-output",
+    )
+    source = p.add_argument_group("sample source")
+    source.add_argument("--prompt", default=None, help="single prompt to sample")
+    source.add_argument("--data", default=None, help="HF/local/cloud prompt dataset for batch sampling")
+    source.add_argument("--prompt-column", default="prompt")
+    source.add_argument("--seed-column", default=None)
+    source.add_argument("--max-rows", type=int, default=None)
+
+    model = p.add_argument_group("diffusion")
+    model.add_argument("--model", default=None, help="optional base model override")
+    model.add_argument(
+        "--diffusion-adapter",
+        default=None,
+        help="optional module:factory or file.py:factory hook for non-standard artifacts",
+    )
+    model.add_argument("--dtype", choices=["auto", "bf16", "fp16", "f32"], default="auto")
+    model.add_argument("--num-inference-steps", type=int, default=30)
+    model.add_argument("--guidance-scale", type=float, default=None)
+    model.add_argument("--height", type=int, default=None)
+    model.add_argument("--width", type=int, default=None)
+    model.add_argument("--num-frames", type=int, default=None)
+    model.add_argument("--seed", type=int, default=None)
+    model.add_argument("--fps", type=int, default=8)
+
+    infra = p.add_argument_group("infrastructure")
+    infra.add_argument("--spot", action="store_true", default=True, help="use a spot instance (default)")
+    infra.add_argument("--on-demand", dest="spot", action="store_false", help="use on-demand instead of spot")
+    infra.add_argument("--disk-size", type=int, default=256, help="sampler disk (GB)")
+    infra.add_argument("--learner-cpus", default=None, help="vCPU hint for the sampler node")
+    infra.add_argument("--learner-instance-type", default=None, help="pin sampler node to an instance type")
+    infra.add_argument("--learner-image", default=None, help="override the sampler machine image")
+    infra.add_argument("--cluster-prefix", default="yeto-sample", help="cluster name prefix")
+    infra.add_argument("--keep", action="store_true", help="do not tear down the sampler cluster")
+    infra.add_argument("--retry-until-up", action="store_true", help="keep retrying provisioning until capacity is found")
+    infra.add_argument("--controller-poll", type=int, default=30, help="job status poll interval (seconds)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="yeto",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = p.add_subparsers(dest="command", metavar="{launch,status,logs,down}")
+    sub = p.add_subparsers(dest="command", metavar="{launch,shape,sample-diffusion,status,logs,down}")
 
     launch = sub.add_parser(
         "launch",
@@ -429,6 +550,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="override the model weight size estimate (bf16 GB)",
     )
     shape.add_argument("--no-cache", action="store_true", help="bypass the 1h signal cache")
+
+    sample = sub.add_parser(
+        "sample-diffusion",
+        help="run diffusion adapter sampling on a SkyPilot GPU task",
+    )
+    _add_diffusion_sample_args(sample)
 
     status = sub.add_parser("status", help="table of known runs")
     status.add_argument(
@@ -530,10 +657,14 @@ def _print_detach_hints(name: str) -> None:
 
 def _fleet_args_error(args) -> str | None:
     """Validate the --gpu / --budget / --flops combination."""
+    from .models import resolve_model_kind
+
     if args.gpu is not None and (args.budget is not None or args.flops is not None):
         return "--budget/--flops belong to auto-fleet planning; drop them or drop --gpu"
     if args.gpu is None and args.budget is None and args.flops is None:
         return "pass --gpu, or --budget and/or --flops for an auto-planned fleet"
+    if args.gpu is None and resolve_model_kind(args.model, args.model_kind) == "diffusion":
+        return "diffusion launch currently requires --gpu; auto-fleet sizing is causal-LM only"
     return None
 
 
@@ -618,6 +749,19 @@ def cmd_launch(args) -> int:
     state, code = _final_state(runs.load_run(name) or {"name": name})
     print(f"[yeto] run '{name}' finished: {state} (exit code {code})")
     return code
+
+
+def cmd_sample_diffusion(args) -> int:
+    if bool(args.prompt) == bool(args.data):
+        print("[yeto] pass exactly one of --prompt or --data", file=sys.stderr)
+        return 1
+    try:
+        from .launcher import run_diffusion_sample
+
+        return run_diffusion_sample(args)
+    except ValueError as e:
+        print(f"[yeto] {e}", file=sys.stderr)
+        return 1
 
 
 # ---------------------------------------------------------------------------
@@ -1179,6 +1323,8 @@ def main(argv=None) -> int:
         return cmd_launch(args)
     if args.command == "shape":
         return cmd_shape(args)
+    if args.command == "sample-diffusion":
+        return cmd_sample_diffusion(args)
     if args.command == "status":
         return cmd_status(args)
     if args.command == "logs":

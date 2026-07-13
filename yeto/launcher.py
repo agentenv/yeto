@@ -387,11 +387,15 @@ GPU_IMAGE_OVERRIDES: dict[tuple[str, str], object] = {
 MEGATRON_IMAGE = "docker:nvcr.io/nvidia/nemo:25.09"
 
 
-def learner_image_for(args, spec: ClusterSpec):
+def learner_image_for(args, spec: ClusterSpec, learner_id: int | None = None):
     """The image for a learner cluster: explicit flag > megatron container >
     internal override table > None (provider default + setup-time remediation)."""
     explicit = parse_image_spec(getattr(args, "learner_image", None))
     if explicit is not None:
+        if isinstance(explicit, dict) and learner_id is not None:
+            for key in (str(learner_id), f"l{learner_id}"):
+                if key in explicit:
+                    return explicit[key]
         return explicit
     if getattr(args, "island_backend", "torch") == "megatron":
         return MEGATRON_IMAGE
@@ -406,19 +410,22 @@ def learner_image_for(args, spec: ClusterSpec):
 
 def parse_image_spec(value: str | None):
     """--learner-image: a single image id/tag applied everywhere, or
-    comma-separated region=id pairs -> the region dict sky expects."""
+    comma-separated region=id pairs -> the region dict sky expects. Numeric
+    keys are learner ids and are resolved before region keys; this covers
+    providers where a saved OS volume is not a reusable image."""
     if not value:
         return None
     if "=" not in value:
         return value
     images = {}
     for pair in value.split(","):
-        region, _, image = pair.partition("=")
-        if not region or not image:
+        key, _, image = pair.partition("=")
+        if not key or not image:
             raise ValueError(
-                f"bad --learner-image entry {pair!r}; expected region=image-id"
+                f"bad --learner-image entry {pair!r}; expected region=image-id "
+                "or learner-id=image-id"
             )
-        images[region.strip()] = image.strip()
+        images[key.strip()] = image.strip()
     return images
 
 
@@ -452,43 +459,103 @@ MEGATRON_SETUP = (
     "|| echo '[yeto-setup] megatron stack install failed; --island-backend megatron unavailable' >&2"
 )
 
+DIFFUSION_SAMPLE_ADAPTER_DIR = "~/yeto-adapter"
+DIFFUSION_SAMPLE_OUTPUT_DIR = "~/yeto-output"
+
 
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
     import sky
 
     from .datasource import learner_data_arg, learner_file_mounts
+    from .models import resolve_model_kind
 
-    # Flags shared by both island backends. The DiLoCo sync, LoRA, data, and
-    # loss are identical; only the intra-island parallelism differs.
-    learner_flags = (
+    model_kind = resolve_model_kind(args.model, getattr(args, "model_kind", "auto"))
+    loss_function = args.loss_function
+    if model_kind == "diffusion" and loss_function == "cross_entropy":
+        loss_function = "flow_matching"
+
+    # Flags shared by all learners. The DiLoCo sync, LoRA, and data source
+    # shape are identical; the per-task forward/loss loop differs.
+    common_flags = (
         f" --model {shlex.quote(args.model)}"
         f" --data {shlex.quote(learner_data_arg(args.data))}"
         f" --syncer $SYNCER_ADDR"
         f" --learner-id $LEARNER_ID"
         f" --num-learners {num_learners}"
-        f" --loss-function {args.loss_function}"
-        f" --train-on {args.train_on}"
+        f" --loss-function {loss_function}"
         f" --tuning {args.tuning}"
         f" --lora-r {args.lora_r}"
         f" --lora-targets {getattr(args, 'lora_targets', 'auto')}"
-        f" --seq-len {args.seq_len}"
         f" --micro-batch-size {args.micro_batch_size}"
         f" --grad-accum {args.grad_accum}"
         f" --inner-lr {args.inner_lr}"
         f" --fragments {args.fragments}"
         f" --fragment-pattern {args.fragment_pattern}"
         f" --merge-alpha {args.merge_alpha}"
-        f" --tokenize {args.tokenize}"
-        f" --stream-workers {args.stream_workers}"
         f" --wire-dtype {args.wire_dtype}"
         f" --wan-streams {args.wan_streams}"
         f" --output-dir ~/yeto-output"
     )
+    learner_flags = common_flags
+    if model_kind == "causal-lm":
+        learner_flags += (
+            f" --train-on {args.train_on}"
+            f" --seq-len {args.seq_len}"
+            f" --tokenize {args.tokenize}"
+            f" --stream-workers {args.stream_workers}"
+        )
+    else:
+        if getattr(args, "island_backend", "torch") != "torch":
+            raise ValueError("diffusion model-kind uses the torch island backend, not megatron")
+        learner_flags += (
+            f" --shard {args.shard}"
+            f" --image-column {shlex.quote(args.image_column)}"
+            f" --video-column {shlex.quote(args.video_column)}"
+            f" --prompt-column {shlex.quote(args.prompt_column)}"
+            f" --latent-column {shlex.quote(args.latent_column)}"
+            f" --text-embeds-column {shlex.quote(args.text_embeds_column)}"
+            f" --text-attention-mask-column {shlex.quote(args.text_attention_mask_column)}"
+            f" --pooled-text-embeds-column {shlex.quote(args.pooled_text_embeds_column)}"
+            f" --resize-mode {shlex.quote(getattr(args, 'resize_mode', 'stretch'))}"
+            f" --stream-workers {args.stream_workers}"
+        )
+        if getattr(args, "diffusion_adapter", None):
+            learner_flags += f" --diffusion-adapter {shlex.quote(args.diffusion_adapter)}"
+        if getattr(args, "diffusion_seed", None) is not None:
+            learner_flags += f" --seed {args.diffusion_seed}"
+        if getattr(args, "cache_latents", False):
+            learner_flags += " --cache-latents"
+        if getattr(args, "cache_text_embeds", False):
+            learner_flags += " --cache-text-embeds"
+        if getattr(args, "bucket_by_shape", False):
+            learner_flags += " --bucket-by-shape"
+        if getattr(args, "diffusion_loss_weighting", "none") != "none":
+            learner_flags += f" --diffusion-loss-weighting {args.diffusion_loss_weighting}"
+            learner_flags += f" --diffusion-min-snr-gamma {args.diffusion_min_snr_gamma}"
+        if args.height:
+            learner_flags += f" --height {args.height}"
+        if args.width:
+            learner_flags += f" --width {args.width}"
+        if args.num_frames:
+            learner_flags += f" --num-frames {args.num_frames}"
+        if getattr(args, "fps", None):
+            learner_flags += f" --fps {args.fps}"
     if args.max_rows:
         learner_flags += f" --max-rows {args.max_rows}"
 
     backend = getattr(args, "island_backend", "torch")
-    if backend == "megatron":
+    if model_kind == "diffusion":
+        entrypoint = "yeto.diffusion.learner"
+        setup_steps = [
+            WAN_TUNING,
+            NVME_SETUP,
+            NVME_ENV,
+            HF_TOKEN_ENV,
+            TORCH_SETUP,
+            "pip install -q -r requirements.txt",
+            "pip install -q 'diffusers>=0.35' safetensors pillow 'imageio[ffmpeg]' 'bitsandbytes>=0.46.1'",
+        ]
+    elif backend == "megatron":
         gpus = spec.num_nodes * spec.gpus_per_node
         tp = max(1, getattr(args, "tensor_parallel", 1))
         pp = max(1, getattr(args, "pipeline_parallel", 1))
@@ -566,6 +633,15 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f"(nohup huggingface-cli download {shlex.quote(repo)} "
         ">/tmp/hf-prefetch.log 2>&1 &) || true"
     )
+    run = (
+        f"{NVME_ENV}\n"
+        f"{HF_TOKEN_ENV}\n"
+        'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
+        "torchrun --nnodes=$SKYPILOT_NUM_NODES --node_rank=$SKYPILOT_NODE_RANK "
+        "--nproc_per_node=$SKYPILOT_NUM_GPUS_PER_NODE "
+        "--master_addr=$MASTER_ADDR --master_port=29500 "
+        f"-m {entrypoint}{learner_flags}"
+    )
     task = sky.Task(
         name=f"yeto-learner-{learner_id}",
         setup="\n".join(setup_steps + [prefetch]),
@@ -577,7 +653,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     )
     infra = f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud
     resources_kwargs = {}
-    image = learner_image_for(args, spec)
+    image = learner_image_for(args, spec, learner_id)
     if image is not None:
         resources_kwargs["image_id"] = image
     if spec.num_nodes > 1:
@@ -602,6 +678,177 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         )
     )
     return task
+
+
+def _diffusion_sample_adapter_mount(adapter_dir: str) -> tuple[str, dict[str, str]]:
+    from .datasource import _is_cloud_url
+
+    if _is_cloud_url(adapter_dir):
+        return DIFFUSION_SAMPLE_ADAPTER_DIR, {DIFFUSION_SAMPLE_ADAPTER_DIR: adapter_dir}
+    path = os.path.expanduser(adapter_dir)
+    if os.path.exists(path):
+        return DIFFUSION_SAMPLE_ADAPTER_DIR, {DIFFUSION_SAMPLE_ADAPTER_DIR: path}
+    raise ValueError("--adapter-dir must be an existing local path or a cloud URI")
+
+
+def _add_flag(cmd: str, name: str, value) -> str:
+    if value is None:
+        return cmd
+    return f"{cmd} --{name} {shlex.quote(str(value))}"
+
+
+def make_diffusion_sample_task(args, spec: ClusterSpec):
+    import sky
+
+    from .datasource import learner_data_arg, learner_file_mounts
+
+    adapter_arg, file_mounts = _diffusion_sample_adapter_mount(args.adapter_dir)
+    sample_cmd = (
+        "python3 -m yeto.diffusion.sample"
+        f" --adapter-dir {shlex.quote(adapter_arg)}"
+        f" --dtype {shlex.quote(args.dtype)}"
+        f" --num-inference-steps {int(args.num_inference_steps)}"
+        f" --fps {int(args.fps)}"
+    )
+    if args.data:
+        sample_cmd += (
+            f" --data {shlex.quote(learner_data_arg(args.data))}"
+            f" --output-dir {shlex.quote(DIFFUSION_SAMPLE_OUTPUT_DIR)}"
+            f" --prompt-column {shlex.quote(args.prompt_column)}"
+        )
+        if args.seed_column:
+            sample_cmd += f" --seed-column {shlex.quote(args.seed_column)}"
+        if args.max_rows is not None:
+            sample_cmd += f" --max-rows {int(args.max_rows)}"
+        file_mounts.update(learner_file_mounts(args.data))
+    else:
+        sample_cmd += (
+            f" --prompt {shlex.quote(args.prompt)}"
+            f" --output {shlex.quote(DIFFUSION_SAMPLE_OUTPUT_DIR + '/sample.png')}"
+        )
+    for name in (
+        "model",
+        "diffusion_adapter",
+        "guidance_scale",
+        "height",
+        "width",
+        "num_frames",
+        "seed",
+    ):
+        sample_cmd = _add_flag(sample_cmd, name.replace("_", "-"), getattr(args, name, None))
+
+    local_token = os.path.expanduser(HF_TOKEN_PATH)
+    if os.path.isfile(local_token):
+        file_mounts[HF_TOKEN_PATH] = local_token
+    setup_steps = [
+        WAN_TUNING,
+        NVME_SETUP,
+        NVME_ENV,
+        HF_TOKEN_ENV,
+        TORCH_SETUP,
+        "pip install -q -r requirements.txt",
+        "pip install -q 'diffusers>=0.35' safetensors pillow 'imageio[ffmpeg]' 'bitsandbytes>=0.46.1'",
+    ]
+    run = f"{NVME_ENV}\n{HF_TOKEN_ENV}\nmkdir -p {DIFFUSION_SAMPLE_OUTPUT_DIR}\n{sample_cmd}"
+    envs = {"HF_HUB_ENABLE_HF_TRANSFER": "1"}
+    if os.environ.get("HF_TOKEN"):
+        envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    task = sky.Task(
+        name="yeto-diffusion-sample",
+        setup="\n".join(setup_steps),
+        run=run,
+        envs=envs,
+        workdir=str(REPO_ROOT),
+        file_mounts=file_mounts or None,
+    )
+    infra = f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud
+    resources_kwargs = {}
+    image = learner_image_for(args, spec)
+    if image is not None:
+        resources_kwargs["image_id"] = image
+    task.set_resources(
+        sky.Resources(
+            infra=infra,
+            accelerators=spec.accelerators,
+            cpus=getattr(args, "learner_cpus", None),
+            instance_type=getattr(args, "learner_instance_type", None),
+            use_spot=args.spot,
+            disk_size=args.disk_size,
+            **resources_kwargs,
+        )
+    )
+    return task
+
+
+def _status_terminal(status) -> bool:
+    if status is None:
+        return False
+    is_terminal = getattr(status, "is_terminal", None)
+    if callable(is_terminal):
+        return bool(is_terminal())
+    text = str(status)
+    return any(s in text for s in ("SUCCEEDED", "FAILED", "CANCELLED", "STOPPED"))
+
+
+def _status_succeeded(status) -> bool:
+    return status is not None and "SUCCEEDED" in str(status)
+
+
+def _wait_for_terminal_job(cluster: str, job_id: int, poll_interval: int = 30):
+    ops = SkySDKOps()
+    while True:
+        status = ops.job_status(cluster, job_id)
+        if _status_terminal(status):
+            return status
+        ops.sleep(max(1, poll_interval))
+
+
+def run_diffusion_sample(args) -> int:
+    specs = parse_gpu_spec(args.gpu)
+    if len(specs) != 1:
+        raise ValueError("diffusion sampling expects exactly one --gpu cluster")
+    spec = specs[0]
+    if spec.num_nodes != 1 or spec.total_gpus != 1:
+        raise ValueError("diffusion sampling currently expects one single-GPU node")
+
+    import sky
+
+    cluster = f"{args.cluster_prefix}-sample"
+    task = make_diffusion_sample_task(args, spec)
+    output = getattr(args, "output", None)
+    local_dest = (
+        os.path.expanduser(output)
+        if output and delivery.kind(output) == "local"
+        else os.path.expanduser(DIFFUSION_SAMPLE_OUTPUT_DIR)
+    )
+    try:
+        print(f"[launcher] launching diffusion sampler on {spec} as {cluster}")
+        job_id, _handle = sky.stream_and_get(
+            sky.launch(task, cluster_name=cluster, retry_until_up=args.retry_until_up)
+        )
+        threading.Thread(target=_tail, args=(cluster, job_id, "sample"), daemon=True).start()
+        status = _wait_for_terminal_job(
+            cluster, job_id, getattr(args, "controller_poll", 30)
+        )
+        if not _status_succeeded(status):
+            print(f"[launcher] diffusion sample job ended as {status}", file=sys.stderr)
+            return 1
+        os.makedirs(local_dest, exist_ok=True)
+        subprocess.run(delivery.fetch_cmd(cluster, local_dest), check=True)
+        print(f"[launcher] diffusion samples fetched to {local_dest}")
+        if delivery.is_remote(output):
+            delivery.deliver(output, local_dest)
+            print(f"[launcher] diffusion samples uploaded to {output}")
+        return 0
+    except subprocess.CalledProcessError as e:
+        print(f"[launcher] fetching {cluster}:~/yeto-output failed ({e})", file=sys.stderr)
+        return 2
+    finally:
+        if args.keep:
+            print(f"[launcher] keeping cluster: {cluster}")
+        else:
+            print(f"[launcher] tearing down {cluster}")
+            terminate_and_verify(sky, cluster)
 
 
 def learner_cluster_names(prefix: str, specs: list[ClusterSpec]) -> list[str]:

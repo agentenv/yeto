@@ -4,14 +4,14 @@ All losses SUM over tokens (not mean). Each takes `target_logprobs` —
 log p_theta(x_t) for the target token at each position — plus per-loss
 inputs, and returns a scalar loss tensor.
 
-Available: cross_entropy | importance_sampling | ppo | cispo | dro
+Available: cross_entropy | importance_sampling | ppo | cispo | dro | flow_matching
 """
 
 from __future__ import annotations
 
 import torch
 
-LOSS_FUNCTIONS = ("cross_entropy", "importance_sampling", "ppo", "cispo", "dro")
+LOSS_FUNCTIONS = ("cross_entropy", "importance_sampling", "ppo", "cispo", "dro", "flow_matching")
 
 
 def cross_entropy(target_logprobs: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
@@ -64,6 +64,29 @@ def dro(
     """L = -sum_t [log p_theta(x_t) A_t - (beta/2)(log p_theta(x_t) - log q(x_t))^2]."""
     kl_sq = (target_logprobs - sampling_logprobs) ** 2
     return -(target_logprobs * advantages - 0.5 * beta * kl_sq).sum()
+
+
+def flow_matching_loss(
+    model_output: torch.Tensor,
+    target: torch.Tensor,
+    timestep: torch.Tensor,
+    weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rectified-flow diffusion loss: MSE against the velocity target.
+
+    ``timestep`` is part of the public signature so future weighting schemes
+    can be added without changing the diffusion learner's loss interface.
+    """
+    del timestep
+    per_elem = (model_output.float() - target.float()).pow(2)
+    if weights is not None:
+        weights = weights.to(device=per_elem.device, dtype=per_elem.dtype)
+        while weights.ndim < per_elem.ndim:
+            weights = weights.view(*weights.shape, *([1] * (per_elem.ndim - weights.ndim)))
+        per_elem = per_elem * weights
+        return per_elem.sum(), weights.expand_as(per_elem).sum().clamp(min=1)
+    loss = per_elem.sum()
+    return loss, torch.tensor(per_elem.numel(), device=per_elem.device)
 
 
 def load_custom_loss(spec: str):
@@ -135,9 +158,8 @@ def sft_loss(
     """
     if loss_function != "cross_entropy":
         raise ValueError(
-            f"loss function {loss_function!r} requires sampling logprobs and "
-            f"advantages (RL data); SFT datasets support cross_entropy or a "
-            f"custom:<file.py> loss"
+            f"loss function {loss_function!r} is not a causal-LM SFT loss; "
+            f"SFT datasets support cross_entropy or a custom:<file.py> loss"
         )
     shift_logits = logits[:, :-1].float()
     shift_labels = labels[:, 1:]
