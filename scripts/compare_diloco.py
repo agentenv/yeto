@@ -88,6 +88,7 @@ OUTER_OPTIMIZERS = (
     "capped-nesterov-wsub",
     "block-rms",
     "block-yogi",
+    "cheb-sgd",
 )
 # Matrix-fragment aggregation modes the harness understands (client-side
 # --matrix-merge). "worker-snr" is the memoryless cross-worker consensus merge.

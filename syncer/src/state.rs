@@ -241,6 +241,9 @@ pub struct ActionPreview {
     /// this step; unchanged for the other optimizers. One entry per tensor in
     /// the fragment. Installed alongside the buffer on commit.
     resulting_block_v: Vec<f32>,
+    /// Chebyshev-SGD cycle-phase counter after this step; unchanged for the
+    /// other optimizers. Installed alongside the buffer on commit.
+    resulting_cheb_phase: f32,
     /// Curvature-aware controller (`capped-nesterov-curv`) history after this
     /// step: the merged delta `g_t` and applied step `dtheta_t` this commit
     /// stores for the next commit's lambda_hat. Unchanged (carried through) for
@@ -401,6 +404,7 @@ fn compute_action_fingerprint(preview: &ActionPreview) -> [u64; 2] {
     mix_action_fingerprint(&mut hash, preview.resulting_rho_ema.to_bits() as u64);
     mix_action_fingerprint(&mut hash, preview.resulting_capped_mu.to_bits() as u64);
     mix_action_fingerprint(&mut hash, preview.resulting_capped_gain.to_bits() as u64);
+    mix_action_fingerprint(&mut hash, preview.resulting_cheb_phase.to_bits() as u64);
     mix_action_fingerprint(&mut hash, preview.resulting_block_v.len() as u64);
     for value in &preview.resulting_block_v {
         mix_action_fingerprint(&mut hash, value.to_bits() as u64);
@@ -465,6 +469,12 @@ pub struct GlobalState {
     /// then re-warms — exactly the fresh-start behavior of `capped_mu`.
     curv_prev_delta: Vec<Vec<f32>>,
     curv_prev_dtheta: Vec<Vec<f32>>,
+    /// Per-fragment Chebyshev-SGD cycle-phase counter (0..CHEB_SGD_CYCLE, as
+    /// f32). Only `cheb-sgd` reads or writes it; it holds no directional memory
+    /// (a scalar phase). Like the other outer-optimizer scalar states it is NOT
+    /// part of the checkpoint format: a restore re-initializes to 0, restarting
+    /// the cycle from its smallest (safest) step.
+    cheb_phase: Vec<f32>,
     pub initialized: Vec<bool>,
     /// Global step at which each fragment was last merged (its version).
     pub versions: Vec<u64>,
@@ -524,6 +534,7 @@ impl GlobalState {
         // shape as params), so lambda_hat = 0 on the first measured commit.
         let curv_prev_delta = params.clone();
         let curv_prev_dtheta = params.clone();
+        let cheb_phase = vec![0.0f32; layout.fragments.len()];
         let initialized = vec![false; layout.fragments.len()];
         let versions = vec![0; layout.fragments.len()];
         let state_epochs = vec![0; layout.fragments.len()];
@@ -538,6 +549,7 @@ impl GlobalState {
             block_v,
             curv_prev_delta,
             curv_prev_dtheta,
+            cheb_phase,
             initialized,
             versions,
             global_step: 0,
@@ -716,6 +728,7 @@ impl GlobalState {
         let mut resulting_block_v = self.block_v[fid].clone();
         let mut resulting_curv_prev_delta = self.curv_prev_delta[fid].clone();
         let mut resulting_curv_prev_dtheta = self.curv_prev_dtheta[fid].clone();
+        let mut resulting_cheb_phase = self.cheb_phase[fid];
         let tensor_numels: Vec<usize> = self.layout.fragments[fid]
             .tensor_numels
             .iter()
@@ -737,6 +750,7 @@ impl GlobalState {
             &tensor_numels,
             &mut resulting_block_v,
             aggregate.disagreement_energy,
+            &mut resulting_cheb_phase,
         );
         // The capped-Nesterov family chooses its momentum (and, for gc, its
         // gain) per commit; materializing its step must use the effective
@@ -771,6 +785,7 @@ impl GlobalState {
             || !resulting_rho_ema.is_finite()
             || !resulting_capped_mu.is_finite()
             || !resulting_capped_gain.is_finite()
+            || !resulting_cheb_phase.is_finite()
             || resulting_block_v.iter().any(|value| !value.is_finite())
             || resulting_curv_prev_delta
                 .iter()
@@ -807,6 +822,7 @@ impl GlobalState {
             resulting_block_v,
             resulting_curv_prev_delta,
             resulting_curv_prev_dtheta,
+            resulting_cheb_phase,
             applied_step,
             stats: MergeStats {
                 gnorm: aggregate.gnorm,
@@ -1268,6 +1284,7 @@ impl GlobalState {
             || !preview.resulting_rho_ema.is_finite()
             || !preview.resulting_capped_mu.is_finite()
             || !preview.resulting_capped_gain.is_finite()
+            || !preview.resulting_cheb_phase.is_finite()
             || preview.resulting_block_v.len() != self.layout.fragments[fid].tensor_numels.len()
             || preview
                 .resulting_block_v
@@ -1384,6 +1401,7 @@ impl GlobalState {
         mix(self.rho_ema[fid].to_bits() as u64);
         mix(self.capped_mu[fid].to_bits() as u64);
         mix(self.capped_gain[fid].to_bits() as u64);
+        mix(self.cheb_phase[fid].to_bits() as u64);
         mix(self.block_v[fid].len() as u64);
         for value in &self.block_v[fid] {
             mix(value.to_bits() as u64);
@@ -1424,6 +1442,7 @@ impl GlobalState {
             merge::OuterOptimizer::BlockYogi => 8,
             merge::OuterOptimizer::CappedNesterovCurv => 9,
             merge::OuterOptimizer::CappedNesterovWsub => 10,
+            merge::OuterOptimizer::ChebSgd => 11,
         });
         match self.delta_correction {
             None => mix(0),
@@ -1456,6 +1475,7 @@ impl GlobalState {
             resulting_block_v,
             resulting_curv_prev_delta,
             resulting_curv_prev_dtheta,
+            resulting_cheb_phase,
             stats,
             ..
         } = preview;
@@ -1468,6 +1488,7 @@ impl GlobalState {
         self.block_v[fid] = resulting_block_v;
         self.curv_prev_delta[fid] = resulting_curv_prev_delta;
         self.curv_prev_dtheta[fid] = resulting_curv_prev_dtheta;
+        self.cheb_phase[fid] = resulting_cheb_phase;
         self.state_epochs[fid] = next_epoch;
         Ok(stats)
     }
@@ -1562,6 +1583,9 @@ impl GlobalState {
             self.rho_ema[p] = merge::RHO_ADAPTIVE_INITIAL_RHO_EMA;
             self.capped_mu[p] = merge::CAPPED_NESTEROV_INITIAL_MU;
             self.capped_gain[p] = merge::CAPPED_NESTEROV_GC_INITIAL_GAIN;
+            // The Chebyshev-SGD cycle phase is likewise not checkpointed; reset
+            // to 0 so a resumed run restarts the cycle from its smallest step.
+            self.cheb_phase[p] = 0.0;
             // The curvature-aware controller history is not checkpointed
             // either; reset to zero so lambda_hat is inactive for one commit.
             for slot in [

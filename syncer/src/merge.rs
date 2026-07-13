@@ -41,6 +41,7 @@ pub enum OuterOptimizer {
     CappedNesterovWsub,
     BlockRms,
     BlockYogi,
+    ChebSgd,
 }
 
 impl OuterOptimizer {
@@ -57,6 +58,7 @@ impl OuterOptimizer {
             Self::CappedNesterovWsub => "capped-nesterov-wsub",
             Self::BlockRms => "block-rms",
             Self::BlockYogi => "block-yogi",
+            Self::ChebSgd => "cheb-sgd",
         }
     }
 
@@ -87,8 +89,9 @@ impl FromStr for OuterOptimizer {
             "capped-nesterov-wsub" => Ok(Self::CappedNesterovWsub),
             "block-rms" => Ok(Self::BlockRms),
             "block-yogi" => Ok(Self::BlockYogi),
+            "cheb-sgd" => Ok(Self::ChebSgd),
             other => Err(format!(
-                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov, capped-nesterov-gc, capped-nesterov-r, capped-nesterov-curv, capped-nesterov-wsub, block-rms, block-yogi; got {other:?}"
+                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov, capped-nesterov-gc, capped-nesterov-r, capped-nesterov-curv, capped-nesterov-wsub, block-rms, block-yogi, cheb-sgd; got {other:?}"
             )),
         }
     }
@@ -148,6 +151,7 @@ pub fn apply_outer_step(
     tensor_numels: &[usize],
     block_v: &mut [f32],
     disagreement_energy: f64,
+    cheb_phase: &mut f32,
 ) -> OuterStepStats {
     match optimizer {
         OuterOptimizer::Nesterov => nesterov_step(params, buf, delta, lr, momentum),
@@ -183,6 +187,7 @@ pub fn apply_outer_step(
         OuterOptimizer::BlockYogi => {
             block_second_moment_step(params, buf, delta, lr, tensor_numels, block_v, true)
         }
+        OuterOptimizer::ChebSgd => cheb_sgd_step(params, buf, delta, lr, cheb_phase),
     }
 }
 
@@ -226,7 +231,8 @@ pub fn materialize_applied_step(
         | OuterOptimizer::RestartedEma
         | OuterOptimizer::RhoAdaptive
         | OuterOptimizer::BlockRms
-        | OuterOptimizer::BlockYogi => {
+        | OuterOptimizer::BlockYogi
+        | OuterOptimizer::ChebSgd => {
             updated_buf.iter().map(|buf| lr * *buf).collect()
         }
     }
@@ -1010,6 +1016,165 @@ pub fn block_second_moment_step(
         0.0,
         delta_norm_sq,
         false,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Chebyshev-SGD: memoryless spectral-acceleration outer optimizer.
+//
+// The escape from the transverse-momentum poison (docs/LEAN_THEOREMS.md T1-T3,
+// docs/POLYNOMIAL_OUTER_OPTIMIZER.md family 1): instead of a directional
+// first-moment buffer, apply a short cyclical learning-rate schedule around the
+// tuned base LR whose K-step product is the shifted-Chebyshev residual
+// polynomial for a symmetric operator with eigenvalues in [1, kappa]. This is
+// pure scaled SGD each commit -- the update direction is the current merged
+// pseudo-gradient `delta`, scaled by a SCALAR multiplier m_k -- so it carries
+// no old velocity into newly-steep directions. The only cross-round state is a
+// scalar cycle-phase counter per fragment (`cheb_phase`); the optimizer buffer
+// `buf` is used ONLY as read-only scratch to detect a geometry change (the
+// cosine between the current delta and the previous applied direction) and is
+// overwritten every commit with the current scaled delta -- it is never added
+// to the step, so no directional memory enters the update. Because the step
+// ACQUIRES a curvature estimate (the [1, kappa] range comes from the measured
+// spectral width, EXP2 outer-dynamics diagnostic) rather than a gain/cosine
+// scalar of (g, buffer), Lean T3's geometry-blind impossibility does not
+// directly apply.
+
+/// Cycle length K (small -> large -> mid -> small).
+pub const CHEB_SGD_CYCLE: usize = 4;
+/// Estimated symmetric-part condition number kappa = lambda_max / lambda_min of
+/// the local pseudo-gradient dynamics operator. Calibrated to the measured
+/// short-horizon spectral width (rank2/rank16 H16 condition number ~= 19-20 in
+/// the Krylov subspace, EXP2 outer-dynamics diagnostic). kappa = 1 makes every
+/// multiplier exactly 1 (degenerate to plain SGD at the base LR).
+pub const CHEB_SGD_KAPPA: f64 = 20.0;
+/// Hard multiplier bounds (robust-control safety): the applied step is always
+/// within [m_min, m_max] * base LR of tuned SGD, and the clamped schedule still
+/// averages to 1 over the cycle (see `cheb_sgd_multipliers`).
+pub const CHEB_SGD_M_MIN: f64 = 0.5;
+pub const CHEB_SGD_M_MAX: f64 = 2.0;
+/// Restart the cycle (reset phase to 0) when the merged delta's cosine against
+/// the previous applied direction drops below this: a large geometry change
+/// invalidates the [1, kappa] schedule, so damp with the smallest step first.
+pub const CHEB_SGD_RESTART_COS: f32 = 0.0;
+
+/// The K ordered, arithmetic-mean-normalized, hard-bounded Chebyshev step-size
+/// multipliers for condition number `kappa` (>= 1), in the Leja "small -> large
+/// -> mid -> small" order. Returns `[1.0; K]` exactly when `kappa == 1`.
+///
+/// Construction (docs/POLYNOMIAL_OUTER_OPTIMIZER.md; codex gpt-5.6-sol derivation):
+/// with `a = 1`, `b = kappa`, center `c = (a+b)/2`, half-width `d = (b-a)/2`,
+/// the shifted-Chebyshev nodes give raw steps `s_j = 1 / (c +/- d * cos(theta))`
+/// for `theta in {pi/8, 3pi/8}`. Ordered small->large->mid->small:
+///   s = [ 1/(c+d q), 1/(c-d q), 1/(c-d r), 1/(c+d r) ],  q=cos(pi/8), r=cos(3pi/8).
+/// Arithmetic-mean normalization `m_j = tau * s_j` anchors the cycle-average
+/// multiplier to 1 (so the average LR stays the tuned base) and preserves
+/// `m_j = 1` at kappa = 1; `tau` is chosen by a monotone bisection so the
+/// hard-clamped multipliers still average exactly 1 (feasible since
+/// m_min <= 1 <= m_max).
+pub fn cheb_sgd_multipliers(kappa: f64) -> [f64; CHEB_SGD_CYCLE] {
+    if !(kappa > 1.0) {
+        return [1.0; CHEB_SGD_CYCLE];
+    }
+    let a = 1.0;
+    let b = kappa;
+    let c = 0.5 * (a + b);
+    let d = 0.5 * (b - a);
+    let q = (std::f64::consts::PI / 8.0).cos();
+    let r = (3.0 * std::f64::consts::PI / 8.0).cos();
+    // small -> large -> mid-large -> mid-small
+    let s = [
+        1.0 / (c + d * q),
+        1.0 / (c - d * q),
+        1.0 / (c - d * r),
+        1.0 / (c + d * r),
+    ];
+    // Monotone bisection for tau with mean(clip(tau*s, m_min, m_max)) == 1.
+    let mean_clamped = |tau: f64| -> f64 {
+        s.iter()
+            .map(|sj| (tau * sj).clamp(CHEB_SGD_M_MIN, CHEB_SGD_M_MAX))
+            .sum::<f64>()
+            / CHEB_SGD_CYCLE as f64
+    };
+    let mut lo = 0.0f64;
+    let mut hi = CHEB_SGD_M_MAX / s.iter().cloned().fold(f64::INFINITY, f64::min);
+    // Ensure the bracket contains the root (mean is nondecreasing in tau).
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if mean_clamped(mid) < 1.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let tau = 0.5 * (lo + hi);
+    let mut m = [0.0f64; CHEB_SGD_CYCLE];
+    for j in 0..CHEB_SGD_CYCLE {
+        m[j] = (tau * s[j]).clamp(CHEB_SGD_M_MIN, CHEB_SGD_M_MAX);
+    }
+    m
+}
+
+/// One Chebyshev-SGD commit. `phase` is the persistent scalar cycle counter in
+/// `0..CHEB_SGD_CYCLE` (as f32; reset to 0 on a checkpoint restore, like the
+/// other outer-optimizer scalar states). The applied step is
+/// `lr * m_k * delta`; `buf` is overwritten with `m_k * delta` so the
+/// `materialize_applied_step` `lr * buf` branch is bit-identical, and its
+/// PRIOR contents (last commit's applied direction) are read first to detect a
+/// geometry change. No first-moment memory enters the direction.
+pub fn cheb_sgd_step(
+    params: &mut [f32],
+    buf: &mut [f32],
+    delta: &[f32],
+    lr: f32,
+    phase: &mut f32,
+) -> OuterStepStats {
+    debug_assert_eq!(params.len(), buf.len());
+    debug_assert_eq!(buf.len(), delta.len());
+    // Geometry-change restart: cosine of the current delta against the previous
+    // applied direction held in `buf` (read-only; not injected into the step).
+    let buf_norm_sq = norm_sq(buf);
+    let delta_norm_sq = norm_sq(delta);
+    if buf_norm_sq > 0.0 && delta_norm_sq > 0.0 {
+        let dot: f64 = buf
+            .iter()
+            .zip(delta)
+            .map(|(b, d)| *b as f64 * *d as f64)
+            .sum();
+        let cosine = (dot / (buf_norm_sq * delta_norm_sq).sqrt()).clamp(-1.0, 1.0);
+        if cosine < CHEB_SGD_RESTART_COS as f64 {
+            *phase = 0.0;
+        }
+    }
+    let restarted = *phase == 0.0 && buf_norm_sq > 0.0;
+    let k = ((*phase as usize) % CHEB_SGD_CYCLE).min(CHEB_SGD_CYCLE - 1);
+    let mult = cheb_sgd_multipliers(CHEB_SGD_KAPPA)[k] as f32;
+
+    let mut step_norm_sq = 0.0;
+    let mut direction_norm_sq = 0.0;
+    let mut direction_delta_dot = 0.0;
+    for ((p, b), d) in params.iter_mut().zip(buf.iter_mut()).zip(delta) {
+        let direction = mult * *d;
+        *b = direction; // scratch: current scaled delta, for materialize + next-commit probe
+        let step = lr * direction;
+        *p -= step;
+        let direction = direction as f64;
+        let step = step as f64;
+        step_norm_sq += step * step;
+        direction_norm_sq += direction * direction;
+        direction_delta_dot += direction * *d as f64;
+    }
+    *phase = (((k + 1) % CHEB_SGD_CYCLE) as f32).floor();
+    // Direction is a positive scalar multiple of delta, so cosine is +1 and the
+    // history contribution is zero (memoryless): report current == direction.
+    finish_outer_step_stats(
+        step_norm_sq,
+        direction_norm_sq,
+        delta_norm_sq,
+        direction_delta_dot,
+        0.0,
+        direction_norm_sq,
+        restarted,
     )
 }
 
@@ -3399,5 +3564,114 @@ mod tests {
             &mut params, &mut buf, &small, lr, &numels, &mut block_v, true,
         );
         assert!((block_v[1] as f64) < v1_prev, "yogi did not decrease v");
+    }
+
+    // ---- cheb-sgd -----------------------------------------------------------
+
+    #[test]
+    fn cheb_sgd_multipliers_degenerate_isotropic_is_plain_sgd() {
+        // kappa = 1 (or <= 1): every multiplier is exactly 1, so a cheb-sgd
+        // commit is byte-identical to plain SGD at the base LR.
+        assert_eq!(cheb_sgd_multipliers(1.0), [1.0; CHEB_SGD_CYCLE]);
+        assert_eq!(cheb_sgd_multipliers(0.5), [1.0; CHEB_SGD_CYCLE]);
+    }
+
+    #[test]
+    fn cheb_sgd_multipliers_are_ordered_bounded_and_mean_one() {
+        // Anisotropic kappa: arithmetic-mean-anchored, hard-bounded, and in the
+        // small -> large -> mid -> small Leja order.
+        let m = cheb_sgd_multipliers(CHEB_SGD_KAPPA);
+        // hard safety bounds
+        for &mj in &m {
+            assert!(mj >= CHEB_SGD_M_MIN - 1e-12 && mj <= CHEB_SGD_M_MAX + 1e-12,
+                    "multiplier {mj} out of [{CHEB_SGD_M_MIN}, {CHEB_SGD_M_MAX}]");
+        }
+        // cycle-average multiplier is 1 (average LR stays the tuned base)
+        let mean = m.iter().sum::<f64>() / CHEB_SGD_CYCLE as f64;
+        assert_close(mean, 1.0);
+        // ordering (small -> large -> mid-large -> mid-small): phase 1 is the
+        // largest step, phase 0 the smallest; the reordered schedule is
+        // monotone m[0] <= m[3] <= m[2] <= m[1] (small steps may tie at m_min
+        // for large kappa, cf. codex kappa=30 -> [0.5, 2.0, 1.0, 0.5]).
+        assert!(m[1] > m[2] && m[2] > m[0], "phase 1 not the largest: {m:?}");
+        assert!(m[0] <= m[3] && m[3] <= m[2] && m[2] <= m[1],
+                "schedule not monotone in Leja order: {m:?}");
+        assert!(m[0] < 1.0 && m[1] > 1.0, "cycle should straddle base LR");
+        // deterministic
+        assert_eq!(m, cheb_sgd_multipliers(CHEB_SGD_KAPPA));
+
+        // Moderate kappa stays inside the bounds -> strictly ordered, no ties.
+        let m4 = cheb_sgd_multipliers(4.0);
+        assert_close(m4.iter().sum::<f64>() / CHEB_SGD_CYCLE as f64, 1.0);
+        assert!(m4[0] < m4[3] && m4[3] < m4[2] && m4[2] < m4[1],
+                "moderate kappa should be strictly small<mid-small<mid-large<large: {m4:?}");
+    }
+
+    #[test]
+    fn cheb_sgd_cycle_sequence_is_deterministic() {
+        // Over CHEB_SGD_CYCLE aligned commits the phase advances 0->1->2->3->0
+        // and each commit applies lr * m_k * delta (pure scaled SGD).
+        let lr = 0.28f32;
+        let delta = [1.0f32, -2.0, 0.5];
+        let m = cheb_sgd_multipliers(CHEB_SGD_KAPPA);
+        let mut params = [0.0f32; 3];
+        let mut buf = [0.0f32; 3];
+        let mut phase = 0.0f32;
+        for k in 0..CHEB_SGD_CYCLE {
+            let before = params;
+            let stats = cheb_sgd_step(&mut params, &mut buf, &delta, lr, &mut phase);
+            // applied displacement is exactly lr * m_k * delta
+            for i in 0..3 {
+                let expected = lr * m[k] as f32 * delta[i];
+                assert_close((before[i] - params[i]) as f64, expected as f64);
+                // buf holds the (unscaled-by-lr) applied direction m_k * delta
+                assert_close(buf[i] as f64, (m[k] as f32 * delta[i]) as f64);
+            }
+            // direction is a positive multiple of delta -> cosine +1, no history
+            assert_close(stats.direction_delta_cosine.unwrap(), 1.0);
+            assert_eq!(stats.history_current_norm_ratio, Some(0.0));
+            assert_eq!(phase, ((k + 1) % CHEB_SGD_CYCLE) as f32);
+        }
+        assert_eq!(phase, 0.0); // wrapped back to the start of the cycle
+    }
+
+    #[test]
+    fn cheb_sgd_restart_resets_phase_on_geometry_change() {
+        let lr = 0.1f32;
+        let delta = [1.0f32, 0.0];
+        let mut params = [0.0f32; 2];
+        let mut buf = [0.0f32; 2];
+        let mut phase = 0.0f32;
+        // advance two aligned commits: phase -> 2, buf holds a +x direction.
+        cheb_sgd_step(&mut params, &mut buf, &delta, lr, &mut phase);
+        cheb_sgd_step(&mut params, &mut buf, &delta, lr, &mut phase);
+        assert_eq!(phase, 2.0);
+        // an anti-aligned delta (cosine -1 < CHEB_SGD_RESTART_COS) restarts the
+        // cycle: phase resets to 0 and the smallest (phase-0) multiplier applies.
+        let flip = [-1.0f32, 0.0];
+        let m0 = cheb_sgd_multipliers(CHEB_SGD_KAPPA)[0] as f32;
+        let before = params;
+        let stats = cheb_sgd_step(&mut params, &mut buf, &flip, lr, &mut phase);
+        assert!(stats.restarted, "geometry-change restart not flagged");
+        assert_close((before[0] - params[0]) as f64, (lr * m0 * flip[0]) as f64);
+        assert_eq!(phase, 1.0); // 0 (restart) applied, then advanced to 1
+    }
+
+    #[test]
+    fn cheb_sgd_step_is_bit_identical_to_materialized_step() {
+        // The lr * buf materialize branch must reproduce the applied step
+        // bit-for-bit (as for the block/ema optimizers).
+        let lr = 0.28f32;
+        let delta = [0.7f32, -1.3, 2.1, 0.0, -0.4];
+        let mut params = [0.0f32; 5];
+        let mut buf = [0.0f32; 5];
+        let mut phase = 1.0f32; // mid-cycle, multiplier != 1
+        let base = params;
+        cheb_sgd_step(&mut params, &mut buf, &delta, lr, &mut phase);
+        let materialized =
+            materialize_applied_step(OuterOptimizer::ChebSgd, &buf, &delta, lr, 0.9, 1.0);
+        for i in 0..5 {
+            assert_eq!(base[i] - params[i], materialized[i]);
+        }
     }
 }
