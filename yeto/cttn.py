@@ -36,7 +36,23 @@ import numpy as np
 # may consume at most 10% of the current memoryless step's positive-curvature
 # budget. Used everywhere, never per-H/rank/inner-LR tuned.
 RHO_DEFAULT = 0.10
-_EPS = 1e-30
+_F64_EPS = np.finfo(np.float64).eps
+
+
+def _stable_norm(v: np.ndarray) -> float:
+    """Euclidean norm without squaring the original scale."""
+    if v.size == 0:
+        return 0.0
+    scale = float(np.max(np.abs(v)))
+    if scale == 0.0:
+        return 0.0
+    return scale * float(np.linalg.norm(v / scale))
+
+
+def _scale_relative_tol(*values: float, factor: float = 256.0) -> float:
+    """Roundoff allowance with no absolute floor (important near 1e-40)."""
+    scale = max((abs(float(value)) for value in values), default=0.0)
+    return factor * _F64_EPS * scale
 
 
 def project_out(v: np.ndarray, q: np.ndarray) -> np.ndarray:
@@ -52,10 +68,13 @@ def orth(cols: list[np.ndarray]) -> np.ndarray:
     basis: list[np.ndarray] = []
     for c in cols:
         w = c.astype(np.float64, copy=True)
-        for b in basis:
-            w = w - b * float(b @ w)
-        n = float(np.linalg.norm(w))
-        if n > 1e-12 * (float(np.linalg.norm(c)) + _EPS):
+        original_norm = _stable_norm(w)
+        for _ in range(2):
+            for b in basis:
+                w = w - b * float(b @ w)
+        n = _stable_norm(w)
+        rel_tol = 32.0 * _F64_EPS * max(1, len(basis))
+        if np.isfinite(n) and n > rel_tol * original_norm:
             basis.append(w / n)
     if not basis:
         return np.zeros((cols[0].shape[0], 0), dtype=np.float64)
@@ -71,27 +90,112 @@ def block_lanczos(hvp, Q0: np.ndarray, block_steps: int):
     Rayleigh block. Full reorthogonalization (k is tiny, <=8) for numerical
     stability in the near-flat LoRA spectrum.
 
-    HVP budget: b0*(block_steps-1) to grow the basis, then one T = V^T (H V)
-    block of k more — i.e. ~b0*block_steps total. Seed with b0=2, block_steps=4
-    for the design's 8-HVP-per-round point (the +k for T can reuse the last
-    block's products in a Lanczos recurrence; kept explicit here for clarity)."""
-    basis = [Q0[:, j].astype(np.float64) for j in range(Q0.shape[1])]
-    cur = Q0.astype(np.float64)
+    Every computed H@Q block is cached and reused to assemble T, so the routine
+    performs exactly one HVP per returned basis column. With b0=2 and
+    block_steps=4 this is at most 8 columnwise HVPs, including T construction.
+    Exhausted or invariant Krylov directions are dropped rather than normalized
+    from roundoff."""
+    Q0 = np.asarray(Q0, dtype=np.float64)
+    assert Q0.ndim == 2 and Q0.shape[1] > 0
+    assert np.all(np.isfinite(Q0)), "Q0 must contain only finite columns"
+
+    basis_blocks = [Q0]
+    basis = [Q0[:, j].copy() for j in range(Q0.shape[1])]
+    hv_blocks: list[np.ndarray] = []
+    cur = Q0
     for _ in range(max(0, block_steps - 1)):
-        W = hvp(cur)                                  # [p, bcur]
-        # full reorthogonalization against the accumulated basis
-        for u in basis:
-            W = W - np.outer(u, u @ W)
-        Qn = orth([W[:, j] for j in range(W.shape[1])])
-        if Qn.shape[1] == 0:
+        Hcur = np.asarray(hvp(cur), dtype=np.float64)  # [p, bcur]
+        assert Hcur.shape == cur.shape
+        assert np.all(np.isfinite(Hcur)), "HVP returned non-finite values"
+        hv_blocks.append(Hcur)
+
+        Qn_cols: list[np.ndarray] = []
+        for j in range(Hcur.shape[1]):
+            original = Hcur[:, j]
+            original_norm = _stable_norm(original)
+            w = original.copy()
+            # Two-pass modified Gram-Schmidt against every accumulated column,
+            # including significant columns accepted earlier in this block.
+            for _ in range(2):
+                for u in basis + Qn_cols:
+                    w = w - u * float(u @ w)
+            residual_norm = _stable_norm(w)
+            rel_tol = 32.0 * _F64_EPS * max(1, len(basis) + len(Qn_cols))
+            if (np.isfinite(residual_norm)
+                    and residual_norm > rel_tol * original_norm):
+                Qn_cols.append(w / residual_norm)
+
+        if not Qn_cols:
             break
-        for j in range(Qn.shape[1]):
-            basis.append(Qn[:, j])
+        Qn = np.stack(Qn_cols, axis=1)
+        basis_blocks.append(Qn)
+        basis.extend(Qn_cols)
         cur = Qn
-    V = np.stack(basis, axis=1)                       # [p, k]
-    T = V.T @ hvp(V)                                  # [k, k]
+
+    # If growth reached its requested depth, the last accepted block has not
+    # yet been multiplied by H. Compute it once; all earlier products are cached.
+    if len(hv_blocks) < len(basis_blocks):
+        Hcur = np.asarray(hvp(basis_blocks[-1]), dtype=np.float64)
+        assert Hcur.shape == basis_blocks[-1].shape
+        assert np.all(np.isfinite(Hcur)), "HVP returned non-finite values"
+        hv_blocks.append(Hcur)
+
+    V = np.concatenate(basis_blocks, axis=1)          # [p, k]
+    HV = np.concatenate(hv_blocks, axis=1)            # [p, k]
+    T = V.T @ HV                                      # [k, k]
     T = 0.5 * (T + T.T)
+    gram_error = float(np.linalg.norm(V.T @ V - np.eye(V.shape[1])))
+    orth_tol = max(1e-12, 128.0 * _F64_EPS * max(1, V.shape[1]))
+    assert np.all(np.isfinite(V)), "block-Lanczos basis contains non-finite values"
+    assert np.all(np.isfinite(T)), "block-Lanczos Rayleigh block is non-finite"
+    assert gram_error <= orth_tol, (
+        f"block-Lanczos basis lost orthogonality: {gram_error} > {orth_tol}"
+    )
     return V, T
+
+
+def _projected_psd_operator(qc: np.ndarray, T: np.ndarray):
+    """Return (P, Tplus, P Tplus P) in the small Krylov coordinates."""
+    T = np.asarray(T, dtype=np.float64)
+    T = 0.5 * (T + T.T)
+    evals, evecs = np.linalg.eigh(T)
+    Tplus = (evecs * np.clip(evals, 0.0, None)) @ evecs.T
+
+    qc = np.asarray(qc, dtype=np.float64)
+    qnorm = _stable_norm(qc)
+    qn = qc / qnorm if qnorm > 0.0 else np.zeros_like(qc)
+    Pc = np.eye(qc.shape[0]) - np.outer(qn, qn)
+    Ac = Pc @ Tplus @ Pc
+    Ac = 0.5 * (Ac + Ac.T)
+    if Ac.size:
+        aevals, aevecs = np.linalg.eigh(Ac)
+        ascale = float(np.max(np.abs(aevals)))
+        atol = _scale_relative_tol(ascale, factor=256.0)
+        aevals = np.where(aevals > atol, aevals, 0.0)
+        Ac = (aevecs * aevals) @ aevecs.T
+        Ac = 0.5 * (Ac + Ac.T)
+    return Pc, Tplus, Ac
+
+
+def _transverse_energy_kdim(qc: np.ndarray, zc: np.ndarray, T: np.ndarray) -> float:
+    """Curvature energy after explicitly projecting small coordinates."""
+    Pc, _, Ac = _projected_psd_operator(qc, T)
+    zc = Pc @ np.asarray(zc, dtype=np.float64)
+    energy = float(zc @ (Ac @ zc))
+    scale = float(np.max(np.abs(Ac))) * _stable_norm(zc) ** 2 if Ac.size else 0.0
+    tol = _scale_relative_tol(energy, scale)
+    assert energy >= -tol, f"PSD transverse energy became negative: {energy}"
+    if abs(energy) <= tol:
+        return 0.0
+    return max(energy, 0.0)
+
+
+def _assert_trust_postcondition(mu: float, e_after: float, budget: float) -> None:
+    lhs = float(mu) ** 4 * e_after
+    tol = _scale_relative_tol(lhs, budget, factor=1024.0)
+    assert lhs <= budget + tol, (
+        f"trust-region postcondition violated: {lhs} > {budget} + {tol}"
+    )
 
 
 def _solve_trustregion_kdim(qc, rc, gc, T, *, mu, rho):
@@ -106,58 +210,103 @@ def _solve_trustregion_kdim(qc, rc, gc, T, *, mu, rho):
     A = P Hplus P (q-direction projected out on both sides) keeps z transverse so
     q^T z == 0 exactly; the budget uses the full current-step curvature g^T Hplus g.
     """
-    T = 0.5 * (T + T.T)
-    evals, evecs = np.linalg.eigh(T)
-    Tplus = (evecs * np.clip(evals, 0.0, None)) @ evecs.T          # [k,k] PSD
+    if rho < 0.0:
+        raise ValueError("rho must be non-negative")
 
-    qn = qc / (float(np.linalg.norm(qc)) + _EPS)
-    Pc = np.eye(qc.shape[0]) - np.outer(qn, qn)
-    Ac = Pc @ Tplus @ Pc
-    Ac = 0.5 * (Ac + Ac.T)
-    muA, W = np.linalg.eigh(Ac)                # muA >= 0 (PSD, q-dir -> 0)
-    muA = np.clip(muA, 0.0, None)
+    qc = np.asarray(qc, dtype=np.float64)
+    rc = np.asarray(rc, dtype=np.float64)
+    gc = np.asarray(gc, dtype=np.float64)
+    T = np.asarray(T, dtype=np.float64)
+    assert qc.ndim == rc.ndim == gc.ndim == 1
+    assert qc.shape == rc.shape == gc.shape
+    assert T.shape == (qc.shape[0], qc.shape[0])
+    assert all(np.all(np.isfinite(x)) for x in (qc, rc, gc, T))
 
-    rj = W.T @ rc                              # r in the A-eigenbasis (rc ⊥ qc)
+    Pc, Tplus, Ac = _projected_psd_operator(qc, T)
+    rc = Pc @ rc                               # structural transversality
+    muA, W = np.linalg.eigh(Ac)
+    eig_scale = float(np.max(np.abs(muA))) if muA.size else 0.0
+    eig_tol = _scale_relative_tol(eig_scale, factor=256.0)
+    muA = np.where(muA > eig_tol, muA, 0.0)
+
+    rj = W.T @ rc                              # r in the A-eigenbasis (rc perp qc)
     e_before = float(np.sum(muA * rj * rj))    # r^T A r
-    g_curv = float(gc @ (Tplus @ gc))          # g^T Hplus g
+    g_curv_raw = float(gc @ (Tplus @ gc))      # g^T Hplus g
+    g_scale = (float(np.max(np.abs(Tplus))) * _stable_norm(gc) ** 2
+               if Tplus.size else 0.0)
+    g_tol = _scale_relative_tol(g_curv_raw, g_scale)
+    assert g_curv_raw >= -g_tol, f"PSD gradient curvature became negative: {g_curv_raw}"
+    g_curv = max(g_curv_raw, 0.0)
     budget = rho * g_curv
-    mu4 = mu ** 4
+    mu4 = float(mu) ** 4
 
-    def energy(tau: float) -> float:
-        zc = rj / (1.0 + tau * muA)
-        return float(np.sum(muA * zc * zc))
+    active = muA > 0.0
+    lambda_scale = float(np.max(muA)) if np.any(active) else 0.0
+    lambda_scaled = muA[active] / lambda_scale if lambda_scale > 0.0 else muA[active]
 
-    if mu4 * e_before <= budget or e_before <= _EPS:
+    def energy_scaled(sigma: float) -> float:
+        denom = 1.0 + sigma * lambda_scaled
+        z_active = rj[active] / denom
+        return float(np.sum(muA[active] * z_active * z_active))
+
+    lhs_before = mu4 * e_before
+    gate_tol = _scale_relative_tol(lhs_before, budget)
+    if mu4 == 0.0 or e_before == 0.0 or lhs_before <= budget + gate_tol:
         tau = 0.0
         bind = False
         z_eig = rj.copy()
+    elif budget == 0.0:
+        # The finite-tau limit for a zero target: remove every positive-
+        # curvature component and retain A's nullspace exactly.
+        tau = np.inf
+        bind = True
+        z_eig = rj.copy()
+        z_eig[active] = 0.0
     else:
         bind = True
         target = budget / mu4
+        target_tol = _scale_relative_tol(e_before, target)
+        assert target > 0.0, "positive-budget branch requires a positive target"
+        assert target < e_before + target_tol
+        # Land just inside the cap so eigenspace reconstruction and the final
+        # full-space projection cannot round an equality to the wrong side.
+        solve_target = target * (1.0 - 32768.0 * _F64_EPS)
+        assert solve_target > 0.0
+
+        # Solve in sigma=tau*lambda_max so 1e-40 and 1e+20 curvature have the
+        # same well-scaled bracket. A positive target must be explicitly bracketed.
         lo, hi = 0.0, 1.0
-        for _ in range(200):                   # grow hi until energy(hi) <= target
-            if energy(hi) <= target:
+        bracketed = False
+        for _ in range(2048):
+            if energy_scaled(hi) <= solve_target:
+                bracketed = True
                 break
             hi *= 2.0
-        for _ in range(200):                   # bisection (energy monotone dec)
+        assert bracketed, "failed to bracket positive trust-region target"
+        for _ in range(256):
             mid = 0.5 * (lo + hi)
-            if energy(mid) > target:
+            if energy_scaled(mid) > solve_target:
                 lo = mid
             else:
                 hi = mid
-            if hi - lo < 1e-14 * (hi + 1.0):
-                break
-        tau = hi
-        z_eig = rj / (1.0 + tau * muA)
+        tau = hi / lambda_scale
+        z_eig = rj.copy()
+        z_eig[active] = rj[active] / (1.0 + hi * lambda_scaled)
 
-    z_coords = W @ z_eig
-    e_after = float(np.sum(muA * z_eig * z_eig))
+    z_coords = Pc @ (W @ z_eig)
+    e_after = float(z_coords @ (Ac @ z_coords))
+    e_after_scale = (float(np.max(np.abs(Ac))) * _stable_norm(z_coords) ** 2
+                     if Ac.size else 0.0)
+    e_after_tol = _scale_relative_tol(e_after, e_after_scale)
+    assert e_after >= -e_after_tol, f"PSD transverse energy became negative: {e_after}"
+    e_after = 0.0 if abs(e_after) <= e_after_tol else max(e_after, 0.0)
+    _assert_trust_postcondition(mu, e_after, budget)
 
     contrib = muA * rj * rj                     # Ritz-mode concentration of e_before
     order = np.argsort(contrib)[::-1]
     csum = np.cumsum(contrib[order])
     total = csum[-1] if csum.size else 0.0
-    n90 = int(np.searchsorted(csum, 0.9 * total) + 1) if total > _EPS else 0
+    n90 = int(np.searchsorted(csum, 0.9 * total) + 1) if total > 0.0 else 0
 
     diag = {"tau": tau, "bind": bind, "e_before": e_before, "e_after": e_after,
             "budget": budget, "ritz": muA, "n_modes_90": n90}
@@ -214,8 +363,10 @@ def cttn_step(
     """
     g = g.astype(np.float64, copy=False)
     b = b.astype(np.float64, copy=False)
-    gn = float(np.linalg.norm(g))
-    if gn <= _EPS:
+    V = V.astype(np.float64, copy=False)
+    T = T.astype(np.float64, copy=False)
+    gn = _stable_norm(g)
+    if gn == 0.0:
         # Degenerate: no merged signal. Fall back to plain Nesterov.
         b_new = mu * b + g
         d = g + mu * b_new
@@ -225,7 +376,7 @@ def cttn_step(
     q = g / gn
     r = project_out(b, q)              # transverse buffer
     b_parallel = b - r
-    r_norm = float(np.linalg.norm(r))
+    r_norm = _stable_norm(r)
 
     # Project into the k-dim V basis (q, r, g all lie in span(V)) and solve the
     # <=k-dim trust region with the shared core (identical for the torch path).
@@ -234,15 +385,24 @@ def cttn_step(
     gc = V.T @ g
     z_coords, diag = _solve_trustregion_kdim(qc, rc, gc, T, mu=mu, rho=rho)
 
-    z = V @ z_coords                   # parameter space; q^T z == 0 by construction
-    z_norm = float(np.linalg.norm(z))
+    z = V @ z_coords
+    z = project_out(z, q)              # final full-space transversality guard
+    z_norm = _stable_norm(z)
+    z_coords_final = V.T @ z
+    diag["e_after"] = _transverse_energy_kdim(qc, z_coords_final, T)
+    _assert_trust_postcondition(mu, diag["e_after"], diag["budget"])
     b_new = mu * (b_parallel + z) + g
     d = g + mu * mu * z                 # == g + mu * P(b_new); q^T d == ||g||
+    qtd = float(q @ d)
+    qtd_tol = _scale_relative_tol(qtd, gn, factor=1024.0 * max(1, g.size))
+    assert abs(qtd - gn) <= qtd_tol, (
+        f"parallel-step invariant violated: q^T d={qtd}, ||g||={gn}"
+    )
 
     return CttnResult(
         d=d, b_new=b_new, z=z, tau=diag["tau"], bind=diag["bind"],
         r_norm=r_norm, z_norm=z_norm,
-        norm_retention=(z_norm / r_norm) if r_norm > _EPS else 1.0,
+        norm_retention=(z_norm / r_norm) if r_norm > 0.0 else 1.0,
         e_before=diag["e_before"], e_after=diag["e_after"], budget=diag["budget"],
         ritz=diag["ritz"], n_modes_90=diag["n_modes_90"],
     )

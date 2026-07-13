@@ -7,7 +7,9 @@ correct optimizer rather than a buggy one:
   3. anisotropic damping:                   sharp Ritz modes of r shrunk,
                                             flat modes preserved
 plus dimensionless-rho scale invariance (the bug that killed wsub) and the
-non-binding / degenerate fallbacks.
+non-binding / degenerate fallbacks. Regression cases cover exhausted Krylov
+spaces, cached-HVP accounting, indefinite curvature, zero budgets, extreme
+scales, and the bf16 torch path.
 
 Run:  python scripts/test_cttn.py
 """
@@ -16,7 +18,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from yeto.cttn import block_lanczos, cttn_step, orth, project_out
+from yeto.cttn import (
+    _solve_trustregion_kdim,
+    block_lanczos,
+    cttn_step,
+    orth,
+    project_out,
+)
 
 RNG = np.random.default_rng(20260713)
 
@@ -42,12 +50,234 @@ def check(name, cond):
     return cond
 
 
+def scaled_bound_holds(lhs: float, rhs: float, rtol: float = 1e-11) -> bool:
+    return lhs <= rhs + rtol * max(abs(lhs), abs(rhs))
+
+
+def counted_hvp(H: np.ndarray):
+    stats = {"calls": 0, "columns": 0}
+
+    def hvp(X):
+        stats["calls"] += 1
+        stats["columns"] += X.shape[1]
+        return H @ X
+
+    return hvp, stats
+
+
+def test_identity_rank_collapse(mu: float, rho: float) -> bool:
+    print("\nIdentity-Hessian rank-collapse regression:")
+    p = 24
+    H = np.eye(p)
+    g = RNG.standard_normal(p)
+    q = g / np.linalg.norm(g)
+    transverse = project_out(RNG.standard_normal(p), q)
+    transverse /= np.linalg.norm(transverse)
+    b = 4.0 * np.linalg.norm(g) * transverse + 0.25 * q
+    r = project_out(b, q)
+    Q0 = orth([q, r / np.linalg.norm(r)])
+    hvp, stats = counted_hvp(H)
+    V, T = block_lanczos(hvp, Q0, block_steps=4)
+    res = cttn_step(g, b, V, T, mu=mu, rho=rho)
+
+    gram_error = float(np.linalg.norm(V.T @ V - np.eye(V.shape[1])))
+    lhs = mu ** 4 * res.e_after
+    ok = True
+    ok &= check(f"H=I Krylov stops at seed rank (k={V.shape[1]} == 2)",
+                V.shape[1] == 2)
+    ok &= check(f"H=I basis remains orthonormal (error={gram_error:.3g})",
+                gram_error < 1e-12)
+    ok &= check(f"cached HVP count equals returned rank ({stats['columns']} == 2)",
+                stats["columns"] == V.shape[1] == 2)
+    ok &= check("identity parallel invariant",
+                np.isclose(q @ res.d, np.linalg.norm(g), rtol=1e-12, atol=0.0))
+    ok &= check(f"identity trust bound ({lhs:.6g} <= {res.budget:.6g})",
+                scaled_bound_holds(lhs, res.budget))
+    return ok
+
+
+def test_invariant_subspace(mu: float, rho: float) -> bool:
+    print("\nLow-rank invariant-subspace regression:")
+    H = np.diag([7.0, 3.0, 1.0, 0.0, 0.0, 0.0])
+    g = np.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
+    q = g / np.linalg.norm(g)
+    b = np.array([3.0, -2.0, 4.0, 0.0, 0.0, 0.0])
+    r = project_out(b, q)
+    Q0 = orth([q, r / np.linalg.norm(r)])
+    hvp, stats = counted_hvp(H)
+    V, T = block_lanczos(hvp, Q0, block_steps=4)
+    res = cttn_step(g, b, V, T, mu=mu, rho=rho)
+
+    gram_error = float(np.linalg.norm(V.T @ V - np.eye(V.shape[1])))
+    ok = True
+    ok &= check(f"invariant Krylov space stops at rank 3 (k={V.shape[1]})",
+                V.shape[1] == 3)
+    ok &= check(f"invariant basis orthonormal (error={gram_error:.3g})",
+                gram_error < 1e-12)
+    ok &= check(f"invariant-space HVPs cached ({stats['columns']} == {V.shape[1]})",
+                stats["columns"] == V.shape[1])
+    ok &= check("invariant-space result finite",
+                np.all(np.isfinite(res.d)) and np.all(np.isfinite(res.z)))
+    return ok
+
+
+def test_indefinite_and_zero_budget(mu: float) -> bool:
+    print("\nIndefinite/zero-budget regressions:")
+    H = np.diag([-5.0, 0.0, 3.0, 8.0])
+    g = np.array([0.0, 0.0, 0.0, 1.0])
+    b = np.array([1.0, 0.0, 1.0, 0.0])
+    q = g.copy()
+    r = project_out(b, q)
+    V, T = block_lanczos(hvp_of(H), orth([q, r / np.linalg.norm(r)]), 4)
+    res = cttn_step(g, b, V, T, mu=mu, rho=0.0)
+
+    # Negative curvature is zeroed by Hplus, while the positive transverse
+    # direction must be removed to meet a truly zero target.
+    ok = True
+    ok &= check("indefinite spectrum is PSD-projected",
+                np.all(res.ritz >= 0.0))
+    ok &= check(f"negative-curvature component retained ({res.z[0]:.6g} ~= 1)",
+                np.isclose(res.z[0], 1.0, atol=1e-12))
+    ok &= check(f"positive-curvature component removed ({res.z[2]:.3g} ~= 0)",
+                abs(res.z[2]) < 1e-12)
+    ok &= check("rho=0 binds with positive transverse energy",
+                res.bind and np.isinf(res.tau) and res.e_after == 0.0)
+
+    # g lies in H's nullspace, so the budget is zero even at rho>0. The
+    # positive transverse mode is removed and A's nullspace is retained.
+    H0 = np.diag([0.0, 2.0, 0.0])
+    g0 = np.array([1.0, 0.0, 0.0])
+    b0 = np.array([0.0, 1.0, 1.0])
+    r0 = project_out(b0, g0)
+    V0, T0 = block_lanczos(hvp_of(H0), orth([g0, r0 / np.linalg.norm(r0)]), 4)
+    res0 = cttn_step(g0, b0, V0, T0, mu=mu, rho=0.1)
+    ok &= check("g_curv=0 removes positive transverse curvature",
+                res0.bind and abs(res0.z[1]) < 1e-12)
+    ok &= check("g_curv=0 retains transverse nullspace",
+                np.isclose(res0.z[2], 1.0, atol=1e-12))
+    ok &= check("zero-budget result remains exactly transverse",
+                abs(g0 @ res0.z) < 1e-12 and np.isclose(g0 @ res0.d, 1.0))
+    return ok
+
+
+def test_trustregion_edge_cases(mu: float, rho: float) -> bool:
+    print("\nTrust-region scale/degeneracy regressions:")
+    qc = np.array([1.0, 0.0])
+    rc = np.array([0.0, 1.0])
+    gc = np.array([1.0, 0.0])
+
+    # Exact former counterexample: 0.9^4 * 1e-40 > 0.1 * 1e-40.
+    _, tiny_diag = _solve_trustregion_kdim(
+        qc, rc, gc, np.eye(2) * 1e-40, mu=mu, rho=rho,
+    )
+    tiny_lhs = mu ** 4 * tiny_diag["e_after"]
+    ok = True
+    ok &= check("T=1e-40 cap binds (no fixed absolute epsilon)", tiny_diag["bind"])
+    ok &= check(f"T=1e-40 postcondition ({tiny_lhs:.3g} <= "
+                f"{tiny_diag['budget']:.3g})",
+                scaled_bound_holds(tiny_lhs, tiny_diag["budget"]))
+
+    # Full-step scale invariance across 80 orders of curvature energy.
+    scaled_results = []
+    for label, alpha, beta in (
+        ("tiny", 1e-20, 1e-40),
+        ("huge", 1e20, 1e20),
+    ):
+        H = np.eye(2) * beta
+        g = np.array([alpha, 0.0])
+        b = np.array([0.0, alpha])
+        V, T = block_lanczos(hvp_of(H), np.eye(2), block_steps=4)
+        res = cttn_step(g, b, V, T, mu=mu, rho=rho)
+        lhs = mu ** 4 * res.e_after
+        scaled_results.append(res)
+        ok &= check(f"{label}-scale cap binds", res.bind)
+        ok &= check(f"{label}-scale postcondition ({lhs:.3g} <= {res.budget:.3g})",
+                    scaled_bound_holds(lhs, res.budget))
+        ok &= check(f"{label}-scale parallel invariant",
+                    np.isclose(res.d[0], alpha, rtol=1e-12, atol=0.0))
+    ok &= check("tiny/huge retention is scale-invariant",
+                np.isclose(scaled_results[0].norm_retention,
+                           scaled_results[1].norm_retention,
+                           rtol=1e-11, atol=0.0))
+
+    z_mu0, diag_mu0 = _solve_trustregion_kdim(
+        qc, rc, gc, np.eye(2), mu=0.0, rho=0.0,
+    )
+    ok &= check("mu=0 retains transverse momentum and cannot bind",
+                not diag_mu0["bind"] and np.allclose(z_mu0, rc))
+
+    leaking_rc = np.array([3.0, 4.0])
+    z_zero, diag_zero = _solve_trustregion_kdim(
+        qc, leaking_rc, gc, np.zeros((2, 2)), mu=mu, rho=0.0,
+    )
+    ok &= check("all-zero A retains only structurally transverse rc",
+                not diag_zero["bind"] and np.allclose(z_zero, [0.0, 4.0]))
+    return ok
+
+
+def test_torch_bf16_parity() -> bool:
+    print("\nTorch bf16/fp32-work regression:")
+    try:
+        import torch
+        from yeto.cttn_torch import block_lanczos_torch, cttn_step_torch
+    except (ImportError, OSError) as exc:
+        return check(f"torch import available ({exc})", False)
+
+    Q0 = torch.tensor(
+        [[0.5, 0.5], [0.5, -0.5], [0.5, 0.5], [0.5, -0.5]],
+        dtype=torch.bfloat16,
+    )
+    stats = {"columns": 0}
+
+    def identity_hvp(X):
+        stats["columns"] += X.shape[1]
+        return X
+
+    V32, T32 = block_lanczos_torch(identity_hvp, Q0, block_steps=4)
+    g = torch.tensor([1.0, 1.0, 1.0, 1.0], dtype=torch.bfloat16)
+    b = torch.tensor([4.0, -4.0, 4.0, -4.0], dtype=torch.bfloat16)
+    V_bf16 = V32.to(torch.bfloat16)
+    T_bf16 = T32.to(torch.bfloat16)
+    d_t, b_new_t, diag_t = cttn_step_torch(
+        g, b, V_bf16, T_bf16, mu=0.5, rho=0.25,
+    )
+
+    g_np = g.float().numpy().astype(np.float64)
+    b_np = b.float().numpy().astype(np.float64)
+    V_np = V_bf16.float().numpy().astype(np.float64)
+    T_np = T_bf16.float().numpy().astype(np.float64)
+    res_np = cttn_step(g_np, b_np, V_np, T_np, mu=0.5, rho=0.25)
+    d_np_bf16 = torch.from_numpy(res_np.d).to(torch.bfloat16).float().numpy()
+    b_np_bf16 = torch.from_numpy(res_np.b_new).to(torch.bfloat16).float().numpy()
+
+    q = g.float() / torch.linalg.vector_norm(g.float())
+    qtd = float(torch.dot(q, d_t.float()))
+    gram_error = float(torch.linalg.matrix_norm(V32.T @ V32 - torch.eye(2)))
+    ok = True
+    ok &= check(f"torch H=I Krylov stops at 2 columns (k={V32.shape[1]})",
+                V32.shape[1] == 2 and stats["columns"] == 2)
+    ok &= check(f"torch Krylov basis orthonormal (error={gram_error:.3g})",
+                gram_error < 1e-6)
+    ok &= check("bf16 public output dtype preserved",
+                d_t.dtype == torch.bfloat16 and b_new_t.dtype == torch.bfloat16)
+    ok &= check("bf16 path matches numpy after the required output cast",
+                np.allclose(d_t.float().numpy(), d_np_bf16, rtol=1e-6, atol=1e-6)
+                and np.allclose(b_new_t.float().numpy(), b_np_bf16,
+                                rtol=1e-6, atol=1e-6))
+    ok &= check(f"bf16 torch parallel invariant ({qtd:.6g} == 2)",
+                np.isclose(qtd, 2.0, rtol=1e-6, atol=1e-6))
+    ok &= check("bf16 diagnostics are finite fp32-compatible numpy arrays",
+                diag_t.d.dtype == np.float32 and np.all(np.isfinite(diag_t.d))
+                and diag_t.z.dtype == np.float32)
+    return ok
+
+
 def main() -> int:
     p = 300
     mu = 0.9
     rho = 0.10
     H, U, lam = make_H(p, sharp=[120.0, 60.0, 30.0], flat_scale=1.0)
-    hvp = hvp_of(H)
+    hvp, golden_hvp_stats = counted_hvp(H)
 
     g = RNG.standard_normal(p)
     b = RNG.standard_normal(p) * 2.0        # buffer with real transverse content
@@ -61,6 +291,10 @@ def main() -> int:
 
     ok = True
     print("CTTN core golden-trace:")
+
+    ok &= check(f"full-rank Krylov uses one HVP per column "
+                f"({golden_hvp_stats['columns']} == {V.shape[1]} <= 8)",
+                golden_hvp_stats["columns"] == V.shape[1] <= 8)
 
     # 1. parallel step is exact SGD
     qtd = float(q @ res.d)
@@ -131,6 +365,12 @@ def main() -> int:
     # 6. degenerate g==0 fallback doesn't crash and returns plain Nesterov.
     res0 = cttn_step(np.zeros(p), b, V, T, mu=mu, rho=rho)
     ok &= check("g==0 fallback finite", np.all(np.isfinite(res0.d)))
+
+    ok &= test_identity_rank_collapse(mu, rho)
+    ok &= test_invariant_subspace(mu, rho)
+    ok &= test_indefinite_and_zero_budget(mu)
+    ok &= test_trustregion_edge_cases(mu, rho)
+    ok &= test_torch_bf16_parity()
 
     print(f"\n{'ALL PASS' if ok else 'FAILURES PRESENT'}")
     return 0 if ok else 1
