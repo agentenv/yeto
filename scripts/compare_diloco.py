@@ -90,6 +90,7 @@ OUTER_OPTIMIZERS = (
     "block-yogi",
     "cheb-sgd",
     "cttn",
+    "cttn-scalar",
 )
 # Matrix-fragment aggregation modes the harness understands (client-side
 # --matrix-merge). "worker-snr" is the memoryless cross-worker consensus merge.
@@ -101,6 +102,7 @@ COMMIT_POLICIES = (
     "probe_lr_shadow",
     "probe_lr_v1",
     "cttn_v1",
+    "cttn_scalar_v1",
 )
 LOO_COMMIT_POLICIES = frozenset(("probe_shadow", "probe_loo_v1"))
 ACTION_PROBE_MIN_GAIN = 0.00025
@@ -109,7 +111,7 @@ ACTION_PROBE_MIN_WIN_RATE = 0.75
 ACTION_PROBE_ACTIONS = ("A0", "A1", "A2", "A3", "A4")
 ACTION_PROBE_SHADOW_POLICIES = frozenset(("probe_shadow", "probe_lr_shadow"))
 ACTION_PROBE_ACTIVE_POLICIES = frozenset(
-    ("probe_loo_v1", "probe_lr_v1", "cttn_v1")
+    ("probe_loo_v1", "probe_lr_v1", "cttn_v1", "cttn_scalar_v1")
 )
 ACTION_PROBE_SCALAR_MULTIPLIERS = {
     action: multiplier
@@ -276,9 +278,11 @@ def apply_arm_overrides(
             arm.outer_momentum if outer_momentum is None else outer_momentum
         )
         selected_policy = arm.commit_policy if commit_policy is None else commit_policy
-        if selected_optimizer == "cttn":
-            selected_policy = "cttn_v1"
-        if selected_policy == "cttn_v1":
+        if selected_optimizer in ("cttn", "cttn-scalar"):
+            selected_policy = (
+                "cttn_v1" if selected_optimizer == "cttn" else "cttn_scalar_v1"
+            )
+        if selected_policy in ("cttn_v1", "cttn_scalar_v1"):
             if outer_momentum is None:
                 selected_momentum = 0.0
         normalized.append(
@@ -572,12 +576,19 @@ def syncer_command(
     cttn_rho: float = 0.10,
 ) -> list[str]:
     # The syncer takes no fragment count: the layout arrives in HELLO.
-    cttn_pseudo_optimizer = arm.outer_optimizer == "cttn"
+    cttn_pseudo_optimizer = arm.outer_optimizer in ("cttn", "cttn-scalar")
     syncer_outer_optimizer = (
         "nesterov" if cttn_pseudo_optimizer else arm.outer_optimizer
     )
-    commit_policy = "cttn_v1" if cttn_pseudo_optimizer else arm.commit_policy
-    cttn_enabled = commit_policy == "cttn_v1"
+    if cttn_pseudo_optimizer:
+        commit_policy = (
+            "cttn_scalar_v1"
+            if arm.outer_optimizer == "cttn-scalar"
+            else "cttn_v1"
+        )
+    else:
+        commit_policy = arm.commit_policy
+    cttn_enabled = commit_policy in ("cttn_v1", "cttn_scalar_v1")
     cmd = [
         str(SYNCER_BIN),
         "--port",
@@ -1048,7 +1059,13 @@ def validate_action_probe_run(
     validate_event_tape_records(arm, records, expected_steps=expected_steps)
     if not records:
         raise RuntimeError(f"{arm.name}: action-probe event tape has no records")
-    action_names = ("A0", "CTTN") if policy == "cttn_v1" else ACTION_PROBE_ACTIONS
+    action_names = (
+        ("A0", "CTTN")
+        if policy == "cttn_v1"
+        else ("A0", "CTTN-SCALAR")
+        if policy == "cttn_scalar_v1"
+        else ACTION_PROBE_ACTIONS
+    )
 
     selected_counts: Counter[str] = Counter()
     committed_counts: Counter[str] = Counter()
@@ -1139,7 +1156,7 @@ def validate_action_probe_run(
                     f"{selected_action} selected_multiplier must be exactly "
                     f"{expected_multiplier} for {policy}",
                 )
-        if policy == "cttn_v1" and not fallback:
+        if policy in ("cttn_v1", "cttn_scalar_v1") and not fallback:
             if record.get("cttn_bind") not in (True, False):
                 _probe_record_error(
                     arm, index, record, "successful CTTN record must include cttn_bind"

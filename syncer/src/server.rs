@@ -1405,7 +1405,7 @@ async fn complete_round(
                 MergeCandidate::new(*id, push.values.as_slice(), weight)
             })
             .collect::<Vec<_>>();
-        if cfg.commit_policy == CommitPolicy::ProbeCttnV1 {
+        if let Some(cttn_mode) = cfg.commit_policy.cttn_mode() {
             let aggregate = st.build_full_aggregate(p, &candidates)?;
             let inputs = st.cttn_inputs(&aggregate, cfg.cttn_mu)?;
             let baseline = st.preview_aggregate(&aggregate, t)?;
@@ -1430,6 +1430,7 @@ async fn complete_round(
                         inputs.mu,
                         cfg.cttn_rho,
                         4,
+                        cttn_mode,
                     )
                     .await
                 {
@@ -1437,6 +1438,11 @@ async fn complete_round(
                         let latency = probe_started.elapsed().as_secs_f64() * 1000.0;
                         let diagnostics = verified.diagnostics;
                         let request_digest = verified.request_digest;
+                        let action = if cttn_mode == "scalar" {
+                            "CTTN-SCALAR"
+                        } else {
+                            "CTTN"
+                        };
                         match st.commit_cttn_step(
                             &aggregate,
                             t,
@@ -1448,8 +1454,8 @@ async fn complete_round(
                                 stats,
                                 CommitDecision {
                                     policy: cfg.commit_policy,
-                                    selected_action: "CTTN".to_owned(),
-                                    committed_action: "CTTN".to_owned(),
+                                    selected_action: action.to_owned(),
+                                    committed_action: action.to_owned(),
                                     fallback: false,
                                     fallback_reason: None,
                                     probe_latency_ms: Some(latency),

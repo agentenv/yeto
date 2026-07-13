@@ -1,9 +1,8 @@
 """End-to-end test of the sidecar CTTN step (yeto/cttn_sidecar) on a tiny model.
 
-Validates the retained-graph HVP path used inside the action-probe sidecar:
-  * exactly ONE forward + ONE first-backward for the whole 8-HVP sketch
-    (efficiency: the fix for the 84.7s/14-HVP regression);
-  * retained-graph HVP == naive per-column HVP (correctness);
+Validates the panel-streamed HVP path used inside the action-probe sidecar:
+  * only one graph is built per panel for an 8-column HVP call;
+  * panel-streamed HVP == the true panel-averaged HVP (correctness);
   * cttn_sidecar_step end-to-end preserves q^T d == ||g|| on real curvature;
   * panel averaging works (multi-panel Hessian).
 
@@ -59,29 +58,37 @@ def main() -> int:
     ok = True
     print("CTTN sidecar (tiny LoRA-Llama):")
 
-    # 1. retained-graph HVP == naive per-column HVP, and counts ONE forward.
-    fwd_calls = {"n": 0}
+    # 1. Panel-streamed HVP == naive per-column HVP. The no-grad loss pass and
+    # the graph-building pass each visit every panel once; all eight columns
+    # reuse that panel's graph.
+    fwd_calls = {"all": 0, "grad": 0}
     orig_forward = model.forward
 
     def counting_forward(*a, **k):
-        fwd_calls["n"] += 1
+        fwd_calls["all"] += 1
+        fwd_calls["grad"] += int(torch.is_grad_enabled())
         return orig_forward(*a, **k)
 
     model.forward = counting_forward
     hvp, loss_val, release = make_hvp(model, params, panels)
-    n_fwd_after_build = fwd_calls["n"]
+    n_fwd_after_build = dict(fwd_calls)
     X = torch.tensor(rng.standard_normal((p, 8)), dtype=torch.float32)
     HX = hvp(X)
-    n_fwd_after_8hvp = fwd_calls["n"]
+    n_fwd_after_8hvp = dict(fwd_calls)
     release()
     model.forward = orig_forward
 
-    ok &= check(f"one forward per panel to build graph "
-                f"({n_fwd_after_build} == {len(panels)})",
-                n_fwd_after_build == len(panels))
-    ok &= check(f"8 HVP columns add ZERO forwards (retained graph) "
-                f"({n_fwd_after_8hvp - n_fwd_after_build} == 0)",
-                n_fwd_after_8hvp == n_fwd_after_build)
+    ok &= check(
+        f"loss pass is one no-grad forward per panel "
+        f"({n_fwd_after_build['all']} == {len(panels)})",
+        n_fwd_after_build == {"all": len(panels), "grad": 0},
+    )
+    ok &= check(
+        f"8 HVP columns build one graph per panel "
+        f"({n_fwd_after_8hvp['grad']} == {len(panels)})",
+        n_fwd_after_8hvp["grad"] == len(panels)
+        and n_fwd_after_8hvp["all"] == 2 * len(panels),
+    )
 
     # naive HVP for one column to cross-check
     def naive_hvp_col(v):
@@ -102,7 +109,7 @@ def main() -> int:
     v0 = X[:, 0]
     naive = naive_hvp_col(v0)
     rel = (HX[:, 0] - naive).norm().item() / (naive.norm().item() + 1e-12)
-    ok &= check(f"retained-graph HVP == naive (rel={rel:.2e})", rel < 1e-5)
+    ok &= check(f"panel-averaged HVP == naive (rel={rel:.2e})", rel < 1e-5)
 
     # 2. end-to-end sidecar step: q^T d == ||g||, finite, buffer shape.
     g = torch.tensor(rng.standard_normal(p), dtype=torch.float32)
@@ -130,6 +137,20 @@ def main() -> int:
         and zero_budget.diag.budget == 0.0
         and zero_budget.diag.e_after == 0.0
         and abs(zero_qtd - float(g.norm())) < 1e-4 * float(g.norm()),
+    )
+
+    scalar = cttn_sidecar_step(
+        model, params, panels, g, b, mu=0.9, rho=0.10, scalar_control=True
+    )
+    scalar_qtd = float(torch.dot(q, scalar.d))
+    scalar_r = b - q * torch.dot(q, b)
+    scalar_z = (scalar.d - g) / (0.9 ** 2)
+    scalar_alpha = float(torch.dot(scalar_z, scalar_r) / torch.dot(scalar_r, scalar_r))
+    scalar_residual = float(torch.linalg.vector_norm(scalar_z - scalar_alpha * scalar_r))
+    ok &= check(
+        "scalar-HVP control applies one isotropic transverse shrink",
+        abs(scalar_qtd - float(g.norm())) < 1e-4 * float(g.norm())
+        and scalar_residual < 2e-4 * float(torch.linalg.vector_norm(scalar_r)),
     )
 
     # 3. flatten/unflatten round-trip in fragment order

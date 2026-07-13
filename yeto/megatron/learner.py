@@ -164,6 +164,7 @@ def main(argv=None):
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 
     from ..fragments import build_layout
+    from ..layout_metadata import build_fragment_order_metadata
     from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
     from ..tensor_io import (
         apply_fragment,
@@ -211,7 +212,14 @@ def main(argv=None):
     client = None
     if rank == 0 and args.syncer != "none":
         host, port = args.syncer.rsplit(":", 1)
-        client = SyncerClient((host, int(port)), args.learner_id, layout, wire_dtype, args.wan_streams)
+        client = SyncerClient(
+            (host, int(port)),
+            args.learner_id,
+            layout,
+            wire_dtype,
+            args.wan_streams,
+            layout_metadata=build_fragment_order_metadata(layout),
+        )
         client.start()
         log.info("connected to syncer at %s", args.syncer)
         if args.learner_id == 0:

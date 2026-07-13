@@ -456,6 +456,7 @@ def build_cttn_request_frame(
     mu: float,
     rho: float,
     block_steps: int = 4,
+    mode: str = "matrix",
 ) -> bytes:
     """Build the exact ``cttn_step`` wire frame emitted by the Rust client."""
 
@@ -511,6 +512,8 @@ def build_cttn_request_frame(
     if rho < 0.0:
         raise ProtocolError("cttn.rho must be non-negative")
     block_steps = _require_int(block_steps, "cttn.block_steps", minimum=1)
+    if mode not in ("matrix", "scalar"):
+        raise ProtocolError("cttn.mode must be matrix or scalar")
 
     header = {
         "protocol": PROTOCOL,
@@ -539,6 +542,7 @@ def build_cttn_request_frame(
             "mu": mu,
             "rho": rho,
             "block_steps": block_steps,
+            "mode": mode,
         },
     }
     return encode_frame(header, bytes(payload))
@@ -589,6 +593,7 @@ class CttnRequest:
     mu: float
     rho: float
     block_steps: int
+    mode: str
     request_digest: str
 
 
@@ -983,6 +988,9 @@ def parse_cttn_request(frame: Frame) -> CttnRequest:
     if rho < 0.0:
         raise ProtocolError("cttn.rho must be non-negative")
     block_steps = _require_int(cttn.get("block_steps"), "cttn.block_steps", minimum=1)
+    mode = cttn.get("mode", "matrix")
+    if mode not in ("matrix", "scalar"):
+        raise ProtocolError("cttn.mode must be matrix or scalar")
     if offset != len(frame.payload):
         raise ProtocolError(
             f"payload has {len(frame.payload) - offset} unclaimed bytes"
@@ -1013,6 +1021,7 @@ def parse_cttn_request(frame: Frame) -> CttnRequest:
         mu=mu,
         rho=rho,
         block_steps=block_steps,
+        mode=mode,
         request_digest=frame.digest,
     )
 
@@ -1831,6 +1840,7 @@ class ActionProbeReplica:
                 rho=request.rho,
                 block_steps=request.block_steps,
                 loss_function=self.loss_function,
+                scalar_control=request.mode == "scalar",
             )
             _sync_device(self.device)
             if result.d.numel() != request.g.numel() or result.b_new.numel() != request.b.numel():

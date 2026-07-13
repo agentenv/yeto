@@ -20,6 +20,7 @@ from yeto.cttn import (
     RHO_DEFAULT,
     CttnResult,
     _assert_trust_postcondition,
+    _solve_scalar_trustregion_kdim,
     _solve_trustregion_kdim,
     _transverse_energy_kdim,
 )
@@ -109,6 +110,7 @@ def cttn_step_torch(
     *,
     mu: float,
     rho: float = RHO_DEFAULT,
+    scalar_control: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, CttnResult]:
     """One CTTN step in torch. Returns (d, b_new, diagnostics).
 
@@ -151,7 +153,20 @@ def cttn_step_torch(
     gc = (Vw.T @ gw).detach().double().cpu().numpy()
     Tk = Tw.detach().double().cpu().numpy()
 
-    z_coords_np, diag = _solve_trustregion_kdim(qc, rc, gc, Tk, mu=mu, rho=rho)
+    solve = (
+        _solve_scalar_trustregion_kdim
+        if scalar_control
+        else _solve_trustregion_kdim
+    )
+    z_coords_np, diag = solve(
+        qc,
+        rc,
+        gc,
+        Tk,
+        mu=mu,
+        rho=rho,
+        working_eps=_F32_EPS,
+    )
 
     z_coords = torch.tensor(z_coords_np, device=dev, dtype=work_dtype)
     z = Vw @ z_coords
@@ -160,7 +175,12 @@ def cttn_step_torch(
     z_norm = float(_stable_norm_float32(z))
     z_coords_final = (Vw.T @ z).detach().double().cpu().numpy()
     diag["e_after"] = _transverse_energy_kdim(qc, z_coords_final, Tk)
-    _assert_trust_postcondition(mu, diag["e_after"], diag["budget"])
+    _assert_trust_postcondition(
+        mu,
+        diag["e_after"],
+        diag["budget"],
+        working_eps=_F32_EPS,
+    )
 
     b_new_work = mu * (b_parallel + z) + gw
     d_work = gw + (mu * mu) * z

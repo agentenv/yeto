@@ -31,6 +31,7 @@ import torch.distributed as dist
 from .autobatch import int_or_auto, rebalance_grad_accum, resolve_micro_batch_size
 from .data import StreamingPackedBlocks, build_packed_dataset
 from .fragments import FragmentLayout, build_layout
+from .layout_metadata import build_fragment_order_metadata
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
 from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
 from .tensor_io import (
@@ -1064,7 +1065,12 @@ def main(argv=None) -> None:
     if rank == 0 and args.syncer != "none":
         host, port = args.syncer.rsplit(":", 1)
         client = SyncerClient(
-            (host, int(port)), args.learner_id, layout, wire_dtype, args.wan_streams
+            (host, int(port)),
+            args.learner_id,
+            layout,
+            wire_dtype,
+            args.wan_streams,
+            layout_metadata=build_fragment_order_metadata(layout),
         )
         client.start()
         log.info("connected to syncer at %s", args.syncer)

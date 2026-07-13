@@ -190,15 +190,34 @@ def _transverse_energy_kdim(qc: np.ndarray, zc: np.ndarray, T: np.ndarray) -> fl
     return max(energy, 0.0)
 
 
-def _assert_trust_postcondition(mu: float, e_after: float, budget: float) -> None:
+def _assert_trust_postcondition(
+    mu: float,
+    e_after: float,
+    budget: float,
+    *,
+    working_eps: float = _F64_EPS,
+) -> None:
+    """Check the trust cap at the precision used for p-dimensional work."""
     lhs = float(mu) ** 4 * e_after
-    tol = _scale_relative_tol(lhs, budget, factor=1024.0)
+    if not np.isfinite(working_eps) or working_eps <= 0.0:
+        raise ValueError("working_eps must be finite and positive")
+    scale = max(abs(lhs), abs(float(budget)))
+    tol = 64.0 * float(working_eps) * scale
     assert lhs <= budget + tol, (
         f"trust-region postcondition violated: {lhs} > {budget} + {tol}"
     )
 
 
-def _solve_trustregion_kdim(qc, rc, gc, T, *, mu, rho):
+def _solve_trustregion_kdim(
+    qc,
+    rc,
+    gc,
+    T,
+    *,
+    mu,
+    rho,
+    working_eps: float = _F64_EPS,
+):
     """Shared <=k-dim CTTN trust-region solve (numpy; k<=8).
 
     qc, rc, gc : [k] coordinates of q, r, g in the orthonormal V basis
@@ -300,7 +319,7 @@ def _solve_trustregion_kdim(qc, rc, gc, T, *, mu, rho):
     e_after_tol = _scale_relative_tol(e_after, e_after_scale)
     assert e_after >= -e_after_tol, f"PSD transverse energy became negative: {e_after}"
     e_after = 0.0 if abs(e_after) <= e_after_tol else max(e_after, 0.0)
-    _assert_trust_postcondition(mu, e_after, budget)
+    _assert_trust_postcondition(mu, e_after, budget, working_eps=working_eps)
 
     contrib = muA * rj * rj                     # Ritz-mode concentration of e_before
     order = np.argsort(contrib)[::-1]
@@ -310,6 +329,105 @@ def _solve_trustregion_kdim(qc, rc, gc, T, *, mu, rho):
 
     diag = {"tau": tau, "bind": bind, "e_before": e_before, "e_after": e_after,
             "budget": budget, "ritz": muA, "n_modes_90": n90}
+    return z_coords, diag
+
+
+def _solve_scalar_trustregion_kdim(
+    qc,
+    rc,
+    gc,
+    T,
+    *,
+    mu,
+    rho,
+    working_eps: float = _F64_EPS,
+):
+    """Isotropic scalar-HVP control using the same curvature budget as CTTN."""
+    if rho < 0.0:
+        raise ValueError("rho must be non-negative")
+
+    qc = np.asarray(qc, dtype=np.float64)
+    rc = np.asarray(rc, dtype=np.float64)
+    gc = np.asarray(gc, dtype=np.float64)
+    T = np.asarray(T, dtype=np.float64)
+    assert qc.ndim == rc.ndim == gc.ndim == 1
+    assert qc.shape == rc.shape == gc.shape
+    assert T.shape == (qc.shape[0], qc.shape[0])
+    assert all(np.all(np.isfinite(x)) for x in (qc, rc, gc, T))
+
+    Pc, Tplus, Ac = _projected_psd_operator(qc, T)
+    rc = Pc @ rc
+    muA, W = np.linalg.eigh(Ac)
+    eig_scale = float(np.max(np.abs(muA))) if muA.size else 0.0
+    eig_tol = _scale_relative_tol(eig_scale, factor=256.0)
+    muA = np.where(muA > eig_tol, muA, 0.0)
+
+    e_before = float(rc @ (Ac @ rc))
+    e_before_scale = (
+        float(np.max(np.abs(Ac))) * _stable_norm(rc) ** 2 if Ac.size else 0.0
+    )
+    e_before_tol = _scale_relative_tol(e_before, e_before_scale)
+    assert e_before >= -e_before_tol, (
+        f"PSD transverse energy became negative: {e_before}"
+    )
+    e_before = 0.0 if abs(e_before) <= e_before_tol else max(e_before, 0.0)
+
+    g_curv_raw = float(gc @ (Tplus @ gc))
+    g_scale = (
+        float(np.max(np.abs(Tplus))) * _stable_norm(gc) ** 2
+        if Tplus.size
+        else 0.0
+    )
+    g_tol = _scale_relative_tol(g_curv_raw, g_scale)
+    assert g_curv_raw >= -g_tol, (
+        f"PSD gradient curvature became negative: {g_curv_raw}"
+    )
+    budget = rho * max(g_curv_raw, 0.0)
+    mu4 = float(mu) ** 4
+    lhs_before = mu4 * e_before
+    gate_tol = _scale_relative_tol(lhs_before, budget)
+
+    if mu4 == 0.0 or e_before == 0.0 or lhs_before <= budget + gate_tol:
+        alpha = 1.0
+        bind = False
+        tau = 0.0
+    elif budget == 0.0:
+        alpha = 0.0
+        bind = True
+        tau = np.inf
+    else:
+        alpha = float(np.sqrt(budget / lhs_before))
+        bind = True
+        tau = (1.0 / alpha) - 1.0
+
+    z_coords = Pc @ (alpha * rc)
+    e_after = float(z_coords @ (Ac @ z_coords))
+    e_after_scale = (
+        float(np.max(np.abs(Ac))) * _stable_norm(z_coords) ** 2
+        if Ac.size
+        else 0.0
+    )
+    e_after_tol = _scale_relative_tol(e_after, e_after_scale)
+    assert e_after >= -e_after_tol, f"PSD transverse energy became negative: {e_after}"
+    e_after = 0.0 if abs(e_after) <= e_after_tol else max(e_after, 0.0)
+    _assert_trust_postcondition(mu, e_after, budget, working_eps=working_eps)
+
+    rj = W.T @ rc
+    contrib = muA * rj * rj
+    order = np.argsort(contrib)[::-1]
+    csum = np.cumsum(contrib[order])
+    total = csum[-1] if csum.size else 0.0
+    n90 = int(np.searchsorted(csum, 0.9 * total) + 1) if total > 0.0 else 0
+    diag = {
+        "tau": tau,
+        "bind": bind,
+        "e_before": e_before,
+        "e_after": e_after,
+        "budget": budget,
+        "ritz": muA,
+        "n_modes_90": n90,
+        "alpha": alpha,
+    }
     return z_coords, diag
 
 
@@ -405,4 +523,84 @@ def cttn_step(
         norm_retention=(z_norm / r_norm) if r_norm > 0.0 else 1.0,
         e_before=diag["e_before"], e_after=diag["e_after"], budget=diag["budget"],
         ritz=diag["ritz"], n_modes_90=diag["n_modes_90"],
+    )
+
+
+def cttn_scalar_step(
+    g: np.ndarray,
+    b: np.ndarray,
+    V: np.ndarray,
+    T: np.ndarray,
+    *,
+    mu: float,
+    rho: float = RHO_DEFAULT,
+) -> CttnResult:
+    """Scalar-HVP control: apply one isotropic shrink ``z = alpha * P(b)``.
+
+    The scalar control uses the same HVP sketch and the same curvature budget
+    as CTTN. Its only difference is that every transverse direction shares one
+    shrink factor instead of receiving per-eigendirection damping.
+    """
+    g = g.astype(np.float64, copy=False)
+    b = b.astype(np.float64, copy=False)
+    V = V.astype(np.float64, copy=False)
+    T = T.astype(np.float64, copy=False)
+    gn = _stable_norm(g)
+    if gn == 0.0:
+        b_new = mu * b + g
+        d = g + mu * b_new
+        return CttnResult(
+            d,
+            b_new,
+            np.zeros_like(g),
+            0.0,
+            False,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            np.zeros(0),
+            0,
+        )
+
+    q = g / gn
+    r = project_out(b, q)
+    b_parallel = b - r
+    r_norm = _stable_norm(r)
+    qc = V.T @ q
+    rc = V.T @ r
+    gc = V.T @ g
+    z_coords, diag = _solve_scalar_trustregion_kdim(
+        qc, rc, gc, T, mu=mu, rho=rho
+    )
+
+    z = project_out(V @ z_coords, q)
+    z_norm = _stable_norm(z)
+    z_coords_final = V.T @ z
+    diag["e_after"] = _transverse_energy_kdim(qc, z_coords_final, T)
+    _assert_trust_postcondition(mu, diag["e_after"], diag["budget"])
+    b_new = mu * (b_parallel + z) + g
+    d = g + mu * mu * z
+    qtd = float(q @ d)
+    qtd_tol = _scale_relative_tol(qtd, gn, factor=1024.0 * max(1, g.size))
+    assert abs(qtd - gn) <= qtd_tol, (
+        f"parallel-step invariant violated: q^T d={qtd}, ||g||={gn}"
+    )
+
+    return CttnResult(
+        d=d,
+        b_new=b_new,
+        z=z,
+        tau=diag["tau"],
+        bind=diag["bind"],
+        r_norm=r_norm,
+        z_norm=z_norm,
+        norm_retention=(z_norm / r_norm) if r_norm > 0.0 else 1.0,
+        e_before=diag["e_before"],
+        e_after=diag["e_after"],
+        budget=diag["budget"],
+        ritz=diag["ritz"],
+        n_modes_90=diag["n_modes_90"],
     )

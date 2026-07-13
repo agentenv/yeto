@@ -138,8 +138,9 @@ struct Args {
     /// probe_shadow evaluates A0-A4 but commits A0; probe_loo_v1 commits the
     /// exact sidecar-selected LOO preview; probe_lr_shadow evaluates the
     /// frozen step-scale grid but commits x1; probe_lr_v1 commits the exact
-    /// sidecar-selected scaled preview; cttn_v1 asks the sidecar to compute
-    /// the curvature-trust direction and commits it through the dedicated path.
+    /// sidecar-selected scaled preview; cttn_v1 and cttn_scalar_v1 ask the
+    /// sidecar to compute a matrix or scalar curvature-trust direction and
+    /// commit it through the dedicated path.
     #[arg(long, default_value_t = action_probe::CommitPolicy::TokenWeighted)]
     commit_policy: action_probe::CommitPolicy,
     /// Persistent action-probe sidecar endpoint. Probe policies require a
@@ -251,7 +252,7 @@ fn action_probe_config(args: &Args) -> anyhow::Result<Option<action_probe::Clien
         std::time::Duration::from_millis(args.action_probe_timeout_ms),
         run_uuid,
         expected,
-        args.commit_policy == action_probe::CommitPolicy::ProbeCttnV1,
+        args.commit_policy.cttn_mode().is_some(),
     )?))
 }
 
@@ -461,6 +462,27 @@ mod tests {
         assert_eq!(cttn.commit_policy, action_probe::CommitPolicy::ProbeCttnV1);
         assert_eq!(cttn.cttn_rho, 0.2);
         assert_eq!(cttn.cttn_mu, 0.8);
+
+        let scalar_cttn = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "2",
+            "--total-steps",
+            "1",
+            "--commit-policy",
+            "cttn_scalar_v1",
+            "--action-probe-endpoint",
+            "127.0.0.1:49321",
+            "--action-probe-run-uuid",
+            "run-cttn-scalar",
+            "--action-probe-expected-config",
+            "/tmp/probe.json",
+        ])
+        .unwrap();
+        assert_eq!(
+            scalar_cttn.commit_policy,
+            action_probe::CommitPolicy::ProbeCttnScalarV1
+        );
     }
 
     #[test]

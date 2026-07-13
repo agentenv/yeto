@@ -66,12 +66,38 @@ def main() -> int:
     ok &= check("b round-trips", torch.equal(request.b, b))
     ok &= check("mu round-trips", request.mu == 0.9)
     ok &= check("rho round-trips", request.rho == 0.1)
+    ok &= check("matrix mode round-trips", request.mode == "matrix")
     ok &= check("fragment order round-trips", request.fragment_names == fragment_names)
     ok &= check(
         "g and b digests round-trip",
         request.g_digest == frame.header["cttn"]["g"]["sha256"]
         and request.b_digest == frame.header["cttn"]["b"]["sha256"],
     )
+    scalar_request = parse_cttn_request(
+        decode_frame(
+            build_cttn_request_frame(
+                request_id="cttn-scalar-wire-test",
+                run_uuid="run-wire-test",
+                step=9,
+                fragment_id=0,
+                base_version=8,
+                state_epoch=3,
+                fragment_versions=(8,),
+                layout_hash=digest("layout"),
+                anchor_manifest_sha256=digest("anchor"),
+                probe_config_sha256=digest("config"),
+                current_state=current_state,
+                fragment_names=fragment_names,
+                g=g,
+                b=b,
+                mu=0.9,
+                rho=0.1,
+                block_steps=4,
+                mode="scalar",
+            )
+        )
+    )
+    ok &= check("scalar control mode round-trips", scalar_request.mode == "scalar")
 
     d = torch.tensor([0.4, -0.2, 0.9, 1.8, -2.7, 3.6], dtype=torch.float32)
     b_new = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=torch.float32)

@@ -45,6 +45,7 @@ pub enum CommitPolicy {
     ProbeLrShadow,
     ProbeLrV1,
     ProbeCttnV1,
+    ProbeCttnScalarV1,
 }
 
 impl CommitPolicy {
@@ -66,6 +67,14 @@ impl CommitPolicy {
             _ => None,
         }
     }
+
+    pub const fn cttn_mode(self) -> Option<&'static str> {
+        match self {
+            Self::ProbeCttnV1 => Some("matrix"),
+            Self::ProbeCttnScalarV1 => Some("scalar"),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for CommitPolicy {
@@ -77,6 +86,7 @@ impl fmt::Display for CommitPolicy {
             Self::ProbeLrShadow => "probe_lr_shadow",
             Self::ProbeLrV1 => "probe_lr_v1",
             Self::ProbeCttnV1 => "cttn_v1",
+            Self::ProbeCttnScalarV1 => "cttn_scalar_v1",
         })
     }
 }
@@ -92,8 +102,9 @@ impl FromStr for CommitPolicy {
             "probe_lr_shadow" | "probe-lr-shadow" => Ok(Self::ProbeLrShadow),
             "probe_lr_v1" | "probe-lr-v1" => Ok(Self::ProbeLrV1),
             "cttn_v1" | "cttn-v1" => Ok(Self::ProbeCttnV1),
+            "cttn_scalar_v1" | "cttn-scalar-v1" => Ok(Self::ProbeCttnScalarV1),
             _ => Err(format!(
-                "commit policy must be token_weighted, probe_shadow, probe_loo_v1, probe_lr_shadow, probe_lr_v1, or cttn_v1; got {value:?}"
+                "commit policy must be token_weighted, probe_shadow, probe_loo_v1, probe_lr_shadow, probe_lr_v1, cttn_v1, or cttn_scalar_v1; got {value:?}"
             )),
         }
     }
@@ -1085,10 +1096,11 @@ impl ActionProbeClient {
         mu: f32,
         rho: f32,
         block_steps: u32,
+        mode: &str,
     ) -> std::result::Result<VerifiedCttn, ProbeError> {
         self.last_request_digest = None;
         let request =
-            self.build_cttn_request(state, aggregate, step, g, b, mu, rho, block_steps)?;
+            self.build_cttn_request(state, aggregate, step, g, b, mu, rho, block_steps, mode)?;
         self.last_request_digest = Some(request.request_digest.clone());
         let timeout = self.config.timeout;
         let response = match tokio::time::timeout(timeout, self.roundtrip(&request.frame)).await {
@@ -1122,6 +1134,7 @@ impl ActionProbeClient {
         mu: f32,
         rho: f32,
         block_steps: u32,
+        mode: &str,
     ) -> std::result::Result<WireCttnRequest, ProbeError> {
         let fragment_id = aggregate.fragment_id();
         if fragment_id >= self.layout.fragment_names.len() {
@@ -1158,6 +1171,11 @@ impl ActionProbeClient {
                     .to_owned(),
             ));
         }
+        if !matches!(mode, "matrix" | "scalar") {
+            return Err(ProbeError::Protocol(format!(
+                "CTTN mode must be matrix or scalar, got {mode:?}"
+            )));
+        }
 
         let request_id = format!(
             "cttn-step-{step}-fragment-{fragment_id}-base-{}-epoch-{}",
@@ -1192,6 +1210,7 @@ impl ActionProbeClient {
         vector_specs.insert("mu".to_owned(), json!(mu));
         vector_specs.insert("rho".to_owned(), json!(rho));
         vector_specs.insert("block_steps".to_owned(), json!(block_steps));
+        vector_specs.insert("mode".to_owned(), json!(mode));
 
         let header = json!({
             "protocol": PROTOCOL,
@@ -2410,9 +2429,18 @@ mod tests {
         assert_eq!("probe-lr-shadow".parse(), Ok(CommitPolicy::ProbeLrShadow));
         assert_eq!("probe_lr_v1".parse(), Ok(CommitPolicy::ProbeLrV1));
         assert_eq!("cttn-v1".parse(), Ok(CommitPolicy::ProbeCttnV1));
+        assert_eq!(
+            "cttn-scalar-v1".parse(),
+            Ok(CommitPolicy::ProbeCttnScalarV1)
+        );
         assert!(CommitPolicy::ProbeLrShadow.is_shadow());
         assert!(!CommitPolicy::ProbeCttnV1.is_shadow());
         assert!(!CommitPolicy::ProbeCttnV1.is_leave_one_out());
+        assert_eq!(CommitPolicy::ProbeCttnV1.cttn_mode(), Some("matrix"));
+        assert_eq!(
+            CommitPolicy::ProbeCttnScalarV1.cttn_mode(),
+            Some("scalar")
+        );
         assert_eq!(
             CommitPolicy::ProbeLrV1.step_scale_multipliers(),
             Some(&LR_PREVIEW_MULTIPLIERS)
@@ -2553,7 +2581,15 @@ mod tests {
         let inputs = state.cttn_inputs(&aggregate, 0.9).unwrap();
         let request = client
             .build_cttn_request(
-                &state, &aggregate, 5, &inputs.g, &inputs.b, inputs.mu, 0.1, 4,
+                &state,
+                &aggregate,
+                5,
+                &inputs.g,
+                &inputs.b,
+                inputs.mu,
+                0.1,
+                4,
+                "matrix",
             )
             .unwrap();
         let header_len = u32::from_be_bytes(request.frame[8..12].try_into().unwrap()) as usize;
@@ -2577,6 +2613,7 @@ mod tests {
         assert_eq!(header["cttn"]["mu"], json!(inputs.mu));
         assert_eq!(header["cttn"]["rho"], json!(0.1f32));
         assert_eq!(header["cttn"]["block_steps"], 4);
+        assert_eq!(header["cttn"]["mode"], "matrix");
 
         let response = cttn_response(&request, &config, &request.g, Value::Null, true, 0.0, 0.0);
         let verified = verify_cttn_response(&response, &request, &config).unwrap();
