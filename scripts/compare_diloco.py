@@ -84,6 +84,8 @@ OUTER_OPTIMIZERS = (
     "capped-nesterov",
     "capped-nesterov-gc",
     "capped-nesterov-r",
+    "capped-nesterov-curv",
+    "capped-nesterov-wsub",
     "block-rms",
     "block-yogi",
 )

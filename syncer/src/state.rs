@@ -123,6 +123,14 @@ pub struct AggregateDelta {
     selected_weight_mass: f64,
     delta: Vec<f32>,
     gnorm: f64,
+    /// Worker-disagreement transverse curvature-energy proxy
+    /// `E_b = b_perp^T C b_perp` (`merge::disagreement_transverse_energy`),
+    /// computed here where the per-worker deltas exist and threaded to the
+    /// `capped-nesterov-wsub` outer step. `0.0` for every other optimizer
+    /// (the energy is not computed) and whenever there is no measurable
+    /// disagreement. Deterministic from the fingerprinted base state and
+    /// candidates, so it needs no separate seal.
+    disagreement_energy: f64,
 }
 
 #[allow(dead_code)] // Public action API; server wiring lands separately.
@@ -157,6 +165,10 @@ impl AggregateDelta {
 
     pub const fn gnorm(&self) -> f64 {
         self.gnorm
+    }
+
+    pub const fn disagreement_energy(&self) -> f64 {
+        self.disagreement_energy
     }
 }
 
@@ -229,6 +241,12 @@ pub struct ActionPreview {
     /// this step; unchanged for the other optimizers. One entry per tensor in
     /// the fragment. Installed alongside the buffer on commit.
     resulting_block_v: Vec<f32>,
+    /// Curvature-aware controller (`capped-nesterov-curv`) history after this
+    /// step: the merged delta `g_t` and applied step `dtheta_t` this commit
+    /// stores for the next commit's lambda_hat. Unchanged (carried through) for
+    /// the other optimizers. Installed alongside the buffer on commit.
+    resulting_curv_prev_delta: Vec<f32>,
+    resulting_curv_prev_dtheta: Vec<f32>,
     applied_step: Vec<f32>,
     stats: MergeStats,
     step_scale: f64,
@@ -390,6 +408,8 @@ fn compute_action_fingerprint(preview: &ActionPreview) -> [u64; 2] {
     for values in [
         preview.resulting_params.as_slice(),
         preview.resulting_optimizer_buffer.as_slice(),
+        preview.resulting_curv_prev_delta.as_slice(),
+        preview.resulting_curv_prev_dtheta.as_slice(),
         preview.applied_step.as_slice(),
     ] {
         mix_action_fingerprint(&mut hash, values.len() as u64);
@@ -434,6 +454,17 @@ pub struct GlobalState {
     /// format; a restore re-initializes to zero and the EMAs re-warm on the
     /// first measured commit.
     block_v: Vec<Vec<f32>>,
+    /// Per-fragment previous merged delta `g_{t-1}` and previous applied outer
+    /// step `dtheta_{t-1}` (as a parameter displacement), the two extra vector
+    /// states of the curvature-aware controller (`capped-nesterov-curv`). Only
+    /// that optimizer reads or writes them. Same shape as `params`; the online
+    /// secant curvature proxy `lambda_hat` is computed from them each commit.
+    /// Like the other outer-optimizer states above they are NOT part of the
+    /// checkpoint format: a restore re-initializes both to zero, so the
+    /// curvature transverse cap is inactive for one commit (lambda_hat = 0) and
+    /// then re-warms — exactly the fresh-start behavior of `capped_mu`.
+    curv_prev_delta: Vec<Vec<f32>>,
+    curv_prev_dtheta: Vec<Vec<f32>>,
     pub initialized: Vec<bool>,
     /// Global step at which each fragment was last merged (its version).
     pub versions: Vec<u64>,
@@ -489,6 +520,10 @@ impl GlobalState {
             .iter()
             .map(|f| vec![0.0f32; f.tensor_numels.len()])
             .collect();
+        // Curvature-aware controller history: zero-filled per fragment (same
+        // shape as params), so lambda_hat = 0 on the first measured commit.
+        let curv_prev_delta = params.clone();
+        let curv_prev_dtheta = params.clone();
         let initialized = vec![false; layout.fragments.len()];
         let versions = vec![0; layout.fragments.len()];
         let state_epochs = vec![0; layout.fragments.len()];
@@ -501,6 +536,8 @@ impl GlobalState {
             capped_mu,
             capped_gain,
             block_v,
+            curv_prev_delta,
+            curv_prev_dtheta,
             initialized,
             versions,
             global_step: 0,
@@ -677,6 +714,8 @@ impl GlobalState {
         let mut resulting_capped_mu = self.capped_mu[fid];
         let mut resulting_capped_gain = self.capped_gain[fid];
         let mut resulting_block_v = self.block_v[fid].clone();
+        let mut resulting_curv_prev_delta = self.curv_prev_delta[fid].clone();
+        let mut resulting_curv_prev_dtheta = self.curv_prev_dtheta[fid].clone();
         let tensor_numels: Vec<usize> = self.layout.fragments[fid]
             .tensor_numels
             .iter()
@@ -693,8 +732,11 @@ impl GlobalState {
             &mut resulting_rho_ema,
             &mut resulting_capped_mu,
             &mut resulting_capped_gain,
+            &mut resulting_curv_prev_delta,
+            &mut resulting_curv_prev_dtheta,
             &tensor_numels,
             &mut resulting_block_v,
+            aggregate.disagreement_energy,
         );
         // The capped-Nesterov family chooses its momentum (and, for gc, its
         // gain) per commit; materializing its step must use the effective
@@ -705,6 +747,8 @@ impl GlobalState {
             merge::OuterOptimizer::CappedNesterov
                 | merge::OuterOptimizer::CappedNesterovGc
                 | merge::OuterOptimizer::CappedNesterovR
+                | merge::OuterOptimizer::CappedNesterovCurv
+                | merge::OuterOptimizer::CappedNesterovWsub
         ) {
             resulting_capped_mu
         } else {
@@ -728,6 +772,12 @@ impl GlobalState {
             || !resulting_capped_mu.is_finite()
             || !resulting_capped_gain.is_finite()
             || resulting_block_v.iter().any(|value| !value.is_finite())
+            || resulting_curv_prev_delta
+                .iter()
+                .any(|value| !value.is_finite())
+            || resulting_curv_prev_dtheta
+                .iter()
+                .any(|value| !value.is_finite())
             || applied_step.iter().any(|value| !value.is_finite())
             || !outer.applied_step_norm.is_finite()
             || outer
@@ -755,6 +805,8 @@ impl GlobalState {
             resulting_capped_mu,
             resulting_capped_gain,
             resulting_block_v,
+            resulting_curv_prev_delta,
+            resulting_curv_prev_dtheta,
             applied_step,
             stats: MergeStats {
                 gnorm: aggregate.gnorm,
@@ -1062,6 +1114,8 @@ impl GlobalState {
             if !gnorm.is_finite() || delta.iter().any(|value| !value.is_finite()) {
                 bail!("fragment {fid}: aggregate delta is not finite");
             }
+            let disagreement_energy =
+                self.disagreement_energy_for(anchor, &learners, fid, &delta);
             return Ok(AggregateDelta {
                 fragment_id: fid,
                 base_version: self.versions[fid],
@@ -1075,6 +1129,7 @@ impl GlobalState {
                 selected_weight_mass: selected_weight / full_weight,
                 delta,
                 gnorm,
+                disagreement_energy,
             });
         }
         let mut offset = 0usize;
@@ -1130,6 +1185,7 @@ impl GlobalState {
         if !gnorm.is_finite() || delta.iter().any(|value| !value.is_finite()) {
             bail!("fragment {fid}: aggregate delta is not finite");
         }
+        let disagreement_energy = self.disagreement_energy_for(anchor, &learners, fid, &delta);
         Ok(AggregateDelta {
             fragment_id: fid,
             base_version: self.versions[fid],
@@ -1143,7 +1199,29 @@ impl GlobalState {
             selected_weight_mass: selected_weight / full_weight,
             delta,
             gnorm,
+            disagreement_energy,
         })
+    }
+
+    /// Worker-disagreement transverse curvature-energy proxy for the aggregate,
+    /// computed here where the per-worker deltas exist. Only the
+    /// `capped-nesterov-wsub` outer step consumes it; every other optimizer
+    /// gets `0.0` and skips the O(M*d) work. The momentum buffer is the
+    /// pre-step `self.momentum[fid]` — exactly the `b_{t-1}` the outer step
+    /// reads — so the threaded scalar matches the step's own geometry, keeping
+    /// the preview bit-exact.
+    fn disagreement_energy_for(
+        &self,
+        anchor: &[f32],
+        learners: &[&[f32]],
+        fid: usize,
+        delta: &[f32],
+    ) -> f64 {
+        if self.outer_optimizer == merge::OuterOptimizer::CappedNesterovWsub {
+            merge::disagreement_transverse_energy(anchor, learners, &self.momentum[fid], delta)
+        } else {
+            0.0
+        }
     }
 
     fn ensure_current_preview(&self, preview: &ActionPreview) -> Result<()> {
@@ -1193,6 +1271,16 @@ impl GlobalState {
             || preview.resulting_block_v.len() != self.layout.fragments[fid].tensor_numels.len()
             || preview
                 .resulting_block_v
+                .iter()
+                .any(|value| !value.is_finite())
+            || preview.resulting_curv_prev_delta.len() != numel
+            || preview.resulting_curv_prev_dtheta.len() != numel
+            || preview
+                .resulting_curv_prev_delta
+                .iter()
+                .any(|value| !value.is_finite())
+            || preview
+                .resulting_curv_prev_dtheta
                 .iter()
                 .any(|value| !value.is_finite())
             || !preview.stats.gnorm.is_finite()
@@ -1300,6 +1388,14 @@ impl GlobalState {
         for value in &self.block_v[fid] {
             mix(value.to_bits() as u64);
         }
+        mix(self.curv_prev_delta[fid].len() as u64);
+        for value in &self.curv_prev_delta[fid] {
+            mix(value.to_bits() as u64);
+        }
+        mix(self.curv_prev_dtheta[fid].len() as u64);
+        for value in &self.curv_prev_dtheta[fid] {
+            mix(value.to_bits() as u64);
+        }
         match &self.outer_lr_by_fragment {
             None => {
                 mix(0);
@@ -1326,6 +1422,8 @@ impl GlobalState {
             merge::OuterOptimizer::CappedNesterovR => 6,
             merge::OuterOptimizer::BlockRms => 7,
             merge::OuterOptimizer::BlockYogi => 8,
+            merge::OuterOptimizer::CappedNesterovCurv => 9,
+            merge::OuterOptimizer::CappedNesterovWsub => 10,
         });
         match self.delta_correction {
             None => mix(0),
@@ -1356,6 +1454,8 @@ impl GlobalState {
             resulting_capped_mu,
             resulting_capped_gain,
             resulting_block_v,
+            resulting_curv_prev_delta,
+            resulting_curv_prev_dtheta,
             stats,
             ..
         } = preview;
@@ -1366,6 +1466,8 @@ impl GlobalState {
         self.capped_mu[fid] = resulting_capped_mu;
         self.capped_gain[fid] = resulting_capped_gain;
         self.block_v[fid] = resulting_block_v;
+        self.curv_prev_delta[fid] = resulting_curv_prev_delta;
+        self.curv_prev_dtheta[fid] = resulting_curv_prev_dtheta;
         self.state_epochs[fid] = next_epoch;
         Ok(stats)
     }
@@ -1460,6 +1562,16 @@ impl GlobalState {
             self.rho_ema[p] = merge::RHO_ADAPTIVE_INITIAL_RHO_EMA;
             self.capped_mu[p] = merge::CAPPED_NESTEROV_INITIAL_MU;
             self.capped_gain[p] = merge::CAPPED_NESTEROV_GC_INITIAL_GAIN;
+            // The curvature-aware controller history is not checkpointed
+            // either; reset to zero so lambda_hat is inactive for one commit.
+            for slot in [
+                &mut self.curv_prev_delta[p],
+                &mut self.curv_prev_dtheta[p],
+            ] {
+                for v in slot.iter_mut() {
+                    *v = 0.0;
+                }
+            }
             self.initialized[p] = true;
             self.state_epochs[p] = next_epoch;
         }
@@ -2083,6 +2195,11 @@ mod tests {
                 0.0f32,
                 "capped-nesterov-r",
             ),
+            (
+                merge::OuterOptimizer::CappedNesterovCurv,
+                0.0f32,
+                "capped-nesterov-curv",
+            ),
         ];
         for (optimizer, momentum, label) in cases {
             let mut st = GlobalState::new(
@@ -2365,6 +2482,7 @@ mod tests {
                 merge::OuterOptimizer::CappedNesterov,
                 merge::OuterOptimizer::CappedNesterovGc,
                 merge::OuterOptimizer::CappedNesterovR,
+                merge::OuterOptimizer::CappedNesterovCurv,
                 merge::OuterOptimizer::BlockRms,
                 merge::OuterOptimizer::BlockYogi,
             ] {

@@ -273,6 +273,8 @@ fn validate_outer_optimizer(
             | merge::OuterOptimizer::CappedNesterov
             | merge::OuterOptimizer::CappedNesterovGc
             | merge::OuterOptimizer::CappedNesterovR
+            | merge::OuterOptimizer::CappedNesterovCurv
+            | merge::OuterOptimizer::CappedNesterovWsub
             | merge::OuterOptimizer::BlockRms
             | merge::OuterOptimizer::BlockYogi
     ) && !outer_momentum.is_finite()
@@ -424,6 +426,14 @@ mod tests {
             ("capped-nesterov", merge::OuterOptimizer::CappedNesterov),
             ("capped-nesterov-gc", merge::OuterOptimizer::CappedNesterovGc),
             ("capped-nesterov-r", merge::OuterOptimizer::CappedNesterovR),
+            (
+                "capped-nesterov-curv",
+                merge::OuterOptimizer::CappedNesterovCurv,
+            ),
+            (
+                "capped-nesterov-wsub",
+                merge::OuterOptimizer::CappedNesterovWsub,
+            ),
         ] {
             let args = Args::try_parse_from([
                 "yeto-syncer",
