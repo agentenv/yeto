@@ -70,6 +70,10 @@ class AdapterInfo:
 def canonical_name(tree_path: str) -> str:
     """MLX tree path of a lora_A/lora_B array -> the peft FQN the torch
     learner would report for the same tensor."""
+    # Some mlx-lm architectures wrap the HF causal LM body under
+    # language_model, while transformers/peft report the body as model.
+    if tree_path.startswith("language_model."):
+        tree_path = tree_path.removeprefix("language_model.")
     return f"base_model.model.{tree_path}.default.weight"
 
 
