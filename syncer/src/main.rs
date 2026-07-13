@@ -251,6 +251,7 @@ fn action_probe_config(args: &Args) -> anyhow::Result<Option<action_probe::Clien
         std::time::Duration::from_millis(args.action_probe_timeout_ms),
         run_uuid,
         expected,
+        args.commit_policy == action_probe::CommitPolicy::ProbeCttnV1,
     )?))
 }
 

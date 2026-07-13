@@ -566,7 +566,7 @@ def syncer_command(
     version_matched_anchor: bool = False,
     anchor_drift_log: bool = False,
     action_probe_endpoint: str | None = None,
-    action_probe_timeout_ms: int = 30_000,
+    action_probe_timeout_ms: int = 300_000,
     action_probe_run_uuid: str | None = None,
     action_probe_expected_config: Path | None = None,
     cttn_rho: float = 0.10,
@@ -1144,8 +1144,23 @@ def validate_action_probe_run(
                 _probe_record_error(
                     arm, index, record, "successful CTTN record must include cttn_bind"
                 )
+            tau = record.get("cttn_tau")
+            zero_budget_limit = (
+                tau is None
+                and record.get("cttn_bind") is True
+                and record.get("cttn_budget") == 0.0
+                and record.get("cttn_e_after") == 0.0
+            )
+            if not zero_budget_limit and (
+                not isinstance(tau, (int, float)) or not math.isfinite(tau)
+            ):
+                _probe_record_error(
+                    arm,
+                    index,
+                    record,
+                    "cttn_tau must be finite or null for the binding zero-budget limit",
+                )
             for field in (
-                "cttn_tau",
                 "cttn_retention",
                 "cttn_e_before",
                 "cttn_e_after",
@@ -1872,7 +1887,7 @@ def main() -> int:
         default=None,
         help="verified disjoint anchor manifest consumed by action_probe_server",
     )
-    p.add_argument("--action-probe-timeout-s", type=float, default=30.0)
+    p.add_argument("--action-probe-timeout-s", type=float, default=300.0)
     p.add_argument("--action-probe-startup-timeout-s", type=float, default=1800.0)
     p.add_argument("--action-probe-run-uuid", default=None)
     p.add_argument(

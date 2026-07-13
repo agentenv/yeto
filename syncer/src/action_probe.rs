@@ -105,6 +105,7 @@ pub struct ClientConfig {
     timeout: Duration,
     run_uuid: String,
     expected: ExpectedProbeConfig,
+    require_learner_layout_binding: bool,
 }
 
 impl ClientConfig {
@@ -113,6 +114,7 @@ impl ClientConfig {
         timeout: Duration,
         run_uuid: String,
         expected_path: &Path,
+        require_learner_layout_binding: bool,
     ) -> Result<Self> {
         let endpoint: SocketAddr = endpoint
             .parse()
@@ -143,6 +145,7 @@ impl ClientConfig {
             timeout,
             run_uuid,
             expected,
+            require_learner_layout_binding,
         })
     }
 }
@@ -291,7 +294,11 @@ struct BoundLayout {
 }
 
 impl BoundLayout {
-    fn bind(expected: &ExpectedProbeConfig, state: &GlobalState) -> Result<Self> {
+    fn bind(
+        expected: &ExpectedProbeConfig,
+        state: &GlobalState,
+        require_learner_layout_binding: bool,
+    ) -> Result<Self> {
         if expected.fragment_names.len() != state.layout.fragments.len() {
             bail!(
                 "expected probe config has {} fragments, syncer layout has {}",
@@ -299,10 +306,18 @@ impl BoundLayout {
                 state.layout.fragments.len()
             );
         }
+        let fragment_names = if require_learner_layout_binding {
+            let learner_names = learner_fragment_names(state)?;
+            if learner_names != expected.fragment_names {
+                bail!("action-probe fragment order does not match the learner HELLO tensor order");
+            }
+            learner_names
+        } else {
+            expected.fragment_names.clone()
+        };
         let mut state_tensors = Vec::new();
         let mut seen = HashSet::new();
-        for (fragment_id, (names, fragment)) in expected
-            .fragment_names
+        for (fragment_id, (names, fragment)) in fragment_names
             .iter()
             .zip(&state.layout.fragments)
             .enumerate()
@@ -366,9 +381,100 @@ impl BoundLayout {
         state_tensors.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(Self {
             state_tensors,
-            fragment_names: expected.fragment_names.clone(),
+            fragment_names,
         })
     }
+}
+
+fn learner_fragment_names(state: &GlobalState) -> Result<Vec<Vec<String>>> {
+    let raw = state.layout_meta.as_deref().context(
+        "CTTN requires learner HELLO layout metadata with ordered fragment tensor names",
+    )?;
+    let root = strict_json(raw.as_bytes()).context("parse learner HELLO layout metadata")?;
+    let object = root
+        .as_object()
+        .context("learner HELLO layout metadata must be a JSON object")?;
+    let fragments = object
+        .get("fragments")
+        .and_then(Value::as_array)
+        .context("learner HELLO layout metadata must contain fragments")?;
+    if fragments.len() != state.layout.fragments.len() {
+        bail!(
+            "learner HELLO metadata has {} fragments, syncer layout has {}",
+            fragments.len(),
+            state.layout.fragments.len()
+        );
+    }
+
+    let mut by_id = BTreeMap::new();
+    let mut seen = HashSet::new();
+    for fragment_value in fragments {
+        let fragment = fragment_value
+            .as_object()
+            .context("learner HELLO fragment metadata must be an object")?;
+        let fragment_id = fragment
+            .get("id")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .context("learner HELLO fragment id must be a non-negative integer")?;
+        let layout_fragment =
+            state.layout.fragments.get(fragment_id).with_context(|| {
+                format!("learner HELLO fragment id {fragment_id} is out of range")
+            })?;
+        let tensors = fragment
+            .get("tensors")
+            .and_then(Value::as_array)
+            .with_context(|| format!("learner HELLO fragment {fragment_id} has no tensor list"))?;
+        if tensors.len() != layout_fragment.tensor_numels.len() {
+            bail!(
+                "learner HELLO fragment {fragment_id} names {} tensors, layout has {}",
+                tensors.len(),
+                layout_fragment.tensor_numels.len()
+            );
+        }
+        let mut names = Vec::with_capacity(tensors.len());
+        for (tensor_index, (tensor_value, &expected_numel)) in tensors
+            .iter()
+            .zip(&layout_fragment.tensor_numels)
+            .enumerate()
+        {
+            let tensor = tensor_value.as_object().with_context(|| {
+                format!(
+                    "learner HELLO fragment {fragment_id} tensor {tensor_index} must be an object"
+                )
+            })?;
+            let name = tensor
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty() && name.len() <= 1024)
+                .with_context(|| {
+                    format!("learner HELLO fragment {fragment_id} tensor {tensor_index} has an invalid name")
+                })?;
+            let numel = tensor
+                .get("numel")
+                .and_then(Value::as_u64)
+                .with_context(|| {
+                    format!("learner HELLO fragment {fragment_id} tensor {name:?} has no numel")
+                })?;
+            if numel != expected_numel {
+                bail!(
+                    "learner HELLO fragment {fragment_id} tensor {name:?} has numel {numel}, layout has {expected_numel}"
+                );
+            }
+            if !seen.insert(name.to_owned()) {
+                bail!("learner HELLO layout metadata repeats tensor name {name:?}");
+            }
+            names.push(name.to_owned());
+        }
+        if by_id.insert(fragment_id, names).is_some() {
+            bail!("learner HELLO layout metadata repeats fragment id {fragment_id}");
+        }
+    }
+    let expected_ids: Vec<usize> = (0..fragments.len()).collect();
+    if by_id.keys().copied().collect::<Vec<_>>() != expected_ids {
+        bail!("learner HELLO fragment ids must be contiguous from zero");
+    }
+    Ok(by_id.into_values().collect())
 }
 
 fn infer_lora_shape(name: &str, numel: usize, rank: usize) -> Result<Vec<usize>> {
@@ -804,7 +910,8 @@ pub struct VerifiedSelection {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CttnDiagnostics {
     pub bind: bool,
-    pub tau: f64,
+    /// `None` is the exact zero-budget limit tau=+infinity.
+    pub tau: Option<f64>,
     pub retention: f64,
     pub e_before: f64,
     pub e_after: f64,
@@ -919,7 +1026,11 @@ fn append_state_block(
 
 impl ActionProbeClient {
     pub fn bind(config: ClientConfig, state: &GlobalState) -> Result<Self> {
-        let layout = BoundLayout::bind(&config.expected, state)?;
+        let layout = BoundLayout::bind(
+            &config.expected,
+            state,
+            config.require_learner_layout_binding,
+        )?;
         Ok(Self {
             config,
             layout,
@@ -1462,12 +1573,32 @@ fn verify_cttn_response(
             .filter(|value| value.is_finite())
             .ok_or_else(|| ProbeError::Protocol(format!("diagnostics.{field} must be finite")))
     };
+    let bind = diagnostics_object
+        .get("bind")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| ProbeError::Protocol("diagnostics.bind must be boolean".to_owned()))?;
+    let tau = match diagnostics_object.get("tau") {
+        Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    ProbeError::Protocol(
+                        "diagnostics.tau must be finite or null for the zero-budget limit"
+                            .to_owned(),
+                    )
+                })?,
+        ),
+        None => {
+            return Err(ProbeError::Protocol(
+                "diagnostics.tau is required".to_owned(),
+            ));
+        }
+    };
     let diagnostics = CttnDiagnostics {
-        bind: diagnostics_object
-            .get("bind")
-            .and_then(Value::as_bool)
-            .ok_or_else(|| ProbeError::Protocol("diagnostics.bind must be boolean".to_owned()))?,
-        tau: finite("tau")?,
+        bind,
+        tau,
         retention: finite("retention")?,
         e_before: finite("e_before")?,
         e_after: finite("e_after")?,
@@ -1481,7 +1612,7 @@ fn verify_cttn_response(
         ritz_max: finite("ritz_max")?,
         loss: finite("loss")?,
     };
-    if diagnostics.tau < 0.0
+    if diagnostics.tau.is_some_and(|tau| tau < 0.0)
         || diagnostics.retention < 0.0
         || diagnostics.e_before < 0.0
         || diagnostics.e_after < 0.0
@@ -1492,8 +1623,16 @@ fn verify_cttn_response(
             "CTTN diagnostics contain a negative norm, energy, budget, or curvature".to_owned(),
         ));
     }
+    if diagnostics.tau.is_none()
+        && (!diagnostics.bind || diagnostics.budget != 0.0 || diagnostics.e_after != 0.0)
+    {
+        return Err(ProbeError::UnsafeResponse(
+            "diagnostics.tau may be null only for a binding zero-budget, zero-energy limit"
+                .to_owned(),
+        ));
+    }
 
-    let gnorm_sq = request
+    let g_dot_g = request
         .g
         .iter()
         .map(|value| {
@@ -1501,19 +1640,22 @@ fn verify_cttn_response(
             value * value
         })
         .sum::<f64>();
-    if gnorm_sq > 0.0 {
-        let gnorm = gnorm_sq.sqrt();
-        let q_dot_d = request
+    if g_dot_g > 0.0 {
+        let g_dot_d = request
             .g
             .iter()
             .zip(&d)
             .map(|(g, d)| *g as f64 * *d as f64)
-            .sum::<f64>()
-            / gnorm;
-        let tolerance = 1e-4 * gnorm.max(1e-12);
-        if !q_dot_d.is_finite() || (q_dot_d - gnorm).abs() > tolerance {
+            .sum::<f64>();
+        let dimension = request.g.len().max(1) as f64;
+        let tolerance = 512.0
+            * f32::EPSILON as f64
+            * dimension
+            * g_dot_g.abs().max(g_dot_d.abs()).max(f64::MIN_POSITIVE);
+        if !g_dot_d.is_finite() || (g_dot_d - g_dot_g).abs() > tolerance {
             return Err(ProbeError::UnsafeResponse(format!(
-                "CTTN parallel-step invariant failed: q.d={q_dot_d}, ||g||={gnorm}, tolerance={tolerance}"
+                "CTTN parallel-step invariant failed: g.d={g_dot_d}, g.g={g_dot_g}, dimension={}, tolerance={tolerance}",
+                request.g.len()
             )));
         }
     }
@@ -2087,6 +2229,85 @@ mod tests {
         expected
     }
 
+    fn learner_layout_metadata(expected: &ExpectedProbeConfig) -> String {
+        json!({
+            "layout_meta_version": 1,
+            "fragments": expected
+                .fragment_names
+                .iter()
+                .enumerate()
+                .map(|(fragment_id, names)| json!({
+                    "id": fragment_id,
+                    "tensors": names.iter().map(|name| json!({
+                        "name": name,
+                        "numel": 4,
+                    })).collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>(),
+        })
+        .to_string()
+    }
+
+    fn cttn_response(
+        request: &WireCttnRequest,
+        config: &ClientConfig,
+        d: &[f32],
+        tau: Value,
+        bind: bool,
+        budget: f64,
+        e_after: f64,
+    ) -> WireResponse {
+        let b_new = vec![0.0f32; d.len()];
+        let d_raw = f32_bytes(d);
+        let b_raw = f32_bytes(&b_new);
+        let mut payload = d_raw.clone();
+        payload.extend_from_slice(&b_raw);
+        let header = json!({
+            "protocol": PROTOCOL,
+            "type": "cttn_result",
+            "request_id": request.request_id,
+            "run_uuid": config.run_uuid,
+            "step": request.step,
+            "fragment_id": request.fragment_id,
+            "base_version": request.base_version,
+            "state_epoch": request.state_epoch,
+            "fragment_versions": request.fragment_versions,
+            "request_digest": request.request_digest,
+            "ok": true,
+            "dtype": "f32le",
+            "d": {"offset": 0, "nbytes": d_raw.len(), "sha256": sha256_hex(&d_raw)},
+            "b_new": {
+                "offset": d_raw.len(),
+                "nbytes": b_raw.len(),
+                "sha256": sha256_hex(&b_raw),
+            },
+            "diagnostics": {
+                "bind": bind,
+                "tau": tau,
+                "retention": 0.0,
+                "e_before": 1.0,
+                "e_after": e_after,
+                "budget": budget,
+                "n_modes_90": 1,
+                "ritz_max": 2.0,
+                "loss": 1.5,
+            },
+            "digests": {
+                "state_sha256": request.state_digest,
+                "g_sha256": request.g_digest,
+                "b_sha256": request.b_digest,
+                "anchor_manifest_sha256": config.expected.anchor_manifest_sha256,
+                "anchor_tensors_sha256": config.expected.anchor_tensors_sha256,
+                "probe_config_sha256": config.expected.probe_config_sha256,
+                "layout_hash": config.expected.layout_hash,
+            },
+        });
+        WireResponse {
+            header: canonical_json(&header).unwrap(),
+            payload,
+        }
+    }
+
     fn previews(state: &GlobalState, values: &[Vec<f32>]) -> RetainedPreviews {
         let candidates = values
             .iter()
@@ -2212,7 +2433,7 @@ mod tests {
             expected.layout_hash,
             "b74af0ab4b118be75e536fccf374de367814e3064c4b6f3e3b56b7e5eaaa50c2"
         );
-        let bound = BoundLayout::bind(&expected, &state).unwrap();
+        let bound = BoundLayout::bind(&expected, &state, false).unwrap();
         assert_eq!(bound.state_tensors[0].shape, vec![2, 2]);
         assert_eq!(
             bound.fragment_names[1][0],
@@ -2221,7 +2442,27 @@ mod tests {
 
         let mut stale = expected;
         stale.layout_hash = "0".repeat(64);
-        assert!(BoundLayout::bind(&stale, &state).is_err());
+        assert!(BoundLayout::bind(&stale, &state, false).is_err());
+    }
+
+    #[test]
+    fn cttn_binding_rejects_a_silent_learner_tensor_permutation() {
+        let (mut state, _) = state_and_candidates();
+        let expected = expected_for(&state);
+        state.layout_meta = Some(learner_layout_metadata(&expected));
+        BoundLayout::bind(&expected, &state, true).unwrap();
+
+        let mut metadata: Value =
+            serde_json::from_str(state.layout_meta.as_ref().unwrap()).unwrap();
+        let first = metadata["fragments"][0]["tensors"][0]["name"].clone();
+        metadata["fragments"][0]["tensors"][0]["name"] =
+            metadata["fragments"][1]["tensors"][0]["name"].clone();
+        metadata["fragments"][1]["tensors"][0]["name"] = first;
+        state.layout_meta = Some(metadata.to_string());
+        let error = BoundLayout::bind(&expected, &state, true).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not match the learner HELLO"));
     }
 
     #[test]
@@ -2274,8 +2515,9 @@ mod tests {
             timeout: Duration::from_secs(1),
             run_uuid: "run-test".to_owned(),
             expected,
+            require_learner_layout_binding: false,
         };
-        let client = ActionProbeClient::bind(config, &state).unwrap();
+        let client = ActionProbeClient::bind(config.clone(), &state).unwrap();
         let set = previews(&state, &values);
         let request = client.build_request(&state, &set, 5, 0).unwrap();
         assert_eq!(&request.frame[..8], FRAME_MAGIC);
@@ -2299,8 +2541,9 @@ mod tests {
             timeout: Duration::from_secs(1),
             run_uuid: "run-cttn".to_owned(),
             expected: expected_for(&state),
+            require_learner_layout_binding: false,
         };
-        let client = ActionProbeClient::bind(config, &state).unwrap();
+        let client = ActionProbeClient::bind(config.clone(), &state).unwrap();
         let candidates = values
             .iter()
             .enumerate()
@@ -2310,14 +2553,7 @@ mod tests {
         let inputs = state.cttn_inputs(&aggregate, 0.9).unwrap();
         let request = client
             .build_cttn_request(
-                &state,
-                &aggregate,
-                5,
-                &inputs.g,
-                &inputs.b,
-                inputs.mu,
-                0.1,
-                4,
+                &state, &aggregate, 5, &inputs.g, &inputs.b, inputs.mu, 0.1, 4,
             )
             .unwrap();
         let header_len = u32::from_be_bytes(request.frame[8..12].try_into().unwrap()) as usize;
@@ -2329,7 +2565,10 @@ mod tests {
             .map(|spec| spec["nbytes"].as_u64().unwrap() as usize)
             .sum();
         assert_eq!(header["type"], "cttn_step");
-        assert_eq!(header["fragment"]["tensor_names"], json!(client.layout.fragment_names[0]));
+        assert_eq!(
+            header["fragment"]["tensor_names"],
+            json!(client.layout.fragment_names[0])
+        );
         assert_eq!(header["cttn"]["g"]["offset"], state_bytes);
         assert_eq!(
             header["cttn"]["b"]["offset"],
@@ -2338,6 +2577,26 @@ mod tests {
         assert_eq!(header["cttn"]["mu"], json!(inputs.mu));
         assert_eq!(header["cttn"]["rho"], json!(0.1f32));
         assert_eq!(header["cttn"]["block_steps"], 4);
+
+        let response = cttn_response(&request, &config, &request.g, Value::Null, true, 0.0, 0.0);
+        let verified = verify_cttn_response(&response, &request, &config).unwrap();
+        assert_eq!(verified.d, request.g);
+        assert_eq!(verified.diagnostics.tau, None);
+
+        let invalid_limit =
+            cttn_response(&request, &config, &request.g, Value::Null, false, 0.0, 0.0);
+        assert!(matches!(
+            verify_cttn_response(&invalid_limit, &request, &config),
+            Err(ProbeError::UnsafeResponse(_))
+        ));
+
+        let reversed = request.g.iter().map(|value| -*value).collect::<Vec<_>>();
+        let unsafe_direction =
+            cttn_response(&request, &config, &reversed, json!(0.0), false, 1.0, 1.0);
+        assert!(matches!(
+            verify_cttn_response(&unsafe_direction, &request, &config),
+            Err(ProbeError::UnsafeResponse(_))
+        ));
     }
 
     #[test]
@@ -2348,6 +2607,7 @@ mod tests {
             timeout: Duration::from_secs(1),
             run_uuid: "run-scalars".to_owned(),
             expected: expected_for(&state),
+            require_learner_layout_binding: false,
         };
         let client = ActionProbeClient::bind(config, &state).unwrap();
         let set = scaled_previews(&state, &values);
@@ -2378,6 +2638,7 @@ mod tests {
             timeout: Duration::from_secs(1),
             run_uuid: "run-scalars".to_owned(),
             expected: expected_for(&state),
+            require_learner_layout_binding: false,
         };
         let client = ActionProbeClient::bind(config.clone(), &state).unwrap();
         let set = scaled_previews(&state, &values);
@@ -2418,6 +2679,7 @@ mod tests {
             timeout: Duration::from_secs(1),
             run_uuid: "run-persistent".to_owned(),
             expected: expected_for(&state),
+            require_learner_layout_binding: false,
         };
         let mut client = ActionProbeClient::bind(config, &state).unwrap();
         let set = previews(&state, &values);
@@ -2449,6 +2711,7 @@ mod tests {
             timeout: Duration::from_millis(10),
             run_uuid: "run-timeout".to_owned(),
             expected: expected_for(&state),
+            require_learner_layout_binding: false,
         };
         let mut client = ActionProbeClient::bind(config, &state).unwrap();
         let set = previews(&state, &values);
@@ -2467,6 +2730,7 @@ mod tests {
             timeout: Duration::from_secs(1),
             run_uuid: "run-unsafe".to_owned(),
             expected: expected_for(&state),
+            require_learner_layout_binding: false,
         };
         let client = ActionProbeClient::bind(config.clone(), &state).unwrap();
         let set = previews(&state, &values);

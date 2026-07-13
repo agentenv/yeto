@@ -953,7 +953,7 @@ class ActionProbeEngine:
         while len(self._cache) > self.retry_cache_size:
             self._cache.popitem(last=False)
 
-    def handle(self, frame: Frame) -> tuple[dict[str, Any], bytes]:
+    def handle(self, frame: Frame) -> dict[str, Any] | tuple[dict[str, Any], bytes]:
         started = time.perf_counter()
         request: EvaluateRequest | None = None
         key: tuple[str, str] | None = None
@@ -962,7 +962,7 @@ class ActionProbeEngine:
             and frame.header.get("type") == "ping"
             and not frame.payload
         ):
-            return ({
+            return {
                 "protocol": PROTOCOL,
                 "type": "pong",
                 "ok": True,
@@ -970,7 +970,7 @@ class ActionProbeEngine:
                 "cache_hit": False,
                 "supported_action_families": list(SUPPORTED_ACTION_FAMILIES),
                 "service": self.describe(),
-            }, b"")
+            }
 
         if frame.header.get("protocol") == PROTOCOL and frame.header.get("type") == "cttn_step":
             try:
@@ -1041,7 +1041,7 @@ class ActionProbeEngine:
                 response["cache_hit"] = True
                 response["retry_lookup_ms"] = (time.perf_counter() - started) * 1000.0
                 _log_successful_decision(response, self.selection)
-                return response, b""
+                return response
             if request.anchor_manifest_sha256 != self.backend.anchor_manifest_sha256:
                 raise RequestValidationError(
                     "request anchor manifest SHA-256 does not match service"
@@ -1136,7 +1136,7 @@ class ActionProbeEngine:
             json.dumps(response, allow_nan=False)
             self._cache_response(key, frame.digest, response)
             _log_successful_decision(response, self.selection)
-            return response, b""
+            return response
         except Exception as exc:
             log.exception("action-probe request failed closed")
             if isinstance(exc, ProtocolError):
@@ -1154,7 +1154,7 @@ class ActionProbeEngine:
             )
             if request is not None and key is not None:
                 self._cache_response(key, frame.digest, response)
-            return response, b""
+            return response
 
 
 def _parse_listen(value: str) -> tuple[str, int]:
@@ -1284,7 +1284,11 @@ class ActionProbeTCPService:
                     "closing malformed/timed-out action-probe connection: %s", exc
                 )
                 return
-            response_header, response_payload = self.engine.handle(frame)
+            response = self.engine.handle(frame)
+            if isinstance(response, tuple):
+                response_header, response_payload = response
+            else:
+                response_header, response_payload = response, b""
             try:
                 send_frame(connection, response_header, response_payload)
             except (ProtocolError, OSError) as exc:

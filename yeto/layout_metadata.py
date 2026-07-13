@@ -19,6 +19,24 @@ MERGE_MODE_NAMES = {
 }
 
 
+def build_fragment_order_metadata(layout: FragmentLayout) -> dict:
+    """Return the ordered tensor identity carried by a learner HELLO."""
+
+    return {
+        "layout_meta_version": LAYOUT_META_VERSION,
+        "fragments": [
+            {
+                "id": fid,
+                "tensors": [
+                    {"name": name, "numel": int(numel)}
+                    for name, numel in fragment.tensors
+                ],
+            }
+            for fid, fragment in enumerate(layout.fragments)
+        ],
+    }
+
+
 def build_layout_metadata(
     *,
     task: str,

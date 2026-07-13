@@ -1981,7 +1981,7 @@ fn format_tape_line(
         format!(
             ",\"cttn_bind\":{},\"cttn_tau\":{},\"cttn_retention\":{},\"cttn_e_before\":{},\"cttn_e_after\":{},\"cttn_budget\":{},\"cttn_n_modes_90\":{},\"cttn_ritz_max\":{},\"cttn_loss\":{}",
             diag.bind,
-            json_number(diag.tau),
+            optional_json_number(diag.tau),
             json_number(diag.retention),
             json_number(diag.e_before),
             json_number(diag.e_after),

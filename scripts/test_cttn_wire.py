@@ -106,6 +106,21 @@ def main() -> int:
     ok &= check("result payload is fully claimed", offset == len(response.payload))
     ok &= check("diagnostics round-trip", response.header["diagnostics"] == diagnostics)
 
+    zero_budget_diagnostics = dict(diagnostics, tau=float("inf"), budget=0.0, e_after=0.0)
+    zero_budget_response = decode_frame(
+        build_cttn_result_frame(
+            request,
+            d,
+            b_new,
+            zero_budget_diagnostics,
+            anchor_tensors_sha256=digest("anchor-tensors"),
+        )
+    )
+    ok &= check(
+        "zero-budget tau=+infinity is encoded as JSON null",
+        zero_budget_response.header["diagnostics"]["tau"] is None,
+    )
+
     print(f"\n{'ALL PASS' if ok else 'FAILURES PRESENT'}")
     return 0 if ok else 1
 

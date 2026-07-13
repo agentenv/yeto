@@ -1044,6 +1044,9 @@ def build_cttn_result_frame(
         }
         payload.extend(raw)
     diagnostics = dict(diagnostics)
+    tau = diagnostics.get("tau")
+    if isinstance(tau, (int, float)) and math.isinf(tau) and tau > 0.0:
+        diagnostics["tau"] = None
     try:
         json.dumps(diagnostics, allow_nan=False)
     except (TypeError, ValueError) as exc:
@@ -1856,9 +1859,10 @@ class ActionProbeReplica:
             raise primary_error
         assert result is not None
         ritz = result.diag.ritz
+        tau = float(result.diag.tau)
         diagnostics = {
             "bind": bool(result.diag.bind),
-            "tau": float(result.diag.tau),
+            "tau": None if math.isinf(tau) and tau > 0.0 else tau,
             "retention": float(result.diag.norm_retention),
             "e_before": float(result.diag.e_before),
             "e_after": float(result.diag.e_after),

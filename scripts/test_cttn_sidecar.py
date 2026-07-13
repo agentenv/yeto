@@ -121,6 +121,17 @@ def main() -> int:
           f"tau={res.diag.tau:.4g} ritz_max={res.diag.ritz.max() if res.diag.ritz.size else 0:.4g} "
           f"loss={res.loss:.4f}")
 
+    zero_budget = cttn_sidecar_step(model, params, panels, g, b, mu=0.9, rho=0.0)
+    zero_qtd = float(torch.dot(q, zero_budget.d))
+    ok &= check(
+        "rho=0 commits the fully damped zero-budget limit",
+        zero_budget.diag.bind
+        and np.isposinf(zero_budget.diag.tau)
+        and zero_budget.diag.budget == 0.0
+        and zero_budget.diag.e_after == 0.0
+        and abs(zero_qtd - float(g.norm())) < 1e-4 * float(g.norm()),
+    )
+
     # 3. flatten/unflatten round-trip in fragment order
     flat = flatten_params(params)
     parts = _unflatten_like(flat, params)
