@@ -94,6 +94,76 @@ def block_lanczos(hvp, Q0: np.ndarray, block_steps: int):
     return V, T
 
 
+def _solve_trustregion_kdim(qc, rc, gc, T, *, mu, rho):
+    """Shared <=k-dim CTTN trust-region solve (numpy; k<=8).
+
+    qc, rc, gc : [k] coordinates of q, r, g in the orthonormal V basis
+                 (q = g/||g|| parallel dir, r = P(b) transverse buffer).
+    T          : [k, k] Rayleigh block V^T H V.
+    Returns (z_coords [k], diag) where z = V @ z_coords is the damped transverse
+    momentum and diag carries tau/bind/energies/budget/ritz/n_modes_90.
+
+    A = P Hplus P (q-direction projected out on both sides) keeps z transverse so
+    q^T z == 0 exactly; the budget uses the full current-step curvature g^T Hplus g.
+    """
+    T = 0.5 * (T + T.T)
+    evals, evecs = np.linalg.eigh(T)
+    Tplus = (evecs * np.clip(evals, 0.0, None)) @ evecs.T          # [k,k] PSD
+
+    qn = qc / (float(np.linalg.norm(qc)) + _EPS)
+    Pc = np.eye(qc.shape[0]) - np.outer(qn, qn)
+    Ac = Pc @ Tplus @ Pc
+    Ac = 0.5 * (Ac + Ac.T)
+    muA, W = np.linalg.eigh(Ac)                # muA >= 0 (PSD, q-dir -> 0)
+    muA = np.clip(muA, 0.0, None)
+
+    rj = W.T @ rc                              # r in the A-eigenbasis (rc ⊥ qc)
+    e_before = float(np.sum(muA * rj * rj))    # r^T A r
+    g_curv = float(gc @ (Tplus @ gc))          # g^T Hplus g
+    budget = rho * g_curv
+    mu4 = mu ** 4
+
+    def energy(tau: float) -> float:
+        zc = rj / (1.0 + tau * muA)
+        return float(np.sum(muA * zc * zc))
+
+    if mu4 * e_before <= budget or e_before <= _EPS:
+        tau = 0.0
+        bind = False
+        z_eig = rj.copy()
+    else:
+        bind = True
+        target = budget / mu4
+        lo, hi = 0.0, 1.0
+        for _ in range(200):                   # grow hi until energy(hi) <= target
+            if energy(hi) <= target:
+                break
+            hi *= 2.0
+        for _ in range(200):                   # bisection (energy monotone dec)
+            mid = 0.5 * (lo + hi)
+            if energy(mid) > target:
+                lo = mid
+            else:
+                hi = mid
+            if hi - lo < 1e-14 * (hi + 1.0):
+                break
+        tau = hi
+        z_eig = rj / (1.0 + tau * muA)
+
+    z_coords = W @ z_eig
+    e_after = float(np.sum(muA * z_eig * z_eig))
+
+    contrib = muA * rj * rj                     # Ritz-mode concentration of e_before
+    order = np.argsort(contrib)[::-1]
+    csum = np.cumsum(contrib[order])
+    total = csum[-1] if csum.size else 0.0
+    n90 = int(np.searchsorted(csum, 0.9 * total) + 1) if total > _EPS else 0
+
+    diag = {"tau": tau, "bind": bind, "e_before": e_before, "e_after": e_after,
+            "budget": budget, "ritz": muA, "n_modes_90": n90}
+    return z_coords, diag
+
+
 @dataclass
 class CttnResult:
     d: np.ndarray            # the applied outer direction; theta -= eta * d
@@ -157,84 +227,22 @@ def cttn_step(
     b_parallel = b - r
     r_norm = float(np.linalg.norm(r))
 
-    # Work in the k-dim V-coordinate space (q, r, g all lie in span(V)).
-    qc = V.T @ q                       # [k]
-    rc = V.T @ r                       # [k]
-    gc = V.T @ g                       # [k]
+    # Project into the k-dim V basis (q, r, g all lie in span(V)) and solve the
+    # <=k-dim trust region with the shared core (identical for the torch path).
+    qc = V.T @ q
+    rc = V.T @ r
+    gc = V.T @ g
+    z_coords, diag = _solve_trustregion_kdim(qc, rc, gc, T, mu=mu, rho=rho)
 
-    # PSD-project the Ritz block -> Hplus in-basis [k,k].
-    T = 0.5 * (T + T.T)
-    evals, evecs = np.linalg.eigh(T)
-    Tplus = (evecs * np.clip(evals, 0.0, None)) @ evecs.T      # [k,k] PSD
-
-    # A = P Hplus P, restricted to span(V): project out the q-direction on both
-    # sides so the damped momentum stays TRANSVERSE (q^T z == 0 exactly).
-    qn = qc / (float(np.linalg.norm(qc)) + _EPS)
-    Pc = np.eye(qc.shape[0]) - np.outer(qn, qn)
-    Ac = Pc @ Tplus @ Pc
-    Ac = 0.5 * (Ac + Ac.T)
-    muA, W = np.linalg.eigh(Ac)        # muA >= 0 (PSD, q-direction -> 0)
-    muA = np.clip(muA, 0.0, None)
-
-    rj = W.T @ rc                      # r in the A-eigenbasis (rc already ⊥ qc)
-    e_before = float(np.sum(muA * rj * rj))            # r^T A r
-    # Current-step positive-curvature budget: g^T Hplus g (g has a q-component).
-    g_curv = float(gc @ (Tplus @ gc))
-    budget = rho * g_curv
-
-    # Trust region: smallest tau>=0 s.t. mu^4 * z(tau)^T A z(tau) <= budget, with
-    # z(tau)_j = rj_j / (1 + tau muA_j) in the A-eigenbasis; energy monotone dec.
-    mu4 = mu ** 4
-
-    def energy(tau: float) -> float:
-        zc = rj / (1.0 + tau * muA)
-        return float(np.sum(muA * zc * zc))
-
-    if mu4 * e_before <= budget or e_before <= _EPS:
-        tau = 0.0
-        bind = False
-        z_eig = rj.copy()
-    else:
-        bind = True
-        target = budget / mu4
-        lo, hi = 0.0, 1.0
-        for _ in range(200):
-            if energy(hi) <= target:
-                break
-            hi *= 2.0
-        for _ in range(200):
-            mid = 0.5 * (lo + hi)
-            if energy(mid) > target:
-                lo = mid
-            else:
-                hi = mid
-            if hi - lo < 1e-14 * (hi + 1.0):
-                break
-        tau = hi
-        z_eig = rj / (1.0 + tau * muA)
-
-    z_coords = W @ z_eig               # back to V-coords
     z = V @ z_coords                   # parameter space; q^T z == 0 by construction
     z_norm = float(np.linalg.norm(z))
-    e_after = float(np.sum(muA * z_eig * z_eig))
-    Wt = rj                            # alias for the concentration diagnostic below
-    evals_plus = muA
-
-    # Nesterov update with the damped transverse momentum.
     b_new = mu * (b_parallel + z) + g
     d = g + mu * mu * z                 # == g + mu * P(b_new); q^T d == ||g||
 
-    # # Ritz modes explaining 90% of e_before (concentration diagnostic).
-    contrib = evals_plus * Wt * Wt
-    order = np.argsort(contrib)[::-1]
-    csum = np.cumsum(contrib[order])
-    total = csum[-1] if csum.size else 0.0
-    n90 = int(np.searchsorted(csum, 0.9 * total) + 1) if total > _EPS else 0
-
     return CttnResult(
-        d=d, b_new=b_new, z=z, tau=tau, bind=bind,
+        d=d, b_new=b_new, z=z, tau=diag["tau"], bind=diag["bind"],
         r_norm=r_norm, z_norm=z_norm,
         norm_retention=(z_norm / r_norm) if r_norm > _EPS else 1.0,
-        e_before=e_before, e_after=e_after, budget=budget,
-        ritz=evals_plus, n_modes_90=n90,
+        e_before=diag["e_before"], e_after=diag["e_after"], budget=diag["budget"],
+        ritz=diag["ritz"], n_modes_90=diag["n_modes_90"],
     )
