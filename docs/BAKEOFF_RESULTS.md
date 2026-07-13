@@ -76,14 +76,28 @@ within each workload's own eval set; higher Δ = better). Correctness gate PASSE
 (control-arm zero-sum exactly 0.0/0.0 → implementation provably unbiased).
 | cell | SCAFFOLD | control | Δ (better by) |
 |------|----------|---------|---------------|
-| HET-H64 | 1.43882 | 1.45705 | +0.0182 (clears) |
+| **H16-IID** | 1.47322 | 1.54547 | **+0.0722** |
 | H64-IID | 1.53250 | 1.54859 | +0.0161 |
 | H256-IID | 1.54791 | 1.54865 | +0.0007 (≈null) |
-Gate needs a >0.018 win on H256 AND heterogeneous. H256 is ~null (+0.0007) — the
-OPPOSITE of the design's grow-with-H prediction. The non-monotonicity (H64 +0.016
-→ H256 ~0) shows the H64-IID +0.016 was single-seed NOISE, not a horizon-tilted
-effect; true IID effect ≈0. Het +0.018 alone is insufficient → KILL. The
-implementation is clean (zero-sum verified), so the null is real, not a bug.
+| HET-H64 | 1.43882 | 1.45705 | +0.0182 (clears) |
+Gate needs a >0.018 win on H256 AND heterogeneous. H256 is ~null (+0.0007) → the
+gate's long-H requirement is unmet → **KILL as an outer-momentum fix** (no change
+to "ship SGD-0.28"). The implementation is clean (control-arm zero-sum exactly
+0.0/0.0 → provably unbiased), so the null is real, not a bug.
+
+**But the horizon tilt is the OPPOSITE of the design hypothesis, and real.** With
+the H16 cell now in, the IID gain is cleanly MONOTONIC-DECREASING in H:
++0.0722 (H16) → +0.0161 (H64) → +0.0007 (H256). A 3-point monotone trend, H16 at
+~8× the noise floor, is not single-seed noise (this supersedes the earlier
+"H64 +0.016 was noise" read, made before the H16 point existed). The control
+arms are flat (~1.545–1.549 across all H) while the scaffold arms improve as H
+shrinks — a genuine short-horizon effect. This makes SCAFFOLD-lite the STRONGEST
+short-H helper in the campaign (cf. worker-SNR −0.0019, Iso-C −0.0078 at H16) and
+places it squarely in the unifying no-free-lunch pattern: consensus/spatial
+corrections help short-H, break/vanish at long-H. The gate hunted the payoff at
+long-H (null here) and used short-H only as a do-no-harm guard — where the actual
++0.072 sat. Flagged for seed-replication of the short-H cells before it is
+claimed as a result; no extra compute spent yet (gate already decided).
 
 ## Notes
 ¹ block-Yogi H256 lost to node preemption mid-run; conclusion robust without it.
