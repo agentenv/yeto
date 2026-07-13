@@ -1,0 +1,280 @@
+- generic [active] [ref=f83e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f83e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f83e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f83e8]:
+    - search [ref=f83e9]:
+      - generic [ref=f83e11]:
+        - link "Go to Google Home" [ref=f83e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQPAgI
+        - generic [ref=f83e21]:
+          - generic [ref=f83e22]:
+            - combobox "Search" [ref=f83e25]: "\"Gradient Diversity: a Key Ingredient\" arxiv abstract \"Gradient Diversity: a Key Ingredient\" arxiv abstract"
+            - generic [ref=f83e26]:
+              - button "Clear" [ref=f83e28] [cursor=pointer]
+              - generic [ref=f83e33]:
+                - button "Search by voice" [ref=f83e34] [cursor=pointer]
+                - button "Search by image" [ref=f83e37] [cursor=pointer]
+          - button "Search" [ref=f83e40] [cursor=pointer]
+    - generic [ref=f83e45]:
+      - button "Settings" [ref=f83e47] [cursor=pointer]
+      - button "Share" [ref=f83e53] [cursor=pointer]
+      - generic [ref=f83e59]:
+        - button "Google apps" [ref=f83e61] [cursor=pointer]
+        - link "Sign in" [ref=f83e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522Gradient%2520Diversity%253A%2520a%2520Key%2520Ingredient%2522%2520arxiv%2520abstract&ec=futura_srp_og_si_72236_p
+  - generic [ref=f83e68]:
+    - navigation [ref=f83e74]:
+      - generic [ref=f83e80]:
+        - list [ref=f83e81]:
+          - listitem [ref=f83e82]:
+            - link "AI Mode" [ref=f83e85] [cursor=pointer]:
+              - /url: /search?q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&aep=1&ntc=1&sa=X&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQ2J8OegQICBAD
+          - listitem [ref=f83e89]:
+            - link "All" [disabled] [ref=f83e90]
+          - listitem [ref=f83e93]:
+            - link "Images" [ref=f83e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sa=X&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQtKgLegQIGxAB
+          - listitem [ref=f83e97]:
+            - link "Videos" [ref=f83e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sa=X&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQtKgLegQIGRAB
+          - listitem [ref=f83e101]:
+            - link "Shopping" [ref=f83e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&ved=1t:220175&ictx=111
+          - listitem [ref=f83e105]:
+            - link "Forums" [ref=f83e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sa=X&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQs6gLegQIDhAB
+          - listitem [ref=f83e109]:
+            - link "Short videos" [ref=f83e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sa=X&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQs6gLegQICxAB
+          - listitem [ref=f83e113]:
+            - button [ref=f83e114] [cursor=pointer]:
+              - generic "More filters" [ref=f83e115]: More
+        - button "Tools" [ref=f83e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f83e129]
+    - main [ref=f83e135]:
+      - generic [ref=f83e139]:
+        - generic [ref=f83e142]:
+          - heading "Web results" [level=2] [ref=f83e143]
+          - generic [ref=f83e144]:
+            - generic [ref=f83e147]:
+              - 'link "[1706.05699] Gradient Diversity: a Key Ingredient for ... arXiv https://arxiv.org › cs" [ref=f83e149] [cursor=pointer]':
+                - /url: https://arxiv.org/abs/1706.05699
+                - 'heading "[1706.05699] Gradient Diversity: a Key Ingredient for ..." [level=3] [ref=f83e150]'
+                - generic [ref=f83e156]:
+                  - generic [ref=f83e157]: arXiv
+                  - generic [ref=f83e159]: https://arxiv.org › cs
+              - button "About this result" [ref=f83e163] [cursor=pointer]
+            - generic [ref=f83e169]:
+              - generic [ref=f83e170]: by D Yin · 2017 · Cited by 192 —
+              - generic [ref=f83e171]:
+                - emphasis [ref=f83e172]: Abstract
+                - text: page for
+                - emphasis [ref=f83e173]: arXiv
+                - text: "paper 1706.05699:"
+                - emphasis [ref=f83e174]: "Gradient Diversity: a Key Ingredient"
+                - text: for Scalable Distributed Learning.
+        - generic [ref=f83e185]:
+          - heading "Thinking" [level=2] [ref=f83e189]
+          - progressbar "Generating" [ref=f83e192]
+        - generic [ref=f83e196]:
+          - heading "Web results" [level=2] [ref=f83e197]
+          - generic [ref=f83e198]:
+            - generic [ref=f83e201]:
+              - 'link "Gradient Diversity: a Key Ingredient for Scalable Distributed ... Proceedings of Machine Learning Research https://proceedings.mlr.press › ..." [ref=f83e203] [cursor=pointer]':
+                - /url: https://proceedings.mlr.press/v84/yin18a.html
+                - 'heading "Gradient Diversity: a Key Ingredient for Scalable Distributed ..." [level=3] [ref=f83e204]'
+                - generic [ref=f83e210]:
+                  - generic [ref=f83e211]: Proceedings of Machine Learning Research
+                  - generic [ref=f83e213]: https://proceedings.mlr.press › ...
+              - button "About this result" [ref=f83e217] [cursor=pointer]
+            - generic [ref=f83e223]:
+              - generic [ref=f83e224]: by D Yin · 2018 · Cited by 192 —
+              - generic [ref=f83e225]:
+                - text: "& Bartlett, P.. (2018)."
+                - emphasis [ref=f83e226]: "Gradient Diversity: a Key Ingredient"
+                - text: for Scalable Distributed Learning. Proceedings of the Twenty-First International Conference on ...
+              - link "Read more" [ref=f83e227] [cursor=pointer]:
+                - /url: https://proceedings.mlr.press/v84/yin18a.html#:~:text=Copy%20to%20Clipboard
+            - generic [ref=f83e229]:
+              - text: "Missing: arxiv ‎| Show results with:"
+              - link "arxiv" [ref=f83e230] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=%22Gradient+Diversity:+a+Key+Ingredient%22+%22arxiv%22+abstract&sa=X&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQ5t4CegQILRAB
+        - generic [ref=f83e234]:
+          - generic [ref=f83e237]:
+            - 'link "Gradient Diversity: a Key Ingredient for Scalable Distributed ... Proceedings of Machine Learning Research http://proceedings.mlr.press › ..." [ref=f83e239] [cursor=pointer]':
+              - /url: http://proceedings.mlr.press/v84/yin18a/yin18a.pdf
+              - 'heading "Gradient Diversity: a Key Ingredient for Scalable Distributed ..." [level=3] [ref=f83e240]'
+              - generic [ref=f83e246]:
+                - generic [ref=f83e247]: Proceedings of Machine Learning Research
+                - generic [ref=f83e249]: http://proceedings.mlr.press › ...
+            - generic [ref=f83e251]: PDF
+            - button "About this result" [ref=f83e254] [cursor=pointer]
+          - generic [ref=f83e259]:
+            - generic [ref=f83e260]:
+              - generic [ref=f83e261]: by D Yin · 2018 · Cited by 192 —
+              - generic [ref=f83e262]:
+                - emphasis [ref=f83e263]: "Gradient Diversity: a Key Ingredient"
+                - text: for Scalable Distributed Learning. (a) ...
+                - emphasis [ref=f83e264]: arXiv
+                - text: preprint
+                - emphasis [ref=f83e265]: arXiv
+                - text: :1603.04467, 2016. D. Alistarh, J. Li, R. Tomioka ...
+              - link "Read more" [ref=f83e266] [cursor=pointer]:
+                - /url: http://proceedings.mlr.press/v84/yin18a/yin18a.pdf#:~:text=Gradient%20Diversity%3A%20a%20Key%20Ingredient,(a)&text=arXiv%20preprint%20arXiv%3A1603.04467%2C%202016.,Li%2C%20R.%20Tomioka%2C%20and%20M.
+            - generic [ref=f83e267]: 10 pages
+        - generic [ref=f83e271]:
+          - generic [ref=f83e274]:
+            - 'link "Gradient Diversity: a Key Ingredient for Scalable ... OPT 2025: Optimization for Machine Learning https://opt-ml.org › papers › OPT2017_paper_37" [ref=f83e276] [cursor=pointer]':
+              - /url: https://opt-ml.org/oldopt/papers/OPT2017_paper_37.pdf
+              - 'heading "Gradient Diversity: a Key Ingredient for Scalable ..." [level=3] [ref=f83e277]'
+              - generic [ref=f83e286]:
+                - generic [ref=f83e287]: "OPT 2025: Optimization for Machine Learning"
+                - generic [ref=f83e289]: https://opt-ml.org › papers › OPT2017_paper_37
+            - generic [ref=f83e291]: PDF
+            - button "About this result" [ref=f83e294] [cursor=pointer]
+          - generic [ref=f83e299]:
+            - generic [ref=f83e300]:
+              - generic [ref=f83e301]: by D Yin · Cited by 192 —
+              - text: It has been experimentally observed that distributed implementations of mini-batch stochastic gradient descent (SGD) algorithms exhibit speedup saturation ...
+              - link "Read more" [ref=f83e302] [cursor=pointer]:
+                - /url: https://opt-ml.org/oldopt/papers/OPT2017_paper_37.pdf#:~:text=It%20has%20been%20experimentally%20observed,speedup%20saturation%20and%20decaying%20gen%2D
+            - generic [ref=f83e303]: 6 pages
+        - generic [ref=f83e307]:
+          - generic [ref=f83e310]:
+            - 'link "\"Gradient Diversity: a Key Ingredient for Scalable ... Reddit · r/mlscaling 2 comments · 2 years ago" [ref=f83e312] [cursor=pointer]':
+              - /url: https://www.reddit.com/r/mlscaling/comments/1cqecic/gradient_diversity_a_key_ingredient_for_scalable/
+              - 'heading "\"Gradient Diversity: a Key Ingredient for Scalable ..." [level=3] [ref=f83e313]'
+              - generic [ref=f83e319]:
+                - generic [ref=f83e320]: Reddit · r/mlscaling
+                - generic [ref=f83e322]: 2 comments · 2 years ago
+            - button "About this result" [ref=f83e326] [cursor=pointer]
+          - generic [ref=f83e333]:
+            - emphasis [ref=f83e334]: Abstract
+            - text: page for
+            - emphasis [ref=f83e335]: arXiv
+            - text: "paper 1706.05699:"
+            - emphasis [ref=f83e336]: "Gradient Diversity: a Key Ingredient"
+            - text: for Scalable Distributed Learning.
+        - generic [ref=f83e340]:
+          - generic [ref=f83e343]:
+            - link "Peter Bartlett's 2017-2024 Papers University of California, Berkeley https://www.stat.berkeley.edu › ~bartlett › recent-pubs_bib" [ref=f83e345] [cursor=pointer]:
+              - /url: https://www.stat.berkeley.edu/~bartlett/publications/recent-pubs_bib.html
+              - heading "Peter Bartlett's 2017-2024 Papers" [level=3] [ref=f83e346]
+              - generic [ref=f83e355]:
+                - generic [ref=f83e356]: University of California, Berkeley
+                - generic [ref=f83e358]: https://www.stat.berkeley.edu › ~bartlett › recent-pubs_bib
+            - button "About this result" [ref=f83e362] [cursor=pointer]
+          - generic [ref=f83e368]:
+            - generic [ref=f83e369]: by F Hedayati · Cited by 2 —
+            - generic [ref=f83e370]:
+              - text: "... {"
+              - emphasis [ref=f83e371]: "Gradient Diversity: a Key Ingredient"
+              - text: "for Scalable Distributed Learning}, year = {2018}, booktitle = {Proceedings of the 21st International Conference on ..."
+            - link "Read more" [ref=f83e372] [cursor=pointer]:
+              - /url: https://www.stat.berkeley.edu/~bartlett/publications/recent-pubs_bib.html#:~:text=Gradient%20Diversity%3A%20a%20Key%20Ingredient,the%2021st%20International%20Conference%20on
+        - generic [ref=f83e376]:
+          - generic [ref=f83e379]:
+            - 'link "FedAWARE: Maximizing Gradient Diversity for ... arXiv https://arxiv.org › html" [ref=f83e381] [cursor=pointer]':
+              - /url: https://arxiv.org/html/2310.02702v3
+              - 'heading "FedAWARE: Maximizing Gradient Diversity for ..." [level=3] [ref=f83e382]'
+              - generic [ref=f83e388]:
+                - generic [ref=f83e389]: arXiv
+                - generic [ref=f83e391]: https://arxiv.org › html
+            - button "About this result" [ref=f83e395] [cursor=pointer]
+          - generic [ref=f83e401]:
+            - generic [ref=f83e402]: May 24, 2024 —
+            - generic [ref=f83e403]:
+              - emphasis [ref=f83e404]: "Gradient diversity: a key ingredient"
+              - text: for scalable distributed learning. In International Conference on Artificial Intelligence and ...
+            - link "Read more" [ref=f83e405] [cursor=pointer]:
+              - /url: https://arxiv.org/html/2310.02702v3#:~:text=Gradient%20diversity%3A%20a%20key%20ingredient,Intelligence%20and%20Statistics%2C%20pages%201998%E2%80%932007.
+        - generic [ref=f83e409]:
+          - generic [ref=f83e412]:
+            - link "arXiv:2106.13897v3 [cs.LG] 13 Dec 2021 arXiv https://arxiv.org › pdf" [ref=f83e414] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/2106.13897
+              - heading "arXiv:2106.13897v3 [cs.LG] 13 Dec 2021" [level=3] [ref=f83e415]
+              - generic [ref=f83e421]:
+                - generic [ref=f83e422]: arXiv
+                - generic [ref=f83e424]: https://arxiv.org › pdf
+            - generic [ref=f83e426]: PDF
+            - button "About this result" [ref=f83e429] [cursor=pointer]
+          - generic [ref=f83e435]:
+            - generic [ref=f83e436]: by Y Dandi · 2021 · Cited by 58 —
+            - generic [ref=f83e437]:
+              - emphasis [ref=f83e438]: "Gradient Diversity: a Key Ingredient"
+              - text: for. Scalable Distributed Learning. In Storkey, A.; and Perez-Cruz, F., eds., Proceedings of the Twenty ...
+            - link "Read more" [ref=f83e439] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/2106.13897#:~:text=Gradient%20Diversity%3A%20a%20Key%20Ingredient,the%20Twenty%2DFirst%20International%20Conference%20on
+        - generic [ref=f83e443]:
+          - generic [ref=f83e446]:
+            - link "A Noise Measure for Geometry-Adaptive SGD Schedules arXiv https://arxiv.org › html" [ref=f83e448] [cursor=pointer]:
+              - /url: https://arxiv.org/html/2606.30455
+              - heading "A Noise Measure for Geometry-Adaptive SGD Schedules" [level=3] [ref=f83e449]
+              - generic [ref=f83e455]:
+                - generic [ref=f83e456]: arXiv
+                - generic [ref=f83e458]: https://arxiv.org › html
+            - button "About this result" [ref=f83e462] [cursor=pointer]
+          - generic [ref=f83e468]:
+            - generic [ref=f83e469]: Jun 29, 2026 —
+            - generic [ref=f83e470]:
+              - emphasis [ref=f83e471]: "Gradient diversity: A key ingredient"
+              - text: for scalable distributed learning. In AISTATS. You et al. [2017] You, Y., Gitman, I., and Ginsburg, B ...
+            - link "Read more" [ref=f83e472] [cursor=pointer]:
+              - /url: https://arxiv.org/html/2606.30455#:~:text=Gradient%20diversity%3A%20A%20key%20ingredient,Gitman%2C%20I.%2C%20and%20Ginsburg%2C%20B.
+      - navigation [ref=f83e475]:
+        - heading "Page Navigation" [level=1] [ref=f83e476]
+        - text: "1"
+        - link "Page 2" [ref=f83e479] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sca_esv=30a5fb343c9df574&ei=F_5Par7VHtvKkPIP6uW8sA0&start=10&sa=N&sstk=AU9db-Bf1QJ09kFvW7y2IYStl0jbqydf5XXPuKyf-CTtsKQTbjKF0Bq_Of6QIQHcxG8W1PanORXpx8rTqKg8VMz2nnqGuFaKFCkBOA&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQ8tMDegQIPBAE
+          - text: "2"
+        - link "Page 3" [ref=f83e481] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sca_esv=30a5fb343c9df574&ei=F_5Par7VHtvKkPIP6uW8sA0&start=20&sa=N&sstk=AU9db-Bf1QJ09kFvW7y2IYStl0jbqydf5XXPuKyf-CTtsKQTbjKF0Bq_Of6QIQHcxG8W1PanORXpx8rTqKg8VMz2nnqGuFaKFCkBOA&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQ8tMDegQIPBAG
+          - text: "3"
+        - link "Page 4" [ref=f83e483] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sca_esv=30a5fb343c9df574&ei=F_5Par7VHtvKkPIP6uW8sA0&start=30&sa=N&sstk=AU9db-Bf1QJ09kFvW7y2IYStl0jbqydf5XXPuKyf-CTtsKQTbjKF0Bq_Of6QIQHcxG8W1PanORXpx8rTqKg8VMz2nnqGuFaKFCkBOA&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQ8tMDegQIPBAI
+          - text: "4"
+        - link "Page 5" [ref=f83e485] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sca_esv=30a5fb343c9df574&ei=F_5Par7VHtvKkPIP6uW8sA0&start=40&sa=N&sstk=AU9db-Bf1QJ09kFvW7y2IYStl0jbqydf5XXPuKyf-CTtsKQTbjKF0Bq_Of6QIQHcxG8W1PanORXpx8rTqKg8VMz2nnqGuFaKFCkBOA&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQ8tMDegQIPBAK
+          - text: "5"
+        - link "Page 6" [ref=f83e487] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sca_esv=30a5fb343c9df574&ei=F_5Par7VHtvKkPIP6uW8sA0&start=50&sa=N&sstk=AU9db-Bf1QJ09kFvW7y2IYStl0jbqydf5XXPuKyf-CTtsKQTbjKF0Bq_Of6QIQHcxG8W1PanORXpx8rTqKg8VMz2nnqGuFaKFCkBOA&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQ8tMDegQIPBAM
+          - text: "6"
+        - link "Page 7" [ref=f83e489] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sca_esv=30a5fb343c9df574&ei=F_5Par7VHtvKkPIP6uW8sA0&start=60&sa=N&sstk=AU9db-Bf1QJ09kFvW7y2IYStl0jbqydf5XXPuKyf-CTtsKQTbjKF0Bq_Of6QIQHcxG8W1PanORXpx8rTqKg8VMz2nnqGuFaKFCkBOA&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQ8tMDegQIPBAO
+          - text: "7"
+        - link "Page 8" [ref=f83e491] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sca_esv=30a5fb343c9df574&ei=F_5Par7VHtvKkPIP6uW8sA0&start=70&sa=N&sstk=AU9db-Bf1QJ09kFvW7y2IYStl0jbqydf5XXPuKyf-CTtsKQTbjKF0Bq_Of6QIQHcxG8W1PanORXpx8rTqKg8VMz2nnqGuFaKFCkBOA&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQ8tMDegQIPBAQ
+          - text: "8"
+        - link "Page 9" [ref=f83e493] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sca_esv=30a5fb343c9df574&ei=F_5Par7VHtvKkPIP6uW8sA0&start=80&sa=N&sstk=AU9db-Bf1QJ09kFvW7y2IYStl0jbqydf5XXPuKyf-CTtsKQTbjKF0Bq_Of6QIQHcxG8W1PanORXpx8rTqKg8VMz2nnqGuFaKFCkBOA&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQ8tMDegQIPBAS
+          - text: "9"
+        - link "Page 10" [ref=f83e495] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sca_esv=30a5fb343c9df574&ei=F_5Par7VHtvKkPIP6uW8sA0&start=90&sa=N&sstk=AU9db-Bf1QJ09kFvW7y2IYStl0jbqydf5XXPuKyf-CTtsKQTbjKF0Bq_Of6QIQHcxG8W1PanORXpx8rTqKg8VMz2nnqGuFaKFCkBOA&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQ8tMDegQIPBAU
+          - text: "10"
+        - heading [level=2] [ref=f83e497]:
+          - link "Next" [ref=f83e498] [cursor=pointer]:
+            - /url: /search?q=%22Gradient+Diversity:+a+Key+Ingredient%22+arxiv+abstract&sca_esv=30a5fb343c9df574&ei=F_5Par7VHtvKkPIP6uW8sA0&start=10&sa=N&sstk=AU9db-Bf1QJ09kFvW7y2IYStl0jbqydf5XXPuKyf-CTtsKQTbjKF0Bq_Of6QIQHcxG8W1PanORXpx8rTqKg8VMz2nnqGuFaKFCkBOA&ved=2ahUKEwj-vIi3scaVAxVbJUQIHeoyD9YQ8NMDegQIPBAW
+      - navigation
+    - contentinfo [ref=f83e501]:
+      - heading "Footer Links" [level=1] [ref=f83e502]
+      - generic [ref=f83e506]:
+        - generic [ref=f83e510]:
+          - button "Woodland, California - From your IP address" [ref=f83e512] [cursor=pointer]:
+            - generic [ref=f83e513]: Woodland, California
+            - generic [ref=f83e515]:
+              - text: "-"
+              - generic [ref=f83e516]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f83e518] [cursor=pointer]
+        - generic [ref=f83e521]:
+          - link "Help" [ref=f83e522] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f83e523] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f83e524] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f83e525] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

@@ -1,0 +1,286 @@
+- generic [ref=f129e2]:
+  - link "Skip to main content" [ref=f129e3] [cursor=pointer]:
+    - /url: "#content"
+  - region "Announcement" [ref=f129e4]:
+    - generic [ref=f129e6]: arXiv is now an independent nonprofit!
+    - link "Learn more" [ref=f129e7] [cursor=pointer]:
+      - /url: https://info.arxiv.org/about
+    - button "Dismiss announcement" [ref=f129e8] [cursor=pointer]: ×
+  - banner [ref=f129e9]:
+    - link [ref=f129e10] [cursor=pointer]:
+      - /url: https://arxiv.org/IgnoreMe
+    - link "archive home" [ref=f129e11] [cursor=pointer]:
+      - /url: https://arxiv.org/
+      - img "archive" [ref=f129e12]
+    - navigation "Main navigation" [ref=f129e13]:
+      - link "Search" [ref=f129e14] [cursor=pointer]:
+        - /url: https://arxiv.org/search
+      - link "Submit" [ref=f129e18] [cursor=pointer]:
+        - /url: https://arxiv.org/user/create
+      - link "Donate" [ref=f129e19] [cursor=pointer]:
+        - /url: https://info.arxiv.org/about/donate.html
+      - link "Log in" [ref=f129e21] [cursor=pointer]:
+        - /url: https://arxiv.org/login
+  - main [ref=f129e22]:
+    - generic [ref=f129e24]:
+      - generic [ref=f129e25]:
+        - heading "Computer Science > Machine Learning" [level=1] [ref=f129e27]
+        - generic [ref=f129e29]:
+          - generic [ref=f129e30]:
+            - text: "[Submitted on 13 Feb 2018 ("
+            - link "v1" [ref=f129e31] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/1802.04434v1
+            - text: ), last revised 7 Aug 2018 (this version, v3)]
+          - 'heading "signSGD: Compressed Optimisation for Non-Convex Problems" [level=1] [ref=f129e32]'
+          - generic [ref=f129e33]:
+            - link "Jeremy Bernstein" [ref=f129e34] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Bernstein,+J
+            - text: ","
+            - link "Yu-Xiang Wang" [ref=f129e35] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Wang,+Y
+            - text: ","
+            - link "Kamyar Azizzadenesheli" [ref=f129e36] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Azizzadenesheli,+K
+            - text: ","
+            - link "Anima Anandkumar" [ref=f129e37] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Anandkumar,+A
+          - blockquote [ref=f129e38]:
+            - text: "Training large neural networks requires distributing learning across multiple workers, where the cost of communicating gradients can be a significant bottleneck. signSGD alleviates this problem by transmitting just the sign of each minibatch stochastic gradient. We prove that it can get the best of both worlds: compressed gradients and SGD-level convergence rate. The relative \\ell_1/\\ell_2 geometry of gradients, noise and curvature informs whether signSGD or SGD is theoretically better suited to a particular problem. On the practical side we find that the momentum counterpart of signSGD is able to match the accuracy and convergence speed of Adam on deep Imagenet models. We extend our theory to the distributed setting, where the parameter server uses majority vote to aggregate gradient signs from each worker enabling 1-bit compression of worker-server communication in both directions. Using a theorem by Gauss we prove that majority vote can achieve the same reduction in variance as full precision distributed SGD. Thus, there is great promise for sign-based optimisation schemes to achieve fast communication and fast convergence. Code to reproduce experiments is to be found at"
+            - link "this https URL" [ref=f129e39] [cursor=pointer]:
+              - /url: https://github.com/jxbz/signSGD
+            - text: .
+          - table "Additional metadata" [ref=f129e41]:
+            - rowgroup [ref=f129e42]:
+              - row [ref=f129e43]:
+                - cell "Subjects:" [ref=f129e44]
+                - cell "Machine Learning (cs.LG); Distributed, Parallel, and Cluster Computing (cs.DC); Optimization and Control (math.OC)" [ref=f129e45]
+              - row [ref=f129e46]:
+                - cell "Cite as:" [ref=f129e47]
+                - cell [ref=f129e48]:
+                  - generic [ref=f129e49]:
+                    - link "arXiv:1802.04434" [ref=f129e50] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/1802.04434
+                    - text: "[cs.LG]"
+              - row [ref=f129e51]:
+                - cell [ref=f129e52]
+                - cell [ref=f129e53]:
+                  - text: (or
+                  - generic [ref=f129e54]:
+                    - link "arXiv:1802.04434v3" [ref=f129e55] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/1802.04434v3
+                    - text: "[cs.LG]"
+                  - text: for this version)
+              - row [ref=f129e56]:
+                - cell [ref=f129e57]
+                - cell [ref=f129e58]:
+                  - link "https://doi.org/10.48550/arXiv.1802.04434" [ref=f129e59] [cursor=pointer]:
+                    - /url: https://doi.org/10.48550/arXiv.1802.04434
+                  - button "Focus to learn more" [ref=f129e61]
+        - generic [ref=f129e64]:
+          - heading "Submission history" [level=2] [ref=f129e65]
+          - text: "From: Jeremy Bernstein ["
+          - link "view email" [ref=f129e66] [cursor=pointer]:
+            - /url: /show-email/c30de5d0/1802.04434
+          - text: "]"
+          - strong [ref=f129e67]:
+            - link "[v1]" [ref=f129e68] [cursor=pointer]:
+              - /url: /abs/1802.04434v1
+          - text: Tue, 13 Feb 2018 02:14:35 UTC (201 KB)
+          - strong [ref=f129e69]:
+            - link "[v2]" [ref=f129e70] [cursor=pointer]:
+              - /url: /abs/1802.04434v2
+          - text: Sat, 23 Jun 2018 18:01:27 UTC (478 KB)
+          - strong [ref=f129e71]: "[v3]"
+          - text: Tue, 7 Aug 2018 18:55:19 UTC (477 KB)
+      - generic [ref=f129e72]:
+        - generic [ref=f129e73]:
+          - heading "Access Paper:" [level=2] [ref=f129e74]
+          - list [ref=f129e75]:
+            - listitem [ref=f129e76]:
+              - link "View PDF" [ref=f129e77] [cursor=pointer]:
+                - /url: /pdf/1802.04434
+            - listitem [ref=f129e78]:
+              - link "TeX Source" [ref=f129e79] [cursor=pointer]:
+                - /url: /src/1802.04434
+          - link "view license" [ref=f129e81] [cursor=pointer]:
+            - /url: http://arxiv.org/licenses/nonexclusive-distrib/1.0/
+        - generic [ref=f129e82]:
+          - heading "Current browse context:" [level=3] [ref=f129e83]
+          - generic [ref=f129e84]: cs.LG
+          - generic [ref=f129e85]:
+            - link "< prev" [ref=f129e87] [cursor=pointer]:
+              - /url: /prevnext?id=1802.04434&function=prev&context=cs.LG
+            - text: "|"
+            - link "next >" [ref=f129e89] [cursor=pointer]:
+              - /url: /prevnext?id=1802.04434&function=next&context=cs.LG
+          - generic [ref=f129e90]:
+            - link "new" [ref=f129e91] [cursor=pointer]:
+              - /url: /list/cs.LG/new
+            - text: "|"
+            - link "recent" [ref=f129e92] [cursor=pointer]:
+              - /url: /list/cs.LG/recent
+            - text: "|"
+            - link "2018-02" [ref=f129e93] [cursor=pointer]:
+              - /url: /list/cs.LG/2018-02
+          - generic [ref=f129e94]:
+            - text: "Change to browse by:"
+            - generic [ref=f129e95]:
+              - link "cs" [ref=f129e96] [cursor=pointer]:
+                - /url: /abs/1802.04434?context=cs
+              - link "cs.DC" [ref=f129e97] [cursor=pointer]:
+                - /url: /abs/1802.04434?context=cs.DC
+              - link "math" [ref=f129e98] [cursor=pointer]:
+                - /url: /abs/1802.04434?context=math
+              - link "math.OC" [ref=f129e99] [cursor=pointer]:
+                - /url: /abs/1802.04434?context=math.OC
+        - generic [ref=f129e100]:
+          - heading "References & Citations" [level=3] [ref=f129e101]
+          - list [ref=f129e102]:
+            - listitem [ref=f129e103]:
+              - link "NASA ADS" [ref=f129e104] [cursor=pointer]:
+                - /url: https://ui.adsabs.harvard.edu/abs/arXiv:1802.04434
+            - listitem [ref=f129e105]:
+              - link "Google Scholar" [ref=f129e106] [cursor=pointer]:
+                - /url: https://scholar.google.com/scholar_lookup?arxiv_id=1802.04434
+            - listitem [ref=f129e107]:
+              - link "Semantic Scholar" [ref=f129e108] [cursor=pointer]:
+                - /url: https://api.semanticscholar.org/arXiv:1802.04434
+        - generic [ref=f129e109]:
+          - heading [level=3] [ref=f129e110]:
+            - link "DBLP" [ref=f129e111] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de
+            - text: "- CS Bibliography"
+          - generic [ref=f129e112]:
+            - link "listing" [ref=f129e113] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/db/journals/corr/corr1802.html#abs-1802-04434
+            - text: "|"
+            - link "bibtex" [ref=f129e114] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/rec/bibtex/journals/corr/abs-1802-04434
+          - generic [ref=f129e115]:
+            - link "Jeremy Bernstein" [ref=f129e116] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Jeremy%20Bernstein
+            - link "Yu-Xiang Wang" [ref=f129e117] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Yu-Xiang%20Wang
+            - link "Kamyar Azizzadenesheli" [ref=f129e118] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Kamyar%20Azizzadenesheli
+            - link "Anima Anandkumar" [ref=f129e119] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Anima%20Anandkumar
+        - button "export BibTeX citation" [ref=f129e121]
+        - generic [ref=f129e122]:
+          - heading "Bookmark" [level=3] [ref=f129e124]
+          - link [ref=f129e125] [cursor=pointer]:
+            - /url: "http://www.bibsonomy.org/BibtexHandler?requTask=upload&url=https://arxiv.org/abs/1802.04434&description=signSGD: Compressed Optimisation for Non-Convex Problems"
+            - img "BibSonomy" [ref=f129e126]
+          - link [ref=f129e127] [cursor=pointer]:
+            - /url: "https://reddit.com/submit?url=https://arxiv.org/abs/1802.04434&title=signSGD: Compressed Optimisation for Non-Convex Problems"
+            - img "Reddit" [ref=f129e128]
+      - tablist "arXivLabs tools" [ref=f129e130]:
+        - radio "Bibliographic Tools" [checked] [ref=f129e131]
+        - tab "Bibliographic Tools" [selected] [ref=f129e132] [cursor=pointer]
+        - tabpanel "Bibliographic Tools" [ref=f129e133]:
+          - heading "Bibliographic and Citation Tools" [level=1] [ref=f129e134]
+          - generic [ref=f129e135]:
+            - generic [ref=f129e136]:
+              - generic [ref=f129e138]:
+                - checkbox "Bibliographic Explorer Toggle"
+                - generic [ref=f129e140]: Bibliographic Explorer Toggle
+              - generic [ref=f129e141]:
+                - text: Bibliographic Explorer
+                - emphasis [ref=f129e142]:
+                  - text: (
+                  - link "What is the Explorer?" [ref=f129e143] [cursor=pointer]:
+                    - /url: https://info.arxiv.org/labs/showcase.html#arxiv-bibliographic-explorer
+                  - text: )
+            - generic [ref=f129e144]:
+              - generic [ref=f129e146]:
+                - checkbox "Connected Papers"
+                - generic [ref=f129e148]: Connected Papers Toggle
+              - generic [ref=f129e149]:
+                - text: Connected Papers
+                - emphasis [ref=f129e150]:
+                  - text: (
+                  - link "What is Connected Papers?" [ref=f129e151] [cursor=pointer]:
+                    - /url: https://www.connectedpapers.com/about
+                  - text: )
+            - generic [ref=f129e152]:
+              - generic [ref=f129e154]:
+                - checkbox "Litmaps"
+                - generic [ref=f129e156]: Litmaps Toggle
+              - generic [ref=f129e157]:
+                - text: Litmaps
+                - emphasis [ref=f129e158]:
+                  - text: (
+                  - link "What is Litmaps?" [ref=f129e159] [cursor=pointer]:
+                    - /url: https://www.litmaps.co/
+                  - text: )
+            - generic [ref=f129e160]:
+              - generic [ref=f129e162]:
+                - checkbox "scite Smart Citations"
+                - generic [ref=f129e164]: scite.ai Toggle
+              - generic [ref=f129e165]:
+                - text: scite Smart Citations
+                - emphasis [ref=f129e166]:
+                  - text: (
+                  - link "What are Smart Citations?" [ref=f129e167] [cursor=pointer]:
+                    - /url: https://www.scite.ai/
+                  - text: )
+        - radio "Code, Data, Media" [ref=f129e171]
+        - tab "Code, Data, Media" [ref=f129e172] [cursor=pointer]
+        - radio "Demos" [ref=f129e173]
+        - tab "Demos" [ref=f129e174] [cursor=pointer]
+        - radio "Related Papers" [ref=f129e175]
+        - tab "Related Papers" [ref=f129e176] [cursor=pointer]
+        - radio "About arXivLabs" [ref=f129e177]
+        - tab "About arXivLabs" [ref=f129e178] [cursor=pointer]
+      - generic [ref=f129e179]:
+        - link "Which authors of this paper are endorsers?" [ref=f129e180] [cursor=pointer]:
+          - /url: /auth/show-endorsers/1802.04434
+        - text: "|"
+        - link "Disable MathJax" [ref=f129e181] [cursor=pointer]:
+          - /url: javascript:setMathjaxCookie()
+        - text: (
+        - link "What is MathJax?" [ref=f129e182] [cursor=pointer]:
+          - /url: https://info.arxiv.org/help/mathjax.html
+        - text: )
+  - contentinfo [ref=f129e183]:
+    - generic [ref=f129e184]:
+      - generic [ref=f129e185]:
+        - generic [ref=f129e186]:
+          - text: We gratefully acknowledge support from our
+          - strong [ref=f129e187]: major funders
+          - text: ","
+          - link [ref=f129e188] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about/ourmembers.html
+            - strong [ref=f129e189]: member institutions
+          - text: ", and all contributors."
+        - navigation "Site navigation" [ref=f129e190]:
+          - link "About" [ref=f129e191] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about
+          - generic [ref=f129e192]: ·
+          - link "Help" [ref=f129e193] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help
+          - generic [ref=f129e194]: ·
+          - link "Contact" [ref=f129e195] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/contact.html
+          - generic [ref=f129e196]: ·
+          - link "Subscribe" [ref=f129e197] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/subscribe
+          - generic [ref=f129e198]: ·
+          - link "Copyright" [ref=f129e199] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/license/index.html
+          - generic [ref=f129e200]: ·
+          - link "Privacy" [ref=f129e201] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/policies/privacy_policy.html
+          - generic [ref=f129e202]: ·
+          - link "Accessibility" [ref=f129e203] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/web_accessibility.html
+          - generic [ref=f129e204]: ·
+          - link "Operational Status (opens in new tab)" [ref=f129e205] [cursor=pointer]:
+            - /url: https://status.arxiv.org
+            - text: Operational Status
+            - generic [ref=f129e206]: (opens in new tab)
+      - generic "Major funders" [ref=f129e207]:
+        - generic [ref=f129e208]: Major funding support from
+        - generic [ref=f129e209]:
+          - img "Simons Foundation" [ref=f129e210]
+          - img "Schmidt Sciences" [ref=f129e211]

@@ -1,0 +1,141 @@
+- generic [active] [ref=f97e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f97e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f97e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f97e8]:
+    - search [ref=f97e9]:
+      - generic [ref=f97e11]:
+        - link "Go to Google Home" [ref=f97e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjDucu6scaVAxXHE0QIHYPrN2gQPAgI
+        - generic [ref=f97e21]:
+          - generic [ref=f97e22]:
+            - combobox "Search" [ref=f97e25]: "\"GradDiv\" \"Mean Resultant Length\" arxiv \"GradDiv\" \"Mean Resultant Length\" arxiv"
+            - generic [ref=f97e26]:
+              - button "Clear" [ref=f97e28] [cursor=pointer]
+              - generic [ref=f97e33]:
+                - button "Search by voice" [ref=f97e34] [cursor=pointer]
+                - button "Search by image" [ref=f97e37] [cursor=pointer]
+          - button "Search" [ref=f97e40] [cursor=pointer]
+    - generic [ref=f97e45]:
+      - button "Settings" [ref=f97e47] [cursor=pointer]
+      - button "Share" [ref=f97e53] [cursor=pointer]
+      - generic [ref=f97e59]:
+        - button "Google apps" [ref=f97e61] [cursor=pointer]
+        - link "Sign in" [ref=f97e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522GradDiv%2522%2B%2522Mean%2BResultant%2BLength%2522%2Barxiv&ec=futura_srp_og_si_72236_p
+  - generic [ref=f97e68]:
+    - navigation [ref=f97e74]:
+      - generic [ref=f97e80]:
+        - list [ref=f97e81]:
+          - listitem [ref=f97e82]:
+            - link "AI Mode" [ref=f97e85] [cursor=pointer]:
+              - /url: /search?q=%22GradDiv%22+%22Mean+Resultant+Length%22+arxiv&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegvvKnEPeeArWgEP9exNATg6oybL0Q4MEKOxPxFbct-gPoxJydwQkFVgNkm6vNXPQZjfoWDOyzkktih_Z6lssQmfbdqIKqxUyGROmvXoo-iyz5AhpVQ&aep=1&ntc=1&sa=X&ved=2ahUKEwjDucu6scaVAxXHE0QIHYPrN2gQ2J8OegQIEhAD
+          - listitem [ref=f97e89]:
+            - link "All" [disabled] [ref=f97e90]
+          - listitem [ref=f97e93]:
+            - link "Images" [ref=f97e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegvvKnEPeeArWgEP9exNATg6oybL0Q4MEKOxPxFbct-gPoxJydwQkFVgNkm6vNXPQZjfoWDOyzkktih_Z6lssQmfbdqIKqxUyGROmvXoo-iyz5AhpVQ&q=%22GradDiv%22+%22Mean+Resultant+Length%22+arxiv&sa=X&ved=2ahUKEwjDucu6scaVAxXHE0QIHYPrN2gQtKgLegQIGRAB
+          - listitem [ref=f97e97]:
+            - link "Videos" [ref=f97e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegvvKnEPeeArWgEP9exNATg6oybL0Q4MEKOxPxFbct-gPoxJydwQkFVgNkm6vNXPQZjfoWDOyzkktih_Z6lssQmfbdqIKqxUyGROmvXoo-iyz5AhpVQ&q=%22GradDiv%22+%22Mean+Resultant+Length%22+arxiv&sa=X&ved=2ahUKEwjDucu6scaVAxXHE0QIHYPrN2gQtKgLegQIGBAB
+          - listitem [ref=f97e101]:
+            - link "Forums" [ref=f97e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegvvKnEPeeArWgEP9exNATg6oybL0Q4MEKOxPxFbct-gPoxJydwQkFVgNkm6vNXPQZjfoWDOyzkktih_Z6lssQmfbdqIKqxUyGROmvXoo-iyz5AhpVQ&q=%22GradDiv%22+%22Mean+Resultant+Length%22+arxiv&sa=X&ved=2ahUKEwjDucu6scaVAxXHE0QIHYPrN2gQs6gLegQIFhAB
+          - listitem [ref=f97e105]:
+            - link "Shopping" [ref=f97e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegvvKnEPeeArWgEP9exNATg6oybL0Q4MEKOxPxFbct-gPoxJydwQkFVgNkm6vNXPQZjfoWDOyzkktih_Z6lssQmfbdqIKqxUyGROmvXoo-iyz5AhpVQ&q=%22GradDiv%22+%22Mean+Resultant+Length%22+arxiv&ved=1t:220175&ictx=111
+          - listitem [ref=f97e109]:
+            - link "Short videos" [ref=f97e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegvvKnEPeeArWgEP9exNATg6oybL0Q4MEKOxPxFbct-gPoxJydwQkFVgNkm6vNXPQZjfoWDOyzkktih_Z6lssQmfbdqIKqxUyGROmvXoo-iyz5AhpVQ&q=%22GradDiv%22+%22Mean+Resultant+Length%22+arxiv&sa=X&ved=2ahUKEwjDucu6scaVAxXHE0QIHYPrN2gQs6gLegQIFxAB
+          - listitem [ref=f97e113]:
+            - button [ref=f97e114] [cursor=pointer]:
+              - generic "More filters" [ref=f97e115]: More
+        - button "Tools" [ref=f97e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f97e129]
+    - generic [ref=f97e134]:
+      - generic [ref=f97e153]:
+        - heading "Thinking" [level=2] [ref=f97e157]
+        - progressbar "Generating" [ref=f97e160]
+      - main [ref=f97e162]:
+        - generic [ref=f97e166]:
+          - generic [ref=f97e169]:
+            - heading "Web results" [level=2] [ref=f97e170]
+            - generic [ref=f97e171]:
+              - generic [ref=f97e174]:
+                - 'link "GradDiv: Adversarial Robustness of Randomized Neural ... arXiv https://arxiv.org › pdf" [ref=f97e176] [cursor=pointer]':
+                  - /url: https://arxiv.org/pdf/2107.02425
+                  - 'heading "GradDiv: Adversarial Robustness of Randomized Neural ..." [level=3] [ref=f97e177]'
+                  - generic [ref=f97e183]:
+                    - generic [ref=f97e184]: arXiv
+                    - generic [ref=f97e186]: https://arxiv.org › pdf
+                - generic [ref=f97e188]: PDF
+                - button "About this result" [ref=f97e191] [cursor=pointer]
+              - generic [ref=f97e197]:
+                - generic [ref=f97e198]: by S Lee · 2021 · Cited by 96 —
+                - generic [ref=f97e199]:
+                  - text: The (population)
+                  - emphasis [ref=f97e200]: mean resultant length
+                  - text: (MRL) ρ is de- fined as ρ = E ... We refer to the
+                  - emphasis [ref=f97e201]: GradDiv
+                  - text: regularizations in (16), (17), and (19) as ...
+                - link "Read more" [ref=f97e202] [cursor=pointer]:
+                  - /url: https://arxiv.org/pdf/2107.02425#:~:text=The%20(population)%20mean%20resultant%20length,and%20it%20satisfies%20the%20equation&text=We%20refer%20to%20the%20GradDiv,as%20GradDiv%2D%CE%BA%2C%20GradDiv%2Dmean%2C%20and%20GradDiv%2DDPP%2C
+          - generic [ref=f97e206]:
+            - generic [ref=f97e209]:
+              - 'link "GradDiv: Adversarial Robustness of Randomized Neural ... IEEE Computer Society https://www.computer.org › csdl › journal › 2023/02" [ref=f97e211] [cursor=pointer]':
+                - /url: https://www.computer.org/csdl/journal/tp/2023/02/09761760/1CKMkj4mEBW
+                - 'heading "GradDiv: Adversarial Robustness of Randomized Neural ..." [level=3] [ref=f97e212]'
+                - generic [ref=f97e221]:
+                  - generic [ref=f97e222]: IEEE Computer Society
+                  - generic [ref=f97e224]: https://www.computer.org › csdl › journal › 2023/02
+              - button "About this result" [ref=f97e228] [cursor=pointer]
+            - generic [ref=f97e234]:
+              - generic [ref=f97e235]: by S Lee · 2023 · Cited by 98 —
+              - generic [ref=f97e236]:
+                - text: The length of sample mean vector is called the
+                - emphasis [ref=f97e237]: Mean Resultant Length
+                - text: (MRL). ...
+                - emphasis [ref=f97e238]: GradDiv
+                - text: "-mean, and"
+                - emphasis [ref=f97e239]: GradDiv
+                - text: "-DPP, respectively. To compute the"
+                - emphasis [ref=f97e240]: GradDiv
+                - text: ...
+              - link "Read more" [ref=f97e241] [cursor=pointer]:
+                - /url: https://www.computer.org/csdl/journal/tp/2023/02/09761760/1CKMkj4mEBW#:~:text=The%20length%20of%20sample%20mean,the%20Mean%20Resultant%20Length%20(MRL).&text=%2C%20GradDiv%2Dmean%2C%20and%20GradDiv%2DDPP%2C%20respectively.,to%20sample%20the%20loss%20gradients.
+            - list [ref=f97e243]:
+              - listitem [ref=f97e244]:
+                - link "1 Introduction" [ref=f97e245] [cursor=pointer]:
+                  - /url: https://www.computer.org/csdl/journal/tp/2023/02/09761760/1CKMkj4mEBW#:~:text=1%20Introduction
+              - listitem [ref=f97e248]:
+                - link "4.1 Vmf Distribution And The..." [ref=f97e249] [cursor=pointer]:
+                  - /url: https://www.computer.org/csdl/journal/tp/2023/02/09761760/1CKMkj4mEBW#:~:text=4.1%20vMF%20Distribution%20and%20the%20Concentration%20Parameter
+              - listitem [ref=f97e252]:
+                - link "5 Experiments" [ref=f97e253] [cursor=pointer]:
+                  - /url: https://www.computer.org/csdl/journal/tp/2023/02/09761760/1CKMkj4mEBW#:~:text=5%20Experiments
+        - generic:
+          - generic:
+            - navigation
+        - navigation
+    - contentinfo [ref=f97e256]:
+      - heading "Footer Links" [level=1] [ref=f97e257]
+      - generic [ref=f97e261]:
+        - generic [ref=f97e265]:
+          - button "Woodland, California - From your IP address" [ref=f97e267] [cursor=pointer]:
+            - generic [ref=f97e268]: Woodland, California
+            - generic [ref=f97e270]:
+              - text: "-"
+              - generic [ref=f97e271]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f97e273] [cursor=pointer]
+        - generic [ref=f97e276]:
+          - link "Help" [ref=f97e277] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f97e278] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f97e279] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f97e280] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

@@ -1,0 +1,342 @@
+- generic [active] [ref=f25e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f25e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f25e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f25e8]:
+    - search [ref=f25e9]:
+      - generic [ref=f25e11]:
+        - link "Go to Google Home" [ref=f25e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQPAgI
+        - generic [ref=f25e21]:
+          - generic [ref=f25e22]:
+            - combobox "Search" [ref=f25e25]: robust aggregation federated learning geometric median RFA Pillutla robust aggregation federated learning geometric median RFA Pillutla
+            - generic [ref=f25e26]:
+              - button "Clear" [ref=f25e28] [cursor=pointer]
+              - generic [ref=f25e33]:
+                - button "Search by voice" [ref=f25e34] [cursor=pointer]
+                - button "Search by image" [ref=f25e37] [cursor=pointer]
+          - button "Search" [ref=f25e40] [cursor=pointer]
+    - generic [ref=f25e45]:
+      - button "Settings" [ref=f25e47] [cursor=pointer]
+      - button "Share" [ref=f25e53] [cursor=pointer]
+      - generic [ref=f25e59]:
+        - button "Google apps" [ref=f25e61] [cursor=pointer]
+        - link "Sign in" [ref=f25e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3Drobust%2520aggregation%2520federated%2520learning%2520geometric%2520median%2520RFA%2520Pillutla&ec=futura_srp_og_si_72236_p
+  - generic [ref=f25e68]:
+    - navigation [ref=f25e74]:
+      - generic [ref=f25e80]:
+        - list [ref=f25e81]:
+          - listitem [ref=f25e82]:
+            - link "AI Mode" [ref=f25e85] [cursor=pointer]:
+              - /url: /search?q=robust+aggregation+federated+learning+geometric+median+RFA+Pillutla&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&aep=1&ntc=1&sa=X&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQ2J8OegQIKxAD
+          - listitem [ref=f25e89]:
+            - link "All" [disabled] [ref=f25e90]
+          - listitem [ref=f25e93]:
+            - link "Videos" [ref=f25e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=robust+aggregation+federated+learning+geometric+median+RFA+Pillutla&sa=X&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQtKgLegQILxAB
+          - listitem [ref=f25e97]:
+            - link "Images" [ref=f25e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=robust+aggregation+federated+learning+geometric+median+RFA+Pillutla&sa=X&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQtKgLegQINBAB
+          - listitem [ref=f25e101]:
+            - link "Forums" [ref=f25e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=robust+aggregation+federated+learning+geometric+median+RFA+Pillutla&sa=X&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQs6gLegQIMxAB
+          - listitem [ref=f25e105]:
+            - link "Shopping" [ref=f25e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=robust+aggregation+federated+learning+geometric+median+RFA+Pillutla&ved=1t:220175&ictx=111
+          - listitem [ref=f25e109]:
+            - link "Short videos" [ref=f25e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=robust+aggregation+federated+learning+geometric+median+RFA+Pillutla&sa=X&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQs6gLegQIMBAB
+          - listitem [ref=f25e113]:
+            - button [ref=f25e114] [cursor=pointer]:
+              - generic "More filters" [ref=f25e115]: More
+        - button "Tools" [ref=f25e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f25e129]
+    - generic [ref=f25e134]:
+      - generic [ref=f25e153]:
+        - heading "Thinking" [level=2] [ref=f25e157]
+        - progressbar "Generating" [ref=f25e160]
+      - main [ref=f25e162]:
+        - generic [ref=f25e166]:
+          - generic [ref=f25e169]:
+            - heading "Web results" [level=2] [ref=f25e170]
+            - generic [ref=f25e171]:
+              - generic [ref=f25e174]:
+                - link "[1912.13445] Robust Aggregation for Federated Learning arXiv https://arxiv.org › stat" [ref=f25e176] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/1912.13445
+                  - heading "[1912.13445] Robust Aggregation for Federated Learning" [level=3] [ref=f25e177]
+                  - generic [ref=f25e183]:
+                    - generic [ref=f25e184]: arXiv
+                    - generic [ref=f25e186]: https://arxiv.org › stat
+                - button "About this result" [ref=f25e190] [cursor=pointer]
+              - generic [ref=f25e196]:
+                - generic [ref=f25e197]: by K Pillutla · 2019 · Cited by 1369 —
+                - generic [ref=f25e198]:
+                  - text: The approach relies on a
+                  - emphasis [ref=f25e199]: robust aggregation
+                  - text: oracle based on the
+                  - emphasis [ref=f25e200]: geometric median
+                  - text: ", which returns a"
+                  - emphasis [ref=f25e201]: robust
+                  - text: aggregate using a constant number ...
+                - link "Read more" [ref=f25e202] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/1912.13445#:~:text=The%20approach%20relies%20on%20a,a%20regular%20non%2Drobust%20averaging%20oracle.
+          - generic [ref=f25e206]:
+            - generic [ref=f25e209]:
+              - link "Robust Aggregation for Federated Learning Krishna Pillutla https://krishnap25.github.io › papers › 2019_rfa" [ref=f25e211] [cursor=pointer]:
+                - /url: https://krishnap25.github.io/papers/2019_rfa.pdf
+                - heading "Robust Aggregation for Federated Learning" [level=3] [ref=f25e212]
+                - generic [ref=f25e221]:
+                  - generic [ref=f25e222]: Krishna Pillutla
+                  - generic [ref=f25e224]: https://krishnap25.github.io › papers › 2019_rfa
+              - generic [ref=f25e226]: PDF
+              - button "About this result" [ref=f25e229] [cursor=pointer]
+            - generic [ref=f25e234]:
+              - generic [ref=f25e235]:
+                - generic [ref=f25e236]: by K Pillutla · Cited by 1369 —
+                - generic [ref=f25e237]:
+                  - emphasis [ref=f25e238]: Federated learning
+                  - text: can be made
+                  - emphasis [ref=f25e239]: robust
+                  - text: to corrupted updates by replacing the weighted arithmetic mean
+                  - emphasis [ref=f25e240]: aggregation
+                  - text: with an approximate
+                  - emphasis [ref=f25e241]: geometric median
+                  - text: at thrice ...
+                - link "Read more" [ref=f25e242] [cursor=pointer]:
+                  - /url: https://krishnap25.github.io/papers/2019_rfa.pdf#:~:text=Federated%20learning%20can%20be%20made,at%20thrice%20the%20communication%20cost.
+              - generic [ref=f25e243]: 38 pages
+          - generic [ref=f25e247]:
+            - generic [ref=f25e250]:
+              - link "Robust aggregation for federated learning with the RFA ... GitHub https://github.com › krishnap25 › RFA" [ref=f25e252] [cursor=pointer]:
+                - /url: https://github.com/krishnap25/RFA
+                - heading "Robust aggregation for federated learning with the RFA ..." [level=3] [ref=f25e253]
+                - generic [ref=f25e259]:
+                  - generic [ref=f25e260]: GitHub
+                  - generic [ref=f25e262]: https://github.com › krishnap25 › RFA
+              - button "About this result" [ref=f25e266] [cursor=pointer]
+            - generic [ref=f25e272]:
+              - generic [ref=f25e273]:
+                - text: This code provides an implementation of
+                - emphasis [ref=f25e274]: robust aggregation algorithms for federated learning
+                - text: . This codebase is based on a fork of the Leaf benchmark suite.
+              - link "Read more" [ref=f25e275] [cursor=pointer]:
+                - /url: https://github.com/krishnap25/RFA#:~:text=This%20code%20provides%20an%20implementation,Robust%20Aggregation%20for%20Federated%20Learning.
+          - generic [ref=f25e279]:
+            - generic [ref=f25e282]:
+              - link "Robust Aggregation for Federated Learning IEEE Xplore https://ieeexplore.ieee.org › iel7" [ref=f25e284] [cursor=pointer]:
+                - /url: https://ieeexplore.ieee.org/iel7/78/9675017/09721118.pdf
+                - heading "Robust Aggregation for Federated Learning" [level=3] [ref=f25e285]
+                - generic [ref=f25e294]:
+                  - generic [ref=f25e295]: IEEE Xplore
+                  - generic [ref=f25e297]: https://ieeexplore.ieee.org › iel7
+              - button "About this result" [ref=f25e301] [cursor=pointer]
+            - generic [ref=f25e306]:
+              - generic [ref=f25e307]:
+                - generic [ref=f25e308]: by K Pillutla · 2022 · Cited by 1369 —
+                - generic [ref=f25e309]:
+                  - emphasis [ref=f25e310]: Federated learning
+                  - text: can be made
+                  - emphasis [ref=f25e311]: robust
+                  - text: to corrupted updates by replacing the weighted arithmetic mean
+                  - emphasis [ref=f25e312]: aggregation
+                  - text: with an ap- proximate
+                  - emphasis [ref=f25e313]: geometric median
+                  - text: at 1-3 ...
+                - link "Read more" [ref=f25e314] [cursor=pointer]:
+                  - /url: https://ieeexplore.ieee.org/iel7/78/9675017/09721118.pdf#:~:text=Federated%20learning%20can%20be%20made,1%2D3%20times%20the%20communication%20cost.
+              - generic [ref=f25e315]: 13 pages
+          - generic [ref=f25e319]:
+            - generic [ref=f25e322]:
+              - link "Robust Aggregation for Federated Learning - ADS Harvard University https://ui.adsabs.harvard.edu › abs › abstract" [ref=f25e324] [cursor=pointer]:
+                - /url: https://ui.adsabs.harvard.edu/abs/2022ITSP...70.1142P/abstract
+                - heading "Robust Aggregation for Federated Learning - ADS" [level=3] [ref=f25e325]
+                - generic [ref=f25e331]:
+                  - generic [ref=f25e332]: Harvard University
+                  - generic [ref=f25e334]: https://ui.adsabs.harvard.edu › abs › abstract
+              - button "About this result" [ref=f25e338] [cursor=pointer]
+            - generic [ref=f25e344]:
+              - generic [ref=f25e345]: by K Pillutla · 2022 · Cited by 1369 —
+              - generic [ref=f25e346]:
+                - text: The proposed approach,
+                - emphasis [ref=f25e347]: Robust Federated Aggregation
+                - text: (
+                - emphasis [ref=f25e348]: RFA
+                - text: ), relies on the
+                - emphasis [ref=f25e349]: aggregation
+                - text: of updates using the
+                - emphasis [ref=f25e350]: geometric median
+                - text: ", which can be computed efficiently ..."
+              - link "Read more" [ref=f25e351] [cursor=pointer]:
+                - /url: https://ui.adsabs.harvard.edu/abs/2022ITSP...70.1142P/abstract#:~:text=The%20proposed%20approach%2C%20Robust%20Federated,efficiently%20using%20a%20Weiszfeld%2Dtype%20algorithm.
+          - table [ref=f25e357]:
+            - rowgroup [ref=f25e358]:
+              - row [ref=f25e359]:
+                - cell [ref=f25e360]:
+                  - heading [level=3] [ref=f25e361]:
+                    - link [ref=f25e362] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar?q=robust+aggregation+federated+learning+geometric+median+RFA+Pillutla&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                      - generic [ref=f25e363]:
+                        - text: Scholarly articles for
+                        - emphasis [ref=f25e364]: robust aggregation federated learning geometric median RFA Pillutla
+              - row [ref=f25e365]:
+                - cell [ref=f25e366]:
+                  - heading [level=3] [ref=f25e367]:
+                    - link [ref=f25e368] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://ieeexplore.ieee.org/ielaam/78/9675017/9721118-aam.pdf&hl=en&sa=X&ei=3_1PavCQNNGp6rQPnZeeyQo&scisig=AM1tuoMIzIdkcX1AufrpLITwKhWf&oi=scholarr
+                      - generic [ref=f25e369]:
+                        - emphasis [ref=f25e370]: Robust aggregation
+                        - text: for
+                        - emphasis [ref=f25e371]: federated learning
+                    - generic [ref=f25e372]:
+                      - text: "-"
+                      - generic [ref=f25e373]:
+                        - text: ‎
+                        - emphasis [ref=f25e375]: Pillutla
+                      - text: "- Cited by 1371"
+          - generic [ref=f25e378]:
+            - heading "Web results" [level=2] [ref=f25e379]
+            - generic [ref=f25e380]:
+              - generic [ref=f25e383]:
+                - link "Robust Aggregation for Federated Learning arXiv https://arxiv.org › pdf" [ref=f25e385] [cursor=pointer]:
+                  - /url: https://arxiv.org/pdf/1912.13445
+                  - heading "Robust Aggregation for Federated Learning" [level=3] [ref=f25e386]
+                  - generic [ref=f25e392]:
+                    - generic [ref=f25e393]: arXiv
+                    - generic [ref=f25e395]: https://arxiv.org › pdf
+                - generic [ref=f25e397]: PDF
+                - button "About this result" [ref=f25e400] [cursor=pointer]
+              - generic [ref=f25e406]:
+                - generic [ref=f25e407]: by K Pillutla · 2019 · Cited by 1369 —
+                - generic [ref=f25e408]:
+                  - text: "The main take-away message of this work is:"
+                  - emphasis [ref=f25e409]: Federated learning
+                  - text: can be made
+                  - emphasis [ref=f25e410]: robust
+                  - text: to corrupted updates by replacing the weighted arithmetic
+                  - emphasis [ref=f25e411]: mean
+                  - text: .
+                - link "Read more" [ref=f25e412] [cursor=pointer]:
+                  - /url: https://arxiv.org/pdf/1912.13445#:~:text=The%20main%20take%2Daway%20message%20of,replacing%20the%20weighted%20arithmetic%20mean
+          - generic [ref=f25e416]:
+            - generic [ref=f25e419]:
+              - link "Robust Aggregation for Federated Learning ResearchGate https://www.researchgate.net › ... › Robustness" [ref=f25e421] [cursor=pointer]:
+                - /url: https://www.researchgate.net/publication/358842974_Robust_Aggregation_for_Federated_Learning
+                - heading "Robust Aggregation for Federated Learning" [level=3] [ref=f25e422]
+                - generic [ref=f25e428]:
+                  - generic [ref=f25e429]: ResearchGate
+                  - generic [ref=f25e431]: https://www.researchgate.net › ... › Robustness
+              - button "About this result" [ref=f25e435] [cursor=pointer]
+            - generic [ref=f25e441]:
+              - generic [ref=f25e442]:
+                - text: The proposed approach,
+                - emphasis [ref=f25e443]: Robust Federated Aggregation
+                - text: (
+                - emphasis [ref=f25e444]: RFA
+                - text: ), relies on the
+                - emphasis [ref=f25e445]: aggregation
+                - text: of updates using the
+                - emphasis [ref=f25e446]: geometric median
+                - text: ", which can be computed efficiently ..."
+              - link "Read more" [ref=f25e447] [cursor=pointer]:
+                - /url: https://www.researchgate.net/publication/358842974_Robust_Aggregation_for_Federated_Learning#:~:text=The%20proposed%20approach%2C%20Robust%20Federated,efficiently%20using%20a%20Weiszfeld%2Dtype%20algorithm.
+          - generic [ref=f25e451]:
+            - generic [ref=f25e454]:
+              - 'link "Webinar: Robust Aggregation for Federated Learning (Video) Signal Processing Society https://rc.signalprocessingsociety.org › spsweb24022" [ref=f25e456] [cursor=pointer]':
+                - /url: https://rc.signalprocessingsociety.org/education/webinars/spsweb24022
+                - 'heading "Webinar: Robust Aggregation for Federated Learning (Video)" [level=3] [ref=f25e457]'
+                - generic [ref=f25e463]:
+                  - generic [ref=f25e464]: Signal Processing Society
+                  - generic [ref=f25e466]: https://rc.signalprocessingsociety.org › spsweb24022
+              - button "About this result" [ref=f25e470] [cursor=pointer]
+            - generic [ref=f25e476]:
+              - generic [ref=f25e477]:
+                - text: We present a novel approach to
+                - emphasis [ref=f25e478]: federated learning
+                - text: that endows its
+                - emphasis [ref=f25e479]: aggregation
+                - text: process with greater
+                - emphasis [ref=f25e480]: robustness
+                - text: against the potential poisoning of local data or ...
+              - link "Read more" [ref=f25e481] [cursor=pointer]:
+                - /url: https://rc.signalprocessingsociety.org/education/webinars/spsweb24022#:~:text=We%20present%20a%20novel%20approach,model%20parameters%20on%20participating%20devices.
+          - generic [ref=f25e485]:
+            - generic [ref=f25e488]:
+              - 'link "tRFA: Robust Aggregation for Federated Learning in PyTorch GitHub https://github.com › krishnap25 › tRFA" [ref=f25e490] [cursor=pointer]':
+                - /url: https://github.com/krishnap25/tRFA
+                - 'heading "tRFA: Robust Aggregation for Federated Learning in PyTorch" [level=3] [ref=f25e491]'
+                - generic [ref=f25e497]:
+                  - generic [ref=f25e498]: GitHub
+                  - generic [ref=f25e500]: https://github.com › krishnap25 › tRFA
+              - button "About this result" [ref=f25e504] [cursor=pointer]
+            - generic [ref=f25e510]:
+              - generic [ref=f25e511]:
+                - text: The accompanying paper describes a
+                - emphasis [ref=f25e512]: robust aggregation
+                - text: approach to make
+                - emphasis [ref=f25e513]: federated learning robust
+                - text: to settings when a fraction of the devices may be sending ...
+              - link "Read more" [ref=f25e514] [cursor=pointer]:
+                - /url: https://github.com/krishnap25/tRFA#:~:text=The%20accompanying%20paper%20describes%20a,corrupted%20updates%20to%20the%20server.
+        - generic [ref=f25e516]:
+          - generic [ref=f25e521]:
+            - heading "People also search for" [level=2] [ref=f25e523]
+            - generic [ref=f25e525]:
+              - generic [ref=f25e526]:
+                - link "Robust aggregation federated learning geometric median rfa pillutla github" [ref=f25e530] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Robust+aggregation+federated+learning+geometric+median+rfa+pillutla+github&sa=X&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQ1QJ6BAgJEAE
+                - link "Robust aggregation for federated learning" [ref=f25e544] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Robust+aggregation+for+federated+learning&sa=X&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQ1QJ6BAgREAE
+                - 'link "FLTrust: Byzantine-robust federated learning via trust bootstrapping" [ref=f25e558] [cursor=pointer]':
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=FLTrust:+Byzantine-robust+federated+learning+via+trust+bootstrapping&sa=X&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQ1QJ6BAgOEAE
+              - generic [ref=f25e569]:
+                - 'link "Byzantine-robust distributed Learning: Towards optimal statistical rates" [ref=f25e573] [cursor=pointer]':
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Byzantine-robust+distributed+Learning:+Towards+optimal+statistical+rates&sa=X&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQ1QJ6BAgMEAE
+                - 'link "Machine learning with adversaries: Byzantine tolerant gradient descent" [ref=f25e587] [cursor=pointer]':
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Machine+learning+with+adversaries:+Byzantine+tolerant+gradient+descent&sa=X&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQ1QJ6BAgLEAE
+                - link "Trimmed mean federated learning" [ref=f25e601] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Trimmed+mean+federated+learning&sa=X&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQ1QJ6BAgKEAE
+          - navigation [ref=f25e612]:
+            - heading "Page Navigation" [level=1] [ref=f25e613]
+            - text: "1"
+            - link "Page 2" [ref=f25e616] [cursor=pointer]:
+              - /url: /search?q=robust+aggregation+federated+learning+geometric+median+RFA+Pillutla&sca_esv=30a5fb343c9df574&ei=3_1PaoDXLNv0kPIPnfGP2QQ&start=10&sa=N&sstk=AU9db-CnPCmcugIc_P8AlCCoxeHvHrhzmPMMihQgTp8Rt1QKLp3NMVwArcu8xOxBFXIHiM_Ok48sLnCeTMsIto-utr6A_MkN8r2Gxw&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQ8tMDegQITRAE
+              - text: "2"
+            - link "Page 3" [ref=f25e618] [cursor=pointer]:
+              - /url: /search?q=robust+aggregation+federated+learning+geometric+median+RFA+Pillutla&sca_esv=30a5fb343c9df574&ei=3_1PaoDXLNv0kPIPnfGP2QQ&start=20&sa=N&sstk=AU9db-CnPCmcugIc_P8AlCCoxeHvHrhzmPMMihQgTp8Rt1QKLp3NMVwArcu8xOxBFXIHiM_Ok48sLnCeTMsIto-utr6A_MkN8r2Gxw&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQ8tMDegQITRAG
+              - text: "3"
+            - link "Page 4" [ref=f25e620] [cursor=pointer]:
+              - /url: /search?q=robust+aggregation+federated+learning+geometric+median+RFA+Pillutla&sca_esv=30a5fb343c9df574&ei=3_1PaoDXLNv0kPIPnfGP2QQ&start=30&sa=N&sstk=AU9db-CnPCmcugIc_P8AlCCoxeHvHrhzmPMMihQgTp8Rt1QKLp3NMVwArcu8xOxBFXIHiM_Ok48sLnCeTMsIto-utr6A_MkN8r2Gxw&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQ8tMDegQITRAI
+              - text: "4"
+            - link "Page 5" [ref=f25e622] [cursor=pointer]:
+              - /url: /search?q=robust+aggregation+federated+learning+geometric+median+RFA+Pillutla&sca_esv=30a5fb343c9df574&ei=3_1PaoDXLNv0kPIPnfGP2QQ&start=40&sa=N&sstk=AU9db-CnPCmcugIc_P8AlCCoxeHvHrhzmPMMihQgTp8Rt1QKLp3NMVwArcu8xOxBFXIHiM_Ok48sLnCeTMsIto-utr6A_MkN8r2Gxw&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQ8tMDegQITRAK
+              - text: "5"
+            - link "Page 6" [ref=f25e624] [cursor=pointer]:
+              - /url: /search?q=robust+aggregation+federated+learning+geometric+median+RFA+Pillutla&sca_esv=30a5fb343c9df574&ei=3_1PaoDXLNv0kPIPnfGP2QQ&start=50&sa=N&sstk=AU9db-CnPCmcugIc_P8AlCCoxeHvHrhzmPMMihQgTp8Rt1QKLp3NMVwArcu8xOxBFXIHiM_Ok48sLnCeTMsIto-utr6A_MkN8r2Gxw&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQ8tMDegQITRAM
+              - text: "6"
+            - heading [level=2] [ref=f25e626]:
+              - link "Next" [ref=f25e627] [cursor=pointer]:
+                - /url: /search?q=robust+aggregation+federated+learning+geometric+median+RFA+Pillutla&sca_esv=30a5fb343c9df574&ei=3_1PaoDXLNv0kPIPnfGP2QQ&start=10&sa=N&sstk=AU9db-CnPCmcugIc_P8AlCCoxeHvHrhzmPMMihQgTp8Rt1QKLp3NMVwArcu8xOxBFXIHiM_Ok48sLnCeTMsIto-utr6A_MkN8r2Gxw&ved=2ahUKEwjAwrycscaVAxVbOkQIHZ34I0sQ8NMDegQITRAO
+        - navigation
+    - contentinfo [ref=f25e630]:
+      - heading "Footer Links" [level=1] [ref=f25e631]
+      - generic [ref=f25e635]:
+        - generic [ref=f25e639]:
+          - button "Woodland, California - From your IP address" [ref=f25e641] [cursor=pointer]:
+            - generic [ref=f25e642]: Woodland, California
+            - generic [ref=f25e644]:
+              - text: "-"
+              - generic [ref=f25e645]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f25e647] [cursor=pointer]
+        - generic [ref=f25e650]:
+          - link "Help" [ref=f25e651] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f25e652] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f25e653] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f25e654] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

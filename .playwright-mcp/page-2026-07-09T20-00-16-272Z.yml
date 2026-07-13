@@ -1,0 +1,320 @@
+- generic [active] [ref=f1e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f1e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f1e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f1e8]:
+    - search [ref=f1e9]:
+      - generic [ref=f1e11]:
+        - link "Go to Google Home" [ref=f1e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQPAgI
+        - generic [ref=f1e21]:
+          - generic [ref=f1e22]:
+            - combobox "Search" [ref=f1e25]: "\"gradient diversity\" distributed optimization paper \"gradient diversity\" distributed optimization paper"
+            - generic [ref=f1e26]:
+              - button "Clear" [ref=f1e28] [cursor=pointer]
+              - generic [ref=f1e33]:
+                - button "Search by voice" [ref=f1e34] [cursor=pointer]
+                - button "Search by image" [ref=f1e37] [cursor=pointer]
+          - button "Search" [ref=f1e40] [cursor=pointer]
+    - generic [ref=f1e45]:
+      - button "Settings" [ref=f1e47] [cursor=pointer]
+      - button "Share" [ref=f1e53] [cursor=pointer]
+      - generic [ref=f1e59]:
+        - button "Google apps" [ref=f1e61] [cursor=pointer]
+        - link "Sign in" [ref=f1e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522gradient%2Bdiversity%2522%2Bdistributed%2Boptimization%2Bpaper&ec=futura_srp_og_si_72236_p
+  - generic [ref=f1e68]:
+    - navigation [ref=f1e74]:
+      - generic [ref=f1e80]:
+        - list [ref=f1e81]:
+          - listitem [ref=f1e82]:
+            - link "AI Mode" [ref=f1e85] [cursor=pointer]:
+              - /url: /search?q=%22gradient+diversity%22+distributed+optimization+paper&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbdipNP9IdSJPNW0dZW-vtpfaswOEsivmYdYATbl6Z44RwK8v_WUA6Pb_pL_p3dlL44p25neWv9Io4wX7Kzvc6Zyrap813ohlrEtpC5iZDMrO7eHiNkRgm6PBmtPez0UBxyBBjpSA&aep=1&ntc=1&sa=X&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQ2J8OegQICBAD
+          - listitem [ref=f1e89]:
+            - link "All" [disabled] [ref=f1e90]
+          - listitem [ref=f1e93]:
+            - link "Images" [ref=f1e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbdipNP9IdSJPNW0dZW-vtpfaswOEsivmYdYATbl6Z44RwK8v_WUA6Pb_pL_p3dlL44p25neWv9Io4wX7Kzvc6Zyrap813ohlrEtpC5iZDMrO7eHiNkRgm6PBmtPez0UBxyBBjpSA&q=%22gradient+diversity%22+distributed+optimization+paper&sa=X&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQtKgLegQIGBAB
+          - listitem [ref=f1e97]:
+            - link "Shopping" [ref=f1e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbdipNP9IdSJPNW0dZW-vtpfaswOEsivmYdYATbl6Z44RwK8v_WUA6Pb_pL_p3dlL44p25neWv9Io4wX7Kzvc6Zyrap813ohlrEtpC5iZDMrO7eHiNkRgm6PBmtPez0UBxyBBjpSA&q=%22gradient+diversity%22+distributed+optimization+paper&ved=1t:220175&ictx=111
+          - listitem [ref=f1e101]:
+            - link "Videos" [ref=f1e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbdipNP9IdSJPNW0dZW-vtpfaswOEsivmYdYATbl6Z44RwK8v_WUA6Pb_pL_p3dlL44p25neWv9Io4wX7Kzvc6Zyrap813ohlrEtpC5iZDMrO7eHiNkRgm6PBmtPez0UBxyBBjpSA&q=%22gradient+diversity%22+distributed+optimization+paper&sa=X&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQtKgLegQIFhAB
+          - listitem [ref=f1e105]:
+            - link "Forums" [ref=f1e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbdipNP9IdSJPNW0dZW-vtpfaswOEsivmYdYATbl6Z44RwK8v_WUA6Pb_pL_p3dlL44p25neWv9Io4wX7Kzvc6Zyrap813ohlrEtpC5iZDMrO7eHiNkRgm6PBmtPez0UBxyBBjpSA&q=%22gradient+diversity%22+distributed+optimization+paper&sa=X&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQs6gLegQIFRAB
+          - listitem [ref=f1e109]:
+            - link "News" [ref=f1e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&q=%22gradient+diversity%22+distributed+optimization+paper&tbm=nws&source=lnms&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbdipNP9IdSJPNW0dZW-vtpfaswOEsivmYdYATbl6Z44RwK8v_WUA6Pb_pL_p3dlL44p25neWv9Io4wX7Kzvc6Zyrap813ohlrEtpC5iZDMrO7eHiNkRgm6PBmtPez0UBxyBBjpSA&sa=X&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQ0pQJegQIExAB
+          - listitem [ref=f1e113]:
+            - button [ref=f1e114] [cursor=pointer]:
+              - generic "More filters" [ref=f1e115]: More
+        - button "Tools" [ref=f1e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f1e129]
+    - generic [ref=f1e134]:
+      - generic [ref=f1e153]:
+        - heading "Thinking" [level=2] [ref=f1e157]
+        - progressbar "Generating" [ref=f1e160]
+      - main [ref=f1e162]:
+        - generic [ref=f1e166]:
+          - table [ref=f1e172]:
+            - rowgroup [ref=f1e173]:
+              - row [ref=f1e174]:
+                - cell [ref=f1e175]:
+                  - heading [level=3] [ref=f1e176]:
+                    - link [ref=f1e177] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar?q=%22gradient+diversity%22+distributed+optimization+paper&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                      - generic [ref=f1e178]:
+                        - text: Scholarly articles for
+                        - emphasis [ref=f1e179]: "\"gradient diversity\" distributed optimization paper"
+              - row [ref=f1e180]:
+                - cell [ref=f1e181]:
+                  - heading "… of randomized neural networks via gradient diversity … - ‎Lee - Cited by 98" [level=3] [ref=f1e182]:
+                    - link [ref=f1e183] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2107.02425&hl=en&sa=X&ei=z_1PavCDMaOaieoPmKu3mQ0&scisig=AM1tuoN533oXraVErOJ9x6ToQQ-X&oi=scholarr
+                      - generic [ref=f1e184]:
+                        - text: … of randomized neural networks via
+                        - emphasis [ref=f1e185]: gradient diversity
+                        - text: …
+                    - generic [ref=f1e186]:
+                      - text: "-"
+                      - generic [ref=f1e187]: ‎Lee
+                      - text: "- Cited by 98"
+                  - heading "… descent performs variational inference, converges to … - ‎Chaudhari - Cited by 426" [level=3] [ref=f1e188]:
+                    - link "… descent performs variational inference, converges to …" [ref=f1e189] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/1710.11029&hl=en&sa=X&ei=z_1PavCDMaOaieoPmKu3mQ0&scisig=AM1tuoNCysSsj66Uz1hLifFxGXuY&oi=scholarr
+                    - generic [ref=f1e190]:
+                      - text: "-"
+                      - generic [ref=f1e191]: ‎Chaudhari
+                      - text: "- Cited by 426"
+                  - 'heading "Federated learning: Challenges, methods, and future … - ‎Li - Cited by 9486" [level=3] [ref=f1e192]':
+                    - 'link "Federated learning: Challenges, methods, and future …" [ref=f1e193] [cursor=pointer]':
+                      - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/1908.07873&hl=en&sa=X&ei=z_1PavCDMaOaieoPmKu3mQ0&scisig=AM1tuoMIf8PE2iROqUYwzH5fZSJq&oi=scholarr
+                    - generic [ref=f1e194]:
+                      - text: "-"
+                      - generic [ref=f1e195]: ‎Li
+                      - text: "- Cited by 9486"
+          - generic [ref=f1e198]:
+            - heading "Web results" [level=2] [ref=f1e199]
+            - generic [ref=f1e200]:
+              - generic [ref=f1e203]:
+                - 'link "Gradient Diversity: a Key Ingredient for Scalable Distributed ... Proceedings of Machine Learning Research http://proceedings.mlr.press › ..." [ref=f1e205] [cursor=pointer]':
+                  - /url: http://proceedings.mlr.press/v84/yin18a/yin18a.pdf
+                  - 'heading "Gradient Diversity: a Key Ingredient for Scalable Distributed ..." [level=3] [ref=f1e206]'
+                  - generic [ref=f1e212]:
+                    - generic [ref=f1e213]: Proceedings of Machine Learning Research
+                    - generic [ref=f1e215]: http://proceedings.mlr.press › ...
+                - generic [ref=f1e217]: PDF
+                - button "About this result" [ref=f1e220] [cursor=pointer]
+              - generic [ref=f1e225]:
+                - generic [ref=f1e226]:
+                  - generic [ref=f1e227]: by D Yin · 2018 · Cited by 192 —
+                  - generic [ref=f1e228]:
+                    - text: We intro- duce the notion of
+                    - emphasis [ref=f1e229]: gradient diversity
+                    - text: that measures the dissimilarity between concur- rent gradient updates, and show its key role in the convergence ...
+                  - link "Read more" [ref=f1e230] [cursor=pointer]:
+                    - /url: http://proceedings.mlr.press/v84/yin18a/yin18a.pdf#:~:text=We%20intro%2D,the%20convergence%20and%20generalization%20per%2D
+                - generic [ref=f1e231]: 10 pages
+          - generic [ref=f1e235]:
+            - generic [ref=f1e238]:
+              - link "Gradient Diversity arXiv https://arxiv.org › pdf" [ref=f1e240] [cursor=pointer]:
+                - /url: https://arxiv.org/pdf/1706.05699
+                - heading "Gradient Diversity" [level=3] [ref=f1e241]
+                - generic [ref=f1e247]:
+                  - generic [ref=f1e248]: arXiv
+                  - generic [ref=f1e250]: https://arxiv.org › pdf
+              - generic [ref=f1e252]: PDF
+              - button "About this result" [ref=f1e255] [cursor=pointer]
+            - generic [ref=f1e261]:
+              - generic [ref=f1e262]: by D Yin · 2017 · Cited by 192 —
+              - generic [ref=f1e263]:
+                - text: We provide experimental evidence indicating the key role of
+                - emphasis [ref=f1e264]: gradient diversity
+                - text: in
+                - emphasis [ref=f1e265]: distributed
+                - text: learning, and discuss how heuristics like ...
+              - link "Read more" [ref=f1e266] [cursor=pointer]:
+                - /url: https://arxiv.org/pdf/1706.05699#:~:text=We%20provide%20experimental%20evidence,and%20quantization%20can%20improve%20it.
+          - generic [ref=f1e270]:
+            - generic [ref=f1e273]:
+              - 'link "Gradient Diversity: a Key Ingredient for Scalable ... OPT 2025: Optimization for Machine Learning https://opt-ml.org › papers › OPT2017_paper_37" [ref=f1e275] [cursor=pointer]':
+                - /url: https://opt-ml.org/oldopt/papers/OPT2017_paper_37.pdf
+                - 'heading "Gradient Diversity: a Key Ingredient for Scalable ..." [level=3] [ref=f1e276]'
+                - generic [ref=f1e285]:
+                  - generic [ref=f1e286]: "OPT 2025: Optimization for Machine Learning"
+                  - generic [ref=f1e288]: https://opt-ml.org › papers › OPT2017_paper_37
+              - generic [ref=f1e290]: PDF
+              - button "About this result" [ref=f1e293] [cursor=pointer]
+            - generic [ref=f1e298]:
+              - generic [ref=f1e299]:
+                - generic [ref=f1e300]: by D Yin · Cited by 192 —
+                - generic [ref=f1e301]:
+                  - text: We introduce the notion of
+                  - emphasis [ref=f1e302]: gradient diversity
+                  - text: that measures the dissimilarity between concurrent gradient updates, and show its key role in the convergence and ...
+                - link "Read more" [ref=f1e303] [cursor=pointer]:
+                  - /url: https://opt-ml.org/oldopt/papers/OPT2017_paper_37.pdf#:~:text=We%20introduce%20the%20notion%20of,generalization%20performance%20of%20mini%2Dbatch%20SGD.
+              - generic [ref=f1e304]: 6 pages
+          - generic [ref=f1e308]:
+            - generic [ref=f1e311]:
+              - 'link "[PDF] Gradient Diversity: a Key Ingredient for Scalable ... Semantic Scholar https://www.semanticscholar.org › paper › Gradient-Di..." [ref=f1e313] [cursor=pointer]':
+                - /url: https://www.semanticscholar.org/paper/Gradient-Diversity%3A-a-Key-Ingredient-for-Scalable-Yin-Pananjady/6cbbcfd0c5df424d66d4aae01bde0d8731384799
+                - 'heading "[PDF] Gradient Diversity: a Key Ingredient for Scalable ..." [level=3] [ref=f1e314]'
+                - generic [ref=f1e320]:
+                  - generic [ref=f1e321]: Semantic Scholar
+                  - generic [ref=f1e323]: https://www.semanticscholar.org › paper › Gradient-Di...
+              - button "About this result" [ref=f1e327] [cursor=pointer]
+            - generic [ref=f1e334]:
+              - text: It is proved that on problems with high
+              - emphasis [ref=f1e335]: gradient diversity
+              - text: ", mini-batch SGD is amenable to better speedups, while maintaining the generalization performance ..."
+          - generic [ref=f1e339]:
+            - generic [ref=f1e342]:
+              - 'link "\"Gradient Diversity: a Key Ingredient for Scalable ... Reddit · r/mlscaling 2 comments · 2 years ago" [ref=f1e344] [cursor=pointer]':
+                - /url: https://www.reddit.com/r/mlscaling/comments/1cqecic/gradient_diversity_a_key_ingredient_for_scalable/
+                - 'heading "\"Gradient Diversity: a Key Ingredient for Scalable ..." [level=3] [ref=f1e345]'
+                - generic [ref=f1e351]:
+                  - generic [ref=f1e352]: Reddit · r/mlscaling
+                  - generic [ref=f1e354]: 2 comments · 2 years ago
+              - button "About this result" [ref=f1e358] [cursor=pointer]
+            - generic [ref=f1e365]:
+              - text: Abstract page for arXiv
+              - emphasis [ref=f1e366]: paper
+              - text: "1706.05699:"
+              - emphasis [ref=f1e367]: Gradient Diversity
+              - text: ": a Key Ingredient for Scalable"
+              - emphasis [ref=f1e368]: Distributed
+              - text: Learning.
+          - generic [ref=f1e372]:
+            - generic [ref=f1e375]:
+              - 'link "FedAWARE: Maximizing Gradient Diversity for ... arXiv https://arxiv.org › html" [ref=f1e377] [cursor=pointer]':
+                - /url: https://arxiv.org/html/2310.02702v3
+                - 'heading "FedAWARE: Maximizing Gradient Diversity for ..." [level=3] [ref=f1e378]'
+                - generic [ref=f1e384]:
+                  - generic [ref=f1e385]: arXiv
+                  - generic [ref=f1e387]: https://arxiv.org › html
+              - button "About this result" [ref=f1e391] [cursor=pointer]
+            - generic [ref=f1e397]:
+              - generic [ref=f1e398]: May 24, 2024 —
+              - generic [ref=f1e399]:
+                - text: Our theory examines the impacts of
+                - emphasis [ref=f1e400]: gradient diversity
+                - text: in federated
+                - emphasis [ref=f1e401]: optimization
+                - text: and matches the convergence of classic aggregation-based methods ...
+              - link "Read more" [ref=f1e402] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2310.02702v3#:~:text=Our%20theory%20examines%20the%20impacts,aggregation%2Dbased%20methods%2C%20such%20as%20FedAvg.
+          - generic [ref=f1e406]:
+            - generic [ref=f1e409]:
+              - link "Speeding up Distributed SGD for Non-convex Optimization ICML 2026 https://icml.cc › virtual › poster" [ref=f1e411] [cursor=pointer]:
+                - /url: https://icml.cc/virtual/2019/poster/4289
+                - heading "Speeding up Distributed SGD for Non-convex Optimization" [level=3] [ref=f1e412]
+                - generic [ref=f1e418]:
+                  - generic [ref=f1e419]: ICML 2026
+                  - generic [ref=f1e421]: https://icml.cc › virtual › poster
+              - button "About this result" [ref=f1e425] [cursor=pointer]
+            - generic [ref=f1e431]:
+              - generic [ref=f1e432]:
+                - text: In this
+                - emphasis [ref=f1e433]: paper
+                - text: ", we advocate the use of redundancy towards communication ..."
+                - emphasis [ref=f1e434]: gradient diversity
+                - text: . Show more. Chat is not available. Successful Page Load ...
+              - link "Read more" [ref=f1e435] [cursor=pointer]:
+                - /url: https://icml.cc/virtual/2019/poster/4289#:~:text=In%20this%20paper%2C%20we%20advocate,stochastic%20algorithms%20for%20non%2Dconvex%20optimization.&text=gradient%20diversity.,Successful%20Page%20Load
+          - generic [ref=f1e439]:
+            - generic [ref=f1e442]:
+              - link "Convergence of Distributed Adaptive Optimization with ... OpenReview https://openreview.net › forum" [ref=f1e444] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=VNg7srnvD9
+                - heading "Convergence of Distributed Adaptive Optimization with ..." [level=3] [ref=f1e445]
+                - generic [ref=f1e451]:
+                  - generic [ref=f1e452]: OpenReview
+                  - generic [ref=f1e454]: https://openreview.net › forum
+              - button "About this result" [ref=f1e458] [cursor=pointer]
+            - generic [ref=f1e464]:
+              - generic [ref=f1e465]: by Z Cheng · Cited by 7 —
+              - generic [ref=f1e466]:
+                - text: Both approaches use adaptive strategies based on
+                - emphasis [ref=f1e467]: gradient diversity
+                - text: and Polyak step sizes, and their results hold in heterogeneous data settings ...
+              - link "Read more" [ref=f1e468] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=VNg7srnvD9#:~:text=Both%20approaches%20use%20adaptive%20strategies,hold%20in%20heterogeneous%20data%20settings.
+          - generic [ref=f1e472]:
+            - generic [ref=f1e475]:
+              - 'link "FedDC: a federated learning framework to enhance ... ACM Digital Library https://dl.acm.org › doi › abs" [ref=f1e477] [cursor=pointer]':
+                - /url: https://dl.acm.org/doi/abs/10.1007/s10586-025-05184-5
+                - 'heading "FedDC: a federated learning framework to enhance ..." [level=3] [ref=f1e478]'
+                - generic [ref=f1e484]:
+                  - generic [ref=f1e485]: ACM Digital Library
+                  - generic [ref=f1e487]: https://dl.acm.org › doi › abs
+              - button "About this result" [ref=f1e491] [cursor=pointer]
+            - generic [ref=f1e497]:
+              - generic [ref=f1e498]: by Y Liu · 2025 · Cited by 1 —
+              - generic [ref=f1e499]:
+                - text: A novel
+                - emphasis [ref=f1e500]: gradient diversity
+                - text: metric is proposed in this
+                - emphasis [ref=f1e501]: paper
+                - text: to select clients by maximizing the
+                - emphasis [ref=f1e502]: gradient diversity
+                - text: of the client subset. To ...
+              - link "Read more" [ref=f1e503] [cursor=pointer]:
+                - /url: https://dl.acm.org/doi/abs/10.1007/s10586-025-05184-5#:~:text=A%20novel%20gradient%20diversity%20metric,of%20the%20client%20subset.%20To
+        - navigation [ref=f1e506]:
+          - heading "Page Navigation" [level=1] [ref=f1e507]
+          - text: "1"
+          - link "Page 2" [ref=f1e510] [cursor=pointer]:
+            - /url: /search?q=%22gradient+diversity%22+distributed+optimization+paper&sca_esv=30a5fb343c9df574&ei=z_1ParDBJ6zykPIPsNaVwQE&start=10&sa=N&sstk=AU9db-Dp-he7XRlKdbnIJeDv55EDqUfKXSz9RvaxkeVhswa6BSA-KorQFyoTxdSfgDQq6_qwtVyfzjh1g8KhqQE2z3kcTAbFS_4cNA&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQ8tMDegQIPhAE
+            - text: "2"
+          - link "Page 3" [ref=f1e512] [cursor=pointer]:
+            - /url: /search?q=%22gradient+diversity%22+distributed+optimization+paper&sca_esv=30a5fb343c9df574&ei=z_1ParDBJ6zykPIPsNaVwQE&start=20&sa=N&sstk=AU9db-Dp-he7XRlKdbnIJeDv55EDqUfKXSz9RvaxkeVhswa6BSA-KorQFyoTxdSfgDQq6_qwtVyfzjh1g8KhqQE2z3kcTAbFS_4cNA&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQ8tMDegQIPhAG
+            - text: "3"
+          - link "Page 4" [ref=f1e514] [cursor=pointer]:
+            - /url: /search?q=%22gradient+diversity%22+distributed+optimization+paper&sca_esv=30a5fb343c9df574&ei=z_1ParDBJ6zykPIPsNaVwQE&start=30&sa=N&sstk=AU9db-Dp-he7XRlKdbnIJeDv55EDqUfKXSz9RvaxkeVhswa6BSA-KorQFyoTxdSfgDQq6_qwtVyfzjh1g8KhqQE2z3kcTAbFS_4cNA&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQ8tMDegQIPhAI
+            - text: "4"
+          - link "Page 5" [ref=f1e516] [cursor=pointer]:
+            - /url: /search?q=%22gradient+diversity%22+distributed+optimization+paper&sca_esv=30a5fb343c9df574&ei=z_1ParDBJ6zykPIPsNaVwQE&start=40&sa=N&sstk=AU9db-Dp-he7XRlKdbnIJeDv55EDqUfKXSz9RvaxkeVhswa6BSA-KorQFyoTxdSfgDQq6_qwtVyfzjh1g8KhqQE2z3kcTAbFS_4cNA&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQ8tMDegQIPhAK
+            - text: "5"
+          - link "Page 6" [ref=f1e518] [cursor=pointer]:
+            - /url: /search?q=%22gradient+diversity%22+distributed+optimization+paper&sca_esv=30a5fb343c9df574&ei=z_1ParDBJ6zykPIPsNaVwQE&start=50&sa=N&sstk=AU9db-Dp-he7XRlKdbnIJeDv55EDqUfKXSz9RvaxkeVhswa6BSA-KorQFyoTxdSfgDQq6_qwtVyfzjh1g8KhqQE2z3kcTAbFS_4cNA&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQ8tMDegQIPhAM
+            - text: "6"
+          - link "Page 7" [ref=f1e520] [cursor=pointer]:
+            - /url: /search?q=%22gradient+diversity%22+distributed+optimization+paper&sca_esv=30a5fb343c9df574&ei=z_1ParDBJ6zykPIPsNaVwQE&start=60&sa=N&sstk=AU9db-Dp-he7XRlKdbnIJeDv55EDqUfKXSz9RvaxkeVhswa6BSA-KorQFyoTxdSfgDQq6_qwtVyfzjh1g8KhqQE2z3kcTAbFS_4cNA&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQ8tMDegQIPhAO
+            - text: "7"
+          - link "Page 8" [ref=f1e522] [cursor=pointer]:
+            - /url: /search?q=%22gradient+diversity%22+distributed+optimization+paper&sca_esv=30a5fb343c9df574&ei=z_1ParDBJ6zykPIPsNaVwQE&start=70&sa=N&sstk=AU9db-Dp-he7XRlKdbnIJeDv55EDqUfKXSz9RvaxkeVhswa6BSA-KorQFyoTxdSfgDQq6_qwtVyfzjh1g8KhqQE2z3kcTAbFS_4cNA&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQ8tMDegQIPhAQ
+            - text: "8"
+          - link "Page 9" [ref=f1e524] [cursor=pointer]:
+            - /url: /search?q=%22gradient+diversity%22+distributed+optimization+paper&sca_esv=30a5fb343c9df574&ei=z_1ParDBJ6zykPIPsNaVwQE&start=80&sa=N&sstk=AU9db-Dp-he7XRlKdbnIJeDv55EDqUfKXSz9RvaxkeVhswa6BSA-KorQFyoTxdSfgDQq6_qwtVyfzjh1g8KhqQE2z3kcTAbFS_4cNA&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQ8tMDegQIPhAS
+            - text: "9"
+          - link "Page 10" [ref=f1e526] [cursor=pointer]:
+            - /url: /search?q=%22gradient+diversity%22+distributed+optimization+paper&sca_esv=30a5fb343c9df574&ei=z_1ParDBJ6zykPIPsNaVwQE&start=90&sa=N&sstk=AU9db-Dp-he7XRlKdbnIJeDv55EDqUfKXSz9RvaxkeVhswa6BSA-KorQFyoTxdSfgDQq6_qwtVyfzjh1g8KhqQE2z3kcTAbFS_4cNA&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQ8tMDegQIPhAU
+            - text: "10"
+          - heading [level=2] [ref=f1e528]:
+            - link "Next" [ref=f1e529] [cursor=pointer]:
+              - /url: /search?q=%22gradient+diversity%22+distributed+optimization+paper&sca_esv=30a5fb343c9df574&ei=z_1ParDBJ6zykPIPsNaVwQE&start=10&sa=N&sstk=AU9db-Dp-he7XRlKdbnIJeDv55EDqUfKXSz9RvaxkeVhswa6BSA-KorQFyoTxdSfgDQq6_qwtVyfzjh1g8KhqQE2z3kcTAbFS_4cNA&ved=2ahUKEwjw5OaUscaVAxUsOUQIHTBrJRgQ8NMDegQIPhAW
+        - navigation
+    - contentinfo [ref=f1e532]:
+      - heading "Footer Links" [level=1] [ref=f1e533]
+      - generic [ref=f1e537]:
+        - generic [ref=f1e541]:
+          - button "Woodland, California - From your IP address" [ref=f1e543] [cursor=pointer]:
+            - generic [ref=f1e544]: Woodland, California
+            - generic [ref=f1e546]:
+              - text: "-"
+              - generic [ref=f1e547]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f1e549] [cursor=pointer]
+        - generic [ref=f1e552]:
+          - link "Help" [ref=f1e553] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f1e554] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f1e555] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f1e556] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

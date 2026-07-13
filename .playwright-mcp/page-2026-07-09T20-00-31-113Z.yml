@@ -1,0 +1,326 @@
+- generic [active] [ref=f21e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f21e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f21e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f21e8]:
+    - search [ref=f21e9]:
+      - generic [ref=f21e11]:
+        - link "Go to Google Home" [ref=f21e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjxj_abscaVAxWPIUQIHZyJODAQPAgI
+        - generic [ref=f21e21]:
+          - generic [ref=f21e22]:
+            - combobox "Search" [ref=f21e25]: centered clipping federated learning Karimireddy centered clipping federated learning Karimireddy
+            - generic [ref=f21e26]:
+              - button "Clear" [ref=f21e28] [cursor=pointer]
+              - generic [ref=f21e33]:
+                - button "Search by voice" [ref=f21e34] [cursor=pointer]
+                - button "Search by image" [ref=f21e37] [cursor=pointer]
+          - button "Search" [ref=f21e40] [cursor=pointer]
+    - generic [ref=f21e45]:
+      - button "Settings" [ref=f21e47] [cursor=pointer]
+      - button "Share" [ref=f21e53] [cursor=pointer]
+      - generic [ref=f21e59]:
+        - button "Google apps" [ref=f21e61] [cursor=pointer]
+        - link "Sign in" [ref=f21e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3Dcentered%2520clipping%2520federated%2520learning%2520Karimireddy&ec=futura_srp_og_si_72236_p
+  - generic [ref=f21e68]:
+    - navigation [ref=f21e74]:
+      - generic [ref=f21e80]:
+        - list [ref=f21e81]:
+          - listitem [ref=f21e82]:
+            - link "AI Mode" [ref=f21e85] [cursor=pointer]:
+              - /url: /search?q=centered+clipping+federated+learning+Karimireddy&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEfmexCwyVncqqJWDU0VvgxX3iEDPybK1uNDy8j8Tqn9NQxi-XK9o_7JRm4NNWR-BtqOns28zH1xsXQXkoq4zH6gqyqebZYsWYdDLTTbJSnHNVJrFLfOXXzh1-vQqUuHsQVLtvFQ&aep=1&ntc=1&sa=X&ved=2ahUKEwjxj_abscaVAxWPIUQIHZyJODAQ2J8OegQICBAD
+          - listitem [ref=f21e89]:
+            - link "All" [disabled] [ref=f21e90]
+          - listitem [ref=f21e93]:
+            - link "Images" [ref=f21e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEfmexCwyVncqqJWDU0VvgxX3iEDPybK1uNDy8j8Tqn9NQxi-XK9o_7JRm4NNWR-BtqOns28zH1xsXQXkoq4zH6gqyqebZYsWYdDLTTbJSnHNVJrFLfOXXzh1-vQqUuHsQVLtvFQ&q=centered+clipping+federated+learning+Karimireddy&sa=X&ved=2ahUKEwjxj_abscaVAxWPIUQIHZyJODAQtKgLegQIKhAB
+          - listitem [ref=f21e97]:
+            - link "Videos" [ref=f21e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEfmexCwyVncqqJWDU0VvgxX3iEDPybK1uNDy8j8Tqn9NQxi-XK9o_7JRm4NNWR-BtqOns28zH1xsXQXkoq4zH6gqyqebZYsWYdDLTTbJSnHNVJrFLfOXXzh1-vQqUuHsQVLtvFQ&q=centered+clipping+federated+learning+Karimireddy&sa=X&ved=2ahUKEwjxj_abscaVAxWPIUQIHZyJODAQtKgLegQILRAB
+          - listitem [ref=f21e101]:
+            - link "Shopping" [ref=f21e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEfmexCwyVncqqJWDU0VvgxX3iEDPybK1uNDy8j8Tqn9NQxi-XK9o_7JRm4NNWR-BtqOns28zH1xsXQXkoq4zH6gqyqebZYsWYdDLTTbJSnHNVJrFLfOXXzh1-vQqUuHsQVLtvFQ&q=centered+clipping+federated+learning+Karimireddy&ved=1t:220175&ictx=111
+          - listitem [ref=f21e105]:
+            - link "Forums" [ref=f21e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEfmexCwyVncqqJWDU0VvgxX3iEDPybK1uNDy8j8Tqn9NQxi-XK9o_7JRm4NNWR-BtqOns28zH1xsXQXkoq4zH6gqyqebZYsWYdDLTTbJSnHNVJrFLfOXXzh1-vQqUuHsQVLtvFQ&q=centered+clipping+federated+learning+Karimireddy&sa=X&ved=2ahUKEwjxj_abscaVAxWPIUQIHZyJODAQs6gLegQIKBAB
+          - listitem [ref=f21e109]:
+            - link "News" [ref=f21e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&q=centered+clipping+federated+learning+Karimireddy&tbm=nws&source=lnms&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEfmexCwyVncqqJWDU0VvgxX3iEDPybK1uNDy8j8Tqn9NQxi-XK9o_7JRm4NNWR-BtqOns28zH1xsXQXkoq4zH6gqyqebZYsWYdDLTTbJSnHNVJrFLfOXXzh1-vQqUuHsQVLtvFQ&sa=X&ved=2ahUKEwjxj_abscaVAxWPIUQIHZyJODAQ0pQJegQIHhAB
+          - listitem [ref=f21e113]:
+            - button [ref=f21e114] [cursor=pointer]:
+              - generic "More filters" [ref=f21e115]: More
+        - button "Tools" [ref=f21e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f21e129]
+    - main [ref=f21e135]:
+      - generic [ref=f21e139]:
+        - generic [ref=f21e142]:
+          - heading "Web results" [level=2] [ref=f21e143]
+          - generic [ref=f21e144]:
+            - generic [ref=f21e147]:
+              - link "Learning from History for Byzantine Robust Optimization Proceedings of Machine Learning Research https://proceedings.mlr.press › karimireddy21a" [ref=f21e149] [cursor=pointer]:
+                - /url: https://proceedings.mlr.press/v139/karimireddy21a/karimireddy21a.pdf
+                - heading "Learning from History for Byzantine Robust Optimization" [level=3] [ref=f21e150]
+                - generic [ref=f21e156]:
+                  - generic [ref=f21e157]: Proceedings of Machine Learning Research
+                  - generic [ref=f21e159]: https://proceedings.mlr.press › karimireddy21a
+              - generic [ref=f21e161]: PDF
+              - button "About this result" [ref=f21e164] [cursor=pointer]
+            - generic [ref=f21e169]:
+              - generic [ref=f21e170]:
+                - generic [ref=f21e171]: by SP Karimireddy · Cited by 355 —
+                - generic [ref=f21e172]:
+                  - text: We first describe a simple new aggregator based on iterative
+                  - emphasis [ref=f21e173]: centered clipping
+                  - text: which is much more robust to the distribution of the gradient noise. This ag-.
+                - link "Read more" [ref=f21e174] [cursor=pointer]:
+                  - /url: https://proceedings.mlr.press/v139/karimireddy21a/karimireddy21a.pdf#:~:text=We%20first%20describe%20a%20simple,the%20gradient%20noise.%20This%20ag%2D
+              - generic [ref=f21e175]: 9 pages
+        - generic [ref=f21e179]:
+          - generic [ref=f21e182]:
+            - link "Byzantine-Robust Decentralized Learning via ClippedGossip arXiv https://arxiv.org › cs" [ref=f21e184] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2202.01545
+              - heading "Byzantine-Robust Decentralized Learning via ClippedGossip" [level=3] [ref=f21e185]
+              - generic [ref=f21e191]:
+                - generic [ref=f21e192]: arXiv
+                - generic [ref=f21e194]: https://arxiv.org › cs
+            - button "About this result" [ref=f21e198] [cursor=pointer]
+          - generic [ref=f21e204]:
+            - generic [ref=f21e205]: by L He · 2022 · Cited by 111 —
+            - text: In this paper, we study the challenging task of Byzantine-robust decentralized training on arbitrary communication graphs.
+            - link "Read more" [ref=f21e206] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2202.01545#:~:text=In%20this%20paper%2C%20we%20study,training%20on%20arbitrary%20communication%20graphs.
+        - generic [ref=f21e210]:
+          - generic [ref=f21e213]:
+            - link "Efficient Federated Learning against Byzantine Attacks and ... NeurIPS 2026 https://neurips.cc › virtual › poster" [ref=f21e215] [cursor=pointer]:
+              - /url: https://neurips.cc/virtual/2025/poster/118753
+              - heading "Efficient Federated Learning against Byzantine Attacks and ..." [level=3] [ref=f21e216]
+              - generic [ref=f21e222]:
+                - generic [ref=f21e223]: NeurIPS 2026
+                - generic [ref=f21e225]: https://neurips.cc › virtual › poster
+            - button "About this result" [ref=f21e229] [cursor=pointer]
+          - generic [ref=f21e235]:
+            - generic [ref=f21e236]:
+              - emphasis [ref=f21e237]: Federated Learning
+              - text: (FL) enables multiple clients to collaboratively train models without sharing raw data, but is vulnerable to Byzantine attacks and data ...
+            - link "Read more" [ref=f21e238] [cursor=pointer]:
+              - /url: https://neurips.cc/virtual/2025/poster/118753#:~:text=Federated%20Learning%20(FL)%20enables%20multiple,which%20can%20severely%20degrade%20performance.
+        - generic [ref=f21e242]:
+          - generic [ref=f21e245]:
+            - link "Sai Praneeth Karimireddy Google Scholar https://scholar.google.com › citations" [ref=f21e247] [cursor=pointer]:
+              - /url: https://scholar.google.com/citations?user=wKJeOQoAAAAJ&hl=en
+              - heading "Sai Praneeth Karimireddy" [level=3] [ref=f21e248]
+              - generic [ref=f21e254]:
+                - generic [ref=f21e255]: Google Scholar
+                - generic [ref=f21e257]: https://scholar.google.com › citations
+            - button "About this result" [ref=f21e261] [cursor=pointer]
+          - generic [ref=f21e267]:
+            - generic [ref=f21e268]:
+              - emphasis [ref=f21e269]: Byzantine-Robust Decentralized Learning via Self-Centered Clipping
+              - text: . L He, SP Karimireddy, M Jaggi. ICML Workshop on Federated learning (FL-ICML), 2022. 112* ...
+            - link "Read more" [ref=f21e270] [cursor=pointer]:
+              - /url: https://scholar.google.com/citations?user=wKJeOQoAAAAJ&hl=en#:~:text=Byzantine%2DRobust%20Decentralized%20Learning%20via%20Self%2DCentered,112*
+        - generic [ref=f21e274]:
+          - generic [ref=f21e277]:
+            - link "Learning from history for Byzantine robust optimization ICML 2026 https://icml.cc › media › icml-2021 › Slides" [ref=f21e279] [cursor=pointer]:
+              - /url: https://icml.cc/media/icml-2021/Slides/9987.pdf
+              - heading "Learning from history for Byzantine robust optimization" [level=3] [ref=f21e280]
+              - generic [ref=f21e286]:
+                - generic [ref=f21e287]: ICML 2026
+                - generic [ref=f21e289]: https://icml.cc › media › icml-2021 › Slides
+            - generic [ref=f21e291]: PDF
+            - button "About this result" [ref=f21e294] [cursor=pointer]
+          - generic [ref=f21e299]:
+            - generic [ref=f21e300]:
+              - generic [ref=f21e301]:
+                - emphasis [ref=f21e302]: Federated learning
+                - text: . 3. ○ Each worker i computes stochastic gradient at x and ...
+                - emphasis [ref=f21e303]: Centered clipping
+                - text: with worker momentum provably and practically defends ...
+              - link "Read more" [ref=f21e304] [cursor=pointer]:
+                - /url: https://icml.cc/media/icml-2021/Slides/9987.pdf#:~:text=Federated%20learning,stochastic%20gradient%20at%20x%20and&text=Centered%20clipping%20with%20worker%20momentum,practically%20defends%20against%20Byzantine%20attacks
+            - generic [ref=f21e305]: 31 pages
+        - generic [ref=f21e309]:
+          - generic [ref=f21e312]:
+            - 'link "Byzantines Can Also Learn From History: Fall of Centered ... ACM Digital Library https://dl.acm.org › doi › abs › TIFS.2023.3345171" [ref=f21e314] [cursor=pointer]':
+              - /url: https://dl.acm.org/doi/abs/10.1109/TIFS.2023.3345171
+              - 'heading "Byzantines Can Also Learn From History: Fall of Centered ..." [level=3] [ref=f21e315]'
+              - generic [ref=f21e321]:
+                - generic [ref=f21e322]: ACM Digital Library
+                - generic [ref=f21e324]: https://dl.acm.org › doi › abs › TIFS.2023.3345171
+            - button "About this result" [ref=f21e328] [cursor=pointer]
+          - generic [ref=f21e334]:
+            - generic [ref=f21e335]: by K Özfatura · 2024 · Cited by 32 —
+            - generic [ref=f21e336]:
+              - text: "Byzantines Can Also Learn From History:"
+              - emphasis [ref=f21e337]: Fall of Centered Clipping in Federated Learning
+              - text: ... Karimireddy, and M. Jaggi, “Byzantine-robust ...
+            - link "Read more" [ref=f21e338] [cursor=pointer]:
+              - /url: https://dl.acm.org/doi/abs/10.1109/TIFS.2023.3345171#:~:text=Byzantines%20Can%20Also%20Learn%20From,Centered%20Clipping%20in%20Federated%20Learning&text=Show%20all%20references
+        - generic [ref=f21e342]:
+          - generic [ref=f21e345]:
+            - link "Fall of Centered Clipping in Federated Learning arXiv https://arxiv.org › pdf" [ref=f21e347] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/2208.09894
+              - heading "Fall of Centered Clipping in Federated Learning" [level=3] [ref=f21e348]
+              - generic [ref=f21e354]:
+                - generic [ref=f21e355]: arXiv
+                - generic [ref=f21e357]: https://arxiv.org › pdf
+            - generic [ref=f21e359]: PDF
+            - button "About this result" [ref=f21e362] [cursor=pointer]
+          - generic [ref=f21e368]:
+            - generic [ref=f21e369]: by K Ozfatura · 2022 · Cited by 32 —
+            - generic [ref=f21e370]:
+              - text: He, S. P.
+              - emphasis [ref=f21e371]: Karimireddy
+              - text: ", and M. Jaggi, “Byzantine-robust decentralized"
+              - emphasis [ref=f21e372]: learning
+              - text: via self-
+              - emphasis [ref=f21e373]: centered clipping
+              - text: ",” ArXiv, 2022. [24] ..."
+            - link "Read more" [ref=f21e374] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/2208.09894#:~:text=He%2C%20S.%20P.%20Karimireddy%2C%20and%20M.,%5B24%5D%20P.
+        - generic [ref=f21e378]:
+          - generic [ref=f21e381]:
+            - link "Sai Praneeth Karimireddy Google Scholar https://scholar.google.de › citations" [ref=f21e383] [cursor=pointer]:
+              - /url: https://scholar.google.de/citations?user=wKJeOQoAAAAJ&hl=pl
+              - heading "Sai Praneeth Karimireddy" [level=3] [ref=f21e384]
+              - generic [ref=f21e390]:
+                - generic [ref=f21e391]: Google Scholar
+                - generic [ref=f21e393]: https://scholar.google.de › citations
+            - button "About this result" [ref=f21e397] [cursor=pointer]
+          - generic [ref=f21e403]:
+            - generic [ref=f21e404]:
+              - emphasis [ref=f21e405]: Byzantine-Robust Decentralized Learning via Self-Centered Clipping
+              - text: . L He, SP Karimireddy, M Jaggi. ICML Workshop on Federated learning (FL-ICML), 2022. 107* ...
+            - link "Read more" [ref=f21e406] [cursor=pointer]:
+              - /url: https://scholar.google.de/citations?user=wKJeOQoAAAAJ&hl=pl#:~:text=Byzantine%2DRobust%20Decentralized%20Learning%20via%20Self%2DCentered,107*
+        - generic [ref=f21e410]:
+          - generic [ref=f21e413]:
+            - link "Byzantine-Robust Decentralized Learning via Remove-then ... Columbia University https://www.ee.columbia.edu › ~jghaderi › aaai24" [ref=f21e415] [cursor=pointer]:
+              - /url: https://www.ee.columbia.edu/~jghaderi/aaai24.pdf
+              - heading "Byzantine-Robust Decentralized Learning via Remove-then ..." [level=3] [ref=f21e416]
+              - generic [ref=f21e425]:
+                - generic [ref=f21e426]: Columbia University
+                - generic [ref=f21e428]: https://www.ee.columbia.edu › ~jghaderi › aaai24
+            - generic [ref=f21e430]: PDF
+            - button "About this result" [ref=f21e433] [cursor=pointer]
+          - generic [ref=f21e438]:
+            - generic [ref=f21e439]:
+              - generic [ref=f21e440]: by C Yang · 2024 · Cited by 22 —
+              - generic [ref=f21e441]:
+                - text: He,
+                - emphasis [ref=f21e442]: Karimireddy
+                - text: ", and. Jaggi (2022) propose a self-"
+                - emphasis [ref=f21e443]: centered clipping
+                - text: (SCCLIP) ag- gregation rule, yet obtaining the
+                - emphasis [ref=f21e444]: clipping
+                - text: threshold in SC-.
+                - emphasis [ref=f21e445]: CLIP
+                - text: relies on ...
+              - link "Read more" [ref=f21e446] [cursor=pointer]:
+                - /url: https://www.ee.columbia.edu/~jghaderi/aaai24.pdf#:~:text=He%2C%20Karimireddy%2C%20and,the%20set%20of%20benign%20workers
+            - generic [ref=f21e447]: 9 pages
+        - table [ref=f21e453]:
+          - rowgroup [ref=f21e454]:
+            - row [ref=f21e455]:
+              - cell [ref=f21e456]:
+                - heading [level=3] [ref=f21e457]:
+                  - link [ref=f21e458] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar?q=centered+clipping+federated+learning+Karimireddy&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                    - generic [ref=f21e459]:
+                      - text: Scholarly articles for
+                      - emphasis [ref=f21e460]: centered clipping federated learning Karimireddy
+            - row [ref=f21e461]:
+              - cell [ref=f21e462]:
+                - heading [level=3] [ref=f21e463]:
+                  - link [ref=f21e464] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://proceedings.neurips.cc/paper_files/paper/2021/file/f0e6be4ce76ccfa73c5a540d992d0756-Paper.pdf&hl=en&sa=X&ei=3v1PasHmK6ew6rQP-PrjsAQ&scisig=AM1tuoNflTAMOYVkTADRUl5osL8s&oi=scholarr
+                    - generic [ref=f21e465]:
+                      - text: … centralized barrier for cross-device
+                      - emphasis [ref=f21e466]: federated learning
+                  - generic [ref=f21e467]:
+                    - text: "-"
+                    - generic [ref=f21e468]:
+                      - text: ‎
+                      - emphasis [ref=f21e470]: Karimireddy
+                    - text: "- Cited by 153"
+                - heading [level=3] [ref=f21e471]:
+                  - link [ref=f21e472] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2008.03606&hl=en&sa=X&ei=3v1PasHmK6ew6rQP-PrjsAQ&scisig=AM1tuoP4nke82KUotsdJABQ3nI_0&oi=scholarr
+                    - generic [ref=f21e473]:
+                      - text: … centralized stochastic algorithms in
+                      - emphasis [ref=f21e474]: federated learning
+                  - generic [ref=f21e475]:
+                    - text: "-"
+                    - generic [ref=f21e476]:
+                      - text: ‎
+                      - emphasis [ref=f21e478]: Karimireddy
+                    - text: "- Cited by 299"
+                - heading "Byzantine-robust decentralized learning via … - ‎He - Cited by 111" [level=3] [ref=f21e479]:
+                  - link [ref=f21e480] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2202.01545&hl=en&sa=X&ei=3v1PasHmK6ew6rQP-PrjsAQ&scisig=AM1tuoNbuJjQyQAdfAvK9cMs9vAe&oi=scholarr
+                    - generic [ref=f21e481]:
+                      - text: Byzantine-robust decentralized
+                      - emphasis [ref=f21e482]: learning
+                      - text: via …
+                  - generic [ref=f21e483]:
+                    - text: "-"
+                    - generic [ref=f21e484]: ‎He
+                    - text: "- Cited by 111"
+        - generic [ref=f21e491]:
+          - generic [ref=f21e494]:
+            - link "Federated learning (ft. Sai Praneeth Reddy Karimireddy) YouTube · ZettaBytes, EPFL 4.1K+ views · 6 years ago" [ref=f21e496] [cursor=pointer]:
+              - /url: https://www.youtube.com/watch?v=zxzBJSfJa4Q
+              - heading "Federated learning (ft. Sai Praneeth Reddy Karimireddy)" [level=3] [ref=f21e497]
+              - generic [ref=f21e503]:
+                - generic [ref=f21e504]: YouTube · ZettaBytes, EPFL
+                - generic [ref=f21e506]: 4.1K+ views · 6 years ago
+            - button "About this result" [ref=f21e510] [cursor=pointer]
+          - generic [ref=f21e515]:
+            - button "Federated learning (ft. Sai Praneeth Reddy Karimireddy) by ZettaBytes, EPFL on YouTube. Play on Google. 5:03" [ref=f21e516] [cursor=pointer]:
+              - generic [ref=f21e517]: 5:03
+            - generic [ref=f21e533]: Federated learning is a design to learn from local untransferable data. We discuss this with Sai Praneeth Reddy Karimireddy, a PhD candidate ...
+      - navigation [ref=f21e537]:
+        - heading "Page Navigation" [level=1] [ref=f21e538]
+        - text: "1"
+        - link "Page 2" [ref=f21e541] [cursor=pointer]:
+          - /url: /search?q=centered+clipping+federated+learning+Karimireddy&sca_esv=30a5fb343c9df574&ei=3v1PavGoI4_DkPIPnJPigQM&start=10&sa=N&sstk=AU9db-BLUUctVoeFkCi3csAHn5t5lJ6aW3Wj-Td42Xt2s-Ly4Alz-Wsr1jmXGqlis6jYpGxP4bvqpm7CSPXj1fLhZ5WlkwaDyu3rIA&ved=2ahUKEwjxj_abscaVAxWPIUQIHZyJODAQ8tMDegQIPBAE
+          - text: "2"
+        - link "Page 3" [ref=f21e543] [cursor=pointer]:
+          - /url: /search?q=centered+clipping+federated+learning+Karimireddy&sca_esv=30a5fb343c9df574&ei=3v1PavGoI4_DkPIPnJPigQM&start=20&sa=N&sstk=AU9db-BLUUctVoeFkCi3csAHn5t5lJ6aW3Wj-Td42Xt2s-Ly4Alz-Wsr1jmXGqlis6jYpGxP4bvqpm7CSPXj1fLhZ5WlkwaDyu3rIA&ved=2ahUKEwjxj_abscaVAxWPIUQIHZyJODAQ8tMDegQIPBAG
+          - text: "3"
+        - link "Page 4" [ref=f21e545] [cursor=pointer]:
+          - /url: /search?q=centered+clipping+federated+learning+Karimireddy&sca_esv=30a5fb343c9df574&ei=3v1PavGoI4_DkPIPnJPigQM&start=30&sa=N&sstk=AU9db-BLUUctVoeFkCi3csAHn5t5lJ6aW3Wj-Td42Xt2s-Ly4Alz-Wsr1jmXGqlis6jYpGxP4bvqpm7CSPXj1fLhZ5WlkwaDyu3rIA&ved=2ahUKEwjxj_abscaVAxWPIUQIHZyJODAQ8tMDegQIPBAI
+          - text: "4"
+        - link "Page 5" [ref=f21e547] [cursor=pointer]:
+          - /url: /search?q=centered+clipping+federated+learning+Karimireddy&sca_esv=30a5fb343c9df574&ei=3v1PavGoI4_DkPIPnJPigQM&start=40&sa=N&sstk=AU9db-BLUUctVoeFkCi3csAHn5t5lJ6aW3Wj-Td42Xt2s-Ly4Alz-Wsr1jmXGqlis6jYpGxP4bvqpm7CSPXj1fLhZ5WlkwaDyu3rIA&ved=2ahUKEwjxj_abscaVAxWPIUQIHZyJODAQ8tMDegQIPBAK
+          - text: "5"
+        - link "Page 6" [ref=f21e549] [cursor=pointer]:
+          - /url: /search?q=centered+clipping+federated+learning+Karimireddy&sca_esv=30a5fb343c9df574&ei=3v1PavGoI4_DkPIPnJPigQM&start=50&sa=N&sstk=AU9db-BLUUctVoeFkCi3csAHn5t5lJ6aW3Wj-Td42Xt2s-Ly4Alz-Wsr1jmXGqlis6jYpGxP4bvqpm7CSPXj1fLhZ5WlkwaDyu3rIA&ved=2ahUKEwjxj_abscaVAxWPIUQIHZyJODAQ8tMDegQIPBAM
+          - text: "6"
+        - heading [level=2] [ref=f21e551]:
+          - link "Next" [ref=f21e552] [cursor=pointer]:
+            - /url: /search?q=centered+clipping+federated+learning+Karimireddy&sca_esv=30a5fb343c9df574&ei=3v1PavGoI4_DkPIPnJPigQM&start=10&sa=N&sstk=AU9db-BLUUctVoeFkCi3csAHn5t5lJ6aW3Wj-Td42Xt2s-Ly4Alz-Wsr1jmXGqlis6jYpGxP4bvqpm7CSPXj1fLhZ5WlkwaDyu3rIA&ved=2ahUKEwjxj_abscaVAxWPIUQIHZyJODAQ8NMDegQIPBAO
+      - navigation
+    - contentinfo [ref=f21e555]:
+      - heading "Footer Links" [level=1] [ref=f21e556]
+      - generic [ref=f21e560]:
+        - generic [ref=f21e564]:
+          - button "Woodland, California - From your IP address" [ref=f21e566] [cursor=pointer]:
+            - generic [ref=f21e567]: Woodland, California
+            - generic [ref=f21e569]:
+              - text: "-"
+              - generic [ref=f21e570]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f21e572] [cursor=pointer]
+        - generic [ref=f21e575]:
+          - link "Help" [ref=f21e576] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f21e577] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f21e578] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f21e579] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

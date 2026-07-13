@@ -1,0 +1,344 @@
+- generic [active] [ref=f42e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f42e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f42e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f42e8]:
+    - search [ref=f42e9]:
+      - generic [ref=f42e11]:
+        - link "Go to Google Home" [ref=f42e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwit4-uescaVAxW5JUQIHXipGf8QPAgI
+        - generic [ref=f42e21]:
+          - generic [ref=f42e22]:
+            - combobox "Search" [ref=f42e25]: sign variance agreement federated learning aggregation sign variance agreement federated learning aggregation
+            - generic [ref=f42e26]:
+              - button "Clear" [ref=f42e28] [cursor=pointer]
+              - generic [ref=f42e33]:
+                - button "Search by voice" [ref=f42e34] [cursor=pointer]
+                - button "Search by image" [ref=f42e37] [cursor=pointer]
+          - button "Search" [ref=f42e40] [cursor=pointer]
+    - generic [ref=f42e45]:
+      - button "Settings" [ref=f42e47] [cursor=pointer]
+      - button "Share" [ref=f42e53] [cursor=pointer]
+      - generic [ref=f42e59]:
+        - button "Google apps" [ref=f42e61] [cursor=pointer]
+        - link "Sign in" [ref=f42e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3Dsign%2520variance%2520agreement%2520federated%2520learning%2520aggregation&ec=futura_srp_og_si_72236_p
+  - generic [ref=f42e68]:
+    - navigation [ref=f42e74]:
+      - generic [ref=f42e80]:
+        - list [ref=f42e81]:
+          - listitem [ref=f42e82]:
+            - link "AI Mode" [ref=f42e85] [cursor=pointer]:
+              - /url: /search?q=sign+variance+agreement+federated+learning+aggregation&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cYuTSDdr5M5eLVnu4bmWLMuP1zuHDWxWNS3Z0PnPwkd8Jdov7EiUGP03ACtcN_D7sw64TNr-qp1BSI3KNX_JE01_AV1VfxKRE7uEfTfJQ3Phupl_IkFAz-sHOP79YfpZ00yE1MA&aep=1&ntc=1&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q2J8OegQIBxAD
+          - listitem [ref=f42e89]:
+            - link "All" [disabled] [ref=f42e90]
+          - listitem [ref=f42e93]:
+            - link "Images" [ref=f42e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cYuTSDdr5M5eLVnu4bmWLMuP1zuHDWxWNS3Z0PnPwkd8Jdov7EiUGP03ACtcN_D7sw64TNr-qp1BSI3KNX_JE01_AV1VfxKRE7uEfTfJQ3Phupl_IkFAz-sHOP79YfpZ00yE1MA&q=sign+variance+agreement+federated+learning+aggregation&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8QtKgLegQIIhAB
+          - listitem [ref=f42e97]:
+            - link "Videos" [ref=f42e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cYuTSDdr5M5eLVnu4bmWLMuP1zuHDWxWNS3Z0PnPwkd8Jdov7EiUGP03ACtcN_D7sw64TNr-qp1BSI3KNX_JE01_AV1VfxKRE7uEfTfJQ3Phupl_IkFAz-sHOP79YfpZ00yE1MA&q=sign+variance+agreement+federated+learning+aggregation&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8QtKgLegQIHRAB
+          - listitem [ref=f42e101]:
+            - link "Forums" [ref=f42e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cYuTSDdr5M5eLVnu4bmWLMuP1zuHDWxWNS3Z0PnPwkd8Jdov7EiUGP03ACtcN_D7sw64TNr-qp1BSI3KNX_JE01_AV1VfxKRE7uEfTfJQ3Phupl_IkFAz-sHOP79YfpZ00yE1MA&q=sign+variance+agreement+federated+learning+aggregation&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Qs6gLegQIGhAB
+          - listitem [ref=f42e105]:
+            - link "Shopping" [ref=f42e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cYuTSDdr5M5eLVnu4bmWLMuP1zuHDWxWNS3Z0PnPwkd8Jdov7EiUGP03ACtcN_D7sw64TNr-qp1BSI3KNX_JE01_AV1VfxKRE7uEfTfJQ3Phupl_IkFAz-sHOP79YfpZ00yE1MA&q=sign+variance+agreement+federated+learning+aggregation&ved=1t:220175&ictx=111
+          - listitem [ref=f42e109]:
+            - link "News" [ref=f42e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&q=sign+variance+agreement+federated+learning+aggregation&tbm=nws&source=lnms&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cYuTSDdr5M5eLVnu4bmWLMuP1zuHDWxWNS3Z0PnPwkd8Jdov7EiUGP03ACtcN_D7sw64TNr-qp1BSI3KNX_JE01_AV1VfxKRE7uEfTfJQ3Phupl_IkFAz-sHOP79YfpZ00yE1MA&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q0pQJegQIFBAB
+          - listitem [ref=f42e113]:
+            - button [ref=f42e114] [cursor=pointer]:
+              - generic "More filters" [ref=f42e115]: More
+        - button "Tools" [ref=f42e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f42e129]
+    - generic [ref=f42e134]:
+      - generic [ref=f42e153]:
+        - heading "Thinking" [level=2] [ref=f42e157]
+        - progressbar "Generating" [ref=f42e160]
+      - main [ref=f42e162]:
+        - generic [ref=f42e166]:
+          - generic [ref=f42e169]:
+            - heading "Web results" [level=2] [ref=f42e170]
+            - generic [ref=f42e171]:
+              - generic [ref=f42e174]:
+                - 'link "FedSECA: Sign Election and Coordinate-wise Aggregation ... arXiv https://arxiv.org › html" [ref=f42e176] [cursor=pointer]':
+                  - /url: https://arxiv.org/html/2411.03861v2
+                  - 'heading "FedSECA: Sign Election and Coordinate-wise Aggregation ..." [level=3] [ref=f42e177]'
+                  - generic [ref=f42e183]:
+                    - generic [ref=f42e184]: arXiv
+                    - generic [ref=f42e186]: https://arxiv.org › html
+                - button "About this result" [ref=f42e190] [cursor=pointer]
+              - generic [ref=f42e196]:
+                - generic [ref=f42e197]: Apr 8, 2025 —
+                - generic [ref=f42e198]:
+                  - emphasis [ref=f42e199]: Federated learning
+                  - text: (FL) [17] enables collaborative training of a machine learning (ML) model by sharing statistical updates learned on data ...
+                - link "Read more" [ref=f42e200] [cursor=pointer]:
+                  - /url: https://arxiv.org/html/2411.03861v2#:~:text=Federated%20learning%20(FL),thus%20mitigating%20systemic%20privacy%20risks
+          - generic [ref=f42e204]:
+            - generic [ref=f42e207]:
+              - 'link "FedSECA: Sign Election and Coordinate-wise Aggregation of ... The Computer Vision Foundation https://openaccess.thecvf.com › FedVision › papers" [ref=f42e209] [cursor=pointer]':
+                - /url: https://openaccess.thecvf.com/content/CVPR2025W/FedVision/papers/Benjamin_FedSECA_Sign_Election_and_Coordinate-wise_Aggregation_of_Gradients_for_Byzantine_CVPRW_2025_paper.pdf
+                - 'heading "FedSECA: Sign Election and Coordinate-wise Aggregation of ..." [level=3] [ref=f42e210]'
+                - generic [ref=f42e219]:
+                  - generic [ref=f42e220]: The Computer Vision Foundation
+                  - generic [ref=f42e222]: https://openaccess.thecvf.com › FedVision › papers
+              - generic [ref=f42e224]: PDF
+              - button "About this result" [ref=f42e227] [cursor=pointer]
+            - generic [ref=f42e232]:
+              - generic [ref=f42e233]:
+                - generic [ref=f42e234]: by JG Benjamin · 2025 · Cited by 2 —
+                - generic [ref=f42e235]:
+                  - text: We propose a robust coordinate-wise
+                  - emphasis [ref=f42e236]: aggregation
+                  - text: (RoCA) method that performs
+                  - emphasis [ref=f42e237]: aggregation
+                  - text: of
+                  - emphasis [ref=f42e238]: variance
+                  - text: "-reduced sparse (VRS) gradients, where individual gradients ..."
+                - link "Read more" [ref=f42e239] [cursor=pointer]:
+                  - /url: https://openaccess.thecvf.com/content/CVPR2025W/FedVision/papers/Benjamin_FedSECA_Sign_Election_and_Coordinate-wise_Aggregation_of_Gradients_for_Byzantine_CVPRW_2025_paper.pdf#:~:text=%E2%80%A2%20We%20propose%20a%20robust,gradients%2C%20where%20individual%20gradients%20are
+              - generic [ref=f42e240]: 10 pages
+          - table [ref=f42e246]:
+            - rowgroup [ref=f42e247]:
+              - row [ref=f42e248]:
+                - cell [ref=f42e249]:
+                  - heading [level=3] [ref=f42e250]:
+                    - link [ref=f42e251] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar?q=sign+variance+agreement+federated+learning+aggregation&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                      - generic [ref=f42e252]:
+                        - text: Scholarly articles for
+                        - emphasis [ref=f42e253]: sign variance agreement federated learning aggregation
+              - row [ref=f42e254]:
+                - cell [ref=f42e255]:
+                  - heading "Reviewing federated learning aggregation algorithms; … - ‎Moshawrab - Cited by 216" [level=3] [ref=f42e256]:
+                    - link [ref=f42e257] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://www.mdpi.com/2079-9292/12/10/2287&hl=en&sa=X&ei=5P1PareVMZiM6rQPxbGiYA&scisig=AM1tuoM2WL0wmWIVWFJoY1lA_Eos&oi=scholarr
+                      - generic [ref=f42e258]:
+                        - text: Reviewing
+                        - emphasis [ref=f42e259]: federated learning aggregation
+                        - text: algorithms; …
+                    - generic [ref=f42e260]:
+                      - text: "-"
+                      - generic [ref=f42e261]: ‎Moshawrab
+                      - text: "- Cited by 216"
+                  - heading "… with heterogeneous quantization in federated learning - ‎Elkordy - Cited by 116" [level=3] [ref=f42e262]:
+                    - link [ref=f42e263] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://www.researchgate.net/profile/Ahmed-Elkordy-2/publication/344436499_Secure_Aggregation_with_Heterogeneous_Quantization_in_Federated_Learning/links/60d13e83a6fdcc01d48e40dd/Secure-Aggregation-with-Heterogeneous-Quantization-in-Federated-Learning.pdf&hl=en&sa=X&ei=5P1PareVMZiM6rQPxbGiYA&scisig=AM1tuoOQrObJnf78dGW7HE4x2iWw&oi=scholarr
+                      - generic [ref=f42e264]:
+                        - text: … with heterogeneous quantization in
+                        - emphasis [ref=f42e265]: federated learning
+                    - generic [ref=f42e266]:
+                      - text: "-"
+                      - generic [ref=f42e267]: ‎Elkordy
+                      - text: "- Cited by 116"
+          - generic [ref=f42e270]:
+            - heading "Web results" [level=2] [ref=f42e271]
+            - generic [ref=f42e272]:
+              - generic [ref=f42e275]:
+                - link "Understanding Aggregation Algorithms in Federated ... Medium · Praburam 9 likes · 1 year ago" [ref=f42e277] [cursor=pointer]:
+                  - /url: https://medium.com/@praburam_93885/understanding-aggregation-algorithms-in-federated-learning-834ed2bbe860
+                  - heading "Understanding Aggregation Algorithms in Federated ..." [level=3] [ref=f42e278]
+                  - generic [ref=f42e284]:
+                    - generic [ref=f42e285]: Medium · Praburam
+                    - generic [ref=f42e287]: 9 likes · 1 year ago
+                - button "About this result" [ref=f42e291] [cursor=pointer]
+              - generic [ref=f42e297]:
+                - generic [ref=f42e298]:
+                  - text: These
+                  - emphasis [ref=f42e299]: aggregation
+                  - text: algorithms play a crucial role in how we can combine the local client models to get a global model.
+                - link "Read more" [ref=f42e300] [cursor=pointer]:
+                  - /url: https://medium.com/@praburam_93885/understanding-aggregation-algorithms-in-federated-learning-834ed2bbe860#:~:text=In%20the%20decentralized%20approach%20of,to%20get%20a%20global%20model.
+              - generic [ref=f42e302]:
+                - text: "Missing: agreement ‎| Show results with:"
+                - link "agreement" [ref=f42e303] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=sign+variance+%22agreement%22+federated+learning+aggregation&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q5t4CegQIMxAB
+          - generic [ref=f42e307]:
+            - generic [ref=f42e310]:
+              - link "Model aggregation techniques in federated learning ScienceDirect.com https://www.sciencedirect.com › science › article › pii" [ref=f42e312] [cursor=pointer]:
+                - /url: https://www.sciencedirect.com/science/article/pii/S0167739X23003333
+                - heading "Model aggregation techniques in federated learning" [level=3] [ref=f42e313]
+                - generic [ref=f42e319]:
+                  - generic [ref=f42e320]: ScienceDirect.com
+                  - generic [ref=f42e322]: https://www.sciencedirect.com › science › article › pii
+              - button "About this result" [ref=f42e326] [cursor=pointer]
+            - generic [ref=f42e332]:
+              - generic [ref=f42e333]: by P Qi · 2024 · Cited by 604 —
+              - generic [ref=f42e334]:
+                - text: This paper presents a systematic literature review encompassing 201 studies on model
+                - emphasis [ref=f42e335]: aggregation
+                - text: in FL. The focus is on summarizing the proposed techniques.
+              - link "Read more" [ref=f42e336] [cursor=pointer]:
+                - /url: https://www.sciencedirect.com/science/article/pii/S0167739X23003333#:~:text=To%20address%20this%20gap%2C%20this,currently%20applied%20for%20model%20fusion.
+            - generic [ref=f42e338]:
+              - text: "Missing: agreement ‎| Show results with:"
+              - link "agreement" [ref=f42e339] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=sign+variance+%22agreement%22+federated+learning+aggregation&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q5t4CegQINRAB
+          - generic [ref=f42e343]:
+            - generic [ref=f42e346]:
+              - 'link "z-SignFedAvg: A Unified Stochastic Sign-Based ... The Association for the Advancement of Artificial Intelligence https://ojs.aaai.org › AAAI › article › view" [ref=f42e348] [cursor=pointer]':
+                - /url: https://ojs.aaai.org/index.php/AAAI/article/view/29454/30740
+                - 'heading "z-SignFedAvg: A Unified Stochastic Sign-Based ..." [level=3] [ref=f42e349]'
+                - generic [ref=f42e355]:
+                  - generic [ref=f42e356]: The Association for the Advancement of Artificial Intelligence
+                  - generic [ref=f42e358]: https://ojs.aaai.org › AAAI › article › view
+              - generic [ref=f42e360]: PDF
+              - button "About this result" [ref=f42e363] [cursor=pointer]
+            - generic [ref=f42e369]:
+              - generic [ref=f42e370]: by Z Tang · 2024 · Cited by 31 —
+              - generic [ref=f42e371]:
+                - text: Extensive experiments are conducted to demonstrate that the
+                - emphasis [ref=f42e372]: z-SignFedAvg
+                - text: can achieve competitive empirical performance on real datasets and outperforms existing ...
+              - link "Read more" [ref=f42e373] [cursor=pointer]:
+                - /url: https://ojs.aaai.org/index.php/AAAI/article/view/29454/30740#:~:text=Extensive%20experiments%20are%20conducted%20to,datasets%20and%20outperforms%20existing%20schemes.
+            - generic [ref=f42e375]:
+              - text: "Missing: agreement ‎| Show results with:"
+              - link "agreement" [ref=f42e376] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=sign+variance+%22agreement%22+federated+learning+aggregation&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q5t4CegQINBAB
+          - generic [ref=f42e380]:
+            - generic [ref=f42e383]:
+              - 'link "z-SignFedAvg: a unified stochastic sign-based ... ACM Digital Library https://dl.acm.org › doi" [ref=f42e385] [cursor=pointer]':
+                - /url: https://dl.acm.org/doi/10.1609/aaai.v38i14.29454
+                - 'heading "z-SignFedAvg: a unified stochastic sign-based ..." [level=3] [ref=f42e386]'
+                - generic [ref=f42e392]:
+                  - generic [ref=f42e393]: ACM Digital Library
+                  - generic [ref=f42e395]: https://dl.acm.org › doi
+              - button "About this result" [ref=f42e399] [cursor=pointer]
+            - generic [ref=f42e405]:
+              - generic [ref=f42e406]:
+                - text: In this paper, we propose a novel noisy perturbation scheme with a general symmetric noise distribution for
+                - emphasis [ref=f42e407]: sign
+                - text: "-based compression."
+              - link "Read more" [ref=f42e408] [cursor=pointer]:
+                - /url: https://dl.acm.org/doi/10.1609/aaai.v38i14.29454#:~:text=In%20this%20paper%2C%20we%20propose,noise%20distribution%20for%20sign%2Dbased%20compression
+            - generic [ref=f42e410]:
+              - text: "Missing: agreement ‎| Show results with:"
+              - link "agreement" [ref=f42e411] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=sign+variance+%22agreement%22+federated+learning+aggregation&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q5t4CegQILRAB
+          - generic [ref=f42e415]:
+            - generic [ref=f42e418]:
+              - 'link "SSFed: Statistical Significance Aggregation Algorithm in ... The Science and Information (SAI) Organization https://thesai.org › Downloads › Paper_112-SSFed..." [ref=f42e420] [cursor=pointer]':
+                - /url: https://thesai.org/Downloads/Volume16No3/Paper_112-SSFed_Statistical_Significance_Aggregation_Algorithm.pdf
+                - 'heading "SSFed: Statistical Significance Aggregation Algorithm in ..." [level=3] [ref=f42e421]'
+                - generic [ref=f42e427]:
+                  - generic [ref=f42e428]: The Science and Information (SAI) Organization
+                  - generic [ref=f42e430]: https://thesai.org › Downloads › Paper_112-SSFed...
+              - generic [ref=f42e432]: PDF
+              - button "About this result" [ref=f42e435] [cursor=pointer]
+            - generic [ref=f42e440]:
+              - generic [ref=f42e441]:
+                - generic [ref=f42e442]:
+                  - text: Abstract—
+                  - emphasis [ref=f42e443]: Federated learning
+                  - text: enables collaborative model training across multiple clients without sharing raw data, where the global server aggregates local ...
+                - link "Read more" [ref=f42e444] [cursor=pointer]:
+                  - /url: https://thesai.org/Downloads/Volume16No3/Paper_112-SSFed_Statistical_Significance_Aggregation_Algorithm.pdf#:~:text=Abstract%E2%80%94Federated%20learning%20enables%20collaborative%20model,global%20server%20aggregates%20local%20models.
+              - generic [ref=f42e445]: 7 pages
+            - generic [ref=f42e447]:
+              - text: "Missing: agreement ‎| Show results with:"
+              - link "agreement" [ref=f42e448] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=sign+variance+%22agreement%22+federated+learning+aggregation&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q5t4CegQILxAB
+          - generic [ref=f42e452]:
+            - generic [ref=f42e455]:
+              - link "Federated Learning and Custom Aggregation Schemes Towards Data Science https://towardsdatascience.com › Latest" [ref=f42e457] [cursor=pointer]:
+                - /url: https://towardsdatascience.com/federated-learning-and-custom-aggregation-schemes/
+                - heading "Federated Learning and Custom Aggregation Schemes" [level=3] [ref=f42e458]
+                - generic [ref=f42e464]:
+                  - generic [ref=f42e465]: Towards Data Science
+                  - generic [ref=f42e467]: https://towardsdatascience.com › Latest
+              - button "About this result" [ref=f42e471] [cursor=pointer]
+            - generic [ref=f42e477]:
+              - generic [ref=f42e478]: Oct 22, 2025 —
+              - generic [ref=f42e479]:
+                - text: This document is for machine
+                - emphasis [ref=f42e480]: learning
+                - text: practitioners, researchers, and engineers interested in exploring custom
+                - emphasis [ref=f42e481]: aggregation
+                - text: schemes in ...
+              - link "Read more" [ref=f42e482] [cursor=pointer]:
+                - /url: https://towardsdatascience.com/federated-learning-and-custom-aggregation-schemes/#:~:text=This%20document%20is%20for%20machine,aggregation%20schemes%20in%20federated%20learning.
+            - generic [ref=f42e483]: "Missing: variance ‎agreement"
+          - generic [ref=f42e491]:
+            - generic [ref=f42e494]:
+              - link "Secure Model Aggregation in Federated Learning YouTube · Communications and Signal Processing Seminar Series 2.1K+ views · 4 years ago" [ref=f42e496] [cursor=pointer]:
+                - /url: https://www.youtube.com/watch?v=rwzLSNMpm8U
+                - heading "Secure Model Aggregation in Federated Learning" [level=3] [ref=f42e497]
+                - generic [ref=f42e503]:
+                  - generic [ref=f42e504]: YouTube · Communications and Signal Processing Seminar Series
+                  - generic [ref=f42e506]: 2.1K+ views · 4 years ago
+              - button "About this result" [ref=f42e510] [cursor=pointer]
+            - generic [ref=f42e515]:
+              - button "Secure Model Aggregation in Federated Learning by Communications and Signal Processing Seminar Series on YouTube. Play on Google. 1:17:20" [ref=f42e516] [cursor=pointer]:
+                - generic [ref=f42e517]: 1:17:20
+              - generic [ref=f42e530]: Secure Model Aggregation in Federated Learning.
+            - button "10 key moments in this video" [ref=f42e536] [cursor=pointer]
+            - generic [ref=f42e546]: "Missing: variance ‎agreement"
+        - generic [ref=f42e549]:
+          - generic [ref=f42e554]:
+            - heading "People also search for" [level=2] [ref=f42e556]
+            - generic [ref=f42e558]:
+              - generic [ref=f42e559]:
+                - link "Sign variance agreement federated learning aggregation example" [ref=f42e563] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Sign+variance+agreement+federated+learning+aggregation+example&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q1QJ6BAgKEAE
+                - link "Federated learning aggregation methods" [ref=f42e577] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Federated+learning+aggregation+methods&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q1QJ6BAgZEAE
+                - 'link "Model aggregation techniques in federated learning: A comprehensive survey" [ref=f42e591] [cursor=pointer]':
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Model+aggregation+techniques+in+federated+learning:+A+comprehensive+survey&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q1QJ6BAgTEAE
+              - generic [ref=f42e602]:
+                - link "Federated learning algorithm" [ref=f42e606] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Federated+learning+algorithm&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q1QJ6BAgNEAE
+                - link "Aggregation model" [ref=f42e620] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Aggregation+model&sa=X&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q1QJ6BAgLEAE
+          - navigation [ref=f42e631]:
+            - heading "Page Navigation" [level=1] [ref=f42e632]
+            - text: "1"
+            - link "Page 2" [ref=f42e635] [cursor=pointer]:
+              - /url: /search?q=sign+variance+agreement+federated+learning+aggregation&sca_esv=30a5fb343c9df574&ei=5P1Paq3hKrnLkPIP-NLm-A8&start=10&sa=N&sstk=AU9db-A-fEayLFWLRLHqyNoMsCeWExTJDE0xElX-hgeQVzpkKkeloCYR4xqxxYFhdlPHboQv7YAi4yaBheAAiQuWm_XOIMWS9EfxLg&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q8tMDegQIRxAE
+              - text: "2"
+            - link "Page 3" [ref=f42e637] [cursor=pointer]:
+              - /url: /search?q=sign+variance+agreement+federated+learning+aggregation&sca_esv=30a5fb343c9df574&ei=5P1Paq3hKrnLkPIP-NLm-A8&start=20&sa=N&sstk=AU9db-A-fEayLFWLRLHqyNoMsCeWExTJDE0xElX-hgeQVzpkKkeloCYR4xqxxYFhdlPHboQv7YAi4yaBheAAiQuWm_XOIMWS9EfxLg&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q8tMDegQIRxAG
+              - text: "3"
+            - link "Page 4" [ref=f42e639] [cursor=pointer]:
+              - /url: /search?q=sign+variance+agreement+federated+learning+aggregation&sca_esv=30a5fb343c9df574&ei=5P1Paq3hKrnLkPIP-NLm-A8&start=30&sa=N&sstk=AU9db-A-fEayLFWLRLHqyNoMsCeWExTJDE0xElX-hgeQVzpkKkeloCYR4xqxxYFhdlPHboQv7YAi4yaBheAAiQuWm_XOIMWS9EfxLg&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q8tMDegQIRxAI
+              - text: "4"
+            - link "Page 5" [ref=f42e641] [cursor=pointer]:
+              - /url: /search?q=sign+variance+agreement+federated+learning+aggregation&sca_esv=30a5fb343c9df574&ei=5P1Paq3hKrnLkPIP-NLm-A8&start=40&sa=N&sstk=AU9db-A-fEayLFWLRLHqyNoMsCeWExTJDE0xElX-hgeQVzpkKkeloCYR4xqxxYFhdlPHboQv7YAi4yaBheAAiQuWm_XOIMWS9EfxLg&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q8tMDegQIRxAK
+              - text: "5"
+            - link "Page 6" [ref=f42e643] [cursor=pointer]:
+              - /url: /search?q=sign+variance+agreement+federated+learning+aggregation&sca_esv=30a5fb343c9df574&ei=5P1Paq3hKrnLkPIP-NLm-A8&start=50&sa=N&sstk=AU9db-A-fEayLFWLRLHqyNoMsCeWExTJDE0xElX-hgeQVzpkKkeloCYR4xqxxYFhdlPHboQv7YAi4yaBheAAiQuWm_XOIMWS9EfxLg&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q8tMDegQIRxAM
+              - text: "6"
+            - link "Page 7" [ref=f42e645] [cursor=pointer]:
+              - /url: /search?q=sign+variance+agreement+federated+learning+aggregation&sca_esv=30a5fb343c9df574&ei=5P1Paq3hKrnLkPIP-NLm-A8&start=60&sa=N&sstk=AU9db-A-fEayLFWLRLHqyNoMsCeWExTJDE0xElX-hgeQVzpkKkeloCYR4xqxxYFhdlPHboQv7YAi4yaBheAAiQuWm_XOIMWS9EfxLg&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q8tMDegQIRxAO
+              - text: "7"
+            - link "Page 8" [ref=f42e647] [cursor=pointer]:
+              - /url: /search?q=sign+variance+agreement+federated+learning+aggregation&sca_esv=30a5fb343c9df574&ei=5P1Paq3hKrnLkPIP-NLm-A8&start=70&sa=N&sstk=AU9db-A-fEayLFWLRLHqyNoMsCeWExTJDE0xElX-hgeQVzpkKkeloCYR4xqxxYFhdlPHboQv7YAi4yaBheAAiQuWm_XOIMWS9EfxLg&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q8tMDegQIRxAQ
+              - text: "8"
+            - heading [level=2] [ref=f42e649]:
+              - link "Next" [ref=f42e650] [cursor=pointer]:
+                - /url: /search?q=sign+variance+agreement+federated+learning+aggregation&sca_esv=30a5fb343c9df574&ei=5P1Paq3hKrnLkPIP-NLm-A8&start=10&sa=N&sstk=AU9db-A-fEayLFWLRLHqyNoMsCeWExTJDE0xElX-hgeQVzpkKkeloCYR4xqxxYFhdlPHboQv7YAi4yaBheAAiQuWm_XOIMWS9EfxLg&ved=2ahUKEwit4-uescaVAxW5JUQIHXipGf8Q8NMDegQIRxAS
+        - navigation
+    - contentinfo [ref=f42e653]:
+      - heading "Footer Links" [level=1] [ref=f42e654]
+      - generic [ref=f42e658]:
+        - generic [ref=f42e662]:
+          - button "Woodland, California - From your IP address" [ref=f42e664] [cursor=pointer]:
+            - generic [ref=f42e665]: Woodland, California
+            - generic [ref=f42e667]:
+              - text: "-"
+              - generic [ref=f42e668]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f42e670] [cursor=pointer]
+        - generic [ref=f42e673]:
+          - link "Help" [ref=f42e674] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f42e675] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f42e676] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f42e677] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

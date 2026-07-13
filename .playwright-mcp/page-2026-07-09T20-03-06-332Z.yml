@@ -1,0 +1,285 @@
+- generic [ref=f128e2]:
+  - link "Skip to main content" [ref=f128e3] [cursor=pointer]:
+    - /url: "#content"
+  - region "Announcement" [ref=f128e4]:
+    - generic [ref=f128e6]: arXiv is now an independent nonprofit!
+    - link "Learn more" [ref=f128e7] [cursor=pointer]:
+      - /url: https://info.arxiv.org/about
+    - button "Dismiss announcement" [ref=f128e8] [cursor=pointer]: ×
+  - banner [ref=f128e9]:
+    - link [ref=f128e10] [cursor=pointer]:
+      - /url: https://arxiv.org/IgnoreMe
+    - link "archive home" [ref=f128e11] [cursor=pointer]:
+      - /url: https://arxiv.org/
+      - img "archive" [ref=f128e12]
+    - navigation "Main navigation" [ref=f128e13]:
+      - link "Search" [ref=f128e14] [cursor=pointer]:
+        - /url: https://arxiv.org/search
+      - link "Submit" [ref=f128e18] [cursor=pointer]:
+        - /url: https://arxiv.org/user/create
+      - link "Donate" [ref=f128e19] [cursor=pointer]:
+        - /url: https://info.arxiv.org/about/donate.html
+      - link "Log in" [ref=f128e21] [cursor=pointer]:
+        - /url: https://arxiv.org/login
+  - main [ref=f128e22]:
+    - generic [ref=f128e24]:
+      - generic [ref=f128e25]:
+        - heading "Computer Science > Machine Learning" [level=1] [ref=f128e27]
+        - generic [ref=f128e29]:
+          - generic [ref=f128e30]:
+            - text: "[Submitted on 5 Mar 2018 ("
+            - link "v1" [ref=f128e31] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/1803.01498v1
+            - text: ), last revised 25 Feb 2021 (this version, v2)]
+          - 'heading "Byzantine-Robust Distributed Learning: Towards Optimal Statistical Rates" [level=1] [ref=f128e32]'
+          - generic [ref=f128e33]:
+            - link "Dong Yin" [ref=f128e34] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Yin,+D
+            - text: ","
+            - link "Yudong Chen" [ref=f128e35] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Chen,+Y
+            - text: ","
+            - link "Kannan Ramchandran" [ref=f128e36] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Ramchandran,+K
+            - text: ","
+            - link "Peter Bartlett" [ref=f128e37] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Bartlett,+P
+          - blockquote [ref=f128e38]: "In large-scale distributed learning, security issues have become increasingly important. Particularly in a decentralized environment, some computing units may behave abnormally, or even exhibit Byzantine failures -- arbitrary and potentially adversarial behavior. In this paper, we develop distributed learning algorithms that are provably robust against such failures, with a focus on achieving optimal statistical performance. A main result of this work is a sharp analysis of two robust distributed gradient descent algorithms based on median and trimmed mean operations, respectively. We prove statistical error rates for three kinds of population loss functions: strongly convex, non-strongly convex, and smooth non-convex. In particular, these algorithms are shown to achieve order-optimal statistical error rates for strongly convex losses. To achieve better communication efficiency, we further propose a median-based distributed algorithm that is provably robust, and uses only one communication round. For strongly convex quadratic loss, we show that this algorithm achieves the same optimal error rate as the robust distributed gradient descent algorithms."
+          - table "Additional metadata" [ref=f128e40]:
+            - rowgroup [ref=f128e41]:
+              - row [ref=f128e42]:
+                - cell "Comments:" [ref=f128e43]
+                - cell "ICML 2018" [ref=f128e44]
+              - row [ref=f128e45]:
+                - cell "Subjects:" [ref=f128e46]
+                - cell "Machine Learning (cs.LG); Cryptography and Security (cs.CR); Distributed, Parallel, and Cluster Computing (cs.DC); Machine Learning (stat.ML)" [ref=f128e47]
+              - row [ref=f128e48]:
+                - cell "Cite as:" [ref=f128e49]
+                - cell [ref=f128e50]:
+                  - generic [ref=f128e51]:
+                    - link "arXiv:1803.01498" [ref=f128e52] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/1803.01498
+                    - text: "[cs.LG]"
+              - row [ref=f128e53]:
+                - cell [ref=f128e54]
+                - cell [ref=f128e55]:
+                  - text: (or
+                  - generic [ref=f128e56]:
+                    - link "arXiv:1803.01498v2" [ref=f128e57] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/1803.01498v2
+                    - text: "[cs.LG]"
+                  - text: for this version)
+              - row [ref=f128e58]:
+                - cell [ref=f128e59]
+                - cell [ref=f128e60]:
+                  - link "https://doi.org/10.48550/arXiv.1803.01498" [ref=f128e61] [cursor=pointer]:
+                    - /url: https://doi.org/10.48550/arXiv.1803.01498
+                  - button "Focus to learn more" [ref=f128e63]
+        - generic [ref=f128e66]:
+          - heading "Submission history" [level=2] [ref=f128e67]
+          - text: "From: Dong Yin ["
+          - link "view email" [ref=f128e68] [cursor=pointer]:
+            - /url: /show-email/b81e88cd/1803.01498
+          - text: "]"
+          - strong [ref=f128e69]:
+            - link "[v1]" [ref=f128e70] [cursor=pointer]:
+              - /url: /abs/1803.01498v1
+          - text: Mon, 5 Mar 2018 05:04:17 UTC (62 KB)
+          - strong [ref=f128e71]: "[v2]"
+          - text: Thu, 25 Feb 2021 06:34:39 UTC (62 KB)
+      - generic [ref=f128e72]:
+        - generic [ref=f128e73]:
+          - heading "Access Paper:" [level=2] [ref=f128e74]
+          - list [ref=f128e75]:
+            - listitem [ref=f128e76]:
+              - link "View PDF" [ref=f128e77] [cursor=pointer]:
+                - /url: /pdf/1803.01498
+            - listitem [ref=f128e78]:
+              - link "TeX Source" [ref=f128e79] [cursor=pointer]:
+                - /url: /src/1803.01498
+          - link "view license" [ref=f128e81] [cursor=pointer]:
+            - /url: http://arxiv.org/licenses/nonexclusive-distrib/1.0/
+        - generic [ref=f128e82]:
+          - heading "Current browse context:" [level=3] [ref=f128e83]
+          - generic [ref=f128e84]: cs.LG
+          - generic [ref=f128e85]:
+            - link "< prev" [ref=f128e87] [cursor=pointer]:
+              - /url: /prevnext?id=1803.01498&function=prev&context=cs.LG
+            - text: "|"
+            - link "next >" [ref=f128e89] [cursor=pointer]:
+              - /url: /prevnext?id=1803.01498&function=next&context=cs.LG
+          - generic [ref=f128e90]:
+            - link "new" [ref=f128e91] [cursor=pointer]:
+              - /url: /list/cs.LG/new
+            - text: "|"
+            - link "recent" [ref=f128e92] [cursor=pointer]:
+              - /url: /list/cs.LG/recent
+            - text: "|"
+            - link "2018-03" [ref=f128e93] [cursor=pointer]:
+              - /url: /list/cs.LG/2018-03
+          - generic [ref=f128e94]:
+            - text: "Change to browse by:"
+            - generic [ref=f128e95]:
+              - link "cs" [ref=f128e96] [cursor=pointer]:
+                - /url: /abs/1803.01498?context=cs
+              - link "cs.CR" [ref=f128e97] [cursor=pointer]:
+                - /url: /abs/1803.01498?context=cs.CR
+              - link "cs.DC" [ref=f128e98] [cursor=pointer]:
+                - /url: /abs/1803.01498?context=cs.DC
+              - link "stat" [ref=f128e99] [cursor=pointer]:
+                - /url: /abs/1803.01498?context=stat
+              - link "stat.ML" [ref=f128e100] [cursor=pointer]:
+                - /url: /abs/1803.01498?context=stat.ML
+        - generic [ref=f128e101]:
+          - heading "References & Citations" [level=3] [ref=f128e102]
+          - list [ref=f128e103]:
+            - listitem [ref=f128e104]:
+              - link "NASA ADS" [ref=f128e105] [cursor=pointer]:
+                - /url: https://ui.adsabs.harvard.edu/abs/arXiv:1803.01498
+            - listitem [ref=f128e106]:
+              - link "Google Scholar" [ref=f128e107] [cursor=pointer]:
+                - /url: https://scholar.google.com/scholar_lookup?arxiv_id=1803.01498
+            - listitem [ref=f128e108]:
+              - link "Semantic Scholar" [ref=f128e109] [cursor=pointer]:
+                - /url: https://api.semanticscholar.org/arXiv:1803.01498
+        - generic [ref=f128e110]:
+          - heading [level=3] [ref=f128e111]:
+            - link "DBLP" [ref=f128e112] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de
+            - text: "- CS Bibliography"
+          - generic [ref=f128e113]:
+            - link "listing" [ref=f128e114] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/db/journals/corr/corr1803.html#abs-1803-01498
+            - text: "|"
+            - link "bibtex" [ref=f128e115] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/rec/bibtex/journals/corr/abs-1803-01498
+          - generic [ref=f128e116]:
+            - link "Dong Yin" [ref=f128e117] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Dong%20Yin
+            - link "Yudong Chen" [ref=f128e118] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Yudong%20Chen
+            - link "Kannan Ramchandran" [ref=f128e119] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Kannan%20Ramchandran
+            - link "Peter L. Bartlett" [ref=f128e120] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Peter%20L.%20Bartlett
+            - link "Peter Bartlett" [ref=f128e121] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Peter%20Bartlett
+        - button "export BibTeX citation" [ref=f128e123]
+        - generic [ref=f128e124]:
+          - heading "Bookmark" [level=3] [ref=f128e126]
+          - link [ref=f128e127] [cursor=pointer]:
+            - /url: "http://www.bibsonomy.org/BibtexHandler?requTask=upload&url=https://arxiv.org/abs/1803.01498&description=Byzantine-Robust Distributed Learning: Towards Optimal Statistical Rates"
+            - img "BibSonomy" [ref=f128e128]
+          - link [ref=f128e129] [cursor=pointer]:
+            - /url: "https://reddit.com/submit?url=https://arxiv.org/abs/1803.01498&title=Byzantine-Robust Distributed Learning: Towards Optimal Statistical Rates"
+            - img "Reddit" [ref=f128e130]
+      - tablist "arXivLabs tools" [ref=f128e132]:
+        - radio "Bibliographic Tools" [checked] [ref=f128e133]
+        - tab "Bibliographic Tools" [selected] [ref=f128e134] [cursor=pointer]
+        - tabpanel "Bibliographic Tools" [ref=f128e135]:
+          - heading "Bibliographic and Citation Tools" [level=1] [ref=f128e136]
+          - generic [ref=f128e137]:
+            - generic [ref=f128e138]:
+              - generic [ref=f128e140]:
+                - checkbox "Bibliographic Explorer Toggle"
+                - generic [ref=f128e142]: Bibliographic Explorer Toggle
+              - generic [ref=f128e143]:
+                - text: Bibliographic Explorer
+                - emphasis [ref=f128e144]:
+                  - text: (
+                  - link "What is the Explorer?" [ref=f128e145] [cursor=pointer]:
+                    - /url: https://info.arxiv.org/labs/showcase.html#arxiv-bibliographic-explorer
+                  - text: )
+            - generic [ref=f128e146]:
+              - generic [ref=f128e148]:
+                - checkbox "Connected Papers"
+                - generic [ref=f128e150]: Connected Papers Toggle
+              - generic [ref=f128e151]:
+                - text: Connected Papers
+                - emphasis [ref=f128e152]:
+                  - text: (
+                  - link "What is Connected Papers?" [ref=f128e153] [cursor=pointer]:
+                    - /url: https://www.connectedpapers.com/about
+                  - text: )
+            - generic [ref=f128e154]:
+              - generic [ref=f128e156]:
+                - checkbox "Litmaps"
+                - generic [ref=f128e158]: Litmaps Toggle
+              - generic [ref=f128e159]:
+                - text: Litmaps
+                - emphasis [ref=f128e160]:
+                  - text: (
+                  - link "What is Litmaps?" [ref=f128e161] [cursor=pointer]:
+                    - /url: https://www.litmaps.co/
+                  - text: )
+            - generic [ref=f128e162]:
+              - generic [ref=f128e164]:
+                - checkbox "scite Smart Citations"
+                - generic [ref=f128e166]: scite.ai Toggle
+              - generic [ref=f128e167]:
+                - text: scite Smart Citations
+                - emphasis [ref=f128e168]:
+                  - text: (
+                  - link "What are Smart Citations?" [ref=f128e169] [cursor=pointer]:
+                    - /url: https://www.scite.ai/
+                  - text: )
+        - radio "Code, Data, Media" [ref=f128e173]
+        - tab "Code, Data, Media" [ref=f128e174] [cursor=pointer]
+        - radio "Demos" [ref=f128e175]
+        - tab "Demos" [ref=f128e176] [cursor=pointer]
+        - radio "Related Papers" [ref=f128e177]
+        - tab "Related Papers" [ref=f128e178] [cursor=pointer]
+        - radio "About arXivLabs" [ref=f128e179]
+        - tab "About arXivLabs" [ref=f128e180] [cursor=pointer]
+      - generic [ref=f128e181]:
+        - link "Which authors of this paper are endorsers?" [ref=f128e182] [cursor=pointer]:
+          - /url: /auth/show-endorsers/1803.01498
+        - text: "|"
+        - link "Disable MathJax" [ref=f128e183] [cursor=pointer]:
+          - /url: javascript:setMathjaxCookie()
+        - text: (
+        - link "What is MathJax?" [ref=f128e184] [cursor=pointer]:
+          - /url: https://info.arxiv.org/help/mathjax.html
+        - text: )
+  - contentinfo [ref=f128e185]:
+    - generic [ref=f128e186]:
+      - generic [ref=f128e187]:
+        - generic [ref=f128e188]:
+          - text: We gratefully acknowledge support from our
+          - strong [ref=f128e189]: major funders
+          - text: ","
+          - link [ref=f128e190] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about/ourmembers.html
+            - strong [ref=f128e191]: member institutions
+          - text: ", and all contributors."
+        - navigation "Site navigation" [ref=f128e192]:
+          - link "About" [ref=f128e193] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about
+          - generic [ref=f128e194]: ·
+          - link "Help" [ref=f128e195] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help
+          - generic [ref=f128e196]: ·
+          - link "Contact" [ref=f128e197] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/contact.html
+          - generic [ref=f128e198]: ·
+          - link "Subscribe" [ref=f128e199] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/subscribe
+          - generic [ref=f128e200]: ·
+          - link "Copyright" [ref=f128e201] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/license/index.html
+          - generic [ref=f128e202]: ·
+          - link "Privacy" [ref=f128e203] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/policies/privacy_policy.html
+          - generic [ref=f128e204]: ·
+          - link "Accessibility" [ref=f128e205] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/web_accessibility.html
+          - generic [ref=f128e206]: ·
+          - link "Operational Status (opens in new tab)" [ref=f128e207] [cursor=pointer]:
+            - /url: https://status.arxiv.org
+            - text: Operational Status
+            - generic [ref=f128e208]: (opens in new tab)
+      - generic "Major funders" [ref=f128e209]:
+        - generic [ref=f128e210]: Major funding support from
+        - generic [ref=f128e211]:
+          - img "Simons Foundation" [ref=f128e212]
+          - img "Schmidt Sciences" [ref=f128e213]

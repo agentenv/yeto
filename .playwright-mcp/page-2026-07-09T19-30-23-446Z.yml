@@ -1,0 +1,292 @@
+- generic [active] [ref=f28e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f28e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f28e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f28e8]:
+    - search [ref=f28e9]:
+      - generic [ref=f28e11]:
+        - link "Go to Google Home" [ref=f28e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQPAgI
+        - generic [ref=f28e21]:
+          - generic [ref=f28e22]:
+            - combobox "Search" [ref=f28e25]: "\"Stochastic Optimization Using a Trust-Region Method and Random Models\" arxiv \"Stochastic Optimization Using a Trust-Region Method and Random Models\" arxiv"
+            - generic [ref=f28e26]:
+              - button "Clear" [ref=f28e28] [cursor=pointer]
+              - generic [ref=f28e33]:
+                - button "Search by voice" [ref=f28e34] [cursor=pointer]
+                - button "Search by image" [ref=f28e37] [cursor=pointer]
+          - button "Search" [ref=f28e40] [cursor=pointer]
+    - generic [ref=f28e45]:
+      - button "Settings" [ref=f28e47] [cursor=pointer]
+      - button "Share" [ref=f28e53] [cursor=pointer]
+      - generic [ref=f28e59]:
+        - button "Google apps" [ref=f28e61] [cursor=pointer]
+        - link "Sign in" [ref=f28e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522Stochastic%2BOptimization%2BUsing%2Ba%2BTrust-Region%2BMethod%2Band%2BRandom%2BModels%2522%2Barxiv&ec=futura_srp_og_si_72236_p
+  - generic [ref=f28e68]:
+    - navigation [ref=f28e74]:
+      - generic [ref=f28e80]:
+        - list [ref=f28e81]:
+          - listitem [ref=f28e82]:
+            - link "AI Mode" [ref=f28e85] [cursor=pointer]:
+              - /url: /search?q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sca_esv=d4e925c21a8887a9&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlBx_GgM0fzV1XsSsLkzcasTiI6xGBffAN_rhJRz3qTXXmyD3YIUXwPPXKRc3YvdafGc-8x8n6CepD7e6d70IxKqVJCoPs2Q7kTUGk-Sb2ItPKdUXeicV7ZHxqOMEsstwm0lftZKmiMQx9G9TjkuxsF_HZiQYA&aep=1&ntc=1&sa=X&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQ2J8OegQICBAD
+          - listitem [ref=f28e89]:
+            - link "All" [disabled] [ref=f28e90]
+          - listitem [ref=f28e93]:
+            - link "Videos" [ref=f28e94] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlBx_GgM0fzV1XsSsLkzcasTiI6xGBffAN_rhJRz3qTXXmyD3YIUXwPPXKRc3YvdafGc-8x8n6CepD7e6d70IxKqVJCoPs2Q7kTUGk-Sb2ItPKdUXeicV7ZHxqOMEsstwm0lftZKmiMQx9G9TjkuxsF_HZiQYA&q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sa=X&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQtKgLegQIKRAB
+          - listitem [ref=f28e97]:
+            - link "Images" [ref=f28e98] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlBx_GgM0fzV1XsSsLkzcasTiI6xGBffAN_rhJRz3qTXXmyD3YIUXwPPXKRc3YvdafGc-8x8n6CepD7e6d70IxKqVJCoPs2Q7kTUGk-Sb2ItPKdUXeicV7ZHxqOMEsstwm0lftZKmiMQx9G9TjkuxsF_HZiQYA&q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sa=X&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQtKgLegQIHxAB
+          - listitem [ref=f28e101]:
+            - link "Forums" [ref=f28e102] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlBx_GgM0fzV1XsSsLkzcasTiI6xGBffAN_rhJRz3qTXXmyD3YIUXwPPXKRc3YvdafGc-8x8n6CepD7e6d70IxKqVJCoPs2Q7kTUGk-Sb2ItPKdUXeicV7ZHxqOMEsstwm0lftZKmiMQx9G9TjkuxsF_HZiQYA&q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sa=X&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQs6gLegQIHRAB
+          - listitem [ref=f28e105]:
+            - link "Short videos" [ref=f28e106] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlBx_GgM0fzV1XsSsLkzcasTiI6xGBffAN_rhJRz3qTXXmyD3YIUXwPPXKRc3YvdafGc-8x8n6CepD7e6d70IxKqVJCoPs2Q7kTUGk-Sb2ItPKdUXeicV7ZHxqOMEsstwm0lftZKmiMQx9G9TjkuxsF_HZiQYA&q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sa=X&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQs6gLegQIGxAB
+          - listitem [ref=f28e109]:
+            - link "Shopping" [ref=f28e110] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlBx_GgM0fzV1XsSsLkzcasTiI6xGBffAN_rhJRz3qTXXmyD3YIUXwPPXKRc3YvdafGc-8x8n6CepD7e6d70IxKqVJCoPs2Q7kTUGk-Sb2ItPKdUXeicV7ZHxqOMEsstwm0lftZKmiMQx9G9TjkuxsF_HZiQYA&q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&ved=1t:220175&ictx=111
+          - listitem [ref=f28e113]:
+            - button [ref=f28e114] [cursor=pointer]:
+              - generic "More filters" [ref=f28e115]: More
+        - button "Tools" [ref=f28e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f28e129]
+    - main [ref=f28e135]:
+      - generic [ref=f28e139]:
+        - generic [ref=f28e142]:
+          - heading "Web results" [level=2] [ref=f28e143]
+          - generic [ref=f28e144]:
+            - generic [ref=f28e147]:
+              - link "Stochastic Optimization Using a Trust-Region Method and ... arXiv https://arxiv.org › math" [ref=f28e149] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/1504.04231
+                - heading "Stochastic Optimization Using a Trust-Region Method and ..." [level=3] [ref=f28e150]
+                - generic [ref=f28e156]:
+                  - generic [ref=f28e157]: arXiv
+                  - generic [ref=f28e159]: https://arxiv.org › math
+              - button "About this result" [ref=f28e163] [cursor=pointer]
+            - generic [ref=f28e169]:
+              - generic [ref=f28e170]: by R Chen · 2015 · Cited by 231 —
+              - generic [ref=f28e171]:
+                - text: Abstract page for
+                - emphasis [ref=f28e172]: arXiv
+                - text: "paper 1504.04231:"
+                - emphasis [ref=f28e173]: Stochastic Optimization Using a Trust-Region Method and Random Models
+                - text: .
+        - generic [ref=f28e184]:
+          - heading "Thinking" [level=2] [ref=f28e188]
+          - progressbar "Generating" [ref=f28e191]
+        - generic [ref=f28e195]:
+          - heading "Web results" [level=2] [ref=f28e196]
+          - generic [ref=f28e197]:
+            - generic [ref=f28e200]:
+              - link "Stochastic optimization using a trust-region method and ... ACM Digital Library https://dl.acm.org › doi" [ref=f28e202] [cursor=pointer]:
+                - /url: https://dl.acm.org/doi/10.1007/s10107-017-1141-8
+                - heading "Stochastic optimization using a trust-region method and ..." [level=3] [ref=f28e203]
+                - generic [ref=f28e209]:
+                  - generic [ref=f28e210]: ACM Digital Library
+                  - generic [ref=f28e212]: https://dl.acm.org › doi
+              - button "About this result" [ref=f28e216] [cursor=pointer]
+            - generic [ref=f28e222]:
+              - generic [ref=f28e223]:
+                - emphasis [ref=f28e224]: Stochastic optimization using a trust-region method and random models
+                - text: ...
+                - emphasis [ref=f28e225]: arXiv
+                - text: :1606.04838 (2016). Google Scholar. [5]. Chang, K.H., Li, M.K., Wan, H ...
+              - link "Read more" [ref=f28e226] [cursor=pointer]:
+                - /url: https://dl.acm.org/doi/10.1007/s10107-017-1141-8#:~:text=Stochastic%20optimization%20using%20a%20trust%2Dregion,method%20and%20random%20models&text=arXiv%3A1606.04838%20(2016),response%2Dsurface%20framework%20for%20simulation%20optimization.
+        - generic [ref=f28e230]:
+          - generic [ref=f28e233]:
+            - link "Stochastic optimization using a trust-region method and ... Semantic Scholar https://www.semanticscholar.org › paper › Stochastic-o..." [ref=f28e235] [cursor=pointer]:
+              - /url: https://www.semanticscholar.org/paper/Stochastic-optimization-using-a-trust-region-method-Chen-Menickelly/002156a54312b8a69009a034d04a28e16f2d6b84
+              - heading "Stochastic optimization using a trust-region method and ..." [level=3] [ref=f28e236]
+              - generic [ref=f28e242]:
+                - generic [ref=f28e243]: Semantic Scholar
+                - generic [ref=f28e245]: https://www.semanticscholar.org › paper › Stochastic-o...
+            - button "About this result" [ref=f28e249] [cursor=pointer]
+          - generic [ref=f28e255]:
+            - generic [ref=f28e256]:
+              - emphasis [ref=f28e257]: Stochastic optimization using a trust-region method and random models
+              - text: · Ruobing Chen, Matt Menickelly, K. Scheinberg · Published in Mathematical programming 16 ...
+            - link "Read more" [ref=f28e258] [cursor=pointer]:
+              - /url: https://www.semanticscholar.org/paper/Stochastic-optimization-using-a-trust-region-method-Chen-Menickelly/002156a54312b8a69009a034d04a28e16f2d6b84#:~:text=Stochastic%20optimization%20using%20a%20trust%2Dregion,method%20and%20random%20models&text=Ruobing%20Chen%2C%20Matt%20Menickelly%2C%20K.,Scheinberg&text=Published%20in%20Mathematical%20programming%2016,April%202015
+        - generic [ref=f28e262]:
+          - generic [ref=f28e265]:
+            - link "Stochastic optimization using a trust-region method and ... ACM Digital Library https://dl.acm.org › doi › abs" [ref=f28e267] [cursor=pointer]:
+              - /url: https://dl.acm.org/doi/abs/10.1007/s10107-017-1141-8
+              - heading "Stochastic optimization using a trust-region method and ..." [level=3] [ref=f28e268]
+              - generic [ref=f28e274]:
+                - generic [ref=f28e275]: ACM Digital Library
+                - generic [ref=f28e277]: https://dl.acm.org › doi › abs
+            - button "About this result" [ref=f28e281] [cursor=pointer]
+          - generic [ref=f28e287]:
+            - generic [ref=f28e288]: by R Chen · 2018 · Cited by 231 —
+            - generic [ref=f28e289]:
+              - emphasis [ref=f28e290]: Stochastic optimization using a trust-region method and random models
+              - text: ...
+              - emphasis [ref=f28e291]: arXiv
+              - text: :1606.04838 (2016)Google Scholar Google Scholar; Chang, K.H. ...
+            - link "Read more" [ref=f28e292] [cursor=pointer]:
+              - /url: https://dl.acm.org/doi/abs/10.1007/s10107-017-1141-8#:~:text=Stochastic%20optimization%20using%20a%20trust%2Dregion,method%20and%20random%20models&text=arXiv%3A1606.04838%20(2016)Google%20Scholar,Chang%2C%20K.H.
+        - generic [ref=f28e296]:
+          - generic [ref=f28e299]:
+            - link "Convergence Rate Analysis of a Stochastic Trust Region Method ... arXiv https://www.arxiv.org › pdf" [ref=f28e301] [cursor=pointer]:
+              - /url: https://www.arxiv.org/pdf/1609.07428v1
+              - heading "Convergence Rate Analysis of a Stochastic Trust Region Method ..." [level=3] [ref=f28e302]
+              - generic [ref=f28e308]:
+                - generic [ref=f28e309]: arXiv
+                - generic [ref=f28e311]: https://www.arxiv.org › pdf
+            - button "About this result" [ref=f28e315] [cursor=pointer]
+          - generic [ref=f28e322]:
+            - text: Report
+            - emphasis [ref=f28e323]: arXiv
+            - text: :1603.05643, 2016. [2] A. Anonymous.
+            - emphasis [ref=f28e324]: Stochastic optimization using a trust-region method and random models
+            - text: . Technical Report, 2015. [3] Michael ...
+        - generic [ref=f28e328]:
+          - generic [ref=f28e331]:
+            - link "multi-fidelity stochastic trust region method with adaptive sampling Informs-Sim https://www.informs-sim.org › con158" [ref=f28e333] [cursor=pointer]:
+              - /url: https://www.informs-sim.org/wsc25papers/con158.pdf
+              - heading "multi-fidelity stochastic trust region method with adaptive sampling" [level=3] [ref=f28e334]
+              - generic [ref=f28e343]:
+                - generic [ref=f28e344]: Informs-Sim
+                - generic [ref=f28e346]: https://www.informs-sim.org › con158
+            - generic [ref=f28e348]: PDF
+            - button "About this result" [ref=f28e351] [cursor=pointer]
+          - generic [ref=f28e358]:
+            - text: “
+            - emphasis [ref=f28e359]: Stochastic optimization using a trust-region method and random models
+            - text: ”. Mathematical Programming 169(2):447–487. Chen, X., S. Hemmati, and F. Yang. 2017 ...
+        - table [ref=f28e365]:
+          - rowgroup [ref=f28e366]:
+            - row [ref=f28e367]:
+              - cell [ref=f28e368]:
+                - heading [level=3] [ref=f28e369]:
+                  - link [ref=f28e370] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar?q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                    - generic [ref=f28e371]:
+                      - text: Scholarly articles for
+                      - emphasis [ref=f28e372]: "\"Stochastic Optimization Using a Trust-Region Method and Random Models\" arxiv"
+            - row [ref=f28e373]:
+              - cell [ref=f28e374]:
+                - heading "… optimization using a trust-region method and random … - ‎Chen - Cited by 231" [level=3] [ref=f28e375]:
+                  - link [ref=f28e376] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/1504.04231&hl=en&sa=X&ei=z_ZPaoy-BJ_O6rQP-cSqmAU&scisig=AM1tuoMo6UKzrBwOv8EtfTT662wJ&oi=scholarr
+                    - generic [ref=f28e377]:
+                      - text: …
+                      - emphasis [ref=f28e378]: optimization using a trust
+                      - text: "-"
+                      - emphasis [ref=f28e379]: region method and random
+                      - text: …
+                  - generic [ref=f28e380]:
+                    - text: "-"
+                    - generic [ref=f28e381]: ‎Chen
+                    - text: "- Cited by 231"
+        - generic [ref=f28e384]:
+          - heading "Web results" [level=2] [ref=f28e385]
+          - generic [ref=f28e386]:
+            - generic [ref=f28e389]:
+              - link "Stochastic Trust-Region Algorithm in Random Subspaces ... SIAM Publications Library https://epubs.siam.org › doi › abs" [ref=f28e391] [cursor=pointer]:
+                - /url: https://epubs.siam.org/doi/abs/10.1137/22M1524072
+                - heading "Stochastic Trust-Region Algorithm in Random Subspaces ..." [level=3] [ref=f28e392]
+                - generic [ref=f28e398]:
+                  - generic [ref=f28e399]: SIAM Publications Library
+                  - generic [ref=f28e401]: https://epubs.siam.org › doi › abs
+              - button "About this result" [ref=f28e405] [cursor=pointer]
+            - generic [ref=f28e411]:
+              - generic [ref=f28e412]: by KJ Dzahini · 2024 · Cited by 26 —
+              - generic [ref=f28e413]:
+                - text: Scheinberg,
+                - emphasis [ref=f28e414]: Stochastic optimization using a trust-region method and random models
+                - text: ", Math. Program., 169 (2018), pp. 447–487. Crossref · Web of Science · Google ..."
+              - link "Read more" [ref=f28e415] [cursor=pointer]:
+                - /url: https://epubs.siam.org/doi/abs/10.1137/22M1524072#:~:text=Show%20all%20references
+        - generic [ref=f28e419]:
+          - generic [ref=f28e422]:
+            - link "A new nonmonotone adaptive trust region algorithm DML-CZ https://dml.cz › handle › 10338.dmlcz" [ref=f28e424] [cursor=pointer]:
+              - /url: https://dml.cz/handle/10338.dmlcz/149568
+              - heading "A new nonmonotone adaptive trust region algorithm" [level=3] [ref=f28e425]
+              - generic [ref=f28e434]:
+                - generic [ref=f28e435]: DML-CZ
+                - generic [ref=f28e437]: https://dml.cz › handle › 10338.dmlcz
+            - button "About this result" [ref=f28e441] [cursor=pointer]
+          - generic [ref=f28e448]:
+            - text: ...
+            - emphasis [ref=f28e449]: arxiv
+            - text: ".org/abs/1901.00088 (2019), 15 pages. [4] Chen, R., Menickelly, M., Scheinberg, K.:"
+            - emphasis [ref=f28e450]: Stochastic optimization using a trust-region method and random models
+            - text: .
+        - generic [ref=f28e454]:
+          - generic [ref=f28e457]:
+            - link "An Adaptive Sample Size Trust-Region Method for Finite- ... arXiv https://arxiv.org › pdf" [ref=f28e459] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/1910.03294
+              - heading "An Adaptive Sample Size Trust-Region Method for Finite- ..." [level=3] [ref=f28e460]
+              - generic [ref=f28e466]:
+                - generic [ref=f28e467]: arXiv
+                - generic [ref=f28e469]: https://arxiv.org › pdf
+            - generic [ref=f28e471]: PDF
+            - button "About this result" [ref=f28e474] [cursor=pointer]
+          - generic [ref=f28e480]:
+            - generic [ref=f28e481]: by R Mohr · 2019 · Cited by 4 —
+            - generic [ref=f28e482]:
+              - text: Chen, M. Menickelly, and K. Scheinberg.
+              - emphasis [ref=f28e483]: Stochastic optimization using a trust-region method and random models
+              - text: ". Mathematical Programming, 169(2): ..."
+            - link "Read more" [ref=f28e484] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/1910.03294#:~:text=Chen%2C%20M.%20Menickelly%2C%20and%20K.,Mathematical%20Programming%2C%20169(2)%3A447%E2%80%93487%2C%202018.
+      - navigation [ref=f28e487]:
+        - heading "Page Navigation" [level=1] [ref=f28e488]
+        - text: "1"
+        - link "Page 2" [ref=f28e491] [cursor=pointer]:
+          - /url: /search?q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sca_esv=d4e925c21a8887a9&ei=zvZPavqPOYm_kPIPtIGdgQQ&start=10&sa=N&sstk=AU9db-A9Vt2UT_lZKCsYXh6aSHA3KDzTBzQPANz9hQAADYRBtSBTG3BRftsrJCg2iRD6q49a66lMamkrLdtxsDLiX8kpUfLu6VPfXg&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQ8tMDegQIPRAE
+          - text: "2"
+        - link "Page 3" [ref=f28e493] [cursor=pointer]:
+          - /url: /search?q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sca_esv=d4e925c21a8887a9&ei=zvZPavqPOYm_kPIPtIGdgQQ&start=20&sa=N&sstk=AU9db-A9Vt2UT_lZKCsYXh6aSHA3KDzTBzQPANz9hQAADYRBtSBTG3BRftsrJCg2iRD6q49a66lMamkrLdtxsDLiX8kpUfLu6VPfXg&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQ8tMDegQIPRAG
+          - text: "3"
+        - link "Page 4" [ref=f28e495] [cursor=pointer]:
+          - /url: /search?q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sca_esv=d4e925c21a8887a9&ei=zvZPavqPOYm_kPIPtIGdgQQ&start=30&sa=N&sstk=AU9db-A9Vt2UT_lZKCsYXh6aSHA3KDzTBzQPANz9hQAADYRBtSBTG3BRftsrJCg2iRD6q49a66lMamkrLdtxsDLiX8kpUfLu6VPfXg&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQ8tMDegQIPRAI
+          - text: "4"
+        - link "Page 5" [ref=f28e497] [cursor=pointer]:
+          - /url: /search?q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sca_esv=d4e925c21a8887a9&ei=zvZPavqPOYm_kPIPtIGdgQQ&start=40&sa=N&sstk=AU9db-A9Vt2UT_lZKCsYXh6aSHA3KDzTBzQPANz9hQAADYRBtSBTG3BRftsrJCg2iRD6q49a66lMamkrLdtxsDLiX8kpUfLu6VPfXg&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQ8tMDegQIPRAK
+          - text: "5"
+        - link "Page 6" [ref=f28e499] [cursor=pointer]:
+          - /url: /search?q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sca_esv=d4e925c21a8887a9&ei=zvZPavqPOYm_kPIPtIGdgQQ&start=50&sa=N&sstk=AU9db-A9Vt2UT_lZKCsYXh6aSHA3KDzTBzQPANz9hQAADYRBtSBTG3BRftsrJCg2iRD6q49a66lMamkrLdtxsDLiX8kpUfLu6VPfXg&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQ8tMDegQIPRAM
+          - text: "6"
+        - link "Page 7" [ref=f28e501] [cursor=pointer]:
+          - /url: /search?q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sca_esv=d4e925c21a8887a9&ei=zvZPavqPOYm_kPIPtIGdgQQ&start=60&sa=N&sstk=AU9db-A9Vt2UT_lZKCsYXh6aSHA3KDzTBzQPANz9hQAADYRBtSBTG3BRftsrJCg2iRD6q49a66lMamkrLdtxsDLiX8kpUfLu6VPfXg&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQ8tMDegQIPRAO
+          - text: "7"
+        - link "Page 8" [ref=f28e503] [cursor=pointer]:
+          - /url: /search?q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sca_esv=d4e925c21a8887a9&ei=zvZPavqPOYm_kPIPtIGdgQQ&start=70&sa=N&sstk=AU9db-A9Vt2UT_lZKCsYXh6aSHA3KDzTBzQPANz9hQAADYRBtSBTG3BRftsrJCg2iRD6q49a66lMamkrLdtxsDLiX8kpUfLu6VPfXg&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQ8tMDegQIPRAQ
+          - text: "8"
+        - link "Page 9" [ref=f28e505] [cursor=pointer]:
+          - /url: /search?q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sca_esv=d4e925c21a8887a9&ei=zvZPavqPOYm_kPIPtIGdgQQ&start=80&sa=N&sstk=AU9db-A9Vt2UT_lZKCsYXh6aSHA3KDzTBzQPANz9hQAADYRBtSBTG3BRftsrJCg2iRD6q49a66lMamkrLdtxsDLiX8kpUfLu6VPfXg&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQ8tMDegQIPRAS
+          - text: "9"
+        - link "Page 10" [ref=f28e507] [cursor=pointer]:
+          - /url: /search?q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sca_esv=d4e925c21a8887a9&ei=zvZPavqPOYm_kPIPtIGdgQQ&start=90&sa=N&sstk=AU9db-A9Vt2UT_lZKCsYXh6aSHA3KDzTBzQPANz9hQAADYRBtSBTG3BRftsrJCg2iRD6q49a66lMamkrLdtxsDLiX8kpUfLu6VPfXg&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQ8tMDegQIPRAU
+          - text: "10"
+        - heading [level=2] [ref=f28e509]:
+          - link "Next" [ref=f28e510] [cursor=pointer]:
+            - /url: /search?q=%22Stochastic+Optimization+Using+a+Trust-Region+Method+and+Random+Models%22+arxiv&sca_esv=d4e925c21a8887a9&ei=zvZPavqPOYm_kPIPtIGdgQQ&start=10&sa=N&sstk=AU9db-A9Vt2UT_lZKCsYXh6aSHA3KDzTBzQPANz9hQAADYRBtSBTG3BRftsrJCg2iRD6q49a66lMamkrLdtxsDLiX8kpUfLu6VPfXg&ved=2ahUKEwj6rvy9qsaVAxWJH0QIHbRAJ0AQ8NMDegQIPRAW
+      - navigation
+    - contentinfo [ref=f28e513]:
+      - heading "Footer Links" [level=1] [ref=f28e514]
+      - generic [ref=f28e518]:
+        - generic [ref=f28e522]:
+          - button "Woodland, California - From your IP address" [ref=f28e524] [cursor=pointer]:
+            - generic [ref=f28e525]: Woodland, California
+            - generic [ref=f28e527]:
+              - text: "-"
+              - generic [ref=f28e528]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f28e530] [cursor=pointer]
+        - generic [ref=f28e533]:
+          - link "Help" [ref=f28e534] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f28e535] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f28e536] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f28e537] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

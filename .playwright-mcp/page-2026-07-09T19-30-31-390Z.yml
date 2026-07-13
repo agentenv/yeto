@@ -1,0 +1,40 @@
+- generic [ref=f32e2]:
+  - article [ref=f32e4]:
+    - paragraph [ref=f32e6]:
+      - text: See pages - of
+      - link "nonconvex-arxiv.pdf" [ref=f32e7] [cursor=pointer]:
+        - /url: nonconvex-arxiv.pdf
+  - generic [ref=f32e8]:
+    - link "◄" [ref=f32e9] [cursor=pointer]:
+      - /url: /html/1603.05642
+    - link [ref=f32e10] [cursor=pointer]:
+      - /url: /
+      - img "ar5iv homepage" [ref=f32e11]
+    - link "Feeling lucky?" [ref=f32e12] [cursor=pointer]:
+      - /url: /feeling_lucky
+      - text: Feelinglucky?
+    - link "Conversion report (W)" [ref=f32e13] [cursor=pointer]:
+      - /url: /log/1603.05643
+      - text: Conversionreport (W)
+    - link "Report an issue" [ref=f32e14] [cursor=pointer]:
+      - /url: https://github.com/dginev/ar5iv/issues/new?template=improve-article--arxiv-id-.md&title=Improve+article+1603.05643
+      - text: Reportan issue
+    - link "View original on arXiv" [ref=f32e15] [cursor=pointer]:
+      - /url: https://arxiv.org/abs/1603.05643
+      - text: View originalon arXiv
+    - link "►" [ref=f32e16] [cursor=pointer]:
+      - /url: /html/1603.05644
+  - contentinfo [ref=f32e17]:
+    - link "🌙" [ref=f32e18] [cursor=pointer]:
+      - /url: javascript:toggleColorScheme()
+    - link "Copyright" [ref=f32e20] [cursor=pointer]:
+      - /url: https://arxiv.org/help/license
+    - link "Privacy Policy" [ref=f32e21] [cursor=pointer]:
+      - /url: https://arxiv.org/help/policies/privacy_policy
+    - generic [ref=f32e22]:
+      - text: Generated on Mon Mar 18 03:48:54 2024 by
+      - link "LaTeXMLMascot Sammy" [ref=f32e23] [cursor=pointer]:
+        - /url: http://dlmf.nist.gov/LaTeXML/
+        - generic [ref=f32e24]: LaTe
+        - text: XML
+        - img "Mascot Sammy" [ref=f32e25]

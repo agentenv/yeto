@@ -1,0 +1,264 @@
+- generic [ref=f127e2]:
+  - link "Skip to main content" [ref=f127e3] [cursor=pointer]:
+    - /url: "#content"
+  - region "Announcement" [ref=f127e4]:
+    - generic [ref=f127e6]: arXiv is now an independent nonprofit!
+    - link "Learn more" [ref=f127e7] [cursor=pointer]:
+      - /url: https://info.arxiv.org/about
+    - button "Dismiss announcement" [ref=f127e8] [cursor=pointer]: ×
+  - banner [ref=f127e9]:
+    - link [ref=f127e10] [cursor=pointer]:
+      - /url: https://arxiv.org/IgnoreMe
+    - link "archive home" [ref=f127e11] [cursor=pointer]:
+      - /url: https://arxiv.org/
+      - img "archive" [ref=f127e12]
+    - navigation "Main navigation" [ref=f127e13]:
+      - link "Search" [ref=f127e14] [cursor=pointer]:
+        - /url: https://arxiv.org/search
+      - link "Submit" [ref=f127e18] [cursor=pointer]:
+        - /url: https://arxiv.org/user/create
+      - link "Donate" [ref=f127e19] [cursor=pointer]:
+        - /url: https://info.arxiv.org/about/donate.html
+      - link "Log in" [ref=f127e21] [cursor=pointer]:
+        - /url: https://arxiv.org/login
+  - main [ref=f127e22]:
+    - generic [ref=f127e24]:
+      - generic [ref=f127e25]:
+        - heading "Statistics > Machine Learning" [level=1] [ref=f127e27]
+        - generic [ref=f127e29]:
+          - generic [ref=f127e30]:
+            - text: "[Submitted on 31 Dec 2019 ("
+            - link "v1" [ref=f127e31] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/1912.13445v1
+            - text: ), last revised 17 Jan 2022 (this version, v2)]
+          - heading "Robust Aggregation for Federated Learning" [level=1] [ref=f127e32]
+          - generic [ref=f127e33]:
+            - link "Krishna Pillutla" [ref=f127e34] [cursor=pointer]:
+              - /url: https://arxiv.org/search/stat?searchtype=author&query=Pillutla,+K
+            - text: ","
+            - link "Sham M. Kakade" [ref=f127e35] [cursor=pointer]:
+              - /url: https://arxiv.org/search/stat?searchtype=author&query=Kakade,+S+M
+            - text: ","
+            - link "Zaid Harchaoui" [ref=f127e36] [cursor=pointer]:
+              - /url: https://arxiv.org/search/stat?searchtype=author&query=Harchaoui,+Z
+          - blockquote [ref=f127e37]: Federated learning is the centralized training of statistical models from decentralized data on mobile devices while preserving the privacy of each device. We present a robust aggregation approach to make federated learning robust to settings when a fraction of the devices may be sending corrupted updates to the server. The approach relies on a robust aggregation oracle based on the geometric median, which returns a robust aggregate using a constant number of iterations of a regular non-robust averaging oracle. The robust aggregation oracle is privacy-preserving, similar to the non-robust secure average oracle it builds upon. We establish its convergence for least squares estimation of additive models. We provide experimental results with linear models and deep networks for three tasks in computer vision and natural language processing. The robust aggregation approach is agnostic to the level of corruption; it outperforms the classical aggregation approach in terms of robustness when the level of corruption is high, while being competitive in the regime of low corruption. Two variants, a faster one with one-step robust aggregation and another one with on-device personalization, round off the paper.
+          - table "Additional metadata" [ref=f127e39]:
+            - rowgroup [ref=f127e40]:
+              - row [ref=f127e41]:
+                - cell "Subjects:" [ref=f127e42]
+                - cell "Machine Learning (stat.ML); Cryptography and Security (cs.CR); Machine Learning (cs.LG)" [ref=f127e43]
+              - row [ref=f127e44]:
+                - cell "Cite as:" [ref=f127e45]
+                - cell [ref=f127e46]:
+                  - generic [ref=f127e47]:
+                    - link "arXiv:1912.13445" [ref=f127e48] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/1912.13445
+                    - text: "[stat.ML]"
+              - row [ref=f127e49]:
+                - cell [ref=f127e50]
+                - cell [ref=f127e51]:
+                  - text: (or
+                  - generic [ref=f127e52]:
+                    - link "arXiv:1912.13445v2" [ref=f127e53] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/1912.13445v2
+                    - text: "[stat.ML]"
+                  - text: for this version)
+              - row [ref=f127e54]:
+                - cell [ref=f127e55]
+                - cell [ref=f127e56]:
+                  - link "https://doi.org/10.48550/arXiv.1912.13445" [ref=f127e57] [cursor=pointer]:
+                    - /url: https://doi.org/10.48550/arXiv.1912.13445
+                  - button "Focus to learn more" [ref=f127e59]
+              - row [ref=f127e62]:
+                - cell "Journal reference:" [ref=f127e63]
+                - 'cell "IEEE Transactions on Signal Processing 70 (2022): 1142-1154" [ref=f127e64]'
+              - row [ref=f127e65]:
+                - cell "Related DOI:" [ref=f127e66]
+                - cell [ref=f127e67]:
+                  - link "https://doi.org/10.1109/TSP.2022.3153135" [ref=f127e68] [cursor=pointer]:
+                    - /url: https://doi.org/10.1109/TSP.2022.3153135
+                  - button "Focus to learn more" [ref=f127e70]
+        - generic [ref=f127e73]:
+          - heading "Submission history" [level=2] [ref=f127e74]
+          - text: "From: Krishna Pillutla ["
+          - link "view email" [ref=f127e75] [cursor=pointer]:
+            - /url: /show-email/d869c344/1912.13445
+          - text: "]"
+          - strong [ref=f127e76]:
+            - link "[v1]" [ref=f127e77] [cursor=pointer]:
+              - /url: /abs/1912.13445v1
+          - text: Tue, 31 Dec 2019 17:24:41 UTC (4,018 KB)
+          - strong [ref=f127e78]: "[v2]"
+          - text: Mon, 17 Jan 2022 05:25:59 UTC (1,236 KB)
+      - generic [ref=f127e79]:
+        - generic [ref=f127e80]:
+          - heading "Access Paper:" [level=2] [ref=f127e81]
+          - list [ref=f127e82]:
+            - listitem [ref=f127e83]:
+              - link "View PDF" [ref=f127e84] [cursor=pointer]:
+                - /url: /pdf/1912.13445
+            - listitem [ref=f127e85]:
+              - link "TeX Source" [ref=f127e86] [cursor=pointer]:
+                - /url: /src/1912.13445
+          - link "view license" [ref=f127e88] [cursor=pointer]:
+            - /url: http://arxiv.org/licenses/nonexclusive-distrib/1.0/
+        - generic [ref=f127e89]:
+          - heading "Current browse context:" [level=3] [ref=f127e90]
+          - generic [ref=f127e91]: stat.ML
+          - generic [ref=f127e92]:
+            - link "< prev" [ref=f127e94] [cursor=pointer]:
+              - /url: /prevnext?id=1912.13445&function=prev&context=stat.ML
+            - text: "|"
+            - link "next >" [ref=f127e96] [cursor=pointer]:
+              - /url: /prevnext?id=1912.13445&function=next&context=stat.ML
+          - generic [ref=f127e97]:
+            - link "new" [ref=f127e98] [cursor=pointer]:
+              - /url: /list/stat.ML/new
+            - text: "|"
+            - link "recent" [ref=f127e99] [cursor=pointer]:
+              - /url: /list/stat.ML/recent
+            - text: "|"
+            - link "2019-12" [ref=f127e100] [cursor=pointer]:
+              - /url: /list/stat.ML/2019-12
+          - generic [ref=f127e101]:
+            - text: "Change to browse by:"
+            - generic [ref=f127e102]:
+              - link "cs" [ref=f127e103] [cursor=pointer]:
+                - /url: /abs/1912.13445?context=cs
+              - link "cs.CR" [ref=f127e104] [cursor=pointer]:
+                - /url: /abs/1912.13445?context=cs.CR
+              - link "cs.LG" [ref=f127e105] [cursor=pointer]:
+                - /url: /abs/1912.13445?context=cs.LG
+              - link "stat" [ref=f127e106] [cursor=pointer]:
+                - /url: /abs/1912.13445?context=stat
+        - generic [ref=f127e107]:
+          - heading "References & Citations" [level=3] [ref=f127e108]
+          - list [ref=f127e109]:
+            - listitem [ref=f127e110]:
+              - link "NASA ADS" [ref=f127e111] [cursor=pointer]:
+                - /url: https://ui.adsabs.harvard.edu/abs/arXiv:1912.13445
+            - listitem [ref=f127e112]:
+              - link "Google Scholar" [ref=f127e113] [cursor=pointer]:
+                - /url: https://scholar.google.com/scholar_lookup?arxiv_id=1912.13445
+            - listitem [ref=f127e114]:
+              - link "Semantic Scholar" [ref=f127e115] [cursor=pointer]:
+                - /url: https://api.semanticscholar.org/arXiv:1912.13445
+        - button "export BibTeX citation" [ref=f127e117]
+        - generic [ref=f127e118]:
+          - heading "Bookmark" [level=3] [ref=f127e120]
+          - link [ref=f127e121] [cursor=pointer]:
+            - /url: http://www.bibsonomy.org/BibtexHandler?requTask=upload&url=https://arxiv.org/abs/1912.13445&description=Robust Aggregation for Federated Learning
+            - img "BibSonomy" [ref=f127e122]
+          - link [ref=f127e123] [cursor=pointer]:
+            - /url: https://reddit.com/submit?url=https://arxiv.org/abs/1912.13445&title=Robust Aggregation for Federated Learning
+            - img "Reddit" [ref=f127e124]
+      - tablist "arXivLabs tools" [ref=f127e126]:
+        - radio "Bibliographic Tools" [checked] [ref=f127e127]
+        - tab "Bibliographic Tools" [selected] [ref=f127e128] [cursor=pointer]
+        - tabpanel "Bibliographic Tools" [ref=f127e129]:
+          - heading "Bibliographic and Citation Tools" [level=1] [ref=f127e130]
+          - generic [ref=f127e131]:
+            - generic [ref=f127e132]:
+              - generic [ref=f127e134]:
+                - checkbox "Bibliographic Explorer Toggle"
+                - generic [ref=f127e136]: Bibliographic Explorer Toggle
+              - generic [ref=f127e137]:
+                - text: Bibliographic Explorer
+                - emphasis [ref=f127e138]:
+                  - text: (
+                  - link "What is the Explorer?" [ref=f127e139] [cursor=pointer]:
+                    - /url: https://info.arxiv.org/labs/showcase.html#arxiv-bibliographic-explorer
+                  - text: )
+            - generic [ref=f127e140]:
+              - generic [ref=f127e142]:
+                - checkbox "Connected Papers"
+                - generic [ref=f127e144]: Connected Papers Toggle
+              - generic [ref=f127e145]:
+                - text: Connected Papers
+                - emphasis [ref=f127e146]:
+                  - text: (
+                  - link "What is Connected Papers?" [ref=f127e147] [cursor=pointer]:
+                    - /url: https://www.connectedpapers.com/about
+                  - text: )
+            - generic [ref=f127e148]:
+              - generic [ref=f127e150]:
+                - checkbox "Litmaps"
+                - generic [ref=f127e152]: Litmaps Toggle
+              - generic [ref=f127e153]:
+                - text: Litmaps
+                - emphasis [ref=f127e154]:
+                  - text: (
+                  - link "What is Litmaps?" [ref=f127e155] [cursor=pointer]:
+                    - /url: https://www.litmaps.co/
+                  - text: )
+            - generic [ref=f127e156]:
+              - generic [ref=f127e158]:
+                - checkbox "scite Smart Citations"
+                - generic [ref=f127e160]: scite.ai Toggle
+              - generic [ref=f127e161]:
+                - text: scite Smart Citations
+                - emphasis [ref=f127e162]:
+                  - text: (
+                  - link "What are Smart Citations?" [ref=f127e163] [cursor=pointer]:
+                    - /url: https://www.scite.ai/
+                  - text: )
+        - radio "Code, Data, Media" [ref=f127e167]
+        - tab "Code, Data, Media" [ref=f127e168] [cursor=pointer]
+        - radio "Demos" [ref=f127e169]
+        - tab "Demos" [ref=f127e170] [cursor=pointer]
+        - radio "Related Papers" [ref=f127e171]
+        - tab "Related Papers" [ref=f127e172] [cursor=pointer]
+        - radio "About arXivLabs" [ref=f127e173]
+        - tab "About arXivLabs" [ref=f127e174] [cursor=pointer]
+      - generic [ref=f127e175]:
+        - link "Which authors of this paper are endorsers?" [ref=f127e176] [cursor=pointer]:
+          - /url: /auth/show-endorsers/1912.13445
+        - text: "|"
+        - link "Disable MathJax" [ref=f127e177] [cursor=pointer]:
+          - /url: javascript:setMathjaxCookie()
+        - text: (
+        - link "What is MathJax?" [ref=f127e178] [cursor=pointer]:
+          - /url: https://info.arxiv.org/help/mathjax.html
+        - text: )
+  - contentinfo [ref=f127e179]:
+    - generic [ref=f127e180]:
+      - generic [ref=f127e181]:
+        - generic [ref=f127e182]:
+          - text: We gratefully acknowledge support from our
+          - strong [ref=f127e183]: major funders
+          - text: ","
+          - link [ref=f127e184] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about/ourmembers.html
+            - strong [ref=f127e185]: member institutions
+          - text: ", and all contributors."
+        - navigation "Site navigation" [ref=f127e186]:
+          - link "About" [ref=f127e187] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about
+          - generic [ref=f127e188]: ·
+          - link "Help" [ref=f127e189] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help
+          - generic [ref=f127e190]: ·
+          - link "Contact" [ref=f127e191] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/contact.html
+          - generic [ref=f127e192]: ·
+          - link "Subscribe" [ref=f127e193] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/subscribe
+          - generic [ref=f127e194]: ·
+          - link "Copyright" [ref=f127e195] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/license/index.html
+          - generic [ref=f127e196]: ·
+          - link "Privacy" [ref=f127e197] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/policies/privacy_policy.html
+          - generic [ref=f127e198]: ·
+          - link "Accessibility" [ref=f127e199] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/web_accessibility.html
+          - generic [ref=f127e200]: ·
+          - link "Operational Status (opens in new tab)" [ref=f127e201] [cursor=pointer]:
+            - /url: https://status.arxiv.org
+            - text: Operational Status
+            - generic [ref=f127e202]: (opens in new tab)
+      - generic "Major funders" [ref=f127e203]:
+        - generic [ref=f127e204]: Major funding support from
+        - generic [ref=f127e205]:
+          - img "Simons Foundation" [ref=f127e206]
+          - img "Schmidt Sciences" [ref=f127e207]

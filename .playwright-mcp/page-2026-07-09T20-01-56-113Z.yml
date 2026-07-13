@@ -1,0 +1,324 @@
+- generic [active] [ref=f103e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f103e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f103e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f103e8]:
+    - search [ref=f103e9]:
+      - generic [ref=f103e11]:
+        - link "Go to Google Home" [ref=f103e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQPAgI
+        - generic [ref=f103e21]:
+          - generic [ref=f103e22]:
+            - combobox "Search" [ref=f103e25]: "\"gradient diversity\" \"sum\" \"norm\" Yin \"gradient diversity\" \"sum\" \"norm\" Yin"
+            - generic [ref=f103e26]:
+              - button "Clear" [ref=f103e28] [cursor=pointer]
+              - generic [ref=f103e33]:
+                - button "Search by voice" [ref=f103e34] [cursor=pointer]
+                - button "Search by image" [ref=f103e37] [cursor=pointer]
+          - button "Search" [ref=f103e40] [cursor=pointer]
+    - generic [ref=f103e45]:
+      - button "Settings" [ref=f103e47] [cursor=pointer]
+      - button "Share" [ref=f103e53] [cursor=pointer]
+      - generic [ref=f103e59]:
+        - button "Google apps" [ref=f103e61] [cursor=pointer]
+        - link "Sign in" [ref=f103e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522gradient%2Bdiversity%2522%2B%2522sum%2522%2B%2522norm%2522%2BYin&ec=futura_srp_og_si_72236_p
+  - generic [ref=f103e68]:
+    - navigation [ref=f103e74]:
+      - generic [ref=f103e80]:
+        - list [ref=f103e81]:
+          - listitem [ref=f103e82]:
+            - link "AI Mode" [ref=f103e85] [cursor=pointer]:
+              - /url: /search?q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832cSpkWkfSwsmpNIrD_OQ-UcbyNc1IAMReVybHU31OS8M5qeXFW8IBZ126ecPotulahckkYMlLLPDbDLd-zFG4Nfi6RXzjGSCQRldQfawZH9ZkTdn4ffoJwMjZepp2ryfIumxa1QYGYgVDEr2HHA9WcY-FpyQxxoPgwzbCY16l2ByNqcbyw&aep=1&ntc=1&sa=X&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQ2J8OegQIGRAD
+          - listitem [ref=f103e89]:
+            - link "All" [disabled] [ref=f103e90]
+          - listitem [ref=f103e93]:
+            - link "Images" [ref=f103e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832cSpkWkfSwsmpNIrD_OQ-UcbyNc1IAMReVybHU31OS8M5qeXFW8IBZ126ecPotulahckkYMlLLPDbDLd-zFG4Nfi6RXzjGSCQRldQfawZH9ZkTdn4ffoJwMjZepp2ryfIumxa1QYGYgVDEr2HHA9WcY-FpyQxxoPgwzbCY16l2ByNqcbyw&q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sa=X&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQtKgLegQIPxAB
+          - listitem [ref=f103e97]:
+            - link "Videos" [ref=f103e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832cSpkWkfSwsmpNIrD_OQ-UcbyNc1IAMReVybHU31OS8M5qeXFW8IBZ126ecPotulahckkYMlLLPDbDLd-zFG4Nfi6RXzjGSCQRldQfawZH9ZkTdn4ffoJwMjZepp2ryfIumxa1QYGYgVDEr2HHA9WcY-FpyQxxoPgwzbCY16l2ByNqcbyw&q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sa=X&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQtKgLegQIOxAB
+          - listitem [ref=f103e101]:
+            - link "Short videos" [ref=f103e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832cSpkWkfSwsmpNIrD_OQ-UcbyNc1IAMReVybHU31OS8M5qeXFW8IBZ126ecPotulahckkYMlLLPDbDLd-zFG4Nfi6RXzjGSCQRldQfawZH9ZkTdn4ffoJwMjZepp2ryfIumxa1QYGYgVDEr2HHA9WcY-FpyQxxoPgwzbCY16l2ByNqcbyw&q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sa=X&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQs6gLegQIPhAB
+          - listitem [ref=f103e105]:
+            - link "Shopping" [ref=f103e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832cSpkWkfSwsmpNIrD_OQ-UcbyNc1IAMReVybHU31OS8M5qeXFW8IBZ126ecPotulahckkYMlLLPDbDLd-zFG4Nfi6RXzjGSCQRldQfawZH9ZkTdn4ffoJwMjZepp2ryfIumxa1QYGYgVDEr2HHA9WcY-FpyQxxoPgwzbCY16l2ByNqcbyw&q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&ved=1t:220175&ictx=111
+          - listitem [ref=f103e109]:
+            - link "Forums" [ref=f103e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832cSpkWkfSwsmpNIrD_OQ-UcbyNc1IAMReVybHU31OS8M5qeXFW8IBZ126ecPotulahckkYMlLLPDbDLd-zFG4Nfi6RXzjGSCQRldQfawZH9ZkTdn4ffoJwMjZepp2ryfIumxa1QYGYgVDEr2HHA9WcY-FpyQxxoPgwzbCY16l2ByNqcbyw&q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sa=X&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQs6gLegQINBAB
+          - listitem [ref=f103e113]:
+            - button [ref=f103e114] [cursor=pointer]:
+              - generic "More filters" [ref=f103e115]: More
+        - button "Tools" [ref=f103e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f103e129]
+    - generic [ref=f103e134]:
+      - generic [ref=f103e153]:
+        - heading "Thinking" [level=2] [ref=f103e157]
+        - progressbar "Generating" [ref=f103e160]
+      - main [ref=f103e162]:
+        - generic [ref=f103e166]:
+          - table [ref=f103e172]:
+            - rowgroup [ref=f103e173]:
+              - row [ref=f103e174]:
+                - cell [ref=f103e175]:
+                  - heading [level=3] [ref=f103e176]:
+                    - link [ref=f103e177] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar?q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                      - generic [ref=f103e178]:
+                        - text: Scholarly articles for
+                        - emphasis [ref=f103e179]: "\"gradient diversity\" \"sum\" \"norm\" Yin"
+              - row [ref=f103e180]:
+                - cell [ref=f103e181]:
+                  - heading "The impact of neural network overparameterization on … - ‎Sankararaman - Cited by 158" [level=3] [ref=f103e182]:
+                    - link "The impact of neural network overparameterization on …" [ref=f103e183] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=http://proceedings.mlr.press/v119/sankararaman20a/sankararaman20a.pdf&hl=en&sa=X&ei=M_5PaoDGKuO_6rQPntjBkAk&scisig=AM1tuoPTBIqrIouGVT8pEncE9z_L&oi=scholarr
+                    - generic [ref=f103e184]:
+                      - text: "-"
+                      - generic [ref=f103e185]: ‎Sankararaman
+                      - text: "- Cited by 158"
+          - generic [ref=f103e188]:
+            - heading "Web results" [level=2] [ref=f103e189]
+            - generic [ref=f103e190]:
+              - generic [ref=f103e193]:
+                - link "A Noise Measure for Geometry-Adaptive SGD Schedules arXiv https://arxiv.org › html" [ref=f103e195] [cursor=pointer]:
+                  - /url: https://arxiv.org/html/2606.30455
+                  - heading "A Noise Measure for Geometry-Adaptive SGD Schedules" [level=3] [ref=f103e196]
+                  - generic [ref=f103e202]:
+                    - generic [ref=f103e203]: arXiv
+                    - generic [ref=f103e205]: https://arxiv.org › html
+                - button "About this result" [ref=f103e209] [cursor=pointer]
+              - generic [ref=f103e215]:
+                - generic [ref=f103e216]: Jun 29, 2026 —
+                - generic [ref=f103e217]:
+                  - text: (2018) define
+                  - emphasis [ref=f103e218]: gradient diversity
+                  - text: as ∑ i ‖ g i ‖ 2 / ‖ ∑ i g i ‖ 2 \
+                  - emphasis [ref=f103e219]: sum
+                  - text: "_{i}\\left\\lVert g_{i}\\right\\rVert^{2}/\\left\\lVert\\"
+                  - emphasis [ref=f103e220]: sum
+                  - text: "_{i}g_{i}\\right\\rVert ..."
+                - link "Read more" [ref=f103e221] [cursor=pointer]:
+                  - /url: https://arxiv.org/html/2606.30455#:~:text=(2018),2
+          - generic [ref=f103e225]:
+            - generic [ref=f103e228]:
+              - link "Normalization Layer Per-Example Gradients are Sufficient ... NeurIPS 2026 https://neurips.cc › virtual › poster" [ref=f103e230] [cursor=pointer]:
+                - /url: https://neurips.cc/virtual/2024/poster/95128
+                - heading "Normalization Layer Per-Example Gradients are Sufficient ..." [level=3] [ref=f103e231]
+                - generic [ref=f103e237]:
+                  - generic [ref=f103e238]: NeurIPS 2026
+                  - generic [ref=f103e240]: https://neurips.cc › virtual › poster
+              - button "About this result" [ref=f103e244] [cursor=pointer]
+            - generic [ref=f103e250]:
+              - generic [ref=f103e251]:
+                - text: This gradient vector may be viewed as the
+                - emphasis [ref=f103e252]: sum
+                - text: of gradients computed over each individual example in the minibatch. ... “Gradient
+                - emphasis [ref=f103e253]: norm
+                - text: cost” below refers to the ...
+              - link "Read more" [ref=f103e254] [cursor=pointer]:
+                - /url: https://neurips.cc/virtual/2024/poster/95128#:~:text=2%20Background&text=B%20Additional%20Simultaneous%20Per%2DExample%20Gradient
+          - generic [ref=f103e258]:
+            - generic [ref=f103e261]:
+              - link "Making Coherence Out of Nothing At All OpenReview https://openreview.net › forum" [ref=f103e263] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=xsx58rmaW2p&noteId=0BgvULnh-A8
+                - heading "Making Coherence Out of Nothing At All" [level=3] [ref=f103e264]
+                - generic [ref=f103e270]:
+                  - generic [ref=f103e271]: OpenReview
+                  - generic [ref=f103e273]: https://openreview.net › forum
+              - button "About this result" [ref=f103e277] [cursor=pointer]
+            - generic [ref=f103e283]:
+              - generic [ref=f103e284]:
+                - text: As soon as significant coherence builds up, it leads to an increase in the effective learning rate (higher relative gradient
+                - emphasis [ref=f103e285]: norm
+                - text: ) leading to faster consumption ...
+              - link "Read more" [ref=f103e286] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=xsx58rmaW2p&noteId=0BgvULnh-A8#:~:text=As%20soon%20as%20significant%20coherence,and%20which%20is%20the%20effect.
+          - generic [ref=f103e290]:
+            - generic [ref=f103e293]:
+              - 'link "Diversity-Adjusted Adaptive Step Size OPT 2025: Optimization for Machine Learning https://opt-ml.org › papers › paper83" [ref=f103e295] [cursor=pointer]':
+                - /url: https://opt-ml.org/papers/2023/paper83.pdf
+                - heading "Diversity-Adjusted Adaptive Step Size" [level=3] [ref=f103e296]
+                - generic [ref=f103e305]:
+                  - generic [ref=f103e306]: "OPT 2025: Optimization for Machine Learning"
+                  - generic [ref=f103e308]: https://opt-ml.org › papers › paper83
+              - generic [ref=f103e310]: PDF
+              - button "About this result" [ref=f103e313] [cursor=pointer]
+            - generic [ref=f103e319]:
+              - generic [ref=f103e320]: by P Yazdkhasti —
+              - generic [ref=f103e321]:
+                - emphasis [ref=f103e322]: Gradient diversity
+                - text: ": a key ingredient for scalable distributed learning. In ... Finite"
+                - emphasis [ref=f103e323]: sum
+                - text: problems are a special case of 3. Many machine learning ...
+              - link "Read more" [ref=f103e324] [cursor=pointer]:
+                - /url: https://opt-ml.org/papers/2023/paper83.pdf#:~:text=Gradient%20diversity%3A%20a%20key%20ingredient,for%20scalable%20distributed%20learning.%20In&text=Finite%20sum%20problems%20are%20a,problems%20can%20be%20represented%20in
+          - generic [ref=f103e328]:
+            - generic [ref=f103e331]:
+              - 'link "DiveBatch: Accelerating Model Training Through Gradient- ... arXiv https://arxiv.org › html" [ref=f103e333] [cursor=pointer]':
+                - /url: https://arxiv.org/html/2509.16173v1
+                - 'heading "DiveBatch: Accelerating Model Training Through Gradient- ..." [level=3] [ref=f103e334]'
+                - generic [ref=f103e340]:
+                  - generic [ref=f103e341]: arXiv
+                  - generic [ref=f103e343]: https://arxiv.org › html
+              - button "About this result" [ref=f103e347] [cursor=pointer]
+            - generic [ref=f103e354]:
+              - text: ...
+              - emphasis [ref=f103e355]: gradient diversity
+              - text: (
+              - emphasis [ref=f103e356]: Yin
+              - text: et al., 2018) ...
+              - emphasis [ref=f103e357]: sum
+              - text: "of individual gradients' L 2 L_{2} -"
+              - emphasis [ref=f103e358]: norm
+              - text: ...
+              - emphasis [ref=f103e359]: sum
+              - text: of the gradients ∑ i ∈ ℬ j ∇ 𝜽 ℓ ( 𝜽 t k + j − 1 ...
+          - generic [ref=f103e363]:
+            - generic [ref=f103e366]:
+              - link "A. Additional Experiment Results Proceedings of Machine Learning Research http://proceedings.mlr.press › ..." [ref=f103e368] [cursor=pointer]:
+                - /url: http://proceedings.mlr.press/v97/haddadpour19a/haddadpour19a-supp.pdf
+                - heading "A. Additional Experiment Results" [level=3] [ref=f103e369]
+                - generic [ref=f103e375]:
+                  - generic [ref=f103e376]: Proceedings of Machine Learning Research
+                  - generic [ref=f103e378]: http://proceedings.mlr.press › ...
+              - generic [ref=f103e380]: PDF
+              - button "About this result" [ref=f103e383] [cursor=pointer]
+            - generic [ref=f103e389]:
+              - generic [ref=f103e390]:
+                - text: Let us first review the definitions of
+                - emphasis [ref=f103e391]: gradient diversity
+                - text: and batch-bound that are introduced in (
+                - emphasis [ref=f103e392]: Yin
+                - text: et al. ... the
+                - emphasis [ref=f103e393]: norm
+                - text: of gradients at each chunk ...
+              - link "Read more" [ref=f103e394] [cursor=pointer]:
+                - /url: http://proceedings.mlr.press/v97/haddadpour19a/haddadpour19a-supp.pdf#:~:text=Let%20us%20first%20review%20the,introduced%20in%20(Yin%20et%20al.&text=the%20norm%20of%20gradients%20at,each%20chunk%20satisfies%20k%E2%88%87f(x%2C%20Dj)k2
+          - generic [ref=f103e398]:
+            - generic [ref=f103e401]:
+              - link "Pairwise Diverse and Uncertain Gradient-Sampling for ... - PMC PubMed Central (PMC) (.gov) https://pmc.ncbi.nlm.nih.gov › articles › PMC12656071" [ref=f103e403] [cursor=pointer]:
+                - /url: https://pmc.ncbi.nlm.nih.gov/articles/PMC12656071/
+                - heading "Pairwise Diverse and Uncertain Gradient-Sampling for ... - PMC" [level=3] [ref=f103e404]
+                - generic [ref=f103e410]:
+                  - generic [ref=f103e411]: PubMed Central (PMC) (.gov)
+                  - generic [ref=f103e413]: https://pmc.ncbi.nlm.nih.gov › articles › PMC12656071
+              - button "About this result" [ref=f103e417] [cursor=pointer]
+            - generic [ref=f103e423]:
+              - generic [ref=f103e424]: by C Löffler · 2025 —
+              - generic [ref=f103e425]:
+                - text: We compute four metrics on each method's gradient updates, i.e., mean gradient
+                - emphasis [ref=f103e426]: norm
+                - text: ","
+                - emphasis [ref=f103e427]: gradient diversity
+                - text: ", the coefficient of variation , and ..."
+              - link "Read more" [ref=f103e428] [cursor=pointer]:
+                - /url: https://pmc.ncbi.nlm.nih.gov/articles/PMC12656071/#:~:text=We%20compute%20four%20metrics%20on,and%20the%20Gradient's%20Signal%2Dto%2DNoise%20ratio
+          - generic [ref=f103e432]:
+            - generic [ref=f103e435]:
+              - link "gradient correlation is a key ingredient to ICLR 2026 https://proceedings.iclr.cc › paper › file" [ref=f103e437] [cursor=pointer]:
+                - /url: https://proceedings.iclr.cc/paper_files/paper/2025/file/cf5e02e94c2804af895ade10be1be00b-Paper-Conference.pdf
+                - heading "gradient correlation is a key ingredient to" [level=3] [ref=f103e438]
+                - generic [ref=f103e447]:
+                  - generic [ref=f103e448]: ICLR 2026
+                  - generic [ref=f103e450]: https://proceedings.iclr.cc › paper › file
+              - generic [ref=f103e452]: PDF
+              - button "About this result" [ref=f103e455] [cursor=pointer]
+            - generic [ref=f103e461]:
+              - generic [ref=f103e462]: by J Hermant · Cited by 3 —
+              - generic [ref=f103e463]:
+                - text: ...
+                - emphasis [ref=f103e464]: sum
+                - text: of functions in a convex setting. We demonstrate that the average ... Without any assumption on f, Proposition 1 splits the
+                - emphasis [ref=f103e465]: norm
+                - text: of ∇f into two terms.
+              - link "Read more" [ref=f103e466] [cursor=pointer]:
+                - /url: https://proceedings.iclr.cc/paper_files/paper/2025/file/cf5e02e94c2804af895ade10be1be00b-Paper-Conference.pdf#:~:text=sum%20of%20functions%20in%20a,demonstrate%20that%20the%20average%20correla%2D&text=Proposition%201%20is%20proved%20in,the%20other%20one%20involves%20the
+          - generic [ref=f103e471]:
+            - heading "People also ask" [level=2] [ref=f103e473]
+            - button "What is the formula for gradient descent weight update?" [ref=f103e480] [cursor=pointer]
+          - generic [ref=f103e490]:
+            - heading "Web results" [level=2] [ref=f103e491]
+            - generic [ref=f103e492]:
+              - generic [ref=f103e495]:
+                - link "Understanding generalization error of SGD in nonconvex ... Springer Nature Link https://link.springer.com › Machine Learning" [ref=f103e497] [cursor=pointer]:
+                  - /url: https://link.springer.com/article/10.1007/s10994-021-06056-w
+                  - heading "Understanding generalization error of SGD in nonconvex ..." [level=3] [ref=f103e498]
+                  - generic [ref=f103e504]:
+                    - generic [ref=f103e505]: Springer Nature Link
+                    - generic [ref=f103e507]: https://link.springer.com › Machine Learning
+                - button "About this result" [ref=f103e511] [cursor=pointer]
+              - generic [ref=f103e517]:
+                - generic [ref=f103e518]: by Y Zhou · 2022 · Cited by 44 —
+                - generic [ref=f103e519]:
+                  - text: ...
+                  - emphasis [ref=f103e520]: sum
+                  - text: "_{k=1}^{n} \\ell ({{\\mathbf {w}}}; {{\\mathbf {z}}}_k). \\end ... (2017) studied the role that"
+                  - emphasis [ref=f103e521]: gradient diversity
+                  - text: plays in characterizing the ...
+                - link "Read more" [ref=f103e522] [cursor=pointer]:
+                  - /url: https://link.springer.com/article/10.1007/s10994-021-06056-w#:~:text=sum%20_%7Bk%3D1%7D%5E%7Bn%7D%20%5Cell%20(%7B%7B%5Cmathbf%20%7Bw%7D%7D%7D%3B,%7B%7B%5Cmathbf%20%7Bz%7D%7D%7D_k).%20%5Cend%7Baligned%7D&text=(2017)%20studied%20the%20role%20that,expected%20generalization%20error%20of%20SGD.
+        - generic [ref=f103e524]:
+          - generic [ref=f103e529]:
+            - heading "People also search for" [level=2] [ref=f103e531]
+            - generic [ref=f103e533]:
+              - link "Gradient diversity sum norm yin tat" [ref=f103e538] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=Gradient+diversity+sum+norm+yin+tat&sa=X&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQ1QJ6BAhFEAE
+              - link "Gradient diversity sum norm yin example" [ref=f103e553] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=Gradient+diversity+sum+norm+yin+example&sa=X&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQ1QJ6BAhEEAE
+          - navigation [ref=f103e564]:
+            - heading "Page Navigation" [level=1] [ref=f103e565]
+            - text: "1"
+            - link "Page 2" [ref=f103e568] [cursor=pointer]:
+              - /url: /search?q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sca_esv=30a5fb343c9df574&ei=M_5Paua1JKfGkPIP5LC-2QU&start=10&sa=N&sstk=AU9db-Cj_iE9mn2uiJwhj93ogD9vfQRhfbe6knNW2mVDVLxptOfUTU4YZWmCaD15bbABFXLJWfzo1IsEQBFO2xIFG8Lmr9lcY44otA&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQ8tMDegQIQhAE
+              - text: "2"
+            - link "Page 3" [ref=f103e570] [cursor=pointer]:
+              - /url: /search?q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sca_esv=30a5fb343c9df574&ei=M_5Paua1JKfGkPIP5LC-2QU&start=20&sa=N&sstk=AU9db-Cj_iE9mn2uiJwhj93ogD9vfQRhfbe6knNW2mVDVLxptOfUTU4YZWmCaD15bbABFXLJWfzo1IsEQBFO2xIFG8Lmr9lcY44otA&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQ8tMDegQIQhAG
+              - text: "3"
+            - link "Page 4" [ref=f103e572] [cursor=pointer]:
+              - /url: /search?q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sca_esv=30a5fb343c9df574&ei=M_5Paua1JKfGkPIP5LC-2QU&start=30&sa=N&sstk=AU9db-Cj_iE9mn2uiJwhj93ogD9vfQRhfbe6knNW2mVDVLxptOfUTU4YZWmCaD15bbABFXLJWfzo1IsEQBFO2xIFG8Lmr9lcY44otA&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQ8tMDegQIQhAI
+              - text: "4"
+            - link "Page 5" [ref=f103e574] [cursor=pointer]:
+              - /url: /search?q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sca_esv=30a5fb343c9df574&ei=M_5Paua1JKfGkPIP5LC-2QU&start=40&sa=N&sstk=AU9db-Cj_iE9mn2uiJwhj93ogD9vfQRhfbe6knNW2mVDVLxptOfUTU4YZWmCaD15bbABFXLJWfzo1IsEQBFO2xIFG8Lmr9lcY44otA&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQ8tMDegQIQhAK
+              - text: "5"
+            - link "Page 6" [ref=f103e576] [cursor=pointer]:
+              - /url: /search?q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sca_esv=30a5fb343c9df574&ei=M_5Paua1JKfGkPIP5LC-2QU&start=50&sa=N&sstk=AU9db-Cj_iE9mn2uiJwhj93ogD9vfQRhfbe6knNW2mVDVLxptOfUTU4YZWmCaD15bbABFXLJWfzo1IsEQBFO2xIFG8Lmr9lcY44otA&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQ8tMDegQIQhAM
+              - text: "6"
+            - link "Page 7" [ref=f103e578] [cursor=pointer]:
+              - /url: /search?q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sca_esv=30a5fb343c9df574&ei=M_5Paua1JKfGkPIP5LC-2QU&start=60&sa=N&sstk=AU9db-Cj_iE9mn2uiJwhj93ogD9vfQRhfbe6knNW2mVDVLxptOfUTU4YZWmCaD15bbABFXLJWfzo1IsEQBFO2xIFG8Lmr9lcY44otA&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQ8tMDegQIQhAO
+              - text: "7"
+            - link "Page 8" [ref=f103e580] [cursor=pointer]:
+              - /url: /search?q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sca_esv=30a5fb343c9df574&ei=M_5Paua1JKfGkPIP5LC-2QU&start=70&sa=N&sstk=AU9db-Cj_iE9mn2uiJwhj93ogD9vfQRhfbe6knNW2mVDVLxptOfUTU4YZWmCaD15bbABFXLJWfzo1IsEQBFO2xIFG8Lmr9lcY44otA&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQ8tMDegQIQhAQ
+              - text: "8"
+            - link "Page 9" [ref=f103e582] [cursor=pointer]:
+              - /url: /search?q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sca_esv=30a5fb343c9df574&ei=M_5Paua1JKfGkPIP5LC-2QU&start=80&sa=N&sstk=AU9db-Cj_iE9mn2uiJwhj93ogD9vfQRhfbe6knNW2mVDVLxptOfUTU4YZWmCaD15bbABFXLJWfzo1IsEQBFO2xIFG8Lmr9lcY44otA&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQ8tMDegQIQhAS
+              - text: "9"
+            - link "Page 10" [ref=f103e584] [cursor=pointer]:
+              - /url: /search?q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sca_esv=30a5fb343c9df574&ei=M_5Paua1JKfGkPIP5LC-2QU&start=90&sa=N&sstk=AU9db-Cj_iE9mn2uiJwhj93ogD9vfQRhfbe6knNW2mVDVLxptOfUTU4YZWmCaD15bbABFXLJWfzo1IsEQBFO2xIFG8Lmr9lcY44otA&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQ8tMDegQIQhAU
+              - text: "10"
+            - heading [level=2] [ref=f103e586]:
+              - link "Next" [ref=f103e587] [cursor=pointer]:
+                - /url: /search?q=%22gradient+diversity%22+%22sum%22+%22norm%22+Yin&sca_esv=30a5fb343c9df574&ei=M_5Paua1JKfGkPIP5LC-2QU&start=10&sa=N&sstk=AU9db-Cj_iE9mn2uiJwhj93ogD9vfQRhfbe6knNW2mVDVLxptOfUTU4YZWmCaD15bbABFXLJWfzo1IsEQBFO2xIFG8Lmr9lcY44otA&ved=2ahUKEwimm7vEscaVAxUnI0QIHWSYL1sQ8NMDegQIQhAW
+        - navigation
+    - contentinfo [ref=f103e590]:
+      - heading "Footer Links" [level=1] [ref=f103e591]
+      - generic [ref=f103e595]:
+        - generic [ref=f103e599]:
+          - button "Woodland, California - From your IP address" [ref=f103e601] [cursor=pointer]:
+            - generic [ref=f103e602]: Woodland, California
+            - generic [ref=f103e604]:
+              - text: "-"
+              - generic [ref=f103e605]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f103e607] [cursor=pointer]
+        - generic [ref=f103e610]:
+          - link "Help" [ref=f103e611] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f103e612] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f103e613] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f103e614] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

@@ -1,0 +1,310 @@
+- generic [active] [ref=f62e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f62e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f62e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f62e8]:
+    - search [ref=f62e9]:
+      - generic [ref=f62e11]:
+        - link "Go to Google Home" [ref=f62e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwif-qaoscaVAxXCJEQIHRbLG0oQPAgI
+        - generic [ref=f62e21]:
+          - generic [ref=f62e22]:
+            - combobox "Search" [ref=f62e25]: "\"gradient agreement\" \"server\" federated learning \"gradient agreement\" \"server\" federated learning"
+            - generic [ref=f62e26]:
+              - button "Clear" [ref=f62e28] [cursor=pointer]
+              - generic [ref=f62e33]:
+                - button "Search by voice" [ref=f62e34] [cursor=pointer]
+                - button "Search by image" [ref=f62e37] [cursor=pointer]
+          - button "Search" [ref=f62e40] [cursor=pointer]
+    - generic [ref=f62e45]:
+      - button "Settings" [ref=f62e47] [cursor=pointer]
+      - button "Share" [ref=f62e53] [cursor=pointer]
+      - generic [ref=f62e59]:
+        - button "Google apps" [ref=f62e61] [cursor=pointer]
+        - link "Sign in" [ref=f62e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522gradient%2520agreement%2522%2520%2522server%2522%2520federated%2520learning&ec=futura_srp_og_si_72236_p
+  - generic [ref=f62e68]:
+    - navigation [ref=f62e74]:
+      - generic [ref=f62e80]:
+        - list [ref=f62e81]:
+          - listitem [ref=f62e82]:
+            - link "AI Mode" [ref=f62e85] [cursor=pointer]:
+              - /url: /search?q=%22gradient+agreement%22+%22server%22+federated+learning&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz6mPncLV6BMXrUfQD5ftu4HKiVJOOiqhNYT8Keh_15lhVLohIhM8kHnw_tixWHDpdAHWCTimc1GO2znH-0EdfLD74c9fw&aep=1&ntc=1&sa=X&ved=2ahUKEwif-qaoscaVAxXCJEQIHRbLG0oQ2J8OegQIBxAD
+          - listitem [ref=f62e89]:
+            - link "All" [disabled] [ref=f62e90]
+          - listitem [ref=f62e93]:
+            - link "Images" [ref=f62e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz6mPncLV6BMXrUfQD5ftu4HKiVJOOiqhNYT8Keh_15lhVLohIhM8kHnw_tixWHDpdAHWCTimc1GO2znH-0EdfLD74c9fw&q=%22gradient+agreement%22+%22server%22+federated+learning&sa=X&ved=2ahUKEwif-qaoscaVAxXCJEQIHRbLG0oQtKgLegQIGRAB
+          - listitem [ref=f62e97]:
+            - link "Shopping" [ref=f62e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz6mPncLV6BMXrUfQD5ftu4HKiVJOOiqhNYT8Keh_15lhVLohIhM8kHnw_tixWHDpdAHWCTimc1GO2znH-0EdfLD74c9fw&q=%22gradient+agreement%22+%22server%22+federated+learning&ved=1t:220175&ictx=111
+          - listitem [ref=f62e101]:
+            - link "Videos" [ref=f62e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz6mPncLV6BMXrUfQD5ftu4HKiVJOOiqhNYT8Keh_15lhVLohIhM8kHnw_tixWHDpdAHWCTimc1GO2znH-0EdfLD74c9fw&q=%22gradient+agreement%22+%22server%22+federated+learning&sa=X&ved=2ahUKEwif-qaoscaVAxXCJEQIHRbLG0oQtKgLegQIDRAB
+          - listitem [ref=f62e105]:
+            - link "Forums" [ref=f62e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz6mPncLV6BMXrUfQD5ftu4HKiVJOOiqhNYT8Keh_15lhVLohIhM8kHnw_tixWHDpdAHWCTimc1GO2znH-0EdfLD74c9fw&q=%22gradient+agreement%22+%22server%22+federated+learning&sa=X&ved=2ahUKEwif-qaoscaVAxXCJEQIHRbLG0oQs6gLegQIDBAB
+          - listitem [ref=f62e109]:
+            - link "Short videos" [ref=f62e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz6mPncLV6BMXrUfQD5ftu4HKiVJOOiqhNYT8Keh_15lhVLohIhM8kHnw_tixWHDpdAHWCTimc1GO2znH-0EdfLD74c9fw&q=%22gradient+agreement%22+%22server%22+federated+learning&sa=X&ved=2ahUKEwif-qaoscaVAxXCJEQIHRbLG0oQs6gLegQICxAB
+          - listitem [ref=f62e113]:
+            - button [ref=f62e114] [cursor=pointer]:
+              - generic "More filters" [ref=f62e115]: More
+        - button "Tools" [ref=f62e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f62e129]
+    - generic [ref=f62e134]:
+      - generic [ref=f62e153]:
+        - heading "Thinking" [level=2] [ref=f62e157]
+        - progressbar "Generating" [ref=f62e160]
+      - main [ref=f62e162]:
+        - generic [ref=f62e166]:
+          - generic [ref=f62e169]:
+            - heading "Web results" [level=2] [ref=f62e170]
+            - generic [ref=f62e171]:
+              - generic [ref=f62e174]:
+                - link "Tackling the Non-IID Issue in Heterogeneous Federated ... arXiv https://arxiv.org › pdf" [ref=f62e176] [cursor=pointer]:
+                  - /url: https://arxiv.org/pdf/2309.06692
+                  - heading "Tackling the Non-IID Issue in Heterogeneous Federated ..." [level=3] [ref=f62e177]
+                  - generic [ref=f62e183]:
+                    - generic [ref=f62e184]: arXiv
+                    - generic [ref=f62e186]: https://arxiv.org › pdf
+                - generic [ref=f62e188]: PDF
+                - button "About this result" [ref=f62e191] [cursor=pointer]
+              - generic [ref=f62e197]:
+                - generic [ref=f62e198]: by X Zhang · 2023 · Cited by 22 —
+                - generic [ref=f62e199]:
+                  - text: Subsequently,. [27] extend this insight to domain generation, presenting two
+                  - emphasis [ref=f62e200]: gradient agreement
+                  - text: strategies to alleviate gradient conflict. In.
+                - link "Read more" [ref=f62e201] [cursor=pointer]:
+                  - /url: https://arxiv.org/pdf/2309.06692#:~:text=Subsequently%2C,to%20alleviate%20gradient%20conflict.%20In
+          - generic [ref=f62e205]:
+            - generic [ref=f62e208]:
+              - link "Gradient Masked Averaging for Federated Learning OpenReview https://openreview.net › pdf" [ref=f62e210] [cursor=pointer]:
+                - /url: https://openreview.net/pdf/1e0164d7244f2ed7ac44ee66c215644a8b743fb8.pdf
+                - heading "Gradient Masked Averaging for Federated Learning" [level=3] [ref=f62e211]
+                - generic [ref=f62e217]:
+                  - generic [ref=f62e218]: OpenReview
+                  - generic [ref=f62e220]: https://openreview.net › pdf
+              - generic [ref=f62e222]: PDF
+              - button "About this result" [ref=f62e225] [cursor=pointer]
+            - generic [ref=f62e231]:
+              - generic [ref=f62e232]:
+                - text: the
+                - emphasis [ref=f62e233]: server
+                - text: . Intuitively, gradient masking prioritizes ... This indicates the relevance of the
+                - emphasis [ref=f62e234]: gradient agreement
+                - text: across clients in
+                - emphasis [ref=f62e235]: federated learning
+                - text: .
+              - link "Read more" [ref=f62e236] [cursor=pointer]:
+                - /url: https://openreview.net/pdf/1e0164d7244f2ed7ac44ee66c215644a8b743fb8.pdf#:~:text=the%20server.%20Intuitively%2C%20gradient%20masking,are%20aligned%20with%20the%20overall&text=This,across%20clients%20in%20federated%20learning.
+          - generic [ref=f62e240]:
+            - generic [ref=f62e243]:
+              - link "A Practical Approach to Federated Learning Vaikkunth ... Massachusetts Institute of Technology https://dspace.mit.edu › bitstreams › download" [ref=f62e245] [cursor=pointer]:
+                - /url: https://dspace.mit.edu/bitstreams/5ff6c317-9bd4-4cd9-a82a-9f92528607fc/download
+                - heading "A Practical Approach to Federated Learning Vaikkunth ..." [level=3] [ref=f62e246]
+                - generic [ref=f62e252]:
+                  - generic [ref=f62e253]: Massachusetts Institute of Technology
+                  - generic [ref=f62e255]: https://dspace.mit.edu › bitstreams › download
+              - generic [ref=f62e257]: PDF
+              - button "About this result" [ref=f62e260] [cursor=pointer]
+            - generic [ref=f62e266]:
+              - generic [ref=f62e267]: by V Mugunthan · 2022 · Cited by 2 —
+              - generic [ref=f62e268]:
+                - text: On the other hand [74] proposed a
+                - emphasis [ref=f62e269]: gradient agreement
+                - text: method based on gradient directions to
+                - emphasis [ref=f62e270]: learn
+                - text: features that agree across environments. ...
+                - emphasis [ref=f62e271]: federated
+                - text: machine ...
+              - link "Read more" [ref=f62e272] [cursor=pointer]:
+                - /url: https://dspace.mit.edu/bitstreams/5ff6c317-9bd4-4cd9-a82a-9f92528607fc/download#:~:text=steps%20would%20require%20access%20to,magnitude.%20In%20this%20chapter%2C%20I&text=perform%20federated%20machine%20learning%20without,case%2C%20clients%20send%20their%20masked
+          - generic [ref=f62e276]:
+            - generic [ref=f62e279]:
+              - link "Tackling the Non-IID Issue in Heterogeneous Federated ... arXiv https://arxiv.org › html" [ref=f62e281] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2309.06692v2
+                - heading "Tackling the Non-IID Issue in Heterogeneous Federated ..." [level=3] [ref=f62e282]
+                - generic [ref=f62e288]:
+                  - generic [ref=f62e289]: arXiv
+                  - generic [ref=f62e291]: https://arxiv.org › html
+              - button "About this result" [ref=f62e295] [cursor=pointer]
+            - generic [ref=f62e302]:
+              - emphasis [ref=f62e303]: Federated learning
+              - text: (FL) is a privacy ...
+              - emphasis [ref=f62e304]: server
+              - text: aggregation. Additionally, personalized ...
+              - emphasis [ref=f62e305]: gradient agreement
+              - text: strategies to alleviate gradient conflict.
+          - generic [ref=f62e309]:
+            - generic [ref=f62e312]:
+              - link "ASamad73/Federated-Perturbed-Annealing-Conflict-Elimination GitHub https://github.com › ASamad73 › Federated-Perturbed-..." [ref=f62e314] [cursor=pointer]:
+                - /url: https://github.com/ASamad73/Federated-Perturbed-Annealing-Conflict-Elimination
+                - heading "ASamad73/Federated-Perturbed-Annealing-Conflict-Elimination" [level=3] [ref=f62e315]
+                - generic [ref=f62e321]:
+                  - generic [ref=f62e322]: GitHub
+                  - generic [ref=f62e324]: https://github.com › ASamad73 › Federated-Perturbed-...
+              - button "About this result" [ref=f62e328] [cursor=pointer]
+            - generic [ref=f62e335]:
+              - text: Privileged to the idea that prioritizing
+              - emphasis [ref=f62e336]: gradient agreement
+              - text: filters spurious features and improves aggregation in non-IID FL. ...
+              - emphasis [ref=f62e337]: Federated learning
+              - text: aggregates ...
+          - generic [ref=f62e341]:
+            - generic [ref=f62e344]:
+              - link "Daily Papers Hugging Face https://huggingface.co › papers" [ref=f62e346] [cursor=pointer]:
+                - /url: https://huggingface.co/papers?q=data-parallel%20stochastic%20gradient%20descent
+                - heading "Daily Papers" [level=3] [ref=f62e347]
+                - generic [ref=f62e353]:
+                  - generic [ref=f62e354]: Hugging Face
+                  - generic [ref=f62e356]: https://huggingface.co › papers
+              - button "About this result" [ref=f62e360] [cursor=pointer]
+            - generic [ref=f62e366]:
+              - generic [ref=f62e367]: Jun 24, 2026 —
+              - generic [ref=f62e368]:
+                - text: We introduce
+                - emphasis [ref=f62e369]: Gradient Agreement
+                - text: Filtering (GAF) to improve on gradient averaging in distributed deep
+                - emphasis [ref=f62e370]: learning
+                - text: optimization.
+              - link "Read more" [ref=f62e371] [cursor=pointer]:
+                - /url: https://huggingface.co/papers?q=data-parallel+stochastic+gradient+descent#:~:text=We%20introduce%20Gradient%20Agreement%20Filtering,in%20distributed%20deep%20learning%20optimization.
+          - generic [ref=f62e375]:
+            - generic [ref=f62e378]:
+              - link "Selective Layer Updates in Deep Learning Emergent Mind https://www.emergentmind.com › topics › selective-lay..." [ref=f62e380] [cursor=pointer]:
+                - /url: https://www.emergentmind.com/topics/selective-layer-updates
+                - heading "Selective Layer Updates in Deep Learning" [level=3] [ref=f62e381]
+                - generic [ref=f62e387]:
+                  - generic [ref=f62e388]: Emergent Mind
+                  - generic [ref=f62e390]: https://www.emergentmind.com › topics › selective-lay...
+              - button "About this result" [ref=f62e394] [cursor=pointer]
+            - generic [ref=f62e400]:
+              - generic [ref=f62e401]: Jan 4, 2026 —
+              - generic [ref=f62e402]:
+                - text: Momentum–
+                - emphasis [ref=f62e403]: Gradient Agreement
+                - text: ": Intra-layer masking, as in AlphaAdam ... Block or Layer Selection in FL: Clients or"
+                - emphasis [ref=f62e404]: server
+                - text: select a small ...
+              - link "Read more" [ref=f62e405] [cursor=pointer]:
+                - /url: https://www.emergentmind.com/topics/selective-layer-updates#:~:text=Momentum%E2%80%93Gradient%20Agreement%3A%20Intra%2Dlayer%20masking%2C%20as,using%20a%20compensatory%20scaling%20factor&text=Block%20or%20Layer%20Selection%20in,per%20round%20(FedTLU%2C%20AdaGradSelect%2C%20FedPart).
+          - generic [ref=f62e409]:
+            - generic [ref=f62e412]:
+              - link "Université de Montréal Generalization in Federated Learning scholaris.ca https://umontreal.scholaris.ca › bitstreams › content" [ref=f62e414] [cursor=pointer]:
+                - /url: https://umontreal.scholaris.ca/server/api/core/bitstreams/36b603e3-a630-4a55-afa8-e65b22e3b45b/content
+                - heading "Université de Montréal Generalization in Federated Learning" [level=3] [ref=f62e415]
+                - generic [ref=f62e421]:
+                  - generic [ref=f62e422]: scholaris.ca
+                  - generic [ref=f62e424]: https://umontreal.scholaris.ca › bitstreams › content
+              - generic [ref=f62e426]: PDF
+              - button "About this result" [ref=f62e429] [cursor=pointer]
+            - generic [ref=f62e435]:
+              - generic [ref=f62e436]: by I Tenison · 2022 —
+              - generic [ref=f62e437]:
+                - text: FL without a central
+                - emphasis [ref=f62e438]: server
+                - text: is called decentralized
+                - emphasis [ref=f62e439]: federated learning
+                - text: . ... other hand [40] proposed a
+                - emphasis [ref=f62e440]: gradient agreement
+                - text: method based on gradient ...
+              - link "Read more" [ref=f62e441] [cursor=pointer]:
+                - /url: https://umontreal.scholaris.ca/server/api/core/bitstreams/36b603e3-a630-4a55-afa8-e65b22e3b45b/content#:~:text=FL%20without%20a%20central%20server,federated%20learning.&text=other%20hand%20%5B40%5D%20proposed%20a,on%20gradient%20directions%20to%20learn
+          - generic [ref=f62e445]:
+            - generic [ref=f62e448]:
+              - link "PROBLEM-PARAMETER-FREE FEDERATED LEARNING OpenReview https://openreview.net › pdf" [ref=f62e450] [cursor=pointer]:
+                - /url: https://openreview.net/pdf?id=ZuazHmXTns
+                - heading "PROBLEM-PARAMETER-FREE FEDERATED LEARNING" [level=3] [ref=f62e451]
+                - generic [ref=f62e457]:
+                  - generic [ref=f62e458]: OpenReview
+                  - generic [ref=f62e460]: https://openreview.net › pdf
+              - generic [ref=f62e462]: PDF
+              - button "About this result" [ref=f62e465] [cursor=pointer]
+            - generic [ref=f62e471]:
+              - generic [ref=f62e472]: by W Yan · Cited by 11 —
+              - generic [ref=f62e473]:
+                - text: Hsu et al. (2019) proposed Fe-. dAvgM, which incorporates a
+                - emphasis [ref=f62e474]: server
+                - text: "-side momentum term into the FedAvg algorithm, demonstrating enhanced convergence rates and ..."
+              - link "Read more" [ref=f62e475] [cursor=pointer]:
+                - /url: https://openreview.net/pdf?id=ZuazHmXTns#:~:text=of%20adaptive%20methods%20with%20momentum,Wang%20et%20al.%20(2019)%20developed
+          - table [ref=f62e481]:
+            - rowgroup [ref=f62e482]:
+              - row [ref=f62e483]:
+                - cell [ref=f62e484]:
+                  - heading [level=3] [ref=f62e485]:
+                    - link [ref=f62e486] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar?q=%22gradient+agreement%22+%22server%22+federated+learning&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                      - generic [ref=f62e487]:
+                        - text: Scholarly articles for
+                        - emphasis [ref=f62e488]: "\"gradient agreement\" \"server\" federated learning"
+              - row [ref=f62e489]:
+                - cell [ref=f62e490]:
+                  - heading "Gradient masked averaging for federated learning - ‎Tenison - Cited by 46" [level=3] [ref=f62e491]:
+                    - link [ref=f62e492] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2201.11986&hl=en&sa=X&ei=-P1Pat_gJ7u36rQP0tn08Qo&scisig=AM1tuoOcjMNdKDrIWGKXlSnV8X51&oi=scholarr
+                      - generic [ref=f62e493]:
+                        - text: Gradient masked averaging for
+                        - emphasis [ref=f62e494]: federated learning
+                    - generic [ref=f62e495]:
+                      - text: "-"
+                      - generic [ref=f62e496]: ‎Tenison
+                      - text: "- Cited by 46"
+                  - heading "… meta consensus for heterogeneous federated learning - ‎Li - Cited by 15" [level=3] [ref=f62e497]:
+                    - link [ref=f62e498] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://dl.acm.org/doi/pdf/10.1145/3664647.3681510&hl=en&sa=X&ei=-P1Pat_gJ7u36rQP0tn08Qo&scisig=AM1tuoOvB2M9AgbY85ghzSCmt13O&oi=scholarr
+                      - generic [ref=f62e499]:
+                        - text: … meta consensus for heterogeneous
+                        - emphasis [ref=f62e500]: federated learning
+                    - generic [ref=f62e501]:
+                      - text: "-"
+                      - generic [ref=f62e502]: ‎Li
+                      - text: "- Cited by 15"
+                  - heading "… the non-iid issue in heterogeneous federated learning … - ‎Zhang - Cited by 22" [level=3] [ref=f62e503]:
+                    - link [ref=f62e504] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2309.06692&hl=en&sa=X&ei=-P1Pat_gJ7u36rQP0tn08Qo&scisig=AM1tuoMtIZDGc0R9kokfzlAgp0og&oi=scholarr
+                      - generic [ref=f62e505]:
+                        - text: … the non-iid issue in heterogeneous
+                        - emphasis [ref=f62e506]: federated learning
+                        - text: …
+                    - generic [ref=f62e507]:
+                      - text: "-"
+                      - generic [ref=f62e508]: ‎Zhang
+                      - text: "- Cited by 22"
+        - navigation [ref=f62e511]:
+          - heading "Page Navigation" [level=1] [ref=f62e512]
+          - text: "1"
+          - link "Page 2" [ref=f62e515] [cursor=pointer]:
+            - /url: /search?q=%22gradient+agreement%22+%22server%22+federated+learning&sca_esv=30a5fb343c9df574&ei=-P1Pap-eIcLJkPIPlpbv0AQ&start=10&sa=N&sstk=AU9db-CjIZ22XyAMQRNyeJ80BCysWw4E3O84qH5wZbO2g0EgbErMkdFOirmLoIHvA0w8Cgmfbz5TyR0vVxutixYOwVDkhgZmm-mI2w&ved=2ahUKEwif-qaoscaVAxXCJEQIHRbLG0oQ8tMDegQINBAE
+            - text: "2"
+          - link "Page 3" [ref=f62e517] [cursor=pointer]:
+            - /url: /search?q=%22gradient+agreement%22+%22server%22+federated+learning&sca_esv=30a5fb343c9df574&ei=-P1Pap-eIcLJkPIPlpbv0AQ&start=20&sa=N&sstk=AU9db-CjIZ22XyAMQRNyeJ80BCysWw4E3O84qH5wZbO2g0EgbErMkdFOirmLoIHvA0w8Cgmfbz5TyR0vVxutixYOwVDkhgZmm-mI2w&ved=2ahUKEwif-qaoscaVAxXCJEQIHRbLG0oQ8tMDegQINBAG
+            - text: "3"
+          - heading [level=2] [ref=f62e519]:
+            - link "Next" [ref=f62e520] [cursor=pointer]:
+              - /url: /search?q=%22gradient+agreement%22+%22server%22+federated+learning&sca_esv=30a5fb343c9df574&ei=-P1Pap-eIcLJkPIPlpbv0AQ&start=10&sa=N&sstk=AU9db-CjIZ22XyAMQRNyeJ80BCysWw4E3O84qH5wZbO2g0EgbErMkdFOirmLoIHvA0w8Cgmfbz5TyR0vVxutixYOwVDkhgZmm-mI2w&ved=2ahUKEwif-qaoscaVAxXCJEQIHRbLG0oQ8NMDegQINBAI
+        - navigation
+    - contentinfo [ref=f62e523]:
+      - heading "Footer Links" [level=1] [ref=f62e524]
+      - generic [ref=f62e528]:
+        - generic [ref=f62e532]:
+          - button "Woodland, California - From your IP address" [ref=f62e534] [cursor=pointer]:
+            - generic [ref=f62e535]: Woodland, California
+            - generic [ref=f62e537]:
+              - text: "-"
+              - generic [ref=f62e538]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f62e540] [cursor=pointer]
+        - generic [ref=f62e543]:
+          - link "Help" [ref=f62e544] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f62e545] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f62e546] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f62e547] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

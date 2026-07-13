@@ -1,0 +1,355 @@
+- generic [active] [ref=f111e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f111e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f111e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f111e8]:
+    - search [ref=f111e9]:
+      - generic [ref=f111e11]:
+        - link "Go to Google Home" [ref=f111e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQPAgI
+        - generic [ref=f111e21]:
+          - generic [ref=f111e22]:
+            - combobox "Search" [ref=f111e25]: survey Byzantine-robust federated learning aggregation arxiv survey Byzantine-robust federated learning aggregation arxiv
+            - generic [ref=f111e26]:
+              - button "Clear" [ref=f111e28] [cursor=pointer]
+              - generic [ref=f111e33]:
+                - button "Search by voice" [ref=f111e34] [cursor=pointer]
+                - button "Search by image" [ref=f111e37] [cursor=pointer]
+          - button "Search" [ref=f111e40] [cursor=pointer]
+    - generic [ref=f111e45]:
+      - button "Settings" [ref=f111e47] [cursor=pointer]
+      - button "Share" [ref=f111e53] [cursor=pointer]
+      - generic [ref=f111e59]:
+        - button "Google apps" [ref=f111e61] [cursor=pointer]
+        - link "Sign in" [ref=f111e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3Dsurvey%2BByzantine-robust%2Bfederated%2Blearning%2Baggregation%2Barxiv&ec=futura_srp_og_si_72236_p
+  - generic [ref=f111e68]:
+    - navigation [ref=f111e74]:
+      - generic [ref=f111e80]:
+        - list [ref=f111e81]:
+          - listitem [ref=f111e82]:
+            - link "AI Mode" [ref=f111e85] [cursor=pointer]:
+              - /url: /search?q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&aep=1&ntc=1&sa=X&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ2J8OegQICBAD
+          - listitem [ref=f111e89]:
+            - link "All" [disabled] [ref=f111e90]
+          - listitem [ref=f111e93]:
+            - link "Images" [ref=f111e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sa=X&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQtKgLegQIEBAB
+          - listitem [ref=f111e97]:
+            - link "Videos" [ref=f111e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sa=X&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQtKgLegQIDhAB
+          - listitem [ref=f111e101]:
+            - link "Shopping" [ref=f111e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&ved=1t:220175&ictx=111
+          - listitem [ref=f111e105]:
+            - link "Forums" [ref=f111e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sa=X&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQs6gLegQICxAB
+          - listitem [ref=f111e109]:
+            - link "Short videos" [ref=f111e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sa=X&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQs6gLegQIChAB
+          - listitem [ref=f111e113]:
+            - button [ref=f111e114] [cursor=pointer]:
+              - generic "More filters" [ref=f111e115]: More
+        - button "Tools" [ref=f111e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f111e129]
+    - main [ref=f111e135]:
+      - generic [ref=f111e139]:
+        - generic [ref=f111e142]:
+          - heading "Web results" [level=2] [ref=f111e143]
+          - generic [ref=f111e144]:
+            - generic [ref=f111e147]:
+              - link "Byzantine-Robust Federated Learning with Learnable ... arXiv https://arxiv.org › cs" [ref=f111e149] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/2511.03529
+                - heading "Byzantine-Robust Federated Learning with Learnable ..." [level=3] [ref=f111e150]
+                - generic [ref=f111e156]:
+                  - generic [ref=f111e157]: arXiv
+                  - generic [ref=f111e159]: https://arxiv.org › cs
+              - button "About this result" [ref=f111e163] [cursor=pointer]
+            - generic [ref=f111e169]:
+              - generic [ref=f111e170]: by J Parsa · 2025 · Cited by 2 —
+              - generic [ref=f111e171]:
+                - text: In this paper, we propose a novel
+                - emphasis [ref=f111e172]: Byzantine-robust FL optimization problem
+                - text: that incorporates adaptive weighting into the aggregation process.
+              - link "Read more" [ref=f111e173] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/2511.03529#:~:text=In%20this%20paper%2C%20we%20propose,weighting%20into%20the%20aggregation%20process.
+            - generic [ref=f111e175]:
+              - text: "Missing: survey ‎| Show results with:"
+              - link "survey" [ref=f111e176] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=%22survey%22+Byzantine-robust+federated+learning+aggregation+arxiv&sa=X&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ5t4CegQILhAB
+        - generic [ref=f111e180]:
+          - generic [ref=f111e183]:
+            - link "An Experimental Study of Byzantine-Robust Aggregation ... arXiv https://arxiv.org › cs" [ref=f111e185] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2302.07173
+              - heading "An Experimental Study of Byzantine-Robust Aggregation ..." [level=3] [ref=f111e186]
+              - generic [ref=f111e192]:
+                - generic [ref=f111e193]: arXiv
+                - generic [ref=f111e195]: https://arxiv.org › cs
+            - button "About this result" [ref=f111e199] [cursor=pointer]
+          - generic [ref=f111e205]:
+            - generic [ref=f111e206]: by S Li · 2023 · Cited by 155 —
+            - generic [ref=f111e207]:
+              - text: "Abstract:"
+              - emphasis [ref=f111e208]: Byzantine
+              - text: "-"
+              - emphasis [ref=f111e209]: robust federated learning
+              - text: aims at mitigating Byzantine failures during the federated training process, where malicious ...
+            - link "Read more" [ref=f111e210] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2302.07173#:~:text=Byzantine%2Drobust%20federated%20learning%20aims%20at,performance%20of%20the%20global%20model.
+        - generic [ref=f111e221]:
+          - heading "Thinking" [level=2] [ref=f111e225]
+          - progressbar "Generating" [ref=f111e228]
+        - generic [ref=f111e232]:
+          - heading "Web results" [level=2] [ref=f111e233]
+          - generic [ref=f111e234]:
+            - generic [ref=f111e237]:
+              - link "Byzantine-Robust Aggregation for Securing Decentralized ... arXiv https://arxiv.org › cs" [ref=f111e239] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/2409.17754
+                - heading "Byzantine-Robust Aggregation for Securing Decentralized ..." [level=3] [ref=f111e240]
+                - generic [ref=f111e246]:
+                  - generic [ref=f111e247]: arXiv
+                  - generic [ref=f111e249]: https://arxiv.org › cs
+              - button "About this result" [ref=f111e253] [cursor=pointer]
+            - generic [ref=f111e259]:
+              - generic [ref=f111e260]: by D Cajaraville-Aboy · 2024 · Cited by 20 —
+              - generic [ref=f111e261]:
+                - text: In this paper, we present a novel
+                - emphasis [ref=f111e262]: Byzantine-robust aggregation algorithm
+                - text: to enhance the security of Decentralized Federated Learning environments, coined WFAgg.
+              - link "Read more" [ref=f111e263] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/2409.17754#:~:text=In%20this%20paper%2C%20we%20present,Federated%20Learning%20environments%2C%20coined%20WFAgg.
+            - generic [ref=f111e265]:
+              - text: "Missing: survey ‎| Show results with:"
+              - link "survey" [ref=f111e266] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=%22survey%22+Byzantine-robust+federated+learning+aggregation+arxiv&sa=X&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ5t4CegQILxAB
+        - generic [ref=f111e270]:
+          - generic [ref=f111e273]:
+            - link "Byzantine-Robust Federated Learning Framework with ... arXiv https://arxiv.org › cs" [ref=f111e275] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2601.01053
+              - heading "Byzantine-Robust Federated Learning Framework with ..." [level=3] [ref=f111e276]
+              - generic [ref=f111e282]:
+                - generic [ref=f111e283]: arXiv
+                - generic [ref=f111e285]: https://arxiv.org › cs
+            - button "About this result" [ref=f111e289] [cursor=pointer]
+          - generic [ref=f111e295]:
+            - generic [ref=f111e296]: by M Rahmati · 2026 —
+            - generic [ref=f111e297]:
+              - text: This paper presents a novel
+              - emphasis [ref=f111e298]: Byzantine-robust federated learning framework
+              - text: integrated with post-quantum secure aggregation specifically designed ...
+            - link "Read more" [ref=f111e299] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2601.01053#:~:text=This%20paper%20presents%20a%20novel,sharing%20across%20critical%20IoT%20infrastructure.
+          - generic [ref=f111e301]:
+            - text: "Missing: survey ‎| Show results with:"
+            - link "survey" [ref=f111e302] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&q=%22survey%22+Byzantine-robust+federated+learning+aggregation+arxiv&sa=X&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ5t4CegQIMRAB
+        - generic [ref=f111e306]:
+          - generic [ref=f111e309]:
+            - link "[2410.22680] Byzantine-Robust Federated Learning arXiv https://arxiv.org › cs" [ref=f111e311] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2410.22680
+              - heading "[2410.22680] Byzantine-Robust Federated Learning" [level=3] [ref=f111e312]
+              - generic [ref=f111e318]:
+                - generic [ref=f111e319]: arXiv
+                - generic [ref=f111e321]: https://arxiv.org › cs
+            - button "About this result" [ref=f111e325] [cursor=pointer]
+          - generic [ref=f111e331]:
+            - generic [ref=f111e332]: by A Deshmukh · 2024 · Cited by 5 —
+            - text: This paper provides a exhaustive and updated taxonomy of existing methods and frameworks, before zooming in and conducting an in-depth analysis.
+            - link "Read more" [ref=f111e333] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2410.22680#:~:text=This%20paper%20provides%20a%20exhaustive,of%20Federated%20Learning%20(RoFL)%20protocol.
+        - generic [ref=f111e337]:
+          - generic [ref=f111e340]:
+            - link "Practical Validity Conditions for Byzantine-Tolerant ... arXiv https://arxiv.org › cs" [ref=f111e342] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2605.15887
+              - heading "Practical Validity Conditions for Byzantine-Tolerant ..." [level=3] [ref=f111e343]
+              - generic [ref=f111e349]:
+                - generic [ref=f111e350]: arXiv
+                - generic [ref=f111e352]: https://arxiv.org › cs
+            - button "About this result" [ref=f111e356] [cursor=pointer]
+          - generic [ref=f111e362]:
+            - generic [ref=f111e363]: by M Cambus · 2026 —
+            - generic [ref=f111e364]:
+              - text: "Abstract:"
+              - emphasis [ref=f111e365]: Robust aggregation
+              - text: is the core operation in
+              - emphasis [ref=f111e366]: Byzantine
+              - text: "-tolerant"
+              - emphasis [ref=f111e367]: federated learning
+              - text: . To ensure the quality of
+              - emphasis [ref=f111e368]: aggregation
+              - text: ...
+            - link "Read more" [ref=f111e369] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2605.15887#:~:text=Robust%20aggregation%20is%20the%20core,attacks%2C%20validity%20conditions%20are%20needed.
+          - generic [ref=f111e371]:
+            - text: "Missing: survey ‎| Show results with:"
+            - link "survey" [ref=f111e372] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&q=%22survey%22+Byzantine-robust+federated+learning+aggregation+arxiv&sa=X&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ5t4CegQIMBAB
+        - generic [ref=f111e376]:
+          - generic [ref=f111e379]:
+            - link "Byzantine-Robust Decentralized Federated Learning ACM Digital Library https://dl.acm.org › doi" [ref=f111e381] [cursor=pointer]:
+              - /url: https://dl.acm.org/doi/10.1145/3658644.3670307
+              - heading "Byzantine-Robust Decentralized Federated Learning" [level=3] [ref=f111e382]
+              - generic [ref=f111e388]:
+                - generic [ref=f111e389]: ACM Digital Library
+                - generic [ref=f111e391]: https://dl.acm.org › doi
+            - button "About this result" [ref=f111e395] [cursor=pointer]
+          - generic [ref=f111e401]:
+            - generic [ref=f111e402]: Dec 9, 2024 —
+            - generic [ref=f111e403]:
+              - text: The paper proposes BALANCE, a
+              - emphasis [ref=f111e404]: Byzantine
+              - text: "-"
+              - emphasis [ref=f111e405]: robust
+              - text: defense mechanism for decentralized
+              - emphasis [ref=f111e406]: federated learning
+              - text: . The core innovation is that each client ...
+            - link "Read more" [ref=f111e407] [cursor=pointer]:
+              - /url: https://dl.acm.org/doi/10.1145/3658644.3670307#:~:text=The%20paper%20proposes%20BALANCE%2C%20a,clients%20are%20trustworthy%20or%20malicious.
+        - generic [ref=f111e411]:
+          - generic [ref=f111e414]:
+            - 'link "FLTG: Byzantine-Robust Federated Learning via Angle ... arXiv https://arxiv.org › cs" [ref=f111e416] [cursor=pointer]':
+              - /url: https://arxiv.org/abs/2505.12851
+              - 'heading "FLTG: Byzantine-Robust Federated Learning via Angle ..." [level=3] [ref=f111e417]'
+              - generic [ref=f111e423]:
+                - generic [ref=f111e424]: arXiv
+                - generic [ref=f111e426]: https://arxiv.org › cs
+            - button "About this result" [ref=f111e430] [cursor=pointer]
+          - generic [ref=f111e436]:
+            - generic [ref=f111e437]: by Y Wen · 2025 · Cited by 2 —
+            - generic [ref=f111e438]:
+              - text: We propose
+              - emphasis [ref=f111e439]: FLTG
+              - text: ", a novel aggregation algorithm integrating angle-based defense and dynamic reference selection."
+            - link "Read more" [ref=f111e440] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2505.12851#:~:text=To%20address%20this%2C%20we%20propose,defense%20and%20dynamic%20reference%20selection.
+          - generic [ref=f111e442]:
+            - text: "Missing: survey ‎| Show results with:"
+            - link "survey" [ref=f111e443] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&q=%22survey%22+Byzantine-robust+federated+learning+aggregation+arxiv&sa=X&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ5t4CegQILRAB
+        - generic [ref=f111e447]:
+          - generic [ref=f111e450]:
+            - link "Byzantine-Robust Federated Learning with Optimal Statistical ... Proceedings of Machine Learning Research https://proceedings.mlr.press › ..." [ref=f111e452] [cursor=pointer]:
+              - /url: https://proceedings.mlr.press/v206/zhu23b/zhu23b.pdf
+              - heading "Byzantine-Robust Federated Learning with Optimal Statistical ..." [level=3] [ref=f111e453]
+              - generic [ref=f111e459]:
+                - generic [ref=f111e460]: Proceedings of Machine Learning Research
+                - generic [ref=f111e462]: https://proceedings.mlr.press › ...
+            - generic [ref=f111e464]: PDF
+            - button "About this result" [ref=f111e467] [cursor=pointer]
+          - generic [ref=f111e473]:
+            - generic [ref=f111e474]: by B Zhu · 2023 · Cited by 63 —
+            - generic [ref=f111e475]:
+              - text: We propose
+              - emphasis [ref=f111e476]: Byzantine-robust federated learn- ing protocols
+              - text: with nearly optimal statistical rates based on recent progress in high dimen-.
+            - link "Read more" [ref=f111e477] [cursor=pointer]:
+              - /url: https://proceedings.mlr.press/v206/zhu23b/zhu23b.pdf#:~:text=We%20propose%20Byzantine%2Drobust%20federated%20learn%2D,recent%20progress%20in%20high%20dimen%2D
+        - table [ref=f111e483]:
+          - rowgroup [ref=f111e484]:
+            - row [ref=f111e485]:
+              - cell [ref=f111e486]:
+                - heading [level=3] [ref=f111e487]:
+                  - link [ref=f111e488] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar?q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                    - generic [ref=f111e489]:
+                      - text: Scholarly articles for
+                      - emphasis [ref=f111e490]: survey Byzantine-robust federated learning aggregation arxiv
+            - row [ref=f111e491]:
+              - cell [ref=f111e492]:
+                - heading "… of byzantine-robust aggregation schemes in federated … - ‎Li - Cited by 156" [level=3] [ref=f111e493]:
+                  - link [ref=f111e494] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2302.07173&hl=en&sa=X&ei=Q_5PatShO5iM6rQPxbGiYA&scisig=AM1tuoOeL9HL2RVKHr0N46DDoJqN&oi=scholarr
+                    - generic [ref=f111e495]:
+                      - text: … of
+                      - emphasis [ref=f111e496]: byzantine
+                      - text: "-"
+                      - emphasis [ref=f111e497]: robust aggregation
+                      - text: schemes in
+                      - emphasis [ref=f111e498]: federated
+                      - text: …
+                  - generic [ref=f111e499]:
+                    - text: "-"
+                    - generic [ref=f111e500]: ‎Li
+                    - text: "- Cited by 156"
+                - 'heading "… in Byzantine-Robust Federated Learning: A survey. - ‎Szeląg - Cited by 11" [level=3] [ref=f111e501]':
+                  - link [ref=f111e502] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://eprint.iacr.org/2025/510&hl=en&sa=X&ei=Q_5PatShO5iM6rQPxbGiYA&scisig=AM1tuoOjphCsAx9sy4ST2-szqkKP&oi=scholarr
+                    - generic [ref=f111e503]:
+                      - text: … in
+                      - emphasis [ref=f111e504]: Byzantine
+                      - text: "-"
+                      - emphasis [ref=f111e505]: Robust Federated Learning
+                      - text: ": A"
+                      - emphasis [ref=f111e506]: survey
+                      - text: .
+                  - generic [ref=f111e507]:
+                    - text: "-"
+                    - generic [ref=f111e508]: ‎Szeląg
+                    - text: "- Cited by 11"
+                - heading "… systematic literature review of robust federated learning … - ‎Uddin - Cited by 86" [level=3] [ref=f111e509]:
+                  - link [ref=f111e510] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://dl.acm.org/doi/pdf/10.1145/3727643&hl=en&sa=X&ei=Q_5PatShO5iM6rQPxbGiYA&scisig=AM1tuoPLKV9Y_JDRCJvwO9Q865B6&oi=scholarr
+                    - generic [ref=f111e511]:
+                      - text: … systematic literature review of robust
+                      - emphasis [ref=f111e512]: federated learning
+                      - text: …
+                  - generic [ref=f111e513]:
+                    - text: "-"
+                    - generic [ref=f111e514]: ‎Uddin
+                    - text: "- Cited by 86"
+      - navigation [ref=f111e517]:
+        - heading "Page Navigation" [level=1] [ref=f111e518]
+        - text: "1"
+        - link "Page 2" [ref=f111e521] [cursor=pointer]:
+          - /url: /search?q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sca_esv=30a5fb343c9df574&ei=Q_5PasbcNMmkkPIP-PeviAE&start=10&sa=N&sstk=AU9db-AI24KxJQTeqeQBF-LkJHFXnNG0aZYo1LhzKWlns8TbhNmtTBo551bYjToZiDHLQTKntS9IN2W7mrO5hw_uZ3y2bBv6e1SdMA&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ8tMDegQIQRAE
+          - text: "2"
+        - link "Page 3" [ref=f111e523] [cursor=pointer]:
+          - /url: /search?q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sca_esv=30a5fb343c9df574&ei=Q_5PasbcNMmkkPIP-PeviAE&start=20&sa=N&sstk=AU9db-AI24KxJQTeqeQBF-LkJHFXnNG0aZYo1LhzKWlns8TbhNmtTBo551bYjToZiDHLQTKntS9IN2W7mrO5hw_uZ3y2bBv6e1SdMA&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ8tMDegQIQRAG
+          - text: "3"
+        - link "Page 4" [ref=f111e525] [cursor=pointer]:
+          - /url: /search?q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sca_esv=30a5fb343c9df574&ei=Q_5PasbcNMmkkPIP-PeviAE&start=30&sa=N&sstk=AU9db-AI24KxJQTeqeQBF-LkJHFXnNG0aZYo1LhzKWlns8TbhNmtTBo551bYjToZiDHLQTKntS9IN2W7mrO5hw_uZ3y2bBv6e1SdMA&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ8tMDegQIQRAI
+          - text: "4"
+        - link "Page 5" [ref=f111e527] [cursor=pointer]:
+          - /url: /search?q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sca_esv=30a5fb343c9df574&ei=Q_5PasbcNMmkkPIP-PeviAE&start=40&sa=N&sstk=AU9db-AI24KxJQTeqeQBF-LkJHFXnNG0aZYo1LhzKWlns8TbhNmtTBo551bYjToZiDHLQTKntS9IN2W7mrO5hw_uZ3y2bBv6e1SdMA&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ8tMDegQIQRAK
+          - text: "5"
+        - link "Page 6" [ref=f111e529] [cursor=pointer]:
+          - /url: /search?q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sca_esv=30a5fb343c9df574&ei=Q_5PasbcNMmkkPIP-PeviAE&start=50&sa=N&sstk=AU9db-AI24KxJQTeqeQBF-LkJHFXnNG0aZYo1LhzKWlns8TbhNmtTBo551bYjToZiDHLQTKntS9IN2W7mrO5hw_uZ3y2bBv6e1SdMA&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ8tMDegQIQRAM
+          - text: "6"
+        - link "Page 7" [ref=f111e531] [cursor=pointer]:
+          - /url: /search?q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sca_esv=30a5fb343c9df574&ei=Q_5PasbcNMmkkPIP-PeviAE&start=60&sa=N&sstk=AU9db-AI24KxJQTeqeQBF-LkJHFXnNG0aZYo1LhzKWlns8TbhNmtTBo551bYjToZiDHLQTKntS9IN2W7mrO5hw_uZ3y2bBv6e1SdMA&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ8tMDegQIQRAO
+          - text: "7"
+        - link "Page 8" [ref=f111e533] [cursor=pointer]:
+          - /url: /search?q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sca_esv=30a5fb343c9df574&ei=Q_5PasbcNMmkkPIP-PeviAE&start=70&sa=N&sstk=AU9db-AI24KxJQTeqeQBF-LkJHFXnNG0aZYo1LhzKWlns8TbhNmtTBo551bYjToZiDHLQTKntS9IN2W7mrO5hw_uZ3y2bBv6e1SdMA&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ8tMDegQIQRAQ
+          - text: "8"
+        - link "Page 9" [ref=f111e535] [cursor=pointer]:
+          - /url: /search?q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sca_esv=30a5fb343c9df574&ei=Q_5PasbcNMmkkPIP-PeviAE&start=80&sa=N&sstk=AU9db-AI24KxJQTeqeQBF-LkJHFXnNG0aZYo1LhzKWlns8TbhNmtTBo551bYjToZiDHLQTKntS9IN2W7mrO5hw_uZ3y2bBv6e1SdMA&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ8tMDegQIQRAS
+          - text: "9"
+        - link "Page 10" [ref=f111e537] [cursor=pointer]:
+          - /url: /search?q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sca_esv=30a5fb343c9df574&ei=Q_5PasbcNMmkkPIP-PeviAE&start=90&sa=N&sstk=AU9db-AI24KxJQTeqeQBF-LkJHFXnNG0aZYo1LhzKWlns8TbhNmtTBo551bYjToZiDHLQTKntS9IN2W7mrO5hw_uZ3y2bBv6e1SdMA&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ8tMDegQIQRAU
+          - text: "10"
+        - heading [level=2] [ref=f111e539]:
+          - link "Next" [ref=f111e540] [cursor=pointer]:
+            - /url: /search?q=survey+Byzantine-robust+federated+learning+aggregation+arxiv&sca_esv=30a5fb343c9df574&ei=Q_5PasbcNMmkkPIP-PeviAE&start=10&sa=N&sstk=AU9db-AI24KxJQTeqeQBF-LkJHFXnNG0aZYo1LhzKWlns8TbhNmtTBo551bYjToZiDHLQTKntS9IN2W7mrO5hw_uZ3y2bBv6e1SdMA&ved=2ahUKEwiGipzMscaVAxVJEkQIHfj7CxEQ8NMDegQIQRAW
+      - navigation
+    - contentinfo [ref=f111e543]:
+      - heading "Footer Links" [level=1] [ref=f111e544]
+      - generic [ref=f111e548]:
+        - generic [ref=f111e552]:
+          - button "Woodland, California - From your IP address" [ref=f111e554] [cursor=pointer]:
+            - generic [ref=f111e555]: Woodland, California
+            - generic [ref=f111e557]:
+              - text: "-"
+              - generic [ref=f111e558]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f111e560] [cursor=pointer]
+        - generic [ref=f111e563]:
+          - link "Help" [ref=f111e564] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f111e565] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f111e566] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f111e567] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

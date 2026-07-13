@@ -475,7 +475,7 @@ def test_compare_eval_only_does_not_build_syncer(monkeypatch, capsys):
     monkeypatch.setattr(compare, "ensure_syncer", unexpected_syncer_build)
 
     assert compare.main() == 0
-    assert capsys.readouterr().out == "EVAL_LOSS 1.250000\n"
+    assert capsys.readouterr().out == "EVAL_LOSS 1.25\n"
 
 
 def test_calibrate_fragment_score_writes_heldout_split(tmp_path):

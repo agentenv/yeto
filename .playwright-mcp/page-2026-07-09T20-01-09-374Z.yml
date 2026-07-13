@@ -1,0 +1,248 @@
+- generic [ref=f77e2]:
+  - link "Skip to main content" [ref=f77e3] [cursor=pointer]:
+    - /url: "#content"
+  - region "Announcement" [ref=f77e4]:
+    - generic [ref=f77e6]: arXiv is now an independent nonprofit!
+    - link "Learn more" [ref=f77e7] [cursor=pointer]:
+      - /url: https://info.arxiv.org/about
+    - button "Dismiss announcement" [ref=f77e8] [cursor=pointer]: ×
+  - banner [ref=f77e9]:
+    - link [ref=f77e10] [cursor=pointer]:
+      - /url: https://arxiv.org/IgnoreMe
+    - link "archive home" [ref=f77e11] [cursor=pointer]:
+      - /url: https://arxiv.org/
+      - img "archive" [ref=f77e12]
+    - navigation "Main navigation" [ref=f77e13]:
+      - link "Search" [ref=f77e14] [cursor=pointer]:
+        - /url: https://arxiv.org/search
+      - link "Submit" [ref=f77e18] [cursor=pointer]:
+        - /url: https://arxiv.org/user/create
+      - link "Donate" [ref=f77e19] [cursor=pointer]:
+        - /url: https://info.arxiv.org/about/donate.html
+      - link "Log in" [ref=f77e21] [cursor=pointer]:
+        - /url: https://arxiv.org/login
+  - main [ref=f77e22]:
+    - generic [ref=f77e24]:
+      - generic [ref=f77e25]:
+        - heading "Computer Science > Machine Learning" [level=1] [ref=f77e27]
+        - generic [ref=f77e29]:
+          - generic [ref=f77e30]: "[Submitted on 6 Nov 2024]"
+          - heading "Adaptive Consensus Gradients Aggregation for Scaled Distributed Training" [level=1] [ref=f77e31]
+          - generic [ref=f77e32]:
+            - link "Yoni Choukroun" [ref=f77e33] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Choukroun,+Y
+            - text: ","
+            - link "Shlomi Azoulay" [ref=f77e34] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Azoulay,+S
+            - text: ","
+            - link "Pavel Kisilev" [ref=f77e35] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Kisilev,+P
+          - blockquote [ref=f77e36]: Distributed machine learning has recently become a critical paradigm for training large models on vast datasets. We examine the stochastic optimization problem for deep learning within synchronous parallel computing environments under communication constraints. While averaging distributed gradients is the most widely used method for gradient estimation, whether this is the optimal strategy remains an open question. In this work, we analyze the distributed gradient aggregation process through the lens of subspace optimization. By formulating the aggregation problem as an objective-aware subspace optimization problem, we derive an efficient weighting scheme for gradients, guided by subspace coefficients. We further introduce subspace momentum to accelerate convergence while maintaining statistical unbiasedness in the aggregation. Our method demonstrates improved performance over the ubiquitous gradient averaging on multiple MLPerf tasks while remaining extremely efficient in both communicational and computational complexity.
+          - table "Additional metadata" [ref=f77e38]:
+            - rowgroup [ref=f77e39]:
+              - row [ref=f77e40]:
+                - cell "Subjects:" [ref=f77e41]
+                - cell "Machine Learning (cs.LG); Artificial Intelligence (cs.AI); Distributed, Parallel, and Cluster Computing (cs.DC)" [ref=f77e42]
+              - row [ref=f77e43]:
+                - cell "Cite as:" [ref=f77e44]
+                - cell [ref=f77e45]:
+                  - generic [ref=f77e46]:
+                    - link "arXiv:2411.03742" [ref=f77e47] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/2411.03742
+                    - text: "[cs.LG]"
+              - row [ref=f77e48]:
+                - cell [ref=f77e49]
+                - cell [ref=f77e50]:
+                  - text: (or
+                  - generic [ref=f77e51]:
+                    - link "arXiv:2411.03742v1" [ref=f77e52] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/2411.03742v1
+                    - text: "[cs.LG]"
+                  - text: for this version)
+              - row [ref=f77e53]:
+                - cell [ref=f77e54]
+                - cell [ref=f77e55]:
+                  - link "https://doi.org/10.48550/arXiv.2411.03742" [ref=f77e56] [cursor=pointer]:
+                    - /url: https://doi.org/10.48550/arXiv.2411.03742
+                  - button "Focus to learn more" [ref=f77e58]
+        - generic [ref=f77e61]:
+          - heading "Submission history" [level=2] [ref=f77e62]
+          - text: "From: Yoni Choukroun ["
+          - link "view email" [ref=f77e63] [cursor=pointer]:
+            - /url: /show-email/1433a3df/2411.03742
+          - text: "]"
+          - strong [ref=f77e64]: "[v1]"
+          - text: Wed, 6 Nov 2024 08:16:39 UTC (2,944 KB)
+      - generic [ref=f77e65]:
+        - generic [ref=f77e66]:
+          - heading "Access Paper:" [level=2] [ref=f77e67]
+          - list [ref=f77e68]:
+            - listitem [ref=f77e69]:
+              - link "View PDF" [ref=f77e70] [cursor=pointer]:
+                - /url: /pdf/2411.03742
+            - listitem [ref=f77e71]:
+              - link "HTML (experimental)" [ref=f77e72] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2411.03742v1
+            - listitem [ref=f77e73]:
+              - link "TeX Source" [ref=f77e74] [cursor=pointer]:
+                - /url: /src/2411.03742
+          - link "view license" [ref=f77e76] [cursor=pointer]:
+            - /url: http://creativecommons.org/licenses/by/4.0/
+        - generic [ref=f77e78]:
+          - heading "Current browse context:" [level=3] [ref=f77e79]
+          - generic [ref=f77e80]: cs.LG
+          - generic [ref=f77e81]:
+            - link "< prev" [ref=f77e83] [cursor=pointer]:
+              - /url: /prevnext?id=2411.03742&function=prev&context=cs.LG
+            - text: "|"
+            - link "next >" [ref=f77e85] [cursor=pointer]:
+              - /url: /prevnext?id=2411.03742&function=next&context=cs.LG
+          - generic [ref=f77e86]:
+            - link "new" [ref=f77e87] [cursor=pointer]:
+              - /url: /list/cs.LG/new
+            - text: "|"
+            - link "recent" [ref=f77e88] [cursor=pointer]:
+              - /url: /list/cs.LG/recent
+            - text: "|"
+            - link "2024-11" [ref=f77e89] [cursor=pointer]:
+              - /url: /list/cs.LG/2024-11
+          - generic [ref=f77e90]:
+            - text: "Change to browse by:"
+            - generic [ref=f77e91]:
+              - link "cs" [ref=f77e92] [cursor=pointer]:
+                - /url: /abs/2411.03742?context=cs
+              - link "cs.AI" [ref=f77e93] [cursor=pointer]:
+                - /url: /abs/2411.03742?context=cs.AI
+              - link "cs.DC" [ref=f77e94] [cursor=pointer]:
+                - /url: /abs/2411.03742?context=cs.DC
+        - generic [ref=f77e95]:
+          - heading "References & Citations" [level=3] [ref=f77e96]
+          - list [ref=f77e97]:
+            - listitem [ref=f77e98]:
+              - link "NASA ADS" [ref=f77e99] [cursor=pointer]:
+                - /url: https://ui.adsabs.harvard.edu/abs/arXiv:2411.03742
+            - listitem [ref=f77e100]:
+              - link "Google Scholar" [ref=f77e101] [cursor=pointer]:
+                - /url: https://scholar.google.com/scholar_lookup?arxiv_id=2411.03742
+            - listitem [ref=f77e102]:
+              - link "Semantic Scholar" [ref=f77e103] [cursor=pointer]:
+                - /url: https://api.semanticscholar.org/arXiv:2411.03742
+        - button "export BibTeX citation" [ref=f77e105]
+        - generic [ref=f77e106]:
+          - heading "Bookmark" [level=3] [ref=f77e108]
+          - link [ref=f77e109] [cursor=pointer]:
+            - /url: http://www.bibsonomy.org/BibtexHandler?requTask=upload&url=https://arxiv.org/abs/2411.03742&description=Adaptive Consensus Gradients Aggregation for Scaled Distributed Training
+            - img "BibSonomy" [ref=f77e110]
+          - link [ref=f77e111] [cursor=pointer]:
+            - /url: https://reddit.com/submit?url=https://arxiv.org/abs/2411.03742&title=Adaptive Consensus Gradients Aggregation for Scaled Distributed Training
+            - img "Reddit" [ref=f77e112]
+      - tablist "arXivLabs tools" [ref=f77e114]:
+        - radio "Bibliographic Tools" [checked] [ref=f77e115]
+        - tab "Bibliographic Tools" [selected] [ref=f77e116] [cursor=pointer]
+        - tabpanel "Bibliographic Tools" [ref=f77e117]:
+          - heading "Bibliographic and Citation Tools" [level=1] [ref=f77e118]
+          - generic [ref=f77e119]:
+            - generic [ref=f77e120]:
+              - generic [ref=f77e122]:
+                - checkbox "Bibliographic Explorer Toggle"
+                - generic [ref=f77e124]: Bibliographic Explorer Toggle
+              - generic [ref=f77e125]:
+                - text: Bibliographic Explorer
+                - emphasis [ref=f77e126]:
+                  - text: (
+                  - link "What is the Explorer?" [ref=f77e127] [cursor=pointer]:
+                    - /url: https://info.arxiv.org/labs/showcase.html#arxiv-bibliographic-explorer
+                  - text: )
+            - generic [ref=f77e128]:
+              - generic [ref=f77e130]:
+                - checkbox "Connected Papers"
+                - generic [ref=f77e132]: Connected Papers Toggle
+              - generic [ref=f77e133]:
+                - text: Connected Papers
+                - emphasis [ref=f77e134]:
+                  - text: (
+                  - link "What is Connected Papers?" [ref=f77e135] [cursor=pointer]:
+                    - /url: https://www.connectedpapers.com/about
+                  - text: )
+            - generic [ref=f77e136]:
+              - generic [ref=f77e138]:
+                - checkbox "Litmaps"
+                - generic [ref=f77e140]: Litmaps Toggle
+              - generic [ref=f77e141]:
+                - text: Litmaps
+                - emphasis [ref=f77e142]:
+                  - text: (
+                  - link "What is Litmaps?" [ref=f77e143] [cursor=pointer]:
+                    - /url: https://www.litmaps.co/
+                  - text: )
+            - generic [ref=f77e144]:
+              - generic [ref=f77e146]:
+                - checkbox "scite Smart Citations"
+                - generic [ref=f77e148]: scite.ai Toggle
+              - generic [ref=f77e149]:
+                - text: scite Smart Citations
+                - emphasis [ref=f77e150]:
+                  - text: (
+                  - link "What are Smart Citations?" [ref=f77e151] [cursor=pointer]:
+                    - /url: https://www.scite.ai/
+                  - text: )
+        - radio "Code, Data, Media" [ref=f77e155]
+        - tab "Code, Data, Media" [ref=f77e156] [cursor=pointer]
+        - radio "Demos" [ref=f77e157]
+        - tab "Demos" [ref=f77e158] [cursor=pointer]
+        - radio "Related Papers" [ref=f77e159]
+        - tab "Related Papers" [ref=f77e160] [cursor=pointer]
+        - radio "About arXivLabs" [ref=f77e161]
+        - tab "About arXivLabs" [ref=f77e162] [cursor=pointer]
+      - generic [ref=f77e163]:
+        - link "Which authors of this paper are endorsers?" [ref=f77e164] [cursor=pointer]:
+          - /url: /auth/show-endorsers/2411.03742
+        - text: "|"
+        - link "Disable MathJax" [ref=f77e165] [cursor=pointer]:
+          - /url: javascript:setMathjaxCookie()
+        - text: (
+        - link "What is MathJax?" [ref=f77e166] [cursor=pointer]:
+          - /url: https://info.arxiv.org/help/mathjax.html
+        - text: )
+  - contentinfo [ref=f77e167]:
+    - generic [ref=f77e168]:
+      - generic [ref=f77e169]:
+        - generic [ref=f77e170]:
+          - text: We gratefully acknowledge support from our
+          - strong [ref=f77e171]: major funders
+          - text: ","
+          - link [ref=f77e172] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about/ourmembers.html
+            - strong [ref=f77e173]: member institutions
+          - text: ", and all contributors."
+        - navigation "Site navigation" [ref=f77e174]:
+          - link "About" [ref=f77e175] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about
+          - generic [ref=f77e176]: ·
+          - link "Help" [ref=f77e177] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help
+          - generic [ref=f77e178]: ·
+          - link "Contact" [ref=f77e179] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/contact.html
+          - generic [ref=f77e180]: ·
+          - link "Subscribe" [ref=f77e181] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/subscribe
+          - generic [ref=f77e182]: ·
+          - link "Copyright" [ref=f77e183] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/license/index.html
+          - generic [ref=f77e184]: ·
+          - link "Privacy" [ref=f77e185] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/policies/privacy_policy.html
+          - generic [ref=f77e186]: ·
+          - link "Accessibility" [ref=f77e187] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/web_accessibility.html
+          - generic [ref=f77e188]: ·
+          - link "Operational Status (opens in new tab)" [ref=f77e189] [cursor=pointer]:
+            - /url: https://status.arxiv.org
+            - text: Operational Status
+            - generic [ref=f77e190]: (opens in new tab)
+      - generic "Major funders" [ref=f77e191]:
+        - generic [ref=f77e192]: Major funding support from
+        - generic [ref=f77e193]:
+          - img "Simons Foundation" [ref=f77e194]
+          - img "Schmidt Sciences" [ref=f77e195]

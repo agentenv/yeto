@@ -1,0 +1,317 @@
+- generic [active] [ref=f58e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f58e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f58e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f58e8]:
+    - search [ref=f58e9]:
+      - generic [ref=f58e11]:
+        - link "Go to Google Home" [ref=f58e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQPAgI
+        - generic [ref=f58e21]:
+          - generic [ref=f58e22]:
+            - combobox "Search" [ref=f58e25]: "\"mean resultant length\" gradient aggregation \"mean resultant length\" gradient aggregation"
+            - generic [ref=f58e26]:
+              - button "Clear" [ref=f58e28] [cursor=pointer]
+              - generic [ref=f58e33]:
+                - button "Search by voice" [ref=f58e34] [cursor=pointer]
+                - button "Search by image" [ref=f58e37] [cursor=pointer]
+          - button "Search" [ref=f58e40] [cursor=pointer]
+    - generic [ref=f58e45]:
+      - button "Settings" [ref=f58e47] [cursor=pointer]
+      - button "Share" [ref=f58e53] [cursor=pointer]
+      - generic [ref=f58e59]:
+        - button "Google apps" [ref=f58e61] [cursor=pointer]
+        - link "Sign in" [ref=f58e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522mean%2520resultant%2520length%2522%2520gradient%2520aggregation&ec=futura_srp_og_si_72236_p
+  - generic [ref=f58e68]:
+    - navigation [ref=f58e74]:
+      - generic [ref=f58e80]:
+        - list [ref=f58e81]:
+          - listitem [ref=f58e82]:
+            - link "AI Mode" [ref=f58e85] [cursor=pointer]:
+              - /url: /search?q=%22mean+resultant+length%22+gradient+aggregation&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&aep=1&ntc=1&sa=X&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQ2J8OegQICBAD
+          - listitem [ref=f58e89]:
+            - link "All" [disabled] [ref=f58e90]
+          - listitem [ref=f58e93]:
+            - link "Images" [ref=f58e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=%22mean+resultant+length%22+gradient+aggregation&sa=X&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQtKgLegQIGhAB
+          - listitem [ref=f58e97]:
+            - link "Videos" [ref=f58e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=%22mean+resultant+length%22+gradient+aggregation&sa=X&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQtKgLegQIFBAB
+          - listitem [ref=f58e101]:
+            - link "Shopping" [ref=f58e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=%22mean+resultant+length%22+gradient+aggregation&ved=1t:220175&ictx=111
+          - listitem [ref=f58e105]:
+            - link "Forums" [ref=f58e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=%22mean+resultant+length%22+gradient+aggregation&sa=X&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQs6gLegQIDRAB
+          - listitem [ref=f58e109]:
+            - link "Short videos" [ref=f58e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=%22mean+resultant+length%22+gradient+aggregation&sa=X&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQs6gLegQIDBAB
+          - listitem [ref=f58e113]:
+            - button [ref=f58e114] [cursor=pointer]:
+              - generic "More filters" [ref=f58e115]: More
+        - button "Tools" [ref=f58e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f58e129]
+    - generic [ref=f58e134]:
+      - generic [ref=f58e153]:
+        - heading "Thinking" [level=2] [ref=f58e157]
+        - progressbar "Generating" [ref=f58e160]
+      - main [ref=f58e162]:
+        - generic [ref=f58e166]:
+          - table [ref=f58e172]:
+            - rowgroup [ref=f58e173]:
+              - row [ref=f58e174]:
+                - cell [ref=f58e175]:
+                  - heading [level=3] [ref=f58e176]:
+                    - link [ref=f58e177] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar?q=%22mean+resultant+length%22+gradient+aggregation&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                      - generic [ref=f58e178]:
+                        - text: Scholarly articles for
+                        - emphasis [ref=f58e179]: "\"mean resultant length\" gradient aggregation"
+              - row [ref=f58e180]:
+                - cell [ref=f58e181]:
+                  - heading "Effect of DEM-smoothing and-aggregation on … - ‎Erdbrügger - Cited by 40" [level=3] [ref=f58e182]:
+                    - link [ref=f58e183] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://www.sciencedirect.com/science/article/pii/S0022169421007678&hl=en&sa=X&ei=9_1Pas5Z47_qtA-e2MGQCQ&scisig=AM1tuoMXY4hg5wRhEF47vQ0km-er&oi=scholarr
+                      - generic [ref=f58e184]:
+                        - text: Effect of DEM-smoothing and-
+                        - emphasis [ref=f58e185]: aggregation
+                        - text: on …
+                    - generic [ref=f58e186]:
+                      - text: "-"
+                      - generic [ref=f58e187]: ‎Erdbrügger
+                      - text: "- Cited by 40"
+                  - heading "Spatial aggregation of complex terrain - ‎Band - Cited by 77" [level=3] [ref=f58e188]:
+                    - link [ref=f58e189] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://onlinelibrary.wiley.com/doi/abs/10.1111/j.1538-4632.1989.tb00897.x&hl=en&sa=X&ei=9_1Pas5Z47_qtA-e2MGQCQ&scisig=AM1tuoODUvmEpBPbDN9F3xNNV9n6&oi=scholarr
+                      - generic [ref=f58e190]:
+                        - text: Spatial
+                        - emphasis [ref=f58e191]: aggregation
+                        - text: of complex terrain
+                    - generic [ref=f58e192]:
+                      - text: "-"
+                      - generic [ref=f58e193]: ‎Band
+                      - text: "- Cited by 77"
+                  - heading "Detecting collective behaviour in animal relocation … - ‎Dalziel - Cited by 32" [level=3] [ref=f58e194]:
+                    - link "Detecting collective behaviour in animal relocation …" [ref=f58e195] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://besjournals.onlinelibrary.wiley.com/doi/abs/10.1111/2041-210X.12437&hl=en&sa=X&ei=9_1Pas5Z47_qtA-e2MGQCQ&scisig=AM1tuoMX8W29I7Oy2z11-7oey_lD&oi=scholarr
+                    - generic [ref=f58e196]:
+                      - text: "-"
+                      - generic [ref=f58e197]: ‎Dalziel
+                      - text: "- Cited by 32"
+          - generic [ref=f58e200]:
+            - heading "Web results" [level=2] [ref=f58e201]
+            - generic [ref=f58e202]:
+              - generic [ref=f58e205]:
+                - link "Effect of DEM-smoothing and -aggregation on ... ScienceDirect.com https://www.sciencedirect.com › science › article › pii" [ref=f58e207] [cursor=pointer]:
+                  - /url: https://www.sciencedirect.com/science/article/pii/S0022169421007678
+                  - heading "Effect of DEM-smoothing and -aggregation on ..." [level=3] [ref=f58e208]
+                  - generic [ref=f58e214]:
+                    - generic [ref=f58e215]: ScienceDirect.com
+                    - generic [ref=f58e217]: https://www.sciencedirect.com › science › article › pii
+                - button "About this result" [ref=f58e221] [cursor=pointer]
+              - generic [ref=f58e227]:
+                - generic [ref=f58e228]: by J Erdbrügger · 2021 · Cited by 40 —
+                - generic [ref=f58e229]:
+                  - text: The value of the
+                  - emphasis [ref=f58e230]: mean resultant length
+                  - text: is one if all flow directions are similar and zero if they point in all directions (Kutil, 2012, Pewsey et al., 2013).
+                - link "Read more" [ref=f58e231] [cursor=pointer]:
+                  - /url: https://www.sciencedirect.com/science/article/pii/S0022169421007678#:~:text=The%20value%20of%20the%20mean,2012%2C%20Pewsey%20et%20al.%2C%202013).
+          - generic [ref=f58e235]:
+            - generic [ref=f58e238]:
+              - link "Holonomy-based Diagnostic of Strain Compatibility in ... arXiv https://arxiv.org › html" [ref=f58e240] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2604.10521v1
+                - heading "Holonomy-based Diagnostic of Strain Compatibility in ..." [level=3] [ref=f58e241]
+                - generic [ref=f58e247]:
+                  - generic [ref=f58e248]: arXiv
+                  - generic [ref=f58e250]: https://arxiv.org › html
+              - button "About this result" [ref=f58e254] [cursor=pointer]
+            - generic [ref=f58e260]:
+              - generic [ref=f58e261]: Apr 12, 2026 —
+              - generic [ref=f58e262]:
+                - text: ...
+                - emphasis [ref=f58e263]: gradient
+                - text: metric. Whereas the
+                - emphasis [ref=f58e264]: gradient
+                - text: quantifies local ... The
+                - emphasis [ref=f58e265]: mean resultant length
+                - text: of the fast-axis orientation is then calculated as ...
+              - link "Read more" [ref=f58e266] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2604.10521v1#:~:text=from%20residual%20rotations%20accumulated%20along,gradient%20quantifies%20local%20orientational%20variation%2C&text=The%20mean%20resultant%20length%20of,orientation%20is%20then%20calculated%20as
+          - generic [ref=f58e270]:
+            - generic [ref=f58e273]:
+              - link "Two types of inversely graded bands in spaced ... GeoScienceWorld https://pubs.geoscienceworld.org › jsedres › article › T..." [ref=f58e275] [cursor=pointer]:
+                - /url: https://pubs.geoscienceworld.org/sepm/jsedres/article/96/3/537/731640/Two-types-of-inversely-graded-bands-in-spaced
+                - heading "Two types of inversely graded bands in spaced ..." [level=3] [ref=f58e276]
+                - generic [ref=f58e282]:
+                  - generic [ref=f58e283]: GeoScienceWorld
+                  - generic [ref=f58e285]: https://pubs.geoscienceworld.org › jsedres › article › T...
+              - button "About this result" [ref=f58e289] [cursor=pointer]
+            - generic [ref=f58e295]:
+              - generic [ref=f58e296]: Jun 29, 2026 —
+              - generic [ref=f58e297]:
+                - text: D) The
+                - emphasis [ref=f58e298]: mean resultant length
+                - text: R ¯ was also computed for grains with aspect ratios greater than 1.5:.
+              - link "Read more" [ref=f58e299] [cursor=pointer]:
+                - /url: https://pubs.geoscienceworld.org/sepm/jsedres/article/96/3/537/731640/Two-types-of-inversely-graded-bands-in-spaced#:~:text=D)%20The%20mean%20resultant%20length,aspect%20ratios%20greater%20than%201.5%3A
+          - generic [ref=f58e303]:
+            - generic [ref=f58e306]:
+              - link "Detecting collective behaviour in animal relocation data, with ... besjournals https://besjournals.onlinelibrary.wiley.com › doi" [ref=f58e308] [cursor=pointer]:
+                - /url: https://besjournals.onlinelibrary.wiley.com/doi/10.1111/2041-210X.12437
+                - heading "Detecting collective behaviour in animal relocation data, with ..." [level=3] [ref=f58e309]
+                - generic [ref=f58e315]:
+                  - generic [ref=f58e316]: besjournals
+                  - generic [ref=f58e318]: https://besjournals.onlinelibrary.wiley.com › doi
+              - button "About this result" [ref=f58e322] [cursor=pointer]
+            - generic [ref=f58e328]:
+              - generic [ref=f58e329]: by BD Dalziel · 2016 · Cited by 32 —
+              - generic [ref=f58e330]:
+                - text: The intuition, which is similar to the
+                - emphasis [ref=f58e331]: mean resultant length
+                - text: from circular statistics, is that independent velocities will tend to be evenly ...
+              - link "Read more" [ref=f58e332] [cursor=pointer]:
+                - /url: https://besjournals.onlinelibrary.wiley.com/doi/10.1111/2041-210X.12437#:~:text=The%20intuition%2C%20which%20is%20similar,out%20when%20they%20are%20summed.
+          - generic [ref=f58e336]:
+            - generic [ref=f58e339]:
+              - 'link "GradDiv: Adversarial Robustness of Randomized Neural ... IEEE Computer Society https://www.computer.org › csdl › journal › 2023/02" [ref=f58e341] [cursor=pointer]':
+                - /url: https://www.computer.org/csdl/journal/tp/2023/02/09761760/1CKMkj4mEBW
+                - 'heading "GradDiv: Adversarial Robustness of Randomized Neural ..." [level=3] [ref=f58e342]'
+                - generic [ref=f58e351]:
+                  - generic [ref=f58e352]: IEEE Computer Society
+                  - generic [ref=f58e354]: https://www.computer.org › csdl › journal › 2023/02
+              - button "About this result" [ref=f58e358] [cursor=pointer]
+            - generic [ref=f58e364]:
+              - generic [ref=f58e365]: by S Lee · 2023 · Cited by 98 —
+              - generic [ref=f58e366]:
+                - text: Next, we demonstrate that the expected loss increase caused by proxy
+                - emphasis [ref=f58e367]: gradients
+                - text: is upper bounded by the
+                - emphasis [ref=f58e368]: Mean Resultant Length
+                - text: (MRL) of the loss
+                - emphasis [ref=f58e369]: gradients
+                - text: .
+              - link "Read more" [ref=f58e370] [cursor=pointer]:
+                - /url: https://www.computer.org/csdl/journal/tp/2023/02/09761760/1CKMkj4mEBW#:~:text=Next%2C%20we%20demonstrate%20that%20the,(MRL)%20of%20the%20loss%20gradients.
+          - generic [ref=f58e374]:
+            - generic [ref=f58e377]:
+              - link "Boulder populations and orientation trends on asteroid Ryugu PubMed Central (PMC) (.gov) https://pmc.ncbi.nlm.nih.gov › articles › PMC13149696" [ref=f58e379] [cursor=pointer]:
+                - /url: https://pmc.ncbi.nlm.nih.gov/articles/PMC13149696/
+                - heading "Boulder populations and orientation trends on asteroid Ryugu" [level=3] [ref=f58e380]
+                - generic [ref=f58e386]:
+                  - generic [ref=f58e387]: PubMed Central (PMC) (.gov)
+                  - generic [ref=f58e389]: https://pmc.ncbi.nlm.nih.gov › articles › PMC13149696
+              - button "About this result" [ref=f58e393] [cursor=pointer]
+            - generic [ref=f58e399]:
+              - generic [ref=f58e400]: by A Ray · 2026 —
+              - generic [ref=f58e401]:
+                - text: The
+                - emphasis [ref=f58e402]: mean resultant length
+                - text: (MRL) quantifies the clustering strength of axial orientation data, where directions 180° apart are treated as equivalent. It ...
+              - link "Read more" [ref=f58e403] [cursor=pointer]:
+                - /url: https://pmc.ncbi.nlm.nih.gov/articles/PMC13149696/#:~:text=The%20mean%20resultant%20length%20(MRL),are%20treated%20as%20equivalent.%20It
+          - generic [ref=f58e407]:
+            - generic [ref=f58e410]:
+              - link "Why use sequence length instead of query vector ... Facebook · Artificial Intelligence & Deep Learning 1 comment · 7 years ago" [ref=f58e412] [cursor=pointer]:
+                - /url: https://www.facebook.com/groups/DeepNetGroup/posts/808017429591141/
+                - heading "Why use sequence length instead of query vector ..." [level=3] [ref=f58e413]
+                - generic [ref=f58e419]:
+                  - generic [ref=f58e420]: Facebook · Artificial Intelligence & Deep Learning
+                  - generic [ref=f58e422]: 1 comment · 7 years ago
+              - button "About this result" [ref=f58e426] [cursor=pointer]
+            - generic [ref=f58e432]:
+              - generic [ref=f58e433]:
+                - text: ...
+                - emphasis [ref=f58e434]: Mean Resultant Length
+                - text: "R automatically balances the two Results on AIME25 (32K-token generation, Qwen3-8B): → 2.5× higher throughput vs Full ..."
+              - link "Read more" [ref=f58e435] [cursor=pointer]:
+                - /url: https://www.facebook.com/groups/DeepNetGroup/posts/808017429591141/#:~:text=Mean%20Resultant%20Length%20R%20automatically,2.5%C3%97%20higher%20throughput%20vs%20Full
+          - generic [ref=f58e439]:
+            - generic [ref=f58e442]:
+              - link "AMPLIFICATION IN A STOCHASTIC TWO DIMENSIONAL ... Case Western Reserve University https://case.edu › thomas › ChuechoteMSThesis" [ref=f58e444] [cursor=pointer]:
+                - /url: https://case.edu/math/thomas/ChuechoteMSThesis.pdf
+                - heading "AMPLIFICATION IN A STOCHASTIC TWO DIMENSIONAL ..." [level=3] [ref=f58e445]
+                - generic [ref=f58e451]:
+                  - generic [ref=f58e452]: Case Western Reserve University
+                  - generic [ref=f58e454]: https://case.edu › thomas › ChuechoteMSThesis
+              - generic [ref=f58e456]: PDF
+              - button "About this result" [ref=f58e459] [cursor=pointer]
+            - generic [ref=f58e466]:
+              - text: Here, we call R the
+              - emphasis [ref=f58e467]: mean resultant length
+              - text: . It is a measure of concentration of a data set and ¯θ is the mean direction. 2.7 Amplification. Amplification is a ...
+          - generic [ref=f58e471]:
+            - generic [ref=f58e474]:
+              - link "DESIGN OF EXPERIMENTS VIA MULTI-FIDELITY ... National Science Foundation (.gov) https://par.nsf.gov › servlets › purl" [ref=f58e476] [cursor=pointer]:
+                - /url: https://par.nsf.gov/servlets/purl/10621785
+                - heading "DESIGN OF EXPERIMENTS VIA MULTI-FIDELITY ..." [level=3] [ref=f58e477]
+                - generic [ref=f58e486]:
+                  - generic [ref=f58e487]: National Science Foundation (.gov)
+                  - generic [ref=f58e489]: https://par.nsf.gov › servlets › purl
+              - generic [ref=f58e491]: PDF
+              - button "About this result" [ref=f58e494] [cursor=pointer]
+            - generic [ref=f58e500]:
+              - generic [ref=f58e501]: by DJ Gillcrist · 2024 · Cited by 2 —
+              - generic [ref=f58e502]:
+                - text: The plots in Fig. 11, which use noncorrected
+                - emphasis [ref=f58e503]: mean resultant length
+                - text: values, however, provide a much better indication, through a strong correlation between ...
+              - link "Read more" [ref=f58e504] [cursor=pointer]:
+                - /url: https://par.nsf.gov/servlets/purl/10621785#:~:text=The%20plots%20in%20Fig.%2011%2C,strong%20correlation%20between%20success%20and
+        - navigation [ref=f58e507]:
+          - heading "Page Navigation" [level=1] [ref=f58e508]
+          - text: "1"
+          - link "Page 2" [ref=f58e511] [cursor=pointer]:
+            - /url: /search?q=%22mean+resultant+length%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=9v1ParqoNufbkPIPgpfS2Qk&start=10&sa=N&sstk=AU9db-BvXeTM2CtTpIegvOlfIOluTfXFdXgd4PoBo1aML3MA-450U1oTZCjTSJcb5PO1m8PgTu1XDBA7lcj1Ccl9uUVRwIm_L0CTzQ&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQ8tMDegQIPhAE
+            - text: "2"
+          - link "Page 3" [ref=f58e513] [cursor=pointer]:
+            - /url: /search?q=%22mean+resultant+length%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=9v1ParqoNufbkPIPgpfS2Qk&start=20&sa=N&sstk=AU9db-BvXeTM2CtTpIegvOlfIOluTfXFdXgd4PoBo1aML3MA-450U1oTZCjTSJcb5PO1m8PgTu1XDBA7lcj1Ccl9uUVRwIm_L0CTzQ&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQ8tMDegQIPhAG
+            - text: "3"
+          - link "Page 4" [ref=f58e515] [cursor=pointer]:
+            - /url: /search?q=%22mean+resultant+length%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=9v1ParqoNufbkPIPgpfS2Qk&start=30&sa=N&sstk=AU9db-BvXeTM2CtTpIegvOlfIOluTfXFdXgd4PoBo1aML3MA-450U1oTZCjTSJcb5PO1m8PgTu1XDBA7lcj1Ccl9uUVRwIm_L0CTzQ&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQ8tMDegQIPhAI
+            - text: "4"
+          - link "Page 5" [ref=f58e517] [cursor=pointer]:
+            - /url: /search?q=%22mean+resultant+length%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=9v1ParqoNufbkPIPgpfS2Qk&start=40&sa=N&sstk=AU9db-BvXeTM2CtTpIegvOlfIOluTfXFdXgd4PoBo1aML3MA-450U1oTZCjTSJcb5PO1m8PgTu1XDBA7lcj1Ccl9uUVRwIm_L0CTzQ&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQ8tMDegQIPhAK
+            - text: "5"
+          - link "Page 6" [ref=f58e519] [cursor=pointer]:
+            - /url: /search?q=%22mean+resultant+length%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=9v1ParqoNufbkPIPgpfS2Qk&start=50&sa=N&sstk=AU9db-BvXeTM2CtTpIegvOlfIOluTfXFdXgd4PoBo1aML3MA-450U1oTZCjTSJcb5PO1m8PgTu1XDBA7lcj1Ccl9uUVRwIm_L0CTzQ&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQ8tMDegQIPhAM
+            - text: "6"
+          - link "Page 7" [ref=f58e521] [cursor=pointer]:
+            - /url: /search?q=%22mean+resultant+length%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=9v1ParqoNufbkPIPgpfS2Qk&start=60&sa=N&sstk=AU9db-BvXeTM2CtTpIegvOlfIOluTfXFdXgd4PoBo1aML3MA-450U1oTZCjTSJcb5PO1m8PgTu1XDBA7lcj1Ccl9uUVRwIm_L0CTzQ&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQ8tMDegQIPhAO
+            - text: "7"
+          - link "Page 8" [ref=f58e523] [cursor=pointer]:
+            - /url: /search?q=%22mean+resultant+length%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=9v1ParqoNufbkPIPgpfS2Qk&start=70&sa=N&sstk=AU9db-BvXeTM2CtTpIegvOlfIOluTfXFdXgd4PoBo1aML3MA-450U1oTZCjTSJcb5PO1m8PgTu1XDBA7lcj1Ccl9uUVRwIm_L0CTzQ&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQ8tMDegQIPhAQ
+            - text: "8"
+          - link "Page 9" [ref=f58e525] [cursor=pointer]:
+            - /url: /search?q=%22mean+resultant+length%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=9v1ParqoNufbkPIPgpfS2Qk&start=80&sa=N&sstk=AU9db-BvXeTM2CtTpIegvOlfIOluTfXFdXgd4PoBo1aML3MA-450U1oTZCjTSJcb5PO1m8PgTu1XDBA7lcj1Ccl9uUVRwIm_L0CTzQ&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQ8tMDegQIPhAS
+            - text: "9"
+          - link "Page 10" [ref=f58e527] [cursor=pointer]:
+            - /url: /search?q=%22mean+resultant+length%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=9v1ParqoNufbkPIPgpfS2Qk&start=90&sa=N&sstk=AU9db-BvXeTM2CtTpIegvOlfIOluTfXFdXgd4PoBo1aML3MA-450U1oTZCjTSJcb5PO1m8PgTu1XDBA7lcj1Ccl9uUVRwIm_L0CTzQ&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQ8tMDegQIPhAU
+            - text: "10"
+          - heading [level=2] [ref=f58e529]:
+            - link "Next" [ref=f58e530] [cursor=pointer]:
+              - /url: /search?q=%22mean+resultant+length%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=9v1ParqoNufbkPIPgpfS2Qk&start=10&sa=N&sstk=AU9db-BvXeTM2CtTpIegvOlfIOluTfXFdXgd4PoBo1aML3MA-450U1oTZCjTSJcb5PO1m8PgTu1XDBA7lcj1Ccl9uUVRwIm_L0CTzQ&ved=2ahUKEwi6-8GnscaVAxXnLUQIHYKLNJsQ8NMDegQIPhAW
+        - navigation
+    - contentinfo [ref=f58e533]:
+      - heading "Footer Links" [level=1] [ref=f58e534]
+      - generic [ref=f58e538]:
+        - generic [ref=f58e542]:
+          - button "Woodland, California - From your IP address" [ref=f58e544] [cursor=pointer]:
+            - generic [ref=f58e545]: Woodland, California
+            - generic [ref=f58e547]:
+              - text: "-"
+              - generic [ref=f58e548]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f58e550] [cursor=pointer]
+        - generic [ref=f58e553]:
+          - link "Help" [ref=f58e554] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f58e555] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f58e556] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f58e557] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

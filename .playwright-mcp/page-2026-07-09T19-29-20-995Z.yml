@@ -1,0 +1,282 @@
+- generic [ref=f5e2]:
+  - link "Skip to main content" [ref=f5e3] [cursor=pointer]:
+    - /url: "#content"
+  - region "Announcement" [ref=f5e4]:
+    - generic [ref=f5e6]: arXiv is now an independent nonprofit!
+    - link "Learn more" [ref=f5e7] [cursor=pointer]:
+      - /url: https://info.arxiv.org/about
+    - button "Dismiss announcement" [ref=f5e8] [cursor=pointer]: ×
+  - banner [ref=f5e9]:
+    - link [ref=f5e10] [cursor=pointer]:
+      - /url: https://arxiv.org/IgnoreMe
+    - link "archive home" [ref=f5e11] [cursor=pointer]:
+      - /url: https://arxiv.org/
+      - img "archive" [ref=f5e12]
+    - navigation "Main navigation" [ref=f5e13]:
+      - link "Search" [ref=f5e14] [cursor=pointer]:
+        - /url: https://arxiv.org/search
+      - link "Submit" [ref=f5e18] [cursor=pointer]:
+        - /url: https://arxiv.org/user/create
+      - link "Donate" [ref=f5e19] [cursor=pointer]:
+        - /url: https://info.arxiv.org/about/donate.html
+      - link "Log in" [ref=f5e21] [cursor=pointer]:
+        - /url: https://arxiv.org/login
+  - main [ref=f5e22]:
+    - generic [ref=f5e24]:
+      - generic [ref=f5e25]:
+        - heading "Computer Science > Machine Learning" [level=1] [ref=f5e27]
+        - generic [ref=f5e29]:
+          - generic [ref=f5e30]:
+            - text: "[Submitted on 25 May 2018 ("
+            - link "v1" [ref=f5e31] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/1805.10032v1
+            - text: ), last revised 18 May 2019 (this version, v3)]
+          - 'heading "Zeno: Distributed Stochastic Gradient Descent with Suspicion-based Fault-tolerance" [level=1] [ref=f5e32]'
+          - generic [ref=f5e33]:
+            - link "Cong Xie" [ref=f5e34] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Xie,+C
+            - text: ","
+            - link "Oluwasanmi Koyejo" [ref=f5e35] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Koyejo,+O
+            - text: ","
+            - link "Indranil Gupta" [ref=f5e36] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Gupta,+I
+          - blockquote [ref=f5e37]: We present Zeno, a technique to make distributed machine learning, particularly Stochastic Gradient Descent (SGD), tolerant to an arbitrary number of faulty workers. Zeno generalizes previous results that assumed a majority of non-faulty nodes; we need assume only one non-faulty worker. Our key idea is to suspect workers that are potentially defective. Since this is likely to lead to false positives, we use a ranking-based preference mechanism. We prove the convergence of SGD for non-convex problems under these scenarios. Experimental results show that Zeno outperforms existing approaches.
+          - table "Additional metadata" [ref=f5e39]:
+            - rowgroup [ref=f5e40]:
+              - row [ref=f5e41]:
+                - cell "Comments:" [ref=f5e42]
+                - cell "ICML 2019" [ref=f5e43]
+              - row [ref=f5e44]:
+                - cell "Subjects:" [ref=f5e45]
+                - cell "Machine Learning (cs.LG); Cryptography and Security (cs.CR); Distributed, Parallel, and Cluster Computing (cs.DC); Machine Learning (stat.ML)" [ref=f5e46]
+              - row [ref=f5e47]:
+                - cell "Cite as:" [ref=f5e48]
+                - cell [ref=f5e49]:
+                  - generic [ref=f5e50]:
+                    - link "arXiv:1805.10032" [ref=f5e51] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/1805.10032
+                    - text: "[cs.LG]"
+              - row [ref=f5e52]:
+                - cell [ref=f5e53]
+                - cell [ref=f5e54]:
+                  - text: (or
+                  - generic [ref=f5e55]:
+                    - link "arXiv:1805.10032v3" [ref=f5e56] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/1805.10032v3
+                    - text: "[cs.LG]"
+                  - text: for this version)
+              - row [ref=f5e57]:
+                - cell [ref=f5e58]
+                - cell [ref=f5e59]:
+                  - link "https://doi.org/10.48550/arXiv.1805.10032" [ref=f5e60] [cursor=pointer]:
+                    - /url: https://doi.org/10.48550/arXiv.1805.10032
+                  - button "Focus to learn more" [ref=f5e62]
+        - generic [ref=f5e65]:
+          - heading "Submission history" [level=2] [ref=f5e66]
+          - text: "From: Cong Xie ["
+          - link "view email" [ref=f5e67] [cursor=pointer]:
+            - /url: /show-email/9ef97eff/1805.10032
+          - text: "]"
+          - strong [ref=f5e68]:
+            - link "[v1]" [ref=f5e69] [cursor=pointer]:
+              - /url: /abs/1805.10032v1
+          - text: Fri, 25 May 2018 08:33:24 UTC (537 KB)
+          - strong [ref=f5e70]:
+            - link "[v2]" [ref=f5e71] [cursor=pointer]:
+              - /url: /abs/1805.10032v2
+          - text: Sun, 16 Sep 2018 08:20:57 UTC (536 KB)
+          - strong [ref=f5e72]: "[v3]"
+          - text: Sat, 18 May 2019 00:52:06 UTC (242 KB)
+      - generic [ref=f5e73]:
+        - generic [ref=f5e74]:
+          - heading "Access Paper:" [level=2] [ref=f5e75]
+          - list [ref=f5e76]:
+            - listitem [ref=f5e77]:
+              - link "View PDF" [ref=f5e78] [cursor=pointer]:
+                - /url: /pdf/1805.10032
+            - listitem [ref=f5e79]:
+              - link "TeX Source" [ref=f5e80] [cursor=pointer]:
+                - /url: /src/1805.10032
+          - link "view license" [ref=f5e82] [cursor=pointer]:
+            - /url: http://arxiv.org/licenses/nonexclusive-distrib/1.0/
+        - generic [ref=f5e83]:
+          - heading "Current browse context:" [level=3] [ref=f5e84]
+          - generic [ref=f5e85]: cs.LG
+          - generic [ref=f5e86]:
+            - link "< prev" [ref=f5e88] [cursor=pointer]:
+              - /url: /prevnext?id=1805.10032&function=prev&context=cs.LG
+            - text: "|"
+            - link "next >" [ref=f5e90] [cursor=pointer]:
+              - /url: /prevnext?id=1805.10032&function=next&context=cs.LG
+          - generic [ref=f5e91]:
+            - link "new" [ref=f5e92] [cursor=pointer]:
+              - /url: /list/cs.LG/new
+            - text: "|"
+            - link "recent" [ref=f5e93] [cursor=pointer]:
+              - /url: /list/cs.LG/recent
+            - text: "|"
+            - link "2018-05" [ref=f5e94] [cursor=pointer]:
+              - /url: /list/cs.LG/2018-05
+          - generic [ref=f5e95]:
+            - text: "Change to browse by:"
+            - generic [ref=f5e96]:
+              - link "cs" [ref=f5e97] [cursor=pointer]:
+                - /url: /abs/1805.10032?context=cs
+              - link "cs.CR" [ref=f5e98] [cursor=pointer]:
+                - /url: /abs/1805.10032?context=cs.CR
+              - link "cs.DC" [ref=f5e99] [cursor=pointer]:
+                - /url: /abs/1805.10032?context=cs.DC
+              - link "stat" [ref=f5e100] [cursor=pointer]:
+                - /url: /abs/1805.10032?context=stat
+              - link "stat.ML" [ref=f5e101] [cursor=pointer]:
+                - /url: /abs/1805.10032?context=stat.ML
+        - generic [ref=f5e102]:
+          - heading "References & Citations" [level=3] [ref=f5e103]
+          - list [ref=f5e104]:
+            - listitem [ref=f5e105]:
+              - link "NASA ADS" [ref=f5e106] [cursor=pointer]:
+                - /url: https://ui.adsabs.harvard.edu/abs/arXiv:1805.10032
+            - listitem [ref=f5e107]:
+              - link "Google Scholar" [ref=f5e108] [cursor=pointer]:
+                - /url: https://scholar.google.com/scholar_lookup?arxiv_id=1805.10032
+            - listitem [ref=f5e109]:
+              - link "Semantic Scholar" [ref=f5e110] [cursor=pointer]:
+                - /url: https://api.semanticscholar.org/arXiv:1805.10032
+        - generic [ref=f5e111]:
+          - heading [level=3] [ref=f5e112]:
+            - link "DBLP" [ref=f5e113] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de
+            - text: "- CS Bibliography"
+          - generic [ref=f5e114]:
+            - link "listing" [ref=f5e115] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/db/journals/corr/corr1805.html#abs-1805-10032
+            - text: "|"
+            - link "bibtex" [ref=f5e116] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/rec/bibtex/journals/corr/abs-1805-10032
+          - generic [ref=f5e117]:
+            - link "Cong Xie" [ref=f5e118] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Cong%20Xie
+            - link "Oluwasanmi Koyejo" [ref=f5e119] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Oluwasanmi%20Koyejo
+            - link "Indranil Gupta" [ref=f5e120] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Indranil%20Gupta
+        - button "export BibTeX citation" [ref=f5e122]
+        - generic [ref=f5e123]:
+          - heading "Bookmark" [level=3] [ref=f5e125]
+          - link [ref=f5e126] [cursor=pointer]:
+            - /url: "http://www.bibsonomy.org/BibtexHandler?requTask=upload&url=https://arxiv.org/abs/1805.10032&description=Zeno: Distributed Stochastic Gradient Descent with Suspicion-based Fault-tolerance"
+            - img "BibSonomy" [ref=f5e127]
+          - link [ref=f5e128] [cursor=pointer]:
+            - /url: "https://reddit.com/submit?url=https://arxiv.org/abs/1805.10032&title=Zeno: Distributed Stochastic Gradient Descent with Suspicion-based Fault-tolerance"
+            - img "Reddit" [ref=f5e129]
+      - tablist "arXivLabs tools" [ref=f5e131]:
+        - radio "Bibliographic Tools" [checked] [ref=f5e132]
+        - tab "Bibliographic Tools" [selected] [ref=f5e133] [cursor=pointer]
+        - tabpanel "Bibliographic Tools" [ref=f5e134]:
+          - heading "Bibliographic and Citation Tools" [level=1] [ref=f5e135]
+          - generic [ref=f5e136]:
+            - generic [ref=f5e137]:
+              - generic [ref=f5e139]:
+                - checkbox "Bibliographic Explorer Toggle"
+                - generic [ref=f5e141]: Bibliographic Explorer Toggle
+              - generic [ref=f5e142]:
+                - text: Bibliographic Explorer
+                - emphasis [ref=f5e143]:
+                  - text: (
+                  - link "What is the Explorer?" [ref=f5e144] [cursor=pointer]:
+                    - /url: https://info.arxiv.org/labs/showcase.html#arxiv-bibliographic-explorer
+                  - text: )
+            - generic [ref=f5e145]:
+              - generic [ref=f5e147]:
+                - checkbox "Connected Papers"
+                - generic [ref=f5e149]: Connected Papers Toggle
+              - generic [ref=f5e150]:
+                - text: Connected Papers
+                - emphasis [ref=f5e151]:
+                  - text: (
+                  - link "What is Connected Papers?" [ref=f5e152] [cursor=pointer]:
+                    - /url: https://www.connectedpapers.com/about
+                  - text: )
+            - generic [ref=f5e153]:
+              - generic [ref=f5e155]:
+                - checkbox "Litmaps"
+                - generic [ref=f5e157]: Litmaps Toggle
+              - generic [ref=f5e158]:
+                - text: Litmaps
+                - emphasis [ref=f5e159]:
+                  - text: (
+                  - link "What is Litmaps?" [ref=f5e160] [cursor=pointer]:
+                    - /url: https://www.litmaps.co/
+                  - text: )
+            - generic [ref=f5e161]:
+              - generic [ref=f5e163]:
+                - checkbox "scite Smart Citations"
+                - generic [ref=f5e165]: scite.ai Toggle
+              - generic [ref=f5e166]:
+                - text: scite Smart Citations
+                - emphasis [ref=f5e167]:
+                  - text: (
+                  - link "What are Smart Citations?" [ref=f5e168] [cursor=pointer]:
+                    - /url: https://www.scite.ai/
+                  - text: )
+        - radio "Code, Data, Media" [ref=f5e172]
+        - tab "Code, Data, Media" [ref=f5e173] [cursor=pointer]
+        - radio "Demos" [ref=f5e174]
+        - tab "Demos" [ref=f5e175] [cursor=pointer]
+        - radio "Related Papers" [ref=f5e176]
+        - tab "Related Papers" [ref=f5e177] [cursor=pointer]
+        - radio "About arXivLabs" [ref=f5e178]
+        - tab "About arXivLabs" [ref=f5e179] [cursor=pointer]
+      - generic [ref=f5e180]:
+        - link "Which authors of this paper are endorsers?" [ref=f5e181] [cursor=pointer]:
+          - /url: /auth/show-endorsers/1805.10032
+        - text: "|"
+        - link "Disable MathJax" [ref=f5e182] [cursor=pointer]:
+          - /url: javascript:setMathjaxCookie()
+        - text: (
+        - link "What is MathJax?" [ref=f5e183] [cursor=pointer]:
+          - /url: https://info.arxiv.org/help/mathjax.html
+        - text: )
+  - contentinfo [ref=f5e184]:
+    - generic [ref=f5e185]:
+      - generic [ref=f5e186]:
+        - generic [ref=f5e187]:
+          - text: We gratefully acknowledge support from our
+          - strong [ref=f5e188]: major funders
+          - text: ","
+          - link [ref=f5e189] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about/ourmembers.html
+            - strong [ref=f5e190]: member institutions
+          - text: ", and all contributors."
+        - navigation "Site navigation" [ref=f5e191]:
+          - link "About" [ref=f5e192] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about
+          - generic [ref=f5e193]: ·
+          - link "Help" [ref=f5e194] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help
+          - generic [ref=f5e195]: ·
+          - link "Contact" [ref=f5e196] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/contact.html
+          - generic [ref=f5e197]: ·
+          - link "Subscribe" [ref=f5e198] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/subscribe
+          - generic [ref=f5e199]: ·
+          - link "Copyright" [ref=f5e200] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/license/index.html
+          - generic [ref=f5e201]: ·
+          - link "Privacy" [ref=f5e202] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/policies/privacy_policy.html
+          - generic [ref=f5e203]: ·
+          - link "Accessibility" [ref=f5e204] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/web_accessibility.html
+          - generic [ref=f5e205]: ·
+          - link "Operational Status (opens in new tab)" [ref=f5e206] [cursor=pointer]:
+            - /url: https://status.arxiv.org
+            - text: Operational Status
+            - generic [ref=f5e207]: (opens in new tab)
+      - generic "Major funders" [ref=f5e208]:
+        - generic [ref=f5e209]: Major funding support from
+        - generic [ref=f5e210]:
+          - img "Simons Foundation" [ref=f5e211]
+          - img "Schmidt Sciences" [ref=f5e212]

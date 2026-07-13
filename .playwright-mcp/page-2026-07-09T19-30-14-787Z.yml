@@ -1,0 +1,324 @@
+- generic [active] [ref=f22e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f22e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f22e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f22e8]:
+    - search [ref=f22e9]:
+      - generic [ref=f22e11]:
+        - link "Go to Google Home" [ref=f22e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4QPAgI
+        - generic [ref=f22e21]:
+          - generic [ref=f22e22]:
+            - combobox "Search" [ref=f22e25]: STORM stochastic trust region method expected value functions paper STORM stochastic trust region method expected value functions paper
+            - generic [ref=f22e26]:
+              - button "Clear" [ref=f22e28] [cursor=pointer]
+              - generic [ref=f22e33]:
+                - button "Search by voice" [ref=f22e34] [cursor=pointer]
+                - button "Search by image" [ref=f22e37] [cursor=pointer]
+          - button "Search" [ref=f22e40] [cursor=pointer]
+    - generic [ref=f22e45]:
+      - button "Settings" [ref=f22e47] [cursor=pointer]
+      - button "Share" [ref=f22e53] [cursor=pointer]
+      - generic [ref=f22e59]:
+        - button "Google apps" [ref=f22e61] [cursor=pointer]
+        - link "Sign in" [ref=f22e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3DSTORM%2Bstochastic%2Btrust%2Bregion%2Bmethod%2Bexpected%2Bvalue%2Bfunctions%2Bpaper&ec=futura_srp_og_si_72236_p
+  - generic [ref=f22e68]:
+    - navigation [ref=f22e74]:
+      - generic [ref=f22e80]:
+        - list [ref=f22e81]:
+          - listitem [ref=f22e82]:
+            - link "AI Mode" [ref=f22e85] [cursor=pointer]:
+              - /url: /search?q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sca_esv=d4e925c21a8887a9&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&aep=1&ntc=1&sa=X&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4Q2J8OegQICBAD
+          - listitem [ref=f22e89]:
+            - link "All" [disabled] [ref=f22e90]
+          - listitem [ref=f22e93]:
+            - link "Images" [ref=f22e94] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sa=X&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4QtKgLegQIGhAB
+          - listitem [ref=f22e97]:
+            - link "Videos" [ref=f22e98] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sa=X&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4QtKgLegQIFhAB
+          - listitem [ref=f22e101]:
+            - link "Shopping" [ref=f22e102] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=STORM+stochastic+trust+region+method+expected+value+functions+paper&ved=1t:220175&ictx=111
+          - listitem [ref=f22e105]:
+            - link "Forums" [ref=f22e106] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sa=X&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4Qs6gLegQIDBAB
+          - listitem [ref=f22e109]:
+            - link "Short videos" [ref=f22e110] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sa=X&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4Qs6gLegQICxAB
+          - listitem [ref=f22e113]:
+            - button [ref=f22e114] [cursor=pointer]:
+              - generic "More filters" [ref=f22e115]: More
+        - button "Tools" [ref=f22e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f22e129]
+    - generic [ref=f22e134]:
+      - generic [ref=f22e153]:
+        - heading "Thinking" [level=2] [ref=f22e157]
+        - progressbar "Generating" [ref=f22e160]
+      - main [ref=f22e162]:
+        - generic [ref=f22e166]:
+          - generic [ref=f22e169]:
+            - heading "Web results" [level=2] [ref=f22e170]
+            - generic [ref=f22e171]:
+              - generic [ref=f22e174]:
+                - link "Stochastic Optimization Using a Trust-Region Method and ... arXiv https://arxiv.org › pdf" [ref=f22e176] [cursor=pointer]:
+                  - /url: https://arxiv.org/pdf/1504.04231
+                  - heading "Stochastic Optimization Using a Trust-Region Method and ..." [level=3] [ref=f22e177]
+                  - generic [ref=f22e183]:
+                    - generic [ref=f22e184]: arXiv
+                    - generic [ref=f22e186]: https://arxiv.org › pdf
+                - generic [ref=f22e188]: PDF
+                - button "About this result" [ref=f22e191] [cursor=pointer]
+              - generic [ref=f22e197]:
+                - generic [ref=f22e198]: by R Chen · 2015 · Cited by 231 —
+                - generic [ref=f22e199]:
+                  - text: Abstract. In this
+                  - emphasis [ref=f22e200]: paper
+                  - text: ", we propose and analyze a"
+                  - emphasis [ref=f22e201]: trust
+                  - text: "-"
+                  - emphasis [ref=f22e202]: region
+                  - text: model-based algorithm for solving unconstrained
+                  - emphasis [ref=f22e203]: stochastic
+                  - text: optimization ...
+                - link "Read more" [ref=f22e204] [cursor=pointer]:
+                  - /url: https://arxiv.org/pdf/1504.04231#:~:text=Abstract,unconstrained%20stochastic%20optimization%20problems.
+          - generic [ref=f22e208]:
+            - generic [ref=f22e211]:
+              - link "Convergence Rate Analysis of a Stochastic Trust Region ... Optimization Online https://optimization-online.org › 2018/10" [ref=f22e213] [cursor=pointer]:
+                - /url: https://optimization-online.org/wp-content/uploads/2018/10/6869.pdf
+                - heading "Convergence Rate Analysis of a Stochastic Trust Region ..." [level=3] [ref=f22e214]
+                - generic [ref=f22e220]:
+                  - generic [ref=f22e221]: Optimization Online
+                  - generic [ref=f22e223]: https://optimization-online.org › 2018/10
+              - generic [ref=f22e225]: PDF
+              - button "About this result" [ref=f22e228] [cursor=pointer]
+            - generic [ref=f22e233]:
+              - generic [ref=f22e234]:
+                - generic [ref=f22e235]: by J Blanchet · 2018 · Cited by 181 —
+                - generic [ref=f22e236]:
+                  - text: Abstract. We propose a novel framework for analyzing convergence rates of
+                  - emphasis [ref=f22e237]: stochastic
+                  - text: optimization algorithms with adaptive step sizes.
+                - link "Read more" [ref=f22e238] [cursor=pointer]:
+                  - /url: https://optimization-online.org/wp-content/uploads/2018/10/6869.pdf#:~:text=Abstract,algorithms%20with%20adaptive%20step%20sizes.
+              - generic [ref=f22e239]: 36 pages
+          - generic [ref=f22e243]:
+            - generic [ref=f22e246]:
+              - link "Convergence Rate Analysis of a Stochastic Trust Region ... ORA - Oxford University Research Archive https://ora.ox.ac.uk › objects › files" [ref=f22e248] [cursor=pointer]:
+                - /url: https://ora.ox.ac.uk/objects/uuid:798e9ee8-baa2-4497-b53a-1377c4c2f748/files/md4b318de63104840148dcc3cb163a1c4
+                - heading "Convergence Rate Analysis of a Stochastic Trust Region ..." [level=3] [ref=f22e249]
+                - generic [ref=f22e255]:
+                  - generic [ref=f22e256]: ORA - Oxford University Research Archive
+                  - generic [ref=f22e258]: https://ora.ox.ac.uk › objects › files
+              - generic [ref=f22e260]: PDF
+              - button "About this result" [ref=f22e263] [cursor=pointer]
+            - generic [ref=f22e269]:
+              - generic [ref=f22e270]: by J Blanchet · 2019 · Cited by 181 —
+              - generic [ref=f22e271]:
+                - text: We will refer to the primary
+                - emphasis [ref=f22e272]: method
+                - text: analyzed in this
+                - emphasis [ref=f22e273]: paper
+                - text: as
+                - emphasis [ref=f22e274]: STORM
+                - text: (
+                - emphasis [ref=f22e275]: Stochastic Trust
+                - text: "-"
+                - emphasis [ref=f22e276]: region
+                - text: . Optimization with Random Models).
+                - emphasis [ref=f22e277]: STORM
+                - text: was ...
+              - link "Read more" [ref=f22e278] [cursor=pointer]:
+                - /url: https://ora.ox.ac.uk/objects/uuid:798e9ee8-baa2-4497-b53a-1377c4c2f748/files/md4b318de63104840148dcc3cb163a1c4#:~:text=We%20will%20refer%20to%20the,introduced%20in%20Chen%20et%20al.
+          - generic [ref=f22e282]:
+            - generic [ref=f22e285]:
+              - link "Convergence Rate Analysis of a Stochastic Trust Region ... Stanford University http://web.stanford.edu › ~jblanche › papers › St..." [ref=f22e287] [cursor=pointer]:
+                - /url: http://web.stanford.edu/~jblanche/papers/Stochastic_Trust_Region.pdf
+                - heading "Convergence Rate Analysis of a Stochastic Trust Region ..." [level=3] [ref=f22e288]
+                - generic [ref=f22e294]:
+                  - generic [ref=f22e295]: Stanford University
+                  - generic [ref=f22e297]: http://web.stanford.edu › ~jblanche › papers › St...
+              - generic [ref=f22e299]: PDF
+              - button "About this result" [ref=f22e302] [cursor=pointer]
+            - generic [ref=f22e307]:
+              - generic [ref=f22e308]:
+                - generic [ref=f22e309]: by J Blanchet · 2016 · Cited by 44 —
+                - generic [ref=f22e310]:
+                  - text: In this
+                  - emphasis [ref=f22e311]: paper
+                  - text: ", we explore the theoretical convergence rate of the"
+                  - emphasis [ref=f22e312]: trust region method
+                  - text: in [2], which we will refer to as.
+                  - emphasis [ref=f22e313]: STORM
+                  - text: (
+                  - emphasis [ref=f22e314]: Stochastic
+                  - text: trust ...
+                - link "Read more" [ref=f22e315] [cursor=pointer]:
+                  - /url: http://web.stanford.edu/~jblanche/papers/Stochastic_Trust_Region.pdf#:~:text=In%20this%20paper%2C%20we%20explore,region%20method%20with%20Random%20Models).
+              - generic [ref=f22e316]: 22 pages
+          - generic [ref=f22e320]:
+            - generic [ref=f22e323]:
+              - link "Black-Box Optimization in Machine Learning with Trust ... P.C. Rossin College of Engineering & Applied Science https://engineering.lehigh.edu › pdf › tech-papers" [ref=f22e325] [cursor=pointer]:
+                - /url: https://engineering.lehigh.edu/sites/engineering.lehigh.edu/files/_DEPARTMENTS/ise/pdf/tech-papers/17/17T_005.pdf
+                - heading "Black-Box Optimization in Machine Learning with Trust ..." [level=3] [ref=f22e326]
+                - generic [ref=f22e332]:
+                  - generic [ref=f22e333]: P.C. Rossin College of Engineering & Applied Science
+                  - generic [ref=f22e335]: https://engineering.lehigh.edu › pdf › tech-papers
+              - generic [ref=f22e337]: PDF
+              - button "About this result" [ref=f22e340] [cursor=pointer]
+            - generic [ref=f22e345]:
+              - generic [ref=f22e346]:
+                - generic [ref=f22e347]: by H Ghanbari · Cited by 39 —
+                - generic [ref=f22e348]:
+                  - text: In this work, we utilize a
+                  - emphasis [ref=f22e349]: Trust Region
+                  - text: based. Derivative Free Optimization (DFO-TR)
+                  - emphasis [ref=f22e350]: method
+                  - text: to directly maximize the
+                  - emphasis [ref=f22e351]: Area
+                  - text: Under Receiver.
+                - link "Read more" [ref=f22e352] [cursor=pointer]:
+                  - /url: https://engineering.lehigh.edu/sites/engineering.lehigh.edu/files/_DEPARTMENTS/ise/pdf/tech-papers/17/17T_005.pdf#:~:text=In%20this%20work%2C%20we%20utilize,maximize%20the%20Area%20Under%20Receiver
+              - generic [ref=f22e353]: 14 pages
+          - generic [ref=f22e357]:
+            - generic [ref=f22e360]:
+              - link "Stochastic Trust-Region Algorithm in Random Subspaces ... SIAM Publications Library https://epubs.siam.org › doi" [ref=f22e362] [cursor=pointer]:
+                - /url: https://epubs.siam.org/doi/10.1137/22M1524072
+                - heading "Stochastic Trust-Region Algorithm in Random Subspaces ..." [level=3] [ref=f22e363]
+                - generic [ref=f22e369]:
+                  - generic [ref=f22e370]: SIAM Publications Library
+                  - generic [ref=f22e372]: https://epubs.siam.org › doi
+              - button "About this result" [ref=f22e376] [cursor=pointer]
+            - generic [ref=f22e382]:
+              - generic [ref=f22e383]:
+                - text: This work proposes a framework for large-scale
+                - emphasis [ref=f22e384]: stochastic
+                - text: derivative-free optimization (DFO) by introducing STARS, a
+                - emphasis [ref=f22e385]: trust
+                - text: "-"
+                - emphasis [ref=f22e386]: region method
+                - text: based on iterative ...
+              - link "Read more" [ref=f22e387] [cursor=pointer]:
+                - /url: https://epubs.siam.org/doi/10.1137/22M1524072#:~:text=This%20work%20proposes%20a%20framework,iterative%20minimization%20in%20random%20subspaces.
+          - generic [ref=f22e391]:
+            - generic [ref=f22e394]:
+              - link "Stochastic Average Model Methods OSTI (.gov) https://www.osti.gov › servlets › purl" [ref=f22e396] [cursor=pointer]:
+                - /url: https://www.osti.gov/servlets/purl/2476911
+                - heading "Stochastic Average Model Methods" [level=3] [ref=f22e397]
+                - generic [ref=f22e403]:
+                  - generic [ref=f22e404]: OSTI (.gov)
+                  - generic [ref=f22e406]: https://www.osti.gov › servlets › purl
+              - generic [ref=f22e408]: PDF
+              - button "About this result" [ref=f22e411] [cursor=pointer]
+            - generic [ref=f22e417]:
+              - generic [ref=f22e418]: by M Menickelly · 2024 · Cited by 3 —
+              - generic [ref=f22e419]:
+                - emphasis [ref=f22e420]: STORM
+                - text: framework is a
+                - emphasis [ref=f22e421]: trust
+                - text: "-"
+                - emphasis [ref=f22e422]: region method
+                - text: with
+                - emphasis [ref=f22e423]: stochastic
+                - text: models and
+                - emphasis [ref=f22e424]: function value
+                - text: estimates; Algorithm 1 can be seen as a special case of
+                - emphasis [ref=f22e425]: STORM
+                - text: ", where the."
+              - link "Read more" [ref=f22e426] [cursor=pointer]:
+                - /url: https://www.osti.gov/servlets/purl/2476911#:~:text=STORM%20framework%20is%20a%20trust%2Dregion,case%20of%20STORM%2C%20where%20the
+          - generic [ref=f22e430]:
+            - generic [ref=f22e433]:
+              - link "Convergence Rate Analysis of a Stochastic Trust Region ... arXiv https://arxiv.org › pdf" [ref=f22e435] [cursor=pointer]:
+                - /url: https://arxiv.org/pdf/1609.07428
+                - heading "Convergence Rate Analysis of a Stochastic Trust Region ..." [level=3] [ref=f22e436]
+                - generic [ref=f22e442]:
+                  - generic [ref=f22e443]: arXiv
+                  - generic [ref=f22e445]: https://arxiv.org › pdf
+              - generic [ref=f22e447]: PDF
+              - button "About this result" [ref=f22e450] [cursor=pointer]
+            - generic [ref=f22e456]:
+              - generic [ref=f22e457]: by J Blanchet · 2016 · Cited by 1 —
+              - generic [ref=f22e458]:
+                - text: Abstract. We propose a novel framework for analyzing convergence rates of
+                - emphasis [ref=f22e459]: stochastic
+                - text: optimization algorithms with adaptive step sizes.
+              - link "Read more" [ref=f22e460] [cursor=pointer]:
+                - /url: https://arxiv.org/pdf/1609.07428#:~:text=Abstract,algorithms%20with%20adaptive%20step%20sizes.
+          - generic [ref=f22e464]:
+            - generic [ref=f22e467]:
+              - link "(PDF) Stochastic Trust-Region Response-Surface Method ... ResearchGate https://www.researchgate.net › publication › 26217353..." [ref=f22e469] [cursor=pointer]:
+                - /url: https://www.researchgate.net/publication/262173536_Stochastic_Trust-Region_Response-Surface_Method_STRONG---A_New_Response-Surface_Framework_for_Simulation_Optimization
+                - heading "(PDF) Stochastic Trust-Region Response-Surface Method ..." [level=3] [ref=f22e470]
+                - generic [ref=f22e476]:
+                  - generic [ref=f22e477]: ResearchGate
+                  - generic [ref=f22e479]: https://www.researchgate.net › publication › 26217353...
+              - button "About this result" [ref=f22e483] [cursor=pointer]
+            - generic [ref=f22e489]:
+              - generic [ref=f22e490]: Oct 1, 2015 —
+              - generic [ref=f22e491]:
+                - text: In this
+                - emphasis [ref=f22e492]: paper
+                - text: ", we consider the problem of"
+                - emphasis [ref=f22e493]: stochastic
+                - text: optimization under a bandit feedback model. We generalize the GP-UCB algorithm ...
+              - link "Read more" [ref=f22e494] [cursor=pointer]:
+                - /url: https://www.researchgate.net/publication/262173536_Stochastic_Trust-Region_Response-Surface_Method_STRONG---A_New_Response-Surface_Framework_for_Simulation_Optimization#:~:text=In%20this%20paper%2C%20we%20consider,We%20generalize%20the%20GP%2DUCB%20algorithm
+        - navigation [ref=f22e497]:
+          - heading "Page Navigation" [level=1] [ref=f22e498]
+          - text: "1"
+          - link "Page 2" [ref=f22e501] [cursor=pointer]:
+            - /url: /search?q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sca_esv=d4e925c21a8887a9&ei=xvZPauyzCdrIkPIPzJGy8AI&start=10&sa=N&sstk=AU9db-CMtGYA9m59KXL0s0uk4g3FfIT3cfaGPy9ivVvWyozE6IPWpzZlUacl014MMCs8IxCn-41vaYeyOpMaLLDKmwmCPDnBWqiU7w&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4Q8tMDegQIPBAE
+            - text: "2"
+          - link "Page 3" [ref=f22e503] [cursor=pointer]:
+            - /url: /search?q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sca_esv=d4e925c21a8887a9&ei=xvZPauyzCdrIkPIPzJGy8AI&start=20&sa=N&sstk=AU9db-CMtGYA9m59KXL0s0uk4g3FfIT3cfaGPy9ivVvWyozE6IPWpzZlUacl014MMCs8IxCn-41vaYeyOpMaLLDKmwmCPDnBWqiU7w&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4Q8tMDegQIPBAG
+            - text: "3"
+          - link "Page 4" [ref=f22e505] [cursor=pointer]:
+            - /url: /search?q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sca_esv=d4e925c21a8887a9&ei=xvZPauyzCdrIkPIPzJGy8AI&start=30&sa=N&sstk=AU9db-CMtGYA9m59KXL0s0uk4g3FfIT3cfaGPy9ivVvWyozE6IPWpzZlUacl014MMCs8IxCn-41vaYeyOpMaLLDKmwmCPDnBWqiU7w&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4Q8tMDegQIPBAI
+            - text: "4"
+          - link "Page 5" [ref=f22e507] [cursor=pointer]:
+            - /url: /search?q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sca_esv=d4e925c21a8887a9&ei=xvZPauyzCdrIkPIPzJGy8AI&start=40&sa=N&sstk=AU9db-CMtGYA9m59KXL0s0uk4g3FfIT3cfaGPy9ivVvWyozE6IPWpzZlUacl014MMCs8IxCn-41vaYeyOpMaLLDKmwmCPDnBWqiU7w&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4Q8tMDegQIPBAK
+            - text: "5"
+          - link "Page 6" [ref=f22e509] [cursor=pointer]:
+            - /url: /search?q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sca_esv=d4e925c21a8887a9&ei=xvZPauyzCdrIkPIPzJGy8AI&start=50&sa=N&sstk=AU9db-CMtGYA9m59KXL0s0uk4g3FfIT3cfaGPy9ivVvWyozE6IPWpzZlUacl014MMCs8IxCn-41vaYeyOpMaLLDKmwmCPDnBWqiU7w&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4Q8tMDegQIPBAM
+            - text: "6"
+          - link "Page 7" [ref=f22e511] [cursor=pointer]:
+            - /url: /search?q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sca_esv=d4e925c21a8887a9&ei=xvZPauyzCdrIkPIPzJGy8AI&start=60&sa=N&sstk=AU9db-CMtGYA9m59KXL0s0uk4g3FfIT3cfaGPy9ivVvWyozE6IPWpzZlUacl014MMCs8IxCn-41vaYeyOpMaLLDKmwmCPDnBWqiU7w&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4Q8tMDegQIPBAO
+            - text: "7"
+          - link "Page 8" [ref=f22e513] [cursor=pointer]:
+            - /url: /search?q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sca_esv=d4e925c21a8887a9&ei=xvZPauyzCdrIkPIPzJGy8AI&start=70&sa=N&sstk=AU9db-CMtGYA9m59KXL0s0uk4g3FfIT3cfaGPy9ivVvWyozE6IPWpzZlUacl014MMCs8IxCn-41vaYeyOpMaLLDKmwmCPDnBWqiU7w&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4Q8tMDegQIPBAQ
+            - text: "8"
+          - link "Page 9" [ref=f22e515] [cursor=pointer]:
+            - /url: /search?q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sca_esv=d4e925c21a8887a9&ei=xvZPauyzCdrIkPIPzJGy8AI&start=80&sa=N&sstk=AU9db-CMtGYA9m59KXL0s0uk4g3FfIT3cfaGPy9ivVvWyozE6IPWpzZlUacl014MMCs8IxCn-41vaYeyOpMaLLDKmwmCPDnBWqiU7w&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4Q8tMDegQIPBAS
+            - text: "9"
+          - link "Page 10" [ref=f22e517] [cursor=pointer]:
+            - /url: /search?q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sca_esv=d4e925c21a8887a9&ei=xvZPauyzCdrIkPIPzJGy8AI&start=90&sa=N&sstk=AU9db-CMtGYA9m59KXL0s0uk4g3FfIT3cfaGPy9ivVvWyozE6IPWpzZlUacl014MMCs8IxCn-41vaYeyOpMaLLDKmwmCPDnBWqiU7w&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4Q8tMDegQIPBAU
+            - text: "10"
+          - heading [level=2] [ref=f22e519]:
+            - link "Next" [ref=f22e520] [cursor=pointer]:
+              - /url: /search?q=STORM+stochastic+trust+region+method+expected+value+functions+paper&sca_esv=d4e925c21a8887a9&ei=xvZPauyzCdrIkPIPzJGy8AI&start=10&sa=N&sstk=AU9db-CMtGYA9m59KXL0s0uk4g3FfIT3cfaGPy9ivVvWyozE6IPWpzZlUacl014MMCs8IxCn-41vaYeyOpMaLLDKmwmCPDnBWqiU7w&ved=2ahUKEwjsruS5qsaVAxVaJEQIHcyIDC4Q8NMDegQIPBAW
+        - navigation
+    - contentinfo [ref=f22e523]:
+      - heading "Footer Links" [level=1] [ref=f22e524]
+      - generic [ref=f22e528]:
+        - generic [ref=f22e532]:
+          - button "Woodland, California - From your IP address" [ref=f22e534] [cursor=pointer]:
+            - generic [ref=f22e535]: Woodland, California
+            - generic [ref=f22e537]:
+              - text: "-"
+              - generic [ref=f22e538]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f22e540] [cursor=pointer]
+        - generic [ref=f22e543]:
+          - link "Help" [ref=f22e544] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f22e545] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f22e546] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f22e547] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

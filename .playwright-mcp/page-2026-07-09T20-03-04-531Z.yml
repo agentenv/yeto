@@ -1,0 +1,311 @@
+- generic [ref=f125e2]:
+  - link "Skip to main content" [ref=f125e3] [cursor=pointer]:
+    - /url: "#content"
+  - region "Announcement" [ref=f125e4]:
+    - generic [ref=f125e6]: arXiv is now an independent nonprofit!
+    - link "Learn more" [ref=f125e7] [cursor=pointer]:
+      - /url: https://info.arxiv.org/about
+    - button "Dismiss announcement" [ref=f125e8] [cursor=pointer]: ×
+  - banner [ref=f125e9]:
+    - link [ref=f125e10] [cursor=pointer]:
+      - /url: https://arxiv.org/IgnoreMe
+    - link "archive home" [ref=f125e11] [cursor=pointer]:
+      - /url: https://arxiv.org/
+      - img "archive" [ref=f125e12]
+    - navigation "Main navigation" [ref=f125e13]:
+      - link "Search" [ref=f125e14] [cursor=pointer]:
+        - /url: https://arxiv.org/search
+      - link "Submit" [ref=f125e18] [cursor=pointer]:
+        - /url: https://arxiv.org/user/create
+      - link "Donate" [ref=f125e19] [cursor=pointer]:
+        - /url: https://info.arxiv.org/about/donate.html
+      - link "Log in" [ref=f125e21] [cursor=pointer]:
+        - /url: https://arxiv.org/login
+  - main [ref=f125e22]:
+    - generic [ref=f125e24]:
+      - generic [ref=f125e25]:
+        - heading "Computer Science > Machine Learning" [level=1] [ref=f125e27]
+        - generic [ref=f125e29]:
+          - generic [ref=f125e30]:
+            - text: "[Submitted on 29 Feb 2020 ("
+            - link "v1" [ref=f125e31] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2003.00295v1
+            - text: ), last revised 8 Sep 2021 (this version, v5)]
+          - heading "Adaptive Federated Optimization" [level=1] [ref=f125e32]
+          - generic [ref=f125e33]:
+            - link "Sashank Reddi" [ref=f125e34] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Reddi,+S
+            - text: ","
+            - link "Zachary Charles" [ref=f125e35] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Charles,+Z
+            - text: ","
+            - link "Manzil Zaheer" [ref=f125e36] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Zaheer,+M
+            - text: ","
+            - link "Zachary Garrett" [ref=f125e37] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Garrett,+Z
+            - text: ","
+            - link "Keith Rush" [ref=f125e38] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Rush,+K
+            - text: ","
+            - link "Jakub Konečný" [ref=f125e39] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Kone%C4%8Dn%C3%BD,+J
+            - text: ","
+            - link "Sanjiv Kumar" [ref=f125e40] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Kumar,+S
+            - text: ","
+            - link "H. Brendan McMahan" [ref=f125e41] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=McMahan,+H+B
+          - blockquote [ref=f125e42]: Federated learning is a distributed machine learning paradigm in which a large number of clients coordinate with a central server to learn a model without sharing their own training data. Standard federated optimization methods such as Federated Averaging (FedAvg) are often difficult to tune and exhibit unfavorable convergence behavior. In non-federated settings, adaptive optimization methods have had notable success in combating such issues. In this work, we propose federated versions of adaptive optimizers, including Adagrad, Adam, and Yogi, and analyze their convergence in the presence of heterogeneous data for general non-convex settings. Our results highlight the interplay between client heterogeneity and communication efficiency. We also perform extensive experiments on these methods and show that the use of adaptive optimizers can significantly improve the performance of federated learning.
+          - table "Additional metadata" [ref=f125e44]:
+            - rowgroup [ref=f125e45]:
+              - row [ref=f125e46]:
+                - cell "Comments:" [ref=f125e47]
+                - cell "Published as a conference paper at ICLR 2021" [ref=f125e48]
+              - row [ref=f125e49]:
+                - cell "Subjects:" [ref=f125e50]
+                - cell "Machine Learning (cs.LG); Distributed, Parallel, and Cluster Computing (cs.DC); Optimization and Control (math.OC); Machine Learning (stat.ML)" [ref=f125e51]
+              - row [ref=f125e52]:
+                - cell "Cite as:" [ref=f125e53]
+                - cell [ref=f125e54]:
+                  - generic [ref=f125e55]:
+                    - link "arXiv:2003.00295" [ref=f125e56] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/2003.00295
+                    - text: "[cs.LG]"
+              - row [ref=f125e57]:
+                - cell [ref=f125e58]
+                - cell [ref=f125e59]:
+                  - text: (or
+                  - generic [ref=f125e60]:
+                    - link "arXiv:2003.00295v5" [ref=f125e61] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/2003.00295v5
+                    - text: "[cs.LG]"
+                  - text: for this version)
+              - row [ref=f125e62]:
+                - cell [ref=f125e63]
+                - cell [ref=f125e64]:
+                  - link "https://doi.org/10.48550/arXiv.2003.00295" [ref=f125e65] [cursor=pointer]:
+                    - /url: https://doi.org/10.48550/arXiv.2003.00295
+                  - button "Focus to learn more" [ref=f125e67]
+        - generic [ref=f125e70]:
+          - heading "Submission history" [level=2] [ref=f125e71]
+          - text: "From: Zachary Charles ["
+          - link "view email" [ref=f125e72] [cursor=pointer]:
+            - /url: /show-email/2f165358/2003.00295
+          - text: "]"
+          - strong [ref=f125e73]:
+            - link "[v1]" [ref=f125e74] [cursor=pointer]:
+              - /url: /abs/2003.00295v1
+          - text: Sat, 29 Feb 2020 16:37:29 UTC (213 KB)
+          - strong [ref=f125e75]:
+            - link "[v2]" [ref=f125e76] [cursor=pointer]:
+              - /url: /abs/2003.00295v2
+          - text: Fri, 10 Jul 2020 23:31:57 UTC (178 KB)
+          - strong [ref=f125e77]:
+            - link "[v3]" [ref=f125e78] [cursor=pointer]:
+              - /url: /abs/2003.00295v3
+          - text: Wed, 2 Dec 2020 17:37:11 UTC (694 KB)
+          - strong [ref=f125e79]:
+            - link "[v4]" [ref=f125e80] [cursor=pointer]:
+              - /url: /abs/2003.00295v4
+          - text: Tue, 24 Aug 2021 16:32:06 UTC (705 KB)
+          - strong [ref=f125e81]: "[v5]"
+          - text: Wed, 8 Sep 2021 23:37:17 UTC (705 KB)
+      - generic [ref=f125e82]:
+        - generic [ref=f125e83]:
+          - heading "Access Paper:" [level=2] [ref=f125e84]
+          - list [ref=f125e85]:
+            - listitem [ref=f125e86]:
+              - link "View PDF" [ref=f125e87] [cursor=pointer]:
+                - /url: /pdf/2003.00295
+            - listitem [ref=f125e88]:
+              - link "TeX Source" [ref=f125e89] [cursor=pointer]:
+                - /url: /src/2003.00295
+          - link "view license" [ref=f125e91] [cursor=pointer]:
+            - /url: http://arxiv.org/licenses/nonexclusive-distrib/1.0/
+        - generic [ref=f125e92]:
+          - heading "Current browse context:" [level=3] [ref=f125e93]
+          - generic [ref=f125e94]: cs.LG
+          - generic [ref=f125e95]:
+            - link "< prev" [ref=f125e97] [cursor=pointer]:
+              - /url: /prevnext?id=2003.00295&function=prev&context=cs.LG
+            - text: "|"
+            - link "next >" [ref=f125e99] [cursor=pointer]:
+              - /url: /prevnext?id=2003.00295&function=next&context=cs.LG
+          - generic [ref=f125e100]:
+            - link "new" [ref=f125e101] [cursor=pointer]:
+              - /url: /list/cs.LG/new
+            - text: "|"
+            - link "recent" [ref=f125e102] [cursor=pointer]:
+              - /url: /list/cs.LG/recent
+            - text: "|"
+            - link "2020-03" [ref=f125e103] [cursor=pointer]:
+              - /url: /list/cs.LG/2020-03
+          - generic [ref=f125e104]:
+            - text: "Change to browse by:"
+            - generic [ref=f125e105]:
+              - link "cs" [ref=f125e106] [cursor=pointer]:
+                - /url: /abs/2003.00295?context=cs
+              - link "cs.DC" [ref=f125e107] [cursor=pointer]:
+                - /url: /abs/2003.00295?context=cs.DC
+              - link "math" [ref=f125e108] [cursor=pointer]:
+                - /url: /abs/2003.00295?context=math
+              - link "math.OC" [ref=f125e109] [cursor=pointer]:
+                - /url: /abs/2003.00295?context=math.OC
+              - link "stat" [ref=f125e110] [cursor=pointer]:
+                - /url: /abs/2003.00295?context=stat
+              - link "stat.ML" [ref=f125e111] [cursor=pointer]:
+                - /url: /abs/2003.00295?context=stat.ML
+        - generic [ref=f125e112]:
+          - heading "References & Citations" [level=3] [ref=f125e113]
+          - list [ref=f125e114]:
+            - listitem [ref=f125e115]:
+              - link "NASA ADS" [ref=f125e116] [cursor=pointer]:
+                - /url: https://ui.adsabs.harvard.edu/abs/arXiv:2003.00295
+            - listitem [ref=f125e117]:
+              - link "Google Scholar" [ref=f125e118] [cursor=pointer]:
+                - /url: https://scholar.google.com/scholar_lookup?arxiv_id=2003.00295
+            - listitem [ref=f125e119]:
+              - link "Semantic Scholar" [ref=f125e120] [cursor=pointer]:
+                - /url: https://api.semanticscholar.org/arXiv:2003.00295
+        - generic [ref=f125e121]:
+          - heading [level=3] [ref=f125e122]:
+            - link "DBLP" [ref=f125e123] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de
+            - text: "- CS Bibliography"
+          - generic [ref=f125e124]:
+            - link "listing" [ref=f125e125] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/db/journals/corr/corr2003.html#abs-2003-00295
+            - text: "|"
+            - link "bibtex" [ref=f125e126] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/rec/bibtex/journals/corr/abs-2003-00295
+          - generic [ref=f125e127]:
+            - link "Sashank J. Reddi" [ref=f125e128] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Sashank%20J.%20Reddi
+            - link "Manzil Zaheer" [ref=f125e129] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Manzil%20Zaheer
+            - link "Jakub Konecný" [ref=f125e130] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Jakub%20Konecn%C3%BD
+            - link "Sanjiv Kumar" [ref=f125e131] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Sanjiv%20Kumar
+            - link "H. Brendan McMahan" [ref=f125e132] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=H.%20Brendan%20McMahan
+        - button "export BibTeX citation" [ref=f125e134]
+        - generic [ref=f125e135]:
+          - heading "Bookmark" [level=3] [ref=f125e137]
+          - link [ref=f125e138] [cursor=pointer]:
+            - /url: http://www.bibsonomy.org/BibtexHandler?requTask=upload&url=https://arxiv.org/abs/2003.00295&description=Adaptive Federated Optimization
+            - img "BibSonomy" [ref=f125e139]
+          - link [ref=f125e140] [cursor=pointer]:
+            - /url: https://reddit.com/submit?url=https://arxiv.org/abs/2003.00295&title=Adaptive Federated Optimization
+            - img "Reddit" [ref=f125e141]
+      - tablist "arXivLabs tools" [ref=f125e143]:
+        - radio "Bibliographic Tools" [checked] [ref=f125e144]
+        - tab "Bibliographic Tools" [selected] [ref=f125e145] [cursor=pointer]
+        - tabpanel "Bibliographic Tools" [ref=f125e146]:
+          - heading "Bibliographic and Citation Tools" [level=1] [ref=f125e147]
+          - generic [ref=f125e148]:
+            - generic [ref=f125e149]:
+              - generic [ref=f125e151]:
+                - checkbox "Bibliographic Explorer Toggle"
+                - generic [ref=f125e153]: Bibliographic Explorer Toggle
+              - generic [ref=f125e154]:
+                - text: Bibliographic Explorer
+                - emphasis [ref=f125e155]:
+                  - text: (
+                  - link "What is the Explorer?" [ref=f125e156] [cursor=pointer]:
+                    - /url: https://info.arxiv.org/labs/showcase.html#arxiv-bibliographic-explorer
+                  - text: )
+            - generic [ref=f125e157]:
+              - generic [ref=f125e159]:
+                - checkbox "Connected Papers"
+                - generic [ref=f125e161]: Connected Papers Toggle
+              - generic [ref=f125e162]:
+                - text: Connected Papers
+                - emphasis [ref=f125e163]:
+                  - text: (
+                  - link "What is Connected Papers?" [ref=f125e164] [cursor=pointer]:
+                    - /url: https://www.connectedpapers.com/about
+                  - text: )
+            - generic [ref=f125e165]:
+              - generic [ref=f125e167]:
+                - checkbox "Litmaps"
+                - generic [ref=f125e169]: Litmaps Toggle
+              - generic [ref=f125e170]:
+                - text: Litmaps
+                - emphasis [ref=f125e171]:
+                  - text: (
+                  - link "What is Litmaps?" [ref=f125e172] [cursor=pointer]:
+                    - /url: https://www.litmaps.co/
+                  - text: )
+            - generic [ref=f125e173]:
+              - generic [ref=f125e175]:
+                - checkbox "scite Smart Citations"
+                - generic [ref=f125e177]: scite.ai Toggle
+              - generic [ref=f125e178]:
+                - text: scite Smart Citations
+                - emphasis [ref=f125e179]:
+                  - text: (
+                  - link "What are Smart Citations?" [ref=f125e180] [cursor=pointer]:
+                    - /url: https://www.scite.ai/
+                  - text: )
+        - radio "Code, Data, Media" [ref=f125e184]
+        - tab "Code, Data, Media" [ref=f125e185] [cursor=pointer]
+        - radio "Demos" [ref=f125e186]
+        - tab "Demos" [ref=f125e187] [cursor=pointer]
+        - radio "Related Papers" [ref=f125e188]
+        - tab "Related Papers" [ref=f125e189] [cursor=pointer]
+        - radio "About arXivLabs" [ref=f125e190]
+        - tab "About arXivLabs" [ref=f125e191] [cursor=pointer]
+      - generic [ref=f125e192]:
+        - link "Which authors of this paper are endorsers?" [ref=f125e193] [cursor=pointer]:
+          - /url: /auth/show-endorsers/2003.00295
+        - text: "|"
+        - link "Disable MathJax" [ref=f125e194] [cursor=pointer]:
+          - /url: javascript:setMathjaxCookie()
+        - text: (
+        - link "What is MathJax?" [ref=f125e195] [cursor=pointer]:
+          - /url: https://info.arxiv.org/help/mathjax.html
+        - text: )
+  - contentinfo [ref=f125e196]:
+    - generic [ref=f125e197]:
+      - generic [ref=f125e198]:
+        - generic [ref=f125e199]:
+          - text: We gratefully acknowledge support from our
+          - strong [ref=f125e200]: major funders
+          - text: ","
+          - link [ref=f125e201] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about/ourmembers.html
+            - strong [ref=f125e202]: member institutions
+          - text: ", and all contributors."
+        - navigation "Site navigation" [ref=f125e203]:
+          - link "About" [ref=f125e204] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about
+          - generic [ref=f125e205]: ·
+          - link "Help" [ref=f125e206] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help
+          - generic [ref=f125e207]: ·
+          - link "Contact" [ref=f125e208] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/contact.html
+          - generic [ref=f125e209]: ·
+          - link "Subscribe" [ref=f125e210] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/subscribe
+          - generic [ref=f125e211]: ·
+          - link "Copyright" [ref=f125e212] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/license/index.html
+          - generic [ref=f125e213]: ·
+          - link "Privacy" [ref=f125e214] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/policies/privacy_policy.html
+          - generic [ref=f125e215]: ·
+          - link "Accessibility" [ref=f125e216] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/web_accessibility.html
+          - generic [ref=f125e217]: ·
+          - link "Operational Status (opens in new tab)" [ref=f125e218] [cursor=pointer]:
+            - /url: https://status.arxiv.org
+            - text: Operational Status
+            - generic [ref=f125e219]: (opens in new tab)
+      - generic "Major funders" [ref=f125e220]:
+        - generic [ref=f125e221]: Major funding support from
+        - generic [ref=f125e222]:
+          - img "Simons Foundation" [ref=f125e223]
+          - img "Schmidt Sciences" [ref=f125e224]

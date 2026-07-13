@@ -1,0 +1,275 @@
+- generic [active] [ref=f87e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f87e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f87e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f87e8]:
+    - search [ref=f87e9]:
+      - generic [ref=f87e11]:
+        - link "Go to Google Home" [ref=f87e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQPAgI
+        - generic [ref=f87e21]:
+          - generic [ref=f87e22]:
+            - combobox "Search" [ref=f87e25]: "\"Gradient Masked Averaging for Federated Learning\" \"Gradient Masked Averaging for Federated Learning\""
+            - generic [ref=f87e26]:
+              - button "Clear" [ref=f87e28] [cursor=pointer]
+              - generic [ref=f87e33]:
+                - button "Search by voice" [ref=f87e34] [cursor=pointer]
+                - button "Search by image" [ref=f87e37] [cursor=pointer]
+          - button "Search" [ref=f87e40] [cursor=pointer]
+    - generic [ref=f87e45]:
+      - button "Settings" [ref=f87e47] [cursor=pointer]
+      - button "Share" [ref=f87e53] [cursor=pointer]
+      - generic [ref=f87e59]:
+        - button "Google apps" [ref=f87e61] [cursor=pointer]
+        - link "Sign in" [ref=f87e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522Gradient%2520Masked%2520Averaging%2520for%2520Federated%2520Learning%2522&ec=futura_srp_og_si_72236_p
+  - generic [ref=f87e68]:
+    - navigation [ref=f87e74]:
+      - generic [ref=f87e80]:
+        - list [ref=f87e81]:
+          - listitem [ref=f87e82]:
+            - link "AI Mode" [ref=f87e85] [cursor=pointer]:
+              - /url: /search?q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&aep=1&ntc=1&sa=X&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQ2J8OegQIFRAD
+          - listitem [ref=f87e89]:
+            - link "All" [disabled] [ref=f87e90]
+          - listitem [ref=f87e93]:
+            - link "Images" [ref=f87e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sa=X&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQtKgLegQIGRAB
+          - listitem [ref=f87e97]:
+            - link "Shopping" [ref=f87e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&ved=1t:220175&ictx=111
+          - listitem [ref=f87e101]:
+            - link "Videos" [ref=f87e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sa=X&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQtKgLegQIHBAB
+          - listitem [ref=f87e105]:
+            - link "Forums" [ref=f87e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sa=X&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQs6gLegQIHRAB
+          - listitem [ref=f87e109]:
+            - link "Short videos" [ref=f87e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sa=X&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQs6gLegQIHhAB
+          - listitem [ref=f87e113]:
+            - button [ref=f87e114] [cursor=pointer]:
+              - generic "More filters" [ref=f87e115]: More
+        - button "Tools" [ref=f87e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f87e130]
+    - main [ref=f87e136]:
+      - generic [ref=f87e140]:
+        - generic [ref=f87e143]:
+          - heading "Web results" [level=2] [ref=f87e144]
+          - generic [ref=f87e145]:
+            - generic [ref=f87e148]:
+              - link "Gradient Masked Averaging for Federated Learning arXiv https://arxiv.org › cs" [ref=f87e150] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/2201.11986
+                - heading "Gradient Masked Averaging for Federated Learning" [level=3] [ref=f87e151]
+                - generic [ref=f87e157]:
+                  - generic [ref=f87e158]: arXiv
+                  - generic [ref=f87e160]: https://arxiv.org › cs
+              - button "About this result" [ref=f87e164] [cursor=pointer]
+            - generic [ref=f87e170]:
+              - generic [ref=f87e171]: by I Tenison · 2022 · Cited by 46 —
+              - generic [ref=f87e172]:
+                - text: "Title:"
+                - emphasis [ref=f87e173]: Gradient Masked Averaging for Federated Learning
+                - text: . Authors:Irene Tenison, Sai Aravind Sreeramadas, Vaikkunth Mugunthan, Edouard Oyallon ...
+              - link "Read more" [ref=f87e174] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/2201.11986#:~:text=Gradient%20Masked%20Averaging%20for%20Federated,Oyallon%2C%20Irina%20Rish%2C%20Eugene%20Belilovsky
+        - generic [ref=f87e175]:
+          - generic [ref=f87e179]:
+            - generic [ref=f87e182]:
+              - link "Gradient Masked Averaging for Federated Learning OpenReview https://openreview.net › forum" [ref=f87e184] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=REAyrhRYAo
+                - heading "Gradient Masked Averaging for Federated Learning" [level=3] [ref=f87e185]
+                - generic [ref=f87e191]:
+                  - generic [ref=f87e192]: OpenReview
+                  - generic [ref=f87e194]: https://openreview.net › forum
+              - button "About this result" [ref=f87e198] [cursor=pointer]
+            - generic [ref=f87e204]:
+              - generic [ref=f87e205]: by I Tenison · Cited by 46 —
+              - generic [ref=f87e206]:
+                - emphasis [ref=f87e207]: Gradient Masked Averaging for Federated Learning
+                - text: . Download PDF · Irene Tenison, Sai Aravind Sreeramadas, Vaikkunth Mugunthan, Edouard Oyallon, Irina Rish ...
+              - link "Read more" [ref=f87e208] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=REAyrhRYAo#:~:text=Gradient%20Masked%20Averaging%20for%20Federated,Oyallon%2C%20Irina%20Rish%2C%20Eugene%20Belilovsky
+          - generic [ref=f87e219]:
+            - heading "Thinking" [level=2] [ref=f87e223]
+            - progressbar "Generating" [ref=f87e226]
+          - generic [ref=f87e231]:
+            - generic [ref=f87e234]:
+              - link "Gradient Masked Averaging for Federated Learning Archive ouverte HAL https://hal.science › ..." [ref=f87e236] [cursor=pointer]:
+                - /url: https://hal.science/hal-04262447v1
+                - heading "Gradient Masked Averaging for Federated Learning" [level=3] [ref=f87e237]
+                - generic [ref=f87e243]:
+                  - generic [ref=f87e244]: Archive ouverte HAL
+                  - generic [ref=f87e246]: https://hal.science › ...
+              - button "About this result" [ref=f87e250] [cursor=pointer]
+            - generic [ref=f87e256]:
+              - generic [ref=f87e257]:
+                - emphasis [ref=f87e258]: Gradient Masked Averaging for Federated Learning
+                - text: · Irene Tenison · Sai Aravind Sreeramadas · Vaikkunth Mugunthan · Eugene Belilovsky · Irina Rish.
+              - link "Read more" [ref=f87e259] [cursor=pointer]:
+                - /url: https://hal.science/hal-04262447v1#:~:text=Gradient%20Masked%20Averaging%20for%20Federated,Learning&text=R%C3%A9sum%C3%A9&text=R%C3%A9sum%C3%A9&text=R%C3%A9sum%C3%A9&text=R%C3%A9sum%C3%A9&text=R%C3%A9sum%C3%A9
+          - generic [ref=f87e263]:
+            - generic [ref=f87e266]:
+              - link "Gradient Masked Averaging for Federated Learning OpenReview https://openreview.net › pdf" [ref=f87e268] [cursor=pointer]:
+                - /url: https://openreview.net/pdf/1e0164d7244f2ed7ac44ee66c215644a8b743fb8.pdf
+                - heading "Gradient Masked Averaging for Federated Learning" [level=3] [ref=f87e269]
+                - generic [ref=f87e275]:
+                  - generic [ref=f87e276]: OpenReview
+                  - generic [ref=f87e278]: https://openreview.net › pdf
+              - generic [ref=f87e280]: PDF
+              - button "About this result" [ref=f87e283] [cursor=pointer]
+            - generic [ref=f87e289]:
+              - generic [ref=f87e290]:
+                - emphasis [ref=f87e291]: Gradient Masked Averaging for Federated Learning
+                - text: . Irene Tenison∗,1,∇, Sai Aravind Sreeramadas2,3, Vaikkunth Mugunthan1, Edouard Oyallon4,. Irina Rish2,3 ...
+              - link "Read more" [ref=f87e292] [cursor=pointer]:
+                - /url: https://openreview.net/pdf/1e0164d7244f2ed7ac44ee66c215644a8b743fb8.pdf#:~:text=Gradient%20Masked%20Averaging%20for%20Federated,Irina%20Rish2%2C3%2C%20and%20Eugene%20Belilovsky3%2C5
+          - generic [ref=f87e296]:
+            - generic [ref=f87e299]:
+              - link "Gradient Masked Averaging for Federated Learning ResearchGate https://www.researchgate.net › ... › Federalism" [ref=f87e301] [cursor=pointer]:
+                - /url: https://www.researchgate.net/publication/358232765_Gradient_Masked_Averaging_for_Federated_Learning?_tp=eyJjb250ZXh0Ijp7InBhZ2UiOiJzY2llbnRpZmljQ29udHJpYnV0aW9ucyIsInByZXZpb3VzUGFnZSI6bnVsbCwic3ViUGFnZSI6bnVsbH19
+                - heading "Gradient Masked Averaging for Federated Learning" [level=3] [ref=f87e302]
+                - generic [ref=f87e308]:
+                  - generic [ref=f87e309]: ResearchGate
+                  - generic [ref=f87e311]: https://www.researchgate.net › ... › Federalism
+              - button "About this result" [ref=f87e315] [cursor=pointer]
+            - generic [ref=f87e322]:
+              - emphasis [ref=f87e323]: Gradient Masked Averaging for Federated Learning
+              - text: ". January 2022. DOI:10.48550/arXiv.2201.11986. Authors: Irene Tenison · Irene Tenison. This person ..."
+          - generic [ref=f87e327]:
+            - generic [ref=f87e330]:
+              - link "Gradient Masked Averaging for Federated Learning devneko jp https://fugumt.com › fugumt › paper_check" [ref=f87e332] [cursor=pointer]:
+                - /url: https://fugumt.com/fugumt/paper_check/2201.11986v2_enmode
+                - heading "Gradient Masked Averaging for Federated Learning" [level=3] [ref=f87e333]
+                - generic [ref=f87e342]:
+                  - generic [ref=f87e343]: devneko jp
+                  - generic [ref=f87e345]: https://fugumt.com › fugumt › paper_check
+              - button "About this result" [ref=f87e349] [cursor=pointer]
+            - generic [ref=f87e356]:
+              - emphasis [ref=f87e357]: Gradient Masked Averaging for Federated Learning
+              - text: ". URL: http://arxiv.org/abs/2201.11986v2; Date: Tue, 14 Nov 2023 21:41:26 GMT; Title:"
+              - emphasis [ref=f87e358]: Gradient Masked
+              - text: ...
+          - generic [ref=f87e362]:
+            - generic [ref=f87e365]:
+              - link "declearn.aggregator.GradientMaskedAveraging Inria https://magnet.gitlabpages.inria.fr › docs › api-reference" [ref=f87e367] [cursor=pointer]:
+                - /url: https://magnet.gitlabpages.inria.fr/declearn/docs/2.2/api-reference/aggregator/GradientMaskedAveraging/
+                - heading "declearn.aggregator.GradientMaskedAveraging" [level=3] [ref=f87e368]
+                - generic [ref=f87e374]:
+                  - generic [ref=f87e375]: Inria
+                  - generic [ref=f87e377]: https://magnet.gitlabpages.inria.fr › docs › api-reference
+              - button "About this result" [ref=f87e381] [cursor=pointer]
+            - generic [ref=f87e388]:
+              - emphasis [ref=f87e389]: Gradient Masked Averaging for Federated Learning
+              - text: . https://arxiv.org/abs/2201.11986. Source code in declearn/aggregator/_gma.py. 30 31 32 33 34 35 36 37 38 39 ...
+          - generic [ref=f87e393]:
+            - generic [ref=f87e396]:
+              - link "Université de Montréal Generalization in Federated Learning scholaris.ca https://umontreal.scholaris.ca › bitstreams › content" [ref=f87e398] [cursor=pointer]:
+                - /url: https://umontreal.scholaris.ca/server/api/core/bitstreams/36b603e3-a630-4a55-afa8-e65b22e3b45b/content
+                - heading "Université de Montréal Generalization in Federated Learning" [level=3] [ref=f87e399]
+                - generic [ref=f87e405]:
+                  - generic [ref=f87e406]: scholaris.ca
+                  - generic [ref=f87e408]: https://umontreal.scholaris.ca › bitstreams › content
+              - generic [ref=f87e410]: PDF
+              - button "About this result" [ref=f87e413] [cursor=pointer]
+            - generic [ref=f87e419]:
+              - generic [ref=f87e420]: by I Tenison · 2022 —
+              - generic [ref=f87e421]:
+                - text: "Belilovsky et Irina Rish :"
+                - emphasis [ref=f87e422]: Gradient masked averaging for federated learning
+                - text: ", 2022. [54] Chandra Thapa, M. A. P. Chamikara, Seyit Camtepe et ..."
+              - link "Read more" [ref=f87e423] [cursor=pointer]:
+                - /url: https://umontreal.scholaris.ca/server/api/core/bitstreams/36b603e3-a630-4a55-afa8-e65b22e3b45b/content#:~:text=Belilovsky%20et%20Irina%20Rish%20%3A,Sun%20%3A%20Splitfed%3A%20When%20federated
+          - generic [ref=f87e427]:
+            - generic [ref=f87e430]:
+              - link "arXiv:2201.11986v1 [cs.LG] 28 Jan 2022 arXiv https://arxiv.org › pdf" [ref=f87e432] [cursor=pointer]:
+                - /url: https://arxiv.org/pdf/2201.11986
+                - heading "arXiv:2201.11986v1 [cs.LG] 28 Jan 2022" [level=3] [ref=f87e433]
+                - generic [ref=f87e439]:
+                  - generic [ref=f87e440]: arXiv
+                  - generic [ref=f87e442]: https://arxiv.org › pdf
+              - generic [ref=f87e444]: PDF
+              - button "About this result" [ref=f87e447] [cursor=pointer]
+            - generic [ref=f87e453]:
+              - generic [ref=f87e454]: by I Tenison · 2022 · Cited by 45 —
+              - generic [ref=f87e455]:
+                - emphasis [ref=f87e456]: Gradient Masked Averaging for Federated Learning
+                - text: . Irene Tenison 1 2 Sai Aravind Sreeramadas 1 2 Vaikkunth Mugunthan 3 Edouard Oyallon 4.
+              - link "Read more" [ref=f87e457] [cursor=pointer]:
+                - /url: https://arxiv.org/pdf/2201.11986#:~:text=Gradient%20Masked%20Averaging%20for%20Federated,Mugunthan%203%20Edouard%20Oyallon%204
+          - table [ref=f87e463]:
+            - rowgroup [ref=f87e464]:
+              - row [ref=f87e465]:
+                - cell [ref=f87e466]:
+                  - heading [level=3] [ref=f87e467]:
+                    - link [ref=f87e468] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar?q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                      - generic [ref=f87e469]:
+                        - text: Scholarly articles for
+                        - emphasis [ref=f87e470]: "\"Gradient Masked Averaging for Federated Learning\""
+              - row [ref=f87e471]:
+                - cell [ref=f87e472]:
+                  - heading "Gradient masked averaging for federated learning - ‎Tenison - Cited by 46" [level=3] [ref=f87e473]:
+                    - link [ref=f87e474] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2201.11986&hl=en&sa=X&ei=Gf5PauWUDdGp6rQPnZeeyQo&scisig=AM1tuoOcjMNdKDrIWGKXlSnV8X51&oi=scholarr
+                      - emphasis [ref=f87e476]: Gradient masked averaging for federated learning
+                    - generic [ref=f87e477]:
+                      - text: "-"
+                      - generic [ref=f87e478]: ‎Tenison
+                      - text: "- Cited by 46"
+      - navigation [ref=f87e481]:
+        - heading "Page Navigation" [level=1] [ref=f87e482]
+        - text: "1"
+        - link "Page 2" [ref=f87e485] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sca_esv=30a5fb343c9df574&ei=Gf5Paq_vBoChur8PsZyDEQ&start=10&sa=N&sstk=AU9db-D22tYVUvw1EpU3GSjxneKsMKyWO3YWTWF4Lfyw8oIe-kRtXEqTHX0x9d10ZZp6-hNBkHQJK5bN8xJDDniGSAZwbDfKOmAFtw&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQ8tMDegQIPRAE
+          - text: "2"
+        - link "Page 3" [ref=f87e487] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sca_esv=30a5fb343c9df574&ei=Gf5Paq_vBoChur8PsZyDEQ&start=20&sa=N&sstk=AU9db-D22tYVUvw1EpU3GSjxneKsMKyWO3YWTWF4Lfyw8oIe-kRtXEqTHX0x9d10ZZp6-hNBkHQJK5bN8xJDDniGSAZwbDfKOmAFtw&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQ8tMDegQIPRAG
+          - text: "3"
+        - link "Page 4" [ref=f87e489] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sca_esv=30a5fb343c9df574&ei=Gf5Paq_vBoChur8PsZyDEQ&start=30&sa=N&sstk=AU9db-D22tYVUvw1EpU3GSjxneKsMKyWO3YWTWF4Lfyw8oIe-kRtXEqTHX0x9d10ZZp6-hNBkHQJK5bN8xJDDniGSAZwbDfKOmAFtw&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQ8tMDegQIPRAI
+          - text: "4"
+        - link "Page 5" [ref=f87e491] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sca_esv=30a5fb343c9df574&ei=Gf5Paq_vBoChur8PsZyDEQ&start=40&sa=N&sstk=AU9db-D22tYVUvw1EpU3GSjxneKsMKyWO3YWTWF4Lfyw8oIe-kRtXEqTHX0x9d10ZZp6-hNBkHQJK5bN8xJDDniGSAZwbDfKOmAFtw&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQ8tMDegQIPRAK
+          - text: "5"
+        - link "Page 6" [ref=f87e493] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sca_esv=30a5fb343c9df574&ei=Gf5Paq_vBoChur8PsZyDEQ&start=50&sa=N&sstk=AU9db-D22tYVUvw1EpU3GSjxneKsMKyWO3YWTWF4Lfyw8oIe-kRtXEqTHX0x9d10ZZp6-hNBkHQJK5bN8xJDDniGSAZwbDfKOmAFtw&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQ8tMDegQIPRAM
+          - text: "6"
+        - link "Page 7" [ref=f87e495] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sca_esv=30a5fb343c9df574&ei=Gf5Paq_vBoChur8PsZyDEQ&start=60&sa=N&sstk=AU9db-D22tYVUvw1EpU3GSjxneKsMKyWO3YWTWF4Lfyw8oIe-kRtXEqTHX0x9d10ZZp6-hNBkHQJK5bN8xJDDniGSAZwbDfKOmAFtw&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQ8tMDegQIPRAO
+          - text: "7"
+        - link "Page 8" [ref=f87e497] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sca_esv=30a5fb343c9df574&ei=Gf5Paq_vBoChur8PsZyDEQ&start=70&sa=N&sstk=AU9db-D22tYVUvw1EpU3GSjxneKsMKyWO3YWTWF4Lfyw8oIe-kRtXEqTHX0x9d10ZZp6-hNBkHQJK5bN8xJDDniGSAZwbDfKOmAFtw&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQ8tMDegQIPRAQ
+          - text: "8"
+        - link "Page 9" [ref=f87e499] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sca_esv=30a5fb343c9df574&ei=Gf5Paq_vBoChur8PsZyDEQ&start=80&sa=N&sstk=AU9db-D22tYVUvw1EpU3GSjxneKsMKyWO3YWTWF4Lfyw8oIe-kRtXEqTHX0x9d10ZZp6-hNBkHQJK5bN8xJDDniGSAZwbDfKOmAFtw&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQ8tMDegQIPRAS
+          - text: "9"
+        - link "Page 10" [ref=f87e501] [cursor=pointer]:
+          - /url: /search?q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sca_esv=30a5fb343c9df574&ei=Gf5Paq_vBoChur8PsZyDEQ&start=90&sa=N&sstk=AU9db-D22tYVUvw1EpU3GSjxneKsMKyWO3YWTWF4Lfyw8oIe-kRtXEqTHX0x9d10ZZp6-hNBkHQJK5bN8xJDDniGSAZwbDfKOmAFtw&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQ8tMDegQIPRAU
+          - text: "10"
+        - heading [level=2] [ref=f87e503]:
+          - link "Next" [ref=f87e504] [cursor=pointer]:
+            - /url: /search?q=%22Gradient+Masked+Averaging+for+Federated+Learning%22&sca_esv=30a5fb343c9df574&ei=Gf5Paq_vBoChur8PsZyDEQ&start=10&sa=N&sstk=AU9db-D22tYVUvw1EpU3GSjxneKsMKyWO3YWTWF4Lfyw8oIe-kRtXEqTHX0x9d10ZZp6-hNBkHQJK5bN8xJDDniGSAZwbDfKOmAFtw&ved=2ahUKEwjv3-q3scaVAxWAkO4BHTHOIAIQ8NMDegQIPRAW
+      - navigation
+    - contentinfo [ref=f87e507]:
+      - heading "Footer Links" [level=1] [ref=f87e508]
+      - generic [ref=f87e512]:
+        - generic [ref=f87e516]:
+          - button "Woodland, California - From your IP address" [ref=f87e518] [cursor=pointer]:
+            - generic [ref=f87e519]: Woodland, California
+            - generic [ref=f87e521]:
+              - text: "-"
+              - generic [ref=f87e522]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f87e524] [cursor=pointer]
+        - generic [ref=f87e527]:
+          - link "Help" [ref=f87e528] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f87e529] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f87e530] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f87e531] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

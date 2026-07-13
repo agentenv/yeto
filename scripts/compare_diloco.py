@@ -2023,7 +2023,11 @@ def main() -> int:
             args.device,
             tuning=args.tuning,
         )
-        print(f"EVAL_LOSS {loss:.6f}")
+        # Full double precision (17 sig digits, round-trippable): 6dp rounding
+        # once masked a spurious iso bit-identity (EXP2.40). eval_in_subprocess
+        # and the summarizers parse this line, so the extra digits flow into
+        # results.jsonl and every downstream comparison.
+        print(f"EVAL_LOSS {loss:.17g}")
         return 0
 
     arms = apply_arm_overrides(

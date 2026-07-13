@@ -1,0 +1,278 @@
+- generic [active] [ref=f37e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f37e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f37e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f37e8]:
+    - search [ref=f37e9]:
+      - generic [ref=f37e11]:
+        - link "Go to Google Home" [ref=f37e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwimocfTqsaVAxW1IEQIHfD3DU4QPAgI
+        - generic [ref=f37e21]:
+          - generic [ref=f37e22]:
+            - combobox "Search" [ref=f37e25]: "\"Robust machine learning by median-of-means\" arxiv \"Robust machine learning by median-of-means\" arxiv"
+            - generic [ref=f37e26]:
+              - button "Clear" [ref=f37e28] [cursor=pointer]
+              - generic [ref=f37e33]:
+                - button "Search by voice" [ref=f37e34] [cursor=pointer]
+                - button "Search by image" [ref=f37e37] [cursor=pointer]
+          - button "Search" [ref=f37e40] [cursor=pointer]
+    - generic [ref=f37e45]:
+      - button "Settings" [ref=f37e47] [cursor=pointer]
+      - button "Share" [ref=f37e53] [cursor=pointer]
+      - generic [ref=f37e59]:
+        - button "Google apps" [ref=f37e61] [cursor=pointer]
+        - link "Sign in" [ref=f37e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522Robust%2Bmachine%2Blearning%2Bby%2Bmedian-of-means%2522%2Barxiv&ec=futura_srp_og_si_72236_p
+  - generic [ref=f37e68]:
+    - navigation [ref=f37e74]:
+      - generic [ref=f37e80]:
+        - list [ref=f37e81]:
+          - listitem [ref=f37e82]:
+            - link "AI Mode" [ref=f37e85] [cursor=pointer]:
+              - /url: /search?q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sca_esv=d4e925c21a8887a9&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&aep=1&ntc=1&sa=X&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4Q2J8OegQICBAD
+          - listitem [ref=f37e89]:
+            - link "All" [disabled] [ref=f37e90]
+          - listitem [ref=f37e93]:
+            - link "Videos" [ref=f37e94] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sa=X&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4QtKgLegQIHRAB
+          - listitem [ref=f37e97]:
+            - link "Images" [ref=f37e98] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sa=X&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4QtKgLegQIGxAB
+          - listitem [ref=f37e101]:
+            - link "Forums" [ref=f37e102] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sa=X&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4Qs6gLegQIDxAB
+          - listitem [ref=f37e105]:
+            - link "Shopping" [ref=f37e106] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=%22Robust+machine+learning+by+median-of-means%22+arxiv&ved=1t:220175&ictx=111
+          - listitem [ref=f37e109]:
+            - link "Short videos" [ref=f37e110] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sa=X&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4Qs6gLegQIDhAB
+          - listitem [ref=f37e113]:
+            - button [ref=f37e114] [cursor=pointer]:
+              - generic "More filters" [ref=f37e115]: More
+        - button "Tools" [ref=f37e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f37e129]
+    - main [ref=f37e135]:
+      - generic [ref=f37e139]:
+        - generic [ref=f37e142]:
+          - heading "Web results" [level=2] [ref=f37e143]
+          - generic [ref=f37e144]:
+            - generic [ref=f37e147]:
+              - link "[1711.10306] Robust machine learning by median-of-means arXiv https://arxiv.org › math" [ref=f37e149] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/1711.10306
+                - heading "[1711.10306] Robust machine learning by median-of-means" [level=3] [ref=f37e150]
+                - generic [ref=f37e156]:
+                  - generic [ref=f37e157]: arXiv
+                  - generic [ref=f37e159]: https://arxiv.org › math
+              - button "About this result" [ref=f37e163] [cursor=pointer]
+            - generic [ref=f37e169]:
+              - generic [ref=f37e170]: by G Lecué · 2017 · Cited by 249 —
+              - generic [ref=f37e171]:
+                - emphasis [ref=f37e172]: Robust machine learning by median-of-means
+                - text: ": theory and practice. Authors:Guillaume Lecué, Matthieu Lerasle."
+              - link "Read more" [ref=f37e173] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/1711.10306#:~:text=Robust%20machine%20learning%20by%20median%2Dof%2Dmeans,Guillaume%20Lecu%C3%A9%2C%20Matthieu%20Lerasle
+        - generic [ref=f37e177]:
+          - generic [ref=f37e180]:
+            - link "Robust machine learning by median-of-means Project Euclid https://projecteuclid.org › issue-2 › 19-AOS1828" [ref=f37e182] [cursor=pointer]:
+              - /url: https://projecteuclid.org/journals/annals-of-statistics/volume-48/issue-2/Robust-machine-learning-by-median-of-means--Theory-and/10.1214/19-AOS1828.pdf
+              - heading "Robust machine learning by median-of-means" [level=3] [ref=f37e183]
+              - generic [ref=f37e189]:
+                - generic [ref=f37e190]: Project Euclid
+                - generic [ref=f37e192]: https://projecteuclid.org › issue-2 › 19-AOS1828
+            - button "About this result" [ref=f37e196] [cursor=pointer]
+          - generic [ref=f37e202]:
+            - generic [ref=f37e203]: by G Lecué · 2020 · Cited by 249 —
+            - generic [ref=f37e204]:
+              - text: Available at
+              - emphasis [ref=f37e205]: arXiv
+              - text: :1706.02410. [27] HUBER, P. J. (1964). Robust estimation ... Supplement to “
+              - emphasis [ref=f37e206]: Robust machine learning by median-of-means
+              - text: ": The- ory and ..."
+            - link "Read more" [ref=f37e207] [cursor=pointer]:
+              - /url: https://projecteuclid.org/journals/annals-of-statistics/volume-48/issue-2/Robust-machine-learning-by-median-of-means--Theory-and/10.1214/19-AOS1828.pdf#:~:text=Available%20at%20arXiv%3A1706.02410.,of%20a%20location%20parameter.%20Ann.&text=Supplement%20to%20%E2%80%9CRobust%20machine%20learning,ory%20and%20practice.
+        - generic [ref=f37e218]:
+          - heading "Thinking" [level=2] [ref=f37e222]
+          - progressbar "Generating" [ref=f37e225]
+        - generic [ref=f37e229]:
+          - heading "Web results" [level=2] [ref=f37e230]
+          - generic [ref=f37e231]:
+            - generic [ref=f37e234]:
+              - link "A remark on \"Robust machine learning by median-of-means\" arXiv https://arxiv.org › abs" [ref=f37e236] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/1712.06788
+                - heading "A remark on \"Robust machine learning by median-of-means\"" [level=3] [ref=f37e237]
+                - generic [ref=f37e243]:
+                  - generic [ref=f37e244]: arXiv
+                  - generic [ref=f37e246]: https://arxiv.org › abs
+              - button "About this result" [ref=f37e250] [cursor=pointer]
+            - generic [ref=f37e256]:
+              - generic [ref=f37e257]: by G Lugosi · 2017 · Cited by 4 —
+              - generic [ref=f37e258]:
+                - text: We explore the recent results announced in "
+                - emphasis [ref=f37e259]: Robust machine learning by median-of-means
+                - text: ": theory and practice\" by G. Lecué and M. Lerasle. We show ..."
+              - link "Read more" [ref=f37e260] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/1712.06788#:~:text=We%20explore%20the%20recent%20results,and%20M.%20Lerasle.%20We%20show
+        - generic [ref=f37e264]:
+          - generic [ref=f37e267]:
+            - link "n° 2017-32 Robust machine learning by median-of-means crest.science https://crest.science › RePEc › wpstorage" [ref=f37e269] [cursor=pointer]:
+              - /url: https://crest.science/RePEc/wpstorage/2017-32.pdf
+              - heading "n° 2017-32 Robust machine learning by median-of-means" [level=3] [ref=f37e270]
+              - generic [ref=f37e276]:
+                - generic [ref=f37e277]: crest.science
+                - generic [ref=f37e279]: https://crest.science › RePEc › wpstorage
+            - generic [ref=f37e281]: PDF
+            - button "About this result" [ref=f37e284] [cursor=pointer]
+          - generic [ref=f37e290]:
+            - generic [ref=f37e291]: by M LERASLE · 2017 · Cited by 249 —
+            - generic [ref=f37e292]:
+              - emphasis [ref=f37e293]: Robust machine learning by median-of-means
+              - text: ": theory and practice. G ..."
+              - emphasis [ref=f37e294]: arXiv
+              - text: :1410.3192. [67] Shahar Mendelson. Learning without ...
+            - link "Read more" [ref=f37e295] [cursor=pointer]:
+              - /url: https://crest.science/RePEc/wpstorage/2017-32.pdf#:~:text=Robust%20machine%20learning%20by%20median%2Dof%2Dmeans,G.LECUE1&text=arXiv%3A1410.3192.,Shahar%20Mendelson.%20Learning%20without%20concentration.
+        - generic [ref=f37e299]:
+          - generic [ref=f37e302]:
+            - link "Matthieu Lerasle Google Scholar https://scholar.google.com › citations" [ref=f37e304] [cursor=pointer]:
+              - /url: https://scholar.google.com/citations?user=wiIjWWsAAAAJ&hl=en
+              - heading "Matthieu Lerasle" [level=3] [ref=f37e305]
+              - generic [ref=f37e311]:
+                - generic [ref=f37e312]: Google Scholar
+                - generic [ref=f37e314]: https://scholar.google.com › citations
+            - button "About this result" [ref=f37e318] [cursor=pointer]
+          - generic [ref=f37e324]:
+            - generic [ref=f37e325]:
+              - emphasis [ref=f37e326]: Robust machine learning by median-of-means
+              - text: ": theory and practice. G Lecué, M Lerasle. 248, 2020. Choice of V for V-fold cross-validation in least-squares density ..."
+            - link "Read more" [ref=f37e327] [cursor=pointer]:
+              - /url: https://scholar.google.com/citations?user=wiIjWWsAAAAJ&hl=en#:~:text=Robust%20machine%20learning%20by%20median%2Dof%2Dmeans%3A,cross%2Dvalidation%20in%20least%2Dsquares%20density%20estimation
+        - generic [ref=f37e331]:
+          - generic [ref=f37e334]:
+            - link "(PDF) Robust machine learning by median-of-means ResearchGate https://www.researchgate.net › ... › Machine Learning" [ref=f37e336] [cursor=pointer]:
+              - /url: https://www.researchgate.net/publication/321347497_Robust_machine_learning_by_median-of-means_Theory_and_practice
+              - heading "(PDF) Robust machine learning by median-of-means" [level=3] [ref=f37e337]
+              - generic [ref=f37e343]:
+                - generic [ref=f37e344]: ResearchGate
+                - generic [ref=f37e346]: https://www.researchgate.net › ... › Machine Learning
+            - button "About this result" [ref=f37e350] [cursor=pointer]
+          - generic [ref=f37e356]:
+            - generic [ref=f37e357]: Nov 30, 2017 —
+            - generic [ref=f37e358]:
+              - emphasis [ref=f37e359]: Robust machine learning by median-of-means
+              - text: ": Theory and practice ..."
+              - emphasis [ref=f37e360]: arXiv
+              - text: :1410.3192. [67] Shahar Mendelson. Learning without concentration ...
+            - link "Read more" [ref=f37e361] [cursor=pointer]:
+              - /url: https://www.researchgate.net/publication/321347497_Robust_machine_learning_by_median-of-means_Theory_and_practice#:~:text=Robust%20machine%20learning%20by%20median%2Dof%2Dmeans%3A,Theory%20and%20practice&text=arXiv%3A1410.3192.,Shahar%20Mendelson.%20Learning%20without%20concentration.
+        - generic [ref=f37e365]:
+          - generic [ref=f37e368]:
+            - link "Publications - Matthieu Lerasle - CNRS Matthieu Lerasle https://lerasle.perso.math.cnrs.fr › publications" [ref=f37e370] [cursor=pointer]:
+              - /url: https://lerasle.perso.math.cnrs.fr/fr/publications.html
+              - heading "Publications - Matthieu Lerasle - CNRS" [level=3] [ref=f37e371]
+              - generic [ref=f37e380]:
+                - generic [ref=f37e381]: Matthieu Lerasle
+                - generic [ref=f37e383]: https://lerasle.perso.math.cnrs.fr › publications
+            - button "About this result" [ref=f37e387] [cursor=pointer]
+          - generic [ref=f37e393]:
+            - generic [ref=f37e394]:
+              - emphasis [ref=f37e395]: Robust machine learning by median-of-means
+              - text: ": theory and practice, with G. Lecué, Ann. Statist., 48, 2, (2020), 906-931,"
+              - emphasis [ref=f37e396]: arXiv
+              - text: :1711.10306. Density estimation for ...
+            - link "Read more" [ref=f37e397] [cursor=pointer]:
+              - /url: https://lerasle.perso.math.cnrs.fr/fr/publications.html#:~:text=Robust%20machine%20learning%20by%20median%2Dof%2Dmeans,estimation%20for%20RWRE%2C%20with%20A.
+        - generic [ref=f37e401]:
+          - generic [ref=f37e404]:
+            - link "Median of means principle as a divide-and-conquer ... GitHub https://lecueguillaume.github.io › MOMKLL" [ref=f37e406] [cursor=pointer]:
+              - /url: https://lecueguillaume.github.io/assets/MOMKLL.pdf
+              - heading "Median of means principle as a divide-and-conquer ..." [level=3] [ref=f37e407]
+              - generic [ref=f37e416]:
+                - generic [ref=f37e417]: GitHub
+                - generic [ref=f37e419]: https://lecueguillaume.github.io › MOMKLL
+            - generic [ref=f37e421]: PDF
+            - button "About this result" [ref=f37e424] [cursor=pointer]
+          - generic [ref=f37e430]:
+            - generic [ref=f37e431]: by J Kwon · 2018 · Cited by 3 —
+            - generic [ref=f37e432]:
+              - emphasis [ref=f37e433]: Robust machine learning by median-of-means
+              - text: ": theory and practice."
+              - emphasis [ref=f37e434]: arXiv
+              - text: preprint
+              - emphasis [ref=f37e435]: arXiv
+              - text: :1711.10306, 2017. [30] Guillaume Lecué, Matthieu ...
+            - link "Read more" [ref=f37e436] [cursor=pointer]:
+              - /url: https://lecueguillaume.github.io/assets/MOMKLL.pdf#:~:text=Robust%20machine%20learning%20by%20median%2Dof%2Dmeans%3A,Matthieu%20Lerasle%2C%20and%20Timoth%C3%A9e%20Mathieu.
+        - generic [ref=f37e440]:
+          - generic [ref=f37e443]:
+            - link "A MOM-based ensemble method for robustness, subsampling ... arXiv https://arxiv.org › pdf" [ref=f37e445] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/1812.02435
+              - heading "A MOM-based ensemble method for robustness, subsampling ..." [level=3] [ref=f37e446]
+              - generic [ref=f37e452]:
+                - generic [ref=f37e453]: arXiv
+                - generic [ref=f37e455]: https://arxiv.org › pdf
+            - generic [ref=f37e457]: PDF
+            - button "About this result" [ref=f37e460] [cursor=pointer]
+          - generic [ref=f37e467]:
+            - emphasis [ref=f37e468]: Robust machine learning by median-of-means
+            - text: ": theory and practice."
+            - emphasis [ref=f37e469]: arXiv
+            - text: preprint
+            - emphasis [ref=f37e470]: arXiv
+            - text: :1711.10306, 2017. [30] Guillaume Lecué, Matthieu Lerasle, and Timothée ...
+      - navigation [ref=f37e473]:
+        - heading "Page Navigation" [level=1] [ref=f37e474]
+        - text: "1"
+        - link "Page 2" [ref=f37e477] [cursor=pointer]:
+          - /url: /search?q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sca_esv=d4e925c21a8887a9&ei=_PZPaqazDLXBkPIP8O-38AQ&start=10&sa=N&sstk=AU9db-BQ0yBkcF1Tp3Bk-ubRlB23rdatctBJ7G3c_sktcJUX1dzJndaeggx3rIYtS5DAAS_JWrt7P9YSG5kaN8y2iivVHkIS0R6QQg&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4Q8tMDegQIMhAE
+          - text: "2"
+        - link "Page 3" [ref=f37e479] [cursor=pointer]:
+          - /url: /search?q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sca_esv=d4e925c21a8887a9&ei=_PZPaqazDLXBkPIP8O-38AQ&start=20&sa=N&sstk=AU9db-BQ0yBkcF1Tp3Bk-ubRlB23rdatctBJ7G3c_sktcJUX1dzJndaeggx3rIYtS5DAAS_JWrt7P9YSG5kaN8y2iivVHkIS0R6QQg&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4Q8tMDegQIMhAG
+          - text: "3"
+        - link "Page 4" [ref=f37e481] [cursor=pointer]:
+          - /url: /search?q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sca_esv=d4e925c21a8887a9&ei=_PZPaqazDLXBkPIP8O-38AQ&start=30&sa=N&sstk=AU9db-BQ0yBkcF1Tp3Bk-ubRlB23rdatctBJ7G3c_sktcJUX1dzJndaeggx3rIYtS5DAAS_JWrt7P9YSG5kaN8y2iivVHkIS0R6QQg&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4Q8tMDegQIMhAI
+          - text: "4"
+        - link "Page 5" [ref=f37e483] [cursor=pointer]:
+          - /url: /search?q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sca_esv=d4e925c21a8887a9&ei=_PZPaqazDLXBkPIP8O-38AQ&start=40&sa=N&sstk=AU9db-BQ0yBkcF1Tp3Bk-ubRlB23rdatctBJ7G3c_sktcJUX1dzJndaeggx3rIYtS5DAAS_JWrt7P9YSG5kaN8y2iivVHkIS0R6QQg&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4Q8tMDegQIMhAK
+          - text: "5"
+        - link "Page 6" [ref=f37e485] [cursor=pointer]:
+          - /url: /search?q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sca_esv=d4e925c21a8887a9&ei=_PZPaqazDLXBkPIP8O-38AQ&start=50&sa=N&sstk=AU9db-BQ0yBkcF1Tp3Bk-ubRlB23rdatctBJ7G3c_sktcJUX1dzJndaeggx3rIYtS5DAAS_JWrt7P9YSG5kaN8y2iivVHkIS0R6QQg&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4Q8tMDegQIMhAM
+          - text: "6"
+        - link "Page 7" [ref=f37e487] [cursor=pointer]:
+          - /url: /search?q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sca_esv=d4e925c21a8887a9&ei=_PZPaqazDLXBkPIP8O-38AQ&start=60&sa=N&sstk=AU9db-BQ0yBkcF1Tp3Bk-ubRlB23rdatctBJ7G3c_sktcJUX1dzJndaeggx3rIYtS5DAAS_JWrt7P9YSG5kaN8y2iivVHkIS0R6QQg&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4Q8tMDegQIMhAO
+          - text: "7"
+        - link "Page 8" [ref=f37e489] [cursor=pointer]:
+          - /url: /search?q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sca_esv=d4e925c21a8887a9&ei=_PZPaqazDLXBkPIP8O-38AQ&start=70&sa=N&sstk=AU9db-BQ0yBkcF1Tp3Bk-ubRlB23rdatctBJ7G3c_sktcJUX1dzJndaeggx3rIYtS5DAAS_JWrt7P9YSG5kaN8y2iivVHkIS0R6QQg&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4Q8tMDegQIMhAQ
+          - text: "8"
+        - link "Page 9" [ref=f37e491] [cursor=pointer]:
+          - /url: /search?q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sca_esv=d4e925c21a8887a9&ei=_PZPaqazDLXBkPIP8O-38AQ&start=80&sa=N&sstk=AU9db-BQ0yBkcF1Tp3Bk-ubRlB23rdatctBJ7G3c_sktcJUX1dzJndaeggx3rIYtS5DAAS_JWrt7P9YSG5kaN8y2iivVHkIS0R6QQg&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4Q8tMDegQIMhAS
+          - text: "9"
+        - link "Page 10" [ref=f37e493] [cursor=pointer]:
+          - /url: /search?q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sca_esv=d4e925c21a8887a9&ei=_PZPaqazDLXBkPIP8O-38AQ&start=90&sa=N&sstk=AU9db-BQ0yBkcF1Tp3Bk-ubRlB23rdatctBJ7G3c_sktcJUX1dzJndaeggx3rIYtS5DAAS_JWrt7P9YSG5kaN8y2iivVHkIS0R6QQg&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4Q8tMDegQIMhAU
+          - text: "10"
+        - heading [level=2] [ref=f37e495]:
+          - link "Next" [ref=f37e496] [cursor=pointer]:
+            - /url: /search?q=%22Robust+machine+learning+by+median-of-means%22+arxiv&sca_esv=d4e925c21a8887a9&ei=_PZPaqazDLXBkPIP8O-38AQ&start=10&sa=N&sstk=AU9db-BQ0yBkcF1Tp3Bk-ubRlB23rdatctBJ7G3c_sktcJUX1dzJndaeggx3rIYtS5DAAS_JWrt7P9YSG5kaN8y2iivVHkIS0R6QQg&ved=2ahUKEwimocfTqsaVAxW1IEQIHfD3DU4Q8NMDegQIMhAW
+      - navigation
+    - contentinfo [ref=f37e499]:
+      - heading "Footer Links" [level=1] [ref=f37e500]
+      - generic [ref=f37e504]:
+        - generic [ref=f37e508]:
+          - button "Woodland, California - From your IP address" [ref=f37e510] [cursor=pointer]:
+            - generic [ref=f37e511]: Woodland, California
+            - generic [ref=f37e513]:
+              - text: "-"
+              - generic [ref=f37e514]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f37e516] [cursor=pointer]
+        - generic [ref=f37e519]:
+          - link "Help" [ref=f37e520] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f37e521] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f37e522] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f37e523] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

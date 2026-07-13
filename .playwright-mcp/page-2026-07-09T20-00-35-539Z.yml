@@ -1,0 +1,365 @@
+- generic [active] [ref=f37e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f37e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f37e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f37e8]:
+    - search [ref=f37e9]:
+      - generic [ref=f37e11]:
+        - link "Go to Google Home" [ref=f37e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQPAgI
+        - generic [ref=f37e21]:
+          - generic [ref=f37e22]:
+            - combobox "Search" [ref=f37e25]: gradient agreement federated learning cosine similarity adaptive aggregation gradient agreement federated learning cosine similarity adaptive aggregation
+            - generic [ref=f37e26]:
+              - button "Clear" [ref=f37e28] [cursor=pointer]
+              - generic [ref=f37e33]:
+                - button "Search by voice" [ref=f37e34] [cursor=pointer]
+                - button "Search by image" [ref=f37e37] [cursor=pointer]
+          - button "Search" [ref=f37e40] [cursor=pointer]
+    - generic [ref=f37e45]:
+      - button "Settings" [ref=f37e47] [cursor=pointer]
+      - button "Share" [ref=f37e53] [cursor=pointer]
+      - generic [ref=f37e59]:
+        - button "Google apps" [ref=f37e61] [cursor=pointer]
+        - link "Sign in" [ref=f37e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3Dgradient%2520agreement%2520federated%2520learning%2520cosine%2520similarity%2520adaptive%2520aggregation&ec=futura_srp_og_si_72236_p
+  - generic [ref=f37e68]:
+    - navigation [ref=f37e74]:
+      - generic [ref=f37e80]:
+        - list [ref=f37e81]:
+          - listitem [ref=f37e82]:
+            - link "AI Mode" [ref=f37e85] [cursor=pointer]:
+              - /url: /search?q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&aep=1&ntc=1&sa=X&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ2J8OegQICBAD
+          - listitem [ref=f37e89]:
+            - link "All" [disabled] [ref=f37e90]
+          - listitem [ref=f37e93]:
+            - link "Images" [ref=f37e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sa=X&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQtKgLegQIGxAB
+          - listitem [ref=f37e97]:
+            - link "Videos" [ref=f37e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sa=X&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQtKgLegQIGRAB
+          - listitem [ref=f37e101]:
+            - link "Shopping" [ref=f37e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&ved=1t:220175&ictx=111
+          - listitem [ref=f37e105]:
+            - link "Forums" [ref=f37e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sa=X&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQs6gLegQIFRAB
+          - listitem [ref=f37e109]:
+            - link "Short videos" [ref=f37e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sa=X&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQs6gLegQIDxAB
+          - listitem [ref=f37e113]:
+            - button [ref=f37e114] [cursor=pointer]:
+              - generic "More filters" [ref=f37e115]: More
+        - button "Tools" [ref=f37e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f37e129]
+    - generic [ref=f37e134]:
+      - generic [ref=f37e153]:
+        - heading "Thinking" [level=2] [ref=f37e157]
+        - progressbar "Generating" [ref=f37e160]
+      - main [ref=f37e162]:
+        - generic [ref=f37e166]:
+          - generic [ref=f37e169]:
+            - heading "Web results" [level=2] [ref=f37e170]
+            - generic [ref=f37e171]:
+              - generic [ref=f37e174]:
+                - 'link "FedGA: Federated Learning via Gradient Adaptive ... IEEE Xplore https://ieeexplore.ieee.org › iel8" [ref=f37e176] [cursor=pointer]':
+                  - /url: https://ieeexplore.ieee.org/iel8/11342430/11342431/11343271.pdf
+                  - 'heading "FedGA: Federated Learning via Gradient Adaptive ..." [level=3] [ref=f37e177]'
+                  - generic [ref=f37e186]:
+                    - generic [ref=f37e187]: IEEE Xplore
+                    - generic [ref=f37e189]: https://ieeexplore.ieee.org › iel8
+                - button "About this result" [ref=f37e193] [cursor=pointer]
+              - generic [ref=f37e199]:
+                - generic [ref=f37e200]: by C Hu · 2025 —
+                - generic [ref=f37e201]:
+                  - text: To address these challenges, this paper proposes
+                  - emphasis [ref=f37e202]: FedGA
+                  - text: ", an innovative FL framework that leverages cosine similarity-based weighted aggregation to enhance ..."
+                - link "Read more" [ref=f37e203] [cursor=pointer]:
+                  - /url: https://ieeexplore.ieee.org/iel8/11342430/11342431/11343271.pdf#:~:text=To%20address%20these%20challenges%2C,enhance%20model%20convergence%20speed.
+              - generic [ref=f37e205]:
+                - text: "Missing: agreement ‎| Show results with:"
+                - link "agreement" [ref=f37e206] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=gradient+%22agreement%22+federated+learning+cosine+similarity+adaptive+aggregation&sa=X&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ5t4CegQIMBAB
+          - table [ref=f37e212]:
+            - rowgroup [ref=f37e213]:
+              - row [ref=f37e214]:
+                - cell [ref=f37e215]:
+                  - heading [level=3] [ref=f37e216]:
+                    - link [ref=f37e217] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar?q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                      - generic [ref=f37e218]:
+                        - text: Scholarly articles for
+                        - emphasis [ref=f37e219]: gradient agreement federated learning cosine similarity adaptive aggregation
+              - row [ref=f37e220]:
+                - cell [ref=f37e221]:
+                  - heading "… learning with similarity-based model aggregation - ‎Tan - Cited by 11" [level=3] [ref=f37e222]:
+                    - link [ref=f37e223] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://ieeexplore.ieee.org/abstract/document/10535193/&hl=en&sa=X&ei=4_1Pari0BZa06rQPm7SPgAc&scisig=AM1tuoNlXPMgOWsQITfLKQahYpKU&oi=scholarr
+                      - generic [ref=f37e224]:
+                        - text: …
+                        - emphasis [ref=f37e225]: learning
+                        - text: with
+                        - emphasis [ref=f37e226]: similarity
+                        - text: "-based model"
+                        - emphasis [ref=f37e227]: aggregation
+                    - generic [ref=f37e228]:
+                      - text: "-"
+                      - generic [ref=f37e229]: ‎Tan
+                      - text: "- Cited by 11"
+                  - heading "Optimizing federated learning with aggregation … - ‎Khan - Cited by 25" [level=3] [ref=f37e230]:
+                    - link [ref=f37e231] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://ieeexplore.ieee.org/iel8/8782664/10834807/11082669.pdf&hl=en&sa=X&ei=4_1Pari0BZa06rQPm7SPgAc&scisig=AM1tuoPDzDoKgK-D9RhKlFDjyF0b&oi=scholarr
+                      - generic [ref=f37e232]:
+                        - text: Optimizing
+                        - emphasis [ref=f37e233]: federated learning
+                        - text: with
+                        - emphasis [ref=f37e234]: aggregation
+                        - text: …
+                    - generic [ref=f37e235]:
+                      - text: "-"
+                      - generic [ref=f37e236]: ‎Khan
+                      - text: "- Cited by 25"
+                  - heading "… learning with cosine similarity based aggregation on … - ‎Wu - Cited by 4" [level=3] [ref=f37e237]:
+                    - link [ref=f37e238] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://link.springer.com/chapter/10.1007/978-981-97-0811-6_26&hl=en&sa=X&ei=4_1Pari0BZa06rQPm7SPgAc&scisig=AM1tuoMZdTBJfP4wEMyAmTzWqEdw&oi=scholarr
+                      - generic [ref=f37e239]:
+                        - text: …
+                        - emphasis [ref=f37e240]: learning
+                        - text: with
+                        - emphasis [ref=f37e241]: cosine similarity
+                        - text: based
+                        - emphasis [ref=f37e242]: aggregation
+                        - text: on …
+                    - generic [ref=f37e243]:
+                      - text: "-"
+                      - generic [ref=f37e244]: ‎Wu
+                      - text: "- Cited by 4"
+          - generic [ref=f37e247]:
+            - heading "Web results" [level=2] [ref=f37e248]
+            - generic [ref=f37e249]:
+              - generic [ref=f37e252]:
+                - link "High Precision Method of Federated Learning Based on ... IEEE Xplore https://ieeexplore.ieee.org › document" [ref=f37e254] [cursor=pointer]:
+                  - /url: https://ieeexplore.ieee.org/document/9903232/
+                  - heading "High Precision Method of Federated Learning Based on ..." [level=3] [ref=f37e255]
+                  - generic [ref=f37e264]:
+                    - generic [ref=f37e265]: IEEE Xplore
+                    - generic [ref=f37e267]: https://ieeexplore.ieee.org › document
+                - button "About this result" [ref=f37e271] [cursor=pointer]
+              - generic [ref=f37e277]:
+                - generic [ref=f37e278]: by J Wang · 2022 · Cited by 5 —
+                - generic [ref=f37e279]:
+                  - text: In this paper, we propose a
+                  - emphasis [ref=f37e280]: federated learning gradient adaptive aggregation
+                  - text: method based on cosine similarity and a central node privacy protection method.
+                - link "Read more" [ref=f37e281] [cursor=pointer]:
+                  - /url: https://ieeexplore.ieee.org/document/9903232/#:~:text=In%20this%20paper%2C%20we%20propose,solve%20the%20above%2Dmentioned%20problems%20respectively.
+          - generic [ref=f37e285]:
+            - generic [ref=f37e288]:
+              - link "Adaptive Federated Learning with Aggregated Gradients arXiv https://arxiv.org › html" [ref=f37e290] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2303.15799v5
+                - heading "Adaptive Federated Learning with Aggregated Gradients" [level=3] [ref=f37e291]
+                - generic [ref=f37e297]:
+                  - generic [ref=f37e298]: arXiv
+                  - generic [ref=f37e300]: https://arxiv.org › html
+              - button "About this result" [ref=f37e304] [cursor=pointer]
+            - generic [ref=f37e310]:
+              - generic [ref=f37e311]: Aug 30, 2024 —
+              - generic [ref=f37e312]:
+                - text: To tackle the challenge of information exchange among clients during local training and design a decentralized
+                - emphasis [ref=f37e313]: adaptive learning
+                - text: rate for each ...
+              - link "Read more" [ref=f37e314] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2303.15799v5#:~:text=To%20tackle%20the%20challenge%20of,parameters%20and%20gradients%20over%20time.
+            - generic [ref=f37e316]:
+              - text: "Missing: agreement ‎| Show results with:"
+              - link "agreement" [ref=f37e317] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=gradient+%22agreement%22+federated+learning+cosine+similarity+adaptive+aggregation&sa=X&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ5t4CegQILxAB
+          - generic [ref=f37e321]:
+            - generic [ref=f37e324]:
+              - link "Addressing Negative Client Sampling in Federated Learning OpenReview https://openreview.net › forum" [ref=f37e326] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=v73h3bYE2Z
+                - heading "Addressing Negative Client Sampling in Federated Learning" [level=3] [ref=f37e327]
+                - generic [ref=f37e333]:
+                  - generic [ref=f37e334]: OpenReview
+                  - generic [ref=f37e336]: https://openreview.net › forum
+              - button "About this result" [ref=f37e340] [cursor=pointer]
+            - generic [ref=f37e346]:
+              - generic [ref=f37e347]: by W Yang · Cited by 1 —
+              - generic [ref=f37e348]:
+                - text: The paper proposes a new method to mitigate distribution differences between clients in
+                - emphasis [ref=f37e349]: federated learning
+                - text: case. It demonstrates the effect of ...
+              - link "Read more" [ref=f37e350] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=v73h3bYE2Z#:~:text=The%20paper%20proposes%20a%20new,achieve%20the%20significantly%20better%20performance.
+          - generic [ref=f37e354]:
+            - generic [ref=f37e357]:
+              - link "Adaptive weighted aggregation federated learning algorithm ... IOPscience https://iopscience.iop.org › article" [ref=f37e359] [cursor=pointer]:
+                - /url: https://iopscience.iop.org/article/10.1088/2631-8695/ae0f7a
+                - heading "Adaptive weighted aggregation federated learning algorithm ..." [level=3] [ref=f37e360]
+                - generic [ref=f37e366]:
+                  - generic [ref=f37e367]: IOPscience
+                  - generic [ref=f37e369]: https://iopscience.iop.org › article
+              - button "About this result" [ref=f37e373] [cursor=pointer]
+            - generic [ref=f37e379]:
+              - generic [ref=f37e380]: by B Ma · 2025 —
+              - generic [ref=f37e381]:
+                - text: The
+                - emphasis [ref=f37e382]: cosine similarity
+                - text: between
+                - emphasis [ref=f37e383]: gradients
+                - text: indicates the consistency of the
+                - emphasis [ref=f37e384]: gradients
+                - text: . If
+                - emphasis [ref=f37e385]: gradients
+                - text: exhibit higher
+                - emphasis [ref=f37e386]: cosine similarity
+                - text: ", the loss ..."
+              - link "Read more" [ref=f37e387] [cursor=pointer]:
+                - /url: https://iopscience.iop.org/article/10.1088/2631-8695/ae0f7a#:~:text=4.%20Experimental%20results%20and%20analysis
+            - generic [ref=f37e389]:
+              - text: "Missing: agreement ‎| Show results with:"
+              - link "agreement" [ref=f37e390] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=gradient+%22agreement%22+federated+learning+cosine+similarity+adaptive+aggregation&sa=X&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ5t4CegQIKxAB
+          - generic [ref=f37e394]:
+            - generic [ref=f37e397]:
+              - link "Enhancing Federated Learning with Adaptive Aggregation ... Swansea University https://cronfa.swan.ac.uk › Record › Download" [ref=f37e399] [cursor=pointer]:
+                - /url: https://cronfa.swan.ac.uk/Record/cronfa71338/Download/71338__36140__55aad54dc2ce443ebb020f4d633cc188.pdf
+                - heading "Enhancing Federated Learning with Adaptive Aggregation ..." [level=3] [ref=f37e400]
+                - generic [ref=f37e406]:
+                  - generic [ref=f37e407]: Swansea University
+                  - generic [ref=f37e409]: https://cronfa.swan.ac.uk › Record › Download
+              - generic [ref=f37e411]: PDF
+              - button "About this result" [ref=f37e414] [cursor=pointer]
+            - generic [ref=f37e420]:
+              - generic [ref=f37e421]: by YI HU · 2025 —
+              - generic [ref=f37e422]:
+                - text: For IG, the attack depends on
+                - emphasis [ref=f37e423]: cosine similarity
+                - text: between observed
+                - emphasis [ref=f37e424]: gradients
+                - text: and candidate
+                - emphasis [ref=f37e425]: gradients
+                - text: to iteratively refine the reconstructed image ...
+              - link "Read more" [ref=f37e426] [cursor=pointer]:
+                - /url: https://cronfa.swan.ac.uk/Record/cronfa71338/Download/71338__36140__55aad54dc2ce443ebb020f4d633cc188.pdf#:~:text=For%20IG%2C%20the%20attack%20depends,the%20reconstructed%20image.
+            - generic [ref=f37e428]:
+              - text: "Missing: agreement ‎| Show results with:"
+              - link "agreement" [ref=f37e429] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=gradient+%22agreement%22+federated+learning+cosine+similarity+adaptive+aggregation&sa=X&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ5t4CegQILRAB
+          - generic [ref=f37e433]:
+            - generic [ref=f37e436]:
+              - link "Federated Learning with Adaptive Gradient Compression ... River Publishers https://journals.riverpublishers.com › article › view" [ref=f37e438] [cursor=pointer]:
+                - /url: https://journals.riverpublishers.com/index.php/JCSANDM/article/view/31067/23941
+                - heading "Federated Learning with Adaptive Gradient Compression ..." [level=3] [ref=f37e439]
+                - generic [ref=f37e448]:
+                  - generic [ref=f37e449]: River Publishers
+                  - generic [ref=f37e451]: https://journals.riverpublishers.com › article › view
+              - button "About this result" [ref=f37e455] [cursor=pointer]
+            - generic [ref=f37e461]:
+              - generic [ref=f37e462]: by L Qi · 2026 · Cited by 1 —
+              - generic [ref=f37e463]:
+                - text: This paper proposes a
+                - emphasis [ref=f37e464]: federated learning
+                - text: (FL) framework that incorporates
+                - emphasis [ref=f37e465]: adaptive gradient
+                - text: compression and dynamic
+                - emphasis [ref=f37e466]: aggregation
+                - text: to address communication ...
+              - link "Read more" [ref=f37e467] [cursor=pointer]:
+                - /url: https://journals.riverpublishers.com/index.php/JCSANDM/article/view/31067/23941#:~:text=This%20paper%20proposes%20a%20federated,dynamic%20aggregation%20to%20address%20communication
+            - generic [ref=f37e469]:
+              - text: "Missing: agreement ‎| Show results with:"
+              - link "agreement" [ref=f37e470] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=gradient+%22agreement%22+federated+learning+cosine+similarity+adaptive+aggregation&sa=X&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ5t4CegQILhAB
+          - generic [ref=f37e474]:
+            - generic [ref=f37e477]:
+              - link "Model aggregation techniques in federated learning ScienceDirect.com https://www.sciencedirect.com › science › article › pii" [ref=f37e479] [cursor=pointer]:
+                - /url: https://www.sciencedirect.com/science/article/pii/S0167739X23003333
+                - heading "Model aggregation techniques in federated learning" [level=3] [ref=f37e480]
+                - generic [ref=f37e486]:
+                  - generic [ref=f37e487]: ScienceDirect.com
+                  - generic [ref=f37e489]: https://www.sciencedirect.com › science › article › pii
+              - button "About this result" [ref=f37e493] [cursor=pointer]
+            - generic [ref=f37e499]:
+              - generic [ref=f37e500]: by P Qi · 2024 · Cited by 604 —
+              - generic [ref=f37e501]:
+                - text: This paper presents a systematic literature review encompassing 201 studies on model
+                - emphasis [ref=f37e502]: aggregation
+                - text: in FL. The focus is on summarizing the proposed techniques.
+              - link "Read more" [ref=f37e503] [cursor=pointer]:
+                - /url: https://www.sciencedirect.com/science/article/pii/S0167739X23003333#:~:text=To%20address%20this%20gap%2C%20this,currently%20applied%20for%20model%20fusion.
+            - generic [ref=f37e505]:
+              - text: "Missing: agreement ‎| Show results with:"
+              - link "agreement" [ref=f37e506] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=gradient+%22agreement%22+federated+learning+cosine+similarity+adaptive+aggregation&sa=X&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ5t4CegQIMRAB
+          - generic [ref=f37e510]:
+            - generic [ref=f37e513]:
+              - 'link "FedCVG: a two-stage robust federated learning optimization ... PubMed Central (PMC) (.gov) https://pmc.ncbi.nlm.nih.gov › articles › PMC12106618" [ref=f37e515] [cursor=pointer]':
+                - /url: https://pmc.ncbi.nlm.nih.gov/articles/PMC12106618/
+                - 'heading "FedCVG: a two-stage robust federated learning optimization ..." [level=3] [ref=f37e516]'
+                - generic [ref=f37e522]:
+                  - generic [ref=f37e523]: PubMed Central (PMC) (.gov)
+                  - generic [ref=f37e525]: https://pmc.ncbi.nlm.nih.gov › articles › PMC12106618
+              - button "About this result" [ref=f37e529] [cursor=pointer]
+            - generic [ref=f37e535]:
+              - generic [ref=f37e536]: by R Zhang · 2025 · Cited by 4 —
+              - text: FedCVG improves average accuracy by 4.2% and reduces communication overhead by approximately 50% while defending against poisoning attacks.
+              - link "Read more" [ref=f37e537] [cursor=pointer]:
+                - /url: https://pmc.ncbi.nlm.nih.gov/articles/PMC12106618/#:~:text=Extensive%20experimental%20results%20show%20that%2C,while%20defending%20against%20poisoning%20attacks.
+        - navigation [ref=f37e540]:
+          - heading "Page Navigation" [level=1] [ref=f37e541]
+          - text: "1"
+          - link "Page 2" [ref=f37e544] [cursor=pointer]:
+            - /url: /search?q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sca_esv=30a5fb343c9df574&ei=4v1PavPnO9jJkPIPkK68iQY&start=10&sa=N&sstk=AU9db-AGuzKgI9sJWO2exVrPC_I6BpWgFcHvleLT0nn8xemgTWZCG-y3vHzVRkykgL1BANuySYRf-BAT4OCw-sN5iR2FSGj6JzOJ5Q&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ8tMDegQIRBAE
+            - text: "2"
+          - link "Page 3" [ref=f37e546] [cursor=pointer]:
+            - /url: /search?q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sca_esv=30a5fb343c9df574&ei=4v1PavPnO9jJkPIPkK68iQY&start=20&sa=N&sstk=AU9db-AGuzKgI9sJWO2exVrPC_I6BpWgFcHvleLT0nn8xemgTWZCG-y3vHzVRkykgL1BANuySYRf-BAT4OCw-sN5iR2FSGj6JzOJ5Q&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ8tMDegQIRBAG
+            - text: "3"
+          - link "Page 4" [ref=f37e548] [cursor=pointer]:
+            - /url: /search?q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sca_esv=30a5fb343c9df574&ei=4v1PavPnO9jJkPIPkK68iQY&start=30&sa=N&sstk=AU9db-AGuzKgI9sJWO2exVrPC_I6BpWgFcHvleLT0nn8xemgTWZCG-y3vHzVRkykgL1BANuySYRf-BAT4OCw-sN5iR2FSGj6JzOJ5Q&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ8tMDegQIRBAI
+            - text: "4"
+          - link "Page 5" [ref=f37e550] [cursor=pointer]:
+            - /url: /search?q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sca_esv=30a5fb343c9df574&ei=4v1PavPnO9jJkPIPkK68iQY&start=40&sa=N&sstk=AU9db-AGuzKgI9sJWO2exVrPC_I6BpWgFcHvleLT0nn8xemgTWZCG-y3vHzVRkykgL1BANuySYRf-BAT4OCw-sN5iR2FSGj6JzOJ5Q&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ8tMDegQIRBAK
+            - text: "5"
+          - link "Page 6" [ref=f37e552] [cursor=pointer]:
+            - /url: /search?q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sca_esv=30a5fb343c9df574&ei=4v1PavPnO9jJkPIPkK68iQY&start=50&sa=N&sstk=AU9db-AGuzKgI9sJWO2exVrPC_I6BpWgFcHvleLT0nn8xemgTWZCG-y3vHzVRkykgL1BANuySYRf-BAT4OCw-sN5iR2FSGj6JzOJ5Q&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ8tMDegQIRBAM
+            - text: "6"
+          - link "Page 7" [ref=f37e554] [cursor=pointer]:
+            - /url: /search?q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sca_esv=30a5fb343c9df574&ei=4v1PavPnO9jJkPIPkK68iQY&start=60&sa=N&sstk=AU9db-AGuzKgI9sJWO2exVrPC_I6BpWgFcHvleLT0nn8xemgTWZCG-y3vHzVRkykgL1BANuySYRf-BAT4OCw-sN5iR2FSGj6JzOJ5Q&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ8tMDegQIRBAO
+            - text: "7"
+          - link "Page 8" [ref=f37e556] [cursor=pointer]:
+            - /url: /search?q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sca_esv=30a5fb343c9df574&ei=4v1PavPnO9jJkPIPkK68iQY&start=70&sa=N&sstk=AU9db-AGuzKgI9sJWO2exVrPC_I6BpWgFcHvleLT0nn8xemgTWZCG-y3vHzVRkykgL1BANuySYRf-BAT4OCw-sN5iR2FSGj6JzOJ5Q&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ8tMDegQIRBAQ
+            - text: "8"
+          - link "Page 9" [ref=f37e558] [cursor=pointer]:
+            - /url: /search?q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sca_esv=30a5fb343c9df574&ei=4v1PavPnO9jJkPIPkK68iQY&start=80&sa=N&sstk=AU9db-AGuzKgI9sJWO2exVrPC_I6BpWgFcHvleLT0nn8xemgTWZCG-y3vHzVRkykgL1BANuySYRf-BAT4OCw-sN5iR2FSGj6JzOJ5Q&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ8tMDegQIRBAS
+            - text: "9"
+          - link "Page 10" [ref=f37e560] [cursor=pointer]:
+            - /url: /search?q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sca_esv=30a5fb343c9df574&ei=4v1PavPnO9jJkPIPkK68iQY&start=90&sa=N&sstk=AU9db-AGuzKgI9sJWO2exVrPC_I6BpWgFcHvleLT0nn8xemgTWZCG-y3vHzVRkykgL1BANuySYRf-BAT4OCw-sN5iR2FSGj6JzOJ5Q&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ8tMDegQIRBAU
+            - text: "10"
+          - heading [level=2] [ref=f37e562]:
+            - link "Next" [ref=f37e563] [cursor=pointer]:
+              - /url: /search?q=gradient+agreement+federated+learning+cosine+similarity+adaptive+aggregation&sca_esv=30a5fb343c9df574&ei=4v1PavPnO9jJkPIPkK68iQY&start=10&sa=N&sstk=AU9db-AGuzKgI9sJWO2exVrPC_I6BpWgFcHvleLT0nn8xemgTWZCG-y3vHzVRkykgL1BANuySYRf-BAT4OCw-sN5iR2FSGj6JzOJ5Q&ved=2ahUKEwjz4IKescaVAxXYJEQIHRAXL2EQ8NMDegQIRBAW
+        - navigation
+    - contentinfo [ref=f37e566]:
+      - heading "Footer Links" [level=1] [ref=f37e567]
+      - generic [ref=f37e571]:
+        - generic [ref=f37e575]:
+          - button "Woodland, California - From your IP address" [ref=f37e577] [cursor=pointer]:
+            - generic [ref=f37e578]: Woodland, California
+            - generic [ref=f37e580]:
+              - text: "-"
+              - generic [ref=f37e581]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f37e583] [cursor=pointer]
+        - generic [ref=f37e586]:
+          - link "Help" [ref=f37e587] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f37e588] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f37e589] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f37e590] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

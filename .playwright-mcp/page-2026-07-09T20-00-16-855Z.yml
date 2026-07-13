@@ -1,0 +1,320 @@
+- generic [active] [ref=f3e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f3e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f3e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f3e8]:
+    - search [ref=f3e9]:
+      - generic [ref=f3e11]:
+        - link "Go to Google Home" [ref=f3e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQPAgI
+        - generic [ref=f3e21]:
+          - generic [ref=f3e22]:
+            - combobox "Search" [ref=f3e25]: "\"centered clipping\" federated learning \"centered clipping\" federated learning"
+            - generic [ref=f3e26]:
+              - button "Clear" [ref=f3e28] [cursor=pointer]
+              - generic [ref=f3e33]:
+                - button "Search by voice" [ref=f3e34] [cursor=pointer]
+                - button "Search by image" [ref=f3e37] [cursor=pointer]
+          - button "Search" [ref=f3e40] [cursor=pointer]
+    - generic [ref=f3e45]:
+      - button "Settings" [ref=f3e47] [cursor=pointer]
+      - button "Share" [ref=f3e53] [cursor=pointer]
+      - generic [ref=f3e59]:
+        - button "Google apps" [ref=f3e61] [cursor=pointer]
+        - link "Sign in" [ref=f3e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522centered%2Bclipping%2522%2Bfederated%2Blearning&ec=futura_srp_og_si_72236_p
+  - generic [ref=f3e68]:
+    - navigation [ref=f3e74]:
+      - generic [ref=f3e80]:
+        - list [ref=f3e81]:
+          - listitem [ref=f3e82]:
+            - link "AI Mode" [ref=f3e85] [cursor=pointer]:
+              - /url: /search?q=%22centered+clipping%22+federated+learning&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&aep=1&ntc=1&sa=X&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQ2J8OegQICBAD
+          - listitem [ref=f3e89]:
+            - link "All" [disabled] [ref=f3e90]
+          - listitem [ref=f3e93]:
+            - link "Images" [ref=f3e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22centered+clipping%22+federated+learning&sa=X&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQtKgLegQIKxAB
+          - listitem [ref=f3e97]:
+            - link "Videos" [ref=f3e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22centered+clipping%22+federated+learning&sa=X&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQtKgLegQIKRAB
+          - listitem [ref=f3e101]:
+            - link "Shopping" [ref=f3e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22centered+clipping%22+federated+learning&ved=1t:220175&ictx=111
+          - listitem [ref=f3e105]:
+            - link "Forums" [ref=f3e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22centered+clipping%22+federated+learning&sa=X&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQs6gLegQIHRAB
+          - listitem [ref=f3e109]:
+            - link "Short videos" [ref=f3e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22centered+clipping%22+federated+learning&sa=X&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQs6gLegQIFBAB
+          - listitem [ref=f3e113]:
+            - button [ref=f3e114] [cursor=pointer]:
+              - generic "More filters" [ref=f3e115]: More
+        - button "Tools" [ref=f3e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f3e129]
+    - generic [ref=f3e134]:
+      - generic [ref=f3e153]:
+        - heading "Thinking" [level=2] [ref=f3e157]
+        - progressbar "Generating" [ref=f3e160]
+      - main [ref=f3e162]:
+        - generic [ref=f3e166]:
+          - generic [ref=f3e169]:
+            - heading "Web results" [level=2] [ref=f3e170]
+            - generic [ref=f3e171]:
+              - generic [ref=f3e174]:
+                - 'link "Byzantines can also Learn from History: Fall of Centered ... arXiv https://arxiv.org › cs" [ref=f3e176] [cursor=pointer]':
+                  - /url: https://arxiv.org/abs/2208.09894
+                  - 'heading "Byzantines can also Learn from History: Fall of Centered ..." [level=3] [ref=f3e177]'
+                  - generic [ref=f3e183]:
+                    - generic [ref=f3e184]: arXiv
+                    - generic [ref=f3e186]: https://arxiv.org › cs
+                - button "About this result" [ref=f3e190] [cursor=pointer]
+              - generic [ref=f3e196]:
+                - generic [ref=f3e197]: by K Ozfatura · 2022 · Cited by 32 —
+                - generic [ref=f3e198]:
+                  - text: The
+                  - emphasis [ref=f3e199]: centered clipping
+                  - text: (CC) framework has further shown that the momentum term from the previous iteration, besides reducing the variance, can be ...
+                - link "Read more" [ref=f3e200] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/2208.09894#:~:text=The%20centered%20clipping%20(CC)%20framework,to%20neutralize%20Byzantine%20attacks%20better.
+          - generic [ref=f3e204]:
+            - generic [ref=f3e207]:
+              - link "Fall of Centered Clipping in Federated Learning IEEE Xplore https://ieeexplore.ieee.org › iel7" [ref=f3e209] [cursor=pointer]:
+                - /url: https://ieeexplore.ieee.org/iel7/10206/10319981/10366296.pdf
+                - heading "Fall of Centered Clipping in Federated Learning" [level=3] [ref=f3e210]
+                - generic [ref=f3e219]:
+                  - generic [ref=f3e220]: IEEE Xplore
+                  - generic [ref=f3e222]: https://ieeexplore.ieee.org › iel7
+              - button "About this result" [ref=f3e226] [cursor=pointer]
+            - generic [ref=f3e231]:
+              - generic [ref=f3e232]:
+                - generic [ref=f3e233]: by K Özfatura · 2023 · Cited by 32 —
+                - generic [ref=f3e234]:
+                  - text: The
+                  - emphasis [ref=f3e235]: centered clipping
+                  - text: (CC) framework has further shown that the momentum term from the previous iteration, besides reducing the variance, can be ...
+                - link "Read more" [ref=f3e236] [cursor=pointer]:
+                  - /url: https://ieeexplore.ieee.org/iel7/10206/10319981/10366296.pdf#:~:text=The%20centered%20clipping%20(CC)%20framework,as%20a%20reference%20point%20to
+              - generic [ref=f3e237]: 13 pages
+          - generic [ref=f3e241]:
+            - generic [ref=f3e244]:
+              - link "Fall of Centered Clipping in Federated Learning arXiv https://arxiv.org › pdf" [ref=f3e246] [cursor=pointer]:
+                - /url: https://arxiv.org/pdf/2208.09894
+                - heading "Fall of Centered Clipping in Federated Learning" [level=3] [ref=f3e247]
+                - generic [ref=f3e253]:
+                  - generic [ref=f3e254]: arXiv
+                  - generic [ref=f3e256]: https://arxiv.org › pdf
+              - generic [ref=f3e258]: PDF
+              - button "About this result" [ref=f3e261] [cursor=pointer]
+            - generic [ref=f3e267]:
+              - generic [ref=f3e268]: by K Ozfatura · 2022 · Cited by 32 —
+              - generic [ref=f3e269]:
+                - text: The
+                - emphasis [ref=f3e270]: centered clipping
+                - text: (CC) framework has further shown that the momentum term from the previous iteration, besides reducing the variance, can be ...
+              - link "Read more" [ref=f3e271] [cursor=pointer]:
+                - /url: https://arxiv.org/pdf/2208.09894#:~:text=The%20centered%20clipping%20(CC)%20framework,as%20a%20reference%20point%20to
+          - generic [ref=f3e275]:
+            - generic [ref=f3e278]:
+              - 'link "Byzantines Can Also Learn From History: Fall of Centered ... ACM Digital Library https://dl.acm.org › doi › abs › TIFS.2023.3345171" [ref=f3e280] [cursor=pointer]':
+                - /url: https://dl.acm.org/doi/abs/10.1109/TIFS.2023.3345171
+                - 'heading "Byzantines Can Also Learn From History: Fall of Centered ..." [level=3] [ref=f3e281]'
+                - generic [ref=f3e287]:
+                  - generic [ref=f3e288]: ACM Digital Library
+                  - generic [ref=f3e290]: https://dl.acm.org › doi › abs › TIFS.2023.3345171
+              - button "About this result" [ref=f3e294] [cursor=pointer]
+            - generic [ref=f3e300]:
+              - generic [ref=f3e301]: by K Özfatura · 2024 · Cited by 32 —
+              - generic [ref=f3e302]:
+                - text: The
+                - emphasis [ref=f3e303]: centered clipping
+                - text: (CC) framework has further shown that the momentum term from the previous iteration, besides reducing the variance, can be ...
+              - link "Read more" [ref=f3e304] [cursor=pointer]:
+                - /url: https://dl.acm.org/doi/abs/10.1109/TIFS.2023.3345171#:~:text=The%20centered%20clipping%20(CC)%20framework,to%20neutralize%20Byzantine%20attacks%20better.
+          - generic [ref=f3e308]:
+            - generic [ref=f3e311]:
+              - link "Efficient Federated Learning against Byzantine Attacks and ... NeurIPS 2026 https://neurips.cc › virtual › poster" [ref=f3e313] [cursor=pointer]:
+                - /url: https://neurips.cc/virtual/2025/poster/118753
+                - heading "Efficient Federated Learning against Byzantine Attacks and ..." [level=3] [ref=f3e314]
+                - generic [ref=f3e320]:
+                  - generic [ref=f3e321]: NeurIPS 2026
+                  - generic [ref=f3e323]: https://neurips.cc › virtual › poster
+              - button "About this result" [ref=f3e327] [cursor=pointer]
+            - generic [ref=f3e333]:
+              - generic [ref=f3e334]:
+                - text: ...
+                - emphasis [ref=f3e335]: centered clipping
+                - text: ", respectively, to update the global model parameters over ... Fedbr: Improving"
+                - emphasis [ref=f3e336]: federated learning
+                - text: on heterogeneous data via local learning bias ...
+              - link "Read more" [ref=f3e337] [cursor=pointer]:
+                - /url: https://neurips.cc/virtual/2025/poster/118753#:~:text=5%20Conclusion&text=Bytez.com%20%2D%20Designed%20for%20Accessibility
+          - generic [ref=f3e341]:
+            - generic [ref=f3e344]:
+              - 'link "Byzantines can also Learn from History: Fall of Centered ... DeepAI https://deepai.org › publication › byzantines-can-also-le..." [ref=f3e346] [cursor=pointer]':
+                - /url: https://deepai.org/publication/byzantines-can-also-learn-from-history-fall-of-centered-clipping-in-federated-learning
+                - 'heading "Byzantines can also Learn from History: Fall of Centered ..." [level=3] [ref=f3e347]'
+                - generic [ref=f3e353]:
+                  - generic [ref=f3e354]: DeepAI
+                  - generic [ref=f3e356]: https://deepai.org › publication › byzantines-can-also-le...
+              - button "About this result" [ref=f3e360] [cursor=pointer]
+            - generic [ref=f3e367]:
+              - text: The
+              - emphasis [ref=f3e368]: Centered Clipping
+              - text: framework (ICML 2021) has further shown that, besides reducing the variance, the momentum term from the previous iteration can be used as ...
+          - generic [ref=f3e372]:
+            - generic [ref=f3e375]:
+              - link "Learning from history for Byzantine robust optimization ICML 2026 https://icml.cc › media › icml-2021 › Slides" [ref=f3e377] [cursor=pointer]:
+                - /url: https://icml.cc/media/icml-2021/Slides/9987.pdf
+                - heading "Learning from history for Byzantine robust optimization" [level=3] [ref=f3e378]
+                - generic [ref=f3e384]:
+                  - generic [ref=f3e385]: ICML 2026
+                  - generic [ref=f3e387]: https://icml.cc › media › icml-2021 › Slides
+              - generic [ref=f3e389]: PDF
+              - button "About this result" [ref=f3e392] [cursor=pointer]
+            - generic [ref=f3e397]:
+              - generic [ref=f3e398]:
+                - generic [ref=f3e399]:
+                  - emphasis [ref=f3e400]: Federated learning
+                  - text: . 3. ○ Each worker i computes stochastic gradient at x and ...
+                  - emphasis [ref=f3e401]: Centered clipping
+                  - text: with worker momentum provably and practically defends ...
+                - link "Read more" [ref=f3e402] [cursor=pointer]:
+                  - /url: https://icml.cc/media/icml-2021/Slides/9987.pdf#:~:text=Federated%20learning,stochastic%20gradient%20at%20x%20and&text=Centered%20clipping%20with%20worker%20momentum,practically%20defends%20against%20Byzantine%20attacks
+              - generic [ref=f3e403]: 31 pages
+          - generic [ref=f3e407]:
+            - generic [ref=f3e410]:
+              - 'link "Byzantines can also Learn from History: Fall of Centered ... SciSpace https://scispace.com › pdf" [ref=f3e412] [cursor=pointer]':
+                - /url: https://scispace.com/pdf/byzantines-can-also-learn-from-history-fall-of-centered-2o5m9ox7.pdf
+                - 'heading "Byzantines can also Learn from History: Fall of Centered ..." [level=3] [ref=f3e413]'
+                - generic [ref=f3e419]:
+                  - generic [ref=f3e420]: SciSpace
+                  - generic [ref=f3e422]: https://scispace.com › pdf
+              - generic [ref=f3e424]: PDF
+              - button "About this result" [ref=f3e427] [cursor=pointer]
+            - generic [ref=f3e434]:
+              - text: "Byzantines can also Learn from History: Fall of"
+              - emphasis [ref=f3e435]: Centered Clipping
+              - text: in
+              - emphasis [ref=f3e436]: Federated Learning
+              - text: . Kerem ¨Ozfatura. KUIS AI Center. Koç University aozfatura22@ku.edu.tr.
+          - generic [ref=f3e440]:
+            - generic [ref=f3e443]:
+              - link "FEDERATED LEARNING FRAMEWORK BASED ON ... OpenReview https://openreview.net › forum" [ref=f3e445] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=AUszBTiYBB6
+                - heading "FEDERATED LEARNING FRAMEWORK BASED ON ..." [level=3] [ref=f3e446]
+                - generic [ref=f3e452]:
+                  - generic [ref=f3e453]: OpenReview
+                  - generic [ref=f3e455]: https://openreview.net › forum
+              - button "About this result" [ref=f3e459] [cursor=pointer]
+            - generic [ref=f3e465]:
+              - generic [ref=f3e466]: by WT Xiang · Cited by 5 —
+              - generic [ref=f3e467]:
+                - text: There are many other aggregation rules, such as geometric median,
+                - emphasis [ref=f3e468]: centered-clipping
+                - text: "[2], and so on. Also, the authors do not evaluate their ..."
+              - link "Read more" [ref=f3e469] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=AUszBTiYBB6#:~:text=There%20are%20many%20other%20aggregation,some%20advanced%20attacks%20%5B3%2C%204%5D.
+          - table [ref=f3e475]:
+            - rowgroup [ref=f3e476]:
+              - row [ref=f3e477]:
+                - cell [ref=f3e478]:
+                  - heading [level=3] [ref=f3e479]:
+                    - link [ref=f3e480] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar?q=%22centered+clipping%22+federated+learning&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                      - generic [ref=f3e481]:
+                        - text: Scholarly articles for
+                        - emphasis [ref=f3e482]: "\"centered clipping\" federated learning"
+              - row [ref=f3e483]:
+                - cell [ref=f3e484]:
+                  - 'heading "… history: Fall of centered clipping in federated learning - ‎Özfatura - Cited by 32" [level=3] [ref=f3e485]':
+                    - link [ref=f3e486] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2208.09894&hl=en&sa=X&ei=0P1Pat6SGtGp6rQPnZeeyQo&scisig=AM1tuoM6UBa9mnEeWHUDfJTyG_WY&oi=scholarr
+                      - generic [ref=f3e487]:
+                        - text: "… history: Fall of"
+                        - emphasis [ref=f3e488]: centered clipping
+                        - text: in
+                        - emphasis [ref=f3e489]: federated learning
+                    - generic [ref=f3e490]:
+                      - text: "-"
+                      - generic [ref=f3e491]: ‎Özfatura
+                      - text: "- Cited by 32"
+                  - heading "… learning be more robust than federated learning? - ‎Raynal - Cited by 10" [level=3] [ref=f3e492]:
+                    - link [ref=f3e493] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2303.03829&hl=en&sa=X&ei=0P1Pat6SGtGp6rQPnZeeyQo&scisig=AM1tuoMre7Wk9hJ-pgyZSsTF9AGq&oi=scholarr
+                      - generic [ref=f3e494]:
+                        - text: …
+                        - emphasis [ref=f3e495]: learning
+                        - text: be more robust than
+                        - emphasis [ref=f3e496]: federated learning
+                        - text: "?"
+                    - generic [ref=f3e497]:
+                      - text: "-"
+                      - generic [ref=f3e498]: ‎Raynal
+                      - text: "- Cited by 10"
+                  - heading "… -robust aggregation schemes in federated learning - ‎Li - Cited by 156" [level=3] [ref=f3e499]:
+                    - link [ref=f3e500] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2302.07173&hl=en&sa=X&ei=0P1Pat6SGtGp6rQPnZeeyQo&scisig=AM1tuoOeL9HL2RVKHr0N46DDoJqN&oi=scholarr
+                      - generic [ref=f3e501]:
+                        - text: … -robust aggregation schemes in
+                        - emphasis [ref=f3e502]: federated learning
+                    - generic [ref=f3e503]:
+                      - text: "-"
+                      - generic [ref=f3e504]: ‎Li
+                      - text: "- Cited by 156"
+        - navigation [ref=f3e507]:
+          - heading "Page Navigation" [level=1] [ref=f3e508]
+          - text: "1"
+          - link "Page 2" [ref=f3e511] [cursor=pointer]:
+            - /url: /search?q=%22centered+clipping%22+federated+learning&sca_esv=30a5fb343c9df574&ei=0P1PavDpErmekPIPm9OskA4&start=10&sa=N&sstk=AU9db-DZoGGaXcOdhGo5-8xtGOorfCQ9TXx6YBcWMl6Lh0OsoUGrx71D_yNxlj8z-7pxbB5kVwUait5LtvR2Aga6O9lnP2T5TPtFDw&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQ8tMDegQINBAE
+            - text: "2"
+          - link "Page 3" [ref=f3e513] [cursor=pointer]:
+            - /url: /search?q=%22centered+clipping%22+federated+learning&sca_esv=30a5fb343c9df574&ei=0P1PavDpErmekPIPm9OskA4&start=20&sa=N&sstk=AU9db-DZoGGaXcOdhGo5-8xtGOorfCQ9TXx6YBcWMl6Lh0OsoUGrx71D_yNxlj8z-7pxbB5kVwUait5LtvR2Aga6O9lnP2T5TPtFDw&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQ8tMDegQINBAG
+            - text: "3"
+          - link "Page 4" [ref=f3e515] [cursor=pointer]:
+            - /url: /search?q=%22centered+clipping%22+federated+learning&sca_esv=30a5fb343c9df574&ei=0P1PavDpErmekPIPm9OskA4&start=30&sa=N&sstk=AU9db-DZoGGaXcOdhGo5-8xtGOorfCQ9TXx6YBcWMl6Lh0OsoUGrx71D_yNxlj8z-7pxbB5kVwUait5LtvR2Aga6O9lnP2T5TPtFDw&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQ8tMDegQINBAI
+            - text: "4"
+          - link "Page 5" [ref=f3e517] [cursor=pointer]:
+            - /url: /search?q=%22centered+clipping%22+federated+learning&sca_esv=30a5fb343c9df574&ei=0P1PavDpErmekPIPm9OskA4&start=40&sa=N&sstk=AU9db-DZoGGaXcOdhGo5-8xtGOorfCQ9TXx6YBcWMl6Lh0OsoUGrx71D_yNxlj8z-7pxbB5kVwUait5LtvR2Aga6O9lnP2T5TPtFDw&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQ8tMDegQINBAK
+            - text: "5"
+          - link "Page 6" [ref=f3e519] [cursor=pointer]:
+            - /url: /search?q=%22centered+clipping%22+federated+learning&sca_esv=30a5fb343c9df574&ei=0P1PavDpErmekPIPm9OskA4&start=50&sa=N&sstk=AU9db-DZoGGaXcOdhGo5-8xtGOorfCQ9TXx6YBcWMl6Lh0OsoUGrx71D_yNxlj8z-7pxbB5kVwUait5LtvR2Aga6O9lnP2T5TPtFDw&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQ8tMDegQINBAM
+            - text: "6"
+          - link "Page 7" [ref=f3e521] [cursor=pointer]:
+            - /url: /search?q=%22centered+clipping%22+federated+learning&sca_esv=30a5fb343c9df574&ei=0P1PavDpErmekPIPm9OskA4&start=60&sa=N&sstk=AU9db-DZoGGaXcOdhGo5-8xtGOorfCQ9TXx6YBcWMl6Lh0OsoUGrx71D_yNxlj8z-7pxbB5kVwUait5LtvR2Aga6O9lnP2T5TPtFDw&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQ8tMDegQINBAO
+            - text: "7"
+          - link "Page 8" [ref=f3e523] [cursor=pointer]:
+            - /url: /search?q=%22centered+clipping%22+federated+learning&sca_esv=30a5fb343c9df574&ei=0P1PavDpErmekPIPm9OskA4&start=70&sa=N&sstk=AU9db-DZoGGaXcOdhGo5-8xtGOorfCQ9TXx6YBcWMl6Lh0OsoUGrx71D_yNxlj8z-7pxbB5kVwUait5LtvR2Aga6O9lnP2T5TPtFDw&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQ8tMDegQINBAQ
+            - text: "8"
+          - link "Page 9" [ref=f3e525] [cursor=pointer]:
+            - /url: /search?q=%22centered+clipping%22+federated+learning&sca_esv=30a5fb343c9df574&ei=0P1PavDpErmekPIPm9OskA4&start=80&sa=N&sstk=AU9db-DZoGGaXcOdhGo5-8xtGOorfCQ9TXx6YBcWMl6Lh0OsoUGrx71D_yNxlj8z-7pxbB5kVwUait5LtvR2Aga6O9lnP2T5TPtFDw&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQ8tMDegQINBAS
+            - text: "9"
+          - link "Page 10" [ref=f3e527] [cursor=pointer]:
+            - /url: /search?q=%22centered+clipping%22+federated+learning&sca_esv=30a5fb343c9df574&ei=0P1PavDpErmekPIPm9OskA4&start=90&sa=N&sstk=AU9db-DZoGGaXcOdhGo5-8xtGOorfCQ9TXx6YBcWMl6Lh0OsoUGrx71D_yNxlj8z-7pxbB5kVwUait5LtvR2Aga6O9lnP2T5TPtFDw&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQ8tMDegQINBAU
+            - text: "10"
+          - heading [level=2] [ref=f3e529]:
+            - link "Next" [ref=f3e530] [cursor=pointer]:
+              - /url: /search?q=%22centered+clipping%22+federated+learning&sca_esv=30a5fb343c9df574&ei=0P1PavDpErmekPIPm9OskA4&start=10&sa=N&sstk=AU9db-DZoGGaXcOdhGo5-8xtGOorfCQ9TXx6YBcWMl6Lh0OsoUGrx71D_yNxlj8z-7pxbB5kVwUait5LtvR2Aga6O9lnP2T5TPtFDw&ved=2ahUKEwjwkY-VscaVAxU5D0QIHZspC-IQ8NMDegQINBAW
+        - navigation
+    - contentinfo [ref=f3e533]:
+      - heading "Footer Links" [level=1] [ref=f3e534]
+      - generic [ref=f3e538]:
+        - generic [ref=f3e542]:
+          - button "Woodland, California - From your IP address" [ref=f3e544] [cursor=pointer]:
+            - generic [ref=f3e545]: Woodland, California
+            - generic [ref=f3e547]:
+              - text: "-"
+              - generic [ref=f3e548]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f3e550] [cursor=pointer]
+        - generic [ref=f3e553]:
+          - link "Help" [ref=f3e554] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f3e555] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f3e556] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f3e557] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

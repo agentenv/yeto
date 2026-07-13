@@ -1,0 +1,289 @@
+- generic [active] [ref=f17e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f17e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f17e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f17e8]:
+    - search [ref=f17e9]:
+      - generic [ref=f17e11]:
+        - link "Go to Google Home" [ref=f17e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQPAgI
+        - generic [ref=f17e21]:
+          - generic [ref=f17e22]:
+            - combobox "Search" [ref=f17e25]: "\"a stochastic line search method with expected complexity\" arxiv \"a stochastic line search method with expected complexity\" arxiv"
+            - generic [ref=f17e26]:
+              - button "Clear" [ref=f17e28] [cursor=pointer]
+              - generic [ref=f17e33]:
+                - button "Search by voice" [ref=f17e34] [cursor=pointer]
+                - button "Search by image" [ref=f17e37] [cursor=pointer]
+          - button "Search" [ref=f17e40] [cursor=pointer]
+    - generic [ref=f17e45]:
+      - button "Settings" [ref=f17e47] [cursor=pointer]
+      - button "Share" [ref=f17e53] [cursor=pointer]
+      - generic [ref=f17e59]:
+        - button "Google apps" [ref=f17e61] [cursor=pointer]
+        - link "Sign in" [ref=f17e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522a%2Bstochastic%2Bline%2Bsearch%2Bmethod%2Bwith%2Bexpected%2Bcomplexity%2522%2Barxiv&ec=futura_srp_og_si_72236_p
+  - generic [ref=f17e68]:
+    - navigation [ref=f17e74]:
+      - generic [ref=f17e80]:
+        - list [ref=f17e81]:
+          - listitem [ref=f17e82]:
+            - link "AI Mode" [ref=f17e85] [cursor=pointer]:
+              - /url: /search?q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sca_esv=d4e925c21a8887a9&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE5XdvSlI_LORjvMqi_KlDwmEfG0_Tf_E2J0y8OiIQPeyixqgWEePseYtZq-i0AxubwO6-gyBGMrBh6_XmtbpLl_sJGMu1-pHVbyO0cGxr9wz1laqS_PuahWCz5AaYirA7b7MiAxbC3WzboVfcYQHaYLCgWHiPDeJipWI2XpZMN1t3b-F6g&aep=1&ntc=1&sa=X&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQ2J8OegQICBAD
+          - listitem [ref=f17e89]:
+            - link "All" [disabled] [ref=f17e90]
+          - listitem [ref=f17e93]:
+            - link "Videos" [ref=f17e94] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE5XdvSlI_LORjvMqi_KlDwmEfG0_Tf_E2J0y8OiIQPeyixqgWEePseYtZq-i0AxubwO6-gyBGMrBh6_XmtbpLl_sJGMu1-pHVbyO0cGxr9wz1laqS_PuahWCz5AaYirA7b7MiAxbC3WzboVfcYQHaYLCgWHiPDeJipWI2XpZMN1t3b-F6g&q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sa=X&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQtKgLegQILhAB
+          - listitem [ref=f17e97]:
+            - link "Forums" [ref=f17e98] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE5XdvSlI_LORjvMqi_KlDwmEfG0_Tf_E2J0y8OiIQPeyixqgWEePseYtZq-i0AxubwO6-gyBGMrBh6_XmtbpLl_sJGMu1-pHVbyO0cGxr9wz1laqS_PuahWCz5AaYirA7b7MiAxbC3WzboVfcYQHaYLCgWHiPDeJipWI2XpZMN1t3b-F6g&q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sa=X&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQs6gLegQIKxAB
+          - listitem [ref=f17e101]:
+            - link "Images" [ref=f17e102] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE5XdvSlI_LORjvMqi_KlDwmEfG0_Tf_E2J0y8OiIQPeyixqgWEePseYtZq-i0AxubwO6-gyBGMrBh6_XmtbpLl_sJGMu1-pHVbyO0cGxr9wz1laqS_PuahWCz5AaYirA7b7MiAxbC3WzboVfcYQHaYLCgWHiPDeJipWI2XpZMN1t3b-F6g&q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sa=X&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQtKgLegQIJBAB
+          - listitem [ref=f17e105]:
+            - link "Shopping" [ref=f17e106] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE5XdvSlI_LORjvMqi_KlDwmEfG0_Tf_E2J0y8OiIQPeyixqgWEePseYtZq-i0AxubwO6-gyBGMrBh6_XmtbpLl_sJGMu1-pHVbyO0cGxr9wz1laqS_PuahWCz5AaYirA7b7MiAxbC3WzboVfcYQHaYLCgWHiPDeJipWI2XpZMN1t3b-F6g&q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&ved=1t:220175&ictx=111
+          - listitem [ref=f17e109]:
+            - link "Short videos" [ref=f17e110] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE5XdvSlI_LORjvMqi_KlDwmEfG0_Tf_E2J0y8OiIQPeyixqgWEePseYtZq-i0AxubwO6-gyBGMrBh6_XmtbpLl_sJGMu1-pHVbyO0cGxr9wz1laqS_PuahWCz5AaYirA7b7MiAxbC3WzboVfcYQHaYLCgWHiPDeJipWI2XpZMN1t3b-F6g&q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sa=X&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQs6gLegQIFRAB
+          - listitem [ref=f17e113]:
+            - button [ref=f17e114] [cursor=pointer]:
+              - generic "More filters" [ref=f17e115]: More
+        - button "Tools" [ref=f17e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f17e129]
+    - generic [ref=f17e134]:
+      - generic [ref=f17e153]:
+        - heading "Thinking" [level=2] [ref=f17e157]
+        - progressbar "Generating" [ref=f17e160]
+      - main [ref=f17e162]:
+        - generic [ref=f17e166]:
+          - generic [ref=f17e169]:
+            - heading "Web results" [level=2] [ref=f17e170]
+            - generic [ref=f17e171]:
+              - generic [ref=f17e174]:
+                - link "A Stochastic Line Search Method with Expected ... SIAM Publications Library https://epubs.siam.org › doi" [ref=f17e176] [cursor=pointer]:
+                  - /url: https://epubs.siam.org/doi/10.1137/18M1216250
+                  - heading "A Stochastic Line Search Method with Expected ..." [level=3] [ref=f17e177]
+                  - generic [ref=f17e183]:
+                    - generic [ref=f17e184]: SIAM Publications Library
+                    - generic [ref=f17e186]: https://epubs.siam.org › doi
+                - button "About this result" [ref=f17e190] [cursor=pointer]
+              - generic [ref=f17e196]:
+                - generic [ref=f17e197]:
+                  - emphasis [ref=f17e198]: A Stochastic Line Search Method with Expected Complexity
+                  - text: "Analysis. Authors: Courtney Paquette and Katya Scheinberg https://orcid.org/0000-0003-3547-1841 ..."
+                - link "Read more" [ref=f17e199] [cursor=pointer]:
+                  - /url: https://epubs.siam.org/doi/10.1137/18M1216250#:~:text=A%20Stochastic%20Line%20Search%20Method,Authors%20Info%20%26%20Affiliations
+          - generic [ref=f17e203]:
+            - generic [ref=f17e206]:
+              - link "a stochastic line search method with expected complexity ... NSF Public Access Repository (.gov) https://par.nsf.gov › servlets › purl" [ref=f17e208] [cursor=pointer]:
+                - /url: https://par.nsf.gov/servlets/purl/10208765
+                - heading "a stochastic line search method with expected complexity ..." [level=3] [ref=f17e209]
+                - generic [ref=f17e218]:
+                  - generic [ref=f17e219]: NSF Public Access Repository (.gov)
+                  - generic [ref=f17e221]: https://par.nsf.gov › servlets › purl
+              - generic [ref=f17e223]: PDF
+              - button "About this result" [ref=f17e226] [cursor=pointer]
+            - generic [ref=f17e232]:
+              - generic [ref=f17e233]: by C Paquette · 2020 · Cited by 162 —
+              - text: Abstract. For deterministic optimization, line search methods augment algorithms by provid- ing stability and improved efficiency. Here we adapt a classical ...
+              - link "Read more" [ref=f17e234] [cursor=pointer]:
+                - /url: https://par.nsf.gov/servlets/purl/10208765#:~:text=Abstract.%20For%20deterministic%20optimization%2C%20line,backtracking%20Armijo%20line%20search%20to
+          - generic [ref=f17e238]:
+            - generic [ref=f17e241]:
+              - link "A Stochastic Line Search Method with Expected ... ACM Digital Library https://dl.acm.org › doi" [ref=f17e243] [cursor=pointer]:
+                - /url: https://dl.acm.org/doi/10.1137/18M1216250
+                - heading "A Stochastic Line Search Method with Expected ..." [level=3] [ref=f17e244]
+                - generic [ref=f17e250]:
+                  - generic [ref=f17e251]: ACM Digital Library
+                  - generic [ref=f17e253]: https://dl.acm.org › doi
+              - button "About this result" [ref=f17e257] [cursor=pointer]
+            - generic [ref=f17e263]:
+              - generic [ref=f17e264]:
+                - emphasis [ref=f17e265]: A Stochastic Line Search Method with Expected Complexity
+                - text: Analysis. Authors ...
+                - emphasis [ref=f17e266]: arxiv
+                - text: .org/abs/1609.07428 [math.OC], 2018. Google Scholar. [4]. R ...
+              - link "Read more" [ref=f17e267] [cursor=pointer]:
+                - /url: https://dl.acm.org/doi/10.1137/18M1216250#:~:text=A%20Stochastic%20Line%20Search%20Method,Authors%3A%20Courtney%20Paquette&text=Scheinberg%2C%20Convergence%20Rate%20Analysis%20of,R.
+          - table [ref=f17e273]:
+            - rowgroup [ref=f17e274]:
+              - row [ref=f17e275]:
+                - cell [ref=f17e276]:
+                  - heading [level=3] [ref=f17e277]:
+                    - link [ref=f17e278] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar?q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                      - generic [ref=f17e279]:
+                        - text: Scholarly articles for
+                        - emphasis [ref=f17e280]: "\"a stochastic line search method with expected complexity\" arxiv"
+              - row [ref=f17e281]:
+                - cell [ref=f17e282]:
+                  - heading "… stochastic line search method with expected complexity … - ‎Paquette - Cited by 162" [level=3] [ref=f17e283]:
+                    - link [ref=f17e284] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://par.nsf.gov/servlets/purl/10208765&hl=en&sa=X&ei=sPZPav75Mqew6rQP-PrjsAQ&scisig=AM1tuoNyRBTyMKvJL046gi6EXX2v&oi=scholarr
+                      - generic [ref=f17e285]:
+                        - text: …
+                        - emphasis [ref=f17e286]: stochastic line search method with expected complexity
+                        - text: …
+                    - generic [ref=f17e287]:
+                      - text: "-"
+                      - generic [ref=f17e288]: ‎Paquette
+                      - text: "- Cited by 162"
+          - generic [ref=f17e291]:
+            - heading "Web results" [level=2] [ref=f17e292]
+            - generic [ref=f17e293]:
+              - generic [ref=f17e296]:
+                - link "Expected complexity analysis of stochastic direct-search arXiv https://arxiv.org › pdf" [ref=f17e298] [cursor=pointer]:
+                  - /url: https://arxiv.org/pdf/2003.03066
+                  - heading "Expected complexity analysis of stochastic direct-search" [level=3] [ref=f17e299]
+                  - generic [ref=f17e305]:
+                    - generic [ref=f17e306]: arXiv
+                    - generic [ref=f17e308]: https://arxiv.org › pdf
+                - generic [ref=f17e310]: PDF
+                - button "About this result" [ref=f17e313] [cursor=pointer]
+              - generic [ref=f17e320]:
+                - emphasis [ref=f17e321]: A Stochastic Line Search Method with Expected Complexity
+                - text: . Analysis. SIAM Journal on Optimization, 30(1):349–376, 2020. [15] L. N. Vicente. Worst case ...
+          - generic [ref=f17e325]:
+            - generic [ref=f17e328]:
+              - link "Courtney Paquette Google Scholar https://scholar.google.co.uk › citations" [ref=f17e330] [cursor=pointer]:
+                - /url: https://scholar.google.co.uk/citations?user=EkeZG30AAAAJ&hl=nl
+                - heading "Courtney Paquette" [level=3] [ref=f17e331]
+                - generic [ref=f17e337]:
+                  - generic [ref=f17e338]: Google Scholar
+                  - generic [ref=f17e340]: https://scholar.google.co.uk › citations
+              - button "About this result" [ref=f17e344] [cursor=pointer]
+            - generic [ref=f17e350]:
+              - generic [ref=f17e351]:
+                - emphasis [ref=f17e352]: A stochastic line search method with expected complexity
+                - text: analysis. C Paquette, K Scheinberg. SIAM Journal on Optimization 30 (1), 349-376, 2020. 155, 2020 ; The ...
+              - link "Read more" [ref=f17e353] [cursor=pointer]:
+                - /url: https://scholar.google.co.uk/citations?user=EkeZG30AAAAJ&hl=nl#:~:text=A%20stochastic%20line%20search%20method,155&text=The%20nonsmooth%20landscape%20of%20phase,retrieval
+          - generic [ref=f17e357]:
+            - generic [ref=f17e360]:
+              - link "Improving Line Search Methods for Large Scale Neural ... arXiv https://arxiv.org › html" [ref=f17e362] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2403.18519v1
+                - heading "Improving Line Search Methods for Large Scale Neural ..." [level=3] [ref=f17e363]
+                - generic [ref=f17e369]:
+                  - generic [ref=f17e370]: arXiv
+                  - generic [ref=f17e372]: https://arxiv.org › html
+              - button "About this result" [ref=f17e376] [cursor=pointer]
+            - generic [ref=f17e382]:
+              - generic [ref=f17e383]: Mar 27, 2024 —
+              - generic [ref=f17e384]:
+                - text: Scheinberg, “
+                - emphasis [ref=f17e385]: A stochastic line search method with expected complexity
+                - text: analysis,” SIAM Journal on Optimization, vol. 30, no. 1, pp. 349–376 ...
+              - link "Read more" [ref=f17e386] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2403.18519v1#:~:text=Scheinberg%2C%20%E2%80%9CA%20stochastic%20line%20search,no.%201%2C%20pp.%20349%E2%80%93376%2C%202020.
+          - generic [ref=f17e390]:
+            - generic [ref=f17e393]:
+              - link "Convergence Rate Analysis of a Stochastic Trust Region ... ORA - Oxford University Research Archive https://ora.ox.ac.uk › objects › files" [ref=f17e395] [cursor=pointer]:
+                - /url: https://ora.ox.ac.uk/objects/uuid:798e9ee8-baa2-4497-b53a-1377c4c2f748/files/md4b318de63104840148dcc3cb163a1c4
+                - heading "Convergence Rate Analysis of a Stochastic Trust Region ..." [level=3] [ref=f17e396]
+                - generic [ref=f17e402]:
+                  - generic [ref=f17e403]: ORA - Oxford University Research Archive
+                  - generic [ref=f17e405]: https://ora.ox.ac.uk › objects › files
+              - generic [ref=f17e407]: PDF
+              - button "About this result" [ref=f17e410] [cursor=pointer]
+            - generic [ref=f17e416]:
+              - generic [ref=f17e417]: by J Blanchet · 2019 · Cited by 181 —
+              - generic [ref=f17e418]:
+                - text: Paquette C, Scheinberg K (2018)
+                - emphasis [ref=f17e419]: A stochastic line search method with expected complexity
+                - text: analysis.
+                - emphasis [ref=f17e420]: arXiv
+                - text: :1807.07994 . Reddi SJ, Hefny A, Sra ...
+              - link "Read more" [ref=f17e421] [cursor=pointer]:
+                - /url: https://ora.ox.ac.uk/objects/uuid:798e9ee8-baa2-4497-b53a-1377c4c2f748/files/md4b318de63104840148dcc3cb163a1c4#:~:text=Paquette%20C%2C%20Scheinberg%20K%20(2018),variance%20reduction%20for%20nonconvex%20optimiza%2D
+          - generic [ref=f17e425]:
+            - generic [ref=f17e428]:
+              - link "An Adaptive Proximal Framework for Weakly Convex ... arXiv https://arxiv.org › html" [ref=f17e430] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2606.17285v2
+                - heading "An Adaptive Proximal Framework for Weakly Convex ..." [level=3] [ref=f17e431]
+                - generic [ref=f17e437]:
+                  - generic [ref=f17e438]: arXiv
+                  - generic [ref=f17e440]: https://arxiv.org › html
+              - button "About this result" [ref=f17e444] [cursor=pointer]
+            - generic [ref=f17e450]:
+              - generic [ref=f17e451]: 7 days ago —
+              - generic [ref=f17e452]:
+                - text: Scheinberg (2020)
+                - emphasis [ref=f17e453]: A stochastic line search method with expected complexity
+                - text: analysis. SIAM Journal on Optimization 30 (1), pp. 349–376 ...
+              - link "Read more" [ref=f17e454] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2606.17285v2#:~:text=Scheinberg%20(2020)%20A%20stochastic%20line,Optimization%2030%20(1)%2C%20pp.%20349%E2%80%93376.
+          - generic [ref=f17e458]:
+            - generic [ref=f17e461]:
+              - link "A Stochastic Objective-Function-Free Adaptive Regularization ... Open Journal of Mathematical Optimization https://ojmo.centre-mersenne.org › articles › ojmo" [ref=f17e463] [cursor=pointer]:
+                - /url: https://ojmo.centre-mersenne.org/articles/10.5802/ojmo.41/
+                - heading "A Stochastic Objective-Function-Free Adaptive Regularization ..." [level=3] [ref=f17e464]
+                - generic [ref=f17e470]:
+                  - generic [ref=f17e471]: Open Journal of Mathematical Optimization
+                  - generic [ref=f17e473]: https://ojmo.centre-mersenne.org › articles › ojmo
+              - button "About this result" [ref=f17e477] [cursor=pointer]
+            - generic [ref=f17e483]:
+              - generic [ref=f17e484]: by S Gratton · 2025 · Cited by 6 —
+              - generic [ref=f17e485]:
+                - text: "[37] Courtney Paquette; Katya Scheinberg"
+                - emphasis [ref=f17e486]: A Stochastic Line Search Method with Expected Complexity
+                - text: Analysis, SIAM J. Optim., Volume 30 (2020) no. 1, pp. 349 ...
+              - link "Read more" [ref=f17e487] [cursor=pointer]:
+                - /url: https://ojmo.centre-mersenne.org/articles/10.5802/ojmo.41/#:~:text=%5B37%5D%20Courtney%20Paquette%3B%20Katya%20Scheinberg,DOI%20%7C%20MR%20%7C%20Zbl
+        - navigation [ref=f17e490]:
+          - heading "Page Navigation" [level=1] [ref=f17e491]
+          - text: "1"
+          - link "Page 2" [ref=f17e494] [cursor=pointer]:
+            - /url: /search?q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sca_esv=d4e925c21a8887a9&ei=sPZPavDlLJTAkPIPlI6gqQ0&start=10&sa=N&sstk=AU9db-CT8ed5fatkcRo7-LPgyUULbRgEhkKno0F7aU7y6TT2PKUYtAPY-sqzFqSFVb7P8elwigi8WwfQs1JJbXn0ux9ZVQpjrzULxQ&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQ8tMDegQIPhAE
+            - text: "2"
+          - link "Page 3" [ref=f17e496] [cursor=pointer]:
+            - /url: /search?q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sca_esv=d4e925c21a8887a9&ei=sPZPavDlLJTAkPIPlI6gqQ0&start=20&sa=N&sstk=AU9db-CT8ed5fatkcRo7-LPgyUULbRgEhkKno0F7aU7y6TT2PKUYtAPY-sqzFqSFVb7P8elwigi8WwfQs1JJbXn0ux9ZVQpjrzULxQ&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQ8tMDegQIPhAG
+            - text: "3"
+          - link "Page 4" [ref=f17e498] [cursor=pointer]:
+            - /url: /search?q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sca_esv=d4e925c21a8887a9&ei=sPZPavDlLJTAkPIPlI6gqQ0&start=30&sa=N&sstk=AU9db-CT8ed5fatkcRo7-LPgyUULbRgEhkKno0F7aU7y6TT2PKUYtAPY-sqzFqSFVb7P8elwigi8WwfQs1JJbXn0ux9ZVQpjrzULxQ&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQ8tMDegQIPhAI
+            - text: "4"
+          - link "Page 5" [ref=f17e500] [cursor=pointer]:
+            - /url: /search?q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sca_esv=d4e925c21a8887a9&ei=sPZPavDlLJTAkPIPlI6gqQ0&start=40&sa=N&sstk=AU9db-CT8ed5fatkcRo7-LPgyUULbRgEhkKno0F7aU7y6TT2PKUYtAPY-sqzFqSFVb7P8elwigi8WwfQs1JJbXn0ux9ZVQpjrzULxQ&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQ8tMDegQIPhAK
+            - text: "5"
+          - link "Page 6" [ref=f17e502] [cursor=pointer]:
+            - /url: /search?q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sca_esv=d4e925c21a8887a9&ei=sPZPavDlLJTAkPIPlI6gqQ0&start=50&sa=N&sstk=AU9db-CT8ed5fatkcRo7-LPgyUULbRgEhkKno0F7aU7y6TT2PKUYtAPY-sqzFqSFVb7P8elwigi8WwfQs1JJbXn0ux9ZVQpjrzULxQ&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQ8tMDegQIPhAM
+            - text: "6"
+          - link "Page 7" [ref=f17e504] [cursor=pointer]:
+            - /url: /search?q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sca_esv=d4e925c21a8887a9&ei=sPZPavDlLJTAkPIPlI6gqQ0&start=60&sa=N&sstk=AU9db-CT8ed5fatkcRo7-LPgyUULbRgEhkKno0F7aU7y6TT2PKUYtAPY-sqzFqSFVb7P8elwigi8WwfQs1JJbXn0ux9ZVQpjrzULxQ&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQ8tMDegQIPhAO
+            - text: "7"
+          - link "Page 8" [ref=f17e506] [cursor=pointer]:
+            - /url: /search?q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sca_esv=d4e925c21a8887a9&ei=sPZPavDlLJTAkPIPlI6gqQ0&start=70&sa=N&sstk=AU9db-CT8ed5fatkcRo7-LPgyUULbRgEhkKno0F7aU7y6TT2PKUYtAPY-sqzFqSFVb7P8elwigi8WwfQs1JJbXn0ux9ZVQpjrzULxQ&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQ8tMDegQIPhAQ
+            - text: "8"
+          - link "Page 9" [ref=f17e508] [cursor=pointer]:
+            - /url: /search?q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sca_esv=d4e925c21a8887a9&ei=sPZPavDlLJTAkPIPlI6gqQ0&start=80&sa=N&sstk=AU9db-CT8ed5fatkcRo7-LPgyUULbRgEhkKno0F7aU7y6TT2PKUYtAPY-sqzFqSFVb7P8elwigi8WwfQs1JJbXn0ux9ZVQpjrzULxQ&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQ8tMDegQIPhAS
+            - text: "9"
+          - link "Page 10" [ref=f17e510] [cursor=pointer]:
+            - /url: /search?q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sca_esv=d4e925c21a8887a9&ei=sPZPavDlLJTAkPIPlI6gqQ0&start=90&sa=N&sstk=AU9db-CT8ed5fatkcRo7-LPgyUULbRgEhkKno0F7aU7y6TT2PKUYtAPY-sqzFqSFVb7P8elwigi8WwfQs1JJbXn0ux9ZVQpjrzULxQ&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQ8tMDegQIPhAU
+            - text: "10"
+          - heading [level=2] [ref=f17e512]:
+            - link "Next" [ref=f17e513] [cursor=pointer]:
+              - /url: /search?q=%22a+stochastic+line+search+method+with+expected+complexity%22+arxiv&sca_esv=d4e925c21a8887a9&ei=sPZPavDlLJTAkPIPlI6gqQ0&start=10&sa=N&sstk=AU9db-CT8ed5fatkcRo7-LPgyUULbRgEhkKno0F7aU7y6TT2PKUYtAPY-sqzFqSFVb7P8elwigi8WwfQs1JJbXn0ux9ZVQpjrzULxQ&ved=2ahUKEwjw_civqsaVAxUUIEQIHRQHKNUQ8NMDegQIPhAW
+        - navigation
+    - contentinfo [ref=f17e516]:
+      - heading "Footer Links" [level=1] [ref=f17e517]
+      - generic [ref=f17e521]:
+        - generic [ref=f17e525]:
+          - button "Woodland, California - From your IP address" [ref=f17e527] [cursor=pointer]:
+            - generic [ref=f17e528]: Woodland, California
+            - generic [ref=f17e530]:
+              - text: "-"
+              - generic [ref=f17e531]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f17e533] [cursor=pointer]
+        - generic [ref=f17e536]:
+          - link "Help" [ref=f17e537] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f17e538] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f17e539] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f17e540] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

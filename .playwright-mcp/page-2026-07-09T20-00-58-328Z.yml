@@ -1,0 +1,330 @@
+- generic [active] [ref=f66e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f66e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f66e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f66e8]:
+    - search [ref=f66e9]:
+      - generic [ref=f66e11]:
+        - link "Go to Google Home" [ref=f66e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQPAgI
+        - generic [ref=f66e21]:
+          - generic [ref=f66e22]:
+            - combobox "Search" [ref=f66e25]: "\"consensus\" \"gradient\" aggregation norm \"consensus\" \"gradient\" aggregation norm"
+            - generic [ref=f66e26]:
+              - button "Clear" [ref=f66e28] [cursor=pointer]
+              - generic [ref=f66e33]:
+                - button "Search by voice" [ref=f66e34] [cursor=pointer]
+                - button "Search by image" [ref=f66e37] [cursor=pointer]
+          - button "Search" [ref=f66e40] [cursor=pointer]
+    - generic [ref=f66e45]:
+      - button "Settings" [ref=f66e47] [cursor=pointer]
+      - button "Share" [ref=f66e53] [cursor=pointer]
+      - generic [ref=f66e59]:
+        - button "Google apps" [ref=f66e61] [cursor=pointer]
+        - link "Sign in" [ref=f66e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522consensus%2522%2520%2522gradient%2522%2520aggregation%2520norm&ec=futura_srp_og_si_72236_p
+  - generic [ref=f66e68]:
+    - navigation [ref=f66e74]:
+      - generic [ref=f66e80]:
+        - list [ref=f66e81]:
+          - listitem [ref=f66e82]:
+            - link "AI Mode" [ref=f66e85] [cursor=pointer]:
+              - /url: /search?q=%22consensus%22+%22gradient%22+aggregation+norm&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&aep=1&ntc=1&sa=X&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQ2J8OegQICBAD
+          - listitem [ref=f66e89]:
+            - link "All" [disabled] [ref=f66e90]
+          - listitem [ref=f66e93]:
+            - link "Images" [ref=f66e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22consensus%22+%22gradient%22+aggregation+norm&sa=X&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQtKgLegQIGRAB
+          - listitem [ref=f66e97]:
+            - link "Shopping" [ref=f66e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22consensus%22+%22gradient%22+aggregation+norm&ved=1t:220175&ictx=111
+          - listitem [ref=f66e101]:
+            - link "Videos" [ref=f66e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22consensus%22+%22gradient%22+aggregation+norm&sa=X&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQtKgLegQIExAB
+          - listitem [ref=f66e105]:
+            - link "Forums" [ref=f66e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22consensus%22+%22gradient%22+aggregation+norm&sa=X&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQs6gLegQIDxAB
+          - listitem [ref=f66e109]:
+            - link "Short videos" [ref=f66e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22consensus%22+%22gradient%22+aggregation+norm&sa=X&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQs6gLegQIChAB
+          - listitem [ref=f66e113]:
+            - button [ref=f66e114] [cursor=pointer]:
+              - generic "More filters" [ref=f66e115]: More
+        - button "Tools" [ref=f66e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f66e129]
+    - generic [ref=f66e134]:
+      - generic [ref=f66e153]:
+        - heading "Thinking" [level=2] [ref=f66e157]
+        - progressbar "Generating" [ref=f66e160]
+      - main [ref=f66e162]:
+        - generic [ref=f66e166]:
+          - generic [ref=f66e169]:
+            - heading "Web results" [level=2] [ref=f66e170]
+            - generic [ref=f66e171]:
+              - generic [ref=f66e174]:
+                - link "Adaptive Consensus Gradients Aggregation for Scaled ... arXiv https://arxiv.org › html" [ref=f66e176] [cursor=pointer]:
+                  - /url: https://arxiv.org/html/2411.03742v1
+                  - heading "Adaptive Consensus Gradients Aggregation for Scaled ..." [level=3] [ref=f66e177]
+                  - generic [ref=f66e183]:
+                    - generic [ref=f66e184]: arXiv
+                    - generic [ref=f66e186]: https://arxiv.org › html
+                - button "About this result" [ref=f66e190] [cursor=pointer]
+              - generic [ref=f66e196]:
+                - generic [ref=f66e197]: Nov 6, 2024 —
+                - generic [ref=f66e198]:
+                  - text: Adaptive
+                  - emphasis [ref=f66e199]: Consensus
+                  - text: Gradients
+                  - emphasis [ref=f66e200]: Aggregation
+                  - text: for Scaled Distributed Training ...
+                  - emphasis [ref=f66e201]: aggregation
+                  - text: scheme to the
+                  - emphasis [ref=f66e202]: standard gradient
+                  - text: averaging formulation.
+                - link "Read more" [ref=f66e203] [cursor=pointer]:
+                  - /url: https://arxiv.org/html/2411.03742v1#:~:text=Adaptive%20Consensus%20Gradients%20Aggregation%20for,Scaled%20Distributed%20Training&text=s%20equal%20would%20reduce%20the,the%20standard%20gradient%20averaging%20formulation.
+          - generic [ref=f66e207]:
+            - generic [ref=f66e210]:
+              - link "Norm-Based Outlier Filtering and Consensus Aggregation for ... bwise.kr https://scholarworks.bwise.kr › cau › 2019.sw.cau" [ref=f66e212] [cursor=pointer]:
+                - /url: https://scholarworks.bwise.kr/cau/bitstream/2019.sw.cau/85759/1/Norm-Based%20Outlier%20Filtering%20and%20Consensus%20Aggregation%20for%20Robust%20Federated%20Learning.pdf
+                - heading "Norm-Based Outlier Filtering and Consensus Aggregation for ..." [level=3] [ref=f66e213]
+                - generic [ref=f66e222]:
+                  - generic [ref=f66e223]: bwise.kr
+                  - generic [ref=f66e225]: https://scholarworks.bwise.kr › cau › 2019.sw.cau
+              - generic [ref=f66e227]: PDF
+              - button "About this result" [ref=f66e230] [cursor=pointer]
+            - generic [ref=f66e235]:
+              - generic [ref=f66e236]:
+                - generic [ref=f66e237]: by H Yeo · 2025 · Cited by 2 —
+                - generic [ref=f66e238]:
+                  - text: By enforcing alignment with a
+                  - emphasis [ref=f66e239]: consensus
+                  - text: direction, our method neutralizes such strategies by re-centering the
+                  - emphasis [ref=f66e240]: aggregated gradient
+                  - text: space. VOLUME 13, 2025.
+                - link "Read more" [ref=f66e241] [cursor=pointer]:
+                  - /url: https://scholarworks.bwise.kr/cau/bitstream/2019.sw.cau/85759/1/Norm-Based%20Outlier%20Filtering%20and%20Consensus%20Aggregation%20for%20Robust%20Federated%20Learning.pdf#:~:text=By%20enforcing,VOLUME%2013%2C%202025
+              - generic [ref=f66e242]: 11 pages
+          - generic [ref=f66e246]:
+            - generic [ref=f66e249]:
+              - 'link "Optimize Wider, Not Deeper: Consensus Aggregation for Policy ... arXiv https://arxiv.org › html" [ref=f66e251] [cursor=pointer]':
+                - /url: https://arxiv.org/html/2603.12596
+                - 'heading "Optimize Wider, Not Deeper: Consensus Aggregation for Policy ..." [level=3] [ref=f66e252]'
+                - generic [ref=f66e258]:
+                  - generic [ref=f66e259]: arXiv
+                  - generic [ref=f66e261]: https://arxiv.org › html
+              - button "About this result" [ref=f66e265] [cursor=pointer]
+            - generic [ref=f66e272]:
+              - text: To understand this drift, we can use Fisher information geometry to decompose policy updates into signal (the natural
+              - emphasis [ref=f66e273]: gradient
+              - text: ... CAPO (
+              - emphasis [ref=f66e274]: Consensus Aggregation
+              - text: for ...
+          - generic [ref=f66e278]:
+            - generic [ref=f66e281]:
+              - link "Gradient-Consensus Method for Distributed Optimization in ... University of Minnesota Twin Cities http://salapakalab.ece.umn.edu › data" [ref=f66e283] [cursor=pointer]:
+                - /url: http://salapakalab.ece.umn.edu/data/4a72144b27e7f864ae89.pdf
+                - heading "Gradient-Consensus Method for Distributed Optimization in ..." [level=3] [ref=f66e284]
+                - generic [ref=f66e293]:
+                  - generic [ref=f66e294]: University of Minnesota Twin Cities
+                  - generic [ref=f66e296]: http://salapakalab.ece.umn.edu › data
+              - generic [ref=f66e298]: PDF
+              - button "About this result" [ref=f66e301] [cursor=pointer]
+            - generic [ref=f66e306]:
+              - generic [ref=f66e307]:
+                - generic [ref=f66e308]: by V Khatana · Cited by 32 —
+                - generic [ref=f66e309]:
+                  - text: The
+                  - emphasis [ref=f66e310]: gradient
+                  - text: "-"
+                  - emphasis [ref=f66e311]: consensus
+                  - text: scheme uses a finite-time terminated
+                  - emphasis [ref=f66e312]: consensus
+                  - text: protocol called ρ-
+                  - emphasis [ref=f66e313]: consensus
+                  - text: ", which allows each local estimate to be ρ-close to each other ..."
+                - link "Read more" [ref=f66e314] [cursor=pointer]:
+                  - /url: http://salapakalab.ece.umn.edu/data/4a72144b27e7f864ae89.pdf#:~:text=The%20gradient%2Dconsensus%20scheme%20uses%20a,each%20other%20at%20every%20iteration.
+              - generic [ref=f66e315]: 6 pages
+          - generic [ref=f66e319]:
+            - generic [ref=f66e322]:
+              - link "machine learning - What exactly is Gradient norm? Data Science Stack Exchange https://datascience.stackexchange.com › questions › wh..." [ref=f66e324] [cursor=pointer]:
+                - /url: https://datascience.stackexchange.com/questions/121790/what-exactly-is-gradient-norm
+                - heading "machine learning - What exactly is Gradient norm?" [level=3] [ref=f66e325]
+                - generic [ref=f66e331]:
+                  - generic [ref=f66e332]: Data Science Stack Exchange
+                  - generic [ref=f66e334]: https://datascience.stackexchange.com › questions › wh...
+              - button "About this result" [ref=f66e338] [cursor=pointer]
+            - generic [ref=f66e344]:
+              - generic [ref=f66e345]: May 27, 2023 —
+              - text: I found that there is no common resource and well defined definition for "Gradient norm", most search results are based on ML experts providing answers ...
+            - generic [ref=f66e350]:
+              - link "3 answers" [ref=f66e351] [cursor=pointer]:
+                - /url: https://datascience.stackexchange.com/a/124818
+              - generic [ref=f66e352]: ·
+              - generic [ref=f66e353]: "Top answer:"
+              - generic [ref=f66e354]: The concept of norm comes from functional analysis (and is found both in linear algebra ...
+          - generic [ref=f66e358]:
+            - generic [ref=f66e361]:
+              - 'link "Robust distributed optimization: Attacks and defenses ... - Tianyi Chen Cornell University https://chen.tech.cornell.edu › slides › Lec17" [ref=f66e363] [cursor=pointer]':
+                - /url: https://chen.tech.cornell.edu/ECE5290/assets/slides/Lec17.pdf
+                - 'heading "Robust distributed optimization: Attacks and defenses ... - Tianyi Chen" [level=3] [ref=f66e364]'
+                - generic [ref=f66e370]:
+                  - generic [ref=f66e371]: Cornell University
+                  - generic [ref=f66e373]: https://chen.tech.cornell.edu › slides › Lec17
+              - generic [ref=f66e375]: PDF
+              - button "About this result" [ref=f66e378] [cursor=pointer]
+            - generic [ref=f66e385]:
+              - text: Why average
+              - emphasis [ref=f66e386]: aggregation
+              - text: "fails? Value. ××××××××××. ×. Honest. Byzantine. Average. Median. Recall: Average"
+              - emphasis [ref=f66e387]: consensus
+              - text: or
+              - emphasis [ref=f66e388]: gradient aggregation
+              - text: is fragile. A single ...
+          - generic [ref=f66e392]:
+            - generic [ref=f66e395]:
+              - link "Gradient Clipping Accelerates Saddle Avoidance in ... OpenReview https://openreview.net › forum" [ref=f66e397] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=Qyncyz1YNF
+                - heading "Gradient Clipping Accelerates Saddle Avoidance in ..." [level=3] [ref=f66e398]
+                - generic [ref=f66e404]:
+                  - generic [ref=f66e405]: OpenReview
+                  - generic [ref=f66e407]: https://openreview.net › forum
+              - button "About this result" [ref=f66e411] [cursor=pointer]
+            - generic [ref=f66e417]:
+              - generic [ref=f66e418]: by Y Bo —
+              - generic [ref=f66e419]:
+                - text: ...
+                - emphasis [ref=f66e420]: gradient norm
+                - text: and the
+                - emphasis [ref=f66e421]: consensus
+                - text: /tracking errors depends directly on these spectral properties. On the empirical side, we have added a new CNN experiment on ...
+              - link "Read more" [ref=f66e422] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=Qyncyz1YNF#:~:text=gradient%20norm%20and%20the%20consensus%2Ftracking,a%20new%20CNN%20experiment%20on
+          - generic [ref=f66e426]:
+            - generic [ref=f66e429]:
+              - link "Consensus-based clustering and data aggregation in ... - PMC PubMed Central (PMC) (.gov) https://pmc.ncbi.nlm.nih.gov › articles › PMC10496004" [ref=f66e431] [cursor=pointer]:
+                - /url: https://pmc.ncbi.nlm.nih.gov/articles/PMC10496004/
+                - heading "Consensus-based clustering and data aggregation in ... - PMC" [level=3] [ref=f66e432]
+                - generic [ref=f66e438]:
+                  - generic [ref=f66e439]: PubMed Central (PMC) (.gov)
+                  - generic [ref=f66e441]: https://pmc.ncbi.nlm.nih.gov › articles › PMC10496004
+              - button "About this result" [ref=f66e445] [cursor=pointer]
+            - generic [ref=f66e451]:
+              - generic [ref=f66e452]: by JJ Damanik · 2023 · Cited by 2 —
+              - generic [ref=f66e453]:
+                - emphasis [ref=f66e454]: Consensus
+                - text: (Choi, Brunet & How, 2009) may be one of the solutions to this. The sub-
+                - emphasis [ref=f66e455]: gradient
+                - text: method using
+                - emphasis [ref=f66e456]: consensus
+                - text: as proposed in Nedic ...
+              - link "Read more" [ref=f66e457] [cursor=pointer]:
+                - /url: https://pmc.ncbi.nlm.nih.gov/articles/PMC10496004/#:~:text=Consensus%20(Choi%2C%20Brunet%20%26%20How%2C,decentralized%20network%20of%20multi%2Dagent%20systems.
+          - generic [ref=f66e461]:
+            - generic [ref=f66e464]:
+              - link "Exact Decentralized Optimization via Explicit l1 Consensus ... Optimization Online https://optimization-online.org › 2025/11" [ref=f66e466] [cursor=pointer]:
+                - /url: https://optimization-online.org/wp-content/uploads/2025/11/dp2ga.pdf
+                - heading "Exact Decentralized Optimization via Explicit l1 Consensus ..." [level=3] [ref=f66e467]
+                - generic [ref=f66e473]:
+                  - generic [ref=f66e474]: Optimization Online
+                  - generic [ref=f66e476]: https://optimization-online.org › 2025/11
+              - generic [ref=f66e478]: PDF
+              - button "About this result" [ref=f66e481] [cursor=pointer]
+            - generic [ref=f66e486]:
+              - generic [ref=f66e487]:
+                - generic [ref=f66e488]: by H Wang · 2025 —
+                - generic [ref=f66e489]:
+                  - emphasis [ref=f66e490]: Consensus
+                  - text: optimization enables autonomous agents to solve joint tasks through peer-to- peer exchanges alone. Classical decentralized
+                  - emphasis [ref=f66e491]: gradient
+                  - text: ...
+                - link "Read more" [ref=f66e492] [cursor=pointer]:
+                  - /url: https://optimization-online.org/wp-content/uploads/2025/11/dp2ga.pdf#:~:text=Consensus%20optimization%20enables%20autonomous%20agents,is%20appealing%20for%20its%20minimal
+              - generic [ref=f66e493]: 27 pages
+          - table [ref=f66e499]:
+            - rowgroup [ref=f66e500]:
+              - row [ref=f66e501]:
+                - cell [ref=f66e502]:
+                  - heading [level=3] [ref=f66e503]:
+                    - link [ref=f66e504] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar?q=%22consensus%22+%22gradient%22+aggregation+norm&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                      - generic [ref=f66e505]:
+                        - text: Scholarly articles for
+                        - emphasis [ref=f66e506]: "\"consensus\" \"gradient\" aggregation norm"
+              - row [ref=f66e507]:
+                - cell [ref=f66e508]:
+                  - 'heading "Edge-consensus learning: Deep learning on P2P … - ‎Niwa - Cited by 49" [level=3] [ref=f66e509]':
+                    - link [ref=f66e510] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://dl.acm.org/doi/pdf/10.1145/3394486.3403109&hl=en&sa=X&ei=-f1PavDpLoXLieoPlarxuQU&scisig=AM1tuoOUQ_hTau0DKQKEmODOh5Uj&oi=scholarr
+                      - generic [ref=f66e511]:
+                        - text: Edge-
+                        - emphasis [ref=f66e512]: consensus
+                        - text: "learning: Deep learning on P2P …"
+                    - generic [ref=f66e513]:
+                      - text: "-"
+                      - generic [ref=f66e514]: ‎Niwa
+                      - text: "- Cited by 49"
+                  - heading "… convergent algorithm for reducing disagreement in … - ‎Khatana - Cited by 8" [level=3] [ref=f66e515]:
+                    - link "… convergent algorithm for reducing disagreement in …" [ref=f66e516] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://ieeexplore.ieee.org/abstract/document/10273441/&hl=en&sa=X&ei=-f1PavDpLoXLieoPlarxuQU&scisig=AM1tuoNN8RiNWwkVfw3MV3z18BlH&oi=scholarr
+                    - generic [ref=f66e517]:
+                      - text: "-"
+                      - generic [ref=f66e518]: ‎Khatana
+                      - text: "- Cited by 8"
+        - navigation [ref=f66e521]:
+          - heading "Page Navigation" [level=1] [ref=f66e522]
+          - text: "1"
+          - link "Page 2" [ref=f66e525] [cursor=pointer]:
+            - /url: /search?q=%22consensus%22+%22gradient%22+aggregation+norm&sca_esv=30a5fb343c9df574&ei=-f1PapD5I7iWkPIP9uOHKA&start=10&sa=N&sstk=AU9db-CGHUTislVFmdukEPdvfdzVsYbs0_Xg_lUoxfQIzBgQ0KaE3WSbdevM8GKIKw73sIcOpfs-cni4Hp6UtFYBNYMvobupR6k0rg&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQ8tMDegQIPxAE
+            - text: "2"
+          - link "Page 3" [ref=f66e527] [cursor=pointer]:
+            - /url: /search?q=%22consensus%22+%22gradient%22+aggregation+norm&sca_esv=30a5fb343c9df574&ei=-f1PapD5I7iWkPIP9uOHKA&start=20&sa=N&sstk=AU9db-CGHUTislVFmdukEPdvfdzVsYbs0_Xg_lUoxfQIzBgQ0KaE3WSbdevM8GKIKw73sIcOpfs-cni4Hp6UtFYBNYMvobupR6k0rg&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQ8tMDegQIPxAG
+            - text: "3"
+          - link "Page 4" [ref=f66e529] [cursor=pointer]:
+            - /url: /search?q=%22consensus%22+%22gradient%22+aggregation+norm&sca_esv=30a5fb343c9df574&ei=-f1PapD5I7iWkPIP9uOHKA&start=30&sa=N&sstk=AU9db-CGHUTislVFmdukEPdvfdzVsYbs0_Xg_lUoxfQIzBgQ0KaE3WSbdevM8GKIKw73sIcOpfs-cni4Hp6UtFYBNYMvobupR6k0rg&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQ8tMDegQIPxAI
+            - text: "4"
+          - link "Page 5" [ref=f66e531] [cursor=pointer]:
+            - /url: /search?q=%22consensus%22+%22gradient%22+aggregation+norm&sca_esv=30a5fb343c9df574&ei=-f1PapD5I7iWkPIP9uOHKA&start=40&sa=N&sstk=AU9db-CGHUTislVFmdukEPdvfdzVsYbs0_Xg_lUoxfQIzBgQ0KaE3WSbdevM8GKIKw73sIcOpfs-cni4Hp6UtFYBNYMvobupR6k0rg&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQ8tMDegQIPxAK
+            - text: "5"
+          - link "Page 6" [ref=f66e533] [cursor=pointer]:
+            - /url: /search?q=%22consensus%22+%22gradient%22+aggregation+norm&sca_esv=30a5fb343c9df574&ei=-f1PapD5I7iWkPIP9uOHKA&start=50&sa=N&sstk=AU9db-CGHUTislVFmdukEPdvfdzVsYbs0_Xg_lUoxfQIzBgQ0KaE3WSbdevM8GKIKw73sIcOpfs-cni4Hp6UtFYBNYMvobupR6k0rg&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQ8tMDegQIPxAM
+            - text: "6"
+          - link "Page 7" [ref=f66e535] [cursor=pointer]:
+            - /url: /search?q=%22consensus%22+%22gradient%22+aggregation+norm&sca_esv=30a5fb343c9df574&ei=-f1PapD5I7iWkPIP9uOHKA&start=60&sa=N&sstk=AU9db-CGHUTislVFmdukEPdvfdzVsYbs0_Xg_lUoxfQIzBgQ0KaE3WSbdevM8GKIKw73sIcOpfs-cni4Hp6UtFYBNYMvobupR6k0rg&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQ8tMDegQIPxAO
+            - text: "7"
+          - link "Page 8" [ref=f66e537] [cursor=pointer]:
+            - /url: /search?q=%22consensus%22+%22gradient%22+aggregation+norm&sca_esv=30a5fb343c9df574&ei=-f1PapD5I7iWkPIP9uOHKA&start=70&sa=N&sstk=AU9db-CGHUTislVFmdukEPdvfdzVsYbs0_Xg_lUoxfQIzBgQ0KaE3WSbdevM8GKIKw73sIcOpfs-cni4Hp6UtFYBNYMvobupR6k0rg&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQ8tMDegQIPxAQ
+            - text: "8"
+          - link "Page 9" [ref=f66e539] [cursor=pointer]:
+            - /url: /search?q=%22consensus%22+%22gradient%22+aggregation+norm&sca_esv=30a5fb343c9df574&ei=-f1PapD5I7iWkPIP9uOHKA&start=80&sa=N&sstk=AU9db-CGHUTislVFmdukEPdvfdzVsYbs0_Xg_lUoxfQIzBgQ0KaE3WSbdevM8GKIKw73sIcOpfs-cni4Hp6UtFYBNYMvobupR6k0rg&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQ8tMDegQIPxAS
+            - text: "9"
+          - link "Page 10" [ref=f66e541] [cursor=pointer]:
+            - /url: /search?q=%22consensus%22+%22gradient%22+aggregation+norm&sca_esv=30a5fb343c9df574&ei=-f1PapD5I7iWkPIP9uOHKA&start=90&sa=N&sstk=AU9db-CGHUTislVFmdukEPdvfdzVsYbs0_Xg_lUoxfQIzBgQ0KaE3WSbdevM8GKIKw73sIcOpfs-cni4Hp6UtFYBNYMvobupR6k0rg&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQ8tMDegQIPxAU
+            - text: "10"
+          - heading [level=2] [ref=f66e543]:
+            - link "Next" [ref=f66e544] [cursor=pointer]:
+              - /url: /search?q=%22consensus%22+%22gradient%22+aggregation+norm&sca_esv=30a5fb343c9df574&ei=-f1PapD5I7iWkPIP9uOHKA&start=10&sa=N&sstk=AU9db-CGHUTislVFmdukEPdvfdzVsYbs0_Xg_lUoxfQIzBgQ0KaE3WSbdevM8GKIKw73sIcOpfs-cni4Hp6UtFYBNYMvobupR6k0rg&ved=2ahUKEwjQ2eaoscaVAxU4C0QIHfbxAQUQ8NMDegQIPxAW
+        - navigation
+    - contentinfo [ref=f66e547]:
+      - heading "Footer Links" [level=1] [ref=f66e548]
+      - generic [ref=f66e552]:
+        - generic [ref=f66e556]:
+          - button "Woodland, California - From your IP address" [ref=f66e558] [cursor=pointer]:
+            - generic [ref=f66e559]: Woodland, California
+            - generic [ref=f66e561]:
+              - text: "-"
+              - generic [ref=f66e562]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f66e564] [cursor=pointer]
+        - generic [ref=f66e567]:
+          - link "Help" [ref=f66e568] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f66e569] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f66e570] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f66e571] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

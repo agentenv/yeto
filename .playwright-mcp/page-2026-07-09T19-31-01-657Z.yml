@@ -1,0 +1,325 @@
+- generic [active] [ref=f33e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f33e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f33e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f33e8]:
+    - search [ref=f33e9]:
+      - generic [ref=f33e11]:
+        - link "Go to Google Home" [ref=f33e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQPAgI
+        - generic [ref=f33e21]:
+          - generic [ref=f33e22]:
+            - combobox "Search" [ref=f33e25]: Lugosi Mendelson median of means robust mean estimation arxiv Lugosi Mendelson median of means robust mean estimation arxiv
+            - generic [ref=f33e26]:
+              - button "Clear" [ref=f33e28] [cursor=pointer]
+              - generic [ref=f33e33]:
+                - button "Search by voice" [ref=f33e34] [cursor=pointer]
+                - button "Search by image" [ref=f33e37] [cursor=pointer]
+          - button "Search" [ref=f33e40] [cursor=pointer]
+    - generic [ref=f33e45]:
+      - button "Settings" [ref=f33e47] [cursor=pointer]
+      - button "Share" [ref=f33e53] [cursor=pointer]
+      - generic [ref=f33e59]:
+        - button "Google apps" [ref=f33e61] [cursor=pointer]
+        - link "Sign in" [ref=f33e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3DLugosi%2BMendelson%2Bmedian%2Bof%2Bmeans%2Brobust%2Bmean%2Bestimation%2Barxiv&ec=futura_srp_og_si_72236_p
+  - generic [ref=f33e68]:
+    - navigation [ref=f33e74]:
+      - generic [ref=f33e80]:
+        - list [ref=f33e81]:
+          - listitem [ref=f33e82]:
+            - link "AI Mode" [ref=f33e85] [cursor=pointer]:
+              - /url: /search?q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sca_esv=d4e925c21a8887a9&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cn05EoNqnRUpRtqDK_L3JteSLxt4cUK996luNBLqJEG4fpqOg4FicO_udYAw92rW4b1c3TZpH1huhQVuCHdE_LGPgJ1TLJ1z7pLB4mdxfiHzwhoFmML5dEJza1EZwhnuZ4AuolZUWRz9dOegMP-cu3DP_Xp-LiVYG_iGQoqhLfA-DmWntLcE8xHQtzp47AGDmV9WD-w&aep=1&ntc=1&sa=X&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQ2J8OegQIBxAD
+          - listitem [ref=f33e89]:
+            - link "All" [disabled] [ref=f33e90]
+          - listitem [ref=f33e93]:
+            - link "Forums" [ref=f33e94] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cn05EoNqnRUpRtqDK_L3JteSLxt4cUK996luNBLqJEG4fpqOg4FicO_udYAw92rW4b1c3TZpH1huhQVuCHdE_LGPgJ1TLJ1z7pLB4mdxfiHzwhoFmML5dEJza1EZwhnuZ4AuolZUWRz9dOegMP-cu3DP_Xp-LiVYG_iGQoqhLfA-DmWntLcE8xHQtzp47AGDmV9WD-w&q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sa=X&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQs6gLegQIDhAB
+          - listitem [ref=f33e97]:
+            - link "Videos" [ref=f33e98] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cn05EoNqnRUpRtqDK_L3JteSLxt4cUK996luNBLqJEG4fpqOg4FicO_udYAw92rW4b1c3TZpH1huhQVuCHdE_LGPgJ1TLJ1z7pLB4mdxfiHzwhoFmML5dEJza1EZwhnuZ4AuolZUWRz9dOegMP-cu3DP_Xp-LiVYG_iGQoqhLfA-DmWntLcE8xHQtzp47AGDmV9WD-w&q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sa=X&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQtKgLegQIEBAB
+          - listitem [ref=f33e101]:
+            - link "Images" [ref=f33e102] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cn05EoNqnRUpRtqDK_L3JteSLxt4cUK996luNBLqJEG4fpqOg4FicO_udYAw92rW4b1c3TZpH1huhQVuCHdE_LGPgJ1TLJ1z7pLB4mdxfiHzwhoFmML5dEJza1EZwhnuZ4AuolZUWRz9dOegMP-cu3DP_Xp-LiVYG_iGQoqhLfA-DmWntLcE8xHQtzp47AGDmV9WD-w&q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sa=X&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQtKgLegQIDxAB
+          - listitem [ref=f33e105]:
+            - link "Shopping" [ref=f33e106] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cn05EoNqnRUpRtqDK_L3JteSLxt4cUK996luNBLqJEG4fpqOg4FicO_udYAw92rW4b1c3TZpH1huhQVuCHdE_LGPgJ1TLJ1z7pLB4mdxfiHzwhoFmML5dEJza1EZwhnuZ4AuolZUWRz9dOegMP-cu3DP_Xp-LiVYG_iGQoqhLfA-DmWntLcE8xHQtzp47AGDmV9WD-w&q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&ved=1t:220175&ictx=111
+          - listitem [ref=f33e109]:
+            - link "Short videos" [ref=f33e110] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cn05EoNqnRUpRtqDK_L3JteSLxt4cUK996luNBLqJEG4fpqOg4FicO_udYAw92rW4b1c3TZpH1huhQVuCHdE_LGPgJ1TLJ1z7pLB4mdxfiHzwhoFmML5dEJza1EZwhnuZ4AuolZUWRz9dOegMP-cu3DP_Xp-LiVYG_iGQoqhLfA-DmWntLcE8xHQtzp47AGDmV9WD-w&q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sa=X&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQs6gLegQIDRAB
+          - listitem [ref=f33e113]:
+            - button [ref=f33e114] [cursor=pointer]:
+              - generic "More filters" [ref=f33e115]: More
+        - button "Tools" [ref=f33e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f33e129]
+    - main [ref=f33e135]:
+      - generic [ref=f33e139]:
+        - generic [ref=f33e142]:
+          - heading "Web results" [level=2] [ref=f33e143]
+          - generic [ref=f33e144]:
+            - generic [ref=f33e147]:
+              - 'link "Robust multivariate mean estimation: the optimality of ... arXiv https://arxiv.org › math" [ref=f33e149] [cursor=pointer]':
+                - /url: https://arxiv.org/abs/1907.11391
+                - 'heading "Robust multivariate mean estimation: the optimality of ..." [level=3] [ref=f33e150]'
+                - generic [ref=f33e156]:
+                  - generic [ref=f33e157]: arXiv
+                  - generic [ref=f33e159]: https://arxiv.org › math
+              - button "About this result" [ref=f33e163] [cursor=pointer]
+            - generic [ref=f33e169]:
+              - generic [ref=f33e170]: by G Lugosi · 2019 · Cited by 196 —
+              - generic [ref=f33e171]:
+                - text: We introduce a multivariate extension of the trimmed-
+                - emphasis [ref=f33e172]: mean estimator
+                - text: and show its optimal performance under minimal conditions.
+              - link "Read more" [ref=f33e173] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/1907.11391#:~:text=We%20introduce%20a%20multivariate%20extension,optimal%20performance%20under%20minimal%20conditions.
+            - generic [ref=f33e174]: "Missing: median ‎means"
+        - generic [ref=f33e179]:
+          - generic [ref=f33e182]:
+            - link "A remark on \"Robust machine learning by median-of-means\" arXiv https://arxiv.org › abs" [ref=f33e184] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/1712.06788
+              - heading "A remark on \"Robust machine learning by median-of-means\"" [level=3] [ref=f33e185]
+              - generic [ref=f33e191]:
+                - generic [ref=f33e192]: arXiv
+                - generic [ref=f33e194]: https://arxiv.org › abs
+            - button "About this result" [ref=f33e198] [cursor=pointer]
+          - generic [ref=f33e204]:
+            - generic [ref=f33e205]: by G Lugosi · 2017 · Cited by 4 —
+            - generic [ref=f33e206]:
+              - text: Abstract:We explore the recent results announced in "
+              - emphasis [ref=f33e207]: Robust
+              - text: machine learning by
+              - emphasis [ref=f33e208]: median-of-means
+              - text: ": theory and practice\" by G. Lecué and M."
+            - link "Read more" [ref=f33e209] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/1712.06788#:~:text=We%20explore%20the%20recent%20results,by%20G.%20Lecu%C3%A9%20and%20M.
+          - generic [ref=f33e210]: "Missing: mean ‎estimation"
+        - generic [ref=f33e215]:
+          - generic [ref=f33e218]:
+            - link "Robust Mean Estimation with the Bayesian Median of Means arXiv https://arxiv.org › math" [ref=f33e220] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/1906.01204
+              - heading "Robust Mean Estimation with the Bayesian Median of Means" [level=3] [ref=f33e221]
+              - generic [ref=f33e227]:
+                - generic [ref=f33e228]: arXiv
+                - generic [ref=f33e230]: https://arxiv.org › math
+            - button "About this result" [ref=f33e234] [cursor=pointer]
+          - generic [ref=f33e240]:
+            - generic [ref=f33e241]: by P Orenstein · 2019 · Cited by 5 —
+            - generic [ref=f33e242]:
+              - text: This paper introduces the Bayesian
+              - emphasis [ref=f33e243]: median of means
+              - text: ", an aggregation rule that roughly interpolates between the sample"
+              - emphasis [ref=f33e244]: mean
+              - text: and
+              - emphasis [ref=f33e245]: median
+              - text: .
+            - link "Read more" [ref=f33e246] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/1906.01204#:~:text=This%20paper%20introduces%20the%20Bayesian,at%20the%20expense%20of%20bias.
+          - generic [ref=f33e247]: "Missing: Lugosi ‎Mendelson"
+        - generic [ref=f33e252]:
+          - generic [ref=f33e255]:
+            - link "Mean estimation in high dimension EMS Press https://ems.press › content › book-chapter-files" [ref=f33e257] [cursor=pointer]:
+              - /url: https://ems.press/content/book-chapter-files/33347
+              - heading "Mean estimation in high dimension" [level=3] [ref=f33e258]
+              - generic [ref=f33e264]:
+                - generic [ref=f33e265]: EMS Press
+                - generic [ref=f33e267]: https://ems.press › content › book-chapter-files
+            - button "About this result" [ref=f33e271] [cursor=pointer]
+          - generic [ref=f33e277]:
+            - generic [ref=f33e278]: by G Lugosi · 2023 · Cited by 1 —
+            - generic [ref=f33e279]:
+              - text: Abstract. In this note we discuss the statistical problem of
+              - emphasis [ref=f33e280]: estimating
+              - text: the
+              - emphasis [ref=f33e281]: mean
+              - text: of a random vector based on independent, identically distributed data.
+            - link "Read more" [ref=f33e282] [cursor=pointer]:
+              - /url: https://ems.press/content/book-chapter-files/33347#:~:text=Abstract,on%20independent%2C%20identically%20distributed%20data.
+        - generic [ref=f33e286]:
+          - generic [ref=f33e289]:
+            - link "Robust machine learning by median-of-means Project Euclid https://projecteuclid.org › issue-2 › 19-AOS1828" [ref=f33e291] [cursor=pointer]:
+              - /url: https://projecteuclid.org/journals/annals-of-statistics/volume-48/issue-2/Robust-machine-learning-by-median-of-means--Theory-and/10.1214/19-AOS1828.pdf
+              - heading "Robust machine learning by median-of-means" [level=3] [ref=f33e292]
+              - generic [ref=f33e298]:
+                - generic [ref=f33e299]: Project Euclid
+                - generic [ref=f33e301]: https://projecteuclid.org › issue-2 › 19-AOS1828
+            - button "About this result" [ref=f33e305] [cursor=pointer]
+          - generic [ref=f33e310]:
+            - generic [ref=f33e311]:
+              - generic [ref=f33e312]: by G Lecué · 2020 · Cited by 249 —
+              - generic [ref=f33e313]:
+                - emphasis [ref=f33e314]: Estimation
+                - text: of high dimensional
+                - emphasis [ref=f33e315]: mean
+                - text: regression in the absence of symmetry ...
+                - emphasis [ref=f33e316]: Robust
+                - text: empirical
+                - emphasis [ref=f33e317]: mean
+                - text: estimators. Available at.
+                - emphasis [ref=f33e318]: arXiv
+                - text: :1112.3914. [41] ...
+              - link "Read more" [ref=f33e319] [cursor=pointer]:
+                - /url: https://projecteuclid.org/journals/annals-of-statistics/volume-48/issue-2/Robust-machine-learning-by-median-of-means--Theory-and/10.1214/19-AOS1828.pdf#:~:text=Estimation%20of%20high%20dimensional%20mean,symmetry%20and%20light%20tail%20assumptions.&text=Robust%20empirical%20mean%20estimators.%20Available,%5B41%5D%20LOUNICI%2C%20K.
+            - generic [ref=f33e320]: 26 pages
+        - generic [ref=f33e324]:
+          - generic [ref=f33e327]:
+            - link "Robust multivariate mean estimation arXiv https://arxiv.org › pdf" [ref=f33e329] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/1907.11391
+              - heading "Robust multivariate mean estimation" [level=3] [ref=f33e330]
+              - generic [ref=f33e336]:
+                - generic [ref=f33e337]: arXiv
+                - generic [ref=f33e339]: https://arxiv.org › pdf
+            - generic [ref=f33e341]: PDF
+            - button "About this result" [ref=f33e344] [cursor=pointer]
+          - generic [ref=f33e350]:
+            - generic [ref=f33e351]: by G Lugosi · 2019 · Cited by 196 —
+            - generic [ref=f33e352]:
+              - text: With this notation in place, the
+              - emphasis [ref=f33e353]: definition
+              - text: of the
+              - emphasis [ref=f33e354]: estimator
+              - text: "is as follows: Univariate"
+              - emphasis [ref=f33e355]: mean estimator
+              - text: . (1) Consider the corrupted sample eX1,..., eXN , eY1,..., ...
+            - link "Read more" [ref=f33e356] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/1907.11391#:~:text=With%20this%20notation%20in%20place%2C,%2C%20eY1%2C...%2C%20eYN%20as%20input.
+        - generic [ref=f33e360]:
+          - generic [ref=f33e363]:
+            - link "Efficient median of means estimator Stanislav Minsker https://stasminsker.github.io › efficientMOM" [ref=f33e365] [cursor=pointer]:
+              - /url: https://stasminsker.github.io/papers/efficientMOM.pdf
+              - heading "Efficient median of means estimator" [level=3] [ref=f33e366]
+              - generic [ref=f33e375]:
+                - generic [ref=f33e376]: Stanislav Minsker
+                - generic [ref=f33e378]: https://stasminsker.github.io › efficientMOM
+            - generic [ref=f33e380]: PDF
+            - button "About this result" [ref=f33e383] [cursor=pointer]
+          - generic [ref=f33e389]:
+            - generic [ref=f33e390]: by S Minsker · Cited by 19 —
+            - generic [ref=f33e391]:
+              - emphasis [ref=f33e392]: arXiv
+              - text: preprint.
+              - emphasis [ref=f33e393]: arXiv
+              - text: :2011.08384.
+              - emphasis [ref=f33e394]: Lugosi
+              - text: ", G. and"
+              - emphasis [ref=f33e395]: Mendelson
+              - text: ", S. (2019)."
+              - emphasis [ref=f33e396]: Mean estimation
+              - text: "and regression under heavy-tailed distri- butions: A ..."
+            - link "Read more" [ref=f33e397] [cursor=pointer]:
+              - /url: https://stasminsker.github.io/papers/efficientMOM.pdf#:~:text=arXiv%20preprint,butions%3A%20A%20survey.
+        - generic [ref=f33e401]:
+          - generic [ref=f33e404]:
+            - link "The Geometric Median and Applications to Robust Mean ... NSF Public Access Repository (.gov) https://par.nsf.gov › servlets › purl" [ref=f33e406] [cursor=pointer]:
+              - /url: https://par.nsf.gov/servlets/purl/10423179
+              - heading "The Geometric Median and Applications to Robust Mean ..." [level=3] [ref=f33e407]
+              - generic [ref=f33e416]:
+                - generic [ref=f33e417]: NSF Public Access Repository (.gov)
+                - generic [ref=f33e419]: https://par.nsf.gov › servlets › purl
+            - generic [ref=f33e421]: PDF
+            - button "About this result" [ref=f33e424] [cursor=pointer]
+          - generic [ref=f33e430]:
+            - generic [ref=f33e431]: by S Minsker · 2024 · Cited by 19 —
+            - generic [ref=f33e432]:
+              - text: This paper is devoted to the statistical and numerical properties of the geometric
+              - emphasis [ref=f33e433]: median
+              - text: ", and its applications to the problem of"
+              - emphasis [ref=f33e434]: robust mean estimation
+              - text: via the ...
+            - link "Read more" [ref=f33e435] [cursor=pointer]:
+              - /url: https://par.nsf.gov/servlets/purl/10423179#:~:text=This%20paper%20is%20devoted%20to,the%20median%20of%20means%20principle.
+        - generic [ref=f33e439]:
+          - generic [ref=f33e442]:
+            - link "Outlier-Robust Mean Embedding Estimation by Median-of ... Proceedings of Machine Learning Research https://proceedings.mlr.press › ..." [ref=f33e444] [cursor=pointer]:
+              - /url: https://proceedings.mlr.press/v97/lerasle19a/lerasle19a.pdf
+              - heading "Outlier-Robust Mean Embedding Estimation by Median-of ..." [level=3] [ref=f33e445]
+              - generic [ref=f33e451]:
+                - generic [ref=f33e452]: Proceedings of Machine Learning Research
+                - generic [ref=f33e454]: https://proceedings.mlr.press › ...
+            - generic [ref=f33e456]: PDF
+            - button "About this result" [ref=f33e459] [cursor=pointer]
+          - generic [ref=f33e465]:
+            - generic [ref=f33e466]: by M Lerasle · 2019 · Cited by 47 —
+            - generic [ref=f33e467]:
+              - text: In this paper, we show how the recently emerged principle of
+              - emphasis [ref=f33e468]: median-of-means
+              - text: can be used to design estimators for kernel
+              - emphasis [ref=f33e469]: mean
+              - text: embedding and MMD with excessive ...
+            - link "Read more" [ref=f33e470] [cursor=pointer]:
+              - /url: https://proceedings.mlr.press/v97/lerasle19a/lerasle19a.pdf#:~:text=In%20this%20paper%2C%20we%20show,and%20MMD%20with%20excessive%20resistance
+        - generic [ref=f33e474]:
+          - generic [ref=f33e477]:
+            - link "Optimal robust mean and location estimation via convex ... arXiv https://arxiv.org › math" [ref=f33e479] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2102.00995
+              - heading "Optimal robust mean and location estimation via convex ..." [level=3] [ref=f33e480]
+              - generic [ref=f33e486]:
+                - generic [ref=f33e487]: arXiv
+                - generic [ref=f33e489]: https://arxiv.org › math
+            - button "About this result" [ref=f33e493] [cursor=pointer]
+          - generic [ref=f33e499]:
+            - generic [ref=f33e500]: by J Depersin · 2021 · Cited by 22 —
+            - generic [ref=f33e501]:
+              - text: Abstract page for
+              - emphasis [ref=f33e502]: arXiv
+              - text: "paper 2102.00995: Optimal"
+              - emphasis [ref=f33e503]: robust mean
+              - text: and location
+              - emphasis [ref=f33e504]: estimation
+              - text: via convex programs with respect to any pseudo-norms.
+      - navigation [ref=f33e507]:
+        - heading "Page Navigation" [level=1] [ref=f33e508]
+        - text: "1"
+        - link "Page 2" [ref=f33e511] [cursor=pointer]:
+          - /url: /search?q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sca_esv=d4e925c21a8887a9&ei=9fZPapOoCfqgkPIPt5oQ&start=10&sa=N&sstk=AU9db-Cjar8Qts_s7JU-9HnRQE8jseDTT7K_lui-LRpF3yH419iohd3BhcBF7CBAUFpaiQRcISePR6EVcWLt_d6noT9K1P9f_KsgTA&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQ8tMDegQIQBAE
+          - text: "2"
+        - link "Page 3" [ref=f33e513] [cursor=pointer]:
+          - /url: /search?q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sca_esv=d4e925c21a8887a9&ei=9fZPapOoCfqgkPIPt5oQ&start=20&sa=N&sstk=AU9db-Cjar8Qts_s7JU-9HnRQE8jseDTT7K_lui-LRpF3yH419iohd3BhcBF7CBAUFpaiQRcISePR6EVcWLt_d6noT9K1P9f_KsgTA&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQ8tMDegQIQBAG
+          - text: "3"
+        - link "Page 4" [ref=f33e515] [cursor=pointer]:
+          - /url: /search?q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sca_esv=d4e925c21a8887a9&ei=9fZPapOoCfqgkPIPt5oQ&start=30&sa=N&sstk=AU9db-Cjar8Qts_s7JU-9HnRQE8jseDTT7K_lui-LRpF3yH419iohd3BhcBF7CBAUFpaiQRcISePR6EVcWLt_d6noT9K1P9f_KsgTA&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQ8tMDegQIQBAI
+          - text: "4"
+        - link "Page 5" [ref=f33e517] [cursor=pointer]:
+          - /url: /search?q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sca_esv=d4e925c21a8887a9&ei=9fZPapOoCfqgkPIPt5oQ&start=40&sa=N&sstk=AU9db-Cjar8Qts_s7JU-9HnRQE8jseDTT7K_lui-LRpF3yH419iohd3BhcBF7CBAUFpaiQRcISePR6EVcWLt_d6noT9K1P9f_KsgTA&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQ8tMDegQIQBAK
+          - text: "5"
+        - link "Page 6" [ref=f33e519] [cursor=pointer]:
+          - /url: /search?q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sca_esv=d4e925c21a8887a9&ei=9fZPapOoCfqgkPIPt5oQ&start=50&sa=N&sstk=AU9db-Cjar8Qts_s7JU-9HnRQE8jseDTT7K_lui-LRpF3yH419iohd3BhcBF7CBAUFpaiQRcISePR6EVcWLt_d6noT9K1P9f_KsgTA&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQ8tMDegQIQBAM
+          - text: "6"
+        - link "Page 7" [ref=f33e521] [cursor=pointer]:
+          - /url: /search?q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sca_esv=d4e925c21a8887a9&ei=9fZPapOoCfqgkPIPt5oQ&start=60&sa=N&sstk=AU9db-Cjar8Qts_s7JU-9HnRQE8jseDTT7K_lui-LRpF3yH419iohd3BhcBF7CBAUFpaiQRcISePR6EVcWLt_d6noT9K1P9f_KsgTA&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQ8tMDegQIQBAO
+          - text: "7"
+        - link "Page 8" [ref=f33e523] [cursor=pointer]:
+          - /url: /search?q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sca_esv=d4e925c21a8887a9&ei=9fZPapOoCfqgkPIPt5oQ&start=70&sa=N&sstk=AU9db-Cjar8Qts_s7JU-9HnRQE8jseDTT7K_lui-LRpF3yH419iohd3BhcBF7CBAUFpaiQRcISePR6EVcWLt_d6noT9K1P9f_KsgTA&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQ8tMDegQIQBAQ
+          - text: "8"
+        - link "Page 9" [ref=f33e525] [cursor=pointer]:
+          - /url: /search?q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sca_esv=d4e925c21a8887a9&ei=9fZPapOoCfqgkPIPt5oQ&start=80&sa=N&sstk=AU9db-Cjar8Qts_s7JU-9HnRQE8jseDTT7K_lui-LRpF3yH419iohd3BhcBF7CBAUFpaiQRcISePR6EVcWLt_d6noT9K1P9f_KsgTA&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQ8tMDegQIQBAS
+          - text: "9"
+        - link "Page 10" [ref=f33e527] [cursor=pointer]:
+          - /url: /search?q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sca_esv=d4e925c21a8887a9&ei=9fZPapOoCfqgkPIPt5oQ&start=90&sa=N&sstk=AU9db-Cjar8Qts_s7JU-9HnRQE8jseDTT7K_lui-LRpF3yH419iohd3BhcBF7CBAUFpaiQRcISePR6EVcWLt_d6noT9K1P9f_KsgTA&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQ8tMDegQIQBAU
+          - text: "10"
+        - heading [level=2] [ref=f33e529]:
+          - link "Next" [ref=f33e530] [cursor=pointer]:
+            - /url: /search?q=Lugosi+Mendelson+median+of+means+robust+mean+estimation+arxiv&sca_esv=d4e925c21a8887a9&ei=9fZPapOoCfqgkPIPt5oQ&start=10&sa=N&sstk=AU9db-Cjar8Qts_s7JU-9HnRQE8jseDTT7K_lui-LRpF3yH419iohd3BhcBF7CBAUFpaiQRcISePR6EVcWLt_d6noT9K1P9f_KsgTA&ved=2ahUKEwjT9pjQqsaVAxV6EEQIHTcNBAAQ8NMDegQIQBAW
+      - navigation
+    - contentinfo [ref=f33e533]:
+      - heading "Footer Links" [level=1] [ref=f33e534]
+      - generic [ref=f33e538]:
+        - generic [ref=f33e542]:
+          - button "Woodland, California - From your IP address" [ref=f33e544] [cursor=pointer]:
+            - generic [ref=f33e545]: Woodland, California
+            - generic [ref=f33e547]:
+              - text: "-"
+              - generic [ref=f33e548]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f33e550] [cursor=pointer]
+        - generic [ref=f33e553]:
+          - link "Help" [ref=f33e554] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f33e555] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f33e556] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f33e557] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

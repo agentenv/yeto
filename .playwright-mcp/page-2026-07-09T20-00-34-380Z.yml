@@ -1,0 +1,337 @@
+- generic [active] [ref=f33e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f33e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f33e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f33e8]:
+    - search [ref=f33e9]:
+      - generic [ref=f33e11]:
+        - link "Go to Google Home" [ref=f33e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQPAgI
+        - generic [ref=f33e21]:
+          - generic [ref=f33e22]:
+            - combobox "Search" [ref=f33e25]: FedNova normalized averaging federated learning Wang FedNova normalized averaging federated learning Wang
+            - generic [ref=f33e26]:
+              - button "Clear" [ref=f33e28] [cursor=pointer]
+              - generic [ref=f33e33]:
+                - button "Search by voice" [ref=f33e34] [cursor=pointer]
+                - button "Search by image" [ref=f33e37] [cursor=pointer]
+          - button "Search" [ref=f33e40] [cursor=pointer]
+    - generic [ref=f33e45]:
+      - button "Settings" [ref=f33e47] [cursor=pointer]
+      - button "Share" [ref=f33e53] [cursor=pointer]
+      - generic [ref=f33e59]:
+        - button "Google apps" [ref=f33e61] [cursor=pointer]
+        - link "Sign in" [ref=f33e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3DFedNova%2520normalized%2520averaging%2520federated%2520learning%2520Wang&ec=futura_srp_og_si_72236_p
+  - generic [ref=f33e68]:
+    - navigation [ref=f33e74]:
+      - generic [ref=f33e80]:
+        - list [ref=f33e81]:
+          - listitem [ref=f33e82]:
+            - link "AI Mode" [ref=f33e85] [cursor=pointer]:
+              - /url: /search?q=FedNova+normalized+averaging+federated+learning+Wang&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEfmexCwyVncqqJWDU0Vvgxc6FIBPgVKOgC9S5Fbse6a9-BNuqcgXQ2KnUGfoA1koBdoAhBt0c6UXUgHutpe2GPTeK4U-xaNs7cVWlfPfXSX2Y9KNyghXEFc9i7WA0kJfCU3Bxbg&aep=1&ntc=1&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ2J8OegQIMhAD
+          - listitem [ref=f33e89]:
+            - link "All" [disabled] [ref=f33e90]
+          - listitem [ref=f33e93]:
+            - link "Images" [ref=f33e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEfmexCwyVncqqJWDU0Vvgxc6FIBPgVKOgC9S5Fbse6a9-BNuqcgXQ2KnUGfoA1koBdoAhBt0c6UXUgHutpe2GPTeK4U-xaNs7cVWlfPfXSX2Y9KNyghXEFc9i7WA0kJfCU3Bxbg&q=FedNova+normalized+averaging+federated+learning+Wang&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQtKgLegQIQBAB
+          - listitem [ref=f33e97]:
+            - link "Videos" [ref=f33e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEfmexCwyVncqqJWDU0Vvgxc6FIBPgVKOgC9S5Fbse6a9-BNuqcgXQ2KnUGfoA1koBdoAhBt0c6UXUgHutpe2GPTeK4U-xaNs7cVWlfPfXSX2Y9KNyghXEFc9i7WA0kJfCU3Bxbg&q=FedNova+normalized+averaging+federated+learning+Wang&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQtKgLegQIQxAB
+          - listitem [ref=f33e101]:
+            - link "Shopping" [ref=f33e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEfmexCwyVncqqJWDU0Vvgxc6FIBPgVKOgC9S5Fbse6a9-BNuqcgXQ2KnUGfoA1koBdoAhBt0c6UXUgHutpe2GPTeK4U-xaNs7cVWlfPfXSX2Y9KNyghXEFc9i7WA0kJfCU3Bxbg&q=FedNova+normalized+averaging+federated+learning+Wang&ved=1t:220175&ictx=111
+          - listitem [ref=f33e105]:
+            - link "Forums" [ref=f33e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEfmexCwyVncqqJWDU0Vvgxc6FIBPgVKOgC9S5Fbse6a9-BNuqcgXQ2KnUGfoA1koBdoAhBt0c6UXUgHutpe2GPTeK4U-xaNs7cVWlfPfXSX2Y9KNyghXEFc9i7WA0kJfCU3Bxbg&q=FedNova+normalized+averaging+federated+learning+Wang&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQs6gLegQIQRAB
+          - listitem [ref=f33e109]:
+            - link "News" [ref=f33e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&q=FedNova+normalized+averaging+federated+learning+Wang&tbm=nws&source=lnms&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEfmexCwyVncqqJWDU0Vvgxc6FIBPgVKOgC9S5Fbse6a9-BNuqcgXQ2KnUGfoA1koBdoAhBt0c6UXUgHutpe2GPTeK4U-xaNs7cVWlfPfXSX2Y9KNyghXEFc9i7WA0kJfCU3Bxbg&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ0pQJegQIQhAB
+          - listitem [ref=f33e113]:
+            - button [ref=f33e114] [cursor=pointer]:
+              - generic "More filters" [ref=f33e115]: More
+        - button "Tools" [ref=f33e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f33e129]
+    - main [ref=f33e135]:
+      - generic [ref=f33e139]:
+        - generic [ref=f33e142]:
+          - heading "Web results" [level=2] [ref=f33e143]
+          - generic [ref=f33e144]:
+            - generic [ref=f33e147]:
+              - link "[2007.07481] Tackling the Objective Inconsistency Problem ... arXiv https://arxiv.org › abs" [ref=f33e149] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/2007.07481
+                - heading "[2007.07481] Tackling the Objective Inconsistency Problem ..." [level=3] [ref=f33e150]
+                - generic [ref=f33e156]:
+                  - generic [ref=f33e157]: arXiv
+                  - generic [ref=f33e159]: https://arxiv.org › abs
+              - button "About this result" [ref=f33e163] [cursor=pointer]
+            - generic [ref=f33e169]:
+              - generic [ref=f33e170]: by J Wang · 2020 · Cited by 2736 —
+              - generic [ref=f33e171]:
+                - text: Using insights from this analysis, we propose
+                - emphasis [ref=f33e172]: FedNova, a normalized averaging method
+                - text: that eliminates objective inconsistency while preserving ...
+              - link "Read more" [ref=f33e173] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/2007.07481#:~:text=Using%20insights%20from%20this%20analysis%2C,while%20preserving%20fast%20error%20convergence.
+        - generic [ref=f33e184]:
+          - heading "Thinking" [level=2] [ref=f33e188]
+          - progressbar "Generating" [ref=f33e191]
+        - generic [ref=f33e195]:
+          - heading "Web results" [level=2] [ref=f33e196]
+          - generic [ref=f33e197]:
+            - generic [ref=f33e200]:
+              - link "A Novel Framework for the Analysis and Design of ... Parallel Data Lab https://www.pdl.cmu.edu › PDL-FTP › BigLearning" [ref=f33e202] [cursor=pointer]:
+                - /url: https://www.pdl.cmu.edu/PDL-FTP/BigLearning/Novel_Framework.pdf
+                - heading "A Novel Framework for the Analysis and Design of ..." [level=3] [ref=f33e203]
+                - generic [ref=f33e209]:
+                  - generic [ref=f33e210]: Parallel Data Lab
+                  - generic [ref=f33e212]: https://www.pdl.cmu.edu › PDL-FTP › BigLearning
+              - generic [ref=f33e214]: PDF
+              - button "About this result" [ref=f33e217] [cursor=pointer]
+            - generic [ref=f33e222]:
+              - generic [ref=f33e223]:
+                - generic [ref=f33e224]: by J Wang · 2021 · Cited by 191 —
+                - generic [ref=f33e225]:
+                  - text: Using insights from this analysis, we propose
+                  - emphasis [ref=f33e226]: FedNova
+                  - text: ", a"
+                  - emphasis [ref=f33e227]: normalized averaging
+                  - text: method that eliminates objective inconsistency while preserving fast error.
+                - link "Read more" [ref=f33e228] [cursor=pointer]:
+                  - /url: https://www.pdl.cmu.edu/PDL-FTP/BigLearning/Novel_Framework.pdf#:~:text=Using%20insights%20from%20this,inconsistency%20while%20preserving%20fast%20error
+              - generic [ref=f33e229]: 16 pages
+        - generic [ref=f33e233]:
+          - generic [ref=f33e236]:
+            - link "Tackling the Objective Inconsistency Problem in ... Flower AI https://flower.ai › docs › baselines › fednova" [ref=f33e238] [cursor=pointer]:
+              - /url: https://flower.ai/docs/baselines/fednova.html
+              - heading "Tackling the Objective Inconsistency Problem in ..." [level=3] [ref=f33e239]
+              - generic [ref=f33e245]:
+                - generic [ref=f33e246]: Flower AI
+                - generic [ref=f33e248]: https://flower.ai › docs › baselines › fednova
+            - button "About this result" [ref=f33e252] [cursor=pointer]
+          - generic [ref=f33e258]:
+            - generic [ref=f33e259]:
+              - text: Using insights from this analysis, we propose
+              - emphasis [ref=f33e260]: FedNova, a normalized averaging method
+              - text: that eliminates objective inconsistency while preserving fast error ...
+            - link "Read more" [ref=f33e261] [cursor=pointer]:
+              - /url: https://flower.ai/docs/baselines/fednova.html#:~:text=Using%20insights%20from%20this%20analysis%2C,while%20preserving%20fast%20error%20convergence.
+        - generic [ref=f33e265]:
+          - generic [ref=f33e268]:
+            - link "Tackling the objective inconsistency problem in ... Princeton University https://collaborate.princeton.edu › publications › tacklin..." [ref=f33e270] [cursor=pointer]:
+              - /url: https://collaborate.princeton.edu/en/publications/tackling-the-objective-inconsistency-problem-in-heterogeneous-fed/
+              - heading "Tackling the objective inconsistency problem in ..." [level=3] [ref=f33e271]
+              - generic [ref=f33e277]:
+                - generic [ref=f33e278]: Princeton University
+                - generic [ref=f33e280]: https://collaborate.princeton.edu › publications › tacklin...
+            - button "About this result" [ref=f33e284] [cursor=pointer]
+          - generic [ref=f33e290]:
+            - generic [ref=f33e291]: by J Wang · 2020 · Cited by 2736 —
+            - generic [ref=f33e292]:
+              - text: Using insights from this analysis, we propose
+              - emphasis [ref=f33e293]: FedNova, a normalized averaging method
+              - text: that eliminates objective inconsistency while preserving fast error ...
+            - link "Read more" [ref=f33e294] [cursor=pointer]:
+              - /url: https://collaborate.princeton.edu/en/publications/tackling-the-objective-inconsistency-problem-in-heterogeneous-fed/#:~:text=Using%20insights%20from%20this%20analysis%2C,while%20preserving%20fast%20error%20convergence.
+        - generic [ref=f33e298]:
+          - generic [ref=f33e301]:
+            - link "[P] FedNova:Federated Normalized averaging algorithm Reddit · r/MachineLearning 3 years ago" [ref=f33e303] [cursor=pointer]:
+              - /url: https://www.reddit.com/r/MachineLearning/comments/14u9ivq/p_fednovafederated_normalized_averaging_algorithm/
+              - heading "[P] FedNova:Federated Normalized averaging algorithm" [level=3] [ref=f33e304]
+              - generic [ref=f33e310]:
+                - generic [ref=f33e311]: Reddit · r/MachineLearning
+                - generic [ref=f33e313]: 3 years ago
+            - button "About this result" [ref=f33e317] [cursor=pointer]
+          - generic [ref=f33e323]:
+            - generic [ref=f33e324]:
+              - text: "[P]"
+              - emphasis [ref=f33e325]: FedNova:Federated Normalized averaging algorithm
+              - text: . Project. I was working on a project based on tackling the objective inconsistency problem ...
+            - link "Read more" [ref=f33e326] [cursor=pointer]:
+              - /url: https://www.reddit.com/r/MachineLearning/comments/14u9ivq/p_fednovafederated_normalized_averaging_algorithm/#:~:text=%5BP%5D%20FedNova%3AFederated%20Normalized%20averaging%20algorithm,problem%20based%20on%20paper%20https%3A%2F%2Fdoi.org%2F10.48550%2FarXiv.2007.07481.
+          - generic [ref=f33e328]:
+            - text: "Missing: Wang ‎| Show results with:"
+            - link "Wang" [ref=f33e329] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&q=FedNova+normalized+averaging+federated+learning+%22Wang%22&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ5t4CegQILhAB
+        - generic [ref=f33e333]:
+          - generic [ref=f33e336]:
+            - link "Tackling the Objective Inconsistency Problem in ... arXiv https://arxiv.org › pdf" [ref=f33e338] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/2007.07481
+              - heading "Tackling the Objective Inconsistency Problem in ..." [level=3] [ref=f33e339]
+              - generic [ref=f33e345]:
+                - generic [ref=f33e346]: arXiv
+                - generic [ref=f33e348]: https://arxiv.org › pdf
+            - generic [ref=f33e350]: PDF
+            - button "About this result" [ref=f33e353] [cursor=pointer]
+          - generic [ref=f33e359]:
+            - generic [ref=f33e360]: by J Wang · 2020 · Cited by 2736 —
+            - generic [ref=f33e361]:
+              - text: Using insights from this analysis, we propose
+              - emphasis [ref=f33e362]: Fed-. Nova, a normalized averaging method
+              - text: that eliminates objective inconsistency while preserving ...
+            - link "Read more" [ref=f33e363] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/2007.07481#:~:text=Using%20insights%20from%20this%20analysis%2C,preserving%20fast%20error%20convergence.
+        - generic [ref=f33e367]:
+          - generic [ref=f33e370]:
+            - 'link "JYWa/FedNova: PyTorch implementation of ... GitHub https://github.com › JYWa › FedNova" [ref=f33e372] [cursor=pointer]':
+              - /url: https://github.com/JYWa/FedNova
+              - 'heading "JYWa/FedNova: PyTorch implementation of ..." [level=3] [ref=f33e373]'
+              - generic [ref=f33e379]:
+                - generic [ref=f33e380]: GitHub
+                - generic [ref=f33e382]: https://github.com › JYWa › FedNova
+            - button "About this result" [ref=f33e386] [cursor=pointer]
+          - generic [ref=f33e392]:
+            - generic [ref=f33e393]:
+              - text: Using insights from this analysis, we propose
+              - emphasis [ref=f33e394]: FedNova, a normalized averaging method
+              - text: that eliminates objective inconsistency while preserving fast error ...
+            - link "Read more" [ref=f33e395] [cursor=pointer]:
+              - /url: https://github.com/JYWa/FedNova#:~:text=Using%20insights%20from%20this%20analysis%2C,while%20preserving%20fast%20error%20convergence.
+        - table [ref=f33e401]:
+          - rowgroup [ref=f33e402]:
+            - row [ref=f33e403]:
+              - cell [ref=f33e404]:
+                - heading [level=3] [ref=f33e405]:
+                  - link [ref=f33e406] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar?q=FedNova+normalized+averaging+federated+learning+Wang&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                    - generic [ref=f33e407]:
+                      - text: Scholarly articles for
+                      - emphasis [ref=f33e408]: FedNova normalized averaging federated learning Wang
+            - row [ref=f33e409]:
+              - cell [ref=f33e410]:
+                - heading [level=3] [ref=f33e411]:
+                  - link [ref=f33e412] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://ieeexplore.ieee.org/ielaam/78/9307529/9521822-aam.pdf&hl=en&sa=X&ei=4v1Parn6Aqew6rQP-PrjsAQ&scisig=AM1tuoMweRCjSX2SVA1dbcxpLUpA&oi=scholarr
+                    - generic [ref=f33e413]:
+                      - text: … and design of heterogeneous
+                      - emphasis [ref=f33e414]: federated learning
+                  - generic [ref=f33e415]:
+                    - text: "-"
+                    - generic [ref=f33e416]:
+                      - text: ‎
+                      - emphasis [ref=f33e418]: Wang
+                    - text: "- Cited by 191"
+                - heading [level=3] [ref=f33e419]:
+                  - link [ref=f33e420] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://proceedings.neurips.cc/paper_files/paper/2020/file/564127c03caab942e503ee6f810f54fd-Paper.pdf&hl=en&sa=X&ei=4v1Parn6Aqew6rQP-PrjsAQ&scisig=AM1tuoP1DYKVsw9gL9HSgWt6ej_O&oi=scholarr
+                    - generic [ref=f33e421]:
+                      - text: … inconsistency problem in heterogeneous
+                      - emphasis [ref=f33e422]: federated
+                      - text: …
+                  - generic [ref=f33e423]:
+                    - text: "-"
+                    - generic [ref=f33e424]:
+                      - text: ‎
+                      - emphasis [ref=f33e426]: Wang
+                    - text: "- Cited by 2744"
+                - heading [level=3] [ref=f33e427]:
+                  - link [ref=f33e428] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://ojs.aaai.org/index.php/AAAI/article/view/26212/25984&hl=en&sa=X&ei=4v1Parn6Aqew6rQP-PrjsAQ&scisig=AM1tuoOtCpmYZf2A8KZW3eZowRp7&oi=scholarr
+                    - generic [ref=f33e429]:
+                      - text: … client-variance-reduced adaptive
+                      - emphasis [ref=f33e430]: federated learning
+                      - text: …
+                  - generic [ref=f33e431]:
+                    - text: "-"
+                    - generic [ref=f33e432]:
+                      - text: ‎
+                      - emphasis [ref=f33e434]: Wang
+                    - text: "- Cited by 41"
+        - generic [ref=f33e437]:
+          - heading "Web results" [level=2] [ref=f33e438]
+          - generic [ref=f33e439]:
+            - generic [ref=f33e442]:
+              - link "Tackling the objective inconsistency problem in ... ACM Digital Library https://dl.acm.org › doi › abs" [ref=f33e444] [cursor=pointer]:
+                - /url: https://dl.acm.org/doi/abs/10.5555/3495724.3496362
+                - heading "Tackling the objective inconsistency problem in ..." [level=3] [ref=f33e445]
+                - generic [ref=f33e451]:
+                  - generic [ref=f33e452]: ACM Digital Library
+                  - generic [ref=f33e454]: https://dl.acm.org › doi › abs
+              - button "About this result" [ref=f33e458] [cursor=pointer]
+            - generic [ref=f33e464]:
+              - generic [ref=f33e465]: by J Wang · 2020 · Cited by 2736 —
+              - generic [ref=f33e466]:
+                - text: This paper provides a general framework to analyze the convergence of heterogeneous
+                - emphasis [ref=f33e467]: federated
+                - text: optimization algorithms.
+              - link "Read more" [ref=f33e468] [cursor=pointer]:
+                - /url: https://dl.acm.org/doi/abs/10.5555/3495724.3496362#:~:text=This%20paper%20provides%20a%20general,of%20heterogeneous%20federated%20optimization%20algorithms.
+        - generic [ref=f33e472]:
+          - generic [ref=f33e475]:
+            - 'link "FedNova: Normalized Averaging for Heterogeneous Systems ApX Machine Learning https://apxml.com › courses › fednova-algorithm" [ref=f33e477] [cursor=pointer]':
+              - /url: https://apxml.com/courses/federated-learning/chapter-2-advanced-aggregation-algorithms/fednova-algorithm
+              - 'heading "FedNova: Normalized Averaging for Heterogeneous Systems" [level=3] [ref=f33e478]'
+              - generic [ref=f33e487]:
+                - generic [ref=f33e488]: ApX Machine Learning
+                - generic [ref=f33e490]: https://apxml.com › courses › fednova-algorithm
+            - button "About this result" [ref=f33e494] [cursor=pointer]
+          - generic [ref=f33e501]:
+            - text: Explore FedNova, an aggregation method that
+            - emphasis [ref=f33e502]: normalizes updates
+            - text: to account for varying local computations.
+      - generic [ref=f33e504]:
+        - generic [ref=f33e509]:
+          - heading "People also search for" [level=2] [ref=f33e511]
+          - generic [ref=f33e513]:
+            - generic [ref=f33e514]:
+              - link "Fednova normalized averaging federated learning wang pdf" [ref=f33e518] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=Fednova+normalized+averaging+federated+learning+wang+pdf&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ1QJ6BAgJEAE
+              - link "Fednova normalized averaging federated learning wang python" [ref=f33e532] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=Fednova+normalized+averaging+federated+learning+wang+python&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ1QJ6BAgbEAE
+              - link "Fednova normalized averaging federated learning wang github" [ref=f33e546] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=Fednova+normalized+averaging+federated+learning+wang+github&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ1QJ6BAgZEAE
+              - link "FedNova federated learning" [ref=f33e560] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=FedNova+federated+learning&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ1QJ6BAgYEAE
+            - generic [ref=f33e571]:
+              - link "Tackling the objective inconsistency problem in heterogeneous federated optimization" [ref=f33e575] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=Tackling+the+objective+inconsistency+problem+in+heterogeneous+federated+optimization&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ1QJ6BAgXEAE
+              - link "Federated optimization in heterogeneous networks" [ref=f33e589] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=Federated+optimization+in+heterogeneous+networks&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ1QJ6BAgNEAE
+              - link "Federated learning with matched averaging" [ref=f33e603] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=Federated+learning+with+matched+averaging&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ1QJ6BAgMEAE
+              - 'link "SCAFFOLD: stochastic controlled Averaging for federated learning" [ref=f33e617] [cursor=pointer]':
+                - /url: /search?sca_esv=30a5fb343c9df574&q=SCAFFOLD:+stochastic+controlled+Averaging+for+federated+learning&sa=X&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ1QJ6BAgLEAE
+        - navigation [ref=f33e628]:
+          - heading "Page Navigation" [level=1] [ref=f33e629]
+          - text: "1"
+          - link "Page 2" [ref=f33e632] [cursor=pointer]:
+            - /url: /search?q=FedNova+normalized+averaging+federated+learning+Wang&sca_esv=30a5fb343c9df574&ei=4f1PavWqObnGkPIPmt72uA4&start=10&sa=N&sstk=AU9db-BdGMBxYi7EtcKDsRw0m3BUz27PR-nMG-dyvjxkMe-wbQSoOpUUNfnu-X8uMfmYsXEUrm8zNgPXw6KE0X887Qz2K-V9uel4Xw&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ8tMDegQIRxAE
+            - text: "2"
+          - link "Page 3" [ref=f33e634] [cursor=pointer]:
+            - /url: /search?q=FedNova+normalized+averaging+federated+learning+Wang&sca_esv=30a5fb343c9df574&ei=4f1PavWqObnGkPIPmt72uA4&start=20&sa=N&sstk=AU9db-BdGMBxYi7EtcKDsRw0m3BUz27PR-nMG-dyvjxkMe-wbQSoOpUUNfnu-X8uMfmYsXEUrm8zNgPXw6KE0X887Qz2K-V9uel4Xw&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ8tMDegQIRxAG
+            - text: "3"
+          - link "Page 4" [ref=f33e636] [cursor=pointer]:
+            - /url: /search?q=FedNova+normalized+averaging+federated+learning+Wang&sca_esv=30a5fb343c9df574&ei=4f1PavWqObnGkPIPmt72uA4&start=30&sa=N&sstk=AU9db-BdGMBxYi7EtcKDsRw0m3BUz27PR-nMG-dyvjxkMe-wbQSoOpUUNfnu-X8uMfmYsXEUrm8zNgPXw6KE0X887Qz2K-V9uel4Xw&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ8tMDegQIRxAI
+            - text: "4"
+          - link "Page 5" [ref=f33e638] [cursor=pointer]:
+            - /url: /search?q=FedNova+normalized+averaging+federated+learning+Wang&sca_esv=30a5fb343c9df574&ei=4f1PavWqObnGkPIPmt72uA4&start=40&sa=N&sstk=AU9db-BdGMBxYi7EtcKDsRw0m3BUz27PR-nMG-dyvjxkMe-wbQSoOpUUNfnu-X8uMfmYsXEUrm8zNgPXw6KE0X887Qz2K-V9uel4Xw&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ8tMDegQIRxAK
+            - text: "5"
+          - link "Page 6" [ref=f33e640] [cursor=pointer]:
+            - /url: /search?q=FedNova+normalized+averaging+federated+learning+Wang&sca_esv=30a5fb343c9df574&ei=4f1PavWqObnGkPIPmt72uA4&start=50&sa=N&sstk=AU9db-BdGMBxYi7EtcKDsRw0m3BUz27PR-nMG-dyvjxkMe-wbQSoOpUUNfnu-X8uMfmYsXEUrm8zNgPXw6KE0X887Qz2K-V9uel4Xw&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ8tMDegQIRxAM
+            - text: "6"
+          - heading [level=2] [ref=f33e642]:
+            - link "Next" [ref=f33e643] [cursor=pointer]:
+              - /url: /search?q=FedNova+normalized+averaging+federated+learning+Wang&sca_esv=30a5fb343c9df574&ei=4f1PavWqObnGkPIPmt72uA4&start=10&sa=N&sstk=AU9db-BdGMBxYi7EtcKDsRw0m3BUz27PR-nMG-dyvjxkMe-wbQSoOpUUNfnu-X8uMfmYsXEUrm8zNgPXw6KE0X887Qz2K-V9uel4Xw&ved=2ahUKEwi1n8OdscaVAxU5I0QIHRqvHecQ8NMDegQIRxAO
+      - navigation
+    - contentinfo [ref=f33e646]:
+      - heading "Footer Links" [level=1] [ref=f33e647]
+      - generic [ref=f33e651]:
+        - generic [ref=f33e655]:
+          - button "Woodland, California - From your IP address" [ref=f33e657] [cursor=pointer]:
+            - generic [ref=f33e658]: Woodland, California
+            - generic [ref=f33e660]:
+              - text: "-"
+              - generic [ref=f33e661]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f33e663] [cursor=pointer]
+        - generic [ref=f33e666]:
+          - link "Help" [ref=f33e667] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f33e668] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f33e669] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f33e670] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

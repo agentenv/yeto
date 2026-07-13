@@ -1,0 +1,292 @@
+- generic [active] [ref=f121e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f121e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f121e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f121e8]:
+    - search [ref=f121e9]:
+      - generic [ref=f121e11]:
+        - link "Go to Google Home" [ref=f121e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjQtsXTscaVAxVeD0QIHf4ADr0QPAgI
+        - generic [ref=f121e21]:
+          - generic [ref=f121e22]:
+            - combobox "Search" [ref=f121e25]: "\"Federated Learning with Similarity-based Model Aggregation\" \"Federated Learning with Similarity-based Model Aggregation\""
+            - generic [ref=f121e26]:
+              - button "Clear" [ref=f121e28] [cursor=pointer]
+              - generic [ref=f121e33]:
+                - button "Search by voice" [ref=f121e34] [cursor=pointer]
+                - button "Search by image" [ref=f121e37] [cursor=pointer]
+          - button "Search" [ref=f121e40] [cursor=pointer]
+    - generic [ref=f121e45]:
+      - button "Settings" [ref=f121e47] [cursor=pointer]
+      - button "Share" [ref=f121e53] [cursor=pointer]
+      - generic [ref=f121e59]:
+        - button "Google apps" [ref=f121e61] [cursor=pointer]
+        - link "Sign in" [ref=f121e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522Federated%2BLearning%2Bwith%2BSimilarity-based%2BModel%2BAggregation%2522&ec=futura_srp_og_si_72236_p
+  - generic [ref=f121e68]:
+    - navigation [ref=f121e74]:
+      - generic [ref=f121e80]:
+        - list [ref=f121e81]:
+          - listitem [ref=f121e82]:
+            - link "AI Mode" [ref=f121e85] [cursor=pointer]:
+              - /url: /search?q=%22Federated+Learning+with+Similarity-based+Model+Aggregation%22&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&aep=1&ntc=1&sa=X&ved=2ahUKEwjQtsXTscaVAxVeD0QIHf4ADr0Q2J8OegQICBAD
+          - listitem [ref=f121e89]:
+            - link "All" [disabled] [ref=f121e90]
+          - listitem [ref=f121e93]:
+            - link "Images" [ref=f121e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22Federated+Learning+with+Similarity-based+Model+Aggregation%22&sa=X&ved=2ahUKEwjQtsXTscaVAxVeD0QIHf4ADr0QtKgLegQIMhAB
+          - listitem [ref=f121e97]:
+            - link "Shopping" [ref=f121e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22Federated+Learning+with+Similarity-based+Model+Aggregation%22&ved=1t:220175&ictx=111
+          - listitem [ref=f121e101]:
+            - link "Videos" [ref=f121e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22Federated+Learning+with+Similarity-based+Model+Aggregation%22&sa=X&ved=2ahUKEwjQtsXTscaVAxVeD0QIHf4ADr0QtKgLegQIKBAB
+          - listitem [ref=f121e105]:
+            - link "Forums" [ref=f121e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22Federated+Learning+with+Similarity-based+Model+Aggregation%22&sa=X&ved=2ahUKEwjQtsXTscaVAxVeD0QIHf4ADr0Qs6gLegQIHhAB
+          - listitem [ref=f121e109]:
+            - link "Short videos" [ref=f121e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWZdQJOrgSsOpll5rxyNcIceuSHrD98r42QCy2VpGaYtAW8zKT6mHypPIWJGeeRm7tzF71PjUOVFXsXUiM6lom55kLPulHeTkVQO3xs0VJ3Z6hOEzmQ&q=%22Federated+Learning+with+Similarity-based+Model+Aggregation%22&sa=X&ved=2ahUKEwjQtsXTscaVAxVeD0QIHf4ADr0Qs6gLegQIFBAB
+          - listitem [ref=f121e113]:
+            - button [ref=f121e114] [cursor=pointer]:
+              - generic "More filters" [ref=f121e115]: More
+        - button "Tools" [ref=f121e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f121e129]
+    - generic [ref=f121e134]:
+      - generic [ref=f121e153]:
+        - heading "Thinking Searching Thinking a little longer" [level=2] [ref=f121e157]:
+          - generic [ref=f121e158]:
+            - generic [ref=f121e159]: Thinking
+            - generic [ref=f121e161]: Searching
+            - generic [ref=f121e171]: Thinking a little longer
+        - progressbar "Generating" [ref=f121e174]
+      - main [ref=f121e225]:
+        - generic [ref=f121e229]:
+          - generic [ref=f121e232]:
+            - heading "Web results" [level=2] [ref=f121e233]
+            - generic [ref=f121e234]:
+              - generic [ref=f121e237]:
+                - link "Secure and Accurate Personalized Federated Learning ... IEEE Xplore https://ieeexplore.ieee.org › document" [ref=f121e239] [cursor=pointer]:
+                  - /url: https://ieeexplore.ieee.org/document/10535193/
+                  - heading "Secure and Accurate Personalized Federated Learning ..." [level=3] [ref=f121e240]
+                  - generic [ref=f121e249]:
+                    - generic [ref=f121e250]: IEEE Xplore
+                    - generic [ref=f121e252]: https://ieeexplore.ieee.org › document
+                - button "About this result" [ref=f121e256] [cursor=pointer]
+              - generic [ref=f121e262]:
+                - generic [ref=f121e263]: by Z Tan · 2024 · Cited by 11 —
+                - generic [ref=f121e264]:
+                  - text: Secure and Accurate Personalized
+                  - emphasis [ref=f121e265]: Federated Learning With Similarity-Based Model Aggregation
+                  - text: ". Abstract: Personalized federated learning (PFL) ..."
+                - link "Read more" [ref=f121e266] [cursor=pointer]:
+                  - /url: https://ieeexplore.ieee.org/document/10535193/#:~:text=Secure%20and%20Accurate%20Personalized%20Federated,personalized%20models%20for%20local%20clients.
+          - table [ref=f121e272]:
+            - rowgroup [ref=f121e273]:
+              - row [ref=f121e274]:
+                - cell [ref=f121e275]:
+                  - heading [level=3] [ref=f121e276]:
+                    - link [ref=f121e277] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar?q=%22Federated+Learning+with+Similarity-based+Model+Aggregation%22&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                      - generic [ref=f121e278]:
+                        - text: Scholarly articles for
+                        - emphasis [ref=f121e279]: "\"Federated Learning with Similarity-based Model Aggregation\""
+              - row [ref=f121e280]:
+                - cell [ref=f121e281]:
+                  - heading "… learning with similarity-based model aggregation - ‎Tan - Cited by 11" [level=3] [ref=f121e282]:
+                    - link [ref=f121e283] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://ieeexplore.ieee.org/abstract/document/10535193/&hl=en&sa=X&ei=U_5PauOqFNGp6rQPnZeeyQo&scisig=AM1tuoNlXPMgOWsQITfLKQahYpKU&oi=scholarr
+                      - generic [ref=f121e284]:
+                        - text: …
+                        - emphasis [ref=f121e285]: learning with similarity
+                        - text: "-"
+                        - emphasis [ref=f121e286]: based model aggregation
+                    - generic [ref=f121e287]:
+                      - text: "-"
+                      - generic [ref=f121e288]: ‎Tan
+                      - text: "- Cited by 11"
+                  - heading "… Projection-Guided Adaptive Aggregation Strategy for … - ‎Chang - Cited by 10" [level=3] [ref=f121e289]:
+                    - link "… Projection-Guided Adaptive Aggregation Strategy for …" [ref=f121e290] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://ieeexplore.ieee.org/abstract/document/11122662/&hl=en&sa=X&ei=U_5PauOqFNGp6rQPnZeeyQo&scisig=AM1tuoOSdIrH2-P5ldDE888nPJp2&oi=scholarr
+                    - generic [ref=f121e291]:
+                      - text: "-"
+                      - generic [ref=f121e292]: ‎Chang
+                      - text: "- Cited by 10"
+          - generic [ref=f121e295]:
+            - heading "Web results" [level=2] [ref=f121e296]
+            - generic [ref=f121e297]:
+              - generic [ref=f121e300]:
+                - link "Secure and Accurate Personalized Federated Learning With ... IEEE Computer Society https://www.computer.org › csdl › journal › 2025/01" [ref=f121e302] [cursor=pointer]:
+                  - /url: https://www.computer.org/csdl/journal/su/2025/01/10535193/1X6bnF8Ezxm
+                  - heading "Secure and Accurate Personalized Federated Learning With ..." [level=3] [ref=f121e303]
+                  - generic [ref=f121e312]:
+                    - generic [ref=f121e313]: IEEE Computer Society
+                    - generic [ref=f121e315]: https://www.computer.org › csdl › journal › 2025/01
+                - button "About this result" [ref=f121e319] [cursor=pointer]
+              - generic [ref=f121e326]:
+                - text: Secure and Accurate Personalized
+                - emphasis [ref=f121e327]: Federated Learning With Similarity-Based Model Aggregation
+                - text: ". Jan.-Feb. 2025, pp. 132-145, vol. 10. DOI Bookmark: 10.1109/TSUSC ..."
+          - generic [ref=f121e331]:
+            - generic [ref=f121e334]:
+              - link "Secure and Accurate Personalized Federated Learning With ... ResearchGate https://www.researchgate.net › ... › Federalism" [ref=f121e336] [cursor=pointer]:
+                - /url: https://www.researchgate.net/publication/380746607_Secure_and_accurate_personalized_federated_learning_with_similarity-based_model_aggregation
+                - heading "Secure and Accurate Personalized Federated Learning With ..." [level=3] [ref=f121e337]
+                - generic [ref=f121e343]:
+                  - generic [ref=f121e344]: ResearchGate
+                  - generic [ref=f121e346]: https://www.researchgate.net › ... › Federalism
+              - button "About this result" [ref=f121e350] [cursor=pointer]
+            - generic [ref=f121e357]:
+              - text: Secure and Accurate Personalized
+              - emphasis [ref=f121e358]: Federated Learning With Similarity-Based Model Aggregation
+              - text: . January 2024; IEEE Transactions on Sustainable Computing PP(99):1 ...
+          - generic [ref=f121e362]:
+            - generic [ref=f121e365]:
+              - link "Secure and accurate personalized federated learning with ... IEEE Xplore https://ieeexplore.ieee.org › iel7" [ref=f121e367] [cursor=pointer]:
+                - /url: https://ieeexplore.ieee.org/iel7/7274860/7742329/10535193.pdf
+                - heading "Secure and accurate personalized federated learning with ..." [level=3] [ref=f121e368]
+                - generic [ref=f121e377]:
+                  - generic [ref=f121e378]: IEEE Xplore
+                  - generic [ref=f121e380]: https://ieeexplore.ieee.org › iel7
+              - button "About this result" [ref=f121e384] [cursor=pointer]
+            - generic [ref=f121e389]:
+              - generic [ref=f121e390]:
+                - generic [ref=f121e391]: by Z Tan · 2024 · Cited by 11 —
+                - text: Abstract—Personalized federated learning (PFL) combines client needs and data characteristics to train personalized models for local clients.
+                - link "Read more" [ref=f121e392] [cursor=pointer]:
+                  - /url: https://ieeexplore.ieee.org/iel7/7274860/7742329/10535193.pdf#:~:text=Abstract%E2%80%94Personalized%20federated%20learning%20(PFL)%20combines,clients.
+              - generic [ref=f121e393]: 14 pages
+          - generic [ref=f121e397]:
+            - generic [ref=f121e400]:
+              - link "Junqing Le DBLP https://dblp.org › Persons" [ref=f121e402] [cursor=pointer]:
+                - /url: https://dblp.org/pid/196/5835
+                - heading "Junqing Le" [level=3] [ref=f121e403]
+                - generic [ref=f121e409]:
+                  - generic [ref=f121e410]: DBLP
+                  - generic [ref=f121e412]: https://dblp.org › Persons
+              - button "About this result" [ref=f121e416] [cursor=pointer]
+            - generic [ref=f121e422]:
+              - generic [ref=f121e423]: Apr 3, 2026 —
+              - generic [ref=f121e424]:
+                - text: Secure and Accurate Personalized
+                - emphasis [ref=f121e425]: Federated Learning With Similarity-Based Model Aggregation
+                - text: ". IEEE Trans. Sustain. Comput. 10(1): 132-145 ..."
+              - link "Read more" [ref=f121e426] [cursor=pointer]:
+                - /url: https://dblp.org/pid/196/5835#:~:text=Secure%20and%20Accurate%20Personalized%20Federated,Sustain.%20Comput.%2010(1)%3A%20132%2D145%20(2025)
+          - generic [ref=f121e430]:
+            - generic [ref=f121e433]:
+              - 'link "APDP-FL: Personalized Federated Learning Based on ... MDPI https://www.mdpi.com › ..." [ref=f121e435] [cursor=pointer]':
+                - /url: https://www.mdpi.com/2073-8994/17/12/2023
+                - 'heading "APDP-FL: Personalized Federated Learning Based on ..." [level=3] [ref=f121e436]'
+                - generic [ref=f121e442]:
+                  - generic [ref=f121e443]: MDPI
+                  - generic [ref=f121e445]: https://www.mdpi.com › ...
+              - button "About this result" [ref=f121e449] [cursor=pointer]
+            - generic [ref=f121e455]:
+              - generic [ref=f121e456]: by F Guo · 2025 · Cited by 2 —
+              - generic [ref=f121e457]:
+                - text: Secure and accurate personalized
+                - emphasis [ref=f121e458]: federated learning with similarity-based model aggregation
+                - text: . IEEE Trans. Sustain. Comput. 2024, 10, 132–145. [Google Scholar] ...
+              - link "Read more" [ref=f121e459] [cursor=pointer]:
+                - /url: https://www.mdpi.com/2073-8994/17/12/2023#:~:text=Secure%20and%20accurate%20personalized%20federated,10%2C%20132%E2%80%93145.%20%5BGoogle%20Scholar%5D%20%5BCrossRef%5D
+          - generic [ref=f121e463]:
+            - generic [ref=f121e466]:
+              - link "Secure and Accurate Personalized Federated Learning ... ScienceON https://scienceon.kisti.re.kr › srch" [ref=f121e468] [cursor=pointer]:
+                - /url: https://scienceon.kisti.re.kr/srch/selectPORSrchArticle.do?cn=NART133834330
+                - heading "Secure and Accurate Personalized Federated Learning ..." [level=3] [ref=f121e469]
+                - generic [ref=f121e475]:
+                  - generic [ref=f121e476]: ScienceON
+                  - generic [ref=f121e478]: https://scienceon.kisti.re.kr › srch
+              - generic [ref=f121e480]:
+                - generic [ref=f121e481]: ·
+                - link "Translate this page" [ref=f121e482] [cursor=pointer]:
+                  - /url: https://scienceon.kisti.re.kr/srch/selectPORSrchArticle.do?cn=NART133834330
+              - button "About this result" [ref=f121e485] [cursor=pointer]
+            - generic [ref=f121e491]:
+              - generic [ref=f121e492]:
+                - text: Secure and Accurate Personalized
+                - emphasis [ref=f121e493]: Federated Learning With Similarity-Based Model Aggregation
+                - text: . Ieee transactions on sustainable computing, v.10 no.1, 2025년, ...
+              - link "Read more" [ref=f121e494] [cursor=pointer]:
+                - /url: https://scienceon.kisti.re.kr/srch/selectPORSrchArticle.do?cn=NART133834330#:~:text=Secure%20and%20Accurate%20Personalized%20Federated,computing%2C%20v.10%20no.1%2C%202025%EB%85%84%2C%20pp.
+          - generic [ref=f121e498]:
+            - generic [ref=f121e501]:
+              - link "A hybrid and efficient Federated Learning for privacy ... ACM Digital Library https://dl.acm.org › doi › j.adhoc.2025.103761" [ref=f121e503] [cursor=pointer]:
+                - /url: https://dl.acm.org/doi/10.1016/j.adhoc.2025.103761
+                - heading "A hybrid and efficient Federated Learning for privacy ..." [level=3] [ref=f121e504]
+                - generic [ref=f121e510]:
+                  - generic [ref=f121e511]: ACM Digital Library
+                  - generic [ref=f121e513]: https://dl.acm.org › doi › j.adhoc.2025.103761
+              - button "About this result" [ref=f121e517] [cursor=pointer]
+            - generic [ref=f121e523]:
+              - generic [ref=f121e524]: by S Cao · 2025 · Cited by 17 —
+              - generic [ref=f121e525]:
+                - text: ...
+                - emphasis [ref=f121e526]: federated learning with similarity-based model aggregation
+                - text: ", IEEE Trans. Sustain. Comput. (2024). Google Scholar. [33]. Swanand Kadhe, Nived ..."
+              - link "Read more" [ref=f121e527] [cursor=pointer]:
+                - /url: https://dl.acm.org/doi/10.1016/j.adhoc.2025.103761#:~:text=Show%20all%20references
+          - generic [ref=f121e532]:
+            - heading "People also ask" [level=2] [ref=f121e534]
+            - generic [ref=f121e535]:
+              - button "What is model aggregation techniques in federated learning?" [ref=f121e541] [cursor=pointer]
+              - button "What is the function of aggregation in federated learning?" [ref=f121e555] [cursor=pointer]
+              - button "What are the limitations of federated learning?" [ref=f121e569] [cursor=pointer]
+              - button "What is the best framework for federated learning?" [ref=f121e583] [cursor=pointer]
+          - generic [ref=f121e593]:
+            - heading "Web results" [level=2] [ref=f121e594]
+            - generic [ref=f121e595]:
+              - generic [ref=f121e598]:
+                - link "Xiaofeng Liao Phd\\D Professor (Full) at Chongqing University ResearchGate https://www.researchgate.net › Chongqing University" [ref=f121e600] [cursor=pointer]:
+                  - /url: https://www.researchgate.net/profile/Xiaofeng-Liao-4
+                  - heading "Xiaofeng Liao Phd\\D Professor (Full) at Chongqing University" [level=3] [ref=f121e601]
+                  - generic [ref=f121e607]:
+                    - generic [ref=f121e608]: ResearchGate
+                    - generic [ref=f121e610]: https://www.researchgate.net › Chongqing University
+                - button "About this result" [ref=f121e614] [cursor=pointer]
+              - generic [ref=f121e620]:
+                - generic [ref=f121e621]:
+                  - text: To ensure privacy security, combining information sec... View · Secure and Accurate Personalized
+                  - emphasis [ref=f121e622]: Federated Learning With Similarity-Based Model Aggregation
+                  - text: .
+                - link "Read more" [ref=f121e623] [cursor=pointer]:
+                  - /url: https://www.researchgate.net/profile/Xiaofeng-Liao-4#:~:text=To%20ensure%20privacy%20security%2C%20combining,Learning%20With%20Similarity%2DBased%20Model%20Aggregation
+        - navigation [ref=f121e626]:
+          - heading "Page Navigation" [level=1] [ref=f121e627]
+          - text: "1"
+          - link "Page 2" [ref=f121e630] [cursor=pointer]:
+            - /url: /search?q=%22Federated+Learning+with+Similarity-based+Model+Aggregation%22&sca_esv=30a5fb343c9df574&ei=U_5PapDBDd6ekPIP_oG46As&start=10&sa=N&sstk=AU9db-DHS6-nl-GgR5gt_izslulgDtRlfawKfFhD45iIHq3cZCtPDfNwJ5Uw9uEyHBcT4MKxWC4hE0f65vTfpq6uhv44bA_oS_kEsw&ved=2ahUKEwjQtsXTscaVAxVeD0QIHf4ADr0Q8tMDegQIVBAE
+            - text: "2"
+          - link "Page 3" [ref=f121e632] [cursor=pointer]:
+            - /url: /search?q=%22Federated+Learning+with+Similarity-based+Model+Aggregation%22&sca_esv=30a5fb343c9df574&ei=U_5PapDBDd6ekPIP_oG46As&start=20&sa=N&sstk=AU9db-DHS6-nl-GgR5gt_izslulgDtRlfawKfFhD45iIHq3cZCtPDfNwJ5Uw9uEyHBcT4MKxWC4hE0f65vTfpq6uhv44bA_oS_kEsw&ved=2ahUKEwjQtsXTscaVAxVeD0QIHf4ADr0Q8tMDegQIVBAG
+            - text: "3"
+          - link "Page 4" [ref=f121e634] [cursor=pointer]:
+            - /url: /search?q=%22Federated+Learning+with+Similarity-based+Model+Aggregation%22&sca_esv=30a5fb343c9df574&ei=U_5PapDBDd6ekPIP_oG46As&start=30&sa=N&sstk=AU9db-DHS6-nl-GgR5gt_izslulgDtRlfawKfFhD45iIHq3cZCtPDfNwJ5Uw9uEyHBcT4MKxWC4hE0f65vTfpq6uhv44bA_oS_kEsw&ved=2ahUKEwjQtsXTscaVAxVeD0QIHf4ADr0Q8tMDegQIVBAI
+            - text: "4"
+          - heading [level=2] [ref=f121e636]:
+            - link "Next" [ref=f121e637] [cursor=pointer]:
+              - /url: /search?q=%22Federated+Learning+with+Similarity-based+Model+Aggregation%22&sca_esv=30a5fb343c9df574&ei=U_5PapDBDd6ekPIP_oG46As&start=10&sa=N&sstk=AU9db-DHS6-nl-GgR5gt_izslulgDtRlfawKfFhD45iIHq3cZCtPDfNwJ5Uw9uEyHBcT4MKxWC4hE0f65vTfpq6uhv44bA_oS_kEsw&ved=2ahUKEwjQtsXTscaVAxVeD0QIHf4ADr0Q8NMDegQIVBAK
+        - navigation
+    - contentinfo [ref=f121e640]:
+      - heading "Footer Links" [level=1] [ref=f121e641]
+      - generic [ref=f121e645]:
+        - generic [ref=f121e649]:
+          - button "Woodland, California - From your IP address" [ref=f121e651] [cursor=pointer]:
+            - generic [ref=f121e652]: Woodland, California
+            - generic [ref=f121e654]:
+              - text: "-"
+              - generic [ref=f121e655]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f121e657] [cursor=pointer]
+        - generic [ref=f121e660]:
+          - link "Help" [ref=f121e661] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f121e662] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f121e663] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f121e664] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

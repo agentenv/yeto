@@ -1,0 +1,373 @@
+- generic [active] [ref=f13e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f13e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f13e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f13e8]:
+    - search [ref=f13e9]:
+      - generic [ref=f13e11]:
+        - link "Go to Google Home" [ref=f13e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQPAgI
+        - generic [ref=f13e21]:
+          - generic [ref=f13e22]:
+            - combobox "Search" [ref=f13e25]: stochastic Armijo backtracking line search deep learning paper stochastic Armijo backtracking line search deep learning paper
+            - generic [ref=f13e26]:
+              - button "Clear" [ref=f13e28] [cursor=pointer]
+              - generic [ref=f13e33]:
+                - button "Search by voice" [ref=f13e34] [cursor=pointer]
+                - button "Search by image" [ref=f13e37] [cursor=pointer]
+          - button "Search" [ref=f13e40] [cursor=pointer]
+    - generic [ref=f13e45]:
+      - button "Settings" [ref=f13e47] [cursor=pointer]
+      - button "Share" [ref=f13e53] [cursor=pointer]
+      - generic [ref=f13e59]:
+        - button "Google apps" [ref=f13e61] [cursor=pointer]
+        - link "Sign in" [ref=f13e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3Dstochastic%2BArmijo%2Bbacktracking%2Bline%2Bsearch%2Bdeep%2Blearning%2Bpaper&ec=futura_srp_og_si_72236_p
+  - generic [ref=f13e68]:
+    - navigation [ref=f13e74]:
+      - generic [ref=f13e80]:
+        - list [ref=f13e81]:
+          - listitem [ref=f13e82]:
+            - link "AI Mode" [ref=f13e85] [cursor=pointer]:
+              - /url: /search?q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&sca_esv=d4e925c21a8887a9&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&aep=1&ntc=1&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ2J8OegQIBxAD
+          - listitem [ref=f13e89]:
+            - link "All" [disabled] [ref=f13e90]
+          - listitem [ref=f13e93]:
+            - link "Videos" [ref=f13e94] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQtKgLegQIMhAB
+          - listitem [ref=f13e97]:
+            - link "Images" [ref=f13e98] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQtKgLegQIKRAB
+          - listitem [ref=f13e101]:
+            - link "Forums" [ref=f13e102] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQs6gLegQIHxAB
+          - listitem [ref=f13e105]:
+            - link "Shopping" [ref=f13e106] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&ved=1t:220175&ictx=111
+          - listitem [ref=f13e109]:
+            - link "Short videos" [ref=f13e110] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKE-Dsslc-KGKq55jF_BVsFlCZ_qea3ZQNMU_L5SWbG8ROva_LKGdZoPsB7f_pNLAVJWp9IQ1GSOPaLf6lQXFiNaz6dOgmooJUYsFr31d5CoJGkaF3G9t-FAQ5RTDLyRhMJl-BYIs3ZqfWMtD5drQaDN0-5MATJU4ED20yVcqCIiIckAnUrA&q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQs6gLegQIHBAB
+          - listitem [ref=f13e113]:
+            - button [ref=f13e114] [cursor=pointer]:
+              - generic "More filters" [ref=f13e115]: More
+        - button "Tools" [ref=f13e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f13e129]
+    - main [ref=f13e135]:
+      - generic [ref=f13e139]:
+        - table [ref=f13e145]:
+          - rowgroup [ref=f13e146]:
+            - row [ref=f13e147]:
+              - cell [ref=f13e148]:
+                - heading [level=3] [ref=f13e149]:
+                  - link [ref=f13e150] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar?q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                    - generic [ref=f13e151]:
+                      - text: Scholarly articles for
+                      - emphasis [ref=f13e152]: stochastic Armijo backtracking line search deep learning paper
+            - row [ref=f13e153]:
+              - cell [ref=f13e154]:
+                - heading "Adaptive backtracking line search - ‎Cavalcanti - Cited by 3" [level=3] [ref=f13e155]:
+                  - link [ref=f13e156] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2408.13150&hl=en&sa=X&ei=qfZPavGEF-bXieoPtYTbiA4&scisig=AM1tuoOYsEv-xaeX5xESKui-ygkW&oi=scholarr
+                    - generic [ref=f13e157]:
+                      - text: Adaptive
+                      - emphasis [ref=f13e158]: backtracking line search
+                  - generic [ref=f13e159]:
+                    - text: "-"
+                    - generic [ref=f13e160]: ‎Cavalcanti
+                    - text: "- Cited by 3"
+                - heading "Stochastic adaptive line search for differentially private … - ‎Chen - Cited by 26" [level=3] [ref=f13e161]:
+                  - link [ref=f13e162] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2008.07978&hl=en&sa=X&ei=qfZPavGEF-bXieoPtYTbiA4&scisig=AM1tuoMafpYquxfBwpRIfTpA_ici&oi=scholarr
+                    - generic [ref=f13e163]:
+                      - emphasis [ref=f13e164]: Stochastic
+                      - text: adaptive
+                      - emphasis [ref=f13e165]: line search
+                      - text: for differentially private …
+                  - generic [ref=f13e166]:
+                    - text: "-"
+                    - generic [ref=f13e167]: ‎Chen
+                    - text: "- Cited by 26"
+                - heading "Adaptive backtracking for faster optimization - ‎Cavalcanti - Cited by 6" [level=3] [ref=f13e168]:
+                  - link [ref=f13e169] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://proceedings.iclr.cc/paper_files/paper/2025/file/fee20f7ca858e3acfb8e5ae641ee69a3-Paper-Conference.pdf&hl=en&sa=X&ei=qfZPavGEF-bXieoPtYTbiA4&scisig=AM1tuoMNHL5gl2J9GRiRiA9fdl37&oi=scholarr
+                    - generic [ref=f13e170]:
+                      - text: Adaptive
+                      - emphasis [ref=f13e171]: backtracking
+                      - text: for faster optimization
+                  - generic [ref=f13e172]:
+                    - text: "-"
+                    - generic [ref=f13e173]: ‎Cavalcanti
+                    - text: "- Cited by 6"
+        - generic [ref=f13e176]:
+          - heading "Web results" [level=2] [ref=f13e177]
+          - generic [ref=f13e178]:
+            - generic [ref=f13e181]:
+              - link "Improving Line Search Methods for Large Scale Neural ... arXiv https://arxiv.org › html" [ref=f13e183] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2403.18519v1
+                - heading "Improving Line Search Methods for Large Scale Neural ..." [level=3] [ref=f13e184]
+                - generic [ref=f13e190]:
+                  - generic [ref=f13e191]: arXiv
+                  - generic [ref=f13e193]: https://arxiv.org › html
+              - button "About this result" [ref=f13e197] [cursor=pointer]
+            - generic [ref=f13e203]:
+              - generic [ref=f13e204]: Mar 27, 2024 —
+              - generic [ref=f13e205]:
+                - text: In this
+                - emphasis [ref=f13e206]: paper
+                - text: ", we identify existing issues in state-of-the-art"
+                - emphasis [ref=f13e207]: line search
+                - text: methods, propose enhancements, and rigorously evaluate their effectiveness.
+              - link "Read more" [ref=f13e208] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2403.18519v1#:~:text=In%20this%20paper%2C%20we%20identify,and%20rigorously%20evaluate%20their%20effectiveness.
+        - generic [ref=f13e212]:
+          - generic [ref=f13e215]:
+            - 'link "Painless Stochastic Gradient: Interpolation, Line-Search, ... NeurIPS 2026 http://papers.neurips.cc › paper › 8630-painless-s..." [ref=f13e217] [cursor=pointer]':
+              - /url: http://papers.neurips.cc/paper/8630-painless-stochastic-gradient-interpolation-line-search-and-convergence-rates.pdf
+              - 'heading "Painless Stochastic Gradient: Interpolation, Line-Search, ..." [level=3] [ref=f13e218]'
+              - generic [ref=f13e224]:
+                - generic [ref=f13e225]: NeurIPS 2026
+                - generic [ref=f13e227]: http://papers.neurips.cc › paper › 8630-painless-s...
+            - generic [ref=f13e229]: PDF
+            - button "About this result" [ref=f13e232] [cursor=pointer]
+          - generic [ref=f13e237]:
+            - generic [ref=f13e238]:
+              - generic [ref=f13e239]: by S Vaswani · Cited by 307 —
+              - generic [ref=f13e240]:
+                - text: In the interpolation setting, we prove that SGD with a
+                - emphasis [ref=f13e241]: stochastic
+                - text: variant of the classic
+                - emphasis [ref=f13e242]: Armijo line
+                - text: "-"
+                - emphasis [ref=f13e243]: search
+                - text: attains the deterministic convergence rates for both.
+              - link "Read more" [ref=f13e244] [cursor=pointer]:
+                - /url: http://papers.neurips.cc/paper/8630-painless-stochastic-gradient-interpolation-line-search-and-convergence-rates.pdf#:~:text=In%20the%20interpolation%20setting%2C%20we,deterministic%20convergence%20rates%20for%20both
+            - generic [ref=f13e245]: 14 pages
+        - generic [ref=f13e249]:
+          - generic [ref=f13e252]:
+            - link "Armijo Line-search Can Make (Stochastic) Gradient ... OpenReview https://openreview.net › forum" [ref=f13e254] [cursor=pointer]:
+              - /url: https://openreview.net/forum?id=LKQIS65fgd&noteId=SgKjv9ugFB
+              - heading "Armijo Line-search Can Make (Stochastic) Gradient ..." [level=3] [ref=f13e255]
+              - generic [ref=f13e261]:
+                - generic [ref=f13e262]: OpenReview
+                - generic [ref=f13e264]: https://openreview.net › forum
+            - button "About this result" [ref=f13e268] [cursor=pointer]
+          - generic [ref=f13e274]:
+            - generic [ref=f13e275]:
+              - text: "TL;DR: Using"
+              - emphasis [ref=f13e276]: Armijo line
+              - text: "-"
+              - emphasis [ref=f13e277]: search
+              - text: can lead to exponential improvements in the gradient descent convergence rate for problems such as logistic regression and ...
+            - link "Read more" [ref=f13e278] [cursor=pointer]:
+              - /url: https://openreview.net/forum?id=LKQIS65fgd&noteId=SgKjv9ugFB#:~:text=TL%3BDR%3A%20Using%20Armijo%20line%2Dsearch%20can,policy%20optimization%20in%20reinforcement%20learning.
+        - generic [ref=f13e282]:
+          - generic [ref=f13e285]:
+            - link "Armijo Line-search Makes (Stochastic) Gradient Descent ... arXiv https://arxiv.org › html" [ref=f13e287] [cursor=pointer]:
+              - /url: https://arxiv.org/html/2503.00229v1
+              - heading "Armijo Line-search Makes (Stochastic) Gradient Descent ..." [level=3] [ref=f13e288]
+              - generic [ref=f13e294]:
+                - generic [ref=f13e295]: arXiv
+                - generic [ref=f13e297]: https://arxiv.org › html
+            - button "About this result" [ref=f13e301] [cursor=pointer]
+          - generic [ref=f13e307]:
+            - generic [ref=f13e308]:
+              - emphasis [ref=f13e309]: Armijo line-search (Armijo-LS
+              - text: ) is a standard method to set the step-size for gradient descent (GD). For smooth functions, Armijo-LS alleviates the need to know ...
+            - link "Read more" [ref=f13e310] [cursor=pointer]:
+              - /url: https://arxiv.org/html/2503.00229v1#:~:text=Armijo%20line%2Dsearch%20(Armijo%2DLS)%20is%20a,know%20the%20global%20smoothness%20constant
+        - generic [ref=f13e314]:
+          - generic [ref=f13e317]:
+            - link "Armijo Line-search Can Make (Stochastic) Gradient Descent ... GitHub https://raw.githubusercontent.com › main › assets" [ref=f13e319] [cursor=pointer]:
+              - /url: https://raw.githubusercontent.com/mlresearch/v267/main/assets/vaswani25a/vaswani25a.pdf
+              - heading "Armijo Line-search Can Make (Stochastic) Gradient Descent ..." [level=3] [ref=f13e320]
+              - generic [ref=f13e326]:
+                - generic [ref=f13e327]: GitHub
+                - generic [ref=f13e329]: https://raw.githubusercontent.com › main › assets
+            - generic [ref=f13e331]: PDF
+            - button "About this result" [ref=f13e334] [cursor=pointer]
+          - generic [ref=f13e340]:
+            - generic [ref=f13e341]: by S Vaswani · Cited by 8 —
+            - generic [ref=f13e342]:
+              - emphasis [ref=f13e343]: Backtracking Armijo line
+              - text: "-"
+              - emphasis [ref=f13e344]: search
+              - text: (
+              - emphasis [ref=f13e345]: Armijo
+              - text: ",. 1966; Nocedal & Wright, 2006) ... This"
+              - emphasis [ref=f13e346]: paper
+              - text: presents work whose goal is to advance the field of
+              - emphasis [ref=f13e347]: Machine Learning
+              - text: .
+            - link "Read more" [ref=f13e348] [cursor=pointer]:
+              - /url: https://raw.githubusercontent.com/mlresearch/v267/main/assets/vaswani25a/vaswani25a.pdf#:~:text=Backtracking%20Armijo%20line%2Dsearch%20(Armijo%2C,2006)%20(referred%20to%20as%20Armijo%2DLS)&text=This%20paper%20presents%20work%20whose,of%20Machine%20Learning.
+        - generic [ref=f13e352]:
+          - generic [ref=f13e355]:
+            - link "Armijo Line-search Can Make (Stochastic) Gradient ... ICML 2026 https://icml.cc › virtual › poster" [ref=f13e357] [cursor=pointer]:
+              - /url: https://icml.cc/virtual/2025/poster/45597
+              - heading "Armijo Line-search Can Make (Stochastic) Gradient ..." [level=3] [ref=f13e358]
+              - generic [ref=f13e364]:
+                - generic [ref=f13e365]: ICML 2026
+                - generic [ref=f13e367]: https://icml.cc › virtual › poster
+            - button "About this result" [ref=f13e371] [cursor=pointer]
+          - generic [ref=f13e377]:
+            - generic [ref=f13e378]:
+              - text: We prove that under the interpolation assumption, for convex losses,
+              - emphasis [ref=f13e379]: stochastic
+              - text: GD with a
+              - emphasis [ref=f13e380]: stochastic line
+              - text: "-"
+              - emphasis [ref=f13e381]: search
+              - text: can match the fast convergence of GD-LS.
+            - link "Read more" [ref=f13e382] [cursor=pointer]:
+              - /url: https://icml.cc/virtual/2025/poster/45597#:~:text=Show%20more
+        - generic [ref=f13e386]:
+          - generic [ref=f13e389]:
+            - link "Backtracking Line Search | PDF Scribd https://www.scribd.com › document › Backtracking-Lin..." [ref=f13e391] [cursor=pointer]:
+              - /url: https://www.scribd.com/document/645777767/Backtracking-Line-Search
+              - heading "Backtracking Line Search | PDF" [level=3] [ref=f13e392]
+              - generic [ref=f13e398]:
+                - generic [ref=f13e399]: Scribd
+                - generic [ref=f13e401]: https://www.scribd.com › document › Backtracking-Lin...
+            - button "About this result" [ref=f13e405] [cursor=pointer]
+          - generic [ref=f13e411]:
+            - generic [ref=f13e412]:
+              - emphasis [ref=f13e413]: Backtracking line search converges well under Armijo's condition
+              - text: but can be more computationally expensive than adaptive methods, which may not maintain descent ...
+            - link "Read more" [ref=f13e414] [cursor=pointer]:
+              - /url: https://www.scribd.com/document/645777767/Backtracking-Line-Search#:~:text=Backtracking%20line%20search%20converges%20well,properties%20without%20careful%20tuning%20.
+        - generic [ref=f13e418]:
+          - generic [ref=f13e421]:
+            - link "Complexities of Armijo-like algorithms in Deep Learning ... Archive ouverte HAL https://hal.science › document" [ref=f13e423] [cursor=pointer]:
+              - /url: https://hal.science/hal-04847236v1/document
+              - heading "Complexities of Armijo-like algorithms in Deep Learning ..." [level=3] [ref=f13e424]
+              - generic [ref=f13e430]:
+                - generic [ref=f13e431]: Archive ouverte HAL
+                - generic [ref=f13e433]: https://hal.science › document
+            - generic [ref=f13e435]: PDF
+            - button "About this result" [ref=f13e438] [cursor=pointer]
+          - generic [ref=f13e444]:
+            - generic [ref=f13e445]: Dec 18, 2024 —
+            - generic [ref=f13e446]:
+              - text: Abstract The classical
+              - emphasis [ref=f13e447]: Armijo backtracking
+              - text: algorithm [4] achieves the op- timal complexity for smooth functions like gradient descent but ...
+            - link "Read more" [ref=f13e448] [cursor=pointer]:
+              - /url: https://hal.science/hal-04847236v1/document#:~:text=Abstract%20The%20classical%20Armijo%20backtracking,gradient%20descent%20but%20without%20any
+        - generic [ref=f13e452]:
+          - generic [ref=f13e455]:
+            - 'link "MSL: An Adaptive Momentum-based Stochastic Line- ... OpenReview https://openreview.net › pdf" [ref=f13e457] [cursor=pointer]':
+              - /url: https://openreview.net/pdf?id=UfvQbl7Kpx
+              - 'heading "MSL: An Adaptive Momentum-based Stochastic Line- ..." [level=3] [ref=f13e458]'
+              - generic [ref=f13e464]:
+                - generic [ref=f13e465]: OpenReview
+                - generic [ref=f13e467]: https://openreview.net › pdf
+            - generic [ref=f13e469]: PDF
+            - button "About this result" [ref=f13e472] [cursor=pointer]
+          - generic [ref=f13e478]:
+            - generic [ref=f13e479]: by C Fan · Cited by 4 —
+            - generic [ref=f13e480]:
+              - text: A popular example is
+              - emphasis [ref=f13e481]: back-tracking line-search based on a stochastic Armijo condition
+              - text: . But the success of this strategy relies crucially on the search ...
+            - link "Read more" [ref=f13e482] [cursor=pointer]:
+              - /url: https://openreview.net/pdf?id=UfvQbl7Kpx#:~:text=A%20popular%20example%20is%20back%2Dtracking,direction%20being%20a%20descent%20direction.
+        - generic [ref=f13e486]:
+          - generic [ref=f13e489]:
+            - link "a stochastic line search method with expected complexity ... NSF Public Access Repository (.gov) https://par.nsf.gov › servlets › purl" [ref=f13e491] [cursor=pointer]:
+              - /url: https://par.nsf.gov/servlets/purl/10208765
+              - heading "a stochastic line search method with expected complexity ..." [level=3] [ref=f13e492]
+              - generic [ref=f13e501]:
+                - generic [ref=f13e502]: NSF Public Access Repository (.gov)
+                - generic [ref=f13e504]: https://par.nsf.gov › servlets › purl
+            - generic [ref=f13e506]: PDF
+            - button "About this result" [ref=f13e509] [cursor=pointer]
+          - generic [ref=f13e515]:
+            - generic [ref=f13e516]: by C Paquette · 2020 · Cited by 162 —
+            - generic [ref=f13e517]:
+              - text: Here we adapt a classical
+              - emphasis [ref=f13e518]: backtracking Armijo line search
+              - text: to the
+              - emphasis [ref=f13e519]: stochastic
+              - text: optimization setting. While traditional
+              - emphasis [ref=f13e520]: line search
+              - text: relies on exact computations of.
+            - link "Read more" [ref=f13e521] [cursor=pointer]:
+              - /url: https://par.nsf.gov/servlets/purl/10208765#:~:text=Here%20we%20adapt%20a%20classical,relies%20on%20exact%20computations%20of
+          - generic [ref=f13e523]:
+            - text: "Missing: deep ‎| Show results with:"
+            - link "deep" [ref=f13e524] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&q=stochastic+Armijo+backtracking+line+search+%22deep%22+learning+paper&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ5t4CegQINhAB
+      - generic [ref=f13e526]:
+        - generic [ref=f13e531]:
+          - heading "People also search for" [level=2] [ref=f13e533]
+          - generic [ref=f13e535]:
+            - generic [ref=f13e536]:
+              - link "Stochastic armijo backtracking line search deep learning paper pdf" [ref=f13e540] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Stochastic+armijo+backtracking+line+search+deep+learning+paper+pdf&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ1QJ6BAgIEAE
+              - link "Stochastic armijo backtracking line search deep learning paper example" [ref=f13e554] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Stochastic+armijo+backtracking+line+search+deep+learning+paper+example&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ1QJ6BAgbEAE
+              - link "Stochastic armijo backtracking line search deep learning paper python" [ref=f13e568] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Stochastic+armijo+backtracking+line+search+deep+learning+paper+python&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ1QJ6BAgaEAE
+              - link "Stochastic armijo backtracking line search deep learning paper github" [ref=f13e582] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Stochastic+armijo+backtracking+line+search+deep+learning+paper+github&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ1QJ6BAgYEAE
+            - generic [ref=f13e593]:
+              - link "Armijo line search" [ref=f13e597] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Armijo+line+search&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ1QJ6BAgNEAE
+              - link "Armijo condition formula" [ref=f13e611] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Armijo+condition+formula&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ1QJ6BAgLEAE
+              - link "Adaptive backtracking line search" [ref=f13e625] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Adaptive+backtracking+line+search&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ1QJ6BAgKEAE
+              - link "Backtracking line search python" [ref=f13e639] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Backtracking+line+search+python&sa=X&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ1QJ6BAgJEAE
+        - navigation [ref=f13e650]:
+          - heading "Page Navigation" [level=1] [ref=f13e651]
+          - text: "1"
+          - link "Page 2" [ref=f13e654] [cursor=pointer]:
+            - /url: /search?q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&sca_esv=d4e925c21a8887a9&ei=qfZPaqOHDv3TkPIPtpn2sQI&start=10&sa=N&sstk=AU9db-COb6MQXfJLBTbGPR8EpQEyytC_81f1n0CF6wVw_1aEQDHpEvmxApKTNF_-ZweDVdCrIsYeMyI6wXnMFLPyOaq_IU0vfm2eeA&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ8tMDegQISRAE
+            - text: "2"
+          - link "Page 3" [ref=f13e656] [cursor=pointer]:
+            - /url: /search?q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&sca_esv=d4e925c21a8887a9&ei=qfZPaqOHDv3TkPIPtpn2sQI&start=20&sa=N&sstk=AU9db-COb6MQXfJLBTbGPR8EpQEyytC_81f1n0CF6wVw_1aEQDHpEvmxApKTNF_-ZweDVdCrIsYeMyI6wXnMFLPyOaq_IU0vfm2eeA&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ8tMDegQISRAG
+            - text: "3"
+          - link "Page 4" [ref=f13e658] [cursor=pointer]:
+            - /url: /search?q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&sca_esv=d4e925c21a8887a9&ei=qfZPaqOHDv3TkPIPtpn2sQI&start=30&sa=N&sstk=AU9db-COb6MQXfJLBTbGPR8EpQEyytC_81f1n0CF6wVw_1aEQDHpEvmxApKTNF_-ZweDVdCrIsYeMyI6wXnMFLPyOaq_IU0vfm2eeA&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ8tMDegQISRAI
+            - text: "4"
+          - link "Page 5" [ref=f13e660] [cursor=pointer]:
+            - /url: /search?q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&sca_esv=d4e925c21a8887a9&ei=qfZPaqOHDv3TkPIPtpn2sQI&start=40&sa=N&sstk=AU9db-COb6MQXfJLBTbGPR8EpQEyytC_81f1n0CF6wVw_1aEQDHpEvmxApKTNF_-ZweDVdCrIsYeMyI6wXnMFLPyOaq_IU0vfm2eeA&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ8tMDegQISRAK
+            - text: "5"
+          - link "Page 6" [ref=f13e662] [cursor=pointer]:
+            - /url: /search?q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&sca_esv=d4e925c21a8887a9&ei=qfZPaqOHDv3TkPIPtpn2sQI&start=50&sa=N&sstk=AU9db-COb6MQXfJLBTbGPR8EpQEyytC_81f1n0CF6wVw_1aEQDHpEvmxApKTNF_-ZweDVdCrIsYeMyI6wXnMFLPyOaq_IU0vfm2eeA&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ8tMDegQISRAM
+            - text: "6"
+          - link "Page 7" [ref=f13e664] [cursor=pointer]:
+            - /url: /search?q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&sca_esv=d4e925c21a8887a9&ei=qfZPaqOHDv3TkPIPtpn2sQI&start=60&sa=N&sstk=AU9db-COb6MQXfJLBTbGPR8EpQEyytC_81f1n0CF6wVw_1aEQDHpEvmxApKTNF_-ZweDVdCrIsYeMyI6wXnMFLPyOaq_IU0vfm2eeA&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ8tMDegQISRAO
+            - text: "7"
+          - link "Page 8" [ref=f13e666] [cursor=pointer]:
+            - /url: /search?q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&sca_esv=d4e925c21a8887a9&ei=qfZPaqOHDv3TkPIPtpn2sQI&start=70&sa=N&sstk=AU9db-COb6MQXfJLBTbGPR8EpQEyytC_81f1n0CF6wVw_1aEQDHpEvmxApKTNF_-ZweDVdCrIsYeMyI6wXnMFLPyOaq_IU0vfm2eeA&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ8tMDegQISRAQ
+            - text: "8"
+          - heading [level=2] [ref=f13e668]:
+            - link "Next" [ref=f13e669] [cursor=pointer]:
+              - /url: /search?q=stochastic+Armijo+backtracking+line+search+deep+learning+paper&sca_esv=d4e925c21a8887a9&ei=qfZPaqOHDv3TkPIPtpn2sQI&start=10&sa=N&sstk=AU9db-COb6MQXfJLBTbGPR8EpQEyytC_81f1n0CF6wVw_1aEQDHpEvmxApKTNF_-ZweDVdCrIsYeMyI6wXnMFLPyOaq_IU0vfm2eeA&ved=2ahUKEwjj__6rqsaVAxX9KUQIHbaMPSYQ8NMDegQISRAS
+      - navigation
+    - contentinfo [ref=f13e672]:
+      - heading "Footer Links" [level=1] [ref=f13e673]
+      - generic [ref=f13e677]:
+        - generic [ref=f13e681]:
+          - button "Woodland, California - From your IP address" [ref=f13e683] [cursor=pointer]:
+            - generic [ref=f13e684]: Woodland, California
+            - generic [ref=f13e686]:
+              - text: "-"
+              - generic [ref=f13e687]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f13e689] [cursor=pointer]
+        - generic [ref=f13e692]:
+          - link "Help" [ref=f13e693] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f13e694] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f13e695] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f13e696] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

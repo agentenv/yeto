@@ -1,0 +1,156 @@
+- generic [active] [ref=f6e1]:
+  - banner [ref=f6e2]:
+    - link "Skip to main content" [ref=f6e3] [cursor=pointer]:
+      - /url: "#main-container"
+    - region "Announcement" [ref=f6e4]:
+      - generic [ref=f6e6]: arXiv is now an independent nonprofit!
+      - link "Learn more" [ref=f6e7] [cursor=pointer]:
+        - /url: https://info.arxiv.org/about
+      - button "Dismiss announcement" [ref=f6e8] [cursor=pointer]: ×
+    - banner [ref=f6e9]:
+      - link "archive home" [ref=f6e10] [cursor=pointer]:
+        - /url: https://arxiv.org/
+        - img "archive" [ref=f6e11]
+      - navigation "Main navigation" [ref=f6e12]:
+        - link "Search" [ref=f6e13] [cursor=pointer]:
+          - /url: /search
+        - link "Submit" [ref=f6e17] [cursor=pointer]:
+          - /url: https://arxiv.org/user/create
+        - link "Donate" [ref=f6e18] [cursor=pointer]:
+          - /url: https://info.arxiv.org/about/donate.html
+        - link "Log in" [ref=f6e20] [cursor=pointer]:
+          - /url: https://arxiv.org/login
+  - main [ref=f6e21]:
+    - generic [ref=f6e22]:
+      - 'heading "Showing 1–1 of 1 results for all: Zeno++: Robust Fully Asynchronous SGD" [level=1] [ref=f6e24]'
+      - link "Search v0.5.6 released 2020-02-24" [ref=f6e27] [cursor=pointer]:
+        - /url: https://github.com/arXiv/arxiv-search/releases
+    - generic [ref=f6e28]:
+      - generic [ref=f6e29]:
+        - generic [ref=f6e30]:
+          - generic [ref=f6e31]:
+            - generic: Search term or terms
+            - textbox "Search term or terms" [ref=f6e32]:
+              - /placeholder: Search term...
+              - text: "Zeno++: Robust Fully Asynchronous SGD"
+          - combobox "Field" [ref=f6e34] [cursor=pointer]:
+            - option "All fields" [selected]
+            - option "Title"
+            - option "Author(s)"
+            - option "Abstract"
+            - option "Comments"
+            - option "Journal reference"
+            - option "ACM classification"
+            - option "MSC classification"
+            - option "Report number"
+            - option "arXiv identifier"
+            - option "DOI"
+            - option "ORCID"
+            - option "License (URI)"
+            - option "arXiv author ID"
+            - option "Help pages"
+            - option "Full text"
+          - button "Search" [ref=f6e36] [cursor=pointer]
+        - generic [ref=f6e38]:
+          - generic [ref=f6e39] [cursor=pointer]:
+            - radio "Show abstracts Show abstracts" [checked] [ref=f6e40]
+            - text: Show abstracts
+          - generic [ref=f6e41] [cursor=pointer]:
+            - radio "Hide abstracts Hide abstracts" [ref=f6e42]
+            - text: Hide abstracts
+        - link "Advanced Search" [ref=f6e45] [cursor=pointer]:
+          - /url: /search/advanced?terms-0-term=Zeno%2B%2B%3A+Robust+Fully+Asynchronous+SGD&terms-0-field=all&size=50&order=-announced_date_first
+      - generic [ref=f6e49]:
+        - generic [ref=f6e50]:
+          - combobox "results per page" [ref=f6e52] [cursor=pointer]:
+            - option "25"
+            - option "50" [selected]
+            - option "100"
+            - option "200"
+          - text: results per page.
+        - generic [ref=f6e53]:
+          - text: Sort results by
+          - combobox "Sort results by" [ref=f6e55] [cursor=pointer]:
+            - option "Announcement date (newest first)" [selected]
+            - option "Announcement date (oldest first)"
+            - option "Submission date (newest first)"
+            - option "Submission date (oldest first)"
+            - option "Relevance"
+        - button "Go" [ref=f6e57] [cursor=pointer]
+      - list [ref=f6e58]:
+        - listitem [ref=f6e59]:
+          - generic [ref=f6e60]:
+            - paragraph [ref=f6e61]:
+              - link "arXiv:1903.07020" [ref=f6e62] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/1903.07020
+              - generic [ref=f6e63]:
+                - text: "["
+                - link "pdf" [ref=f6e64] [cursor=pointer]:
+                  - /url: https://arxiv.org/pdf/1903.07020
+                - text: ","
+                - link "other" [ref=f6e65] [cursor=pointer]:
+                  - /url: https://arxiv.org/format/1903.07020
+                - text: "]"
+            - generic [ref=f6e66]:
+              - generic [ref=f6e67]: cs.LG
+              - generic [ref=f6e68]: cs.DC
+              - generic [ref=f6e69]: stat.ML
+          - paragraph [ref=f6e70]: "Zeno++: Robust Fully Asynchronous SGD"
+          - paragraph [ref=f6e71]:
+            - text: "Authors:"
+            - link "Cong Xie" [ref=f6e72] [cursor=pointer]:
+              - /url: /search/?searchtype=author&query=Xie%2C+C
+            - text: ","
+            - link "Sanmi Koyejo" [ref=f6e73] [cursor=pointer]:
+              - /url: /search/?searchtype=author&query=Koyejo%2C+S
+            - text: ","
+            - link "Indranil Gupta" [ref=f6e74] [cursor=pointer]:
+              - /url: /search/?searchtype=author&query=Gupta%2C+I
+          - paragraph [ref=f6e75]:
+            - text: "Abstract:"
+            - generic [ref=f6e76]: We propose Zeno++, a new… ▽ More
+          - paragraph [ref=f6e77]: Submitted 9 May, 2021; v1 submitted 16 March, 2019; originally announced March 2019.
+          - paragraph [ref=f6e78]: "Comments: ICML version with some additional remarks related to the acceptance rate of Byzantine validation, and also with the full version of error bounds in the theorems"
+  - contentinfo [ref=f6e79]:
+    - contentinfo [ref=f6e80]:
+      - generic [ref=f6e81]:
+        - generic [ref=f6e82]:
+          - generic [ref=f6e83]:
+            - text: We gratefully acknowledge support from our
+            - strong [ref=f6e84]: major funders
+            - text: ","
+            - link [ref=f6e85] [cursor=pointer]:
+              - /url: https://info.arxiv.org/about/ourmembers.html
+              - strong [ref=f6e86]: member institutions
+            - text: ", and all contributors."
+          - navigation "Site navigation" [ref=f6e87]:
+            - link "About" [ref=f6e88] [cursor=pointer]:
+              - /url: https://info.arxiv.org/about
+            - generic [ref=f6e89]: ·
+            - link "Help" [ref=f6e90] [cursor=pointer]:
+              - /url: https://info.arxiv.org/help
+            - generic [ref=f6e91]: ·
+            - link "Contact" [ref=f6e92] [cursor=pointer]:
+              - /url: https://info.arxiv.org/help/contact.html
+            - generic [ref=f6e93]: ·
+            - link "Subscribe" [ref=f6e94] [cursor=pointer]:
+              - /url: https://info.arxiv.org/help/subscribe
+            - generic [ref=f6e95]: ·
+            - link "Copyright" [ref=f6e96] [cursor=pointer]:
+              - /url: https://info.arxiv.org/help/license/index.html
+            - generic [ref=f6e97]: ·
+            - link "Privacy" [ref=f6e98] [cursor=pointer]:
+              - /url: https://info.arxiv.org/help/policies/privacy_policy.html
+            - generic [ref=f6e99]: ·
+            - link "Accessibility" [ref=f6e100] [cursor=pointer]:
+              - /url: https://info.arxiv.org/help/web_accessibility.html
+            - generic [ref=f6e101]: ·
+            - link "Operational Status (opens in new tab)" [ref=f6e102] [cursor=pointer]:
+              - /url: https://status.arxiv.org
+              - text: Operational Status
+              - generic [ref=f6e103]: (opens in new tab)
+        - generic "Major funders" [ref=f6e104]:
+          - generic [ref=f6e105]: Major funding support from
+          - generic [ref=f6e106]:
+            - img "Simons Foundation" [ref=f6e107]
+            - img "Schmidt Sciences" [ref=f6e108]

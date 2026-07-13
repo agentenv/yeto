@@ -1,0 +1,374 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - button [ref=e4] [cursor=pointer]
+    - link "Homepage" [ref=e6] [cursor=pointer]:
+      - /url: /schhp?hl=en&as_sdt=0,5
+    - generic [ref=e9]:
+      - textbox "Search" [ref=e11]: consensus disagreement scaled aggregation federated learning
+      - button "Search" [ref=e12] [cursor=pointer]
+    - link "Sign in" [ref=e16] [cursor=pointer]:
+      - /url: https://accounts.google.com/Login?hl=en&continue=https://scholar.google.com/scholar%3Fq%3Dconsensus%2Bdisagreement%2Bscaled%2Baggregation%2Bfederated%2Blearning
+  - generic [ref=e17]:
+    - generic [ref=e20]: Articles
+    - generic [ref=e22]: About 21,200 results (0.20 sec)
+    - generic [ref=e24]:
+      - link "My profile" [ref=e25] [cursor=pointer]:
+        - /url: /citations?hl=en
+      - link "My library" [ref=e28] [cursor=pointer]:
+        - /url: /scholar?scilib=1&scioq=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+  - generic [ref=e31]:
+    - navigation [ref=e32]:
+      - generic [ref=e33]:
+        - list [ref=e35]:
+          - listitem [ref=e36]:
+            - link "Any time" [ref=e37] [cursor=pointer]:
+              - /url: /scholar?q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+          - listitem [ref=e38]:
+            - link "Since 2026" [ref=e39] [cursor=pointer]:
+              - /url: /scholar?as_ylo=2026&q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+          - listitem [ref=e40]:
+            - link "Since 2025" [ref=e41] [cursor=pointer]:
+              - /url: /scholar?as_ylo=2025&q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+          - listitem [ref=e42]:
+            - link "Since 2022" [ref=e43] [cursor=pointer]:
+              - /url: /scholar?as_ylo=2022&q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+          - listitem [ref=e44]:
+            - link "Custom range..." [ref=e45] [cursor=pointer]:
+              - /url: javascript:void(0)
+        - list [ref=e46]:
+          - listitem [ref=e47]:
+            - link "Sort by relevance" [ref=e48] [cursor=pointer]:
+              - /url: /scholar?hl=en&as_sdt=0,5&q=consensus+disagreement+scaled+aggregation++%22federated+learning%22
+          - listitem [ref=e49]:
+            - link "Sort by date" [ref=e50] [cursor=pointer]:
+              - /url: /scholar?hl=en&as_sdt=0,5&q=consensus+disagreement+scaled+aggregation++%22federated+learning%22&scisbd=1
+        - list [ref=e51]:
+          - listitem [ref=e52]:
+            - link "Any type" [ref=e53] [cursor=pointer]:
+              - /url: /scholar?q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+          - listitem [ref=e54]:
+            - link "Review articles" [ref=e55] [cursor=pointer]:
+              - /url: /scholar?q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5&as_rr=1
+        - list [ref=e56]:
+          - listitem [ref=e57]:
+            - checkbox "include patents" [ref=e58] [cursor=pointer]
+          - listitem [ref=e62]:
+            - checkbox "include citations" [checked] [ref=e63] [cursor=pointer]
+        - link "Create alert" [ref=e68] [cursor=pointer]:
+          - /url: /scholar_alerts?view_op=create_alert_options&hl=en&alert_query=consensus+disagreement+scaled+aggregation++%22federated+learning%22&alert_params=%3Fhl%3Den%26as_sdt%3D0,5
+    - main [ref=e71]:
+      - generic [ref=e72]:
+        - generic [ref=e73]:
+          - generic [ref=e74]:
+            - link "[PDF] mlr.press" [ref=e78] [cursor=pointer]:
+              - /url: https://proceedings.mlr.press/v202/ye23f/ye23f.pdf
+            - generic [ref=e79]:
+              - heading [level=3] [ref=e80]:
+                - 'link "Feddisco: Federated learning with discrepancy-aware collaboration" [ref=e81] [cursor=pointer]':
+                  - /url: https://proceedings.mlr.press/v202/ye23f.html
+              - generic [ref=e82]:
+                - link "R Ye" [ref=e83] [cursor=pointer]:
+                  - /url: /citations?user=Q4-VTxcAAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "M Xu" [ref=e84] [cursor=pointer]:
+                  - /url: /citations?user=OXN81PMAAAAJ&hl=en&oi=sra
+                - text: ", J Wang,"
+                - link "C Xu" [ref=e85] [cursor=pointer]:
+                  - /url: /citations?user=UgmMqV0AAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "S Chen" [ref=e86] [cursor=pointer]:
+                  - /url: /citations?user=W_Q33RMAAAAJ&hl=en&oi=sra
+                - text: … - … on Machine Learning, 2023 - proceedings.mlr.press
+              - generic [ref=e87]: … aggregation weight and the performance of aggregated global model, we conduct three independent trials, where each trial considers federated training of … and we aggregate these two …
+              - generic [ref=e88]:
+                - button "Save" [ref=e89] [cursor=pointer]
+                - button "Cite" [ref=e92] [cursor=pointer]
+                - link "Cited by 204" [ref=e95] [cursor=pointer]:
+                  - /url: /scholar?cites=4950926378605144571&as_sdt=2005&sciodt=0,5&hl=en
+                - link "Related articles" [ref=e96] [cursor=pointer]:
+                  - /url: /scholar?q=related:--neaU85tUQJ:scholar.google.com/&scioq=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - link "All 6 versions" [ref=e97] [cursor=pointer]:
+                  - /url: /scholar?cluster=4950926378605144571&hl=en&as_sdt=0,5
+                - button "More" [ref=e98] [cursor=pointer]
+          - generic [ref=e101]:
+            - link "[PDF] arxiv.org" [ref=e105] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/2603.21276
+            - generic [ref=e106]:
+              - heading [level=3] [ref=e107]:
+                - link "Aggregation alignment for federated learning with mixture-of-experts under data heterogeneity" [ref=e108] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/2603.21276
+              - generic [ref=e109]:
+                - text: Z Fang, Q Wang,
+                - link "H An" [ref=e110] [cursor=pointer]:
+                  - /url: /citations?user=YlRk19IAAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "Z Lin" [ref=e111] [cursor=pointer]:
+                  - /url: /citations?user=bDU6l9IAAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "Y Deng" [ref=e112] [cursor=pointer]:
+                  - /url: /citations?user=EdRi_MEAAAAJ&hl=en&oi=sra
+                - text: ", X Chen… - arXiv preprint arXiv …, 2026 - arxiv.org"
+              - generic [ref=e113]: … are further scaled by the direction consensus, with highly aligned updates receiving a high … scale federated learning deployments. This robustness stems from the dedicated aggregation …
+              - generic [ref=e114]:
+                - button "Save" [ref=e115] [cursor=pointer]
+                - button "Cite" [ref=e118] [cursor=pointer]
+                - link "Cited by 3" [ref=e121] [cursor=pointer]:
+                  - /url: /scholar?cites=6841057727515909371&as_sdt=2005&sciodt=0,5&hl=en
+                - link "Related articles" [ref=e122] [cursor=pointer]:
+                  - /url: /scholar?q=related:-9yG-MFR8F4J:scholar.google.com/&scioq=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - link "All 2 versions" [ref=e123] [cursor=pointer]:
+                  - /url: /scholar?cluster=6841057727515909371&hl=en&as_sdt=0,5
+                - button "More" [ref=e124] [cursor=pointer]
+          - generic [ref=e127]:
+            - link "[PDF] arxiv.org" [ref=e131] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/1912.13163
+            - generic [ref=e132]:
+              - heading [level=3] [ref=e133]:
+                - 'link "Federated learning with cooperating devices: A consensus approach for massive IoT networks" [ref=e134] [cursor=pointer]':
+                  - /url: https://ieeexplore.ieee.org/abstract/document/8950073/
+              - generic [ref=e135]:
+                - link "S Savazzi" [ref=e136] [cursor=pointer]:
+                  - /url: /citations?user=osj_V88AAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "M Nicoli" [ref=e137] [cursor=pointer]:
+                  - /url: /citations?user=r0qzdnUAAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "V Rampa" [ref=e138] [cursor=pointer]:
+                  - /url: /citations?user=6CxNMaIAAAAJ&hl=en&oi=sra
+                - text: "- IEEE Internet of Things Journal, 2020 - ieeexplore.ieee.org"
+              - generic [ref=e139]: "… for aggregation and fusion of local parameters; this has the drawback of a single point of failure and scaling … This article proposes a fully distributed (or serverless) learning approach: the …"
+              - generic [ref=e140]:
+                - button "Save" [ref=e141] [cursor=pointer]
+                - button "Cite" [ref=e144] [cursor=pointer]
+                - link "Cited by 543" [ref=e147] [cursor=pointer]:
+                  - /url: /scholar?cites=4210618074441802805&as_sdt=2005&sciodt=0,5&hl=en
+                - link "Related articles" [ref=e148] [cursor=pointer]:
+                  - /url: /scholar?q=related:NWTxc9QebzoJ:scholar.google.com/&scioq=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - link "All 7 versions" [ref=e149] [cursor=pointer]:
+                  - /url: /scholar?cluster=4210618074441802805&hl=en&as_sdt=0,5
+          - generic [ref=e150]:
+            - link "[PDF] researchgate.net" [ref=e154] [cursor=pointer]:
+              - /url: https://www.researchgate.net/profile/Moming-Duan/publication/357259569_FedGroup_Efficient_Federated_Learning_via_Decomposed_Similarity-Based_Clustering/links/61e5213370db8b034c9e1190/FedGroup-Efficient-Federated-Learning-via-Decomposed-Similarity-Based-Clustering.pdf
+            - generic [ref=e155]:
+              - heading [level=3] [ref=e156]:
+                - 'link "Fedgroup: Efficient federated learning via decomposed similarity-based clustering" [ref=e157] [cursor=pointer]':
+                  - /url: https://ieeexplore.ieee.org/abstract/document/9644782/
+              - generic [ref=e158]:
+                - link "M Duan" [ref=e159] [cursor=pointer]:
+                  - /url: /citations?user=vEWocfwAAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "D Liu" [ref=e160] [cursor=pointer]:
+                  - /url: /citations?user=LSmCSQsAAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "X Ji" [ref=e161] [cursor=pointer]:
+                  - /url: /citations?user=Dk24jtwAAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "R Liu" [ref=e162] [cursor=pointer]:
+                  - /url: /citations?user=Dj66G2EAAAAJ&hl=en&oi=sra
+                - text: ", L Liang… - 2021 IEEE Intl Conf …, 2021 - ieeexplore.ieee.org"
+              - generic [ref=e163]: … consensus global model. However, above CFL-based frameworks are inefficient in the large-scale federated training … the pre-training scale α = 20, the inter-group aggregation is disable…
+              - generic [ref=e164]:
+                - button "Save" [ref=e165] [cursor=pointer]
+                - button "Cite" [ref=e168] [cursor=pointer]
+                - link "Cited by 182" [ref=e171] [cursor=pointer]:
+                  - /url: /scholar?cites=14830816227796774644&as_sdt=2005&sciodt=0,5&hl=en
+                - link "Related articles" [ref=e172] [cursor=pointer]:
+                  - /url: /scholar?q=related:9O7sOsik0c0J:scholar.google.com/&scioq=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - link "All 5 versions" [ref=e173] [cursor=pointer]:
+                  - /url: /scholar?cluster=14830816227796774644&hl=en&as_sdt=0,5
+          - generic [ref=e175]:
+            - heading [level=3] [ref=e176]:
+              - link "Energy consumption prediction model for smart homes via decentralized federated learning with LSTM" [ref=e177] [cursor=pointer]:
+                - /url: https://ieeexplore.ieee.org/abstract/document/10288152/
+            - generic [ref=e178]:
+              - link "D Połap" [ref=e179] [cursor=pointer]:
+                - /url: /citations?user=8vtcLEwAAAAJ&hl=en&oi=sra
+              - text: ", G Srivastava,"
+              - link "A Jaszcz" [ref=e180] [cursor=pointer]:
+                - /url: /citations?user=IUT0sScAAAAJ&hl=en&oi=sra
+              - text: "- IEEE Transactions on …, 2023 - ieeexplore.ieee.org"
+            - generic [ref=e181]: … of aggregation performed over all rounds of federated learning… The reason for the bad prediction was the wrong scale of the … It is very important, that the consensus algorithm we use has …
+            - generic [ref=e182]:
+              - button "Save" [ref=e183] [cursor=pointer]
+              - button "Cite" [ref=e186] [cursor=pointer]
+              - link "Cited by 50" [ref=e189] [cursor=pointer]:
+                - /url: /scholar?cites=5726477380674471396&as_sdt=2005&sciodt=0,5&hl=en
+              - link "Related articles" [ref=e190] [cursor=pointer]:
+                - /url: /scholar?q=related:5EVpadaIeE8J:scholar.google.com/&scioq=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+              - link "All 5 versions" [ref=e191] [cursor=pointer]:
+                - /url: /scholar?cluster=5726477380674471396&hl=en&as_sdt=0,5
+          - generic [ref=e193]:
+            - heading [level=3] [ref=e194]:
+              - 'link "Dfeddg2: Distribution guided gossip based generalizable and communication efficient decentralized federated learning" [ref=e195] [cursor=pointer]':
+                - /url: https://ieeexplore.ieee.org/abstract/document/11408173/
+            - generic [ref=e196]:
+              - link "B Pal" [ref=e197] [cursor=pointer]:
+                - /url: /citations?user=Bbujcf8AAAAJ&hl=en&oi=sra
+              - text: ","
+              - link "S Funiak" [ref=e198] [cursor=pointer]:
+                - /url: /citations?user=ZMuI-2QAAAAJ&hl=en&oi=sra
+              - text: ","
+              - link "J Liu" [ref=e199] [cursor=pointer]:
+                - /url: /citations?user=DSyNTMIAAAAJ&hl=en&oi=sra
+              - text: ","
+              - link "P Moghadam" [ref=e200] [cursor=pointer]:
+                - /url: /citations?user=QAVcuWUAAAAJ&hl=en&oi=sra
+              - text: … - IEEE Internet of …, 2026 - ieeexplore.ieee.org
+            - generic [ref=e201]: … distributed knowledge aggregation process. While centralized … in remote environments to large-scale sensor networks—where … yields a smaller consensus error than uniform gossip. …
+            - generic [ref=e202]:
+              - button "Save" [ref=e203] [cursor=pointer]
+              - button "Cite" [ref=e206] [cursor=pointer]
+              - link "Cited by 2" [ref=e209] [cursor=pointer]:
+                - /url: /scholar?cites=397656910626093083&as_sdt=2005&sciodt=0,5&hl=en
+              - link "Related articles" [ref=e210] [cursor=pointer]:
+                - /url: /scholar?q=related:G_hYdNrChAUJ:scholar.google.com/&scioq=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+              - link "All 3 versions" [ref=e211] [cursor=pointer]:
+                - /url: /scholar?cluster=397656910626093083&hl=en&as_sdt=0,5
+          - generic [ref=e212]:
+            - link "[PDF] arxiv.org" [ref=e216] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/2104.13130
+            - generic [ref=e217]:
+              - heading [level=3] [ref=e218]:
+                - link "Secure and efficient federated learning through layering and sharding blockchain" [ref=e219] [cursor=pointer]:
+                  - /url: https://ieeexplore.ieee.org/abstract/document/10419032/
+              - generic [ref=e220]:
+                - link "S Yuan" [ref=e221] [cursor=pointer]:
+                  - /url: /citations?user=DtZdo_AAAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "B Cao" [ref=e222] [cursor=pointer]:
+                  - /url: /citations?user=FZ029uUAAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "Y Sun" [ref=e223] [cursor=pointer]:
+                  - /url: /citations?user=30FlEg0AAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "Z Wan" [ref=e224] [cursor=pointer]:
+                  - /url: /citations?user=8D7Vh20AAAAJ&hl=en&oi=sra
+                - text: … - IEEE Transactions on …, 2024 - ieeexplore.ieee.org
+              - generic [ref=e225]: … on a central aggregator for training orchestration, but this … consensus among shards, thereby reducing the scale of information exchange and storage resource requirements and scaling …
+              - generic [ref=e226]:
+                - button "Save" [ref=e227] [cursor=pointer]
+                - button "Cite" [ref=e230] [cursor=pointer]
+                - link "Cited by 84" [ref=e233] [cursor=pointer]:
+                  - /url: /scholar?cites=4701744456936108087&as_sdt=2005&sciodt=0,5&hl=en
+                - link "Related articles" [ref=e234] [cursor=pointer]:
+                  - /url: /scholar?q=related:N7BWNKzzP0EJ:scholar.google.com/&scioq=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - link "All 4 versions" [ref=e235] [cursor=pointer]:
+                  - /url: /scholar?cluster=4701744456936108087&hl=en&as_sdt=0,5
+          - generic [ref=e237]:
+            - heading [level=3] [ref=e238]:
+              - link "A blockchain-empowered federated learning in healthcare-based cyber physical systems" [ref=e239] [cursor=pointer]:
+                - /url: https://ieeexplore.ieee.org/abstract/document/9760019/
+            - generic [ref=e240]:
+              - text: Y Liu, W Yu,
+              - link "Z Ai" [ref=e241] [cursor=pointer]:
+                - /url: /citations?user=5SD_aeYAAAAJ&hl=en&oi=sra
+              - text: ","
+              - link "G Xu" [ref=e242] [cursor=pointer]:
+                - /url: /citations?user=9sKAGXAAAAAJ&hl=en&oi=sra
+              - text: ","
+              - link "L Zhao" [ref=e243] [cursor=pointer]:
+                - /url: /citations?user=7KlP2dIAAAAJ&hl=en&oi=sra
+              - text: … - IEEE Transactions on …, 2022 - ieeexplore.ieee.org
+            - generic [ref=e244]: … Each hospital can only cover a limited and small-scaled population, which is not … aggregation truthfulness and incentive issues simultaneously and design a blockchain consensus …
+            - generic [ref=e245]:
+              - button "Save" [ref=e246] [cursor=pointer]
+              - button "Cite" [ref=e249] [cursor=pointer]
+              - link "Cited by 109" [ref=e252] [cursor=pointer]:
+                - /url: /scholar?cites=14545480605298740241&as_sdt=2005&sciodt=0,5&hl=en
+              - link "Related articles" [ref=e253] [cursor=pointer]:
+                - /url: /scholar?q=related:EUwqlovt28kJ:scholar.google.com/&scioq=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+              - link "All 2 versions" [ref=e254] [cursor=pointer]:
+                - /url: /scholar?cluster=14545480605298740241&hl=en&as_sdt=0,5
+          - generic [ref=e255]:
+            - link "[PDF] jceim.org" [ref=e259] [cursor=pointer]:
+              - /url: https://jceim.org/index.php/ojs/article/download/113/110
+            - generic [ref=e260]:
+              - heading [level=3] [ref=e261]:
+                - link "Robust aggregation algorithms for federated learning in unreliable network environments" [ref=e262] [cursor=pointer]:
+                  - /url: http://jceim.org/index.php/ojs/article/view/113
+              - generic [ref=e263]:
+                - link "Z Zeng" [ref=e264] [cursor=pointer]:
+                  - /url: /citations?user=un3nMoAAAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "S Yang" [ref=e265] [cursor=pointer]:
+                  - /url: /citations?user=vm0Dal8AAAAJ&hl=en&oi=sra
+                - text: ", G Ding - Journal of Computing and Electronic Information …, 2025 - jceim.org"
+              - generic [ref=e266]: "… realistic large-scale federated learning scenarios: Parameter … aggregation mechanisms when using federated learning (FL) in … the commonly used traditional aggregation algorithms like …"
+              - generic [ref=e267]:
+                - button "Save" [ref=e268] [cursor=pointer]
+                - button "Cite" [ref=e271] [cursor=pointer]
+                - link "Cited by 11" [ref=e274] [cursor=pointer]:
+                  - /url: /scholar?cites=7401723484884952673&as_sdt=2005&sciodt=0,5&hl=en
+                - link "Related articles" [ref=e275] [cursor=pointer]:
+                  - /url: /scholar?q=related:YeY7Iks0uGYJ:scholar.google.com/&scioq=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - button "More" [ref=e276] [cursor=pointer]
+          - generic [ref=e279]:
+            - link "[PDF] ieee.org" [ref=e283] [cursor=pointer]:
+              - /url: https://ieeexplore.ieee.org/iel8/8782664/10834807/11082669.pdf
+            - generic [ref=e284]:
+              - heading [level=3] [ref=e285]:
+                - 'link "Optimizing federated learning with aggregation strategies: A comprehensive survey" [ref=e286] [cursor=pointer]':
+                  - /url: https://ieeexplore.ieee.org/abstract/document/11082669/
+              - generic [ref=e287]:
+                - link "N Khan" [ref=e288] [cursor=pointer]:
+                  - /url: /citations?user=KE9UXtcAAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "S Nisar" [ref=e289] [cursor=pointer]:
+                  - /url: /citations?user=ibzLrFIAAAAJ&hl=en&oi=sra
+                - text: ","
+                - link "MA Khan" [ref=e290] [cursor=pointer]:
+                  - /url: /citations?user=0xDhDEMAAAAJ&hl=en&oi=sra
+                - text: … - IEEE Open Journal …, 2025 - ieeexplore.ieee.org
+              - generic [ref=e291]: … learning to enable high efficiency aggregation in large-scale federations. To achieve these, advanced message-passing techniques that optimize both communication and the model …
+              - generic [ref=e292]:
+                - button "Save" [ref=e293] [cursor=pointer]
+                - button "Cite" [ref=e296] [cursor=pointer]
+                - link "Cited by 25" [ref=e299] [cursor=pointer]:
+                  - /url: /scholar?cites=13224659526689275292&as_sdt=2005&sciodt=0,5&hl=en
+                - link "Related articles" [ref=e300] [cursor=pointer]:
+                  - /url: /scholar?q=related:nL3Ms8Vth7cJ:scholar.google.com/&scioq=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - link "All 5 versions" [ref=e301] [cursor=pointer]:
+                  - /url: /scholar?cluster=13224659526689275292&hl=en&as_sdt=0,5
+        - navigation [ref=e303]:
+          - table [ref=e305]:
+            - rowgroup [ref=e306]:
+              - row [ref=e307]:
+                - cell [ref=e308]
+                - cell "1" [ref=e310]
+                - cell [ref=e312]:
+                  - link "2" [ref=e313] [cursor=pointer]:
+                    - /url: /scholar?start=10&q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - cell [ref=e315]:
+                  - link "3" [ref=e316] [cursor=pointer]:
+                    - /url: /scholar?start=20&q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - cell [ref=e318]:
+                  - link "4" [ref=e319] [cursor=pointer]:
+                    - /url: /scholar?start=30&q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - cell [ref=e321]:
+                  - link "5" [ref=e322] [cursor=pointer]:
+                    - /url: /scholar?start=40&q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - cell [ref=e324]:
+                  - link "6" [ref=e325] [cursor=pointer]:
+                    - /url: /scholar?start=50&q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - cell [ref=e327]:
+                  - link "7" [ref=e328] [cursor=pointer]:
+                    - /url: /scholar?start=60&q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - cell [ref=e330]:
+                  - link "8" [ref=e331] [cursor=pointer]:
+                    - /url: /scholar?start=70&q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - cell [ref=e333]:
+                  - link "9" [ref=e334] [cursor=pointer]:
+                    - /url: /scholar?start=80&q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - cell [ref=e336]:
+                  - link "10" [ref=e337] [cursor=pointer]:
+                    - /url: /scholar?start=90&q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+                - cell [ref=e339]:
+                  - link "Next" [ref=e340] [cursor=pointer]:
+                    - /url: /scholar?start=10&q=consensus+disagreement+scaled+aggregation+federated+learning&hl=en&as_sdt=0,5
+  - contentinfo [ref=e343]:
+    - generic [ref=e344]:
+      - link "Privacy" [ref=e345] [cursor=pointer]:
+        - /url: //www.google.com/intl/en/policies/privacy/
+      - link "Terms" [ref=e346] [cursor=pointer]:
+        - /url: //www.google.com/intl/en/policies/terms/
+      - button "Help" [ref=e347] [cursor=pointer]

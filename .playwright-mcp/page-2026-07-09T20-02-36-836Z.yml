@@ -1,0 +1,278 @@
+- generic [ref=f124e2]:
+  - link "Skip to main content" [ref=f124e3] [cursor=pointer]:
+    - /url: "#content"
+  - region "Announcement" [ref=f124e4]:
+    - generic [ref=f124e6]: arXiv is now an independent nonprofit!
+    - link "Learn more" [ref=f124e7] [cursor=pointer]:
+      - /url: https://info.arxiv.org/about
+    - button "Dismiss announcement" [ref=f124e8] [cursor=pointer]: ×
+  - banner [ref=f124e9]:
+    - link [ref=f124e10] [cursor=pointer]:
+      - /url: https://arxiv.org/IgnoreMe
+    - link "archive home" [ref=f124e11] [cursor=pointer]:
+      - /url: https://arxiv.org/
+      - img "archive" [ref=f124e12]
+    - navigation "Main navigation" [ref=f124e13]:
+      - link "Search" [ref=f124e14] [cursor=pointer]:
+        - /url: https://arxiv.org/search
+      - link "Submit" [ref=f124e18] [cursor=pointer]:
+        - /url: https://arxiv.org/user/create
+      - link "Donate" [ref=f124e19] [cursor=pointer]:
+        - /url: https://info.arxiv.org/about/donate.html
+      - link "Log in" [ref=f124e21] [cursor=pointer]:
+        - /url: https://arxiv.org/login
+  - main [ref=f124e22]:
+    - generic [ref=f124e24]:
+      - generic [ref=f124e25]:
+        - heading "Computer Science > Machine Learning" [level=1] [ref=f124e27]
+        - generic [ref=f124e29]:
+          - generic [ref=f124e30]:
+            - text: "[Submitted on 28 Jan 2022 ("
+            - link "v1" [ref=f124e31] [cursor=pointer]:
+              - /url: https://arxiv.org/abs/2201.11986v1
+            - text: ), last revised 14 Nov 2023 (this version, v2)]
+          - heading "Gradient Masked Averaging for Federated Learning" [level=1] [ref=f124e32]
+          - generic [ref=f124e33]:
+            - link "Irene Tenison" [ref=f124e34] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Tenison,+I
+            - text: ","
+            - link "Sai Aravind Sreeramadas" [ref=f124e35] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Aravind,+S
+            - text: ","
+            - link "Vaikkunth Mugunthan" [ref=f124e36] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Mugunthan,+V
+            - text: ","
+            - link "Edouard Oyallon" [ref=f124e37] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Oyallon,+E
+            - text: ","
+            - link "Irina Rish" [ref=f124e38] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Rish,+I
+            - text: ","
+            - link "Eugene Belilovsky" [ref=f124e39] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Belilovsky,+E
+          - blockquote [ref=f124e40]: Federated learning (FL) is an emerging paradigm that permits a large number of clients with heterogeneous data to coordinate learning of a unified global model without the need to share data amongst each other. A major challenge in federated learning is the heterogeneity of data across client, which can degrade the performance of standard FL algorithms. Standard FL algorithms involve averaging of model parameters or gradient updates to approximate the global model at the server. However, we argue that in heterogeneous settings, averaging can result in information loss and lead to poor generalization due to the bias induced by dominant client gradients. We hypothesize that to generalize better across non-i.i.d datasets, the algorithms should focus on learning the invariant mechanism that is constant while ignoring spurious mechanisms that differ across clients. Inspired from recent works in Out-of-Distribution generalization, we propose a gradient masked averaging approach for FL as an alternative to the standard averaging of client updates. This aggregation technique for client updates can be adapted as a drop-in replacement in most existing federated algorithms. We perform extensive experiments on multiple FL algorithms with in-distribution, real-world, feature-skewed out-of-distribution, and quantity imbalanced datasets and show that it provides consistent improvements, particularly in the case of heterogeneous clients.
+          - table "Additional metadata" [ref=f124e42]:
+            - rowgroup [ref=f124e43]:
+              - row [ref=f124e44]:
+                - cell "Subjects:" [ref=f124e45]
+                - cell "Machine Learning (cs.LG); Artificial Intelligence (cs.AI)" [ref=f124e46]
+              - row [ref=f124e47]:
+                - cell "Cite as:" [ref=f124e48]
+                - cell [ref=f124e49]:
+                  - generic [ref=f124e50]:
+                    - link "arXiv:2201.11986" [ref=f124e51] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/2201.11986
+                    - text: "[cs.LG]"
+              - row [ref=f124e52]:
+                - cell [ref=f124e53]
+                - cell [ref=f124e54]:
+                  - text: (or
+                  - generic [ref=f124e55]:
+                    - link "arXiv:2201.11986v2" [ref=f124e56] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/2201.11986v2
+                    - text: "[cs.LG]"
+                  - text: for this version)
+              - row [ref=f124e57]:
+                - cell [ref=f124e58]
+                - cell [ref=f124e59]:
+                  - link "https://doi.org/10.48550/arXiv.2201.11986" [ref=f124e60] [cursor=pointer]:
+                    - /url: https://doi.org/10.48550/arXiv.2201.11986
+                  - button "Focus to learn more" [ref=f124e62]
+        - generic [ref=f124e65]:
+          - heading "Submission history" [level=2] [ref=f124e66]
+          - text: "From: Irene Tenison ["
+          - link "view email" [ref=f124e67] [cursor=pointer]:
+            - /url: /show-email/40cf5c07/2201.11986
+          - text: "]"
+          - strong [ref=f124e68]:
+            - link "[v1]" [ref=f124e69] [cursor=pointer]:
+              - /url: /abs/2201.11986v1
+          - text: Fri, 28 Jan 2022 08:42:43 UTC (1,795 KB)
+          - strong [ref=f124e70]: "[v2]"
+          - text: Tue, 14 Nov 2023 21:41:26 UTC (5,746 KB)
+      - generic [ref=f124e71]:
+        - generic [ref=f124e72]:
+          - heading "Access Paper:" [level=2] [ref=f124e73]
+          - list [ref=f124e74]:
+            - listitem [ref=f124e75]:
+              - link "View PDF" [ref=f124e76] [cursor=pointer]:
+                - /url: /pdf/2201.11986
+            - listitem [ref=f124e77]:
+              - link "TeX Source" [ref=f124e78] [cursor=pointer]:
+                - /url: /src/2201.11986
+          - link "view license" [ref=f124e80] [cursor=pointer]:
+            - /url: http://arxiv.org/licenses/nonexclusive-distrib/1.0/
+        - generic [ref=f124e81]:
+          - heading "Current browse context:" [level=3] [ref=f124e82]
+          - generic [ref=f124e83]: cs.LG
+          - generic [ref=f124e84]:
+            - link "< prev" [ref=f124e86] [cursor=pointer]:
+              - /url: /prevnext?id=2201.11986&function=prev&context=cs.LG
+            - text: "|"
+            - link "next >" [ref=f124e88] [cursor=pointer]:
+              - /url: /prevnext?id=2201.11986&function=next&context=cs.LG
+          - generic [ref=f124e89]:
+            - link "new" [ref=f124e90] [cursor=pointer]:
+              - /url: /list/cs.LG/new
+            - text: "|"
+            - link "recent" [ref=f124e91] [cursor=pointer]:
+              - /url: /list/cs.LG/recent
+            - text: "|"
+            - link "2022-01" [ref=f124e92] [cursor=pointer]:
+              - /url: /list/cs.LG/2022-01
+          - generic [ref=f124e93]:
+            - text: "Change to browse by:"
+            - generic [ref=f124e94]:
+              - link "cs" [ref=f124e95] [cursor=pointer]:
+                - /url: /abs/2201.11986?context=cs
+              - link "cs.AI" [ref=f124e96] [cursor=pointer]:
+                - /url: /abs/2201.11986?context=cs.AI
+        - generic [ref=f124e97]:
+          - heading "References & Citations" [level=3] [ref=f124e98]
+          - list [ref=f124e99]:
+            - listitem [ref=f124e100]:
+              - link "NASA ADS" [ref=f124e101] [cursor=pointer]:
+                - /url: https://ui.adsabs.harvard.edu/abs/arXiv:2201.11986
+            - listitem [ref=f124e102]:
+              - link "Google Scholar" [ref=f124e103] [cursor=pointer]:
+                - /url: https://scholar.google.com/scholar_lookup?arxiv_id=2201.11986
+            - listitem [ref=f124e104]:
+              - link "Semantic Scholar" [ref=f124e105] [cursor=pointer]:
+                - /url: https://api.semanticscholar.org/arXiv:2201.11986
+        - generic [ref=f124e106]:
+          - heading [level=3] [ref=f124e107]:
+            - link "DBLP" [ref=f124e108] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de
+            - text: "- CS Bibliography"
+          - generic [ref=f124e109]:
+            - link "listing" [ref=f124e110] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/db/journals/corr/corr2201.html#abs-2201-11986
+            - text: "|"
+            - link "bibtex" [ref=f124e111] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/rec/bibtex/journals/corr/abs-2201-11986
+          - generic [ref=f124e112]:
+            - link "Edouard Oyallon" [ref=f124e113] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Edouard%20Oyallon
+            - link "Eugene Belilovsky" [ref=f124e114] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Eugene%20Belilovsky
+            - link "Irina Rish" [ref=f124e115] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Irina%20Rish
+        - button "export BibTeX citation" [ref=f124e117]
+        - generic [ref=f124e118]:
+          - heading "Bookmark" [level=3] [ref=f124e120]
+          - link [ref=f124e121] [cursor=pointer]:
+            - /url: http://www.bibsonomy.org/BibtexHandler?requTask=upload&url=https://arxiv.org/abs/2201.11986&description=Gradient Masked Averaging for Federated Learning
+            - img "BibSonomy" [ref=f124e122]
+          - link [ref=f124e123] [cursor=pointer]:
+            - /url: https://reddit.com/submit?url=https://arxiv.org/abs/2201.11986&title=Gradient Masked Averaging for Federated Learning
+            - img "Reddit" [ref=f124e124]
+      - tablist "arXivLabs tools" [ref=f124e126]:
+        - radio "Bibliographic Tools" [checked] [ref=f124e127]
+        - tab "Bibliographic Tools" [selected] [ref=f124e128] [cursor=pointer]
+        - tabpanel "Bibliographic Tools" [ref=f124e129]:
+          - heading "Bibliographic and Citation Tools" [level=1] [ref=f124e130]
+          - generic [ref=f124e131]:
+            - generic [ref=f124e132]:
+              - generic [ref=f124e134]:
+                - checkbox "Bibliographic Explorer Toggle"
+                - generic [ref=f124e136]: Bibliographic Explorer Toggle
+              - generic [ref=f124e137]:
+                - text: Bibliographic Explorer
+                - emphasis [ref=f124e138]:
+                  - text: (
+                  - link "What is the Explorer?" [ref=f124e139] [cursor=pointer]:
+                    - /url: https://info.arxiv.org/labs/showcase.html#arxiv-bibliographic-explorer
+                  - text: )
+            - generic [ref=f124e140]:
+              - generic [ref=f124e142]:
+                - checkbox "Connected Papers"
+                - generic [ref=f124e144]: Connected Papers Toggle
+              - generic [ref=f124e145]:
+                - text: Connected Papers
+                - emphasis [ref=f124e146]:
+                  - text: (
+                  - link "What is Connected Papers?" [ref=f124e147] [cursor=pointer]:
+                    - /url: https://www.connectedpapers.com/about
+                  - text: )
+            - generic [ref=f124e148]:
+              - generic [ref=f124e150]:
+                - checkbox "Litmaps"
+                - generic [ref=f124e152]: Litmaps Toggle
+              - generic [ref=f124e153]:
+                - text: Litmaps
+                - emphasis [ref=f124e154]:
+                  - text: (
+                  - link "What is Litmaps?" [ref=f124e155] [cursor=pointer]:
+                    - /url: https://www.litmaps.co/
+                  - text: )
+            - generic [ref=f124e156]:
+              - generic [ref=f124e158]:
+                - checkbox "scite Smart Citations"
+                - generic [ref=f124e160]: scite.ai Toggle
+              - generic [ref=f124e161]:
+                - text: scite Smart Citations
+                - emphasis [ref=f124e162]:
+                  - text: (
+                  - link "What are Smart Citations?" [ref=f124e163] [cursor=pointer]:
+                    - /url: https://www.scite.ai/
+                  - text: )
+        - radio "Code, Data, Media" [ref=f124e167]
+        - tab "Code, Data, Media" [ref=f124e168] [cursor=pointer]
+        - radio "Demos" [ref=f124e169]
+        - tab "Demos" [ref=f124e170] [cursor=pointer]
+        - radio "Related Papers" [ref=f124e171]
+        - tab "Related Papers" [ref=f124e172] [cursor=pointer]
+        - radio "About arXivLabs" [ref=f124e173]
+        - tab "About arXivLabs" [ref=f124e174] [cursor=pointer]
+      - generic [ref=f124e175]:
+        - link "Which authors of this paper are endorsers?" [ref=f124e176] [cursor=pointer]:
+          - /url: /auth/show-endorsers/2201.11986
+        - text: "|"
+        - link "Disable MathJax" [ref=f124e177] [cursor=pointer]:
+          - /url: javascript:setMathjaxCookie()
+        - text: (
+        - link "What is MathJax?" [ref=f124e178] [cursor=pointer]:
+          - /url: https://info.arxiv.org/help/mathjax.html
+        - text: )
+  - contentinfo [ref=f124e179]:
+    - generic [ref=f124e180]:
+      - generic [ref=f124e181]:
+        - generic [ref=f124e182]:
+          - text: We gratefully acknowledge support from our
+          - strong [ref=f124e183]: major funders
+          - text: ","
+          - link [ref=f124e184] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about/ourmembers.html
+            - strong [ref=f124e185]: member institutions
+          - text: ", and all contributors."
+        - navigation "Site navigation" [ref=f124e186]:
+          - link "About" [ref=f124e187] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about
+          - generic [ref=f124e188]: ·
+          - link "Help" [ref=f124e189] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help
+          - generic [ref=f124e190]: ·
+          - link "Contact" [ref=f124e191] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/contact.html
+          - generic [ref=f124e192]: ·
+          - link "Subscribe" [ref=f124e193] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/subscribe
+          - generic [ref=f124e194]: ·
+          - link "Copyright" [ref=f124e195] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/license/index.html
+          - generic [ref=f124e196]: ·
+          - link "Privacy" [ref=f124e197] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/policies/privacy_policy.html
+          - generic [ref=f124e198]: ·
+          - link "Accessibility" [ref=f124e199] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/web_accessibility.html
+          - generic [ref=f124e200]: ·
+          - link "Operational Status (opens in new tab)" [ref=f124e201] [cursor=pointer]:
+            - /url: https://status.arxiv.org
+            - text: Operational Status
+            - generic [ref=f124e202]: (opens in new tab)
+      - generic "Major funders" [ref=f124e203]:
+        - generic [ref=f124e204]: Major funding support from
+        - generic [ref=f124e205]:
+          - img "Simons Foundation" [ref=f124e206]
+          - img "Schmidt Sciences" [ref=f124e207]

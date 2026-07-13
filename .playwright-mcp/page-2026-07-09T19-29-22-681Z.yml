@@ -1,0 +1,283 @@
+- generic [active] [ref=f7e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f7e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f7e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f7e8]:
+    - search [ref=f7e9]:
+      - generic [ref=f7e11]:
+        - link "Go to Google Home" [ref=f7e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQPAgI
+        - generic [ref=f7e21]:
+          - generic [ref=f7e22]:
+            - combobox "Search" [ref=f7e25]: Zeno++ Robust Fully Asynchronous SGD arxiv Zeno++ Robust Fully Asynchronous SGD arxiv
+            - generic [ref=f7e26]:
+              - button "Clear" [ref=f7e28] [cursor=pointer]
+              - generic [ref=f7e33]:
+                - button "Search by voice" [ref=f7e34] [cursor=pointer]
+                - button "Search by image" [ref=f7e37] [cursor=pointer]
+          - button "Search" [ref=f7e40] [cursor=pointer]
+    - generic [ref=f7e45]:
+      - button "Settings" [ref=f7e47] [cursor=pointer]
+      - button "Share" [ref=f7e53] [cursor=pointer]
+      - generic [ref=f7e59]:
+        - button "Google apps" [ref=f7e61] [cursor=pointer]
+        - link "Sign in" [ref=f7e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3DZeno%252B%252B%2BRobust%2BFully%2BAsynchronous%2BSGD%2Barxiv&ec=futura_srp_og_si_72236_p
+  - generic [ref=f7e68]:
+    - navigation [ref=f7e74]:
+      - generic [ref=f7e80]:
+        - list [ref=f7e81]:
+          - listitem [ref=f7e82]:
+            - link "AI Mode" [ref=f7e85] [cursor=pointer]:
+              - /url: /search?q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sca_esv=d4e925c21a8887a9&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&aep=1&ntc=1&sa=X&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ2J8OegQICBAD
+          - listitem [ref=f7e89]:
+            - link "All" [disabled] [ref=f7e90]
+          - listitem [ref=f7e93]:
+            - link "Images" [ref=f7e94] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sa=X&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQtKgLegQICxAB
+          - listitem [ref=f7e97]:
+            - link "Videos" [ref=f7e98] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sa=X&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQtKgLegQIDBAB
+          - listitem [ref=f7e101]:
+            - link "Shopping" [ref=f7e102] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&ved=1t:220175&ictx=111
+          - listitem [ref=f7e105]:
+            - link "Forums" [ref=f7e106] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sa=X&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQs6gLegQIDhAB
+          - listitem [ref=f7e109]:
+            - link "Short videos" [ref=f7e110] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sa=X&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQs6gLegQIDRAB
+          - listitem [ref=f7e113]:
+            - button [ref=f7e114] [cursor=pointer]:
+              - generic "More filters" [ref=f7e115]: More
+        - button "Tools" [ref=f7e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f7e129]
+    - generic [ref=f7e134]:
+      - generic [ref=f7e153]:
+        - heading "Thinking" [level=2] [ref=f7e157]
+        - progressbar "Generating" [ref=f7e160]
+      - main [ref=f7e162]:
+        - generic [ref=f7e166]:
+          - generic [ref=f7e169]:
+            - heading "Web results" [level=2] [ref=f7e170]
+            - generic [ref=f7e171]:
+              - generic [ref=f7e174]:
+                - 'link "[1903.07020] Zeno++: Robust Fully Asynchronous SGD arXiv https://arxiv.org › cs" [ref=f7e176] [cursor=pointer]':
+                  - /url: https://arxiv.org/abs/1903.07020
+                  - 'heading "[1903.07020] Zeno++: Robust Fully Asynchronous SGD" [level=3] [ref=f7e177]'
+                  - generic [ref=f7e183]:
+                    - generic [ref=f7e184]: arXiv
+                    - generic [ref=f7e186]: https://arxiv.org › cs
+                - button "About this result" [ref=f7e190] [cursor=pointer]
+              - generic [ref=f7e196]:
+                - generic [ref=f7e197]: by C Xie · 2019 · Cited by 196 —
+                - generic [ref=f7e198]:
+                  - text: We propose
+                  - emphasis [ref=f7e199]: Zeno
+                  - text: ++, a new robust asynchronous Stochastic Gradient Descent~(SGD) procedure which tolerates Byzantine failures of the workers.
+                - link "Read more" [ref=f7e200] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/1903.07020#:~:text=We%20propose%20Zeno%2B%2B%2C%20a%20new,Byzantine%20failures%20of%20the%20workers.
+          - generic [ref=f7e204]:
+            - generic [ref=f7e207]:
+              - 'link "Zeno++: Robust Fully Asynchronous SGD arXiv https://arxiv.org › pdf" [ref=f7e209] [cursor=pointer]':
+                - /url: https://arxiv.org/pdf/1903.07020
+                - 'heading "Zeno++: Robust Fully Asynchronous SGD" [level=3] [ref=f7e210]'
+                - generic [ref=f7e216]:
+                  - generic [ref=f7e217]: arXiv
+                  - generic [ref=f7e219]: https://arxiv.org › pdf
+              - generic [ref=f7e221]: PDF
+              - button "About this result" [ref=f7e224] [cursor=pointer]
+            - generic [ref=f7e230]:
+              - generic [ref=f7e231]: by C Xie · 2019 · Cited by 196 —
+              - generic [ref=f7e232]:
+                - text: We propose
+                - emphasis [ref=f7e233]: Zeno
+                - text: ++, a new robust asynchronous. Stochastic Gradient Descent (SGD) procedure, intended to tolerate Byzantine failures of work-.
+              - link "Read more" [ref=f7e234] [cursor=pointer]:
+                - /url: https://arxiv.org/pdf/1903.07020#:~:text=We%20propose%20Zeno%2B%2B%2C%20a%20new,tolerate%20Byzantine%20failures%20of%20work%2D
+          - generic [ref=f7e238]:
+            - generic [ref=f7e241]:
+              - 'link "Zeno++: Robust Fully Asynchronous SGD OpenReview https://openreview.net › forum" [ref=f7e243] [cursor=pointer]':
+                - /url: https://openreview.net/forum?id=rygHe64FDS
+                - 'heading "Zeno++: Robust Fully Asynchronous SGD" [level=3] [ref=f7e244]'
+                - generic [ref=f7e250]:
+                  - generic [ref=f7e251]: OpenReview
+                  - generic [ref=f7e253]: https://openreview.net › forum
+              - button "About this result" [ref=f7e257] [cursor=pointer]
+            - generic [ref=f7e263]:
+              - generic [ref=f7e264]: by C Xie · Cited by 196 —
+              - generic [ref=f7e265]:
+                - text: "Abstract: We propose"
+                - emphasis [ref=f7e266]: Zeno
+                - text: ++, a new robust asynchronous Stochastic Gradient Descent~(SGD) procedure which tolerates Byzantine failures of the workers.
+              - link "Read more" [ref=f7e267] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=rygHe64FDS#:~:text=Abstract%3A%20We%20propose%20Zeno%2B%2B%2C%20a,Byzantine%20failures%20of%20the%20workers.
+          - generic [ref=f7e271]:
+            - generic [ref=f7e274]:
+              - 'link "Zeno++: Robust Fully Asynchronous SGD Proceedings of Machine Learning Research https://proceedings.mlr.press › ..." [ref=f7e276] [cursor=pointer]':
+                - /url: https://proceedings.mlr.press/v119/xie20c.html
+                - 'heading "Zeno++: Robust Fully Asynchronous SGD" [level=3] [ref=f7e277]'
+                - generic [ref=f7e283]:
+                  - generic [ref=f7e284]: Proceedings of Machine Learning Research
+                  - generic [ref=f7e286]: https://proceedings.mlr.press › ...
+              - button "About this result" [ref=f7e290] [cursor=pointer]
+            - generic [ref=f7e296]:
+              - generic [ref=f7e297]: by C Xie · 2020 · Cited by 196 —
+              - generic [ref=f7e298]:
+                - text: We propose
+                - emphasis [ref=f7e299]: Zeno
+                - text: ++, a new robust asynchronous Stochastic Gradient Descent(SGD) procedure, intended to tolerate Byzantine failures of workers.
+              - link "Read more" [ref=f7e300] [cursor=pointer]:
+                - /url: https://proceedings.mlr.press/v119/xie20c.html#:~:text=We%20propose%20Zeno%2B%2B%2C%20a%20new,tolerate%20Byzantine%20failures%20of%20workers.
+            - generic [ref=f7e302]:
+              - text: "Missing: arxiv ‎| Show results with:"
+              - link "arxiv" [ref=f7e303] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+%22arxiv%22&sa=X&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ5t4CegQILxAB
+          - generic [ref=f7e307]:
+            - generic [ref=f7e310]:
+              - 'link "Zeno++: Robust Fully Asynchronous SGD ICML 2026 https://icml.cc › virtual › poster" [ref=f7e312] [cursor=pointer]':
+                - /url: https://icml.cc/virtual/2020/poster/6052
+                - 'heading "Zeno++: Robust Fully Asynchronous SGD" [level=3] [ref=f7e313]'
+                - generic [ref=f7e319]:
+                  - generic [ref=f7e320]: ICML 2026
+                  - generic [ref=f7e322]: https://icml.cc › virtual › poster
+              - button "About this result" [ref=f7e326] [cursor=pointer]
+            - generic [ref=f7e332]:
+              - generic [ref=f7e333]:
+                - text: Abstract. We propose
+                - emphasis [ref=f7e334]: Zeno
+                - text: ++, a new robust asynchronous Stochastic Gradient Descent(SGD) procedure, intended to tolerate Byzantine failures of workers.
+              - link "Read more" [ref=f7e335] [cursor=pointer]:
+                - /url: https://icml.cc/virtual/2020/poster/6052#:~:text=Abstract,tolerate%20Byzantine%20failures%20of%20workers.
+            - generic [ref=f7e337]:
+              - text: "Missing: arxiv ‎| Show results with:"
+              - link "arxiv" [ref=f7e338] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+%22arxiv%22&sa=X&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ5t4CegQILBAB
+          - generic [ref=f7e342]:
+            - generic [ref=f7e345]:
+              - link "Byzantine Tolerance for Distributed SGD University of Illinois Urbana-Champaign http://publish.illinois.edu › 2020/09 › Simon-Xie" [ref=f7e347] [cursor=pointer]:
+                - /url: http://publish.illinois.edu/ids2-tripods/files/2020/09/Simon-Xie.pdf
+                - heading "Byzantine Tolerance for Distributed SGD" [level=3] [ref=f7e348]
+                - generic [ref=f7e354]:
+                  - generic [ref=f7e355]: University of Illinois Urbana-Champaign
+                  - generic [ref=f7e357]: http://publish.illinois.edu › 2020/09 › Simon-Xie
+              - generic [ref=f7e359]: PDF
+              - button "About this result" [ref=f7e362] [cursor=pointer]
+            - generic [ref=f7e368]:
+              - generic [ref=f7e369]:
+                - emphasis [ref=f7e370]: "Zeno++: robust asynchronous SGD"
+                - text: with arbitrary number of Byzantine workers. ArXiv, abs/1903.07020. [Yin et al., 2018] Yin, D., Chen, Y., Ramchandran, K ...
+              - link "Read more" [ref=f7e371] [cursor=pointer]:
+                - /url: http://publish.illinois.edu/ids2-tripods/files/2020/09/Simon-Xie.pdf#:~:text=Zeno%2B%2B%3A%20robust%20asynchronous%20SGD%20with,Ramchandran%2C%20K.%2C%20and%20Bartlett%2C%20P.
+            - generic [ref=f7e373]:
+              - text: "Missing: Fully ‎| Show results with:"
+              - link "Fully" [ref=f7e374] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Zeno%2B%2B+Robust+%22Fully%22+Asynchronous+SGD+arxiv&sa=X&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ5t4CegQILhAB
+          - generic [ref=f7e378]:
+            - generic [ref=f7e381]:
+              - link "robust asynchronous SGD with arbitrary number of Byzantine ... ResearchGate https://www.researchgate.net › ... › Robustness" [ref=f7e383] [cursor=pointer]:
+                - /url: https://www.researchgate.net/publication/331858012_Zeno_robust_asynchronous_SGD_with_arbitrary_number_of_Byzantine_workers
+                - heading "robust asynchronous SGD with arbitrary number of Byzantine ..." [level=3] [ref=f7e384]
+                - generic [ref=f7e390]:
+                  - generic [ref=f7e391]: ResearchGate
+                  - generic [ref=f7e393]: https://www.researchgate.net › ... › Robustness
+              - button "About this result" [ref=f7e397] [cursor=pointer]
+            - generic [ref=f7e404]:
+              - text: We propose
+              - emphasis [ref=f7e405]: Zeno
+              - text: ++, a new robust asynchronous Stochastic Gradient Descent~(SGD) procedure which tolerates Byzantine failures of the workers.
+          - generic [ref=f7e409]:
+            - generic [ref=f7e412]:
+              - 'link "Zeno++: Robust Fully Asynchronous SGD Distributed Protocols Research Group https://dprg.cs.uiuc.edu › zeno_pp_slides_icml20" [ref=f7e414] [cursor=pointer]':
+                - /url: https://dprg.cs.uiuc.edu/data/files/2020/zeno_pp_slides_icml20.pdf
+                - 'heading "Zeno++: Robust Fully Asynchronous SGD" [level=3] [ref=f7e415]'
+                - generic [ref=f7e424]:
+                  - generic [ref=f7e425]: Distributed Protocols Research Group
+                  - generic [ref=f7e427]: https://dprg.cs.uiuc.edu › zeno_pp_slides_icml20
+              - generic [ref=f7e429]: PDF
+              - button "About this result" [ref=f7e432] [cursor=pointer]
+            - generic [ref=f7e437]:
+              - generic [ref=f7e438]:
+                - generic [ref=f7e439]: by C Xie · Cited by 196 —
+                - generic [ref=f7e440]:
+                  - text: "Goal: converge under attacks/failures."
+                  - emphasis [ref=f7e441]: "Zeno++: distributed asynchronous SGD"
+                  - text: that. • tolerates an arbitrary number of malicious workers.
+                - link "Read more" [ref=f7e442] [cursor=pointer]:
+                  - /url: https://dprg.cs.uiuc.edu/data/files/2020/zeno_pp_slides_icml20.pdf#:~:text=Goal%3A%20converge%20under%20attacks%2Ffailures,arbitrary%20number%20of%20malicious%20workers
+              - generic [ref=f7e443]: 58 pages
+            - generic [ref=f7e445]:
+              - text: "Missing: arxiv ‎| Show results with:"
+              - link "arxiv" [ref=f7e446] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+%22arxiv%22&sa=X&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ5t4CegQILRAB
+          - generic [ref=f7e450]:
+            - generic [ref=f7e453]:
+              - 'link "Zeno++: Robust Fully Asynchronous SGD SlidesLive https://slideslive.com › zeno-robust-fully-asynchronous..." [ref=f7e455] [cursor=pointer]':
+                - /url: https://slideslive.com/38927782/zeno-robust-fully-asynchronous-sgd
+                - 'heading "Zeno++: Robust Fully Asynchronous SGD" [level=3] [ref=f7e456]'
+                - generic [ref=f7e462]:
+                  - generic [ref=f7e463]: SlidesLive
+                  - generic [ref=f7e465]: https://slideslive.com › zeno-robust-fully-asynchronous...
+              - button "About this result" [ref=f7e469] [cursor=pointer]
+            - generic [ref=f7e475]:
+              - generic [ref=f7e476]: Jul 12, 2020 —
+              - generic [ref=f7e477]:
+                - text: We propose
+                - emphasis [ref=f7e478]: Zeno
+                - text: ++, a new robust asynchronous Stochastic Gradient Descent (SGD) procedure, which tolerates Byzantine failures of the workers.
+        - navigation [ref=f7e481]:
+          - heading "Page Navigation" [level=1] [ref=f7e482]
+          - text: "1"
+          - link "Page 2" [ref=f7e485] [cursor=pointer]:
+            - /url: /search?q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sca_esv=d4e925c21a8887a9&ei=kfZPatuWO7ackPIP35qusAc&start=10&sa=N&sstk=AU9db-CX-ym_etgj_2ql9qLpqP59UWMLlJIyDRvAH2yHj_vBPW0FXR3bd-ADI-CpvwMp-_yOD51xDlGP05JalSTo3Zf_yCWQrnjoTg&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ8tMDegQIQBAE
+            - text: "2"
+          - link "Page 3" [ref=f7e487] [cursor=pointer]:
+            - /url: /search?q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sca_esv=d4e925c21a8887a9&ei=kfZPatuWO7ackPIP35qusAc&start=20&sa=N&sstk=AU9db-CX-ym_etgj_2ql9qLpqP59UWMLlJIyDRvAH2yHj_vBPW0FXR3bd-ADI-CpvwMp-_yOD51xDlGP05JalSTo3Zf_yCWQrnjoTg&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ8tMDegQIQBAG
+            - text: "3"
+          - link "Page 4" [ref=f7e489] [cursor=pointer]:
+            - /url: /search?q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sca_esv=d4e925c21a8887a9&ei=kfZPatuWO7ackPIP35qusAc&start=30&sa=N&sstk=AU9db-CX-ym_etgj_2ql9qLpqP59UWMLlJIyDRvAH2yHj_vBPW0FXR3bd-ADI-CpvwMp-_yOD51xDlGP05JalSTo3Zf_yCWQrnjoTg&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ8tMDegQIQBAI
+            - text: "4"
+          - link "Page 5" [ref=f7e491] [cursor=pointer]:
+            - /url: /search?q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sca_esv=d4e925c21a8887a9&ei=kfZPatuWO7ackPIP35qusAc&start=40&sa=N&sstk=AU9db-CX-ym_etgj_2ql9qLpqP59UWMLlJIyDRvAH2yHj_vBPW0FXR3bd-ADI-CpvwMp-_yOD51xDlGP05JalSTo3Zf_yCWQrnjoTg&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ8tMDegQIQBAK
+            - text: "5"
+          - link "Page 6" [ref=f7e493] [cursor=pointer]:
+            - /url: /search?q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sca_esv=d4e925c21a8887a9&ei=kfZPatuWO7ackPIP35qusAc&start=50&sa=N&sstk=AU9db-CX-ym_etgj_2ql9qLpqP59UWMLlJIyDRvAH2yHj_vBPW0FXR3bd-ADI-CpvwMp-_yOD51xDlGP05JalSTo3Zf_yCWQrnjoTg&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ8tMDegQIQBAM
+            - text: "6"
+          - link "Page 7" [ref=f7e495] [cursor=pointer]:
+            - /url: /search?q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sca_esv=d4e925c21a8887a9&ei=kfZPatuWO7ackPIP35qusAc&start=60&sa=N&sstk=AU9db-CX-ym_etgj_2ql9qLpqP59UWMLlJIyDRvAH2yHj_vBPW0FXR3bd-ADI-CpvwMp-_yOD51xDlGP05JalSTo3Zf_yCWQrnjoTg&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ8tMDegQIQBAO
+            - text: "7"
+          - link "Page 8" [ref=f7e497] [cursor=pointer]:
+            - /url: /search?q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sca_esv=d4e925c21a8887a9&ei=kfZPatuWO7ackPIP35qusAc&start=70&sa=N&sstk=AU9db-CX-ym_etgj_2ql9qLpqP59UWMLlJIyDRvAH2yHj_vBPW0FXR3bd-ADI-CpvwMp-_yOD51xDlGP05JalSTo3Zf_yCWQrnjoTg&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ8tMDegQIQBAQ
+            - text: "8"
+          - link "Page 9" [ref=f7e499] [cursor=pointer]:
+            - /url: /search?q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sca_esv=d4e925c21a8887a9&ei=kfZPatuWO7ackPIP35qusAc&start=80&sa=N&sstk=AU9db-CX-ym_etgj_2ql9qLpqP59UWMLlJIyDRvAH2yHj_vBPW0FXR3bd-ADI-CpvwMp-_yOD51xDlGP05JalSTo3Zf_yCWQrnjoTg&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ8tMDegQIQBAS
+            - text: "9"
+          - link "Page 10" [ref=f7e501] [cursor=pointer]:
+            - /url: /search?q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sca_esv=d4e925c21a8887a9&ei=kfZPatuWO7ackPIP35qusAc&start=90&sa=N&sstk=AU9db-CX-ym_etgj_2ql9qLpqP59UWMLlJIyDRvAH2yHj_vBPW0FXR3bd-ADI-CpvwMp-_yOD51xDlGP05JalSTo3Zf_yCWQrnjoTg&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ8tMDegQIQBAU
+            - text: "10"
+          - heading [level=2] [ref=f7e503]:
+            - link "Next" [ref=f7e504] [cursor=pointer]:
+              - /url: /search?q=Zeno%2B%2B+Robust+Fully+Asynchronous+SGD+arxiv&sca_esv=d4e925c21a8887a9&ei=kfZPatuWO7ackPIP35qusAc&start=10&sa=N&sstk=AU9db-CX-ym_etgj_2ql9qLpqP59UWMLlJIyDRvAH2yHj_vBPW0FXR3bd-ADI-CpvwMp-_yOD51xDlGP05JalSTo3Zf_yCWQrnjoTg&ved=2ahUKEwibo_OgqsaVAxU2DkQIHV-NC3YQ8NMDegQIQBAW
+        - navigation
+    - contentinfo [ref=f7e507]:
+      - heading "Footer Links" [level=1] [ref=f7e508]
+      - generic [ref=f7e512]:
+        - generic [ref=f7e516]:
+          - button "Woodland, California - From your IP address" [ref=f7e518] [cursor=pointer]:
+            - generic [ref=f7e519]: Woodland, California
+            - generic [ref=f7e521]:
+              - text: "-"
+              - generic [ref=f7e522]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f7e524] [cursor=pointer]
+        - generic [ref=f7e527]:
+          - link "Help" [ref=f7e528] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f7e529] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f7e530] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f7e531] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

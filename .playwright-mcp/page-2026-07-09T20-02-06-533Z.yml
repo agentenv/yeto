@@ -1,0 +1,286 @@
+- generic [active] [ref=f107e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f107e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f107e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f107e8]:
+    - search [ref=f107e9]:
+      - generic [ref=f107e11]:
+        - link "Go to Google Home" [ref=f107e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQPAgI
+        - generic [ref=f107e21]:
+          - generic [ref=f107e22]:
+            - combobox "Search" [ref=f107e25]: "\"Learning from History for Byzantine Robust Optimization\" arxiv \"Learning from History for Byzantine Robust Optimization\" arxiv"
+            - generic [ref=f107e26]:
+              - button "Clear" [ref=f107e28] [cursor=pointer]
+              - generic [ref=f107e33]:
+                - button "Search by voice" [ref=f107e34] [cursor=pointer]
+                - button "Search by image" [ref=f107e37] [cursor=pointer]
+          - button "Search" [ref=f107e40] [cursor=pointer]
+    - generic [ref=f107e45]:
+      - button "Settings" [ref=f107e47] [cursor=pointer]
+      - button "Share" [ref=f107e53] [cursor=pointer]
+      - generic [ref=f107e59]:
+        - button "Google apps" [ref=f107e61] [cursor=pointer]
+        - link "Sign in" [ref=f107e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522Learning%2Bfrom%2BHistory%2Bfor%2BByzantine%2BRobust%2BOptimization%2522%2Barxiv&ec=futura_srp_og_si_72236_p
+  - generic [ref=f107e68]:
+    - navigation [ref=f107e74]:
+      - generic [ref=f107e80]:
+        - list [ref=f107e81]:
+          - listitem [ref=f107e82]:
+            - link "AI Mode" [ref=f107e85] [cursor=pointer]:
+              - /url: /search?q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegslZITv4C2ITIiG_Zhv1CUVVCFZGgo3Z3gGlpXWh4hmaVbQHT1-5w12lVdW-6Wi-I2FI08mKlJq6aK8xb91xerMNRhHhYeKLDDB9urDhxYqUhm4-VQ&aep=1&ntc=1&sa=X&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQ2J8OegQICBAD
+          - listitem [ref=f107e89]:
+            - link "All" [disabled] [ref=f107e90]
+          - listitem [ref=f107e93]:
+            - link "Images" [ref=f107e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegslZITv4C2ITIiG_Zhv1CUVVCFZGgo3Z3gGlpXWh4hmaVbQHT1-5w12lVdW-6Wi-I2FI08mKlJq6aK8xb91xerMNRhHhYeKLDDB9urDhxYqUhm4-VQ&q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sa=X&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQtKgLegQIHxAB
+          - listitem [ref=f107e97]:
+            - link "Videos" [ref=f107e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegslZITv4C2ITIiG_Zhv1CUVVCFZGgo3Z3gGlpXWh4hmaVbQHT1-5w12lVdW-6Wi-I2FI08mKlJq6aK8xb91xerMNRhHhYeKLDDB9urDhxYqUhm4-VQ&q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sa=X&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQtKgLegQIHBAB
+          - listitem [ref=f107e101]:
+            - link "Forums" [ref=f107e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegslZITv4C2ITIiG_Zhv1CUVVCFZGgo3Z3gGlpXWh4hmaVbQHT1-5w12lVdW-6Wi-I2FI08mKlJq6aK8xb91xerMNRhHhYeKLDDB9urDhxYqUhm4-VQ&q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sa=X&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQs6gLegQIGhAB
+          - listitem [ref=f107e105]:
+            - link "Shopping" [ref=f107e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegslZITv4C2ITIiG_Zhv1CUVVCFZGgo3Z3gGlpXWh4hmaVbQHT1-5w12lVdW-6Wi-I2FI08mKlJq6aK8xb91xerMNRhHhYeKLDDB9urDhxYqUhm4-VQ&q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&ved=1t:220175&ictx=111
+          - listitem [ref=f107e109]:
+            - link "Short videos" [ref=f107e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegslZITv4C2ITIiG_Zhv1CUVVCFZGgo3Z3gGlpXWh4hmaVbQHT1-5w12lVdW-6Wi-I2FI08mKlJq6aK8xb91xerMNRhHhYeKLDDB9urDhxYqUhm4-VQ&q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sa=X&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQs6gLegQIEBAB
+          - listitem [ref=f107e113]:
+            - button [ref=f107e114] [cursor=pointer]:
+              - generic "More filters" [ref=f107e115]: More
+        - button "Tools" [ref=f107e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f107e129]
+    - main [ref=f107e135]:
+      - generic [ref=f107e139]:
+        - generic [ref=f107e142]:
+          - heading "Web results" [level=2] [ref=f107e143]
+          - generic [ref=f107e144]:
+            - generic [ref=f107e147]:
+              - link "Learning from History for Byzantine Robust Optimization arXiv https://arxiv.org › cs" [ref=f107e149] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/2012.10333
+                - heading "Learning from History for Byzantine Robust Optimization" [level=3] [ref=f107e150]
+                - generic [ref=f107e156]:
+                  - generic [ref=f107e157]: arXiv
+                  - generic [ref=f107e159]: https://arxiv.org › cs
+              - button "About this result" [ref=f107e163] [cursor=pointer]
+            - generic [ref=f107e169]:
+              - generic [ref=f107e170]: by SP Karimireddy · 2020 · Cited by 355 —
+              - generic [ref=f107e171]:
+                - text: "Title:"
+                - emphasis [ref=f107e172]: Learning from History for Byzantine Robust Optimization
+                - text: . Authors:Sai Praneeth Karimireddy, Lie He, Martin Jaggi. View a PDF of the paper ...
+              - link "Read more" [ref=f107e173] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/2012.10333#:~:text=Learning%20from%20History%20for%20Byzantine,Karimireddy%2C%20Lie%20He%2C%20Martin%20Jaggi
+        - generic [ref=f107e184]:
+          - heading "Thinking" [level=2] [ref=f107e188]
+          - progressbar "Generating" [ref=f107e191]
+        - generic [ref=f107e195]:
+          - heading "Web results" [level=2] [ref=f107e196]
+          - generic [ref=f107e197]:
+            - generic [ref=f107e200]:
+              - link "Learning from History for Byzantine Robust Optimization Proceedings of Machine Learning Research https://proceedings.mlr.press › ..." [ref=f107e202] [cursor=pointer]:
+                - /url: https://proceedings.mlr.press/v139/karimireddy21a/karimireddy21a.pdf
+                - heading "Learning from History for Byzantine Robust Optimization" [level=3] [ref=f107e203]
+                - generic [ref=f107e209]:
+                  - generic [ref=f107e210]: Proceedings of Machine Learning Research
+                  - generic [ref=f107e212]: https://proceedings.mlr.press › ...
+              - generic [ref=f107e214]: PDF
+              - button "About this result" [ref=f107e217] [cursor=pointer]
+            - generic [ref=f107e223]:
+              - generic [ref=f107e224]: by SP Karimireddy · Cited by 355 —
+              - generic [ref=f107e225]:
+                - text: This simple examples illustrates the fragility of such 'middle-seekers' to bimodal noise. Page 4.
+                - emphasis [ref=f107e226]: Learning from History for Byzantine Robust Optimization
+                - text: .
+              - link "Read more" [ref=f107e227] [cursor=pointer]:
+                - /url: https://proceedings.mlr.press/v139/karimireddy21a/karimireddy21a.pdf#:~:text=This%20simple%20examples%20illustrates%20the,History%20for%20Byzantine%20Robust%20Optimization
+        - generic [ref=f107e231]:
+          - generic [ref=f107e234]:
+            - link "Learning from History for Byzantine Robust Optimization arXiv https://www.arxiv.org › pdf" [ref=f107e236] [cursor=pointer]:
+              - /url: https://www.arxiv.org/pdf/2012.10333v1
+              - heading "Learning from History for Byzantine Robust Optimization" [level=3] [ref=f107e237]
+              - generic [ref=f107e243]:
+                - generic [ref=f107e244]: arXiv
+                - generic [ref=f107e246]: https://www.arxiv.org › pdf
+            - button "About this result" [ref=f107e250] [cursor=pointer]
+          - generic [ref=f107e257]:
+            - emphasis [ref=f107e258]: Learning from History for Byzantine Robust Optimization
+            - text: . Sai Praneeth Karimireddy. ∗. Lie He. ∗. Martin Jaggi. ∗. December 2020. Abstract. Byzantine ...
+        - generic [ref=f107e262]:
+          - generic [ref=f107e265]:
+            - link "Learning from History for Byzantine Robust Optimization GitHub https://github.com › epfml › byzantine-robust-optimizer" [ref=f107e267] [cursor=pointer]:
+              - /url: https://github.com/epfml/byzantine-robust-optimizer
+              - heading "Learning from History for Byzantine Robust Optimization" [level=3] [ref=f107e268]
+              - generic [ref=f107e274]:
+                - generic [ref=f107e275]: GitHub
+                - generic [ref=f107e277]: https://github.com › epfml › byzantine-robust-optimizer
+            - button "About this result" [ref=f107e281] [cursor=pointer]
+          - generic [ref=f107e287]:
+            - generic [ref=f107e288]:
+              - emphasis [ref=f107e289]: Learning from History for Byzantine Robust Optimization
+              - text: ". This repository contains research code for our Byzantine robust optimization paper. Summary: We ..."
+            - link "Read more" [ref=f107e290] [cursor=pointer]:
+              - /url: https://github.com/epfml/byzantine-robust-optimizer#:~:text=Learning%20from%20History%20for%20Byzantine,to%20derail%20the%20training%20process.
+        - generic [ref=f107e294]:
+          - generic [ref=f107e297]:
+            - link "Learning from History for Byzantine Robust Optimization Proceedings of Machine Learning Research https://proceedings.mlr.press › ..." [ref=f107e299] [cursor=pointer]:
+              - /url: https://proceedings.mlr.press/v139/karimireddy21a/karimireddy21a-supp.pdf
+              - heading "Learning from History for Byzantine Robust Optimization" [level=3] [ref=f107e300]
+              - generic [ref=f107e306]:
+                - generic [ref=f107e307]: Proceedings of Machine Learning Research
+                - generic [ref=f107e309]: https://proceedings.mlr.press › ...
+            - generic [ref=f107e311]: PDF
+            - button "About this result" [ref=f107e314] [cursor=pointer]
+          - generic [ref=f107e320]:
+            - generic [ref=f107e321]: by SP Karimireddy · Cited by 355 —
+            - generic [ref=f107e322]:
+              - emphasis [ref=f107e323]: arXiv
+              - text: 1810.05291, 2018. Page 10.
+              - emphasis [ref=f107e324]: Learning from History for Byzantine Robust Optimization
+              - text: . Blanchard, P., El Mhamdi, E. M., Guerraoui, R., and. Stainer, J ...
+            - link "Read more" [ref=f107e325] [cursor=pointer]:
+              - /url: https://proceedings.mlr.press/v139/karimireddy21a/karimireddy21a-supp.pdf#:~:text=arXiv%201810.05291%2C%202018.,Stainer%2C%20J.
+        - generic [ref=f107e329]:
+          - generic [ref=f107e332]:
+            - link "Learning from History for Byzantine Robust Optimization Semantic Scholar https://www.semanticscholar.org › paper › Learning-fro..." [ref=f107e334] [cursor=pointer]:
+              - /url: https://www.semanticscholar.org/paper/Learning-from-History-for-Byzantine-Robust-Karimireddy-He/693eb9ecd819712abb40cc6c059aa84c84d354bb
+              - heading "Learning from History for Byzantine Robust Optimization" [level=3] [ref=f107e335]
+              - generic [ref=f107e341]:
+                - generic [ref=f107e342]: Semantic Scholar
+                - generic [ref=f107e344]: https://www.semanticscholar.org › paper › Learning-fro...
+            - button "About this result" [ref=f107e348] [cursor=pointer]
+          - generic [ref=f107e355]:
+            - emphasis [ref=f107e356]: Learning from History for Byzantine Robust Optimization
+            - text: · Sai Praneeth Karimireddy, Lie He, Martin Jaggi · Published in International Conference on… 18 December ...
+        - generic [ref=f107e360]:
+          - generic [ref=f107e363]:
+            - link "Learning from History for Byzantine Robust Optimization ResearchGate https://www.researchgate.net › ... › Robust Optimization" [ref=f107e365] [cursor=pointer]:
+              - /url: https://www.researchgate.net/publication/347515499_Learning_from_History_for_Byzantine_Robust_Optimization
+              - heading "Learning from History for Byzantine Robust Optimization" [level=3] [ref=f107e366]
+              - generic [ref=f107e372]:
+                - generic [ref=f107e373]: ResearchGate
+                - generic [ref=f107e375]: https://www.researchgate.net › ... › Robust Optimization
+            - button "About this result" [ref=f107e379] [cursor=pointer]
+          - generic [ref=f107e386]:
+            - emphasis [ref=f107e387]: Learning from History for Byzantine Robust Optimization
+            - text: . December 2020. DOI:10.48550/
+            - emphasis [ref=f107e388]: arXiv
+            - text: ".2012.10333. Authors: Sai Praneeth ..."
+        - generic [ref=f107e392]:
+          - generic [ref=f107e395]:
+            - link "Lie He (贺烈) Google Scholar https://scholar.google.com › citati..." [ref=f107e397] [cursor=pointer]:
+              - /url: https://scholar.google.com/citations?user=rIAYxaMAAAAJ&hl=vi
+              - heading "Lie He (贺烈)" [level=3] [ref=f107e398]
+              - generic [ref=f107e404]:
+                - generic [ref=f107e405]: Google Scholar
+                - generic [ref=f107e407]: https://scholar.google.com › citati...
+            - generic [ref=f107e409]:
+              - generic [ref=f107e410]: ·
+              - link "Translate this page" [ref=f107e411] [cursor=pointer]:
+                - /url: https://scholar.google.com/citations?user=rIAYxaMAAAAJ&hl=vi
+            - button "About this result" [ref=f107e414] [cursor=pointer]
+          - generic [ref=f107e420]:
+            - generic [ref=f107e421]:
+              - emphasis [ref=f107e422]: Learning from history for byzantine robust optimization
+              - text: . SP Karimireddy, L He ...
+              - emphasis [ref=f107e423]: arXiv
+              - text: preprint
+              - emphasis [ref=f107e424]: arXiv
+              - text: :2202.01545, 2022. 110, 2022. RelaySum for ...
+            - link "Read more" [ref=f107e425] [cursor=pointer]:
+              - /url: https://scholar.google.com/citations?user=rIAYxaMAAAAJ&hl=vi#:~:text=Learning%20from%20history%20for%20byzantine,Karimireddy%2C%20L%20He%2C%20M%20Jaggi&text=arXiv%20preprint%20arXiv%3A2202.01545%2C%202022,Deep%20Learning%20on%20Heterogeneous%20Data
+        - generic [ref=f107e429]:
+          - generic [ref=f107e432]:
+            - link "Byzantine Robustness and Partial Participation Can Be ... Eduard Gorbunov https://eduardgorbunov.github.io › assets › files" [ref=f107e434] [cursor=pointer]:
+              - /url: https://eduardgorbunov.github.io/assets/files/PODL2024_Byzantine_robustness_and_PP.pdf
+              - heading "Byzantine Robustness and Partial Participation Can Be ..." [level=3] [ref=f107e435]
+              - generic [ref=f107e444]:
+                - generic [ref=f107e445]: Eduard Gorbunov
+                - generic [ref=f107e447]: https://eduardgorbunov.github.io › assets › files
+            - generic [ref=f107e449]: PDF
+            - button "About this result" [ref=f107e452] [cursor=pointer]
+          - generic [ref=f107e458]:
+            - generic [ref=f107e459]: by GMPRS Horváth · 2024 · Cited by 8 —
+            - generic [ref=f107e460]:
+              - emphasis [ref=f107e461]: Learning from history for byzantine robust optimization
+              - text: (ICML 2021). LeCun, Y. and Cortes, C. The MNIST database of handwritten digits (http ...
+            - link "Read more" [ref=f107e462] [cursor=pointer]:
+              - /url: https://eduardgorbunov.github.io/assets/files/PODL2024_Byzantine_robustness_and_PP.pdf#:~:text=Learning%20from%20history%20for%20byzantine,of%20handwritten%20digits%20(http%3A%2F%2Fyann.lecun.com%2Fexdb%2Fmnist%2F%2C%201998)
+        - table [ref=f107e468]:
+          - rowgroup [ref=f107e469]:
+            - row [ref=f107e470]:
+              - cell [ref=f107e471]:
+                - heading [level=3] [ref=f107e472]:
+                  - link [ref=f107e473] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar?q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                    - generic [ref=f107e474]:
+                      - text: Scholarly articles for
+                      - emphasis [ref=f107e475]: "\"Learning from History for Byzantine Robust Optimization\" arxiv"
+            - row [ref=f107e476]:
+              - cell [ref=f107e477]:
+                - heading "Learning from history for byzantine robust optimization - ‎Karimireddy - Cited by 355" [level=3] [ref=f107e478]:
+                  - link [ref=f107e479] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=http://proceedings.mlr.press/v139/karimireddy21a/karimireddy21a.pdf&hl=en&sa=X&ei=Pv5PasHvCKew6rQP-PrjsAQ&scisig=AM1tuoPyxGyoa_lFFfeDjXMXWzjf&oi=scholarr
+                    - emphasis [ref=f107e481]: Learning from history for byzantine robust optimization
+                  - generic [ref=f107e482]:
+                    - text: "-"
+                    - generic [ref=f107e483]: ‎Karimireddy
+                    - text: "- Cited by 355"
+      - navigation [ref=f107e486]:
+        - heading "Page Navigation" [level=1] [ref=f107e487]
+        - text: "1"
+        - link "Page 2" [ref=f107e490] [cursor=pointer]:
+          - /url: /search?q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sca_esv=30a5fb343c9df574&ei=Pv5PavHlAZPMkPIPnqyy4A8&start=10&sa=N&sstk=AU9db-DJM3vDNlrRkCMdSn-xeR0EpN87X0y2eJcVjcjMU8wgJKsJJBfGDRwSsMBEmFeXcNoKUe8u0CUMsgBi6PkGr4ElEfByE5zDeQ&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQ8tMDegQIPRAE
+          - text: "2"
+        - link "Page 3" [ref=f107e492] [cursor=pointer]:
+          - /url: /search?q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sca_esv=30a5fb343c9df574&ei=Pv5PavHlAZPMkPIPnqyy4A8&start=20&sa=N&sstk=AU9db-DJM3vDNlrRkCMdSn-xeR0EpN87X0y2eJcVjcjMU8wgJKsJJBfGDRwSsMBEmFeXcNoKUe8u0CUMsgBi6PkGr4ElEfByE5zDeQ&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQ8tMDegQIPRAG
+          - text: "3"
+        - link "Page 4" [ref=f107e494] [cursor=pointer]:
+          - /url: /search?q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sca_esv=30a5fb343c9df574&ei=Pv5PavHlAZPMkPIPnqyy4A8&start=30&sa=N&sstk=AU9db-DJM3vDNlrRkCMdSn-xeR0EpN87X0y2eJcVjcjMU8wgJKsJJBfGDRwSsMBEmFeXcNoKUe8u0CUMsgBi6PkGr4ElEfByE5zDeQ&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQ8tMDegQIPRAI
+          - text: "4"
+        - link "Page 5" [ref=f107e496] [cursor=pointer]:
+          - /url: /search?q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sca_esv=30a5fb343c9df574&ei=Pv5PavHlAZPMkPIPnqyy4A8&start=40&sa=N&sstk=AU9db-DJM3vDNlrRkCMdSn-xeR0EpN87X0y2eJcVjcjMU8wgJKsJJBfGDRwSsMBEmFeXcNoKUe8u0CUMsgBi6PkGr4ElEfByE5zDeQ&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQ8tMDegQIPRAK
+          - text: "5"
+        - link "Page 6" [ref=f107e498] [cursor=pointer]:
+          - /url: /search?q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sca_esv=30a5fb343c9df574&ei=Pv5PavHlAZPMkPIPnqyy4A8&start=50&sa=N&sstk=AU9db-DJM3vDNlrRkCMdSn-xeR0EpN87X0y2eJcVjcjMU8wgJKsJJBfGDRwSsMBEmFeXcNoKUe8u0CUMsgBi6PkGr4ElEfByE5zDeQ&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQ8tMDegQIPRAM
+          - text: "6"
+        - link "Page 7" [ref=f107e500] [cursor=pointer]:
+          - /url: /search?q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sca_esv=30a5fb343c9df574&ei=Pv5PavHlAZPMkPIPnqyy4A8&start=60&sa=N&sstk=AU9db-DJM3vDNlrRkCMdSn-xeR0EpN87X0y2eJcVjcjMU8wgJKsJJBfGDRwSsMBEmFeXcNoKUe8u0CUMsgBi6PkGr4ElEfByE5zDeQ&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQ8tMDegQIPRAO
+          - text: "7"
+        - link "Page 8" [ref=f107e502] [cursor=pointer]:
+          - /url: /search?q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sca_esv=30a5fb343c9df574&ei=Pv5PavHlAZPMkPIPnqyy4A8&start=70&sa=N&sstk=AU9db-DJM3vDNlrRkCMdSn-xeR0EpN87X0y2eJcVjcjMU8wgJKsJJBfGDRwSsMBEmFeXcNoKUe8u0CUMsgBi6PkGr4ElEfByE5zDeQ&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQ8tMDegQIPRAQ
+          - text: "8"
+        - link "Page 9" [ref=f107e504] [cursor=pointer]:
+          - /url: /search?q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sca_esv=30a5fb343c9df574&ei=Pv5PavHlAZPMkPIPnqyy4A8&start=80&sa=N&sstk=AU9db-DJM3vDNlrRkCMdSn-xeR0EpN87X0y2eJcVjcjMU8wgJKsJJBfGDRwSsMBEmFeXcNoKUe8u0CUMsgBi6PkGr4ElEfByE5zDeQ&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQ8tMDegQIPRAS
+          - text: "9"
+        - link "Page 10" [ref=f107e506] [cursor=pointer]:
+          - /url: /search?q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sca_esv=30a5fb343c9df574&ei=Pv5PavHlAZPMkPIPnqyy4A8&start=90&sa=N&sstk=AU9db-DJM3vDNlrRkCMdSn-xeR0EpN87X0y2eJcVjcjMU8wgJKsJJBfGDRwSsMBEmFeXcNoKUe8u0CUMsgBi6PkGr4ElEfByE5zDeQ&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQ8tMDegQIPRAU
+          - text: "10"
+        - heading [level=2] [ref=f107e508]:
+          - link "Next" [ref=f107e509] [cursor=pointer]:
+            - /url: /search?q=%22Learning+from+History+for+Byzantine+Robust+Optimization%22+arxiv&sca_esv=30a5fb343c9df574&ei=Pv5PavHlAZPMkPIPnqyy4A8&start=10&sa=N&sstk=AU9db-DJM3vDNlrRkCMdSn-xeR0EpN87X0y2eJcVjcjMU8wgJKsJJBfGDRwSsMBEmFeXcNoKUe8u0CUMsgBi6PkGr4ElEfByE5zDeQ&ved=2ahUKEwjx_LfJscaVAxUTJkQIHR6WDPwQ8NMDegQIPRAW
+      - navigation
+    - contentinfo [ref=f107e512]:
+      - heading "Footer Links" [level=1] [ref=f107e513]
+      - generic [ref=f107e517]:
+        - generic [ref=f107e521]:
+          - button "Woodland, California - From your IP address" [ref=f107e523] [cursor=pointer]:
+            - generic [ref=f107e524]: Woodland, California
+            - generic [ref=f107e526]:
+              - text: "-"
+              - generic [ref=f107e527]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f107e529] [cursor=pointer]
+        - generic [ref=f107e532]:
+          - link "Help" [ref=f107e533] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f107e534] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f107e535] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f107e536] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

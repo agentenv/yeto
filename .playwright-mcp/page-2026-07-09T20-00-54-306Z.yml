@@ -1,0 +1,291 @@
+- generic [active] [ref=f54e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f54e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f54e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f54e8]:
+    - search [ref=f54e9]:
+      - generic [ref=f54e11]:
+        - link "Go to Google Home" [ref=f54e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjyv_mmscaVAxXpM0QIHXrRKI0QPAgI
+        - generic [ref=f54e21]:
+          - generic [ref=f54e22]:
+            - combobox "Search" [ref=f54e25]: "\"average of normalized gradients\" distributed optimization \"average of normalized gradients\" distributed optimization"
+            - generic [ref=f54e26]:
+              - button "Clear" [ref=f54e28] [cursor=pointer]
+              - generic [ref=f54e33]:
+                - button "Search by voice" [ref=f54e34] [cursor=pointer]
+                - button "Search by image" [ref=f54e37] [cursor=pointer]
+          - button "Search" [ref=f54e40] [cursor=pointer]
+    - generic [ref=f54e45]:
+      - button "Settings" [ref=f54e47] [cursor=pointer]
+      - button "Share" [ref=f54e53] [cursor=pointer]
+      - generic [ref=f54e59]:
+        - button "Google apps" [ref=f54e61] [cursor=pointer]
+        - link "Sign in" [ref=f54e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522average%2520of%2520normalized%2520gradients%2522%2520distributed%2520optimization&ec=futura_srp_og_si_72236_p
+  - generic [ref=f54e68]:
+    - navigation [ref=f54e74]:
+      - generic [ref=f54e80]:
+        - list [ref=f54e81]:
+          - listitem [ref=f54e82]:
+            - link "AI Mode" [ref=f54e85] [cursor=pointer]:
+              - /url: /search?q=%22average+of+normalized+gradients%22+distributed+optimization&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&aep=1&ntc=1&sa=X&ved=2ahUKEwjyv_mmscaVAxXpM0QIHXrRKI0Q2J8OegQIFBAD
+          - listitem [ref=f54e89]:
+            - link "All" [disabled] [ref=f54e90]
+          - listitem [ref=f54e93]:
+            - link "Images" [ref=f54e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22average+of+normalized+gradients%22+distributed+optimization&sa=X&ved=2ahUKEwjyv_mmscaVAxXpM0QIHXrRKI0QtKgLegQIJxAB
+          - listitem [ref=f54e97]:
+            - link "Videos" [ref=f54e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22average+of+normalized+gradients%22+distributed+optimization&sa=X&ved=2ahUKEwjyv_mmscaVAxXpM0QIHXrRKI0QtKgLegQIKxAB
+          - listitem [ref=f54e101]:
+            - link "Shopping" [ref=f54e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22average+of+normalized+gradients%22+distributed+optimization&ved=1t:220175&ictx=111
+          - listitem [ref=f54e105]:
+            - link "Forums" [ref=f54e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22average+of+normalized+gradients%22+distributed+optimization&sa=X&ved=2ahUKEwjyv_mmscaVAxXpM0QIHXrRKI0Qs6gLegQILhAB
+          - listitem [ref=f54e109]:
+            - link "Short videos" [ref=f54e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=%22average+of+normalized+gradients%22+distributed+optimization&sa=X&ved=2ahUKEwjyv_mmscaVAxXpM0QIHXrRKI0Qs6gLegQIKRAB
+          - listitem [ref=f54e113]:
+            - button [ref=f54e114] [cursor=pointer]:
+              - generic "More filters" [ref=f54e115]: More
+        - button "Tools" [ref=f54e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f54e129]
+    - generic [ref=f54e134]:
+      - generic [ref=f54e153]:
+        - heading "Thinking" [level=2] [ref=f54e157]
+        - progressbar "Generating" [ref=f54e160]
+      - main [ref=f54e162]:
+        - generic [ref=f54e166]:
+          - table [ref=f54e172]:
+            - rowgroup [ref=f54e173]:
+              - row [ref=f54e174]:
+                - cell [ref=f54e175]:
+                  - heading [level=3] [ref=f54e176]:
+                    - link [ref=f54e177] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar?q=%22average+of+normalized+gradients%22+distributed+optimization&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                      - generic [ref=f54e178]:
+                        - text: Scholarly articles for
+                        - emphasis [ref=f54e179]: "\"average of normalized gradients\" distributed optimization"
+              - row [ref=f54e180]:
+                - cell [ref=f54e181]:
+                  - heading "An energy-efficient and trustworthy unsupervised … - ‎Huang - Cited by 35" [level=3] [ref=f54e182]:
+                    - link "An energy-efficient and trustworthy unsupervised …" [ref=f54e183] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://dl.acm.org/doi/pdf/10.1145/3543855&hl=en&sa=X&ei=9f1PatWuNKOaieoPmKu3mQ0&scisig=AM1tuoPTVCtYJulMciTn-VIuBOLg&oi=scholarr
+                    - generic [ref=f54e184]:
+                      - text: "-"
+                      - generic [ref=f54e185]: ‎Huang
+                      - text: "- Cited by 35"
+                  - heading "Scientific Visualization based on Simplicial Complexes - ‎Cignoni - Cited by 3" [level=3] [ref=f54e186]:
+                    - link "Scientific Visualization based on Simplicial Complexes" [ref=f54e187] [cursor=pointer]:
+                      - /url: https://scholar.google.com/scholar_url?url=https://iris.cnr.it/bitstream/20.500.14243/363091/1/prod_411814-doc_144988.pdf&hl=en&sa=X&ei=9f1PatWuNKOaieoPmKu3mQ0&scisig=AM1tuoOVX8ERuK_HVU_Vk__VWyE6&oi=scholarr
+                    - generic [ref=f54e188]:
+                      - text: "-"
+                      - generic [ref=f54e189]: ‎Cignoni
+                      - text: "- Cited by 3"
+          - generic [ref=f54e192]:
+            - heading "Web results" [level=2] [ref=f54e193]
+            - generic [ref=f54e194]:
+              - generic [ref=f54e197]:
+                - 'link "Stochastic Gradient Descent: Going As Fast As Possible ... HAL-Inria https://inria.hal.science › document" [ref=f54e199] [cursor=pointer]':
+                  - /url: https://inria.hal.science/hal-01700460/document
+                  - 'heading "Stochastic Gradient Descent: Going As Fast As Possible ..." [level=3] [ref=f54e200]'
+                  - generic [ref=f54e206]:
+                    - generic [ref=f54e207]: HAL-Inria
+                    - generic [ref=f54e209]: https://inria.hal.science › document
+                - generic [ref=f54e211]: PDF
+                - button "About this result" [ref=f54e214] [cursor=pointer]
+              - generic [ref=f54e220]:
+                - generic [ref=f54e221]: by AS Sebag · 2017 · Cited by 19 —
+                - generic [ref=f54e222]:
+                  - text: // exponential moving
+                  - emphasis [ref=f54e223]: average of normalized gradients
+                  - text: . 14 η ← η exp C(kpk2. 2 − µ)/σ(d). // agnostic learning rate update. 15 θ ← θ − ηg.
+                - link "Read more" [ref=f54e224] [cursor=pointer]:
+                  - /url: https://inria.hal.science/hal-01700460/document#:~:text=%2F%2F%20exponential%20moving%20average%20of,%CE%B8%20%E2%86%90%20%CE%B8%20%E2%88%92%20%CE%B7g
+          - generic [ref=f54e228]:
+            - generic [ref=f54e231]:
+              - link "Stochastic Gradient Descent arXiv https://arxiv.org › pdf" [ref=f54e233] [cursor=pointer]:
+                - /url: https://arxiv.org/pdf/1709.01427
+                - heading "Stochastic Gradient Descent" [level=3] [ref=f54e234]
+                - generic [ref=f54e240]:
+                  - generic [ref=f54e241]: arXiv
+                  - generic [ref=f54e243]: https://arxiv.org › pdf
+              - generic [ref=f54e245]: PDF
+              - button "About this result" [ref=f54e248] [cursor=pointer]
+            - generic [ref=f54e254]:
+              - generic [ref=f54e255]: by A Schoenauer-Sebag · 2017 · Cited by 19 —
+              - generic [ref=f54e256]:
+                - text: As the data size and the model dimensionality increase, mainstream convex
+                - emphasis [ref=f54e257]: optimization
+                - text: ... // exponential moving
+                - emphasis [ref=f54e258]: average of normalized gradients
+                - text: .
+              - link "Read more" [ref=f54e259] [cursor=pointer]:
+                - /url: https://arxiv.org/pdf/1709.01427#:~:text=As%20the%20data%20size%20and,increase%2C%20mainstream%20convex%20optimization%20methods&text=%2F%2F%20exponential%20moving%20average%20of,normalized%20gradients
+          - generic [ref=f54e263]:
+            - generic [ref=f54e266]:
+              - 'link "TAEFuzz: Automatic Fuzzing for Image-based Deep ... ACM Digital Library https://dl.acm.org › doi" [ref=f54e268] [cursor=pointer]':
+                - /url: https://dl.acm.org/doi/10.1145/3714463
+                - 'heading "TAEFuzz: Automatic Fuzzing for Image-based Deep ..." [level=3] [ref=f54e269]'
+                - generic [ref=f54e275]:
+                  - generic [ref=f54e276]: ACM Digital Library
+                  - generic [ref=f54e278]: https://dl.acm.org › doi
+              - button "About this result" [ref=f54e282] [cursor=pointer]
+            - generic [ref=f54e288]:
+              - generic [ref=f54e289]: Aug 14, 2025 —
+              - generic [ref=f54e290]:
+                - text: By repeating the above steps to generate M examples, the
+                - emphasis [ref=f54e291]: average of normalized gradients
+                - text: on the radius r can be calculated. Once the ...
+              - link "Read more" [ref=f54e292] [cursor=pointer]:
+                - /url: https://dl.acm.org/doi/10.1145/3714463#:~:text=By%20repeating%20the%20above%20steps,can%20be%20calculated.%20Once%20the
+          - generic [ref=f54e296]:
+            - generic [ref=f54e299]:
+              - link "Contribution-wise Byzantine-robust aggregation for Class- ... ScienceDirect.com https://www.sciencedirect.com › article › abs › pii" [ref=f54e301] [cursor=pointer]:
+                - /url: https://www.sciencedirect.com/science/article/abs/pii/S0020025524003888
+                - heading "Contribution-wise Byzantine-robust aggregation for Class- ..." [level=3] [ref=f54e302]
+                - generic [ref=f54e308]:
+                  - generic [ref=f54e309]: ScienceDirect.com
+                  - generic [ref=f54e311]: https://www.sciencedirect.com › article › abs › pii
+              - button "About this result" [ref=f54e315] [cursor=pointer]
+            - generic [ref=f54e321]:
+              - generic [ref=f54e322]: by Y Li · 2024 · Cited by 10 —
+              - generic [ref=f54e323]:
+                - text: Finally, the server combines the HS and C o n S as the final score (FS) and computes the
+                - emphasis [ref=f54e324]: average of normalized gradients
+                - text: weighted by their FS as the global ...
+              - link "Read more" [ref=f54e325] [cursor=pointer]:
+                - /url: https://www.sciencedirect.com/science/article/abs/pii/S0020025524003888#:~:text=Finally%2C%20the%20server%20combines%20the,as%20the%20global%20model%20update.
+          - generic [ref=f54e330]:
+            - heading "People also ask" [level=2] [ref=f54e332]
+            - generic [ref=f54e333]:
+              - button "Does SGD always converge?" [ref=f54e339] [cursor=pointer]
+              - button "What's the difference between SGD and GD?" [ref=f54e353] [cursor=pointer]
+              - button "Is gradient descent an optimization problem?" [ref=f54e367] [cursor=pointer]
+              - button "What is the global minimum in gradient descent?" [ref=f54e381] [cursor=pointer]
+          - generic [ref=f54e391]:
+            - heading "Web results" [level=2] [ref=f54e392]
+            - generic [ref=f54e393]:
+              - generic [ref=f54e396]:
+                - link "Energy-aware neural architecture selection and ... IEEE Computer Society https://www.computer.org › proceedings-article › ipdpsw" [ref=f54e398] [cursor=pointer]:
+                  - /url: https://www.computer.org/csdl/proceedings-article/ipdpsw/2022/974700a732/1Fu9F9EbpQY
+                  - heading "Energy-aware neural architecture selection and ..." [level=3] [ref=f54e399]
+                  - generic [ref=f54e408]:
+                    - generic [ref=f54e409]: IEEE Computer Society
+                    - generic [ref=f54e411]: https://www.computer.org › proceedings-article › ipdpsw
+                - button "About this result" [ref=f54e415] [cursor=pointer]
+              - generic [ref=f54e421]:
+                - generic [ref=f54e422]: by NC Frey · Cited by 22 —
+                - generic [ref=f54e423]:
+                  - text: Equation (8) is an
+                  - emphasis [ref=f54e424]: average of normalized gradients
+                  - text: ", where the normalization factor is the square root of the second order gradient. Here, k k refers to the ..."
+                - link "Read more" [ref=f54e425] [cursor=pointer]:
+                  - /url: https://www.computer.org/csdl/proceedings-article/ipdpsw/2022/974700a732/1Fu9F9EbpQY#:~:text=Equation%20(8)%20is%20an%20average,refers%20to%20the
+          - generic [ref=f54e429]:
+            - generic [ref=f54e432]:
+              - 'link "Tao: Re-Thinking DL-based Microarchitecture Simulation arXiv https://arxiv.org › html" [ref=f54e434] [cursor=pointer]':
+                - /url: https://arxiv.org/html/2404.10921v2
+                - 'heading "Tao: Re-Thinking DL-based Microarchitecture Simulation" [level=3] [ref=f54e435]'
+                - generic [ref=f54e441]:
+                  - generic [ref=f54e442]: arXiv
+                  - generic [ref=f54e444]: https://arxiv.org › html
+              - button "About this result" [ref=f54e448] [cursor=pointer]
+            - generic [ref=f54e454]:
+              - generic [ref=f54e455]: Apr 29, 2024 —
+              - generic [ref=f54e456]:
+                - text: This normalization ensures that both gradients have the similar scale. The
+                - emphasis [ref=f54e457]: average of normalized gradients
+                - text: ", i.e., G A ⁢ W ..."
+              - link "Read more" [ref=f54e458] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2404.10921v2#:~:text=This%20normalization%20ensures%20that%20both,W
+          - generic [ref=f54e462]:
+            - generic [ref=f54e465]:
+              - link "An energy-efficient and trustworthy unsupervised anomaly ... University of Exeter research repository https://ore.exeter.ac.uk › articles › files" [ref=f54e467] [cursor=pointer]:
+                - /url: https://ore.exeter.ac.uk/articles/journal_contribution/An_energy-efficient_and_trustworthy_unsupervised_anomaly_detection_framework_EATU_for_IIoT/29790995/1/files/56828603.pdf
+                - heading "An energy-efficient and trustworthy unsupervised anomaly ..." [level=3] [ref=f54e468]
+                - generic [ref=f54e474]:
+                  - generic [ref=f54e475]: University of Exeter research repository
+                  - generic [ref=f54e477]: https://ore.exeter.ac.uk › articles › files
+              - generic [ref=f54e479]: PDF
+              - button "About this result" [ref=f54e482] [cursor=pointer]
+            - generic [ref=f54e488]:
+              - generic [ref=f54e489]: by Z Huang · 2022 · Cited by 35 —
+              - generic [ref=f54e490]:
+                - text: calculate the
+                - emphasis [ref=f54e491]: average of normalized gradients
+                - text: fingerprint obtained from data, some attack types such as botnet attacks have many unseen patterns that cannot ...
+              - link "Read more" [ref=f54e492] [cursor=pointer]:
+                - /url: https://ore.exeter.ac.uk/articles/journal_contribution/An_energy-efficient_and_trustworthy_unsupervised_anomaly_detection_framework_EATU_for_IIoT/29790995/1/files/56828603.pdf#:~:text=calculate%20the%20average%20of%20normalized,be%20reveled%20by%20calculating%20gradients.
+          - generic [ref=f54e496]:
+            - generic [ref=f54e499]:
+              - link "This electronic thesis or dissertation has been downloaded ... University of Bristol https://research-information.bris.ac.uk › files › Ziji..." [ref=f54e501] [cursor=pointer]:
+                - /url: https://research-information.bris.ac.uk/files/446706123/Zijie_PhD_Thesis_final.pdf
+                - heading "This electronic thesis or dissertation has been downloaded ..." [level=3] [ref=f54e502]
+                - generic [ref=f54e508]:
+                  - generic [ref=f54e509]: University of Bristol
+                  - generic [ref=f54e511]: https://research-information.bris.ac.uk › files › Ziji...
+              - generic [ref=f54e513]: PDF
+              - button "About this result" [ref=f54e516] [cursor=pointer]
+            - generic [ref=f54e522]:
+              - generic [ref=f54e523]: by Z HUANG · 2024 —
+              - generic [ref=f54e524]:
+                - text: ...
+                - emphasis [ref=f54e525]: average of normalized gradients
+                - text: fingerprint obtained from data, some attack types such as botnet attacks have many unseen patterns that cannot be reveled by ...
+              - link "Read more" [ref=f54e526] [cursor=pointer]:
+                - /url: https://research-information.bris.ac.uk/files/446706123/Zijie_PhD_Thesis_final.pdf#:~:text=n%20distance%20to%20calculate%20the,to%20explain%20in%20such%20cases.
+          - generic [ref=f54e530]:
+            - generic [ref=f54e533]:
+              - 'link "TAO: Re-Thinking DL-based Microarchitecture Simulation ResearchGate https://www.researchgate.net › ... › Microarchitecture" [ref=f54e535] [cursor=pointer]':
+                - /url: https://www.researchgate.net/publication/380265186_Tao_Re-Thinking_DL-based_Microarchitecture_Simulation
+                - 'heading "TAO: Re-Thinking DL-based Microarchitecture Simulation" [level=3] [ref=f54e536]'
+                - generic [ref=f54e542]:
+                  - generic [ref=f54e543]: ResearchGate
+                  - generic [ref=f54e545]: https://www.researchgate.net › ... › Microarchitecture
+              - button "About this result" [ref=f54e549] [cursor=pointer]
+            - generic [ref=f54e555]:
+              - generic [ref=f54e556]: May 2, 2024 —
+              - generic [ref=f54e557]:
+                - text: ...
+                - emphasis [ref=f54e558]: average of normalized gradients
+                - text: "GAWT. A+GBWT. B. 2. 7: Use the"
+                - emphasis [ref=f54e559]: average of normalized gradients
+                - text: to update embedding layers and update ...
+              - link "Read more" [ref=f54e560] [cursor=pointer]:
+                - /url: https://www.researchgate.net/publication/380265186_Tao_Re-Thinking_DL-based_Microarchitecture_Simulation#:~:text=6%3A%20Compute%20average%20of%20normalized,embedding%20layers%20and%20update%20model
+        - generic [ref=f54e562]:
+          - generic [ref=f54e563]:
+            - heading "Notices about Filtered Results" [level=2] [ref=f54e564]
+            - paragraph [ref=f54e566]:
+              - generic [ref=f54e567]:
+                - text: In order to show you the most relevant results, we have omitted some entries very similar to the 10 already displayed.If you like, you can
+                - link "repeat the search with the omitted results included" [ref=f54e568] [cursor=pointer]:
+                  - /url: /search?q=%22average+of+normalized+gradients%22+distributed+optimization&sca_esv=30a5fb343c9df574&filter=0
+                - text: .
+          - navigation
+        - navigation
+    - contentinfo [ref=f54e569]:
+      - heading "Footer Links" [level=1] [ref=f54e570]
+      - generic [ref=f54e574]:
+        - generic [ref=f54e578]:
+          - button "Woodland, California - From your IP address" [ref=f54e580] [cursor=pointer]:
+            - generic [ref=f54e581]: Woodland, California
+            - generic [ref=f54e583]:
+              - text: "-"
+              - generic [ref=f54e584]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f54e586] [cursor=pointer]
+        - generic [ref=f54e589]:
+          - link "Help" [ref=f54e590] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f54e591] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f54e592] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f54e593] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

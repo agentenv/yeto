@@ -1,0 +1,413 @@
+- generic [active] [ref=f10e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f10e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f10e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f10e8]:
+    - search [ref=f10e9]:
+      - generic [ref=f10e11]:
+        - link "Go to Google Home" [ref=f10e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwit-u-VscaVAxULBUQIHVP0BrsQPAgI
+        - generic [ref=f10e21]:
+          - generic [ref=f10e22]:
+            - combobox "Search" [ref=f10e25]: "\"normalized gradient averaging\" federated learning \"normalized gradient averaging\" federated learning"
+            - generic [ref=f10e26]:
+              - button "Clear" [ref=f10e28] [cursor=pointer]
+              - generic [ref=f10e33]:
+                - button "Search by voice" [ref=f10e34] [cursor=pointer]
+                - button "Search by image" [ref=f10e37] [cursor=pointer]
+          - button "Search" [ref=f10e40] [cursor=pointer]
+    - generic [ref=f10e45]:
+      - button "Settings" [ref=f10e47] [cursor=pointer]
+      - button "Share" [ref=f10e53] [cursor=pointer]
+      - generic [ref=f10e59]:
+        - button "Google apps" [ref=f10e61] [cursor=pointer]
+        - link "Sign in" [ref=f10e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522normalized%2Bgradient%2Baveraging%2522%2Bfederated%2Blearning&ec=futura_srp_og_si_72236_p
+  - generic [ref=f10e68]:
+    - navigation [ref=f10e74]:
+      - generic [ref=f10e80]:
+        - list [ref=f10e81]:
+          - listitem [ref=f10e82]:
+            - link "AI Mode" [ref=f10e85] [cursor=pointer]:
+              - /url: /search?q=normalized+gradient+averaging+federated+learning&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&aep=1&ntc=1&sa=X&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ2J8OegQIChAD
+          - listitem [ref=f10e89]:
+            - link "All" [disabled] [ref=f10e90]
+          - listitem [ref=f10e93]:
+            - link "Images" [ref=f10e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=normalized+gradient+averaging+federated+learning&sa=X&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQtKgLegQIHhAB
+          - listitem [ref=f10e97]:
+            - link "Videos" [ref=f10e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=normalized+gradient+averaging+federated+learning&sa=X&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQtKgLegQIHRAB
+          - listitem [ref=f10e101]:
+            - link "Shopping" [ref=f10e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=normalized+gradient+averaging+federated+learning&ved=1t:220175&ictx=111
+          - listitem [ref=f10e105]:
+            - link "Forums" [ref=f10e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=normalized+gradient+averaging+federated+learning&sa=X&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQs6gLegQIFRAB
+          - listitem [ref=f10e109]:
+            - link "Short videos" [ref=f10e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-12o7QqJlXuVqdyTgH1QDy7e8aDHIiAV59eoNEOdQ5wN2YOMPs54GjlPbPJtTCnxhyqI7tuqva5fzBlqnQEIGh_ne8PEFRlIPmVd0ZGJtaHnOLKgCQ&q=normalized+gradient+averaging+federated+learning&sa=X&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQs6gLegQIEBAB
+          - listitem [ref=f10e113]:
+            - button [ref=f10e114] [cursor=pointer]:
+              - generic "More filters" [ref=f10e115]: More
+        - button "Tools" [ref=f10e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f10e129]
+    - generic [ref=f10e134]:
+      - generic [ref=f10e153]:
+        - heading "Thinking" [level=2] [ref=f10e157]
+        - progressbar "Generating" [ref=f10e160]
+      - main [ref=f10e162]:
+        - generic [ref=f10e163]:
+          - generic [ref=f10e167]:
+            - heading "No results found for \"normalized gradient averaging\" federated learning." [level=2] [ref=f10e168]
+            - text: Results for
+            - link "normalized gradient averaging federated learning" [ref=f10e169] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&q=normalized+gradient+averaging+federated+learning&sa=X&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQgwN6BAg8EAE
+            - text: "(without quotes):"
+          - generic [ref=f10e172]:
+            - generic [ref=f10e175]:
+              - heading "Web results" [level=2] [ref=f10e176]
+              - generic [ref=f10e177]:
+                - generic [ref=f10e180]:
+                  - link "Efficient Federated Learning against Byzantine Attacks and ... NeurIPS 2026 https://neurips.cc › virtual › poster" [ref=f10e182] [cursor=pointer]:
+                    - /url: https://neurips.cc/virtual/2025/poster/118753
+                    - heading "Efficient Federated Learning against Byzantine Attacks and ..." [level=3] [ref=f10e183]
+                    - generic [ref=f10e189]:
+                      - generic [ref=f10e190]: NeurIPS 2026
+                      - generic [ref=f10e192]: https://neurips.cc › virtual › poster
+                  - button "About this result" [ref=f10e196] [cursor=pointer]
+                - generic [ref=f10e202]:
+                  - generic [ref=f10e203]:
+                    - text: To address this issue, we propose a simple yet effective
+                    - emphasis [ref=f10e204]: Federated Normalized Gradients
+                    - text: Algorithm (Fed-NGA), which performs aggregation by merely computing the ...
+                  - link "Read more" [ref=f10e205] [cursor=pointer]:
+                    - /url: https://neurips.cc/virtual/2025/poster/118753#:~:text=To%20address%20this%20issue%2C%20we,normalized%20gradients%20from%20each%20client.
+            - generic [ref=f10e209]:
+              - generic [ref=f10e212]:
+                - link "Gradient Masked Averaging for Federated Learning arXiv https://arxiv.org › cs" [ref=f10e214] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/2201.11986
+                  - heading "Gradient Masked Averaging for Federated Learning" [level=3] [ref=f10e215]
+                  - generic [ref=f10e221]:
+                    - generic [ref=f10e222]: arXiv
+                    - generic [ref=f10e224]: https://arxiv.org › cs
+                - button "About this result" [ref=f10e228] [cursor=pointer]
+              - generic [ref=f10e234]:
+                - generic [ref=f10e235]: by I Tenison · 2022 · Cited by 46 —
+                - generic [ref=f10e236]:
+                  - text: We propose a
+                  - emphasis [ref=f10e237]: gradient masked averaging approach for FL
+                  - text: as an alternative to the standard averaging of client updates.
+                - link "Read more" [ref=f10e238] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/2201.11986#:~:text=Inspired%20from%20recent%20works%20in,standard%20averaging%20of%20client%20updates.
+              - generic [ref=f10e240]:
+                - text: "Missing: normalized ‎| Show results with:"
+                - link "normalized" [ref=f10e241] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=%22normalized%22+gradient+averaging+federated+learning&sa=X&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ5t4CegQILhAB
+            - generic [ref=f10e246]:
+              - heading "Discussions and forums" [level=2] [ref=f10e248]
+              - generic [ref=f10e249]:
+                - generic [ref=f10e252]:
+                  - generic [ref=f10e254] [cursor=pointer]:
+                    - generic [ref=f10e257]:
+                      - link "[P] FedNova:Federated Normalized averaging algorithm Reddit · r/MachineLearning · 3 years ago" [ref=f10e258]:
+                        - /url: https://www.reddit.com/r/MachineLearning/comments/14u9ivq/p_fednovafederated_normalized_averaging_algorithm/
+                        - generic [ref=f10e259]:
+                          - heading [level=3] [ref=f10e260]:
+                            - link "[P] FedNova:Federated Normalized averaging algorithm" [ref=f10e261]
+                          - generic [ref=f10e268]:
+                            - generic [ref=f10e269]: Reddit ·
+                            - generic [ref=f10e272]:
+                              - generic [ref=f10e273]: r/MachineLearning
+                              - generic [ref=f10e274]:
+                                - generic [ref=f10e275]: ·
+                                - generic [ref=f10e276]: 3 years ago
+                      - generic [ref=f10e282]:
+                        - generic [ref=f10e285]: ·
+                        - button "About this result" [ref=f10e291]
+                    - button "[P] FedNova:Federated Normalized averaging algorithm Reddit · r/MachineLearning · 3 years ago" [expanded] [ref=f10e296]
+                  - list [ref=f10e308]:
+                    - listitem [ref=f10e309]:
+                      - generic [ref=f10e313]:
+                        - link "I was working on a project based on tackling the objective inconsistency problem based on paper https://doi.org/10.48550/arXiv.2007.07481 . More discussions on [P] FedNova:Federated Normalized averaging algorithm" [ref=f10e314] [cursor=pointer]:
+                          - /url: https://www.reddit.com/r/MachineLearning/comments/14u9ivq/p_fednovafederated_normalized_averaging_algorithm/
+                        - generic [ref=f10e316]:
+                          - text: I was working on a project based on tackling the objective inconsistency problem based on paper https://doi.org/10.48550/arXiv.2007.07481 .
+                          - link [ref=f10e317] [cursor=pointer]:
+                            - /url: https://www.reddit.com/r/MachineLearning/comments/14u9ivq/p_fednovafederated_normalized_averaging_algorithm/
+                            - generic [ref=f10e318]: More
+                - generic [ref=f10e326] [cursor=pointer]:
+                  - generic [ref=f10e329]:
+                    - link "What is the reason weight averaging works in Federated Learning? Reddit · r/deeplearning · 6 comments · 4 years ago" [ref=f10e330]:
+                      - /url: https://www.reddit.com/r/deeplearning/comments/svn9bm/what_is_the_reason_weight_averaging_works_in/
+                      - generic [ref=f10e331]:
+                        - heading [level=3] [ref=f10e332]:
+                          - link "What is the reason weight averaging works in Federated Learning?" [ref=f10e333]
+                        - generic [ref=f10e340]:
+                          - generic [ref=f10e341]: Reddit ·
+                          - generic [ref=f10e343]:
+                            - generic [ref=f10e344]:
+                              - generic [ref=f10e345]: r/deeplearning
+                              - generic [ref=f10e346]:
+                                - generic [ref=f10e347]: ·
+                                - generic [ref=f10e348]: 6 comments
+                            - generic [ref=f10e349]:
+                              - generic [ref=f10e350]: ·
+                              - generic [ref=f10e351]: 4 years ago
+                    - generic [ref=f10e357]:
+                      - generic [ref=f10e360]: ·
+                      - button "About this result" [ref=f10e366]
+                  - button "What is the reason weight averaging works in Federated Learning? Reddit · r/deeplearning · 6 comments · 4 years ago" [ref=f10e371]
+                - generic [ref=f10e380] [cursor=pointer]:
+                  - generic [ref=f10e383]:
+                    - link "Proof that averaging weights is equal to averaging gradients (FedSGD vs ... Data Science Stack Exchange · 3 years ago" [ref=f10e384]:
+                      - /url: https://datascience.stackexchange.com/questions/114638/proof-that-averaging-weights-is-equal-to-averaging-gradients-fedsgd-vs-fedavg
+                      - generic [ref=f10e385]:
+                        - heading [level=3] [ref=f10e386]:
+                          - link "Proof that averaging weights is equal to averaging gradients (FedSGD vs ..." [ref=f10e387]
+                        - generic [ref=f10e394]:
+                          - generic [ref=f10e395]: Data Science Stack Exchange ·
+                          - generic [ref=f10e396]: 3 years ago
+                    - generic [ref=f10e405]:
+                      - generic [ref=f10e408]: ·
+                      - button "About this result" [ref=f10e414]
+                  - button "Proof that averaging weights is equal to averaging gradients (FedSGD vs ... Data Science Stack Exchange · 3 years ago" [ref=f10e419]
+                - link "See more discussions" [ref=f10e425] [cursor=pointer]:
+                  - /url: /search?q=normalized+gradient+averaging+federated+learning&sca_esv=30a5fb343c9df574&udm=18&sa=X&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ8poLegQIFBAE
+                  - separator [ref=f10e426]
+                  - generic [ref=f10e427]: See more
+            - generic [ref=f10e434]:
+              - heading "Web results" [level=2] [ref=f10e435]
+              - generic [ref=f10e436]:
+                - generic [ref=f10e439]:
+                  - link "Gradient Masked Averaging for Federated Learning OpenReview https://openreview.net › pdf" [ref=f10e441] [cursor=pointer]:
+                    - /url: https://openreview.net/pdf/1e0164d7244f2ed7ac44ee66c215644a8b743fb8.pdf
+                    - heading "Gradient Masked Averaging for Federated Learning" [level=3] [ref=f10e442]
+                    - generic [ref=f10e448]:
+                      - generic [ref=f10e449]: OpenReview
+                      - generic [ref=f10e451]: https://openreview.net › pdf
+                  - generic [ref=f10e453]: PDF
+                  - button "About this result" [ref=f10e456] [cursor=pointer]
+                - generic [ref=f10e462]:
+                  - text: Multiple variations of FedAVG have been proposed to improve convergence in non-i.i.d data distribution settings, including adding regularization to the client ...
+                  - link "Read more" [ref=f10e463] [cursor=pointer]:
+                    - /url: https://openreview.net/pdf/1e0164d7244f2ed7ac44ee66c215644a8b743fb8.pdf#:~:text=Multiple%20variations%20of%20FedAVG%20have,client%20objective%20Li%20et%20al.
+            - generic [ref=f10e467]:
+              - generic [ref=f10e470]:
+                - 'link "FedNova: Normalized Averaging for Heterogeneous Systems ApX Machine Learning https://apxml.com › courses › fednova-algorithm" [ref=f10e472] [cursor=pointer]':
+                  - /url: https://apxml.com/courses/federated-learning/chapter-2-advanced-aggregation-algorithms/fednova-algorithm
+                  - 'heading "FedNova: Normalized Averaging for Heterogeneous Systems" [level=3] [ref=f10e473]'
+                  - generic [ref=f10e482]:
+                    - generic [ref=f10e483]: ApX Machine Learning
+                    - generic [ref=f10e485]: https://apxml.com › courses › fednova-algorithm
+                - button "About this result" [ref=f10e489] [cursor=pointer]
+              - generic [ref=f10e496]:
+                - text: Explore FedNova, an aggregation method that
+                - emphasis [ref=f10e497]: normalizes updates
+                - text: to account for varying local computations.
+            - table [ref=f10e503]:
+              - rowgroup [ref=f10e504]:
+                - row [ref=f10e505]:
+                  - cell [ref=f10e506]:
+                    - heading [level=3] [ref=f10e507]:
+                      - link [ref=f10e508] [cursor=pointer]:
+                        - /url: https://scholar.google.com/scholar?q=normalized+gradient+averaging+federated+learning&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                        - generic [ref=f10e509]:
+                          - text: Scholarly articles for
+                          - emphasis [ref=f10e510]: normalized gradient averaging federated learning
+                - row [ref=f10e511]:
+                  - cell [ref=f10e512]:
+                    - 'heading "… gradient averaging: Tolerate the communication … - ‎Zhu - Cited by 102" [level=3] [ref=f10e513]':
+                      - link [ref=f10e514] [cursor=pointer]:
+                        - /url: https://scholar.google.com/scholar_url?url=https://proceedings.neurips.cc/paper_files/paper/2021/file/fc03d48253286a798f5116ec00e99b2b-Paper.pdf&hl=en&sa=X&ei=0v1Pasr-CKew6rQP-PrjsAQ&scisig=AM1tuoP6Pjrk1rtf4EjEnZbQKOyp&oi=scholarr
+                        - generic [ref=f10e515]:
+                          - text: …
+                          - emphasis [ref=f10e516]: gradient averaging
+                          - text: ": Tolerate the communication …"
+                      - generic [ref=f10e517]:
+                        - text: "-"
+                        - generic [ref=f10e518]: ‎Zhu
+                        - text: "- Cited by 102"
+                    - heading "… supervised federated learning by reducing the gradient … - ‎Zhang - Cited by 151" [level=3] [ref=f10e519]:
+                      - link [ref=f10e520] [cursor=pointer]:
+                        - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2008.11364&hl=en&sa=X&ei=0v1Pasr-CKew6rQP-PrjsAQ&scisig=AM1tuoNRXmOr-dOeHP7gb3kGgEeb&oi=scholarr
+                        - generic [ref=f10e521]:
+                          - text: … supervised
+                          - emphasis [ref=f10e522]: federated learning
+                          - text: by reducing the
+                          - emphasis [ref=f10e523]: gradient
+                          - text: …
+                      - generic [ref=f10e524]:
+                        - text: "-"
+                        - generic [ref=f10e525]: ‎Zhang
+                        - text: "- Cited by 151"
+                    - heading "Gradient masked averaging for federated learning - ‎Tenison - Cited by 46" [level=3] [ref=f10e526]:
+                      - link [ref=f10e527] [cursor=pointer]:
+                        - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2201.11986&hl=en&sa=X&ei=0v1Pasr-CKew6rQP-PrjsAQ&scisig=AM1tuoOcjMNdKDrIWGKXlSnV8X51&oi=scholarr
+                        - generic [ref=f10e528]:
+                          - emphasis [ref=f10e529]: Gradient
+                          - text: masked
+                          - emphasis [ref=f10e530]: averaging
+                          - text: for
+                          - emphasis [ref=f10e531]: federated learning
+                      - generic [ref=f10e532]:
+                        - text: "-"
+                        - generic [ref=f10e533]: ‎Tenison
+                        - text: "- Cited by 46"
+            - generic [ref=f10e536]:
+              - heading "Web results" [level=2] [ref=f10e537]
+              - generic [ref=f10e538]:
+                - generic [ref=f10e541]:
+                  - link "Federated Optimization Algorithms - FedSGD and FedAvg GitHub https://shreyansh26.github.io › post › 2021-12-18_feder..." [ref=f10e543] [cursor=pointer]:
+                    - /url: https://shreyansh26.github.io/post/2021-12-18_federated_optimization_fedavg/
+                    - heading "Federated Optimization Algorithms - FedSGD and FedAvg" [level=3] [ref=f10e544]
+                    - generic [ref=f10e550]:
+                      - generic [ref=f10e551]: GitHub
+                      - generic [ref=f10e553]: https://shreyansh26.github.io › post › 2021-12-18_feder...
+                  - button "About this result" [ref=f10e557] [cursor=pointer]
+                - generic [ref=f10e563]:
+                  - generic [ref=f10e564]: Dec 18, 2021 —
+                  - generic [ref=f10e565]:
+                    - text: A mathematical deep dive on a
+                    - emphasis [ref=f10e566]: Federated
+                    - text: Optimization algorithm - FedAvg and comparing it with a standard approach - FedSGD.
+            - generic [ref=f10e570]:
+              - generic [ref=f10e573]:
+                - 'link "Differentially Private Federated Learning with Normalized ... OPT 2025: Optimization for Machine Learning https://opt-ml.org › papers › paper39" [ref=f10e575] [cursor=pointer]':
+                  - /url: https://opt-ml.org/papers/2022/paper39.pdf
+                  - heading "Differentially Private Federated Learning with Normalized ..." [level=3] [ref=f10e576]
+                  - generic [ref=f10e585]:
+                    - generic [ref=f10e586]: "OPT 2025: Optimization for Machine Learning"
+                    - generic [ref=f10e588]: https://opt-ml.org › papers › paper39
+                - generic [ref=f10e590]: PDF
+                - button "About this result" [ref=f10e593] [cursor=pointer]
+              - generic [ref=f10e598]:
+                - generic [ref=f10e599]:
+                  - generic [ref=f10e600]: by R Das · Cited by 5 —
+                  - generic [ref=f10e601]:
+                    - text: The customary approach for client-level differentially private
+                    - emphasis [ref=f10e602]: federated learning
+                    - text: (FL) is to add. Gaussian noise to the
+                    - emphasis [ref=f10e603]: average
+                    - text: of the clipped client updates.
+                  - link "Read more" [ref=f10e604] [cursor=pointer]:
+                    - /url: https://opt-ml.org/papers/2022/paper39.pdf#:~:text=The%20customary%20approach%20for%20client%2Dlevel,of%20the%20clipped%20client%20updates.
+                - generic [ref=f10e605]: 25 pages
+            - generic [ref=f10e609]:
+              - generic [ref=f10e612]:
+                - link "Federated learning Wikipedia https://en.wikipedia.org › wiki › Federated_learning" [ref=f10e614] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Federated_learning
+                  - heading "Federated learning" [level=3] [ref=f10e615]
+                  - generic [ref=f10e621]:
+                    - generic [ref=f10e622]: Wikipedia
+                    - generic [ref=f10e624]: https://en.wikipedia.org › wiki › Federated_learning
+                - button "About this result" [ref=f10e628] [cursor=pointer]
+              - generic [ref=f10e634]:
+                - generic [ref=f10e635]:
+                  - text: The server
+                  - emphasis [ref=f10e636]: averages
+                  - text: the
+                  - emphasis [ref=f10e637]: gradients
+                  - text: in proportion to the number of
+                  - emphasis [ref=f10e638]: training
+                  - text: data on each node, and uses the
+                  - emphasis [ref=f10e639]: average
+                  - text: to make a
+                  - emphasis [ref=f10e640]: gradient
+                  - text: descent step.
+                  - emphasis [ref=f10e641]: Federated
+                  - text: ...
+                - link "Read more" [ref=f10e642] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Federated_learning#:~:text=The%20server%20averages%20the%20gradients,Federated%20averaging%20(FedAvg)
+              - list [ref=f10e644]:
+                - listitem [ref=f10e645]:
+                  - link "Definition" [ref=f10e646] [cursor=pointer]:
+                    - /url: https://en.wikipedia.org/wiki/Federated_learning#Definition
+                - listitem [ref=f10e649]:
+                  - link "Main features" [ref=f10e650] [cursor=pointer]:
+                    - /url: https://en.wikipedia.org/wiki/Federated_learning#Main_features
+                - listitem [ref=f10e653]:
+                  - link "Algorithmic hyper-parameters" [ref=f10e654] [cursor=pointer]:
+                    - /url: https://en.wikipedia.org/wiki/Federated_learning#Algorithmic_hyper-parameters
+                - listitem [ref=f10e657]:
+                  - link "Algorithms" [ref=f10e658] [cursor=pointer]:
+                    - /url: https://en.wikipedia.org/wiki/Federated_learning#Algorithms
+            - generic [ref=f10e664]:
+              - generic [ref=f10e667]:
+                - 'link "FedNolowe: A normalized loss-based weighted aggregation ... PubMed Central (PMC) (.gov) https://pmc.ncbi.nlm.nih.gov › articles › PMC12352789" [ref=f10e669] [cursor=pointer]':
+                  - /url: https://pmc.ncbi.nlm.nih.gov/articles/PMC12352789/
+                  - 'heading "FedNolowe: A normalized loss-based weighted aggregation ..." [level=3] [ref=f10e670]'
+                  - generic [ref=f10e676]:
+                    - generic [ref=f10e677]: PubMed Central (PMC) (.gov)
+                    - generic [ref=f10e679]: https://pmc.ncbi.nlm.nih.gov › articles › PMC12352789
+                - button "About this result" [ref=f10e683] [cursor=pointer]
+              - generic [ref=f10e689]:
+                - generic [ref=f10e690]: by DD Le · 2025 · Cited by 11 —
+                - generic [ref=f10e691]:
+                  - text: Federated Learning supports
+                  - emphasis [ref=f10e692]: collaborative model training across distributed clients
+                  - text: while keeping sensitive data decentralized.
+        - generic [ref=f10e694]:
+          - generic [ref=f10e699]:
+            - heading "People also search for" [level=2] [ref=f10e701]
+            - generic [ref=f10e703]:
+              - link "Normalized gradient averaging federated learning github" [ref=f10e708] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=Normalized+gradient+averaging+federated+learning+github&sa=X&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ1QJ6BAhBEAE
+              - link "Normalized gradient averaging federated learning example" [ref=f10e723] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=Normalized+gradient+averaging+federated+learning+example&sa=X&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ1QJ6BAhCEAE
+          - navigation [ref=f10e734]:
+            - heading "Page Navigation" [level=1] [ref=f10e735]
+            - text: "1"
+            - link "Page 2" [ref=f10e738] [cursor=pointer]:
+              - /url: /search?q=normalized+gradient+averaging+federated+learning&sca_esv=30a5fb343c9df574&ei=0f1Pau3NNouKkPIP0-ib2As&start=10&sa=N&sstk=AU9db-CZFAGMZOR_l3Fh-gQlvHFVKYgAzVosJbgLAvET0315jI8mYS2DZBZkbL7UYmdPdDLb8Bf1amxqemxQQU3zS0q4On7g7NuF4g&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ8tMDegQIPRAE
+              - text: "2"
+            - link "Page 3" [ref=f10e740] [cursor=pointer]:
+              - /url: /search?q=normalized+gradient+averaging+federated+learning&sca_esv=30a5fb343c9df574&ei=0f1Pau3NNouKkPIP0-ib2As&start=20&sa=N&sstk=AU9db-CZFAGMZOR_l3Fh-gQlvHFVKYgAzVosJbgLAvET0315jI8mYS2DZBZkbL7UYmdPdDLb8Bf1amxqemxQQU3zS0q4On7g7NuF4g&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ8tMDegQIPRAG
+              - text: "3"
+            - link "Page 4" [ref=f10e742] [cursor=pointer]:
+              - /url: /search?q=normalized+gradient+averaging+federated+learning&sca_esv=30a5fb343c9df574&ei=0f1Pau3NNouKkPIP0-ib2As&start=30&sa=N&sstk=AU9db-CZFAGMZOR_l3Fh-gQlvHFVKYgAzVosJbgLAvET0315jI8mYS2DZBZkbL7UYmdPdDLb8Bf1amxqemxQQU3zS0q4On7g7NuF4g&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ8tMDegQIPRAI
+              - text: "4"
+            - link "Page 5" [ref=f10e744] [cursor=pointer]:
+              - /url: /search?q=normalized+gradient+averaging+federated+learning&sca_esv=30a5fb343c9df574&ei=0f1Pau3NNouKkPIP0-ib2As&start=40&sa=N&sstk=AU9db-CZFAGMZOR_l3Fh-gQlvHFVKYgAzVosJbgLAvET0315jI8mYS2DZBZkbL7UYmdPdDLb8Bf1amxqemxQQU3zS0q4On7g7NuF4g&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ8tMDegQIPRAK
+              - text: "5"
+            - link "Page 6" [ref=f10e746] [cursor=pointer]:
+              - /url: /search?q=normalized+gradient+averaging+federated+learning&sca_esv=30a5fb343c9df574&ei=0f1Pau3NNouKkPIP0-ib2As&start=50&sa=N&sstk=AU9db-CZFAGMZOR_l3Fh-gQlvHFVKYgAzVosJbgLAvET0315jI8mYS2DZBZkbL7UYmdPdDLb8Bf1amxqemxQQU3zS0q4On7g7NuF4g&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ8tMDegQIPRAM
+              - text: "6"
+            - link "Page 7" [ref=f10e748] [cursor=pointer]:
+              - /url: /search?q=normalized+gradient+averaging+federated+learning&sca_esv=30a5fb343c9df574&ei=0f1Pau3NNouKkPIP0-ib2As&start=60&sa=N&sstk=AU9db-CZFAGMZOR_l3Fh-gQlvHFVKYgAzVosJbgLAvET0315jI8mYS2DZBZkbL7UYmdPdDLb8Bf1amxqemxQQU3zS0q4On7g7NuF4g&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ8tMDegQIPRAO
+              - text: "7"
+            - link "Page 8" [ref=f10e750] [cursor=pointer]:
+              - /url: /search?q=normalized+gradient+averaging+federated+learning&sca_esv=30a5fb343c9df574&ei=0f1Pau3NNouKkPIP0-ib2As&start=70&sa=N&sstk=AU9db-CZFAGMZOR_l3Fh-gQlvHFVKYgAzVosJbgLAvET0315jI8mYS2DZBZkbL7UYmdPdDLb8Bf1amxqemxQQU3zS0q4On7g7NuF4g&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ8tMDegQIPRAQ
+              - text: "8"
+            - link "Page 9" [ref=f10e752] [cursor=pointer]:
+              - /url: /search?q=normalized+gradient+averaging+federated+learning&sca_esv=30a5fb343c9df574&ei=0f1Pau3NNouKkPIP0-ib2As&start=80&sa=N&sstk=AU9db-CZFAGMZOR_l3Fh-gQlvHFVKYgAzVosJbgLAvET0315jI8mYS2DZBZkbL7UYmdPdDLb8Bf1amxqemxQQU3zS0q4On7g7NuF4g&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ8tMDegQIPRAS
+              - text: "9"
+            - link "Page 10" [ref=f10e754] [cursor=pointer]:
+              - /url: /search?q=normalized+gradient+averaging+federated+learning&sca_esv=30a5fb343c9df574&ei=0f1Pau3NNouKkPIP0-ib2As&start=90&sa=N&sstk=AU9db-CZFAGMZOR_l3Fh-gQlvHFVKYgAzVosJbgLAvET0315jI8mYS2DZBZkbL7UYmdPdDLb8Bf1amxqemxQQU3zS0q4On7g7NuF4g&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ8tMDegQIPRAU
+              - text: "10"
+            - heading [level=2] [ref=f10e756]:
+              - link "Next" [ref=f10e757] [cursor=pointer]:
+                - /url: /search?q=normalized+gradient+averaging+federated+learning&sca_esv=30a5fb343c9df574&ei=0f1Pau3NNouKkPIP0-ib2As&start=10&sa=N&sstk=AU9db-CZFAGMZOR_l3Fh-gQlvHFVKYgAzVosJbgLAvET0315jI8mYS2DZBZkbL7UYmdPdDLb8Bf1amxqemxQQU3zS0q4On7g7NuF4g&ved=2ahUKEwit-u-VscaVAxULBUQIHVP0BrsQ8NMDegQIPRAW
+        - navigation
+    - contentinfo [ref=f10e760]:
+      - heading "Footer Links" [level=1] [ref=f10e761]
+      - generic [ref=f10e765]:
+        - generic [ref=f10e769]:
+          - button "Woodland, California - From your IP address" [ref=f10e771] [cursor=pointer]:
+            - generic [ref=f10e772]: Woodland, California
+            - generic [ref=f10e774]:
+              - text: "-"
+              - generic [ref=f10e775]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f10e777] [cursor=pointer]
+        - generic [ref=f10e780]:
+          - link "Help" [ref=f10e781] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f10e782] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f10e783] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f10e784] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

@@ -1,0 +1,155 @@
+- generic [active] [ref=f7e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f7e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f7e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f7e8]:
+    - search [ref=f7e9]:
+      - generic [ref=f7e11]:
+        - link "Go to Google Home" [ref=f7e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjc4rKVscaVAxVPCbwBHWGDNfwQPAgI
+        - generic [ref=f7e21]:
+          - generic [ref=f7e22]:
+            - combobox "Search" [ref=f7e25]: "\"adaptive server learning rates\" federated learning FedOpt \"adaptive server learning rates\" federated learning FedOpt"
+            - generic [ref=f7e26]:
+              - button "Clear" [ref=f7e28] [cursor=pointer]
+              - generic [ref=f7e33]:
+                - button "Search by voice" [ref=f7e34] [cursor=pointer]
+                - button "Search by image" [ref=f7e37] [cursor=pointer]
+          - button "Search" [ref=f7e40] [cursor=pointer]
+    - generic [ref=f7e45]:
+      - button "Settings" [ref=f7e47] [cursor=pointer]
+      - button "Share" [ref=f7e53] [cursor=pointer]
+      - generic [ref=f7e59]:
+        - button "Google apps" [ref=f7e61] [cursor=pointer]
+        - link "Sign in" [ref=f7e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522adaptive%2Bserver%2Blearning%2Brates%2522%2Bfederated%2Blearning%2BFedOpt&ec=futura_srp_og_si_72236_p
+  - generic [ref=f7e68]:
+    - navigation [ref=f7e74]:
+      - generic [ref=f7e80]:
+        - list [ref=f7e81]:
+          - listitem [ref=f7e82]:
+            - link "AI Mode" [ref=f7e85] [cursor=pointer]:
+              - /url: /search?q=%22adaptive+server+learning+rates%22+federated+learning+FedOpt&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz6mPncLV6BMXrUfQD5ftu4HKiVJOOiqhNYT8Keh_15lhVLohIhM8kHnw_tixWHDpdAHWCTimc1GO2znH-0EdfLD74c9fw&aep=1&ntc=1&sa=X&ved=2ahUKEwjc4rKVscaVAxVPCbwBHWGDNfwQ2J8OegQIDhAD
+          - listitem [ref=f7e89]:
+            - link "All" [disabled] [ref=f7e90]
+          - listitem [ref=f7e93]:
+            - link "Images" [ref=f7e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz6mPncLV6BMXrUfQD5ftu4HKiVJOOiqhNYT8Keh_15lhVLohIhM8kHnw_tixWHDpdAHWCTimc1GO2znH-0EdfLD74c9fw&q=%22adaptive+server+learning+rates%22+federated+learning+FedOpt&sa=X&ved=2ahUKEwjc4rKVscaVAxVPCbwBHWGDNfwQtKgLegQIERAB
+          - listitem [ref=f7e97]:
+            - link "Shopping" [ref=f7e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz6mPncLV6BMXrUfQD5ftu4HKiVJOOiqhNYT8Keh_15lhVLohIhM8kHnw_tixWHDpdAHWCTimc1GO2znH-0EdfLD74c9fw&q=%22adaptive+server+learning+rates%22+federated+learning+FedOpt&ved=1t:220175&ictx=111
+          - listitem [ref=f7e101]:
+            - link "Videos" [ref=f7e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz6mPncLV6BMXrUfQD5ftu4HKiVJOOiqhNYT8Keh_15lhVLohIhM8kHnw_tixWHDpdAHWCTimc1GO2znH-0EdfLD74c9fw&q=%22adaptive+server+learning+rates%22+federated+learning+FedOpt&sa=X&ved=2ahUKEwjc4rKVscaVAxVPCbwBHWGDNfwQtKgLegQIFBAB
+          - listitem [ref=f7e105]:
+            - link "Forums" [ref=f7e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz6mPncLV6BMXrUfQD5ftu4HKiVJOOiqhNYT8Keh_15lhVLohIhM8kHnw_tixWHDpdAHWCTimc1GO2znH-0EdfLD74c9fw&q=%22adaptive+server+learning+rates%22+federated+learning+FedOpt&sa=X&ved=2ahUKEwjc4rKVscaVAxVPCbwBHWGDNfwQs6gLegQIExAB
+          - listitem [ref=f7e109]:
+            - link "Short videos" [ref=f7e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz6mPncLV6BMXrUfQD5ftu4HKiVJOOiqhNYT8Keh_15lhVLohIhM8kHnw_tixWHDpdAHWCTimc1GO2znH-0EdfLD74c9fw&q=%22adaptive+server+learning+rates%22+federated+learning+FedOpt&sa=X&ved=2ahUKEwjc4rKVscaVAxVPCbwBHWGDNfwQs6gLegQIFRAB
+          - listitem [ref=f7e113]:
+            - button [ref=f7e114] [cursor=pointer]:
+              - generic "More filters" [ref=f7e115]: More
+        - button "Tools" [ref=f7e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f7e129]
+    - generic [ref=f7e134]:
+      - generic [ref=f7e153]:
+        - heading "Thinking" [level=2] [ref=f7e157]
+        - progressbar "Generating" [ref=f7e160]
+      - main [ref=f7e162]:
+        - generic [ref=f7e166]:
+          - generic [ref=f7e169]:
+            - heading "Web results" [level=2] [ref=f7e170]
+            - generic [ref=f7e171]:
+              - generic [ref=f7e174]:
+                - 'link "FedEHD: Entropic High-Order Descent for Robust ... MDPI https://www.mdpi.com › ..." [ref=f7e176] [cursor=pointer]':
+                  - /url: https://www.mdpi.com/2673-2688/6/11/293
+                  - 'heading "FedEHD: Entropic High-Order Descent for Robust ..." [level=3] [ref=f7e177]'
+                  - generic [ref=f7e183]:
+                    - generic [ref=f7e184]: MDPI
+                    - generic [ref=f7e186]: https://www.mdpi.com › ...
+                - button "About this result" [ref=f7e190] [cursor=pointer]
+              - generic [ref=f7e196]:
+                - generic [ref=f7e197]: by K Khan · 2025 —
+                - generic [ref=f7e198]:
+                  - text: ...
+                  - emphasis [ref=f7e199]: adaptive server learning rates
+                  - text: did help to some extent, they did not match the improvements provided by FedEHD. Client momentum (using momentum or Nesterov ...
+                - link "Read more" [ref=f7e200] [cursor=pointer]:
+                  - /url: https://www.mdpi.com/2673-2688/6/11/293#:~:text=adaptive%20server%20learning%20rates%20did,momentum%20(using%20momentum%20or%20Nesterov
+          - generic [ref=f7e205]:
+            - heading "People also ask" [level=2] [ref=f7e207]
+            - generic [ref=f7e208]:
+              - button "What is the learning rate in federated learning?" [ref=f7e214] [cursor=pointer]
+              - button "What are the cons of federated learning?" [ref=f7e228] [cursor=pointer]
+              - button "What is average federated learning?" [ref=f7e242] [cursor=pointer]
+              - button "What is FedAvg in federated learning?" [ref=f7e256] [cursor=pointer]
+          - generic [ref=f7e267]:
+            - heading "Images" [level=2] [ref=f7e271]
+            - generic [ref=f7e275]:
+              - generic [ref=f7e279] [cursor=pointer]:
+                - 'link "FedEHD: Entropic High-Order Descent for Robust Federated ... MDPI" [ref=f7e280]':
+                  - /url: https://www.mdpi.com/2673-2688/6/11/293
+                - button [ref=f7e282]:
+                  - 'img "FedEHD: Entropic High-Order Descent for Robust Federated ..." [ref=f7e284]'
+                - generic [ref=f7e286]:
+                  - generic [ref=f7e287]: "FedEHD: Entropic High-Order Descent for Robust Federated ..."
+                  - generic [ref=f7e289]:
+                    - generic [ref=f7e290]: MDPI
+                    - button "About this result" [ref=f7e299]
+              - generic [ref=f7e307] [cursor=pointer]:
+                - 'link "FedEHD: Entropic High-Order Descent for Robust Federated ... MDPI" [ref=f7e308]':
+                  - /url: https://www.mdpi.com/2673-2688/6/11/293
+                - button [ref=f7e310]:
+                  - 'img "FedEHD: Entropic High-Order Descent for Robust Federated ..." [ref=f7e312]'
+                - generic [ref=f7e314]:
+                  - generic [ref=f7e315]: "FedEHD: Entropic High-Order Descent for Robust Federated ..."
+                  - generic [ref=f7e317]:
+                    - generic [ref=f7e318]: MDPI
+                    - button "About this result" [ref=f7e327]
+              - generic [ref=f7e335] [cursor=pointer]:
+                - 'link "FedEHD: Robust Federated Learning Optimization | PDF ... Scribd" [ref=f7e336]':
+                  - /url: https://www.scribd.com/document/950925822/ai-06-00293
+                - button [ref=f7e338]:
+                  - 'img "FedEHD: Robust Federated Learning Optimization | PDF ..." [ref=f7e340]'
+                - generic [ref=f7e342]:
+                  - generic [ref=f7e343]: "FedEHD: Robust Federated Learning Optimization | PDF ..."
+                  - generic [ref=f7e345]:
+                    - generic [ref=f7e346]: Scribd
+                    - button "About this result" [ref=f7e355]
+            - link "All images" [ref=f7e361] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&q=%22adaptive+server+learning+rates%22+federated+learning+FedOpt&udm=2&source=univ&fir=hBSQ1S649lDNKM%252CSbCGH9gP-jbslM%252C_%253BIoKJzMBMYGcKZM%252CSbCGH9gP-jbslM%252C_%253BhckRSTS6AaugkM%252CKNCj6rO-K3wS-M%252C_&usg=AI4_-kSBECFnq4k_G2v-LLM51rWEb9VuJQ&sa=X&ved=2ahUKEwjc4rKVscaVAxVPCbwBHWGDNfwQ7Al6BAgXEAU
+              - separator [ref=f7e362]
+        - generic [ref=f7e369]:
+          - generic [ref=f7e370]:
+            - heading "Notices about Filtered Results" [level=2] [ref=f7e371]
+            - paragraph [ref=f7e373]:
+              - generic [ref=f7e374]:
+                - text: In order to show you the most relevant results, we have omitted some entries very similar to the 1 already displayed.If you like, you can
+                - link "repeat the search with the omitted results included" [ref=f7e375] [cursor=pointer]:
+                  - /url: /search?q=%22adaptive+server+learning+rates%22+federated+learning+FedOpt&sca_esv=30a5fb343c9df574&filter=0
+                - text: .
+          - navigation
+        - navigation
+    - contentinfo [ref=f7e376]:
+      - heading "Footer Links" [level=1] [ref=f7e377]
+      - generic [ref=f7e381]:
+        - generic [ref=f7e385]:
+          - button "Woodland, California - From your IP address" [ref=f7e387] [cursor=pointer]:
+            - generic [ref=f7e388]: Woodland, California
+            - generic [ref=f7e390]:
+              - text: "-"
+              - generic [ref=f7e391]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f7e393] [cursor=pointer]
+        - generic [ref=f7e396]:
+          - link "Help" [ref=f7e397] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f7e398] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f7e399] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f7e400] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

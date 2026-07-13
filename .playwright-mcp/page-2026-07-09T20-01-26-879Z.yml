@@ -1,0 +1,293 @@
+- generic [active] [ref=f79e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f79e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f79e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f79e8]:
+    - search [ref=f79e9]:
+      - generic [ref=f79e11]:
+        - link "Go to Google Home" [ref=f79e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwit17-2scaVAxVqJUQIHQ25EHwQPAgI
+        - generic [ref=f79e21]:
+          - generic [ref=f79e22]:
+            - combobox "Search" [ref=f79e25]: "\"Mean Resultant Length\" loss gradients \"Mean Resultant Length\" loss gradients"
+            - generic [ref=f79e26]:
+              - button "Clear" [ref=f79e28] [cursor=pointer]
+              - generic [ref=f79e33]:
+                - button "Search by voice" [ref=f79e34] [cursor=pointer]
+                - button "Search by image" [ref=f79e37] [cursor=pointer]
+          - button "Search" [ref=f79e40] [cursor=pointer]
+    - generic [ref=f79e45]:
+      - button "Settings" [ref=f79e47] [cursor=pointer]
+      - button "Share" [ref=f79e53] [cursor=pointer]
+      - generic [ref=f79e59]:
+        - button "Google apps" [ref=f79e61] [cursor=pointer]
+        - link "Sign in" [ref=f79e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522Mean%2520Resultant%2520Length%2522%2520loss%2520gradients&ec=futura_srp_og_si_72236_p
+  - generic [ref=f79e68]:
+    - navigation [ref=f79e74]:
+      - generic [ref=f79e80]:
+        - list [ref=f79e81]:
+          - listitem [ref=f79e82]:
+            - link "AI Mode" [ref=f79e85] [cursor=pointer]:
+              - /url: /search?q=%22Mean+Resultant+Length%22+loss+gradients&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&aep=1&ntc=1&sa=X&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQ2J8OegQIFBAD
+          - listitem [ref=f79e89]:
+            - link "All" [disabled] [ref=f79e90]
+          - listitem [ref=f79e93]:
+            - link "Images" [ref=f79e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=%22Mean+Resultant+Length%22+loss+gradients&sa=X&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQtKgLegQILRAB
+          - listitem [ref=f79e97]:
+            - link "Videos" [ref=f79e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=%22Mean+Resultant+Length%22+loss+gradients&sa=X&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQtKgLegQILhAB
+          - listitem [ref=f79e101]:
+            - link "Shopping" [ref=f79e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=%22Mean+Resultant+Length%22+loss+gradients&ved=1t:220175&ictx=111
+          - listitem [ref=f79e105]:
+            - link "Forums" [ref=f79e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=%22Mean+Resultant+Length%22+loss+gradients&sa=X&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQs6gLegQIKhAB
+          - listitem [ref=f79e109]:
+            - link "Short videos" [ref=f79e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832VstEKsVDqPorK0Gahnm2nrruedQ0d32Et2kDhW_DVrEiVEEKhGMS6J6qOai58Kp-xhksXV28NogeTUukXLA6cErqGvRbRiH7suRTN0y_34V3a_l9_d5vx2BXsNvp3CNaFbjOcCna9jBf_n8HFTuWydDmY1eASGf8xNKp4j1zWBVjs_98w&q=%22Mean+Resultant+Length%22+loss+gradients&sa=X&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQs6gLegQIKRAB
+          - listitem [ref=f79e113]:
+            - button [ref=f79e114] [cursor=pointer]:
+              - generic "More filters" [ref=f79e115]: More
+        - button "Tools" [ref=f79e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f79e129]
+    - generic [ref=f79e134]:
+      - generic [ref=f79e153]:
+        - heading "Thinking" [level=2] [ref=f79e157]
+        - progressbar "Generating" [ref=f79e160]
+      - main [ref=f79e162]:
+        - generic [ref=f79e166]:
+          - generic [ref=f79e169]:
+            - heading "Web results" [level=2] [ref=f79e170]
+            - generic [ref=f79e171]:
+              - generic [ref=f79e174]:
+                - 'link "GradDiv: Adversarial Robustness of Randomized Neural ... arXiv https://arxiv.org › pdf" [ref=f79e176] [cursor=pointer]':
+                  - /url: https://arxiv.org/pdf/2107.02425
+                  - 'heading "GradDiv: Adversarial Robustness of Randomized Neural ..." [level=3] [ref=f79e177]'
+                  - generic [ref=f79e183]:
+                    - generic [ref=f79e184]: arXiv
+                    - generic [ref=f79e186]: https://arxiv.org › pdf
+                - generic [ref=f79e188]: PDF
+                - button "About this result" [ref=f79e191] [cursor=pointer]
+              - generic [ref=f79e197]:
+                - generic [ref=f79e198]: by S Lee · 2021 · Cited by 96 —
+                - generic [ref=f79e199]:
+                  - text: The length of sample mean vector is called the
+                  - emphasis [ref=f79e200]: Mean Resultant Length
+                  - text: . (MRL). The z-axis is chosen to be orthogonal to both u and ureg. success ...
+                - link "Read more" [ref=f79e201] [cursor=pointer]:
+                  - /url: https://arxiv.org/pdf/2107.02425#:~:text=The%20length%20of%20sample%20mean,attributed%20to%20the%20high%20transferability
+          - generic [ref=f79e205]:
+            - generic [ref=f79e208]:
+              - 'link "GradDiv: Adversarial Robustness of Randomized Neural ... IEEE Computer Society https://www.computer.org › csdl › journal › 2023/02" [ref=f79e210] [cursor=pointer]':
+                - /url: https://www.computer.org/csdl/journal/tp/2023/02/09761760/1CKMkj4mEBW
+                - 'heading "GradDiv: Adversarial Robustness of Randomized Neural ..." [level=3] [ref=f79e211]'
+                - generic [ref=f79e220]:
+                  - generic [ref=f79e221]: IEEE Computer Society
+                  - generic [ref=f79e223]: https://www.computer.org › csdl › journal › 2023/02
+              - button "About this result" [ref=f79e227] [cursor=pointer]
+            - generic [ref=f79e233]:
+              - generic [ref=f79e234]: by S Lee · 2023 · Cited by 98 —
+              - generic [ref=f79e235]:
+                - text: Next, we demonstrate that the expected
+                - emphasis [ref=f79e236]: loss
+                - text: increase caused by proxy
+                - emphasis [ref=f79e237]: gradients
+                - text: is upper bounded by the
+                - emphasis [ref=f79e238]: Mean Resultant Length
+                - text: (MRL) of the
+                - emphasis [ref=f79e239]: loss gradients
+                - text: .
+              - link "Read more" [ref=f79e240] [cursor=pointer]:
+                - /url: https://www.computer.org/csdl/journal/tp/2023/02/09761760/1CKMkj4mEBW#:~:text=Next%2C%20we%20demonstrate%20that%20the,(MRL)%20of%20the%20loss%20gradients.
+          - generic [ref=f79e245]:
+            - heading "People also ask" [level=2] [ref=f79e247]
+            - generic [ref=f79e248]:
+              - button "What is the gradient of a loss function?" [ref=f79e254] [cursor=pointer]
+              - button "Does backpropagation use gradient descent?" [ref=f79e268] [cursor=pointer]
+              - button "What is the effect of learning rate in gradient descent?" [ref=f79e282] [cursor=pointer]
+              - button "Which parameter determines the size of the improvement step to take on each iteration of gradient descent?" [ref=f79e296] [cursor=pointer]
+          - generic [ref=f79e306]:
+            - heading "Web results" [level=2] [ref=f79e307]
+            - generic [ref=f79e308]:
+              - generic [ref=f79e311]:
+                - link "Dynamic gradient orientation and multi-scale fusion ... ScienceDirect.com https://www.sciencedirect.com › science › article › pii" [ref=f79e313] [cursor=pointer]:
+                  - /url: https://www.sciencedirect.com/science/article/pii/S1385110125000401
+                  - heading "Dynamic gradient orientation and multi-scale fusion ..." [level=3] [ref=f79e314]
+                  - generic [ref=f79e320]:
+                    - generic [ref=f79e321]: ScienceDirect.com
+                    - generic [ref=f79e323]: https://www.sciencedirect.com › science › article › pii
+                - button "About this result" [ref=f79e327] [cursor=pointer]
+              - generic [ref=f79e333]:
+                - generic [ref=f79e334]: by X Wan · 2025 · Cited by 4 —
+                - generic [ref=f79e335]:
+                  - text: R m is the
+                  - emphasis [ref=f79e336]: mean resultant length
+                  - text: in circular statistics and is used to measure the degree of concentration of angular data.
+                - link "Read more" [ref=f79e337] [cursor=pointer]:
+                  - /url: https://www.sciencedirect.com/science/article/pii/S1385110125000401#:~:text=is%20the%20mean%20resultant%20length,of%20concentration%20of%20angular%20data.
+          - generic [ref=f79e341]:
+            - generic [ref=f79e344]:
+              - link "How Gradient Descent Adapts Network Capacity on Data ... Preprints.org https://www.preprints.org › manuscript" [ref=f79e346] [cursor=pointer]:
+                - /url: https://www.preprints.org/manuscript/202603.0760
+                - heading "How Gradient Descent Adapts Network Capacity on Data ..." [level=3] [ref=f79e347]
+                - generic [ref=f79e353]:
+                  - generic [ref=f79e354]: Preprints.org
+                  - generic [ref=f79e356]: https://www.preprints.org › manuscript
+              - button "About this result" [ref=f79e360] [cursor=pointer]
+            - generic [ref=f79e366]:
+              - generic [ref=f79e367]: by M Mostafa · 2026 —
+              - generic [ref=f79e368]:
+                - text: The
+                - emphasis [ref=f79e369]: mean resultant length
+                - text: was R = 0.2186 ± 0.0205 (plot not shown), indicating clear clustering of the winning neuron directions, as predicted ...
+              - link "Read more" [ref=f79e370] [cursor=pointer]:
+                - /url: https://www.preprints.org/manuscript/202603.0760#:~:text=The%20mean%20resultant%20length%20was,by%20the%20von%20Mises%E2%80%93Fisher%20distribution.
+          - generic [ref=f79e374]:
+            - generic [ref=f79e377]:
+              - link "log_cmk derivative is discontinuous at κ=100, capping learnable ... GitHub https://github.com › graphnet-team › graphnet › issues" [ref=f79e379] [cursor=pointer]:
+                - /url: https://github.com/graphnet-team/graphnet/issues/900
+                - heading "log_cmk derivative is discontinuous at κ=100, capping learnable ..." [level=3] [ref=f79e380]
+                - generic [ref=f79e386]:
+                  - generic [ref=f79e387]: GitHub
+                  - generic [ref=f79e389]: https://github.com › graphnet-team › graphnet › issues
+              - button "About this result" [ref=f79e393] [cursor=pointer]
+            - generic [ref=f79e400]:
+              - text: The
+              - emphasis [ref=f79e401]: loss gradient
+              - text: w.r.t. κ is A₃(κ) = 1/tanh(κ) − 1/κ (the vMF
+              - emphasis [ref=f79e402]: mean resultant length
+              - text: ). On the approx branch ( log_cmk_approx = −√(4+κ²) for m=3) this ...
+          - generic [ref=f79e406]:
+            - generic [ref=f79e409]:
+              - link "A new characterization of the edge of stability based on a... OpenReview https://openreview.net › forum" [ref=f79e411] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=bH-kCY6LdKg&noteId=klMdD85p2C
+                - heading "A new characterization of the edge of stability based on a..." [level=3] [ref=f79e412]
+                - generic [ref=f79e418]:
+                  - generic [ref=f79e419]: OpenReview
+                  - generic [ref=f79e421]: https://openreview.net › forum
+              - button "About this result" [ref=f79e425] [cursor=pointer]
+            - generic [ref=f79e431]:
+              - generic [ref=f79e432]: Feb 1, 2023 —
+              - generic [ref=f79e433]:
+                - text: "Condition 1: the total training"
+                - emphasis [ref=f79e434]: loss gradient
+                - text: ∇ L is aligned ...
+                - emphasis [ref=f79e435]: mean resultant length
+                - text: (MRL) R ¯ b 2 and the concentration parameter ...
+              - link "Read more" [ref=f79e436] [cursor=pointer]:
+                - /url: https://openreview.net/forum?id=bH-kCY6LdKg&noteId=klMdD85p2C#:~:text=Condition%201%3A%20the%20total%20training,aligned%20with%20the%20top%20eigenvector&text=We%20used%20the%20term%20%22concentration,vMF%20(von%20Mises%E2%80%93Fisher)%20distribution%20(cf.
+          - generic [ref=f79e440]:
+            - generic [ref=f79e443]:
+              - link "Implicit Jacobian Regularization Weighted with Impurity of ... Proceedings of Machine Learning Research https://proceedings.mlr.press › ..." [ref=f79e445] [cursor=pointer]:
+                - /url: https://proceedings.mlr.press/v202/lee23q/lee23q.pdf
+                - heading "Implicit Jacobian Regularization Weighted with Impurity of ..." [level=3] [ref=f79e446]
+                - generic [ref=f79e452]:
+                  - generic [ref=f79e453]: Proceedings of Machine Learning Research
+                  - generic [ref=f79e455]: https://proceedings.mlr.press › ...
+              - generic [ref=f79e457]: PDF
+              - button "About this result" [ref=f79e460] [cursor=pointer]
+            - generic [ref=f79e465]:
+              - generic [ref=f79e466]:
+                - generic [ref=f79e467]: by S Lee · 2023 · Cited by 15 —
+                - generic [ref=f79e468]:
+                  - text: Figure 32 shows Figure 9 (Right) for different training steps. Figure 33 shows the evolution of the
+                  - emphasis [ref=f79e469]: Mean Resultant Length
+                  - text: (MRL) ρ in Figure 9 (Left) during ...
+                - link "Read more" [ref=f79e470] [cursor=pointer]:
+                  - /url: https://proceedings.mlr.press/v202/lee23q/lee23q.pdf#:~:text=Figure%2032%20shows%20Figure%209,Figure%209%20(Left)%20during%20training.
+              - generic [ref=f79e471]: 44 pages
+          - generic [ref=f79e475]:
+            - generic [ref=f79e478]:
+              - link "Why use sequence length instead of query vector ... Facebook · Artificial Intelligence & Deep Learning 1 comment · 7 years ago" [ref=f79e480] [cursor=pointer]:
+                - /url: https://www.facebook.com/groups/DeepNetGroup/posts/808017429591141/
+                - heading "Why use sequence length instead of query vector ..." [level=3] [ref=f79e481]
+                - generic [ref=f79e487]:
+                  - generic [ref=f79e488]: Facebook · Artificial Intelligence & Deep Learning
+                  - generic [ref=f79e490]: 1 comment · 7 years ago
+              - button "About this result" [ref=f79e494] [cursor=pointer]
+            - generic [ref=f79e500]:
+              - generic [ref=f79e501]:
+                - text: As a result, the
+                - emphasis [ref=f79e502]: gradient
+                - text: of the
+                - emphasis [ref=f79e503]: loss
+                - text: over the warp location ...
+                - emphasis [ref=f79e504]: Mean Resultant Length
+                - text: R automatically balances the two Results on ...
+              - link "Read more" [ref=f79e505] [cursor=pointer]:
+                - /url: https://www.facebook.com/groups/DeepNetGroup/posts/808017429591141/#:~:text=As%20a%20result%2C%20the%20gradient,more%20suitable%20warp%20locations%20exist.&text=Mean%20Resultant%20Length%20R%20automatically,balances%20the%20two%20Results%20on
+          - generic [ref=f79e509]:
+            - generic [ref=f79e512]:
+              - 'link "Histogram of oriented gradients: a technique for the study ... Astronomy & Astrophysics (A&A) https://www.aanda.org › articles › full_html › 2019/02" [ref=f79e514] [cursor=pointer]':
+                - /url: https://www.aanda.org/articles/aa/full_html/2019/02/aa34300-18/aa34300-18.html
+                - 'heading "Histogram of oriented gradients: a technique for the study ..." [level=3] [ref=f79e515]'
+                - generic [ref=f79e521]:
+                  - generic [ref=f79e522]: Astronomy & Astrophysics (A&A)
+                  - generic [ref=f79e524]: https://www.aanda.org › articles › full_html › 2019/02
+              - button "About this result" [ref=f79e528] [cursor=pointer]
+            - generic [ref=f79e534]:
+              - generic [ref=f79e535]: by JD Soler · 2019 · Cited by 68 —
+              - generic [ref=f79e536]:
+                - text: In the Rayleigh test, if the magnitude of the
+                - emphasis [ref=f79e537]: mean resultant length
+                - text: in the most common instance of unspecified mean direction, defined as Mathematical ...
+              - link "Read more" [ref=f79e538] [cursor=pointer]:
+                - /url: https://www.aanda.org/articles/aa/full_html/2019/02/aa34300-18/aa34300-18.html#:~:text=In%20the%20Rayleigh%20test%2C%20if,unspecified%20mean%20direction%2C%20defined%20as
+        - navigation [ref=f79e541]:
+          - heading "Page Navigation" [level=1] [ref=f79e542]
+          - text: "1"
+          - link "Page 2" [ref=f79e545] [cursor=pointer]:
+            - /url: /search?q=%22Mean+Resultant+Length%22+loss+gradients&sca_esv=30a5fb343c9df574&ei=Fv5Paq30EurKkPIPjfLC4Ac&start=10&sa=N&sstk=AU9db-BoruAJzJ7pICbOZFVzOo__0KTKHvWO4xrrOPgjip_QeqSXkJqYgwAXRrNU9RP9XcnHkMY7LJ3KuCofKQTEDtf9cIA_iE8Lvg&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQ8tMDegQISRAE
+            - text: "2"
+          - link "Page 3" [ref=f79e547] [cursor=pointer]:
+            - /url: /search?q=%22Mean+Resultant+Length%22+loss+gradients&sca_esv=30a5fb343c9df574&ei=Fv5Paq30EurKkPIPjfLC4Ac&start=20&sa=N&sstk=AU9db-BoruAJzJ7pICbOZFVzOo__0KTKHvWO4xrrOPgjip_QeqSXkJqYgwAXRrNU9RP9XcnHkMY7LJ3KuCofKQTEDtf9cIA_iE8Lvg&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQ8tMDegQISRAG
+            - text: "3"
+          - link "Page 4" [ref=f79e549] [cursor=pointer]:
+            - /url: /search?q=%22Mean+Resultant+Length%22+loss+gradients&sca_esv=30a5fb343c9df574&ei=Fv5Paq30EurKkPIPjfLC4Ac&start=30&sa=N&sstk=AU9db-BoruAJzJ7pICbOZFVzOo__0KTKHvWO4xrrOPgjip_QeqSXkJqYgwAXRrNU9RP9XcnHkMY7LJ3KuCofKQTEDtf9cIA_iE8Lvg&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQ8tMDegQISRAI
+            - text: "4"
+          - link "Page 5" [ref=f79e551] [cursor=pointer]:
+            - /url: /search?q=%22Mean+Resultant+Length%22+loss+gradients&sca_esv=30a5fb343c9df574&ei=Fv5Paq30EurKkPIPjfLC4Ac&start=40&sa=N&sstk=AU9db-BoruAJzJ7pICbOZFVzOo__0KTKHvWO4xrrOPgjip_QeqSXkJqYgwAXRrNU9RP9XcnHkMY7LJ3KuCofKQTEDtf9cIA_iE8Lvg&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQ8tMDegQISRAK
+            - text: "5"
+          - link "Page 6" [ref=f79e553] [cursor=pointer]:
+            - /url: /search?q=%22Mean+Resultant+Length%22+loss+gradients&sca_esv=30a5fb343c9df574&ei=Fv5Paq30EurKkPIPjfLC4Ac&start=50&sa=N&sstk=AU9db-BoruAJzJ7pICbOZFVzOo__0KTKHvWO4xrrOPgjip_QeqSXkJqYgwAXRrNU9RP9XcnHkMY7LJ3KuCofKQTEDtf9cIA_iE8Lvg&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQ8tMDegQISRAM
+            - text: "6"
+          - link "Page 7" [ref=f79e555] [cursor=pointer]:
+            - /url: /search?q=%22Mean+Resultant+Length%22+loss+gradients&sca_esv=30a5fb343c9df574&ei=Fv5Paq30EurKkPIPjfLC4Ac&start=60&sa=N&sstk=AU9db-BoruAJzJ7pICbOZFVzOo__0KTKHvWO4xrrOPgjip_QeqSXkJqYgwAXRrNU9RP9XcnHkMY7LJ3KuCofKQTEDtf9cIA_iE8Lvg&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQ8tMDegQISRAO
+            - text: "7"
+          - link "Page 8" [ref=f79e557] [cursor=pointer]:
+            - /url: /search?q=%22Mean+Resultant+Length%22+loss+gradients&sca_esv=30a5fb343c9df574&ei=Fv5Paq30EurKkPIPjfLC4Ac&start=70&sa=N&sstk=AU9db-BoruAJzJ7pICbOZFVzOo__0KTKHvWO4xrrOPgjip_QeqSXkJqYgwAXRrNU9RP9XcnHkMY7LJ3KuCofKQTEDtf9cIA_iE8Lvg&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQ8tMDegQISRAQ
+            - text: "8"
+          - link "Page 9" [ref=f79e559] [cursor=pointer]:
+            - /url: /search?q=%22Mean+Resultant+Length%22+loss+gradients&sca_esv=30a5fb343c9df574&ei=Fv5Paq30EurKkPIPjfLC4Ac&start=80&sa=N&sstk=AU9db-BoruAJzJ7pICbOZFVzOo__0KTKHvWO4xrrOPgjip_QeqSXkJqYgwAXRrNU9RP9XcnHkMY7LJ3KuCofKQTEDtf9cIA_iE8Lvg&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQ8tMDegQISRAS
+            - text: "9"
+          - link "Page 10" [ref=f79e561] [cursor=pointer]:
+            - /url: /search?q=%22Mean+Resultant+Length%22+loss+gradients&sca_esv=30a5fb343c9df574&ei=Fv5Paq30EurKkPIPjfLC4Ac&start=90&sa=N&sstk=AU9db-BoruAJzJ7pICbOZFVzOo__0KTKHvWO4xrrOPgjip_QeqSXkJqYgwAXRrNU9RP9XcnHkMY7LJ3KuCofKQTEDtf9cIA_iE8Lvg&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQ8tMDegQISRAU
+            - text: "10"
+          - heading [level=2] [ref=f79e563]:
+            - link "Next" [ref=f79e564] [cursor=pointer]:
+              - /url: /search?q=%22Mean+Resultant+Length%22+loss+gradients&sca_esv=30a5fb343c9df574&ei=Fv5Paq30EurKkPIPjfLC4Ac&start=10&sa=N&sstk=AU9db-BoruAJzJ7pICbOZFVzOo__0KTKHvWO4xrrOPgjip_QeqSXkJqYgwAXRrNU9RP9XcnHkMY7LJ3KuCofKQTEDtf9cIA_iE8Lvg&ved=2ahUKEwit17-2scaVAxVqJUQIHQ25EHwQ8NMDegQISRAW
+        - navigation
+    - contentinfo [ref=f79e567]:
+      - heading "Footer Links" [level=1] [ref=f79e568]
+      - generic [ref=f79e572]:
+        - generic [ref=f79e576]:
+          - button "Woodland, California - From your IP address" [ref=f79e578] [cursor=pointer]:
+            - generic [ref=f79e579]: Woodland, California
+            - generic [ref=f79e581]:
+              - text: "-"
+              - generic [ref=f79e582]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f79e584] [cursor=pointer]
+        - generic [ref=f79e587]:
+          - link "Help" [ref=f79e588] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f79e589] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f79e590] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f79e591] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

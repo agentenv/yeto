@@ -1,0 +1,253 @@
+- generic [ref=f101e2]:
+  - link "Skip to main content" [ref=f101e3] [cursor=pointer]:
+    - /url: "#content"
+  - region "Announcement" [ref=f101e4]:
+    - generic [ref=f101e6]: arXiv is now an independent nonprofit!
+    - link "Learn more" [ref=f101e7] [cursor=pointer]:
+      - /url: https://info.arxiv.org/about
+    - button "Dismiss announcement" [ref=f101e8] [cursor=pointer]: ×
+  - banner [ref=f101e9]:
+    - link [ref=f101e10] [cursor=pointer]:
+      - /url: https://arxiv.org/IgnoreMe
+    - link "archive home" [ref=f101e11] [cursor=pointer]:
+      - /url: https://arxiv.org/
+      - img "archive" [ref=f101e12]
+    - navigation "Main navigation" [ref=f101e13]:
+      - link "Search" [ref=f101e14] [cursor=pointer]:
+        - /url: https://arxiv.org/search
+      - link "Submit" [ref=f101e18] [cursor=pointer]:
+        - /url: https://arxiv.org/user/create
+      - link "Donate" [ref=f101e19] [cursor=pointer]:
+        - /url: https://info.arxiv.org/about/donate.html
+      - link "Log in" [ref=f101e21] [cursor=pointer]:
+        - /url: https://arxiv.org/login
+  - main [ref=f101e22]:
+    - generic [ref=f101e24]:
+      - generic [ref=f101e25]:
+        - heading "Computer Science > Machine Learning" [level=1] [ref=f101e27]
+        - generic [ref=f101e29]:
+          - generic [ref=f101e30]: "[Submitted on 6 Jul 2021]"
+          - 'heading "GradDiv: Adversarial Robustness of Randomized Neural Networks via Gradient Diversity Regularization" [level=1] [ref=f101e31]'
+          - generic [ref=f101e32]:
+            - link "Sungyoon Lee" [ref=f101e33] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Lee,+S
+            - text: ","
+            - link "Hoki Kim" [ref=f101e34] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Kim,+H
+            - text: ","
+            - link "Jaewook Lee" [ref=f101e35] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Lee,+J
+          - blockquote [ref=f101e36]: Deep learning is vulnerable to adversarial examples. Many defenses based on randomized neural networks have been proposed to solve the problem, but fail to achieve robustness against attacks using proxy gradients such as the Expectation over Transformation (EOT) attack. We investigate the effect of the adversarial attacks using proxy gradients on randomized neural networks and demonstrate that it highly relies on the directional distribution of the loss gradients of the randomized neural network. We show in particular that proxy gradients are less effective when the gradients are more scattered. To this end, we propose Gradient Diversity (GradDiv) regularizations that minimize the concentration of the gradients to build a robust randomized neural network. Our experiments on MNIST, CIFAR10, and STL10 show that our proposed GradDiv regularizations improve the adversarial robustness of randomized neural networks against a variety of state-of-the-art attack methods. Moreover, our method efficiently reduces the transferability among sample models of randomized neural networks.
+          - table "Additional metadata" [ref=f101e38]:
+            - rowgroup [ref=f101e39]:
+              - row [ref=f101e40]:
+                - cell "Subjects:" [ref=f101e41]
+                - cell "Machine Learning (cs.LG)" [ref=f101e42]
+              - row [ref=f101e43]:
+                - cell "Cite as:" [ref=f101e44]
+                - cell [ref=f101e45]:
+                  - generic [ref=f101e46]:
+                    - link "arXiv:2107.02425" [ref=f101e47] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/2107.02425
+                    - text: "[cs.LG]"
+              - row [ref=f101e48]:
+                - cell [ref=f101e49]
+                - cell [ref=f101e50]:
+                  - text: (or
+                  - generic [ref=f101e51]:
+                    - link "arXiv:2107.02425v1" [ref=f101e52] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/2107.02425v1
+                    - text: "[cs.LG]"
+                  - text: for this version)
+              - row [ref=f101e53]:
+                - cell [ref=f101e54]
+                - cell [ref=f101e55]:
+                  - link "https://doi.org/10.48550/arXiv.2107.02425" [ref=f101e56] [cursor=pointer]:
+                    - /url: https://doi.org/10.48550/arXiv.2107.02425
+                  - button "Focus to learn more" [ref=f101e58]
+        - generic [ref=f101e61]:
+          - heading "Submission history" [level=2] [ref=f101e62]
+          - text: "From: Sungyoion Lee ["
+          - link "view email" [ref=f101e63] [cursor=pointer]:
+            - /url: /show-email/33019a0a/2107.02425
+          - text: "]"
+          - strong [ref=f101e64]: "[v1]"
+          - text: Tue, 6 Jul 2021 06:57:40 UTC (4,333 KB)
+      - generic [ref=f101e65]:
+        - generic [ref=f101e66]:
+          - heading "Access Paper:" [level=2] [ref=f101e67]
+          - list [ref=f101e68]:
+            - listitem [ref=f101e69]:
+              - link "View PDF" [ref=f101e70] [cursor=pointer]:
+                - /url: /pdf/2107.02425
+            - listitem [ref=f101e71]:
+              - link "TeX Source" [ref=f101e72] [cursor=pointer]:
+                - /url: /src/2107.02425
+          - link "view license" [ref=f101e74] [cursor=pointer]:
+            - /url: http://creativecommons.org/licenses/by-nc-sa/4.0/
+        - generic [ref=f101e76]:
+          - heading "Current browse context:" [level=3] [ref=f101e77]
+          - generic [ref=f101e78]: cs.LG
+          - generic [ref=f101e79]:
+            - link "< prev" [ref=f101e81] [cursor=pointer]:
+              - /url: /prevnext?id=2107.02425&function=prev&context=cs.LG
+            - text: "|"
+            - link "next >" [ref=f101e83] [cursor=pointer]:
+              - /url: /prevnext?id=2107.02425&function=next&context=cs.LG
+          - generic [ref=f101e84]:
+            - link "new" [ref=f101e85] [cursor=pointer]:
+              - /url: /list/cs.LG/new
+            - text: "|"
+            - link "recent" [ref=f101e86] [cursor=pointer]:
+              - /url: /list/cs.LG/recent
+            - text: "|"
+            - link "2021-07" [ref=f101e87] [cursor=pointer]:
+              - /url: /list/cs.LG/2021-07
+          - generic [ref=f101e88]:
+            - text: "Change to browse by:"
+            - link "cs" [ref=f101e90] [cursor=pointer]:
+              - /url: /abs/2107.02425?context=cs
+        - generic [ref=f101e91]:
+          - heading "References & Citations" [level=3] [ref=f101e92]
+          - list [ref=f101e93]:
+            - listitem [ref=f101e94]:
+              - link "NASA ADS" [ref=f101e95] [cursor=pointer]:
+                - /url: https://ui.adsabs.harvard.edu/abs/arXiv:2107.02425
+            - listitem [ref=f101e96]:
+              - link "Google Scholar" [ref=f101e97] [cursor=pointer]:
+                - /url: https://scholar.google.com/scholar_lookup?arxiv_id=2107.02425
+            - listitem [ref=f101e98]:
+              - link "Semantic Scholar" [ref=f101e99] [cursor=pointer]:
+                - /url: https://api.semanticscholar.org/arXiv:2107.02425
+        - generic [ref=f101e100]:
+          - heading [level=3] [ref=f101e101]:
+            - link "DBLP" [ref=f101e102] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de
+            - text: "- CS Bibliography"
+          - generic [ref=f101e103]:
+            - link "listing" [ref=f101e104] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/db/journals/corr/corr2107.html#abs-2107-02425
+            - text: "|"
+            - link "bibtex" [ref=f101e105] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/rec/bibtex/journals/corr/abs-2107-02425
+          - link "Jaewook Lee" [ref=f101e107] [cursor=pointer]:
+            - /url: https://dblp.uni-trier.de/search/author?author=Jaewook%20Lee
+        - button "export BibTeX citation" [ref=f101e109]
+        - generic [ref=f101e110]:
+          - heading "Bookmark" [level=3] [ref=f101e112]
+          - link [ref=f101e113] [cursor=pointer]:
+            - /url: "http://www.bibsonomy.org/BibtexHandler?requTask=upload&url=https://arxiv.org/abs/2107.02425&description=GradDiv: Adversarial Robustness of Randomized Neural Networks via Gradient Diversity Regularization"
+            - img "BibSonomy" [ref=f101e114]
+          - link [ref=f101e115] [cursor=pointer]:
+            - /url: "https://reddit.com/submit?url=https://arxiv.org/abs/2107.02425&title=GradDiv: Adversarial Robustness of Randomized Neural Networks via Gradient Diversity Regularization"
+            - img "Reddit" [ref=f101e116]
+      - tablist "arXivLabs tools" [ref=f101e118]:
+        - radio "Bibliographic Tools" [checked] [ref=f101e119]
+        - tab "Bibliographic Tools" [selected] [ref=f101e120] [cursor=pointer]
+        - tabpanel "Bibliographic Tools" [ref=f101e121]:
+          - heading "Bibliographic and Citation Tools" [level=1] [ref=f101e122]
+          - generic [ref=f101e123]:
+            - generic [ref=f101e124]:
+              - generic [ref=f101e126]:
+                - checkbox "Bibliographic Explorer Toggle"
+                - generic [ref=f101e128]: Bibliographic Explorer Toggle
+              - generic [ref=f101e129]:
+                - text: Bibliographic Explorer
+                - emphasis [ref=f101e130]:
+                  - text: (
+                  - link "What is the Explorer?" [ref=f101e131] [cursor=pointer]:
+                    - /url: https://info.arxiv.org/labs/showcase.html#arxiv-bibliographic-explorer
+                  - text: )
+            - generic [ref=f101e132]:
+              - generic [ref=f101e134]:
+                - checkbox "Connected Papers"
+                - generic [ref=f101e136]: Connected Papers Toggle
+              - generic [ref=f101e137]:
+                - text: Connected Papers
+                - emphasis [ref=f101e138]:
+                  - text: (
+                  - link "What is Connected Papers?" [ref=f101e139] [cursor=pointer]:
+                    - /url: https://www.connectedpapers.com/about
+                  - text: )
+            - generic [ref=f101e140]:
+              - generic [ref=f101e142]:
+                - checkbox "Litmaps"
+                - generic [ref=f101e144]: Litmaps Toggle
+              - generic [ref=f101e145]:
+                - text: Litmaps
+                - emphasis [ref=f101e146]:
+                  - text: (
+                  - link "What is Litmaps?" [ref=f101e147] [cursor=pointer]:
+                    - /url: https://www.litmaps.co/
+                  - text: )
+            - generic [ref=f101e148]:
+              - generic [ref=f101e150]:
+                - checkbox "scite Smart Citations"
+                - generic [ref=f101e152]: scite.ai Toggle
+              - generic [ref=f101e153]:
+                - text: scite Smart Citations
+                - emphasis [ref=f101e154]:
+                  - text: (
+                  - link "What are Smart Citations?" [ref=f101e155] [cursor=pointer]:
+                    - /url: https://www.scite.ai/
+                  - text: )
+        - radio "Code, Data, Media" [ref=f101e159]
+        - tab "Code, Data, Media" [ref=f101e160] [cursor=pointer]
+        - radio "Demos" [ref=f101e161]
+        - tab "Demos" [ref=f101e162] [cursor=pointer]
+        - radio "Related Papers" [ref=f101e163]
+        - tab "Related Papers" [ref=f101e164] [cursor=pointer]
+        - radio "About arXivLabs" [ref=f101e165]
+        - tab "About arXivLabs" [ref=f101e166] [cursor=pointer]
+      - generic [ref=f101e167]:
+        - link "Which authors of this paper are endorsers?" [ref=f101e168] [cursor=pointer]:
+          - /url: /auth/show-endorsers/2107.02425
+        - text: "|"
+        - link "Disable MathJax" [ref=f101e169] [cursor=pointer]:
+          - /url: javascript:setMathjaxCookie()
+        - text: (
+        - link "What is MathJax?" [ref=f101e170] [cursor=pointer]:
+          - /url: https://info.arxiv.org/help/mathjax.html
+        - text: )
+  - contentinfo [ref=f101e171]:
+    - generic [ref=f101e172]:
+      - generic [ref=f101e173]:
+        - generic [ref=f101e174]:
+          - text: We gratefully acknowledge support from our
+          - strong [ref=f101e175]: major funders
+          - text: ","
+          - link [ref=f101e176] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about/ourmembers.html
+            - strong [ref=f101e177]: member institutions
+          - text: ", and all contributors."
+        - navigation "Site navigation" [ref=f101e178]:
+          - link "About" [ref=f101e179] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about
+          - generic [ref=f101e180]: ·
+          - link "Help" [ref=f101e181] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help
+          - generic [ref=f101e182]: ·
+          - link "Contact" [ref=f101e183] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/contact.html
+          - generic [ref=f101e184]: ·
+          - link "Subscribe" [ref=f101e185] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/subscribe
+          - generic [ref=f101e186]: ·
+          - link "Copyright" [ref=f101e187] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/license/index.html
+          - generic [ref=f101e188]: ·
+          - link "Privacy" [ref=f101e189] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/policies/privacy_policy.html
+          - generic [ref=f101e190]: ·
+          - link "Accessibility" [ref=f101e191] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/web_accessibility.html
+          - generic [ref=f101e192]: ·
+          - link "Operational Status (opens in new tab)" [ref=f101e193] [cursor=pointer]:
+            - /url: https://status.arxiv.org
+            - text: Operational Status
+            - generic [ref=f101e194]: (opens in new tab)
+      - generic "Major funders" [ref=f101e195]:
+        - generic [ref=f101e196]: Major funding support from
+        - generic [ref=f101e197]:
+          - img "Simons Foundation" [ref=f101e198]
+          - img "Schmidt Sciences" [ref=f101e199]

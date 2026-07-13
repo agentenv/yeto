@@ -1,0 +1,306 @@
+- generic [active] [ref=f29e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f29e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f29e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f29e8]:
+    - search [ref=f29e9]:
+      - generic [ref=f29e11]:
+        - link "Go to Google Home" [ref=f29e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQPAgI
+        - generic [ref=f29e21]:
+          - generic [ref=f29e22]:
+            - combobox "Search" [ref=f29e25]: FedOpt adaptive server optimization federated learning Reddi FedOpt adaptive server optimization federated learning Reddi
+            - generic [ref=f29e26]:
+              - button "Clear" [ref=f29e28] [cursor=pointer]
+              - generic [ref=f29e33]:
+                - button "Search by voice" [ref=f29e34] [cursor=pointer]
+                - button "Search by image" [ref=f29e37] [cursor=pointer]
+          - button "Search" [ref=f29e40] [cursor=pointer]
+    - generic [ref=f29e45]:
+      - button "Settings" [ref=f29e47] [cursor=pointer]
+      - button "Share" [ref=f29e53] [cursor=pointer]
+      - generic [ref=f29e59]:
+        - button "Google apps" [ref=f29e61] [cursor=pointer]
+        - link "Sign in" [ref=f29e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3DFedOpt%2520adaptive%2520server%2520optimization%2520federated%2520learning%2520Reddi&ec=futura_srp_og_si_72236_p
+  - generic [ref=f29e68]:
+    - navigation [ref=f29e74]:
+      - generic [ref=f29e80]:
+        - list [ref=f29e81]:
+          - listitem [ref=f29e82]:
+            - link "AI Mode" [ref=f29e85] [cursor=pointer]:
+              - /url: /search?q=FedOpt+adaptive+server+optimization+federated+learning+Reddit&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cqu7ocb7U6ah0xpkIrGMK4AD-5zQwT5IfpPJ6og2sC2IhL_IreU_xIYyHETww2ZG30v92YExXptLJPcXHbdCbgjTm5HCBrRMiSLbkzwFuemxbytvvIXa0N3Lp9IZtQRtMAyg5wHx6Q4Ysh6lOMdECrxVr6L3_X3CqrZLWgDWuB1Noj_NMGDnZ0rvSA7ELy0UDAb5RhQ&aep=1&ntc=1&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ2J8OegQIBxAD
+          - listitem [ref=f29e89]:
+            - link "All" [disabled] [ref=f29e90]
+          - listitem [ref=f29e93]:
+            - link "Short videos" [ref=f29e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cqu7ocb7U6ah0xpkIrGMK4AD-5zQwT5IfpPJ6og2sC2IhL_IreU_xIYyHETww2ZG30v92YExXptLJPcXHbdCbgjTm5HCBrRMiSLbkzwFuemxbytvvIXa0N3Lp9IZtQRtMAyg5wHx6Q4Ysh6lOMdECrxVr6L3_X3CqrZLWgDWuB1Noj_NMGDnZ0rvSA7ELy0UDAb5RhQ&q=FedOpt+adaptive+server+optimization+federated+learning+Reddit&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQs6gLegQIFxAB
+          - listitem [ref=f29e97]:
+            - link "Forums" [ref=f29e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cqu7ocb7U6ah0xpkIrGMK4AD-5zQwT5IfpPJ6og2sC2IhL_IreU_xIYyHETww2ZG30v92YExXptLJPcXHbdCbgjTm5HCBrRMiSLbkzwFuemxbytvvIXa0N3Lp9IZtQRtMAyg5wHx6Q4Ysh6lOMdECrxVr6L3_X3CqrZLWgDWuB1Noj_NMGDnZ0rvSA7ELy0UDAb5RhQ&q=FedOpt+adaptive+server+optimization+federated+learning+Reddit&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQs6gLegQIEBAB
+          - listitem [ref=f29e101]:
+            - link "Shopping" [ref=f29e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cqu7ocb7U6ah0xpkIrGMK4AD-5zQwT5IfpPJ6og2sC2IhL_IreU_xIYyHETww2ZG30v92YExXptLJPcXHbdCbgjTm5HCBrRMiSLbkzwFuemxbytvvIXa0N3Lp9IZtQRtMAyg5wHx6Q4Ysh6lOMdECrxVr6L3_X3CqrZLWgDWuB1Noj_NMGDnZ0rvSA7ELy0UDAb5RhQ&q=FedOpt+adaptive+server+optimization+federated+learning+Reddit&ved=1t:220175&ictx=111
+          - listitem [ref=f29e105]:
+            - link "Videos" [ref=f29e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cqu7ocb7U6ah0xpkIrGMK4AD-5zQwT5IfpPJ6og2sC2IhL_IreU_xIYyHETww2ZG30v92YExXptLJPcXHbdCbgjTm5HCBrRMiSLbkzwFuemxbytvvIXa0N3Lp9IZtQRtMAyg5wHx6Q4Ysh6lOMdECrxVr6L3_X3CqrZLWgDWuB1Noj_NMGDnZ0rvSA7ELy0UDAb5RhQ&q=FedOpt+adaptive+server+optimization+federated+learning+Reddit&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQtKgLegQIChAB
+          - listitem [ref=f29e109]:
+            - link "Images" [ref=f29e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cqu7ocb7U6ah0xpkIrGMK4AD-5zQwT5IfpPJ6og2sC2IhL_IreU_xIYyHETww2ZG30v92YExXptLJPcXHbdCbgjTm5HCBrRMiSLbkzwFuemxbytvvIXa0N3Lp9IZtQRtMAyg5wHx6Q4Ysh6lOMdECrxVr6L3_X3CqrZLWgDWuB1Noj_NMGDnZ0rvSA7ELy0UDAb5RhQ&q=FedOpt+adaptive+server+optimization+federated+learning+Reddit&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQtKgLegQICRAB
+          - listitem [ref=f29e113]:
+            - button [ref=f29e114] [cursor=pointer]:
+              - generic "More filters" [ref=f29e115]: More
+        - button "Tools" [ref=f29e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f29e129]
+    - generic [ref=f29e134]:
+      - generic [ref=f29e135]:
+        - heading [level=2] [ref=f29e140]:
+          - text: These are results for
+          - button "FedOpt adaptive server optimization federated learning Reddit" [ref=f29e141] [cursor=pointer]:
+            - text: FedOpt adaptive server optimization federated learning
+            - generic [ref=f29e142]: Reddit
+          - generic [ref=f29e143]:
+            - text: Search instead for
+            - button "FedOpt adaptive server optimization federated learning Reddi" [ref=f29e144] [cursor=pointer]
+        - generic [ref=f29e159]:
+          - heading "Thinking" [level=2] [ref=f29e163]
+          - progressbar "Generating" [ref=f29e166]
+      - main [ref=f29e168]:
+        - generic [ref=f29e172]:
+          - generic [ref=f29e175]:
+            - heading "Web results" [level=2] [ref=f29e176]
+            - generic [ref=f29e177]:
+              - generic [ref=f29e180]:
+                - link "[2003.00295] Adaptive Federated Optimization arXiv https://arxiv.org › cs" [ref=f29e182] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/2003.00295
+                  - heading "[2003.00295] Adaptive Federated Optimization" [level=3] [ref=f29e183]
+                  - generic [ref=f29e189]:
+                    - generic [ref=f29e190]: arXiv
+                    - generic [ref=f29e192]: https://arxiv.org › cs
+                - button "About this result" [ref=f29e196] [cursor=pointer]
+              - generic [ref=f29e202]:
+                - generic [ref=f29e203]: by S Reddi · 2020 · Cited by 2738 —
+                - generic [ref=f29e204]:
+                  - text: In this work, we propose
+                  - emphasis [ref=f29e205]: federated
+                  - text: versions of
+                  - emphasis [ref=f29e206]: adaptive
+                  - text: optimizers, including Adagrad, Adam, and Yogi, and analyze their convergence in the presence of ...
+                - link "Read more" [ref=f29e207] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/2003.00295#:~:text=In%20this%20work%2C%20we%20propose,data%20for%20general%20non%2Dconvex%20settings.
+          - generic [ref=f29e211]:
+            - generic [ref=f29e214]:
+              - link "Adaptive Federated Optimization OpenMined https://openmined.org › Blog" [ref=f29e216] [cursor=pointer]:
+                - /url: https://openmined.org/blog/adaptive-federated-optimization/
+                - heading "Adaptive Federated Optimization" [level=3] [ref=f29e217]
+                - generic [ref=f29e223]:
+                  - generic [ref=f29e224]: OpenMined
+                  - generic [ref=f29e226]: https://openmined.org › Blog
+              - button "About this result" [ref=f29e230] [cursor=pointer]
+            - generic [ref=f29e236]:
+              - generic [ref=f29e237]:
+                - text: Adaptive Federated Optimization is aimed at
+                - emphasis [ref=f29e238]: improving optimization methods for Federated Learning
+                - text: (FL). These methods can facilitate automatic adaptation.
+              - link "Read more" [ref=f29e239] [cursor=pointer]:
+                - /url: https://openmined.org/blog/adaptive-federated-optimization/#:~:text=Adaptive%20Federated%20Optimization%20is%20aimed,methods%20can%20facilitate%20automatic%20adaptation
+            - generic [ref=f29e241]:
+              - text: "Missing: Reddit ‎| Show results with:"
+              - link "Reddit" [ref=f29e242] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=FedOpt+adaptive+server+optimization+federated+learning+%22Reddit%22&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ5t4CegQIMxAB
+          - generic [ref=f29e246]:
+            - generic [ref=f29e249]:
+              - link "Why is Federated Learning so hyped - losing raw data ... Reddit · r/bioinformatics 10+ comments · 10 months ago" [ref=f29e251] [cursor=pointer]:
+                - /url: https://www.reddit.com/r/bioinformatics/comments/1n5tk8l/why_is_federated_learning_so_hyped_losing_raw/
+                - heading "Why is Federated Learning so hyped - losing raw data ..." [level=3] [ref=f29e252]
+                - generic [ref=f29e258]:
+                  - generic [ref=f29e259]: Reddit · r/bioinformatics
+                  - generic [ref=f29e261]: 10+ comments · 10 months ago
+              - button "About this result" [ref=f29e265] [cursor=pointer]
+            - generic [ref=f29e270]: I’ve been diving into Federated Learning lately, and I just can’t seem to see why it’s being advertised as this game changing approach for privacy-preserv ...
+            - generic [ref=f29e276]:
+              - link "10 answers" [ref=f29e277] [cursor=pointer]:
+                - /url: https://www.reddit.com/r/bioinformatics/comments/1n5tk8l/why_is_federated_learning_so_hyped_losing_raw/nbv3s99/
+              - generic [ref=f29e278]: ·
+              - generic [ref=f29e279]: "Top answer:"
+              - generic [ref=f29e280]: Everyone knows that data is extremely valuable, but for compliance or liability ...
+            - generic [ref=f29e281]: "Missing: FedOpt ‎server ‎optimization"
+          - generic [ref=f29e286]:
+            - generic [ref=f29e289]:
+              - link "Any resources/experience on Federated Multi-Agent RL for ... Reddit · r/reinforcementlearning 1 comment · 1 year ago" [ref=f29e291] [cursor=pointer]:
+                - /url: https://www.reddit.com/r/reinforcementlearning/comments/1kgwa1l/any_resourcesexperience_on_federated_multiagent/
+                - heading "Any resources/experience on Federated Multi-Agent RL for ..." [level=3] [ref=f29e292]
+                - generic [ref=f29e298]:
+                  - generic [ref=f29e299]: Reddit · r/reinforcementlearning
+                  - generic [ref=f29e301]: 1 comment · 1 year ago
+              - button "About this result" [ref=f29e305] [cursor=pointer]
+            - generic [ref=f29e312]:
+              - text: Hey, I'm doing a summer research internship in Open RAN + AI/ML and exploring a project on
+              - emphasis [ref=f29e313]: federated
+              - text: multi-agent RL for
+              - emphasis [ref=f29e314]: adaptive
+              - text: network slicing
+            - generic [ref=f29e316]:
+              - text: "Missing: FedOpt ‎| Show results with:"
+              - link "FedOpt" [ref=f29e317] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=%22FedOpt%22+adaptive+server+optimization+federated+learning+Reddit&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ5t4CegQILxAB
+          - generic [ref=f29e321]:
+            - generic [ref=f29e324]:
+              - link "Efficient Adaptive Federated Optimization OpenReview https://openreview.net › pdf" [ref=f29e326] [cursor=pointer]:
+                - /url: https://openreview.net/pdf?id=dopfjQFr65
+                - heading "Efficient Adaptive Federated Optimization" [level=3] [ref=f29e327]
+                - generic [ref=f29e333]:
+                  - generic [ref=f29e334]: OpenReview
+                  - generic [ref=f29e336]: https://openreview.net › pdf
+              - generic [ref=f29e338]: PDF
+              - button "About this result" [ref=f29e341] [cursor=pointer]
+            - generic [ref=f29e347]:
+              - generic [ref=f29e348]: by SH Lee · Cited by 5 —
+              - generic [ref=f29e349]:
+                - emphasis [ref=f29e350]: Adaptive optimization is critical in federated learning
+                - text: ", where enabling adaptivity on both the server and client sides has proven essential for achieving ..."
+              - link "Read more" [ref=f29e351] [cursor=pointer]:
+                - /url: https://openreview.net/pdf?id=dopfjQFr65#:~:text=Adaptive%20optimization%20is%20critical%20in,proven%20essential%20for%20achieving%20optimal
+            - generic [ref=f29e353]:
+              - text: "Missing: Reddit ‎| Show results with:"
+              - link "Reddit" [ref=f29e354] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=FedOpt+adaptive+server+optimization+federated+learning+%22Reddit%22&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ5t4CegQIMRAB
+          - generic [ref=f29e358]:
+            - generic [ref=f29e361]:
+              - link "[D] Why are most Federated Learning methods so ... Reddit · r/MachineLearning 10+ comments · 1 year ago" [ref=f29e363] [cursor=pointer]:
+                - /url: https://www.reddit.com/r/MachineLearning/comments/1fgjzlt/d_why_are_most_federated_learning_methods_so/
+                - heading "[D] Why are most Federated Learning methods so ..." [level=3] [ref=f29e364]
+                - generic [ref=f29e370]:
+                  - generic [ref=f29e371]: Reddit · r/MachineLearning
+                  - generic [ref=f29e373]: 10+ comments · 1 year ago
+              - button "About this result" [ref=f29e377] [cursor=pointer]
+            - generic [ref=f29e382]: I'm doing research in FL for some time now and went through a few subfields. Whenever I start a new project and do some benchmarking of existing methods, ...
+            - generic [ref=f29e388]:
+              - link "10 answers" [ref=f29e389] [cursor=pointer]:
+                - /url: https://www.reddit.com/r/MachineLearning/comments/1fgjzlt/d_why_are_most_federated_learning_methods_so/ln31p3n/
+              - generic [ref=f29e390]: ·
+              - generic [ref=f29e391]: "Top answer:"
+              - generic [ref=f29e392]: One of the problems that I have seen in a similar subfield is that reducing the dependence ...
+            - generic [ref=f29e394]:
+              - text: "Missing: server ‎| Show results with:"
+              - link "server" [ref=f29e395] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=FedOpt+adaptive+%22server%22+optimization+federated+learning+Reddit&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ5t4CegQILBAB
+          - generic [ref=f29e400]:
+            - heading "People also ask" [level=2] [ref=f29e402]
+            - generic [ref=f29e403]:
+              - button "What are the cons of federated learning?" [ref=f29e409] [cursor=pointer]
+              - button "What is federated optimization?" [ref=f29e423] [cursor=pointer]
+              - button "Is federated learning a thing?" [ref=f29e437] [cursor=pointer]
+              - button "What is the difference between machine learning and federated learning?" [ref=f29e451] [cursor=pointer]
+          - generic [ref=f29e461]:
+            - heading "Web results" [level=2] [ref=f29e462]
+            - generic [ref=f29e463]:
+              - generic [ref=f29e466]:
+                - link "[D] Why is federated learning not more mainstream? Reddit · r/MachineLearning 20+ comments · 2 years ago" [ref=f29e468] [cursor=pointer]:
+                  - /url: https://www.reddit.com/r/MachineLearning/comments/151377t/d_why_is_federated_learning_not_more_mainstream/
+                  - heading "[D] Why is federated learning not more mainstream?" [level=3] [ref=f29e469]
+                  - generic [ref=f29e475]:
+                    - generic [ref=f29e476]: Reddit · r/MachineLearning
+                    - generic [ref=f29e478]: 20+ comments · 2 years ago
+                - button "About this result" [ref=f29e482] [cursor=pointer]
+              - generic [ref=f29e487]: I entirely get that federated learning can add considerable overhead to collaborative ML projects. However, the idea of being able to leverage the data ...
+              - generic [ref=f29e493]:
+                - link "21 answers" [ref=f29e494] [cursor=pointer]:
+                  - /url: https://www.reddit.com/r/MachineLearning/comments/151377t/d_why_is_federated_learning_not_more_mainstream/js6dnjg/
+                - generic [ref=f29e495]: ·
+                - generic [ref=f29e496]: "Top answer:"
+                - generic [ref=f29e497]: Just because you don't see it doesn't mean that it's not happening. This is super common. Most ...
+              - generic [ref=f29e498]: "Missing: FedOpt ‎adaptive"
+          - generic [ref=f29e503]:
+            - generic [ref=f29e506]:
+              - 'link "Adaptive Data Optimization (ADO): A New Algorithm for ... Reddit · r/machinelearningnews 1 year ago" [ref=f29e508] [cursor=pointer]':
+                - /url: https://www.reddit.com/r/machinelearningnews/comments/1gb9526/adaptive_data_optimization_ado_a_new_algorithm/
+                - 'heading "Adaptive Data Optimization (ADO): A New Algorithm for ..." [level=3] [ref=f29e509]'
+                - generic [ref=f29e515]:
+                  - generic [ref=f29e516]: Reddit · r/machinelearningnews
+                  - generic [ref=f29e518]: 1 year ago
+              - button "About this result" [ref=f29e522] [cursor=pointer]
+            - generic [ref=f29e528]:
+              - generic [ref=f29e529]:
+                - emphasis [ref=f29e530]: ADO is an online algorithm
+                - text: that does not require smaller proxy models or additional external data. It uses scaling laws to assess the learning potential of ...
+              - link "Read more" [ref=f29e531] [cursor=pointer]:
+                - /url: https://www.reddit.com/r/machinelearningnews/comments/1gb9526/adaptive_data_optimization_ado_a_new_algorithm/#:~:text=ADO%20is%20an%20online%20algorithm,adjusts%20the%20data%20mixture%20accordingly.
+            - generic [ref=f29e532]: "Missing: FedOpt ‎server ‎federated"
+          - generic [ref=f29e537]:
+            - generic [ref=f29e540]:
+              - link "Efficient Adaptive Federated Optimization arXiv https://arxiv.org › html" [ref=f29e542] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2410.18117v3
+                - heading "Efficient Adaptive Federated Optimization" [level=3] [ref=f29e543]
+                - generic [ref=f29e549]:
+                  - generic [ref=f29e550]: arXiv
+                  - generic [ref=f29e552]: https://arxiv.org › html
+              - button "About this result" [ref=f29e556] [cursor=pointer]
+            - generic [ref=f29e562]:
+              - generic [ref=f29e563]: Oct 25, 2025 —
+              - generic [ref=f29e564]:
+                - emphasis [ref=f29e565]: Adaptive optimization is critical in federated learning
+                - text: ", where enabling adaptivity on both the server and client sides has proven essential for ..."
+              - link "Read more" [ref=f29e566] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2410.18117v3#:~:text=Adaptive%20optimization%20is%20critical%20in,essential%20for%20achieving%20optimal%20performance.
+            - generic [ref=f29e568]:
+              - text: "Missing: Reddit ‎| Show results with:"
+              - link "Reddit" [ref=f29e569] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=FedOpt+adaptive+server+optimization+federated+learning+%22Reddit%22&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ5t4CegQINRAB
+        - generic [ref=f29e571]:
+          - generic [ref=f29e576]:
+            - heading "People also search for" [level=2] [ref=f29e578]
+            - generic [ref=f29e580]:
+              - generic [ref=f29e581]:
+                - link "Fedopt adaptive server optimization federated learning reddit 2020" [ref=f29e585] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Fedopt+adaptive+server+optimization+federated+learning+reddit+2020&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ1QJ6BAhXEAE
+                - link "Fedopt adaptive server optimization federated learning reddit 2021" [ref=f29e599] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Fedopt+adaptive+server+optimization+federated+learning+reddit+2021&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ1QJ6BAhdEAE
+                - link "Adaptive federated optimization" [ref=f29e613] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Adaptive+federated+optimization&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ1QJ6BAhbEAE
+                - link "Adaptive federated optimization ICLR" [ref=f29e627] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Adaptive+federated+optimization+ICLR&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ1QJ6BAhcEAE
+              - generic [ref=f29e638]:
+                - link "Federated optimization in heterogeneous networks" [ref=f29e642] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Federated+optimization+in+heterogeneous+networks&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ1QJ6BAhZEAE
+                - link "FedAdam" [ref=f29e656] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=FedAdam&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ1QJ6BAheEAE
+                - link "Reddi et al adaptive federated optimization iclr 2021" [ref=f29e670] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Reddi+et+al+adaptive+federated+optimization+iclr+2021&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ1QJ6BAhYEAE
+                - link "Federated learning based on Dynamic Regularization" [ref=f29e684] [cursor=pointer]:
+                  - /url: /search?sca_esv=30a5fb343c9df574&q=Federated+learning+based+on+Dynamic+Regularization&sa=X&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ1QJ6BAhaEAE
+          - navigation [ref=f29e695]:
+            - heading "Page Navigation" [level=1] [ref=f29e696]
+            - text: "1"
+            - link "Page 2" [ref=f29e699] [cursor=pointer]:
+              - /url: /search?q=FedOpt+adaptive+server+optimization+federated+learning+Reddit&sca_esv=30a5fb343c9df574&ei=4P1Paou-MseIkPIPtcSVuQE&start=10&sa=N&sstk=AU9db-AbyvGgUo8RqxZ2bFAw8XL1oXNeHucK3i1o8DHSPIw-SG9dFkjrQxlEvCPQUbxUURQHuPG6urlVo1kwwE1f6r0o3bYkjdQ9nw&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ8tMDegQIVBAE
+              - text: "2"
+            - link "Page 3" [ref=f29e701] [cursor=pointer]:
+              - /url: /search?q=FedOpt+adaptive+server+optimization+federated+learning+Reddit&sca_esv=30a5fb343c9df574&ei=4P1Paou-MseIkPIPtcSVuQE&start=20&sa=N&sstk=AU9db-AbyvGgUo8RqxZ2bFAw8XL1oXNeHucK3i1o8DHSPIw-SG9dFkjrQxlEvCPQUbxUURQHuPG6urlVo1kwwE1f6r0o3bYkjdQ9nw&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ8tMDegQIVBAG
+              - text: "3"
+            - heading [level=2] [ref=f29e703]:
+              - link "Next" [ref=f29e704] [cursor=pointer]:
+                - /url: /search?q=FedOpt+adaptive+server+optimization+federated+learning+Reddit&sca_esv=30a5fb343c9df574&ei=4P1Paou-MseIkPIPtcSVuQE&start=10&sa=N&sstk=AU9db-AbyvGgUo8RqxZ2bFAw8XL1oXNeHucK3i1o8DHSPIw-SG9dFkjrQxlEvCPQUbxUURQHuPG6urlVo1kwwE1f6r0o3bYkjdQ9nw&ved=2ahUKEwiLrv-cscaVAxVHBEQIHTViJRcQ8NMDegQIVBAI
+        - navigation
+    - contentinfo [ref=f29e707]:
+      - heading "Footer Links" [level=1] [ref=f29e708]
+      - generic [ref=f29e712]:
+        - generic [ref=f29e716]:
+          - button "Woodland, California - From your IP address" [ref=f29e718] [cursor=pointer]:
+            - generic [ref=f29e719]: Woodland, California
+            - generic [ref=f29e721]:
+              - text: "-"
+              - generic [ref=f29e722]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f29e724] [cursor=pointer]
+        - generic [ref=f29e727]:
+          - link "Help" [ref=f29e728] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f29e729] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f29e730] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f29e731] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

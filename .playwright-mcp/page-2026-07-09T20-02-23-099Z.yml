@@ -1,0 +1,288 @@
+- generic [active] [ref=f117e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f117e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f117e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f117e8]:
+    - search [ref=f117e9]:
+      - generic [ref=f117e11]:
+        - link "Go to Google Home" [ref=f117e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQPAgI
+        - generic [ref=f117e21]:
+          - generic [ref=f117e22]:
+            - combobox "Search" [ref=f117e25]: "\"AdaSum: Adaptive Summation of Gradients\" arxiv \"AdaSum: Adaptive Summation of Gradients\" arxiv"
+            - generic [ref=f117e26]:
+              - button "Clear" [ref=f117e28] [cursor=pointer]
+              - generic [ref=f117e33]:
+                - button "Search by voice" [ref=f117e34] [cursor=pointer]
+                - button "Search by image" [ref=f117e37] [cursor=pointer]
+          - button "Search" [ref=f117e40] [cursor=pointer]
+    - generic [ref=f117e45]:
+      - button "Settings" [ref=f117e47] [cursor=pointer]
+      - button "Share" [ref=f117e53] [cursor=pointer]
+      - generic [ref=f117e59]:
+        - button "Google apps" [ref=f117e61] [cursor=pointer]
+        - link "Sign in" [ref=f117e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522AdaSum%253A%2BAdaptive%2BSummation%2Bof%2BGradients%2522%2Barxiv&ec=futura_srp_og_si_72236_p
+  - generic [ref=f117e68]:
+    - navigation [ref=f117e74]:
+      - generic [ref=f117e80]:
+        - list [ref=f117e81]:
+          - listitem [ref=f117e82]:
+            - link "AI Mode" [ref=f117e85] [cursor=pointer]:
+              - /url: /search?q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegslZITv4C2ITIiG_Zhv1CUVVCFZGgo3Z3gGlpXWh4hmaVbQHT1-5w12lVdW-6Wi-I2FI08mKlJq6aK8xb91xerMNRhHhYeKLDDB9urDhxYqUhm4-VQ&aep=1&ntc=1&sa=X&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQ2J8OegQICBAD
+          - listitem [ref=f117e89]:
+            - link "All" [disabled] [ref=f117e90]
+          - listitem [ref=f117e93]:
+            - link "Images" [ref=f117e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegslZITv4C2ITIiG_Zhv1CUVVCFZGgo3Z3gGlpXWh4hmaVbQHT1-5w12lVdW-6Wi-I2FI08mKlJq6aK8xb91xerMNRhHhYeKLDDB9urDhxYqUhm4-VQ&q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sa=X&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQtKgLegQIFhAB
+          - listitem [ref=f117e97]:
+            - link "Videos" [ref=f117e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegslZITv4C2ITIiG_Zhv1CUVVCFZGgo3Z3gGlpXWh4hmaVbQHT1-5w12lVdW-6Wi-I2FI08mKlJq6aK8xb91xerMNRhHhYeKLDDB9urDhxYqUhm4-VQ&q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sa=X&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQtKgLegQIDRAB
+          - listitem [ref=f117e101]:
+            - link "Forums" [ref=f117e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegslZITv4C2ITIiG_Zhv1CUVVCFZGgo3Z3gGlpXWh4hmaVbQHT1-5w12lVdW-6Wi-I2FI08mKlJq6aK8xb91xerMNRhHhYeKLDDB9urDhxYqUhm4-VQ&q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sa=X&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQs6gLegQICxAB
+          - listitem [ref=f117e105]:
+            - link "Shopping" [ref=f117e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegslZITv4C2ITIiG_Zhv1CUVVCFZGgo3Z3gGlpXWh4hmaVbQHT1-5w12lVdW-6Wi-I2FI08mKlJq6aK8xb91xerMNRhHhYeKLDDB9urDhxYqUhm4-VQ&q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&ved=1t:220175&ictx=111
+          - listitem [ref=f117e109]:
+            - link "Short videos" [ref=f117e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cK2mNBy2II_6WvkKSZWdegslZITv4C2ITIiG_Zhv1CUVVCFZGgo3Z3gGlpXWh4hmaVbQHT1-5w12lVdW-6Wi-I2FI08mKlJq6aK8xb91xerMNRhHhYeKLDDB9urDhxYqUhm4-VQ&q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sa=X&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQs6gLegQIDBAB
+          - listitem [ref=f117e113]:
+            - button [ref=f117e114] [cursor=pointer]:
+              - generic "More filters" [ref=f117e115]: More
+        - button "Tools" [ref=f117e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f117e129]
+    - main [ref=f117e135]:
+      - generic [ref=f117e136]:
+        - generic [ref=f117e140]:
+          - 'heading "No results found for \"AdaSum: Adaptive Summation of Gradients\" arxiv." [level=2] [ref=f117e141]'
+          - text: Results for
+          - 'link "AdaSum: Adaptive Summation of Gradients arxiv" [ref=f117e142] [cursor=pointer]':
+            - /url: /search?sca_esv=30a5fb343c9df574&q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sa=X&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQgwN6BAg9EAE
+          - text: "(without quotes):"
+        - generic [ref=f117e145]:
+          - generic [ref=f117e148]:
+            - heading "Web results" [level=2] [ref=f117e149]
+            - generic [ref=f117e150]:
+              - generic [ref=f117e153]:
+                - link "Scaling Distributed Training with Adaptive Summation arXiv https://arxiv.org › cs" [ref=f117e155] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/2006.02924
+                  - heading "Scaling Distributed Training with Adaptive Summation" [level=3] [ref=f117e156]
+                  - generic [ref=f117e162]:
+                    - generic [ref=f117e163]: arXiv
+                    - generic [ref=f117e165]: https://arxiv.org › cs
+                - button "About this result" [ref=f117e169] [cursor=pointer]
+              - generic [ref=f117e175]:
+                - generic [ref=f117e176]: by S Maleki · 2020 · Cited by 12 —
+                - generic [ref=f117e177]:
+                  - text: This paper introduces a novel method to combine gradients called
+                  - emphasis [ref=f117e178]: Adasum
+                  - text: (for adaptive sum) that converges faster than prior work.
+                - link "Read more" [ref=f117e179] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/2006.02924#:~:text=This%20paper%20introduces%20a%20novel,converges%20faster%20than%20prior%20work.
+          - generic [ref=f117e190]:
+            - heading "Thinking" [level=2] [ref=f117e194]
+            - progressbar "Generating" [ref=f117e197]
+          - generic [ref=f117e201]:
+            - heading "Web results" [level=2] [ref=f117e202]
+            - generic [ref=f117e203]:
+              - generic [ref=f117e206]:
+                - link "Scaling Distributed Training with Adaptive Summation MLSys Proceedings https://proceedings.mlsys.org › paper_files › paper › hash" [ref=f117e208] [cursor=pointer]:
+                  - /url: https://proceedings.mlsys.org/paper_files/paper/2021/hash/427e0e886ebf87538afdf0badb805b7f-Abstract.html
+                  - heading "Scaling Distributed Training with Adaptive Summation" [level=3] [ref=f117e209]
+                  - generic [ref=f117e218]:
+                    - generic [ref=f117e219]: MLSys Proceedings
+                    - generic [ref=f117e221]: https://proceedings.mlsys.org › paper_files › paper › hash
+                - button "About this result" [ref=f117e225] [cursor=pointer]
+              - generic [ref=f117e231]:
+                - generic [ref=f117e232]: by S Maleki · 2021 · Cited by 12 —
+                - generic [ref=f117e233]:
+                  - text: This paper introduces a novel method to combine
+                  - emphasis [ref=f117e234]: gradients
+                  - text: called
+                  - emphasis [ref=f117e235]: Adasum
+                  - text: that significantly improves the convergence when using large minibatches.
+                - link "Read more" [ref=f117e236] [cursor=pointer]:
+                  - /url: https://proceedings.mlsys.org/paper_files/paper/2021/hash/427e0e886ebf87538afdf0badb805b7f-Abstract.html#:~:text=This%20paper%20introduces%20a%20novel,convergence%20when%20using%20large%20minibatches.
+          - generic [ref=f117e240]:
+            - generic [ref=f117e243]:
+              - link "Adaptive Summation Method for Scaling Distributed Training Towards Data Science https://towardsdatascience.com › Latest" [ref=f117e245] [cursor=pointer]:
+                - /url: https://towardsdatascience.com/understanding-adasum-adaptive-summation-method-for-scaling-distributed-training-eb1440c5a165/
+                - heading "Adaptive Summation Method for Scaling Distributed Training" [level=3] [ref=f117e246]
+                - generic [ref=f117e252]:
+                  - generic [ref=f117e253]: Towards Data Science
+                  - generic [ref=f117e255]: https://towardsdatascience.com › Latest
+              - button "About this result" [ref=f117e259] [cursor=pointer]
+            - generic [ref=f117e265]:
+              - generic [ref=f117e266]: May 2, 2021 —
+              - generic [ref=f117e267]:
+                - text: The authors proposed a method called
+                - emphasis [ref=f117e268]: AdaSum
+                - text: to add the
+                - emphasis [ref=f117e269]: gradient
+                - text: vectors when they are are orthogonal and perform arithmetic average when the direction of ...
+              - link "Read more" [ref=f117e270] [cursor=pointer]:
+                - /url: https://towardsdatascience.com/understanding-adasum-adaptive-summation-method-for-scaling-distributed-training-eb1440c5a165/#:~:text=The%20authors%20proposed%20a%20method,gradient%20vectors%20are%20in%20parallel.
+          - generic [ref=f117e274]:
+            - generic [ref=f117e277]:
+              - link "Adaptive Consensus Gradients Aggregation for Scaled ... arXiv https://arxiv.org › html" [ref=f117e279] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2411.03742v1
+                - heading "Adaptive Consensus Gradients Aggregation for Scaled ..." [level=3] [ref=f117e280]
+                - generic [ref=f117e286]:
+                  - generic [ref=f117e287]: arXiv
+                  - generic [ref=f117e289]: https://arxiv.org › html
+              - button "About this result" [ref=f117e293] [cursor=pointer]
+            - generic [ref=f117e299]:
+              - generic [ref=f117e300]: Nov 6, 2024 —
+              - generic [ref=f117e301]:
+                - text: Adasum [34] proposed an
+                - emphasis [ref=f117e302]: adaptive gradient aggregation simulating multiple sequential gradient descent steps
+                - text: . Recently, [18] proposed a new ...
+              - link "Read more" [ref=f117e303] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2411.03742v1#:~:text=Adasum,proposed%20a%20new
+          - generic [ref=f117e307]:
+            - generic [ref=f117e310]:
+              - 'link "AdaS: Adaptive Scheduling of Stochastic Gradients arXiv https://arxiv.org › abs" [ref=f117e312] [cursor=pointer]':
+                - /url: https://arxiv.org/abs/2006.06587
+                - 'heading "AdaS: Adaptive Scheduling of Stochastic Gradients" [level=3] [ref=f117e313]'
+                - generic [ref=f117e319]:
+                  - generic [ref=f117e320]: arXiv
+                  - generic [ref=f117e322]: https://arxiv.org › abs
+              - button "About this result" [ref=f117e326] [cursor=pointer]
+            - generic [ref=f117e332]:
+              - generic [ref=f117e333]: by MS Hosseini · 2020 · Cited by 10 —
+              - generic [ref=f117e334]:
+                - text: Abstract:The choice of step-size used in Stochastic
+                - emphasis [ref=f117e335]: Gradient
+                - text: Descent (SGD) optimization is empirically selected in most training procedures.
+              - link "Read more" [ref=f117e336] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/2006.06587#:~:text=The%20choice%20of%20step%2Dsize%20used,selected%20in%20most%20training%20procedures.
+            - generic [ref=f117e337]: "Missing: AdaSum: ‎Summation"
+          - generic [ref=f117e342]:
+            - generic [ref=f117e345]:
+              - 'link "AdaFamily: A family of Adam-like adaptive gradient methods arXiv https://arxiv.org › cs" [ref=f117e347] [cursor=pointer]':
+                - /url: https://arxiv.org/abs/2203.01603
+                - 'heading "AdaFamily: A family of Adam-like adaptive gradient methods" [level=3] [ref=f117e348]'
+                - generic [ref=f117e354]:
+                  - generic [ref=f117e355]: arXiv
+                  - generic [ref=f117e357]: https://arxiv.org › cs
+              - button "About this result" [ref=f117e361] [cursor=pointer]
+            - generic [ref=f117e367]:
+              - generic [ref=f117e368]: by H Fassold · 2022 · Cited by 4 —
+              - generic [ref=f117e369]:
+                - text: We propose
+                - emphasis [ref=f117e370]: AdaFamily
+                - text: ", a novel method for training deep neural networks. It is a family of adaptive gradient methods and can be interpreted as sort of a blend ..."
+              - link "Read more" [ref=f117e371] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/2203.01603#:~:text=We%20propose%20AdaFamily%2C%20a%20novel,algorithms%20Adam%2C%20AdaBelief%20and%20AdaMomentum.
+          - generic [ref=f117e375]:
+            - generic [ref=f117e378]:
+              - 'link "AdAdaGrad: Adaptive Batch Size Schemes for ... arXiv https://arxiv.org › html" [ref=f117e380] [cursor=pointer]':
+                - /url: https://arxiv.org/html/2402.11215v3
+                - 'heading "AdAdaGrad: Adaptive Batch Size Schemes for ..." [level=3] [ref=f117e381]'
+                - generic [ref=f117e387]:
+                  - generic [ref=f117e388]: arXiv
+                  - generic [ref=f117e390]: https://arxiv.org › html
+              - button "About this result" [ref=f117e394] [cursor=pointer]
+            - generic [ref=f117e400]:
+              - generic [ref=f117e401]:
+                - text: Our focus is on AdaGrad and its norm variant AdaGrad-Norm, which are among the simplest and most extensively studied
+                - emphasis [ref=f117e402]: adaptive gradient
+                - text: methods. The development ...
+              - link "Read more" [ref=f117e403] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2402.11215v3#:~:text=Our%20focus%20is%20on%20AdaGrad,significant%20theoretical%20and%20practical%20relevance.
+            - generic [ref=f117e405]:
+              - text: "Missing: AdaSum: ‎| Show results with:"
+              - link "AdaSum:" [ref=f117e406] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=%22AdaSum:%22+Adaptive+Summation+of+Gradients+arxiv&sa=X&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQ5t4CegQILBAB
+          - generic [ref=f117e410]:
+            - generic [ref=f117e413]:
+              - link "Distributed Training of Embeddings using Graph Analytics UT Austin Computer Science https://www.cs.utexas.edu › ~roshan" [ref=f117e415] [cursor=pointer]:
+                - /url: https://www.cs.utexas.edu/~roshan/GraphAny2Vec.pdf
+                - heading "Distributed Training of Embeddings using Graph Analytics" [level=3] [ref=f117e416]
+                - generic [ref=f117e422]:
+                  - generic [ref=f117e423]: UT Austin Computer Science
+                  - generic [ref=f117e425]: https://www.cs.utexas.edu › ~roshan
+              - generic [ref=f117e427]: PDF
+              - button "About this result" [ref=f117e430] [cursor=pointer]
+            - generic [ref=f117e436]:
+              - generic [ref=f117e437]: by G Gill · Cited by 2 —
+              - generic [ref=f117e438]:
+                - emphasis [ref=f117e439]: Adaptive Summation
+                - text: (
+                - emphasis [ref=f117e440]: AdaSum
+                - text: ) [18] is another technique similar to mini-batch algorithm which computes the
+                - emphasis [ref=f117e441]: gradients
+                - text: for multiple
+                - emphasis [ref=f117e442]: gradients
+                - text: in parallel but.
+              - link "Read more" [ref=f117e443] [cursor=pointer]:
+                - /url: https://www.cs.utexas.edu/~roshan/GraphAny2Vec.pdf#:~:text=Adaptive%20Summation%20(AdaSum)%20%5B18%5D,multiple%20gradients%20in%20parallel%20but
+          - generic [ref=f117e447]:
+            - generic [ref=f117e450]:
+              - link "On the Choice of Learning Rate for Local SGD OpenReview https://openreview.net › pdf" [ref=f117e452] [cursor=pointer]:
+                - /url: https://openreview.net/pdf?id=DPvwr4HJdt
+                - heading "On the Choice of Learning Rate for Local SGD" [level=3] [ref=f117e453]
+                - generic [ref=f117e459]:
+                  - generic [ref=f117e460]: OpenReview
+                  - generic [ref=f117e462]: https://openreview.net › pdf
+              - generic [ref=f117e464]: PDF
+              - button "About this result" [ref=f117e467] [cursor=pointer]
+            - generic [ref=f117e473]:
+              - generic [ref=f117e474]: by L Balles · Cited by 2 —
+              - generic [ref=f117e475]:
+                - text: Based on the assumption that small batch training generalizes better,
+                - emphasis [ref=f117e476]: Adasum
+                - text: (Maleki et al.,. 2021) tries to mimic small batch training while using larger batch ...
+              - link "Read more" [ref=f117e477] [cursor=pointer]:
+                - /url: https://openreview.net/pdf?id=DPvwr4HJdt#:~:text=Based%20on%20the%20assumption%20that,a%20more%20complex%20operation%20to
+      - navigation [ref=f117e480]:
+        - heading "Page Navigation" [level=1] [ref=f117e481]
+        - text: "1"
+        - link "Page 2" [ref=f117e484] [cursor=pointer]:
+          - /url: /search?q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sca_esv=30a5fb343c9df574&ei=Tv5PasCxG4nQkPIPiKvMsA4&start=10&sa=N&sstk=AU9db-C8fdgK_b9UiJkJ2t3A35MZqq07gQ87nWngm1NXsLQolzbrqeh6cAfd-TNm9bJko7JFGNpoQX4dqRMVLqcWbAhP1NQRDnxD9w&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQ8tMDegQIPhAE
+          - text: "2"
+        - link "Page 3" [ref=f117e486] [cursor=pointer]:
+          - /url: /search?q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sca_esv=30a5fb343c9df574&ei=Tv5PasCxG4nQkPIPiKvMsA4&start=20&sa=N&sstk=AU9db-C8fdgK_b9UiJkJ2t3A35MZqq07gQ87nWngm1NXsLQolzbrqeh6cAfd-TNm9bJko7JFGNpoQX4dqRMVLqcWbAhP1NQRDnxD9w&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQ8tMDegQIPhAG
+          - text: "3"
+        - link "Page 4" [ref=f117e488] [cursor=pointer]:
+          - /url: /search?q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sca_esv=30a5fb343c9df574&ei=Tv5PasCxG4nQkPIPiKvMsA4&start=30&sa=N&sstk=AU9db-C8fdgK_b9UiJkJ2t3A35MZqq07gQ87nWngm1NXsLQolzbrqeh6cAfd-TNm9bJko7JFGNpoQX4dqRMVLqcWbAhP1NQRDnxD9w&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQ8tMDegQIPhAI
+          - text: "4"
+        - link "Page 5" [ref=f117e490] [cursor=pointer]:
+          - /url: /search?q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sca_esv=30a5fb343c9df574&ei=Tv5PasCxG4nQkPIPiKvMsA4&start=40&sa=N&sstk=AU9db-C8fdgK_b9UiJkJ2t3A35MZqq07gQ87nWngm1NXsLQolzbrqeh6cAfd-TNm9bJko7JFGNpoQX4dqRMVLqcWbAhP1NQRDnxD9w&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQ8tMDegQIPhAK
+          - text: "5"
+        - link "Page 6" [ref=f117e492] [cursor=pointer]:
+          - /url: /search?q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sca_esv=30a5fb343c9df574&ei=Tv5PasCxG4nQkPIPiKvMsA4&start=50&sa=N&sstk=AU9db-C8fdgK_b9UiJkJ2t3A35MZqq07gQ87nWngm1NXsLQolzbrqeh6cAfd-TNm9bJko7JFGNpoQX4dqRMVLqcWbAhP1NQRDnxD9w&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQ8tMDegQIPhAM
+          - text: "6"
+        - link "Page 7" [ref=f117e494] [cursor=pointer]:
+          - /url: /search?q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sca_esv=30a5fb343c9df574&ei=Tv5PasCxG4nQkPIPiKvMsA4&start=60&sa=N&sstk=AU9db-C8fdgK_b9UiJkJ2t3A35MZqq07gQ87nWngm1NXsLQolzbrqeh6cAfd-TNm9bJko7JFGNpoQX4dqRMVLqcWbAhP1NQRDnxD9w&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQ8tMDegQIPhAO
+          - text: "7"
+        - link "Page 8" [ref=f117e496] [cursor=pointer]:
+          - /url: /search?q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sca_esv=30a5fb343c9df574&ei=Tv5PasCxG4nQkPIPiKvMsA4&start=70&sa=N&sstk=AU9db-C8fdgK_b9UiJkJ2t3A35MZqq07gQ87nWngm1NXsLQolzbrqeh6cAfd-TNm9bJko7JFGNpoQX4dqRMVLqcWbAhP1NQRDnxD9w&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQ8tMDegQIPhAQ
+          - text: "8"
+        - heading [level=2] [ref=f117e498]:
+          - link "Next" [ref=f117e499] [cursor=pointer]:
+            - /url: /search?q=AdaSum:+Adaptive+Summation+of+Gradients+arxiv&sca_esv=30a5fb343c9df574&ei=Tv5PasCxG4nQkPIPiKvMsA4&start=10&sa=N&sstk=AU9db-C8fdgK_b9UiJkJ2t3A35MZqq07gQ87nWngm1NXsLQolzbrqeh6cAfd-TNm9bJko7JFGNpoQX4dqRMVLqcWbAhP1NQRDnxD9w&ved=2ahUKEwjAkKLRscaVAxUJKEQIHYgVE-YQ8NMDegQIPhAS
+      - navigation
+    - contentinfo [ref=f117e502]:
+      - heading "Footer Links" [level=1] [ref=f117e503]
+      - generic [ref=f117e507]:
+        - generic [ref=f117e511]:
+          - button "Woodland, California - From your IP address" [ref=f117e513] [cursor=pointer]:
+            - generic [ref=f117e514]: Woodland, California
+            - generic [ref=f117e516]:
+              - text: "-"
+              - generic [ref=f117e517]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f117e519] [cursor=pointer]
+        - generic [ref=f117e522]:
+          - link "Help" [ref=f117e523] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f117e524] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f117e525] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f117e526] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

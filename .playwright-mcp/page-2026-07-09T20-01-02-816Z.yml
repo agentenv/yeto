@@ -1,0 +1,235 @@
+- generic [active] [ref=f72e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f72e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f72e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f72e8]:
+    - search [ref=f72e9]:
+      - generic [ref=f72e11]:
+        - link "Go to Google Home" [ref=f72e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwiD9omrscaVAxUtJkQIHQXYDSwQPAgI
+        - generic [ref=f72e21]:
+          - generic [ref=f72e22]:
+            - combobox "Search" [ref=f72e25]: "\"Adaptive Consensus Gradients Aggregation\" \"Adaptive Consensus Gradients Aggregation\""
+            - generic [ref=f72e26]:
+              - button "Clear" [ref=f72e28] [cursor=pointer]
+              - generic [ref=f72e33]:
+                - button "Search by voice" [ref=f72e34] [cursor=pointer]
+                - button "Search by image" [ref=f72e37] [cursor=pointer]
+          - button "Search" [ref=f72e40] [cursor=pointer]
+    - generic [ref=f72e45]:
+      - button "Settings" [ref=f72e47] [cursor=pointer]
+      - button "Share" [ref=f72e53] [cursor=pointer]
+      - generic [ref=f72e59]:
+        - button "Google apps" [ref=f72e61] [cursor=pointer]
+        - link "Sign in" [ref=f72e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522Adaptive%2BConsensus%2BGradients%2BAggregation%2522&ec=futura_srp_og_si_72236_p
+  - generic [ref=f72e68]:
+    - navigation [ref=f72e74]:
+      - generic [ref=f72e80]:
+        - list [ref=f72e81]:
+          - listitem [ref=f72e82]:
+            - link "AI Mode" [ref=f72e85] [cursor=pointer]:
+              - /url: /search?q=%22Adaptive+Consensus+Gradients+Aggregation%22&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbdipNP9IdSJPNW0dZW-vtpfTgsxPubDUGnnlexyWPgXsYQ501vMFanP6YYzZT8alsPK9K_UpvZv90tWB2_PHZ3qaLnMhS_YZwJh28ayySOW7TQxOj2Df-YULSzgdLJvDe51FJPcw&aep=1&ntc=1&sa=X&ved=2ahUKEwiD9omrscaVAxUtJkQIHQXYDSwQ2J8OegQICBAD
+          - listitem [ref=f72e89]:
+            - link "All" [disabled] [ref=f72e90]
+          - listitem [ref=f72e93]:
+            - link "Images" [ref=f72e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbdipNP9IdSJPNW0dZW-vtpfTgsxPubDUGnnlexyWPgXsYQ501vMFanP6YYzZT8alsPK9K_UpvZv90tWB2_PHZ3qaLnMhS_YZwJh28ayySOW7TQxOj2Df-YULSzgdLJvDe51FJPcw&q=%22Adaptive+Consensus+Gradients+Aggregation%22&sa=X&ved=2ahUKEwiD9omrscaVAxUtJkQIHQXYDSwQtKgLegQIERAB
+          - listitem [ref=f72e97]:
+            - link "Shopping" [ref=f72e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbdipNP9IdSJPNW0dZW-vtpfTgsxPubDUGnnlexyWPgXsYQ501vMFanP6YYzZT8alsPK9K_UpvZv90tWB2_PHZ3qaLnMhS_YZwJh28ayySOW7TQxOj2Df-YULSzgdLJvDe51FJPcw&q=%22Adaptive+Consensus+Gradients+Aggregation%22&ved=1t:220175&ictx=111
+          - listitem [ref=f72e101]:
+            - link "Videos" [ref=f72e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbdipNP9IdSJPNW0dZW-vtpfTgsxPubDUGnnlexyWPgXsYQ501vMFanP6YYzZT8alsPK9K_UpvZv90tWB2_PHZ3qaLnMhS_YZwJh28ayySOW7TQxOj2Df-YULSzgdLJvDe51FJPcw&q=%22Adaptive+Consensus+Gradients+Aggregation%22&sa=X&ved=2ahUKEwiD9omrscaVAxUtJkQIHQXYDSwQtKgLegQIEBAB
+          - listitem [ref=f72e105]:
+            - link "Forums" [ref=f72e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbdipNP9IdSJPNW0dZW-vtpfTgsxPubDUGnnlexyWPgXsYQ501vMFanP6YYzZT8alsPK9K_UpvZv90tWB2_PHZ3qaLnMhS_YZwJh28ayySOW7TQxOj2Df-YULSzgdLJvDe51FJPcw&q=%22Adaptive+Consensus+Gradients+Aggregation%22&sa=X&ved=2ahUKEwiD9omrscaVAxUtJkQIHQXYDSwQs6gLegQIDxAB
+          - listitem [ref=f72e109]:
+            - link "News" [ref=f72e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&q=%22Adaptive+Consensus+Gradients+Aggregation%22&tbm=nws&source=lnms&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbdipNP9IdSJPNW0dZW-vtpfTgsxPubDUGnnlexyWPgXsYQ501vMFanP6YYzZT8alsPK9K_UpvZv90tWB2_PHZ3qaLnMhS_YZwJh28ayySOW7TQxOj2Df-YULSzgdLJvDe51FJPcw&sa=X&ved=2ahUKEwiD9omrscaVAxUtJkQIHQXYDSwQ0pQJegQIDRAB
+          - listitem [ref=f72e113]:
+            - button [ref=f72e114] [cursor=pointer]:
+              - generic "More filters" [ref=f72e115]: More
+        - button "Tools" [ref=f72e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f72e129]
+    - generic [ref=f72e134]:
+      - generic [ref=f72e153]:
+        - heading "Thinking" [level=2] [ref=f72e157]
+        - progressbar "Generating" [ref=f72e160]
+      - main [ref=f72e162]:
+        - generic [ref=f72e166]:
+          - generic [ref=f72e169]:
+            - heading "Web results" [level=2] [ref=f72e170]
+            - generic [ref=f72e171]:
+              - generic [ref=f72e174]:
+                - link "Adaptive Consensus Gradients Aggregation for Scaled ... arXiv https://arxiv.org › cs" [ref=f72e176] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/2411.03742
+                  - heading "Adaptive Consensus Gradients Aggregation for Scaled ..." [level=3] [ref=f72e177]
+                  - generic [ref=f72e183]:
+                    - generic [ref=f72e184]: arXiv
+                    - generic [ref=f72e186]: https://arxiv.org › cs
+                - button "About this result" [ref=f72e190] [cursor=pointer]
+              - generic [ref=f72e196]:
+                - generic [ref=f72e197]: by Y Choukroun · 2024 · Cited by 1 —
+                - generic [ref=f72e198]:
+                  - emphasis [ref=f72e199]: Adaptive Consensus Gradients Aggregation
+                  - text: for Scaled Distributed Training. Authors:Yoni Choukroun, Shlomi Azoulay, Pavel Kisilev.
+                - link "Read more" [ref=f72e200] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/2411.03742#:~:text=Adaptive%20Consensus%20Gradients%20Aggregation%20for,Choukroun%2C%20Shlomi%20Azoulay%2C%20Pavel%20Kisilev
+          - generic [ref=f72e204]:
+            - generic [ref=f72e207]:
+              - link "Adaptive Consensus Gradients Aggregation for Scaled ... arXiv https://arxiv.org › html" [ref=f72e209] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2411.03742v1
+                - heading "Adaptive Consensus Gradients Aggregation for Scaled ..." [level=3] [ref=f72e210]
+                - generic [ref=f72e216]:
+                  - generic [ref=f72e217]: arXiv
+                  - generic [ref=f72e219]: https://arxiv.org › html
+              - button "About this result" [ref=f72e223] [cursor=pointer]
+            - generic [ref=f72e229]:
+              - generic [ref=f72e230]: Nov 6, 2024 —
+              - generic [ref=f72e231]:
+                - emphasis [ref=f72e232]: Adaptive Consensus Gradients Aggregation
+                - text: for Scaled Distributed Training. Report issue for preceding element. Yoni Choukroun Shlomi Azoulay ...
+              - link "Read more" [ref=f72e233] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2411.03742v1#:~:text=Adaptive%20Consensus%20Gradients%20Aggregation%20for,Choukroun%20Shlomi%20Azoulay%20Pavel%20Kisilev
+          - generic [ref=f72e237]:
+            - generic [ref=f72e240]:
+              - link "Yoni Choukroun GitHub https://yonilc.github.io" [ref=f72e242] [cursor=pointer]:
+                - /url: https://yonilc.github.io/
+                - heading "Yoni Choukroun" [level=3] [ref=f72e243]
+                - generic [ref=f72e252]:
+                  - generic [ref=f72e253]: GitHub
+                  - generic [ref=f72e255]: https://yonilc.github.io
+              - button "About this result" [ref=f72e259] [cursor=pointer]
+            - generic [ref=f72e265]:
+              - generic [ref=f72e266]:
+                - emphasis [ref=f72e267]: Adaptive Consensus Gradients Aggregation
+                - text: for Scaled Distributed Training Yoni Choukroun, Shlomi Azoulya, Pavel Kisilev Arxiv, 2024. We propose a new method ...
+              - link "Read more" [ref=f72e268] [cursor=pointer]:
+                - /url: https://yonilc.github.io/#:~:text=Adaptive%20Consensus%20Gradients%20Aggregation%20for,syncrhonous%20distributed%20data%20parallel%20setting
+          - generic [ref=f72e272]:
+            - generic [ref=f72e275]:
+              - link "Adaptive Consensus Gradients Aggregation for Scaled ... Helport AI https://voiceclone5090.helport.ai › aimap" [ref=f72e277] [cursor=pointer]:
+                - /url: https://voiceclone5090.helport.ai/aimap/p/2411.03742?lang=en
+                - heading "Adaptive Consensus Gradients Aggregation for Scaled ..." [level=3] [ref=f72e278]
+                - generic [ref=f72e287]:
+                  - generic [ref=f72e288]: Helport AI
+                  - generic [ref=f72e290]: https://voiceclone5090.helport.ai › aimap
+              - button "About this result" [ref=f72e294] [cursor=pointer]
+            - generic [ref=f72e301]:
+              - emphasis [ref=f72e302]: Adaptive Consensus Gradients Aggregation
+              - text: for Scaled Distributed Training. 24-11-06 cs.LG 0 cit. Yoni Choukroun, Shlomi Azoulay, Pavel Kisilev.
+          - generic [ref=f72e306]:
+            - generic [ref=f72e309]:
+              - link "Consensus-Based Aggregation Scheme Emergent Mind https://www.emergentmind.com › topics › consensus-ba..." [ref=f72e311] [cursor=pointer]:
+                - /url: https://www.emergentmind.com/topics/consensus-based-aggregation-scheme
+                - heading "Consensus-Based Aggregation Scheme" [level=3] [ref=f72e312]
+                - generic [ref=f72e318]:
+                  - generic [ref=f72e319]: Emergent Mind
+                  - generic [ref=f72e321]: https://www.emergentmind.com › topics › consensus-ba...
+              - button "About this result" [ref=f72e325] [cursor=pointer]
+            - generic [ref=f72e332]:
+              - emphasis [ref=f72e333]: Adaptive Consensus Gradients Aggregation
+              - text: for Scaled Distributed Training (2024). 6. Graphical Representations of Consensus Belief (2013). 7. Consensus in ...
+          - generic [ref=f72e337]:
+            - generic [ref=f72e340]:
+              - link "Yoni Choukroun yoniLc GitHub https://github.com › yoniLc" [ref=f72e342] [cursor=pointer]:
+                - /url: https://github.com/yoniLc
+                - heading "Yoni Choukroun yoniLc" [level=3] [ref=f72e343]
+                - generic [ref=f72e349]:
+                  - generic [ref=f72e350]: GitHub
+                  - generic [ref=f72e352]: https://github.com › yoniLc
+              - button "About this result" [ref=f72e356] [cursor=pointer]
+            - generic [ref=f72e362]:
+              - generic [ref=f72e363]:
+                - text: Sample Implementation of the paper "
+                - emphasis [ref=f72e364]: Adaptive Consensus Gradients Aggregation
+                - text: for Scaled Distributed Training".
+              - link "Read more" [ref=f72e365] [cursor=pointer]:
+                - /url: https://github.com/yoniLc#:~:text=Sample%20Implementation%20of%20the%20paper,Aggregation%20for%20Scaled%20Distributed%20Training%22.
+          - generic [ref=f72e369]:
+            - generic [ref=f72e372]:
+              - link "Pytorch [49] implementation of the AdaCons DDP ... ResearchGate https://www.researchgate.net › figure › Pytorch-49-imp..." [ref=f72e374] [cursor=pointer]:
+                - /url: https://www.researchgate.net/figure/Pytorch-49-implementation-of-the-AdaCons-DDP-communication-hook_fig1_385594792
+                - heading "Pytorch [49] implementation of the AdaCons DDP ..." [level=3] [ref=f72e375]
+                - generic [ref=f72e381]:
+                  - generic [ref=f72e382]: ResearchGate
+                  - generic [ref=f72e384]: https://www.researchgate.net › figure › Pytorch-49-imp...
+              - button "About this result" [ref=f72e388] [cursor=pointer]
+            - generic [ref=f72e395]:
+              - text: "Download scientific diagram | Pytorch [49] implementation of the AdaCons DDP communication hook. from publication:"
+              - emphasis [ref=f72e396]: Adaptive Consensus Gradients Aggregation
+              - text: ...
+          - generic [ref=f72e400]:
+            - generic [ref=f72e403]:
+              - 'link "Yoni Choukroun dblp: computer science bibliography https://dblp.org › Persons" [ref=f72e405] [cursor=pointer]':
+                - /url: https://dblp.org/pid/186/8305
+                - heading "Yoni Choukroun" [level=3] [ref=f72e406]
+                - generic [ref=f72e412]:
+                  - generic [ref=f72e413]: "dblp: computer science bibliography"
+                  - generic [ref=f72e415]: https://dblp.org › Persons
+              - button "About this result" [ref=f72e419] [cursor=pointer]
+            - generic [ref=f72e425]:
+              - generic [ref=f72e426]: May 18, 2026 —
+              - generic [ref=f72e427]:
+                - text: "https://dblp.org/rec/journals/corr/abs-2411-03742. Yoni Choukroun, Shlomi Azoulay, Pavel Kisilev:"
+                - emphasis [ref=f72e428]: Adaptive Consensus Gradients Aggregation
+                - text: for ...
+              - link "Read more" [ref=f72e429] [cursor=pointer]:
+                - /url: https://dblp.org/pid/186/8305#:~:text=Yoni%20Choukroun%2C%20Shlomi%20Azoulay%2C%20Pavel,Aggregation%20for%20Scaled%20Distributed%20Training.
+          - generic [ref=f72e433]:
+            - generic [ref=f72e436]:
+              - link "[Literature Review] Why Gradients Rapidly Increase Near ... Moonlight | AI Colleague for Research Papers https://www.themoonlight.io › review › why-gradients-ra..." [ref=f72e438] [cursor=pointer]:
+                - /url: https://www.themoonlight.io/en/review/why-gradients-rapidly-increase-near-the-end-of-training
+                - heading "[Literature Review] Why Gradients Rapidly Increase Near ..." [level=3] [ref=f72e439]
+                - generic [ref=f72e445]:
+                  - generic [ref=f72e446]: Moonlight | AI Colleague for Research Papers
+                  - generic [ref=f72e448]: https://www.themoonlight.io › review › why-gradients-ra...
+              - button "About this result" [ref=f72e452] [cursor=pointer]
+            - generic [ref=f72e458]:
+              - generic [ref=f72e459]:
+                - emphasis [ref=f72e460]: Adaptive Consensus Gradients Aggregation
+                - text: for Scaled Distributed Training. "Discover the first objective-aware subspace optimization for gradient aggregation ...
+              - link "Read more" [ref=f72e461] [cursor=pointer]:
+                - /url: https://www.themoonlight.io/en/review/why-gradients-rapidly-increase-near-the-end-of-training#:~:text=Adaptive%20Consensus%20Gradients%20Aggregation%20for,distributed%20training%20convergence%20and%20efficiency.
+        - navigation [ref=f72e464]:
+          - heading "Page Navigation" [level=1] [ref=f72e465]
+          - text: "1"
+          - link "Page 2" [ref=f72e468] [cursor=pointer]:
+            - /url: /search?q=%22Adaptive+Consensus+Gradients+Aggregation%22&sca_esv=30a5fb343c9df574&ei=_v1PaoP_Fa3MkPIPhbC34AI&start=10&sa=N&sstk=AU9db-AyKufSn_t0tGEyezkYNmJ7I_mOvFO8Aixq2Yn088BKe-jhaRxtjxsvyyJik5ONoPzniXyr4AlVNP9LsqKdARkeuUzKJFqt8A&ved=2ahUKEwiD9omrscaVAxUtJkQIHQXYDSwQ8tMDegQIPBAE
+            - text: "2"
+          - link "Page 3" [ref=f72e470] [cursor=pointer]:
+            - /url: /search?q=%22Adaptive+Consensus+Gradients+Aggregation%22&sca_esv=30a5fb343c9df574&ei=_v1PaoP_Fa3MkPIPhbC34AI&start=20&sa=N&sstk=AU9db-AyKufSn_t0tGEyezkYNmJ7I_mOvFO8Aixq2Yn088BKe-jhaRxtjxsvyyJik5ONoPzniXyr4AlVNP9LsqKdARkeuUzKJFqt8A&ved=2ahUKEwiD9omrscaVAxUtJkQIHQXYDSwQ8tMDegQIPBAG
+            - text: "3"
+          - link "Page 4" [ref=f72e472] [cursor=pointer]:
+            - /url: /search?q=%22Adaptive+Consensus+Gradients+Aggregation%22&sca_esv=30a5fb343c9df574&ei=_v1PaoP_Fa3MkPIPhbC34AI&start=30&sa=N&sstk=AU9db-AyKufSn_t0tGEyezkYNmJ7I_mOvFO8Aixq2Yn088BKe-jhaRxtjxsvyyJik5ONoPzniXyr4AlVNP9LsqKdARkeuUzKJFqt8A&ved=2ahUKEwiD9omrscaVAxUtJkQIHQXYDSwQ8tMDegQIPBAI
+            - text: "4"
+          - link "Page 5" [ref=f72e474] [cursor=pointer]:
+            - /url: /search?q=%22Adaptive+Consensus+Gradients+Aggregation%22&sca_esv=30a5fb343c9df574&ei=_v1PaoP_Fa3MkPIPhbC34AI&start=40&sa=N&sstk=AU9db-AyKufSn_t0tGEyezkYNmJ7I_mOvFO8Aixq2Yn088BKe-jhaRxtjxsvyyJik5ONoPzniXyr4AlVNP9LsqKdARkeuUzKJFqt8A&ved=2ahUKEwiD9omrscaVAxUtJkQIHQXYDSwQ8tMDegQIPBAK
+            - text: "5"
+          - heading [level=2] [ref=f72e476]:
+            - link "Next" [ref=f72e477] [cursor=pointer]:
+              - /url: /search?q=%22Adaptive+Consensus+Gradients+Aggregation%22&sca_esv=30a5fb343c9df574&ei=_v1PaoP_Fa3MkPIPhbC34AI&start=10&sa=N&sstk=AU9db-AyKufSn_t0tGEyezkYNmJ7I_mOvFO8Aixq2Yn088BKe-jhaRxtjxsvyyJik5ONoPzniXyr4AlVNP9LsqKdARkeuUzKJFqt8A&ved=2ahUKEwiD9omrscaVAxUtJkQIHQXYDSwQ8NMDegQIPBAM
+        - navigation
+    - contentinfo [ref=f72e480]:
+      - heading "Footer Links" [level=1] [ref=f72e481]
+      - generic [ref=f72e485]:
+        - generic [ref=f72e489]:
+          - button "Woodland, California - From your IP address" [ref=f72e491] [cursor=pointer]:
+            - generic [ref=f72e492]: Woodland, California
+            - generic [ref=f72e494]:
+              - text: "-"
+              - generic [ref=f72e495]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f72e497] [cursor=pointer]
+        - generic [ref=f72e500]:
+          - link "Help" [ref=f72e501] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f72e502] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f72e503] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f72e504] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

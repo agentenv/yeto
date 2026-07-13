@@ -1,0 +1,350 @@
+- generic [active] [ref=f41e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f41e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f41e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f41e8]:
+    - search [ref=f41e9]:
+      - generic [ref=f41e11]:
+        - link "Go to Google Home" [ref=f41e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQPAgI
+        - generic [ref=f41e21]:
+          - generic [ref=f41e22]:
+            - combobox "Search" [ref=f41e25]: gradient clipping Pascanu 2013 arxiv norm clipping gradient clipping Pascanu 2013 arxiv norm clipping
+            - generic [ref=f41e26]:
+              - button "Clear" [ref=f41e28] [cursor=pointer]
+              - generic [ref=f41e33]:
+                - button "Search by voice" [ref=f41e34] [cursor=pointer]
+                - button "Search by image" [ref=f41e37] [cursor=pointer]
+          - button "Search" [ref=f41e40] [cursor=pointer]
+    - generic [ref=f41e45]:
+      - button "Settings" [ref=f41e47] [cursor=pointer]
+      - button "Share" [ref=f41e53] [cursor=pointer]
+      - generic [ref=f41e59]:
+        - button "Google apps" [ref=f41e61] [cursor=pointer]
+        - link "Sign in" [ref=f41e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3Dgradient%2Bclipping%2BPascanu%2B2013%2Barxiv%2Bnorm%2Bclipping&ec=futura_srp_og_si_72236_p
+  - generic [ref=f41e68]:
+    - navigation [ref=f41e74]:
+      - generic [ref=f41e80]:
+        - list [ref=f41e81]:
+          - listitem [ref=f41e82]:
+            - link "AI Mode" [ref=f41e85] [cursor=pointer]:
+              - /url: /search?q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sca_esv=d4e925c21a8887a9&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKEzfJsZm6euHh2bPtNTAJBYDOov6zpOjT0O1kBN4V557jpkjAyO0bqJ_5CT2uBkOZpSNr79gLIaXrwmluvSjYTqUZaRZFdmAnbG5aN7_hSjfzPVrib45VjDDfC-eNnls0XHA1pIc8qk3fJQtvRcI2qdwzVUNSijWAiforBIY5-pErn8FAag&aep=1&ntc=1&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ2J8OegQILRAD
+          - listitem [ref=f41e89]:
+            - link "All" [disabled] [ref=f41e90]
+          - listitem [ref=f41e93]:
+            - link "Videos" [ref=f41e94] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKEzfJsZm6euHh2bPtNTAJBYDOov6zpOjT0O1kBN4V557jpkjAyO0bqJ_5CT2uBkOZpSNr79gLIaXrwmluvSjYTqUZaRZFdmAnbG5aN7_hSjfzPVrib45VjDDfC-eNnls0XHA1pIc8qk3fJQtvRcI2qdwzVUNSijWAiforBIY5-pErn8FAag&q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQtKgLegQINBAB
+          - listitem [ref=f41e97]:
+            - link "Images" [ref=f41e98] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKEzfJsZm6euHh2bPtNTAJBYDOov6zpOjT0O1kBN4V557jpkjAyO0bqJ_5CT2uBkOZpSNr79gLIaXrwmluvSjYTqUZaRZFdmAnbG5aN7_hSjfzPVrib45VjDDfC-eNnls0XHA1pIc8qk3fJQtvRcI2qdwzVUNSijWAiforBIY5-pErn8FAag&q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQtKgLegQINhAB
+          - listitem [ref=f41e101]:
+            - link "Shopping" [ref=f41e102] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKEzfJsZm6euHh2bPtNTAJBYDOov6zpOjT0O1kBN4V557jpkjAyO0bqJ_5CT2uBkOZpSNr79gLIaXrwmluvSjYTqUZaRZFdmAnbG5aN7_hSjfzPVrib45VjDDfC-eNnls0XHA1pIc8qk3fJQtvRcI2qdwzVUNSijWAiforBIY5-pErn8FAag&q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&ved=1t:220175&ictx=111
+          - listitem [ref=f41e105]:
+            - link "Forums" [ref=f41e106] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKEzfJsZm6euHh2bPtNTAJBYDOov6zpOjT0O1kBN4V557jpkjAyO0bqJ_5CT2uBkOZpSNr79gLIaXrwmluvSjYTqUZaRZFdmAnbG5aN7_hSjfzPVrib45VjDDfC-eNnls0XHA1pIc8qk3fJQtvRcI2qdwzVUNSijWAiforBIY5-pErn8FAag&q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQs6gLegQIORAB
+          - listitem [ref=f41e109]:
+            - link "Short videos" [ref=f41e110] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cxpBkeIeqYwoCbfNVc4vKEzfJsZm6euHh2bPtNTAJBYDOov6zpOjT0O1kBN4V557jpkjAyO0bqJ_5CT2uBkOZpSNr79gLIaXrwmluvSjYTqUZaRZFdmAnbG5aN7_hSjfzPVrib45VjDDfC-eNnls0XHA1pIc8qk3fJQtvRcI2qdwzVUNSijWAiforBIY5-pErn8FAag&q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQs6gLegQIOBAB
+          - listitem [ref=f41e113]:
+            - button [ref=f41e114] [cursor=pointer]:
+              - generic "More filters" [ref=f41e115]: More
+        - button "Tools" [ref=f41e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f41e129]
+    - main [ref=f41e135]:
+      - generic [ref=f41e139]:
+        - generic [ref=f41e142]:
+          - heading "Web results" [level=2] [ref=f41e143]
+          - generic [ref=f41e144]:
+            - generic [ref=f41e147]:
+              - link "On the difficulty of training Recurrent Neural Networks arXiv https://arxiv.org › abs" [ref=f41e149] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/1211.5063
+                - heading "On the difficulty of training Recurrent Neural Networks" [level=3] [ref=f41e150]
+                - generic [ref=f41e156]:
+                  - generic [ref=f41e157]: arXiv
+                  - generic [ref=f41e159]: https://arxiv.org › abs
+              - button "About this result" [ref=f41e163] [cursor=pointer]
+            - generic [ref=f41e169]:
+              - generic [ref=f41e170]: by R Pascanu · 2012 · Cited by 9814 —
+              - generic [ref=f41e171]:
+                - text: We propose a
+                - emphasis [ref=f41e172]: gradient norm clipping strategy
+                - text: to deal with exploding gradients and a soft constraint for the vanishing gradients problem. We ...
+              - link "Read more" [ref=f41e173] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/1211.5063#:~:text=We%20propose%20a%20gradient%20norm,solutions%20in%20the%20experimental%20section.
+        - generic [ref=f41e184]:
+          - heading "Thinking" [level=2] [ref=f41e188]
+          - progressbar "Generating" [ref=f41e191]
+        - generic [ref=f41e195]:
+          - heading "Web results" [level=2] [ref=f41e196]
+          - generic [ref=f41e197]:
+            - generic [ref=f41e200]:
+              - link "On the difficulty of training recurrent neural networks Proceedings of Machine Learning Research https://proceedings.mlr.press › pascanu13" [ref=f41e202] [cursor=pointer]:
+                - /url: https://proceedings.mlr.press/v28/pascanu13.html
+                - heading "On the difficulty of training recurrent neural networks" [level=3] [ref=f41e203]
+                - generic [ref=f41e209]:
+                  - generic [ref=f41e210]: Proceedings of Machine Learning Research
+                  - generic [ref=f41e212]: https://proceedings.mlr.press › pascanu13
+              - button "About this result" [ref=f41e216] [cursor=pointer]
+            - generic [ref=f41e222]:
+              - generic [ref=f41e223]: by R Pascanu · 2013 · Cited by 9813 —
+              - generic [ref=f41e224]:
+                - text: We propose a
+                - emphasis [ref=f41e225]: gradient norm clipping strategy
+                - text: to deal with exploding gradients and a soft constraint for the vanishing gradients problem. We validate ...
+              - link "Read more" [ref=f41e226] [cursor=pointer]:
+                - /url: https://proceedings.mlr.press/v28/pascanu13.html#:~:text=We%20propose%20a%20gradient%20norm,solutions%20in%20the%20experimental%20section.
+            - generic [ref=f41e228]:
+              - text: "Missing: arxiv ‎| Show results with:"
+              - link "arxiv" [ref=f41e229] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=gradient+clipping+Pascanu+2013+%22arxiv%22+norm+clipping&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ5t4CegQIMhAB
+        - generic [ref=f41e233]:
+          - generic [ref=f41e236]:
+            - link "On the difficulty of training recurrent neural networks ACM Digital Library https://dl.acm.org › doi" [ref=f41e238] [cursor=pointer]:
+              - /url: https://dl.acm.org/doi/10.5555/3042817.3043083
+              - heading "On the difficulty of training recurrent neural networks" [level=3] [ref=f41e239]
+              - generic [ref=f41e245]:
+                - generic [ref=f41e246]: ACM Digital Library
+                - generic [ref=f41e248]: https://dl.acm.org › doi
+            - button "About this result" [ref=f41e252] [cursor=pointer]
+          - generic [ref=f41e258]:
+            - generic [ref=f41e259]: by R Pascanu · 2013 · Cited by 9813 —
+            - generic [ref=f41e260]:
+              - text: We propose a
+              - emphasis [ref=f41e261]: gradient norm clipping strategy
+              - text: to deal with exploding gradients and a soft constraint for the vanishing gradients problem. We validate ...
+            - link "Read more" [ref=f41e262] [cursor=pointer]:
+              - /url: https://dl.acm.org/doi/10.5555/3042817.3043083#:~:text=We%20propose%20a%20gradient%20norm,solutions%20in%20the%20experimental%20section.
+        - generic [ref=f41e266]:
+          - generic [ref=f41e269]:
+            - link "On the difficulty of training Recurrent Neural Networks arXiv https://arxiv.org › pdf" [ref=f41e271] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/1211.5063
+              - heading "On the difficulty of training Recurrent Neural Networks" [level=3] [ref=f41e272]
+              - generic [ref=f41e278]:
+                - generic [ref=f41e279]: arXiv
+                - generic [ref=f41e281]: https://arxiv.org › pdf
+            - generic [ref=f41e283]: PDF
+            - button "About this result" [ref=f41e286] [cursor=pointer]
+          - generic [ref=f41e292]:
+            - generic [ref=f41e293]: by R Pascanu · 2012 · Cited by 9813 —
+            - generic [ref=f41e294]:
+              - text: We propose a
+              - emphasis [ref=f41e295]: gradient norm clipping strategy
+              - text: to deal with exploding gra- dients and a soft constraint for the vanishing gradients problem. We ...
+            - link "Read more" [ref=f41e296] [cursor=pointer]:
+              - /url: https://arxiv.org/pdf/1211.5063#:~:text=We%20propose%20a%20gradient%20norm,gradients%20problem.%20We%20validate%20empirically
+        - generic [ref=f41e300]:
+          - generic [ref=f41e303]:
+            - 'link "Gradient Clipping: Preventing Exploding Gradients in Deep ... Michael Brenndoerfer https://mbrenndoerfer.com › Writing" [ref=f41e305] [cursor=pointer]':
+              - /url: https://mbrenndoerfer.com/writing/gradient-clipping-deep-learning
+              - 'heading "Gradient Clipping: Preventing Exploding Gradients in Deep ..." [level=3] [ref=f41e306]'
+              - generic [ref=f41e312]:
+                - generic [ref=f41e313]: Michael Brenndoerfer
+                - generic [ref=f41e315]: https://mbrenndoerfer.com › Writing
+            - button "About this result" [ref=f41e319] [cursor=pointer]
+          - generic [ref=f41e325]:
+            - generic [ref=f41e326]: Apr 22, 2025 —
+            - generic [ref=f41e327]:
+              - emphasis [ref=f41e328]: Learn how gradient clipping prevents training instability
+              - text: by capping gradient magnitudes. Master clip by value vs clip by norm strategies ...
+            - link "Read more" [ref=f41e329] [cursor=pointer]:
+              - /url: https://mbrenndoerfer.com/writing/gradient-clipping-deep-learning#:~:text=Learn%20how%20gradient%20clipping%20prevents,norm%20strategies%20with%20PyTorch%20implementation.
+        - generic [ref=f41e333]:
+          - generic [ref=f41e336]:
+            - link "Gradient Clipping Explained ApX Machine Learning https://apxml.com › chapter-4-rnn-training-challenges" [ref=f41e338] [cursor=pointer]:
+              - /url: https://apxml.com/courses/rnns-and-sequence-modeling/chapter-4-rnn-training-challenges/gradient-clipping-explained
+              - heading "Gradient Clipping Explained" [level=3] [ref=f41e339]
+              - generic [ref=f41e348]:
+                - generic [ref=f41e349]: ApX Machine Learning
+                - generic [ref=f41e351]: https://apxml.com › chapter-4-rnn-training-challenges
+            - button "About this result" [ref=f41e355] [cursor=pointer]
+          - generic [ref=f41e361]:
+            - generic [ref=f41e362]:
+              - text: "The core idea is simple:"
+              - emphasis [ref=f41e363]: impose a maximum threshold on the magnitude (norm) of the gradients
+              - text: . During training, after calculating the gradients for all ...
+            - link "Read more" [ref=f41e364] [cursor=pointer]:
+              - /url: https://apxml.com/courses/rnns-and-sequence-modeling/chapter-4-rnn-training-challenges/gradient-clipping-explained#:~:text=The%20core%20idea%20is%20simple%3A,calculating%20the%20gradients%20for%20all
+        - generic [ref=f41e368]:
+          - generic [ref=f41e371]:
+            - link "Which work originally introduced gradient clipping? Artificial Intelligence Stack Exchange https://ai.stackexchange.com › questions › which-work-..." [ref=f41e373] [cursor=pointer]:
+              - /url: https://ai.stackexchange.com/questions/19905/which-work-originally-introduced-gradient-clipping
+              - heading "Which work originally introduced gradient clipping?" [level=3] [ref=f41e374]
+              - generic [ref=f41e380]:
+                - generic [ref=f41e381]: Artificial Intelligence Stack Exchange
+                - generic [ref=f41e383]: https://ai.stackexchange.com › questions › which-work-...
+            - button "About this result" [ref=f41e387] [cursor=pointer]
+          - generic [ref=f41e393]:
+            - generic [ref=f41e394]: Mar 31, 2020 —
+            - text: "The Deep Learning book mentions that it's been used for years but the oldest sources it mentions are from 2012: A simple type of solution has been in ..."
+          - generic [ref=f41e399]:
+            - link "1 answer" [ref=f41e400] [cursor=pointer]:
+              - /url: https://ai.stackexchange.com/a/20024
+            - generic [ref=f41e401]: ·
+            - generic [ref=f41e402]: "Top answer:"
+            - generic [ref=f41e403]: Short Answer Tomas Mikolov's mention of gradient clipping in a single paragraph of his PhD thesis in 2012 is the first appearance in the literature. Long ...
+        - generic [ref=f41e407]:
+          - generic [ref=f41e410]:
+            - 'link "AGGC: Adaptive Group Gradient Clipping for Stabilizing ... ACL Anthology https://aclanthology.org › 2026.findings-acl.339...." [ref=f41e412] [cursor=pointer]':
+              - /url: https://aclanthology.org/2026.findings-acl.339.pdf
+              - 'heading "AGGC: Adaptive Group Gradient Clipping for Stabilizing ..." [level=3] [ref=f41e413]'
+              - generic [ref=f41e419]:
+                - generic [ref=f41e420]: ACL Anthology
+                - generic [ref=f41e422]: https://aclanthology.org › 2026.findings-acl.339....
+            - generic [ref=f41e424]: PDF
+            - button "About this result" [ref=f41e427] [cursor=pointer]
+          - generic [ref=f41e433]:
+            - generic [ref=f41e434]: by Z Li · 2026 —
+            - generic [ref=f41e435]:
+              - text: To stabilize the training of Large Language. Models (LLMs),
+              - emphasis [ref=f41e436]: gradient clipping
+              - text: is a nearly ubiquitous heuristic used to alleviate explod- ing gradients.
+            - link "Read more" [ref=f41e437] [cursor=pointer]:
+              - /url: https://aclanthology.org/2026.findings-acl.339.pdf#:~:text=To%20stabilize%20the%20training%20of,ing%20gradients.
+        - generic [ref=f41e441]:
+          - generic [ref=f41e444]:
+            - link "Adaptive Gradient Clipping For Source Separation Networks Mitsubishi Electric Research Laboratories https://www.merl.com › publications › docs" [ref=f41e446] [cursor=pointer]:
+              - /url: https://www.merl.com/publications/docs/TR2020-132.pdf
+              - heading "Adaptive Gradient Clipping For Source Separation Networks" [level=3] [ref=f41e447]
+              - generic [ref=f41e453]:
+                - generic [ref=f41e454]: Mitsubishi Electric Research Laboratories
+                - generic [ref=f41e456]: https://www.merl.com › publications › docs
+            - generic [ref=f41e458]: PDF
+            - button "About this result" [ref=f41e461] [cursor=pointer]
+          - generic [ref=f41e467]:
+            - generic [ref=f41e468]: by P Seetharaman · Cited by 70 —
+            - generic [ref=f41e469]:
+              - emphasis [ref=f41e470]: Clipping
+              - text: the
+              - emphasis [ref=f41e471]: gradient
+              - text: is a known approach to improving gra- dient descent, but requires hand selection of a
+              - emphasis [ref=f41e472]: clipping
+              - text: thresh- old hyperparameter.
+            - link "Read more" [ref=f41e473] [cursor=pointer]:
+              - /url: https://www.merl.com/publications/docs/TR2020-132.pdf#:~:text=Clipping%20the%20gradient%20is%20a,old%20hyperparameter.
+        - table [ref=f41e479]:
+          - rowgroup [ref=f41e480]:
+            - row [ref=f41e481]:
+              - cell [ref=f41e482]:
+                - heading [level=3] [ref=f41e483]:
+                  - link [ref=f41e484] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar?q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                    - generic [ref=f41e485]:
+                      - text: Scholarly articles for
+                      - emphasis [ref=f41e486]: gradient clipping Pascanu 2013 arxiv norm clipping
+            - row [ref=f41e487]:
+              - cell [ref=f41e488]:
+                - 'heading "… not to clip: the dynamics of SGD with gradient clipping … - ‎Marshall - Cited by 12" [level=3] [ref=f41e489]':
+                  - link [ref=f41e490] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://proceedings.iclr.cc/paper_files/paper/2025/file/4446b84fdf15b17c091582e4b86f8a05-Paper-Conference.pdf&hl=en&sa=X&ei=H_dPar70NviOieoP5end2Ag&scisig=AM1tuoMgRQNCHvOyl9PYQXiGvFno&oi=scholarr
+                    - generic [ref=f41e491]:
+                      - text: … not to
+                      - emphasis [ref=f41e492]: clip
+                      - text: ": the dynamics of SGD with"
+                      - emphasis [ref=f41e493]: gradient clipping
+                      - text: …
+                  - generic [ref=f41e494]:
+                    - text: "-"
+                    - generic [ref=f41e495]: ‎Marshall
+                    - text: "- Cited by 12"
+                - heading "Regularized Gradient Clipping Provably Trains Wide … - ‎Tucat - Cited by 3" [level=3] [ref=f41e496]:
+                  - link [ref=f41e497] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://arxiv.org/pdf/2404.08624&hl=en&sa=X&ei=H_dPar70NviOieoP5end2Ag&scisig=AM1tuoOYsQffn0QOr83_MwET1PjT&oi=scholarr
+                    - generic [ref=f41e498]:
+                      - text: Regularized
+                      - emphasis [ref=f41e499]: Gradient Clipping
+                      - text: Provably Trains Wide …
+                  - generic [ref=f41e500]:
+                    - text: "-"
+                    - generic [ref=f41e501]: ‎Tucat
+                    - text: "- Cited by 3"
+                - 'heading "Dp-sgd without clipping: The lipschitz neural network … - ‎Béthune - Cited by 30" [level=3] [ref=f41e502]':
+                  - link [ref=f41e503] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=https://proceedings.iclr.cc/paper_files/paper/2024/file/2cd38e57eb9c3c96e859b89c3d0a3b18-Paper-Conference.pdf&hl=en&sa=X&ei=H_dPar70NviOieoP5end2Ag&scisig=AM1tuoOkxgYQhUtnc-DQt2YtTcAa&oi=scholarr
+                    - generic [ref=f41e504]:
+                      - text: Dp-sgd without
+                      - emphasis [ref=f41e505]: clipping
+                      - text: ": The lipschitz neural network …"
+                  - generic [ref=f41e506]:
+                    - text: "-"
+                    - generic [ref=f41e507]: ‎Béthune
+                    - text: "- Cited by 30"
+      - generic [ref=f41e509]:
+        - generic [ref=f41e514]:
+          - heading "People also search for" [level=2] [ref=f41e516]
+          - generic [ref=f41e518]:
+            - generic [ref=f41e519]:
+              - link "Gradient clipping pascanu 2013 arxiv norm clipping pdf" [ref=f41e523] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Gradient+clipping+pascanu+2013+arxiv+norm+clipping+pdf&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ1QJ6BAgJEAE
+              - link "Gradient clipping pascanu 2013 arxiv norm clipping github" [ref=f41e537] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Gradient+clipping+pascanu+2013+arxiv+norm+clipping+github&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ1QJ6BAgaEAE
+              - link "Vanishing gradient problem" [ref=f41e551] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Vanishing+gradient+problem&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ1QJ6BAgYEAE
+              - link "Bengio et al 1994" [ref=f41e565] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Bengio+et+al+1994&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ1QJ6BAgVEAE
+            - generic [ref=f41e576]:
+              - link "Attention is all you Need" [ref=f41e580] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Attention+is+all+you+Need&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ1QJ6BAgOEAE
+              - link "Exploding gradient problem" [ref=f41e594] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Exploding+gradient+problem&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ1QJ6BAgMEAE
+              - link "Understanding the difficulty of training deep feedforward neural networks" [ref=f41e608] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Understanding+the+difficulty+of+training+deep+feedforward+neural+networks&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ1QJ6BAgLEAE
+              - 'link "Why gradient clipping accelerates training: A theoretical justification for adaptivity" [ref=f41e622] [cursor=pointer]':
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Why+gradient+clipping+accelerates+training:+A+theoretical+justification+for+adaptivity&sa=X&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ1QJ6BAgKEAE
+        - navigation [ref=f41e633]:
+          - heading "Page Navigation" [level=1] [ref=f41e634]
+          - text: "1"
+          - link "Page 2" [ref=f41e637] [cursor=pointer]:
+            - /url: /search?q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sca_esv=d4e925c21a8887a9&ei=H_dPaoHWLOXTkPIPuaeOwAk&start=10&sa=N&sstk=AU9db-CvsSS517oT64V3TV9qSuvn_aHbn_1FSiMK2O3YQdXNA0O8LSxqEtIseZDJUu1sONS_KbP2P69H-6_AeUEgf2Jm19jrZg11aA&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ8tMDegQISBAE
+            - text: "2"
+          - link "Page 3" [ref=f41e639] [cursor=pointer]:
+            - /url: /search?q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sca_esv=d4e925c21a8887a9&ei=H_dPaoHWLOXTkPIPuaeOwAk&start=20&sa=N&sstk=AU9db-CvsSS517oT64V3TV9qSuvn_aHbn_1FSiMK2O3YQdXNA0O8LSxqEtIseZDJUu1sONS_KbP2P69H-6_AeUEgf2Jm19jrZg11aA&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ8tMDegQISBAG
+            - text: "3"
+          - link "Page 4" [ref=f41e641] [cursor=pointer]:
+            - /url: /search?q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sca_esv=d4e925c21a8887a9&ei=H_dPaoHWLOXTkPIPuaeOwAk&start=30&sa=N&sstk=AU9db-CvsSS517oT64V3TV9qSuvn_aHbn_1FSiMK2O3YQdXNA0O8LSxqEtIseZDJUu1sONS_KbP2P69H-6_AeUEgf2Jm19jrZg11aA&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ8tMDegQISBAI
+            - text: "4"
+          - link "Page 5" [ref=f41e643] [cursor=pointer]:
+            - /url: /search?q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sca_esv=d4e925c21a8887a9&ei=H_dPaoHWLOXTkPIPuaeOwAk&start=40&sa=N&sstk=AU9db-CvsSS517oT64V3TV9qSuvn_aHbn_1FSiMK2O3YQdXNA0O8LSxqEtIseZDJUu1sONS_KbP2P69H-6_AeUEgf2Jm19jrZg11aA&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ8tMDegQISBAK
+            - text: "5"
+          - link "Page 6" [ref=f41e645] [cursor=pointer]:
+            - /url: /search?q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sca_esv=d4e925c21a8887a9&ei=H_dPaoHWLOXTkPIPuaeOwAk&start=50&sa=N&sstk=AU9db-CvsSS517oT64V3TV9qSuvn_aHbn_1FSiMK2O3YQdXNA0O8LSxqEtIseZDJUu1sONS_KbP2P69H-6_AeUEgf2Jm19jrZg11aA&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ8tMDegQISBAM
+            - text: "6"
+          - link "Page 7" [ref=f41e647] [cursor=pointer]:
+            - /url: /search?q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sca_esv=d4e925c21a8887a9&ei=H_dPaoHWLOXTkPIPuaeOwAk&start=60&sa=N&sstk=AU9db-CvsSS517oT64V3TV9qSuvn_aHbn_1FSiMK2O3YQdXNA0O8LSxqEtIseZDJUu1sONS_KbP2P69H-6_AeUEgf2Jm19jrZg11aA&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ8tMDegQISBAO
+            - text: "7"
+          - link "Page 8" [ref=f41e649] [cursor=pointer]:
+            - /url: /search?q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sca_esv=d4e925c21a8887a9&ei=H_dPaoHWLOXTkPIPuaeOwAk&start=70&sa=N&sstk=AU9db-CvsSS517oT64V3TV9qSuvn_aHbn_1FSiMK2O3YQdXNA0O8LSxqEtIseZDJUu1sONS_KbP2P69H-6_AeUEgf2Jm19jrZg11aA&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ8tMDegQISBAQ
+            - text: "8"
+          - link "Page 9" [ref=f41e651] [cursor=pointer]:
+            - /url: /search?q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sca_esv=d4e925c21a8887a9&ei=H_dPaoHWLOXTkPIPuaeOwAk&start=80&sa=N&sstk=AU9db-CvsSS517oT64V3TV9qSuvn_aHbn_1FSiMK2O3YQdXNA0O8LSxqEtIseZDJUu1sONS_KbP2P69H-6_AeUEgf2Jm19jrZg11aA&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ8tMDegQISBAS
+            - text: "9"
+          - link "Page 10" [ref=f41e653] [cursor=pointer]:
+            - /url: /search?q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sca_esv=d4e925c21a8887a9&ei=H_dPaoHWLOXTkPIPuaeOwAk&start=90&sa=N&sstk=AU9db-CvsSS517oT64V3TV9qSuvn_aHbn_1FSiMK2O3YQdXNA0O8LSxqEtIseZDJUu1sONS_KbP2P69H-6_AeUEgf2Jm19jrZg11aA&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ8tMDegQISBAU
+            - text: "10"
+          - heading [level=2] [ref=f41e655]:
+            - link "Next" [ref=f41e656] [cursor=pointer]:
+              - /url: /search?q=gradient+clipping+Pascanu+2013+arxiv+norm+clipping&sca_esv=d4e925c21a8887a9&ei=H_dPaoHWLOXTkPIPuaeOwAk&start=10&sa=N&sstk=AU9db-CvsSS517oT64V3TV9qSuvn_aHbn_1FSiMK2O3YQdXNA0O8LSxqEtIseZDJUu1sONS_KbP2P69H-6_AeUEgf2Jm19jrZg11aA&ved=2ahUKEwjB4b_kqsaVAxXlKUQIHbmTA5gQ8NMDegQISBAW
+      - navigation
+    - contentinfo [ref=f41e659]:
+      - heading "Footer Links" [level=1] [ref=f41e660]
+      - generic [ref=f41e664]:
+        - generic [ref=f41e668]:
+          - button "Woodland, California - From your IP address" [ref=f41e670] [cursor=pointer]:
+            - generic [ref=f41e671]: Woodland, California
+            - generic [ref=f41e673]:
+              - text: "-"
+              - generic [ref=f41e674]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f41e676] [cursor=pointer]
+        - generic [ref=f41e679]:
+          - link "Help" [ref=f41e680] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f41e681] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f41e682] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f41e683] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

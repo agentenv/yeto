@@ -1,0 +1,296 @@
+- generic [active] [ref=f50e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f50e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f50e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f50e8]:
+    - search [ref=f50e9]:
+      - generic [ref=f50e11]:
+        - link "Go to Google Home" [ref=f50e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwjxlqumscaVAxULJUQIHWd9NBkQPAgI
+        - generic [ref=f50e21]:
+          - generic [ref=f50e22]:
+            - combobox "Search" [ref=f50e25]: federated learning normalize each client update before averaging unit norm federated learning normalize each client update before averaging unit norm
+            - generic [ref=f50e26]:
+              - button "Clear" [ref=f50e28] [cursor=pointer]
+              - generic [ref=f50e33]:
+                - button "Search by voice" [ref=f50e34] [cursor=pointer]
+                - button "Search by image" [ref=f50e37] [cursor=pointer]
+          - button "Search" [ref=f50e40] [cursor=pointer]
+    - generic [ref=f50e45]:
+      - button "Settings" [ref=f50e47] [cursor=pointer]
+      - button "Share" [ref=f50e53] [cursor=pointer]
+      - generic [ref=f50e59]:
+        - button "Google apps" [ref=f50e61] [cursor=pointer]
+        - link "Sign in" [ref=f50e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3Dfederated%2520learning%2520normalize%2520each%2520client%2520update%2520before%2520averaging%2520unit%2520norm&ec=futura_srp_og_si_72236_p
+  - generic [ref=f50e68]:
+    - navigation [ref=f50e74]:
+      - generic [ref=f50e80]:
+        - list [ref=f50e81]:
+          - listitem [ref=f50e82]:
+            - link "AI Mode" [ref=f50e85] [cursor=pointer]:
+              - /url: /search?q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cYuTSDdr5M5eLVnu4bmWLMv07RWL0osPoOczrPToyXilx9aRQGFvvAlBGDH_piExJfIybNjw02lDBb5bdCKE8zymVoVWCXjyiIsMyqB-Qx6FnS-bvzli6YdDuoBHiWIvJn0smOg&aep=1&ntc=1&sa=X&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ2J8OegQICBAD
+          - listitem [ref=f50e89]:
+            - link "All" [disabled] [ref=f50e90]
+          - listitem [ref=f50e93]:
+            - link "Images" [ref=f50e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cYuTSDdr5M5eLVnu4bmWLMv07RWL0osPoOczrPToyXilx9aRQGFvvAlBGDH_piExJfIybNjw02lDBb5bdCKE8zymVoVWCXjyiIsMyqB-Qx6FnS-bvzli6YdDuoBHiWIvJn0smOg&q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sa=X&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQtKgLegQIIBAB
+          - listitem [ref=f50e97]:
+            - link "Videos" [ref=f50e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cYuTSDdr5M5eLVnu4bmWLMv07RWL0osPoOczrPToyXilx9aRQGFvvAlBGDH_piExJfIybNjw02lDBb5bdCKE8zymVoVWCXjyiIsMyqB-Qx6FnS-bvzli6YdDuoBHiWIvJn0smOg&q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sa=X&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQtKgLegQIGxAB
+          - listitem [ref=f50e101]:
+            - link "Forums" [ref=f50e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cYuTSDdr5M5eLVnu4bmWLMv07RWL0osPoOczrPToyXilx9aRQGFvvAlBGDH_piExJfIybNjw02lDBb5bdCKE8zymVoVWCXjyiIsMyqB-Qx6FnS-bvzli6YdDuoBHiWIvJn0smOg&q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sa=X&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQs6gLegQIGRAB
+          - listitem [ref=f50e105]:
+            - link "Shopping" [ref=f50e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cYuTSDdr5M5eLVnu4bmWLMv07RWL0osPoOczrPToyXilx9aRQGFvvAlBGDH_piExJfIybNjw02lDBb5bdCKE8zymVoVWCXjyiIsMyqB-Qx6FnS-bvzli6YdDuoBHiWIvJn0smOg&q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&ved=1t:220175&ictx=111
+          - listitem [ref=f50e109]:
+            - link "News" [ref=f50e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&tbm=nws&source=lnms&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832a9BVCEiB2iPJNekNderQwLP8msUKsz-6AMxGyueJZ9cYuTSDdr5M5eLVnu4bmWLMv07RWL0osPoOczrPToyXilx9aRQGFvvAlBGDH_piExJfIybNjw02lDBb5bdCKE8zymVoVWCXjyiIsMyqB-Qx6FnS-bvzli6YdDuoBHiWIvJn0smOg&sa=X&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ0pQJegQIFRAB
+          - listitem [ref=f50e113]:
+            - button [ref=f50e114] [cursor=pointer]:
+              - generic "More filters" [ref=f50e115]: More
+        - button "Tools" [ref=f50e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f50e129]
+    - generic [ref=f50e134]:
+      - generic [ref=f50e153]:
+        - heading "Thinking" [level=2] [ref=f50e157]
+        - progressbar "Generating" [ref=f50e160]
+      - main [ref=f50e162]:
+        - generic [ref=f50e166]:
+          - generic [ref=f50e169]:
+            - heading "Web results" [level=2] [ref=f50e170]
+            - generic [ref=f50e171]:
+              - generic [ref=f50e174]:
+                - link "Federated Learning with Manifold Regularization and ... arXiv https://arxiv.org › cs" [ref=f50e176] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/2311.05924
+                  - heading "Federated Learning with Manifold Regularization and ..." [level=3] [ref=f50e177]
+                  - generic [ref=f50e183]:
+                    - generic [ref=f50e184]: arXiv
+                    - generic [ref=f50e186]: https://arxiv.org › cs
+                - button "About this result" [ref=f50e190] [cursor=pointer]
+              - generic [ref=f50e196]:
+                - generic [ref=f50e197]: by X An · 2023 · Cited by 29 —
+                - text: In this paper, we propose FedMRUR by adopting the manifold model fusion scheme and a new global optimizer to alleviate the negative impacts.
+                - link "Read more" [ref=f50e198] [cursor=pointer]:
+                  - /url: https://arxiv.org/abs/2311.05924#:~:text=In%20this%20paper%2C%20we%20propose,to%20alleviate%20the%20negative%20impacts.
+              - generic [ref=f50e199]: "Missing: averaging ‎unit"
+          - generic [ref=f50e204]:
+            - generic [ref=f50e207]:
+              - link "Differentially Private Federated Learning with Normalized ... OpenReview https://openreview.net › pdf" [ref=f50e209] [cursor=pointer]:
+                - /url: https://openreview.net/pdf?id=0FllaTqjor7
+                - heading "Differentially Private Federated Learning with Normalized ..." [level=3] [ref=f50e210]
+                - generic [ref=f50e216]:
+                  - generic [ref=f50e217]: OpenReview
+                  - generic [ref=f50e219]: https://openreview.net › pdf
+              - generic [ref=f50e221]: PDF
+              - button "About this result" [ref=f50e224] [cursor=pointer]
+            - generic [ref=f50e230]:
+              - generic [ref=f50e231]: by R Das · Cited by 5 —
+              - generic [ref=f50e232]:
+                - text: Having said
+                - emphasis [ref=f50e233]: all
+                - text: this, it is worth noting that if the
+                - emphasis [ref=f50e234]: client update norms
+                - text: are lower bounded by Clow, then clipping with threshold C ≤ Clow is equivalent to ...
+              - link "Read more" [ref=f50e235] [cursor=pointer]:
+                - /url: https://openreview.net/pdf?id=0FllaTqjor7#:~:text=Having%20said%20all%20this%2C%20it,with%20the%20same%20scaling%20factor.
+          - generic [ref=f50e239]:
+            - generic [ref=f50e242]:
+              - link "Batch Normalization For Federated Learning Data Science Stack Exchange https://datascience.stackexchange.com › questions › bat..." [ref=f50e244] [cursor=pointer]:
+                - /url: https://datascience.stackexchange.com/questions/81171/batch-normalization-for-federated-learning
+                - heading "Batch Normalization For Federated Learning" [level=3] [ref=f50e245]
+                - generic [ref=f50e251]:
+                  - generic [ref=f50e252]: Data Science Stack Exchange
+                  - generic [ref=f50e254]: https://datascience.stackexchange.com › questions › bat...
+              - button "About this result" [ref=f50e258] [cursor=pointer]
+            - generic [ref=f50e264]:
+              - generic [ref=f50e265]: Sep 3, 2020 —
+              - text: As you know, in a federated learning setting, clients train local versions of the joint global model with their Non i.i.d data and each submit an update ...
+            - generic [ref=f50e270]:
+              - link "1 answer" [ref=f50e271] [cursor=pointer]:
+                - /url: https://datascience.stackexchange.com/a/81178
+              - generic [ref=f50e272]: ·
+              - generic [ref=f50e273]: "Top answer:"
+              - generic [ref=f50e274]: One approach would be to simply average everything, as proposed in the FedAvg preprint. Some very recent preprints suggest only relaying the learned parameters ...
+          - generic [ref=f50e278]:
+            - generic [ref=f50e281]:
+              - link "Federated Optimization Algorithms - FedSGD and FedAvg GitHub https://shreyansh26.github.io › post › 2021-12-18_feder..." [ref=f50e283] [cursor=pointer]:
+                - /url: https://shreyansh26.github.io/post/2021-12-18_federated_optimization_fedavg/
+                - heading "Federated Optimization Algorithms - FedSGD and FedAvg" [level=3] [ref=f50e284]
+                - generic [ref=f50e290]:
+                  - generic [ref=f50e291]: GitHub
+                  - generic [ref=f50e293]: https://shreyansh26.github.io › post › 2021-12-18_feder...
+              - button "About this result" [ref=f50e297] [cursor=pointer]
+            - generic [ref=f50e303]:
+              - generic [ref=f50e304]: Dec 18, 2021 —
+              - generic [ref=f50e305]:
+                - text: This way we can add more computation to
+                - emphasis [ref=f50e306]: each client
+                - text: by iterating the local
+                - emphasis [ref=f50e307]: update
+                - text: multiple times
+                - emphasis [ref=f50e308]: before
+                - text: doing the
+                - emphasis [ref=f50e309]: averaging
+                - text: step. This small ...
+              - link "Read more" [ref=f50e310] [cursor=pointer]:
+                - /url: https://shreyansh26.github.io/post/2021-12-18_federated_optimization_fedavg/#:~:text=This%20way%20we%20can%20add,in%20the%20FederatedAveraging%20(FedAvg)%20algorithm.
+          - generic [ref=f50e314]:
+            - generic [ref=f50e317]:
+              - 'link "FedNova: Normalized Averaging for Heterogeneous Systems ApX Machine Learning https://apxml.com › courses › fednova-algorithm" [ref=f50e319] [cursor=pointer]':
+                - /url: https://apxml.com/courses/federated-learning/chapter-2-advanced-aggregation-algorithms/fednova-algorithm
+                - 'heading "FedNova: Normalized Averaging for Heterogeneous Systems" [level=3] [ref=f50e320]'
+                - generic [ref=f50e329]:
+                  - generic [ref=f50e330]: ApX Machine Learning
+                  - generic [ref=f50e332]: https://apxml.com › courses › fednova-algorithm
+              - button "About this result" [ref=f50e336] [cursor=pointer]
+            - generic [ref=f50e342]:
+              - generic [ref=f50e343]:
+                - text: Federated Normalized Averaging (FedNova) tackles systems heterogeneity directly by
+                - emphasis [ref=f50e344]: normalizing client updates
+                - text: before aggregation. The central idea is to adjust ...
+              - link "Read more" [ref=f50e345] [cursor=pointer]:
+                - /url: https://apxml.com/courses/federated-learning/chapter-2-advanced-aggregation-algorithms/fednova-algorithm#:~:text=Federated%20Normalized%20Averaging%20(FedNova)%20tackles,central%20idea%20is%20to%20adjust
+            - generic [ref=f50e347]:
+              - text: "Missing: unit ‎| Show results with:"
+              - link "unit" [ref=f50e348] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=federated+learning+normalize+each+client+update+before+averaging+%22unit%22+norm&sa=X&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ5t4CegQILxAB
+          - generic [ref=f50e352]:
+            - generic [ref=f50e355]:
+              - 'link "FedBN: Federated Learning on Non-IID Features via Local ... Flower AI https://flower.ai › docs › baselines › fedbn" [ref=f50e357] [cursor=pointer]':
+                - /url: https://flower.ai/docs/baselines/fedbn.html
+                - 'heading "FedBN: Federated Learning on Non-IID Features via Local ..." [level=3] [ref=f50e358]'
+                - generic [ref=f50e364]:
+                  - generic [ref=f50e365]: Flower AI
+                  - generic [ref=f50e367]: https://flower.ai › docs › baselines › fedbn
+              - button "About this result" [ref=f50e371] [cursor=pointer]
+            - generic [ref=f50e377]:
+              - generic [ref=f50e378]:
+                - text: In this work, we propose an effective method that uses local batch
+                - emphasis [ref=f50e379]: normalization
+                - text: to alleviate the feature shift
+                - emphasis [ref=f50e380]: before averaging
+                - text: models.
+              - link "Read more" [ref=f50e381] [cursor=pointer]:
+                - /url: https://flower.ai/docs/baselines/fedbn.html#:~:text=In%20this%20work%2C%20we%20propose,feature%20shift%20before%20averaging%20models.
+            - generic [ref=f50e383]:
+              - text: "Missing: unit ‎| Show results with:"
+              - link "unit" [ref=f50e384] [cursor=pointer]:
+                - /url: /search?sca_esv=30a5fb343c9df574&q=federated+learning+normalize+each+client+update+before+averaging+%22unit%22+norm&sa=X&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ5t4CegQILhAB
+          - generic [ref=f50e388]:
+            - generic [ref=f50e391]:
+              - 'link "FedEff: efficient federated learning with optimal local ... Nature https://www.nature.com › scientific reports › articles" [ref=f50e393] [cursor=pointer]':
+                - /url: https://www.nature.com/articles/s41598-025-22672-1
+                - 'heading "FedEff: efficient federated learning with optimal local ..." [level=3] [ref=f50e394]'
+                - generic [ref=f50e400]:
+                  - generic [ref=f50e401]: Nature
+                  - generic [ref=f50e403]: https://www.nature.com › scientific reports › articles
+              - button "About this result" [ref=f50e407] [cursor=pointer]
+            - generic [ref=f50e413]:
+              - generic [ref=f50e414]: by K Narmadha · 2025 · Cited by 7 —
+              - generic [ref=f50e415]:
+                - text: To eliminate the inconsistency problem, they proposed FedNova, in which local
+                - emphasis [ref=f50e416]: updates
+                - text: are
+                - emphasis [ref=f50e417]: normalized
+                - text: by the
+                - emphasis [ref=f50e418]: clients before
+                - text: aggregation.
+              - link "Read more" [ref=f50e419] [cursor=pointer]:
+                - /url: https://www.nature.com/articles/s41598-025-22672-1#:~:text=To%20eliminate%20the%20inconsistency%20problem%2C,by%20the%20clients%20before%20aggregation.
+          - generic [ref=f50e423]:
+            - generic [ref=f50e426]:
+              - link "Understanding and Implementing Federated Averaging ... Medium · Joemuthui 1 like · 1 year ago" [ref=f50e428] [cursor=pointer]:
+                - /url: https://medium.com/@joemuthui18/day-2-understanding-and-implementing-federated-averaging-fedavg-e8d1d523b155
+                - heading "Understanding and Implementing Federated Averaging ..." [level=3] [ref=f50e429]
+                - generic [ref=f50e435]:
+                  - generic [ref=f50e436]: Medium · Joemuthui
+                  - generic [ref=f50e438]: 1 like · 1 year ago
+              - button "About this result" [ref=f50e442] [cursor=pointer]
+            - generic [ref=f50e448]:
+              - generic [ref=f50e449]:
+                - text: It is a method to combine model
+                - emphasis [ref=f50e450]: updates
+                - text: from multiple
+                - emphasis [ref=f50e451]: clients
+                - text: into a new global model by
+                - emphasis [ref=f50e452]: averaging
+                - text: the model weights.
+              - link "Read more" [ref=f50e453] [cursor=pointer]:
+                - /url: https://medium.com/@joemuthui18/day-2-understanding-and-implementing-federated-averaging-fedavg-e8d1d523b155#:~:text=It%20is%20a%20method%20to,by%20averaging%20the%20model%20weights.
+          - generic [ref=f50e457]:
+            - generic [ref=f50e460]:
+              - 'link "Federated Learning: A Simple Implementation of FedAvg ... Towards Data Science https://towardsdatascience.com › Latest" [ref=f50e462] [cursor=pointer]':
+                - /url: https://towardsdatascience.com/federated-learning-a-simple-implementation-of-fedavg-federated-averaging-with-pytorch-90187c9c9577/
+                - 'heading "Federated Learning: A Simple Implementation of FedAvg ..." [level=3] [ref=f50e463]'
+                - generic [ref=f50e469]:
+                  - generic [ref=f50e470]: Towards Data Science
+                  - generic [ref=f50e472]: https://towardsdatascience.com › Latest
+              - button "About this result" [ref=f50e476] [cursor=pointer]
+            - generic [ref=f50e482]:
+              - generic [ref=f50e483]: Sep 24, 2020 —
+              - generic [ref=f50e484]:
+                - text: In FL,
+                - emphasis [ref=f50e485]: each client
+                - text: trains its model decentrally. In other words, the model training process is carried out separately for
+                - emphasis [ref=f50e486]: each client
+                - text: . Only ...
+              - link "Read more" [ref=f50e487] [cursor=pointer]:
+                - /url: https://towardsdatascience.com/federated-learning-a-simple-implementation-of-fedavg-federated-averaging-with-pytorch-90187c9c9577/#:~:text=In%20FL%2C%20each%20client%20trains,feed%20the%20aggregated%20main%20model.
+        - navigation [ref=f50e490]:
+          - heading "Page Navigation" [level=1] [ref=f50e491]
+          - text: "1"
+          - link "Page 2" [ref=f50e494] [cursor=pointer]:
+            - /url: /search?q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sca_esv=30a5fb343c9df574&ei=9P1PavHMGYvKkPIP5_rRyQE&start=10&sa=N&sstk=AU9db-CdjYcr_fqNpaBK-oO3JxXSRdnSXHLRI5XuOeuofHb_z_sLKhJ1XygPPCZuuy7Soz3fI1TPLpdTrSzWFW9-zNN3ENtxWrBO-w&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ8tMDegQIQBAE
+            - text: "2"
+          - link "Page 3" [ref=f50e496] [cursor=pointer]:
+            - /url: /search?q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sca_esv=30a5fb343c9df574&ei=9P1PavHMGYvKkPIP5_rRyQE&start=20&sa=N&sstk=AU9db-CdjYcr_fqNpaBK-oO3JxXSRdnSXHLRI5XuOeuofHb_z_sLKhJ1XygPPCZuuy7Soz3fI1TPLpdTrSzWFW9-zNN3ENtxWrBO-w&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ8tMDegQIQBAG
+            - text: "3"
+          - link "Page 4" [ref=f50e498] [cursor=pointer]:
+            - /url: /search?q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sca_esv=30a5fb343c9df574&ei=9P1PavHMGYvKkPIP5_rRyQE&start=30&sa=N&sstk=AU9db-CdjYcr_fqNpaBK-oO3JxXSRdnSXHLRI5XuOeuofHb_z_sLKhJ1XygPPCZuuy7Soz3fI1TPLpdTrSzWFW9-zNN3ENtxWrBO-w&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ8tMDegQIQBAI
+            - text: "4"
+          - link "Page 5" [ref=f50e500] [cursor=pointer]:
+            - /url: /search?q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sca_esv=30a5fb343c9df574&ei=9P1PavHMGYvKkPIP5_rRyQE&start=40&sa=N&sstk=AU9db-CdjYcr_fqNpaBK-oO3JxXSRdnSXHLRI5XuOeuofHb_z_sLKhJ1XygPPCZuuy7Soz3fI1TPLpdTrSzWFW9-zNN3ENtxWrBO-w&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ8tMDegQIQBAK
+            - text: "5"
+          - link "Page 6" [ref=f50e502] [cursor=pointer]:
+            - /url: /search?q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sca_esv=30a5fb343c9df574&ei=9P1PavHMGYvKkPIP5_rRyQE&start=50&sa=N&sstk=AU9db-CdjYcr_fqNpaBK-oO3JxXSRdnSXHLRI5XuOeuofHb_z_sLKhJ1XygPPCZuuy7Soz3fI1TPLpdTrSzWFW9-zNN3ENtxWrBO-w&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ8tMDegQIQBAM
+            - text: "6"
+          - link "Page 7" [ref=f50e504] [cursor=pointer]:
+            - /url: /search?q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sca_esv=30a5fb343c9df574&ei=9P1PavHMGYvKkPIP5_rRyQE&start=60&sa=N&sstk=AU9db-CdjYcr_fqNpaBK-oO3JxXSRdnSXHLRI5XuOeuofHb_z_sLKhJ1XygPPCZuuy7Soz3fI1TPLpdTrSzWFW9-zNN3ENtxWrBO-w&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ8tMDegQIQBAO
+            - text: "7"
+          - link "Page 8" [ref=f50e506] [cursor=pointer]:
+            - /url: /search?q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sca_esv=30a5fb343c9df574&ei=9P1PavHMGYvKkPIP5_rRyQE&start=70&sa=N&sstk=AU9db-CdjYcr_fqNpaBK-oO3JxXSRdnSXHLRI5XuOeuofHb_z_sLKhJ1XygPPCZuuy7Soz3fI1TPLpdTrSzWFW9-zNN3ENtxWrBO-w&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ8tMDegQIQBAQ
+            - text: "8"
+          - link "Page 9" [ref=f50e508] [cursor=pointer]:
+            - /url: /search?q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sca_esv=30a5fb343c9df574&ei=9P1PavHMGYvKkPIP5_rRyQE&start=80&sa=N&sstk=AU9db-CdjYcr_fqNpaBK-oO3JxXSRdnSXHLRI5XuOeuofHb_z_sLKhJ1XygPPCZuuy7Soz3fI1TPLpdTrSzWFW9-zNN3ENtxWrBO-w&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ8tMDegQIQBAS
+            - text: "9"
+          - link "Page 10" [ref=f50e510] [cursor=pointer]:
+            - /url: /search?q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sca_esv=30a5fb343c9df574&ei=9P1PavHMGYvKkPIP5_rRyQE&start=90&sa=N&sstk=AU9db-CdjYcr_fqNpaBK-oO3JxXSRdnSXHLRI5XuOeuofHb_z_sLKhJ1XygPPCZuuy7Soz3fI1TPLpdTrSzWFW9-zNN3ENtxWrBO-w&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ8tMDegQIQBAU
+            - text: "10"
+          - heading [level=2] [ref=f50e512]:
+            - link "Next" [ref=f50e513] [cursor=pointer]:
+              - /url: /search?q=federated+learning+normalize+each+client+update+before+averaging+unit+norm&sca_esv=30a5fb343c9df574&ei=9P1PavHMGYvKkPIP5_rRyQE&start=10&sa=N&sstk=AU9db-CdjYcr_fqNpaBK-oO3JxXSRdnSXHLRI5XuOeuofHb_z_sLKhJ1XygPPCZuuy7Soz3fI1TPLpdTrSzWFW9-zNN3ENtxWrBO-w&ved=2ahUKEwjxlqumscaVAxULJUQIHWd9NBkQ8NMDegQIQBAW
+        - navigation
+    - contentinfo [ref=f50e516]:
+      - heading "Footer Links" [level=1] [ref=f50e517]
+      - generic [ref=f50e521]:
+        - generic [ref=f50e525]:
+          - button "Woodland, California - From your IP address" [ref=f50e527] [cursor=pointer]:
+            - generic [ref=f50e528]: Woodland, California
+            - generic [ref=f50e530]:
+              - text: "-"
+              - generic [ref=f50e531]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f50e533] [cursor=pointer]
+        - generic [ref=f50e536]:
+          - link "Help" [ref=f50e537] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f50e538] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f50e539] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f50e540] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

@@ -1,0 +1,275 @@
+- generic [ref=f126e2]:
+  - link "Skip to main content" [ref=f126e3] [cursor=pointer]:
+    - /url: "#content"
+  - region "Announcement" [ref=f126e4]:
+    - generic [ref=f126e6]: arXiv is now an independent nonprofit!
+    - link "Learn more" [ref=f126e7] [cursor=pointer]:
+      - /url: https://info.arxiv.org/about
+    - button "Dismiss announcement" [ref=f126e8] [cursor=pointer]: ×
+  - banner [ref=f126e9]:
+    - link [ref=f126e10] [cursor=pointer]:
+      - /url: https://arxiv.org/IgnoreMe
+    - link "archive home" [ref=f126e11] [cursor=pointer]:
+      - /url: https://arxiv.org/
+      - img "archive" [ref=f126e12]
+    - navigation "Main navigation" [ref=f126e13]:
+      - link "Search" [ref=f126e14] [cursor=pointer]:
+        - /url: https://arxiv.org/search
+      - link "Submit" [ref=f126e18] [cursor=pointer]:
+        - /url: https://arxiv.org/user/create
+      - link "Donate" [ref=f126e19] [cursor=pointer]:
+        - /url: https://info.arxiv.org/about/donate.html
+      - link "Log in" [ref=f126e21] [cursor=pointer]:
+        - /url: https://arxiv.org/login
+  - main [ref=f126e22]:
+    - generic [ref=f126e24]:
+      - generic [ref=f126e25]:
+        - heading "Computer Science > Machine Learning" [level=1] [ref=f126e27]
+        - generic [ref=f126e29]:
+          - generic [ref=f126e30]: "[Submitted on 15 Jul 2020]"
+          - heading "Tackling the Objective Inconsistency Problem in Heterogeneous Federated Optimization" [level=1] [ref=f126e31]
+          - generic [ref=f126e32]:
+            - link "Jianyu Wang" [ref=f126e33] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Wang,+J
+            - text: ","
+            - link "Qinghua Liu" [ref=f126e34] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Liu,+Q
+            - text: ","
+            - link "Hao Liang" [ref=f126e35] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Liang,+H
+            - text: ","
+            - link "Gauri Joshi" [ref=f126e36] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Joshi,+G
+            - text: ","
+            - link "H. Vincent Poor" [ref=f126e37] [cursor=pointer]:
+              - /url: https://arxiv.org/search/cs?searchtype=author&query=Poor,+H+V
+          - blockquote [ref=f126e38]: In federated optimization, heterogeneity in the clients' local datasets and computation speeds results in large variations in the number of local updates performed by each client in each communication round. Naive weighted aggregation of such models causes objective inconsistency, that is, the global model converges to a stationary point of a mismatched objective function which can be arbitrarily different from the true objective. This paper provides a general framework to analyze the convergence of federated heterogeneous optimization algorithms. It subsumes previously proposed methods such as FedAvg and FedProx and provides the first principled understanding of the solution bias and the convergence slowdown due to objective inconsistency. Using insights from this analysis, we propose FedNova, a normalized averaging method that eliminates objective inconsistency while preserving fast error convergence.
+          - table "Additional metadata" [ref=f126e40]:
+            - rowgroup [ref=f126e41]:
+              - row [ref=f126e42]:
+                - cell "Subjects:" [ref=f126e43]
+                - cell "Machine Learning (cs.LG); Distributed, Parallel, and Cluster Computing (cs.DC); Machine Learning (stat.ML)" [ref=f126e44]
+              - row [ref=f126e45]:
+                - cell "Cite as:" [ref=f126e46]
+                - cell [ref=f126e47]:
+                  - generic [ref=f126e48]:
+                    - link "arXiv:2007.07481" [ref=f126e49] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/2007.07481
+                    - text: "[cs.LG]"
+              - row [ref=f126e50]:
+                - cell [ref=f126e51]
+                - cell [ref=f126e52]:
+                  - text: (or
+                  - generic [ref=f126e53]:
+                    - link "arXiv:2007.07481v1" [ref=f126e54] [cursor=pointer]:
+                      - /url: https://arxiv.org/abs/2007.07481v1
+                    - text: "[cs.LG]"
+                  - text: for this version)
+              - row [ref=f126e55]:
+                - cell [ref=f126e56]
+                - cell [ref=f126e57]:
+                  - link "https://doi.org/10.48550/arXiv.2007.07481" [ref=f126e58] [cursor=pointer]:
+                    - /url: https://doi.org/10.48550/arXiv.2007.07481
+                  - button "Focus to learn more" [ref=f126e60]
+        - generic [ref=f126e63]:
+          - heading "Submission history" [level=2] [ref=f126e64]
+          - text: "From: Jianyu Wang ["
+          - link "view email" [ref=f126e65] [cursor=pointer]:
+            - /url: /show-email/45c34d7a/2007.07481
+          - text: "]"
+          - strong [ref=f126e66]: "[v1]"
+          - text: Wed, 15 Jul 2020 05:01:23 UTC (551 KB)
+      - generic [ref=f126e67]:
+        - generic [ref=f126e68]:
+          - heading "Access Paper:" [level=2] [ref=f126e69]
+          - list [ref=f126e70]:
+            - listitem [ref=f126e71]:
+              - link "View PDF" [ref=f126e72] [cursor=pointer]:
+                - /url: /pdf/2007.07481
+            - listitem [ref=f126e73]:
+              - link "TeX Source" [ref=f126e74] [cursor=pointer]:
+                - /url: /src/2007.07481
+          - link "view license" [ref=f126e76] [cursor=pointer]:
+            - /url: http://arxiv.org/licenses/nonexclusive-distrib/1.0/
+        - generic [ref=f126e77]:
+          - heading "Current browse context:" [level=3] [ref=f126e78]
+          - generic [ref=f126e79]: cs.LG
+          - generic [ref=f126e80]:
+            - link "< prev" [ref=f126e82] [cursor=pointer]:
+              - /url: /prevnext?id=2007.07481&function=prev&context=cs.LG
+            - text: "|"
+            - link "next >" [ref=f126e84] [cursor=pointer]:
+              - /url: /prevnext?id=2007.07481&function=next&context=cs.LG
+          - generic [ref=f126e85]:
+            - link "new" [ref=f126e86] [cursor=pointer]:
+              - /url: /list/cs.LG/new
+            - text: "|"
+            - link "recent" [ref=f126e87] [cursor=pointer]:
+              - /url: /list/cs.LG/recent
+            - text: "|"
+            - link "2020-07" [ref=f126e88] [cursor=pointer]:
+              - /url: /list/cs.LG/2020-07
+          - generic [ref=f126e89]:
+            - text: "Change to browse by:"
+            - generic [ref=f126e90]:
+              - link "cs" [ref=f126e91] [cursor=pointer]:
+                - /url: /abs/2007.07481?context=cs
+              - link "cs.DC" [ref=f126e92] [cursor=pointer]:
+                - /url: /abs/2007.07481?context=cs.DC
+              - link "stat" [ref=f126e93] [cursor=pointer]:
+                - /url: /abs/2007.07481?context=stat
+              - link "stat.ML" [ref=f126e94] [cursor=pointer]:
+                - /url: /abs/2007.07481?context=stat.ML
+        - generic [ref=f126e95]:
+          - heading "References & Citations" [level=3] [ref=f126e96]
+          - list [ref=f126e97]:
+            - listitem [ref=f126e98]:
+              - link "NASA ADS" [ref=f126e99] [cursor=pointer]:
+                - /url: https://ui.adsabs.harvard.edu/abs/arXiv:2007.07481
+            - listitem [ref=f126e100]:
+              - link "Google Scholar" [ref=f126e101] [cursor=pointer]:
+                - /url: https://scholar.google.com/scholar_lookup?arxiv_id=2007.07481
+            - listitem [ref=f126e102]:
+              - link "Semantic Scholar" [ref=f126e103] [cursor=pointer]:
+                - /url: https://api.semanticscholar.org/arXiv:2007.07481
+        - generic [ref=f126e104]:
+          - heading [level=3] [ref=f126e105]:
+            - link "DBLP" [ref=f126e106] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de
+            - text: "- CS Bibliography"
+          - generic [ref=f126e107]:
+            - link "listing" [ref=f126e108] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/db/journals/corr/corr2007.html#abs-2007-07481
+            - text: "|"
+            - link "bibtex" [ref=f126e109] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/rec/bibtex/journals/corr/abs-2007-07481
+          - generic [ref=f126e110]:
+            - link "Jianyu Wang" [ref=f126e111] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Jianyu%20Wang
+            - link "Qinghua Liu" [ref=f126e112] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Qinghua%20Liu
+            - link "Hao Liang" [ref=f126e113] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Hao%20Liang
+            - link "Gauri Joshi" [ref=f126e114] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=Gauri%20Joshi
+            - link "H. Vincent Poor" [ref=f126e115] [cursor=pointer]:
+              - /url: https://dblp.uni-trier.de/search/author?author=H.%20Vincent%20Poor
+        - button "export BibTeX citation" [ref=f126e117]
+        - generic [ref=f126e118]:
+          - heading "Bookmark" [level=3] [ref=f126e120]
+          - link [ref=f126e121] [cursor=pointer]:
+            - /url: http://www.bibsonomy.org/BibtexHandler?requTask=upload&url=https://arxiv.org/abs/2007.07481&description=Tackling the Objective Inconsistency Problem in Heterogeneous Federated Optimization
+            - img "BibSonomy" [ref=f126e122]
+          - link [ref=f126e123] [cursor=pointer]:
+            - /url: https://reddit.com/submit?url=https://arxiv.org/abs/2007.07481&title=Tackling the Objective Inconsistency Problem in Heterogeneous Federated Optimization
+            - img "Reddit" [ref=f126e124]
+      - tablist "arXivLabs tools" [ref=f126e126]:
+        - radio "Bibliographic Tools" [checked] [ref=f126e127]
+        - tab "Bibliographic Tools" [selected] [ref=f126e128] [cursor=pointer]
+        - tabpanel "Bibliographic Tools" [ref=f126e129]:
+          - heading "Bibliographic and Citation Tools" [level=1] [ref=f126e130]
+          - generic [ref=f126e131]:
+            - generic [ref=f126e132]:
+              - generic [ref=f126e134]:
+                - checkbox "Bibliographic Explorer Toggle"
+                - generic [ref=f126e136]: Bibliographic Explorer Toggle
+              - generic [ref=f126e137]:
+                - text: Bibliographic Explorer
+                - emphasis [ref=f126e138]:
+                  - text: (
+                  - link "What is the Explorer?" [ref=f126e139] [cursor=pointer]:
+                    - /url: https://info.arxiv.org/labs/showcase.html#arxiv-bibliographic-explorer
+                  - text: )
+            - generic [ref=f126e140]:
+              - generic [ref=f126e142]:
+                - checkbox "Connected Papers"
+                - generic [ref=f126e144]: Connected Papers Toggle
+              - generic [ref=f126e145]:
+                - text: Connected Papers
+                - emphasis [ref=f126e146]:
+                  - text: (
+                  - link "What is Connected Papers?" [ref=f126e147] [cursor=pointer]:
+                    - /url: https://www.connectedpapers.com/about
+                  - text: )
+            - generic [ref=f126e148]:
+              - generic [ref=f126e150]:
+                - checkbox "Litmaps"
+                - generic [ref=f126e152]: Litmaps Toggle
+              - generic [ref=f126e153]:
+                - text: Litmaps
+                - emphasis [ref=f126e154]:
+                  - text: (
+                  - link "What is Litmaps?" [ref=f126e155] [cursor=pointer]:
+                    - /url: https://www.litmaps.co/
+                  - text: )
+            - generic [ref=f126e156]:
+              - generic [ref=f126e158]:
+                - checkbox "scite Smart Citations"
+                - generic [ref=f126e160]: scite.ai Toggle
+              - generic [ref=f126e161]:
+                - text: scite Smart Citations
+                - emphasis [ref=f126e162]:
+                  - text: (
+                  - link "What are Smart Citations?" [ref=f126e163] [cursor=pointer]:
+                    - /url: https://www.scite.ai/
+                  - text: )
+        - radio "Code, Data, Media" [ref=f126e167]
+        - tab "Code, Data, Media" [ref=f126e168] [cursor=pointer]
+        - radio "Demos" [ref=f126e169]
+        - tab "Demos" [ref=f126e170] [cursor=pointer]
+        - radio "Related Papers" [ref=f126e171]
+        - tab "Related Papers" [ref=f126e172] [cursor=pointer]
+        - radio "About arXivLabs" [ref=f126e173]
+        - tab "About arXivLabs" [ref=f126e174] [cursor=pointer]
+      - generic [ref=f126e175]:
+        - link "Which authors of this paper are endorsers?" [ref=f126e176] [cursor=pointer]:
+          - /url: /auth/show-endorsers/2007.07481
+        - text: "|"
+        - link "Disable MathJax" [ref=f126e177] [cursor=pointer]:
+          - /url: javascript:setMathjaxCookie()
+        - text: (
+        - link "What is MathJax?" [ref=f126e178] [cursor=pointer]:
+          - /url: https://info.arxiv.org/help/mathjax.html
+        - text: )
+  - contentinfo [ref=f126e179]:
+    - generic [ref=f126e180]:
+      - generic [ref=f126e181]:
+        - generic [ref=f126e182]:
+          - text: We gratefully acknowledge support from our
+          - strong [ref=f126e183]: major funders
+          - text: ","
+          - link [ref=f126e184] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about/ourmembers.html
+            - strong [ref=f126e185]: member institutions
+          - text: ", and all contributors."
+        - navigation "Site navigation" [ref=f126e186]:
+          - link "About" [ref=f126e187] [cursor=pointer]:
+            - /url: https://info.arxiv.org/about
+          - generic [ref=f126e188]: ·
+          - link "Help" [ref=f126e189] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help
+          - generic [ref=f126e190]: ·
+          - link "Contact" [ref=f126e191] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/contact.html
+          - generic [ref=f126e192]: ·
+          - link "Subscribe" [ref=f126e193] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/subscribe
+          - generic [ref=f126e194]: ·
+          - link "Copyright" [ref=f126e195] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/license/index.html
+          - generic [ref=f126e196]: ·
+          - link "Privacy" [ref=f126e197] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/policies/privacy_policy.html
+          - generic [ref=f126e198]: ·
+          - link "Accessibility" [ref=f126e199] [cursor=pointer]:
+            - /url: https://info.arxiv.org/help/web_accessibility.html
+          - generic [ref=f126e200]: ·
+          - link "Operational Status (opens in new tab)" [ref=f126e201] [cursor=pointer]:
+            - /url: https://status.arxiv.org
+            - text: Operational Status
+            - generic [ref=f126e202]: (opens in new tab)
+      - generic "Major funders" [ref=f126e203]:
+        - generic [ref=f126e204]: Major funding support from
+        - generic [ref=f126e205]:
+          - img "Simons Foundation" [ref=f126e206]
+          - img "Schmidt Sciences" [ref=f126e207]

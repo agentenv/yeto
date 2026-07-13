@@ -1,0 +1,278 @@
+- generic [active] [ref=f91e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f91e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f91e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f91e8]:
+    - search [ref=f91e9]:
+      - generic [ref=f91e11]:
+        - link "Go to Google Home" [ref=f91e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQPAgI
+        - generic [ref=f91e21]:
+          - generic [ref=f91e22]:
+            - combobox "Search" [ref=f91e25]: "\"Adasum\" gradient aggregation \"Adasum\" gradient aggregation"
+            - generic [ref=f91e26]:
+              - button "Clear" [ref=f91e28] [cursor=pointer]
+              - generic [ref=f91e33]:
+                - button "Search by voice" [ref=f91e34] [cursor=pointer]
+                - button "Search by image" [ref=f91e37] [cursor=pointer]
+          - button "Search" [ref=f91e40] [cursor=pointer]
+    - generic [ref=f91e45]:
+      - button "Settings" [ref=f91e47] [cursor=pointer]
+      - button "Share" [ref=f91e53] [cursor=pointer]
+      - generic [ref=f91e59]:
+        - button "Google apps" [ref=f91e61] [cursor=pointer]
+        - link "Sign in" [ref=f91e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3D%2522Adasum%2522%2520gradient%2520aggregation&ec=futura_srp_og_si_72236_p
+  - generic [ref=f91e68]:
+    - navigation [ref=f91e74]:
+      - generic [ref=f91e80]:
+        - list [ref=f91e81]:
+          - listitem [ref=f91e82]:
+            - link "AI Mode" [ref=f91e85] [cursor=pointer]:
+              - /url: /search?q=%22Adasum%22+gradient+aggregation&sca_esv=30a5fb343c9df574&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz46M5or0qsTzsCdATOXqbdWKe4alv-wJ_80KymfsK2N7uqzbQdE9vap0itWYTBSzR6PXAoG2HMg_vJfV7VbLMfL16tTLA&aep=1&ntc=1&sa=X&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQ2J8OegQIBxAD
+          - listitem [ref=f91e89]:
+            - link "All" [disabled] [ref=f91e90]
+          - listitem [ref=f91e93]:
+            - link "Images" [ref=f91e94] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz46M5or0qsTzsCdATOXqbdWKe4alv-wJ_80KymfsK2N7uqzbQdE9vap0itWYTBSzR6PXAoG2HMg_vJfV7VbLMfL16tTLA&q=%22Adasum%22+gradient+aggregation&sa=X&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQtKgLegQILBAB
+          - listitem [ref=f91e97]:
+            - link "Shopping" [ref=f91e98] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz46M5or0qsTzsCdATOXqbdWKe4alv-wJ_80KymfsK2N7uqzbQdE9vap0itWYTBSzR6PXAoG2HMg_vJfV7VbLMfL16tTLA&q=%22Adasum%22+gradient+aggregation&ved=1t:220175&ictx=111
+          - listitem [ref=f91e101]:
+            - link "Videos" [ref=f91e102] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz46M5or0qsTzsCdATOXqbdWKe4alv-wJ_80KymfsK2N7uqzbQdE9vap0itWYTBSzR6PXAoG2HMg_vJfV7VbLMfL16tTLA&q=%22Adasum%22+gradient+aggregation&sa=X&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQtKgLegQIKxAB
+          - listitem [ref=f91e105]:
+            - link "Forums" [ref=f91e106] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz46M5or0qsTzsCdATOXqbdWKe4alv-wJ_80KymfsK2N7uqzbQdE9vap0itWYTBSzR6PXAoG2HMg_vJfV7VbLMfL16tTLA&q=%22Adasum%22+gradient+aggregation&sa=X&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQs6gLegQIJRAB
+          - listitem [ref=f91e109]:
+            - link "Short videos" [ref=f91e110] [cursor=pointer]:
+              - /url: /search?sca_esv=30a5fb343c9df574&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8c4u0nXx4bEIpwm1lnNH832SMIiTl3t-JZ4hGJOxPbHYSIu8Q64jU5EwQ-803VaKbd8XGNh2EAGT96nVa30badWeLcMOEWQcU9WGmTgQb8mz46M5or0qsTzsCdATOXqbdWKe4alv-wJ_80KymfsK2N7uqzbQdE9vap0itWYTBSzR6PXAoG2HMg_vJfV7VbLMfL16tTLA&q=%22Adasum%22+gradient+aggregation&sa=X&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQs6gLegQIIBAB
+          - listitem [ref=f91e113]:
+            - button [ref=f91e114] [cursor=pointer]:
+              - generic "More filters" [ref=f91e115]: More
+        - button "Tools" [ref=f91e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f91e129]
+    - generic [ref=f91e134]:
+      - generic [ref=f91e153]:
+        - heading "Thinking" [level=2] [ref=f91e157]
+        - progressbar "Generating" [ref=f91e160]
+      - main [ref=f91e162]:
+        - generic [ref=f91e166]:
+          - generic [ref=f91e169]:
+            - heading "Web results" [level=2] [ref=f91e170]
+            - generic [ref=f91e171]:
+              - generic [ref=f91e174]:
+                - 'link "GTC 2020: AdaSum: Adaptive Summation of Gradients for ... NVIDIA Developer https://developer.nvidia.com › gtc › video › s21376-vid" [ref=f91e176] [cursor=pointer]':
+                  - /url: https://developer.nvidia.com/gtc/2020/video/s21376-vid
+                  - 'heading "GTC 2020: AdaSum: Adaptive Summation of Gradients for ..." [level=3] [ref=f91e177]'
+                  - generic [ref=f91e183]:
+                    - generic [ref=f91e184]: NVIDIA Developer
+                    - generic [ref=f91e186]: https://developer.nvidia.com › gtc › video › s21376-vid
+                - button "About this result" [ref=f91e190] [cursor=pointer]
+              - generic [ref=f91e196]:
+                - generic [ref=f91e197]:
+                  - emphasis [ref=f91e198]: AdaSum
+                  - text: is a new algorithm to perform parallelized
+                  - emphasis [ref=f91e199]: gradient aggregation
+                  - text: based on the notion of sound model combiners. It brings accuracy of the parallel ...
+                - link "Read more" [ref=f91e200] [cursor=pointer]:
+                  - /url: https://developer.nvidia.com/gtc/2020/video/s21376-vid#:~:text=AdaSum%20is%20a%20new%20algorithm,Descent%2C%20yielding%20a%20faster%20convergence.
+          - generic [ref=f91e204]:
+            - generic [ref=f91e207]:
+              - link "Adaptive Summation Method for Scaling Distributed Training Towards Data Science https://towardsdatascience.com › Latest" [ref=f91e209] [cursor=pointer]:
+                - /url: https://towardsdatascience.com/understanding-adasum-adaptive-summation-method-for-scaling-distributed-training-eb1440c5a165/
+                - heading "Adaptive Summation Method for Scaling Distributed Training" [level=3] [ref=f91e210]
+                - generic [ref=f91e216]:
+                  - generic [ref=f91e217]: Towards Data Science
+                  - generic [ref=f91e219]: https://towardsdatascience.com › Latest
+              - button "About this result" [ref=f91e223] [cursor=pointer]
+            - generic [ref=f91e229]:
+              - generic [ref=f91e230]: May 2, 2021 —
+              - generic [ref=f91e231]:
+                - text: The authors proposed a method called
+                - emphasis [ref=f91e232]: AdaSum
+                - text: to add the
+                - emphasis [ref=f91e233]: gradient
+                - text: vectors when they are are orthogonal and perform arithmetic average when the direction of ...
+              - link "Read more" [ref=f91e234] [cursor=pointer]:
+                - /url: https://towardsdatascience.com/understanding-adasum-adaptive-summation-method-for-scaling-distributed-training-eb1440c5a165/#:~:text=The%20authors%20proposed%20a%20method,gradient%20vectors%20are%20in%20parallel.
+          - generic [ref=f91e238]:
+            - generic [ref=f91e241]:
+              - link "Adaptive Consensus Gradients Aggregation for Scaled ... arXiv https://arxiv.org › html" [ref=f91e243] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2411.03742v1
+                - heading "Adaptive Consensus Gradients Aggregation for Scaled ..." [level=3] [ref=f91e244]
+                - generic [ref=f91e250]:
+                  - generic [ref=f91e251]: arXiv
+                  - generic [ref=f91e253]: https://arxiv.org › html
+              - button "About this result" [ref=f91e257] [cursor=pointer]
+            - generic [ref=f91e263]:
+              - generic [ref=f91e264]: Nov 6, 2024 —
+              - generic [ref=f91e265]:
+                - emphasis [ref=f91e266]: Adasum
+                - text: "[34] proposed an adaptive"
+                - emphasis [ref=f91e267]: gradient aggregation
+                - text: simulating multiple sequential
+                - emphasis [ref=f91e268]: gradient
+                - text: descent steps. Recently, [18] proposed a new ...
+              - link "Read more" [ref=f91e269] [cursor=pointer]:
+                - /url: https://arxiv.org/html/2411.03742v1#:~:text=Adasum,proposed%20a%20new
+          - generic [ref=f91e273]:
+            - generic [ref=f91e276]:
+              - link "How do I select the Pre CPU, hierarchical, and Ring modes ... GitHub https://github.com › horovod › horovod › issues" [ref=f91e278] [cursor=pointer]:
+                - /url: https://github.com/horovod/horovod/issues/2582
+                - heading "How do I select the Pre CPU, hierarchical, and Ring modes ..." [level=3] [ref=f91e279]
+                - generic [ref=f91e285]:
+                  - generic [ref=f91e286]: GitHub
+                  - generic [ref=f91e288]: https://github.com › horovod › horovod › issues
+              - button "About this result" [ref=f91e292] [cursor=pointer]
+            - generic [ref=f91e299]:
+              - emphasis [ref=f91e300]: Adasum
+              - text: will not work with hierarchical allreduce, as it uses its own
+              - emphasis [ref=f91e301]: aggregation
+              - text: method. It also does not use NCCL for cross-host communication at this time, ...
+          - generic [ref=f91e305]:
+            - generic [ref=f91e308]:
+              - link "API - Horovod documentation Horovod documentation https://horovod.readthedocs.io › stable › api" [ref=f91e310] [cursor=pointer]:
+                - /url: https://horovod.readthedocs.io/en/stable/api.html
+                - heading "API - Horovod documentation" [level=3] [ref=f91e311]
+                - generic [ref=f91e317]:
+                  - generic [ref=f91e318]: Horovod documentation
+                  - generic [ref=f91e320]: https://horovod.readthedocs.io › stable › api
+              - button "About this result" [ref=f91e324] [cursor=pointer]
+            - generic [ref=f91e330]:
+              - generic [ref=f91e331]:
+                - emphasis [ref=f91e332]: AdaSum
+                - text: "with Horovod · Analyze Performance · Distributed Hyperparameter Search · Autotune: Automated Performance Tuning · Process Sets: Concurrently Running ..."
+              - link "Read more" [ref=f91e333] [cursor=pointer]:
+                - /url: https://horovod.readthedocs.io/en/stable/api.html#:~:text=AdaSum%20with%20Horovod,Sets%3A%20Concurrently%20Running%20Collective%20Operations
+          - generic [ref=f91e337]:
+            - generic [ref=f91e340]:
+              - 'link "Track: Poster Session 1 MLSys conference https://mlsys.org › virtual › session" [ref=f91e342] [cursor=pointer]':
+                - /url: https://mlsys.org/virtual/2021/session/1666
+                - 'heading "Track: Poster Session 1" [level=3] [ref=f91e343]'
+                - generic [ref=f91e349]:
+                  - generic [ref=f91e350]: MLSys conference
+                  - generic [ref=f91e352]: https://mlsys.org › virtual › session
+              - button "About this result" [ref=f91e356] [cursor=pointer]
+            - generic [ref=f91e362]:
+              - generic [ref=f91e363]:
+                - text: This paper introduces a novel method to combine
+                - emphasis [ref=f91e364]: gradients
+                - text: called
+                - emphasis [ref=f91e365]: Adasum
+                - text: that significantly improves the convergence when using large minibatches. This paper ...
+              - link "Read more" [ref=f91e366] [cursor=pointer]:
+                - /url: https://mlsys.org/virtual/2021/session/1666#:~:text=This%20paper%20introduces%20a%20novel,along%20with%20a%20convergence%20proof.
+          - generic [ref=f91e370]:
+            - generic [ref=f91e373]:
+              - link "Scaling Distributed Training with Adaptive Summation - Papertalk papertalk.org https://papertalk.org › papertalks" [ref=f91e375] [cursor=pointer]:
+                - /url: https://papertalk.org/papertalks/31345
+                - heading "Scaling Distributed Training with Adaptive Summation - Papertalk" [level=3] [ref=f91e376]
+                - generic [ref=f91e382]:
+                  - generic [ref=f91e383]: papertalk.org
+                  - generic [ref=f91e385]: https://papertalk.org › papertalks
+              - button "About this result" [ref=f91e389] [cursor=pointer]
+            - generic [ref=f91e396]:
+              - text: This paper introduces a novel method to combine
+              - emphasis [ref=f91e397]: gradients
+              - text: called
+              - emphasis [ref=f91e398]: Adasum
+              - text: that significantly improves the convergence when using large minibatches. This paper ...
+          - generic [ref=f91e403]:
+            - heading "People also ask" [level=2] [ref=f91e405]
+            - generic [ref=f91e406]:
+              - button "How to fix exploding gradient problem?" [ref=f91e412] [cursor=pointer]
+              - button "Is Adam a gradient descent algorithm?" [ref=f91e426] [cursor=pointer]
+              - button "Is stochastic gradient descent better?" [ref=f91e440] [cursor=pointer]
+          - generic [ref=f91e450]:
+            - heading "Web results" [level=2] [ref=f91e451]
+            - generic [ref=f91e452]:
+              - generic [ref=f91e455]:
+                - 'link "(PDF) AdaSum: An adaptive model for summarization ResearchGate https://www.researchgate.net › ... › Summarization" [ref=f91e457] [cursor=pointer]':
+                  - /url: https://www.researchgate.net/publication/221614413_AdaSum_An_adaptive_model_for_summarization
+                  - 'heading "(PDF) AdaSum: An adaptive model for summarization" [level=3] [ref=f91e458]'
+                  - generic [ref=f91e464]:
+                    - generic [ref=f91e465]: ResearchGate
+                    - generic [ref=f91e467]: https://www.researchgate.net › ... › Summarization
+                - button "About this result" [ref=f91e471] [cursor=pointer]
+              - generic [ref=f91e477]:
+                - generic [ref=f91e478]:
+                  - text: This paper proposes a novel adaptive model for summarization,
+                  - emphasis [ref=f91e479]: AdaSum
+                  - text: ", under the assumption that the sum- mary and the topic representation can be mutually ..."
+                - link "Read more" [ref=f91e480] [cursor=pointer]:
+                  - /url: https://www.researchgate.net/publication/221614413_AdaSum_An_adaptive_model_for_summarization#:~:text=This%20paper%20proposes%20a%20novel,topic%20representation%20can%20be%20mutually
+          - generic [ref=f91e484]:
+            - generic [ref=f91e487]:
+              - link "arXiv:2411.03742v1 [cs.LG] 6 Nov 2024 arXiv https://arxiv.org › pdf" [ref=f91e489] [cursor=pointer]:
+                - /url: https://arxiv.org/pdf/2411.03742?
+                - heading "arXiv:2411.03742v1 [cs.LG] 6 Nov 2024" [level=3] [ref=f91e490]
+                - generic [ref=f91e496]:
+                  - generic [ref=f91e497]: arXiv
+                  - generic [ref=f91e499]: https://arxiv.org › pdf
+              - generic [ref=f91e501]: PDF
+              - button "About this result" [ref=f91e504] [cursor=pointer]
+            - generic [ref=f91e510]:
+              - generic [ref=f91e511]: by Y Choukroun · 2024 · Cited by 1 —
+              - generic [ref=f91e512]:
+                - emphasis [ref=f91e513]: Adasum
+                - text: "[34] proposed an adaptive"
+                - emphasis [ref=f91e514]: gradient aggregation
+                - text: simulating multiple sequential
+                - emphasis [ref=f91e515]: gradient
+                - text: descent steps. Recently, [18] proposed a new ...
+              - link "Read more" [ref=f91e516] [cursor=pointer]:
+                - /url: https://arxiv.org/pdf/2411.03742#:~:text=Adasum%20%5B34%5D%20proposed%20an%20adaptive,a%20new%20algorithm%20that%20period%2D
+        - navigation [ref=f91e519]:
+          - heading "Page Navigation" [level=1] [ref=f91e520]
+          - text: "1"
+          - link "Page 2" [ref=f91e523] [cursor=pointer]:
+            - /url: /search?q=%22Adasum%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=Gv5ParHPCcO_kPIP76TjqAg&start=10&sa=N&sstk=AU9db-Cxr5ULQDh-Gapz-vHobJ2F2Rzxe4xLISBViyDQTPMC9Ej6EvVEUuU-KaN8CUbENNFihDkJ1wQYb9vbZM1mqTA1_boPtIciNg&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQ8tMDegQIRhAE
+            - text: "2"
+          - link "Page 3" [ref=f91e525] [cursor=pointer]:
+            - /url: /search?q=%22Adasum%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=Gv5ParHPCcO_kPIP76TjqAg&start=20&sa=N&sstk=AU9db-Cxr5ULQDh-Gapz-vHobJ2F2Rzxe4xLISBViyDQTPMC9Ej6EvVEUuU-KaN8CUbENNFihDkJ1wQYb9vbZM1mqTA1_boPtIciNg&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQ8tMDegQIRhAG
+            - text: "3"
+          - link "Page 4" [ref=f91e527] [cursor=pointer]:
+            - /url: /search?q=%22Adasum%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=Gv5ParHPCcO_kPIP76TjqAg&start=30&sa=N&sstk=AU9db-Cxr5ULQDh-Gapz-vHobJ2F2Rzxe4xLISBViyDQTPMC9Ej6EvVEUuU-KaN8CUbENNFihDkJ1wQYb9vbZM1mqTA1_boPtIciNg&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQ8tMDegQIRhAI
+            - text: "4"
+          - link "Page 5" [ref=f91e529] [cursor=pointer]:
+            - /url: /search?q=%22Adasum%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=Gv5ParHPCcO_kPIP76TjqAg&start=40&sa=N&sstk=AU9db-Cxr5ULQDh-Gapz-vHobJ2F2Rzxe4xLISBViyDQTPMC9Ej6EvVEUuU-KaN8CUbENNFihDkJ1wQYb9vbZM1mqTA1_boPtIciNg&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQ8tMDegQIRhAK
+            - text: "5"
+          - link "Page 6" [ref=f91e531] [cursor=pointer]:
+            - /url: /search?q=%22Adasum%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=Gv5ParHPCcO_kPIP76TjqAg&start=50&sa=N&sstk=AU9db-Cxr5ULQDh-Gapz-vHobJ2F2Rzxe4xLISBViyDQTPMC9Ej6EvVEUuU-KaN8CUbENNFihDkJ1wQYb9vbZM1mqTA1_boPtIciNg&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQ8tMDegQIRhAM
+            - text: "6"
+          - link "Page 7" [ref=f91e533] [cursor=pointer]:
+            - /url: /search?q=%22Adasum%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=Gv5ParHPCcO_kPIP76TjqAg&start=60&sa=N&sstk=AU9db-Cxr5ULQDh-Gapz-vHobJ2F2Rzxe4xLISBViyDQTPMC9Ej6EvVEUuU-KaN8CUbENNFihDkJ1wQYb9vbZM1mqTA1_boPtIciNg&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQ8tMDegQIRhAO
+            - text: "7"
+          - link "Page 8" [ref=f91e535] [cursor=pointer]:
+            - /url: /search?q=%22Adasum%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=Gv5ParHPCcO_kPIP76TjqAg&start=70&sa=N&sstk=AU9db-Cxr5ULQDh-Gapz-vHobJ2F2Rzxe4xLISBViyDQTPMC9Ej6EvVEUuU-KaN8CUbENNFihDkJ1wQYb9vbZM1mqTA1_boPtIciNg&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQ8tMDegQIRhAQ
+            - text: "8"
+          - link "Page 9" [ref=f91e537] [cursor=pointer]:
+            - /url: /search?q=%22Adasum%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=Gv5ParHPCcO_kPIP76TjqAg&start=80&sa=N&sstk=AU9db-Cxr5ULQDh-Gapz-vHobJ2F2Rzxe4xLISBViyDQTPMC9Ej6EvVEUuU-KaN8CUbENNFihDkJ1wQYb9vbZM1mqTA1_boPtIciNg&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQ8tMDegQIRhAS
+            - text: "9"
+          - heading [level=2] [ref=f91e539]:
+            - link "Next" [ref=f91e540] [cursor=pointer]:
+              - /url: /search?q=%22Adasum%22+gradient+aggregation&sca_esv=30a5fb343c9df574&ei=Gv5ParHPCcO_kPIP76TjqAg&start=10&sa=N&sstk=AU9db-Cxr5ULQDh-Gapz-vHobJ2F2Rzxe4xLISBViyDQTPMC9Ej6EvVEUuU-KaN8CUbENNFihDkJ1wQYb9vbZM1mqTA1_boPtIciNg&ved=2ahUKEwixxKq4scaVAxXDH0QIHW_SGIUQ8NMDegQIRhAU
+        - navigation
+    - contentinfo [ref=f91e543]:
+      - heading "Footer Links" [level=1] [ref=f91e544]
+      - generic [ref=f91e548]:
+        - generic [ref=f91e552]:
+          - button "Woodland, California - From your IP address" [ref=f91e554] [cursor=pointer]:
+            - generic [ref=f91e555]: Woodland, California
+            - generic [ref=f91e557]:
+              - text: "-"
+              - generic [ref=f91e558]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f91e560] [cursor=pointer]
+        - generic [ref=f91e563]:
+          - link "Help" [ref=f91e564] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f91e565] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f91e566] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f91e567] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1

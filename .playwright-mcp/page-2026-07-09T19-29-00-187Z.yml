@@ -1,0 +1,313 @@
+- generic [active] [ref=f2e1]:
+  - generic:
+    - generic:
+      - link "Skip to main content" [ref=f2e2] [cursor=pointer]
+      - link "Accessibility help" [ref=f2e3] [cursor=pointer]:
+        - /url: https://support.google.com/websearch/answer/181196?hl=en
+  - generic [ref=f2e8]:
+    - search [ref=f2e9]:
+      - generic [ref=f2e11]:
+        - link "Go to Google Home" [ref=f2e13] [cursor=pointer]:
+          - /url: https://www.google.com/webhp?hl=en&sa=X&ved=0ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQPAgI
+        - generic [ref=f2e21]:
+          - generic [ref=f2e22]:
+            - combobox "Search" [ref=f2e25]: Zeno distributed stochastic gradient descent suspicion-based robustness paper Zeno distributed stochastic gradient descent suspicion-based robustness paper
+            - generic [ref=f2e26]:
+              - button "Clear" [ref=f2e28] [cursor=pointer]
+              - generic [ref=f2e33]:
+                - button "Search by voice" [ref=f2e34] [cursor=pointer]
+                - button "Search by image" [ref=f2e37] [cursor=pointer]
+          - button "Search" [ref=f2e40] [cursor=pointer]
+    - generic [ref=f2e45]:
+      - button "Settings" [ref=f2e47] [cursor=pointer]
+      - button "Share" [ref=f2e53] [cursor=pointer]
+      - generic [ref=f2e59]:
+        - button "Google apps" [ref=f2e61] [cursor=pointer]
+        - link "Sign in" [ref=f2e66] [cursor=pointer]:
+          - /url: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/search%3Fq%3DZeno%2Bdistributed%2Bstochastic%2Bgradient%2Bdescent%2Bsuspicion-based%2Brobustness%2Bpaper%26sei%3DevZPaq-zEb3bkPIPnuep4QE&ec=futura_srp_og_si_72236_p
+  - generic [ref=f2e68]:
+    - navigation [ref=f2e74]:
+      - generic [ref=f2e80]:
+        - list [ref=f2e81]:
+          - listitem [ref=f2e82]:
+            - link "AI Mode" [ref=f2e85] [cursor=pointer]:
+              - /url: /search?q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sca_esv=d4e925c21a8887a9&udm=50&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cqCQj_06QnZs315LoFmPf5bBLHMJ0vMQmTbuI72DM7jn1PTmby9t4tumVo2l1imA7Sgl2sn6UgauLDePlglhpISi1KHAY3pB-JLu_BDJvd7Kel6Tx1BbPqHJVL-dx0xIKGx2nnmINSH_BHN4VUIc4Ut2lIUaPdgaXymzqi_3DT8kbWdxNBiv25z9iZFKKQmjQRTcb2w&aep=1&ntc=1&sa=X&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQ2J8OegQIFRAD
+          - listitem [ref=f2e89]:
+            - link "All" [disabled] [ref=f2e90]
+          - listitem [ref=f2e93]:
+            - link "Shopping" [ref=f2e94] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=28&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cqCQj_06QnZs315LoFmPf5bBLHMJ0vMQmTbuI72DM7jn1PTmby9t4tumVo2l1imA7Sgl2sn6UgauLDePlglhpISi1KHAY3pB-JLu_BDJvd7Kel6Tx1BbPqHJVL-dx0xIKGx2nnmINSH_BHN4VUIc4Ut2lIUaPdgaXymzqi_3DT8kbWdxNBiv25z9iZFKKQmjQRTcb2w&q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&ved=1t:220175&ictx=111
+          - listitem [ref=f2e97]:
+            - link "Images" [ref=f2e98] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=2&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cqCQj_06QnZs315LoFmPf5bBLHMJ0vMQmTbuI72DM7jn1PTmby9t4tumVo2l1imA7Sgl2sn6UgauLDePlglhpISi1KHAY3pB-JLu_BDJvd7Kel6Tx1BbPqHJVL-dx0xIKGx2nnmINSH_BHN4VUIc4Ut2lIUaPdgaXymzqi_3DT8kbWdxNBiv25z9iZFKKQmjQRTcb2w&q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sa=X&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQtKgLegQIGxAB
+          - listitem [ref=f2e101]:
+            - link "Videos" [ref=f2e102] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=7&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cqCQj_06QnZs315LoFmPf5bBLHMJ0vMQmTbuI72DM7jn1PTmby9t4tumVo2l1imA7Sgl2sn6UgauLDePlglhpISi1KHAY3pB-JLu_BDJvd7Kel6Tx1BbPqHJVL-dx0xIKGx2nnmINSH_BHN4VUIc4Ut2lIUaPdgaXymzqi_3DT8kbWdxNBiv25z9iZFKKQmjQRTcb2w&q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sa=X&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQtKgLegQIGBAB
+          - listitem [ref=f2e105]:
+            - link "Forums" [ref=f2e106] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=18&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cqCQj_06QnZs315LoFmPf5bBLHMJ0vMQmTbuI72DM7jn1PTmby9t4tumVo2l1imA7Sgl2sn6UgauLDePlglhpISi1KHAY3pB-JLu_BDJvd7Kel6Tx1BbPqHJVL-dx0xIKGx2nnmINSH_BHN4VUIc4Ut2lIUaPdgaXymzqi_3DT8kbWdxNBiv25z9iZFKKQmjQRTcb2w&q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sa=X&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQs6gLegQIFxAB
+          - listitem [ref=f2e109]:
+            - link "Short videos" [ref=f2e110] [cursor=pointer]:
+              - /url: /search?sca_esv=d4e925c21a8887a9&udm=39&fbs=ABfTbFVyMZGZf1hfvX9uKjN_-G8cqCQj_06QnZs315LoFmPf5bBLHMJ0vMQmTbuI72DM7jn1PTmby9t4tumVo2l1imA7Sgl2sn6UgauLDePlglhpISi1KHAY3pB-JLu_BDJvd7Kel6Tx1BbPqHJVL-dx0xIKGx2nnmINSH_BHN4VUIc4Ut2lIUaPdgaXymzqi_3DT8kbWdxNBiv25z9iZFKKQmjQRTcb2w&q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sa=X&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQs6gLegQIGRAB
+          - listitem [ref=f2e113]:
+            - button [ref=f2e114] [cursor=pointer]:
+              - generic "More filters" [ref=f2e115]: More
+        - button "Tools" [ref=f2e122] [cursor=pointer]
+    - heading "Search Results" [level=1] [ref=f2e129]
+    - main [ref=f2e135]:
+      - generic [ref=f2e139]:
+        - generic [ref=f2e142]:
+          - heading "Web results" [level=2] [ref=f2e143]
+          - generic [ref=f2e144]:
+            - generic [ref=f2e147]:
+              - 'link "Zeno: Distributed Stochastic Gradient Descent with ... arXiv https://arxiv.org › cs" [ref=f2e149] [cursor=pointer]':
+                - /url: https://arxiv.org/abs/1805.10032
+                - 'heading "Zeno: Distributed Stochastic Gradient Descent with ..." [level=3] [ref=f2e150]'
+                - generic [ref=f2e156]:
+                  - generic [ref=f2e157]: arXiv
+                  - generic [ref=f2e159]: https://arxiv.org › cs
+              - button "About this result" [ref=f2e163] [cursor=pointer]
+            - generic [ref=f2e169]:
+              - generic [ref=f2e170]: by C Xie · 2018 · Cited by 441 —
+              - generic [ref=f2e171]:
+                - text: We present
+                - emphasis [ref=f2e172]: Zeno
+                - text: ", a technique to make distributed machine learning, particularly Stochastic Gradient Descent (SGD), tolerant to an arbitrary number of faulty ..."
+              - link "Read more" [ref=f2e173] [cursor=pointer]:
+                - /url: https://arxiv.org/abs/1805.10032#:~:text=We%20present%20Zeno%2C%20a%20technique,arbitrary%20number%20of%20faulty%20workers.
+            - generic [ref=f2e175]:
+              - text: "Missing: robustness ‎| Show results with:"
+              - link "robustness" [ref=f2e176] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+%22robustness%22+paper&sa=X&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQ5t4CegQIKRAB
+        - generic [ref=f2e187]:
+          - generic [ref=f2e191]:
+            - heading "AI Overview" [level=2] [ref=f2e195]
+            - button "About this result" [ref=f2e199]
+          - button "Show more AI Overview" [ref=f2e216]:
+            - generic [ref=f2e217] [cursor=pointer]: Show more
+        - generic [ref=f2e226]:
+          - heading "Web results" [level=2] [ref=f2e227]
+          - generic [ref=f2e228]:
+            - generic [ref=f2e231]:
+              - 'link "Zeno: Distributed Stochastic Gradient Descent with Suspicion ... Proceedings of Machine Learning Research https://proceedings.mlr.press › ..." [ref=f2e233] [cursor=pointer]':
+                - /url: https://proceedings.mlr.press/v97/xie19b/xie19b.pdf
+                - 'heading "Zeno: Distributed Stochastic Gradient Descent with Suspicion ..." [level=3] [ref=f2e234]'
+                - generic [ref=f2e240]:
+                  - generic [ref=f2e241]: Proceedings of Machine Learning Research
+                  - generic [ref=f2e243]: https://proceedings.mlr.press › ...
+              - generic [ref=f2e245]: PDF
+              - button "About this result" [ref=f2e248] [cursor=pointer]
+            - generic [ref=f2e253]:
+              - generic [ref=f2e254]:
+                - generic [ref=f2e255]: by C Xie · Cited by 441 —
+                - generic [ref=f2e256]:
+                  - text: Abstract. We present
+                  - emphasis [ref=f2e257]: Zeno
+                  - text: ", a technique to make distributed machine learning, particularly Stochastic Gradi- ent Descent (SGD), tolerant to an arbitrary num-."
+                - link "Read more" [ref=f2e258] [cursor=pointer]:
+                  - /url: https://proceedings.mlr.press/v97/xie19b/xie19b.pdf#:~:text=Abstract,tolerant%20to%20an%20arbitrary%20num%2D
+              - generic [ref=f2e259]: 9 pages
+        - table [ref=f2e265]:
+          - rowgroup [ref=f2e266]:
+            - row [ref=f2e267]:
+              - cell [ref=f2e268]:
+                - heading [level=3] [ref=f2e269]:
+                  - link [ref=f2e270] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar?q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&hl=en&as_sdt=0&as_vis=1&oi=scholart
+                    - generic [ref=f2e271]:
+                      - text: Scholarly articles for
+                      - emphasis [ref=f2e272]: Zeno distributed stochastic gradient descent suspicion-based robustness paper
+            - row [ref=f2e273]:
+              - cell [ref=f2e274]:
+                - 'heading "… : Distributed stochastic gradient descent with suspicion- … - ‎Xie - Cited by 442" [level=3] [ref=f2e275]':
+                  - link [ref=f2e276] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar_url?url=http://proceedings.mlr.press/v97/xie19b/xie19b.pdf&hl=en&sa=X&ei=evZPapKILKOaieoPmKu3mQ0&scisig=AM1tuoObrZB7GTBRbAE4uKre0XSw&oi=scholarr
+                    - generic [ref=f2e277]:
+                      - text: "… :"
+                      - emphasis [ref=f2e278]: Distributed stochastic gradient descent
+                      - text: with
+                      - emphasis [ref=f2e279]: suspicion
+                      - text: "- …"
+                  - generic [ref=f2e280]:
+                    - text: "-"
+                    - generic [ref=f2e281]: ‎Xie
+                    - text: "- Cited by 442"
+        - generic [ref=f2e284]:
+          - heading "Web results" [level=2] [ref=f2e285]
+          - generic [ref=f2e286]:
+            - generic [ref=f2e289]:
+              - 'link "Zeno: Distributed Stochastic Gradient Descent with Suspicion ... Proceedings of Machine Learning Research https://proceedings.mlr.press › ..." [ref=f2e291] [cursor=pointer]':
+                - /url: https://proceedings.mlr.press/v97/xie19b.html
+                - 'heading "Zeno: Distributed Stochastic Gradient Descent with Suspicion ..." [level=3] [ref=f2e292]'
+                - generic [ref=f2e298]:
+                  - generic [ref=f2e299]: Proceedings of Machine Learning Research
+                  - generic [ref=f2e301]: https://proceedings.mlr.press › ...
+              - button "About this result" [ref=f2e305] [cursor=pointer]
+            - generic [ref=f2e311]:
+              - generic [ref=f2e312]: by C Xie · 2019 · Cited by 441 —
+              - generic [ref=f2e313]:
+                - text: We present
+                - emphasis [ref=f2e314]: Zeno
+                - text: ", a technique to make distributed machine learning, particularly Stochastic Gradient Descent (SGD), tolerant to an arbitrary number of faulty ..."
+              - link "Read more" [ref=f2e315] [cursor=pointer]:
+                - /url: https://proceedings.mlr.press/v97/xie19b.html#:~:text=We%20present%20Zeno%2C%20a%20technique,arbitrary%20number%20of%20faulty%20workers.
+            - generic [ref=f2e317]:
+              - text: "Missing: robustness ‎| Show results with:"
+              - link "robustness" [ref=f2e318] [cursor=pointer]:
+                - /url: /search?sca_esv=d4e925c21a8887a9&q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+%22robustness%22+paper&sa=X&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQ5t4CegQIKBAB
+        - generic [ref=f2e322]:
+          - generic [ref=f2e325]:
+            - 'link "Zeno: Distributed Stochastic Gradient Descent with ... Distributed Protocols Research Group https://dprg.cs.uiuc.edu › icml_zeno_baposter_v2" [ref=f2e327] [cursor=pointer]':
+              - /url: https://dprg.cs.uiuc.edu/data/files/2019/icml_zeno_baposter_v2.pdf
+              - 'heading "Zeno: Distributed Stochastic Gradient Descent with ..." [level=3] [ref=f2e328]'
+              - generic [ref=f2e337]:
+                - generic [ref=f2e338]: Distributed Protocols Research Group
+                - generic [ref=f2e340]: https://dprg.cs.uiuc.edu › icml_zeno_baposter_v2
+            - generic [ref=f2e342]: PDF
+            - button "About this result" [ref=f2e345] [cursor=pointer]
+          - generic [ref=f2e351]:
+            - text: "Estimated descendant of the loss function: Larger fr(x)−fr(x−γu) implies faster convergence. • Magnitude of the update: Smaller kuk. 2 implies smaller change."
+            - link "Read more" [ref=f2e352] [cursor=pointer]:
+              - /url: https://dprg.cs.uiuc.edu/data/files/2019/icml_zeno_baposter_v2.pdf#:~:text=%E2%80%A2%20Estimated%20descendant%20of%20the,smaller%20change.
+          - generic [ref=f2e353]: "Missing: robustness ‎paper"
+        - generic [ref=f2e358]:
+          - generic [ref=f2e361]:
+            - 'link "[PDF] Zeno: Distributed Stochastic Gradient Descent with ... Semantic Scholar https://www.semanticscholar.org › paper › Zeno:-Distri..." [ref=f2e363] [cursor=pointer]':
+              - /url: https://www.semanticscholar.org/paper/Zeno%3A-Distributed-Stochastic-Gradient-Descent-with-Xie-Koyejo/0a4230af7869cf63159a444510627b4f91e38eed
+              - 'heading "[PDF] Zeno: Distributed Stochastic Gradient Descent with ..." [level=3] [ref=f2e364]'
+              - generic [ref=f2e370]:
+                - generic [ref=f2e371]: Semantic Scholar
+                - generic [ref=f2e373]: https://www.semanticscholar.org › paper › Zeno:-Distri...
+            - button "About this result" [ref=f2e377] [cursor=pointer]
+          - generic [ref=f2e384]:
+            - text: This work presents
+            - emphasis [ref=f2e385]: Zeno
+            - text: ", a technique to make distributed machine learning, particularly Stochastic Gradient Descent (SGD), tolerant to an arbitrary number ..."
+        - generic [ref=f2e389]:
+          - generic [ref=f2e392]:
+            - 'link "Zeno: Distributed Stochastic Gradient Descent with ... Illinois Experts https://experts.illinois.edu › publications › zeno-distribut..." [ref=f2e394] [cursor=pointer]':
+              - /url: https://experts.illinois.edu/en/publications/zeno-distributed-stochastic-gradient-descent-with-suspicion-based/
+              - 'heading "Zeno: Distributed Stochastic Gradient Descent with ..." [level=3] [ref=f2e395]'
+              - generic [ref=f2e401]:
+                - generic [ref=f2e402]: Illinois Experts
+                - generic [ref=f2e404]: https://experts.illinois.edu › publications › zeno-distribut...
+            - button "About this result" [ref=f2e408] [cursor=pointer]
+          - generic [ref=f2e414]:
+            - generic [ref=f2e415]: by C Xie · 2019 · Cited by 441 —
+            - generic [ref=f2e416]:
+              - text: We present
+              - emphasis [ref=f2e417]: Zeno
+              - text: ", a technique to make distributed machine learning, particularly Stochastic Gradient Descent (SGD), tolerant to an arbitrary number of faulty ..."
+            - link "Read more" [ref=f2e418] [cursor=pointer]:
+              - /url: https://experts.illinois.edu/en/publications/zeno-distributed-stochastic-gradient-descent-with-suspicion-based/#:~:text=We%20present%20Zeno%2C%20a%20technique,arbitrary%20number%20of%20faulty%20workers.
+          - generic [ref=f2e419]: "Missing: robustness ‎paper"
+        - generic [ref=f2e424]:
+          - generic [ref=f2e427]:
+            - 'link "Zeno: Distributed Stochastic Gradient Descent with ... ICML 2026 https://icml.cc › media › icml-2019 › Slides" [ref=f2e429] [cursor=pointer]':
+              - /url: https://icml.cc/media/icml-2019/Slides/4485.pdf
+              - 'heading "Zeno: Distributed Stochastic Gradient Descent with ..." [level=3] [ref=f2e430]'
+              - generic [ref=f2e436]:
+                - generic [ref=f2e437]: ICML 2026
+                - generic [ref=f2e439]: https://icml.cc › media › icml-2019 › Slides
+            - generic [ref=f2e441]: PDF
+            - button "About this result" [ref=f2e444] [cursor=pointer]
+          - generic [ref=f2e450]:
+            - generic [ref=f2e451]:
+              - emphasis [ref=f2e452]: Zeno
+              - text: ":"
+              - emphasis [ref=f2e453]: Distributed Stochastic Gradient Descent
+              - text: with.
+              - emphasis [ref=f2e454]: Suspicion
+              - text: "-"
+              - emphasis [ref=f2e455]: based
+              - text: Fault-tolerance. Cong Xie, Oluwasanmi Koyejo, Indranil Gupta. June 12, 2019. Poster 158.
+            - link "Read more" [ref=f2e456] [cursor=pointer]:
+              - /url: https://icml.cc/media/icml-2019/Slides/4485.pdf#:~:text=Zeno%3A%20Distributed%20Stochastic%20Gradient%20Descent,Poster%20158
+          - generic [ref=f2e457]: "Missing: robustness ‎paper"
+        - generic [ref=f2e462]:
+          - generic [ref=f2e465]:
+            - 'link "Zeno: Byzantine-suspicious stochastic gradient descent ResearchGate https://www.researchgate.net › ... › Stochastic" [ref=f2e467] [cursor=pointer]':
+              - /url: https://www.researchgate.net/publication/325396420_Zeno_Byzantine-suspicious_stochastic_gradient_descent
+              - 'heading "Zeno: Byzantine-suspicious stochastic gradient descent" [level=3] [ref=f2e468]'
+              - generic [ref=f2e474]:
+                - generic [ref=f2e475]: ResearchGate
+                - generic [ref=f2e477]: https://www.researchgate.net › ... › Stochastic
+            - button "About this result" [ref=f2e481] [cursor=pointer]
+          - generic [ref=f2e487]:
+            - generic [ref=f2e488]: May 25, 2018 —
+            - generic [ref=f2e489]:
+              - text: We propose
+              - emphasis [ref=f2e490]: Zeno, a new robust aggregation rule
+              - text: ", for distributed synchronous Stochastic Gradient Descent~(SGD) under a general Byzantine failure model."
+            - link "Read more" [ref=f2e491] [cursor=pointer]:
+              - /url: https://www.researchgate.net/publication/325396420_Zeno_Byzantine-suspicious_stochastic_gradient_descent#:~:text=We%20propose%20Zeno%2C%20a%20new,under%20a%20general%20Byzantine%20failure
+        - generic [ref=f2e495]:
+          - generic [ref=f2e498]:
+            - 'link "Zeno: Fault-Tolerant SGD Method | PDF | Median | Estimator Scribd https://www.scribd.com › Icml-Zeno-Appendix" [ref=f2e500] [cursor=pointer]':
+              - /url: https://www.scribd.com/document/401469521/Icml-Zeno-Appendix
+              - 'heading "Zeno: Fault-Tolerant SGD Method | PDF | Median | Estimator" [level=3] [ref=f2e501]'
+              - generic [ref=f2e507]:
+                - generic [ref=f2e508]: Scribd
+                - generic [ref=f2e510]: https://www.scribd.com › Icml-Zeno-Appendix
+            - button "About this result" [ref=f2e514] [cursor=pointer]
+          - generic [ref=f2e520]:
+            - generic [ref=f2e521]:
+              - text: We present
+              - emphasis [ref=f2e522]: Zeno
+              - text: ", a technique to make distributed machine learning, particularly Stochastic Gradient Descent (SGD), tolerant to an arbitrary number of faulty ..."
+            - link "Read more" [ref=f2e523] [cursor=pointer]:
+              - /url: https://www.scribd.com/document/401469521/Icml-Zeno-Appendix#:~:text=We%20present%20Zeno%2C%20a%20technique,arbitrary%20number%20of%20faulty%20workers.
+      - navigation [ref=f2e526]:
+        - heading "Page Navigation" [level=1] [ref=f2e527]
+        - text: "1"
+        - link "Page 2" [ref=f2e530] [cursor=pointer]:
+          - /url: /search?q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sca_esv=d4e925c21a8887a9&ei=evZPao3kIJqO8L0P5fjouQw&start=10&sa=N&sstk=AU9db-DUrP2k-xMG7WIvRtRiMS_Zo7Y8B4x6tEDBjrKcRVVvnkbdcJYqHPu5aoPrWivkSoHSyukTIbQGzXRQ7_zXPSbRicZkgsiOYQ&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQ8tMDegQIKxAE
+          - text: "2"
+        - link "Page 3" [ref=f2e532] [cursor=pointer]:
+          - /url: /search?q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sca_esv=d4e925c21a8887a9&ei=evZPao3kIJqO8L0P5fjouQw&start=20&sa=N&sstk=AU9db-DUrP2k-xMG7WIvRtRiMS_Zo7Y8B4x6tEDBjrKcRVVvnkbdcJYqHPu5aoPrWivkSoHSyukTIbQGzXRQ7_zXPSbRicZkgsiOYQ&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQ8tMDegQIKxAG
+          - text: "3"
+        - link "Page 4" [ref=f2e534] [cursor=pointer]:
+          - /url: /search?q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sca_esv=d4e925c21a8887a9&ei=evZPao3kIJqO8L0P5fjouQw&start=30&sa=N&sstk=AU9db-DUrP2k-xMG7WIvRtRiMS_Zo7Y8B4x6tEDBjrKcRVVvnkbdcJYqHPu5aoPrWivkSoHSyukTIbQGzXRQ7_zXPSbRicZkgsiOYQ&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQ8tMDegQIKxAI
+          - text: "4"
+        - link "Page 5" [ref=f2e536] [cursor=pointer]:
+          - /url: /search?q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sca_esv=d4e925c21a8887a9&ei=evZPao3kIJqO8L0P5fjouQw&start=40&sa=N&sstk=AU9db-DUrP2k-xMG7WIvRtRiMS_Zo7Y8B4x6tEDBjrKcRVVvnkbdcJYqHPu5aoPrWivkSoHSyukTIbQGzXRQ7_zXPSbRicZkgsiOYQ&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQ8tMDegQIKxAK
+          - text: "5"
+        - link "Page 6" [ref=f2e538] [cursor=pointer]:
+          - /url: /search?q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sca_esv=d4e925c21a8887a9&ei=evZPao3kIJqO8L0P5fjouQw&start=50&sa=N&sstk=AU9db-DUrP2k-xMG7WIvRtRiMS_Zo7Y8B4x6tEDBjrKcRVVvnkbdcJYqHPu5aoPrWivkSoHSyukTIbQGzXRQ7_zXPSbRicZkgsiOYQ&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQ8tMDegQIKxAM
+          - text: "6"
+        - link "Page 7" [ref=f2e540] [cursor=pointer]:
+          - /url: /search?q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sca_esv=d4e925c21a8887a9&ei=evZPao3kIJqO8L0P5fjouQw&start=60&sa=N&sstk=AU9db-DUrP2k-xMG7WIvRtRiMS_Zo7Y8B4x6tEDBjrKcRVVvnkbdcJYqHPu5aoPrWivkSoHSyukTIbQGzXRQ7_zXPSbRicZkgsiOYQ&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQ8tMDegQIKxAO
+          - text: "7"
+        - link "Page 8" [ref=f2e542] [cursor=pointer]:
+          - /url: /search?q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sca_esv=d4e925c21a8887a9&ei=evZPao3kIJqO8L0P5fjouQw&start=70&sa=N&sstk=AU9db-DUrP2k-xMG7WIvRtRiMS_Zo7Y8B4x6tEDBjrKcRVVvnkbdcJYqHPu5aoPrWivkSoHSyukTIbQGzXRQ7_zXPSbRicZkgsiOYQ&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQ8tMDegQIKxAQ
+          - text: "8"
+        - link "Page 9" [ref=f2e544] [cursor=pointer]:
+          - /url: /search?q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sca_esv=d4e925c21a8887a9&ei=evZPao3kIJqO8L0P5fjouQw&start=80&sa=N&sstk=AU9db-DUrP2k-xMG7WIvRtRiMS_Zo7Y8B4x6tEDBjrKcRVVvnkbdcJYqHPu5aoPrWivkSoHSyukTIbQGzXRQ7_zXPSbRicZkgsiOYQ&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQ8tMDegQIKxAS
+          - text: "9"
+        - link "Page 10" [ref=f2e546] [cursor=pointer]:
+          - /url: /search?q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sca_esv=d4e925c21a8887a9&ei=evZPao3kIJqO8L0P5fjouQw&start=90&sa=N&sstk=AU9db-DUrP2k-xMG7WIvRtRiMS_Zo7Y8B4x6tEDBjrKcRVVvnkbdcJYqHPu5aoPrWivkSoHSyukTIbQGzXRQ7_zXPSbRicZkgsiOYQ&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQ8tMDegQIKxAU
+          - text: "10"
+        - heading [level=2] [ref=f2e548]:
+          - link "Next" [ref=f2e549] [cursor=pointer]:
+            - /url: /search?q=Zeno+distributed+stochastic+gradient+descent+suspicion-based+robustness+paper&sca_esv=d4e925c21a8887a9&ei=evZPao3kIJqO8L0P5fjouQw&start=10&sa=N&sstk=AU9db-DUrP2k-xMG7WIvRtRiMS_Zo7Y8B4x6tEDBjrKcRVVvnkbdcJYqHPu5aoPrWivkSoHSyukTIbQGzXRQ7_zXPSbRicZkgsiOYQ&ved=2ahUKEwiNid2VqsaVAxUaB7wBHWU8OscQ8NMDegQIKxAW
+      - navigation
+    - contentinfo [ref=f2e552]:
+      - heading "Footer Links" [level=1] [ref=f2e553]
+      - generic [ref=f2e557]:
+        - generic [ref=f2e561]:
+          - button "Woodland, California - From your IP address" [ref=f2e563] [cursor=pointer]:
+            - generic [ref=f2e564]: Woodland, California
+            - generic [ref=f2e566]:
+              - text: "-"
+              - generic [ref=f2e567]: From your IP address
+          - text: "-"
+          - button "Update location" [ref=f2e569] [cursor=pointer]
+        - generic [ref=f2e572]:
+          - link "Help" [ref=f2e573] [cursor=pointer]:
+            - /url: https://support.google.com/websearch/?p=ws_results_help&hl=en&fg=1
+          - link "Send feedback" [ref=f2e574] [cursor=pointer]:
+            - /url: "#"
+          - link "Privacy" [ref=f2e575] [cursor=pointer]:
+            - /url: https://policies.google.com/privacy?hl=en&fg=1
+          - link "Terms" [ref=f2e576] [cursor=pointer]:
+            - /url: https://policies.google.com/terms?hl=en&fg=1
