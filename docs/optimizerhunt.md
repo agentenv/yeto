@@ -993,15 +993,15 @@ signed endpoint and then to `pd-standard` unpack/cache I/O, not a shortage of
 network bandwidth.
 
 The implementation is assembled in the isolated branch
-`experiment/optimizer-state-capture-round3`. The current pre-commit tree passed
+`experiment/optimizer-state-capture-round3`. The frozen release tree passed
 755 Python tests, 171 Rust tests, Ruff lint/format, the replay self-test, and all
-8,567 Lean build jobs. Its reproducible commit identity is recorded below after
-the tree is frozen. Independent launch audits found and closed the reconnect,
+8,567 Lean build jobs. It is frozen and pushed as code commit
+`452ebdea30503f10c1eda68e9fdcff704be2a792`. Independent launch audits found and closed the reconnect,
 cold-start timing, portable parity-input, image-input provenance, and too-short
-VM-envelope holes. No EXP2-54 GPU instance may be created until the code is
-committed and pushed, the launch derivative pins that exact code commit, and
-the newly quota-aware doctor is green. Draft and confirmation specs remain
-`adopt_only` until their stage gates pass.
+VM-envelope holes. The checked-in specs now pin that exact code commit and the
+quota-aware doctor is green. Only a reviewed smoke derivative may remove
+`adopt_only`; development and confirmation remain locked until their stage
+gates pass.
 
 ### PTI-SGD: next temporal candidate, not yet an empirical result
 

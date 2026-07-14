@@ -5,7 +5,8 @@ Status: **DRAFT / NON-LAUNCHABLE**
 
 This plan turns the exact-state capture work into three strictly sequential
 GCP Spot stages. It does not authorize a cloud launch. All three checked-in
-specifications retain `cloud.adopt_only: true` and a pre-final repository SHA.
+specifications retain `cloud.adopt_only: true` and pin audited code commit
+`452ebdea30503f10c1eda68e9fdcff704be2a792`.
 The seed-239 command additionally contains a deliberately non-integer sentinel,
 so confirmation cannot start accidentally even if the cloud guard is removed.
 
@@ -42,9 +43,9 @@ launch if the live grant later falls below the requested shape.
 
 No stage may be opened until all of the following are true:
 
-1. The capture, audited-transcript, validator, and parity changes have been
-   committed, reviewed, and pushed. Replace the placeholder `repo_commit` in
-   every spec with that same final 40-character commit SHA.
+1. The capture, audited-transcript, validator, and parity changes are committed,
+   reviewed, and pushed as `452ebdea30503f10c1eda68e9fdcff704be2a792`;
+   every spec pins that same immutable code commit.
 2. The image path and numeric source-image ID have been re-described and still
    identify the READY image above. Do not substitute a family or a newer image.
 3. The model and data paths exist on the image and the harness doctor/render

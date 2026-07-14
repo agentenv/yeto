@@ -2,7 +2,7 @@
   "schema_version": 1,
   "run_id": "exp2-54-smoke",
   "repo_url": "https://github.com/agentenv/yeto.git",
-  "repo_commit": "9f9edadf3e8a39c91ce5d64d5ac0a93ca22424c4",
+  "repo_commit": "452ebdea30503f10c1eda68e9fdcff704be2a792",
   "cloud": {
     "provider": "gcp",
     "project": "model-training-497007",
