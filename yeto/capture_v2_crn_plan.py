@@ -444,7 +444,8 @@ def _responder_value(index: int, responder: LoadedResponder) -> dict[str, Any]:
         "learner_id": identity.learner_id,
         "rank": identity.rank,
         "window_uuid": identity.window_uuid,
-        "payload_sha256": responder.payload_sha256,
+        "payload_sha256": responder.payload.sha256,
+        "payload_bytes": responder.payload.bytes,
     }
 
 
@@ -604,6 +605,7 @@ def load_crn_evaluation_plan(
         "rank",
         "window_uuid",
         "payload_sha256",
+        "payload_bytes",
     }
     if not isinstance(responder_value, dict) or set(responder_value) != responder_keys:
         raise CRNAuthorityError("CRN plan responder fields are malformed")
