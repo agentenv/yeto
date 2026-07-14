@@ -969,6 +969,7 @@ reconstructed from endpoints or added after outcomes become visible.
 | MTRF | Exact responder join; anchor/H/2/H parameters; per-tensor Adam moments, metrics, clocks, LR mass, decay accounting; production RDA | Conditional direction-only replay after every fail-closed gate above | Full learner restore, syncer boundary state, next-eight groups, fixed evaluation object, RNG restore, isolated k0/k8 replay | EXP2-54; unscored until v2 |
 | MSTP | The MTRF substrate plus the exact half-path and factual merged directions | Conditional direction-only replay under the same gates | The same full CRN restore/evaluation bundle | EXP2-54; unscored until v2 |
 | PTI-SGD | Ordered same-fragment factual directions plus a hash-chained causal prequential ledger | At most a historical direction stream after exact materialization | Sealed shadow outcomes, full restore/evaluation, and a separately frozen preregistration | Separate hypothesis |
+| CPLG-SGD | Two consecutive same-fragment directions, forward tangents, exact directional-sphere transport, and delayed causal scores | Executable full-vector shadow replay only; the action-capable Rust selector is implemented but no live experiment is authorized | Full policy-state restore, identical future-eight groups, fixed evaluation object, and isolated k0/k8 replay | Separate post-PTI hypothesis; unscored |
 | CRP-SGD | Delayed resolution of individually tiny proposal residuals, then a bounded orthogonal pulse from a per-fragment FIFO bank | At most a historical causal-tape mechanism screen after exact materialization | Full restore/evaluation, a separately frozen proposal source, and isolated CRN replay | Separate hypothesis; unscored |
 | CFLX-SGD | Exact global stock trial point, model autograd, and disjoint proposal/validation/audit streams | Not identifiable from v1 learner envelopes | Syncer global state, full model restore, restricted probe oracle, equal live-arm probe cost, and CRN replay | Separate campaign |
 
@@ -1782,11 +1783,77 @@ campaign-wide ceiling of eight active accelerators:
    campaign ceiling, not a reason to skip E1 or allocate eight GPUs to either
    frozen stage.
 
-As of the 2026-07-14 handoff, noninteractive GCP checks are blocked because
-the active `scf@tomo.inc` gcloud credential requires reauthentication; the
-operator must run `gcloud auth login scf@tomo.inc` before a live doctor or
-launch can succeed. This PTI work has made **no cloud mutation and no launch**:
-no PTI VM, disk, object prefix, or experiment result exists yet.
+The GCP authentication block was resolved later on 2026-07-14 with the
+`admin-codex@model-training-497007.iam.gserviceaccount.com` service account in
+an isolated gcloud configuration. The live project reports a Spot A100 quota
+of 16 but an A2 CPU quota of 48, so the largest feasible A2 allocation is one
+four-A100 `a2-highgpu-4g`, not eight A100s at once. The campaign's eight-GPU
+number remains a ceiling; it is not available capacity and does not override
+the sequential E1 gate.
+
+The first immutable online launch,
+`exp2-pti-online-e1-m1-canary-r1`, allocated Spot VM ID
+`3181859973759747432` and boot-disk ID `3875931301588223335` from exact image
+ID `7290368630472593484`. Its verified input manifests passed, but the
+optimizer command never started. The local CLI entry point had resolved the
+editable virtual environment's stale `/Users/shou/yeto` harness instead of the
+experiment worktree's newer harness. The stale controller emitted the already
+known unsafe nested-single-quote runner, producing
+`checksum: line 4: is: command not found` and an unexpected end of file. This
+was controller module drift, not a corrupt checksum or PTI failure.
+
+The r1 run directory, command, spec, logs, and input provenance were synced to
+`gs://yeto-exp2-52-model-training-497007/exp2-pti-online-e1-m1-canary-r1`.
+The harness wrote and round-tripped an abandonment record with SHA-256
+`557494d6b641dc49c2341d07897c979eb424102eab2b0e7f499176d403e1b4fe`,
+then deleted only the authenticated VM and auto-delete boot disk. Independent
+instance and disk lookups both return 404. The r1 identity and prefix are
+quarantined and will not be reused.
+
+Commit `426425aaf09068608ddf2900c71f6d50f1bb5fdb` makes the controller prepend
+and verify its sibling checkout before importing `yeto.optimizer_harness`.
+Its executable regression places a decoy stale harness first on `PYTHONPATH`,
+runs the real entry point from an unrelated directory, and requires the
+base64-safe detached renderer instead of the stale quote-vulnerable renderer.
+The focused harness/spec suite passes 72 tests. Commit `be1bb1f` adds the fresh
+r2 immutable JSON spec, which pins that repair commit and uses new VM, run,
+checkout, artifact, and GCS identities throughout.
+
+Fresh `exp2-pti-online-e1-m1-canary-r2` then ran on Spot VM ID
+`2050450023308312795` with boot-disk ID `2921173287301791963`. The exact
+model/data manifests passed. The roughly 143--146-second start-to-training
+delay was dominated by serial local SHA-256 over the approximately 16.678 GiB
+Qwen 9B model on the 250 GB `pd-ssd`, an effective roughly 117--119 MiB/s; no
+model ingress or network download occurred. Because the loader immediately
+reads the same model again, this is a redundant integrity pass. A future image
+may replace it only with an explicit fail-closed `fs-verity`/signed-attestation
+mode bound to the exact numeric source-image ID; mutable timestamps or an
+unsigned “already verified” marker are not acceptable substitutes.
+
+Both online arms completed exactly 32 commits, eight per fragment. The stock
+arm used 34 local steps, took 81.5 seconds, and evaluated at
+`1.3319227656615953` loss/token. The PTI arm used the same 34 local steps, took
+87.9 seconds, and evaluated at the identical
+`1.3319227656615953`. This equality is expected because PTI constructed 28
+candidate directions and resolved 24 delayed scores, 11 positive and 13
+negative, but its three-strictly-positive interlock never opened and it applied
+zero non-stock actions. It is therefore not evidence of a tie between two
+optimizers.
+
+The fail-closed validator rejected r2 with the sole error
+`PTI tape selected no nonstock actions`. Its FAIL artifact has SHA-256
+`ccac85e0447549c2c2b9321bdd52b9c637f754d8aca71cd3a80e6ce51f65b3ce`
+and explicitly labels the evidence `exploratory_online_non_crn`. All run data,
+checkpoints, adapters, tapes, logs, provenance, validation, checksums, and
+results are preserved under
+`gs://yeto-exp2-52-model-training-497007/exp2-pti-online-e1-m1-canary-r2`.
+The abandonment record SHA-256 is
+`c2785e27e245d1b56548f50be200d0404dcc4826e4cc4963e5f93d5dba407235`.
+The harness deleted exactly that authenticated VM and auto-delete disk, and
+both provider lookups return 404. E2 remains blocked and was not launched.
+Under the frozen gate, PTI is killed as inert at this E1 cell; weakening the
+interlock or increasing the run only after seeing this failure would define a
+new candidate and require fresh preregistration and evidence.
 
 Finally, the two evidence classes must not be conflated. The planned online
 stock/PTI arms are matched and paired by seed, but once PTI first takes a
@@ -1840,6 +1907,129 @@ result therefore rules out unconditional dominance; it does not establish
 that language-model pseudo-gradients have constant angular velocity or that
 CGC improves loss. CGC is a preregisterable shadow/CRN candidate only after the
 same full capture-v2 engineering gate required by PTI.
+
+### CPLG-SGD: two-turn phase-locked continuation
+
+The PTI E1 failure gives a narrow, useful negative result: a fixed `-1/4`
+transverse candidate produced both positive and negative delayed scores, and
+the three-positive causal interlock correctly kept it inert. It does not
+justify weakening that interlock. A distinct follow-up proposal, **Causal
+Phase-Locked Geodesic SGD (CPLG-SGD)**, instead requires two consecutive
+same-fragment rotations to have coherent phase and makes the turn shrink to
+zero under stationarity or reversal.
+
+For previous/current unit stock directions `v = u_{t-1}` and `u = u_t`, let
+
+\[
+\rho=\langle u,v\rangle,\qquad
+d=\frac{\rho u-v}{\sqrt{1-\rho^2}},
+\]
+
+where `d` is the **forward** continuation tangent at `u`. Existing PTI/CGC
+code constructs the opposite backward tangent
+`b=(v-rho*u)/sqrt(1-rho^2)=-d`; reusing `b` without negating it would reverse
+the proposed action. For the preceding forward tangent `h` at `v`, shortest
+great-circle transport on the artificial unit sphere of direction vectors is
+
+\[
+\operatorname{PT}_{v\rightarrow u}(h)
+=h-\frac{\langle h,u\rangle}{1+\rho}(v+u).
+\]
+
+A tangent-plane projection is not this transport. With current and preceding
+turn angles `theta_t` and `theta_{t-1}`, phase coherence and the candidate are
+
+\[
+c=\max(0,\langle d,\operatorname{PT}(h)\rangle),\qquad
+\phi=c\min(\theta_t,\theta_{t-1},\arctan(1/4)),
+\]
+
+\[
+q=\cos(\phi)u+\sin(\phi)d,\qquad C_t=\lVert G_t\rVert q.
+\]
+
+This angle semantics is part of the algorithm identity. The existing
+normalized-linear CGC helper accepts a tangent ratio whose actual angle is
+`atan(alpha)`. Feeding it `phi`, or using
+`c*min(tan(theta_t),tan(theta_{t-1}),1/4)`, defines a different optimizer. A
+correct helper reuse would require `alpha=tan(phi)`; the planned f32 kernel
+instead materializes pinned `cosf(phi)` and `sinf(phi)` directly and
+renormalizes before norm grafting. The initial Lean ratio-proxy draft was
+caught by an independent audit before being described as the exact CPLG
+algorithm. Corrective commit `8690a7a83a899b106fa98260261ea0aed616cd77`
+now formalizes the angle construction and exact sphere-transport formula. It
+proves transport tangency, ideal constant-rotation transport/coherence and
+recovery, exact stock degeneration, unit norm, the actual angular cap, and a
+reversal non-dominance theorem. It also proves that the rejected nested-arctan
+ratio interpretation is strictly different. The full Lean build passes with
+no `sorry`, `admit`, or added axioms; these are real-geometry safety theorems,
+not f32, loss, convergence, or superiority proofs.
+
+CPLG remains causal and fail-closed. Per fragment it needs the previous stock
+direction, forward tangent and angle, one pending shadow candidate with source
+identity, and at most three resolved scores. Preview is pure; only commit may
+install the next state. Sequence/layout/hash failure, nonfinite or nonacute
+geometry, degenerate transport, or a checkpoint invariant failure returns the
+original stock bytes and clears eligibility. The three already-resolved
+strictly-positive score interlock remains unchanged.
+
+Commit `26b985a` adds an independent Python exact-f32 reference and
+`scripts/replay_cplg_shadow.py`. It fixes sequential product-then-add reduction
+order without FMA, dot overshoot tolerance `2^-20`, norm-squared floor `2^-40`,
+strict acute geometry, the forward-tangent sign, shortest-sphere transport,
+reprojection/normalization, literal `sin(phi)`/`cos(phi)` angle semantics, and
+the cap bits `0x3e7adbb0`. Golden vectors distinguish 30-degree forward
+continuation from the wrong 10-degree sign, literal angle from `atan(phi)`, the
+cap, a nonplanar transport, and a reversal fallback. The replay accepts only a
+strict, hashed full-vector stock tape. The retained PTI r2 event tape contains
+vector identities but not those vectors, so it is correctly rejected as
+unidentifiable and cannot be recycled into CPLG evidence.
+
+Commit `538f328` adds the action-capable production Rust selector
+`--outer-optimizer cplg-sgd`. It freezes the treatment as exact f32 outer LR
+`0.28` (bits `0x3e8f5c29`), exact positive-zero momentum, and no per-fragment
+LR overrides. It pins Rust `libm` 0.2.15, implements the same guarded geometry,
+opens no earlier than the sixth same-fragment visit after three strictly
+positive already-resolved shadow scores, and installs state only on commit.
+The `CPL1` checkpoint extension round-trips per-fragment phase/interlock state;
+conditional event-tape fields and action seals bind the geometry, vector
+hashes, fallback reason, and selected action without changing non-CPLG/PTI
+tape records. The Rust suite passes 190/190 tests, including the old PTI golden
+and checkpoint tests, and the 57-test Python CPLG/CGC/PTI subset passes. The
+post-CPLG repository-wide Python run passes 1,252 tests with one CUDA-only skip
+and six dependency deprecation warnings. Targeted Ruff lint/format, Rust
+format, and the direct corrected Lean module also pass; the complete corrected
+Lean build previously completed all 8,570 jobs.
+
+Python currently calls the host C `atan2f`, `sinf`, and `cosf`, whereas the
+production selector calls the pinned Rust `libm`. Exact raw-f32 cross-runtime
+fixtures in commit `316cc6c` confirm that this is a real, not hypothetical,
+gap. Constant-phase geometry, transport, candidate, and shadow score are
+bit-identical. The nonplanar final candidate also matches, although two angle
+scalars differ by one ULP. At the cap, Darwin C `sinf` returns `0x3e785b43`
+while pinned Rust `libm` returns `0x3e785b42`, changing the first candidate
+coordinate from Python `0x40838c9a` to Rust `0x40838c9b`; the second coordinate
+matches. No tolerance or algorithm was changed to hide the mismatch.
+
+The Python report therefore correctly continues to say
+`UNSATISFIED_UNTIL_RUST_FIXTURE_MATCH`. A single portable trig implementation
+or Rust-produced authoritative replay is required before cross-runtime
+evidence can be sealed. This numerical provenance gap, a fresh immutable
+full-vector stock tape, the fixed shadow-analysis gate, and a chained final
+ledger remain launch gates. No CPLG GPU VM or loss arm has been run.
+
+The first admissible experiment is shadow-only on a fresh stock trajectory:
+exactly 32 ordered boundaries, eight per fragment, two phase warm-ups per
+fragment, 24 sealed shadows, 20 resolved shadows, and four declared unresolved
+tails. The fixed gate requires at least eight simulated actions among all 32
+boundaries, mean resolved directional gain above `0.001`, a positive
+fragment-stratified moving-block lower endpoint, at least three positive
+fragment means, exact fallback/integrity, and below-2% overhead. Only a fresh,
+separately preregistered capture-v2 campaign may then test finite loss from the
+same state and future-eight groups. Sphere-geometry and nonanticipation proofs
+cannot establish language-model loss improvement or unconditional dominance;
+the checked-in rotation-reversal theorem explicitly shows why no such general
+claim is available.
 
 ### CRP-SGD: causally resolved residual pulses
 
@@ -2154,11 +2344,14 @@ image ID `7290368630472593484` and `execution.source_mode=checkout`.
 
 The current EXP2-54 state is the r5h result above: deterministic one-A100
 correctness parity passed, the 2% overhead gate failed at 7.964001%, the exact
-VM and disk were deleted, and the obsolete r6 draft was not launched. There is
-no optimizer-harness GCP VM or disk. The only running project VM is the
-unrelated `instance-20260526-guiflow`, which remains out of scope. No optimizer
-loss experiment is authorized until full live capture-v2 restore/evaluation
-exists and its cost qualifier passes.
+VM and disk were deleted, and the obsolete r6 draft was not launched. The PTI
+online E1 r2 engineering canary also completed and was killed for zero
+non-stock actions; its conditional four-A100 E2 was not launched. There is no
+optimizer-harness GCP VM or disk, and current A100/A2 usage is zero. The only
+running project VM is the unrelated `instance-20260526-guiflow`, which remains
+out of scope. No optimizer promotion experiment is authorized until a new
+candidate passes its immutable shadow gate and the full live capture-v2
+restore/evaluation path passes its cost qualifier.
 
 ## Primary references used in the audit
 
