@@ -1006,10 +1006,33 @@ objects and manifests, fsynced same-directory temporary writes, atomic
 no-replace publication, exact verification, race-safe deduplication, canonical
 strict JSON, logical/physical/deduplicated-byte accounting, and fail-closed
 audits for corruption, missing objects, symlinks, temp files, unexpected tree
-entries, false accounting, and orphans. This is deliberately only a local
-POSIX CAS foundation: live learner/syncer hooks, exact tensor packs, restore
-manifests, bounded asynchronous writers, CRN linkage, and cloud publication
-remain separate gates.
+entries, false accounting, and orphans.
+
+Commit `3c07d52fa0ebd3588a9e67a095208d38a4001083` adds the first exact
+capture-v2 tensor pack over that CAS. Named fp32 trainables and supported exact
+optimizer tensors are copied into canonical little-endian contiguous bytes,
+ordered by category and ASCII name, and described by strict dtype, shape,
+offset, size, and per-tensor SHA-256 metadata. Exact clocks are sorted
+nonnegative int64 values. Tests cover insertion-order and stride independence,
+all supported optimizer dtypes, signed-zero and NaN payload bits, scalar/empty
+shapes, independent decoded storage, payload/manifest/per-tensor corruption,
+wrong roles, reordered descriptors, bool-as-int aliases, and no-write input
+failures. This remains a local POSIX storage codec: live learner/syncer hooks,
+restore manifests, transactionally quiesced endpoint snapshots, bounded
+asynchronous writers, CRN linkage, and cloud publication remain separate
+gates.
+
+Commit `af46f614c7cde0853d2ef99c6e6a042f8f4b86d9` adds a strict learner-endpoint
+manifest over the packs. It binds contiguous all-fragment pack identities and
+versions, mode, model buffers, scheduler/scaler metadata, Python/NumPy/Torch
+CPU and indexed CUDA RNG objects, and an explicit future-group union.
+`complete` requires exactly indices 0--7 and no reason; `incomplete` requires
+fewer than eight refs plus a bounded nonempty reason. Publication and loading
+verify every object and pack, canonical role order, and payload
+cross-references. The current layer is still schema-only: causal learner/window
+identity, source/image/model/data/config provenance, live hooks, opaque-state
+codecs, restore/apply, and syncer pre/post reconstruction remain open and are
+not inferred from the manifest.
 
 Seed 223 stays locked through this implementation. Acquiring more v1 envelopes
 now would expose development data without enabling the preregistered finite-loss

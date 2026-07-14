@@ -13,7 +13,7 @@
     "max_total_accelerators": 4,
     "provisioning_model": "SPOT",
     "termination_action": "DELETE",
-    "adopt_only": false,
+    "adopt_only": true,
     "max_run_duration_seconds": 3600,
     "boot_disk_size_gb": 250,
     "boot_disk_type": "pd-ssd",
