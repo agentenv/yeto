@@ -1104,7 +1104,7 @@ def test_exp254_r6_async_qualifier_is_pinned_full_path_dependent_draft(tmp_path)
     assert spec.remote_repo_dir == f"/home/shou/experiments/{run_id}/repo"
     assert spec.remote_run_dir == f"/home/shou/runs/{run_id}"
 
-    assert spec.cloud["labels"]["gate"] == ("exp2-54-smoke-r5b-async-canary-pass")
+    assert spec.cloud["labels"]["gate"] == ("exp2-54-smoke-r5c-async-canary-pass")
     assert spec.cloud["labels"]["draft"] == "true"
     assert spec.cloud["labels"]["evidence"] == "none"
     assert spec.cloud["adopt_only"] is True

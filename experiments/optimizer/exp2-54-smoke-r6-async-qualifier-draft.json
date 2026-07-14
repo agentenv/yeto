@@ -28,7 +28,7 @@
       "purpose": "capture-parity-qualifier",
       "evidence": "none",
       "stage": "qualifier",
-      "gate": "exp2-54-smoke-r5b-async-canary-pass",
+      "gate": "exp2-54-smoke-r5c-async-canary-pass",
       "draft": "true"
     }
   },
@@ -41,6 +41,8 @@
       "/home/shou/experiments/exp2-54-smoke-r6-async-qualifier/repo/scripts/validate_optimizer_state_capture.py",
       "/home/shou/experiments/exp2-54-smoke-r6-async-qualifier/repo/scripts/validate_optimizer_capture_parity.py",
       "/home/shou/venv/bin/python",
+      "/home/shou/.cargo/bin/cargo",
+      "/home/shou/.cargo/bin/rustc",
       "/home/shou/models/Qwen3.5-9B",
       "/home/shou/data/Capybara-local/train.parquet",
       "/etc/yeto-model-files.sha256",
@@ -95,10 +97,11 @@
       "/etc/yeto-optimizer-image.json"
     ],
     "env": {
+      "PATH": "/home/shou/.cargo/bin:/home/shou/venv/bin:/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
       "HF_HUB_OFFLINE": "1",
       "TRANSFORMERS_OFFLINE": "1",
       "TOKENIZERS_PARALLELISM": "false",
-      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
+      "PYTORCH_ALLOC_CONF": "expandable_segments:True"
     },
     "command": [
       "/home/shou/venv/bin/python",
