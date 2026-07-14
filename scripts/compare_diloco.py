@@ -126,6 +126,13 @@ ACTION_PROBE_TRANSPORT_CONFIG_FALLBACK_PREFIXES = (
     "probe_",
     "transport_",
 )
+CAPTURE_PARITY_PAIRS = (
+    ("capture_m1_off", "capture_m1_on"),
+    ("capture_m4_off", "capture_m4_on"),
+)
+CAPTURE_PARITY_ARM_NAMES = frozenset(
+    arm_name for pair in CAPTURE_PARITY_PAIRS for arm_name in pair
+)
 
 
 @dataclass(frozen=True)
@@ -200,6 +207,40 @@ PRESETS: dict[str, Arm] = {
         merge_alpha=0.0,
         wire_dtype="f32",
         pipeline=1,
+        delta_correction="none",
+        outer_lr=0.28,
+        outer_momentum=0.0,
+        optimizer_state_capture=True,
+    ),
+    # One-learner capture-parity canary.  This is the exact m4 qualifier
+    # geometry except for M=1/quorum=1; the command-line H override remains
+    # authoritative for the H=4 smoke.
+    "capture_m1_off": Arm(
+        "capture_m1_off",
+        m=1,
+        fragments=4,
+        quorum=1,
+        strict_quorum=True,
+        inner_optimizer="adamw",
+        fixed_window_microsteps=16,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=4,
+        delta_correction="none",
+        outer_lr=0.28,
+        outer_momentum=0.0,
+    ),
+    "capture_m1_on": Arm(
+        "capture_m1_on",
+        m=1,
+        fragments=4,
+        quorum=1,
+        strict_quorum=True,
+        inner_optimizer="adamw",
+        fixed_window_microsteps=16,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=4,
         delta_correction="none",
         outer_lr=0.28,
         outer_momentum=0.0,
@@ -386,6 +427,17 @@ PRESETS: dict[str, Arm] = {
         commit_policy="probe_lr_v1",
     ),
 }
+
+
+def capture_parity_pair_for_arm_names(
+    arm_names: set[str],
+) -> tuple[str, str] | None:
+    """Return the one exact matched parity pair, rejecting extras or mixing."""
+
+    for pair in CAPTURE_PARITY_PAIRS:
+        if arm_names == set(pair):
+            return pair
+    return None
 
 
 def arm_capture_enabled(args, arm: Arm | None) -> bool:
@@ -723,7 +775,7 @@ def learner_command(
         capture_active = arm_capture_enabled(args, arm)
         matched_parity_arm = bool(
             getattr(args, "optimizer_state_capture_parity", False)
-            and arm.name in {"capture_m4_off", "capture_m4_on"}
+            and arm.name in CAPTURE_PARITY_ARM_NAMES
         )
         # The qualifier compares capture as the sole treatment.  Capture mode
         # itself must disable reconnects so every audited attempt has one
@@ -1411,6 +1463,40 @@ def parity_commit_interval_seconds(
     return duration_ns / 1_000_000_000.0
 
 
+def optimizer_state_capture_parity_command(args, arms: list[Arm]) -> list[str]:
+    """Build the validator command for one exact matched m1 or m4 pair."""
+
+    parity_pair = capture_parity_pair_for_arm_names({arm.name for arm in arms})
+    if parity_pair is None:
+        raise ValueError("capture parity requires one exact matched m1 or m4 pair")
+    off_arm_name, on_arm_name = parity_pair
+    parity_output = args.report_dir / "optimizer_state_capture_parity.json"
+    return [
+        sys.executable,
+        str(REPO_ROOT / "scripts/validate_optimizer_capture_parity.py"),
+        "--off-arm-dir",
+        str(args.work_dir / off_arm_name),
+        "--on-arm-dir",
+        str(args.work_dir / on_arm_name),
+        "--off-results",
+        str(args.report_dir / "results.jsonl"),
+        "--on-results",
+        str(args.report_dir / "results.jsonl"),
+        "--off-arm",
+        off_arm_name,
+        "--on-arm",
+        on_arm_name,
+        "--output",
+        str(parity_output),
+        "--overhead-limit",
+        str(args.optimizer_state_capture_parity_overhead_limit),
+    ] + (
+        ["--require-barrier-schedule"]
+        if args.optimizer_state_capture_parity_require_barrier
+        else []
+    )
+
+
 def validate_action_probe_run(
     arm: Arm,
     records: list[dict],
@@ -2091,10 +2177,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             )
         else:
             validate_event_tape_records(arm, records, expected_steps=exact_outer_steps)
-        if args.optimizer_state_capture_parity and arm.name in {
-            "capture_m4_off",
-            "capture_m4_on",
-        }:
+        if args.optimizer_state_capture_parity and arm.name in CAPTURE_PARITY_ARM_NAMES:
             wall = parity_commit_interval_seconds(
                 records, expected_steps=exact_outer_steps
             )
@@ -2343,7 +2426,8 @@ def main() -> int:
     p.add_argument(
         "--optimizer-state-capture-parity",
         action="store_true",
-        help="after matched capture_m4_off/on arms finish, fail unless their "
+        help="after one exact matched capture_m1_off/on or capture_m4_off/on "
+        "pair finishes, fail unless its "
         "exact probe/final/eval artifacts match and capture overhead is bounded",
     )
     p.add_argument(
@@ -2781,11 +2865,12 @@ def main() -> int:
             )
     if args.optimizer_state_capture_parity:
         names = {arm.name for arm in arms}
-        required = {"capture_m4_off", "capture_m4_on"}
-        if not args.optimizer_state_capture or not required.issubset(names):
+        parity_pair = capture_parity_pair_for_arm_names(names)
+        if not args.optimizer_state_capture or parity_pair is None:
             p.error(
                 "--optimizer-state-capture-parity requires the capture master "
-                "switch and both capture_m4_off,capture_m4_on presets"
+                "switch and exactly one matched capture_m1_off,capture_m1_on "
+                "or capture_m4_off,capture_m4_on pair"
             )
         if not args.syncer_probe_capture or args.syncer_probe_capture_every != 1:
             p.error(
@@ -2982,10 +3067,7 @@ def main() -> int:
             "wall_s": round(wall, 1),
             "eval_loss": loss,
         }
-        if args.optimizer_state_capture_parity and arm.name in {
-            "capture_m4_off",
-            "capture_m4_on",
-        }:
+        if args.optimizer_state_capture_parity and arm.name in CAPTURE_PARITY_ARM_NAMES:
             record["wall_scope"] = "syncer_commit_1_to_commit_N"
         records.append(record)
         print(
@@ -3016,33 +3098,8 @@ def main() -> int:
         )
     (args.report_dir / "report.md").write_text("\n".join(md) + "\n")
     if args.optimizer_state_capture_parity:
-        parity_output = args.report_dir / "optimizer_state_capture_parity.json"
         run_checked(
-            [
-                sys.executable,
-                str(REPO_ROOT / "scripts/validate_optimizer_capture_parity.py"),
-                "--off-arm-dir",
-                str(args.work_dir / "capture_m4_off"),
-                "--on-arm-dir",
-                str(args.work_dir / "capture_m4_on"),
-                "--off-results",
-                str(args.report_dir / "results.jsonl"),
-                "--on-results",
-                str(args.report_dir / "results.jsonl"),
-                "--off-arm",
-                "capture_m4_off",
-                "--on-arm",
-                "capture_m4_on",
-                "--output",
-                str(parity_output),
-                "--overhead-limit",
-                str(args.optimizer_state_capture_parity_overhead_limit),
-            ]
-            + (
-                ["--require-barrier-schedule"]
-                if args.optimizer_state_capture_parity_require_barrier
-                else []
-            ),
+            optimizer_state_capture_parity_command(args, arms),
             args.report_dir / "optimizer_state_capture_parity.log",
         )
     print("\n".join(md))

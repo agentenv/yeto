@@ -155,29 +155,48 @@ def test_capture_flags_are_absent_for_baseline_or_when_disabled():
     assert "--optimizer-state-capture-dir" not in matched_control
 
 
-def test_matched_capture_presets_differ_only_by_treatment_and_name():
-    control = compare.PRESETS["capture_m4_off"]
-    treatment = compare.PRESETS["capture_m4_on"]
+@pytest.mark.parametrize("learner_count", [1, 4])
+def test_matched_capture_presets_differ_only_by_treatment_and_name(learner_count):
+    control = compare.PRESETS[f"capture_m{learner_count}_off"]
+    treatment = compare.PRESETS[f"capture_m{learner_count}_on"]
     control_fields = vars(control).copy()
     treatment_fields = vars(treatment).copy()
-    assert control_fields.pop("name") == "capture_m4_off"
-    assert treatment_fields.pop("name") == "capture_m4_on"
+    assert control_fields.pop("name") == f"capture_m{learner_count}_off"
+    assert treatment_fields.pop("name") == f"capture_m{learner_count}_on"
     assert control_fields.pop("optimizer_state_capture") is False
     assert treatment_fields.pop("optimizer_state_capture") is True
     assert control_fields == treatment_fields
 
 
-def test_parity_learner_commands_differ_only_by_capture_artifact_options():
+def test_m1_parity_presets_mirror_m4_except_learner_and_quorum_counts():
+    for treatment in ("off", "on"):
+        m1_fields = vars(compare.PRESETS[f"capture_m1_{treatment}"]).copy()
+        m4_fields = vars(compare.PRESETS[f"capture_m4_{treatment}"]).copy()
+        assert m1_fields.pop("name") == f"capture_m1_{treatment}"
+        assert m4_fields.pop("name") == f"capture_m4_{treatment}"
+        assert m1_fields.pop("m") == 1
+        assert m4_fields.pop("m") == 4
+        assert m1_fields.pop("quorum") == 1
+        assert m4_fields.pop("quorum") == 4
+        assert m1_fields == m4_fields
+
+
+@pytest.mark.parametrize("learner_count", [1, 4])
+def test_parity_learner_commands_differ_only_by_capture_artifact_options(
+    learner_count,
+):
     args = _args(optimizer_state_capture_parity=True)
-    off_dir = Path("/tmp/run/work/capture_m4_off")
-    on_dir = Path("/tmp/run/work/capture_m4_on")
+    off_name = f"capture_m{learner_count}_off"
+    on_name = f"capture_m{learner_count}_on"
+    off_dir = Path(f"/tmp/run/work/{off_name}")
+    on_dir = Path(f"/tmp/run/work/{on_name}")
 
     def command(arm_name: str, arm_dir: Path) -> list[str]:
         return compare.learner_command(
             args,
             arm_dir,
             learner_id=0,
-            num_learners=4,
+            num_learners=learner_count,
             syncer="127.0.0.1:9000",
             max_steps=80,
             arm=compare.PRESETS[arm_name],
@@ -204,10 +223,8 @@ def test_parity_learner_commands_differ_only_by_capture_artifact_options():
             index += 1
         return prefix, options
 
-    off_prefix, off_options = normalized_options(
-        command("capture_m4_off", off_dir), off_dir
-    )
-    on_prefix, on_options = normalized_options(command("capture_m4_on", on_dir), on_dir)
+    off_prefix, off_options = normalized_options(command(off_name, off_dir), off_dir)
+    on_prefix, on_options = normalized_options(command(on_name, on_dir), on_dir)
     capture_only = {
         "--optimizer-state-capture-dir",
         "--optimizer-state-capture-every",
@@ -228,6 +245,40 @@ def test_parity_learner_commands_differ_only_by_capture_artifact_options():
     assert on_options["--optimizer-state-capture-dir"] == (
         "<ARM_DIR>/optimizer_state_capture_learner_0"
     )
+
+
+@pytest.mark.parametrize("learner_count", [1, 4])
+def test_parity_validator_command_uses_the_exact_matched_pair_paths(learner_count):
+    off_name = f"capture_m{learner_count}_off"
+    on_name = f"capture_m{learner_count}_on"
+    args = SimpleNamespace(
+        work_dir=Path("/tmp/run/work"),
+        report_dir=Path("/tmp/run/report"),
+        optimizer_state_capture_parity_overhead_limit=0.02,
+        optimizer_state_capture_parity_require_barrier=True,
+    )
+
+    command = compare.optimizer_state_capture_parity_command(
+        args, [compare.PRESETS[off_name], compare.PRESETS[on_name]]
+    )
+
+    assert command[command.index("--off-arm-dir") + 1] == str(args.work_dir / off_name)
+    assert command[command.index("--on-arm-dir") + 1] == str(args.work_dir / on_name)
+    assert command[command.index("--off-arm") + 1] == off_name
+    assert command[command.index("--on-arm") + 1] == on_name
+    assert command.count("--require-barrier-schedule") == 1
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        {"capture_m1_off", "capture_m4_on"},
+        {"capture_m1_off", "capture_m1_on", "capture_m4_off", "capture_m4_on"},
+        {"capture_m1_off", "capture_m1_on", "m1"},
+    ],
+)
+def test_parity_pair_selection_rejects_mixing_and_extra_arms(names):
+    assert compare.capture_parity_pair_for_arm_names(names) is None
 
 
 def test_parity_timing_uses_exact_producer_commit_interval():
@@ -365,7 +416,11 @@ def test_parity_campaign_requires_fully_sampled_probe(monkeypatch):
     assert exc_info.value.code == 2
 
 
-def test_parity_campaign_accepts_exact_matched_geometry(monkeypatch):
+@pytest.mark.parametrize(
+    "settings",
+    ["capture_m1_off,capture_m1_on", "capture_m4_off,capture_m4_on"],
+)
+def test_parity_campaign_accepts_exact_matched_geometry(monkeypatch, settings):
     monkeypatch.setattr(
         sys,
         "argv",
@@ -374,7 +429,7 @@ def test_parity_campaign_accepts_exact_matched_geometry(monkeypatch):
             "--data",
             "unused.jsonl",
             "--settings",
-            "capture_m4_off,capture_m4_on",
+            settings,
             "--optimizer-state-capture",
             "--optimizer-state-capture-parity",
             "--barrier-sync",
@@ -405,6 +460,44 @@ def test_parity_campaign_rejects_unproven_nonbarrier_geometry(monkeypatch):
             "capture_m4_off,capture_m4_on",
             "--optimizer-state-capture",
             "--optimizer-state-capture-parity",
+            "--optimizer-state-capture-strict-writer",
+            "--syncer-probe-capture",
+            "--syncer-probe-capture-every",
+            "1",
+            "--syncer-total-steps",
+            "16",
+            "--fixed-window-microsteps",
+            "4",
+            "--dry-run",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        compare.main()
+    assert exc_info.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        "capture_m1_off,capture_m4_on",
+        "capture_m1_off,capture_m1_on,capture_m4_off,capture_m4_on",
+        "capture_m1_off,capture_m1_on,m1",
+    ],
+)
+def test_parity_campaign_rejects_mixed_or_extra_settings(monkeypatch, settings):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compare_diloco.py",
+            "--data",
+            "unused.jsonl",
+            "--settings",
+            settings,
+            "--optimizer-state-capture",
+            "--optimizer-state-capture-parity",
+            "--barrier-sync",
+            "--optimizer-state-capture-parity-require-barrier",
             "--optimizer-state-capture-strict-writer",
             "--syncer-probe-capture",
             "--syncer-probe-capture-every",
