@@ -943,6 +943,114 @@ def test_exp254_r4_draft_requires_observed_barrier_and_strict_writer():
     )
 
 
+def test_exp254_r5_async_canary_is_exactly_pinned_launchable_and_one_gpu():
+    root = Path(__file__).resolve().parents[1] / "experiments" / "optimizer"
+    spec = load_spec(root / "exp2-54-smoke-r5-async-canary.json")
+
+    run_id = "exp2-54-smoke-r5-async-canary"
+    assert spec.run_id == spec.instance_name == run_id
+    assert spec.repo_commit == "a1455ce5b2171374ad74ba74cf9092242e4885ed"
+    assert spec.artifact_uri == ("gs://yeto-exp2-52-model-training-497007/" + run_id)
+    assert spec.execution["source_mode"] == "checkout"
+    assert spec.remote_repo_dir == f"/home/shou/experiments/{run_id}/repo"
+    assert spec.remote_run_dir == f"/home/shou/runs/{run_id}"
+
+    assert spec.cloud["adopt_only"] is False
+    assert spec.cloud["labels"]["draft"] == "false"
+    assert spec.cloud["machine_type"] == "a2-highgpu-1g"
+    assert spec.cloud["accelerator_count"] == 1
+    assert spec.cloud["max_total_accelerators"] == 1
+    assert spec.cloud["provisioning_model"] == "SPOT"
+    assert spec.cloud["boot_disk_type"] == "pd-ssd"
+    assert spec.cloud["image"] == (
+        "projects/model-training-497007/global/images/yeto-optimizer-a100-20260714"
+    )
+    assert spec.cloud["expected_source_image_id"] == "7290368630472593484"
+
+    expected_values = {
+        "--gpu-slots": "1",
+        "--settings": "capture_m1_off,capture_m1_on",
+        "--syncer-total-steps": "16",
+        "--fixed-window-microsteps": "4",
+        "--optimizer-state-capture-parity-overhead-limit": "0.02",
+        "--optimizer-state-capture-writer-max-items": "4",
+        "--optimizer-state-capture-writer-max-bytes": "4294967296",
+        "--optimizer-state-capture-min-joined-boundaries": "16",
+        "--optimizer-state-capture-min-joined-per-fragment": "4",
+    }
+    for flag, expected in expected_values.items():
+        assert spec.command.count(flag) == 1
+        assert spec.command[spec.command.index(flag) + 1] == expected
+    for flag in (
+        "--strict-quorum",
+        "--barrier-sync",
+        "--optimizer-state-capture",
+        "--optimizer-state-capture-parity",
+        "--optimizer-state-capture-parity-require-barrier",
+        "--optimizer-state-capture-strict-writer",
+        "--optimizer-state-capture-background-writer",
+        "--syncer-probe-capture",
+    ):
+        assert spec.command.count(flag) == 1
+        assert spec.checks["expected_flags"][flag] == ""
+    assert "--learner-gpus" not in spec.command
+    assert spec.checks["strict_quorum_step_budget"]["fragments"] == 4
+
+    completion = spec.execution["completion_paths"]
+    learner_completion = [
+        path for path in completion if "optimizer_state_capture_learner_" in path
+    ]
+    assert len(learner_completion) == 2
+    assert all(
+        "optimizer_state_capture_learner_0/" in path for path in learner_completion
+    )
+    assert sum(path.endswith("/syncer_probe/index.jsonl") for path in completion) == 2
+    assert {
+        path for path in completion if path.endswith("/syncer_probe/index.jsonl")
+    } == {
+        f"/home/shou/runs/{run_id}/work/capture_m1_off/syncer_probe/index.jsonl",
+        f"/home/shou/runs/{run_id}/work/capture_m1_on/syncer_probe/index.jsonl",
+    }
+    for suffix in (
+        "/optimizer_state_capture_parity.json",
+        "/optimizer_state_capture_parity.json.sha256",
+        "/optimizer_state_capture_parity.inputs.sha256",
+        "/optimizer_state_capture_committed_boundaries.json",
+        "/optimizer_state_capture_committed_boundaries.json.sha256",
+    ):
+        assert sum(path.endswith(suffix) for path in completion) == 1
+
+    checksums = spec.execution["checksum_manifests"]
+    learner_checksums = [
+        path for path in checksums if "optimizer_state_capture_learner_" in path
+    ]
+    assert len(learner_checksums) == 1
+    assert "optimizer_state_capture_learner_0/" in learner_checksums[0]
+    assert any(
+        path.endswith("/optimizer_state_capture_parity.json.sha256")
+        for path in checksums
+    )
+    assert any(
+        path.endswith("/optimizer_state_capture_parity.inputs.sha256")
+        for path in checksums
+    )
+    assert any(
+        path.endswith("/optimizer_state_capture_committed_boundaries.json.sha256")
+        for path in checksums
+    )
+    assert not any(
+        re.search(r"optimizer_state_capture_learner_[1-9]", path)
+        for path in (*completion, *checksums)
+    )
+    assert not any("capture_m4_" in path for path in (*completion, *checksums))
+
+    rendered_launch = launch_command(spec)
+    assert rendered_launch[:4] == ["gcloud", "compute", "instances", "create"]
+    assert "--machine-type=a2-highgpu-1g" in rendered_launch
+    assert "--provisioning-model=SPOT" in rendered_launch
+    assert "--boot-disk-type=pd-ssd" in rendered_launch
+
+
 def test_launch_verifies_boot_disk_image_provenance_before_recording_state(
     tmp_path, monkeypatch
 ):
