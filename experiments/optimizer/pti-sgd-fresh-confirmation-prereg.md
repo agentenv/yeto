@@ -5,15 +5,27 @@ Freeze date: 2026-07-14 (America/Los_Angeles)
 Status: post-development protocol frozen after inspecting the retained
 seed-53/67/79 direction tapes and before acquiring or scoring any fresh PTI
 capture. Those three tapes are development evidence only and are permanently
-ineligible for confirmation.
+ineligible for confirmation. Amendment 1 was made before fresh acquisition to
+fully specify f32 reduction semantics and to remove an impossible retroactive
+open-tail action rewrite; the superseded and current file digests are recorded
+in `docs/optimizerhunt.md`.
 
 ## Fixed optimizer action
 
 At a valid boundary for fragment `f`, let `G_t` be the exact production
 pseudo-gradient and let `G_prev` be the immediately preceding, hash-chained
 production pseudo-gradient for the same fragment. All dot products, norms,
-normalization, and final materialization use the declared deterministic f32
-kernel and tensor order; no BLAS-dependent reduction is permitted.
+normalization, and final materialization use the following deterministic f32
+kernel; no BLAS-dependent reduction is permitted. Every input is decoded as
+little-endian IEEE-754 f32. Every multiply, add, subtract, and divide is rounded
+back to f32 before its result is reused. Dot products and squared norms use a
+`+0.0` f32 accumulator and canonical tensor/coordinate order, rounding the
+product and then each accumulator addition to f32. `sqrt_f32(x)` is the f32
+rounding of the correctly rounded real square root of the nonnegative f32
+input. Vector normalization uses those primitives coordinate by coordinate.
+The candidate follows the displayed `C_raw` formula and computes
+`||C_raw||`; it must not substitute the real-arithmetic identity
+`sqrt(1+c^2)` after f32 orthogonalization.
 
 For nonzero finite directions, define
 
@@ -56,10 +68,20 @@ z_t = cos(C_t, G_next) - cos(G_t, G_next)
 It is written even when the live interlock was closed, so eligibility cannot
 hide adverse counterfactual scores. A zero or negative resolved score closes
 the interlock until three newer consecutive positive scores exist. Missing
-continuity, integrity failure, nonfinite or degenerate geometry, missing
-history, or an open tail clears the three-score window and returns the
+continuity, integrity failure, nonfinite or degenerate geometry, or missing
+history at a decision boundary clears the three-score window and returns the
 original `G_t` bytes to SGD-0.28 without re-encoding. It is never coded as a
 zero vector or as a newly encoded copy of stock.
+
+End-of-stream is different because a live action already sealed and applied
+at `t` cannot be rewritten after learning that `G_next` will not arrive. On
+close, the state machine emits a deterministic non-action tail-closure record
+identifying the unresolved shadow, excludes that unresolved shadow from every
+direction-score count, and clears all fragment interlocks/history. It does not
+rewrite or score the already sealed action. If a stream resumes after close,
+its first event is a stock warm-up boundary. The closure record contains no
+loss or optimizer outcome. This rule preserves causality and prevents an
+open-tail exclusion from changing an earlier action post hoc.
 
 ## Capability and causal requirements
 
