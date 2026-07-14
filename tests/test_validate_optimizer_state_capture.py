@@ -10,8 +10,13 @@ import pytest
 import torch
 
 from scripts.validate_optimizer_state_capture import (
+    ArtifactRef,
+    CommittedBoundary,
+    CommittedBoundaryIndex,
     Expectations,
+    ResponderRef,
     ValidationError,
+    extract_committed_boundary_index,
     main,
     validate_and_write,
     validate_campaign,
@@ -26,6 +31,11 @@ from yeto.tensor_io import pack_flat
 
 
 MAX_BYTES = 10_000_000
+
+
+def _weight(c_tokens: int, c_steps: int) -> float:
+    tokens = float(c_tokens)
+    return tokens * tokens / float(c_steps)
 
 
 def _sha256(path: Path) -> str:
@@ -86,7 +96,13 @@ def _mutate_transcript(arm_dir: Path, mutation) -> None:
     _write_transcript(path, rows)
 
 
-def _capture_one(arm_dir: Path, learner_id: int, *, pull_global_step: int = 44) -> None:
+def _capture_one(
+    arm_dir: Path,
+    learner_id: int,
+    *,
+    pull_global_step: int = 44,
+    forced_window_uuid: str | None = None,
+) -> None:
     capture_dir = arm_dir / f"optimizer_state_capture_learner_{learner_id}"
     params = OrderedDict(
         [("p", torch.nn.Parameter(torch.tensor([1.0, -2.0], dtype=torch.float32)))]
@@ -105,6 +121,10 @@ def _capture_one(arm_dir: Path, learner_id: int, *, pull_global_step: int = 44) 
         max_midpoint_windows=4,
         max_bytes=MAX_BYTES,
     )
+    if forced_window_uuid is not None:
+        capture._make_window_uuid = (  # type: ignore[method-assign]
+            lambda _identity, _ordinal, _steps: forced_window_uuid
+        )
     window_uuid = capture.note_window_reset(
         0,
         17,
@@ -171,6 +191,7 @@ def _make_transcript(arm_dir: Path, learner_ids: tuple[int, ...]) -> None:
             if metadata["attempt_serial"] == 1:
                 source_event_by_learner[learner_id] = event_seq
             admitted = metadata["attempt_serial"] == 1
+            weight = _weight(metadata["c_tokens"], metadata["c_steps"])
             rows.append(
                 {
                     "schema": "syncer_push_attempt_v1",
@@ -190,8 +211,8 @@ def _make_transcript(arm_dir: Path, learner_ids: tuple[int, ...]) -> None:
                     "declared_payload_sha256": metadata["payload_sha256"],
                     "received_payload_sha256": metadata["payload_sha256"],
                     "payload_digest_match": True,
-                    "weight": 128.0,
-                    "weight_f64_bits": struct.pack(">d", 128.0).hex(),
+                    "weight": weight,
+                    "weight_f64_bits": struct.pack(">d", weight).hex(),
                     "disposition": "admitted_pending"
                     if admitted
                     else "rejected_duplicate",
@@ -202,6 +223,7 @@ def _make_transcript(arm_dir: Path, learner_ids: tuple[int, ...]) -> None:
     responders = []
     for responder_index, learner_id in enumerate(sorted(learner_ids)):
         metadata = attempts_by_learner[learner_id][0]
+        weight = _weight(metadata["c_tokens"], metadata["c_steps"])
         responders.append(
             {
                 "responder_index": responder_index,
@@ -214,8 +236,8 @@ def _make_transcript(arm_dir: Path, learner_ids: tuple[int, ...]) -> None:
                 "local_step": metadata["local_step"],
                 "c_steps": metadata["c_steps"],
                 "c_tokens": metadata["c_tokens"],
-                "weight": 128.0,
-                "weight_f64_bits": struct.pack(">d", 128.0).hex(),
+                "weight": weight,
+                "weight_f64_bits": struct.pack(">d", weight).hex(),
                 "received_payload_sha256": metadata["payload_sha256"],
             }
         )
@@ -315,6 +337,232 @@ def test_valid_push_linked_campaign_emits_atomic_summary_and_relative_tree(tmp_p
         line.endswith("  syncer_response_transcript.jsonl") for line in tree_lines
     )
     assert not list(arm_dir.rglob("*.tmp-*"))
+
+
+def test_committed_boundary_index_binds_exact_ordered_artifacts_and_writes_canonical(
+    tmp_path,
+):
+    arm_dir, expectations = _campaign(tmp_path)
+    index = extract_committed_boundary_index(arm_dir, expectations)
+
+    assert index.capture_session_uuid == "capture-session-fixture"
+    assert index.source_transcript.path == "syncer_response_transcript.jsonl"
+    assert index.source_transcript.sha256 == _sha256(
+        arm_dir / "syncer_response_transcript.jsonl"
+    )
+    assert len(index.boundaries) == 1
+    boundary = index.boundaries[0]
+    assert boundary.commit_event_seq == 6
+    assert boundary.fragment_id == 0
+    assert boundary.request_global_step == 44
+    assert [row.responder_index for row in boundary.responders] == [0, 1]
+    assert [row.learner_id for row in boundary.responders] == [0, 1]
+
+    for responder in boundary.responders:
+        assert not responder.push.path.startswith("/")
+        assert not responder.richardson.path.startswith("/")
+        push_path = arm_dir / responder.push.path
+        richardson_path = arm_dir / responder.richardson.path
+        assert _sha256(push_path) == responder.push.sha256
+        assert _sha256(richardson_path) == responder.richardson.sha256
+        push = torch.load(push_path, map_location="cpu", weights_only=False)
+        richardson = torch.load(richardson_path, map_location="cpu", weights_only=False)
+        assert push["kind"] == "push_candidate"
+        assert push["metadata"]["learner_id"] == responder.learner_id
+        assert push["metadata"]["attempt_serial"] == responder.attempt_serial
+        assert push["metadata"]["window_uuid"] == responder.window_uuid
+        assert richardson["kind"] == "richardson_window"
+        assert richardson["metadata"]["learner_id"] == responder.learner_id
+        assert richardson["metadata"]["window_uuid"] == responder.window_uuid
+        endpoint = richardson["payload"]["endpoint"]["parameters_f32"]
+        assert hashlib.sha256(pack_flat(endpoint, DTYPE_F32)).hexdigest() == (
+            responder.payload_sha256
+        )
+
+    _, tree_text = validate_campaign(arm_dir, expectations)
+    assert (
+        index.source_tree_manifest_sha256
+        == hashlib.sha256(tree_text.encode("ascii")).hexdigest()
+    )
+    expected_raw = index.canonical_bytes()
+    assert expected_raw.endswith(b"\n") and not expected_raw.endswith(b"\n\n")
+    assert expected_raw == index.canonical_bytes()
+
+    summary = validate_and_write(arm_dir, expectations)
+    output = arm_dir / "optimizer_state_capture_committed_boundaries.json"
+    sidecar = output.with_suffix(".json.sha256")
+    assert output.read_bytes() == expected_raw
+    assert sidecar.read_text() == f"{_sha256(output)}  {output.name}\n"
+    assert summary["committed_boundary_index_sha256"] == _sha256(output)
+    assert (
+        json.loads(output.read_text())["boundaries"][0]["responders"][0]["learner_id"]
+        == 0
+    )
+
+
+def test_candidate_join_is_keyed_by_learner_even_when_window_uuid_is_shared(tmp_path):
+    arm_dir = tmp_path / "shared-window"
+    arm_dir.mkdir()
+    shared_uuid = "01234567-89ab-5def-8123-456789abcdef"
+    _capture_one(arm_dir, 0, forced_window_uuid=shared_uuid)
+    _capture_one(arm_dir, 1, forced_window_uuid=shared_uuid)
+    _make_transcript(arm_dir, (0, 1))
+    expectations = Expectations(
+        learner_ids=(0, 1),
+        fragments=1,
+        window_steps=2,
+        every=1,
+        max_hmc_events=4,
+        max_midpoint_windows=4,
+        max_bytes=MAX_BYTES,
+        min_joined_boundaries=1,
+        min_joined_per_fragment=1,
+    )
+
+    responders = (
+        extract_committed_boundary_index(arm_dir, expectations).boundaries[0].responders
+    )
+    assert {row.window_uuid for row in responders} == {shared_uuid}
+    assert responders[0].richardson.path.startswith(
+        "optimizer_state_capture_learner_0/"
+    )
+    assert responders[1].richardson.path.startswith(
+        "optimizer_state_capture_learner_1/"
+    )
+
+
+def test_same_payload_retry_resolves_by_source_attempt_not_digest(tmp_path):
+    arm_dir, expectations = _campaign(tmp_path)
+
+    def commit_second_attempt(rows):
+        attempts = [
+            row
+            for row in rows
+            if row["schema"] == "syncer_push_attempt_v1" and row["learner_id"] == 0
+        ]
+        first, second = attempts
+        first["disposition"] = "rejected_duplicate"
+        second["disposition"] = "admitted_pending"
+        responder = next(
+            row
+            for row in next(
+                item for item in rows if item["schema"] == "syncer_round_commit_v1"
+            )["responders"]
+            if row["learner_id"] == 0
+        )
+        responder["source_attempt_event_seq"] = second["event_seq"]
+        responder["attempt_serial"] = second["attempt_serial"]
+
+    _mutate_transcript(arm_dir, commit_second_attempt)
+    responder = (
+        extract_committed_boundary_index(arm_dir, expectations)
+        .boundaries[0]
+        .responders[0]
+    )
+    push = torch.load(
+        arm_dir / responder.push.path, map_location="cpu", weights_only=False
+    )
+    assert responder.attempt_serial == 2
+    assert push["metadata"]["attempt_serial"] == 2
+
+
+@pytest.mark.parametrize(
+    ("bits", "weight", "message"),
+    [
+        ("0" * 15, 0.0, "16 lowercase hexadecimal"),
+        ("7ff8000000000000", 0.0, "finite non-negative"),
+        (struct.pack(">d", 1.0).hex(), 2.0, "does not round-trip"),
+        (struct.pack(">d", 128.0).hex(), 128.0, "production formula"),
+    ],
+)
+def test_transcript_weight_bits_fail_closed(tmp_path, bits, weight, message):
+    arm_dir, expectations = _campaign(tmp_path)
+
+    def corrupt_weight(rows):
+        commit = next(row for row in rows if row["schema"] == "syncer_round_commit_v1")
+        responder = commit["responders"][0]
+        source_seq = responder["source_attempt_event_seq"]
+        source = next(row for row in rows if row["event_seq"] == source_seq)
+        for row in (source, responder):
+            row["weight_f64_bits"] = bits
+            row["weight"] = weight
+
+    _mutate_transcript(arm_dir, corrupt_weight)
+    with pytest.raises(ValidationError, match=message):
+        extract_committed_boundary_index(arm_dir, expectations)
+
+
+@pytest.mark.parametrize("replacement", [None, "not-a-sha256"])
+def test_boundary_index_rejects_missing_or_malformed_broadcast_digest(
+    tmp_path, replacement
+):
+    arm_dir, expectations = _campaign(tmp_path)
+
+    def corrupt_digest(rows):
+        commit = next(row for row in rows if row["schema"] == "syncer_round_commit_v1")
+        if replacement is None:
+            del commit["broadcast_payload_sha256"]
+        else:
+            commit["broadcast_payload_sha256"] = replacement
+
+    _mutate_transcript(arm_dir, corrupt_digest)
+    with pytest.raises(ValidationError, match="broadcast_payload_sha256"):
+        extract_committed_boundary_index(arm_dir, expectations)
+
+
+def test_canonical_serialization_preserves_boundary_and_responder_tuple_order():
+    artifact = ArtifactRef(path="capture/object.pt", sha256="a" * 64)
+
+    def responder(index: int, learner_id: int) -> ResponderRef:
+        return ResponderRef(
+            responder_index=index,
+            learner_id=learner_id,
+            source_attempt_event_seq=10 + index,
+            attempt_serial=1,
+            window_uuid="01234567-89ab-5def-8123-456789abcdef",
+            base_version=1,
+            local_step=2,
+            c_steps=2,
+            c_tokens=4,
+            weight_f64_bits=struct.pack(">d", 8.0).hex(),
+            payload_sha256="b" * 64,
+            push=artifact,
+            richardson=artifact,
+        )
+
+    first = CommittedBoundary(
+        capture_session_uuid="session",
+        commit_event_seq=20,
+        fragment_id=1,
+        request_global_step=3,
+        committed_fragment_version=3,
+        broadcast_payload_sha256="c" * 64,
+        responders=(responder(0, 9), responder(1, 2)),
+    )
+    second = CommittedBoundary(
+        capture_session_uuid="session",
+        commit_event_seq=21,
+        fragment_id=0,
+        request_global_step=4,
+        committed_fragment_version=4,
+        broadcast_payload_sha256="d" * 64,
+        responders=(responder(0, 8), responder(1, 1)),
+    )
+    index = CommittedBoundaryIndex(
+        source_transcript=ArtifactRef("transcript.jsonl", "e" * 64),
+        capture_session_uuid="session",
+        layout_sha256="f" * 64,
+        source_tree_manifest_sha256="1" * 64,
+        expected=Expectations((0,), 1, 2, 1, 1, 1, 1),
+        boundaries=(first, second),
+    )
+
+    rows = json.loads(index.canonical_bytes())["boundaries"]
+    assert [(row["commit_event_seq"], row["fragment_id"]) for row in rows] == [
+        (20, 1),
+        (21, 0),
+    ]
+    assert [row["learner_id"] for row in rows[0]["responders"]] == [9, 2]
 
 
 def test_manifest_sidecar_and_exact_file_set_fail_closed(tmp_path):
@@ -438,6 +686,25 @@ def test_transcript_rejects_noncontiguous_event_sequence(tmp_path):
         validate_campaign(arm_dir, expectations)
 
 
+def test_normalized_join_rejects_boolean_integer_aliases(tmp_path):
+    arm_dir, expectations = _campaign(tmp_path)
+
+    def use_boolean_serial(rows):
+        commit = next(row for row in rows if row["schema"] == "syncer_round_commit_v1")
+        responder = commit["responders"][0]
+        source = next(
+            row
+            for row in rows
+            if row["event_seq"] == responder["source_attempt_event_seq"]
+        )
+        source["attempt_serial"] = True
+        responder["attempt_serial"] = True
+
+    _mutate_transcript(arm_dir, use_boolean_serial)
+    with pytest.raises(ValidationError, match="attempt_serial"):
+        extract_committed_boundary_index(arm_dir, expectations)
+
+
 @pytest.mark.parametrize(
     ("replacement", "message"),
     [
@@ -463,13 +730,18 @@ def test_cli_failure_replaces_pass_summary_and_removes_stale_tree(tmp_path):
     arm_dir, expectations = _campaign(tmp_path)
     validate_and_write(arm_dir, expectations)
     tree = arm_dir / "optimizer_state_capture_artifacts.sha256"
+    boundary_index = arm_dir / "optimizer_state_capture_committed_boundaries.json"
     assert tree.exists()
+    assert boundary_index.exists()
+    assert boundary_index.with_suffix(".json.sha256").exists()
     (arm_dir / "optimizer_state_capture_learner_0" / ".late.tmp-9").write_bytes(
         b"partial"
     )
 
     assert main(_cli(arm_dir)) == 1
     assert not tree.exists()
+    assert not boundary_index.exists()
+    assert not boundary_index.with_suffix(".json.sha256").exists()
     validation = arm_dir / "optimizer_state_capture_validation.json"
     failure = json.loads(validation.read_text())
     assert failure["status"] == "FAIL"

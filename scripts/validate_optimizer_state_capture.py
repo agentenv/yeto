@@ -7,7 +7,7 @@ artifact through :func:`yeto.optimizer_state_capture.load_capture`, checks the
 manifest and artifact sidecars, rejects extra/missing/temporary files, and
 then validates cross-learner Richardson/push linkage.
 
-Successful validation writes three stable files below the arm directory:
+Successful validation writes a stable evidence set below the arm directory:
 
 ``optimizer_state_capture_validation.json``
     Human- and machine-readable validation summary.
@@ -21,6 +21,10 @@ Successful validation writes three stable files below the arm directory:
     syncer response transcript.  A teardown gate should re-run this manifest
     from that directory immediately before the final artifact sync and VM
     deletion.
+
+``optimizer_state_capture_committed_boundaries.json`` and its checksum sidecar
+    A canonical, fail-closed projection of each authoritative syncer commit to
+    its exact ordered responder, push-candidate, and Richardson artifacts.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ import json
 import math
 import os
 import re
+import struct
 import sys
 import uuid
 from collections import Counter, defaultdict
@@ -49,9 +54,12 @@ from yeto.protocol import DTYPE_F32
 
 SCHEMA = "yeto.optimizer-state-capture-validation"
 SCHEMA_VERSION = 1
+BOUNDARY_INDEX_SCHEMA = "yeto.optimizer-state-capture-committed-boundaries"
+BOUNDARY_INDEX_SCHEMA_VERSION = 1
 CAPTURE_SCHEMA = "yeto.optimizer-state-capture"
 CAPTURE_SCHEMA_VERSION = 1
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+HEX_F64_BITS = re.compile(r"[0-9a-f]{16}\Z")
 CAPTURE_DIRECTORY = re.compile(r"optimizer_state_capture_learner_([0-9]+)\Z")
 FINAL_LIFECYCLE_STATES = frozenset({"pushed", "superseded_unpushed", "closed_unpushed"})
 
@@ -118,6 +126,136 @@ class Expectations:
             "min_joined_boundaries": self.min_joined_boundaries,
             "min_joined_per_fragment": self.min_joined_per_fragment,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactRef:
+    """An arm-relative reference to one already-validated immutable object."""
+
+    path: str
+    sha256: str
+
+    def as_json(self) -> dict[str, Any]:
+        return {"path": self.path, "sha256": self.sha256}
+
+
+@dataclass(frozen=True, slots=True)
+class ResponderRef:
+    """One commit responder in the syncer's exact production merge order."""
+
+    responder_index: int
+    learner_id: int
+    source_attempt_event_seq: int
+    attempt_serial: int
+    window_uuid: str
+    base_version: int
+    local_step: int
+    c_steps: int
+    c_tokens: int
+    weight_f64_bits: str
+    payload_sha256: str
+    push: ArtifactRef
+    richardson: ArtifactRef
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "responder_index": self.responder_index,
+            "learner_id": self.learner_id,
+            "source_attempt_event_seq": self.source_attempt_event_seq,
+            "attempt_serial": self.attempt_serial,
+            "window_uuid": self.window_uuid,
+            "base_version": self.base_version,
+            "local_step": self.local_step,
+            "c_steps": self.c_steps,
+            "c_tokens": self.c_tokens,
+            "weight_f64_bits": self.weight_f64_bits,
+            "payload_sha256": self.payload_sha256,
+            "push": self.push.as_json(),
+            "richardson": self.richardson.as_json(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedBoundary:
+    """A commit normalized only after every authoritative join has passed."""
+
+    capture_session_uuid: str
+    commit_event_seq: int
+    fragment_id: int
+    request_global_step: int
+    committed_fragment_version: int
+    broadcast_payload_sha256: str
+    responders: tuple[ResponderRef, ...]
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "capture_session_uuid": self.capture_session_uuid,
+            "commit_event_seq": self.commit_event_seq,
+            "fragment_id": self.fragment_id,
+            "request_global_step": self.request_global_step,
+            "committed_fragment_version": self.committed_fragment_version,
+            "broadcast_payload_sha256": self.broadcast_payload_sha256,
+            "responders": [responder.as_json() for responder in self.responders],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedBoundaryIndex:
+    """Checksummable projection bound to the exact validated source tree."""
+
+    source_transcript: ArtifactRef
+    capture_session_uuid: str
+    layout_sha256: str
+    source_tree_manifest_sha256: str
+    expected: Expectations
+    boundaries: tuple[CommittedBoundary, ...]
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "schema": BOUNDARY_INDEX_SCHEMA,
+            "schema_version": BOUNDARY_INDEX_SCHEMA_VERSION,
+            "source_transcript": self.source_transcript.as_json(),
+            "capture_session_uuid": self.capture_session_uuid,
+            "layout_sha256": self.layout_sha256,
+            "source_tree_manifest_sha256": self.source_tree_manifest_sha256,
+            "expected": self.expected.as_json(),
+            "boundary_count": len(self.boundaries),
+            "boundaries": [boundary.as_json() for boundary in self.boundaries],
+        }
+
+    def canonical_bytes(self) -> bytes:
+        return (
+            json.dumps(
+                self.as_json(),
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignValidation:
+    summary: dict[str, Any]
+    tree_manifest_text: str
+    boundary_index: CommittedBoundaryIndex
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateRef:
+    metadata: Mapping[str, Any]
+    push: ArtifactRef
+    richardson: ArtifactRef
+
+
+@dataclass(frozen=True, slots=True)
+class _TranscriptValidation:
+    summary: dict[str, Any]
+    joined_keys: tuple[tuple[int, int], ...]
+    joined_by_fragment: dict[int, int]
+    sha256: str
+    boundaries: tuple[CommittedBoundary, ...]
 
 
 @dataclass
@@ -197,6 +335,47 @@ def _require_sha256(value: Any, context: str) -> str:
     if HEX_SHA256.fullmatch(text) is None:
         _fail("must be a lowercase SHA-256 digest", context=context)
     return text
+
+
+def _require_transcript_weight(
+    row: Mapping[str, Any], *, c_steps: int, c_tokens: int, context: str
+) -> str:
+    """Validate the redundant decimal/binary weight against production math."""
+
+    bits = _require_string(row.get("weight_f64_bits"), f"{context}.weight_f64_bits")
+    if HEX_F64_BITS.fullmatch(bits) is None:
+        _fail(
+            "must be exactly 16 lowercase hexadecimal f64 bits",
+            context=f"{context}.weight_f64_bits",
+        )
+    decoded = struct.unpack(">d", bytes.fromhex(bits))[0]
+    if not math.isfinite(decoded) or decoded < 0.0:
+        _fail(
+            "must encode a finite non-negative f64",
+            context=f"{context}.weight_f64_bits",
+        )
+    weight = row.get("weight")
+    if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+        _fail("must be a finite JSON number", context=f"{context}.weight")
+    weight = float(weight)
+    if not math.isfinite(weight):
+        _fail("must be a finite JSON number", context=f"{context}.weight")
+    if struct.pack(">d", weight).hex() != bits:
+        _fail(
+            "decimal weight does not round-trip to weight_f64_bits",
+            context=context,
+        )
+    try:
+        token_count = float(c_tokens)
+        expected = 0.0 if c_steps == 0 else token_count * token_count / float(c_steps)
+    except OverflowError as exc:
+        raise ValidationError(f"{context}: counters overflow f64 weight math") from exc
+    if not math.isfinite(expected) or struct.pack(">d", expected).hex() != bits:
+        _fail(
+            "weight_f64_bits differs from token-weighted production formula",
+            context=context,
+        )
+    return bits
 
 
 def _require_window_uuid(value: Any, context: str) -> str:
@@ -881,37 +1060,62 @@ def _load_transcript(path: Path) -> tuple[list[dict[str, Any]], str]:
     return rows, hashlib.sha256(raw).hexdigest()
 
 
-def _candidate_attempts(
+def _candidate_attempt_refs(
+    arm_dir: Path,
     learners: Sequence[LearnerValidation],
-) -> dict[tuple[int, int], dict[str, Any]]:
-    attempts: dict[tuple[int, int], dict[str, Any]] = {}
+) -> dict[tuple[int, int], _CandidateRef]:
+    attempts: dict[tuple[int, int], _CandidateRef] = {}
     for learner in learners:
         if learner.lifecycle_by_uuid is None:
             _fail(
                 "authoritative transcript validation requires lifecycle-aware manifests"
             )
+        capture_relative = f"optimizer_state_capture_learner_{learner.learner_id}"
+        artifact_pairs = list(
+            zip(learner.envelopes, learner.artifact_entries, strict=True)
+        )
+        richardson_by_window: dict[str, ArtifactRef] = {}
+        for envelope, entry in artifact_pairs:
+            if envelope["kind"] != "richardson_window":
+                continue
+            window_uuid = envelope["metadata"]["window_uuid"]
+            if window_uuid in richardson_by_window:
+                _fail(
+                    "multiple Richardson artifacts share a learner window",
+                    context=f"learner={learner.learner_id} window={window_uuid}",
+                )
+            path = f"{capture_relative}/{entry['path']}"
+            # The entry path is already a validated basename.  Rechecking the
+            # assembled path makes the normalized arm-relative contract explicit.
+            _relative_posix(arm_dir / path, arm_dir)
+            richardson_by_window[window_uuid] = ArtifactRef(
+                path=path,
+                sha256=entry["sha256"],
+            )
         serials: list[int] = []
-        richardson_windows = {
-            envelope["metadata"].get("window_uuid")
-            for envelope in learner.envelopes
-            if envelope["kind"] == "richardson_window"
-        }
-        for envelope in learner.envelopes:
+        for envelope, entry in artifact_pairs:
             if envelope["kind"] != "push_candidate":
                 continue
             metadata = envelope["metadata"]
             window_uuid = metadata["window_uuid"]
-            if window_uuid not in richardson_windows:
+            richardson = richardson_by_window.get(window_uuid)
+            if richardson is None:
                 _fail(
                     "push candidate lacks linked Richardson artifact",
-                    context=window_uuid,
+                    context=f"learner={learner.learner_id} window={window_uuid}",
                 )
             serial = metadata["attempt_serial"]
             serials.append(serial)
             key = (learner.learner_id, serial)
             if key in attempts:
                 _fail("duplicate learner attempt_serial artifact", context=str(key))
-            attempts[key] = metadata
+            path = f"{capture_relative}/{entry['path']}"
+            _relative_posix(arm_dir / path, arm_dir)
+            attempts[key] = _CandidateRef(
+                metadata=metadata,
+                push=ArtifactRef(path=path, sha256=entry["sha256"]),
+                richardson=richardson,
+            )
         expected_serials = list(range(1, len(serials) + 1))
         if serials != expected_serials:
             _fail(
@@ -947,12 +1151,17 @@ def _match_primary_attempt(
         "attempt_serial": "attempt_serial",
     }
     for transcript_key, candidate_key in exact_fields.items():
-        if row.get(transcript_key) != candidate.get(candidate_key):
+        transcript_value = row.get(transcript_key)
+        candidate_value = candidate.get(candidate_key)
+        if (
+            type(transcript_value) is not type(candidate_value)
+            or transcript_value != candidate_value
+        ):
             _fail(
                 f"transcript {transcript_key} differs from learner candidate",
                 context=context,
             )
-    if row.get("wire_dtype") != DTYPE_F32:
+    if _require_int(row.get("wire_dtype"), f"{context}.wire_dtype") != DTYPE_F32:
         _fail("transcript attempt is not f32 wire dtype", context=context)
     payload_digest = candidate["payload_sha256"]
     if row.get("declared_payload_sha256") != payload_digest:
@@ -978,7 +1187,12 @@ def _match_responder_to_attempt(
         "weight_f64_bits",
         "received_payload_sha256",
     ):
-        if responder.get(key) != attempt.get(key):
+        responder_value = responder.get(key)
+        attempt_value = attempt.get(key)
+        if (
+            type(responder_value) is not type(attempt_value)
+            or responder_value != attempt_value
+        ):
             _fail(
                 f"commit responder {key} differs from source attempt", context=context
             )
@@ -989,7 +1203,7 @@ def _validate_response_transcript(
     transcript_path: Path,
     learners: Sequence[LearnerValidation],
     expectations: Expectations,
-) -> tuple[dict[str, Any], list[tuple[int, int]], dict[int, int], str]:
+) -> _TranscriptValidation:
     transcript_path = transcript_path.resolve()
     rows, transcript_digest = _load_transcript(transcript_path)
     relative_path = _relative_posix(transcript_path, arm_dir)
@@ -1052,12 +1266,20 @@ def _validate_response_transcript(
         serial = _require_int(
             row.get("attempt_serial"), f"{context}.attempt_serial", minimum=1
         )
+        c_steps = _require_int(row.get("c_steps"), f"{context}.c_steps", minimum=0)
+        c_tokens = _require_int(row.get("c_tokens"), f"{context}.c_tokens", minimum=0)
         _require_window_uuid(row.get("window_uuid"), f"{context}.window_uuid")
         _require_sha256(
             row.get("declared_payload_sha256"), f"{context}.declared_payload_sha256"
         )
         _require_sha256(
             row.get("received_payload_sha256"), f"{context}.received_payload_sha256"
+        )
+        _require_transcript_weight(
+            row,
+            c_steps=c_steps,
+            c_tokens=c_tokens,
+            context=context,
         )
         source_seq = row.get("source_attempt_event_seq")
         if source_seq is None:
@@ -1089,10 +1311,15 @@ def _validate_response_transcript(
                 "declared_payload_sha256",
                 "received_payload_sha256",
             ):
-                if row.get(key) != source.get(key):
+                row_value = row.get(key)
+                source_value = source.get(key)
+                if (
+                    type(row_value) is not type(source_value)
+                    or row_value != source_value
+                ):
                     _fail(f"follow-up disposition changes {key}", context=context)
 
-    candidates = _candidate_attempts(learners)
+    candidates = _candidate_attempt_refs(arm_dir, learners)
     if set(primary_by_key) != set(candidates):
         _fail(
             "primary transcript attempts differ from learner artifacts: "
@@ -1103,7 +1330,9 @@ def _validate_response_transcript(
     for key, row in primary_by_key.items():
         transcript_serials[key[0]].append(key[1])
         _match_primary_attempt(
-            row, candidates[key], f"learner={key[0]} attempt_serial={key[1]}"
+            row,
+            candidates[key].metadata,
+            f"learner={key[0]} attempt_serial={key[1]}",
         )
     for learner_id, serials in transcript_serials.items():
         expected_serials = list(range(1, len(serials) + 1))
@@ -1116,6 +1345,7 @@ def _validate_response_transcript(
 
     expected_responders = list(sorted(expectations.learner_ids))
     joined: list[tuple[int, int]] = []
+    normalized_boundaries: list[CommittedBoundary] = []
     seen_commits: set[tuple[int, int]] = set()
     for commit in commits:
         event_seq = commit["event_seq"]
@@ -1134,12 +1364,21 @@ def _validate_response_transcript(
         if commit_key in seen_commits:
             _fail("duplicate round commit identity", context=context)
         seen_commits.add(commit_key)
-        if commit.get("committed_fragment_version") != request_step:
+        committed_fragment_version = _require_int(
+            commit.get("committed_fragment_version"),
+            f"{context}.committed_fragment_version",
+            minimum=0,
+        )
+        if committed_fragment_version != request_step:
             _fail(
                 "committed fragment version differs from request step", context=context
             )
-        if commit.get("wire_dtype") != DTYPE_F32:
+        if _require_int(commit.get("wire_dtype"), f"{context}.wire_dtype") != DTYPE_F32:
             _fail("commit is not f32 wire dtype", context=context)
+        broadcast_payload_sha256 = _require_sha256(
+            commit.get("broadcast_payload_sha256"),
+            f"{context}.broadcast_payload_sha256",
+        )
         responders = _require_list(commit.get("responders"), f"{context}.responders")
         responder_count = _require_int(
             commit.get("responder_count"), f"{context}.responder_count", minimum=0
@@ -1161,10 +1400,16 @@ def _validate_response_transcript(
                 f"commit responders {responder_ids!r} != expected {expected_responders!r}",
                 context=context,
             )
+        normalized_responders: list[ResponderRef] = []
         for index, raw_responder in enumerate(responders):
             responder_context = f"{context}.responders[{index}]"
             responder = _require_mapping(raw_responder, responder_context)
-            if responder.get("responder_index") != index:
+            responder_index = _require_int(
+                responder.get("responder_index"),
+                f"{responder_context}.responder_index",
+                minimum=0,
+            )
+            if responder_index != index:
                 _fail(
                     "responder_index is not exact merge order",
                     context=responder_context,
@@ -1202,7 +1447,66 @@ def _validate_response_transcript(
                     "responder has no learner capture candidate",
                     context=responder_context,
                 )
-            _match_primary_attempt(source, candidates[candidate_key], responder_context)
+            candidate = candidates[candidate_key]
+            _match_primary_attempt(source, candidate.metadata, responder_context)
+            attempt_serial = _require_int(
+                responder.get("attempt_serial"),
+                f"{responder_context}.attempt_serial",
+                minimum=1,
+            )
+            base_version = _require_int(
+                responder.get("base_version"),
+                f"{responder_context}.base_version",
+                minimum=0,
+            )
+            local_step = _require_int(
+                responder.get("local_step"),
+                f"{responder_context}.local_step",
+                minimum=0,
+            )
+            c_steps = _require_int(
+                responder.get("c_steps"), f"{responder_context}.c_steps", minimum=0
+            )
+            c_tokens = _require_int(
+                responder.get("c_tokens"), f"{responder_context}.c_tokens", minimum=0
+            )
+            weight_f64_bits = _require_transcript_weight(
+                responder,
+                c_steps=c_steps,
+                c_tokens=c_tokens,
+                context=responder_context,
+            )
+            normalized_responders.append(
+                ResponderRef(
+                    responder_index=responder_index,
+                    learner_id=responder["learner_id"],
+                    source_attempt_event_seq=source_seq,
+                    attempt_serial=attempt_serial,
+                    window_uuid=responder["window_uuid"],
+                    base_version=base_version,
+                    local_step=local_step,
+                    c_steps=c_steps,
+                    c_tokens=c_tokens,
+                    weight_f64_bits=weight_f64_bits,
+                    payload_sha256=_require_sha256(
+                        responder.get("received_payload_sha256"),
+                        f"{responder_context}.received_payload_sha256",
+                    ),
+                    push=candidate.push,
+                    richardson=candidate.richardson,
+                )
+            )
+        normalized_boundaries.append(
+            CommittedBoundary(
+                capture_session_uuid=session,
+                commit_event_seq=event_seq,
+                fragment_id=fragment_id,
+                request_global_step=request_step,
+                committed_fragment_version=committed_fragment_version,
+                broadcast_payload_sha256=broadcast_payload_sha256,
+                responders=tuple(normalized_responders),
+            )
+        )
         joined.append(commit_key)
 
     joined.sort()
@@ -1226,15 +1530,21 @@ def _validate_response_transcript(
         "primary_attempts": len(primary_by_key),
         "commits": len(commits),
     }
-    return transcript_summary, joined, dict(joined_by_fragment), transcript_digest
+    return _TranscriptValidation(
+        summary=transcript_summary,
+        joined_keys=tuple(joined),
+        joined_by_fragment=dict(joined_by_fragment),
+        sha256=transcript_digest,
+        boundaries=tuple(normalized_boundaries),
+    )
 
 
-def validate_campaign(
+def _validate_campaign_full(
     arm_dir: Path,
     expectations: Expectations,
     response_transcript: Path | None = None,
-) -> tuple[dict[str, Any], str]:
-    """Validate one completed arm and return its summary and tree-manifest text."""
+) -> CampaignValidation:
+    """Run the only trusted validation path and retain its normalized join."""
 
     arm_dir = arm_dir.resolve(strict=True)
     if not arm_dir.is_dir():
@@ -1260,13 +1570,12 @@ def validate_campaign(
     layouts = {learner.layout_sha256 for learner in learners}
     if len(layouts) != 1:
         _fail("learner layout digests differ")
+    layout_sha256 = next(iter(layouts))
     response_transcript = (
         response_transcript or arm_dir / "syncer_response_transcript.jsonl"
     )
-    transcript, joined, joined_by_fragment, transcript_digest = (
-        _validate_response_transcript(
-            arm_dir, response_transcript, learners, expectations
-        )
+    transcript = _validate_response_transcript(
+        arm_dir, response_transcript, learners, expectations
     )
     all_tree_entries: dict[str, str] = {}
     for learner in learners:
@@ -1278,7 +1587,7 @@ def validate_campaign(
     transcript_relative = _relative_posix(transcript_path, arm_dir)
     if transcript_relative in all_tree_entries:
         _fail("response transcript collides with a capture artifact path")
-    all_tree_entries[transcript_relative] = transcript_digest
+    all_tree_entries[transcript_relative] = transcript.sha256
     tree_text = "".join(
         f"{digest}  {path}\n" for path, digest in sorted(all_tree_entries.items())
     )
@@ -1289,17 +1598,17 @@ def validate_campaign(
         "status": "PASS",
         "expected": expectations.as_json(),
         "learners": [learner.summary() for learner in learners],
-        "response_transcript": transcript,
+        "response_transcript": transcript.summary,
         "join_mode": "authoritative_syncer_commit",
         "join_key_fields": ["fragment_id", "request_global_step"],
-        "joined_boundaries": len(joined),
+        "joined_boundaries": len(transcript.joined_keys),
         "joined_by_fragment": {
-            str(fragment_id): joined_by_fragment.get(fragment_id, 0)
+            str(fragment_id): transcript.joined_by_fragment.get(fragment_id, 0)
             for fragment_id in range(expectations.fragments)
         },
         "joined_keys": [
             {"fragment_id": fragment_id, "boundary": boundary}
-            for fragment_id, boundary in joined
+            for fragment_id, boundary in transcript.joined_keys
         ],
         "unlisted_artifacts": [],
         "missing_artifacts": [],
@@ -1309,7 +1618,51 @@ def validate_campaign(
         "tree_manifest_sha256": tree_digest,
         "tree_entries": len(all_tree_entries),
     }
-    return summary, tree_text
+    boundary_index = CommittedBoundaryIndex(
+        source_transcript=ArtifactRef(
+            path=transcript_relative,
+            sha256=transcript.sha256,
+        ),
+        capture_session_uuid=transcript.summary["capture_session_uuid"],
+        layout_sha256=layout_sha256,
+        source_tree_manifest_sha256=tree_digest,
+        expected=expectations,
+        boundaries=transcript.boundaries,
+    )
+    return CampaignValidation(
+        summary=summary,
+        tree_manifest_text=tree_text,
+        boundary_index=boundary_index,
+    )
+
+
+def validate_campaign(
+    arm_dir: Path,
+    expectations: Expectations,
+    response_transcript: Path | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Validate one completed arm and return its summary and tree-manifest text."""
+
+    result = _validate_campaign_full(
+        arm_dir,
+        expectations,
+        response_transcript=response_transcript,
+    )
+    return result.summary, result.tree_manifest_text
+
+
+def extract_committed_boundary_index(
+    arm_dir: Path,
+    expectations: Expectations,
+    response_transcript: Path | None = None,
+) -> CommittedBoundaryIndex:
+    """Validate a complete campaign and return its authoritative joined index."""
+
+    return _validate_campaign_full(
+        arm_dir,
+        expectations,
+        response_transcript=response_transcript,
+    ).boundary_index
 
 
 def _atomic_write(path: Path, raw: bytes) -> None:
@@ -1343,6 +1696,19 @@ def _write_json_and_sidecar(path: Path, summary: Mapping[str, Any]) -> None:
     )
 
 
+def _write_committed_boundary_index(path: Path, index: CommittedBoundaryIndex) -> str:
+    """Atomically write a canonical boundary index and return its SHA-256."""
+
+    raw = index.canonical_bytes()
+    _atomic_write(path, raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    _atomic_write(
+        path.with_suffix(path.suffix + ".sha256"),
+        f"{digest}  {path.name}\n".encode("ascii"),
+    )
+    return digest
+
+
 def validate_and_write(
     arm_dir: Path,
     expectations: Expectations,
@@ -1350,6 +1716,7 @@ def validate_and_write(
     response_transcript: Path | None = None,
     output: Path | None = None,
     tree_manifest: Path | None = None,
+    boundary_index: Path | None = None,
 ) -> dict[str, Any]:
     """Validate and atomically write PASS/FAIL evidence.
 
@@ -1362,12 +1729,19 @@ def validate_and_write(
     tree_manifest = (
         tree_manifest or arm_dir / "optimizer_state_capture_artifacts.sha256"
     )
+    boundary_index = (
+        boundary_index or arm_dir / "optimizer_state_capture_committed_boundaries.json"
+    )
     try:
-        summary, tree_text = validate_campaign(
+        result = _validate_campaign_full(
             arm_dir, expectations, response_transcript=response_transcript
         )
     except (ValidationError, OSError) as exc:
         tree_manifest.unlink(missing_ok=True)
+        boundary_index.unlink(missing_ok=True)
+        boundary_index.with_suffix(boundary_index.suffix + ".sha256").unlink(
+            missing_ok=True
+        )
         failure = {
             "schema": SCHEMA,
             "schema_version": SCHEMA_VERSION,
@@ -1377,9 +1751,15 @@ def validate_and_write(
         }
         _write_json_and_sidecar(output, failure)
         raise
-    _atomic_write(tree_manifest, tree_text.encode("ascii"))
+    summary = result.summary
+    _atomic_write(tree_manifest, result.tree_manifest_text.encode("ascii"))
     summary["tree_manifest_path"] = os.path.relpath(tree_manifest, arm_dir)
     summary["tree_manifest_sha256"] = _sha256_file(tree_manifest)
+    boundary_digest = _write_committed_boundary_index(
+        boundary_index, result.boundary_index
+    )
+    summary["committed_boundary_index_path"] = os.path.relpath(boundary_index, arm_dir)
+    summary["committed_boundary_index_sha256"] = boundary_digest
     _write_json_and_sidecar(output, summary)
     return summary
 
@@ -1420,6 +1800,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--tree-manifest", type=Path, default=None)
+    parser.add_argument("--boundary-index", type=Path, default=None)
     return parser
 
 
@@ -1444,6 +1825,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             response_transcript=args.response_transcript,
             output=args.output,
             tree_manifest=args.tree_manifest,
+            boundary_index=args.boundary_index,
         )
     except (ValidationError, OSError) as exc:
         print(f"optimizer capture validation failed: {exc}", file=sys.stderr)
