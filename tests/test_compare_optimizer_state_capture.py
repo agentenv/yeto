@@ -43,6 +43,7 @@ def _args(**overrides):
         "tuning": "lora",
         "bcmp_shadow_path": False,
         "optimizer_state_capture": True,
+        "optimizer_state_capture_profile": "full",
         "optimizer_state_capture_parity": False,
         "optimizer_state_capture_every": 2,
         "optimizer_state_capture_max_hmc_events": 7,
@@ -95,6 +96,29 @@ def test_capture_flags_and_unique_directories_are_forwarded_per_learner():
     )
     assert command[command.index("--optimizer-state-capture-max-bytes") + 1] == "123456"
     assert command[command.index("--max-reconnects") + 1] == "0"
+    assert "--optimizer-state-capture-profile" not in command
+
+
+def test_directional_capture_profile_is_forwarded_only_when_opted_in():
+    command = compare.learner_command(
+        _args(
+            optimizer_state_capture_profile="crp_pti_directional",
+            optimizer_state_capture_max_hmc_events=0,
+        ),
+        Path("/tmp/run/work/capture_m4"),
+        learner_id=2,
+        num_learners=4,
+        syncer="127.0.0.1:9000",
+        max_steps=64,
+        arm=compare.PRESETS["capture_m4"],
+    )
+
+    assert command[command.index("--optimizer-state-capture-profile") + 1] == (
+        "crp_pti_directional"
+    )
+    assert command[command.index("--optimizer-state-capture-max-hmc-events") + 1] == (
+        "0"
+    )
 
 
 def test_background_writer_flags_are_opt_in_and_forward_exact_caps():

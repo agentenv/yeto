@@ -808,6 +808,9 @@ def learner_command(
                 "--optimizer-state-capture-max-bytes",
                 str(getattr(args, "optimizer_state_capture_max_bytes", 4 * 1024**3)),
             ]
+            capture_profile = getattr(args, "optimizer_state_capture_profile", "full")
+            if capture_profile != "full":
+                cmd += ["--optimizer-state-capture-profile", str(capture_profile)]
             if getattr(args, "optimizer_state_capture_background_writer", False):
                 cmd += [
                     "--optimizer-state-capture-background-writer",
@@ -2203,6 +2206,8 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                 str(capture_h),
                 "--expected-every",
                 str(args.optimizer_state_capture_every),
+                "--expected-capture-profile",
+                str(args.optimizer_state_capture_profile),
                 "--expected-max-hmc-events",
                 str(args.optimizer_state_capture_max_hmc_events),
                 "--expected-max-midpoint-windows",
@@ -2391,6 +2396,12 @@ def main() -> int:
         "--optimizer-state-capture",
         action="store_true",
         help="enable exact AdamW midpoint/push lifecycle capture for each async learner",
+    )
+    p.add_argument(
+        "--optimizer-state-capture-profile",
+        choices=("full", "crp_pti_directional"),
+        default="full",
+        help="capture full AdamW evidence or reduced CRP/PTI direction evidence",
     )
     p.add_argument("--optimizer-state-capture-every", type=int, default=1)
     p.add_argument("--optimizer-state-capture-max-hmc-events", type=int, default=32)
@@ -2754,6 +2765,14 @@ def main() -> int:
     ):
         p.error("optimizer-state capture limits must be non-negative")
     if (
+        args.optimizer_state_capture_profile == "crp_pti_directional"
+        and args.optimizer_state_capture_max_hmc_events != 0
+    ):
+        p.error(
+            "--optimizer-state-capture-profile crp_pti_directional requires "
+            "--optimizer-state-capture-max-hmc-events 0"
+        )
+    if (
         args.optimizer_state_capture_writer_max_items < 1
         or args.optimizer_state_capture_writer_max_bytes < 1
     ):
@@ -2908,14 +2927,18 @@ def main() -> int:
                 "--optimizer-state-capture-strict-writer requires "
                 "--optimizer-state-capture"
             )
+        hmc_cap_invalid = (
+            args.optimizer_state_capture_profile == "full"
+            and args.optimizer_state_capture_max_hmc_events < 1
+        )
         if (
-            args.optimizer_state_capture_max_hmc_events < 1
+            hmc_cap_invalid
             or args.optimizer_state_capture_max_midpoint_windows < 1
             or args.optimizer_state_capture_max_bytes < 1
         ):
             p.error(
-                "--optimizer-state-capture-strict-writer requires positive "
-                "event, window, and byte caps"
+                "--optimizer-state-capture-strict-writer requires a positive "
+                "full-profile event cap and positive window and byte caps"
             )
     if args.round_interval_ms is not None:
         from dataclasses import replace as _replace

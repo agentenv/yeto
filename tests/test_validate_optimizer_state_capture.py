@@ -24,6 +24,7 @@ from scripts.validate_optimizer_state_capture import (
 )
 from yeto.fragments import Fragment, FragmentLayout, MERGE_RDA
 from yeto.optimizer_state_capture import (
+    CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL,
     OptimizerStateCapture,
     capture_value_sha256,
 )
@@ -104,6 +105,7 @@ def _capture_one(
     pull_global_step: int = 44,
     forced_window_uuid: str | None = None,
     background_writer: bool = False,
+    capture_profile: str = "full",
 ) -> None:
     capture_dir = arm_dir / f"optimizer_state_capture_learner_{learner_id}"
     params = OrderedDict(
@@ -118,8 +120,11 @@ def _capture_one(
         optimizer=optimizer,
         learner_id=learner_id,
         rank=0,
+        capture_profile=capture_profile,
         every=1,
-        max_hmc_events=4,
+        max_hmc_events=(
+            0 if capture_profile == CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL else 4
+        ),
         max_midpoint_windows=4,
         max_bytes=MAX_BYTES,
         background_writer=background_writer,
@@ -271,19 +276,28 @@ def _make_transcript(arm_dir: Path, learner_ids: tuple[int, ...]) -> None:
 
 
 def _campaign(
-    tmp_path: Path, *, background_writer: bool = False
+    tmp_path: Path,
+    *,
+    background_writer: bool = False,
+    capture_profile: str = "full",
 ) -> tuple[Path, Expectations]:
     arm_dir = tmp_path / "m2"
     arm_dir.mkdir()
-    _capture_one(arm_dir, 0, background_writer=background_writer)
-    _capture_one(arm_dir, 1, background_writer=background_writer)
+    _capture_one(
+        arm_dir, 0, background_writer=background_writer, capture_profile=capture_profile
+    )
+    _capture_one(
+        arm_dir, 1, background_writer=background_writer, capture_profile=capture_profile
+    )
     _make_transcript(arm_dir, (0, 1))
     expectations = Expectations(
         learner_ids=(0, 1),
         fragments=1,
         window_steps=2,
         every=1,
-        max_hmc_events=4,
+        max_hmc_events=(
+            0 if capture_profile == CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL else 4
+        ),
         max_midpoint_windows=4,
         max_bytes=MAX_BYTES,
         min_joined_boundaries=1,
@@ -291,6 +305,7 @@ def _campaign(
         background_writer=background_writer,
         background_writer_max_items=2 if background_writer else 0,
         background_writer_max_bytes=MAX_BYTES if background_writer else 0,
+        capture_profile=capture_profile,
     )
     return arm_dir, expectations
 
@@ -347,6 +362,61 @@ def test_valid_push_linked_campaign_emits_atomic_summary_and_relative_tree(tmp_p
         line.endswith("  syncer_response_transcript.jsonl") for line in tree_lines
     )
     assert not list(arm_dir.rglob("*.tmp-*"))
+
+
+def test_directional_campaign_validates_closed_payload_and_restore_disclaimer(tmp_path):
+    arm_dir, expectations = _campaign(
+        tmp_path, capture_profile=CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL
+    )
+
+    summary, _tree = validate_campaign(arm_dir, expectations)
+
+    assert summary["status"] == "PASS"
+    assert summary["expected"]["capture_profile"] == (
+        CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL
+    )
+    for capture_dir in arm_dir.glob("optimizer_state_capture_learner_*"):
+        manifest = json.loads((capture_dir / "manifest.json").read_text())
+        assert manifest["config"]["capture_v2_restore_complete"] is False
+        assert {row["kind"] for row in manifest["artifacts"]} == {
+            "richardson_window",
+            "push_candidate",
+        }
+        richardson = next(capture_dir.glob("*-richardson_window-*.pt"))
+        envelope = torch.load(richardson, map_location="cpu", weights_only=False)
+        assert set(envelope["payload"]["endpoint"]) == {
+            "tensor_order",
+            "parameters_f32",
+        }
+
+
+def test_directional_campaign_rejects_resealed_optimizer_payload(tmp_path):
+    arm_dir, expectations = _campaign(
+        tmp_path, capture_profile=CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL
+    )
+    capture_dir = arm_dir / "optimizer_state_capture_learner_0"
+
+    def inject_optimizer(envelope):
+        envelope["payload"]["endpoint"]["optimizer"] = {}
+
+    _mutate_artifact(capture_dir, "richardson_window", inject_optimizer)
+    with pytest.raises(
+        ValidationError, match="directional snapshot must contain exactly"
+    ):
+        validate_campaign(arm_dir, expectations)
+
+
+def test_directional_campaign_rejects_restore_authority_claim(tmp_path):
+    arm_dir, expectations = _campaign(
+        tmp_path, capture_profile=CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL
+    )
+    capture_dir = arm_dir / "optimizer_state_capture_learner_0"
+    _mutate_manifest(
+        capture_dir,
+        lambda manifest: manifest["config"].update(capture_v2_restore_complete=True),
+    )
+    with pytest.raises(ValidationError, match="disclaim capture-v2 restore authority"):
+        validate_campaign(arm_dir, expectations)
 
 
 def test_committed_boundary_index_binds_exact_ordered_artifacts_and_writes_canonical(

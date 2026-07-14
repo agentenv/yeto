@@ -15,6 +15,7 @@ import yeto.optimizer_state_capture as capture_module
 from yeto.bounded_background_writer import BackgroundWriterFailed, WriterState
 from yeto.fragments import Fragment, FragmentLayout, MERGE_RDA
 from yeto.optimizer_state_capture import (
+    CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL,
     CaptureIntegrityError,
     OptimizerStateCapture,
     load_capture,
@@ -33,6 +34,7 @@ def _fixture(
     background_writer=False,
     writer_max_items=4,
     writer_max_bytes=10_000_000,
+    capture_profile="full",
 ):
     params = OrderedDict(
         [
@@ -61,6 +63,7 @@ def _fixture(
         optimizer=optimizer,
         learner_id=4,
         rank=0,
+        capture_profile=capture_profile,
         every=every,
         max_hmc_events=max_hmc,
         max_midpoint_windows=max_midpoint,
@@ -70,6 +73,48 @@ def _fixture(
         background_writer_max_bytes=writer_max_bytes,
     )
     return params, layout, optimizer, capture
+
+
+def _finish_two_step_window(params, optimizer, capture):
+    window_uuid = capture.note_broadcast(
+        0, 17, local_step=30, tokens_total=3_000, window_steps=2
+    )
+    assert window_uuid is not None
+    for local_step in (31, 32):
+        for param in params.values():
+            param.grad = torch.full_like(param, 0.25)
+        capture.capture_first_post_broadcast_gradients(
+            local_step_before_update=local_step - 1,
+            tokens_total=3_000 + (local_step - 31) * 128,
+            clip_total_norm=torch.tensor(0.5),
+            clip_max_norm=1.0,
+        )
+        with torch.no_grad():
+            params["a"].add_(1.0)
+            params["b"].sub_(2.0)
+            for param in params.values():
+                optimizer.state[param]["step"].add_(1)
+                optimizer.state[param]["exp_avg"].add_(0.1)
+                optimizer.state[param]["exp_avg_sq"].add_(0.2)
+        capture.after_optimizer_step(
+            local_step=local_step,
+            tokens_total=3_000 + (local_step - 30) * 128,
+            current_window_steps=2,
+        )
+    endpoint = torch.cat([params["a"].detach(), params["b"].detach()])
+    push = capture.note_push(
+        window_uuid=window_uuid,
+        fragment_id=0,
+        pull_global_step=44,
+        base_version=17,
+        local_step=32,
+        c_steps=2,
+        c_tokens=256,
+        wire_codec="f32",
+        payload=pack_flat(endpoint, DTYPE_F32),
+    )
+    capture.note_push_enqueued(push["attempt_serial"])
+    capture.close()
 
 
 def _artifact(directory, kind):
@@ -166,6 +211,71 @@ def test_exact_adamw_moments_steps_and_first_clipped_gradient_are_passive(tmp_pa
     assert torch.equal(
         tensors["a"]["first_clipped_gradient"], torch.tensor([0.4, -0.2])
     )
+
+
+def test_crp_pti_directional_profile_is_closed_small_and_push_joined(tmp_path):
+    full_dir = tmp_path / "full"
+    reduced_dir = tmp_path / "reduced"
+    full_params, _layout, full_optimizer, full = _fixture(full_dir)
+    reduced_params, _layout, reduced_optimizer, reduced = _fixture(
+        reduced_dir,
+        max_hmc=0,
+        capture_profile=CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL,
+    )
+
+    _finish_two_step_window(full_params, full_optimizer, full)
+    _finish_two_step_window(reduced_params, reduced_optimizer, reduced)
+
+    reduced_manifest = json.loads((reduced_dir / "manifest.json").read_text())
+    assert reduced_manifest["config"]["capture_profile"] == (
+        CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL
+    )
+    assert reduced_manifest["config"]["scientific_scope"] == (
+        "crp_pti_direction_evidence_only"
+    )
+    assert reduced_manifest["config"]["capture_v2_restore_complete"] is False
+    assert reduced_manifest["counters"]["hmc_events_admitted"] == 0
+    assert {row["kind"] for row in reduced_manifest["artifacts"]} == {
+        "richardson_window",
+        "push_candidate",
+    }
+    assert not list(reduced_dir.glob("*-adamw_first_gradient-*.pt"))
+
+    reduced_window = _artifact(reduced_dir, "richardson_window")
+    full_window = _artifact(full_dir, "richardson_window")
+    assert set(reduced_window["payload"]) == {
+        "anchor",
+        "midpoint",
+        "endpoint",
+        "step_history",
+        "lr_mass_first_by_group",
+        "lr_mass_second_by_group",
+    }
+    for boundary in ("anchor", "midpoint", "endpoint"):
+        assert set(reduced_window["payload"][boundary]) == {
+            "tensor_order",
+            "parameters_f32",
+        }
+    parameter_bytes = sum(
+        param.numel() * param.element_size() for param in reduced_params.values()
+    )
+    assert capture_module._tensor_storage_bytes(reduced_window["payload"]) == (
+        3 * parameter_bytes + 4 * torch.tensor(0.5).element_size()
+    )
+    assert capture_module._tensor_storage_bytes(full_window["payload"]) > (
+        3 * capture_module._tensor_storage_bytes(reduced_window["payload"])
+    )
+
+
+def test_crp_pti_directional_profile_rejects_hmc_and_unknown_profiles(tmp_path):
+    with pytest.raises(ValueError, match="requires max_hmc_events=0"):
+        _fixture(
+            tmp_path / "hmc",
+            capture_profile=CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL,
+            max_hmc=1,
+        )
+    with pytest.raises(ValueError, match="unknown optimizer-state capture profile"):
+        _fixture(tmp_path / "unknown", capture_profile="restore-ish")
 
 
 def test_exact_anchor_midpoint_endpoint_and_identity(tmp_path):
@@ -800,6 +910,22 @@ def test_strict_capture_configuration_accepts_only_unambiguous_native_path():
     from yeto.learner import validate_optimizer_state_capture_args
 
     validate_optimizer_state_capture_args(_strict_capture_args())
+
+
+def test_directional_capture_cli_requires_explicit_zero_hmc_cap():
+    from yeto.learner import validate_optimizer_state_capture_args
+
+    args = _strict_capture_args(
+        "--optimizer-state-capture-profile",
+        "crp_pti_directional",
+        "--optimizer-state-capture-max-hmc-events",
+        "0",
+    )
+    validate_optimizer_state_capture_args(args)
+    assert args.optimizer_state_capture_profile == CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL
+
+    with pytest.raises(SystemExit):
+        _strict_capture_args("--optimizer-state-capture-profile", "crp_pti_directional")
 
 
 def test_background_writer_cli_is_explicit_and_validates_positive_caps():

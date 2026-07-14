@@ -5,7 +5,7 @@ explicit hook boundaries and writes integrity-checked artifacts.  In
 particular it never calls an optimizer method, changes a parameter/gradient,
 or consumes random numbers.
 
-Schema v1 supports two complementary records:
+Schema v1 supports two complementary records in the default ``full`` profile:
 
 ``adamw_first_gradient``
     The raw AdamW moments and step clock for every tensor in one fragment,
@@ -17,6 +17,13 @@ Schema v1 supports two complementary records:
     optimizer steps, and exactly H completed optimizer steps.  The hook must
     run immediately after the learner advances its local step counter and
     before it applies broadcasts.
+
+The opt-in ``crp_pti_directional`` profile is deliberately narrower.  It
+retains exact f32 anchor, H/2, and H parameter vectors, accepted-step
+chronology, and push lifecycle binding, but omits Adam moments, first
+gradients, and decoupled-decay vectors.  It is sufficient only for forming
+and causally joining CRP/PTI direction evidence.  It is not an optimizer
+restore, capture-v2 endpoint, MTRF, or MSTP record.
 
 Capture is intentionally not wired to environment variables.  Callers must
 construct :class:`OptimizerStateCapture` explicitly, which keeps the normal
@@ -47,6 +54,11 @@ from .fragments import FragmentLayout
 
 SCHEMA_NAME = "yeto.optimizer-state-capture"
 SCHEMA_VERSION = 1
+CAPTURE_PROFILE_FULL = "full"
+CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL = "crp_pti_directional"
+CAPTURE_PROFILES = frozenset(
+    {CAPTURE_PROFILE_FULL, CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL}
+)
 BACKGROUND_PUBLICATION_SCHEMA = "yeto.optimizer-state-capture-publication"
 BACKGROUND_PUBLICATION_SCHEMA_VERSION = 1
 BACKGROUND_TRAILER_BYTES = 8
@@ -240,6 +252,7 @@ class OptimizerStateCapture:
         scaler: Any | None = None,
         learner_id: int,
         rank: int,
+        capture_profile: str = CAPTURE_PROFILE_FULL,
         every: int = 1,
         max_hmc_events: int = 32,
         max_midpoint_windows: int = 32,
@@ -255,6 +268,19 @@ class OptimizerStateCapture:
             raise ValueError("capture event limits must be >= 0")
         if max_bytes < 0:
             raise ValueError("capture max_bytes must be >= 0")
+        if capture_profile not in CAPTURE_PROFILES:
+            raise ValueError(
+                f"unknown optimizer-state capture profile {capture_profile!r}; "
+                f"expected one of {sorted(CAPTURE_PROFILES)!r}"
+            )
+        if (
+            capture_profile == CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL
+            and max_hmc_events != 0
+        ):
+            raise ValueError(
+                "crp_pti_directional capture requires max_hmc_events=0 because "
+                "first-gradient evidence is outside its scientific scope"
+            )
         if background_writer and background_writer_max_items < 1:
             raise ValueError("background writer max_items must be positive")
         if background_writer and background_writer_max_bytes < 1:
@@ -280,6 +306,7 @@ class OptimizerStateCapture:
         self.scaler = scaler
         self.learner_id = int(learner_id)
         self.rank = int(rank)
+        self.capture_profile = capture_profile
         self.every = int(every)
         self.max_hmc_events = int(max_hmc_events)
         self.max_midpoint_windows = int(max_midpoint_windows)
@@ -556,6 +583,25 @@ class OptimizerStateCapture:
             "auxiliary_optimizer": self._auxiliary_optimizer_state(),
         }
 
+    def _window_snapshot(self, fragment_id: int) -> dict[str, Any]:
+        """Return the exact snapshot admitted by the selected profile.
+
+        The directional profile intentionally has a closed, parameter-only
+        snapshot vocabulary.  In particular, callers must not treat it as a
+        partial optimizer restore or as capture-v2 endpoint authority.
+        """
+
+        if self.capture_profile == CAPTURE_PROFILE_FULL:
+            return self._fragment_snapshot(fragment_id)
+        if self.capture_profile != CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL:
+            raise AssertionError(f"unhandled capture profile {self.capture_profile!r}")
+        return {
+            "tensor_order": [
+                name for name, _ in self.layout.fragments[fragment_id].tensors
+            ],
+            "parameters_f32": self._fragment_state(fragment_id),
+        }
+
     def note_broadcast(
         self,
         fragment_id: int,
@@ -583,7 +629,9 @@ class OptimizerStateCapture:
         old = self._pending_hmc.pop(fragment_id, None)
         if old is not None:
             self._record_drop("hmc_superseded_by_broadcast", **old["identity"])
-        if self._selected(self._broadcast_seen):
+        if self.capture_profile == CAPTURE_PROFILE_FULL and self._selected(
+            self._broadcast_seen
+        ):
             if self._hmc_admitted >= self.max_hmc_events:
                 self._record_drop("hmc_event_limit", **identity)
             else:
@@ -651,11 +699,15 @@ class OptimizerStateCapture:
         )
         identity["window_uuid"] = window_uuid
 
-        anchor = self._fragment_snapshot(fragment_id)
-        zero_decay = torch.zeros_like(anchor["parameters_f32"])
-        raw_bytes = _tensor_storage_bytes(anchor) + 2 * _tensor_storage_bytes(
-            zero_decay
-        )
+        anchor = self._window_snapshot(fragment_id)
+        if self.capture_profile == CAPTURE_PROFILE_FULL:
+            zero_decay = torch.zeros_like(anchor["parameters_f32"])
+            raw_bytes = _tensor_storage_bytes(anchor) + 2 * _tensor_storage_bytes(
+                zero_decay
+            )
+        else:
+            zero_decay = None
+            raw_bytes = _tensor_storage_bytes(anchor)
         if self._pending_raw_bytes + raw_bytes > self.max_bytes:
             self._record_drop("midpoint_pending_memory_limit", **identity)
             return None
@@ -668,10 +720,15 @@ class OptimizerStateCapture:
             "anchor": anchor,
             "midpoint": None,
             "step_history": [],
-            "decoupled_decay_first_f32": zero_decay,
-            "decoupled_decay_second_f32": zero_decay.clone(),
             "raw_bytes": raw_bytes,
         }
+        if zero_decay is not None:
+            self._pending_midpoint[fragment_id].update(
+                {
+                    "decoupled_decay_first_f32": zero_decay,
+                    "decoupled_decay_second_f32": zero_decay.clone(),
+                }
+            )
         self._active_window_uuid_by_fragment[fragment_id] = window_uuid
         self._window_lifecycles[window_uuid] = {
             "window_uuid": window_uuid,
@@ -732,21 +789,24 @@ class OptimizerStateCapture:
             elapsed_after_step = (
                 local_step_before_update - pending["identity"]["reset_local_step"] + 1
             )
-            decay_parts = []
-            for name, _ in self.layout.fragments[fragment_id].tensors:
-                param = self.params[name]
-                group_index = self._param_group_by_id[id(param)]
-                group = runtime_groups[group_index]
-                coefficient = float(group["lr"]) * float(group["weight_decay"])
-                decay_parts.append(_cpu_f32(param.detach() * coefficient).reshape(-1))
-            decay_vector = torch.cat(decay_parts)
-            decay_half = (
-                "decoupled_decay_first_f32"
-                if elapsed_after_step <= pending["window_steps"] // 2
-                else "decoupled_decay_second_f32"
-            )
-            # Capture-owned CPU tensors only; factual params/optimizer remain untouched.
-            pending[decay_half].add_(decay_vector)
+            if self.capture_profile == CAPTURE_PROFILE_FULL:
+                decay_parts = []
+                for name, _ in self.layout.fragments[fragment_id].tensors:
+                    param = self.params[name]
+                    group_index = self._param_group_by_id[id(param)]
+                    group = runtime_groups[group_index]
+                    coefficient = float(group["lr"]) * float(group["weight_decay"])
+                    decay_parts.append(
+                        _cpu_f32(param.detach() * coefficient).reshape(-1)
+                    )
+                decay_vector = torch.cat(decay_parts)
+                decay_half = (
+                    "decoupled_decay_first_f32"
+                    if elapsed_after_step <= pending["window_steps"] // 2
+                    else "decoupled_decay_second_f32"
+                )
+                # Capture-owned CPU tensors only; factual state remains untouched.
+                pending[decay_half].add_(decay_vector)
             step_record = {
                 "local_step_before_update": int(local_step_before_update),
                 "tokens_total_before_update": int(tokens_total),
@@ -850,7 +910,7 @@ class OptimizerStateCapture:
             elapsed = local_step - pending["identity"]["reset_local_step"]
             half = pending["window_steps"] // 2
             if elapsed == half and pending["midpoint"] is None:
-                midpoint = self._fragment_snapshot(fragment_id)
+                midpoint = self._window_snapshot(fragment_id)
                 added = _tensor_storage_bytes(midpoint)
                 if self._pending_raw_bytes + added > self.max_bytes:
                     self._drop_pending_midpoint(
@@ -868,7 +928,7 @@ class OptimizerStateCapture:
                 if pending["midpoint"] is None:
                     self._record_drop("midpoint_boundary_missed", **pending["identity"])
                     continue
-                endpoint = self._fragment_snapshot(fragment_id)
+                endpoint = self._window_snapshot(fragment_id)
                 if len(pending["step_history"]) != pending["window_steps"]:
                     self._record_drop(
                         "midpoint_step_history_incomplete",
@@ -904,24 +964,26 @@ class OptimizerStateCapture:
                     "accepted_endpoint_steps": pending["window_steps"],
                     "state_boundary": "post_optimizer_step_pre_broadcast",
                 }
-                wrote = self._write_artifact(
-                    "richardson_window",
-                    metadata,
-                    {
-                        "anchor": pending["anchor"],
-                        "midpoint": pending["midpoint"],
-                        "endpoint": endpoint,
-                        "step_history": pending["step_history"],
-                        "lr_mass_first_by_group": first_lr_mass,
-                        "lr_mass_second_by_group": second_lr_mass,
-                        "decoupled_decay_first_f32": pending[
-                            "decoupled_decay_first_f32"
-                        ],
-                        "decoupled_decay_second_f32": pending[
-                            "decoupled_decay_second_f32"
-                        ],
-                    },
-                )
+                payload = {
+                    "anchor": pending["anchor"],
+                    "midpoint": pending["midpoint"],
+                    "endpoint": endpoint,
+                    "step_history": pending["step_history"],
+                    "lr_mass_first_by_group": first_lr_mass,
+                    "lr_mass_second_by_group": second_lr_mass,
+                }
+                if self.capture_profile == CAPTURE_PROFILE_FULL:
+                    payload.update(
+                        {
+                            "decoupled_decay_first_f32": pending[
+                                "decoupled_decay_first_f32"
+                            ],
+                            "decoupled_decay_second_f32": pending[
+                                "decoupled_decay_second_f32"
+                            ],
+                        }
+                    )
+                wrote = self._write_artifact("richardson_window", metadata, payload)
                 lifecycle = self._window_lifecycles[pending["identity"]["window_uuid"]]
                 lifecycle.update(
                     {
@@ -1370,6 +1432,14 @@ class OptimizerStateCapture:
             "max_bytes": self.max_bytes,
             "layout_sha256": self.layout_digest,
         }
+        if self.capture_profile == CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL:
+            config.update(
+                {
+                    "capture_profile": self.capture_profile,
+                    "scientific_scope": "crp_pti_direction_evidence_only",
+                    "capture_v2_restore_complete": False,
+                }
+            )
         if self.background_writer_enabled:
             config.update(
                 {

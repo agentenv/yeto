@@ -46,6 +46,9 @@ from typing import Any, Mapping, Sequence
 import torch
 
 from yeto.optimizer_state_capture import (
+    CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL,
+    CAPTURE_PROFILE_FULL,
+    CAPTURE_PROFILES,
     CaptureIntegrityError,
     load_capture,
 )
@@ -92,6 +95,7 @@ class Expectations:
     background_writer: bool = False
     background_writer_max_items: int = 0
     background_writer_max_bytes: int = 0
+    capture_profile: str = CAPTURE_PROFILE_FULL
 
     def __post_init__(self) -> None:
         if not self.learner_ids:
@@ -129,6 +133,17 @@ class Expectations:
             raise ValidationError(
                 "expected background writer item and byte caps must be positive"
             )
+        if self.capture_profile not in CAPTURE_PROFILES:
+            raise ValidationError(
+                f"unknown expected capture profile {self.capture_profile!r}"
+            )
+        if (
+            self.capture_profile == CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL
+            and self.max_hmc_events != 0
+        ):
+            raise ValidationError(
+                "crp_pti_directional validation requires max_hmc_events=0"
+            )
 
     def as_json(self) -> dict[str, Any]:
         value = {
@@ -152,6 +167,8 @@ class Expectations:
                     "background_writer_max_bytes": self.background_writer_max_bytes,
                 }
             )
+        if self.capture_profile != CAPTURE_PROFILE_FULL:
+            value["capture_profile"] = self.capture_profile
         return value
 
 
@@ -564,8 +581,78 @@ def _validate_richardson(
         )
         if before != reset_step + offset:
             _fail("step history is not contiguous from reset", context=context)
+    snapshots: list[dict[str, Any]] = []
     for snapshot in ("anchor", "midpoint", "endpoint"):
-        _require_mapping(payload.get(snapshot), f"{context}.payload.{snapshot}")
+        snapshots.append(
+            _require_mapping(payload.get(snapshot), f"{context}.payload.{snapshot}")
+        )
+
+    if expectations.capture_profile == CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL:
+        expected_payload_keys = {
+            "anchor",
+            "midpoint",
+            "endpoint",
+            "step_history",
+            "lr_mass_first_by_group",
+            "lr_mass_second_by_group",
+        }
+        if set(payload) != expected_payload_keys:
+            _fail(
+                "crp_pti_directional payload has fields outside its closed "
+                f"direction-evidence schema: {sorted(set(payload) ^ expected_payload_keys)!r}",
+                context=context,
+            )
+        expected_order: list[str] | None = None
+        expected_shape: tuple[int, ...] | None = None
+        for name, snapshot in zip(("anchor", "midpoint", "endpoint"), snapshots):
+            snapshot_context = f"{context}.payload.{name}"
+            if set(snapshot) != {"tensor_order", "parameters_f32"}:
+                _fail(
+                    "directional snapshot must contain exactly tensor_order and "
+                    "parameters_f32",
+                    context=snapshot_context,
+                )
+            order = _require_list(
+                snapshot.get("tensor_order"), f"{snapshot_context}.tensor_order"
+            )
+            if not order:
+                _fail("tensor order must not be empty", context=snapshot_context)
+            if any(not isinstance(item, str) or not item for item in order):
+                _fail(
+                    "tensor order contains a non-string or empty name",
+                    context=snapshot_context,
+                )
+            if len(set(order)) != len(order):
+                _fail("tensor order contains duplicates", context=snapshot_context)
+            parameters = snapshot.get("parameters_f32")
+            if not isinstance(parameters, torch.Tensor):
+                _fail("parameters_f32 must be a tensor", context=snapshot_context)
+            if parameters.dtype != torch.float32 or parameters.ndim != 1:
+                _fail(
+                    "parameters_f32 must be one flat float32 tensor",
+                    context=snapshot_context,
+                )
+            if parameters.numel() < 1:
+                _fail("parameters_f32 must not be empty", context=snapshot_context)
+            if expected_order is None:
+                expected_order = list(order)
+                expected_shape = tuple(parameters.shape)
+            elif (
+                list(order) != expected_order
+                or tuple(parameters.shape) != expected_shape
+            ):
+                _fail(
+                    "directional snapshots change tensor order or flat shape",
+                    context=snapshot_context,
+                )
+
+
+def _f32_wire_sha256(value: Any, context: str) -> str:
+    if not isinstance(value, torch.Tensor):
+        _fail("f32 endpoint must be a tensor", context=context)
+    if value.dtype != torch.float32 or value.ndim != 1 or not value.is_contiguous():
+        _fail("f32 endpoint must be a contiguous flat float32 tensor", context=context)
+    return hashlib.sha256(value.view(torch.uint8).numpy().tobytes()).hexdigest()
 
 
 def _retry_identity(metadata: Mapping[str, Any], context: str) -> str:
@@ -751,6 +838,15 @@ def _validate_lifecycles(
                     context=window_uuid,
                 )
             rich_metadata = richardson[0]["metadata"]
+            rich_endpoint = richardson[0]["payload"]["endpoint"]["parameters_f32"]
+            endpoint_digest = _f32_wire_sha256(
+                rich_endpoint, f"{context}.{window_uuid}.endpoint"
+            )
+            if lifecycle.get("expected_f32_payload_sha256") != endpoint_digest:
+                _fail(
+                    "lifecycle payload digest differs from exact Richardson endpoint",
+                    context=window_uuid,
+                )
             for lifecycle_key, metadata_key in (
                 ("endpoint_local_step", "endpoint_local_step"),
                 ("endpoint_tokens_total", "endpoint_tokens_total"),
@@ -865,6 +961,25 @@ def _validate_learner(
         _fail("manifest kind is not run_manifest", context=context)
 
     config = _require_mapping(manifest.get("config"), f"{context}.config")
+    raw_capture_profile = config.get("capture_profile", CAPTURE_PROFILE_FULL)
+    actual_capture_profile = _require_string(
+        raw_capture_profile, f"{context}.config.capture_profile"
+    )
+    if actual_capture_profile not in CAPTURE_PROFILES:
+        _fail("unknown capture profile", context=context)
+    if actual_capture_profile != expectations.capture_profile:
+        _fail(
+            "config capture_profile differs from expected mode",
+            context=context,
+        )
+    if actual_capture_profile == CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL:
+        if config.get("scientific_scope") != "crp_pti_direction_evidence_only":
+            _fail("directional profile has incorrect scientific scope", context=context)
+        if config.get("capture_v2_restore_complete") is not False:
+            _fail(
+                "directional profile must explicitly disclaim capture-v2 restore authority",
+                context=context,
+            )
     expected_config = {
         "learner_id": learner_id,
         "rank": 0,
@@ -1063,6 +1178,17 @@ def _validate_learner(
             entry.get("sidecar_bytes"), f"{entry_context}.sidecar_bytes", minimum=1
         )
         kind = _require_string(entry.get("kind"), f"{entry_context}.kind")
+        allowed_kinds = {"adamw_first_gradient", "richardson_window", "push_candidate"}
+        if kind not in allowed_kinds:
+            _fail(f"unknown artifact kind {kind!r}", context=entry_context)
+        if (
+            expectations.capture_profile == CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL
+            and kind == "adamw_first_gradient"
+        ):
+            _fail(
+                "crp_pti_directional profile forbids first-gradient artifacts",
+                context=entry_context,
+            )
         fragment_id = _require_int(
             entry.get("fragment_id"), f"{entry_context}.fragment_id", minimum=0
         )
@@ -1930,6 +2056,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-fragments", required=True, type=int)
     parser.add_argument("--expected-h", required=True, type=int)
     parser.add_argument("--expected-every", required=True, type=int)
+    parser.add_argument(
+        "--expected-capture-profile",
+        choices=sorted(CAPTURE_PROFILES),
+        default=CAPTURE_PROFILE_FULL,
+    )
     parser.add_argument("--expected-max-hmc-events", required=True, type=int)
     parser.add_argument("--expected-max-midpoint-windows", required=True, type=int)
     parser.add_argument("--expected-max-bytes", required=True, type=int)
@@ -1977,6 +2108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             background_writer=args.expected_background_writer,
             background_writer_max_items=(args.expected_background_writer_max_items),
             background_writer_max_bytes=(args.expected_background_writer_max_bytes),
+            capture_profile=args.expected_capture_profile,
         )
         summary = validate_and_write(
             args.arm_dir,

@@ -370,6 +370,13 @@ def parse_args(argv=None):
         help="EXP: rank-0 directory for exact AdamW/window/push lifecycle captures",
     )
     p.add_argument(
+        "--optimizer-state-capture-profile",
+        choices=("full", "crp_pti_directional"),
+        default="full",
+        help="full AdamW evidence (default), or parameter-only anchor/H/2/H "
+        "direction evidence for CRP/PTI; the reduced profile is not restore authority",
+    )
+    p.add_argument(
         "--optimizer-state-capture-every",
         type=int,
         default=1,
@@ -467,6 +474,14 @@ def parse_args(argv=None):
         p.error("--optimizer-state-capture-every must be >= 1")
     if args.optimizer_state_capture_max_hmc_events < 0:
         p.error("--optimizer-state-capture-max-hmc-events must be >= 0")
+    if (
+        args.optimizer_state_capture_profile == "crp_pti_directional"
+        and args.optimizer_state_capture_max_hmc_events != 0
+    ):
+        p.error(
+            "--optimizer-state-capture-profile crp_pti_directional requires "
+            "--optimizer-state-capture-max-hmc-events 0"
+        )
     if args.optimizer_state_capture_max_midpoint_windows < 0:
         p.error("--optimizer-state-capture-max-midpoint-windows must be >= 0")
     if args.optimizer_state_capture_max_bytes < 0:
@@ -1631,6 +1646,7 @@ def run_inner_loop(
             scheduler=sched,
             learner_id=args.learner_id,
             rank=rank,
+            capture_profile=args.optimizer_state_capture_profile,
             every=args.optimizer_state_capture_every,
             max_hmc_events=args.optimizer_state_capture_max_hmc_events,
             max_midpoint_windows=args.optimizer_state_capture_max_midpoint_windows,
@@ -1640,7 +1656,11 @@ def run_inner_loop(
             background_writer_max_bytes=(args.optimizer_state_capture_writer_max_bytes),
         )
         capture_window_uuids = [None] * layout.num_fragments
-        log.info("optimizer-state capture enabled at %s", capture_dir)
+        log.info(
+            "optimizer-state capture enabled at %s (profile=%s)",
+            capture_dir,
+            args.optimizer_state_capture_profile,
+        )
 
     if args.loss_function.startswith("pickle:"):
         compute_loss = load_pickled_loss(args.loss_function)
