@@ -2748,6 +2748,17 @@ CPLG/replay/wrapper/spec/harness tests passed; the full Python suite passed
 format/check passed. No cloud resource or r2 artifact prefix existed while
 these controls were written.
 
+The immutable r2 cloud launch contract is
+`experiments/optimizer/exp2-cplg-shadow-direction-r2.json`, SHA-256
+`b39ec7d4faec2691895a2ea41d94df0950e130212a26ad8abbe80d5efe989efd`.
+It pins repaired runtime source commit
+`eb6d21146011112ffe8df5cb518c985e8c0297bd`, retained image ID
+`7290368630472593484`, one `a2-highgpu-1g` Spot VM in `us-central1-c`, a
+3,600-second maximum run, and the fresh r2 artifact prefix. The contract test
+also binds the truthful three-row result schema; its focused spec/wrapper run
+passed 23 tests. Harness validation and command rendering passed before the
+control-plane commit and launch.
+
 ## Primary references used in the audit
 
 - SCAFFOLD: <https://proceedings.mlr.press/v119/karimireddy20a.html>
