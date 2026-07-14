@@ -419,6 +419,30 @@ def test_directional_campaign_rejects_restore_authority_claim(tmp_path):
         validate_campaign(arm_dir, expectations)
 
 
+def test_directional_campaign_cannot_be_relabelled_as_legacy_full(tmp_path):
+    arm_dir, directional_expectations = _campaign(
+        tmp_path, capture_profile=CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL
+    )
+
+    def strip_directional_identity(manifest):
+        config = manifest["config"]
+        config.pop("capture_profile")
+        config.pop("scientific_scope")
+        config.pop("capture_v2_restore_complete")
+
+    for capture_dir in arm_dir.glob("optimizer_state_capture_learner_*"):
+        _mutate_manifest(capture_dir, strip_directional_identity)
+    relabelled_expectations = replace(
+        directional_expectations,
+        capture_profile="full",
+    )
+
+    with pytest.raises(
+        ValidationError, match="full profile payload does not match its closed"
+    ):
+        validate_campaign(arm_dir, relabelled_expectations)
+
+
 def test_committed_boundary_index_binds_exact_ordered_artifacts_and_writes_canonical(
     tmp_path,
 ):

@@ -645,6 +645,38 @@ def _validate_richardson(
                     "directional snapshots change tensor order or flat shape",
                     context=snapshot_context,
                 )
+    else:
+        # ``full`` was the implicit legacy profile before capture_profile was
+        # added to manifests.  Its payload therefore has to identify the mode;
+        # otherwise deleting the explicit directional marker could relabel a
+        # parameter-only artifact as full optimizer-state evidence.
+        expected_payload_keys = {
+            "anchor",
+            "midpoint",
+            "endpoint",
+            "step_history",
+            "lr_mass_first_by_group",
+            "lr_mass_second_by_group",
+            "decoupled_decay_first_f32",
+            "decoupled_decay_second_f32",
+        }
+        if set(payload) != expected_payload_keys:
+            _fail(
+                "full profile payload does not match its closed optimizer-state schema",
+                context=context,
+            )
+        for name, snapshot in zip(("anchor", "midpoint", "endpoint"), snapshots):
+            if set(snapshot) != {
+                "tensor_order",
+                "parameters_f32",
+                "optimizer",
+                "auxiliary_optimizer",
+            }:
+                _fail(
+                    "full profile snapshot does not contain exact optimizer and "
+                    "auxiliary state fields",
+                    context=f"{context}.payload.{name}",
+                )
 
 
 def _f32_wire_sha256(value: Any, context: str) -> str:
