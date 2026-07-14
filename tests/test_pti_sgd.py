@@ -9,12 +9,15 @@ import pytest
 
 from yeto.pti_sgd import (
     PTIAction,
+    PTIClosureEntry,
     PTIEvent,
+    PTILedgerEntry,
     PTISGD,
     PTI_COEFFICIENT,
     PTI_INTERLOCK_LENGTH,
     decode_f32le,
     encode_f32le,
+    pti_candidate_f32le,
     replay,
     sha256_bytes,
 )
@@ -189,6 +192,41 @@ def test_active_action_has_exact_negative_quarter_geometry() -> None:
 
 
 @pytest.mark.parametrize(
+    ("current", "previous", "expected_hex"),
+    [
+        (
+            (1.0, 2.0, 3.0),
+            (3.0, -2.0, 1.0),
+            "c33d8a3e820620403a4e3140",
+        ),
+        (
+            (1.0, 0.0),
+            (0.0, 1.0),
+            "435b783f435b78be",
+        ),
+        (
+            (0.125, -7.5, 2.25, 0.5),
+            (4.0, 1.0, -3.0, 2.0),
+            "4bfaabbf8065e2c05bb64640eb848fbe",
+        ),
+    ],
+)
+def test_amendment_one_sequential_f32_candidate_byte_vectors(
+    current: tuple[float, ...],
+    previous: tuple[float, ...],
+    expected_hex: str,
+) -> None:
+    candidate = pti_candidate_f32le(
+        encode_f32le(current), encode_f32le(previous), (len(current),)
+    )
+
+    assert candidate.hex() == expected_hex
+    if current == (1.0, 2.0, 3.0):
+        # Superseded binary64 fsum/sqrt plus analytic sqrt(1+c^2) result.
+        assert candidate.hex() != "c33d8a3e810620403a4e3140"
+
+
+@pytest.mark.parametrize(
     ("make_bad", "reason"),
     [
         (
@@ -299,8 +337,101 @@ def test_deterministic_decision_and_append_only_ledger_hashes() -> None:
     assert rebound_result.ledger.ledger_sha256 != first[0].ledger.ledger_sha256
 
 
-def test_action_schema_has_no_loss_or_outcome_fields() -> None:
-    names = {field.name.lower() for field in fields(PTIAction)}
+def test_close_seals_unscored_tail_after_nonstock_without_rewriting_action() -> None:
+    policy = PTISGD()
+    events = tuple(
+        _angle_event(index, index, degrees)
+        for index, degrees in enumerate((0.0, 10.0, 20.0, 30.0, 40.0))
+    )
+    results = tuple(policy.process(event) for event in events)
+    final_result = results[-1]
+    action_before_close = final_result.action
+    ledger_before_close = policy.ledger
+    head_before_close = policy.ledger_head
+    score_count_before_close = policy.resolved_shadow_score_count
+
+    closed = policy.close()
+
+    assert final_result.action == action_before_close
+    assert policy.ledger == ledger_before_close
+    assert final_result.action.used_nonstock is True
+    assert len(closed) == 1
+    tail = closed[0]
+    assert tail.source_sequence == 4
+    assert tail.fragment == 0
+    assert tail.version == 4
+    assert tail.unresolved_shadow_sha256 == final_result.ledger.sealed_shadow_sha256
+    assert tail.source_used_nonstock is True
+    assert tail.resolved_shadow_score is None
+    assert tail.direction_score_count_delta == 0
+    assert policy.resolved_shadow_score_count == score_count_before_close == 3
+    assert tail.previous_ledger_sha256 == head_before_close
+    assert policy.ledger_head == tail.closure_sha256
+    assert policy.closed is True
+
+    closure_snapshot = policy.closures
+    closure_head = policy.ledger_head
+    assert policy.close() == closed
+    assert policy.closures == closure_snapshot
+    assert policy.ledger_head == closure_head
+    twin = PTISGD()
+    twin.replay(events)
+    assert twin.close() == closed
+    assert twin.ledger_head == closure_head
+    with pytest.raises(RuntimeError, match="call reopen"):
+        policy.process(_angle_event(5, 5, 50.0))
+
+
+def test_close_orders_fragment_tails_and_reopen_forces_stock_warmup() -> None:
+    policy = PTISGD()
+    policy.process(_angle_event(0, 2, 80.0, fragment=1))
+    policy.process(_angle_event(1, 7, 0.0, fragment=0))
+    policy.process(_angle_event(2, 5, 70.0, fragment=1))
+    policy.process(_angle_event(3, 9, 10.0, fragment=0))
+    score_count = policy.resolved_shadow_score_count
+
+    tails = policy.close()
+
+    assert [tail.fragment for tail in tails] == [0, 1]
+    assert [tail.source_sequence for tail in tails] == [3, 2]
+    assert all(tail.resolved_shadow_score is None for tail in tails)
+    assert all(tail.direction_score_count_delta == 0 for tail in tails)
+    assert tails[1].previous_ledger_sha256 == tails[0].closure_sha256
+    assert policy.resolved_shadow_score_count == score_count == 0
+
+    policy.reopen()
+    resumed = _angle_event(99, 1, 35.0, fragment=0)
+    resumed_result = policy.process(resumed)
+    assert resumed_result.action.reason == "warmup"
+    assert resumed_result.action.raw is resumed.stock_raw
+    assert resumed_result.ledger.previous_ledger_sha256 == tails[-1].closure_sha256
+    with pytest.raises(RuntimeError, match="already open"):
+        policy.reopen()
+
+
+def test_empty_and_corrupt_stream_close_are_deterministic_and_unscored() -> None:
+    empty = PTISGD()
+    assert empty.close() == ()
+    assert empty.close() == ()
+    assert empty.closures == ()
+    assert empty.ledger_head == "0" * 64
+    assert empty.resolved_shadow_score_count == 0
+
+    corrupt = PTISGD()
+    corrupt_event = replace(_angle_event(0, 0, 0.0), stock_sha256="f" * 64)
+    corrupt_result = corrupt.process(corrupt_event)
+    head_before_close = corrupt.ledger_head
+    assert corrupt_result.action.reason == "stock_hash_mismatch"
+    assert corrupt.close() == ()
+    assert corrupt.close() == ()
+    assert corrupt.ledger_head == head_before_close
+    assert corrupt.closures == ()
+    assert corrupt.resolved_shadow_score_count == 0
+
+
+@pytest.mark.parametrize("record_type", [PTIAction, PTILedgerEntry, PTIClosureEntry])
+def test_action_and_audit_schemas_have_no_loss_or_outcome_fields(record_type) -> None:
+    names = {field.name.lower() for field in fields(record_type)}
     forbidden = ("loss", "outcome", "reward", "objective")
 
     assert PTI_COEFFICIENT == -1 / 4

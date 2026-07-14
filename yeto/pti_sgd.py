@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -143,6 +144,23 @@ class PTILedgerEntry:
 
 
 @dataclass(frozen=True)
+class PTIClosureEntry:
+    """Non-action audit record for one unresolved end-of-stream shadow."""
+
+    last_sequence: int
+    source_sequence: int
+    fragment: int
+    version: int
+    shape: tuple[int, ...]
+    unresolved_shadow_sha256: str
+    source_used_nonstock: bool
+    resolved_shadow_score: None
+    direction_score_count_delta: int
+    previous_ledger_sha256: str
+    closure_sha256: str
+
+
+@dataclass(frozen=True)
 class PTIResult:
     """The action and audit entry emitted for a single event."""
 
@@ -152,9 +170,11 @@ class PTIResult:
 
 @dataclass(frozen=True)
 class _PendingShadow:
+    source_sequence: int
     stock: tuple[float, ...]
     candidate: tuple[float, ...]
     candidate_sha256: str
+    source_used_nonstock: bool
 
 
 @dataclass
@@ -184,6 +204,9 @@ class PTISGDPolicy:
         self._fragments: dict[int, _FragmentState] = {}
         self._ledger: list[PTILedgerEntry] = []
         self._ledger_head = _ZERO_HASH
+        self._closures: list[PTIClosureEntry] = []
+        self._last_close_records: tuple[PTIClosureEntry, ...] = ()
+        self._closed = False
 
     @property
     def ledger(self) -> tuple[PTILedgerEntry, ...]:
@@ -193,9 +216,27 @@ class PTISGDPolicy:
 
     @property
     def ledger_head(self) -> str:
-        """Hash of the most recently sealed ledger entry."""
+        """Hash of the most recently sealed action or closure audit record."""
 
         return self._ledger_head
+
+    @property
+    def closures(self) -> tuple[PTIClosureEntry, ...]:
+        """All tail-closure records in their deterministic chain order."""
+
+        return tuple(self._closures)
+
+    @property
+    def closed(self) -> bool:
+        """Whether event admission is stopped pending an explicit reopen."""
+
+        return self._closed
+
+    @property
+    def resolved_shadow_score_count(self) -> int:
+        """Number of factual next-direction scores, excluding open tails."""
+
+        return sum(entry.resolved_shadow_score is not None for entry in self._ledger)
 
     def reset(self) -> None:
         """Clear the chronological cursor, fragment states, and ledger."""
@@ -204,6 +245,77 @@ class PTISGDPolicy:
         self._fragments.clear()
         self._ledger.clear()
         self._ledger_head = _ZERO_HASH
+        self._closures.clear()
+        self._last_close_records = ()
+        self._closed = False
+
+    def close(self) -> tuple[PTIClosureEntry, ...]:
+        """Seal unresolved shadows as non-action records and clear live state.
+
+        The records are ordered by fragment id and chained after the existing
+        action ledger.  An unresolved shadow is explicitly unscored and never
+        changes its already sealed source action.  Repeated close calls return
+        the same records without extending or rewriting the audit chain.
+        """
+
+        if self._closed:
+            return self._last_close_records
+
+        records: list[PTIClosureEntry] = []
+        last_sequence = -1 if self._last_sequence is None else self._last_sequence
+        for fragment in sorted(self._fragments):
+            state = self._fragments[fragment]
+            pending = state.pending
+            if pending is None:
+                continue
+            previous_hash = self._ledger_head
+            closure_payload = {
+                "schema": _POLICY_SCHEMA,
+                "kind": "unresolved_shadow_tail_closure",
+                "last_sequence": last_sequence,
+                "source_sequence": pending.source_sequence,
+                "fragment": fragment,
+                "version": state.version,
+                "shape": list(state.shape),
+                "unresolved_shadow_sha256": pending.candidate_sha256,
+                "source_used_nonstock": pending.source_used_nonstock,
+                "resolved_shadow_score": None,
+                "direction_score_count_delta": 0,
+                "previous_ledger_sha256": previous_hash,
+            }
+            closure_hash = _canonical_hash(closure_payload)
+            record = PTIClosureEntry(
+                last_sequence=last_sequence,
+                source_sequence=pending.source_sequence,
+                fragment=fragment,
+                version=state.version,
+                shape=state.shape,
+                unresolved_shadow_sha256=pending.candidate_sha256,
+                source_used_nonstock=pending.source_used_nonstock,
+                resolved_shadow_score=None,
+                direction_score_count_delta=0,
+                previous_ledger_sha256=previous_hash,
+                closure_sha256=closure_hash,
+            )
+            records.append(record)
+            self._closures.append(record)
+            self._ledger_head = closure_hash
+
+        self._fragments.clear()
+        self._last_sequence = None
+        self._last_close_records = tuple(records)
+        self._closed = True
+        return self._last_close_records
+
+    def reopen(self) -> None:
+        """Resume admission with empty fragment history and a stock warm-up."""
+
+        if not self._closed:
+            raise RuntimeError("PTI stream is already open")
+        self._fragments.clear()
+        self._last_sequence = None
+        self._last_close_records = ()
+        self._closed = False
 
     def replay(self, events: Iterable[PTIEvent]) -> tuple[PTIResult, ...]:
         """Process a finite event stream in its supplied chronological order."""
@@ -213,6 +325,8 @@ class PTISGDPolicy:
     def process(self, event: PTIEvent) -> PTIResult:
         """Consume one event and seal exactly one action and ledger entry."""
 
+        if self._closed:
+            raise RuntimeError("PTI stream is closed; call reopen() before process()")
         if not isinstance(event, PTIEvent):
             raise TypeError("event must be a PTIEvent")
 
@@ -260,7 +374,17 @@ class PTISGDPolicy:
                 reason="nonfinite_stock",
                 fragment_state_cleared=True,
             )
-        if _norm_sq(stock) <= PTI_DEGENERATE_NORM_SQ:
+        try:
+            stock_norm_sq = _norm_sq(stock)
+        except ValueError:
+            self._fragments.pop(event.fragment, None)
+            return self._stock_result(
+                event,
+                actual_hash=actual_hash,
+                reason="nonfinite_stock_geometry",
+                fragment_state_cleared=True,
+            )
+        if stock_norm_sq <= PTI_DEGENERATE_NORM_SQ:
             self._fragments.pop(event.fragment, None)
             return self._stock_result(
                 event,
@@ -347,9 +471,11 @@ class PTISGDPolicy:
         state.shape = event.shape
         state.stock = stock
         state.pending = _PendingShadow(
+            source_sequence=event.sequence,
             stock=stock,
             candidate=candidate,
             candidate_sha256=candidate_hash,
+            source_used_nonstock=interlock_open,
         )
 
         if interlock_open:
@@ -428,9 +554,9 @@ class PTISGDPolicy:
                 "expected_stock_sha256": event.stock_sha256,
                 "actual_stock_sha256": actual_hash,
             },
-            "resolved_shadow_score_f64le": _float_bits(resolved_shadow_score),
-            "interlock_scores_f64le": [
-                _float_bits(score) for score in interlock_scores
+            "resolved_shadow_score_f32le": _score_f32_bits(resolved_shadow_score),
+            "interlock_scores_f32le": [
+                _score_f32_bits(score) for score in interlock_scores
             ],
             "interlock_open": interlock_open,
             "sealed_shadow_sha256": sealed_shadow_sha256,
@@ -492,6 +618,19 @@ def replay(events: Iterable[PTIEvent]) -> tuple[PTIResult, ...]:
     return PTISGDPolicy().replay(events)
 
 
+def pti_candidate_f32le(
+    current_raw: bytes, previous_raw: bytes, shape: tuple[int, ...]
+) -> bytes:
+    """Materialize the Amendment-1 candidate from exact stock f32 bytes."""
+
+    current = decode_f32le(current_raw, shape)
+    previous = decode_f32le(previous_raw, shape)
+    if not all(math.isfinite(value) for value in (*current, *previous)):
+        raise ValueError("candidate inputs must be finite f32 values")
+    raw, _candidate = _fixed_candidate(current, previous)
+    return raw
+
+
 def _shape_numel(shape: tuple[int, ...]) -> int:
     if type(shape) is not tuple or not shape:
         raise ValueError("shape must be a nonempty tuple")
@@ -503,54 +642,152 @@ def _shape_numel(shape: tuple[int, ...]) -> int:
     return count
 
 
+def _f32(value: float) -> float:
+    """Round one real-valued Python operation result to IEEE-754 f32."""
+
+    try:
+        rounded = struct.unpack("<f", struct.pack("<f", value))[0]
+    except (OverflowError, struct.error) as exc:
+        raise ValueError("f32 operation overflowed") from exc
+    if not math.isfinite(rounded):
+        raise ValueError("f32 operation produced a nonfinite value")
+    return rounded
+
+
+def _f32_from_bits(bits: int) -> float:
+    return struct.unpack("<f", struct.pack("<I", bits))[0]
+
+
+def _f32_bits(value: float) -> int:
+    return struct.unpack("<I", struct.pack("<f", value))[0]
+
+
+def _add_f32(left: float, right: float) -> float:
+    return _f32(left + right)
+
+
+def _subtract_f32(left: float, right: float) -> float:
+    return _f32(left - right)
+
+
+def _multiply_f32(left: float, right: float) -> float:
+    return _f32(left * right)
+
+
+def _divide_f32(numerator: float, denominator: float) -> float:
+    if denominator == 0.0:
+        raise ValueError("f32 division by zero")
+    return _f32(numerator / denominator)
+
+
+def _sqrt_f32(value: float) -> float:
+    """Correctly round the real square root of a nonnegative f32 to f32.
+
+    ``math.sqrt`` supplies only an initial candidate.  Exact rational midpoint
+    comparisons then correct that candidate and implement ties-to-even, so the
+    sealed result does not depend on the host libm's last binary64 bit.
+    """
+
+    value = _f32(value)
+    if value < 0.0:
+        raise ValueError("f32 square root requires a nonnegative input")
+    if value == 0.0:
+        return 0.0
+
+    exact_value = Fraction.from_float(value)
+    candidate = _f32(math.sqrt(value))
+    while True:
+        bits = _f32_bits(candidate)
+        if bits > 0:
+            previous = _f32_from_bits(bits - 1)
+            lower_midpoint = (
+                Fraction.from_float(previous) + Fraction.from_float(candidate)
+            ) / 2
+            lower_square = lower_midpoint * lower_midpoint
+            if exact_value < lower_square or (exact_value == lower_square and bits & 1):
+                candidate = previous
+                continue
+
+        following = _f32_from_bits(bits + 1)
+        upper_midpoint = (
+            Fraction.from_float(candidate) + Fraction.from_float(following)
+        ) / 2
+        upper_square = upper_midpoint * upper_midpoint
+        if exact_value > upper_square or (exact_value == upper_square and bits & 1):
+            candidate = following
+            continue
+        return candidate
+
+
+def _dot_f32(left: Sequence[float], right: Sequence[float]) -> float:
+    """Canonical coordinate-order f32 product-then-add reduction."""
+
+    if len(left) != len(right):
+        raise ValueError("dot-product shapes differ")
+    accumulator = _f32(0.0)
+    for left_value, right_value in zip(left, right, strict=True):
+        product = _multiply_f32(left_value, right_value)
+        accumulator = _add_f32(accumulator, product)
+    return accumulator
+
+
 def _norm_sq(vector: Sequence[float]) -> float:
-    return math.fsum(value * value for value in vector)
+    return _dot_f32(vector, vector)
+
+
+def _normalize_f32(vector: Sequence[float]) -> tuple[tuple[float, ...], float]:
+    norm_sq = _norm_sq(vector)
+    if norm_sq <= PTI_DEGENERATE_NORM_SQ:
+        raise ValueError("direction is degenerate")
+    norm = _sqrt_f32(norm_sq)
+    normalized = tuple(_divide_f32(value, norm) for value in vector)
+    return normalized, norm
 
 
 def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
-    left_sq = _norm_sq(left)
-    right_sq = _norm_sq(right)
-    if left_sq <= PTI_DEGENERATE_NORM_SQ or right_sq <= PTI_DEGENERATE_NORM_SQ:
-        raise ValueError("cosine direction is degenerate")
-    dot = math.fsum(a * b for a, b in zip(left, right, strict=True))
-    return dot / math.sqrt(left_sq * right_sq)
+    unit_left, _left_norm = _normalize_f32(left)
+    unit_right, _right_norm = _normalize_f32(right)
+    return _dot_f32(unit_left, unit_right)
 
 
 def _shadow_score(pending: _PendingShadow, factual: Sequence[float]) -> float:
-    return _cosine(pending.candidate, factual) - _cosine(pending.stock, factual)
+    candidate_cosine = _cosine(pending.candidate, factual)
+    stock_cosine = _cosine(pending.stock, factual)
+    return _subtract_f32(candidate_cosine, stock_cosine)
 
 
 def _fixed_candidate(
     current: Sequence[float], previous: Sequence[float]
 ) -> tuple[bytes, tuple[float, ...]]:
-    current_sq = _norm_sq(current)
-    previous_sq = _norm_sq(previous)
-    if current_sq <= PTI_DEGENERATE_NORM_SQ or previous_sq <= PTI_DEGENERATE_NORM_SQ:
-        raise ValueError("stock direction is degenerate")
-
-    current_norm = math.sqrt(current_sq)
-    previous_norm = math.sqrt(previous_sq)
-    unit_current = tuple(value / current_norm for value in current)
-    unit_previous = tuple(value / previous_norm for value in previous)
-    projection = math.fsum(
-        a * b for a, b in zip(unit_previous, unit_current, strict=True)
-    )
+    unit_current, current_norm = _normalize_f32(current)
+    unit_previous, _previous_norm = _normalize_f32(previous)
+    projection = _dot_f32(unit_previous, unit_current)
     transverse = tuple(
-        old - projection * new
+        _subtract_f32(old, _multiply_f32(projection, new))
         for old, new in zip(unit_previous, unit_current, strict=True)
     )
-    transverse_sq = _norm_sq(transverse)
-    if transverse_sq <= PTI_DEGENERATE_NORM_SQ:
+    try:
+        unit_transverse, _transverse_norm = _normalize_f32(transverse)
+    except ValueError:
         raise ValueError("previous direction has no stable transverse component")
-    transverse_norm = math.sqrt(transverse_sq)
-    unit_transverse = tuple(value / transverse_norm for value in transverse)
-    scale = current_norm / math.sqrt(1.0 + PTI_COEFFICIENT**2)
-    ideal = tuple(
-        scale * (new + PTI_COEFFICIENT * orthogonal)
+    coefficient = _f32(PTI_COEFFICIENT)
+    candidate_raw_direction = tuple(
+        _add_f32(new, _multiply_f32(coefficient, orthogonal))
         for new, orthogonal in zip(unit_current, unit_transverse, strict=True)
     )
-    raw = encode_f32le(ideal)
-    candidate = struct.unpack(f"<{len(ideal)}f", raw)
+    candidate_raw_norm_sq = _norm_sq(candidate_raw_direction)
+    if candidate_raw_norm_sq <= PTI_DEGENERATE_NORM_SQ:
+        raise ValueError("candidate raw direction is degenerate")
+    candidate_raw_norm = _sqrt_f32(candidate_raw_norm_sq)
+    unit_candidate_raw = tuple(
+        _divide_f32(component, candidate_raw_norm)
+        for component in candidate_raw_direction
+    )
+    candidate = tuple(
+        _multiply_f32(current_norm, component) for component in unit_candidate_raw
+    )
+    raw = encode_f32le(candidate)
+    candidate = struct.unpack(f"<{len(candidate)}f", raw)
     if not all(math.isfinite(value) for value in candidate):
         raise ValueError("candidate is not finite after f32 sealing")
     if _norm_sq(candidate) <= PTI_DEGENERATE_NORM_SQ:
@@ -562,12 +799,12 @@ def _is_sha256(value: str) -> bool:
     return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
 
 
-def _float_bits(value: float | None) -> str | None:
+def _score_f32_bits(value: float | None) -> str | None:
     if value is None:
         return None
     if not math.isfinite(value):
         raise ValueError("nonfinite values cannot be sealed")
-    return struct.pack("<d", value).hex()
+    return struct.pack("<f", _f32(value)).hex()
 
 
 def _canonical_hash(payload: object) -> str:
@@ -583,6 +820,7 @@ def _canonical_hash(payload: object) -> str:
 
 __all__ = [
     "PTIAction",
+    "PTIClosureEntry",
     "PTIEvent",
     "PTILedgerEntry",
     "PTIResult",
@@ -594,6 +832,7 @@ __all__ = [
     "PTI_INTERLOCK_LENGTH",
     "decode_f32le",
     "encode_f32le",
+    "pti_candidate_f32le",
     "replay",
     "sha256_bytes",
 ]
