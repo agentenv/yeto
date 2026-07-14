@@ -452,7 +452,10 @@ def load_probe_capture(root: Path) -> ProbeCapture:
 
 
 def compare_probe_captures(
-    off_root: Path, on_root: Path
+    off_root: Path,
+    on_root: Path,
+    *,
+    require_barrier_schedule: bool = False,
 ) -> tuple[dict[str, Any], ProbeCapture]:
     off = load_probe_capture(off_root)
     on = load_probe_capture(on_root)
@@ -474,6 +477,12 @@ def compare_probe_captures(
             if off.referenced_manifest.get(key) != on.referenced_manifest.get(key)
         ]
         raise ParityError(f"probe payload bytes differ at {differences[:12]}")
+    barrier_schedule = None
+    if require_barrier_schedule:
+        barrier_schedule = {
+            "off": validate_barrier_schedule(off, label="capture-OFF"),
+            "on": validate_barrier_schedule(on, label="capture-ON"),
+        }
     return (
         {
             "candidate_rows": len(off.candidate_digests),
@@ -483,9 +492,110 @@ def compare_probe_captures(
                 [off.canonical_rows[key] for key in sorted(off.canonical_rows)]
             ),
             "canonicalized_fields": list(PATH_FIELDS),
+            "barrier_schedule": barrier_schedule,
         },
         on,
     )
+
+
+def validate_barrier_schedule(probe: ProbeCapture, *, label: str) -> dict[str, Any]:
+    """Prove that a fully sampled probe followed the lockstep barrier schedule.
+
+    Exact OFF/ON equality alone is insufficient: two matched arms could share
+    the same non-barrier race.  A true pipeline barrier produces complete
+    fragment waves.  Every learner responds at one local step within a commit,
+    every fragment in a wave is pushed at the same local step, and successive
+    waves advance by exactly the fixed local horizon H.
+    """
+
+    groups = sorted(probe.group_keys)
+    steps = [step for step, _fragment in groups]
+    if steps != list(range(1, len(groups) + 1)):
+        raise ParityError(f"{label} barrier schedule has non-contiguous commit steps")
+
+    fragments = sorted({fragment for _step, fragment in groups})
+    if not fragments:
+        raise ParityError(f"{label} barrier schedule has no fragments")
+    fragment_count = len(fragments)
+    if len(groups) % fragment_count:
+        raise ParityError(
+            f"{label} barrier schedule ends with an incomplete fragment wave"
+        )
+
+    first_wave_order = [fragment for _step, fragment in groups[:fragment_count]]
+    if len(set(first_wave_order)) != fragment_count:
+        raise ParityError(
+            f"{label} barrier schedule first wave does not cover every fragment once"
+        )
+
+    expected_learners: tuple[int, ...] | None = None
+    horizon: int | None = None
+    group_local_steps: list[int] = []
+    for group_index, group in enumerate(groups):
+        step, fragment = group
+        expected_fragment = first_wave_order[group_index % fragment_count]
+        if fragment != expected_fragment:
+            raise ParityError(
+                f"{label} barrier schedule fragment order differs at step {step}: "
+                f"got {fragment}, expected {expected_fragment}"
+            )
+        rows = [
+            row
+            for (row_step, row_fragment, _learner), row in probe.canonical_rows.items()
+            if (row_step, row_fragment) == group
+        ]
+        learners = tuple(sorted(int(row["learner_id"]) for row in rows))
+        if expected_learners is None:
+            expected_learners = learners
+        elif learners != expected_learners:
+            raise ParityError(
+                f"{label} barrier schedule responder set differs at {group}"
+            )
+        for field in ("local_step", "c_steps", "c_tokens", "base_version"):
+            values = {int(row[field]) for row in rows}
+            if len(values) != 1:
+                raise ParityError(
+                    f"{label} barrier schedule responders disagree on {field} "
+                    f"at {group}: {sorted(values)}"
+                )
+        group_horizon = int(rows[0]["c_steps"])
+        if horizon is None:
+            horizon = group_horizon
+        elif group_horizon != horizon:
+            raise ParityError(
+                f"{label} barrier schedule H changed at {group}: "
+                f"got {group_horizon}, expected {horizon}"
+            )
+        group_local_steps.append(int(rows[0]["local_step"]))
+
+    assert horizon is not None and expected_learners is not None
+    wave_local_steps: list[int] = []
+    for offset in range(0, len(group_local_steps), fragment_count):
+        wave = group_local_steps[offset : offset + fragment_count]
+        if len(set(wave)) != 1:
+            wave_number = offset // fragment_count + 1
+            raise ParityError(
+                f"{label} barrier schedule wave {wave_number} crosses local-step "
+                f"boundaries: {wave}"
+            )
+        wave_local_steps.append(wave[0])
+    for wave_number, (previous, current) in enumerate(
+        zip(wave_local_steps, wave_local_steps[1:]), 2
+    ):
+        if current - previous != horizon:
+            raise ParityError(
+                f"{label} barrier schedule wave {wave_number} advanced "
+                f"{current - previous} local steps; expected H={horizon}"
+            )
+
+    return {
+        "commit_groups": len(groups),
+        "fragment_order": first_wave_order,
+        "fragments": fragment_count,
+        "horizon_steps": horizon,
+        "learners": list(expected_learners),
+        "wave_local_steps": wave_local_steps,
+    }
 
 
 def validate_on_transcript(path: Path, probe: ProbeCapture) -> dict[str, Any]:
@@ -1014,6 +1124,7 @@ def run_gate(
     overhead_limit: float = 0.02,
     extra_final_files: list[str] | None = None,
     input_manifest: Path | None = None,
+    require_barrier_schedule: bool = False,
 ) -> dict[str, Any]:
     overhead_limit_error = None
     if not math.isfinite(overhead_limit) or overhead_limit < 0:
@@ -1044,7 +1155,9 @@ def run_gate(
     def probe_operation() -> dict[str, Any]:
         nonlocal on_probe
         detail, on_probe = compare_probe_captures(
-            off_arm_dir / "syncer_probe", on_arm_dir / "syncer_probe"
+            off_arm_dir / "syncer_probe",
+            on_arm_dir / "syncer_probe",
+            require_barrier_schedule=require_barrier_schedule,
         )
         return detail
 
@@ -1153,6 +1266,7 @@ def run_gate(
             "on_arm": on_arm,
             "extra_final_files": extra_final_files,
             "input_manifest": str(input_manifest),
+            "require_barrier_schedule": require_barrier_schedule,
         },
         "thresholds": {
             "wall_overhead_fraction": (
@@ -1172,6 +1286,7 @@ def run_gate(
             "The gate proves artifact equality, not that OFF and ON were scheduled on identical hardware or under identical external load.",
             "Overhead uses exact syncer monotonic timestamps from commit sequence 1 through N; rounded results.jsonl wall values are descriptive and must agree with the sealed tapes.",
             "The syncer probe must capture every commit and every responder; sampled or incomplete probe/transcript key sets fail.",
+            "When required, the barrier schedule check proves complete fixed-H lockstep waves from producer metadata; it does not infer barrier use from the command line.",
             "Only explicit path-valued metadata fields are canonicalized; arbitrary run names, labels, metrics, and unknown metadata remain exact.",
             "The sha256sum-compatible input manifest seals every file consumed by a successful parity decision and is independently required by the experiment harness.",
         ],
@@ -1218,6 +1333,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         help="additional arm-relative final payload to compare exactly; repeatable",
     )
+    parser.add_argument(
+        "--require-barrier-schedule",
+        action="store_true",
+        help="fail unless both arms prove complete fixed-H lockstep fragment waves",
+    )
     return parser.parse_args(argv)
 
 
@@ -1234,6 +1354,7 @@ def main(argv: list[str] | None = None) -> int:
         overhead_limit=args.overhead_limit,
         extra_final_files=args.extra_final_file,
         input_manifest=args.input_manifest,
+        require_barrier_schedule=args.require_barrier_schedule,
     )
     print(
         json.dumps(

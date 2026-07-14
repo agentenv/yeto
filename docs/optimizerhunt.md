@@ -1191,6 +1191,56 @@ quota-aware doctor is green, but development and confirmation remain locked
 until normalized materialization, capture-v2, deterministic qualifier
 scheduling, and measured overhead gates pass.
 
+### EXP2-54 r3 parity failure: scheduling, not optimizer math
+
+The completed `exp2-54-smoke-r3` matched run failed the parity gate. The first
+substantive OFF/ON difference is syncer commit step 6, fragment 1: OFF records
+all four responders at learner local step 10, while ON records learners 0--1
+at step 10 and learners 2--3 at step 11. All responders still report the same
+fixed `c_steps=4`, `c_tokens=512`, and pushed base version. The difference is
+therefore not an oversized H window, token weighting, or an outer-optimizer
+calculation. It is the exact local window selected for the push.
+
+Capture was mathematically passive but not schedule-passive. The learner wrote
+artifacts synchronously on its training thread, while broadcasts are drained
+and applied only at step boundaries. Serialization therefore changed whether
+a pending broadcast reset landed before or after the next optimizer step. The
+change propagated to later candidates, the final checkpoint, the export, and
+evaluation. OFF was not itself lockstep: by commit step 12 its fragment-3
+responders were split across local steps 15 and 16. An OFF/ON equality check
+alone could consequently accept a matched non-barrier race.
+
+The cost evidence agrees with that mechanism. Learner 2 slowed from roughly
+1.17 seconds per step in OFF to 1.81--2.00 seconds per step in ON. The sealed
+commit interval rose from 18.2 to 32.7 seconds, about 79.7% overhead. ON
+learner 2 wrote 50 artifacts totaling 1,252,639,051 bytes: 18 first-gradient
+captures, 16 Richardson windows, and 16 push candidates. Its only recorded
+drops were the declared incomplete shutdown-tail states, so the observed r3
+failure is not evidence of a capacity drop.
+
+The next qualifier must enable the existing true `--barrier-sync` learner
+mode in both arms. The parity gate now has an opt-in
+`--require-barrier-schedule` contract that proves the producer trace consists
+of complete fragment waves: responders agree on local step/H/tokens/base in
+each commit, every fragment in a wave is pushed at one local step, and
+successive waves advance by exactly H. This checks observed behavior rather
+than trusting an argv label. The capture validator also has an opt-in
+`--strict-writer` contract. It rejects every non-terminal drop, including byte,
+event, window, and pending-memory limits; only the three explicitly declared
+incomplete-at-close tail reasons remain admissible. The compare driver exposes
+these as `--optimizer-state-capture-parity-require-barrier` and
+`--optimizer-state-capture-strict-writer`, and refuses invalid flag
+combinations or nonpositive caps.
+
+This barrier should make capture latency affect wall time rather than the
+optimizer-step schedule. It does not make the synchronous writer cheap: with
+r3's measured cost, the 2% overhead gate will probably still fail. That would
+be a valid qualifier result and a reason to replace the writer implementation,
+not to relax parity. The strict writer contract remains deliberately separate
+from content-addressed storage or an asynchronous writer, so it does not
+duplicate the CAS workstream. No new GCP instance was launched for this
+diagnosis or plumbing change.
+
 ### PTI-SGD: next temporal candidate, not yet an empirical result
 
 A separate agent review proposed **Prequential Transverse Interlock SGD

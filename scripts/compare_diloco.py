@@ -2116,7 +2116,12 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                 str(args.optimizer_state_capture_min_joined_boundaries),
                 "--min-joined-per-fragment",
                 str(args.optimizer_state_capture_min_joined_per_fragment),
-            ],
+            ]
+            + (
+                ["--strict-writer"]
+                if args.optimizer_state_capture_strict_writer
+                else []
+            ),
             arm_dir / "optimizer_state_capture_validation.log",
         )
     # Export the merged global parameters to a peft adapter dir.
@@ -2310,6 +2315,16 @@ def main() -> int:
         type=float,
         default=0.02,
         help="maximum capture-on wall-time overhead for the matched parity gate",
+    )
+    p.add_argument(
+        "--optimizer-state-capture-parity-require-barrier",
+        action="store_true",
+        help="qualify parity only when both probe tapes prove a fixed-H lockstep barrier schedule",
+    )
+    p.add_argument(
+        "--optimizer-state-capture-strict-writer",
+        action="store_true",
+        help="fail capture validation on any non-terminal writer drop, including every configured capacity limit",
     )
     p.add_argument(
         "--device", default="cpu", help="learner/eval device (cpu, mps, cuda)"
@@ -2733,6 +2748,27 @@ def main() -> int:
                 "--optimizer-state-capture-parity requires at least two exact "
                 "syncer steps so post-first-commit steady-state timing is nonempty"
             )
+    if args.optimizer_state_capture_parity_require_barrier:
+        if not args.optimizer_state_capture_parity or not args.barrier_sync:
+            p.error(
+                "--optimizer-state-capture-parity-require-barrier requires "
+                "--optimizer-state-capture-parity and --barrier-sync"
+            )
+    if args.optimizer_state_capture_strict_writer:
+        if not args.optimizer_state_capture:
+            p.error(
+                "--optimizer-state-capture-strict-writer requires "
+                "--optimizer-state-capture"
+            )
+        if (
+            args.optimizer_state_capture_max_hmc_events < 1
+            or args.optimizer_state_capture_max_midpoint_windows < 1
+            or args.optimizer_state_capture_max_bytes < 1
+        ):
+            p.error(
+                "--optimizer-state-capture-strict-writer requires positive "
+                "event, window, and byte caps"
+            )
     if args.round_interval_ms is not None:
         from dataclasses import replace as _replace
 
@@ -2938,7 +2974,12 @@ def main() -> int:
                 str(parity_output),
                 "--overhead-limit",
                 str(args.optimizer_state_capture_parity_overhead_limit),
-            ],
+            ]
+            + (
+                ["--require-barrier-schedule"]
+                if args.optimizer_state_capture_parity_require_barrier
+                else []
+            ),
             args.report_dir / "optimizer_state_capture_parity.log",
         )
     print("\n".join(md))

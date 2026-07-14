@@ -8,6 +8,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "validate_optimizer_capture_parity.py"
 SPEC = importlib.util.spec_from_file_location(
@@ -250,7 +252,7 @@ def _make_pair(
     )
 
 
-def _run(pair: Pair) -> dict:
+def _run(pair: Pair, *, require_barrier_schedule: bool = False) -> dict:
     return MOD.run_gate(
         off_arm_dir=pair.off_arm,
         on_arm_dir=pair.on_arm,
@@ -259,6 +261,7 @@ def _run(pair: Pair) -> dict:
         off_arm=pair.off_arm_name,
         on_arm=pair.on_arm_name,
         output=pair.output,
+        require_barrier_schedule=require_barrier_schedule,
     )
 
 
@@ -296,6 +299,69 @@ def test_matched_pair_passes_with_only_known_path_metadata_canonicalized(tmp_pat
             hashlib.sha256((input_manifest.parent / relative).read_bytes()).hexdigest()
             == expected
         )
+
+
+def _set_second_commit_local_step(pair: Pair, local_step: int) -> None:
+    for arm in (pair.off_arm, pair.on_arm):
+        path = arm / "syncer_probe" / "index.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        rows[1]["local_step"] = local_step
+        _write_jsonl(path, rows)
+    transcript = pair.on_arm / "syncer_response_transcript.jsonl"
+    rows = [json.loads(line) for line in transcript.read_text().splitlines()]
+    for row in rows:
+        if row.get("request_global_step") == 2:
+            if row.get("schema") == "syncer_push_attempt_v1":
+                row["local_step"] = local_step
+            elif row.get("schema") == "syncer_round_commit_v1":
+                row["responders"][0]["local_step"] = local_step
+    _write_jsonl(transcript, rows)
+
+
+def test_required_barrier_schedule_accepts_exact_fixed_h_waves(tmp_path):
+    pair = _make_pair(tmp_path)
+    _set_second_commit_local_step(pair, 8)
+
+    result = _run(pair, require_barrier_schedule=True)
+
+    assert result["status"] == "PASS"
+    detail = _check(result, "syncer_probe_exact_payload_parity")["detail"]
+    assert detail["barrier_schedule"]["off"]["wave_local_steps"] == [4, 8]
+    assert detail["barrier_schedule"]["on"]["horizon_steps"] == 4
+
+
+def test_required_barrier_schedule_rejects_nonbarrier_step_advance(tmp_path):
+    pair = _make_pair(tmp_path)
+
+    result = _run(pair, require_barrier_schedule=True)
+
+    check = _check(result, "syncer_probe_exact_payload_parity")
+    assert result["status"] == "FAIL"
+    assert "advanced 0 local steps; expected H=4" in check["error"]
+
+
+def test_required_barrier_schedule_rejects_split_responder_boundary(tmp_path):
+    rows = {
+        (1, 0, learner): {
+            "learner_id": learner,
+            "local_step": local_step,
+            "c_steps": 4,
+            "c_tokens": 512,
+            "base_version": 0,
+        }
+        for learner, local_step in ((0, 10), (1, 10), (2, 11), (3, 11))
+    }
+    probe = MOD.ProbeCapture(
+        root=tmp_path,
+        canonical_rows=rows,
+        candidate_digests={},
+        state_digests={(1, 0): "state"},
+        update_digests={(1, 0): "update"},
+        referenced_manifest={},
+    )
+
+    with pytest.raises(MOD.ParityError, match="responders disagree on local_step"):
+        MOD.validate_barrier_schedule(probe, label="capture-ON")
 
 
 def test_input_manifest_detects_post_gate_input_mutation(tmp_path):

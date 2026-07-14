@@ -62,6 +62,13 @@ HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 HEX_F64_BITS = re.compile(r"[0-9a-f]{16}\Z")
 CAPTURE_DIRECTORY = re.compile(r"optimizer_state_capture_learner_([0-9]+)\Z")
 FINAL_LIFECYCLE_STATES = frozenset({"pushed", "superseded_unpushed", "closed_unpushed"})
+ALLOWED_TERMINAL_DROP_REASONS = frozenset(
+    {
+        "hmc_incomplete_at_close",
+        "midpoint_incomplete_at_close",
+        "window_unpushed_at_close",
+    }
+)
 
 
 class ValidationError(ValueError):
@@ -81,6 +88,7 @@ class Expectations:
     max_bytes: int
     min_joined_boundaries: int = 0
     min_joined_per_fragment: int = 0
+    strict_writer: bool = False
 
     def __post_init__(self) -> None:
         if not self.learner_ids:
@@ -125,6 +133,7 @@ class Expectations:
             "max_bytes": self.max_bytes,
             "min_joined_boundaries": self.min_joined_boundaries,
             "min_joined_per_fragment": self.min_joined_per_fragment,
+            "strict_writer": self.strict_writer,
         }
 
 
@@ -893,6 +902,18 @@ def _validate_learner(
     for reason, count in drop_counts.items():
         _require_string(reason, f"{context}.counters.drop_counts key")
         _require_int(count, f"{context}.counters.drop_counts.{reason}", minimum=1)
+    if expectations.strict_writer:
+        unexpected_drops = {
+            reason: count
+            for reason, count in drop_counts.items()
+            if reason not in ALLOWED_TERMINAL_DROP_REASONS
+        }
+        if unexpected_drops:
+            _fail(
+                "strict writer contract rejects non-terminal drops: "
+                f"{dict(sorted(unexpected_drops.items()))}",
+                context=context,
+            )
 
     raw_entries = _require_list(manifest.get("artifacts"), f"{context}.artifacts")
     entries: list[dict[str, Any]] = []
@@ -1801,6 +1822,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--tree-manifest", type=Path, default=None)
     parser.add_argument("--boundary-index", type=Path, default=None)
+    parser.add_argument(
+        "--strict-writer",
+        action="store_true",
+        help="fail on every capture drop except incomplete shutdown-tail state",
+    )
     return parser
 
 
@@ -1818,6 +1844,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_bytes=args.expected_max_bytes,
             min_joined_boundaries=args.min_joined_boundaries,
             min_joined_per_fragment=args.min_joined_per_fragment,
+            strict_writer=args.strict_writer,
         )
         summary = validate_and_write(
             args.arm_dir,

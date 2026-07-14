@@ -4,6 +4,7 @@ import hashlib
 import json
 import struct
 from collections import OrderedDict
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -563,6 +564,39 @@ def test_canonical_serialization_preserves_boundary_and_responder_tuple_order():
         (21, 0),
     ]
     assert [row["learner_id"] for row in rows[0]["responders"]] == [9, 2]
+
+
+def test_strict_writer_rejects_capacity_or_active_schedule_drops(tmp_path):
+    arm_dir, expectations = _campaign(tmp_path)
+    capture_dir = arm_dir / "optimizer_state_capture_learner_0"
+    _mutate_manifest(
+        capture_dir,
+        lambda manifest: manifest["counters"]["drop_counts"].update(
+            richardson_window_disk_byte_limit=1
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="strict writer contract"):
+        validate_campaign(arm_dir, replace(expectations, strict_writer=True))
+
+
+def test_strict_writer_allows_only_declared_shutdown_tail_drops(tmp_path):
+    arm_dir, expectations = _campaign(tmp_path)
+    capture_dir = arm_dir / "optimizer_state_capture_learner_0"
+    _mutate_manifest(
+        capture_dir,
+        lambda manifest: manifest["counters"]["drop_counts"].update(
+            hmc_incomplete_at_close=1,
+            midpoint_incomplete_at_close=1,
+            window_unpushed_at_close=1,
+        ),
+    )
+
+    summary, _tree = validate_campaign(
+        arm_dir, replace(expectations, strict_writer=True)
+    )
+
+    assert summary["status"] == "PASS"
 
 
 def test_manifest_sidecar_and_exact_file_set_fail_closed(tmp_path):
