@@ -6,5 +6,6 @@ import LeanMechanism.Correction
 import LeanMechanism.ExactStateMidpoint
 import LeanMechanism.PrequentialTransverseInterlock
 import LeanMechanism.CausalGeodesicContinuation
+import LeanMechanism.CausalPhaseLockedGeodesic
 import LeanMechanism.CrossFittedLookahead
 import LeanMechanism.CRPAccounting
