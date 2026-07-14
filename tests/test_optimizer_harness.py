@@ -949,7 +949,7 @@ def test_exp254_r5_async_canary_is_exactly_pinned_launchable_and_one_gpu():
 
     run_id = "exp2-54-smoke-r5-async-canary"
     assert spec.run_id == spec.instance_name == run_id
-    assert spec.repo_commit == "a1455ce5b2171374ad74ba74cf9092242e4885ed"
+    assert spec.repo_commit == "4ed893d195f260ba7560680d1cf3e5030f1e7bed"
     assert spec.artifact_uri == ("gs://yeto-exp2-52-model-training-497007/" + run_id)
     assert spec.execution["source_mode"] == "checkout"
     assert spec.remote_repo_dir == f"/home/shou/experiments/{run_id}/repo"
