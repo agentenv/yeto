@@ -911,6 +911,37 @@ def test_exp254_full_capture_checksums_every_learner_and_transcript(name):
     assert spec.command[spec.command.index("--syncer-total-steps") + 1] == "32"
 
 
+def test_exp254_r4_draft_requires_observed_barrier_and_strict_writer():
+    root = Path(__file__).resolve().parents[1] / "experiments" / "optimizer"
+    spec = load_spec(root / "exp2-54-smoke-r4-barrier-draft.json")
+
+    assert spec.cloud["labels"]["draft"] == "true"
+    assert spec.repo_commit == "935cb7d64e12e6821d76f707ec9e49671576f921"
+    for flag in (
+        "--strict-quorum",
+        "--barrier-sync",
+        "--optimizer-state-capture",
+        "--optimizer-state-capture-parity",
+        "--optimizer-state-capture-parity-require-barrier",
+        "--optimizer-state-capture-strict-writer",
+        "--syncer-probe-capture",
+    ):
+        assert spec.command.count(flag) == 1
+        assert spec.checks["expected_flags"][flag] == ""
+    assert (
+        spec.command[
+            spec.command.index("--optimizer-state-capture-min-joined-boundaries") + 1
+        ]
+        == "16"
+    )
+    assert (
+        spec.command[
+            spec.command.index("--optimizer-state-capture-min-joined-per-fragment") + 1
+        ]
+        == "4"
+    )
+
+
 def test_launch_verifies_boot_disk_image_provenance_before_recording_state(
     tmp_path, monkeypatch
 ):
