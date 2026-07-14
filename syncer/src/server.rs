@@ -67,6 +67,9 @@ pub struct Config {
     /// Clamped to the fragment count so concurrent rounds always target
     /// distinct fragments.
     pub pipeline: u32,
+    /// Preserve concurrent launch/upload/gather, but commit the minimum
+    /// in-flight request step first. False retains completion-order commits.
+    pub deterministic_commit_order: bool,
     /// Lower bound on the time between consecutive round LAUNCHES (ms).
     /// On a WAN, round latency naturally spaces merges many inner steps
     /// apart (the sync interval H the algorithm is tuned for); on a LAN or
@@ -741,6 +744,18 @@ fn has_pending_rounds(next_steps: &[u64], total_steps: u64) -> bool {
     next_steps.iter().any(|step| *step <= total_steps)
 }
 
+fn minimum_step_round_index(rounds: &[Round]) -> Option<usize> {
+    rounds
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, round)| round.t)
+        .map(|(index, _)| index)
+}
+
+fn commit_order_allows(rounds: &[Round], index: usize, deterministic: bool) -> bool {
+    !deterministic || minimum_step_round_index(rounds) == Some(index)
+}
+
 /// Per-learner inner-step duration estimated from consecutive pushes
 /// (each push carries the learner's local_step), smoothed with an EMA as
 /// the paper prescribes for the grace-window inputs (arXiv 2604.21428,
@@ -1346,13 +1361,15 @@ async fn scheduler(
                 .grace_deadline
                 .unwrap_or(inflight[i].quorum_deadline);
             let expired = now >= deadline;
-            if round_completion_ready(
+            let order_allows = commit_order_allows(&inflight, i, cfg.deterministic_commit_order);
+            let completion_ready = round_completion_ready(
                 inflight[i].pushes.len(),
                 connected,
                 k,
                 cfg.strict_quorum,
                 expired,
-            ) {
+            );
+            if order_allows && completion_ready {
                 let round = inflight.remove(i);
                 let released = busy_fragments.remove(&round.p);
                 debug_assert!(released, "completed fragment was not marked busy");
@@ -1371,9 +1388,14 @@ async fn scheduler(
                 )
                 .await?;
                 completed_any = true;
+                if cfg.deterministic_commit_order {
+                    // The selected index referred to the pre-removal vector.
+                    // Refill/recompute before another ordered commit.
+                    break;
+                }
                 continue;
             }
-            if expired {
+            if expired && !completion_ready {
                 let r = &mut inflight[i];
                 warn!(step = r.t, "round not ready at deadline; re-sending pull");
                 for g in current_groups(&registry) {
@@ -2598,6 +2620,7 @@ mod tests {
             grace_gamma: 0.8,
             grace_tau: 2.0,
             pipeline: 1,
+            deterministic_commit_order: false,
             min_round_interval_ms: 0,
             sync_interval_steps: 0.0,
             delta_correction: false,
@@ -2919,6 +2942,44 @@ mod tests {
 
         assert!(busy.remove(&0));
         assert_eq!(next_launchable_round(&next_steps, &busy, 20), Some((5, 0)));
+    }
+
+    #[test]
+    fn deterministic_commit_candidate_waits_for_oldest_inflight_step() {
+        let mut rounds = vec![test_round(), test_round(), test_round(), test_round()];
+        for (round, (step, fragment, ready)) in
+            rounds
+                .iter_mut()
+                .zip([(8, 3, true), (6, 1, true), (5, 0, false), (7, 2, true)])
+        {
+            round.t = step;
+            round.p = fragment;
+            if ready {
+                round.pushes.insert(0, test_push(0));
+            }
+        }
+
+        // Steps 6, 7, and 8 are already quorum-ready, but none may overtake
+        // the delayed step 5. The pipeline and gathered pushes stay intact.
+        let oldest = minimum_step_round_index(&rounds).unwrap();
+        assert_eq!(rounds[oldest].t, 5);
+        assert!(rounds[oldest].pushes.is_empty());
+        assert_eq!(
+            rounds
+                .iter()
+                .filter(|round| !round.pushes.is_empty())
+                .count(),
+            3
+        );
+        assert!(commit_order_allows(&rounds, oldest, true));
+        assert!((0..rounds.len())
+            .filter(|&index| index != oldest)
+            .all(|index| !commit_order_allows(&rounds, index, true)));
+        assert!((0..rounds.len()).all(|index| commit_order_allows(&rounds, index, false)));
+
+        rounds[oldest].pushes.insert(0, test_push(0));
+        assert_eq!(rounds.remove(oldest).t, 5);
+        assert_eq!(rounds[minimum_step_round_index(&rounds).unwrap()].t, 6);
     }
 
     #[test]

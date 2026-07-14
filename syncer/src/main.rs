@@ -34,6 +34,12 @@ struct Args {
     /// paper's τ=2); 1 = serial rounds. Clamped to the fragment count.
     #[arg(long, default_value_t = 2)]
     pipeline: u32,
+    /// Commit ready pipelined rounds in ascending request-step order. Pulls,
+    /// uploads, and quorum gathering remain concurrent; only the already
+    /// serialized mutation point waits for the oldest in-flight round. This is
+    /// opt-in because completion-order commits are the production default.
+    #[arg(long, default_value_t = false)]
+    deterministic_commit_order: bool,
     /// Lower bound on time between consecutive round launches, in ms. WAN
     /// latency spaces merges naturally; on LAN/localhost this emulates the
     /// sync interval H the outer optimizer is tuned for. 0 = unthrottled.
@@ -236,6 +242,7 @@ fn main() -> anyhow::Result<()> {
         grace_gamma: args.grace_gamma,
         grace_tau: args.grace_tau,
         pipeline: args.pipeline,
+        deterministic_commit_order: args.deterministic_commit_order,
         min_round_interval_ms: args.min_round_interval_ms,
         sync_interval_steps: args.sync_interval_steps,
         delta_correction,
@@ -407,11 +414,26 @@ mod tests {
         assert_eq!(args.outer_momentum, 0.9);
         assert_eq!(args.outer_restart_cos_threshold, 0.0);
         assert_eq!(args.delta_norm_ref, 0.0);
+        assert!(!args.deterministic_commit_order);
         assert_eq!(
             args.commit_policy,
             action_probe::CommitPolicy::TokenWeighted
         );
         assert!(action_probe_config(&args).unwrap().is_none());
+    }
+
+    #[test]
+    fn parses_deterministic_commit_order_as_opt_in() {
+        let args = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "1",
+            "--total-steps",
+            "4",
+            "--deterministic-commit-order",
+        ])
+        .unwrap();
+        assert!(args.deterministic_commit_order);
     }
 
     #[test]

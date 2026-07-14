@@ -359,6 +359,21 @@ def test_syncer_response_transcript_requires_and_forwards_pair():
         )
 
 
+def test_deterministic_commit_order_is_forwarded_only_when_enabled():
+    arm = compare.PRESETS["capture_m1_on"]
+    base = compare.syncer_command(arm, 9000, Path("/tmp/run/base"), 16)
+    ordered = compare.syncer_command(
+        arm,
+        9001,
+        Path("/tmp/run/ordered"),
+        16,
+        deterministic_commit_order=True,
+    )
+
+    assert "--deterministic-commit-order" not in base
+    assert ordered.count("--deterministic-commit-order") == 1
+
+
 def test_capture_rejects_ambiguous_arm_before_launch(monkeypatch):
     monkeypatch.setattr(
         sys,

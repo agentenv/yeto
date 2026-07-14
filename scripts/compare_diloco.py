@@ -957,6 +957,7 @@ def syncer_command(
     action_probe_expected_config: Path | None = None,
     response_transcript: Path | None = None,
     response_transcript_session: str | None = None,
+    deterministic_commit_order: bool = False,
 ) -> list[str]:
     # The syncer takes no fragment count: the layout arrives in HELLO.
     cmd = [
@@ -1018,6 +1019,8 @@ def syncer_command(
         cmd += ["--anchor-drift-log"]
     if arm.strict_quorum:
         cmd += ["--strict-quorum"]
+    if deterministic_commit_order:
+        cmd += ["--deterministic-commit-order"]
     if probe_capture:
         cmd += [
             "--probe-capture-dir",
@@ -2094,6 +2097,9 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                 anchor_drift_log=getattr(args, "anchor_drift_log", False),
                 response_transcript=response_transcript,
                 response_transcript_session=response_transcript_session,
+                deterministic_commit_order=getattr(
+                    args, "deterministic_commit_order", False
+                ),
                 **syncer_args,
             ),
             stdout=syncer_log,
@@ -2592,6 +2598,13 @@ def main() -> int:
         "after pushing a fragment delta until the syncer's merged broadcast "
         "for that fragment returns, taking no inner steps while a merge is in "
         "flight. Off by default (non-barrier strict-quorum schedule).",
+    )
+    p.add_argument(
+        "--deterministic-commit-order",
+        action="store_true",
+        help="opt in to ascending request-step commits at the syncer while "
+        "retaining pipelined pulls, uploads, and quorum gathering; forwarded "
+        "to both matched arms",
     )
     p.add_argument(
         "--version-matched-anchor",
