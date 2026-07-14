@@ -565,6 +565,34 @@ def test_ensure_syncer_rebuilds_when_rust_source_is_newer(
     )
 
 
+def test_run_checked_imports_the_pinned_checkout_before_installed_packages(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    package = repo / "yeto"
+    stale = tmp_path / "stale"
+    stale_package = stale / "yeto"
+    scripts.mkdir(parents=True)
+    package.mkdir()
+    stale_package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "probe.py").write_text('VALUE = "pinned-checkout"\n')
+    (stale_package / "__init__.py").write_text("")
+    probe = scripts / "probe.py"
+    probe.write_text("from yeto.probe import VALUE\nprint(VALUE)\n")
+    log = tmp_path / "probe.log"
+
+    monkeypatch.setattr(compare, "REPO_ROOT", repo)
+    monkeypatch.setenv("PYTHONPATH", str(stale))
+    compare.run_checked([sys.executable, str(probe)], log)
+
+    assert log.read_text() == "pinned-checkout\n"
+    env = compare.repo_subprocess_env({"PYTHONPATH": str(stale), "KEEP": "1"})
+    assert env["PYTHONPATH"].split(os.pathsep) == [str(repo), str(stale)]
+    assert env["KEEP"] == "1"
+
+
 def test_compare_eval_only_does_not_build_syncer(monkeypatch, capsys):
     monkeypatch.setattr(
         sys,

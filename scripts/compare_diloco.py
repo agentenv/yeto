@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import re
 import shlex
@@ -2149,11 +2150,28 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
     return export_dir, wall
 
 
+def repo_subprocess_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    """Force child Python processes to import this pinned checkout first."""
+    child_env = dict(os.environ if env is None else env)
+    root = str(REPO_ROOT)
+    inherited = [
+        entry
+        for entry in child_env.get("PYTHONPATH", "").split(os.pathsep)
+        if entry and entry != root
+    ]
+    child_env["PYTHONPATH"] = os.pathsep.join([root, *inherited])
+    return child_env
+
+
 def run_checked(cmd: list[str], log: Path, env: dict | None = None) -> None:
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "w") as f:
         rc = subprocess.run(
-            cmd, cwd=REPO_ROOT, stdout=f, stderr=subprocess.STDOUT, env=env
+            cmd,
+            cwd=REPO_ROOT,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            env=repo_subprocess_env(env),
         ).returncode
     if rc != 0:
         tail = "\n".join(log.read_text().splitlines()[-6:])
