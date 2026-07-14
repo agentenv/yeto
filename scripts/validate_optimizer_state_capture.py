@@ -89,6 +89,9 @@ class Expectations:
     min_joined_boundaries: int = 0
     min_joined_per_fragment: int = 0
     strict_writer: bool = False
+    background_writer: bool = False
+    background_writer_max_items: int = 0
+    background_writer_max_bytes: int = 0
 
     def __post_init__(self) -> None:
         if not self.learner_ids:
@@ -120,9 +123,15 @@ class Expectations:
                 "minimum joined-boundary total must be at least fragments times "
                 f"the per-fragment minimum ({required_total})"
             )
+        if self.background_writer and (
+            self.background_writer_max_items < 1 or self.background_writer_max_bytes < 1
+        ):
+            raise ValidationError(
+                "expected background writer item and byte caps must be positive"
+            )
 
     def as_json(self) -> dict[str, Any]:
-        return {
+        value = {
             "learner_ids": list(self.learner_ids),
             "rank": 0,
             "fragments": self.fragments,
@@ -135,6 +144,15 @@ class Expectations:
             "min_joined_per_fragment": self.min_joined_per_fragment,
             "strict_writer": self.strict_writer,
         }
+        if self.background_writer:
+            value.update(
+                {
+                    "background_writer": True,
+                    "background_writer_max_items": self.background_writer_max_items,
+                    "background_writer_max_bytes": self.background_writer_max_bytes,
+                }
+            )
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -855,8 +873,32 @@ def _validate_learner(
         "max_midpoint_windows": expectations.max_midpoint_windows,
         "max_bytes": expectations.max_bytes,
     }
+    actual_background_writer = config.get("background_writer", False)
+    if actual_background_writer is not False and actual_background_writer is not True:
+        _fail("config background_writer must be boolean when present", context=context)
+    if actual_background_writer != expectations.background_writer:
+        _fail(
+            "config background_writer differs from expected mode",
+            context=context,
+        )
+    writer_counts: dict[str, int] | None = None
+    if expectations.background_writer:
+        expected_config.update(
+            {
+                "background_writer": True,
+                "background_writer_max_items": (
+                    expectations.background_writer_max_items
+                ),
+                "background_writer_max_bytes": (
+                    expectations.background_writer_max_bytes
+                ),
+            }
+        )
     for key, expected in expected_config.items():
-        actual = _require_int(config.get(key), f"{context}.config.{key}", minimum=0)
+        if isinstance(expected, bool):
+            actual = _require_bool(config.get(key), f"{context}.config.{key}")
+        else:
+            actual = _require_int(config.get(key), f"{context}.config.{key}", minimum=0)
         if actual != expected:
             _fail(f"config {key}={actual} != expected {expected}", context=context)
     if config.get("optimizer_class") != "torch.optim.adamw.AdamW":
@@ -914,8 +956,88 @@ def _validate_learner(
                 f"{dict(sorted(unexpected_drops.items()))}",
                 context=context,
             )
+    if expectations.background_writer:
+        reserved = _require_int(
+            counters.get("background_artifact_reserved_bytes"),
+            f"{context}.counters.background_artifact_reserved_bytes",
+            minimum=0,
+        )
+        if reserved != 0:
+            _fail(
+                "background capture retains reserved artifact bytes",
+                context=context,
+            )
+        writer = _require_mapping(
+            manifest.get("background_writer"), f"{context}.background_writer"
+        )
+        if writer.get("state") != "closed":
+            _fail("background writer is not closed", context=context)
+        for key, expected in (
+            ("max_items", expectations.background_writer_max_items),
+            ("max_bytes", expectations.background_writer_max_bytes),
+        ):
+            if (
+                _require_int(
+                    writer.get(key), f"{context}.background_writer.{key}", minimum=1
+                )
+                != expected
+            ):
+                _fail(f"background writer {key} differs from expected", context=context)
+        writer_counts = {
+            key: _require_int(
+                writer.get(key), f"{context}.background_writer.{key}", minimum=0
+            )
+            for key in (
+                "accepted_items",
+                "accepted_bytes",
+                "completed_items",
+                "completed_bytes",
+                "abandoned_items",
+                "abandoned_bytes",
+                "reserved_items",
+                "reserved_bytes",
+                "queued_items",
+                "queued_bytes",
+                "in_flight_items",
+                "in_flight_bytes",
+            )
+        }
+        if (
+            writer_counts["accepted_items"] != writer_counts["completed_items"]
+            or writer_counts["accepted_bytes"] != writer_counts["completed_bytes"]
+        ):
+            _fail(
+                "background writer did not complete every accepted byte",
+                context=context,
+            )
+        for key in (
+            "abandoned_items",
+            "abandoned_bytes",
+            "reserved_items",
+            "reserved_bytes",
+            "queued_items",
+            "queued_bytes",
+            "in_flight_items",
+            "in_flight_bytes",
+        ):
+            if writer_counts[key] != 0:
+                _fail(f"background writer terminal {key} is nonzero", context=context)
+        if writer.get("worker_alive") is not False:
+            _fail("background writer worker is still alive", context=context)
+        if any(
+            writer.get(key) is not None
+            for key in ("failure_sequence", "failure_type", "failure_message")
+        ):
+            _fail("background writer reports a terminal failure", context=context)
 
     raw_entries = _require_list(manifest.get("artifacts"), f"{context}.artifacts")
+    if writer_counts is not None and writer_counts["completed_items"] != len(
+        raw_entries
+    ):
+        _fail(
+            "background writer completed-item count differs from artifact index",
+            context=context,
+        )
     entries: list[dict[str, Any]] = []
     expected_names = {"manifest.json", "manifest.json.sha256"}
     seen_names: set[str] = set()
@@ -1827,6 +1949,13 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail on every capture drop except incomplete shutdown-tail state",
     )
+    parser.add_argument(
+        "--expected-background-writer",
+        action="store_true",
+        help="require a drained successful bounded background writer in every manifest",
+    )
+    parser.add_argument("--expected-background-writer-max-items", type=int, default=0)
+    parser.add_argument("--expected-background-writer-max-bytes", type=int, default=0)
     return parser
 
 
@@ -1845,6 +1974,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             min_joined_boundaries=args.min_joined_boundaries,
             min_joined_per_fragment=args.min_joined_per_fragment,
             strict_writer=args.strict_writer,
+            background_writer=args.expected_background_writer,
+            background_writer_max_items=(args.expected_background_writer_max_items),
+            background_writer_max_bytes=(args.expected_background_writer_max_bytes),
         )
         summary = validate_and_write(
             args.arm_dir,

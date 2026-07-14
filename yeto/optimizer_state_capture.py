@@ -26,8 +26,10 @@ learner path inert when the corresponding CLI option is absent.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
+import threading
 import uuid
 from collections import Counter
 from pathlib import Path
@@ -35,11 +37,19 @@ from typing import Any, Mapping
 
 import torch
 
+from .bounded_background_writer import (
+    BackgroundWriterFailed,
+    BoundedBackgroundWriter,
+    WriteItem,
+)
 from .fragments import FragmentLayout
 
 
 SCHEMA_NAME = "yeto.optimizer-state-capture"
 SCHEMA_VERSION = 1
+BACKGROUND_PUBLICATION_SCHEMA = "yeto.optimizer-state-capture-publication"
+BACKGROUND_PUBLICATION_SCHEMA_VERSION = 1
+BACKGROUND_TRAILER_BYTES = 8
 
 
 class CaptureIntegrityError(ValueError):
@@ -209,6 +219,9 @@ class OptimizerStateCapture:
         max_midpoint_windows: int = 32,
         max_bytes: int = 4 * 1024**3,
         max_manifest_drops: int = 256,
+        background_writer: bool = False,
+        background_writer_max_items: int = 4,
+        background_writer_max_bytes: int = 4 * 1024**3,
     ) -> None:
         if every < 1:
             raise ValueError("capture cadence 'every' must be >= 1")
@@ -216,6 +229,10 @@ class OptimizerStateCapture:
             raise ValueError("capture event limits must be >= 0")
         if max_bytes < 0:
             raise ValueError("capture max_bytes must be >= 0")
+        if background_writer and background_writer_max_items < 1:
+            raise ValueError("background writer max_items must be positive")
+        if background_writer and background_writer_max_bytes < 1:
+            raise ValueError("background writer max_bytes must be positive")
         if type(optimizer) is not torch.optim.AdamW:
             raise TypeError("optimizer-state capture v1 requires torch.optim.AdamW")
         if scaler is not None:
@@ -242,6 +259,9 @@ class OptimizerStateCapture:
         self.max_midpoint_windows = int(max_midpoint_windows)
         self.max_bytes = int(max_bytes)
         self.max_manifest_drops = int(max_manifest_drops)
+        self.background_writer_enabled = bool(background_writer)
+        self.background_writer_max_items = int(background_writer_max_items)
+        self.background_writer_max_bytes = int(background_writer_max_bytes)
         self.layout_digest = layout_sha256(layout)
 
         layout_names = set(layout.tensor_names())
@@ -281,6 +301,8 @@ class OptimizerStateCapture:
         self._hmc_admitted = 0
         self._midpoint_admitted = 0
         self._artifact_bytes = 0
+        self._artifact_reserved_bytes = 0
+        self._publication_lock = threading.Lock()
         self._pending_raw_bytes = 0
         self._pending_hmc: dict[int, dict[str, Any]] = {}
         self._pending_midpoint: dict[int, dict[str, Any]] = {}
@@ -293,7 +315,23 @@ class OptimizerStateCapture:
         self._drop_counts: Counter[str] = Counter()
         self._recent_drops: list[dict[str, Any]] = []
         self._closed = False
-        self._write_manifest()
+        self._background_writer: BoundedBackgroundWriter | None = None
+        self._background_writer_stats: dict[str, Any] | None = None
+        if self.background_writer_enabled:
+            self._background_writer = BoundedBackgroundWriter(
+                self._publish_background_item,
+                max_items=self.background_writer_max_items,
+                max_bytes=self.background_writer_max_bytes,
+                thread_name=(
+                    f"optimizer-capture-writer-l{self.learner_id}-r{self.rank}"
+                ),
+            )
+        try:
+            self._write_manifest()
+        except BaseException:
+            if self._background_writer is not None:
+                self._background_writer.close()
+            raise
 
     @staticmethod
     def _group_config(group: Mapping[str, Any]) -> dict[str, Any]:
@@ -332,6 +370,35 @@ class OptimizerStateCapture:
 
     def _selected(self, ordinal: int) -> bool:
         return (ordinal - 1) % self.every == 0
+
+    def _observe_background_writer(self) -> None:
+        """Surface asynchronous publication failure at a capture boundary."""
+
+        writer = self._background_writer
+        if writer is None:
+            return
+        try:
+            stats = writer.check()
+        except BackgroundWriterFailed:
+            # FAILED already stops the worker. close() joins it and re-raises
+            # the same first cause, giving the persisted diagnostic a stable
+            # worker_alive=false terminal snapshot.
+            try:
+                writer.close()
+            except BackgroundWriterFailed as failure:
+                self._background_writer_stats = writer.snapshot().as_json()
+                with self._publication_lock:
+                    self._artifact_reserved_bytes = 0
+                try:
+                    self._write_manifest_raw()
+                except BaseException:
+                    # Publication failure is the first error. A secondary
+                    # diagnostic-manifest failure must never replace it.
+                    pass
+                raise failure
+            raise AssertionError("failed writer close unexpectedly succeeded")
+        else:
+            self._background_writer_stats = stats.as_json()
 
     def _record_drop(self, reason: str, **identity: Any) -> None:
         self._drop_counts[reason] += 1
@@ -477,6 +544,7 @@ class OptimizerStateCapture:
         learner counters have been reset.
         """
 
+        self._observe_background_writer()
         if self._closed:
             raise RuntimeError("capture is closed")
         self._validate_fragment_id(fragment_id)
@@ -522,6 +590,7 @@ class OptimizerStateCapture:
     ) -> str | None:
         """Start a candidate H/2,H window from the current fragment state."""
 
+        self._observe_background_writer()
         if self._closed:
             raise RuntimeError("capture is closed")
         self._validate_fragment_id(fragment_id)
@@ -601,6 +670,7 @@ class OptimizerStateCapture:
     ) -> None:
         """Record step context and save pending first gradients before AdamW."""
 
+        self._observe_background_writer()
         if self._closed:
             raise RuntimeError("capture is closed")
         runtime_groups = [
@@ -740,6 +810,7 @@ class OptimizerStateCapture:
     ) -> None:
         """Capture exact H/2 and H states before the step-boundary sync."""
 
+        self._observe_background_writer()
         if self._closed:
             raise RuntimeError("capture is closed")
         for fragment_id in list(self._pending_midpoint):
@@ -863,6 +934,7 @@ class OptimizerStateCapture:
         ``retry_ordinal`` values. A changed endpoint or payload fails closed.
         """
 
+        self._observe_background_writer()
         if self._closed:
             raise RuntimeError("capture is closed")
         lifecycle = self._window_lifecycles.get(window_uuid)
@@ -951,6 +1023,7 @@ class OptimizerStateCapture:
     def note_push_enqueued(self, attempt_serial: int) -> None:
         """Finalize a prepared candidate only after the client accepted it."""
 
+        self._observe_background_writer()
         attempt = self._push_attempts_by_serial.get(int(attempt_serial))
         if attempt is None:
             raise CaptureIntegrityError(f"unknown push attempt serial {attempt_serial}")
@@ -968,6 +1041,7 @@ class OptimizerStateCapture:
     def close(self) -> None:
         """Record incomplete candidates and finalize the manifest."""
 
+        self._observe_background_writer()
         if self._closed:
             return
         for fragment_id, pending in list(self._pending_hmc.items()):
@@ -989,6 +1063,26 @@ class OptimizerStateCapture:
                 fragment_id=lifecycle["fragment_id"],
                 fragment_version=lifecycle["fragment_version"],
             )
+        if self._background_writer is not None:
+            try:
+                stats = self._background_writer.close()
+            except BackgroundWriterFailed as failure:
+                self._background_writer_stats = (
+                    self._background_writer.snapshot().as_json()
+                )
+                with self._publication_lock:
+                    self._artifact_reserved_bytes = 0
+                try:
+                    self._write_manifest_raw()
+                except BaseException:
+                    pass
+                raise failure
+            self._background_writer_stats = stats.as_json()
+            with self._publication_lock:
+                if self._artifact_reserved_bytes != 0:
+                    raise CaptureIntegrityError(
+                        "background writer drained with outstanding artifact bytes"
+                    )
         self._closed = True
         self._write_manifest()
 
@@ -1004,6 +1098,7 @@ class OptimizerStateCapture:
     def _write_artifact(
         self, kind: str, metadata: dict[str, Any], payload: dict[str, Any]
     ) -> bool:
+        self._observe_background_writer()
         serial = self._next_serial()
         envelope = {
             "schema": SCHEMA_NAME,
@@ -1017,6 +1112,15 @@ class OptimizerStateCapture:
             f"{serial:06d}-{kind}-l{self.learner_id}-r{self.rank}-"
             f"f{metadata['fragment_id']}-v{metadata['fragment_version']}.pt"
         )
+        if self._background_writer is not None:
+            return self._enqueue_background_artifact(
+                serial=serial,
+                name=name,
+                kind=kind,
+                metadata=metadata,
+                envelope=envelope,
+            )
+
         path = self.directory / name
         temporary = path.with_name(f".{name}.tmp-{os.getpid()}-{serial}")
         with temporary.open("wb") as handle:
@@ -1050,42 +1154,221 @@ class OptimizerStateCapture:
         self._write_manifest()
         return True
 
+    def _enqueue_background_artifact(
+        self,
+        *,
+        serial: int,
+        name: str,
+        kind: str,
+        metadata: Mapping[str, Any],
+        envelope: Mapping[str, Any],
+    ) -> bool:
+        """Serialize to immutable bytes, reserve disk budget, then enqueue."""
+
+        writer = self._background_writer
+        if writer is None:
+            raise AssertionError("background artifact enqueue without a writer")
+        try:
+            buffer = io.BytesIO()
+            torch.save(dict(envelope), buffer)
+            artifact_bytes = buffer.tell()
+            view = buffer.getbuffer()
+            try:
+                digest = hashlib.sha256(view[:artifact_bytes]).hexdigest()
+            finally:
+                view.release()
+            sidecar_raw = f"{digest}  {name}\n".encode("ascii")
+            required = artifact_bytes + len(sidecar_raw)
+            header = {
+                "schema": BACKGROUND_PUBLICATION_SCHEMA,
+                "schema_version": BACKGROUND_PUBLICATION_SCHEMA_VERSION,
+                "serial": int(serial),
+                "name": name,
+                "sha256": digest,
+                "artifact_bytes": artifact_bytes,
+                "sidecar_bytes": len(sidecar_raw),
+                "required_bytes": required,
+                "kind": kind,
+                "fragment_id": int(metadata["fragment_id"]),
+                "fragment_version": int(metadata["fragment_version"]),
+            }
+            header_raw = _json_bytes(header)
+            buffer.write(header_raw)
+            buffer.write(len(header_raw).to_bytes(BACKGROUND_TRAILER_BYTES, "big"))
+            immutable_job = buffer.getvalue()
+        except BaseException:
+            # A local serialization/ownership failure occurs before admission.
+            # Stop the otherwise-idleable non-daemon worker before propagating.
+            self._stop_background_writer_after_local_error()
+            raise
+
+        with self._publication_lock:
+            fits_disk_budget = (
+                self._artifact_bytes + self._artifact_reserved_bytes + required
+                <= self.max_bytes
+            )
+            if fits_disk_budget:
+                self._artifact_reserved_bytes += required
+        if not fits_disk_budget:
+            self._record_drop(f"{kind}_disk_byte_limit", **metadata)
+            return False
+
+        try:
+            writer.submit(immutable_job, reservation_bytes=len(immutable_job))
+        except BaseException:
+            with self._publication_lock:
+                self._artifact_reserved_bytes -= required
+            self._stop_background_writer_after_local_error()
+            raise
+        self._write_manifest()
+        return True
+
+    def _stop_background_writer_after_local_error(self) -> None:
+        """Join the worker after a pre-admission failure without marking close."""
+
+        writer = self._background_writer
+        if writer is None:
+            return
+        try:
+            stats = writer.close()
+        except BackgroundWriterFailed as failure:
+            self._background_writer_stats = writer.snapshot().as_json()
+            with self._publication_lock:
+                self._artifact_reserved_bytes = 0
+            try:
+                self._write_manifest_raw()
+            except BaseException:
+                pass
+            raise failure
+        self._background_writer_stats = stats.as_json()
+        try:
+            self._write_manifest_raw()
+        except BaseException:
+            pass
+
+    def _publish_background_item(self, item: WriteItem) -> None:
+        """Worker-only atomic file and sidecar publication."""
+
+        raw = item.payload
+        if len(raw) <= BACKGROUND_TRAILER_BYTES:
+            raise CaptureIntegrityError("truncated background publication job")
+        header_bytes = int.from_bytes(raw[-BACKGROUND_TRAILER_BYTES:], "big")
+        header_start = len(raw) - BACKGROUND_TRAILER_BYTES - header_bytes
+        if header_start <= 0:
+            raise CaptureIntegrityError("invalid background publication header size")
+        try:
+            header = json.loads(raw[header_start:-BACKGROUND_TRAILER_BYTES])
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CaptureIntegrityError(
+                "malformed background publication header"
+            ) from exc
+        if (
+            not isinstance(header, dict)
+            or header.get("schema") != BACKGROUND_PUBLICATION_SCHEMA
+            or header.get("schema_version") != BACKGROUND_PUBLICATION_SCHEMA_VERSION
+        ):
+            raise CaptureIntegrityError("unsupported background publication header")
+        if header.get("artifact_bytes") != header_start:
+            raise CaptureIntegrityError("background artifact length/header mismatch")
+        name = header.get("name")
+        if (
+            not isinstance(name, str)
+            or Path(name).name != name
+            or not name.endswith(".pt")
+        ):
+            raise CaptureIntegrityError("unsafe background artifact name")
+        digest = header.get("sha256")
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise CaptureIntegrityError("invalid background artifact digest")
+        sidecar_raw = f"{digest}  {name}\n".encode("ascii")
+        required = header_start + len(sidecar_raw)
+        if (
+            header.get("sidecar_bytes") != len(sidecar_raw)
+            or header.get("required_bytes") != required
+        ):
+            raise CaptureIntegrityError("background publication budget mismatch")
+
+        path = self.directory / name
+        serial = int(header["serial"])
+        temporary = path.with_name(f".{name}.tmp-{os.getpid()}-{serial}")
+        artifact_view = memoryview(raw)[:header_start]
+        try:
+            with temporary.open("wb") as handle:
+                handle.write(artifact_view)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            artifact_view.release()
+        os.replace(temporary, path)
+        sidecar = path.with_suffix(path.suffix + ".sha256")
+        _atomic_replace_bytes(sidecar, sidecar_raw, serial)
+        _fsync_directory(self.directory)
+
+        entry = {
+            "path": name,
+            "sha256": digest,
+            "bytes": header_start,
+            "sidecar_bytes": len(sidecar_raw),
+            "kind": str(header["kind"]),
+            "fragment_id": int(header["fragment_id"]),
+            "fragment_version": int(header["fragment_version"]),
+        }
+        with self._publication_lock:
+            self._artifact_reserved_bytes -= required
+            self._artifact_bytes += required
+            self._artifacts.append(entry)
+
     def _manifest(self) -> dict[str, Any]:
-        return {
+        with self._publication_lock:
+            artifact_bytes = self._artifact_bytes
+            artifact_reserved_bytes = self._artifact_reserved_bytes
+            artifacts = list(self._artifacts)
+        config = {
+            "learner_id": self.learner_id,
+            "rank": self.rank,
+            "optimizer_class": (
+                f"{type(self.optimizer).__module__}.{type(self.optimizer).__qualname__}"
+            ),
+            "torch_version": torch.__version__,
+            "adamw_semantics": {
+                "bias_correction": True,
+                "epsilon_placement": "outside_sqrt",
+                "weight_decay": "decoupled",
+                "step_clock": "per_parameter_raw_optimizer_state",
+            },
+            "every": self.every,
+            "max_hmc_events": self.max_hmc_events,
+            "max_midpoint_windows": self.max_midpoint_windows,
+            "max_bytes": self.max_bytes,
+            "layout_sha256": self.layout_digest,
+        }
+        if self.background_writer_enabled:
+            config.update(
+                {
+                    "background_writer": True,
+                    "background_writer_max_items": self.background_writer_max_items,
+                    "background_writer_max_bytes": self.background_writer_max_bytes,
+                    "background_writer_payload_ownership": "exact_immutable_bytes",
+                    "background_writer_publication": "fifo_single_worker",
+                }
+            )
+        manifest = {
             "schema": SCHEMA_NAME,
             "schema_version": SCHEMA_VERSION,
             "kind": "run_manifest",
-            "config": {
-                "learner_id": self.learner_id,
-                "rank": self.rank,
-                "optimizer_class": (
-                    f"{type(self.optimizer).__module__}.{type(self.optimizer).__qualname__}"
-                ),
-                "torch_version": torch.__version__,
-                "adamw_semantics": {
-                    "bias_correction": True,
-                    "epsilon_placement": "outside_sqrt",
-                    "weight_decay": "decoupled",
-                    "step_clock": "per_parameter_raw_optimizer_state",
-                },
-                "every": self.every,
-                "max_hmc_events": self.max_hmc_events,
-                "max_midpoint_windows": self.max_midpoint_windows,
-                "max_bytes": self.max_bytes,
-                "layout_sha256": self.layout_digest,
-            },
+            "config": config,
             "counters": {
                 "broadcasts_seen": self._broadcast_seen,
                 "window_resets_seen": self._window_reset_seen,
                 "hmc_events_admitted": self._hmc_admitted,
                 "midpoint_windows_admitted": self._midpoint_admitted,
-                "artifact_bytes": self._artifact_bytes,
+                "artifact_bytes": artifact_bytes,
                 "pending_raw_bytes": self._pending_raw_bytes,
                 "push_attempt_serial": self._push_attempt_serial,
                 "drop_counts": dict(sorted(self._drop_counts.items())),
                 "closed": self._closed,
             },
-            "artifacts": list(self._artifacts),
+            "artifacts": artifacts,
             "window_lifecycles": list(self._window_lifecycles.values()),
             "push_retries": {
                 retry_identity: {
@@ -1100,8 +1383,18 @@ class OptimizerStateCapture:
             },
             "recent_drops": list(self._recent_drops),
         }
+        if self.background_writer_enabled:
+            manifest["counters"]["background_artifact_reserved_bytes"] = (
+                artifact_reserved_bytes
+            )
+            manifest["background_writer"] = dict(self._background_writer_stats or {})
+        return manifest
 
     def _write_manifest(self) -> None:
+        self._observe_background_writer()
+        self._write_manifest_raw()
+
+    def _write_manifest_raw(self) -> None:
         serial = self._next_serial()
         raw = _json_bytes(self._manifest())
         path = self.directory / "manifest.json"

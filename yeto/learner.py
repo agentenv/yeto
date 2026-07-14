@@ -394,6 +394,24 @@ def parse_args(argv=None):
         help="maximum finalized capture artifact plus checksum bytes",
     )
     p.add_argument(
+        "--optimizer-state-capture-background-writer",
+        action="store_true",
+        help="EXP qualifier: publish immutable serialized capture artifacts through "
+        "one bounded FIFO background writer; default capture remains synchronous",
+    )
+    p.add_argument(
+        "--optimizer-state-capture-writer-max-items",
+        type=int,
+        default=4,
+        help="maximum queued plus in-flight background capture artifacts",
+    )
+    p.add_argument(
+        "--optimizer-state-capture-writer-max-bytes",
+        type=int,
+        default=4 * 1024**3,
+        help="maximum immutable queued plus in-flight background payload bytes",
+    )
+    p.add_argument(
         "--freeze-delta-before-delay",
         action="store_true",
         help="EXP/stress only: materialize payload/probe snapshot before "
@@ -453,6 +471,18 @@ def parse_args(argv=None):
         p.error("--optimizer-state-capture-max-midpoint-windows must be >= 0")
     if args.optimizer_state_capture_max_bytes < 0:
         p.error("--optimizer-state-capture-max-bytes must be >= 0")
+    if args.optimizer_state_capture_writer_max_items < 1:
+        p.error("--optimizer-state-capture-writer-max-items must be >= 1")
+    if args.optimizer_state_capture_writer_max_bytes < 1:
+        p.error("--optimizer-state-capture-writer-max-bytes must be >= 1")
+    if (
+        args.optimizer_state_capture_background_writer
+        and args.optimizer_state_capture_dir is None
+    ):
+        p.error(
+            "--optimizer-state-capture-background-writer requires "
+            "--optimizer-state-capture-dir"
+        )
     return args
 
 
@@ -467,6 +497,11 @@ def validate_optimizer_state_capture_args(args) -> None:
     """Fail closed unless a capture run has one exact window/push meaning."""
 
     if getattr(args, "optimizer_state_capture_dir", None) is None:
+        if getattr(args, "optimizer_state_capture_background_writer", False):
+            raise RuntimeError(
+                "--optimizer-state-capture-background-writer requires "
+                "--optimizer-state-capture-dir"
+            )
         return
     violations = []
     if args.syncer == "none":
@@ -1600,6 +1635,9 @@ def run_inner_loop(
             max_hmc_events=args.optimizer_state_capture_max_hmc_events,
             max_midpoint_windows=args.optimizer_state_capture_max_midpoint_windows,
             max_bytes=args.optimizer_state_capture_max_bytes,
+            background_writer=args.optimizer_state_capture_background_writer,
+            background_writer_max_items=(args.optimizer_state_capture_writer_max_items),
+            background_writer_max_bytes=(args.optimizer_state_capture_writer_max_bytes),
         )
         capture_window_uuids = [None] * layout.num_fragments
         log.info("optimizer-state capture enabled at %s", capture_dir)

@@ -3,12 +3,15 @@ from __future__ import annotations
 import copy
 import json
 import random
+import threading
+import time
 from collections import OrderedDict
 
 import numpy as np
 import pytest
 import torch
 
+from yeto.bounded_background_writer import BackgroundWriterFailed, WriterState
 from yeto.fragments import Fragment, FragmentLayout, MERGE_RDA
 from yeto.optimizer_state_capture import (
     CaptureIntegrityError,
@@ -19,7 +22,17 @@ from yeto.protocol import DTYPE_F32
 from yeto.tensor_io import pack_flat
 
 
-def _fixture(tmp_path, *, max_bytes=10_000_000, every=1, max_hmc=8, max_midpoint=8):
+def _fixture(
+    tmp_path,
+    *,
+    max_bytes=10_000_000,
+    every=1,
+    max_hmc=8,
+    max_midpoint=8,
+    background_writer=False,
+    writer_max_items=4,
+    writer_max_bytes=10_000_000,
+):
     params = OrderedDict(
         [
             ("a", torch.nn.Parameter(torch.tensor([1.0, 2.0], dtype=torch.float32))),
@@ -51,6 +64,9 @@ def _fixture(tmp_path, *, max_bytes=10_000_000, every=1, max_hmc=8, max_midpoint
         max_hmc_events=max_hmc,
         max_midpoint_windows=max_midpoint,
         max_bytes=max_bytes,
+        background_writer=background_writer,
+        background_writer_max_items=writer_max_items,
+        background_writer_max_bytes=writer_max_bytes,
     )
     return params, layout, optimizer, capture
 
@@ -59,6 +75,14 @@ def _artifact(directory, kind):
     paths = list(directory.glob(f"*-{kind}-*.pt"))
     assert len(paths) == 1
     return load_capture(paths[0])
+
+
+def _wait_until(predicate, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError("timed out waiting for background capture state")
+        time.sleep(0.001)
 
 
 def _clone_live_state(params, optimizer):
@@ -232,12 +256,245 @@ def test_atomic_sidecar_tamper_rejection_and_no_temporary_files(tmp_path):
     assert path.with_suffix(".pt.sha256").exists()
     assert not list(tmp_path.glob("*.tmp-*"))
     assert load_capture(path)["kind"] == "adamw_first_gradient"
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert "background_writer" not in manifest
+    assert "background_writer" not in manifest["config"]
 
     raw = bytearray(path.read_bytes())
     raw[len(raw) // 2] ^= 1
     path.write_bytes(raw)
     with pytest.raises(CaptureIntegrityError, match="file checksum mismatch"):
         load_capture(path)
+
+
+def test_background_writer_completes_live_fifo_artifacts_and_emits_stats(tmp_path):
+    params, _layout, optimizer, capture = _fixture(
+        tmp_path,
+        background_writer=True,
+        writer_max_items=2,
+    )
+    params["a"].grad = torch.tensor([0.4, -0.2])
+    params["b"].grad = torch.tensor([0.1])
+    window_uuid = capture.note_broadcast(
+        0, 17, local_step=30, tokens_total=3_000, window_steps=2
+    )
+    assert window_uuid is not None
+    for local_step in (31, 32):
+        capture.capture_first_post_broadcast_gradients(
+            local_step_before_update=local_step - 1,
+            tokens_total=3_000 + (local_step - 31) * 128,
+            clip_total_norm=torch.tensor(0.5),
+        )
+        with torch.no_grad():
+            params["a"].add_(1.0)
+            params["b"].sub_(2.0)
+            for param in params.values():
+                optimizer.state[param]["step"].add_(1)
+        capture.after_optimizer_step(
+            local_step=local_step,
+            tokens_total=3_000 + (local_step - 30) * 128,
+            current_window_steps=2,
+        )
+    endpoint = torch.cat([params["a"].detach(), params["b"].detach()])
+    candidate = capture.note_push(
+        window_uuid=window_uuid,
+        fragment_id=0,
+        pull_global_step=44,
+        base_version=17,
+        local_step=32,
+        c_steps=2,
+        c_tokens=256,
+        wire_codec="f32",
+        payload=pack_flat(endpoint, DTYPE_F32),
+    )
+    capture.note_push_enqueued(candidate["attempt_serial"])
+    capture.close()
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["counters"]["closed"] is True
+    assert manifest["counters"]["background_artifact_reserved_bytes"] == 0
+    assert manifest["counters"]["drop_counts"] == {}
+    assert [row["kind"] for row in manifest["artifacts"]] == [
+        "adamw_first_gradient",
+        "richardson_window",
+        "push_candidate",
+    ]
+    assert [
+        load_capture(tmp_path / row["path"])["kind"] for row in manifest["artifacts"]
+    ] == [
+        "adamw_first_gradient",
+        "richardson_window",
+        "push_candidate",
+    ]
+    stats = manifest["background_writer"]
+    assert stats["state"] == "closed"
+    assert stats["accepted_items"] == stats["completed_items"] == 3
+    assert stats["accepted_bytes"] == stats["completed_bytes"]
+    assert stats["abandoned_items"] == stats["reserved_items"] == 0
+    assert stats["queued_items"] == stats["in_flight_items"] == 0
+    assert stats["worker_alive"] is False
+    assert not list(tmp_path.glob("*.tmp-*"))
+
+
+def test_background_close_does_not_publish_completion_before_worker_drain(
+    tmp_path, monkeypatch
+):
+    entered = threading.Event()
+    release = threading.Event()
+    original = OptimizerStateCapture._publish_background_item
+
+    def blocked_publish(self, item):
+        entered.set()
+        assert release.wait(3.0)
+        return original(self, item)
+
+    monkeypatch.setattr(
+        OptimizerStateCapture, "_publish_background_item", blocked_publish
+    )
+    params, _layout, _optimizer, capture = _fixture(tmp_path, background_writer=True)
+    params["a"].grad = torch.ones_like(params["a"])
+    params["b"].grad = torch.ones_like(params["b"])
+    capture.note_broadcast(0, 1, local_step=0, tokens_total=0, window_steps=4)
+    capture.capture_first_post_broadcast_gradients(
+        local_step_before_update=0, tokens_total=0
+    )
+    assert entered.wait(3.0)
+
+    close_errors = []
+
+    def close_capture():
+        try:
+            capture.close()
+        except BaseException as exc:
+            close_errors.append(exc)
+
+    closer = threading.Thread(target=close_capture, name="capture-close-test")
+    closer.start()
+    assert capture._background_writer is not None
+    _wait_until(
+        lambda: capture._background_writer.snapshot().state is WriterState.CLOSING
+    )
+    incomplete = json.loads((tmp_path / "manifest.json").read_text())
+    assert incomplete["counters"]["closed"] is False
+    assert not list(tmp_path.glob("*-adamw_first_gradient-*.pt"))
+    assert closer.is_alive()
+
+    release.set()
+    closer.join(3.0)
+    assert not closer.is_alive()
+    assert close_errors == []
+    complete = json.loads((tmp_path / "manifest.json").read_text())
+    assert complete["counters"]["closed"] is True
+    assert complete["background_writer"]["state"] == "closed"
+    assert complete["background_writer"]["completed_items"] == 1
+    assert len(list(tmp_path.glob("*-adamw_first_gradient-*.pt"))) == 1
+    assert complete["counters"]["drop_counts"] == {
+        "midpoint_incomplete_at_close": 1,
+        "window_unpushed_at_close": 1,
+    }
+
+
+def test_background_publication_failure_aborts_at_next_capture_boundary(
+    tmp_path, monkeypatch
+):
+    injected = OSError("injected artifact fsync failure")
+
+    def fail_publish(_self, _item):
+        raise injected
+
+    monkeypatch.setattr(OptimizerStateCapture, "_publish_background_item", fail_publish)
+    params, _layout, _optimizer, capture = _fixture(tmp_path, background_writer=True)
+    params["a"].grad = torch.ones_like(params["a"])
+    params["b"].grad = torch.ones_like(params["b"])
+    capture.note_broadcast(0, 1, local_step=0, tokens_total=0, window_steps=4)
+    capture.capture_first_post_broadcast_gradients(
+        local_step_before_update=0, tokens_total=0
+    )
+    assert capture._background_writer is not None
+    _wait_until(
+        lambda: capture._background_writer.snapshot().state is WriterState.FAILED
+    )
+
+    with pytest.raises(BackgroundWriterFailed) as boundary_error:
+        capture.after_optimizer_step(
+            local_step=1, tokens_total=128, current_window_steps=4
+        )
+    assert boundary_error.value.cause is injected
+    with pytest.raises(BackgroundWriterFailed) as close_error:
+        capture.close()
+    assert close_error.value.cause is injected
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["counters"]["closed"] is False
+    assert manifest["counters"]["background_artifact_reserved_bytes"] == 0
+    assert manifest["counters"]["drop_counts"] == {}
+    assert manifest["background_writer"]["state"] == "failed"
+    assert manifest["background_writer"]["failure_type"] == "OSError"
+    assert manifest["background_writer"]["worker_alive"] is False
+    assert capture._background_writer.thread_alive is False
+
+
+def test_background_queue_full_blocks_without_capture_drop(tmp_path, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    original = OptimizerStateCapture._publish_background_item
+
+    def blocked_first_publish(self, item):
+        if item.sequence == 1:
+            entered.set()
+            assert release.wait(3.0)
+        return original(self, item)
+
+    monkeypatch.setattr(
+        OptimizerStateCapture, "_publish_background_item", blocked_first_publish
+    )
+    params, _layout, _optimizer, capture = _fixture(
+        tmp_path,
+        background_writer=True,
+        writer_max_items=1,
+    )
+    params["a"].grad = torch.ones_like(params["a"])
+    params["b"].grad = torch.ones_like(params["b"])
+    capture.note_broadcast(0, 1, local_step=0, tokens_total=0, window_steps=4)
+    capture.capture_first_post_broadcast_gradients(
+        local_step_before_update=0, tokens_total=0
+    )
+    assert entered.wait(3.0)
+
+    producer_errors = []
+
+    def produce_second():
+        try:
+            assert capture._write_artifact(
+                "push_candidate",
+                {"fragment_id": 0, "fragment_version": 1},
+                {},
+            )
+        except BaseException as exc:
+            producer_errors.append(exc)
+
+    producer = threading.Thread(target=produce_second, name="capture-producer-test")
+    producer.start()
+    assert capture._background_writer is not None
+    _wait_until(
+        lambda: capture._background_writer.snapshot().producer_block_events == 1
+    )
+    while_full = json.loads((tmp_path / "manifest.json").read_text())
+    assert while_full["counters"]["drop_counts"] == {}
+    assert producer.is_alive()
+
+    release.set()
+    producer.join(3.0)
+    assert not producer.is_alive()
+    assert producer_errors == []
+    capture.close()
+    final = json.loads((tmp_path / "manifest.json").read_text())
+    assert final["counters"]["drop_counts"] == {
+        "midpoint_incomplete_at_close": 1,
+        "window_unpushed_at_close": 1,
+    }
+    assert final["background_writer"]["producer_block_events"] == 1
+    assert final["background_writer"]["completed_items"] == 2
 
 
 def test_cadence_limits_schedule_change_and_disk_budget_are_manifested(tmp_path):
@@ -419,7 +676,7 @@ def test_non_adamw_optimizer_fails_closed(tmp_path):
         )
 
 
-def _strict_capture_args():
+def _strict_capture_args(*extra):
     from yeto.learner import parse_args
 
     return parse_args(
@@ -453,6 +710,7 @@ def _strict_capture_args():
             "--fixed-window-microsteps",
             "4",
         ]
+        + list(extra)
     )
 
 
@@ -460,6 +718,22 @@ def test_strict_capture_configuration_accepts_only_unambiguous_native_path():
     from yeto.learner import validate_optimizer_state_capture_args
 
     validate_optimizer_state_capture_args(_strict_capture_args())
+
+
+def test_background_writer_cli_is_explicit_and_validates_positive_caps():
+    from yeto.learner import validate_optimizer_state_capture_args
+
+    args = _strict_capture_args(
+        "--optimizer-state-capture-background-writer",
+        "--optimizer-state-capture-writer-max-items",
+        "3",
+        "--optimizer-state-capture-writer-max-bytes",
+        "123456",
+    )
+    validate_optimizer_state_capture_args(args)
+    assert args.optimizer_state_capture_background_writer is True
+    assert args.optimizer_state_capture_writer_max_items == 3
+    assert args.optimizer_state_capture_writer_max_bytes == 123456
 
 
 @pytest.mark.parametrize(

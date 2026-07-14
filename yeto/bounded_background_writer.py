@@ -351,6 +351,18 @@ class BoundedBackgroundWriter:
         with self._condition:
             return self._snapshot_locked()
 
+    def check(self) -> WriterStats:
+        """Return a snapshot or propagate the worker's first failure.
+
+        Unlike :meth:`close`, this does not change an open writer's lifecycle.
+        Capture loops use it at deterministic hook boundaries so asynchronous
+        publication errors cannot remain latent until process teardown.
+        """
+
+        with self._condition:
+            self._raise_if_failed_locked()
+            return self._snapshot_locked()
+
     def _finish_producer_block_locked(self, started_ns: int | None) -> None:
         if started_ns is None:
             return

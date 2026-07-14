@@ -756,6 +756,20 @@ def learner_command(
                 "--optimizer-state-capture-max-bytes",
                 str(getattr(args, "optimizer_state_capture_max_bytes", 4 * 1024**3)),
             ]
+            if getattr(args, "optimizer_state_capture_background_writer", False):
+                cmd += [
+                    "--optimizer-state-capture-background-writer",
+                    "--optimizer-state-capture-writer-max-items",
+                    str(getattr(args, "optimizer_state_capture_writer_max_items", 4)),
+                    "--optimizer-state-capture-writer-max-bytes",
+                    str(
+                        getattr(
+                            args,
+                            "optimizer_state_capture_writer_max_bytes",
+                            4 * 1024**3,
+                        )
+                    ),
+                ]
         if getattr(args, "bcmp_shadow_path", False):
             cmd += [
                 "--bcmp-shadow-path",
@@ -2118,6 +2132,17 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                 str(args.optimizer_state_capture_min_joined_per_fragment),
             ]
             + (
+                [
+                    "--expected-background-writer",
+                    "--expected-background-writer-max-items",
+                    str(args.optimizer_state_capture_writer_max_items),
+                    "--expected-background-writer-max-bytes",
+                    str(args.optimizer_state_capture_writer_max_bytes),
+                ]
+                if args.optimizer_state_capture_background_writer
+                else []
+            )
+            + (
                 ["--strict-writer"]
                 if args.optimizer_state_capture_strict_writer
                 else []
@@ -2290,6 +2315,17 @@ def main() -> int:
         "--optimizer-state-capture-max-midpoint-windows", type=int, default=32
     )
     p.add_argument("--optimizer-state-capture-max-bytes", type=int, default=4 * 1024**3)
+    p.add_argument(
+        "--optimizer-state-capture-background-writer",
+        action="store_true",
+        help="publish capture artifacts through the bounded FIFO background writer",
+    )
+    p.add_argument("--optimizer-state-capture-writer-max-items", type=int, default=4)
+    p.add_argument(
+        "--optimizer-state-capture-writer-max-bytes",
+        type=int,
+        default=4 * 1024**3,
+    )
     p.add_argument(
         "--optimizer-state-capture-min-joined-boundaries",
         type=int,
@@ -2633,6 +2669,19 @@ def main() -> int:
         or args.optimizer_state_capture_min_joined_per_fragment < 0
     ):
         p.error("optimizer-state capture limits must be non-negative")
+    if (
+        args.optimizer_state_capture_writer_max_items < 1
+        or args.optimizer_state_capture_writer_max_bytes < 1
+    ):
+        p.error("optimizer-state background-writer caps must be positive")
+    if (
+        args.optimizer_state_capture_background_writer
+        and not args.optimizer_state_capture
+    ):
+        p.error(
+            "--optimizer-state-capture-background-writer requires "
+            "--optimizer-state-capture"
+        )
     if args.scaffold_beta is not None and args.scaffold_beta <= 0.0:
         p.error("--scaffold-beta must be positive")
     if args.scaffold_control_shuffle and args.inner_control_variate not in (

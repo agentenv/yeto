@@ -48,6 +48,9 @@ def _args(**overrides):
         "optimizer_state_capture_max_hmc_events": 7,
         "optimizer_state_capture_max_midpoint_windows": 9,
         "optimizer_state_capture_max_bytes": 123456,
+        "optimizer_state_capture_background_writer": False,
+        "optimizer_state_capture_writer_max_items": 4,
+        "optimizer_state_capture_writer_max_bytes": 654321,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -92,6 +95,31 @@ def test_capture_flags_and_unique_directories_are_forwarded_per_learner():
     )
     assert command[command.index("--optimizer-state-capture-max-bytes") + 1] == "123456"
     assert command[command.index("--max-reconnects") + 1] == "0"
+
+
+def test_background_writer_flags_are_opt_in_and_forward_exact_caps():
+    command = compare.learner_command(
+        _args(
+            optimizer_state_capture_background_writer=True,
+            optimizer_state_capture_writer_max_items=3,
+            optimizer_state_capture_writer_max_bytes=456789,
+        ),
+        Path("/tmp/run/work/capture_m4"),
+        learner_id=1,
+        num_learners=4,
+        syncer="127.0.0.1:9000",
+        max_steps=64,
+        arm=compare.PRESETS["capture_m4"],
+    )
+
+    assert command.count("--optimizer-state-capture-background-writer") == 1
+    assert (
+        command[command.index("--optimizer-state-capture-writer-max-items") + 1] == "3"
+    )
+    assert (
+        command[command.index("--optimizer-state-capture-writer-max-bytes") + 1]
+        == "456789"
+    )
 
 
 def test_capture_flags_are_absent_for_baseline_or_when_disabled():
@@ -267,6 +295,23 @@ def test_capture_rejects_ambiguous_arm_before_launch(monkeypatch):
             "--settings",
             "m4",
             "--optimizer-state-capture",
+            "--dry-run",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        compare.main()
+    assert exc_info.value.code == 2
+
+
+def test_background_writer_requires_capture_master_switch(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compare_diloco.py",
+            "--data",
+            "unused.jsonl",
+            "--optimizer-state-capture-background-writer",
             "--dry-run",
         ],
     )

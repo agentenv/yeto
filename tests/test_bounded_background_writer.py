@@ -50,6 +50,7 @@ def test_fifo_order_reservations_and_timing_counters() -> None:
     assert writer.submit(b"three", reservation_bytes=5) == 3
 
     while_blocked = writer.snapshot()
+    assert writer.check().state is WriterState.OPEN
     assert while_blocked.state is WriterState.OPEN
     assert while_blocked.reserved_items == 3
     assert while_blocked.reserved_bytes == 11
@@ -190,6 +191,9 @@ def test_first_sink_failure_abandons_fifo_wakes_waiters_and_propagates(
     assert enqueue_error.value.sequence == 1
     assert enqueue_error.value.cause is injected
     assert enqueue_error.value.__cause__ is injected
+    with pytest.raises(BackgroundWriterFailed) as health_error:
+        writer.check()
+    assert health_error.value.cause is injected
     with pytest.raises(BackgroundWriterFailed) as invalid_enqueue_error:
         writer.submit(bytearray(b"x"), reservation_bytes=1)  # type: ignore[arg-type]
     assert invalid_enqueue_error.value.cause is injected

@@ -103,6 +103,7 @@ def _capture_one(
     *,
     pull_global_step: int = 44,
     forced_window_uuid: str | None = None,
+    background_writer: bool = False,
 ) -> None:
     capture_dir = arm_dir / f"optimizer_state_capture_learner_{learner_id}"
     params = OrderedDict(
@@ -121,6 +122,9 @@ def _capture_one(
         max_hmc_events=4,
         max_midpoint_windows=4,
         max_bytes=MAX_BYTES,
+        background_writer=background_writer,
+        background_writer_max_items=2,
+        background_writer_max_bytes=MAX_BYTES,
     )
     if forced_window_uuid is not None:
         capture._make_window_uuid = (  # type: ignore[method-assign]
@@ -266,11 +270,13 @@ def _make_transcript(arm_dir: Path, learner_ids: tuple[int, ...]) -> None:
     _write_transcript(arm_dir / "syncer_response_transcript.jsonl", rows)
 
 
-def _campaign(tmp_path: Path) -> tuple[Path, Expectations]:
+def _campaign(
+    tmp_path: Path, *, background_writer: bool = False
+) -> tuple[Path, Expectations]:
     arm_dir = tmp_path / "m2"
     arm_dir.mkdir()
-    _capture_one(arm_dir, 0)
-    _capture_one(arm_dir, 1)
+    _capture_one(arm_dir, 0, background_writer=background_writer)
+    _capture_one(arm_dir, 1, background_writer=background_writer)
     _make_transcript(arm_dir, (0, 1))
     expectations = Expectations(
         learner_ids=(0, 1),
@@ -282,6 +288,9 @@ def _campaign(tmp_path: Path) -> tuple[Path, Expectations]:
         max_bytes=MAX_BYTES,
         min_joined_boundaries=1,
         min_joined_per_fragment=1,
+        background_writer=background_writer,
+        background_writer_max_items=2 if background_writer else 0,
+        background_writer_max_bytes=MAX_BYTES if background_writer else 0,
     )
     return arm_dir, expectations
 
@@ -564,6 +573,24 @@ def test_canonical_serialization_preserves_boundary_and_responder_tuple_order():
         (21, 0),
     ]
     assert [row["learner_id"] for row in rows[0]["responders"]] == [9, 2]
+
+
+def test_background_writer_campaign_requires_drained_complete_manifests(tmp_path):
+    arm_dir, expectations = _campaign(tmp_path, background_writer=True)
+
+    summary, _tree = validate_campaign(arm_dir, expectations)
+
+    assert summary["status"] == "PASS"
+    for learner in summary["learners"]:
+        manifest = json.loads(
+            (arm_dir / learner["manifest_path"]).read_text(encoding="utf-8")
+        )
+        writer = manifest["background_writer"]
+        assert writer["state"] == "closed"
+        assert writer["accepted_items"] == writer["completed_items"]
+        assert writer["completed_items"] == len(manifest["artifacts"])
+        assert writer["abandoned_items"] == 0
+        assert writer["worker_alive"] is False
 
 
 def test_strict_writer_rejects_capacity_or_active_schedule_drops(tmp_path):
