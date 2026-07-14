@@ -82,6 +82,7 @@ class DecodedTensorPack:
 
     manifest_id: str
     manifest_sha256: str
+    fragment_id: int
     payload: ObjectRef
     trainable: dict[str, torch.Tensor]
     optimizer: dict[str, torch.Tensor]
@@ -199,6 +200,7 @@ def publish_tensor_pack(
     store: CaptureObjectStore,
     manifest_id: str,
     *,
+    fragment_id: int,
     trainable: Mapping[str, torch.Tensor],
     optimizer: Mapping[str, torch.Tensor],
     clocks: Mapping[str, int],
@@ -222,6 +224,7 @@ def publish_tensor_pack(
     optimizer_items = _ordered_items(optimizer, "optimizer")
     clock_rows = _clock_rows(clocks)
     metadata_value = _snapshot_metadata(metadata)
+    fragment_id = _validate_exact_int(fragment_id, "fragment_id")
     if not trainable_items:
         raise TensorPackError("tensor pack requires at least one trainable tensor")
 
@@ -249,6 +252,7 @@ def publish_tensor_pack(
     pack_metadata = {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
+        "fragment_id": fragment_id,
         "byte_order": BYTE_ORDER,
         "tensor_order": TENSOR_ORDER,
         "tensors": descriptors,
@@ -350,6 +354,7 @@ def load_tensor_pack(
     expected_metadata_keys = {
         "schema",
         "schema_version",
+        "fragment_id",
         "byte_order",
         "tensor_order",
         "tensors",
@@ -367,6 +372,9 @@ def load_tensor_pack(
         raise TensorPackError("tensor-pack manifest uses an unsupported byte order")
     if metadata["tensor_order"] != TENSOR_ORDER:
         raise TensorPackError("tensor-pack manifest uses an unsupported tensor order")
+    fragment_id = _validate_exact_int(
+        metadata["fragment_id"], "tensor-pack fragment_id"
+    )
     if not isinstance(metadata["metadata"], dict):
         raise TensorPackError("tensor-pack user metadata must be an object")
 
@@ -459,6 +467,7 @@ def load_tensor_pack(
     return DecodedTensorPack(
         manifest_id=manifest["manifest_id"],
         manifest_sha256=manifest_sha256,
+        fragment_id=fragment_id,
         payload=payload_ref,
         trainable=tensors["trainable"],
         optimizer=tensors["optimizer"],

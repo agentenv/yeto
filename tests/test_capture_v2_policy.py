@@ -11,6 +11,7 @@ from yeto.capture_v2_endpoint import (
     EndpointIdentity,
     FutureGroupRefs,
     InputProvenance,
+    publish_future_group_envelope,
     publish_learner_endpoint,
 )
 from yeto.capture_v2_policy import (
@@ -55,26 +56,38 @@ def _endpoint(
     pack = publish_tensor_pack(
         store,
         "policy-fixture-fragment",
+        fragment_id=0,
         trainable={"model.layer.weight": torch.tensor([1.0, -2.0])},
         optimizer={"model.layer.weight/exp_avg": torch.tensor([0.25, -0.5])},
         clocks={"optimizer_steps": 7},
         metadata={"fragment_id": 0},
     )
+    identity = EndpointIdentity(
+        capture_session_uuid=SESSION,
+        learner_id=0,
+        rank=0,
+        local_step=100,
+        active_fragment_id=0,
+        window_uuid="00000000-0000-4000-8000-000000000001",
+    )
     future_groups = {
-        index: _object(store, f"future group {index}".encode())
+        index: publish_future_group_envelope(
+            store,
+            capture_session_uuid=identity.capture_session_uuid,
+            window_uuid=identity.window_uuid,
+            learner_id=identity.learner_id,
+            rank=identity.rank,
+            group_index=index,
+            group_id=f"policy-batch-{index}",
+            data_iterator_position=1000 + index,
+            content=f"future group {index}".encode(),
+        )
         for index in range(8 if complete_future_groups else 0)
     }
     return publish_learner_endpoint(
         store,
         "policy-fixture-endpoint",
-        identity=EndpointIdentity(
-            capture_session_uuid=SESSION,
-            learner_id=0,
-            rank=0,
-            local_step=100,
-            active_fragment_id=0,
-            window_uuid="00000000-0000-4000-8000-000000000001",
-        ),
+        identity=identity,
         input_provenance=InputProvenance(
             object=_object(store, b"endpoint provenance"),
             source_commit="a" * 40,
@@ -130,7 +143,7 @@ def _boundary(
             if weight_f64_bits is None
             else weight_f64_bits
         ),
-        payload_sha256=hashlib.sha256(b"responder payload").hexdigest(),
+        payload=_object(store, b"responder payload"),
     )
     return publish_syncer_boundary(
         store,

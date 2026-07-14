@@ -61,10 +61,11 @@ def _publish_sample(store: CaptureObjectStore, manifest_id: str = "capture-0001"
     return publish_tensor_pack(
         store,
         manifest_id,
+        fragment_id=3,
         trainable=trainable,
         optimizer=optimizer,
         clocks=clocks,
-        metadata={"fragment_id": 3, "boundary": "post-step"},
+        metadata={"boundary": "post-step"},
     )
 
 
@@ -89,14 +90,16 @@ def test_pack_is_deterministic_and_round_trips_exact_named_tensors(tmp_path):
     first = publish_tensor_pack(
         store,
         "capture-0001",
+        fragment_id=3,
         trainable=trainable,
         optimizer=optimizer,
         clocks=clocks,
-        metadata=OrderedDict([("fragment_id", 3), ("boundary", "post-step")]),
+        metadata={"boundary": "post-step"},
     )
     second = publish_tensor_pack(
         store,
         "capture-0001",
+        fragment_id=3,
         trainable=OrderedDict(
             (name, tensor.detach().contiguous().clone())
             for name, tensor in reversed(list(trainable.items()))
@@ -106,7 +109,7 @@ def test_pack_is_deterministic_and_round_trips_exact_named_tensors(tmp_path):
             for name, tensor in reversed(list(optimizer.items()))
         ),
         clocks=OrderedDict(reversed(list(clocks.items()))),
-        metadata=OrderedDict([("boundary", "post-step"), ("fragment_id", 3)]),
+        metadata={"boundary": "post-step"},
     )
 
     assert first.payload == second.payload
@@ -118,10 +121,11 @@ def test_pack_is_deterministic_and_round_trips_exact_named_tensors(tmp_path):
     loaded = load_tensor_pack(store, first)
     assert loaded.manifest_id == "capture-0001"
     assert loaded.manifest_sha256 == first.manifest.sha256
+    assert loaded.fragment_id == 3
     assert list(loaded.trainable) == sorted(trainable)
     assert list(loaded.optimizer) == sorted(optimizer)
     assert loaded.clocks == {"local_step": 41, "tokens_total": 8192}
-    assert loaded.metadata == {"boundary": "post-step", "fragment_id": 3}
+    assert loaded.metadata == {"boundary": "post-step"}
     for name, expected in trainable.items():
         assert loaded.trainable[name].dtype == expected.dtype
         assert loaded.trainable[name].shape == expected.shape
@@ -134,6 +138,7 @@ def test_pack_is_deterministic_and_round_trips_exact_named_tensors(tmp_path):
         assert _raw(loaded.optimizer[name]) == _raw(expected)
 
     manifest = store.load_manifest(first.manifest)
+    assert manifest["metadata"]["fragment_id"] == 3
     descriptors = manifest["metadata"]["tensors"]
     assert [(row["kind"], row["name"]) for row in descriptors] == [
         *(("trainable", name) for name in sorted(trainable)),
@@ -175,6 +180,7 @@ def test_round_trip_preserves_supported_optimizer_dtype_bits_and_shapes(tmp_path
     ref = publish_tensor_pack(
         store,
         "dtype-bits",
+        fragment_id=0,
         trainable=trainable,
         optimizer=optimizer,
         clocks={"optimizer_steps": 2**40},
@@ -200,6 +206,7 @@ def test_encode_and_decode_are_independent_of_all_source_and_result_aliases(tmp_
     ref = publish_tensor_pack(
         store,
         "aliases",
+        fragment_id=0,
         trainable={"fragment.a": shared, "fragment.b": shared},
         optimizer={"state/exp_avg": shared},
         clocks={"step": 1},
@@ -267,6 +274,8 @@ def test_valid_cas_payload_with_stale_per_tensor_hash_fails_closed(tmp_path):
     [
         ("extra-metadata-field", "metadata fields are malformed"),
         ("boolean-schema", "unsupported schema"),
+        ("missing-fragment-id", "metadata fields are malformed"),
+        ("boolean-fragment-id", "must be a non-negative integer"),
         ("wrong-order-contract", "unsupported tensor order"),
         ("extra-descriptor-field", "row 0 fields are malformed"),
         ("unhashable-kind", "unsupported kind"),
@@ -289,6 +298,10 @@ def test_resealed_schema_mutations_fail_closed(tmp_path, case, message):
         metadata["unexpected"] = 1
     elif case == "boolean-schema":
         metadata["schema_version"] = True
+    elif case == "missing-fragment-id":
+        metadata.pop("fragment_id")
+    elif case == "boolean-fragment-id":
+        metadata["fragment_id"] = True
     elif case == "wrong-order-contract":
         metadata["tensor_order"] = "dictionary-order"
     elif case == "extra-descriptor-field":
@@ -370,6 +383,7 @@ def test_invalid_sources_and_clocks_publish_nothing(tmp_path):
             publish_tensor_pack(
                 store,
                 f"invalid-{index}",
+                fragment_id=0,
                 trainable=case["trainable"],
                 optimizer=case["optimizer"],
                 clocks=case["clocks"],
@@ -394,6 +408,7 @@ def test_invalid_identity_or_metadata_is_rejected_before_payload_insert(
         publish_tensor_pack(
             store,
             manifest_id,
+            fragment_id=0,
             trainable={"fragment": torch.ones(1, dtype=torch.float32)},
             optimizer={},
             clocks={},

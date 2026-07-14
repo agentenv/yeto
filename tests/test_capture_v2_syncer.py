@@ -60,6 +60,7 @@ def _learner_endpoint(
         packs[fragment_id] = publish_tensor_pack(
             store,
             f"learner-{learner_id}-fragment-{fragment_id}",
+            fragment_id=fragment_id,
             trainable={
                 f"learner.{learner_id}.layer.{fragment_id}.weight": torch.tensor(
                     [learner_id + fragment_id + 0.25], dtype=torch.float32
@@ -109,13 +110,11 @@ def _learner_endpoint(
     )
 
 
-def _responder(endpoint, learner_id: int):
+def _responder(store: CaptureObjectStore, endpoint, learner_id: int):
     return ResponderEndpointRef(
         endpoint=endpoint,
         weight_f64_bits=struct.pack(">d", 128.0 + learner_id).hex(),
-        payload_sha256=hashlib.sha256(
-            f"push payload {learner_id}".encode()
-        ).hexdigest(),
+        payload=_object(store, f"push payload {learner_id}".encode()),
     )
 
 
@@ -137,9 +136,9 @@ def _boundary_arguments(store: CaptureObjectStore):
             post_fragment_version=42,
         ),
         "responders": [
-            _responder(endpoints[2], 2),
-            _responder(endpoints[0], 0),
-            _responder(endpoints[1], 1),
+            _responder(store, endpoints[2], 2),
+            _responder(store, endpoints[0], 0),
+            _responder(store, endpoints[1], 1),
         ],
         "pre_fragment": _object(store, pre),
         "post_fragment": _object(store, post),
@@ -212,6 +211,9 @@ def test_boundary_is_canonical_deterministic_and_cross_wires_endpoints(tmp_path)
     assert loaded.identity == arguments["identity"]
     assert [row.endpoint.identity.learner_id for row in loaded.responders] == [0, 1, 2]
     assert [row.responder_index for row in loaded.responders] == [0, 1, 2]
+    assert [
+        store.object_path(row.payload.sha256).read_bytes() for row in loaded.responders
+    ] == [b"push payload 0", b"push payload 1", b"push payload 2"]
     assert [row.endpoint.identity.local_step for row in loaded.responders] == [
         100,
         101,
@@ -233,6 +235,9 @@ def test_boundary_is_canonical_deterministic_and_cross_wires_endpoints(tmp_path)
         "syncer/post-fragment",
         "syncer/outer-state",
         "syncer/broadcast",
+        "responders/0/payload",
+        "responders/1/payload",
+        "responders/2/payload",
     ]
     assert manifest["metadata"]["broadcast"] == {
         "role": "syncer/broadcast",
@@ -245,6 +250,13 @@ def test_boundary_is_canonical_deterministic_and_cross_wires_endpoints(tmp_path)
         )
         assert responder["input_provenance"]["source_commit"] == "a" * 40
         assert responder["input_provenance"]["image_id"] == "gcp:yeto-a100-v1"
+        payload_row = next(
+            row
+            for row in manifest["objects"]
+            if row["role"] == responder["payload_role"]
+        )
+        assert responder["payload_sha256"] == payload_row["sha256"]
+        assert responder["payload_bytes"] == payload_row["bytes"]
     store.audit()
 
 
@@ -267,6 +279,37 @@ def test_opaque_reconstruction_callback_must_reproduce_both_exact_outputs(tmp_pa
     assert [row.endpoint.identity.learner_id for row in request.responders] == [0, 1, 2]
     assert request.pre_fragment == internal["_raw"]["pre"]
     assert request.outer_state == internal["_raw"]["outer"]
+
+
+def test_reconstruction_reloads_authority_after_config_and_responder_mutation(tmp_path):
+    store = CaptureObjectStore(tmp_path / "cas")
+    boundary, _arguments, internal = _publish_boundary(store)
+    loaded = load_syncer_boundary(store, boundary)
+    authoritative_weight = loaded.responders[0].weight_f64_bits
+    authoritative_payload = loaded.responders[0].payload
+
+    loaded.merge_config.parameters["weighted"] = False
+    loaded.outer_config.parameters["lr_f64_bits"] = "3ff0000000000000"
+    loaded.responders[0].weight_f64_bits = "0000000000000000"
+    loaded.responders[0].payload = _object(store, b"mutated responder payload view")
+    seen = {}
+
+    def reconstruct(request):
+        seen["request"] = request
+        post = request.pre_fragment + b"|merged-with|" + request.outer_state
+        return ReconstructionOutput(post, b"broadcast:" + post)
+
+    result = verify_reconstruction(store, loaded, reconstruct)
+
+    assert result.post_fragment == internal["_raw"]["post"]
+    request = seen["request"]
+    assert request.merge_config.parameters["weighted"] is True
+    assert (
+        request.outer_config.parameters["lr_f64_bits"] == struct.pack(">d", 0.28).hex()
+    )
+    assert [row.endpoint.identity.learner_id for row in request.responders] == [0, 1, 2]
+    assert request.responders[0].weight_f64_bits == authoritative_weight
+    assert request.responders[0].payload == authoritative_payload
 
 
 @pytest.mark.parametrize(
@@ -315,6 +358,8 @@ def test_reconstruction_mismatches_fail_closed(tmp_path, case, message):
         ("endpoint-cross-wire", "identity cross-reference mismatch"),
         ("weight-bits", "16 lowercase hex"),
         ("payload-sha", "lowercase SHA-256"),
+        ("payload-ff", "payload metadata/object cross-reference mismatch"),
+        ("digest-only-payload", "fields are malformed"),
         ("merge-config-extra", "fields are malformed"),
         ("outer-config-array", "parameters must be an object"),
         ("broadcast-sha", "broadcast SHA/bytes cross-reference mismatch"),
@@ -340,12 +385,21 @@ def test_resealed_boundary_schema_and_cross_wire_mutations_fail_closed(
     elif case == "responder-index":
         metadata["responders"][0]["responder_index"] = True
     elif case == "responder-order":
+        original_payloads = [
+            {
+                key: row[key]
+                for key in ("payload_role", "payload_sha256", "payload_bytes")
+            }
+            for row in metadata["responders"]
+        ]
         metadata["responders"][0], metadata["responders"][1] = (
             metadata["responders"][1],
             metadata["responders"][0],
         )
         metadata["responders"][0]["responder_index"] = 0
         metadata["responders"][1]["responder_index"] = 1
+        for index, payload in enumerate(original_payloads):
+            metadata["responders"][index].update(payload)
     elif case == "identity-cross-wire":
         metadata["responders"][0]["endpoint_identity"]["local_step"] += 1
     elif case == "provenance-cross-wire":
@@ -363,6 +417,11 @@ def test_resealed_boundary_schema_and_cross_wire_mutations_fail_closed(
         metadata["responders"][0]["weight_f64_bits"] = "ABC"
     elif case == "payload-sha":
         metadata["responders"][0]["payload_sha256"] = "A" * 64
+    elif case == "payload-ff":
+        metadata["responders"][0]["payload_sha256"] = "f" * 64
+    elif case == "digest-only-payload":
+        metadata["responders"][0].pop("payload_role")
+        metadata["responders"][0].pop("payload_bytes")
     elif case == "merge-config-extra":
         metadata["merge_config"]["unexpected"] = 1
     elif case == "outer-config-array":
@@ -467,17 +526,17 @@ def test_publication_rejects_causally_mismatched_responders(tmp_path, case, mess
         wrong = _learner_endpoint(
             store, 9, session="87654321-4321-4765-8765-123456789abc"
         )
-        arguments["responders"] = [_responder(wrong, 9)]
+        arguments["responders"] = [_responder(store, wrong, 9)]
     elif case == "wrong-fragment":
         wrong = _learner_endpoint(store, 9, active_fragment_id=0)
-        arguments["responders"] = [_responder(wrong, 9)]
+        arguments["responders"] = [_responder(store, wrong, 9)]
     elif case == "wrong-pre-version":
         wrong = _learner_endpoint(store, 9, fragment_versions=(5, 16))
-        arguments["responders"] = [_responder(wrong, 9)]
+        arguments["responders"] = [_responder(store, wrong, 9)]
     elif case == "duplicate-learner":
         arguments["responders"] = [
-            _responder(endpoints[0], 0),
-            _responder(endpoints[0], 0),
+            _responder(store, endpoints[0], 0),
+            _responder(store, endpoints[0], 0),
         ]
     elif case == "no-responders":
         arguments["responders"] = []

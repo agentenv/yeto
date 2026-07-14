@@ -12,7 +12,9 @@ from yeto.capture_v2_endpoint import (
     EndpointManifestError,
     FutureGroupRefs,
     InputProvenance,
+    load_future_group_envelope,
     load_learner_endpoint,
+    publish_future_group_envelope,
     publish_learner_endpoint,
 )
 from yeto.capture_v2_store import (
@@ -32,6 +34,7 @@ def _fragment_pack(store: CaptureObjectStore, fragment_id: int):
     return publish_tensor_pack(
         store,
         f"fragment-pack-{fragment_id}",
+        fragment_id=fragment_id,
         trainable={
             f"model.layer.{fragment_id}.weight": torch.tensor(
                 [fragment_id + 0.25, fragment_id - 0.5], dtype=torch.float32
@@ -46,7 +49,35 @@ def _fragment_pack(store: CaptureObjectStore, fragment_id: int):
             ),
         },
         clocks={"optimizer_steps": fragment_id + 7},
-        metadata={"fragment_id": fragment_id},
+        metadata={"fixture": "endpoint"},
+    )
+
+
+def _future_envelope(
+    store: CaptureObjectStore,
+    identity: EndpointIdentity,
+    index: int,
+    *,
+    session: str | None = None,
+    window: str | None = None,
+    learner_id: int | None = None,
+    rank: int | None = None,
+    envelope_index: int | None = None,
+    group_id: str | None = None,
+    data_iterator_position: int | None = None,
+) -> ObjectRef:
+    return publish_future_group_envelope(
+        store,
+        capture_session_uuid=session or identity.capture_session_uuid,
+        window_uuid=window or identity.window_uuid,
+        learner_id=identity.learner_id if learner_id is None else learner_id,
+        rank=identity.rank if rank is None else rank,
+        group_index=index if envelope_index is None else envelope_index,
+        group_id=group_id or f"batch-{index}",
+        data_iterator_position=(
+            1000 + index if data_iterator_position is None else data_iterator_position
+        ),
+        content=f"opaque exact state: future-group-{index}".encode(),
     )
 
 
@@ -60,18 +91,19 @@ def _endpoint_arguments(
     future_reason: str | None = None,
 ):
     packs = {index: _fragment_pack(store, index) for index in range(fragment_count)}
+    identity = EndpointIdentity(
+        capture_session_uuid="12345678-1234-5678-9234-567812345678",
+        learner_id=4,
+        rank=0,
+        local_step=42,
+        active_fragment_id=0,
+        window_uuid="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    )
     future_refs = {
-        index: _object(store, f"future-group-{index}") for index in future_indices
+        index: _future_envelope(store, identity, index) for index in future_indices
     }
     return {
-        "identity": EndpointIdentity(
-            capture_session_uuid="12345678-1234-5678-9234-567812345678",
-            learner_id=4,
-            rank=0,
-            local_step=42,
-            active_fragment_id=0,
-            window_uuid="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-        ),
+        "identity": identity,
         "input_provenance": InputProvenance(
             object=_object(store, "input-provenance"),
             source_commit="a" * 40,
@@ -154,7 +186,7 @@ def test_complete_endpoint_is_canonical_deterministic_and_cross_verified(tmp_pat
     assert loaded.fragment_versions == (101, 102, 103)
     assert list(loaded.fragments) == [0, 1, 2]
     for fragment_id, pack in loaded.fragments.items():
-        assert pack.metadata["fragment_id"] == fragment_id
+        assert pack.fragment_id == fragment_id
         assert list(pack.trainable) == [f"model.layer.{fragment_id}.weight"]
         assert pack.optimizer[f"model.layer.{fragment_id}.weight/step"].item() == (
             fragment_id + 7
@@ -173,6 +205,16 @@ def test_complete_endpoint_is_canonical_deterministic_and_cross_verified(tmp_pat
     assert loaded.future_groups.state == "complete"
     assert loaded.future_groups.reason is None
     assert list(loaded.future_groups.refs) == list(range(FUTURE_GROUP_COUNT))
+    for index, ref in loaded.future_groups.refs.items():
+        envelope = load_future_group_envelope(store, ref)
+        assert envelope.capture_session_uuid == loaded.identity.capture_session_uuid
+        assert envelope.window_uuid == loaded.identity.window_uuid
+        assert envelope.learner_id == loaded.identity.learner_id
+        assert envelope.rank == loaded.identity.rank
+        assert envelope.group_index == index
+        assert envelope.group_id == f"batch-{index}"
+        assert envelope.data_iterator_position == 1000 + index
+        assert envelope.content == f"opaque exact state: future-group-{index}".encode()
 
     manifest = store.load_manifest(first.manifest)
     assert [row["role"] for row in manifest["objects"]] == [
@@ -275,6 +317,93 @@ def test_future_group_publication_count_and_state_rules_fail_closed(
 @pytest.mark.parametrize(
     ("case", "message"),
     [
+        ("same-object-x8", "cannot be reused across indices"),
+        ("old-opaque-ref", "envelope magic is malformed"),
+        ("wrong-index", "differs from endpoint slot"),
+        ("wrong-session", "identity differs from endpoint"),
+        ("wrong-window", "identity differs from endpoint"),
+        ("wrong-learner", "identity differs from endpoint"),
+        ("wrong-rank", "identity differs from endpoint"),
+        ("wrong-data-position", "not canonically aligned"),
+        ("wrong-content-digest", "content SHA-256 mismatch"),
+    ],
+)
+def test_future_group_envelope_identity_and_reuse_fail_closed(tmp_path, case, message):
+    store = CaptureObjectStore(tmp_path / case)
+    arguments = _endpoint_arguments(store, fragment_count=1)
+    identity = arguments["identity"]
+    refs = dict(arguments["future_groups"].refs)
+    if case == "same-object-x8":
+        refs = {index: refs[0] for index in range(FUTURE_GROUP_COUNT)}
+    elif case == "old-opaque-ref":
+        refs[3] = _object(store, "legacy opaque future group")
+    elif case == "wrong-index":
+        refs[3] = _future_envelope(store, identity, 3, envelope_index=4)
+    elif case == "wrong-session":
+        refs[3] = _future_envelope(
+            store,
+            identity,
+            3,
+            session="87654321-4321-4765-8765-123456789abc",
+        )
+    elif case == "wrong-window":
+        refs[3] = _future_envelope(
+            store,
+            identity,
+            3,
+            window="bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+        )
+    elif case == "wrong-learner":
+        refs[3] = _future_envelope(store, identity, 3, learner_id=5)
+    elif case == "wrong-rank":
+        refs[3] = _future_envelope(store, identity, 3, rank=1)
+    elif case == "wrong-data-position":
+        refs[3] = _future_envelope(store, identity, 3, data_iterator_position=2003)
+    elif case == "wrong-content-digest":
+        raw = bytearray(store.object_path(refs[3].sha256).read_bytes())
+        raw[-1] ^= 1
+        refs[3] = store.put_bytes(bytes(raw)).ref
+    else:  # pragma: no cover
+        raise AssertionError(case)
+    arguments["future_groups"] = FutureGroupRefs("complete", refs)
+
+    with pytest.raises(EndpointManifestError, match=message):
+        publish_learner_endpoint(store, f"bad-envelope-{case}", **arguments)
+
+    assert len(list(store.manifests_dir.iterdir())) == 1
+
+
+def test_resealed_endpoint_reusing_one_future_envelope_x8_fails_closed(tmp_path):
+    store = CaptureObjectStore(tmp_path / "cas")
+    arguments = _endpoint_arguments(store, fragment_count=1)
+    endpoint = publish_learner_endpoint(store, "valid-endpoint", **arguments)
+    manifest = store.load_manifest(endpoint.manifest)
+    metadata = copy.deepcopy(manifest["metadata"])
+    entries = _manifest_entries(store, manifest)
+    first_future = next(
+        entry for entry in entries if entry.role == "future-groups/0"
+    ).object
+    resealed_entries = [
+        ManifestEntry(entry.role, first_future)
+        if entry.role.startswith("future-groups/")
+        else entry
+        for entry in entries
+    ]
+    resealed = _reseal_endpoint(
+        store,
+        endpoint,
+        metadata,
+        manifest_id="same-future-envelope-x8",
+        entries=resealed_entries,
+    )
+
+    with pytest.raises(EndpointManifestError, match="cannot be reused across indices"):
+        load_learner_endpoint(store, resealed)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
         ("extra-field", "metadata fields are malformed"),
         ("boolean-schema", "unsupported schema"),
         ("wrong-mode", "mode must be one of"),
@@ -362,8 +491,27 @@ def test_fragment_tensor_pack_payload_cross_reference_mismatch_is_rejected(tmp_p
         store, endpoint, metadata, manifest_id="cross-reference-mismatch"
     )
 
-    with pytest.raises(EndpointManifestError, match="cross-reference mismatch"):
+    with pytest.raises(
+        EndpointManifestError, match="intrinsic tensor-pack fragment_id"
+    ):
         load_learner_endpoint(store, resealed)
+
+
+def test_fragment_tensor_pack_slot_swap_is_rejected_during_publication(tmp_path):
+    store = CaptureObjectStore(tmp_path / "cas")
+    arguments = _endpoint_arguments(store, fragment_count=2)
+    arguments["fragment_packs"] = {
+        0: arguments["fragment_packs"][1],
+        1: arguments["fragment_packs"][0],
+    }
+    manifest_count = len(list(store.manifests_dir.iterdir()))
+
+    with pytest.raises(
+        EndpointManifestError, match="intrinsic tensor-pack fragment_id"
+    ):
+        publish_learner_endpoint(store, "swapped-packs", **arguments)
+
+    assert len(list(store.manifests_dir.iterdir())) == manifest_count
 
 
 def test_extra_or_reordered_object_roles_are_rejected(tmp_path):

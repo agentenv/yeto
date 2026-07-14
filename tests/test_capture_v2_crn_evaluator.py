@@ -24,6 +24,7 @@ from yeto.capture_v2_endpoint import (
     EndpointIdentity,
     FutureGroupRefs,
     InputProvenance,
+    publish_future_group_envelope,
     publish_learner_endpoint,
 )
 from yeto.capture_v2_policy import (
@@ -84,30 +85,42 @@ def _fixture(
 ) -> _Fixture:
     store = store or CaptureObjectStore(tmp_path / "cas")
     future_count = 8 if future_state == "complete" else 7
+    numeric_suffix = sum(suffix.encode())
+    identity = EndpointIdentity(
+        capture_session_uuid=SESSION,
+        learner_id=0,
+        rank=0,
+        local_step=100,
+        active_fragment_id=0,
+        window_uuid=f"00000000-0000-4000-8000-{numeric_suffix:012d}",
+    )
     future_groups = tuple(
-        _object(store, f"{suffix} future group {index}".encode())
+        publish_future_group_envelope(
+            store,
+            capture_session_uuid=identity.capture_session_uuid,
+            window_uuid=identity.window_uuid,
+            learner_id=identity.learner_id,
+            rank=identity.rank,
+            group_index=index,
+            group_id=f"{suffix}-batch-{index}",
+            data_iterator_position=1000 + index,
+            content=f"{suffix} future group {index}".encode(),
+        )
         for index in range(future_count)
     )
     pack = publish_tensor_pack(
         store,
         f"{suffix}-fragment-pack",
+        fragment_id=0,
         trainable={"model.weight": torch.tensor([1.0, -2.0])},
         optimizer={"model.weight/exp_avg": torch.tensor([0.25, -0.5])},
         clocks={"optimizer_steps": 7},
         metadata={"fixture": suffix},
     )
-    numeric_suffix = sum(suffix.encode())
     endpoint = publish_learner_endpoint(
         store,
         f"{suffix}-endpoint",
-        identity=EndpointIdentity(
-            capture_session_uuid=SESSION,
-            learner_id=0,
-            rank=0,
-            local_step=100,
-            active_fragment_id=0,
-            window_uuid=f"00000000-0000-4000-8000-{numeric_suffix:012d}",
-        ),
+        identity=identity,
         input_provenance=InputProvenance(
             object=_object(store, f"{suffix} provenance".encode()),
             source_commit="a" * 40,
@@ -148,7 +161,7 @@ def _fixture(
             ResponderEndpointRef(
                 endpoint=endpoint,
                 weight_f64_bits=struct.pack(">d", 128.0).hex(),
-                payload_sha256=_digest(suffix, "payload"),
+                payload=_object(store, f"{suffix} responder payload".encode()),
             )
         ],
         pre_fragment=_object(store, f"{suffix} pre fragment".encode()),

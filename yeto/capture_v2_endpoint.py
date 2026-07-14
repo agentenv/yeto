@@ -8,8 +8,10 @@ safe to capture, mutate a model or optimizer, or claim any replay outcome.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import struct
 import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -38,11 +40,16 @@ PYTHON_RNG_ROLE = "rng/python"
 NUMPY_RNG_ROLE = "rng/numpy"
 TORCH_CPU_RNG_ROLE = "rng/torch-cpu"
 INPUT_PROVENANCE_ROLE = "provenance/input"
+FUTURE_GROUP_ENVELOPE_SCHEMA = "yeto.capture-v2-future-group-envelope"
+FUTURE_GROUP_ENVELOPE_VERSION = 1
+FUTURE_GROUP_ENVELOPE_MAGIC = b"YETO_CAPTURE_V2_FUTURE_GROUP\x00"
 
 _MAX_COUNTER = 2**63 - 1
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _SOURCE_COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 _IMAGE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,511}\Z")
+_GROUP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}\Z")
+_MAX_ENVELOPE_HEADER_BYTES = 16 * 1024
 
 
 class EndpointManifestError(CaptureStoreError):
@@ -60,6 +67,22 @@ class FutureGroupRefs:
     state: str
     refs: Mapping[int, ObjectRef]
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class LoadedFutureGroupEnvelope:
+    """Verified identity header and exact embedded future-group content."""
+
+    object: ObjectRef
+    capture_session_uuid: str
+    window_uuid: str
+    learner_id: int
+    rank: int
+    group_index: int
+    group_id: str
+    data_iterator_position: int
+    content_sha256: str
+    content: bytes
 
 
 @dataclass(frozen=True)
@@ -169,6 +192,165 @@ def _sha256(value: Any, context: str) -> str:
     return value
 
 
+def _group_id(value: Any, context: str) -> str:
+    if not isinstance(value, str) or _GROUP_ID_RE.fullmatch(value) is None:
+        raise EndpointManifestError(f"{context} is malformed")
+    return value
+
+
+def _canonical_envelope_header(value: Mapping[str, Any]) -> bytes:
+    try:
+        return (
+            json.dumps(
+                dict(value),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise EndpointManifestError(
+            f"future-group envelope header is not canonical JSON data: {exc}"
+        ) from exc
+
+
+def publish_future_group_envelope(
+    store: CaptureObjectStore,
+    *,
+    capture_session_uuid: str,
+    window_uuid: str,
+    learner_id: int,
+    rank: int,
+    group_index: int,
+    group_id: str,
+    data_iterator_position: int,
+    content: bytes,
+) -> ObjectRef:
+    """Publish one canonical identity envelope containing exact group bytes."""
+
+    if not isinstance(content, bytes):
+        raise TypeError("future-group content must be bytes")
+    header = {
+        "schema": FUTURE_GROUP_ENVELOPE_SCHEMA,
+        "schema_version": FUTURE_GROUP_ENVELOPE_VERSION,
+        "capture_session_uuid": _canonical_uuid(
+            capture_session_uuid, "future-group capture_session_uuid"
+        ),
+        "window_uuid": _canonical_uuid(window_uuid, "future-group window_uuid"),
+        "learner_id": _exact_nonnegative_int(learner_id, "future-group learner_id"),
+        "rank": _exact_nonnegative_int(rank, "future-group rank"),
+        "group_index": _exact_nonnegative_int(group_index, "future-group group_index"),
+        "group_id": _group_id(group_id, "future-group group_id"),
+        "data_iterator_position": _exact_nonnegative_int(
+            data_iterator_position, "future-group data_iterator_position"
+        ),
+        "content_bytes": len(content),
+        "content_sha256": hashlib.sha256(content).hexdigest(),
+    }
+    header_bytes = _canonical_envelope_header(header)
+    if len(header_bytes) > _MAX_ENVELOPE_HEADER_BYTES:
+        raise EndpointManifestError("future-group envelope header is too large")
+    raw = (
+        FUTURE_GROUP_ENVELOPE_MAGIC
+        + struct.pack(">Q", len(header_bytes))
+        + header_bytes
+        + content
+    )
+    return store.put_bytes(raw).ref
+
+
+def load_future_group_envelope(
+    store: CaptureObjectStore, ref: ObjectRef
+) -> LoadedFutureGroupEnvelope:
+    """Strictly verify one canonical future-group envelope and its content."""
+
+    ref = _exact_ref(ref, "future-group envelope")
+    path = store.verify_object(ref)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise EndpointManifestError(
+            f"cannot read future-group envelope {path}: {exc}"
+        ) from exc
+    if len(raw) != ref.bytes or hashlib.sha256(raw).hexdigest() != ref.sha256:
+        raise EndpointManifestError(
+            "future-group envelope changed after CAS verification"
+        )
+    prefix_bytes = len(FUTURE_GROUP_ENVELOPE_MAGIC) + 8
+    if len(raw) < prefix_bytes or not raw.startswith(FUTURE_GROUP_ENVELOPE_MAGIC):
+        raise EndpointManifestError("future-group envelope magic is malformed")
+    header_size = struct.unpack(
+        ">Q",
+        raw[len(FUTURE_GROUP_ENVELOPE_MAGIC) : prefix_bytes],
+    )[0]
+    if header_size == 0 or header_size > _MAX_ENVELOPE_HEADER_BYTES:
+        raise EndpointManifestError("future-group envelope header size is malformed")
+    header_end = prefix_bytes + header_size
+    if header_end > len(raw):
+        raise EndpointManifestError("future-group envelope header is truncated")
+    header_raw = raw[prefix_bytes:header_end]
+    try:
+        header = json.loads(header_raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise EndpointManifestError(
+            f"future-group envelope header cannot be decoded: {exc}"
+        ) from exc
+    if not isinstance(header, dict) or header_raw != _canonical_envelope_header(header):
+        raise EndpointManifestError("future-group envelope header is not canonical")
+    expected_keys = {
+        "schema",
+        "schema_version",
+        "capture_session_uuid",
+        "window_uuid",
+        "learner_id",
+        "rank",
+        "group_index",
+        "group_id",
+        "data_iterator_position",
+        "content_bytes",
+        "content_sha256",
+    }
+    if set(header) != expected_keys:
+        raise EndpointManifestError("future-group envelope header fields are malformed")
+    if header["schema"] != FUTURE_GROUP_ENVELOPE_SCHEMA or (
+        type(header["schema_version"]) is not int
+        or header["schema_version"] != FUTURE_GROUP_ENVELOPE_VERSION
+    ):
+        raise EndpointManifestError("future-group envelope uses an unsupported schema")
+    content = raw[header_end:]
+    content_bytes = _exact_nonnegative_int(
+        header["content_bytes"], "future-group content_bytes"
+    )
+    if len(content) != content_bytes:
+        raise EndpointManifestError("future-group envelope content size mismatch")
+    content_sha256 = _sha256(header["content_sha256"], "future-group content_sha256")
+    if hashlib.sha256(content).hexdigest() != content_sha256:
+        raise EndpointManifestError("future-group envelope content SHA-256 mismatch")
+    return LoadedFutureGroupEnvelope(
+        object=ref,
+        capture_session_uuid=_canonical_uuid(
+            header["capture_session_uuid"], "future-group capture_session_uuid"
+        ),
+        window_uuid=_canonical_uuid(header["window_uuid"], "future-group window_uuid"),
+        learner_id=_exact_nonnegative_int(
+            header["learner_id"], "future-group learner_id"
+        ),
+        rank=_exact_nonnegative_int(header["rank"], "future-group rank"),
+        group_index=_exact_nonnegative_int(
+            header["group_index"], "future-group group_index"
+        ),
+        group_id=_group_id(header["group_id"], "future-group group_id"),
+        data_iterator_position=_exact_nonnegative_int(
+            header["data_iterator_position"],
+            "future-group data_iterator_position",
+        ),
+        content_sha256=content_sha256,
+        content=content,
+    )
+
+
 def _identity_value(identity: EndpointIdentity, fragment_count: int) -> dict[str, Any]:
     if not isinstance(identity, EndpointIdentity):
         raise TypeError("identity must be EndpointIdentity")
@@ -276,7 +458,54 @@ def _indexed_refs(
     return result
 
 
-def _future_rows(future: FutureGroupRefs) -> tuple[list[dict[str, Any]], str | None]:
+def _validate_future_group_envelopes(
+    store: CaptureObjectStore,
+    refs: Mapping[int, ObjectRef],
+    identity: EndpointIdentity,
+) -> None:
+    if len({ref.sha256 for ref in refs.values()}) != len(refs):
+        raise EndpointManifestError(
+            "future-group envelope objects cannot be reused across indices"
+        )
+    base_position: int | None = None
+    group_ids: set[str] = set()
+    for index, ref in refs.items():
+        envelope = load_future_group_envelope(store, ref)
+        if (
+            envelope.capture_session_uuid != identity.capture_session_uuid
+            or envelope.window_uuid != identity.window_uuid
+            or envelope.learner_id != identity.learner_id
+            or envelope.rank != identity.rank
+        ):
+            raise EndpointManifestError(
+                f"future-group envelope {index} identity differs from endpoint"
+            )
+        if envelope.group_index != index:
+            raise EndpointManifestError(
+                f"future-group envelope index {envelope.group_index} differs from "
+                f"endpoint slot {index}"
+            )
+        if envelope.group_id in group_ids:
+            raise EndpointManifestError("future-group envelope group_id is reused")
+        group_ids.add(envelope.group_id)
+        position_base = envelope.data_iterator_position - index
+        if position_base < 0:
+            raise EndpointManifestError(
+                "future-group data_iterator_position precedes its group index"
+            )
+        if base_position is None:
+            base_position = position_base
+        elif position_base != base_position:
+            raise EndpointManifestError(
+                "future-group data_iterator_position is not canonically aligned"
+            )
+
+
+def _future_rows(
+    store: CaptureObjectStore,
+    future: FutureGroupRefs,
+    identity: EndpointIdentity,
+) -> tuple[list[dict[str, Any]], str | None, dict[int, ObjectRef]]:
     if not isinstance(future, FutureGroupRefs):
         raise TypeError("future_groups must be FutureGroupRefs")
     refs = _indexed_refs(
@@ -309,9 +538,11 @@ def _future_rows(future: FutureGroupRefs) -> tuple[list[dict[str, Any]], str | N
         raise EndpointManifestError(
             "future-group state must be 'complete' or 'incomplete'"
         )
+    _validate_future_group_envelopes(store, refs, identity)
     return (
         [{"index": index, "role": _future_group_role(index)} for index in refs],
         future.reason,
+        refs,
     )
 
 
@@ -336,6 +567,11 @@ def _fragment_pack_rows(
     payloads: dict[int, ObjectRef] = {}
     for fragment_id, pack in packs.items():
         decoded = load_tensor_pack(store, pack)
+        if decoded.fragment_id != fragment_id:
+            raise EndpointManifestError(
+                f"endpoint fragment slot {fragment_id} disagrees with intrinsic "
+                f"tensor-pack fragment_id {decoded.fragment_id}"
+            )
         if decoded.payload != pack.payload:
             raise EndpointManifestError(
                 f"fragment {fragment_id} tensor-pack payload identity mismatch"
@@ -400,12 +636,8 @@ def publish_learner_endpoint(
         scheduler, "scheduler metadata", allow_none=False
     )
     scaler_value = _snapshot_json_object(scaler, "scaler metadata", allow_none=True)
-    future_rows, future_reason = _future_rows(future_groups)
-    future_refs = _indexed_refs(
-        future_groups.refs,
-        "future-group refs",
-        require_contiguous=False,
-        maximum_exclusive=FUTURE_GROUP_COUNT,
+    future_rows, future_reason, future_refs = _future_rows(
+        store, future_groups, identity
     )
 
     entries: list[ManifestEntry] = [
@@ -764,6 +996,11 @@ def load_learner_endpoint(
             False,
         )
         decoded = load_tensor_pack(store, tensor_manifest_ref)
+        if decoded.fragment_id != fragment_id:
+            raise EndpointManifestError(
+                f"endpoint fragment slot {fragment_id} disagrees with intrinsic "
+                f"tensor-pack fragment_id {decoded.fragment_id}"
+            )
         endpoint_payload = _object_ref_by_role(objects, row["payload_role"])
         if decoded.payload != endpoint_payload:
             raise EndpointManifestError(
@@ -774,6 +1011,7 @@ def load_learner_endpoint(
     future_refs = {
         row["index"]: _object_ref_by_role(objects, row["role"]) for row in future_rows
     }
+    _validate_future_group_envelopes(store, future_refs, identity)
     rng = EndpointRngRefs(
         python=_object_ref_by_role(objects, PYTHON_RNG_ROLE),
         numpy=_object_ref_by_role(objects, NUMPY_RNG_ROLE),

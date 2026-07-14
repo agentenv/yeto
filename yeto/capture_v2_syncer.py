@@ -82,7 +82,7 @@ class ResponderEndpointRef:
 
     endpoint: EndpointRestoreRef
     weight_f64_bits: str
-    payload_sha256: str
+    payload: ObjectRef
 
 
 @dataclass(frozen=True)
@@ -100,10 +100,10 @@ class LoadedResponder:
     endpoint: LoadedLearnerEndpoint
     endpoint_ref: EndpointRestoreRef
     weight_f64_bits: str
-    payload_sha256: str
+    payload: ObjectRef
 
 
-@dataclass
+@dataclass(frozen=True)
 class LoadedSyncerBoundary:
     """Strictly validated syncer boundary and all learner endpoint links."""
 
@@ -181,6 +181,10 @@ def _identifier(value: Any, context: str) -> str:
     if not isinstance(value, str) or _IDENTIFIER_RE.fullmatch(value) is None:
         raise SyncerBoundaryError(f"{context} is malformed")
     return value
+
+
+def _responder_payload_role(responder_index: int) -> str:
+    return f"responders/{responder_index}/payload"
 
 
 def _snapshot_json_object(value: Mapping[str, Any], context: str) -> dict[str, Any]:
@@ -323,7 +327,7 @@ def _responder_rows(
     store: CaptureObjectStore,
     responders: Sequence[ResponderEndpointRef],
     identity: SyncerBoundaryIdentity,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[int, ObjectRef]]:
     if isinstance(responders, (str, bytes)) or not isinstance(responders, Sequence):
         raise TypeError("responders must be a sequence")
     loaded: list[tuple[LoadedLearnerEndpoint, ResponderEndpointRef]] = []
@@ -347,7 +351,9 @@ def _responder_rows(
                 "responder endpoint fragment version differs from boundary pre-version"
             )
         _f64_bits(responder.weight_f64_bits, "responder weight_f64_bits")
-        _sha256(responder.payload_sha256, "responder payload_sha256")
+        if not isinstance(responder.payload, ObjectRef):
+            raise TypeError("responder payload must be an ObjectRef")
+        store.verify_object(responder.payload)
         loaded.append((endpoint, responder))
     if not loaded:
         raise SyncerBoundaryError("syncer boundary requires at least one responder")
@@ -359,7 +365,10 @@ def _responder_rows(
         )
 
     rows: list[dict[str, Any]] = []
+    payloads: dict[int, ObjectRef] = {}
     for responder_index, (endpoint, responder) in enumerate(loaded):
+        payload_role = _responder_payload_role(responder_index)
+        payloads[responder_index] = responder.payload
         rows.append(
             {
                 "responder_index": responder_index,
@@ -369,10 +378,12 @@ def _responder_rows(
                 "endpoint_identity": _endpoint_identity_value(endpoint.identity),
                 "input_provenance": _provenance_value(endpoint.input_provenance),
                 "weight_f64_bits": responder.weight_f64_bits,
-                "payload_sha256": responder.payload_sha256,
+                "payload_role": payload_role,
+                "payload_sha256": responder.payload.sha256,
+                "payload_bytes": responder.payload.bytes,
             }
         )
-    return rows
+    return rows, payloads
 
 
 def publish_syncer_boundary(
@@ -391,7 +402,7 @@ def publish_syncer_boundary(
     """Cross-check every input and atomically publish one syncer boundary."""
 
     identity_data = _identity_value(identity)
-    responder_rows = _responder_rows(store, responders, identity)
+    responder_rows, responder_payloads = _responder_rows(store, responders, identity)
     for ref, context in (
         (pre_fragment, "pre_fragment"),
         (post_fragment, "post_fragment"),
@@ -420,6 +431,10 @@ def publish_syncer_boundary(
             ManifestEntry(POST_FRAGMENT_ROLE, post_fragment),
             ManifestEntry(OUTER_STATE_ROLE, outer_state),
             ManifestEntry(BROADCAST_ROLE, broadcast),
+            *(
+                ManifestEntry(_responder_payload_role(index), payload)
+                for index, payload in responder_payloads.items()
+            ),
         ],
         metadata=metadata,
     )
@@ -430,6 +445,7 @@ def _parse_responder_rows(
     store: CaptureObjectStore,
     value: Any,
     identity: SyncerBoundaryIdentity,
+    objects: Mapping[str, ObjectRef],
 ) -> tuple[LoadedResponder, ...]:
     if not isinstance(value, list) or not value:
         raise SyncerBoundaryError("boundary responders must be a non-empty array")
@@ -441,7 +457,9 @@ def _parse_responder_rows(
         "endpoint_identity",
         "input_provenance",
         "weight_f64_bits",
+        "payload_role",
         "payload_sha256",
+        "payload_bytes",
     }
     result: list[LoadedResponder] = []
     previous_key: tuple[int, int] | None = None
@@ -503,6 +521,19 @@ def _parse_responder_rows(
         if endpoint.identity.learner_id in learner_ids:
             raise SyncerBoundaryError("boundary responders repeat learner_id")
         learner_ids.add(endpoint.identity.learner_id)
+        payload_role = _responder_payload_role(index)
+        if row["payload_role"] != payload_role:
+            raise SyncerBoundaryError(f"{context} payload role is noncanonical")
+        try:
+            payload = ObjectRef(row["payload_sha256"], row["payload_bytes"])
+        except CaptureStoreError as exc:
+            raise SyncerBoundaryError(
+                f"{context} payload reference is malformed: {exc}"
+            ) from exc
+        if payload != objects[payload_role]:
+            raise SyncerBoundaryError(
+                f"{context} payload metadata/object cross-reference mismatch"
+            )
         result.append(
             LoadedResponder(
                 responder_index=index,
@@ -511,21 +542,22 @@ def _parse_responder_rows(
                 weight_f64_bits=_f64_bits(
                     row["weight_f64_bits"], f"{context} weight_f64_bits"
                 ),
-                payload_sha256=_sha256(
-                    row["payload_sha256"], f"{context} payload_sha256"
-                ),
+                payload=payload,
             )
         )
     return tuple(result)
 
 
-def _object_map(manifest: Mapping[str, Any]) -> dict[str, ObjectRef]:
+def _object_map(
+    manifest: Mapping[str, Any], responder_count: int
+) -> dict[str, ObjectRef]:
     rows = manifest["objects"]
     expected_roles = [
         PRE_FRAGMENT_ROLE,
         POST_FRAGMENT_ROLE,
         OUTER_STATE_ROLE,
         BROADCAST_ROLE,
+        *(_responder_payload_role(index) for index in range(responder_count)),
     ]
     if [row["role"] for row in rows] != expected_roles:
         raise SyncerBoundaryError(
@@ -561,10 +593,13 @@ def load_syncer_boundary(
     ):
         raise SyncerBoundaryError("syncer-boundary uses an unsupported schema")
     identity = _parse_identity(metadata["identity"])
-    responders = _parse_responder_rows(store, metadata["responders"], identity)
+    responder_value = metadata["responders"]
+    if not isinstance(responder_value, list) or not responder_value:
+        raise SyncerBoundaryError("boundary responders must be a non-empty array")
+    objects = _object_map(manifest, len(responder_value))
+    responders = _parse_responder_rows(store, responder_value, identity, objects)
     merge_config = _parse_config(metadata["merge_config"], "merge_config")
     outer_config = _parse_config(metadata["outer_config"], "outer_config")
-    objects = _object_map(manifest)
 
     broadcast_metadata = metadata["broadcast"]
     if not isinstance(broadcast_metadata, dict) or set(broadcast_metadata) != {
@@ -631,10 +666,15 @@ def verify_reconstruction(
 ) -> ReconstructionOutput:
     """Require a callback to reproduce exact post-fragment and broadcast bytes."""
 
-    loaded = (
-        boundary
+    # Loaded structures are convenient inspection views, not authority.  Always
+    # reload their content-addressed manifest immediately before constructing a
+    # callback request so caller mutation after an earlier load cannot alter
+    # verified reconstruction inputs.
+    loaded = load_syncer_boundary(
+        store,
+        boundary.manifest_sha256
         if isinstance(boundary, LoadedSyncerBoundary)
-        else load_syncer_boundary(store, boundary)
+        else boundary,
     )
     request = ReconstructionRequest(
         identity=loaded.identity,
