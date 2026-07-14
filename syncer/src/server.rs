@@ -2562,6 +2562,33 @@ fn format_tape_line(
     let pti_previous_stock_sha256 = optional_sha256_json(stats.pti.previous_stock_sha256);
     let pti_candidate_sha256 = optional_sha256_json(stats.pti.candidate_sha256);
     let pti_action_sha256 = optional_sha256_json(stats.pti.action_sha256);
+    // Keep every non-CPLG tape line byte-compatible with the existing schema.
+    // The CPLG evidence block appears only when that selector is active.
+    let cplg_fields = if stats.cplg.reason == crate::state::CplgReason::NotActive {
+        String::new()
+    } else {
+        let cplg_rho = optional_json_number(stats.cplg.rho);
+        let cplg_theta = optional_json_number(stats.cplg.theta);
+        let cplg_previous_theta = optional_json_number(stats.cplg.previous_theta);
+        let cplg_coherence = optional_json_number(stats.cplg.coherence);
+        let cplg_phi = optional_json_number(stats.cplg.phi);
+        let cplg_shadow_score = optional_json_number(stats.cplg.resolved_shadow_score);
+        let cplg_score_count = stats.cplg.interlock_score_count;
+        let cplg_interlock_open = stats.cplg.interlock_open;
+        let cplg_used_nonstock = stats.cplg.used_nonstock;
+        let cplg_state_cleared = stats.cplg.state_cleared;
+        let cplg_reason = optional_json_string(Some(stats.cplg.reason.as_str()));
+        let cplg_stock_sha256 = optional_sha256_json(stats.cplg.stock_sha256);
+        let cplg_previous_stock_sha256 = optional_sha256_json(stats.cplg.previous_stock_sha256);
+        let cplg_previous_tangent_sha256 = optional_sha256_json(stats.cplg.previous_tangent_sha256);
+        let cplg_transported_tangent_sha256 =
+            optional_sha256_json(stats.cplg.transported_tangent_sha256);
+        let cplg_candidate_sha256 = optional_sha256_json(stats.cplg.candidate_sha256);
+        let cplg_action_sha256 = optional_sha256_json(stats.cplg.action_sha256);
+        format!(
+            ",\"cplg_rho\":{cplg_rho},\"cplg_theta\":{cplg_theta},\"cplg_previous_theta\":{cplg_previous_theta},\"cplg_coherence\":{cplg_coherence},\"cplg_phi\":{cplg_phi},\"cplg_shadow_score\":{cplg_shadow_score},\"cplg_score_count\":{cplg_score_count},\"cplg_interlock_open\":{cplg_interlock_open},\"cplg_used_nonstock\":{cplg_used_nonstock},\"cplg_state_cleared\":{cplg_state_cleared},\"cplg_reason\":{cplg_reason},\"cplg_stock_sha256\":{cplg_stock_sha256},\"cplg_previous_stock_sha256\":{cplg_previous_stock_sha256},\"cplg_previous_tangent_sha256\":{cplg_previous_tangent_sha256},\"cplg_transported_tangent_sha256\":{cplg_transported_tangent_sha256},\"cplg_candidate_sha256\":{cplg_candidate_sha256},\"cplg_action_sha256\":{cplg_action_sha256}"
+        )
+    };
     let policy = serde_json::to_string(&decision.policy.to_string()).unwrap();
     let selected_action = serde_json::to_string(&decision.selected_action).unwrap();
     let committed_action = serde_json::to_string(&decision.committed_action).unwrap();
@@ -2574,7 +2601,7 @@ fn format_tape_line(
     let committed_multiplier = json_number(decision.committed_multiplier);
     let request_digest = optional_json_string(decision.request_digest.as_deref());
     format!(
-        "{{\"step\":{step},\"fragment\":{fragment},\"commit_seq\":{commit_seq},\"commit_elapsed_ns\":{commit_elapsed_ns},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"pti_shadow_score\":{pti_shadow_score},\"pti_score_count\":{},\"pti_interlock_open\":{},\"pti_used_nonstock\":{},\"pti_state_cleared\":{},\"pti_reason\":{pti_reason},\"pti_stock_sha256\":{pti_stock_sha256},\"pti_previous_stock_sha256\":{pti_previous_stock_sha256},\"pti_candidate_sha256\":{pti_candidate_sha256},\"pti_action_sha256\":{pti_action_sha256},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}}}\n",
+        "{{\"step\":{step},\"fragment\":{fragment},\"commit_seq\":{commit_seq},\"commit_elapsed_ns\":{commit_elapsed_ns},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"pti_shadow_score\":{pti_shadow_score},\"pti_score_count\":{},\"pti_interlock_open\":{},\"pti_used_nonstock\":{},\"pti_state_cleared\":{},\"pti_reason\":{pti_reason},\"pti_stock_sha256\":{pti_stock_sha256},\"pti_previous_stock_sha256\":{pti_previous_stock_sha256},\"pti_candidate_sha256\":{pti_candidate_sha256},\"pti_action_sha256\":{pti_action_sha256}{cplg_fields},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}}}\n",
         responders.join(","),
         outer.restarted,
         stats.pti.interlock_score_count,
@@ -2620,6 +2647,7 @@ mod tests {
                 restarted,
             },
             pti: crate::state::PtiStepStats::default(),
+            cplg: crate::state::CplgStepStats::default(),
         }
     }
 
@@ -3397,6 +3425,59 @@ mod tests {
         assert_eq!(value["pti_previous_stock_sha256"], "22".repeat(32));
         assert_eq!(value["pti_candidate_sha256"], "33".repeat(32));
         assert_eq!(value["pti_action_sha256"], "33".repeat(32));
+        assert!(value.get("cplg_rho").is_none());
+    }
+
+    #[test]
+    fn event_tape_seals_cplg_geometry_and_action_evidence() {
+        let mut stats = merge_stats(1.0, 0.28, Some(0.99), Some(0.0), false);
+        stats.cplg = crate::state::CplgStepStats {
+            rho: Some(0.984_807_7),
+            theta: Some(0.174_532_92),
+            previous_theta: Some(0.174_532_92),
+            coherence: Some(1.0),
+            phi: Some(0.174_532_92),
+            resolved_shadow_score: Some(0.015_192_3),
+            interlock_score_count: 3,
+            interlock_open: true,
+            used_nonstock: true,
+            state_cleared: false,
+            reason: crate::state::CplgReason::CandidateSelected,
+            stock_sha256: [0x11; 32],
+            previous_stock_sha256: [0x22; 32],
+            previous_tangent_sha256: [0x33; 32],
+            transported_tangent_sha256: [0x44; 32],
+            candidate_sha256: [0x55; 32],
+            action_sha256: [0x55; 32],
+        };
+        let line = format_tape_line(
+            6,
+            0,
+            6,
+            10,
+            &HashMap::new(),
+            &stats,
+            &CommitDecision::token_weighted(),
+            &HashMap::new(),
+            1,
+        );
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["cplg_rho"], 0.984_807_7);
+        assert_eq!(value["cplg_theta"], 0.174_532_92);
+        assert_eq!(value["cplg_previous_theta"], 0.174_532_92);
+        assert_eq!(value["cplg_coherence"], 1.0);
+        assert_eq!(value["cplg_phi"], 0.174_532_92);
+        assert_eq!(value["cplg_shadow_score"], 0.015_192_3);
+        assert_eq!(value["cplg_score_count"], 3);
+        assert_eq!(value["cplg_interlock_open"], true);
+        assert_eq!(value["cplg_used_nonstock"], true);
+        assert_eq!(value["cplg_reason"], "candidate_selected");
+        assert_eq!(value["cplg_stock_sha256"], "11".repeat(32));
+        assert_eq!(value["cplg_previous_stock_sha256"], "22".repeat(32));
+        assert_eq!(value["cplg_previous_tangent_sha256"], "33".repeat(32));
+        assert_eq!(value["cplg_transported_tangent_sha256"], "44".repeat(32));
+        assert_eq!(value["cplg_candidate_sha256"], "55".repeat(32));
+        assert_eq!(value["cplg_action_sha256"], "55".repeat(32));
     }
 
     // ---- EXP2.46 anchor-drift diagnostics / version-matched anchoring ------

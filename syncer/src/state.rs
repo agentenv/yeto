@@ -93,6 +93,65 @@ pub struct MergeStats {
     /// Diagnostics from the causal PTI direction selector.  These remain the
     /// all-false/default record for every other outer optimizer.
     pub pti: PtiStepStats,
+    /// Diagnostics from the causal phase-locked geodesic selector. These are
+    /// default-valued for every other outer optimizer.
+    pub cplg: CplgStepStats,
+}
+
+/// One boundary's causal CPLG selector diagnostics. All geometry refers only
+/// to the current and already committed same-fragment history; the resolved
+/// score evaluates the preceding shadow and never looks ahead.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CplgStepStats {
+    pub rho: Option<f64>,
+    pub theta: Option<f64>,
+    pub previous_theta: Option<f64>,
+    pub coherence: Option<f64>,
+    pub phi: Option<f64>,
+    pub resolved_shadow_score: Option<f64>,
+    pub interlock_score_count: u8,
+    pub interlock_open: bool,
+    pub used_nonstock: bool,
+    pub state_cleared: bool,
+    pub reason: CplgReason,
+    pub stock_sha256: [u8; 32],
+    pub previous_stock_sha256: [u8; 32],
+    pub previous_tangent_sha256: [u8; 32],
+    pub transported_tangent_sha256: [u8; 32],
+    pub candidate_sha256: [u8; 32],
+    pub action_sha256: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CplgReason {
+    #[default]
+    NotActive,
+    StockWarmup,
+    PhaseWarmup,
+    InterlockClosed,
+    CandidateSelected,
+    DegenerateStock,
+    NonAcuteTurn,
+    InvalidGeometry,
+    InvalidShadowScore,
+    ZeroOrRoundedPhase,
+}
+
+impl CplgReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotActive => "not_active",
+            Self::StockWarmup => "stock_warmup",
+            Self::PhaseWarmup => "phase_warmup",
+            Self::InterlockClosed => "interlock_closed",
+            Self::CandidateSelected => "candidate_selected",
+            Self::DegenerateStock => "degenerate_stock",
+            Self::NonAcuteTurn => "non_acute_turn",
+            Self::InvalidGeometry => "invalid_geometry",
+            Self::InvalidShadowScore => "invalid_shadow_score",
+            Self::ZeroOrRoundedPhase => "zero_or_rounded_phase",
+        }
+    }
 }
 
 /// One boundary's causal PTI selector diagnostics.  The score, when present,
@@ -301,6 +360,8 @@ pub struct ActionPreview {
     /// preview commits, so retries and alternative previews cannot advance or
     /// score the interlock twice.
     resulting_pti_state: PtiFragmentState,
+    /// Causal CPLG history after this pure preview. Installed only on commit.
+    resulting_cplg_state: CplgFragmentState,
     applied_step: Vec<f32>,
     stats: MergeStats,
     step_scale: f64,
@@ -313,6 +374,18 @@ pub struct ActionPreview {
 #[derive(Clone, Debug, Default, PartialEq)]
 struct PtiFragmentState {
     previous_stock: Vec<f32>,
+    pending_candidate: Vec<f32>,
+    scores: Vec<f32>,
+}
+
+/// Minimal checkpointable per-fragment CPLG state. `previous_theta` is
+/// present exactly when `previous_forward_tangent` is present; an empty
+/// `pending_candidate` means there is no shadow to resolve at this boundary.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CplgFragmentState {
+    previous_stock: Vec<f32>,
+    previous_forward_tangent: Vec<f32>,
+    previous_theta: Option<f32>,
     pending_candidate: Vec<f32>,
     scores: Vec<f32>,
 }
@@ -645,6 +718,387 @@ fn pti_select_direction(
     )
 }
 
+const CPLG_DEGENERATE_NORM_SQ: f32 = f32::from_bits(0x2b80_0000); // 2^-40
+const CPLG_DOT_OVERSHOOT_TOLERANCE: f32 = f32::from_bits(0x3580_0000); // 2^-20
+const CPLG_ANGLE_CAP: f32 = f32::from_bits(0x3e7a_dbb0); // round_f32(atan(1/4))
+const CPLG_INTERLOCK_LENGTH: usize = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CplgGeometryError {
+    NonAcute,
+    Invalid,
+}
+
+struct CplgGeometry {
+    forward_tangent: Vec<f32>,
+    transported_tangent: Option<Vec<f32>>,
+    theta: f32,
+    rho: f32,
+    coherence: Option<f32>,
+    phi: Option<f32>,
+    candidate: Option<Vec<f32>>,
+}
+
+fn cplg_normalize(values: &[f32]) -> Option<(Vec<f32>, f32)> {
+    let norm_sq = pti_dot(values, values)?;
+    if norm_sq <= CPLG_DEGENERATE_NORM_SQ {
+        return None;
+    }
+    let norm = norm_sq.sqrt();
+    if !norm.is_finite() || norm <= 0.0 {
+        return None;
+    }
+    let mut normalized = Vec::with_capacity(values.len());
+    for value in values {
+        let component = *value / norm;
+        if !component.is_finite() {
+            return None;
+        }
+        normalized.push(component);
+    }
+    Some((normalized, norm))
+}
+
+fn cplg_checked_unit_dot(left: &[f32], right: &[f32]) -> Option<f32> {
+    let raw = pti_dot(left, right)?;
+    if !(-1.0 - CPLG_DOT_OVERSHOOT_TOLERANCE..=1.0 + CPLG_DOT_OVERSHOOT_TOLERANCE).contains(&raw) {
+        return None;
+    }
+    Some(raw.clamp(-1.0, 1.0))
+}
+
+fn cplg_reproject_and_normalize(values: &[f32], unit_normal: &[f32]) -> Option<Vec<f32>> {
+    let projection = pti_dot(values, unit_normal)?;
+    let mut tangent = Vec::with_capacity(values.len());
+    for (&value, &normal) in values.iter().zip(unit_normal) {
+        let projected = projection * normal;
+        let component = value - projected;
+        if !projected.is_finite() || !component.is_finite() {
+            return None;
+        }
+        tangent.push(component);
+    }
+    cplg_normalize(&tangent).map(|(unit, _)| unit)
+}
+
+/// Build the current forward tangent and, once a preceding tangent exists,
+/// parallel-transport it and form the phase-locked geodesic shadow. `libm` is
+/// exact-version pinned in Cargo.toml so atan2/sin/cos do not silently vary
+/// with the host C library.
+fn cplg_geometry(
+    current: &[f32],
+    previous: &[f32],
+    previous_forward_tangent: &[f32],
+    previous_theta: Option<f32>,
+) -> std::result::Result<CplgGeometry, CplgGeometryError> {
+    let (unit_current, current_norm) = cplg_normalize(current).ok_or(CplgGeometryError::Invalid)?;
+    let (unit_previous, _) = cplg_normalize(previous).ok_or(CplgGeometryError::Invalid)?;
+    let rho =
+        cplg_checked_unit_dot(&unit_current, &unit_previous).ok_or(CplgGeometryError::Invalid)?;
+    // The frozen V1 kernel is intentionally acute-only. Antipodal/orthogonal
+    // turns have no stable forward phase under the selected convention.
+    if !(rho > 0.0 && rho < 1.0) {
+        return Err(CplgGeometryError::NonAcute);
+    }
+    let rho_sq = rho * rho;
+    let sin_sq = 1.0 - rho_sq;
+    if !rho_sq.is_finite() || sin_sq <= CPLG_DEGENERATE_NORM_SQ {
+        return Err(CplgGeometryError::Invalid);
+    }
+    let sin_theta = sin_sq.sqrt();
+    let theta = libm::atan2f(sin_theta, rho);
+    if !sin_theta.is_finite() || !theta.is_finite() || theta <= 0.0 {
+        return Err(CplgGeometryError::Invalid);
+    }
+
+    // Forward tangent at u: d = (rho*u - v)/sqrt(1-rho^2). Reprojection and
+    // normalization deliberately follow the raw residual in canonical order.
+    let mut residual = Vec::with_capacity(current.len());
+    for (&u, &v) in unit_current.iter().zip(&unit_previous) {
+        let aligned = rho * u;
+        let component = aligned - v;
+        if !aligned.is_finite() || !component.is_finite() {
+            return Err(CplgGeometryError::Invalid);
+        }
+        residual.push(component);
+    }
+    let forward_tangent =
+        cplg_reproject_and_normalize(&residual, &unit_current).ok_or(CplgGeometryError::Invalid)?;
+
+    if previous_forward_tangent.is_empty() && previous_theta.is_none() {
+        return Ok(CplgGeometry {
+            forward_tangent,
+            transported_tangent: None,
+            theta,
+            rho,
+            coherence: None,
+            phi: None,
+            candidate: None,
+        });
+    }
+    if previous_forward_tangent.len() != current.len()
+        || previous_theta.is_none()
+        || previous_forward_tangent
+            .iter()
+            .any(|value| !value.is_finite())
+    {
+        return Err(CplgGeometryError::Invalid);
+    }
+    let previous_theta = previous_theta.unwrap();
+    if !previous_theta.is_finite() || previous_theta <= 0.0 {
+        return Err(CplgGeometryError::Invalid);
+    }
+
+    // Shortest-sphere parallel transport v -> u:
+    // PT(h) = h - (<h,u>/(1+rho))*(v+u), followed by a defensive tangent
+    // reprojection to remove only f32 roundoff.
+    let denominator = 1.0 + rho;
+    let hu = pti_dot(previous_forward_tangent, &unit_current).ok_or(CplgGeometryError::Invalid)?;
+    let factor = hu / denominator;
+    if !denominator.is_finite() || denominator <= 1.0 || !factor.is_finite() {
+        return Err(CplgGeometryError::Invalid);
+    }
+    let mut transported_raw = Vec::with_capacity(current.len());
+    for ((&h, &v), &u) in previous_forward_tangent
+        .iter()
+        .zip(&unit_previous)
+        .zip(&unit_current)
+    {
+        let sum = v + u;
+        let term = factor * sum;
+        let component = h - term;
+        if !sum.is_finite() || !term.is_finite() || !component.is_finite() {
+            return Err(CplgGeometryError::Invalid);
+        }
+        transported_raw.push(component);
+    }
+    let transported_tangent = cplg_reproject_and_normalize(&transported_raw, &unit_current)
+        .ok_or(CplgGeometryError::Invalid)?;
+    let raw_coherence = cplg_checked_unit_dot(&forward_tangent, &transported_tangent)
+        .ok_or(CplgGeometryError::Invalid)?;
+    let coherence = raw_coherence.max(0.0);
+    let theta_star = theta.min(previous_theta).min(CPLG_ANGLE_CAP);
+    let phi = coherence * theta_star;
+    let cosine = libm::cosf(phi);
+    let sine = libm::sinf(phi);
+    if !theta_star.is_finite()
+        || theta_star <= 0.0
+        || !phi.is_finite()
+        || !cosine.is_finite()
+        || !sine.is_finite()
+    {
+        return Err(CplgGeometryError::Invalid);
+    }
+    let mut raw_candidate = Vec::with_capacity(current.len());
+    for (&u, &d) in unit_current.iter().zip(&forward_tangent) {
+        let along = cosine * u;
+        let transverse = sine * d;
+        let component = along + transverse;
+        if !along.is_finite() || !transverse.is_finite() || !component.is_finite() {
+            return Err(CplgGeometryError::Invalid);
+        }
+        raw_candidate.push(component);
+    }
+    let (unit_candidate, _) = cplg_normalize(&raw_candidate).ok_or(CplgGeometryError::Invalid)?;
+    let mut candidate = Vec::with_capacity(current.len());
+    for component in unit_candidate {
+        let value = current_norm * component;
+        if !value.is_finite() {
+            return Err(CplgGeometryError::Invalid);
+        }
+        candidate.push(value);
+    }
+
+    Ok(CplgGeometry {
+        forward_tangent,
+        transported_tangent: Some(transported_tangent),
+        theta,
+        rho,
+        coherence: Some(coherence),
+        phi: Some(phi),
+        candidate: Some(candidate),
+    })
+}
+
+fn cplg_bitwise_equal(left: &[f32], right: &[f32]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.to_bits() == right.to_bits())
+}
+
+fn cplg_select_direction(
+    current: &[f32],
+    prior: &CplgFragmentState,
+) -> (Vec<f32>, CplgFragmentState, CplgStepStats) {
+    let stock = current.to_vec();
+    let stock_sha256 = pti_sha256(current);
+    let previous_stock_sha256 = if prior.previous_stock.is_empty() {
+        [0; 32]
+    } else {
+        pti_sha256(&prior.previous_stock)
+    };
+    let previous_tangent_sha256 = if prior.previous_forward_tangent.is_empty() {
+        [0; 32]
+    } else {
+        pti_sha256(&prior.previous_forward_tangent)
+    };
+    let fallback = |reason: CplgReason, resolved_shadow_score, score_count| {
+        (
+            stock.clone(),
+            CplgFragmentState::default(),
+            CplgStepStats {
+                resolved_shadow_score,
+                interlock_score_count: score_count,
+                state_cleared: true,
+                reason,
+                stock_sha256,
+                previous_stock_sha256,
+                previous_tangent_sha256,
+                action_sha256: stock_sha256,
+                ..CplgStepStats::default()
+            },
+        )
+    };
+
+    if cplg_normalize(current).is_none() {
+        return fallback(CplgReason::DegenerateStock, None, 0);
+    }
+    if prior.previous_stock.is_empty() {
+        return (
+            stock,
+            CplgFragmentState {
+                previous_stock: current.to_vec(),
+                ..CplgFragmentState::default()
+            },
+            CplgStepStats {
+                reason: CplgReason::StockWarmup,
+                stock_sha256,
+                action_sha256: stock_sha256,
+                ..CplgStepStats::default()
+            },
+        );
+    }
+
+    let mut scores = prior.scores.clone();
+    let mut resolved_shadow_score = None;
+    if !prior.pending_candidate.is_empty() {
+        let Some(candidate_cosine) = pti_cosine(&prior.pending_candidate, current) else {
+            return fallback(CplgReason::InvalidShadowScore, None, scores.len() as u8);
+        };
+        let Some(stock_cosine) = pti_cosine(&prior.previous_stock, current) else {
+            return fallback(CplgReason::InvalidShadowScore, None, scores.len() as u8);
+        };
+        let score = candidate_cosine - stock_cosine;
+        if !score.is_finite() {
+            return fallback(CplgReason::InvalidShadowScore, None, scores.len() as u8);
+        }
+        if scores.len() == CPLG_INTERLOCK_LENGTH {
+            scores.remove(0);
+        }
+        scores.push(score);
+        resolved_shadow_score = Some(score as f64);
+    }
+
+    let geometry = match cplg_geometry(
+        current,
+        &prior.previous_stock,
+        &prior.previous_forward_tangent,
+        prior.previous_theta,
+    ) {
+        Ok(geometry) => geometry,
+        Err(CplgGeometryError::NonAcute) => {
+            return fallback(
+                CplgReason::NonAcuteTurn,
+                resolved_shadow_score,
+                scores.len() as u8,
+            )
+        }
+        Err(CplgGeometryError::Invalid) => {
+            return fallback(
+                CplgReason::InvalidGeometry,
+                resolved_shadow_score,
+                scores.len() as u8,
+            )
+        }
+    };
+
+    let base_stats = CplgStepStats {
+        rho: Some(geometry.rho as f64),
+        theta: Some(geometry.theta as f64),
+        previous_theta: prior.previous_theta.map(|value| value as f64),
+        coherence: geometry.coherence.map(|value| value as f64),
+        phi: geometry.phi.map(|value| value as f64),
+        resolved_shadow_score,
+        interlock_score_count: scores.len() as u8,
+        stock_sha256,
+        previous_stock_sha256,
+        previous_tangent_sha256,
+        transported_tangent_sha256: geometry
+            .transported_tangent
+            .as_deref()
+            .map(pti_sha256)
+            .unwrap_or([0; 32]),
+        action_sha256: stock_sha256,
+        ..CplgStepStats::default()
+    };
+    let Some(candidate) = geometry.candidate else {
+        return (
+            stock,
+            CplgFragmentState {
+                previous_stock: current.to_vec(),
+                previous_forward_tangent: geometry.forward_tangent,
+                previous_theta: Some(geometry.theta),
+                pending_candidate: Vec::new(),
+                scores,
+            },
+            CplgStepStats {
+                reason: CplgReason::PhaseWarmup,
+                ..base_stats
+            },
+        );
+    };
+    let candidate_sha256 = pti_sha256(&candidate);
+    let interlock_open =
+        scores.len() == CPLG_INTERLOCK_LENGTH && scores.iter().all(|score| *score > 0.0);
+    let candidate_is_stock = cplg_bitwise_equal(&candidate, current);
+    let used_nonstock = interlock_open && !candidate_is_stock;
+    let action = if used_nonstock {
+        candidate.clone()
+    } else {
+        stock
+    };
+    (
+        action,
+        CplgFragmentState {
+            previous_stock: current.to_vec(),
+            previous_forward_tangent: geometry.forward_tangent,
+            previous_theta: Some(geometry.theta),
+            pending_candidate: candidate,
+            scores,
+        },
+        CplgStepStats {
+            interlock_open,
+            used_nonstock,
+            reason: if candidate_is_stock {
+                CplgReason::ZeroOrRoundedPhase
+            } else if used_nonstock {
+                CplgReason::CandidateSelected
+            } else {
+                CplgReason::InterlockClosed
+            },
+            candidate_sha256,
+            action_sha256: if used_nonstock {
+                candidate_sha256
+            } else {
+                stock_sha256
+            },
+            ..base_stats
+        },
+    )
+}
+
 fn mix_action_fingerprint(hash: &mut [u64; 2], word: u64) {
     hash[0] ^= word;
     hash[0] = hash[0].wrapping_mul(0x0000_0100_0000_01b3);
@@ -705,6 +1159,58 @@ fn compute_action_fingerprint(preview: &ActionPreview) -> [u64; 2] {
     ] {
         for chunk in digest.chunks_exact(8) {
             mix_action_fingerprint(&mut hash, u64::from_le_bytes(chunk.try_into().unwrap()));
+        }
+    }
+    // Preserve every pre-CPLG action seal exactly. CPLG-only evidence is mixed
+    // only for an active CPLG preview; default stats/state add no words.
+    if preview.stats.cplg.reason != CplgReason::NotActive {
+        for value in [
+            preview.stats.cplg.rho,
+            preview.stats.cplg.theta,
+            preview.stats.cplg.previous_theta,
+            preview.stats.cplg.coherence,
+            preview.stats.cplg.phi,
+            preview.stats.cplg.resolved_shadow_score,
+        ] {
+            mix_optional_f64(&mut hash, value);
+        }
+        mix_action_fingerprint(&mut hash, preview.stats.cplg.interlock_score_count as u64);
+        mix_action_fingerprint(&mut hash, preview.stats.cplg.interlock_open as u64);
+        mix_action_fingerprint(&mut hash, preview.stats.cplg.used_nonstock as u64);
+        mix_action_fingerprint(&mut hash, preview.stats.cplg.state_cleared as u64);
+        mix_action_fingerprint(&mut hash, preview.stats.cplg.reason as u64);
+        for digest in [
+            &preview.stats.cplg.stock_sha256,
+            &preview.stats.cplg.previous_stock_sha256,
+            &preview.stats.cplg.previous_tangent_sha256,
+            &preview.stats.cplg.transported_tangent_sha256,
+            &preview.stats.cplg.candidate_sha256,
+            &preview.stats.cplg.action_sha256,
+        ] {
+            for chunk in digest.chunks_exact(8) {
+                mix_action_fingerprint(&mut hash, u64::from_le_bytes(chunk.try_into().unwrap()));
+            }
+        }
+        for values in [
+            preview.resulting_cplg_state.previous_stock.as_slice(),
+            preview
+                .resulting_cplg_state
+                .previous_forward_tangent
+                .as_slice(),
+            preview.resulting_cplg_state.pending_candidate.as_slice(),
+            preview.resulting_cplg_state.scores.as_slice(),
+        ] {
+            mix_action_fingerprint(&mut hash, values.len() as u64);
+            for value in values {
+                mix_action_fingerprint(&mut hash, value.to_bits() as u64);
+            }
+        }
+        match preview.resulting_cplg_state.previous_theta {
+            None => mix_action_fingerprint(&mut hash, 0),
+            Some(theta) => {
+                mix_action_fingerprint(&mut hash, 1);
+                mix_action_fingerprint(&mut hash, theta.to_bits() as u64);
+            }
         }
     }
     mix_action_fingerprint(&mut hash, preview.resulting_rho_ema.to_bits() as u64);
@@ -787,6 +1293,9 @@ pub struct GlobalState {
     /// Frozen PTI current/previous-direction and causal shadow-score state,
     /// isolated per fragment.  Only `pti-sgd` reads or writes it.
     pti_state: Vec<PtiFragmentState>,
+    /// Causal phase/tangent/shadow state, isolated per fragment. Only
+    /// `cplg-sgd` reads or writes it.
+    cplg_state: Vec<CplgFragmentState>,
     pub initialized: Vec<bool>,
     /// Global step at which each fragment was last merged (its version).
     pub versions: Vec<u64>,
@@ -871,6 +1380,7 @@ impl GlobalState {
         let curv_prev_dtheta = params.clone();
         let cheb_phase = vec![0.0f32; layout.fragments.len()];
         let pti_state = vec![PtiFragmentState::default(); layout.fragments.len()];
+        let cplg_state = vec![CplgFragmentState::default(); layout.fragments.len()];
         let initialized = vec![false; layout.fragments.len()];
         let versions = vec![0; layout.fragments.len()];
         let state_epochs = vec![0; layout.fragments.len()];
@@ -890,6 +1400,7 @@ impl GlobalState {
             curv_prev_dtheta,
             cheb_phase,
             pti_state,
+            cplg_state,
             initialized,
             versions,
             global_step: 0,
@@ -1117,7 +1628,17 @@ impl GlobalState {
             } else {
                 (None, self.pti_state[fid].clone(), PtiStepStats::default())
             };
-        let selected_delta = pti_action_delta.as_deref().unwrap_or(delta);
+        let (cplg_action_delta, resulting_cplg_state, cplg_stats) =
+            if self.outer_optimizer == merge::OuterOptimizer::CplgSgd {
+                let (action, state, stats) = cplg_select_direction(delta, &self.cplg_state[fid]);
+                (Some(action), state, stats)
+            } else {
+                (None, self.cplg_state[fid].clone(), CplgStepStats::default())
+            };
+        let selected_delta = pti_action_delta
+            .as_deref()
+            .or(cplg_action_delta.as_deref())
+            .unwrap_or(delta);
         let mut resulting_params = self.params[fid].clone();
         let mut resulting_optimizer_buffer = self.momentum[fid].clone();
         let mut resulting_rho_ema = self.rho_ema[fid];
@@ -1222,11 +1743,13 @@ impl GlobalState {
             resulting_curv_prev_dtheta,
             resulting_cheb_phase,
             resulting_pti_state,
+            resulting_cplg_state,
             applied_step,
             stats: MergeStats {
                 gnorm: aggregate.gnorm,
                 outer,
                 pti: pti_stats,
+                cplg: cplg_stats,
             },
             step_scale: 1.0,
             unscaled_applied_step_norm: materialized_step_norm,
@@ -1717,6 +2240,74 @@ impl GlobalState {
                 .pti
                 .resolved_shadow_score
                 .is_some_and(|value| !value.is_finite())
+            || !matches!(preview.resulting_cplg_state.previous_stock.len(), 0)
+                && preview.resulting_cplg_state.previous_stock.len() != numel
+            || !matches!(
+                preview.resulting_cplg_state.previous_forward_tangent.len(),
+                0
+            ) && preview.resulting_cplg_state.previous_forward_tangent.len() != numel
+            || !matches!(preview.resulting_cplg_state.pending_candidate.len(), 0)
+                && preview.resulting_cplg_state.pending_candidate.len() != numel
+            || preview.resulting_cplg_state.scores.len() > CPLG_INTERLOCK_LENGTH
+            || preview.resulting_cplg_state.previous_stock.is_empty()
+                && (!preview
+                    .resulting_cplg_state
+                    .previous_forward_tangent
+                    .is_empty()
+                    || preview.resulting_cplg_state.previous_theta.is_some()
+                    || !preview.resulting_cplg_state.pending_candidate.is_empty()
+                    || !preview.resulting_cplg_state.scores.is_empty())
+            || preview
+                .resulting_cplg_state
+                .previous_forward_tangent
+                .is_empty()
+                != preview.resulting_cplg_state.previous_theta.is_none()
+            || !preview.resulting_cplg_state.pending_candidate.is_empty()
+                && preview
+                    .resulting_cplg_state
+                    .previous_forward_tangent
+                    .is_empty()
+            || preview.resulting_cplg_state.pending_candidate.is_empty()
+                && !preview.resulting_cplg_state.scores.is_empty()
+            || preview
+                .resulting_cplg_state
+                .previous_stock
+                .iter()
+                .chain(&preview.resulting_cplg_state.previous_forward_tangent)
+                .chain(&preview.resulting_cplg_state.pending_candidate)
+                .chain(&preview.resulting_cplg_state.scores)
+                .any(|value| !value.is_finite())
+            || preview
+                .resulting_cplg_state
+                .previous_theta
+                .is_some_and(|value| !value.is_finite() || value <= 0.0)
+            || preview.stats.cplg.interlock_score_count as usize > CPLG_INTERLOCK_LENGTH
+            || [
+                preview.stats.cplg.rho,
+                preview.stats.cplg.theta,
+                preview.stats.cplg.previous_theta,
+                preview.stats.cplg.coherence,
+                preview.stats.cplg.phi,
+                preview.stats.cplg.resolved_shadow_score,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+            || preview
+                .stats
+                .cplg
+                .rho
+                .is_some_and(|value| !(0.0..1.0).contains(&value))
+            || preview
+                .stats
+                .cplg
+                .coherence
+                .is_some_and(|value| !(0.0..=1.0).contains(&value))
+            || preview
+                .stats
+                .cplg
+                .phi
+                .is_some_and(|value| !(0.0..=CPLG_ANGLE_CAP as f64).contains(&value))
             || !preview.stats.gnorm.is_finite()
             || preview.stats.gnorm < 0.0
             || !preview.stats.outer.applied_step_norm.is_finite()
@@ -1861,6 +2452,7 @@ impl GlobalState {
             merge::OuterOptimizer::CappedNesterovWsub => 10,
             merge::OuterOptimizer::ChebSgd => 11,
             merge::OuterOptimizer::PtiSgd => 12,
+            merge::OuterOptimizer::CplgSgd => 13,
         });
         if self.outer_optimizer == merge::OuterOptimizer::PtiSgd {
             let state = &self.pti_state[fid];
@@ -1872,6 +2464,27 @@ impl GlobalState {
                 mix(values.len() as u64);
                 for value in values {
                     mix(value.to_bits() as u64);
+                }
+            }
+        }
+        if self.outer_optimizer == merge::OuterOptimizer::CplgSgd {
+            let state = &self.cplg_state[fid];
+            for values in [
+                state.previous_stock.as_slice(),
+                state.previous_forward_tangent.as_slice(),
+                state.pending_candidate.as_slice(),
+                state.scores.as_slice(),
+            ] {
+                mix(values.len() as u64);
+                for value in values {
+                    mix(value.to_bits() as u64);
+                }
+            }
+            match state.previous_theta {
+                None => mix(0),
+                Some(theta) => {
+                    mix(1);
+                    mix(theta.to_bits() as u64);
                 }
             }
         }
@@ -1908,6 +2521,7 @@ impl GlobalState {
             resulting_curv_prev_dtheta,
             resulting_cheb_phase,
             resulting_pti_state,
+            resulting_cplg_state,
             stats,
             ..
         } = preview;
@@ -1926,6 +2540,7 @@ impl GlobalState {
         self.curv_prev_dtheta[fid] = resulting_curv_prev_dtheta;
         self.cheb_phase[fid] = resulting_cheb_phase;
         self.pti_state[fid] = resulting_pti_state;
+        self.cplg_state[fid] = resulting_cplg_state;
         self.state_epochs[fid] = next_epoch;
         Ok(stats)
     }
@@ -1940,6 +2555,7 @@ impl GlobalState {
 
 const CKPT_MAGIC: u32 = 0xD170_5A7E;
 const PTI_CKPT_EXTENSION_MAGIC: u32 = 0x3149_5450; // little-endian "PTI1"
+const CPLG_CKPT_EXTENSION_MAGIC: u32 = 0x314c_5043; // little-endian "CPL1"
 
 impl GlobalState {
     /// Persist a consistent snapshot. Called only at the quiescent cut
@@ -1975,8 +2591,11 @@ impl GlobalState {
                 let bytes = meta.as_bytes();
                 f.write_all(&(bytes.len() as u32).to_le_bytes())?;
                 f.write_all(bytes)?;
-            } else if self.outer_optimizer == merge::OuterOptimizer::PtiSgd {
-                // A zero-length metadata block disambiguates the optional PTI
+            } else if matches!(
+                self.outer_optimizer,
+                merge::OuterOptimizer::PtiSgd | merge::OuterOptimizer::CplgSgd
+            ) {
+                // A zero-length metadata block disambiguates a causal-selector
                 // extension from legacy checkpoints that ended at the ledger.
                 f.write_all(&0u32.to_le_bytes())?;
             }
@@ -1988,6 +2607,33 @@ impl GlobalState {
                         f.write_all(&(values.len() as u64).to_le_bytes())?;
                         for value in values {
                             f.write_all(&value.to_le_bytes())?;
+                        }
+                    }
+                    f.write_all(&(state.scores.len() as u32).to_le_bytes())?;
+                    for score in &state.scores {
+                        f.write_all(&score.to_le_bytes())?;
+                    }
+                }
+            }
+            if self.outer_optimizer == merge::OuterOptimizer::CplgSgd {
+                f.write_all(&CPLG_CKPT_EXTENSION_MAGIC.to_le_bytes())?;
+                f.write_all(&(self.cplg_state.len() as u32).to_le_bytes())?;
+                for state in &self.cplg_state {
+                    for values in [
+                        &state.previous_stock,
+                        &state.previous_forward_tangent,
+                        &state.pending_candidate,
+                    ] {
+                        f.write_all(&(values.len() as u64).to_le_bytes())?;
+                        for value in values {
+                            f.write_all(&value.to_le_bytes())?;
+                        }
+                    }
+                    match state.previous_theta {
+                        None => f.write_all(&0u8.to_le_bytes())?,
+                        Some(theta) => {
+                            f.write_all(&1u8.to_le_bytes())?;
+                            f.write_all(&theta.to_le_bytes())?;
                         }
                     }
                     f.write_all(&(state.scores.len() as u32).to_le_bytes())?;
@@ -2054,6 +2700,7 @@ impl GlobalState {
             // Legacy checkpoints have no causal PTI history.  Resume safely
             // from a stock warm-up boundary instead of inventing a shadow.
             self.pti_state[p] = PtiFragmentState::default();
+            self.cplg_state[p] = CplgFragmentState::default();
             self.initialized[p] = true;
             self.state_epochs[p] = next_epoch;
         }
@@ -2082,58 +2729,148 @@ impl GlobalState {
             }
         }
         if !r.0.is_empty() {
-            if r.u32()? != PTI_CKPT_EXTENSION_MAGIC {
-                bail!("checkpoint has unknown trailing extension");
-            }
-            let state_count = r.u32()? as usize;
-            if state_count != self.pti_state.len() {
-                bail!(
-                    "PTI checkpoint has {state_count} fragments, layout has {}",
-                    self.pti_state.len()
-                );
-            }
-            for fid in 0..state_count {
-                let mut read_vector = |name: &str| -> Result<Vec<f32>> {
-                    let len = r.u64()? as usize;
-                    let expected = self.params[fid].len();
-                    if len != 0 && len != expected {
+            match r.u32()? {
+                PTI_CKPT_EXTENSION_MAGIC => {
+                    let state_count = r.u32()? as usize;
+                    if state_count != self.pti_state.len() {
                         bail!(
-                            "PTI checkpoint fragment {fid} {name} has {len} values, expected 0 or {expected}"
+                            "PTI checkpoint has {state_count} fragments, layout has {}",
+                            self.pti_state.len()
                         );
                     }
-                    let mut values = Vec::with_capacity(len);
-                    for _ in 0..len {
-                        let value = f32::from_le_bytes(r.take(4)?.try_into()?);
-                        if !value.is_finite() {
-                            bail!("PTI checkpoint fragment {fid} {name} is non-finite");
+                    for fid in 0..state_count {
+                        let mut read_vector = |name: &str| -> Result<Vec<f32>> {
+                            let len = r.u64()? as usize;
+                            let expected = self.params[fid].len();
+                            if len != 0 && len != expected {
+                                bail!(
+                                    "PTI checkpoint fragment {fid} {name} has {len} values, expected 0 or {expected}"
+                                );
+                            }
+                            let mut values = Vec::with_capacity(len);
+                            for _ in 0..len {
+                                let value = f32::from_le_bytes(r.take(4)?.try_into()?);
+                                if !value.is_finite() {
+                                    bail!("PTI checkpoint fragment {fid} {name} is non-finite");
+                                }
+                                values.push(value);
+                            }
+                            Ok(values)
+                        };
+                        let previous_stock = read_vector("previous stock")?;
+                        let pending_candidate = read_vector("pending candidate")?;
+                        let score_count = r.u32()? as usize;
+                        if score_count > PTI_INTERLOCK_LENGTH {
+                            bail!("PTI checkpoint fragment {fid} has {score_count} scores");
                         }
-                        values.push(value);
+                        let mut scores = Vec::with_capacity(score_count);
+                        for _ in 0..score_count {
+                            let score = f32::from_le_bytes(r.take(4)?.try_into()?);
+                            if !score.is_finite() {
+                                bail!("PTI checkpoint fragment {fid} score is non-finite");
+                            }
+                            scores.push(score);
+                        }
+                        self.pti_state[fid] = PtiFragmentState {
+                            previous_stock,
+                            pending_candidate,
+                            scores,
+                        };
                     }
-                    Ok(values)
-                };
-                let previous_stock = read_vector("previous stock")?;
-                let pending_candidate = read_vector("pending candidate")?;
-                let score_count = r.u32()? as usize;
-                if score_count > PTI_INTERLOCK_LENGTH {
-                    bail!("PTI checkpoint fragment {fid} has {score_count} scores");
                 }
-                let mut scores = Vec::with_capacity(score_count);
-                for _ in 0..score_count {
-                    let score = f32::from_le_bytes(r.take(4)?.try_into()?);
-                    if !score.is_finite() {
-                        bail!("PTI checkpoint fragment {fid} score is non-finite");
+                CPLG_CKPT_EXTENSION_MAGIC => {
+                    let state_count = r.u32()? as usize;
+                    if state_count != self.cplg_state.len() {
+                        bail!(
+                            "CPLG checkpoint has {state_count} fragments, layout has {}",
+                            self.cplg_state.len()
+                        );
                     }
-                    scores.push(score);
+                    for fid in 0..state_count {
+                        let mut read_vector = |name: &str| -> Result<Vec<f32>> {
+                            let len = r.u64()? as usize;
+                            let expected = self.params[fid].len();
+                            if len != 0 && len != expected {
+                                bail!(
+                                    "CPLG checkpoint fragment {fid} {name} has {len} values, expected 0 or {expected}"
+                                );
+                            }
+                            let mut values = Vec::with_capacity(len);
+                            for _ in 0..len {
+                                let value = f32::from_le_bytes(r.take(4)?.try_into()?);
+                                if !value.is_finite() {
+                                    bail!("CPLG checkpoint fragment {fid} {name} is non-finite");
+                                }
+                                values.push(value);
+                            }
+                            Ok(values)
+                        };
+                        let previous_stock = read_vector("previous stock")?;
+                        let previous_forward_tangent = read_vector("previous tangent")?;
+                        let pending_candidate = read_vector("pending candidate")?;
+                        let previous_theta = match r.u8()? {
+                            0 => None,
+                            1 => {
+                                let theta = f32::from_le_bytes(r.take(4)?.try_into()?);
+                                if !theta.is_finite() || theta <= 0.0 {
+                                    bail!("CPLG checkpoint fragment {fid} theta is invalid");
+                                }
+                                Some(theta)
+                            }
+                            tag => bail!("CPLG checkpoint fragment {fid} has theta tag {tag}"),
+                        };
+                        if previous_forward_tangent.is_empty() != previous_theta.is_none() {
+                            bail!("CPLG checkpoint fragment {fid} has inconsistent phase state");
+                        }
+                        if !pending_candidate.is_empty() && previous_forward_tangent.is_empty() {
+                            bail!(
+                                "CPLG checkpoint fragment {fid} has a shadow without phase state"
+                            );
+                        }
+                        let score_count = r.u32()? as usize;
+                        if score_count > CPLG_INTERLOCK_LENGTH {
+                            bail!("CPLG checkpoint fragment {fid} has {score_count} scores");
+                        }
+                        let mut scores = Vec::with_capacity(score_count);
+                        for _ in 0..score_count {
+                            let score = f32::from_le_bytes(r.take(4)?.try_into()?);
+                            if !score.is_finite() {
+                                bail!("CPLG checkpoint fragment {fid} score is non-finite");
+                            }
+                            scores.push(score);
+                        }
+                        if previous_stock.is_empty()
+                            && (!previous_forward_tangent.is_empty()
+                                || previous_theta.is_some()
+                                || !pending_candidate.is_empty()
+                                || !scores.is_empty())
+                        {
+                            bail!("CPLG checkpoint fragment {fid} has phase state without stock history");
+                        }
+                        if previous_forward_tangent.is_empty()
+                            && (!pending_candidate.is_empty() || !scores.is_empty())
+                        {
+                            bail!(
+                                "CPLG checkpoint fragment {fid} has shadow state without a tangent"
+                            );
+                        }
+                        if pending_candidate.is_empty() && !scores.is_empty() {
+                            bail!("CPLG checkpoint fragment {fid} has scores without a pending shadow");
+                        }
+                        self.cplg_state[fid] = CplgFragmentState {
+                            previous_stock,
+                            previous_forward_tangent,
+                            previous_theta,
+                            pending_candidate,
+                            scores,
+                        };
+                    }
                 }
-                self.pti_state[fid] = PtiFragmentState {
-                    previous_stock,
-                    pending_candidate,
-                    scores,
-                };
+                _ => bail!("checkpoint has unknown trailing extension"),
             }
         }
         if !r.0.is_empty() {
-            bail!("checkpoint has trailing bytes after PTI extension");
+            bail!("checkpoint has trailing bytes after causal-selector extension");
         }
         Ok(())
     }
@@ -3392,6 +4129,206 @@ mod tests {
             assert_eq!(resumed.pti_state, uninterrupted.pti_state);
         }
         assert!(uninterrupted.pti_state[0]
+            .scores
+            .iter()
+            .all(|score| *score > 0.0));
+        std::fs::remove_file(path).ok();
+    }
+
+    fn cplg_unit_degrees(degrees: f32) -> Vec<f32> {
+        let radians = degrees * (std::f32::consts::PI / 180.0);
+        vec![libm::cosf(radians), libm::sinf(radians)]
+    }
+
+    #[test]
+    fn cplg_constant_phase_uses_forward_sign_and_literal_angle() {
+        let mut state = CplgFragmentState::default();
+        let (action0, next, stats0) = cplg_select_direction(&cplg_unit_degrees(0.0), &state);
+        assert_eq!(stats0.reason, CplgReason::StockWarmup);
+        assert_eq!(action0, cplg_unit_degrees(0.0));
+        state = next;
+
+        let (action1, next, stats1) = cplg_select_direction(&cplg_unit_degrees(10.0), &state);
+        assert_eq!(stats1.reason, CplgReason::PhaseWarmup);
+        assert_eq!(action1, cplg_unit_degrees(10.0));
+        state = next;
+
+        let (action2, next, stats2) = cplg_select_direction(&cplg_unit_degrees(20.0), &state);
+        assert_eq!(action2, cplg_unit_degrees(20.0));
+        assert!((stats2.coherence.unwrap() - 1.0).abs() < 2.0e-6);
+        let expected_turn = 10.0 * (std::f64::consts::PI / 180.0);
+        assert!((stats2.phi.unwrap() - expected_turn).abs() < 2.0e-6);
+        let candidate = &next.pending_candidate;
+        let candidate_angle = libm::atan2f(candidate[1], candidate[0]) as f64;
+        let expected_angle = 30.0 * (std::f64::consts::PI / 180.0);
+        assert!((candidate_angle - expected_angle).abs() < 3.0e-6);
+        // The forward convention predicts 30 degrees; the opposite sign
+        // would produce 10 degrees and fail this assertion decisively.
+        assert!(candidate_angle > stats2.theta.unwrap());
+    }
+
+    #[test]
+    fn cplg_reversal_clamps_coherence_to_zero() {
+        let mut state = CplgFragmentState::default();
+        for degrees in [0.0f32, 10.0] {
+            let (_, next, _) = cplg_select_direction(&cplg_unit_degrees(degrees), &state);
+            state = next;
+        }
+        let (action, next, stats) = cplg_select_direction(&cplg_unit_degrees(0.0), &state);
+        assert_eq!(stats.coherence, Some(0.0));
+        assert_eq!(stats.phi, Some(0.0));
+        assert_eq!(action, cplg_unit_degrees(0.0));
+        assert!(pti_cosine(&next.pending_candidate, &action).unwrap() > 1.0 - 2.0e-6);
+    }
+
+    #[test]
+    fn cplg_phase_angle_is_capped_at_atan_quarter() {
+        assert_eq!(CPLG_ANGLE_CAP.to_bits(), 0x3e7a_dbb0);
+        assert_eq!(libm::atanf(0.25).to_bits(), CPLG_ANGLE_CAP.to_bits());
+        let mut state = CplgFragmentState::default();
+        for degrees in [0.0f32, 20.0] {
+            let (_, next, _) = cplg_select_direction(&cplg_unit_degrees(degrees), &state);
+            state = next;
+        }
+        let (_, next, stats) = cplg_select_direction(&cplg_unit_degrees(40.0), &state);
+        assert!((stats.coherence.unwrap() - 1.0).abs() < 2.0e-6);
+        assert_eq!(stats.phi.unwrap() as f32, CPLG_ANGLE_CAP);
+        let candidate_angle = libm::atan2f(next.pending_candidate[1], next.pending_candidate[0]);
+        let expected = 40.0 * (std::f32::consts::PI / 180.0) + CPLG_ANGLE_CAP;
+        assert!((candidate_angle - expected).abs() < 3.0e-6);
+    }
+
+    #[test]
+    fn cplg_interlock_first_selects_on_sixth_causal_visit() {
+        let mut state = CplgFragmentState::default();
+        for (visit, degrees) in [0.0f32, 10.0, 20.0, 30.0, 40.0, 50.0]
+            .into_iter()
+            .enumerate()
+        {
+            let current = cplg_unit_degrees(degrees);
+            let (action, next, stats) = cplg_select_direction(&current, &state);
+            if visit < 5 {
+                assert!(!stats.used_nonstock, "opened at causal visit {}", visit + 1);
+                assert_eq!(action, current);
+            } else {
+                assert_eq!(stats.interlock_score_count, 3);
+                assert!(stats.interlock_open);
+                assert!(stats.used_nonstock);
+                assert_eq!(stats.reason, CplgReason::CandidateSelected);
+                assert!(!cplg_bitwise_equal(&action, &current));
+            }
+            state = next;
+        }
+        assert_eq!(state.scores.len(), 3);
+        assert!(state.scores.iter().all(|score| *score > 0.0));
+    }
+
+    #[test]
+    fn cplg_nonacute_turn_is_exact_stock_fallback_and_clears_state() {
+        let (_, state, _) =
+            cplg_select_direction(&cplg_unit_degrees(0.0), &CplgFragmentState::default());
+        let current = cplg_unit_degrees(90.0);
+        let (action, next, stats) = cplg_select_direction(&current, &state);
+        assert!(cplg_bitwise_equal(&action, &current));
+        assert_eq!(next, CplgFragmentState::default());
+        assert!(stats.state_cleared);
+        assert_eq!(stats.reason, CplgReason::NonAcuteTurn);
+        assert_eq!(stats.action_sha256, stats.stock_sha256);
+    }
+
+    #[test]
+    fn cplg_preview_is_pure_and_commit_advances_once() {
+        let layout = Layout {
+            fragments: vec![FragmentInfo {
+                merge_mode: MERGE_AVG,
+                tensor_numels: vec![2],
+                tensor_shapes: None,
+            }],
+        };
+        let mut state = GlobalState::new(
+            layout,
+            None,
+            CPLG_TREATMENT_LR_FOR_TEST,
+            0.0,
+            crate::protocol::DTYPE_F32,
+        );
+        state.outer_optimizer = merge::OuterOptimizer::CplgSgd;
+        state.init_fragment(0, vec![0.0, 0.0]).unwrap();
+        let learner = [-1.0f32, 0.0];
+        let candidates = [MergeCandidate::new(0, &learner, 1.0)];
+        let aggregate = state.build_full_aggregate(0, &candidates).unwrap();
+        let first = state.preview_aggregate(&aggregate, 1).unwrap();
+        let repeated = state.preview_aggregate(&aggregate, 1).unwrap();
+        assert_eq!(first, repeated);
+        assert_eq!(state.cplg_state[0], CplgFragmentState::default());
+        state.commit_preview(first).unwrap();
+        assert_eq!(state.cplg_state[0].previous_stock, vec![1.0, 0.0]);
+        assert!(state.cplg_state[0].previous_forward_tangent.is_empty());
+    }
+
+    const CPLG_TREATMENT_LR_FOR_TEST: f32 = f32::from_bits(0x3e8f_5c29);
+
+    #[test]
+    fn cplg_checkpoint_resume_is_bit_identical_to_uninterrupted_stream() {
+        fn new_state() -> GlobalState {
+            let layout = Layout {
+                fragments: vec![FragmentInfo {
+                    merge_mode: MERGE_AVG,
+                    tensor_numels: vec![2],
+                    tensor_shapes: None,
+                }],
+            };
+            let mut state = GlobalState::new(
+                layout,
+                None,
+                CPLG_TREATMENT_LR_FOR_TEST,
+                0.0,
+                crate::protocol::DTYPE_F32,
+            );
+            state.outer_optimizer = merge::OuterOptimizer::CplgSgd;
+            state.init_fragment(0, vec![0.0, 0.0]).unwrap();
+            state
+        }
+        fn apply_direction(state: &mut GlobalState, degrees: f32) -> MergeStats {
+            let delta = cplg_unit_degrees(degrees);
+            let endpoint: Vec<f32> = state.params[0]
+                .iter()
+                .zip(delta)
+                .map(|(parameter, value)| *parameter - value)
+                .collect();
+            let stats = state.merge_and_step(0, &[&endpoint], &[1.0]).unwrap();
+            state.versions[0] += 1;
+            state.global_step += 1;
+            stats
+        }
+
+        let mut uninterrupted = new_state();
+        let mut checkpoint_source = new_state();
+        for degrees in [0.0f32, 10.0, 20.0, 30.0] {
+            assert_eq!(
+                apply_direction(&mut uninterrupted, degrees),
+                apply_direction(&mut checkpoint_source, degrees)
+            );
+        }
+        let path = std::env::temp_dir().join(format!(
+            "yeto-cplg-resume-{}-{}.ckpt",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        checkpoint_source.save_checkpoint(&path).unwrap();
+        let mut resumed = new_state();
+        resumed.load_checkpoint(&path).unwrap();
+        assert_eq!(resumed.cplg_state, checkpoint_source.cplg_state);
+
+        for degrees in [40.0f32, 50.0] {
+            let expected_stats = apply_direction(&mut uninterrupted, degrees);
+            let resumed_stats = apply_direction(&mut resumed, degrees);
+            assert_eq!(resumed_stats, expected_stats);
+            assert_eq!(resumed.params, uninterrupted.params);
+            assert_eq!(resumed.momentum, uninterrupted.momentum);
+            assert_eq!(resumed.cplg_state, uninterrupted.cplg_state);
+        }
+        assert!(uninterrupted.cplg_state[0]
             .scores
             .iter()
             .all(|score| *score > 0.0));

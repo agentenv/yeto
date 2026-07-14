@@ -84,7 +84,7 @@ struct Args {
     outer_momentum: f32,
     /// Outer optimizer: nesterov, normalized-ema, restarted-ema,
     /// rho-adaptive, capped-nesterov[-gc|-r], block-rms, block-yogi,
-    /// cheb-sgd, or pti-sgd.
+    /// cheb-sgd, pti-sgd, or cplg-sgd.
     /// block-rms/block-yogi are memoryless (beta1=0) per-tensor second-moment
     /// optimizers with a global norm-match back to the plain-SGD step. cheb-sgd
     /// is a memoryless cyclical Chebyshev learning-rate schedule (no buffer).
@@ -221,6 +221,11 @@ fn main() -> anyhow::Result<()> {
         .as_deref()
         .map(parse_outer_lr_by_fragment)
         .transpose()?;
+    validate_cplg_treatment(
+        args.outer_optimizer,
+        args.outer_lr,
+        outer_lr_by_fragment.as_deref(),
+    )?;
     let action_probe = action_probe_config(&args)?;
     match (
         args.response_transcript.as_ref(),
@@ -368,9 +373,36 @@ fn validate_outer_optimizer(
             "--outer-momentum is unused by {optimizer} but must still be finite, got {outer_momentum}"
         );
     }
-    if optimizer == merge::OuterOptimizer::PtiSgd && outer_momentum != 0.0 {
+    if matches!(
+        optimizer,
+        merge::OuterOptimizer::PtiSgd | merge::OuterOptimizer::CplgSgd
+    ) && outer_momentum != 0.0
+    {
         anyhow::bail!(
-            "--outer-optimizer pti-sgd requires --outer-momentum 0 so its selected direction feeds the frozen stock SGD kernel; got {outer_momentum}"
+            "--outer-optimizer {optimizer} requires --outer-momentum 0 so its selected direction feeds the frozen stock SGD kernel; got {outer_momentum}"
+        );
+    }
+    Ok(())
+}
+
+const CPLG_TREATMENT_LR: f32 = f32::from_bits(0x3e8f_5c29); // exact f32 0.28
+
+fn validate_cplg_treatment(
+    optimizer: merge::OuterOptimizer,
+    outer_lr: f32,
+    outer_lr_by_fragment: Option<&[f32]>,
+) -> anyhow::Result<()> {
+    if optimizer != merge::OuterOptimizer::CplgSgd {
+        return Ok(());
+    }
+    if outer_lr_by_fragment.is_some() {
+        anyhow::bail!(
+            "--outer-optimizer cplg-sgd forbids --outer-lr-by-fragment so every fragment has the frozen SGD-0.28 treatment identity"
+        );
+    }
+    if outer_lr.to_bits() != CPLG_TREATMENT_LR.to_bits() {
+        anyhow::bail!(
+            "--outer-optimizer cplg-sgd requires exact f32 --outer-lr 0.28 (bits 0x3e8f5c29); got {outer_lr:?}"
         );
     }
     Ok(())
@@ -544,6 +576,7 @@ mod tests {
             ),
             ("cheb-sgd", merge::OuterOptimizer::ChebSgd),
             ("pti-sgd", merge::OuterOptimizer::PtiSgd),
+            ("cplg-sgd", merge::OuterOptimizer::CplgSgd),
         ] {
             let args = Args::try_parse_from([
                 "yeto-syncer",
@@ -573,6 +606,24 @@ mod tests {
         assert!(validate_outer_optimizer(merge::OuterOptimizer::ChebSgd, f32::NAN).is_err());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::PtiSgd, 0.0).is_ok());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::PtiSgd, 0.9).is_err());
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::CplgSgd, 0.0).is_ok());
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::CplgSgd, 0.9).is_err());
+        assert!(validate_cplg_treatment(
+            merge::OuterOptimizer::CplgSgd,
+            f32::from_bits(0x3e8f_5c29),
+            None,
+        )
+        .is_ok());
+        assert!(
+            validate_cplg_treatment(merge::OuterOptimizer::CplgSgd, 0.280_000_03, None).is_err()
+        );
+        assert!(validate_cplg_treatment(
+            merge::OuterOptimizer::CplgSgd,
+            f32::from_bits(0x3e8f_5c29),
+            Some(&[f32::from_bits(0x3e8f_5c29)]),
+        )
+        .is_err());
+        assert!(validate_cplg_treatment(merge::OuterOptimizer::PtiSgd, 0.7, None).is_ok());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::CappedNesterovR, 0.9).is_ok());
         assert!(
             validate_outer_optimizer(merge::OuterOptimizer::CappedNesterovR, f32::NAN).is_err()

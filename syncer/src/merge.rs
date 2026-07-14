@@ -47,6 +47,10 @@ pub enum OuterOptimizer {
     /// receives the already selected stock/PTI direction and intentionally
     /// applies the same Nesterov kernel as the stock path.
     PtiSgd,
+    /// Causal phase-locked geodesic direction policy followed by the ordinary
+    /// outer SGD step. The causal per-fragment geometry and interlock live in
+    /// `state.rs`; this layer receives the already selected direction.
+    CplgSgd,
 }
 
 impl OuterOptimizer {
@@ -65,6 +69,7 @@ impl OuterOptimizer {
             Self::BlockYogi => "block-yogi",
             Self::ChebSgd => "cheb-sgd",
             Self::PtiSgd => "pti-sgd",
+            Self::CplgSgd => "cplg-sgd",
         }
     }
 
@@ -97,8 +102,9 @@ impl FromStr for OuterOptimizer {
             "block-yogi" => Ok(Self::BlockYogi),
             "cheb-sgd" => Ok(Self::ChebSgd),
             "pti-sgd" => Ok(Self::PtiSgd),
+            "cplg-sgd" => Ok(Self::CplgSgd),
             other => Err(format!(
-                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov, capped-nesterov-gc, capped-nesterov-r, capped-nesterov-curv, capped-nesterov-wsub, block-rms, block-yogi, cheb-sgd, pti-sgd; got {other:?}"
+                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov, capped-nesterov-gc, capped-nesterov-r, capped-nesterov-curv, capped-nesterov-wsub, block-rms, block-yogi, cheb-sgd, pti-sgd, cplg-sgd; got {other:?}"
             )),
         }
     }
@@ -161,7 +167,7 @@ pub fn apply_outer_step(
     cheb_phase: &mut f32,
 ) -> OuterStepStats {
     match optimizer {
-        OuterOptimizer::Nesterov | OuterOptimizer::PtiSgd => {
+        OuterOptimizer::Nesterov | OuterOptimizer::PtiSgd | OuterOptimizer::CplgSgd => {
             nesterov_step(params, buf, delta, lr, momentum)
         }
         OuterOptimizer::NormalizedEma => normalized_ema_step(params, buf, delta, lr, momentum),
@@ -222,6 +228,7 @@ pub fn materialize_applied_step(
     match optimizer {
         OuterOptimizer::Nesterov
         | OuterOptimizer::PtiSgd
+        | OuterOptimizer::CplgSgd
         | OuterOptimizer::CappedNesterov
         | OuterOptimizer::CappedNesterovR
         | OuterOptimizer::CappedNesterovCurv
@@ -3480,6 +3487,9 @@ mod tests {
         assert_eq!("block-yogi".parse(), Ok(OuterOptimizer::BlockYogi));
         assert_eq!(OuterOptimizer::BlockRms.to_string(), "block-rms");
         assert_eq!(OuterOptimizer::BlockYogi.to_string(), "block-yogi");
+        assert_eq!("pti-sgd".parse(), Ok(OuterOptimizer::PtiSgd));
+        assert_eq!("cplg-sgd".parse(), Ok(OuterOptimizer::CplgSgd));
+        assert_eq!(OuterOptimizer::CplgSgd.to_string(), "cplg-sgd");
     }
 
     // ---- worker-SNR merge mode ----
