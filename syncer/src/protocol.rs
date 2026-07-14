@@ -20,6 +20,10 @@ pub const MSG_CHUNK: u8 = 9;
 /// BCAST_FRAGMENT (fid u32, version u64, bulk-wire tensor bytes). Never emitted on
 /// the default path, so learners that do not enable control variates ignore it.
 pub const MSG_BCAST_CONTROL: u8 = 10;
+/// Identity-shuffle Option-II residual plus the shared residual mean.
+/// Envelope: fid u32, version u64, residual byte length u64, then the assigned
+/// residual bytes followed by the mean bytes.
+pub const MSG_BCAST_CONTROL_PAIR: u8 = 11;
 
 pub const DTYPE_F32: u8 = 1;
 pub const DTYPE_BF16: u8 = 2;
@@ -34,7 +38,11 @@ pub const Q4_BLOCK: usize = 256;
 /// Dtype of INIT_PARAMS/BCAST_FRAGMENT tensors for a session dtype: q4
 /// applies only to push deltas; full parameter payloads stay bf16.
 pub fn bulk_dtype(dtype: u8) -> u8 {
-    if dtype == DTYPE_Q4 { DTYPE_BF16 } else { dtype }
+    if dtype == DTYPE_Q4 {
+        DTYPE_BF16
+    } else {
+        dtype
+    }
 }
 
 /// Hard cap on a single frame; a fragment of a very large model can still be

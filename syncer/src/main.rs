@@ -49,14 +49,13 @@ struct Args {
     /// Pre-merge learner-delta correction: "heloco" or "none".
     #[arg(long, default_value = "heloco")]
     delta_correction: String,
-    /// SCAFFOLD-lite inner control variates (docs/OTHER_OPTIMIZERS.md #5):
-    /// "none" (default) or "scaffold_lite". When enabled, after each fragment
-    /// merge the syncer broadcasts the token-normalized mean control c =
-    /// sum_i(theta_i - anchor) / sum_i tokens_i (MSG_BCAST_CONTROL), which
-    /// learners use to correct their inner gradients. Does not change the
-    /// merge or outer step; the default is byte-identical to before.
+    /// SCAFFOLD inner controls: none, scaffold_lite, or learner-accumulated
+    /// scaffold_full Option II.
     #[arg(long, default_value = "none")]
     inner_control_variate: String,
+    /// Cyclically derange full controls across learner identities each round.
+    #[arg(long, default_value_t = false)]
+    scaffold_control_shuffle: bool,
     /// Give up waiting for quorum and re-send the pull after this long.
     #[arg(long, default_value_t = 900)]
     quorum_timeout_s: u64,
@@ -127,8 +126,8 @@ struct Args {
     event_tape: Option<std::path::PathBuf>,
     /// Optional directory for offline syncer-current fragment probes.
     /// When set, the syncer writes one pre-merge checkpoint per sampled
-    /// round, one f32 candidate-fragment file per admitted responder, and
-    /// an index.jsonl tying them together.
+    /// round, one f32 candidate-fragment file per admitted responder, the
+    /// applied update vector, and an index.jsonl tying them together.
     #[arg(long)]
     probe_capture_dir: Option<std::path::PathBuf>,
     /// Capture every Nth outer step when --probe-capture-dir is set.
@@ -176,16 +175,32 @@ fn main() -> anyhow::Result<()> {
         other => anyhow::bail!("--delta-correction must be 'heloco' or 'none', got {other:?}"),
     };
     let control_variate = match args.inner_control_variate.as_str() {
-        "scaffold_lite" => true,
-        "none" => false,
+        "scaffold_lite" => server::ControlVariateMode::ScaffoldLite,
+        "scaffold_full" => server::ControlVariateMode::ScaffoldFull,
+        "none" => server::ControlVariateMode::None,
         other => anyhow::bail!(
-            "--inner-control-variate must be 'none' or 'scaffold_lite', got {other:?}"
+            "--inner-control-variate must be 'none', 'scaffold_lite', or 'scaffold_full', got {other:?}"
         ),
     };
-    if control_variate && !args.version_matched_anchor {
+    if control_variate != server::ControlVariateMode::None && !args.version_matched_anchor {
         anyhow::bail!(
-            "--inner-control-variate scaffold_lite requires --version-matched-anchor so every local/mean control uses the exact pushed base version"
+            "SCAFFOLD requires --version-matched-anchor so every control uses the exact pushed base version"
         );
+    }
+    if args.scaffold_control_shuffle && control_variate != server::ControlVariateMode::ScaffoldFull
+    {
+        anyhow::bail!("--scaffold-control-shuffle requires scaffold_full");
+    }
+    if control_variate == server::ControlVariateMode::ScaffoldFull
+        && (args.quorum != args.learners || !args.strict_quorum)
+    {
+        anyhow::bail!("scaffold_full is restricted to strict full participation");
+    }
+    if args.scaffold_control_shuffle && args.learners < 2 {
+        anyhow::bail!("--scaffold-control-shuffle requires at least two learners");
+    }
+    if control_variate == server::ControlVariateMode::ScaffoldFull && args.resume {
+        anyhow::bail!("scaffold_full resume is not supported in the narrow correctness regime");
     }
     let outer_lr_by_fragment = args
         .outer_lr_by_fragment
@@ -205,6 +220,7 @@ fn main() -> anyhow::Result<()> {
         sync_interval_steps: args.sync_interval_steps,
         delta_correction,
         control_variate,
+        scaffold_control_shuffle: args.scaffold_control_shuffle,
         quorum_timeout_s: args.quorum_timeout_s,
         strict_quorum: args.strict_quorum,
         total_steps: args.total_steps,
@@ -463,7 +479,10 @@ mod tests {
             ("normalized-ema", merge::OuterOptimizer::NormalizedEma),
             ("restarted-ema", merge::OuterOptimizer::RestartedEma),
             ("capped-nesterov", merge::OuterOptimizer::CappedNesterov),
-            ("capped-nesterov-gc", merge::OuterOptimizer::CappedNesterovGc),
+            (
+                "capped-nesterov-gc",
+                merge::OuterOptimizer::CappedNesterovGc,
+            ),
             ("capped-nesterov-r", merge::OuterOptimizer::CappedNesterovR),
             (
                 "capped-nesterov-curv",

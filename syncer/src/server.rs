@@ -27,6 +27,19 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(180);
 const WRITER_QUEUE: usize = 128;
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlVariateMode {
+    None,
+    ScaffoldLite,
+    ScaffoldFull,
+}
+
+impl ControlVariateMode {
+    fn enabled(self) -> bool {
+        self != Self::None
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub port: u16,
@@ -64,12 +77,9 @@ pub struct Config {
     pub sync_interval_steps: f64,
     /// HeLoCo per-tensor delta correction before merging.
     pub delta_correction: bool,
-    /// SCAFFOLD-lite inner control variates (docs/OTHER_OPTIMIZERS.md #5). When
-    /// true, `complete_round` broadcasts the token-normalized mean control c for
-    /// each merged fragment (MSG_BCAST_CONTROL) so learners can correct their
-    /// inner gradients by (c_i - c). Does not touch the merge or outer step;
-    /// false (default) is byte-identical to the pre-scaffold path.
-    pub control_variate: bool,
+    pub control_variate: ControlVariateMode,
+    /// Mechanism control: cyclically derange full-control residuals by worker.
+    pub scaffold_control_shuffle: bool,
     pub quorum_timeout_s: u64,
     /// Require the configured quorum even after learners disconnect, and do
     /// not commit under-quorum rounds on timeout.
@@ -102,8 +112,8 @@ pub struct Config {
     /// JSONL event tape: one record per merge.
     pub event_tape: Option<std::path::PathBuf>,
     /// Optional offline probe capture directory. When enabled, complete_round
-    /// writes a pre-merge syncer checkpoint and admitted candidate fragment
-    /// tensors before applying the outer step.
+    /// writes a pre-merge syncer checkpoint, admitted candidate fragment
+    /// tensors, and the resulting applied-update vector.
     pub probe_capture_dir: Option<std::path::PathBuf>,
     /// Capture every Nth outer step. 0 disables capture.
     pub probe_capture_every: u64,
@@ -205,6 +215,14 @@ struct Push {
     c_steps: u32,
     c_tokens: u64,
     values: Vec<f32>,
+}
+
+enum ControlBroadcast {
+    SharedMean(Vec<f32>),
+    ShuffledResiduals {
+        assigned: HashMap<u32, Vec<f32>>,
+        mean: Vec<f32>,
+    },
 }
 
 /// EXP2.46 anchor-drift diagnostics for one push. The syncer differences a
@@ -919,9 +937,8 @@ async fn scheduler(
     };
     let mut step_rates = StepRates::default();
     let mut last_sync_secs = 0.0f64; // previous round's merge+broadcast time
-
-    // Send everyone the initial (or resumed) global parameters so all
-    // learners start bit-identical (also serves recovery for late joiners).
+                                     // Send everyone the initial (or resumed) global parameters so all
+                                     // learners start bit-identical (also serves recovery for late joiners).
     broadcast_all_fragments(&st, &registry).await;
 
     // Phase 2: the outer loop. One fragment per global step, round-robin,
@@ -1289,6 +1306,76 @@ fn commit_preview_index(policy: CommitPolicy, selected_index: usize) -> usize {
     }
 }
 
+fn build_control_broadcast(
+    cfg: &Config,
+    st: &GlobalState,
+    fragment: usize,
+    step: u64,
+    ids: &[u32],
+    pushes: &HashMap<u32, Push>,
+) -> Result<Option<ControlBroadcast>> {
+    if !cfg.control_variate.enabled() {
+        return Ok(None);
+    }
+    let dim = st.params[fragment].len();
+    let mut anchors = Vec::with_capacity(ids.len());
+    let mut endpoints = Vec::with_capacity(ids.len());
+    let mut tokens = Vec::with_capacity(ids.len());
+    for id in ids {
+        let push = pushes.get(id).expect("sorted id in push map");
+        anchors.push(st.anchor_at(fragment, push.base_version).with_context(|| {
+            format!(
+                "SCAFFOLD step {step} fragment {fragment}: retained anchor for learner {} base version {} is unavailable",
+                push.learner_id, push.base_version
+            )
+        })?);
+        endpoints.push(push.values.as_slice());
+        tokens.push(push.c_tokens);
+    }
+    let mut residual_mean = vec![0.0f32; dim];
+    if !crate::merge::scaffold_mean_control_version_matched(
+        &anchors,
+        &endpoints,
+        &tokens,
+        &mut residual_mean,
+    ) {
+        bail!("SCAFFOLD step {step} fragment {fragment}: invalid residual group");
+    }
+    if !cfg.scaffold_control_shuffle {
+        return Ok(Some(ControlBroadcast::SharedMean(residual_mean)));
+    }
+    if tokens.windows(2).any(|pair| pair[0] != pair[1]) {
+        bail!("scaffold_full identity shuffle requires equal-token windows");
+    }
+
+    let mut residuals = Vec::with_capacity(ids.len());
+    for ((anchor, endpoint), &token_count) in anchors.iter().zip(&endpoints).zip(&tokens) {
+        residuals.push(
+            endpoint
+                .iter()
+                .zip(*anchor)
+                .map(|(value, base)| (value - base) / token_count as f32)
+                .collect(),
+        );
+    }
+    let assigned = cyclic_derangement(ids, &residuals)?;
+    Ok(Some(ControlBroadcast::ShuffledResiduals {
+        assigned,
+        mean: residual_mean,
+    }))
+}
+
+fn cyclic_derangement(ids: &[u32], canonical: &[Vec<f32>]) -> Result<HashMap<u32, Vec<f32>>> {
+    if ids.len() < 2 || ids.len() != canonical.len() {
+        bail!("identity shuffle requires at least two matching worker controls");
+    }
+    let mut assigned = HashMap::with_capacity(ids.len());
+    for (index, id) in ids.iter().enumerate() {
+        assigned.insert(*id, canonical[(index + 1) % canonical.len()].clone());
+    }
+    Ok(assigned)
+}
+
 /// Merge a gathered round, apply the outer step, broadcast, and record it.
 /// Called from the single scheduler task, so merges are serialized even
 /// with several rounds in flight; concurrent rounds target distinct
@@ -1334,40 +1421,9 @@ async fn complete_round(
             }
         }
     }
-    capture_round_candidates(cfg, st, p, t, prev_version, &pushes)?;
+    let probe_capture = capture_round_candidates(cfg, st, p, t, prev_version, &pushes)?;
     let ids = sorted_push_ids(&pushes);
-    // SCAFFOLD-lite mean control from the exact endpoint and exact retained
-    // base anchor of each admitted push. The old current-anchor calculation
-    // was only valid when every worker happened to share the current version;
-    // under asynchronous activation it broke sum_i(c_i - c) = 0. Requiring the
-    // per-push base here makes the identity explicit and fails closed if anchor
-    // history cannot resolve a version.
-    let control_mean: Option<Vec<f32>> = if cfg.control_variate {
-        let mut anchors = Vec::with_capacity(ids.len());
-        let mut endpoints = Vec::with_capacity(ids.len());
-        let mut tokens = Vec::with_capacity(ids.len());
-        for id in &ids {
-            let push = pushes.get(id).expect("sorted id in push map");
-            anchors.push(st.anchor_at(p, push.base_version).with_context(|| {
-                format!(
-                    "SCAFFOLD step {t} fragment {p}: retained anchor for learner {} base version {} is unavailable",
-                    push.learner_id, push.base_version
-                )
-            })?);
-            endpoints.push(push.values.as_slice());
-            tokens.push(push.c_tokens);
-        }
-        let mut mean = vec![0.0f32; st.params[p].len()];
-        crate::merge::scaffold_mean_control_version_matched(
-            &anchors,
-            &endpoints,
-            &tokens,
-            &mut mean,
-        )
-        .then_some(mean)
-    } else {
-        None
-    };
+    let control_broadcast = build_control_broadcast(cfg, st, p, t, &ids, &pushes)?;
     // EXP2.46: anchor-drift diagnostics + optional version-matched re-anchoring.
     // Computed from the original uploads (post-Q4-reconstruction full models)
     // BEFORE any re-anchoring, so the local delta reflects the true window
@@ -1554,6 +1610,7 @@ async fn complete_round(
             }
         }
     };
+    finish_probe_capture(probe_capture, st)?;
     for id in &ids {
         let push = pushes.get(id).expect("sorted id must exist in push map");
         st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
@@ -1564,14 +1621,26 @@ async fn complete_round(
     for g in current_groups(registry) {
         let _ = g.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
     }
-    // SCAFFOLD-lite: broadcast the mean control c right after the fragment, at
-    // the same (new) version, so learners correct the next window's gradients.
-    if let Some(control) = control_mean {
-        let control_payload = encode_control(st, p, &control)?;
-        for g in current_groups(registry) {
-            let _ = g
-                .send_large(MSG_BCAST_CONTROL, control_payload.clone())
-                .await;
+    // Broadcast the endpoint-residual mean at the fragment's new version.
+    // Full Option II accumulates on the learner. The shuffle arm alone needs a
+    // personalized message, carrying a fixed cyclic reassignment of residuals.
+    if let Some(control) = control_broadcast {
+        match control {
+            ControlBroadcast::SharedMean(mean) => {
+                let payload = encode_control(st, p, &mean)?;
+                for g in current_groups(registry) {
+                    let _ = g.send_large(MSG_BCAST_CONTROL, payload.clone()).await;
+                }
+            }
+            ControlBroadcast::ShuffledResiduals { assigned, mean } => {
+                for g in current_groups(registry) {
+                    let Some(local) = assigned.get(&g.learner_id) else {
+                        continue;
+                    };
+                    let payload = encode_control_pair(st, p, local, &mean)?;
+                    let _ = g.send_large(MSG_BCAST_CONTROL_PAIR, payload).await;
+                }
+            }
         }
     }
     *last_sync_secs = sync_start.elapsed().as_secs_f64();
@@ -1618,6 +1687,12 @@ async fn complete_round(
     Ok(())
 }
 
+struct ProbeCaptureRound {
+    update_path: std::path::PathBuf,
+    fragment: usize,
+    params_before: Vec<f32>,
+}
+
 fn capture_round_candidates(
     cfg: &Config,
     st: &GlobalState,
@@ -1625,23 +1700,26 @@ fn capture_round_candidates(
     step: u64,
     prev_version: u64,
     pushes: &HashMap<u32, Push>,
-) -> Result<()> {
+) -> Result<Option<ProbeCaptureRound>> {
     let Some(root) = &cfg.probe_capture_dir else {
-        return Ok(());
+        return Ok(None);
     };
     if cfg.probe_capture_every == 0 || step % cfg.probe_capture_every != 0 {
-        return Ok(());
+        return Ok(None);
     }
     if pushes.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let state_dir = root.join("states");
     let candidate_dir = root.join("candidates");
+    let update_dir = root.join("applied_updates");
     std::fs::create_dir_all(&state_dir)?;
     std::fs::create_dir_all(&candidate_dir)?;
+    std::fs::create_dir_all(&update_dir)?;
     let state_name = format!("state_before_step_{step:08}.ckpt");
     let state_path = state_dir.join(&state_name);
     st.save_checkpoint(&state_path)?;
+    let update_name = format!("applied_update_step_{step:08}_fragment_{fragment:04}.f32");
 
     for push in pushes.values() {
         if push.values.len() != st.params[fragment].len() {
@@ -1667,9 +1745,26 @@ fn capture_round_candidates(
             push,
             &state_name,
             &candidate_name,
+            &update_name,
         )?;
     }
-    Ok(())
+    Ok(Some(ProbeCaptureRound {
+        update_path: update_dir.join(update_name),
+        fragment,
+        params_before: st.params[fragment].clone(),
+    }))
+}
+
+fn finish_probe_capture(capture: Option<ProbeCaptureRound>, st: &GlobalState) -> Result<()> {
+    let Some(capture) = capture else {
+        return Ok(());
+    };
+    let update: Vec<f32> = st.params[capture.fragment]
+        .iter()
+        .zip(&capture.params_before)
+        .map(|(after, before)| after - before)
+        .collect();
+    write_f32_file(&capture.update_path, &update)
 }
 
 fn write_f32_file(path: &std::path::Path, values: &[f32]) -> Result<()> {
@@ -1695,6 +1790,7 @@ fn append_probe_index(
     push: &Push,
     state_name: &str,
     candidate_name: &str,
+    update_name: &str,
 ) -> Result<()> {
     use std::io::Write;
     let index = root.join("index.jsonl");
@@ -1704,6 +1800,7 @@ fn append_probe_index(
             "\"schema\":\"syncer_probe_capture_v1\",",
             "\"oracle_scope\":\"syncer_current_global_pending_offline\",",
             "\"step\":{step},",
+            "\"version\":{step},",
             "\"syncer_global_step\":{syncer_global_step},",
             "\"fragment\":{fragment},",
             "\"current_fragment_version\":{current_fragment_version},",
@@ -1714,7 +1811,8 @@ fn append_probe_index(
             "\"c_tokens\":{c_tokens},",
             "\"weight\":{weight},",
             "\"state_checkpoint\":\"states/{state_name}\",",
-            "\"candidate_f32\":\"candidates/{candidate_name}\"",
+            "\"candidate_f32\":\"candidates/{candidate_name}\",",
+            "\"applied_update_f32\":\"applied_updates/{update_name}\"",
             "}}\n"
         ),
         step = step,
@@ -1729,6 +1827,7 @@ fn append_probe_index(
         weight = crate::merge::learner_weight(push.c_tokens, push.c_steps),
         state_name = state_name,
         candidate_name = candidate_name,
+        update_name = update_name,
     );
     std::fs::OpenOptions::new()
         .create(true)
@@ -1739,6 +1838,9 @@ fn append_probe_index(
 }
 
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
+    if cfg.control_variate == ControlVariateMode::ScaffoldFull && group.dtype != DTYPE_F32 {
+        bail!("scaffold_full is restricted to an f32 wire");
+    }
     let mut st = GlobalState::new(
         group.layout.clone(),
         group.layout_meta.clone(),
@@ -1840,6 +1942,25 @@ fn encode_control(st: &GlobalState, p: usize, control: &[f32]) -> Result<bytes::
     payload.extend_from_slice(&(p as u32).to_le_bytes());
     payload.extend_from_slice(&st.versions[p].to_le_bytes());
     payload.extend_from_slice(&body);
+    Ok(bytes::Bytes::from(payload))
+}
+
+fn encode_control_pair(
+    st: &GlobalState,
+    p: usize,
+    local: &[f32],
+    mean: &[f32],
+) -> Result<bytes::Bytes> {
+    let mut local_body = Vec::new();
+    let mut mean_body = Vec::new();
+    encode_tensor(bulk_dtype(st.wire_dtype), local, &mut local_body)?;
+    encode_tensor(bulk_dtype(st.wire_dtype), mean, &mut mean_body)?;
+    let mut payload = Vec::with_capacity(20 + local_body.len() + mean_body.len());
+    payload.extend_from_slice(&(p as u32).to_le_bytes());
+    payload.extend_from_slice(&st.versions[p].to_le_bytes());
+    payload.extend_from_slice(&(local_body.len() as u64).to_le_bytes());
+    payload.extend_from_slice(&local_body);
+    payload.extend_from_slice(&mean_body);
     Ok(bytes::Bytes::from(payload))
 }
 
@@ -2083,6 +2204,69 @@ mod tests {
         ensure_fragment_version_advances(2, 8, 9).unwrap();
         assert!(ensure_fragment_version_advances(2, 8, 8).is_err());
         assert!(ensure_fragment_version_advances(2, 8, 7).is_err());
+    }
+
+    #[test]
+    fn scaffold_identity_shuffle_is_a_clean_control_derangement() {
+        let ids = vec![0, 1, 2, 3];
+        let rounds = vec![
+            vec![
+                vec![1.0, 2.0],
+                vec![-1.0, -2.0],
+                vec![3.0, -1.0],
+                vec![-3.0, 1.0],
+            ],
+            vec![
+                vec![2.0, -4.0],
+                vec![-2.0, 4.0],
+                vec![1.0, 3.0],
+                vec![-1.0, -3.0],
+            ],
+        ];
+        let mut controls = vec![vec![0.0f32; 2]; ids.len()];
+        let mut shuffled = vec![vec![0.0f32; 2]; ids.len()];
+        for residuals in rounds {
+            let assigned = cyclic_derangement(&ids, &residuals).unwrap();
+            for index in 0..ids.len() {
+                for coordinate in 0..2 {
+                    controls[index][coordinate] += residuals[index][coordinate];
+                    shuffled[index][coordinate] += assigned[&ids[index]][coordinate];
+                }
+            }
+        }
+        for index in 0..ids.len() {
+            assert_ne!(shuffled[index], controls[index]);
+            assert_eq!(shuffled[index], controls[(index + 1) % controls.len()]);
+        }
+        let mut original_norms: Vec<u32> = controls
+            .iter()
+            .map(|control| {
+                control
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    .to_bits()
+            })
+            .collect();
+        let mut shuffled_norms: Vec<u32> = shuffled
+            .iter()
+            .map(|control| {
+                control
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    .to_bits()
+            })
+            .collect();
+        original_norms.sort_unstable();
+        shuffled_norms.sort_unstable();
+        assert_eq!(original_norms, shuffled_norms);
+        for coordinate in 0..controls[0].len() {
+            let before: f32 = controls.iter().map(|control| control[coordinate]).sum();
+            let after: f32 = shuffled.iter().map(|control| control[coordinate]).sum();
+            assert_eq!(before, 0.0);
+            assert_eq!(after, 0.0);
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-"""SCAFFOLD-lite inner control variates for DiLoCo (candidate #5,
+"""SCAFFOLD inner control variates for DiLoCo (candidate #5,
 docs/OTHER_OPTIMIZERS.md).
 
 Endpoint-derived control variates that reduce cross-worker client drift while
@@ -26,6 +26,23 @@ token-weighted mean control from the SAME per-worker deltas it already merges:
 i.e. ``c`` is the token-weighted mean of the ``c_i`` (equation 2 is exactly the
 token-normalized merged pseudo-move, which the syncer already computes). ``c``
 is broadcast back to every learner.
+
+Lite overwrites the next local control with this endpoint residual. Full
+Option II accumulates it instead. Writing the observed residual as ``m_i`` and
+its exact token-weighted server mean as ``m``:
+
+    d_i[next] = d_i + beta * (m_i - m)                                  (2b)
+
+Each learner owns its accumulated ``d_i``; the syncer keeps broadcasting the
+already-available residual mean ``m``. The identity-shuffle mechanism arm uses
+a fixed cyclic permutation of the per-worker residual streams, so accumulating
+them produces the same permutation of the canonical full controls.
+
+In real f32, independently evaluating ``m_i - m`` on each learner introduces a
+small roundoff residual rather than an exact zero. Correctness audits therefore
+bound the four-worker aggregate by ``max(2e-6, 2e-5 * max_abs_correction)``.
+The relative term covers f32 subtraction and four-way summation; the absolute
+floor covers controls near zero.
 
 Per inner optimizer step (which consumes ``tokens_per_step`` raw tokens at
 inner learning rate ``eta``) the SCAFFOLD correction ``grad <- grad - c_i + c``
@@ -79,6 +96,7 @@ log = logging.getLogger("scaffold")
 __all__ = [
     "local_control",
     "mean_control",
+    "accumulate_control",
     "grad_correction",
     "effective_step_gradient",
     "VersionedControlPairs",
@@ -150,6 +168,28 @@ def mean_control(
     for c_i, t_i in zip(controls, token_counts):
         acc = acc + c_i.detach().float() * float(t_i)
     return acc / total
+
+
+def accumulate_control(
+    previous: torch.Tensor,
+    endpoint_residual: torch.Tensor,
+    residual_mean: torch.Tensor,
+    beta: float = 1.0,
+) -> torch.Tensor:
+    """Full Option-II update ``d_i += beta * (m_i - mean_j m_j)``.
+
+    ``endpoint_residual`` is the token-normalized move observed over the just
+    completed, already-corrected inner window. Centering it with the
+    token-weighted residual mean preserves the accumulated zero mean up to the
+    explicitly audited f32 roundoff bound above.
+    """
+    if beta <= 0.0:
+        raise ValueError(f"beta must be positive, got {beta}")
+    if previous.shape != endpoint_residual.shape or previous.shape != residual_mean.shape:
+        raise ValueError("previous, endpoint_residual, and residual_mean must match")
+    return previous.detach().float() + float(beta) * (
+        endpoint_residual.detach().float() - residual_mean.detach().float()
+    )
 
 
 def grad_correction(

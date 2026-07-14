@@ -33,7 +33,12 @@ from .data import StreamingPackedBlocks, build_packed_dataset
 from .fragments import FragmentLayout, build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
 from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
-from .scaffold import VersionedControlPairs, grad_correction, local_control
+from .scaffold import (
+    VersionedControlPairs,
+    accumulate_control,
+    grad_correction,
+    local_control,
+)
 from .tensor_io import (
     apply_fragment,
     dequantize_q4,
@@ -180,16 +185,24 @@ def parse_args(argv=None):
     )
     p.add_argument(
         "--inner-control-variate",
-        choices=["none", "scaffold_lite"],
+        choices=["none", "scaffold_lite", "scaffold_full"],
         default="none",
-        help="SCAFFOLD-lite endpoint-derived inner control variates "
-        "(docs/OTHER_OPTIMIZERS.md #5). 'scaffold_lite' corrects every inner "
-        "gradient by (c_i - c): the worker keeps a token-normalized local "
-        "control c_i from its own window endpoint, the syncer broadcasts the "
-        "token-weighted mean control c, and the correction reduces cross-worker "
-        "client drift without an extra forward. Requires a syncer started with "
-        "the matching --inner-control-variate scaffold_lite. 'none' (default) "
-        "is byte-identical to the pre-scaffold loop.",
+        help="endpoint-derived SCAFFOLD controls. 'scaffold_lite' overwrites "
+        "the local control each round; 'scaffold_full' accumulates Option II "
+        "controls on the learner. Both apply (c_i - c) to "
+        "each inner gradient and require a matching syncer mode.",
+    )
+    p.add_argument(
+        "--scaffold-beta",
+        type=float,
+        default=1.0,
+        help="positive Option-II control accumulation coefficient",
+    )
+    p.add_argument(
+        "--scaffold-control-shuffle",
+        action="store_true",
+        help="receive a fixed cyclic derangement of full-control residuals; "
+        "must match the syncer setting",
     )
     p.add_argument(
         "--scaffold-correctness-mode",
@@ -907,10 +920,11 @@ def main(argv=None) -> None:
     if not 0.0 <= args.merge_alpha < 1.0:
         raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
 
-    if getattr(args, "inner_control_variate", "none") == "scaffold_lite":
+    scaffold_mode = getattr(args, "inner_control_variate", "none")
+    if scaffold_mode != "none":
         if args.syncer == "none":
             raise RuntimeError(
-                "--inner-control-variate scaffold_lite requires an async syncer "
+                f"--inner-control-variate {scaffold_mode} requires an async syncer "
                 "run (the mean control c is broadcast by the syncer)"
             )
         if world > 1:
@@ -920,22 +934,27 @@ def main(argv=None) -> None:
             # Not implemented — the scaffold experiments run one process per
             # learner (same constraint as --probe-data / --barrier-sync).
             raise RuntimeError(
-                "--inner-control-variate scaffold_lite currently supports "
+                f"--inner-control-variate {scaffold_mode} currently supports "
                 f"single-process learners (world size 1); world size is {world}"
             )
         if args.inner_optimizer != "sgd" or args.weight_decay != 0.0:
             log.warning(
-                "SCAFFOLD-lite with %s/weight_decay=%g is experimental: the "
+                "SCAFFOLD %s with %s/weight_decay=%g is experimental: the "
                 "gradient correction is not guaranteed unbiased outside "
                 "constant-LR plain SGD",
+                scaffold_mode,
                 args.inner_optimizer,
                 args.weight_decay,
             )
+    if args.scaffold_beta <= 0.0:
+        raise ValueError(f"--scaffold-beta must be positive, got {args.scaffold_beta}")
+    if args.scaffold_control_shuffle and scaffold_mode != "scaffold_full":
+        raise ValueError("--scaffold-control-shuffle requires scaffold_full")
 
     if getattr(args, "scaffold_correctness_mode", False):
         violations = []
-        if args.inner_control_variate != "scaffold_lite":
-            violations.append("--inner-control-variate scaffold_lite")
+        if args.inner_control_variate not in ("scaffold_lite", "scaffold_full"):
+            violations.append("a SCAFFOLD --inner-control-variate mode")
         if args.tuning != "lora":
             violations.append("--tuning lora (fp32 trainable parameters)")
         if args.inner_optimizer != "sgd":
@@ -1306,15 +1325,23 @@ def run_inner_loop(
     # so it can evaluate candidate deltas against the learner-known global
     # state. Before any broadcast the anchor is the base-model value, which
     # every learner loads identically (and learner 0 sends as INIT_PARAMS).
-    # SCAFFOLD-lite inner control variates (docs/OTHER_OPTIMIZERS.md #5,
-    # yeto/scaffold.py). Per fragment the learner keeps a token-normalized
-    # local control c_i (from its own wire-decoded window endpoint) and the
-    # syncer-broadcast mean control c. Push and control traffic are independent,
-    # so the two halves are keyed by the completed fragment version and are
-    # usable only as an exact-version pair. This also prevents a control that
-    # races ahead of its parameter broadcast from activating early.
-    scaffold_on = getattr(args, "inner_control_variate", "none") == "scaffold_lite"
+    # SCAFFOLD controls are keyed by the completed fragment version so a
+    # control that races its parameter broadcast cannot activate early. Lite
+    # computes the local half from the pushed endpoint; full Option II keeps the
+    # accumulator here and receives the residual mean from the syncer.
+    scaffold_mode = getattr(args, "inner_control_variate", "none")
+    scaffold_on = scaffold_mode != "none"
+    scaffold_full = scaffold_mode == "scaffold_full"
+    scaffold_shuffle = bool(getattr(args, "scaffold_control_shuffle", False))
     control_pairs = [VersionedControlPairs() for _ in range(layout.num_fragments)]
+    full_residual_pairs = [
+        VersionedControlPairs() for _ in range(layout.num_fragments)
+    ]
+    full_controls = [
+        torch.zeros(frag.numel, dtype=torch.float32, device=device)
+        for frag in layout.fragments
+    ]
+    full_accumulated_versions = [-1] * layout.num_fragments
     anchors: list[torch.Tensor] | None = None
     if rank == 0 and client is not None and (
         client.dtype == DTYPE_Q4 or args.probe_data is not None or scaffold_on
@@ -1422,6 +1449,8 @@ def run_inner_loop(
             fragment_versions[fid] = version
             if scaffold_on:
                 control_pairs[fid].discard_before(version)
+                if scaffold_full:
+                    full_residual_pairs[fid].discard_before(version)
             # Both modes restart the window at apply time. In lag mode this
             # starts the window that must be trained entirely on the
             # just-applied released (K-stale) base; the matching pull is held
@@ -1441,17 +1470,54 @@ def run_inner_loop(
             if target == version and control_pairs[fid].get(version) is not None:
                 awaiting_control.pop(fid, None)
 
+    def activate_full_control(fid: int, version: int) -> None:
+        """Accumulate one version exactly once after its residual pair arrives."""
+        if not scaffold_full or version <= full_accumulated_versions[fid]:
+            return
+        pair = full_residual_pairs[fid].get(version)
+        if pair is None:
+            return
+        residual, residual_mean = pair
+        full_controls[fid] = accumulate_control(
+            full_controls[fid], residual, residual_mean, args.scaffold_beta
+        ).to(device)
+        control_pairs[fid].add_local(version, full_controls[fid])
+        control_pairs[fid].add_mean(version, torch.zeros_like(full_controls[fid]))
+        full_accumulated_versions[fid] = version
+
     def drain_scaffold_controls() -> None:
         """Decode control broadcasts without ever cross-pairing versions."""
         if not scaffold_on:
             return
-        for ctrl in client.drain_controls():
-            mean = unpack_fragment(
-                layout.fragments[ctrl.fragment_id],
-                ctrl.data,
-                bulk_dtype(client.dtype),
-            ).to(device)
-            control_pairs[ctrl.fragment_id].add_mean(ctrl.version, mean)
+        if scaffold_shuffle:
+            controls = client.drain_control_pairs()
+        else:
+            controls = client.drain_controls()
+        for ctrl in controls:
+            frag = layout.fragments[ctrl.fragment_id]
+            if scaffold_shuffle:
+                residual = unpack_fragment(
+                    frag, ctrl.local_data, bulk_dtype(client.dtype)
+                ).to(device)
+                residual_mean = unpack_fragment(
+                    frag, ctrl.mean_data, bulk_dtype(client.dtype)
+                ).to(device)
+                full_residual_pairs[ctrl.fragment_id].add_local(
+                    ctrl.version, residual
+                )
+                full_residual_pairs[ctrl.fragment_id].add_mean(
+                    ctrl.version, residual_mean
+                )
+                activate_full_control(ctrl.fragment_id, ctrl.version)
+            else:
+                mean = unpack_fragment(
+                    frag, ctrl.data, bulk_dtype(client.dtype)
+                ).to(device)
+                if scaffold_full:
+                    full_residual_pairs[ctrl.fragment_id].add_mean(ctrl.version, mean)
+                    activate_full_control(ctrl.fragment_id, ctrl.version)
+                else:
+                    control_pairs[ctrl.fragment_id].add_mean(ctrl.version, mean)
             target = awaiting_control.get(ctrl.fragment_id)
             if (
                 target == ctrl.version
@@ -1493,7 +1559,7 @@ def run_inner_loop(
             )
             audit_corrections: list[torch.Tensor] = []
             if scaffold_on:
-                # SCAFFOLD-lite: correct each fragment's grad by (c_i - c)
+                # Correct each fragment's grad by (c_i - c)
                 # before clipping. Skips a fragment until both its local
                 # control (set at push time) and the syncer's mean control
                 # (received via BCAST_CONTROL) exist, so the first window per
@@ -1743,12 +1809,17 @@ def run_inner_loop(
                             transmitted_endpoint = unpack_fragment(
                                 layout.fragments[fid], payload, client.dtype
                             )
-                        control_pairs[fid].add_local(
-                            pull.global_step,
-                            local_control(
-                                base_anchor_for_push, transmitted_endpoint, c_tokens
-                            ).to(device),
-                        )
+                        residual = local_control(
+                            base_anchor_for_push, transmitted_endpoint, c_tokens
+                        ).to(device)
+                        if scaffold_full:
+                            if not scaffold_shuffle:
+                                full_residual_pairs[fid].add_local(
+                                    pull.global_step, residual
+                                )
+                                activate_full_control(fid, pull.global_step)
+                        else:
+                            control_pairs[fid].add_local(pull.global_step, residual)
                     if barrier_sync:
                         # True lockstep: record that this fragment's merge is
                         # in flight. The inner loop will not step again until a

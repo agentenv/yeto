@@ -36,6 +36,9 @@ Presets (--settings, comma-separated or 'all'):
   avg       merge = plain weighted averaging (outer lr 1.0, mu 0, alpha 0)
   m2h24     stock DiLoCo throttled to its design-point sync interval (H~24)
   iso       IsoLoCo: Iso-C isotropic aggregation on matrix fragments
+  scaffold_full  accumulating SCAFFOLD Option II in the H16 correctness regime
+  scaffold_full_shuffle  full controls cyclically reassigned across workers
+  scaffold_sgd  paired H16 plain-SGD mechanism control
   probe_shadow  four-responder exact LOO probe; always commit A0
   probe_loo_v1  four-responder exact LOO probe; commit the selected preview
   probe_lr_shadow  predeclared scalar probe; always commit x1 (A0)
@@ -137,11 +140,11 @@ class Arm:
     # Aggregation for non-embedding (matrix) fragments: "rda" (default) or
     # "iso" (Iso-C-style isotropic aggregation, IsoLoCo, arXiv 2607.03011).
     matrix_merge: str = "rda"
-    # SCAFFOLD-lite inner control variates (docs/OTHER_OPTIMIZERS.md #5):
-    # "none" (default) or "scaffold_lite". When on, the syncer broadcasts the
-    # token-normalized mean control c and learners correct their inner gradients
-    # by (c_i - c). Threaded to BOTH the learners and the syncer.
+    # SCAFFOLD endpoint controls: lite overwrite or accumulating full Option II.
     inner_control_variate: str = "none"
+    scaffold_beta: float = 1.0
+    scaffold_control_shuffle: bool = False
+    scaffold_plain_sgd_regime: bool = False
     # Opt-in restrictions for the first SCAFFOLD correctness run. Keeping these
     # on the arm avoids changing any existing/default command line.
     scaffold_correctness_mode: bool = False
@@ -212,9 +215,63 @@ PRESETS: dict[str, Arm] = {
         quorum=4,
         strict_quorum=True,
         inner_control_variate="scaffold_lite",
+        scaffold_plain_sgd_regime=True,
         scaffold_correctness_mode=True,
         inner_optimizer="sgd",
         fixed_window_microsteps=64,
+        version_matched_anchor=True,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=4,
+        outer_lr=0.28,
+        outer_momentum=0.0,
+    ),
+    "scaffold_full": Arm(
+        "scaffold_full",
+        m=4,
+        fragments=4,
+        quorum=4,
+        strict_quorum=True,
+        inner_control_variate="scaffold_full",
+        scaffold_plain_sgd_regime=True,
+        scaffold_correctness_mode=True,
+        inner_optimizer="sgd",
+        fixed_window_microsteps=16,
+        version_matched_anchor=True,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=4,
+        outer_lr=0.28,
+        outer_momentum=0.0,
+    ),
+    "scaffold_full_shuffle": Arm(
+        "scaffold_full_shuffle",
+        m=4,
+        fragments=4,
+        quorum=4,
+        strict_quorum=True,
+        inner_control_variate="scaffold_full",
+        scaffold_control_shuffle=True,
+        scaffold_plain_sgd_regime=True,
+        scaffold_correctness_mode=True,
+        inner_optimizer="sgd",
+        fixed_window_microsteps=16,
+        version_matched_anchor=True,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=4,
+        outer_lr=0.28,
+        outer_momentum=0.0,
+    ),
+    "scaffold_sgd": Arm(
+        "scaffold_sgd",
+        m=4,
+        fragments=4,
+        quorum=4,
+        strict_quorum=True,
+        scaffold_plain_sgd_regime=True,
+        inner_optimizer="sgd",
+        fixed_window_microsteps=16,
         version_matched_anchor=True,
         merge_alpha=0.0,
         wire_dtype="f32",
@@ -281,6 +338,8 @@ def apply_arm_overrides(
     commit_policy: str | None = None,
     matrix_merge: str | None = None,
     inner_control_variate: str | None = None,
+    scaffold_beta: float | None = None,
+    scaffold_control_shuffle: bool = False,
 ) -> list[Arm]:
     """Apply CLI-wide async-arm overrides without mutating presets."""
     if all(
@@ -295,8 +354,9 @@ def apply_arm_overrides(
             commit_policy,
             matrix_merge,
             inner_control_variate,
+            scaffold_beta,
         )
-    ):
+    ) and not scaffold_control_shuffle:
         return arms
 
     from dataclasses import replace
@@ -332,6 +392,12 @@ def apply_arm_overrides(
                 arm.inner_control_variate
                 if inner_control_variate is None
                 else inner_control_variate
+            ),
+            scaffold_beta=(
+                arm.scaffold_beta if scaffold_beta is None else scaffold_beta
+            ),
+            scaffold_control_shuffle=(
+                arm.scaffold_control_shuffle or scaffold_control_shuffle
             ),
         )
         for arm in arms
@@ -598,7 +664,11 @@ def learner_command(
             cmd += ["--pad-to-fixed-window-tokens"]
         if getattr(args, "freeze_delta_before_delay", False):
             cmd += ["--freeze-delta-before-delay"]
-        if getattr(args, "barrier_sync", False) or arm.scaffold_correctness_mode:
+        if (
+            getattr(args, "barrier_sync", False)
+            or arm.scaffold_plain_sgd_regime
+            or arm.scaffold_correctness_mode
+        ):
             cmd += ["--barrier-sync"]
         lag_commits = int(getattr(args, "learner_broadcast_lag_commits", 0))
         if lag_commits > 0:
@@ -618,12 +688,15 @@ def learner_command(
             # command lines byte-identical to the pre-iso harness.
             cmd += ["--matrix-merge", arm.matrix_merge]
         if arm.inner_control_variate != "none":
-            # SCAFFOLD-lite: the learner keeps c_i and applies (c_i - c); the
-            # syncer (below) must run with the matching flag to broadcast c.
             cmd += ["--inner-control-variate", arm.inner_control_variate]
+            if arm.inner_control_variate == "scaffold_full":
+                cmd += ["--scaffold-beta", str(arm.scaffold_beta)]
+                if arm.scaffold_control_shuffle:
+                    cmd += ["--scaffold-control-shuffle"]
         if arm.scaffold_correctness_mode:
+            cmd += ["--scaffold-correctness-mode"]
+        if arm.scaffold_plain_sgd_regime:
             cmd += [
-                "--scaffold-correctness-mode",
                 "--inner-optimizer",
                 arm.inner_optimizer,
                 "--weight-decay",
@@ -634,6 +707,9 @@ def learner_command(
                 "0",
                 "--max-reconnects",
                 "0",
+            ]
+        if arm.scaffold_correctness_mode:
+            cmd += [
                 "--scaffold-audit-path",
                 str(arm_dir / f"scaffold_audit_learner_{learner_id}.pt"),
             ]
@@ -720,9 +796,10 @@ def syncer_command(
         arm.commit_policy,
     ]
     if arm.inner_control_variate != "none":
-        # SCAFFOLD-lite: the syncer must broadcast the mean control c (only
-        # emitted when active, so default command lines stay byte-identical).
         cmd += ["--inner-control-variate", arm.inner_control_variate]
+        if arm.inner_control_variate == "scaffold_full":
+            if arm.scaffold_control_shuffle:
+                cmd += ["--scaffold-control-shuffle"]
     if arm.outer_lr_by_fragment:
         cmd += ["--outer-lr-by-fragment", arm.outer_lr_by_fragment]
     if delta_norm_ref > 0.0:
@@ -2156,11 +2233,20 @@ def main() -> int:
     )
     p.add_argument(
         "--inner-control-variate",
-        choices=["none", "scaffold_lite"],
+        choices=["none", "scaffold_lite", "scaffold_full"],
         default=None,
-        help="override SCAFFOLD-lite inner control variates for every selected "
-        "async arm (docs/OTHER_OPTIMIZERS.md #5); threaded to both the "
-        "learners and the syncer",
+        help="override SCAFFOLD inner controls for every selected async arm",
+    )
+    p.add_argument(
+        "--scaffold-beta",
+        type=float,
+        default=None,
+        help="override full Option-II accumulation beta (default 1.0)",
+    )
+    p.add_argument(
+        "--scaffold-control-shuffle",
+        action="store_true",
+        help="cyclically derange full controls across worker identities",
     )
     p.add_argument(
         "--outer-lr-by-fragment",
@@ -2188,8 +2274,8 @@ def main() -> int:
     p.add_argument(
         "--syncer-probe-capture",
         action="store_true",
-        help="capture pre-merge syncer checkpoints and candidate fragments "
-        "for offline syncer-current utility probes",
+        help="capture pre-merge checkpoints, candidate fragments, and applied "
+        "update vectors for offline probes/de-confounding",
     )
     p.add_argument(
         "--syncer-probe-capture-every",
@@ -2207,6 +2293,13 @@ def main() -> int:
 
     if args.syncer_total_steps < 0 or args.learner_max_steps < 0:
         p.error("--syncer-total-steps and --learner-max-steps must be non-negative")
+    if args.scaffold_beta is not None and args.scaffold_beta <= 0.0:
+        p.error("--scaffold-beta must be positive")
+    if args.scaffold_control_shuffle and args.inner_control_variate not in (
+        None,
+        "scaffold_full",
+    ):
+        p.error("--scaffold-control-shuffle requires scaffold_full")
     if args.fixed_window_schedule is not None:
         from yeto.learner import parse_fixed_window_schedule
 
@@ -2246,7 +2339,12 @@ def main() -> int:
         commit_policy=args.commit_policy,
         matrix_merge=args.matrix_merge,
         inner_control_variate=args.inner_control_variate,
+        scaffold_beta=args.scaffold_beta,
+        scaffold_control_shuffle=args.scaffold_control_shuffle,
     )
+    for arm in arms:
+        if arm.scaffold_control_shuffle and arm.inner_control_variate != "scaffold_full":
+            p.error("identity shuffle requires a scaffold_full arm")
     if args.round_interval_ms is not None:
         from dataclasses import replace as _replace
 

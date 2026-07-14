@@ -53,6 +53,9 @@ MSG_CHUNK = 9
 # (fid u32, version u64, bulk-wire tensor bytes); off by default so non-scaffold
 # sessions never see it. See yeto/scaffold.py.
 MSG_BCAST_CONTROL = 10
+# Identity-shuffle Option-II residual pair. Envelope: fid u32, version u64,
+# residual byte length u64, then assigned-residual and shared-mean bytes.
+MSG_BCAST_CONTROL_PAIR = 11
 
 DTYPE_F32 = 1
 DTYPE_BF16 = 2
@@ -145,6 +148,14 @@ class BcastFragment:
     data: bytes  # raw tensor bytes in the session dtype
 
 
+@dataclass
+class BcastControlPair:
+    fragment_id: int
+    version: int
+    local_data: bytes
+    mean_data: bytes
+
+
 class SyncerClient:
     """Non-blocking striped syncer connection owned by one learner process.
 
@@ -180,6 +191,7 @@ class SyncerClient:
         # SCAFFOLD-lite mean-control broadcasts (MSG_BCAST_CONTROL). Empty and
         # never fed unless the syncer runs with control variates enabled.
         self._controls: queue.Queue[BcastFragment] = queue.Queue()
+        self._control_pairs: queue.Queue[BcastControlPair] = queue.Queue()
         self._reasm: dict[int, tuple[bytearray, list[int]]] = {}
         self._reasm_lock = threading.Lock()
         self._msg_id = itertools.count()
@@ -381,6 +393,10 @@ class SyncerClient:
         drain. Always empty unless the syncer has control variates enabled."""
         return self._drain(self._controls)
 
+    def drain_control_pairs(self) -> list[BcastControlPair]:
+        """Identity-shuffled residual plus the shared residual mean."""
+        return self._drain(self._control_pairs)
+
     @staticmethod
     def _drain(q: queue.Queue) -> list:
         out = []
@@ -504,6 +520,14 @@ class SyncerClient:
         elif msg_type == MSG_BCAST_CONTROL:
             fid, version = struct.unpack_from("<IQ", payload)
             self._controls.put(BcastFragment(fid, version, payload[12:]))
+        elif msg_type == MSG_BCAST_CONTROL_PAIR:
+            fid, version, local_len = struct.unpack_from("<IQQ", payload)
+            split = 20 + local_len
+            if split > len(payload):
+                raise ValueError("truncated SCAFFOLD full control pair")
+            self._control_pairs.put(
+                BcastControlPair(fid, version, payload[20:split], payload[split:])
+            )
 
 
 def _close_socket(sock: socket.socket) -> None:

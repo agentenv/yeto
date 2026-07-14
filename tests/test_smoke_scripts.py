@@ -126,6 +126,56 @@ def test_scaffold_lite_preset_is_plain_sgd_version_matched_correctness_run():
     assert "--version-matched-anchor" in syncer
 
 
+def test_scaffold_full_and_shuffle_presets_thread_option_ii_flags():
+    args = SimpleNamespace(
+        model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=512,
+        micro_batch_size=2, inner_lr=3e-4, device="cpu", shard="ddp",
+        learner_gpus=0, training_seed=123,
+    )
+    full = compare.PRESETS["scaffold_full"]
+    learner = compare.learner_command(
+        args, Path("/tmp/w/scaffold_full"), learner_id=0, num_learners=4,
+        syncer="127.0.0.1:1", max_steps=128, arm=full,
+    )
+    syncer = compare.syncer_command(
+        full, 1234, Path("/tmp/w/scaffold_full"), total_steps=8
+    )
+    assert learner[learner.index("--inner-control-variate") + 1] == "scaffold_full"
+    assert learner[learner.index("--scaffold-beta") + 1] == "1.0"
+    assert "--scaffold-beta" not in syncer
+    assert "--scaffold-control-shuffle" not in syncer
+    assert learner[learner.index("--fixed-window-microsteps") + 1] == "16"
+
+    shuffled = compare.PRESETS["scaffold_full_shuffle"]
+    shuffled_learner = compare.learner_command(
+        args, Path("/tmp/w/scaffold_full_shuffle"), learner_id=0,
+        num_learners=4, syncer="127.0.0.1:1", max_steps=128, arm=shuffled,
+    )
+    shuffled_syncer = compare.syncer_command(
+        shuffled, 1234, Path("/tmp/w/scaffold_full_shuffle"), total_steps=8
+    )
+    assert "--scaffold-control-shuffle" in shuffled_learner
+    assert "--scaffold-control-shuffle" in shuffled_syncer
+
+
+def test_scaffold_sgd_control_keeps_the_same_plain_sgd_h16_regime():
+    args = SimpleNamespace(
+        model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=512,
+        micro_batch_size=2, inner_lr=3e-4, device="cpu", shard="ddp",
+        learner_gpus=0, training_seed=123,
+    )
+    arm = compare.PRESETS["scaffold_sgd"]
+    learner = compare.learner_command(
+        args, Path("/tmp/w/scaffold_sgd"), learner_id=0, num_learners=4,
+        syncer="127.0.0.1:1", max_steps=128, arm=arm,
+    )
+    assert "--inner-control-variate" not in learner
+    assert "--scaffold-correctness-mode" not in learner
+    assert "--barrier-sync" in learner
+    assert learner[learner.index("--inner-optimizer") + 1] == "sgd"
+    assert learner[learner.index("--fixed-window-microsteps") + 1] == "16"
+
+
 def test_default_arm_commands_do_not_gain_scaffold_flags():
     args = SimpleNamespace(
         model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=512,

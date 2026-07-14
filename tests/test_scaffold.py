@@ -17,6 +17,7 @@ from yeto.fragments import MERGE_AVG, Fragment
 from yeto.protocol import DTYPE_F32
 from yeto.scaffold import (
     VersionedControlPairs,
+    accumulate_control,
     effective_step_gradient,
     grad_correction,
     local_control,
@@ -255,6 +256,16 @@ def test_version_paired_controls_never_cross_activate():
     assert pairs.get(8) is not None
 
 
+def test_full_option_ii_accumulates_instead_of_two_cycling():
+    previous = torch.zeros(4)
+    residual = torch.tensor([1.0, -2.0, 0.5, 3.0])
+    residual_mean = torch.zeros(4)
+    first = accumulate_control(previous, residual, residual_mean)
+    second = accumulate_control(first, torch.zeros(4), torch.zeros(4))
+    assert torch.equal(first, residual)
+    assert torch.equal(second, first)
+
+
 def test_real_f32_wire_plain_sgd_zero_sum(caplog):
     """Real codec + torch.optim.SGD path, not a symbolic update equation."""
     torch.manual_seed(4)
@@ -302,3 +313,69 @@ def test_real_f32_wire_plain_sgd_zero_sum(caplog):
     assert diagnostics["displacement_sum_max_abs"] < 2e-9
     assert "before_clip correction_sum_l2" in caplog.text
     assert "after_step displacement_sum_l2" in caplog.text
+
+
+def test_full_option_ii_real_f32_wire_plain_sgd_zero_sum(caplog):
+    """Multiple f32 rounds stay inside the declared four-worker error bound."""
+    torch.manual_seed(5)
+    workers = 4
+    dim = 64
+    tokens = 16 * TOKENS_PER_STEP
+    frag = Fragment(MERGE_AVG, [("weight", dim)])
+    controls = [torch.zeros(dim) for _ in range(workers)]
+    for _ in range(256):
+        anchors = [torch.randn(dim) for _ in range(workers)]
+        endpoints = [anchor + 1e-3 * torch.randn(dim) for anchor in anchors]
+        transmitted = [
+            unpack_fragment(frag, pack_flat(endpoint, DTYPE_F32), DTYPE_F32)
+            for endpoint in endpoints
+        ]
+        residuals = [
+            local_control(anchor, endpoint, tokens)
+            for anchor, endpoint in zip(anchors, transmitted)
+        ]
+        residual_mean = mean_control(residuals, [tokens] * workers)
+        mean_on_wire = unpack_fragment(
+            frag, pack_flat(residual_mean, DTYPE_F32), DTYPE_F32
+        )
+        controls = [
+            accumulate_control(old, residual, mean_on_wire)
+            for old, residual in zip(controls, residuals)
+        ]
+    parameters = [torch.nn.Parameter(torch.zeros(dim)) for _ in range(workers)]
+    optimizers = [torch.optim.SGD([p], lr=INNER_LR) for p in parameters]
+    before = [p.detach().clone() for p in parameters]
+    corrections = []
+    for parameter, optimizer, control in zip(parameters, optimizers, controls):
+        parameter.grad = torch.zeros_like(parameter)
+        corrections.append(
+            apply_control_correction(
+                frag,
+                {"weight": parameter},
+                control,
+                torch.zeros_like(control),
+                TOKENS_PER_STEP,
+                INNER_LR,
+            )
+        )
+        optimizer.step()
+    after = [p.detach().clone() for p in parameters]
+
+    with caplog.at_level("INFO", logger="scaffold"):
+        diagnostics = zero_sum_step_diagnostics(corrections, before, after)
+    correction_scale = max(correction.abs().max().item() for correction in corrections)
+    correction_tol = max(2e-6, 2e-5 * correction_scale)
+    displacement_scale = max(
+        (after_i - before_i).abs().max().item()
+        for before_i, after_i in zip(before, after)
+    )
+    displacement_tol = max(2e-7, 2e-4 * displacement_scale)
+    print(
+        "full f32 zero-sum "
+        f"correction={diagnostics['correction_sum_max_abs']:.9g} "
+        f"tol={correction_tol:.9g} "
+        f"displacement={diagnostics['displacement_sum_max_abs']:.9g} "
+        f"tol={displacement_tol:.9g}"
+    )
+    assert diagnostics["correction_sum_max_abs"] <= correction_tol
+    assert diagnostics["displacement_sum_max_abs"] <= displacement_tol

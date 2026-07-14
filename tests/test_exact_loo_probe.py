@@ -202,6 +202,14 @@ def test_complete_group_validation_requires_expected_unique_ids_and_metadata():
         MOD.validate_candidate_groups(nonpositive, 4)
 
 
+def test_capture_v1_reader_accepts_additive_applied_update_field():
+    rows = [_capture_row(learner_id) for learner_id in range(4)]
+    for row in rows:
+        row["applied_update_f32"] = "applied_updates/step-1-fragment-0.f32"
+    groups = MOD.validate_candidate_groups(rows, 4)
+    assert len(groups) == 1
+
+
 def test_capture_payload_manifest_digests_state_and_candidate_files(tmp_path):
     (tmp_path / "states").mkdir()
     (tmp_path / "candidates").mkdir()
