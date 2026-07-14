@@ -1,5 +1,5 @@
 {
-  "analysis_source_sha256": "8828e4b8e502d377f1ea0d1d7330d5e8b03b3b6a0524a0f292f8ac2506e55815",
+  "analysis_source_sha256": "a0c9645ce9cde5b8084497af6c681a2d13c830159150883e078fa8048c24fccb",
   "crp": {
     "conclusion": "Scalar norms, residual/future-gradient dots, and cosines do not identify CRP bank sums, projections, pulse bytes, or normalized gain z. No CRP action or empirical CRP score was reconstructed.",
     "decision": "UNIDENTIFIABLE",
@@ -268,6 +268,134 @@
     "identifiable": true,
     "input": [
       {
+        "coefficient_results": {
+          "-0.03125": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.001881011643702784,
+              "3": 0.0010243256286178641,
+              "7": 0.000810076548576663
+            },
+            "interlock_eligible_count": 140,
+            "interlock_eligible_fraction": 0.7070707070707071,
+            "mean_cosine_gain": 0.001238471273632437,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.8695652173913043,
+            "post_warmup_opportunities": 198,
+            "scores": 207
+          },
+          "-0.0625": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.00409985450648755,
+              "3": 0.00239802245443219,
+              "7": 0.0019672785541862995
+            },
+            "interlock_eligible_count": 150,
+            "interlock_eligible_fraction": 0.7575757575757576,
+            "mean_cosine_gain": 0.0028217185050353464,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.8985507246376812,
+            "post_warmup_opportunities": 198,
+            "scores": 207
+          },
+          "-0.125": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.009510681109703482,
+              "3": 0.00616247108692094,
+              "7": 0.005294606553481272
+            },
+            "interlock_eligible_count": 163,
+            "interlock_eligible_fraction": 0.8232323232323232,
+            "mean_cosine_gain": 0.006989252916701898,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.927536231884058,
+            "post_warmup_opportunities": 198,
+            "scores": 207
+          },
+          "-0.25": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.02380435275599817,
+              "3": 0.01739439767579145,
+              "7": 0.015653836625715813
+            },
+            "interlock_eligible_count": 179,
+            "interlock_eligible_fraction": 0.9040404040404041,
+            "mean_cosine_gain": 0.01895086235250181,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.9565217391304348,
+            "post_warmup_opportunities": 198,
+            "scores": 207
+          },
+          "0": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.0,
+              "3": 0.0,
+              "7": 0.0
+            },
+            "interlock_eligible_count": 0,
+            "interlock_eligible_fraction": 0.0,
+            "mean_cosine_gain": 0.0,
+            "positive_fragment_count": 0,
+            "positive_score_fraction": 0.0,
+            "post_warmup_opportunities": 198,
+            "scores": 207
+          },
+          "0.03125": {
+            "fragment_mean_cosine_gain": {
+              "11": -0.001536681737161543,
+              "3": -0.0006709311611832288,
+              "7": -0.0004595619269481473
+            },
+            "interlock_eligible_count": 10,
+            "interlock_eligible_fraction": 0.050505050505050504,
+            "mean_cosine_gain": -0.0008890582750976396,
+            "positive_fragment_count": 0,
+            "positive_score_fraction": 0.25120772946859904,
+            "post_warmup_opportunities": 198,
+            "scores": 207
+          },
+          "0.0625": {
+            "fragment_mean_cosine_gain": {
+              "11": -0.002725551154620972,
+              "3": -0.0009875402630795764,
+              "7": -0.0005682905190746277
+            },
+            "interlock_eligible_count": 23,
+            "interlock_eligible_fraction": 0.11616161616161616,
+            "mean_cosine_gain": -0.0014271273122583921,
+            "positive_fragment_count": 0,
+            "positive_score_fraction": 0.3188405797101449,
+            "post_warmup_opportunities": 198,
+            "scores": 207
+          },
+          "0.125": {
+            "fragment_mean_cosine_gain": {
+              "11": -0.004061147034679864,
+              "3": -0.000569476822917824,
+              "7": 0.0002528098575583409
+            },
+            "interlock_eligible_count": 35,
+            "interlock_eligible_fraction": 0.17676767676767677,
+            "mean_cosine_gain": -0.0014592713333464492,
+            "positive_fragment_count": 1,
+            "positive_score_fraction": 0.4444444444444444,
+            "post_warmup_opportunities": 198,
+            "scores": 207
+          },
+          "0.25": {
+            "fragment_mean_cosine_gain": {
+              "11": -0.0027337926496848004,
+              "3": 0.004230849582329932,
+              "7": 0.005795184394132155
+            },
+            "interlock_eligible_count": 78,
+            "interlock_eligible_fraction": 0.3939393939393939,
+            "mean_cosine_gain": 0.002430747108925762,
+            "positive_fragment_count": 2,
+            "positive_score_fraction": 0.642512077294686,
+            "post_warmup_opportunities": 198,
+            "scores": 207
+          }
+        },
         "fragments": [
           {
             "eligible_counts": {
@@ -347,10 +475,140 @@
             }
           },
           "index_sha256": "8b291187a33711970d6e42ccc1af6d3f2f77bb6b46b0794af7eb97a25e04660e",
+          "source_capture_id": "equal-token-late-smollm2-p4de-seed53-syncer-current-6m",
+          "source_seed": 53,
           "unique_boundaries": 216
         }
       },
       {
+        "coefficient_results": {
+          "-0.03125": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.0014172664434536142,
+              "3": 0.001030094765233851,
+              "7": 0.0011042516590149087
+            },
+            "interlock_eligible_count": 147,
+            "interlock_eligible_fraction": 0.7616580310880829,
+            "mean_cosine_gain": 0.0011831096876301628,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.900990099009901,
+            "post_warmup_opportunities": 193,
+            "scores": 202
+          },
+          "-0.0625": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.0032006088485935845,
+              "3": 0.002428860753307268,
+              "7": 0.002578535900121743
+            },
+            "interlock_eligible_count": 163,
+            "interlock_eligible_fraction": 0.844559585492228,
+            "mean_cosine_gain": 0.0027344813336080257,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.9356435643564357,
+            "post_warmup_opportunities": 193,
+            "scores": 202
+          },
+          "-0.125": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.007828991775503004,
+              "3": 0.006300220947950376,
+              "7": 0.006604082521921706
+            },
+            "interlock_eligible_count": 180,
+            "interlock_eligible_fraction": 0.9326424870466321,
+            "mean_cosine_gain": 0.006908074269247926,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.9702970297029703,
+            "post_warmup_opportunities": 193,
+            "scores": 202
+          },
+          "-0.25": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.020923858502937143,
+              "3": 0.017956736784907664,
+              "7": 0.018574836005427604
+            },
+            "interlock_eligible_count": 187,
+            "interlock_eligible_fraction": 0.9689119170984456,
+            "mean_cosine_gain": 0.01914589422492158,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.9900990099009901,
+            "post_warmup_opportunities": 193,
+            "scores": 202
+          },
+          "0": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.0,
+              "3": 0.0,
+              "7": 0.0
+            },
+            "interlock_eligible_count": 0,
+            "interlock_eligible_fraction": 0.0,
+            "mean_cosine_gain": 0.0,
+            "positive_fragment_count": 0,
+            "positive_score_fraction": 0.0,
+            "post_warmup_opportunities": 193,
+            "scores": 202
+          },
+          "0.03125": {
+            "fragment_mean_cosine_gain": {
+              "11": -0.0010459673830527708,
+              "3": -0.0006573268590485047,
+              "7": -0.0007299012037072306
+            },
+            "interlock_eligible_count": 11,
+            "interlock_eligible_fraction": 0.05699481865284974,
+            "mean_cosine_gain": -0.0008103040679614772,
+            "positive_fragment_count": 0,
+            "positive_score_fraction": 0.21287128712871287,
+            "post_warmup_opportunities": 193,
+            "scores": 202
+          },
+          "0.0625": {
+            "fragment_mean_cosine_gain": {
+              "11": -0.0017186651267151211,
+              "3": -0.0009410545151423132,
+              "7": -0.0010844133283418522
+            },
+            "interlock_eligible_count": 17,
+            "interlock_eligible_fraction": 0.08808290155440414,
+            "mean_cosine_gain": -0.0012465245718737354,
+            "positive_fragment_count": 0,
+            "positive_score_fraction": 0.2623762376237624,
+            "post_warmup_opportunities": 193,
+            "scores": 202
+          },
+          "0.125": {
+            "fragment_mean_cosine_gain": {
+              "11": -0.001952630636839306,
+              "3": -0.0004006131350897523,
+              "7": -0.0006794285100417218
+            },
+            "interlock_eligible_count": 32,
+            "interlock_eligible_fraction": 0.16580310880829016,
+            "mean_cosine_gain": -0.001007869584292733,
+            "positive_fragment_count": 0,
+            "positive_score_fraction": 0.41089108910891087,
+            "post_warmup_opportunities": 193,
+            "scores": 202
+          },
+          "0.25": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.0017970234796351034,
+              "3": 0.004854028193016999,
+              "7": 0.004332769809641435
+            },
+            "interlock_eligible_count": 84,
+            "interlock_eligible_fraction": 0.43523316062176165,
+            "mean_cosine_gain": 0.0036671785520132876,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.6782178217821783,
+            "post_warmup_opportunities": 193,
+            "scores": 202
+          }
+        },
         "fragments": [
           {
             "eligible_counts": {
@@ -430,10 +688,140 @@
             }
           },
           "index_sha256": "cc472c93c54c274c10e039aa53ccbbe034c2b634c8b5026a2bb66ae56a6b7115",
+          "source_capture_id": "equal-token-late-smollm2-p4de-seed67-syncer-current-6m",
+          "source_seed": 67,
           "unique_boundaries": 211
         }
       },
       {
+        "coefficient_results": {
+          "-0.03125": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.0014503600816588198,
+              "3": 0.0009310645120889904,
+              "7": 0.0009583535034988564
+            },
+            "interlock_eligible_count": 142,
+            "interlock_eligible_fraction": 0.6995073891625616,
+            "mean_cosine_gain": 0.0011116692680323327,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.8490566037735849,
+            "post_warmup_opportunities": 203,
+            "scores": 212
+          },
+          "-0.0625": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.0032553761386983865,
+              "3": 0.0022183664418088515,
+              "7": 0.002262436156068314
+            },
+            "interlock_eligible_count": 154,
+            "interlock_eligible_fraction": 0.7586206896551724,
+            "mean_cosine_gain": 0.002575534500746065,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.8820754716981132,
+            "post_warmup_opportunities": 203,
+            "scores": 212
+          },
+          "-0.125": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.007893090095248806,
+              "3": 0.005831327625874258,
+              "7": 0.0058776948610783225
+            },
+            "interlock_eligible_count": 177,
+            "interlock_eligible_fraction": 0.8719211822660099,
+            "mean_cosine_gain": 0.006527626902080422,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.9386792452830188,
+            "post_warmup_opportunities": 203,
+            "scores": 212
+          },
+          "-0.25": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.020877450715229003,
+              "3": 0.01684689595254271,
+              "7": 0.01677938826789635
+            },
+            "interlock_eligible_count": 187,
+            "interlock_eligible_fraction": 0.9211822660098522,
+            "mean_cosine_gain": 0.018155130800552848,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.9528301886792453,
+            "post_warmup_opportunities": 203,
+            "scores": 212
+          },
+          "0": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.0,
+              "3": 0.0,
+              "7": 0.0
+            },
+            "interlock_eligible_count": 0,
+            "interlock_eligible_fraction": 0.0,
+            "mean_cosine_gain": 0.0,
+            "positive_fragment_count": 0,
+            "positive_score_fraction": 0.0,
+            "post_warmup_opportunities": 203,
+            "scores": 212
+          },
+          "0.03125": {
+            "fragment_mean_cosine_gain": {
+              "11": -0.0010904175179019238,
+              "3": -0.0005710568773394261,
+              "7": -0.0006088049795497795
+            },
+            "interlock_eligible_count": 15,
+            "interlock_eligible_fraction": 0.07389162561576355,
+            "mean_cosine_gain": -0.0007551859343974917,
+            "positive_fragment_count": 0,
+            "positive_score_fraction": 0.2169811320754717,
+            "post_warmup_opportunities": 203,
+            "scores": 212
+          },
+          "0.0625": {
+            "fragment_mean_cosine_gain": {
+              "11": -0.0018187589223216064,
+              "3": -0.0007814895114727486,
+              "7": -0.00086730404881494
+            },
+            "interlock_eligible_count": 22,
+            "interlock_eligible_fraction": 0.10837438423645321,
+            "mean_cosine_gain": -0.00115272390256103,
+            "positive_fragment_count": 0,
+            "positive_score_fraction": 0.29245283018867924,
+            "post_warmup_opportunities": 203,
+            "scores": 212
+          },
+          "0.125": {
+            "fragment_mean_cosine_gain": {
+              "11": -0.002196462445481638,
+              "3": -0.00013367013064454766,
+              "7": -0.0003455683860095962
+            },
+            "interlock_eligible_count": 42,
+            "interlock_eligible_fraction": 0.20689655172413793,
+            "mean_cosine_gain": -0.0008857467257837682,
+            "positive_fragment_count": 0,
+            "positive_score_fraction": 0.42924528301886794,
+            "post_warmup_opportunities": 203,
+            "scores": 212
+          },
+          "0.25": {
+            "fragment_mean_cosine_gain": {
+              "11": 0.0011484938233755286,
+              "3": 0.005183030471562484,
+              "7": 0.004610514392388965
+            },
+            "interlock_eligible_count": 89,
+            "interlock_eligible_fraction": 0.43842364532019706,
+            "mean_cosine_gain": 0.0036591332687586783,
+            "positive_fragment_count": 3,
+            "positive_score_fraction": 0.6792452830188679,
+            "post_warmup_opportunities": 203,
+            "scores": 212
+          }
+        },
         "fragments": [
           {
             "eligible_counts": {
@@ -513,6 +901,8 @@
             }
           },
           "index_sha256": "a2c68cfb38eb9d51fc85a8a1686a40a1a7d7e6b56a561a78300e93e04855a564",
+          "source_capture_id": "equal-token-late-smollm2-p4de-seed79-syncer-current-6m",
+          "source_seed": 79,
           "unique_boundaries": 221
         }
       }
@@ -532,6 +922,19 @@
       "3": 208,
       "7": 207
     }
+  },
+  "replay_io_contract": {
+    "hashes": "exactly 64 lowercase hexadecimal SHA-256 digits",
+    "input_paths": "relative, root-contained, regular, and without symlink components",
+    "json": {
+      "duplicate_fields": "reject",
+      "integer_coercion": "reject",
+      "nonstandard_constants": "reject",
+      "unexpected_exact_fields": "reject"
+    },
+    "output": "fsync temporary report, atomic replace, verify SHA-256, then publish an atomically replaced .sha256 completion marker",
+    "sequence_gap": "clear all banks and emit bit-identical stock fallback",
+    "vector_or_shape_integrity_failure": "clear affected bank and emit bit-identical stock fallback"
   },
   "schema": "crp_optimizer_retained_evidence_report_v1"
 }

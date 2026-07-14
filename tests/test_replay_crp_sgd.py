@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -190,6 +191,14 @@ def _write_exact_tape(root: Path):
     return index
 
 
+def _read_tape_rows(index):
+    return [json.loads(line) for line in index.read_text().splitlines()]
+
+
+def _write_tape_rows(index, rows):
+    index.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+
 def test_exact_replay_is_deterministic_and_reports_bit_identity(tmp_path):
     index = _write_exact_tape(tmp_path)
 
@@ -207,14 +216,183 @@ def test_exact_replay_is_deterministic_and_reports_bit_identity(tmp_path):
 
 def test_exact_replay_treats_hash_mismatch_as_corrupt_fallback(tmp_path):
     index = _write_exact_tape(tmp_path)
-    rows = [json.loads(line) for line in index.read_text().splitlines()]
+    rows = _read_tape_rows(index)
     rows[0]["proposal_f32le_sha256"] = "0" * 64
-    index.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    _write_tape_rows(index, rows)
 
     result = MOD.replay_exact_crp(index)
 
     assert result["actions"][0]["reason"].startswith("invalid_proposal:sha256_mismatch")
     assert result["actions"][0]["bit_identical_stock_fallback"]
+    assert result["summary"]["input_fallback_classes"] == {
+        "continuity": 0,
+        "nonidentical_fallback": 0,
+        "proposal_integrity": 1,
+        "shape_integrity": 0,
+        "stock_integrity": 0,
+    }
+    assert result["summary"]["all_fallbacks_bit_identical"]
+
+
+def test_stock_hash_mismatch_is_separately_accounted_exact_fallback(tmp_path):
+    index = _write_exact_tape(tmp_path)
+    rows = _read_tape_rows(index)
+    rows[0]["stock_f32le_sha256"] = "0" * 64
+    _write_tape_rows(index, rows)
+
+    result = MOD.replay_exact_crp(index)
+
+    assert result["actions"][0]["reason"].startswith("invalid_stock:sha256_mismatch")
+    assert result["actions"][0]["bit_identical_stock_fallback"]
+    assert result["summary"]["input_fallback_classes"]["stock_integrity"] == 1
+    assert result["summary"]["all_fallbacks_bit_identical"]
+
+
+@pytest.mark.parametrize("bad_sequence", [True, "0", 0.0])
+def test_exact_index_does_not_coerce_bool_string_or_float_to_integer(
+    tmp_path, bad_sequence
+):
+    index = _write_exact_tape(tmp_path)
+    rows = _read_tape_rows(index)
+    rows[0]["sequence"] = bad_sequence
+    _write_tape_rows(index, rows)
+
+    with pytest.raises(ValueError, match="sequence must be int"):
+        MOD.replay_exact_crp(index)
+
+
+def test_exact_index_rejects_nonstandard_json_constants(tmp_path):
+    index = _write_exact_tape(tmp_path)
+    lines = index.read_text().splitlines()
+    lines[0] = lines[0].replace('"sequence": 0', '"sequence": NaN')
+    index.write_text("\n".join(lines) + "\n")
+
+    with pytest.raises(ValueError, match="non-standard JSON constant NaN"):
+        MOD.replay_exact_crp(index)
+
+
+def test_exact_index_rejects_duplicate_and_unexpected_json_fields(tmp_path):
+    index = _write_exact_tape(tmp_path)
+    lines = index.read_text().splitlines()
+    lines[0] = lines[0][:-1] + ', "sequence": 0}'
+    index.write_text("\n".join(lines) + "\n")
+    with pytest.raises(ValueError, match="duplicate JSON field 'sequence'"):
+        MOD.replay_exact_crp(index)
+
+    index = _write_exact_tape(tmp_path)
+    rows = _read_tape_rows(index)
+    rows[0]["ignored"] = "forbidden"
+    _write_tape_rows(index, rows)
+    with pytest.raises(ValueError, match="unexpected=.*ignored"):
+        MOD.replay_exact_crp(index)
+
+
+@pytest.mark.parametrize(
+    "bad_digest",
+    ["A" * 64, "a" * 63, "g" * 64, True],
+)
+def test_exact_index_requires_canonical_lowercase_sha256(tmp_path, bad_digest):
+    index = _write_exact_tape(tmp_path)
+    rows = _read_tape_rows(index)
+    rows[0]["stock_f32le_sha256"] = bad_digest
+    _write_tape_rows(index, rows)
+
+    with pytest.raises(ValueError, match="lowercase hexadecimal|must be str"):
+        MOD.replay_exact_crp(index)
+
+
+def test_exact_index_rejects_absolute_parent_and_symlink_vector_paths(tmp_path):
+    index = _write_exact_tape(tmp_path)
+    rows = _read_tape_rows(index)
+    rows[0]["stock_f32le"] = str((tmp_path / "stock-0.f32").resolve())
+    _write_tape_rows(index, rows)
+    with pytest.raises(ValueError, match="relative and root-contained"):
+        MOD.replay_exact_crp(index)
+
+    index = _write_exact_tape(tmp_path)
+    rows = _read_tape_rows(index)
+    rows[0]["stock_f32le"] = "../stock-0.f32"
+    _write_tape_rows(index, rows)
+    with pytest.raises(ValueError, match="relative and root-contained"):
+        MOD.replay_exact_crp(index)
+
+    index = _write_exact_tape(tmp_path)
+    link = tmp_path / "linked-stock.f32"
+    link.symlink_to(tmp_path / "stock-0.f32")
+    rows = _read_tape_rows(index)
+    rows[0]["stock_f32le"] = link.name
+    _write_tape_rows(index, rows)
+    with pytest.raises(ValueError, match="symlink path component is forbidden"):
+        MOD.replay_exact_crp(index)
+
+
+def test_sequence_gap_forces_accounted_global_bank_clear_and_stock_fallback(tmp_path):
+    index = _write_exact_tape(tmp_path)
+    rows = _read_tape_rows(index)
+    rows[-1]["sequence"] = 4
+    _write_tape_rows(index, rows)
+
+    result = MOD.replay_exact_crp(index)
+
+    final = result["actions"][-1]
+    assert final["reason"].startswith("continuity_gap_bank_cleared")
+    assert final["bit_identical_stock_fallback"]
+    assert final["input_continuity_error"] == "expected_sequence_3_observed_4"
+    assert result["summary"]["pulses"] == 0
+    assert result["summary"]["input_fallback_classes"]["continuity"] == 1
+    assert result["summary"]["all_fallbacks_bit_identical"]
+
+
+def test_fragment_numel_change_clears_state_and_falls_back(tmp_path):
+    index = _write_exact_tape(tmp_path)
+    rows = _read_tape_rows(index)
+    stock_path = tmp_path / "stock-1-wide.f32"
+    proposal_path = tmp_path / "proposal-1-wide.f32"
+    stock_path.write_bytes(np.asarray([1.0, 0.1, 0.0], dtype="<f4").tobytes())
+    proposal_path.write_bytes(np.asarray([1.0, 0.14, 0.0], dtype="<f4").tobytes())
+    rows[1].update(
+        {
+            "numel": 3,
+            "stock_f32le": stock_path.name,
+            "stock_f32le_sha256": MOD.sha256_file(stock_path),
+            "proposal_f32le": proposal_path.name,
+            "proposal_f32le_sha256": MOD.sha256_file(proposal_path),
+        }
+    )
+    _write_tape_rows(index, rows)
+
+    result = MOD.replay_exact_crp(index)
+
+    assert result["actions"][1]["reason"] == "fragment_numel_changed_bank_cleared"
+    assert result["actions"][1]["bit_identical_stock_fallback"]
+    assert result["summary"]["input_fallback_classes"]["shape_integrity"] == 2
+
+
+def test_cli_publishes_atomic_report_and_lowercase_checksum_completion_marker(tmp_path):
+    tape = tmp_path / "tape"
+    tape.mkdir()
+    index = _write_exact_tape(tape)
+    output = tmp_path / "out" / "result.json"
+
+    assert MOD.main(["--exact-crp-index", str(index), "--out", str(output)]) == 0
+    first = output.read_bytes()
+    checksum_path = Path(f"{output}.sha256")
+    expected = hashlib.sha256(first).hexdigest()
+    assert checksum_path.read_text() == f"{expected}  {output.name}\n"
+    assert MOD.LOWER_SHA256_RE.fullmatch(expected)
+    assert not list(output.parent.glob(f".{output.name}.tmp.*"))
+    assert not list(output.parent.glob(f".{checksum_path.name}.tmp.*"))
+
+    assert MOD.main(["--exact-crp-index", str(index), "--out", str(output)]) == 0
+    assert output.read_bytes() == first
+    assert checksum_path.read_text() == f"{expected}  {output.name}\n"
+
+
+def test_hardening_does_not_change_frozen_policy_digest():
+    digest = hashlib.sha256(
+        MOD.canonical_json(MOD.policy_contract()).encode()
+    ).hexdigest()
+    assert digest == "7b8fb30ca98f4b0916f4158824c98246799c61c08d416bfb6bb37d5b2e022710"
 
 
 def test_bcmp_scalar_tape_is_explicitly_unidentifiable(tmp_path):
@@ -306,13 +484,58 @@ def test_pti_screen_materializes_exact_factual_directions_without_policy_inventi
         assert actual.dtype == np.float32
         assert actual.tobytes() == wanted.tobytes()
     assert provenance["derived_direction_chain_sha256"]
+    assert provenance["source_capture_id"] == "capture"
+    assert provenance["source_seed"] is None
     assert result["decision"] == "DIRECTION_SCREEN_ONLY"
     assert not result["causal_loss_claim"]
     assert result["valid_scores_by_fragment"] == {"0": 3}
     assert result["coefficient_results"]["0"]["mean_cosine_gain"] == 0.0
     assert result["coefficient_results"]["-0.25"]["post_warmup_opportunities"] == 0
     assert result["coefficient_results"]["-0.25"]["interlock_eligible_fraction"] is None
+    assert (
+        result["input"][0]["coefficient_results"]["-0.25"]
+        == result["coefficient_results"]["-0.25"]
+    )
     assert any("tie-break" in item for item in result["limitations"])
+
+
+def test_pti_capture_rejects_coerced_unknown_duplicate_and_symlinked_inputs(tmp_path):
+    capture = tmp_path / "bool"
+    _write_pti_capture(capture)
+    rows = _read_tape_rows(capture / "index.jsonl")
+    rows[0]["step"] = True
+    _write_tape_rows(capture / "index.jsonl", rows)
+    with pytest.raises(ValueError, match="step must be int"):
+        MOD.materialize_factual_directions(capture)
+
+    capture = tmp_path / "unknown"
+    _write_pti_capture(capture)
+    rows = _read_tape_rows(capture / "index.jsonl")
+    rows[0]["unknown"] = 1
+    _write_tape_rows(capture / "index.jsonl", rows)
+    with pytest.raises(ValueError, match="unexpected fields.*unknown"):
+        MOD.materialize_factual_directions(capture)
+
+    capture = tmp_path / "duplicate"
+    _write_pti_capture(capture)
+    index = capture / "index.jsonl"
+    lines = index.read_text().splitlines()
+    lines[0] = lines[0][:-1] + ', "step": 1}'
+    index.write_text("\n".join(lines) + "\n")
+    with pytest.raises(ValueError, match="duplicate JSON field 'step'"):
+        MOD.materialize_factual_directions(capture)
+
+    capture = tmp_path / "symlink"
+    _write_pti_capture(capture)
+    index = capture / "index.jsonl"
+    rows = _read_tape_rows(index)
+    target = capture / rows[0]["state_checkpoint"]
+    link = capture / "states" / "linked.ckpt"
+    link.symlink_to(target)
+    rows[0]["state_checkpoint"] = "states/linked.ckpt"
+    _write_tape_rows(index, rows)
+    with pytest.raises(ValueError, match="symlink path component is forbidden"):
+        MOD.materialize_factual_directions(capture)
 
 
 def test_pti_analytic_scores_match_direct_normalized_vector_construction():

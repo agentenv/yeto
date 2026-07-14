@@ -14,7 +14,11 @@ import argparse
 import hashlib
 import json
 import math
+import os
+import re
+import stat
 import struct
+import tempfile
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +60,49 @@ PTI_TRANSVERSE_NORM_SQ_MIN = 2.0**-40
 
 CKPT_MAGIC = 0xD170_5A7E
 EXACT_SCHEMA = "crp_exact_vectors_v1"
+LOWER_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+EXACT_FIELDS = frozenset(
+    {
+        "schema",
+        "event_id",
+        "sequence",
+        "fragment",
+        "numel",
+        "stock_f32le",
+        "stock_f32le_sha256",
+        "proposal_f32le",
+        "proposal_f32le_sha256",
+    }
+)
+SYNCER_PROBE_FIELDS = frozenset(
+    {
+        "schema",
+        "oracle_scope",
+        "step",
+        "version",
+        "syncer_global_step",
+        "fragment",
+        "current_fragment_version",
+        "learner_id",
+        "base_version",
+        "local_step",
+        "c_steps",
+        "c_tokens",
+        "weight",
+        "state_checkpoint",
+        "candidate_f32",
+        "applied_update_f32",
+    }
+)
+SYNCER_PROBE_STRING_FIELDS = frozenset(
+    {
+        "schema",
+        "oracle_scope",
+        "state_checkpoint",
+        "candidate_f32",
+        "applied_update_f32",
+    }
+)
 
 
 def sha256_bytes(raw: bytes) -> str:
@@ -70,8 +117,155 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _atomic_write(path: Path, raw: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.tmp."
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o644)
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def write_checksummed_output(path: Path, rendered: str) -> str:
+    raw = rendered.encode("utf-8")
+    digest = sha256_bytes(raw)
+    if LOWER_SHA256_RE.fullmatch(digest) is None:
+        raise AssertionError("internal SHA-256 encoder returned a noncanonical digest")
+    _atomic_write(path, raw)
+    if sha256_file(path) != digest:
+        raise OSError(f"{path}: atomic output verification failed")
+    checksum_path = Path(f"{path}.sha256")
+    checksum = f"{digest}  {path.name}\n".encode("ascii")
+    _atomic_write(checksum_path, checksum)
+    if checksum_path.read_bytes() != checksum:
+        raise OSError(f"{checksum_path}: atomic checksum verification failed")
+    return digest
+
+
 def canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant {value}")
+
+
+def _object_without_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON field {key!r}")
+        result[key] = value
+    return result
+
+
+def strict_json_object(text: str, context: str) -> dict:
+    try:
+        value = json.loads(
+            text,
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_json_constant,
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
+        raise ValueError(f"{context}: invalid strict JSON: {error}") from error
+    if type(value) is not dict:
+        raise ValueError(f"{context}: top-level JSON value must be an object")
+    return value
+
+
+def _require_fields(row: dict, expected: frozenset[str], context: str) -> None:
+    actual = frozenset(row)
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    if missing or unexpected:
+        raise ValueError(
+            f"{context}: field set mismatch; missing={missing}, unexpected={unexpected}"
+        )
+
+
+def _require_type(row: dict, field: str, expected: type, context: str):
+    if field not in row:
+        raise ValueError(f"{context}: missing field {field!r}")
+    value = row[field]
+    if type(value) is not expected:
+        raise ValueError(
+            f"{context}: {field} must be {expected.__name__}, got {type(value).__name__}"
+        )
+    return value
+
+
+def _require_int(row: dict, field: str, context: str) -> int:
+    return _require_type(row, field, int, context)
+
+
+def _require_string(row: dict, field: str, context: str) -> str:
+    value = _require_type(row, field, str, context)
+    if not value:
+        raise ValueError(f"{context}: {field} must not be empty")
+    return value
+
+
+def _require_number(row: dict, field: str, context: str) -> float:
+    if field not in row:
+        raise ValueError(f"{context}: missing field {field!r}")
+    value = row[field]
+    if type(value) not in (int, float):
+        raise ValueError(
+            f"{context}: {field} must be a JSON number, got {type(value).__name__}"
+        )
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise ValueError(f"{context}: {field} must be finite")
+    return numeric
+
+
+def _require_lower_sha256(row: dict, field: str, context: str) -> str:
+    value = _require_string(row, field, context)
+    if LOWER_SHA256_RE.fullmatch(value) is None:
+        raise ValueError(f"{context}: {field} must be 64 lowercase hexadecimal digits")
+    return value
+
+
+def _root_contained_regular_file(root: Path, value: str, context: str) -> Path:
+    relative = Path(value)
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        raise ValueError(
+            f"{context}: path must be relative and root-contained: {value!r}"
+        )
+    resolved_root = root.resolve(strict=True)
+    current = resolved_root
+    for part in relative.parts:
+        current = current / part
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError as error:
+            raise ValueError(f"{context}: path does not exist: {value!r}") from error
+        if stat.S_ISLNK(mode):
+            raise ValueError(
+                f"{context}: symlink path component is forbidden: {value!r}"
+            )
+    resolved = current.resolve(strict=True)
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as error:
+        raise ValueError(f"{context}: path escapes input root: {value!r}") from error
+    if not resolved.is_file():
+        raise ValueError(f"{context}: path is not a regular file: {value!r}")
+    return resolved
 
 
 def policy_contract() -> dict:
@@ -103,6 +297,27 @@ def policy_contract() -> dict:
             "seal the current residual for the next same-fragment boundary",
         ],
         "fallback": "return the original stock f32 byte object without re-encoding",
+    }
+
+
+def replay_io_contract() -> dict:
+    return {
+        "json": {
+            "duplicate_fields": "reject",
+            "unexpected_exact_fields": "reject",
+            "nonstandard_constants": "reject",
+            "integer_coercion": "reject",
+        },
+        "hashes": "exactly 64 lowercase hexadecimal SHA-256 digits",
+        "input_paths": "relative, root-contained, regular, and without symlink components",
+        "sequence_gap": "clear all banks and emit bit-identical stock fallback",
+        "vector_or_shape_integrity_failure": (
+            "clear affected bank and emit bit-identical stock fallback"
+        ),
+        "output": (
+            "fsync temporary report, atomic replace, verify SHA-256, then publish "
+            "an atomically replaced .sha256 completion marker"
+        ),
     }
 
 
@@ -165,6 +380,7 @@ class ExactEvent:
     fragment: int
     stock: ExactVector
     proposal: ExactVector | None
+    continuity_error: str | None = None
 
 
 @dataclass
@@ -190,6 +406,7 @@ class _BankEntry:
 @dataclass
 class _FragmentState:
     ordinal: int = 0
+    numel: int | None = None
     pending: _Pending | None = None
     bank: list[_BankEntry] = field(default_factory=list)
 
@@ -218,6 +435,11 @@ class CRPEngine:
     def __init__(self) -> None:
         self._states: dict[int, _FragmentState] = defaultdict(_FragmentState)
 
+    @staticmethod
+    def _clear_state(state: _FragmentState) -> None:
+        state.pending = None
+        state.bank.clear()
+
     def _fallback(
         self,
         event: ExactEvent,
@@ -242,30 +464,42 @@ class CRPEngine:
         )
 
     def process(self, event: ExactEvent) -> CRPAction:
+        if event.continuity_error is not None:
+            # A global sequence gap may hide a boundary for any fragment.
+            # Drop every causal bank and do not seal this event as a source.
+            self._states.clear()
+            state = self._states[event.fragment]
+            state.ordinal = 1
+            state.numel = int(event.stock.values.size) or None
+            return self._fallback(
+                event, f"continuity_gap_bank_cleared:{event.continuity_error}"
+            )
+
         state = self._states[event.fragment]
         state.ordinal += 1
         ordinal = state.ordinal
 
         if not event.stock.valid or event.stock.values.size == 0:
-            state.pending = None
-            state.bank.clear()
+            self._clear_state(state)
             return self._fallback(event, f"invalid_stock:{event.stock.error}")
         if event.proposal is None or not event.proposal.valid:
-            state.pending = None
-            state.bank.clear()
+            self._clear_state(state)
             error = "missing" if event.proposal is None else event.proposal.error
             return self._fallback(event, f"invalid_proposal:{error}")
         if event.proposal.values.shape != event.stock.values.shape:
-            state.pending = None
-            state.bank.clear()
+            self._clear_state(state)
             return self._fallback(event, "proposal_shape_mismatch")
+        if state.numel is not None and state.numel != event.stock.values.size:
+            self._clear_state(state)
+            state.numel = int(event.stock.values.size)
+            return self._fallback(event, "fragment_numel_changed_bank_cleared")
+        state.numel = int(event.stock.values.size)
 
         stock = event.stock.values.astype(np.float64, copy=False)
         proposal = event.proposal.values.astype(np.float64, copy=False)
         stock_norm = _norm64(stock)
         if stock_norm == 0.0:
-            state.pending = None
-            state.bank.clear()
+            self._clear_state(state)
             return self._fallback(event, "zero_stock_norm")
 
         admitted: _BankEntry | None = None
@@ -346,8 +580,7 @@ class CRPEngine:
                 ratio,
             )
         else:
-            state.pending = None
-            state.bank.clear()
+            self._clear_state(state)
             return self._fallback(event, "nonfinite_current_residual")
 
         admitted_id = None if admitted is None else admitted.source_event_id
@@ -380,71 +613,118 @@ class CRPEngine:
         )
 
 
-def read_exact_index(index: Path) -> tuple[list[ExactEvent], list[dict]]:
+def read_exact_index(index: Path) -> tuple[list[ExactEvent], list[dict], str]:
+    try:
+        index_mode = index.lstat().st_mode
+    except FileNotFoundError as error:
+        raise ValueError(f"{index}: index does not exist") from error
+    if stat.S_ISLNK(index_mode) or not stat.S_ISREG(index_mode):
+        raise ValueError(f"{index}: index must be a regular non-symlink file")
+    index = index.resolve(strict=True)
     root = index.parent
+    index_raw = index.read_bytes()
+    try:
+        index_text = index_raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"{index}: index is not UTF-8") from error
     events: list[ExactEvent] = []
     provenance: list[dict] = []
     seen_ids: set[str] = set()
     previous_sequence: int | None = None
-    with index.open(encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, 1):
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            if row.get("schema") != EXACT_SCHEMA:
-                raise ValueError(
-                    f"{index}:{line_number}: schema must be {EXACT_SCHEMA}"
-                )
-            event_id = str(row["event_id"])
-            sequence = int(row["sequence"])
-            fragment = int(row["fragment"])
-            numel = int(row["numel"])
-            if event_id in seen_ids:
-                raise ValueError(
-                    f"{index}:{line_number}: duplicate event_id {event_id}"
-                )
-            if previous_sequence is not None and sequence <= previous_sequence:
-                raise ValueError(
-                    f"{index}:{line_number}: sequence is not strictly increasing"
-                )
-            if fragment < 0 or numel <= 0:
-                raise ValueError(f"{index}:{line_number}: invalid fragment or numel")
-            seen_ids.add(event_id)
-            previous_sequence = sequence
-
-            def load(field: str) -> tuple[Path, ExactVector]:
-                path = Path(row[field])
-                path = path if path.is_absolute() else root / path
-                raw = path.read_bytes()
-                vector = ExactVector.from_raw(raw, str(row[f"{field}_sha256"]), numel)
-                return path, vector
-
-            stock_path, stock = load("stock_f32le")
-            proposal_path, proposal = load("proposal_f32le")
-            events.append(ExactEvent(event_id, sequence, fragment, stock, proposal))
-            provenance.append(
-                {
-                    "event_id": event_id,
-                    "stock_path": str(stock_path),
-                    "stock_sha256": stock.sha256,
-                    "proposal_path": str(proposal_path),
-                    "proposal_sha256": proposal.sha256,
-                }
+    for line_number, line in enumerate(index_text.splitlines(), 1):
+        if not line.strip():
+            continue
+        context = f"{index}:{line_number}"
+        row = strict_json_object(line, context)
+        _require_fields(row, EXACT_FIELDS, context)
+        schema = _require_string(row, "schema", context)
+        if schema != EXACT_SCHEMA:
+            raise ValueError(f"{context}: schema must be {EXACT_SCHEMA}")
+        event_id = _require_string(row, "event_id", context)
+        sequence = _require_int(row, "sequence", context)
+        fragment = _require_int(row, "fragment", context)
+        numel = _require_int(row, "numel", context)
+        if event_id in seen_ids:
+            raise ValueError(f"{context}: duplicate event_id {event_id}")
+        if previous_sequence is not None and sequence <= previous_sequence:
+            raise ValueError(f"{context}: sequence is not strictly increasing")
+        if fragment < 0 or numel <= 0 or sequence < 0:
+            raise ValueError(f"{context}: sequence, fragment, and numel must be valid")
+        continuity_error = None
+        if previous_sequence is not None and sequence != previous_sequence + 1:
+            continuity_error = (
+                f"expected_sequence_{previous_sequence + 1}_observed_{sequence}"
             )
+        seen_ids.add(event_id)
+        previous_sequence = sequence
+
+        def load(field: str) -> tuple[Path, ExactVector, str]:
+            relative = _require_string(row, field, context)
+            expected = _require_lower_sha256(row, f"{field}_sha256", context)
+            path = _root_contained_regular_file(root, relative, f"{context}:{field}")
+            raw = path.read_bytes()
+            vector = ExactVector.from_raw(raw, expected, numel)
+            return path, vector, expected
+
+        stock_path, stock, expected_stock = load("stock_f32le")
+        proposal_path, proposal, expected_proposal = load("proposal_f32le")
+        events.append(
+            ExactEvent(
+                event_id,
+                sequence,
+                fragment,
+                stock,
+                proposal,
+                continuity_error,
+            )
+        )
+        provenance.append(
+            {
+                "event_id": event_id,
+                "stock_path": str(stock_path),
+                "stock_expected_sha256": expected_stock,
+                "stock_sha256": stock.sha256,
+                "stock_valid": stock.valid,
+                "stock_error": stock.error,
+                "proposal_path": str(proposal_path),
+                "proposal_expected_sha256": expected_proposal,
+                "proposal_sha256": proposal.sha256,
+                "proposal_valid": proposal.valid,
+                "proposal_error": proposal.error,
+                "continuity_error": continuity_error,
+            }
+        )
     if not events:
         raise ValueError(f"{index}: no records")
-    return events, provenance
+    return events, provenance, sha256_bytes(index_raw)
 
 
 def replay_exact_crp(index: Path) -> dict:
-    events, provenance = read_exact_index(index)
+    events, provenance, index_sha256 = read_exact_index(index)
     engine = CRPEngine()
     actions = []
     reasons: Counter[str] = Counter()
+    fallback_classes: Counter[str] = Counter()
     pulses = 0
     for event in events:
         action = engine.process(event)
         reasons[action.reason] += 1
+        if event.continuity_error is not None:
+            fallback_classes["continuity"] += 1
+        if not event.stock.valid:
+            fallback_classes["stock_integrity"] += 1
+        if event.proposal is None or not event.proposal.valid:
+            fallback_classes["proposal_integrity"] += 1
+        if action.reason in (
+            "proposal_shape_mismatch",
+            "fragment_numel_changed_bank_cleared",
+        ):
+            fallback_classes["shape_integrity"] += 1
+        if action.fallback and not action.bit_identical_to_stock:
+            fallback_classes["nonidentical_fallback"] += 1
+            raise AssertionError(
+                f"{event.event_id}: fallback re-encoded or replaced the stock bytes"
+            )
         pulses += int(not action.fallback)
         actions.append(
             {
@@ -460,17 +740,31 @@ def replay_exact_crp(index: Path) -> dict:
                 "admitted_event_id": action.admitted_event_id,
                 "resolution_score": action.resolution_score,
                 "expired_count": action.expired_count,
+                "input_continuity_error": event.continuity_error,
+                "stock_integrity_error": event.stock.error,
+                "proposal_integrity_error": (
+                    "missing" if event.proposal is None else event.proposal.error
+                ),
             }
         )
+    for classification in (
+        "continuity",
+        "stock_integrity",
+        "proposal_integrity",
+        "shape_integrity",
+        "nonidentical_fallback",
+    ):
+        fallback_classes.setdefault(classification, 0)
     return {
         "schema": "crp_exact_replay_result_v1",
         "analysis_source_sha256": sha256_file(Path(__file__).resolve()),
+        "replay_io_contract": replay_io_contract(),
         "decision": "REPLAYED",
         "identifiable": True,
         "policy": policy_contract(),
         "input": {
-            "index": str(index),
-            "index_sha256": sha256_file(index),
+            "index": str(index.resolve()),
+            "index_sha256": index_sha256,
             "events": len(events),
             "vector_provenance": provenance,
         },
@@ -479,20 +773,26 @@ def replay_exact_crp(index: Path) -> dict:
             "fallbacks": len(events) - pulses,
             "action_fraction": pulses / len(events),
             "reasons": dict(sorted(reasons.items())),
+            "input_fallback_classes": dict(sorted(fallback_classes.items())),
+            "all_fallbacks_bit_identical": fallback_classes["nonidentical_fallback"]
+            == 0,
         },
         "actions": actions,
     }
 
 
 def _iter_jsonl(path: Path) -> Iterable[dict]:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError as error:
+        raise ValueError(f"{path}: JSONL does not exist") from error
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise ValueError(f"{path}: JSONL must be a regular non-symlink file")
     with path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
                 continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError as error:
-                raise ValueError(f"{path}:{line_number}: {error}") from error
+            yield strict_json_object(line, f"{path}:{line_number}")
 
 
 def audit_bcmp_scalar(paths: list[Path]) -> dict:
@@ -509,14 +809,30 @@ def audit_bcmp_scalar(paths: list[Path]) -> dict:
             }
         )
         for row in _iter_jsonl(path):
-            schema = str(row.get("schema"))
+            context = f"{path}:{schema_counts.total() + 1}"
+            schema = _require_string(row, "schema", context)
             schema_counts[schema] += 1
             if schema == "bcmp_shadow_v1":
-                event_id = str(row["event_id"])
+                event_id = _require_string(row, "event_id", context)
+                _require_number(row, "stock_total_step_l2", context)
+                if any(
+                    (event_id, candidate) in candidate_rows
+                    for candidate in ("ray", "slab", "reset")
+                ):
+                    raise ValueError(f"{context}: duplicate shadow event_id {event_id}")
                 for candidate in ("ray", "slab", "reset"):
                     candidate_rows[event_id, candidate] = row
             elif schema == "bcmp_shadow_resolution_v1":
-                resolutions[str(row["event_id"]), str(row["candidate"])] = row
+                event_id = _require_string(row, "event_id", context)
+                candidate = _require_string(row, "candidate", context)
+                if candidate not in ("ray", "slab", "reset"):
+                    raise ValueError(f"{context}: unsupported candidate {candidate}")
+                _require_number(row, "direction_l2", context)
+                _require_number(row, "future_gradient_dot", context)
+                key = (event_id, candidate)
+                if key in resolutions:
+                    raise ValueError(f"{context}: duplicate resolution {key}")
+                resolutions[key] = row
 
     joined = sorted(set(candidate_rows) & set(resolutions))
     summaries: dict[str, dict] = {}
@@ -531,12 +847,17 @@ def audit_bcmp_scalar(paths: list[Path]) -> dict:
         tiny_positive_dot = 0
         ratios: list[float] = []
         for shadow, resolution in rows:
-            stock_norm = float(shadow["stock_total_step_l2"])
-            residual_norm = float(resolution["direction_l2"])
+            stock_norm = _require_number(shadow, "stock_total_step_l2", "joined shadow")
+            residual_norm = _require_number(
+                resolution, "direction_l2", "joined resolution"
+            )
             ratio = math.inf if stock_norm <= 0.0 else residual_norm / stock_norm
             ratios.append(ratio)
             is_tiny = math.isfinite(ratio) and ratio < CRP_INDIVIDUAL_MAX_RATIO
-            is_positive_dot = float(resolution["future_gradient_dot"]) > 0.0
+            is_positive_dot = (
+                _require_number(resolution, "future_gradient_dot", "joined resolution")
+                > 0.0
+            )
             tiny += int(is_tiny)
             positive_dot += int(is_positive_dot)
             tiny_positive_dot += int(is_tiny and is_positive_dot)
@@ -629,7 +950,11 @@ def parse_checkpoint(path: Path) -> Checkpoint:
     if offset != len(view):
         metadata_size = struct.unpack("<I", take(4, "metadata size"))[0]
         metadata = bytes(take(metadata_size, "metadata"))
-        json.loads(metadata.decode("utf-8"))
+        try:
+            metadata_text = metadata.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError(f"{path}: checkpoint metadata is not UTF-8") from error
+        strict_json_object(metadata_text, f"{path}:checkpoint metadata")
     if offset != len(view):
         raise ValueError(f"{path}: trailing bytes")
     return Checkpoint(global_step, tuple(fragments))
@@ -638,14 +963,29 @@ def parse_checkpoint(path: Path) -> Checkpoint:
 def _unique_capture_rows(index: Path) -> list[dict]:
     unique: dict[tuple[int, int], dict] = {}
     for row in _iter_jsonl(index):
-        if row.get("schema") != "syncer_probe_capture_v1":
-            raise ValueError(f"{index}: unexpected schema {row.get('schema')}")
-        key = (int(row["step"]), int(row["fragment"]))
+        context = str(index)
+        unexpected = sorted(set(row) - SYNCER_PROBE_FIELDS)
+        if unexpected:
+            raise ValueError(f"{context}: unexpected fields {unexpected}")
+        for field_name in row:
+            if field_name in SYNCER_PROBE_STRING_FIELDS:
+                _require_string(row, field_name, context)
+            else:
+                _require_int(row, field_name, context)
+        if _require_string(row, "schema", context) != "syncer_probe_capture_v1":
+            raise ValueError(f"{context}: unexpected schema {row.get('schema')}")
+        step = _require_int(row, "step", context)
+        fragment = _require_int(row, "fragment", context)
+        current_version = _require_int(row, "current_fragment_version", context)
+        state_checkpoint = _require_string(row, "state_checkpoint", context)
+        if step < 0 or fragment < 0 or current_version < 0:
+            raise ValueError(f"{context}: negative syncer boundary field")
+        key = (step, fragment)
         material = {
             "step": key[0],
             "fragment": key[1],
-            "current_fragment_version": int(row["current_fragment_version"]),
-            "state_checkpoint": str(row["state_checkpoint"]),
+            "current_fragment_version": current_version,
+            "state_checkpoint": state_checkpoint,
         }
         previous = unique.setdefault(key, material)
         if previous != material:
@@ -656,6 +996,7 @@ def _unique_capture_rows(index: Path) -> list[dict]:
 def materialize_factual_directions(
     capture: Path,
 ) -> tuple[dict[int, list[np.ndarray]], dict]:
+    capture = capture.resolve(strict=True)
     index = capture / "index.jsonl"
     rows = _unique_capture_rows(index)
     root = capture
@@ -674,8 +1015,16 @@ def materialize_factual_directions(
                     f"{index}: fragment {fragment} next version "
                     f"{following['current_fragment_version']} != prior step {current['step']}"
                 )
-            current_path = root / current["state_checkpoint"]
-            following_path = root / following["state_checkpoint"]
+            current_path = _root_contained_regular_file(
+                root,
+                current["state_checkpoint"],
+                f"{index}:state_checkpoint",
+            )
+            following_path = _root_contained_regular_file(
+                root,
+                following["state_checkpoint"],
+                f"{index}:state_checkpoint",
+            )
             for path in (current_path, following_path):
                 checkpoint_hashes.setdefault(str(path), sha256_file(path))
             before = parse_checkpoint(current_path)
@@ -721,8 +1070,15 @@ def materialize_factual_directions(
             raw = _f32le(direction)
             derived_chain.update(struct.pack("<II", fragment, ordinal))
             derived_chain.update(hashlib.sha256(raw).digest())
+    if capture.name == "syncer_probe" and capture.parent.parent.name == "work":
+        source_capture_id = capture.parent.parent.parent.name
+    else:
+        source_capture_id = capture.name
+    seed_match = re.search(r"(?:^|-)seed(\d+)(?:-|$)", source_capture_id)
     return directions, {
         "capture": str(capture),
+        "source_capture_id": source_capture_id,
+        "source_seed": int(seed_match.group(1)) if seed_match else None,
         "index_sha256": sha256_file(index),
         "unique_boundaries": len(rows),
         "fragments": fragment_meta,
@@ -802,43 +1158,9 @@ def _pti_scores(stream: list[np.ndarray]) -> tuple[list[dict], dict]:
     }
 
 
-def screen_pti_captures(captures: list[Path]) -> dict:
-    per_capture = []
-    aggregate: dict[float, list[tuple[int, float, bool, bool]]] = defaultdict(list)
-    total_by_fragment = Counter()
-    for capture in captures:
-        directions, provenance = materialize_factual_directions(capture)
-        capture_rows = []
-        for fragment, stream in sorted(directions.items()):
-            outcomes, meta = _pti_scores(stream)
-            total_by_fragment[fragment] += len(outcomes)
-            for outcome in outcomes:
-                for coefficient, score in outcome["scores"].items():
-                    aggregate[coefficient].append(
-                        (
-                            fragment,
-                            score,
-                            bool(outcome["eligible_before_score"][coefficient]),
-                            bool(outcome["post_warmup"]),
-                        )
-                    )
-            capture_rows.append(
-                {
-                    "fragment": fragment,
-                    "valid_shadow_scores": len(outcomes),
-                    "skipped": meta["skipped"],
-                    "post_warmup_opportunities": meta["post_warmup_opportunities"],
-                    "eligible_counts": {
-                        format(coefficient, ".8g"): int(
-                            meta["eligible_counts"][coefficient]
-                        )
-                        for coefficient in PTI_COEFFICIENTS
-                        if coefficient != 0.0
-                    },
-                }
-            )
-        per_capture.append({"provenance": provenance, "fragments": capture_rows})
-
+def _summarize_pti_coefficients(
+    aggregate: dict[float, list[tuple[int, float, bool, bool]]],
+) -> dict:
     coefficient_results = {}
     for coefficient in PTI_COEFFICIENTS:
         rows = aggregate[coefficient]
@@ -867,6 +1189,54 @@ def screen_pti_captures(captures: list[Path]) -> dict:
                 eligible_count / post_warmup_count if post_warmup_count else None
             ),
         }
+    return coefficient_results
+
+
+def screen_pti_captures(captures: list[Path]) -> dict:
+    per_capture = []
+    aggregate: dict[float, list[tuple[int, float, bool, bool]]] = defaultdict(list)
+    total_by_fragment = Counter()
+    for capture in captures:
+        directions, provenance = materialize_factual_directions(capture)
+        capture_rows = []
+        capture_aggregate: dict[float, list[tuple[int, float, bool, bool]]] = (
+            defaultdict(list)
+        )
+        for fragment, stream in sorted(directions.items()):
+            outcomes, meta = _pti_scores(stream)
+            total_by_fragment[fragment] += len(outcomes)
+            for outcome in outcomes:
+                for coefficient, score in outcome["scores"].items():
+                    row = (
+                        fragment,
+                        score,
+                        bool(outcome["eligible_before_score"][coefficient]),
+                        bool(outcome["post_warmup"]),
+                    )
+                    aggregate[coefficient].append(row)
+                    capture_aggregate[coefficient].append(row)
+            capture_rows.append(
+                {
+                    "fragment": fragment,
+                    "valid_shadow_scores": len(outcomes),
+                    "skipped": meta["skipped"],
+                    "post_warmup_opportunities": meta["post_warmup_opportunities"],
+                    "eligible_counts": {
+                        format(coefficient, ".8g"): int(
+                            meta["eligible_counts"][coefficient]
+                        )
+                        for coefficient in PTI_COEFFICIENTS
+                        if coefficient != 0.0
+                    },
+                }
+            )
+        per_capture.append(
+            {
+                "provenance": provenance,
+                "fragments": capture_rows,
+                "coefficient_results": _summarize_pti_coefficients(capture_aggregate),
+            }
+        )
     return {
         "schema": "pti_historical_direction_screen_v1",
         "decision": "DIRECTION_SCREEN_ONLY",
@@ -880,7 +1250,7 @@ def screen_pti_captures(captures: list[Path]) -> dict:
             str(fragment): count
             for fragment, count in sorted(total_by_fragment.items())
         },
-        "coefficient_results": coefficient_results,
+        "coefficient_results": _summarize_pti_coefficients(aggregate),
         "limitations": [
             "checkpoint differences identify realized factual directions, not losses",
             "the source capture has no sealed CRN k=0/k=8 outcome bundle",
@@ -909,6 +1279,7 @@ def retained_evidence_report(bcmp: list[Path], pti_captures: list[Path]) -> dict
     return {
         "schema": "crp_optimizer_retained_evidence_report_v1",
         "analysis_source_sha256": sha256_file(Path(__file__).resolve()),
+        "replay_io_contract": replay_io_contract(),
         "preregistered_policy_sha256": sha256_bytes(
             canonical_json(policy_contract()).encode("utf-8")
         ),
@@ -947,8 +1318,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.out is None:
         print(rendered, end="")
     else:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(rendered, encoding="utf-8")
+        write_checksummed_output(args.out, rendered)
     return 0
 
 

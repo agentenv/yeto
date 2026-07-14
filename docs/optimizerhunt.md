@@ -1368,11 +1368,19 @@ The exact replay contract is `crp_exact_vectors_v1`: each chronological row
 must hash exact little-endian f32 bytes for both factual stock direction `G_t`
 and proposal direction `Q_t`, with event, sequence, fragment, and length. The
 engine rejects or clears on checksum, shape, finiteness, norm, continuity, or
-resolution failure. Thirteen tests cover causal ordering, strict threshold
+resolution failure. Twenty-nine tests cover causal ordering, strict threshold
 behavior, bank clearing and expiry, no upward scaling, maximum clipping,
 NaN-payload/negative-zero bit-identical fallback, deterministic repeated
 replay, exact checkpoint materialization, and equivalence of the analytic PTI
-score to direct vector construction.
+score to direct vector construction. The exact reader additionally rejects
+duplicate, missing, and unexpected fields; non-standard JSON constants;
+booleans, strings, or floats in integer fields; noncanonical or uppercase
+SHA-256 text; and absolute, escaping, non-regular, or symlink-containing vector
+and checkpoint paths. A global sequence gap clears every fragment bank and
+consumes a bit-identical stock fallback. Vector/hash and shape integrity
+fallbacks are separately counted in the output ledger. Reports are fsynced to
+a same-directory temporary file, atomically replaced and rehashed, after which
+an atomically replaced `.sha256` file is published as the completion marker.
 
 The retained `exp2-53a2` BCMP tape does **not** satisfy that contract. Across
 four learner JSONLs it contains 458 shadow events and 1,368 joined candidate
@@ -1412,6 +1420,28 @@ statistics:
 | `+1/8` | `-0.0011166459386409112` | `0.428341384863124` | `0.1835016835016835` | `0/3` |
 | `+1/4` | `0.0032522881997281102` | `0.6666666666666666` | `0.4225589225589226` | `3/3` |
 
+The pooled `-1/4` result is also descriptive-positive in each exact source
+capture independently:
+
+| source capture | scores | mean cosine gain | positive-score fraction | post-warm-up interlock eligible fraction |
+| --- | ---: | ---: | ---: | ---: |
+| `equal-token-late-smollm2-p4de-seed53-syncer-current-6m` | 207 | `0.01895086235250181` | `0.9565217391304348` | `0.9040404040404041` |
+| `equal-token-late-smollm2-p4de-seed67-syncer-current-6m` | 202 | `0.01914589422492158` | `0.9900990099009901` | `0.9689119170984456` |
+| `equal-token-late-smollm2-p4de-seed79-syncer-current-6m` | 212 | `0.018155130800552848` | `0.9528301886792453` | `0.9211822660098522` |
+
+Their exact index SHA-256 / derived factual-direction-chain SHA-256 pairs are:
+
+- seed 53: `8b291187a33711970d6e42ccc1af6d3f2f77bb6b46b0794af7eb97a25e04660e`
+  / `da959b31aeeb79ec2885e18cdb3bfba093f636e9f52829bc6a47e8b970a8f883`;
+- seed 67: `cc472c93c54c274c10e039aa53ccbbe034c2b634c8b5026a2bb66ae56a6b7115`
+  / `dff5e018e1bf22a890baffaeecfec347c3153d2cc4c36762aeb98e71ab851b8c`;
+- seed 79: `a2c68cfb38eb9d51fc85a8a1686a40a1a7d7e6b56a561a78300e93e04855a564`
+  / `2f5fea96cf3f325ff1626be3be3fe42e5f10af2270684ebf02ac8abb24d4980c`.
+
+This per-capture agreement is a robustness description of historical
+direction geometry. It is not a new promotion gate and does not change
+`DIRECTION_SCREEN_ONLY`.
+
 For `-1/4`, the fragment means were `0.01739135170016281` (fragment 3),
 `0.016985339645211022` (fragment 7), and `0.021872914611294623` (fragment
 11). This sign asymmetry is useful mechanism evidence, not evidence that PTI
@@ -1427,11 +1457,13 @@ The machine-readable report is
 digest is
 `7b8fb30ca98f4b0916f4158824c98246799c61c08d416bfb6bb37d5b2e022710`;
 the recorded analyzer-source digest is
-`8828e4b8e502d377f1ea0d1d7330d5e8b03b3b6a0524a0f292f8ac2506e55815`;
+`a0c9645ce9cde5b8084497af6c681a2d13c830159150883e078fa8048c24fccb`;
 the report SHA-256 is
-`7ad71b9c90b7d95185544b327ff954f8987e156b938b70f2ac492b1d54116554`.
-Two complete invocations produced byte-identical reports. No cloud resource,
-model execution, live outcome, parameter retuning, or push was used.
+`90efb32abb93ef57185824e45464a7d6a7b52ee791ffad51211948894d7d52ea`;
+the same digest and basename are recorded in
+`crp-retained-evidence-report.json.sha256`. Two complete invocations produced
+byte-identical reports. No cloud resource, model execution, live outcome,
+parameter retuning, post-hoc gate, or push was used.
 
 ### CFLX-SGD: cross-fitted lookahead candidate
 
