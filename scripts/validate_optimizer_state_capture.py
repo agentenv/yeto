@@ -1149,6 +1149,38 @@ def _validate_learner(
                 "in_flight_bytes",
             )
         }
+        writer_high_waters = {
+            key: _require_int(
+                writer.get(key), f"{context}.background_writer.{key}", minimum=0
+            )
+            for key in (
+                "reservation_high_water_items",
+                "reservation_high_water_bytes",
+                "queue_high_water_items",
+                "queue_high_water_bytes",
+            )
+        }
+        for key, capacity in (
+            ("reservation_high_water_items", expectations.background_writer_max_items),
+            ("queue_high_water_items", expectations.background_writer_max_items),
+            ("reservation_high_water_bytes", expectations.background_writer_max_bytes),
+            ("queue_high_water_bytes", expectations.background_writer_max_bytes),
+        ):
+            if writer_high_waters[key] > capacity:
+                _fail(
+                    f"background writer {key} exceeds configured capacity",
+                    context=context,
+                )
+        if (
+            writer_high_waters["queue_high_water_items"]
+            > writer_high_waters["reservation_high_water_items"]
+            or writer_high_waters["queue_high_water_bytes"]
+            > writer_high_waters["reservation_high_water_bytes"]
+        ):
+            _fail(
+                "background writer queue high-water exceeds reservation high-water",
+                context=context,
+            )
         if (
             writer_counts["accepted_items"] != writer_counts["completed_items"]
             or writer_counts["accepted_bytes"] != writer_counts["completed_bytes"]

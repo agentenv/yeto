@@ -687,6 +687,48 @@ def test_background_writer_campaign_requires_drained_complete_manifests(tmp_path
         assert writer["worker_alive"] is False
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("reservation_high_water_items", 3),
+        ("queue_high_water_items", 3),
+        ("reservation_high_water_bytes", MAX_BYTES + 1),
+        ("queue_high_water_bytes", MAX_BYTES + 1),
+    ],
+)
+def test_background_writer_rejects_high_water_above_configured_capacity(
+    tmp_path, field, value
+):
+    arm_dir, expectations = _campaign(tmp_path, background_writer=True)
+    capture_dir = arm_dir / "optimizer_state_capture_learner_0"
+    _mutate_manifest(
+        capture_dir,
+        lambda manifest: manifest["background_writer"].__setitem__(field, value),
+    )
+
+    with pytest.raises(ValidationError, match=f"{field} exceeds configured capacity"):
+        validate_campaign(arm_dir, replace(expectations, strict_writer=True))
+
+
+def test_background_writer_rejects_queue_high_water_above_reservation_high_water(
+    tmp_path,
+):
+    arm_dir, expectations = _campaign(tmp_path, background_writer=True)
+    capture_dir = arm_dir / "optimizer_state_capture_learner_0"
+
+    def invalidate_high_water_order(manifest):
+        writer = manifest["background_writer"]
+        writer["reservation_high_water_items"] = 1
+        writer["queue_high_water_items"] = 2
+
+    _mutate_manifest(capture_dir, invalidate_high_water_order)
+
+    with pytest.raises(
+        ValidationError, match="queue high-water exceeds reservation high-water"
+    ):
+        validate_campaign(arm_dir, replace(expectations, strict_writer=True))
+
+
 def test_strict_writer_rejects_capacity_or_active_schedule_drops(tmp_path):
     arm_dir, expectations = _campaign(tmp_path)
     capture_dir = arm_dir / "optimizer_state_capture_learner_0"
