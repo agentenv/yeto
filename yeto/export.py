@@ -39,6 +39,7 @@ from .backends import all_backends, get_backend
 from .fragments import FragmentLayout
 
 CKPT_MAGIC = 0xD170_5A7E
+PTI_CKPT_EXTENSION_MAGIC = 0x31495450  # little-endian b"PTI1"
 
 
 @dataclass
@@ -104,7 +105,7 @@ def parse_checkpoint(path: str | Path) -> Checkpoint:
                 "incompatible syncer version"
             )
         (meta_len,) = struct.unpack("<I", take(4, "layout_meta_len"))
-        if off + meta_len != len(data):
+        if off + meta_len > len(data):
             raise ValueError(
                 f"{path}: trailing bytes do not form a valid layout metadata block "
                 f"(declared {meta_len} bytes, have {len(data) - off})"
@@ -112,6 +113,41 @@ def parse_checkpoint(path: str | Path) -> Checkpoint:
         raw_meta = take(meta_len, "layout_meta")
         if raw_meta:
             layout_meta = json.loads(raw_meta.decode("utf-8"))
+    # PTI-SGD checkpoints append causal direction/interlock state after the
+    # ordinary export payload.  Export does not consume that optimizer state,
+    # but validates and skips it so the model parameters remain recoverable.
+    if off != len(data):
+        magic, state_count = struct.unpack("<II", take(8, "PTI extension header"))
+        if magic != PTI_CKPT_EXTENSION_MAGIC:
+            raise ValueError(f"{path}: unknown checkpoint extension 0x{magic:08X}")
+        if state_count != num_fragments:
+            raise ValueError(
+                f"{path}: PTI extension has {state_count} fragments, expected {num_fragments}"
+            )
+        for fid, (_version, params, _momentum) in enumerate(fragments):
+            numel = params.numel()
+            for field in ("previous stock", "pending candidate"):
+                (count,) = struct.unpack(
+                    "<Q", take(8, f"PTI fragment {fid} {field} length")
+                )
+                if count not in (0, numel):
+                    raise ValueError(
+                        f"{path}: PTI fragment {fid} {field} has {count} values, "
+                        f"expected 0 or {numel}"
+                    )
+                take(4 * count, f"PTI fragment {fid} {field}")
+            (score_count,) = struct.unpack(
+                "<I", take(4, f"PTI fragment {fid} score count")
+            )
+            if score_count > 3:
+                raise ValueError(
+                    f"{path}: PTI fragment {fid} has invalid score count {score_count}"
+                )
+            take(4 * score_count, f"PTI fragment {fid} scores")
+    if off != len(data):
+        raise ValueError(
+            f"{path}: {len(data) - off} trailing bytes after checkpoint extensions"
+        )
     return Checkpoint(global_step, fragments, ledger, layout_meta)
 
 
@@ -157,7 +193,9 @@ def parse_args(argv=None):
     )
     # Shared across tasks; per-task flags come from the registered backends.
     p.add_argument("--task", choices=[b.name for b in all_backends()], default="lm")
-    p.add_argument("--checkpoint", required=True, help="path to the syncer checkpoint file")
+    p.add_argument(
+        "--checkpoint", required=True, help="path to the syncer checkpoint file"
+    )
     p.add_argument("--fragments", type=int, default=8, help="P used during training")
     p.add_argument(
         "--fragment-pattern",

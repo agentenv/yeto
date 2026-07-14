@@ -2498,6 +2498,18 @@ fn optional_json_string(value: Option<&str>) -> String {
         .unwrap_or_else(|| "null".to_owned())
 }
 
+fn optional_sha256_json(value: [u8; 32]) -> String {
+    if value == [0; 32] {
+        return "null".to_owned();
+    }
+    let mut encoded = String::with_capacity(64);
+    use std::fmt::Write as _;
+    for byte in value {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    serde_json::to_string(&encoded).expect("hex digest is valid JSON")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn format_tape_line(
     step: u64,
@@ -2542,6 +2554,14 @@ fn format_tape_line(
     let outer_step_norm = json_number(outer.applied_step_norm);
     let outer_direction_cosine = optional_json_number(outer.direction_delta_cosine);
     let outer_history_current_ratio = optional_json_number(outer.history_current_norm_ratio);
+    let pti_shadow_score = optional_json_number(stats.pti.resolved_shadow_score);
+    let pti_reason =
+        (stats.pti.reason != crate::state::PtiReason::NotActive).then(|| stats.pti.reason.as_str());
+    let pti_reason = optional_json_string(pti_reason);
+    let pti_stock_sha256 = optional_sha256_json(stats.pti.stock_sha256);
+    let pti_previous_stock_sha256 = optional_sha256_json(stats.pti.previous_stock_sha256);
+    let pti_candidate_sha256 = optional_sha256_json(stats.pti.candidate_sha256);
+    let pti_action_sha256 = optional_sha256_json(stats.pti.action_sha256);
     let policy = serde_json::to_string(&decision.policy.to_string()).unwrap();
     let selected_action = serde_json::to_string(&decision.selected_action).unwrap();
     let committed_action = serde_json::to_string(&decision.committed_action).unwrap();
@@ -2554,9 +2574,13 @@ fn format_tape_line(
     let committed_multiplier = json_number(decision.committed_multiplier);
     let request_digest = optional_json_string(decision.request_digest.as_deref());
     format!(
-        "{{\"step\":{step},\"fragment\":{fragment},\"commit_seq\":{commit_seq},\"commit_elapsed_ns\":{commit_elapsed_ns},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}}}\n",
+        "{{\"step\":{step},\"fragment\":{fragment},\"commit_seq\":{commit_seq},\"commit_elapsed_ns\":{commit_elapsed_ns},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"pti_shadow_score\":{pti_shadow_score},\"pti_score_count\":{},\"pti_interlock_open\":{},\"pti_used_nonstock\":{},\"pti_state_cleared\":{},\"pti_reason\":{pti_reason},\"pti_stock_sha256\":{pti_stock_sha256},\"pti_previous_stock_sha256\":{pti_previous_stock_sha256},\"pti_candidate_sha256\":{pti_candidate_sha256},\"pti_action_sha256\":{pti_action_sha256},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}}}\n",
         responders.join(","),
         outer.restarted,
+        stats.pti.interlock_score_count,
+        stats.pti.interlock_open,
+        stats.pti.used_nonstock,
+        stats.pti.state_cleared,
         decision.fallback,
     )
 }
@@ -2595,6 +2619,7 @@ mod tests {
                 history_current_norm_ratio,
                 restarted,
             },
+            pti: crate::state::PtiStepStats::default(),
         }
     }
 
@@ -3334,6 +3359,44 @@ mod tests {
         assert!(line.contains("\"fallback\":true"));
         assert!(line.contains("\"fallback_reason\":\"probe_timeout\""));
         assert!(!line.contains("NaN"));
+    }
+
+    #[test]
+    fn event_tape_seals_pti_action_evidence() {
+        let mut stats = merge_stats(1.0, 0.28, Some(0.97), Some(0.0), false);
+        stats.pti = crate::state::PtiStepStats {
+            resolved_shadow_score: Some(0.0125),
+            interlock_score_count: 3,
+            interlock_open: true,
+            used_nonstock: true,
+            state_cleared: false,
+            reason: crate::state::PtiReason::CandidateSelected,
+            stock_sha256: [0x11; 32],
+            previous_stock_sha256: [0x22; 32],
+            candidate_sha256: [0x33; 32],
+            action_sha256: [0x33; 32],
+        };
+        let line = format_tape_line(
+            5,
+            0,
+            5,
+            10,
+            &HashMap::new(),
+            &stats,
+            &CommitDecision::token_weighted(),
+            &HashMap::new(),
+            1,
+        );
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["pti_shadow_score"], 0.0125);
+        assert_eq!(value["pti_score_count"], 3);
+        assert_eq!(value["pti_interlock_open"], true);
+        assert_eq!(value["pti_used_nonstock"], true);
+        assert_eq!(value["pti_reason"], "candidate_selected");
+        assert_eq!(value["pti_stock_sha256"], "11".repeat(32));
+        assert_eq!(value["pti_previous_stock_sha256"], "22".repeat(32));
+        assert_eq!(value["pti_candidate_sha256"], "33".repeat(32));
+        assert_eq!(value["pti_action_sha256"], "33".repeat(32));
     }
 
     // ---- EXP2.46 anchor-drift diagnostics / version-matched anchoring ------

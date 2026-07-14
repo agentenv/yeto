@@ -42,6 +42,11 @@ pub enum OuterOptimizer {
     BlockRms,
     BlockYogi,
     ChebSgd,
+    /// Frozen PTI direction policy followed by the ordinary outer SGD step.
+    /// The causal per-fragment direction state lives in `state.rs`; merge.rs
+    /// receives the already selected stock/PTI direction and intentionally
+    /// applies the same Nesterov kernel as the stock path.
+    PtiSgd,
 }
 
 impl OuterOptimizer {
@@ -59,6 +64,7 @@ impl OuterOptimizer {
             Self::BlockRms => "block-rms",
             Self::BlockYogi => "block-yogi",
             Self::ChebSgd => "cheb-sgd",
+            Self::PtiSgd => "pti-sgd",
         }
     }
 
@@ -90,8 +96,9 @@ impl FromStr for OuterOptimizer {
             "block-rms" => Ok(Self::BlockRms),
             "block-yogi" => Ok(Self::BlockYogi),
             "cheb-sgd" => Ok(Self::ChebSgd),
+            "pti-sgd" => Ok(Self::PtiSgd),
             other => Err(format!(
-                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov, capped-nesterov-gc, capped-nesterov-r, capped-nesterov-curv, capped-nesterov-wsub, block-rms, block-yogi, cheb-sgd; got {other:?}"
+                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov, capped-nesterov-gc, capped-nesterov-r, capped-nesterov-curv, capped-nesterov-wsub, block-rms, block-yogi, cheb-sgd, pti-sgd; got {other:?}"
             )),
         }
     }
@@ -154,7 +161,9 @@ pub fn apply_outer_step(
     cheb_phase: &mut f32,
 ) -> OuterStepStats {
     match optimizer {
-        OuterOptimizer::Nesterov => nesterov_step(params, buf, delta, lr, momentum),
+        OuterOptimizer::Nesterov | OuterOptimizer::PtiSgd => {
+            nesterov_step(params, buf, delta, lr, momentum)
+        }
         OuterOptimizer::NormalizedEma => normalized_ema_step(params, buf, delta, lr, momentum),
         OuterOptimizer::RestartedEma => {
             restarted_ema_step(params, buf, delta, lr, momentum, restart_cos_threshold)
@@ -212,6 +221,7 @@ pub fn materialize_applied_step(
     debug_assert_eq!(updated_buf.len(), delta.len());
     match optimizer {
         OuterOptimizer::Nesterov
+        | OuterOptimizer::PtiSgd
         | OuterOptimizer::CappedNesterov
         | OuterOptimizer::CappedNesterovR
         | OuterOptimizer::CappedNesterovCurv

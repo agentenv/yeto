@@ -6,7 +6,12 @@ import json
 import pytest
 import torch
 
-from yeto.export import CKPT_MAGIC, parse_checkpoint, validate_against_layout
+from yeto.export import (
+    CKPT_MAGIC,
+    PTI_CKPT_EXTENSION_MAGIC,
+    parse_checkpoint,
+    validate_against_layout,
+)
 from yeto.fragments import build_layout
 from yeto.tensor_io import apply_fragment
 
@@ -48,10 +53,14 @@ def checkpoint_bytes(global_step, blobs, ledger, magic=CKPT_MAGIC):
 
 def checkpoint_bytes_with_meta(global_step, blobs, ledger, meta):
     raw = json.dumps(meta, sort_keys=True).encode("utf-8")
-    return checkpoint_bytes(global_step, blobs, ledger) + struct.pack("<I", len(raw)) + raw
+    return (
+        checkpoint_bytes(global_step, blobs, ledger) + struct.pack("<I", len(raw)) + raw
+    )
 
 
-def make_checkpoint(tmp_path, params, num_fragments=4, global_step=42, magic=CKPT_MAGIC):
+def make_checkpoint(
+    tmp_path, params, num_fragments=4, global_step=42, magic=CKPT_MAGIC
+):
     layout = build_layout([(n, p.numel()) for n, p in params.items()], num_fragments)
     blobs = [
         (100 + fid, flat_fragment(frag, params), torch.full((frag.numel,), 0.5 * fid))
@@ -101,7 +110,10 @@ def test_truncated(tmp_path):
 def test_layout_metadata_block_is_parsed(tmp_path):
     params = fake_params()
     layout = build_layout([(n, p.numel()) for n, p in params.items()], 4)
-    blobs = [(fid, flat_fragment(frag, params), torch.zeros(frag.numel)) for fid, frag in enumerate(layout.fragments)]
+    blobs = [
+        (fid, flat_fragment(frag, params), torch.zeros(frag.numel))
+        for fid, frag in enumerate(layout.fragments)
+    ]
     meta = {"task": "nava", "fragments": []}
     path = tmp_path / "syncer-meta.ckpt"
     path.write_bytes(checkpoint_bytes_with_meta(3, blobs, LEDGER, meta))
@@ -110,6 +122,33 @@ def test_layout_metadata_block_is_parsed(tmp_path):
 
     assert ckpt.global_step == 3
     assert ckpt.layout_meta == meta
+
+
+def test_pti_checkpoint_extension_is_validated_and_ignored_for_export(tmp_path):
+    params = fake_params()
+    layout = build_layout([(n, p.numel()) for n, p in params.items()], 4)
+    blobs = [
+        (fid, flat_fragment(frag, params), torch.zeros(frag.numel))
+        for fid, frag in enumerate(layout.fragments)
+    ]
+    raw = bytearray(checkpoint_bytes(7, blobs, LEDGER))
+    raw += struct.pack("<I", 0)  # empty layout metadata block
+    raw += struct.pack("<II", PTI_CKPT_EXTENSION_MAGIC, len(blobs))
+    for _version, values, _momentum in blobs:
+        current = values.reshape(-1).tolist()
+        raw += struct.pack("<Q", len(current))
+        raw += struct.pack(f"<{len(current)}f", *current)
+        raw += struct.pack("<Q", 0)  # no pending candidate
+        raw += struct.pack("<I", 2)
+        raw += struct.pack("<2f", 0.1, -0.2)
+    path = tmp_path / "syncer-pti.ckpt"
+    path.write_bytes(raw)
+
+    ckpt = parse_checkpoint(path)
+    assert ckpt.global_step == 7
+    assert ckpt.layout_meta is None
+    for parsed, expected in zip(ckpt.fragments, blobs):
+        assert torch.equal(parsed[1], expected[1])
 
 
 def test_numel_mismatch_raises(tmp_path):

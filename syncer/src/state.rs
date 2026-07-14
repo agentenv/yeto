@@ -2,6 +2,7 @@
 //! and outer-optimizer momentum, all in f32.
 
 use anyhow::{bail, Result};
+use sha2::{Digest, Sha256};
 
 use crate::merge;
 use crate::protocol::Reader;
@@ -89,6 +90,52 @@ pub struct MergeStats {
     /// L2 norm of the merged pseudo-gradient before the outer optimizer.
     pub gnorm: f64,
     pub outer: merge::OuterStepStats,
+    /// Diagnostics from the causal PTI direction selector.  These remain the
+    /// all-false/default record for every other outer optimizer.
+    pub pti: PtiStepStats,
+}
+
+/// One boundary's causal PTI selector diagnostics.  The score, when present,
+/// resolves the preceding same-fragment shadow against this boundary's
+/// factual stock direction; it is never a look-ahead score for this action.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PtiStepStats {
+    pub resolved_shadow_score: Option<f64>,
+    pub interlock_score_count: u8,
+    pub interlock_open: bool,
+    pub used_nonstock: bool,
+    pub state_cleared: bool,
+    pub reason: PtiReason,
+    pub stock_sha256: [u8; 32],
+    pub previous_stock_sha256: [u8; 32],
+    pub candidate_sha256: [u8; 32],
+    pub action_sha256: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PtiReason {
+    #[default]
+    NotActive,
+    Warmup,
+    InterlockClosed,
+    CandidateSelected,
+    DegenerateStock,
+    InvalidShadowScore,
+    DegenerateTransverse,
+}
+
+impl PtiReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotActive => "not_active",
+            Self::Warmup => "warmup",
+            Self::InterlockClosed => "interlock_closed",
+            Self::CandidateSelected => "candidate_selected",
+            Self::DegenerateStock => "degenerate_stock",
+            Self::InvalidShadowScore => "invalid_shadow_score",
+            Self::DegenerateTransverse => "degenerate_transverse",
+        }
+    }
 }
 
 /// One validated learner candidate presented to the deterministic merge API.
@@ -250,11 +297,24 @@ pub struct ActionPreview {
     /// the other optimizers. Installed alongside the buffer on commit.
     resulting_curv_prev_delta: Vec<f32>,
     resulting_curv_prev_dtheta: Vec<f32>,
+    /// Causal PTI history after this preview.  It is installed only when the
+    /// preview commits, so retries and alternative previews cannot advance or
+    /// score the interlock twice.
+    resulting_pti_state: PtiFragmentState,
     applied_step: Vec<f32>,
     stats: MergeStats,
     step_scale: f64,
     unscaled_applied_step_norm: f64,
     action_fingerprint: [u64; 2],
+}
+
+/// Minimal per-fragment state for the frozen PTI direction selector.  Empty
+/// vectors denote an un-warmed state or the absence of a pending shadow.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct PtiFragmentState {
+    previous_stock: Vec<f32>,
+    pending_candidate: Vec<f32>,
+    scores: Vec<f32>,
 }
 
 #[allow(dead_code)] // Public action API; server wiring lands separately.
@@ -355,6 +415,236 @@ fn flat_l2_norm(values: &[f32]) -> f64 {
         .sqrt()
 }
 
+const PTI_DEGENERATE_NORM_SQ: f32 = 9.094_947e-13; // exactly 2^-40 in f32
+const PTI_INTERLOCK_LENGTH: usize = 3;
+const PTI_COEFFICIENT: f32 = -0.25;
+
+fn pti_dot(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.len() != right.len() {
+        return None;
+    }
+    let mut accumulator = 0.0f32;
+    for (&left_value, &right_value) in left.iter().zip(right) {
+        // Keep the product and accumulation as separate f32 operations.  Rust
+        // does not enable reassociation/fast-math here, so canonical coordinate
+        // order matches the frozen Python reference kernel.
+        let product = left_value * right_value;
+        accumulator += product;
+        if !product.is_finite() || !accumulator.is_finite() {
+            return None;
+        }
+    }
+    Some(accumulator)
+}
+
+fn pti_normalize(values: &[f32]) -> Option<(Vec<f32>, f32)> {
+    let norm_sq = pti_dot(values, values)?;
+    if !norm_sq.is_finite() || norm_sq <= PTI_DEGENERATE_NORM_SQ {
+        return None;
+    }
+    let norm = norm_sq.sqrt();
+    if !norm.is_finite() || norm <= 0.0 {
+        return None;
+    }
+    let normalized: Vec<f32> = values.iter().map(|value| *value / norm).collect();
+    normalized
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some((normalized, norm))
+}
+
+fn pti_cosine(left: &[f32], right: &[f32]) -> Option<f32> {
+    let (left_unit, _) = pti_normalize(left)?;
+    let (right_unit, _) = pti_normalize(right)?;
+    pti_dot(&left_unit, &right_unit)
+}
+
+fn pti_candidate(current: &[f32], previous: &[f32]) -> Option<Vec<f32>> {
+    let (unit_current, current_norm) = pti_normalize(current)?;
+    let (unit_previous, _) = pti_normalize(previous)?;
+    let projection = pti_dot(&unit_previous, &unit_current)?;
+    let transverse: Vec<f32> = unit_previous
+        .iter()
+        .zip(&unit_current)
+        .map(|(old, new)| *old - projection * *new)
+        .collect();
+    let (unit_transverse, _) = pti_normalize(&transverse)?;
+    let raw_direction: Vec<f32> = unit_current
+        .iter()
+        .zip(&unit_transverse)
+        .map(|(new, orthogonal)| *new + PTI_COEFFICIENT * *orthogonal)
+        .collect();
+    let (unit_candidate, _) = pti_normalize(&raw_direction)?;
+    let candidate: Vec<f32> = unit_candidate
+        .iter()
+        .map(|component| current_norm * *component)
+        .collect();
+    if candidate.iter().any(|value| !value.is_finite())
+        || pti_dot(&candidate, &candidate)? <= PTI_DEGENERATE_NORM_SQ
+    {
+        return None;
+    }
+    Some(candidate)
+}
+
+fn pti_sha256(values: &[f32]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for value in values {
+        digest.update(value.to_le_bytes());
+    }
+    digest.finalize().into()
+}
+
+fn pti_select_direction(
+    current: &[f32],
+    prior: &PtiFragmentState,
+) -> (Vec<f32>, PtiFragmentState, PtiStepStats) {
+    let stock = current.to_vec();
+    let stock_sha256 = pti_sha256(current);
+    let previous_stock_sha256 = if prior.previous_stock.is_empty() {
+        [0; 32]
+    } else {
+        pti_sha256(&prior.previous_stock)
+    };
+    if pti_normalize(current).is_none() {
+        return (
+            stock,
+            PtiFragmentState::default(),
+            PtiStepStats {
+                state_cleared: true,
+                reason: PtiReason::DegenerateStock,
+                stock_sha256,
+                previous_stock_sha256,
+                action_sha256: stock_sha256,
+                ..PtiStepStats::default()
+            },
+        );
+    }
+
+    if prior.previous_stock.is_empty() {
+        return (
+            stock,
+            PtiFragmentState {
+                previous_stock: current.to_vec(),
+                ..PtiFragmentState::default()
+            },
+            PtiStepStats {
+                reason: PtiReason::Warmup,
+                stock_sha256,
+                action_sha256: stock_sha256,
+                ..PtiStepStats::default()
+            },
+        );
+    }
+
+    let mut scores = prior.scores.clone();
+    let mut resolved_shadow_score = None;
+    if !prior.pending_candidate.is_empty() {
+        let Some(candidate_cosine) = pti_cosine(&prior.pending_candidate, current) else {
+            return (
+                stock,
+                PtiFragmentState::default(),
+                PtiStepStats {
+                    state_cleared: true,
+                    reason: PtiReason::InvalidShadowScore,
+                    stock_sha256,
+                    previous_stock_sha256,
+                    action_sha256: stock_sha256,
+                    ..PtiStepStats::default()
+                },
+            );
+        };
+        let Some(stock_cosine) = pti_cosine(&prior.previous_stock, current) else {
+            return (
+                stock,
+                PtiFragmentState::default(),
+                PtiStepStats {
+                    state_cleared: true,
+                    reason: PtiReason::InvalidShadowScore,
+                    stock_sha256,
+                    previous_stock_sha256,
+                    action_sha256: stock_sha256,
+                    ..PtiStepStats::default()
+                },
+            );
+        };
+        let score = candidate_cosine - stock_cosine;
+        if !score.is_finite() {
+            return (
+                stock,
+                PtiFragmentState::default(),
+                PtiStepStats {
+                    state_cleared: true,
+                    reason: PtiReason::InvalidShadowScore,
+                    stock_sha256,
+                    previous_stock_sha256,
+                    action_sha256: stock_sha256,
+                    ..PtiStepStats::default()
+                },
+            );
+        }
+        if scores.len() == PTI_INTERLOCK_LENGTH {
+            scores.remove(0);
+        }
+        scores.push(score);
+        resolved_shadow_score = Some(score as f64);
+    }
+
+    let Some(candidate) = pti_candidate(current, &prior.previous_stock) else {
+        return (
+            stock,
+            PtiFragmentState::default(),
+            PtiStepStats {
+                resolved_shadow_score,
+                interlock_score_count: scores.len() as u8,
+                state_cleared: true,
+                reason: PtiReason::DegenerateTransverse,
+                stock_sha256,
+                previous_stock_sha256,
+                action_sha256: stock_sha256,
+                ..PtiStepStats::default()
+            },
+        );
+    };
+    let candidate_sha256 = pti_sha256(&candidate);
+    let interlock_open =
+        scores.len() == PTI_INTERLOCK_LENGTH && scores.iter().all(|score| *score > 0.0);
+    let action = if interlock_open {
+        candidate.clone()
+    } else {
+        stock
+    };
+    let action_sha256 = if interlock_open {
+        candidate_sha256
+    } else {
+        stock_sha256
+    };
+    (
+        action,
+        PtiFragmentState {
+            previous_stock: current.to_vec(),
+            pending_candidate: candidate,
+            scores: scores.clone(),
+        },
+        PtiStepStats {
+            resolved_shadow_score,
+            interlock_score_count: scores.len() as u8,
+            interlock_open,
+            used_nonstock: interlock_open,
+            state_cleared: false,
+            reason: if interlock_open {
+                PtiReason::CandidateSelected
+            } else {
+                PtiReason::InterlockClosed
+            },
+            stock_sha256,
+            previous_stock_sha256,
+            candidate_sha256,
+            action_sha256,
+        },
+    )
+}
+
 fn mix_action_fingerprint(hash: &mut [u64; 2], word: u64) {
     hash[0] ^= word;
     hash[0] = hash[0].wrapping_mul(0x0000_0100_0000_01b3);
@@ -401,6 +691,22 @@ fn compute_action_fingerprint(preview: &ActionPreview) -> [u64; 2] {
     mix_optional_f64(&mut hash, preview.stats.outer.direction_delta_cosine);
     mix_optional_f64(&mut hash, preview.stats.outer.history_current_norm_ratio);
     mix_action_fingerprint(&mut hash, preview.stats.outer.restarted as u64);
+    mix_optional_f64(&mut hash, preview.stats.pti.resolved_shadow_score);
+    mix_action_fingerprint(&mut hash, preview.stats.pti.interlock_score_count as u64);
+    mix_action_fingerprint(&mut hash, preview.stats.pti.interlock_open as u64);
+    mix_action_fingerprint(&mut hash, preview.stats.pti.used_nonstock as u64);
+    mix_action_fingerprint(&mut hash, preview.stats.pti.state_cleared as u64);
+    mix_action_fingerprint(&mut hash, preview.stats.pti.reason as u64);
+    for digest in [
+        &preview.stats.pti.stock_sha256,
+        &preview.stats.pti.previous_stock_sha256,
+        &preview.stats.pti.candidate_sha256,
+        &preview.stats.pti.action_sha256,
+    ] {
+        for chunk in digest.chunks_exact(8) {
+            mix_action_fingerprint(&mut hash, u64::from_le_bytes(chunk.try_into().unwrap()));
+        }
+    }
     mix_action_fingerprint(&mut hash, preview.resulting_rho_ema.to_bits() as u64);
     mix_action_fingerprint(&mut hash, preview.resulting_capped_mu.to_bits() as u64);
     mix_action_fingerprint(&mut hash, preview.resulting_capped_gain.to_bits() as u64);
@@ -414,6 +720,9 @@ fn compute_action_fingerprint(preview: &ActionPreview) -> [u64; 2] {
         preview.resulting_optimizer_buffer.as_slice(),
         preview.resulting_curv_prev_delta.as_slice(),
         preview.resulting_curv_prev_dtheta.as_slice(),
+        preview.resulting_pti_state.previous_stock.as_slice(),
+        preview.resulting_pti_state.pending_candidate.as_slice(),
+        preview.resulting_pti_state.scores.as_slice(),
         preview.applied_step.as_slice(),
     ] {
         mix_action_fingerprint(&mut hash, values.len() as u64);
@@ -475,6 +784,9 @@ pub struct GlobalState {
     /// part of the checkpoint format: a restore re-initializes to 0, restarting
     /// the cycle from its smallest (safest) step.
     cheb_phase: Vec<f32>,
+    /// Frozen PTI current/previous-direction and causal shadow-score state,
+    /// isolated per fragment.  Only `pti-sgd` reads or writes it.
+    pti_state: Vec<PtiFragmentState>,
     pub initialized: Vec<bool>,
     /// Global step at which each fragment was last merged (its version).
     pub versions: Vec<u64>,
@@ -558,6 +870,7 @@ impl GlobalState {
         let curv_prev_delta = params.clone();
         let curv_prev_dtheta = params.clone();
         let cheb_phase = vec![0.0f32; layout.fragments.len()];
+        let pti_state = vec![PtiFragmentState::default(); layout.fragments.len()];
         let initialized = vec![false; layout.fragments.len()];
         let versions = vec![0; layout.fragments.len()];
         let state_epochs = vec![0; layout.fragments.len()];
@@ -576,6 +889,7 @@ impl GlobalState {
             curv_prev_delta,
             curv_prev_dtheta,
             cheb_phase,
+            pti_state,
             initialized,
             versions,
             global_step: 0,
@@ -796,6 +1110,14 @@ impl GlobalState {
             None
         };
         let delta: &[f32] = renormalized_delta.as_deref().unwrap_or(&aggregate.delta);
+        let (pti_action_delta, resulting_pti_state, pti_stats) =
+            if self.outer_optimizer == merge::OuterOptimizer::PtiSgd {
+                let (action, state, stats) = pti_select_direction(delta, &self.pti_state[fid]);
+                (Some(action), state, stats)
+            } else {
+                (None, self.pti_state[fid].clone(), PtiStepStats::default())
+            };
+        let selected_delta = pti_action_delta.as_deref().unwrap_or(delta);
         let mut resulting_params = self.params[fid].clone();
         let mut resulting_optimizer_buffer = self.momentum[fid].clone();
         let mut resulting_rho_ema = self.rho_ema[fid];
@@ -814,7 +1136,7 @@ impl GlobalState {
             self.outer_optimizer,
             &mut resulting_params,
             &mut resulting_optimizer_buffer,
-            delta,
+            selected_delta,
             outer_lr,
             self.outer_momentum,
             self.outer_restart_cos_threshold,
@@ -847,7 +1169,7 @@ impl GlobalState {
         let applied_step = merge::materialize_applied_step(
             self.outer_optimizer,
             &resulting_optimizer_buffer,
-            delta,
+            selected_delta,
             outer_lr,
             materialize_momentum,
             resulting_capped_gain,
@@ -899,10 +1221,12 @@ impl GlobalState {
             resulting_curv_prev_delta,
             resulting_curv_prev_dtheta,
             resulting_cheb_phase,
+            resulting_pti_state,
             applied_step,
             stats: MergeStats {
                 gnorm: aggregate.gnorm,
                 outer,
+                pti: pti_stats,
             },
             step_scale: 1.0,
             unscaled_applied_step_norm: materialized_step_norm,
@@ -1375,6 +1699,24 @@ impl GlobalState {
                 .resulting_curv_prev_dtheta
                 .iter()
                 .any(|value| !value.is_finite())
+            || !matches!(preview.resulting_pti_state.previous_stock.len(), 0)
+                && preview.resulting_pti_state.previous_stock.len() != numel
+            || !matches!(preview.resulting_pti_state.pending_candidate.len(), 0)
+                && preview.resulting_pti_state.pending_candidate.len() != numel
+            || preview.resulting_pti_state.scores.len() > PTI_INTERLOCK_LENGTH
+            || preview
+                .resulting_pti_state
+                .previous_stock
+                .iter()
+                .chain(&preview.resulting_pti_state.pending_candidate)
+                .chain(&preview.resulting_pti_state.scores)
+                .any(|value| !value.is_finite())
+            || preview.stats.pti.interlock_score_count as usize > PTI_INTERLOCK_LENGTH
+            || preview
+                .stats
+                .pti
+                .resolved_shadow_score
+                .is_some_and(|value| !value.is_finite())
             || !preview.stats.gnorm.is_finite()
             || preview.stats.gnorm < 0.0
             || !preview.stats.outer.applied_step_norm.is_finite()
@@ -1518,7 +1860,21 @@ impl GlobalState {
             merge::OuterOptimizer::CappedNesterovCurv => 9,
             merge::OuterOptimizer::CappedNesterovWsub => 10,
             merge::OuterOptimizer::ChebSgd => 11,
+            merge::OuterOptimizer::PtiSgd => 12,
         });
+        if self.outer_optimizer == merge::OuterOptimizer::PtiSgd {
+            let state = &self.pti_state[fid];
+            for values in [
+                state.previous_stock.as_slice(),
+                state.pending_candidate.as_slice(),
+                state.scores.as_slice(),
+            ] {
+                mix(values.len() as u64);
+                for value in values {
+                    mix(value.to_bits() as u64);
+                }
+            }
+        }
         match self.delta_correction {
             None => mix(0),
             Some(config) => {
@@ -1551,6 +1907,7 @@ impl GlobalState {
             resulting_curv_prev_delta,
             resulting_curv_prev_dtheta,
             resulting_cheb_phase,
+            resulting_pti_state,
             stats,
             ..
         } = preview;
@@ -1568,6 +1925,7 @@ impl GlobalState {
         self.curv_prev_delta[fid] = resulting_curv_prev_delta;
         self.curv_prev_dtheta[fid] = resulting_curv_prev_dtheta;
         self.cheb_phase[fid] = resulting_cheb_phase;
+        self.pti_state[fid] = resulting_pti_state;
         self.state_epochs[fid] = next_epoch;
         Ok(stats)
     }
@@ -1581,6 +1939,7 @@ impl GlobalState {
 }
 
 const CKPT_MAGIC: u32 = 0xD170_5A7E;
+const PTI_CKPT_EXTENSION_MAGIC: u32 = 0x3149_5450; // little-endian "PTI1"
 
 impl GlobalState {
     /// Persist a consistent snapshot. Called only at the quiescent cut
@@ -1616,6 +1975,26 @@ impl GlobalState {
                 let bytes = meta.as_bytes();
                 f.write_all(&(bytes.len() as u32).to_le_bytes())?;
                 f.write_all(bytes)?;
+            } else if self.outer_optimizer == merge::OuterOptimizer::PtiSgd {
+                // A zero-length metadata block disambiguates the optional PTI
+                // extension from legacy checkpoints that ended at the ledger.
+                f.write_all(&0u32.to_le_bytes())?;
+            }
+            if self.outer_optimizer == merge::OuterOptimizer::PtiSgd {
+                f.write_all(&PTI_CKPT_EXTENSION_MAGIC.to_le_bytes())?;
+                f.write_all(&(self.pti_state.len() as u32).to_le_bytes())?;
+                for state in &self.pti_state {
+                    for values in [&state.previous_stock, &state.pending_candidate] {
+                        f.write_all(&(values.len() as u64).to_le_bytes())?;
+                        for value in values {
+                            f.write_all(&value.to_le_bytes())?;
+                        }
+                    }
+                    f.write_all(&(state.scores.len() as u32).to_le_bytes())?;
+                    for score in &state.scores {
+                        f.write_all(&score.to_le_bytes())?;
+                    }
+                }
             }
             f.flush()?;
         }
@@ -1672,6 +2051,9 @@ impl GlobalState {
                     *v = 0.0;
                 }
             }
+            // Legacy checkpoints have no causal PTI history.  Resume safely
+            // from a stock warm-up boundary instead of inventing a shadow.
+            self.pti_state[p] = PtiFragmentState::default();
             self.initialized[p] = true;
             self.state_epochs[p] = next_epoch;
         }
@@ -1689,16 +2071,69 @@ impl GlobalState {
         if !r.0.is_empty() {
             let n = r.u32()? as usize;
             let bytes = r.take(n)?;
-            if !r.0.is_empty() {
-                bail!("checkpoint has trailing bytes after layout metadata");
-            }
-            let meta = String::from_utf8(bytes.to_vec())?;
-            if let Some(current) = &self.layout_meta {
-                if current != &meta {
-                    bail!("checkpoint layout metadata does not match HELLO metadata");
+            if n > 0 {
+                let meta = String::from_utf8(bytes.to_vec())?;
+                if let Some(current) = &self.layout_meta {
+                    if current != &meta {
+                        bail!("checkpoint layout metadata does not match HELLO metadata");
+                    }
                 }
+                self.layout_meta = Some(meta);
             }
-            self.layout_meta = Some(meta);
+        }
+        if !r.0.is_empty() {
+            if r.u32()? != PTI_CKPT_EXTENSION_MAGIC {
+                bail!("checkpoint has unknown trailing extension");
+            }
+            let state_count = r.u32()? as usize;
+            if state_count != self.pti_state.len() {
+                bail!(
+                    "PTI checkpoint has {state_count} fragments, layout has {}",
+                    self.pti_state.len()
+                );
+            }
+            for fid in 0..state_count {
+                let mut read_vector = |name: &str| -> Result<Vec<f32>> {
+                    let len = r.u64()? as usize;
+                    let expected = self.params[fid].len();
+                    if len != 0 && len != expected {
+                        bail!(
+                            "PTI checkpoint fragment {fid} {name} has {len} values, expected 0 or {expected}"
+                        );
+                    }
+                    let mut values = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        let value = f32::from_le_bytes(r.take(4)?.try_into()?);
+                        if !value.is_finite() {
+                            bail!("PTI checkpoint fragment {fid} {name} is non-finite");
+                        }
+                        values.push(value);
+                    }
+                    Ok(values)
+                };
+                let previous_stock = read_vector("previous stock")?;
+                let pending_candidate = read_vector("pending candidate")?;
+                let score_count = r.u32()? as usize;
+                if score_count > PTI_INTERLOCK_LENGTH {
+                    bail!("PTI checkpoint fragment {fid} has {score_count} scores");
+                }
+                let mut scores = Vec::with_capacity(score_count);
+                for _ in 0..score_count {
+                    let score = f32::from_le_bytes(r.take(4)?.try_into()?);
+                    if !score.is_finite() {
+                        bail!("PTI checkpoint fragment {fid} score is non-finite");
+                    }
+                    scores.push(score);
+                }
+                self.pti_state[fid] = PtiFragmentState {
+                    previous_stock,
+                    pending_candidate,
+                    scores,
+                };
+            }
+        }
+        if !r.0.is_empty() {
+            bail!("checkpoint has trailing bytes after PTI extension");
         }
         Ok(())
     }
@@ -2809,5 +3244,157 @@ mod tests {
         assert!(st.init_fragment(0, vec![1.0; 3]).is_err());
         let learner = vec![0.0f32; 3];
         assert!(st.merge_and_step(0, &[&learner], &[1.0]).is_err());
+    }
+
+    #[test]
+    fn pti_candidate_matches_frozen_python_f32_kernel_fixture() {
+        // Python reference: pti_candidate_f32le([0,1], [1,0], (2,)).
+        let candidate = pti_candidate(&[0.0, 1.0], &[1.0, 0.0]).unwrap();
+        assert_eq!(candidate[0].to_bits(), 0xbe78_5b43);
+        assert_eq!(candidate[1].to_bits(), 0x3f78_5b43);
+
+        let fixtures: &[(&[f32], &[f32], &[u32])] = &[
+            (
+                &[0.3, -1.2, 2.0],
+                &[1.5, 0.2, -0.7],
+                &[0xbe8a_915e, 0xbf92_5692, 0x4002_5f84],
+            ),
+            (
+                &[-2.25, 0.5, 1.25, 3.0],
+                &[0.125, -1.75, 2.5, 0.25],
+                &[0xc016_43ef, 0x3f8a_173d, 0x3ef2_4f27, 0x403f_ba62],
+            ),
+            (
+                &[1e-3, 2e-3, -4e-3],
+                &[3e-3, -2e-3, 1e-3],
+                &[0xb814_8e19, 0x3b1e_2ba5, 0xbb7f_4942],
+            ),
+        ];
+        for &(current, previous, expected) in fixtures {
+            let actual = pti_candidate(current, previous).unwrap();
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn pti_interlock_uses_only_three_already_resolved_scores() {
+        let mut state = PtiFragmentState::default();
+        // A steadily counter-clockwise direction stream makes the frozen
+        // negative transverse coefficient lead the current stock direction.
+        // The candidate sealed at each boundary is scored only by the next
+        // element; the action opens on the boundary resolving score three.
+        for (index, angle) in [0.0f32, 0.2, 0.4, 0.6, 0.8].into_iter().enumerate() {
+            let current = [angle.cos(), angle.sin()];
+            let (action, next, stats) = pti_select_direction(&current, &state);
+            if index < 4 {
+                assert!(
+                    !stats.used_nonstock,
+                    "opened before three scores at {index}"
+                );
+                assert_eq!(action, current);
+            } else {
+                assert_eq!(stats.interlock_score_count, 3);
+                assert!(stats.interlock_open);
+                assert!(stats.used_nonstock);
+                assert_ne!(action, current);
+            }
+            state = next;
+        }
+        assert_eq!(state.scores.len(), 3);
+        assert!(state.scores.iter().all(|score| *score > 0.0));
+    }
+
+    #[test]
+    fn pti_preview_is_pure_and_commit_advances_shadow_once() {
+        let layout = Layout {
+            fragments: vec![FragmentInfo {
+                merge_mode: MERGE_AVG,
+                tensor_numels: vec![2],
+                tensor_shapes: None,
+            }],
+        };
+        let mut st = GlobalState::new(layout, None, 0.28, 0.0, crate::protocol::DTYPE_F32);
+        st.outer_optimizer = merge::OuterOptimizer::PtiSgd;
+        st.init_fragment(0, vec![0.0, 0.0]).unwrap();
+        let learner = [-1.0f32, 0.0]; // stock delta [1, 0]
+        let candidates = [MergeCandidate::new(0, &learner, 1.0)];
+        let aggregate = st.build_full_aggregate(0, &candidates).unwrap();
+        let first = st.preview_aggregate(&aggregate, 1).unwrap();
+        let second = st.preview_aggregate(&aggregate, 1).unwrap();
+        assert_eq!(first, second);
+        assert!(st.pti_state[0].previous_stock.is_empty());
+        st.commit_preview(first).unwrap();
+        assert_eq!(st.pti_state[0].previous_stock, vec![1.0, 0.0]);
+        assert!(st.pti_state[0].pending_candidate.is_empty());
+    }
+
+    #[test]
+    fn pti_checkpoint_resume_is_bit_identical_to_uninterrupted_stream() {
+        fn pti_state() -> GlobalState {
+            let layout = Layout {
+                fragments: vec![FragmentInfo {
+                    merge_mode: MERGE_AVG,
+                    tensor_numels: vec![2],
+                    tensor_shapes: None,
+                }],
+            };
+            let mut state = GlobalState::new(layout, None, 0.28, 0.0, crate::protocol::DTYPE_F32);
+            state.outer_optimizer = merge::OuterOptimizer::PtiSgd;
+            state.init_fragment(0, vec![0.0, 0.0]).unwrap();
+            state
+        }
+        fn apply_direction(state: &mut GlobalState, angle: f32) -> MergeStats {
+            let delta = [angle.cos(), angle.sin()];
+            let endpoint: Vec<f32> = state.params[0]
+                .iter()
+                .zip(delta)
+                .map(|(parameter, value)| *parameter - value)
+                .collect();
+            let stats = state.merge_and_step(0, &[&endpoint], &[1.0]).unwrap();
+            state.versions[0] += 1;
+            state.global_step += 1;
+            stats
+        }
+
+        let prefix = [0.0f32, 0.2, 0.4, 0.6];
+        let suffix = [0.8f32, 1.0];
+        let mut uninterrupted = pti_state();
+        let mut checkpoint_source = pti_state();
+        for angle in prefix {
+            assert_eq!(
+                apply_direction(&mut uninterrupted, angle),
+                apply_direction(&mut checkpoint_source, angle)
+            );
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "yeto-pti-resume-{}-{}.ckpt",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        checkpoint_source.save_checkpoint(&path).unwrap();
+        let mut resumed = pti_state();
+        resumed.load_checkpoint(&path).unwrap();
+        assert_eq!(resumed.pti_state, checkpoint_source.pti_state);
+
+        for angle in suffix {
+            let expected_stats = apply_direction(&mut uninterrupted, angle);
+            let resumed_stats = apply_direction(&mut resumed, angle);
+            assert_eq!(resumed_stats, expected_stats);
+            assert_eq!(resumed.params, uninterrupted.params);
+            assert_eq!(resumed.momentum, uninterrupted.momentum);
+            assert_eq!(resumed.pti_state, uninterrupted.pti_state);
+        }
+        assert!(uninterrupted.pti_state[0]
+            .scores
+            .iter()
+            .all(|score| *score > 0.0));
+        std::fs::remove_file(path).ok();
     }
 }

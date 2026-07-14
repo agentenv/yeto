@@ -83,7 +83,8 @@ struct Args {
     #[arg(long, default_value_t = 0.9)]
     outer_momentum: f32,
     /// Outer optimizer: nesterov, normalized-ema, restarted-ema,
-    /// rho-adaptive, capped-nesterov[-gc|-r], block-rms, block-yogi, or cheb-sgd.
+    /// rho-adaptive, capped-nesterov[-gc|-r], block-rms, block-yogi,
+    /// cheb-sgd, or pti-sgd.
     /// block-rms/block-yogi are memoryless (beta1=0) per-tensor second-moment
     /// optimizers with a global norm-match back to the plain-SGD step. cheb-sgd
     /// is a memoryless cyclical Chebyshev learning-rate schedule (no buffer).
@@ -367,6 +368,11 @@ fn validate_outer_optimizer(
             "--outer-momentum is unused by {optimizer} but must still be finite, got {outer_momentum}"
         );
     }
+    if optimizer == merge::OuterOptimizer::PtiSgd && outer_momentum != 0.0 {
+        anyhow::bail!(
+            "--outer-optimizer pti-sgd requires --outer-momentum 0 so its selected direction feeds the frozen stock SGD kernel; got {outer_momentum}"
+        );
+    }
     Ok(())
 }
 
@@ -537,6 +543,7 @@ mod tests {
                 merge::OuterOptimizer::CappedNesterovWsub,
             ),
             ("cheb-sgd", merge::OuterOptimizer::ChebSgd),
+            ("pti-sgd", merge::OuterOptimizer::PtiSgd),
         ] {
             let args = Args::try_parse_from([
                 "yeto-syncer",
@@ -564,6 +571,8 @@ mod tests {
         );
         assert!(validate_outer_optimizer(merge::OuterOptimizer::ChebSgd, 0.9).is_ok());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::ChebSgd, f32::NAN).is_err());
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::PtiSgd, 0.0).is_ok());
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::PtiSgd, 0.9).is_err());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::CappedNesterovR, 0.9).is_ok());
         assert!(
             validate_outer_optimizer(merge::OuterOptimizer::CappedNesterovR, f32::NAN).is_err()

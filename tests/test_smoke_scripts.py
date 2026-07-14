@@ -65,7 +65,9 @@ def test_only_and_skip():
     import pytest
 
     with pytest.raises(SystemExit):
-        smoke.select_models(SimpleNamespace(only="not-a-model", skip=None, tier="small"))
+        smoke.select_models(
+            SimpleNamespace(only="not-a-model", skip=None, tier="small")
+        )
 
 
 def test_run_names_are_cluster_safe():
@@ -79,8 +81,12 @@ def test_run_names_are_cluster_safe():
 
 def test_launch_command_uses_auto_planner():
     args = SimpleNamespace(
-        data="org/ds", budget=15.0, total_steps=8, fragments=4,
-        seq_len=1024, max_rows=512,
+        data="org/ds",
+        budget=15.0,
+        total_steps=8,
+        fragments=4,
+        seq_len=1024,
+        max_rows=512,
     )
     cmd = smoke.launch_command("lfm25-230m", args)
     assert "--gpu" not in cmd, "auto smoke must let the shape planner pick the fleet"
@@ -100,14 +106,26 @@ def test_compare_presets_cover_core_axes():
 
 def test_scaffold_lite_preset_is_plain_sgd_version_matched_correctness_run():
     args = SimpleNamespace(
-        model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=512,
-        micro_batch_size=2, inner_lr=3e-4, device="cpu", shard="ddp",
-        learner_gpus=0, training_seed=123,
+        model="lfm25-230m",
+        lora_r=16,
+        lora_alpha=32,
+        seq_len=512,
+        micro_batch_size=2,
+        inner_lr=3e-4,
+        device="cpu",
+        shard="ddp",
+        learner_gpus=0,
+        training_seed=123,
     )
     arm = compare.PRESETS["scaffold_lite"]
     learner = compare.learner_command(
-        args, Path("/tmp/w/scaffold_lite"), learner_id=0, num_learners=4,
-        syncer="127.0.0.1:1", max_steps=128, arm=arm,
+        args,
+        Path("/tmp/w/scaffold_lite"),
+        learner_id=0,
+        num_learners=4,
+        syncer="127.0.0.1:1",
+        max_steps=128,
+        arm=arm,
     )
     syncer = compare.syncer_command(
         arm, 1234, Path("/tmp/w/scaffold_lite"), total_steps=8
@@ -128,14 +146,26 @@ def test_scaffold_lite_preset_is_plain_sgd_version_matched_correctness_run():
 
 def test_scaffold_full_and_shuffle_presets_thread_option_ii_flags():
     args = SimpleNamespace(
-        model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=512,
-        micro_batch_size=2, inner_lr=3e-4, device="cpu", shard="ddp",
-        learner_gpus=0, training_seed=123,
+        model="lfm25-230m",
+        lora_r=16,
+        lora_alpha=32,
+        seq_len=512,
+        micro_batch_size=2,
+        inner_lr=3e-4,
+        device="cpu",
+        shard="ddp",
+        learner_gpus=0,
+        training_seed=123,
     )
     full = compare.PRESETS["scaffold_full"]
     learner = compare.learner_command(
-        args, Path("/tmp/w/scaffold_full"), learner_id=0, num_learners=4,
-        syncer="127.0.0.1:1", max_steps=128, arm=full,
+        args,
+        Path("/tmp/w/scaffold_full"),
+        learner_id=0,
+        num_learners=4,
+        syncer="127.0.0.1:1",
+        max_steps=128,
+        arm=full,
     )
     syncer = compare.syncer_command(
         full, 1234, Path("/tmp/w/scaffold_full"), total_steps=8
@@ -148,8 +178,13 @@ def test_scaffold_full_and_shuffle_presets_thread_option_ii_flags():
 
     shuffled = compare.PRESETS["scaffold_full_shuffle"]
     shuffled_learner = compare.learner_command(
-        args, Path("/tmp/w/scaffold_full_shuffle"), learner_id=0,
-        num_learners=4, syncer="127.0.0.1:1", max_steps=128, arm=shuffled,
+        args,
+        Path("/tmp/w/scaffold_full_shuffle"),
+        learner_id=0,
+        num_learners=4,
+        syncer="127.0.0.1:1",
+        max_steps=128,
+        arm=shuffled,
     )
     shuffled_syncer = compare.syncer_command(
         shuffled, 1234, Path("/tmp/w/scaffold_full_shuffle"), total_steps=8
@@ -160,14 +195,26 @@ def test_scaffold_full_and_shuffle_presets_thread_option_ii_flags():
 
 def test_scaffold_sgd_control_keeps_the_same_plain_sgd_h16_regime():
     args = SimpleNamespace(
-        model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=512,
-        micro_batch_size=2, inner_lr=3e-4, device="cpu", shard="ddp",
-        learner_gpus=0, training_seed=123,
+        model="lfm25-230m",
+        lora_r=16,
+        lora_alpha=32,
+        seq_len=512,
+        micro_batch_size=2,
+        inner_lr=3e-4,
+        device="cpu",
+        shard="ddp",
+        learner_gpus=0,
+        training_seed=123,
     )
     arm = compare.PRESETS["scaffold_sgd"]
     learner = compare.learner_command(
-        args, Path("/tmp/w/scaffold_sgd"), learner_id=0, num_learners=4,
-        syncer="127.0.0.1:1", max_steps=128, arm=arm,
+        args,
+        Path("/tmp/w/scaffold_sgd"),
+        learner_id=0,
+        num_learners=4,
+        syncer="127.0.0.1:1",
+        max_steps=128,
+        arm=arm,
     )
     assert "--inner-control-variate" not in learner
     assert "--scaffold-correctness-mode" not in learner
@@ -178,19 +225,33 @@ def test_scaffold_sgd_control_keeps_the_same_plain_sgd_h16_regime():
 
 def test_default_arm_commands_do_not_gain_scaffold_flags():
     args = SimpleNamespace(
-        model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=512,
-        micro_batch_size=2, inner_lr=3e-4, device="cpu", shard="ddp",
-        learner_gpus=0, training_seed=123,
+        model="lfm25-230m",
+        lora_r=16,
+        lora_alpha=32,
+        seq_len=512,
+        micro_batch_size=2,
+        inner_lr=3e-4,
+        device="cpu",
+        shard="ddp",
+        learner_gpus=0,
+        training_seed=123,
     )
     arm = compare.PRESETS["m4"]
     learner = compare.learner_command(
-        args, Path("/tmp/w/m4"), learner_id=0, num_learners=4,
-        syncer="127.0.0.1:1", max_steps=10, arm=arm,
+        args,
+        Path("/tmp/w/m4"),
+        learner_id=0,
+        num_learners=4,
+        syncer="127.0.0.1:1",
+        max_steps=10,
+        arm=arm,
     )
     syncer = compare.syncer_command(arm, 1234, Path("/tmp/w/m4"), total_steps=8)
     for flag in (
-        "--inner-control-variate", "--scaffold-correctness-mode",
-        "--inner-optimizer", "--version-matched-anchor",
+        "--inner-control-variate",
+        "--scaffold-correctness-mode",
+        "--inner-optimizer",
+        "--version-matched-anchor",
     ):
         assert flag not in learner
         assert flag not in syncer
@@ -222,6 +283,70 @@ def test_compare_outer_optimizer_defaults_match_syncer_defaults():
     cmd = compare.syncer_command(arm, 1234, Path("/tmp/w/m4"), total_steps=40)
     assert cmd[cmd.index("--outer-optimizer") + 1] == "nesterov"
     assert cmd[cmd.index("--outer-restart-cos-threshold") + 1] == "0.0"
+
+
+def test_pti_online_pairs_differ_only_in_outer_direction_selector():
+    from dataclasses import asdict
+
+    for size in ("m1", "m4"):
+        stock = compare.PRESETS[f"pti_{size}_stock"]
+        candidate = compare.PRESETS[f"pti_{size}_candidate"]
+        stock_fields = asdict(stock)
+        candidate_fields = asdict(candidate)
+        assert stock_fields.pop("name") != candidate_fields.pop("name")
+        assert stock_fields.pop("outer_optimizer") == "nesterov"
+        assert candidate_fields.pop("outer_optimizer") == "pti-sgd"
+        assert stock_fields == candidate_fields
+        assert stock.outer_lr == candidate.outer_lr == 0.28
+        assert stock.outer_momentum == candidate.outer_momentum == 0.0
+        assert stock.strict_quorum and candidate.strict_quorum
+
+
+def test_pti_online_pair_commands_freeze_sgd028_and_fixed_h():
+    args = SimpleNamespace(
+        model="lfm25-230m",
+        lora_r=2,
+        lora_alpha=4,
+        seq_len=128,
+        micro_batch_size=1,
+        inner_lr=1e-3,
+        device="cpu",
+        shard="ddp",
+        learner_gpus=0,
+        training_seed=271271,
+        barrier_sync=True,
+    )
+    for name, expected_h in (
+        ("pti_m1_stock", "4"),
+        ("pti_m1_candidate", "4"),
+        ("pti_m4_stock", "16"),
+        ("pti_m4_candidate", "16"),
+    ):
+        arm = compare.PRESETS[name]
+        learner = compare.learner_command(
+            args,
+            Path(f"/tmp/w/{name}"),
+            learner_id=0,
+            num_learners=arm.m,
+            syncer="127.0.0.1:1",
+            max_steps=96,
+            arm=arm,
+        )
+        syncer = compare.syncer_command(
+            arm,
+            1234,
+            Path(f"/tmp/w/{name}"),
+            total_steps=32,
+            deterministic_commit_order=True,
+        )
+        assert learner[learner.index("--fixed-window-microsteps") + 1] == expected_h
+        assert "--barrier-sync" in learner
+        assert syncer[syncer.index("--outer-lr") + 1] == "0.28"
+        assert syncer[syncer.index("--outer-momentum") + 1] == "0.0"
+        expected_optimizer = "pti-sgd" if name.endswith("candidate") else "nesterov"
+        assert syncer[syncer.index("--outer-optimizer") + 1] == expected_optimizer
+        assert "--strict-quorum" in syncer
+        assert "--deterministic-commit-order" in syncer
 
 
 def test_compare_outer_optimizer_override_applies_to_every_selected_arm():
@@ -377,13 +502,24 @@ def test_fixed_window_outer_steps_equalizes_completed_commits():
 
 def test_multi_gpu_learner_uses_torchrun_and_gpu_blocks():
     args = SimpleNamespace(
-        model="gemma4", lora_r=16, lora_alpha=32, seq_len=512,
-        micro_batch_size=1, inner_lr=3e-4, device="cuda",
-        shard="fsdp", learner_gpus=2,
+        model="gemma4",
+        lora_r=16,
+        lora_alpha=32,
+        seq_len=512,
+        micro_batch_size=1,
+        inner_lr=3e-4,
+        device="cuda",
+        shard="fsdp",
+        learner_gpus=2,
     )
     cmd = compare.learner_command(
-        args, Path("/tmp/w/m2"), learner_id=1, num_learners=2,
-        syncer="127.0.0.1:1", max_steps=10, arm=compare.PRESETS["m2"],
+        args,
+        Path("/tmp/w/m2"),
+        learner_id=1,
+        num_learners=2,
+        syncer="127.0.0.1:1",
+        max_steps=10,
+        arm=compare.PRESETS["m2"],
     )
     assert "torch.distributed.run" in cmd and "--nproc_per_node=2" in cmd
     assert "--device" not in cmd  # torchrun ranks pick cuda from LOCAL_RANK
@@ -438,25 +574,45 @@ def test_compare_gpu_wait_filters_to_assigned_gpus(monkeypatch, capsys):
 
 def test_learner_command_arm_overrides():
     args = SimpleNamespace(
-        model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=512,
-        micro_batch_size=2, inner_lr=3e-4, device="cpu",
-        shard="ddp", learner_gpus=0, fixed_window_tokens=8192,
-        fixed_window_microsteps=64, pad_to_fixed_window_tokens=True,
-        freeze_delta_before_delay=True, learner_push_delay_ms="0,50",
-        learner_step_sleep_ms="0", learner_delay_jitter_ms=20.0,
+        model="lfm25-230m",
+        lora_r=16,
+        lora_alpha=32,
+        seq_len=512,
+        micro_batch_size=2,
+        inner_lr=3e-4,
+        device="cpu",
+        shard="ddp",
+        learner_gpus=0,
+        fixed_window_tokens=8192,
+        fixed_window_microsteps=64,
+        pad_to_fixed_window_tokens=True,
+        freeze_delta_before_delay=True,
+        learner_push_delay_ms="0,50",
+        learner_step_sleep_ms="0",
+        learner_delay_jitter_ms=20.0,
         training_seed=123,
     )
     arm = compare.PRESETS["q4"]
     cmd = compare.learner_command(
-        args, Path("/tmp/w/q4"), learner_id=1, num_learners=2,
-        syncer="127.0.0.1:1", max_steps=10, arm=arm,
+        args,
+        Path("/tmp/w/q4"),
+        learner_id=1,
+        num_learners=2,
+        syncer="127.0.0.1:1",
+        max_steps=10,
+        arm=arm,
     )
     assert cmd[cmd.index("--wire-dtype") + 1] == "q4"
     assert cmd[cmd.index("--seed") + 1] == "123"
     assert cmd[cmd.index("--data") + 1].endswith("train.jsonl")
     base = compare.learner_command(
-        args, Path("/tmp/w/baseline"), learner_id=0, num_learners=1,
-        syncer="none", max_steps=10, arm=None,
+        args,
+        Path("/tmp/w/baseline"),
+        learner_id=0,
+        num_learners=1,
+        syncer="none",
+        max_steps=10,
+        arm=None,
     )
     assert "--wire-dtype" not in base  # baseline never touches sync knobs
     assert "--fixed-window-tokens" in cmd
@@ -468,23 +624,40 @@ def test_learner_command_arm_overrides():
 
 def test_learner_command_forwards_fixed_window_schedule():
     args = SimpleNamespace(
-        model="lfm25-230m", lora_r=16, lora_alpha=32, seq_len=128,
-        micro_batch_size=1, inner_lr=3e-4, device="cpu",
-        shard="ddp", learner_gpus=0, tuning="lora",
+        model="lfm25-230m",
+        lora_r=16,
+        lora_alpha=32,
+        seq_len=128,
+        micro_batch_size=1,
+        inner_lr=3e-4,
+        device="cpu",
+        shard="ddp",
+        learner_gpus=0,
+        tuning="lora",
         fixed_window_schedule="0:16,160:256,170:16,330:256",
         training_seed=223223,
     )
     arm = compare.PRESETS["m4"]
     cmd = compare.learner_command(
-        args, Path("/tmp/w/m4"), learner_id=0, num_learners=4,
-        syncer="127.0.0.1:1", max_steps=10, arm=arm,
+        args,
+        Path("/tmp/w/m4"),
+        learner_id=0,
+        num_learners=4,
+        syncer="127.0.0.1:1",
+        max_steps=10,
+        arm=arm,
     )
     assert (
         cmd[cmd.index("--fixed-window-schedule") + 1] == "0:16,160:256,170:16,330:256"
     )
     base = compare.learner_command(
-        args, Path("/tmp/w/baseline"), learner_id=0, num_learners=1,
-        syncer="none", max_steps=10, arm=None,
+        args,
+        Path("/tmp/w/baseline"),
+        learner_id=0,
+        num_learners=1,
+        syncer="none",
+        max_steps=10,
+        arm=None,
     )
     assert "--fixed-window-schedule" not in base
 
@@ -498,7 +671,9 @@ def test_syncer_command_quorum_defaults_to_all_learners():
     # Experiment arms control sync frequency explicitly: the syncer's
     # adaptive H default is off for probe arms, on (24) only for m2h24.
     assert cmd[cmd.index("--sync-interval-steps") + 1] == "0.0"
-    h24 = compare.syncer_command(compare.PRESETS["m2h24"], 1, Path("/tmp/w/h"), total_steps=1)
+    h24 = compare.syncer_command(
+        compare.PRESETS["m2h24"], 1, Path("/tmp/w/h"), total_steps=1
+    )
     assert h24[h24.index("--sync-interval-steps") + 1] == "24.0"
 
 
@@ -867,7 +1042,9 @@ def test_group_local_tuner_excludes_oracle_actions():
             policy_groups.append(replay)
 
     rules = group_local.candidate_rules(feature_groups, ["probe_grad_dot"])
-    assert all("oracle" not in rule.name and "random" not in rule.name for rule in rules)
+    assert all(
+        "oracle" not in rule.name and "random" not in rule.name for rule in rules
+    )
     result = group_local.heldout_seed_replay(
         feature_groups,
         ["probe_grad_dot"],
@@ -935,9 +1112,13 @@ def test_exp27_feature_and_policy_grid_helpers_exclude_oracles():
     }
     # Fill deployable action aliases required by baseline grid evaluation.
     for action in policy_grid.DEPLOYABLE_ACTIONS:
-        feature_row["actions"].setdefault(action, feature_row["actions"]["token_weighted"])
+        feature_row["actions"].setdefault(
+            action, feature_row["actions"]["token_weighted"]
+        )
     rules = policy_grid.candidate_rules([feature_row], ["probe_grad_dot"])
-    assert all("oracle" not in rule.name and "random" not in rule.name for rule in rules)
+    assert all(
+        "oracle" not in rule.name and "random" not in rule.name for rule in rules
+    )
     drop = policy_grid.Rule(
         "drop",
         "drop25_if_spread",
@@ -991,7 +1172,9 @@ def test_action_probe_deployable_selection_excludes_oracles():
     assert action == "anchor_drop_bottom25"
     assert utility == 0.1
     assert margin == 0.1
-    assert all("oracle" not in action for action in action_probe.DEFAULT_DEPLOYABLE_ACTIONS)
+    assert all(
+        "oracle" not in action for action in action_probe.DEFAULT_DEPLOYABLE_ACTIONS
+    )
 
 
 def test_action_probe_manifest_overlap_is_rejected():
@@ -1149,7 +1332,12 @@ def test_buffered_nesterov_matches_syncer_equation():
 def test_buffered_transport_caps_history_without_dropping_candidates():
     import torch
 
-    updates = [torch.tensor([1.0]), torch.tensor([1.2]), torch.tensor([-4.0]), torch.tensor([-3.0])]
+    updates = [
+        torch.tensor([1.0]),
+        torch.tensor([1.2]),
+        torch.tensor([-4.0]),
+        torch.tensor([-3.0]),
+    ]
     merged, stats = buffered_nesterov._transport_slice(
         updates,
         [1.0, 1.0, 1.0, 1.0],
@@ -1169,7 +1357,9 @@ def test_coordinate_midpoint_median_is_sign_equivariant():
 
     values = [torch.tensor([float(value)]) for value in range(0, 16, 2)]
     median = buffered_nesterov._coordinate_midpoint_median(values)
-    negated = buffered_nesterov._coordinate_midpoint_median([-value for value in values])
+    negated = buffered_nesterov._coordinate_midpoint_median(
+        [-value for value in values]
+    )
     assert median.item() == 7.0
     assert torch.equal(negated, -median)
 
@@ -1274,12 +1464,17 @@ def test_consensus_rda_retains_disagreement_magnitude():
             align=0.0,
         )
 
-    candidates = [candidate(torch.tensor([1.0, 0.0])), candidate(torch.tensor([0.0, 1.0]))]
+    candidates = [
+        candidate(torch.tensor([1.0, 0.0])),
+        candidate(torch.tensor([0.0, 1.0])),
+    ]
     frag = SimpleNamespace(tensors=[("x", 2)], merge_mode=MERGE_RDA)
     linear, scale = buffered_nesterov._consensus_rda_update(
         candidates, torch.zeros(2), frag, "linear"
     )
-    baseline = buffered_nesterov._production_merge_update(candidates, torch.zeros(2), frag)
+    baseline = buffered_nesterov._production_merge_update(
+        candidates, torch.zeros(2), frag
+    )
     assert math.isclose(scale, math.sqrt(0.5), rel_tol=1e-6)
     assert linear.norm() < baseline.norm()
     assert torch.allclose(linear, torch.tensor([0.5, 0.5]), atol=1e-6)
@@ -1312,7 +1507,9 @@ def test_anchor_gradient_tensor_norm_matching_is_per_tensor():
     matched = anchor_gradient_syncer._tensor_normmatch(source, target, frag)
     assert torch.allclose(matched[:2].norm(), target[:2].norm())
     assert torch.allclose(matched[2:].norm(), target[2:].norm())
-    assert torch.allclose(matched[:2] / matched[:2].norm(), source[:2] / source[:2].norm())
+    assert torch.allclose(
+        matched[:2] / matched[:2].norm(), source[:2] / source[:2].norm()
+    )
 
 
 def test_anchor_gradient_pcgrad_removes_tensor_conflict():
@@ -1321,7 +1518,9 @@ def test_anchor_gradient_pcgrad_removes_tensor_conflict():
     frag = SimpleNamespace(tensors=[("only", 2)])
     baseline = torch.tensor([1.0, 0.0])
     anchor = torch.tensor([-1.0, 1.0])
-    corrected, conflict_fraction = anchor_gradient_syncer._pcgrad(baseline, anchor, frag)
+    corrected, conflict_fraction = anchor_gradient_syncer._pcgrad(
+        baseline, anchor, frag
+    )
     assert conflict_fraction == 1.0
     assert torch.dot(corrected, anchor).item() >= -1e-6
     assert torch.allclose(corrected.norm(), baseline.norm())
@@ -1375,7 +1574,9 @@ def test_anchor_gradient_aggregate_merges_policy_partitions(tmp_path):
     left = tmp_path / "left.jsonl"
     right = tmp_path / "right.jsonl"
     left.write_text(json.dumps({**shared, "anchor_blend05_utility": 0.2}) + "\n")
-    right.write_text(json.dumps({**shared, "anchor_pcgrad_normmatch_utility": 0.3}) + "\n")
+    right.write_text(
+        json.dumps({**shared, "anchor_pcgrad_normmatch_utility": 0.3}) + "\n"
+    )
     rows = anchor_gradient_agg.merge_records([left, right])
     assert rows == [
         {
