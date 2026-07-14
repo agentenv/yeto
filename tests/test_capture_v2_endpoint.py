@@ -8,8 +8,10 @@ import torch
 
 from yeto.capture_v2_endpoint import (
     FUTURE_GROUP_COUNT,
+    EndpointIdentity,
     EndpointManifestError,
     FutureGroupRefs,
+    InputProvenance,
     load_learner_endpoint,
     publish_learner_endpoint,
 )
@@ -62,6 +64,22 @@ def _endpoint_arguments(
         index: _object(store, f"future-group-{index}") for index in future_indices
     }
     return {
+        "identity": EndpointIdentity(
+            capture_session_uuid="12345678-1234-5678-9234-567812345678",
+            learner_id=4,
+            rank=0,
+            local_step=42,
+            active_fragment_id=0,
+            window_uuid="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        ),
+        "input_provenance": InputProvenance(
+            object=_object(store, "input-provenance"),
+            source_commit="a" * 40,
+            image_id="gcp:yeto-a100-v1",
+            model_sha256="b" * 64,
+            data_sha256="c" * 64,
+            config_sha256="d" * 64,
+        ),
         "fragment_packs": packs,
         "fragment_versions": [101 + index for index in range(fragment_count)],
         "mode": "train",
@@ -130,6 +148,8 @@ def test_complete_endpoint_is_canonical_deterministic_and_cross_verified(tmp_pat
     loaded = load_learner_endpoint(store, first)
     assert loaded.manifest_id == "endpoint-0042"
     assert loaded.manifest_sha256 == first.manifest.sha256
+    assert loaded.identity == arguments["identity"]
+    assert loaded.input_provenance == arguments["input_provenance"]
     assert loaded.mode == "train"
     assert loaded.fragment_versions == (101, 102, 103)
     assert list(loaded.fragments) == [0, 1, 2]
@@ -160,6 +180,7 @@ def test_complete_endpoint_is_canonical_deterministic_and_cross_verified(tmp_pat
         "fragments/1/tensor-pack-payload",
         "fragments/2/tensor-pack-payload",
         "model/buffers",
+        "provenance/input",
         "rng/python",
         "rng/numpy",
         "rng/torch-cpu",
@@ -262,6 +283,11 @@ def test_future_group_publication_count_and_state_rules_fail_closed(
         ("noncontiguous-fragments", "canonical and contiguous"),
         ("scheduler-array", "scheduler metadata must be an object"),
         ("scaler-array", "scaler metadata must be an object or null"),
+        ("identity-extra-field", "identity fields are malformed"),
+        ("invalid-window-uuid", "canonical UUID"),
+        ("active-fragment-outside", "must identify one endpoint fragment"),
+        ("invalid-source-commit", "lowercase 40-hex commit"),
+        ("provenance-object-mismatch", "cross-reference mismatch"),
         ("cuda-role-gap", "canonical and contiguous"),
         ("future-required-seven", "must require exactly 8"),
         ("future-complete-seven", "require exactly 8 refs"),
@@ -290,6 +316,16 @@ def test_resealed_endpoint_schema_mutations_fail_closed(tmp_path, case, message)
         metadata["scheduler"] = []
     elif case == "scaler-array":
         metadata["scaler"] = []
+    elif case == "identity-extra-field":
+        metadata["identity"]["unexpected"] = 1
+    elif case == "invalid-window-uuid":
+        metadata["identity"]["window_uuid"] = "not-a-uuid"
+    elif case == "active-fragment-outside":
+        metadata["identity"]["active_fragment_id"] = 2
+    elif case == "invalid-source-commit":
+        metadata["input_provenance"]["source_commit"] = "A" * 40
+    elif case == "provenance-object-mismatch":
+        metadata["input_provenance"]["sha256"] = "f" * 64
     elif case == "cuda-role-gap":
         metadata["rng"]["torch_cuda_roles"][1] = "rng/torch-cuda/3"
     elif case == "future-required-seven":
@@ -415,6 +451,32 @@ def test_invalid_endpoint_inputs_are_rejected_without_an_endpoint_manifest(tmp_p
         ({"fragment_versions": [True, 2]}, "non-negative integer"),
         ({"mode": "predict"}, "mode must be one of"),
         ({"scheduler": {"loss": float("nan")}}, "not canonical JSON data"),
+        (
+            {
+                "identity": EndpointIdentity(
+                    capture_session_uuid="12345678-1234-5678-9234-567812345678",
+                    learner_id=4,
+                    rank=0,
+                    local_step=42,
+                    active_fragment_id=0,
+                    window_uuid="AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE",
+                )
+            },
+            "canonical UUID",
+        ),
+        (
+            {
+                "input_provenance": InputProvenance(
+                    object=arguments["input_provenance"].object,
+                    source_commit="short",
+                    image_id="gcp:yeto-a100-v1",
+                    model_sha256="b" * 64,
+                    data_sha256="c" * 64,
+                    config_sha256="d" * 64,
+                )
+            },
+            "lowercase 40-hex commit",
+        ),
         (
             {
                 "fragment_packs": {

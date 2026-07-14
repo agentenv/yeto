@@ -9,6 +9,8 @@ safe to capture, mutate a model or optimizer, or claim any replay outcome.
 from __future__ import annotations
 
 import json
+import re
+import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -35,8 +37,12 @@ MODEL_BUFFERS_ROLE = "model/buffers"
 PYTHON_RNG_ROLE = "rng/python"
 NUMPY_RNG_ROLE = "rng/numpy"
 TORCH_CPU_RNG_ROLE = "rng/torch-cpu"
+INPUT_PROVENANCE_ROLE = "provenance/input"
 
 _MAX_COUNTER = 2**63 - 1
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_SOURCE_COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
+_IMAGE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,511}\Z")
 
 
 class EndpointManifestError(CaptureStoreError):
@@ -54,6 +60,30 @@ class FutureGroupRefs:
     state: str
     refs: Mapping[int, ObjectRef]
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class EndpointIdentity:
+    """Causal learner identity at the captured endpoint boundary."""
+
+    capture_session_uuid: str
+    learner_id: int
+    rank: int
+    local_step: int
+    active_fragment_id: int
+    window_uuid: str
+
+
+@dataclass(frozen=True)
+class InputProvenance:
+    """Exact provenance object plus explicit source/image/input identities."""
+
+    object: ObjectRef
+    source_commit: str
+    image_id: str
+    model_sha256: str
+    data_sha256: str
+    config_sha256: str
 
 
 @dataclass(frozen=True)
@@ -79,6 +109,8 @@ class LoadedLearnerEndpoint:
 
     manifest_id: str
     manifest_sha256: str
+    identity: EndpointIdentity
+    input_provenance: InputProvenance
     mode: str
     fragment_versions: tuple[int, ...]
     fragments: dict[int, DecodedTensorPack]
@@ -115,6 +147,80 @@ def _exact_ref(value: Any, context: str) -> ObjectRef:
     if not isinstance(value, ObjectRef):
         raise TypeError(f"{context} must be an ObjectRef")
     return value
+
+
+def _canonical_uuid(value: Any, context: str) -> str:
+    if not isinstance(value, str):
+        raise EndpointManifestError(f"{context} must be a canonical UUID string")
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError) as exc:
+        raise EndpointManifestError(
+            f"{context} must be a canonical UUID string"
+        ) from exc
+    if str(parsed) != value:
+        raise EndpointManifestError(f"{context} must be a canonical UUID string")
+    return value
+
+
+def _sha256(value: Any, context: str) -> str:
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise EndpointManifestError(f"{context} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _identity_value(identity: EndpointIdentity, fragment_count: int) -> dict[str, Any]:
+    if not isinstance(identity, EndpointIdentity):
+        raise TypeError("identity must be EndpointIdentity")
+    active_fragment_id = _exact_nonnegative_int(
+        identity.active_fragment_id, "active_fragment_id"
+    )
+    if active_fragment_id >= fragment_count:
+        raise EndpointManifestError(
+            "active_fragment_id must identify one of the endpoint fragment packs"
+        )
+    return {
+        "capture_session_uuid": _canonical_uuid(
+            identity.capture_session_uuid, "capture_session_uuid"
+        ),
+        "learner_id": _exact_nonnegative_int(identity.learner_id, "learner_id"),
+        "rank": _exact_nonnegative_int(identity.rank, "rank"),
+        "local_step": _exact_nonnegative_int(identity.local_step, "local_step"),
+        "active_fragment_id": active_fragment_id,
+        "window_uuid": _canonical_uuid(identity.window_uuid, "window_uuid"),
+    }
+
+
+def _provenance_value(provenance: InputProvenance) -> dict[str, Any]:
+    if not isinstance(provenance, InputProvenance):
+        raise TypeError("input_provenance must be InputProvenance")
+    object_ref = _exact_ref(provenance.object, "input provenance object")
+    if (
+        not isinstance(provenance.source_commit, str)
+        or _SOURCE_COMMIT_RE.fullmatch(provenance.source_commit) is None
+    ):
+        raise EndpointManifestError(
+            "input provenance source_commit must be a lowercase 40-hex commit"
+        )
+    if (
+        not isinstance(provenance.image_id, str)
+        or _IMAGE_ID_RE.fullmatch(provenance.image_id) is None
+    ):
+        raise EndpointManifestError("input provenance image_id is malformed")
+    return {
+        "role": INPUT_PROVENANCE_ROLE,
+        "sha256": object_ref.sha256,
+        "bytes": object_ref.bytes,
+        "source_commit": provenance.source_commit,
+        "image_id": provenance.image_id,
+        "model_sha256": _sha256(
+            provenance.model_sha256, "input provenance model_sha256"
+        ),
+        "data_sha256": _sha256(provenance.data_sha256, "input provenance data_sha256"),
+        "config_sha256": _sha256(
+            provenance.config_sha256, "input provenance config_sha256"
+        ),
+    }
 
 
 def _snapshot_json_object(
@@ -251,6 +357,8 @@ def publish_learner_endpoint(
     store: CaptureObjectStore,
     manifest_id: str,
     *,
+    identity: EndpointIdentity,
+    input_provenance: InputProvenance,
     fragment_packs: Mapping[int, TensorPackRef],
     fragment_versions: Sequence[int],
     mode: str,
@@ -268,6 +376,8 @@ def publish_learner_endpoint(
     if not isinstance(mode, str) or mode not in MODES:
         raise EndpointManifestError(f"mode must be one of {sorted(MODES)}")
     fragment_rows, fragment_payloads = _fragment_pack_rows(store, fragment_packs)
+    identity_data = _identity_value(identity, len(fragment_rows))
+    provenance_data = _provenance_value(input_provenance)
     if isinstance(fragment_versions, (str, bytes)) or not isinstance(
         fragment_versions, Sequence
     ):
@@ -305,6 +415,7 @@ def publish_learner_endpoint(
     entries.extend(
         [
             ManifestEntry(MODEL_BUFFERS_ROLE, model_buffers),
+            ManifestEntry(INPUT_PROVENANCE_ROLE, input_provenance.object),
             ManifestEntry(PYTHON_RNG_ROLE, python_rng),
             ManifestEntry(NUMPY_RNG_ROLE, numpy_rng),
             ManifestEntry(TORCH_CPU_RNG_ROLE, torch_cpu_rng),
@@ -321,6 +432,8 @@ def publish_learner_endpoint(
     metadata = {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
+        "identity": identity_data,
+        "input_provenance": provenance_data,
         "mode": mode,
         "fragment_versions": versions,
         "fragments": fragment_rows,
@@ -383,6 +496,78 @@ def _parse_fragment_rows(value: Any) -> list[dict[str, Any]]:
             ) from exc
         rows.append(row)
     return rows
+
+
+def _parse_identity(value: Any, fragment_count: int) -> EndpointIdentity:
+    expected_keys = {
+        "capture_session_uuid",
+        "learner_id",
+        "rank",
+        "local_step",
+        "active_fragment_id",
+        "window_uuid",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise EndpointManifestError("endpoint identity fields are malformed")
+    active_fragment_id = _exact_nonnegative_int(
+        value["active_fragment_id"], "endpoint active_fragment_id"
+    )
+    if active_fragment_id >= fragment_count:
+        raise EndpointManifestError(
+            "endpoint active_fragment_id must identify one endpoint fragment"
+        )
+    return EndpointIdentity(
+        capture_session_uuid=_canonical_uuid(
+            value["capture_session_uuid"], "endpoint capture_session_uuid"
+        ),
+        learner_id=_exact_nonnegative_int(value["learner_id"], "endpoint learner_id"),
+        rank=_exact_nonnegative_int(value["rank"], "endpoint rank"),
+        local_step=_exact_nonnegative_int(value["local_step"], "endpoint local_step"),
+        active_fragment_id=active_fragment_id,
+        window_uuid=_canonical_uuid(value["window_uuid"], "endpoint window_uuid"),
+    )
+
+
+def _parse_provenance(value: Any) -> InputProvenance:
+    expected_keys = {
+        "role",
+        "sha256",
+        "bytes",
+        "source_commit",
+        "image_id",
+        "model_sha256",
+        "data_sha256",
+        "config_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise EndpointManifestError("endpoint input-provenance fields are malformed")
+    if value["role"] != INPUT_PROVENANCE_ROLE:
+        raise EndpointManifestError("endpoint input-provenance role is noncanonical")
+    try:
+        object_ref = ObjectRef(value["sha256"], value["bytes"])
+    except CaptureStoreError as exc:
+        raise EndpointManifestError(
+            f"endpoint input-provenance object reference is malformed: {exc}"
+        ) from exc
+    source_commit = value["source_commit"]
+    if (
+        not isinstance(source_commit, str)
+        or _SOURCE_COMMIT_RE.fullmatch(source_commit) is None
+    ):
+        raise EndpointManifestError(
+            "endpoint source_commit must be a lowercase 40-hex commit"
+        )
+    image_id = value["image_id"]
+    if not isinstance(image_id, str) or _IMAGE_ID_RE.fullmatch(image_id) is None:
+        raise EndpointManifestError("endpoint image_id is malformed")
+    return InputProvenance(
+        object=object_ref,
+        source_commit=source_commit,
+        image_id=image_id,
+        model_sha256=_sha256(value["model_sha256"], "endpoint model_sha256"),
+        data_sha256=_sha256(value["data_sha256"], "endpoint data_sha256"),
+        config_sha256=_sha256(value["config_sha256"], "endpoint config_sha256"),
+    )
 
 
 def _parse_rng(value: Any) -> list[str]:
@@ -496,6 +681,8 @@ def load_learner_endpoint(
     expected_metadata_keys = {
         "schema",
         "schema_version",
+        "identity",
+        "input_provenance",
         "mode",
         "fragment_versions",
         "fragments",
@@ -525,6 +712,8 @@ def load_learner_endpoint(
         )
 
     fragment_rows = _parse_fragment_rows(metadata["fragments"])
+    identity = _parse_identity(metadata["identity"], len(fragment_rows))
+    input_provenance = _parse_provenance(metadata["input_provenance"])
     versions_value = metadata["fragment_versions"]
     if not isinstance(versions_value, list):
         raise EndpointManifestError("endpoint fragment_versions must be an array")
@@ -547,6 +736,7 @@ def load_learner_endpoint(
     expected_roles.extend(
         [
             MODEL_BUFFERS_ROLE,
+            INPUT_PROVENANCE_ROLE,
             PYTHON_RNG_ROLE,
             NUMPY_RNG_ROLE,
             TORCH_CPU_RNG_ROLE,
@@ -558,6 +748,10 @@ def load_learner_endpoint(
     if actual_roles != expected_roles:
         raise EndpointManifestError(
             "endpoint object roles differ from the canonical referenced role sequence"
+        )
+    if _object_ref_by_role(objects, INPUT_PROVENANCE_ROLE) != input_provenance.object:
+        raise EndpointManifestError(
+            "endpoint input-provenance metadata/object cross-reference mismatch"
         )
 
     decoded_fragments: dict[int, DecodedTensorPack] = {}
@@ -596,6 +790,8 @@ def load_learner_endpoint(
     return LoadedLearnerEndpoint(
         manifest_id=manifest["manifest_id"],
         manifest_sha256=manifest_sha256,
+        identity=identity,
+        input_provenance=input_provenance,
         mode=mode,
         fragment_versions=versions,
         fragments=decoded_fragments,
