@@ -2,16 +2,15 @@
 
 Last updated: 2026-07-14 (America/Los_Angeles)
 
-This is a working operator handoff, not yet a durable repository source of
-truth. The document, harness, analyzers, specs, tests, and new Lean sources are
-untracked, and supporting tracked files—including `scripts/compare_diloco.py`,
-the Lean root import/README, and `.gitignore`—also have uncommitted changes on
-`lean-anchor-drift@4a43c39b88f9ae174c3741d75586f3f8cbc3fbd8`. A clean checkout
-cannot reproduce the local harness/analyzer/Lean claims until the complete
-change set is reviewed, committed, and pushed. The BC-MP shadow code used by
-`exp2-53a` and `exp2-53a2` is independently pinned to pushed commit
+This is the durable operator handoff for the isolated pushed branch
+`experiment/optimizer-state-capture-round3`. Harness code, analyzers,
+experiment specifications, tests, and Lean sources are tracked on that branch;
+the gitignored `.optimizer-harness/` directory is deliberately local lifecycle
+state, must not be committed, and is not experiment evidence. Historical
+`exp2-53a` and `exp2-53a2` BC-MP execution remains pinned to pushed commit
 `9f9edadf3e8a39c91ce5d64d5ac0a93ca22424c4` on
-`origin/experiment/bcmp-shadow-round2`.
+`origin/experiment/bcmp-shadow-round2`; later documentation and harness work
+must not rewrite that provenance.
 
 The handoff records the completed SCAFFOLD de-confound, timestamped cloud
 state, ingress diagnosis, reusable GCP image work, optimizer proposals, local
@@ -222,8 +221,9 @@ The harness lives in:
   run and image recipe;
 - `tests/test_optimizer_harness.py`: focused safety and validation tests.
 
-Local state is written under `.optimizer-harness/state/` and ignored by Git.
-It contains no cloud or Hugging Face credential.
+Local state is written under the gitignored `.optimizer-harness/state/`. It is
+local lifecycle evidence, must not be committed, and contains no cloud or
+Hugging Face credential.
 
 ### CLI
 
@@ -357,18 +357,15 @@ bound with required post-empirical headroom; when present, the preflight uses
 the larger of the ideal-relative and empirical requirements. In the current
 post-run hardened EXP2-53 metadata, those bounds are `1360+128=1488` and
 `1471+129=1600`, so a 1,599-step cap fails validation and 1,600 passes. This is
-still a preflight
-sanity check, not a proof of liveness under arbitrary non-barrier asynchronous
-scheduling.
+still a preflight sanity check, not a proof of liveness under arbitrary
+non-barrier asynchronous scheduling.
 
-The current harness suite passes 52 focused tests. The BC-MP analyzer passes
-11 tests plus three subtests, the de-confound analyzer passes five tests, and
-the combined focused harness/analyzer suite passes 68 tests plus three
-subtests. Remaining desirable work is a fully staged runner in which
-each arm has an immutable completion manifest and can restart independently
-after Spot preemption. The current `compare_diloco.py` is still monolithic and
-deletes its work directory at startup, so the harness does not pretend it can
-resume a partially completed arm.
+The current optimizer-harness suite passes 67 focused tests. Remaining
+desirable work is a fully staged runner in which each arm has an immutable
+completion manifest and can restart independently after Spot preemption. The
+current `compare_diloco.py` is still monolithic and deletes its work directory
+at startup, so the harness does not pretend it can resume a partially
+completed arm.
 
 ## GCP image outcome
 
@@ -539,12 +536,15 @@ chosen instead.
 
 ### AWS
 
-AWS is not currently viable for this four-A100 job:
-
-- us-east-1 P-Spot quota is 128, with 96 consumed by the protected p4de node;
-- the increase request to 256 remains `CASE_OPENED` as of 2026-07-14;
-- other US p4d placement scores were poor;
-- eu-west-1 had capacity but zero P-Spot quota.
+AWS is not currently viable for this four-A100 job. The us-east-1 P-Spot
+request `06a577d8449947daa77c4d94f66eb413hv2KfCjg` did close successfully and
+the applied quota is now 256. That removes the earlier quota blocker even with
+the protected 96-vCPU p4de workload. A fresh read-only placement query on
+2026-07-14, however, returned score `1` for `p4d.24xlarge` in every returned
+us-east-1 availability-zone ID (`use1-az1`, `az2`, `az4`, and `az6`). AWS is
+therefore quota-ready but presently capacity-poor. Other US p4d scores were
+also poor in the prior survey, while eu-west-1 had capacity but zero P-Spot
+quota.
 
 No AWS resource was modified for exp2-52.
 
@@ -742,14 +742,13 @@ was written and hashed before seed 239 was opened.
 | IQM-Merge robust order statistic | Exact production 76/76. Held-worker gain replicated at `+0.016378` and `+0.016510` with 4/4 workers/fragments positive, but sealed next-same-fragment gain was `-0.025497` and `-0.025255`, with 0/4 positive fragments and about 47.3% median action. | Kill; same-round held-worker prediction is not a safe optimizer objective. |
 | CPER-SGD causal prequential router | Exact production 76/76 on both seeds. A ledger using only previously sealed next-fragment evidence routed baseline 76/76 times, with zero action and zero gain. The rejected barycenter and secant experts replicated strongly negative mean advantages: about `-0.0602` and `-0.0218`. | Kill; safe abstention proves the router rejected harmful temporal experts, but an optimizer that always returns SGD-0.28 has no effect to confirm. |
 
-Compact reports for these retained-tape screens are mirrored under
-`docs/optimizer-reports/`; the hashed preregistrations, decisions, summaries,
-and executables still live under `/tmp`. The full CPER-SGD artifact set is also
+The checked-in tree retains this summary table but not the complete
+preregistration/executable/output bundles for the earlier JK/HMC/NG-TR/CAMS/PC/
+IQM screens. Treat those rows as summarized historical evidence until their
+complete bundles are archived. The full CPER-SGD artifact set is durably
 archived at
 `gs://yeto-exp2-52-model-training-497007/optimizer-screens/cper-sgd-20260714`;
 the earlier screens do not yet have equivalent durable object prefixes.
-Neither working-tree location is committed. Preserve the complete evidence
-before treating this table as a reproducible repository result record.
 
 These results leave exact outer SGD-0.28 as the production optimizer. They also
 sharpen capture requirements: HMC needs bias-corrected `exp_avg_sq`, clocks, and
@@ -757,27 +756,20 @@ first post-broadcast gradients; NG-TR needs exact full-f32 H/2 and H endpoints
 with identity metadata. Neither quantity may be fabricated from endpoint norms
 or adjacent rounds.
 
-The corresponding local algebraic mechanisms are implemented in the untracked
-working-tree file `lean-mechanism/LeanMechanism/OptimizerRound2.lean`:
-Richardson cancels a
-quadratic-in-time scalar displacement term, harmonic scalar preconditioner
-consensus preserves the weighted immediate step under a common numerator and
-eliminates metric-only pairwise dispersion, and delete-one jackknife cancels
-the first-order `a/M` term in the standard bias expansion. Local `lake build`
-and direct checks pass without `sorry`; these artifacts are not durable until
-committed and pushed. The replay results, not these local identities, determine
-the optimizer decisions.
+Earlier source worktrees also contained proof prototypes for Richardson,
+harmonic scalar preconditioner consensus, and delete-one jackknife algebra.
+`OptimizerRound2.lean` is not in this release branch, so those prototypes are
+not durable evidence here and are deliberately not counted in the release
+build. The replay results, not local algebraic identities, determine the
+optimizer decisions.
 
 ## Formal results and limits
 
-Lean 4.31 with Mathlib was used for small mechanism results. In the current
-local working tree, `lake build` succeeds and no `sorry`, `admit`, or newly
-declared axiom was found. The new files `BCMPAdamW.lean`,
-`TransverseWin.lean`, and `OptimizerRound2.lean` and their imports are not yet
-committed or pushed; treat them as local audit artifacts, not checked-in
-proofs. Their `#print axioms` output has Mathlib's conventional `propext`,
-`Classical.choice`, and `Quot.sound` dependencies. None is a theorem about
-language-model loss.
+Lean 4.31 with Mathlib was used for small mechanism results. The release root
+imports the checked-in modules and `lake build` succeeds with no `sorry`,
+`admit`, or newly declared project axiom. Dedicated audit targets report only
+Mathlib's conventional `propext`, `Classical.choice`, and `Quot.sound`
+dependencies. None is a theorem about language-model loss.
 
 ### Transverse quadratic correction
 
@@ -838,6 +830,27 @@ An exact deterministic PyTorch counterexample uses `f(x)=x^2/2`, H16 split
 8+8, inner LR 0.001, AdamW betas `(0.9,0.999)`, epsilon `1e-8`, weight decay
 0.01, and outer eta 0.28. RS2's final quadratic loss is 13.95% worse than the
 ordinary trajectory. This kills an immediate Qwen run.
+
+### CRP residual accounting and non-identification
+
+`CRPAccounting.lean` follows the executable sign convention exactly:
+`r = Q - G` and a full residual is added to stock, so `G + r = Q`. It proves
+the generic subtractive squared-norm identity and the additive identity used
+by CRP,
+
+\[
+\lVert G + \lambda r\rVert^2 = \lVert G\rVert^2
+  + 2\lambda\langle G,r\rangle + \lambda^2\lVert r\rVert^2.
+\]
+
+The finite-coordinate theorem exposes the missing stock/proposal cross term.
+A one-dimensional constructive counterexample has equal stock and residual
+norms but opposite cross terms and corrected squared energies `0` and `4`.
+Therefore the retained BC-MP scalar norms do not identify a CRP correction.
+The direct proof/audit target and 1,905-job module build pass; the final
+aggregate job count is recorded with the release verification below. These
+are accounting and impossibility results, not convergence or superiority
+theorems.
 
 ## Statistical and provenance rules
 
@@ -1022,17 +1035,69 @@ restore manifests, transactionally quiesced endpoint snapshots, bounded
 asynchronous writers, CRN linkage, and cloud publication remain separate
 gates.
 
-Commit `af46f614c7cde0853d2ef99c6e6a042f8f4b86d9` adds a strict learner-endpoint
-manifest over the packs. It binds contiguous all-fragment pack identities and
-versions, mode, model buffers, scheduler/scaler metadata, Python/NumPy/Torch
-CPU and indexed CUDA RNG objects, and an explicit future-group union.
-`complete` requires exactly indices 0--7 and no reason; `incomplete` requires
-fewer than eight refs plus a bounded nonempty reason. Publication and loading
-verify every object and pack, canonical role order, and payload
-cross-references. The current layer is still schema-only: causal learner/window
-identity, source/image/model/data/config provenance, live hooks, opaque-state
-codecs, restore/apply, and syncer pre/post reconstruction remain open and are
-not inferred from the manifest.
+Commit `af46f614c7cde0853d2ef99c6e6a042f8f4b86d9` added the first strict
+learner-endpoint manifest over the packs. It binds contiguous all-fragment
+pack identities and versions, mode, model buffers, scheduler/scaler metadata,
+Python/NumPy/Torch CPU and indexed CUDA RNG objects, and an explicit
+future-group union. `complete` requires exactly indices 0--7 and no reason;
+`incomplete` requires fewer than eight refs plus a bounded nonempty reason.
+
+Commit `cd90d61e39936efe0ff305ef4799767e10c90647` closes the endpoint identity gap and adds the paired syncer
+boundary contract. Every endpoint now requires canonical capture-session and
+window UUIDs, learner ID/rank/local step/active fragment, and an exact
+provenance object bound to source commit, image ID, and model/data/config
+digests. A syncer manifest binds session/commit/fragment and pre/post versions,
+canonical merge and outer configurations, ordered endpoint responders and
+their exact f64 weight bits/payload hashes, plus fixed-role pre-fragment,
+post-fragment, outer-state, and broadcast CAS objects. Publication and load
+cross-check endpoint session, active fragment, pre-version, identity, and
+provenance. Reconstruction code receives verified endpoints, pre-fragment,
+outer state, and configurations, but not the expected outputs; it passes only
+if independently read captured post-fragment and broadcast bytes both match
+exactly.
+
+This remains a storage and reconstruction-verification layer. Opaque-state
+codecs, transactionally quiesced live learner/syncer hooks, restore/apply,
+policy actions, isolated CRN evaluation, and cloud publication are separate
+gates and are not inferred from a manifest.
+
+Commit `317464201d314491d0b79e9c22705a0801d780ee` adds the policy-agnostic action boundary. A frozen policy
+manifest binds its source/config objects and declares a subset of the closed
+capability vocabulary (`same_fragment_history`, `midpoint_adam`,
+`global_boundary_state`, `model_autograd`, `proposal_stream`,
+`worker_restore`, `crn_train_k8`). A sealed action binds one verified syncer
+boundary, exact stock and selected pseudo-gradient objects, outer-LR bits,
+resulting fragment, decision/config hashes, and its required capabilities.
+Stock fallback must select the exact stock object; a non-stock action must
+differ. No outcome fields are legal in an action. A separate immutable outcome
+manifest binds k0/k8/evaluation objects and finite losses after the action has
+already been sealed. Policy publication/load also decodes responder f64 bits
+and rejects NaN, infinity, negative values, `+0.0`, and `-0.0` without
+inventing a weight normalization rule.
+
+Subsequent policy hardening binds capability claims to the actual boundary
+evidence: global state must exist, worker restore requires all packs, buffers,
+scheduler/scaler and RNG objects, and `crn_train_k8` requires exact future
+groups 0--7. Boundary and action learning rates are finite positive f64 bits
+and must agree exactly. A stock result must be the captured post-fragment; a
+non-stock result remains formula-owned. The decision is an exact CAS object,
+not a caller-supplied digest. Finally, sealed actions no longer accept free-form
+reason prose. Their action/fallback fields use a closed code vocabulary with
+kind/code compatibility, preventing loss values or outcome claims from being
+smuggled through a reason string.
+
+Commit `ecda3ee` adds a pre-outcome CRN authority. A campaign index admits one
+exact plan per boundary. Each plan binds the boundary, stock/candidate actions,
+exact endpoint/responder payload, evaluation object, ordered future groups
+0--7, CUDA-stream count, horizons `[0,8]`, A/B then B/A schedule, evaluator
+source/image/config provenance, and reserved attestation/outcome identities.
+Production compatibility is exact SGD/Nesterov at f64 LR `0.28` with positive
+zero momentum. The evaluator reloads that authority before any callback, runs
+four fresh traces, retains restore/application/group/final state hashes and
+exact finite loss bits, and publishes one atomic paired outcome only when the
+two execution orders agree. Generic one-arm policy outcomes are explicitly
+non-admissible. This closes post-hoc plan and one-arm-outcome substitution; it
+does not supply the still-missing live capture-v2 producer/restore hooks.
 
 Seed 223 stays locked through this implementation. Acquiring more v1 envelopes
 now would expose development data without enabling the preregistered finite-loss
@@ -1042,8 +1107,9 @@ immutable.
 
 ### Qualifier and GCP sequence
 
-The first GPU spend is a behavior-preservation qualifier, not a candidate
-score. One command runs matched four-learner `capture_m4_off` and
+The first full four-responder capture-v2 GPU qualifier is planned as a
+behavior-preservation test, not a candidate score. One command runs matched
+four-learner `capture_m4_off` and
 `capture_m4_on` arms with strict quorum 4, four fragments, H=4, f32, no delta
 correction, `merge_alpha=0`, native AdamW, and outer SGD-0.28. The gate requires
 exact committed push/transcript joins, exact deterministic artifact parity
@@ -1089,9 +1155,9 @@ The repair constructs each complete inner runner/uploader program first and
 quotes it exactly once with `shlex.join`. An executable regression traverses
 the same outer-shell → `bash -c` boundary, forces the apostrophe-containing
 missing-manifest branch, and requires exit 14 plus an atomic `runner.exit`.
-All 59 harness tests and the complete 783-test repository `tests/` target
-pass, and an independent renderer audit verified the exact argv and exit-code
-protocol. The pushed fix commit is
+At that repair commit, all 59 then-present harness tests and the then-current
+783-test repository `tests/` target passed, and an independent renderer audit
+verified the exact argv and exit-code protocol. The pushed fix commit is
 `69cff38369041cef8d1bddc9c23a9ecb05843a90`.
 
 The fresh identity `exp2-54-smoke-r2` passed both input manifests and completed
@@ -1177,7 +1243,8 @@ throughput, queue high-water mark, RSS/pinned memory, physical unique bytes,
 and restore parity before the four-A100 qualifier. Seed 239 remains locked
 until one immutable winner, configuration, and analysis hash are selected.
 There is no honest winner ETA while full CRN state is absent. No EXP2-54 VM is
-currently running; GCP spend is deliberately paused at the failed parity gate.
+currently running; GCP spend is paused after r5h passed correctness parity but
+failed the frozen 2% capture-overhead gate at 7.964001%.
 Future qualifiers retain a one-hour VM safety envelope so checkout, validation,
 evaluation, upload, and teardown do not race provider auto-delete. Development
 and a separately authorized confirmation retain two-hour envelopes.
@@ -1200,9 +1267,11 @@ signed endpoint and then to `pd-standard` unpack/cache I/O, not a shortage of
 network bandwidth.
 
 The implementation is assembled in the isolated branch
-`experiment/optimizer-state-capture-round3`. The frozen release tree passed
-783 Python tests, 171 Rust tests, Ruff lint/format, the replay self-test, and all
-8,567 Lean build jobs. The audited capture implementation is commit
+`experiment/optimizer-state-capture-round3`. At the earlier r3 release
+milestone, the frozen tree passed 783 Python tests, 171 Rust tests, Ruff
+lint/format, the replay self-test, and all 8,567 then-present Lean build jobs.
+Those counts are historical; the final r5h branch verification is recorded
+below. The audited r3 capture implementation is commit
 `452ebdea30503f10c1eda68e9fdcff704be2a792`; the remote-runner quoting repair
 and its executable regression are commit
 `69cff38369041cef8d1bddc9c23a9ecb05843a90`; the child-import repair is
@@ -1210,9 +1279,10 @@ and its executable regression are commit
 launch audits found and closed the reconnect,
 cold-start timing, portable parity-input, image-input provenance, and too-short
 VM-envelope holes. The checked-in acquisition specs remain locked. The
-quota-aware doctor is green, but development and confirmation remain locked
-until normalized materialization, capture-v2, deterministic qualifier
-scheduling, and measured overhead gates pass.
+quota-aware doctor is green and r5h established deterministic one-A100
+correctness parity. Development and confirmation remain locked on the failed
+end-to-end overhead gate and the still-missing full live capture-v2
+producer/restore/evaluator path.
 
 ### EXP2-54 r3 parity failure: scheduling, not optimizer math
 
@@ -1242,12 +1312,12 @@ drops were the declared incomplete shutdown-tail states, so the observed r3
 failure is not evidence of a capacity drop.
 
 The next qualifier must enable the existing true `--barrier-sync` learner
-mode in both arms. The parity gate now has an opt-in
-`--require-barrier-schedule` contract that proves the producer trace consists
+mode in both arms. Any parity qualification now requires the
+`--require-barrier-schedule` contract, which proves the producer trace consists
 of complete fragment waves: responders agree on local step/H/tokens/base in
 each commit, every fragment in a wave is pushed at one local step, and
 successive waves advance by exactly H. This checks observed behavior rather
-than trusting an argv label. The capture validator also has an opt-in
+than trusting an argv label. Parity qualification also requires the
 `--strict-writer` contract. It rejects every non-terminal drop, including byte,
 event, window, and pending-memory limits; only the three explicitly declared
 incomplete-at-close tail reasons remain admissible. The compare driver exposes
@@ -1255,25 +1325,20 @@ these as `--optimizer-state-capture-parity-require-barrier` and
 `--optimizer-state-capture-strict-writer`, and refuses invalid flag
 combinations or nonpositive caps.
 
-This barrier should make capture latency affect wall time rather than the
-optimizer-step schedule. It does not make the synchronous writer cheap: with
-r3's measured cost, the 2% overhead gate will probably still fail. That would
-be a valid qualifier result and a reason to replace the writer implementation,
-not to relax parity. The strict writer contract remains deliberately separate
-from content-addressed storage or an asynchronous writer, so it does not
-duplicate the CAS workstream. No new GCP instance was launched for this
-diagnosis or plumbing change.
+This barrier makes capture latency affect wall time rather than the
+optimizer-step schedule. The strict writer contract remains separate from
+capture-v2 CAS semantics, so parity qualification does not silently substitute
+a new state schema.
 
-### Standalone bounded background writer groundwork
+### Bounded background capture publication
 
-The reusable `BoundedBackgroundWriter` is implemented and concurrency-tested
-as a standalone primitive, but is deliberately **not connected** to
-`OptimizerStateCapture` yet. It accepts only exact immutable `bytes` payloads
-with an explicit reservation equal to their length. One non-daemon worker
-executes a fixed sink in FIFO admission order. Both item and byte reservations
-remain charged while the item is queued and throughout the sink call, so a
-slow write or `fsync` cannot free apparent capacity while the worker still owns
-the payload. Producers block on full capacity; no capacity drop path exists.
+Commit `0335291` introduced the reusable `BoundedBackgroundWriter`. It accepts
+only exact immutable `bytes` payloads with an explicit reservation equal to
+their length. One non-daemon worker executes a fixed sink in FIFO admission
+order. Both item and byte reservations remain charged while the item is queued
+and throughout the sink call, so a slow write or `fsync` cannot free apparent
+capacity while the worker still owns the payload. Producers block on full
+capacity; no capacity drop path exists.
 
 Close changes admission atomically from open to closing, wakes blocked
 producers with a closed-admission error, drains every item accepted before the
@@ -1287,49 +1352,344 @@ busy/idle nanoseconds, close-wait time, terminal error identity, and worker
 liveness. Tests cover FIFO ordering, byte and item backpressure, injected
 write- and fsync-like errors, six concurrent producers, concurrent close and
 submission races, immutable/reservation rejection, idempotent close, and zero
-remaining worker threads. This primitive contains no path layout, serializer,
-atomic-file protocol, CAS, or object-store policy; those remain the live
-capture integration layer's responsibility.
+remaining worker threads.
+
+Commit `e625e0f` integrates that primitive behind the explicit
+`--optimizer-state-capture-background-writer` flag without changing the
+default synchronous path. The learner serializes an immutable artifact before
+admission; the worker owns atomic `.pt` publication, checksum sidecars, file
+and directory `fsync`, and first-error propagation. Queue caps block rather
+than drop. `close()` drains and joins before `closed=true`; the strict validator
+requires accepted/completed byte equality, no abandonment/reservation/queue or
+in-flight residue, a stopped worker, and exact artifact-index completeness.
+
+An audit then found that the first integration still hashed artifacts and
+published a fsynced manifest on the learner hot path. Commit
+`4cb2f18042eddeb7c297bc6f0555f66256a8c489` moves artifact SHA-256 and sidecar
+construction entirely to the worker. In background mode it publishes one
+initial manifest, keeps hot lifecycle/counter transitions in memory, and
+publishes the final manifest only after drain; failure still forces a
+diagnostic manifest. Instrumented tests prove that artifact hashes and all hot
+phase `fsync` calls run on the named worker thread and that successful manifest
+publication occurs exactly at construction and post-drain completion.
+
+The corrected path was then exercised through three uniquely named one-A100
+Spot attempts. The first two were execution-environment failures before
+training: r5 invoked absent bare `python`, and r5b used the exact venv Python
+but its detached non-login PATH omitted Cargo. Both failure records were synced
+and their exact instances/disks were deleted. r5c therefore froze an explicit
+PATH containing the venv, Cargo/Rust, `/snap/bin`, and system tools, listed the
+interpreter/Cargo/Rust executables as required image paths, and passed a
+detached `env -i` smoke covering Python imports, CUDA, Cargo, Rust, Git,
+GCloud, SHA-256, model, and data before the full provenance scan.
+
+The r5c runner completed both barrier arms and produced a scientifically valid
+engineering failure at
+`gs://yeto-exp2-52-model-training-497007/exp2-54-smoke-r5c-async-canary`.
+OFF and ON had identical eval loss/token `1.4166344593414884`; all 16 ordered
+commits, four fragment waves, syncer probe payloads, transcript joins, final
+syncer checkpoint, and strict no-drop capture validation passed. ON retained
+52 verified artifacts totaling `1,285,362,637` artifact bytes: 20 first
+gradients, 16 Richardson windows, and 16 push records. The background worker
+accepted and completed every byte with zero abandonment; it spent
+`6.876044215` seconds in its sink, while producer capacity blocking totaled
+only `0.625183101` seconds.
+
+The exact commit-1-to-commit-16 interval nevertheless rose from
+`18.482062741` to `26.342267777` seconds: **42.528830% overhead**, so the
+frozen 2% gate failed. This localizes most remaining cost to producer-side
+snapshot construction/serialization rather than queue backpressure or disk
+publication. Export comparison also reported `adapter_config.json`, but the
+only difference was permutation of PEFT's set-valued `target_modules` list;
+model loss, checkpoint, and binary payload evidence were identical. The
+failure was synced with abandonment record SHA-256
+`e00c63b8ad0817e288e7a75b35f64cc6655133a004c49842c1a9e11a1a909535`.
+Exact instance ID `3244200075441468763` and boot-disk ID
+`1152111786048877915` now return 404. The checked-in four-A100 r6 draft was not
+launched and is obsolete as an executable specification: it pins `e99179e`,
+retains the failed r5e gate, and predates deterministic commit ordering,
+endpoint reuse, and the SSH-safe harness. It must not be launched or edited in
+place.
+
+Commit `9c6ff53` closes both non-performance defects exposed around r5c. An
+audit of PEFT 0.19.1 confirmed that `LoraConfig.__post_init__` converts a
+list-valued `target_modules` to a set. Parity therefore sorts exactly the root
+`adapter_config.json` top-level `list[str]` at that field while preserving
+duplicate multiplicity. Membership changes, element/container-type changes,
+nested fields, other JSON files, other lists, unknown metadata, and binary
+payloads still compare exactly. The harness also accepts an optional closed
+list of absolute `required_executables`, each already present in
+`required_paths`, and exercises every one with `--version` under the exact
+detached spec environment before `nohup`. This makes the venv/Cargo/Rust PATH
+contract executable without weakening historical specs.
+
+Commit `2d4c9f6` then moves the measured producer bottleneck across the
+existing bounded-writer boundary. Background mode now transfers a one-shot,
+exclusive, structurally frozen CPU snapshot before building the artifact
+envelope. Exact-boundary tensor copies remain on the producer, because
+deferring those copies would race live parameters and Adam state; structural
+payload hashing, `torch.save`, artifact hashing, atomic publication, `fsync`,
+and sidecar construction run on the worker. Queue ownership is conservatively
+byte-reserved through sink completion, the worker verifies the exact serialized
+size against that reservation, and final artifact accounting remains exact.
+The synchronous default is unchanged. In a five-run 64 MiB isolated
+post-snapshot benchmark, the producer section fell from median `118.723 ms` to
+`0.0816 ms` while total drain remained `114.175 ms`: the work moved off the
+hot path rather than disappearing.
+
+Commit `5977360` adds the opt-in `crp_pti_directional` capture profile for the
+next engineering canary. It retains exact contiguous f32 fragment vectors at
+the anchor, accepted H/2 boundary, and accepted H boundary; exact tensor order;
+contiguous accepted-step chronology and LR masses; and the existing
+window-to-push-to-authoritative-commit join. It omits first post-broadcast
+gradients, Adam moments/raw optimizer state, scheduler/scaler snapshots, and
+accumulated decay vectors. On the observed r5c artifact mix this projects
+roughly `1,285.3 MB` down to `261.8 MB`, a `79.6%` reduction. Its manifest is
+explicitly scoped to `crp_pti_direction_evidence_only` and sets
+`capture_v2_restore_complete=false`. It is not stock-boundary authority,
+restore authority, a CRN-loss bundle, a policy action, or an optimizer result.
+Commit `3111f39` additionally requires the closed full payload/optimizer schema
+when validating legacy full captures, so deleting the directional markers
+cannot relabel a reduced bundle as full evidence.
+
+The uniquely named r5d one-A100 Spot canary then exercised that combined path.
+It retained 32 artifacts totaling `259,962,886` artifact-plus-sidecar bytes,
+versus r5c's 52 artifacts and `1,285,362,637` bytes. All 32 jobs completed with
+zero abandonment, and final checkpoint, export, and eval loss/token
+`1.4166344593414884` were exact across OFF/ON. The sealed parity gate still
+failed: OFF's second fixed-H wave committed fragment steps `[5,7,6,8]`, while
+ON committed `[5,6,7,8]`. At `(step=6, fragment=1, learner=0)`, the exact probe
+metadata consequently had `syncer_global_step=7` OFF and `5` ON. The gate
+correctly refused transcript/timing admission rather than canonicalizing that
+schedule difference. Diagnostic, non-admitted tape intervals were
+`17.708764577 s` OFF and `19.718775923 s` ON, or `11.350375896%` overhead.
+
+The writer evidence localized the leading cause: a four-item reservation high
+water and three-item queue high water saturated the configured item cap on
+each eight-job H-wave burst. The producer blocked 16 times for
+`1.334270645 s`, `66.38%` of the diagnostic interval delta, while structural
+freeze took only `0.016468009 s`. All 32 owned jobs together used
+`328,076,192` bytes, only `7.64%` of the unchanged 4 GiB byte cap. The failure
+tree is retained at
+`gs://yeto-exp2-52-model-training-497007/exp2-54-smoke-r5d-directional-canary`;
+abandonment record SHA-256 is
+`ae959086859a13343f55f0d6de523c73aec58f156bbd1ecf1a0f0a2ab58f5901`.
+Exact instance ID `2261800274408238443` and disk ID `8196336138399247723`
+now return 404.
+
+Commit `e99179e` hardens strict validation before the conditional r5e retry:
+reservation/queue item and byte high-water claims must not exceed their
+configured caps, and queue high-water must not exceed reservation high-water.
+r5e changes only the item cap from 4 to 32, enough to admit the complete
+observed 32-job run while the 4 GiB ownership cap, payload, barrier, exact
+parity, and 2% gate remain unchanged.
+
+r5e proved that queue tuning was exhausted. All 32 items again completed with
+zero abandonment, but producer capacity blocks fell from 16 to exactly zero;
+reservation high water was seven items/`78,649,925` bytes. OFF nevertheless
+committed wave 3 as `[9,11,10,12]`, while ON committed
+`[9,10,11,12]`, so exact probe parity failed at step 10. Diagnostic intervals
+were `18.255600152 s` OFF and `19.564660108 s` ON, or approximately `7.17%`
+overhead. Final checkpoint, export, and eval remained exact. The retained tree
+is
+`gs://yeto-exp2-52-model-training-497007/exp2-54-smoke-r5e-directional-burst-canary`;
+abandonment record SHA-256 is
+`7a683f248c8b6fc196957a7b6ac9473765016c80e3b31a169123d170c1a6a15d`.
+Exact instance ID `6150165584886360488` and disk ID `810480084346202536`
+now return 404.
+
+Two orthogonal repairs follow that result. Commit `0d8561b` preallocates the
+final contiguous CPU f32 fragment buffer and synchronously copies each live
+tensor directly into its final slice, removing per-parameter CPU intermediates
+and the second full-fragment `torch.cat` copy. The next manifest measures exact
+snapshot calls, bytes, source tensor count, CUDA calls, and total/max time.
+Synthetic 16 MiB CPU fragments improved about `1.7--2.0x` for 8--128 tensors;
+the A100 effect was measured in r5h below. Commit `2867ed0` adds the default-off
+`--deterministic-commit-order` qualifier mode. Four-stream ingress, pipeline
+launch, uploads, and quorum gathering remain concurrent, but the serialized
+state mutation waits for the minimum in-flight request step. This prevents
+ready later fragments from overtaking an older request without canonicalizing
+evidence after the fact. It is a declared qualifier schedule, not a claim
+about the production completion-order scheduler.
+
+Commit `02ce0b1` then closes a duplicate endpoint-read defect. For one CUDA
+fragment, capture now forms one f32 `torch.cat` in declared layout order and
+performs one blocking fragment-sized device-to-host transfer. At the accepted
+H boundary the original complete CPU endpoint is transferred exclusively to
+the artifact worker and one distinct CPU clone is transferred to the learner's
+fixed-window response. The learner therefore does not reread live CUDA
+parameters to answer the same boundary. The exact f32 wire SHA-256 is computed
+before worker handoff, and tests cover tensor-storage separation, two-way
+mutation isolation while the worker is blocked, retry identity, layout drift,
+noncontiguous source tensors, directional/full profiles, and synchronous versus
+background equality. The manifest separately accounts snapshot calls, source
+tensors, coalesced CUDA bytes, endpoint-identity hashing, and retained endpoint
+cloning.
+
+Two subsequent attempts produced no training evidence and are recorded only as
+preflight failures. r5f reached its exact image and checkout but gcloud SSH's
+extra shell parse consumed a nested quoting layer in the detached runner body.
+Its failure tree is
+`gs://yeto-exp2-52-model-training-497007/exp2-54-smoke-r5f-directional-endpoint-reuse-canary`;
+abandonment SHA-256 is
+`35d8ca7e9f40e9b55b9cbee480ac1ca10f12cce8dc3d7f431aae043d90489c6e`.
+Exact instance ID `7370808347110138535` and disk ID
+`5868512611846054567` return 404. Commit `e8c7d28` repairs the transport by
+base64-encoding each nested Bash body and decoding it only inside the remote
+`bash -c`; a real A100-host transport smoke passed with an apostrophe-bearing
+payload. r5g was then invoked incorrectly from the operator shell without
+binding `PYTHONPATH` to this worktree, so Python imported the original checkout
+harness and reproduced the old wrapper failure before training. This was an
+operator invocation error, not an image or experiment result. Its failure tree
+is
+`gs://yeto-exp2-52-model-training-497007/exp2-54-smoke-r5g-directional-ssh-safe-canary`;
+abandonment SHA-256 is
+`1dd34b46bc97b97e8304e97e920b1df68a15946615e050f76aa04be63f3c6f95`.
+Exact instance ID `2748115238036168881` and disk ID
+`107228130778538161` return 404.
+
+The worktree-bound r5h retry finally produced an admissible parity comparison
+and exact timing measurement at
+`gs://yeto-exp2-52-model-training-497007/exp2-54-smoke-r5h-directional-worktree-harness-canary`.
+It executed repo/harness pin
+`e8c7d28a228023a8bf8963aad1f53a80b07cc191`; the checked-in r5h spec is commit
+`34d27feadfbb2208b4c6d25f14e76b4eff09e064`.
+Both arms committed the exact canonical sequence 1--16 with fragment order
+`[0,1,2,3]` in each of four fixed-H waves. All 16 authoritative transcript
+joins, four joins per fragment, exact probe payloads, final syncer checkpoint,
+six-file adapter export, and eval loss/token `1.4166344593414884` passed. The
+ON learner retained 32 verified artifacts totaling `259,962,886` bytes. The
+bounded writer accepted and completed all 32 jobs/`328,076,192` reserved bytes,
+with zero block, abandonment, queued, reserved, or in-flight residue at close.
+
+The 2% performance gate nevertheless failed. The exact commit-1-to-commit-16
+interval was `18.421168652 s` OFF and `19.888230758 s` ON: **7.964001% capture
+overhead**. The A100 manifest measured 52/52 coalesced CUDA snapshots totaling
+`281,309,184` bytes and `0.157208758 s`; 16 endpoint-identity hashes over
+`86,556,672` bytes took `0.263190275 s`; retained endpoint clones took
+`0.009378067 s`; and structural freeze took `0.019477676 s`. Worker-side
+payload hashing, serialization, and publication consumed `0.852979217 s`,
+`0.183581429 s`, and `1.369562928 s`, respectively. Queue blocking and duplicate
+endpoint reads are no longer observed bottlenecks. The end-to-end capture path
+still exceeds the frozen budget; these component counters identify substantial
+remaining CPU, memory, and publication work but do not uniquely attribute the
+interval delta because the operations overlap. r5h is an engineering failure,
+not optimizer evidence.
+
+The harness abandonment record is retained with SHA-256
+`f284969aceb426b1143f34d3c17e4d81cd0e9bcd7b5d4fef7086ba0900535c0f`.
+Exact instance ID `1879903009492427199` and auto-delete disk ID
+`2154987517248266687` both return 404. The four-A100 r6 direction-only draft
+was not launched: scaling a failed cost path would still not create the full
+model/optimizer/RNG/data restore state required for a causal loss comparison.
+r5h evaluated no optimizer candidate and produced no optimizer-loss evidence.
+No candidate in the completed hunt has established superiority over SGD-0.28;
+PTI remains direction-only motivation for a future full capture-v2 CRN test.
+
+### Final branch verification
+
+After the r5h teardown and CGC kernel commit `f9f9a37`, the release checks are:
+
+- repository-wide Python: 1,186 passed, one skipped, six dependency
+  deprecation warnings; the skip is the CUDA-only coalesced-transfer unit test,
+  while r5h's A100 manifest independently records 52/52 coalesced CUDA calls;
+- Rust syncer: 173 passed, zero failed;
+- focused optimizer-harness suite: 67 passed;
+- direct CTTN golden-trace program: all cases passed;
+- targeted Ruff lint and format: all 11 selected changed/critical files passed;
+- Lean aggregate build: 8,569 jobs completed successfully, including CGC's
+  norm/cap/stationary theorems and reversal counterexample;
+- r5h spec validation: passed with exact repo/harness pin `e8c7d28`;
+- `git diff --check`: passed.
+
+Repository-wide Pytest had initially collected four numerical helper functions
+from the directly executable `scripts/test_cttn.py` as fixture-based tests.
+That script now declares itself non-collectable without changing direct
+execution; the full clean count above is the post-fix rerun, not a filtered
+failure count.
 
 ### PTI-SGD: next temporal candidate, not yet an empirical result
 
 A separate agent review proposed **Prequential Transverse Interlock SGD
 (PTI-SGD)** to address the most consistent prior failure: strong same-round
 held-worker directions becoming negative on the next same-fragment boundary.
-For unit current and previous production directions, it extracts only the
-previous direction's component orthogonal to the current direction and tests a
-fixed signed coefficient grid
-`{0, ±1/32, ±1/16, ±1/8, ±1/4}`. Every candidate is norm-grafted back to the
-exact SGD-0.28 pseudo-gradient norm, so its maximum possible rotation is
-`atan(1/4) ≈ 14.04°`.
+The retained-tape development screen extracted the previous production
+direction's component orthogonal to the current unit direction and evaluated
+the fixed signed coefficient grid `{0, ±1/32, ±1/16, ±1/8, ±1/4}`. Every
+candidate was norm-grafted back to the exact SGD-0.28 pseudo-gradient norm, so
+its maximum possible rotation was `atan(1/4) ≈ 14.04°`.
 
-Every signed coefficient is shadow-scored on every valid boundary whether or
-not it is selected. The router may use a nonzero coefficient only when that
-coefficient's three most recent valid **counterfactual shadow scores** all
-improved the sealed next same-fragment cosine. A nonpositive score disables
-application but does not stop later shadow scoring, so three new consecutive
-positive scores can restore eligibility. Missing continuity,
+Every signed coefficient was shadow-scored on every valid boundary whether or
+not it was eligible. The development router could use a nonzero coefficient
+only when that coefficient's three most recent valid **counterfactual shadow
+scores** all improved the sealed next same-fragment cosine. The subsequent
+Amendment 1 freeze selected the sole live coefficient `-1/4`; the current PTI
+state machine performs no coefficient search or tie-break. A nonpositive score
+disables application but does not stop later shadow scoring, so three new
+consecutive positive scores can restore eligibility. Missing continuity,
 degenerate transverse geometry, nonfinite state, or a hash mismatch returns
 bit-identical SGD. Unlike CPER-SGD, which compared two large fixed full-vector
-experts and abstained 76/76 times, PTI tests small signed transverse turns,
-uses a recent causal interlock rather than a lifetime cumulative winner, and
-is killed if it acts on fewer than 25% of all predefined valid post-warm-up
+experts and abstained 76/76 times, PTI uses a small signed transverse turn and
+a recent causal interlock rather than a lifetime cumulative winner. It is
+killed if it acts on fewer than 25% of all predefined valid post-warm-up
 boundaries; integrity exclusions and warm-up are fixed before outcomes, so the
 policy cannot shrink the denominator by declaring difficult cases ineligible.
 
 This is only a falsifiable proposal. Its shadow gate requires at least 32
 post-warm-up decisions, eight per fragment, mean sealed next-fragment cosine
 gain above 0.001 with a positive block-bootstrap lower bound, at least three
-positive fragments, and nontrivial action. A separate PTI preregistration may
-reuse the numerical fresh paired SGD-0.28 k0/k8 thresholds, but PTI is not a
-third EXP2-54 hypothesis and cannot inherit its two-candidate Holm/ranking rule.
-The Lean file
+positive fragments, and nontrivial action. The checked-in fresh PTI
+preregistration defines one mechanism/finite-loss gate and explicitly keeps
+PTI outside EXP2-54's two-candidate Holm family. The Lean file
 `PrequentialTransverseInterlock.lean` proves only the normalized alignment
 identity and its stationary-direction counterexample: every nonzero
 orthogonal turn is worse when the next direction is unchanged. It proves no
 training-loss or convergence superiority. The direct module check and complete
 Lean build pass with no `sorry`, `admit`, or project axiom; the audited theorem
 dependencies are only `propext`, `Classical.choice`, and `Quot.sound`.
+
+### CGC-SGD: bounded angular continuation kernel
+
+A later failure-synthesis agent proposed **Causal Geodesic-Continuation SGD
+(CGC-SGD)**. It preserves PTI's historically favored opposite-transverse sign
+but replaces PTI's fixed turn with a one-step angular-velocity estimate. For
+unit current direction `u`, previous direction `p`, acute cosine
+`rho=<u,p>`, and normalized backward tangent
+
+\[
+b = \frac{p-\rho u}{\sqrt{1-\rho^2}},
+\]
+
+the candidate uses
+
+\[
+\lambda=\min\!\left(\frac{\sqrt{1-\rho^2}}{\rho},\frac14\right),
+\qquad
+q=\frac{u-\lambda b}{\sqrt{1+\lambda^2}},
+\]
+
+then grafts `q` to the exact stock pseudo-gradient norm. Below the cap this is
+constant-angular-velocity continuation; at zero angular velocity it degenerates
+exactly to stock rather than applying PTI's fixed stationary-direction penalty.
+The cap keeps the turn at most `atan(1/4) ≈ 14.04°`.
+
+Commit `f9f9a37f7f5f3b2106ae30aa12825e91eaa88dae` implements only the bounded,
+state-free f32 kernel. It consumes exact little-endian current/previous bytes;
+malformed evidence is an error, while stationary, nonacute, degenerate,
+nonfinite, or f32-inert geometry returns the identical stock `bytes` object.
+It contains no causal interlock, live optimizer hook, loss-dependent router, or
+claim that the output should be applied. Focused CGC/PTI/adapter regression
+testing passed 46 tests.
+
+`CausalGeodesicContinuation.lean` proves norm preservation under orthonormal
+stock/tangent geometry, exact stock degeneracy at zero angular velocity, exact
+constant-angular continuation below the cap, the current-direction cosine,
+and the squared-cosine lower bound `16/17`. It also proves an explicit reversal
+counterexample in which continuation is strictly worse than stock. The formal
+result therefore rules out unconditional dominance; it does not establish
+that language-model pseudo-gradients have constant angular velocity or that
+CGC improves loss. CGC is a preregisterable shadow/CRN candidate only after the
+same full capture-v2 engineering gate required by PTI.
 
 ### CRP-SGD: causally resolved residual pulses
 
@@ -1473,11 +1833,67 @@ For `-1/4`, the fragment means were `0.01739135170016281` (fragment 3),
 `0.016985339645211022` (fragment 7), and `0.021872914611294623` (fragment
 11). This sign asymmetry is useful mechanism evidence, not evidence that PTI
 beats SGD-0.28. The directions become off-policy after the first hypothetical
-non-stock action; the source tapes contain no sealed k=0/k=8 loss bundle; and
-the checked-in PTI proposal does not freeze a tie-break when multiple
-coefficients satisfy their three-positive interlocks. The audit therefore
-reports per-coefficient eligibility and deliberately invents no composite PTI
-action. `MSTP` remains `UNIDENTIFIABLE`, never a zero-action result.
+non-stock action, and the source tapes contain no sealed k=0/k=8 loss bundle.
+At the time of this retained-tape audit the grid screen had no predeclared
+composite tie-break, so the audit reported each coefficient separately and did
+not retroactively apply the later frozen `-1/4` policy. `MSTP` remains
+`UNIDENTIFIABLE`, never a zero-action result.
+
+After this development-only screen, the fresh PTI protocol was frozen in
+`experiments/optimizer/pti-sgd-fresh-confirmation-prereg.md`. Its initial
+post-development SHA-256 was
+`9c7127d18c0657500debb3273ff8e550903966653947b7fbf3de3eb83346909c`.
+Before any fresh acquisition, adversarial implementation review found that the
+text had not fully specified per-operation f32 rounding and had asked an
+online policy to retroactively replace an already applied action when a stream
+later ended. Amendment 1 fixes those specification defects. Its current
+SHA-256 is
+`693f190c14ca0f31b6cbe65a4fa829ff15797b2f2a4f72e0dfa4aa531c43fe58`;
+the checked-in sidecar binds this current digest. The amendment defines
+left-to-right sequential f32 arithmetic and an explicit non-action tail-close
+record; it does not change the selected coefficient, empirical gates, or use
+any fresh outcome.
+It fixes the only non-stock coefficient at `-1/4`, so there is no live
+tie-break or coefficient search; the seed-53/67/79 tapes are permanently
+ineligible for confirmation. It requires the three-positive causal interlock,
+bit-identical stock fallback, complete capture-v2 capability checks, isolated
+A/B and B/A k0/k8 replay, one fresh mechanism/finite-loss gate, five fresh
+paired online seeds, and then H/model/inner-optimizer breadth before any
+generalization claim. This is a post-development freeze for new data, not a
+retroactive preregistration of the retained result.
+
+Commit `30620b7020b82801547baea612d59716e49a8c77` implements that fixed
+direction policy as a reusable causal state machine. It consumes hash-bound
+little-endian f32 stock bytes in a gap-free global event order; allows strictly
+increasing global fragment versions rather than incorrectly assuming `+1`;
+resolves only the previously sealed shadow; updates the last-three score
+interlock; and then seals the current action and next shadow. It always shadows
+the fixed candidate while valid, even when the interlock is closed. Gaps,
+equal/decreasing versions, corruption, shape changes, nonfinite data, and
+degenerate geometry clear the affected causal state and return the identical
+input stock bytes object. The deterministic action and ledger contain no loss
+or outcome field. This makes PTI executable for future exact replay, but does
+not upgrade the historical direction screen into a loss result.
+
+Commit `c2010ed` bridges that state machine to the stored capture-v2
+syncer-boundary and sealed-action schema. Syncer schema v2 owns the exact stock
+pseudo-gradient CAS object, canonical flat-f32 numel/layout identity, and equal
+pre/stock/post/broadcast byte lengths. It
+independently checks the memoryless f32 outer update. The adapter accepts no
+caller-supplied PTI event or relabel: sequence, fragment, version, shape, and
+stock bytes come only from the verified boundary. It requires production RDA,
+exact Nesterov LR `0.28`/positive-zero momentum, the declared policy
+capabilities, and causal session/sequence/version/layout continuity. It then
+publishes a CAS decision proof and a generic sealed action; unsupported or
+inconsistent evidence returns `UNIDENTIFIABLE` without advancing policy state.
+The stock path preserves exact stock and post-fragment object identities, and
+the non-stock path deterministically materializes the f32 result. Commit
+`4b145a9` maps the adapter into the closed action/fallback reason vocabulary
+while retaining the detailed, policy-generated PTI reason only inside the
+hash-bound decision proof. This is boundary/action authority only. It does not
+provide the live full-state producer, branch restore, future-group execution,
+or A/B then B/A evaluator required for a finite-loss outcome, and it is not a
+fresh empirical PTI result.
 
 The machine-readable report is
 `docs/optimizer-reports/crp-retained-evidence-report.json`. Its frozen-policy
@@ -1518,11 +1934,12 @@ empirical result or novelty claim. `CrossFittedLookahead.lean` proves the
 narrow scalar inequality underlying the proposed normalized-alignment argument
 and a separate quadratic counterexample where probe preference is opposite
 true-loss preference. The vector/orthonormal cosine interpretation remains an
-informal corollary, not an encoded theorem. The direct and 8,567-job aggregate builds pass
-without `sorry`, `admit`, or project axioms; these results do not prove finite
-loss, population transfer, convergence, or superiority over SGD.
+informal corollary, not an encoded theorem. The direct and current 8,569-job
+aggregate builds pass without `sorry`, `admit`, or project axioms; these
+results do not prove finite loss, population transfer, convergence, or
+superiority over SGD.
 
-## Current operator sequence
+## EXP2-52/53 operator history
 
 The exp2-52 run, analysis, matched control, image creation, canary, family
 promotion, and exact-ID teardown are complete. Full SCAFFOLD and identity
@@ -1584,6 +2001,14 @@ harness deleted exact VM ID `4065267032092554960`; its auto-delete boot disk ID
 both return 404. There is no active EXP2-53 GCP VM. The retained custom image
 remains the reusable launch artifact; future GPU experiments should use exact
 image ID `7290368630472593484` and `execution.source_mode=checkout`.
+
+The current EXP2-54 state is the r5h result above: deterministic one-A100
+correctness parity passed, the 2% overhead gate failed at 7.964001%, the exact
+VM and disk were deleted, and the obsolete r6 draft was not launched. There is
+no optimizer-harness GCP VM or disk. The only running project VM is the
+unrelated `instance-20260526-guiflow`, which remains out of scope. No optimizer
+loss experiment is authorized until full live capture-v2 restore/evaluation
+exists and its cost qualifier passes.
 
 ## Primary references used in the audit
 
