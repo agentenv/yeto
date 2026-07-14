@@ -2,7 +2,7 @@
   "schema_version": 1,
   "run_id": "exp2-54-smoke-r5e-directional-burst-canary",
   "repo_url": "https://github.com/agentenv/yeto.git",
-  "repo_commit": "3111f39f702960b24c30e05fe7d318766a4502f5",
+  "repo_commit": "e99179e020d3fe6468a220793c6f6bf8ab1aa74a",
   "cloud": {
     "provider": "gcp",
     "project": "model-training-497007",
