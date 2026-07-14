@@ -278,6 +278,66 @@ def test_crp_pti_directional_profile_rejects_hmc_and_unknown_profiles(tmp_path):
         _fixture(tmp_path / "unknown", capture_profile="restore-ish")
 
 
+def test_fragment_snapshot_flattens_directly_without_alias_or_deferred_reads(tmp_path):
+    base = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    params = OrderedDict(
+        [
+            # Exercise logical flattening of a non-contiguous live tensor.
+            ("a", torch.nn.Parameter(base.t())),
+            ("b", torch.nn.Parameter(torch.tensor([-3.0, 8.0]))),
+        ]
+    )
+    layout = FragmentLayout([Fragment(MERGE_RDA, [("a", 12), ("b", 2)])])
+    optimizer = torch.optim.AdamW(params.values(), lr=0.1)
+    capture = OptimizerStateCapture(
+        tmp_path,
+        params=params,
+        layout=layout,
+        optimizer=optimizer,
+        learner_id=0,
+        rank=0,
+        capture_profile=CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL,
+        max_hmc_events=0,
+    )
+
+    expected = torch.cat([params["a"].detach().reshape(-1), params["b"].detach()])
+    snapshot = capture._fragment_state(0)
+    assert snapshot.device.type == "cpu"
+    assert snapshot.dtype == torch.float32
+    assert snapshot.is_contiguous()
+    assert torch.equal(snapshot, expected)
+
+    # A snapshot is fully owned before return: later writes to either live
+    # source cannot change it, including a non-contiguous source view.
+    with torch.no_grad():
+        params["a"].fill_(99.0)
+        params["b"].fill_(-99.0)
+    assert torch.equal(snapshot, expected)
+
+    pipeline = capture._background_pipeline_stats
+    assert pipeline["producer_snapshot_calls"] == 1
+    assert pipeline["producer_snapshot_ns_total"] > 0
+    assert pipeline["producer_snapshot_ns_max"] > 0
+    assert pipeline["producer_snapshot_bytes_total"] == 14 * 4
+    assert pipeline["producer_snapshot_tensors_total"] == 2
+    assert pipeline["producer_snapshot_cuda_calls"] == 0
+    capture.close()
+
+
+def test_fragment_snapshot_rejects_layout_numel_drift(tmp_path):
+    params, layout, _optimizer, capture = _fixture(
+        tmp_path,
+        max_hmc=0,
+        capture_profile=CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL,
+    )
+    layout.fragments[0].tensors[0] = ("a", 1)
+    with pytest.raises(CaptureIntegrityError, match="layout declares 1"):
+        capture._fragment_state(0)
+    # Restore the fixture's layout so close can emit a valid terminal manifest.
+    layout.fragments[0].tensors[0] = ("a", 2)
+    capture.close()
+
+
 def test_exact_anchor_midpoint_endpoint_and_identity(tmp_path):
     params, _layout, _optimizer, capture = _fixture(tmp_path)
     capture.note_window_reset(

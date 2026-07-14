@@ -473,6 +473,12 @@ class OptimizerStateCapture:
         self._background_writer_stats: dict[str, Any] | None = None
         self._background_initial_manifest_written = False
         self._background_pipeline_stats = {
+            "producer_snapshot_calls": 0,
+            "producer_snapshot_ns_total": 0,
+            "producer_snapshot_ns_max": 0,
+            "producer_snapshot_bytes_total": 0,
+            "producer_snapshot_tensors_total": 0,
+            "producer_snapshot_cuda_calls": 0,
             "producer_handoffs": 0,
             "producer_freeze_ns_total": 0,
             "producer_freeze_ns_max": 0,
@@ -632,13 +638,52 @@ class OptimizerStateCapture:
         )
 
     def _fragment_state(self, fragment_id: int) -> torch.Tensor:
-        for name, _ in self.layout.fragments[fragment_id].tensors:
-            if self.params[name].dtype != torch.float32:
-                raise TypeError(f"capture parameter {name!r} changed away from fp32")
+        """Copy one exact-boundary fragment directly into its final CPU buffer.
+
+        The previous implementation cloned every parameter to an intermediate
+        CPU tensor and then ``torch.cat`` copied the whole fragment a second
+        time.  Preallocating the final flat tensor removes that complete CPU
+        copy and its per-parameter intermediate allocations.  Every live
+        tensor is still read synchronously on this caller thread before the
+        method returns, so background publication never observes deferred
+        parameter reads.
+        """
+
         fragment = self.layout.fragments[fragment_id]
-        return torch.cat(
-            [_cpu_f32(self.params[name]).reshape(-1) for name, _ in fragment.tensors]
+        started_ns = time.monotonic_ns()
+        flat = torch.empty(fragment.numel, device="cpu", dtype=torch.float32)
+        offset = 0
+        cuda_source = False
+        for name, expected_numel in fragment.tensors:
+            source = self.params[name].detach()
+            if source.dtype != torch.float32:
+                raise TypeError(f"capture parameter {name!r} changed away from fp32")
+            if source.numel() != expected_numel:
+                raise CaptureIntegrityError(
+                    f"capture parameter {name!r} has {source.numel()} values; "
+                    f"layout declares {expected_numel}"
+                )
+            # non_blocking=False is intentional. The returned CPU tensor is a
+            # complete factual boundary snapshot, never an in-flight view of
+            # live CUDA state handed to another thread.
+            flat.narrow(0, offset, expected_numel).copy_(
+                source.reshape(-1), non_blocking=False
+            )
+            offset += expected_numel
+            cuda_source = cuda_source or source.device.type == "cuda"
+        if offset != flat.numel():
+            raise AssertionError("fragment snapshot did not fill its CPU buffer")
+        elapsed_ns = time.monotonic_ns() - started_ns
+        stats = self._background_pipeline_stats
+        stats["producer_snapshot_calls"] += 1
+        stats["producer_snapshot_ns_total"] += elapsed_ns
+        stats["producer_snapshot_ns_max"] = max(
+            stats["producer_snapshot_ns_max"], elapsed_ns
         )
+        stats["producer_snapshot_bytes_total"] += flat.numel() * flat.element_size()
+        stats["producer_snapshot_tensors_total"] += len(fragment.tensors)
+        stats["producer_snapshot_cuda_calls"] += int(cuda_source)
+        return flat
 
     def _fragment_optimizer_state(self, fragment_id: int) -> dict[str, Any]:
         """Exact raw AdamW state plus explicit mathematical zero-state flags."""
