@@ -404,10 +404,25 @@ def _load_plan_inputs(
         if not _same_manifest(action.boundary_ref.manifest, boundary_ref.manifest):
             raise CRNAuthorityError(f"{context} is cross-wired to another boundary")
         _require_action_capabilities(action, context)
-    if stock.action_kind != "stock_fallback":
-        raise CRNAuthorityError("stock action must be an exact stock_fallback")
-    if candidate.action_kind != "nonstock":
-        raise CRNAuthorityError("candidate action must be nonstock")
+    if (
+        stock.action_kind != "stock_fallback"
+        or stock.action_reason != "stock_control"
+        or stock.fallback_reason != "intentional_stock_control"
+    ):
+        raise CRNAuthorityError("stock action must be an exact intentional control")
+    if _same_manifest(stock_ref.manifest, candidate_ref.manifest):
+        raise CRNAuthorityError(
+            "stock and candidate actions must be distinct manifests"
+        )
+    if candidate.action_kind not in {"nonstock", "stock_fallback"}:
+        raise CRNAuthorityError("candidate action kind is unsupported")
+    if candidate.action_kind == "stock_fallback" and (
+        candidate.action_reason != "stock_fallback"
+        or candidate.fallback_reason == "intentional_stock_control"
+    ):
+        raise CRNAuthorityError(
+            "candidate fallback must be a policy decision, not a stock control"
+        )
     if stock.stock_pseudo_gradient != candidate.stock_pseudo_gradient:
         raise CRNAuthorityError(
             "stock and candidate actions use different stock objects"
@@ -738,6 +753,45 @@ def load_crn_evaluation_plan(
     )
 
 
+def _validate_campaign_coherence(
+    plans: Sequence[LoadedCRNEvaluationPlan],
+) -> None:
+    """Keep one campaign on one frozen seed/input/evaluator/policy contract."""
+
+    baseline = plans[0]
+    baseline_session = baseline.boundary.identity.capture_session_uuid
+    baseline_provenance = baseline.responder.endpoint.input_provenance
+    previous_commit_seq = baseline.boundary.identity.commit_seq
+    for plan in plans[1:]:
+        if plan.boundary.identity.capture_session_uuid != baseline_session:
+            raise CRNAuthorityError("campaign plans span more than one capture session")
+        if plan.responder.endpoint.input_provenance != baseline_provenance:
+            raise CRNAuthorityError("campaign plans have different input provenance")
+        if plan.evaluation != baseline.evaluation:
+            raise CRNAuthorityError("campaign plans use different evaluation objects")
+        if plan.evaluator != baseline.evaluator:
+            raise CRNAuthorityError("campaign plans use different evaluator provenance")
+        if plan.expected_cuda_rng_streams != baseline.expected_cuda_rng_streams:
+            raise CRNAuthorityError(
+                "campaign plans use different CUDA RNG stream counts"
+            )
+        if not _same_manifest(
+            plan.stock.policy_ref.manifest, baseline.stock.policy_ref.manifest
+        ):
+            raise CRNAuthorityError("campaign stock controls use different policies")
+        if not _same_manifest(
+            plan.candidate.policy_ref.manifest,
+            baseline.candidate.policy_ref.manifest,
+        ):
+            raise CRNAuthorityError("campaign candidates use different policies")
+        commit_seq = plan.boundary.identity.commit_seq
+        if commit_seq <= previous_commit_seq:
+            raise CRNAuthorityError(
+                "campaign plans are not in strict chronological commit order"
+            )
+        previous_commit_seq = commit_seq
+
+
 def publish_crn_campaign_index(
     store: CaptureObjectStore,
     manifest_id: str,
@@ -767,6 +821,7 @@ def publish_crn_campaign_index(
         )
     if len(set(outcomes)) != len(outcomes):
         raise CRNAuthorityError("campaign index repeats a reserved paired outcome ID")
+    _validate_campaign_coherence([item for _, item in loaded])
     metadata = {
         "schema": CAMPAIGN_INDEX_SCHEMA,
         "schema_version": SCHEMA_VERSION,
@@ -815,6 +870,7 @@ def load_crn_campaign_index(
     if not isinstance(rows, list) or not rows:
         raise CRNAuthorityError("campaign index plans must be a non-empty array")
     plans: list[CRNEvaluationPlanRef] = []
+    loaded_plans: list[LoadedCRNEvaluationPlan] = []
     boundaries: set[str] = set()
     outcomes: set[str] = set()
     for index, row in enumerate(rows):
@@ -831,6 +887,7 @@ def load_crn_campaign_index(
             _parse_manifest_descriptor(row["plan"], f"campaign plan {index}")
         )
         plan = load_crn_evaluation_plan(store, plan_ref)
+        loaded_plans.append(plan)
         if row["boundary_sha256"] != plan.boundary_ref.manifest.sha256:
             raise CRNAuthorityError("campaign plan boundary summary mismatch")
         if row["paired_outcome_manifest_id"] != plan.paired_outcome_manifest_id:
@@ -842,6 +899,7 @@ def load_crn_campaign_index(
         boundaries.add(plan.boundary_ref.manifest.sha256)
         outcomes.add(plan.paired_outcome_manifest_id)
         plans.append(plan_ref)
+    _validate_campaign_coherence(loaded_plans)
     manifest_sha = (
         ref.manifest.sha256
         if isinstance(ref, CRNCampaignIndexRef)
@@ -935,6 +993,29 @@ def _normalized_trace(evidence: CRNArmEvidence) -> tuple[Any, ...]:
     )
 
 
+def _normalized_fallback_trace(evidence: CRNArmEvidence) -> tuple[Any, ...]:
+    """Ignore only arm/action labels and arm-specific evaluation artifact wrappers."""
+
+    return (
+        evidence.restore_state_sha256,
+        evidence.applied_state_sha256,
+        (
+            evidence.k0.step,
+            evidence.k0.evaluation,
+            evidence.k0.state_sha256,
+            evidence.k0.loss_f64_bits,
+        ),
+        evidence.groups,
+        (
+            evidence.k8.step,
+            evidence.k8.evaluation,
+            evidence.k8.state_sha256,
+            evidence.k8.loss_f64_bits,
+        ),
+        evidence.final_state_sha256,
+    )
+
+
 def _validate_traces(
     store: CaptureObjectStore,
     plan: LoadedCRNEvaluationPlan,
@@ -1012,6 +1093,24 @@ def _validate_traces(
         candidate[1]
     ):
         raise CRNAuthorityError("candidate trace differs across A/B and B/A order")
+    stock_batches = tuple(
+        (group.group_index, group.future_group, group.batch_sha256)
+        for group in stock[0].groups
+    )
+    candidate_batches = tuple(
+        (group.group_index, group.future_group, group.batch_sha256)
+        for group in candidate[0].groups
+    )
+    if stock_batches != candidate_batches:
+        raise CRNAuthorityError(
+            "stock and candidate traces lack byte-identical future groups"
+        )
+    if plan.candidate.action_kind == "stock_fallback" and (
+        _normalized_fallback_trace(stock[0]) != _normalized_fallback_trace(candidate[0])
+    ):
+        raise CRNAuthorityError(
+            "candidate stock fallback differs from the exact stock control"
+        )
     return values
 
 

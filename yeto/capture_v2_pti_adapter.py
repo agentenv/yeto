@@ -45,6 +45,11 @@ PRODUCTION_MERGE_CONFIG = BoundaryConfig("rda", {"weighted": True})
 PRODUCTION_OUTER_LR_F64_BITS = struct.pack(">d", 0.28).hex()
 PRODUCTION_OUTER_MOMENTUM_F64_BITS = "0000000000000000"
 REQUIRED_POLICY_CAPABILITIES = ("same_fragment_history", "global_boundary_state")
+CRN_ACTION_CAPABILITIES = (
+    "global_boundary_state",
+    "worker_restore",
+    "crn_train_k8",
+)
 
 _AMENDMENT_1_DESCRIPTOR = {
     "algorithm": "pti-sgd",
@@ -201,7 +206,10 @@ def _continuity_reason(
     if expected_layout is not None and observed_layout != expected_layout:
         return "fragment_layout_discontinuity"
     previous_version = state._fragment_versions.get(identity.fragment_id)
-    if previous_version is not None and identity.pre_fragment_version != previous_version:
+    if (
+        previous_version is not None
+        and identity.pre_fragment_version != previous_version
+    ):
         return "fragment_version_discontinuity"
     return None
 
@@ -233,13 +241,41 @@ def _object_value(role: str, ref: ObjectRef) -> dict[str, Any]:
     return {"role": role, "sha256": ref.sha256, "bytes": ref.bytes}
 
 
-def process_authoritative_boundary(
+def _crn_capture_reason(boundary: LoadedSyncerBoundary) -> str | None:
+    """Match the generic action contract before creating any PTI CAS objects."""
+
+    expected_groups = list(range(8))
+    for responder in boundary.responders:
+        endpoint = responder.endpoint
+        fragment_count = len(endpoint.fragment_versions)
+        if (
+            fragment_count == 0
+            or list(endpoint.fragments) != list(range(fragment_count))
+            or not isinstance(endpoint.model_buffers, ObjectRef)
+            or not isinstance(endpoint.scheduler, dict)
+            or not isinstance(endpoint.rng.python, ObjectRef)
+            or not isinstance(endpoint.rng.numpy, ObjectRef)
+            or not isinstance(endpoint.rng.torch_cpu, ObjectRef)
+            or not endpoint.rng.torch_cuda
+            or any(not isinstance(ref, ObjectRef) for ref in endpoint.rng.torch_cuda)
+        ):
+            return "incomplete_worker_restore_evidence"
+        if (
+            endpoint.future_groups.state != "complete"
+            or list(endpoint.future_groups.refs) != expected_groups
+        ):
+            return "incomplete_future_groups_0_through_7"
+    return None
+
+
+def _process_authoritative_boundary(
     store: CaptureObjectStore,
     *,
     state: CaptureV2PTIPolicyState,
     policy: PolicyDefinitionRef,
     boundary: SyncerBoundaryRef,
     action_manifest_id: str,
+    action_capabilities: tuple[str, ...],
 ) -> PTIAdapterResult:
     """Derive, process, prove, and seal one action from boundary authority only."""
 
@@ -259,11 +295,16 @@ def process_authoritative_boundary(
     config_reason = _production_config_reason(loaded_boundary)
     if config_reason is not None:
         return _unidentifiable(config_reason)
-    missing = sorted(
-        set(REQUIRED_POLICY_CAPABILITIES) - set(loaded_policy.capabilities)
+    required_policy_capabilities = set(REQUIRED_POLICY_CAPABILITIES) | set(
+        action_capabilities
     )
+    missing = sorted(required_policy_capabilities - set(loaded_policy.capabilities))
     if missing:
         return _unidentifiable(f"missing_policy_capabilities:{','.join(missing)}")
+    if "worker_restore" in action_capabilities or "crn_train_k8" in action_capabilities:
+        crn_reason = _crn_capture_reason(loaded_boundary)
+        if crn_reason is not None:
+            return _unidentifiable(crn_reason)
     continuity_reason = _continuity_reason(state, loaded_boundary)
     if continuity_reason is not None:
         return _unidentifiable(continuity_reason)
@@ -298,7 +339,9 @@ def process_authoritative_boundary(
         if selected != loaded_boundary.stock_pseudo_gradient:
             raise PTIAdapterError("PTI stock fallback lost exact stock object identity")
         if resulting != loaded_boundary.post_fragment:
-            raise PTIAdapterError("PTI stock fallback lost exact post-fragment identity")
+            raise PTIAdapterError(
+                "PTI stock fallback lost exact post-fragment identity"
+            )
 
     proof = {
         "schema": SCHEMA,
@@ -374,7 +417,7 @@ def process_authoritative_boundary(
         policy=policy,
         boundary=boundary,
         fragment_id=identity.fragment_id,
-        required_capabilities=("global_boundary_state",),
+        required_capabilities=action_capabilities,
         stock_pseudo_gradient=loaded_boundary.stock_pseudo_gradient,
         selected_pseudo_gradient=selected,
         outer_lr_f64_bits=PRODUCTION_OUTER_LR_F64_BITS,
@@ -403,6 +446,50 @@ def process_authoritative_boundary(
         selected_pseudo_gradient=selected,
         resulting_fragment=resulting,
         pti_result=pti_result,
+    )
+
+
+def process_authoritative_boundary(
+    store: CaptureObjectStore,
+    *,
+    state: CaptureV2PTIPolicyState,
+    policy: PolicyDefinitionRef,
+    boundary: SyncerBoundaryRef,
+    action_manifest_id: str,
+) -> PTIAdapterResult:
+    """Seal the direction-only PTI action used by historical replay tooling."""
+
+    return _process_authoritative_boundary(
+        store,
+        state=state,
+        policy=policy,
+        boundary=boundary,
+        action_manifest_id=action_manifest_id,
+        action_capabilities=("global_boundary_state",),
+    )
+
+
+def process_authoritative_crn_boundary(
+    store: CaptureObjectStore,
+    *,
+    state: CaptureV2PTIPolicyState,
+    policy: PolicyDefinitionRef,
+    boundary: SyncerBoundaryRef,
+    action_manifest_id: str,
+) -> PTIAdapterResult:
+    """Seal a PTI arm only when exact restore and future-eight CRN data exist.
+
+    The capability set is fixed by this entry point; callers cannot downgrade
+    it while presenting the result as a finite-loss candidate action.
+    """
+
+    return _process_authoritative_boundary(
+        store,
+        state=state,
+        policy=policy,
+        boundary=boundary,
+        action_manifest_id=action_manifest_id,
+        action_capabilities=CRN_ACTION_CAPABILITIES,
     )
 
 
@@ -489,9 +576,7 @@ def load_authoritative_pti_action(
     expected_format = {
         "encoding": "ieee754-f32le-flat",
         "fragment_numel": action.boundary.fragment_format.fragment_numel,
-        "tensor_layout_sha256": (
-            action.boundary.fragment_format.tensor_layout_sha256
-        ),
+        "tensor_layout_sha256": (action.boundary.fragment_format.tensor_layout_sha256),
     }
     expected_outer = {
         "algorithm": "coordinate-order-f32-memoryless-sgd",
@@ -576,6 +661,7 @@ def load_authoritative_pti_action(
 
 __all__ = [
     "CaptureV2PTIPolicyState",
+    "CRN_ACTION_CAPABILITIES",
     "IDENTIFIED",
     "LoadedPTIAdapterAction",
     "PRODUCTION_MERGE_CONFIG",
@@ -588,4 +674,5 @@ __all__ = [
     "load_decision_proof",
     "load_authoritative_pti_action",
     "process_authoritative_boundary",
+    "process_authoritative_crn_boundary",
 ]

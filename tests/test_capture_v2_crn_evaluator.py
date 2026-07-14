@@ -33,6 +33,7 @@ from yeto.capture_v2_crn_plan import (
     publish_crn_evaluation_plan,
     publish_crn_isolation_attestation,
 )
+from yeto.capture_v2_pti_crn import analyze_authorized_pti_crn_campaign
 from yeto.capture_v2_endpoint import (
     EndpointIdentity,
     FutureGroupRefs,
@@ -43,10 +44,16 @@ from yeto.capture_v2_endpoint import (
 from yeto.capture_v2_policy import (
     CAPABILITIES,
     SealedOuterActionRef,
+    load_sealed_outer_action,
     load_policy_outcome,
     publish_policy_definition,
     publish_policy_outcome,
     publish_sealed_outer_action,
+)
+from yeto.capture_v2_pti_adapter import (
+    CaptureV2PTIPolicyState,
+    IDENTIFIED,
+    process_authoritative_crn_boundary,
 )
 from yeto.capture_v2_store import (
     CaptureObjectStore,
@@ -107,6 +114,7 @@ def _fixture(
     candidate_required=COMPLETE_CAPABILITIES,
     outer_lr: float = 0.28,
     outer_momentum: float = 0.0,
+    candidate_fallback: bool = False,
 ) -> _Fixture:
     store = store or CaptureObjectStore(tmp_path / "cas")
     future_count = 8 if future_state == "complete" else 7
@@ -220,9 +228,17 @@ def _fixture(
         capabilities=CAPABILITIES,
     )
     stock = load_syncer_boundary(store, boundary).stock_pseudo_gradient
-    candidate = _object(store, f"{suffix} candidate pseudo-gradient".encode())
+    candidate = (
+        stock
+        if candidate_fallback
+        else _object(store, f"{suffix} candidate pseudo-gradient".encode())
+    )
     stock_result = post_fragment
-    candidate_result = _object(store, f"{suffix} candidate resulting fragment".encode())
+    candidate_result = (
+        stock_result
+        if candidate_fallback
+        else _object(store, f"{suffix} candidate resulting fragment".encode())
+    )
     common = {
         "policy": policy,
         "boundary": boundary,
@@ -251,9 +267,9 @@ def _fixture(
         stock_pseudo_gradient=stock,
         selected_pseudo_gradient=candidate,
         resulting_fragment=candidate_result,
-        action_kind="nonstock",
-        action_reason="candidate_selected",
-        fallback_reason=None,
+        action_kind="stock_fallback" if candidate_fallback else "nonstock",
+        action_reason="stock_fallback" if candidate_fallback else "candidate_selected",
+        fallback_reason="candidate_unavailable" if candidate_fallback else None,
     )
     evaluation = _object(store, f"{suffix} fixed evaluation object".encode())
     evaluator_source = _object(store, f"{suffix} evaluator source".encode())
@@ -327,6 +343,10 @@ class _FakeBackend:
         self.shared_state = [_digest("fresh worker restore")]
         self.state_hash_calls = 0
         self.corrupted = False
+        self.candidate_fallback = (
+            load_crn_evaluation_plan(self.store, fixture.plan).candidate.action_kind
+            == "stock_fallback"
+        )
         self.manifest_count_during_callbacks: list[int] = []
 
     def _callback_guard(self) -> None:
@@ -428,9 +448,17 @@ class _FakeBackend:
         if self.fault == "missing-evaluation-object":
             artifact = ObjectRef("f" * 64, 17)
 
-        base = 1.25 if request.action.manifest_id.endswith("stock-action") else 1.0
+        is_stock = request.action.manifest_id.endswith("stock-action") or (
+            self.candidate_fallback
+            and request.action.manifest_id.endswith("candidate-action")
+        )
+        base = 1.25 if is_stock else 1.0
         loss = base if request.step == 0 else base - 0.125
         if self.fault == "loss-nondeterminism" and branch.order == "candidate-stock":
+            loss += 0.03125
+        if self.fault == "fallback-loss" and request.action.manifest_id.endswith(
+            "candidate-action"
+        ):
             loss += 0.03125
         loss_bits = struct.pack(">d", loss).hex()
         if self.fault == "nonfinite-loss":
@@ -482,6 +510,10 @@ class _FakeBackend:
         batch_hash = hashlib.sha256(request.future_group.data).hexdigest()
         if self.fault == "batch-nondeterminism" and branch.order == "candidate-stock":
             batch_hash = _digest(batch_hash, branch.order)
+        if self.fault == "cross-arm-batch" and request.action.manifest_id.endswith(
+            "candidate-action"
+        ):
+            batch_hash = _digest(batch_hash, "candidate")
         group_index = request.group_index
         if self.fault == "missing-group-receipt" and request.group_index == 3:
             group_index = 4
@@ -593,6 +625,7 @@ def test_isolated_crn_runs_both_orders_and_only_then_publishes_outcomes(tmp_path
         ("missing-group-receipt", "missing or cross-wired"),
         ("loss-nondeterminism", "nondeterminism or branch leakage"),
         ("batch-nondeterminism", "nondeterminism or branch leakage"),
+        ("cross-arm-batch", "byte-identical future groups"),
         ("state-nondeterminism", "nondeterminism or branch leakage"),
         ("artifact-nondeterminism", "nondeterminism or branch leakage"),
         ("unstable-state-hash", "state hash is nondeterministic"),
@@ -619,6 +652,29 @@ def test_incomplete_worker_future_groups_cannot_seal_crn_action(tmp_path):
         CaptureStoreError, match="complete canonical future groups 0..7"
     ):
         _fixture(tmp_path, future_state="incomplete")
+
+
+def test_policy_selected_stock_fallback_remains_in_crn_denominator(tmp_path):
+    fixture = _fixture(tmp_path, candidate_fallback=True)
+
+    result = _evaluate(fixture, _FakeBackend(fixture))
+
+    assert result.stock_trace.applied_state_sha256 == (
+        result.candidate_trace.applied_state_sha256
+    )
+    assert (
+        result.stock_trace.k0.loss_f64_bits == result.candidate_trace.k0.loss_f64_bits
+    )
+    assert (
+        result.stock_trace.k8.loss_f64_bits == result.candidate_trace.k8.loss_f64_bits
+    )
+
+
+def test_stock_fallback_arm_must_be_exactly_identical_to_control(tmp_path):
+    fixture = _fixture(tmp_path, candidate_fallback=True)
+
+    with pytest.raises(CaptureStoreError, match="stock fallback diverged"):
+        _evaluate(fixture, _FakeBackend(fixture, fault="fallback-loss"))
 
 
 @pytest.mark.parametrize("arm", ["stock", "candidate"])
@@ -712,7 +768,7 @@ def test_alternative_evaluation_plan_is_not_posthoc_admissible(tmp_path):
             lambda metadata: metadata["actions"].__setitem__(
                 "stock", metadata["actions"]["candidate"]
             ),
-            "stock action must be an exact stock_fallback",
+            "stock action must be an exact intentional control",
         ),
         (
             lambda metadata: metadata.__setitem__("horizons", [0, 7]),
@@ -748,6 +804,19 @@ def test_campaign_index_rejects_competing_plan_for_same_boundary(tmp_path):
             "competing-campaign-index",
             campaign_id="pti-sgd-028-competing",
             plans=[fixture.plan, alternate],
+        )
+
+
+def test_campaign_index_rejects_mixed_input_provenance(tmp_path):
+    first = _fixture(tmp_path, suffix="first")
+    second = _fixture(tmp_path, store=first.store, suffix="second")
+
+    with pytest.raises(CRNAuthorityError, match="different input provenance"):
+        publish_crn_campaign_index(
+            first.store,
+            "mixed-provenance-campaign-index",
+            campaign_id="pti-sgd-028-mixed-provenance",
+            plans=[first.plan, second.plan],
         )
 
 
@@ -821,6 +890,46 @@ def test_attestation_rejects_loss_bit_or_state_chain_tampering(tmp_path):
         )
 
 
+def test_attestation_rejects_cross_arm_batch_hash_substitution(tmp_path):
+    fixture = _fixture(tmp_path)
+    result = _evaluate(fixture, _FakeBackend(fixture))
+    attestation = load_crn_isolation_attestation(fixture.store, result.attestation)
+    traces = list(attestation.traces)
+    for trace_index in (1, 2):
+        groups = list(traces[trace_index].groups)
+        groups[0] = replace(groups[0], batch_sha256="1" * 64)
+        traces[trace_index] = replace(traces[trace_index], groups=tuple(groups))
+
+    with pytest.raises(CRNAuthorityError, match="byte-identical future groups"):
+        publish_crn_isolation_attestation(
+            fixture.store,
+            campaign_index=fixture.campaign_index,
+            plan=fixture.plan,
+            traces=traces,
+        )
+
+
+def test_attestation_rejects_divergent_policy_stock_fallback(tmp_path):
+    fixture = _fixture(tmp_path, candidate_fallback=True)
+    result = _evaluate(fixture, _FakeBackend(fixture))
+    attestation = load_crn_isolation_attestation(fixture.store, result.attestation)
+    traces = list(attestation.traces)
+    changed_bits = struct.pack(">d", 1.5).hex()
+    for trace_index in (1, 2):
+        traces[trace_index] = replace(
+            traces[trace_index],
+            k8=replace(traces[trace_index].k8, loss_f64_bits=changed_bits),
+        )
+
+    with pytest.raises(CRNAuthorityError, match="fallback differs"):
+        publish_crn_isolation_attestation(
+            fixture.store,
+            campaign_index=fixture.campaign_index,
+            plan=fixture.plan,
+            traces=traces,
+        )
+
+
 def test_paired_outcome_crosschecks_both_arms_against_attestation(tmp_path):
     fixture = _fixture(tmp_path)
     result = _evaluate(fixture, _FakeBackend(fixture))
@@ -877,3 +986,89 @@ def test_output_identity_is_reserved_by_plan_not_call_time(tmp_path):
             backend=_FakeBackend(fixture),
             stock_outcome_manifest_id="posthoc-choice",
         )
+
+
+def test_campaign_analysis_rejects_outcome_omission_and_duplication(tmp_path):
+    fixture = _fixture(tmp_path)
+    result = _evaluate(fixture, _FakeBackend(fixture))
+
+    with pytest.raises(CRNAuthorityError, match="exact precommitted.*denominator"):
+        analyze_authorized_pti_crn_campaign(
+            fixture.store,
+            campaign_index=fixture.campaign_index,
+            paired_outcomes=(),
+        )
+    with pytest.raises(CRNAuthorityError, match="repeat a campaign plan"):
+        analyze_authorized_pti_crn_campaign(
+            fixture.store,
+            campaign_index=fixture.campaign_index,
+            paired_outcomes=(result.paired_outcome, result.paired_outcome),
+        )
+
+
+def test_campaign_analysis_rejects_generic_candidate_substitution(tmp_path):
+    fixture = _fixture(tmp_path)
+    result = _evaluate(fixture, _FakeBackend(fixture))
+
+    with pytest.raises(CaptureStoreError, match="decision proof"):
+        analyze_authorized_pti_crn_campaign(
+            fixture.store,
+            campaign_index=fixture.campaign_index,
+            paired_outcomes=(result.paired_outcome,),
+        )
+
+
+def test_pti_adapter_plan_evaluator_and_campaign_analysis_compose(tmp_path):
+    fixture = _fixture(tmp_path)
+    stock = load_sealed_outer_action(fixture.store, fixture.stock_action)
+    pti = process_authoritative_crn_boundary(
+        fixture.store,
+        state=CaptureV2PTIPolicyState(),
+        policy=stock.policy_ref,
+        boundary=fixture.boundary,
+        action_manifest_id="pti-candidate-action",
+    )
+    assert pti.status == IDENTIFIED
+    assert pti.pti_result.action.used_nonstock is False
+    original_plan = load_crn_evaluation_plan(fixture.store, fixture.plan)
+    plan = publish_crn_evaluation_plan(
+        fixture.store,
+        "pti-composed-plan",
+        boundary=fixture.boundary,
+        stock_action=fixture.stock_action,
+        candidate_action=pti.action,
+        responder_index=0,
+        evaluation=fixture.evaluation,
+        expected_cuda_rng_streams=1,
+        evaluator=original_plan.evaluator,
+        attestation_manifest_id="pti-composed-attestation",
+        paired_outcome_manifest_id="pti-composed-paired-outcome",
+    )
+    campaign = publish_crn_campaign_index(
+        fixture.store,
+        "pti-composed-campaign-index",
+        campaign_id="pti-sgd-028-composed",
+        plans=[plan],
+    )
+    composed = replace(
+        fixture,
+        candidate_action=pti.action,
+        candidate_result=pti.resulting_fragment,
+        plan=plan,
+        campaign_index=campaign,
+    )
+
+    result = _evaluate(composed, _FakeBackend(composed))
+    analysis = analyze_authorized_pti_crn_campaign(
+        fixture.store,
+        campaign_index=campaign,
+        paired_outcomes=(result.paired_outcome,),
+    )
+
+    assert len(analysis.observations) == 1
+    assert analysis.observations[0].candidate_used_nonstock is False
+    assert analysis.observations[0].k0_gain == 0.0
+    assert analysis.observations[0].k8_gain == 0.0
+    assert analysis.summary.sample_gate_pass is False
+    assert analysis.summary.action_rate_gate_pass is False
+    assert analysis.summary.finite_loss_gate_pass is False

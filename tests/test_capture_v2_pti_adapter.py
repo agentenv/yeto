@@ -9,10 +9,16 @@ import struct
 import pytest
 import torch
 
+from yeto.capture_v2_crn_plan import (
+    EvaluatorProvenance,
+    load_crn_evaluation_plan,
+    publish_crn_evaluation_plan,
+)
 from yeto.capture_v2_endpoint import (
     EndpointIdentity,
     FutureGroupRefs,
     InputProvenance,
+    publish_future_group_envelope,
     publish_learner_endpoint,
 )
 from yeto.capture_v2_policy import (
@@ -28,6 +34,7 @@ from yeto.capture_v2_pti_adapter import (
     UNIDENTIFIABLE,
     load_authoritative_pti_action,
     process_authoritative_boundary,
+    process_authoritative_crn_boundary,
 )
 from yeto.capture_v2_store import CaptureObjectStore
 from yeto.capture_v2_syncer import (
@@ -53,7 +60,9 @@ def _object(store, raw: bytes):
     return store.put_bytes(raw).ref
 
 
-def _endpoint(store, *, session: str, pre_version: int, suffix: str):
+def _endpoint(
+    store, *, session: str, pre_version: int, suffix: str, complete_crn: bool = False
+):
     pack = publish_tensor_pack(
         store,
         f"pack-{suffix}",
@@ -63,17 +72,36 @@ def _endpoint(store, *, session: str, pre_version: int, suffix: str):
         clocks={"optimizer_steps": pre_version},
         metadata={"suffix": suffix},
     )
+    identity = EndpointIdentity(
+        capture_session_uuid=session,
+        learner_id=0,
+        rank=0,
+        local_step=pre_version,
+        active_fragment_id=0,
+        window_uuid=f"00000000-0000-4000-8000-{pre_version + 1:012d}",
+    )
+    future_groups = (
+        {
+            index: publish_future_group_envelope(
+                store,
+                capture_session_uuid=session,
+                window_uuid=identity.window_uuid,
+                learner_id=0,
+                rank=0,
+                group_index=index,
+                group_id=f"{suffix}-group-{index}",
+                data_iterator_position=pre_version * 10 + index,
+                content=f"{suffix}-future-{index}".encode(),
+            )
+            for index in range(8)
+        }
+        if complete_crn
+        else {}
+    )
     return publish_learner_endpoint(
         store,
         f"endpoint-{suffix}",
-        identity=EndpointIdentity(
-            capture_session_uuid=session,
-            learner_id=0,
-            rank=0,
-            local_step=pre_version,
-            active_fragment_id=0,
-            window_uuid=f"00000000-0000-4000-8000-{pre_version + 1:012d}",
-        ),
+        identity=identity,
         input_provenance=InputProvenance(
             object=_object(store, f"provenance-{suffix}".encode()),
             source_commit="a" * 40,
@@ -92,7 +120,11 @@ def _endpoint(store, *, session: str, pre_version: int, suffix: str):
         numpy_rng=_object(store, f"np-{suffix}".encode()),
         torch_cpu_rng=_object(store, f"cpu-{suffix}".encode()),
         torch_cuda_rng={0: _object(store, f"cuda-{suffix}".encode())},
-        future_groups=FutureGroupRefs("incomplete", {}, "not required by PTI"),
+        future_groups=FutureGroupRefs(
+            "complete" if complete_crn else "incomplete",
+            future_groups,
+            None if complete_crn else "not required by direction-only PTI",
+        ),
     )
 
 
@@ -114,10 +146,15 @@ def _boundary(
     wrong_post: bool = False,
     wrong_broadcast: bool = False,
     suffix: str | None = None,
+    complete_crn: bool = False,
 ):
     suffix = suffix or f"{session[:8]}-{sequence}-{pre_version}-{stock_values[0]}"
     endpoint = _endpoint(
-        store, session=session, pre_version=pre_version, suffix=suffix
+        store,
+        session=session,
+        pre_version=pre_version,
+        suffix=suffix,
+        complete_crn=complete_crn,
     )
     pre_raw = encode_f32le(pre_values)
     stock_raw = encode_f32le(stock_values)
@@ -178,9 +215,7 @@ def test_authoritative_boundary_derives_exact_stock_fallback_and_proof(tmp_path)
     store = CaptureObjectStore(tmp_path / "cas")
     state = CaptureV2PTIPolicyState()
     policy = _policy(store)
-    boundary = _boundary(
-        store, sequence=7, pre_version=40, stock_values=(1.0, 0.0)
-    )
+    boundary = _boundary(store, sequence=7, pre_version=40, stock_values=(1.0, 0.0))
 
     result = process_authoritative_boundary(
         store,
@@ -196,9 +231,110 @@ def test_authoritative_boundary_derives_exact_stock_fallback_and_proof(tmp_path)
     assert loaded.action.action_kind == "stock_fallback"
     assert loaded.action.stock_pseudo_gradient == loaded.action.selected_pseudo_gradient
     assert loaded.action.resulting_fragment == loaded.action.boundary.post_fragment
-    assert result.pti_result.action.raw == store.object_path(
-        loaded.action.stock_pseudo_gradient.sha256
-    ).read_bytes()
+    assert (
+        result.pti_result.action.raw
+        == store.object_path(loaded.action.stock_pseudo_gradient.sha256).read_bytes()
+    )
+
+
+def test_crn_entry_point_requires_complete_restore_and_future_eight(tmp_path):
+    store = CaptureObjectStore(tmp_path / "cas")
+    state = CaptureV2PTIPolicyState()
+    policy = _policy(store)
+    boundary = _boundary(
+        store,
+        sequence=7,
+        pre_version=40,
+        stock_values=(1.0, 0.0),
+    )
+    object_count = len(list(store.objects_dir.iterdir()))
+
+    result = process_authoritative_crn_boundary(
+        store,
+        state=state,
+        policy=policy,
+        boundary=boundary,
+        action_manifest_id="crn-action-incomplete",
+    )
+
+    assert result.status == UNIDENTIFIABLE
+    assert result.reason == "incomplete_future_groups_0_through_7"
+    assert state.last_commit_seq is None
+    assert len(list(store.objects_dir.iterdir())) == object_count
+
+
+def test_crn_entry_point_seals_nondowngradable_capabilities(tmp_path):
+    store = CaptureObjectStore(tmp_path / "cas")
+    state = CaptureV2PTIPolicyState()
+    policy = _policy(store)
+    boundary = _boundary(
+        store,
+        sequence=7,
+        pre_version=40,
+        stock_values=(1.0, 0.0),
+        complete_crn=True,
+    )
+
+    result = process_authoritative_crn_boundary(
+        store,
+        state=state,
+        policy=policy,
+        boundary=boundary,
+        action_manifest_id="crn-action-complete",
+    )
+
+    assert result.status == IDENTIFIED
+    loaded = load_authoritative_pti_action(store, result.action)
+    assert loaded.action.required_capabilities == (
+        "global_boundary_state",
+        "worker_restore",
+        "crn_train_k8",
+    )
+    assert loaded.action.action_kind == "stock_fallback"
+    assert state.last_commit_seq == 7
+
+    stock_control = publish_sealed_outer_action(
+        store,
+        "crn-stock-control",
+        policy=policy,
+        boundary=boundary,
+        fragment_id=0,
+        required_capabilities=(
+            "global_boundary_state",
+            "worker_restore",
+            "crn_train_k8",
+        ),
+        stock_pseudo_gradient=loaded.action.stock_pseudo_gradient,
+        selected_pseudo_gradient=loaded.action.stock_pseudo_gradient,
+        outer_lr_f64_bits=LR_BITS,
+        resulting_fragment=loaded.action.boundary.post_fragment,
+        decision=_object(store, b"exact stock control\n"),
+        config_sha256=loaded.action.policy.config.sha256,
+        action_kind="stock_fallback",
+        action_reason="stock_control",
+        fallback_reason="intentional_stock_control",
+    )
+    plan = publish_crn_evaluation_plan(
+        store,
+        "crn-plan-with-pti-fallback",
+        boundary=boundary,
+        stock_action=stock_control,
+        candidate_action=result.action,
+        responder_index=0,
+        evaluation=_object(store, b"fixed evaluation\n"),
+        expected_cuda_rng_streams=1,
+        evaluator=EvaluatorProvenance(
+            source_commit="f" * 40,
+            image_id="local-fake-evaluator@sha256:test",
+            source=_object(store, b"evaluator source\n"),
+            config=_object(store, b"evaluator config\n"),
+        ),
+        attestation_manifest_id="crn-pti-fallback-attestation",
+        paired_outcome_manifest_id="crn-pti-fallback-outcome",
+    )
+    assert load_crn_evaluation_plan(store, plan).candidate.action_kind == (
+        "stock_fallback"
+    )
 
 
 def test_causal_history_opens_nonstock_and_computes_f32_result(tmp_path):
@@ -285,9 +421,7 @@ def test_missing_capability_and_session_sequence_layout_relabels_abstain(tmp_pat
         store,
         state=first_state,
         policy=_policy(store, capabilities=missing, suffix="missing"),
-        boundary=_boundary(
-            store, sequence=0, pre_version=0, stock_values=(1.0, 0.0)
-        ),
+        boundary=_boundary(store, sequence=0, pre_version=0, stock_values=(1.0, 0.0)),
         action_manifest_id="missing-action",
     )
     assert missing_result.status == UNIDENTIFIABLE

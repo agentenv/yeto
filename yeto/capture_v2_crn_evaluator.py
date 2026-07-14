@@ -476,6 +476,52 @@ def _assert_same_trace(first: ArmTrace, second: ArmTrace, context: str) -> None:
         )
 
 
+def _assert_cross_arm_batch_identity(stock: ArmTrace, candidate: ArmTrace) -> None:
+    stock_batches = tuple(
+        (group.group_index, group.future_group, group.batch_sha256)
+        for group in stock.groups
+    )
+    candidate_batches = tuple(
+        (group.group_index, group.future_group, group.batch_sha256)
+        for group in candidate.groups
+    )
+    if stock_batches != candidate_batches:
+        raise CRNEvaluationError(
+            "stock and candidate arms did not consume byte-identical future groups"
+        )
+
+
+def _fallback_trace_identity(trace: ArmTrace) -> tuple[Any, ...]:
+    """Remove only the deliberately distinct candidate/control action identity."""
+
+    return (
+        trace.restore_state_sha256,
+        trace.applied_state_sha256,
+        (
+            trace.k0.step,
+            trace.k0.evaluation,
+            trace.k0.state_sha256,
+            trace.k0.loss_f64_bits,
+        ),
+        tuple(
+            (
+                group.group_index,
+                group.future_group,
+                group.batch_sha256,
+                group.state_sha256,
+            )
+            for group in trace.groups
+        ),
+        (
+            trace.k8.step,
+            trace.k8.evaluation,
+            trace.k8.state_sha256,
+            trace.k8.loss_f64_bits,
+        ),
+        trace.final_state_sha256,
+    )
+
+
 def _manifest_ref(identity: ManifestIdentity) -> ManifestRef:
     return ManifestRef(
         identity.manifest_id,
@@ -601,6 +647,14 @@ def evaluate_isolated_crn_pair(
         traces[("candidate-stock", "candidate")],
         "candidate arm",
     )
+    _assert_cross_arm_batch_identity(stock_trace, candidate_trace)
+    if inputs.candidate.action_kind == "stock_fallback" and (
+        _fallback_trace_identity(stock_trace)
+        != _fallback_trace_identity(candidate_trace)
+    ):
+        raise CRNEvaluationError(
+            "candidate stock fallback diverged from the exact stock control"
+        )
 
     for branch, expected_state in completed:
         if (
