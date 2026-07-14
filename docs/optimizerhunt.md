@@ -956,6 +956,7 @@ reconstructed from endpoints or added after outcomes become visible.
 | MTRF | Exact responder join; anchor/H/2/H parameters; per-tensor Adam moments, metrics, clocks, LR mass, decay accounting; production RDA | Conditional direction-only replay after every fail-closed gate above | Full learner restore, syncer boundary state, next-eight groups, fixed evaluation object, RNG restore, isolated k0/k8 replay | EXP2-54; unscored until v2 |
 | MSTP | The MTRF substrate plus the exact half-path and factual merged directions | Conditional direction-only replay under the same gates | The same full CRN restore/evaluation bundle | EXP2-54; unscored until v2 |
 | PTI-SGD | Ordered same-fragment factual directions plus a hash-chained causal prequential ledger | At most a historical direction stream after exact materialization | Sealed shadow outcomes, full restore/evaluation, and a separately frozen preregistration | Separate hypothesis |
+| CRP-SGD | Delayed resolution of individually tiny proposal residuals, then a bounded orthogonal pulse from a per-fragment FIFO bank | At most a historical causal-tape mechanism screen after exact materialization | Full restore/evaluation, a separately frozen proposal source, and isolated CRN replay | Separate hypothesis; unscored |
 | CFLX-SGD | Exact global stock trial point, model autograd, and disjoint proposal/validation/audit streams | Not identifiable from v1 learner envelopes | Syncer global state, full model restore, restricted probe oracle, equal live-arm probe cost, and CRN replay | Separate campaign |
 
 The shared replay layer will be capability-based. Every policy must emit the
@@ -974,15 +975,41 @@ The bounded implementation order is:
    object hashes;
 2. build the atomic direction-only materializer and require byte-exact
    production RDA/SGD-0.28 broadcast parity;
-3. add capture-v2 at the exact H endpoint, including all mutable learner state,
+3. make the qualifier schedule deterministic with a true response barrier and
+   move serialization, hashing, and fsync behind a bounded fail-closed writer;
+4. add capture-v2 at the exact H endpoint, including all mutable learner state,
    buffers, named optimizer/scheduler/scaler state and RNG, then passively
    attach the next eight actual update groups as they are consumed;
-4. add a syncer replay shard containing exact pre/post affected-fragment bytes
+5. add a syncer replay shard containing exact pre/post affected-fragment bytes
    and outer state, then a policy-agnostic isolated evaluator whose A/B and B/A
    executions have identical hashes and losses; and
-5. run corruption, stale-anchor, responder-order, repeated-replay, missing
+6. run corruption, stale-anchor, responder-order, repeated-replay, missing
    capability, and branch-isolation tests, followed by a new matched GPU
    qualifier because v2 changes serialization and runtime cost.
+
+The first part of that sequence is now implemented in commit
+`47ad73594bbb9ae93d0d2220798b319e46fce6b6`. The existing full campaign
+validator, rather than a second parser, exports a canonical checksummed
+`optimizer_state_capture_committed_boundaries.json`. Each boundary preserves
+authoritative transcript event order and exact responder merge order and binds
+the admitted source attempt to exact push and Richardson object paths and
+SHA-256 digests. The index also binds the source transcript, capture session,
+common layout, validation expectations, and source-tree manifest. Validation
+now rejects malformed/nonfinite/negative f64 weight bits, decimal/bit or Rust
+token-weight-formula disagreement, malformed broadcast digests, Python
+bool-as-int aliases, cross-learner UUID aliasing, same-payload retry aliasing,
+responder reorder, and stale output after a failed rerun.
+
+The capture-v2 storage foundation is commit
+`ba16256e65586ef97ca3020ec5530e0443c62574`. It provides immutable SHA-256
+objects and manifests, fsynced same-directory temporary writes, atomic
+no-replace publication, exact verification, race-safe deduplication, canonical
+strict JSON, logical/physical/deduplicated-byte accounting, and fail-closed
+audits for corruption, missing objects, symlinks, temp files, unexpected tree
+entries, false accounting, and orphans. This is deliberately only a local
+POSIX CAS foundation: live learner/syncer hooks, exact tensor packs, restore
+manifests, bounded asynchronous writers, CRN linkage, and cloud publication
+remain separate gates.
 
 Seed 223 stays locked through this implementation. Acquiring more v1 envelopes
 now would expose development data without enabling the preregistered finite-loss
@@ -1039,28 +1066,98 @@ The repair constructs each complete inner runner/uploader program first and
 quotes it exactly once with `shlex.join`. An executable regression traverses
 the same outer-shell → `bash -c` boundary, forces the apostrophe-containing
 missing-manifest branch, and requires exit 14 plus an atomic `runner.exit`.
-All 59 harness tests and the complete 756-test repository `tests/` target
+All 59 harness tests and the complete 783-test repository `tests/` target
 pass, and an independent renderer audit verified the exact argv and exit-code
 protocol. The pushed fix commit is
-`69cff38369041cef8d1bddc9c23a9ecb05843a90`. The replacement qualifier is
-`exp2-54-smoke-r2`; it has a new instance name, checkout/run paths, GCS
-prefix, state identity, and `run-id` label, and pins that fix commit. It
-retains the same image ID, data/model manifests, seeds, arm commands, and
-scientific gate.
+`69cff38369041cef8d1bddc9c23a9ecb05843a90`.
+
+The fresh identity `exp2-54-smoke-r2` passed both input manifests and completed
+the OFF arm plus all 16 ON commits. It then failed before validation because
+the absolute validator subprocess imported an older installed `yeto` package
+instead of the pinned checkout and raised `ModuleNotFoundError` for
+`yeto.optimizer_state_capture`. No candidate result was produced. The harness
+preserved the incomplete tree under
+`gs://yeto-exp2-52-model-training-497007/exp2-54-smoke-r2`, recorded exact VM
+ID `5980313032922468927`, disk ID `3539552211744559679`, and abandonment
+SHA-256
+`4b9d3771aee6c63d5929500af0f70152c038a24e5590ca2a7dfc23f1a8728d77`,
+then deleted only those authenticated resources; both now return 404. Commit
+`afa0b07c379e8bce4140e4862da9861b7a2c8e74` fixes every child Python
+subprocess by prepending the pinned checkout to `PYTHONPATH`. Its executable
+regression places a deliberately stale fake `yeto` package first in the
+parent environment and proves that the child still imports the checkout.
+
+The next immutable identity, `exp2-54-smoke-r3`, pinned that fix and ran to the
+actual scientific gate on four Spot A100s. Its capture validator passed: 16
+authoritative joined boundaries, four per fragment, 64 primary attempts, 81
+transcript events, 202 verified learner artifacts, no missing/unlisted/temp
+artifact, and exact tree-manifest SHA-256
+`7424d023e0abdc4b71fdea3a96991fbfef8b485faeaa0f2ce18878d7f50d3a7d`.
+The four learner artifact-byte totals were `1,269,000,908`, `1,252,639,051`,
+`1,252,639,051`, and `1,269,000,908`; the retained GCS run tree is
+`7,821,538,975` bytes (`7.284 GiB`). This proves that the repaired transport,
+capture, checksum, and validation paths execute end to end. It does not prove
+behavior preservation.
+
+The exact OFF/ON parity gate rejected r3. Responder arrival order differed
+from the first commit, which the parity comparator intentionally
+key-normalizes, but the first substantive metadata divergence was commit/step
+6, fragment 1,
+learner 2: OFF answered at local step 10 while ON answered at local step 11.
+Capture therefore changed how much asynchronous local work completed before
+the broadcast boundary. The final syncer checkpoint and exported adapter
+bytes consequently differed. Descriptive eval losses were `1.3693659077`
+OFF and `1.3677875564` ON, but that difference is invalid as an optimizer
+comparison and is not promoted. The raw commit-1-to-commit-16 intervals were
+`18.232708765 s` OFF and `32.728699397 s` ON, a descriptive `79.5054%`
+increase; the parity program correctly refused to call this the threshold
+metric after the earlier trajectory mismatch. Its signed FAIL artifact has
+SHA-256
+`515b800b25f2d9bef088748fe54c6c192cc3b54d195a6a5a8165dcd6cde02fab`.
+
+The r3 evidence remains at
+`gs://yeto-exp2-52-model-training-497007/exp2-54-smoke-r3`. Exact VM ID
+`2042458077012922652`, boot-disk ID `6741716953892360476`, source-image ID
+`7290368630472593484`, and ownership nonce `b0d2d40f3d61ac76` were recorded.
+The harness synced and round-tripped the failure evidence, wrote abandonment
+SHA-256
+`c5f8e04b9de8768f8c85a1d2882bd4be1048ae1ba544fe30d9e85331e7fa804c`,
+and deleted exactly that VM and auto-delete disk. Both return 404. The unrelated
+`instance-20260526-guiflow` in `asia-east2-c` remains untouched.
+
+This failure is not a reason to relax exact parity. The next qualifier must
+use the already implemented `--barrier-sync` response boundary so OFF and ON
+cannot take different numbers of inner steps while a merge is in flight. It
+must also replace synchronous `torch.save`/hash/fsync on the learner path with
+immutable CPU snapshots and a bounded writer queue that blocks rather than
+drops evidence. No r4 GPU rerun is authorized until those mechanics and their
+failure tests are frozen; another non-barrier v1 rerun would merely measure
+the same scheduling race.
 
 Only a passing qualifier can unlock seed-223 H16 **state acquisition**. Its
-minimum is 32 complete committed boundaries, at least eight per fragment.
+scientific minimum is 32 complete committed boundaries, eight per fragment,
+but capture-v2 must run 36 commits: nine per fragment. The last four are a
+predeclared drain tail so every one of the first eight selected endpoints per
+fragment can acquire eight strictly future update groups. The drain endpoints
+are not added to the scientific sample. Exactly 32 commits cannot guarantee
+future-eight data for the final selected endpoints.
 It does not unlock candidate scoring. Before MTRF/MSTP development can begin,
 the joined-bundle materializer and full CRN capture/restore/evaluation layer
 must be implemented, independently tested, and frozen against the existing
 schema. Only then do the preregistered mean-k8, Holm-adjusted lower-bound, and
-action/safety gates apply. Seed 239 remains locked until one immutable winner,
-configuration, and analysis hash are selected. There is no honest
-winner ETA while full CRN state is absent. The qualifier is expected to finish
-in about 30 minutes but now has a one-hour VM safety envelope so checkout,
-validation, evaluation, upload, and teardown are not racing a 30-minute
-provider auto-delete. Development and a separately authorized confirmation
-retain two-hour envelopes.
+action/safety gates apply. Capture-v2 sizing is currently an engineering
+projection, not a measurement: roughly `150--160 MiB` per committed responder,
+`9.6--10.3 GiB` for the 16-commit H4 four-learner qualifier, and
+`21.6--23.2 GiB` for the 36-commit H16 acquisition including its drain tail. A
+one-A100 serialization/restore canary must measure hook latency, writer
+throughput, queue high-water mark, RSS/pinned memory, physical unique bytes,
+and restore parity before the four-A100 qualifier. Seed 239 remains locked
+until one immutable winner, configuration, and analysis hash are selected.
+There is no honest winner ETA while full CRN state is absent. No EXP2-54 VM is
+currently running; GCP spend is deliberately paused at the failed parity gate.
+Future qualifiers retain a one-hour VM safety envelope so checkout, validation,
+evaluation, upload, and teardown do not race provider auto-delete. Development
+and a separately authorized confirmation retain two-hour envelopes.
 
 The reusable image is
 `projects/model-training-497007/global/images/yeto-optimizer-a100-20260714`,
@@ -1081,17 +1178,18 @@ network bandwidth.
 
 The implementation is assembled in the isolated branch
 `experiment/optimizer-state-capture-round3`. The frozen release tree passed
-756 Python tests, 171 Rust tests, Ruff lint/format, the replay self-test, and all
+783 Python tests, 171 Rust tests, Ruff lint/format, the replay self-test, and all
 8,567 Lean build jobs. The audited capture implementation is commit
 `452ebdea30503f10c1eda68e9fdcff704be2a792`; the remote-runner quoting repair
 and its executable regression are commit
-`69cff38369041cef8d1bddc9c23a9ecb05843a90`, which the replacement qualifier
-pins. Independent launch audits found and closed the reconnect,
+`69cff38369041cef8d1bddc9c23a9ecb05843a90`; the child-import repair is
+`afa0b07c379e8bce4140e4862da9861b7a2c8e74`, which r3 pinned. Independent
+launch audits found and closed the reconnect,
 cold-start timing, portable parity-input, image-input provenance, and too-short
-VM-envelope holes. The checked-in acquisition specs remain locked; the
-replacement qualifier alone is live-enabled and the quota-aware doctor is
-green. Development and confirmation remain locked until their stage gates
-pass.
+VM-envelope holes. The checked-in acquisition specs remain locked. The
+quota-aware doctor is green, but development and confirmation remain locked
+until normalized materialization, capture-v2, deterministic qualifier
+scheduling, and measured overhead gates pass.
 
 ### PTI-SGD: next temporal candidate, not yet an empirical result
 
@@ -1132,6 +1230,51 @@ orthogonal turn is worse when the next direction is unchanged. It proves no
 training-loss or convergence superiority. The direct module check and complete
 Lean build pass with no `sorry`, `admit`, or project axiom; the audited theorem
 dependencies are only `propext`, `Classical.choice`, and `Quot.sound`.
+
+### CRP-SGD: causally resolved residual pulses
+
+Another distinct proposal is **Causally Resolved Residual-Pulse SGD
+(CRP-SGD)**. This is a working name and falsifiable design, not a novelty or
+performance claim. For one separately declared proposal source, it seals the
+residual `r_t = Q_t - G_t` at boundary `t`, applies exact SGD-0.28, and only at
+the next same-fragment boundary measures whether that tiny residual improved
+directional agreement. A residual may enter an eight-boundary FIFO only when
+its relative norm is strictly between zero and `1/20`, its provenance chain is
+intact, and the predeclared delayed score is positive. A nonpositive score,
+missing continuity, nonfinite state, or hash failure clears the whole fragment
+bank; CRP never reverses a bad residual after seeing its outcome.
+
+Once at least two admitted residuals have accumulated, CRP sums them, removes
+the component parallel to the current factual direction, and acts only when
+the remaining norm reaches `1/20` of the factual direction. The pulse is never
+scaled upward and is clipped down at `1/8`; after emission the bank clears.
+Thus an action is orthogonal to stock, has a predeclared relative norm in
+`[0.05, 0.125]`, and increases total direction norm by at most
+`sqrt(1 + (1/8)^2) ≈ 1.00778`. Every no-pulse branch returns `None` to the
+unchanged SGD-0.28 caller with the original factual gradient buffer. Auxiliary
+bank state cannot enter stock optimizer state.
+
+CRP is designed to make the earlier tiny-action and negative-next-boundary
+failures decisive rather than cosmetically positive. Coherent tiny residuals
+must supply enough real mass for a measurable bounded pulse; incoherent,
+negative, or stale residuals clear, cancel, or expire. The cheap causal-tape
+screen requires at least 32 post-warm-up opportunities, eight per fragment,
+pulses on at least 25% of all predefined opportunities, a mean sealed delayed
+gain above `0.001` with positive moving-block lower endpoint, at least three
+positive fragments, and at least 60% positive pulses. Failure retains
+SGD-0.28; it is not permission to lower the threshold, extend the delay, flip
+signs, or choose a different proposal source after inspection.
+
+The Lean-sized proof target is deliberately narrow. Bank accounting records
+every admitted, emitted, and discarded residual via
+`e' = e + r - a - d`, hence `e' + a + d = e + r`; a telescoped version proves
+the bank creates no correction mass. A scalar quadratic identity exposes the
+conditional loss gap as `λ/2 * (a² - 2a(x-b))`. Neither theorem makes delayed
+cosine a safety proof or establishes convergence. CRP must pass byte-parity and
+CPU quadratic property tests before it may consume an isolated CRN bundle, and
+each proposal generator is a separate hypothesis. The current v1 evidence is
+not sufficient to run that loss replay, so no GPU acquisition is justified
+merely to discover whether the bank fires.
 
 ### CFLX-SGD: cross-fitted lookahead candidate
 
