@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import struct
 from dataclasses import dataclass, replace
@@ -10,7 +11,6 @@ import torch
 from yeto.capture_v2_crn_evaluator import (
     ApplyActionReceipt,
     ApplyActionRequest,
-    CRNEvaluationError,
     EvaluationReceipt,
     EvaluationRequest,
     ManifestIdentity,
@@ -19,6 +19,19 @@ from yeto.capture_v2_crn_evaluator import (
     TrainGroupReceipt,
     TrainGroupRequest,
     evaluate_isolated_crn_pair,
+)
+from yeto.capture_v2_crn_plan import (
+    CRNAuthorityError,
+    CRNCampaignIndexRef,
+    CRNEvaluationPlanRef,
+    CRNPairedOutcomeRef,
+    EvaluatorProvenance,
+    load_crn_evaluation_plan,
+    load_crn_isolation_attestation,
+    load_crn_paired_outcome,
+    publish_crn_campaign_index,
+    publish_crn_evaluation_plan,
+    publish_crn_isolation_attestation,
 )
 from yeto.capture_v2_endpoint import (
     EndpointIdentity,
@@ -32,9 +45,15 @@ from yeto.capture_v2_policy import (
     SealedOuterActionRef,
     load_policy_outcome,
     publish_policy_definition,
+    publish_policy_outcome,
     publish_sealed_outer_action,
 )
-from yeto.capture_v2_store import CaptureObjectStore, CaptureStoreError, ObjectRef
+from yeto.capture_v2_store import (
+    CaptureObjectStore,
+    CaptureStoreError,
+    ManifestEntry,
+    ObjectRef,
+)
 from yeto.capture_v2_syncer import (
     BoundaryConfig,
     ResponderEndpointRef,
@@ -68,6 +87,8 @@ class _Fixture:
     boundary: SyncerBoundaryRef
     stock_action: SealedOuterActionRef
     candidate_action: SealedOuterActionRef
+    campaign_index: CRNCampaignIndexRef
+    plan: CRNEvaluationPlanRef
     evaluation: ObjectRef
     future_groups: tuple[ObjectRef, ...]
     stock_result: ObjectRef
@@ -82,6 +103,8 @@ def _fixture(
     future_state: str = "complete",
     stock_required=COMPLETE_CAPABILITIES,
     candidate_required=COMPLETE_CAPABILITIES,
+    outer_lr: float = 0.28,
+    outer_momentum: float = 0.0,
 ) -> _Fixture:
     store = store or CaptureObjectStore(tmp_path / "cas")
     future_count = 8 if future_state == "complete" else 7
@@ -170,8 +193,11 @@ def _fixture(
         broadcast=_object(store, f"{suffix} broadcast".encode()),
         merge_config=BoundaryConfig("rda", {"weighted": True}),
         outer_config=BoundaryConfig(
-            "stock-sgd",
-            {"lr_f64_bits": struct.pack(">d", 0.28).hex()},
+            "nesterov",
+            {
+                "lr_f64_bits": struct.pack(">d", outer_lr).hex(),
+                "momentum_f64_bits": struct.pack(">d", outer_momentum).hex(),
+            },
         ),
     )
     source = _object(store, f"{suffix} policy source".encode())
@@ -194,7 +220,7 @@ def _fixture(
         "policy": policy,
         "boundary": boundary,
         "fragment_id": 0,
-        "outer_lr_f64_bits": struct.pack(">d", 0.28).hex(),
+        "outer_lr_f64_bits": struct.pack(">d", outer_lr).hex(),
         "decision": _object(store, f"{suffix} decision bytes".encode()),
         "config_sha256": config.sha256,
     }
@@ -222,12 +248,41 @@ def _fixture(
         action_reason="seal the candidate comparison arm",
         fallback_reason=None,
     )
+    evaluation = _object(store, f"{suffix} fixed evaluation object".encode())
+    evaluator_source = _object(store, f"{suffix} evaluator source".encode())
+    evaluator_config = _object(store, f"{suffix} evaluator config".encode())
+    plan = publish_crn_evaluation_plan(
+        store,
+        f"{suffix}-crn-plan",
+        boundary=boundary,
+        stock_action=stock_action,
+        candidate_action=candidate_action,
+        responder_index=0,
+        evaluation=evaluation,
+        expected_cuda_rng_streams=1,
+        evaluator=EvaluatorProvenance(
+            source_commit="f" * 40,
+            image_id="capture-v2-fake-crn-evaluator@sha256:test",
+            source=evaluator_source,
+            config=evaluator_config,
+        ),
+        attestation_manifest_id=f"{suffix}-crn-attestation",
+        paired_outcome_manifest_id=f"{suffix}-crn-paired-outcome",
+    )
+    campaign_index = publish_crn_campaign_index(
+        store,
+        f"{suffix}-crn-campaign-index",
+        campaign_id=f"pti-sgd-028-{suffix}",
+        plans=[plan],
+    )
     return _Fixture(
         store=store,
         boundary=boundary,
         stock_action=stock_action,
         candidate_action=candidate_action,
-        evaluation=_object(store, f"{suffix} fixed evaluation object".encode()),
+        campaign_index=campaign_index,
+        plan=plan,
+        evaluation=evaluation,
         future_groups=future_groups,
         stock_result=stock_result,
         candidate_result=candidate_result,
@@ -273,6 +328,14 @@ class _FakeBackend:
         )
         for action in (self.fixture.stock_action, self.fixture.candidate_action):
             assert self.store.manifest_path(action.manifest.sha256).is_file()
+
+    def provenance(self) -> EvaluatorProvenance:
+        self._callback_guard()
+        self.calls.append(("provenance",))
+        provenance = load_crn_evaluation_plan(self.store, self.fixture.plan).evaluator
+        if self.fault == "wrong-provenance":
+            return replace(provenance, image_id="crosswired-evaluator-image")
+        return provenance
 
     def restore(self, request: RestoreRequest) -> RestoreReceipt:
         self._callback_guard()
@@ -427,14 +490,38 @@ class _FakeBackend:
 def _evaluate(fixture: _Fixture, backend: _FakeBackend):
     return evaluate_isolated_crn_pair(
         fixture.store,
+        campaign_index=fixture.campaign_index,
+        plan=fixture.plan,
+        backend=backend,
+    )
+
+
+def _reseal_manifest(fixture: _Fixture, ref, mutate):
+    manifest = deepcopy(fixture.store.load_manifest(ref.manifest))
+    mutate(manifest["metadata"])
+    entries = [
+        ManifestEntry(row["role"], ObjectRef(row["sha256"], row["bytes"]))
+        for row in manifest["objects"]
+    ]
+    return fixture.store.publish_manifest(
+        manifest["manifest_id"], entries, metadata=manifest["metadata"]
+    )
+
+
+def _alternate_plan(fixture: _Fixture, suffix: str) -> CRNEvaluationPlanRef:
+    loaded = load_crn_evaluation_plan(fixture.store, fixture.plan)
+    return publish_crn_evaluation_plan(
+        fixture.store,
+        f"alternate-{suffix}-crn-plan",
         boundary=fixture.boundary,
         stock_action=fixture.stock_action,
         candidate_action=fixture.candidate_action,
         responder_index=0,
-        evaluation=fixture.evaluation,
-        backend=backend,
-        stock_outcome_manifest_id="crn-stock-outcome",
-        candidate_outcome_manifest_id="crn-candidate-outcome",
+        evaluation=_object(fixture.store, f"alternate {suffix} evaluation".encode()),
+        expected_cuda_rng_streams=1,
+        evaluator=loaded.evaluator,
+        attestation_manifest_id=f"alternate-{suffix}-crn-attestation",
+        paired_outcome_manifest_id=f"alternate-{suffix}-crn-paired-outcome",
     )
 
 
@@ -472,17 +559,17 @@ def test_isolated_crn_runs_both_orders_and_only_then_publishes_outcomes(tmp_path
     assert set(backend.manifest_count_during_callbacks) == {manifest_count_before}
     assert len(list(fixture.store.manifests_dir.iterdir())) == manifest_count_before + 2
 
-    stock = load_policy_outcome(fixture.store, result.stock_outcome)
-    candidate = load_policy_outcome(fixture.store, result.candidate_outcome)
-    assert stock.action_ref.manifest.sha256 == fixture.stock_action.manifest.sha256
-    assert candidate.action_ref.manifest.sha256 == (
-        fixture.candidate_action.manifest.sha256
-    )
-    assert stock.evaluation == candidate.evaluation == fixture.evaluation
-    assert struct.pack(">d", stock.k0_loss).hex() == result.stock_trace.k0.loss_f64_bits
-    assert struct.pack(">d", stock.k8_loss).hex() == result.stock_trace.k8.loss_f64_bits
-    assert stock.evaluation_loss == stock.k8_loss
-    assert candidate.evaluation_loss == candidate.k8_loss
+    attestation = load_crn_isolation_attestation(fixture.store, result.attestation)
+    paired = load_crn_paired_outcome(fixture.store, result.paired_outcome)
+    assert len(attestation.traces) == 4
+    assert paired.scientifically_admissible is True
+    assert paired.stock.action.sha256 == fixture.stock_action.manifest.sha256
+    assert paired.candidate.action.sha256 == (fixture.candidate_action.manifest.sha256)
+    assert paired.evaluation == fixture.evaluation
+    assert paired.stock.k0_loss_f64_bits == result.stock_trace.k0.loss_f64_bits
+    assert paired.stock.k8_loss_f64_bits == result.stock_trace.k8.loss_f64_bits
+    assert paired.candidate.k0_loss_f64_bits == result.candidate_trace.k0.loss_f64_bits
+    assert paired.candidate.k8_loss_f64_bits == result.candidate_trace.k8.loss_f64_bits
     assert len(result.stock_trace.groups) == len(result.candidate_trace.groups) == 8
     fixture.store.audit()
 
@@ -505,6 +592,7 @@ def test_isolated_crn_runs_both_orders_and_only_then_publishes_outcomes(tmp_path
         ("nonfinite-loss", "decode to a finite f64"),
         ("missing-evaluation-object", "regular non-symlink"),
         ("backend-exception", "backend future group 3 failed"),
+        ("wrong-provenance", "provenance differs from the sealed plan"),
         ("corrupt-sealed-action", "manifest SHA-256 mismatch"),
     ],
 )
@@ -528,82 +616,257 @@ def test_incomplete_worker_future_groups_cannot_seal_crn_action(tmp_path):
 
 @pytest.mark.parametrize("arm", ["stock", "candidate"])
 def test_missing_crn_capability_fails_before_first_callback(tmp_path, arm):
-    fixture = _fixture(
-        tmp_path,
-        stock_required=("worker_restore",) if arm == "stock" else COMPLETE_CAPABILITIES,
-        candidate_required=("worker_restore",)
-        if arm == "candidate"
-        else COMPLETE_CAPABILITIES,
-    )
-    backend = _FakeBackend(fixture)
-
-    with pytest.raises(
-        CRNEvaluationError, match=r"complete worker_restore\+crn_train_k8"
-    ):
-        _evaluate(fixture, backend)
-
-    assert backend.calls == []
-
-
-def test_action_role_swap_and_boundary_cross_wire_fail_before_callbacks(tmp_path):
-    fixture = _fixture(tmp_path, suffix="one")
-    backend = _FakeBackend(fixture)
-    with pytest.raises(CRNEvaluationError, match="stock action must"):
-        evaluate_isolated_crn_pair(
-            fixture.store,
-            boundary=fixture.boundary,
-            stock_action=fixture.candidate_action,
-            candidate_action=fixture.stock_action,
-            responder_index=0,
-            evaluation=fixture.evaluation,
-            backend=backend,
-            stock_outcome_manifest_id="stock-outcome",
-            candidate_outcome_manifest_id="candidate-outcome",
+    with pytest.raises(CRNAuthorityError, match="lacks required"):
+        _fixture(
+            tmp_path,
+            stock_required=("worker_restore",)
+            if arm == "stock"
+            else COMPLETE_CAPABILITIES,
+            candidate_required=("worker_restore",)
+            if arm == "candidate"
+            else COMPLETE_CAPABILITIES,
         )
-    assert backend.calls == []
 
+
+def test_campaign_rejects_an_unauthorized_plan_before_callbacks(tmp_path):
+    fixture = _fixture(tmp_path, suffix="one")
     second = _fixture(tmp_path, store=fixture.store, suffix="two")
-    with pytest.raises(CRNEvaluationError, match="cross-wired to another boundary"):
+    backend = _FakeBackend(fixture)
+    with pytest.raises(CRNAuthorityError, match="not authorized"):
         evaluate_isolated_crn_pair(
             fixture.store,
-            boundary=fixture.boundary,
-            stock_action=fixture.stock_action,
-            candidate_action=second.candidate_action,
-            responder_index=0,
-            evaluation=fixture.evaluation,
+            campaign_index=fixture.campaign_index,
+            plan=second.plan,
             backend=backend,
-            stock_outcome_manifest_id="stock-outcome",
-            candidate_outcome_manifest_id="candidate-outcome",
         )
     assert backend.calls == []
 
 
 @pytest.mark.parametrize(
-    ("responder_index", "stock_id", "candidate_id", "message"),
+    ("campaign", "plan", "message"),
     [
-        (True, "stock-outcome", "candidate-outcome", "non-negative integer"),
-        (1, "stock-outcome", "candidate-outcome", "absent from the boundary"),
-        (0, "bad/id", "candidate-outcome", "canonical manifest_id"),
-        (0, "same-outcome", "same-outcome", "must differ"),
+        (None, "plan", "campaign_index must be CRNCampaignIndexRef"),
+        ("campaign", None, "plan must be CRNEvaluationPlanRef"),
     ],
 )
-def test_invalid_evaluator_inputs_fail_before_callbacks(
-    tmp_path, responder_index, stock_id, candidate_id, message
+def test_invalid_authority_types_fail_before_callbacks(
+    tmp_path, campaign, plan, message
 ):
     fixture = _fixture(tmp_path)
     backend = _FakeBackend(fixture)
+    campaign_value = fixture.campaign_index if campaign == "campaign" else campaign
+    plan_value = fixture.plan if plan == "plan" else plan
 
-    with pytest.raises(CRNEvaluationError, match=message):
+    with pytest.raises(TypeError, match=message):
         evaluate_isolated_crn_pair(
             fixture.store,
-            boundary=fixture.boundary,
-            stock_action=fixture.stock_action,
-            candidate_action=fixture.candidate_action,
-            responder_index=responder_index,
-            evaluation=fixture.evaluation,
+            campaign_index=campaign_value,
+            plan=plan_value,
             backend=backend,
-            stock_outcome_manifest_id=stock_id,
-            candidate_outcome_manifest_id=candidate_id,
         )
 
     assert backend.calls == []
+
+
+def test_alternative_evaluation_plan_is_not_posthoc_admissible(tmp_path):
+    fixture = _fixture(tmp_path)
+    alternate = _alternate_plan(fixture, "evaluation")
+    backend = _FakeBackend(fixture)
+
+    with pytest.raises(CRNAuthorityError, match="not authorized"):
+        evaluate_isolated_crn_pair(
+            fixture.store,
+            campaign_index=fixture.campaign_index,
+            plan=alternate,
+            backend=backend,
+        )
+
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda metadata: metadata["responder"].__setitem__("rank", 7),
+            "responder identity cross-reference mismatch",
+        ),
+        (
+            lambda metadata: metadata["future_groups"][0].__setitem__(
+                "sha256", metadata["future_groups"][1]["sha256"]
+            ),
+            "future group 0 cross-reference mismatch",
+        ),
+        (
+            lambda metadata: metadata["evaluation"].__setitem__("sha256", "0" * 64),
+            "evaluation object cross-reference mismatch",
+        ),
+        (
+            lambda metadata: metadata["actions"].__setitem__(
+                "stock", metadata["actions"]["candidate"]
+            ),
+            "stock action must be an exact stock_fallback",
+        ),
+        (
+            lambda metadata: metadata.__setitem__("horizons", [0, 7]),
+            r"horizons must be exactly \[0, 8\]",
+        ),
+        (
+            lambda metadata: metadata["schedule"][0].__setitem__(
+                "arms", ["candidate", "stock"]
+            ),
+            "arm schedule is not canonical",
+        ),
+        (
+            lambda metadata: metadata.__setitem__("expected_cuda_rng_streams", 2),
+            "CUDA RNG stream count differs",
+        ),
+    ],
+)
+def test_resealed_plan_choice_tampering_is_rejected(tmp_path, mutate, message):
+    fixture = _fixture(tmp_path)
+    tampered = CRNEvaluationPlanRef(_reseal_manifest(fixture, fixture.plan, mutate))
+
+    with pytest.raises(CaptureStoreError, match=message):
+        load_crn_evaluation_plan(fixture.store, tampered)
+
+
+def test_campaign_index_rejects_competing_plan_for_same_boundary(tmp_path):
+    fixture = _fixture(tmp_path)
+    alternate = _alternate_plan(fixture, "competing")
+
+    with pytest.raises(CRNAuthorityError, match="competing plans"):
+        publish_crn_campaign_index(
+            fixture.store,
+            "competing-campaign-index",
+            campaign_id="pti-sgd-028-competing",
+            plans=[fixture.plan, alternate],
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"outer_lr": 0.27}, "outer LR must be exactly f64 0.28"),
+        ({"outer_momentum": 0.9}, r"exact \+0.0 f64 momentum"),
+    ],
+)
+def test_plan_rejects_non_pti_outer_dynamics(tmp_path, kwargs, message):
+    with pytest.raises(CRNAuthorityError, match=message):
+        _fixture(tmp_path, **kwargs)
+
+
+def test_attestation_rejects_trace_omission_and_order_swap(tmp_path):
+    fixture = _fixture(tmp_path)
+    result = _evaluate(fixture, _FakeBackend(fixture))
+    attestation = load_crn_isolation_attestation(fixture.store, result.attestation)
+
+    with pytest.raises(CRNAuthorityError, match="exactly four traces"):
+        publish_crn_isolation_attestation(
+            fixture.store,
+            campaign_index=fixture.campaign_index,
+            plan=fixture.plan,
+            traces=attestation.traces[:-1],
+        )
+    swapped = (
+        attestation.traces[1],
+        attestation.traces[0],
+        *attestation.traces[2:],
+    )
+    with pytest.raises(CRNAuthorityError, match="frozen schedule"):
+        publish_crn_isolation_attestation(
+            fixture.store,
+            campaign_index=fixture.campaign_index,
+            plan=fixture.plan,
+            traces=swapped,
+        )
+
+
+def test_attestation_rejects_loss_bit_or_state_chain_tampering(tmp_path):
+    fixture = _fixture(tmp_path)
+    result = _evaluate(fixture, _FakeBackend(fixture))
+    attestation = load_crn_isolation_attestation(fixture.store, result.attestation)
+
+    changed_loss = replace(
+        attestation.traces[0],
+        k8=replace(
+            attestation.traces[0].k8,
+            loss_f64_bits=struct.pack(">d", 99.0).hex(),
+        ),
+    )
+    with pytest.raises(CRNAuthorityError, match="stock trace differs"):
+        publish_crn_isolation_attestation(
+            fixture.store,
+            campaign_index=fixture.campaign_index,
+            plan=fixture.plan,
+            traces=(changed_loss, *attestation.traces[1:]),
+        )
+
+    groups = list(attestation.traces[0].groups)
+    groups[-1] = replace(groups[-1], state_sha256="0" * 64)
+    changed_state = replace(attestation.traces[0], groups=tuple(groups))
+    with pytest.raises(CRNAuthorityError, match="last future-group state"):
+        publish_crn_isolation_attestation(
+            fixture.store,
+            campaign_index=fixture.campaign_index,
+            plan=fixture.plan,
+            traces=(changed_state, *attestation.traces[1:]),
+        )
+
+
+def test_paired_outcome_crosschecks_both_arms_against_attestation(tmp_path):
+    fixture = _fixture(tmp_path)
+    result = _evaluate(fixture, _FakeBackend(fixture))
+
+    def crosswire(metadata):
+        metadata["arms"]["stock"]["action"] = metadata["arms"]["candidate"]["action"]
+
+    tampered = CRNPairedOutcomeRef(
+        _reseal_manifest(fixture, result.paired_outcome, crosswire)
+    )
+    with pytest.raises(CRNAuthorityError, match="stock outcome differs"):
+        load_crn_paired_outcome(fixture.store, tampered)
+
+
+def test_generic_one_arm_outcome_is_explicitly_non_admissible(tmp_path):
+    fixture = _fixture(tmp_path)
+    result = _evaluate(fixture, _FakeBackend(fixture))
+    trace = result.candidate_trace
+    generic_ref = publish_policy_outcome(
+        fixture.store,
+        "generic-one-arm-outcome",
+        action=fixture.candidate_action,
+        k0=trace.k0.artifact,
+        k0_loss=struct.unpack(">d", bytes.fromhex(trace.k0.loss_f64_bits))[0],
+        k8=trace.k8.artifact,
+        k8_loss=struct.unpack(">d", bytes.fromhex(trace.k8.loss_f64_bits))[0],
+        evaluation=fixture.evaluation,
+        evaluation_loss=struct.unpack(">d", bytes.fromhex(trace.k8.loss_f64_bits))[0],
+    )
+
+    assert generic_ref.scientifically_admissible is False
+    assert (
+        load_policy_outcome(fixture.store, generic_ref).scientifically_admissible
+        is False
+    )
+
+
+def test_output_identity_is_reserved_by_plan_not_call_time(tmp_path):
+    fixture = _fixture(tmp_path)
+    result = _evaluate(fixture, _FakeBackend(fixture))
+    loaded_plan = load_crn_evaluation_plan(fixture.store, fixture.plan)
+
+    assert (
+        result.attestation.manifest.manifest_id == loaded_plan.attestation_manifest_id
+    )
+    assert result.paired_outcome.manifest.manifest_id == (
+        loaded_plan.paired_outcome_manifest_id
+    )
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        evaluate_isolated_crn_pair(
+            fixture.store,
+            campaign_index=fixture.campaign_index,
+            plan=fixture.plan,
+            backend=_FakeBackend(fixture),
+            stock_outcome_manifest_id="posthoc-choice",
+        )

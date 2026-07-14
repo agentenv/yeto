@@ -14,12 +14,21 @@ import struct
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .capture_v2_crn_plan import (
+    CRNArmEvidence,
+    CRNCampaignIndexRef,
+    CRNEvaluationEvidence,
+    CRNEvaluationPlanRef,
+    CRNGroupEvidence,
+    CRNIsolationAttestationRef,
+    CRNPairedOutcomeRef,
+    EvaluatorProvenance,
+    load_authorized_crn_plan,
+    publish_crn_isolation_attestation,
+    publish_crn_paired_outcome,
+)
 from .capture_v2_policy import (
     LoadedSealedOuterAction,
-    PolicyOutcomeRef,
-    SealedOuterActionRef,
-    load_sealed_outer_action,
-    publish_policy_outcome,
 )
 from .capture_v2_store import (
     CaptureObjectStore,
@@ -27,15 +36,12 @@ from .capture_v2_store import (
     ManifestRef,
     ObjectRef,
 )
-from .capture_v2_syncer import SyncerBoundaryRef, load_syncer_boundary
 
 
-REQUIRED_CAPABILITIES = frozenset({"worker_restore", "crn_train_k8"})
 FUTURE_GROUP_COUNT = 8
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _F64_BITS_RE = re.compile(r"[0-9a-f]{16}\Z")
-_MANIFEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
 class CRNEvaluationError(CaptureStoreError):
@@ -142,6 +148,9 @@ class TrainGroupReceipt:
 class IsolatedCRNBackend(Protocol):
     """Policy-agnostic callbacks required by the isolated evaluator."""
 
+    def provenance(self) -> EvaluatorProvenance:
+        """Return the exact sealed evaluator code, image, and config identity."""
+
     def restore(self, request: RestoreRequest) -> RestoreReceipt:
         """Create an independent fresh branch from the verified endpoint."""
 
@@ -177,16 +186,20 @@ class ArmTrace:
 
 @dataclass(frozen=True)
 class CRNEvaluationResult:
-    """Published outcomes and the two verified canonical arm traces."""
+    """Atomic paired result plus its complete durable isolation proof."""
 
-    stock_outcome: PolicyOutcomeRef
-    candidate_outcome: PolicyOutcomeRef
+    campaign_index: CRNCampaignIndexRef
+    plan: CRNEvaluationPlanRef
+    attestation: CRNIsolationAttestationRef
+    paired_outcome: CRNPairedOutcomeRef
     stock_trace: ArmTrace
     candidate_trace: ArmTrace
 
 
 @dataclass(frozen=True)
 class _Inputs:
+    campaign_index_ref: CRNCampaignIndexRef
+    plan_ref: CRNEvaluationPlanRef
     boundary: ManifestIdentity
     endpoint: ManifestIdentity
     stock: LoadedSealedOuterAction
@@ -197,6 +210,7 @@ class _Inputs:
     candidate_result: VerifiedArtifact
     evaluation: VerifiedArtifact
     future_groups: tuple[VerifiedArtifact, ...]
+    evaluator: EvaluatorProvenance
 
 
 def _manifest_identity(ref: ManifestRef) -> ManifestIdentity:
@@ -235,91 +249,38 @@ def _verified_artifact(
     return VerifiedArtifact(ref, data)
 
 
-def _validate_manifest_id(value: Any, context: str) -> str:
-    if not isinstance(value, str) or _MANIFEST_ID_RE.fullmatch(value) is None:
-        raise CRNEvaluationError(f"{context} is not a canonical manifest_id")
-    return value
-
-
-def _same_manifest(left: ManifestRef, right: ManifestRef) -> bool:
-    return (
-        left.manifest_id == right.manifest_id
-        and left.sha256 == right.sha256
-        and left.bytes == right.bytes
-    )
-
-
-def _require_capabilities(action: LoadedSealedOuterAction, context: str) -> None:
-    required = set(action.required_capabilities)
-    declared = set(action.policy.capabilities)
-    if not REQUIRED_CAPABILITIES <= required or not REQUIRED_CAPABILITIES <= declared:
-        raise CRNEvaluationError(
-            f"{context} lacks complete worker_restore+crn_train_k8 capabilities"
-        )
-
-
 def _load_inputs(
     store: CaptureObjectStore,
     *,
-    boundary_ref: SyncerBoundaryRef,
-    stock_ref: SealedOuterActionRef,
-    candidate_ref: SealedOuterActionRef,
-    responder_index: int,
-    evaluation_ref: ObjectRef,
+    campaign_index_ref: CRNCampaignIndexRef,
+    plan_ref: CRNEvaluationPlanRef,
 ) -> _Inputs:
-    if not isinstance(boundary_ref, SyncerBoundaryRef):
-        raise TypeError("boundary must be a SyncerBoundaryRef")
-    if not isinstance(stock_ref, SealedOuterActionRef):
-        raise TypeError("stock_action must be a SealedOuterActionRef")
-    if not isinstance(candidate_ref, SealedOuterActionRef):
-        raise TypeError("candidate_action must be a SealedOuterActionRef")
-    if type(responder_index) is not int or responder_index < 0:
-        raise CRNEvaluationError("responder_index must be a non-negative integer")
-
-    boundary = load_syncer_boundary(store, boundary_ref)
-    stock = load_sealed_outer_action(store, stock_ref)
-    candidate = load_sealed_outer_action(store, candidate_ref)
-    for action, context in ((stock, "stock action"), (candidate, "candidate action")):
-        if not _same_manifest(action.boundary_ref.manifest, boundary_ref.manifest):
-            raise CRNEvaluationError(f"{context} is cross-wired to another boundary")
-        _require_capabilities(action, context)
-    if stock.action_kind != "stock_fallback":
-        raise CRNEvaluationError("stock action must be a sealed stock_fallback")
-    if candidate.action_kind != "nonstock":
-        raise CRNEvaluationError("candidate action must be a sealed nonstock action")
-    if stock.stock_pseudo_gradient != candidate.stock_pseudo_gradient:
-        raise CRNEvaluationError(
-            "stock and candidate actions use different stock objects"
-        )
-    if responder_index >= len(boundary.responders):
-        raise CRNEvaluationError("responder_index is absent from the boundary")
-
-    responder = boundary.responders[responder_index]
-    captured = responder.endpoint.future_groups
-    expected_indices = list(range(FUTURE_GROUP_COUNT))
-    if captured.state != "complete" or list(captured.refs) != expected_indices:
-        raise CRNEvaluationError(
-            "selected worker restore lacks the complete ordered 8 future groups"
-        )
+    plan = load_authorized_crn_plan(store, campaign_index_ref, plan_ref)
+    responder = plan.responder
     future_groups = tuple(
-        _verified_artifact(store, captured.refs[index], f"future group {index}")
-        for index in expected_indices
+        _verified_artifact(store, ref, f"future group {index}")
+        for index, ref in enumerate(plan.future_groups)
     )
     return _Inputs(
-        boundary=_manifest_identity(boundary_ref.manifest),
+        campaign_index_ref=campaign_index_ref,
+        plan_ref=plan_ref,
+        boundary=_manifest_identity(plan.boundary_ref.manifest),
         endpoint=_manifest_identity(responder.endpoint_ref.manifest),
-        stock=stock,
-        candidate=candidate,
-        stock_identity=_manifest_identity(stock_ref.manifest),
-        candidate_identity=_manifest_identity(candidate_ref.manifest),
+        stock=plan.stock,
+        candidate=plan.candidate,
+        stock_identity=_manifest_identity(plan.stock_ref.manifest),
+        candidate_identity=_manifest_identity(plan.candidate_ref.manifest),
         stock_result=_verified_artifact(
-            store, stock.resulting_fragment, "stock resulting fragment"
+            store, plan.stock.resulting_fragment, "stock resulting fragment"
         ),
         candidate_result=_verified_artifact(
-            store, candidate.resulting_fragment, "candidate resulting fragment"
+            store, plan.candidate.resulting_fragment, "candidate resulting fragment"
         ),
-        evaluation=_verified_artifact(store, evaluation_ref, "fixed evaluation object"),
+        evaluation=_verified_artifact(
+            store, plan.evaluation, "fixed evaluation object"
+        ),
         future_groups=future_groups,
+        evaluator=plan.evaluator,
     )
 
 
@@ -515,43 +476,82 @@ def _assert_same_trace(first: ArmTrace, second: ArmTrace, context: str) -> None:
         )
 
 
+def _manifest_ref(identity: ManifestIdentity) -> ManifestRef:
+    return ManifestRef(
+        identity.manifest_id,
+        identity.sha256,
+        identity.bytes,
+        False,
+    )
+
+
+def _attestation_trace(
+    *, order: str, position: int, arm: str, trace: ArmTrace
+) -> CRNArmEvidence:
+    """Convert a validated in-memory trace to the durable authority schema."""
+
+    return CRNArmEvidence(
+        order=order,
+        position=position,
+        arm=arm,
+        action=_manifest_ref(trace.action),
+        restore_state_sha256=trace.restore_state_sha256,
+        applied_state_sha256=trace.applied_state_sha256,
+        k0=CRNEvaluationEvidence(
+            step=trace.k0.step,
+            evaluation=trace.k0.evaluation,
+            artifact=trace.k0.artifact,
+            state_sha256=trace.k0.state_sha256,
+            loss_f64_bits=trace.k0.loss_f64_bits,
+        ),
+        groups=tuple(
+            CRNGroupEvidence(
+                group_index=group.group_index,
+                future_group=group.future_group,
+                batch_sha256=group.batch_sha256,
+                state_sha256=group.state_sha256,
+            )
+            for group in trace.groups
+        ),
+        k8=CRNEvaluationEvidence(
+            step=trace.k8.step,
+            evaluation=trace.k8.evaluation,
+            artifact=trace.k8.artifact,
+            state_sha256=trace.k8.state_sha256,
+            loss_f64_bits=trace.k8.loss_f64_bits,
+        ),
+        final_state_sha256=trace.final_state_sha256,
+    )
+
+
 def evaluate_isolated_crn_pair(
     store: CaptureObjectStore,
     *,
-    boundary: SyncerBoundaryRef,
-    stock_action: SealedOuterActionRef,
-    candidate_action: SealedOuterActionRef,
-    responder_index: int,
-    evaluation: ObjectRef,
+    campaign_index: CRNCampaignIndexRef,
+    plan: CRNEvaluationPlanRef,
     backend: IsolatedCRNBackend,
-    stock_outcome_manifest_id: str,
-    candidate_outcome_manifest_id: str,
 ) -> CRNEvaluationResult:
-    """Evaluate sealed stock/candidate actions in both orders, then publish.
+    """Evaluate one pre-authorized plan in both orders, then publish atomically.
 
-    No callback runs until the boundary, both actions, the selected worker
-    restore, the fixed evaluation object, and all eight future groups have been
-    verified.  The fixed evaluation object's k8 loss is also recorded as the
-    outcome's final ``evaluation_loss``.
+    No callback runs until the campaign membership and the plan's boundary,
+    actions, responder endpoint, fixed evaluation object, future groups,
+    schedule, horizons, evaluator provenance, CUDA count, and reserved output
+    identities have all been verified.
     """
-
-    stock_outcome_manifest_id = _validate_manifest_id(
-        stock_outcome_manifest_id, "stock outcome manifest id"
-    )
-    candidate_outcome_manifest_id = _validate_manifest_id(
-        candidate_outcome_manifest_id, "candidate outcome manifest id"
-    )
-    if stock_outcome_manifest_id == candidate_outcome_manifest_id:
-        raise CRNEvaluationError("stock and candidate outcome manifest ids must differ")
 
     inputs = _load_inputs(
         store,
-        boundary_ref=boundary,
-        stock_ref=stock_action,
-        candidate_ref=candidate_action,
-        responder_index=responder_index,
-        evaluation_ref=evaluation,
+        campaign_index_ref=campaign_index,
+        plan_ref=plan,
     )
+    provenance_callback = getattr(backend, "provenance", None)
+    if not callable(provenance_callback):
+        raise CRNEvaluationError("backend lacks sealed evaluator provenance")
+    actual_provenance = _backend_call("provenance", provenance_callback)
+    if not isinstance(actual_provenance, EvaluatorProvenance):
+        raise CRNEvaluationError("backend provenance returned the wrong type")
+    if actual_provenance != inputs.evaluator:
+        raise CRNEvaluationError("backend provenance differs from the sealed plan")
     seen_branch_objects: set[int] = set()
     completed: list[tuple[object, str]] = []
     traces: dict[tuple[str, str], ArmTrace] = {}
@@ -615,50 +615,51 @@ def evaluate_isolated_crn_pair(
     # failing before an outcome manifest is published.
     _load_inputs(
         store,
-        boundary_ref=boundary,
-        stock_ref=stock_action,
-        candidate_ref=candidate_action,
-        responder_index=responder_index,
-        evaluation_ref=evaluation,
+        campaign_index_ref=campaign_index,
+        plan_ref=plan,
     )
-    for trace in (stock_trace, candidate_trace):
+    for trace in traces.values():
         store.verify_object(trace.k0.artifact)
         store.verify_object(trace.k8.artifact)
 
-    _, stock_k0_loss = _loss_bits(stock_trace.k0.loss_f64_bits, "stock k0 loss bits")
-    _, stock_k8_loss = _loss_bits(stock_trace.k8.loss_f64_bits, "stock k8 loss bits")
-    _, candidate_k0_loss = _loss_bits(
-        candidate_trace.k0.loss_f64_bits, "candidate k0 loss bits"
+    durable_traces = (
+        _attestation_trace(
+            order="stock-candidate",
+            position=0,
+            arm="stock",
+            trace=traces[("stock-candidate", "stock")],
+        ),
+        _attestation_trace(
+            order="stock-candidate",
+            position=1,
+            arm="candidate",
+            trace=traces[("stock-candidate", "candidate")],
+        ),
+        _attestation_trace(
+            order="candidate-stock",
+            position=0,
+            arm="candidate",
+            trace=traces[("candidate-stock", "candidate")],
+        ),
+        _attestation_trace(
+            order="candidate-stock",
+            position=1,
+            arm="stock",
+            trace=traces[("candidate-stock", "stock")],
+        ),
     )
-    _, candidate_k8_loss = _loss_bits(
-        candidate_trace.k8.loss_f64_bits, "candidate k8 loss bits"
-    )
-
-    stock_outcome = publish_policy_outcome(
+    attestation = publish_crn_isolation_attestation(
         store,
-        stock_outcome_manifest_id,
-        action=stock_action,
-        k0=stock_trace.k0.artifact,
-        k0_loss=stock_k0_loss,
-        k8=stock_trace.k8.artifact,
-        k8_loss=stock_k8_loss,
-        evaluation=inputs.evaluation.ref,
-        evaluation_loss=stock_k8_loss,
+        campaign_index=inputs.campaign_index_ref,
+        plan=inputs.plan_ref,
+        traces=durable_traces,
     )
-    candidate_outcome = publish_policy_outcome(
-        store,
-        candidate_outcome_manifest_id,
-        action=candidate_action,
-        k0=candidate_trace.k0.artifact,
-        k0_loss=candidate_k0_loss,
-        k8=candidate_trace.k8.artifact,
-        k8_loss=candidate_k8_loss,
-        evaluation=inputs.evaluation.ref,
-        evaluation_loss=candidate_k8_loss,
-    )
+    paired_outcome = publish_crn_paired_outcome(store, attestation=attestation)
     return CRNEvaluationResult(
-        stock_outcome=stock_outcome,
-        candidate_outcome=candidate_outcome,
+        campaign_index=inputs.campaign_index_ref,
+        plan=inputs.plan_ref,
+        attestation=attestation,
+        paired_outcome=paired_outcome,
         stock_trace=stock_trace,
         candidate_trace=candidate_trace,
     )

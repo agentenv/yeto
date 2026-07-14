@@ -121,14 +121,20 @@ class LoadedSealedOuterAction:
 
 @dataclass(frozen=True)
 class PolicyOutcomeRef:
-    """Content identity of one immutable outcome appended beside an action."""
+    """Content identity of one generic, scientifically non-admissible outcome."""
 
     manifest: ManifestRef
+
+    @property
+    def scientifically_admissible(self) -> bool:
+        """Only the attested atomic CRN pair can support the campaign claim."""
+
+        return False
 
 
 @dataclass
 class LoadedPolicyOutcome:
-    """Verified evaluation objects and finite losses bound to one action."""
+    """Verified generic outcome, never sufficient for CRN scientific claims."""
 
     manifest_id: str
     manifest_sha256: str
@@ -140,6 +146,12 @@ class LoadedPolicyOutcome:
     k8_loss: float
     evaluation: ObjectRef
     evaluation_loss: float
+
+    @property
+    def scientifically_admissible(self) -> bool:
+        """Generic one-arm outcomes cannot substitute for an attested CRN pair."""
+
+        return False
 
 
 def _policy_id(value: Any) -> str:
