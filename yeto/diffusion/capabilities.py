@@ -274,9 +274,12 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         scheduler=_FLOW_MATCH,
         forward_kwargs=("hidden_states", "timestep", "encoder_hidden_states"),
         output_alignment="direct latent output",
-        status="needs-real-validation",
-        gaps=("same contract as Wan2.1 1.3B but large model needs GPU validation",),
-        evidence=("finetrainers WanModelSpecification",),
+        status="generic-covered",
+        gaps=("production-length video validation still pending",),
+        evidence=(
+            "AWS p4de Wan2.1 14B raw-video 20-step 8-GPU FSDP2 LoRA train/backward/save/reload/sample",
+            "finetrainers WanModelSpecification",
+        ),
     ),
     "wan22": _cap(
         family="Wan",
@@ -288,9 +291,12 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         scheduler=_FLOW_MATCH,
         forward_kwargs=("hidden_states", "timestep", "encoder_hidden_states"),
         output_alignment="direct latent output",
-        status="needs-real-validation",
-        gaps=("generic multi-denoiser routing is implemented; real Wan2.2 validation is pending",),
-        evidence=("Wan2.2 config/source inspection",),
+        status="generic-covered",
+        gaps=("production-length video validation still pending",),
+        evidence=(
+            "AWS p4de Wan2.2 raw-video 20-step 8-GPU FSDP2 dual-denoiser LoRA train/backward/save/reload/sample",
+            "Wan2.2 config/source inspection",
+        ),
     ),
     "nava": _cap(
         family="NAVA",

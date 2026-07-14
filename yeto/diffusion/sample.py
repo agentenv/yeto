@@ -317,6 +317,36 @@ def _flatten_frames(value):
     return list(value) if isinstance(value, (list, tuple)) else None
 
 
+def _array_frames(value):
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        return None
+    if not isinstance(value, np.ndarray):
+        return None
+    if value.ndim == 5 and value.shape[0] == 1:
+        value = value[0]
+    if value.ndim == 3:
+        value = value[None]
+    if value.ndim != 4:
+        return None
+
+    frames = []
+    for frame in value:
+        if frame.ndim == 3 and frame.shape[0] in (1, 3, 4) and frame.shape[-1] not in (1, 3, 4):
+            frame = np.moveaxis(frame, 0, -1)
+        if np.issubdtype(frame.dtype, np.floating):
+            frame = np.clip(frame, 0.0, 1.0) * 255.0
+        else:
+            frame = np.clip(frame, 0, 255)
+        frame = frame.astype(np.uint8)
+        if frame.ndim == 3 and frame.shape[-1] == 1:
+            frame = frame[..., 0]
+        frames.append(Image.fromarray(frame))
+    return frames
+
+
 def save_sample_output(sample, output_path: str | Path, *, fps: int = 8) -> list[Path]:
     value = _primary_output(sample)
     path = Path(os.path.expanduser(str(output_path)))
@@ -327,7 +357,7 @@ def save_sample_output(sample, output_path: str | Path, *, fps: int = 8) -> list
         value.save(path)
         return [path]
 
-    frames = _flatten_frames(value)
+    frames = _array_frames(value) or _flatten_frames(value)
     if frames and all(_is_pil_image(frame) for frame in frames):
         if len(frames) == 1 and path.suffix:
             path.parent.mkdir(parents=True, exist_ok=True)

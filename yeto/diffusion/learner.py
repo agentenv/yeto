@@ -1238,9 +1238,17 @@ def encode_latents(pipe, rows, args, device, dtype, adapter=None) -> LatentBatch
         encoded = _call_vae_encode(pipe.vae, pixels)
         latents = _extract_latents(encoded)
         vae_config = getattr(pipe.vae, "config", None)
-        scale = getattr(vae_config, "scaling_factor", None) or 1.0
-        shift = getattr(vae_config, "shift_factor", None) or 0.0
-        latents = (latents - shift) * scale
+        latent_mean = getattr(vae_config, "latents_mean", None)
+        latent_std = getattr(vae_config, "latents_std", None)
+        if latent_mean is not None and latent_std is not None:
+            shape = (1, -1, *((1,) * (latents.ndim - 2)))
+            mean = torch.as_tensor(latent_mean, device=latents.device, dtype=latents.dtype).view(shape)
+            std = torch.as_tensor(latent_std, device=latents.device, dtype=latents.dtype).view(shape)
+            latents = (latents - mean) / std
+        else:
+            scale = getattr(vae_config, "scaling_factor", None) or 1.0
+            shift = getattr(vae_config, "shift_factor", None) or 0.0
+            latents = (latents - shift) * scale
     meta = _latent_meta(rows, latents)
     latents = _maybe_pack_latents(pipe, latents)
     return LatentBatch(latents, *meta)
@@ -1715,6 +1723,16 @@ def _sample_scheduler_timesteps(scheduler, batch: int, device) -> tuple[torch.Te
     return indices, scheduler_timesteps[indices.clamp(max=scheduler_timesteps.numel() - 1)]
 
 
+def _sync_multi_denoiser_timesteps(pipe, indices: torch.Tensor, timesteps: torch.Tensor) -> None:
+    if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() <= 1:
+        return
+    if len(_trainable_module_items(pipe)) < 2:
+        return
+    # Sharded experts must execute the same collective sequence on every rank.
+    dist.broadcast(indices, src=0)
+    dist.broadcast(timesteps, src=0)
+
+
 def _match_dims(values: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     while values.ndim < target.ndim:
         values = values.view(*values.shape, *([1] * (target.ndim - values.ndim)))
@@ -1811,6 +1829,7 @@ def add_noise_and_target(pipe, batch: LatentBatch):
         raise RuntimeError("diffusion pipeline has no scheduler")
     noise = torch.randn_like(latents)
     indices, timesteps = _sample_scheduler_timesteps(scheduler, int(latents.shape[0]), latents.device)
+    _sync_multi_denoiser_timesteps(pipe, indices, timesteps)
     scale_noise = getattr(scheduler, "scale_noise", None)
     if callable(scale_noise):
         noisy = _call_scheduler_method(

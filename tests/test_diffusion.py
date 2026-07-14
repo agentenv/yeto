@@ -126,7 +126,8 @@ def test_diffusion_capability_matrix_covers_aliases():
     assert "nava" in aliases_by_status("adapter-required")
     assert aliases_by_status("generic-gap") == ()
     assert "flux" in aliases_by_status("needs-real-validation")
-    assert "wan22" in aliases_by_status("needs-real-validation")
+    assert "wan21-t2v-14b" in aliases_by_status("generic-covered")
+    assert "wan22" in aliases_by_status("generic-covered")
     assert "| `wan22` |" in format_capability_table(("wan22",))
 
 
@@ -693,6 +694,28 @@ def test_add_noise_prefers_scheduler_scale_noise(monkeypatch):
     assert torch.equal(timesteps, torch.tensor([10.0, 30.0]))
     assert torch.allclose(noisy.latents, torch.tensor([[13.0], [35.0]]))
     assert torch.allclose(target, torch.tensor([[-1.0], [-3.0]]))
+
+
+def test_distributed_multi_denoiser_syncs_timestep_routing(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    seen = []
+    monkeypatch.setattr(learner.dist, "is_available", lambda: True)
+    monkeypatch.setattr(learner.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(learner.dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(learner.dist, "broadcast", lambda tensor, src: seen.append((tensor, src)))
+
+    pipe = SimpleNamespace(
+        transformer=torch.nn.Linear(1, 1),
+        transformer_2=torch.nn.Linear(1, 1),
+    )
+    indices = torch.tensor([3])
+    timesteps = torch.tensor([750.0])
+
+    learner._sync_multi_denoiser_timesteps(pipe, indices, timesteps)
+
+    assert seen == [(indices, 0), (timesteps, 0)]
 
 
 def test_add_noise_uses_named_add_noise_and_sample_prediction_target(monkeypatch):
@@ -1340,6 +1363,41 @@ def test_raw_video_encode_uses_pipeline_pack_latents(tmp_path):
     assert pipe.seen_pack == ((1, 4, 2, 3, 5), 1, 1)
 
 
+def test_raw_video_encode_uses_channel_latent_mean_and_std(tmp_path):
+    torch = pytest.importorskip("torch")
+    Image = pytest.importorskip("PIL.Image")
+    from yeto.diffusion import learner
+
+    clip = tmp_path / "clip"
+    clip.mkdir()
+    Image.new("RGB", (4, 4), color="red").save(clip / "frame_000.png")
+
+    class TinyLatentDist:
+        def sample(self):
+            return torch.tensor([1.0, 4.0]).view(1, 2, 1, 1, 1)
+
+    class TinyVAE(torch.nn.Module):
+        class config:
+            latents_mean = [1.0, 2.0]
+            latents_std = [2.0, 4.0]
+            scaling_factor = 99.0
+            shift_factor = 99.0
+
+        def encode(self, sample):
+            return SimpleNamespace(latent_dist=TinyLatentDist())
+
+    pipe = SimpleNamespace(vae=TinyVAE())
+    got = learner.encode_latents(
+        pipe,
+        [{"video": "clip", "__yeto_data_root__": str(tmp_path)}],
+        _args(height=4, width=4, num_frames=1),
+        torch.device("cpu"),
+        torch.float32,
+    )
+
+    assert torch.equal(got.latents, torch.tensor([0.0, 0.5]).view(1, 2, 1, 1, 1))
+
+
 def test_raw_video_encode_fits_variable_frame_counts_to_target_shape(tmp_path):
     torch = pytest.importorskip("torch")
     Image = pytest.importorskip("PIL.Image")
@@ -1401,6 +1459,19 @@ def test_raw_video_encode_fits_variable_frame_counts_to_target_shape(tmp_path):
     assert pipe.vae.seen_shape == (2, 3, 3, 4, 4)
     assert tuple(got.latents.shape) == (2, 4, 3, 2, 2)
     assert (got.latent_num_frames, got.latent_height, got.latent_width) == (3, 2, 2)
+
+
+def test_diffusion_sample_saves_numpy_video_frames(tmp_path):
+    np = pytest.importorskip("numpy")
+    Image = pytest.importorskip("PIL.Image")
+    from yeto.diffusion import sample
+
+    output = SimpleNamespace(frames=np.full((1, 2, 4, 4, 3), 0.5, dtype=np.float32))
+    saved = sample.save_sample_output(output, tmp_path / "frames")
+
+    assert [path.name for path in saved] == ["frame_000000.png", "frame_000001.png"]
+    with Image.open(saved[0]) as image:
+        assert image.getpixel((0, 0)) == (127, 127, 127)
 
 
 def test_raw_image_lora_adapter_round_trip(monkeypatch, tmp_path):
