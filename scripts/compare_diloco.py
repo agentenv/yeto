@@ -2748,6 +2748,20 @@ def main() -> int:
                 "--optimizer-state-capture-parity requires at least two exact "
                 "syncer steps so post-first-commit steady-state timing is nonempty"
             )
+        if (
+            not args.barrier_sync
+            or not args.optimizer_state_capture_parity_require_barrier
+        ):
+            p.error(
+                "--optimizer-state-capture-parity requires --barrier-sync and "
+                "--optimizer-state-capture-parity-require-barrier so the gate "
+                "proves observed fixed-H lockstep behavior"
+            )
+        if not args.optimizer_state_capture_strict_writer:
+            p.error(
+                "--optimizer-state-capture-parity requires "
+                "--optimizer-state-capture-strict-writer"
+            )
     if args.optimizer_state_capture_parity_require_barrier:
         if not args.optimizer_state_capture_parity or not args.barrier_sync:
             p.error(

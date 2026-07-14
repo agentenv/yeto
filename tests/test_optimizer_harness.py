@@ -916,7 +916,7 @@ def test_exp254_r4_draft_requires_observed_barrier_and_strict_writer():
     spec = load_spec(root / "exp2-54-smoke-r4-barrier-draft.json")
 
     assert spec.cloud["labels"]["draft"] == "true"
-    assert spec.repo_commit == "935cb7d64e12e6821d76f707ec9e49671576f921"
+    assert spec.repo_commit == "8cbff7650440e87a321ad525d485eef4c295a7d4"
     for flag in (
         "--strict-quorum",
         "--barrier-sync",

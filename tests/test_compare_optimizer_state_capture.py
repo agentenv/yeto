@@ -332,6 +332,9 @@ def test_parity_campaign_accepts_exact_matched_geometry(monkeypatch):
             "capture_m4_off,capture_m4_on",
             "--optimizer-state-capture",
             "--optimizer-state-capture-parity",
+            "--barrier-sync",
+            "--optimizer-state-capture-parity-require-barrier",
+            "--optimizer-state-capture-strict-writer",
             "--syncer-probe-capture",
             "--syncer-probe-capture-every",
             "1",
@@ -343,3 +346,31 @@ def test_parity_campaign_accepts_exact_matched_geometry(monkeypatch):
         ],
     )
     assert compare.main() == 0
+
+
+def test_parity_campaign_rejects_unproven_nonbarrier_geometry(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compare_diloco.py",
+            "--data",
+            "unused.jsonl",
+            "--settings",
+            "capture_m4_off,capture_m4_on",
+            "--optimizer-state-capture",
+            "--optimizer-state-capture-parity",
+            "--optimizer-state-capture-strict-writer",
+            "--syncer-probe-capture",
+            "--syncer-probe-capture-every",
+            "1",
+            "--syncer-total-steps",
+            "16",
+            "--fixed-window-microsteps",
+            "4",
+            "--dry-run",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        compare.main()
+    assert exc_info.value.code == 2
