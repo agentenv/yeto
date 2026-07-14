@@ -1,4 +1,4 @@
-# Learner ↔ Syncer wire protocol (v3)
+# Learner ↔ Syncer wire protocol (v4)
 
 Transport: a **connection group** of `1 + S` persistent TCP sockets per
 learner (stream 0 = control, streams 1..S = data). A single cross-region TCP
@@ -33,6 +33,9 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
 | 7    | SHUTDOWN       | syncer → learner | empty (training reached T global steps) |
 | 8    | DATA_HELLO     | learner → syncer | learner_id:u32, stream_idx:u16 (attaches this socket to the learner's group as a data stream) |
 | 9    | CHUNK          | either           | msg_id:u64, total_len:u64, offset:u64, bytes (slice of an inner frame) |
+| 10   | BCAST_CONTROL  | syncer → learner | fragment_id:u32, version:u64, mean control tensor bytes (only with scaffold_lite) |
+| 11   | BCAST_CONTROL_PAIR | syncer → learner | fragment_id:u32, version:u64, local_len:u64, assigned residual bytes, shared mean bytes (only with scaffold_full shuffle) |
+| 12   | PUSH_FRAGMENT_AUDIT | learner → syncer | the exact type-4 header, then audit_version:u8 (=1), window_uuid:16 bytes, attempt_serial:u64, payload_sha256:32 bytes, tensor bytes |
 
 ## Striping
 
@@ -108,6 +111,31 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
 - **Recovery**: a (re)connecting learner sends HELLO; syncer replies with
   BCAST_FRAGMENT for every initialized fragment at that fragment's version.
 - Merge math runs in f32 on the syncer regardless of wire dtype.
+
+## Audited pushes and exact response transcript
+
+Type 12 is opt-in and exists solely to join one captured learner window to the
+exact candidate admitted by the syncer. Type 4 is unchanged byte-for-byte. An
+audited learner computes `payload_sha256` over only the exact tensor bytes: the
+digest excludes the push/audit headers, outer frame, and CHUNK envelopes. The
+syncer hashes the received tensor-byte tail before decoding and refuses a digest
+mismatch before it can count toward quorum.
+
+Retries of one frozen endpoint reuse `window_uuid` and the payload digest but
+use a new learner-monotone `attempt_serial`. With `--response-transcript PATH
+--response-transcript-session UUID`, the syncer requires type-12 responses and
+writes a fresh fail-closed JSONL containing:
+
+- `syncer_push_attempt_v1` disposition records for pending admission,
+  duplicates, invalid/stale/late responses, and connection pruning; and
+- `syncer_round_commit_v1` records whose responders are enumerated in the exact
+  ascending numeric learner-ID order passed to the merge, including source
+  attempt, UUID/digest, counters, and f64 weight bits.
+
+A push is only finally admitted when its attempt event appears in a round commit
+record. `admitted_pending` can later be pruned after a disconnect or session
+replacement. Transcript mode is explicit and off by default; without it the
+legacy packet and scheduler paths are unchanged.
 
 ## Q4 delta pushes (dtype = 3)
 

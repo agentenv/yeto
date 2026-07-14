@@ -25,6 +25,7 @@ check_health only raises once reconnection has been given up for good.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import queue
@@ -56,6 +57,12 @@ MSG_BCAST_CONTROL = 10
 # Identity-shuffle Option-II residual pair. Envelope: fid u32, version u64,
 # residual byte length u64, then assigned-residual and shared-mean bytes.
 MSG_BCAST_CONTROL_PAIR = 11
+# Opt-in audited PUSH_FRAGMENT.  The legacy type-4 envelope stays byte-for-byte
+# unchanged; type 12 inserts a small audit header before the exact tensor bytes.
+MSG_PUSH_FRAGMENT_AUDIT = 12
+
+AUDIT_PUSH_VERSION = 1
+_AUDIT_PUSH_HEAD = struct.Struct("<B16sQ32s")
 
 DTYPE_F32 = 1
 DTYPE_BF16 = 2
@@ -116,7 +123,9 @@ def encode_hello(
     parts = [struct.pack("<IBI", learner_id, dtype, layout.num_fragments)]
     for frag in layout.fragments:
         parts.append(struct.pack("<BI", frag.merge_mode, len(frag.tensors)))
-        parts.append(struct.pack(f"<{len(frag.tensors)}Q", *(n for _, n in frag.tensors)))
+        parts.append(
+            struct.pack(f"<{len(frag.tensors)}Q", *(n for _, n in frag.tensors))
+        )
         if frag.merge_mode == MERGE_ISO:
             # Iso fragments append (rows, cols) per tensor so the syncer can
             # take the 2D view; avg/RDA keep the original wire format.
@@ -129,7 +138,9 @@ def encode_hello(
         elif isinstance(layout_metadata, str):
             meta = layout_metadata.encode("utf-8")
         else:
-            meta = json.dumps(layout_metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            meta = json.dumps(
+                layout_metadata, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
         parts.append(struct.pack("<I", len(meta)))
         parts.append(meta)
     return b"".join(parts)
@@ -154,6 +165,29 @@ class BcastControlPair:
     version: int
     local_data: bytes
     mean_data: bytes
+
+
+@dataclass(frozen=True)
+class PushAudit:
+    """Foreign-key metadata for an explicitly audited fragment push.
+
+    ``payload_sha256`` is the binary SHA-256 digest of the exact tensor bytes,
+    excluding all protocol/framing headers.  ``attempt_serial`` is monotone
+    within one learner capture session; retries of one frozen endpoint reuse the
+    window UUID and payload digest but receive a new attempt serial.
+    """
+
+    window_uuid: bytes
+    attempt_serial: int
+    payload_sha256: bytes
+
+    def __post_init__(self) -> None:
+        if len(self.window_uuid) != 16 or not any(self.window_uuid):
+            raise ValueError("audit window_uuid must be 16 nonzero bytes")
+        if self.attempt_serial < 1 or self.attempt_serial > (1 << 64) - 1:
+            raise ValueError("audit attempt_serial must be in [1, 2^64-1]")
+        if len(self.payload_sha256) != 32:
+            raise ValueError("audit payload_sha256 must be 32 bytes")
 
 
 class SyncerClient:
@@ -231,7 +265,9 @@ class SyncerClient:
 
     def start(self) -> None:
         self._connect_group(patient=True)
-        self._supervisor = threading.Thread(target=self._supervise, name="yeto-supervisor", daemon=True)
+        self._supervisor = threading.Thread(
+            target=self._supervise, name="yeto-supervisor", daemon=True
+        )
         self._supervisor.start()
 
     def _connect_group(self, patient: bool) -> None:
@@ -243,7 +279,9 @@ class SyncerClient:
         """
         socks: list[socket.socket] = []
         try:
-            control = self._connect_one() if patient else self._dial(RECONNECT_DIAL_TIMEOUT)
+            control = (
+                self._connect_one() if patient else self._dial(RECONNECT_DIAL_TIMEOUT)
+            )
             write_frame(
                 control,
                 MSG_HELLO,
@@ -257,7 +295,11 @@ class SyncerClient:
             )
             socks.append(control)
             for idx in range(self.num_streams):
-                s = self._connect_one() if patient else self._dial(RECONNECT_DIAL_TIMEOUT)
+                s = (
+                    self._connect_one()
+                    if patient
+                    else self._dial(RECONNECT_DIAL_TIMEOUT)
+                )
                 write_frame(s, MSG_DATA_HELLO, struct.pack("<IH", self.learner_id, idx))
                 socks.append(s)
         except BaseException:
@@ -276,9 +318,17 @@ class SyncerClient:
                 q: queue.Queue[bytes | None] = queue.Queue(maxsize=256)
                 self._queues.append(q)
                 ts = threading.Thread(
-                    target=self._send_loop, args=(gen, s, q), name=f"yeto-send-{i}", daemon=True
+                    target=self._send_loop,
+                    args=(gen, s, q),
+                    name=f"yeto-send-{i}",
+                    daemon=True,
                 )
-                tr = threading.Thread(target=self._recv_loop, args=(gen, s), name=f"yeto-recv-{i}", daemon=True)
+                tr = threading.Thread(
+                    target=self._recv_loop,
+                    args=(gen, s),
+                    name=f"yeto-recv-{i}",
+                    daemon=True,
+                )
                 self._threads += [ts, tr]
                 ts.start()
                 tr.start()
@@ -317,9 +367,14 @@ class SyncerClient:
             while True:
                 if self._closed.is_set() or self.shutdown.is_set():
                     return
-                if self.max_reconnects is not None and self._reconnects_used >= self.max_reconnects:
+                if (
+                    self.max_reconnects is not None
+                    and self._reconnects_used >= self.max_reconnects
+                ):
                     with self._lock:
-                        self._err = self._last_err or ConnectionError("syncer connection lost")
+                        self._err = self._last_err or ConnectionError(
+                            "syncer connection lost"
+                        )
                     return
                 self._reconnects_used += 1
                 if self._closed.wait(backoff):
@@ -366,7 +421,9 @@ class SyncerClient:
         c_steps: int,
         c_tokens: int,
         tensor_bytes: bytes,
-    ) -> None:
+        *,
+        audit: PushAudit | None = None,
+    ) -> bool:
         head = struct.pack(
             "<IIQQQIQ",
             self.learner_id,
@@ -377,10 +434,28 @@ class SyncerClient:
             c_steps,
             c_tokens,
         )
-        self._send_large(MSG_PUSH_FRAGMENT, head + tensor_bytes)
+        if audit is None:
+            # This is deliberately the original expression: type 4 and every
+            # byte after its 44-byte header remain exactly backward compatible.
+            return self._send_large(MSG_PUSH_FRAGMENT, head + tensor_bytes)
+        actual_digest = hashlib.sha256(tensor_bytes).digest()
+        if actual_digest != audit.payload_sha256:
+            raise ValueError("audit payload_sha256 does not match tensor_bytes")
+        audit_head = _AUDIT_PUSH_HEAD.pack(
+            AUDIT_PUSH_VERSION,
+            audit.window_uuid,
+            audit.attempt_serial,
+            audit.payload_sha256,
+        )
+        return self._send_large(
+            MSG_PUSH_FRAGMENT_AUDIT, head + audit_head + tensor_bytes
+        )
 
     def heartbeat(self, local_step: int) -> None:
-        self._enqueue(0, self._frame(MSG_HEARTBEAT, struct.pack("<IQ", self.learner_id, local_step)))
+        self._enqueue(
+            0,
+            self._frame(MSG_HEARTBEAT, struct.pack("<IQ", self.learner_id, local_step)),
+        )
 
     def drain_pulls(self) -> list[PullRequest]:
         return self._drain(self._pulls)
@@ -434,23 +509,25 @@ class SyncerClient:
             except queue.Full:
                 continue
 
-    def _send_large(self, msg_type: int, payload: bytes) -> None:
+    def _send_large(self, msg_type: int, payload: bytes) -> bool:
         inner = self._frame(msg_type, payload)
         if self.num_streams == 0:
-            self._enqueue(0, inner)
-            return
+            return self._enqueue(0, inner)
         with self._lock:
             if not self._connected.is_set():
-                return  # outage: drop the whole message rather than send a torso
+                return False  # outage: drop the whole message rather than send a torso
             gen = self._gen
         msg_id = next(self._msg_id)
         total = len(inner)
         for offset in range(0, total, CHUNK_SIZE):
             chunk = inner[offset : offset + CHUNK_SIZE]
-            envelope = self._frame(MSG_CHUNK, _CHUNK_HEAD.pack(msg_id, total, offset) + chunk)
+            envelope = self._frame(
+                MSG_CHUNK, _CHUNK_HEAD.pack(msg_id, total, offset) + chunk
+            )
             stream = 1 + next(self._rr) % self.num_streams
             if not self._enqueue(stream, envelope, gen=gen):
-                return  # group died mid-message; drop the remainder
+                return False  # group died mid-message; drop the remainder
+        return True
 
     def _socket_failed(self, gen: int, exc: BaseException) -> None:
         if self.shutdown.is_set() or self._closed.is_set():

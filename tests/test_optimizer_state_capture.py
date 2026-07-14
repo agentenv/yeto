@@ -1,0 +1,562 @@
+from __future__ import annotations
+
+import copy
+import json
+import random
+from collections import OrderedDict
+
+import numpy as np
+import pytest
+import torch
+
+from yeto.fragments import Fragment, FragmentLayout, MERGE_RDA
+from yeto.optimizer_state_capture import (
+    CaptureIntegrityError,
+    OptimizerStateCapture,
+    load_capture,
+)
+from yeto.protocol import DTYPE_F32
+from yeto.tensor_io import pack_flat
+
+
+def _fixture(tmp_path, *, max_bytes=10_000_000, every=1, max_hmc=8, max_midpoint=8):
+    params = OrderedDict(
+        [
+            ("a", torch.nn.Parameter(torch.tensor([1.0, 2.0], dtype=torch.float32))),
+            ("b", torch.nn.Parameter(torch.tensor([-3.0], dtype=torch.float32))),
+        ]
+    )
+    layout = FragmentLayout([Fragment(MERGE_RDA, [("a", 2), ("b", 1)])])
+    optimizer = torch.optim.AdamW(
+        params.values(), lr=0.125, betas=(0.7, 0.91), eps=1e-6, weight_decay=0.03
+    )
+    optimizer.state[params["a"]] = {
+        "step": torch.tensor(7.0),
+        "exp_avg": torch.tensor([0.25, -0.5]),
+        "exp_avg_sq": torch.tensor([1.25, 2.5]),
+    }
+    optimizer.state[params["b"]] = {
+        "step": torch.tensor(11.0),
+        "exp_avg": torch.tensor([0.75]),
+        "exp_avg_sq": torch.tensor([3.5]),
+    }
+    capture = OptimizerStateCapture(
+        tmp_path,
+        params=params,
+        layout=layout,
+        optimizer=optimizer,
+        learner_id=4,
+        rank=0,
+        every=every,
+        max_hmc_events=max_hmc,
+        max_midpoint_windows=max_midpoint,
+        max_bytes=max_bytes,
+    )
+    return params, layout, optimizer, capture
+
+
+def _artifact(directory, kind):
+    paths = list(directory.glob(f"*-{kind}-*.pt"))
+    assert len(paths) == 1
+    return load_capture(paths[0])
+
+
+def _clone_live_state(params, optimizer):
+    return {
+        "params": {name: value.detach().clone() for name, value in params.items()},
+        "grads": {
+            name: None if value.grad is None else value.grad.detach().clone()
+            for name, value in params.items()
+        },
+        "optimizer": {
+            name: {
+                key: value.detach().clone()
+                if isinstance(value, torch.Tensor)
+                else copy.deepcopy(value)
+                for key, value in optimizer.state[param].items()
+            }
+            for name, param in params.items()
+        },
+        "python_rng": random.getstate(),
+        "numpy_rng": np.random.get_state(),
+        "torch_rng": torch.get_rng_state().clone(),
+    }
+
+
+def _assert_live_state_equal(before, params, optimizer):
+    for name, value in params.items():
+        assert torch.equal(value, before["params"][name])
+        expected_grad = before["grads"][name]
+        if expected_grad is None:
+            assert value.grad is None
+        else:
+            assert torch.equal(value.grad, expected_grad)
+        for key, expected in before["optimizer"][name].items():
+            actual = optimizer.state[value][key]
+            if isinstance(expected, torch.Tensor):
+                assert torch.equal(actual, expected)
+            else:
+                assert actual == expected
+    assert random.getstate() == before["python_rng"]
+    after_numpy = np.random.get_state()
+    assert after_numpy[0] == before["numpy_rng"][0]
+    assert np.array_equal(after_numpy[1], before["numpy_rng"][1])
+    assert after_numpy[2:] == before["numpy_rng"][2:]
+    assert torch.equal(torch.get_rng_state(), before["torch_rng"])
+
+
+def test_exact_adamw_moments_steps_and_first_clipped_gradient_are_passive(tmp_path):
+    params, _layout, optimizer, capture = _fixture(tmp_path)
+    params["a"].grad = torch.tensor([0.4, -0.2])
+    params["b"].grad = torch.tensor([0.1])
+
+    before = _clone_live_state(params, optimizer)
+    capture.note_broadcast(0, 23, local_step=100, tokens_total=4096, window_steps=4)
+    capture.capture_first_post_broadcast_gradients(
+        local_step_before_update=100, tokens_total=4096
+    )
+    _assert_live_state_equal(before, params, optimizer)
+
+    record = _artifact(tmp_path, "adamw_first_gradient")
+    assert record["metadata"]["fragment_version"] == 23
+    assert record["metadata"]["steps_since_reset_before_update"] == 0
+    assert record["metadata"]["gradient_boundary"] == (
+        "post_allreduce_post_clip_pre_optimizer_step"
+    )
+    tensors = record["payload"]["tensors"]
+    assert tensors["a"]["optimizer_step"] == 7
+    assert tensors["b"]["optimizer_step"] == 11
+    assert torch.equal(tensors["a"]["exp_avg"], torch.tensor([0.25, -0.5]))
+    assert torch.equal(tensors["a"]["exp_avg_sq"], torch.tensor([1.25, 2.5]))
+    assert torch.equal(
+        tensors["a"]["first_clipped_gradient"], torch.tensor([0.4, -0.2])
+    )
+    assert tensors["a"]["optimizer_group_config"]["betas"] == [0.7, 0.91]
+    assert tensors["a"]["optimizer_group_config"]["weight_decay"] == 0.03
+
+    # Captured tensors are real copies, not aliases of subsequent live state.
+    optimizer.state[params["a"]]["exp_avg"].add_(99)
+    params["a"].grad.add_(99)
+    assert torch.equal(tensors["a"]["exp_avg"], torch.tensor([0.25, -0.5]))
+    assert torch.equal(
+        tensors["a"]["first_clipped_gradient"], torch.tensor([0.4, -0.2])
+    )
+
+
+def test_exact_anchor_midpoint_endpoint_and_identity(tmp_path):
+    params, _layout, _optimizer, capture = _fixture(tmp_path)
+    capture.note_window_reset(
+        0, 9, local_step=20, tokens_total=2_000, window_steps=4, reason="lag_push"
+    )
+
+    expected = {}
+    for local_step in range(21, 25):
+        capture.capture_first_post_broadcast_gradients(
+            local_step_before_update=local_step - 1,
+            tokens_total=2_000 + (local_step - 21) * 128,
+            clip_total_norm=torch.tensor(0.75),
+        )
+        with torch.no_grad():
+            params["a"].add_(torch.tensor([1.0, 2.0]))
+            params["b"].add_(3.0)
+            for param in params.values():
+                optimizer_state = _optimizer.state[param]
+                optimizer_state["step"].add_(1)
+                optimizer_state["exp_avg"].add_(0.1)
+                optimizer_state["exp_avg_sq"].add_(0.2)
+        if local_step in (22, 24):
+            expected[local_step] = torch.cat(
+                [params["a"].detach().clone(), params["b"].detach().clone()]
+            )
+        capture.after_optimizer_step(
+            local_step=local_step,
+            tokens_total=2_000 + (local_step - 20) * 128,
+            current_window_steps=4,
+        )
+
+    record = _artifact(tmp_path, "richardson_window")
+    assert record["metadata"]["reset_reason"] == "lag_push"
+    assert record["metadata"]["fragment_version"] == 9
+    assert record["metadata"]["reset_local_step"] == 20
+    assert record["metadata"]["midpoint_local_step"] == 22
+    assert record["metadata"]["endpoint_local_step"] == 24
+    assert record["payload"]["anchor"]["tensor_order"] == ["a", "b"]
+    assert record["payload"]["anchor"]["parameters_f32"].dtype == torch.float32
+    assert torch.equal(
+        record["payload"]["anchor"]["parameters_f32"], torch.tensor([1.0, 2.0, -3.0])
+    )
+    assert torch.equal(record["payload"]["midpoint"]["parameters_f32"], expected[22])
+    assert torch.equal(record["payload"]["endpoint"]["parameters_f32"], expected[24])
+    anchor_a = record["payload"]["anchor"]["optimizer"]["a"]
+    midpoint_a = record["payload"]["midpoint"]["optimizer"]["a"]
+    endpoint_a = record["payload"]["endpoint"]["optimizer"]["a"]
+    assert anchor_a["optimizer_step"] == 7
+    assert midpoint_a["optimizer_step"] == 9
+    assert endpoint_a["optimizer_step"] == 11
+    assert torch.equal(
+        anchor_a["raw_optimizer_state"]["exp_avg"], torch.tensor([0.25, -0.5])
+    )
+    assert len(record["payload"]["step_history"]) == 4
+    assert record["payload"]["lr_mass_first_by_group"] == [0.25]
+    assert record["payload"]["lr_mass_second_by_group"] == [0.25]
+    assert torch.allclose(
+        record["payload"]["decoupled_decay_first_f32"],
+        torch.tensor([3.0, 6.0, -3.0]) * (0.125 * 0.03),
+        rtol=0,
+        atol=1e-9,
+    )
+    assert torch.allclose(
+        record["payload"]["decoupled_decay_second_f32"],
+        torch.tensor([7.0, 14.0, 9.0]) * (0.125 * 0.03),
+        rtol=0,
+        atol=1e-9,
+    )
+    assert all(
+        row["clip"]["max_norm"] == 1.0 for row in record["payload"]["step_history"]
+    )
+    assert all(
+        torch.allclose(row["clip"]["coefficient"], torch.tensor(1.0))
+        for row in record["payload"]["step_history"]
+    )
+
+
+def test_atomic_sidecar_tamper_rejection_and_no_temporary_files(tmp_path):
+    params, _layout, _optimizer, capture = _fixture(tmp_path)
+    params["a"].grad = torch.tensor([0.1, 0.2])
+    params["b"].grad = torch.tensor([0.3])
+    capture.note_broadcast(0, 1, local_step=0, tokens_total=0, window_steps=4)
+    capture.capture_first_post_broadcast_gradients(
+        local_step_before_update=0, tokens_total=0
+    )
+    path = next(tmp_path.glob("*-adamw_first_gradient-*.pt"))
+    assert path.with_suffix(".pt.sha256").exists()
+    assert not list(tmp_path.glob("*.tmp-*"))
+    assert load_capture(path)["kind"] == "adamw_first_gradient"
+
+    raw = bytearray(path.read_bytes())
+    raw[len(raw) // 2] ^= 1
+    path.write_bytes(raw)
+    with pytest.raises(CaptureIntegrityError, match="file checksum mismatch"):
+        load_capture(path)
+
+
+def test_cadence_limits_schedule_change_and_disk_budget_are_manifested(tmp_path):
+    params, _layout, _optimizer, capture = _fixture(
+        tmp_path, max_bytes=1, every=2, max_hmc=1, max_midpoint=2
+    )
+    params["a"].grad = torch.ones_like(params["a"])
+    params["b"].grad = torch.ones_like(params["b"])
+
+    # Broadcast 1 is selected. Its artifact cannot fit the one-byte budget;
+    # its midpoint anchor cannot be admitted either.
+    capture.note_broadcast(0, 1, local_step=0, tokens_total=0, window_steps=4)
+    capture.capture_first_post_broadcast_gradients(
+        local_step_before_update=0, tokens_total=0
+    )
+    # Broadcast 2 is skipped by cadence. Broadcast 3 is selected but the HMC
+    # admission cap was already consumed by broadcast 1.
+    capture.note_broadcast(0, 2, local_step=1, tokens_total=1, window_steps=4)
+    capture.note_broadcast(0, 3, local_step=2, tokens_total=2, window_steps=4)
+    capture.close()
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    drops = manifest["counters"]["drop_counts"]
+    assert drops["adamw_first_gradient_disk_byte_limit"] == 1
+    assert drops["midpoint_pending_memory_limit"] >= 1
+    assert drops["hmc_event_limit"] == 1
+    assert manifest["counters"]["artifact_bytes"] == 0
+    assert manifest["counters"]["closed"] is True
+
+
+def test_window_schedule_change_invalidates_pending_exact_window(tmp_path):
+    _params, _layout, _optimizer, capture = _fixture(tmp_path)
+    capture.note_window_reset(
+        0, 5, local_step=10, tokens_total=1_000, window_steps=4, reason="broadcast"
+    )
+    capture.after_optimizer_step(
+        local_step=11, tokens_total=1_100, current_window_steps=6
+    )
+    capture.close()
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["counters"]["drop_counts"]["midpoint_window_schedule_changed"] == 1
+    assert not list(tmp_path.glob("*-richardson_window-*.pt"))
+
+
+def test_non_fp32_parameters_fail_closed_instead_of_silent_cast(tmp_path):
+    param = torch.nn.Parameter(torch.ones(2, dtype=torch.float64))
+    layout = FragmentLayout([Fragment(MERGE_RDA, [("p", 2)])])
+    optimizer = torch.optim.AdamW([param])
+    with pytest.raises(TypeError, match="refusing a silent cast"):
+        OptimizerStateCapture(
+            tmp_path,
+            params={"p": param},
+            layout=layout,
+            optimizer=optimizer,
+            learner_id=0,
+            rank=0,
+        )
+
+
+def test_window_uuid_push_join_and_retry_mapping(tmp_path):
+    params, _layout, optimizer, capture = _fixture(tmp_path)
+    window_uuid = capture.note_window_reset(
+        0, 17, local_step=30, tokens_total=3_000, window_steps=2, reason="broadcast"
+    )
+    assert window_uuid is not None and len(window_uuid) == 36
+
+    for local_step in (31, 32):
+        capture.capture_first_post_broadcast_gradients(
+            local_step_before_update=local_step - 1,
+            tokens_total=3_000 + (local_step - 31) * 128,
+            clip_total_norm=torch.tensor(0.5),
+            clip_max_norm=1.0,
+        )
+        with torch.no_grad():
+            params["a"].add_(1.0)
+            params["b"].sub_(2.0)
+            for param in params.values():
+                optimizer.state[param]["step"].add_(1)
+        capture.after_optimizer_step(
+            local_step=local_step,
+            tokens_total=3_000 + (local_step - 30) * 128,
+            current_window_steps=2,
+        )
+
+    endpoint = torch.cat([params["a"].detach(), params["b"].detach()])
+    payload = pack_flat(endpoint, DTYPE_F32)
+    common = {
+        "window_uuid": window_uuid,
+        "fragment_id": 0,
+        "pull_global_step": 44,
+        "base_version": 17,
+        "local_step": 32,
+        "c_steps": 2,
+        "c_tokens": 256,
+        "wire_codec": "f32",
+        "payload": payload,
+    }
+    first = capture.note_push(**common)
+    capture.note_push_enqueued(first["attempt_serial"])
+    second = capture.note_push(**common)
+    capture.note_push_enqueued(second["attempt_serial"])
+    assert first["retry_identity"] == second["retry_identity"]
+    assert first["retry_ordinal"] == 1
+    assert second["retry_ordinal"] == 2
+    assert first["attempt_serial"] == 1
+    assert second["attempt_serial"] == 2
+    assert first["window_uuid"] == window_uuid
+
+    candidates = sorted(tmp_path.glob("*-push_candidate-*.pt"))
+    assert len(candidates) == 2
+    assert [load_capture(path)["metadata"]["retry_ordinal"] for path in candidates] == [
+        1,
+        2,
+    ]
+    with pytest.raises(CaptureIntegrityError, match="immutable capture endpoint"):
+        capture.note_push(**{**common, "payload": payload[:-4] + b"nope"})
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    lifecycle = manifest["window_lifecycles"][0]
+    assert lifecycle["window_uuid"] == window_uuid
+    assert lifecycle["status"] == "pushed"
+    assert lifecycle["push_attempts"] == 2
+    assert lifecycle["enqueued_pushes"] == 2
+    retry = manifest["push_retries"][first["retry_identity"]]
+    assert retry["attempts"] == 2
+    assert retry["candidate"]["pull_global_step"] == 44
+    with pytest.raises(CaptureIntegrityError, match="finalized twice"):
+        capture.note_push_enqueued(first["attempt_serial"])
+
+
+def test_superseded_and_closed_windows_are_explicitly_unpushed(tmp_path):
+    _params, _layout, _optimizer, capture = _fixture(tmp_path)
+    first_uuid = capture.note_window_reset(
+        0, 1, local_step=0, tokens_total=0, window_steps=4, reason="broadcast"
+    )
+    second_uuid = capture.note_window_reset(
+        0, 2, local_step=1, tokens_total=128, window_steps=4, reason="broadcast"
+    )
+    assert first_uuid != second_uuid
+    capture.close()
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    by_uuid = {row["window_uuid"]: row for row in manifest["window_lifecycles"]}
+    assert by_uuid[first_uuid]["status"] == "superseded_unpushed"
+    assert by_uuid[second_uuid]["status"] == "closed_unpushed"
+    drops = manifest["counters"]["drop_counts"]
+    assert drops["window_superseded_unpushed"] == 1
+    assert drops["window_unpushed_at_close"] == 1
+
+
+def test_scaler_configuration_fails_closed(tmp_path):
+    params = {"p": torch.nn.Parameter(torch.ones(1))}
+    layout = FragmentLayout([Fragment(MERGE_RDA, [("p", 1)])])
+    optimizer = torch.optim.AdamW(params.values())
+    with pytest.raises(TypeError, match="native no-scaler"):
+        OptimizerStateCapture(
+            tmp_path,
+            params=params,
+            layout=layout,
+            optimizer=optimizer,
+            scaler=object(),
+            learner_id=0,
+            rank=0,
+        )
+
+
+def test_non_adamw_optimizer_fails_closed(tmp_path):
+    param = torch.nn.Parameter(torch.ones(1))
+    layout = FragmentLayout([Fragment(MERGE_RDA, [("p", 1)])])
+    optimizer = torch.optim.SGD([param], lr=0.1)
+    with pytest.raises(TypeError, match="requires torch.optim.AdamW"):
+        OptimizerStateCapture(
+            tmp_path,
+            params={"p": param},
+            layout=layout,
+            optimizer=optimizer,
+            learner_id=0,
+            rank=0,
+        )
+
+
+def _strict_capture_args():
+    from yeto.learner import parse_args
+
+    return parse_args(
+        [
+            "--model",
+            "m",
+            "--data",
+            "d",
+            "--syncer",
+            "host:1",
+            "--learner-id",
+            "0",
+            "--num-learners",
+            "1",
+            "--optimizer-state-capture-dir",
+            "/tmp/capture",
+            "--inner-optimizer",
+            "adamw",
+            "--tuning",
+            "lora",
+            "--wire-dtype",
+            "f32",
+            "--merge-alpha",
+            "0",
+            "--inner-control-variate",
+            "none",
+            "--debug-broadcast-lag-commits",
+            "0",
+            "--max-reconnects",
+            "0",
+            "--fixed-window-microsteps",
+            "4",
+        ]
+    )
+
+
+def test_strict_capture_configuration_accepts_only_unambiguous_native_path():
+    from yeto.learner import validate_optimizer_state_capture_args
+
+    validate_optimizer_state_capture_args(_strict_capture_args())
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("syncer", "none", "async --syncer"),
+        ("tuning", "full", "--tuning lora"),
+        ("inner_optimizer", "sgd", "--inner-optimizer adamw"),
+        ("wire_dtype", "bf16", "--wire-dtype f32"),
+        ("merge_alpha", 0.5, "--merge-alpha 0"),
+        ("inner_control_variate", "scaffold_lite", "--inner-control-variate none"),
+        ("debug_broadcast_lag_commits", 1, "--debug-broadcast-lag-commits 0"),
+        ("max_reconnects", None, "--max-reconnects 0"),
+        ("fixed_window_microsteps", 3, "fixed even --fixed-window-microsteps"),
+        ("fixed_window_tokens", 1, "fixed even --fixed-window-microsteps"),
+        ("fixed_window_schedule", [(0, 4)], "fixed even --fixed-window-microsteps"),
+    ],
+)
+def test_ambiguous_capture_configuration_fails_closed(field, value, expected):
+    from yeto.learner import validate_optimizer_state_capture_args
+
+    args = _strict_capture_args()
+    setattr(args, field, value)
+    with pytest.raises(RuntimeError, match=expected):
+        validate_optimizer_state_capture_args(args)
+
+
+def test_fixed_window_snapshot_carries_immutable_uuid_and_endpoint_copy():
+    from yeto.learner import make_fixed_window_snapshot
+
+    params = {"p": torch.nn.Parameter(torch.tensor([1.0, 2.0]))}
+    fragment = Fragment(MERGE_RDA, [("p", 2)])
+    anchor = torch.tensor([9.0, 8.0])
+    window_uuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    snapshot = make_fixed_window_snapshot(
+        fragment,
+        params,
+        anchor=anchor,
+        c_steps=4,
+        c_tokens=512,
+        local_step=12,
+        base_version=7,
+        window_uuid=window_uuid,
+    )
+    params["p"].data.add_(100)
+    anchor.add_(100)
+    assert snapshot["window_uuid"] == window_uuid
+    assert torch.equal(snapshot["flat"], torch.tensor([1.0, 2.0]))
+    assert torch.equal(snapshot["anchor"], torch.tensor([9.0, 8.0]))
+    assert snapshot["c_steps"] == 4
+    assert snapshot["c_tokens"] == 512
+
+
+def test_candidate_identity_encodes_exactly_into_audited_wire_header(tmp_path):
+    import uuid
+
+    from yeto.learner import push_audit_from_candidate
+
+    params, _layout, optimizer, capture = _fixture(tmp_path)
+    window_uuid = capture.note_window_reset(
+        0, 3, local_step=0, tokens_total=0, window_steps=2, reason="broadcast"
+    )
+    for local_step in (1, 2):
+        capture.capture_first_post_broadcast_gradients(
+            local_step_before_update=local_step - 1,
+            tokens_total=(local_step - 1) * 16,
+            clip_total_norm=torch.tensor(0.5),
+        )
+        with torch.no_grad():
+            for param in params.values():
+                param.add_(0.25)
+                optimizer.state[param]["step"].add_(1)
+        capture.after_optimizer_step(
+            local_step=local_step,
+            tokens_total=local_step * 16,
+            current_window_steps=2,
+        )
+    endpoint = torch.cat([params["a"].detach(), params["b"].detach()])
+    payload = pack_flat(endpoint, DTYPE_F32)
+    candidate = capture.note_push(
+        window_uuid=window_uuid,
+        fragment_id=0,
+        pull_global_step=5,
+        base_version=3,
+        local_step=2,
+        c_steps=2,
+        c_tokens=32,
+        wire_codec="f32",
+        payload=payload,
+    )
+    audit = push_audit_from_candidate(candidate)
+    assert audit.window_uuid == uuid.UUID(window_uuid).bytes
+    assert audit.attempt_serial == candidate["attempt_serial"]
+    assert audit.payload_sha256.hex() == candidate["payload_sha256"]
+    capture.close()
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["window_lifecycles"][0]["status"] == "closed_unpushed"
+    assert (
+        manifest["push_attempts"][str(candidate["attempt_serial"])]["enqueued"] is False
+    )

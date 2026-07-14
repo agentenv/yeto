@@ -23,6 +23,7 @@ import math
 import os
 import random
 import time
+import uuid
 from collections import deque
 
 import torch
@@ -33,7 +34,14 @@ from .bcmp_shadow import BCMPShadowTracker
 from .data import StreamingPackedBlocks, build_packed_dataset
 from .fragments import FragmentLayout, build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
-from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
+from .protocol import (
+    DTYPE_BF16,
+    DTYPE_F32,
+    DTYPE_Q4,
+    PushAudit,
+    SyncerClient,
+    bulk_dtype,
+)
 from .scaffold import (
     VersionedControlPairs,
     accumulate_control,
@@ -70,7 +78,11 @@ def accelerator_model_dtype(device: torch.device | str) -> torch.dtype:
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Yeto learner")
-    p.add_argument("--model", required=True, help="HF model id or an alias from yeto/models.py (gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...)")
+    p.add_argument(
+        "--model",
+        required=True,
+        help="HF model id or an alias from yeto/models.py (gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...)",
+    )
     p.add_argument("--data", required=True, help="HF dataset id")
     p.add_argument(
         "--syncer",
@@ -237,7 +249,9 @@ def parse_args(argv=None):
         help="maximum syncer reconnect attempts; 0 disables reconnects",
     )
     p.add_argument("--wan-streams", type=int, default=4)
-    p.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
+    p.add_argument(
+        "--max-rows", type=int, default=None, help="cap dataset rows per learner"
+    )
     p.add_argument(
         "--tokenize",
         choices=["stream", "preload"],
@@ -351,6 +365,35 @@ def parse_args(argv=None):
         " applies. Enables fixed-window mode by itself.",
     )
     p.add_argument(
+        "--optimizer-state-capture-dir",
+        default=None,
+        help="EXP: rank-0 directory for exact AdamW/window/push lifecycle captures",
+    )
+    p.add_argument(
+        "--optimizer-state-capture-every",
+        type=int,
+        default=1,
+        help="capture one in every N eligible broadcast/window events",
+    )
+    p.add_argument(
+        "--optimizer-state-capture-max-hmc-events",
+        type=int,
+        default=32,
+        help="maximum admitted first-post-broadcast AdamW events",
+    )
+    p.add_argument(
+        "--optimizer-state-capture-max-midpoint-windows",
+        type=int,
+        default=32,
+        help="maximum admitted exact anchor/H/2/H windows",
+    )
+    p.add_argument(
+        "--optimizer-state-capture-max-bytes",
+        type=int,
+        default=4 * 1024**3,
+        help="maximum finalized capture artifact plus checksum bytes",
+    )
+    p.add_argument(
         "--freeze-delta-before-delay",
         action="store_true",
         help="EXP/stress only: materialize payload/probe snapshot before "
@@ -402,6 +445,14 @@ def parse_args(argv=None):
         # every q4 delta whose base is not current (validate_push_candidate),
         # so the first lagged push would stall the fragment forever.
         p.error("--debug-broadcast-lag-commits is incompatible with --wire-dtype q4")
+    if args.optimizer_state_capture_every < 1:
+        p.error("--optimizer-state-capture-every must be >= 1")
+    if args.optimizer_state_capture_max_hmc_events < 0:
+        p.error("--optimizer-state-capture-max-hmc-events must be >= 0")
+    if args.optimizer_state_capture_max_midpoint_windows < 0:
+        p.error("--optimizer-state-capture-max-midpoint-windows must be >= 0")
+    if args.optimizer_state_capture_max_bytes < 0:
+        p.error("--optimizer-state-capture-max-bytes must be >= 0")
     return args
 
 
@@ -410,6 +461,43 @@ def setup_distributed() -> tuple[int, int]:
         dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
         return dist.get_rank(), dist.get_world_size()
     return 0, 1
+
+
+def validate_optimizer_state_capture_args(args) -> None:
+    """Fail closed unless a capture run has one exact window/push meaning."""
+
+    if getattr(args, "optimizer_state_capture_dir", None) is None:
+        return
+    violations = []
+    if args.syncer == "none":
+        violations.append("an async --syncer")
+    if args.tuning != "lora":
+        violations.append("--tuning lora")
+    if args.inner_optimizer != "adamw":
+        violations.append("--inner-optimizer adamw")
+    if args.wire_dtype != "f32":
+        violations.append("--wire-dtype f32")
+    if args.merge_alpha != 0.0:
+        violations.append("--merge-alpha 0")
+    if args.inner_control_variate != "none":
+        violations.append("--inner-control-variate none")
+    if args.debug_broadcast_lag_commits != 0:
+        violations.append("--debug-broadcast-lag-commits 0")
+    if args.max_reconnects != 0:
+        violations.append("--max-reconnects 0")
+    if (
+        args.fixed_window_microsteps < 2
+        or args.fixed_window_microsteps % 2
+        or args.fixed_window_tokens != 0
+        or args.fixed_window_schedule is not None
+    ):
+        violations.append("one fixed even --fixed-window-microsteps >= 2")
+    if violations:
+        raise RuntimeError(
+            "--optimizer-state-capture-dir requires native no-scaler fp32 "
+            "AdamW with an unambiguous fixed f32 push lifecycle: "
+            + ", ".join(violations)
+        )
 
 
 def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
@@ -446,7 +534,9 @@ def load_model_and_tokenizer(args, device):
         dtype = torch.float32
     else:
         dtype = accelerator_model_dtype(device)
-    tokenizer = _from_pretrained_offline_first(AutoTokenizer, model_id, trust_remote_code=True)
+    tokenizer = _from_pretrained_offline_first(
+        AutoTokenizer, model_id, trust_remote_code=True
+    )
     model = _from_pretrained_offline_first(
         AutoModelForCausalLM, model_id, torch_dtype=dtype, trust_remote_code=True
     )
@@ -616,6 +706,40 @@ def barrier_release(awaiting: dict[int, int], fid: int, version: int) -> bool:
     return False
 
 
+def make_fixed_window_snapshot(
+    fragment,
+    params: dict[str, torch.Tensor],
+    *,
+    anchor: torch.Tensor | None,
+    c_steps: int,
+    c_tokens: int,
+    local_step: int,
+    base_version: int,
+    window_uuid: str | None,
+) -> dict:
+    """Freeze one immutable response endpoint and its capture lifecycle ID."""
+
+    return {
+        "flat": fragment_flat(fragment, params).detach().cpu(),
+        "anchor": anchor.clone() if anchor is not None else None,
+        "c_steps": int(c_steps),
+        "c_tokens": int(c_tokens),
+        "local_step": int(local_step),
+        "base_version": int(base_version),
+        "window_uuid": window_uuid,
+    }
+
+
+def push_audit_from_candidate(candidate: dict) -> PushAudit:
+    """Encode the exact local candidate foreign keys into the audited wire."""
+
+    return PushAudit(
+        window_uuid=uuid.UUID(candidate["window_uuid"]).bytes,
+        attempt_serial=int(candidate["attempt_serial"]),
+        payload_sha256=bytes.fromhex(candidate["payload_sha256"]),
+    )
+
+
 def parse_fixed_window_schedule(spec: str) -> list[tuple[int, int]]:
     """Parse ``--fixed-window-schedule`` "commit1:h1,commit2:h2,...".
 
@@ -716,7 +840,9 @@ class FragmentUtilityProbe:
         self.layout = layout
         self.device = device
         self.compute_loss = compute_loss
-        self.path = args.probe_log or os.path.join(args.output_dir, "fragment_probe.jsonl")
+        self.path = args.probe_log or os.path.join(
+            args.output_dir, "fragment_probe.jsonl"
+        )
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         # Start fresh for each learner process; append is used so resumed runs
         # can choose a distinct path without file-mode plumbing.
@@ -737,7 +863,10 @@ class FragmentUtilityProbe:
         self.batches = []
         for input_ids, weights in loader:
             self.batches.append(
-                (input_ids.to(device, non_blocking=True), weights.to(device, non_blocking=True))
+                (
+                    input_ids.to(device, non_blocking=True),
+                    weights.to(device, non_blocking=True),
+                )
             )
             if len(self.batches) >= args.probe_batches:
                 break
@@ -755,12 +884,16 @@ class FragmentUtilityProbe:
             self.path,
         )
 
-    def note_broadcast(self, fid: int, old_anchor: torch.Tensor | None, new_anchor: torch.Tensor) -> None:
+    def note_broadcast(
+        self, fid: int, old_anchor: torch.Tensor | None, new_anchor: torch.Tensor
+    ) -> None:
         if old_anchor is None or old_anchor.numel() != new_anchor.numel():
             return
         direction = new_anchor.float().cpu() - old_anchor.float().cpu()
         prev = self.momentum[fid]
-        self.momentum[fid] = direction if prev is None else 0.85 * prev + 0.15 * direction
+        self.momentum[fid] = (
+            direction if prev is None else 0.85 * prev + 0.15 * direction
+        )
 
     def maybe_record(
         self,
@@ -794,7 +927,9 @@ class FragmentUtilityProbe:
             delta = norm - prev_mean
             uncertainty = math.sqrt(self.norm_var[fid]) / (abs(prev_mean) + 1e-8)
             self.norm_var[fid] = 0.85 * self.norm_var[fid] + 0.15 * delta * delta
-        self.norm_ema[fid] = norm if prev_mean is None else 0.85 * prev_mean + 0.15 * norm
+        self.norm_ema[fid] = (
+            norm if prev_mean is None else 0.85 * prev_mean + 0.15 * norm
+        )
         hist.append(norm)
 
         if self.candidates_seen % self.args.probe_every != 0:
@@ -854,7 +989,9 @@ class FragmentUtilityProbe:
                 apply_fragment(frag, anchors[i].to(self.device), self.params)
             base_loss, base_by_batch = self._probe_losses()
             trial = anchors[fid].float().cpu() + self.args.probe_outer_lr * update
-            apply_fragment(self.layout.fragments[fid], trial.to(self.device), self.params)
+            apply_fragment(
+                self.layout.fragments[fid], trial.to(self.device), self.params
+            )
             trial_loss, trial_by_batch = self._probe_losses()
         finally:
             for frag, flat in zip(self.layout.fragments, local_snapshot):
@@ -933,6 +1070,8 @@ def main(argv=None) -> None:
 
     if not 0.0 <= args.merge_alpha < 1.0:
         raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
+
+    validate_optimizer_state_capture_args(args)
 
     if args.bcmp_shadow_every < 1:
         raise ValueError("--bcmp-shadow-every must be >= 1")
@@ -1091,6 +1230,7 @@ def main(argv=None) -> None:
 
             peft_model = model
             ignored = set(params.values())
+
             # Shard each transformer block separately (comm/compute overlap,
             # one block unsharded at a time); the root call picks up whatever
             # sits outside the blocks (embeddings, final norm, lm_head). Only
@@ -1120,7 +1260,9 @@ def main(argv=None) -> None:
                 len(ignored),
             )
             wrapped = {
-                normalize_param_name(n): p for n, p in model.named_parameters() if p.requires_grad
+                normalize_param_name(n): p
+                for n, p in model.named_parameters()
+                if p.requires_grad
             }
             # The fragment layout was built from pre-wrap names; they must
             # survive wrapping bit-identically so this learner speaks the
@@ -1174,7 +1316,9 @@ def main(argv=None) -> None:
         # no base gather).
         peft_model = model
     elif world > 1:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index])
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[device.index]
+        )
         params = trainable_params(model.module)
 
     if args.inner_optimizer == "sgd":
@@ -1188,9 +1332,7 @@ def main(argv=None) -> None:
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt,
         lambda s: (
-            1.0
-            if args.warmup_steps <= 0
-            else min(1.0, (s + 1) / args.warmup_steps)
+            1.0 if args.warmup_steps <= 0 else min(1.0, (s + 1) / args.warmup_steps)
         ),
     )
 
@@ -1273,11 +1415,24 @@ def main(argv=None) -> None:
         log.info("connected to syncer at %s", args.syncer)
         if args.learner_id == 0:
             for fid, frag in enumerate(layout.fragments):
-                client.send_init(fid, pack_fragment(frag, params, bulk_dtype(wire_dtype)))
+                client.send_init(
+                    fid, pack_fragment(frag, params, bulk_dtype(wire_dtype))
+                )
             log.info("sent INIT_PARAMS for %d fragments", layout.num_fragments)
 
     run_inner_loop(
-        args, model, params, layout, opt, sched, loader, client, rank, world, device, tokenizer
+        args,
+        model,
+        params,
+        layout,
+        opt,
+        sched,
+        loader,
+        client,
+        rank,
+        world,
+        device,
+        tokenizer,
     )
 
     if rank == 0:
@@ -1310,7 +1465,18 @@ def main(argv=None) -> None:
 
 
 def run_inner_loop(
-    args, model, params, layout, opt, sched, loader, client, rank, world, device, tokenizer
+    args,
+    model,
+    params,
+    layout,
+    opt,
+    sched,
+    loader,
+    client,
+    rank,
+    world,
+    device,
+    tokenizer,
 ):
     # Counters (Alg. 1): incremented for all fragments each step, reset per
     # fragment on receipt. Tracked as global totals + per-fragment snapshots.
@@ -1361,22 +1527,24 @@ def run_inner_loop(
     scaffold_full = scaffold_mode == "scaffold_full"
     scaffold_shuffle = bool(getattr(args, "scaffold_control_shuffle", False))
     control_pairs = [VersionedControlPairs() for _ in range(layout.num_fragments)]
-    full_residual_pairs = [
-        VersionedControlPairs() for _ in range(layout.num_fragments)
-    ]
+    full_residual_pairs = [VersionedControlPairs() for _ in range(layout.num_fragments)]
     full_controls = [
         torch.zeros(frag.numel, dtype=torch.float32, device=device)
         for frag in layout.fragments
     ]
     full_accumulated_versions = [-1] * layout.num_fragments
     anchors: list[torch.Tensor] | None = None
-    if rank == 0 and client is not None and (
-        client.dtype == DTYPE_Q4 or args.probe_data is not None or scaffold_on
+    if (
+        rank == 0
+        and client is not None
+        and (client.dtype == DTYPE_Q4 or args.probe_data is not None or scaffold_on)
     ):
         anchors = [fragment_flat(frag, params).cpu() for frag in layout.fragments]
     # c_tokens counts RAW tokens processed (throughput proxy for merge
     # weighting), not the subset of loss-weighted tokens.
-    tokens_per_inner_step = world * args.micro_batch_size * args.grad_accum * args.seq_len
+    tokens_per_inner_step = (
+        world * args.micro_batch_size * args.grad_accum * args.seq_len
+    )
     fixed_window_steps = 1
     if args.fixed_window_microsteps > 0:
         fixed_window_steps = max(fixed_window_steps, args.fixed_window_microsteps)
@@ -1403,6 +1571,7 @@ def run_inner_loop(
     fixed_window_snapshots: list[dict | None] | None = (
         [None] * layout.num_fragments if fixed_window_enabled else None
     )
+    capture_window_uuids: list[str | None] | None = None
     if fixed_window_enabled and rank == 0:
         log.info(
             "fixed response window enabled: %d step(s), %d token(s)/step, "
@@ -1414,16 +1583,41 @@ def run_inner_loop(
             fixed_window_schedule,
         )
 
+    state_capture = None
+    capture_dir = getattr(args, "optimizer_state_capture_dir", None)
+    if rank == 0 and client is not None and capture_dir is not None:
+        from .optimizer_state_capture import OptimizerStateCapture
+
+        state_capture = OptimizerStateCapture(
+            capture_dir,
+            params=params,
+            layout=layout,
+            optimizer=opt,
+            scheduler=sched,
+            learner_id=args.learner_id,
+            rank=rank,
+            every=args.optimizer_state_capture_every,
+            max_hmc_events=args.optimizer_state_capture_max_hmc_events,
+            max_midpoint_windows=args.optimizer_state_capture_max_midpoint_windows,
+            max_bytes=args.optimizer_state_capture_max_bytes,
+        )
+        capture_window_uuids = [None] * layout.num_fragments
+        log.info("optimizer-state capture enabled at %s", capture_dir)
+
     if args.loss_function.startswith("pickle:"):
         compute_loss = load_pickled_loss(args.loss_function)
     elif args.loss_function.startswith("custom:"):
         compute_loss = load_custom_loss(args.loss_function)
     else:
-        compute_loss = lambda logits, ids, w: sft_loss(logits, ids, args.loss_function, w)  # noqa: E731
+        compute_loss = lambda logits, ids, w: sft_loss(
+            logits, ids, args.loss_function, w
+        )  # noqa: E731
 
     probe = None
     if rank == 0 and client is not None and args.probe_data is not None:
-        probe = FragmentUtilityProbe(args, model, params, layout, tokenizer, device, compute_loss)
+        probe = FragmentUtilityProbe(
+            args, model, params, layout, tokenizer, device, compute_loss
+        )
     bcmp_shadow = None
     if rank == 0 and args.bcmp_shadow_path is not None:
         bcmp_shadow = BCMPShadowTracker(
@@ -1509,6 +1703,14 @@ def run_inner_loop(
             tokens_at_reset[fid] = tokens_total
             if fixed_window_snapshots is not None:
                 fixed_window_snapshots[fid] = None
+            if state_capture is not None:
+                capture_window_uuids[fid] = state_capture.note_broadcast(
+                    fid,
+                    version,
+                    local_step=steps_total,
+                    tokens_total=tokens_total,
+                    window_steps=fixed_window_steps,
+                )
             if lag_applied_since_push is not None:
                 lag_applied_since_push[fid] = True
             global_step = max(global_step, version)
@@ -1552,17 +1754,15 @@ def run_inner_loop(
                 residual_mean = unpack_fragment(
                     frag, ctrl.mean_data, bulk_dtype(client.dtype)
                 ).to(device)
-                full_residual_pairs[ctrl.fragment_id].add_local(
-                    ctrl.version, residual
-                )
+                full_residual_pairs[ctrl.fragment_id].add_local(ctrl.version, residual)
                 full_residual_pairs[ctrl.fragment_id].add_mean(
                     ctrl.version, residual_mean
                 )
                 activate_full_control(ctrl.fragment_id, ctrl.version)
             else:
-                mean = unpack_fragment(
-                    frag, ctrl.data, bulk_dtype(client.dtype)
-                ).to(device)
+                mean = unpack_fragment(frag, ctrl.data, bulk_dtype(client.dtype)).to(
+                    device
+                )
                 if scaffold_full:
                     full_residual_pairs[ctrl.fragment_id].add_mean(ctrl.version, mean)
                     activate_full_control(ctrl.fragment_id, ctrl.version)
@@ -1651,20 +1851,34 @@ def run_inner_loop(
                 # so a plain clip over them is correct (the frozen base
                 # contributes no grads).
                 allreduce_trainable_grads(params.values(), world)
+                clip_total_norm = None
                 if args.grad_clip > 0.0:
-                    torch.nn.utils.clip_grad_norm_(params.values(), args.grad_clip)
+                    clip_total_norm = torch.nn.utils.clip_grad_norm_(
+                        params.values(), args.grad_clip
+                    )
             elif args.shard == "fsdp":
+                clip_total_norm = None
                 if args.grad_clip > 0.0:
-                    model.clip_grad_norm_(args.grad_clip)
+                    clip_total_norm = model.clip_grad_norm_(args.grad_clip)
             else:
+                clip_total_norm = None
                 if args.grad_clip > 0.0:
-                    torch.nn.utils.clip_grad_norm_(params.values(), args.grad_clip)
+                    clip_total_norm = torch.nn.utils.clip_grad_norm_(
+                        params.values(), args.grad_clip
+                    )
             if bcmp_shadow is not None:
                 bcmp_shadow.before_optimizer_step(
                     layout=layout,
                     params=params,
                     optimizer=opt,
                     local_step=steps_total,
+                )
+            if state_capture is not None:
+                state_capture.capture_first_post_broadcast_gradients(
+                    local_step_before_update=steps_total,
+                    tokens_total=tokens_total,
+                    clip_total_norm=clip_total_norm,
+                    clip_max_norm=args.grad_clip if args.grad_clip > 0.0 else None,
                 )
             opt.step()
             if audit_capture:
@@ -1696,7 +1910,15 @@ def run_inner_loop(
             opt.zero_grad(set_to_none=True)
             steps_total += 1
             tokens_total += tokens_per_inner_step
-            step_jitter_ms = args.debug_delay_jitter_ms if args.debug_step_sleep_ms > 0.0 else 0.0
+            if state_capture is not None:
+                state_capture.after_optimizer_step(
+                    local_step=steps_total,
+                    tokens_total=tokens_total,
+                    current_window_steps=fixed_window_steps,
+                )
+            step_jitter_ms = (
+                args.debug_delay_jitter_ms if args.debug_step_sleep_ms > 0.0 else 0.0
+            )
             _debug_sleep(args.debug_step_sleep_ms, step_jitter_ms)
 
             if rank == 0 and fixed_window_snapshots is not None:
@@ -1706,16 +1928,20 @@ def run_inner_loop(
                     snap_steps = steps_total - steps_at_reset[snap_fid]
                     if snap_steps < fixed_window_steps:
                         continue
-                    fixed_window_snapshots[snap_fid] = {
-                        "flat": fragment_flat(layout.fragments[snap_fid], params).detach().cpu(),
-                        "anchor": (
-                            anchors[snap_fid].clone() if anchors is not None else None
+                    fixed_window_snapshots[snap_fid] = make_fixed_window_snapshot(
+                        layout.fragments[snap_fid],
+                        params,
+                        anchor=(anchors[snap_fid] if anchors is not None else None),
+                        c_steps=snap_steps,
+                        c_tokens=tokens_total - tokens_at_reset[snap_fid],
+                        local_step=steps_total,
+                        base_version=fragment_versions[snap_fid],
+                        window_uuid=(
+                            capture_window_uuids[snap_fid]
+                            if capture_window_uuids is not None
+                            else None
                         ),
-                        "c_steps": snap_steps,
-                        "c_tokens": tokens_total - tokens_at_reset[snap_fid],
-                        "local_step": steps_total,
-                        "base_version": fragment_versions[snap_fid],
-                    }
+                    )
 
             if steps_total % 10 == 0 and rank == 0:
                 dt = time.monotonic() - t_last
@@ -1750,7 +1976,9 @@ def run_inner_loop(
                 dist.broadcast_object_list(box, src=0)
                 meta, shutdown = box
                 if rank != 0:
-                    actions = [(f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta]
+                    actions = [
+                        (f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta
+                    ]
                 for fid, version, flat in actions:
                     flat = flat.to(device)
                     dist.broadcast(flat, src=0)
@@ -1769,7 +1997,9 @@ def run_inner_loop(
                     # blending after the broadcast stays consistent.
                     if args.merge_alpha > 0:
                         local = fragment_flat(layout.fragments[fid], params)
-                        flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
+                        flat = (
+                            args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
+                        )
                     apply_fragment(layout.fragments[fid], flat, params)
                     if rank == 0:
                         fragment_versions[fid] = version
@@ -1781,6 +2011,14 @@ def run_inner_loop(
                         tokens_at_reset[fid] = tokens_total
                         if fixed_window_snapshots is not None:
                             fixed_window_snapshots[fid] = None
+                        if state_capture is not None:
+                            capture_window_uuids[fid] = state_capture.note_broadcast(
+                                fid,
+                                version,
+                                local_step=steps_total,
+                                tokens_total=tokens_total,
+                                window_steps=fixed_window_steps,
+                            )
                         if lag_applied_since_push is not None:
                             lag_applied_since_push[fid] = True
                     global_step = max(global_step, version)
@@ -1818,21 +2056,27 @@ def run_inner_loop(
                         c_tokens = int(snap["c_tokens"])
                         local_step_for_push = int(snap["local_step"])
                         base_version_for_push = int(snap["base_version"])
+                        window_uuid_for_push = snap.get("window_uuid")
                     else:
                         c_steps = steps_total - steps_at_reset[fid]
                         if c_steps < 1:
                             still_pending.append(pull)
                             continue
                         c_tokens = tokens_total - tokens_at_reset[fid]
-                        local_flat = fragment_flat(layout.fragments[fid], params).detach().cpu()
+                        local_flat = (
+                            fragment_flat(layout.fragments[fid], params).detach().cpu()
+                        )
                         base_anchor_for_push = (
                             anchors[fid].clone() if anchors is not None else None
                         )
                         local_step_for_push = steps_total
                         base_version_for_push = fragment_versions[fid]
+                        window_uuid_for_push = None
                     if probe is not None:
                         if anchors is None:
-                            raise RuntimeError("fragment utility probe requires anchors")
+                            raise RuntimeError(
+                                "fragment utility probe requires anchors"
+                            )
                         probe.maybe_record(
                             learner_id=args.learner_id,
                             fid=fid,
@@ -1850,7 +2094,21 @@ def run_inner_loop(
                     else:
                         payload = pack_flat(local_flat, client.dtype)
                     _debug_sleep(args.debug_push_delay_ms, args.debug_delay_jitter_ms)
-                    client.push_fragment(
+                    push_audit = None
+                    if state_capture is not None and window_uuid_for_push is not None:
+                        candidate = state_capture.note_push(
+                            window_uuid=window_uuid_for_push,
+                            fragment_id=fid,
+                            pull_global_step=pull.global_step,
+                            base_version=base_version_for_push,
+                            local_step=local_step_for_push,
+                            c_steps=c_steps,
+                            c_tokens=c_tokens,
+                            wire_codec=args.wire_dtype,
+                            payload=payload,
+                        )
+                        push_audit = push_audit_from_candidate(candidate)
+                    push_enqueued = client.push_fragment(
                         fid,
                         pull.global_step,
                         base_version_for_push,
@@ -1858,7 +2116,14 @@ def run_inner_loop(
                         c_steps,
                         c_tokens,
                         payload,
+                        audit=push_audit,
                     )
+                    if state_capture is not None and not push_enqueued:
+                        raise RuntimeError(
+                            "audited capture push was not enqueued; reconnect is disabled"
+                        )
+                    if state_capture is not None and push_audit is not None:
+                        state_capture.note_push_enqueued(push_audit.attempt_serial)
                     if scaffold_on and anchors is not None and c_tokens > 0:
                         # Compute c_i from the exact per-push base anchor and
                         # the endpoint after the same wire codec the syncer
@@ -1866,11 +2131,12 @@ def run_inner_loop(
                         # (and is exact, not merely close, on the f32 correctness
                         # wire).
                         if base_anchor_for_push is None:
-                            raise RuntimeError("SCAFFOLD push is missing its base anchor")
+                            raise RuntimeError(
+                                "SCAFFOLD push is missing its base anchor"
+                            )
                         if client.dtype == DTYPE_Q4:
-                            transmitted_endpoint = (
-                                base_anchor_for_push
-                                + dequantize_q4(payload, layout.fragments[fid].numel)
+                            transmitted_endpoint = base_anchor_for_push + dequantize_q4(
+                                payload, layout.fragments[fid].numel
                             )
                         else:
                             transmitted_endpoint = unpack_fragment(
@@ -1970,7 +2236,11 @@ def run_inner_loop(
         epoch += 1
     if bcmp_shadow is not None:
         bcmp_shadow.close(local_step=steps_total)
-    log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
+    if state_capture is not None:
+        state_capture.close()
+    log.info(
+        "inner loop done at local_step=%d global_step=%d", steps_total, global_step
+    )
 
 
 if __name__ == "__main__":

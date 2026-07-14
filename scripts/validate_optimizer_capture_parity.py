@@ -48,9 +48,7 @@ EXPORT_PATH_KEYS = {
     "output_dir",
 }
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
-UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-)
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 ATTEMPT_DISPOSITIONS = {
     "admitted_pending",
     "rejected_duplicate",
@@ -134,7 +132,9 @@ def validate_f32_payload(path: Path, *, label: str) -> tuple[str, int]:
         raise ParityError(f"{label} has invalid nonempty f32 length: {path}")
     for index, (value,) in enumerate(struct.iter_unpack("<f", raw)):
         if not math.isfinite(value):
-            raise ParityError(f"{label} contains non-finite f32 at index {index}: {path}")
+            raise ParityError(
+                f"{label} contains non-finite f32 at index {index}: {path}"
+            )
     return hashlib.sha256(raw).hexdigest(), len(raw) // 4
 
 
@@ -177,9 +177,7 @@ def parse_checkpoint_summary(path: Path) -> CheckpointSummary:
     (fragment_count,) = struct.unpack("<I", take(4, "fragment_count"))
     fragments: list[tuple[int, int]] = []
     for fragment in range(fragment_count):
-        version, numel = struct.unpack(
-            "<QQ", take(16, f"fragment {fragment} header")
-        )
+        version, numel = struct.unpack("<QQ", take(16, f"fragment {fragment} header"))
         # Both params and outer momentum are little-endian f32 arrays.  Reject
         # NaN/Inf even when OFF and ON happen to contain identical corruption.
         for tensor_name in ("params", "momentum"):
@@ -212,7 +210,9 @@ def parse_checkpoint_summary(path: Path) -> CheckpointSummary:
             try:
                 metadata_text = metadata_raw.decode("utf-8")
             except UnicodeError as exc:
-                raise ParityError(f"{path}: layout metadata is not UTF-8: {exc}") from exc
+                raise ParityError(
+                    f"{path}: layout metadata is not UTF-8: {exc}"
+                ) from exc
             metadata = strict_json_loads(metadata_text, source=f"{path}:layout_meta")
             layout_meta_sha256 = canonical_sha256(metadata)
 
@@ -336,7 +336,9 @@ def load_probe_capture(root: Path) -> ProbeCapture:
         if not candidate_rel.startswith("candidates/"):
             raise ParityError(f"candidate_f32 has unexpected location: {candidate_rel}")
         if not update_rel.startswith("applied_updates/"):
-            raise ParityError(f"applied_update_f32 has unexpected location: {update_rel}")
+            raise ParityError(
+                f"applied_update_f32 has unexpected location: {update_rel}"
+            )
 
         expected_group_paths = group_paths.setdefault(group, (state_rel, update_rel))
         if expected_group_paths != (state_rel, update_rel):
@@ -386,7 +388,9 @@ def load_probe_capture(root: Path) -> ProbeCapture:
         try:
             checkpoint_summaries[state_rel] = parse_checkpoint_summary(root / state_rel)
         except Exception as exc:
-            raise ParityError(f"invalid pre-merge checkpoint {state_rel}: {exc}") from exc
+            raise ParityError(
+                f"invalid pre-merge checkpoint {state_rel}: {exc}"
+            ) from exc
     for group, (state_rel, _update_rel) in group_paths.items():
         step, fragment = group
         checkpoint = checkpoint_summaries[state_rel]
@@ -447,7 +451,9 @@ def load_probe_capture(root: Path) -> ProbeCapture:
     )
 
 
-def compare_probe_captures(off_root: Path, on_root: Path) -> tuple[dict[str, Any], ProbeCapture]:
+def compare_probe_captures(
+    off_root: Path, on_root: Path
+) -> tuple[dict[str, Any], ProbeCapture]:
     off = load_probe_capture(off_root)
     on = load_probe_capture(on_root)
     if set(off.canonical_rows) != set(on.canonical_rows):
@@ -462,7 +468,9 @@ def compare_probe_captures(off_root: Path, on_root: Path) -> tuple[dict[str, Any
     if off.referenced_manifest != on.referenced_manifest:
         differences = [
             key
-            for key in sorted(set(off.referenced_manifest) | set(on.referenced_manifest))
+            for key in sorted(
+                set(off.referenced_manifest) | set(on.referenced_manifest)
+            )
             if off.referenced_manifest.get(key) != on.referenced_manifest.get(key)
         ]
         raise ParityError(f"probe payload bytes differ at {differences[:12]}")
@@ -516,7 +524,9 @@ def validate_on_transcript(path: Path, probe: ProbeCapture) -> dict[str, Any]:
             if digest is not None and (
                 not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest)
             ):
-                raise ParityError(f"transcript event {seq} has malformed payload digest")
+                raise ParityError(
+                    f"transcript event {seq} has malformed payload digest"
+                )
             attempts[seq] = row
         elif schema == "syncer_round_commit_v1":
             step = require_int(row, "request_global_step", minimum=1)
@@ -536,7 +546,9 @@ def validate_on_transcript(path: Path, probe: ProbeCapture) -> dict[str, Any]:
                 if not isinstance(responder, dict):
                     raise ParityError(f"commit {key} responder is not an object")
                 if require_int(responder, "responder_index") != expected_index:
-                    raise ParityError(f"commit {key} responder indices are not contiguous")
+                    raise ParityError(
+                        f"commit {key} responder indices are not contiguous"
+                    )
                 learner = require_int(responder, "learner_id")
                 learner_ids.append(learner)
                 source = require_int(responder, "source_attempt_event_seq", minimum=1)
@@ -584,23 +596,37 @@ def validate_on_transcript(path: Path, probe: ProbeCapture) -> dict[str, Any]:
                     )
                 window = responder.get("window_uuid")
                 if not isinstance(window, str) or not UUID_RE.fullmatch(window):
-                    raise ParityError(f"commit {key} learner {learner} has malformed UUID")
+                    raise ParityError(
+                        f"commit {key} learner {learner} has malformed UUID"
+                    )
                 if attempt.get("window_uuid") != window:
                     raise ParityError(f"commit {key} learner {learner} UUID mismatch")
                 digest = responder.get("received_payload_sha256")
                 if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
-                    raise ParityError(f"commit {key} learner {learner} has malformed digest")
+                    raise ParityError(
+                        f"commit {key} learner {learner} has malformed digest"
+                    )
                 if attempt.get("received_payload_sha256") != digest:
-                    raise ParityError(f"commit {key} learner {learner} attempt digest mismatch")
+                    raise ParityError(
+                        f"commit {key} learner {learner} attempt digest mismatch"
+                    )
                 if attempt.get("payload_digest_match") is not True:
-                    raise ParityError(f"commit {key} learner {learner} wire digest did not match")
-                candidate_digest = probe.candidate_digests.get((step, fragment, learner))
+                    raise ParityError(
+                        f"commit {key} learner {learner} wire digest did not match"
+                    )
+                candidate_digest = probe.candidate_digests.get(
+                    (step, fragment, learner)
+                )
                 if candidate_digest != digest:
                     raise ParityError(
                         f"commit {key} learner {learner} wire/candidate bytes differ"
                     )
-            if learner_ids != sorted(learner_ids) or len(set(learner_ids)) != len(learner_ids):
-                raise ParityError(f"commit {key} responders are not unique numeric order")
+            if learner_ids != sorted(learner_ids) or len(set(learner_ids)) != len(
+                learner_ids
+            ):
+                raise ParityError(
+                    f"commit {key} responders are not unique numeric order"
+                )
             expected_learners = sorted(
                 candidate_key[2]
                 for candidate_key in probe.candidate_digests
@@ -684,9 +710,7 @@ def compare_export_trees(off_arm: Path, on_arm: Path) -> dict[str, Any]:
     on = load_export_manifest(on_arm / "export", on_arm)
     if off != on:
         differences = [
-            path
-            for path in sorted(set(off) | set(on))
-            if off.get(path) != on.get(path)
+            path for path in sorted(set(off) | set(on)) if off.get(path) != on.get(path)
         ]
         raise ParityError(f"export payload trees differ at {differences[:12]}")
     return {
@@ -729,7 +753,9 @@ def compare_final_checkpoints(
                 "learners_in_ledger": len(off_ckpt.ledger),
             }
             if off_ckpt != on_ckpt:
-                raise ParityError("final checkpoint semantics differ despite digest comparison")
+                raise ParityError(
+                    "final checkpoint semantics differ despite digest comparison"
+                )
     return {
         "files": manifest,
         "manifest_sha256": canonical_sha256(manifest),
@@ -758,6 +784,8 @@ def compare_results(
     off_arm: str,
     on_arm: str,
     overhead_limit: float,
+    off_interval_ns: int,
+    on_interval_ns: int,
 ) -> dict[str, Any]:
     off = load_results(off_path)
     on = load_results(on_path)
@@ -765,6 +793,15 @@ def compare_results(
         raise ParityError(f"OFF arm {off_arm!r} is absent from {off_path}")
     if on_arm not in on:
         raise ParityError(f"ON arm {on_arm!r} is absent from {on_path}")
+    expected_wall_scope = "syncer_commit_1_to_commit_N"
+    if off[off_arm].get("wall_scope") != expected_wall_scope:
+        raise ParityError(
+            f"OFF result must use steady-state wall scope {expected_wall_scope!r}"
+        )
+    if on[on_arm].get("wall_scope") != expected_wall_scope:
+        raise ParityError(
+            f"ON result must use steady-state wall scope {expected_wall_scope!r}"
+        )
     off_row = dict(off[off_arm])
     on_row = dict(on[on_arm])
     off_row.pop("arm", None)
@@ -778,17 +815,19 @@ def compare_results(
 
     off_wall = require_finite_number(off[off_arm], "wall_s")
     on_wall = require_finite_number(on[on_arm], "wall_s")
-    if off_wall <= 0.05:
-        raise ParityError("OFF wall_s is too small for a rounded 0.1s overhead bound")
-    point_overhead = on_wall / off_wall - 1.0
-    # compare_diloco rounds wall time to one decimal.  Use the worst endpoints
-    # of those rounding bins, otherwise a nominal 1.99% result could conceal a
-    # true value over the frozen 2% threshold.
-    worst_overhead = (on_wall + 0.05) / (off_wall - 0.05) - 1.0
-    if worst_overhead > overhead_limit:
+    if off_interval_ns <= 0 or on_interval_ns <= 0:
+        raise ParityError("producer timing interval must be positive")
+    off_exact = off_interval_ns / 1_000_000_000.0
+    on_exact = on_interval_ns / 1_000_000_000.0
+    if off_wall != round(off_exact, 1) or on_wall != round(on_exact, 1):
         raise ParityError(
-            f"capture overhead fails/ambiguous: point={point_overhead:.8f}, "
-            f"rounding-worst={worst_overhead:.8f}, limit={overhead_limit:.8f}"
+            "results wall_s does not match the sealed producer timing interval"
+        )
+    point_overhead = on_interval_ns / off_interval_ns - 1.0
+    if point_overhead > overhead_limit:
+        raise ParityError(
+            f"capture overhead fails: exact={point_overhead:.8f}, "
+            f"limit={overhead_limit:.8f}"
         )
     return {
         "off_arm": off_arm,
@@ -796,12 +835,59 @@ def compare_results(
         "eval_loss": off[off_arm]["eval_loss"],
         "off_wall_s_rounded": off_wall,
         "on_wall_s_rounded": on_wall,
+        "off_interval_ns": off_interval_ns,
+        "on_interval_ns": on_interval_ns,
         "point_overhead_fraction": point_overhead,
-        "rounding_worst_overhead_fraction": worst_overhead,
         "limit_fraction": overhead_limit,
         "wall_time_rounding_s": 0.1,
+        "wall_scope": expected_wall_scope,
         "off_result_rows": len(off),
         "on_result_rows": len(on),
+    }
+
+
+def load_commit_interval(path: Path) -> dict[str, Any]:
+    rows = read_jsonl(path)
+    if len(rows) < 2:
+        raise ParityError(f"{path}: timing tape requires at least two commits")
+    elapsed: list[int] = []
+    identities: list[tuple[int, int, int]] = []
+    semantic_identities: set[tuple[int, int]] = set()
+    for expected_seq, row in enumerate(rows, 1):
+        commit_seq = row.get("commit_seq")
+        commit_elapsed_ns = row.get("commit_elapsed_ns")
+        if type(commit_seq) is not int or commit_seq != expected_seq:
+            raise ParityError(
+                f"{path}: non-contiguous commit_seq at row {expected_seq}: "
+                f"{commit_seq!r}"
+            )
+        if type(commit_elapsed_ns) is not int or commit_elapsed_ns < 0:
+            raise ParityError(
+                f"{path}: invalid commit_elapsed_ns at row {expected_seq}"
+            )
+        if elapsed and commit_elapsed_ns <= elapsed[-1]:
+            raise ParityError(f"{path}: commit_elapsed_ns is not strictly increasing")
+        step = require_int(row, "step", minimum=1)
+        fragment = require_int(row, "fragment")
+        semantic = (step, fragment)
+        if semantic in semantic_identities:
+            raise ParityError(f"{path}: duplicate timing commit identity {semantic}")
+        semantic_identities.add(semantic)
+        identities.append((commit_seq, step, fragment))
+        elapsed.append(commit_elapsed_ns)
+    interval_ns = elapsed[-1] - elapsed[0]
+    if interval_ns <= 0:
+        raise ParityError(f"{path}: producer timing interval is empty")
+    return {
+        "commits": len(rows),
+        "first_excluded_commit_seq": 1,
+        "first_included_commit_seq": 2,
+        "final_included_commit_seq": len(rows),
+        "first_commit_elapsed_ns": elapsed[0],
+        "final_commit_elapsed_ns": elapsed[-1],
+        "interval_ns": interval_ns,
+        "ordered_commit_identities": [list(identity) for identity in identities],
+        "tape_sha256": sha256_file(path),
     }
 
 
@@ -835,6 +921,87 @@ def write_evidence(path: Path, evidence: dict[str, Any]) -> str:
     return digest
 
 
+def _regular_tree_files(root: Path, *, label: str) -> list[Path]:
+    if not root.is_dir() or root.is_symlink():
+        raise ParityError(f"missing regular {label} directory: {root}")
+    files: list[Path] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ParityError(f"symlink in {label} directory: {path}")
+        if path.is_file():
+            files.append(path.resolve())
+        elif not path.is_dir():
+            raise ParityError(f"unsupported {label} filesystem entry: {path}")
+    if not files:
+        raise ParityError(f"empty {label} directory: {root}")
+    return files
+
+
+def parity_input_files(
+    *,
+    off_arm_dir: Path,
+    on_arm_dir: Path,
+    off_results: Path,
+    on_results: Path,
+    extra_final_files: list[str],
+) -> list[Path]:
+    """Return every file consumed by a successful parity decision."""
+    paths = [
+        *_regular_tree_files(off_arm_dir / "syncer_probe", label="capture-OFF probe"),
+        *_regular_tree_files(on_arm_dir / "syncer_probe", label="capture-ON probe"),
+        *_regular_tree_files(off_arm_dir / "export", label="capture-OFF export"),
+        *_regular_tree_files(on_arm_dir / "export", label="capture-ON export"),
+        (off_arm_dir / "state.ckpt").resolve(strict=True),
+        (on_arm_dir / "state.ckpt").resolve(strict=True),
+        (off_arm_dir / "tape.jsonl").resolve(strict=True),
+        (on_arm_dir / "tape.jsonl").resolve(strict=True),
+        (on_arm_dir / "syncer_response_transcript.jsonl").resolve(strict=True),
+        off_results.resolve(strict=True),
+        on_results.resolve(strict=True),
+    ]
+    for relative_text in extra_final_files:
+        relative = Path(relative_text)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ParityError(f"unsafe final-file relative path: {relative_text!r}")
+        paths.extend(
+            [
+                (off_arm_dir / relative).resolve(strict=True),
+                (on_arm_dir / relative).resolve(strict=True),
+            ]
+        )
+    unique: dict[str, Path] = {}
+    for path in paths:
+        if path.is_symlink() or not path.is_file():
+            raise ParityError(f"parity input is not a regular non-symlink file: {path}")
+        unique[str(path)] = path
+    return [unique[key] for key in sorted(unique)]
+
+
+def write_input_manifest(path: Path, inputs: list[Path]) -> dict[str, Any]:
+    """Atomically seal parity inputs in sha256sum-compatible form."""
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[str] = []
+    for input_path in inputs:
+        relative = os.path.relpath(input_path, start=path.parent)
+        if "\n" in relative or "\r" in relative or "\\" in relative:
+            raise ParityError(f"unsupported parity input path: {input_path}")
+        rows.append(f"{sha256_file(input_path)}  {relative}\n")
+    raw = "".join(rows).encode("utf-8")
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("wb") as handle:
+        handle.write(raw)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    return {
+        "path": str(path),
+        "files": len(inputs),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "format": "sha256sum_relative_to_manifest_directory",
+    }
+
+
 def run_gate(
     *,
     off_arm_dir: Path,
@@ -846,16 +1013,23 @@ def run_gate(
     output: Path,
     overhead_limit: float = 0.02,
     extra_final_files: list[str] | None = None,
+    input_manifest: Path | None = None,
 ) -> dict[str, Any]:
     overhead_limit_error = None
     if not math.isfinite(overhead_limit) or overhead_limit < 0:
         overhead_limit_error = "overhead_limit must be finite and nonnegative"
     extra_final_files = list(extra_final_files or [])
+    input_manifest = (
+        input_manifest.resolve()
+        if input_manifest is not None
+        else output.with_suffix(".inputs.sha256").resolve()
+    )
     off_arm_dir = off_arm_dir.resolve()
     on_arm_dir = on_arm_dir.resolve()
     checks: list[dict[str, Any]] = []
     errors: list[str] = []
     on_probe: ProbeCapture | None = None
+    timing_intervals: dict[str, dict[str, Any]] = {}
 
     def execute(name: str, operation: Callable[[], dict[str, Any]]) -> None:
         try:
@@ -881,7 +1055,9 @@ def run_gate(
         if off_transcript.exists() or off_transcript.is_symlink():
             raise ParityError("capture-OFF arm unexpectedly has an audit transcript")
         if on_probe is None:
-            raise ParityError("cannot validate ON transcript after probe parity failure")
+            raise ParityError(
+                "cannot validate ON transcript after probe parity failure"
+            )
         return validate_on_transcript(
             on_arm_dir / "syncer_response_transcript.jsonl", on_probe
         )
@@ -889,26 +1065,81 @@ def run_gate(
     execute("capture_on_transcript_join", transcript_operation)
     execute(
         "final_syncer_checkpoint_parity",
-        lambda: compare_final_checkpoints(
-            off_arm_dir, on_arm_dir, extra_final_files
-        ),
+        lambda: compare_final_checkpoints(off_arm_dir, on_arm_dir, extra_final_files),
     )
     execute(
         "export_payload_parity",
         lambda: compare_export_trees(off_arm_dir, on_arm_dir),
     )
 
+    def timing_operation() -> dict[str, Any]:
+        if on_probe is None:
+            raise ParityError("cannot validate timing after probe parity failure")
+        off_timing = load_commit_interval(off_arm_dir / "tape.jsonl")
+        on_timing = load_commit_interval(on_arm_dir / "tape.jsonl")
+        if off_timing["commits"] != on_timing["commits"]:
+            raise ParityError(
+                "OFF/ON producer timing tapes have different commit counts"
+            )
+        if (
+            off_timing["ordered_commit_identities"]
+            != on_timing["ordered_commit_identities"]
+        ):
+            raise ParityError(
+                "OFF/ON producer timing tapes have different ordered commit identities"
+            )
+        tape_groups = {
+            (identity[1], identity[2])
+            for identity in on_timing["ordered_commit_identities"]
+        }
+        if tape_groups != on_probe.group_keys:
+            raise ParityError(
+                "timing tape/probe commit groups differ; "
+                f"missing={sorted(on_probe.group_keys - tape_groups)}, "
+                f"extra={sorted(tape_groups - on_probe.group_keys)}"
+            )
+        timing_intervals["off"] = off_timing
+        timing_intervals["on"] = on_timing
+        return {"off": off_timing, "on": on_timing}
+
+    execute("syncer_commit_interval_timing", timing_operation)
+
     def results_operation() -> dict[str, Any]:
         if overhead_limit_error is not None:
             raise ParityError(overhead_limit_error)
+        if set(timing_intervals) != {"off", "on"}:
+            raise ParityError("cannot evaluate overhead after producer timing failure")
         return compare_results(
-            off_results, on_results, off_arm, on_arm, overhead_limit
+            off_results,
+            on_results,
+            off_arm,
+            on_arm,
+            overhead_limit,
+            timing_intervals["off"]["interval_ns"],
+            timing_intervals["on"]["interval_ns"],
         )
 
     execute(
         "eval_and_wall_overhead",
         results_operation,
     )
+
+    if not errors:
+        execute(
+            "sealed_input_tree",
+            lambda: write_input_manifest(
+                input_manifest,
+                parity_input_files(
+                    off_arm_dir=off_arm_dir,
+                    on_arm_dir=on_arm_dir,
+                    off_results=off_results,
+                    on_results=on_results,
+                    extra_final_files=extra_final_files,
+                ),
+            ),
+        )
+    elif input_manifest.exists() or input_manifest.is_symlink():
+        input_manifest.unlink()
 
     evidence: dict[str, Any] = {
         "schema": SCHEMA,
@@ -921,6 +1152,7 @@ def run_gate(
             "off_arm": off_arm,
             "on_arm": on_arm,
             "extra_final_files": extra_final_files,
+            "input_manifest": str(input_manifest),
         },
         "thresholds": {
             "wall_overhead_fraction": (
@@ -938,9 +1170,10 @@ def run_gate(
         },
         "limitations": [
             "The gate proves artifact equality, not that OFF and ON were scheduled on identical hardware or under identical external load.",
-            "Wall times in results.jsonl are rounded to 0.1 seconds; the gate uses the worst case over both rounding bins.",
+            "Overhead uses exact syncer monotonic timestamps from commit sequence 1 through N; rounded results.jsonl wall values are descriptive and must agree with the sealed tapes.",
             "The syncer probe must capture every commit and every responder; sampled or incomplete probe/transcript key sets fail.",
             "Only explicit path-valued metadata fields are canonicalized; arbitrary run names, labels, metrics, and unknown metadata remain exact.",
+            "The sha256sum-compatible input manifest seals every file consumed by a successful parity decision and is independently required by the experiment harness.",
         ],
     }
     artifact_sha256 = write_evidence(output, evidence)
@@ -975,6 +1208,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--overhead-limit", type=float, default=0.02)
     parser.add_argument(
+        "--input-manifest",
+        type=Path,
+        help="sha256sum manifest for every consumed parity input; defaults next to --output",
+    )
+    parser.add_argument(
         "--extra-final-file",
         action="append",
         default=[],
@@ -995,6 +1233,7 @@ def main(argv: list[str] | None = None) -> int:
         output=args.output,
         overhead_limit=args.overhead_limit,
         extra_final_files=args.extra_final_file,
+        input_manifest=args.input_manifest,
     )
     print(
         json.dumps(

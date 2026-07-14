@@ -160,9 +160,7 @@ pub fn apply_outer_step(
             restarted_ema_step(params, buf, delta, lr, momentum, restart_cos_threshold)
         }
         OuterOptimizer::RhoAdaptive => rho_adaptive_step(params, buf, delta, lr, rho_ema),
-        OuterOptimizer::CappedNesterov => {
-            capped_nesterov_step(params, buf, delta, lr, capped_mu)
-        }
+        OuterOptimizer::CappedNesterov => capped_nesterov_step(params, buf, delta, lr, capped_mu),
         OuterOptimizer::CappedNesterovGc => {
             capped_nesterov_gc_step(params, buf, delta, lr, capped_mu, capped_gain)
         }
@@ -232,9 +230,7 @@ pub fn materialize_applied_step(
         | OuterOptimizer::RhoAdaptive
         | OuterOptimizer::BlockRms
         | OuterOptimizer::BlockYogi
-        | OuterOptimizer::ChebSgd => {
-            updated_buf.iter().map(|buf| lr * *buf).collect()
-        }
+        | OuterOptimizer::ChebSgd => updated_buf.iter().map(|buf| lr * *buf).collect(),
     }
 }
 
@@ -309,8 +305,8 @@ pub fn rho_adaptive_step(
         0.0
     };
     if measured {
-        *rho_ema = (RHO_ADAPTIVE_EMA_BETA * *rho_ema as f64
-            + (1.0 - RHO_ADAPTIVE_EMA_BETA) * rho) as f32;
+        *rho_ema =
+            (RHO_ADAPTIVE_EMA_BETA * *rho_ema as f64 + (1.0 - RHO_ADAPTIVE_EMA_BETA) * rho) as f32;
     }
     let scale = rho_adaptive_gain(*rho_ema as f64) as f32;
     let mut step_norm_sq = 0.0f64;
@@ -573,11 +569,7 @@ pub fn capped_nesterov_r_step(
 /// `prev_dtheta` may be shorter than `delta` only when uninitialized, in which
 /// case the zip stops early and lambda_hat is 0 — but the production caller
 /// keeps them full-length (zero-filled) so the panel form is exact.
-fn capped_nesterov_curv_lambda_hat(
-    delta: &[f32],
-    prev_delta: &[f32],
-    prev_dtheta: &[f32],
-) -> f64 {
+fn capped_nesterov_curv_lambda_hat(delta: &[f32], prev_delta: &[f32], prev_dtheta: &[f32]) -> f64 {
     let mut dot = 0.0f64;
     let mut dtheta_norm_sq = 0.0f64;
     for ((d, pd), pt) in delta.iter().zip(prev_delta).zip(prev_dtheta) {
@@ -602,12 +594,7 @@ fn capped_nesterov_curv_lambda_hat(
 /// (inactive). The same sign-reversal guard as `capped_nesterov_cap` applies:
 /// if `A_t(cap) = 1 + cap + cap^2 c_t < 0` the cap is zeroed (keeps every
 /// admissible mu on the descent side).
-pub fn capped_nesterov_curv_cap(
-    c_t: f64,
-    r_t: f64,
-    delta_norm_sq: f64,
-    lambda_hat: f64,
-) -> f64 {
+pub fn capped_nesterov_curv_cap(c_t: f64, r_t: f64, delta_norm_sq: f64, lambda_hat: f64) -> f64 {
     let mu_par = capped_nesterov_mu_par(c_t);
     // Transverse curvature-energy denominator lambda_hat * r_t^2 * ||g_t||^2.
     let denom = lambda_hat * r_t * r_t * delta_norm_sq;
@@ -1315,12 +1302,7 @@ pub fn merge_rda(anchor: &[f32], learners: &[&[f32]], weights: &[f64], out: &mut
         return;
     }
     let norms: Vec<f64> = learners.iter().map(|l| l2_norm(anchor, l)).collect();
-    let radial: f64 = norms
-        .iter()
-        .zip(weights)
-        .map(|(n, w)| n * w)
-        .sum::<f64>()
-        / wsum;
+    let radial: f64 = norms.iter().zip(weights).map(|(n, w)| n * w).sum::<f64>() / wsum;
 
     // Weighted mean of unit directions, φ(0) := 0.
     out.fill(0.0);
@@ -1333,7 +1315,11 @@ pub fn merge_rda(anchor: &[f32], learners: &[&[f32]], weights: &[f64], out: &mut
             *o += coef * (*a - *l);
         }
     }
-    let mean_dir_norm = out.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
+    let mean_dir_norm = out
+        .iter()
+        .map(|v| (*v as f64) * (*v as f64))
+        .sum::<f64>()
+        .sqrt();
     if mean_dir_norm < 1e-12 {
         // Degenerate (all-zero or cancelling directions): fall back to Avg.
         merge_avg(anchor, learners, weights, out);
@@ -1870,18 +1856,37 @@ pub struct Heloco {
 impl Default for Heloco {
     fn default() -> Self {
         // Table 3 of the paper.
-        Self { c_ok: 0.2, k_s: 0.5, k_d: 1.0, beta_max: 0.5, kappa: 3.0, eps: 1e-8 }
+        Self {
+            c_ok: 0.2,
+            k_s: 0.5,
+            k_d: 1.0,
+            beta_max: 0.5,
+            kappa: 3.0,
+            eps: 1e-8,
+        }
     }
 }
 
 pub fn heloco_correct(delta: &mut [f32], momentum: &[f32], h: &Heloco) {
     debug_assert_eq!(delta.len(), momentum.len());
-    let du = delta.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
-    let dm = momentum.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    let du = delta
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let dm = momentum
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
     if du < h.eps || dm < h.eps {
         return;
     }
-    let dot: f64 = delta.iter().zip(momentum).map(|(d, m)| *d as f64 * *m as f64).sum();
+    let dot: f64 = delta
+        .iter()
+        .zip(momentum)
+        .map(|(d, m)| *d as f64 * *m as f64)
+        .sum();
     let c = dot / (du * dm);
     if c >= h.c_ok {
         return;
@@ -2174,7 +2179,6 @@ mod tests {
         assert_eq!(out, [3.0, 4.0]);
     }
 
-
     #[test]
     fn heloco_aligned_passes_through() {
         let h = Heloco::default();
@@ -2290,7 +2294,11 @@ mod tests {
         let mag = norm(&d);
         let before = cosine(&d, &m);
         heloco_correct(&mut d, &m, &h);
-        assert!((norm(&d) - mag).abs() < 1e-5, "magnitude changed: {mag} -> {}", norm(&d));
+        assert!(
+            (norm(&d) - mag).abs() < 1e-5,
+            "magnitude changed: {mag} -> {}",
+            norm(&d)
+        );
         assert!(cosine(&d, &m) > before);
     }
 
@@ -2304,8 +2312,16 @@ mod tests {
         // Same directions, but huge momentum norm → low confidence → weaker
         // correction (closer to the original delta).
         let orig = [-1.0f32, 0.2];
-        let moved_small: f64 = small_m.iter().zip(&orig).map(|(a, b)| (a - b).abs() as f64).sum();
-        let moved_large: f64 = large_m.iter().zip(&orig).map(|(a, b)| (a - b).abs() as f64).sum();
+        let moved_small: f64 = small_m
+            .iter()
+            .zip(&orig)
+            .map(|(a, b)| (a - b).abs() as f64)
+            .sum();
+        let moved_large: f64 = large_m
+            .iter()
+            .zip(&orig)
+            .map(|(a, b)| (a - b).abs() as f64)
+            .sum();
         assert!(moved_large < moved_small);
     }
 
@@ -2441,9 +2457,7 @@ mod tests {
         let s3 = rho_adaptive_step(&mut p, &mut buf, &[-1.0, -2.0], lr, &mut rho_ema);
         let gain3 = 15.0 / 17.0;
         assert!((rho_ema as f64 + 0.125).abs() < tol);
-        assert!(
-            (buf[0] as f64 + gain3).abs() < tol && (buf[1] as f64 + 2.0 * gain3).abs() < tol
-        );
+        assert!((buf[0] as f64 + gain3).abs() < tol && (buf[1] as f64 + 2.0 * gain3).abs() < tol);
         assert!(
             (p[0] as f64 + (0.316 - 0.1 * gain3)).abs() < tol
                 && (p[1] as f64 + (0.632 - 0.2 * gain3)).abs() < tol
@@ -2661,8 +2675,8 @@ mod tests {
             dtheta_norm_sq += (*pt as f64).powi(2);
         }
         let lambda_hat = lam_dot.max(0.0) / (dtheta_norm_sq + CAPPED_NESTEROV_CURV_LAMBDA_EPS);
-        let mu_par =
-            2.0 * CAPPED_NESTEROV_MU_MAX / (1.0 + (1.0 + 4.0 * c_t.max(0.0) * CAPPED_NESTEROV_MU_MAX).sqrt());
+        let mu_par = 2.0 * CAPPED_NESTEROV_MU_MAX
+            / (1.0 + (1.0 + 4.0 * c_t.max(0.0) * CAPPED_NESTEROV_MU_MAX).sqrt());
         let denom = lambda_hat * r_t * r_t * delta_norm_sq;
         let mu_curv = if denom > 0.0 {
             (CAPPED_NESTEROV_CURV_E_PERP / denom).powf(0.25)
@@ -2673,8 +2687,7 @@ mod tests {
         if 1.0 + cap + cap * cap * c_t < 0.0 {
             cap = 0.0;
         }
-        let released =
-            CAPPED_NESTEROV_EMA_BETA * mu_prev + (1.0 - CAPPED_NESTEROV_EMA_BETA) * cap;
+        let released = CAPPED_NESTEROV_EMA_BETA * mu_prev + (1.0 - CAPPED_NESTEROV_EMA_BETA) * cap;
         cap.min(released)
     }
 
@@ -2741,8 +2754,7 @@ mod tests {
 
         for delta in [[10.0f32, 0.0], [0.0, 10.0], [5.0, 5.0]] {
             // Expected momentum from the pre-step state (independent formula).
-            let expected_mu =
-                curv_reference_mu(&buf, &delta, &prev_delta, &prev_dtheta, mu as f64);
+            let expected_mu = curv_reference_mu(&buf, &delta, &prev_delta, &prev_dtheta, mu as f64);
             // Expected plain-Nesterov transition at that (f32-rounded) mu.
             let m = expected_mu as f32;
             let expected_buf = [m * buf[0] + delta[0], m * buf[1] + delta[1]];
@@ -2763,7 +2775,10 @@ mod tests {
                 &mut prev_dtheta,
             );
 
-            assert!((mu as f64 - expected_mu).abs() < 1e-6, "mu {mu} vs {expected_mu}");
+            assert!(
+                (mu as f64 - expected_mu).abs() < 1e-6,
+                "mu {mu} vs {expected_mu}"
+            );
             assert!((buf[0] as f64 - expected_buf[0] as f64).abs() < tol);
             assert!((buf[1] as f64 - expected_buf[1] as f64).abs() < tol);
             assert!((p[0] as f64 - expected_p[0] as f64).abs() < tol);
@@ -2855,8 +2870,14 @@ mod tests {
             &mut prev_delta,
             &mut prev_dtheta,
         );
-        let step =
-            materialize_applied_step(OuterOptimizer::CappedNesterovCurv, &buf, &delta, 0.3, mu, 1.0);
+        let step = materialize_applied_step(
+            OuterOptimizer::CappedNesterovCurv,
+            &buf,
+            &delta,
+            0.3,
+            mu,
+            1.0,
+        );
         for ((b, s), after) in base.iter().zip(&step).zip(&p) {
             assert_eq!((b - s).to_bits(), after.to_bits());
         }
@@ -2964,7 +2985,13 @@ mod tests {
         assert_eq!(mu, CAPPED_NESTEROV_MU_MAX as f32);
         let mut p_ref = [0.0f32, 0.0, 0.0];
         let mut buf_ref = [0.3f32, -0.7, 1.1];
-        nesterov_step(&mut p_ref, &mut buf_ref, &delta, 0.2, CAPPED_NESTEROV_MU_MAX as f32);
+        nesterov_step(
+            &mut p_ref,
+            &mut buf_ref,
+            &delta,
+            0.2,
+            CAPPED_NESTEROV_MU_MAX as f32,
+        );
         for (a, b) in p.iter().zip(&p_ref) {
             assert_eq!(a.to_bits(), b.to_bits());
         }
@@ -3103,14 +3130,8 @@ mod tests {
         let delta = [1.0f32, -0.5, 0.25];
         let mut mu = CAPPED_NESTEROV_INITIAL_MU;
         capped_nesterov_r_step(&mut p, &mut buf, &delta, 0.3, &mut mu);
-        let step = materialize_applied_step(
-            OuterOptimizer::CappedNesterovR,
-            &buf,
-            &delta,
-            0.3,
-            mu,
-            1.0,
-        );
+        let step =
+            materialize_applied_step(OuterOptimizer::CappedNesterovR, &buf, &delta, 0.3, mu, 1.0);
         for ((b, s), after) in base.iter().zip(&step).zip(&p) {
             assert_eq!((b - s).to_bits(), after.to_bits());
         }
@@ -3419,7 +3440,10 @@ mod tests {
         assert_eq!("nesterov".parse(), Ok(OuterOptimizer::Nesterov));
         assert_eq!("normalized-ema".parse(), Ok(OuterOptimizer::NormalizedEma));
         assert_eq!("restarted-ema".parse(), Ok(OuterOptimizer::RestartedEma));
-        assert_eq!("capped-nesterov".parse(), Ok(OuterOptimizer::CappedNesterov));
+        assert_eq!(
+            "capped-nesterov".parse(),
+            Ok(OuterOptimizer::CappedNesterov)
+        );
         assert_eq!(
             "capped-nesterov-gc".parse(),
             Ok(OuterOptimizer::CappedNesterovGc)
@@ -3537,7 +3561,12 @@ mod tests {
         // token-normalized control c_i = (theta - anchor) / tokens.
         let anchor = [0.5f32, -1.0, 2.0];
         let endpoint = vec![0.7f32, -1.4, 2.6]; // theta - anchor = [0.2,-0.4,0.6]
-        let learners_vec = vec![endpoint.clone(), endpoint.clone(), endpoint.clone(), endpoint];
+        let learners_vec = vec![
+            endpoint.clone(),
+            endpoint.clone(),
+            endpoint.clone(),
+            endpoint,
+        ];
         let refs: Vec<&[f32]> = learners_vec.iter().map(Vec::as_slice).collect();
         let tokens = [10u64, 10, 10, 10];
         let mut out = vec![0.0f32; 3];
@@ -3605,8 +3634,15 @@ mod tests {
         let mut params = [0.0f32; 4];
         let mut buf = [0.0f32; 4];
         let mut block_v = [0.0f32; 2];
-        let stats =
-            block_second_moment_step(&mut params, &mut buf, &delta, lr, &numels, &mut block_v, false);
+        let stats = block_second_moment_step(
+            &mut params,
+            &mut buf,
+            &delta,
+            lr,
+            &numels,
+            &mut block_v,
+            false,
+        );
         // v_0 = 0.05 * (9 + 16)/2 = 0.625 ; v_1 = 0.05 * (1 + 1)/2 = 0.05.
         assert_close(block_v[0] as f64, 0.05 * 25.0 / 2.0);
         assert_close(block_v[1] as f64, 0.05 * 2.0 / 2.0);
@@ -3643,7 +3679,13 @@ mod tests {
             v0 = BLOCK_ADAPTIVE_BETA2 * v0 + (1.0 - BLOCK_ADAPTIVE_BETA2) * s0;
             v1 = BLOCK_ADAPTIVE_BETA2 * v1 + (1.0 - BLOCK_ADAPTIVE_BETA2) * s1;
             let stats = block_second_moment_step(
-                &mut params, &mut buf, d, lr, &numels, &mut block_v, false,
+                &mut params,
+                &mut buf,
+                d,
+                lr,
+                &numels,
+                &mut block_v,
+                false,
             );
             assert_close(block_v[0] as f64, v0);
             assert_close(block_v[1] as f64, v1);
@@ -3662,8 +3704,15 @@ mod tests {
         let mut params = [0.0f32; 4];
         let mut buf = [0.0f32; 4];
         let mut block_v = [0.0f32; 2];
-        let stats =
-            block_second_moment_step(&mut params, &mut buf, &delta, lr, &numels, &mut block_v, true);
+        let stats = block_second_moment_step(
+            &mut params,
+            &mut buf,
+            &delta,
+            lr,
+            &numels,
+            &mut block_v,
+            true,
+        );
         // First step from 0: sign(0 - s) = -1, v = (1 - beta2) * s (>= 0).
         assert_close(block_v[0] as f64, 0.05 * 4.0 / 2.0);
         assert_close(block_v[1] as f64, 0.05 * 36.0 / 2.0);
@@ -3674,7 +3723,13 @@ mod tests {
         let small = [0.1f32, 0.0, 0.0, 0.1];
         let v1_prev = block_v[1] as f64;
         block_second_moment_step(
-            &mut params, &mut buf, &small, lr, &numels, &mut block_v, true,
+            &mut params,
+            &mut buf,
+            &small,
+            lr,
+            &numels,
+            &mut block_v,
+            true,
         );
         assert!((block_v[1] as f64) < v1_prev, "yogi did not decrease v");
     }
@@ -3696,8 +3751,10 @@ mod tests {
         let m = cheb_sgd_multipliers(CHEB_SGD_KAPPA);
         // hard safety bounds
         for &mj in &m {
-            assert!(mj >= CHEB_SGD_M_MIN - 1e-12 && mj <= CHEB_SGD_M_MAX + 1e-12,
-                    "multiplier {mj} out of [{CHEB_SGD_M_MIN}, {CHEB_SGD_M_MAX}]");
+            assert!(
+                mj >= CHEB_SGD_M_MIN - 1e-12 && mj <= CHEB_SGD_M_MAX + 1e-12,
+                "multiplier {mj} out of [{CHEB_SGD_M_MIN}, {CHEB_SGD_M_MAX}]"
+            );
         }
         // cycle-average multiplier is 1 (average LR stays the tuned base)
         let mean = m.iter().sum::<f64>() / CHEB_SGD_CYCLE as f64;
@@ -3707,8 +3764,10 @@ mod tests {
         // monotone m[0] <= m[3] <= m[2] <= m[1] (small steps may tie at m_min
         // for large kappa, cf. codex kappa=30 -> [0.5, 2.0, 1.0, 0.5]).
         assert!(m[1] > m[2] && m[2] > m[0], "phase 1 not the largest: {m:?}");
-        assert!(m[0] <= m[3] && m[3] <= m[2] && m[2] <= m[1],
-                "schedule not monotone in Leja order: {m:?}");
+        assert!(
+            m[0] <= m[3] && m[3] <= m[2] && m[2] <= m[1],
+            "schedule not monotone in Leja order: {m:?}"
+        );
         assert!(m[0] < 1.0 && m[1] > 1.0, "cycle should straddle base LR");
         // deterministic
         assert_eq!(m, cheb_sgd_multipliers(CHEB_SGD_KAPPA));
@@ -3716,8 +3775,10 @@ mod tests {
         // Moderate kappa stays inside the bounds -> strictly ordered, no ties.
         let m4 = cheb_sgd_multipliers(4.0);
         assert_close(m4.iter().sum::<f64>() / CHEB_SGD_CYCLE as f64, 1.0);
-        assert!(m4[0] < m4[3] && m4[3] < m4[2] && m4[2] < m4[1],
-                "moderate kappa should be strictly small<mid-small<mid-large<large: {m4:?}");
+        assert!(
+            m4[0] < m4[3] && m4[3] < m4[2] && m4[2] < m4[1],
+            "moderate kappa should be strictly small<mid-small<mid-large<large: {m4:?}"
+        );
     }
 
     #[test]
@@ -3833,7 +3894,12 @@ mod tests {
         let theta1 = [0.375f32, 0.375];
         let theta2 = theta; // [0.390625, 0.53125]
         let mut d3_current = [0.0f32, 0.0];
-        merge_avg(&theta2, &[&[0.5, 0.5], &[0.5, 0.5]], &[1.0, 1.0], &mut d3_current);
+        merge_avg(
+            &theta2,
+            &[&[0.5, 0.5], &[0.5, 0.5]],
+            &[1.0, 1.0],
+            &mut d3_current,
+        );
         assert_eq!(d3_current, [-0.109375, 0.03125]); // = theta_2 - [0.5,0.5]
 
         // Version-matched control (NO such flag exists in the Rust syncer today,
@@ -3851,7 +3917,7 @@ mod tests {
         // (weight 1/2) is what separates current-anchor from version-matched.
         let anchor_drift_b = [theta2[0] - theta1[0], theta2[1] - theta1[1]];
         assert_eq!(anchor_drift_b, [0.015625, 0.15625]); // [1/64, 5/32]
-        // current - vmatched == 0.5 * anchor_drift_B  (worker B's merge weight)
+                                                         // current - vmatched == 0.5 * anchor_drift_B  (worker B's merge weight)
         assert_eq!(d3_current[0] - d3_vmatched[0], 0.5 * anchor_drift_b[0]);
         assert_eq!(d3_current[1] - d3_vmatched[1], 0.5 * anchor_drift_b[1]);
 

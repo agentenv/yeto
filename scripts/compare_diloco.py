@@ -112,9 +112,7 @@ ACTION_PROBE_SHADOW_POLICIES = frozenset(("probe_shadow", "probe_lr_shadow"))
 ACTION_PROBE_ACTIVE_POLICIES = frozenset(("probe_loo_v1", "probe_lr_v1"))
 ACTION_PROBE_SCALAR_MULTIPLIERS = {
     action: multiplier
-    for action, multiplier in zip(
-        ACTION_PROBE_ACTIONS, (1.0, 0.75, 1.125, 1.25, 1.5)
-    )
+    for action, multiplier in zip(ACTION_PROBE_ACTIONS, (1.0, 0.75, 1.125, 1.25, 1.5))
 }
 ACTION_PROBE_DIGEST_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
 ACTION_PROBE_SUMMARY_FILENAME = "action_probe_run_summary.json"
@@ -172,6 +170,10 @@ class Arm:
     # 24; comparison arms default it OFF so each arm's sync frequency is an
     # explicit experimental variable, not an ambient default.
     sync_interval_steps: float = 0.0
+    # Exact optimizer-state capture is an explicit per-arm treatment.  The
+    # CLI flag is only a campaign-level master switch, which lets a matched
+    # capture-off/capture-on pair run under one immutable command line.
+    optimizer_state_capture: bool = False
 
 
 PRESETS: dict[str, Arm] = {
@@ -181,6 +183,77 @@ PRESETS: dict[str, Arm] = {
     # (fragments, fixed windows, outer step, probe capture) with quorum
     # defaulting to 1. Every "merge" is a single learner's window delta.
     "m1": Arm("m1", m=1),
+    # Exact-state capture canaries.  These presets deliberately remove every
+    # merge/wire ambiguity that would prevent a learner endpoint from being
+    # joined byte-for-byte to the syncer's admitted candidate.  The H value
+    # remains a CLI override so smoke (H=4) and development (H=16) share the
+    # same launch plumbing.
+    "capture_m1": Arm(
+        "capture_m1",
+        m=1,
+        fragments=4,
+        quorum=1,
+        strict_quorum=True,
+        inner_optimizer="adamw",
+        fixed_window_microsteps=4,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=1,
+        delta_correction="none",
+        outer_lr=0.28,
+        outer_momentum=0.0,
+        optimizer_state_capture=True,
+    ),
+    "capture_m4": Arm(
+        "capture_m4",
+        m=4,
+        fragments=4,
+        quorum=4,
+        strict_quorum=True,
+        inner_optimizer="adamw",
+        fixed_window_microsteps=16,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=4,
+        delta_correction="none",
+        outer_lr=0.28,
+        outer_momentum=0.0,
+        optimizer_state_capture=True,
+    ),
+    # Behavior-preservation qualifier: these arms differ only in whether the
+    # exact capture/audited-push path is enabled.  Override H from the CLI for
+    # a short H=4 smoke while preserving the same four-learner geometry.
+    "capture_m4_off": Arm(
+        "capture_m4_off",
+        m=4,
+        fragments=4,
+        quorum=4,
+        strict_quorum=True,
+        inner_optimizer="adamw",
+        fixed_window_microsteps=16,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=4,
+        delta_correction="none",
+        outer_lr=0.28,
+        outer_momentum=0.0,
+    ),
+    "capture_m4_on": Arm(
+        "capture_m4_on",
+        m=4,
+        fragments=4,
+        quorum=4,
+        strict_quorum=True,
+        inner_optimizer="adamw",
+        fixed_window_microsteps=16,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=4,
+        delta_correction="none",
+        outer_lr=0.28,
+        outer_momentum=0.0,
+        optimizer_state_capture=True,
+    ),
     "m12": Arm("m12", m=12, fragments=12, quorum=6),
     "alpha0": Arm("alpha0", merge_alpha=0.0),
     "q4": Arm("q4", wire_dtype="q4"),
@@ -314,6 +387,16 @@ PRESETS: dict[str, Arm] = {
 }
 
 
+def arm_capture_enabled(args, arm: Arm | None) -> bool:
+    """Whether this concrete arm receives the opt-in capture treatment."""
+
+    return bool(
+        arm is not None
+        and arm.optimizer_state_capture
+        and getattr(args, "optimizer_state_capture", False)
+    )
+
+
 def select_arms(spec: str) -> list[Arm]:
     names = (
         list(PRESETS)
@@ -342,21 +425,24 @@ def apply_arm_overrides(
     scaffold_control_shuffle: bool = False,
 ) -> list[Arm]:
     """Apply CLI-wide async-arm overrides without mutating presets."""
-    if all(
-        value is None
-        for value in (
-            outer_lr,
-            outer_lr_by_fragment,
-            outer_momentum,
-            outer_optimizer,
-            outer_restart_cos_threshold,
-            delta_correction,
-            commit_policy,
-            matrix_merge,
-            inner_control_variate,
-            scaffold_beta,
+    if (
+        all(
+            value is None
+            for value in (
+                outer_lr,
+                outer_lr_by_fragment,
+                outer_momentum,
+                outer_optimizer,
+                outer_restart_cos_threshold,
+                delta_correction,
+                commit_policy,
+                matrix_merge,
+                inner_control_variate,
+                scaffold_beta,
+            )
         )
-    ) and not scaffold_control_shuffle:
+        and not scaffold_control_shuffle
+    ):
         return arms
 
     from dataclasses import replace
@@ -413,7 +499,9 @@ def steps_for(
     return max(1, math.ceil(token_budget / (mbs * seq_len * learners * world)))
 
 
-def fixed_window_outer_steps(learner_steps: int, window_steps: int, fragments: int) -> int:
+def fixed_window_outer_steps(
+    learner_steps: int, window_steps: int, fragments: int
+) -> int:
     """Exact complete fragment commits for a barrier-synchronous fixed-H arm."""
     if learner_steps < window_steps:
         raise ValueError(
@@ -437,9 +525,7 @@ def validate_scaffold_correctness_audit(arm: Arm, arm_dir: Path) -> dict[str, fl
         for learner_id in range(arm.m)
     ]
     corrections = [record["correction_before_clip"] for record in records]
-    displacements = [
-        record["correction_displacement_after_step"] for record in records
-    ]
+    displacements = [record["correction_displacement_after_step"] for record in records]
     zeros = [torch.zeros_like(displacement) for displacement in displacements]
     diagnostics = zero_sum_step_diagnostics(corrections, zeros, displacements)
 
@@ -633,6 +719,42 @@ def learner_command(
         # single-process learners take the explicit one.
         cmd += ["--device", args.device]
     if arm is not None:
+        capture_active = arm_capture_enabled(args, arm)
+        matched_parity_arm = bool(
+            getattr(args, "optimizer_state_capture_parity", False)
+            and arm.name in {"capture_m4_off", "capture_m4_on"}
+        )
+        # The qualifier compares capture as the sole treatment.  Capture mode
+        # itself must disable reconnects so every audited attempt has one
+        # unambiguous transport identity; enforce that same policy on the OFF
+        # control rather than silently leaving it at the learner's unbounded
+        # default.  AdamW is also explicit in both matched commands.
+        if capture_active or matched_parity_arm:
+            cmd += [
+                "--inner-optimizer",
+                "adamw",
+                "--max-reconnects",
+                "0",
+            ]
+        if capture_active:
+            cmd += [
+                "--optimizer-state-capture-dir",
+                str(arm_dir / f"optimizer_state_capture_learner_{learner_id}"),
+                "--optimizer-state-capture-every",
+                str(getattr(args, "optimizer_state_capture_every", 1)),
+                "--optimizer-state-capture-max-hmc-events",
+                str(getattr(args, "optimizer_state_capture_max_hmc_events", 32)),
+                "--optimizer-state-capture-max-midpoint-windows",
+                str(
+                    getattr(
+                        args,
+                        "optimizer_state_capture_max_midpoint_windows",
+                        32,
+                    )
+                ),
+                "--optimizer-state-capture-max-bytes",
+                str(getattr(args, "optimizer_state_capture_max_bytes", 4 * 1024**3)),
+            ]
         if getattr(args, "bcmp_shadow_path", False):
             cmd += [
                 "--bcmp-shadow-path",
@@ -763,6 +885,8 @@ def syncer_command(
     action_probe_timeout_ms: int = 30_000,
     action_probe_run_uuid: str | None = None,
     action_probe_expected_config: Path | None = None,
+    response_transcript: Path | None = None,
+    response_transcript_session: str | None = None,
 ) -> list[str]:
     # The syncer takes no fragment count: the layout arrives in HELLO.
     cmd = [
@@ -830,6 +954,17 @@ def syncer_command(
             str(arm_dir / "syncer_probe"),
             "--probe-capture-every",
             str(probe_capture_every),
+        ]
+    if (response_transcript is None) != (response_transcript_session is None):
+        raise ValueError(
+            "response transcript path and session must be configured together"
+        )
+    if response_transcript is not None:
+        cmd += [
+            "--response-transcript",
+            str(response_transcript),
+            "--response-transcript-session",
+            str(response_transcript_session),
         ]
     if arm.commit_policy != "token_weighted":
         missing = [
@@ -1048,7 +1183,9 @@ def _load_event_tape(arm: Arm, tape_path: Path) -> list[dict]:
     try:
         lines = tape_path.read_text().splitlines()
     except OSError as exc:
-        raise RuntimeError(f"{arm.name}: cannot read event tape {tape_path}: {exc}") from exc
+        raise RuntimeError(
+            f"{arm.name}: cannot read event tape {tape_path}: {exc}"
+        ) from exc
 
     def reject_nonfinite(value: str):
         raise ValueError(f"non-finite JSON constant {value}")
@@ -1156,8 +1293,12 @@ def validate_event_tape_records(
                     f"{arm.name}: {mode} run has malformed responder {position} "
                     f"at step {step}: weight fields overflow"
                 ) from None
-            if not math.isfinite(weight_number) or weight_number <= 0 or not math.isclose(
-                weight_number, expected_weight, rel_tol=1e-12, abs_tol=0.0
+            if (
+                not math.isfinite(weight_number)
+                or weight_number <= 0
+                or not math.isclose(
+                    weight_number, expected_weight, rel_tol=1e-12, abs_tol=0.0
+                )
             ):
                 raise RuntimeError(
                     f"{arm.name}: {mode} run has malformed responder {position} "
@@ -1173,9 +1314,7 @@ def validate_event_tape_records(
             )
 
 
-def _probe_record_error(
-    arm: Arm, index: int, record: dict, message: str
-) -> NoReturn:
+def _probe_record_error(arm: Arm, index: int, record: dict, message: str) -> NoReturn:
     step = record.get("step", "?")
     fragment = record.get("fragment", "?")
     raise RuntimeError(
@@ -1219,9 +1358,42 @@ def _probe_percentile(values: list[float], quantile: float) -> float:
 
 
 def _is_transport_or_config_fallback(reason: str) -> bool:
-    return reason in ACTION_PROBE_TRANSPORT_CONFIG_FALLBACK_REASONS or reason.startswith(
-        ACTION_PROBE_TRANSPORT_CONFIG_FALLBACK_PREFIXES
+    return (
+        reason in ACTION_PROBE_TRANSPORT_CONFIG_FALLBACK_REASONS
+        or reason.startswith(ACTION_PROBE_TRANSPORT_CONFIG_FALLBACK_PREFIXES)
     )
+
+
+def parity_commit_interval_seconds(
+    records: list[dict], *, expected_steps: int
+) -> float:
+    """Exact producer-side time from commit sequence 1 through sequence N."""
+    if expected_steps < 2 or len(records) != expected_steps:
+        raise RuntimeError(
+            "parity timing requires the exact event tape for at least two commits"
+        )
+    elapsed: list[int] = []
+    for expected_seq, record in enumerate(records, 1):
+        commit_seq = record.get("commit_seq")
+        commit_elapsed_ns = record.get("commit_elapsed_ns")
+        if type(commit_seq) is not int or commit_seq != expected_seq:
+            raise RuntimeError(
+                "parity timing event tape has a missing, duplicate, or reordered "
+                f"commit_seq at record {expected_seq}: {commit_seq!r}"
+            )
+        if type(commit_elapsed_ns) is not int or commit_elapsed_ns < 0:
+            raise RuntimeError(
+                f"parity timing record {expected_seq} has invalid commit_elapsed_ns"
+            )
+        if elapsed and commit_elapsed_ns <= elapsed[-1]:
+            raise RuntimeError(
+                "parity timing commit_elapsed_ns must increase strictly in commit order"
+            )
+        elapsed.append(commit_elapsed_ns)
+    duration_ns = elapsed[-1] - elapsed[0]
+    if duration_ns <= 0:
+        raise RuntimeError("parity timing interval is empty")
+    return duration_ns / 1_000_000_000.0
 
 
 def validate_action_probe_run(
@@ -1273,15 +1445,16 @@ def validate_action_probe_run(
         committed_multiplier = _positive_finite_probe_number(
             arm, index, record, "committed_multiplier"
         )
-        latency = _positive_finite_probe_number(
-            arm, index, record, "probe_latency_ms"
-        )
+        latency = _positive_finite_probe_number(arm, index, record, "probe_latency_ms")
         request_digest = record.get("request_digest")
         if not isinstance(request_digest, str) or not ACTION_PROBE_DIGEST_RE.fullmatch(
             request_digest
         ):
             _probe_record_error(
-                arm, index, record, "request_digest must be exactly 64 hexadecimal characters"
+                arm,
+                index,
+                record,
+                "request_digest must be exactly 64 hexadecimal characters",
             )
 
         fallback = record.get("fallback")
@@ -1312,7 +1485,10 @@ def validate_action_probe_run(
             )
         if not fallback and fallback_reason is not None:
             _probe_record_error(
-                arm, index, record, "a selected alternative cannot carry fallback_reason"
+                arm,
+                index,
+                record,
+                "a selected alternative cannot carry fallback_reason",
             )
 
         if selected_action == "A0" and selected_multiplier != 1.0:
@@ -1359,7 +1535,9 @@ def validate_action_probe_run(
                 transport_config_fallback_count += 1
 
     def ordered_counts(counts: Counter[str]) -> dict[str, int]:
-        return {action: counts[action] for action in ACTION_PROBE_ACTIONS if counts[action]}
+        return {
+            action: counts[action] for action in ACTION_PROBE_ACTIONS if counts[action]
+        }
 
     summary = {
         "arm": arm.name,
@@ -1414,8 +1592,7 @@ def _git_metadata(command: list[str]) -> str:
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
         return (
-            f"unavailable: {shlex.join(command)} exited {result.returncode}: "
-            f"{detail}\n"
+            f"unavailable: {shlex.join(command)} exited {result.returncode}: {detail}\n"
         )
     return result.stdout
 
@@ -1499,7 +1676,9 @@ def validate_materialized_anchor_disjointness(
         try:
             lines = path.read_text().splitlines()
         except OSError as exc:
-            raise RuntimeError(f"cannot read materialized {label} data {path}: {exc}") from exc
+            raise RuntimeError(
+                f"cannot read materialized {label} data {path}: {exc}"
+            ) from exc
         for line_number, line in enumerate(lines, 1):
             if not line.strip():
                 continue
@@ -1739,6 +1918,11 @@ def run_baseline(args, work: Path) -> tuple[Path, float]:
 def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
     arm_dir = work / arm.name
     arm_dir.mkdir(parents=True, exist_ok=True)
+    capture_active = arm_capture_enabled(args, arm)
+    response_transcript = (
+        arm_dir / "syncer_response_transcript.jsonl" if capture_active else None
+    )
+    response_transcript_session = str(uuid.uuid4()) if capture_active else None
     budget_steps = steps_for(
         args.token_budget,
         args.micro_batch_size,
@@ -1750,8 +1934,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
     derived_exact_outer_steps = 0
     if arm.scaffold_correctness_mode and not args.syncer_total_steps:
         window = (
-            getattr(args, "fixed_window_microsteps", 0)
-            or arm.fixed_window_microsteps
+            getattr(args, "fixed_window_microsteps", 0) or arm.fixed_window_microsteps
         )
         if window is None:
             raise RuntimeError("SCAFFOLD correctness arm requires a fixed H")
@@ -1805,6 +1988,8 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                 delta_norm_ref=getattr(args, "delta_norm_ref", 0.0),
                 version_matched_anchor=getattr(args, "version_matched_anchor", False),
                 anchor_drift_log=getattr(args, "anchor_drift_log", False),
+                response_transcript=response_transcript,
+                response_transcript_session=response_transcript_session,
                 **syncer_args,
             ),
             stdout=syncer_log,
@@ -1890,9 +2075,49 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                 expected_steps=exact_outer_steps,
             )
         else:
-            validate_event_tape_records(
-                arm, records, expected_steps=exact_outer_steps
+            validate_event_tape_records(arm, records, expected_steps=exact_outer_steps)
+        if args.optimizer_state_capture_parity and arm.name in {
+            "capture_m4_off",
+            "capture_m4_on",
+        }:
+            wall = parity_commit_interval_seconds(
+                records, expected_steps=exact_outer_steps
             )
+    if capture_active:
+        capture_h = (
+            getattr(args, "fixed_window_microsteps", 0) or arm.fixed_window_microsteps
+        )
+        if capture_h is None:
+            raise RuntimeError(f"{arm.name}: optimizer capture requires a fixed H")
+        run_checked(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts/validate_optimizer_state_capture.py"),
+                "--arm-dir",
+                str(arm_dir),
+                "--response-transcript",
+                str(response_transcript),
+                "--expected-learners",
+                ",".join(str(learner_id) for learner_id in range(arm.m)),
+                "--expected-fragments",
+                str(arm.fragments),
+                "--expected-h",
+                str(capture_h),
+                "--expected-every",
+                str(args.optimizer_state_capture_every),
+                "--expected-max-hmc-events",
+                str(args.optimizer_state_capture_max_hmc_events),
+                "--expected-max-midpoint-windows",
+                str(args.optimizer_state_capture_max_midpoint_windows),
+                "--expected-max-bytes",
+                str(args.optimizer_state_capture_max_bytes),
+                "--min-joined-boundaries",
+                str(args.optimizer_state_capture_min_joined_boundaries),
+                "--min-joined-per-fragment",
+                str(args.optimizer_state_capture_min_joined_per_fragment),
+            ],
+            arm_dir / "optimizer_state_capture_validation.log",
+        )
     # Export the merged global parameters to a peft adapter dir.
     export_dir = arm_dir / "export"
     run_checked(
@@ -2030,6 +2255,43 @@ def main() -> int:
         type=int,
         default=1,
         help="sample every Nth applied fragment broadcast in each learner",
+    )
+    p.add_argument(
+        "--optimizer-state-capture",
+        action="store_true",
+        help="enable exact AdamW midpoint/push lifecycle capture for each async learner",
+    )
+    p.add_argument("--optimizer-state-capture-every", type=int, default=1)
+    p.add_argument("--optimizer-state-capture-max-hmc-events", type=int, default=32)
+    p.add_argument(
+        "--optimizer-state-capture-max-midpoint-windows", type=int, default=32
+    )
+    p.add_argument("--optimizer-state-capture-max-bytes", type=int, default=4 * 1024**3)
+    p.add_argument(
+        "--optimizer-state-capture-min-joined-boundaries",
+        type=int,
+        default=0,
+        help="fail the capture arm unless at least this many audited committed "
+        "boundaries join across every expected learner",
+    )
+    p.add_argument(
+        "--optimizer-state-capture-min-joined-per-fragment",
+        type=int,
+        default=0,
+        help="fail the capture arm unless every fragment has this many audited "
+        "committed joined boundaries",
+    )
+    p.add_argument(
+        "--optimizer-state-capture-parity",
+        action="store_true",
+        help="after matched capture_m4_off/on arms finish, fail unless their "
+        "exact probe/final/eval artifacts match and capture overhead is bounded",
+    )
+    p.add_argument(
+        "--optimizer-state-capture-parity-overhead-limit",
+        type=float,
+        default=0.02,
+        help="maximum capture-on wall-time overhead for the matched parity gate",
     )
     p.add_argument(
         "--device", default="cpu", help="learner/eval device (cpu, mps, cuda)"
@@ -2321,6 +2583,23 @@ def main() -> int:
         p.error("--syncer-total-steps and --learner-max-steps must be non-negative")
     if args.bcmp_shadow_every < 1:
         p.error("--bcmp-shadow-every must be positive")
+    if args.optimizer_state_capture_every < 1:
+        p.error("--optimizer-state-capture-every must be positive")
+    if (
+        not math.isfinite(args.optimizer_state_capture_parity_overhead_limit)
+        or args.optimizer_state_capture_parity_overhead_limit < 0.0
+    ):
+        p.error(
+            "--optimizer-state-capture-parity-overhead-limit must be finite and nonnegative"
+        )
+    if (
+        args.optimizer_state_capture_max_hmc_events < 0
+        or args.optimizer_state_capture_max_midpoint_windows < 0
+        or args.optimizer_state_capture_max_bytes < 0
+        or args.optimizer_state_capture_min_joined_boundaries < 0
+        or args.optimizer_state_capture_min_joined_per_fragment < 0
+    ):
+        p.error("optimizer-state capture limits must be non-negative")
     if args.scaffold_beta is not None and args.scaffold_beta <= 0.0:
         p.error("--scaffold-beta must be positive")
     if args.scaffold_control_shuffle and args.inner_control_variate not in (
@@ -2371,7 +2650,10 @@ def main() -> int:
         scaffold_control_shuffle=args.scaffold_control_shuffle,
     )
     for arm in arms:
-        if arm.scaffold_control_shuffle and arm.inner_control_variate != "scaffold_full":
+        if (
+            arm.scaffold_control_shuffle
+            and arm.inner_control_variate != "scaffold_full"
+        ):
             p.error("identity shuffle requires a scaffold_full arm")
     if args.bcmp_shadow_path:
         non_adamw = [arm.name for arm in arms if arm.inner_optimizer != "adamw"]
@@ -2379,6 +2661,59 @@ def main() -> int:
             p.error(
                 "--bcmp-shadow-path requires AdamW async arms; incompatible "
                 f"settings: {', '.join(non_adamw)}"
+            )
+    if args.optimizer_state_capture:
+        capture_arms = [arm for arm in arms if arm.optimizer_state_capture]
+        if not capture_arms:
+            p.error(
+                "--optimizer-state-capture requires at least one capture-enabled preset"
+            )
+        incompatible = [
+            arm.name
+            for arm in capture_arms
+            if arm.inner_optimizer != "adamw"
+            or arm.wire_dtype != "f32"
+            or arm.merge_alpha != 0.0
+            or arm.inner_control_variate != "none"
+        ]
+        if incompatible:
+            p.error(
+                "--optimizer-state-capture requires AdamW, f32 wire, "
+                "merge-alpha 0, and no inner control variate; incompatible "
+                f"settings: {', '.join(incompatible)}"
+            )
+        if args.syncer_total_steps == 0:
+            p.error(
+                "--optimizer-state-capture requires --syncer-total-steps so the "
+                "syncer closes and fsyncs the response transcript"
+            )
+        required_total = (
+            max(arm.fragments for arm in capture_arms)
+            * args.optimizer_state_capture_min_joined_per_fragment
+        )
+        if args.optimizer_state_capture_min_joined_boundaries < required_total:
+            p.error(
+                "--optimizer-state-capture-min-joined-boundaries must be at "
+                "least max(capture fragments) times "
+                "--optimizer-state-capture-min-joined-per-fragment"
+            )
+    if args.optimizer_state_capture_parity:
+        names = {arm.name for arm in arms}
+        required = {"capture_m4_off", "capture_m4_on"}
+        if not args.optimizer_state_capture or not required.issubset(names):
+            p.error(
+                "--optimizer-state-capture-parity requires the capture master "
+                "switch and both capture_m4_off,capture_m4_on presets"
+            )
+        if not args.syncer_probe_capture or args.syncer_probe_capture_every != 1:
+            p.error(
+                "--optimizer-state-capture-parity requires fully sampled "
+                "--syncer-probe-capture with --syncer-probe-capture-every 1"
+            )
+        if args.syncer_total_steps is None or args.syncer_total_steps < 2:
+            p.error(
+                "--optimizer-state-capture-parity requires at least two exact "
+                "syncer steps so post-first-commit steady-state timing is nonempty"
             )
     if args.round_interval_ms is not None:
         from dataclasses import replace as _replace
@@ -2524,9 +2859,18 @@ def main() -> int:
     for arm in arms:
         adapters, wall = run_diloco(args, arm, args.work_dir)
         loss = eval_in_subprocess(args, adapters, evalf)
-        records.append(
-            {"arm": arm.name, "m": arm.m, "wall_s": round(wall, 1), "eval_loss": loss}
-        )
+        record = {
+            "arm": arm.name,
+            "m": arm.m,
+            "wall_s": round(wall, 1),
+            "eval_loss": loss,
+        }
+        if args.optimizer_state_capture_parity and arm.name in {
+            "capture_m4_off",
+            "capture_m4_on",
+        }:
+            record["wall_scope"] = "syncer_commit_1_to_commit_N"
+        records.append(record)
         print(
             f"[compare] {arm.name} eval loss/token: {loss:.4f} ({wall:.0f}s)",
             flush=True,
@@ -2538,8 +2882,7 @@ def main() -> int:
             f.write(json.dumps(r) + "\n")
     comparison = "DiLoCo comparison" if bl is None else "DiLoCo vs synchronous baseline"
     md = [
-        f"# {comparison} — {args.model}, "
-        f"{args.token_budget} tokens/arm",
+        f"# {comparison} — {args.model}, {args.token_budget} tokens/arm",
         "",
         "| arm | M | wall (s) | eval loss/token | Δ vs baseline |",
         "|---|---|---|---|---|",
@@ -2555,6 +2898,31 @@ def main() -> int:
             f"| {r['eval_loss']:.4f} | {delta} |"
         )
     (args.report_dir / "report.md").write_text("\n".join(md) + "\n")
+    if args.optimizer_state_capture_parity:
+        parity_output = args.report_dir / "optimizer_state_capture_parity.json"
+        run_checked(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts/validate_optimizer_capture_parity.py"),
+                "--off-arm-dir",
+                str(args.work_dir / "capture_m4_off"),
+                "--on-arm-dir",
+                str(args.work_dir / "capture_m4_on"),
+                "--off-results",
+                str(args.report_dir / "results.jsonl"),
+                "--on-results",
+                str(args.report_dir / "results.jsonl"),
+                "--off-arm",
+                "capture_m4_off",
+                "--on-arm",
+                "capture_m4_on",
+                "--output",
+                str(parity_output),
+                "--overhead-limit",
+                str(args.optimizer_state_capture_parity_overhead_limit),
+            ],
+            args.report_dir / "optimizer_state_capture_parity.log",
+        )
     print("\n".join(md))
     return 0
 

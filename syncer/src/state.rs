@@ -547,8 +547,7 @@ impl GlobalState {
         let momentum = params.clone();
         let rho_ema = vec![merge::RHO_ADAPTIVE_INITIAL_RHO_EMA; layout.fragments.len()];
         let capped_mu = vec![merge::CAPPED_NESTEROV_INITIAL_MU; layout.fragments.len()];
-        let capped_gain =
-            vec![merge::CAPPED_NESTEROV_GC_INITIAL_GAIN; layout.fragments.len()];
+        let capped_gain = vec![merge::CAPPED_NESTEROV_GC_INITIAL_GAIN; layout.fragments.len()];
         let block_v = layout
             .fragments
             .iter()
@@ -1207,8 +1206,7 @@ impl GlobalState {
             if !gnorm.is_finite() || delta.iter().any(|value| !value.is_finite()) {
                 bail!("fragment {fid}: aggregate delta is not finite");
             }
-            let disagreement_energy =
-                self.disagreement_energy_for(anchor, &learners, fid, &delta);
+            let disagreement_energy = self.disagreement_energy_for(anchor, &learners, fid, &delta);
             return Ok(AggregateDelta {
                 fragment_id: fid,
                 base_version: self.versions[fid],
@@ -1669,10 +1667,7 @@ impl GlobalState {
             self.cheb_phase[p] = 0.0;
             // The curvature-aware controller history is not checkpointed
             // either; reset to zero so lambda_hat is inactive for one commit.
-            for slot in [
-                &mut self.curv_prev_delta[p],
-                &mut self.curv_prev_dtheta[p],
-            ] {
+            for slot in [&mut self.curv_prev_delta[p], &mut self.curv_prev_dtheta[p]] {
                 for v in slot.iter_mut() {
                     *v = 0.0;
                 }
@@ -1774,7 +1769,7 @@ mod tests {
         // Merge to a fresh global; install snapshots (version 0, [1;4]) first.
         st.merge_and_step(0, &[&vec![0.0f32; 4]], &[1.0]).unwrap();
         st.versions[0] = 5; // the server bumps the version after merge_and_step
-        // Current version resolves to the live params.
+                            // Current version resolves to the live params.
         assert_eq!(st.anchor_at(0, 5).unwrap(), &[0.0f32; 4]);
         // The learner's base version resolves to the retained prior global.
         assert_eq!(st.anchor_at(0, 0).unwrap(), &[1.0f32; 4]);
@@ -1986,7 +1981,8 @@ mod tests {
         assert_eq!(st.momentum[0], vec![1.0; 4]);
         // Learner sits 2.0 below the new anchor: raw delta [2;4], norm 4.
         let learner2: Vec<f32> = st.params[0].iter().map(|value| value - 2.0).collect();
-        st.merge_and_step(0, &[learner2.as_slice()], &[1.0]).unwrap();
+        st.merge_and_step(0, &[learner2.as_slice()], &[1.0])
+            .unwrap();
         for value in &st.params[0] {
             assert!(
                 (*value - (10.0 - 1.9 - 2.71)).abs() < 1e-4,
@@ -2016,7 +2012,11 @@ mod tests {
 
         let raw_norm = vector_norm(aggregate.delta());
         let scale = (st.delta_norm_ref as f64 / raw_norm) as f32;
-        let scaled: Vec<f32> = aggregate.delta().iter().map(|value| scale * *value).collect();
+        let scaled: Vec<f32> = aggregate
+            .delta()
+            .iter()
+            .map(|value| scale * *value)
+            .collect();
         assert!((vector_norm(&scaled) - 1.5).abs() < 1e-6);
         let rematerialized = merge::materialize_applied_step(
             merge::OuterOptimizer::Nesterov,

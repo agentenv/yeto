@@ -6,12 +6,17 @@
 //! "two fragments in flight"), so a slow quorum on one fragment never
 //! delays pulling the next.
 
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+#[cfg(test)]
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
+use std::io::{BufWriter, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
@@ -26,6 +31,9 @@ const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(180);
 const WRITER_QUEUE: usize = 128;
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+/// Opt-in audited push. Legacy MSG_PUSH_FRAGMENT=4 is never changed.
+const MSG_PUSH_FRAGMENT_AUDIT: u8 = 12;
+const AUDIT_PUSH_VERSION: u8 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlVariateMode {
@@ -117,6 +125,10 @@ pub struct Config {
     pub probe_capture_dir: Option<std::path::PathBuf>,
     /// Capture every Nth outer step. 0 disables capture.
     pub probe_capture_every: u64,
+    /// Exact audited-push/commit JSONL. None keeps the production path off.
+    pub response_transcript: Option<std::path::PathBuf>,
+    /// Stable capture-session identity written into every transcript record.
+    pub response_transcript_session: Option<String>,
     /// Production commit policy. token_weighted retains the legacy mutating
     /// merge path exactly; probe policies use sealed State previews.
     pub commit_policy: CommitPolicy,
@@ -215,6 +227,233 @@ struct Push {
     c_steps: u32,
     c_tokens: u64,
     values: Vec<f32>,
+    audit: Option<PushAudit>,
+}
+
+#[derive(Clone, Debug)]
+struct PushAudit {
+    window_uuid: [u8; 16],
+    attempt_serial: u64,
+    declared_payload_sha256: [u8; 32],
+    received_payload_sha256: [u8; 32],
+    source_attempt_event_seq: Option<u64>,
+}
+
+impl PushAudit {
+    fn digest_matches(&self) -> bool {
+        self.declared_payload_sha256 == self.received_payload_sha256
+    }
+}
+
+struct ResponseTranscript {
+    writer: BufWriter<std::fs::File>,
+    session: String,
+    next_event_seq: u64,
+}
+
+impl ResponseTranscript {
+    fn create(path: &std::path::Path, session: String) -> Result<Self> {
+        if session.trim().is_empty() {
+            bail!("response transcript session must not be empty");
+        }
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("create fresh response transcript {}", path.display()))?;
+        let mut transcript = Self {
+            writer: BufWriter::new(file),
+            session,
+            next_event_seq: 1,
+        };
+        transcript.append(json!({
+            "schema": "syncer_response_transcript_header_v1",
+        }))?;
+        Ok(transcript)
+    }
+
+    fn reserve_event_seq(&mut self) -> u64 {
+        let event_seq = self.next_event_seq;
+        self.next_event_seq += 1;
+        event_seq
+    }
+
+    fn append_reserved(&mut self, event_seq: u64, mut record: Value) -> Result<()> {
+        let object = record
+            .as_object_mut()
+            .context("response transcript record must be a JSON object")?;
+        object.insert(
+            "capture_session_uuid".to_owned(),
+            Value::String(self.session.clone()),
+        );
+        object.insert("event_seq".to_owned(), Value::from(event_seq));
+        serde_json::to_writer(&mut self.writer, &record)?;
+        self.writer.write_all(b"\n")?;
+        // Audit mode is fail-closed: make each disposition visible before the
+        // scheduler can use later evidence that refers to it.
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    fn append(&mut self, record: Value) -> Result<u64> {
+        let event_seq = self.reserve_event_seq();
+        self.append_reserved(event_seq, record)?;
+        Ok(event_seq)
+    }
+
+    fn append_push_attempt(
+        &mut self,
+        event_seq: u64,
+        push: &Push,
+        wire_dtype: u8,
+        disposition: &str,
+        reason: Option<&str>,
+        source_attempt_event_seq: Option<u64>,
+    ) -> Result<()> {
+        let audit = push.audit.as_ref();
+        let weight = crate::merge::learner_weight(push.c_tokens, push.c_steps);
+        self.append_reserved(
+            event_seq,
+            json!({
+                "schema": "syncer_push_attempt_v1",
+                "request_global_step": push.global_step,
+                "fragment_id": push.fragment_id,
+                "learner_id": push.learner_id,
+                "connection_id": push.connection_id,
+                "window_uuid": audit.map(|item| format_uuid(&item.window_uuid)),
+                "attempt_serial": audit.map(|item| item.attempt_serial),
+                "base_version": push.base_version,
+                "local_step": push.local_step,
+                "c_steps": push.c_steps,
+                "c_tokens": push.c_tokens,
+                "wire_dtype": wire_dtype,
+                "declared_payload_sha256": audit.map(|item| hex_bytes(&item.declared_payload_sha256)),
+                "received_payload_sha256": audit.map(|item| hex_bytes(&item.received_payload_sha256)),
+                "payload_digest_match": audit.map(PushAudit::digest_matches),
+                "weight": weight.is_finite().then_some(weight),
+                "weight_f64_bits": format!("{:016x}", weight.to_bits()),
+                "disposition": disposition,
+                "reason": reason,
+                "source_attempt_event_seq": source_attempt_event_seq,
+            }),
+        )
+    }
+
+    fn append_pruned(&mut self, push: &Push, wire_dtype: u8, reason: &str) -> Result<()> {
+        let event_seq = self.reserve_event_seq();
+        let source = push
+            .audit
+            .as_ref()
+            .and_then(|audit| audit.source_attempt_event_seq);
+        self.append_push_attempt(
+            event_seq,
+            push,
+            wire_dtype,
+            "pruned_connection",
+            Some(reason),
+            source,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_commit(
+        &mut self,
+        cfg: &Config,
+        step: u64,
+        fragment: usize,
+        previous_fragment_version: u64,
+        syncer_global_step_before: u64,
+        syncer_global_step_after: u64,
+        wire_dtype: u8,
+        pushes: &HashMap<u32, Push>,
+        ids: &[u32],
+        broadcast_payload: &[u8],
+    ) -> Result<()> {
+        let mut responders = Vec::with_capacity(ids.len());
+        for (responder_index, learner_id) in ids.iter().enumerate() {
+            let push = pushes
+                .get(learner_id)
+                .expect("sorted responder id must exist in push map");
+            let audit = push.audit.as_ref().with_context(|| {
+                format!(
+                    "response transcript commit {step}/{fragment} contains legacy push from learner {learner_id}"
+                )
+            })?;
+            let source_attempt_event_seq = audit.source_attempt_event_seq.with_context(|| {
+                format!(
+                    "response transcript commit {step}/{fragment} responder {learner_id} lacks source event"
+                )
+            })?;
+            let weight = crate::merge::learner_weight(push.c_tokens, push.c_steps);
+            responders.push(json!({
+                "responder_index": responder_index,
+                "learner_id": learner_id,
+                "connection_id": push.connection_id,
+                "source_attempt_event_seq": source_attempt_event_seq,
+                "window_uuid": format_uuid(&audit.window_uuid),
+                "attempt_serial": audit.attempt_serial,
+                "base_version": push.base_version,
+                "local_step": push.local_step,
+                "c_steps": push.c_steps,
+                "c_tokens": push.c_tokens,
+                "weight": weight,
+                "weight_f64_bits": format!("{:016x}", weight.to_bits()),
+                "received_payload_sha256": hex_bytes(&audit.received_payload_sha256),
+            }));
+        }
+        self.append(json!({
+            "schema": "syncer_round_commit_v1",
+            "commit_id": format!("step-{step:08}-fragment-{fragment:04}"),
+            "request_global_step": step,
+            "fragment_id": fragment,
+            "previous_fragment_version": previous_fragment_version,
+            "committed_fragment_version": step,
+            "syncer_global_step_before": syncer_global_step_before,
+            "syncer_global_step_after": syncer_global_step_after,
+            "strict_quorum": cfg.strict_quorum,
+            "configured_quorum": cfg.quorum,
+            "responder_count": responders.len(),
+            "wire_dtype": wire_dtype,
+            "commit_policy": cfg.commit_policy.to_string(),
+            "broadcast_payload_sha256": hex_bytes(&Sha256::digest(broadcast_payload)),
+            "responders": responders,
+        }))?;
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<()> {
+        self.writer.flush()?;
+        self.writer.get_ref().sync_all()?;
+        Ok(())
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        result.push(HEX[(byte >> 4) as usize] as char);
+        result.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    result
+}
+
+fn format_uuid(bytes: &[u8; 16]) -> String {
+    let raw = hex_bytes(bytes);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &raw[0..8],
+        &raw[8..12],
+        &raw[12..16],
+        &raw[16..20],
+        &raw[20..32]
+    )
 }
 
 enum ControlBroadcast {
@@ -309,6 +548,14 @@ fn validate_push_candidate(
     current_params: &[f32],
     wire_dtype: u8,
 ) -> Result<f64> {
+    if let Some(audit) = &push.audit {
+        if !audit.digest_matches() {
+            bail!(
+                "audited push from learner {} has a payload SHA-256 mismatch",
+                push.learner_id
+            );
+        }
+    }
     if push.global_step != expected_step {
         bail!(
             "push from learner {} targets step {}, expected {expected_step}",
@@ -373,7 +620,7 @@ fn validate_push_candidate(
     Ok(weight)
 }
 
-fn admit_push(round: &mut Round, push: Push, st: &GlobalState) -> Result<()> {
+fn validate_push_for_round(round: &Round, push: &Push, st: &GlobalState) -> Result<()> {
     if round.pushes.contains_key(&push.learner_id) {
         bail!(
             "duplicate push from learner {} for step {} fragment {}",
@@ -383,13 +630,19 @@ fn admit_push(round: &mut Round, push: Push, st: &GlobalState) -> Result<()> {
         );
     }
     validate_push_candidate(
-        &push,
+        push,
         round.t,
         round.p,
         st.versions[round.p],
         &st.params[round.p],
         st.wire_dtype,
     )?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn admit_push(round: &mut Round, push: Push, st: &GlobalState) -> Result<()> {
+    validate_push_for_round(round, &push, st)?;
     match round.pushes.entry(push.learner_id) {
         Entry::Vacant(entry) => {
             entry.insert(push);
@@ -795,7 +1048,8 @@ async fn dispatch_inner(
                 .await
                 .ok();
         }
-        MSG_PUSH_FRAGMENT => {
+        MSG_PUSH_FRAGMENT | MSG_PUSH_FRAGMENT_AUDIT => {
+            let audited = msg_type == MSG_PUSH_FRAGMENT_AUDIT;
             let mut r = Reader(payload);
             let learner_id = r.u32()?;
             validate_push_identity(group.learner_id, learner_id)?;
@@ -805,6 +1059,34 @@ async fn dispatch_inner(
             let local_step = r.u64()?;
             let c_steps = r.u32()?;
             let c_tokens = r.u64()?;
+            let audit_head = if audited {
+                let version = r.u8()?;
+                if version != AUDIT_PUSH_VERSION {
+                    bail!("unsupported audited push version {version}");
+                }
+                let window_uuid: [u8; 16] = r.take(16)?.try_into()?;
+                if window_uuid.iter().all(|byte| *byte == 0) {
+                    bail!("audited push window UUID must not be all zero");
+                }
+                let attempt_serial = r.u64()?;
+                if attempt_serial == 0 {
+                    bail!("audited push attempt serial must be positive");
+                }
+                let declared_payload_sha256: [u8; 32] = r.take(32)?.try_into()?;
+                Some((window_uuid, attempt_serial, declared_payload_sha256))
+            } else {
+                None
+            };
+            let tensor_bytes = r.rest();
+            let audit = audit_head.map(|(window_uuid, attempt_serial, declared_payload_sha256)| {
+                PushAudit {
+                    window_uuid,
+                    attempt_serial,
+                    declared_payload_sha256,
+                    received_payload_sha256: Sha256::digest(tensor_bytes).into(),
+                    source_attempt_event_seq: None,
+                }
+            });
             let mut values = Vec::new();
             if group.dtype == DTYPE_Q4 {
                 // Q4 pushes carry the *delta* against base_version; the
@@ -814,9 +1096,9 @@ async fn dispatch_inner(
                     .fragments
                     .get(fragment_id as usize)
                     .with_context(|| format!("push for unknown fragment {fragment_id}"))?;
-                decode_q4(r.rest(), frag.numel(), &mut values)?;
+                decode_q4(tensor_bytes, frag.numel(), &mut values)?;
             } else {
-                decode_tensor(group.dtype, r.rest(), &mut values)?;
+                decode_tensor(group.dtype, tensor_bytes, &mut values)?;
             }
             event_tx
                 .send(Event::Push {
@@ -831,6 +1113,7 @@ async fn dispatch_inner(
                         c_steps,
                         c_tokens,
                         values,
+                        audit,
                     },
                 })
                 .await
@@ -853,6 +1136,15 @@ async fn scheduler(
     registry: Registry,
 ) -> Result<()> {
     let mut state: Option<GlobalState> = None;
+    let mut response_transcript = match (
+        cfg.response_transcript.as_deref(),
+        cfg.response_transcript_session.clone(),
+    ) {
+        (Some(path), Some(session)) => Some(ResponseTranscript::create(path, session)?),
+        (None, None) => None,
+        _ => bail!("response transcript path/session must be configured together"),
+    };
+    let mut seen_audit_attempts: HashSet<(u32, u64)> = HashSet::new();
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
     // a resumed checkpoint) and all expected learners have connected (late
@@ -904,7 +1196,20 @@ async fn scheduler(
                     info!("global parameters initialized");
                 }
             }
-            Event::Push { .. } => warn!("push before initialization; dropped"),
+            Event::Push { group, push } => {
+                warn!("push before initialization; dropped");
+                if let Some(transcript) = response_transcript.as_mut() {
+                    let event_seq = transcript.reserve_event_seq();
+                    transcript.append_push_attempt(
+                        event_seq,
+                        &push,
+                        group.dtype,
+                        "rejected_invalid",
+                        Some("push_before_initialization"),
+                        None,
+                    )?;
+                }
+            }
             Event::Disconnected { group } => {
                 if remove_group_if_current(&registry, &group) {
                     warn!(learner_id = group.learner_id, "disconnected during init");
@@ -940,6 +1245,8 @@ async fn scheduler(
                                      // Send everyone the initial (or resumed) global parameters so all
                                      // learners start bit-identical (also serves recovery for late joiners).
     broadcast_all_fragments(&st, &registry).await;
+    let timing_origin = Instant::now();
+    let mut commit_seq = 0u64;
 
     // Phase 2: the outer loop. One fragment per global step, round-robin,
     // with up to `pipeline` rounds in flight at once: while round t sits in
@@ -1000,13 +1307,18 @@ async fn scheduler(
         } else {
             (cfg.quorum as usize).min(connected.max(1))
         };
-        prune_noncurrent_pushes(
+        let pruned = prune_noncurrent_pushes(
             &mut inflight,
             &current_connections,
             k,
             Instant::now(),
             Duration::from_secs(cfg.quorum_timeout_s),
         );
+        if let Some(transcript) = response_transcript.as_mut() {
+            for push in &pruned {
+                transcript.append_pruned(push, st.wire_dtype, "connection_no_longer_current")?;
+            }
+        }
 
         // Arm the grace window of any round that just reached quorum.
         for r in inflight.iter_mut() {
@@ -1044,6 +1356,7 @@ async fn scheduler(
                 let round = inflight.remove(i);
                 let released = busy_fragments.remove(&round.p);
                 debug_assert!(released, "completed fragment was not marked busy");
+                commit_seq = commit_seq.saturating_add(1);
                 complete_round(
                     &cfg,
                     &mut st,
@@ -1051,6 +1364,9 @@ async fn scheduler(
                     &mut last_sync_secs,
                     &mut action_probe_client,
                     action_probe_unavailable.as_deref(),
+                    response_transcript.as_mut(),
+                    commit_seq,
+                    &timing_origin,
                     round,
                 )
                 .await?;
@@ -1091,9 +1407,38 @@ async fn scheduler(
             Err(_) => continue, // deadline hit; loop re-evaluates
             Ok(None) => bail!("event channel closed"),
             Ok(Some(ev)) => match ev {
-                Event::Push { group, push } => {
+                Event::Push { group, mut push } => {
                     let learner_id = push.learner_id;
                     let local_step = push.local_step;
+                    let transcript_event_seq = response_transcript
+                        .as_mut()
+                        .map(ResponseTranscript::reserve_event_seq);
+                    if response_transcript.is_some() && push.audit.is_none() {
+                        response_transcript.as_mut().unwrap().append_push_attempt(
+                            transcript_event_seq.unwrap(),
+                            &push,
+                            group.dtype,
+                            "rejected_invalid",
+                            Some("audited_push_required"),
+                            None,
+                        )?;
+                        continue;
+                    }
+                    if let Some(audit) = &push.audit {
+                        if response_transcript.is_some()
+                            && !seen_audit_attempts.insert((learner_id, audit.attempt_serial))
+                        {
+                            response_transcript.as_mut().unwrap().append_push_attempt(
+                                transcript_event_seq.unwrap(),
+                                &push,
+                                group.dtype,
+                                "rejected_invalid",
+                                Some("reused_attempt_serial"),
+                                None,
+                            )?;
+                            continue;
+                        }
+                    }
                     if push.connection_id != group.connection_id
                         || !group.validated.load(Ordering::Acquire)
                         || !group_is_current(&registry, &group)
@@ -1102,6 +1447,18 @@ async fn scheduler(
                             learner_id,
                             "push from stale or unvalidated session rejected"
                         );
+                        if let (Some(transcript), Some(event_seq)) =
+                            (response_transcript.as_mut(), transcript_event_seq)
+                        {
+                            transcript.append_push_attempt(
+                                event_seq,
+                                &push,
+                                group.dtype,
+                                "rejected_stale_session",
+                                Some("connection_not_current"),
+                                None,
+                            )?;
+                        }
                         continue;
                     }
                     // Route to the in-flight round the pull came from.
@@ -1111,13 +1468,65 @@ async fn scheduler(
                     {
                         let step = r.t;
                         let fragment = r.p;
-                        match admit_push(r, push, &st) {
-                            Ok(()) => {
-                                step_rates.note(learner_id, local_step, Instant::now());
-                            }
-                            Err(e) => warn!(learner_id, step, fragment, "push rejected: {e:#}"),
+                        if let (Some(event_seq), Some(audit)) =
+                            (transcript_event_seq, push.audit.as_mut())
+                        {
+                            audit.source_attempt_event_seq = Some(event_seq);
                         }
-                    } // else: stale response from a completed round; drop
+                        match validate_push_for_round(r, &push, &st) {
+                            Ok(()) => {
+                                r.pushes.insert(learner_id, push);
+                                step_rates.note(learner_id, local_step, Instant::now());
+                                if let (Some(transcript), Some(event_seq)) =
+                                    (response_transcript.as_mut(), transcript_event_seq)
+                                {
+                                    let admitted = r
+                                        .pushes
+                                        .get(&learner_id)
+                                        .expect("just-admitted push must remain in round");
+                                    transcript.append_push_attempt(
+                                        event_seq,
+                                        admitted,
+                                        group.dtype,
+                                        "admitted_pending",
+                                        None,
+                                        None,
+                                    )?;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(learner_id, step, fragment, "push rejected: {e:#}");
+                                if let (Some(transcript), Some(event_seq)) =
+                                    (response_transcript.as_mut(), transcript_event_seq)
+                                {
+                                    let disposition = if r.pushes.contains_key(&learner_id) {
+                                        "rejected_duplicate"
+                                    } else {
+                                        "rejected_invalid"
+                                    };
+                                    transcript.append_push_attempt(
+                                        event_seq,
+                                        &push,
+                                        group.dtype,
+                                        disposition,
+                                        Some(&e.to_string()),
+                                        None,
+                                    )?;
+                                }
+                            }
+                        }
+                    } else if let (Some(transcript), Some(event_seq)) =
+                        (response_transcript.as_mut(), transcript_event_seq)
+                    {
+                        transcript.append_push_attempt(
+                            event_seq,
+                            &push,
+                            group.dtype,
+                            "late_no_inflight",
+                            Some("round_not_inflight"),
+                            None,
+                        )?;
+                    }
                 }
                 Event::Hello { group } => {
                     // Rejoining learner: catch it up to the current state.
@@ -1140,7 +1549,7 @@ async fn scheduler(
                     } else {
                         (cfg.quorum as usize).min(connected_now.max(1))
                     };
-                    remove_connection_pushes(
+                    let pruned = remove_connection_pushes(
                         &mut inflight,
                         learner_id,
                         group.connection_id,
@@ -1148,6 +1557,15 @@ async fn scheduler(
                         Instant::now(),
                         Duration::from_secs(cfg.quorum_timeout_s),
                     );
+                    if let Some(transcript) = response_transcript.as_mut() {
+                        for push in &pruned {
+                            transcript.append_pruned(
+                                push,
+                                st.wire_dtype,
+                                "connection_disconnected",
+                            )?;
+                        }
+                    }
                 }
             },
         }
@@ -1163,6 +1581,9 @@ async fn scheduler(
     info!("training complete after {} outer steps", cfg.total_steps);
     // Give writer tasks a moment to flush the shutdown frames.
     tokio::time::sleep(Duration::from_secs(2)).await;
+    if let Some(transcript) = response_transcript {
+        transcript.finish()?;
+    }
     Ok(())
 }
 
@@ -1202,16 +1623,28 @@ fn prune_noncurrent_pushes(
     quorum: usize,
     now: Instant,
     timeout: Duration,
-) {
+) -> Vec<Push> {
+    let mut removed = Vec::new();
     for round in rounds {
         let before = round.pushes.len();
-        round.pushes.retain(|learner_id, push| {
-            current_connections.get(learner_id) == Some(&push.connection_id)
-        });
+        let stale: Vec<u32> = round
+            .pushes
+            .iter()
+            .filter_map(|(learner_id, push)| {
+                (current_connections.get(learner_id) != Some(&push.connection_id))
+                    .then_some(*learner_id)
+            })
+            .collect();
+        for learner_id in stale {
+            if let Some(push) = round.pushes.remove(&learner_id) {
+                removed.push(push);
+            }
+        }
         if round.pushes.len() != before && round.pushes.len() < quorum {
             reset_round_wait(round, now, timeout);
         }
     }
+    removed
 }
 
 fn remove_connection_pushes(
@@ -1221,19 +1654,23 @@ fn remove_connection_pushes(
     quorum: usize,
     now: Instant,
     timeout: Duration,
-) {
+) -> Vec<Push> {
+    let mut removed = Vec::new();
     for round in rounds {
         let belongs_to_connection = round
             .pushes
             .get(&learner_id)
             .is_some_and(|push| push.connection_id == connection_id);
         if belongs_to_connection {
-            round.pushes.remove(&learner_id);
+            if let Some(push) = round.pushes.remove(&learner_id) {
+                removed.push(push);
+            }
         }
         if belongs_to_connection && round.pushes.len() < quorum {
             reset_round_wait(round, now, timeout);
         }
     }
+    removed
 }
 
 #[derive(Clone, Debug)]
@@ -1380,6 +1817,7 @@ fn cyclic_derangement(ids: &[u32], canonical: &[Vec<f32>]) -> Result<HashMap<u32
 /// Called from the single scheduler task, so merges are serialized even
 /// with several rounds in flight; concurrent rounds target distinct
 /// fragments, so each merge touches disjoint params/momentum.
+#[allow(clippy::too_many_arguments)]
 async fn complete_round(
     cfg: &Config,
     st: &mut GlobalState,
@@ -1387,6 +1825,9 @@ async fn complete_round(
     last_sync_secs: &mut f64,
     action_probe_client: &mut Option<ActionProbeClient>,
     action_probe_unavailable: Option<&str>,
+    response_transcript: Option<&mut ResponseTranscript>,
+    commit_seq: u64,
+    timing_origin: &Instant,
     round: Round,
 ) -> Result<()> {
     let Round {
@@ -1397,6 +1838,7 @@ async fn complete_round(
         ..
     } = round;
     let prev_version = st.versions[p];
+    let syncer_global_step_before = st.global_step;
     ensure_fragment_version_advances(p, prev_version, t)?;
     if pushes.is_empty() {
         bail!("round {t} fragment {p} has no admitted pushes");
@@ -1621,6 +2063,20 @@ async fn complete_round(
     for g in current_groups(registry) {
         let _ = g.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
     }
+    if let Some(transcript) = response_transcript {
+        transcript.append_commit(
+            cfg,
+            t,
+            p,
+            prev_version,
+            syncer_global_step_before,
+            st.global_step,
+            st.wire_dtype,
+            &pushes,
+            &ids,
+            &payload,
+        )?;
+    }
     // Broadcast the endpoint-residual mean at the fragment's new version.
     // Full Option II accumulates on the learner. The shuffle arm alone needs a
     // personalized message, carrying a fixed cyclic reassignment of residuals.
@@ -1666,6 +2122,8 @@ async fn complete_round(
             tape,
             t,
             p,
+            commit_seq,
+            timing_origin.elapsed().as_nanos().min(u64::MAX as u128) as u64,
             &pushes,
             &weights,
             &merge_stats,
@@ -1970,6 +2428,8 @@ fn append_tape(
     path: &std::path::Path,
     step: u64,
     fragment: usize,
+    commit_seq: u64,
+    commit_elapsed_ns: u64,
     pushes: &HashMap<u32, Push>,
     _weights: &[f64],
     stats: &MergeStats,
@@ -1978,7 +2438,17 @@ fn append_tape(
     ms: u64,
 ) {
     use std::io::Write;
-    let line = format_tape_line(step, fragment, pushes, stats, decision, anchor_drift, ms);
+    let line = format_tape_line(
+        step,
+        fragment,
+        commit_seq,
+        commit_elapsed_ns,
+        pushes,
+        stats,
+        decision,
+        anchor_drift,
+        ms,
+    );
     let res = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -2010,6 +2480,8 @@ fn optional_json_string(value: Option<&str>) -> String {
 fn format_tape_line(
     step: u64,
     fragment: usize,
+    commit_seq: u64,
+    commit_elapsed_ns: u64,
     pushes: &HashMap<u32, Push>,
     stats: &MergeStats,
     decision: &CommitDecision,
@@ -2060,7 +2532,7 @@ fn format_tape_line(
     let committed_multiplier = json_number(decision.committed_multiplier);
     let request_digest = optional_json_string(decision.request_digest.as_deref());
     format!(
-        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}}}\n",
+        "{{\"step\":{step},\"fragment\":{fragment},\"commit_seq\":{commit_seq},\"commit_elapsed_ns\":{commit_elapsed_ns},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}}}\n",
         responders.join(","),
         outer.restarted,
         decision.fallback,
@@ -2117,6 +2589,56 @@ mod tests {
         st
     }
 
+    fn test_config() -> Config {
+        Config {
+            port: 0,
+            learners: 4,
+            quorum: 4,
+            grace_ms: 0,
+            grace_gamma: 0.8,
+            grace_tau: 2.0,
+            pipeline: 1,
+            min_round_interval_ms: 0,
+            sync_interval_steps: 0.0,
+            delta_correction: false,
+            control_variate: ControlVariateMode::None,
+            scaffold_control_shuffle: false,
+            quorum_timeout_s: 1,
+            strict_quorum: true,
+            total_steps: 1,
+            outer_lr: 0.28,
+            outer_lr_by_fragment: None,
+            outer_momentum: 0.0,
+            outer_optimizer: crate::merge::OuterOptimizer::Nesterov,
+            outer_restart_cos_threshold: 0.0,
+            delta_norm_ref: 0.0,
+            version_matched_anchor: false,
+            anchor_drift_instrument: false,
+            final_state: None,
+            checkpoint_path: None,
+            checkpoint_every: 0,
+            resume: false,
+            event_tape: None,
+            probe_capture_dir: None,
+            probe_capture_every: 0,
+            response_transcript: None,
+            response_transcript_session: None,
+            commit_policy: CommitPolicy::TokenWeighted,
+            action_probe: None,
+        }
+    }
+
+    fn unique_transcript_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "yeto-response-transcript-{label}-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
     fn test_round() -> Round {
         let now = Instant::now();
         Round {
@@ -2141,7 +2663,32 @@ mod tests {
             c_steps: 10,
             c_tokens: 100,
             values: vec![1.0, 2.0],
+            audit: None,
         }
+    }
+
+    fn audited_payload(
+        learner_id: u32,
+        window_uuid: [u8; 16],
+        attempt_serial: u64,
+        tensor: &[u8],
+        declared_digest: Option<[u8; 32]>,
+    ) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&learner_id.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&9u64.to_le_bytes());
+        payload.extend_from_slice(&7u64.to_le_bytes());
+        payload.extend_from_slice(&21u64.to_le_bytes());
+        payload.extend_from_slice(&10u32.to_le_bytes());
+        payload.extend_from_slice(&100u64.to_le_bytes());
+        payload.push(AUDIT_PUSH_VERSION);
+        payload.extend_from_slice(&window_uuid);
+        payload.extend_from_slice(&attempt_serial.to_le_bytes());
+        payload
+            .extend_from_slice(&declared_digest.unwrap_or_else(|| Sha256::digest(tensor).into()));
+        payload.extend_from_slice(tensor);
+        payload
     }
 
     fn test_group(learner_id: u32, validated: bool) -> Arc<Group> {
@@ -2166,6 +2713,190 @@ mod tests {
         validate_push_identity(3, 3).unwrap();
         let err = validate_push_identity(3, 4).unwrap_err().to_string();
         assert!(err.contains("does not match connection learner id"));
+    }
+
+    #[tokio::test]
+    async fn audited_push_parses_exact_wire_digest_without_changing_values() {
+        let group = test_group(7, true);
+        let tensor = [1.25f32.to_le_bytes(), (-3.5f32).to_le_bytes()].concat();
+        let window_uuid = [0x5au8; 16];
+        let payload = audited_payload(7, window_uuid, 23, &tensor, None);
+        let (tx, mut rx) = mpsc::channel(1);
+
+        dispatch_inner(&group, MSG_PUSH_FRAGMENT_AUDIT, &payload, &tx)
+            .await
+            .unwrap();
+        let Event::Push { push, .. } = rx.recv().await.unwrap() else {
+            panic!("audited push did not dispatch as a Push event");
+        };
+        assert_eq!(push.values, vec![1.25, -3.5]);
+        let audit = push.audit.unwrap();
+        assert_eq!(audit.window_uuid, window_uuid);
+        assert_eq!(audit.attempt_serial, 23);
+        assert_eq!(audit.declared_payload_sha256, Sha256::digest(&tensor)[..]);
+        assert_eq!(audit.received_payload_sha256, Sha256::digest(&tensor)[..]);
+        assert!(audit.digest_matches());
+    }
+
+    #[tokio::test]
+    async fn audited_push_digest_mismatch_is_dispatched_but_never_admitted() {
+        let group = test_group(7, true);
+        let tensor = [1.0f32.to_le_bytes(), 2.0f32.to_le_bytes()].concat();
+        let payload = audited_payload(7, [1u8; 16], 1, &tensor, Some([0u8; 32]));
+        let (tx, mut rx) = mpsc::channel(1);
+        dispatch_inner(&group, MSG_PUSH_FRAGMENT_AUDIT, &payload, &tx)
+            .await
+            .unwrap();
+        let Event::Push { push, .. } = rx.recv().await.unwrap() else {
+            panic!("audited push did not dispatch as a Push event");
+        };
+        assert!(!push.audit.as_ref().unwrap().digest_matches());
+        let mut round = test_round();
+        let error = admit_push(&mut round, push, &test_state(DTYPE_F32))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("SHA-256 mismatch"));
+        assert!(round.pushes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn audited_push_rejects_zero_window_or_attempt_at_parse_boundary() {
+        let group = test_group(7, true);
+        let tensor = [1.0f32.to_le_bytes(), 2.0f32.to_le_bytes()].concat();
+        let (tx, _rx) = mpsc::channel(1);
+        let zero_window = audited_payload(7, [0u8; 16], 1, &tensor, None);
+        assert!(
+            dispatch_inner(&group, MSG_PUSH_FRAGMENT_AUDIT, &zero_window, &tx)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("must not be all zero")
+        );
+        let zero_attempt = audited_payload(7, [1u8; 16], 0, &tensor, None);
+        assert!(
+            dispatch_inner(&group, MSG_PUSH_FRAGMENT_AUDIT, &zero_attempt, &tx)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("must be positive")
+        );
+    }
+
+    #[test]
+    fn response_transcript_writes_fresh_exact_attempt_records() {
+        let path = unique_transcript_path("attempt");
+        let mut transcript =
+            ResponseTranscript::create(&path, "capture-session-test".to_owned()).unwrap();
+        let mut push = test_push(2);
+        push.audit = Some(PushAudit {
+            window_uuid: [0xabu8; 16],
+            attempt_serial: 7,
+            declared_payload_sha256: [0x11u8; 32],
+            received_payload_sha256: [0x11u8; 32],
+            source_attempt_event_seq: Some(2),
+        });
+        let event_seq = transcript.reserve_event_seq();
+        assert_eq!(event_seq, 2); // header is event 1
+        transcript
+            .append_push_attempt(event_seq, &push, DTYPE_F32, "admitted_pending", None, None)
+            .unwrap();
+        transcript.finish().unwrap();
+
+        let rows: Vec<Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["schema"], "syncer_response_transcript_header_v1");
+        assert_eq!(rows[1]["schema"], "syncer_push_attempt_v1");
+        assert_eq!(rows[1]["capture_session_uuid"], "capture-session-test");
+        assert_eq!(rows[1]["event_seq"], 2);
+        assert_eq!(rows[1]["learner_id"], 2);
+        assert_eq!(
+            rows[1]["window_uuid"],
+            "abababab-abab-abab-abab-abababababab"
+        );
+        assert_eq!(rows[1]["attempt_serial"], 7);
+        assert_eq!(rows[1]["payload_digest_match"], true);
+        assert_eq!(rows[1]["disposition"], "admitted_pending");
+        assert_eq!(
+            rows[1]["weight_f64_bits"],
+            format!("{:016x}", 1000f64.to_bits())
+        );
+    }
+
+    #[test]
+    fn response_commit_uses_exact_numeric_merge_order_and_source_attempts() {
+        let path = unique_transcript_path("commit");
+        let mut transcript =
+            ResponseTranscript::create(&path, "capture-session-commit".to_owned()).unwrap();
+        let mut pushes = HashMap::new();
+        for (source_event, learner_id) in [(2, 10), (3, 2), (4, 7)] {
+            let mut push = test_push(learner_id);
+            push.audit = Some(PushAudit {
+                window_uuid: [learner_id as u8; 16],
+                attempt_serial: source_event,
+                declared_payload_sha256: [learner_id as u8; 32],
+                received_payload_sha256: [learner_id as u8; 32],
+                source_attempt_event_seq: Some(source_event),
+            });
+            pushes.insert(learner_id, push);
+        }
+        let ids = sorted_push_ids(&pushes);
+        assert_eq!(ids, vec![2, 7, 10]);
+        transcript
+            .append_commit(
+                &test_config(),
+                9,
+                0,
+                7,
+                8,
+                9,
+                DTYPE_F32,
+                &pushes,
+                &ids,
+                b"broadcast-payload",
+            )
+            .unwrap();
+        transcript.finish().unwrap();
+
+        let rows: Vec<Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        std::fs::remove_file(&path).unwrap();
+        let commit = &rows[1];
+        assert_eq!(commit["schema"], "syncer_round_commit_v1");
+        assert_eq!(commit["commit_id"], "step-00000009-fragment-0000");
+        let responders = commit["responders"].as_array().unwrap();
+        assert_eq!(
+            responders
+                .iter()
+                .map(|row| row["learner_id"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![2, 7, 10]
+        );
+        assert_eq!(
+            responders
+                .iter()
+                .map(|row| row["responder_index"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            responders
+                .iter()
+                .map(|row| row["source_attempt_event_seq"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![3, 4, 2]
+        );
+        assert_eq!(
+            commit["broadcast_payload_sha256"],
+            hex_bytes(&Sha256::digest(b"broadcast-payload"))
+        );
     }
 
     #[test]
@@ -2475,14 +3206,25 @@ mod tests {
                 c_steps: 10,
                 c_tokens: 100,
                 values: Vec::new(),
+                audit: None,
             },
         );
         let stats = merge_stats(2.5, 0.75, Some(-0.25), Some(3.0), true);
         let decision = CommitDecision::token_weighted();
-        let line = format_tape_line(9, 2, &pushes, &stats, &decision, &HashMap::new(), 17);
+        let line = format_tape_line(
+            9,
+            2,
+            3,
+            123,
+            &pushes,
+            &stats,
+            &decision,
+            &HashMap::new(),
+            17,
+        );
 
         assert!(
-            line.starts_with("{\"step\":9,\"fragment\":2,\"gnorm\":2.5,\"ms\":17,\"responders\":[")
+            line.starts_with("{\"step\":9,\"fragment\":2,\"commit_seq\":3,\"commit_elapsed_ns\":123,\"gnorm\":2.5,\"ms\":17,\"responders\":[")
         );
         assert!(line.contains(
             "{\"id\":4,\"base_version\":7,\"c_steps\":10,\"c_tokens\":100,\"weight\":1000}"
@@ -2511,7 +3253,17 @@ mod tests {
     fn event_tape_uses_null_for_undefined_outer_ratios() {
         let stats = merge_stats(0.0, 0.0, None, None, false);
         let decision = CommitDecision::probe_fallback(CommitPolicy::ProbeLooV1, "probe_timeout");
-        let line = format_tape_line(1, 0, &HashMap::new(), &stats, &decision, &HashMap::new(), 0);
+        let line = format_tape_line(
+            1,
+            0,
+            1,
+            10,
+            &HashMap::new(),
+            &stats,
+            &decision,
+            &HashMap::new(),
+            0,
+        );
         assert!(line.contains("\"gnorm\":0"));
         assert!(line.contains("\"outer_step_norm\":0"));
         assert!(line.contains("\"outer_direction_cosine\":null"));
@@ -2623,7 +3375,7 @@ mod tests {
         );
         let stats = merge_stats(1.0, 1.0, None, None, false);
         let decision = CommitDecision::token_weighted();
-        let line = format_tape_line(9, 0, &pushes, &stats, &decision, &drift, 0);
+        let line = format_tape_line(9, 0, 1, 10, &pushes, &stats, &decision, &drift, 0);
         assert!(line.contains("\"anchor_drift_norm\":4"));
         assert!(line.contains("\"local_delta_norm\":6"));
         assert!(line.contains("\"anchor_drift_momentum_cos\":-0.5"));
@@ -2658,6 +3410,8 @@ mod tests {
         let line = format_tape_line(
             1,
             0,
+            1,
+            10,
             &HashMap::new(),
             &merge_stats(1.0, 1.0, None, None, false),
             &decision,

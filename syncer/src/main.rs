@@ -134,6 +134,13 @@ struct Args {
     /// 0 disables capture even if the directory is present.
     #[arg(long, default_value_t = 1)]
     probe_capture_every: u64,
+    /// Opt-in exact audited-push/commit JSONL. Requires audited type-12 pushes
+    /// and a fresh output path; absent leaves the legacy path unchanged.
+    #[arg(long)]
+    response_transcript: Option<std::path::PathBuf>,
+    /// Capture-session UUID copied into every --response-transcript record.
+    #[arg(long)]
+    response_transcript_session: Option<String>,
     /// Commit policy: token_weighted preserves the production baseline;
     /// probe_shadow evaluates A0-A4 but commits A0; probe_loo_v1 commits the
     /// exact sidecar-selected LOO preview; probe_lr_shadow evaluates the
@@ -208,6 +215,19 @@ fn main() -> anyhow::Result<()> {
         .map(parse_outer_lr_by_fragment)
         .transpose()?;
     let action_probe = action_probe_config(&args)?;
+    match (
+        args.response_transcript.as_ref(),
+        args.response_transcript_session.as_deref(),
+    ) {
+        (Some(_), Some(session)) if !session.trim().is_empty() => {}
+        (Some(_), _) => anyhow::bail!(
+            "--response-transcript requires a non-empty --response-transcript-session"
+        ),
+        (None, Some(_)) => {
+            anyhow::bail!("--response-transcript-session requires --response-transcript")
+        }
+        (None, None) => {}
+    }
     let cfg = server::Config {
         port: args.port,
         learners: args.learners,
@@ -239,6 +259,8 @@ fn main() -> anyhow::Result<()> {
         event_tape: args.event_tape,
         probe_capture_dir: args.probe_capture_dir,
         probe_capture_every: args.probe_capture_every,
+        response_transcript: args.response_transcript,
+        response_transcript_session: args.response_transcript_session,
         commit_policy: args.commit_policy,
         action_probe,
     };
