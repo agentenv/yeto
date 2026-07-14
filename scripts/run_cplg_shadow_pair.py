@@ -29,6 +29,7 @@ SYNCER_DIR = REPO_ROOT / "syncer"
 PINNED_HELPER = SYNCER_DIR / "target" / "release" / "cplg_libm_oracle"
 OFF_ARM = "cplg_shadow_off"
 ON_ARM = "cplg_shadow_on"
+BASE_ARM = "base (untrained)"
 FRAGMENT_ORDER = [0, 1, 2, 3] * 8
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -158,7 +159,7 @@ def _validate_frozen_config(
         raise RunnerError("frozen scientific configuration sections must be objects")
     fixed_identities = {
         "status": "frozen_before_direction_outcome",
-        "run_id": "exp2-cplg-shadow-direction-r1",
+        "run_id": "exp2-cplg-shadow-direction-r2",
     }
     for field, expected in fixed_identities.items():
         if config.get(field) != expected:
@@ -181,6 +182,7 @@ def _validate_frozen_config(
         workload,
         {
             "arms_in_order": [OFF_ARM, ON_ARM],
+            "result_rows_in_order": [BASE_ARM, OFF_ARM, ON_ARM],
             "capture_enabled_by_arm": [False, True],
             "sequence_length": 128,
             "micro_batch_size": 1,
@@ -236,7 +238,7 @@ def _validate_frozen_config(
     _require_exact_fields(
         capture,
         {
-            "capture_session_uuid": "a758d49d-203d-4e80-a816-0ffe38f60588",
+            "capture_session_uuid": "667f5de8-6d6d-4ce0-9344-efc239583abf",
             "expected_records": 32,
             "vector_format": "canonical little-endian f32 full stock pseudo-gradient",
             "initial_identity": (
@@ -512,10 +514,14 @@ def _normalize_event_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _evaluation_losses(results: Path) -> tuple[float, float]:
     rows = _read_jsonl(results, "comparison results")
     observed_arms = [row.get("arm") for row in rows]
-    if observed_arms != [OFF_ARM, ON_ARM]:
+    if observed_arms != [BASE_ARM, OFF_ARM, ON_ARM]:
         raise RunnerError(
-            "comparison results must contain exactly the frozen OFF/ON arms in order"
+            "comparison results must contain exactly the untrained base followed by "
+            "the frozen OFF/ON arms"
         )
+    base_loss = rows[0].get("eval_loss")
+    if type(base_loss) not in (int, float) or not math.isfinite(base_loss):
+        raise RunnerError(f"{BASE_ARM}: evaluation loss is not finite")
     by_arm = {row.get("arm"): row for row in rows}
     losses = []
     for arm in (OFF_ARM, ON_ARM):

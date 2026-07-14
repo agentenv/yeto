@@ -1414,8 +1414,10 @@ find \"$run/input-provenance\" -type f -print0 | sort -z | \
 printf %s {encoded} | base64 -d > \"$run/spec.json\"
 printf '%s\\n' {shlex.quote(command)} > \"$run/command.sh\"
 printf '%s\\n' \"$run/runner.log\" > \"$run/active-log-path\"
-git -C \"$repo\" status --short > \"$run/git-status.txt\"
-git -C \"$repo\" diff --binary > \"$run/git-diff.patch\"
+printf 'clean detached checkout %s\\n' \\
+  \"$(git -C \"$repo\" rev-parse HEAD)\" > \"$run/git-status.txt\"
+printf '# no tracked or untracked diff; clean detached checkout %s\\n' \\
+  \"$(git -C \"$repo\" rev-parse HEAD)\" > \"$run/git-diff.patch\"
 cd \"$repo\"
 nohup {runner_bash} _ \"$run\" {runner_argv} > \"$run/runner.log\" 2>&1 < /dev/null &
 runner=$!

@@ -30,7 +30,7 @@ assert COMPARE_SPEC.loader is not None
 sys.modules[COMPARE_SPEC.name] = COMPARE_MOD
 COMPARE_SPEC.loader.exec_module(COMPARE_MOD)
 FROZEN_CONFIG = (
-    ROOT / "experiments" / "optimizer" / "cplg-sgd-shadow-direction-r1-config.json"
+    ROOT / "experiments" / "optimizer" / "cplg-sgd-shadow-direction-r2-config.json"
 )
 
 
@@ -108,6 +108,11 @@ def test_frozen_config_matches_executable_gate_contract() -> None:
     )
     assert config["status"] == "frozen_before_direction_outcome"
     assert config["workload"]["arms_in_order"] == [MOD.OFF_ARM, MOD.ON_ARM]
+    assert config["workload"]["result_rows_in_order"] == [
+        MOD.BASE_ARM,
+        MOD.OFF_ARM,
+        MOD.ON_ARM,
+    ]
     assert config["workload"]["raw_local_training_tokens"] == 4_352
     assert config["workload"]["compare_token_budget"] == 4_352
     assert config["workload"]["expected_terminal_local_steps"] == 34
@@ -192,7 +197,9 @@ def _complete_pair(tmp_path: Path) -> tuple[Path, Path, Path]:
     on = _arm_fixture(work, MOD.ON_ARM, capture=True, duration=10_100)
     report.mkdir()
     (report / "results.jsonl").write_text(
-        json.dumps({"arm": MOD.OFF_ARM, "eval_loss": 1.25})
+        json.dumps({"arm": MOD.BASE_ARM, "eval_loss": 1.5})
+        + "\n"
+        + json.dumps({"arm": MOD.OFF_ARM, "eval_loss": 1.25})
         + "\n"
         + json.dumps({"arm": MOD.ON_ARM, "eval_loss": 1.25})
         + "\n"
@@ -373,8 +380,24 @@ def test_duplicate_or_out_of_order_result_arms_are_fatal(tmp_path: Path) -> None
         + "\n"
     )
 
-    with pytest.raises(MOD.RunnerError, match="exactly the frozen OFF/ON arms"):
+    with pytest.raises(MOD.RunnerError, match="untrained base followed by"):
         MOD._evaluation_losses(results)
+
+
+def test_real_compare_result_schema_accepts_base_then_frozen_pair(
+    tmp_path: Path,
+) -> None:
+    results = tmp_path / "results.jsonl"
+    results.write_text(
+        json.dumps({"arm": MOD.BASE_ARM, "m": 0, "wall_s": 0.0, "eval_loss": 1.5})
+        + "\n"
+        + json.dumps({"arm": MOD.OFF_ARM, "m": 1, "wall_s": 80.5, "eval_loss": 1.25})
+        + "\n"
+        + json.dumps({"arm": MOD.ON_ARM, "m": 1, "wall_s": 80.3, "eval_loss": 1.25})
+        + "\n"
+    )
+
+    assert MOD._evaluation_losses(results) == (1.25, 1.25)
 
 
 def test_helper_preflight_builds_locked_and_publishes_identity(

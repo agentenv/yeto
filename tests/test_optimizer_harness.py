@@ -574,6 +574,9 @@ def test_start_script_pins_commit_and_sets_backup(tmp_path):
     assert "base64 -d" in script
     assert "runner.pid" in script and "backup.pid" in script
     assert "--baseline-loss 0.0" in script
+    assert "clean detached checkout" in script
+    assert "# no tracked or untracked diff" in script
+    assert 'git -C "$repo" status --short > "$run/git-status.txt"' not in script
 
 
 def test_checkout_source_mode_fetches_exact_detached_commit(tmp_path):

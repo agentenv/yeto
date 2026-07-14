@@ -2665,6 +2665,89 @@ under `/private/tmp/yeto-gcloud-admin-codex` reported cloud prerequisites OK at
 `2026-07-14T20:42:32Z`. No GPU, VM, disk, run prefix, or direction outcome had
 been created or opened at that point.
 
+### 2026-07-14 CPLG stock-shadow acquisition r1: preserved `INCONCLUSIVE`
+
+After the independent gate and resource audits reported no blocker, the exact
+frozen r1 spec was launched on one Spot A100. The harness owned VM
+`exp2-cplg-shadow-direction-r1` / provider ID
+`1959194496687873622`, boot disk ID `1112489218094603862`, ownership nonce
+`d8b6d70ab54f6b04`, and retained source-image ID `7290368630472593484`.
+The runtime preflight bound implementation commit `a4122c5f...`, config digest
+`6636a9a5...`, `Cargo.lock` digest `2f5e404a...`, and Linux Rust-libm helper
+digest `72fa765d43b71463753024adff3afb2d86284ea2422a427e1b91347ad6360bbb`.
+
+Both stock arms reached exactly 34 local steps and 32 outer commits. Their
+canonical layout digest was
+`85cdff92c745f0f3e221c573b60a39f0cb14cd35e4313e4f5086428cf7d6fdd9`
+and their exact initial-state digest was
+`3b398acd56d9df580416856f8c7d86a97f34590671faf8617504687c3adca931`.
+OFF and ON evaluation losses were bit-identical at
+`1.3319227656615953`; the untrained base row was `1.4244070067489154`.
+The ON writer closed with 32 accepted/completed items, no dropped or
+abandoned bytes, 173,113,344 vector bytes, tape digest
+`b27eb88d82f8fe1608e577f90b3b171e28b40bbfeb7eeb5c7633bcb9c7dcba62`,
+ledger head
+`07acb144dc935d24d39921c74474ddd593367e9bf53a80868668cdf4aa751fec`,
+and manifest digest
+`203e83d48331ea3ad7267eec62bb1685d3bfa8aea850beb28697b2a759346a0b`.
+The unrounded producer intervals were 46,887,555,224 ns OFF and
+47,205,244,120 ns ON, a diagnostic capture overhead of approximately
+0.67755%; the rounded full-arm wall rows were 80.5 s OFF and 80.3 s ON.
+
+These observations are diagnostics only. Before the replay analyzer opened a
+CPLG direction verdict, the post-acquisition validator rejected
+`results.jsonl`: it expected exactly `[OFF, ON]`, whereas
+`compare_diloco.py --skip-baseline` truthfully and always writes
+`[base (untrained), OFF, ON]`; `--skip-baseline` omits the separately trained
+synchronous baseline, not the untrained evaluation row. The checksummed
+terminal therefore records `INCONCLUSIVE`, stage
+`post_acquisition_evidence_validation`, error class `EvidenceError`, and the
+runner exited 3. This attempt is not a direction PASS or FAIL, does not
+authorize active E1, and will not be retrospectively reclassified or analyzed
+to tune the frozen mechanism.
+
+The complete failed attempt was explicitly synced to
+`gs://yeto-exp2-52-model-training-497007/exp2-cplg-shadow-direction-r1`
+before teardown: 103 objects totaling 450,179,942 bytes were present,
+including both tapes/checkpoints/exports/receipts, all 32 vector objects,
+preflight, terminal receipt, results, logs, and provenance. Exact-ID
+`abandon` wrote abandonment record digest
+`03cc82f3fbb14b89a83cf86500a50feb8703dc7c4a8abca4a2138ffc823a239b`
+and completed at `2026-07-14T21:01:23Z`. Subsequent provider lookups returned
+not-found for both owned VM and disk. The protected unrelated CPU VM
+`instance-20260526-guiflow` remained RUNNING with ID
+`3908640733128066700`.
+
+The failed-run teardown check exposed a second pre-retry lifecycle defect:
+clean checkouts produced zero-byte `git-status.txt` and `git-diff.patch`, but
+the harness requires every declared completion path to be nonempty before
+`delete`. Thus even a runner-zero PASS would have been undeletable through the
+successful-run path. The repair writes explicit nonempty clean-checkout and
+no-diff attestations after the existing full tracked/untracked cleanliness
+guard. The comparison validator repair accepts exactly the real closed schema
+`[base (untrained), OFF, ON]`, validates all three finite losses, and still
+requires bit-identical OFF/ON losses. A new attempt requires a reviewed
+protocol, source commit, run ID, capture UUID, artifact prefix, immutable spec,
+and fresh audit; r1 evidence may be used only to diagnose these controller
+defects.
+
+The fresh r2 controller protocol is now frozen before any r2 direction
+outcome. It accepts only the real closed result order
+`[base (untrained), cplg_shadow_off, cplg_shadow_on]`, validates all three
+finite losses, and still requires OFF/ON bit identity. The harness writes
+nonempty clean-checkout and no-diff attestations only after its existing full
+tracked/untracked cleanliness rejection. R2 uses run ID
+`exp2-cplg-shadow-direction-r2`, capture UUID
+`667f5de8-6d6d-4ce0-9344-efc239583abf`, configuration
+`cplg-sgd-shadow-direction-r2-config.json`, and configuration SHA-256
+`fb7d4c0539cc8760058e0f0b20101bde7fcbac9224c8b27ca69d9724180aaf96`.
+The new dossier explicitly excludes all r1 vectors and diagnostic values from
+r2 replay, bootstrap, gates, and tuning. Before commit, 131 focused
+CPLG/replay/wrapper/spec/harness tests passed; the full Python suite passed
+1,285 tests with two skips and five unchanged dependency warnings, and Ruff
+format/check passed. No cloud resource or r2 artifact prefix existed while
+these controls were written.
+
 ## Primary references used in the audit
 
 - SCAFFOLD: <https://proceedings.mlr.press/v119/karimireddy20a.html>
