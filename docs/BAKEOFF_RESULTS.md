@@ -80,6 +80,7 @@ within each workload's own eval set; higher Δ = better). Correctness gate PASSE
 | H64-IID | 1.53250 | 1.54859 | +0.0161 |
 | H256-IID | 1.54791 | 1.54865 | +0.0007 (≈null) |
 | HET-H64 | 1.43882 | 1.45705 | +0.0182 (clears) |
+| H64 inner-lr-hi (0.002) | 1.47780 | 1.50809 | +0.0303 |
 Gate needs a >0.018 win on H256 AND heterogeneous. H256 is ~null (+0.0007) → the
 gate's long-H requirement is unmet → **KILL as an outer-momentum fix** (no change
 to "ship SGD-0.28"). The implementation is clean (control-arm zero-sum exactly
@@ -137,8 +138,8 @@ loss/token (lower = better):
 |------|-----------|----------|------------|-----------|
 | H16  | 1.3936 | 1.4218 | 1.3963 | 1.4284 |
 | H64  | 1.3917 | 1.4306 | 1.3923 | 1.4350 |
-| H256 | 1.3979 | 1.4368 | in progress | in progress |
-| H64 inner-lr-hi (2.4e-3) | 1.3931 | 1.5417 | in progress | in progress |
+| H256 | 1.397884 | 1.436835 | 1.397870 | 1.437190 |
+| H64 inner-lr-hi (2.4e-3) | 1.393070 | 1.541656 | 1.393963 | 1.532613 |
 Muon-inner strictly worse than AdamW-inner at every horizon (+0.028/+0.039/+0.039;
 +0.149 at high inner-LR where Muon nearly fails to train). Guarded-Chebyshev outer
 ≈ SGD-0.28 outer under BOTH inner optimizers (worst gap +0.0066). MuLoCo's
