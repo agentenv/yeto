@@ -46,6 +46,26 @@ CAPABILITIES = (
 )
 _CAPABILITY_ORDER = {name: index for index, name in enumerate(CAPABILITIES)}
 
+# These fields retain their v1 names for adapter compatibility, but their
+# values are closed codes rather than prose.  Keeping the vocabulary small
+# prevents action manifests from becoming a covert carrier for observed losses
+# or other post-outcome data.
+ACTION_REASON_CODES = (
+    "candidate_selected",
+    "stock_control",
+    "stock_fallback",
+)
+FALLBACK_REASON_CODES = (
+    "intentional_stock_control",
+    "unsupported_capability",
+    "candidate_unavailable",
+    "candidate_invalid",
+    "candidate_rejected",
+    "policy_error",
+)
+_ACTION_REASON_CODE_SET = frozenset(ACTION_REASON_CODES)
+_FALLBACK_REASON_CODE_SET = frozenset(FALLBACK_REASON_CODES)
+
 POLICY_SOURCE_ROLE = "policy/source"
 POLICY_CONFIG_ROLE = "policy/config"
 STOCK_GRADIENT_ROLE = "action/stock-pseudo-gradient"
@@ -184,9 +204,9 @@ def _f64_bits(value: Any, context: str) -> str:
     return value
 
 
-def _reason(value: Any, context: str) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > 2048:
-        raise PolicyContractError(f"{context} must be a non-empty bounded string")
+def _reason_code(value: Any, allowed: frozenset[str], context: str) -> str:
+    if type(value) is not str or value not in allowed:
+        raise PolicyContractError(f"{context} must be a closed predeclared reason code")
     return value
 
 
@@ -363,7 +383,25 @@ def _validate_action_semantics(
             raise PolicyContractError(
                 "stock fallback selected pseudo-gradient must reference the exact stock object"
             )
-        fallback = _reason(fallback_reason, "fallback_reason")
+        fallback = _reason_code(
+            fallback_reason,
+            _FALLBACK_REASON_CODE_SET,
+            "fallback_reason",
+        )
+        reason = _reason_code(
+            action_reason,
+            _ACTION_REASON_CODE_SET,
+            "action_reason",
+        )
+        expected_reason = (
+            "stock_control"
+            if fallback == "intentional_stock_control"
+            else "stock_fallback"
+        )
+        if reason != expected_reason:
+            raise PolicyContractError(
+                "stock action_reason is incompatible with its fallback_reason code"
+            )
     elif action_kind == "nonstock":
         if selected == stock:
             raise PolicyContractError(
@@ -372,9 +410,18 @@ def _validate_action_semantics(
         if fallback_reason is not None:
             raise PolicyContractError("nonstock action cannot contain fallback_reason")
         fallback = None
+        reason = _reason_code(
+            action_reason,
+            _ACTION_REASON_CODE_SET,
+            "action_reason",
+        )
+        if reason != "candidate_selected":
+            raise PolicyContractError(
+                "nonstock action_reason must be candidate_selected"
+            )
     else:
         raise PolicyContractError("action_kind must be 'stock_fallback' or 'nonstock'")
-    return action_kind, _reason(action_reason, "action_reason"), fallback
+    return action_kind, reason, fallback
 
 
 def _validate_boundary_action_weights(boundary: LoadedSyncerBoundary) -> None:

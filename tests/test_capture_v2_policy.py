@@ -15,7 +15,9 @@ from yeto.capture_v2_endpoint import (
     publish_learner_endpoint,
 )
 from yeto.capture_v2_policy import (
+    ACTION_REASON_CODES,
     CAPABILITIES,
+    FALLBACK_REASON_CODES,
     PolicyContractError,
     load_policy_definition,
     load_policy_outcome,
@@ -223,7 +225,7 @@ def _action_arguments(
         "decision": _object(store, b"decision record"),
         "config_sha256": config.sha256,
         "action_kind": "nonstock",
-        "action_reason": "candidate supplied a sealed pseudo-gradient",
+        "action_reason": "candidate_selected",
         "fallback_reason": None,
     }
 
@@ -389,21 +391,141 @@ def test_stock_fallback_requires_the_exact_stock_object(tmp_path):
         resulting_fragment=load_syncer_boundary(
             store, arguments["boundary"]
         ).post_fragment,
-        fallback_reason="candidate capability unavailable at this boundary",
+        action_reason="stock_fallback",
+        fallback_reason="unsupported_capability",
     )
     action = publish_sealed_outer_action(store, "stock-fallback", **arguments)
     loaded = load_sealed_outer_action(store, action)
     assert loaded.selected_pseudo_gradient == loaded.stock_pseudo_gradient
-    assert loaded.fallback_reason == (
-        "candidate capability unavailable at this boundary"
+    assert loaded.action_reason == "stock_fallback"
+    assert loaded.fallback_reason == "unsupported_capability"
+
+
+def test_reason_code_vocabulary_is_small_closed_and_adapter_stable():
+    assert ACTION_REASON_CODES == (
+        "candidate_selected",
+        "stock_control",
+        "stock_fallback",
     )
+    assert FALLBACK_REASON_CODES == (
+        "intentional_stock_control",
+        "unsupported_capability",
+        "candidate_unavailable",
+        "candidate_invalid",
+        "candidate_rejected",
+        "policy_error",
+    )
+
+
+@pytest.mark.parametrize(
+    "smuggled_reason",
+    [
+        "candidate selected because k8 loss was 0.271828",
+        "candidate_selected:k0=1.0:k8=0.5",
+        "candidate_selected\nloss_f64_bits=3fd0000000000000",
+        " candidate_selected",
+        "candidate_selected ",
+        "",
+        7,
+    ],
+)
+def test_action_reason_cannot_carry_free_form_or_outcome_data(
+    tmp_path, smuggled_reason
+):
+    store = CaptureObjectStore(tmp_path / "cas")
+    arguments = _action_arguments(store)
+    arguments["action_reason"] = smuggled_reason
+    manifest_count = len(list(store.manifests_dir.iterdir()))
+
+    with pytest.raises(PolicyContractError, match="closed predeclared reason code"):
+        publish_sealed_outer_action(store, "smuggled-action-reason", **arguments)
+
+    assert len(list(store.manifests_dir.iterdir())) == manifest_count
+
+
+@pytest.mark.parametrize(
+    "smuggled_reason",
+    [
+        "unsupported capability; candidate loss=0.125",
+        "unsupported_capability:k8=3fc0000000000000",
+        "policy_error\nobserved_outcome=win",
+        "unsupported_capability ",
+        7,
+    ],
+)
+def test_fallback_reason_cannot_carry_free_form_or_outcome_data(
+    tmp_path, smuggled_reason
+):
+    store = CaptureObjectStore(tmp_path / "cas")
+    arguments = _action_arguments(store)
+    arguments.update(
+        action_kind="stock_fallback",
+        selected_pseudo_gradient=arguments["stock_pseudo_gradient"],
+        resulting_fragment=load_syncer_boundary(
+            store, arguments["boundary"]
+        ).post_fragment,
+        action_reason="stock_fallback",
+        fallback_reason=smuggled_reason,
+    )
+    manifest_count = len(list(store.manifests_dir.iterdir()))
+
+    with pytest.raises(PolicyContractError, match="closed predeclared reason code"):
+        publish_sealed_outer_action(store, "smuggled-fallback-reason", **arguments)
+
+    assert len(list(store.manifests_dir.iterdir())) == manifest_count
+
+
+@pytest.mark.parametrize(
+    ("action_reason", "fallback_reason", "message"),
+    [
+        ("stock_control", None, "must be candidate_selected"),
+        ("stock_fallback", None, "must be candidate_selected"),
+    ],
+)
+def test_nonstock_rejects_known_but_semantically_wrong_reason_code(
+    tmp_path, action_reason, fallback_reason, message
+):
+    store = CaptureObjectStore(tmp_path / action_reason)
+    arguments = _action_arguments(store)
+    arguments["action_reason"] = action_reason
+    arguments["fallback_reason"] = fallback_reason
+
+    with pytest.raises(PolicyContractError, match=message):
+        publish_sealed_outer_action(store, "wrong-nonstock-reason", **arguments)
+
+
+@pytest.mark.parametrize(
+    ("action_reason", "fallback_reason"),
+    [
+        ("stock_control", "unsupported_capability"),
+        ("stock_fallback", "intentional_stock_control"),
+        ("candidate_selected", "policy_error"),
+    ],
+)
+def test_stock_rejects_known_but_incompatible_reason_code_pair(
+    tmp_path, action_reason, fallback_reason
+):
+    store = CaptureObjectStore(tmp_path / f"{action_reason}-{fallback_reason}")
+    arguments = _action_arguments(store)
+    arguments.update(
+        action_kind="stock_fallback",
+        selected_pseudo_gradient=arguments["stock_pseudo_gradient"],
+        resulting_fragment=load_syncer_boundary(
+            store, arguments["boundary"]
+        ).post_fragment,
+        action_reason=action_reason,
+        fallback_reason=fallback_reason,
+    )
+
+    with pytest.raises(PolicyContractError, match="incompatible"):
+        publish_sealed_outer_action(store, "wrong-stock-reason-pair", **arguments)
 
 
 @pytest.mark.parametrize(
     ("kind", "same_object", "fallback", "message"),
     [
-        ("stock_fallback", False, "fell back", "must reference the exact stock"),
-        ("stock_fallback", True, None, "non-empty bounded string"),
+        ("stock_fallback", False, "policy_error", "must reference the exact stock"),
+        ("stock_fallback", True, None, "closed predeclared reason code"),
         ("nonstock", True, None, "must differ from the stock"),
         ("nonstock", False, "not allowed", "cannot contain fallback_reason"),
         ("unknown", False, None, "must be 'stock_fallback' or 'nonstock'"),
@@ -422,6 +544,7 @@ def test_action_kind_and_fallback_contract_fails_closed(
     )
     arguments["fallback_reason"] = fallback
     if kind == "stock_fallback":
+        arguments["action_reason"] = "stock_fallback"
         arguments["resulting_fragment"] = load_syncer_boundary(
             store, arguments["boundary"]
         ).post_fragment
@@ -558,7 +681,8 @@ def test_stock_fallback_rejects_unrelated_resulting_fragment(tmp_path):
     arguments.update(
         action_kind="stock_fallback",
         selected_pseudo_gradient=arguments["stock_pseudo_gradient"],
-        fallback_reason="attempted fallback with an unrelated result",
+        action_reason="stock_fallback",
+        fallback_reason="policy_error",
     )
 
     with pytest.raises(PolicyContractError, match="exact boundary post_fragment"):
@@ -616,7 +740,7 @@ def test_sealed_action_rejects_nonfinite_nonpositive_or_negative_zero_weights(
             decision=_object(store, b"decision"),
             config_sha256=config.sha256,
             action_kind="nonstock",
-            action_reason="would otherwise select candidate",
+            action_reason="candidate_selected",
             fallback_reason=None,
         )
 
@@ -675,7 +799,9 @@ def test_sealed_action_load_rejects_resealed_negative_zero_boundary_weight(tmp_p
         ("outer-lr", "16 lowercase hex"),
         ("outer-lr-nan", "finite positive f64"),
         ("outer-lr-mismatch", "differs from syncer boundary"),
-        ("reason-type", "non-empty bounded string"),
+        ("reason-type", "closed predeclared reason code"),
+        ("reason-prose", "closed predeclared reason code"),
+        ("fallback-prose", "closed predeclared reason code"),
     ],
 )
 def test_resealed_action_schema_role_and_cross_wire_mutations_fail_closed(
@@ -719,7 +845,8 @@ def test_resealed_action_schema_role_and_cross_wire_mutations_fail_closed(
         entries[1] = ManifestEntry(entries[1].role, entries[0].object)
     elif case == "stock-result-not-boundary":
         metadata["action_kind"] = "stock_fallback"
-        metadata["fallback_reason"] = "resealed as invalid stock fallback"
+        metadata["action_reason"] = "stock_fallback"
+        metadata["fallback_reason"] = "candidate_invalid"
         metadata["selected_pseudo_gradient"]["sha256"] = metadata[
             "stock_pseudo_gradient"
         ]["sha256"]
@@ -744,6 +871,18 @@ def test_resealed_action_schema_role_and_cross_wire_mutations_fail_closed(
         metadata["outer_lr_f64_bits"] = struct.pack(">d", 0.1).hex()
     elif case == "reason-type":
         metadata["action_reason"] = 123
+    elif case == "reason-prose":
+        metadata["action_reason"] = "candidate_selected after observing k8=0.1"
+    elif case == "fallback-prose":
+        metadata["action_kind"] = "stock_fallback"
+        metadata["action_reason"] = "stock_fallback"
+        metadata["fallback_reason"] = "policy_error; observed_loss=0.1"
+        metadata["selected_pseudo_gradient"]["sha256"] = metadata[
+            "stock_pseudo_gradient"
+        ]["sha256"]
+        metadata["selected_pseudo_gradient"]["bytes"] = metadata[
+            "stock_pseudo_gradient"
+        ]["bytes"]
     else:  # pragma: no cover
         raise AssertionError(case)
     resealed = _reseal(store, action, metadata, f"resealed-{case}", entries)

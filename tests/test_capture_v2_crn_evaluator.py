@@ -240,8 +240,8 @@ def _fixture(
         selected_pseudo_gradient=stock,
         resulting_fragment=stock_result,
         action_kind="stock_fallback",
-        action_reason="seal the stock comparison arm",
-        fallback_reason="intentional stock CRN control arm",
+        action_reason="stock_control",
+        fallback_reason="intentional_stock_control",
     )
     candidate_action = publish_sealed_outer_action(
         store,
@@ -252,7 +252,7 @@ def _fixture(
         selected_pseudo_gradient=candidate,
         resulting_fragment=candidate_result,
         action_kind="nonstock",
-        action_reason="seal the candidate comparison arm",
+        action_reason="candidate_selected",
         fallback_reason=None,
     )
     evaluation = _object(store, f"{suffix} fixed evaluation object".encode())
