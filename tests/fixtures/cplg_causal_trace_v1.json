@@ -1,0 +1,229 @@
+{
+  "schema": "cplg_causal_raw_bit_trace_v1",
+  "shape": [
+    2
+  ],
+  "resume_after_step": 3,
+  "steps": [
+    {
+      "step": 0,
+      "input_f32le": "0000803f00000000",
+      "action_f32le": "0000803f00000000",
+      "candidate_f32le": null,
+      "reason": "stock_warmup",
+      "resolved_score_bits": null,
+      "interlock_score_count": 0,
+      "interlock_open": false,
+      "used_nonstock": false,
+      "state_cleared": false,
+      "next_state": {
+        "previous_stock_f32le": "0000803f00000000",
+        "previous_forward_tangent_f32le": null,
+        "previous_theta_bits": null,
+        "pending_candidate_f32le": null,
+        "score_bits": []
+      }
+    },
+    {
+      "step": 1,
+      "input_f32le": "5c1c7c3fd4d0313e",
+      "action_f32le": "5c1c7c3fd4d0313e",
+      "candidate_f32le": null,
+      "reason": "phase_warmup",
+      "resolved_score_bits": null,
+      "interlock_score_count": 0,
+      "interlock_open": false,
+      "used_nonstock": false,
+      "state_cleared": false,
+      "next_state": {
+        "previous_stock_f32le": "5c1c7c3fd4d0313e",
+        "previous_forward_tangent_f32le": "d5d031be5d1c7c3f",
+        "previous_theta_bits": "3e32b8b7",
+        "pending_candidate_f32le": null,
+        "score_bits": []
+      }
+    },
+    {
+      "step": 2,
+      "input_f32le": "b28f703f431daf3e",
+      "action_f32le": "b28f703f431daf3e",
+      "candidate_f32le": "dbb35d3ff0ffff3e",
+      "reason": "interlock_closed",
+      "resolved_score_bits": null,
+      "interlock_score_count": 0,
+      "interlock_open": false,
+      "used_nonstock": false,
+      "state_cleared": false,
+      "next_state": {
+        "previous_stock_f32le": "b28f703f431daf3e",
+        "previous_forward_tangent_f32le": "431dafbeb28f703f",
+        "previous_theta_bits": "3e32b8a0",
+        "pending_candidate_f32le": "dbb35d3ff0ffff3e",
+        "score_bits": []
+      }
+    },
+    {
+      "step": 3,
+      "input_f32le": "d7b35d3f0000003f",
+      "action_f32le": "d7b35d3f0000003f",
+      "candidate_f32le": "831b443fb48d243f",
+      "reason": "interlock_closed",
+      "resolved_score_bits": "3c78e8c0",
+      "interlock_score_count": 1,
+      "interlock_open": false,
+      "used_nonstock": false,
+      "state_cleared": false,
+      "next_state": {
+        "previous_stock_f32le": "d7b35d3f0000003f",
+        "previous_forward_tangent_f32le": "ffffffbed7b35d3f",
+        "previous_theta_bits": "3e32b8b7",
+        "pending_candidate_f32le": "831b443fb48d243f",
+        "score_bits": [
+          "3c78e8c0"
+        ]
+      }
+    },
+    {
+      "step": 4,
+      "input_f32le": "7d1b443fba8d243f",
+      "action_f32le": "7d1b443fba8d243f",
+      "candidate_f32le": "c18d243f771b443f",
+      "reason": "interlock_closed",
+      "resolved_score_bits": "3c78e900",
+      "interlock_score_count": 2,
+      "interlock_open": false,
+      "used_nonstock": false,
+      "state_cleared": false,
+      "next_state": {
+        "previous_stock_f32le": "7d1b443fba8d243f",
+        "previous_forward_tangent_f32le": "ba8d24bf7c1b443f",
+        "previous_theta_bits": "3e32b8a0",
+        "pending_candidate_f32le": "c18d243f771b443f",
+        "score_bits": [
+          "3c78e8c0",
+          "3c78e900"
+        ]
+      }
+    },
+    {
+      "step": 5,
+      "input_f32le": "bb8d243f7d1b443f",
+      "action_f32le": "0800003fd3b35d3f",
+      "candidate_f32le": "0800003fd3b35d3f",
+      "reason": "candidate_selected",
+      "resolved_score_bits": "3c78e900",
+      "interlock_score_count": 3,
+      "interlock_open": true,
+      "used_nonstock": true,
+      "state_cleared": false,
+      "next_state": {
+        "previous_stock_f32le": "bb8d243f7d1b443f",
+        "previous_forward_tangent_f32le": "7d1b44bfbb8d243f",
+        "previous_theta_bits": "3e32b8a0",
+        "pending_candidate_f32le": "0800003fd3b35d3f",
+        "score_bits": [
+          "3c78e8c0",
+          "3c78e900",
+          "3c78e900"
+        ]
+      }
+    },
+    {
+      "step": 6,
+      "input_f32le": "d7b35dbf0100003f",
+      "action_f32le": "d7b35dbf0100003f",
+      "candidate_f32le": null,
+      "reason": "nonacute_turn",
+      "resolved_score_bits": "3e31d0b2",
+      "interlock_score_count": 3,
+      "interlock_open": false,
+      "used_nonstock": false,
+      "state_cleared": true,
+      "next_state": {
+        "previous_stock_f32le": null,
+        "previous_forward_tangent_f32le": null,
+        "previous_theta_bits": null,
+        "pending_candidate_f32le": null,
+        "score_bits": []
+      }
+    },
+    {
+      "step": 7,
+      "input_f32le": "0000803f00000080",
+      "action_f32le": "0000803f00000080",
+      "candidate_f32le": null,
+      "reason": "stock_warmup",
+      "resolved_score_bits": null,
+      "interlock_score_count": 0,
+      "interlock_open": false,
+      "used_nonstock": false,
+      "state_cleared": false,
+      "next_state": {
+        "previous_stock_f32le": "0000803f00000080",
+        "previous_forward_tangent_f32le": null,
+        "previous_theta_bits": null,
+        "pending_candidate_f32le": null,
+        "score_bits": []
+      }
+    },
+    {
+      "step": 8,
+      "input_f32le": "5c1c7c3fd4d0313e",
+      "action_f32le": "5c1c7c3fd4d0313e",
+      "candidate_f32le": null,
+      "reason": "phase_warmup",
+      "resolved_score_bits": null,
+      "interlock_score_count": 0,
+      "interlock_open": false,
+      "used_nonstock": false,
+      "state_cleared": false,
+      "next_state": {
+        "previous_stock_f32le": "5c1c7c3fd4d0313e",
+        "previous_forward_tangent_f32le": "d5d031be5d1c7c3f",
+        "previous_theta_bits": "3e32b8b7",
+        "pending_candidate_f32le": null,
+        "score_bits": []
+      }
+    },
+    {
+      "step": 9,
+      "input_f32le": "0000803f00000080",
+      "action_f32le": "0000803f00000080",
+      "candidate_f32le": "0000803f00000080",
+      "reason": "zero_or_rounded_phase",
+      "resolved_score_bits": null,
+      "interlock_score_count": 0,
+      "interlock_open": false,
+      "used_nonstock": false,
+      "state_cleared": false,
+      "next_state": {
+        "previous_stock_f32le": "0000803f00000080",
+        "previous_forward_tangent_f32le": "00000000000080bf",
+        "previous_theta_bits": "3e32b8b7",
+        "pending_candidate_f32le": "0000803f00000080",
+        "score_bits": []
+      }
+    },
+    {
+      "step": 10,
+      "input_f32le": "5c1c7c3fd4d0313e",
+      "action_f32le": "5c1c7c3fd4d0313e",
+      "candidate_f32le": "5c1c7c3fd4d0313e",
+      "reason": "zero_or_rounded_phase",
+      "resolved_score_bits": "00000000",
+      "interlock_score_count": 1,
+      "interlock_open": false,
+      "used_nonstock": false,
+      "state_cleared": false,
+      "next_state": {
+        "previous_stock_f32le": "5c1c7c3fd4d0313e",
+        "previous_forward_tangent_f32le": "d5d031be5d1c7c3f",
+        "previous_theta_bits": "3e32b8b7",
+        "pending_candidate_f32le": "5c1c7c3fd4d0313e",
+        "score_bits": [
+          "00000000"
+        ]
+      }
+    }
+  ]
+}

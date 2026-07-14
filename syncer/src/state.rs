@@ -146,7 +146,7 @@ impl CplgReason {
             Self::InterlockClosed => "interlock_closed",
             Self::CandidateSelected => "candidate_selected",
             Self::DegenerateStock => "degenerate_stock",
-            Self::NonAcuteTurn => "non_acute_turn",
+            Self::NonAcuteTurn => "nonacute_turn",
             Self::InvalidGeometry => "invalid_geometry",
             Self::InvalidShadowScore => "invalid_shadow_score",
             Self::ZeroOrRoundedPhase => "zero_or_rounded_phase",
@@ -879,14 +879,26 @@ fn cplg_geometry(
     let coherence = raw_coherence.max(0.0);
     let theta_star = theta.min(previous_theta).min(CPLG_ANGLE_CAP);
     let phi = coherence * theta_star;
+    if !theta_star.is_finite() || theta_star <= 0.0 || !phi.is_finite() {
+        return Err(CplgGeometryError::Invalid);
+    }
+    // Zero phase is an exact stock shadow, not a renormalized reconstruction
+    // of stock.  Preserve every input bit (including signed zero) while still
+    // sealing the valid candidate so its next-boundary score is causally zero.
+    if phi == 0.0 {
+        return Ok(CplgGeometry {
+            forward_tangent,
+            transported_tangent: Some(transported_tangent),
+            theta,
+            rho,
+            coherence: Some(coherence),
+            phi: Some(phi),
+            candidate: Some(current.to_vec()),
+        });
+    }
     let cosine = libm::cosf(phi);
     let sine = libm::sinf(phi);
-    if !theta_star.is_finite()
-        || theta_star <= 0.0
-        || !phi.is_finite()
-        || !cosine.is_finite()
-        || !sine.is_finite()
-    {
+    if !cosine.is_finite() || !sine.is_finite() {
         return Err(CplgGeometryError::Invalid);
     }
     let mut raw_candidate = Vec::with_capacity(current.len());
@@ -1471,6 +1483,67 @@ impl GlobalState {
         self.initialized.iter().all(|&b| b)
     }
 
+    /// Canonical identity of the exact layout established by HELLO. This
+    /// hashes the decoded wire contract and the exact metadata bytes rather
+    /// than trusting a caller-supplied label.
+    pub fn canonical_layout_sha256(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"yeto-syncer-layout-v1\0");
+        digest.update((self.layout.fragments.len() as u64).to_le_bytes());
+        for (fragment_id, fragment) in self.layout.fragments.iter().enumerate() {
+            digest.update((fragment_id as u64).to_le_bytes());
+            digest.update([fragment.merge_mode]);
+            digest.update((fragment.tensor_numels.len() as u64).to_le_bytes());
+            for numel in &fragment.tensor_numels {
+                digest.update(numel.to_le_bytes());
+            }
+            match &fragment.tensor_shapes {
+                Some(shapes) => {
+                    digest.update([1]);
+                    digest.update((shapes.len() as u64).to_le_bytes());
+                    for (rows, columns) in shapes {
+                        digest.update(rows.to_le_bytes());
+                        digest.update(columns.to_le_bytes());
+                    }
+                }
+                None => digest.update([0]),
+            }
+        }
+        match &self.layout_meta {
+            Some(metadata) => {
+                digest.update([1]);
+                digest.update((metadata.len() as u64).to_le_bytes());
+                digest.update(metadata.as_bytes());
+            }
+            None => digest.update([0]),
+        }
+        format!("{:x}", digest.finalize())
+    }
+
+    /// Exact fresh global parameter identity before the first outer commit.
+    /// Signed zero and every f32 payload bit are preserved.
+    pub fn canonical_initial_state_sha256(&self) -> Result<String> {
+        if self.global_step != 0
+            || !self.all_initialized()
+            || self.versions.iter().any(|version| *version != 0)
+            || self.params.iter().flatten().any(|value| !value.is_finite())
+        {
+            bail!("initial-state identity requires finite initialized step-zero state");
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"yeto-syncer-initial-f32-state-v1\0");
+        digest.update(self.canonical_layout_sha256().as_bytes());
+        digest.update((self.params.len() as u64).to_le_bytes());
+        for (fragment_id, values) in self.params.iter().enumerate() {
+            digest.update((fragment_id as u64).to_le_bytes());
+            digest.update((values.len() as u64).to_le_bytes());
+            for value in values {
+                digest.update(value.to_le_bytes());
+            }
+        }
+        Ok(format!("{:x}", digest.finalize()))
+    }
+
     pub fn init_fragment(&mut self, fid: usize, values: Vec<f32>) -> Result<()> {
         if fid >= self.params.len() {
             bail!("init fragment {fid}: fragment id out of range");
@@ -1507,6 +1580,21 @@ impl GlobalState {
     ) -> Result<AggregateDelta> {
         let full_weight = self.validate_candidate_group(fid, candidates)?;
         self.build_aggregate_from_subset(fid, candidates, full_weight)
+    }
+
+    /// Materialize the exact stock pseudo-gradient consumed by memoryless
+    /// outer SGD without mutating optimizer state. This is intentionally a
+    /// separate opt-in capture API; the production token-weighted commit path
+    /// remains `merge_and_step` and is not replaced by a preview.
+    pub fn materialize_stock_direction(
+        &self,
+        fid: usize,
+        candidates: &[MergeCandidate<'_>],
+    ) -> Result<Vec<f32>> {
+        if self.delta_norm_ref != 0.0 {
+            bail!("stock-direction capture forbids delta-norm-ref")
+        }
+        Ok(self.build_full_aggregate(fid, candidates)?.delta)
     }
 
     /// Build the exact production aggregate for a sorted responder subset.
@@ -2916,6 +3004,54 @@ mod tests {
         assert!(st.all_initialized());
     }
 
+    #[test]
+    fn canonical_layout_and_initial_state_hash_bind_exact_live_bits() {
+        let make = |metadata: Option<&str>, signed_zero: f32| {
+            let mut state = GlobalState::new(
+                layout2(),
+                metadata.map(str::to_owned),
+                0.28,
+                0.0,
+                crate::protocol::DTYPE_F32,
+            );
+            state
+                .init_fragment(0, vec![1.0, signed_zero, 2.0, 3.0])
+                .unwrap();
+            state.init_fragment(1, vec![4.0, 5.0, 6.0, 7.0]).unwrap();
+            state
+        };
+        let positive = make(Some("{\"layout_hash\":\"live\"}"), 0.0);
+        let identical = make(Some("{\"layout_hash\":\"live\"}"), 0.0);
+        let negative_zero = make(Some("{\"layout_hash\":\"live\"}"), -0.0);
+        let other_metadata = make(Some("{\"layout_hash\":\"other\"}"), 0.0);
+
+        assert_eq!(
+            positive.canonical_layout_sha256(),
+            identical.canonical_layout_sha256()
+        );
+        assert_eq!(
+            positive.canonical_initial_state_sha256().unwrap(),
+            identical.canonical_initial_state_sha256().unwrap()
+        );
+        assert_ne!(
+            positive.canonical_initial_state_sha256().unwrap(),
+            negative_zero.canonical_initial_state_sha256().unwrap()
+        );
+        assert_ne!(
+            positive.canonical_layout_sha256(),
+            other_metadata.canonical_layout_sha256()
+        );
+        assert_ne!(
+            positive.canonical_initial_state_sha256().unwrap(),
+            other_metadata.canonical_initial_state_sha256().unwrap()
+        );
+
+        let mut incomplete =
+            GlobalState::new(layout2(), None, 0.28, 0.0, crate::protocol::DTYPE_F32);
+        incomplete.init_fragment(0, vec![1.0; 4]).unwrap();
+        assert!(incomplete.canonical_initial_state_sha256().is_err());
+    }
+
     // ---- EXP2.46 version-matched anchoring / anchor history ---------------
 
     /// One f32 fragment of 4 params, lr 1 mu 0 (plain SGD = weight averaging),
@@ -4174,10 +4310,12 @@ mod tests {
             let (_, next, _) = cplg_select_direction(&cplg_unit_degrees(degrees), &state);
             state = next;
         }
-        let (action, next, stats) = cplg_select_direction(&cplg_unit_degrees(0.0), &state);
+        let current = vec![1.0f32, -0.0f32];
+        let (action, next, stats) = cplg_select_direction(&current, &state);
         assert_eq!(stats.coherence, Some(0.0));
         assert_eq!(stats.phi, Some(0.0));
-        assert_eq!(action, cplg_unit_degrees(0.0));
+        assert!(cplg_bitwise_equal(&action, &current));
+        assert!(cplg_bitwise_equal(&next.pending_candidate, &current));
         assert!(pti_cosine(&next.pending_candidate, &action).unwrap() > 1.0 - 2.0e-6);
     }
 
@@ -4341,6 +4479,161 @@ mod tests {
 
     fn cplg_value_bits(values: &[f32]) -> Vec<u32> {
         values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CplgCausalTraceFixture {
+        schema: String,
+        shape: Vec<usize>,
+        resume_after_step: usize,
+        steps: Vec<CplgCausalTraceStep>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CplgCausalTraceStep {
+        step: usize,
+        input_f32le: String,
+        action_f32le: String,
+        candidate_f32le: Option<String>,
+        reason: String,
+        resolved_score_bits: Option<String>,
+        interlock_score_count: u8,
+        interlock_open: bool,
+        used_nonstock: bool,
+        state_cleared: bool,
+        next_state: CplgCausalTraceState,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CplgCausalTraceState {
+        previous_stock_f32le: Option<String>,
+        previous_forward_tangent_f32le: Option<String>,
+        previous_theta_bits: Option<String>,
+        pending_candidate_f32le: Option<String>,
+        score_bits: Vec<String>,
+    }
+
+    fn cplg_fixture_values(raw_hex: &str) -> Vec<f32> {
+        assert_eq!(raw_hex.len() % 8, 0, "raw f32 fixture hex is misaligned");
+        raw_hex
+            .as_bytes()
+            .chunks_exact(8)
+            .map(|component| {
+                let text = std::str::from_utf8(component).unwrap();
+                let mut raw = [0u8; 4];
+                for (index, byte) in raw.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).unwrap();
+                }
+                f32::from_bits(u32::from_le_bytes(raw))
+            })
+            .collect()
+    }
+
+    fn cplg_fixture_optional_values(raw_hex: &Option<String>) -> Vec<f32> {
+        raw_hex
+            .as_deref()
+            .map(cplg_fixture_values)
+            .unwrap_or_default()
+    }
+
+    fn cplg_fixture_optional_bits(raw_hex: &Option<String>) -> Option<u32> {
+        raw_hex
+            .as_deref()
+            .map(|text| u32::from_str_radix(text, 16).unwrap())
+    }
+
+    #[test]
+    fn cplg_shared_raw_bit_causal_trace_matches_production_and_resume() {
+        let fixture: CplgCausalTraceFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/cplg_causal_trace_v1.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture.schema, "cplg_causal_raw_bit_trace_v1");
+        assert_eq!(fixture.shape, [2]);
+        assert_eq!(fixture.steps.len(), 11);
+
+        let mut state = CplgFragmentState::default();
+        let mut resumed: Option<CplgFragmentState> = None;
+        for (expected_step, row) in fixture.steps.iter().enumerate() {
+            assert_eq!(row.step, expected_step);
+            let current = cplg_fixture_values(&row.input_f32le);
+            let (action, next, stats) = cplg_select_direction(&current, &state);
+            if let Some(resumed_state) = resumed.as_ref() {
+                let resumed_result = cplg_select_direction(&current, resumed_state);
+                assert_eq!(resumed_result, (action.clone(), next.clone(), stats));
+            }
+
+            assert!(cplg_bitwise_equal(
+                &action,
+                &cplg_fixture_values(&row.action_f32le)
+            ));
+            assert_eq!(
+                cplg_value_bits(&next.pending_candidate),
+                cplg_value_bits(&cplg_fixture_optional_values(&row.candidate_f32le))
+            );
+            assert_eq!(stats.reason.as_str(), row.reason);
+            assert_eq!(
+                stats
+                    .resolved_shadow_score
+                    .map(|value| (value as f32).to_bits()),
+                cplg_fixture_optional_bits(&row.resolved_score_bits)
+            );
+            assert_eq!(stats.interlock_score_count, row.interlock_score_count);
+            assert_eq!(stats.interlock_open, row.interlock_open);
+            assert_eq!(stats.used_nonstock, row.used_nonstock);
+            assert_eq!(stats.state_cleared, row.state_cleared);
+
+            let expected_state = &row.next_state;
+            assert_eq!(
+                cplg_value_bits(&next.previous_stock),
+                cplg_value_bits(&cplg_fixture_optional_values(
+                    &expected_state.previous_stock_f32le
+                ))
+            );
+            assert_eq!(
+                cplg_value_bits(&next.previous_forward_tangent),
+                cplg_value_bits(&cplg_fixture_optional_values(
+                    &expected_state.previous_forward_tangent_f32le
+                ))
+            );
+            assert_eq!(
+                next.previous_theta.map(f32::to_bits),
+                cplg_fixture_optional_bits(&expected_state.previous_theta_bits)
+            );
+            assert_eq!(
+                cplg_value_bits(&next.pending_candidate),
+                cplg_value_bits(&cplg_fixture_optional_values(
+                    &expected_state.pending_candidate_f32le
+                ))
+            );
+            assert_eq!(
+                cplg_value_bits(&next.scores),
+                expected_state
+                    .score_bits
+                    .iter()
+                    .map(|text| u32::from_str_radix(text, 16).unwrap())
+                    .collect::<Vec<_>>()
+            );
+
+            state = next;
+            if resumed.is_some() {
+                resumed = Some(state.clone());
+            }
+            if expected_step == fixture.resume_after_step {
+                resumed = Some(state.clone());
+            }
+        }
+        assert_eq!(
+            cplg_fixture_values(&fixture.steps[9].input_f32le)[1].to_bits(),
+            0x8000_0000
+        );
+        assert_eq!(
+            fixture.steps[10].resolved_score_bits.as_deref(),
+            Some("00000000")
+        );
     }
 
     fn cplg_exact_fixture(
@@ -4525,8 +4818,8 @@ mod tests {
         assert_eq!(cplg_value_bits(transported), [0x0000_0000, 0x3f80_0000]);
         let raw_coherence = pti_dot(&current_geometry.forward_tangent, transported).unwrap();
         assert_eq!(raw_coherence.to_bits(), 0xbf80_0000);
-        // Python exposes raw -1 in its decision field. Rust deliberately stores
-        // max(+0, raw) as the phase coherence consumed by the algorithm.
+        // Both the Python reference and Rust production state deliberately
+        // store max(+0, raw), not the raw -1 dot product, as phase coherence.
         assert_eq!(current_geometry.coherence.unwrap().to_bits(), 0x0000_0000);
         assert_ne!(current_geometry.coherence.unwrap().to_bits(), 0xbf80_0000);
         assert_eq!(current_geometry.phi.unwrap().to_bits(), 0x0000_0000);

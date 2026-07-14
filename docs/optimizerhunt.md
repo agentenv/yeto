@@ -2353,6 +2353,290 @@ out of scope. No optimizer promotion experiment is authorized until a new
 candidate passes its immutable shadow gate and the full live capture-v2
 restore/evaluation path passes its cost qualifier.
 
+### 2026-07-14 continuation audit
+
+The optimizer hunt resumed from the checked-out
+`experiment/optimizer-state-capture-round3` worktree at commit
+`16afcbe6601cfd6bc9aef01dc5f14684eba1141d`. Historical attempts were treated
+as retained evidence rather than rerun suggestions. The local Git worktree
+inventory contains the earlier barrier qualifier, BC-MP shadow, capture-v2
+object-store, committed-boundary index, CRN authority, CRP replay, async
+capture, Lean/bake-off, and curvature branches. Their branch tips and durable
+documents were cross-referenced against this log. None overrides the frozen
+verdicts above: PTI remains killed at E1 for zero actions; BC-MP and the
+round-two inventions remain killed or unidentifiable under their stated
+gates; and r5h remains a correctness pass but cost-gate failure. Unmerged
+historical worktree code is not itself new evidence and will not be silently
+promoted into a fresh experiment.
+
+The strongest implemented but unrun candidate remains CPLG-SGD. Its first
+admissible new evidence is the already specified fresh, stock-trajectory,
+full-vector shadow screen. A GPU launch is still blocked at the implementation
+audit boundary: the independent Python evaluator uses Darwin host C
+`atan2f`/`sinf`/`cosf`, while production uses pinned Rust `libm = 0.2.15`.
+At the angular cap, `sinf` differs by one ULP and one candidate coordinate also
+differs by one ULP. The checked-in report therefore correctly says
+`UNSATISFIED_UNTIL_RUST_FIXTURE_MATCH`. The planned repair is to keep the
+Python geometric/state reference independent while supplying its f32
+transcendentals from a small, hash-pinned Rust-libm helper. Rust then becomes
+the sole authoritative transcendental evaluator before any fresh outcome is
+opened; raw-bit fixtures must prove full candidate parity. This is a numerical
+contract repair, not coefficient or gate tuning.
+
+The prior 7.964001% r5h result measured the much broader live exact-state
+capture path and does not authorize weakening its 2% gate. CPLG's earlier
+shadow stage needs only the exact ordered stock pseudo-gradient vectors and
+their hashes, not learner Adam/RNG/data-iterator restore bundles. A separate
+low-overhead syncer-owned full-vector tape is therefore the next capture
+design to audit. If implemented, it must preserve exact f32 bytes, sequence and
+fragment identity, atomic/checksummed publication, a closed writer ledger, and
+the frozen 32-boundary/eight-per-fragment denominator. It cannot be described
+as capture-v2 finite-loss authority, and a shadow pass would still leave the
+full restore/evaluate cost qualifier and same-state CRN stage outstanding.
+
+The resumed Stage-2 audit found additional blockers that were not explicit in
+the earlier summary. First, the Rust treatment validator compared momentum
+numerically with `0.0`, which admits IEEE-754 negative zero even though CPLG
+and PTI require exact positive-zero identity. It must compare raw f32 bits and
+gain a negative-zero regression. Second, the existing Python CPLG replay is a
+stateless triple-vector construction rather than an independent causal state
+machine. It retains history through nonacute/invalid geometry even though
+production clears the fragment state; it seals a pending shadow only for a
+non-stock vector even though production seals a valid byte-stock zero-phase
+candidate; and it neither advances the last-three resolved-score window nor
+simulates the three-positive interlock. These differences can change later
+eligibility and action counts even when a single candidate vector matches.
+The reference must model preview/commit, clearing, valid stock-shadow
+resolution, and checkpoint/resume before Stage 2 can pass.
+
+The shadow analyzer also does not yet implement the frozen experiment verdict.
+It currently lacks enforcement of 32 ordered boundaries with exactly eight
+per fragment, 24 sealed and 20 resolved shadows plus four declared tails, at
+least eight simulated actions, the `>0.001` mean score, the specified
+fragment-stratified moving-block lower endpoint, three positive fragment
+means, the chained final ledger, and matched below-2% overhead. The exact
+bootstrap seed/draw/block/multiplicity semantics and the CPLG E2 advancement
+gate still require a dedicated immutable dossier. These are launch blockers,
+not details to fill after a GPU outcome.
+
+A separate completion audit also found that PTI r2's zero-action failure is
+genuine and sufficient to kill advancement, but its validator did not cover
+all other frozen E1 requirements: it did not enforce the below-2% interval
+overhead or create/verify the planned predecessor-chained action ledger. Its
+81.5-second versus 87.9-second descriptive arm times are not a valid proof of
+that interval gate. The PTI plan header is chronologically stale, and its old
+confirmation ordering predates the active SOP's H16/H64/H256 Stage-6 product
+gate. None of these omissions rescues PTI; they narrow the evidence claim and
+must not be copied into a future validator.
+
+The live provider audit used the isolated campaign gcloud configuration and
+recomputed the latest remote checksums. There is no optimizer VM or disk in
+GCP, no pending/running EC2 instance in any enabled region of AWS account
+`533462777468`, and no local optimizer/training process at the final sample.
+All ten lifecycle records in this worktree are `ABANDONED`; exact provider
+lookups return not found for every recorded VM and disk. The PTI r2 validation
+digest recomputes as
+`ccac85e0447549c2c2b9321bdd52b9c637f754d8aca71cd3a80e6ce51f65b3ce`
+and its abandonment digest as
+`c2785e27e245d1b56548f50be200d0404dcc4826e4cc4963e5f93d5dba407235`.
+The r5h parity digest recomputes as
+`2afac80f24bb8274bc79c2fc465cc928389f60016c6d3e9471d6908b6b6ccf4b`
+and its abandonment digest as
+`f284969aceb426b1143f34d3c17e4d81cd0e9bcd7b5d4fef7086ba0900535c0f`.
+No collection or teardown remains for those attempts.
+
+The one live GCP VM is the protected unrelated CPU workload
+`instance-20260526-guiflow`, numeric ID `3908640733128066700`, in
+`asia-east2-c`; it remains out of scope. Exact image ID
+`7290368630472593484` remains intentionally `READY` and consumes no GPU.
+Current `us-central1` quota is 16 Spot A100s but only 48 A2 CPUs, so the
+quota-feasible allocation is at most one four-A100 `a2-highgpu-4g`, not eight
+concurrent A100s. Zonal Spot placement is not guaranteed. Scientific capacity
+remains zero until the CPU and shadow prerequisites pass. A stale main-worktree
+`exp2-53-smoke` ledger says running even though exact VM ID
+`1744019134829053908` and its named disk are absent; its incomplete prefix is
+negative provenance and needs only local lifecycle reconciliation, never ID or
+prefix reuse.
+
+The first continuation implementation pass now closes the previously listed
+selector/reference defects on CPU. The Rust treatment boundary compares the
+momentum bits and rejects negative zero. The independent Python reference is a
+causal per-fragment preview/commit machine: it resolves the pending shadow
+before current geometry, retains only the last three scores, seals valid
+zero-phase byte-stock candidates, clears the complete state on nonacute or
+invalid geometry, and selects a non-stock action only after three already
+resolved strictly positive scores. The replay implements the frozen exact
+32-boundary round-robin accounting, 24/20/4 seal/resolve/tail counts, eight-
+action minimum, mean and fragment gates, and the 20,000-draw SplitMix64
+fragment-stratified circular block bootstrap. It also rejects noncanonical or
+escaping vector paths, duplicate JSON fields, discontinuous versions, broken
+predecessor chains, incomplete writer accounting, manifest/sidecar mismatch,
+and any missing full vector rather than shrinking the denominator.
+
+Production now has an opt-in syncer-owned stock-vector writer rather than the
+failed broad learner-state capture path. The capture path independently
+materializes the deterministic weighted-RDA stock pseudo-gradient before the
+legacy stock commit recomputes the same aggregate from the same sorted inputs;
+the matched overhead gate therefore measures this extra capture computation as
+well as I/O. It transfers the owned f32 vector through a bounded FIFO, writes
+atomic little-endian vector objects, hashes a canonical
+predecessor-chained JSONL row for every commit, and closes an atomic manifest
+plus checksum sidecar. Capture is accepted only for fresh deterministic
+token-weighted stock SGD-0.28 with f32 wire, exact positive-zero momentum and
+delta-norm reference, no fragment LR override, and an expected row count equal
+to the syncer total. A writer queue/I/O error or incomplete expected count is
+fatal. This is direction-shadow evidence only; it contains no Adam, RNG,
+future-group, restore, or finite-loss authority.
+
+Pinned Rust `libm = 0.2.15` is now available to the independent Python
+reference through a persistent closed-schema raw-bit helper. The exact raw-f32
+constant-phase, angular-cap, nonplanar, and reversal fixtures all match the
+production Rust expectations when this helper is authoritative. In
+particular, the cap candidate is now the production bytes
+`9b8c8340954db540`, while the host-Darwin diagnostic remains the deliberately
+different `9a8c8340954db540`. The helper executable SHA-256 is reported by the
+analyzer, and the frozen shadow gate refuses to pass without it.
+
+The current focused audit passes 38 Python reference/replay tests, including a
+fully passing synthetic shadow gate, cost-only failure, raw-bit parity, causal
+state, and tape corruption cases. Rust passes all 193 main tests plus both
+helper tests; exact vector bytes, ledger head, manifest completion,
+preview/commit, checkpoint/resume, legacy behavior, and signed-zero
+regressions are included. The complete Lean build passes all 8,570 jobs; the
+existing style warnings are unchanged and no Lean source was modified in this
+continuation. Targeted Ruff and Rust format checks pass. On this workstation,
+bare `uv run` selected CPython 3.14 and could not install pinned Torch 2.8;
+verification must explicitly use the available CPython 3.13 and
+`PYTHONPATH=.` because the editable package metadata does not expose the
+top-level `yeto` package. The cloud argv already has to pin the sibling
+checkout/interpreter/import path, so this local discovery is a reproducibility
+constraint rather than optimizer evidence. The generated untracked `uv.lock`
+is not an experiment artifact and must not enter the implementation commit.
+
+One additional binding gap emerged before finalizing the runner. The current
+capture CLI accepts a caller-supplied `layout_sha256`, but the syncer has not
+yet proved that value against the actual layout received in HELLO. Stable rows
+alone would therefore bind an assertion, not the live layout. Before the
+immutable spec can be frozen, the producer must derive a canonical digest from
+the established wire layout and exact layout metadata (or verify the supplied
+digest against it), and the OFF/ON pair must publish equal exact initial-state
+hashes and unrounded monotonic interval evidence. No GPU is authorized while
+those producer/run-evidence bindings remain open.
+
+Dry-rendering the inherited M=1/H4 command exposed a separate work-accounting
+error before launch. With `--syncer-total-steps 32`, the syncer shuts the
+learner down after the same 34 terminal local steps observed in PTI E1. At
+sequence length 128 and microbatch one, that is exactly 4,352 raw local
+training tokens. The old `--token-budget 32768` label only computed a 256-step
+default ceiling that was overridden by `--learner-max-steps 96` and never
+reached; it did not make the run consume 32,768 tokens. The CPLG shadow
+preregistration now uses the truthful `--token-budget 4352`, retains 96 only
+as strict-quorum headroom, and gates the observed 34 steps. This is acceptable
+for a stock-direction acquisition screen, not for an active E1 claiming the
+SOP's standard 32,768-token profile. Any later CPLG E1 must preregister a
+schedule that actually executes its declared token budget; it may not copy the
+historical label as proof of equal work.
+
+The frozen CPLG wrapper was tightened further before cloud use. It now hashes
+the actual separate scientific configuration file and rejects a compare argv
+whose declared configuration digest differs, leaving the immutable cloud spec
+to pin the source commit without a self-referential file hash. The analyzer
+requires the overhead JSON's basename-bound SHA-256 sidecar, and exact export
+tree hashing rejects symlinked directories as well as symlinked files. These
+are pre-acquisition integrity controls, not favorable optimizer evidence.
+The resulting frozen scientific configuration is
+`experiments/optimizer/cplg-sgd-shadow-direction-r1-config.json`, SHA-256
+`6636a9a537cfac495c2f4c22f641b2a325f4e79e78da3d876ff70595b49f79d8`;
+it contains no observed CPLG direction outcome.
+
+The first pre-outcome consistency scan caught and corrected a draft-only JSON
+mismatch: it had transcribed the activity threshold as four simulated actions
+and included an extra per-fragment action minimum, while the dossier and
+executable gate both freeze eight total actions. No direction outcome existed;
+the corrected config removes the extra field, requires eight, and has the
+final digest above. The superseded draft digest was never launchable.
+
+The post-hardening local audit passed 45 focused CPLG Python tests, all 196
+`yeto-syncer` tests, both `cplg_libm_oracle` tests, Rust formatting, and Ruff
+check/format over the seven changed Python files. A first full Python command
+using only the `dev` test dependency produced 1,255 passes, two skips, and 12
+unrelated failures because the isolated environment omitted the declared
+`launcher`/`nava` extras (`skypilot[aws]` and `boto3`). Repeating the same full
+suite with the project-declared `dev`, `launcher`, and `nava` extras passed
+1,267 tests with two skips. The failed dependency-incomplete invocation is
+retained here so the green result is not presented without its environment
+qualification.
+
+The final wrapper audit also made the frozen configuration's checksum sidecar
+mandatory at runtime and closed the comparison-results cardinality/order
+check: exactly one OFF row followed by exactly one ON row is accepted.
+Duplicate, extra, or reordered result rows fail before overhead analysis.
+The wrapper also builds both Rust binaries with `cargo build --locked` before
+acquisition, publishes the clean source commit, Cargo.lock digest, and exact
+helper executable digest in a checksummed preflight receipt, and rejects any
+post-pair helper digest change. Thus the authoritative transcendental binary
+is fixed before either stock arm produces an outcome. Its explicit expected
+40-character commit must match HEAD, and Git status must have no tracked or
+untracked nonignored files; a fresh remote checkout proves the commit was
+available from the pinned repository.
+
+A latest-state audit then found that a correct configuration digest could be
+stamped onto an argv with different model/data, seeds, LoRA, or workload
+inputs. Before outcomes, the wrapper was changed to parse the checksummed JSON
+and compare every frozen scientific input to exactly one explicit compare
+option. The profile also made the previously source-defaulted learner choices
+explicit: dense-model all-linear LoRA, AdamW defaults (betas 0.9/0.999,
+epsilon 1e-8), weight decay 0.01, ten-step linear warmup then constant LR,
+clip norm 1.0, gradient checkpointing off, DDP, preload tokenization, and
+assistant-token cross entropy. The corrected final configuration digest is
+`6636a9a537cfac495c2f4c22f641b2a325f4e79e78da3d876ff70595b49f79d8`;
+the preceding digest was never used to launch or inspect an outcome.
+
+The final pre-outcome config revision also caps the whole campaign at one A100
+and closes the retry table: scientific `FAIL` has no retry; `INCONCLUSIVE` or
+`UNIDENTIFIABLE` requires a newly reviewed protocol and identity; only one
+fresh-identity `INFRA_FAILURE` retry is allowed after evidence preservation,
+exact-ID teardown, and a documented root-cause repair. Its final digest is the
+`6636a9a5...9f79d8` value above.
+
+The wrapper now has a distinct terminal supervisor artifact. It atomically
+publishes checksummed `PASS` or `FAIL` after a valid analyzer result,
+`INCONCLUSIVE` for post-acquisition evidence-validation failure, and
+`INFRA_FAILURE` for pre-acquisition/configuration/build/compare failure. A
+nonfresh terminal path prevents execution, so a traceback or missing analyzer
+report can no longer masquerade as an unclassified completed attempt.
+
+A subsequent pre-outcome implementation audit found four evidence-quality
+gaps: the two runtimes did not yet consume one full causal raw-bit trace; the
+standalone analyzer could replace a stale report; unexpected ordinary
+exceptions could escape the terminal supervisor; and the documentation
+incorrectly said the capture aggregate was materialized only once. All four
+were corrected before acquisition. Both runtimes now consume the same
+11-boundary fixture and compare action, candidate, complete causal state,
+theta, delayed-score window, clear/recovery behavior, and resumed continuation
+by raw f32 bits. It includes a first selected non-stock action, a nonacute
+clear, a negative-zero coordinate, byte-stock zero-phase sealing, and a later
+exact positive-zero score. The fixture exposed one real diagnostic-only drift:
+Rust wrote `non_acute_turn` while Python wrote `nonacute_turn`. Rust was changed
+to the already frozen analyzer vocabulary; the numerical state and action bytes
+already agreed. Analyzer and wrapper publication is now no-clobber even for
+dangling symlinks, the outer supervisor catches and records unexpected
+exceptions as `INFRA_FAILURE`, and the capture description now truthfully says
+that capture rematerializes the deterministic aggregate before the legacy
+stock path recomputes it. The overhead gate includes that extra work.
+
+The same closure pass made `device=cuda` and `gpu_slots=1` explicit scientific
+fields and changed the no-outcome configuration digest to
+`6636a9a537cfac495c2f4c22f641b2a325f4e79e78da3d876ff70595b49f79d8`.
+The validator now enforces the complete frozen mechanism, analysis, gate, and
+lifecycle constants, rechecks clean Git/Cargo/helper identity after acquisition
+and after analysis, and requires the analyzer's helper digest to equal the
+checksummed preflight digest. Final local verification passed 89 focused Python
+tests, 197 syncer tests, two helper tests, the locked release build, Ruff and
+Rust formatting checks, and 1,281 Python tests with two skips under CPython
+3.13 plus the declared `dev`, `launcher`, and `nava` extras. No direction
+outcome existed during any of these corrections.
+
 ## Primary references used in the audit
 
 - SCAFFOLD: <https://proceedings.mlr.press/v119/karimireddy20a.html>

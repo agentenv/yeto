@@ -3,6 +3,7 @@ mod merge;
 mod protocol;
 mod server;
 mod state;
+mod stock_vector_tape;
 
 use clap::Parser;
 
@@ -131,6 +132,32 @@ struct Args {
     /// JSONL event tape (one record per merge).
     #[arg(long)]
     event_tape: Option<std::path::PathBuf>,
+    /// Fresh output directory for the narrow exact stock-vector shadow tape.
+    /// Requires the three identity arguments and frozen stock-SGD semantics.
+    #[arg(long)]
+    stock_vector_capture_dir: Option<std::path::PathBuf>,
+    /// Stable UUID-like identity copied into every stock-vector row.
+    #[arg(long)]
+    stock_vector_capture_session: Option<String>,
+    /// Optional expected canonical live-layout SHA-256. The producer always
+    /// derives the actual digest from HELLO and fails if this expectation is
+    /// supplied but differs.
+    #[arg(long)]
+    stock_vector_capture_layout_sha256: Option<String>,
+    /// Lowercase SHA-256 of the immutable run configuration.
+    #[arg(long)]
+    stock_vector_capture_run_config_sha256: Option<String>,
+    /// Exact expected stock-vector row count; must equal --total-steps.
+    #[arg(long, default_value_t = 0)]
+    stock_vector_capture_expected_records: u64,
+    /// Fresh atomic receipt for the exact pre-commit layout and f32 global
+    /// state. Used in both matched stock-shadow arms.
+    #[arg(long)]
+    stock_shadow_initial_state_manifest: Option<std::path::PathBuf>,
+    /// Atomic completion/timing receipt paired with
+    /// --stock-shadow-initial-state-manifest.
+    #[arg(long)]
+    stock_shadow_completion_manifest: Option<std::path::PathBuf>,
     /// Optional directory for offline syncer-current fragment probes.
     /// When set, the syncer writes one pre-merge checkpoint per sampled
     /// round, one f32 candidate-fragment file per admitted responder, the
@@ -227,6 +254,17 @@ fn main() -> anyhow::Result<()> {
         outer_lr_by_fragment.as_deref(),
     )?;
     let action_probe = action_probe_config(&args)?;
+    let stock_vector_capture = stock_vector_capture_config(&args, outer_lr_by_fragment.as_deref())?;
+    if args.stock_shadow_initial_state_manifest.is_some()
+        != args.stock_shadow_completion_manifest.is_some()
+    {
+        anyhow::bail!(
+            "stock-shadow initial-state and completion manifest paths are required together"
+        );
+    }
+    if args.stock_shadow_initial_state_manifest.is_some() {
+        validate_stock_shadow_identity(&args, outer_lr_by_fragment.as_deref())?;
+    }
     match (
         args.response_transcript.as_ref(),
         args.response_transcript_session.as_deref(),
@@ -270,6 +308,9 @@ fn main() -> anyhow::Result<()> {
         checkpoint_every: args.checkpoint_every,
         resume: args.resume,
         event_tape: args.event_tape,
+        stock_vector_capture,
+        stock_shadow_initial_state_manifest: args.stock_shadow_initial_state_manifest,
+        stock_shadow_completion_manifest: args.stock_shadow_completion_manifest,
         probe_capture_dir: args.probe_capture_dir,
         probe_capture_every: args.probe_capture_every,
         response_transcript: args.response_transcript,
@@ -281,6 +322,64 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(server::run(cfg))
+}
+
+fn stock_vector_capture_config(
+    args: &Args,
+    outer_lr_by_fragment: Option<&[f32]>,
+) -> anyhow::Result<Option<stock_vector_tape::StockVectorTapeConfig>> {
+    let fields_present = [
+        args.stock_vector_capture_dir.is_some(),
+        args.stock_vector_capture_session.is_some(),
+        args.stock_vector_capture_run_config_sha256.is_some(),
+        args.stock_vector_capture_expected_records != 0,
+    ];
+    if fields_present.iter().all(|present| !present)
+        && args.stock_vector_capture_layout_sha256.is_none()
+    {
+        return Ok(None);
+    }
+    if !fields_present.iter().all(|present| *present) {
+        anyhow::bail!(
+            "stock-vector capture requires dir, session, run-config SHA-256, and expected-records together"
+        );
+    }
+    validate_stock_shadow_identity(args, outer_lr_by_fragment)?;
+    if args.stock_vector_capture_expected_records != args.total_steps {
+        anyhow::bail!("stock-vector capture requires expected-records equal to total-steps");
+    }
+    Ok(Some(stock_vector_tape::StockVectorTapeConfig {
+        root: args.stock_vector_capture_dir.clone().unwrap(),
+        capture_session_uuid: args.stock_vector_capture_session.clone().unwrap(),
+        expected_layout_sha256: args.stock_vector_capture_layout_sha256.clone(),
+        run_config_sha256: args.stock_vector_capture_run_config_sha256.clone().unwrap(),
+        expected_records: args.stock_vector_capture_expected_records,
+    }))
+}
+
+fn validate_stock_shadow_identity(
+    args: &Args,
+    outer_lr_by_fragment: Option<&[f32]>,
+) -> anyhow::Result<()> {
+    if args.outer_optimizer != merge::OuterOptimizer::Nesterov
+        || args.outer_lr.to_bits() != CPLG_TREATMENT_LR.to_bits()
+        || args.outer_momentum.to_bits() != 0x0000_0000
+        || outer_lr_by_fragment.is_some()
+        || args.delta_norm_ref.to_bits() != 0x0000_0000
+    {
+        anyhow::bail!(
+            "stock shadow requires exact memoryless stock SGD-0.28, positive-zero momentum, no per-fragment LR, and positive-zero delta-norm-ref"
+        );
+    }
+    if !args.deterministic_commit_order
+        || args.commit_policy != action_probe::CommitPolicy::TokenWeighted
+        || args.resume
+    {
+        anyhow::bail!(
+            "stock shadow requires a fresh non-resumed run with deterministic token-weighted commits"
+        );
+    }
+    Ok(())
 }
 
 fn action_probe_config(args: &Args) -> anyhow::Result<Option<action_probe::ClientConfig>> {
@@ -376,10 +475,10 @@ fn validate_outer_optimizer(
     if matches!(
         optimizer,
         merge::OuterOptimizer::PtiSgd | merge::OuterOptimizer::CplgSgd
-    ) && outer_momentum != 0.0
+    ) && outer_momentum.to_bits() != 0x0000_0000
     {
         anyhow::bail!(
-            "--outer-optimizer {optimizer} requires --outer-momentum 0 so its selected direction feeds the frozen stock SGD kernel; got {outer_momentum}"
+            "--outer-optimizer {optimizer} requires exact positive-zero --outer-momentum (bits 0x00000000) so its selected direction feeds the frozen stock SGD kernel; got {outer_momentum:?}"
         );
     }
     Ok(())
@@ -605,8 +704,10 @@ mod tests {
         assert!(validate_outer_optimizer(merge::OuterOptimizer::ChebSgd, 0.9).is_ok());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::ChebSgd, f32::NAN).is_err());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::PtiSgd, 0.0).is_ok());
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::PtiSgd, -0.0).is_err());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::PtiSgd, 0.9).is_err());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::CplgSgd, 0.0).is_ok());
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::CplgSgd, -0.0).is_err());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::CplgSgd, 0.9).is_err());
         assert!(validate_cplg_treatment(
             merge::OuterOptimizer::CplgSgd,
@@ -631,6 +732,65 @@ mod tests {
         assert_eq!(parse_cosine_threshold("-0.25").unwrap(), -0.25);
         assert!(parse_cosine_threshold("1.1").is_err());
         assert!(parse_cosine_threshold("NaN").is_err());
+    }
+
+    #[test]
+    fn stock_vector_capture_requires_frozen_stock_identity() {
+        let parse = || {
+            let layout_sha256 = "1".repeat(64);
+            let config_sha256 = "2".repeat(64);
+            Args::try_parse_from([
+                "yeto-syncer",
+                "--learners",
+                "1",
+                "--total-steps",
+                "32",
+                "--deterministic-commit-order",
+                "--outer-optimizer",
+                "nesterov",
+                "--outer-lr",
+                "0.28",
+                "--outer-momentum",
+                "0",
+                "--stock-vector-capture-dir",
+                "/tmp/yeto-cplg-stock-test",
+                "--stock-vector-capture-session",
+                "123e4567-e89b-12d3-a456-426614174000",
+                "--stock-vector-capture-layout-sha256",
+                &layout_sha256,
+                "--stock-vector-capture-run-config-sha256",
+                &config_sha256,
+                "--stock-vector-capture-expected-records",
+                "32",
+            ])
+            .unwrap()
+        };
+        let args = parse();
+        let config = stock_vector_capture_config(&args, None).unwrap().unwrap();
+        assert_eq!(config.expected_records, 32);
+        assert_eq!(config.expected_layout_sha256, Some("1".repeat(64)));
+
+        let mut negative_zero = parse();
+        negative_zero.outer_momentum = -0.0;
+        assert!(stock_vector_capture_config(&negative_zero, None).is_err());
+        let mut wrong_lr = parse();
+        wrong_lr.outer_lr = 0.280_000_03;
+        assert!(stock_vector_capture_config(&wrong_lr, None).is_err());
+        let mut resume = parse();
+        resume.resume = true;
+        assert!(stock_vector_capture_config(&resume, None).is_err());
+        let mut missing_identity = parse();
+        missing_identity.stock_vector_capture_run_config_sha256 = None;
+        assert!(stock_vector_capture_config(&missing_identity, None).is_err());
+        let mut derived_layout = parse();
+        derived_layout.stock_vector_capture_layout_sha256 = None;
+        assert_eq!(
+            stock_vector_capture_config(&derived_layout, None)
+                .unwrap()
+                .unwrap()
+                .expected_layout_sha256,
+            None
+        );
     }
 
     #[test]

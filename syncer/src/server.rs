@@ -26,6 +26,10 @@ use tracing::{info, warn};
 use crate::action_probe::{self, ActionProbeClient, CommitPolicy, RetainedPreviews};
 use crate::protocol::*;
 use crate::state::{GlobalState, Layout, MergeCandidate, MergeStats};
+use crate::stock_vector_tape::{
+    write_completion_manifest, write_initial_state_manifest, StockVectorTapeConfig,
+    StockVectorTapeRow, StockVectorTapeWriter,
+};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -122,6 +126,14 @@ pub struct Config {
     pub resume: bool,
     /// JSONL event tape: one record per merge.
     pub event_tape: Option<std::path::PathBuf>,
+    /// Narrow syncer-owned exact stock-vector tape; absent is byte-compatible
+    /// with the production path.
+    pub stock_vector_capture: Option<StockVectorTapeConfig>,
+    /// Optional exact fresh-state receipt used by both matched shadow arms.
+    pub stock_shadow_initial_state_manifest: Option<std::path::PathBuf>,
+    /// Atomic interval-completion receipt paired with the initial-state
+    /// receipt. Both paths are absent on ordinary runs.
+    pub stock_shadow_completion_manifest: Option<std::path::PathBuf>,
     /// Optional offline probe capture directory. When enabled, complete_round
     /// writes a pre-merge syncer checkpoint, admitted candidate fragment
     /// tensors, and the resulting applied-update vector.
@@ -1233,6 +1245,47 @@ async fn scheduler(
         }
     }
     let mut st = state.unwrap();
+    let stock_shadow_identities = if cfg.stock_vector_capture.is_some()
+        || cfg.stock_shadow_initial_state_manifest.is_some()
+    {
+        Some((
+            st.canonical_layout_sha256(),
+            st.canonical_initial_state_sha256()?,
+        ))
+    } else {
+        None
+    };
+    if let Some(path) = &cfg.stock_shadow_initial_state_manifest {
+        let (layout_sha256, initial_state_sha256) = stock_shadow_identities
+            .as_ref()
+            .context("stock-shadow identities were not derived")?;
+        write_initial_state_manifest(
+            path,
+            cfg.stock_vector_capture.is_some(),
+            layout_sha256,
+            initial_state_sha256,
+        )?;
+    }
+    let stock_shadow_interval_start = cfg
+        .stock_shadow_completion_manifest
+        .as_ref()
+        .map(|_| Instant::now());
+    let mut stock_vector_capture = match cfg.stock_vector_capture.clone() {
+        Some(config) => {
+            if st.wire_dtype != DTYPE_F32 {
+                bail!("stock-vector capture requires f32 wire dtype");
+            }
+            let (layout_sha256, initial_state_sha256) = stock_shadow_identities
+                .as_ref()
+                .context("stock-vector identities were not derived")?;
+            Some(StockVectorTapeWriter::create(
+                config,
+                layout_sha256.clone(),
+                initial_state_sha256.clone(),
+            )?)
+        }
+        None => None,
+    };
     let num_fragments = st.layout.fragments.len();
     if num_fragments == 0 {
         bail!("syncer layout must contain at least one fragment");
@@ -1382,6 +1435,7 @@ async fn scheduler(
                     &mut action_probe_client,
                     action_probe_unavailable.as_deref(),
                     response_transcript.as_mut(),
+                    stock_vector_capture.as_mut(),
                     commit_seq,
                     &timing_origin,
                     round,
@@ -1596,6 +1650,36 @@ async fn scheduler(
     if let Some(path) = &cfg.final_state {
         dump_state(&st, path)?;
         info!(path = %path.display(), "final global state written");
+    }
+    if let Some(capture) = stock_vector_capture.take() {
+        let completion = capture.finish()?;
+        info!(
+            records = completion.records,
+            vector_bytes = completion.vector_bytes,
+            tape_sha256 = %completion.tape_sha256,
+            ledger_head = %completion.ledger_head,
+            manifest = %completion.manifest_path.display(),
+            manifest_sha256 = %completion.manifest_sha256,
+            "stock-vector capture complete"
+        );
+    }
+    if let (Some(path), Some(started)) = (
+        &cfg.stock_shadow_completion_manifest,
+        stock_shadow_interval_start,
+    ) {
+        let (layout_sha256, initial_state_sha256) = stock_shadow_identities
+            .as_ref()
+            .context("stock-shadow completion identities were not derived")?;
+        let duration_ns = u64::try_from(started.elapsed().as_nanos())
+            .context("stock-shadow interval exceeds u64 nanoseconds")?;
+        write_completion_manifest(
+            path,
+            cfg.stock_vector_capture.is_some(),
+            layout_sha256,
+            initial_state_sha256,
+            duration_ns,
+            st.global_step,
+        )?;
     }
     for g in current_groups(&registry) {
         let _ = g.send_small(MSG_SHUTDOWN, bytes::Bytes::new()).await;
@@ -1848,6 +1932,7 @@ async fn complete_round(
     action_probe_client: &mut Option<ActionProbeClient>,
     action_probe_unavailable: Option<&str>,
     response_transcript: Option<&mut ResponseTranscript>,
+    stock_vector_capture: Option<&mut StockVectorTapeWriter>,
     commit_seq: u64,
     timing_origin: &Instant,
     round: Round,
@@ -1936,6 +2021,19 @@ async fn complete_round(
         learners.push(push.values.as_slice());
         weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
     }
+    let stock_vector = if stock_vector_capture.is_some() {
+        let candidates = ids
+            .iter()
+            .zip(&weights)
+            .map(|(id, &weight)| {
+                let push = pushes.get(id).expect("sorted id must exist in push map");
+                MergeCandidate::new(*id, push.values.as_slice(), weight)
+            })
+            .collect::<Vec<_>>();
+        Some(st.materialize_stock_direction(p, &candidates)?)
+    } else {
+        None
+    };
     let sync_start = Instant::now();
     let (merge_stats, decision) = if cfg.commit_policy == CommitPolicy::TokenWeighted {
         // Keep the legacy production path intact. In particular, do not
@@ -2098,6 +2196,21 @@ async fn complete_round(
             &ids,
             &payload,
         )?;
+    }
+    if let (Some(capture), Some(vector)) = (stock_vector_capture, stock_vector) {
+        capture.submit(StockVectorTapeRow {
+            commit_seq,
+            step: t,
+            fragment: p,
+            fragment_version_before: prev_version,
+            fragment_version_after: t,
+            responders: ids
+                .iter()
+                .zip(&weights)
+                .map(|(id, weight)| (*id, weight.to_bits()))
+                .collect(),
+            vector,
+        })?;
     }
     // Broadcast the endpoint-residual mean at the fragment's new version.
     // Full Option II accumulates on the learner. The shuffle arm alone needs a
@@ -2695,6 +2808,9 @@ mod tests {
             checkpoint_every: 0,
             resume: false,
             event_tape: None,
+            stock_vector_capture: None,
+            stock_shadow_initial_state_manifest: None,
+            stock_shadow_completion_manifest: None,
             probe_capture_dir: None,
             probe_capture_every: 0,
             response_transcript: None,

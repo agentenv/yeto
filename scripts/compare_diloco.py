@@ -134,6 +134,8 @@ CAPTURE_PARITY_PAIRS = (
 CAPTURE_PARITY_ARM_NAMES = frozenset(
     arm_name for pair in CAPTURE_PARITY_PAIRS for arm_name in pair
 )
+CPLG_SHADOW_PAIR = ("cplg_shadow_off", "cplg_shadow_on")
+CPLG_SHADOW_ARM_NAMES = frozenset(CPLG_SHADOW_PAIR)
 
 
 @dataclass(frozen=True)
@@ -183,6 +185,9 @@ class Arm:
     # CLI flag is only a campaign-level master switch, which lets a matched
     # capture-off/capture-on pair run under one immutable command line.
     optimizer_state_capture: bool = False
+    # Narrow syncer-owned exact stock-vector direction tape. This is not the
+    # learner optimizer-state/capture-v2 path above.
+    stock_vector_capture: bool = False
     # Optional transport-attempt ceiling forwarded to every learner in this
     # arm.  None preserves the historical retry behavior; 0 makes an
     # evidence-critical matched run fail closed on the first disconnect.
@@ -366,6 +371,41 @@ PRESETS: dict[str, Arm] = {
         outer_lr=0.28,
         outer_momentum=0.0,
         outer_optimizer="pti-sgd",
+        max_reconnects=0,
+    ),
+    # Fresh stock-only CPLG direction-shadow acquisition. The pair differs
+    # solely by the narrow syncer-owned exact-vector writer.
+    "cplg_shadow_off": Arm(
+        "cplg_shadow_off",
+        m=1,
+        fragments=4,
+        quorum=1,
+        strict_quorum=True,
+        fixed_window_microsteps=4,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=4,
+        delta_correction="none",
+        outer_lr=0.28,
+        outer_momentum=0.0,
+        outer_optimizer="nesterov",
+        max_reconnects=0,
+    ),
+    "cplg_shadow_on": Arm(
+        "cplg_shadow_on",
+        m=1,
+        fragments=4,
+        quorum=1,
+        strict_quorum=True,
+        fixed_window_microsteps=4,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=4,
+        delta_correction="none",
+        outer_lr=0.28,
+        outer_momentum=0.0,
+        outer_optimizer="nesterov",
+        stock_vector_capture=True,
         max_reconnects=0,
     ),
     "m12": Arm("m12", m=12, fragments=12, quorum=6),
@@ -844,12 +884,29 @@ def learner_command(
         # single-process learners take the explicit one.
         cmd += ["--device", args.device]
     if arm is not None:
+        if arm.name in CPLG_SHADOW_ARM_NAMES:
+            cmd += [
+                "--inner-optimizer",
+                "adamw",
+                "--weight-decay",
+                "0.01",
+                "--warmup-steps",
+                "10",
+                "--grad-clip",
+                "1.0",
+                "--gradient-checkpointing",
+                "off",
+                "--lora-targets",
+                "all-linear",
+                "--max-reconnects",
+                "0",
+            ]
         capture_active = arm_capture_enabled(args, arm)
         matched_parity_arm = bool(
             getattr(args, "optimizer_state_capture_parity", False)
             and arm.name in CAPTURE_PARITY_ARM_NAMES
         )
-        if arm.max_reconnects is not None:
+        if arm.max_reconnects is not None and arm.name not in CPLG_SHADOW_ARM_NAMES:
             cmd += ["--max-reconnects", str(arm.max_reconnects)]
         # The qualifier compares capture as the sole treatment.  Capture mode
         # itself must disable reconnects so every audited attempt has one
@@ -1032,6 +1089,12 @@ def syncer_command(
     response_transcript: Path | None = None,
     response_transcript_session: str | None = None,
     deterministic_commit_order: bool = False,
+    stock_shadow_initial_state_manifest: Path | None = None,
+    stock_shadow_completion_manifest: Path | None = None,
+    stock_vector_capture_dir: Path | None = None,
+    stock_vector_capture_session: str | None = None,
+    stock_vector_capture_run_config_sha256: str | None = None,
+    stock_vector_capture_expected_layout_sha256: str | None = None,
 ) -> list[str]:
     # The syncer takes no fragment count: the layout arrives in HELLO.
     cmd = [
@@ -1095,6 +1158,42 @@ def syncer_command(
         cmd += ["--strict-quorum"]
     if deterministic_commit_order:
         cmd += ["--deterministic-commit-order"]
+    if (stock_shadow_initial_state_manifest is None) != (
+        stock_shadow_completion_manifest is None
+    ):
+        raise ValueError("stock-shadow receipt paths must be configured together")
+    if stock_shadow_initial_state_manifest is not None:
+        cmd += [
+            "--stock-shadow-initial-state-manifest",
+            str(stock_shadow_initial_state_manifest),
+            "--stock-shadow-completion-manifest",
+            str(stock_shadow_completion_manifest),
+        ]
+    stock_vector_fields = (
+        stock_vector_capture_dir,
+        stock_vector_capture_session,
+        stock_vector_capture_run_config_sha256,
+    )
+    if any(value is not None for value in stock_vector_fields):
+        if not all(value is not None for value in stock_vector_fields):
+            raise ValueError(
+                "stock-vector capture arguments must be configured together"
+            )
+        cmd += [
+            "--stock-vector-capture-dir",
+            str(stock_vector_capture_dir),
+            "--stock-vector-capture-session",
+            str(stock_vector_capture_session),
+            "--stock-vector-capture-run-config-sha256",
+            str(stock_vector_capture_run_config_sha256),
+            "--stock-vector-capture-expected-records",
+            str(total_steps),
+        ]
+        if stock_vector_capture_expected_layout_sha256 is not None:
+            cmd += [
+                "--stock-vector-capture-layout-sha256",
+                stock_vector_capture_expected_layout_sha256,
+            ]
     if probe_capture:
         cmd += [
             "--probe-capture-dir",
@@ -2099,6 +2198,30 @@ def run_baseline(args, work: Path) -> tuple[Path, float]:
 def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
     arm_dir = work / arm.name
     arm_dir.mkdir(parents=True, exist_ok=True)
+    stock_shadow_active = arm.name in CPLG_SHADOW_ARM_NAMES
+    stock_shadow_syncer_args = {}
+    if stock_shadow_active:
+        stock_shadow_syncer_args = {
+            "stock_shadow_initial_state_manifest": (
+                arm_dir / "stock_shadow_initial_state.json"
+            ),
+            "stock_shadow_completion_manifest": (
+                arm_dir / "stock_shadow_completion.json"
+            ),
+        }
+        if arm.stock_vector_capture:
+            stock_shadow_syncer_args.update(
+                {
+                    "stock_vector_capture_dir": arm_dir / "stock_vectors",
+                    "stock_vector_capture_session": (args.stock_shadow_capture_session),
+                    "stock_vector_capture_run_config_sha256": (
+                        args.stock_shadow_run_config_sha256
+                    ),
+                    "stock_vector_capture_expected_layout_sha256": (
+                        args.stock_shadow_expected_layout_sha256
+                    ),
+                }
+            )
     capture_active = arm_capture_enabled(args, arm)
     response_transcript = (
         arm_dir / "syncer_response_transcript.jsonl" if capture_active else None
@@ -2174,6 +2297,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                 deterministic_commit_order=getattr(
                     args, "deterministic_commit_order", False
                 ),
+                **stock_shadow_syncer_args,
                 **syncer_args,
             ),
             stdout=syncer_log,
@@ -2706,6 +2830,21 @@ def main() -> int:
         "the learner-budget-driven ceiling",
     )
     p.add_argument(
+        "--stock-shadow-run-config-sha256",
+        default=None,
+        help="lowercase SHA-256 of the immutable CPLG shadow run specification",
+    )
+    p.add_argument(
+        "--stock-shadow-capture-session",
+        default=None,
+        help="fresh stable capture identity for the CPLG shadow ON arm",
+    )
+    p.add_argument(
+        "--stock-shadow-expected-layout-sha256",
+        default=None,
+        help="optional frozen expected live-layout digest; actual layout is always derived",
+    )
+    p.add_argument(
         "--learner-max-steps",
         type=int,
         default=0,
@@ -2921,6 +3060,58 @@ def main() -> int:
         scaffold_beta=args.scaffold_beta,
         scaffold_control_shuffle=args.scaffold_control_shuffle,
     )
+    cplg_shadow_selected = {arm.name for arm in arms} & CPLG_SHADOW_ARM_NAMES
+    if cplg_shadow_selected:
+        if [arm.name for arm in arms] != list(CPLG_SHADOW_PAIR):
+            p.error(
+                "CPLG shadow acquisition requires exactly "
+                "cplg_shadow_off,cplg_shadow_on in that order"
+            )
+        for field, value in (
+            ("--stock-shadow-run-config-sha256", args.stock_shadow_run_config_sha256),
+            (
+                "--stock-shadow-expected-layout-sha256",
+                args.stock_shadow_expected_layout_sha256,
+            ),
+        ):
+            if value is not None and re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                p.error(f"{field} must be lowercase hexadecimal SHA-256")
+        if args.stock_shadow_run_config_sha256 is None:
+            p.error("CPLG shadow acquisition requires --stock-shadow-run-config-sha256")
+        if not args.stock_shadow_capture_session:
+            p.error("CPLG shadow acquisition requires --stock-shadow-capture-session")
+        if (
+            args.syncer_total_steps != 32
+            or args.learner_max_steps != 96
+            or args.fixed_window_microsteps != 4
+            or args.token_budget != 4_352
+            or args.eval_rows != 8
+            or not args.strict_quorum
+            or not args.barrier_sync
+            or not args.deterministic_commit_order
+            or not args.skip_baseline
+        ):
+            p.error(
+                "CPLG shadow acquisition requires 32 commits, learner cap 96, "
+                "H4, 4352 exact raw tokens, 8 eval rows, strict barrier deterministic "
+                "commits, and --skip-baseline"
+            )
+        incompatible = [
+            arm.name
+            for arm in arms
+            if arm.m != 1
+            or arm.fragments != 4
+            or arm.quorum != 1
+            or arm.wire_dtype != "f32"
+            or arm.merge_alpha != 0.0
+            or arm.delta_correction != "none"
+            or arm.outer_optimizer != "nesterov"
+            or arm.outer_lr != 0.28
+            or arm.outer_momentum != 0.0
+            or arm.max_reconnects != 0
+        ]
+        if incompatible:
+            p.error(f"CPLG shadow preset identity drifted: {incompatible}")
     for arm in arms:
         if (
             arm.scaffold_control_shuffle
