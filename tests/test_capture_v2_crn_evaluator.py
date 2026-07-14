@@ -125,13 +125,14 @@ def _fixture(
         python_rng=_object(store, f"{suffix} python rng".encode()),
         numpy_rng=_object(store, f"{suffix} numpy rng".encode()),
         torch_cpu_rng=_object(store, f"{suffix} torch cpu rng".encode()),
-        torch_cuda_rng={},
+        torch_cuda_rng={0: _object(store, f"{suffix} torch cuda rng 0".encode())},
         future_groups=FutureGroupRefs(
             future_state,
             {index: ref for index, ref in enumerate(future_groups)},
             None if future_state == "complete" else "future group 7 is absent",
         ),
     )
+    post_fragment = _object(store, f"{suffix} post fragment".encode())
     boundary = publish_syncer_boundary(
         store,
         f"{suffix}-boundary",
@@ -151,7 +152,7 @@ def _fixture(
             )
         ],
         pre_fragment=_object(store, f"{suffix} pre fragment".encode()),
-        post_fragment=_object(store, f"{suffix} post fragment".encode()),
+        post_fragment=post_fragment,
         outer_state=_object(store, f"{suffix} outer state".encode()),
         broadcast=_object(store, f"{suffix} broadcast".encode()),
         merge_config=BoundaryConfig("rda", {"weighted": True}),
@@ -174,14 +175,14 @@ def _fixture(
     )
     stock = _object(store, f"{suffix} exact stock pseudo-gradient".encode())
     candidate = _object(store, f"{suffix} candidate pseudo-gradient".encode())
-    stock_result = _object(store, f"{suffix} stock resulting fragment".encode())
+    stock_result = post_fragment
     candidate_result = _object(store, f"{suffix} candidate resulting fragment".encode())
     common = {
         "policy": policy,
         "boundary": boundary,
         "fragment_id": 0,
         "outer_lr_f64_bits": struct.pack(">d", 0.28).hex(),
-        "decision_sha256": _digest(suffix, "decision"),
+        "decision": _object(store, f"{suffix} decision bytes".encode()),
         "config_sha256": config.sha256,
     }
     stock_action = publish_sealed_outer_action(
@@ -505,14 +506,11 @@ def test_adversarial_backend_fails_before_outcome_publication(tmp_path, fault, m
     assert len(list(fixture.store.manifests_dir.iterdir())) == manifest_count_before
 
 
-def test_incomplete_worker_future_groups_fail_before_first_callback(tmp_path):
-    fixture = _fixture(tmp_path, future_state="incomplete")
-    backend = _FakeBackend(fixture)
-
-    with pytest.raises(CRNEvaluationError, match="complete ordered 8 future groups"):
-        _evaluate(fixture, backend)
-
-    assert backend.calls == []
+def test_incomplete_worker_future_groups_cannot_seal_crn_action(tmp_path):
+    with pytest.raises(
+        CaptureStoreError, match="complete canonical future groups 0..7"
+    ):
+        _fixture(tmp_path, future_state="incomplete")
 
 
 @pytest.mark.parametrize("arm", ["stock", "candidate"])

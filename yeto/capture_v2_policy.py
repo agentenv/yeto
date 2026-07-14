@@ -2,7 +2,10 @@
 
 The module defines immutable identities and cross-reference checks only.  It
 does not implement optimizer formulas, choose an action, write live training
-state, or interpret evaluation results.
+state, or interpret evaluation results.  In particular, candidate-result math
+remains policy-owned: v1 binds the exact candidate resulting fragment but
+cannot prove that an optimizer formula produced it.  Stock fallback is the
+narrow exception and is pinned to the verified boundary post-fragment.
 """
 
 from __future__ import annotations
@@ -48,6 +51,7 @@ POLICY_CONFIG_ROLE = "policy/config"
 STOCK_GRADIENT_ROLE = "action/stock-pseudo-gradient"
 SELECTED_GRADIENT_ROLE = "action/selected-pseudo-gradient"
 RESULTING_FRAGMENT_ROLE = "action/resulting-fragment"
+DECISION_ROLE = "action/decision"
 K0_ROLE = "outcome/k0"
 K8_ROLE = "outcome/k8"
 EVALUATION_ROLE = "outcome/evaluation"
@@ -107,6 +111,7 @@ class LoadedSealedOuterAction:
     selected_pseudo_gradient: ObjectRef
     outer_lr_f64_bits: str
     resulting_fragment: ObjectRef
+    decision: ObjectRef
     decision_sha256: str
     config_sha256: str
     action_kind: str
@@ -370,6 +375,97 @@ def _validate_boundary_action_weights(boundary: LoadedSyncerBoundary) -> None:
             )
 
 
+def _positive_f64_bits(value: Any, context: str) -> str:
+    bits = _f64_bits(value, context)
+    decoded = struct.unpack(">d", bytes.fromhex(bits))[0]
+    if not math.isfinite(decoded) or decoded <= 0.0:
+        raise PolicyContractError(f"{context} must decode to a finite positive f64")
+    return bits
+
+
+def _validate_outer_lr(
+    boundary: LoadedSyncerBoundary, action_outer_lr_f64_bits: Any
+) -> str:
+    parameters = boundary.outer_config.parameters
+    if not isinstance(parameters, dict) or "lr_f64_bits" not in parameters:
+        raise PolicyContractError(
+            "syncer boundary outer_config must contain lr_f64_bits"
+        )
+    boundary_bits = _positive_f64_bits(
+        parameters["lr_f64_bits"], "syncer boundary outer_config lr_f64_bits"
+    )
+    action_bits = _positive_f64_bits(
+        action_outer_lr_f64_bits, "action outer_lr_f64_bits"
+    )
+    if action_bits != boundary_bits:
+        raise PolicyContractError(
+            "action outer_lr_f64_bits differs from syncer boundary outer_config"
+        )
+    return action_bits
+
+
+def _worker_restore_evidence(boundary: LoadedSyncerBoundary) -> bool:
+    for responder in boundary.responders:
+        endpoint = responder.endpoint
+        fragment_count = len(endpoint.fragment_versions)
+        if (
+            fragment_count == 0
+            or list(endpoint.fragments) != list(range(fragment_count))
+            or not isinstance(endpoint.model_buffers, ObjectRef)
+            or not isinstance(endpoint.scheduler, dict)
+            or not isinstance(endpoint.rng.python, ObjectRef)
+            or not isinstance(endpoint.rng.numpy, ObjectRef)
+            or not isinstance(endpoint.rng.torch_cpu, ObjectRef)
+            or not endpoint.rng.torch_cuda
+            or any(not isinstance(ref, ObjectRef) for ref in endpoint.rng.torch_cuda)
+        ):
+            return False
+    return True
+
+
+def _crn_train_k8_evidence(boundary: LoadedSyncerBoundary) -> bool:
+    expected = list(range(8))
+    return all(
+        responder.endpoint.future_groups.state == "complete"
+        and list(responder.endpoint.future_groups.refs) == expected
+        for responder in boundary.responders
+    )
+
+
+def _validate_required_capability_evidence(
+    boundary: LoadedSyncerBoundary, required: tuple[str, ...]
+) -> None:
+    for capability in required:
+        if capability == "global_boundary_state":
+            if not all(
+                isinstance(ref, ObjectRef)
+                for ref in (
+                    boundary.pre_fragment,
+                    boundary.post_fragment,
+                    boundary.outer_state,
+                )
+            ):
+                raise PolicyContractError(
+                    "global_boundary_state lacks verified boundary objects"
+                )
+        elif capability == "worker_restore":
+            if not _worker_restore_evidence(boundary):
+                raise PolicyContractError(
+                    "worker_restore requires every responder to have complete GPU "
+                    "restore evidence including at least one CUDA RNG object"
+                )
+        elif capability == "crn_train_k8":
+            if not _crn_train_k8_evidence(boundary):
+                raise PolicyContractError(
+                    "crn_train_k8 requires every responder to have complete canonical "
+                    "future groups 0..7"
+                )
+        else:
+            raise PolicyContractError(
+                f"required capability {capability!r} has no v1 boundary evidence schema"
+            )
+
+
 def publish_sealed_outer_action(
     store: CaptureObjectStore,
     manifest_id: str,
@@ -382,7 +478,7 @@ def publish_sealed_outer_action(
     selected_pseudo_gradient: ObjectRef,
     outer_lr_f64_bits: str,
     resulting_fragment: ObjectRef,
-    decision_sha256: str,
+    decision: ObjectRef,
     config_sha256: str,
     action_kind: str,
     action_reason: str,
@@ -405,12 +501,19 @@ def publish_sealed_outer_action(
     missing = sorted(set(required) - set(loaded_policy.capabilities))
     if missing:
         raise PolicyContractError(f"policy is missing required capabilities: {missing}")
+    _validate_required_capability_evidence(loaded_boundary, required)
     stock = _exact_ref(stock_pseudo_gradient, "stock_pseudo_gradient")
     selected = _exact_ref(selected_pseudo_gradient, "selected_pseudo_gradient")
     result = _exact_ref(resulting_fragment, "resulting_fragment")
+    decision = _exact_ref(decision, "decision")
     action_kind, action_reason, fallback_reason = _validate_action_semantics(
         action_kind, stock, selected, action_reason, fallback_reason
     )
+    if action_kind == "stock_fallback" and result != loaded_boundary.post_fragment:
+        raise PolicyContractError(
+            "stock fallback resulting_fragment must reference the exact boundary "
+            "post_fragment"
+        )
     config_sha256 = _sha256(config_sha256, "config_sha256")
     if config_sha256 != loaded_policy.config.sha256:
         raise PolicyContractError(
@@ -428,9 +531,10 @@ def publish_sealed_outer_action(
         "selected_pseudo_gradient": _object_descriptor(
             SELECTED_GRADIENT_ROLE, selected
         ),
-        "outer_lr_f64_bits": _f64_bits(outer_lr_f64_bits, "outer_lr_f64_bits"),
+        "outer_lr_f64_bits": _validate_outer_lr(loaded_boundary, outer_lr_f64_bits),
         "resulting_fragment": _object_descriptor(RESULTING_FRAGMENT_ROLE, result),
-        "decision_sha256": _sha256(decision_sha256, "decision_sha256"),
+        "decision": _object_descriptor(DECISION_ROLE, decision),
+        "decision_sha256": decision.sha256,
         "config_sha256": config_sha256,
         "action_kind": action_kind,
         "action_reason": action_reason,
@@ -442,6 +546,7 @@ def publish_sealed_outer_action(
             ManifestEntry(STOCK_GRADIENT_ROLE, stock),
             ManifestEntry(SELECTED_GRADIENT_ROLE, selected),
             ManifestEntry(RESULTING_FRAGMENT_ROLE, result),
+            ManifestEntry(DECISION_ROLE, decision),
         ],
         metadata=metadata,
     )
@@ -469,6 +574,7 @@ def load_sealed_outer_action(
         "selected_pseudo_gradient",
         "outer_lr_f64_bits",
         "resulting_fragment",
+        "decision",
         "decision_sha256",
         "config_sha256",
         "action_kind",
@@ -509,6 +615,7 @@ def load_sealed_outer_action(
     missing = sorted(set(required) - set(policy.capabilities))
     if missing:
         raise PolicyContractError(f"policy is missing required capabilities: {missing}")
+    _validate_required_capability_evidence(boundary, required)
 
     stock = _parse_object_descriptor(
         metadata["stock_pseudo_gradient"],
@@ -525,6 +632,11 @@ def load_sealed_outer_action(
         RESULTING_FRAGMENT_ROLE,
         "resulting fragment",
     )
+    decision = _parse_object_descriptor(
+        metadata["decision"],
+        DECISION_ROLE,
+        "decision",
+    )
     action_kind, action_reason, fallback_reason = _validate_action_semantics(
         metadata["action_kind"],
         stock,
@@ -532,6 +644,14 @@ def load_sealed_outer_action(
         metadata["action_reason"],
         metadata["fallback_reason"],
     )
+    if action_kind == "stock_fallback" and result != boundary.post_fragment:
+        raise PolicyContractError(
+            "stock fallback resulting_fragment must reference the exact boundary "
+            "post_fragment"
+        )
+    decision_sha256 = _sha256(metadata["decision_sha256"], "action decision_sha256")
+    if decision_sha256 != decision.sha256:
+        raise PolicyContractError("action decision_sha256 differs from decision object")
     config_sha256 = _sha256(metadata["config_sha256"], "action config_sha256")
     if config_sha256 != policy.config.sha256:
         raise PolicyContractError(
@@ -543,6 +663,7 @@ def load_sealed_outer_action(
         STOCK_GRADIENT_ROLE,
         SELECTED_GRADIENT_ROLE,
         RESULTING_FRAGMENT_ROLE,
+        DECISION_ROLE,
     ]
     if [row["role"] for row in rows] != expected_roles:
         raise PolicyContractError(
@@ -553,6 +674,7 @@ def load_sealed_outer_action(
         objects[STOCK_GRADIENT_ROLE] != stock
         or objects[SELECTED_GRADIENT_ROLE] != selected
         or objects[RESULTING_FRAGMENT_ROLE] != result
+        or objects[DECISION_ROLE] != decision
     ):
         raise PolicyContractError(
             "sealed action metadata/object cross-reference mismatch"
@@ -575,11 +697,10 @@ def load_sealed_outer_action(
         required_capabilities=required,
         stock_pseudo_gradient=stock,
         selected_pseudo_gradient=selected,
-        outer_lr_f64_bits=_f64_bits(
-            metadata["outer_lr_f64_bits"], "action outer_lr_f64_bits"
-        ),
+        outer_lr_f64_bits=_validate_outer_lr(boundary, metadata["outer_lr_f64_bits"]),
         resulting_fragment=result,
-        decision_sha256=_sha256(metadata["decision_sha256"], "action decision_sha256"),
+        decision=decision,
+        decision_sha256=decision_sha256,
         config_sha256=config_sha256,
         action_kind=action_kind,
         action_reason=action_reason,
