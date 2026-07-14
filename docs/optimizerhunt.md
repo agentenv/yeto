@@ -2759,6 +2759,70 @@ also binds the truthful three-row result schema; its focused spec/wrapper run
 passed 23 tests. Harness validation and command rendering passed before the
 control-plane commit and launch.
 
+### 2026-07-14 CPLG stock-shadow acquisition r2: direction `PASS`
+
+The frozen r2 contract was committed as `3e42b5a19ca650f0b42e5801dd4edcbf7b0e240a`
+and pushed before launch. It ran on exactly one Spot A100: VM provider ID
+`2810084310378027114`, boot-disk ID `2644313557893322858`, ownership nonce
+`aef1eefe8bc28eec`, and retained source-image ID `7290368630472593484`.
+Runtime preflight bound repaired source commit
+`eb6d21146011112ffe8df5cb518c985e8c0297bd`, config digest
+`fb7d4c0539cc8760058e0f0b20101bde7fcbac9224c8b27ca69d9724180aaf96`,
+`Cargo.lock` digest
+`2f5e404a2651b0587e91512566bf35a54eedce01a4f3f53206a00ac14e0ac4c3`,
+and helper digest
+`72fa765d43b71463753024adff3afb2d86284ea2422a427e1b91347ad6360bbb`.
+
+Both stock arms reached exactly 34 local steps and 32 commits from identical
+initial state
+`3b398acd56d9df580416856f8c7d86a97f34590671faf8617504687c3adca931`
+and layout
+`85cdff92c745f0f3e221c573b60a39f0cb14cd35e4313e4f5086428cf7d6fdd9`.
+Their binary64 evaluation losses were bit-identical at
+`1.3319227656615953`; the untrained loss was `1.4244070067489154`.
+The exact OFF and ON producer intervals were 47,302,293,313 ns and
+47,735,433,378 ns. Thus capture overhead was
+`0.009156851278518476` (approximately 0.916%), below the frozen 2% maximum.
+The ON writer closed with all 32 objects and 173,113,344 bytes, no drops,
+abandonment, pending data, or error. Its tape digest was
+`1e939222005f78d9d9711c4558d59b922e566af513485ce231d11ce417838c31`,
+ledger head
+`64c912ccf00fd0c33180059e72a184ccd9e8548d12eca02f9e0090757ebdfd01`,
+and tape-manifest digest
+`1a0d19a27b99c82a0110a3e186269ebd2d76396b5163a625086862aacabac3fd`.
+
+The checksummed terminal receipt records `PASS`, stage
+`completed_analysis`, with analysis digest
+`a1143e818580c3b6b463bb180a04fb20991b04498f5fcd4820da2c6a52ada4fc`.
+All 20 resolved shadows were positive. Mean shadow cosine gain was
+`0.0028530240058898928`, above the required `0.001`; all four fragment
+means were positive, above the required three; and the frozen 20,000-draw
+fragment-stratified circular-block bootstrap lower endpoint was
+`0.0027203083038330076`, strictly above zero. Replay constructed 24 nonstock
+shadows, opened the interlock for 12 simulated actions against a minimum of
+eight, left four expected unresolved tail shadows, and reported no gate
+errors. This is direction-only evidence. It is not an active E1 result, a
+causal finite-loss comparison, or evidence that CPLG beats SGD-0.28; it only
+authorizes writing and reviewing a separate active E1 preregistration.
+
+The successful run was synced to
+`gs://yeto-exp2-52-model-training-497007/exp2-cplg-shadow-direction-r2`:
+120 objects totaling 450,249,709 bytes, runner exit `0`, and a 78-entry final
+checksum manifest were verified before teardown. Exact-ID `delete` then
+completed successfully. Subsequent provider lookups returned not-found for
+both the owned VM and disk at `2026-07-14T21:42:01Z`; the protected unrelated
+VM `instance-20260526-guiflow` remained RUNNING with provider ID
+`3908640733128066700`.
+
+This run exposed a cost-design defect even though its evidence passed: the
+same A100 VM performed approximately 16.5 minutes of scalar, single-core
+exact-f32 Python replay after GPU acquisition ended, leaving the accelerator
+idle. The frozen r2 wrapper could not be moved mid-run without making the
+attempt inconclusive. Future capture protocols must preregister a split
+pipeline: durably sync and verify the complete tape, release the accelerator,
+then run deterministic replay on pinned CPU infrastructure. No later GPU run
+may repeat this co-scheduling pattern.
+
 ## Primary references used in the audit
 
 - SCAFFOLD: <https://proceedings.mlr.press/v119/karimireddy20a.html>
