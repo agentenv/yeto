@@ -1294,8 +1294,19 @@ gcloud storage rsync --recursive "$run" "$artifact" >> "$run/backup-transfer.log
 
 
 def _render_bash_c(body: str) -> str:
-    """Quote a complete nested Bash program exactly once."""
-    return shlex.join(["bash", "-c", body])
+    """Render a nested Bash program without embedding its syntax in SSH text.
+
+    ``gcloud compute ssh --command`` adds another remote-shell parse beyond the
+    local ``subprocess`` boundary.  A normally shell-quoted ``bash -c`` body is
+    therefore not stable when that body itself contains quotes: the remote
+    transport can consume one quoting layer and split the program into Bash's
+    positional arguments.  Base64 keeps the transported command lexical-only;
+    command substitution decodes the program into one double-quoted ``-c``
+    argument, whose contents are not reparsed by the outer shell.
+    """
+
+    encoded = base64.b64encode(body.encode()).decode()
+    return f'bash -c "$(printf %s {encoded} | base64 -d)"'
 
 
 def detached_runtime_smoke_script(spec: ExperimentSpec) -> str:

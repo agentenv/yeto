@@ -530,7 +530,8 @@ def test_start_script_pins_commit_and_sets_backup(tmp_path):
     script = start_script(spec)
     assert COMMIT in script
     assert "git -C" in script and "rev-parse HEAD" in script
-    assert "gcloud storage rsync --recursive" in script
+    assert "gcloud storage rsync --recursive" in harness._backup_body()
+    assert "base64 -d" in script
     assert "runner.pid" in script and "backup.pid" in script
     assert "--baseline-loss 0.0" in script
 
@@ -681,13 +682,13 @@ def test_declared_tree_checksum_manifest_is_verified_before_success(tmp_path):
         raw["execution"]["checksum_manifests"] = [manifest]
 
     spec = _spec(tmp_path, add_manifest)
-    script = start_script(spec)
-    assert "manifest=" + manifest in script
-    assert 'cd "$(dirname "$manifest")"' in script
-    assert 'sha256sum -c "$(basename "$manifest")"' in script
-    assert script.index(
-        "declared checksum manifest verification failed"
-    ) < script.index('printf "%s\\n" "$code" > "$run/runner.exit.tmp"')
+    body = harness._runner_body(spec)
+    assert "manifest=" + manifest in body
+    assert 'cd "$(dirname "$manifest")"' in body
+    assert 'sha256sum -c "$(basename "$manifest")"' in body
+    assert body.index("declared checksum manifest verification failed") < body.index(
+        'printf "%s\\n" "$code" > "$run/runner.exit.tmp"'
+    )
 
     completion_check = harness.remote_completion_check_script(spec)
     assert 'cd "$(dirname "$manifest")"' in completion_check
@@ -727,6 +728,8 @@ def test_rendered_runner_preserves_apostrophes_and_records_checksum_failure(
     assert "declared checksum manifest is missing" in result.stderr
     assert (run / "runner.exit").read_text() == "14\n"
     assert f'nohup {harness._render_bash_c(body)} _ "$run"' in start_script(spec)
+    assert body not in harness._render_bash_c(body)
+    assert "base64 -d" in harness._render_bash_c(body)
 
 
 def test_declared_tree_checksum_manifest_must_be_scoped_and_completed(tmp_path):
@@ -1148,15 +1151,17 @@ def test_exp254_r6_async_qualifier_is_pinned_full_path_dependent_draft(tmp_path)
 
     run_id = "exp2-54-smoke-r6-async-qualifier"
     assert spec.run_id == spec.instance_name == run_id
-    assert spec.repo_commit == "4ed893d195f260ba7560680d1cf3e5030f1e7bed"
+    assert spec.repo_commit == "e99179e020d3fe6468a220793c6f6bf8ab1aa74a"
     assert spec.artifact_uri == ("gs://yeto-exp2-52-model-training-497007/" + run_id)
     assert spec.execution["source_mode"] == "checkout"
     assert spec.remote_repo_dir == f"/home/shou/experiments/{run_id}/repo"
     assert spec.remote_run_dir == f"/home/shou/runs/{run_id}"
 
-    assert spec.cloud["labels"]["gate"] == ("exp2-54-smoke-r5c-async-canary-pass")
+    assert spec.cloud["labels"]["gate"] == (
+        "exp2-54-smoke-r5e-directional-burst-canary-pass"
+    )
     assert spec.cloud["labels"]["draft"] == "true"
-    assert spec.cloud["labels"]["evidence"] == "none"
+    assert spec.cloud["labels"]["evidence"] == "conditional-qualifier"
     assert spec.cloud["adopt_only"] is True
     assert spec.cloud["machine_type"] == "a2-highgpu-4g"
     assert spec.cloud["accelerator_count"] == 4
@@ -1177,7 +1182,7 @@ def test_exp254_r6_async_qualifier_is_pinned_full_path_dependent_draft(tmp_path)
         "--syncer-total-steps": "16",
         "--fixed-window-microsteps": "4",
         "--optimizer-state-capture-parity-overhead-limit": "0.02",
-        "--optimizer-state-capture-writer-max-items": "4",
+        "--optimizer-state-capture-writer-max-items": "32",
         "--optimizer-state-capture-writer-max-bytes": "4294967296",
         "--optimizer-state-capture-min-joined-boundaries": "16",
         "--optimizer-state-capture-min-joined-per-fragment": "4",
