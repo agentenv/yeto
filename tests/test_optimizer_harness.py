@@ -1051,6 +1051,107 @@ def test_exp254_r5_async_canary_is_exactly_pinned_launchable_and_one_gpu():
     assert "--boot-disk-type=pd-ssd" in rendered_launch
 
 
+def test_exp254_r6_async_qualifier_is_pinned_full_path_dependent_draft(tmp_path):
+    root = Path(__file__).resolve().parents[1] / "experiments" / "optimizer"
+    spec_path = root / "exp2-54-smoke-r6-async-qualifier-draft.json"
+    spec = load_spec(spec_path)
+
+    run_id = "exp2-54-smoke-r6-async-qualifier"
+    assert spec.run_id == spec.instance_name == run_id
+    assert spec.repo_commit == "4ed893d195f260ba7560680d1cf3e5030f1e7bed"
+    assert spec.artifact_uri == ("gs://yeto-exp2-52-model-training-497007/" + run_id)
+    assert spec.execution["source_mode"] == "checkout"
+    assert spec.remote_repo_dir == f"/home/shou/experiments/{run_id}/repo"
+    assert spec.remote_run_dir == f"/home/shou/runs/{run_id}"
+
+    assert spec.cloud["labels"]["gate"] == ("exp2-54-smoke-r5-async-canary-pass")
+    assert spec.cloud["labels"]["draft"] == "true"
+    assert spec.cloud["labels"]["evidence"] == "none"
+    assert spec.cloud["adopt_only"] is True
+    assert spec.cloud["machine_type"] == "a2-highgpu-4g"
+    assert spec.cloud["accelerator_count"] == 4
+    assert spec.cloud["max_total_accelerators"] == 4
+    assert spec.cloud["provisioning_model"] == "SPOT"
+    assert spec.cloud["boot_disk_type"] == "pd-ssd"
+    assert spec.cloud["image"] == (
+        "projects/model-training-497007/global/images/yeto-optimizer-a100-20260714"
+    )
+    assert spec.cloud["expected_source_image_id"] == "7290368630472593484"
+
+    expected_values = {
+        "--gpu-slots": "4",
+        "--settings": "capture_m4_off,capture_m4_on",
+        "--syncer-total-steps": "16",
+        "--fixed-window-microsteps": "4",
+        "--optimizer-state-capture-parity-overhead-limit": "0.02",
+        "--optimizer-state-capture-writer-max-items": "4",
+        "--optimizer-state-capture-writer-max-bytes": "4294967296",
+        "--optimizer-state-capture-min-joined-boundaries": "16",
+        "--optimizer-state-capture-min-joined-per-fragment": "4",
+    }
+    for flag, expected in expected_values.items():
+        assert spec.command.count(flag) == 1
+        assert spec.command[spec.command.index(flag) + 1] == expected
+        if flag != "--settings":
+            assert spec.checks["expected_flags"][flag] == expected
+    assert spec.checks["expected_arms"] == ["capture_m4_off", "capture_m4_on"]
+    for flag in (
+        "--strict-quorum",
+        "--barrier-sync",
+        "--optimizer-state-capture",
+        "--optimizer-state-capture-parity",
+        "--optimizer-state-capture-parity-require-barrier",
+        "--optimizer-state-capture-strict-writer",
+        "--optimizer-state-capture-background-writer",
+        "--syncer-probe-capture",
+    ):
+        assert spec.command.count(flag) == 1
+        assert spec.checks["expected_flags"][flag] == ""
+    assert spec.checks["strict_quorum_step_budget"]["fragments"] == 4
+
+    run = f"/home/shou/runs/{run_id}"
+    completion = spec.execution["completion_paths"]
+    checksums = spec.execution["checksum_manifests"]
+    expected_learner_manifests = {
+        f"{run}/work/capture_m4_on/optimizer_state_capture_learner_{learner}/manifest.json"
+        for learner in range(4)
+    }
+    expected_learner_checksums = {
+        path + ".sha256" for path in expected_learner_manifests
+    }
+    assert {
+        path for path in completion if path.endswith("/manifest.json")
+    } == expected_learner_manifests
+    assert {
+        path for path in completion if path.endswith("/manifest.json.sha256")
+    } == expected_learner_checksums
+    assert {
+        path for path in checksums if path.endswith("/manifest.json.sha256")
+    } == expected_learner_checksums
+    assert {
+        path for path in completion if path.endswith("/syncer_probe/index.jsonl")
+    } == {
+        f"{run}/work/capture_m4_off/syncer_probe/index.jsonl",
+        f"{run}/work/capture_m4_on/syncer_probe/index.jsonl",
+    }
+    committed_boundaries = (
+        f"{run}/work/capture_m4_on/optimizer_state_capture_committed_boundaries.json"
+    )
+    assert committed_boundaries in completion
+    assert committed_boundaries + ".sha256" in completion
+    assert committed_boundaries + ".sha256" in checksums
+    assert not any("capture_m1_" in path for path in (*completion, *checksums))
+
+    class NoCloudCalls:
+        dry_run = False
+
+        def run(self, command, *, check=True):
+            raise AssertionError(f"unexpected cloud command: {command}")
+
+    with pytest.raises(HarnessError, match="adopt_only"):
+        launch(spec, NoCloudCalls(), tmp_path / "state", confirmed=True)
+
+
 def test_launch_verifies_boot_disk_image_provenance_before_recording_state(
     tmp_path, monkeypatch
 ):
