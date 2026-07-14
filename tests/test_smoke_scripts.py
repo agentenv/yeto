@@ -340,6 +340,7 @@ def test_pti_online_pair_commands_freeze_sgd028_and_fixed_h():
             deterministic_commit_order=True,
         )
         assert learner[learner.index("--fixed-window-microsteps") + 1] == expected_h
+        assert learner[learner.index("--max-reconnects") + 1] == "0"
         assert "--barrier-sync" in learner
         assert syncer[syncer.index("--outer-lr") + 1] == "0.28"
         assert syncer[syncer.index("--outer-momentum") + 1] == "0.0"

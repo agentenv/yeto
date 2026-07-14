@@ -183,6 +183,10 @@ class Arm:
     # CLI flag is only a campaign-level master switch, which lets a matched
     # capture-off/capture-on pair run under one immutable command line.
     optimizer_state_capture: bool = False
+    # Optional transport-attempt ceiling forwarded to every learner in this
+    # arm.  None preserves the historical retry behavior; 0 makes an
+    # evidence-critical matched run fail closed on the first disconnect.
+    max_reconnects: int | None = None
 
 
 PRESETS: dict[str, Arm] = {
@@ -314,6 +318,7 @@ PRESETS: dict[str, Arm] = {
         outer_lr=0.28,
         outer_momentum=0.0,
         outer_optimizer="nesterov",
+        max_reconnects=0,
     ),
     "pti_m1_candidate": Arm(
         "pti_m1_candidate",
@@ -329,6 +334,7 @@ PRESETS: dict[str, Arm] = {
         outer_lr=0.28,
         outer_momentum=0.0,
         outer_optimizer="pti-sgd",
+        max_reconnects=0,
     ),
     "pti_m4_stock": Arm(
         "pti_m4_stock",
@@ -344,6 +350,7 @@ PRESETS: dict[str, Arm] = {
         outer_lr=0.28,
         outer_momentum=0.0,
         outer_optimizer="nesterov",
+        max_reconnects=0,
     ),
     "pti_m4_candidate": Arm(
         "pti_m4_candidate",
@@ -359,6 +366,7 @@ PRESETS: dict[str, Arm] = {
         outer_lr=0.28,
         outer_momentum=0.0,
         outer_optimizer="pti-sgd",
+        max_reconnects=0,
     ),
     "m12": Arm("m12", m=12, fragments=12, quorum=6),
     "alpha0": Arm("alpha0", merge_alpha=0.0),
@@ -841,6 +849,8 @@ def learner_command(
             getattr(args, "optimizer_state_capture_parity", False)
             and arm.name in CAPTURE_PARITY_ARM_NAMES
         )
+        if arm.max_reconnects is not None:
+            cmd += ["--max-reconnects", str(arm.max_reconnects)]
         # The qualifier compares capture as the sole treatment.  Capture mode
         # itself must disable reconnects so every audited attempt has one
         # unambiguous transport identity; enforce that same policy on the OFF
