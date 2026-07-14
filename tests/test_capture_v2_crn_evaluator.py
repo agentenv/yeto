@@ -56,9 +56,11 @@ from yeto.capture_v2_store import (
 )
 from yeto.capture_v2_syncer import (
     BoundaryConfig,
+    FlatF32FragmentFormat,
     ResponderEndpointRef,
     SyncerBoundaryIdentity,
     SyncerBoundaryRef,
+    load_syncer_boundary,
     publish_syncer_boundary,
 )
 from yeto.capture_v2_tensor_pack import publish_tensor_pack
@@ -168,7 +170,10 @@ def _fixture(
             None if future_state == "complete" else "future group 7 is absent",
         ),
     )
-    post_fragment = _object(store, f"{suffix} post fragment".encode())
+    pre_raw = struct.pack("<2f", 1.0, -2.0)
+    stock_raw = struct.pack("<2f", 0.25, -0.5)
+    post_raw = struct.pack("<2f", 0.93, -1.86)
+    post_fragment = _object(store, post_raw)
     boundary = publish_syncer_boundary(
         store,
         f"{suffix}-boundary",
@@ -187,10 +192,12 @@ def _fixture(
                 payload=_object(store, f"{suffix} responder payload".encode()),
             )
         ],
-        pre_fragment=_object(store, f"{suffix} pre fragment".encode()),
+        fragment_format=FlatF32FragmentFormat(2, "f" * 64),
+        pre_fragment=_object(store, pre_raw),
+        stock_pseudo_gradient=_object(store, stock_raw),
         post_fragment=post_fragment,
         outer_state=_object(store, f"{suffix} outer state".encode()),
-        broadcast=_object(store, f"{suffix} broadcast".encode()),
+        broadcast=_object(store, post_raw),
         merge_config=BoundaryConfig("rda", {"weighted": True}),
         outer_config=BoundaryConfig(
             "nesterov",
@@ -212,7 +219,7 @@ def _fixture(
         config=config,
         capabilities=CAPABILITIES,
     )
-    stock = _object(store, f"{suffix} exact stock pseudo-gradient".encode())
+    stock = load_syncer_boundary(store, boundary).stock_pseudo_gradient
     candidate = _object(store, f"{suffix} candidate pseudo-gradient".encode())
     stock_result = post_fragment
     candidate_result = _object(store, f"{suffix} candidate resulting fragment".encode())

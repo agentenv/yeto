@@ -515,6 +515,10 @@ def publish_sealed_outer_action(
         raise PolicyContractError(f"policy is missing required capabilities: {missing}")
     _validate_required_capability_evidence(loaded_boundary, required)
     stock = _exact_ref(stock_pseudo_gradient, "stock_pseudo_gradient")
+    if stock != loaded_boundary.stock_pseudo_gradient:
+        raise PolicyContractError(
+            "action stock_pseudo_gradient must reference the exact boundary stock object"
+        )
     selected = _exact_ref(selected_pseudo_gradient, "selected_pseudo_gradient")
     result = _exact_ref(resulting_fragment, "resulting_fragment")
     decision = _exact_ref(decision, "decision")
@@ -634,6 +638,10 @@ def load_sealed_outer_action(
         STOCK_GRADIENT_ROLE,
         "stock pseudo-gradient",
     )
+    if stock != boundary.stock_pseudo_gradient:
+        raise PolicyContractError(
+            "action stock pseudo-gradient differs from exact boundary stock object"
+        )
     selected = _parse_object_descriptor(
         metadata["selected_pseudo_gradient"],
         SELECTED_GRADIENT_ROLE,

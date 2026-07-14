@@ -1,17 +1,18 @@
 """Strict capture-v2 syncer-boundary manifests and reconstruction contract.
 
 The schema binds one syncer fragment commit to verified learner endpoint
-manifests and exact opaque CAS objects.  Reconstruction remains caller-owned:
-this module supplies verified inputs to a callback and accepts its result only
-when the post-fragment and broadcast bytes match the captured objects exactly.
-It contains no merge or outer-optimizer implementation.
+manifests and exact CAS objects.  Reconstruction remains caller-owned; this
+module additionally verifies the captured memoryless f32 outer update before
+accepting callback outputs.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+import struct
 import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, Sequence
@@ -34,9 +35,10 @@ from .capture_v2_store import (
 
 
 SCHEMA = "yeto.capture-v2-syncer-boundary"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 PRE_FRAGMENT_ROLE = "syncer/pre-fragment"
+STOCK_PSEUDO_GRADIENT_ROLE = "syncer/stock-pseudo-gradient"
 POST_FRAGMENT_ROLE = "syncer/post-fragment"
 OUTER_STATE_ROLE = "syncer/outer-state"
 BROADCAST_ROLE = "syncer/broadcast"
@@ -62,6 +64,14 @@ class BoundaryConfig:
 
     name: str
     parameters: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class FlatF32FragmentFormat:
+    """Canonical coordinate layout for every fragment-shaped boundary object."""
+
+    fragment_numel: int
+    tensor_layout_sha256: str
 
 
 @dataclass(frozen=True)
@@ -113,7 +123,9 @@ class LoadedSyncerBoundary:
     responders: tuple[LoadedResponder, ...]
     merge_config: BoundaryConfig
     outer_config: BoundaryConfig
+    fragment_format: FlatF32FragmentFormat
     pre_fragment: ObjectRef
+    stock_pseudo_gradient: ObjectRef
     post_fragment: ObjectRef
     outer_state: ObjectRef
     broadcast: ObjectRef
@@ -127,7 +139,9 @@ class ReconstructionRequest:
     responders: tuple[LoadedResponder, ...]
     merge_config: BoundaryConfig
     outer_config: BoundaryConfig
+    fragment_format: FlatF32FragmentFormat
     pre_fragment: bytes
+    stock_pseudo_gradient: bytes
     outer_state: bytes
 
 
@@ -181,6 +195,55 @@ def _identifier(value: Any, context: str) -> str:
     if not isinstance(value, str) or _IDENTIFIER_RE.fullmatch(value) is None:
         raise SyncerBoundaryError(f"{context} is malformed")
     return value
+
+
+def _fragment_format_value(value: FlatF32FragmentFormat) -> dict[str, Any]:
+    if not isinstance(value, FlatF32FragmentFormat):
+        raise TypeError("fragment_format must be FlatF32FragmentFormat")
+    numel = _exact_nonnegative_int(value.fragment_numel, "fragment_numel")
+    if numel == 0:
+        raise SyncerBoundaryError("fragment_numel must be strictly positive")
+    return {
+        "encoding": "ieee754-f32le-flat",
+        "fragment_numel": numel,
+        "tensor_layout_sha256": _sha256(
+            value.tensor_layout_sha256, "tensor_layout_sha256"
+        ),
+    }
+
+
+def _parse_fragment_format(value: Any) -> FlatF32FragmentFormat:
+    if not isinstance(value, dict) or set(value) != {
+        "encoding",
+        "fragment_numel",
+        "tensor_layout_sha256",
+    }:
+        raise SyncerBoundaryError("fragment_format fields are malformed")
+    if value["encoding"] != "ieee754-f32le-flat":
+        raise SyncerBoundaryError("fragment_format encoding is noncanonical")
+    numel = _exact_nonnegative_int(value["fragment_numel"], "fragment_numel")
+    if numel == 0:
+        raise SyncerBoundaryError("fragment_numel must be strictly positive")
+    return FlatF32FragmentFormat(
+        fragment_numel=numel,
+        tensor_layout_sha256=_sha256(
+            value["tensor_layout_sha256"], "tensor_layout_sha256"
+        ),
+    )
+
+
+def _validate_fragment_object_lengths(
+    fragment_format: FlatF32FragmentFormat,
+    *refs: tuple[ObjectRef, str],
+) -> None:
+    expected_bytes = fragment_format.fragment_numel * 4
+    for ref, context in refs:
+        if not isinstance(ref, ObjectRef):
+            raise TypeError(f"{context} must be an ObjectRef")
+        if ref.bytes != expected_bytes:
+            raise SyncerBoundaryError(
+                f"{context} bytes must equal fragment_numel * 4 ({expected_bytes})"
+            )
 
 
 def _responder_payload_role(responder_index: int) -> str:
@@ -392,7 +455,9 @@ def publish_syncer_boundary(
     *,
     identity: SyncerBoundaryIdentity,
     responders: Sequence[ResponderEndpointRef],
+    fragment_format: FlatF32FragmentFormat,
     pre_fragment: ObjectRef,
+    stock_pseudo_gradient: ObjectRef,
     post_fragment: ObjectRef,
     outer_state: ObjectRef,
     broadcast: ObjectRef,
@@ -403,14 +468,16 @@ def publish_syncer_boundary(
 
     identity_data = _identity_value(identity)
     responder_rows, responder_payloads = _responder_rows(store, responders, identity)
-    for ref, context in (
+    fragment_format_data = _fragment_format_value(fragment_format)
+    _validate_fragment_object_lengths(
+        fragment_format,
         (pre_fragment, "pre_fragment"),
+        (stock_pseudo_gradient, "stock_pseudo_gradient"),
         (post_fragment, "post_fragment"),
-        (outer_state, "outer_state"),
         (broadcast, "broadcast"),
-    ):
-        if not isinstance(ref, ObjectRef):
-            raise TypeError(f"{context} must be an ObjectRef")
+    )
+    if not isinstance(outer_state, ObjectRef):
+        raise TypeError("outer_state must be an ObjectRef")
     metadata = {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
@@ -418,6 +485,7 @@ def publish_syncer_boundary(
         "responders": responder_rows,
         "merge_config": _config_value(merge_config, "merge_config"),
         "outer_config": _config_value(outer_config, "outer_config"),
+        "fragment_format": fragment_format_data,
         "broadcast": {
             "role": BROADCAST_ROLE,
             "sha256": broadcast.sha256,
@@ -428,6 +496,7 @@ def publish_syncer_boundary(
         manifest_id,
         [
             ManifestEntry(PRE_FRAGMENT_ROLE, pre_fragment),
+            ManifestEntry(STOCK_PSEUDO_GRADIENT_ROLE, stock_pseudo_gradient),
             ManifestEntry(POST_FRAGMENT_ROLE, post_fragment),
             ManifestEntry(OUTER_STATE_ROLE, outer_state),
             ManifestEntry(BROADCAST_ROLE, broadcast),
@@ -554,6 +623,7 @@ def _object_map(
     rows = manifest["objects"]
     expected_roles = [
         PRE_FRAGMENT_ROLE,
+        STOCK_PSEUDO_GRADIENT_ROLE,
         POST_FRAGMENT_ROLE,
         OUTER_STATE_ROLE,
         BROADCAST_ROLE,
@@ -583,6 +653,7 @@ def load_syncer_boundary(
         "responders",
         "merge_config",
         "outer_config",
+        "fragment_format",
         "broadcast",
     }
     if not isinstance(metadata, dict) or set(metadata) != expected_metadata_keys:
@@ -600,6 +671,14 @@ def load_syncer_boundary(
     responders = _parse_responder_rows(store, responder_value, identity, objects)
     merge_config = _parse_config(metadata["merge_config"], "merge_config")
     outer_config = _parse_config(metadata["outer_config"], "outer_config")
+    fragment_format = _parse_fragment_format(metadata["fragment_format"])
+    _validate_fragment_object_lengths(
+        fragment_format,
+        (objects[PRE_FRAGMENT_ROLE], "pre_fragment"),
+        (objects[STOCK_PSEUDO_GRADIENT_ROLE], "stock_pseudo_gradient"),
+        (objects[POST_FRAGMENT_ROLE], "post_fragment"),
+        (objects[BROADCAST_ROLE], "broadcast"),
+    )
 
     broadcast_metadata = metadata["broadcast"]
     if not isinstance(broadcast_metadata, dict) or set(broadcast_metadata) != {
@@ -637,7 +716,9 @@ def load_syncer_boundary(
         responders=responders,
         merge_config=merge_config,
         outer_config=outer_config,
+        fragment_format=fragment_format,
         pre_fragment=objects[PRE_FRAGMENT_ROLE],
+        stock_pseudo_gradient=objects[STOCK_PSEUDO_GRADIENT_ROLE],
         post_fragment=objects[POST_FRAGMENT_ROLE],
         outer_state=objects[OUTER_STATE_ROLE],
         broadcast=objects[BROADCAST_ROLE],
@@ -657,6 +738,59 @@ def _read_exact_object(
     if len(raw) != ref.bytes or hashlib.sha256(raw).hexdigest() != ref.sha256:
         raise SyncerBoundaryError(f"{context} object changed after verification")
     return raw
+
+
+def memoryless_outer_update_f32le(
+    pre_fragment: bytes, stock_pseudo_gradient: bytes, lr_f64_bits: str
+) -> bytes:
+    """Reproduce the syncer's coordinate-order f32 memoryless outer update."""
+
+    if type(pre_fragment) is not bytes or type(stock_pseudo_gradient) is not bytes:
+        raise TypeError("memoryless outer update inputs must have exact type bytes")
+    if len(pre_fragment) != len(stock_pseudo_gradient) or len(pre_fragment) % 4:
+        raise SyncerBoundaryError(
+            "memoryless outer update requires equal whole-f32 input lengths"
+        )
+    bits = _f64_bits(lr_f64_bits, "outer lr_f64_bits")
+    lr64 = struct.unpack(">d", bytes.fromhex(bits))[0]
+    if not math.isfinite(lr64) or lr64 <= 0.0:
+        raise SyncerBoundaryError("outer lr_f64_bits must decode to finite positive f64")
+    try:
+        lr32 = struct.unpack("<f", struct.pack("<f", lr64))[0]
+        pre = struct.unpack(f"<{len(pre_fragment) // 4}f", pre_fragment)
+        stock = struct.unpack(
+            f"<{len(stock_pseudo_gradient) // 4}f", stock_pseudo_gradient
+        )
+        if not all(math.isfinite(value) for value in (*pre, *stock)):
+            raise SyncerBoundaryError(
+                "memoryless outer update inputs must contain finite f32 values"
+            )
+        result = []
+        for parameter, direction in zip(pre, stock, strict=True):
+            product = struct.unpack("<f", struct.pack("<f", lr32 * direction))[0]
+            updated = struct.unpack("<f", struct.pack("<f", parameter - product))[0]
+            result.append(updated)
+        return struct.pack(f"<{len(result)}f", *result)
+    except (OverflowError, struct.error) as exc:
+        raise SyncerBoundaryError(
+            "memoryless outer update contains invalid or non-finite f32 arithmetic"
+        ) from exc
+
+
+def _outer_lr_bits(config: BoundaryConfig) -> str:
+    if config.name != "nesterov" or not isinstance(config.parameters, dict):
+        raise ReconstructionMismatchError(
+            "factual memoryless update requires nesterov outer_config"
+        )
+    if set(config.parameters) != {"lr_f64_bits", "momentum_f64_bits"}:
+        raise ReconstructionMismatchError(
+            "factual memoryless update requires exact nesterov config fields"
+        )
+    if config.parameters["momentum_f64_bits"] != "0000000000000000":
+        raise ReconstructionMismatchError(
+            "factual memoryless update requires exact positive-zero momentum"
+        )
+    return _f64_bits(config.parameters["lr_f64_bits"], "outer lr_f64_bits")
 
 
 def verify_reconstruction(
@@ -681,9 +815,28 @@ def verify_reconstruction(
         responders=loaded.responders,
         merge_config=loaded.merge_config,
         outer_config=loaded.outer_config,
+        fragment_format=loaded.fragment_format,
         pre_fragment=_read_exact_object(store, loaded.pre_fragment, "pre-fragment"),
+        stock_pseudo_gradient=_read_exact_object(
+            store, loaded.stock_pseudo_gradient, "stock-pseudo-gradient"
+        ),
         outer_state=_read_exact_object(store, loaded.outer_state, "outer-state"),
     )
+    expected_post = _read_exact_object(store, loaded.post_fragment, "post-fragment")
+    expected_broadcast = _read_exact_object(store, loaded.broadcast, "broadcast")
+    factual_post = memoryless_outer_update_f32le(
+        request.pre_fragment,
+        request.stock_pseudo_gradient,
+        _outer_lr_bits(loaded.outer_config),
+    )
+    if factual_post != expected_post:
+        raise ReconstructionMismatchError(
+            "captured post-fragment does not reproduce the factual memoryless outer update"
+        )
+    if expected_broadcast != expected_post:
+        raise ReconstructionMismatchError(
+            "captured broadcast differs from the factual memoryless post-fragment"
+        )
     result = callback(request)
     if not isinstance(result, ReconstructionOutput):
         raise ReconstructionMismatchError(
@@ -694,8 +847,6 @@ def verify_reconstruction(
     ):
         raise ReconstructionMismatchError("reconstruction outputs must be exact bytes")
 
-    expected_post = _read_exact_object(store, loaded.post_fragment, "post-fragment")
-    expected_broadcast = _read_exact_object(store, loaded.broadcast, "broadcast")
     if result.post_fragment != expected_post:
         raise ReconstructionMismatchError(
             "reconstruction post-fragment bytes do not match the captured object"

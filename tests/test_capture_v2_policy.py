@@ -32,6 +32,7 @@ from yeto.capture_v2_store import (
 )
 from yeto.capture_v2_syncer import (
     BoundaryConfig,
+    FlatF32FragmentFormat,
     ResponderEndpointRef,
     SyncerBoundaryIdentity,
     load_syncer_boundary,
@@ -132,10 +133,14 @@ def _boundary(
         complete_future_groups=complete_future_groups,
         cuda_rng_count=cuda_rng_count,
     )
-    pre = _object(store, b"pre fragment")
+    pre_raw = struct.pack("<2f", 1.0, -2.0)
+    stock_raw = struct.pack("<2f", 0.25, -0.5)
+    pre = _object(store, pre_raw)
+    stock = _object(store, stock_raw)
     outer = _object(store, b"outer state")
-    post = _object(store, b"post fragment")
-    broadcast = _object(store, b"broadcast fragment")
+    post_raw = struct.pack("<2f", 0.93, -1.86)
+    post = _object(store, post_raw)
+    broadcast = _object(store, post_raw)
     responder = ResponderEndpointRef(
         endpoint=endpoint,
         weight_f64_bits=(
@@ -157,7 +162,9 @@ def _boundary(
             post_fragment_version=8,
         ),
         responders=[responder],
+        fragment_format=FlatF32FragmentFormat(2, "f" * 64),
         pre_fragment=pre,
+        stock_pseudo_gradient=stock,
         post_fragment=post,
         outer_state=outer,
         broadcast=broadcast,
@@ -201,7 +208,7 @@ def _action_arguments(
 ):
     boundary = _boundary(store, **(boundary_kwargs or {}))
     policy, _source, config = _policy(store, capabilities)
-    stock = _object(store, b"stock pseudo-gradient")
+    stock = load_syncer_boundary(store, boundary).stock_pseudo_gradient
     selected = _object(store, b"selected nonstock pseudo-gradient")
     result = _object(store, b"resulting fragment")
     return {
@@ -558,6 +565,15 @@ def test_stock_fallback_rejects_unrelated_resulting_fragment(tmp_path):
         publish_sealed_outer_action(store, "unrelated-stock-result", **arguments)
 
 
+def test_action_rejects_stock_object_not_owned_by_boundary(tmp_path):
+    store = CaptureObjectStore(tmp_path / "cas")
+    arguments = _action_arguments(store)
+    arguments["stock_pseudo_gradient"] = _object(store, b"caller relabeled stock")
+
+    with pytest.raises(PolicyContractError, match="exact boundary stock object"):
+        publish_sealed_outer_action(store, "relabeled-stock", **arguments)
+
+
 def test_nonstock_result_derivation_remains_policy_owned_and_identity_bound(tmp_path):
     """V1 binds candidate bytes but cannot prove policy-owned optimizer math."""
 
@@ -652,7 +668,7 @@ def test_sealed_action_load_rejects_resealed_negative_zero_boundary_weight(tmp_p
         ("crn-incomplete", "complete canonical future groups 0..7"),
         ("selected-cross-wire", "must differ from the stock"),
         ("stock-result-not-boundary", "exact boundary post_fragment"),
-        ("stock-cross-wire", "metadata/object cross-reference mismatch"),
+        ("stock-cross-wire", "differs from exact boundary stock object"),
         ("decision-object-cross-wire", "metadata/object cross-reference mismatch"),
         ("decision-digest-mismatch", "differs from decision object"),
         ("decision-sha", "lowercase SHA-256"),

@@ -22,12 +22,14 @@ from yeto.capture_v2_store import (
 )
 from yeto.capture_v2_syncer import (
     BoundaryConfig,
+    FlatF32FragmentFormat,
     ReconstructionMismatchError,
     ReconstructionOutput,
     ResponderEndpointRef,
     SyncerBoundaryError,
     SyncerBoundaryIdentity,
     load_syncer_boundary,
+    memoryless_outer_update_f32le,
     publish_syncer_boundary,
     verify_reconstruction,
 )
@@ -122,10 +124,11 @@ def _boundary_arguments(store: CaptureObjectStore):
     endpoints = {
         learner_id: _learner_endpoint(store, learner_id) for learner_id in range(3)
     }
-    pre = b"pre-fragment exact bytes"
+    pre = struct.pack("<4f", 1.0, -2.0, 3.0, -4.0)
+    stock = struct.pack("<4f", 0.25, -0.5, 1.25, -1.5)
     outer = b"outer-state exact bytes"
-    post = pre + b"|merged-with|" + outer
-    broadcast = b"broadcast:" + post
+    post = memoryless_outer_update_f32le(pre, stock, struct.pack(">d", 0.28).hex())
+    broadcast = post
     return {
         "identity": SyncerBoundaryIdentity(
             capture_session_uuid=SESSION,
@@ -140,7 +143,9 @@ def _boundary_arguments(store: CaptureObjectStore):
             _responder(store, endpoints[0], 0),
             _responder(store, endpoints[1], 1),
         ],
+        "fragment_format": FlatF32FragmentFormat(4, "e" * 64),
         "pre_fragment": _object(store, pre),
+        "stock_pseudo_gradient": _object(store, stock),
         "post_fragment": _object(store, post),
         "outer_state": _object(store, outer),
         "broadcast": _object(store, broadcast),
@@ -153,11 +158,17 @@ def _boundary_arguments(store: CaptureObjectStore):
             OrderedDict(
                 [
                     ("lr_f64_bits", struct.pack(">d", 0.28).hex()),
-                    ("momentum_f64_bits", struct.pack(">d", 0.9).hex()),
+                    ("momentum_f64_bits", "0000000000000000"),
                 ]
             ),
         ),
-        "_raw": {"pre": pre, "outer": outer, "post": post, "broadcast": broadcast},
+        "_raw": {
+            "pre": pre,
+            "stock": stock,
+            "outer": outer,
+            "post": post,
+            "broadcast": broadcast,
+        },
         "_endpoints": endpoints,
     }
 
@@ -232,6 +243,7 @@ def test_boundary_is_canonical_deterministic_and_cross_wires_endpoints(tmp_path)
     manifest = store.load_manifest(first.manifest)
     assert [row["role"] for row in manifest["objects"]] == [
         "syncer/pre-fragment",
+        "syncer/stock-pseudo-gradient",
         "syncer/post-fragment",
         "syncer/outer-state",
         "syncer/broadcast",
@@ -267,8 +279,12 @@ def test_opaque_reconstruction_callback_must_reproduce_both_exact_outputs(tmp_pa
 
     def reconstruct(request):
         seen["request"] = request
-        post = request.pre_fragment + b"|merged-with|" + request.outer_state
-        return ReconstructionOutput(post, b"broadcast:" + post)
+        post = memoryless_outer_update_f32le(
+            request.pre_fragment,
+            request.stock_pseudo_gradient,
+            request.outer_config.parameters["lr_f64_bits"],
+        )
+        return ReconstructionOutput(post, post)
 
     result = verify_reconstruction(store, boundary, reconstruct)
     assert result == ReconstructionOutput(
@@ -278,6 +294,7 @@ def test_opaque_reconstruction_callback_must_reproduce_both_exact_outputs(tmp_pa
     assert request.identity.fragment_id == FRAGMENT_ID
     assert [row.endpoint.identity.learner_id for row in request.responders] == [0, 1, 2]
     assert request.pre_fragment == internal["_raw"]["pre"]
+    assert request.stock_pseudo_gradient == internal["_raw"]["stock"]
     assert request.outer_state == internal["_raw"]["outer"]
 
 
@@ -296,8 +313,12 @@ def test_reconstruction_reloads_authority_after_config_and_responder_mutation(tm
 
     def reconstruct(request):
         seen["request"] = request
-        post = request.pre_fragment + b"|merged-with|" + request.outer_state
-        return ReconstructionOutput(post, b"broadcast:" + post)
+        post = memoryless_outer_update_f32le(
+            request.pre_fragment,
+            request.stock_pseudo_gradient,
+            request.outer_config.parameters["lr_f64_bits"],
+        )
+        return ReconstructionOutput(post, post)
 
     result = verify_reconstruction(store, loaded, reconstruct)
 
