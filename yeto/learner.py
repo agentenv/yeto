@@ -766,11 +766,33 @@ def make_fixed_window_snapshot(
     local_step: int,
     base_version: int,
     window_uuid: str | None,
+    owned_endpoint_flat: torch.Tensor | None = None,
 ) -> dict:
-    """Freeze one immutable response endpoint and its capture lifecycle ID."""
+    """Freeze one immutable response endpoint and its capture lifecycle ID.
+
+    ``owned_endpoint_flat`` is an optional already-frozen CPU snapshot whose
+    ownership moves into the returned response.  Optimizer-state capture uses
+    it to avoid reading the same live CUDA parameters twice at the H boundary.
+    """
+
+    if owned_endpoint_flat is None:
+        flat = fragment_flat(fragment, params).detach().cpu()
+    else:
+        if (
+            owned_endpoint_flat.device.type != "cpu"
+            or owned_endpoint_flat.dtype != torch.float32
+            or owned_endpoint_flat.requires_grad
+            or not owned_endpoint_flat.is_contiguous()
+            or owned_endpoint_flat.numel() != fragment.numel
+        ):
+            raise ValueError(
+                "owned fixed-window endpoint must be detached contiguous CPU f32 "
+                f"with {fragment.numel} values"
+            )
+        flat = owned_endpoint_flat
 
     return {
-        "flat": fragment_flat(fragment, params).detach().cpu(),
+        "flat": flat,
         "anchor": anchor.clone() if anchor is not None else None,
         "c_steps": int(c_steps),
         "c_tokens": int(c_tokens),
@@ -1968,11 +1990,13 @@ def run_inner_loop(
             opt.zero_grad(set_to_none=True)
             steps_total += 1
             tokens_total += tokens_per_inner_step
+            capture_completed_endpoints = {}
             if state_capture is not None:
-                state_capture.after_optimizer_step(
+                capture_completed_endpoints = state_capture.after_optimizer_step(
                     local_step=steps_total,
                     tokens_total=tokens_total,
                     current_window_steps=fixed_window_steps,
+                    retain_completed_endpoints=fixed_window_snapshots is not None,
                 )
             step_jitter_ms = (
                 args.debug_delay_jitter_ms if args.debug_step_sleep_ms > 0.0 else 0.0
@@ -1998,6 +2022,9 @@ def run_inner_loop(
                             capture_window_uuids[snap_fid]
                             if capture_window_uuids is not None
                             else None
+                        ),
+                        owned_endpoint_flat=capture_completed_endpoints.pop(
+                            snap_fid, None
                         ),
                     )
 

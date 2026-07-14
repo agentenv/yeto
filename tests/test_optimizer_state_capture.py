@@ -321,6 +321,8 @@ def test_fragment_snapshot_flattens_directly_without_alias_or_deferred_reads(tmp
     assert pipeline["producer_snapshot_bytes_total"] == 14 * 4
     assert pipeline["producer_snapshot_tensors_total"] == 2
     assert pipeline["producer_snapshot_cuda_calls"] == 0
+    assert pipeline["producer_snapshot_cuda_coalesced_calls"] == 0
+    assert pipeline["producer_snapshot_cuda_coalesced_bytes_total"] == 0
     capture.close()
 
 
@@ -335,6 +337,57 @@ def test_fragment_snapshot_rejects_layout_numel_drift(tmp_path):
         capture._fragment_state(0)
     # Restore the fixture's layout so close can emit a valid terminal manifest.
     layout.fragments[0].tensors[0] = ("a", 2)
+    capture.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_cuda_fragment_snapshot_uses_one_coalesced_blocking_transfer(tmp_path):
+    device = torch.device("cuda", torch.cuda.current_device())
+    params = OrderedDict(
+        [
+            (
+                "a",
+                torch.nn.Parameter(
+                    torch.arange(12, device=device, dtype=torch.float32)
+                    .reshape(3, 4)
+                    .t()
+                ),
+            ),
+            (
+                "b",
+                torch.nn.Parameter(
+                    torch.tensor([-3.0, 8.0], device=device, dtype=torch.float32)
+                ),
+            ),
+        ]
+    )
+    layout = FragmentLayout([Fragment(MERGE_RDA, [("a", 12), ("b", 2)])])
+    optimizer = torch.optim.AdamW(params.values(), lr=0.1)
+    capture = OptimizerStateCapture(
+        tmp_path,
+        params=params,
+        layout=layout,
+        optimizer=optimizer,
+        learner_id=0,
+        rank=0,
+        capture_profile=CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL,
+        max_hmc_events=0,
+    )
+    expected = torch.cat([params["a"].detach().reshape(-1), params["b"].detach()]).cpu()
+
+    snapshot = capture._fragment_state(0)
+    with torch.no_grad():
+        params["a"].fill_(99.0)
+        params["b"].fill_(-99.0)
+
+    assert snapshot.device.type == "cpu"
+    assert snapshot.is_contiguous()
+    assert torch.equal(snapshot, expected)
+    pipeline = capture._background_pipeline_stats
+    assert pipeline["producer_snapshot_calls"] == 1
+    assert pipeline["producer_snapshot_cuda_calls"] == 1
+    assert pipeline["producer_snapshot_cuda_coalesced_calls"] == 1
+    assert pipeline["producer_snapshot_cuda_coalesced_bytes_total"] == 14 * 4
     capture.close()
 
 
@@ -1160,6 +1213,243 @@ def test_fixed_window_snapshot_carries_immutable_uuid_and_endpoint_copy():
     assert torch.equal(snapshot["anchor"], torch.tensor([9.0, 8.0]))
     assert snapshot["c_steps"] == 4
     assert snapshot["c_tokens"] == 512
+
+
+def test_fixed_window_snapshot_accepts_transferred_capture_endpoint_without_live_read():
+    from yeto.learner import make_fixed_window_snapshot
+
+    params = {"p": torch.nn.Parameter(torch.tensor([100.0, 200.0]))}
+    fragment = Fragment(MERGE_RDA, [("p", 2)])
+    captured = torch.tensor([1.0, 2.0])
+    snapshot = make_fixed_window_snapshot(
+        fragment,
+        params,
+        anchor=None,
+        c_steps=4,
+        c_tokens=512,
+        local_step=12,
+        base_version=7,
+        window_uuid="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        owned_endpoint_flat=captured,
+    )
+    assert snapshot["flat"] is captured
+    assert torch.equal(snapshot["flat"], torch.tensor([1.0, 2.0]))
+
+    with pytest.raises(ValueError, match="detached contiguous CPU f32"):
+        make_fixed_window_snapshot(
+            fragment,
+            params,
+            anchor=None,
+            c_steps=4,
+            c_tokens=512,
+            local_step=12,
+            base_version=7,
+            window_uuid=None,
+            owned_endpoint_flat=torch.tensor([1.0, 2.0], dtype=torch.float64),
+        )
+
+
+def test_retained_endpoint_does_not_alias_background_worker_payload(
+    tmp_path, monkeypatch
+):
+    entered = threading.Event()
+    release = threading.Event()
+    original_publish = OptimizerStateCapture._publish_background_item
+
+    def blocked_publish(self, item):
+        entered.set()
+        assert release.wait(3.0)
+        return original_publish(self, item)
+
+    monkeypatch.setattr(
+        OptimizerStateCapture, "_publish_background_item", blocked_publish
+    )
+    params, _layout, _optimizer, capture = _fixture(
+        tmp_path,
+        max_hmc=0,
+        capture_profile=CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL,
+        background_writer=True,
+    )
+    capture.note_broadcast(0, 17, local_step=30, tokens_total=3_000, window_steps=2)
+    for local_step in (31, 32):
+        capture.capture_first_post_broadcast_gradients(
+            local_step_before_update=local_step - 1,
+            tokens_total=3_000 + (local_step - 31) * 128,
+        )
+        with torch.no_grad():
+            params["a"].add_(1.0)
+            params["b"].sub_(2.0)
+        retained = capture.after_optimizer_step(
+            local_step=local_step,
+            tokens_total=3_000 + (local_step - 30) * 128,
+            current_window_steps=2,
+            retain_completed_endpoints=True,
+        )
+
+    assert entered.wait(3.0)
+    expected = torch.cat([params["a"].detach(), params["b"].detach()])
+    assert torch.equal(retained[0], expected)
+    pipeline = capture._background_pipeline_stats
+    assert pipeline["producer_endpoint_identity_hash_calls"] == 1
+    assert pipeline["producer_endpoint_identity_hash_ns_total"] > 0
+    assert pipeline["producer_endpoint_identity_hash_bytes_total"] == 3 * 4
+    assert pipeline["producer_retained_endpoint_clone_calls"] == 1
+    assert pipeline["producer_retained_endpoint_clone_ns_total"] > 0
+    assert pipeline["producer_retained_endpoint_clone_bytes_total"] == 3 * 4
+    retained[0].fill_(999.0)
+    release.set()
+    capture.close()
+
+    record = _artifact(tmp_path, "richardson_window")
+    assert torch.equal(record["payload"]["endpoint"]["parameters_f32"], expected)
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert (
+        manifest["background_pipeline"]["producer_retained_endpoint_clone_calls"] == 1
+    )
+
+
+def test_retained_endpoint_and_artifact_snapshot_are_distinct_owned_tensors(
+    tmp_path, monkeypatch
+):
+    params, _layout, _optimizer, capture = _fixture(
+        tmp_path,
+        max_hmc=0,
+        capture_profile=CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL,
+    )
+    artifact_endpoint = {}
+
+    def hold_artifact(_kind, _metadata, payload):
+        artifact_endpoint["flat"] = payload["endpoint"]["parameters_f32"]
+        return True
+
+    monkeypatch.setattr(capture, "_write_artifact", hold_artifact)
+    capture.note_broadcast(0, 17, local_step=30, tokens_total=3_000, window_steps=2)
+    for local_step in (31, 32):
+        capture.capture_first_post_broadcast_gradients(
+            local_step_before_update=local_step - 1,
+            tokens_total=3_000 + (local_step - 31) * 128,
+        )
+        with torch.no_grad():
+            params["a"].add_(1.0)
+            params["b"].sub_(2.0)
+        retained = capture.after_optimizer_step(
+            local_step=local_step,
+            tokens_total=3_000 + (local_step - 30) * 128,
+            current_window_steps=2,
+            retain_completed_endpoints=True,
+        )
+
+    response_flat = retained[0]
+    worker_flat = artifact_endpoint["flat"]
+    expected = worker_flat.clone()
+    assert response_flat.data_ptr() != worker_flat.data_ptr()
+    assert torch.equal(response_flat, worker_flat)
+
+    response_flat.add_(100.0)
+    assert torch.equal(worker_flat, expected)
+    worker_flat.sub_(50.0)
+    assert torch.equal(response_flat, expected + 100.0)
+    capture.close()
+
+
+@pytest.mark.parametrize(
+    ("capture_profile", "max_hmc"),
+    [("full", 8), (CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL, 0)],
+)
+def test_reused_endpoint_preserves_sync_async_payload_and_retry_join(
+    tmp_path, capture_profile, max_hmc
+):
+    outcomes = {}
+    for mode in ("synchronous", "background"):
+        directory = tmp_path / mode
+        params, _layout, _optimizer, capture = _fixture(
+            directory,
+            max_hmc=max_hmc,
+            capture_profile=capture_profile,
+            background_writer=mode == "background",
+        )
+        window_uuid = capture.note_broadcast(
+            0, 17, local_step=30, tokens_total=3_000, window_steps=2
+        )
+        for local_step in (31, 32):
+            capture.capture_first_post_broadcast_gradients(
+                local_step_before_update=local_step - 1,
+                tokens_total=3_000 + (local_step - 31) * 128,
+            )
+            with torch.no_grad():
+                params["a"].add_(1.0)
+                params["b"].sub_(2.0)
+            retained = capture.after_optimizer_step(
+                local_step=local_step,
+                tokens_total=3_000 + (local_step - 30) * 128,
+                current_window_steps=2,
+                retain_completed_endpoints=True,
+            )
+        endpoint = retained[0]
+        frozen_endpoint = endpoint.clone()
+        # The learner may continue after freezing H. The joined push must use
+        # the retained response, never a fresh read of these changed params.
+        with torch.no_grad():
+            for param in params.values():
+                param.add_(1_000.0)
+        payload = pack_flat(endpoint, DTYPE_F32)
+        first = capture.note_push(
+            window_uuid=window_uuid,
+            fragment_id=0,
+            pull_global_step=44,
+            base_version=17,
+            local_step=32,
+            c_steps=2,
+            c_tokens=256,
+            wire_codec="f32",
+            payload=payload,
+        )
+        retry = capture.note_push(
+            window_uuid=window_uuid,
+            fragment_id=0,
+            pull_global_step=44,
+            base_version=17,
+            local_step=32,
+            c_steps=2,
+            c_tokens=256,
+            wire_codec="f32",
+            payload=payload,
+        )
+        assert first["retry_identity"] == retry["retry_identity"]
+        assert (first["retry_ordinal"], retry["retry_ordinal"]) == (1, 2)
+        capture.note_push_enqueued(retry["attempt_serial"])
+        capture.close()
+
+        window = _artifact(directory, "richardson_window")
+        manifest = json.loads((directory / "manifest.json").read_text())
+        assert torch.equal(
+            window["payload"]["endpoint"]["parameters_f32"], frozen_endpoint
+        )
+        assert retry["payload_sha256"] == capture_module._f32_wire_sha256(
+            frozen_endpoint
+        )
+        lifecycle = manifest["window_lifecycles"][0]
+        assert lifecycle["status"] == "pushed"
+        assert lifecycle["push_attempts"] == 2
+        assert lifecycle["enqueued_pushes"] == 1
+        assert (
+            manifest["push_attempts"][str(first["attempt_serial"])]["enqueued"] is False
+        )
+        assert (
+            manifest["push_attempts"][str(retry["attempt_serial"])]["enqueued"] is True
+        )
+        outcomes[mode] = {
+            "payload_sha256": window["payload_sha256"],
+            "endpoint": window["payload"]["endpoint"]["parameters_f32"],
+        }
+
+    assert (
+        outcomes["background"]["payload_sha256"]
+        == outcomes["synchronous"]["payload_sha256"]
+    )
+    assert torch.equal(
+        outcomes["background"]["endpoint"], outcomes["synchronous"]["endpoint"]
+    )
 
 
 def test_candidate_identity_encodes_exactly_into_audited_wire_header(tmp_path):

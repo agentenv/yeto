@@ -479,6 +479,16 @@ class OptimizerStateCapture:
             "producer_snapshot_bytes_total": 0,
             "producer_snapshot_tensors_total": 0,
             "producer_snapshot_cuda_calls": 0,
+            "producer_snapshot_cuda_coalesced_calls": 0,
+            "producer_snapshot_cuda_coalesced_bytes_total": 0,
+            "producer_endpoint_identity_hash_calls": 0,
+            "producer_endpoint_identity_hash_ns_total": 0,
+            "producer_endpoint_identity_hash_ns_max": 0,
+            "producer_endpoint_identity_hash_bytes_total": 0,
+            "producer_retained_endpoint_clone_calls": 0,
+            "producer_retained_endpoint_clone_ns_total": 0,
+            "producer_retained_endpoint_clone_ns_max": 0,
+            "producer_retained_endpoint_clone_bytes_total": 0,
             "producer_handoffs": 0,
             "producer_freeze_ns_total": 0,
             "producer_freeze_ns_max": 0,
@@ -651,9 +661,7 @@ class OptimizerStateCapture:
 
         fragment = self.layout.fragments[fragment_id]
         started_ns = time.monotonic_ns()
-        flat = torch.empty(fragment.numel, device="cpu", dtype=torch.float32)
-        offset = 0
-        cuda_source = False
+        sources: list[tuple[torch.Tensor, int]] = []
         for name, expected_numel in fragment.tensors:
             source = self.params[name].detach()
             if source.dtype != torch.float32:
@@ -663,16 +671,35 @@ class OptimizerStateCapture:
                     f"capture parameter {name!r} has {source.numel()} values; "
                     f"layout declares {expected_numel}"
                 )
-            # non_blocking=False is intentional. The returned CPU tensor is a
-            # complete factual boundary snapshot, never an in-flight view of
-            # live CUDA state handed to another thread.
-            flat.narrow(0, offset, expected_numel).copy_(
-                source.reshape(-1), non_blocking=False
+            sources.append((source, expected_numel))
+
+        devices = {source.device for source, _ in sources}
+        coalesced_cuda = len(devices) == 1 and next(iter(devices)).type == "cuda"
+        if coalesced_cuda:
+            # Concatenation and the blocking D2H copy are ordered on the
+            # current stream. This changes no bits (all sources are f32), but
+            # replaces one synchronizing D2H operation per parameter with one
+            # fragment-sized transfer. The host cannot observe/hand off
+            # ``flat`` until the transfer has completed.
+            device_flat = torch.cat(
+                [source.reshape(-1) for source, _ in sources], dim=0
             )
-            offset += expected_numel
-            cuda_source = cuda_source or source.device.type == "cuda"
-        if offset != flat.numel():
-            raise AssertionError("fragment snapshot did not fill its CPU buffer")
+            flat = device_flat.to(
+                device="cpu", dtype=torch.float32, copy=True, non_blocking=False
+            )
+        else:
+            flat = torch.empty(fragment.numel, device="cpu", dtype=torch.float32)
+            offset = 0
+            for source, expected_numel in sources:
+                # non_blocking=False is intentional. The returned CPU tensor
+                # is a complete factual boundary snapshot, never an in-flight
+                # view of live state handed to another thread.
+                flat.narrow(0, offset, expected_numel).copy_(
+                    source.reshape(-1), non_blocking=False
+                )
+                offset += expected_numel
+            if offset != flat.numel():
+                raise AssertionError("fragment snapshot did not fill its CPU buffer")
         elapsed_ns = time.monotonic_ns() - started_ns
         stats = self._background_pipeline_stats
         stats["producer_snapshot_calls"] += 1
@@ -682,7 +709,13 @@ class OptimizerStateCapture:
         )
         stats["producer_snapshot_bytes_total"] += flat.numel() * flat.element_size()
         stats["producer_snapshot_tensors_total"] += len(fragment.tensors)
-        stats["producer_snapshot_cuda_calls"] += int(cuda_source)
+        stats["producer_snapshot_cuda_calls"] += int(
+            any(source.device.type == "cuda" for source, _ in sources)
+        )
+        stats["producer_snapshot_cuda_coalesced_calls"] += int(coalesced_cuda)
+        stats["producer_snapshot_cuda_coalesced_bytes_total"] += int(coalesced_cuda) * (
+            flat.numel() * flat.element_size()
+        )
         return flat
 
     def _fragment_optimizer_state(self, fragment_id: int) -> dict[str, Any]:
@@ -1056,12 +1089,21 @@ class OptimizerStateCapture:
         local_step: int,
         tokens_total: int,
         current_window_steps: int,
-    ) -> None:
-        """Capture exact H/2 and H states before the step-boundary sync."""
+        retain_completed_endpoints: bool = False,
+    ) -> dict[int, torch.Tensor]:
+        """Capture exact H/2 and H states before the step-boundary sync.
+
+        When ``retain_completed_endpoints`` is true, each completed endpoint
+        is copied once on CPU before the artifact snapshot is transferred to
+        the background worker.  The returned mapping can therefore seed the
+        learner's immutable fixed-window response without a second read of
+        live CUDA parameters and without sharing the worker-owned tensor.
+        """
 
         self._observe_background_writer()
         if self._closed:
             raise RuntimeError("capture is closed")
+        completed_endpoints: dict[int, torch.Tensor] = {}
         for fragment_id in list(self._pending_midpoint):
             pending = self._pending_midpoint[fragment_id]
             if pending["window_steps"] != current_window_steps:
@@ -1145,6 +1187,36 @@ class OptimizerStateCapture:
                             ],
                         }
                     )
+                endpoint_flat = endpoint["parameters_f32"]
+                identity_started_ns = time.monotonic_ns()
+                expected_f32_payload_sha256 = _f32_wire_sha256(endpoint_flat)
+                identity_elapsed_ns = time.monotonic_ns() - identity_started_ns
+                stats = self._background_pipeline_stats
+                stats["producer_endpoint_identity_hash_calls"] += 1
+                stats["producer_endpoint_identity_hash_ns_total"] += identity_elapsed_ns
+                stats["producer_endpoint_identity_hash_ns_max"] = max(
+                    stats["producer_endpoint_identity_hash_ns_max"],
+                    identity_elapsed_ns,
+                )
+                endpoint_bytes = endpoint_flat.numel() * endpoint_flat.element_size()
+                stats["producer_endpoint_identity_hash_bytes_total"] += endpoint_bytes
+                if retain_completed_endpoints:
+                    # This clone remains producer-owned. The original endpoint
+                    # below is transferred exclusively to artifact publication.
+                    clone_started_ns = time.monotonic_ns()
+                    completed_endpoints[fragment_id] = endpoint_flat.clone()
+                    clone_elapsed_ns = time.monotonic_ns() - clone_started_ns
+                    stats["producer_retained_endpoint_clone_calls"] += 1
+                    stats["producer_retained_endpoint_clone_ns_total"] += (
+                        clone_elapsed_ns
+                    )
+                    stats["producer_retained_endpoint_clone_ns_max"] = max(
+                        stats["producer_retained_endpoint_clone_ns_max"],
+                        clone_elapsed_ns,
+                    )
+                    stats["producer_retained_endpoint_clone_bytes_total"] += (
+                        endpoint_bytes
+                    )
                 wrote = self._write_artifact("richardson_window", metadata, payload)
                 lifecycle = self._window_lifecycles[pending["identity"]["window_uuid"]]
                 lifecycle.update(
@@ -1156,14 +1228,13 @@ class OptimizerStateCapture:
                         "c_tokens": int(
                             tokens_total - pending["identity"]["reset_tokens"]
                         ),
-                        "expected_f32_payload_sha256": _f32_wire_sha256(
-                            endpoint["parameters_f32"]
-                        ),
+                        "expected_f32_payload_sha256": expected_f32_payload_sha256,
                     }
                 )
                 self._write_manifest()
             elif elapsed > pending["window_steps"]:
                 self._drop_pending_midpoint(fragment_id, "midpoint_boundary_missed")
+        return completed_endpoints
 
     def note_push(
         self,
