@@ -2637,6 +2637,34 @@ Rust formatting checks, and 1,281 Python tests with two skips under CPython
 3.13 plus the declared `dev`, `launcher`, and `nava` extras. No direction
 outcome existed during any of these corrections.
 
+The complete implementation was then committed cleanly as
+`a4122c5f6caffb03636e114609e2feb136a7f5ae` (`Add frozen CPLG stock-shadow
+acquisition`) and pushed to
+`origin/experiment/optimizer-state-capture-round3`; an independent
+`git ls-remote` returned that exact 40-character SHA. The configured HTTPS
+credential was expired and the first push failed before remote mutation, so
+the already authenticated GitHub SSH transport was used without changing the
+commit or repository settings. From that exact clean commit, the full Python
+suite again passed 1,281 tests with two skips, Rust passed 197 syncer plus two
+helper tests, the locked release build succeeded, Ruff and both format checks
+passed, and `lake build LeanMechanism.CausalPhaseLockedGeodesic` completed all
+2,190 jobs with only the pre-existing short-copyright-header warnings.
+
+The immutable acquisition specification is
+`experiments/optimizer/exp2-cplg-shadow-direction-r1.json`, basename-bound
+SHA-256
+`5fb637265f0b2abd6e3ee784247473da0aa4f85804c9f715d0522cd2ef5416e7`.
+It pins the pushed implementation commit, exact image ID, one Spot A100 with a
+campaign maximum of one, isolated checkout/run/prefix identities, complete
+argv and environment, config/dossier/Cargo identities, all input manifests,
+the terminal/analyzer/overhead/preflight receipts, both arm receipts and
+stock artifacts, and all 32 deterministically named full-vector files. Three
+spec contract tests pass. `optimizer_experiment.py validate` passed, rendered
+the intended OFF-then-ON stock-only command, and the provider-aware `doctor`
+under `/private/tmp/yeto-gcloud-admin-codex` reported cloud prerequisites OK at
+`2026-07-14T20:42:32Z`. No GPU, VM, disk, run prefix, or direction outcome had
+been created or opened at that point.
+
 ## Primary references used in the audit
 
 - SCAFFOLD: <https://proceedings.mlr.press/v119/karimireddy20a.html>
