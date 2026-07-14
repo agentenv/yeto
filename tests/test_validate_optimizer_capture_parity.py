@@ -658,9 +658,7 @@ def test_peft_target_modules_semantic_changes_fail_closed(
 
 
 @pytest.mark.parametrize("case", ["other-list", "nested-key", "other-json"])
-def test_target_module_exception_does_not_weaken_other_export_exactness(
-    tmp_path, case
-):
+def test_target_module_exception_does_not_weaken_other_export_exactness(tmp_path, case):
     pair = _make_pair(tmp_path)
     if case == "other-list":
         _set_adapter_config_value(pair.off_arm, "modules_to_save", ["a", "b"])

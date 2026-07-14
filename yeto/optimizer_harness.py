@@ -1310,16 +1310,12 @@ def detached_runtime_smoke_script(spec: ExperimentSpec) -> str:
     executables = spec.execution["required_executables"]
     if not executables:
         return "true"
-    env_assignments = [
-        f"{key}={value}" for key, value in sorted(spec.env.items())
-    ]
+    env_assignments = [f"{key}={value}" for key, value in sorted(spec.env.items())]
     lines = []
     for executable in executables:
         quoted = shlex.quote(executable)
         error = shlex.quote(f"required executable is not executable: {executable}")
-        lines.append(
-            f"test -x {quoted} || {{ echo {error} >&2; exit 21; }}"
-        )
+        lines.append(f"test -x {quoted} || {{ echo {error} >&2; exit 21; }}")
         lines.append(
             shlex.join(["env", *env_assignments, executable, "--version"])
             + " >/dev/null"
