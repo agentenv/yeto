@@ -125,6 +125,12 @@ pub(crate) struct LedgerSeal {
     pub sha256: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LedgerClose {
+    seal: LedgerSeal,
+    accounting: WriterAccounting,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WriterAccounting {
     pub dropped: u64,
@@ -348,16 +354,17 @@ impl CplgOnlineEvidence {
         let mut ledger_head = None;
         let mut ledger_rows = None;
         let writer = if self.arm == Arm::Candidate {
-            let seal = self
+            let close = self
                 .ledger
                 .take()
                 .context("candidate action-ledger writer is absent")?
                 .finish(EXPECTED_COMMITS)?;
+            let seal = close.seal;
             let (checkpoint_head, checkpoint_rows) = state.cplg_action_ledger_evidence();
             if checkpoint_head != seal.head || checkpoint_rows != seal.rows {
                 bail!("final checkpoint CPLG ledger evidence differs from the closed ledger");
             }
-            let accounting = WriterAccounting::default();
+            let accounting = close.accounting;
             let manifest = value_from_pairs([
                 ("arm", Value::String(self.arm.name().to_owned())),
                 (
@@ -917,23 +924,30 @@ impl CplgActionLedgerWriter {
         })
     }
 
-    fn finish(mut self, expected_rows: u64) -> Result<LedgerSeal> {
+    fn finish(mut self, expected_rows: u64) -> Result<LedgerClose> {
         self.writer.flush()?;
         self.writer.get_ref().sync_all()?;
         let pending = self.accepted.saturating_sub(self.completed);
+        let accounting = WriterAccounting {
+            dropped: expected_rows.saturating_sub(self.accepted),
+            abandoned: self.accepted.saturating_sub(self.completed),
+            pending,
+            errors: self.errors,
+        };
         if self.rows != expected_rows
             || self.accepted != expected_rows
             || self.completed != expected_rows
-            || pending != 0
-            || self.errors != 0
+            || accounting != WriterAccounting::default()
         {
             bail!(
-                "CPLG action-ledger writer did not close exactly: rows={} accepted={} completed={} pending={} errors={}",
+                "CPLG action-ledger writer did not close exactly: rows={} accepted={} completed={} dropped={} abandoned={} pending={} errors={}",
                 self.rows,
                 self.accepted,
                 self.completed,
-                pending,
-                self.errors
+                accounting.dropped,
+                accounting.abandoned,
+                accounting.pending,
+                accounting.errors
             );
         }
         drop(self.writer);
@@ -941,7 +955,7 @@ impl CplgActionLedgerWriter {
         if seal.head != self.head {
             bail!("closed CPLG action-ledger head differs from writer head");
         }
-        Ok(seal)
+        Ok(LedgerClose { seal, accounting })
     }
 }
 
@@ -1440,8 +1454,9 @@ mod tests {
             std::fs::read(resumed_path).unwrap(),
             std::fs::read(uninterrupted_path).unwrap()
         );
-        assert_eq!(resumed_seal.rows, 32);
-        assert_ne!(resumed_seal.head, ZERO_SHA256);
+        assert_eq!(resumed_seal.seal.rows, 32);
+        assert_ne!(resumed_seal.seal.head, ZERO_SHA256);
+        assert_eq!(resumed_seal.accounting, WriterAccounting::default());
         uninterrupted_state.global_step = EXPECTED_COMMITS;
         resumed_state.global_step = EXPECTED_COMMITS;
         let uninterrupted_checkpoint = uninterrupted_root.join("final.ckpt");
