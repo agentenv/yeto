@@ -5,7 +5,6 @@ sky teardown call are stubbed."""
 import argparse
 import os
 import subprocess
-import sys
 import time
 
 import pytest
@@ -22,14 +21,25 @@ def tmp_registry(tmp_path, monkeypatch):
 # These tests exercise the local controller mode (a detached worker on this
 # machine); head mode is covered by test_head_mode.py.
 LAUNCH_ARGS = [
-    "--gpu", "aws:8xa100@us-east-2", "--model", "gemma4", "--data", "org/ds",
-    "--controller", "local",
+    "--gpu",
+    "aws:8xa100@us-east-2",
+    "--model",
+    "gemma4",
+    "--data",
+    "org/ds",
+    "--controller",
+    "local",
 ]
 
 
 def make_args_dict(name="run1"):
     ns = cli.parse_args(LAUNCH_ARGS + ["--cluster-prefix", name])
     return vars(ns)
+
+
+def test_launch_cli_accepts_cplg_outer_optimizer():
+    args = cli.parse_args(LAUNCH_ARGS + ["--outer-optimizer", "cplg-sgd"])
+    assert args.outer_optimizer == "cplg-sgd"
 
 
 # ---------------------------------------------------------------------------

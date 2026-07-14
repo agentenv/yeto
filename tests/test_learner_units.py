@@ -1,8 +1,96 @@
 """Unit tests for learner helpers that run without GPUs or a process group."""
 
+import hashlib
+import json
+
 import torch
 
 from yeto.learner import allreduce_trainable_grads, normalize_param_name
+
+
+def test_learner_completion_receipt_is_atomic_and_basename_checksummed(tmp_path):
+    import pytest
+
+    from yeto.learner import write_learner_completion_receipt
+
+    path = tmp_path / "learner-0" / "learner_completion.json"
+    digest = write_learner_completion_receipt(
+        path,
+        learner_id=0,
+        local_step=34,
+        raw_tokens=4_352,
+        global_step=32,
+        reconnect_count=0,
+        terminal_status="syncer_shutdown",
+    )
+
+    raw = path.read_bytes()
+    assert digest == hashlib.sha256(raw).hexdigest()
+    assert json.loads(raw) == {
+        "schema": "yeto.learner_completion.v1",
+        "learner_id": 0,
+        "local_step": 34,
+        "raw_tokens": 4_352,
+        "global_step": 32,
+        "reconnect_count": 0,
+        "terminal_status": "syncer_shutdown",
+    }
+    assert path.with_name(path.name + ".sha256").read_text() == (
+        f"{digest}  learner_completion.json\n"
+    )
+    assert not list(path.parent.glob("*.tmp"))
+
+    with pytest.raises(RuntimeError, match="not fresh"):
+        write_learner_completion_receipt(
+            path,
+            learner_id=0,
+            local_step=34,
+            raw_tokens=4_352,
+            global_step=32,
+            reconnect_count=0,
+            terminal_status="syncer_shutdown",
+        )
+
+
+def test_learner_completion_receipt_rejects_unbound_transport_state(tmp_path):
+    import pytest
+
+    from yeto.learner import write_learner_completion_receipt
+
+    common = {
+        "learner_id": 0,
+        "local_step": 34,
+        "raw_tokens": 4_352,
+        "global_step": 32,
+        "reconnect_count": 0,
+        "terminal_status": "syncer_shutdown",
+    }
+    with pytest.raises(ValueError, match="non-negative integers"):
+        write_learner_completion_receipt(
+            tmp_path / "negative.json", **{**common, "reconnect_count": -1}
+        )
+    with pytest.raises(ValueError, match="invalid learner terminal status"):
+        write_learner_completion_receipt(
+            tmp_path / "unknown.json", **{**common, "terminal_status": "unknown"}
+        )
+
+
+def test_syncer_client_terminal_transport_state_tracks_shutdown():
+    from yeto.fragments import build_layout
+    from yeto.protocol import SyncerClient, TerminalTransportState
+
+    layout = build_layout([("weight", 1)], 1)
+    client = SyncerClient(("127.0.0.1", 1), 0, layout, num_streams=0)
+
+    assert client.terminal_transport_state == TerminalTransportState(
+        reconnect_count=0,
+        shutdown_received=False,
+    )
+    client.shutdown.set()
+    assert client.terminal_transport_state == TerminalTransportState(
+        reconnect_count=0,
+        shutdown_received=True,
+    )
 
 
 # --- normalize_param_name -------------------------------------------------
@@ -112,7 +200,9 @@ def test_fragment_probe_signal_helpers_are_stable():
     assert abs(_sigmoid(0.0) - 0.5) < 1e-12
     assert _sigmoid(100.0) > 1.0 - 1e-12
     assert _sigmoid(-100.0) < 1e-12
-    assert abs(_cosine(torch.tensor([1.0, 0.0]), torch.tensor([2.0, 0.0])) - 1.0) < 1e-12
+    assert (
+        abs(_cosine(torch.tensor([1.0, 0.0]), torch.tensor([2.0, 0.0])) - 1.0) < 1e-12
+    )
     assert abs(_cosine(torch.tensor([1.0, 0.0]), torch.tensor([0.0, 1.0]))) < 1e-12
     assert _cosine(torch.zeros(2), torch.ones(2)) == 0.0
 
@@ -131,7 +221,9 @@ def test_pack_flat_matches_pack_fragment():
     flat = fragment_flat(frag, params)
     for dtype in (DTYPE_F32, DTYPE_BF16):
         assert pack_flat(flat, dtype) == pack_fragment(frag, params, dtype)
-        assert torch.allclose(unpack_fragment(frag, pack_flat(flat, dtype), dtype), flat)
+        assert torch.allclose(
+            unpack_fragment(frag, pack_flat(flat, dtype), dtype), flat
+        )
 
 
 def test_lora_targets_resolution():
@@ -184,7 +276,10 @@ def test_offline_first_uses_cache_hit():
                 raise AssertionError("went online despite cache hit")
             return "cached-model"
 
-    assert _from_pretrained_offline_first(Factory, "org/model", trust_remote_code=True) == "cached-model"
+    assert (
+        _from_pretrained_offline_first(Factory, "org/model", trust_remote_code=True)
+        == "cached-model"
+    )
     assert calls == [{"local_files_only": True, "trust_remote_code": True}]
 
 
@@ -253,11 +348,16 @@ def test_lag_fifo_zero_lag_passes_through_immediately():
 # --- --debug-broadcast-lag-commits argument validation ---------------------
 
 _LEARNER_REQUIRED_ARGV = [
-    "--model", "m",
-    "--data", "d",
-    "--syncer", "none",
-    "--learner-id", "0",
-    "--num-learners", "1",
+    "--model",
+    "m",
+    "--data",
+    "d",
+    "--syncer",
+    "none",
+    "--learner-id",
+    "0",
+    "--num-learners",
+    "1",
 ]
 
 
@@ -315,18 +415,24 @@ def test_lag_flag_rejects_q4_wire_dtype():
         parse_args(
             _LEARNER_REQUIRED_ARGV
             + [
-                "--debug-broadcast-lag-commits", "1",
-                "--fixed-window-microsteps", "64",
-                "--wire-dtype", "q4",
+                "--debug-broadcast-lag-commits",
+                "1",
+                "--fixed-window-microsteps",
+                "64",
+                "--wire-dtype",
+                "q4",
             ]
         )
     # bf16 (default) and f32 remain accepted.
     args = parse_args(
         _LEARNER_REQUIRED_ARGV
         + [
-            "--debug-broadcast-lag-commits", "1",
-            "--fixed-window-microsteps", "64",
-            "--wire-dtype", "f32",
+            "--debug-broadcast-lag-commits",
+            "1",
+            "--fixed-window-microsteps",
+            "64",
+            "--wire-dtype",
+            "f32",
         ]
     )
     assert args.debug_broadcast_lag_commits == 1
@@ -446,8 +552,10 @@ def test_schedule_flag_satisfies_lag_mode_window_requirement():
     args = parse_args(
         _LEARNER_REQUIRED_ARGV
         + [
-            "--debug-broadcast-lag-commits", "1",
-            "--fixed-window-schedule", "0:16",
+            "--debug-broadcast-lag-commits",
+            "1",
+            "--fixed-window-schedule",
+            "0:16",
         ]
     )
     assert args.debug_broadcast_lag_commits == 1
@@ -516,7 +624,18 @@ def test_barrier_sync_flag_defaults_off_and_parses():
 
     assert parse_args(_LEARNER_REQUIRED_ARGV).barrier_sync is False
     args = parse_args(
-        ["--model", "m", "--data", "d", "--syncer", "h:1", "--learner-id", "0",
-         "--num-learners", "1", "--barrier-sync"]
+        [
+            "--model",
+            "m",
+            "--data",
+            "d",
+            "--syncer",
+            "h:1",
+            "--learner-id",
+            "0",
+            "--num-learners",
+            "1",
+            "--barrier-sync",
+        ]
     )
     assert args.barrier_sync is True

@@ -1308,6 +1308,10 @@ pub struct GlobalState {
     /// Causal phase/tangent/shadow state, isolated per fragment. Only
     /// `cplg-sgd` reads or writes it.
     cplg_state: Vec<CplgFragmentState>,
+    /// Active-E1 evidence chain identity at the same consistent cut as the
+    /// causal CPLG state. These fields do not participate in selection math.
+    cplg_action_ledger_head: [u8; 32],
+    cplg_action_ledger_rows: u64,
     pub initialized: Vec<bool>,
     /// Global step at which each fragment was last merged (its version).
     pub versions: Vec<u64>,
@@ -1413,6 +1417,8 @@ impl GlobalState {
             cheb_phase,
             pti_state,
             cplg_state,
+            cplg_action_ledger_head: [0; 32],
+            cplg_action_ledger_rows: 0,
             initialized,
             versions,
             global_step: 0,
@@ -1481,6 +1487,44 @@ impl GlobalState {
 
     pub fn all_initialized(&self) -> bool {
         self.initialized.iter().all(|&b| b)
+    }
+
+    /// Install the evidence-chain head only after its corresponding durable
+    /// ledger row has been accepted. The chain remains observational state;
+    /// CPLG arithmetic and action fingerprints never consume it.
+    pub fn set_cplg_action_ledger_evidence(&mut self, head: &str, rows: u64) -> Result<()> {
+        if self.outer_optimizer != merge::OuterOptimizer::CplgSgd {
+            bail!("CPLG action-ledger evidence requires outer optimizer cplg-sgd");
+        }
+        if rows == 0 || rows > crate::cplg_evidence::EXPECTED_COMMITS {
+            bail!("CPLG action-ledger row count {rows} is outside 1..=32");
+        }
+        if rows != self.cplg_action_ledger_rows + 1 {
+            bail!(
+                "CPLG action-ledger checkpoint count expected {}, got {rows}",
+                self.cplg_action_ledger_rows + 1
+            );
+        }
+        self.cplg_action_ledger_head = decode_sha256(head)?;
+        if self.cplg_action_ledger_head == [0; 32] {
+            bail!("CPLG action-ledger head must not be the zero digest");
+        }
+        self.cplg_action_ledger_rows = rows;
+        Ok(())
+    }
+
+    pub fn cplg_action_ledger_evidence(&self) -> (String, u64) {
+        (
+            encode_sha256(&self.cplg_action_ledger_head),
+            self.cplg_action_ledger_rows,
+        )
+    }
+
+    pub fn cplg_unresolved_tail_count(&self) -> usize {
+        self.cplg_state
+            .iter()
+            .filter(|state| !state.pending_candidate.is_empty())
+            .count()
     }
 
     /// Canonical identity of the exact layout established by HELLO. This
@@ -2644,6 +2688,35 @@ impl GlobalState {
 const CKPT_MAGIC: u32 = 0xD170_5A7E;
 const PTI_CKPT_EXTENSION_MAGIC: u32 = 0x3149_5450; // little-endian "PTI1"
 const CPLG_CKPT_EXTENSION_MAGIC: u32 = 0x314c_5043; // little-endian "CPL1"
+const CPLG_CKPT_EXTENSION_MAGIC_V2: u32 = 0x324c_5043; // little-endian "CPL2"
+
+fn encode_sha256(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut result = String::with_capacity(64);
+    for byte in bytes {
+        result.push(HEX[(byte >> 4) as usize] as char);
+        result.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    result
+}
+
+fn decode_sha256(value: &str) -> Result<[u8; 32]> {
+    if value.len() != 64 {
+        bail!("SHA-256 must contain exactly 64 lowercase hexadecimal characters");
+    }
+    let mut result = [0u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let nibble = |byte: u8| -> Result<u8> {
+            match byte {
+                b'0'..=b'9' => Ok(byte - b'0'),
+                b'a'..=b'f' => Ok(byte - b'a' + 10),
+                _ => bail!("SHA-256 must use lowercase hexadecimal characters"),
+            }
+        };
+        result[index] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+    }
+    Ok(result)
+}
 
 impl GlobalState {
     /// Persist a consistent snapshot. Called only at the quiescent cut
@@ -2704,7 +2777,13 @@ impl GlobalState {
                 }
             }
             if self.outer_optimizer == merge::OuterOptimizer::CplgSgd {
-                f.write_all(&CPLG_CKPT_EXTENSION_MAGIC.to_le_bytes())?;
+                let has_action_evidence = self.cplg_action_ledger_rows > 0;
+                let extension_magic = if has_action_evidence {
+                    CPLG_CKPT_EXTENSION_MAGIC_V2
+                } else {
+                    CPLG_CKPT_EXTENSION_MAGIC
+                };
+                f.write_all(&extension_magic.to_le_bytes())?;
                 f.write_all(&(self.cplg_state.len() as u32).to_le_bytes())?;
                 for state in &self.cplg_state {
                     for values in [
@@ -2728,6 +2807,10 @@ impl GlobalState {
                     for score in &state.scores {
                         f.write_all(&score.to_le_bytes())?;
                     }
+                }
+                if has_action_evidence {
+                    f.write_all(&self.cplg_action_ledger_head)?;
+                    f.write_all(&self.cplg_action_ledger_rows.to_le_bytes())?;
                 }
             }
             f.flush()?;
@@ -2794,6 +2877,8 @@ impl GlobalState {
         }
         let nl = r.u32()? as usize;
         self.ledger.clear();
+        self.cplg_action_ledger_head = [0; 32];
+        self.cplg_action_ledger_rows = 0;
         for _ in 0..nl {
             let id = r.u32()?;
             let l = LearnerLedger {
@@ -2866,7 +2951,10 @@ impl GlobalState {
                         };
                     }
                 }
-                CPLG_CKPT_EXTENSION_MAGIC => {
+                magic
+                    if magic == CPLG_CKPT_EXTENSION_MAGIC
+                        || magic == CPLG_CKPT_EXTENSION_MAGIC_V2 =>
+                {
                     let state_count = r.u32()? as usize;
                     if state_count != self.cplg_state.len() {
                         bail!(
@@ -2952,6 +3040,21 @@ impl GlobalState {
                             pending_candidate,
                             scores,
                         };
+                    }
+                    if magic == CPLG_CKPT_EXTENSION_MAGIC_V2 {
+                        self.cplg_action_ledger_head.copy_from_slice(r.take(32)?);
+                        self.cplg_action_ledger_rows = r.u64()?;
+                        if self.cplg_action_ledger_rows > crate::cplg_evidence::EXPECTED_COMMITS {
+                            bail!(
+                                "CPLG checkpoint has {} action-ledger rows",
+                                self.cplg_action_ledger_rows
+                            );
+                        }
+                        if (self.cplg_action_ledger_rows == 0)
+                            != (self.cplg_action_ledger_head == [0; 32])
+                        {
+                            bail!("CPLG checkpoint action-ledger head/count are inconsistent");
+                        }
                     }
                 }
                 _ => bail!("checkpoint has unknown trailing extension"),
@@ -4440,13 +4543,23 @@ mod tests {
             stats
         }
 
+        fn install_evidence(state: &mut GlobalState, rows: u64) {
+            let head = format!(
+                "{:x}",
+                Sha256::digest(format!("ledger-row-{rows}").as_bytes())
+            );
+            state.set_cplg_action_ledger_evidence(&head, rows).unwrap();
+        }
+
         let mut uninterrupted = new_state();
         let mut checkpoint_source = new_state();
-        for degrees in [0.0f32, 10.0, 20.0, 30.0] {
+        for (index, degrees) in [0.0f32, 10.0, 20.0, 30.0].into_iter().enumerate() {
             assert_eq!(
                 apply_direction(&mut uninterrupted, degrees),
                 apply_direction(&mut checkpoint_source, degrees)
             );
+            install_evidence(&mut uninterrupted, index as u64 + 1);
+            install_evidence(&mut checkpoint_source, index as u64 + 1);
         }
         let path = std::env::temp_dir().join(format!(
             "yeto-cplg-resume-{}-{}.ckpt",
@@ -4457,20 +4570,42 @@ mod tests {
         let mut resumed = new_state();
         resumed.load_checkpoint(&path).unwrap();
         assert_eq!(resumed.cplg_state, checkpoint_source.cplg_state);
+        assert_eq!(
+            resumed.cplg_action_ledger_evidence(),
+            checkpoint_source.cplg_action_ledger_evidence()
+        );
 
-        for degrees in [40.0f32, 50.0] {
+        for (index, degrees) in [40.0f32, 50.0].into_iter().enumerate() {
             let expected_stats = apply_direction(&mut uninterrupted, degrees);
             let resumed_stats = apply_direction(&mut resumed, degrees);
             assert_eq!(resumed_stats, expected_stats);
+            let rows = index as u64 + 5;
+            install_evidence(&mut uninterrupted, rows);
+            install_evidence(&mut resumed, rows);
             assert_eq!(resumed.params, uninterrupted.params);
             assert_eq!(resumed.momentum, uninterrupted.momentum);
             assert_eq!(resumed.cplg_state, uninterrupted.cplg_state);
+            assert_eq!(
+                resumed.cplg_action_ledger_evidence(),
+                uninterrupted.cplg_action_ledger_evidence()
+            );
         }
         assert!(uninterrupted.cplg_state[0]
             .scores
             .iter()
             .all(|score| *score > 0.0));
+        let uninterrupted_final = path.with_extension("uninterrupted-final");
+        let resumed_final = path.with_extension("resumed-final");
+        uninterrupted.save_checkpoint(&uninterrupted_final).unwrap();
+        resumed.save_checkpoint(&resumed_final).unwrap();
+        assert_eq!(
+            std::fs::read(&uninterrupted_final).unwrap(),
+            std::fs::read(&resumed_final).unwrap(),
+            "resumed CPLG causal state and checkpoint evidence must be byte-identical"
+        );
         std::fs::remove_file(path).ok();
+        std::fs::remove_file(uninterrupted_final).ok();
+        std::fs::remove_file(resumed_final).ok();
     }
 
     fn cplg_values_from_bits(bits: &[u32]) -> Vec<f32> {

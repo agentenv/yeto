@@ -94,6 +94,7 @@ OUTER_OPTIMIZERS = (
     "block-yogi",
     "cheb-sgd",
     "pti-sgd",
+    "cplg-sgd",
 )
 # Matrix-fragment aggregation modes the harness understands (client-side
 # --matrix-merge). "worker-snr" is the memoryless cross-worker consensus merge.
@@ -136,6 +137,9 @@ CAPTURE_PARITY_ARM_NAMES = frozenset(
 )
 CPLG_SHADOW_PAIR = ("cplg_shadow_off", "cplg_shadow_on")
 CPLG_SHADOW_ARM_NAMES = frozenset(CPLG_SHADOW_PAIR)
+CPLG_ONLINE_PAIR = ("cplg_m1_stock", "cplg_m1_candidate")
+CPLG_ONLINE_ARM_NAMES = frozenset(CPLG_ONLINE_PAIR)
+CPLG_EXPERIMENT_ARM_NAMES = CPLG_SHADOW_ARM_NAMES | CPLG_ONLINE_ARM_NAMES
 
 
 @dataclass(frozen=True)
@@ -373,6 +377,42 @@ PRESETS: dict[str, Arm] = {
         outer_optimizer="pti-sgd",
         max_reconnects=0,
     ),
+    # First active CPLG canary. The pair is intentionally identical except for
+    # the causal direction selector feeding the same memoryless SGD-0.28 outer
+    # kernel. Runtime validation below prevents global CLI overrides from
+    # silently collapsing or otherwise changing that treatment contrast.
+    "cplg_m1_stock": Arm(
+        "cplg_m1_stock",
+        m=1,
+        fragments=4,
+        quorum=1,
+        strict_quorum=True,
+        fixed_window_microsteps=4,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=4,
+        delta_correction="none",
+        outer_lr=0.28,
+        outer_momentum=0.0,
+        outer_optimizer="nesterov",
+        max_reconnects=0,
+    ),
+    "cplg_m1_candidate": Arm(
+        "cplg_m1_candidate",
+        m=1,
+        fragments=4,
+        quorum=1,
+        strict_quorum=True,
+        fixed_window_microsteps=4,
+        merge_alpha=0.0,
+        wire_dtype="f32",
+        pipeline=4,
+        delta_correction="none",
+        outer_lr=0.28,
+        outer_momentum=0.0,
+        outer_optimizer="cplg-sgd",
+        max_reconnects=0,
+    ),
     # Fresh stock-only CPLG direction-shadow acquisition. The pair differs
     # solely by the narrow syncer-owned exact-vector writer.
     "cplg_shadow_off": Arm(
@@ -560,6 +600,33 @@ def arm_capture_enabled(args, arm: Arm | None) -> bool:
         and arm.optimizer_state_capture
         and getattr(args, "optimizer_state_capture", False)
     )
+
+
+def cplg_online_syncer_args(args, arm: Arm, arm_dir: Path) -> dict:
+    """Return the complete producer-evidence paths for one active CPLG arm."""
+
+    if arm.name not in CPLG_ONLINE_ARM_NAMES:
+        return {}
+    arm_dir = arm_dir.resolve()
+    result = {
+        "cplg_online_run_id": args.cplg_online_run_id,
+        "cplg_online_run_config_sha256": args.cplg_online_run_config_sha256,
+        "cplg_online_source_commit": args.cplg_online_source_commit,
+        "cplg_online_initial_state_manifest": (
+            arm_dir / "cplg_online_initial_state.json"
+        ),
+        "cplg_online_completion_manifest": (arm_dir / "cplg_online_completion.json"),
+    }
+    if arm.name == "cplg_m1_candidate":
+        result.update(
+            {
+                "cplg_action_ledger": arm_dir / "cplg_action_ledger.jsonl",
+                "cplg_action_ledger_manifest": (
+                    arm_dir / "cplg_action_ledger_manifest.json"
+                ),
+            }
+        )
+    return result
 
 
 def select_arms(spec: str) -> list[Arm]:
@@ -884,7 +951,7 @@ def learner_command(
         # single-process learners take the explicit one.
         cmd += ["--device", args.device]
     if arm is not None:
-        if arm.name in CPLG_SHADOW_ARM_NAMES:
+        if arm.name in CPLG_EXPERIMENT_ARM_NAMES:
             cmd += [
                 "--inner-optimizer",
                 "adamw",
@@ -901,12 +968,17 @@ def learner_command(
                 "--max-reconnects",
                 "0",
             ]
+        if arm.name in CPLG_ONLINE_ARM_NAMES:
+            cmd += [
+                "--learner-completion-receipt",
+                str(arm_dir / f"learner-{learner_id}" / "learner_completion.json"),
+            ]
         capture_active = arm_capture_enabled(args, arm)
         matched_parity_arm = bool(
             getattr(args, "optimizer_state_capture_parity", False)
             and arm.name in CAPTURE_PARITY_ARM_NAMES
         )
-        if arm.max_reconnects is not None and arm.name not in CPLG_SHADOW_ARM_NAMES:
+        if arm.max_reconnects is not None and arm.name not in CPLG_EXPERIMENT_ARM_NAMES:
             cmd += ["--max-reconnects", str(arm.max_reconnects)]
         # The qualifier compares capture as the sole treatment.  Capture mode
         # itself must disable reconnects so every audited attempt has one
@@ -1095,6 +1167,13 @@ def syncer_command(
     stock_vector_capture_session: str | None = None,
     stock_vector_capture_run_config_sha256: str | None = None,
     stock_vector_capture_expected_layout_sha256: str | None = None,
+    cplg_online_run_id: str | None = None,
+    cplg_online_run_config_sha256: str | None = None,
+    cplg_online_source_commit: str | None = None,
+    cplg_online_initial_state_manifest: Path | None = None,
+    cplg_online_completion_manifest: Path | None = None,
+    cplg_action_ledger: Path | None = None,
+    cplg_action_ledger_manifest: Path | None = None,
 ) -> list[str]:
     # The syncer takes no fragment count: the layout arrives in HELLO.
     cmd = [
@@ -1158,6 +1237,52 @@ def syncer_command(
         cmd += ["--strict-quorum"]
     if deterministic_commit_order:
         cmd += ["--deterministic-commit-order"]
+    cplg_core = (
+        cplg_online_run_id,
+        cplg_online_run_config_sha256,
+        cplg_online_source_commit,
+        cplg_online_initial_state_manifest,
+        cplg_online_completion_manifest,
+    )
+    cplg_ledger = (cplg_action_ledger, cplg_action_ledger_manifest)
+    if any(value is not None for value in (*cplg_core, *cplg_ledger)):
+        if not all(value is not None for value in cplg_core):
+            raise ValueError(
+                "CPLG online run identity and receipt paths must be configured together"
+            )
+        if any(value is not None for value in cplg_ledger) and not all(
+            value is not None for value in cplg_ledger
+        ):
+            raise ValueError("CPLG action-ledger paths must be configured together")
+        if arm.outer_optimizer == "cplg-sgd" and not all(
+            value is not None for value in cplg_ledger
+        ):
+            raise ValueError("CPLG-SGD online evidence requires the action ledger")
+        if arm.outer_optimizer != "cplg-sgd" and any(
+            value is not None for value in cplg_ledger
+        ):
+            raise ValueError(
+                "CPLG action-ledger paths require --outer-optimizer cplg-sgd"
+            )
+        cmd += [
+            "--cplg-online-run-id",
+            str(cplg_online_run_id),
+            "--cplg-online-run-config-sha256",
+            str(cplg_online_run_config_sha256),
+            "--cplg-online-source-commit",
+            str(cplg_online_source_commit),
+            "--cplg-online-initial-state-manifest",
+            str(Path(cplg_online_initial_state_manifest).resolve()),
+            "--cplg-online-completion-manifest",
+            str(Path(cplg_online_completion_manifest).resolve()),
+        ]
+    if all(value is not None for value in cplg_ledger):
+        cmd += [
+            "--cplg-action-ledger",
+            str(Path(cplg_action_ledger).resolve()),
+            "--cplg-action-ledger-manifest",
+            str(Path(cplg_action_ledger_manifest).resolve()),
+        ]
     if (stock_shadow_initial_state_manifest is None) != (
         stock_shadow_completion_manifest is None
     ):
@@ -2222,6 +2347,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                     ),
                 }
             )
+    online_syncer_args = cplg_online_syncer_args(args, arm, arm_dir)
     capture_active = arm_capture_enabled(args, arm)
     response_transcript = (
         arm_dir / "syncer_response_transcript.jsonl" if capture_active else None
@@ -2298,6 +2424,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                     args, "deterministic_commit_order", False
                 ),
                 **stock_shadow_syncer_args,
+                **online_syncer_args,
                 **syncer_args,
             ),
             stdout=syncer_log,
@@ -2845,6 +2972,21 @@ def main() -> int:
         help="optional frozen expected live-layout digest; actual layout is always derived",
     )
     p.add_argument(
+        "--cplg-online-run-id",
+        default=None,
+        help="immutable active-CPLG run identity forwarded to both syncers",
+    )
+    p.add_argument(
+        "--cplg-online-run-config-sha256",
+        default=None,
+        help="lowercase SHA-256 of the immutable active-CPLG run configuration",
+    )
+    p.add_argument(
+        "--cplg-online-source-commit",
+        default=None,
+        help="clean pushed 40-character source commit for active-CPLG evidence",
+    )
+    p.add_argument(
         "--learner-max-steps",
         type=int,
         default=0,
@@ -2971,6 +3113,27 @@ def main() -> int:
 
     if args.syncer_total_steps < 0 or args.learner_max_steps < 0:
         p.error("--syncer-total-steps and --learner-max-steps must be non-negative")
+    cplg_online_identity = (
+        args.cplg_online_run_id,
+        args.cplg_online_run_config_sha256,
+        args.cplg_online_source_commit,
+    )
+    if any(value is not None for value in cplg_online_identity):
+        if not all(value is not None for value in cplg_online_identity):
+            p.error(
+                "--cplg-online-run-id, --cplg-online-run-config-sha256, and "
+                "--cplg-online-source-commit must be configured together"
+            )
+        if not args.cplg_online_run_id.strip():
+            p.error("--cplg-online-run-id must not be empty")
+        if re.fullmatch(r"[0-9a-f]{64}", args.cplg_online_run_config_sha256) is None:
+            p.error(
+                "--cplg-online-run-config-sha256 must be lowercase hexadecimal SHA-256"
+            )
+        if re.fullmatch(r"[0-9a-f]{40}", args.cplg_online_source_commit) is None:
+            p.error(
+                "--cplg-online-source-commit must be lowercase 40-character hexadecimal"
+            )
     if args.bcmp_shadow_every < 1:
         p.error("--bcmp-shadow-every must be positive")
     if args.optimizer_state_capture_every < 1:
@@ -3112,6 +3275,62 @@ def main() -> int:
         ]
         if incompatible:
             p.error(f"CPLG shadow preset identity drifted: {incompatible}")
+    cplg_online_selected = {arm.name for arm in arms} & CPLG_ONLINE_ARM_NAMES
+    if cplg_online_selected:
+        if [arm.name for arm in arms] != list(CPLG_ONLINE_PAIR):
+            p.error(
+                "active CPLG E1 requires exactly "
+                "cplg_m1_stock,cplg_m1_candidate in that order"
+            )
+        if not all(value is not None for value in cplg_online_identity):
+            p.error("active CPLG E1 requires the complete --cplg-online-* identity")
+        if (
+            args.syncer_total_steps != 32
+            or args.learner_max_steps != 96
+            or args.fixed_window_microsteps != 4
+            or args.token_budget != 4_352
+            or args.eval_rows != 8
+            or not args.strict_quorum
+            or not args.barrier_sync
+            or not args.deterministic_commit_order
+            or not args.skip_baseline
+            or args.delta_norm_ref != 0.0
+            or math.copysign(1.0, args.delta_norm_ref) != 1.0
+        ):
+            p.error(
+                "active CPLG E1 requires 32 commits, learner cap 96, H4, "
+                "4352 exact raw tokens (34 terminal local steps), 8 eval rows, "
+                "strict barrier deterministic commits, and --skip-baseline"
+            )
+        expected_optimizers = {
+            "cplg_m1_stock": "nesterov",
+            "cplg_m1_candidate": "cplg-sgd",
+        }
+        incompatible = [
+            arm.name
+            for arm in arms
+            if arm.m != 1
+            or arm.fragments != 4
+            or arm.quorum != 1
+            or not arm.strict_quorum
+            or arm.fixed_window_microsteps != 4
+            or arm.matrix_merge != "rda"
+            or arm.wire_dtype != "f32"
+            or arm.pipeline != 4
+            or arm.merge_alpha != 0.0
+            or arm.delta_correction != "none"
+            or arm.outer_optimizer != expected_optimizers[arm.name]
+            or arm.outer_lr != 0.28
+            or arm.outer_momentum != 0.0
+            or math.copysign(1.0, arm.outer_momentum) != 1.0
+            or arm.outer_lr_by_fragment is not None
+            or arm.commit_policy != "token_weighted"
+            or arm.max_reconnects != 0
+        ]
+        if incompatible:
+            p.error(f"active CPLG E1 preset identity drifted: {incompatible}")
+    elif any(value is not None for value in cplg_online_identity):
+        p.error("--cplg-online-* identity requires the exact active CPLG E1 pair")
     for arm in arms:
         if (
             arm.scaffold_control_shuffle

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,7 @@ from .fragments import FragmentLayout
 
 CKPT_MAGIC = 0xD170_5A7E
 PTI_CKPT_EXTENSION_MAGIC = 0x31495450  # little-endian b"PTI1"
+CPLG_CKPT_EXTENSION_MAGIC = 0x314C5043  # little-endian b"CPL1"
 
 
 @dataclass
@@ -113,37 +115,124 @@ def parse_checkpoint(path: str | Path) -> Checkpoint:
         raw_meta = take(meta_len, "layout_meta")
         if raw_meta:
             layout_meta = json.loads(raw_meta.decode("utf-8"))
-    # PTI-SGD checkpoints append causal direction/interlock state after the
-    # ordinary export payload.  Export does not consume that optimizer state,
-    # but validates and skips it so the model parameters remain recoverable.
+    # Causal direction selectors append optimizer state after the ordinary
+    # export payload. Export does not consume that state, but validates and
+    # skips it so the model parameters remain recoverable.
     if off != len(data):
-        magic, state_count = struct.unpack("<II", take(8, "PTI extension header"))
-        if magic != PTI_CKPT_EXTENSION_MAGIC:
+        magic, state_count = struct.unpack(
+            "<II", take(8, "causal-selector extension header")
+        )
+        if magic not in (PTI_CKPT_EXTENSION_MAGIC, CPLG_CKPT_EXTENSION_MAGIC):
             raise ValueError(f"{path}: unknown checkpoint extension 0x{magic:08X}")
         if state_count != num_fragments:
+            selector = "PTI" if magic == PTI_CKPT_EXTENSION_MAGIC else "CPLG"
             raise ValueError(
-                f"{path}: PTI extension has {state_count} fragments, expected {num_fragments}"
+                f"{path}: {selector} extension has {state_count} fragments, "
+                f"expected {num_fragments}"
             )
-        for fid, (_version, params, _momentum) in enumerate(fragments):
-            numel = params.numel()
-            for field in ("previous stock", "pending candidate"):
-                (count,) = struct.unpack(
-                    "<Q", take(8, f"PTI fragment {fid} {field} length")
-                )
-                if count not in (0, numel):
-                    raise ValueError(
-                        f"{path}: PTI fragment {fid} {field} has {count} values, "
-                        f"expected 0 or {numel}"
+        if magic == PTI_CKPT_EXTENSION_MAGIC:
+            for fid, (_version, params, _momentum) in enumerate(fragments):
+                numel = params.numel()
+                for field in ("previous stock", "pending candidate"):
+                    (count,) = struct.unpack(
+                        "<Q", take(8, f"PTI fragment {fid} {field} length")
                     )
-                take(4 * count, f"PTI fragment {fid} {field}")
-            (score_count,) = struct.unpack(
-                "<I", take(4, f"PTI fragment {fid} score count")
-            )
-            if score_count > 3:
-                raise ValueError(
-                    f"{path}: PTI fragment {fid} has invalid score count {score_count}"
+                    if count not in (0, numel):
+                        raise ValueError(
+                            f"{path}: PTI fragment {fid} {field} has {count} values, "
+                            f"expected 0 or {numel}"
+                        )
+                    take(4 * count, f"PTI fragment {fid} {field}")
+                (score_count,) = struct.unpack(
+                    "<I", take(4, f"PTI fragment {fid} score count")
                 )
-            take(4 * score_count, f"PTI fragment {fid} scores")
+                if score_count > 3:
+                    raise ValueError(
+                        f"{path}: PTI fragment {fid} has invalid score count "
+                        f"{score_count}"
+                    )
+                take(4 * score_count, f"PTI fragment {fid} scores")
+        else:
+            for fid, (_version, params, _momentum) in enumerate(fragments):
+                numel = params.numel()
+                lengths: dict[str, int] = {}
+                for field in (
+                    "previous stock",
+                    "previous tangent",
+                    "pending candidate",
+                ):
+                    (count,) = struct.unpack(
+                        "<Q", take(8, f"CPLG fragment {fid} {field} length")
+                    )
+                    if count not in (0, numel):
+                        raise ValueError(
+                            f"{path}: CPLG fragment {fid} {field} has {count} values, "
+                            f"expected 0 or {numel}"
+                        )
+                    raw = take(4 * count, f"CPLG fragment {fid} {field}")
+                    if raw and not bool(torch.isfinite(_read_f32(raw)).all()):
+                        raise ValueError(
+                            f"{path}: CPLG fragment {fid} {field} is non-finite"
+                        )
+                    lengths[field] = count
+
+                (theta_tag,) = struct.unpack(
+                    "<B", take(1, f"CPLG fragment {fid} theta tag")
+                )
+                if theta_tag == 0:
+                    has_theta = False
+                elif theta_tag == 1:
+                    (theta,) = struct.unpack(
+                        "<f", take(4, f"CPLG fragment {fid} theta")
+                    )
+                    if not math.isfinite(theta) or theta <= 0.0:
+                        raise ValueError(
+                            f"{path}: CPLG fragment {fid} theta is invalid"
+                        )
+                    has_theta = True
+                else:
+                    raise ValueError(
+                        f"{path}: CPLG fragment {fid} has theta tag {theta_tag}"
+                    )
+
+                (score_count,) = struct.unpack(
+                    "<I", take(4, f"CPLG fragment {fid} score count")
+                )
+                if score_count > 3:
+                    raise ValueError(
+                        f"{path}: CPLG fragment {fid} has invalid score count "
+                        f"{score_count}"
+                    )
+                raw_scores = take(4 * score_count, f"CPLG fragment {fid} scores")
+                if raw_scores and not bool(torch.isfinite(_read_f32(raw_scores)).all()):
+                    raise ValueError(
+                        f"{path}: CPLG fragment {fid} scores are non-finite"
+                    )
+
+                has_stock = lengths["previous stock"] != 0
+                has_tangent = lengths["previous tangent"] != 0
+                has_candidate = lengths["pending candidate"] != 0
+                if has_tangent != has_theta:
+                    raise ValueError(
+                        f"{path}: CPLG fragment {fid} has inconsistent phase state"
+                    )
+                if not has_stock and (
+                    has_tangent or has_theta or has_candidate or score_count
+                ):
+                    raise ValueError(
+                        f"{path}: CPLG fragment {fid} has phase state without "
+                        "stock history"
+                    )
+                if not has_tangent and (has_candidate or score_count):
+                    raise ValueError(
+                        f"{path}: CPLG fragment {fid} has shadow state without "
+                        "a tangent"
+                    )
+                if not has_candidate and score_count:
+                    raise ValueError(
+                        f"{path}: CPLG fragment {fid} has scores without a "
+                        "pending shadow"
+                    )
     if off != len(data):
         raise ValueError(
             f"{path}: {len(data) - off} trailing bytes after checkpoint extensions"

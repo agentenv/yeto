@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::action_probe::{self, ActionProbeClient, CommitPolicy, RetainedPreviews};
+use crate::cplg_evidence::{self, BoundaryIdentity, CplgOnlineConfig, CplgOnlineEvidence};
 use crate::protocol::*;
 use crate::state::{GlobalState, Layout, MergeCandidate, MergeStats};
 use crate::stock_vector_tape::{
@@ -134,6 +135,8 @@ pub struct Config {
     /// Atomic interval-completion receipt paired with the initial-state
     /// receipt. Both paths are absent on ordinary runs.
     pub stock_shadow_completion_manifest: Option<std::path::PathBuf>,
+    /// Frozen active-E1 producer receipts and candidate action ledger.
+    pub cplg_online_evidence: Option<CplgOnlineConfig>,
     /// Optional offline probe capture directory. When enabled, complete_round
     /// writes a pre-merge syncer checkpoint, admitted candidate fragment
     /// tensors, and the resulting applied-update vector.
@@ -1162,6 +1165,7 @@ async fn scheduler(
     mut events: mpsc::Receiver<Event>,
     registry: Registry,
 ) -> Result<()> {
+    let cplg_clock_origin = Instant::now();
     let mut state: Option<GlobalState> = None;
     let mut response_transcript = match (
         cfg.response_transcript.as_deref(),
@@ -1266,6 +1270,34 @@ async fn scheduler(
             initial_state_sha256,
         )?;
     }
+    let expected_live_layout = cfg
+        .stock_vector_capture
+        .as_ref()
+        .and_then(|capture| capture.expected_layout_sha256.as_deref());
+    if cfg.cplg_online_evidence.is_some() {
+        for (name, path) in [
+            ("event tape", cfg.event_tape.as_deref()),
+            ("checkpoint", cfg.checkpoint_path.as_deref()),
+        ] {
+            let path = path.with_context(|| format!("CPLG online {name} path is absent"))?;
+            if path.exists() {
+                bail!("CPLG online {name} path is not fresh: {}", path.display());
+            }
+        }
+    }
+    let mut cplg_online_evidence = cfg
+        .cplg_online_evidence
+        .clone()
+        .map(|config| {
+            CplgOnlineEvidence::prepare(
+                config,
+                cfg.outer_optimizer,
+                &st,
+                expected_live_layout,
+                cplg_clock_origin,
+            )
+        })
+        .transpose()?;
     let stock_shadow_interval_start = cfg
         .stock_shadow_completion_manifest
         .as_ref()
@@ -1315,6 +1347,9 @@ async fn scheduler(
     broadcast_all_fragments(&st, &registry).await;
     let timing_origin = Instant::now();
     let mut commit_seq = 0u64;
+    if let Some(evidence) = cplg_online_evidence.as_mut() {
+        evidence.open_interval()?;
+    }
 
     // Phase 2: the outer loop. One fragment per global step, round-robin,
     // with up to `pipeline` rounds in flight at once: while round t sits in
@@ -1436,6 +1471,7 @@ async fn scheduler(
                     action_probe_unavailable.as_deref(),
                     response_transcript.as_mut(),
                     stock_vector_capture.as_mut(),
+                    cplg_online_evidence.as_mut(),
                     commit_seq,
                     &timing_origin,
                     round,
@@ -1647,10 +1683,6 @@ async fn scheduler(
         }
     }
 
-    if let Some(path) = &cfg.final_state {
-        dump_state(&st, path)?;
-        info!(path = %path.display(), "final global state written");
-    }
     if let Some(capture) = stock_vector_capture.take() {
         let completion = capture.finish()?;
         info!(
@@ -1662,6 +1694,41 @@ async fn scheduler(
             manifest_sha256 = %completion.manifest_sha256,
             "stock-vector capture complete"
         );
+    }
+    if let Some(evidence) = cplg_online_evidence.take() {
+        let checkpoint_path = cfg
+            .checkpoint_path
+            .as_deref()
+            .context("CPLG online completion requires a final checkpoint path")?;
+        let event_tape_path = cfg
+            .event_tape
+            .as_deref()
+            .context("CPLG online completion requires an event-tape path")?;
+        // Re-write the final consistent cut unconditionally. The candidate
+        // checkpoint now contains the action-ledger head/count alongside the
+        // CPLG causal state even when periodic checkpointing was disabled.
+        st.save_checkpoint(checkpoint_path)?;
+        let final_checkpoint_sha256 = cplg_evidence::durably_close_and_sha256(checkpoint_path)?;
+        let event_tape_sha256 = cplg_evidence::durably_close_and_sha256(event_tape_path)?;
+        let completion = evidence.finish(&st, event_tape_sha256, final_checkpoint_sha256)?;
+        info!(
+            interval_start_ns = completion.interval_start_ns,
+            interval_end_ns = completion.interval_end_ns,
+            interval_ns = completion.interval_ns,
+            event_tape_sha256 = %completion.event_tape_sha256,
+            final_checkpoint_sha256 = %completion.final_checkpoint_sha256,
+            ledger_head = ?completion.ledger_head,
+            ledger_rows = ?completion.ledger_rows,
+            writer_dropped = completion.writer.dropped,
+            writer_abandoned = completion.writer.abandoned,
+            writer_pending = completion.writer.pending,
+            writer_errors = completion.writer.errors,
+            "CPLG online evidence complete"
+        );
+    }
+    if let Some(path) = &cfg.final_state {
+        dump_state(&st, path)?;
+        info!(path = %path.display(), "final global state written");
     }
     if let (Some(path), Some(started)) = (
         &cfg.stock_shadow_completion_manifest,
@@ -1933,6 +2000,7 @@ async fn complete_round(
     action_probe_unavailable: Option<&str>,
     response_transcript: Option<&mut ResponseTranscript>,
     stock_vector_capture: Option<&mut StockVectorTapeWriter>,
+    mut cplg_online_evidence: Option<&mut CplgOnlineEvidence>,
     commit_seq: u64,
     timing_origin: &Instant,
     round: Round,
@@ -2177,6 +2245,28 @@ async fn complete_round(
         let push = pushes.get(id).expect("sorted id must exist in push map");
         st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
     }
+    if let Some(evidence) = cplg_online_evidence.as_deref_mut() {
+        if ids.len() != 1 || weights.len() != 1 {
+            bail!("CPLG online boundary requires exactly one admitted responder");
+        }
+        let responder = pushes
+            .get(&ids[0])
+            .context("CPLG online responder identity is absent")?;
+        evidence.record_boundary(
+            st,
+            BoundaryIdentity {
+                commit_sequence: commit_seq,
+                fragment: p,
+                fragment_version: st.versions[p],
+                responder_id: responder.learner_id,
+                responder_step: responder.local_step,
+                responder_c_steps: responder.c_steps,
+                responder_tokens: responder.c_tokens,
+                weight_f64_bits: weights[0].to_bits(),
+                cplg: merge_stats.cplg,
+            },
+        )?;
+    }
 
     // Broadcast the updated fragment.
     let payload = encode_bcast(st, p)?;
@@ -2253,7 +2343,7 @@ async fn complete_round(
     if let Some(tape) = &cfg.event_tape {
         // Records land in completion order, which under pipelining is not
         // necessarily step order.
-        append_tape(
+        let result = append_tape(
             tape,
             t,
             p,
@@ -2266,6 +2356,12 @@ async fn complete_round(
             &anchor_drift,
             ms,
         );
+        if let Err(error) = result {
+            if cplg_online_evidence.is_some() {
+                return Err(error).context("CPLG online event-tape write failed");
+            }
+            warn!("event tape write failed: {error}");
+        }
     }
     // Consistent cut: this round is fully applied and broadcast, and every
     // other in-flight round is still gathering (it has not touched state).
@@ -2571,7 +2667,7 @@ fn append_tape(
     decision: &CommitDecision,
     anchor_drift: &HashMap<u32, AnchorDrift>,
     ms: u64,
-) {
+) -> Result<()> {
     use std::io::Write;
     let line = format_tape_line(
         step,
@@ -2584,14 +2680,12 @@ fn append_tape(
         anchor_drift,
         ms,
     );
-    let res = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-        .and_then(|mut f| f.write_all(line.as_bytes()));
-    if let Err(e) = res {
-        warn!("event tape write failed: {e}");
-    }
+        .and_then(|mut f| f.write_all(line.as_bytes()))
+        .with_context(|| format!("append event tape {}", path.display()))
 }
 
 fn optional_json_number(value: Option<f64>) -> String {
@@ -2811,6 +2905,7 @@ mod tests {
             stock_vector_capture: None,
             stock_shadow_initial_state_manifest: None,
             stock_shadow_completion_manifest: None,
+            cplg_online_evidence: None,
             probe_capture_dir: None,
             probe_capture_every: 0,
             response_transcript: None,

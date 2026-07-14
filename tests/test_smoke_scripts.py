@@ -350,6 +350,265 @@ def test_pti_online_pair_commands_freeze_sgd028_and_fixed_h():
         assert "--deterministic-commit-order" in syncer
 
 
+def test_cplg_online_pair_differs_only_in_outer_direction_selector():
+    from dataclasses import asdict
+
+    stock = compare.PRESETS["cplg_m1_stock"]
+    candidate = compare.PRESETS["cplg_m1_candidate"]
+    stock_fields = asdict(stock)
+    candidate_fields = asdict(candidate)
+
+    assert stock_fields.pop("name") == "cplg_m1_stock"
+    assert candidate_fields.pop("name") == "cplg_m1_candidate"
+    assert stock_fields.pop("outer_optimizer") == "nesterov"
+    assert candidate_fields.pop("outer_optimizer") == "cplg-sgd"
+    assert stock_fields == candidate_fields
+
+
+def test_cplg_online_pair_commands_freeze_identity_and_evidence_paths():
+    args = SimpleNamespace(
+        model="lfm25-230m",
+        lora_r=2,
+        lora_alpha=4,
+        seq_len=128,
+        micro_batch_size=1,
+        inner_lr=1e-3,
+        device="cpu",
+        shard="ddp",
+        learner_gpus=0,
+        training_seed=271271,
+        barrier_sync=True,
+        cplg_online_run_id="exp2-cplg-online-e1",
+        cplg_online_run_config_sha256="a" * 64,
+        cplg_online_source_commit="b" * 40,
+    )
+    commands = {}
+    for name, expected_optimizer in (
+        ("cplg_m1_stock", "nesterov"),
+        ("cplg_m1_candidate", "cplg-sgd"),
+    ):
+        arm = compare.PRESETS[name]
+        arm_dir = Path(f"/tmp/w/{name}")
+        learner = compare.learner_command(
+            args,
+            arm_dir,
+            learner_id=0,
+            num_learners=1,
+            syncer="127.0.0.1:1",
+            max_steps=96,
+            arm=arm,
+        )
+        for flag, value in (
+            ("--inner-optimizer", "adamw"),
+            ("--weight-decay", "0.01"),
+            ("--warmup-steps", "10"),
+            ("--grad-clip", "1.0"),
+            ("--gradient-checkpointing", "off"),
+            ("--lora-targets", "all-linear"),
+            ("--max-reconnects", "0"),
+            ("--fixed-window-microsteps", "4"),
+        ):
+            assert learner.count(flag) == 1
+            assert learner[learner.index(flag) + 1] == value
+        assert learner[learner.index("--learner-completion-receipt") + 1] == str(
+            arm_dir / "learner-0" / "learner_completion.json"
+        )
+
+        evidence = compare.cplg_online_syncer_args(args, arm, arm_dir)
+        syncer = compare.syncer_command(
+            arm,
+            1234,
+            arm_dir,
+            total_steps=32,
+            deterministic_commit_order=True,
+            **evidence,
+        )
+        assert syncer[syncer.index("--outer-optimizer") + 1] == expected_optimizer
+        assert syncer[syncer.index("--cplg-online-run-id") + 1] == (
+            "exp2-cplg-online-e1"
+        )
+        assert syncer[syncer.index("--cplg-online-run-config-sha256") + 1] == ("a" * 64)
+        assert syncer[syncer.index("--cplg-online-source-commit") + 1] == "b" * 40
+        assert syncer[syncer.index("--cplg-online-initial-state-manifest") + 1] == str(
+            arm_dir.resolve() / "cplg_online_initial_state.json"
+        )
+        assert syncer[syncer.index("--cplg-online-completion-manifest") + 1] == str(
+            arm_dir.resolve() / "cplg_online_completion.json"
+        )
+        expected_cplg_flags = {
+            "--cplg-online-run-id",
+            "--cplg-online-run-config-sha256",
+            "--cplg-online-source-commit",
+            "--cplg-online-initial-state-manifest",
+            "--cplg-online-completion-manifest",
+        }
+        if name.endswith("candidate"):
+            expected_cplg_flags.update(
+                {"--cplg-action-ledger", "--cplg-action-ledger-manifest"}
+            )
+            assert syncer[syncer.index("--cplg-action-ledger") + 1] == str(
+                arm_dir.resolve() / "cplg_action_ledger.jsonl"
+            )
+            assert syncer[syncer.index("--cplg-action-ledger-manifest") + 1] == str(
+                arm_dir.resolve() / "cplg_action_ledger_manifest.json"
+            )
+        else:
+            assert "--cplg-action-ledger" not in syncer
+            assert "--cplg-action-ledger-manifest" not in syncer
+        assert {token for token in syncer if token.startswith("--cplg-")} == (
+            expected_cplg_flags
+        )
+        assert "--resume" not in syncer
+        commands[name] = (learner, syncer, arm_dir)
+
+    stock_learner, stock_syncer, stock_dir = commands["cplg_m1_stock"]
+    candidate_learner, candidate_syncer, candidate_dir = commands["cplg_m1_candidate"]
+    assert "cplg_m1_stock" not in " ".join(candidate_learner + candidate_syncer)
+    assert "cplg_m1_candidate" not in " ".join(stock_learner + stock_syncer)
+
+    def normalize_arm_paths(command, arm_dir):
+        prefix = str(arm_dir)
+        resolved_prefix = str(arm_dir.resolve())
+        return [
+            token.replace(resolved_prefix, "{ARM_DIR}").replace(prefix, "{ARM_DIR}")
+            for token in command
+        ]
+
+    assert normalize_arm_paths(stock_learner, stock_dir) == normalize_arm_paths(
+        candidate_learner, candidate_dir
+    )
+
+    normalized_stock = normalize_arm_paths(stock_syncer, stock_dir)
+    normalized_candidate = normalize_arm_paths(candidate_syncer, candidate_dir)
+    for command in (normalized_stock, normalized_candidate):
+        command[command.index("--outer-optimizer") + 1] = "{SELECTOR}"
+    for flag in ("--cplg-action-ledger", "--cplg-action-ledger-manifest"):
+        index = normalized_candidate.index(flag)
+        del normalized_candidate[index : index + 2]
+    assert normalized_stock == normalized_candidate
+
+
+def test_cplg_online_syncer_flags_are_atomic_and_candidate_ledger_is_exclusive(
+    tmp_path,
+):
+    import pytest
+
+    stock = compare.PRESETS["cplg_m1_stock"]
+    candidate = compare.PRESETS["cplg_m1_candidate"]
+    core = {
+        "cplg_online_run_id": "run",
+        "cplg_online_run_config_sha256": "a" * 64,
+        "cplg_online_source_commit": "b" * 40,
+        "cplg_online_initial_state_manifest": tmp_path / "initial.json",
+        "cplg_online_completion_manifest": tmp_path / "completion.json",
+    }
+
+    with pytest.raises(ValueError, match="identity and receipt paths"):
+        compare.syncer_command(
+            stock,
+            1234,
+            tmp_path / "stock",
+            total_steps=32,
+            cplg_online_run_id="run",
+        )
+    with pytest.raises(ValueError, match="require --outer-optimizer cplg-sgd"):
+        compare.syncer_command(
+            stock,
+            1234,
+            tmp_path / "stock",
+            total_steps=32,
+            cplg_action_ledger=tmp_path / "ledger.jsonl",
+            cplg_action_ledger_manifest=tmp_path / "ledger-manifest.json",
+            **core,
+        )
+    with pytest.raises(ValueError, match="requires the action ledger"):
+        compare.syncer_command(
+            candidate,
+            1234,
+            tmp_path / "candidate",
+            total_steps=32,
+            **core,
+        )
+
+
+def test_cplg_online_pair_dry_run_requires_frozen_pair_and_identities(
+    monkeypatch, capsys
+):
+    import pytest
+
+    argv = [
+        "compare_diloco.py",
+        "--data",
+        "unused.jsonl",
+        "--settings",
+        "cplg_m1_stock,cplg_m1_candidate",
+        "--token-budget",
+        "4352",
+        "--eval-rows",
+        "8",
+        "--syncer-total-steps",
+        "32",
+        "--learner-max-steps",
+        "96",
+        "--fixed-window-microsteps",
+        "4",
+        "--strict-quorum",
+        "--barrier-sync",
+        "--deterministic-commit-order",
+        "--skip-baseline",
+        "--cplg-online-run-id",
+        "exp2-cplg-online-e1",
+        "--cplg-online-run-config-sha256",
+        "a" * 64,
+        "--cplg-online-source-commit",
+        "b" * 40,
+        "--dry-run",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert compare.main() == 0
+    assert "optimizer=cplg-sgd" in capsys.readouterr().out
+
+    obsolete_schedule = list(argv)
+    obsolete_schedule[obsolete_schedule.index("--token-budget") + 1] = "32768"
+    obsolete_schedule[obsolete_schedule.index("--syncer-total-steps") + 1] = "256"
+    obsolete_schedule[obsolete_schedule.index("--learner-max-steps") + 1] = "256"
+    monkeypatch.setattr(sys, "argv", obsolete_schedule)
+    with pytest.raises(SystemExit) as exc_info:
+        compare.main()
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "32 commits, learner cap 96" in error
+    assert "4352 exact raw tokens (34 terminal local steps)" in error
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [*argv[:-1], "--outer-optimizer", "nesterov", "--dry-run"],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        compare.main()
+    assert exc_info.value.code == 2
+    assert "preset identity drifted" in capsys.readouterr().err
+
+    single = list(argv)
+    single[single.index("--settings") + 1] = "cplg_m1_candidate"
+    monkeypatch.setattr(sys, "argv", single)
+    with pytest.raises(SystemExit) as exc_info:
+        compare.main()
+    assert exc_info.value.code == 2
+    assert "requires exactly" in capsys.readouterr().err
+
+    uppercase_digest = list(argv)
+    uppercase_digest[uppercase_digest.index("--cplg-online-run-config-sha256") + 1] = (
+        "A" * 64
+    )
+    monkeypatch.setattr(sys, "argv", uppercase_digest)
+    with pytest.raises(SystemExit) as exc_info:
+        compare.main()
+    assert exc_info.value.code == 2
+    assert "lowercase hexadecimal SHA-256" in capsys.readouterr().err
+
+
 def test_compare_outer_optimizer_override_applies_to_every_selected_arm():
     original = compare.select_arms("m4,q4")
     overridden = compare.apply_arm_overrides(

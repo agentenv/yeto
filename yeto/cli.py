@@ -87,9 +87,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
 
     sync = p.add_argument_group("async sync")
-    sync.add_argument("--total-steps", type=int, default=64, help="outer steps T (one fragment each)")
-    sync.add_argument("--fragments", type=int, default=8, help="fragments P (= sync interval H)")
-    sync.add_argument("--quorum", type=int, default=1, help="minimum learners per outer step (K)")
+    sync.add_argument(
+        "--total-steps", type=int, default=64, help="outer steps T (one fragment each)"
+    )
+    sync.add_argument(
+        "--fragments", type=int, default=8, help="fragments P (= sync interval H)"
+    )
+    sync.add_argument(
+        "--quorum", type=int, default=1, help="minimum learners per outer step (K)"
+    )
     sync.add_argument(
         "--external-learners",
         type=int,
@@ -152,9 +158,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     sync.add_argument(
         "--outer-optimizer",
-        choices=["nesterov", "normalized-ema", "restarted-ema"],
+        choices=["nesterov", "normalized-ema", "restarted-ema", "cplg-sgd"],
         default="nesterov",
-        help="syncer outer optimizer; nesterov preserves the existing behavior",
+        help="syncer outer optimizer; cplg-sgd selects the causal phase-locked "
+        "direction and requires the syncer's frozen SGD-0.28 treatment",
     )
     sync.add_argument(
         "--outer-restart-cos-threshold",
@@ -184,7 +191,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="WAN tensor encoding; q4 sends pushes as 4-bit E3M0 block-quantized "
         "deltas (~4x less learner egress; broadcasts stay bf16)",
     )
-    sync.add_argument("--wan-streams", type=int, default=4, help="parallel TCP streams per learner")
+    sync.add_argument(
+        "--wan-streams", type=int, default=4, help="parallel TCP streams per learner"
+    )
 
     infra = p.add_argument_group("infrastructure")
     infra.add_argument(
@@ -238,8 +247,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "'local' runs a detached worker on this machine plus a separate "
         "syncer VM (this machine must stay up for the whole run)",
     )
-    infra.add_argument("--cluster-prefix", default="yeto", help="cluster name prefix; also the run's name")
-    infra.add_argument("--keep", action="store_true", help="do not tear down clusters at the end")
+    infra.add_argument(
+        "--cluster-prefix",
+        default="yeto",
+        help="cluster name prefix; also the run's name",
+    )
+    infra.add_argument(
+        "--keep", action="store_true", help="do not tear down clusters at the end"
+    )
     infra.add_argument(
         "--retry-until-up",
         action="store_true",
@@ -267,10 +282,11 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         backend.add_launch_cli_args(p)
 
 
-
 def parse_args(argv=None):
     """Parse launch flags only (kept for callers that predate subcommands)."""
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     _add_launch_args(p)
     return p.parse_args(argv)
 
@@ -300,7 +316,12 @@ def build_parser() -> argparse.ArgumentParser:
         "cached for 1 hour.",
     )
     shape.add_argument("--model", required=True, help="model alias or HF id")
-    shape.add_argument("--budget", type=float, default=None, help="fleet budget in $/hr (includes head VM)")
+    shape.add_argument(
+        "--budget",
+        type=float,
+        default=None,
+        help="fleet budget in $/hr (includes head VM)",
+    )
     shape.add_argument(
         "--flops",
         type=float,
@@ -310,13 +331,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     shape.add_argument("--tuning", choices=["lora", "full"], default="lora")
     shape.add_argument("--seq-len", type=int, default=2048)
-    shape.add_argument("--data", default=None, help="HF dataset id (fills the launch line; required with --apply)")
+    shape.add_argument(
+        "--data",
+        default=None,
+        help="HF dataset id (fills the launch line; required with --apply)",
+    )
     shape.add_argument(
         "--apply",
         action="store_true",
         help="launch the computed plan immediately (hands off to `yeto launch`)",
     )
-    shape.add_argument("--json", action="store_true", help="emit the plan as JSON instead of text")
+    shape.add_argument(
+        "--json", action="store_true", help="emit the plan as JSON instead of text"
+    )
     shape.add_argument(
         "--regions",
         default=None,
@@ -367,14 +394,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated clouds to plan across (default: aws, plus "
         "runpod when its credentials are present)",
     )
-    shape.add_argument("--max-islands", type=int, default=16, help="cap on learner islands (syncer fan-out)")
+    shape.add_argument(
+        "--max-islands",
+        type=int,
+        default=16,
+        help="cap on learner islands (syncer fan-out)",
+    )
     shape.add_argument(
         "--weights-gb",
         type=float,
         default=None,
         help="override the model weight size estimate (bf16 GB)",
     )
-    shape.add_argument("--no-cache", action="store_true", help="bypass the 1h signal cache")
+    shape.add_argument(
+        "--no-cache", action="store_true", help="bypass the 1h signal cache"
+    )
 
     sub.add_parser("status", help="table of known runs")
 
@@ -428,6 +462,7 @@ def _stream_log(name: str, follow: bool = True, alive=None) -> None:
     exits (then drain what's left). Raises KeyboardInterrupt through to the
     caller — Ctrl-C means "stop streaming", never "stop the run"."""
     if alive is None:
+
         def alive() -> bool:
             meta = runs.load_run(name) or {}
             return runs.is_alive(meta.get("pid"))
@@ -474,7 +509,9 @@ def _fleet_args_error(args) -> str | None:
     backend = get_backend(getattr(args, "task", None))
     if not backend.supports_auto_fleet:
         if args.gpu is None:
-            return f"--task {backend.name} requires --gpu; auto-fleet planning is LM-only"
+            return (
+                f"--task {backend.name} requires --gpu; auto-fleet planning is LM-only"
+            )
         if args.budget is not None or args.flops is not None:
             return (
                 f"--budget/--flops auto-fleet planning is LM-only; pass an "
@@ -506,7 +543,16 @@ def _resolve_auto_fleet(args) -> int:
     except (ValueError, RuntimeError) as e:
         print(f"[yeto] fleet planning failed: {e}", file=sys.stderr)
         return 1
-    print(render(result, args.model, args.budget, args.tuning, args.data, target_tflops=args.flops))
+    print(
+        render(
+            result,
+            args.model,
+            args.budget,
+            args.tuning,
+            args.data,
+            target_tflops=args.flops,
+        )
+    )
     if not result.plan.counts:
         return 1
     entries: list[str] = []
@@ -675,7 +721,9 @@ def _make_head_task(args, syncer_binary, extra_mounts: dict | None = None):
         file_mounts=file_mounts,
     )
     # Same placement grammar as the syncer VM: 'region' (AWS) or 'cloud/region'.
-    infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
+    infra = (
+        args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
+    )
     task.set_resources(
         sky.Resources(
             infra=infra,
@@ -790,7 +838,10 @@ def cmd_launch_head(args) -> int:
     runs.update_run(name, state=runs.SUBMITTED, head_job_id=job_id)
     print(f"[yeto] run '{name}' submitted: job {job_id} on {head_cluster}.")
     print("[yeto] this machine is no longer needed; the head supervises the fleet.")
-    print("[yeto] streaming head logs — Ctrl-C detaches, the run keeps going.\n", flush=True)
+    print(
+        "[yeto] streaming head logs — Ctrl-C detaches, the run keeps going.\n",
+        flush=True,
+    )
     try:
         _stream_head_logs(head_cluster, job_id, follow=True)
     except KeyboardInterrupt:
@@ -1116,9 +1167,23 @@ def cmd_shape(args) -> int:
         print(f"[yeto] shape failed: {e}", file=sys.stderr)
         return 1
     if args.json:
-        print(json.dumps(to_json_dict(result, args.model, args.budget, args.tuning, args.data), indent=2))
+        print(
+            json.dumps(
+                to_json_dict(result, args.model, args.budget, args.tuning, args.data),
+                indent=2,
+            )
+        )
     else:
-        print(render(result, args.model, args.budget, args.tuning, args.data, target_tflops=args.flops))
+        print(
+            render(
+                result,
+                args.model,
+                args.budget,
+                args.tuning,
+                args.data,
+                target_tflops=args.flops,
+            )
+        )
     if not result.plan.counts:
         return 1
     if args.apply:

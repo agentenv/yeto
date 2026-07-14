@@ -1,4 +1,5 @@
 mod action_probe;
+mod cplg_evidence;
 mod merge;
 mod protocol;
 mod server;
@@ -158,6 +159,28 @@ struct Args {
     /// --stock-shadow-initial-state-manifest.
     #[arg(long)]
     stock_shadow_completion_manifest: Option<std::path::PathBuf>,
+    /// Stable active-E1 run identity copied into both arm receipts and every
+    /// candidate action-ledger row.
+    #[arg(long)]
+    cplg_online_run_id: Option<String>,
+    /// Lowercase SHA-256 of the immutable active-E1 run configuration.
+    #[arg(long)]
+    cplg_online_run_config_sha256: Option<String>,
+    /// Lowercase 40-hex source commit for the active-E1 acquisition.
+    #[arg(long)]
+    cplg_online_source_commit: Option<String>,
+    /// Fresh absolute path for the producer-derived initial-state receipt.
+    #[arg(long)]
+    cplg_online_initial_state_manifest: Option<std::path::PathBuf>,
+    /// Fresh absolute path for the active-E1 completion receipt.
+    #[arg(long)]
+    cplg_online_completion_manifest: Option<std::path::PathBuf>,
+    /// Fresh absolute candidate-only path for the 32-row CPLG action ledger.
+    #[arg(long)]
+    cplg_action_ledger: Option<std::path::PathBuf>,
+    /// Fresh absolute candidate-only path for the action-ledger manifest.
+    #[arg(long)]
+    cplg_action_ledger_manifest: Option<std::path::PathBuf>,
     /// Optional directory for offline syncer-current fragment probes.
     /// When set, the syncer writes one pre-merge checkpoint per sampled
     /// round, one f32 candidate-fragment file per admitted responder, the
@@ -255,6 +278,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     let action_probe = action_probe_config(&args)?;
     let stock_vector_capture = stock_vector_capture_config(&args, outer_lr_by_fragment.as_deref())?;
+    let cplg_online_evidence = cplg_online_config(&args, outer_lr_by_fragment.as_deref())?;
     if args.stock_shadow_initial_state_manifest.is_some()
         != args.stock_shadow_completion_manifest.is_some()
     {
@@ -311,6 +335,7 @@ fn main() -> anyhow::Result<()> {
         stock_vector_capture,
         stock_shadow_initial_state_manifest: args.stock_shadow_initial_state_manifest,
         stock_shadow_completion_manifest: args.stock_shadow_completion_manifest,
+        cplg_online_evidence,
         probe_capture_dir: args.probe_capture_dir,
         probe_capture_every: args.probe_capture_every,
         response_transcript: args.response_transcript,
@@ -322,6 +347,106 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(server::run(cfg))
+}
+
+fn cplg_online_config(
+    args: &Args,
+    outer_lr_by_fragment: Option<&[f32]>,
+) -> anyhow::Result<Option<cplg_evidence::CplgOnlineConfig>> {
+    let online_fields_present = [
+        args.cplg_online_run_id.is_some(),
+        args.cplg_online_run_config_sha256.is_some(),
+        args.cplg_online_source_commit.is_some(),
+        args.cplg_online_initial_state_manifest.is_some(),
+        args.cplg_online_completion_manifest.is_some(),
+    ];
+    let ledger_fields_present = [
+        args.cplg_action_ledger.is_some(),
+        args.cplg_action_ledger_manifest.is_some(),
+    ];
+    if online_fields_present.iter().all(|present| !present) {
+        if ledger_fields_present.iter().any(|present| *present) {
+            anyhow::bail!("CPLG action-ledger flags require the full --cplg-online-* group");
+        }
+        return Ok(None);
+    }
+    if !online_fields_present.iter().all(|present| *present) {
+        anyhow::bail!(
+            "CPLG online evidence requires run-id, run-config SHA-256, source commit, initial-state manifest, and completion manifest together"
+        );
+    }
+    if !ledger_fields_present.iter().all(|present| *present)
+        && ledger_fields_present.iter().any(|present| *present)
+    {
+        anyhow::bail!("CPLG action-ledger path and manifest path are required together");
+    }
+    match args.outer_optimizer {
+        merge::OuterOptimizer::Nesterov => {
+            if ledger_fields_present.iter().any(|present| *present) {
+                anyhow::bail!(
+                    "--cplg-action-ledger flags are rejected unless --outer-optimizer is cplg-sgd"
+                );
+            }
+        }
+        merge::OuterOptimizer::CplgSgd => {
+            if !ledger_fields_present.iter().all(|present| *present) {
+                anyhow::bail!(
+                    "--outer-optimizer cplg-sgd requires both CPLG action-ledger flags for active-E1 evidence"
+                );
+            }
+        }
+        optimizer => anyhow::bail!(
+            "CPLG online evidence requires --outer-optimizer nesterov or cplg-sgd, got {optimizer}"
+        ),
+    }
+    if args.total_steps != cplg_evidence::EXPECTED_COMMITS {
+        anyhow::bail!(
+            "CPLG online evidence requires --total-steps {}",
+            cplg_evidence::EXPECTED_COMMITS
+        );
+    }
+    if args.learners != 1 || args.quorum != 1 || !args.strict_quorum {
+        anyhow::bail!("CPLG online evidence requires one learner and strict quorum one");
+    }
+    if !args.deterministic_commit_order
+        || args.commit_policy != action_probe::CommitPolicy::TokenWeighted
+        || args.resume
+    {
+        anyhow::bail!(
+            "CPLG online evidence requires a fresh non-resumed run with deterministic token-weighted commits"
+        );
+    }
+    if args.outer_lr.to_bits() != CPLG_TREATMENT_LR.to_bits()
+        || args.outer_momentum.to_bits() != 0x0000_0000
+        || outer_lr_by_fragment.is_some()
+        || args.delta_norm_ref.to_bits() != 0x0000_0000
+    {
+        anyhow::bail!(
+            "CPLG online evidence requires exact SGD-0.28, positive-zero momentum, no per-fragment LR, and positive-zero delta-norm-ref"
+        );
+    }
+    if args.delta_correction != "none"
+        || args.inner_control_variate != "none"
+        || args.version_matched_anchor
+        || args.anchor_drift_log
+        || args.scaffold_control_shuffle
+    {
+        anyhow::bail!("CPLG online evidence forbids non-frozen merge/control interventions");
+    }
+    if args.event_tape.is_none() || args.checkpoint_path.is_none() {
+        anyhow::bail!("CPLG online evidence requires --event-tape and --checkpoint-path");
+    }
+    let config = cplg_evidence::CplgOnlineConfig {
+        run_id: args.cplg_online_run_id.clone().unwrap(),
+        run_config_sha256: args.cplg_online_run_config_sha256.clone().unwrap(),
+        source_commit: args.cplg_online_source_commit.clone().unwrap(),
+        initial_state_manifest: args.cplg_online_initial_state_manifest.clone().unwrap(),
+        completion_manifest: args.cplg_online_completion_manifest.clone().unwrap(),
+        action_ledger: args.cplg_action_ledger.clone(),
+        action_ledger_manifest: args.cplg_action_ledger_manifest.clone(),
+    };
+    config.validate()?;
+    Ok(Some(config))
 }
 
 fn stock_vector_capture_config(
@@ -571,6 +696,147 @@ mod tests {
         ])
         .unwrap();
         assert!(args.deterministic_commit_order);
+    }
+
+    fn parse_cplg_online(optimizer: &str, include_ledger: bool) -> Args {
+        let mut argv = vec![
+            "yeto-syncer".to_owned(),
+            "--learners".to_owned(),
+            "1".to_owned(),
+            "--quorum".to_owned(),
+            "1".to_owned(),
+            "--strict-quorum".to_owned(),
+            "--total-steps".to_owned(),
+            "32".to_owned(),
+            "--deterministic-commit-order".to_owned(),
+            "--delta-correction".to_owned(),
+            "none".to_owned(),
+            "--outer-optimizer".to_owned(),
+            optimizer.to_owned(),
+            "--outer-lr".to_owned(),
+            "0.28".to_owned(),
+            "--outer-momentum".to_owned(),
+            "0".to_owned(),
+            "--event-tape".to_owned(),
+            "/tmp/cplg-online/tape.jsonl".to_owned(),
+            "--checkpoint-path".to_owned(),
+            "/tmp/cplg-online/state.ckpt".to_owned(),
+            "--cplg-online-run-id".to_owned(),
+            "exp2-cplg-active-e1-m1-r1".to_owned(),
+            "--cplg-online-run-config-sha256".to_owned(),
+            "a".repeat(64),
+            "--cplg-online-source-commit".to_owned(),
+            "b".repeat(40),
+            "--cplg-online-initial-state-manifest".to_owned(),
+            "/tmp/cplg-online/cplg_online_initial_state.json".to_owned(),
+            "--cplg-online-completion-manifest".to_owned(),
+            "/tmp/cplg-online/cplg_online_completion.json".to_owned(),
+        ];
+        if include_ledger {
+            argv.extend([
+                "--cplg-action-ledger".to_owned(),
+                "/tmp/cplg-online/cplg_action_ledger.jsonl".to_owned(),
+                "--cplg-action-ledger-manifest".to_owned(),
+                "/tmp/cplg-online/cplg_action_ledger_manifest.json".to_owned(),
+            ]);
+        }
+        Args::try_parse_from(argv).unwrap()
+    }
+
+    #[test]
+    fn cplg_online_cli_implements_complete_stock_and_candidate_groups() {
+        let stock = parse_cplg_online("nesterov", false);
+        let stock_config = cplg_online_config(&stock, None).unwrap().unwrap();
+        assert_eq!(stock_config.run_id, "exp2-cplg-active-e1-m1-r1");
+        assert_eq!(stock_config.run_config_sha256, "a".repeat(64));
+        assert_eq!(stock_config.source_commit, "b".repeat(40));
+        assert!(stock_config.initial_state_manifest.is_absolute());
+        assert!(stock_config.completion_manifest.is_absolute());
+        assert!(stock_config.action_ledger.is_none());
+
+        let candidate = parse_cplg_online("cplg-sgd", true);
+        let candidate_config = cplg_online_config(&candidate, None).unwrap().unwrap();
+        assert_eq!(
+            candidate_config.action_ledger.as_deref(),
+            Some(std::path::Path::new(
+                "/tmp/cplg-online/cplg_action_ledger.jsonl"
+            ))
+        );
+        assert_eq!(
+            candidate_config.action_ledger_manifest.as_deref(),
+            Some(std::path::Path::new(
+                "/tmp/cplg-online/cplg_action_ledger_manifest.json"
+            ))
+        );
+    }
+
+    #[test]
+    fn cplg_online_cli_rejects_partial_groups_and_stock_ledgers() {
+        let partial = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "1",
+            "--total-steps",
+            "32",
+            "--cplg-online-run-id",
+            "partial",
+        ])
+        .unwrap();
+        assert!(cplg_online_config(&partial, None)
+            .unwrap_err()
+            .to_string()
+            .contains("requires run-id"));
+
+        let candidate_without_ledger = parse_cplg_online("cplg-sgd", false);
+        assert!(cplg_online_config(&candidate_without_ledger, None)
+            .unwrap_err()
+            .to_string()
+            .contains("requires both"));
+
+        let mut malformed_identity = parse_cplg_online("nesterov", false);
+        malformed_identity.cplg_online_run_config_sha256 = Some("A".repeat(64));
+        assert!(cplg_online_config(&malformed_identity, None)
+            .unwrap_err()
+            .to_string()
+            .contains("lowercase hexadecimal"));
+
+        let mut relative_receipt = parse_cplg_online("nesterov", false);
+        relative_receipt.cplg_online_completion_manifest =
+            Some(std::path::PathBuf::from("completion.json"));
+        assert!(cplg_online_config(&relative_receipt, None)
+            .unwrap_err()
+            .to_string()
+            .contains("must be absolute"));
+
+        let mut stock_with_ledger = parse_cplg_online("cplg-sgd", true);
+        stock_with_ledger.outer_optimizer = merge::OuterOptimizer::Nesterov;
+        assert!(cplg_online_config(&stock_with_ledger, None)
+            .unwrap_err()
+            .to_string()
+            .contains("rejected unless"));
+
+        let ledger_without_online = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "1",
+            "--total-steps",
+            "32",
+            "--outer-optimizer",
+            "cplg-sgd",
+            "--outer-lr",
+            "0.28",
+            "--outer-momentum",
+            "0",
+            "--cplg-action-ledger",
+            "/tmp/cplg-online/ledger.jsonl",
+            "--cplg-action-ledger-manifest",
+            "/tmp/cplg-online/manifest.json",
+        ])
+        .unwrap();
+        assert!(cplg_online_config(&ledger_without_online, None)
+            .unwrap_err()
+            .to_string()
+            .contains("full --cplg-online-* group"));
     }
 
     #[test]

@@ -17,14 +17,17 @@ Per inner step (one optimizer step):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import math
 import os
 import random
+import tempfile
 import time
 import uuid
 from collections import deque
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -32,7 +35,7 @@ import torch.distributed as dist
 from .autobatch import int_or_auto, rebalance_grad_accum, resolve_micro_batch_size
 from .bcmp_shadow import BCMPShadowTracker
 from .data import StreamingPackedBlocks, build_packed_dataset
-from .fragments import FragmentLayout, build_layout
+from .fragments import build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
 from .protocol import (
     DTYPE_BF16,
@@ -60,8 +63,6 @@ from .tensor_io import (
 
 log = logging.getLogger("learner")
 
-from .models import MODEL_ALIASES  # single source; see yeto/models.py
-
 
 def accelerator_model_dtype(device: torch.device | str) -> torch.dtype:
     """Storage/compute dtype for frozen base weights on the local device."""
@@ -74,6 +75,88 @@ def accelerator_model_dtype(device: torch.device | str) -> torch.dtype:
             return torch.float16
         return torch.bfloat16
     return torch.bfloat16
+
+
+def write_learner_completion_receipt(
+    path: str | Path,
+    *,
+    learner_id: int,
+    local_step: int,
+    raw_tokens: int,
+    global_step: int,
+    reconnect_count: int,
+    terminal_status: str,
+) -> str:
+    """Atomically publish exact terminal work accounting and its checksum."""
+
+    path = Path(path)
+    sidecar = Path(f"{path}.sha256")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or sidecar.exists():
+        raise RuntimeError(f"learner completion receipt path is not fresh: {path}")
+    if any(
+        type(value) is not int or value < 0
+        for value in (
+            learner_id,
+            local_step,
+            raw_tokens,
+            global_step,
+            reconnect_count,
+        )
+    ):
+        raise ValueError("learner completion counters must be non-negative integers")
+    if terminal_status not in {"syncer_shutdown", "max_local_steps_reached"}:
+        raise ValueError(f"invalid learner terminal status {terminal_status!r}")
+
+    receipt = {
+        "schema": "yeto.learner_completion.v1",
+        "learner_id": learner_id,
+        "local_step": local_step,
+        "raw_tokens": raw_tokens,
+        "global_step": global_step,
+        "reconnect_count": reconnect_count,
+        "terminal_status": terminal_status,
+    }
+    raw = (
+        json.dumps(
+            receipt,
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+    def publish(destination: Path, payload: bytes) -> None:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=destination.name + ".", suffix=".tmp", dir=destination.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    publish(path, raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    publish(sidecar, f"{digest}  {path.name}\n".encode("ascii"))
+    try:
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        # Both files are already fsynced. Some filesystems reject directory
+        # fsync while still providing atomic replacement semantics.
+        pass
+    return digest
 
 
 def parse_args(argv=None):
@@ -267,6 +350,12 @@ def parse_args(argv=None):
     )
     p.add_argument("--max-local-steps", type=int, default=1_000_000, help="safety stop")
     p.add_argument("--output-dir", default="checkpoints/out")
+    p.add_argument(
+        "--learner-completion-receipt",
+        default=None,
+        help="optional atomic JSON work-accounting receipt written after a "
+        "successful learner shutdown",
+    )
     p.add_argument("--device", default=None)
     p.add_argument(
         "--probe-data",
@@ -1492,7 +1581,7 @@ def main(argv=None) -> None:
                 )
             log.info("sent INIT_PARAMS for %d fragments", layout.num_fragments)
 
-    run_inner_loop(
+    completion = run_inner_loop(
         args,
         model,
         params,
@@ -1531,6 +1620,36 @@ def main(argv=None) -> None:
             log.info("saved model to %s", save_dir)
         if client is not None:
             client.close()
+            transport_state = client.terminal_transport_state
+        else:
+            transport_state = None
+        if args.learner_completion_receipt is not None:
+            if (
+                completion["terminal_status"] == "syncer_shutdown"
+                and transport_state is not None
+                and not transport_state.shutdown_received
+            ):
+                raise RuntimeError(
+                    "learner observed syncer shutdown without a matching "
+                    "terminal transport state"
+                )
+            write_learner_completion_receipt(
+                args.learner_completion_receipt,
+                learner_id=args.learner_id,
+                local_step=completion["local_step"],
+                raw_tokens=completion["raw_tokens"],
+                global_step=completion["global_step"],
+                reconnect_count=(
+                    transport_state.reconnect_count
+                    if transport_state is not None
+                    else 0
+                ),
+                terminal_status=completion["terminal_status"],
+            )
+            log.info(
+                "learner completion receipt written to %s",
+                args.learner_completion_receipt,
+            )
     if world > 1:
         dist.barrier()
         dist.destroy_process_group()
@@ -1689,9 +1808,9 @@ def run_inner_loop(
     elif args.loss_function.startswith("custom:"):
         compute_loss = load_custom_loss(args.loss_function)
     else:
-        compute_loss = lambda logits, ids, w: sft_loss(
-            logits, ids, args.loss_function, w
-        )  # noqa: E731
+
+        def compute_loss(logits, ids, weights):
+            return sft_loss(logits, ids, args.loss_function, weights)
 
     probe = None
     if rank == 0 and client is not None and args.probe_data is not None:
@@ -2302,11 +2421,13 @@ def run_inner_loop(
                 # merged global. drain/apply reuse the boundary helpers so the
                 # applied state is bit-identical to a broadcast picked up at a
                 # step boundary. A no-op unless --barrier-sync pushed above.
-                while (
-                    barrier_sync
-                    and (awaiting_broadcast or awaiting_control)
-                    and not shutdown
-                ):
+                # SHUTDOWN travels on the control stream while fragment
+                # broadcasts travel on striped data streams, so shutdown may
+                # be observed first. It stops further optimizer steps but must
+                # not release this barrier: every already-pushed final
+                # broadcast still has to land before terminal global_step is
+                # receipted.
+                while barrier_sync and (awaiting_broadcast or awaiting_control):
                     client.check_health()
                     waited = drain_broadcast_actions()
                     drain_scaffold_controls()
@@ -2326,6 +2447,14 @@ def run_inner_loop(
     log.info(
         "inner loop done at local_step=%d global_step=%d", steps_total, global_step
     )
+    return {
+        "local_step": steps_total,
+        "raw_tokens": tokens_total,
+        "global_step": global_step,
+        "terminal_status": (
+            "syncer_shutdown" if shutdown else "max_local_steps_reached"
+        ),
+    }
 
 
 if __name__ == "__main__":

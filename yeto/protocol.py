@@ -190,6 +190,14 @@ class PushAudit:
             raise ValueError("audit payload_sha256 must be 32 bytes")
 
 
+@dataclass(frozen=True)
+class TerminalTransportState:
+    """Learner-visible transport facts sealed into a completion receipt."""
+
+    reconnect_count: int
+    shutdown_received: bool
+
+
 class SyncerClient:
     """Non-blocking striped syncer connection owned by one learner process.
 
@@ -406,6 +414,23 @@ class SyncerClient:
         attempted this is a no-op; the training loop keeps stepping locally."""
         if self._err is not None:
             raise RuntimeError("syncer connection failed") from self._err
+
+    @property
+    def reconnects_used(self) -> int:
+        """Number of redial attempts consumed by this client."""
+
+        with self._lock:
+            return self._reconnects_used
+
+    @property
+    def terminal_transport_state(self) -> TerminalTransportState:
+        """Snapshot transport facts after the inner loop reaches terminal state."""
+
+        with self._lock:
+            return TerminalTransportState(
+                reconnect_count=self._reconnects_used,
+                shutdown_received=self.shutdown.is_set(),
+            )
 
     # -- learner-facing API ------------------------------------------------------
 

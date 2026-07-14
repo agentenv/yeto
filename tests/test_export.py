@@ -8,6 +8,7 @@ import torch
 
 from yeto.export import (
     CKPT_MAGIC,
+    CPLG_CKPT_EXTENSION_MAGIC,
     PTI_CKPT_EXTENSION_MAGIC,
     parse_checkpoint,
     validate_against_layout,
@@ -149,6 +150,89 @@ def test_pti_checkpoint_extension_is_validated_and_ignored_for_export(tmp_path):
     assert ckpt.layout_meta is None
     for parsed, expected in zip(ckpt.fragments, blobs):
         assert torch.equal(parsed[1], expected[1])
+
+
+def _checkpoint_with_cplg_extension(blobs, *, mutate_first=None):
+    raw = bytearray(checkpoint_bytes(11, blobs, LEDGER))
+    raw += struct.pack("<I", 0)  # empty layout metadata block
+    raw += struct.pack("<II", CPLG_CKPT_EXTENSION_MAGIC, len(blobs))
+    for fid, (_version, values, _momentum) in enumerate(blobs):
+        stock = values.reshape(-1).tolist()
+        tangent = [0.0] * len(stock)
+        tangent[0] = 1.0
+        candidate = list(stock)
+        theta_tag = 1
+        theta = 0.125
+        scores = [0.1, 0.2]
+        if fid == 0 and mutate_first is not None:
+            stock, tangent, candidate, theta_tag, theta, scores = mutate_first(
+                stock, tangent, candidate, theta_tag, theta, scores
+            )
+        for vector in (stock, tangent, candidate):
+            raw += struct.pack("<Q", len(vector))
+            raw += struct.pack(f"<{len(vector)}f", *vector)
+        raw += struct.pack("<B", theta_tag)
+        if theta_tag == 1:
+            raw += struct.pack("<f", theta)
+        raw += struct.pack("<I", len(scores))
+        raw += struct.pack(f"<{len(scores)}f", *scores)
+    return bytes(raw)
+
+
+def test_cplg_checkpoint_extension_is_validated_and_ignored_for_export(tmp_path):
+    params = fake_params()
+    layout = build_layout([(n, p.numel()) for n, p in params.items()], 4)
+    blobs = [
+        (fid, flat_fragment(frag, params), torch.zeros(frag.numel))
+        for fid, frag in enumerate(layout.fragments)
+    ]
+    path = tmp_path / "syncer-cplg.ckpt"
+    path.write_bytes(_checkpoint_with_cplg_extension(blobs))
+
+    ckpt = parse_checkpoint(path)
+
+    assert ckpt.global_step == 11
+    for parsed, expected in zip(ckpt.fragments, blobs):
+        assert torch.equal(parsed[1], expected[1])
+
+
+def test_cplg_checkpoint_extension_rejects_nonfinite_state(tmp_path):
+    params = fake_params()
+    layout = build_layout([(n, p.numel()) for n, p in params.items()], 4)
+    blobs = [
+        (fid, flat_fragment(frag, params), torch.zeros(frag.numel))
+        for fid, frag in enumerate(layout.fragments)
+    ]
+
+    def inject_nan(stock, tangent, candidate, theta_tag, theta, scores):
+        candidate[0] = float("nan")
+        return stock, tangent, candidate, theta_tag, theta, scores
+
+    path = tmp_path / "syncer-cplg-nan.ckpt"
+    path.write_bytes(_checkpoint_with_cplg_extension(blobs, mutate_first=inject_nan))
+
+    with pytest.raises(ValueError, match="pending candidate is non-finite"):
+        parse_checkpoint(path)
+
+
+def test_cplg_checkpoint_extension_rejects_inconsistent_phase_state(tmp_path):
+    params = fake_params()
+    layout = build_layout([(n, p.numel()) for n, p in params.items()], 4)
+    blobs = [
+        (fid, flat_fragment(frag, params), torch.zeros(frag.numel))
+        for fid, frag in enumerate(layout.fragments)
+    ]
+
+    def remove_tangent(stock, tangent, candidate, theta_tag, theta, scores):
+        return stock, [], candidate, theta_tag, theta, scores
+
+    path = tmp_path / "syncer-cplg-phase.ckpt"
+    path.write_bytes(
+        _checkpoint_with_cplg_extension(blobs, mutate_first=remove_tangent)
+    )
+
+    with pytest.raises(ValueError, match="inconsistent phase state"):
+        parse_checkpoint(path)
 
 
 def test_numel_mismatch_raises(tmp_path):
