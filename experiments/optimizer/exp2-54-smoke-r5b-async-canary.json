@@ -2,7 +2,7 @@
   "schema_version": 1,
   "run_id": "exp2-54-smoke-r5b-async-canary",
   "repo_url": "https://github.com/agentenv/yeto.git",
-  "repo_commit": "82f86e00d0a0d4e849c693ddf148df4f6de9bb87",
+  "repo_commit": "4ed893d195f260ba7560680d1cf3e5030f1e7bed",
   "cloud": {
     "provider": "gcp",
     "project": "model-training-497007",
