@@ -4334,4 +4334,210 @@ mod tests {
             .all(|score| *score > 0.0));
         std::fs::remove_file(path).ok();
     }
+
+    fn cplg_values_from_bits(bits: &[u32]) -> Vec<f32> {
+        bits.iter().copied().map(f32::from_bits).collect()
+    }
+
+    fn cplg_value_bits(values: &[f32]) -> Vec<u32> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    fn cplg_exact_fixture(
+        current: &[u32],
+        previous: &[u32],
+        previous_previous: &[u32],
+    ) -> (Vec<f32>, CplgGeometry, CplgGeometry, CplgFragmentState) {
+        let current = cplg_values_from_bits(current);
+        let previous = cplg_values_from_bits(previous);
+        let previous_previous = cplg_values_from_bits(previous_previous);
+        let previous_geometry = cplg_geometry(&previous, &previous_previous, &[], None).unwrap();
+        let current_geometry = cplg_geometry(
+            &current,
+            &previous,
+            &previous_geometry.forward_tangent,
+            Some(previous_geometry.theta),
+        )
+        .unwrap();
+        let prior = CplgFragmentState {
+            previous_stock: previous,
+            previous_forward_tangent: previous_geometry.forward_tangent.clone(),
+            previous_theta: Some(previous_geometry.theta),
+            ..CplgFragmentState::default()
+        };
+        (current, previous_geometry, current_geometry, prior)
+    }
+
+    #[test]
+    fn cplg_cross_runtime_constant_phase_fixture_is_bit_exact() {
+        // Raw vectors are copied byte-for-byte from Python's
+        // test_forward_tangent_sign_continues_rotation_not_backtracks.
+        let (current, previous_geometry, current_geometry, prior) = cplg_exact_fixture(
+            &[0x40d2_7dbc, 0x4019_399b],
+            &[0x403d_1545, 0x3f05_5c9f],
+            &[0x40a0_0000, 0x0000_0000],
+        );
+        assert_eq!(previous_geometry.rho.to_bits(), 0x3f7c_1c5c);
+        assert_eq!(current_geometry.rho.to_bits(), 0x3f7c_1c5c);
+        assert_eq!(previous_geometry.theta.to_bits(), 0x3e32_b8cf);
+        assert_eq!(current_geometry.theta.to_bits(), 0x3e32_b8cf);
+        assert_eq!(
+            cplg_value_bits(&previous_geometry.forward_tangent),
+            [0xbe31_d0d5, 0x3f7c_1c5d]
+        );
+        assert_eq!(
+            cplg_value_bits(&current_geometry.forward_tangent),
+            [0xbeaf_1d43, 0x3f70_8fb2]
+        );
+        assert_eq!(
+            cplg_value_bits(current_geometry.transported_tangent.as_ref().unwrap()),
+            [0xbeaf_1d44, 0x3f70_8fb3]
+        );
+        assert_eq!(current_geometry.coherence.unwrap().to_bits(), 0x3f80_0000);
+        assert_eq!(current_geometry.phi.unwrap().to_bits(), 0x3e32_b8cf);
+
+        let (action, next, stats) = cplg_select_direction(&current, &prior);
+        assert!(cplg_bitwise_equal(&action, &current));
+        assert_eq!(stats.reason, CplgReason::InterlockClosed);
+        assert_eq!(
+            cplg_value_bits(&next.pending_candidate),
+            // Python raw hex: 5bfdc14005006040.
+            [0x40c1_fd5b, 0x4060_0005]
+        );
+
+        // Resolve that exact shadow against Python's raw 30-degree vector.
+        let future = cplg_values_from_bits(&[0x3f5d_b3d7, 0x3f00_0000]);
+        let score_prior = CplgFragmentState {
+            previous_stock: current,
+            previous_forward_tangent: current_geometry.forward_tangent,
+            previous_theta: Some(current_geometry.theta),
+            pending_candidate: next.pending_candidate,
+            scores: Vec::new(),
+        };
+        let (_, _, future_stats) = cplg_select_direction(&future, &score_prior);
+        assert_eq!(
+            (future_stats.resolved_shadow_score.unwrap() as f32).to_bits(),
+            // Python cosine_gain_f32le: raw hex 00e9783c.
+            0x3c78_e900
+        );
+    }
+
+    #[test]
+    fn cplg_cross_runtime_cap_fixture_records_exact_one_ulp_mismatch() {
+        let (current, previous_geometry, current_geometry, prior) = cplg_exact_fixture(
+            &[0x40ab_980d, 0x408f_fc03],
+            &[0x4034_6bc6, 0x3f83_55f3],
+            &[0x40a0_0000, 0x0000_0000],
+        );
+        assert_eq!(previous_geometry.rho.to_bits(), 0x3f70_8fb1);
+        assert_eq!(current_geometry.rho.to_bits(), 0x3f70_8fb1);
+        assert_eq!(previous_geometry.theta.to_bits(), 0x3eb2_b8c7);
+        assert_eq!(current_geometry.theta.to_bits(), 0x3eb2_b8c7);
+        assert_eq!(
+            cplg_value_bits(&previous_geometry.forward_tangent),
+            [0xbeaf_1d44, 0x3f70_8fb2]
+        );
+        assert_eq!(
+            cplg_value_bits(&current_geometry.forward_tangent),
+            [0xbf24_8dbb, 0x3f44_1b7d]
+        );
+        assert_eq!(
+            cplg_value_bits(current_geometry.transported_tangent.as_ref().unwrap()),
+            [0xbf24_8dbb, 0x3f44_1b7d]
+        );
+        assert_eq!(current_geometry.coherence.unwrap().to_bits(), 0x3f80_0000);
+        assert_eq!(current_geometry.phi.unwrap().to_bits(), 0x3e7a_dbb0);
+        assert_eq!(libm::cosf(CPLG_ANGLE_CAP).to_bits(), 0x3f78_5b42);
+        // Python/Darwin host C libm returns 0x3e785b43. Pinned Rust libm is one
+        // ULP lower; do not relabel this fixture cross-runtime bit-exact.
+        assert_eq!(libm::sinf(CPLG_ANGLE_CAP).to_bits(), 0x3e78_5b42);
+        assert_ne!(libm::sinf(CPLG_ANGLE_CAP).to_bits(), 0x3e78_5b43);
+
+        let (_, next, _) = cplg_select_direction(&current, &prior);
+        assert_eq!(
+            cplg_value_bits(&next.pending_candidate),
+            [0x4083_8c9b, 0x40b5_4d95]
+        );
+        assert_ne!(
+            cplg_value_bits(&next.pending_candidate),
+            // Python raw hex: 9a8c8340954db540.
+            [0x4083_8c9a, 0x40b5_4d95]
+        );
+    }
+
+    #[test]
+    fn cplg_cross_runtime_nonplanar_fixture_freezes_matches_and_mismatches() {
+        let (current, previous_geometry, current_geometry, prior) = cplg_exact_fixture(
+            &[0x3fba_eb4d, 0x3ffb_8f82, 0x3f01_486a],
+            &[0x3fd1_0200, 0x3ff0_493d, 0x3e7a_39e8],
+            &[0x3fe2_4630, 0x3fe2_4630, 0x0000_0000],
+        );
+        assert_eq!(previous_geometry.rho.to_bits(), 0x3f7e_28b4);
+        assert_eq!(current_geometry.rho.to_bits(), 0x3f7d_d700);
+        assert_eq!(
+            cplg_value_bits(&previous_geometry.forward_tangent),
+            [0xbefa_dc41, 0x3ea4_2df3, 0x3f4f_851c]
+        );
+        assert_eq!(
+            cplg_value_bits(&current_geometry.forward_tangent),
+            [0xbf12_0c28, 0x3e61_e927, 0x3f4a_866a]
+        );
+        assert_eq!(
+            cplg_value_bits(current_geometry.transported_tangent.as_ref().unwrap()),
+            [0xbf12_0c25, 0x3e61_e919, 0x3f4a_866e]
+        );
+        assert_eq!(current_geometry.coherence.unwrap().to_bits(), 0x3f80_0000);
+
+        // The algebraic vectors match exactly, but pinned Rust libm atan2f is
+        // one ULP above Python for theta_now and one ULP below for theta_prev.
+        assert_eq!(current_geometry.theta.to_bits(), 0x3e05_1eb4);
+        assert_ne!(current_geometry.theta.to_bits(), 0x3e05_1eb3);
+        assert_eq!(previous_geometry.theta.to_bits(), 0x3df5_c2c2);
+        assert_ne!(previous_geometry.theta.to_bits(), 0x3df5_c2c3);
+        assert_eq!(current_geometry.phi.unwrap().to_bits(), 0x3df5_c2c2);
+        assert_ne!(current_geometry.phi.unwrap().to_bits(), 0x3df5_c2c3);
+
+        let (_, next, _) = cplg_select_direction(&current, &prior);
+        assert_eq!(
+            cplg_value_bits(&next.pending_candidate),
+            // Despite the scalar differences, both candidates round to the
+            // Python raw hex 64b8a33ff819014014f73c3f.
+            [0x3fa3_b864, 0x4001_19f8, 0x3f3c_f714]
+        );
+    }
+
+    #[test]
+    fn cplg_cross_runtime_reversal_fixture_matches_vector_not_diagnostic_field() {
+        let (current, previous_geometry, current_geometry, prior) = cplg_exact_fixture(
+            &[0x3f80_0000, 0x0000_0000],
+            &[0x3f7c_1c5c, 0x3e31_d0d4],
+            &[0x3f80_0000, 0x0000_0000],
+        );
+        assert_eq!(previous_geometry.rho.to_bits(), 0x3f7c_1c5d);
+        assert_eq!(current_geometry.rho.to_bits(), 0x3f7c_1c5d);
+        assert_eq!(previous_geometry.theta.to_bits(), 0x3e32_b8b7);
+        assert_eq!(current_geometry.theta.to_bits(), 0x3e32_b8b7);
+        assert_eq!(
+            cplg_value_bits(&current_geometry.forward_tangent),
+            [0x0000_0000, 0xbf80_0000]
+        );
+        let transported = current_geometry.transported_tangent.as_ref().unwrap();
+        assert_eq!(cplg_value_bits(transported), [0x0000_0000, 0x3f80_0000]);
+        let raw_coherence = pti_dot(&current_geometry.forward_tangent, transported).unwrap();
+        assert_eq!(raw_coherence.to_bits(), 0xbf80_0000);
+        // Python exposes raw -1 in its decision field. Rust deliberately stores
+        // max(+0, raw) as the phase coherence consumed by the algorithm.
+        assert_eq!(current_geometry.coherence.unwrap().to_bits(), 0x0000_0000);
+        assert_ne!(current_geometry.coherence.unwrap().to_bits(), 0xbf80_0000);
+        assert_eq!(current_geometry.phi.unwrap().to_bits(), 0x0000_0000);
+
+        let (action, next, stats) = cplg_select_direction(&current, &prior);
+        assert!(cplg_bitwise_equal(&action, &current));
+        assert_eq!(stats.reason, CplgReason::ZeroOrRoundedPhase);
+        assert_eq!(
+            cplg_value_bits(&next.pending_candidate),
+            // Python returns the identical stock bytes 0000803f00000000.
+            [0x3f80_0000, 0x0000_0000]
+        );
+    }
 }
