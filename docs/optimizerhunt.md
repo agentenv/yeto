@@ -930,6 +930,66 @@ current acquisition makes the necessary local state observable, but does not
 by itself make even direction replay executable; the materializer is required,
 and causal k0/k8 evaluation additionally requires the missing full CRN layer.
 
+### Capture-v2 and the joined replay boundary
+
+The v1 artifacts are therefore a measurement substrate, not a causal optimizer
+evaluation bundle. A fail-closed materializer may produce a **direction-only
+joined bundle** for MTRF/MSTP only when it preserves the transcript's exact
+commit/responder order and weight f64 bits, proves a common non-stale anchor,
+preserves per-tensor clocks and optimizer-group semantics, removes or verifies
+decay exactly, and reproduces the committed SGD-0.28 broadcast digest. An
+ambiguous or stale anchor, unsupported group heterogeneity, unknown decay
+contribution, missing responder, reordered responder, or byte mismatch must
+produce `UNIDENTIFIABLE`; it must not produce a partial bundle.
+
+V1 cannot support a causal k=0/k=8 loss claim. It does not preserve all
+trainable fragments and model buffers, the complete optimizer state keyed by
+parameter name, CPU/CUDA/Python/NumPy RNG, a restorable loader position, the
+next eight actual update groups, or exact syncer pre/post boundary state. The
+validator also proves the authoritative join but currently reduces it to
+boundary keys instead of exporting a normalized
+commit → responder → push → Richardson index. None of this missing state may be
+reconstructed from endpoints or added after outcomes become visible.
+
+| Candidate | Direction construction | Maximum honest use of v1 | Additional capability before a loss claim | Campaign |
+| --- | --- | --- | --- | --- |
+| MTRF | Exact responder join; anchor/H/2/H parameters; per-tensor Adam moments, metrics, clocks, LR mass, decay accounting; production RDA | Conditional direction-only replay after every fail-closed gate above | Full learner restore, syncer boundary state, next-eight groups, fixed evaluation object, RNG restore, isolated k0/k8 replay | EXP2-54; unscored until v2 |
+| MSTP | The MTRF substrate plus the exact half-path and factual merged directions | Conditional direction-only replay under the same gates | The same full CRN restore/evaluation bundle | EXP2-54; unscored until v2 |
+| PTI-SGD | Ordered same-fragment factual directions plus a hash-chained causal prequential ledger | At most a historical direction stream after exact materialization | Sealed shadow outcomes, full restore/evaluation, and a separately frozen preregistration | Separate hypothesis |
+| CFLX-SGD | Exact global stock trial point, model autograd, and disjoint proposal/validation/audit streams | Not identifiable from v1 learner envelopes | Syncer global state, full model restore, restricted probe oracle, equal live-arm probe cost, and CRN replay | Separate campaign |
+
+The shared replay layer will be capability-based. Every policy must emit the
+same sealed outer action—fragment, pseudo-gradient bytes, outer-LR bits,
+resulting fragment bytes, and configuration hash—while declaring requirements
+such as `midpoint_adam`, `same_fragment_history`,
+`global_boundary_state`, `model_autograd`, `proposal_stream`,
+`worker_restore`, and `crn_train_k8`. Immutable inputs, actions sealed
+before evaluation, and append-only outcomes are separate objects; losses are
+never written into `state.npz`.
+
+The bounded implementation order is:
+
+1. export a checksummed committed-boundary index with exact event identity,
+   responder order, attempt/window UUID, weight bits, and push/Richardson
+   object hashes;
+2. build the atomic direction-only materializer and require byte-exact
+   production RDA/SGD-0.28 broadcast parity;
+3. add capture-v2 at the exact H endpoint, including all mutable learner state,
+   buffers, named optimizer/scheduler/scaler state and RNG, then passively
+   attach the next eight actual update groups as they are consumed;
+4. add a syncer replay shard containing exact pre/post affected-fragment bytes
+   and outer state, then a policy-agnostic isolated evaluator whose A/B and B/A
+   executions have identical hashes and losses; and
+5. run corruption, stale-anchor, responder-order, repeated-replay, missing
+   capability, and branch-isolation tests, followed by a new matched GPU
+   qualifier because v2 changes serialization and runtime cost.
+
+Seed 223 stays locked through this implementation. Acquiring more v1 envelopes
+now would expose development data without enabling the preregistered finite-loss
+decision. It may open only after the v2 schema, code, commands, policy
+interfaces, source/image/model/data hashes, and matched capture qualifier are
+immutable.
+
 ### Qualifier and GCP sequence
 
 The first GPU spend is a behavior-preservation qualifier, not a candidate
@@ -960,6 +1020,33 @@ that manifest as well as the verdict sidecar. Before the runner starts, it
 also verifies the image's model and data manifests, copies those manifests plus
 runtime/image metadata into `input-provenance/`, and seals that directory in
 `input-provenance.sha256`.
+
+The first live identity, `exp2-54-smoke`, instance ID
+`5674137355695134252` and boot-disk ID `3761493731937326636`, reached that
+input-integrity gate but did not start training. The runner renderer had
+manually nested a single-quoted Bash body containing single-quoted checksum
+diagnostics; the outer shell split the intended program and the remote log
+failed with `checksum: line 4: is: command not found`. The verified model and
+data manifests had already passed. The harness classified the run incomplete,
+stopped only its recorded processes, synced the provenance and failure log,
+wrote and round-tripped `abandonment.json` with SHA-256
+`c137f2b3ae9621f7f41ca32681be253ce4378dce1aa1a05eae79f80062a39a2b`,
+and deleted exactly that authenticated VM and auto-delete disk. Both provider
+lookups now return not found. The failed run ID, local state, and GCS prefix are
+permanently quarantined and will not be reused.
+
+The repair constructs each complete inner runner/uploader program first and
+quotes it exactly once with `shlex.join`. An executable regression traverses
+the same outer-shell → `bash -c` boundary, forces the apostrophe-containing
+missing-manifest branch, and requires exit 14 plus an atomic `runner.exit`.
+All 59 harness tests and the complete 756-test repository `tests/` target
+pass, and an independent renderer audit verified the exact argv and exit-code
+protocol. The pushed fix commit is
+`69cff38369041cef8d1bddc9c23a9ecb05843a90`. The replacement qualifier is
+`exp2-54-smoke-r2`; it has a new instance name, checkout/run paths, GCS
+prefix, state identity, and `run-id` label, and pins that fix commit. It
+retains the same image ID, data/model manifests, seeds, arm commands, and
+scientific gate.
 
 Only a passing qualifier can unlock seed-223 H16 **state acquisition**. Its
 minimum is 32 complete committed boundaries, at least eight per fragment.
@@ -994,14 +1081,17 @@ network bandwidth.
 
 The implementation is assembled in the isolated branch
 `experiment/optimizer-state-capture-round3`. The frozen release tree passed
-755 Python tests, 171 Rust tests, Ruff lint/format, the replay self-test, and all
-8,567 Lean build jobs. It is frozen and pushed as code commit
-`452ebdea30503f10c1eda68e9fdcff704be2a792`. Independent launch audits found and closed the reconnect,
+756 Python tests, 171 Rust tests, Ruff lint/format, the replay self-test, and all
+8,567 Lean build jobs. The audited capture implementation is commit
+`452ebdea30503f10c1eda68e9fdcff704be2a792`; the remote-runner quoting repair
+and its executable regression are commit
+`69cff38369041cef8d1bddc9c23a9ecb05843a90`, which the replacement qualifier
+pins. Independent launch audits found and closed the reconnect,
 cold-start timing, portable parity-input, image-input provenance, and too-short
-VM-envelope holes. The checked-in specs now pin that exact code commit and the
-quota-aware doctor is green. Only a reviewed smoke derivative may remove
-`adopt_only`; development and confirmation remain locked until their stage
-gates pass.
+VM-envelope holes. The checked-in acquisition specs remain locked; the
+replacement qualifier alone is live-enabled and the quota-aware doctor is
+green. Development and confirmation remain locked until their stage gates
+pass.
 
 ### PTI-SGD: next temporal candidate, not yet an empirical result
 
