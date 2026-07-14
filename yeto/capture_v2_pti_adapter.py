@@ -356,6 +356,18 @@ def process_authoritative_boundary(
     }
     decision = store.put_bytes(_canonical_json_bytes(proof)).ref
     action_kind = "nonstock" if pti_result.action.used_nonstock else "stock_fallback"
+    if pti_result.action.used_nonstock:
+        action_reason = "candidate_selected"
+        fallback_reason = None
+    else:
+        action_reason = "stock_fallback"
+        fallback_reason = (
+            "candidate_unavailable"
+            if pti_result.action.reason == "warmup"
+            else "candidate_rejected"
+            if pti_result.action.reason == "interlock_closed"
+            else "candidate_invalid"
+        )
     action = publish_sealed_outer_action(
         store,
         action_manifest_id,
@@ -370,12 +382,8 @@ def process_authoritative_boundary(
         decision=decision,
         config_sha256=loaded_policy.config.sha256,
         action_kind=action_kind,
-        action_reason=f"pti_amendment_1:{pti_result.action.reason}",
-        fallback_reason=(
-            f"pti_fail_closed:{pti_result.action.reason}"
-            if action_kind == "stock_fallback"
-            else None
-        ),
+        action_reason=action_reason,
+        fallback_reason=fallback_reason,
     )
 
     state._pti = candidate_policy
@@ -531,8 +539,22 @@ def load_authoritative_pti_action(
         raise PTIAdapterError("PTI decision proof action hash is cross-wired")
     if pti["used_nonstock"] != (action.action_kind == "nonstock"):
         raise PTIAdapterError("PTI decision proof action kind is cross-wired")
-    if action.action_reason != f"pti_amendment_1:{pti['reason']}":
+    expected_action_reason = (
+        "candidate_selected" if pti["used_nonstock"] else "stock_fallback"
+    )
+    expected_fallback_reason = (
+        None
+        if pti["used_nonstock"]
+        else "candidate_unavailable"
+        if pti["reason"] == "warmup"
+        else "candidate_rejected"
+        if pti["reason"] == "interlock_closed"
+        else "candidate_invalid"
+    )
+    if action.action_reason != expected_action_reason:
         raise PTIAdapterError("PTI decision proof action reason is cross-wired")
+    if action.fallback_reason != expected_fallback_reason:
+        raise PTIAdapterError("PTI decision proof fallback reason is cross-wired")
     for key in ("decision_sha256", "previous_ledger_sha256", "ledger_sha256"):
         value = pti[key]
         if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
