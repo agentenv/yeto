@@ -4,8 +4,9 @@ Machine-checked (Lean 4 + Mathlib, sorry-free) theorems compressing the
 DiLoCo-poison empirical findings onto a minimal anisotropic 2D quadratic model.
 
 - All statements + proofs: `LeanMechanism/Basic.lean`
-- Causal phase-locked geodesic safety, exact constant-rotation recovery, and
-  reversal non-dominance: `LeanMechanism/CausalPhaseLockedGeodesic.lean`
+- Exact angle-based causal phase-locked geodesic safety, sphere transport,
+  constant-rotation recovery, ratio-proxy non-equivalence, and reversal
+  non-dominance: `LeanMechanism/CausalPhaseLockedGeodesic.lean`
 - Prose summary, proof-status table, counterexample instances, and product
   implication: `../docs/LEAN_THEOREMS.md`
 
