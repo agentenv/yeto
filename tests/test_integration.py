@@ -17,7 +17,7 @@ import pytest
 import torch
 
 from yeto.fragments import build_layout
-from yeto.protocol import DTYPE_BF16, DTYPE_Q4, SyncerClient, bulk_dtype
+from yeto.protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
 from yeto.tensor_io import (
     apply_fragment,
     fragment_flat,
@@ -497,6 +497,145 @@ def test_single_learner_roundtrip_block_rms():
         assert l.synced, "learner never received a broadcast"
         flat = torch.cat([p.detach().reshape(-1) for p in l.params.values()])
         assert (flat - target).norm() < target.norm(), "no progress toward target"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        print((proc.stdout.read() if proc.stdout else "")[-3000:])
+
+
+@pytest.mark.timeout(180)
+def test_single_learner_pti_sgd_seals_causal_event_tape(tmp_path):
+    """PTI-SGD runs through the real process and seals its causal evidence.
+
+    Thirty-two serial commits give every one of four fragments eight factual
+    directions.  The test deliberately does not require the interlock to open:
+    the toy quadratic need not have three consecutive positive PTI shadow
+    scores, but it must construct and resolve at least one causal shadow.
+    """
+    import json
+    import math
+
+    binary = build_syncer()
+    port = free_port()
+    total_steps = 32
+    tape = tmp_path / "pti-tape.jsonl"
+    tensor_numel = (DIM + DIM // 4) // 4
+    named = [(f"model.block.{index}.weight", tensor_numel) for index in range(4)]
+    layout = build_layout(named, 4)
+    assert layout.num_fragments == 4
+    proc = subprocess.Popen(
+        [
+            str(binary),
+            "--port", str(port),
+            "--learners", "1",
+            "--quorum", "1",
+            "--grace-ms", "50",
+            "--total-steps", str(total_steps),
+            "--pipeline", "1",
+            "--outer-optimizer", "pti-sgd",
+            "--outer-lr", "0.28",
+            "--outer-momentum", "0",
+            "--event-tape", str(tape),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        # Different coordinate magnitudes make same-fragment directions evolve
+        # under Adam, avoiding the permanently collinear all-ones geometry.
+        torch.manual_seed(20260714)
+        target = torch.randn(DIM + DIM // 4) * torch.linspace(
+            0.25, 2.0, DIM + DIM // 4
+        )
+        learner = ToyLearner(0, port, target, layout, dtype=DTYPE_F32, barrier=True)
+        learner.params = {name: torch.zeros(numel) for name, numel in named}
+        learner.start()
+        learner.join(timeout=120)
+        assert not learner.is_alive(), "PTI learner deadlocked (never finished)"
+        if learner.exc:
+            raise learner.exc
+        assert proc.wait(timeout=30) == 0, "PTI syncer exited nonzero"
+        assert learner.synced, "learner never received a PTI broadcast"
+        flat = torch.cat([p.detach().reshape(-1) for p in learner.synced.values()])
+        assert (flat - target).norm() < target.norm(), "PTI made no quadratic progress"
+
+        records = [json.loads(line) for line in tape.read_text().splitlines() if line]
+        assert len(records) == total_steps
+        assert {fragment: sum(r["fragment"] == fragment for r in records) for fragment in range(4)} == {
+            fragment: total_steps // 4 for fragment in range(4)
+        }
+
+        pti_fields = {
+            "pti_shadow_score",
+            "pti_score_count",
+            "pti_interlock_open",
+            "pti_used_nonstock",
+            "pti_state_cleared",
+            "pti_reason",
+            "pti_stock_sha256",
+            "pti_previous_stock_sha256",
+            "pti_candidate_sha256",
+            "pti_action_sha256",
+        }
+
+        def is_sha256(value):
+            return isinstance(value, str) and len(value) == 64 and all(
+                char in "0123456789abcdef" for char in value
+            )
+
+        per_fragment: dict[int, list[dict]] = {fragment: [] for fragment in range(4)}
+        shadow_count = 0
+        candidate_count = 0
+        for record in records:
+            assert pti_fields <= record.keys()
+            assert record["pti_reason"] in {
+                "warmup",
+                "interlock_closed",
+                "candidate_selected",
+                "degenerate_stock",
+                "invalid_shadow_score",
+                "degenerate_transverse",
+            }
+            assert is_sha256(record["pti_stock_sha256"])
+            assert is_sha256(record["pti_action_sha256"])
+            assert 0 <= record["pti_score_count"] <= 3
+            if record["pti_shadow_score"] is not None:
+                assert math.isfinite(record["pti_shadow_score"])
+                assert record["pti_score_count"] > 0
+                shadow_count += 1
+
+            if record["pti_used_nonstock"]:
+                candidate_count += 1
+                assert record["pti_interlock_open"]
+                assert record["pti_score_count"] == 3
+                assert record["pti_reason"] == "candidate_selected"
+                assert is_sha256(record["pti_candidate_sha256"])
+                assert record["pti_action_sha256"] == record["pti_candidate_sha256"]
+            else:
+                assert not record["pti_interlock_open"]
+                assert record["pti_reason"] != "candidate_selected"
+                assert record["pti_action_sha256"] == record["pti_stock_sha256"]
+
+            history = per_fragment[record["fragment"]]
+            if not history:
+                assert record["pti_reason"] == "warmup"
+                assert record["pti_score_count"] == 0
+                assert record["pti_shadow_score"] is None
+                assert record["pti_previous_stock_sha256"] is None
+                assert record["pti_candidate_sha256"] is None
+            elif record["pti_shadow_score"] is not None:
+                previous = history[-1]
+                assert is_sha256(previous["pti_candidate_sha256"])
+                assert record["pti_previous_stock_sha256"] == previous["pti_stock_sha256"]
+                expected_count = min(previous["pti_score_count"] + 1, 3)
+                assert record["pti_score_count"] == expected_count
+            history.append(record)
+
+        # Candidate selection is data-dependent; shadow construction and
+        # causal next-boundary resolution are mandatory for this integration.
+        assert shadow_count > 0
+        print(f"PTI shadows={shadow_count}, candidate selections={candidate_count}")
     finally:
         if proc.poll() is None:
             proc.kill()
