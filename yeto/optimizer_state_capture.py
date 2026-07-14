@@ -50,6 +50,9 @@ SCHEMA_VERSION = 1
 BACKGROUND_PUBLICATION_SCHEMA = "yeto.optimizer-state-capture-publication"
 BACKGROUND_PUBLICATION_SCHEMA_VERSION = 1
 BACKGROUND_TRAILER_BYTES = 8
+SHA256_HEX_BYTES = 64
+CHECKSUM_SIDECAR_SEPARATOR_BYTES = 2
+CHECKSUM_SIDECAR_NEWLINE_BYTES = 1
 
 
 class CaptureIntegrityError(ValueError):
@@ -68,6 +71,29 @@ def _file_sha256(path: Path) -> str:
         while block := handle.read(1024 * 1024):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _background_artifact_sha256(raw: bytes | memoryview) -> str:
+    """Hash one admitted immutable artifact on the publication worker."""
+
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _background_artifact_sidecar_bytes(digest: str, name: str) -> bytes:
+    """Construct an artifact sidecar on the publication worker."""
+
+    return f"{digest}  {name}\n".encode("ascii")
+
+
+def _checksum_sidecar_size(name: str) -> int:
+    """Return the fixed SHA-256 sidecar size without constructing its value."""
+
+    return (
+        SHA256_HEX_BYTES
+        + CHECKSUM_SIDECAR_SEPARATOR_BYTES
+        + len(name.encode("ascii"))
+        + CHECKSUM_SIDECAR_NEWLINE_BYTES
+    )
 
 
 def _digest_value(digest: "hashlib._Hash", value: Any) -> None:
@@ -317,6 +343,7 @@ class OptimizerStateCapture:
         self._closed = False
         self._background_writer: BoundedBackgroundWriter | None = None
         self._background_writer_stats: dict[str, Any] | None = None
+        self._background_initial_manifest_written = False
         if self.background_writer_enabled:
             self._background_writer = BoundedBackgroundWriter(
                 self._publish_background_item,
@@ -1084,7 +1111,7 @@ class OptimizerStateCapture:
                         "background writer drained with outstanding artifact bytes"
                     )
         self._closed = True
-        self._write_manifest()
+        self._write_manifest(final_background=True)
 
     def _drop_pending_midpoint(self, fragment_id: int, reason: str) -> None:
         pending = self._pending_midpoint.pop(fragment_id)
@@ -1172,21 +1199,15 @@ class OptimizerStateCapture:
             buffer = io.BytesIO()
             torch.save(dict(envelope), buffer)
             artifact_bytes = buffer.tell()
-            view = buffer.getbuffer()
-            try:
-                digest = hashlib.sha256(view[:artifact_bytes]).hexdigest()
-            finally:
-                view.release()
-            sidecar_raw = f"{digest}  {name}\n".encode("ascii")
-            required = artifact_bytes + len(sidecar_raw)
+            sidecar_bytes = _checksum_sidecar_size(name)
+            required = artifact_bytes + sidecar_bytes
             header = {
                 "schema": BACKGROUND_PUBLICATION_SCHEMA,
                 "schema_version": BACKGROUND_PUBLICATION_SCHEMA_VERSION,
                 "serial": int(serial),
                 "name": name,
-                "sha256": digest,
                 "artifact_bytes": artifact_bytes,
-                "sidecar_bytes": len(sidecar_raw),
+                "sidecar_bytes": sidecar_bytes,
                 "required_bytes": required,
                 "kind": kind,
                 "fragment_id": int(metadata["fragment_id"]),
@@ -1277,13 +1298,14 @@ class OptimizerStateCapture:
             or not name.endswith(".pt")
         ):
             raise CaptureIntegrityError("unsafe background artifact name")
-        digest = header.get("sha256")
-        if not isinstance(digest, str) or len(digest) != 64:
-            raise CaptureIntegrityError("invalid background artifact digest")
-        sidecar_raw = f"{digest}  {name}\n".encode("ascii")
-        required = header_start + len(sidecar_raw)
+        if "sha256" in header:
+            raise CaptureIntegrityError(
+                "background producer header must not claim an unverified digest"
+            )
+        expected_sidecar_bytes = _checksum_sidecar_size(name)
+        required = header_start + expected_sidecar_bytes
         if (
-            header.get("sidecar_bytes") != len(sidecar_raw)
+            header.get("sidecar_bytes") != expected_sidecar_bytes
             or header.get("required_bytes") != required
         ):
             raise CaptureIntegrityError("background publication budget mismatch")
@@ -1293,6 +1315,12 @@ class OptimizerStateCapture:
         temporary = path.with_name(f".{name}.tmp-{os.getpid()}-{serial}")
         artifact_view = memoryview(raw)[:header_start]
         try:
+            digest = _background_artifact_sha256(artifact_view)
+            sidecar_raw = _background_artifact_sidecar_bytes(digest, name)
+            if len(sidecar_raw) != expected_sidecar_bytes:
+                raise CaptureIntegrityError(
+                    "background checksum sidecar length changed after reservation"
+                )
             with temporary.open("wb") as handle:
                 handle.write(artifact_view)
                 handle.flush()
@@ -1390,8 +1418,14 @@ class OptimizerStateCapture:
             manifest["background_writer"] = dict(self._background_writer_stats or {})
         return manifest
 
-    def _write_manifest(self) -> None:
+    def _write_manifest(self, *, final_background: bool = False) -> None:
         self._observe_background_writer()
+        if self.background_writer_enabled:
+            if self._background_initial_manifest_written and not final_background:
+                return
+            self._write_manifest_raw()
+            self._background_initial_manifest_written = True
+            return
         self._write_manifest_raw()
 
     def _write_manifest_raw(self) -> None:

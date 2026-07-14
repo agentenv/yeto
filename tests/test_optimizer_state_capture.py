@@ -10,6 +10,7 @@ from collections import OrderedDict
 import numpy as np
 import pytest
 import torch
+import yeto.optimizer_state_capture as capture_module
 
 from yeto.bounded_background_writer import BackgroundWriterFailed, WriterState
 from yeto.fragments import Fragment, FragmentLayout, MERGE_RDA
@@ -267,12 +268,73 @@ def test_atomic_sidecar_tamper_rejection_and_no_temporary_files(tmp_path):
         load_capture(path)
 
 
-def test_background_writer_completes_live_fifo_artifacts_and_emits_stats(tmp_path):
+def test_background_writer_completes_live_fifo_artifacts_and_emits_stats(
+    tmp_path, monkeypatch
+):
+    main_thread = threading.current_thread().name
+    phase = {"value": "construct"}
+    manifest_publications = []
+    artifact_hashes = []
+    artifact_sidecars = []
+    fsync_calls = []
+    admitted_headers = []
+
+    original_manifest_publication = OptimizerStateCapture._write_manifest_raw
+    original_artifact_hash = capture_module._background_artifact_sha256
+    original_artifact_sidecar = capture_module._background_artifact_sidecar_bytes
+    original_publish = OptimizerStateCapture._publish_background_item
+    original_fsync = capture_module.os.fsync
+
+    def traced_manifest_publication(self):
+        manifest_publications.append((phase["value"], threading.current_thread().name))
+        return original_manifest_publication(self)
+
+    def traced_artifact_hash(raw):
+        artifact_hashes.append((phase["value"], threading.current_thread().name))
+        return original_artifact_hash(raw)
+
+    def traced_artifact_sidecar(digest, name):
+        artifact_sidecars.append((phase["value"], threading.current_thread().name))
+        return original_artifact_sidecar(digest, name)
+
+    def inspect_publish(self, item):
+        raw = item.payload
+        header_bytes = int.from_bytes(
+            raw[-capture_module.BACKGROUND_TRAILER_BYTES :], "big"
+        )
+        header_start = len(raw) - capture_module.BACKGROUND_TRAILER_BYTES - header_bytes
+        admitted_headers.append(
+            json.loads(raw[header_start : -capture_module.BACKGROUND_TRAILER_BYTES])
+        )
+        return original_publish(self, item)
+
+    def traced_fsync(descriptor):
+        fsync_calls.append((phase["value"], threading.current_thread().name))
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(
+        OptimizerStateCapture, "_write_manifest_raw", traced_manifest_publication
+    )
+    monkeypatch.setattr(
+        capture_module, "_background_artifact_sha256", traced_artifact_hash
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "_background_artifact_sidecar_bytes",
+        traced_artifact_sidecar,
+    )
+    monkeypatch.setattr(
+        OptimizerStateCapture, "_publish_background_item", inspect_publish
+    )
+    monkeypatch.setattr(capture_module.os, "fsync", traced_fsync)
+
     params, _layout, optimizer, capture = _fixture(
         tmp_path,
         background_writer=True,
         writer_max_items=2,
     )
+    assert manifest_publications == [("construct", main_thread)]
+    phase["value"] = "hot"
     params["a"].grad = torch.tensor([0.4, -0.2])
     params["b"].grad = torch.tensor([0.1])
     window_uuid = capture.note_broadcast(
@@ -308,7 +370,27 @@ def test_background_writer_completes_live_fifo_artifacts_and_emits_stats(tmp_pat
         payload=pack_flat(endpoint, DTYPE_F32),
     )
     capture.note_push_enqueued(candidate["attempt_serial"])
+    assert capture._background_writer is not None
+    writer_thread = capture._background_writer.thread_name
+    _wait_until(lambda: capture._background_writer.snapshot().completed_items == 3)
+
+    assert manifest_publications == [("construct", main_thread)]
+    assert len(admitted_headers) == 3
+    assert all("sha256" not in header for header in admitted_headers)
+    assert artifact_hashes == [("hot", writer_thread)] * 3
+    assert artifact_sidecars == [("hot", writer_thread)] * 3
+    hot_fsyncs = [thread for event_phase, thread in fsync_calls if event_phase == "hot"]
+    assert hot_fsyncs
+    assert set(hot_fsyncs) == {writer_thread}
+
+    phase["value"] = "final"
     capture.close()
+
+    assert manifest_publications == [
+        ("construct", main_thread),
+        ("final", main_thread),
+    ]
+    assert not [event for event in manifest_publications if event[0] == "hot"]
 
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert manifest["counters"]["closed"] is True
