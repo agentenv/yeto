@@ -1,0 +1,537 @@
+{
+  "analysis_source_sha256": "8828e4b8e502d377f1ea0d1d7330d5e8b03b3b6a0524a0f292f8ac2506e55815",
+  "crp": {
+    "conclusion": "Scalar norms, residual/future-gradient dots, and cosines do not identify CRP bank sums, projections, pulse bytes, or normalized gain z. No CRP action or empirical CRP score was reconstructed.",
+    "decision": "UNIDENTIFIABLE",
+    "identifiable": false,
+    "input": {
+      "files": [
+        {
+          "bytes": 348999,
+          "path": "/Users/shou/yeto/experiment-results/EXP2/exp2-53a2-bcmp-shadow/inputs/bcmp_shadow_learner_0.jsonl",
+          "sha256": "3b65ce6d8c859ce213d7928be7f57a4b093c2027a7c402f1ceb9701a963271f3"
+        },
+        {
+          "bytes": 350531,
+          "path": "/Users/shou/yeto/experiment-results/EXP2/exp2-53a2-bcmp-shadow/inputs/bcmp_shadow_learner_1.jsonl",
+          "sha256": "b3f4c1c3a4774be4ac2748b3e249058cf4bfea555af3a8648e1e9c74c0305d17"
+        },
+        {
+          "bytes": 348929,
+          "path": "/Users/shou/yeto/experiment-results/EXP2/exp2-53a2-bcmp-shadow/inputs/bcmp_shadow_learner_2.jsonl",
+          "sha256": "a617e581474f1364e427a21153fdeb3afd0bcd270201180e242c999606e5003a"
+        },
+        {
+          "bytes": 352686,
+          "path": "/Users/shou/yeto/experiment-results/EXP2/exp2-53a2-bcmp-shadow/inputs/bcmp_shadow_learner_3.jsonl",
+          "sha256": "b5345886e52323e0df28138fa1f7eef0362cfc4d718dd61b5ae27ceebed49331"
+        }
+      ],
+      "schema_counts": {
+        "bcmp_shadow_drop_v1": 8,
+        "bcmp_shadow_resolution_v1": 1368,
+        "bcmp_shadow_run_summary_v1": 4,
+        "bcmp_shadow_run_v1": 4,
+        "bcmp_shadow_v1": 458
+      }
+    },
+    "missing_capabilities": [
+      "stock direction vector G_t bytes",
+      "proposal direction vector Q_t or residual r_t bytes",
+      "dtype, tensor layout, and accumulation order for those vectors",
+      "residual-residual cross terms needed to norm a bank sum",
+      "later stock vectors needed to project the bank transversely",
+      "merged production-boundary identity and order (the rows are learner-local)"
+    ],
+    "policy": {
+      "decision_gates": {
+        "bootstrap": {
+          "alpha": 0.05,
+          "block_length": 4,
+          "replicates": 4096,
+          "seed": 4411984
+        },
+        "min_action_fraction": 0.25,
+        "min_mean_score_strict": 0.001,
+        "min_opportunities": 32,
+        "min_opportunities_per_fragment": 8,
+        "min_positive_fragments": 3,
+        "min_positive_pulse_fraction": 0.6
+      },
+      "fallback": "return the original stock f32 byte object without re-encoding",
+      "individual_max_ratio_strict": 0.05,
+      "max_source_age_inclusive": 8,
+      "min_contributors": 2,
+      "pulse_max_ratio_inclusive": 0.125,
+      "pulse_min_ratio_inclusive": 0.05,
+      "timing": [
+        "resolve previous same-fragment residual against current stock",
+        "a failed resolution clears the existing bank",
+        "form a pulse only from residuals admitted before this boundary",
+        "append a newly admitted residual only after the pulse decision",
+        "seal the current residual for the next same-fragment boundary"
+      ]
+    },
+    "scalar_coverage": {
+      "by_candidate": {
+        "ray": {
+          "both_proxy_conditions": 0,
+          "future_residual_dot_positive": 295,
+          "joined_scalar_resolutions": 456,
+          "nonfinite_residual_ratios": 0,
+          "residual_ratio_below_1_over_20": 2,
+          "residual_ratio_max": 1.0000731476820022,
+          "residual_ratio_min": 0.0,
+          "warning": "future_gradient_dot is a descriptive residual proxy, not CRP's normalized cosine gain z"
+        },
+        "reset": {
+          "both_proxy_conditions": 0,
+          "future_residual_dot_positive": 295,
+          "joined_scalar_resolutions": 456,
+          "nonfinite_residual_ratios": 0,
+          "residual_ratio_below_1_over_20": 2,
+          "residual_ratio_max": 1.0000731476820022,
+          "residual_ratio_min": 0.0,
+          "warning": "future_gradient_dot is a descriptive residual proxy, not CRP's normalized cosine gain z"
+        },
+        "slab": {
+          "both_proxy_conditions": 142,
+          "future_residual_dot_positive": 142,
+          "joined_scalar_resolutions": 456,
+          "nonfinite_residual_ratios": 0,
+          "residual_ratio_below_1_over_20": 456,
+          "residual_ratio_max": 0.029975947534065395,
+          "residual_ratio_min": 0.0,
+          "warning": "future_gradient_dot is a descriptive residual proxy, not CRP's normalized cosine gain z"
+        }
+      },
+      "joined_pairs": 1368,
+      "resolution_pairs": 1368,
+      "shadow_candidate_pairs": 1374
+    },
+    "schema": "crp_retained_tape_audit_v1"
+  },
+  "mstp": {
+    "decision": "UNIDENTIFIABLE",
+    "identifiable": false,
+    "missing_capabilities": [
+      "joined exact anchor, H/2, and H parameter arrays",
+      "exact Adam first-moment and metric arrays at midpoint and endpoint",
+      "per-parameter optimizer clocks, LR mass, and decay accounting",
+      "exact committed responder order and production RDA parity proof",
+      "sealed full CRN restore/evaluation bundle for a finite-loss claim"
+    ]
+  },
+  "preregistered_policy_sha256": "7b8fb30ca98f4b0916f4158824c98246799c61c08d416bfb6bb37d5b2e022710",
+  "pti": {
+    "causal_loss_claim": false,
+    "coefficient_results": {
+      "-0.03125": {
+        "fragment_mean_cosine_gain": {
+          "11": 0.0015838439846747653,
+          "3": 0.000994377369081023,
+          "7": 0.0009561509263488283
+        },
+        "interlock_eligible_count": 429,
+        "interlock_eligible_fraction": 0.7222222222222222,
+        "mean_cosine_gain": 0.0011771748717649948,
+        "positive_fragment_count": 3,
+        "positive_score_fraction": 0.8727858293075684,
+        "post_warmup_opportunities": 594,
+        "scores": 621
+      },
+      "-0.0625": {
+        "fragment_mean_cosine_gain": {
+          "11": 0.003520422735496593,
+          "3": 0.002346779317063191,
+          "7": 0.0022663627663181726
+        },
+        "interlock_eligible_count": 467,
+        "interlock_eligible_fraction": 0.7861952861952862,
+        "mean_cosine_gain": 0.002709298347969893,
+        "positive_fragment_count": 3,
+        "positive_score_fraction": 0.9049919484702094,
+        "post_warmup_opportunities": 594,
+        "scores": 621
+      },
+      "-0.125": {
+        "fragment_mean_cosine_gain": {
+          "11": 0.008414057049493485,
+          "3": 0.00609447014853482,
+          "7": 0.005918443073891415
+        },
+        "interlock_eligible_count": 520,
+        "interlock_eligible_fraction": 0.8754208754208754,
+        "mean_cosine_gain": 0.006805254846032888,
+        "positive_fragment_count": 3,
+        "positive_score_fraction": 0.9452495974235104,
+        "post_warmup_opportunities": 594,
+        "scores": 621
+      },
+      "-0.25": {
+        "fragment_mean_cosine_gain": {
+          "11": 0.021872914611294623,
+          "3": 0.01739135170016281,
+          "7": 0.016985339645211022
+        },
+        "interlock_eligible_count": 553,
+        "interlock_eligible_fraction": 0.930976430976431,
+        "mean_cosine_gain": 0.018742651964765277,
+        "positive_fragment_count": 3,
+        "positive_score_fraction": 0.966183574879227,
+        "post_warmup_opportunities": 594,
+        "scores": 621
+      },
+      "0": {
+        "fragment_mean_cosine_gain": {
+          "11": 0.0,
+          "3": 0.0,
+          "7": 0.0
+        },
+        "interlock_eligible_count": 0,
+        "interlock_eligible_fraction": 0.0,
+        "mean_cosine_gain": 0.0,
+        "positive_fragment_count": 0,
+        "positive_score_fraction": 0.0,
+        "post_warmup_opportunities": 594,
+        "scores": 621
+      },
+      "0.03125": {
+        "fragment_mean_cosine_gain": {
+          "11": -0.0012254372853486252,
+          "3": -0.0006323918982117325,
+          "7": -0.0005982526915741109
+        },
+        "interlock_eligible_count": 36,
+        "interlock_eligible_fraction": 0.06060606060606061,
+        "mean_cosine_gain": -0.0008177389738578069,
+        "positive_fragment_count": 0,
+        "positive_score_fraction": 0.22705314009661837,
+        "post_warmup_opportunities": 594,
+        "scores": 621
+      },
+      "0.0625": {
+        "fragment_mean_cosine_gain": {
+          "11": -0.002089935522918799,
+          "3": -0.0009020083677727559,
+          "7": -0.0008379049578788123
+        },
+        "interlock_eligible_count": 62,
+        "interlock_eligible_fraction": 0.10437710437710437,
+        "mean_cosine_gain": -0.0012747033566810307,
+        "positive_fragment_count": 0,
+        "positive_score_fraction": 0.2914653784219002,
+        "post_warmup_opportunities": 594,
+        "scores": 621
+      },
+      "0.125": {
+        "fragment_mean_cosine_gain": {
+          "11": -0.0027417367439070816,
+          "3": -0.00036551044828459563,
+          "7": -0.0002541699778161892
+        },
+        "interlock_eligible_count": 109,
+        "interlock_eligible_fraction": 0.1835016835016835,
+        "mean_cosine_gain": -0.0011166459386409112,
+        "positive_fragment_count": 0,
+        "positive_score_fraction": 0.428341384863124,
+        "post_warmup_opportunities": 594,
+        "scores": 621
+      },
+      "0.25": {
+        "fragment_mean_cosine_gain": {
+          "11": 5.904586380382379e-05,
+          "3": 0.004759604335513739,
+          "7": 0.004915506387926142
+        },
+        "interlock_eligible_count": 251,
+        "interlock_eligible_fraction": 0.4225589225589226,
+        "mean_cosine_gain": 0.0032522881997281102,
+        "positive_fragment_count": 3,
+        "positive_score_fraction": 0.6666666666666666,
+        "post_warmup_opportunities": 594,
+        "scores": 621
+      }
+    },
+    "coefficients": [
+      -0.25,
+      -0.125,
+      -0.0625,
+      -0.03125,
+      0.0,
+      0.03125,
+      0.0625,
+      0.125,
+      0.25
+    ],
+    "decision": "DIRECTION_SCREEN_ONLY",
+    "identifiable": true,
+    "input": [
+      {
+        "fragments": [
+          {
+            "eligible_counts": {
+              "-0.03125": 46,
+              "-0.0625": 49,
+              "-0.125": 56,
+              "-0.25": 58,
+              "0.03125": 4,
+              "0.0625": 7,
+              "0.125": 13,
+              "0.25": 34
+            },
+            "fragment": 3,
+            "post_warmup_opportunities": 66,
+            "skipped": {},
+            "valid_shadow_scores": 69
+          },
+          {
+            "eligible_counts": {
+              "-0.03125": 38,
+              "-0.0625": 45,
+              "-0.125": 51,
+              "-0.25": 60,
+              "0.03125": 6,
+              "0.0625": 16,
+              "0.125": 21,
+              "0.25": 37
+            },
+            "fragment": 7,
+            "post_warmup_opportunities": 66,
+            "skipped": {},
+            "valid_shadow_scores": 69
+          },
+          {
+            "eligible_counts": {
+              "-0.03125": 56,
+              "-0.0625": 56,
+              "-0.125": 56,
+              "-0.25": 61,
+              "0.03125": 0,
+              "0.0625": 0,
+              "0.125": 1,
+              "0.25": 7
+            },
+            "fragment": 11,
+            "post_warmup_opportunities": 66,
+            "skipped": {},
+            "valid_shadow_scores": 69
+          }
+        ],
+        "provenance": {
+          "capture": "/Users/shou/yeto/experiment-results/EXP2/equal-token-late-smollm2-p4de-seed53-syncer-current-6m/work/m12/syncer_probe",
+          "checkpoint_count": 216,
+          "checkpoint_set_sha256": "272da609f7e6f38899d6581d9cce150c749beb48c17ffe41914cf5f46e552a48",
+          "derived_direction_chain_sha256": "da959b31aeeb79ec2885e18cdb3bfba093f636e9f52829bc6a47e8b970a8f883",
+          "fragments": {
+            "11": {
+              "directions": 71,
+              "first_step": 12,
+              "last_step": 864,
+              "numel": 50688,
+              "snapshots": 72
+            },
+            "3": {
+              "directions": 71,
+              "first_step": 4,
+              "last_step": 856,
+              "numel": 51072,
+              "snapshots": 72
+            },
+            "7": {
+              "directions": 71,
+              "first_step": 8,
+              "last_step": 860,
+              "numel": 50688,
+              "snapshots": 72
+            }
+          },
+          "index_sha256": "8b291187a33711970d6e42ccc1af6d3f2f77bb6b46b0794af7eb97a25e04660e",
+          "unique_boundaries": 216
+        }
+      },
+      {
+        "fragments": [
+          {
+            "eligible_counts": {
+              "-0.03125": 45,
+              "-0.0625": 54,
+              "-0.125": 62,
+              "-0.25": 62,
+              "0.03125": 4,
+              "0.0625": 8,
+              "0.125": 13,
+              "0.25": 33
+            },
+            "fragment": 3,
+            "post_warmup_opportunities": 65,
+            "skipped": {},
+            "valid_shadow_scores": 68
+          },
+          {
+            "eligible_counts": {
+              "-0.03125": 47,
+              "-0.0625": 54,
+              "-0.125": 57,
+              "-0.25": 64,
+              "0.03125": 6,
+              "0.0625": 7,
+              "0.125": 15,
+              "0.25": 32
+            },
+            "fragment": 7,
+            "post_warmup_opportunities": 64,
+            "skipped": {},
+            "valid_shadow_scores": 67
+          },
+          {
+            "eligible_counts": {
+              "-0.03125": 55,
+              "-0.0625": 55,
+              "-0.125": 61,
+              "-0.25": 61,
+              "0.03125": 1,
+              "0.0625": 2,
+              "0.125": 4,
+              "0.25": 19
+            },
+            "fragment": 11,
+            "post_warmup_opportunities": 64,
+            "skipped": {},
+            "valid_shadow_scores": 67
+          }
+        ],
+        "provenance": {
+          "capture": "/Users/shou/yeto/experiment-results/EXP2/equal-token-late-smollm2-p4de-seed67-syncer-current-6m/work/m12/syncer_probe",
+          "checkpoint_count": 211,
+          "checkpoint_set_sha256": "5de31b6d4bc1bee007b780a0310033676137a1a59eb3cb37e1c745794fab79a8",
+          "derived_direction_chain_sha256": "dff5e018e1bf22a890baffaeecfec347c3153d2cc4c36762aeb98e71ab851b8c",
+          "fragments": {
+            "11": {
+              "directions": 69,
+              "first_step": 12,
+              "last_step": 840,
+              "numel": 50688,
+              "snapshots": 70
+            },
+            "3": {
+              "directions": 70,
+              "first_step": 4,
+              "last_step": 844,
+              "numel": 51072,
+              "snapshots": 71
+            },
+            "7": {
+              "directions": 69,
+              "first_step": 8,
+              "last_step": 836,
+              "numel": 50688,
+              "snapshots": 70
+            }
+          },
+          "index_sha256": "cc472c93c54c274c10e039aa53ccbbe034c2b634c8b5026a2bb66ae56a6b7115",
+          "unique_boundaries": 211
+        }
+      },
+      {
+        "fragments": [
+          {
+            "eligible_counts": {
+              "-0.03125": 46,
+              "-0.0625": 50,
+              "-0.125": 57,
+              "-0.25": 64,
+              "0.03125": 11,
+              "0.0625": 13,
+              "0.125": 20,
+              "0.25": 42
+            },
+            "fragment": 3,
+            "post_warmup_opportunities": 68,
+            "skipped": {},
+            "valid_shadow_scores": 71
+          },
+          {
+            "eligible_counts": {
+              "-0.03125": 37,
+              "-0.0625": 45,
+              "-0.125": 60,
+              "-0.25": 60,
+              "0.03125": 2,
+              "0.0625": 7,
+              "0.125": 19,
+              "0.25": 30
+            },
+            "fragment": 7,
+            "post_warmup_opportunities": 68,
+            "skipped": {},
+            "valid_shadow_scores": 71
+          },
+          {
+            "eligible_counts": {
+              "-0.03125": 59,
+              "-0.0625": 59,
+              "-0.125": 60,
+              "-0.25": 63,
+              "0.03125": 2,
+              "0.0625": 2,
+              "0.125": 3,
+              "0.25": 17
+            },
+            "fragment": 11,
+            "post_warmup_opportunities": 67,
+            "skipped": {},
+            "valid_shadow_scores": 70
+          }
+        ],
+        "provenance": {
+          "capture": "/Users/shou/yeto/experiment-results/EXP2/equal-token-late-smollm2-p4de-seed79-syncer-current-6m/work/m12/syncer_probe",
+          "checkpoint_count": 221,
+          "checkpoint_set_sha256": "a571624ad352dca581c00c50450cc453c0951c5af107472948bbad72893fc0d3",
+          "derived_direction_chain_sha256": "2f5fea96cf3f325ff1626be3be3fe42e5f10af2270684ebf02ac8abb24d4980c",
+          "fragments": {
+            "11": {
+              "directions": 72,
+              "first_step": 12,
+              "last_step": 876,
+              "numel": 50688,
+              "snapshots": 73
+            },
+            "3": {
+              "directions": 73,
+              "first_step": 4,
+              "last_step": 880,
+              "numel": 51072,
+              "snapshots": 74
+            },
+            "7": {
+              "directions": 73,
+              "first_step": 8,
+              "last_step": 884,
+              "numel": 50688,
+              "snapshots": 74
+            }
+          },
+          "index_sha256": "a2c68cfb38eb9d51fc85a8a1686a40a1a7d7e6b56a561a78300e93e04855a564",
+          "unique_boundaries": 221
+        }
+      }
+    ],
+    "interlock_length": 3,
+    "limitations": [
+      "checkpoint differences identify realized factual directions, not losses",
+      "the source capture has no sealed CRN k=0/k=8 outcome bundle",
+      "the checked-in PTI proposal does not freeze a tie-break among eligible coefficients",
+      "eligibility is therefore reported per coefficient; no composite PTI action is invented",
+      "historical stock directions are off-policy after the first hypothetical non-stock action"
+    ],
+    "schema": "pti_historical_direction_screen_v1",
+    "transverse_norm_sq_min": 9.094947017729282e-13,
+    "valid_scores_by_fragment": {
+      "11": 206,
+      "3": 208,
+      "7": 207
+    }
+  },
+  "schema": "crp_optimizer_retained_evidence_report_v1"
+}

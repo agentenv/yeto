@@ -1276,6 +1276,90 @@ each proposal generator is a separate hypothesis. The current v1 evidence is
 not sufficient to run that loss replay, so no GPU acquisition is justified
 merely to discover whether the bank fires.
 
+#### Retained-tape audit and PTI direction screen
+
+The CPU-only `scripts/replay_crp_sgd.py` freezes a distinct **Causally Resolved
+Residual-Pulse SGD (CRP-SGD)** state machine before reading retained outcomes.
+At a boundary it resolves the previous same-fragment shadow residual against
+the current factual direction, clears the bank on every failed resolution,
+forms a transverse pulse only from residuals admitted before the current
+boundary, and admits the newly resolved residual only after that pulse
+decision. Thus a residual sealed at `t` can be resolved at `t+1` but cannot be
+emitted before `t+2`. Individual residuals must have strict norm ratio below
+`1/20`; at least two admitted residuals are required; source age is at most
+eight same-fragment boundaries; and a bank projection acts only at ratio at
+least `1/20`, with downward-only clipping at `1/8`. Every abstention returns
+the original stock f32 byte object without re-encoding.
+
+The exact replay contract is `crp_exact_vectors_v1`: each chronological row
+must hash exact little-endian f32 bytes for both factual stock direction `G_t`
+and proposal direction `Q_t`, with event, sequence, fragment, and length. The
+engine rejects or clears on checksum, shape, finiteness, norm, continuity, or
+resolution failure. Thirteen tests cover causal ordering, strict threshold
+behavior, bank clearing and expiry, no upward scaling, maximum clipping,
+NaN-payload/negative-zero bit-identical fallback, deterministic repeated
+replay, exact checkpoint materialization, and equivalence of the analytic PTI
+score to direct vector construction.
+
+The retained `exp2-53a2` BCMP tape does **not** satisfy that contract. Across
+four learner JSONLs it contains 458 shadow events and 1,368 joined candidate
+resolutions (456 each for ray, slab, and reset), but only scalar norms,
+residual/future-gradient dots, and cosines. It has neither `G_t` nor `Q_t`
+bytes, tensor layout/accumulation order, residual-residual cross terms, later
+stock vectors for projection, nor a merged production-boundary order. The
+audit therefore returns `CRP: UNIDENTIFIABLE`; it reconstructs no CRP action
+and reports no empirical CRP score. Descriptively, all 456 slab residuals were
+below the frozen `1/20` norm ratio and 142 also had positive future residual
+dot. That dot is not CRP's normalized cosine gain `z`, so these 142 records
+cannot be called admissions or pulses. Ray and reset each had only two tiny
+residuals and zero records satisfying both proxy conditions.
+
+Three older syncer-current captures do contain exact checkpoint bytes at
+consecutive same-fragment boundaries. Version checks prove that subtracting
+each current checkpoint fragment from the next checkpoint for that fragment
+materializes its realized factual f32 displacement. This is enough for a
+narrow historical PTI geometry screen: 621 valid scores, balanced as 208 for
+fragment 3, 207 for fragment 7, and 206 for fragment 11. It is not enough for
+CRP because the BCMP proposal/residual vectors are absent, and it is not enough
+for MSTP because no joined anchor/H/2/H arrays, exact midpoint/end Adam moment
+and metric arrays, clocks, LR/decay accounting, or production-RDA parity proof
+exist locally.
+
+The PTI coefficient screen found the following exact historical direction
+statistics:
+
+| coefficient | mean next-direction cosine gain | positive-score fraction | post-warm-up three-positive eligible fraction | positive fragment means |
+| ---: | ---: | ---: | ---: | ---: |
+| `-1/4` | `0.018742651964765277` | `0.966183574879227` | `0.930976430976431` | `3/3` |
+| `-1/8` | `0.006805254846032888` | `0.9452495974235104` | `0.8754208754208754` | `3/3` |
+| `-1/16` | `0.002709298347969893` | `0.9049919484702094` | `0.7861952861952862` | `3/3` |
+| `-1/32` | `0.0011771748717649948` | `0.8727858293075684` | `0.7222222222222222` | `3/3` |
+| `+1/32` | `-0.0008177389738578069` | `0.22705314009661837` | `0.06060606060606061` | `0/3` |
+| `+1/16` | `-0.0012747033566810307` | `0.2914653784219002` | `0.10437710437710437` | `0/3` |
+| `+1/8` | `-0.0011166459386409112` | `0.428341384863124` | `0.1835016835016835` | `0/3` |
+| `+1/4` | `0.0032522881997281102` | `0.6666666666666666` | `0.4225589225589226` | `3/3` |
+
+For `-1/4`, the fragment means were `0.01739135170016281` (fragment 3),
+`0.016985339645211022` (fragment 7), and `0.021872914611294623` (fragment
+11). This sign asymmetry is useful mechanism evidence, not evidence that PTI
+beats SGD-0.28. The directions become off-policy after the first hypothetical
+non-stock action; the source tapes contain no sealed k=0/k=8 loss bundle; and
+the checked-in PTI proposal does not freeze a tie-break when multiple
+coefficients satisfy their three-positive interlocks. The audit therefore
+reports per-coefficient eligibility and deliberately invents no composite PTI
+action. `MSTP` remains `UNIDENTIFIABLE`, never a zero-action result.
+
+The machine-readable report is
+`docs/optimizer-reports/crp-retained-evidence-report.json`. Its frozen-policy
+digest is
+`7b8fb30ca98f4b0916f4158824c98246799c61c08d416bfb6bb37d5b2e022710`;
+the recorded analyzer-source digest is
+`8828e4b8e502d377f1ea0d1d7330d5e8b03b3b6a0524a0f292f8ac2506e55815`;
+the report SHA-256 is
+`7ad71b9c90b7d95185544b327ff954f8987e156b938b70f2ac492b1d54116554`.
+Two complete invocations produced byte-identical reports. No cloud resource,
+model execution, live outcome, parameter retuning, or push was used.
+
 ### CFLX-SGD: cross-fitted lookahead candidate
 
 A later independent review proposed **Cross-Fitted Lookahead Extragradient SGD
