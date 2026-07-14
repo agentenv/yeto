@@ -329,6 +329,8 @@ def load_tensor_pack(
 ) -> DecodedTensorPack:
     """Load one pack only after strict CAS, schema, and per-tensor validation."""
 
+    if sys.byteorder != BYTE_ORDER:
+        raise TensorPackError("tensor-pack v1 requires a little-endian host")
     manifest_ref: ManifestRef | str = (
         ref.manifest if isinstance(ref, TensorPackRef) else ref
     )

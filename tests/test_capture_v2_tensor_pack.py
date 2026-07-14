@@ -7,6 +7,7 @@ from collections import OrderedDict
 import pytest
 import torch
 
+import yeto.capture_v2_tensor_pack as tensor_pack_mod
 from yeto.capture_v2_store import (
     CaptureObjectStore,
     CaptureStoreError,
@@ -400,3 +401,12 @@ def test_invalid_identity_or_metadata_is_rejected_before_payload_insert(
         )
     assert list(store.objects_dir.iterdir()) == []
     assert list(store.manifests_dir.iterdir()) == []
+
+
+def test_load_rejects_a_non_little_endian_host_before_decoding(tmp_path, monkeypatch):
+    store = CaptureObjectStore(tmp_path / "cas")
+    pack = _publish_sample(store)
+
+    monkeypatch.setattr(tensor_pack_mod.sys, "byteorder", "big")
+    with pytest.raises(TensorPackError, match="requires a little-endian host"):
+        load_tensor_pack(store, pack)
