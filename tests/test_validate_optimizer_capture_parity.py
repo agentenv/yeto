@@ -600,6 +600,95 @@ def test_unknown_export_metadata_is_not_canonicalized(tmp_path):
     assert "adapter_config.json" in check["error"]
 
 
+def _set_adapter_config_value(arm: Path, key: str, value) -> None:
+    path = arm / "export" / "adapter_config.json"
+    config = json.loads(path.read_text(encoding="utf-8"))
+    config[key] = value
+    path.write_text(json.dumps(config), encoding="utf-8")
+
+
+def test_peft_target_modules_list_order_only_passes_and_preserves_duplicates(tmp_path):
+    pair = _make_pair(tmp_path)
+    _set_adapter_config_value(
+        pair.off_arm, "target_modules", ["q_proj", "v_proj", "v_proj"]
+    )
+    _set_adapter_config_value(
+        pair.on_arm, "target_modules", ["v_proj", "q_proj", "v_proj"]
+    )
+
+    result = _run(pair)
+
+    assert result["status"] == "PASS"
+    detail = _check(result, "export_payload_parity")["detail"]
+    assert detail["canonical_json_set_list_fields"] == [
+        {"relative_path": "adapter_config.json", "json_path": ["target_modules"]}
+    ]
+    assert result["canonicalization"]["export_json_set_list_fields"] == [
+        {
+            "relative_path": "adapter_config.json",
+            "json_path": ["target_modules"],
+            "operation": "sort_preserving_multiplicity",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("off_value", "on_value"),
+    [
+        (["q_proj", "v_proj"], ["q_proj", "v_proj", "v_proj"]),
+        (["q_proj", "v_proj"], ["q_proj", "o_proj"]),
+        (["q_proj", "v_proj"], ["q_proj", 7]),
+        (["q_proj", "v_proj"], "q_proj|v_proj"),
+    ],
+    ids=["multiplicity", "content", "element-type", "container-type"],
+)
+def test_peft_target_modules_semantic_changes_fail_closed(
+    tmp_path, off_value, on_value
+):
+    pair = _make_pair(tmp_path)
+    _set_adapter_config_value(pair.off_arm, "target_modules", off_value)
+    _set_adapter_config_value(pair.on_arm, "target_modules", on_value)
+
+    result = _run(pair)
+
+    assert result["status"] == "FAIL"
+    check = _check(result, "export_payload_parity")
+    assert check["status"] == "FAIL"
+    assert "adapter_config.json" in check["error"]
+
+
+@pytest.mark.parametrize("case", ["other-list", "nested-key", "other-json"])
+def test_target_module_exception_does_not_weaken_other_export_exactness(
+    tmp_path, case
+):
+    pair = _make_pair(tmp_path)
+    if case == "other-list":
+        _set_adapter_config_value(pair.off_arm, "modules_to_save", ["a", "b"])
+        _set_adapter_config_value(pair.on_arm, "modules_to_save", ["b", "a"])
+    elif case == "nested-key":
+        _set_adapter_config_value(
+            pair.off_arm, "nested", {"target_modules": ["q_proj", "v_proj"]}
+        )
+        _set_adapter_config_value(
+            pair.on_arm, "nested", {"target_modules": ["v_proj", "q_proj"]}
+        )
+    elif case == "other-json":
+        for arm, values in (
+            (pair.off_arm, ["q_proj", "v_proj"]),
+            (pair.on_arm, ["v_proj", "q_proj"]),
+        ):
+            (arm / "export" / "other.json").write_text(
+                json.dumps({"target_modules": values}), encoding="utf-8"
+            )
+    else:  # pragma: no cover
+        raise AssertionError(case)
+
+    result = _run(pair)
+
+    assert result["status"] == "FAIL"
+    assert _check(result, "export_payload_parity")["status"] == "FAIL"
+
+
 def test_missing_on_transcript_fails_closed(tmp_path):
     pair = _make_pair(tmp_path)
     (pair.on_arm / "syncer_response_transcript.jsonl").unlink()

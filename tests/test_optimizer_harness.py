@@ -16,6 +16,7 @@ from yeto.optimizer_harness import (
     adopt,
     build_parser,
     canary_launch_command,
+    detached_runtime_smoke_script,
     image_create_command,
     launch,
     launch_command,
@@ -154,6 +155,55 @@ def _description(spec, *, instance_id="123", nonce="0123456789abcdef"):
             "nanos": 0,
         }
     return description
+
+
+def test_detached_runtime_smoke_uses_exact_declared_env_and_executables(tmp_path):
+    def mutate(raw):
+        raw["execution"]["required_paths"].extend(
+            ["/home/test/venv/bin/python", "/home/test/.cargo/bin/cargo"]
+        )
+        raw["execution"]["required_executables"] = [
+            "/home/test/venv/bin/python",
+            "/home/test/.cargo/bin/cargo",
+        ]
+        raw["execution"]["env"] = {
+            "PATH": "/home/test/.cargo/bin:/home/test/venv/bin:/usr/bin",
+            "RUNTIME_LABEL": "value with spaces;$HOME",
+        }
+
+    spec = _spec(tmp_path, mutate)
+    script = detached_runtime_smoke_script(spec)
+
+    assert script.count(" --version >/dev/null") == 2
+    assert "test -x /home/test/venv/bin/python" in script
+    assert "test -x /home/test/.cargo/bin/cargo" in script
+    expected_env = [
+        "PATH=/home/test/.cargo/bin:/home/test/venv/bin:/usr/bin",
+        "RUNTIME_LABEL=value with spaces;$HOME",
+    ]
+    for executable in spec.execution["required_executables"]:
+        assert shlex.join(["env", *expected_env, executable, "--version"]) in script
+    rendered_start = start_script(spec)
+    assert rendered_start.index(script) < rendered_start.index("nohup ")
+
+
+def test_detached_runtime_smoke_empty_contract_is_noop(tmp_path):
+    spec = _spec(tmp_path)
+    assert spec.execution["required_executables"] == []
+    assert detached_runtime_smoke_script(spec) == "true"
+
+
+@pytest.mark.parametrize("case", ["undeclared", "duplicate"])
+def test_required_executable_contract_fails_closed(tmp_path, case):
+    def mutate(raw):
+        if case == "undeclared":
+            raw["execution"]["required_executables"] = ["/opt/tool/bin/runtime"]
+        else:
+            path = raw["execution"]["required_paths"][0]
+            raw["execution"]["required_executables"] = [path, path]
+
+    with pytest.raises(HarnessError, match="required_executables"):
+        _spec(tmp_path, mutate)
 
 
 def test_strict_quorum_budget_requires_explicit_async_headroom(tmp_path):

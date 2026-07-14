@@ -7,12 +7,15 @@ from filenames or summary statistics: every fully sampled syncer-probe anchor,
 candidate, and applied update is hashed byte-for-byte, as are the authoritative
 final checkpoint and exported tensor payloads.
 
-Only two forms of nondeterministic metadata are canonicalized:
+Only three forms of nondeterministic metadata are canonicalized:
 
 * the three known path fields in ``syncer_probe/index.jsonl`` are replaced by
   role tokens after their referenced files have been validated and hashed; and
 * JSON export metadata values under an explicit path-key allowlist may replace
-  the corresponding OFF/ON arm-directory prefix with ``<ARM_DIR>``.
+  the corresponding OFF/ON arm-directory prefix with ``<ARM_DIR>``; and
+* the top-level list-valued ``target_modules`` field in PEFT's
+  ``adapter_config.json`` is sorted while preserving every element and its
+  multiplicity.  PEFT converts that one list to a set when loading LoraConfig.
 
 Everything else must match exactly.  The result is always written as canonical
 JSON plus a SHA-256 sidecar, including on failure.
@@ -47,6 +50,7 @@ EXPORT_PATH_KEYS = {
     "name_or_path",
     "output_dir",
 }
+PEFT_SET_LIST_FIELD = ("adapter_config.json", ("target_modules",))
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 ATTEMPT_DISPOSITIONS = {
@@ -768,14 +772,43 @@ def validate_on_transcript(path: Path, probe: ProbeCapture) -> dict[str, Any]:
     }
 
 
-def _canonicalize_export_json(value: Any, arm_dir: Path, key: str | None = None) -> Any:
+def _canonicalize_export_json(
+    value: Any,
+    arm_dir: Path,
+    *,
+    relative_path: str,
+    json_path: tuple[str | int, ...] = (),
+) -> Any:
+    if (
+        (relative_path, json_path) == PEFT_SET_LIST_FIELD
+        and isinstance(value, list)
+        and all(type(item) is str for item in value)
+    ):
+        # PEFT LoraConfig.__post_init__ converts a list-valued target_modules
+        # to a set.  Sorting (not deduplicating) removes only serialization
+        # order noise: content, type, and multiplicity remain evidence.
+        return sorted(value)
     if isinstance(value, dict):
         return {
-            item_key: _canonicalize_export_json(item, arm_dir, item_key)
+            item_key: _canonicalize_export_json(
+                item,
+                arm_dir,
+                relative_path=relative_path,
+                json_path=(*json_path, item_key),
+            )
             for item_key, item in value.items()
         }
     if isinstance(value, list):
-        return [_canonicalize_export_json(item, arm_dir, key) for item in value]
+        return [
+            _canonicalize_export_json(
+                item,
+                arm_dir,
+                relative_path=relative_path,
+                json_path=(*json_path, index),
+            )
+            for index, item in enumerate(value)
+        ]
+    key = json_path[-1] if json_path else None
     if key in EXPORT_PATH_KEYS and isinstance(value, str):
         prefix = str(arm_dir.resolve())
         if value == prefix:
@@ -803,7 +836,9 @@ def load_export_manifest(export_dir: Path, arm_dir: Path) -> dict[str, dict[str,
             except (OSError, UnicodeError) as exc:
                 raise ParityError(f"cannot read export JSON {path}: {exc}") from exc
             value = strict_json_loads(raw, source=path)
-            canonical = _canonicalize_export_json(value, arm_dir)
+            canonical = _canonicalize_export_json(
+                value, arm_dir, relative_path=relative
+            )
             manifest[relative] = {
                 "mode": "canonical_json",
                 "sha256": canonical_sha256(canonical),
@@ -827,6 +862,12 @@ def compare_export_trees(off_arm: Path, on_arm: Path) -> dict[str, Any]:
         "files": len(off),
         "manifest_sha256": canonical_sha256(off),
         "canonical_json_path_keys": sorted(EXPORT_PATH_KEYS),
+        "canonical_json_set_list_fields": [
+            {
+                "relative_path": PEFT_SET_LIST_FIELD[0],
+                "json_path": list(PEFT_SET_LIST_FIELD[1]),
+            }
+        ],
     }
 
 
@@ -1279,6 +1320,13 @@ def run_gate(
         "canonicalization": {
             "probe_index_path_fields": list(PATH_FIELDS),
             "export_json_path_keys": sorted(EXPORT_PATH_KEYS),
+            "export_json_set_list_fields": [
+                {
+                    "relative_path": PEFT_SET_LIST_FIELD[0],
+                    "json_path": list(PEFT_SET_LIST_FIELD[1]),
+                    "operation": "sort_preserving_multiplicity",
+                }
+            ],
             "all_other_values": "exact",
             "binary_payloads": "exact_sha256",
         },
@@ -1287,7 +1335,7 @@ def run_gate(
             "Overhead uses exact syncer monotonic timestamps from commit sequence 1 through N; rounded results.jsonl wall values are descriptive and must agree with the sealed tapes.",
             "The syncer probe must capture every commit and every responder; sampled or incomplete probe/transcript key sets fail.",
             "When required, the barrier schedule check proves complete fixed-H lockstep waves from producer metadata; it does not infer barrier use from the command line.",
-            "Only explicit path-valued metadata fields are canonicalized; arbitrary run names, labels, metrics, and unknown metadata remain exact.",
+            "Only explicit path-valued metadata fields and PEFT adapter_config.json's top-level list-valued target_modules set are canonicalized; target-module multiplicity, arbitrary run names, labels, metrics, and all other metadata remain exact.",
             "The sha256sum-compatible input manifest seals every file consumed by a successful parity decision and is independently required by the experiment harness.",
         ],
     }

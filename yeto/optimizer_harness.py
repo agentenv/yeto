@@ -393,6 +393,22 @@ def load_spec(path: str | Path) -> ExperimentSpec:
         _absolute_remote_path(path, f"execution.required_paths[{index}]")
         for index, path in enumerate(execution.get("required_paths", []))
     ]
+    execution["required_executables"] = [
+        _absolute_remote_path(path, f"execution.required_executables[{index}]")
+        for index, path in enumerate(execution.get("required_executables", []))
+    ]
+    if len(execution["required_executables"]) != len(
+        set(execution["required_executables"])
+    ):
+        raise HarnessError("execution.required_executables must not contain duplicates")
+    undeclared_executables = sorted(
+        set(execution["required_executables"]) - set(execution["required_paths"])
+    )
+    if undeclared_executables:
+        raise HarnessError(
+            "every execution.required_executables entry must also be an exact "
+            f"execution.required_paths entry: {undeclared_executables}"
+        )
     execution["completion_paths"] = [
         _absolute_remote_path(path, f"execution.completion_paths[{index}]")
         for index, path in enumerate(execution.get("completion_paths", []))
@@ -1282,6 +1298,35 @@ def _render_bash_c(body: str) -> str:
     return shlex.join(["bash", "-c", body])
 
 
+def detached_runtime_smoke_script(spec: ExperimentSpec) -> str:
+    """Render executable probes with the detached command's spec env assignments.
+
+    Each executable is an absolute, already-declared required path.  Invoking
+    ``--version`` catches missing execute permission and broken runtime/linker
+    dependencies without starting experiment work.  Empty contracts render a
+    no-op so existing specs remain behavior compatible.
+    """
+
+    executables = spec.execution["required_executables"]
+    if not executables:
+        return "true"
+    env_assignments = [
+        f"{key}={value}" for key, value in sorted(spec.env.items())
+    ]
+    lines = []
+    for executable in executables:
+        quoted = shlex.quote(executable)
+        error = shlex.quote(f"required executable is not executable: {executable}")
+        lines.append(
+            f"test -x {quoted} || {{ echo {error} >&2; exit 21; }}"
+        )
+        lines.append(
+            shlex.join(["env", *env_assignments, executable, "--version"])
+            + " >/dev/null"
+        )
+    return "\n".join(lines)
+
+
 def start_script(spec: ExperimentSpec) -> str:
     run = shlex.quote(spec.remote_run_dir)
     repo = shlex.quote(spec.remote_repo_dir)
@@ -1299,6 +1344,7 @@ def start_script(spec: ExperimentSpec) -> str:
         f"test -e {shlex.quote(path)} || {{ echo 'missing required path: {path}' >&2; exit 3; }}"
         for path in spec.execution["required_paths"]
     )
+    runtime_smoke = detached_runtime_smoke_script(spec)
     input_manifest_verification = (
         "\n".join(
             f"echo {shlex.quote('VERIFY ' + manifest)}; "
@@ -1341,6 +1387,7 @@ dirty=$(git -C \"$repo\" status --porcelain=v1 --untracked-files=all)
   exit 6
 }}
 {required}
+{runtime_smoke}
 mkdir -p \"$run\"
 if [ -e \"$run/spec.json\" ]; then
   echo 'run directory was already initialized; choose a new run_id or use status' >&2
