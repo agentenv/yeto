@@ -1648,6 +1648,156 @@ training-loss or convergence superiority. The direct module check and complete
 Lean build pass with no `sorry`, `admit`, or project axiom; the audited theorem
 dependencies are only `propext`, `Classical.choice`, and `Quot.sound`.
 
+### 2026-07-14 PTI implementation, CRN substrate, and GCP status
+
+Four foundational commits turn parts of the PTI design into executable
+substrate, without creating a PTI-versus-SGD loss result:
+
+- `eb6b3bd` freezes the exploratory online GCP sequence and its E1/E2 resource,
+  integrity, and teardown gates. It predates the production PTI wiring and is
+  still deliberately labeled draft, blocked, and non-launchable; it contains
+  no JSON launch specification.
+- `f294828` adds a single-process PyTorch capture-v2 live publisher/restorer.
+  It snapshots fp32 trainable fragments, supported optimizer tensor/integer
+  state and parameter-group topology, model buffers, JSON-representable
+  scheduler/scaler state, train/eval mode, Python/NumPy/Torch CPU and visible
+  CUDA RNG state, input provenance, and real pre-materialized future groups.
+  Restore verifies the CAS objects, target topology/devices, every represented
+  value, and a digest of all restored mutable state. Unsupported state fails
+  closed before an endpoint is published.
+- `2323657` makes the policy-agnostic capture-v2 CRN orchestration executable.
+  For one pre-authorized boundary it performs four fresh restores in A/B then
+  B/A order, applies the exact sealed stock or candidate action, evaluates at
+  k=0, consumes the same eight sealed future groups, evaluates at k=8, checks
+  order invariance and branch isolation, and atomically publishes an isolation
+  attestation plus paired outcome. It also adds the PTI-specific closed-campaign
+  finite-loss arithmetic over authority-verified outcomes.
+- `73ed593` adds `pti-sgd` to the production Rust syncer, adds matched
+  `pti_m1_stock`/`pti_m1_candidate` and
+  `pti_m4_stock`/`pti_m4_candidate` presets to `compare_diloco.py`, extends the
+  syncer checkpoint format with per-fragment PTI state, and adds PTI evidence
+  fields to the JSONL event tape. Tests assert that each online pair differs
+  only in the outer direction selector.
+
+The frozen online arithmetic is exactly the Amendment-1 `-1/4` policy. For
+current and preceding same-fragment stock pseudo-gradients `G_t` and
+`G_{t-1}`, it computes
+
+\[
+u=G_t/\lVert G_t\rVert,\qquad
+v=G_{t-1}/\lVert G_{t-1}\rVert,
+\]
+
+\[
+p=\frac{v-\langle v,u\rangle u}
+        {\lVert v-\langle v,u\rangle u\rVert},\qquad
+C_t=\lVert G_t\rVert
+    \frac{u-\tfrac14p}{\lVert u-\tfrac14p\rVert}.
+\]
+
+All products, sums, square roots, divisions, and coordinate writes follow the
+frozen sequential f32 operation order. The shadow sealed at boundary `t-1` is
+resolved only when factual same-fragment `G_t` arrives:
+
+\[
+z_{t-1}=\cos(C_{t-1},G_t)-\cos(G_{t-1},G_t).
+\]
+
+The candidate is selected only when the three most recent **already resolved**
+scores are all strictly positive. A valid candidate is still sealed for the
+next shadow when the interlock is closed. Warm-up, a closed interlock, or
+invalid/degenerate geometry applies the stock direction; invalid causal state
+is cleared rather than repaired from an invented observation. The selected
+direction then feeds the same outer Nesterov implementation as the stock arm
+with outer LR exactly `0.28` and momentum positive zero, i.e. this campaign's
+memoryless outer SGD-0.28 kernel. The paired presets otherwise retain the same
+weighted RDA merge, `merge_alpha=0`, f32 wire, no delta correction, strict
+quorum, deterministic commit order, data order, seed, evaluation work, and
+matched inner AdamW. Thus “SGD-0.28” here names the outer step; it does not
+rename the matched inner optimizer.
+
+The Rust candidate kernel is checked against frozen Python little-endian f32
+bit fixtures, including nontrivial three- and four-coordinate cases. PTI state
+is carried inside an immutable action preview and installed only by
+`commit_preview`; repeated previews are equal and do not resolve a shadow or
+advance the interlock twice. The checkpoint extension persists the preceding
+stock direction, pending candidate, and at most three resolved scores for each
+fragment. A test splits a causal direction stream at a checkpoint and proves
+that resumed statistics, parameters, outer buffer, and PTI state remain
+bit-identical to uninterrupted execution. Python export validates and skips
+that optimizer-only extension while still recovering the model checkpoint.
+
+Each PTI event-tape row now reports the resolved shadow score, score count,
+interlock/action/clear flags, reason code, and SHA-256 identities for the
+current stock, previous stock, candidate, and selected action. Those are
+per-record vector identities, not yet a chained PTI ledger: `73ed593` does not
+write the hash-chain predecessor or a separately sealed final ledger head
+required by the E1 plan. Follow-up commit `905328f` exercises the causal path
+through a real syncer process and checks its emitted tape rather than only a
+direct state-machine call. Follow-up commit `8d774bf` adds a wrapper that runs
+one exact stock/PTI setting pair and then a fail-closed validator. The
+validator binds finite terminal losses to exactly 32 matched commit/responder
+schedules, four balanced fragments, both final checkpoints, causal
+same-fragment hash continuity, three-positive interlock decisions, at least
+one non-stock action, and exact stock-fallback action hashes; it atomically
+writes PASS or FAIL evidence and labels the scope exploratory/non-CRN. It does
+not turn the per-row hashes into the missing chain or bind a live cloud
+runtime/image/input manifest. No immutable GCP JSON spec exists yet. Thus the
+online code and local evidence validator are executable, but the branch still
+does not satisfy the complete E1 cloud launch gate.
+
+The live capture-v2 bridge and evaluator similarly close interfaces, not the
+end-to-end live CRN path. The bridge intentionally does not choose a causally
+safe learner boundary or advance/materialize a production data iterator. The
+current training program does not yet pause a real learner and join its exact
+endpoint/future-eight bundle to the corresponding syncer boundary, and no
+production `IsolatedCRNBackend` yet performs fresh model construction,
+endpoint restore, sealed-action application, exact eight-group training, and
+fixed-object evaluation. A real campaign must still precommit a closed set of
+at least 32 balanced boundaries, eight for each of four fragments, before any
+callbacks or outcomes run. The finite-loss analyzer reports the separately
+frozen action-rate check and enforces the k0/k8 sample, gain, bootstrap,
+fragment, positive-boundary, and worst-regression statistics, but it
+deliberately does not accept the direction-score confidence or matched runtime
+overhead evidence needed for PTI promotion. Fake-backend and toy-PyTorch tests
+are contract tests, not live Qwen loss evidence.
+
+The GCP plan remains a sequential two-stage screen using exact READY image ID
+`7290368630472593484`, a 250 GB `pd-ssd` boot disk, Spot provisioning with
+delete-on-termination, a 3,600-second provider runtime limit, and a
+campaign-wide ceiling of eight active accelerators:
+
+1. E1 reserves `exp2-pti-online-e1-m1-canary` on one
+   `a2-highgpu-1g` A100. It pairs the m1 stock and PTI arms at H4 for 32
+   syncer commits, 32,768 training tokens, eight evaluation rows, and seed
+   `271271`. It is only an engineering canary; its loss sign is descriptive,
+   while exact fallback, at least one action, final checkpoint/evidence,
+   finite-loss, equal-work, checksum, and below-2%-overhead checks determine
+   whether engineering passed.
+2. E2 reserves `exp2-pti-online-e2-m4-screen` on one
+   `a2-highgpu-4g` four-A100 VM. It is conditional on a reviewed, checksummed
+   E1 pass and keeps the treatment semantics fixed while moving to four
+   learners, H16, 700,000 tokens, 64 evaluation rows, and 32 syncer commits.
+   The two stages may not overlap; permission to use up to eight A100s is a
+   campaign ceiling, not a reason to skip E1 or allocate eight GPUs to either
+   frozen stage.
+
+As of the 2026-07-14 handoff, noninteractive GCP checks are blocked because
+the active `scf@tomo.inc` gcloud credential requires reauthentication; the
+operator must run `gcloud auth login scf@tomo.inc` before a live doctor or
+launch can succeed. This PTI work has made **no cloud mutation and no launch**:
+no PTI VM, disk, object prefix, or experiment result exists yet.
+
+Finally, the two evidence classes must not be conflated. The planned online
+stock/PTI arms are matched and paired by seed, but once PTI first takes a
+non-stock action their model, optimizer, and subsequent pseudo-gradient states
+diverge. Their trajectory or terminal-loss difference is useful exploratory
+screening only. The preregistered capture-v2 CRN test instead restores both
+actions from the same complete boundary state, runs each in both A/B and B/A
+order, and consumes byte-identical future groups through k=8. Only that latter
+same-state design can contribute the frozen causal finite-loss evidence; no
+result from either design has yet been acquired.
+
 ### CGC-SGD: bounded angular continuation kernel
 
 A later failure-synthesis agent proposed **Causal Geodesic-Continuation SGD
