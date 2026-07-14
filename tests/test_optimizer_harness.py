@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -34,6 +36,44 @@ from yeto.optimizer_harness import (
 
 
 COMMIT = "f08563a9bf944062a51e1b85dc987cbc071ca7bd"
+
+
+def test_cli_uses_sibling_harness_despite_stale_pythonpath(tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    stale = tmp_path / "stale"
+    stale_package = stale / "yeto"
+    stale_package.mkdir(parents=True)
+    (stale_package / "__init__.py").write_text("")
+    (stale_package / "optimizer_harness.py").write_text(
+        "def main():\n    print('STALE_OPTIMIZER_HARNESS')\n    return 0\n"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(stale)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "optimizer_experiment.py"),
+            "render",
+            str(
+                repo_root
+                / "experiments"
+                / "optimizer"
+                / "exp2-pti-online-e1-m1-canary-r1.json"
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "STALE_OPTIMIZER_HARNESS" not in result.stdout
+    assert 'nohup bash -c "$(printf %s ' in result.stdout
+    assert '| base64 -d)"' in result.stdout
+    assert "nohup bash -c '\n" not in result.stdout
 
 
 def _raw() -> dict:
