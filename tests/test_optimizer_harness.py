@@ -1051,6 +1051,46 @@ def test_exp254_r5_async_canary_is_exactly_pinned_launchable_and_one_gpu():
     assert "--boot-disk-type=pd-ssd" in rendered_launch
 
 
+def test_exp254_r5b_canary_clones_r5_with_unique_namespace_and_exact_python():
+    root = Path(__file__).resolve().parents[1] / "experiments" / "optimizer"
+    r5 = load_spec(root / "exp2-54-smoke-r5-async-canary.json")
+    r5b = load_spec(root / "exp2-54-smoke-r5b-async-canary.json")
+
+    old_namespace = "exp2-54-smoke-r5-async-canary"
+    new_namespace = "exp2-54-smoke-r5b-async-canary"
+    interpreter = "/home/shou/venv/bin/python"
+    assert r5b.run_id == r5b.instance_name == new_namespace
+    assert r5b.remote_repo_dir == f"/home/shou/experiments/{new_namespace}/repo"
+    assert r5b.remote_run_dir == f"/home/shou/runs/{new_namespace}"
+    assert r5b.artifact_uri == (
+        "gs://yeto-exp2-52-model-training-497007/" + new_namespace
+    )
+    assert r5b.command[0] == interpreter
+    assert interpreter in r5b.execution["required_paths"]
+    assert r5b.cloud["adopt_only"] is False
+    assert r5b.cloud["labels"]["draft"] == "false"
+    assert old_namespace not in json.dumps(r5b.raw, sort_keys=True)
+    assert f"{interpreter} scripts/compare_diloco.py" in start_script(r5b)
+
+    def normalize_namespace(value):
+        if isinstance(value, dict):
+            return {key: normalize_namespace(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [normalize_namespace(item) for item in value]
+        if isinstance(value, str):
+            return value.replace(new_namespace, old_namespace)
+        return value
+
+    normalized_r5b = normalize_namespace(r5b.raw)
+    normalized_r5b["execution"]["command"][0] = r5.command[0]
+    normalized_r5b["execution"]["required_paths"].remove(interpreter)
+    assert normalized_r5b == r5.raw
+
+    rendered_launch = launch_command(r5b)
+    assert rendered_launch[:4] == ["gcloud", "compute", "instances", "create"]
+    assert rendered_launch[4] == new_namespace
+
+
 def test_exp254_r6_async_qualifier_is_pinned_full_path_dependent_draft(tmp_path):
     root = Path(__file__).resolve().parents[1] / "experiments" / "optimizer"
     spec_path = root / "exp2-54-smoke-r6-async-qualifier-draft.json"
@@ -1064,7 +1104,7 @@ def test_exp254_r6_async_qualifier_is_pinned_full_path_dependent_draft(tmp_path)
     assert spec.remote_repo_dir == f"/home/shou/experiments/{run_id}/repo"
     assert spec.remote_run_dir == f"/home/shou/runs/{run_id}"
 
-    assert spec.cloud["labels"]["gate"] == ("exp2-54-smoke-r5-async-canary-pass")
+    assert spec.cloud["labels"]["gate"] == ("exp2-54-smoke-r5b-async-canary-pass")
     assert spec.cloud["labels"]["draft"] == "true"
     assert spec.cloud["labels"]["evidence"] == "none"
     assert spec.cloud["adopt_only"] is True
@@ -1077,6 +1117,9 @@ def test_exp254_r6_async_qualifier_is_pinned_full_path_dependent_draft(tmp_path)
         "projects/model-training-497007/global/images/yeto-optimizer-a100-20260714"
     )
     assert spec.cloud["expected_source_image_id"] == "7290368630472593484"
+    assert spec.command[0] == "/home/shou/venv/bin/python"
+    assert "/home/shou/venv/bin/python" in spec.execution["required_paths"]
+    assert "/home/shou/venv/bin/python scripts/compare_diloco.py" in start_script(spec)
 
     expected_values = {
         "--gpu-slots": "4",
