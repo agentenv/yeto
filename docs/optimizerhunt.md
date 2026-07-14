@@ -1264,6 +1264,33 @@ from content-addressed storage or an asynchronous writer, so it does not
 duplicate the CAS workstream. No new GCP instance was launched for this
 diagnosis or plumbing change.
 
+### Standalone bounded background writer groundwork
+
+The reusable `BoundedBackgroundWriter` is implemented and concurrency-tested
+as a standalone primitive, but is deliberately **not connected** to
+`OptimizerStateCapture` yet. It accepts only exact immutable `bytes` payloads
+with an explicit reservation equal to their length. One non-daemon worker
+executes a fixed sink in FIFO admission order. Both item and byte reservations
+remain charged while the item is queued and throughout the sink call, so a
+slow write or `fsync` cannot free apparent capacity while the worker still owns
+the payload. Producers block on full capacity; no capacity drop path exists.
+
+Close changes admission atomically from open to closing, wakes blocked
+producers with a closed-admission error, drains every item accepted before the
+transition, joins the worker, and is safe for concurrent callers. The first
+sink exception changes the writer to failed, abandons and accounts for every
+remaining accepted item, wakes blocked producers, stops the worker, and is
+chained from every subsequent submit or close error. Statistics expose current
+and high-water reservations and queues, accepted/completed/abandoned bytes and
+items, producer block count and nanoseconds, queue-wait nanoseconds, worker
+busy/idle nanoseconds, close-wait time, terminal error identity, and worker
+liveness. Tests cover FIFO ordering, byte and item backpressure, injected
+write- and fsync-like errors, six concurrent producers, concurrent close and
+submission races, immutable/reservation rejection, idempotent close, and zero
+remaining worker threads. This primitive contains no path layout, serializer,
+atomic-file protocol, CAS, or object-store policy; those remain the live
+capture integration layer's responsibility.
+
 ### PTI-SGD: next temporal candidate, not yet an empirical result
 
 A separate agent review proposed **Prequential Transverse Interlock SGD
