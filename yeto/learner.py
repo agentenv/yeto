@@ -29,6 +29,7 @@ import torch
 import torch.distributed as dist
 
 from .autobatch import int_or_auto, rebalance_grad_accum, resolve_micro_batch_size
+from .bcmp_shadow import BCMPShadowTracker
 from .data import StreamingPackedBlocks, build_packed_dataset
 from .fragments import FragmentLayout, build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
@@ -144,6 +145,19 @@ def parse_args(argv=None):
         type=float,
         default=1.0,
         help="global gradient-norm cap; 0 disables clipping",
+    )
+    p.add_argument(
+        "--bcmp-shadow-path",
+        default=None,
+        help="optional behavior-preserving JSONL trace of BC-MP ray, "
+        "work-clipped slab, and hard-reset AdamW counterfactuals at the "
+        "first clipped gradient after sampled fragment broadcasts",
+    )
+    p.add_argument(
+        "--bcmp-shadow-every",
+        type=int,
+        default=1,
+        help="sample every Nth applied fragment broadcast for --bcmp-shadow-path",
     )
     p.add_argument("--fragments", type=int, default=8, help="P (= H, round-robin)")
     p.add_argument(
@@ -920,6 +934,19 @@ def main(argv=None) -> None:
     if not 0.0 <= args.merge_alpha < 1.0:
         raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
 
+    if args.bcmp_shadow_every < 1:
+        raise ValueError("--bcmp-shadow-every must be >= 1")
+    if args.bcmp_shadow_path is not None:
+        if args.syncer == "none":
+            raise RuntimeError("--bcmp-shadow-path requires an async syncer run")
+        if args.inner_optimizer != "adamw":
+            raise RuntimeError("--bcmp-shadow-path requires --inner-optimizer adamw")
+        if args.tuning != "lora":
+            raise RuntimeError(
+                "--bcmp-shadow-path currently requires --tuning lora; full/FSDP "
+                "fragment-to-optimizer-state ownership has not been audited"
+            )
+
     scaffold_mode = getattr(args, "inner_control_variate", "none")
     if scaffold_mode != "none":
         if args.syncer == "none":
@@ -1397,6 +1424,19 @@ def run_inner_loop(
     probe = None
     if rank == 0 and client is not None and args.probe_data is not None:
         probe = FragmentUtilityProbe(args, model, params, layout, tokenizer, device, compute_loss)
+    bcmp_shadow = None
+    if rank == 0 and args.bcmp_shadow_path is not None:
+        bcmp_shadow = BCMPShadowTracker(
+            args.bcmp_shadow_path,
+            every=args.bcmp_shadow_every,
+            learner_id=args.learner_id,
+            rank=rank,
+        )
+        log.info(
+            "BC-MP shadow enabled: every=%d log=%s",
+            args.bcmp_shadow_every,
+            args.bcmp_shadow_path,
+        )
 
     def drain_broadcast_actions() -> list:
         """Collect and unpack received global fragments (rank 0), updating
@@ -1442,6 +1482,16 @@ def run_inner_loop(
         nonlocal global_step
         for fid, version, flat in acts:
             flat = flat.to(device)
+            if bcmp_shadow is not None:
+                bcmp_shadow.note_broadcast(
+                    fragment_id=fid,
+                    broadcast_version=version,
+                    local_step=steps_total,
+                    fragment=layout.fragments[fid],
+                    params=params,
+                    global_flat=flat,
+                    merge_alpha=args.merge_alpha,
+                )
             if args.merge_alpha > 0:
                 local = fragment_flat(layout.fragments[fid], params)
                 flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
@@ -1609,6 +1659,13 @@ def run_inner_loop(
             else:
                 if args.grad_clip > 0.0:
                     torch.nn.utils.clip_grad_norm_(params.values(), args.grad_clip)
+            if bcmp_shadow is not None:
+                bcmp_shadow.before_optimizer_step(
+                    layout=layout,
+                    params=params,
+                    optimizer=opt,
+                    local_step=steps_total,
+                )
             opt.step()
             if audit_capture:
                 params_after_audit = torch.cat(
@@ -1697,6 +1754,16 @@ def run_inner_loop(
                 for fid, version, flat in actions:
                     flat = flat.to(device)
                     dist.broadcast(flat, src=0)
+                    if bcmp_shadow is not None:
+                        bcmp_shadow.note_broadcast(
+                            fragment_id=fid,
+                            broadcast_version=version,
+                            local_step=steps_total,
+                            fragment=layout.fragments[fid],
+                            params=params,
+                            global_flat=flat,
+                            merge_alpha=args.merge_alpha,
+                        )
                     # α-blend: keep a share of the inner steps taken while the
                     # merge was in flight. Ranks hold identical params, so
                     # blending after the broadcast stays consistent.
@@ -1901,6 +1968,8 @@ def run_inner_loop(
             if shutdown or steps_total >= args.max_local_steps:
                 break
         epoch += 1
+    if bcmp_shadow is not None:
+        bcmp_shadow.close(local_step=steps_total)
     log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
 
 

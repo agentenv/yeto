@@ -633,6 +633,13 @@ def learner_command(
         # single-process learners take the explicit one.
         cmd += ["--device", args.device]
     if arm is not None:
+        if getattr(args, "bcmp_shadow_path", False):
+            cmd += [
+                "--bcmp-shadow-path",
+                str(arm_dir / f"bcmp_shadow_learner_{learner_id}.jsonl"),
+                "--bcmp-shadow-every",
+                str(getattr(args, "bcmp_shadow_every", 1)),
+            ]
         step_sleep = _float_list_value(
             getattr(args, "learner_step_sleep_ms", "0"), learner_id
         )
@@ -1983,13 +1990,20 @@ def main() -> int:
         "(m2h24): the right value is H * step_time / fragments, and "
         "step time depends on hardware",
     )
-    p.add_argument(
+    baseline = p.add_mutually_exclusive_group()
+    baseline.add_argument(
         "--baseline-loss",
         type=float,
         default=None,
         help="skip the synchronous baseline arm and compare against "
         "this eval loss/token (from a previous run with the same "
         "model, data, seed and budget)",
+    )
+    baseline.add_argument(
+        "--skip-baseline",
+        action="store_true",
+        help="do not run or record a synchronous baseline; use for paired "
+        "optimizer/de-confound arms whose result does not depend on one",
     )
     p.add_argument("--max-rows", type=int, default=None, help="cap training rows")
     p.add_argument(
@@ -2004,6 +2018,18 @@ def main() -> int:
         type=int,
         default=0,
         help="base learner RNG seed; keep equal across compared arms",
+    )
+    p.add_argument(
+        "--bcmp-shadow-path",
+        action="store_true",
+        help="enable behavior-preserving BC-MP shadow diagnostics for each "
+        "async learner; JSONL paths are derived under the arm directory",
+    )
+    p.add_argument(
+        "--bcmp-shadow-every",
+        type=int,
+        default=1,
+        help="sample every Nth applied fragment broadcast in each learner",
     )
     p.add_argument(
         "--device", default="cpu", help="learner/eval device (cpu, mps, cuda)"
@@ -2293,6 +2319,8 @@ def main() -> int:
 
     if args.syncer_total_steps < 0 or args.learner_max_steps < 0:
         p.error("--syncer-total-steps and --learner-max-steps must be non-negative")
+    if args.bcmp_shadow_every < 1:
+        p.error("--bcmp-shadow-every must be positive")
     if args.scaffold_beta is not None and args.scaffold_beta <= 0.0:
         p.error("--scaffold-beta must be positive")
     if args.scaffold_control_shuffle and args.inner_control_variate not in (
@@ -2345,6 +2373,13 @@ def main() -> int:
     for arm in arms:
         if arm.scaffold_control_shuffle and arm.inner_control_variate != "scaffold_full":
             p.error("identity shuffle requires a scaffold_full arm")
+    if args.bcmp_shadow_path:
+        non_adamw = [arm.name for arm in arms if arm.inner_optimizer != "adamw"]
+        if non_adamw:
+            p.error(
+                "--bcmp-shadow-path requires AdamW async arms; incompatible "
+                f"settings: {', '.join(non_adamw)}"
+            )
     if args.round_interval_ms is not None:
         from dataclasses import replace as _replace
 
@@ -2464,7 +2499,10 @@ def main() -> int:
     )
     print(f"[compare] base eval loss/token: {base:.4f}", flush=True)
 
-    if args.baseline_loss is not None:
+    bl = None
+    if args.skip_baseline:
+        print("[compare] synchronous baseline: omitted", flush=True)
+    elif args.baseline_loss is not None:
         bl = args.baseline_loss
         records.append(
             {"arm": "baseline (sync, injected)", "m": 1, "wall_s": 0.0, "eval_loss": bl}
@@ -2498,8 +2536,9 @@ def main() -> int:
     with open(args.report_dir / "results.jsonl", "w") as f:
         for r in records:
             f.write(json.dumps(r) + "\n")
+    comparison = "DiLoCo comparison" if bl is None else "DiLoCo vs synchronous baseline"
     md = [
-        f"# DiLoCo vs synchronous baseline — {args.model}, "
+        f"# {comparison} — {args.model}, "
         f"{args.token_budget} tokens/arm",
         "",
         "| arm | M | wall (s) | eval loss/token | Δ vs baseline |",
@@ -2508,7 +2547,7 @@ def main() -> int:
     for r in records:
         delta = (
             "—"
-            if r["arm"].startswith(("base", "baseline")) or bl == 0
+            if r["arm"].startswith(("base", "baseline")) or bl in (None, 0)
             else (f"{100 * (r['eval_loss'] - bl) / bl:+.2f}%")
         )
         md.append(
