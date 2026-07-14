@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from yeto.optimizer_harness import load_spec
@@ -8,6 +9,7 @@ from yeto.optimizer_harness import load_spec
 ROOT = Path(__file__).parents[1]
 SPECS = ROOT / "experiments" / "optimizer"
 PINNED_COMMIT = "d2f66ab040dc539bcb06629513dfa9f8c3dc9692"
+R2_PINNED_COMMIT = "426425aaf09068608ddf2900c71f6d50f1bb5fdb"
 
 
 def _flag(command: tuple[str, ...], name: str) -> str:
@@ -17,8 +19,8 @@ def _flag(command: tuple[str, ...], name: str) -> str:
     return command[index + 1]
 
 
-def _load(stage: str):
-    return load_spec(SPECS / f"exp2-pti-online-{stage}-r1.json")
+def _load(stage: str, revision: int = 1):
+    return load_spec(SPECS / f"exp2-pti-online-{stage}-r{revision}.json")
 
 
 def test_e1_is_launchable_one_a100_exact_pti_online_pair() -> None:
@@ -42,6 +44,25 @@ def test_e1_is_launchable_one_a100_exact_pti_online_pair() -> None:
     assert _flag(spec.command, "--token-budget") == "32768"
     assert _flag(spec.command, "--eval-rows") == "8"
     assert _flag(spec.command, "--arm-timeout-min") == "20"
+
+
+def test_e1_r2_is_fresh_and_pins_module_drift_repair() -> None:
+    spec = _load("e1-m1-canary", revision=2)
+    serialized = json.dumps(spec.raw, sort_keys=True)
+
+    assert spec.repo_commit == R2_PINNED_COMMIT
+    assert spec.run_id == "exp2-pti-online-e1-m1-canary-r2"
+    assert spec.cloud["instance_name"] == spec.run_id
+    assert spec.cloud["labels"]["run-id"] == spec.run_id
+    assert spec.artifact_uri.endswith("/exp2-pti-online-e1-m1-canary-r2")
+    assert "exp2-pti-online-e1-m1-canary-r1" not in serialized
+    assert spec.cloud["adopt_only"] is False
+    assert spec.cloud["machine_type"] == "a2-highgpu-1g"
+    assert spec.cloud["accelerator_count"] == 1
+    assert _flag(spec.command, "--settings") == "pti_m1_stock,pti_m1_candidate"
+    assert _flag(spec.command, "--outer-lr") == "0.28"
+    assert _flag(spec.command, "--outer-momentum") == "0"
+    assert _flag(spec.command, "--syncer-total-steps") == "32"
 
 
 def test_e2_is_adopt_only_conditional_four_a100_exact_pti_online_pair() -> None:
@@ -87,16 +108,14 @@ def test_specs_freeze_treatment_and_complete_evidence_contracts() -> None:
             assert spec.checks["expected_flags"][flag] == ""
         assert spec.checks["strict_quorum_step_budget"]["fragments"] == 4
         assert (
-            spec.checks["strict_quorum_step_budget"]["min_headroom_steps"]
-            == headroom
+            spec.checks["strict_quorum_step_budget"]["min_headroom_steps"] == headroom
         )
         completions = set(spec.execution["completion_paths"])
         assert any(path.endswith("/report/results.jsonl") for path in completions)
         assert sum(path.endswith("/tape.jsonl") for path in completions) == 2
         assert sum(path.endswith("/state.ckpt") for path in completions) == 2
         assert any(
-            path.endswith("/report/pti_online_validation.json")
-            for path in completions
+            path.endswith("/report/pti_online_validation.json") for path in completions
         )
         assert any(
             path.endswith("/report/pti_online_validation.json.sha256")
