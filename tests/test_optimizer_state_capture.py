@@ -386,13 +386,17 @@ def test_background_writer_completes_live_fifo_artifacts_and_emits_stats(
     manifest_publications = []
     artifact_hashes = []
     artifact_sidecars = []
+    payload_digests = []
+    serializations = []
+    structural_freezes = []
     fsync_calls = []
-    admitted_headers = []
 
     original_manifest_publication = OptimizerStateCapture._write_manifest_raw
     original_artifact_hash = capture_module._background_artifact_sha256
     original_artifact_sidecar = capture_module._background_artifact_sidecar_bytes
-    original_publish = OptimizerStateCapture._publish_background_item
+    original_payload_digest = capture_module.capture_value_sha256
+    original_torch_save = capture_module.torch.save
+    original_structural_freeze = capture_module._freeze_owned_capture_value
     original_fsync = capture_module.os.fsync
 
     def traced_manifest_publication(self):
@@ -407,16 +411,17 @@ def test_background_writer_completes_live_fifo_artifacts_and_emits_stats(
         artifact_sidecars.append((phase["value"], threading.current_thread().name))
         return original_artifact_sidecar(digest, name)
 
-    def inspect_publish(self, item):
-        raw = item.payload
-        header_bytes = int.from_bytes(
-            raw[-capture_module.BACKGROUND_TRAILER_BYTES :], "big"
-        )
-        header_start = len(raw) - capture_module.BACKGROUND_TRAILER_BYTES - header_bytes
-        admitted_headers.append(
-            json.loads(raw[header_start : -capture_module.BACKGROUND_TRAILER_BYTES])
-        )
-        return original_publish(self, item)
+    def traced_payload_digest(value):
+        payload_digests.append((phase["value"], threading.current_thread().name))
+        return original_payload_digest(value)
+
+    def traced_torch_save(*args, **kwargs):
+        serializations.append((phase["value"], threading.current_thread().name))
+        return original_torch_save(*args, **kwargs)
+
+    def traced_structural_freeze(value):
+        structural_freezes.append((phase["value"], threading.current_thread().name))
+        return original_structural_freeze(value)
 
     def traced_fsync(descriptor):
         fsync_calls.append((phase["value"], threading.current_thread().name))
@@ -433,8 +438,10 @@ def test_background_writer_completes_live_fifo_artifacts_and_emits_stats(
         "_background_artifact_sidecar_bytes",
         traced_artifact_sidecar,
     )
+    monkeypatch.setattr(capture_module, "capture_value_sha256", traced_payload_digest)
+    monkeypatch.setattr(capture_module.torch, "save", traced_torch_save)
     monkeypatch.setattr(
-        OptimizerStateCapture, "_publish_background_item", inspect_publish
+        capture_module, "_freeze_owned_capture_value", traced_structural_freeze
     )
     monkeypatch.setattr(capture_module.os, "fsync", traced_fsync)
 
@@ -485,8 +492,10 @@ def test_background_writer_completes_live_fifo_artifacts_and_emits_stats(
     _wait_until(lambda: capture._background_writer.snapshot().completed_items == 3)
 
     assert manifest_publications == [("construct", main_thread)]
-    assert len(admitted_headers) == 3
-    assert all("sha256" not in header for header in admitted_headers)
+    assert structural_freezes
+    assert set(structural_freezes) == {("hot", main_thread)}
+    assert payload_digests == [("hot", writer_thread)] * 3
+    assert serializations == [("hot", writer_thread)] * 3
     assert artifact_hashes == [("hot", writer_thread)] * 3
     assert artifact_sidecars == [("hot", writer_thread)] * 3
     hot_fsyncs = [thread for event_phase, thread in fsync_calls if event_phase == "hot"]
@@ -525,7 +534,105 @@ def test_background_writer_completes_live_fifo_artifacts_and_emits_stats(
     assert stats["abandoned_items"] == stats["reserved_items"] == 0
     assert stats["queued_items"] == stats["in_flight_items"] == 0
     assert stats["worker_alive"] is False
+    assert manifest["config"]["background_writer_payload_ownership"] == (
+        "exclusive_frozen_cpu_snapshot"
+    )
+    assert manifest["config"]["background_writer_producer_work"] == [
+        "exact_boundary_cpu_tensor_snapshot",
+        "structural_freeze",
+        "conservative_byte_reservation",
+    ]
+    assert "payload_sha256" in manifest["config"]["background_writer_worker_work"]
+    assert "torch_save" in manifest["config"]["background_writer_worker_work"]
+    pipeline = manifest["background_pipeline"]
+    assert pipeline["producer_handoffs"] == 3
+    assert pipeline["producer_freeze_ns_total"] > 0
+    assert pipeline["producer_owned_bytes_total"] > 0
+    assert pipeline["worker_payload_digest_calls"] == 3
+    assert pipeline["worker_payload_digest_ns_total"] > 0
+    assert pipeline["worker_serialization_calls"] == 3
+    assert pipeline["worker_serialization_ns_total"] > 0
+    assert pipeline["worker_publication_calls"] == 3
+    assert pipeline["worker_publication_ns_total"] > 0
     assert not list(tmp_path.glob("*.tmp-*"))
+
+
+def test_background_worker_preserves_exact_synchronous_artifact_schema(tmp_path):
+    envelopes = {}
+    for mode in ("synchronous", "background"):
+        directory = tmp_path / mode
+        params, _layout, _optimizer, capture = _fixture(
+            directory,
+            background_writer=mode == "background",
+        )
+        params["a"].grad = torch.tensor([0.4, -0.2])
+        params["b"].grad = torch.tensor([0.1])
+        capture.note_broadcast(0, 17, local_step=30, tokens_total=3_000, window_steps=2)
+        capture.capture_first_post_broadcast_gradients(
+            local_step_before_update=30,
+            tokens_total=3_000,
+            clip_total_norm=torch.tensor(0.5),
+        )
+        capture.close()
+        path = next(directory.glob("*-adamw_first_gradient-*.pt"))
+        envelopes[mode] = load_capture(path)
+        assert envelopes[mode]["kind"] == "adamw_first_gradient"
+
+    assert (
+        envelopes["background"]["payload_sha256"]
+        == (envelopes["synchronous"]["payload_sha256"])
+    )
+    for envelope in envelopes.values():
+        envelope["metadata"].pop("window_uuid")
+    assert envelopes["background"]["metadata"] == envelopes["synchronous"]["metadata"]
+
+
+def test_background_transfer_owns_exact_snapshot_before_live_state_mutates(
+    tmp_path, monkeypatch
+):
+    entered = threading.Event()
+    release = threading.Event()
+    original_publish = OptimizerStateCapture._publish_background_item
+
+    def blocked_publish(self, item):
+        entered.set()
+        assert release.wait(3.0)
+        return original_publish(self, item)
+
+    monkeypatch.setattr(
+        OptimizerStateCapture, "_publish_background_item", blocked_publish
+    )
+    params, _layout, optimizer, capture = _fixture(
+        tmp_path,
+        background_writer=True,
+    )
+    params["a"].grad = torch.tensor([0.4, -0.2])
+    params["b"].grad = torch.tensor([0.1])
+    capture.note_broadcast(0, 17, local_step=30, tokens_total=3_000, window_steps=2)
+    capture.capture_first_post_broadcast_gradients(
+        local_step_before_update=30,
+        tokens_total=3_000,
+    )
+    assert entered.wait(3.0)
+
+    with torch.no_grad():
+        params["a"].add_(100)
+        params["b"].sub_(100)
+        params["a"].grad.add_(100)
+        params["b"].grad.sub_(100)
+        optimizer.state[params["a"]]["exp_avg"].add_(100)
+        optimizer.state[params["b"]]["exp_avg_sq"].sub_(100)
+
+    release.set()
+    capture.close()
+    record = _artifact(tmp_path, "adamw_first_gradient")
+    tensors = record["payload"]["tensors"]
+    assert torch.equal(tensors["a"]["exp_avg"], torch.tensor([0.25, -0.5]))
+    assert torch.equal(tensors["b"]["exp_avg_sq"], torch.tensor([3.5]))
+    assert torch.equal(
+        tensors["a"]["first_clipped_gradient"], torch.tensor([0.4, -0.2])
+    )
+    assert torch.equal(tensors["b"]["first_clipped_gradient"], torch.tensor([0.1]))
 
 
 def test_background_close_does_not_publish_completion_before_worker_drain(

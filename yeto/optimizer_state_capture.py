@@ -37,8 +37,10 @@ import io
 import json
 import os
 import threading
+import time
 import uuid
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -47,6 +49,7 @@ import torch
 from .bounded_background_writer import (
     BackgroundWriterFailed,
     BoundedBackgroundWriter,
+    TransferredWritePayload,
     WriteItem,
 )
 from .fragments import FragmentLayout
@@ -59,12 +62,11 @@ CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL = "crp_pti_directional"
 CAPTURE_PROFILES = frozenset(
     {CAPTURE_PROFILE_FULL, CAPTURE_PROFILE_CRP_PTI_DIRECTIONAL}
 )
-BACKGROUND_PUBLICATION_SCHEMA = "yeto.optimizer-state-capture-publication"
-BACKGROUND_PUBLICATION_SCHEMA_VERSION = 1
-BACKGROUND_TRAILER_BYTES = 8
 SHA256_HEX_BYTES = 64
 CHECKSUM_SIDECAR_SEPARATOR_BYTES = 2
 CHECKSUM_SIDECAR_NEWLINE_BYTES = 1
+BACKGROUND_RESERVATION_BASE_BYTES = 1024 * 1024
+BACKGROUND_RESERVATION_PER_VALUE_BYTES = 4096
 
 
 class CaptureIntegrityError(ValueError):
@@ -106,6 +108,105 @@ def _checksum_sidecar_size(name: str) -> int:
         + len(name.encode("ascii"))
         + CHECKSUM_SIDECAR_NEWLINE_BYTES
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenMapping:
+    items: tuple[tuple[str, Any], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenList:
+    items: tuple[Any, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenTuple:
+    items: tuple[Any, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _BackgroundCaptureJob:
+    serial: int
+    name: str
+    kind: str
+    fragment_id: int
+    fragment_version: int
+    metadata: _FrozenMapping
+    payload: _FrozenMapping
+    disk_reservation_bytes: int
+
+
+def _freeze_owned_capture_value(value: Any) -> tuple[Any, int]:
+    """Freeze structure and conservatively bound an exclusively owned value.
+
+    Tensor bytes are already factual CPU snapshots made at the learner
+    boundary; copying them again would recreate the measured hot-path cost.
+    This function instead removes every mutable container alias and verifies
+    that tensors are detached, contiguous CPU values.  The returned byte count
+    deliberately over-reserves Python/serialization overhead and is checked
+    against the exact serialized size on the worker before publication.
+    """
+
+    overhead = BACKGROUND_RESERVATION_PER_VALUE_BYTES
+    if isinstance(value, torch.Tensor):
+        if value.device.type != "cpu":
+            raise TypeError("background capture ownership requires CPU tensors")
+        if value.requires_grad:
+            raise TypeError("background capture ownership requires detached tensors")
+        if not value.is_contiguous():
+            raise TypeError("background capture ownership requires contiguous tensors")
+        return value, overhead + value.numel() * value.element_size()
+    if isinstance(value, Mapping):
+        items = []
+        reserved = overhead
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("background capture mappings require string keys")
+            frozen, item_reserved = _freeze_owned_capture_value(item)
+            items.append((key, frozen))
+            reserved += len(key.encode("utf-8")) + item_reserved
+        return _FrozenMapping(tuple(items)), reserved
+    if isinstance(value, list):
+        frozen_items = []
+        reserved = overhead
+        for item in value:
+            frozen, item_reserved = _freeze_owned_capture_value(item)
+            frozen_items.append(frozen)
+            reserved += item_reserved
+        return _FrozenList(tuple(frozen_items)), reserved
+    if isinstance(value, tuple):
+        frozen_items = []
+        reserved = overhead
+        for item in value:
+            frozen, item_reserved = _freeze_owned_capture_value(item)
+            frozen_items.append(frozen)
+            reserved += item_reserved
+        return _FrozenTuple(tuple(frozen_items)), reserved
+    if value is None or isinstance(value, (bool, int, float, str)):
+        scalar_bytes = len(value.encode("utf-8")) if isinstance(value, str) else 32
+        return value, overhead + scalar_bytes
+    raise TypeError(
+        f"background capture cannot own value of type {type(value).__name__}"
+    )
+
+
+def _thaw_owned_capture_value(value: Any) -> Any:
+    """Reconstruct the original torch-save container types on the worker."""
+
+    if isinstance(value, _FrozenMapping):
+        return {key: _thaw_owned_capture_value(item) for key, item in value.items}
+    if isinstance(value, _FrozenList):
+        return [_thaw_owned_capture_value(item) for item in value.items]
+    if isinstance(value, _FrozenTuple):
+        return tuple(_thaw_owned_capture_value(item) for item in value.items)
+    if (
+        isinstance(value, torch.Tensor)
+        or value is None
+        or isinstance(value, (bool, int, float, str))
+    ):
+        return value
+    raise TypeError(f"unsupported frozen capture value: {type(value).__name__}")
 
 
 def _digest_value(digest: "hashlib._Hash", value: Any) -> None:
@@ -371,6 +472,22 @@ class OptimizerStateCapture:
         self._background_writer: BoundedBackgroundWriter | None = None
         self._background_writer_stats: dict[str, Any] | None = None
         self._background_initial_manifest_written = False
+        self._background_pipeline_stats = {
+            "producer_handoffs": 0,
+            "producer_freeze_ns_total": 0,
+            "producer_freeze_ns_max": 0,
+            "producer_owned_bytes_total": 0,
+            "producer_disk_reservation_bytes_total": 0,
+            "worker_payload_digest_calls": 0,
+            "worker_payload_digest_ns_total": 0,
+            "worker_payload_digest_ns_max": 0,
+            "worker_serialization_calls": 0,
+            "worker_serialization_ns_total": 0,
+            "worker_serialization_ns_max": 0,
+            "worker_publication_calls": 0,
+            "worker_publication_ns_total": 0,
+            "worker_publication_ns_max": 0,
+        }
         if self.background_writer_enabled:
             self._background_writer = BoundedBackgroundWriter(
                 self._publish_background_item,
@@ -1189,14 +1306,6 @@ class OptimizerStateCapture:
     ) -> bool:
         self._observe_background_writer()
         serial = self._next_serial()
-        envelope = {
-            "schema": SCHEMA_NAME,
-            "schema_version": SCHEMA_VERSION,
-            "kind": kind,
-            "metadata": metadata,
-            "payload_sha256": capture_value_sha256(payload),
-            "payload": payload,
-        }
         name = (
             f"{serial:06d}-{kind}-l{self.learner_id}-r{self.rank}-"
             f"f{metadata['fragment_id']}-v{metadata['fragment_version']}.pt"
@@ -1207,9 +1316,17 @@ class OptimizerStateCapture:
                 name=name,
                 kind=kind,
                 metadata=metadata,
-                envelope=envelope,
+                payload=payload,
             )
 
+        envelope = {
+            "schema": SCHEMA_NAME,
+            "schema_version": SCHEMA_VERSION,
+            "kind": kind,
+            "metadata": metadata,
+            "payload_sha256": capture_value_sha256(payload),
+            "payload": payload,
+        }
         path = self.directory / name
         temporary = path.with_name(f".{name}.tmp-{os.getpid()}-{serial}")
         with temporary.open("wb") as handle:
@@ -1250,57 +1367,72 @@ class OptimizerStateCapture:
         name: str,
         kind: str,
         metadata: Mapping[str, Any],
-        envelope: Mapping[str, Any],
+        payload: Mapping[str, Any],
     ) -> bool:
-        """Serialize to immutable bytes, reserve disk budget, then enqueue."""
+        """Transfer a frozen factual snapshot; serialize only on the worker."""
 
         writer = self._background_writer
         if writer is None:
             raise AssertionError("background artifact enqueue without a writer")
+        freeze_started_ns = time.monotonic_ns()
         try:
-            buffer = io.BytesIO()
-            torch.save(dict(envelope), buffer)
-            artifact_bytes = buffer.tell()
-            sidecar_bytes = _checksum_sidecar_size(name)
-            required = artifact_bytes + sidecar_bytes
-            header = {
-                "schema": BACKGROUND_PUBLICATION_SCHEMA,
-                "schema_version": BACKGROUND_PUBLICATION_SCHEMA_VERSION,
-                "serial": int(serial),
-                "name": name,
-                "artifact_bytes": artifact_bytes,
-                "sidecar_bytes": sidecar_bytes,
-                "required_bytes": required,
-                "kind": kind,
-                "fragment_id": int(metadata["fragment_id"]),
-                "fragment_version": int(metadata["fragment_version"]),
-            }
-            header_raw = _json_bytes(header)
-            buffer.write(header_raw)
-            buffer.write(len(header_raw).to_bytes(BACKGROUND_TRAILER_BYTES, "big"))
-            immutable_job = buffer.getvalue()
+            frozen_metadata, metadata_bytes = _freeze_owned_capture_value(metadata)
+            frozen_payload, payload_bytes = _freeze_owned_capture_value(payload)
+            if not isinstance(frozen_metadata, _FrozenMapping) or not isinstance(
+                frozen_payload, _FrozenMapping
+            ):
+                raise TypeError("background capture metadata/payload must be mappings")
+            owned_bytes = (
+                BACKGROUND_RESERVATION_BASE_BYTES + metadata_bytes + payload_bytes
+            )
+            disk_reservation_bytes = owned_bytes + _checksum_sidecar_size(name)
+            job = _BackgroundCaptureJob(
+                serial=int(serial),
+                name=name,
+                kind=kind,
+                fragment_id=int(metadata["fragment_id"]),
+                fragment_version=int(metadata["fragment_version"]),
+                metadata=frozen_metadata,
+                payload=frozen_payload,
+                disk_reservation_bytes=disk_reservation_bytes,
+            )
+            transferred = TransferredWritePayload(
+                job,
+                reservation_bytes=owned_bytes,
+            )
         except BaseException:
-            # A local serialization/ownership failure occurs before admission.
+            # A local ownership failure occurs before admission.
             # Stop the otherwise-idleable non-daemon worker before propagating.
             self._stop_background_writer_after_local_error()
             raise
+        freeze_elapsed_ns = time.monotonic_ns() - freeze_started_ns
 
         with self._publication_lock:
             fits_disk_budget = (
-                self._artifact_bytes + self._artifact_reserved_bytes + required
+                self._artifact_bytes
+                + self._artifact_reserved_bytes
+                + disk_reservation_bytes
                 <= self.max_bytes
             )
             if fits_disk_budget:
-                self._artifact_reserved_bytes += required
+                self._artifact_reserved_bytes += disk_reservation_bytes
+                stats = self._background_pipeline_stats
+                stats["producer_handoffs"] += 1
+                stats["producer_freeze_ns_total"] += freeze_elapsed_ns
+                stats["producer_freeze_ns_max"] = max(
+                    stats["producer_freeze_ns_max"], freeze_elapsed_ns
+                )
+                stats["producer_owned_bytes_total"] += owned_bytes
+                stats["producer_disk_reservation_bytes_total"] += disk_reservation_bytes
         if not fits_disk_budget:
             self._record_drop(f"{kind}_disk_byte_limit", **metadata)
             return False
 
         try:
-            writer.submit(immutable_job, reservation_bytes=len(immutable_job))
+            writer.submit_transferred(transferred)
         except BaseException:
             with self._publication_lock:
-                self._artifact_reserved_bytes -= required
+                self._artifact_reserved_bytes -= disk_reservation_bytes
             self._stop_background_writer_after_local_error()
             raise
         self._write_manifest()
@@ -1330,89 +1462,98 @@ class OptimizerStateCapture:
             pass
 
     def _publish_background_item(self, item: WriteItem) -> None:
-        """Worker-only atomic file and sidecar publication."""
+        """Worker-only digest, serialization, and atomic publication."""
 
-        raw = item.payload
-        if len(raw) <= BACKGROUND_TRAILER_BYTES:
-            raise CaptureIntegrityError("truncated background publication job")
-        header_bytes = int.from_bytes(raw[-BACKGROUND_TRAILER_BYTES:], "big")
-        header_start = len(raw) - BACKGROUND_TRAILER_BYTES - header_bytes
-        if header_start <= 0:
-            raise CaptureIntegrityError("invalid background publication header size")
-        try:
-            header = json.loads(raw[header_start:-BACKGROUND_TRAILER_BYTES])
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise CaptureIntegrityError(
-                "malformed background publication header"
-            ) from exc
-        if (
-            not isinstance(header, dict)
-            or header.get("schema") != BACKGROUND_PUBLICATION_SCHEMA
-            or header.get("schema_version") != BACKGROUND_PUBLICATION_SCHEMA_VERSION
-        ):
-            raise CaptureIntegrityError("unsupported background publication header")
-        if header.get("artifact_bytes") != header_start:
-            raise CaptureIntegrityError("background artifact length/header mismatch")
-        name = header.get("name")
-        if (
-            not isinstance(name, str)
-            or Path(name).name != name
-            or not name.endswith(".pt")
-        ):
+        job = item.claim_transferred_payload()
+        if not isinstance(job, _BackgroundCaptureJob):
+            raise CaptureIntegrityError("unsupported transferred capture job")
+        if Path(job.name).name != job.name or not job.name.endswith(".pt"):
             raise CaptureIntegrityError("unsafe background artifact name")
-        if "sha256" in header:
-            raise CaptureIntegrityError(
-                "background producer header must not claim an unverified digest"
-            )
-        expected_sidecar_bytes = _checksum_sidecar_size(name)
-        required = header_start + expected_sidecar_bytes
-        if (
-            header.get("sidecar_bytes") != expected_sidecar_bytes
-            or header.get("required_bytes") != required
-        ):
-            raise CaptureIntegrityError("background publication budget mismatch")
 
+        metadata = _thaw_owned_capture_value(job.metadata)
+        payload = _thaw_owned_capture_value(job.payload)
+        digest_started_ns = time.monotonic_ns()
+        payload_sha256 = capture_value_sha256(payload)
+        digest_elapsed_ns = time.monotonic_ns() - digest_started_ns
+        envelope = {
+            "schema": SCHEMA_NAME,
+            "schema_version": SCHEMA_VERSION,
+            "kind": job.kind,
+            "metadata": metadata,
+            "payload_sha256": payload_sha256,
+            "payload": payload,
+        }
+        serialization_started_ns = time.monotonic_ns()
+        buffer = io.BytesIO()
+        torch.save(envelope, buffer)
+        raw = buffer.getvalue()
+        serialization_elapsed_ns = time.monotonic_ns() - serialization_started_ns
+
+        name = job.name
+        expected_sidecar_bytes = _checksum_sidecar_size(name)
+        required = len(raw) + expected_sidecar_bytes
+        if required > job.disk_reservation_bytes:
+            raise CaptureIntegrityError(
+                "serialized artifact exceeded its conservative producer reservation: "
+                f"required={required} reserved={job.disk_reservation_bytes}"
+            )
+
+        publication_started_ns = time.monotonic_ns()
         path = self.directory / name
-        serial = int(header["serial"])
+        serial = job.serial
         temporary = path.with_name(f".{name}.tmp-{os.getpid()}-{serial}")
-        artifact_view = memoryview(raw)[:header_start]
-        try:
-            digest = _background_artifact_sha256(artifact_view)
-            sidecar_raw = _background_artifact_sidecar_bytes(digest, name)
-            if len(sidecar_raw) != expected_sidecar_bytes:
-                raise CaptureIntegrityError(
-                    "background checksum sidecar length changed after reservation"
-                )
-            with temporary.open("wb") as handle:
-                handle.write(artifact_view)
-                handle.flush()
-                os.fsync(handle.fileno())
-        finally:
-            artifact_view.release()
+        digest = _background_artifact_sha256(raw)
+        sidecar_raw = _background_artifact_sidecar_bytes(digest, name)
+        if len(sidecar_raw) != expected_sidecar_bytes:
+            raise CaptureIntegrityError(
+                "background checksum sidecar length changed after reservation"
+            )
+        with temporary.open("wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
         sidecar = path.with_suffix(path.suffix + ".sha256")
         _atomic_replace_bytes(sidecar, sidecar_raw, serial)
         _fsync_directory(self.directory)
+        publication_elapsed_ns = time.monotonic_ns() - publication_started_ns
 
         entry = {
             "path": name,
             "sha256": digest,
-            "bytes": header_start,
+            "bytes": len(raw),
             "sidecar_bytes": len(sidecar_raw),
-            "kind": str(header["kind"]),
-            "fragment_id": int(header["fragment_id"]),
-            "fragment_version": int(header["fragment_version"]),
+            "kind": job.kind,
+            "fragment_id": job.fragment_id,
+            "fragment_version": job.fragment_version,
         }
         with self._publication_lock:
-            self._artifact_reserved_bytes -= required
+            self._artifact_reserved_bytes -= job.disk_reservation_bytes
             self._artifact_bytes += required
             self._artifacts.append(entry)
+            stats = self._background_pipeline_stats
+            stats["worker_payload_digest_calls"] += 1
+            stats["worker_payload_digest_ns_total"] += digest_elapsed_ns
+            stats["worker_payload_digest_ns_max"] = max(
+                stats["worker_payload_digest_ns_max"], digest_elapsed_ns
+            )
+            stats["worker_serialization_calls"] += 1
+            stats["worker_serialization_ns_total"] += serialization_elapsed_ns
+            stats["worker_serialization_ns_max"] = max(
+                stats["worker_serialization_ns_max"], serialization_elapsed_ns
+            )
+            stats["worker_publication_calls"] += 1
+            stats["worker_publication_ns_total"] += publication_elapsed_ns
+            stats["worker_publication_ns_max"] = max(
+                stats["worker_publication_ns_max"], publication_elapsed_ns
+            )
 
     def _manifest(self) -> dict[str, Any]:
         with self._publication_lock:
             artifact_bytes = self._artifact_bytes
             artifact_reserved_bytes = self._artifact_reserved_bytes
             artifacts = list(self._artifacts)
+            background_pipeline_stats = dict(self._background_pipeline_stats)
         config = {
             "learner_id": self.learner_id,
             "rank": self.rank,
@@ -1446,8 +1587,23 @@ class OptimizerStateCapture:
                     "background_writer": True,
                     "background_writer_max_items": self.background_writer_max_items,
                     "background_writer_max_bytes": self.background_writer_max_bytes,
-                    "background_writer_payload_ownership": "exact_immutable_bytes",
+                    "background_writer_payload_ownership": (
+                        "exclusive_frozen_cpu_snapshot"
+                    ),
                     "background_writer_publication": "fifo_single_worker",
+                    "background_writer_producer_work": [
+                        "exact_boundary_cpu_tensor_snapshot",
+                        "structural_freeze",
+                        "conservative_byte_reservation",
+                    ],
+                    "background_writer_worker_work": [
+                        "payload_sha256",
+                        "torch_save",
+                        "artifact_sha256",
+                        "atomic_file_publication",
+                        "fsync",
+                        "checksum_sidecar",
+                    ],
                 }
             )
         manifest = {
@@ -1486,6 +1642,7 @@ class OptimizerStateCapture:
                 artifact_reserved_bytes
             )
             manifest["background_writer"] = dict(self._background_writer_stats or {})
+            manifest["background_pipeline"] = background_pipeline_stats
         return manifest
 
     def _write_manifest(self, *, final_background: bool = False) -> None:

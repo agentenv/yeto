@@ -4,7 +4,8 @@ This module deliberately knows nothing about artifact formats, paths, CAS, or
 ``fsync``.  It is a small ownership and concurrency primitive for a later
 capture-writer integration:
 
-* producers hand off an exact immutable :class:`bytes` payload;
+* producers hand off exact immutable :class:`bytes` or explicitly transfer
+  exclusive ownership of a bounded payload;
 * one non-daemon worker invokes one fixed sink in FIFO admission order;
 * item and byte capacity remain reserved through completion of the sink call;
 * full capacity blocks producers rather than dropping work;
@@ -15,8 +16,11 @@ capture-writer integration:
 The reservation accounts for payload bytes owned by this writer from
 admission through sink return.  The sink must not retain an item or its payload
 after returning; retaining it would extend memory lifetime outside the
-reservation contract.  Exact ``bytes`` inputs are required so callers cannot
-mutate an accepted payload while it is queued or in flight.
+reservation contract.  The ordinary API requires exact ``bytes`` so callers
+cannot mutate an accepted payload while it is queued or in flight.  The
+explicit ownership-transfer API supports already-cloned tensor snapshots whose
+expensive serialization belongs on the worker.  Once transferred, the caller
+must not retain or mutate any alias of the owned object.
 """
 
 from __future__ import annotations
@@ -64,6 +68,44 @@ class ReservationError(ValueError):
     """A submission did not satisfy the explicit byte-reservation contract."""
 
 
+class TransferredWritePayload:
+    """A one-shot carrier for exclusively owned, conservatively bounded work.
+
+    Python cannot enforce move semantics, so construction is an explicit
+    ownership promise: ``value`` and every mutable object reachable from it
+    have no retained producer alias.  The sink can claim the value exactly
+    once.  ``reservation_bytes`` conservatively covers the retained ownership
+    graph until the sink returns.
+    """
+
+    __slots__ = ("_claimed", "_reservation_bytes", "_value")
+
+    def __init__(self, value: Any, *, reservation_bytes: int) -> None:
+        if isinstance(reservation_bytes, bool) or not isinstance(
+            reservation_bytes, int
+        ):
+            raise TypeError("reservation_bytes must be an integer")
+        if reservation_bytes < 1:
+            raise ReservationError("reservation_bytes must be positive")
+        self._value = value
+        self._reservation_bytes = reservation_bytes
+        self._claimed = False
+
+    @property
+    def reservation_bytes(self) -> int:
+        return self._reservation_bytes
+
+    def claim(self) -> Any:
+        """Move the owned value into the sink exactly once."""
+
+        if self._claimed:
+            raise BackgroundWriterError("transferred payload was already claimed")
+        self._claimed = True
+        value = self._value
+        self._value = None
+        return value
+
+
 @dataclass(frozen=True, slots=True)
 class WriteItem:
     """One immutable payload admitted to the FIFO.
@@ -73,9 +115,16 @@ class WriteItem:
     """
 
     sequence: int
-    payload: bytes
+    payload: bytes | TransferredWritePayload
     reserved_bytes: int
     admitted_ns: int
+
+    def claim_transferred_payload(self) -> Any:
+        """Claim an ownership-transferred payload from inside the sink."""
+
+        if type(self.payload) is not TransferredWritePayload:
+            raise BackgroundWriterError("write item does not own a transferred payload")
+        return self.payload.claim()
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +285,21 @@ class BoundedBackgroundWriter:
         the item.
         """
 
+        return self._submit(payload, reservation_bytes=reservation_bytes)
+
+    def submit_transferred(self, payload: TransferredWritePayload) -> int:
+        """Admit a one-shot, exclusively owned payload for worker processing."""
+
+        if type(payload) is not TransferredWritePayload:
+            raise TypeError("payload must be an exact TransferredWritePayload")
+        return self._submit(payload, reservation_bytes=payload.reservation_bytes)
+
+    def _submit(
+        self,
+        payload: bytes | TransferredWritePayload,
+        *,
+        reservation_bytes: int,
+    ) -> int:
         if threading.current_thread() is self._thread:
             raise BackgroundWriterError("the writer sink may not submit recursively")
         block_started_ns: int | None = None
@@ -248,17 +312,26 @@ class BoundedBackgroundWriter:
                 raise BackgroundWriterClosed(
                     f"background writer is {self._state.value}; admission is closed"
                 )
-            if type(payload) is not bytes:
-                raise TypeError("payload must be exact immutable bytes")
+            if type(payload) not in (bytes, TransferredWritePayload):
+                raise TypeError(
+                    "payload must be exact immutable bytes or TransferredWritePayload"
+                )
             if isinstance(reservation_bytes, bool) or not isinstance(
                 reservation_bytes, int
             ):
                 raise TypeError("reservation_bytes must be an integer")
             if reservation_bytes < 1:
                 raise ReservationError("reservation_bytes must be positive")
-            if reservation_bytes != len(payload):
+            if type(payload) is bytes and reservation_bytes != len(payload):
                 raise ReservationError(
                     "reservation_bytes must equal the immutable payload length"
+                )
+            if (
+                type(payload) is TransferredWritePayload
+                and reservation_bytes != payload.reservation_bytes
+            ):
+                raise ReservationError(
+                    "reservation_bytes must equal the transferred payload reservation"
                 )
             if reservation_bytes > self._max_bytes:
                 raise ReservationError(

@@ -8,9 +8,11 @@ import pytest
 
 from yeto.bounded_background_writer import (
     BackgroundWriterClosed,
+    BackgroundWriterError,
     BackgroundWriterFailed,
     BoundedBackgroundWriter,
     ReservationError,
+    TransferredWritePayload,
     WriteItem,
     WriterState,
 )
@@ -79,6 +81,27 @@ def test_fifo_order_reservations_and_timing_counters() -> None:
     assert stats.close_wait_ns_total > 0
     assert stats.worker_alive is False
     assert writer.thread_alive is False
+
+
+def test_explicit_ownership_transfer_is_one_shot_and_conservatively_accounted():
+    owned = {"snapshot": object()}
+    observed = []
+
+    def sink(item: WriteItem) -> None:
+        observed.append(item.claim_transferred_payload())
+        with pytest.raises(BackgroundWriterError, match="already claimed"):
+            item.claim_transferred_payload()
+
+    writer = BoundedBackgroundWriter(sink, max_items=1, max_bytes=4096)
+    transferred = TransferredWritePayload(owned, reservation_bytes=2048)
+    assert writer.submit_transferred(transferred) == 1
+    stats = writer.close()
+
+    assert observed == [owned]
+    assert observed[0] is owned
+    assert stats.accepted_items == stats.completed_items == 1
+    assert stats.accepted_bytes == stats.completed_bytes == 2048
+    assert stats.reserved_items == stats.reserved_bytes == 0
     assert stats.as_json()["state"] == "closed"
 
 
