@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -641,6 +642,41 @@ def test_declared_tree_checksum_manifest_is_verified_before_success(tmp_path):
     completion_check = harness.remote_completion_check_script(spec)
     assert 'cd "$(dirname "$manifest")"' in completion_check
     assert 'sha256sum -c "$(basename "$manifest")"' in completion_check
+
+
+def test_rendered_runner_preserves_apostrophes_and_records_checksum_failure(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        harness,
+        "SAFE_IMAGE_PATH_PREFIXES",
+        (*harness.SAFE_IMAGE_PATH_PREFIXES, "/private/"),
+    )
+    run = tmp_path / "runs" / "exp-test"
+    run.mkdir(parents=True)
+    manifest = run / "missing-artifacts.sha256"
+
+    def add_missing_manifest(raw):
+        raw["execution"]["remote_run_dir"] = str(run)
+        raw["execution"]["completion_paths"] = [str(manifest)]
+        raw["execution"]["checksum_manifests"] = [str(manifest)]
+        raw["image"]["sanitize_paths"][0] = str(run)
+
+    spec = _spec(tmp_path, add_missing_manifest)
+    body = harness._runner_body(spec)
+    rendered = f"{harness._render_bash_c(body)} _ {shlex.quote(str(run))} true"
+    result = subprocess.run(
+        ["bash", "-c", rendered],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 14
+    assert "declared checksum manifest is missing" in result.stderr
+    assert (run / "runner.exit").read_text() == "14\n"
+    assert f'nohup {harness._render_bash_c(body)} _ "$run"' in start_script(spec)
 
 
 def test_declared_tree_checksum_manifest_must_be_scoped_and_completed(tmp_path):

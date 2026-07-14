@@ -1228,17 +1228,8 @@ def _remote_manifest(spec: ExperimentSpec) -> str:
     return base64.b64encode(public_spec.encode()).decode()
 
 
-def start_script(spec: ExperimentSpec) -> str:
-    run = shlex.quote(spec.remote_run_dir)
-    repo = shlex.quote(spec.remote_repo_dir)
-    commit = shlex.quote(spec.repo_commit)
-    artifact = shlex.quote(spec.artifact_uri)
-    interval = int(spec.artifacts["sync_interval_seconds"])
-    command = shlex.join(spec.command)
-    env = " ".join(
-        f"{key}={shlex.quote(value)}" for key, value in sorted(spec.env.items())
-    )
-    runner_argv = "env " + (env + " " if env else "") + command
+def _runner_body(spec: ExperimentSpec) -> str:
+    """Render the inner runner program before quoting it as one shell word."""
     completion = " ".join(
         shlex.quote(path) for path in spec.execution["completion_paths"]
     )
@@ -1255,6 +1246,55 @@ def start_script(spec: ExperimentSpec) -> str:
   fi"""
         for manifest in spec.execution["checksum_manifests"]
     )
+    return f"""set +e
+run="$1"; shift
+"$@"
+code=$?
+{checksum_verification}
+if [ "$code" -eq 0 ]; then
+  if sha256sum {completion} > "$run/final-manifest.sha256.tmp"; then
+    mv "$run/final-manifest.sha256.tmp" "$run/final-manifest.sha256"
+  else
+    rm -f "$run/final-manifest.sha256.tmp"
+    code=15
+  fi
+fi
+printf "%s\\n" "$code" > "$run/runner.exit.tmp"
+mv "$run/runner.exit.tmp" "$run/runner.exit"
+exit "$code"
+"""
+
+
+def _backup_body() -> str:
+    """Render the inner artifact-upload program before shell quoting."""
+    return """set +e
+pid="$1"; run="$2"; artifact="$3"; interval="$4"
+while kill -0 "$pid" 2>/dev/null; do
+  gcloud storage rsync --recursive "$run" "$artifact" >> "$run/backup-transfer.log" 2>&1
+  sleep "$interval"
+done
+gcloud storage rsync --recursive "$run" "$artifact" >> "$run/backup-transfer.log" 2>&1
+"""
+
+
+def _render_bash_c(body: str) -> str:
+    """Quote a complete nested Bash program exactly once."""
+    return shlex.join(["bash", "-c", body])
+
+
+def start_script(spec: ExperimentSpec) -> str:
+    run = shlex.quote(spec.remote_run_dir)
+    repo = shlex.quote(spec.remote_repo_dir)
+    commit = shlex.quote(spec.repo_commit)
+    artifact = shlex.quote(spec.artifact_uri)
+    interval = int(spec.artifacts["sync_interval_seconds"])
+    command = shlex.join(spec.command)
+    env = " ".join(
+        f"{key}={shlex.quote(value)}" for key, value in sorted(spec.env.items())
+    )
+    runner_argv = "env " + (env + " " if env else "") + command
+    runner_bash = _render_bash_c(_runner_body(spec))
+    backup_bash = _render_bash_c(_backup_body())
     required = "\n".join(
         f"test -e {shlex.quote(path)} || {{ echo 'missing required path: {path}' >&2; exit 3; }}"
         for path in spec.execution["required_paths"]
@@ -1323,35 +1363,10 @@ printf '%s\\n' \"$run/runner.log\" > \"$run/active-log-path\"
 git -C \"$repo\" status --short > \"$run/git-status.txt\"
 git -C \"$repo\" diff --binary > \"$run/git-diff.patch\"
 cd \"$repo\"
-nohup bash -c '
-  set +e
-  run="$1"; shift
-  "$@"
-  code=$?
-{checksum_verification}
-  if [ "$code" -eq 0 ]; then
-    if sha256sum {completion} > "$run/final-manifest.sha256.tmp"; then
-      mv "$run/final-manifest.sha256.tmp" "$run/final-manifest.sha256"
-    else
-      rm -f "$run/final-manifest.sha256.tmp"
-      code=15
-    fi
-  fi
-  printf "%s\\n" "$code" > "$run/runner.exit.tmp"
-  mv "$run/runner.exit.tmp" "$run/runner.exit"
-  exit "$code"
-' _ \"$run\" {runner_argv} > \"$run/runner.log\" 2>&1 < /dev/null &
+nohup {runner_bash} _ \"$run\" {runner_argv} > \"$run/runner.log\" 2>&1 < /dev/null &
 runner=$!
 printf '%s\\n' \"$runner\" > \"$run/runner.pid\"
-nohup bash -c '
-  set +e
-  pid="$1"; run="$2"; artifact="$3"; interval="$4"
-  while kill -0 "$pid" 2>/dev/null; do
-    gcloud storage rsync --recursive "$run" "$artifact" >> "$run/backup-transfer.log" 2>&1
-    sleep "$interval"
-  done
-  gcloud storage rsync --recursive "$run" "$artifact" >> "$run/backup-transfer.log" 2>&1
-' _ \"$runner\" \"$run\" {artifact} {interval} >/dev/null 2>&1 < /dev/null &
+nohup {backup_bash} _ \"$runner\" \"$run\" {artifact} {interval} >/dev/null 2>&1 < /dev/null &
 backup=$!
 printf '%s\\n' \"$backup\" > \"$run/backup.pid\"
 printf '{{\"runner_pid\":%s,\"backup_pid\":%s}}\\n' \"$runner\" \"$backup\"
