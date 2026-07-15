@@ -20,6 +20,7 @@ import json
 import math
 import re
 import statistics
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -29,11 +30,19 @@ from typing import Any, Iterable, Mapping, Sequence
 
 
 SCHEMA_VERSION = "0.1"
-HARD_MIN_CONFIRMATORY_SEEDS = 5
+HARD_MIN_CONFIRMATORY_SEEDS = 8
 FINAL_STATUSES = {"COMPLETED", "DIVERGED", "FAILED", "INFRA_FAILURE"}
 SCIENTIFIC_STATUSES = {"COMPLETED", "DIVERGED"}
 SHA256_RE = re.compile(r"^(?:sha256:)?[0-9a-fA-F]{64}$")
 GIT_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+AUTHORITATIVE_PREREG_PATH = (
+    "experiment-specs/best-paper-phase-map-p0-p1-prereg.json"
+)
+AUTHORITATIVE_PREREG_SOURCE_COMMIT = "af3605fc5c98bb5ed61b7225cd2bd45ca2b5a1cb"
+AUTHORITATIVE_PREREG_TEMPLATE_SHA256 = (
+    "0b1963771e3e28e89f74dbe4f11d5b2ef913618d5adde0839260aa25513ab775"
+)
 
 
 class ManifestError(RuntimeError):
@@ -84,6 +93,454 @@ def _canonical_json_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _sha256_canonical(value: Any) -> str:
+    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
+
+
+def _run_git(*args: str) -> subprocess.CompletedProcess[bytes]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), *args],
+            check=False,
+            capture_output=True,
+        )
+    except OSError as exc:
+        raise ManifestError(f"cannot execute git for preregistration authority: {exc}") from exc
+    if result.returncode:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise ManifestError(
+            f"cannot resolve authoritative preregistration with git {' '.join(args)}: "
+            f"{detail}"
+        )
+    return result
+
+
+def _authoritative_template() -> Mapping[str, Any]:
+    raw = _run_git(
+        "show",
+        f"{AUTHORITATIVE_PREREG_SOURCE_COMMIT}:{AUTHORITATIVE_PREREG_PATH}",
+    ).stdout
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != AUTHORITATIVE_PREREG_TEMPLATE_SHA256:
+        raise ManifestError(
+            "hard-pinned authoritative preregistration blob has an unexpected SHA-256"
+        )
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ManifestError(f"authoritative preregistration blob is invalid JSON: {exc}") from exc
+    if not isinstance(value, Mapping):
+        raise ManifestError("authoritative preregistration template must be an object")
+    return value
+
+
+def _json_pointer_escape(value: str) -> str:
+    return value.replace("~", "~0").replace("/", "~1")
+
+
+def _json_pointer_get(value: Any, pointer: str) -> Any:
+    if pointer == "":
+        return value
+    if not pointer.startswith("/"):
+        raise KeyError(pointer)
+    current = value
+    for raw_part in pointer[1:].split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, Mapping):
+            current = current[part]
+        elif isinstance(current, list):
+            current = current[int(part)]
+        else:
+            raise KeyError(pointer)
+    return current
+
+
+def _json_differences(reference: Any, candidate: Any, pointer: str = "") -> set[str]:
+    """Return the smallest object-field/list-root pointers that differ."""
+
+    if isinstance(reference, Mapping) and isinstance(candidate, Mapping):
+        differences: set[str] = set()
+        for key in set(reference) | set(candidate):
+            child = pointer + "/" + _json_pointer_escape(str(key))
+            if key not in reference or key not in candidate:
+                differences.add(child)
+            else:
+                differences.update(
+                    _json_differences(reference[key], candidate[key], child)
+                )
+        return differences
+    # Lists are intentionally atomic. An allowlist entry for a list field
+    # licenses replacement of that exact list, not arbitrary neighboring data.
+    if reference != candidate:
+        return {pointer or "/"}
+    return set()
+
+
+def _path_is_allowed(path: str, allowed: set[str]) -> bool:
+    return any(path == root or path.startswith(root + "/") for root in allowed)
+
+
+def _manifest_kind(manifest: Mapping[str, Any]) -> str:
+    lineage = manifest.get("lineage")
+    if not isinstance(lineage, Mapping):
+        return ""
+    return str(lineage.get("descendant_kind", ""))
+
+
+def _expected_cell_records(
+    manifest: Mapping[str, Any], errors: list[str]
+) -> tuple[set[Coordinate], set[str]]:
+    raw = manifest.get("expected_cells")
+    if not isinstance(raw, list) or not raw:
+        errors.append("expected_cells must be a non-empty authoritative coordinate list")
+        return set(), set()
+    coordinates: set[Coordinate] = set()
+    cell_ids: set[str] = set()
+    for index, item in enumerate(raw):
+        row = _require_mapping(item, f"expected_cells[{index}]", errors)
+        coordinate = _coordinate(row, f"expected_cells[{index}]", errors)
+        if coordinate is not None:
+            if coordinate in coordinates:
+                errors.append(f"expected_cells contains duplicate coordinate {coordinate}")
+            coordinates.add(coordinate)
+        cell_id = row.get("cell_id")
+        if not isinstance(cell_id, str) or not cell_id.strip():
+            errors.append(f"expected_cells[{index}].cell_id must be non-empty")
+        elif cell_id in cell_ids:
+            errors.append(f"expected_cells contains duplicate cell_id {cell_id!r}")
+        else:
+            cell_ids.add(cell_id)
+    return coordinates, cell_ids
+
+
+def _expected_cell_id_coordinates(
+    manifest: Mapping[str, Any]
+) -> dict[str, Coordinate]:
+    output: dict[str, Coordinate] = {}
+    raw = manifest.get("expected_cells")
+    if not isinstance(raw, list):
+        return output
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        cell_id = item.get("cell_id")
+        errors: list[str] = []
+        coordinate = _coordinate(item, "expected cell", errors)
+        if isinstance(cell_id, str) and coordinate is not None and not errors:
+            output[cell_id] = coordinate
+    return output
+
+
+def _validate_expected_cell_blocks(
+    manifest: Mapping[str, Any], coordinates: set[Coordinate], errors: list[str]
+) -> None:
+    required_mu = {
+        float(value)
+        for value in _mapping_or_empty(manifest.get("randomization")).get(
+            "required_mu_per_block", []
+        )
+    }
+    blocks: dict[tuple[int, float, int], set[float]] = defaultdict(set)
+    for coordinate in coordinates:
+        blocks[(coordinate.h, coordinate.eta, coordinate.seed)].add(coordinate.mu)
+    for key, observed in blocks.items():
+        if observed != required_mu:
+            errors.append(
+                f"expected_cells block {key} has mu={sorted(observed)}, expected "
+                f"the complete live-control block {sorted(required_mu)}"
+            )
+
+
+def _latest_parent_rows(
+    parent: Mapping[str, Any], errors: list[str]
+) -> dict[Coordinate, Mapping[str, Any]]:
+    latest: dict[Coordinate, Mapping[str, Any]] = {}
+    latest_attempt: dict[Coordinate, int] = {}
+    rows = parent.get("results")
+    if not isinstance(rows, list):
+        errors.append("adaptive parent results must be an array")
+        return latest
+    for index, raw in enumerate(rows):
+        if not isinstance(raw, Mapping):
+            errors.append(f"adaptive parent results[{index}] must be an object")
+            continue
+        coordinate_errors: list[str] = []
+        coordinate = _coordinate(raw, f"adaptive parent results[{index}]", coordinate_errors)
+        errors.extend(coordinate_errors)
+        attempt = raw.get("attempt")
+        if coordinate is None or not _is_int(attempt):
+            continue
+        if attempt > latest_attempt.get(coordinate, -1):
+            latest_attempt[coordinate] = attempt
+            latest[coordinate] = raw
+    return latest
+
+
+def _same_float(left: float, right: float) -> bool:
+    return math.isclose(left, right, rel_tol=0.0, abs_tol=1e-15)
+
+
+def _allowed_adaptive_etas(
+    parent: Mapping[str, Any], manifest: Mapping[str, Any], errors: list[str]
+) -> dict[int, set[float]]:
+    """Return next registered eta values, keyed by H, from sealed parent losses."""
+
+    latest = _latest_parent_rows(parent, errors)
+    grouped: dict[tuple[int, float, int], list[tuple[float, float]]] = defaultdict(list)
+    for coordinate, row in latest.items():
+        status = _canonical_status(row.get("status"))
+        if status == "COMPLETED" and _finite_number(row.get("loss")):
+            loss = float(row["loss"])
+        elif status == "DIVERGED":
+            loss = math.inf
+        else:
+            errors.append(
+                f"adaptive parent curve contains unresolved {status} at {coordinate}"
+            )
+            continue
+        grouped[(coordinate.h, coordinate.mu, coordinate.seed)].append(
+            (coordinate.eta, loss)
+        )
+
+    adaptive = _mapping_or_empty(manifest.get("adaptive_bracket"))
+    initial = [float(value) for value in adaptive.get("initial_eta", [])]
+    down = [float(value) for value in adaptive.get("downward_extension", [])]
+    up = [float(value) for value in adaptive.get("upward_extension", [])]
+    base_values = {*initial, *down, *up}
+    allowed: dict[int, set[float]] = defaultdict(set)
+    for (h, _mu, seed), values in grouped.items():
+        if seed != adaptive.get("development_seed_only") or not values:
+            continue
+        values.sort()
+        etas = [eta for eta, _loss in values]
+        best_eta, _best_loss = min(values, key=lambda pair: (pair[1], pair[0]))
+        best_index = etas.index(best_eta)
+        candidate: list[float] = []
+        if best_index == 0:
+            boundary_chain = ([min(initial)] if initial else []) + down
+            for index, eta in enumerate(boundary_chain[:-1]):
+                if _same_float(best_eta, eta):
+                    candidate = [boundary_chain[index + 1]]
+                    break
+        elif best_index == len(etas) - 1:
+            boundary_chain = ([max(initial)] if initial else []) + up
+            for index, eta in enumerate(boundary_chain[:-1]):
+                if _same_float(best_eta, eta):
+                    candidate = [boundary_chain[index + 1]]
+                    break
+        else:
+            # Interior refinement is allowed once. Any already-sampled eta
+            # outside the frozen boundary lattice is evidence that this curve
+            # has received its one registered midpoint refinement round.
+            already_refined = any(
+                not any(_same_float(eta, base) for base in base_values)
+                for eta in etas
+            )
+            if not already_refined:
+                candidate = [
+                    math.sqrt(etas[best_index - 1] * best_eta),
+                    math.sqrt(best_eta * etas[best_index + 1]),
+                ]
+        for eta in candidate:
+            if not any(_same_float(eta, sampled) for sampled in etas):
+                allowed[h].add(eta)
+    return allowed
+
+
+def _validate_adaptive_extension(
+    parent: Mapping[str, Any], manifest: Mapping[str, Any], errors: list[str]
+) -> None:
+    parent_cells, _ = _expected_cell_records(parent, errors)
+    child_cells, _ = _expected_cell_records(manifest, errors)
+    new_cells = child_cells - parent_cells
+    allowed = _allowed_adaptive_etas(parent, manifest, errors)
+    for coordinate in sorted(new_cells):
+        if coordinate.seed != _mapping_or_empty(manifest.get("adaptive_bracket")).get(
+            "development_seed_only"
+        ):
+            errors.append(f"adaptive cell uses a later/blinded seed: {coordinate}")
+            continue
+        if not any(
+            _same_float(coordinate.eta, eta) for eta in allowed.get(coordinate.h, set())
+        ):
+            errors.append(
+                f"adaptive cell eta is not the next registered boundary/midpoint: {coordinate}"
+            )
+
+
+def _validate_authority_and_lineage(
+    manifest: Mapping[str, Any],
+    errors: list[str],
+    *,
+    parent_manifest: Mapping[str, Any] | None,
+    p0_replay_report: Mapping[str, Any] | None,
+    p0_replay_report_sha256: str | None,
+) -> None:
+    template = _authoritative_template()
+    lineage = _require_mapping(manifest.get("lineage"), "lineage", errors)
+    if lineage.get("authoritative_prereg_path") != AUTHORITATIVE_PREREG_PATH:
+        errors.append("lineage.authoritative_prereg_path is not the hard-pinned path")
+    if lineage.get("authoritative_prereg_source_commit") != AUTHORITATIVE_PREREG_SOURCE_COMMIT:
+        errors.append("lineage.authoritative_prereg_source_commit is not hard-pinned")
+    if lineage.get("authoritative_prereg_template_sha256") != AUTHORITATIVE_PREREG_TEMPLATE_SHA256:
+        errors.append("lineage.authoritative_prereg_template_sha256 is not hard-pinned")
+
+    frozen_commit = _mapping_or_empty(manifest.get("frozen")).get("git_commit")
+    if isinstance(frozen_commit, str) and re.fullmatch(r"[0-9a-f]{40}", frozen_commit):
+        ancestry = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPO_ROOT),
+                "merge-base",
+                "--is-ancestor",
+                AUTHORITATIVE_PREREG_SOURCE_COMMIT,
+                frozen_commit,
+            ],
+            check=False,
+            capture_output=True,
+        )
+        if ancestry.returncode != 0:
+            errors.append(
+                "frozen.git_commit must be a repository descendant of the "
+                "authoritative preregistration commit"
+            )
+
+    policy = _mapping_or_empty(template.get("lineage_policy"))
+    kinds = _mapping_or_empty(policy.get("registered_descendant_kinds"))
+    kind = _manifest_kind(manifest)
+    kind_policy = kinds.get(kind)
+    if not isinstance(kind_policy, Mapping):
+        errors.append(f"lineage.descendant_kind {kind!r} is not registered")
+        return
+
+    compare_to = template
+    parent_required = kind_policy.get("parent_required") is True
+    if parent_required:
+        if parent_manifest is None:
+            errors.append(f"lineage kind {kind!r} requires the exact sealed parent manifest")
+        else:
+            if parent_manifest.get("status") != "sealed_results":
+                errors.append("lineage parent must have status sealed_results")
+            expected_parent_hash = _sha256_canonical(parent_manifest)
+            if lineage.get("parent_manifest_sha256") != expected_parent_hash:
+                errors.append("lineage.parent_manifest_sha256 does not match the canonical parent")
+            required_parent_kind = kind_policy.get("parent_kind_required")
+            if required_parent_kind and _manifest_kind(parent_manifest) != required_parent_kind:
+                errors.append(
+                    f"lineage parent kind must be {required_parent_kind!r} for {kind!r}"
+                )
+            if kind == "initial_bound_p1_r0" and _manifest_kind(parent_manifest) == "p0_canary_bound":
+                try:
+                    validate_and_summarize(parent_manifest, claim_level="integrity")
+                except ManifestError as exc:
+                    errors.append(f"cited P0 parent fails authoritative validation: {exc}")
+            if kind != "initial_bound_p1_r0":
+                compare_to = parent_manifest
+                if kind_policy.get("parent_results_must_be_exact_prefix") is True:
+                    parent_results = parent_manifest.get("results")
+                    child_results = manifest.get("results")
+                    if not isinstance(parent_results, list) or not isinstance(child_results, list):
+                        errors.append("cumulative descendants require parent/child results arrays")
+                    elif child_results[: len(parent_results)] != parent_results:
+                        errors.append("existing parent results must remain an exact immutable prefix")
+                if kind_policy.get(
+                    "expected_eta_and_cell_command_registry_must_be_strict_supersets"
+                ) is True:
+                    parent_cells, _ = _expected_cell_records(parent_manifest, errors)
+                    child_cells, _ = _expected_cell_records(manifest, errors)
+                    if not parent_cells < child_cells:
+                        errors.append(
+                            "adaptive expected_cells must be a strict superset of "
+                            "the parent coordinates"
+                        )
+    else:
+        if parent_manifest is not None:
+            errors.append(f"lineage kind {kind!r} must be parentless")
+        if lineage.get("parent_manifest_sha256") not in (None, ""):
+            errors.append("parentless P0 lineage.parent_manifest_sha256 must be null")
+
+    allowed = {
+        str(path) for path in kind_policy.get("allowed_exact_paths", [])
+        if isinstance(path, str)
+    }
+    for path in sorted(_json_differences(compare_to, manifest)):
+        if not _path_is_allowed(path, allowed):
+            errors.append(
+                f"lineage kind {kind!r} illegally changes unregistered path {path}"
+            )
+
+    if kind == "p0_canary_bound":
+        protocol = _mapping_or_empty(manifest.get("protocol"))
+        if protocol.get("machine_type") != kind_policy.get("machine_type_required"):
+            errors.append("P0 must use the registered one-A100 machine type")
+        if protocol.get("gpu_slots") != kind_policy.get("gpu_slots_required"):
+            errors.append("P0 must use gpu_slots=1")
+        if lineage.get("p0_replay_report_sha256") not in (None, ""):
+            errors.append("P0 cannot pre-bind a replay report that does not yet exist")
+
+    if kind == "initial_bound_p1_r0":
+        if parent_manifest is not None:
+            for path in kind_policy.get("must_equal_p0_parent_paths", []):
+                try:
+                    child_value = _json_pointer_get(manifest, str(path))
+                    parent_value = _json_pointer_get(parent_manifest, str(path))
+                except (KeyError, ValueError):
+                    errors.append(f"P0/P1 equality path is missing: {path}")
+                    continue
+                if child_value != parent_value:
+                    errors.append(f"P1 differs from its passing P0 at frozen path {path}")
+        if p0_replay_report is None or p0_replay_report_sha256 is None:
+            errors.append("P1 requires the exact sealed P0 CPU replay report")
+        else:
+            if lineage.get("p0_replay_report_sha256") != p0_replay_report_sha256:
+                errors.append("lineage.p0_replay_report_sha256 does not match the report bytes")
+            if p0_replay_report.get("schema") != "yeto_p0_cpu_replay_v1":
+                errors.append("P0 replay report schema is not recognized")
+            if p0_replay_report.get("status") != "PASS":
+                errors.append("P0 replay report did not PASS")
+            if p0_replay_report.get("gpu_deleted_before_replay") is not True:
+                errors.append("P0 replay did not occur after verified GPU deletion")
+            if p0_replay_report.get("all_steps_replayed") is not True:
+                errors.append("P0 replay report does not cover every captured step")
+            if parent_manifest is not None:
+                parent_hash = _sha256_canonical(parent_manifest)
+                if p0_replay_report.get("phase_map_manifest_canonical_sha256") != parent_hash:
+                    errors.append("P0 replay report is not bound to the cited parent manifest")
+
+    # R0 expected_cells is an explicit materialization of the frozen Cartesian
+    # grid. Later kinds are ragged and are checked against their parent above.
+    expected_cells, expected_ids = _expected_cell_records(manifest, errors)
+    _validate_expected_cell_blocks(manifest, expected_cells, errors)
+    required_new_seeds = kind_policy.get("required_new_seeds")
+    if isinstance(required_new_seeds, list):
+        observed_stage_seeds = {coordinate.seed for coordinate in expected_cells}
+        required_stage_seeds = {int(seed) for seed in required_new_seeds}
+        if observed_stage_seeds != required_stage_seeds:
+            errors.append(
+                f"{kind} expected_cells seeds must equal the registered fresh stage "
+                f"seeds {sorted(required_stage_seeds)}"
+            )
+    if kind == "initial_bound_p1_r0":
+        grid_cells = _expected_coordinates_from_grid(manifest, errors)
+        if expected_cells != grid_cells or len(expected_cells) != 36:
+            errors.append("initial P1 expected_cells must equal the exact frozen 36-cell grid")
+    if (
+        kind == "adaptive_bracket_round"
+        and parent_manifest is not None
+        and kind_policy.get("only_next_registered_boundary_or_geometric_midpoint_eta_may_be_added")
+        is True
+    ):
+        _validate_adaptive_extension(parent_manifest, manifest, errors)
+    registry_ids = set(
+        _mapping_or_empty(_mapping_or_empty(manifest.get("frozen")).get("cell_command_hashes"))
+    )
+    if registry_ids != expected_ids:
+        errors.append(
+            "frozen.cell_command_hashes keys must equal authoritative expected_cells IDs"
+        )
+
+
 def _require_sha256(value: Any, label: str, errors: list[str]) -> None:
     if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
         errors.append(f"{label} must be a 64-hex SHA-256 (optional sha256: prefix)")
@@ -125,7 +582,9 @@ def _coordinate(row: Mapping[str, Any], label: str, errors: list[str]) -> Coordi
     return Coordinate(int(h), float(mu), float(eta), int(seed))
 
 
-def _expected_coordinates(manifest: Mapping[str, Any], errors: list[str]) -> set[Coordinate]:
+def _expected_coordinates_from_grid(
+    manifest: Mapping[str, Any], errors: list[str]
+) -> set[Coordinate]:
     grid = _require_mapping(manifest.get("expected_grid"), "expected_grid", errors)
     axes: dict[str, list[Any]] = {}
     for name in ("h", "mu", "eta", "seeds"):
@@ -150,16 +609,24 @@ def _expected_coordinates(manifest: Mapping[str, Any], errors: list[str]) -> set
     return expected
 
 
+def _expected_coordinates(
+    manifest: Mapping[str, Any], errors: list[str]
+) -> set[Coordinate]:
+    coordinates, _cell_ids = _expected_cell_records(manifest, errors)
+    return coordinates
+
+
 def _validate_frozen(manifest: Mapping[str, Any], errors: list[str]) -> None:
     frozen = _require_mapping(manifest.get("frozen"), "frozen", errors)
     git_commit = frozen.get("git_commit")
-    if not isinstance(git_commit, str) or not GIT_RE.fullmatch(git_commit):
-        errors.append("frozen.git_commit must be a bound 40-64 hex commit")
+    if not isinstance(git_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", git_commit):
+        errors.append("frozen.git_commit must be a bound lowercase 40-hex commit")
     for field in (
         "image_digest",
         "model_hash",
         "data_hash",
-        "train_rows_hash",
+        "eval_source_indices_hash",
+        "train_pool_source_indices_hash",
         "eval_hash",
         "eval_example_ids_hash",
         "eval_token_ids_hash",
@@ -168,6 +635,19 @@ def _validate_frozen(manifest: Mapping[str, Any], errors: list[str]) -> None:
         "retry_policy_hash",
     ):
         _require_sha256(frozen.get(field), f"frozen.{field}", errors)
+    expected_seed_keys = {
+        str(coordinate.seed)
+        for coordinate in _expected_coordinates(manifest, errors)
+    }
+    for map_name in ("train_source_indices_hashes", "train_rows_hashes"):
+        values = _require_mapping(frozen.get(map_name), f"frozen.{map_name}", errors)
+        if set(values) != expected_seed_keys:
+            errors.append(
+                f"frozen.{map_name} keys must exactly equal expected-cell seeds "
+                f"{sorted(expected_seed_keys)}"
+            )
+        for seed, digest in values.items():
+            _require_sha256(digest, f"frozen.{map_name}[{seed!r}]", errors)
     _require_bound(frozen.get("image_id"), "frozen.image_id", errors)
     _require_bound(frozen.get("model_id"), "frozen.model_id", errors)
     _require_bound(frozen.get("model_revision"), "frozen.model_revision", errors)
@@ -196,6 +676,17 @@ def _validate_frozen(manifest: Mapping[str, Any], errors: list[str]) -> None:
 def _validate_protocol(manifest: Mapping[str, Any], errors: list[str]) -> None:
     protocol = _require_mapping(manifest.get("protocol"), "protocol", errors)
     expected = {
+        "tuning": "full",
+        "eval_split_seed": 331,
+        "split_population_rule": (
+            "canonical_source_indices_0_through_train_rows_plus_eval_rows_minus_1"
+        ),
+        "eval_selection_rule": (
+            "python_random_seed_331_shuffle_once_then_final_eval_rows"
+        ),
+        "train_shuffle_rule": (
+            "per_study_shuffle_seed_applies_only_to_disjoint_pre_shuffle_train_pool"
+        ),
         "matrix_merge": "rda",
         "strict_quorum": True,
         "barrier": True,
@@ -294,6 +785,20 @@ def _validate_result_common(
     for field in ("git_commit", "image_digest", "model_hash", "data_hash", "eval_hash"):
         if row.get(field) != frozen.get(field):
             errors.append(f"{label}.{field} does not match the frozen manifest")
+    for field in ("eval_source_indices_hash", "train_pool_source_indices_hash"):
+        if row.get(field) != frozen.get(field):
+            errors.append(f"{label}.{field} does not match the frozen manifest")
+    seed_key = str(coordinate.seed)
+    split_maps = {
+        "train_source_indices_hash": "train_source_indices_hashes",
+        "train_rows_hash": "train_rows_hashes",
+    }
+    for row_field, frozen_map in split_maps.items():
+        expected_value = _mapping_or_empty(frozen.get(frozen_map)).get(seed_key)
+        if row.get(row_field) != expected_value:
+            errors.append(
+                f"{label}.{row_field} does not match frozen.{frozen_map}[{seed_key!r}]"
+            )
     expected_command_hash = _mapping_or_empty(frozen.get("cell_command_hashes")).get(cell_id)
     if row.get("command_hash") != expected_command_hash:
         errors.append(
@@ -862,11 +1367,15 @@ def validate_and_summarize(
     *,
     claim_level: str = "integrity",
     require_bracketed: bool = False,
+    parent_manifest: Mapping[str, Any] | None = None,
+    p0_replay_report: Mapping[str, Any] | None = None,
+    p0_replay_report_sha256: str | None = None,
+    _skip_authority_for_tests: bool = False,
 ) -> dict[str, Any]:
     """Validate a manifest and return a machine-readable audit/summary.
 
     ``claim_level='confirmatory'`` is deliberately rejected for development
-    manifests or for fewer than five independent seed blocks, irrespective of
+    manifests or for fewer than eight independent seed blocks, irrespective of
     how many eval rows, commits, or bootstrap samples are present.
     """
 
@@ -886,6 +1395,14 @@ def validate_and_summarize(
         errors.append("mode must be 'development' or 'confirmation'")
     _validate_frozen(manifest, errors)
     _validate_protocol(manifest, errors)
+    if not _skip_authority_for_tests:
+        _validate_authority_and_lineage(
+            manifest,
+            errors,
+            parent_manifest=parent_manifest,
+            p0_replay_report=p0_replay_report,
+            p0_replay_report_sha256=p0_replay_report_sha256,
+        )
     required_result_fields = manifest.get("required_result_fields")
     if (
         not isinstance(required_result_fields, list)
@@ -899,11 +1416,44 @@ def validate_and_summarize(
     if not isinstance(results, list):
         errors.append("results must be an array retaining every attempt")
         results = []
+    status = manifest.get("status")
+    if status == "bound_launch_authority":
+        if results:
+            errors.append("bound_launch_authority must have an empty results array")
+        if claim_level != "integrity":
+            errors.append("unexecuted launch authority supports integrity validation only")
+        if errors:
+            raise ManifestError("\n".join(f"- {message}" for message in errors))
+        return {
+            "schema_version": "1.0",
+            "valid": True,
+            "integrity_status": "BOUND_LAUNCH_AUTHORITY_VALIDATED",
+            "study_id": manifest["study_id"],
+            "manifest_mode": mode,
+            "claim_level_requested": claim_level,
+            "claim_scope": "unexecuted_launch_authority",
+            "confirmatory_eligible": False,
+            "expected_cell_count": len(expected),
+            "final_cell_count": 0,
+            "attempt_count": 0,
+            "warnings": [
+                "This validates launch authority only; it contains no scientific outcomes."
+            ],
+        }
+    if status == "sealed_results" and not results:
+        errors.append("sealed_results must retain at least one terminal attempt")
+    expected_by_id = _expected_cell_id_coordinates(manifest)
     rows: list[Mapping[str, Any]] = []
     for index, raw in enumerate(results):
         row = _require_mapping(raw, f"results[{index}]", errors)
         coordinate = _coordinate(row, f"results[{index}]", errors)
         if coordinate is not None:
+            expected_coordinate = expected_by_id.get(str(row.get("cell_id")))
+            if expected_coordinate != coordinate:
+                errors.append(
+                    f"results[{index}].cell_id is not bound to its declared "
+                    f"expected_cells coordinate"
+                )
             _validate_result_common(row, index=index, manifest=manifest, coordinate=coordinate, errors=errors)
             _validate_status_and_work(row, index=index, manifest=manifest, coordinate=coordinate, errors=errors)
         rows.append(row)
@@ -932,7 +1482,28 @@ def validate_and_summarize(
             f"unexpected={sorted(registry_cell_ids - final_cell_ids)}"
         )
 
-    unique_seeds = sorted({coordinate.seed for coordinate in expected})
+    kind = _manifest_kind(manifest)
+    fresh_confirmation = kind == "fresh_confirmation_stage"
+    registered_confirmation_seeds = {
+        int(seed)
+        for seed in _mapping_or_empty(
+            _mapping_or_empty(
+                _mapping_or_empty(_authoritative_template().get("lineage_policy")).get(
+                    "registered_descendant_kinds"
+                )
+            ).get("fresh_confirmation_stage")
+        ).get("required_new_seeds", [])
+    } if fresh_confirmation and not _skip_authority_for_tests else set()
+    inference_finals = (
+        {
+            coordinate: row
+            for coordinate, row in finals.items()
+            if coordinate.seed in registered_confirmation_seeds
+        }
+        if fresh_confirmation
+        else finals
+    )
+    unique_seeds = sorted({coordinate.seed for coordinate in inference_finals})
     configured_min = manifest.get("min_confirmatory_seeds")
     if not _is_int(configured_min) or configured_min < HARD_MIN_CONFIRMATORY_SEEDS:
         errors.append(
@@ -952,7 +1523,7 @@ def validate_and_summarize(
         for row in phase_map
         if row["bracket_decision"] != "BRACKETED"
     ]
-    if require_bracketed and unbracketed:
+    if require_bracketed and unbracketed and not fresh_confirmation:
         errors.append(f"not all LR curves are bracketed: {unbracketed}")
 
     claim_level = claim_level.strip().lower()
@@ -962,8 +1533,11 @@ def validate_and_summarize(
         mode == "confirmation"
         and _is_int(configured_min)
         and len(unique_seeds) >= max(HARD_MIN_CONFIRMATORY_SEEDS, configured_min)
-        and not unbracketed
-        and all(_canonical_status(row.get("status")) in SCIENTIFIC_STATUSES for row in finals.values())
+        and (fresh_confirmation or not unbracketed)
+        and all(
+            _canonical_status(row.get("status")) in SCIENTIFIC_STATUSES
+            for row in inference_finals.values()
+        )
     )
     if claim_level == "confirmatory" and mode == "development":
         errors.append(
@@ -985,7 +1559,11 @@ def validate_and_summarize(
 
     status_counts = Counter(_canonical_status(row.get("status")) for row in rows)
     final_status_counts = Counter(_canonical_status(row.get("status")) for row in finals.values())
-    overall_bracket = "BRACKETED_DEVELOPMENT_ONLY" if not unbracketed else "EXTENSION_REQUIRED"
+    overall_bracket = (
+        "NOT_APPLICABLE_FROZEN_TUNED_CONFIRMATION"
+        if fresh_confirmation
+        else ("BRACKETED_DEVELOPMENT_ONLY" if not unbracketed else "EXTENSION_REQUIRED")
+    )
     return {
         "schema_version": "1.0",
         "valid": True,
@@ -1010,7 +1588,7 @@ def validate_and_summarize(
         "overall_bracket_decision": overall_bracket,
         "extension_requirements": unbracketed,
         "phase_map": phase_map,
-        "paired_development_summaries": _paired_summary(finals),
+        "paired_development_summaries": _paired_summary(inference_finals),
         "warnings": []
         if confirmatory_eligible
         else [
@@ -1040,6 +1618,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default="integrity",
     )
     parser.add_argument("--require-bracketed", action="store_true")
+    parser.add_argument(
+        "--parent-manifest",
+        type=Path,
+        help="exact sealed parent required by P1 and every later descendant",
+    )
+    parser.add_argument(
+        "--p0-replay-report",
+        type=Path,
+        help="sealed post-deletion CPU replay report required by initial P1",
+    )
     parser.add_argument("--output", type=Path, help="write JSON report here; default stdout")
     return parser
 
@@ -1047,12 +1635,23 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
+        replay_report = (
+            _load_json(args.p0_replay_report) if args.p0_replay_report else None
+        )
+        replay_sha = None
+        if args.p0_replay_report:
+            replay_sha = hashlib.sha256(args.p0_replay_report.read_bytes()).hexdigest()
         report = validate_and_summarize(
             _load_json(args.manifest),
             claim_level=args.claim_level,
             require_bracketed=args.require_bracketed,
+            parent_manifest=(
+                _load_json(args.parent_manifest) if args.parent_manifest else None
+            ),
+            p0_replay_report=replay_report,
+            p0_replay_report_sha256=replay_sha,
         )
-    except ManifestError as exc:
+    except (ManifestError, OSError) as exc:
         print(f"PHASE_MAP_VALIDATION_ERROR\n{exc}", file=sys.stderr)
         return 2
     rendered = json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n"

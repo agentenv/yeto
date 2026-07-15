@@ -19,7 +19,18 @@ sys.modules["validate_phase_map"] = phase_map
 assert SPEC.loader is not None
 SPEC.loader.exec_module(phase_map)
 ManifestError = phase_map.ManifestError
-validate_and_summarize = phase_map.validate_and_summarize
+_validate_with_authority = phase_map.validate_and_summarize
+
+
+def validate_and_summarize(*args, **kwargs):
+    """Exercise payload/statistical rules independently of Git authority.
+
+    Dedicated tests at the end of this file exercise the production authority
+    path against the hard-pinned preregistration commit.
+    """
+
+    kwargs["_skip_authority_for_tests"] = True
+    return _validate_with_authority(*args, **kwargs)
 
 
 HEX_A = "a" * 64
@@ -50,6 +61,7 @@ def _manifest(
             "eta": list(etas),
             "seeds": list(seeds),
         },
+        "expected_cells": [],
         "seed_pairs": seed_pairs,
         "frozen": {
             "git_commit": GIT,
@@ -59,7 +71,16 @@ def _manifest(
             "model_revision": GIT,
             "model_hash": HEX_A,
             "data_hash": HEX_A,
-            "train_rows_hash": HEX_A,
+            "eval_source_indices_hash": HEX_A,
+            "train_pool_source_indices_hash": HEX_A,
+            "train_source_indices_hashes": {
+                str(seed): hashlib.sha256(f"train-index-{seed}".encode()).hexdigest()
+                for seed in seeds
+            },
+            "train_rows_hashes": {
+                str(seed): hashlib.sha256(f"train-rows-{seed}".encode()).hexdigest()
+                for seed in seeds
+            },
             "eval_hash": HEX_A,
             "eval_example_ids_hash": HEX_A,
             "eval_token_ids_hash": HEX_A,
@@ -68,6 +89,17 @@ def _manifest(
             "retry_policy_hash": HEX_A,
         },
         "protocol": {
+            "tuning": "full",
+            "eval_split_seed": 331,
+            "split_population_rule": (
+                "canonical_source_indices_0_through_train_rows_plus_eval_rows_minus_1"
+            ),
+            "eval_selection_rule": (
+                "python_random_seed_331_shuffle_once_then_final_eval_rows"
+            ),
+            "train_shuffle_rule": (
+                "per_study_shuffle_seed_applies_only_to_disjoint_pre_shuffle_train_pool"
+            ),
             "matrix_merge": "rda",
             "strict_quorum": True,
             "barrier": True,
@@ -211,6 +243,14 @@ def _manifest(
                         "image_digest": HEX_A,
                         "model_hash": HEX_A,
                         "data_hash": HEX_A,
+                        "eval_source_indices_hash": HEX_A,
+                        "train_pool_source_indices_hash": HEX_A,
+                        "train_source_indices_hash": manifest["frozen"][
+                            "train_source_indices_hashes"
+                        ][str(seed)],
+                        "train_rows_hash": manifest["frozen"]["train_rows_hashes"][
+                            str(seed)
+                        ],
                         "eval_hash": HEX_A,
                         "command_hash": hashlib.sha256(cell_id.encode("utf-8")).hexdigest(),
                         "capture_uri": f"gs://bucket/{cell_id}/capture",
@@ -247,6 +287,15 @@ def _manifest(
                         "ended_at": "2026-07-14T13:00:00Z",
                     }
                 )
+                manifest["expected_cells"].append(
+                    {
+                        "cell_id": cell_id,
+                        "h": 16,
+                        "mu": mu,
+                        "eta": eta,
+                        "seed": seed,
+                    }
+                )
     manifest["frozen"]["cell_command_hashes"] = {
         row["cell_id"]: row["command_hash"] for row in manifest["results"]
     }
@@ -260,6 +309,228 @@ def _manifest(
         canonical_retry_policy
     ).hexdigest()
     return manifest
+
+
+def _git_head() -> str:
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _authoritative_p0() -> dict:
+    manifest = copy.deepcopy(phase_map._authoritative_template())
+    manifest["status"] = "sealed_results"
+    manifest["study_id"] = "bp-phase-map-p0-unit"
+    manifest["expected_grid"] = {
+        "h": [16],
+        "mu": [0.0, 0.5, 0.9],
+        "eta": [0.04375],
+        "seeds": [337],
+    }
+    manifest["seed_pairs"] = {"337": 337337}
+    manifest["protocol"]["token_budget"] = 8192
+    manifest["protocol"]["gpu_slots"] = 1
+    manifest["protocol"]["machine_type"] = "a2-highgpu-1g"
+    manifest["horizon_work"] = {
+        "16": {
+            "fixed_window_microsteps": 16,
+            "fixed_window_tokens": 2048,
+            "outer_steps": 4,
+        }
+    }
+    cells = []
+    for mu in (0.0, 0.5, 0.9):
+        cell_id = f"bp-phase-map-p0-unit-h16-mu{mu:g}-eta0.04375-s337"
+        cells.append(
+            {"cell_id": cell_id, "h": 16, "mu": mu, "eta": 0.04375, "seed": 337}
+        )
+    manifest["expected_cells"] = cells
+    frozen = manifest["frozen"]
+    frozen.update(
+        {
+            "git_commit": _git_head(),
+            "image_digest": HEX_A,
+            "model_hash": HEX_A,
+            "data_hash": HEX_A,
+            "eval_source_indices_hash": HEX_A,
+            "train_pool_source_indices_hash": HEX_B,
+            "train_source_indices_hashes": {"337": HEX_A},
+            "train_rows_hashes": {"337": HEX_B},
+            "eval_hash": HEX_A,
+            "eval_example_ids_hash": HEX_A,
+            "eval_token_ids_hash": HEX_A,
+            "command_hash": HEX_B,
+            "cell_command_hashes": {
+                cell["cell_id"]: hashlib.sha256(cell["cell_id"].encode()).hexdigest()
+                for cell in cells
+            },
+            "randomization_plan_hash": HEX_B,
+        }
+    )
+    frozen["retry_policy_hash"] = hashlib.sha256(
+        json.dumps(
+            manifest["retry_policy"],
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+    manifest["randomization"]["plan_hash"] = HEX_B
+    manifest["lineage"] = {
+        "authoritative_prereg_path": phase_map.AUTHORITATIVE_PREREG_PATH,
+        "authoritative_prereg_source_commit": (
+            phase_map.AUTHORITATIVE_PREREG_SOURCE_COMMIT
+        ),
+        "authoritative_prereg_template_sha256": (
+            phase_map.AUTHORITATIVE_PREREG_TEMPLATE_SHA256
+        ),
+        "parent_manifest_sha256": None,
+        "p0_replay_report_sha256": None,
+        "descendant_kind": "p0_canary_bound",
+    }
+    results = []
+    for order_index, cell in enumerate(cells):
+        cell_id = cell["cell_id"]
+        mu = cell["mu"]
+        results.append(
+            {
+                "attempt_id": f"{cell_id}-attempt-1",
+                **cell,
+                "training_seed": 337337,
+                "status": "COMPLETED",
+                "failure_reason": None,
+                "loss": 2.0 + 0.01 * mu,
+                "work": {
+                    "fixed_window_microsteps": 16,
+                    "fixed_window_tokens": 2048,
+                    "outer_steps": 4,
+                    "token_budget": 8192,
+                    "eval_rows": 1024,
+                },
+                "observed_work": {
+                    "tokens": 8192,
+                    "microsteps": 64,
+                    "outer_steps": 4,
+                    "full_quorum": True,
+                    "fixed_window_exact": True,
+                    "version_matched_anchor_resolved": True,
+                },
+                "git_commit": frozen["git_commit"],
+                "image_digest": frozen["image_digest"],
+                "model_hash": frozen["model_hash"],
+                "data_hash": frozen["data_hash"],
+                "eval_source_indices_hash": frozen["eval_source_indices_hash"],
+                "train_pool_source_indices_hash": frozen[
+                    "train_pool_source_indices_hash"
+                ],
+                "train_source_indices_hash": frozen["train_source_indices_hashes"][
+                    "337"
+                ],
+                "train_rows_hash": frozen["train_rows_hashes"]["337"],
+                "eval_hash": frozen["eval_hash"],
+                "command_hash": frozen["cell_command_hashes"][cell_id],
+                "capture_uri": f"gs://bucket/{cell_id}/capture",
+                "capture_sha256": HEX_A,
+                "result_uri": f"gs://bucket/{cell_id}/result.json",
+                "result_sha256": HEX_A,
+                "per_example_loss_uri": f"gs://bucket/{cell_id}/eval.jsonl",
+                "per_example_loss_sha256": HEX_A,
+                "paired_control_id": cells[0]["cell_id"],
+                "barrier": True,
+                "version_matched": True,
+                "matrix_merge": "rda",
+                "strict_quorum": True,
+                "delta_correction": "none",
+                "injected_baseline": False,
+                "spot": True,
+                "block_id": "bp-phase-map-p0-unit-block-h16-eta0.04375-s337",
+                "order_index": order_index,
+                "attempt": 1,
+                "retry_of": None,
+                "retry_reason": None,
+                "retry_authorization": None,
+                "hardware": {
+                    "market": "spot",
+                    "provider": "gcp",
+                    "instance_type": "a2-highgpu-1g",
+                    "region": "us-central1-a",
+                    "instance_id": "123456789",
+                    "image_id": frozen["image_id"],
+                    "provisioning_evidence_uri": f"gs://bucket/{cell_id}/spot.json",
+                    "provisioning_evidence_sha256": HEX_B,
+                },
+                "started_at": "2026-07-14T12:00:00Z",
+                "ended_at": "2026-07-14T13:00:00Z",
+            }
+        )
+    manifest["results"] = results
+    return manifest
+
+
+def _authoritative_p1(parent: dict) -> tuple[dict, dict, str]:
+    manifest = copy.deepcopy(phase_map._authoritative_template())
+    cells = []
+    for h in (16, 64, 256):
+        for mu in (0.0, 0.5, 0.9):
+            for eta in (0.021875, 0.04375, 0.0875, 0.175):
+                cell_id = f"bp-phase-map-p1-r0-h{h}-mu{mu:g}-eta{eta:g}-s347"
+                cells.append(
+                    {"cell_id": cell_id, "h": h, "mu": mu, "eta": eta, "seed": 347}
+                )
+    frozen = manifest["frozen"]
+    parent_frozen = parent["frozen"]
+    for field in (
+        "git_commit",
+        "image_digest",
+        "model_hash",
+        "data_hash",
+        "eval_source_indices_hash",
+        "train_pool_source_indices_hash",
+        "eval_hash",
+        "eval_example_ids_hash",
+        "eval_token_ids_hash",
+        "retry_policy_hash",
+    ):
+        frozen[field] = parent_frozen[field]
+    frozen["train_source_indices_hashes"] = {"347": HEX_A}
+    frozen["train_rows_hashes"] = {"347": HEX_B}
+    frozen["command_hash"] = HEX_B
+    frozen["cell_command_hashes"] = {
+        cell["cell_id"]: hashlib.sha256(cell["cell_id"].encode()).hexdigest()
+        for cell in cells
+    }
+    frozen["randomization_plan_hash"] = HEX_A
+    manifest["expected_cells"] = cells
+    manifest["randomization"]["plan_hash"] = HEX_A
+    replay = {
+        "schema": "yeto_p0_cpu_replay_v1",
+        "status": "PASS",
+        "gpu_deleted_before_replay": True,
+        "all_steps_replayed": True,
+        "phase_map_manifest_canonical_sha256": phase_map._sha256_canonical(parent),
+    }
+    replay_bytes = (json.dumps(replay, indent=2, sort_keys=True) + "\n").encode()
+    replay_sha = hashlib.sha256(replay_bytes).hexdigest()
+    manifest["lineage"] = {
+        "authoritative_prereg_path": phase_map.AUTHORITATIVE_PREREG_PATH,
+        "authoritative_prereg_source_commit": (
+            phase_map.AUTHORITATIVE_PREREG_SOURCE_COMMIT
+        ),
+        "authoritative_prereg_template_sha256": (
+            phase_map.AUTHORITATIVE_PREREG_TEMPLATE_SHA256
+        ),
+        "parent_manifest_sha256": phase_map._sha256_canonical(parent),
+        "p0_replay_report_sha256": replay_sha,
+        "descendant_kind": "initial_bound_p1_r0",
+    }
+    manifest["results"] = []
+    manifest["status"] = "bound_launch_authority"
+    return manifest, replay, replay_sha
 
 
 def _result(manifest: dict, *, mu: float, eta: float, seed: int = 347) -> dict:
@@ -315,6 +586,14 @@ def test_exact_cell_coverage_rejects_missing_and_unexpected_cells() -> None:
     unexpected["results"].append(extra)
     with pytest.raises(ManifestError, match="unexpected cells"):
         validate_and_summarize(unexpected)
+
+
+def test_cell_id_is_bound_to_its_expected_coordinate() -> None:
+    manifest = _manifest()
+    first, second = manifest["results"][:2]
+    first["cell_id"], second["cell_id"] = second["cell_id"], first["cell_id"]
+    with pytest.raises(ManifestError, match="cell_id is not bound"):
+        validate_and_summarize(manifest)
 
 
 def test_divergence_is_retained_with_null_loss_and_can_bracket_high_side() -> None:
@@ -571,7 +850,7 @@ def test_provenance_mismatch_is_rejected() -> None:
 def test_cli_emits_json_and_refuses_confirmation(tmp_path: Path, capsys) -> None:
     manifest_path = tmp_path / "manifest.json"
     output_path = tmp_path / "report.json"
-    manifest_path.write_text(json.dumps(_manifest()), encoding="utf-8")
+    manifest_path.write_text(json.dumps(_authoritative_p0()), encoding="utf-8")
     assert phase_map.main(
         [
             str(manifest_path),
@@ -588,3 +867,57 @@ def test_cli_emits_json_and_refuses_confirmation(tmp_path: Path, capsys) -> None
         [str(manifest_path), "--claim-level", "confirmatory"]
     ) == 2
     assert "REFUSED_CONFIRMATORY_CLAIM" in capsys.readouterr().err
+
+
+def test_hard_pinned_authority_rejects_forged_template_identity() -> None:
+    manifest = _authoritative_p0()
+    manifest["lineage"]["authoritative_prereg_template_sha256"] = HEX_A
+    with pytest.raises(ManifestError, match="template_sha256 is not hard-pinned"):
+        _validate_with_authority(manifest)
+
+
+def test_initial_p1_requires_exact_p0_parent_and_replay_gate() -> None:
+    parent = _authoritative_p0()
+    manifest, replay, replay_sha = _authoritative_p1(parent)
+
+    report = _validate_with_authority(
+        manifest,
+        parent_manifest=parent,
+        p0_replay_report=replay,
+        p0_replay_report_sha256=replay_sha,
+    )
+    assert report["integrity_status"] == "BOUND_LAUNCH_AUTHORITY_VALIDATED"
+    assert report["expected_cell_count"] == 36
+
+    with pytest.raises(ManifestError, match="requires the exact sealed parent"):
+        _validate_with_authority(
+            manifest,
+            p0_replay_report=replay,
+            p0_replay_report_sha256=replay_sha,
+        )
+
+    with pytest.raises(ManifestError, match="exact sealed P0 CPU replay"):
+        _validate_with_authority(manifest, parent_manifest=parent)
+
+
+def test_initial_p1_cannot_drift_from_passing_p0_or_expected_cells() -> None:
+    parent = _authoritative_p0()
+    manifest, replay, replay_sha = _authoritative_p1(parent)
+    manifest["frozen"]["eval_hash"] = HEX_B
+    with pytest.raises(ManifestError, match="differs from its passing P0"):
+        _validate_with_authority(
+            manifest,
+            parent_manifest=parent,
+            p0_replay_report=replay,
+            p0_replay_report_sha256=replay_sha,
+        )
+
+    manifest, replay, replay_sha = _authoritative_p1(parent)
+    manifest["expected_cells"].pop()
+    with pytest.raises(ManifestError, match="exact frozen 36-cell grid"):
+        _validate_with_authority(
+            manifest,
+            parent_manifest=parent,
+            p0_replay_report=replay,
+            p0_replay_report_sha256=replay_sha,
+        )
