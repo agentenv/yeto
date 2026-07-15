@@ -397,12 +397,14 @@ def _barrier_events(updates: list[dict]) -> dict:
     return {"schema": "yeto_parallel_barrier_events_v1", "learners": learners}
 
 
-def _provider_record(identity, index: int, created_at: str) -> dict:
+def _provider_record(
+    identity, index: int, created_at: str, *, zone: str = "us-central1-c"
+) -> dict:
     gpu_uuids = [f"GPU-{identity.slot}-{identity.generation}-{gpu}" for gpu in range(4)]
     return {
         "schema": "yeto_parallel_gcp_provider_evidence_v1",
         "project": "model-training-497007",
-        "zone": "us-central1-c",
+        "zone": zone,
         "run_id": identity.run_id,
         "campaign_tag": identity.roster_tag,
         "slot": identity.slot,
@@ -641,6 +643,7 @@ def _campaign_fixture(tmp_path: Path):
         provider = _provider_record(identity, index, _iso(base, -3600))
         provider_path = root / "provider" / "provider-evidence.json"
         _write_json(provider_path, provider)
+        registry_controller.update_state(identity, zone=provider["zone"])
         providers[slot] = provider
         controllers[slot] = pexec.VmPartialManifestController(
             identity=identity,
@@ -695,6 +698,11 @@ def _campaign_fixture(tmp_path: Path):
                 "actual_wave_index": wave_index,
                 "time_block_index": wave["time_block_index"],
                 "retry_time_block_index": None,
+                "available_slot_set": assignment["available_slot_set"],
+                "dispatch_batch_index": assignment["dispatch_batch_index"],
+                "batch_launch_order_index": assignment[
+                    "batch_launch_order_index"
+                ],
                 "launch_order_index": assignment["launch_order_index"],
                 "logical_slot": slot,
                 "generation": 1,
@@ -729,6 +737,7 @@ def _campaign_fixture(tmp_path: Path):
         lifecycle = {
             "schema": "yeto_vm_lifecycle_final_v1",
             "status": "vm_lifecycle_final",
+            "zone": provider["zone"],
             "run_id": identity.run_id,
             "slot": slot,
             "generation": 1,
@@ -817,6 +826,7 @@ def _p3_campaign_fixture(tmp_path: Path):
         provider = _provider_record(identity, index + 20, _iso(base, -3600))
         provider_path = root / "provider" / "provider-evidence.json"
         _write_json(provider_path, provider)
+        registry_controller.update_state(identity, zone=provider["zone"])
         providers[slot] = provider
         controllers[slot] = pexec.VmPartialManifestController(
             identity=identity,
@@ -869,6 +879,11 @@ def _p3_campaign_fixture(tmp_path: Path):
                 "actual_wave_index": wave_index,
                 "time_block_index": wave["time_block_index"],
                 "retry_time_block_index": None,
+                "available_slot_set": assignment["available_slot_set"],
+                "dispatch_batch_index": assignment["dispatch_batch_index"],
+                "batch_launch_order_index": assignment[
+                    "batch_launch_order_index"
+                ],
                 "launch_order_index": assignment["launch_order_index"],
                 "logical_slot": slot,
                 "generation": 1,
@@ -906,6 +921,7 @@ def _p3_campaign_fixture(tmp_path: Path):
             {
                 "schema": "yeto_vm_lifecycle_final_v1",
                 "status": "vm_lifecycle_final",
+                "zone": provider["zone"],
                 "run_id": identity.run_id,
                 "slot": slot,
                 "generation": 1,
@@ -1066,6 +1082,60 @@ def test_p1_has_twelve_three_cell_waves_and_never_fills_idle_slot(tmp_path):
     )
 
 
+def test_revision2_plan_supersedes_old_hash_and_materializes_all_slot_sets(tmp_path):
+    _parent, _bound, _scientific, roster, plan = _p1_design(tmp_path)
+    legacy = pexec.build_legacy_parallel_plan(roster)
+    assert plan["schema"] == "yeto_parallel_plan_v2"
+    assert plan["supersedes_parallel_plan_hash"] == pexec.canonical_sha256(legacy)
+    assert plan["superseded_full_width_waves"] == legacy["waves"]
+    assert len(plan["available_slot_variants"]) == 15
+    assert {
+        tuple(variant["available_slot_set"])
+        for variant in plan["available_slot_variants"]
+    } == set(pexec.available_slot_subsets())
+    assert plan["binding_function"]["pure_inputs"] == [
+        "roster_hash",
+        "available_slot_set",
+        "wave_index",
+        "retry_round",
+    ]
+    assert plan["binding_function"]["outcome_inputs_forbidden"] is True
+
+
+@pytest.mark.parametrize(
+    "slots,expected_batches",
+    [
+        (("v0",), 3),
+        (("v0", "v2"), 2),
+        (("v0", "v1", "v3"), 1),
+        (pexec.LOGICAL_SLOTS, 1),
+    ],
+)
+def test_reduced_width_binding_is_deterministic_and_one_cell_per_slot_per_batch(
+    tmp_path, slots, expected_batches
+):
+    _parent, _bound, _scientific, roster, plan = _p1_design(tmp_path)
+    group_id = plan["waves"][0]["group_id"]
+    first = pexec.wave_for_retry(
+        plan, roster, group_id, 1, available_slots=slots
+    )
+    second = pexec.wave_for_retry(
+        plan, roster, group_id, 1, available_slots=reversed(slots)
+    )
+    assert pexec.canonical_json(first) == pexec.canonical_json(second)
+    assert first["available_slot_set"] == sorted(slots)
+    assert first["dispatch_batch_count"] == expected_batches
+    assert len(first["assigned_cells_in_dispatch_order"]) == 3
+    for batch_index in range(expected_batches):
+        batch = [
+            row
+            for row in first["assigned_cells_in_dispatch_order"]
+            if row["dispatch_batch_index"] == batch_index
+        ]
+        assert len({row["logical_slot"] for row in batch}) == len(batch)
+        assert all(row["logical_slot"] in slots for row in batch)
+
+
 def test_p3_has_eight_width_four_seed_waves(tmp_path):
     _parent, _bound, _scientific, _roster, plan = _p3_design(tmp_path)
     assert len(plan["waves"]) == 8
@@ -1141,6 +1211,46 @@ def test_generation_registry_rejects_nonce_reuse(tmp_path):
     registry.reserve("v0", ownership_nonce="a" * 32)
     with pytest.raises(pexec.LifecycleError, match="reuse"):
         registry.reserve("v1", ownership_nonce="a" * 32)
+
+
+@pytest.mark.parametrize("zone", pexec.ALLOWED_US_CENTRAL1_ZONES)
+def test_provider_record_accepts_each_authorized_us_central1_zone(tmp_path, zone):
+    _parent, bound, _scientific, roster, _plan = _p1_design(tmp_path)
+    registry = pexec.CampaignGenerationRegistry(
+        stage_code="p1r0",
+        study_id=bound["study_id"],
+        roster_digest=pexec.roster_hash(roster),
+        campaign_attempt=1,
+        campaign_state_root=tmp_path / "state",
+        campaign_artifact_root=str(tmp_path / "artifacts"),
+    )
+    identity = registry.reserve("v0", ownership_nonce="c" * 32)
+    provider = _provider_record(
+        identity, 1, "2026-07-15T00:00:00Z", zone=zone
+    )
+    registry_row = identity.registry_row()
+    registry_row["zone"] = zone
+    assert pexec.validate_provider_record(provider, registry_row)[
+        "instance_numeric_id"
+    ] == "1001"
+
+
+def test_provider_record_rejects_zone_outside_authorized_region(tmp_path):
+    _parent, bound, _scientific, roster, _plan = _p1_design(tmp_path)
+    registry = pexec.CampaignGenerationRegistry(
+        stage_code="p1r0",
+        study_id=bound["study_id"],
+        roster_digest=pexec.roster_hash(roster),
+        campaign_attempt=1,
+        campaign_state_root=tmp_path / "state",
+        campaign_artifact_root=str(tmp_path / "artifacts"),
+    )
+    identity = registry.reserve("v0", ownership_nonce="d" * 32)
+    provider = _provider_record(
+        identity, 1, "2026-07-15T00:00:00Z", zone="us-east4-a"
+    )
+    with pytest.raises(pexec.LifecycleError, match="project/zone"):
+        pexec.validate_provider_record(provider, identity.registry_row())
 
 
 def test_partial_manifest_is_not_a_campaign_seal_and_is_hash_locked(tmp_path):
@@ -1517,10 +1627,13 @@ def test_cross_wave_overlap_is_rejected(tmp_path):
     # Extend one wave-0 attempt beyond the wave-1 first dispatch while keeping
     # its own terminal-prefix seal after the process end.
     slot, partial_path, partial, row = _first_attempt(bundle)
-    row["scientific_ended_at"] = "2026-07-15T00:06:00Z"
-    row["wave_terminal_prefix_sealed_at"] = "2026-07-15T00:06:01Z"
-    # Every row in the same wave must cite the same terminal-prefix seal.
     target_wave = row["actual_wave_index"]
+    base = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    overlap_end = _iso(base, (target_wave + 1) * 300 + 60)
+    overlap_seal = _iso(base, (target_wave + 1) * 300 + 61)
+    row["scientific_ended_at"] = overlap_end
+    row["wave_terminal_prefix_sealed_at"] = overlap_seal
+    # Every row in the same wave must cite the same terminal-prefix seal.
     _rewrite_partial(bundle, slot, partial_path, partial)
     for other_slot in pexec.LOGICAL_SLOTS:
         if other_slot == slot:
@@ -1536,8 +1649,8 @@ def test_cross_wave_overlap_is_rejected(tmp_path):
         other = json.loads(other_path.read_text())
         changed = False
         for other_row in other["attempts"]:
-            if other_row["actual_wave_index"] == target_wave:
-                other_row["wave_terminal_prefix_sealed_at"] = "2026-07-15T00:06:01Z"
+                if other_row["actual_wave_index"] == target_wave:
+                    other_row["wave_terminal_prefix_sealed_at"] = overlap_seal
                 changed = True
         if changed:
             _rewrite_partial(bundle, other_slot, other_path, other)
@@ -1699,7 +1812,9 @@ class _ScriptedBackend:
         self.requests.append((identity, request))
         return _iso(
             self.base,
-            request.actual_wave_index * 300 + request.launch_order_index,
+            request.actual_wave_index * 1000
+            + request.dispatch_batch_index * 300
+            + request.batch_launch_order_index,
         )
 
     def collect(self, identity, request):
@@ -1718,10 +1833,18 @@ class _ScriptedBackend:
             "loss": None if should_preempt else 999.0,
             "artifact_inventory": {},
             "scientific_started_at": _iso(
-                self.base, request.actual_wave_index * 300 + 10 + request.launch_order_index
+                self.base,
+                request.actual_wave_index * 1000
+                + request.dispatch_batch_index * 300
+                + 10
+                + request.batch_launch_order_index,
             ),
             "scientific_ended_at": _iso(
-                self.base, request.actual_wave_index * 300 + 100 + request.launch_order_index
+                self.base,
+                request.actual_wave_index * 1000
+                + request.dispatch_batch_index * 300
+                + 100
+                + request.batch_launch_order_index,
             ),
         }
         if should_preempt:
@@ -1741,6 +1864,7 @@ class _ScriptedBackend:
         return {
             "schema": "yeto_vm_lifecycle_final_v1",
             "status": "vm_lifecycle_final",
+            "zone": provider_record["zone"],
             "run_id": identity.run_id,
             "slot": identity.slot,
             "generation": identity.generation,
@@ -1799,6 +1923,44 @@ def _run_scripted_preemption(tmp_path: Path, *, target_slot=None, target_launch=
     )
     vm_registry, census = executor.run()
     return roster, plan, backend, vm_registry, census
+
+
+def test_executor_runs_complete_p1r0_at_width_one_in_deterministic_batches(tmp_path):
+    _parent, bound, scientific, roster, plan = _p1_design(tmp_path)
+    registry = pexec.CampaignGenerationRegistry(
+        stage_code="p1r0",
+        study_id=bound["study_id"],
+        roster_digest=pexec.roster_hash(roster),
+        campaign_attempt=1,
+        campaign_state_root=tmp_path / "state",
+        campaign_artifact_root=str(tmp_path / "artifacts"),
+    )
+    backend = _ScriptedBackend()
+    executor = pexec.ParallelWaveExecutor(
+        roster=roster,
+        parallel_plan=plan,
+        scientific_plan=scientific,
+        bound_manifest=bound,
+        registry=registry,
+        campaign_root=tmp_path / "artifacts",
+        backend=backend,
+        available_slots=("v0",),
+        clock=lambda: "2026-07-16T12:00:00Z",
+    )
+    vm_registry, census = executor.run()
+    assert census["campaign_owned_vm_count"] == 0
+    assert census["campaign_owned_attached_a100s"] == 0
+    assert {row["slot"] for row in vm_registry["generations"]} == {"v0"}
+    assert len(backend.requests) == 36
+    assert all(identity.slot == "v0" for identity, _request in backend.requests)
+    for actual_wave_index in range(12):
+        requests = [
+            request
+            for _identity, request in backend.requests
+            if request.actual_wave_index == actual_wave_index
+        ]
+        assert [request.dispatch_batch_index for request in requests] == [0, 1, 2]
+        assert all(request.available_slot_set == ("v0",) for request in requests)
 
 
 @pytest.mark.parametrize("slot", list(pexec.LOGICAL_SLOTS))

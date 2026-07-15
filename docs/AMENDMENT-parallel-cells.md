@@ -1,6 +1,6 @@
 # Concurrency amendment: parallel scientific cells
 
-**Version:** 1.0, prospective pre-outcome amendment
+**Version:** 1.1, operator-authorized pre-outcome capacity revision
 
 **Status:** This document amends only the scheduling, ownership, retry execution,
 and evidence aggregation rules for the stages named in Section 2. It is not a
@@ -8,6 +8,15 @@ cloud-launch authorization, does not revive any stopped attempt, and does not
 make an implementation launch-ready. A launch still requires the lineage,
 canary, implementation, packet, review, and explicit user/root gates in
 Section 11.
+
+Version 1.1 was authorized by the operator before any P1-R0 scientific cell
+began. It narrowly supersedes Version 1.0's fixed four-VM initial-provisioning
+assumption, fixed `us-central1-c` zone, and fixed full-roster slot assignment.
+The 36 P1-R0 cells, all scientific commands and seeds, work-evidence gates,
+retry vocabulary, blinding, aggregation, one-seal semantics, and exact-ID
+teardown requirements are unchanged. Every revised packet MUST bind both the
+superseded Version 1.0 `parallel_plan_hash` and the new Version 1.1
+`parallel_plan_hash`.
 
 ## 1. Authority, precedence, and unchanged scientific question
 
@@ -41,6 +50,34 @@ Normative terms `MUST`, `MUST NOT`, `REQUIRED`, and `FAIL` are literal
 validation requirements. A missing or unknown required field is a `FAIL`, not
 permission for an operator choice.
 
+### 1.1 Version 1.1 precedence
+
+The following Version 1.1 rulings take precedence over conflicting Version 1.0
+sentences elsewhere in this document:
+
+1. A nonempty available logical-slot set of width one through four is
+   admissible. Provider availability, not a scientific outcome, determines the
+   set. The set is frozen and recorded before each planned or retry wave.
+2. Cell-to-VM binding is a pure deterministic function of
+   `(roster_hash, available_slot_set, wave_index, retry_round)`. All 15 nonempty
+   subsets of `{v0,v1,v2,v3}` and their initial-wave assignments are
+   materialized in the revised plan before scientific launch.
+3. When an atomic group contains more cells than available slots, the group is
+   executed in deterministic dispatch batches. A batch has at most one active
+   cell per logical slot. No result or loss from an earlier batch may be
+   exposed or used before every cell in the atomic group is terminal; the group
+   remains one loss-blind time block and one retry unit.
+4. Any of `us-central1-a`, `us-central1-b`, `us-central1-c`, or
+   `us-central1-f` is admissible. A VM's landed zone is part of its recorded
+   physical identity and MUST agree across its generation state, provider
+   record, VM registry, lifecycle evidence, and exact-ID teardown commands.
+5. Regional `us-central1` preemptible-A100 quota governs. Spot-only remains
+   absolute. On-demand fallback is still forbidden.
+6. A provisioned VM may not remain without scientific work for more than 600
+   seconds. A packet may launch at width one and deterministically use a larger
+   available-slot set on a later wave as additional reviewed slots become
+   READY; it may never wait indefinitely for the full roster.
+
 ## 2. Scope and stage ruling
 
 The only stage codes authorized by this amendment are the following closed
@@ -67,10 +104,12 @@ P1-R0 **is shardable under this amendment**. Its 36 cell coordinates are the
 complete, non-adaptive Cartesian product frozen before launch. Parallel
 execution therefore cannot select which P1-R0 cells exist. It consists of
 exactly 12 randomized three-cell waves, one for each `(H, eta, seed=347)`
-block. All three live-control arms start in the same wave, so the registered
-blocking rationale is preserved. The fourth VM is deliberately idle during
-each P1-R0 wave; P1-R0's realized width is three even though the campaign
-ceiling is four.
+block. All three live-control arms remain in the same loss-blind atomic wave,
+so the registered blocking rationale is preserved. At available width three or
+four the three arms occupy one dispatch batch. At width one or two they occupy
+deterministic sequential dispatch batches, without outcome exposure between
+batches. P1-R0's realized width is therefore one through three while the
+campaign ceiling remains four.
 
 P1 adaptive bracketing is serial **between descendant rounds**. No cell whose
 coordinate depends on an unsealed loss may be materialized, provisioned, or
@@ -106,7 +145,11 @@ on-host maintenance                      = TERMINATE
 instance termination action              = DELETE
 boot disk auto-delete                    = true
 project                                  = model-training-497007
-zone                                     = us-central1-c
+allowed zones                            = {us-central1-a,us-central1-b,
+                                            us-central1-c,us-central1-f}
+quota scope                              = us-central1 regional preemptible A100
+minimum launch width                     = 1 READY scientific VM
+maximum VM idle-before-science           = 600 seconds
 ```
 
 “Concurrent” means that the half-open scientific execution intervals
@@ -126,9 +169,10 @@ state and from provider evidence. Any observed excess is `FAIL`; no result
 acquired while over either cap is admissible.
 
 At most one attempt of a given `cell_id` may be active. At most one cell may be
-active in a logical slot. A new planned wave cannot start until every cell in
-the preceding wave has a mechanically sealed terminal attempt record and any
-required immediate retry wave has resolved.
+active in a logical slot. A new dispatch batch cannot start until every cell in
+the preceding batch of that atomic wave is terminal. A new planned wave cannot
+start until every cell in the preceding wave has a mechanically sealed terminal
+attempt record and any required immediate retry wave has resolved.
 
 ## 4. Canonical roster, fixed seed, and deterministic randomization
 
@@ -239,35 +283,59 @@ the required time-block randomization.
 
 ### 4.4 Seeded arm-to-VM assignment and launch order
 
-For initial wave attempt round `1`, sort that wave's cell IDs by
-`rank("arm-order|<group_id>|1", cell_id)`. Independently sort logical slots
-`{v0,v1,v2,v3}` by `rank("slot-order|<group_id>|1", slot)`. Zip the two lists.
-Unused slots remain idle; another group's arm may not fill an idle slot.
+Let `S` be the canonical UTF-8-sorted nonempty set of READY logical slots
+available immediately before a wave, and let `s_token` be the comma-joined
+members of `S`. For planned wave index `w` and retry round `r`, define:
 
-Sort assigned cell IDs by `rank("launch-order|<group_id>|1", cell_id)` to
-obtain the exact dispatch order. All assigned VMs MUST report `READY` with
-validated provider evidence and immutable inputs before the first dispatch.
-The controller issues all start messages in the committed order without
-waiting for a cell to complete. The last dispatch timestamp minus the first
-MUST be at most 60 seconds, and the last recorded scientific-start timestamp
-minus the first MUST be at most 120 seconds. Exceeding either bound is the
-loss-blind direct reason `pre_unblinding_validator_provenance_failure` for the
-wave; it is never repaired by editing timestamps or redefining the time block.
+```text
+binding_domain = available-slot-binding-v2|<roster_hash>|<s_token>|<w>|<r>
+arm_domain     = <binding_domain>|arm
+slot_domain    = <binding_domain>|slot
+launch_domain  = <binding_domain>|launch
+```
 
-Retry round `r>1` uses the identical rules after replacing the terminal `1` in
-the three domains above with base-10 `r`. Thus retry slot assignment and launch
-order are deterministic, but distinct rounds are independently domain
-separated. A retry wave is inserted immediately after the failed wave and
-before the next planned time block. Original planned groups keep their
-materialized `time_block_index`; each retry record additionally carries
-`retry_time_block_index`, monotonically increasing in actual wave order.
+Sort the atomic group's cell IDs by `rank(arm_domain, cell_id)` and sort `S` by
+`rank(slot_domain, slot)`. Assign the cell at arm position `i` to slot
+`slot_order[i mod |S|]`. Its deterministic dispatch-batch index is
+`floor(i / |S|)`. Sort cells first by dispatch-batch index and then by
+`rank(launch_domain, cell_id)` to obtain the exact global dispatch order; within
+each batch, renumber launch order contiguously from zero. This is a pure
+function of `(roster_hash, available_slot_set, wave_index, retry_round)` and
+contains no loss, duration, failure-rate, or other scientific outcome input.
 
-The complete plan records every group, wave index, cell, logical slot,
-launch-order index, exact command hash, and the retry derivation above. It also
-records the capacity constants from Section 3. Its canonical hash is
-`parallel_plan_hash`. `roster_hash`, `parallel_plan_hash`, the existing
-scientific randomization-plan hash, and their raw file hashes MUST be bound in
-the launch manifest and cited byte-for-byte by every VM partial manifest.
+Every slot used by a batch MUST report `READY` with validated provider evidence,
+landed-zone identity, and immutable inputs before that batch's first dispatch.
+The controller issues all start messages in the committed batch order without
+waiting for a cell in that same batch to complete. The last dispatch minus the
+first within one batch MUST be at most 60 seconds, and the last recorded
+scientific start minus the first within that batch MUST be at most 120 seconds.
+A later batch may start only after all cells in the prior batch are terminal.
+Exceeding a bound is the loss-blind direct reason
+`pre_unblinding_validator_provenance_failure`; timestamps or time blocks may
+not be edited to repair it.
+
+The available set may change only between complete planned/retry waves and only
+from mechanically recorded provider READY, exact-ID teardown, or genuine Spot
+preemption evidence. It may not change because of a loss, convergence signal,
+duration, or preference. A newly READY slot can enlarge the next wave's set; a
+terminally removed generation can shrink it. Every attempt row records the
+exact `available_slot_set`, `dispatch_batch_index`, and
+`batch_launch_order_index` used.
+
+Retry round `r>1` recomputes the same pure function using the new base-10 `r`
+and the then-available set. A retry wave is inserted immediately after the
+failed wave and before the next planned time block. Original planned groups
+keep their materialized `time_block_index`; each retry record additionally
+carries `retry_time_block_index`, monotonically increasing in actual wave order.
+
+The complete revised plan records every group, wave index, all 15 nonempty
+available-slot variants, cell/slot/batch/launch assignment, exact command hash,
+capacity constants, allowed zones, and retry derivation. Its canonical hash is
+the new `parallel_plan_hash`. It also records
+`supersedes_parallel_plan_hash`, the canonical Version 1.0 full-roster plan
+hash. `roster_hash`, both plan hashes, the existing scientific randomization
+plan hash, and their raw file hashes MUST be bound in the launch manifest. Every
+VM partial manifest cites the new plan hash byte-for-byte.
 
 ## 5. Per-VM identity, namespace, and provider-evidence ownership
 
@@ -743,9 +811,11 @@ the authoritative prereg raw SHA-256;
 new production commit, full ancestry proof, source-bundle hash, and test log;
 common and per-VM bootstrap/spec/argv hashes;
 all immutable input identities and generation-qualified sources;
-bound manifest, roster hash, parallel-plan hash, scientific plan hash;
+bound manifest, roster hash, superseded and revised parallel-plan hashes,
+scientific plan hash;
 base and normalized cell-command registries;
-stage code, expected cells/groups/waves, project/zone, capacity constants;
+stage code, expected cells/groups/waves, project/allowed zones, per-generation
+landed zone, available-slot variants, capacity constants;
 campaign attempt, state/artifact/science roots, empty/create-only proofs;
 provider/nonce/exact-ID/teardown contract;
 retry policy and work/seal validator hashes;
@@ -759,7 +829,7 @@ cites that packet. An old review, a review of one VM, a review of a serial
 plan, or a review of a different hash does not transfer.
 
 Any change to the amendment bytes; source commit; schedule/aggregation code;
-rank vectors; roster/plan/command hashes; stage cells; capacity; project/zone;
+rank vectors; roster/plan/command hashes; stage cells; capacity; project/zones;
 machine/GPU shape; namespace grammar; retry policy; work gate; P3 isolation;
 or teardown contract invalidates both passes and requires a new dual review
 before launch. Runtime-only values enumerated in Section 9.3 do not require a
@@ -770,9 +840,12 @@ packet.
 
 Subject to every gate above, the scientifically legitimate maximum is **four
 simultaneous cells on four Spot `a2-highgpu-4g` VMs, totaling at most 16
-A100s**. P1-R0 and P2 deliberately realize width three because an indivisible
-three-arm live-control block occupies one wave; P3 training may realize width
-four because all four cells of a fresh-seed paired block occupy one wave.
+A100s**, and the scientifically legitimate minimum launch width is **one**
+READY Spot VM. P1-R0 and P2 realize width one through three through
+deterministic batches of their indivisible three-cell waves; P3 training
+realizes width one through four through deterministic batches of its four-cell
+seed wave. Every VM lands in one of the four authorized `us-central1` zones,
+and its landed zone is part of its physical identity.
 
 P1-R0's 36 preplanned cells may therefore be sharded. P1's adaptive logic may
 not: only cells already authorized in one immutable descendant may run in
