@@ -93,6 +93,23 @@ def test_pre_p3_surfaces_cannot_name_or_acquire_audit_artifacts(
     assert '"audit_access_log_sha256"' not in result_source
 
 
+@pytest.mark.parametrize(
+    ("token_budget", "expected_steps"),
+    [(65_536, 128), (655_360, 1_280)],
+)
+def test_frozen_command_derives_exact_learner_step_cap(
+    tmp_path: Path, token_budget: int, expected_steps: int
+) -> None:
+    args = _command_args(tmp_path)
+    args.token_budget = token_budget
+    args.learner_max_steps = 9_999
+
+    command = runner.compare_command(args, h=16, mu=0.5, eta=0.0875)
+
+    assert command.count("--learner-max-steps") == 1
+    assert int(command[command.index("--learner-max-steps") + 1]) == expected_steps
+
+
 def test_every_canary_result_constructor_emits_normalized_workload_hash() -> None:
     for constructor in (
         runner.result_attempt,

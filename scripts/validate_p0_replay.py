@@ -575,6 +575,26 @@ def option(command: list[str], flag: str) -> str:
         raise ReplayError(f"frozen command lacks {flag}") from exc
 
 
+def validate_exact_learner_max_steps(
+    command: list[str], tape: list[dict[str, Any]], *, h: int
+) -> int:
+    """Recompute the exact physical learner ceiling from sealed raw work."""
+    if command.count("--learner-max-steps") != 1:
+        raise ReplayError("P0 command must have exactly one learner step cap")
+    if len(tape) % 4:
+        raise ReplayError("P0 tape cannot define exact per-learner work")
+    expected = (len(tape) // 4) * h
+    try:
+        observed = int(option(command, "--learner-max-steps"))
+    except ValueError as exc:
+        raise ReplayError("P0 command has a malformed learner step cap") from exc
+    if observed != expected:
+        raise ReplayError(
+            "P0 command learner step cap differs from exact sealed tape work"
+        )
+    return expected
+
+
 def check_close(
     predicted: np.ndarray,
     observed: np.ndarray,
@@ -698,6 +718,9 @@ def replay_cell(
         range(1, len(tape) + 1)
     ):
         raise ReplayError("tape steps are not one contiguous ordered sequence")
+    validate_exact_learner_max_steps(
+        command, tape, h=command_coordinates["h"]
+    )
     barrier_attestation = validate_barrier_version_trace(
         root,
         attempt,

@@ -85,6 +85,8 @@ def _fixture(tmp_path: Path):
         "0",
         "--barrier-sync",
         "--version-matched-anchor",
+        "--learner-max-steps",
+        "2",
     ]
     (attempt / "command.json").parent.mkdir(parents=True, exist_ok=True)
     (attempt / "command.json").write_text(json.dumps(command))
@@ -601,6 +603,43 @@ def test_cpu_replay_rejects_inner_step_between_push_and_broadcast(tmp_path):
         replay.validate_barrier_version_trace(
             root, attempt, result, tape, registry, h=2, seq_len=1
         )
+
+
+def test_cpu_replay_rejects_post_final_broadcast_extra_inner_step(tmp_path):
+    root, _deleted = _fixture(tmp_path)
+    result, attempt, tape, registry = _barrier_replay_inputs(root)
+    trace = attempt / "work/m4/learner-1/barrier-version-trace.jsonl"
+    events = replay.read_jsonl(trace)
+    events.append(
+        {
+            "schema": "yeto_barrier_trace_v1",
+            "event_seq": len(events) + 1,
+            "learner_id": 1,
+            "local_step": 3,
+            "event": "inner_step_started",
+            "awaiting_fragments": [],
+        }
+    )
+    trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+    _reseal_barrier_trace_for_unit(root, result, attempt, registry, 1)
+
+    with pytest.raises(replay.ReplayError, match="inner-step count"):
+        replay.validate_barrier_version_trace(
+            root, attempt, result, tape, registry, h=2, seq_len=1
+        )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["--learner-max-steps", "3"],
+        ["--learner-max-steps", "2", "--learner-max-steps", "2"],
+        [],
+    ],
+)
+def test_cpu_replay_rejects_nonexact_learner_step_cap(command):
+    with pytest.raises(replay.ReplayError, match="learner step cap"):
+        replay.validate_exact_learner_max_steps(command, [{}, {}, {}, {}], h=2)
 
 
 def test_cpu_replay_rejects_rehashed_late_initial_broadcast(tmp_path):

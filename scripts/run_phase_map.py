@@ -557,6 +557,24 @@ def cell_id(study_id: str, h: int, mu: float, eta: float, seed: int) -> str:
     )
 
 
+def exact_learner_max_steps(args: argparse.Namespace) -> int:
+    """Derive the immutable per-learner physical-step ceiling.
+
+    Four learners jointly consume the registered token budget.  The ceiling
+    is derived here rather than accepted from a caller so receiver scheduling
+    after the final broadcast cannot permit an extra local optimizer step.
+    """
+    denominator = 4 * args.micro_batch_size * args.seq_len
+    if denominator <= 0:
+        raise PhaseMapError("micro batch size and sequence length must be positive")
+    steps, remainder = divmod(args.token_budget, denominator)
+    if remainder or steps <= 0:
+        raise PhaseMapError(
+            "token budget must define an exact positive per-learner step cap"
+        )
+    return steps
+
+
 def compare_command(
     args: argparse.Namespace,
     *,
@@ -565,6 +583,7 @@ def compare_command(
     eta: float,
 ) -> list[str]:
     outer_steps = args.token_budget // (h * args.seq_len)
+    learner_max_steps = exact_learner_max_steps(args)
     frozen_split = args.run_dir / "frozen-eval" / f"seed-{args.seed}" / "materialized"
     command = [
         args.python_executable,
@@ -626,7 +645,7 @@ def compare_command(
         "--syncer-total-steps",
         str(outer_steps),
         "--learner-max-steps",
-        str(args.learner_max_steps),
+        str(learner_max_steps),
         "--strict-quorum",
         "--pipeline-depth",
         "4",
@@ -687,6 +706,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         raise PhaseMapError("every randomized block requires a live mu=0 control")
     if args.token_budget % args.seq_len:
         raise PhaseMapError("token budget must be divisible by seq_len")
+    exact_learner_max_steps(args)
     blocks = [(h, eta) for h in sorted(args.h) for eta in sorted(args.eta)]
     rng = random.Random(args.order_seed)
     rng.shuffle(blocks)
@@ -3256,7 +3276,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--confirmation-audit-rows", type=int, default=1024)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--gpu-slots", type=int, default=4)
-    parser.add_argument("--learner-max-steps", type=int, default=1500)
     parser.add_argument("--syncer-checkpoint-every", type=int, default=4)
     parser.add_argument("--arm-timeout-min", type=int, default=240)
     parser.add_argument("--resource-class", required=True)
