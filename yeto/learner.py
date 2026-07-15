@@ -31,7 +31,7 @@ import torch.distributed as dist
 from .autobatch import int_or_auto, rebalance_grad_accum, resolve_micro_batch_size
 from .data import StreamingPackedBlocks, build_packed_dataset
 from .fragments import FragmentLayout, build_layout
-from .layout_metadata import build_fragment_order_metadata
+from .layout_metadata import build_fragment_order_metadata, build_layout_metadata
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
 from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
 from .tensor_io import (
@@ -59,6 +59,72 @@ def accelerator_model_dtype(device: torch.device | str) -> torch.dtype:
             return torch.float16
         return torch.bfloat16
     return torch.bfloat16
+
+
+def write_resolved_device_proof(args, device: torch.device, rank: int) -> dict | None:
+    """Seal the process-visible CUDA device and provider UUID assignment.
+
+    ``CUDA_VISIBLE_DEVICES`` is set to a full GPU UUID by the comparison
+    controller.  CUDA then exposes that physical GPU as logical device zero;
+    this artifact records both namespaces so the four-learner packing can be
+    audited without trusting process launch order.
+    """
+    if rank != 0:
+        return None
+    expected_uuid = os.environ.get("YETO_ASSIGNED_GPU_UUID")
+    expected_name = os.environ.get("YETO_ASSIGNED_GPU_NAME")
+    physical_index = os.environ.get("YETO_ASSIGNED_PHYSICAL_GPU_INDEX")
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if expected_uuid is None:
+        return None
+    if device.type != "cuda" or not torch.cuda.is_available():
+        raise RuntimeError("assigned GPU UUID is present but CUDA is unavailable")
+    if visible != expected_uuid:
+        raise RuntimeError(
+            "CUDA_VISIBLE_DEVICES does not equal the frozen assigned GPU UUID"
+        )
+    if torch.cuda.device_count() != 1:
+        raise RuntimeError(
+            "UUID-isolated learner must see exactly one logical CUDA device"
+        )
+    logical_index = 0 if device.index is None else int(device.index)
+    if logical_index != 0:
+        raise RuntimeError("UUID-isolated learner must bind logical CUDA device 0")
+    torch.cuda.set_device(logical_index)
+    properties = torch.cuda.get_device_properties(logical_index)
+    actual_name = str(properties.name)
+    if expected_name is not None and actual_name != expected_name:
+        raise RuntimeError("resolved CUDA device name differs from frozen inventory")
+    raw_uuid = getattr(properties, "uuid", None)
+    actual_uuid = None if raw_uuid is None else str(raw_uuid)
+    if actual_uuid is not None and actual_uuid != expected_uuid:
+        raise RuntimeError("resolved CUDA UUID differs from frozen inventory")
+    try:
+        physical_index_value = int(physical_index) if physical_index is not None else None
+    except ValueError as exc:
+        raise RuntimeError("assigned physical GPU index is not an integer") from exc
+    proof = {
+        "schema": "yeto_resolved_device_v1",
+        "learner_id": int(args.learner_id),
+        "rank": int(rank),
+        "physical_cuda_index": physical_index_value,
+        "assigned_gpu_uuid": expected_uuid,
+        "assigned_gpu_name": expected_name,
+        "cuda_visible_devices": visible,
+        "torch_cuda_device_count": torch.cuda.device_count(),
+        "logical_cuda_index": logical_index,
+        "resolved_gpu_uuid": actual_uuid,
+        "resolved_gpu_name": actual_name,
+        "compute_capability": list(
+            torch.cuda.get_device_capability(logical_index)
+        ),
+        "total_memory_bytes": int(properties.total_memory),
+    }
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(os.path.join(args.output_dir, "resolved-device.json"), "w") as handle:
+        json.dump(proof, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return proof
 
 
 def parse_args(argv=None):
@@ -814,6 +880,8 @@ def main(argv=None) -> None:
             )
         device = torch.device("cpu")
 
+    write_resolved_device_proof(args, device, rank)
+
     if args.shard == "fsdp" and device.type != "cuda":
         raise RuntimeError(
             "--shard fsdp requires a CUDA accelerator (torch FSDP cannot "
@@ -1063,6 +1131,20 @@ def main(argv=None) -> None:
     wire_dtype = {"bf16": DTYPE_BF16, "f32": DTYPE_F32, "q4": DTYPE_Q4}[args.wire_dtype]
     client = None
     if rank == 0 and args.syncer != "none":
+        os.makedirs(args.output_dir, exist_ok=True)
+        resolved_layout = build_layout_metadata(
+            task="lm",
+            layout=layout,
+            params=params,
+            tuning=args.tuning,
+            matrix_merge=args.matrix_merge,
+            fragment_count=args.fragments,
+            fragment_pattern=args.fragment_pattern,
+            wire_dtype=args.wire_dtype,
+        )
+        with open(os.path.join(args.output_dir, "resolved-layout.json"), "w") as handle:
+            json.dump(resolved_layout, handle, indent=2, sort_keys=True)
+            handle.write("\n")
         host, port = args.syncer.rsplit(":", 1)
         client = SyncerClient(
             (host, int(port)),

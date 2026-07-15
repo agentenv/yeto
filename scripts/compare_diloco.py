@@ -56,6 +56,7 @@ Report: eval loss/token per arm + delta vs baseline, written to
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import random
@@ -348,7 +349,16 @@ def learner_env(args, learner_id: int) -> dict[str, str] | None:
     gpu_offset = getattr(args, "gpu_offset", 0)
     if learner_gpus <= 0:
         if gpu_slots > 0 and args.device.startswith("cuda"):
-            env["CUDA_VISIBLE_DEVICES"] = str(gpu_offset + (learner_id % gpu_slots))
+            physical_id = gpu_offset + (learner_id % gpu_slots)
+            inventory = getattr(args, "_frozen_gpu_inventory", {})
+            assigned = inventory.get(physical_id)
+            env["CUDA_VISIBLE_DEVICES"] = (
+                assigned["uuid"] if assigned is not None else str(physical_id)
+            )
+            env["YETO_ASSIGNED_PHYSICAL_GPU_INDEX"] = str(physical_id)
+            if assigned is not None:
+                env["YETO_ASSIGNED_GPU_UUID"] = assigned["uuid"]
+                env["YETO_ASSIGNED_GPU_NAME"] = assigned["name"]
             return env
         return None
     lo = learner_id * learner_gpus
@@ -356,6 +366,72 @@ def learner_env(args, learner_id: int) -> dict[str, str] | None:
         str(gpu_offset + g) for g in range(lo, lo + learner_gpus)
     )
     return env
+
+
+def freeze_gpu_uuid_inventory(args, arms: list[Arm]) -> dict:
+    """Freeze physical CUDA index/UUIDs and the four-learner bijection."""
+    if (
+        not args.device.startswith("cuda")
+        or args.learner_gpus != 0
+        or args.gpu_slots != 4
+        or len(arms) != 1
+        or arms[0].m != 4
+    ):
+        raise SystemExit(
+            "distinct learner GPU UUID proof requires one M=4 CUDA arm, "
+            "--learner-gpus 0, and --gpu-slots 4"
+        )
+    requested = assigned_gpu_ids(args, arms)
+    if requested is None or len(requested) != 4:
+        raise SystemExit("GPU UUID proof requires exactly four assigned CUDA indices")
+    command = [
+        "nvidia-smi",
+        "--query-gpu=index,uuid,name",
+        "--format=csv,noheader,nounits",
+    ]
+    result = subprocess.run(command, text=True, capture_output=True)
+    if result.returncode:
+        raise SystemExit(f"nvidia-smi GPU UUID inventory failed: {result.stderr[-1000:]}")
+    inventory: dict[int, dict[str, str | int]] = {}
+    for line in result.stdout.splitlines():
+        parts = [part.strip() for part in line.split(",", 2)]
+        if len(parts) != 3:
+            raise SystemExit(f"malformed nvidia-smi inventory row: {line!r}")
+        try:
+            index = int(parts[0])
+        except ValueError as exc:
+            raise SystemExit(f"invalid nvidia-smi CUDA index: {parts[0]!r}") from exc
+        inventory[index] = {"cuda_index": index, "uuid": parts[1], "name": parts[2]}
+    if set(requested) - set(inventory):
+        raise SystemExit("nvidia-smi inventory omits an assigned CUDA index")
+    selected = {index: inventory[index] for index in requested}
+    uuids = [str(selected[index]["uuid"]) for index in requested]
+    if len(set(uuids)) != 4 or any(not uuid.startswith("GPU-") for uuid in uuids):
+        raise SystemExit("packing canary requires four distinct full-GPU UUIDs")
+    if any("A100" not in str(selected[index]["name"]).upper() for index in requested):
+        raise SystemExit("packing canary requires four NVIDIA A100 devices")
+    args._frozen_gpu_inventory = selected
+    proof = {
+        "schema": "yeto_learner_gpu_uuid_bijection_v1",
+        "nvidia_smi_command": command,
+        "gpu_inventory": [selected[index] for index in requested],
+        "learner_assignments": [
+            {
+                "learner_id": learner,
+                "physical_cuda_index": requested[learner],
+                "gpu_uuid": selected[requested[learner]]["uuid"],
+                "gpu_name": selected[requested[learner]]["name"],
+            }
+            for learner in range(4)
+        ],
+        "distinct_gpu_uuid_count": 4,
+        "one_learner_per_distinct_gpu_uuid": True,
+    }
+    args.report_dir.mkdir(parents=True, exist_ok=True)
+    (args.report_dir / "gpu-allocation.json").write_text(
+        json.dumps(proof, indent=2, sort_keys=True) + "\n"
+    )
+    return proof
 
 
 def assigned_gpu_ids(args, arms: list[Arm] | None = None) -> list[int] | None:
@@ -1352,6 +1428,8 @@ def split_data(
     eval_rows: int,
     max_rows: int | None,
     shuffle_seed: int | None = None,
+    eval_split_seed: int | None = None,
+    confirmation_audit_rows: int = 0,
 ) -> tuple[Path, Path, int]:
     """Materialize --data as train.jsonl / eval.jsonl under `work`.
 
@@ -1361,29 +1439,299 @@ def split_data(
     from yeto.data import load_rows
 
     ds = load_rows(data)
-    n = len(ds)
-    if max_rows is not None:
-        n = min(n, max_rows + eval_rows)
-    if n <= eval_rows:
-        raise SystemExit(f"--data has {n} usable rows; need > --eval-rows {eval_rows}")
+    source_rows = len(ds)
+    if confirmation_audit_rows < 0:
+        raise SystemExit("--confirmation-audit-rows must be non-negative")
+    if source_rows <= eval_rows + confirmation_audit_rows:
+        raise SystemExit(
+            f"--data has {source_rows} usable rows; need > evaluation rows "
+            f"{eval_rows + confirmation_audit_rows}"
+        )
     work.mkdir(parents=True, exist_ok=True)
-    idxs = list(range(n))
-    if shuffle_seed is not None:
-        random.Random(shuffle_seed).shuffle(idxs)
+    idxs = list(range(source_rows))
+    if eval_split_seed is None:
+        # Historical behavior for non-phase-map callers: shuffle the selected
+        # prefix before splitting. New evidence commands must pass the separate
+        # frozen eval seed below.
+        n = source_rows
+        if max_rows is not None:
+            n = min(n, max_rows + eval_rows)
+        idxs = idxs[:n]
+        if shuffle_seed is not None:
+            random.Random(shuffle_seed).shuffle(idxs)
+        train_idxs = idxs[: n - eval_rows]
+        eval_idxs = idxs[n - eval_rows :]
+    else:
+        # Select the locked evaluation set once, then shuffle only the disjoint
+        # training remainder. This keeps eval identity invariant across every
+        # development/confirmation training seed.
+        population_count = source_rows
+        if max_rows is not None:
+            population_count = min(
+                source_rows,
+                max_rows + eval_rows + confirmation_audit_rows,
+            )
+        idxs = idxs[:population_count]
+        random.Random(eval_split_seed).shuffle(idxs)
+        train_count = population_count - eval_rows - confirmation_audit_rows
+        train_pool_idxs = idxs[:train_count]
+        eval_idxs = idxs[train_count : train_count + eval_rows]
+        audit_eval_idxs = idxs[train_count + eval_rows :]
+        train_idxs = list(train_pool_idxs)
+        if shuffle_seed is not None:
+            random.Random(shuffle_seed).shuffle(train_idxs)
+        if max_rows is not None:
+            train_idxs = train_idxs[:max_rows]
 
     def dump(path: Path, idxs) -> None:
         with open(path, "w") as f:
             for i in idxs:
                 row = ds[i]
                 f.write(
-                    json.dumps({k: row[k] for k in ("messages", "tools") if k in row})
+                    json.dumps(
+                        {k: row[k] for k in ("messages", "tools") if k in row},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    )
                     + "\n"
                 )
 
     train, evalf = work / "train.jsonl", work / "eval.jsonl"
-    dump(train, idxs[: n - eval_rows])
-    dump(evalf, idxs[n - eval_rows :])
-    return train, evalf, n - eval_rows
+    dump(train, train_idxs)
+    dump(evalf, eval_idxs)
+    audit_evalf = work / "confirmation-audit.jsonl"
+    if confirmation_audit_rows:
+        dump(audit_evalf, audit_eval_idxs)
+    index_payload = {
+        "schema": "yeto_split_provenance_v1",
+        "source_row_count": source_rows,
+        "source_population_count": (
+            len(train_pool_idxs) + len(eval_idxs) + confirmation_audit_rows
+            if eval_split_seed is not None
+            else len(train_idxs) + len(eval_idxs)
+        ),
+        "train_row_count": len(train_idxs),
+        "eval_row_count": len(eval_idxs),
+        "eval_split_seed": eval_split_seed,
+        "train_shuffle_seed": shuffle_seed,
+        "train_source_indices": train_idxs,
+        "eval_source_indices": eval_idxs,
+    }
+    if eval_split_seed is not None:
+        index_payload["train_pool_source_indices"] = train_pool_idxs
+        index_payload["confirmation_audit_row_count"] = confirmation_audit_rows
+        index_payload["audit_eval_source_indices"] = audit_eval_idxs
+    (work / "split_provenance.json").write_text(
+        json.dumps(index_payload, indent=2, sort_keys=True) + "\n"
+    )
+    return train, evalf, len(train_idxs)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_tensor(tensor, dtype: str) -> str:
+    """Hash one tensor in an explicit little-endian representation."""
+    array = tensor.detach().cpu().contiguous().numpy().astype(dtype, copy=False)
+    return hashlib.sha256(array.tobytes(order="C")).hexdigest()
+
+
+def materialize_eval_provenance(
+    model_id: str,
+    eval_file: Path,
+    seq_len: int,
+    output_dir: Path,
+    train_on: str = "assistant",
+    split_provenance: Path | None = None,
+) -> dict:
+    """Freeze exact source-row and packed-token identities before training."""
+    import torch
+    from transformers import AutoTokenizer
+
+    from yeto.data import build_packed_dataset
+    from yeto.models import resolve
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows_path = output_dir / "eval_rows.jsonl"
+    sequences_path = output_dir / "eval_sequences.jsonl"
+    packed_path = output_dir / "eval_packed.jsonl"
+    summary_path = output_dir / "eval_provenance.json"
+
+    row_records = []
+    with eval_file.open("rb") as handle:
+        for row_index, raw in enumerate(handle):
+            if not raw.strip():
+                continue
+            row_records.append(
+                {
+                    "row_index": row_index,
+                    "row_id": hashlib.sha256(raw.rstrip(b"\r\n")).hexdigest(),
+                    "raw_line_sha256": hashlib.sha256(raw).hexdigest(),
+                }
+            )
+    rows_path.write_text(
+        "".join(
+            json.dumps(
+                record,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            + "\n"
+            for record in row_records
+        )
+    )
+    example_ids = [record["row_id"] for record in row_records]
+    example_ids_hash = hashlib.sha256(
+        json.dumps(
+            example_ids,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    resolved = resolve(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(resolved, trust_remote_code=True)
+    dataset = build_packed_dataset(
+        str(eval_file), tokenizer, 0, 1, seq_len, train_on=train_on
+    )
+    sequence_records = []
+    packed_records = []
+    token_id_arrays = []
+    for sequence_index in range(len(dataset)):
+        input_ids, weights = dataset[sequence_index]
+        input_ids_list = [int(value) for value in input_ids.tolist()]
+        weights_list = [float(value) for value in weights.tolist()]
+        attention_mask = [1] * len(input_ids_list)
+        target_token_mask = [bool(value > 0) for value in weights_list[1:]]
+        token_id_arrays.append(input_ids_list)
+        input_ids_sha256 = _sha256_tensor(input_ids, "<i8")
+        weights_sha256 = _sha256_tensor(weights, "<f4")
+        attention_mask_sha256 = _sha256_tensor(
+            input_ids.new_ones(input_ids.shape, dtype=torch.uint8),
+            "|u1",
+        )
+        sequence_records.append(
+            {
+                "sequence_index": sequence_index,
+                "sequence_id": hashlib.sha256(
+                    (input_ids_sha256 + weights_sha256).encode("ascii")
+                ).hexdigest(),
+                "input_ids_sha256": input_ids_sha256,
+                "labels_sha256": input_ids_sha256,
+                "attention_mask_sha256": attention_mask_sha256,
+                "supervision_weights_sha256": weights_sha256,
+                "target_token_mask_sha256": hashlib.sha256(
+                    bytes(target_token_mask)
+                ).hexdigest(),
+                "sequence_length": int(input_ids.numel()),
+                "supervised_token_count": int((weights[1:] > 0).sum().item()),
+            }
+        )
+        packed_records.append(
+            {
+                "sequence_index": sequence_index,
+                "input_ids": input_ids_list,
+                "labels": input_ids_list,
+                "attention_mask": attention_mask,
+                "supervision_weights": weights_list,
+                "sequence_length": len(input_ids_list),
+                "target_token_mask": target_token_mask,
+                "target_token_count": sum(target_token_mask),
+            }
+        )
+    sequences_path.write_text(
+        "".join(
+            json.dumps(
+                record,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            + "\n"
+            for record in sequence_records
+        )
+    )
+    packed_path.write_text(
+        "".join(
+            json.dumps(
+                record,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            + "\n"
+            for record in packed_records
+        )
+    )
+    token_ids_registry_hash = hashlib.sha256(
+        json.dumps(
+            token_id_arrays,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    summary = {
+        "schema": "yeto_eval_provenance_v1",
+        "created_before_training": True,
+        "model": model_id,
+        "resolved_model": str(resolved),
+        "seq_len": seq_len,
+        "train_on": train_on,
+        "eval_file_sha256": _sha256_file(eval_file),
+        "eval_row_count": len(row_records),
+        "eval_sequence_count": len(sequence_records),
+        "eval_supervised_token_count": sum(
+            record["supervised_token_count"] for record in sequence_records
+        ),
+        "eval_rows_hash": _sha256_file(eval_file),
+        "eval_example_ids_hash": example_ids_hash,
+        "eval_packed_hash": _sha256_file(packed_path),
+        "eval_token_ids_hash": token_ids_registry_hash,
+        "rows_file": rows_path.name,
+        "sequences_file": sequences_path.name,
+        "packed_file": packed_path.name,
+    }
+    if split_provenance is not None:
+        split = json.loads(split_provenance.read_text())
+        summary.update(
+            {
+                "eval_split_seed": split.get("eval_split_seed"),
+                "train_shuffle_seed": split.get("train_shuffle_seed"),
+                "eval_source_indices_hash": hashlib.sha256(
+                    json.dumps(
+                        split.get("eval_source_indices"),
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+                "train_source_indices_hash": hashlib.sha256(
+                    json.dumps(
+                        split.get("train_source_indices"),
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+                "train_pool_source_indices_hash": hashlib.sha256(
+                    json.dumps(
+                        split.get(
+                            "train_pool_source_indices",
+                            split.get("train_source_indices"),
+                        ),
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+                "split_provenance_sha256": _sha256_file(split_provenance),
+            }
+        )
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    return summary
 
 
 def validate_materialized_anchor_disjointness(
@@ -1460,6 +1808,7 @@ def eval_loss_per_token(
     device: str,
     train_on: str = "assistant",
     tuning: str = "lora",
+    output_path: Path | None = None,
 ) -> float:
     """Held-out masked CE per trained token — the comparison metric."""
     import torch
@@ -1490,7 +1839,8 @@ def eval_loss_per_token(
             model = PeftModel.from_pretrained(model, str(adapter_dir))
     model.to(device).eval()
     ds = build_packed_dataset(str(eval_file), tok, 0, 1, seq_len, train_on=train_on)
-    total_loss, total_tokens = 0.0, 0.0
+    total_loss, total_tokens = 0.0, 0
+    records = []
     with torch.no_grad():
         for i in range(len(ds)):
             ids, weights = ds[i]
@@ -1498,9 +1848,45 @@ def eval_loss_per_token(
             weights = weights.unsqueeze(0).to(device)
             out = model(input_ids=ids)
             loss, n = sft_loss(out.logits, ids, "cross_entropy", weights)
-            total_loss += loss.item()
-            total_tokens += n.item()
-    return total_loss / max(total_tokens, 1.0)
+            loss_sum = float(loss.item())
+            token_count = int(n.item())
+            total_loss += loss_sum
+            total_tokens += token_count
+            input_ids_sha256 = _sha256_tensor(ids.squeeze(0), "<i8")
+            weights_sha256 = _sha256_tensor(weights.squeeze(0), "<f4")
+            attention_mask_sha256 = _sha256_tensor(
+                torch.ones_like(ids.squeeze(0), dtype=torch.uint8), "|u1"
+            )
+            target_token_mask = [
+                bool(value > 0)
+                for value in weights.squeeze(0).detach().cpu().tolist()[1:]
+            ]
+            records.append(
+                {
+                    "sequence_index": i,
+                    "sequence_id": hashlib.sha256(
+                        (input_ids_sha256 + weights_sha256).encode("ascii")
+                    ).hexdigest(),
+                    "input_ids_sha256": input_ids_sha256,
+                    "labels_sha256": input_ids_sha256,
+                    "attention_mask_sha256": attention_mask_sha256,
+                    "supervision_weights_sha256": weights_sha256,
+                    "target_token_mask_sha256": hashlib.sha256(
+                        bytes(target_token_mask)
+                    ).hexdigest(),
+                    "sequence_length": int(ids.numel()),
+                    "loss_sum": loss_sum,
+                    "token_count": token_count,
+                    "loss_per_token": loss_sum / max(token_count, 1),
+                }
+            )
+    aggregate = total_loss / max(total_tokens, 1)
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            "".join(json.dumps(record, sort_keys=True) + "\n" for record in records)
+        )
+    return aggregate
 
 
 def wait_for_free_gpus(
@@ -1582,7 +1968,12 @@ def wait_for_free_gpus(
         time.sleep(3)
 
 
-def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float:
+def eval_in_subprocess(
+    args,
+    adapter_dir: Path | None,
+    eval_file: Path,
+    output_path: Path | None = None,
+) -> float:
     """Score in a child process so the model's VRAM is released on exit —
     an in-process eval would keep the base resident on GPU 0 and starve the
     next arm's learners (found the hard way on a 4xL40S box)."""
@@ -1603,6 +1994,8 @@ def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float
     ]
     if adapter_dir is not None:
         cmd += ["--adapter-dir", str(adapter_dir)]
+    if output_path is not None:
+        cmd += ["--eval-output", str(output_path)]
     wait_for_free_gpus(args.device, gpu_ids=assigned_gpu_ids(args))
     out = subprocess.run(
         cmd, cwd=REPO_ROOT, capture_output=True, text=True, env=eval_env(args)
@@ -1616,6 +2009,16 @@ def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float
     raise RuntimeError(
         f"eval subprocess failed ({out.returncode}):\n{out.stdout[-800:]}\n{out.stderr[-800:]}"
     )
+
+
+def write_acquisition_state(report_dir: Path, phase: str, **extra) -> None:
+    """Atomically expose lifecycle phase without inferring scientific cause."""
+    path = report_dir / "acquisition-state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"schema": "yeto_acquisition_state_v1", "phase": phase, **extra}
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
 
 
 def run_baseline(args, work: Path) -> tuple[Path, float]:
@@ -1889,6 +2292,13 @@ def main() -> int:
         "--eval-rows", type=int, default=64, help="held-out rows for scoring"
     )
     p.add_argument(
+        "--prebound-development-eval",
+        type=Path,
+        default=None,
+        help="use this already-frozen development file with --data as the "
+        "already-frozen training file; no source split is materialized",
+    )
+    p.add_argument(
         "--round-interval-ms",
         type=int,
         default=None,
@@ -1904,13 +2314,37 @@ def main() -> int:
         "this eval loss/token (from a previous run with the same "
         "model, data, seed and budget)",
     )
+    p.add_argument(
+        "--skip-baseline",
+        action="store_true",
+        help="do not run or inject a synchronous baseline; use live async controls",
+    )
+    p.add_argument(
+        "--skip-untrained-eval",
+        action="store_true",
+        help="do not repeatedly score the untrained model in phase-map cells",
+    )
     p.add_argument("--max-rows", type=int, default=None, help="cap training rows")
     p.add_argument(
         "--shuffle-rows-seed",
         type=int,
         default=None,
-        help="deterministically shuffle rows before train/eval split; useful "
-        "when row-index learner sharding would otherwise preserve dataset order",
+        help="deterministically shuffle only the training remainder when "
+        "--eval-split-seed is set",
+    )
+    p.add_argument(
+        "--eval-split-seed",
+        type=int,
+        default=None,
+        help="freeze evaluation rows before applying --shuffle-rows-seed to "
+        "the disjoint training remainder",
+    )
+    p.add_argument(
+        "--confirmation-audit-rows",
+        type=int,
+        default=0,
+        help="reserve a second locked loss-free audit split; ordinary compare "
+        "runs never evaluate or emit outcomes for it",
     )
     p.add_argument(
         "--training-seed",
@@ -1948,6 +2382,11 @@ def main() -> int:
         type=int,
         default=0,
         help="first physical GPU id to assign when partitioning learners",
+    )
+    p.add_argument(
+        "--require-distinct-learner-gpu-uuids",
+        action="store_true",
+        help="freeze and enforce a four-A100 learner-to-GPU-UUID bijection",
     )
     p.add_argument(
         "--action-probe-gpus",
@@ -2197,6 +2636,7 @@ def main() -> int:
     # Internal: scoring runs as a child process so VRAM is freed on exit.
     p.add_argument("--eval-only", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--adapter-dir", type=Path, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--eval-output", type=Path, default=None, help=argparse.SUPPRESS)
     args = p.parse_args()
 
     if args.syncer_total_steps < 0 or args.learner_max_steps < 0:
@@ -2216,6 +2656,8 @@ def main() -> int:
         p.error(
             "--strict-quorum requires --syncer-total-steps so learners do not disconnect first"
         )
+    if args.skip_baseline and args.baseline_loss is not None:
+        p.error("--skip-baseline and --baseline-loss are mutually exclusive")
 
     if args.eval_only:
         loss = eval_loss_per_token(
@@ -2225,6 +2667,7 @@ def main() -> int:
             args.seq_len,
             args.device,
             tuning=args.tuning,
+            output_path=args.eval_output,
         )
         # Full double precision (17 sig digits, round-trippable): 6dp rounding
         # once masked a spurious iso bit-identity (EXP2.40). eval_in_subprocess
@@ -2336,12 +2779,52 @@ def main() -> int:
                 f"comparison needs physical GPU ids through {max(requested)} "
                 f"but only {have} visible GPU(s) exist"
             )
+    if args.require_distinct_learner_gpu_uuids:
+        freeze_gpu_uuid_inventory(args, arms)
     persist_reproducibility_metadata(args.report_dir)
     ensure_syncer()
     if args.work_dir.exists():
         shutil.rmtree(args.work_dir)
-    train, evalf, n_train = split_data(
-        args.data, args.work_dir, args.eval_rows, args.max_rows, args.shuffle_rows_seed
+    if args.prebound_development_eval is not None:
+        if args.confirmation_audit_rows:
+            raise SystemExit(
+                "prebound development execution forbids a second evaluation split"
+            )
+        train = Path(args.data)
+        evalf = args.prebound_development_eval
+        if not train.is_file() or not evalf.is_file():
+            raise SystemExit("prebound train/development files must exist")
+        n_train = sum(1 for line in train.open() if line.strip())
+        n_eval = sum(1 for line in evalf.open() if line.strip())
+        if args.max_rows is not None and n_train != args.max_rows:
+            raise SystemExit("prebound training row count differs from --max-rows")
+        if n_eval != args.eval_rows:
+            raise SystemExit("prebound development row count differs from --eval-rows")
+    else:
+        train, evalf, n_train = split_data(
+            args.data,
+            args.work_dir,
+            args.eval_rows,
+            args.max_rows,
+            args.shuffle_rows_seed,
+            args.eval_split_seed,
+            args.confirmation_audit_rows,
+        )
+    eval_provenance = materialize_eval_provenance(
+        args.model,
+        evalf,
+        args.seq_len,
+        args.report_dir / "eval-provenance",
+        split_provenance=(
+            None
+            if args.prebound_development_eval is not None
+            else args.work_dir / "split_provenance.json"
+        ),
+    )
+    write_acquisition_state(
+        args.report_dir,
+        "frozen_inputs_ready",
+        eval_hash=eval_provenance["eval_file_sha256"],
     )
     if probe_arms:
         from yeto.action_probe import load_anchor_manifest
@@ -2357,21 +2840,33 @@ def main() -> int:
     print(f"[compare] {n_train} train rows, {args.eval_rows} eval rows")
 
     records = []
-    base = eval_in_subprocess(args, None, evalf)
-    records.append(
-        {"arm": "base (untrained)", "m": 0, "wall_s": 0.0, "eval_loss": base}
-    )
-    print(f"[compare] base eval loss/token: {base:.4f}", flush=True)
+    if not args.skip_untrained_eval:
+        base = eval_in_subprocess(
+            args,
+            None,
+            evalf,
+            args.report_dir / "per-example-loss" / "base.jsonl",
+        )
+        records.append(
+            {"arm": "base (untrained)", "m": 0, "wall_s": 0.0, "eval_loss": base}
+        )
+        print(f"[compare] base eval loss/token: {base:.4f}", flush=True)
 
+    bl = None
     if args.baseline_loss is not None:
         bl = args.baseline_loss
         records.append(
             {"arm": "baseline (sync, injected)", "m": 1, "wall_s": 0.0, "eval_loss": bl}
         )
         print(f"[compare] baseline eval loss/token: {bl:.4f} (injected)", flush=True)
-    else:
+    elif not args.skip_baseline:
         adapters, wall = run_baseline(args, args.work_dir)
-        bl = eval_in_subprocess(args, adapters, evalf)
+        bl = eval_in_subprocess(
+            args,
+            adapters,
+            evalf,
+            args.report_dir / "per-example-loss" / "baseline.jsonl",
+        )
         records.append(
             {
                 "arm": "baseline (sync)",
@@ -2383,10 +2878,47 @@ def main() -> int:
         print(f"[compare] baseline eval loss/token: {bl:.4f} ({wall:.0f}s)", flush=True)
 
     for arm in arms:
+        write_acquisition_state(args.report_dir, "training_started", arm=arm.name)
         adapters, wall = run_diloco(args, arm, args.work_dir)
-        loss = eval_in_subprocess(args, adapters, evalf)
+        write_acquisition_state(args.report_dir, "endpoint_started", arm=arm.name)
+        loss = eval_in_subprocess(
+            args,
+            adapters,
+            evalf,
+            args.report_dir / "per-example-loss" / f"{arm.name}.jsonl",
+        )
+        endpoint_status = "DIVERGED" if not math.isfinite(loss) else "COMPLETED"
+        if endpoint_status == "DIVERGED":
+            (args.report_dir / "scientific-divergence.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "yeto_scientific_divergence_v1",
+                        "arm": arm.name,
+                        "reason": "nonfinite_endpoint_nll",
+                        "loss_repr": repr(loss),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        write_acquisition_state(
+            args.report_dir,
+            "endpoint_recorded",
+            arm=arm.name,
+            scientific_status=endpoint_status,
+        )
         records.append(
-            {"arm": arm.name, "m": arm.m, "wall_s": round(wall, 1), "eval_loss": loss}
+            {
+                "arm": arm.name,
+                "m": arm.m,
+                "wall_s": round(wall, 1),
+                "eval_loss": loss,
+                "eval_rows": eval_provenance["eval_row_count"],
+                "eval_tokens": eval_provenance["eval_supervised_token_count"],
+                "eval_example_ids_hash": eval_provenance["eval_example_ids_hash"],
+                "eval_token_ids_hash": eval_provenance["eval_token_ids_hash"],
+            }
         )
         print(
             f"[compare] {arm.name} eval loss/token: {loss:.4f} ({wall:.0f}s)",
@@ -2407,7 +2939,7 @@ def main() -> int:
     for r in records:
         delta = (
             "—"
-            if r["arm"].startswith(("base", "baseline")) or bl == 0
+            if r["arm"].startswith(("base", "baseline")) or bl in (None, 0)
             else (f"{100 * (r['eval_loss'] - bl) / bl:+.2f}%")
         )
         md.append(
