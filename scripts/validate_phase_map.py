@@ -819,7 +819,7 @@ def _validate_canary_lifecycle(
             finalized,
         )
         if all(value is not None for value in ordered) and not (
-            acquisition_sealed < deletion_requested <= deletion_completed < finalized
+            acquisition_sealed <= deletion_requested < deletion_completed < finalized
         ):
             errors.append(
                 f"{label} must order immutable acquisition < deletion < final manifest"

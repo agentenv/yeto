@@ -29,6 +29,11 @@ AUTHORITATIVE_PREREG_COMMIT = "16d27bc60deb6d8910bf0111c7fb57c9d0eb5b80"
 AUTHORITATIVE_PREREG_SHA256 = (
     "7cba3c62328b4bfe15fffbc523979274e834e8e720e16f70d79621eaf6ebdb7b"
 )
+ADOPTED_PARALLEL_AMENDMENT_PATH = Path("docs/AMENDMENT-parallel-cells.md")
+ADOPTED_PARALLEL_AMENDMENT_SHA256 = (
+    "e2c87fd6c2ec0e4b91f488b5771334e0befd175560a3e2ccfcf349be1ee8b3dd"
+)
+P0A_SOURCE_REBIND_FROM_COMMIT = "0af7f4a80426babc14896c7c1f7885abcb331d46"
 PARAM_ATOL = 2e-6
 PARAM_RTOL = 2e-6
 TAPE_NORM_RTOL = 2e-4
@@ -371,19 +376,29 @@ def git_output(*args: str) -> bytes:
 
 
 def verify_replay_source(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Prove replay code and authority came from the exact clean P0 commit."""
+    """Prove replay code comes from the exact P0 or adopted fixed commit."""
     frozen_commit = str((manifest.get("frozen") or {}).get("git_commit", ""))
     if not re.fullmatch(r"[0-9a-f]{40}", frozen_commit):
         raise ReplayError("P0 manifest lacks a frozen 40-hex Git commit")
     head = git_output("rev-parse", "HEAD").decode().strip()
-    if head != frozen_commit:
-        raise ReplayError("replay checkout HEAD differs from P0 frozen commit")
+    source_rebind = head != frozen_commit
+    if source_rebind:
+        if frozen_commit != P0A_SOURCE_REBIND_FROM_COMMIT:
+            raise ReplayError("replay source rebind is not the adopted P0a transition")
+        git_output("cat-file", "-e", f"{frozen_commit}^{{commit}}")
+        git_output("cat-file", "-e", f"{head}^{{commit}}")
+        git_output("merge-base", "--is-ancestor", frozen_commit, head)
+        amendment_blob = git_output(
+            "show", f"{head}:{ADOPTED_PARALLEL_AMENDMENT_PATH.as_posix()}"
+        )
+        if sha256_bytes(amendment_blob) != ADOPTED_PARALLEL_AMENDMENT_SHA256:
+            raise ReplayError("replay source rebind lacks the exact adopted amendment")
     if git_output("status", "--porcelain=v1", "--untracked-files=all").strip():
         raise ReplayError("CPU replay requires a completely clean checkout")
-    script_blob = git_output("show", f"{frozen_commit}:{SCRIPT_RELATIVE_PATH.as_posix()}")
+    script_blob = git_output("show", f"{head}:{SCRIPT_RELATIVE_PATH.as_posix()}")
     script_bytes = (REPO_ROOT / SCRIPT_RELATIVE_PATH).read_bytes()
     if script_bytes != script_blob:
-        raise ReplayError("replay validator bytes differ from frozen Git blob")
+        raise ReplayError("replay validator bytes differ from replay Git blob")
     prereg_blob = git_output(
         "show",
         f"{AUTHORITATIVE_PREREG_COMMIT}:{AUTHORITATIVE_PREREG_RELATIVE_PATH.as_posix()}",
@@ -400,7 +415,7 @@ def verify_replay_source(manifest: dict[str, Any]) -> dict[str, Any]:
         != AUTHORITATIVE_PREREG_SHA256
     ):
         raise ReplayError("P0 manifest does not bind the authoritative preregistration")
-    return {
+    attestation = {
         "replay_validator_git_commit": head,
         "replay_validator_script_path": SCRIPT_RELATIVE_PATH.as_posix(),
         "replay_validator_script_sha256": sha256_bytes(script_bytes),
@@ -409,6 +424,19 @@ def verify_replay_source(manifest: dict[str, Any]) -> dict[str, Any]:
         "authoritative_prereg_source_commit": AUTHORITATIVE_PREREG_COMMIT,
         "authoritative_prereg_template_sha256": AUTHORITATIVE_PREREG_SHA256,
     }
+    if source_rebind:
+        attestation.update(
+            {
+                "replay_source_rebind_from_git_commit": frozen_commit,
+                "replay_source_rebind_amendment_path": (
+                    ADOPTED_PARALLEL_AMENDMENT_PATH.as_posix()
+                ),
+                "replay_source_rebind_amendment_sha256": (
+                    ADOPTED_PARALLEL_AMENDMENT_SHA256
+                ),
+            }
+        )
+    return attestation
 
 
 def validate_phase_manifest(
@@ -1103,7 +1131,7 @@ def validate_lifecycle_finalization(
             "finalized_at",
         )
     ]
-    if any(right <= left for left, right in zip(times, times[1:])):
+    if not (times[0] <= times[1] < times[2] < times[3]):
         raise ReplayError("lifecycle envelope timestamp order is invalid")
     return acquisition, acquisition_path
 
@@ -1136,9 +1164,9 @@ def validate_deletion_and_provider_binding(
     sealed_at = parse_time(str(seal.get("sealed_at_utc")))
     requested_at = parse_time(str(deletion.get("deletion_requested_at_utc")))
     deleted_at = parse_time(str(deletion.get("deleted_at_utc")))
-    if not sealed_at < requested_at <= deleted_at < replay_started:
+    if not sealed_at <= requested_at < deleted_at < replay_started:
         raise ReplayError(
-            "required order is acquisition seal < deletion request/completion < replay"
+            "required order is acquisition seal <= deletion request < completion < replay"
         )
 
     project = str(deletion.get("project", ""))
@@ -1202,7 +1230,11 @@ def validate_deletion_and_provider_binding(
         or not isinstance(objects, list)
     ):
         raise ReplayError("deletion evidence lacks immutable GCS object generations")
-    if not sealed_at <= parse_time(str(artifact_seal.get("sealed_at_utc"))) < requested_at:
+    if not (
+        sealed_at
+        <= parse_time(str(artifact_seal.get("sealed_at_utc")))
+        <= requested_at
+    ):
         raise ReplayError("GCS object generation seal has an invalid lifecycle time")
     by_role = {
         str(item.get("role")): item for item in objects if isinstance(item, dict)

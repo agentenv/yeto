@@ -700,8 +700,24 @@ def validate_parent_and_replay(
         raise PhaseMapError("replay report does not bind the canonical parent")
     if replay.get("phase_map_manifest_sha256") != sha256_file(args.parent_manifest):
         raise PhaseMapError("replay report does not bind the raw parent file")
-    if replay.get("replay_validator_git_commit") != parent["frozen"]["git_commit"]:
-        raise PhaseMapError("parent replay did not run from the source commit")
+    replay_commit = replay.get("replay_validator_git_commit")
+    parent_commit = parent["frozen"]["git_commit"]
+    if replay_commit != parent_commit:
+        source_rebind = bool(
+            descendant_kind == "p0b_four_gpu_bound"
+            and replay_commit == args.git_commit
+            and authorize_p0b_source_rebind(parent, args.git_commit)
+        )
+        if not source_rebind:
+            raise PhaseMapError("parent replay did not run from an authorized source")
+        if (
+            replay.get("replay_source_rebind_from_git_commit") != parent_commit
+            or replay.get("replay_source_rebind_amendment_path")
+            != ADOPTED_PARALLEL_AMENDMENT_PATH.as_posix()
+            or replay.get("replay_source_rebind_amendment_sha256")
+            != ADOPTED_PARALLEL_AMENDMENT_SHA256
+        ):
+            raise PhaseMapError("parent replay source-rebind attestation is incomplete")
     for field in (
         "replay_validator_script_sha256",
         "replay_validator_git_blob_sha256",

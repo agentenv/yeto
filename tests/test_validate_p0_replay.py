@@ -534,6 +534,30 @@ def test_replay_all_steps_only_after_verified_deletion(tmp_path):
     assert output.with_suffix(".json.sha256").is_file()
 
 
+def test_same_second_object_seal_and_deletion_request_remain_ordered(tmp_path):
+    root, deleted = _fixture(tmp_path)
+    state = json.loads(deleted.read_text())
+    state["artifact_object_seal"]["sealed_at_utc"] = state[
+        "deletion_requested_at_utc"
+    ]
+    finalizer.write_object(deleted, state)
+    _refinalize(root, deleted)
+    output = tmp_path / "same-second-replay.json"
+
+    report = replay.validate(
+        root,
+        deleted,
+        output,
+        atol=2e-6,
+        rtol=2e-6,
+        tape_rtol=2e-4,
+        source_verifier=_source_attestation,
+        manifest_validator=_manifest_attestation,
+    )
+
+    assert report["status"] == "PASS"
+
+
 def _barrier_replay_inputs(root: Path):
     manifest = json.loads((root / "phase-map-manifest.json").read_text())
     result = manifest["results"][0]

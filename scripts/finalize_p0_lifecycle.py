@@ -171,8 +171,10 @@ def finalize(
         parse_time(deletion_completed_at, "deletion completion"),
         parse_time(finalized_at, "finalization"),
     ]
-    if any(right <= left for left, right in zip(ordered, ordered[1:])):
-        raise FinalizationError("lifecycle must order seal < request < deletion < final")
+    if not (ordered[0] <= ordered[1] < ordered[2] < ordered[3]):
+        raise FinalizationError(
+            "lifecycle must order seal <= request < deletion < final"
+        )
 
     lifecycle_dir = root / "lifecycle"
     instance_path = lifecycle_dir / "instance-not-found.json"

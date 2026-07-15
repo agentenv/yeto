@@ -199,7 +199,14 @@ def test_p0b_allows_only_the_adopted_fixed_production_source_rebind(tmp_path):
     )
     parent_path, replay_path = _fake_replay(tmp_path, parent, "p0a-rebind")
     replay = json.loads(replay_path.read_text())
-    replay["replay_validator_git_commit"] = rpm.P0A_SOURCE_REBIND_FROM_COMMIT
+    replay["replay_validator_git_commit"] = HEAD
+    replay["replay_source_rebind_from_git_commit"] = rpm.P0A_SOURCE_REBIND_FROM_COMMIT
+    replay["replay_source_rebind_amendment_path"] = (
+        rpm.ADOPTED_PARALLEL_AMENDMENT_PATH.as_posix()
+    )
+    replay["replay_source_rebind_amendment_sha256"] = (
+        rpm.ADOPTED_PARALLEL_AMENDMENT_SHA256
+    )
     replay_path.write_text(json.dumps(replay, indent=2, sort_keys=True) + "\n")
 
     p0b = _canary_args(tmp_path, "p0b")
