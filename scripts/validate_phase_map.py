@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
 HARD_MIN_CONFIRMATORY_SEEDS = 8
 FINAL_STATUSES = {"COMPLETED", "DIVERGED", "FAILED", "INFRA_FAILURE"}
 SCIENTIFIC_STATUSES = {"COMPLETED", "DIVERGED"}
@@ -39,9 +39,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 AUTHORITATIVE_PREREG_PATH = (
     "experiment-specs/best-paper-phase-map-p0-p1-prereg.json"
 )
-AUTHORITATIVE_PREREG_SOURCE_COMMIT = "af3605fc5c98bb5ed61b7225cd2bd45ca2b5a1cb"
+AUTHORITATIVE_PREREG_SOURCE_COMMIT = "16d27bc60deb6d8910bf0111c7fb57c9d0eb5b80"
 AUTHORITATIVE_PREREG_TEMPLATE_SHA256 = (
-    "0b1963771e3e28e89f74dbe4f11d5b2ef913618d5adde0839260aa25513ab775"
+    "7cba3c62328b4bfe15fffbc523979274e834e8e720e16f70d79621eaf6ebdb7b"
 )
 
 
@@ -368,13 +368,296 @@ def _validate_adaptive_extension(
             )
 
 
+def _validate_parent_replay_report(
+    *,
+    lineage: Mapping[str, Any],
+    parent_manifest: Mapping[str, Any] | None,
+    report: Mapping[str, Any] | None,
+    report_sha256: str | None,
+    errors: list[str],
+) -> None:
+    """Validate the sealed post-deletion replay cited by P0b or P1."""
+
+    if report is None or report_sha256 is None:
+        errors.append("stage requires the exact sealed parent CPU replay report")
+        return
+    if lineage.get("parent_replay_report_sha256") != report_sha256:
+        errors.append(
+            "lineage.parent_replay_report_sha256 does not match the raw report bytes"
+        )
+    if report.get("schema") != "yeto_p0_cpu_replay_v1":
+        errors.append("parent replay report schema is not recognized")
+    if report.get("status") != "PASS":
+        errors.append("parent replay report did not PASS")
+    if report.get("gpu_deleted_before_replay") is not True:
+        errors.append("parent replay did not occur after verified GPU deletion")
+    if report.get("all_steps_replayed") is not True:
+        errors.append("parent replay report does not cover every captured step")
+    if parent_manifest is not None:
+        parent_hash = _sha256_canonical(parent_manifest)
+        if report.get("phase_map_manifest_canonical_sha256") != parent_hash:
+            errors.append("parent replay report is not bound to the cited parent manifest")
+
+
+def _validate_canary_coordinates(
+    manifest: Mapping[str, Any],
+    kind_policy: Mapping[str, Any],
+    errors: list[str],
+) -> None:
+    coordinates, _ = _expected_cell_records(manifest, errors)
+    required = {
+        Coordinate(
+            int(kind_policy["required_h"]),
+            float(mu),
+            float(kind_policy["required_eta"]),
+            int(kind_policy["required_shuffle_seed"]),
+        )
+        for mu in kind_policy.get("required_mu", [])
+    }
+    if coordinates != required:
+        errors.append(
+            "canary expected_cells must be exactly the registered H16/eta=.0875/"
+            "mu={0,.5,.9}/seed337 block"
+        )
+    expected_grid = _mapping_or_empty(manifest.get("expected_grid"))
+    expected_axes = {
+        "h": [kind_policy.get("required_h")],
+        "mu": kind_policy.get("required_mu"),
+        "eta": [kind_policy.get("required_eta")],
+        "seeds": [kind_policy.get("required_shuffle_seed")],
+    }
+    for field, expected in expected_axes.items():
+        if expected_grid.get(field) != expected:
+            errors.append(f"canary expected_grid.{field} must be {expected!r}")
+    if _mapping_or_empty(manifest.get("seed_pairs")) != {
+        str(kind_policy.get("required_shuffle_seed")): kind_policy.get(
+            "required_training_seed"
+        )
+    }:
+        errors.append("canary seed_pairs must be exactly {'337': 337337}")
+    protocol = _mapping_or_empty(manifest.get("protocol"))
+    for field, expected in (
+        ("token_budget", kind_policy.get("required_token_budget")),
+        ("machine_type", kind_policy.get("machine_type_required")),
+        ("gpu_slots", kind_policy.get("gpu_slots_required")),
+    ):
+        if protocol.get(field) != expected:
+            errors.append(f"canary protocol.{field} must be {expected!r}")
+    horizon = _mapping_or_empty(
+        _mapping_or_empty(manifest.get("horizon_work")).get(
+            str(kind_policy.get("required_h"))
+        )
+    )
+    if horizon.get("outer_steps") != kind_policy.get("required_global_commits"):
+        errors.append("canary horizon_work must schedule exactly 32 global commits")
+    fragments = protocol.get("fragments")
+    if (
+        not _is_int(fragments)
+        or horizon.get("outer_steps") != fragments * kind_policy.get(
+            "required_updates_per_fragment", -1
+        )
+    ):
+        errors.append("canary must schedule exactly eight applied updates per fragment")
+
+
+def _gpu_uuid_map(value: Any) -> dict[str, str] | None:
+    if isinstance(value, Mapping):
+        if any(not isinstance(item, str) for item in value.values()):
+            return None
+        result = {str(key): item for key, item in value.items()}
+    elif isinstance(value, list):
+        result = {}
+        for item in value:
+            if not isinstance(item, Mapping):
+                return None
+            learner = item.get("learner_id")
+            uuid = item.get("gpu_uuid")
+            if learner is None or not isinstance(uuid, str):
+                return None
+            result[str(learner)] = uuid
+    else:
+        return None
+    return result
+
+
+def _validate_p0b_hardware(
+    manifest: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], errors: list[str]
+) -> None:
+    policy = _mapping_or_empty(manifest.get("canary_hardware_evidence_policy"))
+    required = policy.get("p0b_result_hardware_required_fields", [])
+    for index, row in enumerate(rows):
+        label = f"results[{index}].hardware"
+        hardware = _require_mapping(row.get("hardware"), label, errors)
+        missing = [field for field in required if field not in hardware]
+        if missing:
+            errors.append(f"{label} is missing P0b evidence fields: {missing}")
+        for field in (
+            "nvidia_smi_inventory_uri",
+            "learner_gpu_map_uri",
+            "barrier_version_trace_uri",
+            "instance_not_found_evidence_uri",
+            "disk_not_found_evidence_uri",
+            "zero_accelerator_evidence_uri",
+        ):
+            _require_bound(hardware.get(field), f"{label}.{field}", errors)
+        for field in (
+            "nvidia_smi_inventory_sha256",
+            "learner_gpu_map_sha256",
+            "barrier_version_trace_sha256",
+            "instance_not_found_evidence_sha256",
+            "disk_not_found_evidence_sha256",
+            "zero_accelerator_evidence_sha256",
+        ):
+            _require_sha256(hardware.get(field), f"{label}.{field}", errors)
+        for field in (
+            "zone",
+            "instance_name",
+            "instance_numeric_id",
+            "boot_disk_name",
+            "boot_disk_numeric_id",
+            "source_image_numeric_id",
+        ):
+            _require_bound(hardware.get(field), f"{label}.{field}", errors)
+        frozen_image = _mapping_or_empty(manifest.get("frozen")).get("image_id")
+        if str(hardware.get("source_image_numeric_id")) != str(frozen_image):
+            errors.append(f"{label}.source_image_numeric_id does not match frozen.image_id")
+        if hardware.get("distinct_a100_gpu_uuid_count") != 4:
+            errors.append(f"{label}.distinct_a100_gpu_uuid_count must be exactly 4")
+        uuid_map = _gpu_uuid_map(hardware.get("learner_gpu_uuid_bijection"))
+        if uuid_map is None or set(uuid_map) != {"0", "1", "2", "3"}:
+            errors.append(f"{label}.learner_gpu_uuid_bijection must map learners 0..3")
+        elif len(set(uuid_map.values())) != 4 or any(
+            not value.startswith("GPU-") for value in uuid_map.values()
+        ):
+            errors.append(
+                f"{label}.learner_gpu_uuid_bijection must contain four distinct GPU UUIDs"
+            )
+        times = {
+            field: _parse_time(hardware.get(field), f"{label}.{field}", errors)
+            for field in (
+                "provisioning_started_at",
+                "provisioning_completed_at",
+                "artifact_sealed_at",
+                "deletion_requested_at",
+                "deletion_completed_at",
+            )
+        }
+        ordered = [times[field] for field in times]
+        if all(value is not None for value in ordered) and any(
+            right <= left for left, right in zip(ordered, ordered[1:])
+        ):
+            errors.append(
+                f"{label} timestamps must order provisioning, seal, request, and deletion"
+            )
+
+
+def _validate_canary_lifecycle(
+    manifest: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], errors: list[str]
+) -> None:
+    """Bind immutable acquisition, deletion, and the separate final envelope."""
+
+    for index, row in enumerate(rows):
+        label = f"results[{index}].hardware"
+        hardware = _require_mapping(row.get("hardware"), label, errors)
+        if hardware.get("acquisition_status") != "sealed_acquisition_pending_teardown":
+            errors.append(
+                f"{label}.acquisition_status must identify the immutable intermediate seal"
+            )
+        if hardware.get("final_manifest_status") != "sealed_results":
+            errors.append(f"{label}.final_manifest_status must be 'sealed_results'")
+        for field in (
+            "acquisition_manifest_sha256",
+            "acquisition_manifest_canonical_sha256",
+            "acquisition_checksum_sha256",
+            "acquisition_seal_sha256",
+            "deletion_evidence_sha256",
+        ):
+            _require_sha256(hardware.get(field), f"{label}.{field}", errors)
+        acquisition_sealed = _parse_time(
+            hardware.get("artifact_sealed_at"), f"{label}.artifact_sealed_at", errors
+        )
+        deletion_requested = _parse_time(
+            hardware.get("deletion_requested_at"),
+            f"{label}.deletion_requested_at",
+            errors,
+        )
+        deletion_completed = _parse_time(
+            hardware.get("deletion_completed_at"),
+            f"{label}.deletion_completed_at",
+            errors,
+        )
+        finalized = _parse_time(
+            hardware.get("finalized_at"), f"{label}.finalized_at", errors
+        )
+        ordered = (
+            acquisition_sealed,
+            deletion_requested,
+            deletion_completed,
+            finalized,
+        )
+        if all(value is not None for value in ordered) and not (
+            acquisition_sealed < deletion_requested <= deletion_completed < finalized
+        ):
+            errors.append(
+                f"{label} must order immutable acquisition < deletion < final manifest"
+            )
+
+
+def _validate_p0b_matches_parent(
+    manifest: Mapping[str, Any],
+    parent: Mapping[str, Any],
+    kind_policy: Mapping[str, Any],
+    errors: list[str],
+) -> None:
+    for path in kind_policy.get("must_equal_p0a_parent_paths", []):
+        try:
+            child_value = _json_pointer_get(manifest, str(path))
+            parent_value = _json_pointer_get(parent, str(path))
+        except (KeyError, ValueError):
+            errors.append(f"P0a/P0b equality path is missing: {path}")
+            continue
+        if child_value != parent_value:
+            errors.append(f"P0b differs from P0a at frozen path {path}")
+    if manifest.get("status") != "sealed_results":
+        return
+    parent_by_coordinate = _latest_parent_rows(parent, errors)
+    child_by_coordinate = _latest_parent_rows(manifest, errors)
+    if set(parent_by_coordinate) != set(child_by_coordinate):
+        errors.append("P0b result coordinates must exactly match P0a")
+        return
+    fields = (
+        "training_seed",
+        "work",
+        "eval_source_indices_hash",
+        "train_pool_source_indices_hash",
+        "train_source_indices_hash",
+        "train_rows_hash",
+        "eval_rows_hash",
+        "eval_hash",
+        "eval_example_ids_hash",
+        "eval_token_ids_hash",
+        "barrier",
+        "version_matched",
+        "matrix_merge",
+        "strict_quorum",
+        "delta_correction",
+        "injected_baseline",
+        "normalized_workload_command_hash",
+    )
+    for coordinate in sorted(parent_by_coordinate):
+        parent_row, child_row = parent_by_coordinate[coordinate], child_by_coordinate[coordinate]
+        for field in fields:
+            if parent_row.get(field) != child_row.get(field):
+                errors.append(f"P0b {coordinate} differs from P0a workload field {field}")
+
+
 def _validate_authority_and_lineage(
     manifest: Mapping[str, Any],
     errors: list[str],
     *,
     parent_manifest: Mapping[str, Any] | None,
-    p0_replay_report: Mapping[str, Any] | None,
-    p0_replay_report_sha256: str | None,
+    parent_replay_report: Mapping[str, Any] | None,
+    parent_replay_report_sha256: str | None,
 ) -> None:
     template = _authoritative_template()
     lineage = _require_mapping(manifest.get("lineage"), "lineage", errors)
@@ -430,12 +713,27 @@ def _validate_authority_and_lineage(
                 errors.append(
                     f"lineage parent kind must be {required_parent_kind!r} for {kind!r}"
                 )
-            if kind == "initial_bound_p1_r0" and _manifest_kind(parent_manifest) == "p0_canary_bound":
+            if kind == "p0b_four_gpu_bound" and _manifest_kind(parent_manifest) == "p0a_single_gpu_bound":
                 try:
                     validate_and_summarize(parent_manifest, claim_level="integrity")
                 except ManifestError as exc:
-                    errors.append(f"cited P0 parent fails authoritative validation: {exc}")
-            if kind != "initial_bound_p1_r0":
+                    errors.append(f"cited P0a parent fails authoritative validation: {exc}")
+            elif kind == "initial_bound_p1_r0" and _manifest_kind(parent_manifest) == "p0b_four_gpu_bound":
+                # P0b's own authority validation consumed P0a and its replay.  At
+                # P1 we can still independently validate its complete payload,
+                # exact canary coordinates, and four-GPU evidence without
+                # silently accepting a malformed sealed parent.
+                try:
+                    validate_and_summarize(
+                        parent_manifest,
+                        claim_level="integrity",
+                        _skip_authority_for_tests=True,
+                    )
+                except ManifestError as exc:
+                    errors.append(f"cited P0b parent fails payload validation: {exc}")
+            if not kind_policy.get(
+                "compare_allowed_paths_to_authoritative_template_not_p0b_parent"
+            ):
                 compare_to = parent_manifest
                 if kind_policy.get("parent_results_must_be_exact_prefix") is True:
                     parent_results = parent_manifest.get("results")
@@ -458,7 +756,7 @@ def _validate_authority_and_lineage(
         if parent_manifest is not None:
             errors.append(f"lineage kind {kind!r} must be parentless")
         if lineage.get("parent_manifest_sha256") not in (None, ""):
-            errors.append("parentless P0 lineage.parent_manifest_sha256 must be null")
+            errors.append("parentless P0a lineage.parent_manifest_sha256 must be null")
 
     allowed = {
         str(path) for path in kind_policy.get("allowed_exact_paths", [])
@@ -470,43 +768,40 @@ def _validate_authority_and_lineage(
                 f"lineage kind {kind!r} illegally changes unregistered path {path}"
             )
 
-    if kind == "p0_canary_bound":
-        protocol = _mapping_or_empty(manifest.get("protocol"))
-        if protocol.get("machine_type") != kind_policy.get("machine_type_required"):
-            errors.append("P0 must use the registered one-A100 machine type")
-        if protocol.get("gpu_slots") != kind_policy.get("gpu_slots_required"):
-            errors.append("P0 must use gpu_slots=1")
-        if lineage.get("p0_replay_report_sha256") not in (None, ""):
-            errors.append("P0 cannot pre-bind a replay report that does not yet exist")
+    if kind in {"p0a_single_gpu_bound", "p0b_four_gpu_bound"}:
+        _validate_canary_coordinates(manifest, kind_policy, errors)
+    if kind == "p0a_single_gpu_bound":
+        if lineage.get("parent_replay_report_sha256") not in (None, ""):
+            errors.append("P0a cannot pre-bind a parent replay report")
+    if kind == "p0b_four_gpu_bound":
+        _validate_parent_replay_report(
+            lineage=lineage,
+            parent_manifest=parent_manifest,
+            report=parent_replay_report,
+            report_sha256=parent_replay_report_sha256,
+            errors=errors,
+        )
+        if parent_manifest is not None:
+            _validate_p0b_matches_parent(manifest, parent_manifest, kind_policy, errors)
 
     if kind == "initial_bound_p1_r0":
         if parent_manifest is not None:
-            for path in kind_policy.get("must_equal_p0_parent_paths", []):
+            for path in kind_policy.get("must_equal_p0b_parent_paths", []):
                 try:
                     child_value = _json_pointer_get(manifest, str(path))
                     parent_value = _json_pointer_get(parent_manifest, str(path))
                 except (KeyError, ValueError):
-                    errors.append(f"P0/P1 equality path is missing: {path}")
+                    errors.append(f"P0b/P1 equality path is missing: {path}")
                     continue
                 if child_value != parent_value:
-                    errors.append(f"P1 differs from its passing P0 at frozen path {path}")
-        if p0_replay_report is None or p0_replay_report_sha256 is None:
-            errors.append("P1 requires the exact sealed P0 CPU replay report")
-        else:
-            if lineage.get("p0_replay_report_sha256") != p0_replay_report_sha256:
-                errors.append("lineage.p0_replay_report_sha256 does not match the report bytes")
-            if p0_replay_report.get("schema") != "yeto_p0_cpu_replay_v1":
-                errors.append("P0 replay report schema is not recognized")
-            if p0_replay_report.get("status") != "PASS":
-                errors.append("P0 replay report did not PASS")
-            if p0_replay_report.get("gpu_deleted_before_replay") is not True:
-                errors.append("P0 replay did not occur after verified GPU deletion")
-            if p0_replay_report.get("all_steps_replayed") is not True:
-                errors.append("P0 replay report does not cover every captured step")
-            if parent_manifest is not None:
-                parent_hash = _sha256_canonical(parent_manifest)
-                if p0_replay_report.get("phase_map_manifest_canonical_sha256") != parent_hash:
-                    errors.append("P0 replay report is not bound to the cited parent manifest")
+                    errors.append(f"P1 differs from its passing P0b at frozen path {path}")
+        _validate_parent_replay_report(
+            lineage=lineage,
+            parent_manifest=parent_manifest,
+            report=parent_replay_report,
+            report_sha256=parent_replay_report_sha256,
+            errors=errors,
+        )
 
     # R0 expected_cells is an explicit materialization of the frozen Cartesian
     # grid. Later kinds are ragged and are checked against their parent above.
@@ -625,11 +920,18 @@ def _validate_frozen(manifest: Mapping[str, Any], errors: list[str]) -> None:
         "image_digest",
         "model_hash",
         "data_hash",
-        "eval_source_indices_hash",
+        "development_eval_source_indices_hash",
+        "audit_eval_source_indices_hash",
         "train_pool_source_indices_hash",
-        "eval_hash",
-        "eval_example_ids_hash",
-        "eval_token_ids_hash",
+        "development_eval_rows_hash",
+        "development_eval_packed_hash",
+        "development_eval_example_ids_hash",
+        "development_eval_token_ids_hash",
+        "audit_eval_rows_hash",
+        "audit_eval_packed_hash",
+        "audit_eval_example_ids_hash",
+        "audit_eval_token_ids_hash",
+        "audit_access_policy_hash",
         "command_hash",
         "randomization_plan_hash",
         "retry_policy_hash",
@@ -660,6 +962,40 @@ def _validate_frozen(manifest: Mapping[str, Any], errors: list[str]) -> None:
             errors.append("frozen.cell_command_hashes keys must be non-empty cell IDs")
         _require_sha256(digest, f"frozen.cell_command_hashes[{cell_id!r}]", errors)
 
+    expected_audit_policy_hash = _sha256_canonical(
+        _require_mapping(
+            manifest.get("confirmation_policy"), "confirmation_policy", errors
+        )
+    )
+    if frozen.get("audit_access_policy_hash") != expected_audit_policy_hash:
+        errors.append(
+            "frozen.audit_access_policy_hash must equal canonical confirmation_policy"
+        )
+
+    fresh_confirmation = _manifest_kind(manifest) == "fresh_confirmation_stage"
+    for field in (
+        "audit_command_hash",
+        "audit_randomization_plan_hash",
+    ):
+        value = frozen.get(field)
+        if fresh_confirmation:
+            _require_sha256(value, f"frozen.{field}", errors)
+        elif value is not None:
+            errors.append(f"frozen.{field} must remain null before P3")
+    audit_registry = frozen.get("audit_cell_command_hashes")
+    if fresh_confirmation:
+        audit_registry = _require_mapping(
+            audit_registry, "frozen.audit_cell_command_hashes", errors
+        )
+        for cell_id, digest in audit_registry.items():
+            if not isinstance(cell_id, str) or not cell_id:
+                errors.append("frozen.audit_cell_command_hashes keys must be cell IDs")
+            _require_sha256(
+                digest, f"frozen.audit_cell_command_hashes[{cell_id!r}]", errors
+            )
+    elif audit_registry is not None:
+        errors.append("frozen.audit_cell_command_hashes must remain null before P3")
+
     retry_policy = _require_mapping(
         manifest.get("retry_policy"), "retry_policy", errors
     )
@@ -678,12 +1014,18 @@ def _validate_protocol(manifest: Mapping[str, Any], errors: list[str]) -> None:
     expected = {
         "tuning": "full",
         "eval_split_seed": 331,
-        "split_population_rule": (
-            "canonical_source_indices_0_through_train_rows_plus_eval_rows_minus_1"
+        "train_rows": 5000,
+        "development_eval_rows": 1024,
+        "audit_eval_rows": 1024,
+        "split_population_rows": 7048,
+        "split_population_rule": "canonical_source_indices_0_through_7047",
+        "split_assignment_rule": (
+            "python_random.Random(331).shuffle_once_then_positions_0_5000_train_"
+            "5000_6024_development_6024_7048_audit"
         ),
-        "eval_selection_rule": (
-            "python_random_seed_331_shuffle_once_then_final_eval_rows"
-        ),
+        "train_pool_slice_rule": "shuffled_indices_half_open_0_5000",
+        "development_eval_slice_rule": "shuffled_indices_half_open_5000_6024",
+        "audit_eval_slice_rule": "shuffled_indices_half_open_6024_7048",
         "train_shuffle_rule": (
             "per_study_shuffle_seed_applies_only_to_disjoint_pre_shuffle_train_pool"
         ),
@@ -700,10 +1042,6 @@ def _validate_protocol(manifest: Mapping[str, Any], errors: list[str]) -> None:
     for field, value in expected.items():
         if protocol.get(field) != value:
             errors.append(f"protocol.{field} must be {value!r}")
-    eval_rows = protocol.get("eval_rows")
-    if not _is_int(eval_rows) or eval_rows <= 0:
-        errors.append("protocol.eval_rows must be a positive integer")
-
     adaptive = _require_mapping(
         manifest.get("adaptive_bracket"), "adaptive_bracket", errors
     )
@@ -782,12 +1120,48 @@ def _validate_result_common(
             f"({expected_training!r}), got {training_seed!r}"
         )
 
-    for field in ("git_commit", "image_digest", "model_hash", "data_hash", "eval_hash"):
+    for field in ("git_commit", "image_digest", "model_hash", "data_hash"):
         if row.get(field) != frozen.get(field):
             errors.append(f"{label}.{field} does not match the frozen manifest")
-    for field in ("eval_source_indices_hash", "train_pool_source_indices_hash"):
-        if row.get(field) != frozen.get(field):
-            errors.append(f"{label}.{field} does not match the frozen manifest")
+    if row.get("train_pool_source_indices_hash") != frozen.get(
+        "train_pool_source_indices_hash"
+    ):
+        errors.append(
+            f"{label}.train_pool_source_indices_hash does not match the frozen manifest"
+        )
+    fresh_confirmation = _manifest_kind(manifest) == "fresh_confirmation_stage"
+    evaluation_role = row.get("evaluation_role")
+    expected_role = "none" if fresh_confirmation else "development"
+    if evaluation_role != expected_role:
+        errors.append(f"{label}.evaluation_role must be {expected_role!r}")
+    for field in (
+        "audit_status",
+        "audit_loss",
+        "audit_command_hash",
+        "audit_order_index",
+        "audit_per_example_loss_uri",
+        "audit_per_example_loss_sha256",
+        "audit_started_at",
+        "audit_ended_at",
+        "audit_unblind_authorization_sha256",
+    ):
+        if row.get(field) is not None:
+            errors.append(f"{label}.{field} must be null outside audit_results")
+    development_hash_fields = {
+        "eval_source_indices_hash": "development_eval_source_indices_hash",
+        "eval_rows_hash": "development_eval_rows_hash",
+        "eval_hash": "development_eval_packed_hash",
+        "eval_example_ids_hash": "development_eval_example_ids_hash",
+        "eval_token_ids_hash": "development_eval_token_ids_hash",
+    }
+    for row_field, frozen_field in development_hash_fields.items():
+        if fresh_confirmation:
+            if row.get(row_field) is not None:
+                errors.append(f"{label}.{row_field} must be null for P3 training")
+        elif row.get(row_field) != frozen.get(frozen_field):
+            errors.append(
+                f"{label}.{row_field} does not match frozen.{frozen_field}"
+            )
     seed_key = str(coordinate.seed)
     split_maps = {
         "train_source_indices_hash": "train_source_indices_hashes",
@@ -803,6 +1177,12 @@ def _validate_result_common(
     if row.get("command_hash") != expected_command_hash:
         errors.append(
             f"{label}.command_hash does not match frozen.cell_command_hashes[{cell_id!r}]"
+        )
+    if _manifest_kind(manifest) in {"p0a_single_gpu_bound", "p0b_four_gpu_bound"}:
+        _require_sha256(
+            row.get("normalized_workload_command_hash"),
+            f"{label}.normalized_workload_command_hash",
+            errors,
         )
 
     semantic_expectations = {
@@ -824,6 +1204,10 @@ def _validate_result_common(
         errors.append(f"{label}.hardware.market must be 'spot'")
     for field in ("provider", "instance_type", "region", "instance_id", "image_id", "provisioning_evidence_uri"):
         _require_bound(hardware.get(field), f"{label}.hardware.{field}", errors)
+    if hardware.get("instance_type") != protocol.get("machine_type"):
+        errors.append(
+            f"{label}.hardware.instance_type does not match protocol.machine_type"
+        )
     if str(hardware.get("image_id")) != str(frozen.get("image_id")):
         errors.append(f"{label}.hardware.image_id does not match frozen.image_id")
     _require_sha256(
@@ -853,7 +1237,7 @@ def _validate_result_common(
             _require_bound(capture_uri, f"{label}.capture_uri", errors)
             _require_sha256(capture_sha, f"{label}.capture_sha256", errors)
 
-    if status == "COMPLETED":
+    if status == "COMPLETED" and not fresh_confirmation:
         for field in ("per_example_loss_uri",):
             _require_bound(row.get(field), f"{label}.{field}", errors)
         _require_sha256(
@@ -861,6 +1245,24 @@ def _validate_result_common(
             f"{label}.per_example_loss_sha256",
             errors,
         )
+    elif fresh_confirmation:
+        for field in ("per_example_loss_uri", "per_example_loss_sha256"):
+            if row.get(field) is not None:
+                errors.append(f"{label}.{field} must be null for P3 training")
+        if status == "COMPLETED":
+            _require_bound(row.get("checkpoint_uri"), f"{label}.checkpoint_uri", errors)
+            _require_sha256(
+                row.get("checkpoint_sha256"), f"{label}.checkpoint_sha256", errors
+            )
+            _parse_time(
+                row.get("checkpoint_sealed_at"),
+                f"{label}.checkpoint_sealed_at",
+                errors,
+            )
+        elif status == "DIVERGED":
+            for field in ("checkpoint_uri", "checkpoint_sha256"):
+                if row.get(field) is not None:
+                    errors.append(f"{label}.{field} must be null for DIVERGED P3 training")
 
     block_id = row.get("block_id")
     if not isinstance(block_id, str) or not block_id.strip():
@@ -885,8 +1287,12 @@ def _validate_status_and_work(
         return
     loss = row.get("loss")
     failure_reason = row.get("failure_reason")
+    fresh_confirmation = _manifest_kind(manifest) == "fresh_confirmation_stage"
     if status == "COMPLETED":
-        if not _finite_number(loss) or float(loss) <= 0.0:
+        if fresh_confirmation:
+            if loss is not None:
+                errors.append(f"{label}.loss must be null for completed P3 training")
+        elif not _finite_number(loss) or float(loss) <= 0.0:
             errors.append(f"{label}.loss must be positive and finite when COMPLETED")
         if failure_reason not in (None, ""):
             errors.append(f"{label}.failure_reason must be null/empty when COMPLETED")
@@ -931,7 +1337,7 @@ def _validate_status_and_work(
         "fixed_window_tokens": horizon_work.get("fixed_window_tokens"),
         "outer_steps": horizon_work.get("outer_steps"),
         "token_budget": protocol.get("token_budget"),
-        "eval_rows": protocol.get("eval_rows"),
+        "eval_rows": 0 if fresh_confirmation else protocol.get("development_eval_rows"),
     }
     for field, expected in expected_work.items():
         observed = work.get(field)
@@ -1252,6 +1658,361 @@ def _validate_pairing(finals: Mapping[Coordinate, Mapping[str, Any]], errors: li
             errors.append(f"{coordinate}: paired control work must match exactly")
 
 
+def _validate_audit_top_level_quarantine(
+    manifest: Mapping[str, Any], errors: list[str]
+) -> None:
+    """Forbid audit outcomes before a sealed P3 train-then-audit bundle."""
+
+    fresh_confirmation = _manifest_kind(manifest) == "fresh_confirmation_stage"
+    if not fresh_confirmation or manifest.get("status") == "bound_launch_authority":
+        for field in (
+            "audit_checkpoint_registry",
+            "audit_unblind_authorization",
+            "audit_randomization",
+            "audit_results_seal",
+        ):
+            if manifest.get(field) is not None:
+                errors.append(f"{field} must remain null before sealed P3 confirmation")
+        for field in ("audit_access_log", "audit_results"):
+            if manifest.get(field) != []:
+                errors.append(f"{field} must remain empty before sealed P3 confirmation")
+
+
+def _checkpoint_registry_cells(
+    registry: Mapping[str, Any], errors: list[str]
+) -> dict[str, Mapping[str, Any]]:
+    raw = registry.get("cells")
+    if not isinstance(raw, list):
+        errors.append("audit_checkpoint_registry.cells must be an array")
+        return {}
+    output: dict[str, Mapping[str, Any]] = {}
+    required = {
+        "cell_id",
+        "final_attempt_id",
+        "status",
+        "checkpoint_uri",
+        "checkpoint_sha256",
+        "command_hash",
+        "training_completed_at",
+    }
+    for index, value in enumerate(raw):
+        row = _require_mapping(
+            value, f"audit_checkpoint_registry.cells[{index}]", errors
+        )
+        missing = sorted(required - set(row))
+        if missing:
+            errors.append(
+                f"audit_checkpoint_registry.cells[{index}] missing fields {missing}"
+            )
+        cell_id = row.get("cell_id")
+        if not isinstance(cell_id, str) or not cell_id:
+            errors.append(
+                f"audit_checkpoint_registry.cells[{index}].cell_id must be non-empty"
+            )
+        elif cell_id in output:
+            errors.append(f"audit checkpoint registry duplicates cell {cell_id!r}")
+        else:
+            output[cell_id] = row
+    return output
+
+
+def _validate_p3_audit(
+    manifest: Mapping[str, Any],
+    finals: Mapping[Coordinate, Mapping[str, Any]],
+    errors: list[str],
+) -> dict[str, Mapping[str, Any]]:
+    """Validate the P3 train/seal/authorize/audit/seal/unblind sequence."""
+
+    frozen = _mapping_or_empty(manifest.get("frozen"))
+    policy = _mapping_or_empty(manifest.get("confirmation_policy"))
+    expected_ids = {
+        str(row.get("cell_id")) for row in finals.values() if row.get("cell_id")
+    }
+    by_id = {str(row.get("cell_id")): row for row in finals.values()}
+    completed_ids = {
+        cell_id
+        for cell_id, row in by_id.items()
+        if _canonical_status(row.get("status")) == "COMPLETED"
+    }
+
+    audit_commands = _require_mapping(
+        frozen.get("audit_cell_command_hashes"),
+        "frozen.audit_cell_command_hashes",
+        errors,
+    )
+    if set(audit_commands) != expected_ids:
+        errors.append(
+            "frozen.audit_cell_command_hashes keys must equal expected P3 cell IDs"
+        )
+
+    registry = _require_mapping(
+        manifest.get("audit_checkpoint_registry"),
+        "audit_checkpoint_registry",
+        errors,
+    )
+    registry_cells = _checkpoint_registry_cells(registry, errors)
+    if set(registry_cells) != expected_ids:
+        errors.append("audit checkpoint registry must cover expected P3 cells exactly")
+    registry_sealed = _parse_time(
+        registry.get("sealed_at_utc"),
+        "audit_checkpoint_registry.sealed_at_utc",
+        errors,
+    )
+    training_times: list[tuple[datetime, str]] = []
+    for cell_id in sorted(expected_ids & set(registry_cells)):
+        entry, result = registry_cells[cell_id], by_id[cell_id]
+        status = _canonical_status(result.get("status"))
+        if _canonical_status(entry.get("status")) != status:
+            errors.append(f"checkpoint registry status mismatch for {cell_id}")
+        if entry.get("final_attempt_id") != result.get("attempt_id"):
+            errors.append(f"checkpoint registry final_attempt_id mismatch for {cell_id}")
+        if entry.get("command_hash") != result.get("command_hash"):
+            errors.append(f"checkpoint registry command_hash mismatch for {cell_id}")
+        if entry.get("training_completed_at") != result.get("ended_at"):
+            errors.append(f"checkpoint registry training_completed_at mismatch for {cell_id}")
+        completed = _parse_time(
+            entry.get("training_completed_at"),
+            f"checkpoint registry {cell_id} training_completed_at",
+            errors,
+        )
+        if completed is not None:
+            training_times.append((completed, str(entry.get("training_completed_at"))))
+        if status == "COMPLETED":
+            if entry.get("checkpoint_uri") != result.get("checkpoint_uri"):
+                errors.append(f"checkpoint registry checkpoint_uri mismatch for {cell_id}")
+            if entry.get("checkpoint_sha256") != result.get("checkpoint_sha256"):
+                errors.append(f"checkpoint registry checkpoint_sha256 mismatch for {cell_id}")
+        elif status == "DIVERGED":
+            if entry.get("checkpoint_uri") is not None or entry.get("checkpoint_sha256") is not None:
+                errors.append(f"DIVERGED registry cell {cell_id} must have null checkpoint fields")
+        else:
+            errors.append(f"P3 training cell {cell_id} is unresolved with status {status}")
+    training_max_record = max(training_times, default=None, key=lambda item: item[0])
+    training_max = training_max_record[0] if training_max_record is not None else None
+    if registry_sealed is not None and training_max is not None and registry_sealed < training_max:
+        errors.append("checkpoint registry cannot seal before all P3 training completes")
+
+    randomization = _require_mapping(
+        manifest.get("audit_randomization"), "audit_randomization", errors
+    )
+    order = randomization.get("ordered_cell_ids")
+    if not isinstance(order, list) or len(order) != len(expected_ids) or set(order) != expected_ids:
+        errors.append("audit_randomization.ordered_cell_ids must be an exact P3 permutation")
+        order = []
+    elif len(order) != len(set(order)):
+        errors.append("audit_randomization.ordered_cell_ids contains duplicates")
+    if randomization.get("plan_hash") != frozen.get("audit_randomization_plan_hash"):
+        errors.append("audit randomization plan_hash does not match the frozen plan")
+    randomization_created = _parse_time(
+        randomization.get("created_at_utc"),
+        "audit_randomization.created_at_utc",
+        errors,
+    )
+
+    authorization = _require_mapping(
+        manifest.get("audit_unblind_authorization"),
+        "audit_unblind_authorization",
+        errors,
+    )
+    required_authorization = set(
+        policy.get("audit_unblind_authorization_required_fields", [])
+    )
+    missing_authorization = sorted(required_authorization - set(authorization))
+    if missing_authorization:
+        errors.append(
+            f"audit_unblind_authorization missing fields {missing_authorization}"
+        )
+    _require_bound(authorization.get("schema"), "audit_unblind_authorization.schema", errors)
+    if authorization.get("loss_blind") is not True:
+        errors.append("audit authorization must be loss_blind")
+    if authorization.get("all_training_cells_resolved_and_checkpoint_registry_sealed") is not True:
+        errors.append("audit authorization must attest all training cells resolved and sealed")
+    if authorization.get("partial_results_withheld") is not True:
+        errors.append("audit authorization must withhold partial results")
+    _require_sha256(
+        authorization.get("p3_manifest_canonical_sha256"),
+        "audit_unblind_authorization.p3_manifest_canonical_sha256",
+        errors,
+    )
+    if authorization.get("checkpoint_registry_sha256") != _sha256_canonical(registry):
+        errors.append("audit authorization checkpoint_registry_sha256 mismatch")
+    if authorization.get("audit_command_registry_sha256") != _sha256_canonical(
+        audit_commands
+    ):
+        errors.append("audit authorization audit_command_registry_sha256 mismatch")
+    if authorization.get("audit_randomization_plan_sha256") != frozen.get(
+        "audit_randomization_plan_hash"
+    ):
+        errors.append("audit authorization randomization hash mismatch")
+    training_max_text = (
+        training_max_record[1] if training_max_record is not None else None
+    )
+    if authorization.get("training_completed_max_utc") != training_max_text:
+        errors.append("audit authorization training_completed_max_utc mismatch")
+    authorized = _parse_time(
+        authorization.get("authorized_at_utc"),
+        "audit_unblind_authorization.authorized_at_utc",
+        errors,
+    )
+    if authorized is not None:
+        if training_max is not None and authorized <= training_max:
+            errors.append("audit authorization must occur after every training completion")
+        if registry_sealed is not None and authorized <= registry_sealed:
+            errors.append("audit authorization must occur after checkpoint registry sealing")
+        if randomization_created is not None and authorized <= randomization_created:
+            errors.append("audit randomization must be created before authorization")
+    authorization_sha = _sha256_canonical(authorization)
+
+    raw_audit_results = manifest.get("audit_results")
+    if not isinstance(raw_audit_results, list):
+        errors.append("audit_results must be an array")
+        raw_audit_results = []
+    audit_by_id: dict[str, Mapping[str, Any]] = {}
+    required_audit = set(policy.get("audit_result_required_fields", []))
+    audit_end_times: list[datetime] = []
+    for index, value in enumerate(raw_audit_results):
+        row = _require_mapping(value, f"audit_results[{index}]", errors)
+        missing = sorted(required_audit - set(row))
+        if missing:
+            errors.append(f"audit_results[{index}] missing fields {missing}")
+        cell_id = row.get("cell_id")
+        if not isinstance(cell_id, str) or cell_id not in expected_ids:
+            errors.append(f"audit_results[{index}].cell_id is not an expected P3 cell")
+            continue
+        if cell_id in audit_by_id:
+            errors.append(f"audit_results duplicates cell {cell_id!r}")
+            continue
+        audit_by_id[cell_id] = row
+        if row.get("evaluation_role") != "confirmation_audit":
+            errors.append(
+                f"audit_results[{index}].evaluation_role must be 'confirmation_audit'"
+            )
+        training = by_id[cell_id]
+        registry_entry = registry_cells.get(cell_id, {})
+        status = _canonical_status(training.get("status"))
+        audit_status = _canonical_status(row.get("audit_status"))
+        expected_order = order.index(cell_id) if cell_id in order else None
+        if row.get("audit_order_index") != expected_order:
+            errors.append(f"audit order index mismatch for {cell_id}")
+        hash_fields = {
+            "audit_eval_source_indices_hash": "audit_eval_source_indices_hash",
+            "audit_eval_rows_hash": "audit_eval_rows_hash",
+            "audit_eval_packed_hash": "audit_eval_packed_hash",
+            "audit_eval_example_ids_hash": "audit_eval_example_ids_hash",
+            "audit_eval_token_ids_hash": "audit_eval_token_ids_hash",
+        }
+        for row_field, frozen_field in hash_fields.items():
+            if row.get(row_field) != frozen.get(frozen_field):
+                errors.append(f"audit {cell_id} {row_field} does not match frozen audit data")
+        if row.get("audit_command_hash") != audit_commands.get(cell_id):
+            errors.append(f"audit command hash mismatch for {cell_id}")
+        for field, expected in (
+            ("checkpoint_uri", registry_entry.get("checkpoint_uri")),
+            ("checkpoint_sha256", registry_entry.get("checkpoint_sha256")),
+            ("training_attempt_id", training.get("attempt_id")),
+            ("training_completed_at", registry_entry.get("training_completed_at")),
+            ("audit_unblind_authorization_sha256", authorization_sha),
+        ):
+            if row.get(field) != expected:
+                errors.append(f"audit {cell_id} {field} mismatch")
+        if status == "COMPLETED":
+            if audit_status != "COMPLETED" or not _finite_number(row.get("audit_loss")) or float(row["audit_loss"]) <= 0:
+                errors.append(f"audit {cell_id} must have positive finite COMPLETED audit_loss")
+            _require_bound(
+                row.get("audit_per_example_loss_uri"),
+                f"audit {cell_id} audit_per_example_loss_uri",
+                errors,
+            )
+            _require_sha256(
+                row.get("audit_per_example_loss_sha256"),
+                f"audit {cell_id} audit_per_example_loss_sha256",
+                errors,
+            )
+            started = _parse_time(row.get("audit_started_at"), f"audit {cell_id} started", errors)
+            ended = _parse_time(row.get("audit_ended_at"), f"audit {cell_id} ended", errors)
+            if started is not None and authorized is not None and started <= authorized:
+                errors.append(f"audit {cell_id} started before shared authorization")
+            if started is not None and training_max is not None and started <= training_max:
+                errors.append(f"audit {cell_id} started before all P3 training completed")
+            if started is not None and ended is not None and ended <= started:
+                errors.append(f"audit {cell_id} ended before it started")
+            if ended is not None:
+                audit_end_times.append(ended)
+        elif status == "DIVERGED":
+            if audit_status != "DIVERGED" or row.get("audit_loss") is not None:
+                errors.append(f"DIVERGED audit row {cell_id} must retain null audit_loss")
+            for field in (
+                "audit_per_example_loss_uri",
+                "audit_per_example_loss_sha256",
+                "audit_started_at",
+                "audit_ended_at",
+            ):
+                if row.get(field) is not None:
+                    errors.append(f"DIVERGED audit row {cell_id} must have null {field}")
+    if set(audit_by_id) != expected_ids:
+        errors.append("audit result IDs must cover expected P3 cells exactly")
+    if order and [row.get("cell_id") for row in raw_audit_results] != order:
+        errors.append("audit_results must be sealed in the frozen randomized order")
+
+    access_log = manifest.get("audit_access_log")
+    if not isinstance(access_log, list):
+        errors.append("audit_access_log must be an array")
+        access_log = []
+    access_by_id: dict[str, Mapping[str, Any]] = {}
+    required_access = set(policy.get("audit_access_log_entry_required_fields", []))
+    for index, value in enumerate(access_log):
+        entry = _require_mapping(value, f"audit_access_log[{index}]", errors)
+        missing = sorted(required_access - set(entry))
+        if missing:
+            errors.append(f"audit_access_log[{index}] missing fields {missing}")
+        cell_id = entry.get("cell_id")
+        if not isinstance(cell_id, str) or cell_id not in completed_ids or cell_id in access_by_id:
+            errors.append(f"audit_access_log[{index}] has unexpected/duplicate cell_id")
+            continue
+        access_by_id[cell_id] = entry
+        audit_row = audit_by_id.get(cell_id, {})
+        for field, expected in (
+            ("checkpoint_sha256", registry_cells.get(cell_id, {}).get("checkpoint_sha256")),
+            ("audit_eval_packed_hash", frozen.get("audit_eval_packed_hash")),
+            ("audit_command_hash", audit_commands.get(cell_id)),
+            ("access_started_at", audit_row.get("audit_started_at")),
+            ("access_ended_at", audit_row.get("audit_ended_at")),
+        ):
+            if entry.get(field) != expected:
+                errors.append(f"audit access log {cell_id} {field} mismatch")
+    if set(access_by_id) != completed_ids:
+        errors.append("audit access log must cover every and only evaluated checkpoints")
+
+    seal = _require_mapping(
+        manifest.get("audit_results_seal"), "audit_results_seal", errors
+    )
+    missing_seal = sorted(
+        set(policy.get("audit_results_seal_required_fields", [])) - set(seal)
+    )
+    if missing_seal:
+        errors.append(f"audit_results_seal missing fields {missing_seal}")
+    _require_bound(seal.get("schema"), "audit_results_seal.schema", errors)
+    if _canonical_status(seal.get("status")) not in {"PASS", "SEALED"}:
+        errors.append("audit_results_seal.status must be PASS or SEALED")
+    if seal.get("audit_result_registry_sha256") != _sha256_canonical(raw_audit_results):
+        errors.append("audit_results_seal registry hash mismatch")
+    if seal.get("audit_cell_count") != len(expected_ids):
+        errors.append("audit_results_seal.audit_cell_count mismatch")
+    if seal.get("expected_cell_ids_covered_exactly") is not True:
+        errors.append("audit_results_seal must attest exact expected-cell coverage")
+    if seal.get("partial_results_exposed") is not False:
+        errors.append("partial audit results exposure is forbidden")
+    sealed_at = _parse_time(seal.get("sealed_at_utc"), "audit_results_seal.sealed_at_utc", errors)
+    unblinded_at = _parse_time(
+        seal.get("unblinded_at_utc"), "audit_results_seal.unblinded_at_utc", errors
+    )
+    if sealed_at is not None and audit_end_times and sealed_at <= max(audit_end_times):
+        errors.append("audit bundle must seal after every audit evaluation ends")
+    if sealed_at is not None and unblinded_at is not None and unblinded_at < sealed_at:
+        errors.append("audit unblinding cannot precede complete bundle sealing")
+    return audit_by_id
+
+
 def _mean_or_none(values: Iterable[float]) -> float | None:
     materialized = list(values)
     return statistics.fmean(materialized) if materialized else None
@@ -1325,7 +2086,11 @@ def _phase_map_summary(finals: Mapping[Coordinate, Mapping[str, Any]], tolerance
     return summaries
 
 
-def _paired_summary(finals: Mapping[Coordinate, Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _paired_summary(
+    finals: Mapping[Coordinate, Mapping[str, Any]],
+    *,
+    claim_scope: str = "paired_development_summary_only",
+) -> list[dict[str, Any]]:
     by_id = {row.get("cell_id"): (coordinate, row) for coordinate, row in finals.items()}
     grouped: dict[tuple[int, float, float], list[float]] = defaultdict(list)
     unresolved: Counter[tuple[int, float, float]] = Counter()
@@ -1356,7 +2121,7 @@ def _paired_summary(finals: Mapping[Coordinate, Mapping[str, Any]]) -> list[dict
                 "mean_candidate_minus_control": _mean_or_none(values),
                 "sample_sd": statistics.stdev(values) if len(values) >= 2 else None,
                 "seed_level_differences": values,
-                "claim_scope": "paired_development_summary_only",
+                "claim_scope": claim_scope,
             }
         )
     return output
@@ -1368,8 +2133,8 @@ def validate_and_summarize(
     claim_level: str = "integrity",
     require_bracketed: bool = False,
     parent_manifest: Mapping[str, Any] | None = None,
-    p0_replay_report: Mapping[str, Any] | None = None,
-    p0_replay_report_sha256: str | None = None,
+    parent_replay_report: Mapping[str, Any] | None = None,
+    parent_replay_report_sha256: str | None = None,
     _skip_authority_for_tests: bool = False,
 ) -> dict[str, Any]:
     """Validate a manifest and return a machine-readable audit/summary.
@@ -1395,13 +2160,27 @@ def validate_and_summarize(
         errors.append("mode must be 'development' or 'confirmation'")
     _validate_frozen(manifest, errors)
     _validate_protocol(manifest, errors)
+    _validate_audit_top_level_quarantine(manifest, errors)
+    kind = _manifest_kind(manifest)
+    if _skip_authority_for_tests and kind in {
+        "p0a_single_gpu_bound",
+        "p0b_four_gpu_bound",
+    }:
+        kind_policy = _mapping_or_empty(
+            _mapping_or_empty(
+                _mapping_or_empty(_authoritative_template().get("lineage_policy")).get(
+                    "registered_descendant_kinds"
+                )
+            ).get(kind)
+        )
+        _validate_canary_coordinates(manifest, kind_policy, errors)
     if not _skip_authority_for_tests:
         _validate_authority_and_lineage(
             manifest,
             errors,
             parent_manifest=parent_manifest,
-            p0_replay_report=p0_replay_report,
-            p0_replay_report_sha256=p0_replay_report_sha256,
+            parent_replay_report=parent_replay_report,
+            parent_replay_report_sha256=parent_replay_report_sha256,
         )
     required_result_fields = manifest.get("required_result_fields")
     if (
@@ -1469,6 +2248,10 @@ def validate_and_summarize(
     _validate_blocks(finals, manifest, errors)
     _validate_retry_blocks(rows, manifest, errors)
     _validate_pairing(finals, errors)
+    if kind in {"p0a_single_gpu_bound", "p0b_four_gpu_bound"}:
+        _validate_canary_lifecycle(manifest, rows, errors)
+    if kind == "p0b_four_gpu_bound":
+        _validate_p0b_hardware(manifest, rows, errors)
     final_cell_ids = {row.get("cell_id") for row in finals.values()}
     registry_cell_ids = set(
         _mapping_or_empty(
@@ -1482,18 +2265,28 @@ def validate_and_summarize(
             f"unexpected={sorted(registry_cell_ids - final_cell_ids)}"
         )
 
-    kind = _manifest_kind(manifest)
     fresh_confirmation = kind == "fresh_confirmation_stage"
-    registered_confirmation_seeds = {
-        int(seed)
-        for seed in _mapping_or_empty(
-            _mapping_or_empty(
-                _mapping_or_empty(_authoritative_template().get("lineage_policy")).get(
-                    "registered_descendant_kinds"
-                )
-            ).get("fresh_confirmation_stage")
-        ).get("required_new_seeds", [])
-    } if fresh_confirmation and not _skip_authority_for_tests else set()
+    audit_by_id: dict[str, Mapping[str, Any]] = {}
+    if fresh_confirmation:
+        audit_by_id = _validate_p3_audit(manifest, finals, errors)
+    registered_confirmation_seeds = (
+        {
+            coordinate.seed for coordinate in finals
+        }
+        if fresh_confirmation and _skip_authority_for_tests
+        else {
+            int(seed)
+            for seed in _mapping_or_empty(
+                _mapping_or_empty(
+                    _mapping_or_empty(
+                        _authoritative_template().get("lineage_policy")
+                    ).get("registered_descendant_kinds")
+                ).get("fresh_confirmation_stage")
+            ).get("required_new_seeds", [])
+        }
+        if fresh_confirmation
+        else set()
+    )
     inference_finals = (
         {
             coordinate: row
@@ -1503,6 +2296,20 @@ def validate_and_summarize(
         if fresh_confirmation
         else finals
     )
+    if fresh_confirmation:
+        audit_inference_finals: dict[Coordinate, Mapping[str, Any]] = {}
+        for coordinate, training_row in inference_finals.items():
+            cell_id = str(training_row.get("cell_id"))
+            audit_row = audit_by_id.get(cell_id)
+            if audit_row is None:
+                continue
+            outcome = dict(training_row)
+            outcome["status"] = audit_row.get("audit_status")
+            outcome["loss"] = audit_row.get("audit_loss")
+            audit_inference_finals[coordinate] = outcome
+        inference_outcomes: Mapping[Coordinate, Mapping[str, Any]] = audit_inference_finals
+    else:
+        inference_outcomes = inference_finals
     unique_seeds = sorted({coordinate.seed for coordinate in inference_finals})
     configured_min = manifest.get("min_confirmatory_seeds")
     if not _is_int(configured_min) or configured_min < HARD_MIN_CONFIRMATORY_SEEDS:
@@ -1517,7 +2324,7 @@ def validate_and_summarize(
     if tolerance < 0.0 or not math.isfinite(tolerance):
         errors.append("analysis_policy.bracketing_tolerance must be finite and non-negative")
         tolerance = 0.0
-    phase_map = _phase_map_summary(finals, tolerance)
+    phase_map = [] if fresh_confirmation else _phase_map_summary(finals, tolerance)
     unbracketed = [
         {"h": row["h"], "mu": row["mu"], "decision": row["bracket_decision"]}
         for row in phase_map
@@ -1530,19 +2337,27 @@ def validate_and_summarize(
     if claim_level not in {"integrity", "development", "confirmatory"}:
         errors.append("claim_level must be integrity, development, or confirmatory")
     confirmatory_eligible = (
+        fresh_confirmation
+        and
         mode == "confirmation"
         and _is_int(configured_min)
         and len(unique_seeds) >= max(HARD_MIN_CONFIRMATORY_SEEDS, configured_min)
         and (fresh_confirmation or not unbracketed)
         and all(
             _canonical_status(row.get("status")) in SCIENTIFIC_STATUSES
-            for row in inference_finals.values()
+            for row in inference_outcomes.values()
         )
+        and (not fresh_confirmation or len(inference_outcomes) == len(inference_finals))
     )
     if claim_level == "confirmatory" and mode == "development":
         errors.append(
             "REFUSED_CONFIRMATORY_CLAIM: development manifests remain development-only, "
             "regardless of eval rows or bootstrap samples"
+        )
+    if claim_level == "confirmatory" and not fresh_confirmation:
+        errors.append(
+            "REFUSED_CONFIRMATORY_CLAIM: only a registered fresh_confirmation_stage "
+            "with a sealed audit bundle can support confirmation"
         )
     if claim_level == "confirmatory" and len(unique_seeds) < max(HARD_MIN_CONFIRMATORY_SEEDS, int(configured_min or 0)):
         errors.append(
@@ -1588,7 +2403,17 @@ def validate_and_summarize(
         "overall_bracket_decision": overall_bracket,
         "extension_requirements": unbracketed,
         "phase_map": phase_map,
-        "paired_development_summaries": _paired_summary(inference_finals),
+        "paired_development_summaries": (
+            [] if fresh_confirmation else _paired_summary(inference_finals)
+        ),
+        "paired_audit_summaries": (
+            _paired_summary(
+                inference_outcomes,
+                claim_scope="paired_confirmation_audit_primary_endpoint",
+            )
+            if fresh_confirmation
+            else []
+        ),
         "warnings": []
         if confirmatory_eligible
         else [
@@ -1624,9 +2449,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="exact sealed parent required by P1 and every later descendant",
     )
     parser.add_argument(
+        "--parent-replay-report",
         "--p0-replay-report",
+        dest="parent_replay_report",
         type=Path,
-        help="sealed post-deletion CPU replay report required by initial P1",
+        help="sealed post-deletion CPU replay report required by P0b and initial P1",
     )
     parser.add_argument("--output", type=Path, help="write JSON report here; default stdout")
     return parser
@@ -1636,11 +2463,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         replay_report = (
-            _load_json(args.p0_replay_report) if args.p0_replay_report else None
+            _load_json(args.parent_replay_report)
+            if args.parent_replay_report
+            else None
         )
         replay_sha = None
-        if args.p0_replay_report:
-            replay_sha = hashlib.sha256(args.p0_replay_report.read_bytes()).hexdigest()
+        if args.parent_replay_report:
+            replay_sha = hashlib.sha256(
+                args.parent_replay_report.read_bytes()
+            ).hexdigest()
         report = validate_and_summarize(
             _load_json(args.manifest),
             claim_level=args.claim_level,
@@ -1648,8 +2479,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             parent_manifest=(
                 _load_json(args.parent_manifest) if args.parent_manifest else None
             ),
-            p0_replay_report=replay_report,
-            p0_replay_report_sha256=replay_sha,
+            parent_replay_report=replay_report,
+            parent_replay_report_sha256=replay_sha,
         )
     except (ManifestError, OSError) as exc:
         print(f"PHASE_MAP_VALIDATION_ERROR\n{exc}", file=sys.stderr)

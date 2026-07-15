@@ -49,8 +49,11 @@ def _manifest(
     mode: str = "development",
 ) -> dict:
     seed_pairs = {str(seed): seed * 1000 + seed for seed in seeds}
+    confirmation_policy = copy.deepcopy(
+        phase_map._authoritative_template()["confirmation_policy"]
+    )
     manifest = {
-        "schema_version": "0.1",
+        "schema_version": "0.2",
         "status": "sealed_results",
         "study_id": "unit-phase-map-r0",
         "mode": mode,
@@ -71,7 +74,8 @@ def _manifest(
             "model_revision": GIT,
             "model_hash": HEX_A,
             "data_hash": HEX_A,
-            "eval_source_indices_hash": HEX_A,
+            "development_eval_source_indices_hash": HEX_A,
+            "audit_eval_source_indices_hash": HEX_B,
             "train_pool_source_indices_hash": HEX_A,
             "train_source_indices_hashes": {
                 str(seed): hashlib.sha256(f"train-index-{seed}".encode()).hexdigest()
@@ -81,22 +85,39 @@ def _manifest(
                 str(seed): hashlib.sha256(f"train-rows-{seed}".encode()).hexdigest()
                 for seed in seeds
             },
-            "eval_hash": HEX_A,
-            "eval_example_ids_hash": HEX_A,
-            "eval_token_ids_hash": HEX_A,
+            "development_eval_rows_hash": HEX_A,
+            "development_eval_packed_hash": HEX_A,
+            "development_eval_example_ids_hash": HEX_A,
+            "development_eval_token_ids_hash": HEX_A,
+            "audit_eval_rows_hash": HEX_B,
+            "audit_eval_packed_hash": HEX_B,
+            "audit_eval_example_ids_hash": HEX_B,
+            "audit_eval_token_ids_hash": HEX_B,
+            "audit_access_policy_hash": phase_map._sha256_canonical(
+                confirmation_policy
+            ),
             "command_hash": HEX_B,
             "randomization_plan_hash": HEX_B,
             "retry_policy_hash": HEX_A,
+            "audit_command_hash": None,
+            "audit_cell_command_hashes": None,
+            "audit_randomization_plan_hash": None,
         },
         "protocol": {
             "tuning": "full",
+            "train_rows": 5000,
+            "development_eval_rows": 1024,
+            "audit_eval_rows": 1024,
+            "split_population_rows": 7048,
             "eval_split_seed": 331,
-            "split_population_rule": (
-                "canonical_source_indices_0_through_train_rows_plus_eval_rows_minus_1"
+            "split_population_rule": "canonical_source_indices_0_through_7047",
+            "split_assignment_rule": (
+                "python_random.Random(331).shuffle_once_then_positions_0_5000_train_"
+                "5000_6024_development_6024_7048_audit"
             ),
-            "eval_selection_rule": (
-                "python_random_seed_331_shuffle_once_then_final_eval_rows"
-            ),
+            "train_pool_slice_rule": "shuffled_indices_half_open_0_5000",
+            "development_eval_slice_rule": "shuffled_indices_half_open_5000_6024",
+            "audit_eval_slice_rule": "shuffled_indices_half_open_6024_7048",
             "train_shuffle_rule": (
                 "per_study_shuffle_seed_applies_only_to_disjoint_pre_shuffle_train_pool"
             ),
@@ -109,10 +130,18 @@ def _manifest(
             "on_demand_fallback": False,
             "injected_baseline": False,
             "per_example_loss_required": True,
-            "eval_rows": 1024,
             "token_budget": 655360,
             "seq_len": 128,
+            "machine_type": "a2-highgpu-4g",
+            "gpu_slots": 4,
         },
+        "confirmation_policy": confirmation_policy,
+        "audit_checkpoint_registry": None,
+        "audit_unblind_authorization": None,
+        "audit_randomization": None,
+        "audit_access_log": [],
+        "audit_results": [],
+        "audit_results_seal": None,
         "horizon_work": {
             "16": {
                 "fixed_window_microsteps": 16,
@@ -165,6 +194,7 @@ def _manifest(
             "seed",
             "training_seed",
             "status",
+            "evaluation_role",
             "failure_reason",
             "loss",
             "work",
@@ -172,7 +202,14 @@ def _manifest(
             "image_digest",
             "model_hash",
             "data_hash",
+            "eval_source_indices_hash",
+            "train_pool_source_indices_hash",
+            "train_source_indices_hash",
+            "train_rows_hash",
+            "eval_rows_hash",
             "eval_hash",
+            "eval_example_ids_hash",
+            "eval_token_ids_hash",
             "command_hash",
             "capture_uri",
             "capture_sha256",
@@ -196,10 +233,16 @@ def _manifest(
         ],
         "results": [],
     }
-    loss_curve = {
-        0.0: {etas[0]: 1.10, etas[1]: 1.00, etas[2]: 1.20},
-        0.9: {etas[0]: 1.20, etas[1]: 1.05, etas[2]: 1.30},
-    }
+    if len(etas) == 3:
+        loss_curve = {
+            0.0: {etas[0]: 1.10, etas[1]: 1.00, etas[2]: 1.20},
+            0.9: {etas[0]: 1.20, etas[1]: 1.05, etas[2]: 1.30},
+        }
+    else:
+        loss_curve = {
+            0.0: {eta: 1.00 for eta in etas},
+            0.9: {eta: 1.05 for eta in etas},
+        }
     for seed in seeds:
         for eta in etas:
             block_id = f"h16-eta{eta:g}-s{seed}"
@@ -216,6 +259,7 @@ def _manifest(
                         "seed": seed,
                         "training_seed": seed_pairs[str(seed)],
                         "status": "COMPLETED",
+                        "evaluation_role": "development",
                         "failure_reason": None,
                         "loss": loss_curve[mu][eta] + (seed % 7) * 0.001,
                         "work": {
@@ -251,7 +295,10 @@ def _manifest(
                         "train_rows_hash": manifest["frozen"]["train_rows_hashes"][
                             str(seed)
                         ],
+                        "eval_rows_hash": HEX_A,
                         "eval_hash": HEX_A,
+                        "eval_example_ids_hash": HEX_A,
+                        "eval_token_ids_hash": HEX_A,
                         "command_hash": hashlib.sha256(cell_id.encode("utf-8")).hexdigest(),
                         "capture_uri": f"gs://bucket/{cell_id}/capture",
                         "capture_sha256": HEX_A,
@@ -322,32 +369,170 @@ def _git_head() -> str:
     ).stdout.strip()
 
 
-def _authoritative_p0() -> dict:
+def _p3_manifest() -> dict:
+    seeds = (383, 397, 409, 421, 433, 443, 457, 461)
+    manifest = _manifest(seeds=seeds, etas=(0.04375,), mode="confirmation")
+    manifest["lineage"] = {"descendant_kind": "fresh_confirmation_stage"}
+    frozen = manifest["frozen"]
+    frozen["audit_command_hash"] = hashlib.sha256(b"audit-command").hexdigest()
+    frozen["audit_cell_command_hashes"] = {
+        row["cell_id"]: hashlib.sha256(
+            f"audit-{row['cell_id']}".encode()
+        ).hexdigest()
+        for row in manifest["results"]
+    }
+    frozen["audit_randomization_plan_hash"] = hashlib.sha256(
+        b"audit-randomization"
+    ).hexdigest()
+
+    original_losses = {row["cell_id"]: row["loss"] for row in manifest["results"]}
+    for row in manifest["results"]:
+        row["evaluation_role"] = "none"
+        row["loss"] = None
+        for field in (
+            "eval_source_indices_hash",
+            "eval_rows_hash",
+            "eval_hash",
+            "eval_example_ids_hash",
+            "eval_token_ids_hash",
+            "per_example_loss_uri",
+            "per_example_loss_sha256",
+        ):
+            row[field] = None
+        row["work"]["eval_rows"] = 0
+        row["checkpoint_uri"] = f"gs://bucket/{row['cell_id']}/final.ckpt"
+        row["checkpoint_sha256"] = hashlib.sha256(
+            f"checkpoint-{row['cell_id']}".encode()
+        ).hexdigest()
+        row["checkpoint_sealed_at"] = "2026-07-14T13:00:00Z"
+
+    registry = {
+        "schema": "yeto_p3_checkpoint_registry_v1",
+        "cells": [
+            {
+                "cell_id": row["cell_id"],
+                "final_attempt_id": row["attempt_id"],
+                "status": row["status"],
+                "checkpoint_uri": row["checkpoint_uri"],
+                "checkpoint_sha256": row["checkpoint_sha256"],
+                "command_hash": row["command_hash"],
+                "training_completed_at": row["ended_at"],
+            }
+            for row in manifest["results"]
+        ],
+        "sealed_at_utc": "2026-07-14T13:10:00Z",
+    }
+    manifest["audit_checkpoint_registry"] = registry
+    ordered_ids = [row["cell_id"] for row in reversed(manifest["results"])]
+    manifest["audit_randomization"] = {
+        "schema": "yeto_p3_audit_randomization_v1",
+        "ordered_cell_ids": ordered_ids,
+        "plan_hash": frozen["audit_randomization_plan_hash"],
+        "created_at_utc": "2026-07-14T11:00:00Z",
+    }
+    authorization = {
+        "schema": "yeto_p3_audit_authorization_v1",
+        "loss_blind": True,
+        "all_training_cells_resolved_and_checkpoint_registry_sealed": True,
+        "p3_manifest_canonical_sha256": hashlib.sha256(b"p3-training-manifest").hexdigest(),
+        "checkpoint_registry_sha256": phase_map._sha256_canonical(registry),
+        "audit_command_registry_sha256": phase_map._sha256_canonical(
+            frozen["audit_cell_command_hashes"]
+        ),
+        "audit_randomization_plan_sha256": frozen[
+            "audit_randomization_plan_hash"
+        ],
+        "training_completed_max_utc": "2026-07-14T13:00:00Z",
+        "authorized_at_utc": "2026-07-14T13:20:00Z",
+        "partial_results_withheld": True,
+    }
+    manifest["audit_unblind_authorization"] = authorization
+    authorization_sha = phase_map._sha256_canonical(authorization)
+    rows_by_id = {row["cell_id"]: row for row in manifest["results"]}
+    audit_results = []
+    access_log = []
+    for order_index, cell_id in enumerate(ordered_ids):
+        training = rows_by_id[cell_id]
+        audit_row = {
+            "cell_id": cell_id,
+            "evaluation_role": "confirmation_audit",
+            "audit_status": "COMPLETED",
+            "audit_loss": original_losses[cell_id],
+            "audit_eval_source_indices_hash": frozen[
+                "audit_eval_source_indices_hash"
+            ],
+            "audit_eval_rows_hash": frozen["audit_eval_rows_hash"],
+            "audit_eval_packed_hash": frozen["audit_eval_packed_hash"],
+            "audit_eval_example_ids_hash": frozen[
+                "audit_eval_example_ids_hash"
+            ],
+            "audit_eval_token_ids_hash": frozen["audit_eval_token_ids_hash"],
+            "audit_command_hash": frozen["audit_cell_command_hashes"][cell_id],
+            "audit_order_index": order_index,
+            "audit_per_example_loss_uri": f"gs://bucket/{cell_id}/audit.jsonl",
+            "audit_per_example_loss_sha256": hashlib.sha256(
+                f"audit-output-{cell_id}".encode()
+            ).hexdigest(),
+            "checkpoint_uri": training["checkpoint_uri"],
+            "checkpoint_sha256": training["checkpoint_sha256"],
+            "training_attempt_id": training["attempt_id"],
+            "training_completed_at": training["ended_at"],
+            "audit_started_at": "2026-07-14T14:00:00Z",
+            "audit_ended_at": "2026-07-14T14:01:00Z",
+            "audit_unblind_authorization_sha256": authorization_sha,
+        }
+        audit_results.append(audit_row)
+        access_log.append(
+            {
+                "cell_id": cell_id,
+                "checkpoint_sha256": training["checkpoint_sha256"],
+                "audit_eval_packed_hash": frozen["audit_eval_packed_hash"],
+                "audit_command_hash": frozen["audit_cell_command_hashes"][cell_id],
+                "access_started_at": audit_row["audit_started_at"],
+                "access_ended_at": audit_row["audit_ended_at"],
+            }
+        )
+    manifest["audit_results"] = audit_results
+    manifest["audit_access_log"] = access_log
+    manifest["audit_results_seal"] = {
+        "schema": "yeto_p3_audit_results_seal_v1",
+        "status": "SEALED",
+        "audit_result_registry_sha256": phase_map._sha256_canonical(audit_results),
+        "audit_cell_count": len(audit_results),
+        "expected_cell_ids_covered_exactly": True,
+        "sealed_at_utc": "2026-07-14T15:00:00Z",
+        "partial_results_exposed": False,
+        "unblinded_at_utc": "2026-07-14T15:01:00Z",
+    }
+    return manifest
+
+
+def _authoritative_p0a() -> dict:
     manifest = copy.deepcopy(phase_map._authoritative_template())
     manifest["status"] = "sealed_results"
-    manifest["study_id"] = "bp-phase-map-p0-unit"
+    manifest["study_id"] = "bp-phase-map-p0a-unit"
     manifest["expected_grid"] = {
         "h": [16],
         "mu": [0.0, 0.5, 0.9],
-        "eta": [0.04375],
+        "eta": [0.0875],
         "seeds": [337],
     }
     manifest["seed_pairs"] = {"337": 337337}
-    manifest["protocol"]["token_budget"] = 8192
+    manifest["protocol"]["token_budget"] = 65536
     manifest["protocol"]["gpu_slots"] = 1
     manifest["protocol"]["machine_type"] = "a2-highgpu-1g"
     manifest["horizon_work"] = {
         "16": {
             "fixed_window_microsteps": 16,
             "fixed_window_tokens": 2048,
-            "outer_steps": 4,
+            "outer_steps": 32,
         }
     }
     cells = []
     for mu in (0.0, 0.5, 0.9):
-        cell_id = f"bp-phase-map-p0-unit-h16-mu{mu:g}-eta0.04375-s337"
+        cell_id = f"bp-phase-map-p0a-unit-h16-mu{mu:g}-eta0.0875-s337"
         cells.append(
-            {"cell_id": cell_id, "h": 16, "mu": mu, "eta": 0.04375, "seed": 337}
+            {"cell_id": cell_id, "h": 16, "mu": mu, "eta": 0.0875, "seed": 337}
         )
     manifest["expected_cells"] = cells
     frozen = manifest["frozen"]
@@ -357,13 +542,22 @@ def _authoritative_p0() -> dict:
             "image_digest": HEX_A,
             "model_hash": HEX_A,
             "data_hash": HEX_A,
-            "eval_source_indices_hash": HEX_A,
+            "development_eval_source_indices_hash": HEX_A,
+            "audit_eval_source_indices_hash": HEX_B,
             "train_pool_source_indices_hash": HEX_B,
             "train_source_indices_hashes": {"337": HEX_A},
             "train_rows_hashes": {"337": HEX_B},
-            "eval_hash": HEX_A,
-            "eval_example_ids_hash": HEX_A,
-            "eval_token_ids_hash": HEX_A,
+            "development_eval_rows_hash": HEX_A,
+            "development_eval_packed_hash": HEX_A,
+            "development_eval_example_ids_hash": HEX_A,
+            "development_eval_token_ids_hash": HEX_A,
+            "audit_eval_rows_hash": HEX_B,
+            "audit_eval_packed_hash": HEX_B,
+            "audit_eval_example_ids_hash": HEX_B,
+            "audit_eval_token_ids_hash": HEX_B,
+            "audit_access_policy_hash": phase_map._sha256_canonical(
+                manifest["confirmation_policy"]
+            ),
             "command_hash": HEX_B,
             "cell_command_hashes": {
                 cell["cell_id"]: hashlib.sha256(cell["cell_id"].encode()).hexdigest()
@@ -390,8 +584,8 @@ def _authoritative_p0() -> dict:
             phase_map.AUTHORITATIVE_PREREG_TEMPLATE_SHA256
         ),
         "parent_manifest_sha256": None,
-        "p0_replay_report_sha256": None,
-        "descendant_kind": "p0_canary_bound",
+        "parent_replay_report_sha256": None,
+        "descendant_kind": "p0a_single_gpu_bound",
     }
     results = []
     for order_index, cell in enumerate(cells):
@@ -403,19 +597,20 @@ def _authoritative_p0() -> dict:
                 **cell,
                 "training_seed": 337337,
                 "status": "COMPLETED",
+                "evaluation_role": "development",
                 "failure_reason": None,
                 "loss": 2.0 + 0.01 * mu,
                 "work": {
                     "fixed_window_microsteps": 16,
                     "fixed_window_tokens": 2048,
-                    "outer_steps": 4,
-                    "token_budget": 8192,
+                    "outer_steps": 32,
+                    "token_budget": 65536,
                     "eval_rows": 1024,
                 },
                 "observed_work": {
-                    "tokens": 8192,
-                    "microsteps": 64,
-                    "outer_steps": 4,
+                    "tokens": 65536,
+                    "microsteps": 512,
+                    "outer_steps": 32,
                     "full_quorum": True,
                     "fixed_window_exact": True,
                     "version_matched_anchor_resolved": True,
@@ -424,7 +619,9 @@ def _authoritative_p0() -> dict:
                 "image_digest": frozen["image_digest"],
                 "model_hash": frozen["model_hash"],
                 "data_hash": frozen["data_hash"],
-                "eval_source_indices_hash": frozen["eval_source_indices_hash"],
+                "eval_source_indices_hash": frozen[
+                    "development_eval_source_indices_hash"
+                ],
                 "train_pool_source_indices_hash": frozen[
                     "train_pool_source_indices_hash"
                 ],
@@ -432,15 +629,25 @@ def _authoritative_p0() -> dict:
                     "337"
                 ],
                 "train_rows_hash": frozen["train_rows_hashes"]["337"],
-                "eval_hash": frozen["eval_hash"],
+                "eval_rows_hash": frozen["development_eval_rows_hash"],
+                "eval_hash": frozen["development_eval_packed_hash"],
+                "eval_example_ids_hash": frozen[
+                    "development_eval_example_ids_hash"
+                ],
+                "eval_token_ids_hash": frozen[
+                    "development_eval_token_ids_hash"
+                ],
                 "command_hash": frozen["cell_command_hashes"][cell_id],
+                "normalized_workload_command_hash": hashlib.sha256(
+                    f"normalized-{mu:g}".encode()
+                ).hexdigest(),
                 "capture_uri": f"gs://bucket/{cell_id}/capture",
                 "capture_sha256": HEX_A,
                 "result_uri": f"gs://bucket/{cell_id}/result.json",
                 "result_sha256": HEX_A,
                 "per_example_loss_uri": f"gs://bucket/{cell_id}/eval.jsonl",
                 "per_example_loss_sha256": HEX_A,
-                "paired_control_id": cells[0]["cell_id"],
+                "paired_control_id": None if mu == 0.0 else cells[0]["cell_id"],
                 "barrier": True,
                 "version_matched": True,
                 "matrix_merge": "rda",
@@ -448,7 +655,7 @@ def _authoritative_p0() -> dict:
                 "delta_correction": "none",
                 "injected_baseline": False,
                 "spot": True,
-                "block_id": "bp-phase-map-p0-unit-block-h16-eta0.04375-s337",
+                "block_id": "bp-phase-map-p0a-unit-block-h16-eta0.0875-s337",
                 "order_index": order_index,
                 "attempt": 1,
                 "retry_of": None,
@@ -463,6 +670,17 @@ def _authoritative_p0() -> dict:
                     "image_id": frozen["image_id"],
                     "provisioning_evidence_uri": f"gs://bucket/{cell_id}/spot.json",
                     "provisioning_evidence_sha256": HEX_B,
+                    "artifact_sealed_at": "2026-07-14T13:05:00Z",
+                    "deletion_requested_at": "2026-07-14T13:10:00Z",
+                    "deletion_completed_at": "2026-07-14T13:20:00Z",
+                    "acquisition_status": "sealed_acquisition_pending_teardown",
+                    "acquisition_manifest_sha256": HEX_A,
+                    "acquisition_manifest_canonical_sha256": HEX_A,
+                    "acquisition_checksum_sha256": HEX_A,
+                    "acquisition_seal_sha256": HEX_A,
+                    "final_manifest_status": "sealed_results",
+                    "deletion_evidence_sha256": HEX_A,
+                    "finalized_at": "2026-07-14T13:30:00Z",
                 },
                 "started_at": "2026-07-14T12:00:00Z",
                 "ended_at": "2026-07-14T13:00:00Z",
@@ -470,6 +688,111 @@ def _authoritative_p0() -> dict:
         )
     manifest["results"] = results
     return manifest
+
+
+def _replay_for(parent: dict) -> tuple[dict, str]:
+    replay = {
+        "schema": "yeto_p0_cpu_replay_v1",
+        "status": "PASS",
+        "gpu_deleted_before_replay": True,
+        "all_steps_replayed": True,
+        "phase_map_manifest_canonical_sha256": phase_map._sha256_canonical(parent),
+    }
+    replay_bytes = (json.dumps(replay, indent=2, sort_keys=True) + "\n").encode()
+    return replay, hashlib.sha256(replay_bytes).hexdigest()
+
+
+def _authoritative_p0b(parent: dict) -> tuple[dict, dict, str]:
+    manifest = copy.deepcopy(parent)
+    manifest["study_id"] = "bp-phase-map-p0b-unit"
+    manifest["protocol"]["machine_type"] = "a2-highgpu-4g"
+    manifest["protocol"]["gpu_slots"] = 4
+    replay, replay_sha = _replay_for(parent)
+    manifest["lineage"] = {
+        "authoritative_prereg_path": phase_map.AUTHORITATIVE_PREREG_PATH,
+        "authoritative_prereg_source_commit": phase_map.AUTHORITATIVE_PREREG_SOURCE_COMMIT,
+        "authoritative_prereg_template_sha256": phase_map.AUTHORITATIVE_PREREG_TEMPLATE_SHA256,
+        "parent_manifest_sha256": phase_map._sha256_canonical(parent),
+        "parent_replay_report_sha256": replay_sha,
+        "descendant_kind": "p0b_four_gpu_bound",
+    }
+    old_cells = list(manifest["expected_cells"])
+    id_map = {
+        cell["cell_id"]: cell["cell_id"].replace("p0a-unit", "p0b-unit")
+        for cell in old_cells
+    }
+    for cell in manifest["expected_cells"]:
+        cell["cell_id"] = id_map[cell["cell_id"]]
+    for row in manifest["results"]:
+        old_id = row["cell_id"]
+        cell_id = id_map[old_id]
+        row["cell_id"] = cell_id
+        row["attempt_id"] = f"{cell_id}-attempt-1"
+        row["paired_control_id"] = (
+            None if row["mu"] == 0.0 else id_map[row["paired_control_id"]]
+        )
+        row["block_id"] = row["block_id"].replace("p0a-unit", "p0b-unit")
+        row["result_uri"] = f"gs://bucket/{cell_id}/result.json"
+        row["capture_uri"] = f"gs://bucket/{cell_id}/capture"
+        row["per_example_loss_uri"] = f"gs://bucket/{cell_id}/eval.jsonl"
+        row["hardware"] = {
+            "provider": "gcp",
+            "zone": "us-central1-a",
+            "region": "us-central1-a",
+            "market": "spot",
+            "instance_type": "a2-highgpu-4g",
+            "instance_name": f"p0b-{row['order_index']}",
+            "instance_id": f"900{row['order_index']}",
+            "instance_numeric_id": f"900{row['order_index']}",
+            "boot_disk_name": f"p0b-disk-{row['order_index']}",
+            "boot_disk_numeric_id": f"800{row['order_index']}",
+            "image_id": manifest["frozen"]["image_id"],
+            "source_image_numeric_id": manifest["frozen"]["image_id"],
+            "provisioning_evidence_uri": f"gs://bucket/{cell_id}/spot.json",
+            "provisioning_evidence_sha256": HEX_B,
+            "provisioning_started_at": "2026-07-14T11:00:00Z",
+            "provisioning_completed_at": "2026-07-14T11:05:00Z",
+            "nvidia_smi_inventory_uri": f"gs://bucket/{cell_id}/nvidia-smi.json",
+            "nvidia_smi_inventory_sha256": HEX_A,
+            "learner_gpu_map_uri": f"gs://bucket/{cell_id}/gpu-map.json",
+            "learner_gpu_map_sha256": HEX_A,
+            "barrier_version_trace_uri": f"gs://bucket/{cell_id}/barrier.jsonl",
+            "barrier_version_trace_sha256": HEX_A,
+            "distinct_a100_gpu_uuid_count": 4,
+            "learner_gpu_uuid_bijection": {
+                "0": "GPU-a",
+                "1": "GPU-b",
+                "2": "GPU-c",
+                "3": "GPU-d",
+            },
+            "artifact_sealed_at": "2026-07-14T13:05:00Z",
+            "deletion_requested_at": "2026-07-14T13:10:00Z",
+            "deletion_completed_at": "2026-07-14T13:20:00Z",
+            "acquisition_status": "sealed_acquisition_pending_teardown",
+            "acquisition_manifest_sha256": HEX_A,
+            "acquisition_manifest_canonical_sha256": HEX_A,
+            "acquisition_checksum_sha256": HEX_A,
+            "acquisition_seal_sha256": HEX_A,
+            "final_manifest_status": "sealed_results",
+            "deletion_evidence_sha256": HEX_A,
+            "finalized_at": "2026-07-14T13:30:00Z",
+            "instance_not_found_evidence_uri": f"gs://bucket/{cell_id}/vm-gone.json",
+            "instance_not_found_evidence_sha256": HEX_A,
+            "disk_not_found_evidence_uri": f"gs://bucket/{cell_id}/disk-gone.json",
+            "disk_not_found_evidence_sha256": HEX_A,
+            "zero_accelerator_evidence_uri": f"gs://bucket/{cell_id}/gpu-gone.json",
+            "zero_accelerator_evidence_sha256": HEX_A,
+        }
+    manifest["frozen"]["cell_command_hashes"] = {
+        row["cell_id"]: hashlib.sha256(row["cell_id"].encode()).hexdigest()
+        for row in manifest["results"]
+    }
+    for row in manifest["results"]:
+        row["command_hash"] = manifest["frozen"]["cell_command_hashes"][row["cell_id"]]
+    manifest["frozen"]["command_hash"] = hashlib.sha256(b"p0b-command").hexdigest()
+    manifest["frozen"]["randomization_plan_hash"] = hashlib.sha256(b"p0b-order").hexdigest()
+    manifest["randomization"]["plan_hash"] = manifest["frozen"]["randomization_plan_hash"]
+    return manifest, replay, replay_sha
 
 
 def _authoritative_p1(parent: dict) -> tuple[dict, dict, str]:
@@ -486,14 +809,24 @@ def _authoritative_p1(parent: dict) -> tuple[dict, dict, str]:
     parent_frozen = parent["frozen"]
     for field in (
         "git_commit",
+        "image_id",
         "image_digest",
+        "model_id",
+        "model_revision",
         "model_hash",
         "data_hash",
-        "eval_source_indices_hash",
+        "development_eval_source_indices_hash",
+        "audit_eval_source_indices_hash",
         "train_pool_source_indices_hash",
-        "eval_hash",
-        "eval_example_ids_hash",
-        "eval_token_ids_hash",
+        "development_eval_rows_hash",
+        "development_eval_packed_hash",
+        "development_eval_example_ids_hash",
+        "development_eval_token_ids_hash",
+        "audit_eval_rows_hash",
+        "audit_eval_packed_hash",
+        "audit_eval_example_ids_hash",
+        "audit_eval_token_ids_hash",
+        "audit_access_policy_hash",
         "retry_policy_hash",
     ):
         frozen[field] = parent_frozen[field]
@@ -507,15 +840,7 @@ def _authoritative_p1(parent: dict) -> tuple[dict, dict, str]:
     frozen["randomization_plan_hash"] = HEX_A
     manifest["expected_cells"] = cells
     manifest["randomization"]["plan_hash"] = HEX_A
-    replay = {
-        "schema": "yeto_p0_cpu_replay_v1",
-        "status": "PASS",
-        "gpu_deleted_before_replay": True,
-        "all_steps_replayed": True,
-        "phase_map_manifest_canonical_sha256": phase_map._sha256_canonical(parent),
-    }
-    replay_bytes = (json.dumps(replay, indent=2, sort_keys=True) + "\n").encode()
-    replay_sha = hashlib.sha256(replay_bytes).hexdigest()
+    replay, replay_sha = _replay_for(parent)
     manifest["lineage"] = {
         "authoritative_prereg_path": phase_map.AUTHORITATIVE_PREREG_PATH,
         "authoritative_prereg_source_commit": (
@@ -525,7 +850,7 @@ def _authoritative_p1(parent: dict) -> tuple[dict, dict, str]:
             phase_map.AUTHORITATIVE_PREREG_TEMPLATE_SHA256
         ),
         "parent_manifest_sha256": phase_map._sha256_canonical(parent),
-        "p0_replay_report_sha256": replay_sha,
+        "parent_replay_report_sha256": replay_sha,
         "descendant_kind": "initial_bound_p1_r0",
     }
     manifest["results"] = []
@@ -821,22 +1146,116 @@ def test_one_seed_development_manifest_refuses_confirmatory_claim() -> None:
         validate_and_summarize(_manifest(), claim_level="confirmatory")
 
 
-def test_eight_seed_confirmation_can_be_confirmatory() -> None:
+def test_eight_seed_nonregistered_confirmation_is_still_refused() -> None:
     seeds = (347, 359, 373, 383, 397, 409, 421, 433)
-    report = validate_and_summarize(
-        _manifest(seeds=seeds, mode="confirmation"),
-        claim_level="confirmatory",
-        require_bracketed=True,
-    )
+    with pytest.raises(ManifestError, match="fresh_confirmation_stage"):
+        validate_and_summarize(
+            _manifest(seeds=seeds, mode="confirmation"),
+            claim_level="confirmatory",
+            require_bracketed=True,
+        )
+
+
+def test_valid_p3_uses_sealed_audit_loss_as_sole_primary_endpoint() -> None:
+    manifest = _p3_manifest()
+    report = validate_and_summarize(manifest, claim_level="confirmatory")
     assert report["confirmatory_eligible"] is True
     assert report["independent_seed_count"] == 8
+    assert report["paired_development_summaries"] == []
     paired = next(
         row
-        for row in report["paired_development_summaries"]
+        for row in report["paired_audit_summaries"]
         if row["mu"] == 0.9 and row["eta"] == 0.04375
     )
     assert paired["n_paired_completed"] == 8
-    assert paired["sample_sd"] == pytest.approx(0.0, abs=1e-15)
+    assert paired["mean_candidate_minus_control"] == pytest.approx(0.05)
+    assert paired["claim_scope"] == "paired_confirmation_audit_primary_endpoint"
+
+
+def test_pre_p3_audit_outcome_or_access_is_rejected() -> None:
+    manifest = _manifest()
+    manifest["audit_results"] = [{"cell_id": manifest["results"][0]["cell_id"]}]
+    manifest["results"][0]["audit_loss"] = 1.0
+    with pytest.raises(ManifestError, match="audit_results must remain empty"):
+        validate_and_summarize(manifest)
+
+
+def test_p3_training_cannot_open_dev_or_audit_outcomes() -> None:
+    manifest = _p3_manifest()
+    training = manifest["results"][0]
+    training["evaluation_role"] = "development"
+    training["loss"] = 1.0
+    training["eval_hash"] = manifest["frozen"]["development_eval_packed_hash"]
+    manifest["audit_results"][0]["evaluation_role"] = "development"
+    with pytest.raises(ManifestError) as caught:
+        validate_and_summarize(manifest, claim_level="confirmatory")
+    assert "evaluation_role must be 'none'" in str(caught.value)
+    assert "loss must be null" in str(caught.value)
+    assert "evaluation_role must be 'confirmation_audit'" in str(caught.value)
+
+
+def test_p3_audit_must_start_after_all_training_and_shared_authorization() -> None:
+    manifest = _p3_manifest()
+    manifest["audit_results"][0]["audit_started_at"] = "2026-07-14T13:00:00Z"
+    manifest["audit_access_log"][0]["access_started_at"] = "2026-07-14T13:00:00Z"
+    with pytest.raises(ManifestError) as caught:
+        validate_and_summarize(manifest, claim_level="confirmatory")
+    assert "started before shared authorization" in str(caught.value)
+    assert "started before all P3 training" in str(caught.value)
+
+
+def test_p3_partial_or_unsealed_audit_bundle_is_rejected() -> None:
+    manifest = _p3_manifest()
+    removed = manifest["audit_results"].pop()
+    manifest["audit_access_log"] = [
+        row
+        for row in manifest["audit_access_log"]
+        if row["cell_id"] != removed["cell_id"]
+    ]
+    manifest["audit_results_seal"]["partial_results_exposed"] = True
+    with pytest.raises(ManifestError) as caught:
+        validate_and_summarize(manifest, claim_level="confirmatory")
+    assert "cover expected P3 cells exactly" in str(caught.value)
+    assert "partial audit results exposure is forbidden" in str(caught.value)
+
+
+def test_p3_checkpoint_registry_rejects_incomplete_and_duplicate_cells() -> None:
+    manifest = _p3_manifest()
+    cells = manifest["audit_checkpoint_registry"]["cells"]
+    cells.pop()
+    cells.append(copy.deepcopy(cells[0]))
+    with pytest.raises(ManifestError) as caught:
+        validate_and_summarize(manifest, claim_level="confirmatory")
+    assert "duplicates cell" in str(caught.value)
+    assert "must cover expected P3 cells exactly" in str(caught.value)
+
+
+def test_p3_randomization_must_precede_authorization() -> None:
+    manifest = _p3_manifest()
+    manifest["audit_randomization"]["created_at_utc"] = "2026-07-14T13:30:00Z"
+    with pytest.raises(ManifestError, match="created before authorization"):
+        validate_and_summarize(manifest, claim_level="confirmatory")
+
+
+def test_p3_rejects_nonfinite_scientific_audit_loss() -> None:
+    manifest = _p3_manifest()
+    manifest["audit_results"][0]["audit_loss"] = float("nan")
+    with pytest.raises(ManifestError, match="positive finite COMPLETED audit_loss"):
+        validate_and_summarize(manifest, claim_level="confirmatory")
+
+
+def test_spot_only_rejects_on_demand_or_fallback_evidence() -> None:
+    manifest = _manifest()
+    manifest["protocol"]["spot_only"] = False
+    manifest["protocol"]["on_demand_fallback"] = True
+    manifest["results"][0]["spot"] = False
+    manifest["results"][0]["hardware"]["market"] = "on-demand"
+    with pytest.raises(ManifestError) as caught:
+        validate_and_summarize(manifest)
+    assert "protocol.spot_only must be True" in str(caught.value)
+    assert "protocol.on_demand_fallback must be False" in str(caught.value)
+    assert ".spot must be true" in str(caught.value)
+    assert "hardware.market must be 'spot'" in str(caught.value)
 
 
 def test_provenance_mismatch_is_rejected() -> None:
@@ -850,7 +1269,7 @@ def test_provenance_mismatch_is_rejected() -> None:
 def test_cli_emits_json_and_refuses_confirmation(tmp_path: Path, capsys) -> None:
     manifest_path = tmp_path / "manifest.json"
     output_path = tmp_path / "report.json"
-    manifest_path.write_text(json.dumps(_authoritative_p0()), encoding="utf-8")
+    manifest_path.write_text(json.dumps(_authoritative_p0a()), encoding="utf-8")
     assert phase_map.main(
         [
             str(manifest_path),
@@ -870,21 +1289,30 @@ def test_cli_emits_json_and_refuses_confirmation(tmp_path: Path, capsys) -> None
 
 
 def test_hard_pinned_authority_rejects_forged_template_identity() -> None:
-    manifest = _authoritative_p0()
+    manifest = _authoritative_p0a()
     manifest["lineage"]["authoritative_prereg_template_sha256"] = HEX_A
     with pytest.raises(ManifestError, match="template_sha256 is not hard-pinned"):
         _validate_with_authority(manifest)
 
 
-def test_initial_p1_requires_exact_p0_parent_and_replay_gate() -> None:
-    parent = _authoritative_p0()
-    manifest, replay, replay_sha = _authoritative_p1(parent)
+def test_p0b_and_initial_p1_require_exact_parent_replay_chain() -> None:
+    p0a = _authoritative_p0a()
+    p0b, p0a_replay, p0a_replay_sha = _authoritative_p0b(p0a)
+    p0b_report = _validate_with_authority(
+        p0b,
+        parent_manifest=p0a,
+        parent_replay_report=p0a_replay,
+        parent_replay_report_sha256=p0a_replay_sha,
+    )
+    assert p0b_report["integrity_status"] == "VALIDATED"
+
+    manifest, replay, replay_sha = _authoritative_p1(p0b)
 
     report = _validate_with_authority(
         manifest,
-        parent_manifest=parent,
-        p0_replay_report=replay,
-        p0_replay_report_sha256=replay_sha,
+        parent_manifest=p0b,
+        parent_replay_report=replay,
+        parent_replay_report_sha256=replay_sha,
     )
     assert report["integrity_status"] == "BOUND_LAUNCH_AUTHORITY_VALIDATED"
     assert report["expected_cell_count"] == 36
@@ -892,24 +1320,103 @@ def test_initial_p1_requires_exact_p0_parent_and_replay_gate() -> None:
     with pytest.raises(ManifestError, match="requires the exact sealed parent"):
         _validate_with_authority(
             manifest,
-            p0_replay_report=replay,
-            p0_replay_report_sha256=replay_sha,
+            parent_replay_report=replay,
+            parent_replay_report_sha256=replay_sha,
         )
 
-    with pytest.raises(ManifestError, match="exact sealed P0 CPU replay"):
-        _validate_with_authority(manifest, parent_manifest=parent)
+    with pytest.raises(ManifestError, match="exact sealed parent CPU replay"):
+        _validate_with_authority(manifest, parent_manifest=p0b)
+
+    with pytest.raises(ManifestError, match="parent kind must be 'p0b_four_gpu_bound'"):
+        _validate_with_authority(
+            manifest,
+            parent_manifest=p0a,
+            parent_replay_report=p0a_replay,
+            parent_replay_report_sha256=p0a_replay_sha,
+        )
 
 
-def test_initial_p1_cannot_drift_from_passing_p0_or_expected_cells() -> None:
-    parent = _authoritative_p0()
+def test_p0b_rejects_coordinate_work_or_gpu_bijection_drift() -> None:
+    p0a = _authoritative_p0a()
+    p0b, replay, replay_sha = _authoritative_p0b(p0a)
+    p0b["results"][0]["work"]["token_budget"] = 32768
+    p0b["results"][1]["hardware"]["learner_gpu_uuid_bijection"]["3"] = "GPU-a"
+    p0b["results"][2]["normalized_workload_command_hash"] = HEX_B
+    with pytest.raises(ManifestError) as caught:
+        _validate_with_authority(
+            p0b,
+            parent_manifest=p0a,
+            parent_replay_report=replay,
+            parent_replay_report_sha256=replay_sha,
+        )
+    assert "differs from P0a workload field work" in str(caught.value)
+    assert "four distinct GPU UUIDs" in str(caught.value)
+    assert "normalized_workload_command_hash" in str(caught.value)
+
+
+def test_p0b_rejects_wrong_raw_parent_replay_hash() -> None:
+    p0a = _authoritative_p0a()
+    p0b, replay, replay_sha = _authoritative_p0b(p0a)
+    p0b["lineage"]["parent_replay_report_sha256"] = HEX_A
+    with pytest.raises(ManifestError, match="does not match the raw report bytes"):
+        _validate_with_authority(
+            p0b,
+            parent_manifest=p0a,
+            parent_replay_report=replay,
+            parent_replay_report_sha256=replay_sha,
+        )
+
+
+def test_p0b_rejects_missing_exact_teardown_and_barrier_evidence() -> None:
+    p0a = _authoritative_p0a()
+    p0b, replay, replay_sha = _authoritative_p0b(p0a)
+    del p0b["results"][0]["hardware"]["barrier_version_trace_sha256"]
+    p0b["results"][0]["hardware"]["deletion_completed_at"] = (
+        "2026-07-14T13:00:00Z"
+    )
+    with pytest.raises(ManifestError) as caught:
+        _validate_with_authority(
+            p0b,
+            parent_manifest=p0a,
+            parent_replay_report=replay,
+            parent_replay_report_sha256=replay_sha,
+        )
+    assert "missing P0b evidence fields" in str(caught.value)
+    assert "timestamps must order" in str(caught.value)
+
+
+def test_canary_rejects_intermediate_legacy_or_mixed_lifecycle_state() -> None:
+    intermediate = _authoritative_p0a()
+    intermediate["status"] = "sealed_acquisition_pending_teardown"
+    with pytest.raises(ManifestError, match="status must be"):
+        _validate_with_authority(intermediate)
+
+    mixed = _authoritative_p0a()
+    mixed["results"][0]["hardware"]["final_manifest_status"] = (
+        "sealed_acquisition_pending_teardown"
+    )
+    mixed["results"][1]["hardware"]["acquisition_manifest_sha256"] = None
+    with pytest.raises(ManifestError) as caught:
+        _validate_with_authority(mixed)
+    assert "final_manifest_status must be 'sealed_results'" in str(caught.value)
+    assert "acquisition_manifest_sha256 must be" in str(caught.value)
+
+    legacy = _authoritative_p0a()
+    legacy["lineage"]["descendant_kind"] = "p0_canary_bound"
+    with pytest.raises(ManifestError, match="is not registered"):
+        _validate_with_authority(legacy)
+
+def test_initial_p1_cannot_drift_from_passing_p0b_or_expected_cells() -> None:
+    p0a = _authoritative_p0a()
+    parent, _, _ = _authoritative_p0b(p0a)
     manifest, replay, replay_sha = _authoritative_p1(parent)
-    manifest["frozen"]["eval_hash"] = HEX_B
-    with pytest.raises(ManifestError, match="differs from its passing P0"):
+    manifest["frozen"]["development_eval_packed_hash"] = HEX_B
+    with pytest.raises(ManifestError, match="differs from its passing P0b"):
         _validate_with_authority(
             manifest,
             parent_manifest=parent,
-            p0_replay_report=replay,
-            p0_replay_report_sha256=replay_sha,
+            parent_replay_report=replay,
+            parent_replay_report_sha256=replay_sha,
         )
 
     manifest, replay, replay_sha = _authoritative_p1(parent)
@@ -918,6 +1425,6 @@ def test_initial_p1_cannot_drift_from_passing_p0_or_expected_cells() -> None:
         _validate_with_authority(
             manifest,
             parent_manifest=parent,
-            p0_replay_report=replay,
-            p0_replay_report_sha256=replay_sha,
+            parent_replay_report=replay,
+            parent_replay_report_sha256=replay_sha,
         )
