@@ -79,7 +79,9 @@ universal-kernel claims.
 Before P0, bind and seal a clean pushed 40-hex Git commit, numeric image ID
 `7290368630472593484`, model-file hash, parquet hash, train-row hash,
 evaluation-row hash, packed evaluation sequence/token hash, full command hash,
-and randomization-plan hash. Placeholders in the companion JSON are not launch
+randomization-plan hash, and an independent retry-policy hash. A retry
+authorization must cite the retry-policy hash; it must never reuse the
+randomization hash. Placeholders in the companion JSON are not launch
 authority.
 
 `frozen.command_hash` is the hash of the canonical campaign command template,
