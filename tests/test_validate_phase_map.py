@@ -95,11 +95,34 @@ def _manifest(
             "loss_blind": True,
         },
         "retry_policy": {
+            "hash_definition": "sha256 canonical exact top-level retry_policy",
             "loss_blind_only": True,
             "rerun_entire_incomplete_block": True,
             "retain_all_attempts": True,
             "retry_lineage_required": True,
-            "allowed_reasons": ["provider_spot_preemption"],
+            "allowed_reasons": [
+                "provider_spot_preemption",
+                "peer_block_invalidated_by_infra_failure",
+            ],
+            "direct_infrastructure_failure_reasons": [
+                "provider_spot_preemption"
+            ],
+            "peer_retry_reason": "peer_block_invalidated_by_infra_failure",
+            "peer_retry_reason_is_never_failure_reason": True,
+            "infra_failure_reason_must_be_direct_infrastructure_failure_reason": True,
+            "preserve_completed_peer_status_and_artifacts": True,
+            "retry_authorization_required_fields": [
+                "loss_blind",
+                "policy_hash",
+                "trigger_attempt_id",
+                "trigger_reason",
+                "trigger_block_id",
+                "prior_manifest_sha256",
+            ],
+            "retry_block_rows_must_be_contiguous": True,
+            "result_acquisition_is_append_only": True,
+            "trigger_must_be_genuine_infra_failure_in_immediately_prior_same_block": True,
+            "shared_block_retry_authorization_required": True,
         },
         "analysis_policy": {"bracketing_tolerance": 0.0},
         "required_result_fields": [
@@ -227,6 +250,15 @@ def _manifest(
     manifest["frozen"]["cell_command_hashes"] = {
         row["cell_id"]: row["command_hash"] for row in manifest["results"]
     }
+    canonical_retry_policy = json.dumps(
+        manifest["retry_policy"],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    manifest["frozen"]["retry_policy_hash"] = hashlib.sha256(
+        canonical_retry_policy
+    ).hexdigest()
     return manifest
 
 
@@ -331,30 +363,52 @@ def _make_full_block_retry(manifest: dict, eta: float = 0.0875) -> None:
         for row in manifest["results"]
         if row["eta"] == eta and row["seed"] == 347
     ]
+    trigger = next(row for row in original_rows if row["mu"] == 0.9)
+    trigger.update(
+        status="INFRA_FAILURE",
+        failure_reason="provider_spot_preemption",
+        loss=None,
+        per_example_loss_uri=None,
+        per_example_loss_sha256=None,
+    )
+    trigger["observed_work"]["outer_steps"] = 100
+    trigger["observed_work"]["tokens"] = 200000
+    trigger["observed_work"]["microsteps"] = 1562
+    trigger["observed_work"]["full_quorum"] = False
+    trigger["observed_work"]["fixed_window_exact"] = False
+    trigger["observed_work"]["version_matched_anchor_resolved"] = False
+
+    prior_manifest = copy.deepcopy(manifest)
+    prior_hash = hashlib.sha256(
+        json.dumps(
+            prior_manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    authorization = {
+        "loss_blind": True,
+        "policy_hash": manifest["frozen"]["retry_policy_hash"],
+        "trigger_attempt_id": trigger["attempt_id"],
+        "trigger_reason": trigger["failure_reason"],
+        "trigger_block_id": trigger["block_id"],
+        "prior_manifest_sha256": prior_hash,
+    }
+
+    retries = []
     for original in original_rows:
-        original.update(
-            status="INFRA_FAILURE",
-            failure_reason="provider_spot_preemption",
-            loss=None,
-            per_example_loss_uri=None,
-            per_example_loss_sha256=None,
-        )
-        original["observed_work"]["outer_steps"] = 100
-        original["observed_work"]["tokens"] = 200000
-        original["observed_work"]["microsteps"] = 1562
-        original["observed_work"]["full_quorum"] = False
-        original["observed_work"]["fixed_window_exact"] = False
-        original["observed_work"]["version_matched_anchor_resolved"] = False
         retry = copy.deepcopy(original)
         retry.update(
             attempt=2,
             attempt_id=f"{original['cell_id']}#2",
             retry_of=f"{original['cell_id']}#1",
-            retry_reason="provider_spot_preemption",
-            retry_authorization={
-                "loss_blind": True,
-                "policy_hash": manifest["frozen"]["retry_policy_hash"],
-            },
+            retry_reason=(
+                "provider_spot_preemption"
+                if original is trigger
+                else "peer_block_invalidated_by_infra_failure"
+            ),
+            retry_authorization=copy.deepcopy(authorization),
             status="COMPLETED",
             failure_reason=None,
             loss=1.2 if original["mu"] == 0.0 else 1.3,
@@ -384,7 +438,8 @@ def _make_full_block_retry(manifest: dict, eta: float = 0.0875) -> None:
             "fixed_window_exact": True,
             "version_matched_anchor_resolved": True,
         }
-        manifest["results"].append(retry)
+        retries.append(retry)
+    manifest["results"].extend(retries)
 
 
 def test_loss_blind_exact_seed_full_block_retry_is_retained() -> None:
@@ -392,8 +447,8 @@ def test_loss_blind_exact_seed_full_block_retry_is_retained() -> None:
     _make_full_block_retry(manifest)
     report = validate_and_summarize(manifest)
     assert report["retry_count"] == 2
-    assert report["all_attempt_status_counts"]["INFRA_FAILURE"] == 2
-    assert report["retained_noncompleted_attempt_count"] == 2
+    assert report["all_attempt_status_counts"]["INFRA_FAILURE"] == 1
+    assert report["retained_noncompleted_attempt_count"] == 1
 
 
 def test_retry_requires_frozen_loss_blind_authorization() -> None:
@@ -414,6 +469,71 @@ def test_partial_block_retry_is_rejected() -> None:
         if not (row["attempt"] == 2 and row["mu"] == 0.9)
     ]
     with pytest.raises(ManifestError, match="partial"):
+        validate_and_summarize(manifest)
+
+
+def test_completed_peer_retry_requires_peer_reason_and_genuine_trigger() -> None:
+    manifest = _manifest()
+    _make_full_block_retry(manifest)
+    peer_retry = next(
+        row for row in manifest["results"] if row["attempt"] == 2 and row["mu"] == 0.0
+    )
+    peer_retry["retry_reason"] = "provider_spot_preemption"
+    with pytest.raises(ManifestError, match="completed peer"):
+        validate_and_summarize(manifest)
+
+    no_trigger = _manifest()
+    _make_full_block_retry(no_trigger)
+    trigger = next(
+        row
+        for row in no_trigger["results"]
+        if row["attempt"] == 1 and row["mu"] == 0.9 and row["eta"] == 0.0875
+    )
+    trigger.update(
+        status="COMPLETED",
+        failure_reason=None,
+        loss=1.3,
+        per_example_loss_uri="gs://bucket/restored/eval.jsonl",
+        per_example_loss_sha256=HEX_A,
+    )
+    trigger["observed_work"].update(
+        tokens=655360,
+        microsteps=5120,
+        outer_steps=320,
+        full_quorum=True,
+        fixed_window_exact=True,
+        version_matched_anchor_resolved=True,
+    )
+    with pytest.raises(ManifestError, match="genuine direct INFRA_FAILURE"):
+        validate_and_summarize(no_trigger)
+
+
+def test_retry_prior_manifest_hash_and_policy_hash_are_verified() -> None:
+    manifest = _manifest()
+    _make_full_block_retry(manifest)
+    for row in manifest["results"]:
+        if row["attempt"] == 2:
+            row["retry_authorization"]["prior_manifest_sha256"] = HEX_B
+    with pytest.raises(ManifestError, match="prior_manifest_sha256"):
+        validate_and_summarize(manifest)
+
+    policy_tamper = _manifest()
+    policy_tamper["retry_policy"]["forbidden_reasons"] = ["new_unfrozen_rule"]
+    with pytest.raises(ManifestError, match="retry_policy_hash"):
+        validate_and_summarize(policy_tamper)
+
+
+def test_peer_retry_reason_can_never_be_failure_reason() -> None:
+    manifest = _manifest()
+    row = _result(manifest, mu=0.9, eta=0.0875)
+    row.update(
+        status="INFRA_FAILURE",
+        failure_reason="peer_block_invalidated_by_infra_failure",
+        loss=None,
+        per_example_loss_uri=None,
+        per_example_loss_sha256=None,
+    )
+    with pytest.raises(ManifestError, match="peer-only retry reason"):
         validate_and_summarize(manifest)
 
 

@@ -15,6 +15,7 @@ initial expected grid in place is not supported.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -72,6 +73,15 @@ def _require_mapping(value: Any, label: str, errors: list[str]) -> Mapping[str, 
 
 def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
 
 
 def _require_sha256(value: Any, label: str, errors: list[str]) -> None:
@@ -170,6 +180,18 @@ def _validate_frozen(manifest: Mapping[str, Any], errors: list[str]) -> None:
             errors.append("frozen.cell_command_hashes keys must be non-empty cell IDs")
         _require_sha256(digest, f"frozen.cell_command_hashes[{cell_id!r}]", errors)
 
+    retry_policy = _require_mapping(
+        manifest.get("retry_policy"), "retry_policy", errors
+    )
+    expected_retry_hash = hashlib.sha256(
+        _canonical_json_bytes(retry_policy)
+    ).hexdigest()
+    if frozen.get("retry_policy_hash") != expected_retry_hash:
+        errors.append(
+            "frozen.retry_policy_hash must equal SHA-256 of the exact canonical "
+            "top-level retry_policy object"
+        )
+
 
 def _validate_protocol(manifest: Mapping[str, Any], errors: list[str]) -> None:
     protocol = _require_mapping(manifest.get("protocol"), "protocol", errors)
@@ -207,6 +229,30 @@ def _validate_protocol(manifest: Mapping[str, Any], errors: list[str]) -> None:
 
     retry = _require_mapping(manifest.get("retry_policy"), "retry_policy", errors)
     for field in ("loss_blind_only", "rerun_entire_incomplete_block", "retain_all_attempts", "retry_lineage_required"):
+        if retry.get(field) is not True:
+            errors.append(f"retry_policy.{field} must be true")
+    direct_reasons = set(retry.get("direct_infrastructure_failure_reasons", []))
+    allowed_reasons = set(retry.get("allowed_reasons", []))
+    peer_reason = retry.get("peer_retry_reason")
+    if not direct_reasons or not direct_reasons < allowed_reasons:
+        errors.append(
+            "retry_policy direct infrastructure reasons must be a non-empty proper "
+            "subset of allowed_reasons"
+        )
+    if peer_reason not in allowed_reasons or peer_reason in direct_reasons:
+        errors.append(
+            "retry_policy.peer_retry_reason must be allowed but never a direct "
+            "infrastructure-failure reason"
+        )
+    for field in (
+        "peer_retry_reason_is_never_failure_reason",
+        "infra_failure_reason_must_be_direct_infrastructure_failure_reason",
+        "preserve_completed_peer_status_and_artifacts",
+        "trigger_must_be_genuine_infra_failure_in_immediately_prior_same_block",
+        "shared_block_retry_authorization_required",
+        "retry_block_rows_must_be_contiguous",
+        "result_acquisition_is_append_only",
+    ):
         if retry.get(field) is not True:
             errors.append(f"retry_policy.{field} must be true")
 
@@ -348,16 +394,26 @@ def _validate_status_and_work(
     reason_text = str(failure_reason or "").lower()
     if "preempt" in reason_text and status != "INFRA_FAILURE":
         errors.append(f"{label}: preemption must be classified as INFRA_FAILURE")
-    allowed_infra_reasons = set(
-        _mapping_or_empty(manifest.get("retry_policy")).get("allowed_reasons", [])
-    )
-    if status == "INFRA_FAILURE" and failure_reason not in allowed_infra_reasons:
-        errors.append(
-            f"{label}.failure_reason {failure_reason!r} is not a frozen infra-failure reason"
+    direct_infra_reasons = set(
+        _mapping_or_empty(manifest.get("retry_policy")).get(
+            "direct_infrastructure_failure_reasons", []
         )
-    if status != "INFRA_FAILURE" and failure_reason in allowed_infra_reasons:
+    )
+    peer_reason = _mapping_or_empty(manifest.get("retry_policy")).get(
+        "peer_retry_reason"
+    )
+    if status == "INFRA_FAILURE" and failure_reason not in direct_infra_reasons:
+        errors.append(
+            f"{label}.failure_reason {failure_reason!r} is not a frozen direct "
+            "infrastructure-failure reason"
+        )
+    if status != "INFRA_FAILURE" and failure_reason in direct_infra_reasons:
         errors.append(
             f"{label}: frozen infrastructure reason must be classified as INFRA_FAILURE"
+        )
+    if failure_reason == peer_reason:
+        errors.append(
+            f"{label}: peer-only retry reason may never be used as failure_reason"
         )
 
     work = _require_mapping(row.get("work"), f"{label}.work", errors)
@@ -454,13 +510,17 @@ def _final_attempts(
             if position == 0:
                 if retry_of not in (None, ""):
                     errors.append(f"{coordinate}: first attempt cannot have retry_of")
+                if row.get("retry_reason") not in (None, ""):
+                    errors.append(f"{coordinate}: first attempt cannot have retry_reason")
+                if row.get("retry_authorization") not in (None, {}):
+                    errors.append(
+                        f"{coordinate}: first attempt cannot have retry_authorization"
+                    )
                 continue
             previous = attempts[position - 1]
             previous_id = previous.get("attempt_id", f"{previous.get('cell_id')}#{previous.get('attempt')}")
             if retry_of != previous_id:
                 errors.append(f"{coordinate}: retry_of must point to immediately prior attempt {previous_id!r}")
-            if _canonical_status(previous.get("status")) != "INFRA_FAILURE":
-                errors.append(f"{coordinate}: only INFRA_FAILURE may be retried")
             reason = row.get("retry_reason")
             if reason not in allowed_reasons:
                 errors.append(f"{coordinate}: retry_reason {reason!r} is not frozen/allowed")
@@ -470,6 +530,17 @@ def _final_attempts(
                 errors.append(f"{coordinate}: retries require loss_blind=true authorization")
             if authorization.get("policy_hash") != frozen_retry_hash:
                 errors.append(f"{coordinate}: retry authorization policy hash is not frozen")
+            required_authorization = set(
+                retry_policy.get("retry_authorization_required_fields", [])
+            )
+            missing_authorization = sorted(
+                field for field in required_authorization if field not in authorization
+            )
+            if missing_authorization:
+                errors.append(
+                    f"{coordinate}: retry authorization missing fields "
+                    f"{missing_authorization}"
+                )
         finals[coordinate] = attempts[-1]
     return finals
 
@@ -506,20 +577,146 @@ def _validate_retry_blocks(rows: Sequence[Mapping[str, Any]], manifest: Mapping[
         float(value)
         for value in _mapping_or_empty(manifest.get("randomization")).get("required_mu_per_block", [])
     }
-    grouped: dict[tuple[int, float, int, int], set[float]] = defaultdict(set)
-    for row in rows:
+    grouped: dict[
+        tuple[int, float, int, int], list[tuple[int, Coordinate, Mapping[str, Any]]]
+    ] = defaultdict(list)
+    for index, row in enumerate(rows):
         coordinate_errors: list[str] = []
         coordinate = _coordinate(row, "retry block row", coordinate_errors)
         attempt = row.get("attempt")
         if coordinate is None or not _is_int(attempt):
             continue
-        grouped[(coordinate.h, coordinate.eta, coordinate.seed, attempt)].add(coordinate.mu)
-    for key, observed_mu in grouped.items():
+        grouped[(coordinate.h, coordinate.eta, coordinate.seed, attempt)].append(
+            (index, coordinate, row)
+        )
+
+    policy = _mapping_or_empty(manifest.get("retry_policy"))
+    direct_reasons = set(policy.get("direct_infrastructure_failure_reasons", []))
+    peer_reason = policy.get("peer_retry_reason")
+    frozen_policy_hash = _mapping_or_empty(manifest.get("frozen")).get(
+        "retry_policy_hash"
+    )
+
+    for key, entries in grouped.items():
+        observed_mu = {coordinate.mu for _, coordinate, _ in entries}
         if observed_mu != required_mu:
             errors.append(
                 f"retry/randomization block {key} is partial: mu={sorted(observed_mu)}, "
                 f"expected {sorted(required_mu)}"
             )
+        attempt = key[3]
+        if attempt == 1:
+            continue
+
+        indices = sorted(index for index, _, _ in entries)
+        if indices != list(range(indices[0], indices[0] + len(indices))):
+            errors.append(f"retry block {key} rows must be contiguous and append-only")
+
+        previous_key = (key[0], key[1], key[2], attempt - 1)
+        previous_entries = grouped.get(previous_key, [])
+        previous_by_mu = {
+            coordinate.mu: row for _, coordinate, row in previous_entries
+        }
+        if set(previous_by_mu) != required_mu:
+            errors.append(
+                f"retry block {key} lacks a complete immediately prior block round"
+            )
+            continue
+
+        current_rows = [row for _, _, row in entries]
+        authorizations = [
+            row.get("retry_authorization")
+            if isinstance(row.get("retry_authorization"), Mapping)
+            else {}
+            for row in current_rows
+        ]
+        if not authorizations or any(
+            authorization != authorizations[0]
+            for authorization in authorizations[1:]
+        ):
+            errors.append(f"retry block {key} must share one exact authorization")
+            authorization: Mapping[str, Any] = {}
+        else:
+            authorization = authorizations[0]
+
+        prior_statuses = {
+            mu: _canonical_status(row.get("status"))
+            for mu, row in previous_by_mu.items()
+        }
+        invalid_prior = {
+            mu: status
+            for mu, status in prior_statuses.items()
+            if status not in {"COMPLETED", "INFRA_FAILURE"}
+        }
+        if invalid_prior:
+            errors.append(
+                f"retry block {key} may not retry FAILED/DIVERGED prior outcomes: "
+                f"{invalid_prior}"
+            )
+
+        infra_attempts = {
+            row.get("attempt_id"): row
+            for row in previous_by_mu.values()
+            if _canonical_status(row.get("status")) == "INFRA_FAILURE"
+            and row.get("failure_reason") in direct_reasons
+        }
+        trigger_id = authorization.get("trigger_attempt_id")
+        trigger = infra_attempts.get(trigger_id)
+        if trigger is None:
+            errors.append(
+                f"retry block {key} must cite a genuine direct INFRA_FAILURE in "
+                "the immediately prior block"
+            )
+        else:
+            if authorization.get("trigger_reason") != trigger.get("failure_reason"):
+                errors.append(f"retry block {key} trigger_reason does not match trigger")
+            if authorization.get("trigger_block_id") != trigger.get("block_id"):
+                errors.append(f"retry block {key} trigger_block_id does not match trigger")
+
+        block_ids = {row.get("block_id") for row in current_rows}
+        prior_block_ids = {row.get("block_id") for row in previous_by_mu.values()}
+        if len(block_ids) != 1 or block_ids != prior_block_ids:
+            errors.append(
+                f"retry block {key} must preserve the exact prior block_id"
+            )
+        elif authorization.get("trigger_block_id") not in block_ids:
+            errors.append(
+                f"retry block {key} authorization cites a different block_id"
+            )
+
+        if authorization.get("loss_blind") is not True:
+            errors.append(f"retry block {key} authorization must be loss-blind")
+        if authorization.get("policy_hash") != frozen_policy_hash:
+            errors.append(f"retry block {key} authorization policy hash is not frozen")
+
+        prior_manifest = dict(manifest)
+        prior_manifest["results"] = list(rows[: indices[0]])
+        expected_prior_hash = hashlib.sha256(
+            _canonical_json_bytes(prior_manifest)
+        ).hexdigest()
+        if authorization.get("prior_manifest_sha256") != expected_prior_hash:
+            errors.append(
+                f"retry block {key} prior_manifest_sha256 does not match the "
+                "canonical append-only manifest prefix"
+            )
+
+        current_by_mu = {coordinate.mu: row for _, coordinate, row in entries}
+        for mu in required_mu & set(current_by_mu) & set(previous_by_mu):
+            prior = previous_by_mu[mu]
+            current = current_by_mu[mu]
+            prior_status = _canonical_status(prior.get("status"))
+            if prior_status == "COMPLETED":
+                if current.get("retry_reason") != peer_reason:
+                    errors.append(
+                        f"retry block {key} completed peer mu={mu} must use "
+                        f"retry_reason {peer_reason!r}"
+                    )
+            elif prior_status == "INFRA_FAILURE":
+                if current.get("retry_reason") != prior.get("failure_reason"):
+                    errors.append(
+                        f"retry block {key} failed arm mu={mu} retry_reason must "
+                        "match its direct failure_reason"
+                    )
 
 
 def _validate_pairing(finals: Mapping[Coordinate, Mapping[str, Any]], errors: list[str]) -> None:
