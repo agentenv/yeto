@@ -532,6 +532,76 @@ def _validate_p0b_hardware(
             errors.append(
                 f"{label}.learner_gpu_uuid_bijection must contain four distinct GPU UUIDs"
             )
+
+        # ``barrier_version_trace_uri`` binds one sealed registry whose raw
+        # hashes cover the syncer tape and four per-learner causal JSONLs.  The
+        # post-deletion CPU replay independently re-reads those five artifacts
+        # and derives these attestations.  Requiring the replay-derived summary
+        # here prevents a merge-only tape from masquerading as proof that every
+        # learner applied its registered broadcast before its next inner step.
+        for field in (
+            "barrier_trace_validated",
+            "base_versions_match",
+            "no_inner_step_while_blocked",
+        ):
+            if hardware.get(field) is not True:
+                errors.append(f"{label}.{field} must be true")
+        if hardware.get("barrier_trace_learner_count") != 4:
+            errors.append(f"{label}.barrier_trace_learner_count must be exactly 4")
+        expected_commits = _mapping_or_empty(row.get("work")).get("outer_steps")
+        if (
+            not _is_int(expected_commits)
+            or hardware.get("barrier_trace_commit_count") != expected_commits
+        ):
+            errors.append(
+                f"{label}.barrier_trace_commit_count must equal the exact "
+                "scientific outer-step count"
+            )
+        fixed_window_steps = _mapping_or_empty(row.get("work")).get(
+            "fixed_window_microsteps"
+        )
+        fragment_count = _mapping_or_empty(manifest.get("protocol")).get(
+            "fragments"
+        )
+        expected_inner_steps = (
+            expected_commits // fragment_count * fixed_window_steps
+            if _is_int(expected_commits)
+            and _is_int(fragment_count)
+            and fragment_count > 0
+            and expected_commits % fragment_count == 0
+            and _is_int(fixed_window_steps)
+            and fixed_window_steps > 0
+            else None
+        )
+        if (
+            expected_inner_steps is None
+            or hardware.get("barrier_trace_inner_steps_per_learner")
+            != expected_inner_steps
+        ):
+            errors.append(
+                f"{label}.barrier_trace_inner_steps_per_learner must equal the "
+                f"exact physical learner-step count {expected_inner_steps}"
+            )
+        raw_per_fragment = _mapping_or_empty(
+            _mapping_or_empty(row.get("observed_work")).get(
+                "per_fragment_outer_steps"
+            )
+        )
+        observed_per_fragment = {
+            str(fragment): count for fragment, count in raw_per_fragment.items()
+        }
+        expected_per_fragment = (
+            expected_commits // 4
+            if _is_int(expected_commits) and expected_commits % 4 == 0
+            else None
+        )
+        if observed_per_fragment != {
+            str(fragment): expected_per_fragment for fragment in range(4)
+        }:
+            errors.append(
+                f"{label}: sealed barrier evidence must report exactly "
+                f"{expected_per_fragment} applied updates per fragment"
+            )
         times = {
             field: _parse_time(hardware.get(field), f"{label}.{field}", errors)
             for field in (

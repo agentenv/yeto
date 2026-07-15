@@ -735,6 +735,9 @@ def _authoritative_p0b(parent: dict) -> tuple[dict, dict, str]:
         row["result_uri"] = f"gs://bucket/{cell_id}/result.json"
         row["capture_uri"] = f"gs://bucket/{cell_id}/capture"
         row["per_example_loss_uri"] = f"gs://bucket/{cell_id}/eval.jsonl"
+        row["observed_work"]["per_fragment_outer_steps"] = {
+            str(fragment): 8 for fragment in range(4)
+        }
         row["hardware"] = {
             "provider": "gcp",
             "zone": "us-central1-a",
@@ -758,6 +761,12 @@ def _authoritative_p0b(parent: dict) -> tuple[dict, dict, str]:
             "learner_gpu_map_sha256": HEX_A,
             "barrier_version_trace_uri": f"gs://bucket/{cell_id}/barrier.jsonl",
             "barrier_version_trace_sha256": HEX_A,
+            "barrier_trace_validated": True,
+            "base_versions_match": True,
+            "no_inner_step_while_blocked": True,
+            "barrier_trace_learner_count": 4,
+            "barrier_trace_commit_count": 32,
+            "barrier_trace_inner_steps_per_learner": 128,
             "distinct_a100_gpu_uuid_count": 4,
             "learner_gpu_uuid_bijection": {
                 "0": "GPU-a",
