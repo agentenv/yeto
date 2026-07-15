@@ -107,12 +107,67 @@ mapping every expected `cell_id` to the SHA-256 of its exact argv. Each result
 must match its cell-specific hash. Missing, extra, or duplicate map keys fail
 before launch.
 
+Every bound manifest also materializes an explicit `expected_cells` coordinate
+list. P1-R0 must equal the 36-cell Cartesian grid, but this list—not a Cartesian
+axis expansion—is authoritative for coverage. Adaptive and later tuned stages
+are ragged across H and eta: they preserve parent coordinates, add only
+rule-derived coordinates, and keep complete randomized blocks with a live
+mu=0 control. The command-hash registry keys must equal the expected cell IDs
+exactly.
+
+**Pre-outcome split and lineage clarification (2026-07-14).** A second
+independent launcher/validator review found that applying each study seed to
+the whole row population would change the evaluation set across training
+seeds. No P0 or scientific outcome existed when this was found. The campaign
+therefore freezes `eval_split_seed=331` and the exact split algorithm below.
+It also requires every bound manifest to identify the raw authoritative
+preregistration blob and every later manifest to cite its sealed parent. This
+clarification changes no hypothesis, outcome, grid, gate, or analysis rule.
+
+The authoritative template is the raw bytes at
+`experiment-specs/best-paper-phase-map-p0-p1-prereg.json` in a clean pushed
+source commit. Each bound descendant records that path, commit, and raw-byte
+SHA-256. Validation retrieves the blob with `git show <commit>:<path>` and
+requires both its bytes and hash to match; pointing `--prereg-template` at a
+different file is forbidden. These bindings live in the descendant, so the
+template does not self-reference its own commit or hash.
+
+Parent-manifest hashes use SHA-256 of canonical JSON with the same sorted-key,
+no-whitespace, `ensure_ascii=false` convention as the retry-policy hash. P0 is
+the only parentless bound canary. P1-R0 must cite the sealed passing P0 manifest
+and its sealed CPU recurrence-replay report. Every subsequent registered stage
+must cite a sealed parent. Existing parent result rows are immutable. An
+adaptive-bracketing descendant is cumulative: its parent rows remain an exact
+prefix, its eta and command registries may only be extended by the next
+Section 6 boundary/midpoint rule, and only new result rows may be appended.
+Changing an old result, an unregistered eta, model/data/evaluation/protocol
+semantics, retry policy, or horizon/work invalidates the descendant.
+
 ## 3. Locked evaluation
 
 The primary outcome is final validation loss per target token on exactly 1,024
-fixed, disjoint examples. The exact example IDs, order, tokenized packed
-sequences, attention masks, labels, loss sums, and target-token counts are
-hashed before any scientific launch and reused for every arm and seed.
+fixed, disjoint examples. The exact example IDs, source indices, order,
+tokenized packed sequences, attention masks, labels, loss sums, and
+target-token counts are hashed before any scientific launch and reused for
+every arm and seed.
+
+Split construction is exact. Load the pinned parquet in canonical source-row
+order and take the first `train_rows + eval_rows = 6,024` source indices.
+Apply `random.Random(331).shuffle` once to that integer-index list. The final
+1,024 indices, in that order, are the frozen evaluation set; the preceding
+5,000 indices are the disjoint pre-shuffle training pool. For each registered
+study shuffle seed, copy only that 5,000-index training pool and apply
+`random.Random(shuffle_seed).shuffle`; the evaluation indices and order do not
+change. P0 uses training shuffle seed 337, P1 seed 347, and later stages use
+only their registered seeds.
+
+Before P0, bind the SHA-256 of canonical compact JSON arrays for the frozen
+evaluation source-index list and the pre-study-shuffle training-pool
+source-index list. Before each stage, bind maps from every expected study seed
+to (a) its ordered training-source-index-array hash and (b) its materialized
+training-JSONL hash. Each result row must match the map entry for its own seed,
+while the singular evaluation file/index/token hashes remain invariant across
+the entire campaign.
 
 Requirements:
 
@@ -129,7 +184,9 @@ replace a failed endpoint gate.
 
 ## 4. P0: loss-blind semantic canary
 
-P0 uses shuffle/training seed `337 / 337337` on one Spot A100. It is explicitly
+P0 uses shuffle/training seed `337 / 337337` on one Spot A100, specifically an
+`a2-highgpu-1g` Spot VM with `gpu_slots=1`; P1 returns to the frozen
+`a2-highgpu-4g`/`gpu_slots=4` template. It is explicitly
 **non-evidence** and never enters an effect estimate, LR choice, or paper table.
 It may use abbreviated work solely to verify:
 
