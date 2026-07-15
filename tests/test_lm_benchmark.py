@@ -180,6 +180,43 @@ def test_partial_results_round_trip(tmp_path):
     assert benchmark._record_key(records[1]) == ("diloco", "m2", 17)
 
 
+def test_resume_reuses_verified_splits_and_rejects_recipe_changes(tmp_path):
+    work = tmp_path / "work"
+    report = tmp_path / "report"
+    work.mkdir()
+    train = work / "train.jsonl"
+    evaluation = work / "eval.jsonl"
+    train.write_text('{"messages": []}\n', encoding="utf-8")
+    evaluation.write_text('{"messages": []}\n', encoding="utf-8")
+    args = _args(
+        seeds="17,29,43",
+        work_dir=work,
+        report_dir=report,
+        resume=False,
+        overwrite=False,
+        dry_run=False,
+        eval_only=False,
+        adapter_dir=None,
+    )
+    arms = benchmark.select_arms("m2")
+    from yeto.benchmark_resume import build_data_manifest
+
+    manifest = build_data_manifest(
+        work,
+        train,
+        evaluation,
+        train_rows=1,
+        eval_rows=1,
+    )
+    benchmark.write_config(args, arms, manifest)
+
+    args.resume = True
+    assert benchmark.load_resume_data(args, arms) == (train, evaluation, 1)
+    args.inner_lr = 1e-4
+    with pytest.raises(ValueError, match="arguments.inner_lr"):
+        benchmark.load_resume_data(args, arms)
+
+
 def test_tape_summary_and_wire_estimate(tmp_path):
     tape = tmp_path / "tape.jsonl"
     rows = [

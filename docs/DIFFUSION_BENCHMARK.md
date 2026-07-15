@@ -169,6 +169,12 @@ Outputs:
 - `report.md`: human-readable comparison table;
 - per-run learner, syncer, export, and evaluation logs under `--work-dir`.
 
+Use `--resume` after interruption. Resume verifies the original arguments, arm
+definitions, implementation fingerprint, serialized split hashes, and local
+source-data hash when applicable before reusing completed records and the
+original train/eval splits. Legacy runs without an immutable resume manifest
+must restart with `--overwrite`.
+
 ## Interpretation Rules
 
 - Compare each DiLoCo arm only with `baseline-mM` for the same `M` and seed.

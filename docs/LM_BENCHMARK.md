@@ -263,8 +263,12 @@ Outputs:
 - `report.md`: the human-readable comparison table;
 - learner, syncer, export, and evaluation logs under `--work-dir`.
 
-Use `--resume` after interruption. Completed `(kind, arm, seed)` records are
-kept and only missing runs are executed.
+Use `--resume` after interruption. The harness verifies the original arguments,
+arm definitions, implementation fingerprint, serialized split hashes, and local
+source-data hash when applicable before keeping completed `(kind, arm, seed)`
+records. It reuses the original train/eval splits and executes only missing
+runs. Legacy runs without an immutable resume manifest must restart with
+`--overwrite`.
 
 ## Interpretation Rules
 

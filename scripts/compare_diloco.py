@@ -37,8 +37,44 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from yeto.benchmark_resume import (  # noqa: E402
+    build_data_manifest,
+    implementation_fingerprint,
+    jsonable_arguments,
+    load_resume_config,
+    validate_data_manifest,
+    validate_record_keys,
+    write_json_atomic,
+)
+
 SYNCER_BIN = REPO_ROOT / "syncer/target/release/yeto-syncer"
 _USED_PORTS: set[int] = set()
+_RESUME_IDENTITY_EXCLUDES = {
+    "adapter_dir",
+    "dry_run",
+    "eval_only",
+    "materialized_data",
+    "overwrite",
+    "report_dir",
+    "resume",
+    "seeds",
+    "settings",
+    "work_dir",
+}
+_IMPLEMENTATION_PATHS = (
+    Path(__file__),
+    REPO_ROOT / "yeto/benchmark_resume.py",
+    REPO_ROOT / "yeto/learner.py",
+    REPO_ROOT / "yeto/data.py",
+    REPO_ROOT / "yeto/losses.py",
+    REPO_ROOT / "yeto/export.py",
+    REPO_ROOT / "yeto/fragments.py",
+    REPO_ROOT / "yeto/protocol.py",
+    REPO_ROOT / "yeto/tensor_io.py",
+    REPO_ROOT / "syncer/src",
+    REPO_ROOT / "syncer/Cargo.toml",
+    REPO_ROOT / "syncer/Cargo.lock",
+)
 
 
 @dataclass(frozen=True)
@@ -1154,20 +1190,47 @@ def validate_eval_token_match(records: list[dict], evaluation: dict) -> None:
 
 
 def _jsonable_args(args) -> dict:
+    return jsonable_arguments(args, exclude={"eval_only", "adapter_dir"})
+
+
+def _resume_identity(args, arms: list[Arm]) -> dict:
     return {
-        key: str(value) if isinstance(value, Path) else value
-        for key, value in vars(args).items()
-        if key not in {"eval_only", "adapter_dir"}
+        "format_version": 1,
+        "benchmark": "lm-diloco",
+        "arguments": jsonable_arguments(
+            args,
+            exclude=_RESUME_IDENTITY_EXCLUDES,
+        ),
+        "seeds": parse_seeds(args.seeds),
+        "arms": [asdict(arm) for arm in arms],
+        "implementation_sha256": implementation_fingerprint(
+            REPO_ROOT,
+            _IMPLEMENTATION_PATHS,
+        ),
     }
 
 
-def write_config(args, arms: list[Arm]) -> None:
+def _expected_record_keys(args, arms: list[Arm]) -> set[tuple]:
+    seeds = parse_seeds(args.seeds)
+    keys = {("base", "base", None)}
+    for seed in seeds:
+        keys.update(
+            ("baseline", f"baseline-m{learners}", seed)
+            for learners in {arm.learners for arm in arms}
+        )
+        keys.update(("diloco", arm.name, seed) for arm in arms)
+    return keys
+
+
+def write_config(args, arms: list[Arm], data_manifest: dict) -> None:
     args.report_dir.mkdir(parents=True, exist_ok=True)
     config = {
-        "format_version": 1,
+        "format_version": 2,
         "arguments": _jsonable_args(args),
         "seeds": parse_seeds(args.seeds),
         "arms": [asdict(arm) for arm in arms],
+        "resume_identity": _resume_identity(args, arms),
+        "data_manifest": data_manifest,
         "fairness_contract": {
             "same_total_ranks": True,
             "same_per_rank_batch": True,
@@ -1180,13 +1243,18 @@ def write_config(args, arms: list[Arm]) -> None:
             "diloco_artifact": "syncer checkpoint export",
         },
     }
-    (args.report_dir / "config.json").write_text(
-        json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    write_json_atomic(args.report_dir / "config.json", config)
+
+
+def load_resume_data(args, arms: list[Arm]) -> tuple[Path, Path, int]:
+    manifest = load_resume_config(
+        args.report_dir / "config.json",
+        _resume_identity(args, arms),
     )
+    return validate_data_manifest(args.work_dir, manifest)
 
 
 def write_report(args, arms: list[Arm], records: list[dict]) -> list[dict]:
-    write_config(args, arms)
     write_partial_results(args.report_dir, records)
     aggregates = aggregate_records(records)
     (args.report_dir / "summary.json").write_text(
@@ -1457,35 +1525,56 @@ def main(argv=None) -> int:
     if args.dry_run:
         return 0
 
-    if args.work_dir.exists() and not args.resume:
-        if not args.overwrite:
+    if args.resume:
+        if not args.work_dir.is_dir() or not args.report_dir.is_dir():
             raise SystemExit(
-                f"{args.work_dir} already exists; pass --overwrite to replace benchmark output"
+                "--resume requires the existing --work-dir and --report-dir"
             )
-        shutil.rmtree(args.work_dir)
-    if args.report_dir.exists() and not args.resume:
-        if not args.overwrite:
-            raise SystemExit(
-                f"{args.report_dir} already exists; pass --overwrite to replace benchmark output"
-            )
-        shutil.rmtree(args.report_dir)
-    args.work_dir.mkdir(parents=True, exist_ok=True)
-    args.report_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            train_data, eval_data, train_rows = load_resume_data(args, arms)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        print("[lm-benchmark] resume manifest verified; reusing materialized splits")
+    else:
+        if args.work_dir.exists():
+            if not args.overwrite:
+                raise SystemExit(
+                    f"{args.work_dir} already exists; pass --overwrite to replace benchmark output"
+                )
+            shutil.rmtree(args.work_dir)
+        if args.report_dir.exists():
+            if not args.overwrite:
+                raise SystemExit(
+                    f"{args.report_dir} already exists; pass --overwrite to replace benchmark output"
+                )
+            shutil.rmtree(args.report_dir)
+        args.work_dir.mkdir(parents=True, exist_ok=True)
+        args.report_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        materialized_data = materialize_data_source(
-            args.data, args.work_dir / "source-data"
+        try:
+            materialized_data = materialize_data_source(
+                args.data, args.work_dir / "source-data"
+            )
+        except RuntimeError as exc:
+            raise SystemExit(str(exc)) from exc
+        if materialized_data != args.data:
+            args.materialized_data = materialized_data
+        train_data, eval_data, train_rows = split_data(
+            materialized_data,
+            args.work_dir,
+            args.eval_rows,
+            args.max_rows,
         )
-    except RuntimeError as exc:
-        raise SystemExit(str(exc)) from exc
-    if materialized_data != args.data:
-        args.materialized_data = materialized_data
-    train_data, eval_data, train_rows = split_data(
-        materialized_data,
-        args.work_dir,
-        args.eval_rows,
-        args.max_rows,
-    )
+        data_manifest = build_data_manifest(
+            args.work_dir,
+            train_data,
+            eval_data,
+            train_rows=train_rows,
+            eval_rows=args.eval_rows,
+            source=materialized_data,
+        )
+        write_config(args, arms, data_manifest)
+
     consumers = max(arm.learners for arm in arms) * args.learner_gpus
     if train_rows < consumers:
         raise SystemExit(
@@ -1495,10 +1584,14 @@ def main(argv=None) -> int:
         f"[lm-benchmark] materialized {train_rows} train rows and "
         f"{args.eval_rows} held-out rows"
     )
-    write_config(args, arms)
     ensure_syncer()
 
     records = load_partial_results(args.report_dir) if args.resume else []
+    if args.resume:
+        try:
+            validate_record_keys(records, _expected_record_keys(args, arms))
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     completed = {_record_key(record) for record in records}
     if ("base", "base", None) not in completed:
         base_eval = eval_in_subprocess(
