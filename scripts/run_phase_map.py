@@ -41,6 +41,13 @@ ADOPTED_PARALLEL_AMENDMENT_SHA256 = (
     "e2c87fd6c2ec0e4b91f488b5771334e0befd175560a3e2ccfcf349be1ee8b3dd"
 )
 P0A_SOURCE_REBIND_FROM_COMMIT = "0af7f4a80426babc14896c7c1f7885abcb331d46"
+P0B_REPLAY_SOURCE_REBIND_FROM_COMMIT = (
+    "8d58208cacafef12cb95f2642b4fa700531151b4"
+)
+P0B_REPLAY_ERRATUM_PATH = Path("docs/ERRATUM-p0b-replay-validator.md")
+P0B_REPLAY_ERRATUM_SHA256 = (
+    "241c151a7ef6b3ff18221618000ed772c331fd691d69d882c192d3bb8a169aa4"
+)
 sys.path.insert(0, str(REPO_ROOT))
 DIRECT_INFRASTRUCTURE_FAILURE_REASONS = frozenset(
     {
@@ -342,6 +349,61 @@ def authorize_p0b_source_rebind(
         != ADOPTED_PARALLEL_AMENDMENT_SHA256
     ):
         raise PhaseMapError("P0b source rebind lacks the exact adopted amendment")
+    return True
+
+
+def authorize_p0b_replay_source_rebind(
+    parent: dict[str, Any], candidate_commit: str
+) -> bool:
+    """Allow the replay-only P0b -> corrected-validator transition."""
+    parent_commit = str((parent.get("frozen") or {}).get("git_commit", ""))
+    if parent_commit == candidate_commit:
+        return False
+    if (
+        parent.get("lineage", {}).get("descendant_kind") != "p0b_four_gpu_bound"
+        or parent_commit != P0B_REPLAY_SOURCE_REBIND_FROM_COMMIT
+        or not re.fullmatch(r"[0-9a-f]{40}", candidate_commit)
+    ):
+        raise PhaseMapError("P0b replay source rebind is not the adopted erratum")
+    for commit in (parent_commit, candidate_commit):
+        available = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{commit}^{{commit}}"],
+            check=False,
+            capture_output=True,
+        )
+        if available.returncode != 0:
+            raise PhaseMapError("P0b replay source rebind lacks an exact commit object")
+    ancestry = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "merge-base",
+            "--is-ancestor",
+            parent_commit,
+            candidate_commit,
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if ancestry.returncode != 0:
+        raise PhaseMapError("P0b replay validator is not a frozen-source descendant")
+    erratum = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "show",
+            f"{candidate_commit}:{P0B_REPLAY_ERRATUM_PATH.as_posix()}",
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if (
+        erratum.returncode != 0
+        or hashlib.sha256(erratum.stdout).hexdigest() != P0B_REPLAY_ERRATUM_SHA256
+    ):
+        raise PhaseMapError("P0b replay source rebind lacks the exact erratum")
     return True
 
 
@@ -704,19 +766,35 @@ def validate_parent_and_replay(
     replay_commit = replay.get("replay_validator_git_commit")
     parent_commit = parent["frozen"]["git_commit"]
     if replay_commit != parent_commit:
-        source_rebind = bool(
-            descendant_kind == "p0b_four_gpu_bound"
+        rebind_kind = None
+        source_rebind = False
+        if descendant_kind == "p0b_four_gpu_bound" and replay_commit == args.git_commit:
+            source_rebind = authorize_p0b_source_rebind(parent, args.git_commit)
+            rebind_kind = "amendment"
+        elif (
+            descendant_kind == "initial_bound_p1_r0"
             and replay_commit == args.git_commit
-            and authorize_p0b_source_rebind(parent, args.git_commit)
-        )
+        ):
+            source_rebind = authorize_p0b_replay_source_rebind(
+                parent, args.git_commit
+            )
+            rebind_kind = "erratum"
         if not source_rebind:
             raise PhaseMapError("parent replay did not run from an authorized source")
-        if (
-            replay.get("replay_source_rebind_from_git_commit") != parent_commit
-            or replay.get("replay_source_rebind_amendment_path")
+        if replay.get("replay_source_rebind_from_git_commit") != parent_commit:
+            raise PhaseMapError("parent replay source-rebind attestation is incomplete")
+        if rebind_kind == "amendment" and (
+            replay.get("replay_source_rebind_amendment_path")
             != ADOPTED_PARALLEL_AMENDMENT_PATH.as_posix()
             or replay.get("replay_source_rebind_amendment_sha256")
             != ADOPTED_PARALLEL_AMENDMENT_SHA256
+        ):
+            raise PhaseMapError("parent replay source-rebind attestation is incomplete")
+        if rebind_kind == "erratum" and (
+            replay.get("replay_source_rebind_erratum_path")
+            != P0B_REPLAY_ERRATUM_PATH.as_posix()
+            or replay.get("replay_source_rebind_erratum_sha256")
+            != P0B_REPLAY_ERRATUM_SHA256
         ):
             raise PhaseMapError("parent replay source-rebind attestation is incomplete")
     for field in (

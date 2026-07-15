@@ -449,6 +449,80 @@ def _fixture(tmp_path: Path):
     return root, root / "lifecycle" / "deletion-evidence.json"
 
 
+def test_p0b_replay_source_rebind_is_bound_to_exact_erratum(monkeypatch):
+    head = "b" * 40
+    script_bytes = (ROOT / replay.SCRIPT_RELATIVE_PATH).read_bytes()
+    prereg_bytes = (ROOT / replay.AUTHORITATIVE_PREREG_RELATIVE_PATH).read_bytes()
+    erratum_bytes = (ROOT / replay.P0B_REPLAY_ERRATUM_PATH).read_bytes()
+
+    def fake_git_output(*args: str) -> bytes:
+        if args == ("rev-parse", "HEAD"):
+            return f"{head}\n".encode()
+        if args[0] in {"cat-file", "merge-base"}:
+            return b""
+        if args == ("status", "--porcelain=v1", "--untracked-files=all"):
+            return b""
+        if args == (
+            "show",
+            f"{head}:{replay.P0B_REPLAY_ERRATUM_PATH.as_posix()}",
+        ):
+            return erratum_bytes
+        if args == ("show", f"{head}:{replay.SCRIPT_RELATIVE_PATH.as_posix()}"):
+            return script_bytes
+        if args == (
+            "show",
+            f"{replay.AUTHORITATIVE_PREREG_COMMIT}:"
+            f"{replay.AUTHORITATIVE_PREREG_RELATIVE_PATH.as_posix()}",
+        ):
+            return prereg_bytes
+        raise AssertionError(f"unexpected git invocation: {args}")
+
+    monkeypatch.setattr(replay, "git_output", fake_git_output)
+    manifest = {
+        "frozen": {"git_commit": replay.P0B_REPLAY_SOURCE_REBIND_FROM_COMMIT},
+        "lineage": {
+            "authoritative_prereg_path": (
+                replay.AUTHORITATIVE_PREREG_RELATIVE_PATH.as_posix()
+            ),
+            "authoritative_prereg_source_commit": replay.AUTHORITATIVE_PREREG_COMMIT,
+            "authoritative_prereg_template_sha256": replay.AUTHORITATIVE_PREREG_SHA256,
+        },
+    }
+
+    attestation = replay.verify_replay_source(manifest)
+
+    assert attestation["replay_validator_git_commit"] == head
+    assert attestation["replay_source_rebind_from_git_commit"] == (
+        replay.P0B_REPLAY_SOURCE_REBIND_FROM_COMMIT
+    )
+    assert attestation["replay_source_rebind_erratum_path"] == (
+        replay.P0B_REPLAY_ERRATUM_PATH.as_posix()
+    )
+    assert attestation["replay_source_rebind_erratum_sha256"] == (
+        replay.P0B_REPLAY_ERRATUM_SHA256
+    )
+
+
+def test_p0b_replay_source_rebind_rejects_wrong_erratum(monkeypatch):
+    monkeypatch.setattr(
+        replay,
+        "git_output",
+        lambda *args: (
+            f"{'b' * 40}\n".encode()
+            if args == ("rev-parse", "HEAD")
+            else b"tampered"
+            if args[0] == "show"
+            else b""
+        ),
+    )
+    manifest = {
+        "frozen": {"git_commit": replay.P0B_REPLAY_SOURCE_REBIND_FROM_COMMIT}
+    }
+
+    with pytest.raises(replay.ReplayError, match="exact authority document"):
+        replay.verify_replay_source(manifest)
+
+
 def _source_attestation(_manifest):
     return {
         "replay_validator_git_commit": "a" * 40,

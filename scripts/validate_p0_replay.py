@@ -34,6 +34,13 @@ ADOPTED_PARALLEL_AMENDMENT_SHA256 = (
     "e2c87fd6c2ec0e4b91f488b5771334e0befd175560a3e2ccfcf349be1ee8b3dd"
 )
 P0A_SOURCE_REBIND_FROM_COMMIT = "0af7f4a80426babc14896c7c1f7885abcb331d46"
+P0B_REPLAY_SOURCE_REBIND_FROM_COMMIT = (
+    "8d58208cacafef12cb95f2642b4fa700531151b4"
+)
+P0B_REPLAY_ERRATUM_PATH = Path("docs/ERRATUM-p0b-replay-validator.md")
+P0B_REPLAY_ERRATUM_SHA256 = (
+    "241c151a7ef6b3ff18221618000ed772c331fd691d69d882c192d3bb8a169aa4"
+)
 PARAM_ATOL = 2e-6
 PARAM_RTOL = 2e-6
 TAPE_NORM_RTOL = 2e-4
@@ -375,6 +382,24 @@ def git_output(*args: str) -> bytes:
     return result.stdout
 
 
+def replay_source_rebind_authority(
+    frozen_commit: str,
+) -> tuple[str, Path, str] | None:
+    if frozen_commit == P0A_SOURCE_REBIND_FROM_COMMIT:
+        return (
+            "amendment",
+            ADOPTED_PARALLEL_AMENDMENT_PATH,
+            ADOPTED_PARALLEL_AMENDMENT_SHA256,
+        )
+    if frozen_commit == P0B_REPLAY_SOURCE_REBIND_FROM_COMMIT:
+        return (
+            "erratum",
+            P0B_REPLAY_ERRATUM_PATH,
+            P0B_REPLAY_ERRATUM_SHA256,
+        )
+    return None
+
+
 def verify_replay_source(manifest: dict[str, Any]) -> dict[str, Any]:
     """Prove replay code comes from the exact P0 or adopted fixed commit."""
     frozen_commit = str((manifest.get("frozen") or {}).get("git_commit", ""))
@@ -382,17 +407,18 @@ def verify_replay_source(manifest: dict[str, Any]) -> dict[str, Any]:
         raise ReplayError("P0 manifest lacks a frozen 40-hex Git commit")
     head = git_output("rev-parse", "HEAD").decode().strip()
     source_rebind = head != frozen_commit
+    rebind_authority: tuple[str, Path, str] | None = None
     if source_rebind:
-        if frozen_commit != P0A_SOURCE_REBIND_FROM_COMMIT:
-            raise ReplayError("replay source rebind is not the adopted P0a transition")
+        rebind_authority = replay_source_rebind_authority(frozen_commit)
+        if rebind_authority is None:
+            raise ReplayError("replay source rebind lacks an adopted transition")
         git_output("cat-file", "-e", f"{frozen_commit}^{{commit}}")
         git_output("cat-file", "-e", f"{head}^{{commit}}")
         git_output("merge-base", "--is-ancestor", frozen_commit, head)
-        amendment_blob = git_output(
-            "show", f"{head}:{ADOPTED_PARALLEL_AMENDMENT_PATH.as_posix()}"
-        )
-        if sha256_bytes(amendment_blob) != ADOPTED_PARALLEL_AMENDMENT_SHA256:
-            raise ReplayError("replay source rebind lacks the exact adopted amendment")
+        _kind, authority_path, authority_sha256 = rebind_authority
+        authority_blob = git_output("show", f"{head}:{authority_path.as_posix()}")
+        if sha256_bytes(authority_blob) != authority_sha256:
+            raise ReplayError("replay source rebind lacks its exact authority document")
     if git_output("status", "--porcelain=v1", "--untracked-files=all").strip():
         raise ReplayError("CPU replay requires a completely clean checkout")
     script_blob = git_output("show", f"{head}:{SCRIPT_RELATIVE_PATH.as_posix()}")
@@ -425,17 +451,11 @@ def verify_replay_source(manifest: dict[str, Any]) -> dict[str, Any]:
         "authoritative_prereg_template_sha256": AUTHORITATIVE_PREREG_SHA256,
     }
     if source_rebind:
-        attestation.update(
-            {
-                "replay_source_rebind_from_git_commit": frozen_commit,
-                "replay_source_rebind_amendment_path": (
-                    ADOPTED_PARALLEL_AMENDMENT_PATH.as_posix()
-                ),
-                "replay_source_rebind_amendment_sha256": (
-                    ADOPTED_PARALLEL_AMENDMENT_SHA256
-                ),
-            }
-        )
+        assert rebind_authority is not None
+        kind, authority_path, authority_sha256 = rebind_authority
+        attestation["replay_source_rebind_from_git_commit"] = frozen_commit
+        attestation[f"replay_source_rebind_{kind}_path"] = authority_path.as_posix()
+        attestation[f"replay_source_rebind_{kind}_sha256"] = authority_sha256
     return attestation
 
 

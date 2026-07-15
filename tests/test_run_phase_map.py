@@ -235,6 +235,63 @@ def test_p0b_allows_only_the_adopted_fixed_production_source_rebind(tmp_path):
     assert report["integrity_status"] == "BOUND_LAUNCH_AUTHORITY_VALIDATED"
 
 
+def test_initial_p1_accepts_only_erratum_bound_p0b_replay_rebind(
+    tmp_path, monkeypatch
+):
+    args, _plan, _bound = _authority_bound_p1(tmp_path)
+    parent = json.loads(args.parent_manifest.read_text())
+    parent["frozen"]["git_commit"] = rpm.P0B_REPLAY_SOURCE_REBIND_FROM_COMMIT
+    for row in parent["results"]:
+        row["git_commit"] = rpm.P0B_REPLAY_SOURCE_REBIND_FROM_COMMIT
+    args.parent_manifest.write_text(json.dumps(parent, indent=2, sort_keys=True) + "\n")
+
+    replay = json.loads(args.parent_replay_report.read_text())
+    replay["phase_map_manifest_sha256"] = rpm.sha256_file(args.parent_manifest)
+    replay["phase_map_manifest_canonical_sha256"] = rpm.sha256_bytes(
+        rpm.canonical_json(parent)
+    )
+    replay["replay_validator_git_commit"] = HEAD
+    replay["replay_source_rebind_from_git_commit"] = (
+        rpm.P0B_REPLAY_SOURCE_REBIND_FROM_COMMIT
+    )
+    replay["replay_source_rebind_erratum_path"] = (
+        rpm.P0B_REPLAY_ERRATUM_PATH.as_posix()
+    )
+    replay["replay_source_rebind_erratum_sha256"] = rpm.P0B_REPLAY_ERRATUM_SHA256
+    args.parent_replay_report.write_text(
+        json.dumps(replay, indent=2, sort_keys=True) + "\n"
+    )
+    args.expected_parent_manifest_hash = rpm.sha256_bytes(rpm.canonical_json(parent))
+    args.expected_parent_replay_report_hash = rpm.sha256_file(
+        args.parent_replay_report
+    )
+    monkeypatch.setattr(
+        rpm,
+        "authorize_p0b_replay_source_rebind",
+        lambda observed_parent, candidate: (
+            observed_parent == parent and candidate == HEAD
+        ),
+    )
+    template = rpm.verify_authoritative_prereg(args)
+
+    observed_parent, observed_replay = rpm.validate_parent_and_replay(
+        args, template, "initial_bound_p1_r0"
+    )
+
+    assert observed_parent == parent
+    assert observed_replay == replay
+
+    replay.pop("replay_source_rebind_erratum_sha256")
+    args.parent_replay_report.write_text(
+        json.dumps(replay, indent=2, sort_keys=True) + "\n"
+    )
+    args.expected_parent_replay_report_hash = rpm.sha256_file(
+        args.parent_replay_report
+    )
+    with pytest.raises(rpm.PhaseMapError, match="source-rebind attestation"):
+        rpm.validate_parent_and_replay(args, template, "initial_bound_p1_r0")
+
+
 def test_adopted_legacy_p0a_work_is_accepted_only_with_full_replay_attestation(
     tmp_path,
 ):

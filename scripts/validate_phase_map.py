@@ -49,6 +49,10 @@ ADOPTED_PARALLEL_AMENDMENT_SHA256 = (
     "e2c87fd6c2ec0e4b91f488b5771334e0befd175560a3e2ccfcf349be1ee8b3dd"
 )
 P0A_SOURCE_REBIND_FROM_COMMIT = "0af7f4a80426babc14896c7c1f7885abcb331d46"
+P0B_LEGACY_PARENT_WORK_EXTENSION = {
+    "learner_count": 4,
+    "learner_steps_per_learner": 128,
+}
 
 
 class ManifestError(RuntimeError):
@@ -766,8 +770,8 @@ def _validate_p0b_hardware(
             )
         }
         ordered = [times[field] for field in times]
-        if all(value is not None for value in ordered) and any(
-            right <= left for left, right in zip(ordered, ordered[1:])
+        if all(value is not None for value in ordered) and not (
+            ordered[0] < ordered[1] < ordered[2] <= ordered[3] < ordered[4]
         ):
             errors.append(
                 f"{label} timestamps must order provisioning, seal, request, and deletion"
@@ -871,10 +875,29 @@ def _validate_p0b_matches_parent(
         "injected_baseline",
         "normalized_workload_command_hash",
     )
+
+    def work_matches_legacy_parent(
+        parent_work: Any, child_work: Any
+    ) -> bool:
+        if parent_work == child_work:
+            return True
+        if not isinstance(parent_work, Mapping) or not isinstance(child_work, Mapping):
+            return False
+        reduced_child = dict(child_work)
+        for field, expected in P0B_LEGACY_PARENT_WORK_EXTENSION.items():
+            if reduced_child.pop(field, None) != expected:
+                return False
+        return reduced_child == dict(parent_work)
+
     for coordinate in sorted(parent_by_coordinate):
         parent_row, child_row = parent_by_coordinate[coordinate], child_by_coordinate[coordinate]
         for field in fields:
-            if parent_row.get(field) != child_row.get(field):
+            matches = parent_row.get(field) == child_row.get(field)
+            if field == "work":
+                matches = work_matches_legacy_parent(
+                    parent_row.get(field), child_row.get(field)
+                )
+            if not matches:
                 errors.append(f"P0b {coordinate} differs from P0a workload field {field}")
 
 

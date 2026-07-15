@@ -1345,6 +1345,58 @@ def test_p0b_and_initial_p1_require_exact_parent_replay_chain() -> None:
         )
 
 
+def test_p0b_accepts_exact_legacy_parent_work_extension_and_same_second_request() -> None:
+    p0a = _authoritative_p0a()
+    p0b, replay, replay_sha = _authoritative_p0b(p0a)
+    for row in p0b["results"]:
+        row["work"].update(
+            {
+                "learner_count": 4,
+                "learner_steps_per_learner": 128,
+            }
+        )
+        row["hardware"]["deletion_requested_at"] = row["hardware"][
+            "artifact_sealed_at"
+        ]
+
+    report = _validate_with_authority(
+        p0b,
+        parent_manifest=p0a,
+        parent_replay_report=replay,
+        parent_replay_report_sha256=replay_sha,
+    )
+
+    assert report["integrity_status"] == "VALIDATED"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("learner_count", 3),
+        ("learner_steps_per_learner", 127),
+    ],
+)
+def test_p0b_rejects_inexact_legacy_parent_work_extension(field, value) -> None:
+    p0a = _authoritative_p0a()
+    p0b, replay, replay_sha = _authoritative_p0b(p0a)
+    for row in p0b["results"]:
+        row["work"].update(
+            {
+                "learner_count": 4,
+                "learner_steps_per_learner": 128,
+            }
+        )
+    p0b["results"][0]["work"][field] = value
+
+    with pytest.raises(ManifestError, match="differs from P0a workload field work"):
+        _validate_with_authority(
+            p0b,
+            parent_manifest=p0a,
+            parent_replay_report=replay,
+            parent_replay_report_sha256=replay_sha,
+        )
+
+
 def test_p0b_rejects_coordinate_work_or_gpu_bijection_drift() -> None:
     p0a = _authoritative_p0a()
     p0b, replay, replay_sha = _authoritative_p0b(p0a)
