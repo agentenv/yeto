@@ -159,10 +159,12 @@ LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
 
 [docs/DESIGN.md](docs/DESIGN.md) — merge math, blending, adaptive grace,
 delta correction, q4 wire format, snapshots, resilience.
-[docs/LM_BENCHMARK.md](docs/LM_BENCHMARK.md) — equal-hardware causal-LM
-DiLoCo benchmark design, arms, metrics, and interpretation.
-[docs/DIFFUSION_BENCHMARK.md](docs/DIFFUSION_BENCHMARK.md) — corresponding
-diffusion benchmark design and video/image-specific controls.
+[docs/LM_BENCHMARK.md](docs/LM_BENCHMARK.md) — standalone equal-hardware
+causal-LM benchmark contract, workload controls, complete arm and metric
+tables, reproducibility rules, and the Qwen3.6 historical example.
+[docs/DIFFUSION_BENCHMARK.md](docs/DIFFUSION_BENCHMARK.md) — standalone
+equal-hardware diffusion benchmark contract, media controls, complete arm and
+metric tables, reproducibility rules, and the LTX-Video historical example.
 [docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
 [docs/MEGATRON.md](docs/MEGATRON.md) — the Megatron-Core island backend (EP
 for 1T-class MoE).
@@ -174,13 +176,16 @@ learner islands (`yeto launch --external-learners`, cross Mac↔NVIDIA runs).
     python3 -m pytest tests/          # includes a real syncer+learner loop
     (cd syncer && cargo test)
 
-Two heavier harnesses (both support `--dry-run`):
+Three heavier harnesses (all support `--dry-run`):
 
     # smoke every supported model with the auto fleet planner, tiered by
     # size; sequential, self-cleaning, writes a pass/fail report
     python scripts/smoke_models.py --tier small --dry-run
 
-    # quality check: async DiLoCo vs a synchronous baseline at a fixed
-    # token budget, scored by held-out eval loss across settings presets
-    # (M, merge-alpha, q4 wire, serial rounds, no-heloco, strided)
+    # causal-LM quality check against equal-hardware synchronous baselines
     python scripts/compare_diloco.py --data <chat.jsonl> --settings all --dry-run
+
+    # diffusion quality check with an explicit, fixed media shape
+    python scripts/benchmark_diffusion_diloco.py \
+        --model Lightricks/LTX-Video --data <media-dataset> \
+        --height 512 --width 512 --settings all --dry-run

@@ -12,8 +12,6 @@ It is a quality and systems-ablation benchmark. It is not a model leaderboard,
 an image/video aesthetic evaluation, or a cloud provisioning benchmark.
 
 The executable harness is `scripts/benchmark_diffusion_diloco.py`.
-The corresponding causal-LM design and a project-by-project comparison are
-in `docs/LM_BENCHMARK.md`.
 
 ## Fairness Contract
 
@@ -80,26 +78,73 @@ At least three training seeds are used by default. The report shows mean and
 standard deviation of final held-out loss and percentage delta against the
 matching synchronous baseline.
 
-## Arms
+## Workload Controls
 
-| arm | change from production M=2 | question |
+Shape and preprocessing choices define the workload profile. They must remain
+fixed across every item in one result set.
+
+| control | accepted value | benchmark meaning |
 |---|---|---|
-| `m2` | none | Does the production-shaped two-island path match sync? |
-| `m4` | four islands | How does quality scale with more independent islands? |
-| `alpha0` | overwrite broadcasts | Is local/global blending helping? |
-| `q4` | q4 learner pushes | What quality cost buys the WAN reduction? |
-| `serial` | one fragment round in flight | Does pipelining add harmful staleness? |
-| `noheloco` | no delta correction | Is HeLoCo correcting useful stale directions? |
-| `strided` | depth-interleaved fragments | Does fragment construction affect quality? |
-| `direct-rda` | no Nesterov, full outer step, overwrite | Is outer-optimizer gain causing a gap? |
-| `unthrottled` | no H target | How sensitive is diffusion to low-latency over-syncing? |
+| `--model` | model id or alias | Fixes the denoiser, scheduler, latent geometry, and supported adapter path. |
+| `--data` | local path, Hugging Face id, or S3 prefix | Supplies prompt plus image, video, or cached latent rows. |
+| `--height`, `--width` | required positive integers | Fix the spatial training and evaluation shape. |
+| `--resize-mode` | `stretch` or `center-crop` | Fixes how raw media is transformed to the requested shape. |
+| `--num-frames`, `--fps` | optional video controls | Fix temporal length and sampling rate for video workloads. |
+| cache flags | `--cache-latents`, `--cache-text-embeds` | Select raw-media/raw-prompt processing or precomputed tensors; the choice must not vary by item. |
+| column flags | image, video, prompt, latent, text embedding, mask, and pooled embedding columns | Bind dataset schema explicitly. |
+| `--diffusion-loss-weighting` | `none`, `linear`, `sigma`, `snr`, or `min-snr` | Fixes weighting over sampled timesteps; `--diffusion-min-snr-gamma` applies to `min-snr`. |
+| `--sample-budget` | positive integer | Requested global number of training examples per item. |
+| `--eval-rows`, `--eval-repeats`, `--eval-seed` | positive rows/repeats and one fixed seed | Define the held-out Monte Carlo evaluation set. |
+| `--seeds` | one or more training seeds | Repeat full training to estimate optimization variance. |
+| batch and LoRA recipe | micro batch, grad accumulation, LR, weight decay, warmup, LoRA rank/alpha/targets | Must be identical for an arm and its matching baseline. |
 
-`direct-rda` is deliberately not called `avg`. Non-embedding fragments still
-use radial-directional averaging; the arm isolates Nesterov gain and broadcast
-blending without claiming to change the merge operator.
+## Benchmark Items
 
-The ordinary `m2` and `m4` arms retain the production `H=24` target.
-`unthrottled` is the explicit localhost/LAN stress arm.
+Every reported row belongs to one of three item types. Only rows with the same
+`M` and training seed form a quality pair.
+
+| item | execution | artifact evaluated | purpose |
+|---|---|---|---|
+| `base` | no training | unmodified base pipeline | Establish the pre-training held-out loss and verify that fine-tuning helps. |
+| `baseline-mM` | one synchronous process group with `M * G` ranks | rank-0 adapter after the final optimizer step | Supply the equal-hardware reference for every arm with that `M`. |
+| DiLoCo arm | `M` independent process groups with `G` ranks each | adapter exported from the Rust syncer checkpoint | Isolate one synchronization choice while keeping the workload fixed. |
+
+### Common DiLoCo Configuration
+
+Unless an arm overrides a field, the harness uses the following synchronization
+configuration. `--fragments` replaces `P=8` for every selected arm.
+
+| field | default | meaning |
+|---|---:|---|
+| islands (`M`) | `2` | Independent learner process groups. |
+| fragments (`P`) | `8` | Trainable adapter layout partitions synchronized independently. |
+| fragment pattern | `binpack` | Size-balanced parameter grouping. |
+| merge rule | `rda` | Weighted radial-directional aggregation for non-embedding tensors. |
+| broadcast blend (`alpha`) | `0.5` | Apply `0.5 * local + 0.5 * global` when a fragment returns. |
+| learner push dtype | `bf16` | Learner deltas sent without q4 compression. |
+| pipeline depth | `2` | Up to two distinct fragment rounds in flight. |
+| delta correction | `heloco` | Correct stale directions before aggregation. |
+| quorum | all `M` learners | Require every island for each completed fragment round. |
+| outer learning rate | `0.7` | Scale applied by the syncer's outer optimizer. |
+| outer momentum | `0.9` | Nesterov momentum held by the syncer. |
+| target sync interval (`H`) | `24` inner steps | Throttle fast local rounds toward the production cadence. |
+
+### Arm Matrix
+
+The table lists every preset accepted by `--settings`. Unlisted fields retain
+the common values above.
+
+| arm | `M` | exact override | isolated question | required interpretation |
+|---|---:|---|---|---|
+| `m2` | 2 | none | Does the production-shaped two-island path match sync? | Compare only with `baseline-m2`. |
+| `m4` | 4 | `learners=4` | Does quality remain stable with more independent islands? | Compare only with `baseline-m4`; total ranks remain `4 * G`. |
+| `alpha0` | 2 | `merge_alpha=0.0` | Does overwriting with the returned global fragment outperform local/global blending? | A change isolates broadcast application, not aggregation. |
+| `q4` | 2 | `wire_dtype=q4` | What quality cost accompanies lower learner egress? | Only learner pushes are q4; initialization and broadcasts remain bf16. |
+| `serial` | 2 | `pipeline=1` | Does allowing two in-flight fragment rounds introduce harmful staleness? | Lower concurrency may change wall time even when quality is unchanged. |
+| `noheloco` | 2 | `delta_correction=none` | Is HeLoCo correcting useful stale directions? | The merge rule and outer optimizer remain unchanged. |
+| `strided` | 2 | `fragment_pattern=strided` | Does depth-interleaved fragment construction affect quality? | Fragment count stays fixed; only parameter-to-fragment assignment changes. |
+| `direct-rda` | 2 | `outer_lr=1.0`, `outer_momentum=0.0`, `merge_alpha=0.0` | Is outer-optimizer gain or broadcast blending causing the quality gap? | This is direct application of the merged RDA delta, not plain parameter averaging. |
+| `unthrottled` | 2 | `sync_interval_steps=0.0` | How sensitive is training to low-latency over-synchronization? | This is a localhost/LAN stress arm; use measured `H`, not the preset name, to confirm cadence. |
 
 ## Systems Measurements
 
@@ -112,6 +157,21 @@ the intended synchronization actually happened. The report also records:
 - merge and sync duration counts;
 - estimated accepted raw tensor bytes for initialization, pushes, and broadcasts;
 - wall time, samples/second, GPU-hours, and optional estimated cost.
+
+The generated report fields have the following meanings:
+
+| field | definition | use |
+|---|---|---|
+| `samples` | Actual examples processed after step-count ceiling. | Confirm equal training budget within a pair. |
+| `loss/elem` | Total held-out flow-matching loss divided by predicted elements over all rows and repeats. | Primary quality metric; lower is better. |
+| `delta vs sync` | Per-seed percentage loss difference from `baseline-mM`, then mean and standard deviation. | Primary DiLoCo gap; lower is better and negative means improvement. |
+| `train s` | Learner training wall time for the item. | Compare runtime only at matching `M` and hardware. |
+| `samples/s` | Actual processed samples divided by training wall time. | Workload throughput. |
+| `GPU-h` / `cost` | GPU count times wall time, optionally multiplied by `--gpu-hour-cost`. | Resource accounting, not a quality measure. |
+| `mean H` | Mean learner inner-step count attached to accepted fragment responses. | Verify the realized synchronization cadence. |
+| `participation` | Accepted responses divided by the maximum possible responses. | Detect missing or consistently late islands. |
+| `stale` | Mean difference between current and response base fragment versions. | Detect stale updates hidden by aggregate loss. |
+| `sync GB` | Estimated accepted tensor payload for initialization, pushes, and broadcasts. | Compare protocol payloads; it excludes framing, retries, and TCP overhead. |
 
 These are diagnostics, not substitutes for held-out quality. In particular,
 localhost wall time does not measure cross-region TCP throughput.
@@ -167,11 +227,13 @@ python scripts/benchmark_diffusion_diloco.py \
 
 Outputs:
 
-- `config.json`: full arguments, arms, and fairness contract;
-- `results.jsonl`: one record per seed and arm;
-- `summary.json`: cross-seed aggregates;
-- `report.md`: human-readable comparison table;
-- per-run learner, syncer, export, and evaluation logs under `--work-dir`.
+| output | contents | role |
+|---|---|---|
+| `config.json` | Arguments, selected arm definitions, fairness contract, resume identity, and data manifest. | Audit the exact experiment plan. |
+| `results.jsonl` | One durable record per completed `(kind, arm, seed)` run. | Resume unit and source record for aggregation. |
+| `summary.json` | Cross-seed means, standard deviations, and paired deltas. | Machine-readable benchmark conclusion. |
+| `report.md` | Human-readable quality and systems table. | Review and publication surface. |
+| `--work-dir` logs | Learner, baseline, syncer, export, and evaluation logs plus event tapes and checkpoints. | Diagnose failed or invalid items. |
 
 Use `--resume` after interruption. Resume verifies the original arguments, arm
 definitions, implementation fingerprint, serialized split hashes, and local
@@ -198,3 +260,56 @@ The harness intentionally covers LoRA and flow-matching loss, which are the
 supported asynchronous diffusion path. Full-parameter FSDP synchronization,
 cloud provisioning, FID/FVD/aesthetic metrics, checkpoint-time learning
 curves, and forced learner failures are separate experiments.
+
+## Historical Example: LTX-Video
+
+The following archived result is included as an example of benchmark output.
+It predates the current logical-rank training-stream pairing; rerun the current
+harness before using it for an acceptance decision.
+
+### Configuration
+
+| item | value |
+|---|---|
+| completed | 2026-07-10 18:33:11 UTC |
+| model | `Lightricks/LTX-Video` |
+| dataset | LTX Yeto compressed dataset, 4,352 rows |
+| hardware | AWS `p4de.24xlarge`, 8 x A100 80 GB available, `us-west-2b` |
+| workload | 49 frames at 9.3 FPS, 512 x 512, aspect-preserving center crop |
+| topology | `m2`: 2 islands x 2 GPUs; `m4`: 4 islands x 1 GPU; matching baselines used 4 ranks |
+| budget | 512 samples and 128 optimizer steps per item |
+| evaluation | 16 held-out rows x 4 repeats; training seeds 17, 29, and 43 |
+
+### Quality Results
+
+| arm | M | runs | GPUs | samples | loss/elem | delta vs sync |
+|---|---:|---:|---:|---:|---:|---:|
+| `base` | - | 1 | - | - | 0.282278 +/- 0.000000 | - |
+| `baseline-m2` | 2 | 3 | 4 | 512 | 0.120068 +/- 0.000460 | - |
+| `m2` | 2 | 3 | 4 | 512 | 0.121794 +/- 0.001141 | +1.44% +/- 1.27 |
+| `alpha0` | 2 | 3 | 4 | 512 | 0.124892 +/- 0.001046 | +4.02% +/- 1.23 |
+| `q4` | 2 | 3 | 4 | 512 | 0.122769 +/- 0.001046 | +2.25% +/- 1.26 |
+| `serial` | 2 | 3 | 4 | 512 | 0.122538 +/- 0.000759 | +2.06% +/- 1.02 |
+| `noheloco` | 2 | 3 | 4 | 512 | 0.122265 +/- 0.001028 | +1.83% +/- 1.08 |
+| `strided` | 2 | 3 | 4 | 512 | 0.122453 +/- 0.000777 | +1.99% +/- 1.03 |
+| `direct-rda` | 2 | 3 | 4 | 512 | 0.122256 +/- 0.000582 | +1.82% +/- 0.81 |
+| `unthrottled` | 2 | 3 | 4 | 512 | 0.123367 +/- 0.001710 | +2.75% +/- 1.77 |
+| `baseline-m4` | 4 | 3 | 4 | 512 | 0.121219 +/- 0.001523 | - |
+| `m4` | 4 | 3 | 4 | 512 | 0.124124 +/- 0.001386 | +2.42% +/- 2.40 |
+
+### Systems Results
+
+| arm | M | train s | samples/s | GPU-h | mean H | participation % | stale | sync GB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `base` | - | 0.0 | - | 0.000 | - | - | - | - |
+| `baseline-m2` | 2 | 682.8 | 0.750 | 0.759 | - | - | - | - |
+| `m2` | 2 | 636.5 | 0.805 | 0.707 | 20.10 | 98.1 | 0.00 | 1.201 |
+| `alpha0` | 2 | 640.6 | 0.799 | 0.712 | 20.11 | 97.4 | 0.00 | 1.206 |
+| `q4` | 2 | 642.6 | 0.797 | 0.714 | 20.01 | 97.8 | 0.00 | 0.807 |
+| `serial` | 2 | 634.5 | 0.807 | 0.705 | 20.98 | 98.0 | 0.00 | 1.139 |
+| `noheloco` | 2 | 635.6 | 0.806 | 0.706 | 20.03 | 98.5 | 0.00 | 1.195 |
+| `strided` | 2 | 637.5 | 0.803 | 0.708 | 20.07 | 98.5 | 0.00 | 1.195 |
+| `direct-rda` | 2 | 619.1 | 0.827 | 0.688 | 20.06 | 98.5 | 0.00 | 1.204 |
+| `unthrottled` | 2 | 636.5 | 0.805 | 0.707 | 3.20 | 97.3 | 0.00 | 5.952 |
+| `baseline-m4` | 4 | 689.2 | 0.743 | 0.766 | - | - | - | - |
+| `m4` | 4 | 557.8 | 0.919 | 0.620 | 21.33 | 95.6 | 0.00 | 2.224 |
