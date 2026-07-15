@@ -1,0 +1,22 @@
+{
+  "bootstrap_bash_syntax": "PASS",
+  "bound_manifest_canonical_sha256": "a2bebcf09e98ee3458dc93694e25f26e474775d7e8277ae5fe848138e1f2e963",
+  "bound_manifest_validation": "PASS",
+  "campaign_command_hash": "a5453c1f841be2c69b4f00ce527ed6be74db28822f6146d3296e2e613c2f5231",
+  "embedded_bootstrap_byte_identity": "PASS",
+  "fresh_namespace_readonly_preflight": "PASS",
+  "harness_render": "PASS",
+  "harness_validate": "PASS",
+  "launch_performed": false,
+  "parent_manifest_canonical_sha256": "02b1f99537d2611e3462ebe1b4ccedd11fdc07588b7c01d3abdeabbdb5b9d8f8",
+  "parent_replay_raw_sha256": "4c1616de16708590d6a30aaf3af805adc4bad47b827087b49251d678e200c276",
+  "parent_replay_status": "PASS",
+  "protected_instance_targeted": false,
+  "randomization_plan_hash": "e81d8433e3cb49ad0f9e41ad266f55afa81dda75ba9a78525f138f27f2e6d629",
+  "remote_branch_head": "8d58208cacafef12cb95f2642b4fa700531151b4",
+  "remote_source_validation": "PASS",
+  "run_id": "bp-p0b-5966e84-20260715a",
+  "source_bundle_validation": "PASS",
+  "source_commit": "8d58208cacafef12cb95f2642b4fa700531151b4",
+  "status": "PASS"
+}

@@ -1,0 +1,16 @@
+{
+  "attempt_count": 0,
+  "claim_level_requested": "integrity",
+  "claim_scope": "unexecuted_launch_authority",
+  "confirmatory_eligible": false,
+  "expected_cell_count": 3,
+  "final_cell_count": 0,
+  "integrity_status": "BOUND_LAUNCH_AUTHORITY_VALIDATED",
+  "manifest_mode": "development",
+  "schema_version": "1.0",
+  "study_id": "bp-phase-map-p0b",
+  "valid": true,
+  "warnings": [
+    "This validates launch authority only; it contains no scientific outcomes."
+  ]
+}

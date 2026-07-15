@@ -1,0 +1,20 @@
+{
+  "acquisition_checksum_sha256": "9348d3d334305d7dc689b7b3ec5590239ab64de07eef572342c16b9abf33d7cb",
+  "acquisition_manifest_canonical_sha256": "7de34ae28df5b49ee91618ef8dfd3212e63347b2e87107e82f4c4b3ae64a48f7",
+  "acquisition_manifest_sha256": "08969dab66017c2bb1e74fc9081c092cf6c0fb416feba1ccfc189fa075f6c15d",
+  "acquisition_seal_sha256": "a792debd4cf2e1389198bb05f035b179c22c6fafc7ec76dabb821cf0fbf42136",
+  "artifact_object_seal_sha256": "bbe63f65339543dd09a375c0801044fb8fd2669c25b3e5e122ae990fe8e13ffa",
+  "artifact_sealed_at": "2026-07-15T09:31:46Z",
+  "boot_disk_numeric_id": "9211612062952365147",
+  "campaign_owned_accelerators_after_deletion": 0,
+  "deletion_completed_at": "2026-07-15T09:32:55Z",
+  "deletion_evidence_sha256": "37a3139798ca225c82c48f09160e36c0d451b84b4f4126f47380d24b6edeca79",
+  "deletion_requested_at": "2026-07-15T09:31:46Z",
+  "descendant_kind": "p0a_single_gpu_bound",
+  "final_manifest_canonical_sha256": "02b1f99537d2611e3462ebe1b4ccedd11fdc07588b7c01d3abdeabbdb5b9d8f8",
+  "final_manifest_sha256": "f299175a0924da6b99820e5cd63ac0ccaa4d7f307e8358e2ba78e575f91bd885",
+  "finalized_at": "2026-07-15T11:24:28.164720Z",
+  "instance_numeric_id": "7948744008362794075",
+  "schema": "yeto_p0_lifecycle_finalization_v1",
+  "status": "SEALED"
+}

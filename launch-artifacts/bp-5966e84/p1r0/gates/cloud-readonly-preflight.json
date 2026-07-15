@@ -1,0 +1,55 @@
+{
+  "protected_instance_targeted": false,
+  "read_only": true,
+  "status": "PASS",
+  "vms": [
+    {
+      "artifact_prefix": "gs://yeto-exp2-52-model-training-497007/bp-p1r0-w1-5966e84-20260715a",
+      "artifact_prefix_empty": true,
+      "controller_state_absent": true,
+      "controller_state_path": "/tmp/yeto-p1r0-state/bp-p1r0-w1-5966e84-20260715a.json",
+      "describe_output": "ERROR: (gcloud.compute.instances.describe) Could not fetch resource:\n - The resource 'projects/model-training-497007/zones/us-central1-c/instances/bp-p1r0-w1-5966e84-20260715a' was not found",
+      "describe_returncode": 1,
+      "instance_absent": true,
+      "run_id": "bp-p1r0-w1-5966e84-20260715a",
+      "storage_output": "ERROR: (gcloud.storage.ls) One or more URLs matched no objects.",
+      "storage_returncode": 1
+    },
+    {
+      "artifact_prefix": "gs://yeto-exp2-52-model-training-497007/bp-p1r0-w2-5966e84-20260715a",
+      "artifact_prefix_empty": true,
+      "controller_state_absent": true,
+      "controller_state_path": "/tmp/yeto-p1r0-state/bp-p1r0-w2-5966e84-20260715a.json",
+      "describe_output": "ERROR: (gcloud.compute.instances.describe) Could not fetch resource:\n - The resource 'projects/model-training-497007/zones/us-central1-c/instances/bp-p1r0-w2-5966e84-20260715a' was not found",
+      "describe_returncode": 1,
+      "instance_absent": true,
+      "run_id": "bp-p1r0-w2-5966e84-20260715a",
+      "storage_output": "ERROR: (gcloud.storage.ls) One or more URLs matched no objects.",
+      "storage_returncode": 1
+    },
+    {
+      "artifact_prefix": "gs://yeto-exp2-52-model-training-497007/bp-p1r0-w3-5966e84-20260715a",
+      "artifact_prefix_empty": true,
+      "controller_state_absent": true,
+      "controller_state_path": "/tmp/yeto-p1r0-state/bp-p1r0-w3-5966e84-20260715a.json",
+      "describe_output": "ERROR: (gcloud.compute.instances.describe) Could not fetch resource:\n - The resource 'projects/model-training-497007/zones/us-central1-c/instances/bp-p1r0-w3-5966e84-20260715a' was not found",
+      "describe_returncode": 1,
+      "instance_absent": true,
+      "run_id": "bp-p1r0-w3-5966e84-20260715a",
+      "storage_output": "ERROR: (gcloud.storage.ls) One or more URLs matched no objects.",
+      "storage_returncode": 1
+    },
+    {
+      "artifact_prefix": "gs://yeto-exp2-52-model-training-497007/bp-p1r0-w4-5966e84-20260715a",
+      "artifact_prefix_empty": true,
+      "controller_state_absent": true,
+      "controller_state_path": "/tmp/yeto-p1r0-state/bp-p1r0-w4-5966e84-20260715a.json",
+      "describe_output": "ERROR: (gcloud.compute.instances.describe) Could not fetch resource:\n - The resource 'projects/model-training-497007/zones/us-central1-c/instances/bp-p1r0-w4-5966e84-20260715a' was not found",
+      "describe_returncode": 1,
+      "instance_absent": true,
+      "run_id": "bp-p1r0-w4-5966e84-20260715a",
+      "storage_output": "ERROR: (gcloud.storage.ls) One or more URLs matched no objects.",
+      "storage_returncode": 1
+    }
+  ]
+}

@@ -1,0 +1,298 @@
+{
+  "file_count": 58,
+  "files": [
+    {
+      "path": "build_inventory.py",
+      "sha256": "dc3ac6f1fd48e53846525754ca8365feb9c7b289cee3971a98eeba782cfd953a",
+      "size_bytes": 1591
+    },
+    {
+      "path": "p0a-parent/acquisition-seal.json",
+      "sha256": "a792debd4cf2e1389198bb05f035b179c22c6fafc7ec76dabb821cf0fbf42136",
+      "size_bytes": 349
+    },
+    {
+      "path": "p0a-parent/acquisition.sha256",
+      "sha256": "9348d3d334305d7dc689b7b3ec5590239ab64de07eef572342c16b9abf33d7cb",
+      "size_bytes": 110199
+    },
+    {
+      "path": "p0a-parent/deletion-evidence.json",
+      "sha256": "37a3139798ca225c82c48f09160e36c0d451b84b4f4126f47380d24b6edeca79",
+      "size_bytes": 6321
+    },
+    {
+      "path": "p0a-parent/p0a-replay-report.json",
+      "sha256": "4c1616de16708590d6a30aaf3af805adc4bad47b827087b49251d678e200c276",
+      "size_bytes": 38022
+    },
+    {
+      "path": "p0a-parent/p0a-replay-report.json.sha256",
+      "sha256": "db2d479d42ba888cae9ef56d6dc5d886a1c2fe5e302c0ef63e34a91211fc0c67",
+      "size_bytes": 89
+    },
+    {
+      "path": "p0a-parent/phase-map-acquisition-manifest.json",
+      "sha256": "08969dab66017c2bb1e74fc9081c092cf6c0fb416feba1ccfc189fa075f6c15d",
+      "size_bytes": 52226
+    },
+    {
+      "path": "p0a-parent/phase-map-lifecycle-seal.json",
+      "sha256": "f35e55d6c18367ee49177381baaa016023e07561a58819f9cf3a9a789d276d8e",
+      "size_bytes": 1275
+    },
+    {
+      "path": "p0a-parent/phase-map-manifest.json",
+      "sha256": "f299175a0924da6b99820e5cd63ac0ccaa4d7f307e8358e2ba78e575f91bd885",
+      "size_bytes": 56570
+    },
+    {
+      "path": "p0a-parent/phase-map.sha256",
+      "sha256": "13c56195f0eca3ed095a953bd2dd63bdb38e91d91dc148887f57a7ebb98b37f8",
+      "size_bytes": 90
+    },
+    {
+      "path": "p0a-parent/pre-rebind-frozen-envelope/deletion-evidence.json",
+      "sha256": "c0c9c962291f2a4d7be8eb734df6324cbaf331127b16d9556bb345ba8c03a225",
+      "size_bytes": 5854
+    },
+    {
+      "path": "p0a-parent/pre-rebind-frozen-envelope/phase-map-lifecycle-seal.json",
+      "sha256": "1879d292f58769fe0b7c78640979ed4e55933c6a8a9b1392e17436fe623bd30d",
+      "size_bytes": 1275
+    },
+    {
+      "path": "p0a-parent/pre-rebind-frozen-envelope/phase-map-manifest.json",
+      "sha256": "155e7c313da668305f730c7fe23160dcb57321590eff860232d87149ce4b2b38",
+      "size_bytes": 56570
+    },
+    {
+      "path": "p0a-parent/pre-rebind-frozen-envelope/phase-map.sha256",
+      "sha256": "c543499f6177c92eb06d9b5706bd1b6239dd4f919cb53bc486aff57b53965b38",
+      "size_bytes": 90
+    },
+    {
+      "path": "p0b/LAUNCH.sh",
+      "sha256": "f5261b98666e6d694898d304ad6f9ed4d26b31dd4245f5c863381a5ab3fb31f7",
+      "size_bytes": 676
+    },
+    {
+      "path": "p0b/bootstrap.sh",
+      "sha256": "2b8ca3fb212d8ca0cfafbb9cd5b6d3288e8a0558817d2573a9f44cbf263b5ccd",
+      "size_bytes": 132360
+    },
+    {
+      "path": "p0b/build-summary.json",
+      "sha256": "426ab769018e4cf0cbebf5f4ba3f8f1aa23266af654823850df13341f395a6c9",
+      "size_bytes": 450
+    },
+    {
+      "path": "p0b/build_materialization.py",
+      "sha256": "3cd406f3c74f79b6da9477ce7f18da61d1832bcbc4dcb1c1894392288ea20c98",
+      "size_bytes": 9139
+    },
+    {
+      "path": "p0b/build_packet.py",
+      "sha256": "83162275f5c8ff874901a155c95d9a938f915bc875fd334e1904a38de72e0229",
+      "size_bytes": 9332
+    },
+    {
+      "path": "p0b/execute-argv.json",
+      "sha256": "351823193c84b42df3efc61e9857150a25324f1991b5ed0c37d482c162555d49",
+      "size_bytes": 3907
+    },
+    {
+      "path": "p0b/gates/bound-manifest-validation.json",
+      "sha256": "75cc78181c0191ae95ec833afc813e9b209a53bc7891aa137b785a5759a4f489",
+      "size_bytes": 471
+    },
+    {
+      "path": "p0b/gates/cloud-readonly-preflight.json",
+      "sha256": "fd8079e1d498bb392dc82ca0be22f34ee4a281e2dbcc68fe23d64d5542149965",
+      "size_bytes": 831
+    },
+    {
+      "path": "p0b/gates/harness-validate.txt",
+      "sha256": "eec2e1a598d6264446f0c27173a3ee3eae4159ebb289261d6a289de24b257f18",
+      "size_bytes": 75
+    },
+    {
+      "path": "p0b/gates/packet-validation.json",
+      "sha256": "d343a17e18de1ce4ee8b191ac9294b140bbaa3adb46a460446c896e4f20fb1a0",
+      "size_bytes": 1100
+    },
+    {
+      "path": "p0b/materialize-argv.json",
+      "sha256": "30cba9c8f2407ff757b766876a19a5cd61d75c374c0262af972f35ce626b1cc6",
+      "size_bytes": 3695
+    },
+    {
+      "path": "p0b/materialized/bound-manifest.json",
+      "sha256": "0833cbf9c253a8ed30822cd665b8a5803b4a9f2378023418866d623f801a5847",
+      "size_bytes": 33691
+    },
+    {
+      "path": "p0b/materialized/materialization.json",
+      "sha256": "9eb1f3a0140052f42d7534a3b1f79dc974ad93332a81a266a57a7d93050b2d34",
+      "size_bytes": 307
+    },
+    {
+      "path": "p0b/materialized/randomization-plan.json",
+      "sha256": "17e3654270c4d61f9aa8b64647f61b1204c4c6665af70cb06eaeb5491dec23ad",
+      "size_bytes": 8957
+    },
+    {
+      "path": "p0b/optimizer-harness-p0b.json",
+      "sha256": "98cfe74cf0b0e467e007b7a5f02d560f4d8aaa47ded29db880f827ab733e4b8a",
+      "size_bytes": 180191
+    },
+    {
+      "path": "p0b/optimizer-harness-p0b.rendered.txt",
+      "sha256": "682aae550d5c7af23705cb72fd3982a514a3895be0ab7eb4702a300e15ae06b6",
+      "size_bytes": 602229
+    },
+    {
+      "path": "p0b/source/yeto-8d58208ca.bundle",
+      "sha256": "5776334c3e11d7cd5241e0ffc4e7eed62b4d65f5e208e0bc4752c0b1722b74d6",
+      "size_bytes": 2330781
+    },
+    {
+      "path": "p0b/validate_packet.py",
+      "sha256": "fb17302457e00c7caf324a591be963c10787ec2304bbe3b66e4f3717f29f4011",
+      "size_bytes": 10520
+    },
+    {
+      "path": "p1r0/LAUNCH-BLOCKED.sh",
+      "sha256": "6b0faf38334fdae3ad3d3b180162fd7159a28e9118de67833fbf14fc2e69f76e",
+      "size_bytes": 507
+    },
+    {
+      "path": "p1r0/build_wave_plan.py",
+      "sha256": "94b118a1c224f43e29687c6175b56b7df609a7d938e26b214684571eb5ca0bc7",
+      "size_bytes": 12333
+    },
+    {
+      "path": "p1r0/gates/cloud-readonly-preflight.json",
+      "sha256": "a5a06d064cb326a3c09ce8d10237ac94cd1536c8362d467a1c71ae8d5887d6c0",
+      "size_bytes": 3007
+    },
+    {
+      "path": "p1r0/gates/rank-golden-vectors.json",
+      "sha256": "ab798b3c53eb82d4cf3d657e5c0cfbe88b6f65e16ec403e4a380b32d1dc3b8b8",
+      "size_bytes": 4941
+    },
+    {
+      "path": "p1r0/gates/wave-plan-validation.json",
+      "sha256": "94f955e5b52bd43aa4a5f8eb8d18f889959aa4cc2f81135aeac9de7975e62052",
+      "size_bytes": 980
+    },
+    {
+      "path": "p1r0/launch-cells.json",
+      "sha256": "31d45849d36a4170a2cb51ddd3e774046b0696dddf97b9fa704dc542474fa62e",
+      "size_bytes": 17811
+    },
+    {
+      "path": "p1r0/scientific-materialize-argv.prebinding.json",
+      "sha256": "5946c288980207a9bcc4a6b72adf5c144ab5637287dad1e0c80ec2d5738109b5",
+      "size_bytes": 1509
+    },
+    {
+      "path": "p1r0/scientific-randomization-plan.json",
+      "sha256": "5c6c8755cf2f0aaf2a4ffb5c8a857cb3a2b92b2a55efff8ecb86e4bc7c99fb5e",
+      "size_bytes": 100429
+    },
+    {
+      "path": "p1r0/validate_wave_plan.py",
+      "sha256": "dbc42d37d8702e8d7443ec7f975b478c9cf026105191526cc6289b2e0fe0c201",
+      "size_bytes": 11285
+    },
+    {
+      "path": "p1r0/vms/v0.json",
+      "sha256": "a100bb44384291d4e5f91d382759ad0752cd7c3533124a0c107d199861e2cf67",
+      "size_bytes": 2860
+    },
+    {
+      "path": "p1r0/vms/v1.json",
+      "sha256": "a27dfb65596aae18c97816ad099f4446ebd2cb186cd1d00a6592ed486eaddbb1",
+      "size_bytes": 3803
+    },
+    {
+      "path": "p1r0/vms/v2.json",
+      "sha256": "5484e735e357a1603e61e5a3543095333a5b776b99ee428db7c7d0c145cf0a94",
+      "size_bytes": 3482
+    },
+    {
+      "path": "p1r0/vms/v3.json",
+      "sha256": "5bdc1626115f4010dd8711266ecbc3099b9f31de4d1efc5e4aefdb5645226d3f",
+      "size_bytes": 3793
+    },
+    {
+      "path": "p1r0/wave-plan.prebinding.json",
+      "sha256": "795079f0fc98c23b963cd2008ea548c8a44ec7bb39e44dd00273b9a53f19691a",
+      "size_bytes": 58463
+    },
+    {
+      "path": "p1r0/waves/wave-01.json",
+      "sha256": "abc49d78fae9f126d81c6bd7f66ed76a6c5a0201b5b57b3a9ad9a67ac5525b19",
+      "size_bytes": 4379
+    },
+    {
+      "path": "p1r0/waves/wave-02.json",
+      "sha256": "4dc84d2de5717a5350a4b57fb9b7a1dfc6bbceae019da34fdaa4ef70590a5e32",
+      "size_bytes": 4337
+    },
+    {
+      "path": "p1r0/waves/wave-03.json",
+      "sha256": "3c86b936b076c5339da12d648f183cf5ada5d8b5b1a68ef601c445964d8e1cdb",
+      "size_bytes": 4337
+    },
+    {
+      "path": "p1r0/waves/wave-04.json",
+      "sha256": "0505f16fe36c2b4775563641b258e691457beee83eca7e48e910e472c9fa3655",
+      "size_bytes": 4365
+    },
+    {
+      "path": "p1r0/waves/wave-05.json",
+      "sha256": "d8824816462fdaef46b2a121efc45559a754cb35f95a2ce9ae5a5699fdead836",
+      "size_bytes": 4365
+    },
+    {
+      "path": "p1r0/waves/wave-06.json",
+      "sha256": "cff418c3efa6751379c62d771899de6ef5dbd667a353f004e5cfbf5850dcf4c8",
+      "size_bytes": 4351
+    },
+    {
+      "path": "p1r0/waves/wave-07.json",
+      "sha256": "9252b164d191225a27754346989e292c37b65c7da6651cd536ab61a6d2f20ac9",
+      "size_bytes": 4351
+    },
+    {
+      "path": "p1r0/waves/wave-08.json",
+      "sha256": "b45b1f9817c48d6030a1e6779b8def393ade7b15be13f6927c09f0963297d1df",
+      "size_bytes": 4323
+    },
+    {
+      "path": "p1r0/waves/wave-09.json",
+      "sha256": "5159e1396c0b019478fe472f46e5abeb1eb03347893e7f176a1732dca01752a9",
+      "size_bytes": 4323
+    },
+    {
+      "path": "p1r0/waves/wave-10.json",
+      "sha256": "dce36b6e4aab5c36fb2514c9fc309810e305f3245c64418afe5257a59f2e6639",
+      "size_bytes": 4337
+    },
+    {
+      "path": "p1r0/waves/wave-11.json",
+      "sha256": "38c37cd69b3c50c1311640494edad859089bc82ae0eb528b29525474e4803249",
+      "size_bytes": 4353
+    },
+    {
+      "path": "p1r0/waves/wave-12.json",
+      "sha256": "aad8cc75247c6219aa960dfc685d8755b1322027505c5896fdf64448814381c8",
+      "size_bytes": 4367
+    }
+  ],
+  "operator_label_commit": "5966e84",
+  "schema": "yeto_best_paper_integration_packet_inventory_v1",
+  "source_commit": "8d58208cacafef12cb95f2642b4fa700531151b4"
+}

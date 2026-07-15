@@ -1,0 +1,141 @@
+{
+  "artifact_object_seal": {
+    "objects": [
+      {
+        "crc32c": null,
+        "generation": "1784105884683066",
+        "md5_hash": null,
+        "metageneration": "1",
+        "role": "acquisition_checksum",
+        "sha256": "9348d3d334305d7dc689b7b3ec5590239ab64de07eef572342c16b9abf33d7cb",
+        "size": 110199,
+        "uri": "gs://yeto-exp2-52-model-training-497007/bp-p0a-0af7f4a-20260715c/phase-map/acquisition.sha256"
+      },
+      {
+        "crc32c": null,
+        "generation": "1784105171529939",
+        "md5_hash": null,
+        "metageneration": "1",
+        "role": "phase_map_manifest",
+        "sha256": "08969dab66017c2bb1e74fc9081c092cf6c0fb416feba1ccfc189fa075f6c15d",
+        "size": 52226,
+        "uri": "gs://yeto-exp2-52-model-training-497007/bp-p0a-0af7f4a-20260715c/phase-map/phase-map-manifest.json"
+      }
+    ],
+    "schema": "optimizer_harness_artifact_object_seal_v1",
+    "sealed_at_utc": "2026-07-15T09:31:46Z"
+  },
+  "artifact_uri": "gs://yeto-exp2-52-model-training-497007/bp-p0a-0af7f4a-20260715c/phase-map",
+  "backup_pid": 42814,
+  "boot_disk": {
+    "id": "9211612062952365147",
+    "name": "bp-p0a-0af7f4a-20260715c",
+    "self_link": "https://www.googleapis.com/compute/v1/projects/model-training-497007/zones/us-central1-c/disks/bp-p0a-0af7f4a-20260715c",
+    "source_image": "https://www.googleapis.com/compute/v1/projects/model-training-497007/global/images/yeto-optimizer-a100-20260714",
+    "source_image_id": "7290368630472593484",
+    "source_image_path": "projects/model-training-497007/global/images/yeto-optimizer-a100-20260714",
+    "user": "https://www.googleapis.com/compute/v1/projects/model-training-497007/zones/us-central1-c/instances/bp-p0a-0af7f4a-20260715c"
+  },
+  "boot_disk_id": "9211612062952365147",
+  "boot_disk_self_link": "https://www.googleapis.com/compute/v1/projects/model-training-497007/zones/us-central1-c/disks/bp-p0a-0af7f4a-20260715c",
+  "deleted_at_utc": "2026-07-15T09:32:55Z",
+  "deleted_boot_disk_id": "9211612062952365147",
+  "deleted_boot_disk_name": "bp-p0a-0af7f4a-20260715c",
+  "deleted_instance_id": "7948744008362794075",
+  "deleted_instance_name": "bp-p0a-0af7f4a-20260715c",
+  "deletion_requested_at_utc": "2026-07-15T09:31:46Z",
+  "instance_id": "7948744008362794075",
+  "instance_name": "bp-p0a-0af7f4a-20260715c",
+  "instance_self_link": "https://www.googleapis.com/compute/v1/projects/model-training-497007/zones/us-central1-c/instances/bp-p0a-0af7f4a-20260715c",
+  "labels": {
+    "campaign": "best-paper-phase-map",
+    "draft": "false",
+    "managed-by": "yeto-optimizer-harness",
+    "ownership-nonce": "72e73159ca7f39bb",
+    "run-id": "bp-p0a-0af7f4a-20260715c",
+    "stage": "p0a"
+  },
+  "ownership_nonce": "72e73159ca7f39bb",
+  "post_delete_accelerator_proof": {
+    "campaign_owned_accelerators": 0,
+    "inventory_sha256": "6d612e676352b1cd2446431aaaf5d2d5625ee2dde0ed93b0ef18d0f5caaf3145",
+    "ownership_labels": {
+      "campaign": "best-paper-phase-map",
+      "draft": "false",
+      "managed-by": "yeto-optimizer-harness",
+      "ownership-nonce": "72e73159ca7f39bb",
+      "run-id": "bp-p0a-0af7f4a-20260715c",
+      "stage": "p0a"
+    },
+    "project": "model-training-497007",
+    "queried_at_utc": "2026-07-15T09:32:55Z",
+    "total_active_accelerators": 0,
+    "unrelated_active_accelerators": 0
+  },
+  "project": "model-training-497007",
+  "provider_evidence": {
+    "automatic_restart": false,
+    "boot_disk_id": "9211612062952365147",
+    "boot_disk_name": "bp-p0a-0af7f4a-20260715c",
+    "boot_disk_self_link": "https://www.googleapis.com/compute/v1/projects/model-training-497007/zones/us-central1-c/disks/bp-p0a-0af7f4a-20260715c",
+    "captured_at_utc": "2026-07-15T07:58:27Z",
+    "instance_id": "7948744008362794075",
+    "instance_name": "bp-p0a-0af7f4a-20260715c",
+    "instance_self_link": "https://www.googleapis.com/compute/v1/projects/model-training-497007/zones/us-central1-c/instances/bp-p0a-0af7f4a-20260715c",
+    "instance_termination_action": "DELETE",
+    "instance_type": "a2-highgpu-1g",
+    "labels": {
+      "campaign": "best-paper-phase-map",
+      "draft": "false",
+      "managed-by": "yeto-optimizer-harness",
+      "ownership-nonce": "72e73159ca7f39bb",
+      "run-id": "bp-p0a-0af7f4a-20260715c",
+      "stage": "p0a"
+    },
+    "market": "spot",
+    "on_host_maintenance": "TERMINATE",
+    "project": "model-training-497007",
+    "provider": "gcp",
+    "provisioning_completed_at": "2026-07-15T06:03:51Z",
+    "provisioning_model": "SPOT",
+    "provisioning_started_at": "2026-07-15T06:03:27Z",
+    "region": "us-central1",
+    "schema": "yeto_gcp_spot_evidence_v1",
+    "source_image_id": "7290368630472593484",
+    "zone": "us-central1-c"
+  },
+  "provider_evidence_sha256": "392fd2c5a3cb9555ad5f5d71cb9ee77d0d4051da02f059e5d69cb91a7a9aa961",
+  "provider_evidence_uri": "gs://yeto-exp2-52-model-training-497007/bp-p0a-0af7f4a-20260715c/provider-evidence.json",
+  "provider_not_found_verification": {
+    "boot_disk": {
+      "name": "bp-p0a-0af7f4a-20260715c",
+      "provider_id": "9211612062952365147",
+      "result": "NOT_FOUND",
+      "verified_at_utc": "2026-07-15T09:32:53Z"
+    },
+    "instance": {
+      "name": "bp-p0a-0af7f4a-20260715c",
+      "provider_id": "7948744008362794075",
+      "result": "NOT_FOUND",
+      "verified_at_utc": "2026-07-15T09:32:53Z"
+    }
+  },
+  "provisioning_completed_at_utc": "2026-07-15T06:03:51Z",
+  "provisioning_started_at_utc": "2026-07-15T06:03:27Z",
+  "repo_commit": "0af7f4a80426babc14896c7c1f7885abcb331d46",
+  "run_id": "bp-p0a-0af7f4a-20260715c",
+  "runner_pid": 42813,
+  "schema_version": 1,
+  "source_image_id": "7290368630472593484",
+  "spec_path": "/private/tmp/yeto-p0a-staging/optimizer-harness-p0a.postupload.json",
+  "status": "DELETED",
+  "verified_boot_disk_absent": true,
+  "verified_instance_absent": true,
+  "zone": "us-central1-c",
+  "deletion_evidence_projection": {
+    "source_path": "/tmp/yeto-p0a-state/bp-p0a-0af7f4a-20260715c.json",
+    "source_sha256": "c0c9c962291f2a4d7be8eb734df6324cbaf331127b16d9556bb345ba8c03a225",
+    "transformation": "artifact_uri appended with /phase-map to match the sealed phase-map object root; all provider/deletion/object-seal fields are byte-value preserving",
+    "projected_for_production_commit": "8ad901759b7a15e16e3dd6054ba5e95c21987702"
+  }
+}

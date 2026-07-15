@@ -1,0 +1,29 @@
+{
+  "arm_to_slot_assignment": "PASS",
+  "atomic_group_count": 12,
+  "atomic_three_mu_groups": "PASS",
+  "cells_per_wave": 3,
+  "dispatch_order": "PASS",
+  "exact_cell_coverage": "PASS",
+  "fresh_requested_namespaces": "PASS",
+  "independent_rank_implementations": "PASS",
+  "launch_eligible": false,
+  "launch_performed": false,
+  "maximum_campaign_a100s": 16,
+  "parallel_executor_aggregator_implemented": false,
+  "parallel_parent_binding_complete": false,
+  "protected_instance_targeted": false,
+  "requested_run_id_aliases": {
+    "v0": "bp-p1r0-w1-5966e84-20260715a",
+    "v1": "bp-p1r0-w2-5966e84-20260715a",
+    "v2": "bp-p1r0-w3-5966e84-20260715a",
+    "v3": "bp-p1r0-w4-5966e84-20260715a"
+  },
+  "requested_run_ids_match_amendment_generation_grammar": false,
+  "scientific_cell_count": 36,
+  "scope": "deterministic_prebinding_schedule_only",
+  "source_commit": "8d58208cacafef12cb95f2642b4fa700531151b4",
+  "status": "PASS",
+  "wave_count": 12,
+  "wave_order": "PASS"
+}

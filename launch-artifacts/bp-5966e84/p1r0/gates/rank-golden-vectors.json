@@ -1,0 +1,122 @@
+[
+  {
+    "domain": "wave",
+    "sha256": "00f05c96a7cb2108c865f080ad06b683e926b980362e44d6301a8d4443899722",
+    "token": "bp-phase-map-p1-r0-block-h256-eta0p021875-s347"
+  },
+  {
+    "domain": "arm-order|bp-phase-map-p1-r0-block-h256-eta0p021875-s347|1",
+    "sha256": "d03391725c97944ac18a3891f4a85f9b8123371b7f9efa5984ab9a9d6b7da2c4",
+    "token": "bp-phase-map-p1-r0-h256-mu0-eta0p021875-s347"
+  },
+  {
+    "domain": "arm-order|bp-phase-map-p1-r0-block-h256-eta0p021875-s347|1",
+    "sha256": "28f6590494c7915e6fbb3b0f685cad01c8dc2b253b53593aa9e7e841849502bd",
+    "token": "bp-phase-map-p1-r0-h256-mu0p5-eta0p021875-s347"
+  },
+  {
+    "domain": "arm-order|bp-phase-map-p1-r0-block-h256-eta0p021875-s347|1",
+    "sha256": "6faa520cd0cee7a26489e37949e70718dea7e9e5ad653ac8fc5e6bc47f65aad8",
+    "token": "bp-phase-map-p1-r0-h256-mu0p9-eta0p021875-s347"
+  },
+  {
+    "domain": "launch-order|bp-phase-map-p1-r0-block-h256-eta0p021875-s347|1",
+    "sha256": "0ab67395e71fbe1481701df538ca248b595fa1f4193b16646f060f1cb2f20e8e",
+    "token": "bp-phase-map-p1-r0-h256-mu0-eta0p021875-s347"
+  },
+  {
+    "domain": "launch-order|bp-phase-map-p1-r0-block-h256-eta0p021875-s347|1",
+    "sha256": "2b47591f84476387253b179a058254306b8e986551123a72ad9c2504709ca0c5",
+    "token": "bp-phase-map-p1-r0-h256-mu0p5-eta0p021875-s347"
+  },
+  {
+    "domain": "launch-order|bp-phase-map-p1-r0-block-h256-eta0p021875-s347|1",
+    "sha256": "5cd9237cc03805fc73371eeacea682e259186e31327a603c5c7723bf4f065339",
+    "token": "bp-phase-map-p1-r0-h256-mu0p9-eta0p021875-s347"
+  },
+  {
+    "domain": "slot-order|bp-phase-map-p1-r0-block-h256-eta0p021875-s347|1",
+    "sha256": "9249c0300398c094c54f60dd917cf7fb4ac753caa669a5f9aa4f2300653f44f1",
+    "token": "v0"
+  },
+  {
+    "domain": "slot-order|bp-phase-map-p1-r0-block-h256-eta0p021875-s347|1",
+    "sha256": "a3e6df0a604263f256a5aa80b65b82bceb97db64561b71a956562b846444ffe0",
+    "token": "v1"
+  },
+  {
+    "domain": "slot-order|bp-phase-map-p1-r0-block-h256-eta0p021875-s347|1",
+    "sha256": "f2be7f0b55dcdbe6bfa7e2af0c45dffcbc3d15f81b2762e7c6058d0db1339ddd",
+    "token": "v2"
+  },
+  {
+    "domain": "slot-order|bp-phase-map-p1-r0-block-h256-eta0p021875-s347|1",
+    "sha256": "70fcf6b970e70f6a896e673331732d30069ed120fd2c509690778b663cb39bb8",
+    "token": "v3"
+  },
+  {
+    "domain": "wave",
+    "sha256": "453ce305379dc244bce075a4d0aa840bf38b4d12fc1941302e95bcee382256ac",
+    "token": "bp-phase-map-p1-r0-block-h64-eta0p0875-s347"
+  },
+  {
+    "domain": "arm-order|bp-phase-map-p1-r0-block-h64-eta0p0875-s347|1",
+    "sha256": "996c368141f44ed73037906faed635c93968be999c8119f4246fdabaf679e852",
+    "token": "bp-phase-map-p1-r0-h64-mu0-eta0p0875-s347"
+  },
+  {
+    "domain": "arm-order|bp-phase-map-p1-r0-block-h64-eta0p0875-s347|1",
+    "sha256": "a44233c1b578471d8a96e1f6a1ad3cdba26d2f0359b7ee9ec170eb94330f6066",
+    "token": "bp-phase-map-p1-r0-h64-mu0p5-eta0p0875-s347"
+  },
+  {
+    "domain": "arm-order|bp-phase-map-p1-r0-block-h64-eta0p0875-s347|1",
+    "sha256": "16af81410640a320af06f980168a7be67cef61efa1853319eb42f654e8ee3cc1",
+    "token": "bp-phase-map-p1-r0-h64-mu0p9-eta0p0875-s347"
+  },
+  {
+    "domain": "launch-order|bp-phase-map-p1-r0-block-h64-eta0p0875-s347|1",
+    "sha256": "295aeee774fbfef6d1b395ff0243392a367205c882a4877b04720408c41d4436",
+    "token": "bp-phase-map-p1-r0-h64-mu0-eta0p0875-s347"
+  },
+  {
+    "domain": "launch-order|bp-phase-map-p1-r0-block-h64-eta0p0875-s347|1",
+    "sha256": "916f1533a84c6c5f6033586526a2de6fcbaa0aecfe074f30f2d38c4d4009c077",
+    "token": "bp-phase-map-p1-r0-h64-mu0p5-eta0p0875-s347"
+  },
+  {
+    "domain": "launch-order|bp-phase-map-p1-r0-block-h64-eta0p0875-s347|1",
+    "sha256": "09f2e9b6fbe6c113b8a3261673572f863df97044c897b126a850896086ff9547",
+    "token": "bp-phase-map-p1-r0-h64-mu0p9-eta0p0875-s347"
+  },
+  {
+    "domain": "slot-order|bp-phase-map-p1-r0-block-h64-eta0p0875-s347|1",
+    "sha256": "eaf997e0b975c064d61b0ffc4c173ea626612f329b31a046e9a205f85d0273f7",
+    "token": "v0"
+  },
+  {
+    "domain": "slot-order|bp-phase-map-p1-r0-block-h64-eta0p0875-s347|1",
+    "sha256": "2e77453f65b7bbcb9489014ef6ce56c471645f06d0c2d65671d38e371b2d7406",
+    "token": "v1"
+  },
+  {
+    "domain": "slot-order|bp-phase-map-p1-r0-block-h64-eta0p0875-s347|1",
+    "sha256": "72dbc98a57ceea0605681d9bbaf57f86a09244b9fccd0c2239436cb2931dbd57",
+    "token": "v2"
+  },
+  {
+    "domain": "slot-order|bp-phase-map-p1-r0-block-h64-eta0p0875-s347|1",
+    "sha256": "e5f53abe3461471ecbda0ebcbdef7438bef889781233936eda2f288fb5cd4354",
+    "token": "v3"
+  },
+  {
+    "domain": "wave",
+    "sha256": "4c2e43bcfda3d310db650497bab492826437870ace3cc1d153148eb51214d78e",
+    "token": "bp-phase-map-p1-r0-block-h256-eta0p175-s347"
+  },
+  {
+    "domain": "arm-order|bp-phase-map-p1-r0-block-h256-eta0p175-s347|1",
+    "sha256": "5ebcd35ebae6b080c5458e8b4e7335fea1f50daeac81241e0d457feee4d1d465",
+    "token": "bp-phase-map-p1-r0-h256-mu0-eta0p175-s347"
+  }
+]

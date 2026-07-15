@@ -1,0 +1,98 @@
+{
+  "accelerator_count": 4,
+  "artifact_prefix": "gs://yeto-exp2-52-model-training-497007/bp-p1r0-w2-5966e84-20260715a",
+  "assigned_cell_count": 10,
+  "assigned_wave_cells": [
+    {
+      "cell_id": "bp-phase-map-p1-r0-h256-mu0-eta0p021875-s347",
+      "command_hash": "2e8d0ecdb3dd0367ed16d9963884304d427cea358fd19bbc31f5d0577c9bff07",
+      "group_id": "bp-phase-map-p1-r0-block-h256-eta0p021875-s347",
+      "launch_order_index": 0,
+      "time_block_index": 0,
+      "wave_index": 0
+    },
+    {
+      "cell_id": "bp-phase-map-p1-r0-h64-mu0p9-eta0p0875-s347",
+      "command_hash": "60f53952a448344ce74ee93a7790a6a9002dedc82ff9ec95dd086b226f6a30b9",
+      "group_id": "bp-phase-map-p1-r0-block-h64-eta0p0875-s347",
+      "launch_order_index": 0,
+      "time_block_index": 1,
+      "wave_index": 1
+    },
+    {
+      "cell_id": "bp-phase-map-p1-r0-h64-mu0p9-eta0p021875-s347",
+      "command_hash": "87384658eac0fe79b2875e8902d1f479585a927036077b17dd9aa1d99377579c",
+      "group_id": "bp-phase-map-p1-r0-block-h64-eta0p021875-s347",
+      "launch_order_index": 2,
+      "time_block_index": 4,
+      "wave_index": 4
+    },
+    {
+      "cell_id": "bp-phase-map-p1-r0-h16-mu0-eta0p04375-s347",
+      "command_hash": "bc47671e04582bbef36cb453436fc578820155ee11b545dfc5d3e268787d1f75",
+      "group_id": "bp-phase-map-p1-r0-block-h16-eta0p04375-s347",
+      "launch_order_index": 1,
+      "time_block_index": 5,
+      "wave_index": 5
+    },
+    {
+      "cell_id": "bp-phase-map-p1-r0-h256-mu0p9-eta0p0875-s347",
+      "command_hash": "7803d8f9b35a723c8b59f7c6a96b8bfe07b1388becd9dbfddaed7be53133b9b1",
+      "group_id": "bp-phase-map-p1-r0-block-h256-eta0p0875-s347",
+      "launch_order_index": 2,
+      "time_block_index": 6,
+      "wave_index": 6
+    },
+    {
+      "cell_id": "bp-phase-map-p1-r0-h16-mu0p5-eta0p175-s347",
+      "command_hash": "5ddcf478d37f700a56fc31b93f442cba2abf788a1ee1086732f523428818b28d",
+      "group_id": "bp-phase-map-p1-r0-block-h16-eta0p175-s347",
+      "launch_order_index": 2,
+      "time_block_index": 7,
+      "wave_index": 7
+    },
+    {
+      "cell_id": "bp-phase-map-p1-r0-h64-mu0p5-eta0p175-s347",
+      "command_hash": "b14188b9175c15604230f43a72fbf95b910b9adaff744651e4cb4992b929f6e9",
+      "group_id": "bp-phase-map-p1-r0-block-h64-eta0p175-s347",
+      "launch_order_index": 2,
+      "time_block_index": 8,
+      "wave_index": 8
+    },
+    {
+      "cell_id": "bp-phase-map-p1-r0-h16-mu0p9-eta0p0875-s347",
+      "command_hash": "e223a261d930dff9b0e18cb9e6f8a9f45640fefd72f7cd91b8d8a6dad796ec40",
+      "group_id": "bp-phase-map-p1-r0-block-h16-eta0p0875-s347",
+      "launch_order_index": 2,
+      "time_block_index": 9,
+      "wave_index": 9
+    },
+    {
+      "cell_id": "bp-phase-map-p1-r0-h64-mu0p5-eta0p04375-s347",
+      "command_hash": "586448cb48abbd55d955477fc58233e9d637868c6c58076a2932b5a5715143fb",
+      "group_id": "bp-phase-map-p1-r0-block-h64-eta0p04375-s347",
+      "launch_order_index": 2,
+      "time_block_index": 10,
+      "wave_index": 10
+    },
+    {
+      "cell_id": "bp-phase-map-p1-r0-h16-mu0p9-eta0p021875-s347",
+      "command_hash": "09d84b0c156fd24ad9423a42569ceddfe1df354fc8939b40589678adca5c0550",
+      "group_id": "bp-phase-map-p1-r0-block-h16-eta0p021875-s347",
+      "launch_order_index": 2,
+      "time_block_index": 11,
+      "wave_index": 11
+    }
+  ],
+  "automatic_restart": false,
+  "controller_state_path": "/tmp/yeto-p1r0-state/bp-p1r0-w2-5966e84-20260715a.json",
+  "launch_eligible": false,
+  "logical_slot": "v1",
+  "machine_type": "a2-highgpu-4g",
+  "on_host_maintenance": "TERMINATE",
+  "provisioning_model": "SPOT",
+  "requested_run_id": "bp-p1r0-w2-5966e84-20260715a",
+  "schema": "yeto_p1r0_requested_vm_plan_v1",
+  "status": "PREBOUND_SCHEDULE_ONLY_NOT_LAUNCH_AUTHORITY",
+  "termination_action": "DELETE"
+}

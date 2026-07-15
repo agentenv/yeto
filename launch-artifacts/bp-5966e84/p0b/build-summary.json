@@ -1,0 +1,9 @@
+{
+  "artifact_uri": "gs://yeto-exp2-52-model-training-497007/bp-p0b-5966e84-20260715a",
+  "bootstrap_sha256": "2b8ca3fb212d8ca0cfafbb9cd5b6d3288e8a0558817d2573a9f44cbf263b5ccd",
+  "embedded_bootstrap_byte_identical": true,
+  "operator_label_commit": "5966e84",
+  "run_id": "bp-p0b-5966e84-20260715a",
+  "source_commit": "8d58208cacafef12cb95f2642b4fa700531151b4",
+  "spec_sha256": "98cfe74cf0b0e467e007b7a5f02d560f4d8aaa47ded29db880f827ab733e4b8a"
+}
