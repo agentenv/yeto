@@ -398,9 +398,23 @@ def _barrier_events(updates: list[dict]) -> dict:
 
 
 def _provider_record(
-    identity, index: int, created_at: str, *, zone: str = "us-central1-c"
+    identity,
+    index: int,
+    created_at: str,
+    *,
+    zone: str = "us-central1-c",
+    machine_type: str = "a2-highgpu-4g",
 ) -> dict:
-    gpu_uuids = [f"GPU-{identity.slot}-{identity.generation}-{gpu}" for gpu in range(4)]
+    contract = pexec.machine_shape_contract(machine_type)
+    gpu_uuids = [
+        f"GPU-{identity.slot}-{identity.generation}-{gpu}"
+        for gpu in range(contract["a100_count"])
+    ]
+    learner_map = (
+        {str(learner): gpu_uuids[learner] for learner in range(4)}
+        if machine_type == pexec.SCIENTIFIC_VM_SHAPE
+        else {str(learner): gpu_uuids[0] for learner in range(4)}
+    )
     return {
         "schema": "yeto_parallel_gcp_provider_evidence_v1",
         "project": "model-training-497007",
@@ -416,19 +430,18 @@ def _provider_record(
         "boot_disk_name": f"{identity.run_id}-disk",
         "boot_disk_numeric_id": str(2000 + index),
         "source_image_numeric_id": "7290368630472593484",
-        "machine_type": "a2-highgpu-4g",
+        "machine_type": machine_type,
         "provisioning_model": "SPOT",
         "termination_action": "DELETE",
         "automatic_restart": False,
         "maintenance_action": "TERMINATE",
         "boot_disk_auto_delete": True,
         "creation_timestamp": created_at,
-        "cuda_indices": [0, 1, 2, 3],
+        "cuda_indices": list(range(contract["a100_count"])),
         "a100_gpu_uuids": gpu_uuids,
-        "a100_gpu_names": ["NVIDIA A100-SXM4-40GB"] * 4,
-        "learner_gpu_uuid_bijection": {
-            str(learner): gpu_uuids[learner] for learner in range(4)
-        },
+        "a100_gpu_names": ["NVIDIA A100-SXM4-40GB"] * contract["a100_count"],
+        "learner_gpu_uuid_bijection": learner_map,
+        "gpu_allocation_mode": contract["gpu_allocation_mode"],
     }
 
 
@@ -643,7 +656,11 @@ def _campaign_fixture(tmp_path: Path):
         provider = _provider_record(identity, index, _iso(base, -3600))
         provider_path = root / "provider" / "provider-evidence.json"
         _write_json(provider_path, provider)
-        registry_controller.update_state(identity, zone=provider["zone"])
+        registry_controller.update_state(
+            identity,
+            zone=provider["zone"],
+            machine_type=provider["machine_type"],
+        )
         providers[slot] = provider
         controllers[slot] = pexec.VmPartialManifestController(
             identity=identity,
@@ -708,10 +725,22 @@ def _campaign_fixture(tmp_path: Path):
                 "generation": 1,
                 "run_id": identity.run_id,
                 "ownership_nonce": identity.ownership_nonce,
+                "machine_type": providers[slot]["machine_type"],
                 "instance_numeric_id": providers[slot]["instance_numeric_id"],
                 "provider_evidence_sha256": pexec.sha256_file(provider_path),
                 "attempt_prefix": identity.attempt_prefix(cell["cell_id"], 1),
-                "executed_command_hash": cell["command_hash"],
+                "frozen_command_hash": cell["command_hash"],
+                "executed_command_hash": pexec.canonical_sha256(
+                    pexec.project_scientific_command_for_machine_type(
+                        cell["command"], providers[slot]["machine_type"]
+                    )
+                ),
+                "normalized_workload_command_hash": pexec.canonical_sha256(
+                    pexec.normalized_workload_command(cell["command"])
+                ),
+                "gpu_slots": pexec.machine_shape_contract(
+                    providers[slot]["machine_type"]
+                )["gpu_slots"],
                 "fresh_start": _fresh_start(),
                 "retry_of": None,
                 "retry_reason": None,
@@ -738,6 +767,7 @@ def _campaign_fixture(tmp_path: Path):
             "schema": "yeto_vm_lifecycle_final_v1",
             "status": "vm_lifecycle_final",
             "zone": provider["zone"],
+            "machine_type": provider["machine_type"],
             "run_id": identity.run_id,
             "slot": slot,
             "generation": 1,
@@ -826,7 +856,11 @@ def _p3_campaign_fixture(tmp_path: Path):
         provider = _provider_record(identity, index + 20, _iso(base, -3600))
         provider_path = root / "provider" / "provider-evidence.json"
         _write_json(provider_path, provider)
-        registry_controller.update_state(identity, zone=provider["zone"])
+        registry_controller.update_state(
+            identity,
+            zone=provider["zone"],
+            machine_type=provider["machine_type"],
+        )
         providers[slot] = provider
         controllers[slot] = pexec.VmPartialManifestController(
             identity=identity,
@@ -889,10 +923,22 @@ def _p3_campaign_fixture(tmp_path: Path):
                 "generation": 1,
                 "run_id": identity.run_id,
                 "ownership_nonce": identity.ownership_nonce,
+                "machine_type": providers[slot]["machine_type"],
                 "instance_numeric_id": providers[slot]["instance_numeric_id"],
                 "provider_evidence_sha256": pexec.sha256_file(provider_path),
                 "attempt_prefix": identity.attempt_prefix(cell["cell_id"], 1),
-                "executed_command_hash": cell["command_hash"],
+                "frozen_command_hash": cell["command_hash"],
+                "executed_command_hash": pexec.canonical_sha256(
+                    pexec.project_scientific_command_for_machine_type(
+                        cell["command"], providers[slot]["machine_type"]
+                    )
+                ),
+                "normalized_workload_command_hash": pexec.canonical_sha256(
+                    pexec.normalized_workload_command(cell["command"])
+                ),
+                "gpu_slots": pexec.machine_shape_contract(
+                    providers[slot]["machine_type"]
+                )["gpu_slots"],
                 "fresh_start": _fresh_start(),
                 "retry_of": None,
                 "retry_reason": None,
@@ -922,6 +968,7 @@ def _p3_campaign_fixture(tmp_path: Path):
                 "schema": "yeto_vm_lifecycle_final_v1",
                 "status": "vm_lifecycle_final",
                 "zone": provider["zone"],
+                "machine_type": provider["machine_type"],
                 "run_id": identity.run_id,
                 "slot": slot,
                 "generation": 1,
@@ -1082,11 +1129,15 @@ def test_p1_has_twelve_three_cell_waves_and_never_fills_idle_slot(tmp_path):
     )
 
 
-def test_revision2_plan_supersedes_old_hash_and_materializes_all_slot_sets(tmp_path):
+def test_revision3_plan_preserves_reduced_width_and_binds_shape_fallback(tmp_path):
     _parent, _bound, _scientific, roster, plan = _p1_design(tmp_path)
     legacy = pexec.build_legacy_parallel_plan(roster)
-    assert plan["schema"] == "yeto_parallel_plan_v2"
+    revision_1_1 = pexec.build_revision_1_1_parallel_plan(roster)
+    assert plan["schema"] == "yeto_parallel_plan_v3"
     assert plan["supersedes_parallel_plan_hash"] == pexec.canonical_sha256(legacy)
+    assert plan["supersedes_revision_1_1_parallel_plan_hash"] == pexec.canonical_sha256(
+        revision_1_1
+    )
     assert plan["superseded_full_width_waves"] == legacy["waves"]
     assert len(plan["available_slot_variants"]) == 15
     assert {
@@ -1100,6 +1151,27 @@ def test_revision2_plan_supersedes_old_hash_and_materializes_all_slot_sets(tmp_p
         "retry_round",
     ]
     assert plan["binding_function"]["outcome_inputs_forbidden"] is True
+    assert plan["capacity"]["shape_fallback_order"] == [
+        "a2-highgpu-4g",
+        "a2-highgpu-1g",
+    ]
+    assert plan["capacity"]["fallback_trigger"] == (
+        "provider_capacity_stockout_before_creation"
+    )
+    assert plan["capacity"]["a100s_per_scientific_vm_by_shape"] == {
+        "a2-highgpu-4g": 4,
+        "a2-highgpu-1g": 1,
+    }
+    assert plan["capacity"]["packing_equivalence_evidence"] == {
+        "p0a_machine_type": "a2-highgpu-1g",
+        "p0a_gpu_slots": 1,
+        "p0b_machine_type": "a2-highgpu-4g",
+        "p0b_gpu_slots": 4,
+        "mu0_bit_identical_loss": "2.105365492953676",
+        "normalized_workload_command_hash": (
+            "155bf0801c2c8bfc71b81ada1f4f5dcb97f5a37395087603bc7aab6517b04faf"
+        ),
+    }
 
 
 @pytest.mark.parametrize(
@@ -1214,7 +1286,10 @@ def test_generation_registry_rejects_nonce_reuse(tmp_path):
 
 
 @pytest.mark.parametrize("zone", pexec.ALLOWED_US_CENTRAL1_ZONES)
-def test_provider_record_accepts_each_authorized_us_central1_zone(tmp_path, zone):
+@pytest.mark.parametrize("machine_type", pexec.ALLOWED_SCIENTIFIC_VM_SHAPES)
+def test_physical_identity_records_each_authorized_zone_and_shape(
+    tmp_path, zone, machine_type
+):
     _parent, bound, _scientific, roster, _plan = _p1_design(tmp_path)
     registry = pexec.CampaignGenerationRegistry(
         stage_code="p1r0",
@@ -1226,13 +1301,20 @@ def test_provider_record_accepts_each_authorized_us_central1_zone(tmp_path, zone
     )
     identity = registry.reserve("v0", ownership_nonce="c" * 32)
     provider = _provider_record(
-        identity, 1, "2026-07-15T00:00:00Z", zone=zone
+        identity,
+        1,
+        "2026-07-15T00:00:00Z",
+        zone=zone,
+        machine_type=machine_type,
     )
-    registry_row = identity.registry_row()
-    registry_row["zone"] = zone
-    assert pexec.validate_provider_record(provider, registry_row)[
-        "instance_numeric_id"
-    ] == "1001"
+    registry.update_state(identity, zone=zone, machine_type=machine_type)
+    registry_row = registry.snapshot()["generations"][0]
+    summary = pexec.validate_provider_record(provider, registry_row)
+    assert summary["instance_numeric_id"] == "1001"
+    assert summary["machine_type"] == machine_type
+    assert summary["a100_count"] == (4 if machine_type.endswith("4g") else 1)
+    assert registry_row["zone"] == zone
+    assert registry_row["machine_type"] == machine_type
 
 
 def test_provider_record_rejects_zone_outside_authorized_region(tmp_path):
@@ -1663,6 +1745,8 @@ def test_capacity_trace_rejects_five_overlapping_generations():
         {
             "creation_timestamp": "2026-07-15T00:00:00Z",
             "deletion_completed_at_utc": "2026-07-15T01:00:00Z",
+            "machine_type": "a2-highgpu-4g",
+            "a100_count": 4,
         }
         for _ in range(5)
     ]
@@ -1865,6 +1949,7 @@ class _ScriptedBackend:
             "schema": "yeto_vm_lifecycle_final_v1",
             "status": "vm_lifecycle_final",
             "zone": provider_record["zone"],
+            "machine_type": provider_record["machine_type"],
             "run_id": identity.run_id,
             "slot": identity.slot,
             "generation": identity.generation,
@@ -1894,7 +1979,12 @@ class _ScriptedBackend:
         del roster_tag
         return {
             "campaign_owned_vm_count": len(self.active),
-            "campaign_owned_attached_a100s": len(self.active) * 4,
+            "campaign_owned_attached_a100s": sum(
+                pexec.machine_shape_contract(
+                    self.providers[run_id]["machine_type"]
+                )["a100_count"]
+                for run_id in self.active
+            ),
         }
 
 

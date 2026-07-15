@@ -46,7 +46,7 @@ AUTHORITATIVE_PREREG_TEMPLATE_SHA256 = (
     "7cba3c62328b4bfe15fffbc523979274e834e8e720e16f70d79621eaf6ebdb7b"
 )
 AMENDMENT_RAW_SHA256 = (
-    "8e9c23dd9306672a2165b060dfea277f5c6adc9796014039e1e1d3759f2334df"
+    "33781ad5d4deb29120a2d41f3ccbe2937a5945b97db6400ff1690abeceb520f7"
 )
 PROTECTED_INSTANCE_ID = "3908640733128066700"
 ALLOWED_STAGE_CODES = frozenset(("p1r0", "p1ad", "p2", "p3t"))
@@ -61,6 +61,20 @@ MAX_CONCURRENT_CELLS = 4
 MAX_CAMPAIGN_A100S = 16
 A100S_PER_VM = 4
 SCIENTIFIC_VM_SHAPE = "a2-highgpu-4g"
+FALLBACK_VM_SHAPE = "a2-highgpu-1g"
+ALLOWED_SCIENTIFIC_VM_SHAPES = (SCIENTIFIC_VM_SHAPE, FALLBACK_VM_SHAPE)
+A100S_PER_VM_BY_SHAPE = {
+    SCIENTIFIC_VM_SHAPE: 4,
+    FALLBACK_VM_SHAPE: 1,
+}
+GPU_ALLOCATION_MODE_BY_SHAPE = {
+    SCIENTIFIC_VM_SHAPE: "one_learner_per_distinct_a100",
+    FALLBACK_VM_SHAPE: "four_learners_packed_one_a100",
+}
+PACKING_EQUIVALENCE_LOSS = "2.105365492953676"
+PACKING_EQUIVALENCE_NORMALIZED_COMMAND_HASH = (
+    "155bf0801c2c8bfc71b81ada1f4f5dcb97f5a37395087603bc7aab6517b04faf"
+)
 RUN_ID_RE = re.compile(
     r"^bp-(p1r0|p1ad|p2|p3t)-[0-9a-f]{16}-c[1-9][0-9]*-v[0-3]-g[1-9][0-9]*$"
 )
@@ -110,6 +124,75 @@ class EvidenceError(ParallelPhaseMapError):
 
 class SealError(ParallelPhaseMapError):
     """A campaign cannot produce the one create-only scientific seal."""
+
+
+def machine_shape_contract(machine_type: Any) -> dict[str, Any]:
+    if machine_type not in ALLOWED_SCIENTIFIC_VM_SHAPES:
+        raise LifecycleError("machine type is not an amendment-authorized scientific shape")
+    shape = str(machine_type)
+    return {
+        "machine_type": shape,
+        "a100_count": A100S_PER_VM_BY_SHAPE[shape],
+        "gpu_slots": A100S_PER_VM_BY_SHAPE[shape],
+        "gpu_allocation_mode": GPU_ALLOCATION_MODE_BY_SHAPE[shape],
+    }
+
+
+def normalized_workload_command(command: Sequence[str]) -> list[str]:
+    """Mirror the preregistered hardware-only command normalization."""
+
+    normalized: list[str] = []
+    skip_value = False
+    role_path_flags = {
+        "--model": "<FROZEN_MODEL>",
+        "--data": "<PREBOUND_TRAIN>",
+        "--prebound-development-eval": "<PREBOUND_DEVELOPMENT_EVAL>",
+    }
+    for index, token in enumerate(command):
+        if not isinstance(token, str):
+            raise EvidenceError("scientific command must contain only string argv tokens")
+        if skip_value:
+            skip_value = False
+            continue
+        if token == "--gpu-slots":
+            skip_value = True
+            continue
+        if token == "--require-distinct-learner-gpu-uuids":
+            continue
+        if token in role_path_flags:
+            if index + 1 >= len(command):
+                raise EvidenceError(f"{token} lacks a value in normalized command")
+            normalized.extend((token, role_path_flags[token]))
+            skip_value = True
+            continue
+        normalized.append(token)
+    if skip_value:
+        raise EvidenceError("--gpu-slots lacks a value in normalized command")
+    return normalized
+
+
+def project_scientific_command_for_machine_type(
+    command: Sequence[str], machine_type: Any
+) -> list[str]:
+    """Apply only the Version 1.2 gpu-slot projection for a landed shape."""
+
+    contract = machine_shape_contract(machine_type)
+    projected = list(command)
+    positions = [index for index, token in enumerate(projected) if token == "--gpu-slots"]
+    if not positions and contract["machine_type"] == SCIENTIFIC_VM_SHAPE:
+        return projected
+    if len(positions) != 1 or positions[0] + 1 >= len(projected):
+        raise EvidenceError("scientific command must contain exactly one --gpu-slots value")
+    value_index = positions[0] + 1
+    if projected[value_index] != "4":
+        raise EvidenceError("frozen scientific command no longer records gpu_slots=4")
+    if (
+        contract["machine_type"] == FALLBACK_VM_SHAPE
+        and "--require-distinct-learner-gpu-uuids" in projected
+    ):
+        raise EvidenceError("packed 1g execution cannot require distinct learner GPU UUIDs")
+    projected[value_index] = str(contract["gpu_slots"])
+    return projected
 
 
 def _reject_json_constant(value: str) -> None:
@@ -763,7 +846,7 @@ def build_wave_assignment(
     }
 
 
-def build_parallel_plan(
+def build_revision_1_1_parallel_plan(
     roster: Mapping[str, Any], *, expected_roster_hash: str | None = None
 ) -> dict[str, Any]:
     actual_roster_hash = roster_hash(roster)
@@ -849,8 +932,57 @@ def build_parallel_plan(
     }
 
 
+def build_parallel_plan(
+    roster: Mapping[str, Any], *, expected_roster_hash: str | None = None
+) -> dict[str, Any]:
+    """Build the Version 1.2 plan without changing Version 1.1 assignments.
+
+    The reduced-width binding domains and every wave byte remain those of the
+    pre-outcome Version 1.1 plan. Version 1.2 changes only the reviewed capacity
+    contract by admitting a provider-recorded 1g packing fallback.
+    """
+
+    previous = build_revision_1_1_parallel_plan(
+        roster, expected_roster_hash=expected_roster_hash
+    )
+    plan = deepcopy(previous)
+    plan["schema"] = "yeto_parallel_plan_v3"
+    plan["supersedes_revision_1_1_parallel_plan_hash"] = canonical_sha256(previous)
+    plan["capacity"] = {
+        "contract_revision": 2,
+        "minimum_available_scientific_vms": 1,
+        "maximum_available_scientific_vms": 4,
+        "maximum_concurrent_scientific_cells": MAX_CONCURRENT_CELLS,
+        "maximum_campaign_owned_attached_a100s": MAX_CAMPAIGN_A100S,
+        "preferred_scientific_vm_shape": SCIENTIFIC_VM_SHAPE,
+        "fallback_scientific_vm_shape": FALLBACK_VM_SHAPE,
+        "shape_fallback_order": list(ALLOWED_SCIENTIFIC_VM_SHAPES),
+        "fallback_trigger": "provider_capacity_stockout_before_creation",
+        "a100s_per_scientific_vm_by_shape": dict(A100S_PER_VM_BY_SHAPE),
+        "gpu_allocation_mode_by_shape": dict(GPU_ALLOCATION_MODE_BY_SHAPE),
+        "active_scientific_cells_per_vm": 1,
+        "allowed_zones": list(ALLOWED_US_CENTRAL1_ZONES),
+        "quota_scope": "us-central1 regional preemptible A100 quota",
+        "packing_equivalence_evidence": {
+            "p0a_machine_type": FALLBACK_VM_SHAPE,
+            "p0a_gpu_slots": 1,
+            "p0b_machine_type": SCIENTIFIC_VM_SHAPE,
+            "p0b_gpu_slots": 4,
+            "mu0_bit_identical_loss": PACKING_EQUIVALENCE_LOSS,
+            "normalized_workload_command_hash": (
+                PACKING_EQUIVALENCE_NORMALIZED_COMMAND_HASH
+            ),
+        },
+    }
+    return plan
+
+
 def parallel_plan_hash(plan: Mapping[str, Any]) -> str:
-    if plan.get("schema") not in ("yeto_parallel_plan_v1", "yeto_parallel_plan_v2"):
+    if plan.get("schema") not in (
+        "yeto_parallel_plan_v1",
+        "yeto_parallel_plan_v2",
+        "yeto_parallel_plan_v3",
+    ):
         raise ScheduleError("parallel plan has the wrong schema")
     return canonical_sha256(plan)
 
@@ -1132,6 +1264,8 @@ class CampaignGenerationRegistry:
             state = _mapping(load_json(identity.state_path, "generation state"), "generation state")
             if state.get("zone") is not None:
                 row["zone"] = state["zone"]
+            if state.get("machine_type") is not None:
+                row["machine_type"] = state["machine_type"]
             generations.append(row)
         return {
             "schema": "yeto_parallel_vm_registry_v1",
@@ -1275,8 +1409,14 @@ def validate_provider_record(
         raise LifecycleError("provider record project/zone/name/image identity differs")
     if identity.get("zone") is not None and record.get("zone") != identity.get("zone"):
         raise LifecycleError("provider record zone differs from the landed physical identity")
-    if record.get("machine_type") != SCIENTIFIC_VM_SHAPE:
-        raise LifecycleError("provider record has the wrong scientific VM shape")
+    shape = machine_shape_contract(record.get("machine_type"))
+    if (
+        identity.get("machine_type") is not None
+        and shape["machine_type"] != identity.get("machine_type")
+    ):
+        raise LifecycleError(
+            "provider record machine type differs from the landed physical identity"
+        )
     required_contract = {
         "provisioning_model": "SPOT",
         "termination_action": "DELETE",
@@ -1292,23 +1432,34 @@ def validate_provider_record(
     gpu_uuids = _array(record.get("a100_gpu_uuids"), "provider A100 UUIDs")
     gpu_names = _array(record.get("a100_gpu_names"), "provider A100 names")
     bijection = _mapping(record.get("learner_gpu_uuid_bijection"), "learner/GPU bijection")
-    if cuda_indices != [0, 1, 2, 3]:
-        raise LifecycleError("provider record must expose CUDA indices 0..3")
+    if record.get("gpu_allocation_mode") != shape["gpu_allocation_mode"]:
+        raise LifecycleError("provider record GPU allocation mode differs from machine shape")
+    if cuda_indices != list(range(shape["a100_count"])):
+        raise LifecycleError("provider record CUDA inventory differs from machine shape")
     if (
-        len(gpu_uuids) != 4
-        or len(set(gpu_uuids)) != 4
+        len(gpu_uuids) != shape["a100_count"]
+        or len(set(gpu_uuids)) != shape["a100_count"]
         or any(not isinstance(value, str) or not value.startswith("GPU-") for value in gpu_uuids)
-        or len(gpu_names) != 4
+        or len(gpu_names) != shape["a100_count"]
         or any(not isinstance(value, str) or "A100" not in value.upper() for value in gpu_names)
     ):
-        raise LifecycleError("provider record must prove four distinct A100 UUIDs")
-    if set(bijection) != {"0", "1", "2", "3"} or set(bijection.values()) != set(gpu_uuids):
-        raise LifecycleError("provider learner-to-GPU UUID mapping is not a bijection")
+        raise LifecycleError("provider record A100 inventory differs from machine shape")
+    if set(bijection) != {"0", "1", "2", "3"}:
+        raise LifecycleError("provider learner-to-GPU UUID mapping lacks four learners")
+    assigned = list(bijection.values())
+    if shape["machine_type"] == SCIENTIFIC_VM_SHAPE:
+        if len(set(assigned)) != 4 or set(assigned) != set(gpu_uuids):
+            raise LifecycleError("4g provider mapping is not a four-A100 learner bijection")
+    elif set(assigned) != {gpu_uuids[0]}:
+        raise LifecycleError("1g provider mapping does not pack four learners on one A100")
     return {
         "instance_numeric_id": instance_id,
         "boot_disk_numeric_id": disk_id,
         "source_image_numeric_id": source_image_id,
         "creation_timestamp": record["creation_timestamp"],
+        "machine_type": shape["machine_type"],
+        "a100_count": shape["a100_count"],
+        "gpu_slots": shape["gpu_slots"],
     }
 
 
@@ -1334,6 +1485,15 @@ def validate_lifecycle_record(
         )
     ):
         raise LifecycleError("VM lifecycle landed zone differs from physical identity")
+    shape = machine_shape_contract(lifecycle.get("machine_type"))
+    if (
+        shape["machine_type"] != provider_record.get("machine_type")
+        or (
+            identity.get("machine_type") is not None
+            and shape["machine_type"] != identity.get("machine_type")
+        )
+    ):
+        raise LifecycleError("VM lifecycle machine type differs from physical identity")
     if lifecycle.get("partial_manifest_sha256") != partial_manifest_sha256:
         raise LifecycleError("VM lifecycle does not bind the hash-locked partial manifest")
     instance_id = require_numeric_id(
@@ -1374,6 +1534,8 @@ def validate_lifecycle_record(
         "boot_disk_numeric_id": disk_id,
         "creation_timestamp": provider_record["creation_timestamp"],
         "deletion_completed_at_utc": lifecycle["deletion_completed_at_utc"],
+        "machine_type": shape["machine_type"],
+        "a100_count": shape["a100_count"],
     }
 
 
@@ -1482,6 +1644,47 @@ def _validate_command_artifact(
         raise EvidenceError("executed command artifact must be an argv string array")
     if command != list(expected_command) or canonical_sha256(command) != expected_hash:
         raise EvidenceError("executed command bytes differ from the registered cell command")
+
+
+def _validate_shape_projected_command(
+    *,
+    row: Mapping[str, Any],
+    cell: Mapping[str, Any],
+    expected_command: Sequence[str],
+    command_path: Path,
+) -> str:
+    machine_type = row.get("machine_type")
+    projected = project_scientific_command_for_machine_type(
+        expected_command, machine_type
+    )
+    frozen_hash = require_sha256(cell.get("command_hash"), "frozen command hash")
+    executed_hash = canonical_sha256(projected)
+    if "--gpu-slots" not in expected_command:
+        if (
+            row.get("frozen_command_hash") != frozen_hash
+            or require_sha256(row.get("executed_command_hash"), "executed command hash")
+            != frozen_hash
+        ):
+            raise EvidenceError("attempt command differs from the frozen nonprojected command")
+        _validate_command_artifact(command_path, projected, frozen_hash)
+        return frozen_hash
+    normalized_hash = canonical_sha256(normalized_workload_command(projected))
+    if (
+        row.get("frozen_command_hash") != frozen_hash
+        or require_sha256(row.get("executed_command_hash"), "executed command hash")
+        != executed_hash
+        or require_sha256(
+            row.get("normalized_workload_command_hash"),
+            "normalized workload command hash",
+        )
+        != cell.get("normalized_workload_command_hash")
+        or normalized_hash != cell.get("normalized_workload_command_hash")
+        or row.get("gpu_slots")
+        != machine_shape_contract(machine_type)["gpu_slots"]
+    ):
+        raise EvidenceError("attempt command projection differs from its landed machine shape")
+    _validate_command_artifact(command_path, projected, executed_hash)
+    return executed_hash
 
 
 def _validate_attempt_start(
@@ -1825,10 +2028,12 @@ def validate_completed_attempt_work(
     if missing:
         raise EvidenceError(f"completed attempt lacks required artifacts: {sorted(missing)}")
 
-    command_hash = require_sha256(row.get("executed_command_hash"), "executed command hash")
-    if command_hash != cell.get("command_hash"):
-        raise EvidenceError("attempt executed command hash differs from the roster")
-    _validate_command_artifact(inventory["command"], expected_command, command_hash)
+    command_hash = _validate_shape_projected_command(
+        row=row,
+        cell=cell,
+        expected_command=expected_command,
+        command_path=inventory["command"],
+    )
     _validate_attempt_start(
         inventory["attempt_start"],
         cell_id=str(row["cell_id"]),
@@ -1902,10 +2107,12 @@ def validate_diverged_attempt(
     required = {"command", "attempt_start", "tape_prefix", "scientific_divergence"}
     if not required.issubset(inventory):
         raise EvidenceError("DIVERGED attempt lacks command/tape/divergence evidence")
-    command_hash = require_sha256(row.get("executed_command_hash"), "executed command hash")
-    if command_hash != cell.get("command_hash"):
-        raise EvidenceError("DIVERGED attempt command hash differs from the roster")
-    _validate_command_artifact(inventory["command"], expected_command, command_hash)
+    command_hash = _validate_shape_projected_command(
+        row=row,
+        cell=cell,
+        expected_command=expected_command,
+        command_path=inventory["command"],
+    )
     _validate_attempt_start(
         inventory["attempt_start"],
         cell_id=str(row["cell_id"]),
@@ -1994,10 +2201,13 @@ def _validate_generation_capacity(lifecycles: Sequence[Mapping[str, Any]]) -> No
         end = parse_time(row.get("deletion_completed_at_utc"), "generation deletion")
         if end < start:
             raise LifecycleError("generation deletion precedes creation")
+        shape = machine_shape_contract(row.get("machine_type"))
+        if row.get("a100_count") != shape["a100_count"]:
+            raise LifecycleError("generation capacity row disagrees with its machine shape")
         # End events sort first at equal timestamps because half-open intervals
         # stop consuming capacity exactly at deletion completion.
-        events.append((start, 1, A100S_PER_VM))
-        events.append((end, -1, -A100S_PER_VM))
+        events.append((start, 1, shape["a100_count"]))
+        events.append((end, -1, -shape["a100_count"]))
     active_vms = 0
     active_a100s = 0
     for _timestamp, vm_delta, gpu_delta in sorted(
@@ -2468,6 +2678,7 @@ class CampaignAggregator:
                 raise LifecycleError("VM registry run ID violates physical-generation grammar")
             if row.get("zone") not in ALLOWED_US_CENTRAL1_ZONES:
                 raise LifecycleError("VM registry lacks an admissible landed us-central1 zone")
+            machine_shape_contract(row.get("machine_type"))
             nonce = row.get("ownership_nonce")
             if not isinstance(nonce, str) or NONCE_RE.fullmatch(nonce) is None:
                 raise LifecycleError("VM registry nonce is not a fresh 128-bit hex token")
@@ -2583,6 +2794,7 @@ class CampaignAggregator:
                     or row.get("logical_slot") != slot
                     or row.get("generation") != generation
                     or row.get("ownership_nonce") != identity["ownership_nonce"]
+                    or row.get("machine_type") != identity.get("machine_type")
                     or row.get("provider_evidence_sha256") != provider_hash
                     or str(row.get("instance_numeric_id"))
                     != provider_summary["instance_numeric_id"]
@@ -2977,6 +3189,7 @@ class ParallelWaveExecutor:
             provider_record_sha256=provider_hash,
             ready_at_utc=ready_at,
             zone=provider["zone"],
+            machine_type=provider["machine_type"],
         )
         self._assert_capacity_census()
         return identity
@@ -3158,6 +3371,11 @@ class ParallelWaveExecutor:
                 / "provider"
                 / "provider-evidence.json"
             )
+            machine_type = provider["machine_type"]
+            shape = machine_shape_contract(machine_type)
+            projected_command = project_scientific_command_for_machine_type(
+                request.command, machine_type
+            )
             row = {
                 **outcome,
                 "attempt_id": f"{request.cell_id}-attempt-{request.retry_round}",
@@ -3176,10 +3394,16 @@ class ParallelWaveExecutor:
                 "generation": identity.generation,
                 "run_id": identity.run_id,
                 "ownership_nonce": identity.ownership_nonce,
+                "machine_type": machine_type,
+                "gpu_slots": shape["gpu_slots"],
                 "instance_numeric_id": provider["instance_numeric_id"],
                 "provider_evidence_sha256": provider_hash,
                 "attempt_prefix": request.attempt_prefix,
-                "executed_command_hash": request.command_hash,
+                "frozen_command_hash": request.command_hash,
+                "executed_command_hash": canonical_sha256(projected_command),
+                "normalized_workload_command_hash": canonical_sha256(
+                    normalized_workload_command(projected_command)
+                ),
                 "fresh_start": dict(request.fresh_start),
                 "retry_of": request.retry_of,
                 "retry_reason": request.retry_reason,

@@ -1,6 +1,6 @@
 # Concurrency amendment: parallel scientific cells
 
-**Version:** 1.1, operator-authorized pre-outcome capacity revision
+**Version:** 1.2, operator-authorized pre-outcome capacity and machine-shape revision
 
 **Status:** This document amends only the scheduling, ownership, retry execution,
 and evidence aggregation rules for the stages named in Section 2. It is not a
@@ -9,14 +9,17 @@ make an implementation launch-ready. A launch still requires the lineage,
 canary, implementation, packet, review, and explicit user/root gates in
 Section 11.
 
-Version 1.1 was authorized by the operator before any P1-R0 scientific cell
-began. It narrowly supersedes Version 1.0's fixed four-VM initial-provisioning
-assumption, fixed `us-central1-c` zone, and fixed full-roster slot assignment.
+Versions 1.1 and 1.2 were authorized by the operator before any P1-R0
+scientific cell began. Version 1.1 narrowly superseded Version 1.0's fixed
+four-VM initial-provisioning assumption, fixed `us-central1-c` zone, and fixed
+full-roster slot assignment. Version 1.2 narrowly supersedes Version 1.1's
+single-shape `a2-highgpu-4g` assumption by admitting a recorded
+`a2-highgpu-1g` Spot fallback after a per-slot 4g capacity stockout.
 The 36 P1-R0 cells, all scientific commands and seeds, work-evidence gates,
 retry vocabulary, blinding, aggregation, one-seal semantics, and exact-ID
-teardown requirements are unchanged. Every revised packet MUST bind both the
-superseded Version 1.0 `parallel_plan_hash` and the new Version 1.1
-`parallel_plan_hash`.
+teardown requirements are unchanged. Every revised packet MUST bind the
+superseded Version 1.0 and Version 1.1 `parallel_plan_hash` values and the new
+Version 1.2 `parallel_plan_hash`.
 
 ## 1. Authority, precedence, and unchanged scientific question
 
@@ -50,10 +53,10 @@ Normative terms `MUST`, `MUST NOT`, `REQUIRED`, and `FAIL` are literal
 validation requirements. A missing or unknown required field is a `FAIL`, not
 permission for an operator choice.
 
-### 1.1 Version 1.1 precedence
+### 1.1 Version 1.2 precedence
 
-The following Version 1.1 rulings take precedence over conflicting Version 1.0
-sentences elsewhere in this document:
+The following Version 1.1 and Version 1.2 rulings take precedence over
+conflicting earlier-version sentences elsewhere in this document:
 
 1. A nonempty available logical-slot set of width one through four is
    admissible. Provider availability, not a scientific outcome, determines the
@@ -77,6 +80,27 @@ sentences elsewhere in this document:
    seconds. A packet may launch at width one and deterministically use a larger
    available-slot set on a later wave as additional reviewed slots become
    READY; it may never wait indefinitely for the full roster.
+7. Each slot first requests Spot `a2-highgpu-4g`. A provider-confirmed capacity
+   stockout before creation permits the same reviewed physical generation to
+   request Spot `a2-highgpu-1g` in its reviewed zone. No other failure permits
+   fallback, and on-demand remains forbidden.
+8. The landed machine type is part of the physical generation identity and
+   MUST agree across generation state, provider evidence, VM registry,
+   lifecycle evidence, work-command projection evidence, and teardown census.
+9. A 4g generation uses `gpu_slots=4`, one learner per distinct A100 UUID. A
+   1g generation uses `gpu_slots=1`, packing all four learners on its one A100.
+   The frozen scientific command remains recorded byte-for-byte; the only
+   permitted execution projection is replacing the value of `--gpu-slots`
+   from `4` to `1`. The projected command MUST have the same registered
+   normalized-workload-command hash as the frozen command.
+10. This projection is supported by the accepted P0 canary chain at the
+    strongest available endpoint: P0a ran the normalized workload packed on
+    Spot `a2-highgpu-1g` and P0b ran it spread on Spot `a2-highgpu-4g`; their
+    `mu=0` development losses were bit-identical at
+    `2.105365492953676`, and both normalized-workload-command hashes were
+    `155bf0801c2c8bfc71b81ada1f4f5dcb97f5a37395087603bc7aab6517b04faf`.
+    This evidence authorizes only the machine/gpu-slots projection above; it
+    changes no scientific coordinate, seed, work, optimizer, or evaluation.
 
 ## 2. Scope and stage ruling
 
@@ -133,11 +157,15 @@ The operator ceiling is frozen as:
 logical VM slots                         = {v0,v1,v2,v3}
 maximum concurrent scientific cells     = 4
 maximum campaign-owned attached A100s   = 16
-scientific VM shape                      = a2-highgpu-4g
-A100s per scientific VM                  = 4
+preferred scientific VM shape            = a2-highgpu-4g
+preferred A100s per VM                    = 4
+fallback scientific VM shape             = a2-highgpu-1g
+fallback A100s per VM                     = 1
+per-slot shape order                      = 4g, then 1g only on capacity stockout
 active scientific cells per VM          = 0 or 1
 learners per cell                        = 4
-learner-to-GPU allocation                = one learner per distinct A100 UUID
+4g learner-to-GPU allocation             = one learner per distinct A100 UUID
+1g learner-to-GPU allocation             = four learners packed on one A100 UUID
 provisioning                             = SPOT
 on-demand fallback                       = forbidden
 automatic restart                        = false
@@ -158,8 +186,10 @@ inputs does not create an active cell. A process that has begun model training,
 checkpoint loading for training, or development evaluation is active until it
 has written a terminal attempt record and exited.
 
-Every campaign-owned VM with attached A100s counts toward the 16-accelerator
-ceiling whether it is busy, idle, stopped, preempting, or awaiting teardown.
+Every campaign-owned VM counts using its recorded landed machine shape: one
+A100 for `a2-highgpu-1g` and four A100s for `a2-highgpu-4g`. Every attached
+A100 counts toward the 16-accelerator ceiling whether it is busy, idle,
+stopped, preempting, or awaiting teardown.
 There is no fifth warm spare. A replacement generation MUST NOT be provisioned
 until the replaced generation has an exact-ID terminal provider record and the
 provider census proves that creating the replacement cannot exceed four
@@ -304,7 +334,8 @@ function of `(roster_hash, available_slot_set, wave_index, retry_round)` and
 contains no loss, duration, failure-rate, or other scientific outcome input.
 
 Every slot used by a batch MUST report `READY` with validated provider evidence,
-landed-zone identity, and immutable inputs before that batch's first dispatch.
+landed-zone and landed-machine-shape identity, and immutable inputs before that
+batch's first dispatch.
 The controller issues all start messages in the committed batch order without
 waiting for a cell in that same batch to complete. The last dispatch minus the
 first within one batch MUST be at most 60 seconds, and the last recorded
@@ -405,18 +436,20 @@ Before any scientific start, the harness MUST persist and hash one provider
 record owned by that physical generation. It contains at least:
 
 ```text
-project, zone, run_id, campaign tag, slot, generation, ownership nonce,
+project, zone, landed machine type, run_id, campaign tag, slot, generation, ownership nonce,
 instance name, instance numeric ID, boot-disk name, boot-disk numeric ID,
 source-image numeric ID, machine type, provisioning model, termination action,
 automatic-restart flag, maintenance action, boot-disk auto-delete flag,
-creation timestamp, four CUDA indices, four A100 UUIDs, and the
-learner-to-GPU-UUID bijection.
+creation timestamp, shape-exact CUDA indices and A100 UUID inventory,
+learner-to-GPU-UUID assignment, and allocation mode.
 ```
 
-The instance numeric ID and disk numeric ID MUST be captured before start;
-the four GPU UUIDs and bijection MUST be captured before the first cell. The
-record MUST prove the Section 3 provider contract, four distinct A100s, exact
-label/nonce ownership, and exclusion of protected numeric instance ID
+The instance numeric ID and disk numeric ID MUST be captured before start. A 4g
+record captures CUDA indices `0..3`, four distinct A100 UUIDs, and the learner
+bijection. A 1g record captures CUDA index `0`, one A100 UUID, and assigns all
+four learners to that UUID. The record MUST prove the Section 3 provider
+contract, shape-exact A100 inventory, exact label/nonce ownership, and
+exclusion of protected numeric instance ID
 `3908640733128066700`. Every attempt row cites the exact provider-record raw
 SHA-256 and the slot/generation on which it ran. A name, prefix, label alone,
 or a provider record from another generation is insufficient.
@@ -731,16 +764,18 @@ Only the following operational identities vary by slot/generation:
 ```text
 run ID; controller state path; artifact prefix; physical generation;
 ownership nonce and ownership labels; instance name/numeric ID;
-boot-disk name/numeric ID; A100 UUIDs and CUDA map;
+boot-disk name/numeric ID; landed zone and machine type; A100 UUIDs and CUDA map;
 provider-evidence bytes/hash; rendered per-VM harness argv/spec/bootstrap hash;
+shape-projected execution-command bytes/hash and normalized-command proof;
 attempt working directory and its raw path hash; start/end timestamps;
 VM partial-manifest hash; lifecycle-final hash; exact-ID teardown proofs.
 ```
 
 Each per-VM rendered outer artifact MUST cite the common campaign identities.
-No per-VM value may change H, mu, eta, seed, data order, cell argv, work,
-evaluation role, or analysis. Zone and machine type are campaign-wide under
-Section 3, not per-VM choices.
+No per-VM value may change H, mu, eta, seed, data order, normalized cell argv,
+work, evaluation role, or analysis. Zone and landed machine type are recorded
+per physical generation under Sections 1.1, 3, and 5; neither may be selected
+using an outcome.
 
 ## 10. Required conformance tests
 
@@ -774,7 +809,12 @@ Before review, the implementation MUST pass deterministic tests that:
     there is exactly one create-only campaign seal; and
 12. prove P3 training commands and every backup/synchronization path cannot
     mount, name, read, copy, or expose development or audit artifacts, while
-    the checkpoint registry still covers exactly 32 expected cells.
+    the checkpoint registry still covers exactly 32 expected cells; and
+13. accept only the ordered Spot shape fallback `a2-highgpu-4g` then
+    `a2-highgpu-1g` on provider capacity stockout; record landed shape in every
+    physical-identity surface; prove 4g uses four distinct UUIDs and 1g uses one
+    UUID for four packed learners; reject every other shape, fallback reason,
+    GPU inventory, or command projection.
 
 A test skip, flaky result, missing negative test, or disagreement between
 independent schedule implementations is `FAIL`.
@@ -815,7 +855,8 @@ bound manifest, roster hash, superseded and revised parallel-plan hashes,
 scientific plan hash;
 base and normalized cell-command registries;
 stage code, expected cells/groups/waves, project/allowed zones, per-generation
-landed zone, available-slot variants, capacity constants;
+landed zone and machine type, ordered shape fallback, P0a/P0b bit-identity
+evidence, available-slot variants, capacity constants;
 campaign attempt, state/artifact/science roots, empty/create-only proofs;
 provider/nonce/exact-ID/teardown contract;
 retry policy and work/seal validator hashes;
@@ -839,13 +880,14 @@ packet.
 ## 12. Final binding ruling
 
 Subject to every gate above, the scientifically legitimate maximum is **four
-simultaneous cells on four Spot `a2-highgpu-4g` VMs, totaling at most 16
-A100s**, and the scientifically legitimate minimum launch width is **one**
-READY Spot VM. P1-R0 and P2 realize width one through three through
+simultaneous cells on four Spot VMs, each independently landing as preferred
+`a2-highgpu-4g` or fallback `a2-highgpu-1g`, totaling at most 16 A100s**. Four
+fallback 1g VMs total four A100s. The scientifically legitimate minimum launch
+width is **one** READY Spot VM. P1-R0 and P2 realize width one through three through
 deterministic batches of their indivisible three-cell waves; P3 training
 realizes width one through four through deterministic batches of its four-cell
 seed wave. Every VM lands in one of the four authorized `us-central1` zones,
-and its landed zone is part of its physical identity.
+and its landed zone and machine type are part of its physical identity.
 
 P1-R0's 36 preplanned cells may therefore be sharded. P1's adaptive logic may
 not: only cells already authorized in one immutable descendant may run in
