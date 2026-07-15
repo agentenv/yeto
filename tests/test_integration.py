@@ -267,6 +267,47 @@ def test_min_round_interval_paces_rounds():
 
 
 @pytest.mark.timeout(180)
+def test_single_learner_roundtrip_iso():
+    """Iso-C aggregation end to end: the learner HELLO carries (rows, cols)
+    per tensor for the iso fragments and the Rust syncer merges through the
+    spectrum-flattening path (matrix_merge="iso", arXiv 2607.03011)."""
+    binary = build_syncer()
+    port = free_port()
+    named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
+    layout = build_layout(
+        named,
+        3,
+        matrix_merge="iso",
+        named_shapes={
+            "model.embed.weight": (DIM // 4,),
+            "model.body.weight": (64, DIM // 64),
+        },
+    )
+    assert any(f.shapes for f in layout.fragments), "iso fragment missing shapes"
+    proc = subprocess.Popen(
+        [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
+         "--grace-ms", "50", "--total-steps", "9"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        target = torch.ones(DIM + DIM // 4)
+        l = ToyLearner(0, port, target, layout)
+        l.start()
+        l.join(timeout=120)
+        assert not l.is_alive()
+        if l.exc:
+            raise l.exc
+        assert proc.wait(timeout=30) == 0
+        assert l.synced, "learner never received a broadcast"
+        flat = torch.cat([p.detach().reshape(-1) for p in l.params.values()])
+        assert (flat - target).norm() < target.norm(), "no progress toward target"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        print((proc.stdout.read() if proc.stdout else "")[-3000:])
+
+
+@pytest.mark.timeout(180)
 def test_single_learner_roundtrip():
     """M=1, K=1: a single self-syncing learner; must run to completion.
     Runs with --pipeline 1 so the serial-round path stays covered (the

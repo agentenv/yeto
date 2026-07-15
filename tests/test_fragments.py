@@ -1,6 +1,6 @@
 import pytest
 
-from yeto.fragments import MERGE_AVG, MERGE_RDA, build_layout, layer_index
+from yeto.fragments import MERGE_AVG, MERGE_ISO, MERGE_RDA, build_layout, layer_index
 
 
 TENSORS = [
@@ -100,3 +100,55 @@ def test_strided_shrinks_empty_bins():
 def test_unknown_pattern_rejected():
     with pytest.raises(ValueError):
         build_layout(TENSORS, 4, pattern="zigzag")
+
+
+def test_iso_matrix_merge_records_2d_shapes():
+    shapes = {
+        "model.embed_tokens.weight": (100, 10),
+        "model.layers.0.q.weight": (8, 8),
+        "model.layers.0.mlp.weight": (16, 16),
+        "model.layers.1.q.weight": (8, 8),
+        "model.layers.1.mlp.weight": (16, 16),
+        "lm_head.weight": (100, 10),
+    }
+    layout = build_layout(TENSORS, 4, matrix_merge="iso", named_shapes=shapes)
+    embed = layout.fragments[0]
+    assert embed.merge_mode == MERGE_AVG
+    assert embed.shapes is None
+    for frag in layout.fragments[1:]:
+        assert frag.merge_mode == MERGE_ISO
+        assert frag.shapes == {n: shapes[n] for n, _ in frag.tensors}
+    rda = build_layout(TENSORS, 4)
+    assert [f.tensors for f in layout.fragments] == [f.tensors for f in rda.fragments]
+
+
+def test_iso_routes_non_2d_tensors_to_avg():
+    named = [("block.norm.weight", 8), ("block.attn.lora_A.weight", 32)]
+    shapes = {"block.norm.weight": (8,), "block.attn.lora_A.weight": (4, 8)}
+    layout = build_layout(named, 3, matrix_merge="iso", named_shapes=shapes)
+    assert layout.fragments[0].merge_mode == MERGE_AVG
+    assert layout.fragments[0].tensors == [("block.norm.weight", 8)]
+    assert layout.fragments[1].merge_mode == MERGE_ISO
+    assert layout.fragments[1].shapes == {"block.attn.lora_A.weight": (4, 8)}
+
+
+def test_iso_requires_shapes_and_valid_mode():
+    with pytest.raises(ValueError):
+        build_layout(TENSORS, 4, matrix_merge="iso")
+    with pytest.raises(ValueError):
+        build_layout(TENSORS, 4, matrix_merge="spectral")
+
+
+def test_avg_regex_groups_vector_like_tensors():
+    layout = build_layout(
+        [
+            ("block.norm.weight", 8),
+            ("block.attn.lora_A.weight", 32),
+            ("block.attn.lora_B.weight", 32),
+        ],
+        3,
+        avg_name_regex=r"(^|\.)(norm|bias)(\.|$)",
+    )
+    assert layout.fragments[0].merge_mode == MERGE_AVG
+    assert layout.fragments[0].tensors == [("block.norm.weight", 8)]
+    assert all(f.merge_mode == MERGE_RDA for f in layout.fragments[1:])

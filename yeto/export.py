@@ -129,8 +129,8 @@ def validate_against_layout(ckpt: Checkpoint, layout: FragmentLayout) -> None:
     if problems:
         raise ValueError(
             "checkpoint does not match the rebuilt fragment layout; make sure "
-            "--model, --tuning, --lora-r, --fragments and --fragment-pattern "
-            "match the training run: " + "; ".join(problems)
+            "--model, --tuning, --lora-r, --fragments, --fragment-pattern and "
+            "--matrix-merge match the training run: " + "; ".join(problems)
         )
 
 
@@ -157,6 +157,12 @@ def parse_args(argv=None):
         choices=["binpack", "strided"],
         default="binpack",
         help="fragment pattern used during training",
+    )
+    p.add_argument(
+        "--matrix-merge",
+        choices=["rda", "iso"],
+        default="rda",
+        help="matrix merge mode used during training",
     )
     p.add_argument("--output-dir", required=True)
     p.add_argument("--device", default="cpu")
@@ -186,7 +192,11 @@ def main(argv=None) -> None:
     model, tokenizer = load_model_and_tokenizer(learner_args, device)
     params = trainable_params(model)
     layout = build_layout(
-        [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
+        [(n, p.numel()) for n, p in params.items()],
+        args.fragments,
+        args.fragment_pattern,
+        matrix_merge=args.matrix_merge,
+        named_shapes={n: tuple(p.shape) for n, p in params.items()},
     )
 
     validate_against_layout(ckpt, layout)

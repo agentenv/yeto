@@ -13,6 +13,10 @@
 //! shrink as R/√M and force outer-lr retuning. Applied per tensor within a
 //! fragment. Degenerate mean direction falls back to direct averaging.
 //!
+//! A third opt-in mode, Iso-C-style isotropic aggregation ("iso", IsoLoCo,
+//! arXiv 2607.03011), direct-averages the per-tensor deltas and then
+//! flattens the singular-value spectrum of the averaged matrix to its mean.
+//!
 //! Outer optimizer: SGD with Nesterov momentum, state held here on the
 //! syncer, with defaults lr=0.7 and μ=0.9.
 
@@ -89,6 +93,158 @@ pub fn merge_rda(anchor: &[f32], learners: &[&[f32]], weights: &[f64], out: &mut
     let scale = (radial / mean_dir_norm) as f32;
     for o in out.iter_mut() {
         *o *= scale;
+    }
+}
+
+const ISO_SINGULAR_VALUE_RTOL: f64 = 1e-10;
+const ISO_JACOBI_MAX_SWEEPS: usize = 64;
+
+/// Iso-C-style isotropic aggregation over one tensor slice (IsoLoCo,
+/// arXiv 2607.03011, Alg. 2). Weighted direct average is applied first;
+/// then the averaged pseudo-gradient, viewed as a row-major `rows` x `cols`
+/// matrix, has its singular-value spectrum flattened to the mean singular
+/// value. Shape/product mismatches leave the direct average untouched.
+pub fn merge_iso(
+    anchor: &[f32],
+    learners: &[&[f32]],
+    weights: &[f64],
+    rows: usize,
+    cols: usize,
+    out: &mut [f32],
+) {
+    merge_avg(anchor, learners, weights, out);
+    if rows == 0 || cols == 0 || rows.saturating_mul(cols) != out.len() {
+        return;
+    }
+    iso_flatten_spectrum(out, rows, cols);
+}
+
+/// Replace the `rows` x `cols` row-major matrix `m` in place by sigma_bar*U*V^T.
+pub fn iso_flatten_spectrum(m: &mut [f32], rows: usize, cols: usize) {
+    debug_assert_eq!(rows * cols, m.len());
+    let k = rows.min(cols);
+    if k == 0 {
+        return;
+    }
+    let values: Vec<f64> = m.iter().map(|value| *value as f64).collect();
+    let gram_on_rows = rows <= cols;
+    let mut gram = vec![0.0f64; k * k];
+    for i in 0..k {
+        for j in i..k {
+            let mut acc = 0.0f64;
+            if gram_on_rows {
+                for c in 0..cols {
+                    acc += values[i * cols + c] * values[j * cols + c];
+                }
+            } else {
+                for r in 0..rows {
+                    acc += values[r * cols + i] * values[r * cols + j];
+                }
+            }
+            gram[i * k + j] = acc;
+            gram[j * k + i] = acc;
+        }
+    }
+    let mut basis = vec![0.0f64; k * k];
+    jacobi_eigh(&mut gram, &mut basis, k);
+    let sigmas: Vec<f64> = (0..k).map(|i| gram[i * k + i].max(0.0).sqrt()).collect();
+    let sigma_max = sigmas.iter().cloned().fold(0.0f64, f64::max);
+    if sigma_max <= 0.0 {
+        return;
+    }
+    let sigma_bar = sigmas.iter().sum::<f64>() / k as f64;
+    let cutoff = sigma_max * ISO_SINGULAR_VALUE_RTOL;
+    let mut whiten = vec![0.0f64; k * k];
+    for j in 0..k {
+        if sigmas[j] <= cutoff {
+            continue;
+        }
+        let gain = sigma_bar / sigmas[j];
+        for a in 0..k {
+            let qa = basis[a * k + j] * gain;
+            if qa == 0.0 {
+                continue;
+            }
+            for b in 0..k {
+                whiten[a * k + b] += qa * basis[b * k + j];
+            }
+        }
+    }
+    if gram_on_rows {
+        for c in 0..cols {
+            for r in 0..k {
+                let mut acc = 0.0f64;
+                for t in 0..k {
+                    acc += whiten[r * k + t] * values[t * cols + c];
+                }
+                m[r * cols + c] = acc as f32;
+            }
+        }
+    } else {
+        for r in 0..rows {
+            for c in 0..k {
+                let mut acc = 0.0f64;
+                for t in 0..k {
+                    acc += values[r * cols + t] * whiten[t * k + c];
+                }
+                m[r * cols + c] = acc as f32;
+            }
+        }
+    }
+}
+
+fn jacobi_eigh(g: &mut [f64], q: &mut [f64], k: usize) {
+    for i in 0..k {
+        for j in 0..k {
+            q[i * k + j] = if i == j { 1.0 } else { 0.0 };
+        }
+    }
+    for _ in 0..ISO_JACOBI_MAX_SWEEPS {
+        let mut off_sq = 0.0f64;
+        let mut diag_sq = 0.0f64;
+        for i in 0..k {
+            diag_sq += g[i * k + i] * g[i * k + i];
+            for j in i + 1..k {
+                off_sq += g[i * k + j] * g[i * k + j];
+            }
+        }
+        if off_sq <= diag_sq.max(f64::MIN_POSITIVE) * 1e-30 {
+            break;
+        }
+        for p in 0..k {
+            for r in p + 1..k {
+                let gpr = g[p * k + r];
+                if gpr == 0.0 {
+                    continue;
+                }
+                let tau = (g[r * k + r] - g[p * k + p]) / (2.0 * gpr);
+                let t = if tau >= 0.0 {
+                    1.0 / (tau + (1.0 + tau * tau).sqrt())
+                } else {
+                    1.0 / (tau - (1.0 + tau * tau).sqrt())
+                };
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = t * c;
+                for i in 0..k {
+                    let gip = g[i * k + p];
+                    let gir = g[i * k + r];
+                    g[i * k + p] = c * gip - s * gir;
+                    g[i * k + r] = s * gip + c * gir;
+                }
+                for i in 0..k {
+                    let gpi = g[p * k + i];
+                    let gri = g[r * k + i];
+                    g[p * k + i] = c * gpi - s * gri;
+                    g[r * k + i] = s * gpi + c * gri;
+                }
+                for i in 0..k {
+                    let qip = q[i * k + p];
+                    let qir = q[i * k + r];
+                    q[i * k + p] = c * qip - s * qir;
+                    q[i * k + r] = s * qip + c * qir;
+                }
+            }
+        }
     }
 }
 
@@ -248,6 +404,105 @@ mod tests {
         let mut out = [0.0f32; 1];
         merge_rda(&anchor, &[&l0, &l1], &[1.0, 1.0], &mut out);
         assert!(out[0].abs() < 1e-6);
+    }
+
+    fn gram(a: &[f32], rows: usize, cols: usize) -> Vec<f64> {
+        let mut g = vec![0.0f64; rows * rows];
+        for i in 0..rows {
+            for j in 0..rows {
+                g[i * rows + j] = (0..cols)
+                    .map(|c| a[i * cols + c] as f64 * a[j * cols + c] as f64)
+                    .sum();
+            }
+        }
+        g
+    }
+
+    #[test]
+    fn iso_flattens_diagonal_spectrum_to_mean_singular_value() {
+        let anchor = [0.0f32; 4];
+        let learner = [-3.0f32, 0.0, 0.0, -1.0];
+        let mut out = [0.0f32; 4];
+        merge_iso(&anchor, &[&learner], &[1.0], 2, 2, &mut out);
+        for (o, e) in out.iter().zip([2.0f32, 0.0, 0.0, 2.0]) {
+            assert!((o - e).abs() < 1e-6, "got {out:?}");
+        }
+    }
+
+    #[test]
+    fn iso_matches_sigma_bar_u_vt_on_rectangular_matrices() {
+        let anchor = [0.0f32; 6];
+        let learner = [-1.0f32, 0.0, 0.0, 0.0, -2.0, 0.0];
+        let mut out = [0.0f32; 6];
+        merge_iso(&anchor, &[&learner], &[2.5], 2, 3, &mut out);
+        for (o, e) in out.iter().zip([1.5f32, 0.0, 0.0, 0.0, 1.5, 0.0]) {
+            assert!((o - e).abs() < 1e-6, "got {out:?}");
+        }
+        let learner_t = [-1.0f32, 0.0, 0.0, -2.0, 0.0, 0.0];
+        let mut out_t = [0.0f32; 6];
+        merge_iso(&anchor, &[&learner_t], &[1.0], 3, 2, &mut out_t);
+        for (o, e) in out_t.iter().zip([1.5f32, 0.0, 0.0, 1.5, 0.0, 0.0]) {
+            assert!((o - e).abs() < 1e-6, "got {out_t:?}");
+        }
+    }
+
+    #[test]
+    fn iso_output_spectrum_is_isotropic_and_aligned() {
+        let anchor = [0.0f32; 12];
+        let delta = [
+            2.0f32, -1.0, 0.5, 3.0,
+            0.25, 4.0, -2.0, 1.0,
+            -1.5, 0.75, 3.5, -0.5,
+        ];
+        let learner: Vec<f32> = delta.iter().map(|d| -d).collect();
+        let mut out = [0.0f32; 12];
+        merge_iso(&anchor, &[&learner[..]], &[1.0], 3, 4, &mut out);
+        let g = gram(&out, 3, 4);
+        let sigma_bar_sq = (g[0] + g[4] + g[8]) / 3.0;
+        assert!(sigma_bar_sq > 0.0);
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { sigma_bar_sq } else { 0.0 };
+                assert!(
+                    (g[i * 3 + j] - expected).abs() < 1e-4 * sigma_bar_sq,
+                    "gram {g:?}"
+                );
+            }
+        }
+        let inner: f64 = out.iter().zip(delta).map(|(o, d)| *o as f64 * d as f64).sum();
+        let out_norm_sq: f64 = out.iter().map(|o| (*o as f64).powi(2)).sum();
+        assert!((inner - out_norm_sq).abs() < 1e-4 * out_norm_sq);
+        let mut again = out;
+        iso_flatten_spectrum(&mut again, 3, 4);
+        for (a, o) in again.iter().zip(out) {
+            assert!((a - o).abs() < 1e-5 * sigma_bar_sq.sqrt() as f32);
+        }
+    }
+
+    #[test]
+    fn iso_weighted_average_feeds_the_transform() {
+        let anchor = [0.0f32; 4];
+        let l0 = [-4.0f32, 0.0, 0.0, 0.0];
+        let l1 = [0.0f32, 0.0, 0.0, -4.0];
+        let mut out = [0.0f32; 4];
+        merge_iso(&anchor, &[&l0, &l1], &[3.0, 1.0], 2, 2, &mut out);
+        for (o, e) in out.iter().zip([2.0f32, 0.0, 0.0, 2.0]) {
+            assert!((o - e).abs() < 1e-6, "got {out:?}");
+        }
+    }
+
+    #[test]
+    fn iso_vector_and_zero_deltas_are_stable() {
+        let anchor = [0.0f32, 0.0];
+        let learner = [-3.0f32, -4.0];
+        let mut out = [0.0f32; 2];
+        merge_iso(&anchor, &[&learner], &[1.0], 1, 2, &mut out);
+        assert!((out[0] - 3.0).abs() < 1e-6 && (out[1] - 4.0).abs() < 1e-6);
+        let zero_learner = [0.0f32, 0.0];
+        merge_iso(&anchor, &[&zero_learner], &[1.0], 2, 1, &mut out);
+        assert_eq!(out, [0.0, 0.0]);
+        merge_iso(&anchor, &[&learner], &[1.0], 3, 5, &mut out);
+        assert_eq!(out, [3.0, 4.0]);
     }
 
     fn cosine(a: &[f32], b: &[f32]) -> f64 {
