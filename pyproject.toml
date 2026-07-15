@@ -38,3 +38,9 @@ yeto-nava-prepare-labels = "yeto.nava.labels:main"
 # Discover yeto and its subpackages (backends, nava, megatron, shape) so a
 # non-editable install ships them too.
 include = ["yeto*"]
+
+[tool.pytest.ini_options]
+# ``scripts/test_*.py`` are standalone numerical executables with explicit
+# CLI parameters, not pytest modules.  The reviewed repository suite lives in
+# tests/; pin discovery so bare ``pytest`` and ``pytest tests`` are identical.
+testpaths = ["tests"]

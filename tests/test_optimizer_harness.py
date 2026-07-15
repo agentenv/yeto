@@ -408,6 +408,14 @@ def test_valid_spec_and_safe_launch_command(tmp_path):
     assert "--image=optimizer-image-v1" in command
 
 
+def test_parallel_launch_command_accepts_prebound_128_bit_ownership_nonce(tmp_path):
+    spec = _spec(tmp_path)
+    nonce = "0123456789abcdef0123456789abcdef"
+    command = launch_command(spec, nonce)
+    labels = next(item for item in command if item.startswith("--labels="))
+    assert f"ownership-nonce={nonce}" in labels
+
+
 def test_launch_command_and_live_identity_pin_max_run_duration(tmp_path):
     def cap_runtime(raw):
         raw["cloud"]["max_run_duration_seconds"] = 7200

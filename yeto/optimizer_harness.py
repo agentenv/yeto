@@ -35,6 +35,7 @@ COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 GCP_NAME_RE = re.compile(r"[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?\Z")
 GCP_IMAGE_PATH_RE = re.compile(r"projects/([^/]+)/global/images/([^/]+)\Z")
 ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+OWNERSHIP_NONCE_RE = re.compile(r"(?:[a-f0-9]{16}|[a-f0-9]{32})\Z")
 SAFE_IMAGE_PATH_PREFIXES = (
     "/home/",
     "/root/",
@@ -161,6 +162,15 @@ def _validate_labels(labels: Mapping[str, Any], run_id: str) -> dict[str, str]:
     if clean.get("run-id") != run_id:
         raise HarnessError("cloud.labels.run-id must exactly match run_id")
     return clean
+
+
+def _validate_ownership_nonce(value: Any) -> str:
+    nonce = _string(value, "ownership nonce")
+    if OWNERSHIP_NONCE_RE.fullmatch(nonce) is None:
+        raise HarnessError(
+            "ownership nonce must be 16 or 32 lowercase hexadecimal characters"
+        )
+    return nonce
 
 
 def _validate_sanitize_path(path: str, remote_run_dir: str) -> None:
@@ -898,11 +908,7 @@ def launch_command(
     cloud = spec.cloud
     labels = dict(cloud["labels"])
     if ownership_nonce is not None:
-        if not re.fullmatch(r"[a-f0-9]{16}", ownership_nonce):
-            raise HarnessError(
-                "ownership nonce must be 16 lowercase hexadecimal characters"
-            )
-        labels["ownership-nonce"] = ownership_nonce
+        labels["ownership-nonce"] = _validate_ownership_nonce(ownership_nonce)
     command = _gcloud_prefix(spec) + [
         "instances",
         "create",
@@ -1247,6 +1253,7 @@ def launch(
     state_dir: str | Path | None,
     *,
     confirmed: bool,
+    ownership_nonce: str | None = None,
 ) -> dict[str, Any]:
     if not confirmed:
         raise HarnessError("launch requires --yes")
@@ -1273,7 +1280,11 @@ def launch(
             f"active={active_accelerators} requested={requested_accelerators} "
             f"cap={max_total_accelerators}"
         )
-    ownership_nonce = secrets.token_hex(8)
+    ownership_nonce = (
+        secrets.token_hex(8)
+        if ownership_nonce is None
+        else _validate_ownership_nonce(ownership_nonce)
+    )
     provisioning_started_at = _utc_now()
     runner.run(launch_command(spec, ownership_nonce))
     if runner.dry_run:
@@ -3836,6 +3847,13 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("spec")
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("spec")
+    launch_parser.add_argument(
+        "--ownership-nonce",
+        help=(
+            "prebound 16- or 32-hex ownership nonce; parallel campaigns use "
+            "the amendment-required 32-hex form"
+        ),
+    )
     launch_parser.add_argument("--yes", action="store_true")
     adopt_parser = subparsers.add_parser("adopt")
     adopt_parser.add_argument("spec")
@@ -3954,6 +3972,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         runner,
                         args.state_dir,
                         confirmed=args.yes,
+                        ownership_nonce=args.ownership_nonce,
                     ),
                     indent=2,
                     sort_keys=True,
