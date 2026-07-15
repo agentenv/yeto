@@ -583,8 +583,38 @@ def test_checkout_source_mode_fetches_exact_detached_commit(tmp_path):
     spec = _spec(tmp_path, checkout)
     script = start_script(spec)
     assert "git clone --filter=blob:none --no-checkout" in script
-    assert f"fetch --depth=1 origin {COMMIT}" in script
+    assert f"fetch --no-tags origin {COMMIT}" in script
+    assert "--depth=1" not in script
+    assert f"cat-file -e {COMMIT}^{{commit}}" in script
     assert f"checkout --detach {COMMIT}" in script
+
+
+def test_checkout_source_authority_restores_history_and_proves_ancestry(tmp_path):
+    ancestor = "16d27bc60deb6d8910bf0111c7fb57c9d0eb5b80"
+    prereg_path = "experiment-specs/best-paper-phase-map-p0-p1-prereg.json"
+    prereg_hash = "7cba3c62328b4bfe15fffbc523979274e834e8e720e16f70d79621eaf6ebdb7b"
+
+    def checkout(raw):
+        raw["execution"]["source_mode"] = "checkout"
+        raw["execution"]["source_authority"] = {
+            "ref": "refs/heads/experiment/best-paper-phase-map",
+            "ancestor_commit": ancestor,
+            "ancestor_path": prereg_path,
+            "ancestor_sha256": prereg_hash,
+        }
+
+    spec = _spec(tmp_path, checkout)
+    script = start_script(spec)
+
+    assert "+refs/heads/experiment/best-paper-phase-map:" in script
+    assert "rev-parse --is-shallow-repository" in script
+    assert "fetch --no-tags --unshallow origin" in script
+    assert f"fetch --no-tags origin {ancestor} {COMMIT}" in script
+    assert f"cat-file -e {ancestor}^{{commit}}" in script
+    assert f"cat-file -e {COMMIT}^{{commit}}" in script
+    assert f"merge-base --is-ancestor {ancestor} {COMMIT}" in script
+    assert f"show {ancestor}:{prereg_path}" in script
+    assert prereg_hash in script
 
 
 def test_image_script_refuses_live_runner_and_removes_credentials(tmp_path):

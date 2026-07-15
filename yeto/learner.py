@@ -585,6 +585,45 @@ def barrier_release(awaiting: dict[int, int], fid: int, version: int) -> bool:
     return False
 
 
+def barrier_round_closure_target(
+    *,
+    barrier_sync: bool,
+    shutdown: bool,
+    steps_total: int,
+    max_local_steps: int,
+    fixed_window_steps: int,
+    fragment_count: int,
+    global_step: int,
+    fixed_window_snapshots: list[dict | None] | None,
+) -> int | None:
+    """Return the real syncer boundary that must close before another step.
+
+    A fixed-window barrier learner captures all fragment snapshots at the same
+    local optimizer-step boundary. Once the first fragment in that round is
+    pushed and its broadcast is applied, taking another optimizer step would
+    make the remaining fragment resets one step late. At the hard work cap it
+    would also strand the final fragment push. Closing the genuine outstanding
+    pulls through the end of the fragment round keeps every reset aligned while
+    executing no extra optimizer step and consuming no extra training token.
+    """
+    if (
+        not barrier_sync
+        or shutdown
+        or fixed_window_snapshots is None
+        or fragment_count <= 0
+        or fixed_window_steps <= 0
+    ):
+        return None
+    if steps_total >= max_local_steps:
+        return (max_local_steps // fixed_window_steps) * fragment_count
+    if (
+        any(snapshot is not None for snapshot in fixed_window_snapshots)
+        and global_step % fragment_count != 0
+    ):
+        return ((global_step // fragment_count) + 1) * fragment_count
+    return None
+
+
 def parse_fixed_window_schedule(spec: str) -> list[tuple[int, int]]:
     """Parse ``--fixed-window-schedule`` "commit1:h1,commit2:h2,...".
 
@@ -1718,6 +1757,110 @@ def run_inner_loop(
                     )
                 shutdown = client.shutdown.is_set()
 
+            boundary_target = barrier_round_closure_target(
+                barrier_sync=barrier_sync,
+                shutdown=shutdown,
+                steps_total=steps_total,
+                max_local_steps=args.max_local_steps,
+                fixed_window_steps=fixed_window_steps,
+                fragment_count=layout.num_fragments,
+                global_step=global_step,
+                fixed_window_snapshots=fixed_window_snapshots,
+            )
+            if boundary_target is not None:
+                boundary_deadline = time.monotonic() + float(client.connect_timeout)
+                boundary_answered: set[tuple[int, int]] = set()
+                while (
+                    not client.shutdown.is_set()
+                    and int(global_step) < int(boundary_target)
+                ):
+                    client.check_health()
+                    pending_pulls.extend(client.drain_pulls())
+                    fresh_pulls = []
+                    for pull in pending_pulls:
+                        round_key = (
+                            int(pull.fragment_id),
+                            int(pull.global_step),
+                        )
+                        if (
+                            round_key in boundary_answered
+                            or int(pull.global_step) <= int(global_step)
+                        ):
+                            boundary_answered.add(round_key)
+                            continue
+                        fresh_pulls.append(pull)
+                    pending_pulls = fresh_pulls
+                    if not pending_pulls:
+                        if time.monotonic() >= boundary_deadline:
+                            raise RuntimeError(
+                                "barrier-sync timed out closing fragment round"
+                            )
+                        time.sleep(0.002)
+                        continue
+                    still_pending = []
+                    pushed = False
+                    for pull in pending_pulls:
+                        fid = pull.fragment_id
+                        round_key = (int(fid), int(pull.global_step))
+                        if int(pull.global_step) > int(boundary_target):
+                            still_pending.append(pull)
+                            continue
+                        if fixed_window_snapshots is None:
+                            raise RuntimeError(
+                                "barrier round closure requires fixed-window snapshots"
+                            )
+                        snap = fixed_window_snapshots[fid]
+                        if snap is None:
+                            still_pending.append(pull)
+                            continue
+                        local_flat = snap["flat"]
+                        c_steps = int(snap["c_steps"])
+                        c_tokens = int(snap["c_tokens"])
+                        local_step_for_push = int(snap["local_step"])
+                        base_version_for_push = int(snap["base_version"])
+                        if anchors is not None and client.dtype == DTYPE_Q4:
+                            payload = quantize_q4(local_flat - anchors[fid])
+                        else:
+                            payload = pack_flat(local_flat, client.dtype)
+                        _debug_sleep(
+                            args.debug_push_delay_ms,
+                            args.debug_delay_jitter_ms,
+                        )
+                        client.push_fragment(
+                            fid,
+                            pull.global_step,
+                            base_version_for_push,
+                            local_step_for_push,
+                            c_steps,
+                            c_tokens,
+                            payload,
+                        )
+                        awaiting_broadcast[fid] = base_version_for_push
+                        emit_barrier_trace(
+                            "push_sent",
+                            steps_total,
+                            fragment=int(fid),
+                            pull_step=int(pull.global_step),
+                            base_version=int(base_version_for_push),
+                            c_steps=int(c_steps),
+                            c_tokens=int(c_tokens),
+                            awaiting_fragments=sorted(awaiting_broadcast),
+                        )
+                        boundary_answered.add(round_key)
+                        pushed = True
+                    pending_pulls = still_pending
+                    if awaiting_broadcast:
+                        drain_required_broadcasts(
+                            awaiting_broadcast,
+                            client,
+                            drain_broadcast_actions,
+                            apply_broadcast_world1,
+                        )
+                    if pushed:
+                        boundary_deadline = (
+                            time.monotonic() + float(client.connect_timeout)
+                        )
+                shutdown = client.shutdown.is_set()
             if shutdown or steps_total >= args.max_local_steps:
                 break
         epoch += 1

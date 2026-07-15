@@ -520,3 +520,53 @@ def test_barrier_sync_flag_defaults_off_and_parses():
          "--num-learners", "1", "--barrier-sync"]
     )
     assert args.barrier_sync is True
+
+
+def test_barrier_round_closure_targets_each_full_fragment_boundary():
+    from yeto.learner import barrier_round_closure_target
+
+    snapshots = [{"c_steps": 16}, {"c_steps": 16}, {"c_steps": 16}, None]
+    assert barrier_round_closure_target(
+        barrier_sync=True,
+        shutdown=False,
+        steps_total=16,
+        max_local_steps=128,
+        fixed_window_steps=16,
+        fragment_count=4,
+        global_step=1,
+        fixed_window_snapshots=snapshots,
+    ) == 4
+    assert barrier_round_closure_target(
+        barrier_sync=True,
+        shutdown=False,
+        steps_total=112,
+        max_local_steps=128,
+        fixed_window_steps=16,
+        fragment_count=4,
+        global_step=29,
+        fixed_window_snapshots=snapshots,
+    ) == 32
+
+
+def test_barrier_round_closure_caps_at_32_without_extra_optimizer_step():
+    from yeto.learner import barrier_round_closure_target
+
+    snapshots = [
+        {"c_steps": 16, "c_tokens": 2048, "local_step": 128}
+        for _ in range(4)
+    ]
+    assert barrier_round_closure_target(
+        barrier_sync=True,
+        shutdown=False,
+        steps_total=128,
+        max_local_steps=128,
+        fixed_window_steps=16,
+        fragment_count=4,
+        global_step=31,
+        fixed_window_snapshots=snapshots,
+    ) == 32
+    assert snapshots[3] == {
+        "c_steps": 16,
+        "c_tokens": 2048,
+        "local_step": 128,
+    }

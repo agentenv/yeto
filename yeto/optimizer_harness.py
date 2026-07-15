@@ -371,6 +371,63 @@ def load_spec(path: str | Path) -> ExperimentSpec:
             "execution.source_mode must be preinstalled_exact or checkout"
         )
     execution["source_mode"] = source_mode
+    source_authority_raw = execution.get("source_authority")
+    if source_authority_raw is None:
+        execution["source_authority"] = None
+    else:
+        if source_mode != "checkout":
+            raise HarnessError(
+                "execution.source_authority requires execution.source_mode=checkout"
+            )
+        source_authority = _object(
+            source_authority_raw, "execution.source_authority"
+        )
+        ref = _string(source_authority.get("ref"), "execution.source_authority.ref")
+        if (
+            not ref.startswith("refs/heads/")
+            or ".." in ref
+            or "@{" in ref
+            or ref.endswith("/")
+            or not re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", ref)
+        ):
+            raise HarnessError(
+                "execution.source_authority.ref must be one normalized refs/heads/* ref"
+            )
+        ancestor_commit = _string(
+            source_authority.get("ancestor_commit"),
+            "execution.source_authority.ancestor_commit",
+        )
+        if not COMMIT_RE.fullmatch(ancestor_commit):
+            raise HarnessError(
+                "execution.source_authority.ancestor_commit must be a full commit SHA"
+            )
+        ancestor_path = _string(
+            source_authority.get("ancestor_path"),
+            "execution.source_authority.ancestor_path",
+        )
+        parsed_ancestor_path = PurePosixPath(ancestor_path)
+        if (
+            parsed_ancestor_path.is_absolute()
+            or ".." in parsed_ancestor_path.parts
+            or str(parsed_ancestor_path) in ("", ".")
+        ):
+            raise HarnessError(
+                "execution.source_authority.ancestor_path must be repo-relative"
+            )
+        ancestor_sha256 = _string(
+            source_authority.get("ancestor_sha256"),
+            "execution.source_authority.ancestor_sha256",
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", ancestor_sha256):
+            raise HarnessError(
+                "execution.source_authority.ancestor_sha256 must be lowercase SHA-256"
+            )
+        execution["source_authority"] = {
+            "ref": ref,
+            "ancestor_commit": ancestor_commit,
+            "ancestor_path": str(parsed_ancestor_path),
+            "ancestor_sha256": ancestor_sha256,
+        }
     execution["remote_repo_dir"] = _absolute_remote_path(
         execution.get("remote_repo_dir"), "execution.remote_repo_dir"
     )
@@ -1497,14 +1554,46 @@ def start_script(
             '> "$run/provider-evidence.json"\n'
         )
     if spec.execution["source_mode"] == "checkout":
+        source_authority = spec.execution["source_authority"]
+        if source_authority is None:
+            checkout_proof = f"""git -C \"$repo\" fetch --no-tags origin {commit}
+git -C \"$repo\" cat-file -e {commit}^{{commit}}
+git -C \"$repo\" checkout --detach {commit}
+"""
+        else:
+            source_ref = shlex.quote(source_authority["ref"])
+            remote_ref = shlex.quote(
+                "refs/remotes/origin/"
+                + source_authority["ref"].removeprefix("refs/heads/")
+            )
+            ancestor_commit = shlex.quote(source_authority["ancestor_commit"])
+            ancestor_path = source_authority["ancestor_path"]
+            ancestor_object = shlex.quote(
+                f"{source_authority['ancestor_commit']}:{ancestor_path}"
+            )
+            ancestor_sha256 = shlex.quote(source_authority["ancestor_sha256"])
+            checkout_proof = f"""git -C \"$repo\" fetch --no-tags origin \\
+  +{source_ref}:{remote_ref}
+if test \"$(git -C \"$repo\" rev-parse --is-shallow-repository)\" = true; then
+  git -C \"$repo\" fetch --no-tags --unshallow origin {source_ref}
+else
+  git -C \"$repo\" fetch --no-tags origin {source_ref}
+fi
+git -C \"$repo\" fetch --no-tags origin {ancestor_commit} {commit}
+git -C \"$repo\" cat-file -e {ancestor_commit}^{{commit}}
+git -C \"$repo\" cat-file -e {commit}^{{commit}}
+test \"$(git -C \"$repo\" rev-parse --is-shallow-repository)\" = false
+git -C \"$repo\" merge-base --is-ancestor {ancestor_commit} {commit}
+git -C \"$repo\" checkout --detach {commit}
+test \"$(git -C \"$repo\" show {ancestor_object} | sha256sum | awk '{{print $1}}')\" = {ancestor_sha256}
+"""
         source_setup = f"""if [ -e \"$repo\" ]; then
   echo 'run-specific checkout path already exists' >&2
   exit 15
 fi
 mkdir -p \"$(dirname \"$repo\")\"
 git clone --filter=blob:none --no-checkout {shlex.quote(spec.repo_url)} \"$repo\"
-git -C \"$repo\" fetch --depth=1 origin {commit}
-git -C \"$repo\" checkout --detach {commit}
+{checkout_proof}
 """
     else:
         source_setup = ""

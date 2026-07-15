@@ -512,6 +512,9 @@ def learner_command(
     max_steps: int,
     arm: Arm | None,
 ) -> list[str]:
+    learner_data = Path(
+        getattr(args, "learner_data", arm_dir.parent / "train.jsonl")
+    ).resolve()
     if args.learner_gpus > 1:
         # Multi-GPU learner: torchrun ranks over this learner's GPU block
         # (models whose frozen base exceeds one GPU need --shard fsdp).
@@ -530,7 +533,7 @@ def learner_command(
         "--model",
         args.model,
         "--data",
-        str(arm_dir.parent / "train.jsonl"),
+        str(learner_data),
         "--syncer",
         syncer,
         "--learner-id",
@@ -619,7 +622,15 @@ def learner_command(
             cmd += ["--matrix-merge", arm.matrix_merge]
         if getattr(args, "probe_data", None):
             probe_data = (
-                str(arm_dir.parent / "eval.jsonl")
+                str(
+                    Path(
+                        getattr(
+                            args,
+                            "learner_probe_data",
+                            arm_dir.parent / "eval.jsonl",
+                        )
+                    ).resolve()
+                )
                 if args.probe_data == "eval"
                 else str(args.probe_data)
             )
@@ -2093,7 +2104,9 @@ def run_baseline(args, work: Path) -> tuple[Path, float]:
     return arm_dir / "learner-0", time.monotonic() - t0
 
 
-def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
+def run_diloco(
+    args, arm: Arm, work: Path
+) -> tuple[Path, float, dict[str, object]]:
     arm_dir = work / arm.name
     arm_dir.mkdir(parents=True, exist_ok=True)
     budget_steps = steps_for(
@@ -2115,6 +2128,8 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
     t0 = None
     learners = []
     learner_logs = []
+    learner_exit_codes = []
+    syncer_exit_code = None
     try:
         if arm.commit_policy != "token_weighted":
             wait_for_free_gpus(
@@ -2178,6 +2193,7 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             )
         for proc in learners:
             rc = proc.wait(timeout=args.arm_timeout_min * 60)
+            learner_exit_codes.append(rc)
             if rc != 0:
                 raise RuntimeError(f"{arm.name}: a learner exited {rc}; see {arm_dir}")
         if args.syncer_total_steps:
@@ -2200,9 +2216,11 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
                 # exits as soon as it is actually done, so this is only
                 # an upper bound on patience.
                 syncer_drain_timeout = max(900, samples * 900)
-            rc = syncer.wait(timeout=syncer_drain_timeout)
-            if rc != 0:
-                raise RuntimeError(f"{arm.name}: syncer exited {rc}; see {arm_dir}")
+            syncer_exit_code = syncer.wait(timeout=syncer_drain_timeout)
+            if syncer_exit_code != 0:
+                raise RuntimeError(
+                    f"{arm.name}: syncer exited {syncer_exit_code}; see {arm_dir}"
+                )
     finally:
         for proc in learners:
             if proc.poll() is None:
@@ -2282,7 +2300,10 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
         ],
         arm_dir / "export.log",
     )
-    return export_dir, wall
+    return export_dir, wall, {
+        "learner_exit_codes": learner_exit_codes,
+        "syncer_exit_code": syncer_exit_code,
+    }
 
 
 def run_checked(cmd: list[str], log: Path, env: dict | None = None) -> None:
@@ -2310,6 +2331,26 @@ def ensure_syncer() -> None:
         subprocess.run(
             ["cargo", "build", "--release", "-q"], cwd=syncer_dir, check=True
         )
+
+
+def resolve_subprocess_paths(args) -> None:
+    """Bind local child-process paths to the compare invocation directory."""
+    for field in ("model", "data", "probe_data"):
+        value = getattr(args, field, None)
+        if value is not None and value != "eval":
+            candidate = Path(value).expanduser()
+            if candidate.exists():
+                setattr(args, field, str(candidate.resolve()))
+    for field in (
+        "prebound_development_eval",
+        "action_probe_anchor_manifest",
+        "adapter_dir",
+    ):
+        value = getattr(args, field, None)
+        if value is not None:
+            setattr(args, field, value.expanduser().resolve())
+    args.work_dir = args.work_dir.expanduser().resolve()
+    args.report_dir = args.report_dir.expanduser().resolve()
 
 
 def main() -> int:
@@ -2704,6 +2745,9 @@ def main() -> int:
     p.add_argument("--eval-output", type=Path, default=None, help=argparse.SUPPRESS)
     args = p.parse_args()
 
+    # Hub IDs stay unchanged; existing local inputs become launch-invariant.
+    resolve_subprocess_paths(args)
+
     if args.syncer_total_steps < 0 or args.learner_max_steps < 0:
         p.error("--syncer-total-steps and --learner-max-steps must be non-negative")
     if args.pipeline_depth is not None and args.pipeline_depth < 1:
@@ -2880,6 +2924,10 @@ def main() -> int:
             args.eval_split_seed,
             args.confirmation_audit_rows,
         )
+    train = train.resolve()
+    evalf = evalf.resolve()
+    args.learner_data = train
+    args.learner_probe_data = evalf
     eval_provenance = materialize_eval_provenance(
         args.model,
         evalf,
@@ -2949,7 +2997,7 @@ def main() -> int:
 
     for arm in arms:
         write_acquisition_state(args.report_dir, "training_started", arm=arm.name)
-        adapters, wall = run_diloco(args, arm, args.work_dir)
+        adapters, wall, exit_statuses = run_diloco(args, arm, args.work_dir)
         write_acquisition_state(args.report_dir, "endpoint_started", arm=arm.name)
         loss = eval_in_subprocess(
             args,
@@ -2988,6 +3036,7 @@ def main() -> int:
                 "eval_tokens": eval_provenance["eval_supervised_token_count"],
                 "eval_example_ids_hash": eval_provenance["eval_example_ids_hash"],
                 "eval_token_ids_hash": eval_provenance["eval_token_ids_hash"],
+                **exit_statuses,
             }
         )
         print(

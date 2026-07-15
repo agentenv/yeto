@@ -368,6 +368,87 @@ def _validate_adaptive_extension(
             )
 
 
+def _registered_p2_coordinates(
+    parent: Mapping[str, Any], errors: list[str]
+) -> set[Coordinate]:
+    """Derive P2's two-seed cells from sealed, passing P1 tuned choices."""
+    latest = _latest_parent_rows(parent, errors)
+    curves: dict[tuple[int, float], list[tuple[float, float]]] = defaultdict(list)
+    for coordinate, row in latest.items():
+        status = _canonical_status(row.get("status"))
+        if coordinate.seed != 347:
+            errors.append("P2 parent must contain only P1 development seed 347")
+            continue
+        if status != "COMPLETED" or not _finite_number(row.get("loss")):
+            errors.append(f"P2 parent has unresolved/nonfinite P1 cell {coordinate}")
+            continue
+        curves[(coordinate.h, coordinate.mu)].append(
+            (coordinate.eta, float(row["loss"]))
+        )
+    template = _authoritative_template()
+    required_curves = {
+        (int(h), float(mu))
+        for h in _mapping_or_empty(template.get("expected_grid")).get("h", [])
+        for mu in _mapping_or_empty(template.get("expected_grid")).get("mu", [])
+    }
+    if set(curves) != required_curves:
+        errors.append("P2 parent must contain exactly nine complete P1 LR curves")
+        return set()
+    neighborhoods: dict[int, set[float]] = defaultdict(set)
+    tuned: dict[tuple[int, float], float] = {}
+    for key, points in curves.items():
+        points.sort(key=lambda pair: pair[0])
+        etas = [eta for eta, _loss in points]
+        if len(etas) != len(set(etas)):
+            errors.append(f"P2 parent curve {key} repeats an eta")
+            continue
+        selected_eta, selected_loss = min(points, key=lambda pair: (pair[1], pair[0]))
+        selected_index = etas.index(selected_eta)
+        if selected_index == 0 or selected_index == len(etas) - 1:
+            errors.append(f"P2 parent curve {key} is not bracketed")
+            continue
+        if not (
+            points[selected_index - 1][1] > selected_loss
+            and points[selected_index + 1][1] > selected_loss
+        ):
+            errors.append(f"P2 parent curve {key} lacks worse immediate neighbors")
+            continue
+        neighborhoods[key[0]].update(
+            (etas[selected_index - 1], selected_eta, etas[selected_index + 1])
+        )
+        tuned[key] = selected_loss
+    if set(tuned) != required_curves:
+        return set()
+    gate = _mapping_or_empty(template.get("go_kill"))
+    d_short = tuned[(16, 0.9)] - tuned[(16, 0.0)]
+    d_long = min(tuned[(256, 0.5)], tuned[(256, 0.9)]) - tuned[(256, 0.0)]
+    if d_short < float(gate.get("d_short_min", math.inf)):
+        errors.append(f"P1 D_short={d_short} fails the registered P2 entry gate")
+    if d_long > float(gate.get("d_long_max", -math.inf)):
+        errors.append(f"P1 D_long={d_long} fails the registered P2 entry gate")
+    seeds = [
+        int(seed)
+        for seed in _mapping_or_empty(
+            _mapping_or_empty(template.get("lineage_policy")).get(
+                "registered_descendant_kinds"
+            )
+        )
+        .get("additional_development_stage", {})
+        .get("required_new_seeds", [])
+    ]
+    required_mu = [
+        float(mu)
+        for mu in _mapping_or_empty(template.get("expected_grid")).get("mu", [])
+    ]
+    return {
+        Coordinate(h, mu, eta, seed)
+        for seed in seeds
+        for h, etas in neighborhoods.items()
+        for eta in etas
+        for mu in required_mu
+    }
+
+
 def _validate_parent_replay_report(
     *,
     lineage: Mapping[str, Any],
@@ -783,6 +864,16 @@ def _validate_authority_and_lineage(
                 errors.append(
                     f"lineage parent kind must be {required_parent_kind!r} for {kind!r}"
                 )
+            if kind == "additional_development_stage" and _manifest_kind(
+                parent_manifest
+            ) not in {"initial_bound_p1_r0", "adaptive_bracket_round"}:
+                errors.append(
+                    "additional_development_stage parent must be a sealed P1 manifest"
+                )
+            if kind == "adaptive_bracket_round" and _manifest_kind(
+                parent_manifest
+            ) not in {"initial_bound_p1_r0", "adaptive_bracket_round"}:
+                errors.append("adaptive_bracket_round parent must be a sealed P1 manifest")
             if kind == "p0b_four_gpu_bound" and _manifest_kind(parent_manifest) == "p0a_single_gpu_bound":
                 try:
                     validate_and_summarize(parent_manifest, claim_level="integrity")
@@ -805,22 +896,69 @@ def _validate_authority_and_lineage(
                 "compare_allowed_paths_to_authoritative_template_not_p0b_parent"
             ):
                 compare_to = parent_manifest
-                if kind_policy.get("parent_results_must_be_exact_prefix") is True:
+                cumulative = kind in {
+                    "adaptive_bracket_round",
+                    "additional_development_stage",
+                }
+                if cumulative or kind_policy.get("parent_results_must_be_exact_prefix") is True:
                     parent_results = parent_manifest.get("results")
                     child_results = manifest.get("results")
                     if not isinstance(parent_results, list) or not isinstance(child_results, list):
                         errors.append("cumulative descendants require parent/child results arrays")
                     elif child_results[: len(parent_results)] != parent_results:
                         errors.append("existing parent results must remain an exact immutable prefix")
-                if kind_policy.get(
+                    parent_expected = parent_manifest.get("expected_cells")
+                    child_expected = manifest.get("expected_cells")
+                    if (
+                        not isinstance(parent_expected, list)
+                        or not isinstance(child_expected, list)
+                    ):
+                        errors.append(
+                            "cumulative descendants require parent/child expected_cells arrays"
+                        )
+                    elif child_expected[: len(parent_expected)] != parent_expected:
+                        errors.append(
+                            "existing parent expected_cells must remain an exact immutable prefix"
+                        )
+                if cumulative or kind_policy.get(
                     "expected_eta_and_cell_command_registry_must_be_strict_supersets"
                 ) is True:
                     parent_cells, _ = _expected_cell_records(parent_manifest, errors)
                     child_cells, _ = _expected_cell_records(manifest, errors)
                     if not parent_cells < child_cells:
                         errors.append(
-                            "adaptive expected_cells must be a strict superset of "
+                            "cumulative expected_cells must be a strict superset of "
                             "the parent coordinates"
+                        )
+                    for field in (
+                        "cell_command_hashes",
+                        "train_source_indices_hashes",
+                        "train_rows_hashes",
+                    ):
+                        parent_map = _mapping_or_empty(
+                            _mapping_or_empty(parent_manifest.get("frozen")).get(
+                                field
+                            )
+                        )
+                        child_map = _mapping_or_empty(
+                            _mapping_or_empty(manifest.get("frozen")).get(field)
+                        )
+                        if any(
+                            key not in child_map or child_map[key] != value
+                            for key, value in parent_map.items()
+                        ):
+                            errors.append(
+                                f"cumulative frozen.{field} must preserve every "
+                                "parent entry exactly"
+                            )
+                    parent_pairs = _mapping_or_empty(parent_manifest.get("seed_pairs"))
+                    child_pairs = _mapping_or_empty(manifest.get("seed_pairs"))
+                    if any(
+                        key not in child_pairs or child_pairs[key] != value
+                        for key, value in parent_pairs.items()
+                    ):
+                        errors.append(
+                            "cumulative seed_pairs must preserve every parent entry exactly"
                         )
     else:
         if parent_manifest is not None:
@@ -879,11 +1017,17 @@ def _validate_authority_and_lineage(
     _validate_expected_cell_blocks(manifest, expected_cells, errors)
     required_new_seeds = kind_policy.get("required_new_seeds")
     if isinstance(required_new_seeds, list):
-        observed_stage_seeds = {coordinate.seed for coordinate in expected_cells}
+        parent_cells = (
+            _expected_cell_records(parent_manifest, errors)[0]
+            if parent_manifest is not None
+            else set()
+        )
+        new_cells = expected_cells - parent_cells
+        observed_stage_seeds = {coordinate.seed for coordinate in new_cells}
         required_stage_seeds = {int(seed) for seed in required_new_seeds}
         if observed_stage_seeds != required_stage_seeds:
             errors.append(
-                f"{kind} expected_cells seeds must equal the registered fresh stage "
+                f"{kind} new expected_cells seeds must equal the registered fresh stage "
                 f"seeds {sorted(required_stage_seeds)}"
             )
     if kind == "initial_bound_p1_r0":
@@ -897,6 +1041,14 @@ def _validate_authority_and_lineage(
         is True
     ):
         _validate_adaptive_extension(parent_manifest, manifest, errors)
+    if kind == "additional_development_stage" and parent_manifest is not None:
+        parent_cells, _ = _expected_cell_records(parent_manifest, errors)
+        expected_new_cells = _registered_p2_coordinates(parent_manifest, errors)
+        if expected_cells - parent_cells != expected_new_cells:
+            errors.append(
+                "P2 new expected_cells do not equal the sealed P1 selected-eta/"
+                "immediate-neighbor blocks on both registered seeds"
+            )
     registry_ids = set(
         _mapping_or_empty(_mapping_or_empty(manifest.get("frozen")).get("cell_command_hashes"))
     )
@@ -2267,8 +2419,14 @@ def validate_and_summarize(
         results = []
     status = manifest.get("status")
     if status == "bound_launch_authority":
-        if results:
+        cumulative_bound = kind in {
+            "adaptive_bracket_round",
+            "additional_development_stage",
+        }
+        if results and not cumulative_bound:
             errors.append("bound_launch_authority must have an empty results array")
+        if cumulative_bound and parent_manifest is None:
+            errors.append("cumulative bound authority requires its exact sealed parent")
         if claim_level != "integrity":
             errors.append("unexecuted launch authority supports integrity validation only")
         if errors:
@@ -2284,7 +2442,7 @@ def validate_and_summarize(
             "confirmatory_eligible": False,
             "expected_cell_count": len(expected),
             "final_cell_count": 0,
-            "attempt_count": 0,
+            "attempt_count": len(results),
             "warnings": [
                 "This validates launch authority only; it contains no scientific outcomes."
             ],

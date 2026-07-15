@@ -53,6 +53,14 @@ class PhaseMapError(RuntimeError):
     pass
 
 
+class WorkEvidenceError(PhaseMapError):
+    """A cell lacks positive evidence for a completed training workload."""
+
+    def __init__(self, message: str, *, cell_id: str | None = None):
+        super().__init__(message)
+        self.cell_id = cell_id
+
+
 def verify_authoritative_prereg(args: argparse.Namespace) -> dict[str, Any]:
     expected_path = (REPO_ROOT / AUTHORITATIVE_PREREG_PATH).resolve()
     if args.prereg_template.resolve() != expected_path:
@@ -113,10 +121,11 @@ def enforce_stage_design(args: argparse.Namespace, template: dict[str, Any]) -> 
             )
     if sorted(args.mu) != [0.0, 0.5, 0.9]:
         raise PhaseMapError("every authorized stage requires mu={0,.5,.9}")
+    seed_pairs = stage_seed_pairs(args)
     if args.study_phase in ("p0a_canary", "p0b_canary"):
         stage_name = "p0a" if args.study_phase == "p0a_canary" else "p0b"
         stage = template["canary_stages"][stage_name]
-        if args.seed != stage["shuffle_seed"] or args.training_seed != stage["training_seed"]:
+        if seed_pairs != [(stage["shuffle_seed"], stage["training_seed"])]:
             raise PhaseMapError(f"{stage_name} seed pair differs from authority")
         if (
             args.h != [stage["h"]]
@@ -167,8 +176,13 @@ def enforce_stage_design(args: argparse.Namespace, template: dict[str, Any]) -> 
             sorted(args.h) != grid["h"]
             or sorted(args.mu) != grid["mu"]
             or sorted(args.eta) != grid["eta"]
-            or args.seed != grid["seeds"][0]
-            or args.training_seed != template["seed_pairs"][str(args.seed)]
+            or seed_pairs
+            != [
+                (
+                    grid["seeds"][0],
+                    template["seed_pairs"][str(grid["seeds"][0])],
+                )
+            ]
             or args.token_budget != protocol["token_budget"]
         ):
             raise PhaseMapError("P1-R0 grid or seed pair differs from authority")
@@ -186,10 +200,62 @@ def enforce_stage_design(args: argparse.Namespace, template: dict[str, Any]) -> 
         if args.require_distinct_learner_gpu_uuids:
             raise PhaseMapError("P1 may not inherit the non-evidence UUID canary flag")
         return "initial_bound_p1_r0"
+    if args.study_phase in {"p1_adaptive", "p1_adaptive_bracket"}:
+        if (
+            seed_pairs != [(347, 347347)]
+            or args.token_budget != protocol["token_budget"]
+        ):
+            raise PhaseMapError("adaptive P1 must remain on seed 347 and frozen work")
+        if args.gpu_slots != 4 or args.resource_class != "a2-highgpu-4g":
+            raise PhaseMapError(
+                "adaptive P1 requires Spot a2-highgpu-4g and gpu_slots=4"
+            )
+        if not args.parent_manifest or not args.expected_parent_manifest_hash:
+            raise PhaseMapError("adaptive P1 requires the exact sealed P1 parent")
+        if args.parent_replay_report or args.expected_parent_replay_report_hash:
+            raise PhaseMapError("adaptive P1 cites its sealed P1 parent, not a replay")
+        if args.require_distinct_learner_gpu_uuids:
+            raise PhaseMapError(
+                "adaptive P1 may not inherit the non-evidence UUID canary flag"
+            )
+        return "adaptive_bracket_round"
+    if getattr(args, "study_phase", None) == "p2_additional_development":
+        required_seeds = template["stage_seeds"]["p2_additional_development"]
+        required_pairs = [(seed, int(f"{seed}{seed}")) for seed in required_seeds]
+        if (
+            sorted(args.h) != template["expected_grid"]["h"]
+            or seed_pairs != required_pairs
+            or args.token_budget != protocol["token_budget"]
+        ):
+            raise PhaseMapError("P2 grid, work, or two registered seed pairs differ")
+        if args.gpu_slots != 4 or args.resource_class != "a2-highgpu-4g":
+            raise PhaseMapError("P2 requires Spot a2-highgpu-4g and gpu_slots=4")
+        if not args.parent_manifest or not args.expected_parent_manifest_hash:
+            raise PhaseMapError("P2 requires the exact sealed passing P1 parent")
+        if args.parent_replay_report or args.expected_parent_replay_report_hash:
+            raise PhaseMapError("P2 cites its sealed P1 parent, not a canary replay")
+        if args.require_distinct_learner_gpu_uuids:
+            raise PhaseMapError("P2 may not inherit the non-evidence UUID canary flag")
+        return "additional_development_stage"
     raise PhaseMapError(
-        "this runner supports only authority-bound P0 and initial P1-R0; "
-        "later stages require a registered cumulative parent-lineage builder"
+        "this runner supports authority-bound P0, initial P1-R0, and registered "
+        "P1 adaptive/P2 cumulative development; P3 requires separate "
+        "train-then-audit tooling"
     )
+
+
+def stage_seed_pairs(args: argparse.Namespace) -> list[tuple[int, int]]:
+    """Return the ordered seed pairs declared by one stage invocation."""
+    extra_seeds = list(getattr(args, "additional_seed", []))
+    extra_training = list(getattr(args, "additional_training_seed", []))
+    if len(extra_seeds) != len(extra_training):
+        raise PhaseMapError(
+            "--additional-seed and --additional-training-seed counts must match"
+        )
+    pairs = [(args.seed, args.training_seed), *zip(extra_seeds, extra_training)]
+    if len({seed for seed, _training in pairs}) != len(pairs):
+        raise PhaseMapError("stage seed pairs contain a duplicate shuffle seed")
+    return pairs
 
 
 def json_pointer(value: Any, pointer: str) -> Any:
@@ -218,6 +284,262 @@ def load_json_object(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
+def final_result_rows(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return one highest-attempt result per expected cell, fail closed."""
+    expected = manifest.get("expected_cells")
+    results = manifest.get("results")
+    if not isinstance(expected, list) or not expected or not isinstance(results, list):
+        raise PhaseMapError("parent lacks expected_cells or retained result rows")
+    expected_ids = []
+    for cell in expected:
+        if not isinstance(cell, dict) or not isinstance(cell.get("cell_id"), str):
+            raise PhaseMapError("parent expected_cells contains a malformed cell")
+        expected_ids.append(cell["cell_id"])
+    if len(set(expected_ids)) != len(expected_ids):
+        raise PhaseMapError("parent expected_cells contains duplicate cell IDs")
+    final: dict[str, dict[str, Any]] = {}
+    for row in results:
+        if not isinstance(row, dict) or not isinstance(row.get("cell_id"), str):
+            raise PhaseMapError("parent results contains a malformed row")
+        attempt = row.get("attempt")
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt <= 0:
+            raise PhaseMapError("parent result lacks a positive integer attempt")
+        cell = row["cell_id"]
+        if cell not in expected_ids:
+            raise PhaseMapError("parent contains an unexpected result cell")
+        if cell not in final or attempt > int(final[cell]["attempt"]):
+            final[cell] = row
+    if set(final) != set(expected_ids):
+        raise PhaseMapError("parent does not resolve every expected cell")
+    return final
+
+
+def verify_parent_hash_chain(manifests: Sequence[dict[str, Any]]) -> None:
+    """Verify an oldest-to-newest canonical parent-hash chain.
+
+    Cumulative P1/P2 hops additionally preserve parent expected cells and result
+    rows as exact ordered prefixes.  That makes row mutation and reordering
+    detectable even when every manifest is otherwise valid JSON.
+    """
+    if len(manifests) < 2:
+        raise PhaseMapError("parent hash chain requires at least two manifests")
+    cumulative_kinds = {"adaptive_bracket_round", "additional_development_stage"}
+    for index, (parent, child) in enumerate(zip(manifests, manifests[1:]), 1):
+        if parent.get("status") != "sealed_results":
+            raise PhaseMapError(f"lineage hop {index} parent is not sealed_results")
+        lineage = child.get("lineage")
+        if not isinstance(lineage, dict):
+            raise PhaseMapError(f"lineage hop {index} lacks lineage metadata")
+        expected_hash = sha256_bytes(canonical_json(parent))
+        if lineage.get("parent_manifest_sha256") != expected_hash:
+            raise PhaseMapError(f"lineage hop {index} parent canonical hash mismatch")
+        if lineage.get("descendant_kind") in cumulative_kinds:
+            parent_cells = parent.get("expected_cells")
+            child_cells = child.get("expected_cells")
+            parent_rows = parent.get("results")
+            child_rows = child.get("results")
+            if (
+                not isinstance(parent_cells, list)
+                or not isinstance(child_cells, list)
+                or child_cells[: len(parent_cells)] != parent_cells
+            ):
+                raise PhaseMapError(
+                    f"lineage hop {index} mutates or reorders parent expected cells"
+                )
+            if (
+                not isinstance(parent_rows, list)
+                or not isinstance(child_rows, list)
+                or child_rows[: len(parent_rows)] != parent_rows
+            ):
+                raise PhaseMapError(
+                    f"lineage hop {index} mutates or reorders parent result rows"
+                )
+
+
+def p1_selected_eta_neighborhoods(
+    parent: dict[str, Any], template: dict[str, Any]
+) -> dict[tuple[int, float], tuple[float, float, float]]:
+    """Derive the registered P1 selected eta and immediate bracket neighbors."""
+    validate_campaign_work_evidence(parent)
+    try:
+        from scripts.validate_phase_map import ManifestError, validate_and_summarize
+
+        validate_and_summarize(
+            parent,
+            claim_level="development",
+            require_bracketed=True,
+            _skip_authority_for_tests=True,
+        )
+    except (ImportError, ManifestError) as exc:
+        raise PhaseMapError(f"P1 parent fails complete development validation: {exc}") from exc
+
+    cells = {
+        str(cell["cell_id"]): cell
+        for cell in parent["expected_cells"]
+        if isinstance(cell, dict) and isinstance(cell.get("cell_id"), str)
+    }
+    final = final_result_rows(parent)
+    curves: dict[tuple[int, float], list[tuple[float, float]]] = defaultdict(list)
+    for cell_id, cell in cells.items():
+        seed = int(cell.get("seed", -1))
+        if seed != 347:
+            raise PhaseMapError("P1 parent contains a non-development seed before P2")
+        row = final[cell_id]
+        loss = row.get("loss")
+        if (
+            row.get("status") != "COMPLETED"
+            or isinstance(loss, bool)
+            or not isinstance(loss, (int, float))
+            or not math.isfinite(float(loss))
+        ):
+            raise PhaseMapError("P1 parent contains a non-completed or nonfinite cell")
+        curves[(int(cell["h"]), float(cell["mu"]))].append(
+            (float(cell["eta"]), float(loss))
+        )
+
+    required_curves = {
+        (int(h), float(mu))
+        for h in template["expected_grid"]["h"]
+        for mu in template["expected_grid"]["mu"]
+    }
+    if set(curves) != required_curves:
+        raise PhaseMapError("P1 parent does not contain exactly nine LR curves")
+    neighborhoods: dict[tuple[int, float], tuple[float, float, float]] = {}
+    tuned: dict[tuple[int, float], float] = {}
+    for key, points in curves.items():
+        points.sort(key=lambda pair: pair[0])
+        etas = [eta for eta, _loss in points]
+        if len(etas) != len(set(etas)):
+            raise PhaseMapError(f"P1 curve {key} repeats an eta")
+        selected_eta, selected_loss = min(points, key=lambda pair: (pair[1], pair[0]))
+        selected_index = etas.index(selected_eta)
+        if selected_index == 0 or selected_index == len(etas) - 1:
+            raise PhaseMapError(f"P1 curve {key} is not bracketed")
+        lower_loss = points[selected_index - 1][1]
+        upper_loss = points[selected_index + 1][1]
+        if not (lower_loss > selected_loss and upper_loss > selected_loss):
+            raise PhaseMapError(f"P1 curve {key} lacks two worse immediate neighbors")
+        neighborhoods[key] = (
+            etas[selected_index - 1],
+            selected_eta,
+            etas[selected_index + 1],
+        )
+        tuned[key] = selected_loss
+
+    d_short = tuned[(16, 0.9)] - tuned[(16, 0.0)]
+    d_long = min(tuned[(256, 0.5)], tuned[(256, 0.9)]) - tuned[(256, 0.0)]
+    gate = template["go_kill"]
+    if d_short < float(gate["d_short_min"]) or d_long > float(gate["d_long_max"]):
+        raise PhaseMapError(
+            f"P1 parent fails registered P2 gate: D_short={d_short}, D_long={d_long}"
+        )
+    return neighborhoods
+
+
+def adaptive_eta_blocks(
+    parent: dict[str, Any], template: dict[str, Any]
+) -> list[tuple[int, float]]:
+    """Derive exactly the next registered Section 6 P1 block suffix."""
+    validate_campaign_work_evidence(parent)
+    try:
+        from scripts.validate_phase_map import ManifestError, validate_and_summarize
+
+        validate_and_summarize(
+            parent,
+            claim_level="development",
+            _skip_authority_for_tests=True,
+        )
+    except (ImportError, ManifestError) as exc:
+        raise PhaseMapError(f"adaptive P1 parent fails validation: {exc}") from exc
+    if parent.get("lineage", {}).get("descendant_kind") not in {
+        "initial_bound_p1_r0",
+        "adaptive_bracket_round",
+    }:
+        raise PhaseMapError("adaptive P1 parent must be an initial/adaptive P1 manifest")
+
+    final = final_result_rows(parent)
+    cells = {
+        str(cell["cell_id"]): cell
+        for cell in parent["expected_cells"]
+        if isinstance(cell, dict) and isinstance(cell.get("cell_id"), str)
+    }
+    curves: dict[tuple[int, float], list[tuple[float, float]]] = defaultdict(list)
+    for cell_id, cell in cells.items():
+        if int(cell.get("seed", -1)) != 347:
+            raise PhaseMapError("adaptive P1 parent contains a later seed")
+        row = final[cell_id]
+        loss = row.get("loss")
+        if (
+            row.get("status") != "COMPLETED"
+            or isinstance(loss, bool)
+            or not isinstance(loss, (int, float))
+            or not math.isfinite(float(loss))
+        ):
+            raise PhaseMapError("adaptive P1 parent has unresolved/nonfinite work")
+        curves[(int(cell["h"]), float(cell["mu"]))].append(
+            (float(cell["eta"]), float(loss))
+        )
+
+    adaptive = template["adaptive_bracket"]
+    initial = [float(value) for value in adaptive["initial_eta"]]
+    downward = [float(value) for value in adaptive["downward_extension"]]
+    upward = [float(value) for value in adaptive["upward_extension"]]
+    boundary_lattice = {*initial, *downward, *upward}
+    by_h: dict[int, set[float]] = defaultdict(set)
+    for (h, _mu), points in curves.items():
+        points.sort(key=lambda pair: pair[0])
+        etas = [eta for eta, _loss in points]
+        best_eta, _best_loss = min(points, key=lambda pair: (pair[1], pair[0]))
+        best_index = etas.index(best_eta)
+        candidates: list[float] = []
+        if best_index == 0:
+            chain = [min(initial), *downward]
+            for index, eta in enumerate(chain[:-1]):
+                if math.isclose(best_eta, eta, rel_tol=0.0, abs_tol=1e-15):
+                    candidates = [chain[index + 1]]
+                    break
+        elif best_index == len(etas) - 1:
+            chain = [max(initial), *upward]
+            for index, eta in enumerate(chain[:-1]):
+                if math.isclose(best_eta, eta, rel_tol=0.0, abs_tol=1e-15):
+                    candidates = [chain[index + 1]]
+                    break
+        elif not any(
+            not any(
+                math.isclose(eta, base, rel_tol=0.0, abs_tol=1e-15)
+                for base in boundary_lattice
+            )
+            for eta in etas
+        ):
+            candidates = [
+                math.sqrt(etas[best_index - 1] * best_eta),
+                math.sqrt(best_eta * etas[best_index + 1]),
+            ]
+        for eta in candidates:
+            if not any(
+                math.isclose(eta, sampled, rel_tol=0.0, abs_tol=1e-15)
+                for sampled in etas
+            ):
+                by_h[h].add(eta)
+    blocks = [(h, eta) for h in sorted(by_h) for eta in sorted(by_h[h])]
+    if not blocks:
+        raise PhaseMapError("sealed P1 parent authorizes no further adaptive eta block")
+    return blocks
+
+
+def p2_eta_blocks(
+    parent: dict[str, Any], template: dict[str, Any]
+) -> list[tuple[int, float]]:
+    neighborhoods = p1_selected_eta_neighborhoods(parent, template)
+    by_h: dict[int, set[float]] = defaultdict(set)
+    for (h, _mu), etas in neighborhoods.items():
+        by_h[h].update(etas)
+    blocks = [(h, eta) for h in sorted(by_h) for eta in sorted(by_h[h])]
+    if not 9 <= len(blocks) <= 27:
+        raise PhaseMapError("registered P2 eta-block union must contain 9..27 blocks")
+    return blocks
+
+
 def validate_parent_and_replay(
     args: argparse.Namespace,
     template: dict[str, Any],
@@ -235,10 +557,8 @@ def validate_parent_and_replay(
     ]
     if not policy.get("parent_required"):
         return None, None
-    if args.parent_manifest is None or args.parent_replay_report is None:
-        raise PhaseMapError(
-            f"{descendant_kind} requires parent manifest and replay report paths"
-        )
+    if args.parent_manifest is None:
+        raise PhaseMapError(f"{descendant_kind} requires a parent manifest path")
 
     parent = load_json_object(args.parent_manifest, "parent phase-map manifest")
     parent_hash = sha256_bytes(canonical_json(parent))
@@ -252,10 +572,9 @@ def validate_parent_and_replay(
         raise PhaseMapError("parent is not a sealed-results manifest")
     lineage = parent.get("lineage")
     required_parent_kind = policy.get("parent_kind_required")
-    if (
-        not isinstance(lineage, dict)
-        or lineage.get("descendant_kind") != required_parent_kind
-    ):
+    if not isinstance(lineage, dict):
+        raise PhaseMapError("parent lacks registered lineage metadata")
+    if required_parent_kind and lineage.get("descendant_kind") != required_parent_kind:
         raise PhaseMapError(
             f"parent must have descendant_kind={required_parent_kind!r}"
         )
@@ -270,37 +589,35 @@ def validate_parent_and_replay(
         if template.get("canary_stages", {}).get("evidence") is not False:
             raise PhaseMapError("canary authority unexpectedly permits evidence")
     parent_cells = parent.get("expected_cells")
-    parent_rows = parent.get("results")
-    final_parent_rows: dict[str, dict[str, Any]] = {}
-    if isinstance(parent_rows, list):
-        for row in parent_rows:
-            cell_id = str(row.get("cell_id", "")) if isinstance(row, dict) else ""
-            if cell_id and (
-                cell_id not in final_parent_rows
-                or int(row.get("attempt", 0))
-                > int(final_parent_rows[cell_id].get("attempt", 0))
-            ):
-                final_parent_rows[cell_id] = row
-    if (
+    final_parent_rows = final_result_rows(parent)
+    if any(row.get("status") != "COMPLETED" for row in final_parent_rows.values()):
+        raise PhaseMapError("parent does not contain completed finite work for every cell")
+    validate_campaign_work_evidence(parent)
+    if required_parent_kind in ("p0a_single_gpu_bound", "p0b_four_gpu_bound") and (
         not isinstance(parent_cells, list)
         or len(parent_cells) != 3
         or {float(cell.get("mu")) for cell in parent_cells} != {0.0, 0.5, 0.9}
-        or not isinstance(parent_rows, list)
-        or len(parent_rows) < 3
-        or {str(row.get("cell_id")) for row in parent_rows}
-        != {str(cell.get("cell_id")) for cell in parent_cells}
-        or any(
-            row.get("status") not in ("COMPLETED", "DIVERGED", "INFRA_FAILURE")
-            for row in parent_rows
-        )
-        or set(final_parent_rows)
-        != {str(cell.get("cell_id")) for cell in parent_cells}
-        or any(
-            row.get("status") not in ("COMPLETED", "DIVERGED")
-            for row in final_parent_rows.values()
-        )
     ):
-        raise PhaseMapError("parent does not contain one resolved full-mu block")
+        raise PhaseMapError("canary parent does not contain one resolved full-mu block")
+    if descendant_kind == "additional_development_stage":
+        if lineage.get("descendant_kind") not in {
+            "initial_bound_p1_r0",
+            "adaptive_bracket_round",
+        }:
+            raise PhaseMapError("P2 parent must be a sealed P1 cumulative manifest")
+        p2_eta_blocks(parent, template)
+    if descendant_kind == "adaptive_bracket_round":
+        if lineage.get("descendant_kind") not in {
+            "initial_bound_p1_r0",
+            "adaptive_bracket_round",
+        }:
+            raise PhaseMapError("adaptive parent must be a sealed P1 manifest")
+        adaptive_eta_blocks(parent, template)
+
+    if not policy.get("parent_replay_pass_report_required"):
+        return parent, None
+    if args.parent_replay_report is None:
+        raise PhaseMapError(f"{descendant_kind} requires a parent replay report")
 
     report_raw_hash = sha256_file(args.parent_replay_report)
     expected_report_hash = require_sha256(
@@ -486,6 +803,28 @@ def parse_floats(value: str) -> list[float]:
     return result
 
 
+def parse_seed_sha256(value: str) -> tuple[int, str]:
+    raw_seed, separator, digest = value.partition("=")
+    try:
+        seed = int(raw_seed)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected SEED=SHA256") from exc
+    if not separator or seed <= 0 or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise argparse.ArgumentTypeError("expected positive SEED=lowercase-64-hex-SHA256")
+    return seed, digest
+
+
+def seed_hash_map(
+    values: Sequence[tuple[int, str]], label: str
+) -> dict[int, str]:
+    output: dict[int, str] = {}
+    for seed, digest in values:
+        if seed in output:
+            raise PhaseMapError(f"{label} repeats seed {seed}")
+        output[seed] = require_sha256(digest, label)
+    return output
+
+
 def slug_float(value: float) -> str:
     return format(value, ".12g").replace(".", "p")
 
@@ -581,10 +920,14 @@ def compare_command(
     h: int,
     mu: float,
     eta: float,
+    seed: int | None = None,
+    training_seed: int | None = None,
 ) -> list[str]:
+    seed = args.seed if seed is None else seed
+    training_seed = args.training_seed if training_seed is None else training_seed
     outer_steps = args.token_budget // (h * args.seq_len)
     learner_max_steps = exact_learner_max_steps(args)
-    frozen_split = args.run_dir / "frozen-eval" / f"seed-{args.seed}" / "materialized"
+    frozen_split = args.run_dir / "frozen-eval" / f"seed-{seed}" / "materialized"
     command = [
         args.python_executable,
         str(args.command_repo_root / "scripts" / "compare_diloco.py"),
@@ -613,11 +956,11 @@ def compare_command(
         "--max-rows",
         str(args.train_rows),
         "--shuffle-rows-seed",
-        str(args.seed),
+        str(seed),
         "--eval-split-seed",
         str(args.eval_split_seed),
         "--training-seed",
-        str(args.training_seed),
+        str(training_seed),
         "--device",
         args.device,
         "--gpu-slots",
@@ -706,32 +1049,87 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         raise PhaseMapError("every randomized block requires a live mu=0 control")
     if args.token_budget % args.seq_len:
         raise PhaseMapError("token budget must be divisible by seq_len")
-    exact_learner_max_steps(args)
-    blocks = [(h, eta) for h in sorted(args.h) for eta in sorted(args.eta)]
+    learner_steps = exact_learner_max_steps(args)
+    seed_pairs = stage_seed_pairs(args)
+    study_phase = getattr(args, "study_phase", None)
+    if study_phase in {"p1_adaptive", "p1_adaptive_bracket"}:
+        template = verify_authoritative_prereg(args)
+        parent = load_json_object(args.parent_manifest, "parent phase-map manifest")
+        expected_parent_hash = require_sha256(
+            args.expected_parent_manifest_hash,
+            "--expected-parent-manifest-hash",
+        )
+        if sha256_bytes(canonical_json(parent)) != expected_parent_hash:
+            raise PhaseMapError("parent canonical hash differs from frozen authority")
+        eta_blocks = adaptive_eta_blocks(parent, template)
+        if sorted(set(args.h)) != sorted({h for h, _eta in eta_blocks}):
+            raise PhaseMapError("adaptive P1 --h must exactly declare the next blocks")
+        if sorted(set(args.eta)) != sorted({eta for _h, eta in eta_blocks}):
+            raise PhaseMapError("adaptive P1 --eta must exactly declare the next blocks")
+        if seed_pairs != [(347, 347347)]:
+            raise PhaseMapError("adaptive P1 may use only seed pair 347/347347")
+        blocks = [(h, eta, 347, 347347) for h, eta in eta_blocks]
+    elif study_phase == "p2_additional_development":
+        template = verify_authoritative_prereg(args)
+        parent = load_json_object(args.parent_manifest, "parent phase-map manifest")
+        expected_parent_hash = require_sha256(
+            args.expected_parent_manifest_hash,
+            "--expected-parent-manifest-hash",
+        )
+        if sha256_bytes(canonical_json(parent)) != expected_parent_hash:
+            raise PhaseMapError("parent canonical hash differs from frozen authority")
+        eta_blocks = p2_eta_blocks(parent, template)
+        declared_etas = sorted(set(args.eta))
+        derived_etas = sorted({eta for _h, eta in eta_blocks})
+        if declared_etas != derived_etas:
+            raise PhaseMapError(
+                "P2 --eta must exactly declare the sealed P1 selected-neighbor union"
+            )
+        blocks = [
+            (h, eta, seed, training_seed)
+            for seed, training_seed in seed_pairs
+            for h, eta in eta_blocks
+        ]
+    else:
+        if len(seed_pairs) != 1:
+            raise PhaseMapError("only registered P2 may bind multiple stage seeds")
+        seed, training_seed = seed_pairs[0]
+        blocks = [
+            (h, eta, seed, training_seed)
+            for h in sorted(args.h)
+            for eta in sorted(args.eta)
+        ]
     rng = random.Random(args.order_seed)
     rng.shuffle(blocks)
     cells = []
     order_index = 0
-    for block_index, (h, eta) in enumerate(blocks):
+    for block_index, (h, eta, seed, training_seed) in enumerate(blocks):
         outer_steps = args.token_budget // (h * args.seq_len)
         if args.token_budget % (h * args.seq_len):
             raise PhaseMapError(f"token budget is not exact for H={h}")
         if outer_steps % 4:
             raise PhaseMapError(f"outer step count must be divisible by fragments: H={h}")
-        block_id = f"{args.study_id}-block-h{h}-eta{slug_float(eta)}-s{args.seed}"
+        block_id = f"{args.study_id}-block-h{h}-eta{slug_float(eta)}-s{seed}"
         block_mu = list(args.mu)
         rng.shuffle(block_mu)
-        control_id = cell_id(args.study_id, h, 0.0, eta, args.seed)
+        control_id = cell_id(args.study_id, h, 0.0, eta, seed)
         for within_block_index, mu in enumerate(block_mu):
-            command = compare_command(args, h=h, mu=mu, eta=eta)
+            command = compare_command(
+                args,
+                h=h,
+                mu=mu,
+                eta=eta,
+                seed=seed,
+                training_seed=training_seed,
+            )
             cells.append(
                 {
-                    "cell_id": cell_id(args.study_id, h, mu, eta, args.seed),
+                    "cell_id": cell_id(args.study_id, h, mu, eta, seed),
                     "H": h,
                     "mu": mu,
                     "eta": eta,
-                    "seed": args.seed,
-                    "training_seed": args.training_seed,
+                    "seed": seed,
+                    "training_seed": training_seed,
                     "command_hash": sha256_bytes(canonical_json(command)),
                     "paired_control_id": control_id,
                     "resource_class": args.resource_class,
@@ -739,6 +1137,8 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
                         "tokens": args.token_budget,
                         "microsteps": args.token_budget // args.seq_len,
                         "outer_steps": outer_steps,
+                        "learner_count": 4,
+                        "learner_steps_per_learner": learner_steps,
                     },
                     "randomization": {
                         "block_id": block_id,
@@ -755,6 +1155,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "study_id": args.study_id,
         "seed": args.seed,
         "training_seed": args.training_seed,
+        "seed_pairs": {str(seed): training for seed, training in seed_pairs},
         "order_seed": args.order_seed,
         "block_fields": ["H", "eta", "seed"],
         "within_block_field": "mu",
@@ -792,6 +1193,8 @@ def build_bound_manifest(
     audit_access_policy_hash: str,
     train_pool_source_indices_hash: str,
     train_source_indices_hash: str,
+    additional_train_rows_hashes: dict[int, str] | None = None,
+    additional_train_source_indices_hashes: dict[int, str] | None = None,
 ) -> dict[str, Any]:
     template = verify_authoritative_prereg(args)
     descendant_kind = enforce_stage_design(args, template)
@@ -803,25 +1206,20 @@ def build_bound_manifest(
     parent, _parent_replay = validate_parent_and_replay(
         args, template, descendant_kind
     )
-    # P0b is a registered hardware-only descendant of P0a.  Building it from
-    # that exact sealed parent makes every inherited hash/work field immutable
-    # by construction.  P0a and the initial P1 binding are compared directly
-    # with the authoritative preregistration template.
+    cumulative = descendant_kind in {
+        "adaptive_bracket_round",
+        "additional_development_stage",
+    }
+    # P0b and cumulative descendants are constructed from the exact parent so
+    # inherited fields cannot be accidentally regenerated or normalized.
     manifest = deepcopy(
-        parent if descendant_kind == "p0b_four_gpu_bound" else template
+        parent if descendant_kind == "p0b_four_gpu_bound" or cumulative else template
     )
     manifest["status"] = "bound_launch_authority"
     manifest["study_id"] = args.study_id
     manifest["mode"] = "development"
     manifest["min_confirmatory_seeds"] = args.minimum_confirmatory_seeds
-    manifest["expected_grid"] = {
-        "h": sorted(args.h),
-        "mu": sorted(args.mu),
-        "eta": sorted(args.eta),
-        "seeds": [args.seed],
-    }
-    manifest["seed_pairs"] = {str(args.seed): args.training_seed}
-    manifest["expected_cells"] = [
+    new_expected_cells = [
         {
             "cell_id": cell["cell_id"],
             "h": cell["H"],
@@ -832,13 +1230,85 @@ def build_bound_manifest(
             "block_id": cell["randomization"]["block_id"],
             "paired_control_id": cell["paired_control_id"],
             "command_hash": cell["command_hash"],
+            "expected_learner_count": cell["target_work"]["learner_count"],
+            "expected_learner_steps": cell["target_work"][
+                "learner_steps_per_learner"
+            ],
             "normalized_workload_command_hash": sha256_bytes(
                 canonical_json(normalized_workload_command(cell["command"]))
             ),
         }
         for cell in plan["cells"]
     ]
-    command_hash = campaign_command_hash(plan)
+    if cumulative:
+        assert parent is not None
+        parent_cells = parent.get("expected_cells")
+        if not isinstance(parent_cells, list):
+            raise PhaseMapError("cumulative parent expected_cells must be an array")
+        old_ids = {
+            str(cell.get("cell_id")) for cell in parent_cells if isinstance(cell, dict)
+        }
+        new_ids = {cell["cell_id"] for cell in new_expected_cells}
+        if old_ids & new_ids:
+            raise PhaseMapError("cumulative descendant repeats a parent cell ID")
+        manifest["expected_cells"] = deepcopy(parent_cells) + new_expected_cells
+        manifest["seed_pairs"].update(
+            {str(seed): training for seed, training in stage_seed_pairs(args)}
+        )
+        all_coordinates = manifest["expected_cells"]
+        manifest["expected_grid"] = {
+            "h": sorted({int(cell["h"]) for cell in all_coordinates}),
+            "mu": sorted({float(cell["mu"]) for cell in all_coordinates}),
+            "eta": sorted({float(cell["eta"]) for cell in all_coordinates}),
+            "seeds": sorted({int(cell["seed"]) for cell in all_coordinates}),
+        }
+    else:
+        manifest["expected_grid"] = {
+            "h": sorted(args.h),
+            "mu": sorted(args.mu),
+            "eta": sorted(args.eta),
+            "seeds": [args.seed],
+        }
+        manifest["seed_pairs"] = {str(args.seed): args.training_seed}
+        manifest["expected_cells"] = new_expected_cells
+
+    supplied_train_rows = {args.seed: train_rows_hash}
+    supplied_train_rows.update(additional_train_rows_hashes or {})
+    supplied_train_indices = {args.seed: train_source_indices_hash}
+    supplied_train_indices.update(additional_train_source_indices_hashes or {})
+    required_new_seeds = {cell["seed"] for cell in plan["cells"]}
+    if set(supplied_train_rows) != required_new_seeds:
+        raise PhaseMapError("train-row hashes must cover exactly the new stage seeds")
+    if set(supplied_train_indices) != required_new_seeds:
+        raise PhaseMapError("train-index hashes must cover exactly the new stage seeds")
+    train_rows_by_seed = (
+        deepcopy(parent["frozen"]["train_rows_hashes"]) if cumulative else {}
+    )
+    train_indices_by_seed = (
+        deepcopy(parent["frozen"]["train_source_indices_hashes"])
+        if cumulative
+        else {}
+    )
+    train_rows_by_seed.update(
+        {str(seed): digest for seed, digest in supplied_train_rows.items()}
+    )
+    train_indices_by_seed.update(
+        {str(seed): digest for seed, digest in supplied_train_indices.items()}
+    )
+    cell_command_hashes = (
+        deepcopy(parent["frozen"]["cell_command_hashes"]) if cumulative else {}
+    )
+    cell_command_hashes.update(
+        {cell["cell_id"]: cell["command_hash"] for cell in plan["cells"]}
+    )
+    command_hash = sha256_bytes(
+        canonical_json(
+            [
+                {"cell_id": cell["cell_id"], "command_hash": cell_command_hashes[cell["cell_id"]]}
+                for cell in manifest["expected_cells"]
+            ]
+        )
+    )
     manifest["frozen"].update(
         {
             "git_commit": args.git_commit,
@@ -862,14 +1332,10 @@ def build_bound_manifest(
             "audit_eval_source_indices_hash": audit_eval_source_indices_hash,
             "audit_access_policy_hash": audit_access_policy_hash,
             "train_pool_source_indices_hash": train_pool_source_indices_hash,
-            "train_source_indices_hashes": {
-                str(args.seed): train_source_indices_hash
-            },
-            "train_rows_hashes": {str(args.seed): train_rows_hash},
+            "train_source_indices_hashes": train_indices_by_seed,
+            "train_rows_hashes": train_rows_by_seed,
             "command_hash": command_hash,
-            "cell_command_hashes": {
-                cell["cell_id"]: cell["command_hash"] for cell in plan["cells"]
-            },
+            "cell_command_hashes": cell_command_hashes,
             "randomization_plan_hash": plan["randomization_plan_hash"],
         }
     )
@@ -946,25 +1412,88 @@ def build_bound_manifest(
                     "--expected-parent-manifest-hash",
                 )
             ),
-            "parent_replay_report_sha256": (
-                None
-                if descendant_kind == "p0a_single_gpu_bound"
-                else require_sha256(
-                    args.expected_parent_replay_report_hash,
-                    "--expected-parent-replay-report-hash",
-                )
-            ),
             "descendant_kind": descendant_kind,
         }
     )
-    manifest["results"] = []
+    if descendant_kind == "p0a_single_gpu_bound":
+        manifest["lineage"]["parent_replay_report_sha256"] = None
+    elif descendant_kind in {"p0b_four_gpu_bound", "initial_bound_p1_r0"}:
+        manifest["lineage"]["parent_replay_report_sha256"] = require_sha256(
+            args.expected_parent_replay_report_hash,
+            "--expected-parent-replay-report-hash",
+        )
+    manifest["results"] = deepcopy(parent["results"]) if cumulative else []
     validate_authorized_template_diff(
         template,
         manifest,
         descendant_kind,
-        baseline=parent if descendant_kind == "p0b_four_gpu_bound" else None,
+        baseline=(
+            parent
+            if descendant_kind == "p0b_four_gpu_bound" or cumulative
+            else None
+        ),
     )
     validate_parent_equality(template, manifest, parent, descendant_kind)
+    if cumulative:
+        assert parent is not None
+        verify_parent_hash_chain([parent, manifest])
+        parent_registry = parent["frozen"]["cell_command_hashes"]
+        if any(
+            cell_command_hashes.get(cell_id) != digest
+            for cell_id, digest in parent_registry.items()
+        ):
+            raise PhaseMapError("cumulative descendant mutates a parent command hash")
+        new_blocks: dict[tuple[int, float, int], set[float]] = defaultdict(set)
+        for cell in new_expected_cells:
+            new_blocks[(cell["h"], float(cell["eta"]), cell["seed"])].add(
+                float(cell["mu"])
+            )
+        required_mu = set(template["expected_grid"]["mu"])
+        if not new_blocks or any(mu != required_mu for mu in new_blocks.values()):
+            raise PhaseMapError(
+                "every new cumulative eta point must be one complete three-mu block"
+            )
+        if descendant_kind == "additional_development_stage":
+            expected_coordinates = {
+                (h, mu, eta, seed)
+                for seed, _training in stage_seed_pairs(args)
+                for h, eta in p2_eta_blocks(parent, template)
+                for mu in required_mu
+            }
+            actual_coordinates = {
+                (
+                    int(cell["h"]),
+                    float(cell["mu"]),
+                    float(cell["eta"]),
+                    int(cell["seed"]),
+                )
+                for cell in new_expected_cells
+            }
+            if actual_coordinates != expected_coordinates:
+                raise PhaseMapError(
+                    "P2 cells must exactly equal the sealed P1 selected-neighbor "
+                    "blocks on both registered seeds"
+                )
+        if descendant_kind == "adaptive_bracket_round":
+            expected_coordinates = {
+                (h, mu, eta, 347)
+                for h, eta in adaptive_eta_blocks(parent, template)
+                for mu in required_mu
+            }
+            actual_coordinates = {
+                (
+                    int(cell["h"]),
+                    float(cell["mu"]),
+                    float(cell["eta"]),
+                    int(cell["seed"]),
+                )
+                for cell in new_expected_cells
+            }
+            if actual_coordinates != expected_coordinates:
+                raise PhaseMapError(
+                    "adaptive P1 cells must exactly equal the next registered "
+                    "boundary/midpoint block suffix"
+                )
     return manifest
 
 
@@ -975,14 +1504,15 @@ def build_schema_fixture(
     fixture = deepcopy(manifest)
     frozen = fixture["frozen"]
     protocol = fixture["protocol"]
-    rows = []
+    rows = deepcopy(fixture.get("results", []))
+    new_rows: list[dict[str, Any]] = []
     for cell in plan["cells"]:
         artifact_sha = sha256_bytes(cell["cell_id"].encode())
         h = cell["H"]
         eta = cell["eta"]
         # An interior synthetic optimum keeps validator summaries deterministic.
         loss = 2.0 + 0.01 * math.log2(eta / 0.04375) ** 2 + 0.02 * cell["mu"]
-        rows.append(
+        new_rows.append(
             {
                 "attempt_id": f"{cell['cell_id']}-attempt-1",
                 "cell_id": cell["cell_id"],
@@ -1001,6 +1531,10 @@ def build_schema_fixture(
                     "outer_steps": cell["target_work"]["outer_steps"],
                     "token_budget": protocol["token_budget"],
                     "eval_rows": protocol["development_eval_rows"],
+                    "learner_count": cell["target_work"]["learner_count"],
+                    "learner_steps_per_learner": cell["target_work"][
+                        "learner_steps_per_learner"
+                    ],
                 },
                 "observed_work": {
                     "tokens": protocol["token_budget"],
@@ -1013,6 +1547,17 @@ def build_schema_fixture(
                     "full_quorum": True,
                     "fixed_window_exact": True,
                     "version_matched_anchor_resolved": True,
+                    "learner_step_counts": {
+                        str(learner): cell["target_work"][
+                            "learner_steps_per_learner"
+                        ]
+                        for learner in range(cell["target_work"]["learner_count"])
+                    },
+                },
+                "exit_statuses": {
+                    "runner": 0,
+                    "syncer": 0,
+                    "learners": [0] * cell["target_work"]["learner_count"],
                 },
                 "git_commit": frozen["git_commit"],
                 "image_digest": frozen["image_digest"],
@@ -1083,11 +1628,12 @@ def build_schema_fixture(
                 "ended_at": "2026-07-14T13:00:00Z",
             }
         )
+    rows.extend(new_rows)
     if fixture["lineage"]["descendant_kind"] in (
         "p0a_single_gpu_bound",
         "p0b_four_gpu_bound",
     ):
-        for row in rows:
+        for row in new_rows:
             evidence_sha = row["capture_sha256"]
             row["hardware"].update(
                 {
@@ -1105,7 +1651,7 @@ def build_schema_fixture(
                 }
             )
     if fixture["lineage"]["descendant_kind"] == "p0b_four_gpu_bound":
-        for row in rows:
+        for row in new_rows:
             evidence_sha = row["capture_sha256"]
             row["hardware"].update(
                 {
@@ -1485,11 +2031,20 @@ def snapshot_provider_evidence(
     instance_id = str(evidence.get("instance_id", ""))
     if not re.fullmatch(r"[0-9]+", instance_id):
         raise PhaseMapError("provider evidence instance_id must be numeric")
+    raw = args.provider_evidence.read_bytes()
+    root_destination = args.run_dir / "provider-evidence.json"
+    if root_destination.exists() and root_destination.read_bytes() != raw:
+        raise PhaseMapError("phase-map root provider evidence already differs")
+    if not root_destination.exists():
+        temporary = root_destination.with_suffix(".json.tmp")
+        temporary.write_bytes(raw)
+        temporary.replace(root_destination)
+    if root_destination.is_symlink() or sha256_file(root_destination) != digest:
+        raise PhaseMapError("phase-map root provider evidence hash mismatch")
     destination = (
         args.run_dir / "provider-evidence" / f"instance-{instance_id}-{digest}.json"
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    raw = args.provider_evidence.read_bytes()
     if destination.exists() and destination.read_bytes() != raw:
         raise PhaseMapError("immutable provider evidence snapshot already differs")
     if not destination.exists():
@@ -2049,13 +2604,23 @@ def validate_eval(
         if (
             not isinstance(token_count, int)
             or isinstance(token_count, bool)
-            or token_count <= 0
+            or token_count < 0
             or token_count != frozen_row.get("supervised_token_count")
         ):
             raise PhaseMapError(f"per-sequence token count mismatch at {index}")
         loss_sum = float(loss_row["loss_sum"])
         loss_per_token = float(loss_row["loss_per_token"])
-        if math.isfinite(loss_sum) and math.isfinite(loss_per_token):
+        if token_count == 0:
+            if (
+                not math.isfinite(loss_sum)
+                or not math.isfinite(loss_per_token)
+                or loss_sum != 0.0
+                or loss_per_token != 0.0
+            ):
+                raise PhaseMapError(
+                    f"zero-target sequence has nonzero/nonfinite loss at {index}"
+                )
+        elif math.isfinite(loss_sum) and math.isfinite(loss_per_token):
             if not math.isclose(
                 loss_per_token,
                 loss_sum / token_count,
@@ -2108,7 +2673,18 @@ def validate_preconfirmation_surface(
             return "audit" in value.casefold()
         return False
 
+    def is_saved_model_tokenizer(path: Path) -> bool:
+        parts = path.relative_to(attempt_dir).parts
+        return (
+            len(parts) == 4
+            and parts[:2] == ("work", "m4")
+            and parts[-1] == "tokenizer.json"
+            and (parts[2] == "export" or parts[2].startswith("learner-"))
+        )
+
     for path in attempt_dir.rglob("*.json"):
+        if is_saved_model_tokenizer(path):
+            continue
         try:
             value = json.loads(path.read_text())
         except json.JSONDecodeError as exc:
@@ -2122,6 +2698,89 @@ def uri_for(args: argparse.Namespace, path: Path) -> str:
     return args.artifact_uri.rstrip("/") + "/" + relative
 
 
+def exit_statuses_are_zero(
+    runner: Any, syncer: Any, learners: Any, expected_learners: int
+) -> bool:
+    def is_zero(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value == 0
+
+    return (
+        is_zero(runner)
+        and is_zero(syncer)
+        and isinstance(learners, list)
+        and len(learners) == expected_learners
+        and all(is_zero(value) for value in learners)
+    )
+
+
+def validate_cell_work_evidence(
+    args: argparse.Namespace,
+    cell: dict[str, Any],
+    attempt_dir: Path,
+    *,
+    runner_exit_code: int,
+) -> tuple[Path, float, dict[str, Any], dict[str, Any]]:
+    """Require positive learner work, a finite endpoint, and clean exits."""
+    results_path = attempt_dir / "report" / "results.jsonl"
+    try:
+        rows = read_jsonl(results_path)
+        arm = [row for row in rows if row.get("arm") == "m4"]
+        if len(rows) != 1 or len(arm) != 1:
+            raise WorkEvidenceError(
+                "phase-map compare output must contain exactly one live m4 arm"
+            )
+        result = arm[0]
+        raw_loss = float(result["eval_loss"])
+        expected_learners = int(cell["target_work"]["learner_count"])
+        expected_steps = int(
+            cell["target_work"]["learner_steps_per_learner"]
+        )
+        learner_exit_codes = result.get("learner_exit_codes")
+        syncer_exit_code = result.get("syncer_exit_code")
+        if not exit_statuses_are_zero(
+            runner_exit_code,
+            syncer_exit_code,
+            learner_exit_codes,
+            expected_learners,
+        ):
+            raise WorkEvidenceError(
+                "runner, syncer, and every expected learner must exit zero"
+            )
+        if not math.isfinite(raw_loss):
+            raise WorkEvidenceError("cell terminal loss is missing or non-finite")
+
+        tape = attempt_dir / "work" / "m4" / "tape.jsonl"
+        observed_work = validate_tape(tape, cell, args)
+        barrier_evidence = validate_barrier_version_trace(
+            attempt_dir, read_jsonl(tape), cell, args
+        )
+        expected_counts = {
+            learner: expected_steps for learner in range(expected_learners)
+        }
+        if barrier_evidence.get("inner_step_counts") != expected_counts:
+            raise WorkEvidenceError(
+                "every learner must reach the frozen expected optimizer-step count"
+            )
+    except WorkEvidenceError:
+        raise
+    except (KeyError, OSError, TypeError, ValueError, PhaseMapError) as exc:
+        raise WorkEvidenceError(f"incomplete cell work evidence: {exc}") from exc
+
+    observed_work["learner_step_counts"] = {
+        str(learner): count
+        for learner, count in barrier_evidence["inner_step_counts"].items()
+    }
+    exit_statuses = {
+        "runner": runner_exit_code,
+        "syncer": syncer_exit_code,
+        "learners": learner_exit_codes,
+    }
+    return results_path, raw_loss, observed_work, {
+        "barrier": barrier_evidence,
+        "exit_statuses": exit_statuses,
+    }
+
+
 def result_attempt(
     args: argparse.Namespace,
     cell: dict[str, Any],
@@ -2132,34 +2791,30 @@ def result_attempt(
     expected_eval: dict[str, Any],
     started_at: str,
     retry_context: dict[str, Any] | None,
+    runner_exit_code: int,
 ) -> dict[str, Any]:
-    results_path = attempt_dir / "report" / "results.jsonl"
-    rows = read_jsonl(results_path)
-    arm = [row for row in rows if row.get("arm") == "m4"]
-    if len(rows) != 1 or len(arm) != 1:
-        raise PhaseMapError("phase-map compare output must contain exactly one live m4 arm")
-    raw_loss = float(arm[0]["eval_loss"])
-    status = "COMPLETED" if math.isfinite(raw_loss) else "DIVERGED"
-    loss = raw_loss if status == "COMPLETED" else None
-    loss_kind = (
-        "endpoint_nll_per_target_token"
-        if status == "COMPLETED"
-        else "scientific_nonfinite_divergence"
+    results_path, raw_loss, observed_work, work_evidence = (
+        validate_cell_work_evidence(
+            args,
+            cell,
+            attempt_dir,
+            runner_exit_code=runner_exit_code,
+        )
     )
     tape = attempt_dir / "work" / "m4" / "tape.jsonl"
-    observed_work = validate_tape(tape, cell, args)
-    barrier_evidence = validate_barrier_version_trace(
-        attempt_dir, read_jsonl(tape), cell, args
-    )
+    barrier_evidence = work_evidence["barrier"]
     layout_sha, merge_modes = validate_layout(attempt_dir)
     gpu_evidence = (
         validate_gpu_uuid_bijection(attempt_dir)
         if args.require_distinct_learner_gpu_uuids
         else None
     )
-    _summary, losses_path = validate_eval(
-        attempt_dir / "report", raw_loss, expected_eval
-    )
+    try:
+        _summary, losses_path = validate_eval(
+            attempt_dir / "report", raw_loss, expected_eval
+        )
+    except (KeyError, OSError, TypeError, ValueError, PhaseMapError) as exc:
+        raise WorkEvidenceError(f"incomplete terminal-loss evidence: {exc}") from exc
     command_path = attempt_dir / "command.json"
     command_hash = sha256_bytes(canonical_json(cell["command"]))
     if command_hash != cell["command_hash"]:
@@ -2231,21 +2886,13 @@ def result_attempt(
         "attempt_id": f"{cell['cell_id']}-attempt-{args.attempt}",
         "cell_id": cell["cell_id"],
         "attempt": args.attempt,
-        "status": status,
+        "status": "COMPLETED",
         "evaluation_role": "development",
-        "reason_code": (
-            "completed_exact_work"
-            if status == "COMPLETED"
-            else "scientific_nonfinite_divergence"
-        ),
-        "failure_reason": (
-            None
-            if status == "COMPLETED"
-            else "non-finite endpoint under frozen scientific command"
-        ),
-        "loss": loss,
-        "raw_loss": raw_loss if math.isfinite(raw_loss) else None,
-        "loss_kind": loss_kind,
+        "reason_code": "completed_exact_work",
+        "failure_reason": None,
+        "loss": raw_loss,
+        "raw_loss": raw_loss,
+        "loss_kind": "endpoint_nll_per_target_token",
         "h": cell["H"],
         "mu": cell["mu"],
         "eta": cell["eta"],
@@ -2259,8 +2906,13 @@ def result_attempt(
             "outer_steps": cell["target_work"]["outer_steps"],
             "token_budget": cell["target_work"]["tokens"],
             "eval_rows": args.eval_rows,
+            "learner_count": cell["target_work"]["learner_count"],
+            "learner_steps_per_learner": cell["target_work"][
+                "learner_steps_per_learner"
+            ],
         },
         "observed_work": observed_work,
+        "exit_statuses": work_evidence["exit_statuses"],
         "started_at": started_at,
         "ended_at": utc_now(),
         "retry_of": None if retry_context is None else retry_context["retry_of"],
@@ -2652,6 +3304,84 @@ def build_retry_contexts(
     return contexts
 
 
+def validate_campaign_work_evidence(manifest: dict[str, Any]) -> None:
+    """Refuse a clean seal unless every final cell proves completed work."""
+    expected_rows = manifest.get("expected_cells")
+    result_rows = manifest.get("results")
+    if not isinstance(expected_rows, list) or not isinstance(result_rows, list):
+        raise WorkEvidenceError("campaign lacks expected cells or cell results")
+    expected = {
+        str(row.get("cell_id")): row
+        for row in expected_rows
+        if isinstance(row, dict) and row.get("cell_id")
+    }
+    final: dict[str, dict[str, Any]] = {}
+    for row in result_rows:
+        if not isinstance(row, dict) or not row.get("cell_id"):
+            raise WorkEvidenceError("campaign contains a malformed cell result")
+        cell_id = str(row["cell_id"])
+        attempt = row.get("attempt")
+        if isinstance(attempt, bool) or not isinstance(attempt, int):
+            raise WorkEvidenceError(f"cell {cell_id} lacks a numeric attempt")
+        if cell_id not in final or attempt > int(final[cell_id]["attempt"]):
+            final[cell_id] = row
+    if not expected or set(final) != set(expected):
+        raise WorkEvidenceError("campaign lacks one final result per expected cell")
+
+    for cell_id, coordinates in expected.items():
+        row = final[cell_id]
+        if row.get("status") != "COMPLETED":
+            raise WorkEvidenceError(
+                f"cell {cell_id} did not complete", cell_id=cell_id
+            )
+        loss = row.get("loss")
+        if (
+            isinstance(loss, bool)
+            or not isinstance(loss, (int, float))
+            or not math.isfinite(float(loss))
+        ):
+            raise WorkEvidenceError(
+                f"cell {cell_id} lacks a finite terminal loss", cell_id=cell_id
+            )
+
+        expected_learners = coordinates.get("expected_learner_count")
+        expected_steps = coordinates.get("expected_learner_steps")
+        if (
+            isinstance(expected_learners, bool)
+            or not isinstance(expected_learners, int)
+            or expected_learners <= 0
+            or isinstance(expected_steps, bool)
+            or not isinstance(expected_steps, int)
+            or expected_steps <= 0
+        ):
+            raise WorkEvidenceError(
+                f"cell {cell_id} lacks frozen learner work coordinates",
+                cell_id=cell_id,
+            )
+        expected_counts = {
+            str(learner): expected_steps for learner in range(expected_learners)
+        }
+        observed = row.get("observed_work")
+        if not isinstance(observed, dict) or observed.get(
+            "learner_step_counts"
+        ) != expected_counts:
+            raise WorkEvidenceError(
+                f"cell {cell_id} learners did not reach the frozen step count",
+                cell_id=cell_id,
+            )
+        exits = row.get("exit_statuses")
+        if not isinstance(exits, dict) or not exit_statuses_are_zero(
+            exits.get("runner"),
+            exits.get("syncer"),
+            exits.get("learners"),
+            expected_learners,
+        ):
+            raise WorkEvidenceError(
+                f"cell {cell_id} lacks zero runner/syncer/learner exits",
+                cell_id=cell_id,
+            )
+
+
 def acquisition_paths(run_dir: Path, manifest: dict[str, Any]) -> list[Path]:
     is_canary = manifest.get("lineage", {}).get("descendant_kind") in (
         "p0a_single_gpu_bound",
@@ -2752,6 +3482,7 @@ def acquisition_paths(run_dir: Path, manifest: dict[str, Any]) -> list[Path]:
 
 
 def write_seal(args: argparse.Namespace, manifest: dict[str, Any]) -> None:
+    validate_campaign_work_evidence(manifest)
     is_canary = manifest.get("lineage", {}).get("descendant_kind") in (
         "p0a_single_gpu_bound",
         "p0b_four_gpu_bound",
@@ -2784,6 +3515,30 @@ def write_seal(args: argparse.Namespace, manifest: dict[str, Any]) -> None:
             raise PhaseMapError(f"cannot seal missing acquisition artifact: {path}")
         lines.append(f"{sha256_file(path)}  {path.relative_to(args.run_dir).as_posix()}")
     write_text(args.run_dir / "acquisition.sha256", "\n".join(lines) + "\n")
+
+
+def finalize_campaign(args: argparse.Namespace, manifest: dict[str, Any]) -> None:
+    try:
+        validate_campaign_work_evidence(manifest)
+    except WorkEvidenceError as exc:
+        if exc.cell_id is not None:
+            cell_rows = [
+                row
+                for row in manifest.get("results", [])
+                if isinstance(row, dict) and str(row.get("cell_id")) == exc.cell_id
+            ]
+            if cell_rows:
+                row = max(cell_rows, key=lambda item: int(item.get("attempt", 0)))
+                if row.get("status") == "COMPLETED":
+                    row["status"] = "FAILED"
+                    row["reason_code"] = "work_evidence_gate_failed"
+                    row["failure_reason"] = str(exc)
+                    row["loss"] = None
+                    row["loss_kind"] = None
+        manifest["status"] = "FAILED"
+        write_json(args.run_dir / "phase-map-manifest.partial.json", manifest)
+        raise
+    write_seal(args, manifest)
 
 
 def execute(args: argparse.Namespace) -> int:
@@ -2845,6 +3600,14 @@ def execute(args: argparse.Namespace) -> int:
             args.expected_train_source_indices_hash,
             "--expected-train-source-indices-hash",
         )
+        additional_train_hashes = seed_hash_map(
+            args.expected_additional_train_rows_hash,
+            "--expected-additional-train-rows-hash",
+        )
+        additional_train_indices_hashes = seed_hash_map(
+            args.expected_additional_train_source_indices_hash,
+            "--expected-additional-train-source-indices-hash",
+        )
         train_pool_indices_hash = require_sha256(
             args.expected_train_pool_source_indices_hash,
             "--expected-train-pool-source-indices-hash",
@@ -2870,6 +3633,10 @@ def execute(args: argparse.Namespace) -> int:
             ),
             train_pool_source_indices_hash=train_pool_indices_hash,
             train_source_indices_hash=train_indices_hash,
+            additional_train_rows_hashes=additional_train_hashes,
+            additional_train_source_indices_hashes=(
+                additional_train_indices_hashes
+            ),
         )
         if args.run_dir.exists() and any(args.run_dir.iterdir()):
             raise PhaseMapError(
@@ -2926,10 +3693,26 @@ def execute(args: argparse.Namespace) -> int:
     )
     actual_commit = verify_source_checkout(args)
 
-    expected_eval = prepare_eval_bundle(
-        args, seed=args.seed, output_dir=args.run_dir / "frozen-eval" / f"seed-{args.seed}"
+    stage_pairs = stage_seed_pairs(args)
+    declared_train_rows = {args.seed: args.expected_train_rows_hash}
+    declared_train_rows.update(
+        seed_hash_map(
+            args.expected_additional_train_rows_hash,
+            "--expected-additional-train-rows-hash",
+        )
     )
-    expected_pairs = {
+    declared_train_indices = {args.seed: args.expected_train_source_indices_hash}
+    declared_train_indices.update(
+        seed_hash_map(
+            args.expected_additional_train_source_indices_hash,
+            "--expected-additional-train-source-indices-hash",
+        )
+    )
+    if set(declared_train_rows) != {seed for seed, _training in stage_pairs}:
+        raise PhaseMapError("frozen train-row hashes do not cover the stage seeds")
+    if set(declared_train_indices) != {seed for seed, _training in stage_pairs}:
+        raise PhaseMapError("frozen train-index hashes do not cover the stage seeds")
+    common_expected_pairs = {
         "development_eval_rows_hash": args.expected_development_eval_rows_hash,
         "development_eval_packed_hash": (
             args.expected_development_eval_packed_hash
@@ -2953,83 +3736,115 @@ def execute(args: argparse.Namespace) -> int:
         "train_pool_source_indices_hash": (
             args.expected_train_pool_source_indices_hash
         ),
-        "train_source_indices_hash": args.expected_train_source_indices_hash,
-        "train_file_sha256": args.expected_train_rows_hash,
     }
     if not args.require_frozen_eval:
         raise PhaseMapError("scientific execution requires --require-frozen-eval")
-    if args.require_frozen_eval:
+    expected_evals: dict[int, dict[str, Any]] = {}
+    for seed, _training_seed in stage_pairs:
+        expected_eval = prepare_eval_bundle(
+            args,
+            seed=seed,
+            output_dir=args.run_dir / "frozen-eval" / f"seed-{seed}",
+        )
+        expected_evals[seed] = expected_eval
+        expected_pairs = {
+            **common_expected_pairs,
+            "train_source_indices_hash": declared_train_indices[seed],
+            "train_file_sha256": declared_train_rows[seed],
+        }
         for key, expected in expected_pairs.items():
             require_sha256(expected, f"frozen {key}")
             if expected_eval[key] != expected:
-                raise PhaseMapError(f"runtime {key} differs from frozen value")
+                raise PhaseMapError(
+                    f"runtime seed {seed} {key} differs from frozen value"
+                )
     for extra_seed in args.freeze_additional_eval_seed:
+        if extra_seed in expected_evals:
+            continue
         prepare_eval_bundle(
             args,
             seed=extra_seed,
             output_dir=args.run_dir / "frozen-eval" / f"seed-{extra_seed}",
         )
 
+    primary_eval = expected_evals[args.seed]
+    additional_rows = {
+        seed: expected_evals[seed]["train_file_sha256"]
+        for seed, _training in stage_pairs
+        if seed != args.seed
+    }
+    additional_indices = {
+        seed: expected_evals[seed]["train_source_indices_hash"]
+        for seed, _training in stage_pairs
+        if seed != args.seed
+    }
     bound = build_bound_manifest(
         args,
         plan,
         model_hash=model_hash,
         data_hash=data_hash,
-        train_rows_hash=expected_eval["train_file_sha256"],
-        development_eval_rows_hash=expected_eval["development_eval_rows_hash"],
-        development_eval_packed_hash=expected_eval[
+        train_rows_hash=primary_eval["train_file_sha256"],
+        development_eval_rows_hash=primary_eval["development_eval_rows_hash"],
+        development_eval_packed_hash=primary_eval[
             "development_eval_packed_hash"
         ],
-        development_eval_example_ids_hash=expected_eval[
+        development_eval_example_ids_hash=primary_eval[
             "development_eval_example_ids_hash"
         ],
-        development_eval_token_ids_hash=expected_eval[
+        development_eval_token_ids_hash=primary_eval[
             "development_eval_token_ids_hash"
         ],
-        development_eval_source_indices_hash=expected_eval[
+        development_eval_source_indices_hash=primary_eval[
             "development_eval_source_indices_hash"
         ],
-        audit_eval_rows_hash=expected_eval["audit_eval_rows_hash"],
-        audit_eval_packed_hash=expected_eval["audit_eval_packed_hash"],
-        audit_eval_example_ids_hash=expected_eval[
+        audit_eval_rows_hash=primary_eval["audit_eval_rows_hash"],
+        audit_eval_packed_hash=primary_eval["audit_eval_packed_hash"],
+        audit_eval_example_ids_hash=primary_eval[
             "audit_eval_example_ids_hash"
         ],
-        audit_eval_token_ids_hash=expected_eval["audit_eval_token_ids_hash"],
-        audit_eval_source_indices_hash=expected_eval[
+        audit_eval_token_ids_hash=primary_eval["audit_eval_token_ids_hash"],
+        audit_eval_source_indices_hash=primary_eval[
             "audit_eval_source_indices_hash"
         ],
-        audit_access_policy_hash=expected_eval["audit_access_policy_hash"],
-        train_pool_source_indices_hash=expected_eval[
+        audit_access_policy_hash=primary_eval["audit_access_policy_hash"],
+        train_pool_source_indices_hash=primary_eval[
             "train_pool_source_indices_hash"
         ],
-        train_source_indices_hash=expected_eval["train_source_indices_hash"],
+        train_source_indices_hash=primary_eval["train_source_indices_hash"],
+        additional_train_rows_hashes=additional_rows,
+        additional_train_source_indices_hashes=additional_indices,
     )
     if sha256_bytes(canonical_json(bound)) != expected_bound_hash:
         raise PhaseMapError("runtime bound manifest differs from sealed manifest hash")
-    common = {
-        "git_commit": actual_commit,
-        "image_digest": args.image_digest,
-        "model_hash": model_hash,
-        "data_hash": data_hash,
-        "eval_source_indices_hash": expected_eval[
-            "development_eval_source_indices_hash"
-        ],
-        "train_pool_source_indices_hash": expected_eval[
-            "train_pool_source_indices_hash"
-        ],
-        "train_source_indices_hash": expected_eval["train_source_indices_hash"],
-        "train_rows_hash": expected_eval["train_file_sha256"],
-        "eval_rows_hash": expected_eval["development_eval_rows_hash"],
-        "eval_hash": expected_eval["development_eval_packed_hash"],
-        "eval_example_ids_hash": expected_eval[
-            "development_eval_example_ids_hash"
-        ],
-        "eval_token_ids_hash": expected_eval[
-            "development_eval_token_ids_hash"
-        ],
-        "randomization_plan_hash": plan["randomization_plan_hash"],
-        "retry_policy_hash": bound["frozen"]["retry_policy_hash"],
-        "provider_evidence_uri": provider_uri,
+    common_by_seed = {
+        seed: {
+            "git_commit": actual_commit,
+            "image_digest": args.image_digest,
+            "model_hash": model_hash,
+            "data_hash": data_hash,
+            "eval_source_indices_hash": expected_eval[
+                "development_eval_source_indices_hash"
+            ],
+            "train_pool_source_indices_hash": expected_eval[
+                "train_pool_source_indices_hash"
+            ],
+            "train_source_indices_hash": expected_eval[
+                "train_source_indices_hash"
+            ],
+            "train_rows_hash": expected_eval["train_file_sha256"],
+            "eval_rows_hash": expected_eval["development_eval_rows_hash"],
+            "eval_hash": expected_eval["development_eval_packed_hash"],
+            "eval_example_ids_hash": expected_eval[
+                "development_eval_example_ids_hash"
+            ],
+            "eval_token_ids_hash": expected_eval[
+                "development_eval_token_ids_hash"
+            ],
+            "randomization_plan_hash": plan["randomization_plan_hash"],
+            "retry_policy_hash": bound["frozen"]["retry_policy_hash"],
+            "provider_evidence_uri": provider_uri,
+        }
+        for seed, expected_eval in expected_evals.items()
     }
     prior_hash = None
     if args.attempt == 1:
@@ -3043,7 +3858,7 @@ def execute(args: argparse.Namespace) -> int:
         ):
             raise PhaseMapError("prior manifest differs from authorized canonical hash")
         prior_without_results = deepcopy(prior)
-        prior_without_results["results"] = []
+        prior_without_results["results"] = deepcopy(bound["results"])
         prior_without_results["status"] = "bound_launch_authority"
         if canonical_json(prior_without_results) != canonical_json(bound):
             raise PhaseMapError("prior manifest frozen design differs from bound manifest")
@@ -3071,11 +3886,11 @@ def execute(args: argparse.Namespace) -> int:
             args, selected, manifest, prior_hash
         )
 
-    had_infra_failure = False
-    had_scientific_failure = False
     for block_cells in by_block.values():
         block_rows: list[dict[str, Any]] = []
         for cell in block_cells:
+            expected_eval = expected_evals[cell["seed"]]
+            common = common_by_seed[cell["seed"]]
             attempt_dir = (
                 args.run_dir / "cells" / cell["cell_id"] / f"attempt-{args.attempt}"
             )
@@ -3130,6 +3945,7 @@ def execute(args: argparse.Namespace) -> int:
                         expected_eval,
                         started,
                         retry_contexts.get(cell["cell_id"]),
+                        process.returncode,
                     )
                 except (OSError, ValueError, PhaseMapError) as exc:
                     if result_validation_failure_is_retryable(exc):
@@ -3159,25 +3975,12 @@ def execute(args: argparse.Namespace) -> int:
                             ),
                             retry_context=retry_contexts.get(cell["cell_id"]),
                         )
-            if row["status"] == "INFRA_FAILURE":
-                had_infra_failure = True
-            if row["status"] == "FAILED":
-                had_scientific_failure = True
             block_rows.append(row)
         # A randomized retry block is one append-only contiguous three-row suffix.
         manifest["results"].extend(block_rows)
         write_json(args.run_dir / "phase-map-manifest.partial.json", manifest)
 
-    write_seal(args, manifest)
-    if had_scientific_failure:
-        raise PhaseMapError(
-            "one or more cells ended FAILED without mechanical retry authority"
-        )
-    if had_infra_failure:
-        raise PhaseMapError(
-            "one or more complete randomized blocks ended in INFRA_FAILURE; "
-            "retry requires a new append-only attempt"
-        )
+    finalize_campaign(args, manifest)
     return 0
 
 
@@ -3235,6 +4038,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-audit-eval-source-indices-hash")
     parser.add_argument("--expected-train-pool-source-indices-hash")
     parser.add_argument("--expected-train-source-indices-hash")
+    parser.add_argument(
+        "--expected-additional-train-rows-hash",
+        type=parse_seed_sha256,
+        action="append",
+        default=[],
+        metavar="SEED=SHA256",
+    )
+    parser.add_argument(
+        "--expected-additional-train-source-indices-hash",
+        type=parse_seed_sha256,
+        action="append",
+        default=[],
+        metavar="SEED=SHA256",
+    )
     parser.add_argument("--require-frozen-eval", action="store_true")
     parser.add_argument("--expected-randomization-plan-hash")
     parser.add_argument("--expected-bound-manifest-hash")
@@ -3264,6 +4081,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eta", type=parse_floats, required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--training-seed", type=int, required=True)
+    parser.add_argument("--additional-seed", type=int, action="append", default=[])
+    parser.add_argument(
+        "--additional-training-seed", type=int, action="append", default=[]
+    )
     parser.add_argument("--order-seed", type=int, required=True)
     parser.add_argument("--eval-split-seed", type=int, default=331)
     parser.add_argument("--freeze-additional-eval-seed", type=int, action="append", default=[])

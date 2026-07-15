@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import hashlib
 import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -775,6 +777,87 @@ def test_eval_validation_retains_nonfinite_scientific_divergence(tmp_path):
     assert path.name == "m4.jsonl"
 
 
+def test_eval_validation_accepts_frozen_zero_supervision_as_valid_excluded(tmp_path):
+    report, expected, rows = _eval_validation_fixture(tmp_path)
+    frozen_path = Path(expected["_eval_sequences_path"])
+    frozen = [json.loads(line) for line in frozen_path.read_text().splitlines()]
+    frozen[0]["supervised_token_count"] = 0
+    frozen_path.write_text("".join(json.dumps(row) + "\n" for row in frozen))
+    rows[0]["token_count"] = 0
+    rows[0]["loss_sum"] = -0.0
+    rows[0]["loss_per_token"] = -0.0
+    (report / "per-example-loss" / "m4.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows)
+    )
+    expected["eval_supervised_token_count"] = 4
+    provenance_path = report / "eval-provenance" / "eval_provenance.json"
+    provenance = json.loads(provenance_path.read_text())
+    provenance["eval_supervised_token_count"] = 4
+    provenance_path.write_text(json.dumps(provenance))
+
+    _summary, path = rpm.validate_eval(report, 2.0, expected)
+
+    assert path.name == "m4.jsonl"
+
+
+def test_eval_validation_rejects_nonzero_loss_for_zero_supervision(tmp_path):
+    report, expected, rows = _eval_validation_fixture(tmp_path)
+    frozen_path = Path(expected["_eval_sequences_path"])
+    frozen = [json.loads(line) for line in frozen_path.read_text().splitlines()]
+    frozen[0]["supervised_token_count"] = 0
+    frozen_path.write_text("".join(json.dumps(row) + "\n" for row in frozen))
+    rows[0].update(token_count=0, loss_sum=1.0, loss_per_token=0.0)
+    (report / "per-example-loss" / "m4.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows)
+    )
+    expected["eval_supervised_token_count"] = 4
+    provenance_path = report / "eval-provenance" / "eval_provenance.json"
+    provenance = json.loads(provenance_path.read_text())
+    provenance["eval_supervised_token_count"] = 4
+    provenance_path.write_text(json.dumps(provenance))
+
+    with pytest.raises(rpm.PhaseMapError, match="zero-target sequence"):
+        rpm.validate_eval(report, 2.0, expected)
+
+
+def test_provider_evidence_is_precopied_into_phase_map_root(tmp_path):
+    source = tmp_path / "provider-input.json"
+    source.write_text(json.dumps({"instance_id": "123"}, sort_keys=True) + "\n")
+    run_dir = tmp_path / "phase-map"
+    run_dir.mkdir()
+    args = SimpleNamespace(
+        provider_evidence=source,
+        run_dir=run_dir,
+        artifact_uri="gs://bucket/run/phase-map",
+    )
+    digest = rpm.sha256_file(source)
+
+    snapshot, uri = rpm.snapshot_provider_evidence(
+        args, {"instance_id": "123"}, digest
+    )
+
+    root_copy = run_dir / "provider-evidence.json"
+    assert root_copy.read_bytes() == source.read_bytes()
+    assert not root_copy.is_symlink()
+    assert snapshot.read_bytes() == source.read_bytes()
+    assert uri.endswith(f"provider-evidence/instance-123-{digest}.json")
+
+
+def test_preconfirmation_scan_ignores_only_saved_tokenizer_vocabularies(tmp_path):
+    attempt = tmp_path / "attempt-1"
+    tokenizer = attempt / "work" / "m4" / "learner-0" / "tokenizer.json"
+    tokenizer.parent.mkdir(parents=True)
+    tokenizer.write_text(json.dumps({"vocab": {"Ġaudit": 1}}))
+
+    rpm.validate_preconfirmation_surface(attempt, ["compare_diloco.py"])
+
+    result = attempt / "report" / "result.json"
+    result.parent.mkdir(parents=True)
+    result.write_text(json.dumps({"audit_loss": 1.0}))
+    with pytest.raises(rpm.PhaseMapError, match="audit field"):
+        rpm.validate_preconfirmation_surface(attempt, ["compare_diloco.py"])
+
+
 def test_process_exit_is_never_inferred_to_be_retryable_infra(tmp_path):
     attempt = tmp_path / "attempt"
     assert rpm.classify_unmarked_process_exit(attempt).startswith("process_exit_without")
@@ -799,3 +882,370 @@ def test_semantic_result_validation_failure_is_never_retryable_infra():
         is False
     )
     assert rpm.result_validation_failure_is_retryable(ValueError("bad arithmetic")) is False
+
+
+def _work_evidence_manifest(
+    *,
+    status: str = "COMPLETED",
+    loss: float | None = 2.0,
+    learner_steps: int = 128,
+    runner_exit: int = 0,
+) -> dict:
+    cell_id = "bp-phase-map-p0a-h16-mu0-eta0p0875-s337"
+    return {
+        "status": "bound_launch_authority",
+        "lineage": {"descendant_kind": "p0a_single_gpu_bound"},
+        "expected_cells": [
+            {
+                "cell_id": cell_id,
+                "expected_learner_count": 4,
+                "expected_learner_steps": 128,
+            }
+        ],
+        "results": [
+            {
+                "cell_id": cell_id,
+                "attempt": 1,
+                "status": status,
+                "loss": loss,
+                "observed_work": {
+                    "learner_step_counts": {
+                        str(learner): learner_steps for learner in range(4)
+                    }
+                },
+                "exit_statuses": {
+                    "runner": runner_exit,
+                    "syncer": 0 if runner_exit == 0 else None,
+                    "learners": [0, 0, 0, 0] if runner_exit == 0 else [1],
+                },
+            }
+        ],
+    }
+
+
+def test_pre_step_learner_exit_records_failed_nonzero_and_no_clean_seal(
+    tmp_path, monkeypatch
+):
+    args = SimpleNamespace(run_dir=tmp_path)
+    manifest = _work_evidence_manifest(
+        status="FAILED", loss=None, learner_steps=0, runner_exit=1
+    )
+
+    monkeypatch.setattr(
+        rpm,
+        "build_parser",
+        lambda: SimpleNamespace(parse_args=lambda _argv: args),
+    )
+    monkeypatch.setattr(
+        rpm, "execute", lambda _args: rpm.finalize_campaign(args, manifest)
+    )
+
+    assert rpm.main([]) == 2
+    partial = json.loads((tmp_path / "phase-map-manifest.partial.json").read_text())
+    assert partial["status"] == "FAILED"
+    assert partial["results"][0]["status"] == "FAILED"
+    assert not (tmp_path / "acquisition-seal.json").exists()
+    assert not (tmp_path / "phase-map-manifest.json").exists()
+
+
+def test_fewer_than_frozen_learner_steps_fails_campaign(tmp_path):
+    args = SimpleNamespace(run_dir=tmp_path)
+    manifest = _work_evidence_manifest(learner_steps=127)
+
+    with pytest.raises(rpm.WorkEvidenceError, match="frozen step count"):
+        rpm.finalize_campaign(args, manifest)
+
+    partial = json.loads((tmp_path / "phase-map-manifest.partial.json").read_text())
+    assert partial["status"] == "FAILED"
+    assert partial["results"][0]["status"] == "FAILED"
+    assert not (tmp_path / "acquisition-seal.json").exists()
+
+
+def test_nonfinite_terminal_loss_fails_campaign(tmp_path):
+    args = SimpleNamespace(run_dir=tmp_path)
+    manifest = _work_evidence_manifest(loss=float("nan"))
+
+    with pytest.raises(rpm.WorkEvidenceError, match="finite terminal loss"):
+        rpm.finalize_campaign(args, manifest)
+
+    partial = json.loads((tmp_path / "phase-map-manifest.partial.json").read_text())
+    assert partial["status"] == "FAILED"
+    assert partial["results"][0]["status"] == "FAILED"
+    assert not (tmp_path / "acquisition-seal.json").exists()
+
+
+def test_complete_mocked_learners_seal_with_per_cell_loss(tmp_path, monkeypatch):
+    args = SimpleNamespace(run_dir=tmp_path)
+    manifest = _work_evidence_manifest(loss=1.75)
+    monkeypatch.setattr(
+        rpm,
+        "acquisition_paths",
+        lambda run_dir, _manifest: [
+            run_dir / "phase-map-manifest.json",
+            run_dir / "phase-map-acquisition-manifest.json",
+            run_dir / "acquisition-seal.json",
+        ],
+    )
+
+    rpm.finalize_campaign(args, manifest)
+
+    sealed = json.loads((tmp_path / "phase-map-acquisition-manifest.json").read_text())
+    assert sealed["status"] == "sealed_acquisition_pending_teardown"
+    assert sealed["results"][0]["loss"] == 1.75
+    assert sealed["results"][0]["observed_work"]["learner_step_counts"] == {
+        str(learner): 128 for learner in range(4)
+    }
+    assert sealed["results"][0]["exit_statuses"] == {
+        "runner": 0,
+        "syncer": 0,
+        "learners": [0, 0, 0, 0],
+    }
+    assert (tmp_path / "acquisition-seal.json").is_file()
+
+
+def test_learner_data_path_survives_different_launch_cwd(tmp_path, monkeypatch):
+    from scripts import compare_diloco as compare
+
+    invocation = tmp_path / "invocation"
+    data = invocation / "inputs" / "train.jsonl"
+    data.parent.mkdir(parents=True)
+    data.write_text('{"messages": []}\n')
+    launch_dir = tmp_path / "different-cwd"
+    launch_dir.mkdir()
+    monkeypatch.chdir(invocation)
+    args = SimpleNamespace(
+        model="model-id",
+        data="inputs/train.jsonl",
+        probe_data=None,
+        prebound_development_eval=None,
+        action_probe_anchor_manifest=None,
+        adapter_dir=None,
+        work_dir=Path("work"),
+        report_dir=Path("report"),
+        lora_r=16,
+        lora_alpha=32,
+        seq_len=128,
+        micro_batch_size=1,
+        inner_lr=3e-4,
+        device="cpu",
+        shard="ddp",
+        learner_gpus=0,
+        training_seed=337337,
+    )
+    compare.resolve_subprocess_paths(args)
+    args.learner_data = Path(args.data)
+    command = compare.learner_command(
+        args,
+        Path("work/m4"),
+        learner_id=0,
+        num_learners=4,
+        syncer="127.0.0.1:1",
+        max_steps=128,
+        arm=compare.PRESETS["m4"],
+    )
+    learner_data = command[command.index("--data") + 1]
+
+    assert args.data == str(data.resolve())
+    assert Path(learner_data).is_absolute()
+    check = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text())",
+            learner_data,
+        ],
+        cwd=launch_dir,
+        text=True,
+        capture_output=True,
+    )
+    assert check.returncode == 0
+    assert check.stdout.strip() == '{"messages": []}'
+
+
+def _passing_sealed_p1(tmp_path: Path) -> dict:
+    _args_value, plan, bound = _authority_bound_p1(tmp_path)
+    parent = rpm.build_schema_fixture(bound, plan)
+    tuned = {
+        (16, 0.0): 2.00,
+        (16, 0.5): 2.01,
+        (16, 0.9): 2.03,
+        (64, 0.0): 2.00,
+        (64, 0.5): 2.00,
+        (64, 0.9): 2.00,
+        (256, 0.0): 2.00,
+        (256, 0.5): 1.98,
+        (256, 0.9): 2.01,
+    }
+    eta_penalty = {
+        0.021875: 0.02,
+        0.04375: 0.0,
+        0.0875: 0.02,
+        0.175: 0.04,
+    }
+    for row in parent["results"]:
+        row["loss"] = tuned[(int(row["h"]), float(row["mu"]))] + eta_penalty[
+            float(row["eta"])
+        ]
+    parent["status"] = "sealed_results"
+    return parent
+
+
+def test_adaptive_p1_uses_registered_midpoints_as_complete_cumulative_blocks(
+    tmp_path,
+):
+    args, initial_plan, initial_bound = _authority_bound_p1(tmp_path)
+    parent = rpm.build_schema_fixture(initial_bound, initial_plan)
+    parent_path = tmp_path / "sealed-initial-p1.json"
+    parent_path.write_text(json.dumps(parent, indent=2, sort_keys=True) + "\n")
+    parent = json.loads(parent_path.read_text())
+    lower_midpoint = (0.021875 * 0.04375) ** 0.5
+    upper_midpoint = (0.04375 * 0.0875) ** 0.5
+    args.study_id = "bp-phase-map-p1-adaptive-1"
+    args.study_phase = "p1_adaptive_bracket"
+    args.h = [16, 64, 256]
+    args.eta = [lower_midpoint, upper_midpoint]
+    args.parent_manifest = parent_path
+    args.expected_parent_manifest_hash = rpm.sha256_bytes(rpm.canonical_json(parent))
+    args.parent_replay_report = None
+    args.expected_parent_replay_report_hash = None
+
+    plan = rpm.build_plan(args)
+    bound = rpm.build_bound_manifest(args, plan, **BOUND_HASHES)
+
+    assert len(plan["cells"]) == 18
+    assert bound["expected_cells"][:36] == parent["expected_cells"]
+    assert bound["results"] == parent["results"]
+    assert bound["lineage"]["descendant_kind"] == "adaptive_bracket_round"
+    report = validator.validate_and_summarize(
+        bound,
+        claim_level="integrity",
+        parent_manifest=parent,
+    )
+    assert report["expected_cell_count"] == 54
+
+
+def _p2_builder_fixture(tmp_path: Path):
+    parent = _passing_sealed_p1(tmp_path)
+    parent_path = tmp_path / "sealed-p1.json"
+    parent_path.write_text(json.dumps(parent, indent=2, sort_keys=True) + "\n")
+    parent = json.loads(parent_path.read_text())
+    args = _args(tmp_path)
+    args.study_id = "bp-phase-map-p2"
+    args.study_phase = "p2_additional_development"
+    args.eta = [0.021875, 0.04375, 0.0875]
+    args.seed = 359
+    args.training_seed = 359359
+    args.additional_seed = [373]
+    args.additional_training_seed = [373373]
+    args.parent_manifest = parent_path
+    args.expected_parent_manifest_hash = rpm.sha256_bytes(rpm.canonical_json(parent))
+    args.parent_replay_report = None
+    args.expected_parent_replay_report_hash = None
+    plan = rpm.build_plan(args)
+    bound = rpm.build_bound_manifest(
+        args,
+        plan,
+        **BOUND_HASHES,
+        additional_train_rows_hashes={373: "6" * 64},
+        additional_train_source_indices_hashes={373: "7" * 64},
+    )
+    return args, parent, plan, bound
+
+
+def test_registered_cumulative_builder_constructs_p2_from_sealed_p1(tmp_path):
+    _args_value, parent, plan, bound = _p2_builder_fixture(tmp_path)
+
+    assert len(plan["cells"]) == 54
+    blocks = {}
+    for cell in plan["cells"]:
+        key = (cell["H"], cell["eta"], cell["seed"])
+        blocks.setdefault(key, set()).add(cell["mu"])
+    assert len(blocks) == 18
+    assert all(mu == {0.0, 0.5, 0.9} for mu in blocks.values())
+    assert bound["expected_cells"][: len(parent["expected_cells"])] == parent[
+        "expected_cells"
+    ]
+    assert bound["results"] == parent["results"]
+    assert len(bound["expected_cells"]) == 90
+    assert bound["expected_grid"]["seeds"] == [347, 359, 373]
+    assert bound["lineage"]["descendant_kind"] == "additional_development_stage"
+    assert bound["lineage"]["parent_manifest_sha256"] == rpm.sha256_bytes(
+        rpm.canonical_json(parent)
+    )
+
+    report = validator.validate_and_summarize(
+        bound,
+        claim_level="integrity",
+        parent_manifest=parent,
+    )
+    assert report["integrity_status"] == "BOUND_LAUNCH_AUTHORITY_VALIDATED"
+    assert report["expected_cell_count"] == 90
+    assert report["attempt_count"] == 36
+
+
+def test_cumulative_descendant_rejects_any_old_result_mutation(tmp_path):
+    _args_value, parent, _plan, bound = _p2_builder_fixture(tmp_path)
+    corrupted = copy.deepcopy(bound)
+    corrupted["results"][0]["loss"] += 0.001
+
+    with pytest.raises(rpm.PhaseMapError, match="mutates or reorders parent result"):
+        rpm.verify_parent_hash_chain([parent, corrupted])
+    with pytest.raises(validator.ManifestError, match="exact immutable prefix"):
+        validator.validate_and_summarize(
+            corrupted,
+            claim_level="integrity",
+            parent_manifest=parent,
+        )
+
+
+def test_cumulative_descendant_enforces_complete_three_mu_new_blocks(tmp_path):
+    _args_value, parent, _plan, bound = _p2_builder_fixture(tmp_path)
+    incomplete = copy.deepcopy(bound)
+    removed = incomplete["expected_cells"].pop()
+    del incomplete["frozen"]["cell_command_hashes"][removed["cell_id"]]
+
+    with pytest.raises(validator.ManifestError) as caught:
+        validator.validate_and_summarize(
+            incomplete,
+            claim_level="integrity",
+            parent_manifest=parent,
+        )
+    assert "complete live-control block" in str(caught.value)
+
+
+def test_parent_hash_chain_verifies_each_exact_canonical_parent(tmp_path):
+    _args_value, parent, _plan, bound = _p2_builder_fixture(tmp_path)
+    rpm.verify_parent_hash_chain([parent, bound])
+
+    corrupted = copy.deepcopy(bound)
+    corrupted["lineage"]["parent_manifest_sha256"] = "0" * 64
+    with pytest.raises(rpm.PhaseMapError, match="parent canonical hash mismatch"):
+        rpm.verify_parent_hash_chain([parent, corrupted])
+
+
+def test_cumulative_lineage_rejects_reordered_parent_prefix(tmp_path):
+    _args_value, parent, _plan, bound = _p2_builder_fixture(tmp_path)
+    reordered = copy.deepcopy(bound)
+    reordered["results"][0], reordered["results"][1] = (
+        reordered["results"][1],
+        reordered["results"][0],
+    )
+
+    with pytest.raises(rpm.PhaseMapError, match="mutates or reorders parent result"):
+        rpm.verify_parent_hash_chain([parent, reordered])
+
+
+def test_synthetic_p2_seals_with_parent_rows_as_exact_prefix(tmp_path):
+    args, parent, plan, bound = _p2_builder_fixture(tmp_path)
+    sealed = rpm.build_schema_fixture(bound, plan)
+
+    assert sealed["results"][: len(parent["results"])] == parent["results"]
+    assert len(sealed["results"]) == len(sealed["expected_cells"]) == 90
+    rpm.validate_campaign_work_evidence(sealed)
+    report = validator.validate_and_summarize(
+        sealed,
+        claim_level="development",
+        parent_manifest=parent,
+    )
+    assert report["integrity_status"] == "VALIDATED"
+    assert report["independent_seeds"] == [347, 359, 373]
