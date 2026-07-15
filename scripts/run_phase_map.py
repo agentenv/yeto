@@ -653,7 +653,8 @@ def validate_parent_and_replay(
     final_parent_rows = final_result_rows(parent)
     if any(row.get("status") != "COMPLETED" for row in final_parent_rows.values()):
         raise PhaseMapError("parent does not contain completed finite work for every cell")
-    validate_campaign_work_evidence(parent)
+    if not policy.get("parent_replay_pass_report_required"):
+        validate_campaign_work_evidence(parent)
     if required_parent_kind in ("p0a_single_gpu_bound", "p0b_four_gpu_bound") and (
         not isinstance(parent_cells, list)
         or len(parent_cells) != 3
@@ -743,6 +744,7 @@ def validate_parent_and_replay(
         or any(cell.get("all_steps_replayed") is not True for cell in replay_cells)
     ):
         raise PhaseMapError("replay report does not replay every parent cell")
+    validate_replay_attested_parent_work(parent, replay)
     return parent, replay
 
 
@@ -3476,6 +3478,150 @@ def validate_campaign_work_evidence(manifest: dict[str, Any]) -> None:
             raise WorkEvidenceError(
                 f"cell {cell_id} lacks zero runner/syncer/learner exits",
                 cell_id=cell_id,
+            )
+
+
+def validate_replay_attested_parent_work(
+    parent: dict[str, Any], replay: dict[str, Any]
+) -> None:
+    """Validate a parent, allowing only the adopted legacy P0a replay bridge.
+
+    New source manifests freeze learner counts/steps in ``expected_cells`` and
+    record per-process exits in every result row.  The adopted P0a acquisition
+    predates those envelope fields, but its sealed tape, barrier traces, and
+    every learner step were independently replayed after exact-ID teardown.
+    This bridge is deliberately restricted to that one frozen source commit
+    and requires the replay to provide the missing positive-work facts.
+    """
+
+    try:
+        validate_campaign_work_evidence(parent)
+        return
+    except WorkEvidenceError:
+        pass
+
+    lineage = parent.get("lineage")
+    frozen = parent.get("frozen")
+    if (
+        not isinstance(lineage, dict)
+        or lineage.get("descendant_kind") != "p0a_single_gpu_bound"
+        or not isinstance(frozen, dict)
+        or frozen.get("git_commit") != P0A_SOURCE_REBIND_FROM_COMMIT
+    ):
+        raise PhaseMapError(
+            "parent lacks strict work evidence and is not the adopted legacy P0a"
+        )
+
+    protocol = parent.get("protocol")
+    if not isinstance(protocol, dict):
+        raise PhaseMapError("legacy P0a parent lacks its frozen protocol")
+    learners = protocol.get("learners")
+    token_budget = protocol.get("token_budget")
+    micro_batch_size = protocol.get("micro_batch_size")
+    seq_len = protocol.get("seq_len")
+    fragments = protocol.get("fragments")
+    if (
+        learners != 4
+        or token_budget != 65_536
+        or micro_batch_size != 1
+        or seq_len != 128
+        or fragments != 4
+    ):
+        raise PhaseMapError("legacy P0a parent protocol is not the adopted canary")
+    expected_steps = token_budget // (learners * micro_batch_size * seq_len)
+    if expected_steps != 128:
+        raise PhaseMapError("legacy P0a learner-step derivation is not 128")
+
+    expected_cells = parent.get("expected_cells")
+    replay_cells = replay.get("cells")
+    if not isinstance(expected_cells, list) or not isinstance(replay_cells, list):
+        raise PhaseMapError("legacy P0a parent/replay cells are malformed")
+    expected_by_id = {
+        str(cell.get("cell_id")): cell
+        for cell in expected_cells
+        if isinstance(cell, dict) and cell.get("cell_id")
+    }
+    replay_by_id = {
+        str(cell.get("cell_id")): cell
+        for cell in replay_cells
+        if isinstance(cell, dict) and cell.get("cell_id")
+    }
+    final_rows = final_result_rows(parent)
+    if (
+        len(expected_by_id) != 3
+        or set(expected_by_id) != set(replay_by_id)
+        or set(expected_by_id) != set(final_rows)
+    ):
+        raise PhaseMapError("legacy P0a replay does not cover the exact parent cells")
+
+    for cell_id, coordinates in expected_by_id.items():
+        row = final_rows[cell_id]
+        replay_cell = replay_by_id[cell_id]
+        attempt = row.get("attempt")
+        replayed_attempts = replay_cell.get("replayed_attempts")
+        if (
+            row.get("status") != "COMPLETED"
+            or isinstance(row.get("loss"), bool)
+            or not isinstance(row.get("loss"), (int, float))
+            or not math.isfinite(float(row["loss"]))
+            or attempt != 1
+            or replay_cell.get("final_attempt") != attempt
+            or replay_cell.get("replayed_attempt_count") != 1
+            or replay_cell.get("all_steps_replayed") is not True
+            or not isinstance(replayed_attempts, list)
+            or len(replayed_attempts) != 1
+        ):
+            raise PhaseMapError(f"legacy P0a cell {cell_id} lacks a complete replay")
+        replayed = replayed_attempts[0]
+        required_replay = {
+            "attempt": 1,
+            "all_steps_replayed": True,
+            "commit_count": 32,
+            "barrier_trace_commit_count": 32,
+            "barrier_trace_inner_steps_per_learner": expected_steps,
+            "barrier_trace_learner_count": learners,
+            "barrier_trace_validated": True,
+            "no_inner_step_while_blocked": True,
+            "base_versions_match": True,
+            "state_chain_contiguous": True,
+            "first_momentum_buffer_exact_zero": True,
+            "capture_tape_responder_join_exact": True,
+        }
+        if any(replayed.get(key) != value for key, value in required_replay.items()):
+            raise PhaseMapError(
+                f"legacy P0a cell {cell_id} replay lacks frozen work evidence"
+            )
+
+        h = int(coordinates.get("h", 0))
+        horizon = (parent.get("horizon_work") or {}).get(str(h))
+        work = row.get("work")
+        observed = row.get("observed_work")
+        hardware = row.get("hardware")
+        if (
+            not isinstance(horizon, dict)
+            or not isinstance(work, dict)
+            or not isinstance(observed, dict)
+            or not isinstance(hardware, dict)
+            or horizon.get("outer_steps") != 32
+            or horizon.get("fixed_window_microsteps") != 16
+            or work.get("outer_steps") != 32
+            or work.get("token_budget") != token_budget
+            or observed.get("tokens") != token_budget
+            or observed.get("microsteps") != token_budget // seq_len
+            or observed.get("outer_steps") != 32
+            or observed.get("per_fragment_outer_steps")
+            != {str(fragment): 8 for fragment in range(fragments)}
+            or observed.get("full_quorum") is not True
+            or observed.get("fixed_window_exact") is not True
+            or observed.get("version_matched_anchor_resolved") is not True
+            or hardware.get("barrier_trace_validated") is not True
+            or hardware.get("barrier_trace_commit_count") != 32
+            or hardware.get("barrier_trace_inner_steps_per_learner")
+            != expected_steps
+            or hardware.get("barrier_trace_learner_count") != learners
+        ):
+            raise PhaseMapError(
+                f"legacy P0a cell {cell_id} parent/replay work facts disagree"
             )
 
 

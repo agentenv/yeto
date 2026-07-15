@@ -235,6 +235,66 @@ def test_p0b_allows_only_the_adopted_fixed_production_source_rebind(tmp_path):
     assert report["integrity_status"] == "BOUND_LAUNCH_AUTHORITY_VALIDATED"
 
 
+def test_adopted_legacy_p0a_work_is_accepted_only_with_full_replay_attestation(
+    tmp_path,
+):
+    args = _canary_args(tmp_path, "p0a")
+    args.git_commit = rpm.P0A_SOURCE_REBIND_FROM_COMMIT
+    plan = rpm.build_plan(args)
+    parent = rpm.build_schema_fixture(
+        rpm.build_bound_manifest(args, plan, **BOUND_HASHES), plan
+    )
+    parent = json.loads(json.dumps(parent))
+    for cell in parent["expected_cells"]:
+        cell.pop("expected_learner_count")
+        cell.pop("expected_learner_steps")
+    for row in parent["results"]:
+        row.pop("exit_statuses")
+        row["observed_work"].pop("learner_step_counts")
+        row["hardware"].update(
+            {
+                "barrier_trace_validated": True,
+                "barrier_trace_commit_count": 32,
+                "barrier_trace_inner_steps_per_learner": 128,
+                "barrier_trace_learner_count": 4,
+            }
+        )
+
+    replay = {
+        "cells": [
+            {
+                "cell_id": row["cell_id"],
+                "final_attempt": 1,
+                "replayed_attempt_count": 1,
+                "all_steps_replayed": True,
+                "replayed_attempts": [
+                    {
+                        "attempt": 1,
+                        "all_steps_replayed": True,
+                        "commit_count": 32,
+                        "barrier_trace_commit_count": 32,
+                        "barrier_trace_inner_steps_per_learner": 128,
+                        "barrier_trace_learner_count": 4,
+                        "barrier_trace_validated": True,
+                        "no_inner_step_while_blocked": True,
+                        "base_versions_match": True,
+                        "state_chain_contiguous": True,
+                        "first_momentum_buffer_exact_zero": True,
+                        "capture_tape_responder_join_exact": True,
+                    }
+                ],
+            }
+            for row in parent["results"]
+        ]
+    }
+
+    rpm.validate_replay_attested_parent_work(parent, replay)
+
+    replay["cells"][0]["replayed_attempts"][0]["commit_count"] = 31
+    with pytest.raises(rpm.PhaseMapError, match="replay lacks frozen work evidence"):
+        rpm.validate_replay_attested_parent_work(parent, replay)
+
+
 def test_plan_is_exact_blocked_36_cell_grid(tmp_path):
     args = _args(tmp_path)
     plan = rpm.build_plan(args)
