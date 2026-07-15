@@ -80,6 +80,61 @@ def test_every_frozen_phase_command_uses_exact_pipeline_depth_four(
         assert "--pipeline" not in command
 
 
+def test_final_shutdown_cannot_silently_bypass_queued_broadcasts() -> None:
+    """Exercise the production drain helper against the shutdown race.
+
+    The first drain returns one broadcast while making SHUTDOWN visible and
+    leaving the other three broadcasts queued.  Returning with any fragment
+    still outstanding is forbidden.
+    """
+
+    barrier_spec = importlib.util.spec_from_file_location(
+        "phase_map_final_barrier_contract", ROOT / "yeto" / "barrier.py"
+    )
+    barrier = importlib.util.module_from_spec(barrier_spec)
+    assert barrier_spec.loader is not None
+    barrier_spec.loader.exec_module(barrier)
+
+    class ShutdownFlag:
+        value = False
+
+        def is_set(self) -> bool:
+            return self.value
+
+    shutdown_flag = ShutdownFlag()
+    class Client:
+        shutdown = shutdown_flag
+
+        @staticmethod
+        def check_health() -> None:
+            return None
+
+    client = Client()
+    queued_batches = [[0], [1, 2, 3]]
+    awaiting = {fragment: 0 for fragment in range(4)}
+
+    def drain() -> list[int]:
+        if not queued_batches:
+            raise RuntimeError("shutdown left a required broadcast unavailable")
+        batch = queued_batches.pop(0)
+        if batch == [0]:
+            shutdown_flag.value = True
+        return batch
+
+    def apply(batch: list[int]) -> None:
+        for fragment in batch:
+            awaiting.pop(fragment)
+
+    barrier.drain_required_broadcasts(
+        awaiting,
+        client,
+        drain,
+        apply,
+        sleep=lambda _seconds: None,
+    )
+    assert awaiting == {}, "final SHUTDOWN silently bypassed queued broadcasts"
+
+
 def _p0b_row() -> tuple[dict, dict]:
     hardware = {
         "provider": "gcp",
