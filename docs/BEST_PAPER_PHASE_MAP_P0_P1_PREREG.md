@@ -82,6 +82,13 @@ evaluation-row hash, packed evaluation sequence/token hash, full command hash,
 and randomization-plan hash. Placeholders in the companion JSON are not launch
 authority.
 
+`frozen.command_hash` is the hash of the canonical campaign command template,
+not a claim that all 36 expanded argvs are identical. The bound descendant
+must additionally contain a complete immutable `cell_command_hashes` object
+mapping every expected `cell_id` to the SHA-256 of its exact argv. Each result
+must match its cell-specific hash. Missing, extra, or duplicate map keys fail
+before launch.
+
 ## 3. Locked evaluation
 
 The primary outcome is final validation loss per target token on exactly 1,024
@@ -311,6 +318,8 @@ M=4 setting.
 Every expected arm, including failures and divergences, must have:
 
 - immutable study/round/cell ID and exact command;
+- canonical campaign-command hash plus a complete expected-cell-to-command-
+  hash map bound before launch;
 - H, mu, eta, shuffle seed, training seed, attempt, block, and order index;
 - clean Git commit and image/model/data/eval/command/randomization hashes;
 - machine type, GPU identity, Spot status, zone, VM/disk IDs and nonce;

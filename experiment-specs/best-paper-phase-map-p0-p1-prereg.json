@@ -35,6 +35,7 @@
     "eval_example_ids_hash": "BIND_BEFORE_P0",
     "eval_token_ids_hash": "BIND_BEFORE_P0",
     "command_hash": "BIND_BEFORE_P1_R0",
+    "cell_command_hashes": "BIND_COMPLETE_CELL_ID_TO_SHA256_MAP_BEFORE_P1_R0",
     "randomization_plan_hash": "BIND_BEFORE_P1_R0"
   },
   "protocol": {
