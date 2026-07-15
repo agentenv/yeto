@@ -1,0 +1,162 @@
+{
+  "schema_version": "0.1",
+  "status": "preregistered_template_not_launch_authority",
+  "study_id": "bp-phase-map-p1-r0",
+  "mode": "development",
+  "frozen_date": "2026-07-14",
+  "source_protocol": "docs/BEST_PAPER_PHASE_MAP_P0_P1_PREREG.md",
+  "legacy_audit": "docs/BEST_PAPER_EXP2_30_PROVENANCE_AUDIT.md",
+  "min_confirmatory_seeds": 8,
+  "p0": {
+    "evidence": false,
+    "shuffle_seed": 337,
+    "training_seed": 337337,
+    "purpose": "loss-blind semantic, provenance, evaluation, and teardown canary"
+  },
+  "expected_grid": {
+    "h": [16, 64, 256],
+    "mu": [0.0, 0.5, 0.9],
+    "eta": [0.021875, 0.04375, 0.0875, 0.175],
+    "seeds": [347]
+  },
+  "seed_pairs": {
+    "347": 347347
+  },
+  "frozen": {
+    "git_commit": "BIND_CLEAN_PUSHED_40_HEX_BEFORE_P0",
+    "image_id": "7290368630472593484",
+    "image_digest": "BIND_BEFORE_P0",
+    "model_id": "HuggingFaceTB/SmolLM2-135M",
+    "model_revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2",
+    "model_hash": "BIND_BEFORE_P0",
+    "data_hash": "BIND_BEFORE_P0",
+    "train_rows_hash": "BIND_BEFORE_P0",
+    "eval_hash": "BIND_BEFORE_P0",
+    "eval_example_ids_hash": "BIND_BEFORE_P0",
+    "eval_token_ids_hash": "BIND_BEFORE_P0",
+    "command_hash": "BIND_BEFORE_P1_R0",
+    "randomization_plan_hash": "BIND_BEFORE_P1_R0"
+  },
+  "protocol": {
+    "tuning": "full",
+    "train_rows": 5000,
+    "eval_rows": 1024,
+    "seq_len": 128,
+    "micro_batch_size": 1,
+    "learners": 4,
+    "fragments": 4,
+    "inner_optimizer": "adamw",
+    "inner_lr": 0.001,
+    "outer_optimizer": "nesterov",
+    "matrix_merge": "rda",
+    "delta_correction": "none",
+    "wire_dtype": "bf16",
+    "syncer_dtype": "f32",
+    "strict_quorum": true,
+    "barrier": true,
+    "version_matched": true,
+    "fixed_window": true,
+    "pad_to_fixed_window_tokens": true,
+    "learner_push_delay_ms": [0, 0, 0, 0],
+    "learner_delay_jitter_ms": 0,
+    "token_budget": 655360,
+    "gpu_slots": 4,
+    "machine_type": "a2-highgpu-4g",
+    "spot_only": true,
+    "on_demand_fallback": false,
+    "injected_baseline": false,
+    "per_example_loss_required": true,
+    "endpoint_significant_digits_min": 12
+  },
+  "horizon_work": {
+    "16": {"fixed_window_microsteps": 16, "fixed_window_tokens": 2048, "outer_steps": 320},
+    "64": {"fixed_window_microsteps": 64, "fixed_window_tokens": 8192, "outer_steps": 80},
+    "256": {"fixed_window_microsteps": 256, "fixed_window_tokens": 32768, "outer_steps": 20}
+  },
+  "randomization": {
+    "unit": "arm",
+    "block_fields": ["h", "eta", "seed"],
+    "required_mu_per_block": [0.0, 0.5, 0.9],
+    "block_order": "materialized_pseudorandom_permutation",
+    "within_block_order": "materialized_pseudorandom_permutation",
+    "loss_blind": true
+  },
+  "adaptive_bracket": {
+    "development_seed_only": 347,
+    "initial_eta": [0.021875, 0.04375, 0.0875, 0.175],
+    "downward_extension": [0.0109375, 0.00546875, 0.002734375, 0.0013671875],
+    "upward_extension": [0.35, 0.7],
+    "interior_refinement": "one geometric midpoint on each side of the current interior minimizer",
+    "new_immutable_manifest_per_round": true,
+    "unbracketed_low_after": 0.0013671875,
+    "unbracketed_high_after": 0.7,
+    "later_seeds_must_remain_blinded": true
+  },
+  "retry_policy": {
+    "loss_blind_only": true,
+    "rerun_entire_incomplete_block": true,
+    "allowed_reasons": [
+      "provider_spot_preemption",
+      "vm_host_gpu_failure",
+      "process_exit_before_scientific_divergence",
+      "missing_or_checksum_invalid_required_artifact",
+      "pre_unblinding_validator_provenance_failure"
+    ],
+    "forbidden_reasons": [
+      "poor_loss",
+      "finite_completed_loss",
+      "scientific_divergence",
+      "post_unblinding_preference"
+    ],
+    "retain_all_attempts": true,
+    "retry_lineage_required": true
+  },
+  "go_kill": {
+    "all_nine_lr_curves_bracketed": true,
+    "d_short_min": 0.02,
+    "d_long_max": -0.01,
+    "p1_is_confirmatory": false
+  },
+  "stage_seeds": {
+    "p1_initial_development": [347],
+    "p2_additional_development": [359, 373],
+    "p3_fresh_confirmation": [383, 397, 409, 421, 433, 443, 457, 461]
+  },
+  "required_result_fields": [
+    "cell_id",
+    "h",
+    "mu",
+    "eta",
+    "seed",
+    "training_seed",
+    "status",
+    "failure_reason",
+    "loss",
+    "work",
+    "git_commit",
+    "image_digest",
+    "model_hash",
+    "data_hash",
+    "eval_hash",
+    "command_hash",
+    "capture_uri",
+    "capture_sha256",
+    "per_example_loss_uri",
+    "per_example_loss_sha256",
+    "paired_control_id",
+    "barrier",
+    "version_matched",
+    "matrix_merge",
+    "strict_quorum",
+    "delta_correction",
+    "spot",
+    "block_id",
+    "order_index",
+    "attempt",
+    "retry_of",
+    "retry_reason",
+    "hardware",
+    "started_at",
+    "ended_at"
+  ]
+}
