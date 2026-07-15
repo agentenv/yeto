@@ -46,16 +46,37 @@ AUTHORITATIVE_PREREG_TEMPLATE_SHA256 = (
     "7cba3c62328b4bfe15fffbc523979274e834e8e720e16f70d79621eaf6ebdb7b"
 )
 AMENDMENT_RAW_SHA256 = (
+    "33d2bca5e00737145c7996c236f9f3face255216608c7c8b635a18cdb0fc2542"
+)
+REVISION_1_2_AMENDMENT_RAW_SHA256 = (
     "33781ad5d4deb29120a2d41f3ccbe2937a5945b97db6400ff1690abeceb520f7"
 )
 PROTECTED_INSTANCE_ID = "3908640733128066700"
 ALLOWED_STAGE_CODES = frozenset(("p1r0", "p1ad", "p2", "p3t"))
 LOGICAL_SLOTS = ("v0", "v1", "v2", "v3")
-ALLOWED_US_CENTRAL1_ZONES = (
+REVISION_1_2_ALLOWED_ZONES = (
     "us-central1-a",
     "us-central1-b",
     "us-central1-c",
     "us-central1-f",
+)
+ALLOWED_US_A100_ZONES = (
+    "us-central1-a",
+    "us-central1-b",
+    "us-central1-c",
+    "us-central1-f",
+    "us-east1-b",
+    "us-west1-b",
+    "us-west4-a",
+    "us-west4-b",
+)
+# Compatibility alias for packet/controller code written against Version 1.1.
+ALLOWED_US_CENTRAL1_ZONES = REVISION_1_2_ALLOWED_ZONES
+ACCEPTED_GENERATION_AMENDMENT_RAW_SHA256S = frozenset(
+    (
+        REVISION_1_2_AMENDMENT_RAW_SHA256,
+        AMENDMENT_RAW_SHA256,
+    )
 )
 MAX_CONCURRENT_CELLS = 4
 MAX_CAMPAIGN_A100S = 16
@@ -136,6 +157,12 @@ def machine_shape_contract(machine_type: Any) -> dict[str, Any]:
         "gpu_slots": A100S_PER_VM_BY_SHAPE[shape],
         "gpu_allocation_mode": GPU_ALLOCATION_MODE_BY_SHAPE[shape],
     }
+
+
+def region_for_zone(zone: Any) -> str:
+    if zone not in ALLOWED_US_A100_ZONES:
+        raise LifecycleError("zone is not in the amendment-authorized US A100 set")
+    return str(zone).rsplit("-", 1)[0]
 
 
 def normalized_workload_command(command: Sequence[str]) -> list[str]:
@@ -917,7 +944,7 @@ def build_revision_1_1_parallel_plan(
             "a100s_per_scientific_vm": A100S_PER_VM,
             "scientific_vm_shape": SCIENTIFIC_VM_SHAPE,
             "active_scientific_cells_per_vm": 1,
-            "allowed_zones": list(ALLOWED_US_CENTRAL1_ZONES),
+            "allowed_zones": list(REVISION_1_2_ALLOWED_ZONES),
             "quota_scope": "us-central1 regional preemptible A100 quota",
         },
         "retry_derivation": {
@@ -961,7 +988,7 @@ def build_parallel_plan(
         "a100s_per_scientific_vm_by_shape": dict(A100S_PER_VM_BY_SHAPE),
         "gpu_allocation_mode_by_shape": dict(GPU_ALLOCATION_MODE_BY_SHAPE),
         "active_scientific_cells_per_vm": 1,
-        "allowed_zones": list(ALLOWED_US_CENTRAL1_ZONES),
+        "allowed_zones": list(REVISION_1_2_ALLOWED_ZONES),
         "quota_scope": "us-central1 regional preemptible A100 quota",
         "packing_equivalence_evidence": {
             "p0a_machine_type": FALLBACK_VM_SHAPE,
@@ -1262,6 +1289,8 @@ class CampaignGenerationRegistry:
         for identity in self.identities:
             row = identity.registry_row()
             state = _mapping(load_json(identity.state_path, "generation state"), "generation state")
+            if state.get("region") is not None:
+                row["region"] = state["region"]
             if state.get("zone") is not None:
                 row["zone"] = state["zone"]
             if state.get("machine_type") is not None:
@@ -1399,7 +1428,7 @@ def validate_provider_record(
     )
     if (
         record.get("project") != "model-training-497007"
-        or record.get("zone") not in ALLOWED_US_CENTRAL1_ZONES
+        or record.get("zone") not in ALLOWED_US_A100_ZONES
         or record.get("campaign_tag") != expected_labels.get("campaign-tag")
         or record.get("instance_name") != identity.get("run_id")
         or not isinstance(record.get("boot_disk_name"), str)
@@ -1407,6 +1436,17 @@ def validate_provider_record(
         or source_image_id != "7290368630472593484"
     ):
         raise LifecycleError("provider record project/zone/name/image identity differs")
+    zone = str(record.get("zone"))
+    region = region_for_zone(zone)
+    recorded_region = record.get("region")
+    identity_region = identity.get("region")
+    if recorded_region is None:
+        if identity_region is not None or zone not in REVISION_1_2_ALLOWED_ZONES:
+            raise LifecycleError("provider record omits the required landed region")
+    elif recorded_region != region:
+        raise LifecycleError("provider record region does not match its landed zone")
+    if identity_region is not None and recorded_region != identity_region:
+        raise LifecycleError("provider record region differs from physical identity")
     if identity.get("zone") is not None and record.get("zone") != identity.get("zone"):
         raise LifecycleError("provider record zone differs from the landed physical identity")
     shape = machine_shape_contract(record.get("machine_type"))
@@ -1457,6 +1497,7 @@ def validate_provider_record(
         "boot_disk_numeric_id": disk_id,
         "source_image_numeric_id": source_image_id,
         "creation_timestamp": record["creation_timestamp"],
+        "region": region,
         "machine_type": shape["machine_type"],
         "a100_count": shape["a100_count"],
         "gpu_slots": shape["gpu_slots"],
@@ -1477,7 +1518,7 @@ def validate_lifecycle_record(
         if lifecycle.get(field) != identity.get(field):
             raise LifecycleError(f"VM lifecycle {field} differs from the registry")
     if (
-        lifecycle.get("zone") not in ALLOWED_US_CENTRAL1_ZONES
+        lifecycle.get("zone") not in ALLOWED_US_A100_ZONES
         or lifecycle.get("zone") != provider_record.get("zone")
         or (
             identity.get("zone") is not None
@@ -1485,6 +1526,23 @@ def validate_lifecycle_record(
         )
     ):
         raise LifecycleError("VM lifecycle landed zone differs from physical identity")
+    zone = str(lifecycle.get("zone"))
+    region = region_for_zone(zone)
+    lifecycle_region = lifecycle.get("region")
+    provider_region = provider_record.get("region")
+    identity_region = identity.get("region")
+    legacy_region_omission = (
+        zone in REVISION_1_2_ALLOWED_ZONES
+        and lifecycle_region is None
+        and provider_region is None
+        and identity_region is None
+    )
+    if not legacy_region_omission and (
+        lifecycle_region != region
+        or provider_region != region
+        or (identity_region is not None and lifecycle_region != identity_region)
+    ):
+        raise LifecycleError("VM lifecycle landed region differs from physical identity")
     shape = machine_shape_contract(lifecycle.get("machine_type"))
     if (
         shape["machine_type"] != provider_record.get("machine_type")
@@ -1534,6 +1592,7 @@ def validate_lifecycle_record(
         "boot_disk_numeric_id": disk_id,
         "creation_timestamp": provider_record["creation_timestamp"],
         "deletion_completed_at_utc": lifecycle["deletion_completed_at_utc"],
+        "region": region,
         "machine_type": shape["machine_type"],
         "a100_count": shape["a100_count"],
     }
@@ -2676,8 +2735,14 @@ class CampaignAggregator:
             )
             if row.get("run_id") != expected_run_id:
                 raise LifecycleError("VM registry run ID violates physical-generation grammar")
-            if row.get("zone") not in ALLOWED_US_CENTRAL1_ZONES:
-                raise LifecycleError("VM registry lacks an admissible landed us-central1 zone")
+            if row.get("zone") not in ALLOWED_US_A100_ZONES:
+                raise LifecycleError("VM registry lacks an admissible landed US A100 zone")
+            recorded_region = row.get("region")
+            if recorded_region is None:
+                if row.get("zone") not in REVISION_1_2_ALLOWED_ZONES:
+                    raise LifecycleError("VM registry omits the required landed region")
+            elif recorded_region != region_for_zone(row.get("zone")):
+                raise LifecycleError("VM registry region does not match its landed zone")
             machine_shape_contract(row.get("machine_type"))
             nonce = row.get("ownership_nonce")
             if not isinstance(nonce, str) or NONCE_RE.fullmatch(nonce) is None:
@@ -2775,13 +2840,24 @@ class CampaignAggregator:
                 "parallel_plan_hash": self.parallel_digest,
                 "bound_manifest_canonical_sha256": self.bound_digest,
                 "scientific_randomization_plan_hash": self.scientific_digest,
-                "amendment_raw_sha256": AMENDMENT_RAW_SHA256,
                 "partial_outcomes_exposed": False,
             }
             if partial.get("status") == "sealed_results":
                 raise LifecycleError("VM partial manifest may not masquerade as sealed_results")
             if any(partial.get(key) != value for key, value in expected_partial.items()):
                 raise LifecycleError("VM partial manifest common identity differs")
+            generation_amendment = partial.get("amendment_raw_sha256")
+            if generation_amendment not in ACCEPTED_GENERATION_AMENDMENT_RAW_SHA256S:
+                raise LifecycleError("VM partial manifest cites an unauthorized amendment")
+            if (
+                generation_amendment == REVISION_1_2_AMENDMENT_RAW_SHA256
+                and provider.get("zone") not in REVISION_1_2_ALLOWED_ZONES
+            ):
+                raise LifecycleError("Version 1.2 generation evidence escaped us-central1")
+            if generation_amendment == AMENDMENT_RAW_SHA256 and (
+                identity.get("region") is None or provider.get("region") is None
+            ):
+                raise LifecycleError("Version 1.3 generation evidence omits landed region")
             partial_attempts = [
                 _mapping(row, "VM partial attempt")
                 for row in _array(partial.get("attempts"), "VM partial attempts")
@@ -2808,6 +2884,11 @@ class CampaignAggregator:
                     raise LifecycleError("attempt writes outside its generation namespace")
                 attempts.append(dict(row))
             lifecycle = _load_strict_object(lifecycle_path, "VM lifecycle final")
+            if (
+                generation_amendment == AMENDMENT_RAW_SHA256
+                and lifecycle.get("region") is None
+            ):
+                raise LifecycleError("Version 1.3 lifecycle evidence omits landed region")
             lifecycle_summary = validate_lifecycle_record(
                 lifecycle, identity, provider, partial_hash
             )
@@ -3188,6 +3269,7 @@ class ParallelWaveExecutor:
             status="ready",
             provider_record_sha256=provider_hash,
             ready_at_utc=ready_at,
+            region=provider["region"],
             zone=provider["zone"],
             machine_type=provider["machine_type"],
         )

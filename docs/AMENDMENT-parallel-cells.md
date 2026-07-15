@@ -1,6 +1,6 @@
 # Concurrency amendment: parallel scientific cells
 
-**Version:** 1.2, operator-authorized pre-outcome capacity and machine-shape revision
+**Version:** 1.3, operator-authorized loss-blind US-region capacity revision
 
 **Status:** This document amends only the scheduling, ownership, retry execution,
 and evidence aggregation rules for the stages named in Section 2. It is not a
@@ -15,11 +15,20 @@ four-VM initial-provisioning assumption, fixed `us-central1-c` zone, and fixed
 full-roster slot assignment. Version 1.2 narrowly supersedes Version 1.1's
 single-shape `a2-highgpu-4g` assumption by admitting a recorded
 `a2-highgpu-1g` Spot fallback after a per-slot 4g capacity stockout.
+Version 1.3 was authorized mid-campaign after provider stockouts and Spot
+preemptions, and before provisioning the next reserved physical generation.
+It narrowly supersedes Version 1.2's `us-central1`-only provider-capacity set
+by admitting the loss-blind US A100 Spot zones in Section 1.1 and recording
+both landed region and landed zone in physical identity. Version 1.3 is a
+provider-policy overlay: it does not change the Version 1.2 scientific or
+parallel-plan bytes, assignments, or `parallel_plan_hash`.
 The 36 P1-R0 cells, all scientific commands and seeds, work-evidence gates,
 retry vocabulary, blinding, aggregation, one-seal semantics, and exact-ID
 teardown requirements are unchanged. Every revised packet MUST bind the
-superseded Version 1.0 and Version 1.1 `parallel_plan_hash` values and the new
-Version 1.2 `parallel_plan_hash`.
+superseded Version 1.0 and Version 1.1 `parallel_plan_hash` values and the
+Version 1.2 `parallel_plan_hash`. A campaign spanning Versions 1.2 and 1.3
+MUST preserve already hash-locked Version 1.2 generation evidence and bind the
+Version 1.3 amendment at the final campaign seal.
 
 ## 1. Authority, precedence, and unchanged scientific question
 
@@ -53,9 +62,9 @@ Normative terms `MUST`, `MUST NOT`, `REQUIRED`, and `FAIL` are literal
 validation requirements. A missing or unknown required field is a `FAIL`, not
 permission for an operator choice.
 
-### 1.1 Version 1.2 precedence
+### 1.1 Version 1.3 precedence
 
-The following Version 1.1 and Version 1.2 rulings take precedence over
+The following Version 1.1, Version 1.2, and Version 1.3 rulings take precedence over
 conflicting earlier-version sentences elsewhere in this document:
 
 1. A nonempty available logical-slot set of width one through four is
@@ -70,11 +79,14 @@ conflicting earlier-version sentences elsewhere in this document:
    cell per logical slot. No result or loss from an earlier batch may be
    exposed or used before every cell in the atomic group is terminal; the group
    remains one loss-blind time block and one retry unit.
-4. Any of `us-central1-a`, `us-central1-b`, `us-central1-c`, or
-   `us-central1-f` is admissible. A VM's landed zone is part of its recorded
-   physical identity and MUST agree across its generation state, provider
-   record, VM registry, lifecycle evidence, and exact-ID teardown commands.
-5. Regional `us-central1` preemptible-A100 quota governs. Spot-only remains
+4. Any of `us-central1-a`, `us-central1-b`, `us-central1-c`,
+   `us-central1-f`, `us-east1-b`, `us-west1-b`, `us-west4-a`, or
+   `us-west4-b` is admissible. A VM's landed region and landed zone are part
+   of its recorded physical identity and MUST agree across its generation
+   state, provider record, VM registry, lifecycle evidence, and exact-ID
+   teardown commands.
+5. The applicable landed-region preemptible-A100 quota governs together with
+   the campaign-wide cap. Spot-only remains
    absolute. On-demand fallback is still forbidden.
 6. A provisioned VM may not remain without scientific work for more than 600
    seconds. A packet may launch at width one and deterministically use a larger
@@ -101,6 +113,20 @@ conflicting earlier-version sentences elsewhere in this document:
     `155bf0801c2c8bfc71b81ada1f4f5dcb97f5a37395087603bc7aab6517b04faf`.
     This evidence authorizes only the machine/gpu-slots projection above; it
     changes no scientific coordinate, seed, work, optimizer, or evaluation.
+11. Version 1.3 prospectively requires an explicit `region` field on every
+    newly landed generation. Hash-locked Version 1.2 generations MUST NOT be
+    rewritten: for those legacy `us-central1` generations only, validators
+    derive `us-central1` from the already-recorded zone when the explicit field
+    is absent. A generation carrying the Version 1.3 amendment hash fails if a
+    required physical-identity surface omits region.
+12. The Version 1.2 parallel plan remains byte-for-byte authoritative. Its
+    `allowed_zones` and quota-scope entries describe the Version 1.2 provider
+    policy and are prospectively superseded by this Section for Version 1.3
+    provisioning; no plan reconstruction, schedule change, or new plan hash is
+    permitted.
+13. Cross-region synchronization to the existing campaign evidence bucket is
+    authorized for these US regions. The bucket location does not affect cell
+    assignment, retry order, machine-shape fallback, or any outcome input.
 
 ## 2. Scope and stage ruling
 
@@ -174,8 +200,10 @@ instance termination action              = DELETE
 boot disk auto-delete                    = true
 project                                  = model-training-497007
 allowed zones                            = {us-central1-a,us-central1-b,
-                                            us-central1-c,us-central1-f}
-quota scope                              = us-central1 regional preemptible A100
+                                            us-central1-c,us-central1-f,
+                                            us-east1-b,us-west1-b,
+                                            us-west4-a,us-west4-b}
+quota scope                              = landed-region preemptible A100 quota
 minimum launch width                     = 1 READY scientific VM
 maximum VM idle-before-science           = 600 seconds
 ```
@@ -334,7 +362,7 @@ function of `(roster_hash, available_slot_set, wave_index, retry_round)` and
 contains no loss, duration, failure-rate, or other scientific outcome input.
 
 Every slot used by a batch MUST report `READY` with validated provider evidence,
-landed-zone and landed-machine-shape identity, and immutable inputs before that
+landed-region, landed-zone, and landed-machine-shape identity, and immutable inputs before that
 batch's first dispatch.
 The controller issues all start messages in the committed batch order without
 waiting for a cell in that same batch to complete. The last dispatch minus the
@@ -359,14 +387,19 @@ failed wave and before the next planned time block. Original planned groups
 keep their materialized `time_block_index`; each retry record additionally
 carries `retry_time_block_index`, monotonically increasing in actual wave order.
 
-The complete revised plan records every group, wave index, all 15 nonempty
+The complete Version 1.2 revised plan records every group, wave index, all 15 nonempty
 available-slot variants, cell/slot/batch/launch assignment, exact command hash,
-capacity constants, allowed zones, and retry derivation. Its canonical hash is
-the new `parallel_plan_hash`. It also records
+capacity constants, its then-authorized zones, and retry derivation. Its
+canonical hash remains the campaign `parallel_plan_hash`; Version 1.3 does not
+rebuild it. The plan also records
 `supersedes_parallel_plan_hash`, the canonical Version 1.0 full-roster plan
 hash. `roster_hash`, both plan hashes, the existing scientific randomization
 plan hash, and their raw file hashes MUST be bound in the launch manifest. Every
-VM partial manifest cites the new plan hash byte-for-byte.
+VM partial manifest cites the Version 1.2 plan hash byte-for-byte. A generation
+partial additionally cites the amendment bytes in force when that generation
+was landed; final aggregation accepts the frozen Version 1.2 amendment hash for
+legacy central-region generations and the Version 1.3 amendment hash for new
+explicit-region generations.
 
 ## 5. Per-VM identity, namespace, and provider-evidence ownership
 
@@ -436,7 +469,7 @@ Before any scientific start, the harness MUST persist and hash one provider
 record owned by that physical generation. It contains at least:
 
 ```text
-project, zone, landed machine type, run_id, campaign tag, slot, generation, ownership nonce,
+project, region, zone, landed machine type, run_id, campaign tag, slot, generation, ownership nonce,
 instance name, instance numeric ID, boot-disk name, boot-disk numeric ID,
 source-image numeric ID, machine type, provisioning model, termination action,
 automatic-restart flag, maintenance action, boot-disk auto-delete flag,
@@ -764,7 +797,7 @@ Only the following operational identities vary by slot/generation:
 ```text
 run ID; controller state path; artifact prefix; physical generation;
 ownership nonce and ownership labels; instance name/numeric ID;
-boot-disk name/numeric ID; landed zone and machine type; A100 UUIDs and CUDA map;
+boot-disk name/numeric ID; landed region, zone, and machine type; A100 UUIDs and CUDA map;
 provider-evidence bytes/hash; rendered per-VM harness argv/spec/bootstrap hash;
 shape-projected execution-command bytes/hash and normalized-command proof;
 attempt working directory and its raw path hash; start/end timestamps;
@@ -773,8 +806,8 @@ VM partial-manifest hash; lifecycle-final hash; exact-ID teardown proofs.
 
 Each per-VM rendered outer artifact MUST cite the common campaign identities.
 No per-VM value may change H, mu, eta, seed, data order, normalized cell argv,
-work, evaluation role, or analysis. Zone and landed machine type are recorded
-per physical generation under Sections 1.1, 3, and 5; neither may be selected
+work, evaluation role, or analysis. Region, zone, and landed machine type are recorded
+per physical generation under Sections 1.1, 3, and 5; none may be selected
 using an outcome.
 
 ## 10. Required conformance tests
@@ -814,7 +847,13 @@ Before review, the implementation MUST pass deterministic tests that:
     `a2-highgpu-1g` on provider capacity stockout; record landed shape in every
     physical-identity surface; prove 4g uses four distinct UUIDs and 1g uses one
     UUID for four packed learners; reject every other shape, fallback reason,
-    GPU inventory, or command projection.
+    GPU inventory, or command projection; and
+14. accept exactly the eight authorized US zones, derive and record each
+    corresponding landed region, reject region/zone disagreement, and prove
+    zone rotation cannot change roster, command, or outcome inputs; preserve
+    the exact Version 1.2 plan hash; accept absent region only for hash-locked
+    Version 1.2 `us-central1` generations; and reject absent region on every
+    Version 1.3 generation.
 
 A test skip, flaky result, missing negative test, or disagreement between
 independent schedule implementations is `FAIL`.
@@ -855,7 +894,7 @@ bound manifest, roster hash, superseded and revised parallel-plan hashes,
 scientific plan hash;
 base and normalized cell-command registries;
 stage code, expected cells/groups/waves, project/allowed zones, per-generation
-landed zone and machine type, ordered shape fallback, P0a/P0b bit-identity
+landed region, zone, and machine type, ordered shape fallback, P0a/P0b bit-identity
 evidence, available-slot variants, capacity constants;
 campaign attempt, state/artifact/science roots, empty/create-only proofs;
 provider/nonce/exact-ID/teardown contract;
@@ -886,8 +925,8 @@ fallback 1g VMs total four A100s. The scientifically legitimate minimum launch
 width is **one** READY Spot VM. P1-R0 and P2 realize width one through three through
 deterministic batches of their indivisible three-cell waves; P3 training
 realizes width one through four through deterministic batches of its four-cell
-seed wave. Every VM lands in one of the four authorized `us-central1` zones,
-and its landed zone and machine type are part of its physical identity.
+seed wave. Every VM lands in one of the eight authorized US A100 Spot zones,
+and its landed region, zone, and machine type are part of its physical identity.
 
 P1-R0's 36 preplanned cells may therefore be sharded. P1's adaptive logic may
 not: only cells already authorized in one immutable descendant may run in

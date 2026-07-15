@@ -418,6 +418,7 @@ def _provider_record(
     return {
         "schema": "yeto_parallel_gcp_provider_evidence_v1",
         "project": "model-training-497007",
+        "region": pexec.region_for_zone(zone),
         "zone": zone,
         "run_id": identity.run_id,
         "campaign_tag": identity.roster_tag,
@@ -622,7 +623,7 @@ def _write_p3_completed_evidence(
     }
 
 
-def _campaign_fixture(tmp_path: Path):
+def _campaign_fixture(tmp_path: Path, *, legacy_revision_1_2_slots=()):
     parent, bound, scientific, roster, plan = _p1_design(tmp_path)
     campaign_root = tmp_path / "campaign-artifacts"
     campaign_root.mkdir()
@@ -651,21 +652,31 @@ def _campaign_fixture(tmp_path: Path):
     base = datetime(2026, 7, 15, tzinfo=timezone.utc)
     controllers = {}
     providers = {}
+    legacy_slots = set(legacy_revision_1_2_slots)
     for index, (slot, identity) in enumerate(identities.items()):
         root = campaign_root / "vms" / slot / "g1"
         provider = _provider_record(identity, index, _iso(base, -3600))
+        if slot in legacy_slots:
+            provider.pop("region")
         provider_path = root / "provider" / "provider-evidence.json"
         _write_json(provider_path, provider)
-        registry_controller.update_state(
-            identity,
-            zone=provider["zone"],
-            machine_type=provider["machine_type"],
-        )
+        landed_identity = {
+            "zone": provider["zone"],
+            "machine_type": provider["machine_type"],
+        }
+        if slot not in legacy_slots:
+            landed_identity["region"] = provider["region"]
+        registry_controller.update_state(identity, **landed_identity)
         providers[slot] = provider
+        generation_common = dict(common)
+        if slot in legacy_slots:
+            generation_common["amendment_raw_sha256"] = (
+                pexec.REVISION_1_2_AMENDMENT_RAW_SHA256
+            )
         controllers[slot] = pexec.VmPartialManifestController(
             identity=identity,
             local_vm_root=root,
-            common_bindings=common,
+            common_bindings=generation_common,
             provider_record_sha256=pexec.sha256_file(provider_path),
         )
     eval_freeze, eval_entry = _write_eval_freeze(campaign_root, 347)
@@ -796,6 +807,8 @@ def _campaign_fixture(tmp_path: Path):
                 "generation_attached_a100s": 0
             },
         }
+        if slot not in legacy_slots:
+            lifecycle["region"] = provider["region"]
         _write_json(
             campaign_root / "vms" / slot / "g1" / "manifests" / "vm-lifecycle-final.json",
             lifecycle,
@@ -858,6 +871,7 @@ def _p3_campaign_fixture(tmp_path: Path):
         _write_json(provider_path, provider)
         registry_controller.update_state(
             identity,
+            region=provider["region"],
             zone=provider["zone"],
             machine_type=provider["machine_type"],
         )
@@ -967,6 +981,7 @@ def _p3_campaign_fixture(tmp_path: Path):
             {
                 "schema": "yeto_vm_lifecycle_final_v1",
                 "status": "vm_lifecycle_final",
+                "region": provider["region"],
                 "zone": provider["zone"],
                 "machine_type": provider["machine_type"],
                 "run_id": identity.run_id,
@@ -1162,6 +1177,9 @@ def test_revision3_plan_preserves_reduced_width_and_binds_shape_fallback(tmp_pat
         "a2-highgpu-4g": 4,
         "a2-highgpu-1g": 1,
     }
+    assert plan["capacity"]["allowed_zones"] == list(
+        pexec.REVISION_1_2_ALLOWED_ZONES
+    )
     assert plan["capacity"]["packing_equivalence_evidence"] == {
         "p0a_machine_type": "a2-highgpu-1g",
         "p0a_gpu_slots": 1,
@@ -1285,7 +1303,7 @@ def test_generation_registry_rejects_nonce_reuse(tmp_path):
         registry.reserve("v1", ownership_nonce="a" * 32)
 
 
-@pytest.mark.parametrize("zone", pexec.ALLOWED_US_CENTRAL1_ZONES)
+@pytest.mark.parametrize("zone", pexec.ALLOWED_US_A100_ZONES)
 @pytest.mark.parametrize("machine_type", pexec.ALLOWED_SCIENTIFIC_VM_SHAPES)
 def test_physical_identity_records_each_authorized_zone_and_shape(
     tmp_path, zone, machine_type
@@ -1307,13 +1325,19 @@ def test_physical_identity_records_each_authorized_zone_and_shape(
         zone=zone,
         machine_type=machine_type,
     )
-    registry.update_state(identity, zone=zone, machine_type=machine_type)
+    registry.update_state(
+        identity,
+        region=pexec.region_for_zone(zone),
+        zone=zone,
+        machine_type=machine_type,
+    )
     registry_row = registry.snapshot()["generations"][0]
     summary = pexec.validate_provider_record(provider, registry_row)
     assert summary["instance_numeric_id"] == "1001"
     assert summary["machine_type"] == machine_type
     assert summary["a100_count"] == (4 if machine_type.endswith("4g") else 1)
     assert registry_row["zone"] == zone
+    assert registry_row["region"] == pexec.region_for_zone(zone)
     assert registry_row["machine_type"] == machine_type
 
 
@@ -1328,10 +1352,29 @@ def test_provider_record_rejects_zone_outside_authorized_region(tmp_path):
         campaign_artifact_root=str(tmp_path / "artifacts"),
     )
     identity = registry.reserve("v0", ownership_nonce="d" * 32)
-    provider = _provider_record(
-        identity, 1, "2026-07-15T00:00:00Z", zone="us-east4-a"
-    )
+    provider = _provider_record(identity, 1, "2026-07-15T00:00:00Z")
+    provider["zone"] = "us-east4-a"
+    provider["region"] = "us-east4"
     with pytest.raises(pexec.LifecycleError, match="project/zone"):
+        pexec.validate_provider_record(provider, identity.registry_row())
+
+
+def test_provider_record_rejects_landed_region_zone_disagreement(tmp_path):
+    _parent, bound, _scientific, roster, _plan = _p1_design(tmp_path)
+    registry = pexec.CampaignGenerationRegistry(
+        stage_code="p1r0",
+        study_id=bound["study_id"],
+        roster_digest=pexec.roster_hash(roster),
+        campaign_attempt=1,
+        campaign_state_root=tmp_path / "state",
+        campaign_artifact_root=str(tmp_path / "artifacts"),
+    )
+    identity = registry.reserve("v0", ownership_nonce="e" * 32)
+    provider = _provider_record(
+        identity, 1, "2026-07-15T00:00:00Z", zone="us-west4-a"
+    )
+    provider["region"] = "us-east1"
+    with pytest.raises(pexec.LifecycleError, match="region"):
         pexec.validate_provider_record(provider, identity.registry_row())
 
 
@@ -1413,6 +1456,30 @@ def test_campaign_aggregator_seals_all_36_cells_and_four_vm_partials(tmp_path):
     assert len(seal["vm_lifecycle_record_hashes"]) == 4
     assert len(manifest["analysis_rounds"]) == 36
     assert all(row["status"] == "COMPLETED" for row in manifest["attempts"])
+
+
+def test_campaign_aggregator_preserves_legacy_revision_1_2_region_omission(tmp_path):
+    bundle = _campaign_fixture(
+        tmp_path, legacy_revision_1_2_slots={"v0"}
+    )
+    manifest, seal = pexec.CampaignAggregator(bundle).build_manifest_and_seal(
+        sealed_at_utc="2026-07-15T12:00:00Z"
+    )
+    legacy = next(
+        row for row in manifest["vm_registry"]["generations"] if row["slot"] == "v0"
+    )
+    assert "region" not in legacy
+    assert legacy["zone"] in pexec.REVISION_1_2_ALLOWED_ZONES
+    assert seal["amendment_raw_sha256"] == pexec.AMENDMENT_RAW_SHA256
+
+
+def test_campaign_aggregator_rejects_revision_1_3_region_omission(tmp_path):
+    bundle = _campaign_fixture(tmp_path)
+    bundle.vm_registry["generations"][0].pop("region")
+    with pytest.raises(pexec.LifecycleError, match="Version 1.3.*region"):
+        pexec.CampaignAggregator(bundle).build_manifest_and_seal(
+            sealed_at_utc="2026-07-15T12:00:00Z"
+        )
 
 
 def test_vm_missing_teardown_proof_hard_fails_aggregation(tmp_path):
@@ -1948,6 +2015,7 @@ class _ScriptedBackend:
         return {
             "schema": "yeto_vm_lifecycle_final_v1",
             "status": "vm_lifecycle_final",
+            "region": provider_record["region"],
             "zone": provider_record["zone"],
             "machine_type": provider_record["machine_type"],
             "run_id": identity.run_id,
