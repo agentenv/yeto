@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import sys
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,65 @@ sys.modules["phase_map_barrier_contract_validator"] = validator
 assert SPEC.loader is not None
 SPEC.loader.exec_module(validator)
 
+RUNNER_SPEC = importlib.util.spec_from_file_location(
+    "phase_map_pipeline_contract_runner",
+    ROOT / "scripts" / "run_phase_map.py",
+)
+phase_runner = importlib.util.module_from_spec(RUNNER_SPEC)
+sys.modules["phase_map_pipeline_contract_runner"] = phase_runner
+assert RUNNER_SPEC.loader is not None
+RUNNER_SPEC.loader.exec_module(phase_runner)
+
 HEX = "a" * 64
+
+
+def _plan_args(tmp_path: Path, stage: str) -> Namespace:
+    canary = stage in {"p0a", "p0b"}
+    return Namespace(
+        study_id=f"bp-phase-map-{stage}",
+        h=[16] if canary else [16, 64, 256],
+        mu=[0.0, 0.5, 0.9],
+        eta=[0.0875] if canary else [0.021875, 0.04375, 0.0875, 0.175],
+        seed=337 if canary else 347,
+        training_seed=337337 if canary else 347347,
+        order_seed=20260714,
+        token_budget=65_536 if canary else 655_360,
+        seq_len=128,
+        run_dir=tmp_path / stage,
+        python_executable=sys.executable,
+        command_repo_root=ROOT,
+        model_path=tmp_path / "model",
+        micro_batch_size=1,
+        inner_lr=0.001,
+        eval_rows=1024,
+        train_rows=5000,
+        eval_split_seed=331,
+        device="cuda",
+        gpu_slots=1 if stage == "p0a" else 4,
+        resource_class=(
+            "a2-highgpu-1g" if stage == "p0a" else "a2-highgpu-4g"
+        ),
+        learner_max_steps=1500,
+        syncer_checkpoint_every=1,
+        arm_timeout_min=240,
+        capture_every_step=canary,
+        require_distinct_learner_gpu_uuids=stage == "p0b",
+    )
+
+
+@pytest.mark.parametrize("stage", ["p0a", "p0b", "p1"])
+def test_every_frozen_phase_command_uses_exact_pipeline_depth_four(
+    tmp_path: Path, stage: str
+) -> None:
+    plan = phase_runner.build_plan(_plan_args(tmp_path, stage))
+    assert plan["cells"]
+    for cell in plan["cells"]:
+        command = cell["command"]
+        assert command.count("--pipeline-depth") == 1
+        assert command[command.index("--pipeline-depth") + 1] == "4"
+        assert command.count("--wan-streams") == 1
+        assert command[command.index("--wan-streams") + 1] == "0"
+        assert "--pipeline" not in command
 
 
 def _p0b_row() -> tuple[dict, dict]:
