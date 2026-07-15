@@ -12,6 +12,8 @@ It is a quality and systems-ablation benchmark. It is not a model leaderboard,
 an image/video aesthetic evaluation, or a cloud provisioning benchmark.
 
 The executable harness is `scripts/benchmark_diffusion_diloco.py`.
+The corresponding causal-LM design and a project-by-project comparison are
+in `docs/LM_BENCHMARK.md`.
 
 ## Fairness Contract
 

@@ -62,8 +62,7 @@ class Arm:
 
 
 # The default arms are production-shaped.  ``unthrottled`` is the explicit
-# low-latency diagnostic; unlike the LM harness, the ordinary m2/m4 arms do
-# not silently disable the production H target.
+# low-latency diagnostic; ordinary m2/m4 arms retain the production H target.
 PRESETS: dict[str, Arm] = {
     "m2": Arm("m2"),
     "m4": Arm("m4", learners=4),

@@ -74,10 +74,15 @@ def test_launch_command_uses_auto_planner():
 def test_compare_presets_cover_the_paper_axes():
     arms = compare.select_arms("all")
     names = {a.name for a in arms}
-    assert {"m2", "m4", "alpha0", "q4", "serial", "noheloco", "strided"} <= names
+    assert {
+        "m2", "m4", "alpha0", "q4", "serial", "noheloco", "strided",
+        "direct-rda", "unthrottled",
+    } <= names
     assert compare.PRESETS["alpha0"].merge_alpha == 0.0
     assert compare.PRESETS["serial"].pipeline == 1
     assert compare.PRESETS["q4"].wire_dtype == "q4"
+    assert compare.PRESETS["m2"].sync_interval_steps == 24.0
+    assert compare.PRESETS["unthrottled"].sync_interval_steps == 0.0
 
 
 def test_token_budget_split_is_fair_across_learners():
@@ -134,8 +139,8 @@ def test_syncer_command_quorum_defaults_to_all_learners():
     assert cmd[cmd.index("--quorum") + 1] == "4"
     assert cmd[cmd.index("--checkpoint-every") + 1] == "1"
     assert cmd[cmd.index("--pipeline") + 1] == "2"
-    # Experiment arms control sync frequency explicitly: the syncer's
-    # adaptive H default is off for probe arms, on (24) only for m2h24.
-    assert cmd[cmd.index("--sync-interval-steps") + 1] == "0.0"
-    h24 = compare.syncer_command(compare.PRESETS["m2h24"], 1, Path("/tmp/w/h"), total_steps=1)
-    assert h24[h24.index("--sync-interval-steps") + 1] == "24.0"
+    assert cmd[cmd.index("--sync-interval-steps") + 1] == "24.0"
+    unthrottled = compare.syncer_command(
+        compare.PRESETS["unthrottled"], 1, Path("/tmp/w/h"), total_steps=1
+    )
+    assert unthrottled[unthrottled.index("--sync-interval-steps") + 1] == "0.0"

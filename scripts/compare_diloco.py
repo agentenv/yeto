@@ -1,52 +1,20 @@
 #!/usr/bin/env python3
-"""Decoupled-DiLoCo quality comparison: async fragment merging vs a
-synchronous baseline, at a fixed training-token budget, scored by held-out
-eval loss.
+"""Benchmark LM DiLoCo against an equal-hardware synchronous baseline.
 
-The claim under test: yeto's async sync "does not hurt much" — M learners
-merging through the syncer should land within a few percent of the eval
-loss of one synchronous learner that saw the same total tokens.
+For an arm with M islands and G ranks per island, ``baseline-mM`` uses one
+synchronous process group with M*G ranks while the DiLoCo arm uses M process
+groups with G ranks each.  Both sides run the same optimizer-step count, use
+the same per-rank batch, and therefore process the same raw-token budget.
+For assistant-masked SFT the harness also pairs rank-local conversation streams
+and rejects a run unless the positive-weight target-token counts match.
 
-Arms (all sharing model, LoRA config, seq len, lr, and token budget):
+DiLoCo is always evaluated from the real Rust syncer's exported checkpoint,
+never from a learner's locally blended adapter.  The final rows are held out
+before training, and every artifact is scored on the same packed evaluation
+tokens.  Repeated training seeds quantify optimization variance.
 
-  base        the base model, untrained (reference floor)
-  baseline    ONE learner, --syncer none: the synchronous reference. Per-
-              step math is identical to DDP-mean / FSDP2 gradient sync, so
-              locally this stands in for the multi-GPU synchronous run; on
-              a GPU cluster the same arm with --shard fsdp IS the FSDP2
-              baseline (see scripts/baseline_ddp.py for a cloud recipe).
-  <preset>    M learners + a real syncer under a settings preset; each
-              learner trains budget/M tokens on its disjoint shard, so the
-              arm consumes the same data and token budget as the baseline.
-
-The DiLoCo arms are scored on the SYNCER's merged global parameters
-(yeto-export from its checkpoint) — the artifact a real run ships — not on
-any single learner's local weights. Held-out rows are split off --data
-before training so no arm ever sees them.
-
-Presets (--settings, comma-separated or 'all'):
-
-  m2        M=2, everything default (bf16 wire, alpha 0.5, pipelined)
-  m4        M=4
-  alpha0    broadcasts overwrite (paper's recommendation at large M)
-  q4        4-bit E3M0 delta pushes on the wire
-  serial    --pipeline 1 (pre-pipelining scheduler behavior)
-  noheloco  delta correction off (pure paper Alg. 2)
-  strided   depth-interleaved fragments
-  iso       Iso-C isotropic matrix aggregation
-  avg       merge = plain weighted averaging (outer lr 1.0, mu 0, alpha 0)
-  m2h24     stock DiLoCo throttled to its design-point sync interval (H~24)
-
-Runs locally on one box (CPU by default; --device mps/cuda where torch
-supports it): the syncer is the real Rust binary, the learners are real
-yeto.learner processes over localhost TCP.
-
-    python scripts/compare_diloco.py --dry-run
-    python scripts/compare_diloco.py --model lfm25-230m --data chat.jsonl \
-        --token-budget 500000 --settings m2,q4,alpha0 --device cpu
-
-Report: eval loss/token per arm + delta vs baseline, written to
---report-dir (report.md + results.jsonl) and printed.
+The harness partitions devices on one host; it does not provision cloud
+instances or emulate WAN latency.
 """
 
 from __future__ import annotations
@@ -54,18 +22,23 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import re
 import shutil
+import signal
 import socket
+import statistics
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 SYNCER_BIN = REPO_ROOT / "syncer/target/release/yeto-syncer"
+_USED_PORTS: set[int] = set()
 
 
 @dataclass(frozen=True)
@@ -73,8 +46,8 @@ class Arm:
     """One DiLoCo configuration under test."""
 
     name: str
-    m: int = 2  # learner islands
-    fragments: int = 4
+    learners: int = 2
+    fragments: int = 8
     fragment_pattern: str = "binpack"
     matrix_merge: str = "rda"
     merge_alpha: float = 0.5
@@ -84,102 +57,174 @@ class Arm:
     quorum: int | None = None  # None -> all M learners each round
     outer_lr: float = 0.7
     outer_momentum: float = 0.9
-    # Floor on time between round launches (--min-round-interval-ms). On
-    # localhost rounds otherwise complete every couple of learner steps
-    # (H~2), far off the outer optimizer's H~24 design point; a WAN spaces
-    # them naturally. 0 = unthrottled.
-    round_interval_ms: int = 0
-    # Adaptive H target (--sync-interval-steps). The SYNCER defaults this to
-    # 24; comparison arms default it OFF so each arm's sync frequency is an
-    # explicit experimental variable, not an ambient default.
-    sync_interval_steps: float = 0.0
+    sync_interval_steps: float = 24.0
 
 
 PRESETS: dict[str, Arm] = {
     "m2": Arm("m2"),
-    "m4": Arm("m4", m=4),
+    "m4": Arm("m4", learners=4),
     "alpha0": Arm("alpha0", merge_alpha=0.0),
     "q4": Arm("q4", wire_dtype="q4"),
     "serial": Arm("serial", pipeline=1),
     "noheloco": Arm("noheloco", delta_correction="none"),
     "strided": Arm("strided", fragment_pattern="strided"),
     "iso": Arm("iso", matrix_merge="iso"),
-    # Merge reduced to plain weighted parameter averaging: no outer
-    # momentum, full step, overwrite broadcasts. At high merge frequency
-    # this approximates synchronous training — if THIS arm matches the
-    # baseline where stock m2 lagged, the gap was outer-optimizer gain at
-    # off-design sync intervals, not asynchrony itself.
-    "avg": Arm("avg", outer_lr=1.0, outer_momentum=0.0, merge_alpha=0.0),
-    # Stock DiLoCo at its design-point sync interval, via the syncer's
-    # adaptive throttle (H = 24 inner steps per fragment, sized from the
-    # measured step time — hardware-independent).
-    "m2h24": Arm("m2h24", sync_interval_steps=24.0),
+    # Non-embedding fragments still use RDA; this removes Nesterov gain and
+    # local blending so each merged RDA delta is applied directly.
+    "direct-rda": Arm(
+        "direct-rda", outer_lr=1.0, outer_momentum=0.0, merge_alpha=0.0
+    ),
+    "unthrottled": Arm("unthrottled", sync_interval_steps=0.0),
 }
 
 
-def select_arms(spec: str) -> list[Arm]:
-    names = list(PRESETS) if spec == "all" else [s.strip() for s in spec.split(",") if s.strip()]
+def select_arms(spec: str, fragments: int = 8) -> list[Arm]:
+    names = (
+        list(PRESETS)
+        if spec == "all"
+        else [value.strip() for value in spec.split(",") if value.strip()]
+    )
+    if not names:
+        raise ValueError("--settings must select at least one benchmark arm")
     unknown = [n for n in names if n not in PRESETS]
     if unknown:
-        raise SystemExit(f"unknown presets: {unknown} (have {list(PRESETS)})")
-    return [PRESETS[n] for n in names]
+        raise ValueError(f"unknown settings {unknown}; choose from {list(PRESETS)}")
+    return [replace(PRESETS[n], fragments=fragments) for n in names]
 
 
-def steps_for(token_budget: int, mbs: int, seq_len: int, learners: int,
-              world: int = 1) -> int:
+def parse_seeds(spec: str) -> list[int]:
+    try:
+        seeds = [int(value.strip()) for value in spec.split(",") if value.strip()]
+    except ValueError as exc:
+        raise ValueError("--seeds must be a comma-separated list of integers") from exc
+    if not seeds:
+        raise ValueError("--seeds must contain at least one integer")
+    if len(seeds) != len(set(seeds)):
+        raise ValueError("--seeds contains duplicates")
+    return seeds
+
+
+def steps_for(
+    token_budget: int,
+    mbs: int,
+    seq_len: int,
+    learners: int,
+    world: int = 1,
+    grad_accum: int = 1,
+) -> int:
     """Inner steps per learner so the arm consumes ~token_budget in total.
     `world` is the DDP/FSDP ranks per learner: every rank processes its own
     micro-batch per step, so tokens/step scale by world."""
-    return max(1, math.ceil(token_budget / (mbs * seq_len * learners * world)))
+    per_step = mbs * seq_len * learners * world * grad_accum
+    if token_budget < 1 or per_step < 1:
+        raise ValueError(
+            "token budget, batch size, sequence length, and ranks must be positive"
+        )
+    return math.ceil(token_budget / per_step)
 
 
-def gpu_env(learner_id: int, gpus_per_learner: int) -> dict[str, str] | None:
-    """CUDA_VISIBLE_DEVICES block for one learner: learner i owns GPUs
-    [i*g, (i+1)*g). None when GPU partitioning is off."""
-    if gpus_per_learner <= 0:
+def processed_tokens(
+    steps: int,
+    mbs: int,
+    seq_len: int,
+    total_ranks: int,
+    grad_accum: int = 1,
+) -> int:
+    return steps * mbs * seq_len * total_ranks * grad_accum
+
+
+def _visible_cuda_devices() -> list[str] | None:
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if raw is None or not raw.strip():
         return None
-    lo = learner_id * gpus_per_learner
-    import os
+    return [value.strip() for value in raw.split(",") if value.strip()]
 
+
+def cuda_env(start: int, count: int, device: str) -> dict[str, str] | None:
+    if not device.startswith("cuda"):
+        return None
+    visible = _visible_cuda_devices()
+    if visible is None:
+        chosen = [str(index) for index in range(start, start + count)]
+    else:
+        chosen = visible[start : start + count]
+        if len(chosen) != count:
+            raise ValueError(
+                f"need CUDA device slice [{start}:{start + count}], but "
+                f"CUDA_VISIBLE_DEVICES exposes only {visible}"
+            )
     env = dict(os.environ)
-    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in range(lo, lo + gpus_per_learner))
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(chosen)
     return env
 
 
-def learner_command(args, arm_dir: Path, *, learner_id: int, num_learners: int,
-                    syncer: str, max_steps: int, arm: Arm | None) -> list[str]:
-    if args.learner_gpus > 1:
-        # Multi-GPU learner: torchrun ranks over this learner's GPU block
-        # (models whose frozen base exceeds one GPU need --shard fsdp).
-        cmd = [
-            sys.executable, "-m", "torch.distributed.run",
-            f"--nproc_per_node={args.learner_gpus}",
-            f"--master_port={free_port()}",
-            "-m", "yeto.learner",
-        ]
-    else:
-        cmd = [sys.executable, "-m", "yeto.learner"]
+def gpu_env(
+    learner_id: int, gpus_per_learner: int, device: str = "cuda"
+) -> dict[str, str] | None:
+    """Backward-compatible learner-indexed CUDA device partition."""
+    if gpus_per_learner <= 0:
+        return None
+    return cuda_env(learner_id * gpus_per_learner, gpus_per_learner, device)
+
+
+def _distributed_prefix(nproc: int) -> list[str]:
+    if nproc < 1:
+        raise ValueError("nproc must be positive")
+    return [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        f"--nproc_per_node={nproc}",
+        "--master_addr=127.0.0.1",
+        f"--master_port={free_port()}",
+        "-m",
+        "yeto.learner",
+    ]
+
+
+def learner_command(
+    args,
+    arm_dir: Path,
+    *,
+    learner_id: int,
+    num_learners: int,
+    syncer: str,
+    max_steps: int,
+    arm: Arm | None,
+    nproc: int | None = None,
+    seed: int = 0,
+    train_data: Path | None = None,
+) -> list[str]:
+    if nproc is None:
+        nproc = max(1, args.learner_gpus)
+    cmd = _distributed_prefix(nproc)
     cmd += [
         "--model", args.model,
-        "--data", str(arm_dir.parent / "train.jsonl"),
+        "--data", str(train_data or arm_dir.parent / "train.jsonl"),
         "--syncer", syncer,
         "--learner-id", str(learner_id),
         "--num-learners", str(num_learners),
         "--tuning", "lora",
         "--lora-r", str(args.lora_r),
         "--lora-alpha", str(args.lora_alpha),
+        "--lora-targets", getattr(args, "lora_targets", "auto"),
         "--seq-len", str(args.seq_len),
         "--micro-batch-size", str(args.micro_batch_size),
-        "--grad-accum", "1",
+        "--grad-accum", str(getattr(args, "grad_accum", 1)),
         "--inner-lr", str(args.inner_lr),
+        "--weight-decay", str(getattr(args, "weight_decay", 0.01)),
+        "--warmup-steps", str(getattr(args, "warmup_steps", 10)),
+        "--seed", str(seed),
         "--max-local-steps", str(max_steps),
-        "--tokenize", "preload",
+        "--tokenize", "stream",
+        "--stream-workers", "0",
+        "--train-on", getattr(args, "train_on", "assistant"),
+        "--gradient-checkpointing", getattr(args, "gradient_checkpointing", "auto"),
+        "--wan-streams", str(getattr(args, "wan_streams", 4)),
         "--shard", args.shard,
         "--output-dir", str(arm_dir / f"learner-{learner_id}"),
     ]
-    if args.learner_gpus <= 1:
-        # torchrun ranks pick their own cuda device from LOCAL_RANK;
-        # single-process learners take the explicit one.
+    if nproc == 1 or not args.device.startswith("cuda"):
         cmd += ["--device", args.device]
     if arm is not None:
         cmd += [
@@ -192,14 +237,21 @@ def learner_command(args, arm_dir: Path, *, learner_id: int, num_learners: int,
     return cmd
 
 
-def syncer_command(arm: Arm, port: int, arm_dir: Path, total_steps: int) -> list[str]:
+def syncer_command(
+    arm: Arm,
+    port: int,
+    arm_dir: Path,
+    total_steps: int,
+    *,
+    grace_ms: int = 1000,
+) -> list[str]:
     # The syncer takes no fragment count: the layout arrives in HELLO.
     return [
         str(SYNCER_BIN),
         "--port", str(port),
-        "--learners", str(arm.m),
-        "--quorum", str(arm.quorum or arm.m),
-        "--grace-ms", "200",
+        "--learners", str(arm.learners),
+        "--quorum", str(arm.quorum or arm.learners),
+        "--grace-ms", str(grace_ms),
         "--total-steps", str(total_steps),
         "--pipeline", str(arm.pipeline),
         "--delta-correction", arm.delta_correction,
@@ -208,18 +260,47 @@ def syncer_command(arm: Arm, port: int, arm_dir: Path, total_steps: int) -> list
         "--checkpoint-path", str(arm_dir / "state.ckpt"),
         "--checkpoint-every", "1",
         "--event-tape", str(arm_dir / "tape.jsonl"),
-        "--min-round-interval-ms", str(arm.round_interval_ms),
         "--sync-interval-steps", str(arm.sync_interval_steps),
     ]
 
 
 def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    while True:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = int(s.getsockname()[1])
+        if port not in _USED_PORTS:
+            _USED_PORTS.add(port)
+            return port
 
 
-def split_data(data: str, work: Path, eval_rows: int, max_rows: int | None) -> tuple[Path, Path, int]:
+def materialize_data_source(data: str, destination: Path) -> str:
+    """Stage an S3 dataset prefix locally; pass other sources through."""
+    if not data.startswith("s3://"):
+        return data
+    if shutil.which("aws") is None:
+        raise RuntimeError(
+            "S3 benchmark data requires the AWS CLI and ambient read credentials"
+        )
+    destination.mkdir(parents=True, exist_ok=True)
+    print(f"[lm-benchmark] syncing {data} to {destination}", flush=True)
+    try:
+        subprocess.run(
+            ["aws", "s3", "sync", data, str(destination), "--only-show-errors"],
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"failed to sync benchmark data from {data} (aws exit {exc.returncode})"
+        ) from exc
+    if not any(destination.iterdir()):
+        raise RuntimeError(f"S3 dataset prefix {data} contains no objects")
+    return str(destination.resolve())
+
+
+def split_data(
+    data: str, work: Path, eval_rows: int, max_rows: int | None
+) -> tuple[Path, Path, int]:
     """Materialize --data as train.jsonl / eval.jsonl under `work`.
 
     The eval split comes off the END of the row stream so every arm trains
@@ -233,13 +314,22 @@ def split_data(data: str, work: Path, eval_rows: int, max_rows: int | None) -> t
         n = min(n, max_rows + eval_rows)
     if n <= eval_rows:
         raise SystemExit(f"--data has {n} usable rows; need > --eval-rows {eval_rows}")
+    for index in range(n):
+        if not ds[index].get("messages"):
+            raise SystemExit(
+                f"--data row {index} has no messages; the LM benchmark requires "
+                "messages-format conversation rows"
+            )
     work.mkdir(parents=True, exist_ok=True)
 
     def dump(path: Path, idxs) -> None:
-        with open(path, "w") as f:
+        with path.open("w", encoding="utf-8") as handle:
             for i in idxs:
                 row = ds[i]
-                f.write(json.dumps({k: row[k] for k in ("messages", "tools") if k in row}) + "\n")
+                materialized = {
+                    key: row[key] for key in ("messages", "tools") if key in row
+                }
+                handle.write(json.dumps(materialized) + "\n")
 
     train, evalf = work / "train.jsonl", work / "eval.jsonl"
     dump(train, range(n - eval_rows))
@@ -247,23 +337,29 @@ def split_data(data: str, work: Path, eval_rows: int, max_rows: int | None) -> t
     return train, evalf, n - eval_rows
 
 
-def eval_loss_per_token(model_id: str, adapter_dir: Path | None, eval_file: Path,
-                        seq_len: int, device: str, train_on: str = "assistant") -> float:
+def evaluate_loss(model_id: str, adapter_dir: Path | None, eval_file: Path,
+                  seq_len: int, device: str, train_on: str = "assistant") -> dict:
     """Held-out masked CE per trained token — the comparison metric."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from yeto.data import build_packed_dataset
+    from yeto.learner import _from_pretrained_offline_first
     from yeto.losses import sft_loss
     from yeto.models import resolve
 
     resolved = resolve(model_id)
-    tok = AutoTokenizer.from_pretrained(resolved, trust_remote_code=True)
+    tok = _from_pretrained_offline_first(
+        AutoTokenizer, resolved, trust_remote_code=True
+    )
     # bf16 on accelerators (a 10B+ base in fp32 would not fit one GPU);
     # fp32 on cpu, where bf16 matmuls are slow and memory is plentiful.
     dtype = torch.float32 if device == "cpu" else torch.bfloat16
-    model = AutoModelForCausalLM.from_pretrained(
-        resolved, dtype=dtype, trust_remote_code=True
+    model = _from_pretrained_offline_first(
+        AutoModelForCausalLM,
+        resolved,
+        dtype=dtype,
+        trust_remote_code=True,
     )
     if adapter_dir is not None:
         from peft import PeftModel
@@ -272,6 +368,7 @@ def eval_loss_per_token(model_id: str, adapter_dir: Path | None, eval_file: Path
     model.to(device).eval()
     ds = build_packed_dataset(str(eval_file), tok, 0, 1, seq_len, train_on=train_on)
     total_loss, total_tokens = 0.0, 0.0
+    block_losses = []
     with torch.no_grad():
         for i in range(len(ds)):
             ids, weights = ds[i]
@@ -281,10 +378,51 @@ def eval_loss_per_token(model_id: str, adapter_dir: Path | None, eval_file: Path
             loss, n = sft_loss(out.logits, ids, "cross_entropy", weights)
             total_loss += loss.item()
             total_tokens += n.item()
-    return total_loss / max(total_tokens, 1.0)
+            if n.item() > 0:
+                block_losses.append(loss.item() / n.item())
+    if total_tokens <= 0:
+        raise ValueError(
+            "held-out rows contain no positive-weight target tokens; use rows "
+            "with assistant responses or pass --train-on all"
+        )
+    loss_per_token = total_loss / total_tokens
+    return {
+        "loss_per_token": loss_per_token,
+        "perplexity": math.exp(loss_per_token) if loss_per_token < 80 else None,
+        "total_loss": total_loss,
+        "trained_tokens": int(total_tokens),
+        "blocks": len(ds),
+        "block_mean": statistics.fmean(block_losses) if block_losses else None,
+        "block_std": statistics.stdev(block_losses) if len(block_losses) > 1 else 0.0,
+    }
 
 
-def wait_for_free_gpus(device: str, limit_mb: int = 2000, timeout_s: int = 180) -> None:
+def eval_loss_per_token(model_id: str, adapter_dir: Path | None, eval_file: Path,
+                        seq_len: int, device: str, train_on: str = "assistant") -> float:
+    """Compatibility wrapper for callers that only need the scalar metric."""
+    return evaluate_loss(
+        model_id, adapter_dir, eval_file, seq_len, device, train_on
+    )["loss_per_token"]
+
+
+def _visible_gpu_uuids() -> set[str] | None:
+    visible = _visible_cuda_devices()
+    if visible is None:
+        return None
+    result = subprocess.run(
+        ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
+        capture_output=True,
+        text=True,
+    )
+    index_to_uuid = {}
+    for line in result.stdout.splitlines():
+        parts = [value.strip() for value in line.split(",")]
+        if len(parts) >= 2:
+            index_to_uuid[parts[0]] = parts[1]
+    return {index_to_uuid.get(value, value) for value in visible}
+
+
+def wait_for_free_gpus(device: str, limit_mb: int = 2000, timeout_s: int = 300) -> None:
     """Block until no compute process holds more than `limit_mb` on any GPU.
 
     Arms and evals run strictly one after another, but a just-exited CUDA
@@ -295,20 +433,23 @@ def wait_for_free_gpus(device: str, limit_mb: int = 2000, timeout_s: int = 180) 
     """
     if not device.startswith("cuda"):
         return
+    visible_uuids = _visible_gpu_uuids()
     deadline = time.monotonic() + timeout_s
     last = ""
     while True:
         out = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=pid,process_name,used_gpu_memory",
+            ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True,
         ).stdout.strip()
         holders = []
         for line in out.splitlines():
             parts = [v.strip() for v in line.split(",")]
-            if len(parts) < 3:
+            if len(parts) < 4:
                 continue
-            pid, name, mem = parts[0], parts[1], parts[-1]
+            gpu_uuid, pid, name, mem = parts[0], parts[1], parts[2], parts[-1]
+            if visible_uuids is not None and gpu_uuid not in visible_uuids:
+                continue
             # Drivers that report [N/A] per-process memory would otherwise
             # slip a fully-loaded process past the numeric check — ANY
             # listed compute app counts as occupying the GPU.
@@ -326,7 +467,8 @@ def wait_for_free_gpus(device: str, limit_mb: int = 2000, timeout_s: int = 180) 
         time.sleep(3)
 
 
-def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float:
+def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path,
+                       log_path: Path | None = None) -> dict:
     """Score in a child process so the model's VRAM is released on exit —
     an in-process eval would keep the base resident on GPU 0 and starve the
     next arm's learners (found the hard way on a 4xL40S box)."""
@@ -335,241 +477,1123 @@ def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path) -> float
         "--model", args.model,
         "--data", str(eval_file),
         "--seq-len", str(args.seq_len),
-        "--device", args.device,
+        "--device", args.eval_device,
+        "--train-on", args.train_on,
     ]
     if adapter_dir is not None:
         cmd += ["--adapter-dir", str(adapter_dir)]
-    wait_for_free_gpus(args.device)
-    out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    wait_for_free_gpus(args.eval_device)
+    env = (
+        cuda_env(0, 1, args.eval_device)
+        if args.eval_device.startswith("cuda")
+        else None
+    )
+    out = subprocess.run(
+        cmd, cwd=REPO_ROOT, capture_output=True, text=True, env=env
+    )
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(out.stdout + out.stderr, encoding="utf-8")
     # The child has exited, but the driver may release its VRAM lazily;
     # don't hand the GPUs to the next arm until it is actually gone.
-    wait_for_free_gpus(args.device)
+    wait_for_free_gpus(args.eval_device)
     for line in reversed(out.stdout.splitlines()):
-        if line.startswith("EVAL_LOSS "):
-            return float(line.split()[1])
+        if line.startswith("EVAL_JSON "):
+            return json.loads(line.removeprefix("EVAL_JSON "))
     raise RuntimeError(
         f"eval subprocess failed ({out.returncode}):\n{out.stdout[-800:]}\n{out.stderr[-800:]}"
     )
 
 
-def run_baseline(args, work: Path) -> tuple[Path, float]:
-    arm_dir = work / "baseline"
-    steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, 1,
-                      world=max(1, args.learner_gpus))
-    cmd = learner_command(args, arm_dir, learner_id=0, num_learners=1,
-                          syncer="none", max_steps=steps, arm=None)
-    wait_for_free_gpus(args.device)
-    t0 = time.monotonic()
-    run_checked(cmd, arm_dir / "learner.log", env=gpu_env(0, args.learner_gpus))
-    return arm_dir / "learner-0", time.monotonic() - t0
+def _tail(path: Path, lines: int = 16) -> str:
+    try:
+        return "\n".join(
+            path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
+        )
+    except OSError:
+        return ""
 
 
-def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
-    arm_dir = work / arm.name
-    arm_dir.mkdir(parents=True, exist_ok=True)
-    steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, arm.m,
-                      world=max(1, args.learner_gpus))
-    port = free_port()
-    # Generous round ceiling: learners stop at their token budget, and the
-    # syncer is terminated once they exit; the checkpoint (written every
-    # round) carries the merged params up to the last completed round.
-    syncer = subprocess.Popen(
-        syncer_command(arm, port, arm_dir, total_steps=steps * arm.m * 4),
-        stdout=open(arm_dir / "syncer.log", "w"), stderr=subprocess.STDOUT,
+_TRAINING_METRICS_RE = re.compile(
+    r"inner loop done .*?raw_tokens=(\d+) target_tokens=(\d+)"
+)
+
+
+def summarize_training_logs(paths: list[Path]) -> dict:
+    """Sum LM-specific raw/target token telemetry across all ranks."""
+    raw_tokens = 0
+    target_tokens = 0
+    ranks = 0
+    for path in paths:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for match in _TRAINING_METRICS_RE.finditer(text):
+            ranks += 1
+            raw_tokens += int(match.group(1))
+            target_tokens += int(match.group(2))
+    if ranks == 0:
+        raise RuntimeError(
+            "learner logs contain no final token telemetry; the run may have "
+            "used an incompatible learner version"
+        )
+    if target_tokens == 0:
+        raise RuntimeError(
+            "training processed no positive-weight target tokens; use rows "
+            "with assistant responses or pass --train-on all"
+        )
+    return {
+        "reported_ranks": ranks,
+        "processed_tokens": raw_tokens,
+        "processed_target_tokens": target_tokens,
+        "target_density": target_tokens / raw_tokens if raw_tokens else None,
+    }
+
+
+def _stop_process(process: subprocess.Popen, timeout: int = 20) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        process.terminate()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            process.kill()
+        process.wait(timeout=10)
+
+
+def run_checked(cmd: list[str], log: Path, env: dict | None = None,
+                timeout_s: int | None = None) -> None:
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("w", encoding="utf-8") as handle:
+        process = subprocess.Popen(
+            cmd,
+            cwd=REPO_ROOT,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
+        try:
+            returncode = process.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            _stop_process(process)
+            raise RuntimeError(f"command timed out: {' '.join(cmd)}\n{_tail(log)}")
+    if returncode != 0:
+        raise RuntimeError(
+            f"command failed with exit code {returncode}: {' '.join(cmd)}\n{_tail(log)}"
+        )
+
+
+def _wait_for_learners(processes: list[subprocess.Popen], logs: list[Path],
+                       timeout_s: int) -> None:
+    deadline = time.monotonic() + timeout_s
+    pending = set(range(len(processes)))
+    while pending:
+        for index in list(pending):
+            returncode = processes[index].poll()
+            if returncode is None:
+                continue
+            pending.remove(index)
+            if returncode != 0:
+                raise RuntimeError(
+                    f"learner {index} failed with exit code {returncode}:\n{_tail(logs[index])}"
+                )
+        if not pending:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"learners timed out after {timeout_s}s")
+        time.sleep(1)
+
+
+def summarize_tape(path: Path, learners: int) -> dict:
+    records = []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    c_steps = [
+        int(responder.get("c_steps", 0))
+        for record in records
+        for responder in record.get("responders", [])
+    ]
+    c_tokens = [
+        int(responder.get("c_tokens", 0))
+        for record in records
+        for responder in record.get("responders", [])
+    ]
+    responders = [len(record.get("responders", [])) for record in records]
+    sync_ms = [float(record.get("ms", 0.0)) for record in records]
+    staleness = []
+    version_history: dict[int, list[int]] = {}
+    for record in records:
+        fragment = int(record.get("fragment", -1))
+        history = version_history.setdefault(fragment, [0])
+        previous = history[-1]
+        for responder in record.get("responders", []):
+            base = int(responder.get("base_version", previous))
+            staleness.append(sum(1 for version in history[1:] if version > base))
+        if fragment >= 0:
+            history.append(int(record.get("step", previous)))
+    return {
+        "merges": len(records),
+        "responses": len(c_steps),
+        "mean_h": statistics.fmean(c_steps) if c_steps else None,
+        "median_h": statistics.median(c_steps) if c_steps else None,
+        "mean_tokens_per_response": (
+            statistics.fmean(c_tokens) if c_tokens else None
+        ),
+        "median_tokens_per_response": (
+            statistics.median(c_tokens) if c_tokens else None
+        ),
+        "mean_responders": statistics.fmean(responders) if responders else None,
+        "participation_rate": (
+            sum(responders) / (len(records) * learners)
+            if records and learners > 0
+            else None
+        ),
+        "mean_sync_ms": statistics.fmean(sync_ms) if sync_ms else None,
+        "mean_staleness": statistics.fmean(staleness) if staleness else None,
+        "max_staleness": max(staleness) if staleness else None,
+    }
+
+
+def _tensor_bytes(numel: int, wire_dtype: str, *, broadcast: bool) -> int:
+    if wire_dtype == "f32":
+        return numel * 4
+    if wire_dtype == "q4" and not broadcast:
+        return math.ceil(numel / 256) * (4 + 128)
+    return numel * 2
+
+
+def estimate_tensor_bytes(fragment_numels: list[int], tape_path: Path,
+                          wire_dtype: str, learners: int) -> int:
+    records = []
+    if tape_path.exists():
+        for line in tape_path.read_text(encoding="utf-8").splitlines():
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    init = sum(_tensor_bytes(n, wire_dtype, broadcast=True) for n in fragment_numels)
+    total = init + learners * init
+    for record in records:
+        fragment = int(record.get("fragment", -1))
+        if not 0 <= fragment < len(fragment_numels):
+            continue
+        numel = fragment_numels[fragment]
+        total += len(record.get("responders", [])) * _tensor_bytes(
+            numel, wire_dtype, broadcast=False
+        )
+        total += learners * _tensor_bytes(numel, wire_dtype, broadcast=True)
+    return total
+
+
+def run_baseline(args, m: int, seed: int, train_data: Path, seed_dir: Path) -> dict:
+    run_dir = seed_dir / f"baseline-m{m}"
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    total_ranks = m * args.learner_gpus
+    steps = steps_for(
+        args.token_budget,
+        args.micro_batch_size,
+        args.seq_len,
+        1,
+        world=total_ranks,
+        grad_accum=args.grad_accum,
+    )
+    command = learner_command(
+        args,
+        run_dir,
+        learner_id=0,
+        num_learners=1,
+        syncer="none",
+        max_steps=steps,
+        arm=None,
+        nproc=total_ranks,
+        seed=seed,
+        train_data=train_data,
     )
     wait_for_free_gpus(args.device)
-    t0 = time.monotonic()
-    learners = []
+    started = time.monotonic()
+    learner_log = run_dir / "learner.log"
+    run_checked(
+        command,
+        learner_log,
+        env=cuda_env(0, total_ranks, args.device),
+        timeout_s=args.arm_timeout_min * 60,
+    )
+    wall = time.monotonic() - started
+    telemetry = summarize_training_logs([learner_log])
+    expected_tokens = processed_tokens(
+        steps,
+        args.micro_batch_size,
+        args.seq_len,
+        total_ranks,
+        args.grad_accum,
+    )
+    if telemetry["reported_ranks"] != total_ranks:
+        raise RuntimeError(
+            f"baseline-m{m}: expected telemetry from {total_ranks} ranks, "
+            f"found {telemetry['reported_ranks']}"
+        )
+    if telemetry["processed_tokens"] != expected_tokens:
+        raise RuntimeError(
+            f"baseline-m{m}: expected {expected_tokens} raw tokens, learner "
+            f"reported {telemetry['processed_tokens']}"
+        )
+    return {
+        "artifact": run_dir / "learner-0",
+        "wall_s": wall,
+        "steps_per_learner": steps,
+        "total_ranks": total_ranks,
+        "total_gpus": total_ranks if args.device.startswith("cuda") else 0,
+        **telemetry,
+    }
+
+
+def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> dict:
+    run_dir = seed_dir / arm.name
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    total_ranks = arm.learners * args.learner_gpus
+    steps = steps_for(
+        args.token_budget,
+        args.micro_batch_size,
+        args.seq_len,
+        arm.learners,
+        world=args.learner_gpus,
+        grad_accum=args.grad_accum,
+    )
+    port = free_port()
+    syncer_steps = max(arm.fragments, steps * arm.learners * arm.fragments * 2)
+    syncer_log_path = run_dir / "syncer.log"
+    syncer_log = syncer_log_path.open("w", encoding="utf-8")
+    syncer = subprocess.Popen(
+        syncer_command(
+            arm,
+            port,
+            run_dir,
+            total_steps=syncer_steps,
+            grace_ms=args.grace_ms,
+        ),
+        cwd=REPO_ROOT,
+        stdout=syncer_log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    processes: list[subprocess.Popen] = []
+    handles = []
+    learner_logs: list[Path] = []
+    wait_for_free_gpus(args.device)
+    started = time.monotonic()
     try:
-        for i in range(arm.m):
-            cmd = learner_command(args, arm_dir, learner_id=i, num_learners=arm.m,
-                                  syncer=f"127.0.0.1:{port}", max_steps=steps, arm=arm)
-            log = open(arm_dir / f"learner-{i}.log", "w")
-            learners.append(subprocess.Popen(
-                cmd, cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT,
-                env=gpu_env(i, args.learner_gpus),
-            ))
-        for proc in learners:
-            rc = proc.wait(timeout=args.arm_timeout_min * 60)
-            if rc != 0:
-                raise RuntimeError(f"{arm.name}: a learner exited {rc}; see {arm_dir}")
+        for learner_id in range(arm.learners):
+            command = learner_command(
+                args,
+                run_dir,
+                learner_id=learner_id,
+                num_learners=arm.learners,
+                syncer=f"127.0.0.1:{port}",
+                max_steps=steps,
+                arm=arm,
+                nproc=args.learner_gpus,
+                seed=seed,
+                train_data=train_data,
+            )
+            log_path = run_dir / f"learner-{learner_id}.log"
+            handle = log_path.open("w", encoding="utf-8")
+            handles.append(handle)
+            learner_logs.append(log_path)
+            processes.append(
+                subprocess.Popen(
+                    command,
+                    cwd=REPO_ROOT,
+                    stdout=handle,
+                    stderr=subprocess.STDOUT,
+                    env=cuda_env(
+                        learner_id * args.learner_gpus,
+                        args.learner_gpus,
+                        args.device,
+                    ),
+                    start_new_session=True,
+                )
+            )
+        _wait_for_learners(processes, learner_logs, args.arm_timeout_min * 60)
+        time.sleep(args.drain_seconds)
+        if syncer.poll() is not None:
+            raise RuntimeError(
+                f"{arm.name}: syncer exited before the token budget ended\n"
+                f"{_tail(syncer_log_path)}"
+            )
     finally:
-        for proc in learners:
-            if proc.poll() is None:
-                proc.terminate()
-        syncer.terminate()
-        syncer.wait(timeout=30)
-    wall = time.monotonic() - t0
-    ckpt = arm_dir / "state.ckpt"
-    if not ckpt.exists():
-        raise RuntimeError(f"{arm.name}: no syncer checkpoint (no round completed); see {arm_dir}")
-    # Export the merged global parameters to a peft adapter dir.
-    export_dir = arm_dir / "export"
+        for process in processes:
+            _stop_process(process)
+        _stop_process(syncer)
+        for handle in handles:
+            handle.close()
+        syncer_log.close()
+    wall = time.monotonic() - started
+    telemetry = summarize_training_logs(learner_logs)
+    expected_tokens = processed_tokens(
+        steps,
+        args.micro_batch_size,
+        args.seq_len,
+        total_ranks,
+        args.grad_accum,
+    )
+    if telemetry["reported_ranks"] != total_ranks:
+        raise RuntimeError(
+            f"{arm.name}: expected telemetry from {total_ranks} ranks, "
+            f"found {telemetry['reported_ranks']}"
+        )
+    if telemetry["processed_tokens"] != expected_tokens:
+        raise RuntimeError(
+            f"{arm.name}: expected {expected_tokens} raw tokens, learner "
+            f"reported {telemetry['processed_tokens']}"
+        )
+
+    checkpoint = run_dir / "state.ckpt"
+    if not checkpoint.exists():
+        raise RuntimeError(
+            f"{arm.name}: no syncer checkpoint was produced\n{_tail(syncer_log_path)}"
+        )
+    export_dir = run_dir / "export"
+    wait_for_free_gpus(args.export_device)
+    export_started = time.monotonic()
     run_checked(
         [
-            sys.executable, "-m", "yeto.export",
-            "--checkpoint", str(ckpt),
-            "--model", args.model,
-            "--tuning", "lora",
-            "--lora-r", str(args.lora_r),
-            "--lora-alpha", str(args.lora_alpha),
-            "--fragments", str(arm.fragments),
-            "--fragment-pattern", arm.fragment_pattern,
-            "--matrix-merge", arm.matrix_merge,
-            "--output-dir", str(export_dir),
-            "--device", "cpu",
+            sys.executable,
+            "-m",
+            "yeto.export",
+            "--checkpoint",
+            str(checkpoint),
+            "--model",
+            args.model,
+            "--tuning",
+            "lora",
+            "--lora-r",
+            str(args.lora_r),
+            "--lora-alpha",
+            str(args.lora_alpha),
+            "--lora-targets",
+            args.lora_targets,
+            "--fragments",
+            str(arm.fragments),
+            "--fragment-pattern",
+            arm.fragment_pattern,
+            "--matrix-merge",
+            arm.matrix_merge,
+            "--output-dir",
+            str(export_dir),
+            "--device",
+            args.export_device,
         ],
-        arm_dir / "export.log",
+        run_dir / "export.log",
+        timeout_s=args.arm_timeout_min * 60,
     )
-    return export_dir, wall
+    export_s = time.monotonic() - export_started
 
+    from yeto.export import parse_checkpoint
 
-def run_checked(cmd: list[str], log: Path, env: dict | None = None) -> None:
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with open(log, "w") as f:
-        rc = subprocess.run(
-            cmd, cwd=REPO_ROOT, stdout=f, stderr=subprocess.STDOUT, env=env
-        ).returncode
-    if rc != 0:
-        tail = "\n".join(log.read_text().splitlines()[-6:])
-        raise RuntimeError(f"command failed ({rc}): {' '.join(cmd)}\n{tail}")
+    parsed = parse_checkpoint(checkpoint)
+    fragment_numels = [int(flat.numel()) for _, flat, _ in parsed.fragments]
+    tape_path = run_dir / "tape.jsonl"
+    tape = summarize_tape(tape_path, arm.learners)
+    tape["estimated_tensor_bytes"] = estimate_tensor_bytes(
+        fragment_numels, tape_path, arm.wire_dtype, arm.learners
+    )
+    return {
+        "artifact": export_dir,
+        "wall_s": wall,
+        "export_s": export_s,
+        "steps_per_learner": steps,
+        "total_ranks": total_ranks,
+        "total_gpus": total_ranks if args.device.startswith("cuda") else 0,
+        "global_step": parsed.global_step,
+        "fragment_versions": [version for version, _, _ in parsed.fragments],
+        "tape": tape,
+        **telemetry,
+    }
 
 
 def ensure_syncer() -> None:
-    if not SYNCER_BIN.exists():
-        print("[compare] building syncer (cargo build --release)")
-        subprocess.run(["cargo", "build", "--release", "-q"], cwd=REPO_ROOT / "syncer", check=True)
+    if SYNCER_BIN.exists():
+        return
+    print("[lm-benchmark] building Rust syncer", flush=True)
+    subprocess.run(
+        ["cargo", "build", "--release", "--quiet"],
+        cwd=REPO_ROOT / "syncer",
+        check=True,
+    )
 
 
-def main() -> int:
-    p = argparse.ArgumentParser(
+def make_record(*, kind: str, arm: str, seed: int | None, learners: int,
+                run: dict, evaluation: dict,
+                gpu_hour_cost: float | None) -> dict:
+    wall_s = float(run.get("wall_s", 0.0))
+    total_gpus = int(run.get("total_gpus", 0))
+    gpu_hours = total_gpus * wall_s / 3600.0
+    tokens = int(run.get("processed_tokens", 0))
+    target_tokens = int(run.get("processed_target_tokens", 0))
+    return {
+        "kind": kind,
+        "arm": arm,
+        "seed": seed,
+        "learners": learners,
+        "total_ranks": int(run.get("total_ranks", 0)),
+        "total_gpus": total_gpus,
+        "steps_per_learner": int(run.get("steps_per_learner", 0)),
+        "processed_tokens": tokens,
+        "processed_target_tokens": target_tokens,
+        "target_density": run.get("target_density"),
+        "wall_s": wall_s,
+        "export_s": float(run.get("export_s", 0.0)),
+        "tokens_per_s": tokens / wall_s if wall_s > 0 else None,
+        "target_tokens_per_s": target_tokens / wall_s if wall_s > 0 else None,
+        "gpu_hours": gpu_hours,
+        "estimated_cost": (
+            gpu_hours * gpu_hour_cost if gpu_hour_cost is not None else None
+        ),
+        "eval": evaluation,
+        "global_step": run.get("global_step"),
+        "fragment_versions": run.get("fragment_versions"),
+        "tape": run.get("tape"),
+    }
+
+
+def _mean_std(values: list[float]) -> tuple[float | None, float | None]:
+    if not values:
+        return None, None
+    return statistics.fmean(values), statistics.stdev(values) if len(values) > 1 else 0.0
+
+
+def aggregate_records(records: list[dict]) -> list[dict]:
+    baselines = {
+        (record["seed"], record["learners"]): record["eval"]["loss_per_token"]
+        for record in records
+        if record["kind"] == "baseline"
+    }
+    order = []
+    grouped: dict[tuple[str, str, int], list[dict]] = {}
+    for record in records:
+        key = (record["kind"], record["arm"], record["learners"])
+        if key not in grouped:
+            order.append(key)
+            grouped[key] = []
+        grouped[key].append(record)
+
+    output = []
+    for kind, arm, learners in order:
+        group = grouped[(kind, arm, learners)]
+        losses = [record["eval"]["loss_per_token"] for record in group]
+        loss_mean, loss_std = _mean_std(losses)
+        perplexities = [
+            record["eval"]["perplexity"]
+            for record in group
+            if record["eval"].get("perplexity") is not None
+        ]
+        perplexity_mean, perplexity_std = _mean_std(perplexities)
+        deltas = []
+        if kind == "diloco":
+            for record in group:
+                baseline = baselines[(record["seed"], learners)]
+                deltas.append(
+                    100.0
+                    * (record["eval"]["loss_per_token"] - baseline)
+                    / baseline
+                )
+        delta_mean, delta_std = _mean_std(deltas)
+        tape_records = [record.get("tape") or {} for record in group]
+
+        def tape_mean(name: str):
+            values = [tape[name] for tape in tape_records if tape.get(name) is not None]
+            return statistics.fmean(values) if values else None
+
+        output.append(
+            {
+                "kind": kind,
+                "arm": arm,
+                "learners": learners,
+                "runs": len(group),
+                "total_gpus": group[0]["total_gpus"],
+                "processed_tokens": group[0]["processed_tokens"],
+                "target_tokens_mean": statistics.fmean(
+                    record.get("processed_target_tokens", 0) for record in group
+                ),
+                "target_density_mean": statistics.fmean(
+                    record["target_density"]
+                    for record in group
+                    if record.get("target_density") is not None
+                )
+                if any(record.get("target_density") is not None for record in group)
+                else None,
+                "loss_mean": loss_mean,
+                "loss_std": loss_std,
+                "perplexity_mean": perplexity_mean,
+                "perplexity_std": perplexity_std,
+                "delta_mean_pct": delta_mean,
+                "delta_std_pct": delta_std,
+                "wall_mean_s": statistics.fmean(record["wall_s"] for record in group),
+                "tokens_per_s_mean": (
+                    statistics.fmean(
+                        record["tokens_per_s"]
+                        for record in group
+                        if record["tokens_per_s"] is not None
+                    )
+                    if any(record["tokens_per_s"] is not None for record in group)
+                    else None
+                ),
+                "target_tokens_per_s_mean": (
+                    statistics.fmean(
+                        record["target_tokens_per_s"]
+                        for record in group
+                        if record.get("target_tokens_per_s") is not None
+                    )
+                    if any(
+                        record.get("target_tokens_per_s") is not None
+                        for record in group
+                    )
+                    else None
+                ),
+                "gpu_hours_mean": statistics.fmean(record["gpu_hours"] for record in group),
+                "estimated_cost_mean": (
+                    statistics.fmean(
+                        record["estimated_cost"]
+                        for record in group
+                        if record["estimated_cost"] is not None
+                    )
+                    if any(record["estimated_cost"] is not None for record in group)
+                    else None
+                ),
+                "mean_h": tape_mean("mean_h"),
+                "mean_tokens_per_response": tape_mean("mean_tokens_per_response"),
+                "participation_rate": tape_mean("participation_rate"),
+                "mean_staleness": tape_mean("mean_staleness"),
+                "sync_bytes_mean": tape_mean("estimated_tensor_bytes"),
+            }
+        )
+    return output
+
+
+def write_partial_results(report_dir: Path, records: list[dict]) -> None:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / "results.jsonl"
+    temporary = report_dir / "results.jsonl.tmp"
+    with temporary.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
+def load_partial_results(report_dir: Path) -> list[dict]:
+    path = report_dir / "results.jsonl"
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _record_key(record: dict) -> tuple[str | None, str | None, int | None]:
+    return record.get("kind"), record.get("arm"), record.get("seed")
+
+
+def validate_target_token_match(
+    records: list[dict], arm: Arm, seed: int, run: dict
+) -> None:
+    baseline = next(
+        (
+            record
+            for record in records
+            if record.get("kind") == "baseline"
+            and record.get("seed") == seed
+            and record.get("learners") == arm.learners
+        ),
+        None,
+    )
+    if baseline is None:
+        raise RuntimeError(
+            f"{arm.name}: missing seed={seed} baseline-m{arm.learners} record"
+        )
+    expected = baseline.get("processed_target_tokens")
+    actual = run.get("processed_target_tokens")
+    if expected != actual:
+        raise RuntimeError(
+            f"{arm.name}: target-token mismatch against baseline-m{arm.learners} "
+            f"for seed={seed}: baseline={expected}, arm={actual}; data order is "
+            "not paired, so this run is invalid"
+        )
+
+
+def validate_eval_token_match(records: list[dict], evaluation: dict) -> None:
+    base = next(
+        (record for record in records if record.get("kind") == "base"),
+        None,
+    )
+    if base is None:
+        raise RuntimeError("missing base evaluation record")
+    expected = base["eval"]["trained_tokens"]
+    actual = evaluation["trained_tokens"]
+    if actual != expected:
+        raise RuntimeError(
+            f"held-out target-token mismatch: base={expected}, artifact={actual}"
+        )
+
+
+def _jsonable_args(args) -> dict:
+    return {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in vars(args).items()
+        if key not in {"eval_only", "adapter_dir"}
+    }
+
+
+def write_config(args, arms: list[Arm]) -> None:
+    args.report_dir.mkdir(parents=True, exist_ok=True)
+    config = {
+        "format_version": 1,
+        "arguments": _jsonable_args(args),
+        "seeds": parse_seeds(args.seeds),
+        "arms": [asdict(arm) for arm in arms],
+        "fairness_contract": {
+            "same_total_ranks": True,
+            "same_per_rank_batch": True,
+            "same_optimizer_steps": True,
+            "same_raw_token_budget": True,
+            "same_training_target_tokens": True,
+            "same_held_out_eval_tokens": True,
+            "paired_rank_data_order": True,
+            "repeated_training_seeds": True,
+            "diloco_artifact": "syncer checkpoint export",
+        },
+    }
+    (args.report_dir / "config.json").write_text(
+        json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def write_report(args, arms: list[Arm], records: list[dict]) -> list[dict]:
+    write_config(args, arms)
+    write_partial_results(args.report_dir, records)
+    aggregates = aggregate_records(records)
+    (args.report_dir / "summary.json").write_text(
+        json.dumps(aggregates, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    lines = [
+        f"# LM DiLoCo benchmark: {args.model}",
+        "",
+        f"Raw-token budget: {args.token_budget}; seeds: {args.seeds}; "
+        f"held-out rows: {args.eval_rows}",
+        "",
+        "## Quality And Token Accounting",
+        "",
+        "| arm | M | runs | GPUs | raw tokens | target tokens | target % "
+        "| CE/token | perplexity | delta vs sync |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+
+    def fmt(value, digits=3):
+        return "-" if value is None else f"{value:.{digits}f}"
+
+    for item in aggregates:
+        loss = (
+            "-"
+            if item["loss_mean"] is None
+            else f"{item['loss_mean']:.6f} +/- {item['loss_std']:.6f}"
+        )
+        delta = (
+            "-"
+            if item["delta_mean_pct"] is None
+            else f"{item['delta_mean_pct']:+.2f}% +/- {item['delta_std_pct']:.2f}"
+        )
+        perplexity = (
+            "-"
+            if item["perplexity_mean"] is None
+            else f"{item['perplexity_mean']:.3f} +/- {item['perplexity_std']:.3f}"
+        )
+        target_density = (
+            None
+            if item["target_density_mean"] is None
+            else 100.0 * item["target_density_mean"]
+        )
+        target_tokens = (
+            "-" if item["kind"] == "base" else f"{item['target_tokens_mean']:.0f}"
+        )
+        lines.append(
+            f"| {item['arm']} | {item['learners'] or '-'} | {item['runs']} "
+            f"| {item['total_gpus'] or '-'} | {item['processed_tokens'] or '-'} "
+            f"| {target_tokens} | {fmt(target_density, 1)} "
+            f"| {loss} | {perplexity} | {delta} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Systems Diagnostics",
+            "",
+            "| arm | M | train s | raw tok/s | target tok/s | GPU-h | cost "
+            "| mean H | tokens/response | participation | stale | sync GB |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for item in aggregates:
+        participation = (
+            None
+            if item["participation_rate"] is None
+            else 100.0 * item["participation_rate"]
+        )
+        sync_gb = (
+            None if item["sync_bytes_mean"] is None else item["sync_bytes_mean"] / 1e9
+        )
+        lines.append(
+            f"| {item['arm']} | {item['learners'] or '-'} "
+            f"| {item['wall_mean_s']:.1f} | {fmt(item['tokens_per_s_mean'], 1)} "
+            f"| {fmt(item['target_tokens_per_s_mean'], 1)} "
+            f"| {item['gpu_hours_mean']:.3f} | {fmt(item['estimated_cost_mean'], 2)} "
+            f"| {fmt(item['mean_h'], 2)} "
+            f"| {fmt(item['mean_tokens_per_response'], 0)} "
+            f"| {fmt(participation, 1)} | {fmt(item['mean_staleness'], 2)} "
+            f"| {fmt(sync_gb, 3)} |"
+        )
+    report = "\n".join(lines) + "\n"
+    (args.report_dir / "report.md").write_text(report, encoding="utf-8")
+    print(report)
+    return aggregates
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--model", default="lfm25-230m")
-    p.add_argument("--data", required=True, help="messages-format chat rows (HF id or local path)")
-    p.add_argument("--token-budget", type=int, default=500_000,
-                   help="total training tokens per arm (split across an arm's learners)")
-    p.add_argument("--settings", default="m2", help=f"comma list of {list(PRESETS)} or 'all'")
-    p.add_argument("--seq-len", type=int, default=512)
-    p.add_argument("--micro-batch-size", type=int, default=2)
-    p.add_argument("--inner-lr", type=float, default=3e-4)
-    p.add_argument("--lora-r", type=int, default=16)
-    p.add_argument("--lora-alpha", type=int, default=32)
-    p.add_argument("--eval-rows", type=int, default=64, help="held-out rows for scoring")
-    p.add_argument("--round-interval-ms", type=int, default=None,
-                   help="override the round-launch floor of throttled presets "
-                   "(m2h24): the right value is H * step_time / fragments, and "
-                   "step time depends on hardware")
-    p.add_argument("--baseline-loss", type=float, default=None,
-                   help="skip the synchronous baseline arm and compare against "
-                   "this eval loss/token (from a previous run with the same "
-                   "model, data, seed and budget)")
-    p.add_argument("--max-rows", type=int, default=None, help="cap training rows")
-    p.add_argument("--device", default="cpu", help="learner/eval device (cpu, mps, cuda)")
-    p.add_argument("--shard", choices=["ddp", "fsdp"], default="ddp",
-                   help="multi-GPU strategy inside a learner (fsdp shards the "
-                   "frozen base when it exceeds one GPU)")
-    p.add_argument("--learner-gpus", type=int, default=0,
-                   help="GPUs per learner; learner i owns the GPU block "
-                   "[i*g, (i+1)*g) and runs under torchrun when g > 1. "
-                   "0 = single process on --device")
-    p.add_argument("--arm-timeout-min", type=int, default=120)
-    p.add_argument("--work-dir", type=Path, default=REPO_ROOT / "compare-work")
-    p.add_argument("--report-dir", type=Path, default=REPO_ROOT / "compare-report")
-    p.add_argument("--dry-run", action="store_true", help="print the plan; run nothing")
-    # Internal: scoring runs as a child process so VRAM is freed on exit.
-    p.add_argument("--eval-only", action="store_true", help=argparse.SUPPRESS)
-    p.add_argument("--adapter-dir", type=Path, default=None, help=argparse.SUPPRESS)
-    args = p.parse_args()
+    parser.add_argument("--model", default="lfm25-230m")
+    parser.add_argument(
+        "--data", required=True, help="messages-format HF id, local path, or S3 prefix"
+    )
+    parser.add_argument("--settings", default="m2")
+    parser.add_argument("--seeds", default="17,29,43")
+    parser.add_argument("--token-budget", type=int, default=500_000)
+    parser.add_argument("--eval-rows", type=int, default=64)
+    parser.add_argument("--max-rows", type=int, default=None, help="cap training rows")
 
-    if args.eval_only:
-        loss = eval_loss_per_token(
-            args.model, args.adapter_dir, Path(args.data), args.seq_len, args.device
+    parser.add_argument("--seq-len", type=int, default=512)
+    parser.add_argument("--micro-batch-size", type=int, default=2)
+    parser.add_argument("--grad-accum", type=int, default=1)
+    parser.add_argument("--inner-lr", type=float, default=3e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--warmup-steps", type=int, default=10)
+    parser.add_argument("--train-on", choices=["assistant", "all"], default="assistant")
+    parser.add_argument("--lora-r", type=int, default=16)
+    parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument(
+        "--lora-targets",
+        choices=["auto", "attention", "all-linear"],
+        default="auto",
+    )
+    parser.add_argument("--fragments", type=int, default=8)
+    parser.add_argument("--wan-streams", type=int, default=4)
+    parser.add_argument("--grace-ms", type=int, default=1000)
+    parser.add_argument(
+        "--gradient-checkpointing", choices=["auto", "on", "off"], default="auto"
+    )
+
+    parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument("--eval-device", choices=["cpu", "cuda"], default=None)
+    parser.add_argument("--export-device", choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument("--shard", choices=["ddp", "fsdp"], default="ddp")
+    parser.add_argument(
+        "--learner-gpus",
+        type=int,
+        default=1,
+        help="ranks per island; on CUDA, each rank owns one GPU",
+    )
+    parser.add_argument("--gpu-hour-cost", type=float, default=None)
+    parser.add_argument("--arm-timeout-min", type=int, default=240)
+    parser.add_argument("--drain-seconds", type=float, default=3.0)
+    parser.add_argument(
+        "--work-dir", type=Path, default=REPO_ROOT / "lm-benchmark-work"
+    )
+    parser.add_argument(
+        "--report-dir", type=Path, default=REPO_ROOT / "lm-benchmark-report"
+    )
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--eval-only", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--adapter-dir", type=Path, default=None, help=argparse.SUPPRESS)
+    return parser
+
+
+def validate_args(args, arms: list[Arm], *, check_devices: bool = True) -> None:
+    parse_seeds(args.seeds)
+    for name in (
+        "token_budget",
+        "eval_rows",
+        "seq_len",
+        "micro_batch_size",
+        "grad_accum",
+        "learner_gpus",
+        "fragments",
+    ):
+        if getattr(args, name) < 1:
+            raise ValueError(f"--{name.replace('_', '-')} must be positive")
+    if args.max_rows is not None and args.max_rows < 1:
+        raise ValueError("--max-rows must be positive")
+    if args.inner_lr <= 0 or args.weight_decay < 0:
+        raise ValueError("--inner-lr must be positive and --weight-decay non-negative")
+    if args.warmup_steps < 0 or args.arm_timeout_min <= 0:
+        raise ValueError("--warmup-steps must be non-negative and timeout positive")
+    if args.lora_r < 1 or args.lora_alpha < 1 or args.wan_streams < 1:
+        raise ValueError("LoRA dimensions and --wan-streams must be positive")
+    if args.gpu_hour_cost is not None and args.gpu_hour_cost < 0:
+        raise ValueError("--gpu-hour-cost must be non-negative")
+    if args.grace_ms < 0 or args.drain_seconds < 0:
+        raise ValueError("--grace-ms and --drain-seconds must be non-negative")
+    if args.device == "cpu" and args.shard == "fsdp":
+        raise ValueError("CPU benchmarks require --shard ddp")
+    if args.eval_device is None:
+        args.eval_device = args.device
+    if check_devices and any(
+        value.startswith("cuda")
+        for value in (args.device, args.eval_device, args.export_device)
+    ):
+        import torch
+
+        required = (
+            max(arm.learners for arm in arms) * args.learner_gpus
+            if args.device.startswith("cuda")
+            else 1
         )
-        print(f"EVAL_LOSS {loss:.6f}")
+        available = torch.cuda.device_count()
+        if available < required:
+            raise ValueError(
+                f"largest arm needs {required} GPUs, but torch sees {available}"
+            )
+
+
+def print_plan(args, arms: list[Arm]) -> None:
+    seeds = parse_seeds(args.seeds)
+    print(
+        f"[lm-benchmark] model={args.model} tokens={args.token_budget} "
+        f"seq_len={args.seq_len} train_on={args.train_on} "
+        f"stream_workers=0 seeds={seeds}"
+    )
+    for m in sorted({arm.learners for arm in arms}):
+        ranks = m * args.learner_gpus
+        steps = steps_for(
+            args.token_budget,
+            args.micro_batch_size,
+            args.seq_len,
+            1,
+            world=ranks,
+            grad_accum=args.grad_accum,
+        )
+        actual = processed_tokens(
+            steps,
+            args.micro_batch_size,
+            args.seq_len,
+            ranks,
+            args.grad_accum,
+        )
+        print(
+            f"  baseline-m{m}: one process group, {ranks} ranks, "
+            f"{steps} steps, {actual} raw tokens"
+        )
+    for arm in arms:
+        ranks = arm.learners * args.learner_gpus
+        steps = steps_for(
+            args.token_budget,
+            args.micro_batch_size,
+            args.seq_len,
+            arm.learners,
+            world=args.learner_gpus,
+            grad_accum=args.grad_accum,
+        )
+        print(
+            f"  {arm.name}: {arm.learners} islands x {args.learner_gpus} ranks, "
+            f"{steps} steps/island, P={arm.fragments}, H={arm.sync_interval_steps}, "
+            f"alpha={arm.merge_alpha}, wire={arm.wire_dtype}, "
+            f"merge={arm.matrix_merge}"
+        )
+    print(f"  repetitions: {len(seeds)} training seed(s)")
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.eval_only:
+        result = evaluate_loss(
+            args.model,
+            args.adapter_dir,
+            Path(args.data),
+            args.seq_len,
+            args.device,
+            args.train_on,
+        )
+        print("EVAL_JSON " + json.dumps(result, sort_keys=True))
         return 0
 
-    arms = select_arms(args.settings)
-    if args.round_interval_ms is not None:
-        from dataclasses import replace as _replace
+    try:
+        arms = select_arms(args.settings, args.fragments)
+        if args.overwrite and args.resume:
+            raise ValueError("--overwrite and --resume are mutually exclusive")
+        validate_args(args, arms, check_devices=not args.dry_run)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
-        arms = [_replace(a, round_interval_ms=args.round_interval_ms)
-                if a.round_interval_ms else a for a in arms]
-    world = max(1, args.learner_gpus)
-    base_steps = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, 1, world)
-    print(f"[compare] model={args.model} budget={args.token_budget} tokens "
-          f"(baseline: {base_steps} steps of {args.micro_batch_size}x{args.seq_len}"
-          f"{f' x{world} ranks' if world > 1 else ''})")
-    for arm in arms:
-        s = steps_for(args.token_budget, args.micro_batch_size, args.seq_len, arm.m, world)
-        print(f"  {arm.name:<10} M={arm.m} {s} steps/learner "
-              f"P={arm.fragments} alpha={arm.merge_alpha} wire={arm.wire_dtype} "
-              f"merge={arm.matrix_merge} pipeline={arm.pipeline} "
-              f"correction={arm.delta_correction}")
+    print_plan(args, arms)
     if args.dry_run:
         return 0
 
-    if args.learner_gpus > 0:
-        import torch
-
-        need = max(arm.m for arm in arms) * args.learner_gpus
-        have = torch.cuda.device_count()
-        if have < need:
+    if args.work_dir.exists() and not args.resume:
+        if not args.overwrite:
             raise SystemExit(
-                f"largest arm needs {need} GPUs ({args.learner_gpus} per learner) "
-                f"but only {have} are visible"
+                f"{args.work_dir} already exists; pass --overwrite to replace benchmark output"
             )
-    ensure_syncer()
-    if args.work_dir.exists():
         shutil.rmtree(args.work_dir)
-    train, evalf, n_train = split_data(args.data, args.work_dir, args.eval_rows, args.max_rows)
-    print(f"[compare] {n_train} train rows, {args.eval_rows} eval rows")
-
-    records = []
-    base = eval_in_subprocess(args, None, evalf)
-    records.append({"arm": "base (untrained)", "m": 0, "wall_s": 0.0, "eval_loss": base})
-    print(f"[compare] base eval loss/token: {base:.4f}", flush=True)
-
-    if args.baseline_loss is not None:
-        bl = args.baseline_loss
-        records.append({"arm": "baseline (sync, injected)", "m": 1, "wall_s": 0.0,
-                        "eval_loss": bl})
-        print(f"[compare] baseline eval loss/token: {bl:.4f} (injected)", flush=True)
-    else:
-        adapters, wall = run_baseline(args, args.work_dir)
-        bl = eval_in_subprocess(args, adapters, evalf)
-        records.append({"arm": "baseline (sync)", "m": 1, "wall_s": round(wall, 1),
-                        "eval_loss": bl})
-        print(f"[compare] baseline eval loss/token: {bl:.4f} ({wall:.0f}s)", flush=True)
-
-    for arm in arms:
-        adapters, wall = run_diloco(args, arm, args.work_dir)
-        loss = eval_in_subprocess(args, adapters, evalf)
-        records.append({"arm": arm.name, "m": arm.m, "wall_s": round(wall, 1),
-                        "eval_loss": loss})
-        print(f"[compare] {arm.name} eval loss/token: {loss:.4f} ({wall:.0f}s)", flush=True)
-
+    if args.report_dir.exists() and not args.resume:
+        if not args.overwrite:
+            raise SystemExit(
+                f"{args.report_dir} already exists; pass --overwrite to replace benchmark output"
+            )
+        shutil.rmtree(args.report_dir)
+    args.work_dir.mkdir(parents=True, exist_ok=True)
     args.report_dir.mkdir(parents=True, exist_ok=True)
-    with open(args.report_dir / "results.jsonl", "w") as f:
-        for r in records:
-            f.write(json.dumps(r) + "\n")
-    md = [
-        f"# DiLoCo vs synchronous baseline — {args.model}, "
-        f"{args.token_budget} tokens/arm",
-        "",
-        "| arm | M | wall (s) | eval loss/token | Δ vs baseline |",
-        "|---|---|---|---|---|",
-    ]
-    for r in records:
-        delta = "—" if r["arm"].startswith(("base", "baseline")) else (
-            f"{100 * (r['eval_loss'] - bl) / bl:+.2f}%"
+
+    try:
+        materialized_data = materialize_data_source(
+            args.data, args.work_dir / "source-data"
         )
-        md.append(f"| {r['arm']} | {r['m'] or '—'} | {r['wall_s']:.0f} "
-                  f"| {r['eval_loss']:.4f} | {delta} |")
-    (args.report_dir / "report.md").write_text("\n".join(md) + "\n")
-    print("\n".join(md))
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    if materialized_data != args.data:
+        args.materialized_data = materialized_data
+    train_data, eval_data, train_rows = split_data(
+        materialized_data,
+        args.work_dir,
+        args.eval_rows,
+        args.max_rows,
+    )
+    consumers = max(arm.learners for arm in arms) * args.learner_gpus
+    if train_rows < consumers:
+        raise SystemExit(
+            f"only {train_rows} train rows for up to {consumers} learner/rank consumers"
+        )
+    print(
+        f"[lm-benchmark] materialized {train_rows} train rows and "
+        f"{args.eval_rows} held-out rows"
+    )
+    write_config(args, arms)
+    ensure_syncer()
+
+    records = load_partial_results(args.report_dir) if args.resume else []
+    completed = {_record_key(record) for record in records}
+    if ("base", "base", None) not in completed:
+        base_eval = eval_in_subprocess(
+            args, None, eval_data, args.work_dir / "base-eval.log"
+        )
+        records.append(
+            make_record(
+                kind="base",
+                arm="base",
+                seed=None,
+                learners=0,
+                run={},
+                evaluation=base_eval,
+                gpu_hour_cost=args.gpu_hour_cost,
+            )
+        )
+        completed.add(("base", "base", None))
+        write_partial_results(args.report_dir, records)
+        print(
+            f"[lm-benchmark] base CE/token={base_eval['loss_per_token']:.6f}",
+            flush=True,
+        )
+    else:
+        print("[lm-benchmark] resume: skipping completed base evaluation")
+
+    distinct_m = sorted({arm.learners for arm in arms})
+    for seed in parse_seeds(args.seeds):
+        seed_dir = args.work_dir / f"seed-{seed}"
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        for m in distinct_m:
+            key = ("baseline", f"baseline-m{m}", seed)
+            if key in completed:
+                print(
+                    f"[lm-benchmark] resume: skipping seed={seed} baseline-m{m}",
+                    flush=True,
+                )
+                continue
+            print(f"[lm-benchmark] seed={seed} baseline-m{m}", flush=True)
+            run = run_baseline(args, m, seed, train_data, seed_dir)
+            evaluation = eval_in_subprocess(
+                args,
+                run["artifact"],
+                eval_data,
+                seed_dir / f"baseline-m{m}" / "eval.log",
+            )
+            validate_eval_token_match(records, evaluation)
+            records.append(
+                make_record(
+                    kind="baseline",
+                    arm=f"baseline-m{m}",
+                    seed=seed,
+                    learners=m,
+                    run=run,
+                    evaluation=evaluation,
+                    gpu_hour_cost=args.gpu_hour_cost,
+                )
+            )
+            completed.add(key)
+            write_partial_results(args.report_dir, records)
+
+        for arm in arms:
+            key = ("diloco", arm.name, seed)
+            if key in completed:
+                print(
+                    f"[lm-benchmark] resume: skipping seed={seed} arm={arm.name}",
+                    flush=True,
+                )
+                continue
+            print(f"[lm-benchmark] seed={seed} arm={arm.name}", flush=True)
+            run = run_diloco(args, arm, seed, train_data, seed_dir)
+            validate_target_token_match(records, arm, seed, run)
+            evaluation = eval_in_subprocess(
+                args,
+                run["artifact"],
+                eval_data,
+                seed_dir / arm.name / "eval.log",
+            )
+            validate_eval_token_match(records, evaluation)
+            records.append(
+                make_record(
+                    kind="diloco",
+                    arm=arm.name,
+                    seed=seed,
+                    learners=arm.learners,
+                    run=run,
+                    evaluation=evaluation,
+                    gpu_hour_cost=args.gpu_hour_cost,
+                )
+            )
+            completed.add(key)
+            write_partial_results(args.report_dir, records)
+
+    write_report(args, arms, records)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

@@ -159,6 +159,10 @@ LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
 
 [docs/DESIGN.md](docs/DESIGN.md) — merge math, blending, adaptive grace,
 delta correction, q4 wire format, snapshots, resilience.
+[docs/LM_BENCHMARK.md](docs/LM_BENCHMARK.md) — equal-hardware causal-LM
+DiLoCo benchmark design, arms, metrics, and interpretation.
+[docs/DIFFUSION_BENCHMARK.md](docs/DIFFUSION_BENCHMARK.md) — corresponding
+diffusion benchmark design and video/image-specific controls.
 [docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
 [docs/MEGATRON.md](docs/MEGATRON.md) — the Megatron-Core island backend (EP
 for 1T-class MoE).
