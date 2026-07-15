@@ -29,6 +29,7 @@ import torch
 import torch.distributed as dist
 
 from .autobatch import int_or_auto, rebalance_grad_accum, resolve_micro_batch_size
+from .barrier import drain_required_broadcasts
 from .data import StreamingPackedBlocks, build_packed_dataset
 from .fragments import FragmentLayout, build_layout
 from .layout_metadata import build_fragment_order_metadata, build_layout_metadata
@@ -1708,14 +1709,14 @@ def run_inner_loop(
                 # merged global. drain/apply reuse the boundary helpers so the
                 # applied state is bit-identical to a broadcast picked up at a
                 # step boundary. A no-op unless --barrier-sync pushed above.
-                while barrier_sync and awaiting_broadcast and not shutdown:
-                    client.check_health()
-                    waited = drain_broadcast_actions()
-                    if waited:
-                        apply_broadcast_world1(waited)
-                    else:
-                        time.sleep(0.002)
-                    shutdown = client.shutdown.is_set()
+                if barrier_sync and awaiting_broadcast:
+                    drain_required_broadcasts(
+                        awaiting_broadcast,
+                        client,
+                        drain_broadcast_actions,
+                        apply_broadcast_world1,
+                    )
+                shutdown = client.shutdown.is_set()
 
             if shutdown or steps_total >= args.max_local_steps:
                 break
