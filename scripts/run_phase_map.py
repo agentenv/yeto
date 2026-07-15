@@ -628,6 +628,10 @@ def compare_command(
         "--learner-max-steps",
         str(args.learner_max_steps),
         "--strict-quorum",
+        "--pipeline-depth",
+        "4",
+        "--wan-streams",
+        "0",
         "--barrier-sync",
         "--version-matched-anchor",
         "--syncer-checkpoint-every",
@@ -982,6 +986,10 @@ def build_schema_fixture(
                     "tokens": protocol["token_budget"],
                     "microsteps": protocol["token_budget"] // protocol["seq_len"],
                     "outer_steps": cell["target_work"]["outer_steps"],
+                    "per_fragment_outer_steps": {
+                        fragment: cell["target_work"]["outer_steps"] // 4
+                        for fragment in range(4)
+                    },
                     "full_quorum": True,
                     "fixed_window_exact": True,
                     "version_matched_anchor_resolved": True,
@@ -1090,8 +1098,18 @@ def build_schema_fixture(
                     + "/gpu-allocation.json",
                     "learner_gpu_map_sha256": evidence_sha,
                     "barrier_version_trace_uri": row["capture_uri"]
-                    + "/tape.jsonl",
+                    + "/barrier-version-trace.json",
                     "barrier_version_trace_sha256": evidence_sha,
+                    "barrier_version_trace_canonical_sha256": evidence_sha,
+                    "barrier_trace_validated": True,
+                    "base_versions_match": True,
+                    "no_inner_step_while_blocked": True,
+                    "barrier_trace_learner_count": 4,
+                    "barrier_trace_commit_count": row["work"]["outer_steps"],
+                    "barrier_trace_inner_steps_per_learner": (
+                        row["work"]["outer_steps"] // 4
+                        * row["work"]["fixed_window_microsteps"]
+                    ),
                     "distinct_a100_gpu_uuid_count": 4,
                     "learner_gpu_uuid_bijection": {
                         str(learner): f"GPU-schema-fixture-{learner}"
@@ -1174,6 +1192,13 @@ def build_retry_schema_fixture(
             "outer_steps": fixture["horizon_work"][str(row["h"])][
                 "outer_steps"
             ],
+            "per_fragment_outer_steps": {
+                fragment: fixture["horizon_work"][str(row["h"])][
+                    "outer_steps"
+                ]
+                // 4
+                for fragment in range(4)
+            },
             "full_quorum": True,
             "fixed_window_exact": True,
             "version_matched_anchor_resolved": True,
@@ -1523,6 +1548,7 @@ def validate_tape(path: Path, cell: dict[str, Any], args: argparse.Namespace) ->
     responder_microsteps = 0
     responder_tokens = 0
     base_versions: dict[tuple[int, int], list[int]] = defaultdict(list)
+    prior_fragment_commit = {fragment: 0 for fragment in range(4)}
     for index, row in enumerate(rows, 1):
         if row.get("step") != index:
             raise PhaseMapError(f"event tape step {index} is missing or reordered")
@@ -1533,6 +1559,12 @@ def validate_tape(path: Path, cell: dict[str, Any], args: argparse.Namespace) ->
         responders = row.get("responders")
         if not isinstance(responders, list) or sorted(r.get("id") for r in responders) != [0, 1, 2, 3]:
             raise PhaseMapError(f"step {index} lacks exact full quorum")
+        row_base_versions = {responder.get("base_version") for responder in responders}
+        if row_base_versions != {prior_fragment_commit[fragment]}:
+            raise PhaseMapError(
+                f"step {index} responder bases do not equal fragment {fragment}'s "
+                "immediately prior committed global step"
+            )
         for responder in responders:
             if responder.get("c_steps") != cell["H"]:
                 raise PhaseMapError(f"step {index} has non-H microstep work")
@@ -1545,12 +1577,23 @@ def validate_tape(path: Path, cell: dict[str, Any], args: argparse.Namespace) ->
             base_versions[(responder["id"], fragment)].append(
                 int(responder["base_version"])
             )
+        prior_fragment_commit[fragment] = index
     expected_per_fragment = expected_steps // 4
     if fragments != Counter({i: expected_per_fragment for i in range(4)}):
         raise PhaseMapError("outer commits are not balanced across four fragments")
     for key, versions in base_versions.items():
-        if versions != sorted(versions) or len(versions) != len(set(versions)):
-            raise PhaseMapError(f"non-monotone base versions for learner/fragment {key}")
+        expected_versions = [
+            0,
+            *[
+                int(row["step"])
+                for row in rows
+                if row.get("fragment") == key[1]
+            ][:-1],
+        ]
+        if versions != expected_versions:
+            raise PhaseMapError(
+                f"non-exact base-version progression for learner/fragment {key}"
+            )
     observed = {
         "tokens": responder_tokens // 4,
         "microsteps": responder_microsteps // 4,
@@ -1559,6 +1602,8 @@ def validate_tape(path: Path, cell: dict[str, Any], args: argparse.Namespace) ->
         "full_quorum": True,
         "fixed_window_exact": True,
         "version_matched_anchor_resolved": True,
+        "base_versions_match": True,
+        "fragment_base_progression_exact": True,
     }
     for key in ("tokens", "microsteps", "outer_steps"):
         if observed[key] != cell["target_work"][key]:
@@ -1566,6 +1611,255 @@ def validate_tape(path: Path, cell: dict[str, Any], args: argparse.Namespace) ->
                 f"observed {key}={observed[key]} != target {cell['target_work'][key]}"
             )
     return observed
+
+
+def validate_barrier_version_trace(
+    attempt_dir: Path,
+    tape_rows: list[dict[str, Any]],
+    cell: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Validate the sealed learner-local barrier state machines against tape.
+
+    Cross-machine clocks and event sequence numbers are deliberately never
+    compared.  Each learner trace is checked in its own causal order, then its
+    pushes and applied broadcasts are joined exactly to the syncer tape.
+    """
+    registry_path = attempt_dir / "report" / "barrier-version-trace.json"
+    registry = load_json_object(registry_path, "barrier version trace registry")
+    if (
+        registry.get("schema") != "yeto_barrier_version_trace_v1"
+        or registry.get("learner_count") != 4
+    ):
+        raise PhaseMapError("barrier trace registry has the wrong schema/count")
+
+    def verify_entry(entry: Any, expected_relative: str, label: str) -> Path:
+        if not isinstance(entry, dict) or entry.get("path") != expected_relative:
+            raise PhaseMapError(f"{label} registry path differs from the exact artifact")
+        path = attempt_dir / expected_relative
+        if not path.is_file() or path.is_symlink():
+            raise PhaseMapError(f"{label} registry artifact is missing or unsafe")
+        if entry.get("sha256") != sha256_file(path):
+            raise PhaseMapError(f"{label} registry hash mismatch")
+        size = entry.get("size_bytes")
+        if isinstance(size, bool) or not isinstance(size, int) or size != path.stat().st_size:
+            raise PhaseMapError(f"{label} registry size mismatch")
+        return path
+
+    tape_path = verify_entry(
+        registry.get("syncer_tape"), "work/m4/tape.jsonl", "syncer tape"
+    )
+    if read_jsonl(tape_path) != tape_rows:
+        raise PhaseMapError("barrier registry tape differs from validated event tape")
+
+    entries = registry.get("learner_traces")
+    if not isinstance(entries, list) or len(entries) != 4:
+        raise PhaseMapError("barrier registry must contain exactly four learner traces")
+    by_learner = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise PhaseMapError("barrier learner registry entry is malformed")
+        learner_id = entry.get("learner_id")
+        if (
+            isinstance(learner_id, bool)
+            or not isinstance(learner_id, int)
+            or learner_id not in range(4)
+            or learner_id in by_learner
+        ):
+            raise PhaseMapError("barrier registry learner IDs must be exactly 0..3")
+        by_learner[learner_id] = verify_entry(
+            entry,
+            f"work/m4/learner-{learner_id}/barrier-version-trace.jsonl",
+            f"learner {learner_id} trace",
+        )
+    if set(by_learner) != {0, 1, 2, 3}:
+        raise PhaseMapError("barrier registry learner IDs must be exactly 0..3")
+
+    expected_pushes: dict[tuple[int, int], dict[str, int]] = {}
+    for row in tape_rows:
+        step = int(row["step"])
+        fragment = int(row["fragment"])
+        for responder in row["responders"]:
+            learner_id = int(responder["id"])
+            expected_pushes[(learner_id, step)] = {
+                "fragment": fragment,
+                "base_version": int(responder["base_version"]),
+                "c_steps": int(responder["c_steps"]),
+                "c_tokens": int(responder["c_tokens"]),
+            }
+
+    # Each H-step optimizer window advances all four fragments concurrently.
+    # Thus the per-learner optimizer-step count is aggregate fragment work / 4.
+    target_microsteps = int(cell["target_work"]["microsteps"])
+    if target_microsteps % 4:
+        raise PhaseMapError("P0 target microsteps are not divisible by four fragments")
+    expected_inner_steps = target_microsteps // 4
+    push_counts: dict[int, int] = {}
+    broadcast_counts: dict[int, int] = {}
+    inner_counts: dict[int, int] = {}
+    for learner_id in range(4):
+        rows = read_jsonl(by_learner[learner_id])
+        awaiting: dict[int, tuple[int, int, int]] = {}
+        reset_local_step = {fragment: 0 for fragment in range(4)}
+        initial_fragments: set[int] = set()
+        seen_pushes: set[int] = set()
+        seen_broadcasts: set[int] = set()
+        next_inner_step = 1
+        previous_local_step = 0
+        for sequence, row in enumerate(rows, 1):
+            if (
+                row.get("schema") != "yeto_barrier_trace_v1"
+                or row.get("event_seq") != sequence
+                or row.get("learner_id") != learner_id
+            ):
+                raise PhaseMapError(
+                    f"learner {learner_id} barrier trace schema/sequence/identity mismatch"
+                )
+            local_step = row.get("local_step")
+            if (
+                isinstance(local_step, bool)
+                or not isinstance(local_step, int)
+                or local_step < previous_local_step
+            ):
+                raise PhaseMapError(
+                    f"learner {learner_id} barrier trace local_step is not monotone"
+                )
+            previous_local_step = local_step
+            declared_awaiting = row.get("awaiting_fragments")
+            event = row.get("event")
+            if event == "initial_broadcast_applied":
+                fragment = row.get("fragment")
+                initial_version = row.get("broadcast_version")
+                if (
+                    sequence not in range(1, 5)
+                    or isinstance(fragment, bool)
+                    or not isinstance(fragment, int)
+                    or fragment != sequence - 1
+                    or local_step != 0
+                    or isinstance(initial_version, bool)
+                    or not isinstance(initial_version, int)
+                    or initial_version != 0
+                    or declared_awaiting != []
+                    or awaiting
+                    or fragment in initial_fragments
+                ):
+                    raise PhaseMapError(
+                        f"learner {learner_id} initial broadcast prefix is not exact"
+                    )
+                initial_fragments.add(fragment)
+                continue
+            if event == "inner_step_started":
+                if (
+                    initial_fragments != {0, 1, 2, 3}
+                    or awaiting
+                    or declared_awaiting != []
+                    or local_step != next_inner_step
+                ):
+                    raise PhaseMapError(
+                        f"learner {learner_id} starts an inner step while blocked or out of order"
+                    )
+                next_inner_step += 1
+                continue
+            if event == "push_sent":
+                fragment = row.get("fragment")
+                pull_step = row.get("pull_step")
+                base_version = row.get("base_version")
+                expected = expected_pushes.get((learner_id, pull_step))
+                if (
+                    isinstance(fragment, bool)
+                    or not isinstance(fragment, int)
+                    or fragment not in range(4)
+                    or isinstance(pull_step, bool)
+                    or not isinstance(pull_step, int)
+                    or pull_step in seen_pushes
+                    or fragment in awaiting
+                    or initial_fragments != {0, 1, 2, 3}
+                    or expected is None
+                    or expected
+                    != {
+                        "fragment": fragment,
+                        "base_version": base_version,
+                        "c_steps": row.get("c_steps"),
+                        "c_tokens": row.get("c_tokens"),
+                    }
+                    or local_step
+                    != ((pull_step - 1) // 4 + 1) * int(cell["H"])
+                    or local_step
+                    != reset_local_step[fragment] + int(cell["H"])
+                ):
+                    raise PhaseMapError(
+                        f"learner {learner_id} push does not biject to the event tape"
+                    )
+                awaiting[fragment] = (pull_step, int(base_version), local_step)
+                seen_pushes.add(pull_step)
+            elif event == "broadcast_applied":
+                fragment = row.get("fragment")
+                pending = awaiting.get(fragment)
+                if pending is None:
+                    raise PhaseMapError(
+                        f"learner {learner_id} applies a broadcast without an outstanding push"
+                    )
+                pull_step, base_version, push_local_step = pending
+                if (
+                    row.get("pushed_base_version") != base_version
+                    or row.get("broadcast_version") != pull_step
+                    or pull_step <= base_version
+                    or local_step != push_local_step
+                    or pull_step in seen_broadcasts
+                ):
+                    raise PhaseMapError(
+                        f"learner {learner_id} broadcast does not release the exact pushed round"
+                    )
+                del awaiting[fragment]
+                reset_local_step[fragment] = local_step
+                seen_broadcasts.add(pull_step)
+            else:
+                raise PhaseMapError(
+                    f"learner {learner_id} barrier trace has unknown event {event!r}"
+                )
+            if declared_awaiting != sorted(awaiting):
+                raise PhaseMapError(
+                    f"learner {learner_id} declared awaiting set differs from causal state"
+                )
+        expected_steps = {
+            step for (expected_learner, step) in expected_pushes if expected_learner == learner_id
+        }
+        if awaiting or seen_pushes != expected_steps or seen_broadcasts != expected_steps:
+            raise PhaseMapError(
+                f"learner {learner_id} barrier trace lacks exact push/broadcast coverage"
+            )
+        if initial_fragments != {0, 1, 2, 3}:
+            raise PhaseMapError(
+                f"learner {learner_id} lacks exact initial broadcast coverage"
+            )
+        if next_inner_step - 1 != expected_inner_steps:
+            raise PhaseMapError(
+                f"learner {learner_id} has {next_inner_step - 1} inner steps, "
+                f"expected {expected_inner_steps}"
+            )
+        if set(reset_local_step.values()) != {expected_inner_steps}:
+            raise PhaseMapError(
+                f"learner {learner_id} fragment windows do not terminate at "
+                f"local step {expected_inner_steps}"
+            )
+        push_counts[learner_id] = len(seen_pushes)
+        broadcast_counts[learner_id] = len(seen_broadcasts)
+        inner_counts[learner_id] = next_inner_step - 1
+
+    return {
+        "registry_path": registry_path,
+        "registry_sha256": sha256_file(registry_path),
+        "registry_canonical_sha256": sha256_bytes(canonical_json(registry)),
+        "barrier_trace_validated": True,
+        "base_versions_match": True,
+        "no_inner_step_while_blocked": True,
+        "learner_count": 4,
+        "commit_count": len(tape_rows),
+        "inner_steps_per_learner": expected_inner_steps,
+        "push_counts": push_counts,
+        "broadcast_counts": broadcast_counts,
+        "inner_step_counts": inner_counts,
+    }
 
 
 def validate_layout(attempt_dir: Path) -> tuple[str, list[str]]:
@@ -1834,6 +2128,9 @@ def result_attempt(
     )
     tape = attempt_dir / "work" / "m4" / "tape.jsonl"
     observed_work = validate_tape(tape, cell, args)
+    barrier_evidence = validate_barrier_version_trace(
+        attempt_dir, read_jsonl(tape), cell, args
+    )
     layout_sha, merge_modes = validate_layout(attempt_dir)
     gpu_evidence = (
         validate_gpu_uuid_bijection(attempt_dir)
@@ -1868,6 +2165,21 @@ def result_attempt(
         "image_id": args.image_numeric_id,
         "provisioning_evidence_uri": common["provider_evidence_uri"],
         "provisioning_evidence_sha256": provider_sha,
+        "barrier_version_trace_uri": uri_for(
+            args, barrier_evidence["registry_path"]
+        ),
+        "barrier_version_trace_sha256": barrier_evidence["registry_sha256"],
+        "barrier_version_trace_canonical_sha256": barrier_evidence[
+            "registry_canonical_sha256"
+        ],
+        "barrier_trace_validated": True,
+        "base_versions_match": True,
+        "no_inner_step_while_blocked": True,
+        "barrier_trace_learner_count": barrier_evidence["learner_count"],
+        "barrier_trace_commit_count": barrier_evidence["commit_count"],
+        "barrier_trace_inner_steps_per_learner": barrier_evidence[
+            "inner_steps_per_learner"
+        ],
     }
     if gpu_evidence is not None:
         hardware.update(
@@ -1888,8 +2200,6 @@ def result_attempt(
                     args, gpu_evidence["allocation_path"]
                 ),
                 "learner_gpu_map_sha256": gpu_evidence["allocation_sha256"],
-                "barrier_version_trace_uri": uri_for(args, tape),
-                "barrier_version_trace_sha256": sha256_file(tape),
                 "distinct_a100_gpu_uuid_count": 4,
                 "learner_gpu_uuid_bijection": gpu_evidence[
                     "learner_gpu_uuid_bijection"
@@ -2377,6 +2687,7 @@ def acquisition_paths(run_dir: Path, manifest: dict[str, Any]) -> list[Path]:
                     / "report"
                     / "eval-provenance"
                     / "eval_provenance.json",
+                    attempt / "report" / "barrier-version-trace.json",
                     attempt / "work" / "m4" / "tape.jsonl",
                     attempt / "work" / "m4" / "state.ckpt",
                     *[
@@ -2385,6 +2696,14 @@ def acquisition_paths(run_dir: Path, manifest: dict[str, Any]) -> list[Path]:
                         / "m4"
                         / f"learner-{learner}"
                         / "resolved-layout.json"
+                        for learner in range(4)
+                    ],
+                    *[
+                        attempt
+                        / "work"
+                        / "m4"
+                        / f"learner-{learner}"
+                        / "barrier-version-trace.jsonl"
                         for learner in range(4)
                     ],
                 ]

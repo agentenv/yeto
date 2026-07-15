@@ -1231,6 +1231,36 @@ def run_inner_loop(
     # on the default non-barrier path.
     barrier_sync = bool(getattr(args, "barrier_sync", False))
     awaiting_broadcast: dict[int, int] = {}
+    barrier_trace = None
+    barrier_trace_seq = 0
+    if barrier_sync and rank == 0:
+        os.makedirs(args.output_dir, exist_ok=True)
+        barrier_trace = open(
+            os.path.join(args.output_dir, "barrier-version-trace.jsonl"),
+            "w",
+            buffering=1,
+        )
+
+    def emit_barrier_trace(event: str, local_step: int, **fields) -> None:
+        """Append one learner-local causal event for the frozen P0 barrier proof.
+
+        Event sequence, rather than cross-machine wall time, is authoritative.
+        The trace is emitted only for ``--barrier-sync`` rank-zero learners.
+        """
+        nonlocal barrier_trace_seq
+        if barrier_trace is None:
+            return
+        barrier_trace_seq += 1
+        row = {
+            "schema": "yeto_barrier_trace_v1",
+            "event_seq": barrier_trace_seq,
+            "learner_id": int(args.learner_id),
+            "local_step": int(local_step),
+            "event": event,
+            **fields,
+        }
+        barrier_trace.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+        barrier_trace.flush()
     # Q4 pushes are deltas anchored at the last *received* global value per
     # fragment; the utility probe also needs these anchors for bf16/f32 runs
     # so it can evaluate candidate deltas against the learner-known global
@@ -1353,7 +1383,63 @@ def run_inner_loop(
             # Barrier release: this fragment's merge has come back, so the
             # learner may resume once every pushed fragment is released.
             if awaiting_broadcast:
-                barrier_release(awaiting_broadcast, fid, version)
+                pushed_base_version = awaiting_broadcast.get(fid)
+                if barrier_release(awaiting_broadcast, fid, version):
+                    emit_barrier_trace(
+                        "broadcast_applied",
+                        steps_total,
+                        fragment=int(fid),
+                        pushed_base_version=int(pushed_base_version),
+                        broadcast_version=int(version),
+                        awaiting_fragments=sorted(awaiting_broadcast),
+                    )
+
+    # A barrier-synchronized run must begin from one fully registered global
+    # state.  INIT_PARAMS is sent asynchronously, so without this startup
+    # gate a learner can take local steps before version-zero broadcasts
+    # arrive; those late applies reset fragment windows after training has
+    # begun and invalidate the exact H-step schedule.  The phase-map transport
+    # pins every frame to one FIFO socket, making the 0..P-1 prefix exact.
+    if barrier_sync and rank == 0 and client is not None:
+        initial_fragments: set[int] = set()
+        startup_deadline = time.monotonic() + float(client.connect_timeout)
+        while len(initial_fragments) < layout.num_fragments:
+            if time.monotonic() >= startup_deadline:
+                raise RuntimeError(
+                    "barrier-sync timed out waiting for initial version-zero broadcasts"
+                )
+            client.check_health()
+            initial_actions = drain_broadcast_actions()
+            if not initial_actions:
+                if client.shutdown.is_set():
+                    raise RuntimeError(
+                        "barrier-sync received shutdown before initial broadcasts"
+                    )
+                time.sleep(0.002)
+                continue
+            for fid, version, _flat in initial_actions:
+                if (
+                    steps_total != 0
+                    or version != 0
+                    or fid in initial_fragments
+                    or fid not in range(layout.num_fragments)
+                ):
+                    raise RuntimeError(
+                        "barrier-sync initial broadcasts must be unique version-zero "
+                        "fragments applied before local training"
+                    )
+                initial_fragments.add(fid)
+            apply_broadcast_world1(initial_actions)
+            for fid, version, _flat in initial_actions:
+                emit_barrier_trace(
+                    "initial_broadcast_applied",
+                    0,
+                    fragment=int(fid),
+                    broadcast_version=int(version),
+                    awaiting_fragments=[],
+                )
+        if initial_fragments != set(range(layout.num_fragments)):
+            raise RuntimeError("barrier-sync initial fragment coverage is incomplete")
 
     shutdown = False
     epoch = 0
@@ -1390,6 +1476,16 @@ def run_inner_loop(
                 model.clip_grad_norm_(1.0)
             else:
                 torch.nn.utils.clip_grad_norm_(params.values(), 1.0)
+            if barrier_sync and awaiting_broadcast:
+                raise RuntimeError(
+                    "barrier-sync attempted an inner optimizer step while "
+                    f"awaiting fragments {sorted(awaiting_broadcast)}"
+                )
+            emit_barrier_trace(
+                "inner_step_started",
+                steps_total + 1,
+                awaiting_fragments=sorted(awaiting_broadcast),
+            )
             opt.step()
             sched.step()
             opt.zero_grad(set_to_none=True)
@@ -1547,6 +1643,16 @@ def run_inner_loop(
                         # apply_broadcast_world1 clears the entry. Re-pushes of
                         # the same round just refresh the same base version.
                         awaiting_broadcast[fid] = base_version_for_push
+                        emit_barrier_trace(
+                            "push_sent",
+                            steps_total,
+                            fragment=int(fid),
+                            pull_step=int(pull.global_step),
+                            base_version=int(base_version_for_push),
+                            c_steps=int(c_steps),
+                            c_tokens=int(c_tokens),
+                            awaiting_fragments=sorted(awaiting_broadcast),
+                        )
                     if lagged_broadcasts is not None:
                         # Lag mode: restart the fixed window at push time so
                         # every commit carries a fresh full window even while
@@ -1614,6 +1720,8 @@ def run_inner_loop(
             if shutdown or steps_total >= args.max_local_steps:
                 break
         epoch += 1
+    if barrier_trace is not None:
+        barrier_trace.close()
     log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
 
 

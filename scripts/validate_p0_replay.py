@@ -76,6 +76,290 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def validate_barrier_version_trace(
+    root: Path,
+    attempt: Path,
+    result: dict[str, Any],
+    tape: list[dict[str, Any]],
+    acquisition_registry: dict[str, str],
+    *,
+    h: int,
+    seq_len: int,
+) -> dict[str, Any]:
+    """Independently replay each learner's barrier causal state machine."""
+    registry_path = attempt / "report" / "barrier-version-trace.json"
+    registry_relative = registry_path.relative_to(root).as_posix()
+    if acquisition_registry.get(registry_relative) != sha256_file(registry_path):
+        raise ReplayError("barrier trace registry is not acquisition-sealed")
+    registry = read_json(registry_path)
+    if (
+        registry.get("schema") != "yeto_barrier_version_trace_v1"
+        or registry.get("learner_count") != 4
+    ):
+        raise ReplayError("barrier trace registry schema/count mismatch")
+
+    hardware = result.get("hardware")
+    if not isinstance(hardware, dict):
+        raise ReplayError("P0 result lacks barrier hardware attestations")
+    registry_sha = sha256_file(registry_path)
+    registry_canonical_sha = sha256_bytes(canonical_json(registry))
+    if (
+        hardware.get("barrier_version_trace_sha256") != registry_sha
+        or hardware.get("barrier_version_trace_canonical_sha256")
+        != registry_canonical_sha
+        or not str(hardware.get("barrier_version_trace_uri", "")).endswith(
+            "/" + registry_relative
+        )
+    ):
+        raise ReplayError("result hardware does not bind the sealed barrier registry")
+
+    def verify_entry(entry: Any, expected_relative: str, label: str) -> Path:
+        if not isinstance(entry, dict) or entry.get("path") != expected_relative:
+            raise ReplayError(f"{label} registry path mismatch")
+        path = attempt / expected_relative
+        root_relative = path.relative_to(root).as_posix()
+        if not path.is_file() or path.is_symlink():
+            raise ReplayError(f"{label} artifact is missing or unsafe")
+        digest = sha256_file(path)
+        if (
+            entry.get("sha256") != digest
+            or acquisition_registry.get(root_relative) != digest
+        ):
+            raise ReplayError(f"{label} artifact is not hash- and acquisition-bound")
+        size = entry.get("size_bytes")
+        if isinstance(size, bool) or not isinstance(size, int) or size != path.stat().st_size:
+            raise ReplayError(f"{label} artifact size mismatch")
+        return path
+
+    tape_path = verify_entry(
+        registry.get("syncer_tape"), "work/m4/tape.jsonl", "syncer tape"
+    )
+    if read_jsonl(tape_path) != tape:
+        raise ReplayError("barrier registry tape differs from replay tape")
+    trace_entries = registry.get("learner_traces")
+    if not isinstance(trace_entries, list) or len(trace_entries) != 4:
+        raise ReplayError("barrier registry lacks exactly four learner traces")
+    trace_paths: dict[int, Path] = {}
+    for entry in trace_entries:
+        if not isinstance(entry, dict):
+            raise ReplayError("malformed learner trace registry entry")
+        learner_id = entry.get("learner_id")
+        if (
+            isinstance(learner_id, bool)
+            or not isinstance(learner_id, int)
+            or learner_id not in range(4)
+            or learner_id in trace_paths
+        ):
+            raise ReplayError("barrier registry learner IDs are not exactly 0..3")
+        trace_paths[learner_id] = verify_entry(
+            entry,
+            f"work/m4/learner-{learner_id}/barrier-version-trace.jsonl",
+            f"learner {learner_id} trace",
+        )
+    if set(trace_paths) != {0, 1, 2, 3}:
+        raise ReplayError("barrier registry learner IDs are not exactly 0..3")
+
+    if [row.get("step") for row in tape] != list(range(1, len(tape) + 1)):
+        raise ReplayError("barrier tape steps are not exact contiguous commit IDs")
+    prior_fragment_commit = {fragment: 0 for fragment in range(4)}
+    fragment_counts: dict[int, int] = defaultdict(int)
+    expected_pushes: dict[tuple[int, int], dict[str, int]] = {}
+    for step, tape_row in enumerate(tape, 1):
+        fragment = tape_row.get("fragment")
+        responders = tape_row.get("responders")
+        if (
+            isinstance(fragment, bool)
+            or not isinstance(fragment, int)
+            or fragment not in range(4)
+            or not isinstance(responders, list)
+            or sorted(responder.get("id") for responder in responders) != [0, 1, 2, 3]
+        ):
+            raise ReplayError(f"barrier tape step {step} lacks exact fragment/quorum")
+        expected_base = prior_fragment_commit[fragment]
+        if {responder.get("base_version") for responder in responders} != {expected_base}:
+            raise ReplayError(
+                f"barrier tape step {step} bases differ from prior fragment commit"
+            )
+        for responder in responders:
+            if (
+                responder.get("c_steps") != h
+                or responder.get("c_tokens") != h * seq_len
+            ):
+                raise ReplayError(f"barrier tape step {step} has wrong fixed work")
+            learner_id = int(responder["id"])
+            expected_pushes[(learner_id, step)] = {
+                "fragment": fragment,
+                "base_version": expected_base,
+                "c_steps": h,
+                "c_tokens": h * seq_len,
+            }
+        prior_fragment_commit[fragment] = step
+        fragment_counts[fragment] += 1
+    if len(tape) % 4 or fragment_counts != {
+        fragment: len(tape) // 4 for fragment in range(4)
+    }:
+        raise ReplayError("barrier tape does not balance exact updates per fragment")
+
+    expected_inner_steps = len(tape) // 4 * h
+    for learner_id in range(4):
+        awaiting: dict[int, tuple[int, int, int]] = {}
+        reset_local_step = {fragment: 0 for fragment in range(4)}
+        initial_fragments: set[int] = set()
+        pushes: set[int] = set()
+        broadcasts: set[int] = set()
+        next_inner_step = 1
+        previous_local_step = 0
+        for event_seq, event in enumerate(read_jsonl(trace_paths[learner_id]), 1):
+            if (
+                event.get("schema") != "yeto_barrier_trace_v1"
+                or event.get("event_seq") != event_seq
+                or event.get("learner_id") != learner_id
+            ):
+                raise ReplayError(
+                    f"learner {learner_id} barrier event sequence/identity mismatch"
+                )
+            local_step = event.get("local_step")
+            if (
+                isinstance(local_step, bool)
+                or not isinstance(local_step, int)
+                or local_step < previous_local_step
+            ):
+                raise ReplayError(f"learner {learner_id} local_step is not monotone")
+            previous_local_step = local_step
+            declared_awaiting = event.get("awaiting_fragments")
+            event_kind = event.get("event")
+            if event_kind == "initial_broadcast_applied":
+                fragment = event.get("fragment")
+                initial_version = event.get("broadcast_version")
+                if (
+                    event_seq not in range(1, 5)
+                    or isinstance(fragment, bool)
+                    or not isinstance(fragment, int)
+                    or fragment != event_seq - 1
+                    or local_step != 0
+                    or isinstance(initial_version, bool)
+                    or not isinstance(initial_version, int)
+                    or initial_version != 0
+                    or declared_awaiting != []
+                    or awaiting
+                    or fragment in initial_fragments
+                ):
+                    raise ReplayError(
+                        f"learner {learner_id} initial broadcast prefix is not exact"
+                    )
+                initial_fragments.add(fragment)
+                continue
+            if event_kind == "inner_step_started":
+                if (
+                    initial_fragments != {0, 1, 2, 3}
+                    or awaiting
+                    or declared_awaiting != []
+                    or local_step != next_inner_step
+                ):
+                    raise ReplayError(
+                        f"learner {learner_id} starts an inner step while blocked/out of order"
+                    )
+                next_inner_step += 1
+                continue
+            if event_kind == "push_sent":
+                fragment = event.get("fragment")
+                pull_step = event.get("pull_step")
+                expected = expected_pushes.get((learner_id, pull_step))
+                if (
+                    isinstance(fragment, bool)
+                    or not isinstance(fragment, int)
+                    or fragment not in range(4)
+                    or isinstance(pull_step, bool)
+                    or not isinstance(pull_step, int)
+                    or pull_step in pushes
+                    or fragment in awaiting
+                    or initial_fragments != {0, 1, 2, 3}
+                    or expected is None
+                    or expected
+                    != {
+                        "fragment": fragment,
+                        "base_version": event.get("base_version"),
+                        "c_steps": event.get("c_steps"),
+                        "c_tokens": event.get("c_tokens"),
+                    }
+                    or local_step != ((pull_step - 1) // 4 + 1) * h
+                    or local_step != reset_local_step[fragment] + h
+                ):
+                    raise ReplayError(
+                        f"learner {learner_id} push does not biject to barrier tape"
+                    )
+                awaiting[fragment] = (
+                    pull_step,
+                    int(event["base_version"]),
+                    local_step,
+                )
+                pushes.add(pull_step)
+            elif event_kind == "broadcast_applied":
+                fragment = event.get("fragment")
+                pending = awaiting.get(fragment)
+                if pending is None:
+                    raise ReplayError(
+                        f"learner {learner_id} broadcast lacks an outstanding push"
+                    )
+                pull_step, base_version, push_local_step = pending
+                if (
+                    event.get("pushed_base_version") != base_version
+                    or event.get("broadcast_version") != pull_step
+                    or pull_step <= base_version
+                    or local_step != push_local_step
+                    or pull_step in broadcasts
+                ):
+                    raise ReplayError(
+                        f"learner {learner_id} broadcast does not release exact push"
+                    )
+                del awaiting[fragment]
+                reset_local_step[fragment] = local_step
+                broadcasts.add(pull_step)
+            else:
+                raise ReplayError(
+                    f"learner {learner_id} has unknown barrier event {event_kind!r}"
+                )
+            if declared_awaiting != sorted(awaiting):
+                raise ReplayError(
+                    f"learner {learner_id} declared awaiting state is false"
+                )
+        expected_steps = {
+            step for expected_learner, step in expected_pushes if expected_learner == learner_id
+        }
+        if awaiting or pushes != expected_steps or broadcasts != expected_steps:
+            raise ReplayError(
+                f"learner {learner_id} lacks exact push/broadcast coverage"
+            )
+        if initial_fragments != {0, 1, 2, 3}:
+            raise ReplayError(
+                f"learner {learner_id} lacks exact initial broadcast coverage"
+            )
+        if next_inner_step - 1 != expected_inner_steps:
+            raise ReplayError(
+                f"learner {learner_id} inner-step count differs from frozen work"
+            )
+        if set(reset_local_step.values()) != {expected_inner_steps}:
+            raise ReplayError(
+                f"learner {learner_id} fragment windows do not end at the frozen step"
+            )
+
+    expected_attestations = {
+        "barrier_trace_validated": True,
+        "base_versions_match": True,
+        "no_inner_step_while_blocked": True,
+        "barrier_trace_learner_count": 4,
+        "barrier_trace_commit_count": len(tape),
+        "barrier_trace_inner_steps_per_learner": expected_inner_steps,
+    }
+    if any(hardware.get(key) != value for key, value in expected_attestations.items()):
+        raise ReplayError("result barrier summary attestations differ from raw traces")
+    return {
+        **expected_attestations,
+        "barrier_version_trace_sha256": registry_sha,
+        "barrier_version_trace_canonical_sha256": registry_canonical_sha,
+    }
+
+
 def git_output(*args: str) -> bytes:
     result = subprocess.run(
         ["git", "-C", str(REPO_ROOT), *args], capture_output=True
@@ -377,6 +661,13 @@ def replay_cell(
     ):
         if flag not in command:
             raise ReplayError(f"P0 command lacks {flag}")
+    if (
+        command.count("--pipeline-depth") != 1
+        or option(command, "--pipeline-depth") != "4"
+    ):
+        raise ReplayError("P0 barrier command must use one pipeline slot per fragment")
+    if command.count("--wan-streams") != 1 or option(command, "--wan-streams") != "0":
+        raise ReplayError("P0 barrier command must serialize learner push streams")
     if option(command, "--syncer-probe-capture-every") != "1":
         raise ReplayError("P0 must capture every applied step")
     eta = np.float32(float(option(command, "--outer-lr")))
@@ -407,6 +698,15 @@ def replay_cell(
         range(1, len(tape) + 1)
     ):
         raise ReplayError("tape steps are not one contiguous ordered sequence")
+    barrier_attestation = validate_barrier_version_trace(
+        root,
+        attempt,
+        result,
+        tape,
+        registry,
+        h=command_coordinates["h"],
+        seq_len=command_seq_len,
+    )
     by_step: dict[int, list[dict[str, Any]]] = defaultdict(list)
     candidate_names: set[str] = set()
     for row in index:
@@ -648,6 +948,7 @@ def replay_cell(
         "state_chain_contiguous": True,
         "non_target_fragments_unchanged": True,
         "capture_tape_responder_join_exact": True,
+        **barrier_attestation,
         "max_param_abs_error": maximum_param_error,
         "max_momentum_abs_error": maximum_momentum_error,
         "max_gnorm_relative_error": maximum_gnorm_relative_error,

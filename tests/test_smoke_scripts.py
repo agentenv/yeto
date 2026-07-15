@@ -335,7 +335,7 @@ def test_learner_command_arm_overrides():
         fixed_window_microsteps=64, pad_to_fixed_window_tokens=True,
         freeze_delta_before_delay=True, learner_push_delay_ms="0,50",
         learner_step_sleep_ms="0", learner_delay_jitter_ms=20.0,
-        training_seed=123,
+        training_seed=123, wan_streams=0,
     )
     arm = compare.PRESETS["q4"]
     cmd = compare.learner_command(
@@ -345,6 +345,7 @@ def test_learner_command_arm_overrides():
     assert cmd[cmd.index("--wire-dtype") + 1] == "q4"
     assert cmd[cmd.index("--seed") + 1] == "123"
     assert cmd[cmd.index("--data") + 1].endswith("train.jsonl")
+    assert cmd[cmd.index("--wan-streams") + 1] == "0"
     base = compare.learner_command(
         args, Path("/tmp/w/baseline"), learner_id=0, num_learners=1,
         syncer="none", max_steps=10, arm=None,

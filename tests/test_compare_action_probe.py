@@ -193,6 +193,17 @@ def test_cttn_shadow_pseudo_optimizer_maps_to_sgd_commit_policy(tmp_path):
     assert cmd[cmd.index("--cttn-shadow-samples") + 1] == "32"
 
 
+def test_pipeline_depth_override_reaches_syncer_command(tmp_path):
+    arm = compare.apply_arm_overrides(
+        [compare.PRESETS["m4"]], pipeline_depth=4
+    )[0]
+    assert arm.pipeline == 4
+    cmd = compare.syncer_command(
+        arm, 29400, tmp_path / "m4", total_steps=32
+    )
+    assert cmd[cmd.index("--pipeline") + 1] == "4"
+
+
 def test_sidecar_command_uses_probe_only_visible_gpu_indices():
     cmd = compare.action_probe_command(
         _args(action_probe_gpus=[6, 7, 9]),

@@ -79,6 +79,10 @@ def _fixture(tmp_path: Path):
         "--syncer-probe-capture-every",
         "1",
         "--strict-quorum",
+        "--pipeline-depth",
+        "4",
+        "--wan-streams",
+        "0",
         "--barrier-sync",
         "--version-matched-anchor",
     ]
@@ -180,6 +184,88 @@ def _fixture(tmp_path: Path):
     )
     tape_path = attempt / "work" / "m4" / "tape.jsonl"
     tape_path.write_text("".join(json.dumps(row) + "\n" for row in tape_rows))
+    trace_entries = []
+    for learner in range(4):
+        trace_path = (
+            attempt
+            / "work"
+            / "m4"
+            / f"learner-{learner}"
+            / "barrier-version-trace.jsonl"
+        )
+        events = []
+
+        def emit(event, local_step, **fields):
+            events.append(
+                {
+                    "schema": "yeto_barrier_trace_v1",
+                    "event_seq": len(events) + 1,
+                    "learner_id": learner,
+                    "local_step": local_step,
+                    "event": event,
+                    **fields,
+                }
+            )
+
+        for fragment in range(4):
+            emit(
+                "initial_broadcast_applied",
+                0,
+                fragment=fragment,
+                broadcast_version=0,
+                awaiting_fragments=[],
+            )
+        emit("inner_step_started", 1, awaiting_fragments=[])
+        emit("inner_step_started", 2, awaiting_fragments=[])
+        awaiting = []
+        for step in range(1, 5):
+            fragment = step - 1
+            awaiting.append(fragment)
+            emit(
+                "push_sent",
+                2,
+                fragment=fragment,
+                pull_step=step,
+                base_version=0,
+                c_steps=2,
+                c_tokens=2,
+                awaiting_fragments=list(awaiting),
+            )
+        for step in range(1, 5):
+            fragment = step - 1
+            awaiting.remove(fragment)
+            emit(
+                "broadcast_applied",
+                2,
+                fragment=fragment,
+                pushed_base_version=0,
+                broadcast_version=step,
+                awaiting_fragments=list(awaiting),
+            )
+        trace_path.write_text("".join(json.dumps(event) + "\n" for event in events))
+        trace_entries.append(
+            {
+                "learner_id": learner,
+                "path": trace_path.relative_to(attempt).as_posix(),
+                "sha256": replay.sha256_file(trace_path),
+                "size_bytes": trace_path.stat().st_size,
+            }
+        )
+    barrier_registry_path = attempt / "report" / "barrier-version-trace.json"
+    barrier_registry_path.parent.mkdir(parents=True, exist_ok=True)
+    barrier_registry = {
+        "schema": "yeto_barrier_version_trace_v1",
+        "learner_count": 4,
+        "syncer_tape": {
+            "path": tape_path.relative_to(attempt).as_posix(),
+            "sha256": replay.sha256_file(tape_path),
+            "size_bytes": tape_path.stat().st_size,
+        },
+        "learner_traces": trace_entries,
+    }
+    barrier_registry_path.write_text(
+        json.dumps(barrier_registry, sort_keys=True, separators=(",", ":")) + "\n"
+    )
     _write_checkpoint(
         attempt / "work" / "m4" / "state.ckpt",
         versions,
@@ -233,6 +319,22 @@ def _fixture(tmp_path: Path):
                 "hardware": {
                     **provider,
                     "provisioning_evidence_sha256": provider_sha,
+                    "barrier_version_trace_uri": (
+                        "gs://bucket/p0/"
+                        + barrier_registry_path.relative_to(root).as_posix()
+                    ),
+                    "barrier_version_trace_sha256": replay.sha256_file(
+                        barrier_registry_path
+                    ),
+                    "barrier_version_trace_canonical_sha256": replay.sha256_bytes(
+                        replay.canonical_json(barrier_registry)
+                    ),
+                    "barrier_trace_validated": True,
+                    "base_versions_match": True,
+                    "no_inner_step_while_blocked": True,
+                    "barrier_trace_learner_count": 4,
+                    "barrier_trace_commit_count": 4,
+                    "barrier_trace_inner_steps_per_learner": 2,
                 },
             }
         ],
@@ -430,6 +532,144 @@ def test_replay_all_steps_only_after_verified_deletion(tmp_path):
     assert output.with_suffix(".json.sha256").is_file()
 
 
+def _barrier_replay_inputs(root: Path):
+    manifest = json.loads((root / "phase-map-manifest.json").read_text())
+    result = manifest["results"][0]
+    attempt = root / "cells" / result["cell_id"] / "attempt-1"
+    tape = replay.read_jsonl(attempt / "work/m4/tape.jsonl")
+    registry = replay.verify_acquisition(root, root / "acquisition.sha256")
+    return result, attempt, tape, registry
+
+
+def _reseal_barrier_trace_for_unit(
+    root: Path,
+    result: dict,
+    attempt: Path,
+    acquisition_registry: dict[str, str],
+    learner: int,
+):
+    registry_path = attempt / "report/barrier-version-trace.json"
+    trace_path = attempt / f"work/m4/learner-{learner}/barrier-version-trace.jsonl"
+    barrier_registry = json.loads(registry_path.read_text())
+    entry = next(
+        row
+        for row in barrier_registry["learner_traces"]
+        if row["learner_id"] == learner
+    )
+    entry["sha256"] = replay.sha256_file(trace_path)
+    entry["size_bytes"] = trace_path.stat().st_size
+    registry_path.write_text(
+        json.dumps(barrier_registry, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    trace_relative = trace_path.relative_to(root).as_posix()
+    registry_relative = registry_path.relative_to(root).as_posix()
+    acquisition_registry[trace_relative] = replay.sha256_file(trace_path)
+    acquisition_registry[registry_relative] = replay.sha256_file(registry_path)
+    result["hardware"]["barrier_version_trace_sha256"] = replay.sha256_file(
+        registry_path
+    )
+    result["hardware"]["barrier_version_trace_canonical_sha256"] = (
+        replay.sha256_bytes(replay.canonical_json(barrier_registry))
+    )
+
+
+def test_cpu_replay_rejects_inner_step_between_push_and_broadcast(tmp_path):
+    root, _deleted = _fixture(tmp_path)
+    result, attempt, tape, registry = _barrier_replay_inputs(root)
+    trace = attempt / "work/m4/learner-1/barrier-version-trace.jsonl"
+    events = replay.read_jsonl(trace)
+    push_index = next(
+        index for index, event in enumerate(events) if event["event"] == "push_sent"
+    )
+    events.insert(
+        push_index + 1,
+        {
+            "schema": "yeto_barrier_trace_v1",
+            "event_seq": 0,
+            "learner_id": 1,
+            "local_step": events[push_index]["local_step"] + 1,
+            "event": "inner_step_started",
+            "awaiting_fragments": [],
+        },
+    )
+    for sequence, event in enumerate(events, 1):
+        event["event_seq"] = sequence
+    trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+    _reseal_barrier_trace_for_unit(root, result, attempt, registry, 1)
+
+    with pytest.raises(replay.ReplayError, match="while blocked"):
+        replay.validate_barrier_version_trace(
+            root, attempt, result, tape, registry, h=2, seq_len=1
+        )
+
+
+def test_cpu_replay_rejects_rehashed_late_initial_broadcast(tmp_path):
+    root, _deleted = _fixture(tmp_path)
+    result, attempt, tape, registry = _barrier_replay_inputs(root)
+    trace = attempt / "work/m4/learner-3/barrier-version-trace.jsonl"
+    events = replay.read_jsonl(trace)
+    events[1]["local_step"] = 1
+    trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+    _reseal_barrier_trace_for_unit(root, result, attempt, registry, 3)
+
+    with pytest.raises(replay.ReplayError, match="initial broadcast prefix"):
+        replay.validate_barrier_version_trace(
+            root, attempt, result, tape, registry, h=2, seq_len=1
+        )
+
+
+def test_cpu_replay_rejects_missing_broadcast_even_when_rehashed(tmp_path):
+    root, _deleted = _fixture(tmp_path)
+    result, attempt, tape, registry = _barrier_replay_inputs(root)
+    trace = attempt / "work/m4/learner-2/barrier-version-trace.jsonl"
+    events = replay.read_jsonl(trace)
+    removed = False
+    retained = []
+    for event in events:
+        if not removed and event["event"] == "broadcast_applied":
+            removed = True
+            continue
+        retained.append(event)
+    for sequence, event in enumerate(retained, 1):
+        event["event_seq"] = sequence
+    trace.write_text("".join(json.dumps(event) + "\n" for event in retained))
+    _reseal_barrier_trace_for_unit(root, result, attempt, registry, 2)
+
+    with pytest.raises(replay.ReplayError, match="awaiting state|coverage"):
+        replay.validate_barrier_version_trace(
+            root, attempt, result, tape, registry, h=2, seq_len=1
+        )
+
+
+def test_cpu_replay_rejects_barrier_trace_omitted_from_acquisition(tmp_path):
+    root, _deleted = _fixture(tmp_path)
+    result, attempt, tape, registry = _barrier_replay_inputs(root)
+    omitted = attempt / "work/m4/learner-3/barrier-version-trace.jsonl"
+    registry.pop(omitted.relative_to(root).as_posix())
+
+    with pytest.raises(replay.ReplayError, match="acquisition-bound"):
+        replay.validate_barrier_version_trace(
+            root, attempt, result, tape, registry, h=2, seq_len=1
+        )
+
+
+def test_cpu_replay_rejects_rehashed_late_fragment_window(tmp_path):
+    root, _deleted = _fixture(tmp_path)
+    result, attempt, tape, registry = _barrier_replay_inputs(root)
+    trace = attempt / "work/m4/learner-0/barrier-version-trace.jsonl"
+    events = replay.read_jsonl(trace)
+    for event in events:
+        if event["event"] in ("push_sent", "broadcast_applied"):
+            event["local_step"] = 3
+    trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+    _reseal_barrier_trace_for_unit(root, result, attempt, registry, 0)
+
+    with pytest.raises(replay.ReplayError, match="push does not biject"):
+        replay.validate_barrier_version_trace(
+            root, attempt, result, tape, registry, h=2, seq_len=1
+        )
+
+
 def test_lifecycle_rejects_post_seal_scientific_mutation_even_if_rehashed(tmp_path):
     root, deleted = _fixture(tmp_path)
     manifest_path = root / "phase-map-manifest.json"
@@ -602,7 +842,11 @@ def test_replay_accepts_authenticated_same_vm_whole_block_retry_history(tmp_path
         "status": "INFRA_FAILURE",
         "failure_reason": "provider_spot_preemption",
     }
-    final = {**first, "attempt": 3}
+    final = json.loads(json.dumps(first))
+    final["attempt"] = 3
+    final["hardware"]["barrier_version_trace_uri"] = final["hardware"][
+        "barrier_version_trace_uri"
+    ].replace("/attempt-1/", "/attempt-3/")
     source = root / "cells" / first["cell_id"] / "attempt-1"
     destination = root / "cells" / first["cell_id"] / "attempt-3"
     shutil.copytree(source, destination)

@@ -253,6 +253,7 @@ def apply_arm_overrides(
     delta_correction: str | None = None,
     commit_policy: str | None = None,
     matrix_merge: str | None = None,
+    pipeline_depth: int | None = None,
 ) -> list[Arm]:
     """Apply CLI-wide async-arm overrides without mutating presets."""
     if all(
@@ -266,6 +267,7 @@ def apply_arm_overrides(
             delta_correction,
             commit_policy,
             matrix_merge,
+            pipeline_depth,
         )
     ):
         return arms
@@ -298,6 +300,7 @@ def apply_arm_overrides(
                 matrix_merge=(
                     arm.matrix_merge if matrix_merge is None else matrix_merge
                 ),
+                pipeline=arm.pipeline if pipeline_depth is None else pipeline_depth,
                 outer_lr=arm.outer_lr if outer_lr is None else outer_lr,
                 outer_lr_by_fragment=(
                     arm.outer_lr_by_fragment
@@ -552,6 +555,8 @@ def learner_command(
         str(args.inner_lr),
         "--max-local-steps",
         str(max_steps),
+        "--wan-streams",
+        str(getattr(args, "wan_streams", 4)),
         "--tokenize",
         "preload",
         "--shard",
@@ -1536,6 +1541,49 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def write_barrier_version_trace_registry(
+    arm_dir: Path, report_dir: Path, learner_count: int
+) -> Path:
+    """Bind the syncer tape and causal learner traces without asserting validity.
+
+    The phase-map runner and the independent CPU replay each validate the
+    event state machine.  This registry only provides one immutable object
+    whose hash commits to all of the underlying evidence files.
+    """
+    artifact_root = report_dir.parent
+    tape = arm_dir / "tape.jsonl"
+    traces = [
+        arm_dir / f"learner-{learner}" / "barrier-version-trace.jsonl"
+        for learner in range(learner_count)
+    ]
+    for path in (tape, *traces):
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"missing or unsafe barrier evidence: {path}")
+
+    def entry(path: Path) -> dict[str, object]:
+        return {
+            "path": path.relative_to(artifact_root).as_posix(),
+            "sha256": _sha256_file(path),
+            "size_bytes": path.stat().st_size,
+        }
+
+    registry_path = report_dir / "barrier-version-trace.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry = {
+        "schema": "yeto_barrier_version_trace_v1",
+        "learner_count": learner_count,
+        "syncer_tape": entry(tape),
+        "learner_traces": [
+            {"learner_id": learner, **entry(path)}
+            for learner, path in enumerate(traces)
+        ],
+    }
+    registry_path.write_text(
+        json.dumps(registry, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    return registry_path
+
+
 def _sha256_tensor(tensor, dtype: str) -> str:
     """Hash one tensor in an explicit little-endian representation."""
     array = tensor.detach().cpu().contiguous().numpy().astype(dtype, copy=False)
@@ -2202,6 +2250,10 @@ def run_diloco(args, arm: Arm, work: Path) -> tuple[Path, float]:
             validate_event_tape_records(
                 arm, records, expected_steps=args.syncer_total_steps
             )
+        if getattr(args, "barrier_sync", False):
+            write_barrier_version_trace_registry(
+                arm_dir, args.report_dir, arm.m
+            )
     # Export the merged global parameters to a peft adapter dir.
     export_dir = arm_dir / "export"
     run_checked(
@@ -2530,6 +2582,19 @@ def main() -> int:
         help="require the configured quorum for every merge and reject partial timeout/tail commits",
     )
     p.add_argument(
+        "--pipeline-depth",
+        type=int,
+        default=None,
+        help="override syncer rounds in flight for every selected async arm",
+    )
+    p.add_argument(
+        "--wan-streams",
+        type=int,
+        default=4,
+        help="parallel learner bulk-data streams; 0 routes bulk frames over "
+        "the FIFO control socket",
+    )
+    p.add_argument(
         "--probe-data",
         default=None,
         help="optional held-out data for fragment utility probe in async arms; "
@@ -2641,6 +2706,10 @@ def main() -> int:
 
     if args.syncer_total_steps < 0 or args.learner_max_steps < 0:
         p.error("--syncer-total-steps and --learner-max-steps must be non-negative")
+    if args.pipeline_depth is not None and args.pipeline_depth < 1:
+        p.error("--pipeline-depth must be positive")
+    if args.wan_streams < 0:
+        p.error("--wan-streams must be non-negative")
     if not math.isfinite(args.cttn_rho) or args.cttn_rho < 0.0:
         p.error("--cttn-rho must be finite and non-negative")
     if args.cttn_shadow_samples <= 0:
@@ -2686,6 +2755,7 @@ def main() -> int:
         delta_correction=args.delta_correction,
         commit_policy=args.commit_policy,
         matrix_merge=args.matrix_merge,
+        pipeline_depth=args.pipeline_depth,
     )
     if args.round_interval_ms is not None:
         from dataclasses import replace as _replace

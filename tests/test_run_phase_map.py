@@ -203,10 +203,14 @@ def test_plan_is_exact_blocked_36_cell_grid(tmp_path):
             "--skip-untrained-eval",
             "--matrix-merge",
             "--strict-quorum",
+            "--pipeline-depth",
+            "--wan-streams",
             "--barrier-sync",
             "--version-matched-anchor",
         ):
             assert flag in command
+        assert command[command.index("--pipeline-depth") + 1] == "4"
+        assert command[command.index("--wan-streams") + 1] == "0"
         assert "--baseline-loss" not in command
         assert command[command.index("--matrix-merge") + 1] == "rda"
         assert command[command.index("--eval-rows") + 1] == "1024"
@@ -321,7 +325,7 @@ def _write_tape(path: Path, cell: dict, *, partial_step: int | None = None):
             responders.append(
                 {
                     "id": learner,
-                    "base_version": (step - 1) // 4,
+                    "base_version": step - 4 if step > 4 else 0,
                     "c_steps": cell["H"],
                     "c_tokens": cell["H"] * 128,
                     "anchor_base_resolved": True,
@@ -359,6 +363,254 @@ def test_tape_validator_rejects_partial_quorum(tmp_path):
 
     with pytest.raises(rpm.PhaseMapError, match="full quorum"):
         rpm.validate_tape(tape, cell, args)
+
+
+def _write_barrier_evidence(attempt: Path, cell: dict, args):
+    tape = attempt / "work" / "m4" / "tape.jsonl"
+    _write_tape(tape, cell)
+    tape_rows = rpm.read_jsonl(tape)
+    learner_entries = []
+    for learner in range(4):
+        trace = (
+            attempt
+            / "work"
+            / "m4"
+            / f"learner-{learner}"
+            / "barrier-version-trace.jsonl"
+        )
+        trace.parent.mkdir(parents=True, exist_ok=True)
+        events = []
+        local_step = 0
+
+        def emit(event, **fields):
+            events.append(
+                {
+                    "schema": "yeto_barrier_trace_v1",
+                    "event_seq": len(events) + 1,
+                    "learner_id": learner,
+                    "local_step": local_step,
+                    "event": event,
+                    **fields,
+                }
+            )
+
+        for fragment in range(4):
+            emit(
+                "initial_broadcast_applied",
+                fragment=fragment,
+                broadcast_version=0,
+                awaiting_fragments=[],
+            )
+        for group_start in range(0, len(tape_rows), 4):
+            for _ in range(cell["H"]):
+                local_step += 1
+                emit("inner_step_started", awaiting_fragments=[])
+            awaiting = []
+            group = tape_rows[group_start : group_start + 4]
+            for tape_row in group:
+                fragment = tape_row["fragment"]
+                responder = tape_row["responders"][learner]
+                awaiting.append(fragment)
+                emit(
+                    "push_sent",
+                    fragment=fragment,
+                    pull_step=tape_row["step"],
+                    base_version=responder["base_version"],
+                    c_steps=responder["c_steps"],
+                    c_tokens=responder["c_tokens"],
+                    awaiting_fragments=list(awaiting),
+                )
+            for tape_row in group:
+                fragment = tape_row["fragment"]
+                responder = tape_row["responders"][learner]
+                awaiting.remove(fragment)
+                emit(
+                    "broadcast_applied",
+                    fragment=fragment,
+                    pushed_base_version=responder["base_version"],
+                    broadcast_version=tape_row["step"],
+                    awaiting_fragments=list(awaiting),
+                )
+        trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+        learner_entries.append(
+            {
+                "learner_id": learner,
+                "path": trace.relative_to(attempt).as_posix(),
+                "sha256": rpm.sha256_file(trace),
+                "size_bytes": trace.stat().st_size,
+            }
+        )
+    registry = {
+        "schema": "yeto_barrier_version_trace_v1",
+        "learner_count": 4,
+        "syncer_tape": {
+            "path": tape.relative_to(attempt).as_posix(),
+            "sha256": rpm.sha256_file(tape),
+            "size_bytes": tape.stat().st_size,
+        },
+        "learner_traces": learner_entries,
+    }
+    registry_path = attempt / "report" / "barrier-version-trace.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(json.dumps(registry) + "\n")
+    return tape_rows, registry_path
+
+
+def _refresh_barrier_registry_entry(registry_path: Path, learner: int):
+    registry = json.loads(registry_path.read_text())
+    trace = registry_path.parent.parent / registry["learner_traces"][learner]["path"]
+    registry["learner_traces"][learner]["sha256"] = rpm.sha256_file(trace)
+    registry["learner_traces"][learner]["size_bytes"] = trace.stat().st_size
+    registry_path.write_text(json.dumps(registry) + "\n")
+
+
+@pytest.mark.parametrize("stage", ["p0a", "p0b"])
+def test_barrier_trace_validator_proves_four_local_state_machines(tmp_path, stage):
+    args = _canary_args(tmp_path, stage)
+    cell = rpm.build_plan(args)["cells"][0]
+    attempt = tmp_path / "attempt"
+    tape_rows, _registry = _write_barrier_evidence(attempt, cell, args)
+
+    proof = rpm.validate_barrier_version_trace(attempt, tape_rows, cell, args)
+
+    assert proof["barrier_trace_validated"] is True
+    assert proof["learner_count"] == 4
+    assert proof["commit_count"] == cell["target_work"]["outer_steps"]
+    assert proof["inner_steps_per_learner"] == 128
+    learner_zero = rpm.read_jsonl(
+        attempt / "work/m4/learner-0/barrier-version-trace.jsonl"
+    )
+    assert [
+        (event["fragment"], event["broadcast_version"], event["local_step"])
+        for event in learner_zero[:4]
+    ] == [(fragment, 0, 0) for fragment in range(4)]
+    assert [
+        event["local_step"]
+        for event in learner_zero
+        if event["event"] == "push_sent"
+    ] == [boundary for boundary in range(16, 129, 16) for _ in range(4)]
+    assert not any(
+        event["event"] == "inner_step_started" and event["local_step"] == 129
+        for event in learner_zero
+    )
+
+
+def test_barrier_trace_validator_rejects_inner_step_before_broadcast(tmp_path):
+    args = _args(tmp_path)
+    cell = _cell_for_tape(args)
+    attempt = tmp_path / "attempt"
+    tape_rows, registry = _write_barrier_evidence(attempt, cell, args)
+    trace = attempt / "work/m4/learner-0/barrier-version-trace.jsonl"
+    events = rpm.read_jsonl(trace)
+    push_index = next(
+        index for index, event in enumerate(events) if event["event"] == "push_sent"
+    )
+    events.insert(
+        push_index + 1,
+        {
+            "schema": "yeto_barrier_trace_v1",
+            "event_seq": 0,
+            "learner_id": 0,
+            "local_step": events[push_index]["local_step"] + 1,
+            "event": "inner_step_started",
+            "awaiting_fragments": [],
+        },
+    )
+    for sequence, event in enumerate(events, 1):
+        event["event_seq"] = sequence
+    trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+    _refresh_barrier_registry_entry(registry, 0)
+
+    with pytest.raises(rpm.PhaseMapError, match="while blocked"):
+        rpm.validate_barrier_version_trace(attempt, tape_rows, cell, args)
+
+
+def test_barrier_trace_validator_rejects_rehashed_late_initial_broadcast(tmp_path):
+    args = _args(tmp_path)
+    cell = _cell_for_tape(args)
+    attempt = tmp_path / "attempt"
+    tape_rows, registry = _write_barrier_evidence(attempt, cell, args)
+    trace = attempt / "work/m4/learner-0/barrier-version-trace.jsonl"
+    events = rpm.read_jsonl(trace)
+    events[2]["local_step"] = 1
+    trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+    _refresh_barrier_registry_entry(registry, 0)
+
+    with pytest.raises(rpm.PhaseMapError, match="initial broadcast prefix"):
+        rpm.validate_barrier_version_trace(attempt, tape_rows, cell, args)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("fragment", False), ("broadcast_version", False)],
+)
+def test_barrier_trace_validator_rejects_boolean_initial_coordinates(
+    tmp_path, field, value
+):
+    args = _args(tmp_path)
+    cell = _cell_for_tape(args)
+    attempt = tmp_path / "attempt"
+    tape_rows, registry = _write_barrier_evidence(attempt, cell, args)
+    trace = attempt / "work/m4/learner-0/barrier-version-trace.jsonl"
+    events = rpm.read_jsonl(trace)
+    events[0][field] = value
+    trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+    _refresh_barrier_registry_entry(registry, 0)
+
+    with pytest.raises(rpm.PhaseMapError, match="initial broadcast prefix"):
+        rpm.validate_barrier_version_trace(attempt, tape_rows, cell, args)
+
+
+def test_barrier_trace_validator_rejects_wrong_broadcast_version(tmp_path):
+    args = _args(tmp_path)
+    cell = _cell_for_tape(args)
+    attempt = tmp_path / "attempt"
+    tape_rows, registry = _write_barrier_evidence(attempt, cell, args)
+    trace = attempt / "work/m4/learner-2/barrier-version-trace.jsonl"
+    events = rpm.read_jsonl(trace)
+    broadcast = next(
+        event for event in events if event["event"] == "broadcast_applied"
+    )
+    broadcast["broadcast_version"] += 1
+    trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+    _refresh_barrier_registry_entry(registry, 2)
+
+    with pytest.raises(rpm.PhaseMapError, match="exact pushed round"):
+        rpm.validate_barrier_version_trace(attempt, tape_rows, cell, args)
+
+
+def test_barrier_trace_validator_rejects_rehashed_late_fragment_window(tmp_path):
+    args = _args(tmp_path)
+    cell = _cell_for_tape(args)
+    attempt = tmp_path / "attempt"
+    tape_rows, registry = _write_barrier_evidence(attempt, cell, args)
+    trace = attempt / "work/m4/learner-1/barrier-version-trace.jsonl"
+    events = rpm.read_jsonl(trace)
+    for event in events:
+        if (
+            event["event"] == "push_sent" and event["pull_step"] in range(1, 5)
+        ) or (
+            event["event"] == "broadcast_applied"
+            and event["broadcast_version"] in range(1, 5)
+        ):
+            event["local_step"] = cell["H"] + 1
+    trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+    _refresh_barrier_registry_entry(registry, 1)
+
+    with pytest.raises(rpm.PhaseMapError, match="push does not biject"):
+        rpm.validate_barrier_version_trace(attempt, tape_rows, cell, args)
+
+
+def test_barrier_trace_validator_rejects_registry_hash_mismatch(tmp_path):
+    args = _args(tmp_path)
+    cell = _cell_for_tape(args)
+    attempt = tmp_path / "attempt"
+    tape_rows, _registry = _write_barrier_evidence(attempt, cell, args)
+    trace = attempt / "work/m4/learner-3/barrier-version-trace.jsonl"
+    trace.write_text(trace.read_text() + "\n")
+
+    with pytest.raises(rpm.PhaseMapError, match="registry hash mismatch"):
+        rpm.validate_barrier_version_trace(attempt, tape_rows, cell, args)
 
 
 def test_layout_validator_requires_identical_rda_layouts(tmp_path):
