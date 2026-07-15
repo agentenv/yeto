@@ -3,6 +3,7 @@ SkyPilot. The registry is redirected to a temp dir; the launcher and the
 sky teardown call are stubbed."""
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -204,6 +205,50 @@ def test_worker_unknown_run(capsys):
 
 
 # ---------------------------------------------------------------------------
+# diffusion sampling command
+
+
+def test_sample_diffusion_requires_one_prompt_source(capsys):
+    base = ["sample-diffusion", "--gpu", "aws:1xt4", "--adapter-dir", "adapter"]
+
+    assert cli.main(base) == 1
+    assert "exactly one" in capsys.readouterr().err
+    assert cli.main(base + ["--prompt", "p", "--data", "org/ds"]) == 1
+    assert "exactly one" in capsys.readouterr().err
+
+
+def test_sample_diffusion_dispatches_to_launcher(monkeypatch):
+    import yeto.launcher
+
+    seen = {}
+
+    def fake_run(args):
+        seen["args"] = args
+        return 0
+
+    monkeypatch.setattr(yeto.launcher, "run_diffusion_sample", fake_run)
+
+    rc = cli.main(
+        [
+            "sample-diffusion",
+            "--gpu",
+            "aws:1xt4@us-west-2",
+            "--adapter-dir",
+            "s3://bucket/adapter",
+            "--prompt",
+            "a cat",
+            "--output",
+            "samples",
+        ]
+    )
+
+    assert rc == 0
+    assert seen["args"].prompt == "a cat"
+    assert seen["args"].adapter_dir == "s3://bucket/adapter"
+    assert seen["args"].output == "samples"
+
+
+# ---------------------------------------------------------------------------
 # down: dead worker, recorded clusters torn down via stubbed sky
 
 
@@ -274,6 +319,44 @@ def test_status_shows_running_for_live_pid(capsys):
         ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("s2")
     )
     assert "RUNNING" in line
+
+
+def test_status_summarizes_event_tape(tmp_path, capsys):
+    tape = tmp_path / "events.jsonl"
+    records = [
+        {
+            "step": 1,
+            "fragment": 0,
+            "expected": [0, 1],
+            "responded": [0, 1],
+            "missed_grace": [],
+            "responders": [
+                {"id": 0, "c_steps": 2, "c_tokens": 20, "weight": 200.0},
+                {"id": 1, "c_steps": 2, "c_tokens": 20, "weight": 200.0},
+            ],
+        },
+        {
+            "step": 2,
+            "fragment": 1,
+            "expected": [0, 1],
+            "responded": [0],
+            "missed_grace": [1],
+            "responders": [
+                {"id": 0, "c_steps": 2, "c_tokens": 20, "weight": 200.0},
+            ],
+        },
+    ]
+    tape.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    assert cli.main(["status", "--tape", str(tape)]) == 0
+    out = capsys.readouterr().out
+    assert "TAPE" in out
+    assert "ROUNDS 2" in out
+    assert "MISSED 1 across 1 rounds" in out
+    assert "NODE  RESPONSES" in out
+    assert "0     2" in out
+    assert "1     1" in out
+    assert "step=2/frag=1: [1]" in out
 
 
 def test_logs_no_follow_dumps_log(capsys):

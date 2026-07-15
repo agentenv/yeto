@@ -31,8 +31,9 @@ import time
 
 from . import runs
 from .backends import all_backends, backend_names, default_task, get_backend
+from .status_metrics import render_tape_summary
 
-SUBCOMMANDS = ("launch", "shape", "status", "logs", "down", "_worker", "_head")
+SUBCOMMANDS = ("launch", "shape", "sample-diffusion", "status", "logs", "down", "_worker", "_head")
 
 
 def _add_launch_args(p: argparse.ArgumentParser) -> None:
@@ -275,13 +276,57 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def _add_diffusion_sample_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--gpu", required=True, help="single GPU cluster, e.g. aws:1xt4@us-west-2")
+    p.add_argument("--adapter-dir", required=True, help="local directory or cloud URI with a Yeto diffusion adapter artifact")
+    p.add_argument(
+        "--output",
+        default=None,
+        help="local directory or remote URI for generated samples; omitted keeps them under ~/yeto-output",
+    )
+    source = p.add_argument_group("sample source")
+    source.add_argument("--prompt", default=None, help="single prompt to sample")
+    source.add_argument("--data", default=None, help="HF/local/cloud prompt dataset for batch sampling")
+    source.add_argument("--prompt-column", default="prompt")
+    source.add_argument("--seed-column", default=None)
+    source.add_argument("--max-rows", type=int, default=None)
+
+    model = p.add_argument_group("diffusion")
+    model.add_argument("--model", default=None, help="optional base model override")
+    model.add_argument(
+        "--diffusion-adapter",
+        default=None,
+        help="optional module:factory or file.py:factory hook for non-standard artifacts",
+    )
+    model.add_argument("--dtype", choices=["auto", "bf16", "fp16", "f32"], default="auto")
+    model.add_argument("--num-inference-steps", type=int, default=30)
+    model.add_argument("--guidance-scale", type=float, default=None)
+    model.add_argument("--height", type=int, default=None)
+    model.add_argument("--width", type=int, default=None)
+    model.add_argument("--num-frames", type=int, default=None)
+    model.add_argument("--seed", type=int, default=None)
+    model.add_argument("--fps", type=int, default=8)
+
+    infra = p.add_argument_group("infrastructure")
+    infra.add_argument("--spot", action="store_true", default=True, help="use a spot instance (default)")
+    infra.add_argument("--on-demand", dest="spot", action="store_false", help="use on-demand instead of spot")
+    infra.add_argument("--disk-size", type=int, default=256, help="sampler disk (GB)")
+    infra.add_argument("--learner-cpus", default=None, help="vCPU hint for the sampler node")
+    infra.add_argument("--learner-instance-type", default=None, help="pin sampler node to an instance type")
+    infra.add_argument("--learner-image", default=None, help="override the sampler machine image")
+    infra.add_argument("--cluster-prefix", default="yeto-sample", help="cluster name prefix")
+    infra.add_argument("--keep", action="store_true", help="do not tear down the sampler cluster")
+    infra.add_argument("--retry-until-up", action="store_true", help="keep retrying provisioning until capacity is found")
+    infra.add_argument("--controller-poll", type=int, default=30, help="job status poll interval (seconds)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="yeto",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = p.add_subparsers(dest="command", metavar="{launch,status,logs,down}")
+    sub = p.add_subparsers(dest="command", metavar="{launch,shape,sample-diffusion,status,logs,down}")
 
     launch = sub.add_parser(
         "launch",
@@ -376,7 +421,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     shape.add_argument("--no-cache", action="store_true", help="bypass the 1h signal cache")
 
-    sub.add_parser("status", help="table of known runs")
+    sample = sub.add_parser("sample-diffusion", help="generate samples from a trained diffusion adapter")
+    _add_diffusion_sample_args(sample)
+
+    status = sub.add_parser("status", help="table of known runs")
+    status.add_argument("--tape", default=None, help="summarize a syncer event-tape JSONL file")
 
     logs = sub.add_parser("logs", help="stream a run's launcher log (Ctrl-C detaches)")
     logs.add_argument("run", help="run name (its --cluster-prefix)")
@@ -928,42 +977,50 @@ def _display_clusters(clusters) -> str:
     return joined if len(joined) <= 40 else f"{len(clusters)} clusters"
 
 
-def cmd_status() -> int:
+def cmd_status(args) -> int:
     # Registry-only, by design: never calls the sky API, so it's instant.
     metas = runs.list_runs()
     if not metas:
-        print("No runs. Start one with: yeto launch --gpu ... --model ... --data ...")
-        return 0
-    header = ("NAME", "STATE", "STARTED", "CLUSTERS", "LOG")
-    rows = []
-    for meta in metas:
-        name = meta.get("name", "?")
-        state = (
-            runs.RUNNING
-            if runs.is_alive(meta.get("pid"))
-            else (meta.get("state") or "UNKNOWN")
-        )
-        rows.append(
-            (
-                name,
-                state,
-                _humanize_ago(meta.get("started_at")),
-                _display_clusters(meta.get("clusters")),
-                _last_log_line(name),
+        if not args.tape:
+            print("No runs. Start one with: yeto launch --gpu ... --model ... --data ...")
+            return 0
+    else:
+        header = ("NAME", "STATE", "STARTED", "CLUSTERS", "LOG")
+        rows = []
+        for meta in metas:
+            name = meta.get("name", "?")
+            state = (
+                runs.RUNNING
+                if runs.is_alive(meta.get("pid"))
+                else (meta.get("state") or "UNKNOWN")
             )
-        )
-    widths = [max(len(r[i]) for r in [header] + rows) for i in range(4)]
-    for row in [header] + rows:
-        lead = "  ".join(row[i].ljust(widths[i]) for i in range(4))
-        print(f"{lead}  {row[4]}")
-    for meta in metas:
-        # Head-mode runs are supervised on their head VM; the registry only
-        # has the state as of submission/teardown.
-        if meta.get("controller") == "head" and meta.get("state") != runs.DOWN:
-            print(
-                f"[yeto] '{meta.get('name')}' is controlled from "
-                f"{meta.get('head_cluster')}; live state: yeto logs {meta.get('name')}"
+            rows.append(
+                (
+                    name,
+                    state,
+                    _humanize_ago(meta.get("started_at")),
+                    _display_clusters(meta.get("clusters")),
+                    _last_log_line(name),
+                )
             )
+        widths = [max(len(r[i]) for r in [header] + rows) for i in range(4)]
+        for row in [header] + rows:
+            lead = "  ".join(row[i].ljust(widths[i]) for i in range(4))
+            print(f"{lead}  {row[4]}")
+        for meta in metas:
+            # Head-mode runs are supervised on their head VM; the registry only
+            # has the state as of submission/teardown.
+            if meta.get("controller") == "head" and meta.get("state") != runs.DOWN:
+                print(
+                    f"[yeto] '{meta.get('name')}' is controlled from "
+                    f"{meta.get('head_cluster')}; live state: yeto logs {meta.get('name')}"
+                )
+    if args.tape:
+        if metas:
+            print()
+        print("TAPE")
+        for line in render_tape_summary(args.tape):
+            print(line)
     return 0
 
 
@@ -1127,6 +1184,19 @@ def cmd_shape(args) -> int:
     return 0
 
 
+def cmd_sample_diffusion(args) -> int:
+    if (args.prompt is None) == (args.data is None):
+        print("[yeto] sample-diffusion needs exactly one of --prompt or --data", file=sys.stderr)
+        return 1
+    from . import launcher
+
+    try:
+        return launcher.run_diffusion_sample(args)
+    except ValueError as e:
+        print(f"[yeto] {e}", file=sys.stderr)
+        return 1
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
@@ -1138,8 +1208,10 @@ def main(argv=None) -> int:
         return cmd_launch(args)
     if args.command == "shape":
         return cmd_shape(args)
+    if args.command == "sample-diffusion":
+        return cmd_sample_diffusion(args)
     if args.command == "status":
-        return cmd_status()
+        return cmd_status(args)
     if args.command == "logs":
         return cmd_logs(args)
     if args.command == "down":

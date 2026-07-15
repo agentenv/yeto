@@ -3,12 +3,11 @@
 The head controller fetches ~/yeto-output from the winning learner before
 learner teardown (so auto-teardown never destroys the only copy), then:
 
-  * remote destinations — any object-store URI SkyPilot supports (s3://,
-    gs://, r2://, oci://, ...) via its Storage abstraction (one code path,
-    sky's credential handling), or hf://org/repo via the Hugging Face
-    Hub — are uploaded from the head, after which the
-    head tears itself down with a detached `sky down`: a fully
-    self-cleaning run;
+  * remote destinations — s3:// via the AWS CLI, other object-store URIs
+    SkyPilot supports (gs://, r2://, oci://, ...) via its Storage abstraction,
+    or hf://org/repo via the Hugging Face Hub — are uploaded from the head,
+    after which the head tears itself down with a detached `sky down`: a
+    fully self-cleaning run;
   * a local path or no --output keeps the artifact on the head (or, in
     local-controller mode, rsyncs it to the path on this machine) and the
     head stays up so nothing is lost.
@@ -17,7 +16,9 @@ learner teardown (so auto-teardown never destroys the only copy), then:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+
 
 def kind(output: str | None) -> str:
     """"none" | "local" | "hf" | "store" (any sky-supported object store)."""
@@ -46,7 +47,10 @@ def deliver(output: str, src_dir: str) -> None:
     k = kind(output)
     src_dir = os.path.expanduser(src_dir)
     if k == "store":
-        _upload_sky(output, src_dir)
+        if output.startswith("s3://"):
+            _upload_s3(output, src_dir)
+        else:
+            _upload_sky(output, src_dir)
     elif k == "hf":
         # sky has no Hub store; huggingface_hub ships with transformers on
         # the head, and HF_TOKEN is forwarded from the submitter.
@@ -58,6 +62,16 @@ def deliver(output: str, src_dir: str) -> None:
         api.upload_folder(repo_id=repo_id, folder_path=src_dir)
     else:
         raise ValueError(f"deliver() only handles remote outputs, got {output!r}")
+
+
+def _upload_s3(output: str, src_dir: str) -> None:
+    """Sync output artifacts to S3 without SkyPilot Storage lifecycle state."""
+    if shutil.which("aws") is None:
+        raise RuntimeError("aws CLI is required for s3:// output delivery")
+    subprocess.run(
+        ["aws", "s3", "sync", src_dir, output.rstrip("/"), "--only-show-errors"],
+        check=True,
+    )
 
 
 def _upload_sky(output: str, src_dir: str) -> None:

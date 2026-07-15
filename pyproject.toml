@@ -33,6 +33,8 @@ nava = ["boto3>=1.28", "PyYAML>=6", "safetensors>=0.4"]
 yeto = "yeto.cli:main"
 yeto-export = "yeto.export:main"
 yeto-nava-prepare-labels = "yeto.nava.labels:main"
+yeto-diffusion-export = "yeto.diffusion.export:main"
+yeto-diffusion-sample = "yeto.diffusion.sample:main"
 
 [tool.setuptools.packages.find]
 # Discover yeto and its subpackages (backends, nava, megatron, shape) so a

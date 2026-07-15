@@ -105,6 +105,31 @@ MODEL_ALIASES = {
     # fp8 repo yourself and pass the path via --model.
 }
 
+DIFFUSION_MODEL_ALIASES = {
+    "flux": "black-forest-labs/FLUX.1-dev",
+    "flux-schnell": "black-forest-labs/FLUX.1-schnell",
+    "flux2-dev": "black-forest-labs/FLUX.2-dev",
+    "chroma1-base": "lodestones/Chroma1-Base",
+    "chroma1-hd": "lodestones/Chroma1-HD",
+    "hidream-i1-dev": "HiDream-ai/HiDream-I1-Dev",
+    "hidream-i1-full": "HiDream-ai/HiDream-I1-Full",
+    "ideogram4": "ideogram-ai/ideogram-4-nf4-diffusers",
+    "qwen-image": "Qwen/Qwen-Image",
+    "qwen-image-2512": "Qwen/Qwen-Image-2512",
+    "sd35": "stabilityai/stable-diffusion-3.5-large",
+    "ltx-video": "Lightricks/LTX-Video",
+    "hunyuan-video": "hunyuanvideo-community/HunyuanVideo",
+    "wan21-t2v-1.3b": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "wan21-t2v-14b": "Wan-AI/Wan2.1-T2V-14B-Diffusers",
+    "wan22": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+    "nava": "baidu/NAVA",
+}
+
+MODEL_KINDS = {
+    **{alias: "causal-lm" for alias in MODEL_ALIASES},
+    **{alias: "diffusion" for alias in DIFFUSION_MODEL_ALIASES},
+}
+
 MODEL_WEIGHT_GB = {
     "gemma4": 66,
     "deepseek4flash": 568,
@@ -164,4 +189,11 @@ MODEL_WEIGHT_GB = {
 
 def resolve(model: str) -> str:
     """Alias -> HF id; raw HF ids pass through unchanged."""
-    return MODEL_ALIASES.get(model, model)
+    return MODEL_ALIASES.get(model, DIFFUSION_MODEL_ALIASES.get(model, model))
+
+
+def resolve_model_kind(model: str, requested: str = "auto") -> str:
+    """Return ``causal-lm`` or ``diffusion`` for a launch request."""
+    if requested != "auto":
+        return requested
+    return MODEL_KINDS.get(model, "causal-lm")

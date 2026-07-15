@@ -956,7 +956,15 @@ async fn scheduler(
                 b.extend_from_slice(&t.to_le_bytes());
                 bytes::Bytes::from(b)
             };
-            for g in current_groups(&registry) {
+            let groups = current_groups(&registry);
+            let mut expected_learners: Vec<u32> = groups.iter().map(|g| g.learner_id).collect();
+            expected_learners.sort_unstable();
+            let launch_quorum = if cfg.strict_quorum {
+                cfg.quorum as usize
+            } else {
+                (cfg.quorum as usize).min(expected_learners.len().max(1))
+            };
+            for g in groups {
                 let _ = g.send_small(MSG_PULL_REQ, pull.clone()).await;
             }
             inflight.push(Round {
@@ -964,8 +972,12 @@ async fn scheduler(
                 p,
                 pull,
                 started: Instant::now(),
+                expected_learners,
                 quorum_deadline: Instant::now() + Duration::from_secs(cfg.quorum_timeout_s),
                 grace_deadline: None,
+                quorum_size: launch_quorum,
+                quorum_ms: None,
+                grace_ms: None,
                 pushes: HashMap::new(),
             });
         }
@@ -997,6 +1009,9 @@ async fn scheduler(
                     Duration::from_millis(cfg.grace_ms),
                 );
                 r.grace_deadline = Some(Instant::now() + grace);
+                r.quorum_size = k;
+                r.quorum_ms = Some(r.started.elapsed().as_millis() as u64);
+                r.grace_ms = Some(grace.as_millis() as u64);
             }
         }
 
@@ -1163,8 +1178,12 @@ struct Round {
     p: usize,
     pull: bytes::Bytes,
     started: Instant,
+    expected_learners: Vec<u32>,
     quorum_deadline: Instant,
     grace_deadline: Option<Instant>,
+    quorum_size: usize,
+    quorum_ms: Option<u64>,
+    grace_ms: Option<u64>,
     pushes: HashMap<u32, Push>,
 }
 
@@ -1300,6 +1319,10 @@ async fn complete_round(
         t,
         p,
         started,
+        expected_learners,
+        quorum_size,
+        quorum_ms,
+        grace_ms,
         mut pushes,
         ..
     } = round;
@@ -1527,6 +1550,7 @@ async fn complete_round(
         let _ = g.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
     }
     *last_sync_secs = sync_start.elapsed().as_secs_f64();
+    let sync_ms = (*last_sync_secs * 1000.0).round() as u64;
     let ms = started.elapsed().as_millis() as u64;
     info!(
         step = t,
@@ -1549,6 +1573,11 @@ async fn complete_round(
             tape,
             t,
             p,
+            &expected_learners,
+            quorum_size,
+            quorum_ms,
+            grace_ms,
+            sync_ms,
             &pushes,
             &weights,
             &merge_stats,
@@ -1786,6 +1815,11 @@ fn append_tape(
     path: &std::path::Path,
     step: u64,
     fragment: usize,
+    expected_learners: &[u32],
+    quorum: usize,
+    quorum_ms: Option<u64>,
+    grace_ms: Option<u64>,
+    sync_ms: u64,
     pushes: &HashMap<u32, Push>,
     _weights: &[f64],
     stats: &MergeStats,
@@ -1794,7 +1828,20 @@ fn append_tape(
     ms: u64,
 ) {
     use std::io::Write;
-    let line = format_tape_line(step, fragment, pushes, stats, decision, anchor_drift, ms);
+    let line = format_tape_line(
+        step,
+        fragment,
+        expected_learners,
+        quorum,
+        quorum_ms,
+        grace_ms,
+        sync_ms,
+        pushes,
+        stats,
+        decision,
+        anchor_drift,
+        ms,
+    );
     let res = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1826,12 +1873,24 @@ fn optional_json_string(value: Option<&str>) -> String {
 fn format_tape_line(
     step: u64,
     fragment: usize,
+    expected_learners: &[u32],
+    quorum: usize,
+    quorum_ms: Option<u64>,
+    grace_ms: Option<u64>,
+    sync_ms: u64,
     pushes: &HashMap<u32, Push>,
     stats: &MergeStats,
     decision: &CommitDecision,
     anchor_drift: &HashMap<u32, AnchorDrift>,
     ms: u64,
 ) -> String {
+    let mut responded: Vec<u32> = pushes.keys().copied().collect();
+    responded.sort_unstable();
+    let missed_grace: Vec<u32> = expected_learners
+        .iter()
+        .copied()
+        .filter(|id| !pushes.contains_key(id))
+        .collect();
     let mut responders: Vec<String> = pushes
         .values()
         .map(|p| {
@@ -1875,12 +1934,28 @@ fn format_tape_line(
     let selected_multiplier = json_number(decision.selected_multiplier);
     let committed_multiplier = json_number(decision.committed_multiplier);
     let request_digest = optional_json_string(decision.request_digest.as_deref());
+    let quorum_ms = json_opt_u64(quorum_ms);
+    let grace_ms = json_opt_u64(grace_ms);
     format!(
-        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}}}\n",
+        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"quorum\":{quorum},\"expected\":{},\"responded\":{},\"missed_grace\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms},\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}}}\n",
         responders.join(","),
+        json_ids(expected_learners),
+        json_ids(&responded),
+        json_ids(&missed_grace),
         outer.restarted,
         decision.fallback,
     )
+}
+
+fn json_ids(ids: &[u32]) -> String {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    let body = ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    format!("[{body}]")
+}
+
+fn json_opt_u64(value: Option<u64>) -> String {
+    value.map_or_else(|| "null".to_string(), |v| v.to_string())
 }
 
 fn dump_state(st: &GlobalState, path: &std::path::Path) -> Result<()> {
@@ -1940,8 +2015,12 @@ mod tests {
             p: 0,
             pull: bytes::Bytes::new(),
             started: now,
+            expected_learners: vec![1, 2],
             quorum_deadline: now + Duration::from_secs(1),
             grace_deadline: None,
+            quorum_size: 1,
+            quorum_ms: None,
+            grace_ms: None,
             pushes: HashMap::new(),
         }
     }
@@ -1958,6 +2037,31 @@ mod tests {
             c_tokens: 100,
             values: vec![1.0, 2.0],
         }
+    }
+
+    fn test_tape_line(
+        step: u64,
+        fragment: usize,
+        pushes: &HashMap<u32, Push>,
+        stats: &MergeStats,
+        decision: &CommitDecision,
+        anchor_drift: &HashMap<u32, AnchorDrift>,
+        ms: u64,
+    ) -> String {
+        format_tape_line(
+            step,
+            fragment,
+            &[1, 4],
+            1,
+            Some(11),
+            Some(22),
+            33,
+            pushes,
+            stats,
+            decision,
+            anchor_drift,
+            ms,
+        )
     }
 
     fn test_group(learner_id: u32, validated: bool) -> Arc<Group> {
@@ -2232,7 +2336,7 @@ mod tests {
         );
         let stats = merge_stats(2.5, 0.75, Some(-0.25), Some(3.0), true);
         let decision = CommitDecision::token_weighted();
-        let line = format_tape_line(9, 2, &pushes, &stats, &decision, &HashMap::new(), 17);
+        let line = test_tape_line(9, 2, &pushes, &stats, &decision, &HashMap::new(), 17);
 
         assert!(
             line.starts_with("{\"step\":9,\"fragment\":2,\"gnorm\":2.5,\"ms\":17,\"responders\":[")
@@ -2257,6 +2361,13 @@ mod tests {
         assert!(line.contains("\"norm_scale\":1"));
         assert!(line.contains("\"step_ratio\":1"));
         assert!(line.contains("\"request_digest\":null"));
+        assert!(line.contains("\"quorum\":1"));
+        assert!(line.contains("\"expected\":[1,4]"));
+        assert!(line.contains("\"responded\":[4]"));
+        assert!(line.contains("\"missed_grace\":[1]"));
+        assert!(line.contains("\"quorum_ms\":11"));
+        assert!(line.contains("\"grace_ms\":22"));
+        assert!(line.contains("\"sync_ms\":33"));
         assert!(line.ends_with("}\n"));
     }
 
@@ -2264,7 +2375,7 @@ mod tests {
     fn event_tape_uses_null_for_undefined_outer_ratios() {
         let stats = merge_stats(0.0, 0.0, None, None, false);
         let decision = CommitDecision::probe_fallback(CommitPolicy::ProbeLooV1, "probe_timeout");
-        let line = format_tape_line(1, 0, &HashMap::new(), &stats, &decision, &HashMap::new(), 0);
+        let line = test_tape_line(1, 0, &HashMap::new(), &stats, &decision, &HashMap::new(), 0);
         assert!(line.contains("\"gnorm\":0"));
         assert!(line.contains("\"outer_step_norm\":0"));
         assert!(line.contains("\"outer_direction_cosine\":null"));
@@ -2376,7 +2487,7 @@ mod tests {
         );
         let stats = merge_stats(1.0, 1.0, None, None, false);
         let decision = CommitDecision::token_weighted();
-        let line = format_tape_line(9, 0, &pushes, &stats, &decision, &drift, 0);
+        let line = test_tape_line(9, 0, &pushes, &stats, &decision, &drift, 0);
         assert!(line.contains("\"anchor_drift_norm\":4"));
         assert!(line.contains("\"local_delta_norm\":6"));
         assert!(line.contains("\"anchor_drift_momentum_cos\":-0.5"));
@@ -2408,7 +2519,7 @@ mod tests {
             committed_multiplier: 1.0,
             request_digest: Some("a".repeat(64)),
         };
-        let line = format_tape_line(
+        let line = test_tape_line(
             1,
             0,
             &HashMap::new(),
