@@ -95,6 +95,7 @@
     "later_seeds_must_remain_blinded": true
   },
   "retry_policy": {
+    "hash_definition": "sha256(utf8(json(retry_policy,sort_keys=true,separators=(',',':'),ensure_ascii=false)))",
     "loss_blind_only": true,
     "rerun_entire_incomplete_block": true,
     "allowed_reasons": [
@@ -102,8 +103,34 @@
       "vm_host_gpu_failure",
       "process_exit_before_scientific_divergence",
       "missing_or_checksum_invalid_required_artifact",
+      "pre_unblinding_validator_provenance_failure",
+      "peer_block_invalidated_by_infra_failure"
+    ],
+    "direct_infrastructure_failure_reasons": [
+      "provider_spot_preemption",
+      "vm_host_gpu_failure",
+      "process_exit_before_scientific_divergence",
+      "missing_or_checksum_invalid_required_artifact",
       "pre_unblinding_validator_provenance_failure"
     ],
+    "peer_retry_reason": "peer_block_invalidated_by_infra_failure",
+    "peer_retry_reason_is_never_failure_reason": true,
+    "infra_failure_reason_must_be_direct_infrastructure_failure_reason": true,
+    "preserve_completed_peer_status_and_artifacts": true,
+    "retry_authorization_required_fields": [
+      "loss_blind",
+      "policy_hash",
+      "trigger_attempt_id",
+      "trigger_reason",
+      "trigger_block_id",
+      "prior_manifest_sha256"
+    ],
+    "prior_manifest_hash_definition": "sha256(utf8(json(final_manifest_with_results_truncated_immediately_before_contiguous_retry_block,sort_keys=true,separators=(',',':'),ensure_ascii=false)))",
+    "retry_block_rows_must_be_contiguous": true,
+    "result_acquisition_is_append_only": true,
+    "mechanical_sealing_before_human_or_analysis_unblinding_is_loss_blind": true,
+    "trigger_must_be_genuine_infra_failure_in_immediately_prior_same_block": true,
+    "shared_block_retry_authorization_required": true,
     "forbidden_reasons": [
       "poor_loss",
       "finite_completed_loss",
@@ -155,8 +182,10 @@
     "block_id",
     "order_index",
     "attempt",
+    "attempt_id",
     "retry_of",
     "retry_reason",
+    "retry_authorization",
     "hardware",
     "started_at",
     "ended_at"

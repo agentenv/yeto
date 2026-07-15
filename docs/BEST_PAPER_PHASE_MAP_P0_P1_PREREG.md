@@ -84,6 +84,22 @@ authorization must cite the retry-policy hash; it must never reuse the
 randomization hash. Placeholders in the companion JSON are not launch
 authority.
 
+`frozen.retry_policy_hash` is exactly SHA-256 over the UTF-8 bytes of the final
+top-level `retry_policy` object serialized as JSON with lexicographically
+sorted keys, no insignificant whitespace (`separators=(",", ":")`), and
+`ensure_ascii=false`. It is not the hash of a launcher helper or a reduced
+projection of the policy.
+
+**Pre-outcome retry clarification (2026-07-14).** Independent launcher/
+validator review found an ambiguity in the whole-block retry rule before P0 or
+P1 was launched. This clarification changes no outcome, grid, seed, gate, or
+analysis rule. It is part of the authoritative preregistration commit that must
+be bound before P0: a completed peer in a block containing an infrastructure
+failure remains `COMPLETED`, with its original loss and artifacts retained. It
+must never be relabeled as `INFRA_FAILURE`. The frozen retry-only reason
+`peer_block_invalidated_by_infra_failure` permits the mandatory whole-block
+rerun under the exact conditions in Section 7.
+
 `frozen.command_hash` is the hash of the canonical campaign command template,
 not a claim that all 36 expanded argvs are identical. The bound descendant
 must additionally contain a complete immutable `cell_command_hashes` object
@@ -201,12 +217,47 @@ Allowed retry triggers are loss-blind and mechanical only:
 - missing or checksum-invalid required artifact;
 - validator-detected command/provenance mismatch before outcomes are opened.
 
-An incomplete/preempted block is marked infrastructure failure and the entire
+When any arm has a genuine allowed infrastructure failure, the entire
 three-arm block is rerun from identical initial state, seed, command, image,
-and data on the same machine/GPU class. All attempts are retained and linked by
-`retry_of`. The retry decision must be logged before aggregate or per-example
-loss is inspected. A finite completed loss, a poor loss, or a preregistered
-hyperparameter divergence is never a retry reason.
+and data on the same machine/GPU class. Only the genuinely failed arm is marked
+`INFRA_FAILURE`; any peer that completed remains `COMPLETED`, and its loss,
+status, and artifacts are retained unchanged. A completed peer may be rerun
+only with retry reason `peer_block_invalidated_by_infra_failure`. That string
+is a retry-authorization reason only: it is never a `failure_reason` and never
+licenses relabeling a completed attempt.
+
+Every arm in the repeated block must be present in the same retry round. Each
+new attempt is linked by `retry_of` to the immediately prior attempt for that
+cell. All three new attempts must carry the same loss-blind
+`retry_authorization`, created before any aggregate or per-example outcome in
+the prior block is opened, containing at least:
+
+- `loss_blind: true` and the independently frozen `policy_hash`;
+- `trigger_attempt_id`, identifying a genuine `INFRA_FAILURE` attempt in the
+  immediately prior instance of the same block;
+- `trigger_reason`, equal to that attempt's allowed mechanical failure reason;
+- `trigger_block_id`, equal to the repeated `(H, eta, seed)` block ID; and
+- `prior_manifest_sha256`, binding the sealed prior block-attempt manifest.
+
+`prior_manifest_sha256` is SHA-256 over the UTF-8 canonical JSON of the exact
+campaign manifest prefix immediately before the retry block, using the same
+sorted-key, no-whitespace, `ensure_ascii=false` convention as the retry-policy
+hash. From the final manifest, the preimage is reconstructed by removing the
+contiguous three-row retry-block suffix in question and every later result row,
+while leaving all non-`results` fields identical. Retry-block rows must
+therefore be contiguous and result acquisition is append-only. Mechanical
+serialization and sealing of outcomes into that prefix is allowed; "opened"
+means exposed to a human or outcome-aware analysis. The shared authorization
+must be created after the prefix is sealed but before that exposure.
+
+The validator must establish that the cited trigger exists in the immediately
+prior complete block round, has status `INFRA_FAILURE`, and has the cited
+direct infrastructure-failure reason; that the prior-manifest hash matches;
+and that all mu arms are rerun. An `INFRA_FAILURE.failure_reason` must come only
+from `direct_infrastructure_failure_reasons`, never from the peer-only retry
+reason. All attempts are retained. A finite completed loss, a poor loss, or a
+preregistered hyperparameter divergence is never a direct or peer retry
+trigger.
 
 ## 8. P1 go/kill decisions
 
