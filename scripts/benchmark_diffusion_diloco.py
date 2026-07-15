@@ -1588,7 +1588,7 @@ def main(argv=None) -> int:
             eval_data,
             train_rows=train_rows,
             eval_rows=args.eval_rows,
-            source=materialized_data,
+            source=_source_root(materialized_data),
         )
         write_config(args, arms, data_manifest)
 

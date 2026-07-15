@@ -270,6 +270,15 @@ def test_materialize_data_source_requires_aws_cli(monkeypatch, tmp_path):
         benchmark.materialize_data_source("s3://bucket/dataset", tmp_path / "source-data")
 
 
+def test_source_root_includes_media_next_to_a_manifest(tmp_path):
+    manifest = tmp_path / "data.jsonl"
+    manifest.write_text("{}\n", encoding="utf-8")
+
+    assert benchmark._source_root(str(manifest)) == tmp_path.resolve()
+    assert benchmark._source_root(str(tmp_path)) == tmp_path.resolve()
+    assert benchmark._source_root("org/remote-dataset") is None
+
+
 def test_partial_results_round_trip_atomically(tmp_path):
     records = [
         {"kind": "base", "arm": "base", "seed": None},
