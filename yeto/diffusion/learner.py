@@ -100,6 +100,39 @@ def diffusion_eval_seed(base_seed: int, row_key, repetition: int = 0) -> int:
     return derive_diffusion_seed(base_seed, "eval", row_key, repetition)
 
 
+def diffusion_logical_rank(learner_id: int, num_learners: int, rank: int) -> int:
+    """Map an island-local rank to its matching synchronous baseline rank."""
+    if num_learners < 1 or not 0 <= learner_id < num_learners or rank < 0:
+        raise ValueError("invalid learner topology for diffusion seed pairing")
+    return learner_id + num_learners * rank
+
+
+def diffusion_rank_seed(
+    base_seed: int,
+    stream: str,
+    learner_id: int,
+    num_learners: int,
+    rank: int,
+) -> int:
+    logical_rank = diffusion_logical_rank(learner_id, num_learners, rank)
+    return derive_diffusion_seed(base_seed, stream, logical_rank)
+
+
+def diffusion_data_seed(
+    base_seed: int,
+    learner_id: int,
+    num_learners: int,
+    consumer: int,
+) -> int:
+    """Seed a rank/worker consumer identically in matching topologies."""
+    logical_consumer = diffusion_logical_rank(
+        learner_id,
+        num_learners,
+        consumer,
+    )
+    return derive_diffusion_seed(base_seed, "data", logical_consumer)
+
+
 def seed_diffusion_rng(seed: int) -> None:
     """Seed process RNGs used by diffusion model construction and training."""
     seed = int(seed) % _MAX_SEED
@@ -547,6 +580,7 @@ class StreamingDiffusionRows(IterableDataset):
         target_num_frames: int | None = None,
         target_height: int | None = None,
         target_width: int | None = None,
+        root_seed: int | None = None,
     ):
         self.dataset_name = dataset_name
         self.learner_id = learner_id
@@ -562,6 +596,7 @@ class StreamingDiffusionRows(IterableDataset):
         self.num_frames = target_num_frames
         self.height = target_height
         self.width = target_width
+        self.root_seed = root_seed
 
     def __iter__(self):
         ds = load_rows(self.dataset_name, self.split)
@@ -581,7 +616,17 @@ class StreamingDiffusionRows(IterableDataset):
             raise ValueError(
                 f"learner {self.learner_id} rank {self.rank} worker {worker_id}: no rows left"
             )
-        rng = random.Random(self.seed + consumer)
+        rng_seed = (
+            self.seed + consumer
+            if self.root_seed is None
+            else diffusion_data_seed(
+                self.root_seed,
+                self.learner_id,
+                self.num_learners,
+                consumer,
+            )
+        )
+        rng = random.Random(rng_seed)
         buckets: dict[tuple, list[dict]] = {}
         while True:
             order = my_rows[:]
@@ -2954,16 +2999,38 @@ def main(argv=None) -> None:
     else:
         args.grad_accum = rebalance_grad_accum(args.grad_accum, args.micro_batch_size)
 
-    data_seed = 0
     loader_generator = None
     if args.seed is not None:
-        train_seed = derive_diffusion_seed(args.seed, "train", args.learner_id, rank)
-        data_seed = derive_diffusion_seed(args.seed, "data", args.learner_id, rank)
-        loader_seed = derive_diffusion_seed(args.seed, "loader", args.learner_id, rank)
+        logical_rank = diffusion_logical_rank(
+            args.learner_id,
+            args.num_learners,
+            rank,
+        )
+        train_seed = diffusion_rank_seed(
+            args.seed,
+            "train",
+            args.learner_id,
+            args.num_learners,
+            rank,
+        )
+        data_seed = diffusion_data_seed(
+            args.seed,
+            args.learner_id,
+            args.num_learners,
+            rank,
+        )
+        loader_seed = diffusion_rank_seed(
+            args.seed,
+            "loader",
+            args.learner_id,
+            args.num_learners,
+            rank,
+        )
         seed_diffusion_rng(train_seed)
         loader_generator = torch.Generator().manual_seed(loader_seed)
         log.info(
-            "diffusion training RNG seed=%d data_seed=%d loader_seed=%d",
+            "diffusion logical_rank=%d training_seed=%d data_seed=%d loader_seed=%d",
+            logical_rank,
             train_seed,
             data_seed,
             loader_seed,
@@ -2982,7 +3049,7 @@ def main(argv=None) -> None:
         target_num_frames=args.num_frames,
         target_height=args.height,
         target_width=args.width,
-        seed=data_seed,
+        root_seed=args.seed,
     )
     loader = DataLoader(
         dataset,

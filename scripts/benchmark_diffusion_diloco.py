@@ -12,8 +12,8 @@ intended difference is synchronization:
 
 Each DiLoCo result is evaluated from the syncer's checkpoint exported through
 ``yeto.diffusion.export``.  A learner's locally blended adapter is never used
-as the result.  Held-out loss is paired: every arm receives the same rows,
-timesteps, and noise draws during evaluation.
+as the result.  Matching logical ranks use the same training rows and RNG
+streams, and held-out loss pairs rows, timesteps, and noise draws across arms.
 
 This is a local execution harness.  It partitions the visible CUDA devices
 between learner processes but does not provision cloud machines.
@@ -1255,6 +1255,8 @@ def write_config(args, arms: list[Arm], data_manifest: dict) -> None:
             "same_total_ranks": True,
             "same_per_gpu_batch": True,
             "same_sample_budget": True,
+            "paired_rank_data_order": True,
+            "paired_training_rng": True,
             "paired_eval_rng": True,
             "diloco_artifact": "syncer checkpoint export",
         },
@@ -1357,7 +1359,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fragments", type=int, default=8)
     parser.add_argument("--wan-streams", type=int, default=4)
     parser.add_argument("--grace-ms", type=int, default=1000)
-    parser.add_argument("--stream-workers", type=int, default=0)
+    parser.add_argument(
+        "--stream-workers",
+        type=int,
+        default=0,
+        help="fixed at 0 so matching baseline and DiLoCo rank streams stay paired",
+    )
 
     parser.add_argument("--diffusion-adapter", default=None)
     parser.add_argument("--cache-latents", action="store_true")
@@ -1439,8 +1446,10 @@ def validate_args(args, arms: list[Arm], *, check_devices: bool = True) -> None:
     ):
         if getattr(args, name) < 1:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
-    if args.stream_workers < 0:
-        raise ValueError("--stream-workers must be non-negative")
+    if args.stream_workers != 0:
+        raise ValueError(
+            "paired diffusion benchmarks require --stream-workers 0"
+        )
     if args.grace_ms < 0:
         raise ValueError("--grace-ms must be non-negative")
     if args.device == "cpu" and args.shard == "fsdp":

@@ -180,6 +180,33 @@ def test_seed_parser_rejects_empty_invalid_and_duplicate_values():
             benchmark.parse_seeds(value)
 
 
+def test_formal_benchmark_requires_zero_data_workers():
+    args = benchmark.build_parser().parse_args(
+        [
+            "--model",
+            "ltx-video",
+            "--data",
+            "rows.jsonl",
+            "--height",
+            "256",
+            "--width",
+            "256",
+            "--device",
+            "cpu",
+            "--shard",
+            "ddp",
+            "--stream-workers",
+            "1",
+        ]
+    )
+    with pytest.raises(ValueError, match="require --stream-workers 0"):
+        benchmark.validate_args(
+            args,
+            benchmark.select_arms("m2"),
+            check_devices=False,
+        )
+
+
 def test_cuda_env_respects_parent_visible_device_mapping(monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,7,8,9")
     env = benchmark.cuda_env(1, 2, "cuda")

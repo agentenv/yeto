@@ -24,6 +24,8 @@ For an arm with `M` islands and `G` ranks per island:
 - both use the same per-rank micro batch and gradient accumulation;
 - both run the same number of optimizer steps;
 - both therefore process the same total number of training examples;
+- corresponding logical ranks consume the same row streams and use the same
+  training RNG streams for timestep, noise, and other stochastic operations;
 - model id, dataset, LoRA rank/alpha/targets, optimizer, loss weighting,
   spatial/video shape, and root training seed are identical;
 - all runs use the same held-out rows and paired evaluation RNG draws.
@@ -117,10 +119,12 @@ localhost wall time does not measure cross-region TCP throughput.
 ## Reproducibility
 
 The benchmark uses explicit micro batch sizes rather than autobatching and
-defaults DataLoader workers to zero. Each training seed controls LoRA
-initialization, data order, timestep sampling, and noise through the diffusion
-learner's seeded RNG streams. Evaluation uses a separate fixed seed so every
-artifact sees identical Monte Carlo samples.
+requires DataLoader workers to remain zero. A DiLoCo rank `(learner_id, rank)`
+is mapped to logical rank `learner_id + M * rank`, which is the matching rank in
+`baseline-mM`. Each training seed therefore controls identical LoRA
+initialization, data order, timestep sampling, noise, and other stochastic
+operations on corresponding ranks. Evaluation uses a separate fixed seed so
+every artifact sees identical Monte Carlo samples.
 
 CUDA kernels are not forced into deterministic implementations. Repeated seeds
 measure optimization variability, not bitwise reproducibility.

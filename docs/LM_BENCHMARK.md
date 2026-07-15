@@ -16,7 +16,7 @@ or a WAN throughput emulator.
 The executable harness is `scripts/compare_diloco.py`.
 
 The synchronization arms are shared with diffusion because they exercise the
-same syncer algorithms. The workload contract, budget, data pairing, quality
+same syncer algorithms. The workload contract, budget, data accounting, quality
 metric, and diagnostics are LM-specific; diffusion sample/noise/shape controls
 are not part of this benchmark.
 
@@ -308,6 +308,7 @@ The domain-specific parts differ:
 | budget unit | raw packed tokens plus verified target tokens | training samples |
 | input controls | sequence length, assistant/all mask | height, width, resize, frames, FPS, caching |
 | primary metric | masked CE/token and perplexity | flow-matching loss per predicted element |
+| training randomness | paired logical-rank streams | paired logical-rank streams |
 | eval randomness | deterministic forward pass | paired timestep/noise draws with repeats |
 | dataset row | conversation plus optional tools | prompt plus image/video/latent fields |
 | saved adapter | causal-LM LoRA | diffusion-component LoRA |
@@ -316,8 +317,9 @@ The domain-specific parts differ:
 The LM update adopts the diffusion benchmark's equal-hardware baselines,
 production-shaped preset names, repeated seeds, S3 staging, resume behavior,
 syncer-tape diagnostics, traffic estimates, and structured reports. The
-LM harness then adds paired conversation/rank streams, exact target-token
-checks, target density, perplexity, and tokens-per-sync diagnostics. The
+Both harnesses pair logical-rank training streams. The LM harness additionally
+checks exact target-token counts and reports target density, perplexity, and
+tokens-per-sync diagnostics. The
 diffusion-only shape, frame, noise-repeat, and sample-budget controls are
 deliberately not copied because they do not apply to causal language modeling.
 
