@@ -36,6 +36,11 @@ AUTHORITATIVE_PREREG_COMMIT = "16d27bc60deb6d8910bf0111c7fb57c9d0eb5b80"
 AUTHORITATIVE_PREREG_SHA256 = (
     "7cba3c62328b4bfe15fffbc523979274e834e8e720e16f70d79621eaf6ebdb7b"
 )
+ADOPTED_PARALLEL_AMENDMENT_PATH = Path("docs/AMENDMENT-parallel-cells.md")
+ADOPTED_PARALLEL_AMENDMENT_SHA256 = (
+    "e2c87fd6c2ec0e4b91f488b5771334e0befd175560a3e2ccfcf349be1ee8b3dd"
+)
+P0A_SOURCE_REBIND_FROM_COMMIT = "0af7f4a80426babc14896c7c1f7885abcb331d46"
 sys.path.insert(0, str(REPO_ROOT))
 DIRECT_INFRASTRUCTURE_FAILURE_REASONS = frozenset(
     {
@@ -282,6 +287,62 @@ def load_json_object(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise PhaseMapError(f"{label} must contain one JSON object")
     return value
+
+
+def authorize_p0b_source_rebind(
+    parent: dict[str, Any], candidate_commit: str
+) -> bool:
+    """Allow the adopted one-time P0a -> fixed-production source transition."""
+    parent_commit = str((parent.get("frozen") or {}).get("git_commit", ""))
+    if parent_commit == candidate_commit:
+        return False
+    if (
+        parent.get("lineage", {}).get("descendant_kind") != "p0a_single_gpu_bound"
+        or parent_commit != P0A_SOURCE_REBIND_FROM_COMMIT
+        or not re.fullmatch(r"[0-9a-f]{40}", candidate_commit)
+    ):
+        raise PhaseMapError("P0b source rebind is not the adopted P0a transition")
+    for commit in (parent_commit, candidate_commit):
+        available = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{commit}^{{commit}}"],
+            check=False,
+            capture_output=True,
+        )
+        if available.returncode != 0:
+            raise PhaseMapError("P0b source rebind lacks an exact commit object")
+    ancestry = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "merge-base",
+            "--is-ancestor",
+            parent_commit,
+            candidate_commit,
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if ancestry.returncode != 0:
+        raise PhaseMapError("P0b fixed production commit is not a P0a descendant")
+    amendment = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "show",
+            f"{candidate_commit}:{ADOPTED_PARALLEL_AMENDMENT_PATH.as_posix()}",
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if (
+        amendment.returncode != 0
+        or hashlib.sha256(amendment.stdout).hexdigest()
+        != ADOPTED_PARALLEL_AMENDMENT_SHA256
+    ):
+        raise PhaseMapError("P0b source rebind lacks the exact adopted amendment")
+    return True
 
 
 def final_result_rows(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -674,6 +735,8 @@ def validate_parent_equality(
     candidate: dict[str, Any],
     parent: dict[str, Any] | None,
     descendant_kind: str,
+    *,
+    p0b_source_rebind: bool = False,
 ) -> None:
     if parent is None:
         return
@@ -687,6 +750,8 @@ def validate_parent_equality(
     if pointer_field is None:
         return
     for pointer in policy[pointer_field]:
+        if p0b_source_rebind and pointer == "/frozen/git_commit":
+            continue
         if json_pointer(candidate, pointer) != json_pointer(parent, pointer):
             raise PhaseMapError(
                 f"{descendant_kind} differs from parent at immutable path {pointer}"
@@ -1206,6 +1271,11 @@ def build_bound_manifest(
     parent, _parent_replay = validate_parent_and_replay(
         args, template, descendant_kind
     )
+    p0b_source_rebind = bool(
+        descendant_kind == "p0b_four_gpu_bound"
+        and parent is not None
+        and authorize_p0b_source_rebind(parent, args.git_commit)
+    )
     cumulative = descendant_kind in {
         "adaptive_bracket_round",
         "additional_development_stage",
@@ -1423,17 +1493,28 @@ def build_bound_manifest(
             "--expected-parent-replay-report-hash",
         )
     manifest["results"] = deepcopy(parent["results"]) if cumulative else []
+    comparison_baseline = (
+        parent
+        if descendant_kind == "p0b_four_gpu_bound" or cumulative
+        else None
+    )
+    if p0b_source_rebind:
+        assert parent is not None
+        comparison_baseline = deepcopy(parent)
+        comparison_baseline["frozen"]["git_commit"] = args.git_commit
     validate_authorized_template_diff(
         template,
         manifest,
         descendant_kind,
-        baseline=(
-            parent
-            if descendant_kind == "p0b_four_gpu_bound" or cumulative
-            else None
-        ),
+        baseline=comparison_baseline,
     )
-    validate_parent_equality(template, manifest, parent, descendant_kind)
+    validate_parent_equality(
+        template,
+        manifest,
+        parent,
+        descendant_kind,
+        p0b_source_rebind=p0b_source_rebind,
+    )
     if cumulative:
         assert parent is not None
         verify_parent_hash_chain([parent, manifest])

@@ -190,6 +190,44 @@ def _authority_bound_p1(tmp_path: Path):
     return args, plan, rpm.build_bound_manifest(args, plan, **BOUND_HASHES)
 
 
+def test_p0b_allows_only_the_adopted_fixed_production_source_rebind(tmp_path):
+    p0a = _canary_args(tmp_path, "p0a")
+    p0a.git_commit = rpm.P0A_SOURCE_REBIND_FROM_COMMIT
+    p0a_plan = rpm.build_plan(p0a)
+    parent = rpm.build_schema_fixture(
+        rpm.build_bound_manifest(p0a, p0a_plan, **BOUND_HASHES), p0a_plan
+    )
+    parent_path, replay_path = _fake_replay(tmp_path, parent, "p0a-rebind")
+    replay = json.loads(replay_path.read_text())
+    replay["replay_validator_git_commit"] = rpm.P0A_SOURCE_REBIND_FROM_COMMIT
+    replay_path.write_text(json.dumps(replay, indent=2, sort_keys=True) + "\n")
+
+    p0b = _canary_args(tmp_path, "p0b")
+    p0b.git_commit = HEAD
+    p0b.parent_manifest = parent_path
+    p0b.expected_parent_manifest_hash = rpm.sha256_bytes(rpm.canonical_json(parent))
+    p0b.parent_replay_report = replay_path
+    p0b.expected_parent_replay_report_hash = rpm.sha256_file(replay_path)
+    plan = rpm.build_plan(p0b)
+    bound = rpm.build_bound_manifest(p0b, plan, **BOUND_HASHES)
+
+    assert bound["frozen"]["git_commit"] == HEAD
+    assert parent["frozen"]["git_commit"] == rpm.P0A_SOURCE_REBIND_FROM_COMMIT
+    assert [
+        cell["normalized_workload_command_hash"] for cell in bound["expected_cells"]
+    ] == [
+        cell["normalized_workload_command_hash"] for cell in parent["expected_cells"]
+    ]
+    report = validator.validate_and_summarize(
+        bound,
+        claim_level="integrity",
+        parent_manifest=parent,
+        parent_replay_report=replay,
+        parent_replay_report_sha256=p0b.expected_parent_replay_report_hash,
+    )
+    assert report["integrity_status"] == "BOUND_LAUNCH_AUTHORITY_VALIDATED"
+
+
 def test_plan_is_exact_blocked_36_cell_grid(tmp_path):
     args = _args(tmp_path)
     plan = rpm.build_plan(args)

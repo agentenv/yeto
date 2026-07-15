@@ -23,6 +23,7 @@ import statistics
 import subprocess
 import sys
 from collections import Counter, defaultdict
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +44,11 @@ AUTHORITATIVE_PREREG_SOURCE_COMMIT = "16d27bc60deb6d8910bf0111c7fb57c9d0eb5b80"
 AUTHORITATIVE_PREREG_TEMPLATE_SHA256 = (
     "7cba3c62328b4bfe15fffbc523979274e834e8e720e16f70d79621eaf6ebdb7b"
 )
+ADOPTED_PARALLEL_AMENDMENT_PATH = "docs/AMENDMENT-parallel-cells.md"
+ADOPTED_PARALLEL_AMENDMENT_SHA256 = (
+    "e2c87fd6c2ec0e4b91f488b5771334e0befd175560a3e2ccfcf349be1ee8b3dd"
+)
+P0A_SOURCE_REBIND_FROM_COMMIT = "0af7f4a80426babc14896c7c1f7885abcb331d46"
 
 
 class ManifestError(RuntimeError):
@@ -185,6 +191,72 @@ def _manifest_kind(manifest: Mapping[str, Any]) -> str:
     if not isinstance(lineage, Mapping):
         return ""
     return str(lineage.get("descendant_kind", ""))
+
+
+def _validate_p0b_source_rebind(
+    manifest: Mapping[str, Any],
+    parent: Mapping[str, Any],
+    errors: list[str],
+) -> bool:
+    child_commit = str(
+        _mapping_or_empty(manifest.get("frozen")).get("git_commit", "")
+    )
+    parent_commit = str(
+        _mapping_or_empty(parent.get("frozen")).get("git_commit", "")
+    )
+    if child_commit == parent_commit:
+        return False
+    if (
+        _manifest_kind(parent) != "p0a_single_gpu_bound"
+        or parent_commit != P0A_SOURCE_REBIND_FROM_COMMIT
+        or not re.fullmatch(r"[0-9a-f]{40}", child_commit)
+    ):
+        errors.append("P0b source rebind is not the adopted P0a transition")
+        return False
+    for commit in (parent_commit, child_commit):
+        available = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{commit}^{{commit}}"],
+            check=False,
+            capture_output=True,
+        )
+        if available.returncode != 0:
+            errors.append("P0b source rebind lacks an exact commit object")
+            return False
+    ancestry = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "merge-base",
+            "--is-ancestor",
+            parent_commit,
+            child_commit,
+        ],
+        check=False,
+        capture_output=True,
+    )
+    amendment = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "show",
+            f"{child_commit}:{ADOPTED_PARALLEL_AMENDMENT_PATH}",
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if ancestry.returncode != 0:
+        errors.append("P0b fixed production commit is not a P0a descendant")
+        return False
+    if (
+        amendment.returncode != 0
+        or hashlib.sha256(amendment.stdout).hexdigest()
+        != ADOPTED_PARALLEL_AMENDMENT_SHA256
+    ):
+        errors.append("P0b source rebind lacks the exact adopted amendment")
+        return False
+    return True
 
 
 def _expected_cell_records(
@@ -759,8 +831,12 @@ def _validate_p0b_matches_parent(
     parent: Mapping[str, Any],
     kind_policy: Mapping[str, Any],
     errors: list[str],
+    *,
+    source_rebind: bool,
 ) -> None:
     for path in kind_policy.get("must_equal_p0a_parent_paths", []):
+        if source_rebind and path == "/frozen/git_commit":
+            continue
         try:
             child_value = _json_pointer_get(manifest, str(path))
             parent_value = _json_pointer_get(parent, str(path))
@@ -849,6 +925,7 @@ def _validate_authority_and_lineage(
         return
 
     compare_to = template
+    p0b_source_rebind = False
     parent_required = kind_policy.get("parent_required") is True
     if parent_required:
         if parent_manifest is None:
@@ -875,6 +952,9 @@ def _validate_authority_and_lineage(
             ) not in {"initial_bound_p1_r0", "adaptive_bracket_round"}:
                 errors.append("adaptive_bracket_round parent must be a sealed P1 manifest")
             if kind == "p0b_four_gpu_bound" and _manifest_kind(parent_manifest) == "p0a_single_gpu_bound":
+                p0b_source_rebind = _validate_p0b_source_rebind(
+                    manifest, parent_manifest, errors
+                )
                 try:
                     validate_and_summarize(parent_manifest, claim_level="integrity")
                 except ManifestError as exc:
@@ -896,6 +976,9 @@ def _validate_authority_and_lineage(
                 "compare_allowed_paths_to_authoritative_template_not_p0b_parent"
             ):
                 compare_to = parent_manifest
+                if p0b_source_rebind:
+                    compare_to = deepcopy(parent_manifest)
+                    compare_to["frozen"]["git_commit"] = frozen_commit
                 cumulative = kind in {
                     "adaptive_bracket_round",
                     "additional_development_stage",
@@ -990,7 +1073,13 @@ def _validate_authority_and_lineage(
             errors=errors,
         )
         if parent_manifest is not None:
-            _validate_p0b_matches_parent(manifest, parent_manifest, kind_policy, errors)
+            _validate_p0b_matches_parent(
+                manifest,
+                parent_manifest,
+                kind_policy,
+                errors,
+                source_rebind=p0b_source_rebind,
+            )
 
     if kind == "initial_bound_p1_r0":
         if parent_manifest is not None:
