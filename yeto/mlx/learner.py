@@ -258,6 +258,7 @@ def main(argv=None) -> None:
     mx.eval(model.parameters())
 
     from ..fragments import build_layout
+    from ..layout_metadata import build_fragment_order_metadata
     from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
     from ..tensor_io import fragment_flat, pack_fragment, quantize_q4, unpack_fragment
 
@@ -279,7 +280,12 @@ def main(argv=None) -> None:
     if args.syncer != "none":
         host, port = args.syncer.rsplit(":", 1)
         client = SyncerClient(
-            (host, int(port)), args.learner_id, layout, wire_dtype, args.wan_streams
+            (host, int(port)),
+            args.learner_id,
+            layout,
+            wire_dtype,
+            args.wan_streams,
+            layout_metadata=build_fragment_order_metadata(layout),
         )
         client.start()
         log.info("connected to syncer at %s", args.syncer)

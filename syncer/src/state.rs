@@ -172,6 +172,14 @@ impl AggregateDelta {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct CttnInputs {
+    pub g: Vec<f32>,
+    pub b: Vec<f32>,
+    pub outer_lr: f32,
+    pub mu: f32,
+}
+
 /// Caller-configurable admissible range for one adaptive step multiplier.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StepScaleBounds {
@@ -431,6 +439,10 @@ pub struct GlobalState {
     pub params: Vec<Vec<f32>>,
     /// Outer-optimizer buffers, same shape as params.
     momentum: Vec<Vec<f32>>,
+    /// Counterfactual mu=0.9 Nesterov buffer used only by CTTN shadow
+    /// diagnostics. It is updated from observed SGD pseudo-gradients and is
+    /// never consulted by the applied optimizer.
+    cttn_shadow_momentum: Vec<Vec<f32>>,
     /// Per-fragment rho-adaptive EMA of the measured round-to-round delta
     /// autocorrelation. Only the rho-adaptive optimizer reads or writes it.
     /// Deliberately NOT checkpointed (the on-disk format is shared with
@@ -545,6 +557,7 @@ impl GlobalState {
             .map(|f| vec![0.0; f.numel()])
             .collect();
         let momentum = params.clone();
+        let cttn_shadow_momentum = params.clone();
         let rho_ema = vec![merge::RHO_ADAPTIVE_INITIAL_RHO_EMA; layout.fragments.len()];
         let capped_mu = vec![merge::CAPPED_NESTEROV_INITIAL_MU; layout.fragments.len()];
         let capped_gain =
@@ -570,6 +583,7 @@ impl GlobalState {
             layout_meta,
             params,
             momentum,
+            cttn_shadow_momentum,
             rho_ema,
             capped_mu,
             capped_gain,
@@ -745,18 +759,7 @@ impl GlobalState {
         self.preview_aggregate_inner(aggregate, target_version)
     }
 
-    fn preview_aggregate_inner(
-        &self,
-        aggregate: &AggregateDelta,
-        target_version: u64,
-    ) -> Result<ActionPreview> {
-        self.ensure_current_base(
-            aggregate.fragment_id,
-            aggregate.base_version,
-            aggregate.base_state_epoch,
-            aggregate.base_state_fingerprint,
-        )?;
-        let fid = aggregate.fragment_id;
+    fn outer_lr_for_fragment(&self, fid: usize) -> Result<f32> {
         let outer_lr = if let Some(rates) = &self.outer_lr_by_fragment {
             *rates.get(fid).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -770,11 +773,85 @@ impl GlobalState {
         if !outer_lr.is_finite() || outer_lr < 0.0 {
             bail!("fragment {fid}: outer learning rate must be finite and non-negative");
         }
-        if !self.outer_momentum.is_finite() || !self.outer_restart_cos_threshold.is_finite() {
-            bail!("fragment {fid}: outer optimizer configuration is not finite");
-        }
+        Ok(outer_lr)
+    }
+
+    fn post_renormalized_delta(&self, fid: usize, delta: &[f32]) -> Result<Vec<f32>> {
         if !self.delta_norm_ref.is_finite() || self.delta_norm_ref < 0.0 {
             bail!("fragment {fid}: delta-norm-ref must be finite and non-negative");
+        }
+        if self.delta_norm_ref <= 0.0 {
+            return Ok(delta.to_vec());
+        }
+        let raw_norm = flat_l2_norm(delta);
+        if raw_norm == 0.0 {
+            return Ok(delta.to_vec());
+        }
+        let scale = (self.delta_norm_ref as f64 / raw_norm) as f32;
+        if !scale.is_finite() {
+            bail!("fragment {fid}: delta-norm-ref rescale is not finite");
+        }
+        Ok(delta.iter().map(|value| scale * *value).collect())
+    }
+
+    /// Freeze the exact CTTN inputs from one aggregate. `g` is the same
+    /// post-renormalization, anchor-minus-upload delta that the fallback outer
+    /// optimizer consumes; `b` is the incoming fragment momentum buffer.
+    pub fn cttn_inputs(&self, aggregate: &AggregateDelta, mu: f32) -> Result<CttnInputs> {
+        self.ensure_current_base(
+            aggregate.fragment_id,
+            aggregate.base_version,
+            aggregate.base_state_epoch,
+            aggregate.base_state_fingerprint,
+        )?;
+        let fid = aggregate.fragment_id;
+        if !mu.is_finite() || !(0.0..1.0).contains(&mu) {
+            bail!("fragment {fid}: CTTN mu must be finite and in [0, 1)");
+        }
+        Ok(CttnInputs {
+            g: self.post_renormalized_delta(fid, &aggregate.delta)?,
+            b: self.momentum[fid].clone(),
+            outer_lr: self.outer_lr_for_fragment(fid)?,
+            mu,
+        })
+    }
+
+    /// Freeze shadow inputs using the independent counterfactual Nesterov
+    /// buffer rather than the applied optimizer's buffer.
+    pub fn cttn_shadow_inputs(&self, aggregate: &AggregateDelta, mu: f32) -> Result<CttnInputs> {
+        self.ensure_current_base(
+            aggregate.fragment_id,
+            aggregate.base_version,
+            aggregate.base_state_epoch,
+            aggregate.base_state_fingerprint,
+        )?;
+        let fid = aggregate.fragment_id;
+        if !mu.is_finite() || !(0.0..1.0).contains(&mu) {
+            bail!("fragment {fid}: CTTN shadow mu must be finite and in [0, 1)");
+        }
+        Ok(CttnInputs {
+            g: self.post_renormalized_delta(fid, &aggregate.delta)?,
+            b: self.cttn_shadow_momentum[fid].clone(),
+            outer_lr: self.outer_lr_for_fragment(fid)?,
+            mu,
+        })
+    }
+
+    fn preview_aggregate_inner(
+        &self,
+        aggregate: &AggregateDelta,
+        target_version: u64,
+    ) -> Result<ActionPreview> {
+        self.ensure_current_base(
+            aggregate.fragment_id,
+            aggregate.base_version,
+            aggregate.base_state_epoch,
+            aggregate.base_state_fingerprint,
+        )?;
+        let fid = aggregate.fragment_id;
+        let outer_lr = self.outer_lr_for_fragment(fid)?;
+        if !self.outer_momentum.is_finite() || !self.outer_restart_cos_threshold.is_finite() {
+            bail!("fragment {fid}: outer optimizer configuration is not finite");
         }
         // Post-merge renormalization (mediation-control experiments): rescale
         // the merged delta to L2 norm `delta_norm_ref` before the outer step.
@@ -782,21 +859,8 @@ impl GlobalState {
         // rescaled slice feeds both the applied step and the materialized
         // preview below, so preview bit-exactness is preserved by
         // construction. gnorm (aggregate.gnorm) keeps the pre-rescale norm.
-        let renormalized_delta: Option<Vec<f32>> = if self.delta_norm_ref > 0.0 {
-            let raw_norm = flat_l2_norm(&aggregate.delta);
-            if raw_norm > 0.0 {
-                let scale = (self.delta_norm_ref as f64 / raw_norm) as f32;
-                if !scale.is_finite() {
-                    bail!("fragment {fid}: delta-norm-ref rescale is not finite");
-                }
-                Some(aggregate.delta.iter().map(|value| scale * *value).collect())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let delta: &[f32] = renormalized_delta.as_deref().unwrap_or(&aggregate.delta);
+        let renormalized_delta = self.post_renormalized_delta(fid, &aggregate.delta)?;
+        let delta = renormalized_delta.as_slice();
         let mut resulting_params = self.params[fid].clone();
         let mut resulting_optimizer_buffer = self.momentum[fid].clone();
         let mut resulting_rho_ema = self.rho_ema[fid];
@@ -911,6 +975,149 @@ impl GlobalState {
         };
         preview.action_fingerprint = compute_action_fingerprint(&preview);
         Ok(preview)
+    }
+
+    /// Commit the sidecar-computed CTTN direction without routing it through
+    /// `apply_outer_step` or `materialize_applied_step`. Both the sealed
+    /// displacement and resulting parameters are built from this same `d`.
+    pub fn commit_cttn_step(
+        &mut self,
+        aggregate: &AggregateDelta,
+        target_version: u64,
+        d: &[f32],
+        b_new: &[f32],
+        outer_lr: f32,
+    ) -> Result<MergeStats> {
+        self.ensure_current_base(
+            aggregate.fragment_id,
+            aggregate.base_version,
+            aggregate.base_state_epoch,
+            aggregate.base_state_fingerprint,
+        )?;
+        if target_version <= aggregate.base_version {
+            bail!(
+                "fragment {}: CTTN target version {target_version} must be newer than base version {}",
+                aggregate.fragment_id,
+                aggregate.base_version
+            );
+        }
+        let fid = aggregate.fragment_id;
+        let expected_lr = self.outer_lr_for_fragment(fid)?;
+        if outer_lr.to_bits() != expected_lr.to_bits() {
+            bail!("fragment {fid}: CTTN outer learning rate changed before commit");
+        }
+        let numel = self.params[fid].len();
+        if d.len() != numel
+            || b_new.len() != numel
+            || d.iter().chain(b_new).any(|value| !value.is_finite())
+        {
+            bail!("fragment {fid}: CTTN returned malformed or non-finite vectors");
+        }
+
+        let g = self.post_renormalized_delta(fid, &aggregate.delta)?;
+        let applied_step: Vec<f32> = d.iter().map(|value| outer_lr * *value).collect();
+        let resulting_params: Vec<f32> = self.params[fid]
+            .iter()
+            .zip(&applied_step)
+            .map(|(param, step)| *param - *step)
+            .collect();
+        if applied_step.iter().any(|value| !value.is_finite())
+            || resulting_params.iter().any(|value| !value.is_finite())
+        {
+            bail!("fragment {fid}: CTTN parameter materialization is non-finite");
+        }
+
+        let mut direction_norm_sq = 0.0f64;
+        let mut delta_norm_sq = 0.0f64;
+        let mut direction_delta_dot = 0.0f64;
+        let mut history_norm_sq = 0.0f64;
+        for (&direction, &delta) in d.iter().zip(&g) {
+            let direction = direction as f64;
+            let delta = delta as f64;
+            let history = direction - delta;
+            direction_norm_sq += direction * direction;
+            delta_norm_sq += delta * delta;
+            direction_delta_dot += direction * delta;
+            history_norm_sq += history * history;
+        }
+        let direction_delta_cosine = if direction_norm_sq > 0.0 && delta_norm_sq > 0.0 {
+            Some(
+                (direction_delta_dot / (direction_norm_sq * delta_norm_sq).sqrt()).clamp(-1.0, 1.0),
+            )
+        } else {
+            None
+        };
+        let history_current_norm_ratio = if delta_norm_sq > 0.0 {
+            Some((history_norm_sq / delta_norm_sq).sqrt())
+        } else {
+            None
+        };
+        let step_norm = flat_l2_norm(&applied_step);
+        let mut preview = ActionPreview {
+            fragment_id: fid,
+            base_version: aggregate.base_version,
+            base_state_epoch: aggregate.base_state_epoch,
+            base_state_fingerprint: aggregate.base_state_fingerprint,
+            target_version,
+            responder_ids: aggregate.responder_ids.clone(),
+            selected_weight: aggregate.selected_weight,
+            selected_weight_mass: aggregate.selected_weight_mass,
+            resulting_params,
+            resulting_optimizer_buffer: b_new.to_vec(),
+            resulting_rho_ema: self.rho_ema[fid],
+            resulting_capped_mu: self.capped_mu[fid],
+            resulting_capped_gain: self.capped_gain[fid],
+            resulting_block_v: self.block_v[fid].clone(),
+            resulting_curv_prev_delta: self.curv_prev_delta[fid].clone(),
+            resulting_curv_prev_dtheta: self.curv_prev_dtheta[fid].clone(),
+            resulting_cheb_phase: self.cheb_phase[fid],
+            applied_step,
+            stats: MergeStats {
+                gnorm: aggregate.gnorm,
+                outer: merge::OuterStepStats {
+                    applied_step_norm: step_norm,
+                    direction_delta_cosine,
+                    history_current_norm_ratio,
+                    restarted: false,
+                },
+            },
+            step_scale: 1.0,
+            unscaled_applied_step_norm: step_norm,
+            action_fingerprint: [0; 2],
+        };
+        preview.action_fingerprint = compute_action_fingerprint(&preview);
+        self.commit_preview(preview)
+    }
+
+    /// Commit the CTTN shadow policy's applied action: exact plain SGD
+    /// (`d == g`) while independently advancing the counterfactual momentum
+    /// buffer `b <- mu*b + g`. No CTTN vector enters params or optimizer state.
+    pub fn commit_cttn_shadow_sgd(
+        &mut self,
+        aggregate: &AggregateDelta,
+        target_version: u64,
+        mu: f32,
+    ) -> Result<MergeStats> {
+        let inputs = self.cttn_shadow_inputs(aggregate, mu)?;
+        let fid = aggregate.fragment_id;
+        let next_shadow: Vec<f32> = inputs
+            .b
+            .iter()
+            .zip(&inputs.g)
+            .map(|(buffer, gradient)| mu * *buffer + *gradient)
+            .collect();
+        // Plain SGD's ordinary Nesterov(mu=0) storage is exactly g. Passing
+        // it here keeps the checkpointed applied-optimizer buffer conventional
+        // while the independent shadow buffer carries mu=0.9 history.
+        let stats = self.commit_cttn_step(
+            aggregate,
+            target_version,
+            &inputs.g,
+            &inputs.g,
+            inputs.outer_lr,
+        )?;
+        self.cttn_shadow_momentum[fid] = next_shadow;
+        Ok(stats)
     }
 
     /// Purely scale the applied parameter step of a complete full-group
@@ -1658,6 +1865,7 @@ impl GlobalState {
                     *v = f32::from_le_bytes(r.take(4)?.try_into()?);
                 }
             }
+            self.cttn_shadow_momentum[p].fill(0.0);
             // The rho-adaptive EMA and the capped-Nesterov-family effective
             // momentum and gc gain are not part of the checkpoint format;
             // restore to their references so resumed runs are deterministic.
@@ -2039,6 +2247,80 @@ mod tests {
         {
             assert_eq!(*committed, before - step);
         }
+    }
+
+    #[test]
+    fn cttn_inputs_and_commit_share_post_renorm_direction_exactly() {
+        let mut st = GlobalState::new(layout2(), None, 0.25, 0.0, crate::protocol::DTYPE_F32);
+        st.delta_norm_ref = 2.0;
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![1.0; 4]).unwrap();
+        st.momentum[0] = vec![0.5, -0.5, 1.0, -1.0];
+        let learner = [0.0f32, 2.0, -1.0, 3.0];
+        let aggregate = st
+            .build_full_aggregate(0, &[MergeCandidate::new(0, &learner, 1.0)])
+            .unwrap();
+        let inputs = st.cttn_inputs(&aggregate, 0.9).unwrap();
+        assert!((vector_norm(&inputs.g) - 2.0).abs() < 1e-6);
+        assert_eq!(inputs.b, vec![0.5, -0.5, 1.0, -1.0]);
+        assert_eq!(inputs.outer_lr, 0.25);
+        assert_eq!(inputs.mu, 0.9);
+
+        let d = inputs.g.clone();
+        let b_new = vec![1.5, 2.5, 3.5, 4.5];
+        let before = st.params[0].clone();
+        let stats = st
+            .commit_cttn_step(&aggregate, 1, &d, &b_new, inputs.outer_lr)
+            .unwrap();
+        for index in 0..d.len() {
+            let applied_step = 0.25f32 * d[index];
+            assert_eq!(
+                st.params[0][index].to_bits(),
+                (before[index] - applied_step).to_bits()
+            );
+        }
+        assert_eq!(st.momentum[0], b_new);
+        assert_eq!(st.versions[0], 1);
+        assert!((stats.outer.applied_step_norm - vector_norm(&d) * 0.25).abs() < 1e-7);
+    }
+
+    #[test]
+    fn cttn_shadow_commits_exact_sgd_and_keeps_independent_mu09_buffer() {
+        let mut st = GlobalState::new(layout2(), None, 0.28, 0.0, crate::protocol::DTYPE_F32);
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![1.0; 4]).unwrap();
+        let learner = [0.0f32, 2.0, -1.0, 3.0];
+        let aggregate = st
+            .build_full_aggregate(0, &[MergeCandidate::new(0, &learner, 1.0)])
+            .unwrap();
+        let inputs = st.cttn_shadow_inputs(&aggregate, 0.9).unwrap();
+        let before = st.params[0].clone();
+        st.commit_cttn_shadow_sgd(&aggregate, 1, 0.9).unwrap();
+        for index in 0..inputs.g.len() {
+            assert_eq!(
+                st.params[0][index].to_bits(),
+                (before[index] - 0.28 * inputs.g[index]).to_bits(),
+                "shadow d must equal g exactly"
+            );
+        }
+        assert_eq!(st.momentum[0], inputs.g);
+        assert_eq!(st.cttn_shadow_momentum[0], inputs.g);
+
+        let learner2 = [0.5f32, 1.5, -0.5, 2.5];
+        let aggregate2 = st
+            .build_full_aggregate(0, &[MergeCandidate::new(0, &learner2, 1.0)])
+            .unwrap();
+        let inputs2 = st.cttn_shadow_inputs(&aggregate2, 0.9).unwrap();
+        assert_eq!(inputs2.b, inputs.g);
+        st.commit_cttn_shadow_sgd(&aggregate2, 2, 0.9).unwrap();
+        let expected_shadow: Vec<f32> = inputs2
+            .b
+            .iter()
+            .zip(&inputs2.g)
+            .map(|(b, g)| 0.9 * *b + *g)
+            .collect();
+        assert_eq!(st.cttn_shadow_momentum[0], expected_shadow);
+        assert_eq!(st.momentum[0], inputs2.g);
     }
 
     #[test]

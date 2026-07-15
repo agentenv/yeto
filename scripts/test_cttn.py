@@ -19,8 +19,10 @@ from __future__ import annotations
 import numpy as np
 
 from yeto.cttn import (
+    _assert_trust_postcondition,
     _solve_trustregion_kdim,
     block_lanczos,
+    cttn_scalar_step,
     cttn_step,
     orth,
     project_out,
@@ -272,6 +274,67 @@ def test_torch_bf16_parity() -> bool:
     return ok
 
 
+def test_fp32_binding_postcondition() -> bool:
+    print("\nFp32 binding-postcondition regression:")
+    mu = 0.9
+    budget = float(np.float32(0.1))
+    exact_e_after = np.float32(budget / (mu ** 4))
+    rounded_e_after = float(np.nextafter(exact_e_after, np.float32(np.inf)))
+    lhs = mu ** 4 * rounded_e_after
+
+    fp32_passed = True
+    try:
+        _assert_trust_postcondition(
+            mu,
+            rounded_e_after,
+            budget,
+            working_eps=np.finfo(np.float32).eps,
+        )
+    except AssertionError:
+        fp32_passed = False
+
+    fp64_rejected = False
+    try:
+        _assert_trust_postcondition(mu, rounded_e_after, budget)
+    except AssertionError:
+        fp64_rejected = True
+
+    ok = True
+    ok &= check(
+        f"binding step rounded above budget by fp32 passes ({lhs:.9g} vs {budget:.9g})",
+        lhs > budget and fp32_passed,
+    )
+    ok &= check("the same excess remains too large for the strict fp64 path", fp64_rejected)
+    return ok
+
+
+def test_scalar_hvp_control(mu: float, rho: float) -> bool:
+    print("\nScalar-HVP control regression:")
+    H = np.diag([4.0, 1.0, 16.0])
+    g = np.array([1.0, 0.0, 0.0])
+    b = np.array([0.0, 4.0, 4.0])
+    V = np.eye(3)
+    matrix = cttn_step(g, b, V, H, mu=mu, rho=rho)
+    scalar = cttn_scalar_step(g, b, V, H, mu=mu, rho=rho)
+    scalar_retention = scalar.z[1:] / b[1:]
+    matrix_retention = matrix.z[1:] / b[1:]
+    ok = True
+    ok &= check("scalar control binds at the CTTN curvature budget", scalar.bind)
+    ok &= check(
+        "scalar control uses one shrink factor in every transverse direction",
+        np.isclose(scalar_retention[0], scalar_retention[1], rtol=1e-12, atol=0.0),
+    )
+    ok &= check(
+        "matrix CTTN remains anisotropic on the same HVP sketch",
+        matrix_retention[1] < matrix_retention[0],
+    )
+    ok &= check(
+        "scalar control satisfies the same trust budget",
+        scaled_bound_holds(mu ** 4 * scalar.e_after, scalar.budget),
+    )
+    return ok
+
+
 def main() -> int:
     p = 300
     mu = 0.9
@@ -371,6 +434,8 @@ def main() -> int:
     ok &= test_indefinite_and_zero_budget(mu)
     ok &= test_trustregion_edge_cases(mu, rho)
     ok &= test_torch_bf16_parity()
+    ok &= test_fp32_binding_postcondition()
+    ok &= test_scalar_hvp_control(mu, rho)
 
     print(f"\n{'ALL PASS' if ok else 'FAILURES PRESENT'}")
     return 0 if ok else 1

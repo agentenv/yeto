@@ -168,6 +168,31 @@ def test_probe_shadow_and_active_syncer_commands_carry_exact_contract(tmp_path):
     assert "--action-probe-endpoint" not in baseline
 
 
+def test_cttn_shadow_pseudo_optimizer_maps_to_sgd_commit_policy(tmp_path):
+    config = tmp_path / "expected.json"
+    config.write_text("{}\n")
+    arm = compare.apply_arm_overrides(
+        [compare.PRESETS["m4"]], outer_optimizer="cttn-shadow"
+    )[0]
+    assert arm.commit_policy == "cttn_shadow_v1"
+    assert arm.outer_momentum == 0.0
+    cmd = compare.syncer_command(
+        arm,
+        29400,
+        tmp_path / "shadow",
+        total_steps=320,
+        cttn_shadow_samples=32,
+        action_probe_endpoint="127.0.0.1:49000",
+        action_probe_timeout_ms=600_000,
+        action_probe_run_uuid="run-shadow",
+        action_probe_expected_config=config,
+    )
+    assert cmd[cmd.index("--outer-optimizer") + 1] == "nesterov"
+    assert cmd[cmd.index("--outer-momentum") + 1] == "0.0"
+    assert cmd[cmd.index("--commit-policy") + 1] == "cttn_shadow_v1"
+    assert cmd[cmd.index("--cttn-shadow-samples") + 1] == "32"
+
+
 def test_sidecar_command_uses_probe_only_visible_gpu_indices():
     cmd = compare.action_probe_command(
         _args(action_probe_gpus=[6, 7, 9]),

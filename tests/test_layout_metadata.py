@@ -1,6 +1,7 @@
 import struct
 
 from yeto.fragments import MERGE_ISO, MERGE_RDA, Fragment, FragmentLayout
+from yeto.layout_metadata import build_fragment_order_metadata
 from yeto.protocol import DTYPE_F32, encode_hello
 
 
@@ -46,3 +47,21 @@ def test_encode_hello_iso_fragment_carries_row_col_pairs():
     (num_streams,) = struct.unpack_from("<H", payload, off)
     assert num_streams == 2
     assert len(payload) == off + 2
+
+
+def test_fragment_order_metadata_preserves_exact_learner_tensor_order():
+    layout = FragmentLayout(
+        [
+            Fragment(MERGE_RDA, [("z.weight", 3), ("a.weight", 5)]),
+            Fragment(MERGE_RDA, [("m.weight", 7)]),
+        ]
+    )
+    metadata = build_fragment_order_metadata(layout)
+    assert [
+        [tensor["name"] for tensor in fragment["tensors"]]
+        for fragment in metadata["fragments"]
+    ] == [["z.weight", "a.weight"], ["m.weight"]]
+    assert [
+        [tensor["numel"] for tensor in fragment["tensors"]]
+        for fragment in metadata["fragments"]
+    ] == [[3, 5], [7]]
