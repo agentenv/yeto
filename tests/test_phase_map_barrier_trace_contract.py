@@ -80,6 +80,36 @@ def test_every_frozen_phase_command_uses_exact_pipeline_depth_four(
         assert "--pipeline" not in command
 
 
+@pytest.mark.parametrize(
+    ("stage", "expected_inner_steps"),
+    [("p0a", 128), ("p0b", 128), ("p1", 1_280)],
+)
+def test_every_frozen_phase_command_hard_caps_exact_registered_inner_work(
+    tmp_path: Path, stage: str, expected_inner_steps: int
+) -> None:
+    args = _plan_args(tmp_path, stage)
+    # A stale caller/default value must not influence the frozen command.  The
+    # cap is derived from token_budget / (learners * micro_batch * seq_len).
+    args.learner_max_steps = 9_999
+
+    plan = phase_runner.build_plan(args)
+    assert plan["cells"]
+    for cell in plan["cells"]:
+        command = cell["command"]
+        assert command.count("--learner-max-steps") == 1
+        observed = int(command[command.index("--learner-max-steps") + 1])
+        assert observed == expected_inner_steps
+        assert (
+            observed * 4 * args.micro_batch_size * args.seq_len
+            == cell["target_work"]["tokens"]
+        )
+
+
+def test_phase_runner_rejects_a_caller_supplied_learner_step_cap() -> None:
+    parser = phase_runner.build_parser()
+    assert "--learner-max-steps" not in parser._option_string_actions
+
+
 def test_final_shutdown_cannot_silently_bypass_queued_broadcasts() -> None:
     """Exercise the production drain helper against the shutdown race.
 
