@@ -9,12 +9,31 @@ and JSONL files are also accepted as a fallback.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
 
 CHAT_ROLES = {"system", "user", "assistant", "tool"}
+ENCRYPTED_REASONING_KEYS = {
+    "ciphertext",
+    "cipher_text",
+    "encrypted_content",
+    "encrypted_reasoning",
+    "encrypted_thinking",
+    "jwe",
+}
+ENCRYPTED_REASONING_MARKERS = (
+    "[encrypted]",
+    "<encrypted",
+    "encrypted:",
+    "enc:",
+    "-----begin pgp message-----",
+)
+JWE_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
+OPAQUE_BASE64_RE = re.compile(r"^[A-Za-z0-9+/_=-]+$")
 
 
 def _text(value: Any) -> str:
@@ -31,6 +50,58 @@ def _truncate(text: str, limit: int | None) -> str:
     return text[:limit] + "\n...[truncated]"
 
 
+def _is_opaque_base64(text: str) -> bool:
+    compact = text.strip()
+    if len(compact) < 120 or any(ch.isspace() for ch in compact):
+        return False
+    if not OPAQUE_BASE64_RE.fullmatch(compact):
+        return False
+    padded = compact + ("=" * (-len(compact) % 4))
+    try:
+        base64.b64decode(padded, validate=True)
+    except Exception:
+        try:
+            base64.urlsafe_b64decode(padded)
+        except Exception:
+            return False
+    return True
+
+
+def _looks_encrypted_reasoning(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        lowered = {str(k).lower() for k in value}
+        if lowered & ENCRYPTED_REASONING_KEYS:
+            return True
+        for key in ("encrypted", "is_encrypted"):
+            if value.get(key) is True:
+                return True
+        marker = value.get("type") or value.get("status") or value.get("format")
+        if isinstance(marker, str) and marker.lower() in {"encrypted", "ciphertext", "jwe"}:
+            return True
+        return any(_looks_encrypted_reasoning(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_looks_encrypted_reasoning(item) for item in value)
+    if not isinstance(value, str):
+        return False
+
+    text = value.strip()
+    lowered = text.lower()
+    if lowered.startswith(ENCRYPTED_REASONING_MARKERS):
+        return True
+    if JWE_RE.fullmatch(text):
+        return True
+    if _is_opaque_base64(text):
+        return True
+    if text.startswith("{"):
+        try:
+            return _looks_encrypted_reasoning(json.loads(text))
+        except json.JSONDecodeError:
+            return False
+    return False
+
+
 def _tool_call(call: dict[str, Any], index: int) -> dict[str, Any]:
     name = call.get("function_name") or call.get("name") or call.get("tool_id") or "tool"
     args = call.get("arguments", call.get("input", {}))
@@ -44,6 +115,21 @@ def _tool_call(call: dict[str, Any], index: int) -> dict[str, Any]:
             "arguments": args,
         },
     }
+
+
+def _codex_output_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return _text(content)
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            parts.append(str(item))
+            continue
+        if item.get("type") in {"output_text", "input_text", "text"}:
+            parts.append(_text(item.get("text")))
+    return "\n".join(part for part in parts if part)
 
 
 def _append_message(messages: list[dict[str, Any]], role: str, content: str, **extra: Any) -> None:
@@ -72,13 +158,19 @@ def row_from_atif(
         return None
 
     messages: list[dict[str, Any]] = []
+    skipped_encrypted_reasoning = 0
     for step in steps:
         if not isinstance(step, dict):
             continue
         source = step.get("source")
         content = _text(step.get("message"))
         if include_thinking:
-            thinking = _text(step.get("extra", {}).get("thinking"))
+            thinking_value = step.get("extra", {}).get("thinking")
+            if _looks_encrypted_reasoning(thinking_value):
+                skipped_encrypted_reasoning += 1
+                thinking = ""
+            else:
+                thinking = _text(thinking_value)
             if thinking:
                 content = f"{content}\n\n[thinking]\n{thinking}".strip()
 
@@ -115,12 +207,16 @@ def row_from_atif(
     row: dict[str, Any] = {"messages": messages}
     agent = doc.get("agent", {})
     if isinstance(agent, dict):
-        row["metadata"] = {
+        metadata = {
             "source": "atif",
             "session_id": doc.get("session_id"),
             "model": agent.get("model_name"),
             "success": success,
         }
+        if skipped_encrypted_reasoning:
+            metadata["reasoning_status"] = "encrypted_skipped"
+            metadata["encrypted_reasoning_skipped"] = skipped_encrypted_reasoning
+        row["metadata"] = metadata
     return row
 
 
@@ -130,7 +226,16 @@ def row_from_session_events(
     max_tool_output_chars: int | None = 4000,
 ) -> dict[str, Any] | None:
     """Build one Yeto row from Puffer session transcript events."""
+    events = list(events)
+    has_codex_event_messages = any(
+        isinstance(event, dict)
+        and event.get("type") == "event_msg"
+        and isinstance(event.get("payload"), dict)
+        and event["payload"].get("type") in {"user_message", "agent_message"}
+        for event in events
+    )
     messages: list[dict[str, Any]] = []
+    skipped_encrypted_reasoning = 0
     for event in events:
         if not isinstance(event, dict):
             continue
@@ -160,10 +265,34 @@ def row_from_session_events(
                 f"{_truncate(_text(event.get('output')), max_tool_output_chars)}"
             ).strip()
             _append_message(messages, "tool", content, tool_call_id=event.get("call_id"))
+        elif typ == "event_msg" and isinstance(event.get("payload"), dict):
+            payload = event["payload"]
+            payload_type = payload.get("type")
+            if payload_type == "user_message":
+                _append_message(messages, "user", _text(payload.get("message")))
+            elif payload_type == "agent_message":
+                _append_message(messages, "assistant", _text(payload.get("message")))
+        elif typ == "response_item" and isinstance(event.get("payload"), dict):
+            payload = event["payload"]
+            payload_type = payload.get("type")
+            if payload_type == "reasoning" and _looks_encrypted_reasoning(payload):
+                skipped_encrypted_reasoning += 1
+            elif payload_type == "message" and not has_codex_event_messages:
+                role = payload.get("role")
+                content = _codex_output_text(payload.get("content"))
+                if role in {"user", "assistant"} and not any(
+                    msg.get("role") == role and msg.get("content") == content
+                    for msg in messages[-3:]
+                ):
+                    _append_message(messages, role, content)
 
     if not _has_trainable_pair(messages):
         return None
-    return {"messages": messages, "metadata": {"source": "session"}}
+    metadata: dict[str, Any] = {"source": "session"}
+    if skipped_encrypted_reasoning:
+        metadata["reasoning_status"] = "encrypted_skipped"
+        metadata["encrypted_reasoning_skipped"] = skipped_encrypted_reasoning
+    return {"messages": messages, "metadata": metadata}
 
 
 def rows_from_json_doc(

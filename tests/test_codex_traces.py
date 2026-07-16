@@ -70,6 +70,54 @@ def test_failed_atif_is_filtered_by_default():
     assert row_from_atif(doc, include_failures=True)["messages"][1]["content"] == "failed"
 
 
+def test_include_thinking_keeps_plain_text_reasoning():
+    doc = {
+        "schema_version": "ATIF-v1.6",
+        "steps": [
+            {"source": "user", "message": "task"},
+            {
+                "source": "agent",
+                "message": "answer",
+                "extra": {"thinking": "plain plan"},
+            },
+        ],
+        "extra": {"success": True},
+    }
+
+    row = row_from_atif(doc, include_thinking=True)
+
+    assert row["messages"][1]["content"] == "answer\n\n[thinking]\nplain plan"
+    assert "reasoning_status" not in row["metadata"]
+
+
+def test_include_thinking_skips_encrypted_reasoning():
+    doc = {
+        "schema_version": "ATIF-v1.6",
+        "steps": [
+            {"source": "user", "message": "task"},
+            {
+                "source": "agent",
+                "message": "answer",
+                "extra": {
+                    "thinking": {
+                        "encrypted": True,
+                        "ciphertext": "abc123",
+                        "algorithm": "test",
+                    }
+                },
+            },
+        ],
+        "extra": {"success": True},
+    }
+
+    row = row_from_atif(doc, include_thinking=True)
+
+    assert row["messages"][1]["content"] == "answer"
+    assert "ciphertext" not in row["messages"][1]["content"]
+    assert row["metadata"]["reasoning_status"] == "encrypted_skipped"
+    assert row["metadata"]["encrypted_reasoning_skipped"] == 1
+
+
 def test_session_events_become_chat_row():
     row = row_from_session_events(
         [
@@ -91,6 +139,40 @@ def test_session_events_become_chat_row():
     assert row["messages"][1]["tool_calls"][0]["id"] == "c1"
     assert row["messages"][1]["tool_calls"][0]["function"]["name"] == "Read"
     assert "Tool Read [ok]" in row["messages"][2]["content"]
+
+
+def test_codex_session_events_skip_encrypted_reasoning():
+    row = row_from_session_events(
+        [
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "hello"},
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": "gAAAAABqTrNaturalEncryptedBlob==",
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "hi",
+                    "phase": "final_answer",
+                },
+            },
+        ]
+    )
+
+    assert row["messages"] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    assert row["metadata"]["reasoning_status"] == "encrypted_skipped"
+    assert row["metadata"]["encrypted_reasoning_skipped"] == 1
 
 
 def test_convert_paths_reads_directories_and_writes_rows(tmp_path):
