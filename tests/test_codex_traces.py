@@ -1,6 +1,11 @@
 import json
 
-from yeto.codex_traces import convert_paths, row_from_atif, row_from_session_events
+from yeto.codex_traces import (
+    _openai_teacher_backfill,
+    convert_paths,
+    row_from_atif,
+    row_from_session_events,
+)
 
 
 def test_atif_trajectory_becomes_yeto_chat_row():
@@ -254,6 +259,84 @@ def test_teacher_backfill_replaces_codex_encrypted_reasoning():
     assert "gAAAAA" not in json.dumps(seen)
     assert row["metadata"]["reasoning_status"] == "teacher_backfilled"
     assert row["metadata"]["teacher_backfilled_reasoning"] == 1
+
+
+def test_openai_compatible_teacher_uses_chat_completions_without_key(monkeypatch):
+    seen = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": "synthetic local rationale"}}]}
+            ).encode()
+
+    def fake_urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["timeout"] = timeout
+        seen["headers"] = dict(request.header_items())
+        seen["body"] = json.loads(request.data.decode())
+        return FakeResponse()
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    teacher = _openai_teacher_backfill(
+        "teacher-model",
+        base_url="http://localhost:8000/v1",
+        max_output_tokens=64,
+    )
+    result = teacher([{"role": "user", "content": "task"}], "answer")
+
+    assert result == "synthetic local rationale"
+    assert seen["url"] == "http://localhost:8000/v1/chat/completions"
+    assert "Authorization" not in seen["headers"]
+    assert seen["body"]["model"] == "teacher-model"
+    assert seen["body"]["max_tokens"] == 64
+    assert seen["body"]["messages"][0]["role"] == "system"
+    assert "user: task" in seen["body"]["messages"][1]["content"]
+    assert "assistant: answer" in seen["body"]["messages"][1]["content"]
+
+
+def test_openai_compatible_teacher_can_use_responses_format(monkeypatch):
+    seen = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"output_text": "responses rationale"}).encode()
+
+    def fake_urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["headers"] = dict(request.header_items())
+        seen["body"] = json.loads(request.data.decode())
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    teacher = _openai_teacher_backfill(
+        "gpt-5.4",
+        api_key="test-key",
+        base_url="https://api.openai.com/v1",
+        api_format="responses",
+    )
+    result = teacher([{"role": "user", "content": "task"}], "answer")
+
+    assert result == "responses rationale"
+    assert seen["url"] == "https://api.openai.com/v1/responses"
+    assert seen["headers"]["Authorization"] == "Bearer test-key"
+    assert seen["body"]["model"] == "gpt-5.4"
+    assert seen["body"]["max_output_tokens"] == 160
 
 
 def test_convert_paths_reads_directories_and_writes_rows(tmp_path):

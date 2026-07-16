@@ -21,6 +21,7 @@ from typing import Any, Callable, Iterable
 
 CHAT_ROLES = {"system", "user", "assistant", "tool"}
 REASONING_POLICIES = ("skip", "teacher-backfill")
+TEACHER_API_FORMATS = ("chat-completions", "responses")
 ENCRYPTED_REASONING_KEYS = {
     "ciphertext",
     "cipher_text",
@@ -180,46 +181,85 @@ def _extract_response_text(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _extract_chat_completion_text(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return ""
+    parts: list[str] = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                parts.extend(
+                    _text(block.get("text"))
+                    for block in content
+                    if isinstance(block, dict) and block.get("text")
+                )
+        text = choice.get("text")
+        if isinstance(text, str):
+            parts.append(text)
+    return "\n".join(part.strip() for part in parts if part.strip()).strip()
+
+
 def _openai_teacher_backfill(
     model: str,
     *,
     api_key: str | None = None,
     base_url: str | None = None,
     max_output_tokens: int = 160,
+    api_format: str = "chat-completions",
 ) -> TeacherBackfillFn:
+    if api_format not in TEACHER_API_FORMATS:
+        raise ValueError(f"api_format must be one of {TEACHER_API_FORMATS}")
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "teacher-backfill requires OPENAI_API_KEY or --teacher-api-key"
-        )
     root = (base_url or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
-    url = f"{root}/responses"
+    endpoint = "responses" if api_format == "responses" else "chat/completions"
+    url = f"{root}/{endpoint}"
+
+    system_prompt = (
+        "You are backfilling missing encrypted reasoning for an SFT dataset. "
+        "Use only the visible transcript below. Do not invent hidden facts, "
+        "do not mention encryption, and write a concise rationale in 1-3 sentences."
+    )
 
     def backfill(messages: list[dict[str, Any]], assistant_content: str) -> str | None:
         context = _visible_context(messages, assistant_content)
-        body = {
-            "model": model,
-            "instructions": (
-                "You are backfilling missing encrypted reasoning for an SFT dataset. "
-                "Use only the visible transcript below. Do not invent hidden facts, "
-                "do not mention encryption, and write a concise rationale in 1-3 sentences."
-            ),
-            "input": (
-                "Visible transcript:\n"
-                f"{context}\n\n"
-                "Backfill the likely high-level reasoning that connects the context "
-                "to the assistant response."
-            ),
-            "max_output_tokens": max_output_tokens,
-        }
+        user_prompt = (
+            "Visible transcript:\n"
+            f"{context}\n\n"
+            "Backfill the likely high-level reasoning that connects the context "
+            "to the assistant response."
+        )
+        if api_format == "responses":
+            body = {
+                "model": model,
+                "instructions": system_prompt,
+                "input": user_prompt,
+                "max_output_tokens": max_output_tokens,
+            }
+        else:
+            body = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "max_tokens": max_output_tokens,
+                "temperature": 0,
+            }
         data = json.dumps(body).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         req = urllib.request.Request(
             url,
             data=data,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             method="POST",
         )
         try:
@@ -228,7 +268,9 @@ def _openai_teacher_backfill(
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"teacher backfill request failed: {detail}") from error
-        return _extract_response_text(payload) or None
+        if api_format == "responses":
+            return _extract_response_text(payload) or None
+        return _extract_chat_completion_text(payload) or None
 
     return backfill
 
@@ -634,12 +676,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--teacher-api-key",
         default=None,
-        help="OpenAI API key for teacher backfill; defaults to OPENAI_API_KEY",
+        help="Optional bearer token for the teacher endpoint; defaults to OPENAI_API_KEY",
     )
     p.add_argument(
         "--teacher-base-url",
         default=None,
         help="OpenAI-compatible base URL for teacher backfill; defaults to OPENAI_BASE_URL or https://api.openai.com/v1",
+    )
+    p.add_argument(
+        "--teacher-api-format",
+        choices=TEACHER_API_FORMATS,
+        default=os.environ.get("YETO_TEACHER_API_FORMAT", "chat-completions"),
+        help=(
+            "OpenAI-compatible API format for teacher backfill. "
+            "Use chat-completions for vLLM/SGLang/OpenAI-compatible servers."
+        ),
     )
     p.add_argument(
         "--teacher-max-output-tokens",
@@ -665,6 +716,7 @@ def main(argv: list[str] | None = None) -> int:
             api_key=args.teacher_api_key,
             base_url=args.teacher_base_url,
             max_output_tokens=args.teacher_max_output_tokens,
+            api_format=args.teacher_api_format,
         )
     rows = convert_paths(
         [Path(p) for p in args.input],
