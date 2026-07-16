@@ -23,17 +23,21 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   P); merges stay serialized in one scheduler task; rounds may complete out
   of order (per-fragment versions, monotonic global step). `--pipeline 1`
   recovers serial rounds.
-- **Sync-interval sensitivity** (measured, gemma4/Lean-Workbook, 500k tokens,
-  M=2, held-out eval CE via scripts/compare_diloco.py): at the design-point
-  sync interval (H≈24 inner steps per fragment) DiLoCo matches synchronous
-  FSDP2 within noise (+0.5%); at H≈2 — what a LAN/localhost fleet produces
-  naturally, since rounds complete as fast as learners answer — the stock
-  outer optimizer (Nesterov 0.7/0.9) over-drives correlated deltas and costs
-  ~+9% (α=0 overwrite makes it far worse; merge reduced to plain averaging
-  recovers to ~+3%). WAN round latency yields large H by itself; for
-  low-latency fleets the syncer self-throttles to `--sync-interval-steps`
-  (default H=24, sized from the measured learner step time; 0 disables),
-  with `--min-round-interval-ms` as a manual floor on top.
+- **Sync-interval sensitivity** (legacy measurement, gemma4/Lean-Workbook,
+  500k tokens, M=2, held-out eval CE): at the design-point sync interval
+  (H≈24 inner steps per fragment) DiLoCo matched the synchronous run within
+  noise (+0.5%); at H≈2 — what a LAN/localhost fleet produces naturally,
+  since rounds complete as fast as learners answer — the stock outer
+  optimizer (Nesterov 0.7/0.9) over-drove correlated deltas and cost ~+9%
+  (α=0 overwrite was much worse; the direct-RDA configuration recovered to
+  ~+3%). The old harness used a one-island baseline, so these numbers remain
+  useful directional evidence but are not equal-hardware throughput results.
+  The current `scripts/compare_diloco.py` names H≈24 `m2`, names H-disabled
+  `unthrottled`, pairs every arm with a matching `baseline-mM`, and repeats
+  training seeds; see `docs/LM_BENCHMARK.md`. WAN round latency yields large H
+  by itself; for low-latency fleets the syncer self-throttles to
+  `--sync-interval-steps` (default H=24, sized from measured learner step
+  time; 0 disables), with `--min-round-interval-ms` as a manual floor on top.
 - **Delta correction**: stale learner deltas that oppose the outer momentum
   are shrunk/reoriented per tensor before merging (HeLoCo;
   `--delta-correction none` disables).

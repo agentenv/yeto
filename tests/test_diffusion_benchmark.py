@@ -180,6 +180,33 @@ def test_seed_parser_rejects_empty_invalid_and_duplicate_values():
             benchmark.parse_seeds(value)
 
 
+def test_formal_benchmark_requires_zero_data_workers():
+    args = benchmark.build_parser().parse_args(
+        [
+            "--model",
+            "ltx-video",
+            "--data",
+            "rows.jsonl",
+            "--height",
+            "256",
+            "--width",
+            "256",
+            "--device",
+            "cpu",
+            "--shard",
+            "ddp",
+            "--stream-workers",
+            "1",
+        ]
+    )
+    with pytest.raises(ValueError, match="require --stream-workers 0"):
+        benchmark.validate_args(
+            args,
+            benchmark.select_arms("m2"),
+            check_devices=False,
+        )
+
+
 def test_cuda_env_respects_parent_visible_device_mapping(monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,7,8,9")
     env = benchmark.cuda_env(1, 2, "cuda")
@@ -243,6 +270,15 @@ def test_materialize_data_source_requires_aws_cli(monkeypatch, tmp_path):
         benchmark.materialize_data_source("s3://bucket/dataset", tmp_path / "source-data")
 
 
+def test_source_root_includes_media_next_to_a_manifest(tmp_path):
+    manifest = tmp_path / "data.jsonl"
+    manifest.write_text("{}\n", encoding="utf-8")
+
+    assert benchmark._source_root(str(manifest)) == tmp_path.resolve()
+    assert benchmark._source_root(str(tmp_path)) == tmp_path.resolve()
+    assert benchmark._source_root("org/remote-dataset") is None
+
+
 def test_partial_results_round_trip_atomically(tmp_path):
     records = [
         {"kind": "base", "arm": "base", "seed": None},
@@ -254,6 +290,42 @@ def test_partial_results_round_trip_atomically(tmp_path):
     assert benchmark.load_partial_results(tmp_path) == records
     assert not (tmp_path / "results.jsonl.tmp").exists()
     assert benchmark._record_key(records[1]) == ("diloco", "m2", 17)
+
+
+def test_resume_reuses_verified_splits_and_rejects_recipe_changes(tmp_path):
+    work = tmp_path / "work"
+    report = tmp_path / "report"
+    work.mkdir()
+    train = work / "train.jsonl"
+    evaluation = work / "eval.jsonl"
+    train.write_text('{"prompt": "train"}\n', encoding="utf-8")
+    evaluation.write_text('{"prompt": "eval"}\n', encoding="utf-8")
+    args = _args(
+        seeds="17,29,43",
+        work_dir=work,
+        report_dir=report,
+        resume=False,
+        overwrite=False,
+        dry_run=False,
+        eval_payload=None,
+    )
+    arms = benchmark.select_arms("m2")
+    from yeto.benchmark_resume import build_data_manifest
+
+    manifest = build_data_manifest(
+        work,
+        train,
+        evaluation,
+        train_rows=1,
+        eval_rows=1,
+    )
+    benchmark.write_config(args, arms, manifest)
+
+    args.resume = True
+    assert benchmark.load_resume_data(args, arms) == (train, evaluation, 1)
+    args.inner_lr = 1e-4
+    with pytest.raises(ValueError, match="arguments.inner_lr"):
+        benchmark.load_resume_data(args, arms)
 
 
 def test_tape_summary_reports_measured_h_participation_and_staleness(tmp_path):

@@ -194,6 +194,71 @@ def test_diffusion_seed_derivation_is_stable_and_separates_eval_rows():
     )
 
 
+def test_diffusion_training_seeds_pair_matching_baseline_consumers():
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    root = 17
+    learners = 4
+    ranks_per_learner = 2
+    workers = 3
+    for learner_id in range(learners):
+        for rank in range(ranks_per_learner):
+            baseline_rank = learner.diffusion_logical_rank(
+                learner_id,
+                learners,
+                rank,
+            )
+            for stream in ("train", "loader"):
+                assert learner.diffusion_rank_seed(
+                    root, stream, learner_id, learners, rank
+                ) == learner.diffusion_rank_seed(root, stream, 0, 1, baseline_rank)
+            for worker_id in range(workers):
+                consumer = rank * workers + worker_id
+                baseline_consumer = learner.diffusion_logical_rank(
+                    learner_id,
+                    learners,
+                    consumer,
+                )
+                assert learner.diffusion_data_seed(
+                    root, learner_id, learners, consumer
+                ) == learner.diffusion_data_seed(root, 0, 1, baseline_consumer)
+
+
+def test_diffusion_training_rows_pair_matching_baseline_rank():
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    rows = [{"id": index} for index in range(96)]
+    learners = 4
+    ranks_per_learner = 2
+    learner_id = 3
+    rank = 1
+    baseline_rank = learner.diffusion_logical_rank(learner_id, learners, rank)
+    baseline = learner.StreamingDiffusionRows(
+        rows,
+        learner_id=0,
+        num_learners=1,
+        rank=baseline_rank,
+        world=learners * ranks_per_learner,
+        root_seed=29,
+    )
+    diloco = learner.StreamingDiffusionRows(
+        rows,
+        learner_id=learner_id,
+        num_learners=learners,
+        rank=rank,
+        world=ranks_per_learner,
+        root_seed=29,
+    )
+
+    baseline_iter = iter(baseline)
+    diloco_iter = iter(diloco)
+    assert [next(baseline_iter)["id"] for _ in range(24)] == [
+        next(diloco_iter)["id"] for _ in range(24)
+    ]
+
+
 def test_seeded_diffusion_loss_is_repeatable_and_restores_caller_rng():
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner

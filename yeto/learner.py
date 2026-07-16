@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import random
 import time
 
 import torch
@@ -101,6 +102,7 @@ def parse_args(argv=None):
     p.add_argument("--inner-lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--warmup-steps", type=int, default=10)
+    p.add_argument("--seed", type=int, default=None)
     p.add_argument("--fragments", type=int, default=8, help="P (= H, round-robin)")
     p.add_argument(
         "--fragment-pattern",
@@ -157,10 +159,23 @@ def parse_args(argv=None):
 
 
 def setup_distributed() -> tuple[int, int]:
-    if "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
         return dist.get_rank(), dist.get_world_size()
     return 0, 1
+
+
+def _derived_training_seed(root: int, learner_id: int, learners: int, rank: int) -> int:
+    """Map an island-local rank to its matching baseline-mM rank seed."""
+    return root + learner_id + learners * rank
+
+
+def _stream_seed(root: int, learner_id: int, learners: int, rank: int,
+                 workers: int) -> int:
+    """Dataset seed before StreamingPackedBlocks adds its consumer index."""
+    if workers == 0:
+        return root + learner_id + (learners - 1) * rank
+    return root + learner_id * 1_000_003
 
 
 def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
@@ -322,8 +337,32 @@ def main(argv=None) -> None:
     if not 0.0 <= args.merge_alpha < 1.0:
         raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
 
+    # An explicit root seed gives every rank/island the same LoRA
+    # initialization. With no seed, preserve the learner's original ambient
+    # RNG behavior outside benchmark runs.
+    if args.seed is not None:
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+
     log.info("loading model %s (%s)", args.model, args.tuning)
     model, tokenizer = load_model_and_tokenizer(args, device)
+
+    # Training randomness may differ after initialization while remaining
+    # reproducible for a given benchmark seed and topology.
+    training_seed = None
+    if args.seed is not None:
+        # learner + M*rank is the corresponding rank in baseline-mM. This
+        # pairs dropout and zero-worker streaming order across the matching
+        # synchronous and DiLoCo topologies.
+        training_seed = _derived_training_seed(
+            args.seed, args.learner_id, args.num_learners, rank
+        )
+        random.seed(training_seed)
+        torch.manual_seed(training_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(training_seed)
 
     grad_ckpt = args.gradient_checkpointing == "on"
     if args.gradient_checkpointing == "auto" and device.type == "cuda":
@@ -484,6 +523,17 @@ def main(argv=None) -> None:
         )
 
     if args.tokenize == "stream":
+        stream_kwargs = {}
+        if args.seed is not None:
+            # With zero workers, StreamingPackedBlocks adds `rank`
+            # internally, yielding seed + learner + M*rank.
+            stream_kwargs["seed"] = _stream_seed(
+                args.seed,
+                args.learner_id,
+                args.num_learners,
+                rank,
+                args.stream_workers,
+            )
         dataset = StreamingPackedBlocks(
             args.data,
             tokenizer,
@@ -494,6 +544,7 @@ def main(argv=None) -> None:
             rank=rank,
             world=world,
             train_on=args.train_on,
+            **stream_kwargs,
         )
         loader = torch.utils.data.DataLoader(
             dataset,
@@ -521,13 +572,26 @@ def main(argv=None) -> None:
         if world > 1:
             from torch.utils.data.distributed import DistributedSampler
 
-            sampler = DistributedSampler(dataset, num_replicas=world, rank=rank)
+            sampler_kwargs = {}
+            if args.seed is not None:
+                sampler_kwargs["seed"] = args.seed + args.learner_id * 1_000_003
+            sampler = DistributedSampler(
+                dataset,
+                num_replicas=world,
+                rank=rank,
+                **sampler_kwargs,
+            )
         loader = torch.utils.data.DataLoader(
             dataset,
             batch_size=args.micro_batch_size,
             sampler=sampler,
             shuffle=sampler is None,
             drop_last=True,
+            generator=(
+                torch.Generator().manual_seed(training_seed)
+                if training_seed is not None
+                else None
+            ),
         )
         log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)
 
@@ -571,7 +635,7 @@ def main(argv=None) -> None:
             log.info("saved model to %s", save_dir)
         if client is not None:
             client.close()
-    if world > 1:
+    if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()
 
@@ -581,6 +645,7 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
     # fragment on receipt. Tracked as global totals + per-fragment snapshots.
     steps_total = 0
     tokens_total = 0
+    target_tokens_total = torch.zeros((), dtype=torch.long, device=device)
     steps_at_reset = [0] * layout.num_fragments
     tokens_at_reset = [0] * layout.num_fragments
     fragment_versions = [0] * layout.num_fragments  # last applied version per fragment
@@ -615,7 +680,10 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
             input_ids = input_ids.to(device, non_blocking=True)
             weights = weights.to(device, non_blocking=True)
             out = model(input_ids=input_ids)
-            loss, _ = compute_loss(out.logits, input_ids, weights)
+            loss, batch_target_tokens = compute_loss(out.logits, input_ids, weights)
+            target_tokens_total.add_(
+                batch_target_tokens.detach().to(device=device, dtype=torch.long)
+            )
             # DDP averages gradients across ranks, so normalizing each rank's
             # sum-over-tokens loss by its *own* trained-token count yields
             # (approximately) the global per-trained-token mean gradient.
@@ -743,7 +811,19 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
             if shutdown or steps_total >= args.max_local_steps:
                 break
         epoch += 1
-    log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
+    raw_tokens_local = (
+        steps_total
+        * args.micro_batch_size
+        * args.grad_accum
+        * args.seq_len
+    )
+    log.info(
+        "inner loop done at local_step=%d global_step=%d raw_tokens=%d target_tokens=%d",
+        steps_total,
+        global_step,
+        raw_tokens_local,
+        int(target_tokens_total.item()),
+    )
 
 
 if __name__ == "__main__":

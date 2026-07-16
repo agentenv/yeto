@@ -175,3 +175,62 @@ def test_offline_first_falls_back_online_on_cold_cache():
 
     assert _from_pretrained_offline_first(Factory, "org/model") == "downloaded-model"
     assert [c.get("local_files_only") for c in calls] == [True, None]
+
+
+def test_learner_accepts_explicit_training_seed():
+    from yeto.learner import parse_args
+
+    args = parse_args(
+        [
+            "--model",
+            "org/model",
+            "--data",
+            "rows.jsonl",
+            "--syncer",
+            "none",
+            "--learner-id",
+            "0",
+            "--num-learners",
+            "1",
+            "--seed",
+            "29",
+        ]
+    )
+    assert args.seed == 29
+
+
+def test_benchmark_seed_pairs_matching_global_rank():
+    from yeto.learner import _derived_training_seed, _stream_seed
+
+    root = 17
+    learners = 4
+    ranks_per_learner = 2
+    for learner_id in range(learners):
+        for rank in range(ranks_per_learner):
+            baseline_rank = learner_id + learners * rank
+            assert _derived_training_seed(root, learner_id, learners, rank) == (
+                _derived_training_seed(root, 0, 1, baseline_rank)
+            )
+            diloco_stream_seed = _stream_seed(
+                root, learner_id, learners, rank, workers=0
+            ) + rank
+            baseline_stream_seed = _stream_seed(
+                root, 0, 1, baseline_rank, workers=0
+            ) + baseline_rank
+            assert diloco_stream_seed == baseline_stream_seed
+
+
+def test_lm_row_shards_pair_with_matching_baseline_rank():
+    from yeto.data import _learner_rows
+
+    row_count = 101
+    learners = 4
+    ranks_per_learner = 2
+    baseline_rows = _learner_rows(row_count, 0, 1, None)
+    for learner_id in range(learners):
+        island_rows = _learner_rows(row_count, learner_id, learners, None)
+        for rank in range(ranks_per_learner):
+            baseline_rank = learner_id + learners * rank
+            assert island_rows[rank::ranks_per_learner] == baseline_rows[
+                baseline_rank :: learners * ranks_per_learner
+            ]
