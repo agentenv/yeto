@@ -31,6 +31,10 @@ dev = ["pytest", "pytest-timeout"]
 
 [project.scripts]
 yeto = "yeto.cli:main"
+# Independent AgentEnv provision entry point; must bypass yeto.cli and its
+# eager Torch imports. Reads one bounded SolveProvisionRequestV1 on stdin and
+# writes one bounded process envelope on stdout.
+yeto-provision-solve = "yeto.provision.json_cli:main"
 yeto-export = "yeto.export:main"
 yeto-codex-traces = "yeto.codex_traces:main"
 yeto-diffusion-export = "yeto.diffusion.export:main"
