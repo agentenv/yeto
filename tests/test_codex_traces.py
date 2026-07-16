@@ -118,6 +118,41 @@ def test_include_thinking_skips_encrypted_reasoning():
     assert row["metadata"]["encrypted_reasoning_skipped"] == 1
 
 
+def test_teacher_backfill_replaces_encrypted_atif_reasoning():
+    seen = {}
+
+    def teacher(messages, assistant_content):
+        seen["messages"] = messages
+        seen["assistant_content"] = assistant_content
+        return "synthetic rationale"
+
+    doc = {
+        "schema_version": "ATIF-v1.6",
+        "steps": [
+            {"source": "user", "message": "task"},
+            {
+                "source": "agent",
+                "message": "answer",
+                "extra": {"thinking": {"encrypted_content": "secret-blob"}},
+            },
+        ],
+        "extra": {"success": True},
+    }
+
+    row = row_from_atif(
+        doc,
+        include_thinking=True,
+        reasoning_policy="teacher-backfill",
+        teacher_backfill_fn=teacher,
+    )
+
+    assert row["messages"][1]["content"] == "answer\n\n[thinking]\nsynthetic rationale"
+    assert seen["assistant_content"] == "answer"
+    assert "secret-blob" not in json.dumps(seen)
+    assert row["metadata"]["reasoning_status"] == "teacher_backfilled"
+    assert row["metadata"]["synthetic_reasoning"] is True
+
+
 def test_session_events_become_chat_row():
     row = row_from_session_events(
         [
@@ -173,6 +208,52 @@ def test_codex_session_events_skip_encrypted_reasoning():
     ]
     assert row["metadata"]["reasoning_status"] == "encrypted_skipped"
     assert row["metadata"]["encrypted_reasoning_skipped"] == 1
+
+
+def test_teacher_backfill_replaces_codex_encrypted_reasoning():
+    seen = {}
+
+    def teacher(messages, assistant_content):
+        seen["messages"] = messages
+        seen["assistant_content"] = assistant_content
+        return "synthetic codex rationale"
+
+    row = row_from_session_events(
+        [
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "hello"},
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": "gAAAAABqTrNaturalEncryptedBlob==",
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "hi",
+                    "phase": "final_answer",
+                },
+            },
+        ],
+        reasoning_policy="teacher-backfill",
+        teacher_backfill_fn=teacher,
+    )
+
+    assert row["messages"] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi\n\n[thinking]\nsynthetic codex rationale"},
+    ]
+    assert seen["messages"] == [{"role": "user", "content": "hello"}]
+    assert seen["assistant_content"] == "hi"
+    assert "gAAAAA" not in json.dumps(seen)
+    assert row["metadata"]["reasoning_status"] == "teacher_backfilled"
+    assert row["metadata"]["teacher_backfilled_reasoning"] == 1
 
 
 def test_convert_paths_reads_directories_and_writes_rows(tmp_path):
