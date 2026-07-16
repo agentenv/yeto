@@ -778,8 +778,7 @@ HEAD_READY_MARKER = "~/.yeto_head_ready"
 HEAD_SETUP_PIP = (
     'pip install -q "skypilot[aws,gcp]>=0.12" && '
     "pip install -q torch --index-url https://download.pytorch.org/whl/cpu && "
-    "pip install -q cloudpickle transformers==5.13.0 && "
-    f"touch {HEAD_READY_MARKER}"
+    "pip install -q cloudpickle transformers==5.13.0"
 )
 HEAD_WAIT_READY = (
     f"for i in $(seq 1 180); do [ -f {HEAD_READY_MARKER} ] && break; sleep 5; done; "
@@ -803,11 +802,12 @@ def _serializable_args(args) -> dict:
     return out
 
 
-def _make_head_task(args, syncer_binary, extra_mounts: dict | None = None):
-    """The head VM's provisioning task: repo workdir, syncer binary, cloud
+def _make_head_task(args, extra_mounts: dict | None = None):
+    """The head VM's provisioning task: repo workdir, cloud
     credentials, staged local --data, and the pickled loss (when used) — no
     run command; the controller job is exec'd separately once the head's IP
-    is known."""
+    is known. The syncer is built on the head so a macOS submitter never
+    uploads a non-Linux binary."""
     import sky
 
     from .launcher import (
@@ -815,15 +815,22 @@ def _make_head_task(args, syncer_binary, extra_mounts: dict | None = None):
         PICKLED_LOSS_FILE,
         REPO_ROOT,
         SYNCER_PORT,
+        SYNCER_REMOTE_BUILD,
         WAN_TUNING,
     )
 
-    file_mounts = {"~/yeto-syncer": str(syncer_binary), **(extra_mounts or {})}
+    file_mounts = dict(extra_mounts or {})
     aws_creds = os.path.expanduser("~/.aws")
     if os.path.isdir(aws_creds):
         # Same pattern as sky's jobs controller: ship the local credentials
         # so the head can launch, recover, and tear down learner clusters.
         file_mounts["~/.aws"] = aws_creds
+    else:
+        print(
+            "[yeto] WARNING: ~/.aws not found; the head will have no cloud "
+            "credentials and cannot launch or tear down learner clusters.",
+            file=sys.stderr,
+        )
     gcloud_creds = os.path.expanduser("~/.config/gcloud")
     if os.path.isdir(gcloud_creds):
         # Enables gs:// --output uploads from the head (ADC).
@@ -833,12 +840,6 @@ def _make_head_task(args, syncer_binary, extra_mounts: dict | None = None):
         # The head re-mounts the token onto learners (authenticated Hub
         # quota, gated models) and needs it itself for --output hf.
         file_mounts[HF_TOKEN_PATH] = hf_token
-    else:
-        print(
-            "[yeto] WARNING: ~/.aws not found; the head will have no cloud "
-            "credentials and cannot launch or tear down learner clusters.",
-            file=sys.stderr,
-        )
     if args.loss_function.startswith("pickle:"):
         # The pickled loss is gitignored, so the workdir sync skips it;
         # mount it into the head's workdir explicitly (the head re-mounts
@@ -848,7 +849,13 @@ def _make_head_task(args, syncer_binary, extra_mounts: dict | None = None):
         )
     task = sky.Task(
         name="yeto-head",
-        setup=f"{WAN_TUNING}; {HEAD_SETUP_PIP}",
+        setup=(
+            "set -e\n"
+            f"{WAN_TUNING}\n"
+            f"{HEAD_SETUP_PIP}\n"
+            f"{SYNCER_REMOTE_BUILD}\n"
+            f"touch {HEAD_READY_MARKER}"
+        ),
         workdir=str(REPO_ROOT),
         file_mounts=file_mounts,
     )
@@ -933,8 +940,6 @@ def cmd_launch_head(args) -> int:
     from .datasource import head_stage
 
     args.data, data_mounts = head_stage(args.data)
-    binary = launcher.build_syncer_binary()
-
     args_dict = _serializable_args(args)
     runs.create_run(name, args_dict)
     learner_names = launcher.learner_cluster_names(name, specs)
@@ -946,7 +951,7 @@ def cmd_launch_head(args) -> int:
     )
 
     print(f"[yeto] provisioning head cluster {head_cluster} in {args.syncer_region}")
-    handle = _sky_launch_head(_make_head_task(args, binary, data_mounts), head_cluster)
+    handle = _sky_launch_head(_make_head_task(args, data_mounts), head_cluster)
     head_ip = handle.head_ip
     print(f"[yeto] head is up at {head_ip}; submitting the controller job")
 

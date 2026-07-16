@@ -169,9 +169,6 @@ def test_cmd_head_reconstructs_args_and_starts_syncer(monkeypatch):
 
 
 def test_launch_head_records_registry(fake_sky, monkeypatch, capsys):
-    monkeypatch.setattr(
-        launcher, "build_syncer_binary", lambda: "/fake/yeto-syncer"
-    )
     monkeypatch.setattr(cli, "_spawn_worker", lambda name: pytest.fail("head mode must not spawn a local worker"))
     fake_sky["next_job_id"] = 42
 
@@ -190,10 +187,12 @@ def test_launch_head_records_registry(fake_sky, monkeypatch, capsys):
     # with the head's IP (from the handle) and the serialized args.
     (cluster, head_task), = fake_sky["launches"]
     assert cluster == "h1-head"
-    assert head_task.file_mounts["~/yeto-syncer"] == "/fake/yeto-syncer"
+    assert "~/yeto-syncer" not in head_task.file_mounts
     assert head_task.resources.kwargs["use_spot"] is False
     assert head_task.resources.kwargs["infra"] == "aws/us-west-2"
     assert 'pip install -q "skypilot[aws,gcp]>=0.12"' in head_task.setup
+    assert "cargo build --release --quiet" in head_task.setup
+    assert "touch ~/.yeto_head_ready" in head_task.setup
     (exec_cluster, job_task), = fake_sky["execs"]
     assert exec_cluster == "h1-head"
     assert job_task.envs["SYNCER_PUBLIC_IP"] == "203.0.113.7"
@@ -207,7 +206,6 @@ def test_launch_head_records_registry(fake_sky, monkeypatch, capsys):
 def test_launch_head_mounts_aws_credentials_when_present(
     fake_sky, monkeypatch, tmp_path
 ):
-    monkeypatch.setattr(launcher, "build_syncer_binary", lambda: "/fake/bin")
     fake_home = tmp_path / "home"
     (fake_home / ".aws").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(fake_home))
@@ -220,7 +218,6 @@ def test_launch_head_mounts_aws_credentials_when_present(
 def test_launch_head_warns_when_aws_credentials_missing(
     fake_sky, monkeypatch, tmp_path, capsys
 ):
-    monkeypatch.setattr(launcher, "build_syncer_binary", lambda: "/fake/bin")
     monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
 
     assert cli.main(["launch", *LAUNCH_ARGS, "--cluster-prefix", "h3"]) == 0
