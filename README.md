@@ -164,13 +164,15 @@ LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
 delta correction, q4 wire format, snapshots, resilience.
 [docs/LM_BENCHMARK.md](docs/LM_BENCHMARK.md) — standalone equal-hardware
 causal-LM benchmark contract, workload controls, complete arm and metric
-tables, reproducibility rules, and the Qwen3.6 historical example.
+tables, and reproducibility rules.
 [docs/DIFFUSION.md](docs/DIFFUSION.md) — the generic Diffusers image/video
 backend, data and conditioning contracts, external adapters, export, sampling,
 validation, and current limitations.
 [docs/DIFFUSION_BENCHMARK.md](docs/DIFFUSION_BENCHMARK.md) — standalone
 equal-hardware diffusion benchmark contract, media controls, complete arm and
-metric tables, reproducibility rules, and the LTX-Video historical example.
+metric tables, and reproducibility rules.
+[docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) — aggregate and
+per-seed results for the completed Qwen3.6, LTX-Video, and Wan2.2 benchmarks.
 [docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
 [docs/MEGATRON.md](docs/MEGATRON.md) — the Megatron-Core island backend (EP
 for 1T-class MoE).

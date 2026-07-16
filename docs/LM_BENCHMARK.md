@@ -352,55 +352,8 @@ parameter synchronization, multi-node launch orchestration, WAN fault
 injection, task-suite evaluation, and checkpoint-time learning curves are
 separate experiments.
 
-## Historical Example: Qwen3.6-27B
+## Results
 
-The following archived result is included as an example of benchmark output.
-It predates the current resume-manifest validation; rerun the current harness
-before using it for an acceptance decision.
-
-### Configuration
-
-| item | value |
-|---|---|
-| completed | 2026-07-14 07:37:52 UTC |
-| model | `Qwen/Qwen3.6-27B` at revision `6a9e13bd6fc8f0983b9b99948120bc37f49c13e9` |
-| dataset | `HuggingFaceH4/Multilingual-Thinking` at revision `f423949d2726f5a5633ea10ac45bc1ea1e0de6e7` |
-| hardware | AWS `p4de.24xlarge` Spot, 8 x A100 80 GB, `us-east-1d` |
-| workload | LoRA r16/alpha32, all-linear targets, assistant mask, sequence 1024, micro batch 1, grad accumulation 1 |
-| topology | `m2`: 2 islands x 4 GPUs; `m4`: 4 islands x 2 GPUs; both baselines used 8-rank FSDP2 |
-| budget | 2,097,152 raw tokens and 256 optimizer steps per item; inner LR `1e-4`, weight decay `0.01`, warmup 10 steps |
-| evaluation | 32 held-out rows; training seeds 17, 29, and 43 |
-
-### Quality Results
-
-| arm | M | runs | GPUs | raw tokens | target tokens | target % | CE/token | perplexity | delta vs sync |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `base` | - | 1 | - | - | - | - | 1.272364 +/- 0.000000 | 3.569 +/- 0.000 | - |
-| `baseline-m2` | 2 | 3 | 8 | 2097152 | 1871297 | 89.2 | 0.921318 +/- 0.012576 | 2.513 +/- 0.032 | - |
-| `m2` | 2 | 3 | 8 | 2097152 | 1871297 | 89.2 | 1.012668 +/- 0.023306 | 2.753 +/- 0.064 | +9.91% +/- 1.50 |
-| `alpha0` | 2 | 3 | 8 | 2097152 | 1871297 | 89.2 | 1.040361 +/- 0.013285 | 2.830 +/- 0.038 | +12.93% +/- 1.59 |
-| `q4` | 2 | 3 | 8 | 2097152 | 1871297 | 89.2 | 1.010183 +/- 0.018556 | 2.746 +/- 0.051 | +9.64% +/- 1.26 |
-| `serial` | 2 | 3 | 8 | 2097152 | 1871297 | 89.2 | 1.016067 +/- 0.021244 | 2.763 +/- 0.058 | +10.28% +/- 1.80 |
-| `noheloco` | 2 | 3 | 8 | 2097152 | 1871297 | 89.2 | 1.014247 +/- 0.023066 | 2.758 +/- 0.063 | +10.08% +/- 1.61 |
-| `strided` | 2 | 3 | 8 | 2097152 | 1871297 | 89.2 | 1.018677 +/- 0.022898 | 2.770 +/- 0.063 | +10.56% +/- 1.45 |
-| `direct-rda` | 2 | 3 | 8 | 2097152 | 1871297 | 89.2 | 0.926470 +/- 0.013628 | 2.526 +/- 0.034 | +0.56% +/- 1.33 |
-| `unthrottled` | 2 | 3 | 8 | 2097152 | 1871297 | 89.2 | 1.029360 +/- 0.011922 | 2.799 +/- 0.033 | +11.74% +/- 1.93 |
-| `baseline-m4` | 4 | 3 | 8 | 2097152 | 1871297 | 89.2 | 0.920028 +/- 0.014428 | 2.510 +/- 0.036 | - |
-| `m4` | 4 | 3 | 8 | 2097152 | 1871297 | 89.2 | 1.024142 +/- 0.007484 | 2.785 +/- 0.021 | +11.33% +/- 1.23 |
-
-### Systems Results
-
-| arm | M | train s | raw tok/s | target tok/s | GPU-h | mean H | tokens/response | participation % | stale | sync GB |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `base` | - | 0.0 | - | - | 0.000 | - | - | - | - | - |
-| `baseline-m2` | 2 | 414.8 | 5056.0 | 4511.5 | 0.922 | - | - | - | - | - |
-| `m2` | 2 | 401.8 | 5219.2 | 4657.1 | 0.893 | 41.72 | 170867 | 99.6 | 0.00 | 5.749 |
-| `alpha0` | 2 | 401.2 | 5227.8 | 4664.8 | 0.891 | 41.59 | 170351 | 100.0 | 0.00 | 5.759 |
-| `q4` | 2 | 424.5 | 4940.9 | 4408.7 | 0.943 | 41.64 | 170540 | 100.0 | 0.00 | 3.857 |
-| `serial` | 2 | 397.5 | 5276.1 | 4707.9 | 0.883 | 41.77 | 171071 | 99.2 | 0.00 | 5.778 |
-| `noheloco` | 2 | 398.8 | 5258.7 | 4692.4 | 0.886 | 42.13 | 172576 | 99.2 | 0.00 | 5.739 |
-| `strided` | 2 | 401.8 | 5219.2 | 4657.1 | 0.893 | 41.37 | 169443 | 100.0 | 0.00 | 5.799 |
-| `direct-rda` | 2 | 402.2 | 5214.9 | 4653.3 | 0.894 | 41.70 | 170805 | 99.6 | 0.00 | 5.749 |
-| `unthrottled` | 2 | 398.2 | 5266.2 | 4699.0 | 0.885 | 33.48 | 137149 | 99.3 | 0.00 | 6.439 |
-| `baseline-m4` | 4 | 415.1 | 5052.0 | 4507.9 | 0.923 | - | - | - | - | - |
-| `m4` | 4 | 393.5 | 5330.0 | 4755.9 | 0.874 | 44.35 | 90821 | 98.4 | 0.00 | 10.583 |
+Completed Qwen3.6 benchmark results, including aggregate and per-seed
+quality, execution, and synchronization tables, are archived in
+[BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md#qwen36-27b-lm).

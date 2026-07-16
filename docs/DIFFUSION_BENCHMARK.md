@@ -261,55 +261,9 @@ supported asynchronous diffusion path. Full-parameter FSDP synchronization,
 cloud provisioning, FID/FVD/aesthetic metrics, checkpoint-time learning
 curves, and forced learner failures are separate experiments.
 
-## Historical Example: LTX-Video
+## Results
 
-The following archived result is included as an example of benchmark output.
-It predates the current logical-rank training-stream pairing; rerun the current
-harness before using it for an acceptance decision.
-
-### Configuration
-
-| item | value |
-|---|---|
-| completed | 2026-07-10 18:33:11 UTC |
-| model | `Lightricks/LTX-Video` |
-| dataset | LTX Yeto compressed dataset, 4,352 rows |
-| hardware | AWS `p4de.24xlarge`, 8 x A100 80 GB available, `us-west-2b` |
-| workload | 49 frames at 9.3 FPS, 512 x 512, aspect-preserving center crop |
-| topology | `m2`: 2 islands x 2 GPUs; `m4`: 4 islands x 1 GPU; matching baselines used 4 ranks |
-| budget | 512 samples and 128 optimizer steps per item |
-| evaluation | 16 held-out rows x 4 repeats; training seeds 17, 29, and 43 |
-
-### Quality Results
-
-| arm | M | runs | GPUs | samples | loss/elem | delta vs sync |
-|---|---:|---:|---:|---:|---:|---:|
-| `base` | - | 1 | - | - | 0.282278 +/- 0.000000 | - |
-| `baseline-m2` | 2 | 3 | 4 | 512 | 0.120068 +/- 0.000460 | - |
-| `m2` | 2 | 3 | 4 | 512 | 0.121794 +/- 0.001141 | +1.44% +/- 1.27 |
-| `alpha0` | 2 | 3 | 4 | 512 | 0.124892 +/- 0.001046 | +4.02% +/- 1.23 |
-| `q4` | 2 | 3 | 4 | 512 | 0.122769 +/- 0.001046 | +2.25% +/- 1.26 |
-| `serial` | 2 | 3 | 4 | 512 | 0.122538 +/- 0.000759 | +2.06% +/- 1.02 |
-| `noheloco` | 2 | 3 | 4 | 512 | 0.122265 +/- 0.001028 | +1.83% +/- 1.08 |
-| `strided` | 2 | 3 | 4 | 512 | 0.122453 +/- 0.000777 | +1.99% +/- 1.03 |
-| `direct-rda` | 2 | 3 | 4 | 512 | 0.122256 +/- 0.000582 | +1.82% +/- 0.81 |
-| `unthrottled` | 2 | 3 | 4 | 512 | 0.123367 +/- 0.001710 | +2.75% +/- 1.77 |
-| `baseline-m4` | 4 | 3 | 4 | 512 | 0.121219 +/- 0.001523 | - |
-| `m4` | 4 | 3 | 4 | 512 | 0.124124 +/- 0.001386 | +2.42% +/- 2.40 |
-
-### Systems Results
-
-| arm | M | train s | samples/s | GPU-h | mean H | participation % | stale | sync GB |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `base` | - | 0.0 | - | 0.000 | - | - | - | - |
-| `baseline-m2` | 2 | 682.8 | 0.750 | 0.759 | - | - | - | - |
-| `m2` | 2 | 636.5 | 0.805 | 0.707 | 20.10 | 98.1 | 0.00 | 1.201 |
-| `alpha0` | 2 | 640.6 | 0.799 | 0.712 | 20.11 | 97.4 | 0.00 | 1.206 |
-| `q4` | 2 | 642.6 | 0.797 | 0.714 | 20.01 | 97.8 | 0.00 | 0.807 |
-| `serial` | 2 | 634.5 | 0.807 | 0.705 | 20.98 | 98.0 | 0.00 | 1.139 |
-| `noheloco` | 2 | 635.6 | 0.806 | 0.706 | 20.03 | 98.5 | 0.00 | 1.195 |
-| `strided` | 2 | 637.5 | 0.803 | 0.708 | 20.07 | 98.5 | 0.00 | 1.195 |
-| `direct-rda` | 2 | 619.1 | 0.827 | 0.688 | 20.06 | 98.5 | 0.00 | 1.204 |
-| `unthrottled` | 2 | 636.5 | 0.805 | 0.707 | 3.20 | 97.3 | 0.00 | 5.952 |
-| `baseline-m4` | 4 | 689.2 | 0.743 | 0.766 | - | - | - | - |
-| `m4` | 4 | 557.8 | 0.919 | 0.620 | 21.33 | 95.6 | 0.00 | 2.224 |
+Completed LTX-Video and Wan2.2 benchmark results, including aggregate and
+per-seed quality, execution, and synchronization tables, are archived in
+[BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md#ltx-video-diffusion) and
+[BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md#wan22-t2v-a14b-diffusion).
