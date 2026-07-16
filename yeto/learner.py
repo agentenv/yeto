@@ -336,6 +336,12 @@ def parse_args(argv=None):
         "to whole optimizer steps because the learner trains packed blocks",
     )
     p.add_argument(
+        "--allow-terminal-partial-fixed-window",
+        action="store_true",
+        help="close one final registered partial fixed window at the exact hard "
+        "optimizer-step cap; all responders report the actual positive tail work",
+    )
+    p.add_argument(
         "--fixed-window-schedule",
         default=None,
         help="EXP: online sync-horizon changes as 'commit1:h1,commit2:h2,...'"
@@ -595,6 +601,7 @@ def barrier_round_closure_target(
     fragment_count: int,
     global_step: int,
     fixed_window_snapshots: list[dict | None] | None,
+    allow_terminal_partial_fixed_window: bool = False,
 ) -> int | None:
     """Return the real syncer boundary that must close before another step.
 
@@ -615,7 +622,10 @@ def barrier_round_closure_target(
     ):
         return None
     if steps_total >= max_local_steps:
-        return (max_local_steps // fixed_window_steps) * fragment_count
+        rounds = max_local_steps // fixed_window_steps
+        if allow_terminal_partial_fixed_window and max_local_steps % fixed_window_steps:
+            rounds += 1
+        return rounds * fragment_count
     if (
         any(snapshot is not None for snapshot in fixed_window_snapshots)
         and global_step % fragment_count != 0
@@ -1548,6 +1558,25 @@ def run_inner_loop(
                         "local_step": steps_total,
                         "base_version": fragment_versions[snap_fid],
                     }
+                if (
+                    args.allow_terminal_partial_fixed_window
+                    and steps_total >= args.max_local_steps
+                ):
+                    for snap_fid, snap in enumerate(fixed_window_snapshots):
+                        if snap is not None:
+                            continue
+                        snap_steps = steps_total - steps_at_reset[snap_fid]
+                        if snap_steps <= 0:
+                            continue
+                        fixed_window_snapshots[snap_fid] = {
+                            "flat": fragment_flat(
+                                layout.fragments[snap_fid], params
+                            ).detach().cpu(),
+                            "c_steps": snap_steps,
+                            "c_tokens": tokens_total - tokens_at_reset[snap_fid],
+                            "local_step": steps_total,
+                            "base_version": fragment_versions[snap_fid],
+                        }
 
             if steps_total % 10 == 0 and rank == 0:
                 dt = time.monotonic() - t_last
@@ -1766,6 +1795,9 @@ def run_inner_loop(
                 fragment_count=layout.num_fragments,
                 global_step=global_step,
                 fixed_window_snapshots=fixed_window_snapshots,
+                allow_terminal_partial_fixed_window=(
+                    args.allow_terminal_partial_fixed_window
+                ),
             )
             if boundary_target is not None:
                 boundary_deadline = time.monotonic() + float(client.connect_timeout)

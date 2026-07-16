@@ -52,7 +52,17 @@ REVISION_1_2_AMENDMENT_RAW_SHA256 = (
     "33781ad5d4deb29120a2d41f3ccbe2937a5945b97db6400ff1690abeceb520f7"
 )
 PROTECTED_INSTANCE_ID = "3908640733128066700"
-ALLOWED_STAGE_CODES = frozenset(("p1r0", "p1ad", "p2", "p3t"))
+MULTISEED_STAGE_CODES = frozenset(("e1", "e4"))
+AUDIT_135M_STAGE_CODES = frozenset(
+    ("a1d", "a1x", "a1c", "a3k", "a3r0", "a3x", "a4d", "a4b", "a4c", "a4x")
+)
+CONTROLLED_STAGE_CODES = MULTISEED_STAGE_CODES | AUDIT_135M_STAGE_CODES
+AUDIT_135M_PREREG_SHA256 = (
+    "a2eb92161a324f161fcdb6d808ae0a9e2309a4bb0dd3924d78122d4d1acad62a"
+)
+ALLOWED_STAGE_CODES = frozenset(
+    ("p1r0", "p1ad", "p2", "p3t", *CONTROLLED_STAGE_CODES)
+)
 LOGICAL_SLOTS = ("v0", "v1", "v2", "v3")
 REVISION_1_2_ALLOWED_ZONES = (
     "us-central1-a",
@@ -69,6 +79,16 @@ ALLOWED_US_A100_ZONES = (
     "us-west1-b",
     "us-west4-a",
     "us-west4-b",
+)
+AUDIT_135M_SURVIVAL_WEIGHTED_ZONE_ORDER = (
+    "us-east1-b",
+    "us-west4-b",
+    "us-west1-b",
+    "us-west4-a",
+    "us-central1-a",
+    "us-central1-b",
+    "us-central1-c",
+    "us-central1-f",
 )
 # Compatibility alias for packet/controller code written against Version 1.1.
 ALLOWED_US_CENTRAL1_ZONES = REVISION_1_2_ALLOWED_ZONES
@@ -97,7 +117,7 @@ PACKING_EQUIVALENCE_NORMALIZED_COMMAND_HASH = (
     "155bf0801c2c8bfc71b81ada1f4f5dcb97f5a37395087603bc7aab6517b04faf"
 )
 RUN_ID_RE = re.compile(
-    r"^bp-(p1r0|p1ad|p2|p3t)-[0-9a-f]{16}-c[1-9][0-9]*-v[0-3]-g[1-9][0-9]*$"
+    r"^bp-(p1r0|p1ad|p2|p3t|e1|e4|a1d|a1x|a1c|a3k|a3r0|a3x|a4d|a4b|a4c|a4x)-[0-9a-f]{16}-c[1-9][0-9]*-v[0-3]-g[1-9][0-9]*$"
 )
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 NONCE_RE = re.compile(r"[0-9a-f]{32}\Z")
@@ -125,6 +145,14 @@ EXPECTED_TOKENS = 655_360
 EXPECTED_MICROSTEPS = 5_120
 EXPECTED_LEARNERS = (0, 1, 2, 3)
 EXPECTED_STEPS_PER_LEARNER = 1_280
+FRAGMENT_COUNT = 4
+BEST_PAPER_V2_FRESH_SEEDS = (383, 397, 409, 421, 433, 443, 457, 461)
+BEST_PAPER_V2_ARMS = {
+    16: frozenset(
+        ((0.0, 0.021875), (0.9, 0.002734375), (0.9, 0.021875))
+    ),
+    256: frozenset(((0.0, 0.04375), (0.9, 0.0109375), (0.9, 0.04375))),
+}
 
 
 class ParallelPhaseMapError(RuntimeError):
@@ -429,6 +457,19 @@ def _cell_field(cell: Mapping[str, Any], lower: str, upper: str | None = None) -
     raise ScheduleError(f"cell {cell.get('cell_id')!r} lacks {lower!r}")
 
 
+def _cell_learner_count(cell: Mapping[str, Any]) -> int:
+    value = cell.get("m", cell.get("M", cell.get("expected_learner_count")))
+    if value is None:
+        target = cell.get("target_work")
+        if isinstance(target, Mapping):
+            value = target.get("learner_count")
+    if value is None:
+        return 4
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ScheduleError(f"cell {cell.get('cell_id')!r} has invalid learner count")
+    return value
+
+
 def _scientific_cells(plan: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     rows = _array(plan.get("cells"), "scientific plan cells")
     by_id: dict[str, dict[str, Any]] = {}
@@ -445,7 +486,7 @@ def _bound_cells(manifest: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dic
     rows = _array(manifest.get("expected_cells"), "bound expected_cells")
     ordered: list[dict[str, Any]] = []
     by_id: dict[str, dict[str, Any]] = {}
-    coordinates: set[tuple[int, float, float, int, int]] = set()
+    coordinates: set[tuple[int, int, float, float, int, int, str | None]] = set()
     for index, raw in enumerate(rows):
         row = _mapping(raw, f"bound expected_cells[{index}]")
         cell_id = row.get("cell_id")
@@ -453,10 +494,12 @@ def _bound_cells(manifest: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dic
             raise ScheduleError("bound manifest has a missing or duplicate cell_id")
         coordinate = (
             int(_cell_field(row, "h", "H")),
+            _cell_learner_count(row),
             float(_cell_field(row, "mu")),
             float(_cell_field(row, "eta")),
             int(_cell_field(row, "seed")),
             int(_cell_field(row, "training_seed")),
+            str(row.get("analysis_role")) if row.get("analysis_role") is not None else None,
         )
         if coordinate in coordinates:
             raise ScheduleError(f"bound manifest duplicates coordinate {coordinate}")
@@ -477,6 +520,22 @@ def _launch_ids_for_stage(
         if len(bound_ids) != 36:
             raise ScheduleError("P1-R0 must bind exactly 36 launch cells")
         return bound_ids
+    if stage_code in MULTISEED_STAGE_CODES:
+        expected = 48 if stage_code == "e1" else 96
+        if parent_ids:
+            raise ScheduleError(f"{stage_code.upper()} multiseed binding must be parentless")
+        if len(bound_ids) != expected:
+            raise ScheduleError(
+                f"{stage_code.upper()} must bind exactly {expected} launch cells"
+            )
+        return bound_ids
+    if stage_code in AUDIT_135M_STAGE_CODES:
+        if not parent_ids.issubset(bound_ids):
+            raise ScheduleError("audit cumulative child omits a parent cell ID")
+        launch_ids = bound_ids - parent_ids
+        if not launch_ids:
+            raise ScheduleError("audit launch suffix is empty")
+        return launch_ids
     if not parent_ids.issubset(bound_ids):
         raise ScheduleError("cumulative child does not contain every parent cell ID")
     launch_ids = bound_ids - parent_ids
@@ -504,13 +563,21 @@ def build_parallel_roster(
     ):
         raise ScheduleError("P0/parent manifest canonical hash differs from the bound parameter")
     lineage = _mapping(bound_manifest.get("lineage"), "bound lineage")
-    if lineage.get("parent_manifest_sha256") != parent_hash:
+    if stage_code in MULTISEED_STAGE_CODES:
+        if lineage.get("parent_manifest_sha256") is not None:
+            raise ScheduleError("multiseed runtime contract must be parentless")
+    elif lineage.get("parent_manifest_sha256") != parent_hash:
         raise ScheduleError("bound descendant is not tied to the supplied parent hash")
     prereg_hash = require_sha256(
         lineage.get("authoritative_prereg_template_sha256"),
         "authoritative preregistration template SHA-256",
     )
-    if prereg_hash != AUTHORITATIVE_PREREG_TEMPLATE_SHA256:
+    expected_prereg_hash = (
+        AUDIT_135M_PREREG_SHA256
+        if stage_code in AUDIT_135M_STAGE_CODES
+        else AUTHORITATIVE_PREREG_TEMPLATE_SHA256
+    )
+    if prereg_hash != expected_prereg_hash:
         raise ScheduleError("bound descendant cites a different authoritative preregistration")
     study_id = bound_manifest.get("study_id")
     descendant_kind = lineage.get("descendant_kind")
@@ -549,6 +616,16 @@ def build_parallel_roster(
             or planned_randomization.get("block_id") != block_id
         ):
             raise ScheduleError(f"cell {cell_id} command/block identity differs across inputs")
+        if stage_code in CONTROLLED_STAGE_CODES and (
+            _cell_learner_count(planned) != _cell_learner_count(bound)
+            or planned.get("pairing_identity_hash")
+            != bound.get("pairing_identity_hash")
+            or planned.get("pairing_command_hash")
+            != bound.get("pairing_command_hash")
+        ):
+            raise ScheduleError(
+                f"cell {cell_id} M or pairing identity differs across inputs"
+            )
         normalized_hash = require_sha256(
             bound.get("normalized_workload_command_hash"),
             f"{cell_id} normalized workload command hash",
@@ -563,16 +640,32 @@ def build_parallel_roster(
                 "cell_id": cell_id,
                 "block_id": block_id,
                 "h": int(_cell_field(bound, "h", "H")),
+                "m": _cell_learner_count(bound),
                 "mu": float(_cell_field(bound, "mu")),
                 "eta": float(_cell_field(bound, "eta")),
                 "seed": int(_cell_field(bound, "seed")),
                 "training_seed": int(_cell_field(bound, "training_seed")),
                 "paired_control_id": bound.get("paired_control_id"),
+                "pairing_identity_hash": bound.get("pairing_identity_hash"),
+                "pairing_command_hash": bound.get("pairing_command_hash"),
+                "expected_learner_count": bound.get(
+                    "expected_learner_count", _cell_learner_count(bound)
+                ),
+                "expected_learner_steps": bound.get("expected_learner_steps"),
+                "audit_stage": bound.get("audit_stage"),
+                "audit_phase": bound.get("audit_phase"),
+                "analysis_role": bound.get("analysis_role"),
+                "pair_key": bound.get("pair_key"),
+                "terminal_partial_window_registered": bound.get(
+                    "terminal_partial_window_registered", False
+                ),
+                "terminal_partial_window_microsteps": bound.get(
+                    "terminal_partial_window_microsteps", 0
+                ),
                 "command_hash": command_hash,
                 "normalized_workload_command_hash": normalized_hash,
             }
         )
-
     roster = {
         "schema": "parallel_roster_v1",
         "stage_code": stage_code,
@@ -588,7 +681,48 @@ def build_parallel_roster(
         ),
         "launch_cells": launch_cells,
     }
-    if set(roster) != {
+    if stage_code in MULTISEED_STAGE_CODES:
+        design_hash = require_sha256(
+            lineage.get("best_paper_v2_design_contract_hash"),
+            "best-paper v2 design contract hash",
+        )
+        if bound_manifest.get("launch_authorized") is not False:
+            raise ScheduleError(
+                "local multiseed contract must not claim launch authorization"
+            )
+        roster["best_paper_v2_design_contract_hash"] = design_hash
+        roster["launch_authorized"] = False
+    elif stage_code in AUDIT_135M_STAGE_CODES:
+        design_hash = require_sha256(
+            lineage.get("audit_135m_design_contract_hash"),
+            "audit-135m design contract hash",
+        )
+        contract = _mapping(
+            bound_manifest.get("audit_135m_contract"), "audit-135m contract"
+        )
+        launch_count = require_positive_int(
+            contract.get("launch_cell_count"), "audit launch cell count"
+        )
+        hard_ceiling = require_finite(
+            contract.get("hard_ceiling_usd"), "audit hard ceiling"
+        )
+        if (
+            launch_count != len(launch_cells)
+            or hard_ceiling <= 0.0
+            or bound_manifest.get("launch_authorized") is not False
+        ):
+            raise ScheduleError("audit contract count/ceiling/authorization differs")
+        roster.update(
+            {
+                "audit_135m_design_contract_hash": design_hash,
+                "audit_stage": contract.get("audit_stage"),
+                "audit_phase": contract.get("audit_phase"),
+                "hard_ceiling_usd": hard_ceiling,
+                "launch_cell_count": launch_count,
+                "launch_authorized": False,
+            }
+        )
+    expected_fields = {
         "schema",
         "stage_code",
         "study_id",
@@ -598,7 +732,23 @@ def build_parallel_roster(
         "parent_expected_cell_ids_hash",
         "cumulative_expected_cell_ids_hash",
         "launch_cells",
-    }:
+    }
+    if stage_code in MULTISEED_STAGE_CODES:
+        expected_fields.update(
+            ("best_paper_v2_design_contract_hash", "launch_authorized")
+        )
+    elif stage_code in AUDIT_135M_STAGE_CODES:
+        expected_fields.update(
+            (
+                "audit_135m_design_contract_hash",
+                "audit_stage",
+                "audit_phase",
+                "hard_ceiling_usd",
+                "launch_cell_count",
+                "launch_authorized",
+            )
+        )
+    if set(roster) != expected_fields:
         raise AssertionError("parallel roster field set drifted")
     return roster
 
@@ -636,6 +786,150 @@ def _group_launch_cells(
                     raise ScheduleError(f"{group_id} has mismatched {field}")
         if stage_code == "p1r0" and (len(rows), len(by_group)) != (36, 12):
             raise ScheduleError("P1-R0 must materialize 12 three-cell waves")
+    elif stage_code in MULTISEED_STAGE_CODES:
+        expected_m = {4} if stage_code == "e1" else {1, 16}
+        for group_id, cells in by_group.items():
+            if len(cells) != 3 or len({str(cell["cell_id"]) for cell in cells}) != 3:
+                raise ScheduleError(f"{group_id} must contain exactly three distinct arms")
+            for field in ("h", "m", "seed", "training_seed"):
+                if len({cell[field] for cell in cells}) != 1:
+                    raise ScheduleError(f"{group_id} has mismatched {field}")
+            h = int(cells[0]["h"])
+            if h not in BEST_PAPER_V2_ARMS:
+                raise ScheduleError(f"{group_id} has unauthorized H={h}")
+            observed_arms = frozenset(
+                (float(cell["mu"]), float(cell["eta"])) for cell in cells
+            )
+            if observed_arms != BEST_PAPER_V2_ARMS[h]:
+                raise ScheduleError(
+                    f"{group_id} does not contain the frozen mixed-eta E1/E4 arms"
+                )
+            pairing_hashes = {cell.get("pairing_identity_hash") for cell in cells}
+            pairing_commands = {cell.get("pairing_command_hash") for cell in cells}
+            if (
+                len(pairing_hashes) != 1
+                or None in pairing_hashes
+                or len(pairing_commands) != 1
+                or None in pairing_commands
+            ):
+                raise ScheduleError(f"{group_id} breaks a paired-block identity")
+            controls = [cell for cell in cells if float(cell["mu"]) == 0.0]
+            if len(controls) != 1 or {
+                cell.get("paired_control_id") for cell in cells
+            } != {controls[0]["cell_id"]}:
+                raise ScheduleError(f"{group_id} lacks one shared live control")
+        observed_seeds = {int(cell["seed"]) for cell in rows}
+        observed_m = {int(cell["m"]) for cell in rows}
+        expected_cells = 48 if stage_code == "e1" else 96
+        expected_groups = 16 if stage_code == "e1" else 32
+        if observed_seeds != set(BEST_PAPER_V2_FRESH_SEEDS):
+            raise ScheduleError(f"{stage_code.upper()} seed registry differs")
+        if observed_m != expected_m:
+            raise ScheduleError(f"{stage_code.upper()} M variants differ")
+        if (len(rows), len(by_group)) != (expected_cells, expected_groups):
+            raise ScheduleError(
+                f"{stage_code.upper()} must materialize {expected_groups} atomic seed blocks"
+            )
+    elif stage_code in AUDIT_135M_STAGE_CODES:
+        expected_roles = {
+            "a1d": {
+                "tune_control_rank0",
+                "tune_method_rank0",
+                "tune_control_rank1",
+                "tune_method_rank1",
+                "tune_control_rank2",
+                "tune_method_rank2",
+            },
+            "a1x": {"boundary_control", "boundary_method"},
+            "a1c": {"fixed_control", "fixed_method", "tuned_control", "tuned_method"},
+            "a3k": {"kernel_recapture"},
+            "a3x": {"frontier_boundary_extension"},
+            "a4d": {
+                "tune_control_rank0",
+                "tune_method_rank0",
+                "tune_control_rank1",
+                "tune_method_rank1",
+                "tune_control_rank2",
+                "tune_method_rank2",
+            },
+            "a4b": {"boundary_control", "boundary_method"},
+            "a4c": {"fixed_control", "fixed_method", "tuned_control", "tuned_method"},
+            "a4x": {"fixed_control", "fixed_method", "tuned_control", "tuned_method"},
+        }
+        expected_seeds = {
+            "a1d": {359, 373},
+            "a1x": {359, 373},
+            "a1c": {383, 397, 409, 421, 433, 443, 457, 461},
+            "a3k": {347},
+            "a3r0": {359, 373},
+            "a3x": {359, 373},
+            "a4d": {2069, 2081},
+            "a4b": {2069, 2081},
+            "a4c": {2083, 2087, 2089},
+            "a4x": {2099, 2111, 2113},
+        }[stage_code]
+        expected_m = {
+            "a1d": {4},
+            "a1x": {4},
+            "a1c": {4},
+            "a3k": {4},
+            "a3r0": {4},
+            "a3x": {4},
+            "a4d": {1, 4},
+            "a4b": {1, 4},
+            "a4c": {1, 4},
+            "a4x": {1, 4},
+        }[stage_code]
+        for group_id, cells in by_group.items():
+            if len({str(cell["cell_id"]) for cell in cells}) != len(cells):
+                raise ScheduleError(f"{group_id} contains a duplicate audit arm")
+            for field in ("h", "m", "seed", "training_seed"):
+                if len({cell[field] for cell in cells}) != 1:
+                    raise ScheduleError(f"{group_id} has mismatched audit {field}")
+            if len({cell.get("pairing_identity_hash") for cell in cells}) != 1:
+                raise ScheduleError(f"{group_id} breaks its audit pairing identity")
+            if len({cell.get("pairing_command_hash") for cell in cells}) != 1:
+                raise ScheduleError(f"{group_id} changes a non-treatment command field")
+            by_id = {str(cell["cell_id"]): cell for cell in cells}
+            for cell in cells:
+                control = by_id.get(str(cell.get("paired_control_id")))
+                if control is None or float(control["mu"]) != 0.0:
+                    raise ScheduleError(f"{group_id} has an invalid live control")
+            roles = {str(cell.get("analysis_role")) for cell in cells}
+            if stage_code == "a3r0":
+                expected = {
+                    f"frontier_eta_{index}"
+                    for index in range(4 if int(cells[0]["h"]) == 8 else 5)
+                }
+                if roles != expected:
+                    raise ScheduleError(f"{group_id} has the wrong A3 frontier roles")
+            elif roles != expected_roles[stage_code]:
+                raise ScheduleError(f"{group_id} has the wrong audit analysis roles")
+        if {int(cell["seed"]) for cell in rows} != expected_seeds:
+            raise ScheduleError(f"{stage_code} seed registry differs")
+        if {int(cell["m"]) for cell in rows} != expected_m:
+            raise ScheduleError(f"{stage_code} learner-count registry differs")
+        if len(rows) != require_positive_int(
+            roster.get("launch_cell_count"), "audit roster launch count"
+        ):
+            raise ScheduleError("audit roster launch count differs from its cells")
+        fixed_counts = {
+            "a1d": 24,
+            "a1c": 64,
+            "a3k": 3,
+            "a3r0": 18,
+            "a4d": 48,
+            "a4c": 48,
+            "a4x": 48,
+        }
+        if stage_code in fixed_counts and len(rows) != fixed_counts[stage_code]:
+            raise ScheduleError(f"{stage_code} must launch exactly {fixed_counts[stage_code]} cells")
+        if stage_code == "a1x" and len(rows) not in (4, 8):
+            raise ScheduleError("A1 boundary extension must add four or eight cells")
+        if stage_code == "a3x" and len(rows) not in (2, 4):
+            raise ScheduleError("A3 boundary extension must add two or four cells")
+        if stage_code == "a4b" and (len(rows) < 4 or len(rows) > 16 or len(rows) % 4):
+            raise ScheduleError("A4 boundary extension must add 4..16 cells by complete pairs")
     elif stage_code == "p3t":
         for group_id, cells in by_group.items():
             if len(cells) != 4 or len({cell["cell_id"] for cell in cells}) != 4:
@@ -666,7 +960,10 @@ def build_legacy_wave_assignment(
     launch_domain = f"launch-order|{group_id}|{retry_round}"
     arm_order = rank_order(cell_ids, arm_domain, study_id)
     slot_order = rank_order(LOGICAL_SLOTS, slot_domain, study_id)
-    assignment = dict(zip(arm_order, slot_order))
+    assignment = {
+        cell_id: slot_order[index % len(slot_order)]
+        for index, cell_id in enumerate(arm_order)
+    }
     launch_order = rank_order(cell_ids, launch_domain, study_id)
     by_id = {str(cell["cell_id"]): cell for cell in cells}
     assigned = []
@@ -680,6 +977,8 @@ def build_legacy_wave_assignment(
                 "arm_order_index": arm_order.index(cell_id),
                 "launch_order_index": launch_index,
                 "command_hash": cell["command_hash"],
+                "m": _cell_learner_count(cell),
+                "pairing_identity_hash": cell.get("pairing_identity_hash"),
                 "arm_rank": rank_hex(arm_domain, study_id, cell_id),
                 "slot_rank": rank_hex(slot_domain, study_id, slot),
                 "launch_rank": rank_hex(launch_domain, study_id, cell_id),
@@ -839,6 +1138,8 @@ def build_wave_assignment(
                 "arm_order_index": arm_position[cell_id],
                 "launch_order_index": launch_index,
                 "command_hash": cell["command_hash"],
+                "m": _cell_learner_count(cell),
+                "pairing_identity_hash": cell.get("pairing_identity_hash"),
                 "binding_domain": binding_domain,
                 "arm_rank": rank_hex(arm_domain, study_id, cell_id),
                 "slot_rank": rank_hex(slot_domain, study_id, slot),
@@ -870,6 +1171,15 @@ def build_wave_assignment(
         "dispatch_span_limit_seconds_per_batch": 60,
         "scientific_start_span_limit_seconds_per_batch": 120,
         "whole_group_loss_blind_until_terminal": True,
+        "runtime_pairing_requirements": {
+            "uniform_machine_type_within_block": True,
+            "uniform_gpu_slots_within_block": True,
+            "learner_gpu_assignment": "learner_id mod gpu_slots",
+            "same_pairing_identity_hash": len(
+                {cell.get("pairing_identity_hash") for cell in cells}
+            )
+            == 1,
+        },
     }
 
 
@@ -915,6 +1225,7 @@ def build_revision_1_1_parallel_plan(
     full_width = next(
         variant for variant in variants if variant["available_slot_set"] == list(LOGICAL_SLOTS)
     )
+    audit_capacity = stage_code in AUDIT_135M_STAGE_CODES
     return {
         "schema": "yeto_parallel_plan_v2",
         "stage_code": stage_code,
@@ -944,8 +1255,25 @@ def build_revision_1_1_parallel_plan(
             "a100s_per_scientific_vm": A100S_PER_VM,
             "scientific_vm_shape": SCIENTIFIC_VM_SHAPE,
             "active_scientific_cells_per_vm": 1,
-            "allowed_zones": list(REVISION_1_2_ALLOWED_ZONES),
-            "quota_scope": "us-central1 regional preemptible A100 quota",
+            "allowed_zones": list(
+                AUDIT_135M_SURVIVAL_WEIGHTED_ZONE_ORDER
+                if audit_capacity
+                else REVISION_1_2_ALLOWED_ZONES
+            ),
+            **(
+                {
+                    "zone_fallback_order": list(
+                        AUDIT_135M_SURVIVAL_WEIGHTED_ZONE_ORDER
+                    )
+                }
+                if audit_capacity
+                else {}
+            ),
+            "quota_scope": (
+                "provider-recorded per-region preemptible A100 quota"
+                if audit_capacity
+                else "us-central1 regional preemptible A100 quota"
+            ),
         },
         "retry_derivation": {
             "whole_atomic_group": True,
@@ -975,6 +1303,7 @@ def build_parallel_plan(
     plan = deepcopy(previous)
     plan["schema"] = "yeto_parallel_plan_v3"
     plan["supersedes_revision_1_1_parallel_plan_hash"] = canonical_sha256(previous)
+    audit_capacity = str(roster.get("stage_code")) in AUDIT_135M_STAGE_CODES
     plan["capacity"] = {
         "contract_revision": 2,
         "minimum_available_scientific_vms": 1,
@@ -988,8 +1317,25 @@ def build_parallel_plan(
         "a100s_per_scientific_vm_by_shape": dict(A100S_PER_VM_BY_SHAPE),
         "gpu_allocation_mode_by_shape": dict(GPU_ALLOCATION_MODE_BY_SHAPE),
         "active_scientific_cells_per_vm": 1,
-        "allowed_zones": list(REVISION_1_2_ALLOWED_ZONES),
-        "quota_scope": "us-central1 regional preemptible A100 quota",
+        "allowed_zones": list(
+            AUDIT_135M_SURVIVAL_WEIGHTED_ZONE_ORDER
+            if audit_capacity
+            else REVISION_1_2_ALLOWED_ZONES
+        ),
+        **(
+            {
+                "zone_fallback_order": list(
+                    AUDIT_135M_SURVIVAL_WEIGHTED_ZONE_ORDER
+                )
+            }
+            if audit_capacity
+            else {}
+        ),
+        "quota_scope": (
+            "provider-recorded per-region preemptible A100 quota"
+            if audit_capacity
+            else "us-central1 regional preemptible A100 quota"
+        ),
         "packing_equivalence_evidence": {
             "p0a_machine_type": FALLBACK_VM_SHAPE,
             "p0a_gpu_slots": 1,
@@ -999,6 +1345,20 @@ def build_parallel_plan(
             "normalized_workload_command_hash": (
                 PACKING_EQUIVALENCE_NORMALIZED_COMMAND_HASH
             ),
+        },
+        "learner_counts": sorted(
+            {_cell_learner_count(cell) for cell in roster["launch_cells"]}
+        ),
+        "maximum_learners_per_gpu_by_shape": {
+            str(count): {
+                SCIENTIFIC_VM_SHAPE: math.ceil(
+                    count / A100S_PER_VM_BY_SHAPE[SCIENTIFIC_VM_SHAPE]
+                ),
+                FALLBACK_VM_SHAPE: count,
+            }
+            for count in sorted(
+                {_cell_learner_count(cell) for cell in roster["launch_cells"]}
+            )
         },
     }
     return plan
@@ -1012,6 +1372,129 @@ def parallel_plan_hash(plan: Mapping[str, Any]) -> str:
     ):
         raise ScheduleError("parallel plan has the wrong schema")
     return canonical_sha256(plan)
+
+
+def multiseed_analysis_loss_cap(
+    stage_code: str, bound_manifest: Mapping[str, Any]
+) -> float | None:
+    """Return the exact frozen divergence cap for controlled audit stages."""
+
+    if stage_code not in CONTROLLED_STAGE_CODES:
+        return None
+    policy = bound_manifest.get("analysis_policy")
+    if not isinstance(policy, Mapping) or set(policy) != {
+        "divergence_loss_cap",
+        "divergence_is_outcome",
+        "silent_divergence_exclusion_forbidden",
+    }:
+        raise ScheduleError("multiseed bound contract lacks the exact analysis policy")
+    cap = policy.get("divergence_loss_cap")
+    if (
+        isinstance(cap, bool)
+        or not isinstance(cap, (int, float))
+        or not math.isfinite(float(cap))
+        or float(cap) <= 0.0
+        or policy.get("divergence_is_outcome") is not True
+        or policy.get("silent_divergence_exclusion_forbidden") is not True
+    ):
+        raise ScheduleError("multiseed divergence policy is not a positive capped outcome")
+    return float(cap)
+
+
+def multiseed_analysis_outcome_fields(
+    *, status: str, loss: Any, divergence_loss_cap: float | None
+) -> dict[str, Any]:
+    """Return the exact analysis fields for one scientifically resolved E1/E4 row."""
+
+    if divergence_loss_cap is None or status not in ("COMPLETED", "DIVERGED"):
+        return {}
+    if status == "DIVERGED":
+        if loss is not None:
+            raise EvidenceError("DIVERGED multiseed outcome must retain a null raw loss")
+        analysis_loss = divergence_loss_cap
+        analysis_loss_kind = "capped_divergence_endpoint_nll"
+        retained = True
+    else:
+        analysis_loss = require_finite(loss, "completed endpoint loss")
+        analysis_loss_kind = "finite_endpoint_nll"
+        retained = False
+    return {
+        "analysis_loss": analysis_loss,
+        "analysis_loss_kind": analysis_loss_kind,
+        "divergence_retained": retained,
+    }
+
+
+def multiseed_runtime_authorization_hash(
+    *,
+    stage_code: str,
+    design_contract_hash: Any,
+    roster_digest: str,
+    parallel_digest: str,
+    bound_digest: str,
+    scientific_digest: str,
+    authorization: Mapping[str, Any] | None,
+    hard_ceiling_usd: Any = None,
+) -> str | None:
+    """Validate and hash the exact external launch authorization."""
+
+    if stage_code not in CONTROLLED_STAGE_CODES:
+        return None
+    common = {
+        "launch_authorized": True,
+        "stage_code": stage_code,
+        "roster_hash": require_sha256(roster_digest, "roster hash"),
+        "parallel_plan_hash": require_sha256(parallel_digest, "parallel plan hash"),
+        "bound_manifest_canonical_sha256": require_sha256(
+            bound_digest, "bound manifest canonical hash"
+        ),
+        "scientific_randomization_plan_hash": require_sha256(
+            scientific_digest, "scientific randomization plan hash"
+        ),
+    }
+    if stage_code in MULTISEED_STAGE_CODES:
+        expected = {
+            "schema": "yeto_multiseed_runtime_authorization_v1",
+            **common,
+            "best_paper_v2_design_contract_hash": require_sha256(
+                design_contract_hash, "best-paper v2 design contract hash"
+            ),
+        }
+    else:
+        ceiling = require_finite(hard_ceiling_usd, "audit hard ceiling")
+        if ceiling <= 0.0:
+            raise LifecycleError("audit hard ceiling must be positive")
+        expected = {
+            "schema": "yeto_audit_135m_runtime_authorization_v1",
+            **common,
+            "audit_135m_design_contract_hash": require_sha256(
+                design_contract_hash, "audit-135m design contract hash"
+            ),
+            "hard_ceiling_usd": ceiling,
+            "spot_only": True,
+            "maximum_attached_a100_equivalent": 16,
+            "max_idle_before_science_seconds": 600,
+        }
+    if (
+        not isinstance(authorization, Mapping)
+        or set(authorization) != set(expected)
+        or any(authorization.get(key) != value for key, value in expected.items())
+    ):
+        raise LifecycleError(
+            "controlled execution lacks an exact runtime authorization"
+        )
+    return canonical_sha256(authorization)
+
+
+def learner_gpu_slot_map(learner_count: int, gpu_slots: int) -> dict[str, int]:
+    """Materialize the exact round-robin learner-to-local-GPU assignment."""
+
+    require_positive_int(learner_count, "learner count")
+    require_positive_int(gpu_slots, "GPU slot count")
+    return {
+        str(learner_id): learner_id % gpu_slots
+        for learner_id in range(learner_count)
+    }
 
 
 def wave_for_retry(
@@ -1355,6 +1838,11 @@ class VmPartialManifestController:
             "attempts": [],
             "partial_outcomes_exposed": False,
         }
+        if common_bindings.get("multiseed_runtime_authorization_hash") is not None:
+            header["multiseed_runtime_authorization_hash"] = require_sha256(
+                common_bindings.get("multiseed_runtime_authorization_hash"),
+                "multiseed runtime authorization hash",
+            )
         write_json_create_only(self.manifest_path, header)
 
     def _load_collecting(self) -> dict[str, Any]:
@@ -1669,28 +2157,64 @@ def _load_strict_object(path: Path, label: str) -> dict[str, Any]:
 
 def _expected_work_for_cell(cell: Mapping[str, Any]) -> dict[str, int]:
     h = int(_cell_field(cell, "h", "H"))
-    if h not in HORIZON_WORK:
-        raise EvidenceError(f"cell {cell.get('cell_id')} has unauthorized horizon H={h}")
     target = cell.get("target_work")
     if target is not None:
         target = _mapping(target, "scientific target work")
-        expected_target = {
-            "tokens": EXPECTED_TOKENS,
-            "microsteps": EXPECTED_MICROSTEPS,
-            "outer_steps": HORIZON_WORK[h]["outer_steps"],
-            "learner_count": 4,
-            "learner_steps_per_learner": EXPECTED_STEPS_PER_LEARNER,
+        learner_count = require_positive_int(
+            target.get("learner_count"), "scientific learner count"
+        )
+        learner_steps = require_positive_int(
+            target.get("learner_steps_per_learner"),
+            "scientific learner steps per learner",
+        )
+        tokens = require_positive_int(target.get("tokens"), "scientific tokens")
+        microsteps = require_positive_int(
+            target.get("microsteps"), "scientific microsteps"
+        )
+        outer_steps = require_positive_int(
+            target.get("outer_steps"), "scientific outer steps"
+        )
+        partial_registered = target.get("terminal_partial_window_registered") is True
+        partial_steps = target.get("terminal_partial_window_microsteps", 0)
+        if isinstance(partial_steps, bool) or not isinstance(partial_steps, int):
+            raise EvidenceError("terminal partial-window work is malformed")
+        full_windows, remainder = divmod(learner_steps, h)
+        expected_rounds = full_windows + bool(remainder)
+        if (
+            _cell_learner_count(cell) != learner_count
+            or (remainder and not partial_registered)
+            or (not remainder and partial_registered)
+            or partial_steps != remainder
+            or outer_steps != expected_rounds * FRAGMENT_COUNT
+            or outer_steps % FRAGMENT_COUNT
+            or microsteps != learner_count * learner_steps
+            or tokens % microsteps
+        ):
+            raise EvidenceError("scientific plan target work is not internally exact")
+        return {
+            "h": h,
+            "tokens": tokens,
+            "microsteps": microsteps,
+            "tokens_per_microstep": tokens // microsteps,
+            "outer_steps": outer_steps,
+            "per_fragment_outer_updates": outer_steps // FRAGMENT_COUNT,
+            "learner_count": learner_count,
+            "learner_steps_per_learner": learner_steps,
+            "terminal_partial_window_registered": partial_registered,
+            "terminal_partial_window_microsteps": partial_steps,
         }
-        if any(target.get(key) != value for key, value in expected_target.items()):
-            raise EvidenceError("scientific plan target work differs from Section 7")
+    if h not in HORIZON_WORK and h not in BEST_PAPER_V2_ARMS:
+        raise EvidenceError(f"cell {cell.get('cell_id')} has unauthorized horizon H={h}")
     return {
         "h": h,
         "tokens": EXPECTED_TOKENS,
         "microsteps": EXPECTED_MICROSTEPS,
+        "tokens_per_microstep": EXPECTED_TOKENS // EXPECTED_MICROSTEPS,
         "outer_steps": HORIZON_WORK[h]["outer_steps"],
         "per_fragment_outer_updates": HORIZON_WORK[h][
             "per_fragment_outer_updates"
         ],
+        "learner_count": len(EXPECTED_LEARNERS),
         "learner_steps_per_learner": EXPECTED_STEPS_PER_LEARNER,
     }
 
@@ -1772,15 +2296,20 @@ def _validate_attempt_start(
     parse_time(start.get("started_at_utc"), "attempt start evidence timestamp")
 
 
-def _validate_learner_steps(path: Path, expected_steps: int) -> None:
+def _validate_learner_steps(
+    path: Path, expected_steps: int, learner_count: int = 4
+) -> None:
     evidence = _load_strict_object(path, "learner step evidence")
     if evidence.get("schema") != "yeto_parallel_learner_steps_v1":
         raise EvidenceError("learner step evidence has the wrong schema")
     learners = _mapping(evidence.get("learners"), "learner step map")
-    if set(learners) != {str(value) for value in EXPECTED_LEARNERS}:
-        raise EvidenceError("learner IDs must be exactly {0,1,2,3}")
+    expected_learners = tuple(range(learner_count))
+    if set(learners) != {str(value) for value in expected_learners}:
+        raise EvidenceError(
+            f"learner IDs must be exactly 0..{learner_count - 1}"
+        )
     expected = list(range(1, expected_steps + 1))
-    for learner in EXPECTED_LEARNERS:
+    for learner in expected_learners:
         steps = _array(learners[str(learner)], f"learner {learner} steps")
         if steps != expected:
             raise EvidenceError(
@@ -1798,33 +2327,41 @@ def _validate_work_events(path: Path, expected: Mapping[str, int]) -> list[dict[
     fragments: Counter[int] = Counter()
     total_microsteps = 0
     total_tokens = 0
-    prior_fragment_commit = {fragment: 0 for fragment in range(4)}
+    prior_fragment_commit = {fragment: 0 for fragment in range(FRAGMENT_COUNT)}
     for outer_step, raw in enumerate(updates, 1):
         update = _mapping(raw, f"work update {outer_step}")
         fragment = update.get("fragment")
         if (
             update.get("outer_step") != outer_step
             or isinstance(fragment, bool)
-            or fragment not in range(4)
+            or fragment not in range(FRAGMENT_COUNT)
         ):
             raise EvidenceError("work updates are missing, reordered, or have an invalid fragment")
         fragments[int(fragment)] += 1
         responders = _array(update.get("responders"), f"work update {outer_step} responders")
-        if len(responders) != 4:
-            raise EvidenceError("work update lacks full four-learner quorum")
+        if len(responders) != expected["learner_count"]:
+            raise EvidenceError("work update lacks the exact full learner quorum")
         by_learner: dict[int, dict[str, Any]] = {}
+        per_fragment_index = fragments[int(fragment)]
+        expected_window_steps = (
+            int(expected["terminal_partial_window_microsteps"])
+            if expected.get("terminal_partial_window_registered")
+            and per_fragment_index == expected["per_fragment_outer_updates"]
+            else expected["h"]
+        )
         for raw_responder in responders:
             responder = _mapping(raw_responder, "work responder")
             learner_id = responder.get("learner_id")
             if (
                 isinstance(learner_id, bool)
-                or learner_id not in EXPECTED_LEARNERS
+                or learner_id not in range(expected["learner_count"])
                 or learner_id in by_learner
             ):
-                raise EvidenceError("work update responder IDs are not exactly 0..3")
+                raise EvidenceError("work update responder IDs do not match M")
             if (
-                responder.get("microsteps") != expected["h"]
-                or responder.get("tokens") != expected["h"] * 128
+                responder.get("microsteps") != expected_window_steps
+                or responder.get("tokens")
+                != expected_window_steps * expected["tokens_per_microstep"]
                 or responder.get("base_version") != prior_fragment_commit[int(fragment)]
                 or responder.get("version_matched_anchor") is not True
             ):
@@ -1834,24 +2371,32 @@ def _validate_work_events(path: Path, expected: Mapping[str, int]) -> list[dict[
             total_tokens += int(responder["tokens"])
         prior_fragment_commit[int(fragment)] = outer_step
     if fragments != Counter(
-        {fragment: expected["per_fragment_outer_updates"] for fragment in range(4)}
+        {
+            fragment: expected["per_fragment_outer_updates"]
+            for fragment in range(FRAGMENT_COUNT)
+        }
     ):
         raise EvidenceError("one or more fragments lack the exact registered update count")
-    if total_microsteps // 4 != expected["microsteps"]:
+    if total_microsteps // FRAGMENT_COUNT != expected["microsteps"]:
         raise EvidenceError("aggregate microsteps differ from the registered work")
-    if total_tokens // 4 != expected["tokens"]:
+    if total_tokens // FRAGMENT_COUNT != expected["tokens"]:
         raise EvidenceError("observed training tokens differ from the registered work")
     return updates
 
 
-def _validate_barrier_events(path: Path, updates: Sequence[Mapping[str, Any]]) -> None:
+def _validate_barrier_events(
+    path: Path,
+    updates: Sequence[Mapping[str, Any]],
+    learner_count: int = 4,
+) -> None:
     evidence = _load_strict_object(path, "barrier event evidence")
     if evidence.get("schema") != "yeto_parallel_barrier_events_v1":
         raise EvidenceError("barrier event evidence has the wrong schema")
     learners = _mapping(evidence.get("learners"), "barrier learner map")
-    if set(learners) != {str(value) for value in EXPECTED_LEARNERS}:
-        raise EvidenceError("barrier evidence learner IDs are not exactly 0..3")
-    for learner in EXPECTED_LEARNERS:
+    expected_learners = tuple(range(learner_count))
+    if set(learners) != {str(value) for value in expected_learners}:
+        raise EvidenceError("barrier evidence learner IDs do not match M")
+    for learner in expected_learners:
         row = _mapping(learners[str(learner)], f"barrier learner {learner}")
         if row.get("initial_fragments") != [0, 1, 2, 3]:
             raise EvidenceError("barrier evidence lacks the four initial broadcasts")
@@ -1964,16 +2509,25 @@ def _validate_finite_eval(
         raise EvidenceError("per-sequence losses do not reproduce the endpoint")
 
 
-def _validate_results(path: Path, expected_loss: Any) -> float:
+def _validate_results(
+    path: Path,
+    expected_loss: Any,
+    *,
+    learner_count: int = 4,
+) -> float:
     result = _load_strict_object(path, "cell result evidence")
-    if result.get("schema") != "yeto_parallel_cell_result_v1" or result.get("arm") != "m4":
+    arm_name = f"m{learner_count}"
+    if (
+        result.get("schema") != "yeto_parallel_cell_result_v1"
+        or result.get("arm") != arm_name
+    ):
         raise EvidenceError("cell result evidence has the wrong schema/arm")
     if (
         result.get("runner_exit_code") != 0
         or result.get("syncer_exit_code") != 0
-        or result.get("learner_exit_codes") != [0, 0, 0, 0]
+        or result.get("learner_exit_codes") != [0] * learner_count
     ):
-        raise EvidenceError("runner, syncer, and all four learners must exit zero")
+        raise EvidenceError("runner, syncer, and every configured learner must exit zero")
     endpoint = require_finite(result.get("eval_loss"), "development endpoint")
     row_loss = require_finite(expected_loss, "partial-manifest development endpoint")
     if not math.isclose(endpoint, row_loss, rel_tol=0.0, abs_tol=0.0):
@@ -2103,9 +2657,15 @@ def validate_completed_attempt_work(
         ),
     )
     expected = _expected_work_for_cell(cell)
-    _validate_learner_steps(inventory["learner_steps"], expected["learner_steps_per_learner"])
+    _validate_learner_steps(
+        inventory["learner_steps"],
+        expected["learner_steps_per_learner"],
+        expected["learner_count"],
+    )
     updates = _validate_work_events(inventory["work_events"], expected)
-    _validate_barrier_events(inventory["barrier_events"], updates)
+    _validate_barrier_events(
+        inventory["barrier_events"], updates, expected["learner_count"]
+    )
 
     if stage_code == "p3t":
         result = _load_strict_object(inventory["results"], "P3 result evidence")
@@ -2131,7 +2691,11 @@ def validate_completed_attempt_work(
             "checkpoint_sha256": sha256_file(inventory["final_checkpoint"]),
         }
 
-    endpoint = _validate_results(inventory["results"], row.get("loss"))
+    endpoint = _validate_results(
+        inventory["results"],
+        row.get("loss"),
+        learner_count=expected["learner_count"],
+    )
     seed_key = str(cell["seed"])
     eval_entry = _mapping(
         evaluation_registry.get(seed_key), f"evaluation registry seed {seed_key}"
@@ -2148,9 +2712,10 @@ def validate_completed_attempt_work(
         evaluation_binding=eval_entry,
     )
     return {
-        "tokens": EXPECTED_TOKENS,
-        "microsteps": EXPECTED_MICROSTEPS,
-        "learner_steps_per_learner": EXPECTED_STEPS_PER_LEARNER,
+        "tokens": expected["tokens"],
+        "microsteps": expected["microsteps"],
+        "learner_count": expected["learner_count"],
+        "learner_steps_per_learner": expected["learner_steps_per_learner"],
         "loss": endpoint,
     }
 
@@ -2496,6 +3061,39 @@ def validate_attempt_schedule(
             ]
             if actual_projection != expected_projection:
                 raise ScheduleError("manual slot swap, dispatch reorder, or mixed group detected")
+            if str(roster.get("stage_code")) in CONTROLLED_STAGE_CODES:
+                if len({row.get("machine_type") for row in rows}) != 1 or len(
+                    {row.get("gpu_slots") for row in rows}
+                ) != 1:
+                    raise ScheduleError(
+                        "paired seed block does not use one hardware/GPU packing profile"
+                    )
+                if len({row.get("pairing_identity_hash") for row in rows}) != 1:
+                    raise ScheduleError("paired seed block identity differs across arms")
+                packing_maps = set()
+                for row in rows:
+                    learner_count = require_positive_int(
+                        row.get("m"), "attempt learner count"
+                    )
+                    gpu_slots = require_positive_int(
+                        row.get("gpu_slots"), "attempt GPU slots"
+                    )
+                    expected_gpu_map = learner_gpu_slot_map(
+                        learner_count, gpu_slots
+                    )
+                    if (
+                        row.get("learner_gpu_slot_map") != expected_gpu_map
+                        or row.get("maximum_learners_per_gpu")
+                        != max(Counter(expected_gpu_map.values()).values())
+                    ):
+                        raise ScheduleError(
+                            "paired seed block has an invalid learner/GPU packing map"
+                        )
+                    packing_maps.add(canonical_json(expected_gpu_map))
+                if len(packing_maps) != 1:
+                    raise ScheduleError(
+                        "paired seed block does not share one learner/GPU packing map"
+                    )
             if any(
                 row.get("group_id") != group_id
                 or row.get("time_block_index") != planned_wave["time_block_index"]
@@ -2599,6 +3197,14 @@ def validate_attempt_schedule(
                     "group_id": group_id,
                     "retry_round": retry_round,
                 }
+                if str(roster.get("stage_code")) in CONTROLLED_STAGE_CODES:
+                    final_analysis[str(row["cell_id"])].update(
+                        {
+                            "analysis_loss": row.get("analysis_loss"),
+                            "analysis_loss_kind": row.get("analysis_loss_kind"),
+                            "divergence_retained": row.get("divergence_retained"),
+                        }
+                    )
             break
     if actual_index != len(by_wave):
         raise ScheduleError("attempt registry contains an extra or reordered wave")
@@ -2614,7 +3220,7 @@ def _validate_inherited_prefix(
     parent_manifest: Mapping[str, Any],
     bound_manifest: Mapping[str, Any],
 ) -> None:
-    if stage_code == "p1r0":
+    if stage_code == "p1r0" or stage_code in MULTISEED_STAGE_CODES:
         return
     parent_cells = _array(parent_manifest.get("expected_cells"), "parent expected cells")
     child_cells = _array(bound_manifest.get("expected_cells"), "child expected cells")
@@ -2639,6 +3245,7 @@ class CampaignBundle:
     final_provider_census: Mapping[str, Any]
     campaign_attempt: int
     campaign_root: Path
+    runtime_authorization: Mapping[str, Any] | None = None
 
 
 class CampaignAggregator:
@@ -2654,6 +3261,22 @@ class CampaignAggregator:
         self.scientific_digest = require_sha256(
             bundle.scientific_plan.get("randomization_plan_hash"),
             "scientific randomization plan hash",
+        )
+        self.divergence_loss_cap = multiseed_analysis_loss_cap(
+            bundle.stage_code, bundle.bound_manifest
+        )
+        self.runtime_authorization_hash = multiseed_runtime_authorization_hash(
+            stage_code=bundle.stage_code,
+            design_contract_hash=(
+                bundle.roster.get("best_paper_v2_design_contract_hash")
+                or bundle.roster.get("audit_135m_design_contract_hash")
+            ),
+            roster_digest=self.roster_digest,
+            parallel_digest=self.parallel_digest,
+            bound_digest=self.bound_digest,
+            scientific_digest=self.scientific_digest,
+            authorization=bundle.runtime_authorization,
+            hard_ceiling_usd=bundle.roster.get("hard_ceiling_usd"),
         )
 
     def _verify_common_bindings(self) -> None:
@@ -2842,6 +3465,10 @@ class CampaignAggregator:
                 "scientific_randomization_plan_hash": self.scientific_digest,
                 "partial_outcomes_exposed": False,
             }
+            if self.runtime_authorization_hash is not None:
+                expected_partial["multiseed_runtime_authorization_hash"] = (
+                    self.runtime_authorization_hash
+                )
             if partial.get("status") == "sealed_results":
                 raise LifecycleError("VM partial manifest may not masquerade as sealed_results")
             if any(partial.get(key) != value for key, value in expected_partial.items()):
@@ -2974,6 +3601,26 @@ class CampaignAggregator:
                 report = {"infrastructure_failure": row["failure_reason"]}
             else:
                 raise EvidenceError("FAILED attempt blocks a campaign seal")
+            if self.divergence_loss_cap is not None and status in (
+                "COMPLETED",
+                "DIVERGED",
+            ):
+                expected_analysis = multiseed_analysis_outcome_fields(
+                    status=str(status),
+                    loss=None if status == "DIVERGED" else report.get("loss"),
+                    divergence_loss_cap=self.divergence_loss_cap,
+                )
+                if (
+                    row.get("analysis_loss") != expected_analysis["analysis_loss"]
+                    or row.get("analysis_loss_kind")
+                    != expected_analysis["analysis_loss_kind"]
+                    or row.get("divergence_retained")
+                    is not expected_analysis["divergence_retained"]
+                ):
+                    raise EvidenceError(
+                        "multiseed analysis row does not retain the exact capped-loss policy"
+                    )
+                report = {**report, **expected_analysis}
             work_reports.append(
                 {"attempt_id": row["attempt_id"], "status": status, "report": report}
             )
@@ -3045,6 +3692,17 @@ class CampaignAggregator:
         }
         if checkpoint_registry is not None:
             manifest["p3_checkpoint_registry"] = checkpoint_registry
+        if self.runtime_authorization_hash is not None:
+            manifest.update(
+                {
+                    "multiseed_runtime_authorization_hash": (
+                        self.runtime_authorization_hash
+                    ),
+                    "analysis_policy": deepcopy(
+                        dict(self.bundle.bound_manifest["analysis_policy"])
+                    ),
+                }
+            )
         manifest_hash = canonical_sha256(manifest)
         vm_registry_hash = canonical_sha256(canonical_vm_registry)
         bound_rows, _bound_by_id = _bound_cells(self.bundle.bound_manifest)
@@ -3077,6 +3735,17 @@ class CampaignAggregator:
             "partial_outcomes_exposed": False,
             "sealed_at_utc": seal_time,
         }
+        if self.runtime_authorization_hash is not None:
+            seal.update(
+                {
+                    "multiseed_runtime_authorization_hash": (
+                        self.runtime_authorization_hash
+                    ),
+                    "analysis_policy_canonical_sha256": canonical_sha256(
+                        self.bundle.bound_manifest["analysis_policy"]
+                    ),
+                }
+            )
         expected_seal_fields = {
             "schema",
             "status",
@@ -3103,6 +3772,13 @@ class CampaignAggregator:
             "partial_outcomes_exposed",
             "sealed_at_utc",
         }
+        if self.runtime_authorization_hash is not None:
+            expected_seal_fields.update(
+                {
+                    "multiseed_runtime_authorization_hash",
+                    "analysis_policy_canonical_sha256",
+                }
+            )
         if set(seal) != expected_seal_fields:
             raise AssertionError("campaign seal field set drifted")
         return manifest, seal
@@ -3134,6 +3810,11 @@ class DispatchRequest:
     batch_launch_order_index: int
     launch_order_index: int
     attempt_prefix: str
+    learner_count: int
+    quorum: int
+    gpu_slots: int
+    learner_gpu_slot_map: Mapping[str, int]
+    pairing_identity_hash: str | None
     command: tuple[str, ...]
     command_hash: str
     fresh_start: Mapping[str, Any]
@@ -3187,6 +3868,7 @@ class ParallelWaveExecutor:
         campaign_root: Path,
         backend: ParallelExecutionBackend,
         available_slots: Sequence[str] | None = None,
+        runtime_authorization: Mapping[str, Any] | None = None,
         clock: Callable[[], str] = utc_now,
     ) -> None:
         self.roster = roster
@@ -3209,6 +3891,23 @@ class ParallelWaveExecutor:
         )
         if registry.roster_hash != self.roster_digest:
             raise LifecycleError("execution registry is bound to a different roster")
+        stage_code = str(roster.get("stage_code"))
+        self.divergence_loss_cap = multiseed_analysis_loss_cap(
+            stage_code, bound_manifest
+        )
+        self.runtime_authorization_hash = multiseed_runtime_authorization_hash(
+            stage_code=stage_code,
+            design_contract_hash=(
+                roster.get("best_paper_v2_design_contract_hash")
+                or roster.get("audit_135m_design_contract_hash")
+            ),
+            roster_digest=self.roster_digest,
+            parallel_digest=self.parallel_digest,
+            bound_digest=self.bound_digest,
+            scientific_digest=self.scientific_digest,
+            authorization=runtime_authorization,
+            hard_ceiling_usd=roster.get("hard_ceiling_usd"),
+        )
         self.active: dict[str, GenerationIdentity] = {}
         self.providers: dict[tuple[str, int], dict[str, Any]] = {}
         self.partials: dict[tuple[str, int], VmPartialManifestController] = {}
@@ -3222,6 +3921,11 @@ class ParallelWaveExecutor:
             "bound_manifest_canonical_sha256": self.bound_digest,
             "scientific_randomization_plan_hash": self.scientific_digest,
             "amendment_raw_sha256": AMENDMENT_RAW_SHA256,
+            **(
+                {"multiseed_runtime_authorization_hash": self.runtime_authorization_hash}
+                if self.runtime_authorization_hash is not None
+                else {}
+            ),
         }
 
     def _assert_capacity_census(self) -> Mapping[str, Any]:
@@ -3335,6 +4039,31 @@ class ParallelWaveExecutor:
             "prior_result_used": False,
         }
 
+    def _paired_available_slots(
+        self, *, group_id: str, retry_round: int
+    ) -> tuple[str, ...]:
+        """Choose one deterministic shape-homogeneous slot set for a seed block."""
+
+        slots = tuple(sorted(self.active))
+        if str(self.roster.get("stage_code")) not in CONTROLLED_STAGE_CODES:
+            return slots
+        by_shape: dict[str, list[str]] = defaultdict(list)
+        for slot in slots:
+            identity = self.active[slot]
+            provider = self.providers[(slot, identity.generation)]
+            by_shape[str(provider["machine_type"])].append(slot)
+        maximum_width = max(len(shape_slots) for shape_slots in by_shape.values())
+        candidates = [
+            f"{shape}|{','.join(sorted(shape_slots))}"
+            for shape, shape_slots in by_shape.items()
+            if len(shape_slots) == maximum_width
+        ]
+        domain = f"paired-shape|{group_id}|{retry_round}"
+        selected = rank_order(candidates, domain, str(self.roster["study_id"]))[0]
+        _shape, _separator, slot_text = selected.partition("|")
+        selected_slots = tuple(slot_text.split(","))
+        return _normalize_available_slots(selected_slots)
+
     def _execute_wave(
         self,
         *,
@@ -3344,12 +4073,15 @@ class ParallelWaveExecutor:
         prior_rows: Sequence[Mapping[str, Any]] | None,
     ) -> list[dict[str, Any]]:
         self._assert_capacity_census()
+        paired_slots = self._paired_available_slots(
+            group_id=str(planned_wave["group_id"]), retry_round=retry_round
+        )
         wave = wave_for_retry(
             self.plan,
             self.roster,
             str(planned_wave["group_id"]),
             retry_round,
-            available_slots=tuple(sorted(self.active)),
+            available_slots=paired_slots,
         )
         requests: list[tuple[GenerationIdentity, DispatchRequest]] = []
         prior_by_cell = (
@@ -3364,6 +4096,9 @@ class ParallelWaveExecutor:
                 raise LifecycleError(f"wave assignment {slot} has no READY generation")
             cell_id = str(assignment["cell_id"])
             scientific = self._scientific_by_id[cell_id]
+            provider = self.providers[(slot, identity.generation)]
+            shape = machine_shape_contract(provider["machine_type"])
+            learner_count = _cell_learner_count(scientific)
             prior = prior_by_cell.get(cell_id)
             if prior is None:
                 retry_of = retry_reason = None
@@ -3399,6 +4134,18 @@ class ParallelWaveExecutor:
                 ),
                 launch_order_index=int(assignment["launch_order_index"]),
                 attempt_prefix=identity.attempt_prefix(cell_id, retry_round),
+                learner_count=learner_count,
+                quorum=int(
+                    _mapping(
+                        scientific.get("target_work"),
+                        f"scientific cell {cell_id} target work",
+                    ).get("quorum", _cell_learner_count(scientific))
+                ),
+                gpu_slots=shape["gpu_slots"],
+                learner_gpu_slot_map=learner_gpu_slot_map(
+                    learner_count, shape["gpu_slots"]
+                ),
+                pairing_identity_hash=scientific.get("pairing_identity_hash"),
                 command=tuple(scientific["command"]),
                 command_hash=str(scientific["command_hash"]),
                 fresh_start=self._fresh_start(),
@@ -3447,6 +4194,33 @@ class ParallelWaveExecutor:
                 "failure_reason"
             ) not in DIRECT_INFRASTRUCTURE_FAILURE_REASONS:
                 raise ScheduleError("backend returned a non-direct infrastructure reason")
+            if self.divergence_loss_cap is not None and status in (
+                "COMPLETED",
+                "DIVERGED",
+            ):
+                expected_analysis = multiseed_analysis_outcome_fields(
+                    status=str(status),
+                    loss=outcome.get("loss"),
+                    divergence_loss_cap=self.divergence_loss_cap,
+                )
+                if outcome.get("analysis_loss") not in (
+                    None,
+                    expected_analysis["analysis_loss"],
+                ) or outcome.get("analysis_loss_kind") not in (
+                    None,
+                    expected_analysis["analysis_loss_kind"],
+                ):
+                    raise ScheduleError(
+                        "backend returned an analysis value outside the frozen multiseed policy"
+                    )
+                if outcome.get("divergence_retained") not in (
+                    None,
+                    expected_analysis["divergence_retained"],
+                ):
+                    raise ScheduleError(
+                        "backend attempted to change multiseed divergence retention"
+                    )
+                outcome.update(expected_analysis)
             provider = self.providers[(identity.slot, identity.generation)]
             provider_hash = sha256_file(
                 self._local_vm_root(identity)
@@ -3455,6 +4229,16 @@ class ParallelWaveExecutor:
             )
             machine_type = provider["machine_type"]
             shape = machine_shape_contract(machine_type)
+            expected_gpu_map = learner_gpu_slot_map(
+                request.learner_count, shape["gpu_slots"]
+            )
+            if (
+                request.gpu_slots != shape["gpu_slots"]
+                or dict(request.learner_gpu_slot_map) != expected_gpu_map
+            ):
+                raise ScheduleError(
+                    "dispatch request learner/GPU packing differs from the landed shape"
+                )
             projected_command = project_scientific_command_for_machine_type(
                 request.command, machine_type
             )
@@ -3481,6 +4265,13 @@ class ParallelWaveExecutor:
                 "instance_numeric_id": provider["instance_numeric_id"],
                 "provider_evidence_sha256": provider_hash,
                 "attempt_prefix": request.attempt_prefix,
+                "m": request.learner_count,
+                "quorum": request.quorum,
+                "learner_gpu_slot_map": expected_gpu_map,
+                "maximum_learners_per_gpu": max(
+                    Counter(expected_gpu_map.values()).values()
+                ),
+                "pairing_identity_hash": request.pairing_identity_hash,
                 "frozen_command_hash": request.command_hash,
                 "executed_command_hash": canonical_sha256(projected_command),
                 "normalized_workload_command_hash": canonical_sha256(
@@ -3503,6 +4294,19 @@ class ParallelWaveExecutor:
             rows.append(row)
 
         rows.sort(key=lambda row: int(row["launch_order_index"]))
+        if str(self.roster.get("stage_code")) in CONTROLLED_STAGE_CODES:
+            if len({row["machine_type"] for row in rows}) != 1 or len(
+                {row["gpu_slots"] for row in rows}
+            ) != 1:
+                raise ScheduleError(
+                    "paired seed block mixed machine shapes or GPU-slot allocations"
+                )
+            if len({row.get("pairing_identity_hash") for row in rows}) != 1:
+                raise ScheduleError("paired seed block mixed pairing identities")
+            if len(
+                {canonical_json(row.get("learner_gpu_slot_map")) for row in rows}
+            ) != 1:
+                raise ScheduleError("paired seed block mixed learner/GPU packing maps")
         terminal_time = parse_time(
             terminal_prefix_sealed_at, "wave terminal-prefix seal time"
         )
@@ -3657,6 +4461,57 @@ def bind_campaign_inputs(
             for slot in LOGICAL_SLOTS
         },
     }
+    if stage_code in MULTISEED_STAGE_CODES:
+        materialization.update(
+            {
+                "launch_authorized": False,
+                "best_paper_v2_design_contract_hash": roster[
+                    "best_paper_v2_design_contract_hash"
+                ],
+                "runtime_authorization_required_fields": {
+                    "schema": "yeto_multiseed_runtime_authorization_v1",
+                    "launch_authorized": True,
+                    "stage_code": stage_code,
+                    "best_paper_v2_design_contract_hash": roster[
+                        "best_paper_v2_design_contract_hash"
+                    ],
+                    "roster_hash": digest,
+                    "parallel_plan_hash": plan_digest,
+                    "bound_manifest_canonical_sha256": canonical_sha256(bound),
+                    "scientific_randomization_plan_hash": scientific[
+                        "randomization_plan_hash"
+                    ],
+                },
+            }
+        )
+    elif stage_code in AUDIT_135M_STAGE_CODES:
+        materialization.update(
+            {
+                "launch_authorized": False,
+                "audit_135m_design_contract_hash": roster[
+                    "audit_135m_design_contract_hash"
+                ],
+                "hard_ceiling_usd": roster["hard_ceiling_usd"],
+                "runtime_authorization_required_fields": {
+                    "schema": "yeto_audit_135m_runtime_authorization_v1",
+                    "launch_authorized": True,
+                    "stage_code": stage_code,
+                    "audit_135m_design_contract_hash": roster[
+                        "audit_135m_design_contract_hash"
+                    ],
+                    "roster_hash": digest,
+                    "parallel_plan_hash": plan_digest,
+                    "bound_manifest_canonical_sha256": canonical_sha256(bound),
+                    "scientific_randomization_plan_hash": scientific[
+                        "randomization_plan_hash"
+                    ],
+                    "hard_ceiling_usd": roster["hard_ceiling_usd"],
+                    "spot_only": True,
+                    "maximum_attached_a100_equivalent": 16,
+                    "max_idle_before_science_seconds": 600,
+                },
+            }
+        )
     write_json_create_only(output_dir / "parallel-binding.json", materialization)
     return materialization
 
@@ -3702,6 +4557,11 @@ def aggregate_from_descriptor(
         ),
         campaign_root=_resolve_descriptor_path(
             descriptor_path, descriptor.get("campaign_root"), "campaign_root"
+        ),
+        runtime_authorization=(
+            object_from("runtime_authorization")
+            if descriptor.get("runtime_authorization") is not None
+            else None
         ),
     )
     aggregator = CampaignAggregator(bundle)

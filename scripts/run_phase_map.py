@@ -40,6 +40,17 @@ ADOPTED_PARALLEL_AMENDMENT_PATH = Path("docs/AMENDMENT-parallel-cells.md")
 ADOPTED_PARALLEL_AMENDMENT_SHA256 = (
     "e2c87fd6c2ec0e4b91f488b5771334e0befd175560a3e2ccfcf349be1ee8b3dd"
 )
+# Exact, committed pre-outcome revisions of the same adopted amendment.  The
+# replay attestation remains pinned to the original adopted hash above, while a
+# later descendant checkout may contain only one of these reviewed revisions.
+ADOPTED_PARALLEL_AMENDMENT_REVISION_SHA256S = frozenset(
+    {
+        ADOPTED_PARALLEL_AMENDMENT_SHA256,
+        "8e9c23dd9306672a2165b060dfea277f5c6adc9796014039e1e1d3759f2334df",
+        "33781ad5d4deb29120a2d41f3ccbe2937a5945b97db6400ff1690abeceb520f7",
+        "33d2bca5e00737145c7996c236f9f3face255216608c7c8b635a18cdb0fc2542",
+    }
+)
 P0A_SOURCE_REBIND_FROM_COMMIT = "0af7f4a80426babc14896c7c1f7885abcb331d46"
 P0B_REPLAY_SOURCE_REBIND_FROM_COMMIT = (
     "8d58208cacafef12cb95f2642b4fa700531151b4"
@@ -59,6 +70,34 @@ DIRECT_INFRASTRUCTURE_FAILURE_REASONS = frozenset(
     }
 )
 PEER_BLOCK_RETRY_REASON = "peer_block_invalidated_by_infra_failure"
+FRAGMENT_COUNT = 4
+SUPPORTED_LEARNER_COUNTS = (1, 4, 16)
+BEST_PAPER_V2_HORIZONS = (16, 256)
+BEST_PAPER_V2_FRESH_SEED_PAIRS = (
+    (383, 383383),
+    (397, 397397),
+    (409, 409409),
+    (421, 421421),
+    (433, 433433),
+    (443, 443443),
+    (457, 457457),
+    (461, 461461),
+)
+# Frozen from the "winning eta" column of P1-ADAPTIVE-FINAL.md.  Each
+# confirmation block contains the independently tuned memoryless arm, the
+# independently tuned mu=.9 arm, and mu=.9 at the memoryless arm's eta.
+BEST_PAPER_V2_TUNED_ETAS = {
+    16: {0.0: 0.021875, 0.9: 0.002734375},
+    256: {0.0: 0.04375, 0.9: 0.0109375},
+}
+BEST_PAPER_V2_STUDY_PHASE_ALIASES = {
+    "e1": "e1",
+    "e1_multiseed": "e1",
+    "best_paper_v2_e1": "e1",
+    "e4": "e4",
+    "e4_multiseed": "e4",
+    "best_paper_v2_e4": "e4",
+}
 
 
 class PhaseMapError(RuntimeError):
@@ -131,8 +170,34 @@ def enforce_stage_design(args: argparse.Namespace, template: dict[str, Any]) -> 
             raise PhaseMapError(
                 f"{field}={getattr(args, field)!r} differs from authority {expected!r}"
             )
+    multiseed_design = validate_multiseed_design(args)
+    if multiseed_design is not None:
+        if sorted(set(args.mu)) != [0.0, 0.9]:
+            raise PhaseMapError("best-paper v2 E1/E4 requires declared mu={0,.9}")
+        expected_eta = sorted(
+            {
+                eta
+                for arms in best_paper_v2_arms().values()
+                for _mu, eta in arms
+            }
+        )
+        if sorted(set(args.eta)) != expected_eta:
+            raise PhaseMapError(
+                "best-paper v2 E1/E4 --eta must equal the frozen tuned-eta union"
+            )
+        if args.gpu_slots != 4 or args.resource_class != "a2-highgpu-4g":
+            raise PhaseMapError(
+                "best-paper v2 plans freeze gpu_slots=4 before shape projection"
+            )
+        if args.require_distinct_learner_gpu_uuids:
+            raise PhaseMapError(
+                "best-paper v2 E1/E4 does not use the M=4-only P0b UUID canary flag"
+            )
+        return f"best_paper_v2_{multiseed_design}_paired_blocks"
     if sorted(args.mu) != [0.0, 0.5, 0.9]:
-        raise PhaseMapError("every authorized stage requires mu={0,.5,.9}")
+        raise PhaseMapError("every legacy authorized stage requires mu={0,.5,.9}")
+    if sorted(set(getattr(args, "learner_counts", [4]))) != [4]:
+        raise PhaseMapError("legacy authority-bound phase-map stages require M=4")
     seed_pairs = stage_seed_pairs(args)
     if args.study_phase in ("p0a_canary", "p0b_canary"):
         stage_name = "p0a" if args.study_phase == "p0a_canary" else "p0b"
@@ -258,16 +323,114 @@ def enforce_stage_design(args: argparse.Namespace, template: dict[str, Any]) -> 
 
 def stage_seed_pairs(args: argparse.Namespace) -> list[tuple[int, int]]:
     """Return the ordered seed pairs declared by one stage invocation."""
+    explicit_pairs = list(getattr(args, "seed_pair", []))
     extra_seeds = list(getattr(args, "additional_seed", []))
     extra_training = list(getattr(args, "additional_training_seed", []))
+    primary_seed = getattr(args, "seed", None)
+    primary_training = getattr(args, "training_seed", None)
+    if explicit_pairs:
+        if (
+            primary_seed is not None
+            or primary_training is not None
+            or extra_seeds
+            or extra_training
+        ):
+            raise PhaseMapError(
+                "--seed-pair is mutually exclusive with --seed/--training-seed "
+                "and --additional-* seeds"
+            )
+        pairs = explicit_pairs
+        if len({seed for seed, _training in pairs}) != len(pairs):
+            raise PhaseMapError("stage seed pairs contain a duplicate shuffle seed")
+        return pairs
+    if (primary_seed is None) != (primary_training is None):
+        raise PhaseMapError("--seed and --training-seed must be supplied together")
+    if primary_seed is None:
+        raise PhaseMapError("stage requires at least one shuffle/training seed pair")
     if len(extra_seeds) != len(extra_training):
         raise PhaseMapError(
             "--additional-seed and --additional-training-seed counts must match"
         )
-    pairs = [(args.seed, args.training_seed), *zip(extra_seeds, extra_training)]
+    pairs = [(primary_seed, primary_training), *zip(extra_seeds, extra_training)]
     if len({seed for seed, _training in pairs}) != len(pairs):
         raise PhaseMapError("stage seed pairs contain a duplicate shuffle seed")
     return pairs
+
+
+def primary_seed_pair(args: argparse.Namespace) -> tuple[int, int]:
+    return stage_seed_pairs(args)[0]
+
+
+def multiseed_design_name(args: argparse.Namespace) -> str | None:
+    explicit = getattr(args, "multiseed_design", None)
+    inferred = BEST_PAPER_V2_STUDY_PHASE_ALIASES.get(
+        str(getattr(args, "study_phase", ""))
+    )
+    if explicit is not None and inferred is not None and explicit != inferred:
+        raise PhaseMapError(
+            "--multiseed-design conflicts with the --study-phase E1/E4 alias"
+        )
+    return explicit or inferred
+
+
+def best_paper_v2_arms() -> dict[int, tuple[tuple[float, float], ...]]:
+    return {
+        h: (
+            (0.0, BEST_PAPER_V2_TUNED_ETAS[h][0.0]),
+            (0.9, BEST_PAPER_V2_TUNED_ETAS[h][0.9]),
+            (0.9, BEST_PAPER_V2_TUNED_ETAS[h][0.0]),
+        )
+        for h in BEST_PAPER_V2_HORIZONS
+    }
+
+
+def explicit_block_arms(
+    args: argparse.Namespace,
+) -> dict[int, tuple[tuple[float, float], ...]] | None:
+    """Return explicit per-H treatment tuples, preserving declared order."""
+
+    declared: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    for h, mu, eta in getattr(args, "block_arm", []):
+        declared[h].append((mu, eta))
+    design = multiseed_design_name(args)
+    frozen = best_paper_v2_arms() if design is not None else None
+    if declared:
+        normalized = {h: tuple(arms) for h, arms in declared.items()}
+        if frozen is not None:
+            if set(normalized) != set(frozen) or any(
+                len(normalized[h]) != len(frozen[h])
+                or set(normalized[h]) != set(frozen[h])
+                for h in frozen
+            ):
+                raise PhaseMapError(
+                    "best-paper v2 block arms differ from the frozen tuned E1/E4 tuples"
+                )
+            return frozen
+        return normalized
+    return frozen
+
+
+def validate_multiseed_design(args: argparse.Namespace) -> str | None:
+    design = multiseed_design_name(args)
+    if design is None:
+        return None
+    seed_pairs = stage_seed_pairs(args)
+    if tuple(seed_pairs) != BEST_PAPER_V2_FRESH_SEED_PAIRS:
+        raise PhaseMapError(
+            "best-paper v2 E1/E4 requires the eight frozen fresh seed pairs"
+        )
+    if tuple(sorted(set(args.h))) != BEST_PAPER_V2_HORIZONS:
+        raise PhaseMapError("best-paper v2 E1/E4 requires H={16,256}")
+    learner_counts = sorted(set(getattr(args, "learner_counts", [4])))
+    required = [4] if design == "e1" else [1, 16]
+    if learner_counts != required:
+        raise PhaseMapError(
+            f"best-paper v2 {design.upper()} requires M={{{','.join(map(str, required))}}}"
+        )
+    arms = explicit_block_arms(args)
+    if arms != best_paper_v2_arms():
+        raise PhaseMapError("best-paper v2 E1/E4 lacks the frozen explicit arm tuples")
+    return design
 
 
 def json_pointer(value: Any, pointer: str) -> Any:
@@ -346,7 +509,7 @@ def authorize_p0b_source_rebind(
     if (
         amendment.returncode != 0
         or hashlib.sha256(amendment.stdout).hexdigest()
-        != ADOPTED_PARALLEL_AMENDMENT_SHA256
+        not in ADOPTED_PARALLEL_AMENDMENT_REVISION_SHA256S
     ):
         raise PhaseMapError("P0b source rebind lacks the exact adopted amendment")
     return True
@@ -964,6 +1127,45 @@ def parse_floats(value: str) -> list[float]:
     return result
 
 
+def parse_seed_pair(value: str) -> tuple[int, int]:
+    """Parse one first-class paired ``SHUFFLE:TRAINING`` seed block."""
+
+    left, separator, right = value.partition(":")
+    if not separator:
+        left, separator, right = value.partition("=")
+    try:
+        shuffle_seed = int(left)
+        training_seed = int(right)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "expected positive SHUFFLE_SEED:TRAINING_SEED"
+        ) from exc
+    if not separator or shuffle_seed <= 0 or training_seed <= 0:
+        raise argparse.ArgumentTypeError(
+            "expected positive SHUFFLE_SEED:TRAINING_SEED"
+        )
+    return shuffle_seed, training_seed
+
+
+def parse_block_arm(value: str) -> tuple[int, float, float]:
+    """Parse one explicit ``H:MU:ETA`` member of an atomic seed block."""
+
+    parts = [part.strip() for part in re.split(r"[:,@]", value)]
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError("expected H:MU:ETA")
+    try:
+        h = int(parts[0])
+        mu = float(parts[1])
+        eta = float(parts[2])
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected H:MU:ETA") from exc
+    if h <= 0 or not math.isfinite(mu) or not math.isfinite(eta) or mu < 0 or eta < 0:
+        raise argparse.ArgumentTypeError(
+            "H must be positive and MU/ETA finite and non-negative"
+        )
+    return h, mu, eta
+
+
 def parse_seed_sha256(value: str) -> tuple[int, str]:
     raw_seed, separator, digest = value.partition("=")
     try:
@@ -1026,11 +1228,18 @@ def validate_frozen_retry_policy(policy: Any) -> dict[str, Any]:
     return policy
 
 
-def semantics(args: argparse.Namespace) -> dict[str, Any]:
+def semantics(
+    args: argparse.Namespace, learner_count: int | None = None
+) -> dict[str, Any]:
+    learner_count = (
+        sorted(set(getattr(args, "learner_counts", [4])))[0]
+        if learner_count is None
+        else learner_count
+    )
     return {
         "tuning": "full",
-        "learners": 4,
-        "fragments": 4,
+        "learners": learner_count,
+        "fragments": FRAGMENT_COUNT,
         "inner_optimizer": "adamw",
         "inner_lr": args.inner_lr,
         "outer_optimizer": "nesterov",
@@ -1044,27 +1253,50 @@ def semantics(args: argparse.Namespace) -> dict[str, Any]:
         "syncer_dtype": "f32",
         "fixed_window": True,
         "pad_to_fixed_window_tokens": True,
-        "learner_push_delay_ms": [0, 0, 0, 0],
+        "learner_push_delay_ms": [0] * learner_count,
         "learner_delay_jitter_ms": 0,
         "seq_len": args.seq_len,
         "micro_batch_size": args.micro_batch_size,
     }
 
 
-def cell_id(study_id: str, h: int, mu: float, eta: float, seed: int) -> str:
+def cell_id(
+    study_id: str,
+    h: int,
+    mu: float,
+    eta: float,
+    seed: int,
+    learner_count: int = 4,
+    *,
+    include_m: bool = False,
+) -> str:
+    m_slug = f"-m{learner_count}" if include_m else ""
     return (
-        f"{study_id}-h{h}-mu{slug_float(mu)}-eta{slug_float(eta)}-s{seed}"
+        f"{study_id}-h{h}{m_slug}-mu{slug_float(mu)}-eta{slug_float(eta)}-s{seed}"
     )
 
 
-def exact_learner_max_steps(args: argparse.Namespace) -> int:
+def exact_learner_max_steps(
+    args: argparse.Namespace, learner_count: int | None = None
+) -> int:
     """Derive the immutable per-learner physical-step ceiling.
 
-    Four learners jointly consume the registered token budget.  The ceiling
+    All learners jointly consume the registered token budget.  The ceiling
     is derived here rather than accepted from a caller so receiver scheduling
     after the final broadcast cannot permit an extra local optimizer step.
     """
-    denominator = 4 * args.micro_batch_size * args.seq_len
+    if learner_count is None:
+        counts = sorted(set(getattr(args, "learner_counts", [4])))
+        if len(counts) != 1:
+            raise PhaseMapError(
+                "learner count is required when a plan contains multiple M variants"
+            )
+        learner_count = counts[0]
+    if learner_count not in SUPPORTED_LEARNER_COUNTS:
+        raise PhaseMapError(
+            f"M={learner_count} is unsupported; expected one of {SUPPORTED_LEARNER_COUNTS}"
+        )
+    denominator = learner_count * args.micro_batch_size * args.seq_len
     if denominator <= 0:
         raise PhaseMapError("micro batch size and sequence length must be positive")
     steps, remainder = divmod(args.token_budget, denominator)
@@ -1083,11 +1315,21 @@ def compare_command(
     eta: float,
     seed: int | None = None,
     training_seed: int | None = None,
+    learner_count: int = 4,
+    allow_terminal_partial_window: bool = False,
 ) -> list[str]:
-    seed = args.seed if seed is None else seed
-    training_seed = args.training_seed if training_seed is None else training_seed
-    outer_steps = args.token_budget // (h * args.seq_len)
-    learner_max_steps = exact_learner_max_steps(args)
+    if (seed is None) != (training_seed is None):
+        raise PhaseMapError("shuffle and training seed overrides must be supplied together")
+    if seed is None:
+        seed, training_seed = primary_seed_pair(args)
+    learner_max_steps = exact_learner_max_steps(args, learner_count)
+    full_windows, terminal_remainder = divmod(learner_max_steps, h)
+    if terminal_remainder and not allow_terminal_partial_window:
+        raise PhaseMapError(
+            f"per-learner step cap {learner_max_steps} is not divisible by H={h} "
+            f"for M={learner_count}"
+        )
+    outer_steps = (full_windows + bool(terminal_remainder)) * FRAGMENT_COUNT
     frozen_split = args.run_dir / "frozen-eval" / f"seed-{seed}" / "materialized"
     command = [
         args.python_executable,
@@ -1099,7 +1341,7 @@ def compare_command(
         "--prebound-development-eval",
         str(frozen_split / "eval.jsonl"),
         "--settings",
-        "m4",
+        f"m{learner_count}",
         "--tuning",
         "full",
         "--skip-baseline",
@@ -1143,7 +1385,7 @@ def compare_command(
         "--pad-to-fixed-window-tokens",
         "--freeze-delta-before-delay",
         "--learner-push-delay-ms",
-        "0,0,0,0",
+        ",".join("0" for _ in range(learner_count)),
         "--learner-delay-jitter-ms",
         "0",
         "--syncer-total-steps",
@@ -1152,7 +1394,7 @@ def compare_command(
         str(learner_max_steps),
         "--strict-quorum",
         "--pipeline-depth",
-        "4",
+        str(FRAGMENT_COUNT),
         "--wan-streams",
         "0",
         "--barrier-sync",
@@ -1166,6 +1408,8 @@ def compare_command(
         "--report-dir",
         "report",
     ]
+    if terminal_remainder:
+        command.append("--allow-terminal-partial-fixed-window")
     if args.capture_every_step:
         command.extend(
             ["--syncer-probe-capture", "--syncer-probe-capture-every", "1"]
@@ -1205,15 +1449,177 @@ def normalized_workload_command(command: Sequence[str]) -> list[str]:
     return normalized
 
 
+def normalized_pairing_command(command: Sequence[str]) -> list[str]:
+    """Redact only the two registered treatment coordinates from one arm.
+
+    Equal hashes prove that initialization/data/worker/work-schedule argv are
+    byte-identical inside a paired block while allowing the intended ``mu`` and
+    ``eta`` treatments to differ.
+    """
+
+    treatment_flags = {
+        "--outer-momentum": "<BLOCK_TREATMENT_MU>",
+        "--outer-lr": "<BLOCK_TREATMENT_ETA>",
+    }
+    normalized: list[str] = []
+    index = 0
+    while index < len(command):
+        token = command[index]
+        replacement = treatment_flags.get(token)
+        if replacement is None:
+            normalized.append(token)
+            index += 1
+            continue
+        if index + 1 >= len(command):
+            raise PhaseMapError(f"{token} lacks a value in pairing command")
+        normalized.extend((token, replacement))
+        index += 2
+    return normalized
+
+
+def seed_block_identity(
+    args: argparse.Namespace,
+    *,
+    h: int,
+    seed: int,
+    training_seed: int,
+    learner_count: int,
+) -> dict[str, Any]:
+    """Canonical identity of every scientifically paired non-treatment input."""
+
+    learner_seeds = {
+        str(learner): training_seed + 1009 * learner
+        for learner in range(learner_count)
+    }
+    identity = {
+        "schema": "yeto_paired_seed_block_identity_v1",
+        "shuffle_seed": seed,
+        "training_seed": training_seed,
+        "initialization": {
+            "frozen_model": str(args.model_path),
+            "learner_process_seed_formula": (
+                "training_seed + 1009 * learner_id + distributed_rank"
+            ),
+            "rank0_process_seeds": learner_seeds,
+        },
+        "data_order": {
+            "prebound_train": str(
+                args.run_dir
+                / "frozen-eval"
+                / f"seed-{seed}"
+                / "materialized"
+                / "train.jsonl"
+            ),
+            "shuffle_seed": seed,
+            "row_shard_formula": "source_row_position mod learner_count",
+            "loader_shuffle_seed_source": "learner_process_seed",
+        },
+        "worker_allocation": {
+            "learner_count": learner_count,
+            "learner_ids": list(range(learner_count)),
+            "frozen_gpu_slots": args.gpu_slots,
+            "runtime_gpu_assignment_formula": (
+                "physical_gpu = gpu_offset + (learner_id mod gpu_slots)"
+            ),
+            "learner_ids_by_gpu_slots": {
+                str(slots): {
+                    str(gpu): [
+                        learner
+                        for learner in range(learner_count)
+                        if learner % slots == gpu
+                    ]
+                    for gpu in range(slots)
+                }
+                for slots in sorted({1, args.gpu_slots})
+            },
+            "uniform_machine_shape_within_block": True,
+        },
+        "work_schedule": {
+            "h": h,
+            "fragments": FRAGMENT_COUNT,
+            "barrier_sync": True,
+            "strict_quorum": learner_count,
+            "version_matched_anchor": True,
+            "pipeline_depth": FRAGMENT_COUNT,
+            "wan_streams": 0,
+            "fixed_window_microsteps": h,
+            "fixed_window_tokens": h * args.seq_len,
+            "learner_push_delay_ms": [0] * learner_count,
+            "learner_delay_jitter_ms": 0,
+            "learner_steps_per_learner": exact_learner_max_steps(
+                args, learner_count
+            ),
+        },
+    }
+    identity["identity_hash"] = sha256_bytes(canonical_json(identity))
+    return identity
+
+
+def validate_seed_block_cells(cells: Sequence[dict[str, Any]]) -> None:
+    """Fail closed if one atomic block loses any pairing invariant."""
+
+    if len(cells) != 3:
+        raise PhaseMapError("a paired seed block must contain exactly three arms")
+    block_ids = {cell["randomization"]["block_id"] for cell in cells}
+    identity_hashes = {cell["pairing_identity_hash"] for cell in cells}
+    pairing_command_hashes = {cell["pairing_command_hash"] for cell in cells}
+    if len(block_ids) != 1 or len(identity_hashes) != 1 or len(pairing_command_hashes) != 1:
+        raise PhaseMapError(
+            "paired block arms do not share initialization/data/worker/work identity"
+        )
+    for field in ("H", "seed", "training_seed", "M"):
+        if len({cell[field] for cell in cells}) != 1:
+            raise PhaseMapError(f"paired block arms have mismatched {field}")
+    if len({(cell["mu"], cell["eta"]) for cell in cells}) != 3:
+        raise PhaseMapError("paired block contains a duplicate (mu,eta) treatment")
+    controls = [cell for cell in cells if cell["mu"] == 0.0]
+    if len(controls) != 1:
+        raise PhaseMapError("paired block requires exactly one live mu=0 control")
+    control_id = controls[0]["cell_id"]
+    if {cell["paired_control_id"] for cell in cells} != {control_id}:
+        raise PhaseMapError("paired block does not bind every arm to its live control")
+
+
 def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     if 0.0 not in args.mu:
         raise PhaseMapError("every randomized block requires a live mu=0 control")
     if args.token_budget % args.seq_len:
         raise PhaseMapError("token budget must be divisible by seq_len")
-    learner_steps = exact_learner_max_steps(args)
     seed_pairs = stage_seed_pairs(args)
+    design = validate_multiseed_design(args)
+    explicit_arms = explicit_block_arms(args)
+    learner_counts = sorted(set(getattr(args, "learner_counts", [4])))
+    if any(count not in SUPPORTED_LEARNER_COUNTS for count in learner_counts):
+        raise PhaseMapError(
+            f"learner counts must be drawn from {SUPPORTED_LEARNER_COUNTS}"
+        )
     study_phase = getattr(args, "study_phase", None)
-    if study_phase in {"p1_adaptive", "p1_adaptive_bracket"}:
+    # Each block tuple is (H, seed, training_seed, M, explicit (mu,eta) arms,
+    # legacy eta-or-None).  The last component preserves old block IDs exactly.
+    blocks: list[
+        tuple[int, int, int, int, tuple[tuple[float, float], ...], float | None]
+    ]
+    if explicit_arms is not None:
+        if set(explicit_arms) != set(args.h):
+            raise PhaseMapError(
+                "explicit --block-arm horizons must equal the declared --h set"
+            )
+        for h, arms in explicit_arms.items():
+            if len(arms) != 3 or len(set(arms)) != 3:
+                raise PhaseMapError(
+                    f"H={h} must declare exactly three distinct (mu,eta) arms"
+                )
+            if sum(mu == 0.0 for mu, _eta in arms) != 1:
+                raise PhaseMapError(f"H={h} must declare exactly one mu=0 arm")
+        blocks = [
+            (h, seed, training_seed, learner_count, explicit_arms[h], None)
+            for seed, training_seed in seed_pairs
+            for learner_count in learner_counts
+            for h in sorted(explicit_arms)
+        ]
+    elif study_phase in {"p1_adaptive", "p1_adaptive_bracket"}:
+        if learner_counts != [4]:
+            raise PhaseMapError("adaptive P1 remains fixed at M=4")
         template = verify_authoritative_prereg(args)
         parent = load_json_object(args.parent_manifest, "parent phase-map manifest")
         expected_parent_hash = require_sha256(
@@ -1229,8 +1635,20 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             raise PhaseMapError("adaptive P1 --eta must exactly declare the next blocks")
         if seed_pairs != [(347, 347347)]:
             raise PhaseMapError("adaptive P1 may use only seed pair 347/347347")
-        blocks = [(h, eta, 347, 347347) for h, eta in eta_blocks]
+        blocks = [
+            (
+                h,
+                347,
+                347347,
+                4,
+                tuple((mu, eta) for mu in args.mu),
+                eta,
+            )
+            for h, eta in eta_blocks
+        ]
     elif study_phase == "p2_additional_development":
+        if learner_counts != [4]:
+            raise PhaseMapError("registered P2 remains fixed at M=4")
         template = verify_authoritative_prereg(args)
         parent = load_json_object(args.parent_manifest, "parent phase-map manifest")
         expected_parent_hash = require_sha256(
@@ -1247,34 +1665,88 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "P2 --eta must exactly declare the sealed P1 selected-neighbor union"
             )
         blocks = [
-            (h, eta, seed, training_seed)
+            (
+                h,
+                seed,
+                training_seed,
+                4,
+                tuple((mu, eta) for mu in args.mu),
+                eta,
+            )
             for seed, training_seed in seed_pairs
             for h, eta in eta_blocks
         ]
     else:
         if len(seed_pairs) != 1:
             raise PhaseMapError("only registered P2 may bind multiple stage seeds")
+        if learner_counts != [4]:
+            raise PhaseMapError("legacy Cartesian phase maps remain fixed at M=4")
         seed, training_seed = seed_pairs[0]
         blocks = [
-            (h, eta, seed, training_seed)
+            (
+                h,
+                seed,
+                training_seed,
+                4,
+                tuple((mu, eta) for mu in args.mu),
+                eta,
+            )
             for h in sorted(args.h)
             for eta in sorted(args.eta)
         ]
     rng = random.Random(args.order_seed)
     rng.shuffle(blocks)
-    cells = []
+    cells: list[dict[str, Any]] = []
+    block_identities: dict[str, dict[str, Any]] = {}
     order_index = 0
-    for block_index, (h, eta, seed, training_seed) in enumerate(blocks):
-        outer_steps = args.token_budget // (h * args.seq_len)
-        if args.token_budget % (h * args.seq_len):
-            raise PhaseMapError(f"token budget is not exact for H={h}")
-        if outer_steps % 4:
+    include_m = explicit_arms is not None
+    for block_index, (
+        h,
+        seed,
+        training_seed,
+        learner_count,
+        arms,
+        legacy_eta,
+    ) in enumerate(blocks):
+        learner_steps = exact_learner_max_steps(args, learner_count)
+        if learner_steps % h:
+            raise PhaseMapError(
+                f"per-learner step count is not divisible by H={h} for M={learner_count}"
+            )
+        outer_steps = learner_steps // h * FRAGMENT_COUNT
+        if outer_steps % FRAGMENT_COUNT:
             raise PhaseMapError(f"outer step count must be divisible by fragments: H={h}")
-        block_id = f"{args.study_id}-block-h{h}-eta{slug_float(eta)}-s{seed}"
-        block_mu = list(args.mu)
-        rng.shuffle(block_mu)
-        control_id = cell_id(args.study_id, h, 0.0, eta, seed)
-        for within_block_index, mu in enumerate(block_mu):
+        if legacy_eta is None:
+            block_id = f"{args.study_id}-block-h{h}-m{learner_count}-s{seed}"
+        else:
+            block_id = (
+                f"{args.study_id}-block-h{h}-eta{slug_float(legacy_eta)}-s{seed}"
+            )
+        identity = seed_block_identity(
+            args,
+            h=h,
+            seed=seed,
+            training_seed=training_seed,
+            learner_count=learner_count,
+        )
+        identity_hash = identity["identity_hash"]
+        block_identities[block_id] = identity
+        block_arms = list(arms)
+        rng.shuffle(block_arms)
+        control_mu, control_eta = next(
+            (mu, eta) for mu, eta in block_arms if mu == 0.0
+        )
+        control_id = cell_id(
+            args.study_id,
+            h,
+            control_mu,
+            control_eta,
+            seed,
+            learner_count,
+            include_m=include_m,
+        )
+        block_cells: list[dict[str, Any]] = []
+        for within_block_index, (mu, eta) in enumerate(block_arms):
             command = compare_command(
                 args,
                 h=h,
@@ -1282,44 +1754,89 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
                 eta=eta,
                 seed=seed,
                 training_seed=training_seed,
+                learner_count=learner_count,
             )
-            cells.append(
-                {
-                    "cell_id": cell_id(args.study_id, h, mu, eta, seed),
-                    "H": h,
-                    "mu": mu,
-                    "eta": eta,
-                    "seed": seed,
-                    "training_seed": training_seed,
-                    "command_hash": sha256_bytes(canonical_json(command)),
-                    "paired_control_id": control_id,
-                    "resource_class": args.resource_class,
-                    "target_work": {
-                        "tokens": args.token_budget,
-                        "microsteps": args.token_budget // args.seq_len,
-                        "outer_steps": outer_steps,
-                        "learner_count": 4,
-                        "learner_steps_per_learner": learner_steps,
-                    },
-                    "randomization": {
-                        "block_id": block_id,
-                        "block_order_index": block_index,
-                        "within_block_index": within_block_index,
-                        "order_index": order_index,
-                    },
-                    "command": command,
-                }
-            )
+            cell = {
+                "cell_id": cell_id(
+                    args.study_id,
+                    h,
+                    mu,
+                    eta,
+                    seed,
+                    learner_count,
+                    include_m=include_m,
+                ),
+                "H": h,
+                "M": learner_count,
+                "mu": mu,
+                "eta": eta,
+                "seed": seed,
+                "training_seed": training_seed,
+                "command_hash": sha256_bytes(canonical_json(command)),
+                "pairing_command_hash": sha256_bytes(
+                    canonical_json(normalized_pairing_command(command))
+                ),
+                "pairing_identity_hash": identity_hash,
+                "paired_control_id": control_id,
+                "resource_class": args.resource_class,
+                "target_work": {
+                    "tokens": args.token_budget,
+                    "microsteps": args.token_budget // args.seq_len,
+                    "outer_steps": outer_steps,
+                    "per_fragment_outer_steps": outer_steps // FRAGMENT_COUNT,
+                    "learner_count": learner_count,
+                    "quorum": learner_count,
+                    "learner_steps_per_learner": learner_steps,
+                },
+                "randomization": {
+                    "block_id": block_id,
+                    "block_order_index": block_index,
+                    "within_block_index": within_block_index,
+                    "order_index": order_index,
+                },
+                "command": command,
+            }
+            block_cells.append(cell)
+            cells.append(cell)
             order_index += 1
+        if explicit_arms is not None:
+            validate_seed_block_cells(block_cells)
+    primary_seed, primary_training_seed = seed_pairs[0]
+    multiseed = explicit_arms is not None
     plan = {
-        "schema": "yeto_phase_map_randomization_v1",
+        "schema": (
+            "yeto_multiseed_phase_map_randomization_v2"
+            if multiseed
+            else "yeto_phase_map_randomization_v1"
+        ),
         "study_id": args.study_id,
-        "seed": args.seed,
-        "training_seed": args.training_seed,
+        "study_phase": study_phase,
+        "multiseed_design": design,
+        "seed": primary_seed,
+        "training_seed": primary_training_seed,
         "seed_pairs": {str(seed): training for seed, training in seed_pairs},
+        "learner_counts": learner_counts,
         "order_seed": args.order_seed,
-        "block_fields": ["H", "eta", "seed"],
-        "within_block_field": "mu",
+        "atomic_wave_unit": "paired_seed_block" if multiseed else "eta_block",
+        "block_fields": (
+            ["H", "seed", "M"] if multiseed else ["H", "eta", "seed"]
+        ),
+        "within_block_fields": ["mu", "eta"] if multiseed else ["mu"],
+        "within_block_field": None if multiseed else "mu",
+        "pairing_invariants": {
+            "same_initialization": True,
+            "same_data_order": True,
+            "same_worker_allocation": True,
+            "same_work_schedule": True,
+            "same_hardware_profile_within_runtime_block": True,
+            "treatment_fields": ["mu", "eta"],
+            "divergence_policy": {
+                "retain": True,
+                "analysis_loss_cap": getattr(args, "divergence_loss_cap", 10.0),
+                "silent_exclusion_forbidden": True,
+            },
+        },
+        "seed_blocks": block_identities,
         "cells": cells,
     }
     plan["randomization_plan_hash"] = sha256_bytes(canonical_json(plan))
@@ -1332,6 +1849,258 @@ def campaign_command_hash(plan: dict[str, Any]) -> str:
         for cell in plan["cells"]
     ]
     return sha256_bytes(canonical_json(registry))
+
+
+def build_multiseed_bound_contract(
+    args: argparse.Namespace,
+    plan: dict[str, Any],
+    *,
+    model_hash: str,
+    data_hash: str,
+    train_rows_hash: str,
+    development_eval_rows_hash: str,
+    development_eval_packed_hash: str,
+    development_eval_example_ids_hash: str,
+    development_eval_token_ids_hash: str,
+    development_eval_source_indices_hash: str,
+    audit_eval_rows_hash: str,
+    audit_eval_packed_hash: str,
+    audit_eval_example_ids_hash: str,
+    audit_eval_token_ids_hash: str,
+    audit_eval_source_indices_hash: str,
+    audit_access_policy_hash: str,
+    train_pool_source_indices_hash: str,
+    train_source_indices_hash: str,
+    additional_train_rows_hashes: dict[int, str] | None,
+    additional_train_source_indices_hashes: dict[int, str] | None,
+) -> dict[str, Any]:
+    """Build a complete local E1/E4 runtime contract without granting launch authority."""
+
+    design = validate_multiseed_design(args)
+    if design is None:
+        raise PhaseMapError("multiseed bound contract requires E1 or E4")
+    seed_pairs = stage_seed_pairs(args)
+    primary_seed, _primary_training = seed_pairs[0]
+    row_hashes = {primary_seed: train_rows_hash, **(additional_train_rows_hashes or {})}
+    index_hashes = {
+        primary_seed: train_source_indices_hash,
+        **(additional_train_source_indices_hashes or {}),
+    }
+    required_seeds = {seed for seed, _training in seed_pairs}
+    if set(row_hashes) != required_seeds or set(index_hashes) != required_seeds:
+        raise PhaseMapError(
+            "multiseed train row/index hashes must cover all eight seeds exactly"
+        )
+    expected_cells = [
+        {
+            "cell_id": cell["cell_id"],
+            "h": cell["H"],
+            "m": cell["M"],
+            "mu": cell["mu"],
+            "eta": cell["eta"],
+            "seed": cell["seed"],
+            "training_seed": cell["training_seed"],
+            "block_id": cell["randomization"]["block_id"],
+            "paired_control_id": cell["paired_control_id"],
+            "pairing_identity_hash": cell["pairing_identity_hash"],
+            "pairing_command_hash": cell["pairing_command_hash"],
+            "command_hash": cell["command_hash"],
+            "normalized_workload_command_hash": sha256_bytes(
+                canonical_json(normalized_workload_command(cell["command"]))
+            ),
+            "expected_learner_count": cell["target_work"]["learner_count"],
+            "expected_quorum": cell["target_work"]["quorum"],
+            "expected_learner_steps": cell["target_work"][
+                "learner_steps_per_learner"
+            ],
+            "expected_outer_steps": cell["target_work"]["outer_steps"],
+        }
+        for cell in plan["cells"]
+    ]
+    cell_command_hashes = {
+        cell["cell_id"]: cell["command_hash"] for cell in plan["cells"]
+    }
+    command_hash = sha256_bytes(
+        canonical_json(
+            [
+                {"cell_id": cell["cell_id"], "command_hash": cell["command_hash"]}
+                for cell in expected_cells
+            ]
+        )
+    )
+    source_paths = {
+        "p1_adaptive_final": REPO_ROOT / "P1-ADAPTIVE-FINAL.md",
+        "experiment_program": REPO_ROOT / "EXPERIMENT-PROGRAM.md",
+    }
+    missing_sources = [name for name, path in source_paths.items() if not path.is_file()]
+    if missing_sources:
+        raise PhaseMapError(
+            "multiseed design source documents are missing: "
+            + ", ".join(sorted(missing_sources))
+        )
+    source_hashes = {name: sha256_file(path) for name, path in source_paths.items()}
+    design_preimage = {
+        "schema": "yeto_best_paper_v2_multiseed_design_v1",
+        "design": design,
+        "horizons": list(BEST_PAPER_V2_HORIZONS),
+        "seed_pairs": [list(pair) for pair in BEST_PAPER_V2_FRESH_SEED_PAIRS],
+        "learner_counts": sorted(set(args.learner_counts)),
+        "arms_by_h": {
+            str(h): [list(arm) for arm in arms]
+            for h, arms in best_paper_v2_arms().items()
+        },
+        "token_budget": args.token_budget,
+        "seq_len": args.seq_len,
+        "micro_batch_size": args.micro_batch_size,
+        "divergence_loss_cap": args.divergence_loss_cap,
+        "source_document_sha256": source_hashes,
+    }
+    design_hash = sha256_bytes(canonical_json(design_preimage))
+    manifest = {
+        "schema_version": "2.0-local-runtime-contract",
+        "status": "bound_runtime_contract",
+        "launch_authorized": False,
+        "launch_authorization_requirement": (
+            "bind an independently reviewed external authorization to the exact "
+            "design/randomization/roster/command hashes before any mutation"
+        ),
+        "study_id": args.study_id,
+        "mode": "paired_seed_confirmation_acquisition",
+        "min_confirmatory_seeds": args.minimum_confirmatory_seeds,
+        "seed_pairs": {str(seed): training for seed, training in seed_pairs},
+        "expected_grid": {
+            "h": list(BEST_PAPER_V2_HORIZONS),
+            "m": sorted(set(args.learner_counts)),
+            "mu": [0.0, 0.9],
+            "eta": sorted(
+                {eta for arms in best_paper_v2_arms().values() for _mu, eta in arms}
+            ),
+            "seeds": [seed for seed, _training in seed_pairs],
+        },
+        "expected_cells": expected_cells,
+        "results": [],
+        "frozen": {
+            "git_commit": args.git_commit,
+            "image_id": args.image_numeric_id,
+            "image_digest": args.image_digest,
+            "model_id": args.model_id,
+            "model_revision": args.model_revision,
+            "model_hash": model_hash,
+            "data_hash": data_hash,
+            "development_eval_rows_hash": development_eval_rows_hash,
+            "development_eval_packed_hash": development_eval_packed_hash,
+            "development_eval_example_ids_hash": development_eval_example_ids_hash,
+            "development_eval_token_ids_hash": development_eval_token_ids_hash,
+            "development_eval_source_indices_hash": (
+                development_eval_source_indices_hash
+            ),
+            "audit_eval_rows_hash": audit_eval_rows_hash,
+            "audit_eval_packed_hash": audit_eval_packed_hash,
+            "audit_eval_example_ids_hash": audit_eval_example_ids_hash,
+            "audit_eval_token_ids_hash": audit_eval_token_ids_hash,
+            "audit_eval_source_indices_hash": audit_eval_source_indices_hash,
+            "audit_access_policy_hash": audit_access_policy_hash,
+            "train_pool_source_indices_hash": train_pool_source_indices_hash,
+            "train_rows_hashes": {
+                str(seed): digest for seed, digest in sorted(row_hashes.items())
+            },
+            "train_source_indices_hashes": {
+                str(seed): digest for seed, digest in sorted(index_hashes.items())
+            },
+            "cell_command_hashes": cell_command_hashes,
+            "command_hash": command_hash,
+            "randomization_plan_hash": plan["randomization_plan_hash"],
+            "best_paper_v2_design_contract_hash": design_hash,
+        },
+        "protocol": {
+            "tuning": "full",
+            "train_rows": args.train_rows,
+            "development_eval_rows": args.eval_rows,
+            "audit_eval_rows": args.confirmation_audit_rows,
+            "seq_len": args.seq_len,
+            "micro_batch_size": args.micro_batch_size,
+            "learner_counts": sorted(set(args.learner_counts)),
+            "fragments": FRAGMENT_COUNT,
+            "inner_optimizer": "adamw",
+            "inner_lr": args.inner_lr,
+            "outer_optimizer": "nesterov",
+            "matrix_merge": "rda",
+            "strict_quorum": True,
+            "barrier": True,
+            "version_matched": True,
+            "fixed_window": True,
+            "token_budget": args.token_budget,
+            "frozen_gpu_slots": args.gpu_slots,
+            "runtime_gpu_projection": "4 -> 1 only by landed machine shape",
+        },
+        "horizon_work": {
+            str(h): {
+                str(count): {
+                    "learner_steps_per_learner": exact_learner_max_steps(
+                        args, count
+                    ),
+                    "outer_steps": exact_learner_max_steps(args, count)
+                    // h
+                    * FRAGMENT_COUNT,
+                    "per_fragment_outer_steps": exact_learner_max_steps(
+                        args, count
+                    )
+                    // h,
+                }
+                for count in sorted(set(args.learner_counts))
+            }
+            for h in BEST_PAPER_V2_HORIZONS
+        },
+        "randomization": {
+            "unit": "arm",
+            "atomic_wave_unit": "paired_seed_block",
+            "block_fields": ["h", "seed", "m"],
+            "within_block_fields": ["mu", "eta"],
+            "required_arm_tuples_by_h": {
+                str(h): [list(arm) for arm in arms]
+                for h, arms in best_paper_v2_arms().items()
+            },
+            "block_order": "materialized_pseudorandom_permutation",
+            "within_block_order": "materialized_pseudorandom_permutation",
+            "loss_blind": True,
+            "plan_hash": plan["randomization_plan_hash"],
+        },
+        "pairing": {
+            "independent_unit": "complete_paired_training_seed_block",
+            "same_initialization": True,
+            "same_data_order": True,
+            "same_worker_allocation": True,
+            "same_work_schedule": True,
+            "uniform_runtime_machine_shape_within_block": True,
+            "seed_blocks": deepcopy(plan["seed_blocks"]),
+        },
+        "analysis_policy": {
+            "divergence_loss_cap": args.divergence_loss_cap,
+            "divergence_is_outcome": True,
+            "silent_divergence_exclusion_forbidden": True,
+        },
+        "retry_policy": {
+            "loss_blind_only": True,
+            "rerun_entire_incomplete_block": True,
+            "retain_all_attempts": True,
+            "retry_lineage_required": True,
+            "direct_infrastructure_failure_reasons": sorted(
+                DIRECT_INFRASTRUCTURE_FAILURE_REASONS
+            ),
+            "peer_retry_reason": PEER_BLOCK_RETRY_REASON,
+        },
+        "lineage": {
+            "descendant_kind": f"best_paper_v2_{design}_paired_blocks",
+            "parent_manifest_sha256": None,
+            "authoritative_prereg_template_sha256": (
+                AUTHORITATIVE_PREREG_SHA256
+            ),
+            "best_paper_v2_design_contract_hash": design_hash,
+            "source_document_sha256": source_hashes,
+        },
+        "design_contract": design_preimage,
+    }
+    return manifest
 
 
 def build_bound_manifest(
@@ -1357,6 +2126,32 @@ def build_bound_manifest(
     additional_train_rows_hashes: dict[int, str] | None = None,
     additional_train_source_indices_hashes: dict[int, str] | None = None,
 ) -> dict[str, Any]:
+    is_multiseed = plan.get("schema") == "yeto_multiseed_phase_map_randomization_v2"
+    if is_multiseed:
+        return build_multiseed_bound_contract(
+            args,
+            plan,
+            model_hash=model_hash,
+            data_hash=data_hash,
+            train_rows_hash=train_rows_hash,
+            development_eval_rows_hash=development_eval_rows_hash,
+            development_eval_packed_hash=development_eval_packed_hash,
+            development_eval_example_ids_hash=development_eval_example_ids_hash,
+            development_eval_token_ids_hash=development_eval_token_ids_hash,
+            development_eval_source_indices_hash=development_eval_source_indices_hash,
+            audit_eval_rows_hash=audit_eval_rows_hash,
+            audit_eval_packed_hash=audit_eval_packed_hash,
+            audit_eval_example_ids_hash=audit_eval_example_ids_hash,
+            audit_eval_token_ids_hash=audit_eval_token_ids_hash,
+            audit_eval_source_indices_hash=audit_eval_source_indices_hash,
+            audit_access_policy_hash=audit_access_policy_hash,
+            train_pool_source_indices_hash=train_pool_source_indices_hash,
+            train_source_indices_hash=train_source_indices_hash,
+            additional_train_rows_hashes=additional_train_rows_hashes,
+            additional_train_source_indices_hashes=(
+                additional_train_source_indices_hashes
+            ),
+        )
     template = verify_authoritative_prereg(args)
     descendant_kind = enforce_stage_design(args, template)
     if str(template.get("schema_version")) != "0.2":
@@ -1395,6 +2190,15 @@ def build_bound_manifest(
             "training_seed": cell["training_seed"],
             "block_id": cell["randomization"]["block_id"],
             "paired_control_id": cell["paired_control_id"],
+            **(
+                {
+                    "m": cell["M"],
+                    "pairing_identity_hash": cell["pairing_identity_hash"],
+                    "pairing_command_hash": cell["pairing_command_hash"],
+                }
+                if is_multiseed
+                else {}
+            ),
             "command_hash": cell["command_hash"],
             "expected_learner_count": cell["target_work"]["learner_count"],
             "expected_learner_steps": cell["target_work"][
@@ -1433,14 +2237,22 @@ def build_bound_manifest(
             "h": sorted(args.h),
             "mu": sorted(args.mu),
             "eta": sorted(args.eta),
-            "seeds": [args.seed],
+            "seeds": sorted(seed for seed, _training in stage_seed_pairs(args)),
+            **(
+                {"m": sorted(set(getattr(args, "learner_counts", [4])))}
+                if is_multiseed
+                else {}
+            ),
         }
-        manifest["seed_pairs"] = {str(args.seed): args.training_seed}
+        manifest["seed_pairs"] = {
+            str(seed): training for seed, training in stage_seed_pairs(args)
+        }
         manifest["expected_cells"] = new_expected_cells
 
-    supplied_train_rows = {args.seed: train_rows_hash}
+    primary_seed, _primary_training_seed = primary_seed_pair(args)
+    supplied_train_rows = {primary_seed: train_rows_hash}
     supplied_train_rows.update(additional_train_rows_hashes or {})
-    supplied_train_indices = {args.seed: train_source_indices_hash}
+    supplied_train_indices = {primary_seed: train_source_indices_hash}
     supplied_train_indices.update(additional_train_source_indices_hashes or {})
     required_new_seeds = {cell["seed"] for cell in plan["cells"]}
     if set(supplied_train_rows) != required_new_seeds:
@@ -1516,8 +2328,22 @@ def build_bound_manifest(
             ),
             "seq_len": args.seq_len,
             "micro_batch_size": args.micro_batch_size,
-            "learners": 4,
-            "fragments": 4,
+            "learners": (
+                sorted(set(getattr(args, "learner_counts", [4])))
+                if is_multiseed
+                and len(set(getattr(args, "learner_counts", [4]))) > 1
+                else sorted(set(getattr(args, "learner_counts", [4])))[0]
+            ),
+            **(
+                {
+                    "learner_counts": sorted(
+                        set(getattr(args, "learner_counts", [4]))
+                    )
+                }
+                if is_multiseed
+                else {}
+            ),
+            "fragments": FRAGMENT_COUNT,
             "inner_optimizer": "adamw",
             "inner_lr": args.inner_lr,
             "outer_optimizer": "nesterov",
@@ -1530,7 +2356,14 @@ def build_bound_manifest(
             "version_matched": True,
             "fixed_window": True,
             "pad_to_fixed_window_tokens": True,
-            "learner_push_delay_ms": [0, 0, 0, 0],
+            "learner_push_delay_ms": (
+                {
+                    str(count): [0] * count
+                    for count in sorted(set(getattr(args, "learner_counts", [4])))
+                }
+                if is_multiseed
+                else [0, 0, 0, 0]
+            ),
             "learner_delay_jitter_ms": 0,
             "eval_split_seed": args.eval_split_seed,
             "token_budget": args.token_budget,
@@ -1542,25 +2375,68 @@ def build_bound_manifest(
             "per_example_loss_required": True,
         }
     )
-    manifest["horizon_work"] = {
-        str(h): {
-            "fixed_window_microsteps": h,
-            "fixed_window_tokens": h * args.seq_len,
-            "outer_steps": args.token_budget // (h * args.seq_len),
+    if is_multiseed:
+        manifest["horizon_work"] = {
+            str(h): {
+                str(count): {
+                    "fixed_window_microsteps": h,
+                    "fixed_window_tokens": h * args.seq_len,
+                    "outer_steps": exact_learner_max_steps(args, count)
+                    // h
+                    * FRAGMENT_COUNT,
+                    "learner_steps_per_learner": exact_learner_max_steps(
+                        args, count
+                    ),
+                }
+                for count in sorted(set(getattr(args, "learner_counts", [4])))
+            }
+            for h in sorted(args.h)
         }
-        for h in sorted(args.h)
+    else:
+        manifest["horizon_work"] = {
+            str(h): {
+                "fixed_window_microsteps": h,
+                "fixed_window_tokens": h * args.seq_len,
+                "outer_steps": args.token_budget // (h * args.seq_len),
+            }
+            for h in sorted(args.h)
+        }
+    randomization_update = {
+        "unit": "arm",
+        "block_fields": (
+            ["h", "seed", "m"] if is_multiseed else ["h", "eta", "seed"]
+        ),
+        "required_mu_per_block": sorted(args.mu),
+        "block_order": "materialized_pseudorandom_permutation",
+        "within_block_order": "materialized_pseudorandom_permutation",
+        "loss_blind": True,
+        "plan_hash": plan["randomization_plan_hash"],
     }
-    manifest["randomization"].update(
-        {
-            "unit": "arm",
-            "block_fields": ["h", "eta", "seed"],
-            "required_mu_per_block": sorted(args.mu),
-            "block_order": "materialized_pseudorandom_permutation",
-            "within_block_order": "materialized_pseudorandom_permutation",
-            "loss_blind": True,
-            "plan_hash": plan["randomization_plan_hash"],
+    if is_multiseed:
+        randomization_update.update(
+            {
+                "within_block_fields": ["mu", "eta"],
+                "required_arm_tuples_by_h": {
+                    str(h): [[mu, eta] for mu, eta in arms]
+                    for h, arms in (explicit_block_arms(args) or {}).items()
+                },
+            }
+        )
+    manifest["randomization"].update(randomization_update)
+    if is_multiseed:
+        manifest["analysis_policy"] = {
+            "divergence_loss_cap": args.divergence_loss_cap,
+            "divergence_is_outcome": True,
+            "silent_divergence_exclusion_forbidden": True,
         }
-    )
+        manifest["pairing"] = {
+            "independent_unit": "complete_paired_training_seed_block",
+            "same_initialization": True,
+            "same_data_order": True,
+            "same_worker_allocation": True,
+            "same_work_schedule": True,
+            "seed_blocks": deepcopy(plan["seed_blocks"]),
+        }
     policy = validate_frozen_retry_policy(manifest.get("retry_policy"))
     manifest["frozen"]["retry_policy_hash"] = sha256_bytes(
         canonical_json(policy)
@@ -2291,25 +3167,49 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def cell_learner_count(cell: dict[str, Any]) -> int:
+    target = cell.get("target_work")
+    value = target.get("learner_count") if isinstance(target, dict) else cell.get("M")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise PhaseMapError(f"cell {cell.get('cell_id')} lacks a positive learner count")
+    return value
+
+
+def cell_arm_name(cell: dict[str, Any]) -> str:
+    return f"m{cell_learner_count(cell)}"
+
+
+def command_flag_value(command: Sequence[str], flag: str) -> str | None:
+    positions = [index for index, token in enumerate(command) if token == flag]
+    if not positions:
+        return None
+    if len(positions) != 1 or positions[0] + 1 >= len(command):
+        raise PhaseMapError(f"scientific command has malformed {flag}")
+    return command[positions[0] + 1]
+
+
 def validate_tape(path: Path, cell: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     rows = read_jsonl(path)
     expected_steps = cell["target_work"]["outer_steps"]
+    learner_count = cell_learner_count(cell)
     if len(rows) != expected_steps:
         raise PhaseMapError(f"event tape has {len(rows)} rows, expected {expected_steps}")
     fragments = Counter()
     responder_microsteps = 0
     responder_tokens = 0
     base_versions: dict[tuple[int, int], list[int]] = defaultdict(list)
-    prior_fragment_commit = {fragment: 0 for fragment in range(4)}
+    prior_fragment_commit = {fragment: 0 for fragment in range(FRAGMENT_COUNT)}
     for index, row in enumerate(rows, 1):
         if row.get("step") != index:
             raise PhaseMapError(f"event tape step {index} is missing or reordered")
         fragment = row.get("fragment")
-        if fragment not in (0, 1, 2, 3):
+        if fragment not in range(FRAGMENT_COUNT):
             raise PhaseMapError(f"invalid fragment at tape step {index}")
         fragments[fragment] += 1
         responders = row.get("responders")
-        if not isinstance(responders, list) or sorted(r.get("id") for r in responders) != [0, 1, 2, 3]:
+        if not isinstance(responders, list) or sorted(
+            r.get("id") for r in responders
+        ) != list(range(learner_count)):
             raise PhaseMapError(f"step {index} lacks exact full quorum")
         row_base_versions = {responder.get("base_version") for responder in responders}
         if row_base_versions != {prior_fragment_commit[fragment]}:
@@ -2317,11 +3217,34 @@ def validate_tape(path: Path, cell: dict[str, Any], args: argparse.Namespace) ->
                 f"step {index} responder bases do not equal fragment {fragment}'s "
                 "immediately prior committed global step"
             )
+        per_fragment_index = fragments[fragment]
+        partial_registered = cell["target_work"].get(
+            "terminal_partial_window_registered"
+        ) is True
+        partial_steps = int(
+            cell["target_work"].get("terminal_partial_window_microsteps", 0)
+        )
+        expected_fragment_updates = int(
+            cell["target_work"].get(
+                "per_fragment_outer_steps", expected_steps // FRAGMENT_COUNT
+            )
+        )
+        expected_window_steps = (
+            partial_steps
+            if partial_registered
+            and per_fragment_index == expected_fragment_updates
+            and partial_steps > 0
+            else cell["H"]
+        )
         for responder in responders:
-            if responder.get("c_steps") != cell["H"]:
-                raise PhaseMapError(f"step {index} has non-H microstep work")
-            if responder.get("c_tokens") != cell["H"] * args.seq_len:
-                raise PhaseMapError(f"step {index} has non-H token work")
+            if responder.get("c_steps") != expected_window_steps:
+                raise PhaseMapError(
+                    f"step {index} has non-registered fixed-window microstep work"
+                )
+            if responder.get("c_tokens") != expected_window_steps * args.seq_len:
+                raise PhaseMapError(
+                    f"step {index} has non-registered fixed-window token work"
+                )
             if responder.get("anchor_base_resolved") is not True:
                 raise PhaseMapError(f"step {index} lacks version-matched anchor proof")
             responder_microsteps += responder["c_steps"]
@@ -2330,8 +3253,10 @@ def validate_tape(path: Path, cell: dict[str, Any], args: argparse.Namespace) ->
                 int(responder["base_version"])
             )
         prior_fragment_commit[fragment] = index
-    expected_per_fragment = expected_steps // 4
-    if fragments != Counter({i: expected_per_fragment for i in range(4)}):
+    expected_per_fragment = expected_steps // FRAGMENT_COUNT
+    if fragments != Counter(
+        {i: expected_per_fragment for i in range(FRAGMENT_COUNT)}
+    ):
         raise PhaseMapError("outer commits are not balanced across four fragments")
     for key, versions in base_versions.items():
         expected_versions = [
@@ -2347,12 +3272,17 @@ def validate_tape(path: Path, cell: dict[str, Any], args: argparse.Namespace) ->
                 f"non-exact base-version progression for learner/fragment {key}"
             )
     observed = {
-        "tokens": responder_tokens // 4,
-        "microsteps": responder_microsteps // 4,
+        "tokens": responder_tokens // FRAGMENT_COUNT,
+        "microsteps": responder_microsteps // FRAGMENT_COUNT,
         "outer_steps": len(rows),
         "per_fragment_outer_steps": dict(sorted(fragments.items())),
         "full_quorum": True,
-        "fixed_window_exact": True,
+        "fixed_window_exact": not cell["target_work"].get(
+            "terminal_partial_window_registered", False
+        ),
+        "terminal_partial_window_registered": cell["target_work"].get(
+            "terminal_partial_window_registered", False
+        ),
         "version_matched_anchor_resolved": True,
         "base_versions_match": True,
         "fragment_base_progression_exact": True,
@@ -2379,9 +3309,11 @@ def validate_barrier_version_trace(
     """
     registry_path = attempt_dir / "report" / "barrier-version-trace.json"
     registry = load_json_object(registry_path, "barrier version trace registry")
+    learner_count = cell_learner_count(cell)
+    arm_name = cell_arm_name(cell)
     if (
         registry.get("schema") != "yeto_barrier_version_trace_v1"
-        or registry.get("learner_count") != 4
+        or registry.get("learner_count") != learner_count
     ):
         raise PhaseMapError("barrier trace registry has the wrong schema/count")
 
@@ -2399,14 +3331,16 @@ def validate_barrier_version_trace(
         return path
 
     tape_path = verify_entry(
-        registry.get("syncer_tape"), "work/m4/tape.jsonl", "syncer tape"
+        registry.get("syncer_tape"), f"work/{arm_name}/tape.jsonl", "syncer tape"
     )
     if read_jsonl(tape_path) != tape_rows:
         raise PhaseMapError("barrier registry tape differs from validated event tape")
 
     entries = registry.get("learner_traces")
-    if not isinstance(entries, list) or len(entries) != 4:
-        raise PhaseMapError("barrier registry must contain exactly four learner traces")
+    if not isinstance(entries, list) or len(entries) != learner_count:
+        raise PhaseMapError(
+            f"barrier registry must contain exactly {learner_count} learner traces"
+        )
     by_learner = {}
     for entry in entries:
         if not isinstance(entry, dict):
@@ -2415,17 +3349,21 @@ def validate_barrier_version_trace(
         if (
             isinstance(learner_id, bool)
             or not isinstance(learner_id, int)
-            or learner_id not in range(4)
+            or learner_id not in range(learner_count)
             or learner_id in by_learner
         ):
-            raise PhaseMapError("barrier registry learner IDs must be exactly 0..3")
+            raise PhaseMapError(
+                f"barrier registry learner IDs must be exactly 0..{learner_count - 1}"
+            )
         by_learner[learner_id] = verify_entry(
             entry,
-            f"work/m4/learner-{learner_id}/barrier-version-trace.jsonl",
+            f"work/{arm_name}/learner-{learner_id}/barrier-version-trace.jsonl",
             f"learner {learner_id} trace",
         )
-    if set(by_learner) != {0, 1, 2, 3}:
-        raise PhaseMapError("barrier registry learner IDs must be exactly 0..3")
+    if set(by_learner) != set(range(learner_count)):
+        raise PhaseMapError(
+            f"barrier registry learner IDs must be exactly 0..{learner_count - 1}"
+        )
 
     expected_pushes: dict[tuple[int, int], dict[str, int]] = {}
     for row in tape_rows:
@@ -2440,19 +3378,17 @@ def validate_barrier_version_trace(
                 "c_tokens": int(responder["c_tokens"]),
             }
 
-    # Each H-step optimizer window advances all four fragments concurrently.
-    # Thus the per-learner optimizer-step count is aggregate fragment work / 4.
-    target_microsteps = int(cell["target_work"]["microsteps"])
-    if target_microsteps % 4:
-        raise PhaseMapError("P0 target microsteps are not divisible by four fragments")
-    expected_inner_steps = target_microsteps // 4
+    # Each H-step optimizer window advances all fragments concurrently.  The
+    # exact per-learner ceiling is frozen independently of M in target_work.
+    expected_inner_steps = int(cell["target_work"]["learner_steps_per_learner"])
     push_counts: dict[int, int] = {}
     broadcast_counts: dict[int, int] = {}
     inner_counts: dict[int, int] = {}
-    for learner_id in range(4):
+    full_fragment_set = set(range(FRAGMENT_COUNT))
+    for learner_id in range(learner_count):
         rows = read_jsonl(by_learner[learner_id])
         awaiting: dict[int, tuple[int, int, int]] = {}
-        reset_local_step = {fragment: 0 for fragment in range(4)}
+        reset_local_step = {fragment: 0 for fragment in range(FRAGMENT_COUNT)}
         initial_fragments: set[int] = set()
         seen_pushes: set[int] = set()
         seen_broadcasts: set[int] = set()
@@ -2483,7 +3419,7 @@ def validate_barrier_version_trace(
                 fragment = row.get("fragment")
                 initial_version = row.get("broadcast_version")
                 if (
-                    sequence not in range(1, 5)
+                    sequence not in range(1, FRAGMENT_COUNT + 1)
                     or isinstance(fragment, bool)
                     or not isinstance(fragment, int)
                     or fragment != sequence - 1
@@ -2502,7 +3438,7 @@ def validate_barrier_version_trace(
                 continue
             if event == "inner_step_started":
                 if (
-                    initial_fragments != {0, 1, 2, 3}
+                    initial_fragments != full_fragment_set
                     or awaiting
                     or declared_awaiting != []
                     or local_step != next_inner_step
@@ -2516,16 +3452,29 @@ def validate_barrier_version_trace(
                 fragment = row.get("fragment")
                 pull_step = row.get("pull_step")
                 base_version = row.get("base_version")
-                expected = expected_pushes.get((learner_id, pull_step))
                 if (
                     isinstance(fragment, bool)
                     or not isinstance(fragment, int)
-                    or fragment not in range(4)
+                    or fragment not in range(FRAGMENT_COUNT)
                     or isinstance(pull_step, bool)
                     or not isinstance(pull_step, int)
+                ):
+                    raise PhaseMapError(
+                        f"learner {learner_id} push does not biject to the event tape"
+                    )
+                expected = expected_pushes.get((learner_id, pull_step))
+                expected_push_local_step = min(
+                    ((pull_step - 1) // FRAGMENT_COUNT + 1) * int(cell["H"]),
+                    expected_inner_steps,
+                )
+                expected_window_steps = expected_push_local_step - reset_local_step[
+                    fragment
+                ]
+                if (
+                    pull_step <= 0
                     or pull_step in seen_pushes
                     or fragment in awaiting
-                    or initial_fragments != {0, 1, 2, 3}
+                    or initial_fragments != full_fragment_set
                     or expected is None
                     or expected
                     != {
@@ -2534,10 +3483,9 @@ def validate_barrier_version_trace(
                         "c_steps": row.get("c_steps"),
                         "c_tokens": row.get("c_tokens"),
                     }
-                    or local_step
-                    != ((pull_step - 1) // 4 + 1) * int(cell["H"])
-                    or local_step
-                    != reset_local_step[fragment] + int(cell["H"])
+                    or local_step != expected_push_local_step
+                    or row.get("c_steps") != expected_window_steps
+                    or row.get("c_tokens") != expected_window_steps * args.seq_len
                 ):
                     raise PhaseMapError(
                         f"learner {learner_id} push does not biject to the event tape"
@@ -2580,7 +3528,7 @@ def validate_barrier_version_trace(
             raise PhaseMapError(
                 f"learner {learner_id} barrier trace lacks exact push/broadcast coverage"
             )
-        if initial_fragments != {0, 1, 2, 3}:
+        if initial_fragments != full_fragment_set:
             raise PhaseMapError(
                 f"learner {learner_id} lacks exact initial broadcast coverage"
             )
@@ -2605,7 +3553,7 @@ def validate_barrier_version_trace(
         "barrier_trace_validated": True,
         "base_versions_match": True,
         "no_inner_step_while_blocked": True,
-        "learner_count": 4,
+        "learner_count": learner_count,
         "commit_count": len(tape_rows),
         "inner_steps_per_learner": expected_inner_steps,
         "push_counts": push_counts,
@@ -2614,10 +3562,18 @@ def validate_barrier_version_trace(
     }
 
 
-def validate_layout(attempt_dir: Path) -> tuple[str, list[str]]:
+def validate_layout(
+    attempt_dir: Path, cell: dict[str, Any] | None = None
+) -> tuple[str, list[str]]:
+    learner_count = 4 if cell is None else cell_learner_count(cell)
+    arm_name = "m4" if cell is None else cell_arm_name(cell)
     paths = [
-        attempt_dir / "work" / "m4" / f"learner-{learner}" / "resolved-layout.json"
-        for learner in range(4)
+        attempt_dir
+        / "work"
+        / arm_name
+        / f"learner-{learner}"
+        / "resolved-layout.json"
+        for learner in range(learner_count)
     ]
     layouts = [json.loads(path.read_text()) for path in paths]
     hashes = [sha256_file(path) for path in paths]
@@ -2625,10 +3581,12 @@ def validate_layout(attempt_dir: Path) -> tuple[str, list[str]]:
         raise PhaseMapError("learner resolved-layout artifacts are not identical")
     first = layouts[0]
     fragments = first.get("fragments", [])
-    if first.get("matrix_merge") != "rda" or len(fragments) != 4:
+    if first.get("matrix_merge") != "rda" or len(fragments) != FRAGMENT_COUNT:
         raise PhaseMapError("resolved layout does not identify four-fragment RDA")
     modes = [fragment.get("merge_mode") for fragment in fragments]
-    if len(modes) != 4 or "rda" not in modes or any(mode not in ("avg", "rda") for mode in modes):
+    if len(modes) != FRAGMENT_COUNT or "rda" not in modes or any(
+        mode not in ("avg", "rda") for mode in modes
+    ):
         raise PhaseMapError(f"unexpected resolved fragment merge modes: {modes}")
     return hashes[0], modes
 
@@ -2736,6 +3694,8 @@ def validate_eval(
     report_dir: Path,
     result_loss: float,
     expected_eval: dict[str, Any],
+    *,
+    arm_name: str = "m4",
 ) -> tuple[dict[str, Any], Path]:
     summary = json.loads(
         (report_dir / "eval-provenance" / "eval_provenance.json").read_text()
@@ -2751,7 +3711,7 @@ def validate_eval(
     ):
         if summary.get(key) != expected_eval.get(key):
             raise PhaseMapError(f"cell evaluation provenance mismatch: {key}")
-    losses_path = report_dir / "per-example-loss" / "m4.jsonl"
+    losses_path = report_dir / "per-example-loss" / f"{arm_name}.jsonl"
     losses = read_jsonl(losses_path)
     frozen_sequences = read_jsonl(Path(expected_eval["_eval_sequences_path"]))
     if len(losses) != len(frozen_sequences):
@@ -2854,7 +3814,8 @@ def validate_preconfirmation_surface(
         parts = path.relative_to(attempt_dir).parts
         return (
             len(parts) == 4
-            and parts[:2] == ("work", "m4")
+            and parts[0] == "work"
+            and re.fullmatch(r"m[1-9][0-9]*", parts[1]) is not None
             and parts[-1] == "tokenizer.json"
             and (parts[2] == "export" or parts[2].startswith("learner-"))
         )
@@ -2899,12 +3860,13 @@ def validate_cell_work_evidence(
 ) -> tuple[Path, float, dict[str, Any], dict[str, Any]]:
     """Require positive learner work, a finite endpoint, and clean exits."""
     results_path = attempt_dir / "report" / "results.jsonl"
+    arm_name = cell_arm_name(cell)
     try:
         rows = read_jsonl(results_path)
-        arm = [row for row in rows if row.get("arm") == "m4"]
+        arm = [row for row in rows if row.get("arm") == arm_name]
         if len(rows) != 1 or len(arm) != 1:
             raise WorkEvidenceError(
-                "phase-map compare output must contain exactly one live m4 arm"
+                f"phase-map compare output must contain exactly one live {arm_name} arm"
             )
         result = arm[0]
         raw_loss = float(result["eval_loss"])
@@ -2923,10 +3885,7 @@ def validate_cell_work_evidence(
             raise WorkEvidenceError(
                 "runner, syncer, and every expected learner must exit zero"
             )
-        if not math.isfinite(raw_loss):
-            raise WorkEvidenceError("cell terminal loss is missing or non-finite")
-
-        tape = attempt_dir / "work" / "m4" / "tape.jsonl"
+        tape = attempt_dir / "work" / arm_name / "tape.jsonl"
         observed_work = validate_tape(tape, cell, args)
         barrier_evidence = validate_barrier_version_trace(
             attempt_dir, read_jsonl(tape), cell, args
@@ -2978,9 +3937,10 @@ def result_attempt(
             runner_exit_code=runner_exit_code,
         )
     )
-    tape = attempt_dir / "work" / "m4" / "tape.jsonl"
+    arm_name = cell_arm_name(cell)
+    tape = attempt_dir / "work" / arm_name / "tape.jsonl"
     barrier_evidence = work_evidence["barrier"]
-    layout_sha, merge_modes = validate_layout(attempt_dir)
+    layout_sha, merge_modes = validate_layout(attempt_dir, cell)
     gpu_evidence = (
         validate_gpu_uuid_bijection(attempt_dir)
         if args.require_distinct_learner_gpu_uuids
@@ -2988,7 +3948,7 @@ def result_attempt(
     )
     try:
         _summary, losses_path = validate_eval(
-            attempt_dir / "report", raw_loss, expected_eval
+            attempt_dir / "report", raw_loss, expected_eval, arm_name=arm_name
         )
     except (KeyError, OSError, TypeError, ValueError, PhaseMapError) as exc:
         raise WorkEvidenceError(f"incomplete terminal-loss evidence: {exc}") from exc
@@ -2999,6 +3959,9 @@ def result_attempt(
     retry_authorization = (
         None if retry_context is None else retry_context["retry_authorization"]
     )
+    diverged = not math.isfinite(raw_loss)
+    scientific_status = "DIVERGED" if diverged else "COMPLETED"
+    analysis_loss = args.divergence_loss_cap if diverged else raw_loss
     hardware = {
         "market": "spot",
         "provider": "gcp",
@@ -3063,14 +4026,23 @@ def result_attempt(
         "attempt_id": f"{cell['cell_id']}-attempt-{args.attempt}",
         "cell_id": cell["cell_id"],
         "attempt": args.attempt,
-        "status": "COMPLETED",
+        "status": scientific_status,
         "evaluation_role": "development",
-        "reason_code": "completed_exact_work",
-        "failure_reason": None,
-        "loss": raw_loss,
-        "raw_loss": raw_loss,
-        "loss_kind": "endpoint_nll_per_target_token",
+        "reason_code": (
+            "scientific_divergence_capped" if diverged else "completed_exact_work"
+        ),
+        "failure_reason": "scientific_divergence" if diverged else None,
+        "loss": None if diverged else raw_loss,
+        "analysis_loss": analysis_loss,
+        "raw_loss": None if diverged else raw_loss,
+        "raw_loss_repr": repr(raw_loss),
+        "loss_kind": (
+            "capped_divergence_endpoint_nll"
+            if diverged
+            else "endpoint_nll_per_target_token"
+        ),
         "h": cell["H"],
+        "m": cell_learner_count(cell),
         "mu": cell["mu"],
         "eta": cell["eta"],
         "seed": cell["seed"],
@@ -3125,7 +4097,11 @@ def result_attempt(
         "per_example_loss_sha256": sha256_file(losses_path),
         "layout_uri": uri_for(
             args,
-            attempt_dir / "work" / "m4" / "learner-0" / "resolved-layout.json",
+            attempt_dir
+            / "work"
+            / arm_name
+            / "learner-0"
+            / "resolved-layout.json",
         ),
         "layout_sha256": layout_sha,
         "resolved_merge_modes": merge_modes,
@@ -3507,18 +4483,40 @@ def validate_campaign_work_evidence(manifest: dict[str, Any]) -> None:
 
     for cell_id, coordinates in expected.items():
         row = final[cell_id]
-        if row.get("status") != "COMPLETED":
+        status = row.get("status")
+        analysis_policy = manifest.get("analysis_policy")
+        divergence_cap = (
+            analysis_policy.get("divergence_loss_cap")
+            if isinstance(analysis_policy, dict)
+            and analysis_policy.get("divergence_is_outcome") is True
+            else None
+        )
+        if status not in ("COMPLETED", "DIVERGED"):
             raise WorkEvidenceError(
                 f"cell {cell_id} did not complete", cell_id=cell_id
             )
         loss = row.get("loss")
-        if (
-            isinstance(loss, bool)
-            or not isinstance(loss, (int, float))
-            or not math.isfinite(float(loss))
+        if status == "COMPLETED":
+            if (
+                isinstance(loss, bool)
+                or not isinstance(loss, (int, float))
+                or not math.isfinite(float(loss))
+            ):
+                raise WorkEvidenceError(
+                    f"cell {cell_id} lacks a finite terminal loss", cell_id=cell_id
+                )
+        elif (
+            loss is not None
+            or isinstance(divergence_cap, bool)
+            or not isinstance(divergence_cap, (int, float))
+            or not math.isfinite(float(divergence_cap))
+            or float(divergence_cap) <= 0.0
+            or row.get("analysis_loss") != divergence_cap
+            or row.get("failure_reason") != "scientific_divergence"
         ):
             raise WorkEvidenceError(
-                f"cell {cell_id} lacks a finite terminal loss", cell_id=cell_id
+                f"cell {cell_id} lacks the frozen capped divergence outcome",
+                cell_id=cell_id,
             )
 
         expected_learners = coordinates.get("expected_learner_count")
@@ -3733,6 +4731,17 @@ def acquisition_paths(run_dir: Path, manifest: dict[str, Any]) -> list[Path]:
         paths.extend(path for path in provider_dir.rglob("*") if path.is_file())
     for result in manifest["results"]:
         attempt = run_dir / "cells" / result["cell_id"] / f"attempt-{result['attempt']}"
+        work = result.get("work") if isinstance(result, dict) else None
+        learner_count = (
+            work.get("learner_count") if isinstance(work, dict) else 4
+        )
+        if (
+            isinstance(learner_count, bool)
+            or not isinstance(learner_count, int)
+            or learner_count <= 0
+        ):
+            raise PhaseMapError("sealed result lacks a valid learner count")
+        arm_name = f"m{learner_count}"
         if not attempt.exists():
             continue
         paths.extend(
@@ -3748,7 +4757,7 @@ def acquisition_paths(run_dir: Path, manifest: dict[str, Any]) -> list[Path]:
                 [
                     attempt / "report" / "results.jsonl",
                     attempt / "report" / "acquisition-state.json",
-                    attempt / "report" / "per-example-loss" / "m4.jsonl",
+                    attempt / "report" / "per-example-loss" / f"{arm_name}.jsonl",
                     attempt / "report" / "eval-provenance" / "eval_rows.jsonl",
                     attempt
                     / "report"
@@ -3759,23 +4768,23 @@ def acquisition_paths(run_dir: Path, manifest: dict[str, Any]) -> list[Path]:
                     / "eval-provenance"
                     / "eval_provenance.json",
                     attempt / "report" / "barrier-version-trace.json",
-                    attempt / "work" / "m4" / "tape.jsonl",
-                    attempt / "work" / "m4" / "state.ckpt",
+                    attempt / "work" / arm_name / "tape.jsonl",
+                    attempt / "work" / arm_name / "state.ckpt",
                     *[
                         attempt
                         / "work"
-                        / "m4"
+                        / arm_name
                         / f"learner-{learner}"
                         / "resolved-layout.json"
-                        for learner in range(4)
+                        for learner in range(learner_count)
                     ],
                     *[
                         attempt
                         / "work"
-                        / "m4"
+                        / arm_name
                         / f"learner-{learner}"
                         / "barrier-version-trace.jsonl"
-                        for learner in range(4)
+                        for learner in range(learner_count)
                     ],
                 ]
             )
@@ -3784,15 +4793,15 @@ def acquisition_paths(run_dir: Path, manifest: dict[str, Any]) -> list[Path]:
                 paths.extend(
                     attempt
                     / "work"
-                    / "m4"
+                    / arm_name
                     / f"learner-{learner}"
                     / "resolved-device.json"
-                    for learner in range(4)
+                    for learner in range(learner_count)
                 )
             divergence = attempt / "report" / "scientific-divergence.json"
             if divergence.is_file():
                 paths.append(divergence)
-            capture = attempt / "work" / "m4" / "syncer_probe"
+            capture = attempt / "work" / arm_name / "syncer_probe"
             if capture.is_dir():
                 paths.extend(path for path in capture.rglob("*") if path.is_file())
         elif result["status"] == "INFRA_FAILURE":
@@ -3976,6 +4985,12 @@ def execute(args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
 
+    if plan.get("schema") == "yeto_multiseed_phase_map_randomization_v2":
+        raise PhaseMapError(
+            "E1/E4 execution must use the parallel launch controller with an "
+            "exact externally reviewed runtime authorization"
+        )
+
     if args.attempt > 1:
         if not args.retry_authorized_at:
             raise PhaseMapError("retry attempt requires authorization time")
@@ -4015,14 +5030,17 @@ def execute(args: argparse.Namespace) -> int:
     actual_commit = verify_source_checkout(args)
 
     stage_pairs = stage_seed_pairs(args)
-    declared_train_rows = {args.seed: args.expected_train_rows_hash}
+    primary_seed, _primary_training_seed = stage_pairs[0]
+    declared_train_rows = {primary_seed: args.expected_train_rows_hash}
     declared_train_rows.update(
         seed_hash_map(
             args.expected_additional_train_rows_hash,
             "--expected-additional-train-rows-hash",
         )
     )
-    declared_train_indices = {args.seed: args.expected_train_source_indices_hash}
+    declared_train_indices = {
+        primary_seed: args.expected_train_source_indices_hash
+    }
     declared_train_indices.update(
         seed_hash_map(
             args.expected_additional_train_source_indices_hash,
@@ -4088,16 +5106,16 @@ def execute(args: argparse.Namespace) -> int:
             output_dir=args.run_dir / "frozen-eval" / f"seed-{extra_seed}",
         )
 
-    primary_eval = expected_evals[args.seed]
+    primary_eval = expected_evals[primary_seed]
     additional_rows = {
         seed: expected_evals[seed]["train_file_sha256"]
         for seed, _training in stage_pairs
-        if seed != args.seed
+        if seed != primary_seed
     }
     additional_indices = {
         seed: expected_evals[seed]["train_source_indices_hash"]
         for seed, _training in stage_pairs
-        if seed != args.seed
+        if seed != primary_seed
     }
     bound = build_bound_manifest(
         args,
@@ -4400,13 +5418,43 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--h", type=parse_ints, required=True)
     parser.add_argument("--mu", type=parse_floats, required=True)
     parser.add_argument("--eta", type=parse_floats, required=True)
-    parser.add_argument("--seed", type=int, required=True)
-    parser.add_argument("--training-seed", type=int, required=True)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--training-seed", type=int)
+    parser.add_argument(
+        "--seed-pair",
+        type=parse_seed_pair,
+        action="append",
+        default=[],
+        metavar="SHUFFLE:TRAINING",
+        help="first-class paired seed block; repeat once per independent seed",
+    )
     parser.add_argument("--additional-seed", type=int, action="append", default=[])
     parser.add_argument(
         "--additional-training-seed", type=int, action="append", default=[]
     )
     parser.add_argument("--order-seed", type=int, required=True)
+    parser.add_argument(
+        "--m",
+        "--learner-counts",
+        "--learners",
+        dest="learner_counts",
+        type=parse_ints,
+        default=[4],
+        help="comma-separated learner counts; best-paper v2 supports 1,4,16",
+    )
+    parser.add_argument(
+        "--block-arm",
+        type=parse_block_arm,
+        action="append",
+        default=[],
+        metavar="H:MU:ETA",
+        help="explicit member of a mixed-eta atomic seed block; repeat three times per H",
+    )
+    parser.add_argument(
+        "--multiseed-design",
+        choices=("e1", "e4"),
+        help="enforce the frozen best-paper v2 E1 or E4 paired-block design",
+    )
     parser.add_argument("--eval-split-seed", type=int, default=331)
     parser.add_argument("--freeze-additional-eval-seed", type=int, action="append", default=[])
     parser.add_argument("--token-budget", type=int, default=655_360)

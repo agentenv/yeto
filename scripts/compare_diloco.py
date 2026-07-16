@@ -28,6 +28,7 @@ Presets (--settings, comma-separated or 'all'):
 
   m2        M=2, everything default (bf16 wire, alpha 0.5, pipelined)
   m4        M=4
+  m16       M=16
   alpha0    broadcasts overwrite (large-M recommendation)
   q4        4-bit E3M0 delta pushes on the wire
   serial    --pipeline 1 (pre-pipelining scheduler behavior)
@@ -172,10 +173,11 @@ class Arm:
 PRESETS: dict[str, Arm] = {
     "m2": Arm("m2"),
     "m4": Arm("m4", m=4),
-    # E1 noise-floor control: one learner behind the identical syncer stack
+    # Best-paper learner-count control: one learner behind the identical syncer stack
     # (fragments, fixed windows, outer step, probe capture) with quorum
     # defaulting to 1. Every "merge" is a single learner's window delta.
     "m1": Arm("m1", m=1),
+    "m16": Arm("m16", m=16),
     "m12": Arm("m12", m=12, fragments=12, quorum=6),
     "alpha0": Arm("alpha0", merge_alpha=0.0),
     "q4": Arm("q4", wire_dtype="q4"),
@@ -339,6 +341,17 @@ def _float_list_value(spec: str, idx: int) -> float:
     if not vals:
         return 0.0
     return vals[idx % len(vals)]
+
+
+def learner_gpu_packing(learner_count: int, gpu_slots: int) -> dict[int, list[int]]:
+    """Return the exact round-robin single-process learner/GPU packing map."""
+
+    if learner_count <= 0 or gpu_slots <= 0:
+        raise ValueError("learner_count and gpu_slots must be positive")
+    packing = {slot: [] for slot in range(gpu_slots)}
+    for learner_id in range(learner_count):
+        packing[learner_id % gpu_slots].append(learner_id)
+    return packing
 
 
 def learner_env(args, learner_id: int) -> dict[str, str] | None:
@@ -599,6 +612,8 @@ def learner_command(
             cmd += ["--fixed-window-schedule", str(fixed_window_schedule)]
         if getattr(args, "pad_to_fixed_window_tokens", False):
             cmd += ["--pad-to-fixed-window-tokens"]
+        if getattr(args, "allow_terminal_partial_fixed_window", False):
+            cmd += ["--allow-terminal-partial-fixed-window"]
         if getattr(args, "freeze_delta_before_delay", False):
             cmd += ["--freeze-delta-before-delay"]
         if getattr(args, "barrier_sync", False):
@@ -2564,6 +2579,12 @@ def main() -> int:
         action="store_true",
         help="accepted for fixed-token experiment configs; windows "
         "round to whole optimizer steps",
+    )
+    p.add_argument(
+        "--allow-terminal-partial-fixed-window",
+        action="store_true",
+        help="close a preregistered positive partial fixed window at the exact "
+        "learner step cap instead of discarding its final trained delta",
     )
     p.add_argument(
         "--fixed-window-schedule",

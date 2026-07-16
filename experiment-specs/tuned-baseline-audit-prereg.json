@@ -1,0 +1,418 @@
+{
+  "schema": "tuned_baseline_audit_prereg_v1",
+  "revision": "1.0",
+  "registered_at_date": "2026-07-16",
+  "title": "A tuned-baseline audit of outer optimization for communication-efficient training",
+  "status": {
+    "prospective_blocks": [
+      "A1",
+      "A2",
+      "A3",
+      "A4",
+      "A5",
+      "A6_OMR",
+      "A6_SLOWMO"
+    ],
+    "historical_outcome_known_blocks": [
+      "A6_SCAFFOLD_LITE"
+    ],
+    "no_controller_or_optimizer_zoo_authority": true
+  },
+  "authority": {
+    "human_readable": "EXPERIMENT-PROGRAM.md",
+    "superseded_history": "history/EXPERIMENT-PROGRAM-pre-audit-2026-07-16.md",
+    "superseded_history_sha256": "7ece64ac0c828b183266c451b61c196dbab89762d95703bcf820ca01f7f8e958",
+    "sealed_sources": {
+      "P1_ADAPTIVE_FINAL.md": "bda2890669e135f27565c628991c012c1ee297863f93a2f0971c81e37e81d394",
+      "P1R0_FINAL.md": "fda13d7cd819dfeb9be7988dbeb4eb00ac5d064158e0225745eee638a062de4a",
+      "PAPER_9B.md": "7e65f8bbcefe9139909034dbfde4bf5b18790bc70dd456fe6940588597025b23",
+      "frozen_phase_map_prereg.md": "6986fcf97cd75d1aaeb70c643e8674fe7b6e61a39450b54adf4ad320a214bab1",
+      "parallel_cells_amendment.md": "33d2bca5e00737145c7996c236f9f3face255216608c7c8b635a18cdb0fc2542"
+    }
+  },
+  "thesis": {
+    "hypothesis": "Fixed-eta baselines can create or exaggerate claimed outer-optimizer effects; independent per-arm LR tuning with paired seeds will often attenuate or collapse them.",
+    "primary_object": "independently tuned mu=0 endpoint loss versus communication horizon/communication cost",
+    "mechanistic_residual": "curvature-weighted second-order buffer energy after first-order step calibration",
+    "outcome_neutral": true
+  },
+  "estimands": {
+    "fixed": "L(method,H,eta_pub,s)-L(baseline,H,eta_pub,s)",
+    "tuned": "min_eta L(method,H,eta,s)-min_eta L(baseline,H,eta,s)",
+    "frontier": "min_eta L(mu=0,H,eta)",
+    "negative_delta_favors_method": true
+  },
+  "classification": {
+    "FIXED_NOT_REPLICATED": "fixed sign wrong or Holm-adjusted seed-level 95% CI includes zero",
+    "COLLAPSES_WITH_TUNING": "fixed effect replicates and tuned CI is wholly inside the stack equivalence interval",
+    "SURVIVES_TUNING": "fixed effect replicates, tuned CI excludes zero in the published direction, and absolute tuned mean is at least epsilon",
+    "REVERSES_WITH_TUNING": "fixed effect replicates and tuned CI excludes zero in the opposite direction",
+    "ATTENUATED_OR_INCONCLUSIVE": "none of the other classifications applies"
+  },
+  "equivalence_margins": {
+    "smollm2_135m_nll": 0.01,
+    "qwen35_9b_lora_nll": 0.009,
+    "omr_c4_llama150m_nll": "freeze the validation-NLL improvement from 5% additional tokens on a separate baseline compute curve before any method evaluation",
+    "slowmo_cifar10_accuracy_percentage_points": 0.25
+  },
+  "eta_first_order_fit": {
+    "formula": "eta_star(mu)=(1-mu)*eta_star(0)",
+    "positive_momentum_rows": [
+      {
+        "h": 16,
+        "mu": 0.5,
+        "eta0": 0.021875,
+        "predicted": 0.0109375,
+        "observed": 0.0109375,
+        "observed_over_predicted": 1.0
+      },
+      {
+        "h": 16,
+        "mu": 0.9,
+        "eta0": 0.021875,
+        "predicted": 0.0021875,
+        "observed": 0.002734375,
+        "observed_over_predicted": 1.25
+      },
+      {
+        "h": 64,
+        "mu": 0.5,
+        "eta0": 0.021875,
+        "predicted": 0.0109375,
+        "observed": 0.0109375,
+        "observed_over_predicted": 1.0
+      },
+      {
+        "h": 64,
+        "mu": 0.9,
+        "eta0": 0.021875,
+        "predicted": 0.0021875,
+        "observed": 0.002734375,
+        "observed_over_predicted": 1.25
+      },
+      {
+        "h": 256,
+        "mu": 0.5,
+        "eta0": 0.04375,
+        "predicted": 0.021875,
+        "observed": 0.021875,
+        "observed_over_predicted": 1.0
+      },
+      {
+        "h": 256,
+        "mu": 0.9,
+        "eta0": 0.04375,
+        "predicted": 0.004375,
+        "observed": 0.0109375,
+        "observed_over_predicted": 2.5
+      }
+    ],
+    "observed_on_prediction_through_origin": {
+      "slope": 1.0416666666666667,
+      "r2": 0.83,
+      "rmse": 0.00265733484791127
+    },
+    "identity_coefficient": {
+      "r2": 0.8248,
+      "rmse": 0.002697670315329198,
+      "mae": 0.0012760416666666669
+    },
+    "normalized_ratio_fit": {
+      "slope": 1.0256410256410258,
+      "r2": 0.8687782805429864,
+      "rmse": 0.06223233281713975
+    },
+    "exact_rows": 3,
+    "rows_within_25_percent": 5,
+    "row_count": 6,
+    "median_absolute_relative_error": 0.125,
+    "outlier": "H256,mu=.9 is 2.5x the first-order prediction"
+  },
+  "house_rules": {
+    "spot_only": true,
+    "on_demand_fallback": false,
+    "accelerator_ceiling_a100_equivalent": 16,
+    "max_idle_before_science_seconds": 600,
+    "exact_numeric_identity_and_teardown_required": true,
+    "append_only_attempt_manifest": true,
+    "retain_all_failures_divergences_and_retries": true,
+    "loss_blind_mechanical_retries_only": true,
+    "whole_atomic_block_retry": true,
+    "completed_peers_retain_original_completed_rows": true,
+    "partial_state_resume_forbidden": true,
+    "scientific_divergence_assigned_infinite_tuning_loss": true,
+    "poor_loss_retry_forbidden": true,
+    "train_all_then_audit_all": true,
+    "partial_audit_exposure_forbidden": true,
+    "seed_level_pair_is_independent_unit": true,
+    "equal_method_tuning_budget": true,
+    "one_boundary_extension_maximum": true,
+    "interior_optimum_required": true,
+    "evaluation_bootstrap_is_supplementary_only": true,
+    "precision_expansion_trigger": "adjusted CI half-width exceeds epsilon after the complete initial seed block",
+    "precision_expansion_sign_blind": true
+  },
+  "seed_registry": {
+    "training_seed_rule": "for four-digit s use int(str(s)+str(s)); legacy three-digit seeds retain the same decimal-concatenation rule",
+    "A1": {
+      "development": [359, 373],
+      "confirmation": [383, 397, 409, 421, 433, 443, 457, 461]
+    },
+    "A2": {
+      "development": [2003, 2011],
+      "confirmation_initial": [2017, 2027, 2029],
+      "confirmation_precision_expansion": [2039, 2053, 2063]
+    },
+    "A3": {
+      "development": [359, 373]
+    },
+    "A4": {
+      "development": [2069, 2081],
+      "confirmation_initial": [2083, 2087, 2089],
+      "confirmation_precision_expansion": [2099, 2111, 2113]
+    },
+    "A5": {
+      "confirmation_initial": [2129, 2131, 2137, 2141, 2143, 2153, 2161, 2179],
+      "confirmation_precision_expansion": [2203, 2207]
+    },
+    "A6_OMR": {
+      "development": [2213],
+      "confirmation_initial": [2221, 2237, 2239],
+      "confirmation_precision_expansion": [2243, 2251, 2267]
+    },
+    "A6_SLOWMO": {
+      "development": [2269, 2273],
+      "confirmation": [2281, 2287, 2293, 2297, 2309]
+    }
+  },
+  "experiments": {
+    "A1": {
+      "name": "multi-seed 135M momentum anchors",
+      "stack": "SmolLM2-135M full-parameter frozen phase-map protocol",
+      "fixed_eta": 0.0875,
+      "anchors": [
+        {
+          "h": 16,
+          "baseline_mu": 0.0,
+          "method_mu": 0.9,
+          "baseline_eta_grid": [0.015467960838455726, 0.021875, 0.030935921676911452],
+          "method_eta_grid": [0.0013671875, 0.002734375, 0.00546875]
+        },
+        {
+          "h": 256,
+          "baseline_mu": 0.0,
+          "method_mu": 0.5,
+          "baseline_eta_grid": [0.030935921676911452, 0.04375, 0.061871843353822904],
+          "method_eta_grid": [0.0109375, 0.021875, 0.030935921676911452]
+        }
+      ],
+      "gate": "both fixed penalties replicate and both tuned Holm-adjusted 95% CIs are inside [-.010,+.010]"
+    },
+    "A2": {
+      "name": "Qwen3.5-9B LoRA transfer",
+      "fixed_eta": 0.175,
+      "anchors": [
+        {
+          "h": 16,
+          "baseline_mu": 0.0,
+          "method_mu": 0.9,
+          "baseline_eta_grid": [0.175, 0.28, 0.448],
+          "method_eta_grid": [0.014, 0.028, 0.056]
+        },
+        {
+          "h": 256,
+          "baseline_mu": 0.0,
+          "method_mu": 0.5,
+          "baseline_eta_grid": [0.175, 0.28, 0.448],
+          "method_eta_grid": [0.0875, 0.175, 0.35]
+        }
+      ],
+      "audit_rows": 1024,
+      "development_rows": 1024,
+      "gate": "fixed effects reproduce and tuned CIs are inside [-.009,+.009] at both H"
+    },
+    "A3": {
+      "name": "tuned memoryless frontier",
+      "mu": 0.0,
+      "existing_minima": {
+        "16": {"eta": 0.021875, "nll": 2.046027520801208},
+        "64": {"eta": 0.021875, "nll": 2.1074817812764506},
+        "256": {"eta": 0.04375, "nll": 2.1486300765736375}
+      },
+      "extension_grids": {
+        "8": [0.0109375, 0.015467960838455726, 0.021875, 0.030935921676911452],
+        "512": [0.021875, 0.030935921676911452, 0.04375, 0.061871843353822904, 0.0875]
+      },
+      "boundary_extensions": {
+        "8": [0.00546875, 0.04375],
+        "512": [0.015467960838455726, 0.12374368670764582]
+      },
+      "matched_eta_kernel": 0.021875,
+      "kernel_replay_required": true,
+      "recapture_if_mechanical_tape_gate_fails": {
+        "h": [16, 64, 256],
+        "mu": 0.0,
+        "eta": 0.021875,
+        "seed": 347
+      },
+      "law": {
+        "V_H": "sum_f[K_f+2*sum_{k=1}^{K_f-1}(K_f-k)*rho_k(H,f)]",
+        "model": "L_init-a*K_H*eta+b*V_H*eta^2 with a>0,b>0",
+        "eta_prediction_log2_tolerance": 0.5,
+        "frontier_extension_rmse_max": 0.01,
+        "prediction_interval_coverage_required": true,
+        "ordering_required": ["F8<=F16", "F512>=F256"]
+      }
+    },
+    "A4": {
+      "name": "M-axis",
+      "m": [1, 4],
+      "h": [16, 256],
+      "fixed_eta": 0.0875,
+      "eta_grids": {
+        "H16_mu0": [0.0109375, 0.021875, 0.04375],
+        "H16_mu0.9": [0.0013671875, 0.002734375, 0.00546875],
+        "H256_mu0": [0.021875, 0.04375, 0.0875],
+        "H256_mu0.5": [0.0109375, 0.021875, 0.04375]
+      },
+      "gate": "fixed effects and tuned classifications reported at each M plus M-by-tuning-by-method interaction"
+    },
+    "A5": {
+      "name": "closed-loop buffer surgery",
+      "h": [16, 256],
+      "mu": 0.9,
+      "trajectories_initial": 8,
+      "trajectories_max": 10,
+      "checkpoints_per_seed_h": 6,
+      "continuation_commits": 12,
+      "one_step_evaluations": 1536,
+      "closed_loop_continuations": 768,
+      "closed_loop_panel": "scale_matched_panel_2_only",
+      "branches": [
+        "factual",
+        "zero_reset",
+        "same_norm_aligned",
+        "same_norm_anti_aligned",
+        "orthogonal",
+        "transverse_sign_flipped",
+        "random_rotated_transverse",
+        "history_shuffled"
+      ],
+      "matched_panel": ["final_applied_step_norm", "current_gradient_aligned_component_where_feasible"],
+      "prediction": "-eta*gTd+0.5*eta^2*dTHd",
+      "gate": {
+        "curvature_coefficient_positive_ci": true,
+        "heldout_rmse_improvement_min_fraction": 0.2,
+        "correct_branch_orderings_min": 6,
+        "correct_branch_orderings_denominator": 8,
+        "one_step_and_closed_loop_required": true
+      }
+    },
+    "A6_OMR": {
+      "source": "arXiv:2605.28585",
+      "model": "PrimeIntellect/llama-150m-fresh",
+      "dataset": "allenai/c4",
+      "sequence_length": 2048,
+      "replicas": 2,
+      "h": [64, 2048],
+      "total_inner_steps": 12500,
+      "approx_tokens": 3300000000,
+      "inner_lr": 0.001,
+      "exact_recurrence": {
+        "buffer": "m_next=beta_out*m+(1-beta_out)*g",
+        "direction": "d=(1+beta_out)*m_next-beta_out*m",
+        "step": "theta=theta-nu*d",
+        "hard_restart": "set only m=0 after every K completed outer rounds"
+      },
+      "fixed_outer_lr": 0.9,
+      "beta_out": 0.7,
+      "hard_restart_period": 3,
+      "eta_grid_both_methods": [0.1, 0.3, 0.5, 0.7, 0.9, 1.1],
+      "joint_boundary_extension": [0.05, 1.3],
+      "primary": "fixed replication then independently tuned no-restart versus hard restart",
+      "secondary": "divergence rate and loss dispersion across the common eta grid"
+    },
+    "A6_SCAFFOLD_LITE": {
+      "new_compute": false,
+      "classification": "HISTORICAL_MAGNITUDE_COLLAPSE",
+      "fixed_scaffold_loss": 1.47322,
+      "fixed_control_loss": 1.54547,
+      "fixed_improvement": 0.07225,
+      "tuned_memoryless_eta": 0.749500521952363,
+      "tuned_memoryless_loss": 1.4723387220473634,
+      "fresh_eta_0.28_control_loss": 1.543579193244204,
+      "tuned_memoryless_improvement": 0.0712404711968406,
+      "fraction_of_fixed_effect_magnitude_accounted_for": 0.9860272830012541,
+      "difference_in_improvement_magnitudes": 0.0010095288031593957,
+      "fresh_seed_confirmation": false
+    },
+    "A6_SLOWMO": {
+      "source": "arXiv:1910.00643, ICLR 2020",
+      "benchmark": "CIFAR-10 Local SGD",
+      "model": "ResNet-18",
+      "epochs": 200,
+      "global_batch_size": 4096,
+      "logical_workers": 32,
+      "physical_spot_a100s": 16,
+      "logical_workers_per_gpu": 2,
+      "packing_parity_canary_required": true,
+      "local_nesterov": 0.9,
+      "weight_decay": 0.0001,
+      "warmup_epochs": 5,
+      "lr_decay_epochs": [100, 150, 175],
+      "tau": 12,
+      "slowmo_alpha": 1.0,
+      "slowmo_beta": 0.7,
+      "exact_recurrence": {
+        "buffer": "u_next=beta*u+(x_outer_start-x_local_end)/gamma",
+        "step": "x_next=x_outer_start-alpha*gamma*u_next",
+        "normalized_ema_mapping": "m=(1-beta)*gamma*u gives m_next=beta*m+(1-beta)*delta and effective outer LR alpha/(1-beta) for constant gamma"
+      },
+      "reset_local_momentum_at_outer_boundary": true,
+      "published_accuracy": {
+        "local_sgd": 91.73,
+        "slowmo": 93.2
+      },
+      "reference_fast_lr_grid_both_methods": [0.01, 0.025, 0.05, 0.1, 0.15],
+      "beta_search_forbidden": true,
+      "fixed_replication_mean_gain_min_points": 0.5,
+      "fixed_replication_lower_ci_gt_zero": true,
+      "tuned_collapse_interval_points": [-0.25, 0.25]
+    }
+  },
+  "gates": [
+    {"id": "G0", "name": "provenance", "rule": "all hashes/cells/work/live controls/blinding/replay/teardown pass"},
+    {"id": "G1", "name": "eta law report", "rule": "report complete fit and residuals; no binary pass"},
+    {"id": "G2", "name": "A1 fixed replication", "rule": "both Holm-adjusted lower endpoints >0"},
+    {"id": "G3", "name": "A1 tuned collapse", "rule": "both tuned adjusted CIs inside [-.010,+.010]"},
+    {"id": "G4", "name": "A2 transfer", "rule": "fixed effects reproduce and tuned CIs inside [-.009,+.009]"},
+    {"id": "G5", "name": "A3 kernel integrity", "rule": "matched-eta exact replay at all five H; predictions frozen before loss unblind"},
+    {"id": "G6", "name": "A3 eta prediction", "rule": "both extension eta errors <=0.5 log2 units"},
+    {"id": "G7", "name": "A3 frontier prediction", "rule": "both in 95% PI, RMSE<=.010, endpoint ordering correct"},
+    {"id": "G8", "name": "A4 M-axis", "rule": "report fixed/tuned effects at M1/M4 and interaction; scope to passing M"},
+    {"id": "G9", "name": "A5 second order", "rule": "positive curvature CI, >=20% RMSE gain, >=6/8 ordering at both H"},
+    {"id": "G10", "name": "A6 OMR fixed", "rule": "published direction with CI excluding zero"},
+    {"id": "G11", "name": "A6 OMR tuned", "rule": "classify with prebound compute-equivalent epsilon"},
+    {"id": "G12", "name": "A6 SCAFFOLD historical", "rule": "cite as historical magnitude collapse only"},
+    {"id": "G13", "name": "A6 SlowMo fixed", "rule": "mean gain >=.50 points and lower CI>0"},
+    {"id": "G14", "name": "A6 SlowMo tuned", "rule": "collapse CI inside [-.25,+.25] or report alternate classification"},
+    {"id": "G15", "name": "cost and Spot", "rule": "Spot only, <=16 accelerators, within block ceiling plus reserve"}
+  ],
+  "costs": {
+    "currency": "USD",
+    "spot_preemption_reserve_fraction": 0.25,
+    "blocks": {
+      "A1": {"planned_arms": 88, "a100_hours_with_reserve": 40, "range_usd": [35, 60], "hard_ceiling_usd": 75},
+      "A2": {"planned_arms": 48, "max_arms": 72, "range_usd": [65, 125], "hard_ceiling_usd": 160},
+      "A3": {"planned_extension_arms": 18, "a100_hours_range": [10, 20], "range_usd": [10, 25], "hard_ceiling_usd": 40},
+      "A4": {"planned_arms": 96, "max_arms": 144, "a100_hours_range": [35, 70], "range_usd": [40, 110], "hard_ceiling_usd": 140},
+      "A5": {"a100_hours_range": [90, 180], "range_usd": [100, 250], "hard_ceiling_usd": 320},
+      "A6_OMR": {"planned_runs": 48, "max_runs": 72, "a100_equivalent_hours_range": [120, 360], "range_usd": [250, 800], "hard_ceiling_usd": 1000},
+      "A6_SCAFFOLD_LITE": {"new_compute": 0, "range_usd": [0, 0], "hard_ceiling_usd": 0},
+      "A6_SLOWMO": {"planned_runs": 40, "a100_hours_range": [160, 480], "range_usd": [180, 600], "hard_ceiling_usd": 750}
+    },
+    "program_range_usd": [680, 1970],
+    "program_hard_ceiling_usd": 2485,
+    "unused_budget_transfer_forbidden_without_amendment": true
+  }
+}

@@ -48,6 +48,14 @@ ADOPTED_PARALLEL_AMENDMENT_PATH = "docs/AMENDMENT-parallel-cells.md"
 ADOPTED_PARALLEL_AMENDMENT_SHA256 = (
     "e2c87fd6c2ec0e4b91f488b5771334e0befd175560a3e2ccfcf349be1ee8b3dd"
 )
+ADOPTED_PARALLEL_AMENDMENT_REVISION_SHA256S = frozenset(
+    {
+        ADOPTED_PARALLEL_AMENDMENT_SHA256,
+        "8e9c23dd9306672a2165b060dfea277f5c6adc9796014039e1e1d3759f2334df",
+        "33781ad5d4deb29120a2d41f3ccbe2937a5945b97db6400ff1690abeceb520f7",
+        "33d2bca5e00737145c7996c236f9f3face255216608c7c8b635a18cdb0fc2542",
+    }
+)
 P0A_SOURCE_REBIND_FROM_COMMIT = "0af7f4a80426babc14896c7c1f7885abcb331d46"
 P0B_LEGACY_PARENT_WORK_EXTENSION = {
     "learner_count": 4,
@@ -256,7 +264,7 @@ def _validate_p0b_source_rebind(
     if (
         amendment.returncode != 0
         or hashlib.sha256(amendment.stdout).hexdigest()
-        != ADOPTED_PARALLEL_AMENDMENT_SHA256
+        not in ADOPTED_PARALLEL_AMENDMENT_REVISION_SHA256S
     ):
         errors.append("P0b source rebind lacks the exact adopted amendment")
         return False
