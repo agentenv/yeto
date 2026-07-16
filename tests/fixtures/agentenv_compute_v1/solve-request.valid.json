@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "planItemId": "ae-0123456789abcdef0123-000",
+  "launch": {
+    "schemaVersion": 1,
+    "nodes": 2
+  },
+  "supply": {
+    "schemaVersion": 1,
+    "snapshotId": "snap-1",
+    "contentEtag": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "generatedAt": "2026-07-15T00:00:00.000Z",
+    "offerings": []
+  }
+}

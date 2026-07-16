@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "snapshotId": "snap-2",
+  "contentEtag": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "generatedAt": "2026-07-15T00:00:00.000Z",
+  "offerings": [
+    {
+      "offeringId": "ae:aws:h100:exact-a",
+      "region": "us-east-1",
+      "market": "on_demand",
+      "accelerator": "H100",
+      "acceleratorsPerNode": 8,
+      "gpuMemoryGb": 80,
+      "vcpus": 192,
+      "topologyCapabilities": ["nvlink"],
+      "sshUser": "ubuntu",
+      "hourlyPriceUsd": "12.00",
+      "maxCount": 4,
+      "validUntil": "2026-07-15T00:30:00.000Z",
+      "provider": "aws",
+      "createReady": true,
+      "availability": "unknown"
+    },
+    {
+      "offeringId": "ae:verda:h100:exact-b",
+      "region": "eu-north-1",
+      "market": "on_demand",
+      "accelerator": "H100",
+      "acceleratorsPerNode": 8,
+      "gpuMemoryGb": 80,
+      "vcpus": 192,
+      "topologyCapabilities": ["nvlink"],
+      "sshUser": "ubuntu",
+      "hourlyPriceUsd": "12.00",
+      "maxCount": 4,
+      "validUntil": "2026-07-15T00:30:00.000Z",
+      "provider": "verda",
+      "createReady": true,
+      "availability": "available"
+    }
+  ]
+}

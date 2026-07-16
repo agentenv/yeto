@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "snapshotId": "snap-1",
+  "contentEtag": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "generatedAt": "2026-07-15T00:00:00.000Z",
+  "offerings": [
+    {
+      "offeringId": "ae:aws:g5-xlarge:0123456789abcdef01234567",
+      "region": "eu-central-1",
+      "market": "on_demand",
+      "accelerator": "A10G",
+      "acceleratorsPerNode": 1,
+      "gpuMemoryGb": 24,
+      "vcpus": 4,
+      "topologyCapabilities": ["nvlink"],
+      "sshUser": "ubuntu",
+      "hourlyPriceUsd": "1.50",
+      "maxCount": 3,
+      "validUntil": "2026-07-15T00:30:00.000Z",
+      "provider": "aws",
+      "createReady": true,
+      "availability": "unknown"
+    }
+  ]
+}

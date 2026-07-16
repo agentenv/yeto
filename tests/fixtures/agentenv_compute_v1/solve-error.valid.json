@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "status": "unsatisfiable",
+  "reason": "no capacity for accelerator H200",
+  "snapshotId": "snap-1",
+  "contentEtag": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
