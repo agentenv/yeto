@@ -77,7 +77,7 @@ TEARDOWN_RESERVE_FIXED_USD = 0.25
 TRANSIENT_PROVIDER_POLL_SECONDS = 1.0
 TRANSIENT_PROVIDER_DELETE_TIMEOUT_SECONDS = 900
 GLOBAL_A100_CEILING = 16
-PREFERRED_PROBE_A100S = 4
+PREFERRED_PROBE_A100S = 1
 MAX_PREFERRED_PROBE_WIDTH = 4
 FUTURE_STAGE_CELL_COUNTS = {
     "a1d": {16: 36, 256: 36},
@@ -1016,8 +1016,8 @@ def _audit_provision_loop(
             backend.note(
                 f"ADAPTIVE CAPACITY probe {tries} for {identity.slot}/g"
                 f"{identity.generation}: region {pexec.region_for_zone(zone)}, zone "
-                f"{zone}; exact run ID/nonce retained, Spot 4g-first then proven 1g "
-                "fallback only after pre-creation stockout."
+                f"{zone}; exact run ID/nonce retained, Spot 1g preferred under the "
+                "ceiling amendment; provider stockout rotates the registered zones."
             )
             provider = dict(backend.provision(identity))
             pexec.validate_provider_record(provider, identity.registry_row())
@@ -1150,7 +1150,7 @@ def _audit_provision_loop(
 def _install_launch_census_and_direct_fallback_patch(
     *, base, backend, campaign_root: Path
 ) -> None:
-    """Re-census before every launch and permit evidenced direct 1g expansion."""
+    """Re-census before every launch and reserve only unseen 1g probes."""
 
     original_provision = backend.provision
     lock = threading.RLock()
@@ -1171,7 +1171,16 @@ def _install_launch_census_and_direct_fallback_patch(
         zone = backend.zone_for_name(identity.run_id)
         with lock:
             direct_parent = backend.audit_direct_1g_authorized_zones.get(zone)
-            requested_a100s = 1 if direct_parent is not None else 4
+            preferred_spec = backend._packet_paths(identity)[0]
+            preferred_value = load_json(preferred_spec)
+            preferred_machine = str(
+                (preferred_value.get("cloud") or {}).get("machine_type")
+            )
+            if direct_parent is None and preferred_machine != "a2-highgpu-1g":
+                raise ControllerError(
+                    "ceiling-amended audit packet is not bound to preferred 1g"
+                )
+            requested_a100s = 1
             census = _global_a100_census(backend)
             visible_names = {
                 str(row["name"])
@@ -1257,7 +1266,7 @@ def _install_launch_census_and_direct_fallback_patch(
             except Exception as exc:
                 context = exc.__context__
                 if (
-                    direct_parent is not None
+                    requested_a100s == 1
                     and "preferred spec is not the reviewed spot 4g shape"
                     in str(exc).casefold()
                     and context is not None
@@ -1267,17 +1276,6 @@ def _install_launch_census_and_direct_fallback_patch(
                 raise
         finally:
             release_pending(identity.run_id)
-        if provider.get("machine_type") == "a2-highgpu-1g":
-            with lock:
-                backend.audit_direct_1g_authorized_zones.setdefault(
-                    str(provider["zone"]),
-                    {
-                        "run_id": str(provider["run_id"]),
-                        "instance_numeric_id": str(
-                            provider["instance_numeric_id"]
-                        ),
-                    },
-                )
         if direct_authorization_path is not None:
             backend.note(
                 f"DIRECT 1G FALLBACK evidence sealed at "
@@ -2364,8 +2362,8 @@ def _provision_cost_eligible_initial_generation(
         errors: list[BaseException] = []
         backend.note(
             f"COST-ELIGIBLE CAPACITY search {attempt + 1} for {slot}: first zone "
-            f"{p1.ZONE_ROTATION[0]}, Spot 4g-first with reviewed 1g fallback only "
-            "after provider-confirmed pre-creation stockout."
+            f"{p1.ZONE_ROTATION[0]}, Spot 1g preferred under the ceiling amendment; "
+            "provider stockout rotates the registered zones."
         )
         _audit_provision_loop(
             base=base,
@@ -2884,7 +2882,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     global_headroom = GLOBAL_A100_CEILING - global_existing
     if global_headroom < PREFERRED_PROBE_A100S:
         raise ControllerError(
-            f"global A100 headroom is {global_headroom}; a reviewed 4g-first Spot "
+            f"global A100 headroom is {global_headroom}; a reviewed 1g Spot "
             "probe could exceed the total ceiling"
         )
     prelaunch_cost_lock = threading.RLock()

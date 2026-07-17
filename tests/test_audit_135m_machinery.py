@@ -402,6 +402,10 @@ def test_global_a100_count_uses_accelerator_inventory_or_machine_shape() -> None
 def test_launch_census_deduplicates_provider_visible_pending_probes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    spec = tmp_path / "preferred-1g.json"
+    spec.write_text(
+        json.dumps({"cloud": {"machine_type": "a2-highgpu-1g"}})
+    )
     visible: dict[str, int] = {}
     release = threading.Event()
     visible_events = {name: threading.Event() for name in ("run-a", "run-b")}
@@ -415,14 +419,18 @@ def test_launch_census_deduplicates_provider_visible_pending_probes(
         def zone_for_name(run_id: str) -> str:
             return "us-central1-a"
 
+        @staticmethod
+        def _packet_paths(identity):
+            return spec, None, None, None
+
         def provision(self, identity):
             if identity.run_id in visible_events:
-                visible[identity.run_id] = 4
+                visible[identity.run_id] = 1
                 visible_events[identity.run_id].set()
                 assert release.wait(timeout=2)
             return {
                 "run_id": identity.run_id,
-                "machine_type": "a2-highgpu-4g",
+                "machine_type": "a2-highgpu-1g",
                 "zone": "us-central1-a",
                 "region": "us-central1",
                 "instance_numeric_id": identity.run_id,
@@ -433,8 +441,9 @@ def test_launch_census_deduplicates_provider_visible_pending_probes(
         controller,
         "_global_a100_census",
         lambda backend: {
-            "total_attached_a100_equivalent": sum(visible.values()),
-            "instances": [
+            "total_attached_a100_equivalent": 12 + sum(visible.values()),
+            "instances": [{"name": "foreign-a100", "a100_count": 12}]
+            + [
                 {"name": name, "a100_count": count}
                 for name, count in visible.items()
             ],
@@ -475,26 +484,31 @@ def test_launch_census_deduplicates_provider_visible_pending_probes(
 def test_launch_census_still_counts_unseen_pending_probes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    spec = tmp_path / "preferred-1g.json"
+    spec.write_text(
+        json.dumps({"cloud": {"machine_type": "a2-highgpu-1g"}})
+    )
     provisioned: list[str] = []
     backend = SimpleNamespace(
         provision=lambda identity: provisioned.append(identity.run_id),
         zone_for_name=lambda run_id: "us-central1-a",
+        _packet_paths=lambda identity: (spec, None, None, None),
     )
     monkeypatch.setattr(
         controller,
         "_global_a100_census",
         lambda backend: {
-            "total_attached_a100_equivalent": 4,
-            "instances": [{"name": "visible-foreign", "a100_count": 4}],
+            "total_attached_a100_equivalent": 12,
+            "instances": [{"name": "visible-foreign", "a100_count": 12}],
         },
     )
     controller._install_launch_census_and_direct_fallback_patch(
         base=SimpleNamespace(), backend=backend, campaign_root=tmp_path
     )
     backend.audit_pending_launches.update(
-        {"unseen-a": 4, "unseen-b": 4, "unseen-c": 4}
+        {"unseen-a": 1, "unseen-b": 1, "unseen-c": 1, "unseen-d": 1}
     )
-    backend.audit_pending_launch_a100s = 12
+    backend.audit_pending_launch_a100s = 4
 
     with pytest.raises(controller.ControllerError, match="global 16-A100 ceiling"):
         backend.provision(
@@ -502,7 +516,36 @@ def test_launch_census_still_counts_unseen_pending_probes(
         )
 
     assert provisioned == []
-    assert backend.audit_pending_launch_a100s == 12
+    assert backend.audit_pending_launch_a100s == 4
+
+
+def test_audit_packet_specs_prefer_one_gpu_spot_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import build_audit_135m_launch_packet as packet
+
+    monkeypatch.setattr(packet, "_configure_base", lambda: None)
+    monkeypatch.setattr(
+        packet._base,
+        "spec_value",
+        lambda **kwargs: {
+            "cloud": {
+                "machine_type": "a2-highgpu-4g",
+                "accelerator_count": 4,
+                "provisioning_model": "SPOT",
+                "labels": {},
+            },
+            "execution": {},
+        },
+    )
+    monkeypatch.setitem(packet._ACTIVE, "stage_code", "a1d")
+
+    value = packet.spec_value()
+
+    assert packet.PREFERRED_PROBE_A100S == 1
+    assert controller.PREFERRED_PROBE_A100S == 1
+    assert value["cloud"]["machine_type"] == "a2-highgpu-1g"
+    assert value["cloud"]["accelerator_count"] == 1
 
 
 def test_transient_pending_create_is_exactly_proved_and_consumed(

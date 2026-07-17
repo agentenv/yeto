@@ -61,7 +61,7 @@ ZONE_ROTATION = (
 PROTECTED_INSTANCE_ID = "3908640733128066700"
 GCLOUD_CONFIG = "/private/tmp/yeto-gcloud-admin-codex"
 GLOBAL_A100_CEILING = 16
-PREFERRED_PROBE_A100S = 4
+PREFERRED_PROBE_A100S = 1
 
 
 def _source_commit() -> str:
@@ -181,6 +181,13 @@ def spec_value(**kwargs: Any) -> dict[str, object]:
     cloud = value["cloud"]
     execution = value["execution"]
     assert isinstance(cloud, dict) and isinstance(execution, dict)
+    if (
+        cloud.get("machine_type") != "a2-highgpu-4g"
+        or cloud.get("provisioning_model") != "SPOT"
+    ):
+        raise PacketError("reviewed base spec is not the expected Spot A2 shape")
+    cloud["machine_type"] = "a2-highgpu-1g"
+    cloud["accelerator_count"] = 1
     labels = cloud["labels"]
     assert isinstance(labels, dict)
     labels["stage"] = str(_ACTIVE["stage_code"])
@@ -650,8 +657,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "parallel_plan_hash": binding["parallel_plan_hash"],
         "runtime_authorization_hash": runtime_authorization_hash,
         "allowed_zones": list(ZONE_ROTATION),
-        "shape_fallback_order": ["a2-highgpu-4g", "a2-highgpu-1g"],
-        "shape_fallback_trigger": "provider_capacity_stockout_before_creation",
+        "shape_fallback_order": ["a2-highgpu-1g"],
+        "shape_fallback_trigger": "operator_ceiling_amendment_cheapest_survivable_shape",
     }
     write_json_create_only(
         materialized / "controller-amendment-revision.json", revision
@@ -824,7 +831,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         // PREFERRED_PROBE_A100S,
         "max_idle_before_science_seconds": 600,
         "zone_rotation": list(ZONE_ROTATION),
-        "shape_fallback_order": ["a2-highgpu-4g", "a2-highgpu-1g"],
+        "shape_fallback_order": ["a2-highgpu-1g"],
         "audit_objects_included": False,
         "audit_model_evaluation_accesses": [],
         "vms": vm_rows,
