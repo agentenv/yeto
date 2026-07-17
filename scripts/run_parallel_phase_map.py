@@ -23,7 +23,6 @@ import math
 import os
 import re
 import secrets
-import subprocess
 import sys
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -64,6 +63,16 @@ ALLOWED_STAGE_CODES = frozenset(
     ("p1r0", "p1ad", "p2", "p3t", *CONTROLLED_STAGE_CODES)
 )
 LOGICAL_SLOTS = ("v0", "v1", "v2", "v3")
+AUDIT_135M_BLOCK_WIDTH = 3
+AUDIT_135M_MAX_CONCURRENT_BLOCKS = 5
+AUDIT_135M_LOGICAL_SLOTS = tuple(
+    f"v{index}"
+    for index in range(AUDIT_135M_BLOCK_WIDTH * AUDIT_135M_MAX_CONCURRENT_BLOCKS)
+)
+ALL_LOGICAL_SLOTS = AUDIT_135M_LOGICAL_SLOTS
+AUDIT_135M_CONCURRENT_BLOCK_AMENDMENT_RAW_SHA256 = (
+    "ac3fa833fd0cf1a985eca1500656217e2025d6d66dd642a1609cd3006405afb7"
+)
 REVISION_1_2_ALLOWED_ZONES = (
     "us-central1-a",
     "us-central1-b",
@@ -99,6 +108,9 @@ ACCEPTED_GENERATION_AMENDMENT_RAW_SHA256S = frozenset(
     )
 )
 MAX_CONCURRENT_CELLS = 4
+AUDIT_135M_MAX_CONCURRENT_CELLS = (
+    AUDIT_135M_BLOCK_WIDTH * AUDIT_135M_MAX_CONCURRENT_BLOCKS
+)
 MAX_CAMPAIGN_A100S = 16
 A100S_PER_VM = 4
 SCIENTIFIC_VM_SHAPE = "a2-highgpu-4g"
@@ -117,7 +129,7 @@ PACKING_EQUIVALENCE_NORMALIZED_COMMAND_HASH = (
     "155bf0801c2c8bfc71b81ada1f4f5dcb97f5a37395087603bc7aab6517b04faf"
 )
 RUN_ID_RE = re.compile(
-    r"^bp-(p1r0|p1ad|p2|p3t|e1|e4|a1d|a1x|a1c|a3k|a3r0|a3x|a4d|a4b|a4c|a4x)-[0-9a-f]{16}-c[1-9][0-9]*-v[0-3]-g[1-9][0-9]*$"
+    r"^bp-(p1r0|p1ad|p2|p3t|e1|e4|a1d|a1x|a1c|a3k|a3r0|a3x|a4d|a4b|a4c|a4x)-[0-9a-f]{16}-c[1-9][0-9]*-v(?:[0-9]|1[0-4])-g[1-9][0-9]*$"
 )
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 NONCE_RE = re.compile(r"[0-9a-f]{32}\Z")
@@ -183,6 +195,26 @@ AUDIT_EVALUATION_MODES = frozenset(
         "capture_only_no_endpoint",
     }
 )
+
+
+def logical_slots_for_stage(stage_code: str) -> tuple[str, ...]:
+    return (
+        AUDIT_135M_LOGICAL_SLOTS
+        if stage_code in AUDIT_135M_STAGE_CODES
+        else LOGICAL_SLOTS
+    )
+
+
+def maximum_scientific_vms_for_stage(stage_code: str) -> int:
+    return len(logical_slots_for_stage(stage_code))
+
+
+def maximum_concurrent_cells_for_stage(stage_code: str) -> int:
+    return (
+        AUDIT_135M_MAX_CONCURRENT_CELLS
+        if stage_code in AUDIT_135M_STAGE_CODES
+        else MAX_CONCURRENT_CELLS
+    )
 
 
 def audit_checkpoint_only(cell: Mapping[str, Any]) -> bool:
@@ -1078,18 +1110,80 @@ def build_legacy_parallel_plan(
     }
 
 
-def _normalize_available_slots(available_slots: Iterable[str]) -> tuple[str, ...]:
-    values = tuple(sorted(set(available_slots), key=lambda value: value.encode("utf-8")))
-    if not values or any(slot not in LOGICAL_SLOTS for slot in values):
-        raise ScheduleError("available slot set must be a nonempty subset of v0..v3")
+def _normalize_available_slots(
+    available_slots: Iterable[str],
+    *,
+    logical_slots: Sequence[str] = LOGICAL_SLOTS,
+) -> tuple[str, ...]:
+    allowed = tuple(logical_slots)
+    requested = set(available_slots)
+    values = tuple(slot for slot in allowed if slot in requested)
+    if (
+        not values
+        or len(values) != len(requested)
+        or any(slot not in allowed for slot in requested)
+    ):
+        raise ScheduleError(
+            "available slot set must be a nonempty subset of the plan logical slots"
+        )
     return values
 
 
-def available_slot_subsets() -> tuple[tuple[str, ...], ...]:
+def available_slot_subsets(
+    logical_slots: Sequence[str] = LOGICAL_SLOTS,
+) -> tuple[tuple[str, ...], ...]:
+    slots = tuple(logical_slots)
     return tuple(
         subset
-        for width in range(1, len(LOGICAL_SLOTS) + 1)
-        for subset in itertools.combinations(LOGICAL_SLOTS, width)
+        for width in range(1, len(slots) + 1)
+        for subset in itertools.combinations(slots, width)
+    )
+
+
+def audit_concurrent_block_slots(
+    *,
+    contract_hash: str,
+    block_index: int,
+    available_slots: Iterable[str],
+) -> tuple[str, ...]:
+    """Bind one audit block to a deterministic three-slot lane.
+
+    The only scientific-schedule inputs are the frozen audit contract hash,
+    the planned block index, and the exact loss-blind slot set made available
+    by the capacity controller.  Batches are contiguous in planned-block
+    order, contain at most five blocks, and use exactly three disjoint slots
+    per block.
+    """
+
+    contract = require_sha256(contract_hash, "audit design contract hash")
+    if isinstance(block_index, bool) or not isinstance(block_index, int) or block_index < 0:
+        raise ScheduleError("audit concurrent block index must be nonnegative")
+    slots = _normalize_available_slots(
+        available_slots, logical_slots=AUDIT_135M_LOGICAL_SLOTS
+    )
+    if (
+        len(slots) % AUDIT_135M_BLOCK_WIDTH
+        or len(slots) > AUDIT_135M_MAX_CONCURRENT_CELLS
+    ):
+        raise ScheduleError(
+            "audit concurrent slot set must contain one to five complete three-slot lanes"
+        )
+    block_count = len(slots) // AUDIT_135M_BLOCK_WIDTH
+    slot_order = rank_order(
+        slots,
+        f"audit-concurrent-slot-order|{contract}|{','.join(slots)}",
+        contract,
+    )
+    lane_order = rank_order(
+        [str(index) for index in range(block_count)],
+        f"audit-concurrent-lane-order|{contract}|{','.join(slots)}",
+        contract,
+    )
+    lane_index = int(lane_order[block_index % block_count])
+    start = lane_index * AUDIT_135M_BLOCK_WIDTH
+    return _normalize_available_slots(
+        slot_order[start : start + AUDIT_135M_BLOCK_WIDTH],
+        logical_slots=AUDIT_135M_LOGICAL_SLOTS,
     )
 
 
@@ -1103,6 +1197,7 @@ def build_wave_assignment(
     retry_round: int,
     wave_index: int,
     time_block_index: int,
+    logical_slots: Sequence[str] = LOGICAL_SLOTS,
 ) -> dict[str, Any]:
     """Build the revision-2 deterministic reduced-width assignment.
 
@@ -1116,7 +1211,10 @@ def build_wave_assignment(
 
     require_positive_int(retry_round, "retry round")
     roster_value = require_sha256(roster_digest, "roster hash")
-    slots = _normalize_available_slots(available_slots)
+    slot_universe = tuple(logical_slots)
+    slots = _normalize_available_slots(
+        available_slots, logical_slots=slot_universe
+    )
     subset_token = ",".join(slots)
     binding_domain = (
         f"available-slot-binding-v2|{roster_value}|{subset_token}|"
@@ -1173,7 +1271,7 @@ def build_wave_assignment(
                 "launch_rank": rank_hex(launch_domain, study_id, cell_id),
             }
         )
-    unavailable = [slot for slot in LOGICAL_SLOTS if slot not in slots]
+    unavailable = [slot for slot in slot_universe if slot not in slots]
     unused_available = [
         slot for slot in slots if slot not in {row["logical_slot"] for row in assigned}
     ]
@@ -1388,6 +1486,106 @@ def build_parallel_plan(
             )
         },
     }
+    if audit_capacity:
+        revision_1_2_hash = canonical_sha256(plan)
+        by_group = _group_launch_cells(roster)
+        contract_hash = require_sha256(
+            roster.get("audit_135m_design_contract_hash"),
+            "audit-135M design contract hash",
+        )
+        concurrent_waves: list[dict[str, Any]] = []
+        batch_rows: list[dict[str, Any]] = []
+        wave_count = len(plan["waves"])
+        for batch_start in range(0, wave_count, AUDIT_135M_MAX_CONCURRENT_BLOCKS):
+            batch_size = min(
+                AUDIT_135M_MAX_CONCURRENT_BLOCKS, wave_count - batch_start
+            )
+            batch_slots = AUDIT_135M_LOGICAL_SLOTS[
+                : batch_size * AUDIT_135M_BLOCK_WIDTH
+            ]
+            assignments = []
+            for block_index in range(batch_start, batch_start + batch_size):
+                prior_wave = plan["waves"][block_index]
+                group_id = str(prior_wave["group_id"])
+                lane = audit_concurrent_block_slots(
+                    contract_hash=contract_hash,
+                    block_index=block_index,
+                    available_slots=batch_slots,
+                )
+                wave = build_wave_assignment(
+                    study_id=str(roster["study_id"]),
+                    roster_digest=roster_hash(roster),
+                    group_id=group_id,
+                    cells=by_group[group_id],
+                    available_slots=lane,
+                    retry_round=1,
+                    wave_index=block_index,
+                    time_block_index=block_index,
+                    logical_slots=AUDIT_135M_LOGICAL_SLOTS,
+                )
+                wave["audit_concurrent_block_index"] = block_index
+                wave["audit_registered_concurrent_batch_index"] = (
+                    batch_start // AUDIT_135M_MAX_CONCURRENT_BLOCKS
+                )
+                wave["audit_registered_batch_slot_set"] = list(batch_slots)
+                concurrent_waves.append(wave)
+                assignments.append(
+                    {
+                        "block_index": block_index,
+                        "group_id": group_id,
+                        "logical_slots": list(lane),
+                    }
+                )
+            batch_rows.append(
+                {
+                    "registered_concurrent_batch_index": (
+                        batch_start // AUDIT_135M_MAX_CONCURRENT_BLOCKS
+                    ),
+                    "block_indices": list(
+                        range(batch_start, batch_start + batch_size)
+                    ),
+                    "available_slot_set": list(batch_slots),
+                    "assignments": assignments,
+                }
+            )
+        plan.pop("available_slot_variants", None)
+        plan["schema"] = "yeto_parallel_plan_v4"
+        plan["supersedes_revision_1_2_parallel_plan_hash"] = revision_1_2_hash
+        plan["logical_slots"] = list(AUDIT_135M_LOGICAL_SLOTS)
+        plan["waves"] = concurrent_waves
+        plan["audit_concurrent_block_binding"] = {
+            "schema": "audit_135m_concurrent_block_binding_v1",
+            "amendment_raw_sha256": (
+                AUDIT_135M_CONCURRENT_BLOCK_AMENDMENT_RAW_SHA256
+            ),
+            "design_contract_hash": contract_hash,
+            "block_width": AUDIT_135M_BLOCK_WIDTH,
+            "maximum_concurrent_blocks": AUDIT_135M_MAX_CONCURRENT_BLOCKS,
+            "maximum_1g_scientific_vms": len(AUDIT_135M_LOGICAL_SLOTS),
+            "pure_inputs": [
+                "audit_135m_design_contract_hash",
+                "planned_block_index",
+                "available_slot_set",
+            ],
+            "outcome_inputs_forbidden": True,
+            "registered_full_width_batches": batch_rows,
+        }
+        plan["capacity"].update(
+            {
+                "contract_revision": 3,
+                "maximum_available_scientific_vms": len(
+                    AUDIT_135M_LOGICAL_SLOTS
+                ),
+                "maximum_concurrent_scientific_cells": (
+                    AUDIT_135M_MAX_CONCURRENT_CELLS
+                ),
+                "maximum_concurrent_atomic_blocks": (
+                    AUDIT_135M_MAX_CONCURRENT_BLOCKS
+                ),
+                "scientific_vms_per_atomic_block": AUDIT_135M_BLOCK_WIDTH,
+                "capacity_degrades_only_from_loss_blind_provider_census": True,
+            }
+        )
     return plan
 
 
@@ -1396,6 +1594,7 @@ def parallel_plan_hash(plan: Mapping[str, Any]) -> str:
         "yeto_parallel_plan_v1",
         "yeto_parallel_plan_v2",
         "yeto_parallel_plan_v3",
+        "yeto_parallel_plan_v4",
     ):
         raise ScheduleError("parallel plan has the wrong schema")
     return canonical_sha256(plan)
@@ -1560,7 +1759,17 @@ def wave_for_retry(
             wave_index=int(initial[0]["wave_index"]),
             time_block_index=int(initial[0]["time_block_index"]),
         )
-    slots = LOGICAL_SLOTS if available_slots is None else available_slots
+    logical_slots = logical_slots_for_stage(str(plan["stage_code"]))
+    if available_slots is None:
+        if plan.get("schema") == "yeto_parallel_plan_v4":
+            slots = _array(
+                initial[0].get("available_slot_set"),
+                "audit registered wave slot set",
+            )
+        else:
+            slots = LOGICAL_SLOTS
+    else:
+        slots = available_slots
     return build_wave_assignment(
         study_id=str(plan["study_id"]),
         roster_digest=str(plan["roster_hash"]),
@@ -1570,6 +1779,7 @@ def wave_for_retry(
         retry_round=retry_round,
         wave_index=int(initial[0]["wave_index"]),
         time_block_index=int(initial[0]["time_block_index"]),
+        logical_slots=logical_slots,
     )
 
 
@@ -1628,7 +1838,7 @@ def physical_run_id(
     require_sha256(roster_digest, "roster hash")
     require_positive_int(campaign_attempt, "campaign attempt")
     require_positive_int(generation, "physical generation")
-    if slot not in LOGICAL_SLOTS:
+    if slot not in logical_slots_for_stage(stage_code):
         raise LifecycleError(f"unknown logical slot {slot!r}")
     run_id = (
         f"bp-{stage_code}-{roster_digest[:16]}-c{campaign_attempt}-{slot}-g{generation}"
@@ -1764,7 +1974,7 @@ class CampaignGenerationRegistry:
         *,
         ownership_nonce: str | None = None,
     ) -> GenerationIdentity:
-        if slot not in LOGICAL_SLOTS:
+        if slot not in logical_slots_for_stage(self.stage_code):
             raise LifecycleError(f"unknown logical slot {slot!r}")
         prior = [generation for (seen_slot, generation) in self._identities if seen_slot == slot]
         generation = max(prior, default=0) + 1
@@ -2980,7 +3190,7 @@ def validate_infrastructure_attempt(
 
 
 def _generation_local_root(campaign_root: Path, slot: str, generation: int) -> Path:
-    if slot not in LOGICAL_SLOTS:
+    if slot not in ALL_LOGICAL_SLOTS:
         raise LifecycleError("VM registry has an unknown logical slot")
     require_positive_int(generation, "VM registry generation")
     return campaign_root / "vms" / slot / f"g{generation}"
@@ -3009,7 +3219,9 @@ def _wave_manifest_hash(rows: Sequence[Mapping[str, Any]]) -> str:
     )
 
 
-def _validate_generation_capacity(lifecycles: Sequence[Mapping[str, Any]]) -> None:
+def _validate_generation_capacity(
+    lifecycles: Sequence[Mapping[str, Any]], *, stage_code: str = "p1r0"
+) -> None:
     events: list[tuple[datetime, int, int]] = []
     for row in lifecycles:
         start = parse_time(row.get("creation_timestamp"), "generation creation")
@@ -3032,11 +3244,18 @@ def _validate_generation_capacity(lifecycles: Sequence[Mapping[str, Any]]) -> No
         active_a100s += gpu_delta
         if active_vms < 0 or active_a100s < 0:
             raise LifecycleError("generation lifecycle capacity trace is inconsistent")
-        if active_vms > 4 or active_a100s > MAX_CAMPAIGN_A100S:
-            raise LifecycleError("generation lifecycle exceeded four VMs or 16 A100s")
+        if (
+            active_vms > maximum_scientific_vms_for_stage(stage_code)
+            or active_a100s > MAX_CAMPAIGN_A100S
+        ):
+            raise LifecycleError(
+                "generation lifecycle exceeded the stage VM limit or 16 A100s"
+            )
 
 
-def _validate_scientific_concurrency(rows: Sequence[Mapping[str, Any]]) -> None:
+def _validate_scientific_concurrency(
+    rows: Sequence[Mapping[str, Any]], *, stage_code: str
+) -> None:
     events: list[tuple[datetime, int, str, str]] = []
     for row in rows:
         if row.get("status") not in ATTEMPT_STATUSES:
@@ -3064,8 +3283,8 @@ def _validate_scientific_concurrency(rows: Sequence[Mapping[str, Any]]) -> None:
                 raise ScheduleError("two attempts of one cell overlap")
             active_slots.add(slot)
             active_cells.add(cell_id)
-            if len(active_cells) > MAX_CONCURRENT_CELLS:
-                raise ScheduleError("scientific concurrency exceeded width four")
+            if len(active_cells) > maximum_concurrent_cells_for_stage(stage_code):
+                raise ScheduleError("scientific concurrency exceeded the stage limit")
 
 
 def _validate_wave_timing(rows: Sequence[Mapping[str, Any]]) -> None:
@@ -3077,7 +3296,9 @@ def _validate_wave_timing(rows: Sequence[Mapping[str, Any]]) -> None:
     }
     if len(slot_sets) != 1:
         raise ScheduleError("one atomic wave mixes available-slot sets")
-    available = _normalize_available_slots(next(iter(slot_sets)))
+    available = _normalize_available_slots(
+        next(iter(slot_sets)), logical_slots=ALL_LOGICAL_SLOTS
+    )
     if any(str(row.get("logical_slot")) not in available for row in rows):
         raise ScheduleError("wave row is assigned outside its available-slot set")
     batches: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
@@ -3183,6 +3404,292 @@ def _validate_retry_authorization(
         raise ScheduleError("FAILED rows may not be retried")
 
 
+def _validate_concurrent_attempt_schedule(
+    *,
+    attempts: Sequence[Mapping[str, Any]],
+    roster: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    parallel_digest: str,
+) -> dict[str, dict[str, Any]]:
+    ordered = sorted(attempts, key=_attempt_sort_key)
+    if ordered != list(attempts):
+        raise ScheduleError("canonical attempt registry is not actual-wave/launch ordered")
+    actual_indices = sorted({int(row["actual_wave_index"]) for row in ordered})
+    if actual_indices != list(range(len(actual_indices))):
+        raise ScheduleError("actual wave indices are not contiguous from zero")
+    by_wave: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in ordered:
+        by_wave[int(row["actual_wave_index"])].append(row)
+    planned_by_group = {
+        str(wave["group_id"]): (index, wave)
+        for index, wave in enumerate(plan["waves"])
+    }
+    if len(planned_by_group) != len(plan["waves"]):
+        raise ScheduleError("concurrent plan repeats a planned atomic group")
+    state = {
+        group_id: {"retry_round": 1, "prior_rows": None, "resolved": False}
+        for group_id in planned_by_group
+    }
+    final_analysis: dict[str, dict[str, Any]] = {}
+    contract_hash = require_sha256(
+        roster.get("audit_135m_design_contract_hash"),
+        "audit-135M design contract hash",
+    )
+    batch_records: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for actual_index in actual_indices:
+        rows = by_wave[actual_index]
+        group_ids = {str(row.get("group_id")) for row in rows}
+        if len(group_ids) != 1:
+            raise ScheduleError("one actual wave mixes concurrent atomic groups")
+        group_id = next(iter(group_ids))
+        if group_id not in planned_by_group:
+            raise ScheduleError("actual concurrent wave names an unknown group")
+        block_index, planned_wave = planned_by_group[group_id]
+        group_state = state[group_id]
+        if group_state["resolved"]:
+            raise ScheduleError("resolved concurrent block has an extra attempt")
+        retry_round = int(group_state["retry_round"])
+        lane_sets = {
+            tuple(_array(row.get("available_slot_set"), "available slot set"))
+            for row in rows
+        }
+        batch_slot_sets = {
+            tuple(
+                _array(
+                    row.get("concurrent_batch_slot_set"),
+                    "concurrent batch slot set",
+                )
+            )
+            for row in rows
+        }
+        batch_indices = {
+            require_nonnegative_int(
+                row.get("concurrent_batch_index"),
+                "concurrent batch index",
+            )
+            for row in rows
+        }
+        if len(lane_sets) != 1 or len(batch_slot_sets) != 1 or len(batch_indices) != 1:
+            raise ScheduleError("one atomic block mixes concurrent binding fields")
+        lane = _normalize_available_slots(
+            next(iter(lane_sets)), logical_slots=AUDIT_135M_LOGICAL_SLOTS
+        )
+        batch_slots = _normalize_available_slots(
+            next(iter(batch_slot_sets)), logical_slots=AUDIT_135M_LOGICAL_SLOTS
+        )
+        batch_index = next(iter(batch_indices))
+        if len(lane) != AUDIT_135M_BLOCK_WIDTH or any(
+            slot not in batch_slots for slot in lane
+        ):
+            raise ScheduleError("concurrent atomic block lacks one complete lane")
+        expected_lane = audit_concurrent_block_slots(
+            contract_hash=contract_hash,
+            block_index=block_index,
+            available_slots=batch_slots,
+        )
+        if lane != expected_lane:
+            raise ScheduleError("concurrent block-to-slot binding is not deterministic")
+        expected = wave_for_retry(
+            plan,
+            roster,
+            group_id,
+            retry_round,
+            available_slots=lane,
+        )
+        expected_rows = expected["assigned_cells_in_dispatch_order"]
+        if len(rows) != len(expected_rows):
+            raise ScheduleError("actual concurrent wave splits or mixes an atomic group")
+        actual_projection = [
+            (
+                row.get("cell_id"),
+                row.get("logical_slot"),
+                row.get("launch_order_index"),
+                row.get("dispatch_batch_index"),
+                row.get("batch_launch_order_index"),
+                row.get("retry_round"),
+            )
+            for row in rows
+        ]
+        expected_projection = [
+            (
+                row["cell_id"],
+                row["logical_slot"],
+                row["launch_order_index"],
+                row["dispatch_batch_index"],
+                row["batch_launch_order_index"],
+                retry_round,
+            )
+            for row in expected_rows
+        ]
+        if actual_projection != expected_projection:
+            raise ScheduleError(
+                "manual concurrent slot swap, dispatch reorder, or mixed group detected"
+            )
+        if len({row.get("machine_type") for row in rows}) != 1 or len(
+            {row.get("gpu_slots") for row in rows}
+        ) != 1:
+            raise ScheduleError(
+                "paired concurrent block does not use one hardware/GPU packing profile"
+            )
+        if len({row.get("pairing_identity_hash") for row in rows}) != 1:
+            raise ScheduleError("paired concurrent block identity differs across arms")
+        packing_maps = set()
+        for row in rows:
+            learner_count = require_positive_int(row.get("m"), "attempt learner count")
+            gpu_slots = require_positive_int(row.get("gpu_slots"), "attempt GPU slots")
+            expected_gpu_map = learner_gpu_slot_map(learner_count, gpu_slots)
+            if (
+                row.get("learner_gpu_slot_map") != expected_gpu_map
+                or row.get("maximum_learners_per_gpu")
+                != max(Counter(expected_gpu_map.values()).values())
+            ):
+                raise ScheduleError(
+                    "paired concurrent block has an invalid learner/GPU packing map"
+                )
+            packing_maps.add(canonical_json(expected_gpu_map))
+        if len(packing_maps) != 1:
+            raise ScheduleError(
+                "paired concurrent block does not share one learner/GPU packing map"
+            )
+        if any(
+            row.get("time_block_index") != planned_wave["time_block_index"]
+            or row.get("attempt") != retry_round
+            or row.get("retry_time_block_index")
+            != (None if retry_round == 1 else actual_index)
+            or row.get("attempt_id")
+            != f"{row.get('cell_id')}-attempt-{retry_round}"
+            for row in rows
+        ):
+            raise ScheduleError("concurrent wave loses group/time-block/attempt identity")
+        _validate_wave_timing(rows)
+        prior_rows = group_state["prior_rows"]
+        for row in rows:
+            _validate_fresh_attempt(
+                row,
+                None
+                if prior_rows is None
+                else next(
+                    prior
+                    for prior in prior_rows
+                    if prior["cell_id"] == row["cell_id"]
+                ),
+            )
+        statuses = {str(row.get("status")) for row in rows}
+        if not statuses.issubset(ATTEMPT_STATUSES) or "FAILED" in statuses:
+            raise ScheduleError("concurrent block has a nonsealable terminal status")
+        has_infra = "INFRA_FAILURE" in statuses
+        if has_infra and "DIVERGED" in statuses:
+            raise ScheduleError("mixed DIVERGED/INFRA_FAILURE block cannot retry")
+        if prior_rows is not None:
+            authorizations = {
+                canonical_json(row.get("retry_authorization")) for row in rows
+            }
+            if len(authorizations) != 1:
+                raise ScheduleError("concurrent block retry lacks one authorization")
+            first_dispatch = min(
+                parse_time(row.get("dispatched_at"), "retry dispatch")
+                for row in rows
+            )
+            for row in rows:
+                prior = next(
+                    prior
+                    for prior in prior_rows
+                    if prior["cell_id"] == row["cell_id"]
+                )
+                _validate_retry_authorization(
+                    row=row,
+                    prior=prior,
+                    prior_wave_rows=prior_rows,
+                    parallel_digest=parallel_digest,
+                    retry_first_dispatch=first_dispatch,
+                )
+        elif any(
+            row.get("retry_of") not in (None, "")
+            or row.get("retry_reason") not in (None, "")
+            or row.get("retry_authorization") not in (None, {})
+            for row in rows
+        ):
+            raise ScheduleError("initial concurrent block declares retry lineage")
+        seal_time = parse_time(
+            rows[0].get("wave_terminal_prefix_sealed_at"),
+            "wave terminal-prefix seal",
+        )
+        if any(
+            parse_time(row.get("wave_terminal_prefix_sealed_at"), "wave seal")
+            != seal_time
+            for row in rows
+        ) or max(
+            parse_time(row.get("scientific_ended_at"), "scientific end")
+            for row in rows
+        ) > seal_time:
+            raise ScheduleError("concurrent wave terminal-prefix seal is invalid")
+        batch_records[batch_index].append(
+            {
+                "group_id": group_id,
+                "block_index": block_index,
+                "batch_slots": batch_slots,
+                "first_dispatch": min(
+                    parse_time(row.get("dispatched_at"), "dispatch") for row in rows
+                ),
+                "sealed_at": seal_time,
+            }
+        )
+        if has_infra:
+            if any(
+                row.get("status") not in ("INFRA_FAILURE", "COMPLETED")
+                for row in rows
+            ):
+                raise ScheduleError("concurrent infrastructure retry precondition differs")
+            group_state["prior_rows"] = list(rows)
+            group_state["retry_round"] = retry_round + 1
+            continue
+        for row in rows:
+            if row.get("status") not in ("COMPLETED", "DIVERGED"):
+                raise ScheduleError("concurrent analysis round is unresolved")
+            final_analysis[str(row["cell_id"])] = {
+                "attempt_id": row["attempt_id"],
+                "attempt": row["attempt"],
+                "status": row["status"],
+                "group_id": group_id,
+                "retry_round": retry_round,
+                "analysis_loss": row.get("analysis_loss"),
+                "analysis_loss_kind": row.get("analysis_loss_kind"),
+                "divergence_retained": row.get("divergence_retained"),
+            }
+        group_state["resolved"] = True
+    if any(not value["resolved"] for value in state.values()):
+        raise ScheduleError("concurrent attempt registry omits a planned block")
+    batch_indices = sorted(batch_records)
+    if batch_indices != list(range(len(batch_indices))):
+        raise ScheduleError("concurrent batch indices are not contiguous from zero")
+    prior_batch_seal: datetime | None = None
+    for batch_index in batch_indices:
+        records = batch_records[batch_index]
+        slot_sets = {record["batch_slots"] for record in records}
+        block_indices = sorted({record["block_index"] for record in records})
+        if len(slot_sets) != 1:
+            raise ScheduleError("one concurrent batch mixes capacity slot sets")
+        batch_slots = next(iter(slot_sets))
+        if (
+            len(block_indices) > AUDIT_135M_MAX_CONCURRENT_BLOCKS
+            or block_indices
+            != list(range(min(block_indices), min(block_indices) + len(block_indices)))
+            or len(batch_slots) != len(block_indices) * AUDIT_135M_BLOCK_WIDTH
+        ):
+            raise ScheduleError("concurrent batch block/slot cardinality differs")
+        first_dispatch = min(record["first_dispatch"] for record in records)
+        if prior_batch_seal is not None and first_dispatch < prior_batch_seal:
+            raise ScheduleError("a later concurrent batch overlaps an unsealed prior batch")
+        prior_batch_seal = max(record["sealed_at"] for record in records)
+    launch_ids = {str(row["cell_id"]) for row in roster["launch_cells"]}
+    if set(final_analysis) != launch_ids:
+        raise ScheduleError("concurrent analysis rounds do not cover every launch cell")
+    _validate_scientific_concurrency(
+        ordered, stage_code=str(roster.get("stage_code"))
+    )
+    return final_analysis
+
+
 def validate_attempt_schedule(
     *,
     attempts: Sequence[Mapping[str, Any]],
@@ -3190,6 +3697,13 @@ def validate_attempt_schedule(
     plan: Mapping[str, Any],
     parallel_digest: str,
 ) -> dict[str, dict[str, Any]]:
+    if plan.get("schema") == "yeto_parallel_plan_v4":
+        return _validate_concurrent_attempt_schedule(
+            attempts=attempts,
+            roster=roster,
+            plan=plan,
+            parallel_digest=parallel_digest,
+        )
     ordered = sorted(attempts, key=_attempt_sort_key)
     if ordered != list(attempts):
         raise ScheduleError("canonical attempt registry is not actual-wave/launch ordered")
@@ -3217,7 +3731,12 @@ def validate_attempt_schedule(
             }
             if len(available_sets) != 1:
                 raise ScheduleError("actual wave mixes available-slot sets")
-            available_slots = _normalize_available_slots(next(iter(available_sets)))
+            available_slots = _normalize_available_slots(
+                next(iter(available_sets)),
+                logical_slots=logical_slots_for_stage(
+                    str(roster.get("stage_code"))
+                ),
+            )
             expected = wave_for_retry(
                 plan,
                 roster,
@@ -3402,7 +3921,9 @@ def validate_attempt_schedule(
     launch_ids = {str(row["cell_id"]) for row in roster["launch_cells"]}
     if set(final_analysis) != launch_ids:
         raise ScheduleError("analysis rounds do not cover every launch cell exactly once")
-    _validate_scientific_concurrency(ordered)
+    _validate_scientific_concurrency(
+        ordered, stage_code=str(roster.get("stage_code"))
+    )
     return final_analysis
 
 
@@ -3537,7 +4058,10 @@ class CampaignAggregator:
         for row in rows:
             slot = row.get("slot")
             generation = require_positive_int(row.get("generation"), "VM generation")
-            if slot not in LOGICAL_SLOTS or (str(slot), generation) in seen_keys:
+            if (
+                slot not in logical_slots_for_stage(self.bundle.stage_code)
+                or (str(slot), generation) in seen_keys
+            ):
                 raise LifecycleError("VM registry repeats or misnames a slot/generation")
             seen_keys.add((str(slot), generation))
             expected_run_id = physical_run_id(
@@ -3597,7 +4121,7 @@ class CampaignAggregator:
                 raise LifecycleError("VM registry outer artifact paths cross namespaces")
             seen_namespaces.add(prefix)
             seen_state_paths.add(state_path)
-        for slot in LOGICAL_SLOTS:
+        for slot in logical_slots_for_stage(self.bundle.stage_code):
             generations = sorted(
                 generation for seen_slot, generation in seen_keys if seen_slot == slot
             )
@@ -3732,7 +4256,9 @@ class CampaignAggregator:
             nonces.add(str(identity["ownership_nonce"]))
             instance_ids.add(provider_summary["instance_numeric_id"])
             disk_ids.add(provider_summary["boot_disk_numeric_id"])
-        _validate_generation_capacity(lifecycle_intervals)
+        _validate_generation_capacity(
+            lifecycle_intervals, stage_code=self.bundle.stage_code
+        )
         return attempts, partial_hashes, lifecycle_hashes, lifecycle_intervals
 
     def _validate_work(
@@ -4225,6 +4751,8 @@ class DispatchRequest:
     cell_id: str
     retry_round: int
     actual_wave_index: int
+    concurrent_batch_index: int
+    concurrent_batch_slot_set: tuple[str, ...]
     time_block_index: int
     retry_time_block_index: int | None
     available_slot_set: tuple[str, ...]
@@ -4301,8 +4829,10 @@ class ParallelWaveExecutor:
         self.campaign_root = campaign_root.resolve()
         self.backend = backend
         self.clock = clock
+        stage_logical_slots = logical_slots_for_stage(str(roster.get("stage_code")))
         self.available_slots = _normalize_available_slots(
-            LOGICAL_SLOTS if available_slots is None else available_slots
+            stage_logical_slots if available_slots is None else available_slots,
+            logical_slots=stage_logical_slots,
         )
         self.roster_digest = roster_hash(roster)
         self.parallel_digest = parallel_plan_hash(parallel_plan)
@@ -4359,8 +4889,13 @@ class ParallelWaveExecutor:
             census.get("campaign_owned_attached_a100s"),
             "campaign-owned attached A100 count",
         )
-        if vm_count > 4 or a100_count > MAX_CAMPAIGN_A100S:
-            raise LifecycleError("provider census exceeds four campaign VMs or 16 A100s")
+        maximum_vms = maximum_scientific_vms_for_stage(
+            str(self.roster.get("stage_code"))
+        )
+        if vm_count > maximum_vms or a100_count > MAX_CAMPAIGN_A100S:
+            raise LifecycleError(
+                "provider census exceeds the stage VM limit or 16 A100s"
+            )
         return census
 
     def _local_vm_root(self, identity: GenerationIdentity) -> Path:
@@ -4462,11 +4997,23 @@ class ParallelWaveExecutor:
         }
 
     def _paired_available_slots(
-        self, *, group_id: str, retry_round: int
+        self,
+        *,
+        group_id: str,
+        retry_round: int,
+        candidate_slots: Iterable[str] | None = None,
     ) -> tuple[str, ...]:
         """Choose one deterministic shape-homogeneous slot set for a seed block."""
 
-        slots = tuple(sorted(self.active))
+        stage_logical_slots = logical_slots_for_stage(
+            str(self.roster.get("stage_code"))
+        )
+        slots = _normalize_available_slots(
+            self.active if candidate_slots is None else candidate_slots,
+            logical_slots=stage_logical_slots,
+        )
+        if any(slot not in self.active for slot in slots):
+            raise LifecycleError("candidate block lane contains a non-READY slot")
         if str(self.roster.get("stage_code")) not in CONTROLLED_STAGE_CODES:
             return slots
         by_shape: dict[str, list[str]] = defaultdict(list)
@@ -4484,7 +5031,9 @@ class ParallelWaveExecutor:
         selected = rank_order(candidates, domain, str(self.roster["study_id"]))[0]
         _shape, _separator, slot_text = selected.partition("|")
         selected_slots = tuple(slot_text.split(","))
-        return _normalize_available_slots(selected_slots)
+        return _normalize_available_slots(
+            selected_slots, logical_slots=stage_logical_slots
+        )
 
     def _execute_wave(
         self,
@@ -4492,12 +5041,27 @@ class ParallelWaveExecutor:
         planned_wave: Mapping[str, Any],
         retry_round: int,
         actual_wave_index: int,
-        prior_rows: Sequence[Mapping[str, Any]] | None,
+        concurrent_batch_index: int = 0,
+        available_slots: Iterable[str] | None = None,
+        concurrent_batch_slot_set: Iterable[str] | None = None,
+        prior_rows: Sequence[Mapping[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         self._assert_capacity_census()
         paired_slots = self._paired_available_slots(
-            group_id=str(planned_wave["group_id"]), retry_round=retry_round
+            group_id=str(planned_wave["group_id"]),
+            retry_round=retry_round,
+            candidate_slots=available_slots,
         )
+        batch_slots = _normalize_available_slots(
+            paired_slots
+            if concurrent_batch_slot_set is None
+            else concurrent_batch_slot_set,
+            logical_slots=logical_slots_for_stage(
+                str(self.roster.get("stage_code"))
+            ),
+        )
+        if any(slot not in batch_slots for slot in paired_slots):
+            raise ScheduleError("atomic block lane is outside its concurrent batch slot set")
         wave = wave_for_retry(
             self.plan,
             self.roster,
@@ -4545,6 +5109,8 @@ class ParallelWaveExecutor:
                 cell_id=cell_id,
                 retry_round=retry_round,
                 actual_wave_index=actual_wave_index,
+                concurrent_batch_index=concurrent_batch_index,
+                concurrent_batch_slot_set=batch_slots,
                 time_block_index=int(planned_wave["time_block_index"]),
                 retry_time_block_index=(
                     None if retry_round == 1 else actual_wave_index
@@ -4673,6 +5239,10 @@ class ParallelWaveExecutor:
                 "group_id": request.group_id,
                 "retry_round": request.retry_round,
                 "actual_wave_index": request.actual_wave_index,
+                "concurrent_batch_index": request.concurrent_batch_index,
+                "concurrent_batch_slot_set": list(
+                    request.concurrent_batch_slot_set
+                ),
                 "time_block_index": request.time_block_index,
                 "retry_time_block_index": request.retry_time_block_index,
                 "available_slot_set": list(request.available_slot_set),
@@ -4857,6 +5427,18 @@ def bind_campaign_inputs(
     digest = roster_hash(roster)
     plan = build_parallel_plan(roster, expected_roster_hash=digest)
     plan_digest = parallel_plan_hash(plan)
+    runtime_logical_slots = (
+        tuple(
+            slot
+            for slot in AUDIT_135M_LOGICAL_SLOTS
+            if any(
+                slot in wave.get("audit_registered_batch_slot_set", [])
+                for wave in plan["waves"]
+            )
+        )
+        if stage_code in AUDIT_135M_STAGE_CODES
+        else LOGICAL_SLOTS
+    )
     if prebound_schedule_path is not None:
         prebound = _mapping(
             load_json(prebound_schedule_path, "prebound schedule"),
@@ -4881,7 +5463,7 @@ def bind_campaign_inputs(
         "science_root": f"/opt/yeto-science/{stage_code}/{digest[:16]}",
         "physical_generation_run_ids": {
             slot: physical_run_id(stage_code, digest, 1, slot, 1)
-            for slot in LOGICAL_SLOTS
+            for slot in runtime_logical_slots
         },
     }
     if stage_code in MULTISEED_STAGE_CODES:
@@ -4911,6 +5493,7 @@ def bind_campaign_inputs(
         materialization.update(
             {
                 "launch_authorized": False,
+                "logical_slots": list(runtime_logical_slots),
                 "audit_135m_design_contract_hash": roster[
                     "audit_135m_design_contract_hash"
                 ],

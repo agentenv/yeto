@@ -46,7 +46,11 @@ ZONE_ROTATION = (
     "us-central1-c",
     "us-central1-f",
 )
-SLOTS = ("v0", "v1", "v2", "v3")
+AUDIT_BLOCK_WIDTH = 3
+MAX_CONCURRENT_BLOCKS = 5
+SLOTS = tuple(
+    f"v{index}" for index in range(AUDIT_BLOCK_WIDTH * MAX_CONCURRENT_BLOCKS)
+)
 PRICE_PER_VM_HOUR = {
     "us-east1": {"a2-highgpu-1g": 1.928, "a2-highgpu-4g": 7.712},
     "us-west4": {"a2-highgpu-1g": 1.817, "a2-highgpu-4g": 7.267},
@@ -61,6 +65,7 @@ TEARDOWN_RESERVE_SECONDS = 900
 TEARDOWN_RESERVE_FIXED_USD = 0.25
 GLOBAL_A100_CEILING = 16
 PREFERRED_PROBE_A100S = 4
+MAX_PREFERRED_PROBE_WIDTH = 4
 FUTURE_STAGE_CELL_COUNTS = {
     "a1d": {16: 32, 256: 32},
     "a1x": {16: 32, 256: 32},
@@ -103,6 +108,13 @@ def load_module(name: str, path: Path):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _bind_reviewed_backend_workspace(base) -> None:
+    tracked_parallel = REPO_ROOT / "scripts" / "run_parallel_phase_map.py"
+    if not tracked_parallel.is_file():
+        raise ControllerError("tracked parallel executor is missing from the source commit")
+    base.WORKSPACE = REPO_ROOT
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -273,6 +285,124 @@ def _global_a100_census(backend) -> dict[str, Any]:
         "instances": inventory,
         "queried_at_utc": utc_now(),
     }
+
+
+def _install_launch_census_and_direct_fallback_patch(
+    *, base, backend, campaign_root: Path
+) -> None:
+    """Re-census before every launch and permit evidenced direct 1g expansion."""
+
+    original_provision = backend.provision
+    lock = threading.RLock()
+    backend.audit_pending_launch_a100s = 0
+    backend.audit_direct_1g_authorized_zones = {}
+
+    def provision(identity):
+        zone = backend.zone_for_name(identity.run_id)
+        with lock:
+            direct_parent = backend.audit_direct_1g_authorized_zones.get(zone)
+            requested_a100s = 1 if direct_parent is not None else 4
+            census = _global_a100_census(backend)
+            projected = (
+                int(census["total_attached_a100_equivalent"])
+                + int(backend.audit_pending_launch_a100s)
+                + requested_a100s
+            )
+            if projected > GLOBAL_A100_CEILING:
+                raise ControllerError(
+                    "loss-blind prelaunch census plus pending probes would exceed "
+                    "the global 16-A100 ceiling"
+                )
+            backend.audit_pending_launch_a100s += requested_a100s
+        direct_authorization_path: Path | None = None
+        try:
+            if direct_parent is not None:
+                preferred, _bootstrap, _runtime, _artifact = backend._packet_paths(identity)
+                fallback = backend._fallback_spec(identity, preferred)
+                backend.spec_by_key[(identity.slot, identity.generation)] = fallback
+                direct_authorization_path = (
+                    campaign_root
+                    / "common"
+                    / "direct-1g-fallback"
+                    / f"{identity.run_id}.json"
+                )
+                direct_authorization = {
+                        "schema": "audit_135m_direct_1g_fallback_authorization_v1",
+                        "status": "AUTHORIZED_FROM_PROVIDER_CONFIRMED_4G_STOCKOUT",
+                        "loss_inspected": False,
+                        "zone": zone,
+                        "run_id": identity.run_id,
+                        "slot": identity.slot,
+                        "generation": identity.generation,
+                        "ownership_nonce": identity.ownership_nonce,
+                        "parent_fallback_run_id": direct_parent["run_id"],
+                        "parent_fallback_instance_numeric_id": direct_parent[
+                            "instance_numeric_id"
+                        ],
+                        "parent_fallback_machine_type": "a2-highgpu-1g",
+                        "authorized_at_utc": utc_now(),
+                    }
+                if direct_authorization_path.exists():
+                    existing = load_json(direct_authorization_path)
+                    stable_fields = set(direct_authorization) - {"authorized_at_utc"}
+                    if any(
+                        existing.get(field) != direct_authorization[field]
+                        for field in stable_fields
+                    ):
+                        raise ControllerError(
+                            "existing direct-1g fallback authorization differs"
+                        )
+                else:
+                    backend.pexec.write_json_create_only(
+                        direct_authorization_path, direct_authorization
+                    )
+                backend.note(
+                    f"DIRECT 1G FALLBACK authorized for {identity.slot}/g"
+                    f"{identity.generation} in {zone}: a prior exact provider launch "
+                    f"({direct_parent['run_id']}, instance "
+                    f"{direct_parent['instance_numeric_id']}) reached reviewed 1g only "
+                    "after pre-creation 4g stockout; global census PASS."
+                )
+        except BaseException:
+            with lock:
+                backend.audit_pending_launch_a100s -= requested_a100s
+            raise
+        try:
+            try:
+                provider = dict(original_provision(identity))
+            except Exception as exc:
+                context = exc.__context__
+                if (
+                    direct_parent is not None
+                    and "preferred spec is not the reviewed spot 4g shape"
+                    in str(exc).casefold()
+                    and context is not None
+                    and base._capacity_stockout(context)
+                ):
+                    raise context
+                raise
+        finally:
+            with lock:
+                backend.audit_pending_launch_a100s -= requested_a100s
+        if provider.get("machine_type") == "a2-highgpu-1g":
+            with lock:
+                backend.audit_direct_1g_authorized_zones.setdefault(
+                    str(provider["zone"]),
+                    {
+                        "run_id": str(provider["run_id"]),
+                        "instance_numeric_id": str(
+                            provider["instance_numeric_id"]
+                        ),
+                    },
+                )
+        if direct_authorization_path is not None:
+            backend.note(
+                f"DIRECT 1G FALLBACK evidence sealed at "
+                f"{direct_authorization_path}."
+            )
+        return provider
+
+    backend.provision = provision
 
 
 def _load_spend_ledger(path: Path, audit_stage: str, ceiling: float) -> dict[str, Any]:
@@ -715,6 +845,313 @@ def _finalize_nonselected(
             preempted=False,
             lifecycle_lock=lifecycle_lock,
         )
+
+
+def _expand_homogeneous_initial_capacity(
+    *,
+    base,
+    p1,
+    pexec,
+    executor,
+    registry,
+    backend,
+    logical_slots: Sequence[str],
+    selected_shape: str,
+    preferred_zone: str,
+    assembly_seconds: int,
+    lock: threading.RLock,
+    lifecycle_lock: threading.RLock,
+) -> tuple[str, ...]:
+    """Fill up to five three-VM block lanes without exceeding 16 A100s."""
+
+    if selected_shape == "a2-highgpu-1g":
+        ordered_zones = (
+            preferred_zone,
+            *[zone for zone in ZONE_ROTATION if zone != preferred_zone],
+        )
+        p1.ZONE_ROTATION = ordered_zones
+        stop_event = threading.Event()
+        science_started = threading.Event()
+        errors: list[BaseException] = []
+        threads: list[threading.Thread] = []
+        for slot in logical_slots:
+            if slot in executor.active:
+                continue
+            thread = threading.Thread(
+                target=p1.provision_loop,
+                kwargs={
+                    "base": base,
+                    "pexec": pexec,
+                    "executor": executor,
+                    "registry": registry,
+                    "backend": backend,
+                    "slot": slot,
+                    "stop_event": stop_event,
+                    "science_started": science_started,
+                    "lock": lock,
+                    "errors": errors,
+                    "required": False,
+                },
+                name=f"audit-expand-{slot}",
+                daemon=False,
+            )
+            thread.start()
+            threads.append(thread)
+        deadline = time.time() + assembly_seconds
+        while time.time() < deadline:
+            if errors:
+                break
+            with lock:
+                matching = [
+                    slot
+                    for slot, identity in executor.active.items()
+                    if executor.providers[(slot, identity.generation)][
+                        "machine_type"
+                    ]
+                    == selected_shape
+                ]
+            if len(matching) >= len(logical_slots):
+                break
+            time.sleep(2)
+        science_started.set()
+        stop_event.set()
+        for thread in threads:
+            thread.join()
+        p1.ZONE_ROTATION = ZONE_ROTATION
+        if errors:
+            raise ControllerError("concurrent-block capacity expansion failed") from errors[0]
+
+    matching_slots = []
+    for slot, identity in list(executor.active.items()):
+        provider = executor.providers[(slot, identity.generation)]
+        if provider["machine_type"] == selected_shape:
+            matching_slots.append(slot)
+            continue
+        backend.note(
+            f"CONCURRENT-BLOCK SHAPE FILTER: {slot}/g{identity.generation} landed "
+            f"{provider['machine_type']} while {selected_shape} is selected; exact-ID "
+            "zero-attempt teardown starts before science."
+        )
+        _finalize_identity(
+            executor=executor,
+            identity=identity,
+            preempted=False,
+            lifecycle_lock=lifecycle_lock,
+        )
+    matching_slots = sorted(matching_slots)
+    usable_count = min(
+        len(logical_slots),
+        (len(matching_slots) // AUDIT_BLOCK_WIDTH) * AUDIT_BLOCK_WIDTH,
+    )
+    if usable_count < AUDIT_BLOCK_WIDTH:
+        raise ControllerError(
+            "capacity assembly did not retain one complete three-VM audit block"
+        )
+    selected = tuple(matching_slots[:usable_count])
+    for slot in matching_slots[usable_count:]:
+        identity = executor.active[slot]
+        backend.note(
+            f"CONCURRENT-BLOCK WIDTH FILTER: {slot}/g{identity.generation} is outside "
+            "the largest complete three-slot lane set; exact-ID zero-attempt teardown "
+            "starts before science."
+        )
+        _finalize_identity(
+            executor=executor,
+            identity=identity,
+            preempted=False,
+            lifecycle_lock=lifecycle_lock,
+        )
+    return selected
+
+
+def _execute_concurrent_block_batches(
+    *,
+    base,
+    p1,
+    pexec,
+    executor,
+    registry,
+    backend,
+    plan: Mapping[str, Any],
+    scientific: Mapping[str, Any],
+    roster: Mapping[str, Any],
+    selected_shape: str,
+    selected_slots: Sequence[str],
+    preferred_replacement_zone: str,
+    lock: threading.RLock,
+    lifecycle_lock: threading.RLock,
+    watchdog: CostWatchdog,
+    campaign_root: Path,
+    spend_ledger: Mapping[str, Any],
+    stage_code: str,
+    ceiling: float,
+) -> None:
+    contract_hash = str(roster["audit_135m_design_contract_hash"])
+    planned_index = 0
+    actual_wave_index = 0
+    concurrent_batch_index = 0
+    selected_slot_names = tuple(sorted(selected_slots))
+    while planned_index < len(plan["waves"]):
+        watchdog.raise_if_triggered()
+        remaining = len(plan["waves"]) - planned_index
+        active_selected = tuple(
+            slot for slot in selected_slot_names if slot in executor.active
+        )
+        concurrent_blocks = min(
+            MAX_CONCURRENT_BLOCKS,
+            remaining,
+            len(active_selected) // AUDIT_BLOCK_WIDTH,
+        )
+        if concurrent_blocks < 1:
+            raise ControllerError("no complete audit block lane remains READY")
+        required_slot_count = concurrent_blocks * AUDIT_BLOCK_WIDTH
+        batch_slots = active_selected[:required_slot_count]
+        for slot in active_selected[required_slot_count:]:
+            identity = executor.active[slot]
+            backend.note(
+                f"NO-IDLE WIDTH SHRINK: {slot}/g{identity.generation} is surplus "
+                f"for the final {concurrent_blocks}-block batch; exact-ID teardown "
+                "starts before the other slots enter scientific work."
+            )
+            _finalize_identity(
+                executor=executor,
+                identity=identity,
+                preempted=False,
+                lifecycle_lock=lifecycle_lock,
+            )
+        selected_slot_names = batch_slots
+        pending = {
+            block_index: {"retry_round": 1, "prior_rows": None}
+            for block_index in range(
+                planned_index, planned_index + concurrent_blocks
+            )
+        }
+        while pending:
+            watchdog.raise_if_triggered()
+            _cost_guard(
+                executor=executor,
+                campaign_root=campaign_root,
+                stage_ledger=spend_ledger,
+                stage_code=stage_code,
+                plan=plan,
+                scientific=scientific,
+                planned_index=min(pending),
+                ceiling=ceiling,
+            )
+            lanes = {
+                block_index: pexec.audit_concurrent_block_slots(
+                    contract_hash=contract_hash,
+                    block_index=block_index,
+                    available_slots=batch_slots,
+                )
+                for block_index in pending
+            }
+            if len({slot for lane in lanes.values() for slot in lane}) != (
+                len(lanes) * AUDIT_BLOCK_WIDTH
+            ):
+                raise ControllerError("deterministic concurrent block lanes overlap")
+            for block_index, lane in lanes.items():
+                for slot in lane:
+                    if slot in executor.active:
+                        continue
+                    backend.note(
+                        f"MISSING LANE SLOT before block {block_index}: {slot}; "
+                        "fresh exact-generation replacement starts loss-blindly."
+                    )
+                    _provision_required_replacement(
+                        base=base,
+                        p1=p1,
+                        pexec=pexec,
+                        executor=executor,
+                        registry=registry,
+                        backend=backend,
+                        slot=slot,
+                        selected_shape=selected_shape,
+                        preferred_zone=preferred_replacement_zone,
+                        lock=lock,
+                        stage_code=stage_code,
+                        plan=plan,
+                        scientific=scientific,
+                        planned_index=block_index,
+                        spend_ledger=spend_ledger,
+                        campaign_root=campaign_root,
+                        ceiling=ceiling,
+                        lifecycle_lock=lifecycle_lock,
+                    )
+            assigned_actual_indices = {}
+            for block_index in sorted(pending):
+                assigned_actual_indices[block_index] = actual_wave_index
+                actual_wave_index += 1
+            retry_summary = ", ".join(
+                f"{index}:{pending[index]['retry_round']}"
+                for index in sorted(pending)
+            )
+            backend.note(
+                f"CONCURRENT BLOCK BATCH {concurrent_batch_index}: planned blocks "
+                f"{sorted(pending)}, slots {list(batch_slots)}, retry rounds "
+                f"{{{retry_summary}}}; "
+                "losses remain SEALED/BLINDED."
+            )
+            results: dict[int, list[dict[str, Any]]] = {}
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(pending)
+            ) as pool:
+                futures = {
+                    block_index: pool.submit(
+                        executor._execute_wave,
+                        planned_wave=plan["waves"][block_index],
+                        retry_round=int(state["retry_round"]),
+                        actual_wave_index=assigned_actual_indices[block_index],
+                        concurrent_batch_index=concurrent_batch_index,
+                        available_slots=lanes[block_index],
+                        concurrent_batch_slot_set=batch_slots,
+                        prior_rows=state["prior_rows"],
+                    )
+                    for block_index, state in pending.items()
+                }
+                for block_index, future in futures.items():
+                    results[block_index] = future.result()
+            watchdog.raise_if_triggered()
+            completed_blocks = []
+            for block_index in sorted(pending):
+                rows = results[block_index]
+                statuses = {str(row["status"]) for row in rows}
+                if "FAILED" in statuses:
+                    raise pexec.ScheduleError("nonretryable FAILED audit block")
+                preempted_slots = sorted(
+                    {
+                        str(row["logical_slot"])
+                        for row in rows
+                        if row["status"] == "INFRA_FAILURE"
+                        and row.get("failure_reason")
+                        == "provider_spot_preemption"
+                    }
+                )
+                for slot in preempted_slots:
+                    identity = executor.active.get(slot)
+                    if identity is not None:
+                        _finalize_identity(
+                            executor=executor,
+                            identity=identity,
+                            preempted=True,
+                            lifecycle_lock=lifecycle_lock,
+                        )
+                if "INFRA_FAILURE" in statuses:
+                    pending[block_index]["prior_rows"] = rows
+                    pending[block_index]["retry_round"] = (
+                        int(pending[block_index]["retry_round"]) + 1
+                    )
+                    backend.note(
+                        f"WHOLE BLOCK RETRY authorized loss-blindly for block "
+                        f"{block_index} after {sorted(statuses)}; fresh attempt "
+                        "namespaces and any preempted physical generations are replaced."
+                    )
+                else:
+                    completed_blocks.append(block_index)
+            for block_index in completed_blocks:
+                del pending[block_index]
+        planned_index += concurrent_blocks
+        concurrent_batch_index += 1
 
 
 def _evaluation_registry(
@@ -1383,11 +1820,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     review = load_json(packet / "review-packet.json")
     stage_code = str(identity_plan["stage_code"])
     target_width = int(identity_plan["target_width"])
+    logical_slots = tuple(identity_plan.get("logical_slots", ()))
+    target_1g_slot_count = int(identity_plan.get("target_1g_slot_count", 0))
+    maximum_concurrent_blocks = int(
+        identity_plan.get("maximum_concurrent_blocks", 0)
+    )
     assembly_seconds = int(identity_plan["assembly_max_seconds"])
     if (
         review.get("status") != "SEALED_LAUNCH_AUTHORIZED"
         or review.get("stage_code") != stage_code
-        or target_width not in range(1, 5)
+        or target_width != AUDIT_BLOCK_WIDTH
+        or not logical_slots
+        or len(logical_slots) != target_1g_slot_count
+        or len(logical_slots) > len(SLOTS)
+        or len(logical_slots) % AUDIT_BLOCK_WIDTH
+        or any(slot not in SLOTS for slot in logical_slots)
+        or review.get("logical_slots") != list(logical_slots)
+        or int(review.get("target_1g_slot_count", 0)) != target_1g_slot_count
+        or int(review.get("maximum_concurrent_blocks", 0))
+        != maximum_concurrent_blocks
+        or maximum_concurrent_blocks
+        != min(MAX_CONCURRENT_BLOCKS, int(identity_plan["wave_count"]))
         or assembly_seconds > 480
         or tuple(identity_plan["zone_rotation"]) != ZONE_ROTATION
         or int(review.get("global_attached_a100_equivalent_at_preflight", 10**9))
@@ -1406,13 +1859,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     sys.modules["build_launch_packet"] = packet_builder
     p1 = load_module("audit_135m_p1_capacity_controller", P1_CONTROLLER)
     p1.STAGE_CODE = stage_code
-    p1.SLOTS = SLOTS
+    p1.SLOTS = logical_slots
     p1.ZONE_ROTATION = ZONE_ROTATION
     p1.NOTE_PATH = NOTE_PATH
     p1.RETRY_SECONDS = 600
     p1.ASSEMBLY_MAX_SECONDS = assembly_seconds
     base = load_module("audit_135m_reviewed_gcp_backend", R0_CONTROLLER)
     p1.patch_base(base, identity_plan)
+    _bind_reviewed_backend_workspace(base)
     base.NOTE_PATH = NOTE_PATH
     base.GCLOUD_CONFIG = GCLOUD_CONFIG
     base.ALLOWED_ZONES = ZONE_ROTATION
@@ -1434,6 +1888,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         or len(scientific.get("cells", [])) != identity_plan["launch_cell_count"]
     ):
         raise ControllerError("packet roster/plan dimensions differ")
+    concurrent_binding = plan.get("audit_concurrent_block_binding")
+    if (
+        plan.get("schema") != "yeto_parallel_plan_v4"
+        or not isinstance(concurrent_binding, Mapping)
+        or concurrent_binding.get("amendment_raw_sha256")
+        != pexec.sha256_file(
+            REPO_ROOT / "docs" / "AMENDMENT-audit-135m-concurrent-blocks.md"
+        )
+        or int(concurrent_binding.get("block_width", 0)) != AUDIT_BLOCK_WIDTH
+        or int(concurrent_binding.get("maximum_concurrent_blocks", 0))
+        != MAX_CONCURRENT_BLOCKS
+    ):
+        raise ControllerError("packet concurrent-block amendment binding differs")
     evaluation_registry = _evaluation_registry(
         packet=packet,
         campaign_root=campaign_root,
@@ -1465,6 +1932,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     backend.private.mkdir(parents=True, exist_ok=True)
     _install_operator_kill_lifecycle_patch(backend)
+    _install_launch_census_and_direct_fallback_patch(
+        base=base, backend=backend, campaign_root=campaign_root
+    )
     executor = pexec.ParallelWaveExecutor(
         roster=roster,
         parallel_plan=plan,
@@ -1473,7 +1943,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         registry=registry,
         campaign_root=campaign_root,
         backend=backend,
-        available_slots=SLOTS,
+        available_slots=logical_slots,
         runtime_authorization=runtime_authorization,
     )
     ceiling = float(identity_plan["hard_ceiling_usd"])
@@ -1491,9 +1961,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "probe could exceed the total ceiling"
         )
     initial_probe_width = min(
-        target_width, len(SLOTS), global_headroom // PREFERRED_PROBE_A100S
+        MAX_PREFERRED_PROBE_WIDTH,
+        len(logical_slots),
+        global_headroom // PREFERRED_PROBE_A100S,
     )
-    initial_slots = SLOTS[:initial_probe_width]
+    initial_slots = logical_slots[:initial_probe_width]
     backend.note(
         f"{stage_code.upper()} LAUNCH AUTHORIZED: {len(roster['launch_cells'])} cells, "
         f"registered target width {target_width}, global-headroom probe width "
@@ -1629,13 +2101,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 selected_slots=set(selected_slots),
                 lifecycle_lock=lifecycle_lock,
             )
-        if set(executor.active) != set(selected_slots):
-            raise ControllerError("post-assembly active slots differ from the selected set")
-        if (
-            int(_global_a100_census(backend)["total_attached_a100_equivalent"])
-            > GLOBAL_A100_CEILING
-        ):
-            raise ControllerError("post-assembly global A100 census exceeds 16")
         preferred_replacement_zone = str(
             executor.providers[
                 (
@@ -1644,10 +2109,41 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 )
             ]["zone"]
         )
+        remaining_assembly_seconds = max(
+            0,
+            assembly_seconds
+            - int(
+                0
+                if first_ready_epoch is None
+                else max(0.0, time.time() - first_ready_epoch)
+            ),
+        )
+        selected_slots = _expand_homogeneous_initial_capacity(
+            base=base,
+            p1=p1,
+            pexec=pexec,
+            executor=executor,
+            registry=registry,
+            backend=backend,
+            logical_slots=logical_slots,
+            selected_shape=selected_shape,
+            preferred_zone=preferred_replacement_zone,
+            assembly_seconds=remaining_assembly_seconds,
+            lock=lock,
+            lifecycle_lock=lifecycle_lock,
+        )
+        if set(executor.active) != set(selected_slots):
+            raise ControllerError("post-assembly active slots differ from the selected set")
+        if (
+            int(_global_a100_census(backend)["total_attached_a100_equivalent"])
+            > GLOBAL_A100_CEILING
+        ):
+            raise ControllerError("post-assembly global A100 census exceeds 16")
         backend.note(
             f"INITIAL ASSEMBLY CLOSED on shape {selected_shape}, slots "
-            f"{list(selected_slots)}, stage-wide forecast ${stage_forecast:.2f}; "
-            "wave 0 dispatch begins immediately."
+            f"{list(selected_slots)}, concurrent block width "
+            f"{len(selected_slots) // AUDIT_BLOCK_WIDTH}, stage-wide forecast "
+            f"${stage_forecast:.2f}; batch 0 dispatch begins immediately."
         )
         _cost_guard(
             executor=executor,
@@ -1669,94 +2165,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         watchdog.start()
 
-        planned_index = 0
-        actual_wave_index = 0
-        retry_round = 1
-        prior_rows = None
-        while planned_index < len(plan["waves"]):
-            watchdog.raise_if_triggered()
-            if errors:
-                raise ControllerError("capacity cleanup thread failed") from errors[0]
-            stage_forecast = _cost_guard(
-                executor=executor,
-                campaign_root=campaign_root,
-                stage_ledger=spend_ledger,
-                stage_code=stage_code,
-                plan=plan,
-                scientific=scientific,
-                planned_index=planned_index,
-                ceiling=ceiling,
-            )
-            if not executor.active:
-                replacement_slot = selected_slots[0]
-                backend.note(
-                    f"ALL ACTIVE SLOTS LOST before planned wave {planned_index}, "
-                    f"retry {retry_round}; fresh replacement generation starts now."
-                )
-                _provision_required_replacement(
-                    base=base,
-                    p1=p1,
-                    pexec=pexec,
-                    executor=executor,
-                    registry=registry,
-                    backend=backend,
-                    slot=replacement_slot,
-                    selected_shape=selected_shape,
-                    preferred_zone=preferred_replacement_zone,
-                    lock=lock,
-                    stage_code=stage_code,
-                    plan=plan,
-                    scientific=scientific,
-                    planned_index=planned_index,
-                    spend_ledger=spend_ledger,
-                    campaign_root=campaign_root,
-                    ceiling=ceiling,
-                    lifecycle_lock=lifecycle_lock,
-                )
-            backend.note(
-                f"WAVE dispatch planned={planned_index}, actual={actual_wave_index}, "
-                f"retry={retry_round}, slots={sorted(executor.active)}; losses remain "
-                "SEALED/BLINDED."
-            )
-            rows = executor._execute_wave(
-                planned_wave=plan["waves"][planned_index],
-                retry_round=retry_round,
-                actual_wave_index=actual_wave_index,
-                prior_rows=prior_rows,
-            )
-            watchdog.raise_if_triggered()
-            actual_wave_index += 1
-            statuses = {str(row["status"]) for row in rows}
-            if "FAILED" in statuses:
-                raise pexec.ScheduleError("nonretryable FAILED audit block")
-            preempted_slots = sorted(
-                {
-                    str(row["logical_slot"])
-                    for row in rows
-                    if row["status"] == "INFRA_FAILURE"
-                    and row.get("failure_reason") == "provider_spot_preemption"
-                }
-            )
-            for slot in preempted_slots:
-                identity = executor.active.get(slot)
-                if identity is not None:
-                    _finalize_identity(
-                        executor=executor,
-                        identity=identity,
-                        preempted=True,
-                        lifecycle_lock=lifecycle_lock,
-                    )
-            if "INFRA_FAILURE" in statuses:
-                prior_rows = rows
-                retry_round += 1
-                backend.note(
-                    f"WHOLE BLOCK RETRY authorized loss-blindly after {sorted(statuses)}; "
-                    "fresh attempt namespaces, no checkpoint/optimizer/tape/result reuse."
-                )
-                continue
-            planned_index += 1
-            prior_rows = None
-            retry_round = 1
+        _execute_concurrent_block_batches(
+            base=base,
+            p1=p1,
+            pexec=pexec,
+            executor=executor,
+            registry=registry,
+            backend=backend,
+            plan=plan,
+            scientific=scientific,
+            roster=roster,
+            selected_shape=selected_shape,
+            selected_slots=selected_slots,
+            preferred_replacement_zone=preferred_replacement_zone,
+            lock=lock,
+            lifecycle_lock=lifecycle_lock,
+            watchdog=watchdog,
+            campaign_root=campaign_root,
+            spend_ledger=spend_ledger,
+            stage_code=stage_code,
+            ceiling=ceiling,
+        )
         watchdog.raise_if_triggered()
         evaluation_role = _deferred_evaluation_role(scientific)
         if evaluation_role is not None:

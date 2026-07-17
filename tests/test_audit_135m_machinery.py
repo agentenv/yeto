@@ -49,6 +49,13 @@ def test_deferred_evaluation_modes_are_exact() -> None:
         )
 
 
+def test_reboot_restoration_binds_reviewed_backend_to_tracked_workspace() -> None:
+    base = SimpleNamespace(WORKSPACE=Path("/private/tmp/missing-helper-tree"))
+    controller._bind_reviewed_backend_workspace(base)
+    assert base.WORKSPACE == controller.REPO_ROOT
+    assert (base.WORKSPACE / "scripts" / "run_parallel_phase_map.py").is_file()
+
+
 def test_hidden_remote_command_uses_guest_paths() -> None:
     command = controller._remote_hidden_command(
         identity=SimpleNamespace(run_id="run"),

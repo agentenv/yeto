@@ -43,7 +43,11 @@ MODEL_ARCHIVE_SHA256 = (
     "53d15a96a333e33c6a7a9224dbe6392a2480420bd40a327588797d03b625e4c3"
 )
 DATA_SHA256 = "970f88b3f2fa6758f3b5f94052f4e91b872541a2ba530223b44a779168c51409"
-SLOTS = ("v0", "v1", "v2", "v3")
+AUDIT_BLOCK_WIDTH = 3
+MAX_CONCURRENT_BLOCKS = 5
+SLOTS = tuple(
+    f"v{index}" for index in range(AUDIT_BLOCK_WIDTH * MAX_CONCURRENT_BLOCKS)
+)
 ZONE_ROTATION = (
     "us-east1-b",
     "us-west4-b",
@@ -135,7 +139,7 @@ def _configure_base() -> None:
     _base.HARNESS_STATE_ROOT = Path(_ACTIVE["harness_state_root"])
     _base.CAMPAIGN_ATTEMPT = int(_ACTIVE["campaign_attempt"])
     _base.ZONE_BY_SLOT = {
-        slot: str(_ACTIVE["initial_zone"]) for slot in SLOTS
+        slot: str(_ACTIVE["initial_zone"]) for slot in _ACTIVE["logical_slots"]
     }
     _base.MODEL_URI = MODEL_URI
     _base.DATA_URI = DATA_URI
@@ -160,6 +164,7 @@ def configure_from_identity_plan(identity_plan: Mapping[str, Any]) -> None:
             ],
             "harness_state_root": identity_plan["harness_state_root"],
             "initial_zone": identity_plan["initial_zone"],
+            "logical_slots": tuple(identity_plan["logical_slots"]),
         }
     )
     _configure_base()
@@ -331,6 +336,8 @@ def _registered_cost_forecast(
 
 
 def _cost_efficient_target_width(parallel_plan: Mapping[str, Any]) -> int:
+    if parallel_plan.get("schema") == "yeto_parallel_plan_v4":
+        return AUDIT_BLOCK_WIDTH
     group_sizes = [
         len(wave.get("assigned_cells_in_dispatch_order", []))
         for wave in parallel_plan.get("waves", [])
@@ -423,6 +430,15 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         or bound.get("frozen", {}).get("git_commit") != SOURCE_COMMIT
     ):
         raise PacketError("audit binding identity/authorization differs")
+    concurrent_binding = parallel_plan.get("audit_concurrent_block_binding")
+    amendment_path = REPO_ROOT / "docs" / "AMENDMENT-audit-135m-concurrent-blocks.md"
+    if (
+        parallel_plan.get("schema") != "yeto_parallel_plan_v4"
+        or not isinstance(concurrent_binding, Mapping)
+        or concurrent_binding.get("amendment_raw_sha256")
+        != sha256_file(amendment_path)
+    ):
+        raise PacketError("audit concurrent-block amendment binding differs")
     if subprocess.run(
         ["git", "-C", str(REPO_ROOT), "diff", "--quiet", SOURCE_COMMIT, "--"]
     ).returncode:
@@ -488,11 +504,19 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         scientific=scientific, science_root=science_root
     )
     roster_tag = str(binding["roster_tag"])
+    logical_slots = tuple(binding.get("logical_slots", ()))
+    if (
+        not logical_slots
+        or len(logical_slots) > len(SLOTS)
+        or len(logical_slots) % AUDIT_BLOCK_WIDTH
+        or any(slot not in SLOTS for slot in logical_slots)
+    ):
+        raise PacketError("audit binding has an invalid concurrent logical-slot set")
     run_ids = {
         slot: f"bp-{stage_code}-{roster_tag}-c{campaign_attempt}-{slot}-g1"
-        for slot in SLOTS
+        for slot in logical_slots
     }
-    joined_run_ids = "--".join(run_ids[slot] for slot in SLOTS)
+    joined_run_ids = "--".join(run_ids[slot] for slot in logical_slots)
     artifact_root = (
         f"{BUCKET}/audit-135m-{stage_code}-{roster_tag}-c1/{joined_run_ids}"
     )
@@ -509,13 +533,14 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "campaign_state_root_base": state_root_base,
             "harness_state_root": harness_state_root,
             "initial_zone": initial_zone,
+            "logical_slots": logical_slots,
         }
     )
     _configure_base()
 
     identity_rows = []
     configs: list[tuple[Path, str]] = []
-    for slot in SLOTS:
+    for slot in logical_slots:
         run_id = run_ids[slot]
         nonce = secrets.token_hex(16)
         artifact_prefix = f"{artifact_root}/vms/{slot}/g1/"
@@ -598,7 +623,12 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "science_root": science_root,
         "initial_zone": initial_zone,
         "zone_rotation": list(ZONE_ROTATION),
+        "logical_slots": list(logical_slots),
         "target_width": _cost_efficient_target_width(parallel_plan),
+        "maximum_concurrent_blocks": min(
+            MAX_CONCURRENT_BLOCKS, len(parallel_plan["waves"])
+        ),
+        "target_1g_slot_count": len(logical_slots),
         "assembly_max_seconds": 480,
         "hard_ceiling_usd": roster["hard_ceiling_usd"],
         "runtime_authorization_hash": runtime_authorization_hash,
@@ -776,6 +806,14 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "cost_forecast": forecast,
         "spot_only": True,
         "maximum_attached_a100_equivalent": 16,
+        "audit_concurrent_block_binding": parallel_plan.get(
+            "audit_concurrent_block_binding"
+        ),
+        "maximum_concurrent_blocks": identity_plan[
+            "maximum_concurrent_blocks"
+        ],
+        "target_1g_slot_count": identity_plan["target_1g_slot_count"],
+        "logical_slots": identity_plan["logical_slots"],
         "global_attached_a100_equivalent_at_preflight": preflight[
             "global_attached_a100_equivalent"
         ],

@@ -408,7 +408,7 @@ def test_six_arm_seed_blocks_split_into_deterministic_loss_blind_batches(tmp_pat
         by_batch: dict[int, list[dict[str, object]]] = {}
         for row in wave["assigned_cells_in_dispatch_order"]:
             by_batch.setdefault(row["dispatch_batch_index"], []).append(row)
-        assert sorted(map(len, by_batch.values())) == [2, 4]
+        assert sorted(map(len, by_batch.values())) == [3, 3]
         assert all(
             len({row["logical_slot"] for row in rows}) == len(rows)
             for rows in by_batch.values()
@@ -422,6 +422,201 @@ def test_six_arm_seed_blocks_split_into_deterministic_loss_blind_batches(tmp_pat
     assert plan["capacity"]["allowed_zones"] == list(
         parallel.AUDIT_135M_SURVIVAL_WEIGHTED_ZONE_ORDER
     )
+
+
+def test_audit_concurrent_block_binding_is_prospective_deterministic_and_disjoint(
+    tmp_path,
+):
+    _parent_value, _bound_value, _scientific, roster, plan = _bound_and_parallel(
+        tmp_path
+    )
+    assert plan["schema"] == "yeto_parallel_plan_v4"
+    assert plan["logical_slots"] == list(parallel.AUDIT_135M_LOGICAL_SLOTS)
+    binding = plan["audit_concurrent_block_binding"]
+    assert binding["amendment_raw_sha256"] == parallel.sha256_file(
+        Path("docs/AMENDMENT-audit-135m-concurrent-blocks.md")
+    )
+    assert binding["block_width"] == 3
+    assert binding["maximum_concurrent_blocks"] == 5
+    assert plan["capacity"]["maximum_concurrent_scientific_cells"] == 15
+    assert plan["capacity"]["maximum_campaign_owned_attached_a100s"] == 16
+
+    contract_hash = roster["audit_135m_design_contract_hash"]
+    batch_slots = parallel.AUDIT_135M_LOGICAL_SLOTS[:12]
+    lanes = [
+        parallel.audit_concurrent_block_slots(
+            contract_hash=contract_hash,
+            block_index=index,
+            available_slots=batch_slots,
+        )
+        for index in range(4)
+    ]
+    assert all(len(lane) == 3 for lane in lanes)
+    assert len({slot for lane in lanes for slot in lane}) == 12
+    assert lanes == [
+        parallel.audit_concurrent_block_slots(
+            contract_hash=contract_hash,
+            block_index=index,
+            available_slots=reversed(batch_slots),
+        )
+        for index in range(4)
+    ]
+    assert [tuple(wave["available_slot_set"]) for wave in plan["waves"]] == lanes
+
+
+@pytest.mark.parametrize("stage_code", ["a1d", "a3k", "a3r0", "a4d"])
+def test_all_initial_135m_stages_inherit_concurrent_block_binding(
+    tmp_path, stage_code
+):
+    _parent_value, _bound_value, _scientific, roster, plan = _bound_and_parallel(
+        tmp_path, stage_code
+    )
+    assert plan["schema"] == "yeto_parallel_plan_v4"
+    contract_hash = roster["audit_135m_design_contract_hash"]
+    for batch_start in range(0, len(plan["waves"]), 5):
+        waves = plan["waves"][batch_start : batch_start + 5]
+        batch_slots = tuple(waves[0]["audit_registered_batch_slot_set"])
+        lanes = [
+            parallel.audit_concurrent_block_slots(
+                contract_hash=contract_hash,
+                block_index=batch_start + offset,
+                available_slots=batch_slots,
+            )
+            for offset in range(len(waves))
+        ]
+        assert len(batch_slots) == 3 * len(waves)
+        assert len({slot for lane in lanes for slot in lane}) == len(batch_slots)
+        assert [tuple(wave["available_slot_set"]) for wave in waves] == lanes
+
+
+def test_audit_capacity_allows_fifteen_1g_vms_but_not_sixteen():
+    rows = [
+        {
+            "creation_timestamp": "2026-07-17T00:00:00Z",
+            "deletion_completed_at_utc": "2026-07-17T01:00:00Z",
+            "machine_type": "a2-highgpu-1g",
+            "a100_count": 1,
+        }
+        for _ in range(15)
+    ]
+    parallel._validate_generation_capacity(rows, stage_code="a1d")
+    with pytest.raises(parallel.LifecycleError, match="stage VM limit|16 A100s"):
+        parallel._validate_generation_capacity(
+            [*rows, dict(rows[-1])], stage_code="a1d"
+        )
+
+
+def test_concurrent_attempt_schedule_allows_disjoint_blocks_to_overlap(tmp_path):
+    _parent_value, _bound_value, scientific, roster, plan = _bound_and_parallel(
+        tmp_path
+    )
+    scientific_by_id = {cell["cell_id"]: cell for cell in scientific["cells"]}
+    batch_slots = parallel.AUDIT_135M_LOGICAL_SLOTS[:12]
+    attempts = []
+    for block_index, planned_wave in enumerate(plan["waves"]):
+        lane = parallel.audit_concurrent_block_slots(
+            contract_hash=roster["audit_135m_design_contract_hash"],
+            block_index=block_index,
+            available_slots=batch_slots,
+        )
+        wave = parallel.wave_for_retry(
+            plan,
+            roster,
+            planned_wave["group_id"],
+            1,
+            available_slots=lane,
+        )
+        for assignment in wave["assigned_cells_in_dispatch_order"]:
+            cell = scientific_by_id[assignment["cell_id"]]
+            learner_count = parallel._cell_learner_count(cell)
+            batch = assignment["dispatch_batch_index"]
+            order = assignment["batch_launch_order_index"]
+            dispatch_second = batch * 30 + order
+            attempts.append(
+                {
+                    "status": "COMPLETED",
+                    "failure_reason": None,
+                    "loss": 2.0,
+                    "analysis_loss": 2.0,
+                    "analysis_loss_kind": "finite_endpoint_nll",
+                    "divergence_retained": False,
+                    "attempt_id": f"{cell['cell_id']}-attempt-1",
+                    "cell_id": cell["cell_id"],
+                    "attempt": 1,
+                    "group_id": planned_wave["group_id"],
+                    "retry_round": 1,
+                    "actual_wave_index": block_index,
+                    "concurrent_batch_index": 0,
+                    "concurrent_batch_slot_set": list(batch_slots),
+                    "time_block_index": planned_wave["time_block_index"],
+                    "retry_time_block_index": None,
+                    "available_slot_set": list(lane),
+                    "dispatch_batch_index": batch,
+                    "batch_launch_order_index": order,
+                    "launch_order_index": assignment["launch_order_index"],
+                    "logical_slot": assignment["logical_slot"],
+                    "m": learner_count,
+                    "gpu_slots": 1,
+                    "learner_gpu_slot_map": {
+                        str(index): 0 for index in range(learner_count)
+                    },
+                    "maximum_learners_per_gpu": learner_count,
+                    "pairing_identity_hash": cell["pairing_identity_hash"],
+                    "attempt_prefix": f"gs://example/{cell['cell_id']}/attempt-1/",
+                    "fresh_start": {
+                        "same_frozen_initial_model": True,
+                        "same_seed_and_data_order": True,
+                        "same_command_and_work_budget": True,
+                        "resumed": False,
+                        "prior_optimizer_state_used": False,
+                        "prior_checkpoint_used": False,
+                        "prior_tape_used": False,
+                        "prior_result_used": False,
+                    },
+                    "retry_of": None,
+                    "retry_reason": None,
+                    "retry_authorization": None,
+                    "vm_ready_at": "2026-07-17T00:00:00Z",
+                    "dispatched_at": (
+                        f"2026-07-17T00:00:{dispatch_second:02d}Z"
+                    ),
+                    "scientific_started_at": (
+                        f"2026-07-17T00:00:{dispatch_second + 5:02d}Z"
+                    ),
+                    "scientific_ended_at": (
+                        f"2026-07-17T00:00:{dispatch_second + 20:02d}Z"
+                    ),
+                    "wave_terminal_prefix_sealed_at": (
+                        "2026-07-17T00:01:00Z"
+                    ),
+                }
+            )
+    attempts.sort(key=lambda row: (row["actual_wave_index"], row["launch_order_index"]))
+    final = parallel.validate_attempt_schedule(
+        attempts=attempts,
+        roster=roster,
+        plan=plan,
+        parallel_digest=parallel.parallel_plan_hash(plan),
+    )
+    assert set(final) == {cell["cell_id"] for cell in roster["launch_cells"]}
+
+    tampered = [dict(row) for row in attempts]
+    tampered[0]["available_slot_set"] = list(
+        parallel.audit_concurrent_block_slots(
+            contract_hash=roster["audit_135m_design_contract_hash"],
+            block_index=1,
+            available_slots=batch_slots,
+        )
+    )
+    with pytest.raises(
+        parallel.ScheduleError, match="deterministic|slot swap|binding fields"
+    ):
+        parallel.validate_attempt_schedule(
+            attempts=tampered,
+            roster=roster,
+            plan=plan,
+            parallel_digest=parallel.parallel_plan_hash(plan),
+        )
 
 
 def test_audit_runtime_authorization_binds_ceiling_and_all_launch_hashes(tmp_path):
