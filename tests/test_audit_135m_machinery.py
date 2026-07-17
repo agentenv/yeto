@@ -399,6 +399,112 @@ def test_global_a100_count_uses_accelerator_inventory_or_machine_shape() -> None
     assert controller._instance_a100_count({"machineType": "e2-standard-8"}) == 0
 
 
+def test_launch_census_deduplicates_provider_visible_pending_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    visible: dict[str, int] = {}
+    release = threading.Event()
+    visible_events = {name: threading.Event() for name in ("run-a", "run-b")}
+    errors: list[BaseException] = []
+
+    class Backend:
+        def __init__(self) -> None:
+            self.audit_direct_1g_authorized_zones: dict[str, dict] = {}
+
+        @staticmethod
+        def zone_for_name(run_id: str) -> str:
+            return "us-central1-a"
+
+        def provision(self, identity):
+            if identity.run_id in visible_events:
+                visible[identity.run_id] = 4
+                visible_events[identity.run_id].set()
+                assert release.wait(timeout=2)
+            return {
+                "run_id": identity.run_id,
+                "machine_type": "a2-highgpu-4g",
+                "zone": "us-central1-a",
+                "region": "us-central1",
+                "instance_numeric_id": identity.run_id,
+            }
+
+    backend = Backend()
+    monkeypatch.setattr(
+        controller,
+        "_global_a100_census",
+        lambda backend: {
+            "total_attached_a100_equivalent": sum(visible.values()),
+            "instances": [
+                {"name": name, "a100_count": count}
+                for name, count in visible.items()
+            ],
+        },
+    )
+    controller._install_launch_census_and_direct_fallback_patch(
+        base=SimpleNamespace(), backend=backend, campaign_root=tmp_path
+    )
+
+    def launch(run_id: str) -> None:
+        try:
+            backend.provision(SimpleNamespace(run_id=run_id, slot="v0", generation=1))
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=launch, args=("run-a",))
+    first.start()
+    assert visible_events["run-a"].wait(timeout=2)
+    second = threading.Thread(target=launch, args=("run-b",))
+    second.start()
+    assert visible_events["run-b"].wait(timeout=2)
+
+    third = backend.provision(
+        SimpleNamespace(run_id="run-c", slot="v2", generation=1)
+    )
+    assert third["run_id"] == "run-c"
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert backend.audit_pending_launches == {}
+    assert backend.audit_pending_launch_a100s == 0
+
+
+def test_launch_census_still_counts_unseen_pending_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provisioned: list[str] = []
+    backend = SimpleNamespace(
+        provision=lambda identity: provisioned.append(identity.run_id),
+        zone_for_name=lambda run_id: "us-central1-a",
+    )
+    monkeypatch.setattr(
+        controller,
+        "_global_a100_census",
+        lambda backend: {
+            "total_attached_a100_equivalent": 4,
+            "instances": [{"name": "visible-foreign", "a100_count": 4}],
+        },
+    )
+    controller._install_launch_census_and_direct_fallback_patch(
+        base=SimpleNamespace(), backend=backend, campaign_root=tmp_path
+    )
+    backend.audit_pending_launches.update(
+        {"unseen-a": 4, "unseen-b": 4, "unseen-c": 4}
+    )
+    backend.audit_pending_launch_a100s = 12
+
+    with pytest.raises(controller.ControllerError, match="global 16-A100 ceiling"):
+        backend.provision(
+            SimpleNamespace(run_id="run-d", slot="v3", generation=1)
+        )
+
+    assert provisioned == []
+    assert backend.audit_pending_launch_a100s == 12
+
+
 def test_transient_pending_create_is_exactly_proved_and_consumed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

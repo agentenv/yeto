@@ -1155,7 +1155,17 @@ def _install_launch_census_and_direct_fallback_patch(
     original_provision = backend.provision
     lock = threading.RLock()
     backend.audit_pending_launch_a100s = 0
+    backend.audit_pending_launches = {}
     backend.audit_direct_1g_authorized_zones = {}
+
+    def release_pending(run_id: str) -> None:
+        with lock:
+            if run_id not in backend.audit_pending_launches:
+                raise ControllerError("pending launch reservation is missing")
+            del backend.audit_pending_launches[run_id]
+            backend.audit_pending_launch_a100s = sum(
+                int(value) for value in backend.audit_pending_launches.values()
+            )
 
     def provision(identity):
         zone = backend.zone_for_name(identity.run_id)
@@ -1163,9 +1173,19 @@ def _install_launch_census_and_direct_fallback_patch(
             direct_parent = backend.audit_direct_1g_authorized_zones.get(zone)
             requested_a100s = 1 if direct_parent is not None else 4
             census = _global_a100_census(backend)
+            visible_names = {
+                str(row["name"])
+                for row in census.get("instances", [])
+                if row.get("name") is not None
+            }
+            unseen_pending_a100s = sum(
+                int(value)
+                for run_id, value in backend.audit_pending_launches.items()
+                if run_id not in visible_names
+            )
             projected = (
                 int(census["total_attached_a100_equivalent"])
-                + int(backend.audit_pending_launch_a100s)
+                + unseen_pending_a100s
                 + requested_a100s
             )
             if projected > GLOBAL_A100_CEILING:
@@ -1173,7 +1193,12 @@ def _install_launch_census_and_direct_fallback_patch(
                     "loss-blind prelaunch census plus pending probes would exceed "
                     "the global 16-A100 ceiling"
                 )
-            backend.audit_pending_launch_a100s += requested_a100s
+            if identity.run_id in backend.audit_pending_launches:
+                raise ControllerError("launch already has a pending A100 reservation")
+            backend.audit_pending_launches[identity.run_id] = requested_a100s
+            backend.audit_pending_launch_a100s = sum(
+                int(value) for value in backend.audit_pending_launches.values()
+            )
         direct_authorization_path: Path | None = None
         try:
             if direct_parent is not None:
@@ -1224,8 +1249,7 @@ def _install_launch_census_and_direct_fallback_patch(
                     "after pre-creation 4g stockout; global census PASS."
                 )
         except BaseException:
-            with lock:
-                backend.audit_pending_launch_a100s -= requested_a100s
+            release_pending(identity.run_id)
             raise
         try:
             try:
@@ -1242,8 +1266,7 @@ def _install_launch_census_and_direct_fallback_patch(
                     raise context
                 raise
         finally:
-            with lock:
-                backend.audit_pending_launch_a100s -= requested_a100s
+            release_pending(identity.run_id)
         if provider.get("machine_type") == "a2-highgpu-1g":
             with lock:
                 backend.audit_direct_1g_authorized_zones.setdefault(
