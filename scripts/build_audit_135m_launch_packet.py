@@ -15,6 +15,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -55,6 +56,8 @@ ZONE_ROTATION = (
 )
 PROTECTED_INSTANCE_ID = "3908640733128066700"
 GCLOUD_CONFIG = "/private/tmp/yeto-gcloud-admin-codex"
+GLOBAL_A100_CEILING = 16
+PREFERRED_PROBE_A100S = 4
 
 
 def _source_commit() -> str:
@@ -203,6 +206,20 @@ def _load(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
+def _instance_a100_count(row: Mapping[str, Any]) -> int:
+    accelerators = row.get("guestAccelerators") or []
+    if isinstance(accelerators, list) and accelerators:
+        return sum(
+            int(accelerator.get("acceleratorCount", 0))
+            for accelerator in accelerators
+            if isinstance(accelerator, Mapping)
+            and "A100" in str(accelerator.get("acceleratorType", "")).upper()
+        )
+    machine_type = str(row.get("machineType", "")).rsplit("/", 1)[-1]
+    match = re.fullmatch(r"a2-(?:ultra)?highgpu-([1-9][0-9]*)g", machine_type)
+    return 0 if match is None else int(match.group(1))
+
+
 def _cloud_preflight(roster_tag: str, artifact_root: str) -> dict[str, Any]:
     env = dict(os.environ)
     env["CLOUDSDK_CONFIG"] = GCLOUD_CONFIG
@@ -219,7 +236,7 @@ def _cloud_preflight(roster_tag: str, artifact_root: str) -> dict[str, Any]:
             "instances",
             "list",
             "--project=model-training-497007",
-            "--format=json(name,id,zone,machineType,labels,status)",
+            "--format=json",
         ]
     )
     if instances.returncode:
@@ -232,6 +249,21 @@ def _cloud_preflight(roster_tag: str, artifact_root: str) -> dict[str, Any]:
     ]
     if owned:
         raise PacketError("campaign tag already owns a GCP instance")
+    live_a100_rows = [
+        {
+            "name": row.get("name"),
+            "instance_numeric_id": str(row.get("id")),
+            "a100_count": _instance_a100_count(row),
+            "campaign_tag": (row.get("labels") or {}).get("campaign-tag"),
+        }
+        for row in rows
+        if row.get("status") != "TERMINATED" and _instance_a100_count(row) > 0
+    ]
+    live_a100_count = sum(row["a100_count"] for row in live_a100_rows)
+    if live_a100_count + PREFERRED_PROBE_A100S > GLOBAL_A100_CEILING:
+        raise PacketError(
+            "global A100 census leaves insufficient room for one reviewed 4g-first probe"
+        )
     protected = [row for row in rows if str(row.get("id")) == PROTECTED_INSTANCE_ID]
     if len(protected) != 1:
         raise PacketError("protected instance census differs")
@@ -260,6 +292,11 @@ def _cloud_preflight(roster_tag: str, artifact_root: str) -> dict[str, Any]:
         "protected_instance_numeric_id": PROTECTED_INSTANCE_ID,
         "protected_instance_untouched": True,
         "visible_instance_count": len(rows),
+        "global_attached_a100_equivalent": live_a100_count,
+        "global_a100_ceiling": GLOBAL_A100_CEILING,
+        "preferred_probe_a100s": PREFERRED_PROBE_A100S,
+        "global_a100_inventory": live_a100_rows,
+        "global_ceiling_after_one_preferred_probe_pass": True,
         "artifact_root": artifact_root,
         "artifact_root_empty": True,
     }
@@ -739,6 +776,13 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "cost_forecast": forecast,
         "spot_only": True,
         "maximum_attached_a100_equivalent": 16,
+        "global_attached_a100_equivalent_at_preflight": preflight[
+            "global_attached_a100_equivalent"
+        ],
+        "maximum_initial_preferred_probe_width_under_global_ceiling": (
+            GLOBAL_A100_CEILING - preflight["global_attached_a100_equivalent"]
+        )
+        // PREFERRED_PROBE_A100S,
         "max_idle_before_science_seconds": 600,
         "zone_rotation": list(ZONE_ROTATION),
         "shape_fallback_order": ["a2-highgpu-4g", "a2-highgpu-1g"],

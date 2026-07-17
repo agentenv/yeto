@@ -16,6 +16,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -58,6 +59,8 @@ SPOT_PREEMPTION_RESERVE_FACTOR = 1.25
 WATCHDOG_POLL_SECONDS = 15
 TEARDOWN_RESERVE_SECONDS = 900
 TEARDOWN_RESERVE_FIXED_USD = 0.25
+GLOBAL_A100_CEILING = 16
+PREFERRED_PROBE_A100S = 4
 FUTURE_STAGE_CELL_COUNTS = {
     "a1d": {16: 32, 256: 32},
     "a1x": {16: 32, 256: 32},
@@ -232,6 +235,44 @@ def _current_campaign_cost(executor, campaign_root: Path) -> tuple[float, list[d
             }
         )
     return total, rows
+
+
+def _instance_a100_count(row: Mapping[str, Any]) -> int:
+    accelerators = row.get("guestAccelerators") or []
+    if isinstance(accelerators, list) and accelerators:
+        return sum(
+            int(accelerator.get("acceleratorCount", 0))
+            for accelerator in accelerators
+            if isinstance(accelerator, Mapping)
+            and "A100" in str(accelerator.get("acceleratorType", "")).upper()
+        )
+    machine_type = str(row.get("machineType", "")).rsplit("/", 1)[-1]
+    match = re.fullmatch(r"a2-(?:ultra)?highgpu-([1-9][0-9]*)g", machine_type)
+    return 0 if match is None else int(match.group(1))
+
+
+def _global_a100_census(backend) -> dict[str, Any]:
+    result = backend.gcloud(
+        "compute", "instances", "list", "--project=model-training-497007", "--format=json"
+    )
+    rows = json.loads(result.stdout)
+    live = [row for row in rows if row.get("status") != "TERMINATED"]
+    inventory = [
+        {
+            "name": row.get("name"),
+            "instance_numeric_id": str(row.get("id")),
+            "a100_count": _instance_a100_count(row),
+            "campaign_tag": (row.get("labels") or {}).get("campaign-tag"),
+        }
+        for row in live
+        if _instance_a100_count(row) > 0
+    ]
+    return {
+        "schema": "audit_135m_global_a100_census_v1",
+        "total_attached_a100_equivalent": sum(row["a100_count"] for row in inventory),
+        "instances": inventory,
+        "queried_at_utc": utc_now(),
+    }
 
 
 def _load_spend_ledger(path: Path, audit_stage: str, ceiling: float) -> dict[str, Any]:
@@ -483,6 +524,33 @@ class CostWatchdog:
         try:
             prior = float(self.stage_ledger["estimated_spend_usd"])
             while not self.stop_event.is_set():
+                global_census = _global_a100_census(self.backend)
+                if (
+                    int(global_census["total_attached_a100_equivalent"])
+                    > GLOBAL_A100_CEILING
+                ):
+                    self.triggered.set()
+                    deleted = _emergency_exact_delete_active(
+                        executor=self.executor,
+                        backend=self.backend,
+                        lifecycle_lock=self.lifecycle_lock,
+                    )
+                    write_json_create_only(
+                        self.campaign_root / "campaign" / "global-a100-stop.json",
+                        {
+                            "schema": "audit_135m_global_a100_stop_v1",
+                            "status": "EXACT_ID_KILL_ISSUED",
+                            "loss_inspected": False,
+                            "global_ceiling": GLOBAL_A100_CEILING,
+                            "global_census": global_census,
+                            "deleted_campaign_generations": deleted,
+                            "triggered_at_utc": utc_now(),
+                        },
+                    )
+                    self.error = ControllerError(
+                        "global attached A100-equivalent count exceeded 16"
+                    )
+                    return
                 current, rows = _current_campaign_cost(
                     self.executor, self.campaign_root
                 )
@@ -1322,6 +1390,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         or target_width not in range(1, 5)
         or assembly_seconds > 480
         or tuple(identity_plan["zone_rotation"]) != ZONE_ROTATION
+        or int(review.get("global_attached_a100_equivalent_at_preflight", 10**9))
+        + PREFERRED_PROBE_A100S
+        > GLOBAL_A100_CEILING
     ):
         raise ControllerError("packet launch identity/width/zone contract differs")
 
@@ -1411,9 +1482,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     census = executor._assert_capacity_census()
     if census["campaign_owned_vm_count"] or census["campaign_owned_attached_a100s"]:
         raise ControllerError("campaign tag already owns a cloud resource")
+    global_census = _global_a100_census(backend)
+    global_existing = int(global_census["total_attached_a100_equivalent"])
+    global_headroom = GLOBAL_A100_CEILING - global_existing
+    if global_headroom < PREFERRED_PROBE_A100S:
+        raise ControllerError(
+            f"global A100 headroom is {global_headroom}; a reviewed 4g-first Spot "
+            "probe could exceed the total ceiling"
+        )
+    initial_probe_width = min(
+        target_width, len(SLOTS), global_headroom // PREFERRED_PROBE_A100S
+    )
+    initial_slots = SLOTS[:initial_probe_width]
     backend.note(
         f"{stage_code.upper()} LAUNCH AUTHORIZED: {len(roster['launch_cells'])} cells, "
-        f"target width {target_width}, hard ceiling ${ceiling:.2f}, current stage "
+        f"registered target width {target_width}, global-headroom probe width "
+        f"{initial_probe_width} ({global_existing}/{GLOBAL_A100_CEILING} A100s already "
+        f"attached outside this campaign), hard ceiling ${ceiling:.2f}, current stage "
         f"spend ${float(spend_ledger['estimated_spend_usd']):.2f}, Spot only, "
         "losses SEALED/BLINDED, exact zero-resource census PASS."
     )
@@ -1433,7 +1518,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     hidden_root: Path | None = None
     campaign_seal: dict[str, Any] | None = None
     try:
-        for slot in SLOTS:
+        for slot in initial_slots:
             thread = threading.Thread(
                 target=p1.provision_loop,
                 kwargs={
@@ -1467,7 +1552,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     f"INITIAL ASSEMBLY first READY width {width}; at most "
                     f"{assembly_seconds}s remain before immediate science/cleanup."
                 )
-            if width >= target_width:
+            if width >= initial_probe_width:
                 break
             if first_ready_epoch is not None and time.time() - first_ready_epoch >= assembly_seconds:
                 break
@@ -1490,7 +1575,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         plan=plan,
                         scientific=scientific,
                         planned_index=0,
-                        target_width=target_width,
+                        target_width=initial_probe_width,
                     )
                 )
             except ControllerError as exc:
@@ -1517,7 +1602,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 selected_slots=set(),
                 lifecycle_lock=lifecycle_lock,
             )
-            selected_slot = SLOTS[0]
+            selected_slot = initial_slots[0]
             selected_shape, stage_forecast = (
                 _provision_cost_eligible_initial_generation(
                     base=base,
@@ -1546,6 +1631,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
         if set(executor.active) != set(selected_slots):
             raise ControllerError("post-assembly active slots differ from the selected set")
+        if (
+            int(_global_a100_census(backend)["total_attached_a100_equivalent"])
+            > GLOBAL_A100_CEILING
+        ):
+            raise ControllerError("post-assembly global A100 census exceeds 16")
         preferred_replacement_zone = str(
             executor.providers[
                 (

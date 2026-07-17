@@ -154,6 +154,11 @@ def test_cost_watchdog_exact_kill_trigger_is_loss_blind(
         lambda executor, campaign_root: (9.8, []),
     )
     monkeypatch.setattr(controller, "_active_teardown_reserve", lambda executor: 0.3)
+    monkeypatch.setattr(
+        controller,
+        "_global_a100_census",
+        lambda backend: {"total_attached_a100_equivalent": 0},
+    )
     deleted = [
         {
             "slot": "v0",
@@ -241,6 +246,29 @@ def test_shape_selection_keeps_only_cost_eligible_landed_region(
     assert shape == "a2-highgpu-1g"
     assert slots == ("v1",)
     assert forecast == 70.0
+
+
+def test_global_a100_count_uses_accelerator_inventory_or_machine_shape() -> None:
+    assert (
+        controller._instance_a100_count(
+            {
+                "guestAccelerators": [
+                    {
+                        "acceleratorType": "projects/x/zones/y/acceleratorTypes/nvidia-tesla-a100",
+                        "acceleratorCount": 4,
+                    }
+                ]
+            }
+        )
+        == 4
+    )
+    assert (
+        controller._instance_a100_count(
+            {"machineType": "projects/x/zones/y/machineTypes/a2-highgpu-8g"}
+        )
+        == 8
+    )
+    assert controller._instance_a100_count({"machineType": "e2-standard-8"}) == 0
 
 
 def _write_capture_state(path: Path, step: int, values: list[float]) -> None:
