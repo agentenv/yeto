@@ -205,6 +205,8 @@ def render(args: argparse.Namespace) -> dict[str, Any]:
         or ledger.get("audit_stage") != stage
         or float(ledger.get("estimated_spend_usd", math.inf))
         >= float(ledger.get("hard_ceiling_usd", -math.inf))
+        or float(ledger.get("pre_science_aborted_launch_spend_usd", math.inf))
+        > float(ledger.get("abort_burn_kill_usd", -math.inf))
     ):
         raise ReportError("final phase/analysis/replay/cost evidence is incomplete")
     if replay.get("final_phase_manifest_canonical_sha256") != hashlib.sha256(
@@ -267,7 +269,10 @@ def render(args: argparse.Namespace) -> dict[str, Any]:
             f"| Estimated Spot spend | `${float(ledger['estimated_spend_usd']):.6f}` |",
             f"| Hard stage ceiling | `${float(ledger['hard_ceiling_usd']):.2f}` |",
             f"| Remaining headroom | `${float(ledger['hard_ceiling_usd']) - float(ledger['estimated_spend_usd']):.6f}` |",
+            f"| Pre-science aborted-launch spend | `${float(ledger['pre_science_aborted_launch_spend_usd']):.6f}` |",
+            f"| Abort-burn kill | `${float(ledger['abort_burn_kill_usd']):.2f}` |",
             "| Provisioning model | Spot only |",
+            "| Concurrent atomic-block width cap | 2 |",
             "| Maximum attached A100-equivalent | 16 |",
             "| Final campaign-owned VM/A100 census | 0 / 0 |",
             "| Protected instance `3908640733128066700` | untouched |",

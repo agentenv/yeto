@@ -24,9 +24,13 @@ from scripts import run_parallel_phase_map as parallel
 def test_ceiling_amendment_covers_full_survivable_stage_paths() -> None:
     authority = audit.load_authority()
     price = controller.PRICE_PER_VM_HOUR["us-west4"]["a2-highgpu-1g"]
+    a1 = authority["costs"]["blocks"]["A1"]
+    assert a1["corrected_cheapest_complete_1g_path_usd_approx"] == 106.0
+    assert a1["range_usd"] == [106.0, 132.5]
+    assert a1["hard_ceiling_usd"] == 140.0
+    assert a1["width_cap"] == 2
+    assert a1["abort_burn_kill_usd"] == 40.0
     hours = {
-        "A1": 48 * controller.CELL_HOURS[16]
-        + 48 * controller.CELL_HOURS[256],
         "A3": 10 * controller.CELL_HOURS[8]
         + 12 * controller.CELL_HOURS[512]
         + controller.CELL_HOURS[16]
@@ -49,9 +53,52 @@ def test_ceiling_amendment_covers_full_survivable_stage_paths() -> None:
         assert block["hard_ceiling_usd"] >= lower_bound * 1.30
         assert block["hard_ceiling_usd"] - lower_bound * 1.30 < 0.01
 
+    assert sum(
+        float(block["hard_ceiling_usd"])
+        for block in authority["costs"]["blocks"].values()
+    ) == pytest.approx(2485.0)
+    assert authority["costs"]["sum_of_block_hard_ceilings_usd"] == 2485.0
+    assert authority["costs"]["program_hard_ceiling_usd"] == 2485.0
+
     assert controller.FUTURE_STAGE_CELL_COUNTS["a1d"] == {16: 36, 256: 36}
     assert controller.FUTURE_STAGE_CELL_COUNTS["a3k"] == {8: 10, 512: 12}
     assert controller.FUTURE_STAGE_CELL_COUNTS["a4d"] == {16: 56, 256: 56}
+
+
+def test_abort_burn_guard_stops_only_pre_science_aborted_launch_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    campaign = tmp_path / "campaign-root"
+    (campaign / "campaign").mkdir(parents=True)
+    ledger = {
+        "pre_science_aborted_launch_spend_usd": 39.5,
+        "abort_burn_kill_usd": 40.0,
+    }
+    monkeypatch.setattr(
+        controller,
+        "_current_campaign_cost",
+        lambda _executor, _campaign_root: (0.51, []),
+    )
+    with pytest.raises(controller.AbortBurnStop, match="exceeds"):
+        controller._guard_abort_burn(
+            executor=SimpleNamespace(),
+            campaign_root=campaign,
+            stage_ledger=ledger,
+            phase="test",
+        )
+    evidence = json.loads((campaign / "campaign" / "abort-burn-guard.json").read_text())
+    assert evidence["status"] == "STOP"
+    assert evidence["projected_pre_science_aborted_launch_spend_usd"] == 40.01
+
+    partial = campaign / "vms" / "v0" / "g1" / "manifests" / "vm-partial-manifest.json"
+    partial.parent.mkdir(parents=True)
+    partial.write_text(json.dumps({"attempts": [{"attempt_id": "science-started"}]}))
+    assert controller._guard_abort_burn(
+        executor=SimpleNamespace(),
+        campaign_root=campaign,
+        stage_ledger=ledger,
+        phase="after-science",
+    ) == 39.5
 
 
 def test_deferred_evaluation_modes_are_exact() -> None:
@@ -1199,11 +1246,13 @@ def test_final_report_renders_registered_a3_disposition(tmp_path: Path) -> None:
     replay_path.write_text(json.dumps(replay_value))
     ledger_path.write_text(
         json.dumps(
-            {
-                "audit_stage": "A3",
-                "estimated_spend_usd": 12.5,
-                "hard_ceiling_usd": 40.0,
-            }
+                {
+                    "audit_stage": "A3",
+                    "estimated_spend_usd": 12.5,
+                    "hard_ceiling_usd": 31.18,
+                    "pre_science_aborted_launch_spend_usd": 0.0,
+                    "abort_burn_kill_usd": 40.0,
+                }
         )
     )
     output = tmp_path / "AUDIT-135M-A3-FINAL.md"

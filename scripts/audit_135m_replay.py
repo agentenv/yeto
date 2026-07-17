@@ -683,6 +683,11 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         float(ledger["estimated_spend_usd"]) < float(ledger["hard_ceiling_usd"]),
         "stage replay ledger reaches/exceeds its hard ceiling",
     )
+    require(
+        float(ledger["pre_science_aborted_launch_spend_usd"])
+        <= float(ledger["abort_burn_kill_usd"]),
+        "stage replay ledger exceeds its abort-burn kill",
+    )
     report = {
         "schema": REPORT_SCHEMA,
         "status": "PASS",
@@ -706,6 +711,10 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         "gates": final_analysis.get("gates"),
         "stage_spend_usd": ledger["estimated_spend_usd"],
         "hard_ceiling_usd": ledger["hard_ceiling_usd"],
+        "pre_science_aborted_launch_spend_usd": ledger[
+            "pre_science_aborted_launch_spend_usd"
+        ],
+        "abort_burn_kill_usd": ledger["abort_burn_kill_usd"],
         "spot_only": True,
         "maximum_attached_a100_equivalent": 16,
         "final_zero_resource_census": True,

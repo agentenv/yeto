@@ -437,31 +437,31 @@ def test_audit_concurrent_block_binding_is_prospective_deterministic_and_disjoin
         Path("docs/AMENDMENT-audit-135m-concurrent-blocks.md")
     )
     assert binding["block_width"] == 3
-    assert binding["maximum_concurrent_blocks"] == 5
-    assert plan["capacity"]["maximum_concurrent_scientific_cells"] == 15
+    assert binding["maximum_concurrent_blocks"] == 2
+    assert plan["capacity"]["maximum_concurrent_scientific_cells"] == 6
     assert plan["capacity"]["maximum_campaign_owned_attached_a100s"] == 16
 
     contract_hash = roster["audit_135m_design_contract_hash"]
-    batch_slots = parallel.AUDIT_135M_LOGICAL_SLOTS[:12]
+    batch_slots = parallel.AUDIT_135M_LOGICAL_SLOTS
     lanes = [
         parallel.audit_concurrent_block_slots(
             contract_hash=contract_hash,
             block_index=index,
             available_slots=batch_slots,
         )
-        for index in range(4)
+        for index in range(2)
     ]
     assert all(len(lane) == 3 for lane in lanes)
-    assert len({slot for lane in lanes for slot in lane}) == 12
+    assert len({slot for lane in lanes for slot in lane}) == 6
     assert lanes == [
         parallel.audit_concurrent_block_slots(
             contract_hash=contract_hash,
             block_index=index,
             available_slots=reversed(batch_slots),
         )
-        for index in range(4)
+        for index in range(2)
     ]
-    assert [tuple(wave["available_slot_set"]) for wave in plan["waves"]] == lanes
+    assert [tuple(wave["available_slot_set"]) for wave in plan["waves"][:2]] == lanes
 
 
 @pytest.mark.parametrize("stage_code", ["a1d", "a3k", "a3r0", "a4d"])
@@ -473,8 +473,9 @@ def test_all_initial_135m_stages_inherit_concurrent_block_binding(
     )
     assert plan["schema"] == "yeto_parallel_plan_v4"
     contract_hash = roster["audit_135m_design_contract_hash"]
-    for batch_start in range(0, len(plan["waves"]), 5):
-        waves = plan["waves"][batch_start : batch_start + 5]
+    width = parallel.AUDIT_135M_MAX_CONCURRENT_BLOCKS
+    for batch_start in range(0, len(plan["waves"]), width):
+        waves = plan["waves"][batch_start : batch_start + width]
         batch_slots = tuple(waves[0]["audit_registered_batch_slot_set"])
         lanes = [
             parallel.audit_concurrent_block_slots(
@@ -489,7 +490,7 @@ def test_all_initial_135m_stages_inherit_concurrent_block_binding(
         assert [tuple(wave["available_slot_set"]) for wave in waves] == lanes
 
 
-def test_audit_capacity_allows_fifteen_1g_vms_but_not_sixteen():
+def test_audit_capacity_allows_six_1g_vms_but_not_seven():
     rows = [
         {
             "creation_timestamp": "2026-07-17T00:00:00Z",
@@ -497,7 +498,7 @@ def test_audit_capacity_allows_fifteen_1g_vms_but_not_sixteen():
             "machine_type": "a2-highgpu-1g",
             "a100_count": 1,
         }
-        for _ in range(15)
+        for _ in range(6)
     ]
     parallel._validate_generation_capacity(rows, stage_code="a1d")
     with pytest.raises(parallel.LifecycleError, match="stage VM limit|16 A100s"):
@@ -511,9 +512,12 @@ def test_concurrent_attempt_schedule_allows_disjoint_blocks_to_overlap(tmp_path)
         tmp_path
     )
     scientific_by_id = {cell["cell_id"]: cell for cell in scientific["cells"]}
-    batch_slots = parallel.AUDIT_135M_LOGICAL_SLOTS[:12]
     attempts = []
     for block_index, planned_wave in enumerate(plan["waves"]):
+        batch_slots = tuple(planned_wave["audit_registered_batch_slot_set"])
+        concurrent_batch_index = (
+            block_index // parallel.AUDIT_135M_MAX_CONCURRENT_BLOCKS
+        )
         lane = parallel.audit_concurrent_block_slots(
             contract_hash=roster["audit_135m_design_contract_hash"],
             block_index=block_index,
@@ -532,6 +536,7 @@ def test_concurrent_attempt_schedule_allows_disjoint_blocks_to_overlap(tmp_path)
             batch = assignment["dispatch_batch_index"]
             order = assignment["batch_launch_order_index"]
             dispatch_second = batch * 30 + order
+            dispatch_minute = concurrent_batch_index * 2
             attempts.append(
                 {
                     "status": "COMPLETED",
@@ -546,7 +551,7 @@ def test_concurrent_attempt_schedule_allows_disjoint_blocks_to_overlap(tmp_path)
                     "group_id": planned_wave["group_id"],
                     "retry_round": 1,
                     "actual_wave_index": block_index,
-                    "concurrent_batch_index": 0,
+                    "concurrent_batch_index": concurrent_batch_index,
                     "concurrent_batch_slot_set": list(batch_slots),
                     "time_block_index": planned_wave["time_block_index"],
                     "retry_time_block_index": None,
@@ -578,16 +583,16 @@ def test_concurrent_attempt_schedule_allows_disjoint_blocks_to_overlap(tmp_path)
                     "retry_authorization": None,
                     "vm_ready_at": "2026-07-17T00:00:00Z",
                     "dispatched_at": (
-                        f"2026-07-17T00:00:{dispatch_second:02d}Z"
+                        f"2026-07-17T00:{dispatch_minute:02d}:{dispatch_second:02d}Z"
                     ),
                     "scientific_started_at": (
-                        f"2026-07-17T00:00:{dispatch_second + 5:02d}Z"
+                        f"2026-07-17T00:{dispatch_minute:02d}:{dispatch_second + 5:02d}Z"
                     ),
                     "scientific_ended_at": (
-                        f"2026-07-17T00:00:{dispatch_second + 20:02d}Z"
+                        f"2026-07-17T00:{dispatch_minute:02d}:{dispatch_second + 20:02d}Z"
                     ),
                     "wave_terminal_prefix_sealed_at": (
-                        "2026-07-17T00:01:00Z"
+                        f"2026-07-17T00:{dispatch_minute + 1:02d}:00Z"
                     ),
                 }
             )
@@ -601,11 +606,12 @@ def test_concurrent_attempt_schedule_allows_disjoint_blocks_to_overlap(tmp_path)
     assert set(final) == {cell["cell_id"] for cell in roster["launch_cells"]}
 
     tampered = [dict(row) for row in attempts]
+    first_batch_slots = tuple(plan["waves"][0]["audit_registered_batch_slot_set"])
     tampered[0]["available_slot_set"] = list(
         parallel.audit_concurrent_block_slots(
             contract_hash=roster["audit_135m_design_contract_hash"],
             block_index=1,
-            available_slots=batch_slots,
+            available_slots=first_batch_slots,
         )
     )
     with pytest.raises(

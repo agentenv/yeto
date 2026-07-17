@@ -1,6 +1,6 @@
 {
   "schema": "tuned_baseline_audit_prereg_v1",
-  "revision": "1.1",
+  "revision": "1.2",
   "registered_at_date": "2026-07-16",
   "amended_at_date": "2026-07-17",
   "revision_history": [
@@ -16,6 +16,22 @@
         "A3": 40.0,
         "A4": 140.0
       }
+    },
+    {
+      "revision": "1.1",
+      "status": "superseded_by_revision_1.2_ceiling_correction",
+      "superseded_git_sha": "e35d82143c3a50c3c1a6ef7327fb40e47bb0ff57",
+      "prereg_json_sha256": "bf66f7b07fb3b5a8ed531320e4ca505df51f75d4d6fd22aa4ab6edc3eafe7bed",
+      "prereg_md_sha256": "f0fec5d8e2b479136c473a1123acc42047f598aeb8839701d25f994ed7ddcae3",
+      "hard_ceilings_usd": {
+        "A1": 82.93,
+        "A3": 31.18,
+        "A4": 138.21,
+        "A6_OMR": 1000.0
+      },
+      "maximum_concurrent_blocks": 5,
+      "abort_burn_kill_usd": null,
+      "sum_of_block_hard_ceilings_usd": 2482.32
     }
   ],
   "title": "A tuned-baseline audit of outer optimization for communication-efficient training",
@@ -166,7 +182,14 @@
     "interior_optimum_required": true,
     "evaluation_bootstrap_is_supplementary_only": true,
     "precision_expansion_trigger": "adjusted CI half-width exceeds epsilon after the complete initial seed block",
-    "precision_expansion_sign_blind": true
+    "precision_expansion_sign_blind": true,
+    "fifth_distinct_launch_machinery_defect_action": "stop the parallel path and publish a status recommending the proven serial P1 controller; do not patch the parallel executor on live VMs",
+    "known_launch_machinery_defects_before_revision_1_2": [
+      "mass_teardown",
+      "missing_fail_fast",
+      "census_race",
+      "budget_margin"
+    ]
   },
   "seed_registry": {
     "training_seed_rule": "for four-digit s use int(str(s)+str(s)); legacy three-digit seeds retain the same decimal-concatenation rule",
@@ -205,6 +228,8 @@
     "A1": {
       "name": "multi-seed 135M momentum anchors",
       "stack": "SmolLM2-135M full-parameter frozen phase-map protocol",
+      "width_cap": 2,
+      "abort_burn_kill_usd": 40.0,
       "fixed_eta": 0.0875,
       "anchors": [
         {
@@ -250,6 +275,8 @@
     "A3": {
       "name": "tuned memoryless frontier",
       "mu": 0.0,
+      "width_cap": 2,
+      "abort_burn_kill_usd": 40.0,
       "existing_minima": {
         "16": {"eta": 0.021875, "nll": 2.046027520801208},
         "64": {"eta": 0.021875, "nll": 2.1074817812764506},
@@ -282,6 +309,8 @@
     },
     "A4": {
       "name": "M-axis",
+      "width_cap": 2,
+      "abort_burn_kill_usd": 40.0,
       "m": [1, 4],
       "h": [16, 256],
       "fixed_eta": 0.0875,
@@ -419,8 +448,11 @@
     "spot_preemption_reserve_fraction": 0.25,
     "hard_ceiling_reserve_fraction": 0.3,
     "remaining_stage_ceiling_amendment": {
-      "authorization": "operator ceiling-amendment authorization A, 2026-07-17",
-      "superseded_git_sha": "c40d525ee509d566c7dd7c9c6e94fa4083a270a5",
+      "authorization": "operator authorization 2: ceiling correction plus width and abort-burn controls, 2026-07-17",
+      "superseded_git_sha": "e35d82143c3a50c3c1a6ef7327fb40e47bb0ff57",
+      "superseded_prereg_json_sha256": "bf66f7b07fb3b5a8ed531320e4ca505df51f75d4d6fd22aa4ab6edc3eafe7bed",
+      "superseded_prereg_md_sha256": "f0fec5d8e2b479136c473a1123acc42047f598aeb8839701d25f994ed7ddcae3",
+      "ceiling_correction_root_cause": "revision 1.1 used a horizon-weighted lower-bound model whose $82.93 A1 ceiling was below A1's observed approximately $106 cheapest complete one-GPU path",
       "excluded_prior_a1_infrastructure_spend_usd": 9.231503,
       "excluded_prior_spend_reason": "two aborted pre-science launch families bought only the now-landed transient-provider isolation and fail-fast cost-guard fixes; operator authorized fresh science budgets",
       "timing_source": {
@@ -454,7 +486,30 @@
       "reserve_semantics": {
         "remaining_work_forecast_factor": 1.25,
         "hard_ceiling_factor": 1.3,
-        "final_five_percentage_points": "reserved for realized boot, transient-provider, and exact-teardown burn"
+        "final_five_percentage_points": "reserved for realized boot, transient-provider, and exact-teardown burn for A3/A4; A1 is overridden by the operator-authorized $140 correction"
+      },
+      "execution_controls": {
+        "A1": {"width_cap": 2, "abort_burn_kill_usd": 40.0},
+        "A3": {"width_cap": 2, "abort_burn_kill_usd": 40.0},
+        "A4": {"width_cap": 2, "abort_burn_kill_usd": 40.0},
+        "abort_burn_scope": "cumulative pre-science aborted-launch spend per stage, tracked separately from scientific stage spend",
+        "abort_burn_stop_rule": "stop when cumulative pre-science aborted-launch spend exceeds $40 for the stage",
+        "fifth_distinct_launch_machinery_defect_fallback": "stop the parallel path and recommend the proven serial P1 controller"
+      },
+      "program_ceiling_reallocation": {
+        "prior_sum_of_block_hard_ceilings_usd": 2482.32,
+        "prior_unallocated_program_headroom_usd": 2.68,
+        "A1_prior_hard_ceiling_usd": 82.93,
+        "A1_corrected_hard_ceiling_usd": 140.0,
+        "A1_increase_usd": 57.07,
+        "donor_block": "A6_OMR",
+        "donor_block_prior_hard_ceiling_usd": 1000.0,
+        "donor_block_headroom_draw_usd": 54.39,
+        "donor_block_corrected_hard_ceiling_usd": 945.61,
+        "new_sum_of_block_hard_ceilings_usd": 2485.0,
+        "program_hard_ceiling_usd": 2485.0,
+        "fits_program_hard_ceiling": true,
+        "remaining_unallocated_program_headroom_usd": 0.0
       },
       "stage_arithmetic": {
         "A1": {
@@ -463,10 +518,13 @@
             "H16": 48,
             "H256": 48
           },
-          "a100_hours_lower_bound": 35.105090360000005,
-          "lower_bound_usd": 63.78594918412001,
-          "lower_bound_times_1p30_usd": 82.92173393935602,
-          "hard_ceiling_usd_rounded_up_to_cent": 82.93
+          "superseded_a100_hours_lower_bound": 35.105090360000005,
+          "superseded_lower_bound_usd": 63.78594918412001,
+          "superseded_lower_bound_times_1p30_usd": 82.92173393935602,
+          "superseded_hard_ceiling_usd": 82.93,
+          "corrected_cheapest_complete_1g_path_usd_approx": 106.0,
+          "corrected_hard_ceiling_usd": 140.0,
+          "corrected_ceiling_over_approx_path_fraction": 0.3207547169811321
         },
         "A3": {
           "survivable_work": "18 frontier + up to 4 boundary-extension + 3 mechanical matched-eta recapture arms",
@@ -501,17 +559,17 @@
       }
     },
     "blocks": {
-      "A1": {"planned_arms": 88, "max_arms_with_boundary_extension": 96, "a100_hours_lower_bound": 35.105090360000005, "lower_bound_usd": 63.78594918412001, "range_usd": [63.78594918412001, 79.73243648015001], "hard_ceiling_usd": 82.93},
+      "A1": {"planned_arms": 88, "max_arms_with_boundary_extension": 96, "superseded_a100_hours_lower_bound": 35.105090360000005, "superseded_lower_bound_usd": 63.78594918412001, "corrected_cheapest_complete_1g_path_usd_approx": 106.0, "range_usd": [106.0, 132.5], "hard_ceiling_usd": 140.0, "width_cap": 2, "abort_burn_kill_usd": 40.0},
       "A2": {"planned_arms": 48, "max_arms": 72, "range_usd": [65, 125], "hard_ceiling_usd": 160},
-      "A3": {"planned_extension_arms": 18, "max_frontier_arms_with_boundary_extension": 22, "max_arms_with_mechanical_recapture": 25, "a100_hours_lower_bound": 13.19955020470238, "lower_bound_usd": 23.983582721944224, "range_usd": [23.983582721944224, 29.97947840243028], "hard_ceiling_usd": 31.18},
-      "A4": {"planned_arms": 96, "max_arms_with_precision_expansion": 144, "max_arms_with_boundary_and_precision_expansion": 160, "a100_hours_lower_bound": 58.50848393333334, "lower_bound_usd": 106.30991530686667, "range_usd": [106.30991530686667, 132.88739413358334], "hard_ceiling_usd": 138.21},
+      "A3": {"planned_extension_arms": 18, "max_frontier_arms_with_boundary_extension": 22, "max_arms_with_mechanical_recapture": 25, "a100_hours_lower_bound": 13.19955020470238, "lower_bound_usd": 23.983582721944224, "range_usd": [23.983582721944224, 29.97947840243028], "hard_ceiling_usd": 31.18, "width_cap": 2, "abort_burn_kill_usd": 40.0},
+      "A4": {"planned_arms": 96, "max_arms_with_precision_expansion": 144, "max_arms_with_boundary_and_precision_expansion": 160, "a100_hours_lower_bound": 58.50848393333334, "lower_bound_usd": 106.30991530686667, "range_usd": [106.30991530686667, 132.88739413358334], "hard_ceiling_usd": 138.21, "width_cap": 2, "abort_burn_kill_usd": 40.0},
       "A5": {"a100_hours_range": [90, 180], "range_usd": [100, 250], "hard_ceiling_usd": 320},
-      "A6_OMR": {"planned_runs": 48, "max_runs": 72, "a100_equivalent_hours_range": [120, 360], "range_usd": [250, 800], "hard_ceiling_usd": 1000},
+      "A6_OMR": {"planned_runs": 48, "max_runs": 72, "a100_equivalent_hours_range": [120, 360], "range_usd": [250, 800], "hard_ceiling_usd": 945.61},
       "A6_SCAFFOLD_LITE": {"new_compute": 0, "range_usd": [0, 0], "hard_ceiling_usd": 0},
       "A6_SLOWMO": {"planned_runs": 40, "a100_hours_range": [160, 480], "range_usd": [180, 600], "hard_ceiling_usd": 750}
     },
-    "program_range_usd": [789.079447212931, 2017.5993090161637],
-    "sum_of_block_hard_ceilings_usd": 2482.32,
+    "program_range_usd": [831.293498028811, 2070.3668725360137],
+    "sum_of_block_hard_ceilings_usd": 2485.0,
     "program_hard_ceiling_usd": 2485,
     "unused_budget_transfer_forbidden_without_amendment": true
   }

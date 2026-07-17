@@ -28,8 +28,8 @@ from scripts import run_phase_map as phase
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PREREG_JSON = REPO_ROOT / "experiment-specs/tuned-baseline-audit-prereg.json"
 PREREG_MD = REPO_ROOT / "experiment-specs/tuned-baseline-audit-prereg.md"
-PREREG_JSON_SHA256 = "bf66f7b07fb3b5a8ed531320e4ca505df51f75d4d6fd22aa4ab6edc3eafe7bed"
-PREREG_MD_SHA256 = "f0fec5d8e2b479136c473a1123acc42047f598aeb8839701d25f994ed7ddcae3"
+PREREG_JSON_SHA256 = "5198d62090ea307a5b8c7151f66088ddf8c57782b00591da93b1465f1c146eb7"
+PREREG_MD_SHA256 = "3739da4d89f14e0081cac501b38164a7e5938bd5595b49d0020f9e862da6c804"
 
 STAGE_CODES = frozenset(
     {
@@ -69,7 +69,7 @@ STAGE_PHASE = {
     "a4c": "confirmation_initial",
     "a4x": "confirmation_precision_expansion",
 }
-HARD_CEILINGS = {"A1": 82.93, "A3": 31.18, "A4": 138.21}
+HARD_CEILINGS = {"A1": 140.0, "A3": 31.18, "A4": 138.21}
 
 MODEL_ID = "HuggingFaceTB/SmolLM2-135M"
 MODEL_REVISION = "93efa2f097d58c2a74874c7e644dbc9b0cee75a2"
@@ -218,7 +218,7 @@ def load_authority() -> dict[str, Any]:
     authority = read_object(PREREG_JSON, "audit preregistration")
     if (
         authority.get("schema") != "tuned_baseline_audit_prereg_v1"
-        or authority.get("revision") != "1.1"
+        or authority.get("revision") != "1.2"
         or authority.get("status", {}).get("no_controller_or_optimizer_zoo_authority")
         is not True
     ):
@@ -230,6 +230,13 @@ def load_authority() -> dict[str, Any]:
     }
     if observed_costs != expected_costs:
         raise AuditContractError("registered 135M hard ceilings differ")
+    for stage in expected_costs:
+        experiment = authority["experiments"][stage]
+        if (
+            int(experiment.get("width_cap", 0)) != 2
+            or float(experiment.get("abort_burn_kill_usd", -1.0)) != 40.0
+        ):
+            raise AuditContractError("registered width/abort-burn controls differ")
     return authority
 
 

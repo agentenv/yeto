@@ -1,6 +1,6 @@
 # Prospective operational amendment: concurrent 135M audit blocks
 
-Status: **adopted prospectively before any A1/A3/A4 scientific attempt**.
+Status: **superseded in part by tuned-baseline audit preregistration revision 1.2 before any A1/A3/A4 scientific attempt**.
 
 Authority was recorded in the campaign handoff channel at
 `/private/tmp/audit-135m-note.md` after the post-reboot controller had proved
@@ -14,12 +14,12 @@ rules, hard cost ceilings, and analysis remain exactly those in
 ## Motivation
 
 The inherited four-slot executor chose three VMs for a six-cell paired block,
-then ran blocks serially.  That was appropriate while foreign workloads held
-most of the project A100 ceiling, but it needlessly serializes independent
-loss-blind blocks when the project census is empty.  The operator therefore
-authorized up to five independent blocks at once on reviewed Spot
-`a2-highgpu-1g` capacity: three VMs per atomic block, at most fifteen attached
-A100s, with the existing project-global ceiling of sixteen unchanged.
+then ran blocks serially.  The first amendment allowed up to five independent
+blocks at once.  After four distinct launch-machinery defects, operator
+authorization 2 prospectively reduced that surface to at most two independent
+blocks at once on reviewed Spot `a2-highgpu-1g` capacity: three VMs per atomic
+block, at most six campaign A100s, with the existing project-global ceiling of
+sixteen unchanged.
 
 ## Frozen concurrent binding
 
@@ -27,10 +27,10 @@ A100s, with the existing project-global ceiling of sixteen unchanged.
   that block is terminal.  For the paired tuning blocks this is three paired
   arms (six cells), dispatched in two deterministic batches over a three-VM
   lane.
-- The audit-only logical-slot universe is `v0` through `v14`.  Legacy P0/P1,
+- The audit-only logical-slot universe is `v0` through `v5`.  Legacy P0/P1,
   E1/E4, and non-audit scheduling retain the original `v0` through `v3`
   universe and byte-identical plan construction.
-- At most five atomic blocks may overlap.  Each block receives exactly three
+- At most two atomic blocks may overlap.  Each block receives exactly three
   disjoint logical slots.
 - The block lane is a pure deterministic function of only:
   1. the frozen `audit_135m_design_contract_hash`;
@@ -38,7 +38,7 @@ A100s, with the existing project-global ceiling of sixteen unchanged.
   3. the exact loss-blind available-slot set.
   The available slots are hash-ranked and partitioned into three-slot lanes;
   a contract-hash permutation of lane indices is indexed by
-  `planned_block_index mod lane_count`.  Any contiguous batch of at most five
+  `planned_block_index mod lane_count`.  Any contiguous batch of at most two
   blocks therefore receives disjoint lanes without consulting outcomes.
 - Capacity may degrade to fewer concurrent blocks only from provider census,
   landed machine shape, preemption, or the hard cost/global-A100 rails.  Loss,
@@ -53,12 +53,8 @@ A100s, with the existing project-global ceiling of sixteen unchanged.
 - Spot only.  On-demand fallback remains forbidden.
 - Before every provider launch, the controller re-censuses the whole project
   and includes concurrently pending probes in the ceiling calculation.
-- The preferred probe remains Spot `a2-highgpu-4g`.  Direct Spot
-  `a2-highgpu-1g` expansion is allowed in a zone only after an exact earlier
-  launch in that zone reached the reviewed 1g fallback through a
-  provider-confirmed pre-creation 4g stockout.  Every direct-fallback identity
-  receives create-only authorization evidence naming that parent provider
-  identity.
+- The preferred shape is direct Spot `a2-highgpu-1g`, with survival-weighted
+  zones and a whole-project census immediately before every provider launch.
 - Total attached A100 equivalents, including foreign workloads, may never
   exceed sixteen.  The live watchdog still exact-ID deletes campaign-owned
   generations if the global count crosses the ceiling.
@@ -69,7 +65,9 @@ A100s, with the existing project-global ceiling of sixteen unchanged.
   ownership nonce, create-only provider/partial/lifecycle evidence, exact-ID
   teardown, and zero-accelerator proof.  Preemption still creates a fresh
   physical generation and fresh attempt namespace.
-- A1 `$75`, A3 `$40`, and A4 `$140` remain hard loss-blind kills.
+- The revision 1.2 hard loss-blind kills are A1 `$140.00`, A3 `$31.18`, and A4
+  `$138.21`.  Each stage also has a separate `$40.00` cumulative pre-science
+  abort-burn kill.
 
 ## Reboot-restoration fix
 
@@ -85,5 +83,5 @@ generation rendering equally self-contained.
 This amendment does not authorize opening hidden objects, unstarted-stage
 seeds, incomplete hidden batches, or scientific losses.  It does not change a
 single scientific command, model/data hash, work budget, pairing identity,
-outcome rule, gate, or cost ceiling.  It only permits already-registered,
-independent atomic blocks to occupy disjoint Spot VM lanes concurrently.
+outcome rule, gate, or analysis.  Revision 1.2 changes only the prospective
+cost and launch-surface controls described above.

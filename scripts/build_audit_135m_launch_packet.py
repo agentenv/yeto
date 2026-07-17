@@ -4,7 +4,7 @@
 The input directory must already contain the non-authorizing audit
 materialization and deterministic parallel binding.  This builder binds the
 pushed scientific commit, current-stage seed bundle, exact runtime
-authorization, four generation-1 identities, Spot-only GCP specs, cost ceiling,
+authorization, up to six generation-1 identities, Spot-only GCP specs, cost ceiling,
 and the reviewed P1 worker/backend substrate.  It performs no provider mutation.
 """
 
@@ -29,7 +29,7 @@ R0_ROOT = Path("/private/tmp/yeto-p1r0-launcher/p1r0-session")
 R0_BUILDER = R0_ROOT / "build_launch_packet.py"
 R0_WORKER = R0_ROOT / "p1r0_vm_worker.py"
 BUCKET = "gs://yeto-exp2-52-model-training-497007"
-PREREG_SHA256 = "bf66f7b07fb3b5a8ed531320e4ca505df51f75d4d6fd22aa4ab6edc3eafe7bed"
+PREREG_SHA256 = "5198d62090ea307a5b8c7151f66088ddf8c57782b00591da93b1465f1c146eb7"
 PREREG_PATH = "experiment-specs/tuned-baseline-audit-prereg.json"
 MODEL_URI = (
     "gs://yeto-exp2-52-model-training-497007/prelaunch/"
@@ -44,7 +44,7 @@ MODEL_ARCHIVE_SHA256 = (
 )
 DATA_SHA256 = "970f88b3f2fa6758f3b5f94052f4e91b872541a2ba530223b44a779168c51409"
 AUDIT_BLOCK_WIDTH = 3
-MAX_CONCURRENT_BLOCKS = 5
+MAX_CONCURRENT_BLOCKS = 2
 SLOTS = tuple(
     f"v{index}" for index in range(AUDIT_BLOCK_WIDTH * MAX_CONCURRENT_BLOCKS)
 )

@@ -49,7 +49,7 @@ ZONE_ROTATION = (
     "us-central1-f",
 )
 AUDIT_BLOCK_WIDTH = 3
-MAX_CONCURRENT_BLOCKS = 5
+MAX_CONCURRENT_BLOCKS = 2
 SLOTS = tuple(
     f"v{index}" for index in range(AUDIT_BLOCK_WIDTH * MAX_CONCURRENT_BLOCKS)
 )
@@ -67,9 +67,9 @@ CELL_HOURS = {
     512: 0.14866439438988095,
 }
 FINITE_KERNEL_EXTRA_HOURS = {8: 0.40, 16: 0.25, 64: 0.12, 256: 0.06, 512: 0.04}
-# The amended hard ceilings are lower_bound * 1.30.  This reviewed remaining-work
-# forecast keeps 1.25 so the last five points remain available for realized boot,
-# transient-provider, and exact-teardown burn rather than being double-counted.
+# The A3/A4 hard ceilings are lower_bound * 1.30; A1 has the operator-authorized
+# $140 correction.  The reviewed remaining-work forecast keeps 1.25 so reserve
+# remains available for realized boot, transient-provider, and exact teardown.
 SPOT_PREEMPTION_RESERVE_FACTOR = 1.25
 WATCHDOG_POLL_SECONDS = 15
 TEARDOWN_RESERVE_SECONDS = 900
@@ -79,6 +79,7 @@ TRANSIENT_PROVIDER_DELETE_TIMEOUT_SECONDS = 900
 GLOBAL_A100_CEILING = 16
 PREFERRED_PROBE_A100S = 1
 MAX_PREFERRED_PROBE_WIDTH = 4
+ABORT_BURN_KILL_USD = 40.0
 FUTURE_STAGE_CELL_COUNTS = {
     "a1d": {16: 36, 256: 36},
     "a1x": {16: 32, 256: 32},
@@ -99,6 +100,10 @@ class ControllerError(RuntimeError):
 
 class HardCeilingStop(ControllerError):
     """The stage was killed loss-blindly before its registered dollar ceiling."""
+
+
+class AbortBurnStop(ControllerError):
+    """Pre-science aborted-launch spend exceeded the registered stage kill."""
 
 
 class HiddenSurvivorPreempted(ControllerError):
@@ -1320,6 +1325,8 @@ def _load_spend_ledger(path: Path, audit_stage: str, ceiling: float) -> dict[str
             "schema": "audit_135m_stage_spend_ledger_v1",
             "audit_stage": audit_stage,
             "hard_ceiling_usd": ceiling,
+            "abort_burn_kill_usd": ABORT_BURN_KILL_USD,
+            "pre_science_aborted_launch_spend_usd": 0.0,
             "estimated_spend_usd": 0.0,
             "campaigns": [],
             "updated_at_utc": utc_now(),
@@ -1331,7 +1338,56 @@ def _load_spend_ledger(path: Path, audit_stage: str, ceiling: float) -> dict[str
         or float(value.get("hard_ceiling_usd", math.nan)) != ceiling
     ):
         raise ControllerError("stage spend ledger identity/ceiling differs")
+    value.setdefault("abort_burn_kill_usd", ABORT_BURN_KILL_USD)
+    value.setdefault("pre_science_aborted_launch_spend_usd", 0.0)
+    if (
+        float(value["abort_burn_kill_usd"]) != ABORT_BURN_KILL_USD
+        or float(value["pre_science_aborted_launch_spend_usd"]) < 0.0
+    ):
+        raise ControllerError("stage abort-burn ledger identity differs")
     return value
+
+
+def _campaign_scientific_attempt_started(campaign_root: Path) -> bool:
+    for path in sorted(campaign_root.glob("vms/*/g*/manifests/vm-partial-manifest.json")):
+        value = load_json(path)
+        attempts = value.get("attempts", [])
+        if isinstance(attempts, list) and attempts:
+            return True
+    return False
+
+
+def _guard_abort_burn(
+    *,
+    executor,
+    campaign_root: Path,
+    stage_ledger: Mapping[str, Any],
+    phase: str,
+) -> float:
+    prior = float(stage_ledger["pre_science_aborted_launch_spend_usd"])
+    if _campaign_scientific_attempt_started(campaign_root):
+        return prior
+    current, _rows = _current_campaign_cost(executor, campaign_root)
+    projected = prior + current
+    kill = float(stage_ledger["abort_burn_kill_usd"])
+    evidence = {
+        "schema": "audit_135m_abort_burn_guard_v1",
+        "status": "STOP" if projected > kill else "PASS",
+        "phase": phase,
+        "prior_pre_science_aborted_launch_spend_usd": round(prior, 6),
+        "current_pre_science_campaign_spend_usd": round(current, 6),
+        "projected_pre_science_aborted_launch_spend_usd": round(projected, 6),
+        "abort_burn_kill_usd": kill,
+        "scientific_attempt_started": False,
+        "evaluated_at_utc": utc_now(),
+    }
+    write_json_atomic(campaign_root / "campaign" / "abort-burn-guard.json", evidence)
+    if projected > kill:
+        raise AbortBurnStop(
+            f"pre-science aborted-launch spend ${projected:.6f} exceeds the "
+            f"registered ${kill:.2f} stage abort-burn kill"
+        )
+    return projected
 
 
 def _write_live_cost(
@@ -2934,6 +2990,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     ceiling = float(identity_plan["hard_ceiling_usd"])
     audit_stage = str(identity_plan["audit_stage"])
+    authority = load_json(
+        REPO_ROOT / "experiment-specs" / "tuned-baseline-audit-prereg.json"
+    )
+    stage_controls = authority.get("experiments", {}).get(audit_stage, {})
+    if (
+        int(stage_controls.get("width_cap", 0)) != MAX_CONCURRENT_BLOCKS
+        or float(stage_controls.get("abort_burn_kill_usd", math.nan))
+        != ABORT_BURN_KILL_USD
+    ):
+        raise ControllerError("registered width/abort-burn controls differ")
     spend_ledger = _load_spend_ledger(args.stage_spend_ledger, audit_stage, ceiling)
     census = executor._assert_capacity_census()
     if census["campaign_owned_vm_count"] or census["campaign_owned_attached_a100s"]:
@@ -2949,18 +3015,24 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     prelaunch_cost_lock = threading.RLock()
 
     def initial_pre_launch_guard() -> None:
-        _guard_provider_mutation_cost(
-            executor=executor,
-            campaign_root=campaign_root,
-            stage_ledger=spend_ledger,
-            stage_code=stage_code,
-            plan=plan,
-            scientific=scientific,
-            planned_index=0,
-            ceiling=ceiling,
-            phase="initial_pre_scientific_prelaunch",
-            lock=prelaunch_cost_lock,
-        )
+        with prelaunch_cost_lock:
+            _guard_abort_burn(
+                executor=executor,
+                campaign_root=campaign_root,
+                stage_ledger=spend_ledger,
+                phase="initial_pre_scientific_prelaunch",
+            )
+            _guard_provider_mutation_cost(
+                executor=executor,
+                campaign_root=campaign_root,
+                stage_ledger=spend_ledger,
+                stage_code=stage_code,
+                plan=plan,
+                scientific=scientific,
+                planned_index=0,
+                ceiling=ceiling,
+                phase="initial_pre_scientific_prelaunch",
+            )
 
     try:
         initial_pre_launch_guard()
@@ -3094,6 +3166,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 selected_shape = ""
                 selected_slots = ()
                 stage_forecast = 0.0
+            _guard_abort_burn(
+                executor=executor,
+                campaign_root=campaign_root,
+                stage_ledger=spend_ledger,
+                phase="initial_assembly_before_science",
+            )
             science_started.set()
             stop_event.set()
         for thread in threads:
@@ -3184,6 +3262,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"{list(selected_slots)}, concurrent block width "
             f"{len(selected_slots) // AUDIT_BLOCK_WIDTH}, stage-wide forecast "
             f"${stage_forecast:.2f}; batch 0 dispatch begins immediately."
+        )
+        _guard_abort_burn(
+            executor=executor,
+            campaign_root=campaign_root,
+            stage_ledger=spend_ledger,
+            phase="final_capacity_before_first_scientific_dispatch",
         )
         _cost_guard(
             executor=executor,
@@ -3430,11 +3514,24 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             campaign_root / "campaign" / "transient-provider-registry.json"
         )
         write_json_atomic(transient_registry_path, transient_registry)
+        scientific_attempt_started = _campaign_scientific_attempt_started(campaign_root)
+        prior_abort_burn = float(
+            spend_ledger["pre_science_aborted_launch_spend_usd"]
+        )
+        updated_abort_burn = (
+            prior_abort_burn
+            if scientific_attempt_started or completed
+            else prior_abort_burn + current_cost
+        )
         campaign_cost = {
             "schema": "audit_135m_campaign_cost_v1",
             "stage_code": stage_code,
             "roster_hash": identity_plan["roster_hash"],
             "completed": completed,
+            "scientific_attempt_started": scientific_attempt_started,
+            "counts_toward_pre_science_abort_burn": (
+                not scientific_attempt_started and not completed
+            ),
             "estimated_cost_usd": round(current_cost, 6),
             "generations": generation_costs,
             "transient_provider_registry": {
@@ -3448,6 +3545,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         campaigns.append(campaign_cost)
         updated_ledger = {
             **spend_ledger,
+            "abort_burn_kill_usd": ABORT_BURN_KILL_USD,
+            "pre_science_aborted_launch_spend_usd": round(
+                updated_abort_burn, 6
+            ),
+            "abort_burn_kill_exceeded": updated_abort_burn > ABORT_BURN_KILL_USD,
             "estimated_spend_usd": round(
                 float(spend_ledger["estimated_spend_usd"]) + current_cost, 6
             ),
@@ -3513,6 +3615,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "estimated_campaign_cost_usd": campaign_cost["estimated_cost_usd"],
         "estimated_stage_spend_usd": updated_ledger["estimated_spend_usd"],
         "hard_ceiling_usd": ceiling,
+        "pre_science_aborted_launch_spend_usd": updated_ledger[
+            "pre_science_aborted_launch_spend_usd"
+        ],
+        "abort_burn_kill_usd": ABORT_BURN_KILL_USD,
         "aggregation_descriptor": str(
             campaign_root / "campaign" / "aggregation-descriptor.json"
         ),
