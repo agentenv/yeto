@@ -225,6 +225,9 @@ def render(args: argparse.Namespace) -> dict[str, Any]:
     total_generations = sum(len(row.get("generations", [])) for row in campaigns)
     total_attempts = sum(int(row.get("attempt_count", 0)) for row in campaigns)
     total_launch_cells = sum(int(row.get("launch_cell_count", 0)) for row in campaigns)
+    execution_modes = sorted(
+        {str(row.get("execution_mode", "parallel")) for row in campaigns}
+    )
 
     title = f"# AUDIT-135M-{stage}-FINAL"
     primary_gate = gates[
@@ -237,21 +240,43 @@ def render(args: argparse.Namespace) -> dict[str, Any]:
         "",
         f"Status: **sealed completion; isolated replay PASS; registered stage disposition `{primary_gate}`**.",
         "",
-        "## Outcome",
-        "",
-        f"Stage {stage} completed under the frozen tuned-baseline-audit preregistration. "
-        f"The cumulative manifest contains **{len(phase['expected_cells'])} expected cells** "
-        f"and **{len(phase['results'])} retained result/attempt rows**. Across this stage's "
-        f"campaigns, **{total_launch_cells} suffix cells**, **{total_attempts} attempts**, and "
-        f"**{total_generations} exact physical generations** were independently replayed.",
-        "",
-        "## Registered gates",
-        "",
-        "| Gate | Disposition |",
-        "|---|---|",
-        *_gate_lines(gates),
-        "",
     ]
+    if stage == "A1":
+        tuned_verdict = gates["G3_A1_tuned_collapse"]
+        lines.extend(
+            [
+                "## A1 tuned-collapse verdict",
+                "",
+                f"**{tuned_verdict}: the seed-level Holm-adjusted confidence intervals "
+                "for both tuned anchors "
+                + (
+                    "are fully contained in `[-0.010,+0.010]`; the registered tuned "
+                    "momentum-collapse claim holds.**"
+                    if tuned_verdict == "PASS"
+                    else "are not both fully contained in `[-0.010,+0.010]`; the "
+                    "registered tuned momentum-collapse claim does not hold.**"
+                ),
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Outcome",
+            "",
+            f"Stage {stage} completed under the frozen tuned-baseline-audit preregistration. "
+            f"The cumulative manifest contains **{len(phase['expected_cells'])} expected cells** "
+            f"and **{len(phase['results'])} retained result/attempt rows**. Across this stage's "
+            f"campaigns, **{total_launch_cells} suffix cells**, **{total_attempts} attempts**, and "
+            f"**{total_generations} exact physical generations** were independently replayed.",
+            "",
+            "## Registered gates",
+            "",
+            "| Gate | Disposition |",
+            "|---|---|",
+            *_gate_lines(gates),
+            "",
+        ]
+    )
     lines.extend(
         _a1_section(analysis)
         if stage == "A1"
@@ -272,7 +297,9 @@ def render(args: argparse.Namespace) -> dict[str, Any]:
             f"| Pre-science aborted-launch spend | `${float(ledger['pre_science_aborted_launch_spend_usd']):.6f}` |",
             f"| Abort-burn kill | `${float(ledger['abort_burn_kill_usd']):.2f}` |",
             "| Provisioning model | Spot only |",
-            "| Concurrent atomic-block width cap | 2 |",
+            f"| Executed acquisition mode(s) | `{', '.join(execution_modes)}` |",
+            "| Preregistered concurrent-block width cap | 2 |",
+            "| Triggered serial fallback width | 1 active Spot VM / 1 A100 |",
             "| Maximum attached A100-equivalent | 16 |",
             "| Final campaign-owned VM/A100 census | 0 / 0 |",
             "| Protected instance `3908640733128066700` | untouched |",

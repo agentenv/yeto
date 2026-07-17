@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from scripts import audit_135m_contract as audit
+from scripts import audit_135m_serial as serial
 from scripts import run_parallel_phase_map as parallel
 
 
@@ -135,9 +136,9 @@ def _verify_campaign(
         raise PromotionError("campaign descriptor does not authorize aggregation")
     campaign = load_object(campaign_manifest_path, "campaign manifest")
     seal = load_object(campaign_seal_path, "campaign seal")
-    if (
-        seal.get("schema") != "yeto_parallel_campaign_seal_v1"
-        or seal.get("status") != "sealed_results"
+    seal_schema = seal.get("schema")
+    common_failure = (
+        seal.get("status") != "sealed_results"
         or seal.get("partial_outcomes_exposed") is not False
         or seal.get("work_evidence_all_pass") is not True
         or seal.get("provider_ownership_all_pass") is not True
@@ -145,13 +146,30 @@ def _verify_campaign(
         or campaign.get("partial_outcomes_exposed") is not False
         or seal.get("campaign_manifest_canonical_sha256")
         != canonical_sha256(campaign)
-    ):
-        raise PromotionError("parallel campaign seal is not a complete blinded PASS")
-    reproduced = parallel.aggregate_from_descriptor(
-        descriptor.resolve(),
-        write_seal=False,
-        sealed_at_utc=str(seal["sealed_at_utc"]),
     )
+    if common_failure:
+        raise PromotionError("campaign seal is not a complete blinded PASS")
+    if seal_schema == "yeto_parallel_campaign_seal_v1":
+        reproduced = parallel.aggregate_from_descriptor(
+            descriptor.resolve(),
+            write_seal=False,
+            sealed_at_utc=str(seal["sealed_at_utc"]),
+        )
+    elif seal_schema == serial.SERIAL_SEAL_SCHEMA:
+        if (
+            seal.get("parallel_executor_used") is not False
+            or seal.get("completed_cell_ratchet_all_pass") is not True
+            or seal.get("generation_lineage_all_pass") is not True
+            or campaign.get("parallel_executor_used") is not False
+        ):
+            raise PromotionError("serial campaign seal did not prove its fallback rails")
+        reproduced = serial.aggregate_from_descriptor(
+            descriptor.resolve(),
+            write_seal=False,
+            sealed_at_utc=str(seal["sealed_at_utc"]),
+        )
+    else:
+        raise PromotionError("campaign seal has an unsupported execution schema")
     if reproduced != seal:
         raise PromotionError("read-only aggregation does not reproduce the campaign seal")
     return campaign, seal
@@ -766,7 +784,11 @@ def promote(args: argparse.Namespace) -> dict[str, Any]:
     phase["sealed_at_utc"] = sealed_at
     write_create_only(args.output_manifest, phase)
     attestation = {
-        "schema": "audit_135m_parallel_hidden_to_phase_attestation_v1",
+        "schema": (
+            "audit_135m_serial_hidden_to_phase_attestation_v1"
+            if campaign_seal.get("schema") == serial.SERIAL_SEAL_SCHEMA
+            else "audit_135m_parallel_hidden_to_phase_attestation_v1"
+        ),
         "status": "PASS",
         "stage_code": stage_code,
         "audit_stage": audit_stage,
@@ -837,6 +859,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ValueError,
         KeyError,
         audit.AuditContractError,
+        serial.SerialAuditError,
         parallel.ParallelPhaseMapError,
     ) as exc:
         print(f"audit phase-promotion error: {exc}", file=__import__("sys").stderr)

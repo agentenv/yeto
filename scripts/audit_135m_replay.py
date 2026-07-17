@@ -9,7 +9,7 @@ every file.
 
 The validate side is intended for a clean detached checkout on the isolated
 replay host.  It verifies the Git/source authority, every archive file, fully
-re-aggregates every parallel campaign from VM evidence, re-promotes every
+re-aggregates every parallel or serial campaign from VM evidence, re-promotes every
 cumulative suffix (including hidden-batch verification), reproduces selection,
 precision decisions, and the final registered gate, then writes one sealed
 JSON replay report.  It performs no GPU work and no cloud mutation.
@@ -42,8 +42,10 @@ SOURCE_FILES = (
     "scripts/audit_135m_kernel_capture.py",
     "scripts/audit_135m_kernel_law.py",
     "scripts/audit_135m_phase_manifest.py",
+    "scripts/audit_135m_serial.py",
     "scripts/run_parallel_phase_map.py",
     "scripts/run_phase_map.py",
+    "docs/AMENDMENT-audit-135m-serial-fallback.md",
 )
 
 
@@ -201,6 +203,9 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "evaluation_registry",
             "final_provider_census",
             "runtime_authorization",
+            "serial_binding",
+            "serial_runtime_authorization",
+            "transient_provider_registry",
         )
         replay_descriptor = dict(descriptor)
         copied_inputs: dict[str, str] = {}
@@ -407,21 +412,52 @@ def _campaign_bundle(root: Path, row: Mapping[str, Any], parallel):
 
 
 def _replay_campaign(
-    *, root: Path, row: Mapping[str, Any], parallel, promotion, temp: Path
+    *, root: Path, row: Mapping[str, Any], parallel, serial, promotion, temp: Path
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     campaign_root = _resolve(root, row["campaign_root"], "campaign root")
     campaign_path = campaign_root / "campaign" / "campaign-manifest.json"
     seal_path = campaign_root / "campaign" / "campaign-seal.json"
     campaign = load_object(campaign_path, "campaign manifest")
     seal = load_object(seal_path, "campaign seal")
-    bundle = _campaign_bundle(root, row, parallel)
-    reproduced_manifest, reproduced_seal = parallel.CampaignAggregator(
-        bundle
-    ).build_manifest_and_seal(sealed_at_utc=str(seal["sealed_at_utc"]))
+    inputs = row.get("inputs")
+    require(isinstance(inputs, Mapping), "campaign input registry is malformed")
+
+    def obj(field: str) -> dict[str, Any]:
+        return load_object(_resolve(root, inputs[field], field), field)
+
+    descriptor = load_object(
+        _resolve(root, row["aggregation_descriptor"], "aggregation descriptor"),
+        "aggregation descriptor",
+    )
+    if seal.get("schema") == serial.SERIAL_SEAL_SCHEMA:
+        reproduced_manifest, reproduced_seal = serial.aggregate(
+            stage_code=str(row["stage_code"]),
+            parent=obj("parent_manifest"),
+            bound=obj("bound_manifest"),
+            scientific=obj("scientific_plan"),
+            roster=obj("parallel_roster"),
+            parallel_plan=obj("parallel_plan"),
+            serial_binding=obj("serial_binding"),
+            serial_authorization=obj("serial_runtime_authorization"),
+            compatibility_runtime_authorization=obj("runtime_authorization"),
+            vm_registry=obj("vm_registry"),
+            transient_provider_registry=obj("transient_provider_registry"),
+            evaluation_registry=obj("evaluation_registry"),
+            final_provider_census=obj("final_provider_census"),
+            campaign_attempt=int(descriptor["campaign_attempt"]),
+            campaign_root=campaign_root,
+            sealed_at_utc=str(seal["sealed_at_utc"]),
+        )
+        registry = obj("vm_registry")
+    else:
+        bundle = _campaign_bundle(root, row, parallel)
+        reproduced_manifest, reproduced_seal = parallel.CampaignAggregator(
+            bundle
+        ).build_manifest_and_seal(sealed_at_utc=str(seal["sealed_at_utc"]))
+        registry = bundle.vm_registry
     require(reproduced_manifest == campaign, "campaign manifest replay differs")
     require(reproduced_seal == seal, "campaign seal replay differs")
 
-    inputs = row["inputs"]
     stored_phase_path = _resolve(root, row["phase_manifest"], "phase manifest")
     stored_phase = load_object(stored_phase_path, "phase manifest")
     stored_attestation = load_object(
@@ -479,7 +515,6 @@ def _replay_campaign(
         replayed_attestation == stored_attestation,
         "cumulative phase attestation replay differs",
     )
-    registry = bundle.vm_registry
     generations = registry.get("generations")
     require(isinstance(generations, list), "VM registry generations are malformed")
     lifecycle_rows = []
@@ -517,6 +552,7 @@ def _replay_campaign(
         )
     return stored_phase, {
         "stage_code": row["stage_code"],
+        "execution_mode": campaign.get("execution_mode", "parallel"),
         "campaign_manifest_canonical_sha256": canonical_sha256(campaign),
         "campaign_seal_raw_sha256": sha256_file(seal_path),
         "attempt_count": len(campaign["attempts"]),
@@ -644,6 +680,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
     from scripts import audit_135m_analysis as analysis
     from scripts import audit_135m_kernel_law as kernel
     from scripts import audit_135m_phase_manifest as promotion
+    from scripts import audit_135m_serial as serial
     from scripts import run_parallel_phase_map as parallel
 
     campaigns = index.get("campaigns")
@@ -658,6 +695,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
                 root=root,
                 row=raw,
                 parallel=parallel,
+                serial=serial,
                 promotion=promotion,
                 temp=temp,
             )
