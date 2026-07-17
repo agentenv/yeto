@@ -2138,6 +2138,9 @@ def run_diloco(
     # syncer is terminated once they exit; the checkpoint (written every
     # round) carries the merged params up to the last completed round.
     sidecar = None
+    kernel_sidecar = None
+    kernel_sidecar_log = None
+    kernel_done = arm_dir / "finite-kernel-capture.done"
     syncer = None
     syncer_log = None
     t0 = None
@@ -2153,6 +2156,43 @@ def run_diloco(
                 timeout_s=int(args.action_probe_startup_timeout_s),
             )
             sidecar = launch_action_probe(args, arm, arm_dir)
+        if getattr(args, "audit_finite_kernel_capture", False):
+            if arm.outer_optimizer != "nesterov" or arm.outer_momentum != 0.0:
+                raise RuntimeError(
+                    "finite-kernel capture is registered only for mu=0 Nesterov cells"
+                )
+            kernel_sidecar_log = open(arm_dir / "finite-kernel-capture.log", "w")
+            kernel_sidecar = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "audit_135m_kernel_capture.py"),
+                    "--capture-dir",
+                    str(arm_dir / "syncer_probe"),
+                    "--final-checkpoint",
+                    str(arm_dir / "state.ckpt"),
+                    "--event-tape",
+                    str(arm_dir / "tape.jsonl"),
+                    "--done-file",
+                    str(kernel_done),
+                    "--scratch-dir",
+                    str(arm_dir / "finite-kernel-scratch"),
+                    "--output",
+                    str(arm_dir / "finite-kernel.json"),
+                    "--status",
+                    str(arm_dir / "finite-kernel-status.json"),
+                    "--expected-outer-steps",
+                    str(total_outer_steps),
+                    "--fragment-count",
+                    str(arm.fragments),
+                    "--learner-count",
+                    str(arm.m),
+                    "--outer-eta",
+                    str(arm.outer_lr),
+                ],
+                cwd=REPO_ROOT,
+                stdout=kernel_sidecar_log,
+                stderr=subprocess.STDOUT,
+            )
         syncer_args = {}
         if sidecar is not None:
             syncer_args = {
@@ -2171,8 +2211,15 @@ def run_diloco(
                 arm_dir,
                 total_steps=total_outer_steps,
                 checkpoint_every=getattr(args, "syncer_checkpoint_every", 1),
-                probe_capture=getattr(args, "syncer_probe_capture", False),
-                probe_capture_every=getattr(args, "syncer_probe_capture_every", 1),
+                probe_capture=(
+                    getattr(args, "syncer_probe_capture", False)
+                    or getattr(args, "audit_finite_kernel_capture", False)
+                ),
+                probe_capture_every=(
+                    1
+                    if getattr(args, "audit_finite_kernel_capture", False)
+                    else getattr(args, "syncer_probe_capture_every", 1)
+                ),
                 delta_norm_ref=getattr(args, "delta_norm_ref", 0.0),
                 version_matched_anchor=getattr(args, "version_matched_anchor", False),
                 anchor_drift_log=getattr(args, "anchor_drift_log", False),
@@ -2236,6 +2283,25 @@ def run_diloco(
                 raise RuntimeError(
                     f"{arm.name}: syncer exited {syncer_exit_code}; see {arm_dir}"
                 )
+        if kernel_sidecar is not None:
+            kernel_done.touch(exist_ok=False)
+            try:
+                kernel_returncode = kernel_sidecar.wait(
+                    timeout=max(3600, args.arm_timeout_min * 60)
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"{arm.name}: finite-kernel capture did not seal in time"
+                ) from exc
+            if kernel_returncode != 0:
+                detail = ""
+                capture_log = arm_dir / "finite-kernel-capture.log"
+                if capture_log.is_file():
+                    detail = "\n".join(capture_log.read_text().splitlines()[-12:])
+                raise RuntimeError(
+                    f"{arm.name}: finite-kernel capture exited {kernel_returncode}: "
+                    f"{detail}"
+                )
     finally:
         for proc in learners:
             if proc.poll() is None:
@@ -2261,6 +2327,15 @@ def run_diloco(
             syncer_log.close()
         if sidecar is not None:
             stop_action_probe(sidecar)
+        if kernel_sidecar is not None and kernel_sidecar.poll() is None:
+            kernel_sidecar.terminate()
+            try:
+                kernel_sidecar.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                kernel_sidecar.kill()
+                kernel_sidecar.wait(timeout=5)
+        if kernel_sidecar_log is not None:
+            kernel_sidecar_log.close()
     assert t0 is not None
     wall = time.monotonic() - t0
     ckpt = arm_dir / "state.ckpt"
@@ -2431,6 +2506,18 @@ def main() -> int:
         "--skip-untrained-eval",
         action="store_true",
         help="do not repeatedly score the untrained model in phase-map cells",
+    )
+    p.add_argument(
+        "--train-only-sealed-checkpoint",
+        action="store_true",
+        help="train and export the registered arm but emit no endpoint loss; used "
+        "by train-all-then-audit-all confirmation and prediction-first stages",
+    )
+    p.add_argument(
+        "--audit-finite-kernel-capture",
+        action="store_true",
+        help="stream every registered mu=0 applied update into a loss-blind full "
+        "finite-lag kernel seal, deleting the large raw capture before completion",
     )
     p.add_argument("--max-rows", type=int, default=None, help="cap training rows")
     p.add_argument(
@@ -2858,6 +2945,27 @@ def main() -> int:
     if args.dry_run:
         return 0
 
+    if args.train_only_sealed_checkpoint and (
+        not args.skip_untrained_eval
+        or not args.skip_baseline
+        or args.baseline_loss is not None
+    ):
+        raise SystemExit(
+            "--train-only-sealed-checkpoint requires --skip-untrained-eval, "
+            "--skip-baseline, and no injected baseline loss"
+        )
+
+    if args.audit_finite_kernel_capture and (
+        not args.train_only_sealed_checkpoint
+        or args.syncer_total_steps is None
+        or args.syncer_total_steps <= 0
+        or args.syncer_probe_capture_every != 1
+    ):
+        raise SystemExit(
+            "--audit-finite-kernel-capture requires train-only acquisition, an "
+            "exact positive --syncer-total-steps, and capture cadence 1"
+        )
+
     if args.learner_gpus > 0 and args.gpu_slots > 0:
         raise SystemExit("--gpu-slots is only valid when --learner-gpus is 0")
     probe_arms = [arm for arm in arms if arm.commit_policy != "token_weighted"]
@@ -3019,6 +3127,30 @@ def main() -> int:
     for arm in arms:
         write_acquisition_state(args.report_dir, "training_started", arm=arm.name)
         adapters, wall, exit_statuses = run_diloco(args, arm, args.work_dir)
+        if args.train_only_sealed_checkpoint:
+            write_acquisition_state(
+                args.report_dir,
+                "checkpoint_recorded",
+                arm=arm.name,
+                scientific_status="TRAINED_CHECKPOINT",
+            )
+            records.append(
+                {
+                    "arm": arm.name,
+                    "m": arm.m,
+                    "wall_s": round(wall, 1),
+                    "eval_loss": None,
+                    "checkpoint_only": True,
+                    "evaluation_role": "none",
+                    **exit_statuses,
+                }
+            )
+            print(
+                f"[compare] {arm.name} checkpoint/export sealed ({wall:.0f}s); "
+                "endpoint evaluation withheld",
+                flush=True,
+            )
+            continue
         write_acquisition_state(args.report_dir, "endpoint_started", arm=arm.name)
         loss = eval_in_subprocess(
             args,
@@ -3077,6 +3209,12 @@ def main() -> int:
         "|---|---|---|---|---|",
     ]
     for r in records:
+        if r.get("checkpoint_only") is True:
+            md.append(
+                f"| {r['arm']} | {r['m'] or '—'} | {r['wall_s']:.0f} "
+                "| SEALED CHECKPOINT | — |"
+            )
+            continue
         delta = (
             "—"
             if r["arm"].startswith(("base", "baseline")) or bl in (None, 0)

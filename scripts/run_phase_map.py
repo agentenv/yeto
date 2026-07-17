@@ -1450,11 +1450,14 @@ def normalized_workload_command(command: Sequence[str]) -> list[str]:
 
 
 def normalized_pairing_command(command: Sequence[str]) -> list[str]:
-    """Redact only the two registered treatment coordinates from one arm.
+    """Redact registered treatments and loss-blind diagnostic instrumentation.
 
     Equal hashes prove that initialization/data/worker/work-schedule argv are
     byte-identical inside a paired block while allowing the intended ``mu`` and
-    ``eta`` treatments to differ.
+    ``eta`` treatments to differ.  The audit finite-kernel sidecar is attached
+    only to the preregistered matched-eta arm in an otherwise paired tuning
+    block.  It observes streamed state cuts without changing optimizer work, so
+    its presence is intentionally excluded from the scientific pairing hash.
     """
 
     treatment_flags = {
@@ -1465,6 +1468,9 @@ def normalized_pairing_command(command: Sequence[str]) -> list[str]:
     index = 0
     while index < len(command):
         token = command[index]
+        if token == "--audit-finite-kernel-capture":
+            index += 1
+            continue
         replacement = treatment_flags.get(token)
         if replacement is None:
             normalized.append(token)

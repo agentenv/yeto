@@ -136,6 +136,7 @@ class ArmSpec:
     eta: float
     role: str
     pair_key: str
+    finite_kernel_capture: bool = False
 
 
 @dataclass(frozen=True)
@@ -145,8 +146,24 @@ class BlockSpec:
     seed: int
     training_seed: int
     arms: tuple[ArmSpec, ...]
-    capture_every_step: bool = False
     terminal_partial_window: bool = False
+    evaluation_mode: str = "development_endpoint"
+
+
+EVALUATION_MODES = frozenset(
+    {
+        "development_endpoint",
+        "confirmation_audit_pending",
+        "development_prediction_pending",
+        "capture_only_no_endpoint",
+    }
+)
+
+
+def _checkpoint_only(mode: str) -> bool:
+    if mode not in EVALUATION_MODES:
+        raise AuditContractError(f"unsupported audit evaluation mode {mode!r}")
+    return mode != "development_endpoint"
 
 
 def canonical_json(value: object) -> bytes:
@@ -585,7 +602,16 @@ def stage_blocks(
                         "tuned",
                     ),
                 )
-                blocks.append(BlockSpec(h, 4, seed, training_seed, arms))
+                blocks.append(
+                    BlockSpec(
+                        h,
+                        4,
+                        seed,
+                        training_seed,
+                        arms,
+                        evaluation_mode="confirmation_audit_pending",
+                    )
+                )
     elif stage_code == "a3k":
         for h in (16, 64, 256):
             blocks.append(
@@ -594,15 +620,29 @@ def stage_blocks(
                     4,
                     347,
                     347347,
-                    (ArmSpec(0.0, 0.021875, "kernel_recapture", "self"),),
-                    capture_every_step=True,
+                    (
+                        ArmSpec(
+                            0.0,
+                            0.021875,
+                            "kernel_recapture",
+                            "self",
+                            finite_kernel_capture=True,
+                        ),
+                    ),
+                    evaluation_mode="capture_only_no_endpoint",
                 )
             )
     elif stage_code == "a3r0":
         for seed, training_seed in A3_SEEDS:
             for h in (8, 512):
                 arms = tuple(
-                    ArmSpec(0.0, eta, f"frontier_eta_{index}", f"self_{index}")
+                    ArmSpec(
+                        0.0,
+                        eta,
+                        f"frontier_eta_{index}",
+                        f"self_{index}",
+                        finite_kernel_capture=(eta == 0.021875),
+                    )
                     for index, eta in enumerate(A3_GRIDS[h])
                 )
                 blocks.append(
@@ -612,8 +652,8 @@ def stage_blocks(
                         seed,
                         training_seed,
                         arms,
-                        capture_every_step=True,
                         terminal_partial_window=(h == 512),
+                        evaluation_mode="development_prediction_pending",
                     )
                 )
     elif stage_code == "a3x":
@@ -635,8 +675,8 @@ def stage_blocks(
                         seed,
                         training_seed,
                         (ArmSpec(0.0, eta, "frontier_boundary_extension", "self"),),
-                        capture_every_step=True,
                         terminal_partial_window=(h == 512),
+                        evaluation_mode="development_prediction_pending",
                     )
                 )
     elif stage_code == "a4d":
@@ -699,7 +739,16 @@ def stage_blocks(
                             "tuned",
                         ),
                     )
-                    blocks.append(BlockSpec(h, m, seed, training_seed, arms))
+                    blocks.append(
+                        BlockSpec(
+                            h,
+                            m,
+                            seed,
+                            training_seed,
+                            arms,
+                            evaluation_mode="confirmation_audit_pending",
+                        )
+                    )
     if stage_code != "a4x" and precision_trigger_path is not None:
         raise AuditContractError(
             "precision-trigger manifest is authorized only for A4 precision expansion"
@@ -833,8 +882,10 @@ def build_plan(
                 learner_count=block.m,
                 allow_terminal_partial_window=block.terminal_partial_window,
             )
-            if block.capture_every_step:
-                command.extend(("--syncer-probe-capture", "--syncer-probe-capture-every", "1"))
+            if arm.finite_kernel_capture:
+                command.append("--audit-finite-kernel-capture")
+            if _checkpoint_only(block.evaluation_mode):
+                command.append("--train-only-sealed-checkpoint")
             cell = {
                 "cell_id": ids_by_role[arm.role],
                 "H": block.h,
@@ -847,6 +898,8 @@ def build_plan(
                 "audit_phase": STAGE_PHASE[stage_code],
                 "analysis_role": arm.role,
                 "pair_key": arm.pair_key,
+                "evaluation_mode": block.evaluation_mode,
+                "finite_kernel_capture_required": arm.finite_kernel_capture,
                 "command_hash": canonical_sha256(command),
                 "pairing_command_hash": canonical_sha256(
                     phase.normalized_pairing_command(command)
@@ -996,6 +1049,10 @@ def build_bound_manifest(
                 "audit_phase": cell["audit_phase"],
                 "analysis_role": cell["analysis_role"],
                 "pair_key": cell["pair_key"],
+                "evaluation_mode": cell["evaluation_mode"],
+                "finite_kernel_capture_required": cell[
+                    "finite_kernel_capture_required"
+                ],
                 "command_hash": cell["command_hash"],
                 "normalized_workload_command_hash": canonical_sha256(
                     phase.normalized_workload_command(cell["command"])

@@ -175,6 +175,23 @@ class SealError(ParallelPhaseMapError):
     """A campaign cannot produce the one create-only scientific seal."""
 
 
+AUDIT_EVALUATION_MODES = frozenset(
+    {
+        "development_endpoint",
+        "confirmation_audit_pending",
+        "development_prediction_pending",
+        "capture_only_no_endpoint",
+    }
+)
+
+
+def audit_checkpoint_only(cell: Mapping[str, Any]) -> bool:
+    mode = cell.get("evaluation_mode", "development_endpoint")
+    if mode not in AUDIT_EVALUATION_MODES:
+        raise EvidenceError(f"unsupported audit evaluation mode {mode!r}")
+    return mode != "development_endpoint"
+
+
 def machine_shape_contract(machine_type: Any) -> dict[str, Any]:
     if machine_type not in ALLOWED_SCIENTIFIC_VM_SHAPES:
         raise LifecycleError("machine type is not an amendment-authorized scientific shape")
@@ -622,6 +639,10 @@ def build_parallel_roster(
             != bound.get("pairing_identity_hash")
             or planned.get("pairing_command_hash")
             != bound.get("pairing_command_hash")
+            or planned.get("evaluation_mode", "development_endpoint")
+            != bound.get("evaluation_mode", "development_endpoint")
+            or planned.get("finite_kernel_capture_required", False)
+            != bound.get("finite_kernel_capture_required", False)
         ):
             raise ScheduleError(
                 f"cell {cell_id} M or pairing identity differs across inputs"
@@ -656,6 +677,12 @@ def build_parallel_roster(
                 "audit_phase": bound.get("audit_phase"),
                 "analysis_role": bound.get("analysis_role"),
                 "pair_key": bound.get("pair_key"),
+                "evaluation_mode": bound.get(
+                    "evaluation_mode", "development_endpoint"
+                ),
+                "finite_kernel_capture_required": bound.get(
+                    "finite_kernel_capture_required", False
+                ),
                 "terminal_partial_window_registered": bound.get(
                     "terminal_partial_window_registered", False
                 ),
@@ -1402,12 +1429,26 @@ def multiseed_analysis_loss_cap(
 
 
 def multiseed_analysis_outcome_fields(
-    *, status: str, loss: Any, divergence_loss_cap: float | None
+    *,
+    status: str,
+    loss: Any,
+    divergence_loss_cap: float | None,
+    checkpoint_only: bool = False,
 ) -> dict[str, Any]:
     """Return the exact analysis fields for one scientifically resolved E1/E4 row."""
 
     if divergence_loss_cap is None or status not in ("COMPLETED", "DIVERGED"):
         return {}
+    if checkpoint_only and status == "COMPLETED":
+        if loss is not None:
+            raise EvidenceError(
+                "checkpoint-only acquisition must complete with a null raw loss"
+            )
+        return {
+            "analysis_loss": None,
+            "analysis_loss_kind": "sealed_checkpoint_pending_bound_evaluation",
+            "divergence_retained": False,
+        }
     if status == "DIVERGED":
         if loss is not None:
             raise EvidenceError("DIVERGED multiseed outcome must retain a null raw loss")
@@ -2612,6 +2653,105 @@ def _validate_checkpoint(path: Path) -> None:
     visit_tensor(value)
 
 
+def _validate_audit_checkpoint_inventory(
+    path: Path, *, cell_id: str, attempt: int
+) -> dict[str, Any]:
+    value = _load_strict_object(path, "audit checkpoint inventory")
+    digest = value.get("inventory_canonical_sha256")
+    preimage = dict(value)
+    preimage.pop("inventory_canonical_sha256", None)
+    if (
+        value.get("schema") != "audit_135m_checkpoint_inventory_v1"
+        or value.get("cell_id") != cell_id
+        or value.get("attempt") != attempt
+        or value.get("loss_exposed") is not False
+        or digest != canonical_sha256(preimage)
+    ):
+        raise EvidenceError("audit checkpoint inventory identity/hash differs")
+    rows = _array(value.get("files"), "audit checkpoint files")
+    if not rows:
+        raise EvidenceError("audit checkpoint inventory is empty")
+    attempt_root = path.parents[2].resolve()
+    seen: set[str] = set()
+    has_checkpoint = False
+    has_export = False
+    for raw in rows:
+        row = _mapping(raw, "audit checkpoint file")
+        relative = row.get("path")
+        if not isinstance(relative, str) or not relative or relative in seen:
+            raise EvidenceError("audit checkpoint inventory path is missing/duplicated")
+        seen.add(relative)
+        candidate = (attempt_root / relative).resolve()
+        try:
+            candidate.relative_to(attempt_root)
+        except ValueError as exc:
+            raise EvidenceError("audit checkpoint file escapes its attempt") from exc
+        if not candidate.is_file() or candidate.is_symlink():
+            raise EvidenceError("audit checkpoint file is missing or unsafe")
+        if (
+            row.get("sha256") != sha256_file(candidate)
+            or row.get("size_bytes") != candidate.stat().st_size
+        ):
+            raise EvidenceError("audit checkpoint file hash/size differs")
+        has_checkpoint = has_checkpoint or relative.endswith("/state.ckpt")
+        has_export = has_export or "/export/" in f"/{relative}"
+    if not has_checkpoint or not has_export:
+        raise EvidenceError("audit checkpoint inventory lacks state.ckpt or export files")
+    return {
+        "checkpoint_inventory_canonical_sha256": str(digest),
+        "checkpoint_file_count": len(rows),
+    }
+
+
+def _validate_audit_finite_kernel_capture(
+    path: Path,
+    *,
+    expected: Mapping[str, int],
+    raw_tape_path: Path,
+) -> dict[str, Any]:
+    value = _load_strict_object(path, "audit finite-kernel capture")
+    digest = value.get("capture_canonical_sha256")
+    preimage = dict(value)
+    preimage.pop("capture_canonical_sha256", None)
+    v_h = value.get("V_H_psd")
+    if (
+        value.get("schema") != "audit_135m_finite_kernel_capture_v1"
+        or value.get("status") != "SEALED"
+        or value.get("loss_exposed") is not False
+        or digest != canonical_sha256(preimage)
+        or value.get("expected_outer_steps") != expected["outer_steps"]
+        or value.get("observed_outer_steps") != expected["outer_steps"]
+        or value.get("K_H") != expected["outer_steps"]
+        or value.get("learner_count") != expected["learner_count"]
+        or value.get("updates_per_fragment")
+        != expected["per_fragment_outer_updates"]
+        or value.get("state_transition_replay_exact") is not True
+        or value.get("all_registered_updates_covered") is not True
+        or value.get("large_capture_cleanup_complete") is not True
+        or value.get("event_tape_sha256") != sha256_file(raw_tape_path)
+        or isinstance(v_h, bool)
+        or not isinstance(v_h, (int, float))
+        or not math.isfinite(float(v_h))
+        or float(v_h) <= 0.0
+    ):
+        raise EvidenceError("audit finite-kernel capture identity/coverage differs")
+    updates = _array(
+        value.get("ordered_update_registry"), "finite-kernel update registry"
+    )
+    if (
+        len(updates) != expected["outer_steps"]
+        or value.get("ordered_update_registry_hash") != canonical_sha256(updates)
+        or [row.get("step") for row in updates]
+        != list(range(1, expected["outer_steps"] + 1))
+    ):
+        raise EvidenceError("audit finite-kernel ordered updates differ")
+    return {
+        "finite_kernel_capture_canonical_sha256": str(digest),
+        "finite_kernel_K_H": expected["outer_steps"],
+        "finite_kernel_V_H_psd": float(v_h),
+    }
+
+
 def validate_completed_attempt_work(
     *,
     stage_code: str,
@@ -2630,16 +2770,26 @@ def validate_completed_attempt_work(
         "barrier_events",
         "results",
     }
+    checkpoint_only = audit_checkpoint_only(cell)
     if stage_code == "p3t":
         required.update(("training_losses", "final_checkpoint"))
         forbidden = {role for role in inventory if "eval" in role or "audit" in role or "development" in role}
         if forbidden:
             raise EvidenceError("P3 training artifact inventory exposes evaluation surfaces")
+    elif checkpoint_only:
+        required.add("checkpoint_inventory")
     else:
         required.update(("eval_freeze", "eval_losses"))
+    kernel_required = cell.get("finite_kernel_capture_required") is True
+    if kernel_required:
+        required.update(("finite_kernel_capture", "raw_tape"))
     missing = required - set(inventory)
     if missing:
         raise EvidenceError(f"completed attempt lacks required artifacts: {sorted(missing)}")
+    if kernel_required and "finite_kernel_capture" not in inventory:
+        raise EvidenceError("registered finite-kernel cell lacks its compact capture")
+    if not kernel_required and "finite_kernel_capture" in inventory:
+        raise EvidenceError("unregistered cell emitted a finite-kernel capture")
 
     command_hash = _validate_shape_projected_command(
         row=row,
@@ -2689,6 +2839,47 @@ def validate_completed_attempt_work(
             "learner_steps_per_learner": EXPECTED_STEPS_PER_LEARNER,
             "loss": None,
             "checkpoint_sha256": sha256_file(inventory["final_checkpoint"]),
+        }
+
+    if checkpoint_only:
+        result = _load_strict_object(
+            inventory["results"], "audit checkpoint-only result evidence"
+        )
+        expected_learner_exits = [0] * expected["learner_count"]
+        if (
+            result.get("schema") != "audit_135m_checkpoint_only_result_v1"
+            or result.get("loss") is not None
+            or row.get("loss") is not None
+            or result.get("evaluation_role") != "none"
+            or result.get("runner_exit_code") != 0
+            or result.get("syncer_exit_code") != 0
+            or result.get("learner_exit_codes") != expected_learner_exits
+        ):
+            raise EvidenceError(
+                "audit checkpoint-only row violates train-all-then-audit-all"
+            )
+        checkpoint = _validate_audit_checkpoint_inventory(
+            inventory["checkpoint_inventory"],
+            cell_id=str(row["cell_id"]),
+            attempt=int(row["attempt"]),
+        )
+        kernel = (
+            _validate_audit_finite_kernel_capture(
+                inventory["finite_kernel_capture"],
+                expected=expected,
+                raw_tape_path=inventory["raw_tape"],
+            )
+            if kernel_required
+            else {}
+        )
+        return {
+            "tokens": expected["tokens"],
+            "microsteps": expected["microsteps"],
+            "learner_count": expected["learner_count"],
+            "learner_steps_per_learner": expected["learner_steps_per_learner"],
+            "loss": None,
+            **checkpoint,
+            **kernel,
         }
 
     endpoint = _validate_results(
@@ -2982,14 +3173,14 @@ def _validate_retry_authorization(
         raise ScheduleError("retry authorization is not between prior sealing and dispatch")
     if row.get("retry_of") != prior.get("attempt_id"):
         raise ScheduleError("retry_of does not cite the immediately prior cell attempt")
-    if prior.get("status") == "COMPLETED":
+    if prior.get("status") in ("COMPLETED", "DIVERGED"):
         if row.get("retry_reason") != PEER_RETRY_REASON:
-            raise ScheduleError("completed retry peer lacks the sole peer retry reason")
+            raise ScheduleError("terminal retry peer lacks the sole peer retry reason")
     elif prior.get("status") == "INFRA_FAILURE":
         if row.get("retry_reason") != prior.get("failure_reason"):
             raise ScheduleError("direct-failure retry reason differs from the prior failure")
     else:
-        raise ScheduleError("DIVERGED/FAILED rows may not be retried")
+        raise ScheduleError("FAILED rows may not be retried")
 
 
 def validate_attempt_schedule(
@@ -3580,6 +3771,28 @@ class CampaignAggregator:
                             "checkpoint_sha256": report["checkpoint_sha256"],
                         }
                     )
+                elif audit_checkpoint_only(merged_cell):
+                    checkpoints.append(
+                        {
+                            "cell_id": cell_id,
+                            "attempt_id": row["attempt_id"],
+                            "status": "COMPLETED",
+                            "checkpoint_inventory_canonical_sha256": report[
+                                "checkpoint_inventory_canonical_sha256"
+                            ],
+                            "checkpoint_file_count": report[
+                                "checkpoint_file_count"
+                            ],
+                            "evaluation_mode": merged_cell["evaluation_mode"],
+                            "finite_kernel_capture_canonical_sha256": report.get(
+                                "finite_kernel_capture_canonical_sha256"
+                            ),
+                            "finite_kernel_K_H": report.get("finite_kernel_K_H"),
+                            "finite_kernel_V_H_psd": report.get(
+                                "finite_kernel_V_H_psd"
+                            ),
+                        }
+                    )
             elif status == "DIVERGED":
                 report = validate_diverged_attempt(
                     row=row,
@@ -3596,6 +3809,20 @@ class CampaignAggregator:
                             "checkpoint_sha256": None,
                         }
                     )
+                elif audit_checkpoint_only(merged_cell):
+                    checkpoints.append(
+                        {
+                            "cell_id": cell_id,
+                            "attempt_id": row["attempt_id"],
+                            "status": "DIVERGED",
+                            "checkpoint_inventory_canonical_sha256": None,
+                            "checkpoint_file_count": 0,
+                            "evaluation_mode": merged_cell["evaluation_mode"],
+                            "finite_kernel_capture_canonical_sha256": None,
+                            "finite_kernel_K_H": None,
+                            "finite_kernel_V_H_psd": None,
+                        }
+                    )
             elif status == "INFRA_FAILURE":
                 validate_infrastructure_attempt(row, self.campaign_root)
                 report = {"infrastructure_failure": row["failure_reason"]}
@@ -3609,6 +3836,7 @@ class CampaignAggregator:
                     status=str(status),
                     loss=None if status == "DIVERGED" else report.get("loss"),
                     divergence_loss_cap=self.divergence_loss_cap,
+                    checkpoint_only=audit_checkpoint_only(merged_cell),
                 )
                 if (
                     row.get("analysis_loss") != expected_analysis["analysis_loss"]
@@ -3637,6 +3865,23 @@ class CampaignAggregator:
             checkpoints.sort(key=lambda row: row["cell_id"].encode("utf-8"))
             checkpoint_registry = {
                 "schema": "yeto_p3_checkpoint_registry_v1",
+                "cells": checkpoints,
+                "checkpoint_registry_hash": canonical_sha256(checkpoints),
+            }
+        elif checkpoints:
+            expected_checkpoint_cells = {
+                cell_id
+                for cell_id, cell in scientific_by_id.items()
+                if audit_checkpoint_only(cell)
+            }
+            if {row["cell_id"] for row in checkpoints} != expected_checkpoint_cells:
+                raise EvidenceError(
+                    "audit checkpoint registry does not cover the exact checkpoint-only suffix"
+                )
+            checkpoints.sort(key=lambda row: row["cell_id"].encode("utf-8"))
+            checkpoint_registry = {
+                "schema": "audit_135m_checkpoint_registry_v1",
+                "loss_exposed": False,
                 "cells": checkpoints,
                 "checkpoint_registry_hash": canonical_sha256(checkpoints),
             }
@@ -3691,7 +3936,10 @@ class CampaignAggregator:
             "partial_outcomes_exposed": False,
         }
         if checkpoint_registry is not None:
-            manifest["p3_checkpoint_registry"] = checkpoint_registry
+            if self.bundle.stage_code == "p3t":
+                manifest["p3_checkpoint_registry"] = checkpoint_registry
+            else:
+                manifest["audit_checkpoint_registry"] = checkpoint_registry
         if self.runtime_authorization_hash is not None:
             manifest.update(
                 {
@@ -3795,6 +4043,180 @@ class CampaignAggregator:
         # a new descendant/namespace rather than repair or overwrite it.
         write_json_create_only(seal_path, seal)
         return seal
+
+
+def build_audit_checkpoint_preseal(
+    *,
+    stage_code: str,
+    parent_manifest: Mapping[str, Any],
+    bound_manifest: Mapping[str, Any],
+    scientific_plan: Mapping[str, Any],
+    roster: Mapping[str, Any],
+    parallel_plan: Mapping[str, Any],
+    vm_registry: Mapping[str, Any],
+    evaluation_registry: Mapping[str, Any],
+    campaign_attempt: int,
+    campaign_root: Path,
+    runtime_authorization: Mapping[str, Any],
+    sealed_at_utc: str | None = None,
+) -> dict[str, Any]:
+    """Seal complete checkpoint/work coverage before hidden batch evaluation.
+
+    This is deliberately not a provider-lifecycle seal: one already-working
+    Spot generation may remain alive to execute the bound hidden batch.  The
+    final campaign seal must later reproduce this exact checkpoint registry and
+    add exact-ID teardown evidence.
+    """
+
+    if stage_code not in AUDIT_135M_STAGE_CODES:
+        raise ScheduleError("checkpoint preseal is restricted to audit-135M stages")
+    root = campaign_root.resolve()
+    generations = _array(vm_registry.get("generations"), "preseal VM generations")
+    attempts: list[dict[str, Any]] = []
+    partial_rows = []
+    expected_common = {
+        "stage_code": stage_code,
+        "study_id": bound_manifest.get("study_id"),
+        "roster_hash": roster_hash(roster),
+        "parallel_plan_hash": parallel_plan_hash(parallel_plan),
+        "bound_manifest_canonical_sha256": canonical_sha256(bound_manifest),
+        "scientific_randomization_plan_hash": scientific_plan.get(
+            "randomization_plan_hash"
+        ),
+        "partial_outcomes_exposed": False,
+    }
+    for raw_identity in generations:
+        identity = _mapping(raw_identity, "preseal generation")
+        slot = str(identity.get("slot"))
+        generation = require_positive_int(
+            identity.get("generation"), "preseal generation number"
+        )
+        local_root = _generation_local_root(root, slot, generation)
+        provider_path = local_root / "provider" / "provider-evidence.json"
+        partial_path = local_root / "manifests" / "vm-partial-manifest.json"
+        if not provider_path.is_file() or not partial_path.is_file():
+            raise LifecycleError(
+                f"preseal generation {slot}/g{generation} lacks provider/partial evidence"
+            )
+        provider = _load_strict_object(provider_path, "preseal provider evidence")
+        validate_provider_record(provider, identity)
+        partial = _load_strict_object(partial_path, "preseal partial manifest")
+        if partial.get("status") not in {
+            "collecting_attempts",
+            "vm_partial_hash_locked",
+        } or any(partial.get(key) != value for key, value in expected_common.items()):
+            raise LifecycleError("checkpoint preseal partial identity differs")
+        rows = [
+            _mapping(row, "preseal partial attempt")
+            for row in _array(partial.get("attempts"), "preseal partial attempts")
+        ]
+        if rows != sorted(rows, key=_attempt_sort_key):
+            raise LifecycleError("checkpoint preseal partial attempts are reordered")
+        attempts.extend(rows)
+        partial_rows.append(
+            {
+                "slot": slot,
+                "generation": generation,
+                "status": partial["status"],
+                "partial_manifest_raw_sha256": sha256_file(partial_path),
+                "attempt_count": len(rows),
+            }
+        )
+    attempts.sort(key=_attempt_sort_key)
+    analysis_rounds = validate_attempt_schedule(
+        attempts=attempts,
+        roster=roster,
+        plan=parallel_plan,
+        parallel_digest=parallel_plan_hash(parallel_plan),
+    )
+    bundle = CampaignBundle(
+        stage_code=stage_code,
+        parent_manifest=parent_manifest,
+        bound_manifest=bound_manifest,
+        scientific_plan=scientific_plan,
+        roster=roster,
+        parallel_plan=parallel_plan,
+        vm_registry=vm_registry,
+        evaluation_registry=evaluation_registry,
+        final_provider_census={
+            "schema": "yeto_parallel_final_provider_census_v1",
+            "campaign_owned_vm_count": 0,
+            "campaign_owned_attached_a100s": 0,
+        },
+        campaign_attempt=campaign_attempt,
+        campaign_root=root,
+        runtime_authorization=runtime_authorization,
+    )
+    aggregator = CampaignAggregator(bundle)
+    work_reports, checkpoint_registry = aggregator._validate_work(
+        attempts, analysis_rounds
+    )
+    if checkpoint_registry is None or checkpoint_registry.get("schema") != (
+        "audit_135m_checkpoint_registry_v1"
+    ):
+        raise EvidenceError("audit checkpoint preseal lacks an exact registry")
+    scientific_by_id = _scientific_cells(scientific_plan)
+    pending = sorted(
+        cell_id
+        for cell_id, cell in scientific_by_id.items()
+        if cell.get("evaluation_mode")
+        in {"confirmation_audit_pending", "development_prediction_pending"}
+    )
+    capture_only = sorted(
+        cell_id
+        for cell_id, cell in scientific_by_id.items()
+        if cell.get("evaluation_mode") == "capture_only_no_endpoint"
+    )
+    seal_time = sealed_at_utc or utc_now()
+    seal_datetime = parse_time(seal_time, "checkpoint preseal timestamp")
+    terminal_times = [
+        parse_time(row.get("scientific_ended_at"), "preseal scientific end")
+        for row in attempts
+        if row.get("status") in ("COMPLETED", "DIVERGED")
+    ]
+    if not terminal_times:
+        raise EvidenceError("checkpoint preseal has no terminal scientific work")
+    maximum_completion_datetime = max(terminal_times)
+    if seal_datetime <= maximum_completion_datetime:
+        raise EvidenceError(
+            "checkpoint preseal must follow the maximum terminal training completion"
+        )
+    maximum_completion = maximum_completion_datetime.isoformat().replace(
+        "+00:00", "Z"
+    )
+    value = {
+        "schema": "audit_135m_checkpoint_preseal_v1",
+        "status": "SEALED_TRAINING_AND_CHECKPOINT_REGISTRY",
+        "stage_code": stage_code,
+        "study_id": bound_manifest["study_id"],
+        "campaign_attempt": campaign_attempt,
+        "loss_exposed": False,
+        "provider_lifecycle_final_pending": True,
+        "bound_manifest_canonical_sha256": canonical_sha256(bound_manifest),
+        "parent_manifest_canonical_sha256": canonical_sha256(parent_manifest),
+        "roster_hash": roster_hash(roster),
+        "parallel_plan_hash": parallel_plan_hash(parallel_plan),
+        "scientific_randomization_plan_hash": scientific_plan[
+            "randomization_plan_hash"
+        ],
+        "multiseed_runtime_authorization_hash": aggregator.runtime_authorization_hash,
+        "attempts_canonical_sha256": canonical_sha256(attempts),
+        "attempts": [deepcopy(dict(row)) for row in attempts],
+        "analysis_rounds": {
+            key: analysis_rounds[key] for key in _utf8_sort(analysis_rounds)
+        },
+        "work_evidence_reports": work_reports,
+        "evaluation_registry": deepcopy(dict(evaluation_registry)),
+        "audit_checkpoint_registry": checkpoint_registry,
+        "evaluation_required_cell_ids": pending,
+        "capture_only_cell_ids": capture_only,
+        "partial_manifests": partial_rows,
+        "partial_outcomes_exposed": False,
+        "maximum_training_completion_utc": maximum_completion,
+        "sealed_at_utc": seal_time,
+    }
+    value["preseal_canonical_sha256"] = canonical_sha256(value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -4107,7 +4529,7 @@ class ParallelWaveExecutor:
                 retry_of = str(prior["attempt_id"])
                 retry_reason = (
                     PEER_RETRY_REASON
-                    if prior["status"] == "COMPLETED"
+                    if prior["status"] in ("COMPLETED", "DIVERGED")
                     else str(prior["failure_reason"])
                 )
                 retry_authorization = {
@@ -4202,6 +4624,7 @@ class ParallelWaveExecutor:
                     status=str(status),
                     loss=outcome.get("loss"),
                     divergence_loss_cap=self.divergence_loss_cap,
+                    checkpoint_only=audit_checkpoint_only(scientific),
                 )
                 if outcome.get("analysis_loss") not in (
                     None,

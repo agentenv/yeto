@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 from pathlib import Path
 
@@ -305,6 +304,40 @@ def test_a3_h512_keeps_exact_tokens_with_one_256_step_terminal_window(tmp_path):
     ) == 8
 
 
+def test_audit_evaluation_modes_and_finite_kernel_registry_are_exact(tmp_path):
+    expected_modes = {
+        "a1d": {"development_endpoint"},
+        "a1c": {"confirmation_audit_pending"},
+        "a3k": {"capture_only_no_endpoint"},
+        "a3r0": {"development_prediction_pending"},
+        "a4d": {"development_endpoint"},
+        "a4c": {"confirmation_audit_pending"},
+    }
+    decisions = {
+        "a1c": _selection(tmp_path, stage="A1", selected_etas=_a1_selected()),
+        "a4c": _selection(tmp_path, stage="A4", selected_etas=_a4_selected()),
+    }
+    captures = []
+    for stage_code, modes in expected_modes.items():
+        plan = _plan(
+            tmp_path,
+            stage_code,
+            decision_path=decisions.get(stage_code),
+        )
+        assert {cell["evaluation_mode"] for cell in plan["cells"]} == modes
+        captures.extend(
+            (stage_code, cell["H"], cell["seed"], cell["mu"], cell["eta"])
+            for cell in plan["cells"]
+            if cell["finite_kernel_capture_required"]
+        )
+    assert len(captures) == 7
+    assert {row[1] for row in captures} == {8, 16, 64, 256, 512}
+    assert all(row[3] == 0.0 and row[4] == pytest.approx(0.021875) for row in captures)
+    assert {row for row in captures if row[0] == "a3k"} == {
+        ("a3k", 16, 347, 0.0, 0.021875),
+        ("a3k", 64, 347, 0.0, 0.021875),
+        ("a3k", 256, 347, 0.0, 0.021875),
+    }
 def test_unregistered_partial_fixed_window_fails_closed(tmp_path):
     args = audit._runtime_namespace(_runtime(tmp_path))
     with pytest.raises(phase.PhaseMapError, match="not divisible by H=512"):
