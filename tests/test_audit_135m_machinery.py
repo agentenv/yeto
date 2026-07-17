@@ -22,6 +22,8 @@ from scripts import run_parallel_phase_map as parallel
 
 
 def test_ceiling_amendment_covers_full_survivable_stage_paths() -> None:
+    from scripts import build_audit_135m_launch_packet as packet
+
     authority = audit.load_authority()
     price = controller.PRICE_PER_VM_HOUR["us-west4"]["a2-highgpu-1g"]
     a1 = authority["costs"]["blocks"]["A1"]
@@ -30,6 +32,11 @@ def test_ceiling_amendment_covers_full_survivable_stage_paths() -> None:
     assert a1["hard_ceiling_usd"] == 140.0
     assert a1["width_cap"] == 2
     assert a1["abort_burn_kill_usd"] == 40.0
+    forecast = packet._registered_cost_forecast(
+        stage_code="a1d", hard_ceiling=a1["hard_ceiling_usd"]
+    )
+    assert forecast["registered_range_usd"] == a1["range_usd"]
+    assert forecast["forecast_upper_usd"] == 132.5
     hours = {
         "A3": 10 * controller.CELL_HOURS[8]
         + 12 * controller.CELL_HOURS[512]

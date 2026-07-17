@@ -318,12 +318,23 @@ def _registered_cost_forecast(
     *, stage_code: str, hard_ceiling: float
 ) -> dict[str, Any]:
     audit_stage = {"a1": "A1", "a3": "A3", "a4": "A4"}[stage_code[:2]]
-    ranges = {
-        "A1": (63.78594918412001, 79.73243648015001),
-        "A3": (23.983582721944224, 29.97947840243028),
-        "A4": (106.30991530686667, 132.88739413358334),
-    }
-    low, high = ranges[audit_stage]
+    authority_path = REPO_ROOT / PREREG_PATH
+    if sha256_file(authority_path) != PREREG_SHA256:
+        raise PacketError("registered cost authority bytes differ")
+    authority = _load(authority_path, "audit preregistration")
+    block = authority.get("costs", {}).get("blocks", {}).get(audit_stage, {})
+    cost_range = block.get("range_usd")
+    if (
+        not isinstance(cost_range, list)
+        or len(cost_range) != 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in cost_range
+        )
+        or float(block.get("hard_ceiling_usd", -1.0)) != hard_ceiling
+    ):
+        raise PacketError("registered stage cost range/ceiling differs")
+    low, high = (float(cost_range[0]), float(cost_range[1]))
     if high >= hard_ceiling:
         raise PacketError("registered stage forecast does not leave ceiling headroom")
     return {
