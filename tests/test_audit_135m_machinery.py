@@ -376,6 +376,29 @@ def test_remaining_cost_preflight_rejects_before_provider_mutation(
     assert notes and "before provider mutation" in notes[-1]
 
 
+def test_cost_eligible_zone_rotation_omits_unaffordable_regions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        controller,
+        "_shape_stage_forecast",
+        lambda **kwargs: 70.0 if kwargs["region"] == "us-west4" else 80.0,
+    )
+
+    zones = controller._cost_eligible_zone_rotation(
+        stage_code="a1d",
+        machine_type="a2-highgpu-1g",
+        plan={},
+        scientific={},
+        planned_index=0,
+        prior_stage_spend=4.0,
+        current_campaign_spend=0.0,
+        ceiling=75.0,
+    )
+
+    assert zones == ("us-west4-b", "us-west4-a")
+
+
 def test_global_a100_count_uses_accelerator_inventory_or_machine_shape() -> None:
     assert (
         controller._instance_a100_count(

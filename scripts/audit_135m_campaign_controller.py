@@ -261,6 +261,34 @@ def _registered_remaining_forecasts(
     return rows
 
 
+def _cost_eligible_zone_rotation(
+    *,
+    stage_code: str,
+    machine_type: str,
+    plan: Mapping[str, Any],
+    scientific: Mapping[str, Any],
+    planned_index: int,
+    prior_stage_spend: float,
+    current_campaign_spend: float,
+    ceiling: float,
+) -> tuple[str, ...]:
+    candidates = []
+    for index, zone in enumerate(ZONE_ROTATION):
+        region = zone.rsplit("-", 1)[0]
+        forecast = _shape_stage_forecast(
+            stage_code=stage_code,
+            machine_type=machine_type,
+            region=region,
+            plan=plan,
+            scientific=scientific,
+            planned_index=planned_index,
+        )
+        if prior_stage_spend + current_campaign_spend + forecast < ceiling:
+            candidates.append((forecast, index, zone))
+    candidates.sort()
+    return tuple(zone for _forecast, _index, zone in candidates)
+
+
 def _assert_remaining_stage_cost_feasible(
     *,
     stage_code: str,
@@ -1747,9 +1775,15 @@ def _expand_homogeneous_initial_capacity(
     """Fill up to five three-VM block lanes without exceeding 16 A100s."""
 
     if selected_shape == "a2-highgpu-1g":
+        preferred_region = preferred_zone.rsplit("-", 1)[0]
         ordered_zones = (
             preferred_zone,
-            *[zone for zone in ZONE_ROTATION if zone != preferred_zone],
+            *[
+                zone
+                for zone in ZONE_ROTATION
+                if zone != preferred_zone
+                and zone.rsplit("-", 1)[0] == preferred_region
+            ],
         )
         p1.ZONE_ROTATION = ordered_zones
         stop_event = threading.Event()
@@ -2221,7 +2255,6 @@ def _provision_required_replacement(
     ceiling: float,
     lifecycle_lock: threading.RLock,
 ) -> None:
-    ordered_zones = [preferred_zone, *[zone for zone in ZONE_ROTATION if zone != preferred_zone]]
     science_started = threading.Event()
     science_started.set()
     stop_event = threading.Event()
@@ -2240,6 +2273,27 @@ def _provision_required_replacement(
         )
 
     for attempt in range(len(ZONE_ROTATION) * 4):
+        current_spend, _rows = _current_campaign_cost(executor, campaign_root)
+        eligible_zones = _cost_eligible_zone_rotation(
+            stage_code=stage_code,
+            machine_type=selected_shape,
+            plan=plan,
+            scientific=scientific,
+            planned_index=planned_index,
+            prior_stage_spend=float(spend_ledger["estimated_spend_usd"]),
+            current_campaign_spend=current_spend,
+            ceiling=ceiling,
+        )
+        if not eligible_zones:
+            raise HardCeilingStop(
+                "no registered zone for the required replacement can finish "
+                "inside the remaining stage ceiling"
+            )
+        ordered_zones = (
+            [preferred_zone, *[zone for zone in eligible_zones if zone != preferred_zone]]
+            if preferred_zone in eligible_zones
+            else list(eligible_zones)
+        )
         offset = attempt % len(ordered_zones)
         p1.ZONE_ROTATION = tuple(ordered_zones[offset:] + ordered_zones[:offset])
         errors: list[BaseException] = []
@@ -2328,15 +2382,6 @@ def _provision_cost_eligible_initial_generation(
     ceiling: float,
     lifecycle_lock: threading.RLock,
 ) -> tuple[str, float]:
-    cheapest_first = tuple(
-        sorted(
-            ZONE_ROTATION,
-            key=lambda zone: (
-                PRICE_PER_VM_HOUR[zone.rsplit("-", 1)[0]]["a2-highgpu-1g"],
-                ZONE_ROTATION.index(zone),
-            ),
-        )
-    )
     science_started = threading.Event()
     science_started.set()
     stop_event = threading.Event()
@@ -2354,7 +2399,23 @@ def _provision_cost_eligible_initial_generation(
             phase="pre_scientific_cost_capacity_ladder",
         )
 
-    for attempt in range(len(cheapest_first) * 4):
+    for attempt in range(len(ZONE_ROTATION) * 4):
+        current_spend, _rows = _current_campaign_cost(executor, campaign_root)
+        cheapest_first = _cost_eligible_zone_rotation(
+            stage_code=stage_code,
+            machine_type="a2-highgpu-1g",
+            plan=plan,
+            scientific=scientific,
+            planned_index=0,
+            prior_stage_spend=float(spend_ledger["estimated_spend_usd"]),
+            current_campaign_spend=current_spend,
+            ceiling=ceiling,
+        )
+        if not cheapest_first:
+            pre_launch_guard()
+            raise HardCeilingStop(
+                "no registered 1g zone can finish inside the remaining stage ceiling"
+            )
         offset = attempt % len(cheapest_first)
         p1.ZONE_ROTATION = tuple(
             cheapest_first[offset:] + cheapest_first[:offset]
@@ -2909,6 +2970,29 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"{exc}"
         )
         raise
+    current_prelaunch_spend, _prelaunch_rows = _current_campaign_cost(
+        executor, campaign_root
+    )
+    initial_cost_eligible_zones = _cost_eligible_zone_rotation(
+        stage_code=stage_code,
+        machine_type="a2-highgpu-1g",
+        plan=plan,
+        scientific=scientific,
+        planned_index=0,
+        prior_stage_spend=float(spend_ledger["estimated_spend_usd"]),
+        current_campaign_spend=current_prelaunch_spend,
+        ceiling=ceiling,
+    )
+    if not initial_cost_eligible_zones:
+        raise HardCeilingStop(
+            "no registered initial 1g zone can finish inside the remaining stage ceiling"
+        )
+    p1.ZONE_ROTATION = initial_cost_eligible_zones
+    backend.note(
+        "COST-ELIGIBLE INITIAL ZONE ROTATION bound before provider mutation: "
+        f"{list(initial_cost_eligible_zones)}; every omitted region fails the "
+        "registered remaining-stage forecast under the durable ledger."
+    )
     initial_probe_width = min(
         MAX_PREFERRED_PROBE_WIDTH,
         len(logical_slots),
