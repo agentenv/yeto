@@ -256,6 +256,92 @@ def test_shape_selection_keeps_only_cost_eligible_landed_region(
     assert forecast == 70.0
 
 
+def test_remaining_cost_preflight_rejects_before_provider_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forecast(**kwargs) -> float:
+        if (
+            kwargs["region"] == "us-west4"
+            and kwargs["machine_type"] == "a2-highgpu-1g"
+        ):
+            return 72.852615
+        return 77.303160
+
+    monkeypatch.setattr(controller, "_shape_stage_forecast", forecast)
+    provisioned: list[str] = []
+    notes: list[str] = []
+
+    def provision(identity):
+        provisioned.append(identity.run_id)
+        raise AssertionError("provider mutation must not be reached")
+
+    backend = SimpleNamespace(
+        audit_transient_generations=set(),
+        note=notes.append,
+        provision=provision,
+    )
+    registry = SimpleNamespace(
+        identities=[],
+        _prebound_nonces={"v0": "1" * 32},
+        stage_code="a1d",
+        study_id="study",
+        roster_hash="a" * 64,
+        campaign_attempt=1,
+        campaign_state_root=tmp_path / "state",
+        campaign_artifact_root="gs://bucket/campaign",
+    )
+    executor = SimpleNamespace(active={}, providers={})
+    evidence_path = (
+        tmp_path / "campaign-root" / "campaign" / "cost-feasibility-stop.json"
+    )
+
+    def pre_launch_guard() -> None:
+        controller._guard_provider_mutation_cost(
+            executor=executor,
+            campaign_root=tmp_path / "campaign-root",
+            stage_ledger={"estimated_spend_usd": 3.884564},
+            stage_code="a1d",
+            plan={},
+            scientific={},
+            planned_index=0,
+            ceiling=75.0,
+            phase="test_prelaunch",
+        )
+
+    errors: list[BaseException] = []
+    controller._audit_provision_loop(
+        base=SimpleNamespace(),
+        p1=SimpleNamespace(ZONE_ROTATION=("us-west4-b",)),
+        pexec=SimpleNamespace(GenerationIdentity=parallel.GenerationIdentity),
+        executor=executor,
+        registry=registry,
+        backend=backend,
+        slot="v0",
+        stop_event=threading.Event(),
+        science_started=threading.Event(),
+        lock=threading.RLock(),
+        errors=errors,
+        required=False,
+        pre_launch_guard=pre_launch_guard,
+    )
+
+    assert provisioned == []
+    assert len(errors) == 1
+    assert isinstance(errors[0], controller.HardCeilingStop)
+    evidence = json.loads(evidence_path.read_text())
+    assert evidence["provider_mutation_authorized"] is False
+    assert evidence["estimated_stage_spend_if_continued_usd"] == pytest.approx(
+        76.737179
+    )
+    assert evidence["cheapest_registered_remaining_forecast"] == {
+        "forecast_usd": 72.852615,
+        "machine_type": "a2-highgpu-1g",
+        "region": "us-west4",
+    }
+    assert len(evidence["registered_remaining_forecasts"]) == 8
+    assert notes and "before provider mutation" in notes[-1]
+
+
 def test_global_a100_count_uses_accelerator_inventory_or_machine_shape() -> None:
     assert (
         controller._instance_a100_count(

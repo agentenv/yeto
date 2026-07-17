@@ -28,7 +28,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -213,6 +213,105 @@ def _shape_stage_forecast(
     return hours * price * SPOT_PREEMPTION_RESERVE_FACTOR
 
 
+def _registered_remaining_forecasts(
+    *,
+    stage_code: str,
+    plan: Mapping[str, Any],
+    scientific: Mapping[str, Any],
+    planned_index: int,
+) -> list[dict[str, Any]]:
+    rows = []
+    registered_regions = {
+        zone.rsplit("-", 1)[0] for zone in ZONE_ROTATION
+    }
+    for region in sorted(registered_regions):
+        for machine_type in sorted(PRICE_PER_VM_HOUR[region]):
+            rows.append(
+                {
+                    "region": region,
+                    "machine_type": machine_type,
+                    "forecast_usd": _shape_stage_forecast(
+                        stage_code=stage_code,
+                        machine_type=machine_type,
+                        region=region,
+                        plan=plan,
+                        scientific=scientific,
+                        planned_index=planned_index,
+                    ),
+                }
+            )
+    rows.sort(
+        key=lambda row: (
+            float(row["forecast_usd"]),
+            str(row["region"]),
+            str(row["machine_type"]),
+        )
+    )
+    if not rows:
+        raise ControllerError("no registered remaining-stage cost forecast exists")
+    return rows
+
+
+def _assert_remaining_stage_cost_feasible(
+    *,
+    stage_code: str,
+    plan: Mapping[str, Any],
+    scientific: Mapping[str, Any],
+    planned_index: int,
+    prior_stage_spend: float,
+    current_campaign_spend: float,
+    ceiling: float,
+    phase: str,
+    evidence_path: Path | None = None,
+) -> dict[str, Any]:
+    forecasts = _registered_remaining_forecasts(
+        stage_code=stage_code,
+        plan=plan,
+        scientific=scientific,
+        planned_index=planned_index,
+    )
+    cheapest = forecasts[0]
+    projected = (
+        prior_stage_spend
+        + current_campaign_spend
+        + float(cheapest["forecast_usd"])
+    )
+    feasible = projected < ceiling
+    evidence = {
+        "schema": "audit_135m_remaining_cost_feasibility_v1",
+        "status": "PASS" if feasible else "HARD_CEILING_INFEASIBLE",
+        "stage_code": stage_code,
+        "phase": phase,
+        "planned_index": planned_index,
+        "loss_inspected": False,
+        "prior_stage_spend_usd": round(prior_stage_spend, 6),
+        "current_campaign_spend_usd": round(current_campaign_spend, 6),
+        "cheapest_registered_remaining_forecast": {
+            **cheapest,
+            "forecast_usd": round(float(cheapest["forecast_usd"]), 6),
+        },
+        "registered_remaining_forecasts": [
+            {**row, "forecast_usd": round(float(row["forecast_usd"]), 6)}
+            for row in forecasts
+        ],
+        "estimated_stage_spend_if_continued_usd": round(projected, 6),
+        "hard_ceiling_usd": ceiling,
+        "provider_mutation_authorized": feasible,
+        "evaluated_at_utc": utc_now(),
+    }
+    if feasible:
+        return evidence
+    if evidence_path is not None and not evidence_path.exists():
+        write_json_create_only(evidence_path, evidence)
+    raise HardCeilingStop(
+        "remaining-stage cost preflight: durable prior spend "
+        f"${prior_stage_spend:.6f} + current campaign burn "
+        f"${current_campaign_spend:.6f} + cheapest registered forecast "
+        f"${float(cheapest['forecast_usd']):.6f} = ${projected:.6f}, which "
+        f"reaches/exceeds the ${ceiling:.2f} ceiling"
+    )
+
+
 def _generation_cost(
     provider: Mapping[str, Any], *, ended_at: str | None = None
 ) -> float:
@@ -333,6 +432,41 @@ def _current_campaign_cost(executor, campaign_root: Path) -> tuple[float, list[d
         )
     rows.sort(key=lambda row: (str(row["slot"]), int(row["generation"])))
     return total, rows
+
+
+def _guard_provider_mutation_cost(
+    *,
+    executor,
+    campaign_root: Path,
+    stage_ledger: Mapping[str, Any],
+    stage_code: str,
+    plan: Mapping[str, Any],
+    scientific: Mapping[str, Any],
+    planned_index: int,
+    ceiling: float,
+    phase: str,
+    lock: threading.RLock | None = None,
+) -> dict[str, Any]:
+    def evaluate() -> dict[str, Any]:
+        current, _rows = _current_campaign_cost(executor, campaign_root)
+        return _assert_remaining_stage_cost_feasible(
+            stage_code=stage_code,
+            plan=plan,
+            scientific=scientific,
+            planned_index=planned_index,
+            prior_stage_spend=float(stage_ledger["estimated_spend_usd"]),
+            current_campaign_spend=current,
+            ceiling=ceiling,
+            phase=phase,
+            evidence_path=(
+                campaign_root / "campaign" / "cost-feasibility-stop.json"
+            ),
+        )
+
+    if lock is None:
+        return evaluate()
+    with lock:
+        return evaluate()
 
 
 def _instance_a100_count(row: Mapping[str, Any]) -> int:
@@ -855,6 +989,7 @@ def _audit_provision_loop(
     lock: threading.RLock,
     errors: list[BaseException],
     required: bool,
+    pre_launch_guard: Callable[[], Any] | None = None,
 ) -> None:
     identity = _audit_provisional_identity(
         pexec=pexec, registry=registry, backend=backend, slot=slot
@@ -866,6 +1001,8 @@ def _audit_provision_loop(
         zone = p1.ZONE_ROTATION[zone_index % len(p1.ZONE_ROTATION)]
         tries += 1
         try:
+            if pre_launch_guard is not None:
+                pre_launch_guard()
             p1.cache_zone_render(backend, identity, zone)
             backend.note(
                 f"ADAPTIVE CAPACITY probe {tries} for {identity.slot}/g"
@@ -932,6 +1069,13 @@ def _audit_provision_loop(
                 f"{identity.run_id} continues in the next survival-weighted zone."
             )
             continue
+        except HardCeilingStop as error:
+            backend.note(
+                f"HARD CEILING PREFLIGHT STOP before provider mutation for "
+                f"{identity.slot}/g{identity.generation}: {error}"
+            )
+            errors.append(error)
+            return
         except Exception as error:
             text = str(error).casefold()
             absent = (
@@ -1568,6 +1712,7 @@ def _expand_homogeneous_initial_capacity(
     assembly_seconds: int,
     lock: threading.RLock,
     lifecycle_lock: threading.RLock,
+    pre_launch_guard: Callable[[], Any],
 ) -> tuple[str, ...]:
     """Fill up to five three-VM block lanes without exceeding 16 A100s."""
 
@@ -1599,6 +1744,7 @@ def _expand_homogeneous_initial_capacity(
                     "lock": lock,
                     "errors": errors,
                     "required": False,
+                    "pre_launch_guard": pre_launch_guard,
                 },
                 name=f"audit-expand-{slot}",
                 daemon=False,
@@ -1627,6 +1773,8 @@ def _expand_homogeneous_initial_capacity(
             thread.join()
         p1.ZONE_ROTATION = ZONE_ROTATION
         if errors:
+            if isinstance(errors[0], HardCeilingStop):
+                raise errors[0]
             raise ControllerError("concurrent-block capacity expansion failed") from errors[0]
 
     matching_slots = []
@@ -2047,6 +2195,20 @@ def _provision_required_replacement(
     science_started = threading.Event()
     science_started.set()
     stop_event = threading.Event()
+
+    def pre_launch_guard() -> None:
+        _guard_provider_mutation_cost(
+            executor=executor,
+            campaign_root=campaign_root,
+            stage_ledger=spend_ledger,
+            stage_code=stage_code,
+            plan=plan,
+            scientific=scientific,
+            planned_index=planned_index,
+            ceiling=ceiling,
+            phase="required_replacement_prelaunch",
+        )
+
     for attempt in range(len(ZONE_ROTATION) * 4):
         offset = attempt % len(ordered_zones)
         p1.ZONE_ROTATION = tuple(ordered_zones[offset:] + ordered_zones[:offset])
@@ -2069,8 +2231,11 @@ def _provision_required_replacement(
             lock=lock,
             errors=errors,
             required=True,
+            pre_launch_guard=pre_launch_guard,
         )
         if errors:
+            if isinstance(errors[0], HardCeilingStop):
+                raise errors[0]
             raise ControllerError("required replacement provisioning failed") from errors[0]
         identity = executor.active.get(slot)
         if identity is None:
@@ -2145,6 +2310,20 @@ def _provision_cost_eligible_initial_generation(
     science_started = threading.Event()
     science_started.set()
     stop_event = threading.Event()
+
+    def pre_launch_guard() -> None:
+        _guard_provider_mutation_cost(
+            executor=executor,
+            campaign_root=campaign_root,
+            stage_ledger=spend_ledger,
+            stage_code=stage_code,
+            plan=plan,
+            scientific=scientific,
+            planned_index=0,
+            ceiling=ceiling,
+            phase="pre_scientific_cost_capacity_ladder",
+        )
+
     for attempt in range(len(cheapest_first) * 4):
         offset = attempt % len(cheapest_first)
         p1.ZONE_ROTATION = tuple(
@@ -2169,9 +2348,12 @@ def _provision_cost_eligible_initial_generation(
             lock=lock,
             errors=errors,
             required=True,
+            pre_launch_guard=pre_launch_guard,
         )
         if errors:
             p1.ZONE_ROTATION = ZONE_ROTATION
+            if isinstance(errors[0], HardCeilingStop):
+                raise errors[0]
             raise ControllerError("cost-eligible capacity search failed") from errors[0]
         identity = executor.active.get(slot)
         if identity is None:
@@ -2673,6 +2855,30 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"global A100 headroom is {global_headroom}; a reviewed 4g-first Spot "
             "probe could exceed the total ceiling"
         )
+    prelaunch_cost_lock = threading.RLock()
+
+    def initial_pre_launch_guard() -> None:
+        _guard_provider_mutation_cost(
+            executor=executor,
+            campaign_root=campaign_root,
+            stage_ledger=spend_ledger,
+            stage_code=stage_code,
+            plan=plan,
+            scientific=scientific,
+            planned_index=0,
+            ceiling=ceiling,
+            phase="initial_pre_scientific_prelaunch",
+            lock=prelaunch_cost_lock,
+        )
+
+    try:
+        initial_pre_launch_guard()
+    except HardCeilingStop as exc:
+        backend.note(
+            "HARD CEILING PREFLIGHT STOP before any provider mutation: "
+            f"{exc}"
+        )
+        raise
     initial_probe_width = min(
         MAX_PREFERRED_PROBE_WIDTH,
         len(logical_slots),
@@ -2719,6 +2925,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "lock": lock,
                     "errors": errors,
                     "required": False,
+                    "pre_launch_guard": initial_pre_launch_guard,
                 },
                 name=f"audit-{stage_code}-initial-{slot}",
                 daemon=False,
@@ -2728,6 +2935,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         first_ready_epoch: float | None = None
         while True:
             if errors:
+                if isinstance(errors[0], HardCeilingStop):
+                    raise errors[0]
                 raise ControllerError("capacity thread failed") from errors[0]
             with lock:
                 width = len(executor.active)
@@ -2776,6 +2985,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         for thread in threads:
             thread.join()
         if errors:
+            if isinstance(errors[0], HardCeilingStop):
+                raise errors[0]
             raise ControllerError("capacity cleanup thread failed") from errors[0]
         if selection_error is not None:
             backend.note(
@@ -2845,6 +3056,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             assembly_seconds=remaining_assembly_seconds,
             lock=lock,
             lifecycle_lock=lifecycle_lock,
+            pre_launch_guard=initial_pre_launch_guard,
         )
         if set(executor.active) != set(selected_slots):
             raise ControllerError("post-assembly active slots differ from the selected set")
