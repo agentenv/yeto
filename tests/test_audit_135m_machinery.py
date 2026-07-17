@@ -17,6 +17,7 @@ from scripts import audit_135m_hidden_evaluator as hidden
 from scripts import audit_135m_phase_manifest as promotion
 from scripts import audit_135m_report as final_report
 from scripts import audit_135m_replay as replay
+from scripts import run_parallel_phase_map as parallel
 
 
 def test_deferred_evaluation_modes_are_exact() -> None:
@@ -276,6 +277,351 @@ def test_global_a100_count_uses_accelerator_inventory_or_machine_shape() -> None
         == 8
     )
     assert controller._instance_a100_count({"machineType": "e2-standard-8"}) == 0
+
+
+def test_transient_pending_create_is_exactly_proved_and_consumed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(controller, "TRANSIENT_PROVIDER_POLL_SECONDS", 0.001)
+    nonce = "1" * 32
+    run_id = "bp-a1d-test-c1-v1-g1"
+    labels = {
+        "campaign": "audit-135m",
+        "campaign-tag": "a" * 16,
+        "draft": "false",
+        "logical-slot": "v1",
+        "managed-by": "yeto-optimizer-harness",
+        "physical-generation": "1",
+        "run-id": run_id,
+        "stage": "a1d",
+    }
+    spec = tmp_path / "spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "cloud": {
+                    "instance_name": run_id,
+                    "zone": "us-central1-a",
+                    "project": "model-training-497007",
+                    "machine_type": "a2-highgpu-4g",
+                    "accelerator_count": 4,
+                    "labels": labels,
+                },
+                "artifacts": {"uri": f"gs://bucket/prefix/{run_id}"},
+            }
+        )
+    )
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.pexec = parallel
+            self.live = False
+            self.disk_seen = threading.Event()
+            self.notes: list[str] = []
+
+        def run(self, command, *, check=True, timeout=None):
+            values = list(command)
+            if "yeto.optimizer_harness" in values and "launch" in values:
+                self.live = True
+                assert self.disk_seen.wait(2)
+                self.live = False
+                raise RuntimeError("OPERATION_CANCELED_BY_USER")
+            if values[:4] == ["gcloud", "compute", "instances", "list"]:
+                return subprocess.CompletedProcess(values, 0, "[]", "")
+            if values[:4] == ["gcloud", "compute", "disks", "describe"]:
+                return subprocess.CompletedProcess(values, 1, "", "NOT_FOUND")
+            if values[:4] == ["gcloud", "compute", "operations", "list"]:
+                return subprocess.CompletedProcess(
+                    values,
+                    0,
+                    json.dumps(
+                        [
+                            {
+                                "name": "operation-1",
+                                "operationType": "insert",
+                                "status": "DONE",
+                                "targetId": "123",
+                                "targetLink": f"zones/us-central1-a/instances/{run_id}",
+                                "error": {
+                                    "errors": [
+                                        {"code": "OPERATION_CANCELED_BY_USER"}
+                                    ]
+                                },
+                            }
+                        ]
+                    ),
+                    "",
+                )
+            if values[:3] == ["gcloud", "storage", "cp"]:
+                return subprocess.CompletedProcess(values, 0, "", "")
+            return subprocess.CompletedProcess(values, 0, "", "")
+
+        def gcloud(self, *args, check=True, timeout=None):
+            return self.run(
+                ["gcloud", *args], check=check, timeout=timeout
+            )
+
+        def describe_instance(self, name, *, check=True):
+            if not self.live:
+                return None
+            return {
+                "id": "123",
+                "name": name,
+                "zone": "zones/us-central1-a",
+                "machineType": "zones/us-central1-a/machineTypes/a2-highgpu-4g",
+                "creationTimestamp": "2026-07-17T11:00:00-07:00",
+                "labels": {**labels, "ownership-nonce": nonce},
+                "scheduling": {"provisioningModel": "SPOT"},
+                "guestAccelerators": [
+                    {
+                        "acceleratorType": "acceleratorTypes/nvidia-tesla-a100",
+                        "acceleratorCount": 4,
+                    }
+                ],
+                "disks": [
+                    {
+                        "source": f"zones/us-central1-a/disks/{run_id}",
+                        "autoDelete": True,
+                    }
+                ],
+            }
+
+        def _disk_description(self, instance):
+            self.disk_seen.set()
+            return {
+                "name": run_id,
+                "id": "456",
+                "sourceImageId": "789",
+            }
+
+        def note(self, value: str) -> None:
+            self.notes.append(value)
+
+    backend = FakeBackend()
+    campaign_root = tmp_path / "campaign-root"
+    controller._install_transient_provider_generation_monitor(
+        backend=backend, campaign_root=campaign_root
+    )
+    command = [
+        "/explicit/python",
+        "-m",
+        "yeto.optimizer_harness",
+        "--state-dir",
+        str(tmp_path / "state"),
+        "launch",
+        str(spec),
+        "--ownership-nonce",
+        nonce,
+        "--yes",
+    ]
+    with pytest.raises(controller.TransientProviderGeneration) as captured:
+        backend.run(command)
+    lifecycle = captured.value.lifecycle
+    assert lifecycle["instance_numeric_id"] == "123"
+    assert lifecycle["boot_disk_numeric_id"] == "456"
+    assert lifecycle["provider_spot_preempted"] is True
+    assert lifecycle["scientific_attempt_started"] is False
+    assert lifecycle["loss_inspected"] is False
+    assert ("v1", 1) in backend.audit_transient_generations
+    lifecycle_path = (
+        campaign_root
+        / "common"
+        / "transient-provider-lifecycles"
+        / f"{run_id}.json"
+    )
+    assert lifecycle_path.is_file()
+    assert backend.notes and "may never be retried" in backend.notes[-1]
+
+
+def test_transient_generation_forces_fresh_identity(tmp_path: Path) -> None:
+    registry = SimpleNamespace(
+        identities=(),
+        _prebound_nonces={"v1": "1" * 32},
+        stage_code="a1d",
+        study_id="study",
+        roster_hash="a" * 64,
+        campaign_attempt=1,
+        campaign_state_root=tmp_path / "state",
+        campaign_artifact_root="gs://bucket/campaign",
+    )
+    backend = SimpleNamespace(audit_transient_generations={('v1', 1)})
+    identity = controller._audit_provisional_identity(
+        pexec=parallel, registry=registry, backend=backend, slot="v1"
+    )
+    assert identity.generation == 2
+    assert identity.run_id.endswith("-v1-g2")
+    assert identity.ownership_nonce != registry._prebound_nonces["v1"]
+
+
+def test_transient_provider_recovery_is_per_slot_and_preserves_ready_sibling(
+    tmp_path: Path,
+) -> None:
+    roster_hash = "a" * 64
+    sibling = parallel.GenerationIdentity(
+        stage_code="a1d",
+        study_id="study",
+        roster_hash=roster_hash,
+        campaign_attempt=1,
+        slot="v0",
+        generation=1,
+        ownership_nonce="0" * 32,
+        campaign_state_root=tmp_path / "state",
+        campaign_artifact_root="gs://bucket/campaign",
+    )
+    registry = SimpleNamespace(
+        identities=[sibling],
+        _prebound_nonces={"v1": "1" * 32},
+        stage_code="a1d",
+        study_id="study",
+        roster_hash=roster_hash,
+        campaign_attempt=1,
+        campaign_state_root=tmp_path / "state",
+        campaign_artifact_root="gs://bucket/campaign",
+    )
+    sibling_provider = {
+        "run_id": sibling.run_id,
+        "instance_numeric_id": "100",
+        "region": "us-central1",
+        "zone": "us-central1-a",
+        "machine_type": "a2-highgpu-4g",
+    }
+    finalized: list[tuple[str, bool]] = []
+    executor = SimpleNamespace(
+        active={"v0": sibling},
+        providers={("v0", 1): sibling_provider},
+        ready_at={},
+        _finalize_identity=lambda identity, preempted: finalized.append(
+            (identity.run_id, preempted)
+        ),
+    )
+
+    class Backend:
+        def __init__(self) -> None:
+            self.audit_transient_generations: set[tuple[str, int]] = set()
+            self.notes: list[str] = []
+
+        def provision(self, identity):
+            if identity.generation == 1:
+                self.audit_transient_generations.add((identity.slot, 1))
+                raise controller.TransientProviderGeneration(
+                    {
+                        "run_id": identity.run_id,
+                        "slot": identity.slot,
+                        "generation": identity.generation,
+                        "ownership_nonce": identity.ownership_nonce,
+                    }
+                )
+            return {
+                "run_id": identity.run_id,
+                "instance_numeric_id": "200",
+                "region": "us-central1",
+                "zone": "us-central1-b",
+                "machine_type": "a2-highgpu-4g",
+            }
+
+        def note(self, value: str) -> None:
+            self.notes.append(value)
+
+        @staticmethod
+        def describe_instance(name, *, check=True):
+            return None
+
+    backend = Backend()
+
+    def initialize_registered_generation(**kwargs) -> None:
+        identity = kwargs["identity"]
+        provider = kwargs["provider"]
+        registry.identities.append(identity)
+        executor.providers[(identity.slot, identity.generation)] = provider
+
+    def mark_ready(**kwargs) -> str:
+        identity = kwargs["identity"]
+        ready = "2026-07-17T18:00:00Z"
+        executor.ready_at[(identity.slot, identity.generation)] = ready
+        return ready
+
+    p1 = SimpleNamespace(
+        ZONE_ROTATION=("us-central1-a", "us-central1-b"),
+        RETRY_SECONDS=0,
+        cache_zone_render=lambda backend, identity, zone: None,
+        initialize_registered_generation=initialize_registered_generation,
+        mark_ready=mark_ready,
+    )
+    pexec = SimpleNamespace(
+        GenerationIdentity=parallel.GenerationIdentity,
+        region_for_zone=lambda zone: zone.rsplit("-", 1)[0],
+        validate_provider_record=lambda provider, identity: None,
+    )
+    errors: list[BaseException] = []
+    controller._audit_provision_loop(
+        base=SimpleNamespace(HARNESS_STATE_ROOT=tmp_path / "harness"),
+        p1=p1,
+        pexec=pexec,
+        executor=executor,
+        registry=registry,
+        backend=backend,
+        slot="v1",
+        stop_event=threading.Event(),
+        science_started=threading.Event(),
+        lock=threading.RLock(),
+        errors=errors,
+        required=False,
+    )
+    assert errors == []
+    assert finalized == []
+    assert executor.active["v0"] is sibling
+    assert executor.providers[("v0", 1)] is sibling_provider
+    assert executor.active["v1"].generation == 2
+    assert executor.active["v1"].ownership_nonce != "1" * 32
+    assert any("permanently consumed" in note for note in backend.notes)
+
+
+def test_transient_generation_cost_is_included(tmp_path: Path) -> None:
+    campaign_root = tmp_path / "campaign-root"
+    lifecycle_root = campaign_root / "common" / "transient-provider-lifecycles"
+    lifecycle_root.mkdir(parents=True)
+    lifecycle = {
+        "schema": "audit_135m_transient_provider_lifecycle_v1",
+        "status": "TRANSIENT_PROVIDER_PREEMPTED_AND_EXACT_IDS_ABSENT",
+        "run_id": "run-v1-g1",
+        "slot": "v1",
+        "generation": 1,
+        "instance_numeric_id": "123",
+        "boot_disk_numeric_id": "456",
+        "region": "us-central1",
+        "zone": "us-central1-a",
+        "machine_type": "a2-highgpu-4g",
+        "creation_timestamp": "2026-07-17T18:00:00Z",
+        "deletion_completed_at_utc": "2026-07-17T19:00:00Z",
+        "scientific_attempt_started": False,
+        "loss_inspected": False,
+    }
+    (lifecycle_root / "run-v1-g1.json").write_text(json.dumps(lifecycle))
+    total, rows = controller._current_campaign_cost(
+        SimpleNamespace(providers={}), campaign_root
+    )
+    assert total == pytest.approx(
+        controller.PRICE_PER_VM_HOUR["us-central1"]["a2-highgpu-4g"]
+    )
+    assert rows == [
+        {
+            "slot": "v1",
+            "generation": 1,
+            "run_id": "run-v1-g1",
+            "instance_numeric_id": "123",
+            "region": "us-central1",
+            "zone": "us-central1-a",
+            "machine_type": "a2-highgpu-4g",
+            "creation_timestamp": "2026-07-17T18:00:00Z",
+            "ended_at_utc": "2026-07-17T19:00:00Z",
+            "status": "TRANSIENT_PRE_READY_FINAL",
+            "estimated_cost_usd": 7.712,
+            "lifecycle_raw_sha256": controller._sha256_file(
+                lifecycle_root / "run-v1-g1.json"
+            ),
+        }
+    ]
 
 
 def _write_capture_state(path: Path, step: int, values: list[float]) -> None:

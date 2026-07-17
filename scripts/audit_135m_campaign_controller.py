@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import importlib.util
 import json
 import math
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -63,6 +65,8 @@ SPOT_PREEMPTION_RESERVE_FACTOR = 1.25
 WATCHDOG_POLL_SECONDS = 15
 TEARDOWN_RESERVE_SECONDS = 900
 TEARDOWN_RESERVE_FIXED_USD = 0.25
+TRANSIENT_PROVIDER_POLL_SECONDS = 1.0
+TRANSIENT_PROVIDER_DELETE_TIMEOUT_SECONDS = 900
 GLOBAL_A100_CEILING = 16
 PREFERRED_PROBE_A100S = 4
 MAX_PREFERRED_PROBE_WIDTH = 4
@@ -90,6 +94,17 @@ class HardCeilingStop(ControllerError):
 
 class HiddenSurvivorPreempted(ControllerError):
     """The complete hidden batch lost its evaluator before any shared unblind."""
+
+
+class TransientProviderGeneration(ControllerError):
+    """A provider identity existed but vanished before normal evidence registration."""
+
+    def __init__(self, lifecycle: Mapping[str, Any]) -> None:
+        self.lifecycle = dict(lifecycle)
+        super().__init__(
+            "provider created and preempted exact physical generation "
+            f"{self.lifecycle.get('run_id')} before normal registration"
+        )
 
 
 def utc_now() -> str:
@@ -210,6 +225,47 @@ def _generation_cost(
     return seconds / 3600.0 * price
 
 
+def _transient_provider_lifecycle_registry(campaign_root: Path) -> dict[str, Any]:
+    root = campaign_root / "common" / "transient-provider-lifecycles"
+    rows = []
+    if root.is_dir():
+        for path in sorted(root.glob("*.json")):
+            lifecycle = load_json(path)
+            if (
+                lifecycle.get("schema")
+                != "audit_135m_transient_provider_lifecycle_v1"
+                or lifecycle.get("status")
+                != "TRANSIENT_PROVIDER_PREEMPTED_AND_EXACT_IDS_ABSENT"
+                or lifecycle.get("scientific_attempt_started") is not False
+                or lifecycle.get("loss_inspected") is not False
+            ):
+                raise ControllerError(f"invalid transient provider lifecycle: {path}")
+            rows.append(
+                {
+                    "run_id": str(lifecycle["run_id"]),
+                    "slot": str(lifecycle["slot"]),
+                    "generation": int(lifecycle["generation"]),
+                    "instance_numeric_id": str(lifecycle["instance_numeric_id"]),
+                    "boot_disk_numeric_id": str(
+                        lifecycle["boot_disk_numeric_id"]
+                    ),
+                    "path": path.relative_to(campaign_root).as_posix(),
+                    "raw_sha256": _sha256_file(path),
+                }
+            )
+    identities = [(row["slot"], row["generation"]) for row in rows]
+    if len(identities) != len(set(identities)):
+        raise ControllerError("transient provider lifecycle identities are duplicated")
+    return {
+        "schema": "audit_135m_transient_provider_registry_v1",
+        "status": "SEALED_EXACT_ID_EVIDENCE",
+        "scientific_attempt_started": False,
+        "loss_inspected": False,
+        "count": len(rows),
+        "lifecycles": rows,
+    }
+
+
 def _current_campaign_cost(executor, campaign_root: Path) -> tuple[float, list[dict[str, Any]]]:
     rows = []
     total = 0.0
@@ -246,6 +302,36 @@ def _current_campaign_cost(executor, campaign_root: Path) -> tuple[float, list[d
                 "estimated_cost_usd": round(cost, 6),
             }
         )
+    registered = set(executor.providers)
+    transient_registry = _transient_provider_lifecycle_registry(campaign_root)
+    for entry in transient_registry["lifecycles"]:
+        key = (str(entry["slot"]), int(entry["generation"]))
+        if key in registered:
+            raise ControllerError(
+                "transient lifecycle collides with a registered provider generation"
+            )
+        lifecycle = load_json(campaign_root / str(entry["path"]))
+        cost = _generation_cost(
+            lifecycle, ended_at=str(lifecycle["deletion_completed_at_utc"])
+        )
+        total += cost
+        rows.append(
+            {
+                "slot": key[0],
+                "generation": key[1],
+                "run_id": lifecycle["run_id"],
+                "instance_numeric_id": lifecycle["instance_numeric_id"],
+                "region": lifecycle["region"],
+                "zone": lifecycle["zone"],
+                "machine_type": lifecycle["machine_type"],
+                "creation_timestamp": lifecycle["creation_timestamp"],
+                "ended_at_utc": lifecycle["deletion_completed_at_utc"],
+                "status": "TRANSIENT_PRE_READY_FINAL",
+                "estimated_cost_usd": round(cost, 6),
+                "lifecycle_raw_sha256": entry["raw_sha256"],
+            }
+        )
+    rows.sort(key=lambda row: (str(row["slot"]), int(row["generation"])))
     return total, rows
 
 
@@ -285,6 +371,627 @@ def _global_a100_census(backend) -> dict[str, Any]:
         "instances": inventory,
         "queried_at_utc": utc_now(),
     }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _persist_create_only_provider_evidence(
+    *, backend, path: Path, value: Mapping[str, Any], remote_uri: str
+) -> None:
+    created = False
+    if path.exists():
+        if load_json(path) != dict(value):
+            raise ControllerError(f"existing provider sighting differs: {path}")
+    else:
+        backend.pexec.write_json_create_only(path, dict(value))
+        created = True
+    if created:
+        backend.gcloud(
+            "storage",
+            "cp",
+            str(path),
+            remote_uri,
+            "--if-generation-match=0",
+            timeout=900,
+        )
+
+
+def _optimizer_launch_context(command: Sequence[str]) -> dict[str, Any] | None:
+    values = list(command)
+    if "yeto.optimizer_harness" not in values or "launch" not in values:
+        return None
+    launch_index = values.index("launch")
+    if launch_index + 1 >= len(values):
+        raise ControllerError("optimizer harness launch command has no spec path")
+    spec_path = Path(values[launch_index + 1]).resolve()
+    spec = load_json(spec_path)
+    cloud = spec.get("cloud")
+    artifacts = spec.get("artifacts")
+    if not isinstance(cloud, Mapping) or not isinstance(artifacts, Mapping):
+        raise ControllerError("optimizer harness launch spec lacks cloud/artifacts")
+    try:
+        nonce = values[values.index("--ownership-nonce") + 1]
+    except (ValueError, IndexError) as exc:
+        raise ControllerError("optimizer harness launch lacks ownership nonce") from exc
+    labels = cloud.get("labels")
+    if not isinstance(labels, Mapping):
+        raise ControllerError("optimizer harness launch spec lacks labels")
+    run_id = str(spec.get("run_id"))
+    if run_id != str(cloud.get("instance_name")) or labels.get("run-id") != run_id:
+        raise ControllerError("optimizer harness launch run identity differs")
+    return {
+        "spec_path": spec_path,
+        "run_id": run_id,
+        "slot": str(labels.get("logical-slot")),
+        "generation": int(str(labels.get("physical-generation"))),
+        "ownership_nonce": nonce,
+        "zone": str(cloud.get("zone")),
+        "region": str(cloud.get("zone")).rsplit("-", 1)[0],
+        "machine_type": str(cloud.get("machine_type")),
+        "a100_count": int(cloud.get("accelerator_count", 0)),
+        "project": str(cloud.get("project")),
+        "labels": {str(key): str(value) for key, value in labels.items()},
+        "artifact_uri": str(artifacts.get("uri")).rstrip("/"),
+    }
+
+
+def _provider_operation_rows(backend, *, run_id: str, zone: str) -> list[dict[str, Any]]:
+    result = backend.gcloud(
+        "compute",
+        "operations",
+        "list",
+        "--project=model-training-497007",
+        f"--filter=zone:({zone}) AND targetLink~{run_id}",
+        "--format=json",
+        check=False,
+    )
+    if result.returncode or not result.stdout.strip():
+        return []
+    values = json.loads(result.stdout)
+    rows = []
+    for value in values:
+        if not isinstance(value, Mapping):
+            continue
+        rows.append(
+            {
+                field: value[field]
+                for field in (
+                    "name",
+                    "operationType",
+                    "status",
+                    "statusMessage",
+                    "targetId",
+                    "targetLink",
+                    "insertTime",
+                    "startTime",
+                    "endTime",
+                    "error",
+                )
+                if value.get(field) is not None
+            }
+        )
+    return rows
+
+
+def _finalize_transient_provider_generation(
+    *,
+    backend,
+    campaign_root: Path,
+    context: Mapping[str, Any],
+    instance_sighting: Mapping[str, Any],
+    disk_sighting: Mapping[str, Any],
+    original_error: BaseException,
+) -> dict[str, Any]:
+    run_id = str(context["run_id"])
+    zone = str(context["zone"])
+    instance_id = str(instance_sighting["instance_numeric_id"])
+    disk_id = str(disk_sighting["boot_disk_numeric_id"])
+    if instance_id == PROTECTED_INSTANCE_ID:
+        raise ControllerError("transient provider generation is the protected instance")
+    deletion_requested_at: str | None = None
+    delete_returncode: int | None = None
+    deadline = time.time() + TRANSIENT_PROVIDER_DELETE_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        live = backend.describe_instance(run_id, check=False)
+        if live is None:
+            instance_not_found_at = utc_now()
+            break
+        if str(live.get("id")) != instance_id:
+            raise ControllerError("transient instance name rebound to a different exact ID")
+        labels = live.get("labels") or {}
+        if labels.get("ownership-nonce") != context["ownership_nonce"]:
+            raise ControllerError("transient instance ownership nonce differs")
+        if deletion_requested_at is None:
+            deletion_requested_at = utc_now()
+            deleted = backend.gcloud(
+                "compute",
+                "instances",
+                "delete",
+                run_id,
+                "--project=model-training-497007",
+                f"--zone={zone}",
+                "--quiet",
+                check=False,
+            )
+            delete_returncode = deleted.returncode
+        time.sleep(TRANSIENT_PROVIDER_POLL_SECONDS)
+    else:
+        raise ControllerError("transient exact instance did not become NOT_FOUND")
+
+    disk_name = str(disk_sighting["boot_disk_name"])
+    while time.time() < deadline:
+        result = backend.gcloud(
+            "compute",
+            "disks",
+            "describe",
+            disk_name,
+            "--project=model-training-497007",
+            f"--zone={zone}",
+            "--format=json",
+            check=False,
+        )
+        if result.returncode:
+            disk_not_found_at = utc_now()
+            break
+        disk = json.loads(result.stdout)
+        if str(disk.get("id")) != disk_id:
+            raise ControllerError("transient disk name rebound to a different exact ID")
+        time.sleep(TRANSIENT_PROVIDER_POLL_SECONDS)
+    else:
+        raise ControllerError("transient exact disk did not become NOT_FOUND")
+
+    census = _global_a100_census(backend)
+    if any(
+        str(row.get("instance_numeric_id")) == instance_id
+        for row in census["instances"]
+    ):
+        raise ControllerError("transient exact generation still owns an attached A100")
+    operations = _provider_operation_rows(backend, run_id=run_id, zone=zone)
+    lifecycle = {
+        "schema": "audit_135m_transient_provider_lifecycle_v1",
+        "status": "TRANSIENT_PROVIDER_PREEMPTED_AND_EXACT_IDS_ABSENT",
+        "stage_code": str(context["labels"].get("stage")),
+        "run_id": run_id,
+        "slot": str(context["slot"]),
+        "generation": int(context["generation"]),
+        "ownership_nonce": str(context["ownership_nonce"]),
+        "labels": dict(context["labels"]),
+        "region": str(instance_sighting["region"]),
+        "zone": zone,
+        "machine_type": str(instance_sighting["machine_type"]),
+        "provisioning_model": "SPOT",
+        "instance_numeric_id": instance_id,
+        "boot_disk_name": disk_name,
+        "boot_disk_numeric_id": disk_id,
+        "source_image_numeric_id": str(
+            disk_sighting.get("source_image_numeric_id")
+        ),
+        "creation_timestamp": str(instance_sighting["creation_timestamp"]),
+        "first_observed_at_utc": str(instance_sighting["observed_at_utc"]),
+        "deletion_requested_at_utc": deletion_requested_at,
+        "deletion_completed_at_utc": max(instance_not_found_at, disk_not_found_at),
+        "teardown_mode": (
+            "OPERATOR_EXACT_DELETE"
+            if deletion_requested_at is not None and delete_returncode == 0
+            else "PROVIDER_SPOT_PREEMPTION_AUTO_DELETE"
+        ),
+        "provider_not_found_verification": {
+            "instance": {
+                "name": run_id,
+                "provider_id": instance_id,
+                "result": "NOT_FOUND",
+                "verified_at_utc": instance_not_found_at,
+            },
+            "boot_disk": {
+                "name": disk_name,
+                "provider_id": disk_id,
+                "result": "NOT_FOUND",
+                "verified_at_utc": disk_not_found_at,
+            },
+        },
+        "zero_attached_accelerator_proof": {
+            "generation_attached_a100s": 0,
+            "instance_numeric_id": instance_id,
+            "verified_at_utc": str(census["queried_at_utc"]),
+            "global_attached_a100_equivalent": int(
+                census["total_attached_a100_equivalent"]
+            ),
+        },
+        "provider_operations": operations,
+        "provider_spot_preempted": True,
+        "scientific_attempt_started": False,
+        "loss_inspected": False,
+        "original_error_type": type(original_error).__name__,
+        "original_error_detail": str(original_error)[-4000:],
+    }
+    path = (
+        campaign_root
+        / "common"
+        / "transient-provider-lifecycles"
+        / f"{run_id}.json"
+    )
+    _persist_create_only_provider_evidence(
+        backend=backend,
+        path=path,
+        value=lifecycle,
+        remote_uri=(
+            str(context["artifact_uri"])
+            + "/manifests/transient-provider-lifecycle.json"
+        ),
+    )
+    backend.audit_transient_generations.add(
+        (str(context["slot"]), int(context["generation"]))
+    )
+    backend.audit_transient_lifecycle_paths.append(path)
+    backend.note(
+        f"TRANSIENT PROVIDER PREEMPTION PASS {context['slot']}/g"
+        f"{context['generation']}: exact instance {instance_id} NOT_FOUND, exact "
+        f"disk {disk_id} NOT_FOUND, attached A100s=0; the generation is consumed "
+        "and may never be retried."
+    )
+    print(
+        json.dumps(
+            {
+                "event": "TRANSIENT_PROVIDER_EXACT_ID_TEARDOWN_PASS",
+                "slot": context["slot"],
+                "generation": context["generation"],
+                "run_id": run_id,
+                "instance_id": instance_id,
+                "boot_disk_id": disk_id,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    return lifecycle
+
+
+def _install_transient_provider_generation_monitor(
+    *, backend, campaign_root: Path
+) -> None:
+    """Capture exact IDs while a blocking provider create operation is pending."""
+
+    original_run = backend.run
+    backend.audit_transient_generations = set()
+    backend.audit_transient_lifecycle_paths = []
+
+    def run(command, *, check=True, timeout=None):
+        context = _optimizer_launch_context(command)
+        if context is None:
+            return original_run(command, check=check, timeout=timeout)
+        holder: dict[str, Any] = {}
+        stop = threading.Event()
+
+        def observe() -> None:
+            while not stop.is_set():
+                try:
+                    live = backend.describe_instance(context["run_id"], check=False)
+                    if live is None:
+                        stop.wait(TRANSIENT_PROVIDER_POLL_SECONDS)
+                        continue
+                    instance_id = str(live.get("id"))
+                    labels = live.get("labels") or {}
+                    expected_labels = {
+                        **context["labels"],
+                        "ownership-nonce": context["ownership_nonce"],
+                    }
+                    if instance_id == PROTECTED_INSTANCE_ID or any(
+                        labels.get(key) != value
+                        for key, value in expected_labels.items()
+                    ):
+                        raise ControllerError(
+                            "pending provider instance exact ownership differs"
+                        )
+                    machine_type = str(live.get("machineType", "")).rsplit("/", 1)[-1]
+                    scheduling = live.get("scheduling") or {}
+                    if (
+                        machine_type != context["machine_type"]
+                        or scheduling.get("provisioningModel") != "SPOT"
+                        or _instance_a100_count(live) != context["a100_count"]
+                    ):
+                        raise ControllerError(
+                            "pending provider instance shape/Spot identity differs"
+                        )
+                    zone = str(live.get("zone", "")).rsplit("/", 1)[-1]
+                    instance = {
+                        "schema": "audit_135m_pending_instance_sighting_v1",
+                        "run_id": context["run_id"],
+                        "slot": context["slot"],
+                        "generation": context["generation"],
+                        "ownership_nonce": context["ownership_nonce"],
+                        "instance_numeric_id": instance_id,
+                        "region": zone.rsplit("-", 1)[0],
+                        "zone": zone,
+                        "machine_type": machine_type,
+                        "a100_count": context["a100_count"],
+                        "provisioning_model": "SPOT",
+                        "creation_timestamp": str(live["creationTimestamp"]),
+                        "observed_at_utc": utc_now(),
+                        "labels": dict(labels),
+                    }
+                    instance_path = (
+                        campaign_root
+                        / "common"
+                        / "provider-sightings"
+                        / context["run_id"]
+                        / "instance.json"
+                    )
+                    _persist_create_only_provider_evidence(
+                        backend=backend,
+                        path=instance_path,
+                        value=instance,
+                        remote_uri=(
+                            context["artifact_uri"]
+                            + "/provider/pending-instance-sighting.json"
+                        ),
+                    )
+                    holder["instance"] = instance
+                    disk = backend._disk_description(live)
+                    disk_sighting = {
+                        "schema": "audit_135m_pending_disk_sighting_v1",
+                        "run_id": context["run_id"],
+                        "slot": context["slot"],
+                        "generation": context["generation"],
+                        "ownership_nonce": context["ownership_nonce"],
+                        "boot_disk_name": str(disk["name"]),
+                        "boot_disk_numeric_id": str(disk["id"]),
+                        "source_image_numeric_id": str(disk.get("sourceImageId")),
+                        "zone": zone,
+                        "observed_at_utc": utc_now(),
+                    }
+                    disk_path = instance_path.with_name("disk.json")
+                    _persist_create_only_provider_evidence(
+                        backend=backend,
+                        path=disk_path,
+                        value=disk_sighting,
+                        remote_uri=(
+                            context["artifact_uri"]
+                            + "/provider/pending-disk-sighting.json"
+                        ),
+                    )
+                    holder["disk"] = disk_sighting
+                    return
+                except BaseException as exc:
+                    holder["monitor_error"] = exc
+                    return
+
+        monitor = threading.Thread(
+            target=observe,
+            name=f"audit-provider-sighting-{context['run_id']}",
+            daemon=False,
+        )
+        monitor.start()
+        result = None
+        run_error: BaseException | None = None
+        try:
+            result = original_run(command, check=check, timeout=timeout)
+        except BaseException as exc:
+            run_error = exc
+        finally:
+            stop.set()
+            monitor.join()
+        monitor_error = holder.get("monitor_error")
+        if monitor_error is not None and run_error is None:
+            run_error = monitor_error
+        if run_error is None:
+            assert result is not None
+            return result
+        if holder.get("instance") is not None and holder.get("disk") is not None:
+            lifecycle = _finalize_transient_provider_generation(
+                backend=backend,
+                campaign_root=campaign_root,
+                context=context,
+                instance_sighting=holder["instance"],
+                disk_sighting=holder["disk"],
+                original_error=run_error,
+            )
+            if isinstance(run_error, (KeyboardInterrupt, SystemExit)):
+                raise run_error
+            raise TransientProviderGeneration(lifecycle) from run_error
+        operations = _provider_operation_rows(
+            backend, run_id=context["run_id"], zone=context["zone"]
+        )
+        if any(str(row.get("targetId", "")).isdigit() for row in operations):
+            raise ControllerError(
+                "provider operation reports a physical target ID but the pending "
+                "monitor lacks an exact disk sighting; refusing identity reuse"
+            ) from run_error
+        raise run_error
+
+    backend.run = run
+
+
+def _audit_provisional_identity(*, pexec, registry, backend, slot: str):
+    prior = [
+        identity.generation
+        for identity in registry.identities
+        if identity.slot == slot
+    ]
+    prior.extend(
+        generation
+        for seen_slot, generation in backend.audit_transient_generations
+        if seen_slot == slot
+    )
+    generation = max(prior, default=0) + 1
+    if generation == 1:
+        nonce = registry._prebound_nonces[slot]
+    else:
+        used = {
+            identity.ownership_nonce for identity in registry.identities
+        }
+        nonce = secrets.token_hex(16)
+        while nonce in used:
+            nonce = secrets.token_hex(16)
+    return pexec.GenerationIdentity(
+        stage_code=registry.stage_code,
+        study_id=registry.study_id,
+        roster_hash=registry.roster_hash,
+        campaign_attempt=registry.campaign_attempt,
+        slot=slot,
+        generation=generation,
+        ownership_nonce=nonce,
+        campaign_state_root=registry.campaign_state_root,
+        campaign_artifact_root=registry.campaign_artifact_root,
+    )
+
+
+def _audit_provision_loop(
+    *,
+    base,
+    p1,
+    pexec,
+    executor,
+    registry,
+    backend,
+    slot: str,
+    stop_event: threading.Event,
+    science_started: threading.Event,
+    lock: threading.RLock,
+    errors: list[BaseException],
+    required: bool,
+) -> None:
+    identity = _audit_provisional_identity(
+        pexec=pexec, registry=registry, backend=backend, slot=slot
+    )
+    zone_index = 0
+    tries = 0
+    while required or not stop_event.is_set():
+        started = time.time()
+        zone = p1.ZONE_ROTATION[zone_index % len(p1.ZONE_ROTATION)]
+        tries += 1
+        try:
+            p1.cache_zone_render(backend, identity, zone)
+            backend.note(
+                f"ADAPTIVE CAPACITY probe {tries} for {identity.slot}/g"
+                f"{identity.generation}: region {pexec.region_for_zone(zone)}, zone "
+                f"{zone}; exact run ID/nonce retained, Spot 4g-first then proven 1g "
+                "fallback only after pre-creation stockout."
+            )
+            provider = dict(backend.provision(identity))
+            pexec.validate_provider_record(provider, identity.registry_row())
+            with lock:
+                p1.initialize_registered_generation(
+                    base=base,
+                    pexec=pexec,
+                    executor=executor,
+                    registry=registry,
+                    identity=identity,
+                    provider=provider,
+                )
+            ready_at = p1.mark_ready(
+                pexec=pexec,
+                executor=executor,
+                registry=registry,
+                identity=identity,
+                provider=provider,
+                active=False,
+            )
+            with lock:
+                late_optional = (not required) and science_started.is_set()
+                if not late_optional:
+                    executor.active[identity.slot] = identity
+            if late_optional:
+                backend.note(
+                    f"LATE OPTIONAL READY {identity.slot}/g{identity.generation} at "
+                    f"{ready_at}; science already began, so exact-ID zero-attempt "
+                    "teardown starts immediately rather than idle-burning."
+                )
+                executor._finalize_identity(identity, preempted=False)
+            else:
+                backend.note(
+                    f"ADAPTIVE READY {identity.slot}/g{identity.generation}: exact "
+                    f"instance {provider['instance_numeric_id']}, region "
+                    f"{provider['region']}, zone {provider['zone']}, machine "
+                    f"{provider['machine_type']}; available width is now "
+                    f"{len(executor.active)}."
+                )
+            return
+        except TransientProviderGeneration as transient:
+            lifecycle = transient.lifecycle
+            if (
+                lifecycle.get("run_id") != identity.run_id
+                or lifecycle.get("ownership_nonce") != identity.ownership_nonce
+                or int(lifecycle.get("generation", 0)) != identity.generation
+            ):
+                errors.append(ControllerError("transient lifecycle identity differs"))
+                return
+            previous = identity
+            zone_index += 1
+            identity = _audit_provisional_identity(
+                pexec=pexec, registry=registry, backend=backend, slot=slot
+            )
+            backend.note(
+                f"PRE-SCIENTIFIC TRANSIENT PREEMPTION finalized for {slot}: "
+                f"{previous.run_id} is permanently consumed; fresh identity "
+                f"{identity.run_id} continues in the next survival-weighted zone."
+            )
+            continue
+        except Exception as error:
+            text = str(error).casefold()
+            absent = (
+                backend.describe_instance(identity.run_id, check=False) is None
+                and not (base.HARNESS_STATE_ROOT / f"{identity.run_id}.json").exists()
+            )
+            unsupported_zone = (
+                "machine type with name" in text
+                and "does not exist in zone" in text
+                and absent
+            )
+            capacity = base._capacity_stockout(error) or (
+                "operation was canceled by user" in text and absent
+            )
+            if unsupported_zone:
+                zone_index += 1
+                backend.note(
+                    f"ADAPTIVE ZONE-CATALOG SKIP {identity.slot}/g"
+                    f"{identity.generation}: {zone} has no A2 shape; no state/resource "
+                    "was created and the next registered zone is tried immediately."
+                )
+                continue
+            if capacity and absent:
+                zone_index += 1
+                next_zone = p1.ZONE_ROTATION[zone_index % len(p1.ZONE_ROTATION)]
+                backend.note(
+                    f"ADAPTIVE STOCKOUT {identity.slot}/g{identity.generation} try "
+                    f"{tries} in {zone}; exact name/nonce and empty prefix retained; "
+                    f"next zone {next_zone} after the registered {p1.RETRY_SECONDS}s "
+                    "start-to-start cadence."
+                )
+                remaining = max(0.0, started + p1.RETRY_SECONDS - time.time())
+                if required:
+                    time.sleep(remaining)
+                elif stop_event.wait(remaining):
+                    return
+                continue
+            key = (identity.slot, identity.generation)
+            if key in executor.providers and backend.describe_instance(
+                identity.run_id, check=False
+            ) is None:
+                try:
+                    executor._finalize_identity(identity, preempted=True)
+                    identity = _audit_provisional_identity(
+                        pexec=pexec,
+                        registry=registry,
+                        backend=backend,
+                        slot=slot,
+                    )
+                    zone_index += 1
+                    backend.note(
+                        f"PRE-SCIENTIFIC PREEMPTION finalized for {slot}; fresh "
+                        f"identity {identity.run_id} will continue capacity search."
+                    )
+                    continue
+                except Exception as finalize_error:
+                    errors.append(finalize_error)
+                    return
+            errors.append(error)
+            return
 
 
 def _install_launch_census_and_direct_fallback_patch(
@@ -878,9 +1585,10 @@ def _expand_homogeneous_initial_capacity(
             if slot in executor.active:
                 continue
             thread = threading.Thread(
-                target=p1.provision_loop,
+                target=_audit_provision_loop,
                 kwargs={
                     "base": base,
+                    "p1": p1,
                     "pexec": pexec,
                     "executor": executor,
                     "registry": registry,
@@ -1348,8 +2056,9 @@ def _provision_required_replacement(
             f"generation, preferred surviving shape {selected_shape}, first zone "
             f"{p1.ZONE_ROTATION[0]}; no prior scientific state is reusable."
         )
-        p1.provision_loop(
+        _audit_provision_loop(
             base=base,
+            p1=p1,
             pexec=pexec,
             executor=executor,
             registry=registry,
@@ -1447,8 +2156,9 @@ def _provision_cost_eligible_initial_generation(
             f"{p1.ZONE_ROTATION[0]}, Spot 4g-first with reviewed 1g fallback only "
             "after provider-confirmed pre-creation stockout."
         )
-        p1.provision_loop(
+        _audit_provision_loop(
             base=base,
+            p1=p1,
             pexec=pexec,
             executor=executor,
             registry=registry,
@@ -1932,6 +2642,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     backend.private.mkdir(parents=True, exist_ok=True)
     _install_operator_kill_lifecycle_patch(backend)
+    _install_transient_provider_generation_monitor(
+        backend=backend, campaign_root=campaign_root
+    )
     _install_launch_census_and_direct_fallback_patch(
         base=base, backend=backend, campaign_root=campaign_root
     )
@@ -1992,9 +2705,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     try:
         for slot in initial_slots:
             thread = threading.Thread(
-                target=p1.provision_loop,
+                target=_audit_provision_loop,
                 kwargs={
                     "base": base,
+                    "p1": p1,
                     "pexec": pexec,
                     "executor": executor,
                     "registry": registry,
@@ -2385,6 +3099,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 controller_error = ceiling_error
         if controller_error is not None:
             completed = False
+        transient_registry = _transient_provider_lifecycle_registry(campaign_root)
+        transient_registry_path = (
+            campaign_root / "campaign" / "transient-provider-registry.json"
+        )
+        write_json_atomic(transient_registry_path, transient_registry)
         campaign_cost = {
             "schema": "audit_135m_campaign_cost_v1",
             "stage_code": stage_code,
@@ -2392,6 +3111,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "completed": completed,
             "estimated_cost_usd": round(current_cost, 6),
             "generations": generation_costs,
+            "transient_provider_registry": {
+                "path": transient_registry_path.relative_to(campaign_root).as_posix(),
+                "raw_sha256": _sha256_file(transient_registry_path),
+                "count": int(transient_registry["count"]),
+            },
             "final_zero_census": census,
         }
         campaigns = list(spend_ledger["campaigns"])
