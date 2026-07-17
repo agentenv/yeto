@@ -59,8 +59,17 @@ PRICE_PER_VM_HOUR = {
     "us-west1": {"a2-highgpu-1g": 1.928, "a2-highgpu-4g": 7.712},
     "us-central1": {"a2-highgpu-1g": 1.928, "a2-highgpu-4g": 7.712},
 }
-CELL_HOURS = {8: 0.90, 16: 0.566, 64: 0.238, 256: 0.163, 512: 0.145}
+CELL_HOURS = {
+    8: 1.001183440327381,
+    16: 0.5683582358333333,
+    64: 0.24238701958333334,
+    256: 0.16299781333333335,
+    512: 0.14866439438988095,
+}
 FINITE_KERNEL_EXTRA_HOURS = {8: 0.40, 16: 0.25, 64: 0.12, 256: 0.06, 512: 0.04}
+# The amended hard ceilings are lower_bound * 1.30.  This reviewed remaining-work
+# forecast keeps 1.25 so the last five points remain available for realized boot,
+# transient-provider, and exact-teardown burn rather than being double-counted.
 SPOT_PREEMPTION_RESERVE_FACTOR = 1.25
 WATCHDOG_POLL_SECONDS = 15
 TEARDOWN_RESERVE_SECONDS = 900
@@ -71,13 +80,13 @@ GLOBAL_A100_CEILING = 16
 PREFERRED_PROBE_A100S = 4
 MAX_PREFERRED_PROBE_WIDTH = 4
 FUTURE_STAGE_CELL_COUNTS = {
-    "a1d": {16: 32, 256: 32},
+    "a1d": {16: 36, 256: 36},
     "a1x": {16: 32, 256: 32},
     "a1c": {},
     "a3k": {8: 10, 512: 12},
     "a3r0": {8: 2, 512: 2},
     "a3x": {},
-    "a4d": {16: 48, 256: 48},
+    "a4d": {16: 56, 256: 56},
     "a4b": {16: 48, 256: 48},
     "a4c": {16: 24, 256: 24},
     "a4x": {},

@@ -1,7 +1,23 @@
 {
   "schema": "tuned_baseline_audit_prereg_v1",
-  "revision": "1.0",
+  "revision": "1.1",
   "registered_at_date": "2026-07-16",
+  "amended_at_date": "2026-07-17",
+  "revision_history": [
+    {
+      "revision": "1.0",
+      "status": "superseded_by_revision_1.1_ceiling_amendment",
+      "superseded_git_sha": "c40d525ee509d566c7dd7c9c6e94fa4083a270a5",
+      "prereg_json_sha256": "a2eb92161a324f161fcdb6d808ae0a9e2309a4bb0dd3924d78122d4d1acad62a",
+      "prereg_md_sha256": "7758ff4a54627bde8418bdd26b93f0058bf7ff917e22805155274f9169b187f0",
+      "spot_preemption_reserve_fraction": 0.25,
+      "hard_ceilings_usd": {
+        "A1": 75.0,
+        "A3": 40.0,
+        "A4": 140.0
+      }
+    }
+  ],
   "title": "A tuned-baseline audit of outer optimization for communication-efficient training",
   "status": {
     "prospective_blocks": [
@@ -401,17 +417,101 @@
   "costs": {
     "currency": "USD",
     "spot_preemption_reserve_fraction": 0.25,
+    "hard_ceiling_reserve_fraction": 0.3,
+    "remaining_stage_ceiling_amendment": {
+      "authorization": "operator ceiling-amendment authorization A, 2026-07-17",
+      "superseded_git_sha": "c40d525ee509d566c7dd7c9c6e94fa4083a270a5",
+      "excluded_prior_a1_infrastructure_spend_usd": 9.231503,
+      "excluded_prior_spend_reason": "two aborted pre-science launch families bought only the now-landed transient-provider isolation and fail-fast cost-guard fixes; operator authorized fresh science budgets",
+      "timing_source": {
+        "description": "sealed cumulative P1 adaptive phase manifest; completed non-injected a2-highgpu-1g attempts of at least five minutes",
+        "sha256": "8286d70fe11e47eed2e43f7fda4a9254370d9f20518ffa75aa22fc7b13789536",
+        "sample_counts": {
+          "H16": 22,
+          "H64": 22,
+          "H256": 13
+        },
+        "median_arm_wall_minutes": {
+          "H16": 34.10149415,
+          "H64": 14.543221175,
+          "H256": 9.7798688
+        },
+        "horizon_extrapolation": {
+          "model": "minutes(H)=a+b/H",
+          "a_minutes": 8.1079407625,
+          "b_minutes_times_H": 415.70452525714285,
+          "H8_minutes": 60.071006419642856,
+          "H512_minutes": 8.919863663392857
+        }
+      },
+      "cheapest_survivable_shape": {
+        "provider": "gcp",
+        "market": "spot",
+        "machine_type": "a2-highgpu-1g",
+        "region": "us-west4",
+        "price_per_vm_hour_usd": 1.817
+      },
+      "reserve_semantics": {
+        "remaining_work_forecast_factor": 1.25,
+        "hard_ceiling_factor": 1.3,
+        "final_five_percentage_points": "reserved for realized boot, transient-provider, and exact-teardown burn"
+      },
+      "stage_arithmetic": {
+        "A1": {
+          "survivable_work": "24 development + up to 8 paired boundary-extension + 64 confirmation arms",
+          "arm_counts_by_horizon": {
+            "H16": 48,
+            "H256": 48
+          },
+          "a100_hours_lower_bound": 35.105090360000005,
+          "lower_bound_usd": 63.78594918412001,
+          "lower_bound_times_1p30_usd": 82.92173393935602,
+          "hard_ceiling_usd_rounded_up_to_cent": 82.93
+        },
+        "A3": {
+          "survivable_work": "18 frontier + up to 4 boundary-extension + 3 mechanical matched-eta recapture arms",
+          "arm_counts_by_horizon": {
+            "H8": 10,
+            "H16": 1,
+            "H64": 1,
+            "H256": 1,
+            "H512": 12
+          },
+          "finite_kernel_extra_hours": {
+            "H16": 0.25,
+            "H64": 0.12,
+            "H256": 0.06
+          },
+          "a100_hours_lower_bound": 13.19955020470238,
+          "lower_bound_usd": 23.983582721944224,
+          "lower_bound_times_1p30_usd": 31.178657538527492,
+          "hard_ceiling_usd_rounded_up_to_cent": 31.18
+        },
+        "A4": {
+          "survivable_work": "48 development + up to 16 paired boundary-extension + 48 initial confirmation + 48 sign-blind precision-expansion arms",
+          "arm_counts_by_horizon": {
+            "H16": 80,
+            "H256": 80
+          },
+          "a100_hours_lower_bound": 58.50848393333334,
+          "lower_bound_usd": 106.30991530686667,
+          "lower_bound_times_1p30_usd": 138.20288989892668,
+          "hard_ceiling_usd_rounded_up_to_cent": 138.21
+        }
+      }
+    },
     "blocks": {
-      "A1": {"planned_arms": 88, "a100_hours_with_reserve": 40, "range_usd": [35, 60], "hard_ceiling_usd": 75},
+      "A1": {"planned_arms": 88, "max_arms_with_boundary_extension": 96, "a100_hours_lower_bound": 35.105090360000005, "lower_bound_usd": 63.78594918412001, "range_usd": [63.78594918412001, 79.73243648015001], "hard_ceiling_usd": 82.93},
       "A2": {"planned_arms": 48, "max_arms": 72, "range_usd": [65, 125], "hard_ceiling_usd": 160},
-      "A3": {"planned_extension_arms": 18, "a100_hours_range": [10, 20], "range_usd": [10, 25], "hard_ceiling_usd": 40},
-      "A4": {"planned_arms": 96, "max_arms": 144, "a100_hours_range": [35, 70], "range_usd": [40, 110], "hard_ceiling_usd": 140},
+      "A3": {"planned_extension_arms": 18, "max_frontier_arms_with_boundary_extension": 22, "max_arms_with_mechanical_recapture": 25, "a100_hours_lower_bound": 13.19955020470238, "lower_bound_usd": 23.983582721944224, "range_usd": [23.983582721944224, 29.97947840243028], "hard_ceiling_usd": 31.18},
+      "A4": {"planned_arms": 96, "max_arms_with_precision_expansion": 144, "max_arms_with_boundary_and_precision_expansion": 160, "a100_hours_lower_bound": 58.50848393333334, "lower_bound_usd": 106.30991530686667, "range_usd": [106.30991530686667, 132.88739413358334], "hard_ceiling_usd": 138.21},
       "A5": {"a100_hours_range": [90, 180], "range_usd": [100, 250], "hard_ceiling_usd": 320},
       "A6_OMR": {"planned_runs": 48, "max_runs": 72, "a100_equivalent_hours_range": [120, 360], "range_usd": [250, 800], "hard_ceiling_usd": 1000},
       "A6_SCAFFOLD_LITE": {"new_compute": 0, "range_usd": [0, 0], "hard_ceiling_usd": 0},
       "A6_SLOWMO": {"planned_runs": 40, "a100_hours_range": [160, 480], "range_usd": [180, 600], "hard_ceiling_usd": 750}
     },
-    "program_range_usd": [680, 1970],
+    "program_range_usd": [789.079447212931, 2017.5993090161637],
+    "sum_of_block_hard_ceilings_usd": 2482.32,
     "program_hard_ceiling_usd": 2485,
     "unused_budget_transfer_forbidden_without_amendment": true
   }

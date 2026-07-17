@@ -28,8 +28,8 @@ from scripts import run_phase_map as phase
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PREREG_JSON = REPO_ROOT / "experiment-specs/tuned-baseline-audit-prereg.json"
 PREREG_MD = REPO_ROOT / "experiment-specs/tuned-baseline-audit-prereg.md"
-PREREG_JSON_SHA256 = "a2eb92161a324f161fcdb6d808ae0a9e2309a4bb0dd3924d78122d4d1acad62a"
-PREREG_MD_SHA256 = "7758ff4a54627bde8418bdd26b93f0058bf7ff917e22805155274f9169b187f0"
+PREREG_JSON_SHA256 = "bf66f7b07fb3b5a8ed531320e4ca505df51f75d4d6fd22aa4ab6edc3eafe7bed"
+PREREG_MD_SHA256 = "f0fec5d8e2b479136c473a1123acc42047f598aeb8839701d25f994ed7ddcae3"
 
 STAGE_CODES = frozenset(
     {
@@ -69,7 +69,7 @@ STAGE_PHASE = {
     "a4c": "confirmation_initial",
     "a4x": "confirmation_precision_expansion",
 }
-HARD_CEILINGS = {"A1": 75.0, "A3": 40.0, "A4": 140.0}
+HARD_CEILINGS = {"A1": 82.93, "A3": 31.18, "A4": 138.21}
 
 MODEL_ID = "HuggingFaceTB/SmolLM2-135M"
 MODEL_REVISION = "93efa2f097d58c2a74874c7e644dbc9b0cee75a2"
@@ -218,7 +218,7 @@ def load_authority() -> dict[str, Any]:
     authority = read_object(PREREG_JSON, "audit preregistration")
     if (
         authority.get("schema") != "tuned_baseline_audit_prereg_v1"
-        or authority.get("revision") != "1.0"
+        or authority.get("revision") != "1.1"
         or authority.get("status", {}).get("no_controller_or_optimizer_zoo_authority")
         is not True
     ):

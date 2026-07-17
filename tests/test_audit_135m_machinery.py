@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from scripts import audit_135m_contract as audit
 from scripts import audit_135m_campaign_controller as controller
 from scripts import audit_135m_kernel_law as kernel
 from scripts import audit_135m_kernel_capture as capture
@@ -18,6 +19,39 @@ from scripts import audit_135m_phase_manifest as promotion
 from scripts import audit_135m_report as final_report
 from scripts import audit_135m_replay as replay
 from scripts import run_parallel_phase_map as parallel
+
+
+def test_ceiling_amendment_covers_full_survivable_stage_paths() -> None:
+    authority = audit.load_authority()
+    price = controller.PRICE_PER_VM_HOUR["us-west4"]["a2-highgpu-1g"]
+    hours = {
+        "A1": 48 * controller.CELL_HOURS[16]
+        + 48 * controller.CELL_HOURS[256],
+        "A3": 10 * controller.CELL_HOURS[8]
+        + 12 * controller.CELL_HOURS[512]
+        + controller.CELL_HOURS[16]
+        + controller.FINITE_KERNEL_EXTRA_HOURS[16]
+        + controller.CELL_HOURS[64]
+        + controller.FINITE_KERNEL_EXTRA_HOURS[64]
+        + controller.CELL_HOURS[256]
+        + controller.FINITE_KERNEL_EXTRA_HOURS[256],
+        "A4": 80 * controller.CELL_HOURS[16]
+        + 80 * controller.CELL_HOURS[256],
+    }
+    for stage, stage_hours in hours.items():
+        block = authority["costs"]["blocks"][stage]
+        lower_bound = stage_hours * price
+        assert block["a100_hours_lower_bound"] == pytest.approx(stage_hours)
+        assert block["lower_bound_usd"] == pytest.approx(lower_bound)
+        assert block["range_usd"][1] == pytest.approx(
+            lower_bound * controller.SPOT_PREEMPTION_RESERVE_FACTOR
+        )
+        assert block["hard_ceiling_usd"] >= lower_bound * 1.30
+        assert block["hard_ceiling_usd"] - lower_bound * 1.30 < 0.01
+
+    assert controller.FUTURE_STAGE_CELL_COUNTS["a1d"] == {16: 36, 256: 36}
+    assert controller.FUTURE_STAGE_CELL_COUNTS["a3k"] == {8: 10, 512: 12}
+    assert controller.FUTURE_STAGE_CELL_COUNTS["a4d"] == {16: 56, 256: 56}
 
 
 def test_deferred_evaluation_modes_are_exact() -> None:

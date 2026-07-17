@@ -29,7 +29,7 @@ R0_ROOT = Path("/private/tmp/yeto-p1r0-launcher/p1r0-session")
 R0_BUILDER = R0_ROOT / "build_launch_packet.py"
 R0_WORKER = R0_ROOT / "p1r0_vm_worker.py"
 BUCKET = "gs://yeto-exp2-52-model-training-497007"
-PREREG_SHA256 = "a2eb92161a324f161fcdb6d808ae0a9e2309a4bb0dd3924d78122d4d1acad62a"
+PREREG_SHA256 = "bf66f7b07fb3b5a8ed531320e4ca505df51f75d4d6fd22aa4ab6edc3eafe7bed"
 PREREG_PATH = "experiment-specs/tuned-baseline-audit-prereg.json"
 MODEL_URI = (
     "gs://yeto-exp2-52-model-training-497007/prelaunch/"
@@ -312,9 +312,9 @@ def _registered_cost_forecast(
 ) -> dict[str, Any]:
     audit_stage = {"a1": "A1", "a3": "A3", "a4": "A4"}[stage_code[:2]]
     ranges = {
-        "A1": (35.0, 60.0),
-        "A3": (10.0, 25.0),
-        "A4": (40.0, 110.0),
+        "A1": (63.78594918412001, 79.73243648015001),
+        "A3": (23.983582721944224, 29.97947840243028),
+        "A4": (106.30991530686667, 132.88739413358334),
     }
     low, high = ranges[audit_stage]
     if high >= hard_ceiling:
@@ -327,6 +327,7 @@ def _registered_cost_forecast(
         "registered_range_usd": [low, high],
         "registered_range_includes_spot_preemption_reserve": True,
         "registered_spot_preemption_reserve_fraction": 0.25,
+        "registered_hard_ceiling_reserve_fraction": 0.30,
         "hard_ceiling_usd": hard_ceiling,
         "forecast_upper_usd": high,
         "ceiling_headroom_usd": hard_ceiling - high,

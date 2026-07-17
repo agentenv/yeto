@@ -2,7 +2,7 @@
 
 **Registered thesis:** *A tuned-baseline audit of outer optimization for communication-efficient training*
 
-**Revision:** audit pivot v1.0, 2026-07-16
+**Revision:** audit pivot v1.1 ceiling amendment, 2026-07-17
 
 **Status:** prospective for A1, A2, A3, A4, A5, A6(i), and A6(iii); A6(ii) is an explicitly outcome-known citation of a sealed historical result and contributes no new confirmatory seed.
 
@@ -11,6 +11,17 @@
 ## 0. Supersession, preserved history, and scope
 
 This document supersedes the prior prospective mechanism/controller program in `EXPERIMENT-PROGRAM.md`, whose exact pre-pivot bytes are preserved at `history/EXPERIMENT-PROGRAM-pre-audit-2026-07-16.md` with SHA-256 `7ece64ac0c828b183266c451b61c196dbab89762d95703bcf820ca01f7f8e958`.
+
+### 0.1 Ceiling-amendment revision history
+
+Revision 1.1 changes only the prospective cost authority for the still-unrun 135M stages A1, A3, and A4, plus the machinery hashes and cost forecasts needed to enforce that authority. It does not change a scientific cell, seed, command, outcome rule, gate, retry rule, blinding rule, or the `$2,485` program hard ceiling.
+
+| Revision | Status | Exact source identity | A1 ceiling | A3 ceiling | A4 ceiling |
+|---|---|---|---:|---:|---:|
+| v1.0 | superseded for remaining-stage cost authority | Git `c40d525ee509d566c7dd7c9c6e94fa4083a270a5`; JSON SHA-256 `a2eb92161a324f161fcdb6d808ae0a9e2309a4bb0dd3924d78122d4d1acad62a`; Markdown SHA-256 `7758ff4a54627bde8418bdd26b93f0058bf7ff917e22805155274f9169b187f0` | `$75.00` | `$40.00` | `$140.00` |
+| v1.1 | current ceiling amendment | operator authorization A, 2026-07-17 | `$82.93` | `$31.18` | `$138.21` |
+
+The `$9.231503` spent on the two retired pre-science A1 launch families remains preserved in the operational history but is excluded from the fresh amended science budgets by explicit operator authorization. It purchased only the subsequently landed transient-provider isolation and fail-fast cost-guard fixes. It does not authorize deletion or mutation of any retired prefix.
 
 The supersession is scientific, not archival:
 
@@ -426,19 +437,55 @@ SlowMo keeps `alpha=1,beta=.7`; no beta search is allowed. Two development seeds
 
 ## 7. Cost registry
 
-Costs are prospective planning ranges, not outcome-dependent caps. The 135M estimates are anchored to completed P1 scientific runtimes on one packed A100: median about `0.566` h at H16, `0.238` h at H64, and `0.163` h at H256. The 9B estimate uses the sealed empirical record of about `$8` for six LoRA arms. A6 paper-faithful rows require a pre-launch timing canary; their dollar ranges therefore remain wider. All rows include a 25% Spot/preemption reserve.
+Costs are prospective planning ranges, not outcome-dependent caps. Revision 1.1 re-costs A1, A3, and A4 from the sealed cumulative P1 adaptive phase manifest, SHA-256 `8286d70fe11e47eed2e43f7fda4a9254370d9f20518ffa75aa22fc7b13789536`. The timing sample includes only completed, non-injected `a2-highgpu-1g` attempts lasting at least five minutes. It contains 22 valid H16 arms, 22 H64 arms, and 13 H256 arms. Their median wall times are:
+
+| H | Median one-1g arm wall time |
+|---:|---:|
+| 16 | `34.10149415 min = 0.5683582358 h` |
+| 64 | `14.543221175 min = 0.2423870196 h` |
+| 256 | `9.7798688 min = 0.1629978133 h` |
+
+H8 and H512 are not present as completed historical arms. The prospective extrapolation is frozen before either endpoint is run: least squares on the three medians with `minutes(H)=a+b/H` gives `a=8.1079407625`, `b=415.7045252571`, H8 `60.0710064196 min = 1.0011834403 h`, and H512 `8.9198636634 min = 0.1486643944 h`.
+
+The cheapest registered survival-weighted option is Spot `a2-highgpu-1g` in `us-west4` at `$1.817/VM-h`. The lower bound includes every registered conditional science branch needed to prevent a later loss-blind boundary, recapture, or precision trigger from becoming mechanically unaffordable. The hard ceiling is exactly the lower bound times `1.30`, rounded upward to the cent. The reviewed remaining-work guard retains its 25% factor; the final five percentage points cover realized boot, transient-provider, and exact-teardown burn.
+
+The arithmetic is:
+
+```text
+A1 hours = 48*0.5683582358 + 48*0.1629978133
+         = 35.1050903600 h
+A1 lower = 35.1050903600*$1.817 = $63.7859491841
+A1 cap   = $63.7859491841*1.30 = $82.9217339394 -> $82.93
+
+A3 hours = 10*1.0011834403 + 12*0.1486643944
+         + (0.5683582358+0.25)
+         + (0.2423870196+0.12)
+         + (0.1629978133+0.06)
+         = 13.1995502047 h
+A3 lower = 13.1995502047*$1.817 = $23.9835827219
+A3 cap   = $23.9835827219*1.30 = $31.1786575385 -> $31.18
+
+A4 hours = 80*0.5683582358 + 80*0.1629978133
+         = 58.5084839333 h
+A4 lower = 58.5084839333*$1.817 = $106.3099153069
+A4 cap   = $106.3099153069*1.30 = $138.2028898989 -> $138.21
+```
+
+The 9B estimate still uses the sealed empirical record of about `$8` for six LoRA arms. A6 paper-faithful rows still require a pre-launch timing canary, so their dollar ranges remain wider.
 
 | Block | Planned new work | Planned accelerator budget | Spot-dollar planning range | Hard block ceiling |
 |---|---:|---:|---:|---:|
-| A1 | 24 development + 64 confirmation = 88 full-training arms | about 40 A100-h incl. reserve | `$35–60` | `$75` |
+| A1 | 24 development + up to 8 paired boundary-extension + 64 confirmation = max 96 arms | `35.1050903600` A100-h lower bound | `$63.7859491841–79.7324364802` | `$82.93` |
 | A2 | 24 tuning + 24 initial confirmation = 48 9B LoRA arms; max 72 with precision expansion | empirical arm-cost basis | `$65–125` | `$160` |
-| A3 | 18 extension arms; up to 3 matched-eta recaptures and one boundary pair | `10–20` A100-h | `$10–25` | `$40` |
-| A4 | 48 tuning + 48 initial confirmation = 96 arms across M1/M4; max 144 | `35–70` A100-h | `$40–110` | `$140` |
+| A3 | 18 frontier arms; max 22 with boundary extension and 25 with mechanical recaptures | `13.1995502047` A100-h lower bound including capture overhead | `$23.9835827219–29.9794784024` | `$31.18` |
+| A4 | 48 development + up to 16 boundary-extension + 48 initial confirmation + 48 precision expansion = max 160 arms | `58.5084839333` A100-h lower bound | `$106.3099153069–132.8873941336` | `$138.21` |
 | A5 | 16 parent trajectories, 1,536 one-step branch evaluations across two scale panels, 768 scale-matched twelve-commit continuations, frozen HVP subset | `90–180` A100-h | `$100–250` | `$320` |
 | A6(i) OMR | 24 tuning + 24 initial confirmation = 48 two-replica runs; max 72 | `120–360` A100-equivalent h after canary | `$250–800` | `$1,000` |
 | A6(ii) SCAFFOLD-lite | sealed citation only | `0` | `$0` | `$0` |
 | A6(iii) SlowMo | 20 tuning + 20 confirmation = 40 16-A100 packed distributed runs | `160–480` A100-h after canary | `$180–600` | `$750` |
-| **Program total** | excludes already sealed evidence | roughly `455–1,150` A100-equivalent h plus empirical 9B arm costs | **`$680–1,970`** | **`$2,485`** |
+| **Program total** | excludes already sealed evidence and the operator-excluded `$9.231503` A1 infrastructure burn | updated 135M lower bounds plus unchanged later-stage estimates | **`$789.0794472129–2,017.5993090162`** | **`$2,485`** |
+
+The amended sum of individual block hard ceilings is `$2,482.32`, leaving `$2.68` unallocated beneath the unchanged program ceiling. That remainder is not a cross-stage transfer authorization.
 
 No stage may borrow another stage’s unused ceiling without a prospective amendment. A6(i) and A6(iii) can be independently killed for reproducibility or cost before scientific outcomes; neither is required to interpret A1–A5.
 

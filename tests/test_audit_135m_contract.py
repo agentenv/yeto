@@ -632,7 +632,7 @@ def test_audit_runtime_authorization_binds_ceiling_and_all_launch_hashes(tmp_pat
         "audit_135m_design_contract_hash": roster[
             "audit_135m_design_contract_hash"
         ],
-        "hard_ceiling_usd": 75.0,
+        "hard_ceiling_usd": audit.HARD_CEILINGS["A1"],
         "spot_only": True,
         "maximum_attached_a100_equivalent": 16,
         "max_idle_before_science_seconds": 600,
@@ -644,7 +644,7 @@ def test_audit_runtime_authorization_binds_ceiling_and_all_launch_hashes(tmp_pat
         parallel_digest=parallel.parallel_plan_hash(plan),
         bound_digest=parallel.canonical_sha256(bound),
         scientific_digest=scientific["randomization_plan_hash"],
-        hard_ceiling_usd=75.0,
+        hard_ceiling_usd=audit.HARD_CEILINGS["A1"],
         authorization=authorization,
     ) == parallel.canonical_sha256(authorization)
     with pytest.raises(parallel.LifecycleError, match="exact runtime authorization"):
@@ -655,8 +655,11 @@ def test_audit_runtime_authorization_binds_ceiling_and_all_launch_hashes(tmp_pat
             parallel_digest=parallel.parallel_plan_hash(plan),
             bound_digest=parallel.canonical_sha256(bound),
             scientific_digest=scientific["randomization_plan_hash"],
-            hard_ceiling_usd=75.0,
-            authorization={**authorization, "hard_ceiling_usd": 75.01},
+            hard_ceiling_usd=audit.HARD_CEILINGS["A1"],
+            authorization={
+                **authorization,
+                "hard_ceiling_usd": audit.HARD_CEILINGS["A1"] + 0.01,
+            },
         )
 
 
