@@ -65,6 +65,13 @@ def parse_args(argv=None):
     )
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument(
+        "--base-quantization",
+        choices=["none", "nf4"],
+        default="none",
+        help="frozen-base storage for LoRA; nf4 enables bitsandbytes QLoRA "
+        "and requires CUDA with --shard ddp",
+    )
+    p.add_argument(
         "--shard",
         choices=["ddp", "fsdp"],
         default="ddp",
@@ -192,15 +199,42 @@ def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
         return factory.from_pretrained(model_id, **kwargs)
 
 
+def _prepare_nf4_base_for_lora(model) -> None:
+    """Freeze an NF4 base without expanding large bf16 tensors to fp32.
+
+    PEFT's generic k-bit helper casts every non-quantized bf16 parameter to
+    fp32. On large-vocabulary models that doubles several gigabytes of frozen
+    embeddings and lm-head weights. Only normalization weights need the fp32
+    stability treatment; checkpointing input gradients are enabled later,
+    after LoRA attachment.
+    """
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    for module in model.modules():
+        if "norm" in module.__class__.__name__.lower():
+            module.to(torch.float32)
+
+
 def load_model_and_tokenizer(args, device):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from .models import resolve
 
-    # The base is always loaded in bf16 (all-float, so FSDP2 shards it and
-    # gradients flow through it). Natively-quantized checkpoints (fp8 MoE,
-    # mxfp4) are an inference format whose forward kernels have no backward,
-    # so training loads bf16 weights and never the packed low-precision ones.
+    base_quantization = getattr(args, "base_quantization", "none")
+    if base_quantization != "none":
+        if args.tuning != "lora":
+            raise ValueError("--base-quantization requires --tuning lora")
+        if device.type != "cuda":
+            raise ValueError("--base-quantization nf4 requires CUDA")
+        if args.shard != "ddp":
+            raise ValueError(
+                "--base-quantization nf4 keeps one frozen base per rank; "
+                "use --shard ddp"
+            )
+
+    # The normal path loads the base in bf16 (all-float, so FSDP2 can shard
+    # it). NF4 is an explicit QLoRA profile for islands where the frozen bf16
+    # base does not fit on one GPU; the trainable adapters remain fp32.
     model_id = resolve(args.model)
     # fsdp+full: originals stay fp32 (uniform dtype for flat-param groups,
     # fp32 optimizer state) and MixedPrecision computes/communicates in bf16.
@@ -213,11 +247,35 @@ def load_model_and_tokenizer(args, device):
     else:
         dtype = torch.bfloat16
     tokenizer = _from_pretrained_offline_first(AutoTokenizer, model_id, trust_remote_code=True)
-    model = _from_pretrained_offline_first(
-        AutoModelForCausalLM, model_id, torch_dtype=dtype, trust_remote_code=True
-    )
+    if base_quantization == "nf4":
+        from transformers import BitsAndBytesConfig
+
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        model = _from_pretrained_offline_first(
+            AutoModelForCausalLM,
+            model_id,
+            quantization_config=quantization_config,
+            device_map={"": device.index if device.index is not None else 0},
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )
+    else:
+        model = _from_pretrained_offline_first(
+            AutoModelForCausalLM,
+            model_id,
+            torch_dtype=dtype,
+            trust_remote_code=True,
+        )
     if args.tuning == "lora":
         from peft import LoraConfig, get_peft_model
+
+        if base_quantization == "nf4":
+            _prepare_nf4_base_for_lora(model)
 
         lora = LoraConfig(
             r=args.lora_r,
@@ -228,7 +286,8 @@ def load_model_and_tokenizer(args, device):
             task_type="CAUSAL_LM",
         )
         model = get_peft_model(model, lora)
-    model.to(device)
+    if base_quantization == "none":
+        model.to(device)
     return model, tokenizer
 
 

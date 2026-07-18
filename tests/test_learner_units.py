@@ -199,6 +199,43 @@ def test_learner_accepts_explicit_training_seed():
     assert args.seed == 29
 
 
+def test_learner_quantization_default_is_unchanged():
+    from yeto.learner import parse_args
+
+    args = parse_args(
+        [
+            "--model", "org/model",
+            "--data", "rows.jsonl",
+            "--syncer", "none",
+            "--learner-id", "0",
+            "--num-learners", "1",
+        ]
+    )
+    assert args.base_quantization == "none"
+
+
+def test_nf4_preparation_freezes_base_and_only_casts_norms():
+    from yeto.learner import _prepare_nf4_base_for_lora
+
+    class RMSNorm(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(4, dtype=torch.bfloat16))
+
+    model = torch.nn.ModuleDict(
+        {
+            "embed": torch.nn.Embedding(8, 4, dtype=torch.bfloat16),
+            "norm": RMSNorm(),
+            "head": torch.nn.Linear(4, 8, bias=False, dtype=torch.bfloat16),
+        }
+    )
+    _prepare_nf4_base_for_lora(model)
+    assert all(not parameter.requires_grad for parameter in model.parameters())
+    assert model["norm"].weight.dtype == torch.float32
+    assert model["embed"].weight.dtype == torch.bfloat16
+    assert model["head"].weight.dtype == torch.bfloat16
+
+
 def test_benchmark_seed_pairs_matching_global_rank():
     from yeto.learner import _derived_training_seed, _stream_seed
 
