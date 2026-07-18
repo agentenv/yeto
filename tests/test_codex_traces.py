@@ -1,6 +1,11 @@
 import json
 
-from yeto.codex_traces import convert_paths, row_from_atif, row_from_session_events
+from yeto.codex_traces import (
+    _openai_teacher_backfill,
+    convert_paths,
+    row_from_atif,
+    row_from_session_events,
+)
 
 
 def test_atif_trajectory_becomes_yeto_chat_row():
@@ -70,6 +75,89 @@ def test_failed_atif_is_filtered_by_default():
     assert row_from_atif(doc, include_failures=True)["messages"][1]["content"] == "failed"
 
 
+def test_include_thinking_keeps_plain_text_reasoning():
+    doc = {
+        "schema_version": "ATIF-v1.6",
+        "steps": [
+            {"source": "user", "message": "task"},
+            {
+                "source": "agent",
+                "message": "answer",
+                "extra": {"thinking": "plain plan"},
+            },
+        ],
+        "extra": {"success": True},
+    }
+
+    row = row_from_atif(doc, include_thinking=True)
+
+    assert row["messages"][1]["content"] == "answer\n\n[thinking]\nplain plan"
+    assert "reasoning_status" not in row["metadata"]
+
+
+def test_include_thinking_skips_encrypted_reasoning():
+    doc = {
+        "schema_version": "ATIF-v1.6",
+        "steps": [
+            {"source": "user", "message": "task"},
+            {
+                "source": "agent",
+                "message": "answer",
+                "extra": {
+                    "thinking": {
+                        "encrypted": True,
+                        "ciphertext": "abc123",
+                        "algorithm": "test",
+                    }
+                },
+            },
+        ],
+        "extra": {"success": True},
+    }
+
+    row = row_from_atif(doc, include_thinking=True)
+
+    assert row["messages"][1]["content"] == "answer"
+    assert "ciphertext" not in row["messages"][1]["content"]
+    assert row["metadata"]["reasoning_status"] == "encrypted_skipped"
+    assert row["metadata"]["encrypted_reasoning_skipped"] == 1
+
+
+def test_teacher_backfill_replaces_encrypted_atif_reasoning():
+    seen = {}
+
+    def teacher(messages, assistant_content):
+        seen["messages"] = messages
+        seen["assistant_content"] = assistant_content
+        return "synthetic rationale"
+
+    doc = {
+        "schema_version": "ATIF-v1.6",
+        "steps": [
+            {"source": "user", "message": "task"},
+            {
+                "source": "agent",
+                "message": "answer",
+                "extra": {"thinking": {"encrypted_content": "secret-blob"}},
+            },
+        ],
+        "extra": {"success": True},
+    }
+
+    row = row_from_atif(
+        doc,
+        include_thinking=True,
+        reasoning_policy="teacher-backfill",
+        teacher_backfill_fn=teacher,
+    )
+
+    assert row["messages"][1]["content"] == "answer\n\n[thinking]\nsynthetic rationale"
+    assert seen["assistant_content"] == "answer"
+    assert "secret-blob" not in json.dumps(seen)
+    assert row["metadata"]["reasoning_status"] == "teacher_backfilled"
+    assert row["metadata"]["synthetic_reasoning"] is True
+
+
 def test_session_events_become_chat_row():
     row = row_from_session_events(
         [
@@ -91,6 +179,164 @@ def test_session_events_become_chat_row():
     assert row["messages"][1]["tool_calls"][0]["id"] == "c1"
     assert row["messages"][1]["tool_calls"][0]["function"]["name"] == "Read"
     assert "Tool Read [ok]" in row["messages"][2]["content"]
+
+
+def test_codex_session_events_skip_encrypted_reasoning():
+    row = row_from_session_events(
+        [
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "hello"},
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": "gAAAAABqTrNaturalEncryptedBlob==",
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "hi",
+                    "phase": "final_answer",
+                },
+            },
+        ]
+    )
+
+    assert row["messages"] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    assert row["metadata"]["reasoning_status"] == "encrypted_skipped"
+    assert row["metadata"]["encrypted_reasoning_skipped"] == 1
+
+
+def test_teacher_backfill_replaces_codex_encrypted_reasoning():
+    seen = {}
+
+    def teacher(messages, assistant_content):
+        seen["messages"] = messages
+        seen["assistant_content"] = assistant_content
+        return "synthetic codex rationale"
+
+    row = row_from_session_events(
+        [
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "hello"},
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": "gAAAAABqTrNaturalEncryptedBlob==",
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "hi",
+                    "phase": "final_answer",
+                },
+            },
+        ],
+        reasoning_policy="teacher-backfill",
+        teacher_backfill_fn=teacher,
+    )
+
+    assert row["messages"] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi\n\n[thinking]\nsynthetic codex rationale"},
+    ]
+    assert seen["messages"] == [{"role": "user", "content": "hello"}]
+    assert seen["assistant_content"] == "hi"
+    assert "gAAAAA" not in json.dumps(seen)
+    assert row["metadata"]["reasoning_status"] == "teacher_backfilled"
+    assert row["metadata"]["teacher_backfilled_reasoning"] == 1
+
+
+def test_openai_compatible_teacher_uses_chat_completions_without_key(monkeypatch):
+    seen = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": "synthetic local rationale"}}]}
+            ).encode()
+
+    def fake_urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["timeout"] = timeout
+        seen["headers"] = dict(request.header_items())
+        seen["body"] = json.loads(request.data.decode())
+        return FakeResponse()
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    teacher = _openai_teacher_backfill(
+        "teacher-model",
+        base_url="http://localhost:8000/v1",
+        max_output_tokens=64,
+    )
+    result = teacher([{"role": "user", "content": "task"}], "answer")
+
+    assert result == "synthetic local rationale"
+    assert seen["url"] == "http://localhost:8000/v1/chat/completions"
+    assert "Authorization" not in seen["headers"]
+    assert seen["body"]["model"] == "teacher-model"
+    assert seen["body"]["max_tokens"] == 64
+    assert seen["body"]["messages"][0]["role"] == "system"
+    assert "user: task" in seen["body"]["messages"][1]["content"]
+    assert "assistant: answer" in seen["body"]["messages"][1]["content"]
+
+
+def test_openai_compatible_teacher_can_use_responses_format(monkeypatch):
+    seen = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"output_text": "responses rationale"}).encode()
+
+    def fake_urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["headers"] = dict(request.header_items())
+        seen["body"] = json.loads(request.data.decode())
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    teacher = _openai_teacher_backfill(
+        "gpt-5.4",
+        api_key="test-key",
+        base_url="https://api.openai.com/v1",
+        api_format="responses",
+    )
+    result = teacher([{"role": "user", "content": "task"}], "answer")
+
+    assert result == "responses rationale"
+    assert seen["url"] == "https://api.openai.com/v1/responses"
+    assert seen["headers"]["Authorization"] == "Bearer test-key"
+    assert seen["body"]["model"] == "gpt-5.4"
+    assert seen["body"]["max_output_tokens"] == 160
 
 
 def test_convert_paths_reads_directories_and_writes_rows(tmp_path):
