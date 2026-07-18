@@ -25,6 +25,7 @@ def _args(**overrides):
         "lora_r": 16,
         "lora_alpha": 32,
         "lora_targets": "auto",
+        "base_quantization": "none",
         "seq_len": 512,
         "micro_batch_size": 1,
         "grad_accum": 2,
@@ -119,6 +120,7 @@ def test_commands_encode_matching_topologies_and_seed():
     assert diloco[diloco.index("--tokenize") + 1] == "stream"
     assert diloco[diloco.index("--stream-workers") + 1] == "0"
     assert diloco[diloco.index("--wire-dtype") + 1] == "q4"
+    assert diloco[diloco.index("--base-quantization") + 1] == "none"
     assert "--wire-dtype" not in baseline
 
 

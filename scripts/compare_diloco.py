@@ -241,6 +241,7 @@ def learner_command(
         "--learner-id", str(learner_id),
         "--num-learners", str(num_learners),
         "--tuning", "lora",
+        "--base-quantization", getattr(args, "base_quantization", "none"),
         "--lora-r", str(args.lora_r),
         "--lora-alpha", str(args.lora_alpha),
         "--lora-targets", getattr(args, "lora_targets", "auto"),
@@ -374,7 +375,8 @@ def split_data(
 
 
 def evaluate_loss(model_id: str, adapter_dir: Path | None, eval_file: Path,
-                  seq_len: int, device: str, train_on: str = "assistant") -> dict:
+                  seq_len: int, device: str, train_on: str = "assistant",
+                  base_quantization: str = "none") -> dict:
     """Held-out masked CE per trained token — the comparison metric."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -388,20 +390,41 @@ def evaluate_loss(model_id: str, adapter_dir: Path | None, eval_file: Path,
     tok = _from_pretrained_offline_first(
         AutoTokenizer, resolved, trust_remote_code=True
     )
-    # bf16 on accelerators (a 10B+ base in fp32 would not fit one GPU);
-    # fp32 on cpu, where bf16 matmuls are slow and memory is plentiful.
-    dtype = torch.float32 if device == "cpu" else torch.bfloat16
-    model = _from_pretrained_offline_first(
-        AutoModelForCausalLM,
-        resolved,
-        dtype=dtype,
-        trust_remote_code=True,
-    )
+    if base_quantization == "nf4":
+        if device == "cpu":
+            raise ValueError("NF4 benchmark evaluation requires CUDA")
+        from transformers import BitsAndBytesConfig
+
+        model = _from_pretrained_offline_first(
+            AutoModelForCausalLM,
+            resolved,
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+            ),
+            device_map={"": 0},
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )
+    else:
+        # bf16 on accelerators (a 10B+ base in fp32 would not fit one GPU);
+        # fp32 on cpu, where bf16 matmuls are slow and memory is plentiful.
+        dtype = torch.float32 if device == "cpu" else torch.bfloat16
+        model = _from_pretrained_offline_first(
+            AutoModelForCausalLM,
+            resolved,
+            dtype=dtype,
+            trust_remote_code=True,
+        )
     if adapter_dir is not None:
         from peft import PeftModel
 
         model = PeftModel.from_pretrained(model, str(adapter_dir))
-    model.to(device).eval()
+    if base_quantization == "none":
+        model.to(device)
+    model.eval()
     ds = build_packed_dataset(str(eval_file), tok, 0, 1, seq_len, train_on=train_on)
     total_loss, total_tokens = 0.0, 0.0
     block_losses = []
@@ -515,6 +538,7 @@ def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path,
         "--seq-len", str(args.seq_len),
         "--device", args.eval_device,
         "--train-on", args.train_on,
+        "--base-quantization", args.base_quantization,
     ]
     if adapter_dir is not None:
         cmd += ["--adapter-dir", str(adapter_dir)]
@@ -914,6 +938,8 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
             args.model,
             "--tuning",
             "lora",
+            "--base-quantization",
+            args.base_quantization,
             "--lora-r",
             str(args.lora_r),
             "--lora-alpha",
@@ -1367,6 +1393,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument(
+        "--base-quantization", choices=["none", "nf4"], default="none"
+    )
+    parser.add_argument(
         "--lora-targets",
         choices=["auto", "attention", "all-linear"],
         default="auto",
@@ -1509,6 +1538,7 @@ def main(argv=None) -> int:
             args.seq_len,
             args.device,
             args.train_on,
+            args.base_quantization,
         )
         print("EVAL_JSON " + json.dumps(result, sort_keys=True))
         return 0
