@@ -813,6 +813,7 @@ def run_inner_loop(
     epoch = 0
     t_last = time.monotonic()
     while not shutdown and steps_total < args.max_local_steps:
+        steps_at_epoch_start = steps_total
         sampler = getattr(loader, "sampler", None)
         if hasattr(sampler, "set_epoch"):
             sampler.set_epoch(epoch)
@@ -988,6 +989,16 @@ def run_inner_loop(
 
             if shutdown or steps_total >= args.max_local_steps:
                 break
+        if (
+            not shutdown
+            and steps_total < args.max_local_steps
+            and steps_total == steps_at_epoch_start
+        ):
+            raise ValueError(
+                "the data loader produced fewer microbatches than --grad-accum "
+                "on at least one rank; use more data, lower --grad-accum, or "
+                "reduce the number of data-parallel consumers"
+            )
         epoch += 1
     counters = TrainingCounters(
         local_steps=steps_total,

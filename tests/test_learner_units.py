@@ -384,6 +384,30 @@ def test_incomplete_accumulation_tail_is_not_an_optimizer_step():
     assert counters.target_tokens == 8
 
 
+def test_dataset_smaller_than_accumulation_group_fails_instead_of_spinning():
+    batches = [_batch([0, 1, 2, 3], [0, 1, 1, 0])]
+    model = _TinyLM()
+    opt = _RecordingOptimizer([model.weight])
+
+    with pytest.raises(ValueError, match="fewer microbatches than --grad-accum"):
+        run_inner_loop(
+            _loop_args(grad_accum=2),
+            model,
+            {"weight": model.weight},
+            _layout(),
+            opt,
+            _Scheduler(),
+            _Loader(batches),
+            None,
+            rank=0,
+            world=1,
+            device=torch.device("cpu"),
+        )
+
+    assert opt.steps == 0
+    assert model.forward_calls == 0
+
+
 def test_lora_targets_resolution():
     from types import SimpleNamespace
 
