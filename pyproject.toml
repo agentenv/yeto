@@ -28,6 +28,8 @@ launcher = ["skypilot[aws]>=0.12"]
 mlx = ["mlx>=0.31", "mlx-lm>=0.29"]
 qlora = ["bitsandbytes>=0.46.1"]
 diffusion = ["diffusers>=0.35", "safetensors", "pillow", "imageio[ffmpeg]", "bitsandbytes>=0.46.1"]
+a100-liger = ["liger-kernel==0.8.0"]
+a100-flash-attn = ["flash-attn==2.8.3"]
 dev = ["pytest", "pytest-timeout"]
 
 [project.scripts]

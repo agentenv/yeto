@@ -27,6 +27,15 @@ import torch
 import torch.distributed as dist
 
 from .autobatch import exact_grad_accum, int_or_auto, resolve_micro_batch_size
+from .causal_kernels import (
+    ATTENTION_BACKENDS,
+    KERNEL_BACKENDS,
+    attention_load_kwargs,
+    liger_sft_forward,
+    require_liger_model_support,
+    resolved_attention_backend,
+    validate_kernel_request,
+)
 from .data import StreamingPackedBlocks, build_packed_dataset
 from .fragments import FragmentLayout, build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
@@ -57,6 +66,20 @@ def parse_args(argv=None):
     p.add_argument("--learner-id", type=int, required=True)
     p.add_argument("--num-learners", type=int, required=True)
     p.add_argument("--loss-function", default="cross_entropy")
+    p.add_argument(
+        "--attention-backend",
+        choices=ATTENTION_BACKENDS,
+        default="auto",
+        help="causal attention implementation: let Transformers choose, "
+        "force PyTorch SDPA, or require pinned FlashAttention 2",
+    )
+    p.add_argument(
+        "--kernel-backend",
+        choices=KERNEL_BACKENDS,
+        default="native",
+        help="causal model/loss kernels: native (default) or the pinned, "
+        "binary-mask-only Liger fused-loss lane",
+    )
     p.add_argument(
         "--train-on",
         choices=["assistant", "all"],
@@ -235,7 +258,7 @@ def _prepare_nf4_base_for_lora(model) -> None:
 
 
 def load_model_and_tokenizer(args, device):
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     from .models import resolve
 
@@ -265,31 +288,82 @@ def load_model_and_tokenizer(args, device):
         dtype = torch.float32
     else:
         dtype = torch.bfloat16
+    kernel_backend = getattr(args, "kernel_backend", "native")
+    attention_backend = getattr(args, "attention_backend", "auto")
+    validate_kernel_request(
+        kernel_backend,
+        args.loss_function,
+        device,
+        dtype,
+        base_quantization,
+    )
+    attention_kwargs = attention_load_kwargs(attention_backend, device, dtype)
+    model_factory = AutoModelForCausalLM
+    kernel_kwargs = {}
+    liger_model_type = None
+    if kernel_backend == "liger":
+        config = _from_pretrained_offline_first(
+            AutoConfig,
+            model_id,
+            trust_remote_code=True,
+        )
+        liger_model_type = require_liger_model_support(config)
+        try:
+            from liger_kernel.transformers import AutoLigerKernelForCausalLM
+        except Exception as exc:
+            raise RuntimeError("could not import AutoLigerKernelForCausalLM") from exc
+        model_factory = AutoLigerKernelForCausalLM
+        kernel_kwargs = {
+            "cross_entropy": False,
+            "fused_linear_cross_entropy": True,
+        }
     tokenizer = _from_pretrained_offline_first(AutoTokenizer, model_id, trust_remote_code=True)
-    if base_quantization == "nf4":
-        from transformers import BitsAndBytesConfig
+    try:
+        if base_quantization == "nf4":
+            from transformers import BitsAndBytesConfig
 
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-        )
-        model = _from_pretrained_offline_first(
-            AutoModelForCausalLM,
-            model_id,
-            quantization_config=quantization_config,
-            device_map={"": device.index if device.index is not None else 0},
-            low_cpu_mem_usage=True,
-            trust_remote_code=True,
-        )
-    else:
-        model = _from_pretrained_offline_first(
-            AutoModelForCausalLM,
-            model_id,
-            torch_dtype=dtype,
-            trust_remote_code=True,
-        )
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+            )
+            model = _from_pretrained_offline_first(
+                model_factory,
+                model_id,
+                quantization_config=quantization_config,
+                device_map={"": device.index if device.index is not None else 0},
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,
+                **attention_kwargs,
+                **kernel_kwargs,
+            )
+        else:
+            model = _from_pretrained_offline_first(
+                model_factory,
+                model_id,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                **attention_kwargs,
+                **kernel_kwargs,
+            )
+    except Exception as exc:
+        if attention_backend != "auto" or kernel_backend != "native":
+            raise RuntimeError(
+                f"failed to load {model_id!r} with attention={attention_backend!r} "
+                f"and kernels={kernel_backend!r}; the dependency or model "
+                "implementation does not support the explicit request"
+            ) from exc
+        raise
+    resolved_attention = resolved_attention_backend(model, attention_backend)
+    log.info(
+        "causal kernel recipe: attention requested=%s resolved=%s; "
+        "model/loss kernels=%s%s",
+        attention_backend,
+        resolved_attention,
+        kernel_backend,
+        f" model_type={liger_model_type}" if liger_model_type else "",
+    )
     if args.tuning == "lora":
         from peft import LoraConfig, get_peft_model
 
@@ -844,7 +918,10 @@ def run_inner_loop(
     anchors: list[torch.Tensor] | None = None
     if rank == 0 and client is not None and client.dtype == DTYPE_Q4:
         anchors = [fragment_flat(frag, params).cpu() for frag in layout.fragments]
-    if args.loss_function.startswith("pickle:"):
+    kernel_backend = getattr(args, "kernel_backend", "native")
+    if kernel_backend == "liger":
+        compute_loss = None
+    elif args.loss_function.startswith("pickle:"):
         compute_loss = load_pickled_loss(args.loss_function)
     elif args.loss_function.startswith("custom:"):
         compute_loss = load_custom_loss(args.loss_function)
@@ -889,8 +966,15 @@ def run_inner_loop(
             for input_ids, weights in group:
                 input_ids = input_ids.to(device, non_blocking=True)
                 weights = weights.to(device, non_blocking=True)
-                out = model(input_ids=input_ids)
-                loss, batch_target_tokens = compute_loss(out.logits, input_ids, weights)
+                if kernel_backend == "liger":
+                    loss, batch_target_tokens = liger_sft_forward(
+                        model, input_ids, weights
+                    )
+                else:
+                    out = model(input_ids=input_ids)
+                    loss, batch_target_tokens = compute_loss(
+                        out.logits, input_ids, weights
+                    )
                 observed_targets.add_(
                     torch.as_tensor(batch_target_tokens, device=device, dtype=torch.long)
                     .detach()
