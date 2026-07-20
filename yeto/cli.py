@@ -156,6 +156,20 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "(attention for MoE — router and routed experts stay frozen)",
     )
     tune.add_argument("--seq-len", type=int, default=2048)
+    tune.add_argument(
+        "--attention-backend",
+        choices=["auto", "sdpa", "flash-attn-2"],
+        default="auto",
+        help="causal attention implementation: let Transformers choose, "
+        "force PyTorch SDPA, or require pinned FlashAttention 2",
+    )
+    tune.add_argument(
+        "--kernel-backend",
+        choices=["native", "liger"],
+        default="native",
+        help="causal model/loss kernels: native (default) or the pinned, "
+        "binary-mask-only Liger fused-loss lane",
+    )
 
     def int_or_auto(value: str):
         # duplicated from yeto/autobatch.py: importing it would pull torch

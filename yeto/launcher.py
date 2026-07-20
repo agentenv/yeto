@@ -459,6 +459,29 @@ MEGATRON_SETUP = (
     "|| echo '[yeto-setup] megatron stack install failed; --island-backend megatron unavailable' >&2"
 )
 
+
+def causal_kernel_setup_steps(args) -> list[str]:
+    """Pinned remote installs selected explicitly for a causal torch learner."""
+    from .kernel_deps import (
+        FLASH_ATTN_VERSION,
+        LIGER_KERNEL_VERSION,
+        NINJA_VERSION,
+        PACKAGING_VERSION,
+    )
+
+    steps: list[str] = []
+    if getattr(args, "kernel_backend", "native") == "liger":
+        steps.append(f"pip install -q 'liger-kernel=={LIGER_KERNEL_VERSION}'")
+    if getattr(args, "attention_backend", "auto") == "flash-attn-2":
+        steps.extend(
+            [
+                f"pip install -q 'ninja=={NINJA_VERSION}' 'packaging=={PACKAGING_VERSION}'",
+                f"MAX_JOBS=${{MAX_JOBS:-8}} pip install -q --no-build-isolation "
+                f"'flash-attn=={FLASH_ATTN_VERSION}'",
+            ]
+        )
+    return steps
+
 DIFFUSION_SAMPLE_ADAPTER_DIR = "~/yeto-adapter"
 DIFFUSION_SAMPLE_OUTPUT_DIR = "~/yeto-output"
 
@@ -473,6 +496,26 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     loss_function = args.loss_function
     if model_kind == "diffusion" and loss_function == "cross_entropy":
         loss_function = "flow_matching"
+
+    backend = getattr(args, "island_backend", "torch")
+    attention_backend = getattr(args, "attention_backend", "auto")
+    kernel_backend = getattr(args, "kernel_backend", "native")
+    if model_kind != "causal-lm" and (
+        attention_backend != "auto" or kernel_backend != "native"
+    ):
+        raise ValueError(
+            "--attention-backend and --kernel-backend apply only to causal-LM models"
+        )
+    if model_kind == "causal-lm" and backend != "torch":
+        if attention_backend != "auto" or kernel_backend != "native":
+            raise ValueError(
+                "--attention-backend and --kernel-backend are supported only "
+                "by the torch causal-LM island backend"
+            )
+    if kernel_backend == "liger" and loss_function != "cross_entropy":
+        raise ValueError(
+            "--kernel-backend liger supports only the built-in cross_entropy loss"
+        )
 
     # Flags shared by all learners. The DiLoCo sync, LoRA, and data source
     # shape are identical; the per-task forward/loss loop differs.
@@ -504,6 +547,11 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             f" --tokenize {args.tokenize}"
             f" --stream-workers {args.stream_workers}"
         )
+        if backend == "torch":
+            learner_flags += (
+                f" --attention-backend {attention_backend}"
+                f" --kernel-backend {kernel_backend}"
+            )
     else:
         if getattr(args, "island_backend", "torch") != "torch":
             raise ValueError("diffusion model-kind uses the torch island backend, not megatron")
@@ -543,7 +591,6 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     if args.max_rows:
         learner_flags += f" --max-rows {args.max_rows}"
 
-    backend = getattr(args, "island_backend", "torch")
     if model_kind == "diffusion":
         entrypoint = "yeto.diffusion.learner"
         setup_steps = [
@@ -585,6 +632,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         entrypoint = "yeto.learner"
         setup_steps = [WAN_TUNING, NVME_SETUP, NVME_ENV, HF_TOKEN_ENV, TORCH_SETUP,
                        "pip install -q -r requirements.txt"]
+        setup_steps.extend(causal_kernel_setup_steps(args))
 
     run = (
         f"{NVME_ENV}\n"
