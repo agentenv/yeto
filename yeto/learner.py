@@ -21,6 +21,7 @@ import logging
 import os
 import random
 import time
+from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
@@ -366,17 +367,100 @@ def allreduce_trainable_grads(params, world: int) -> None:
 
     FSDP leaves params passed via ignored_states unmanaged, so the replicated
     LoRA adapter grads are never reduced; calling this at optimizer-step
-    boundaries (before clipping) reproduces DDP-mean semantics — each rank
-    normalizes its loss by its own trained-token count, and SUM/world of
-    those grads is the cross-rank mean. No-op when world <= 1; params whose
-    grad is None are skipped.
+    boundaries (before clipping) reproduces DDP-mean semantics. Ranks first
+    agree on parameter presence and follow the same reduction schedule,
+    substituting zeros for locally-unused adapters. Globally-unused parameters
+    keep grad=None. No-op when world <= 1.
     """
     if world <= 1:
         return
-    for p in params:
-        if p.grad is not None:
-            dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
-            p.grad.div_(world)
+    params = list(params)
+    if not params:
+        return
+
+    # Every rank must issue the same collectives in the same order. Conditional
+    # modules can leave a parameter unused (grad=None) on only some ranks, so
+    # first agree which parameters were used anywhere, then reduce a real grad
+    # or an explicit zero buffer for every globally-used parameter. Parameters
+    # unused everywhere are skipped identically and stay grad=None so AdamW
+    # does not apply weight decay to them.
+    present = torch.tensor(
+        [p.grad is not None for p in params],
+        dtype=torch.int32,
+        device=params[0].device,
+    )
+    dist.all_reduce(present, op=dist.ReduceOp.SUM)
+    globally_present = present.cpu().tolist()
+    for used, p in zip(globally_present, params):
+        if not used:
+            continue
+        reduced = p.grad if p.grad is not None else torch.zeros_like(p)
+        dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+        reduced.div_(world)
+        if p.grad is None:
+            p.grad = reduced
+
+
+@dataclass(frozen=True)
+class TrainingCounters:
+    """Island-global work accepted into completed optimizer steps."""
+
+    local_steps: int
+    global_step: int
+    raw_tokens: int
+    target_tokens: int
+
+
+def positive_target_tokens(weights: torch.Tensor) -> int:
+    """Count positive-weight causal targets after the one-token LM shift."""
+    if weights.ndim == 0 or weights.shape[-1] < 2:
+        return 0
+    return int((weights[..., 1:] > 0).sum().item())
+
+
+def _next_accumulation_group(iterator, grad_accum: int) -> list:
+    """Look ahead over input tensors only; forward graphs are built one at a time."""
+    group = []
+    for _ in range(grad_accum):
+        try:
+            group.append(next(iterator))
+        except StopIteration:
+            break
+    return group
+
+
+def _common_group_size(local_size: int, device, world: int) -> int:
+    """Largest prefix every rank can process without collective divergence."""
+    if world <= 1:
+        return local_size
+    size = torch.tensor(local_size, dtype=torch.long, device=device)
+    dist.all_reduce(size, op=dist.ReduceOp.MIN)
+    return int(size.item())
+
+
+def _global_group_counts(group: list, device, world: int) -> tuple[int, int, int]:
+    """Return local target count and island-global (target, raw) counts."""
+    local_targets = sum(positive_target_tokens(weights) for _, weights in group)
+    local_raw = sum(int(input_ids.numel()) for input_ids, _ in group)
+    counts = torch.tensor([local_targets, local_raw], dtype=torch.long, device=device)
+    if world > 1:
+        dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+    return local_targets, int(counts[0].item()), int(counts[1].item())
+
+
+def _all_ranks_true(value: bool, device, world: int) -> bool:
+    if world <= 1:
+        return value
+    flag = torch.tensor(1 if value else 0, dtype=torch.int32, device=device)
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+    return bool(flag.item())
+
+
+def _global_loss_sum(local_loss: torch.Tensor, world: int) -> float:
+    total = local_loss.detach().to(dtype=torch.float64).clone()
+    if world > 1:
+        dist.all_reduce(total, op=dist.ReduceOp.SUM)
+    return float(total.item())
 
 
 def main(argv=None) -> None:
@@ -738,12 +822,14 @@ def main(argv=None) -> None:
         dist.destroy_process_group()
 
 
-def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank, world, device):
+def run_inner_loop(
+    args, model, params, layout, opt, sched, loader, client, rank, world, device
+) -> TrainingCounters:
     # Counters (Alg. 1): incremented for all fragments each step, reset per
     # fragment on receipt. Tracked as global totals + per-fragment snapshots.
     steps_total = 0
     tokens_total = 0
-    target_tokens_total = torch.zeros((), dtype=torch.long, device=device)
+    target_tokens_total = 0
     steps_at_reset = [0] * layout.num_fragments
     tokens_at_reset = [0] * layout.num_fragments
     fragment_versions = [0] * layout.num_fragments  # last applied version per fragment
@@ -755,10 +841,6 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
     anchors: list[torch.Tensor] | None = None
     if rank == 0 and client is not None and client.dtype == DTYPE_Q4:
         anchors = [fragment_flat(frag, params).cpu() for frag in layout.fragments]
-    # c_tokens counts RAW tokens processed (throughput proxy for merge
-    # weighting), not the subset of loss-weighted tokens.
-    tokens_per_inner_step = world * args.micro_batch_size * args.grad_accum * args.seq_len
-
     if args.loss_function.startswith("pickle:"):
         compute_loss = load_pickled_loss(args.loss_function)
     elif args.loss_function.startswith("custom:"):
@@ -770,27 +852,60 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
     epoch = 0
     t_last = time.monotonic()
     while not shutdown and steps_total < args.max_local_steps:
-        if hasattr(loader.sampler, "set_epoch"):
-            loader.sampler.set_epoch(epoch)
-        accum = 0
-        opt.zero_grad(set_to_none=True)
-        for input_ids, weights in loader:
-            input_ids = input_ids.to(device, non_blocking=True)
-            weights = weights.to(device, non_blocking=True)
-            out = model(input_ids=input_ids)
-            loss, batch_target_tokens = compute_loss(out.logits, input_ids, weights)
-            target_tokens_total.add_(
-                batch_target_tokens.detach().to(device=device, dtype=torch.long)
+        steps_at_epoch_start = steps_total
+        sampler = getattr(loader, "sampler", None)
+        if hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
+        iterator = iter(loader)
+        while not shutdown and steps_total < args.max_local_steps:
+            group = _next_accumulation_group(iterator, args.grad_accum)
+            common_size = _common_group_size(len(group), device, world)
+            # Preserve the configured optimizer batch: a finite-loader tail is
+            # discarded on every rank instead of becoming a smaller step. The
+            # MIN agreement also makes a shorter rank stop all peers before
+            # any forward/backward collective can diverge.
+            if common_size < args.grad_accum:
+                break
+            group = group[: args.grad_accum]
+            local_targets, global_targets, global_raw = _global_group_counts(
+                group, device, world
             )
-            # DDP averages gradients across ranks, so normalizing each rank's
-            # sum-over-tokens loss by its *own* trained-token count yields
-            # (approximately) the global per-trained-token mean gradient.
-            trained_tokens = weights.sum().clamp(min=1.0)
-            (loss / (trained_tokens * args.grad_accum)).backward()
-            accum += 1
-            if accum < args.grad_accum:
-                continue
-            accum = 0
+            if global_targets == 0:
+                raise ValueError(
+                    "an optimizer-step accumulation group has zero positive "
+                    "causal-LM target tokens across all ranks"
+                )
+
+            # DDP/FSDP and allreduce_trainable_grads produce rank-MEAN grads.
+            # Scaling each local SUM loss by world/global_targets therefore
+            # yields SUM_r grad(loss_r) / SUM_r target_tokens exactly.
+            loss_scale = world / global_targets
+            observed_targets = torch.zeros((), dtype=torch.long, device=device)
+            step_loss_local = torch.zeros((), dtype=torch.float64, device=device)
+            opt.zero_grad(set_to_none=True)
+            for input_ids, weights in group:
+                input_ids = input_ids.to(device, non_blocking=True)
+                weights = weights.to(device, non_blocking=True)
+                out = model(input_ids=input_ids)
+                loss, batch_target_tokens = compute_loss(out.logits, input_ids, weights)
+                observed_targets.add_(
+                    torch.as_tensor(batch_target_tokens, device=device, dtype=torch.long)
+                    .detach()
+                    .sum()
+                )
+                step_loss_local.add_(loss.detach().to(dtype=torch.float64))
+                (loss * loss_scale).backward()
+
+            local_count_matches = int(observed_targets.item()) == local_targets
+            if not _all_ranks_true(local_count_matches, device, world):
+                opt.zero_grad(set_to_none=True)
+                raise ValueError(
+                    "loss function target-token count does not match the "
+                    "positive shifted loss weights: "
+                    f"rank {rank} reported {int(observed_targets.item())}, "
+                    f"expected {local_targets}"
+                )
+
             if args.tuning == "lora":
                 # The adapters are never grad-synced by a wrapper — fsdp+lora
                 # ignores them, the replicated path has no wrapper — so average
@@ -808,18 +923,23 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
             sched.step()
             opt.zero_grad(set_to_none=True)
             steps_total += 1
-            tokens_total += tokens_per_inner_step
+            tokens_total += global_raw
+            target_tokens_total += global_targets
 
-            if steps_total % 10 == 0 and rank == 0:
-                dt = time.monotonic() - t_last
-                t_last = time.monotonic()
-                log.info(
-                    "local_step=%d global_step=%d loss/token=%.4f (%.2f s/step)",
-                    steps_total,
-                    global_step,
-                    loss.item() / trained_tokens.item(),  # per trained token
-                    dt / 10,
-                )
+            if steps_total % 10 == 0:
+                loss_sum = _global_loss_sum(step_loss_local, world)
+                if rank == 0:
+                    dt = time.monotonic() - t_last
+                    t_last = time.monotonic()
+                    log.info(
+                        "local_step=%d global_step=%d loss/token=%.4f "
+                        "target_tokens=%d (%.2f s/step)",
+                        steps_total,
+                        global_step,
+                        loss_sum / global_targets,
+                        target_tokens_total,
+                        dt / 10,
+                    )
 
             # --- fragment sync at the step boundary (never blocks) ---
             # Broadcasts are applied BEFORE pulls are answered: with the
@@ -908,20 +1028,34 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
 
             if shutdown or steps_total >= args.max_local_steps:
                 break
+        if (
+            not shutdown
+            and steps_total < args.max_local_steps
+            and steps_total == steps_at_epoch_start
+        ):
+            raise ValueError(
+                "the data loader produced fewer microbatches than --grad-accum "
+                "on at least one rank; use more data, lower --grad-accum, or "
+                "reduce the number of data-parallel consumers"
+            )
         epoch += 1
-    raw_tokens_local = (
-        steps_total
-        * args.micro_batch_size
-        * args.grad_accum
-        * args.seq_len
+    counters = TrainingCounters(
+        local_steps=steps_total,
+        global_step=global_step,
+        raw_tokens=tokens_total,
+        target_tokens=target_tokens_total,
     )
-    log.info(
-        "inner loop done at local_step=%d global_step=%d raw_tokens=%d target_tokens=%d",
-        steps_total,
-        global_step,
-        raw_tokens_local,
-        int(target_tokens_total.item()),
-    )
+    if rank == 0:
+        log.info(
+            "inner loop done at local_step=%d global_step=%d "
+            "metrics_version=2 metrics_scope=island "
+            "raw_tokens=%d target_tokens=%d",
+            counters.local_steps,
+            counters.global_step,
+            counters.raw_tokens,
+            counters.target_tokens,
+        )
+    return counters
 
 
 if __name__ == "__main__":

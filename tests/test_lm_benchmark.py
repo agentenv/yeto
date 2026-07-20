@@ -348,7 +348,7 @@ def test_aggregate_uses_seed_matched_baseline():
     assert m2["target_density_mean"] == 0.4
 
 
-def test_training_log_summary_tracks_lm_target_tokens(tmp_path):
+def test_training_log_summary_reads_legacy_rank_records(tmp_path):
     first = tmp_path / "learner-0.log"
     second = tmp_path / "learner-1.log"
     first.write_text(
@@ -363,11 +363,101 @@ def test_training_log_summary_tracks_lm_target_tokens(tmp_path):
     )
     summary = benchmark.summarize_training_logs([first, second])
     assert summary == {
-        "reported_ranks": 2,
+        "telemetry_version": 1,
+        "telemetry_scope": "rank",
+        "reported_units": 2,
         "processed_tokens": 10_240,
         "processed_target_tokens": 3_584,
         "target_density": 0.35,
     }
+
+
+def test_training_log_summary_does_not_double_count_island_totals(tmp_path):
+    learner = tmp_path / "learner.log"
+    learner.write_text(
+        "inner loop done at local_step=10 global_step=2 "
+        "metrics_version=2 metrics_scope=island "
+        "raw_tokens=10240 target_tokens=3584\n",
+        encoding="utf-8",
+    )
+    summary = benchmark.summarize_training_logs([learner])
+    assert summary == {
+        "telemetry_version": 2,
+        "telemetry_scope": "island",
+        "reported_units": 1,
+        "processed_tokens": 10_240,
+        "processed_target_tokens": 3_584,
+        "target_density": 0.35,
+    }
+
+
+def test_training_log_summary_sums_island_records(tmp_path):
+    logs = [tmp_path / "learner-0.log", tmp_path / "learner-1.log"]
+    for index, path in enumerate(logs):
+        path.write_text(
+            "inner loop done at local_step=10 global_step=2 "
+            "metrics_version=2 metrics_scope=island "
+            f"raw_tokens=5120 target_tokens={2048 - 512 * index}\n",
+            encoding="utf-8",
+        )
+    summary = benchmark.summarize_training_logs(logs)
+    assert summary["reported_units"] == 2
+    assert summary["processed_tokens"] == 10_240
+    assert summary["processed_target_tokens"] == 3_584
+
+
+def test_training_log_summary_rejects_mixed_schemas(tmp_path):
+    legacy = tmp_path / "legacy.log"
+    island = tmp_path / "island.log"
+    legacy.write_text(
+        "inner loop done raw_tokens=5120 target_tokens=2048\n",
+        encoding="utf-8",
+    )
+    island.write_text(
+        "inner loop done metrics_version=2 metrics_scope=island "
+        "raw_tokens=5120 target_tokens=2048\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="mix final token telemetry schemas"):
+        benchmark.summarize_training_logs([legacy, island])
+
+
+@pytest.mark.parametrize(
+    ("scope", "reported_units", "total_ranks", "islands"),
+    [("rank", 4, 4, 2), ("island", 2, 4, 2)],
+)
+def test_training_telemetry_unit_validation_accepts_scope_counts(
+    scope, reported_units, total_ranks, islands
+):
+    telemetry = {
+        "telemetry_scope": scope,
+        "reported_units": reported_units,
+    }
+    benchmark.validate_training_telemetry_units(
+        telemetry,
+        label="m2",
+        total_ranks=total_ranks,
+        islands=islands,
+    )
+
+
+def test_training_telemetry_unit_validation_rejects_missing_island():
+    telemetry = {
+        "telemetry_scope": "island",
+        "reported_units": 1,
+    }
+    with pytest.raises(RuntimeError, match="expected 2 island-scoped"):
+        benchmark.validate_training_telemetry_units(
+            telemetry,
+            label="m2",
+            total_ranks=4,
+            islands=2,
+        )
+
+
+def test_resume_fingerprint_includes_benchmark_driver():
+    implementation_paths = {path.resolve() for path in benchmark._IMPLEMENTATION_PATHS}
+    assert Path(benchmark.__file__).resolve() in implementation_paths
 
 
 def test_lm_fairness_rejects_target_token_mismatch():
