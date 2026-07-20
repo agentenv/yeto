@@ -21,10 +21,13 @@ rather than silently producing wrong merges.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 
 log = logging.getLogger("megatron-learner")
+MEGATRON_ADAPTER_METADATA_FILE = "yeto_megatron_adapter.json"
+MEGATRON_ADAPTER_WEIGHTS_BASENAME = "megatron_adapter_model"
 
 # Megatron-parallel module names LoRA-A/B attach to. Fused attention
 # (linear_qkv/linear_proj) plus DeepSeek MLA's split projections; the
@@ -180,13 +183,84 @@ def _build_dataset(args):
     )
 
 
-def _save_output_best_effort(bridge, model, output_dir):
+def _save_tensor_state(state, save_dir):
+    try:
+        from safetensors.torch import save_file
+
+        filename = f"{MEGATRON_ADAPTER_WEIGHTS_BASENAME}.safetensors"
+        save_file(state, os.path.join(save_dir, filename))
+        return filename, "safetensors"
+    except Exception as e:
+        import torch
+
+        filename = f"{MEGATRON_ADAPTER_WEIGHTS_BASENAME}.pt"
+        torch.save(state, os.path.join(save_dir, filename))
+        log.warning("safetensors save unavailable for Megatron adapter artifact; used torch.save: %s", e)
+        return filename, "torch"
+
+
+def _save_megatron_adapter_artifact(args, model, output_dir):
+    from transformers import AutoTokenizer
+
+    from ..models import resolve
+
+    save_dir = os.path.expanduser(output_dir)
+    os.makedirs(save_dir, exist_ok=True)
+    params = _adapter_params(model)
+    state = {n: p.detach().cpu().contiguous() for n, p in params.items()}
+    weights_file, weights_format = _save_tensor_state(state, save_dir)
+
+    targets = list(_ATTENTION_TARGETS)
+    if args.lora_targets == "all-linear":
+        targets += _MLP_TARGETS
+    base_model = resolve(args.model)
+    metadata = {
+        "kind": "yeto.megatron.adapter",
+        "schema_version": 1,
+        "base_model_name_or_path": base_model,
+        "tuning": args.tuning,
+        "weights_file": weights_file,
+        "weights_format": weights_format,
+        "lora": {
+            "r": args.lora_r,
+            "alpha": args.lora_alpha,
+            "targets": args.lora_targets,
+            "target_modules": targets,
+        },
+        "parallelism": {
+            "expert": args.expert_parallel,
+            "tensor": args.tensor_parallel,
+            "pipeline": args.pipeline_parallel,
+        },
+        "parameter_names": sorted(state),
+    }
+    with open(os.path.join(save_dir, MEGATRON_ADAPTER_METADATA_FILE), "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+        tokenizer.save_pretrained(save_dir)
+    except Exception as e:
+        log.warning("could not save tokenizer with Megatron adapter artifact: %s", e)
+
+    log.info("saved Megatron adapter artifact to %s", save_dir)
+    return True
+
+
+def _save_output_best_effort(bridge, model, output_dir, args=None):
     save_dir = os.path.expanduser(output_dir)
     os.makedirs(save_dir, exist_ok=True)
     try:
         # Export adapters back to an HF-loadable checkpoint via the bridge.
         bridge.save_hf_pretrained(model, save_dir)
     except Exception as e:
+        if args is not None and args.tuning == "lora":
+            log.warning(
+                "Megatron-Bridge HF export failed after training; writing a "
+                "Yeto Megatron adapter artifact instead: %s",
+                e,
+            )
+            return _save_megatron_adapter_artifact(args, model, save_dir)
         log.warning(
             "Megatron-Bridge HF export failed after training; leaving run successful "
             "so validation can proceed. adapter-only export still needs wiring: %s",
@@ -275,7 +349,7 @@ def main(argv=None):
     )
 
     if rank == 0:
-        _save_output_best_effort(bridge, model, args.output_dir)
+        _save_output_best_effort(bridge, model, args.output_dir, args)
         if client is not None:
             client.close()
     dist.barrier()

@@ -4,6 +4,8 @@ by a live run, not here."""
 
 import sys
 import types
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from yeto.megatron import learner as ml
@@ -139,3 +141,64 @@ def test_save_output_best_effort_keeps_training_successful(tmp_path, caplog):
     assert ml._save_output_best_effort(FailingBridge(), ["model"], tmp_path) is False
     assert tmp_path.exists()
     assert "HF export failed after training" in caplog.text
+
+
+def test_save_output_best_effort_writes_megatron_adapter_fallback(tmp_path, monkeypatch):
+    import torch
+
+    class FailingBridge:
+        def save_hf_pretrained(self, model, save_dir):
+            raise AttributeError("'NoneType' object has no attribute 'megatron_to_hf'")
+
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, model_id, trust_remote_code=False):
+            assert model_id == "resolved/m"
+            assert trust_remote_code is True
+            return cls()
+
+        def save_pretrained(self, save_dir):
+            (Path(save_dir) / "tokenizer_config.json").write_text("{}")
+
+    class FakeChunk:
+        def __init__(self):
+            self.adapter = torch.nn.Parameter(torch.ones(2, 3))
+            self.base = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+
+        def named_parameters(self):
+            return [
+                ("decoder.layers.0.self_attention.linear_qkv.adapter.linear_in.weight", self.adapter),
+                ("decoder.layers.0.self_attention.linear_qkv.weight", self.base),
+            ]
+
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(AutoTokenizer=FakeTokenizer))
+    monkeypatch.setattr("yeto.models.resolve", lambda model: f"resolved/{model}")
+
+    args = SimpleNamespace(
+        model="m",
+        tuning="lora",
+        lora_targets="attention",
+        lora_r=8,
+        lora_alpha=16,
+        expert_parallel=1,
+        tensor_parallel=1,
+        pipeline_parallel=1,
+    )
+
+    assert ml._save_output_best_effort(FailingBridge(), [FakeChunk()], tmp_path, args) is True
+
+    meta_path = tmp_path / ml.MEGATRON_ADAPTER_METADATA_FILE
+    meta = json.loads(meta_path.read_text())
+    assert meta["kind"] == "yeto.megatron.adapter"
+    assert meta["base_model_name_or_path"] == "resolved/m"
+    assert meta["lora"] == {
+        "r": 8,
+        "alpha": 16,
+        "targets": "attention",
+        "target_modules": ml._ATTENTION_TARGETS,
+    }
+    assert meta["parameter_names"] == [
+        "decoder.layers.0.self_attention.linear_qkv.adapter.linear_in.weight"
+    ]
+    assert (tmp_path / meta["weights_file"]).exists()
+    assert (tmp_path / "tokenizer_config.json").exists()
