@@ -501,6 +501,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         learner_flags += (
             f" --train-on {args.train_on}"
             f" --assistant-mask-mode {getattr(args, 'assistant_mask_mode', 'native')}"
+            f" --seed {getattr(args, 'seed', 0)}"
             f" --seq-len {args.seq_len}"
             f" --tokenize {args.tokenize}"
             f" --stream-workers {args.stream_workers}"

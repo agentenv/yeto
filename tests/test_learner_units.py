@@ -522,6 +522,26 @@ def test_torch_and_mlx_learners_parse_assistant_mask_mode():
         assert parse(base + ["--assistant-mask-mode", "legacy"]).assistant_mask_mode == "legacy"
 
 
+def test_learner_defaults_to_shared_initialization_seed():
+    from yeto.learner import parse_args
+
+    args = parse_args(
+        [
+            "--model",
+            "org/model",
+            "--data",
+            "org/data",
+            "--syncer",
+            "none",
+            "--learner-id",
+            "0",
+            "--num-learners",
+            "1",
+        ]
+    )
+    assert args.seed == 0
+
+
 def test_learner_quantization_default_is_unchanged():
     from yeto.learner import parse_args
 

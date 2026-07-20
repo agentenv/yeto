@@ -156,6 +156,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "assistant mask (default), or explicitly use the legacy synthetic "
         "<|role|> compatibility format",
     )
+    tune.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="causal-LM root seed; shared for model/adapter initialization, "
+        "then deterministically separated by learner and rank for training",
+    )
     tune.add_argument("--lora-r", type=int, default=16)
     tune.add_argument(
         "--lora-targets",
