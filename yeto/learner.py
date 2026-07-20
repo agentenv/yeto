@@ -27,6 +27,7 @@ import torch.distributed as dist
 
 from .autobatch import int_or_auto, rebalance_grad_accum, resolve_micro_batch_size
 from .data import StreamingPackedBlocks, build_packed_dataset
+from .finalization import finalize_torch_island
 from .fragments import FragmentLayout, build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
 from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
@@ -791,27 +792,43 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
             # counters, so the self-clock defers the answer one step and it
             # then carries the fresh anchor.
             actions = []  # (fid, version, flat_f32) applied this boundary
+            finalizing = False
             if rank == 0 and client is not None:
                 client.check_health()
-                # 1. collect received global fragments
-                for bc in client.drain_updates():
-                    flat = unpack_fragment(
-                        layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
-                    )
-                    if anchors is not None:
-                        # The anchor is the raw global value (pre-blend), so
-                        # the syncer can reconstruct pushes from Θ(version)+δ.
-                        anchors[bc.fragment_id] = flat.clone()
-                    actions.append((bc.fragment_id, bc.version, flat))
+                finalizing = client.finalizing.is_set()
+                if not finalizing:
+                    # 1. collect received global fragments
+                    for bc in client.drain_updates():
+                        flat = unpack_fragment(
+                            layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
+                        )
+                        if anchors is not None:
+                            # The anchor is the raw global value (pre-blend), so
+                            # the syncer can reconstruct pushes from Θ(version)+δ.
+                            anchors[bc.fragment_id] = flat.clone()
+                        actions.append((bc.fragment_id, bc.version, flat))
                 shutdown = client.shutdown.is_set()
 
             if world > 1:
                 meta = [(f, v) for f, v, _ in actions] if rank == 0 else None
-                box = [meta, shutdown]
+                box = [meta, shutdown, finalizing]
                 dist.broadcast_object_list(box, src=0)
-                meta, shutdown = box
+                meta, shutdown, finalizing = box
                 if rank != 0:
                     actions = [(f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta]
+            if finalizing:
+                manifest = finalize_torch_island(
+                    client,
+                    layout,
+                    params,
+                    rank=rank,
+                    world=world,
+                    device=device,
+                )
+                global_step = max(global_step, manifest.global_step)
+                shutdown = True
+                break
+            if world > 1:
                 for fid, version, flat in actions:
                     flat = flat.to(device)
                     dist.broadcast(flat, src=0)
@@ -870,6 +887,10 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
             if shutdown or steps_total >= args.max_local_steps:
                 break
         epoch += 1
+    if rank == 0 and client is not None and not client.finalized.is_set():
+        raise RuntimeError(
+            "learner stopped before authoritative finalization; refusing to save local parameters"
+        )
     raw_tokens_local = (
         steps_total
         * args.micro_batch_size

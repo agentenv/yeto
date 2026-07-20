@@ -6,7 +6,7 @@
 //! "two fragments in flight"), so a slow quorum on one fragment never
 //! delays pulling the next.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -147,6 +147,7 @@ enum Event {
     Hello { group: Arc<Group> },
     Init { fragment_id: u32, values: Vec<f32> },
     Push(Push),
+    FinalAck { learner_id: u32, global_step: u64 },
     Disconnected { learner_id: u32 },
 }
 
@@ -294,8 +295,24 @@ async fn handle_connection(stream: TcpStream, registry: Registry, event_tx: mpsc
                 .await
                 .ok();
             let res = read_loop(&mut rd, &group, &event_tx).await;
-            registry.lock().unwrap().remove(&learner_id);
-            event_tx.send(Event::Disconnected { learner_id }).await.ok();
+            // A replacement connection for this learner may already be in
+            // the registry. An old control task must never remove the live
+            // generation or emit a misleading disconnect for it.
+            let removed_live_group = {
+                let mut groups = registry.lock().unwrap();
+                if groups
+                    .get(&learner_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &group))
+                {
+                    groups.remove(&learner_id);
+                    true
+                } else {
+                    false
+                }
+            };
+            if removed_live_group {
+                event_tx.send(Event::Disconnected { learner_id }).await.ok();
+            }
             res
         }
         MSG_DATA_HELLO => {
@@ -448,6 +465,16 @@ async fn dispatch_inner(group: &Arc<Group>, msg_type: u8, payload: &[u8], event_
                 .ok();
         }
         MSG_HEARTBEAT => {}
+        MSG_FINAL_ACK => {
+            let global_step = decode_final_ack(payload)?;
+            event_tx
+                .send(Event::FinalAck {
+                    learner_id: group.learner_id,
+                    global_step,
+                })
+                .await
+                .ok();
+        }
         t => bail!("unexpected message type {t} from learner {}", group.learner_id),
     }
     Ok(())
@@ -457,6 +484,7 @@ async fn dispatch_inner(group: &Arc<Group>, msg_type: u8, payload: &[u8], event_
 
 async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Registry) -> Result<()> {
     let mut state: Option<GlobalState> = None;
+    let mut learner_ids = HashSet::new();
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
     // a resumed checkpoint) and all expected learners have connected (late
@@ -471,6 +499,7 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
         }
         match events.recv().await.context("event channel closed")? {
             Event::Hello { group } => {
+                learner_ids.insert(group.learner_id);
                 if state.is_none() {
                     // Layout comes from the HELLO of the first learner.
                     // (All learners must build identical layouts.)
@@ -492,9 +521,13 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
                 }
             }
             Event::Push(_) => warn!("push before initialization; dropped"),
+            Event::FinalAck { learner_id, .. } => {
+                warn!(learner_id, "premature final acknowledgement dropped")
+            }
             Event::Disconnected { learner_id } => warn!(learner_id, "disconnected during init"),
         }
     }
+    learner_ids.extend(registry.lock().unwrap().keys().copied());
     let mut st = state.unwrap();
     let num_fragments = st.layout.fragments.len() as u64;
     let mut step_rates = StepRates::default();
@@ -642,9 +675,19 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
                 }
                 Event::Hello { group } => {
                     // Rejoining learner: catch it up to the current state.
-                    send_all_fragments(&st, &group).await;
+                    if learner_ids.contains(&group.learner_id) {
+                        send_all_fragments(&st, &group).await;
+                    } else {
+                        warn!(
+                            learner_id = group.learner_id,
+                            "unexpected learner id after initialization"
+                        );
+                    }
                 }
                 Event::Init { .. } => {} // already initialized; ignore
+                Event::FinalAck { learner_id, .. } => {
+                    warn!(learner_id, "premature final acknowledgement dropped")
+                }
                 Event::Disconnected { learner_id } => {
                     warn!(learner_id, "learner disconnected");
                     for r in inflight.iter_mut() {
@@ -655,15 +698,33 @@ async fn scheduler(cfg: Config, mut events: mpsc::Receiver<Event>, registry: Reg
         }
     }
 
+    // The outer loop is now quiescent: every launched round has completed.
+    // Persist this authoritative cut regardless of the periodic checkpoint
+    // interval so a non-divisible total_steps can never leave a stale final
+    // checkpoint behind.
+    if let Some(path) = &cfg.checkpoint_path {
+        st.save_checkpoint(path)?;
+        info!(
+            step = st.global_step,
+            path = %path.display(),
+            "final checkpoint written"
+        );
+    }
     if let Some(path) = &cfg.final_state {
         dump_state(&st, path)?;
         info!(path = %path.display(), "final global state written");
     }
-    for g in current_groups(&registry) {
-        let _ = g.send_small(MSG_SHUTDOWN, bytes::Bytes::new()).await;
-    }
+    // Freeze terminal membership to the live groups at the final cut.
+    // Learners already abandoned by fleet recovery are not valid artifact
+    // producers and must not prevent surviving learners from finalizing.
+    let final_members: HashSet<u32> = current_groups(&registry)
+        .into_iter()
+        .filter(|group| learner_ids.contains(&group.learner_id))
+        .map(|group| group.learner_id)
+        .collect();
+    finalize_learners(&cfg, &st, &mut events, &registry, &final_members).await?;
     info!("training complete after {} outer steps", cfg.total_steps);
-    // Give writer tasks a moment to flush the shutdown frames.
+    // Give writer tasks a moment to flush the final control frames.
     tokio::time::sleep(Duration::from_secs(2)).await;
     return Ok(());
 }
@@ -808,6 +869,121 @@ async fn broadcast_all_fragments(st: &GlobalState, registry: &Registry) {
     }
 }
 
+/// Send every authoritative f32 fragment, then publish the version manifest
+/// on the control stream. Data/control streams may reorder; learners cache
+/// terminal fragments and use the manifest to decide when the complete cut
+/// is locally available.
+async fn send_final_cut(st: &GlobalState, group: &Arc<Group>) -> Result<()> {
+    for p in 0..st.layout.fragments.len() {
+        group
+            .send_large(MSG_FINAL_FRAGMENT, encode_final_fragment(st, p)?)
+            .await?;
+    }
+    group
+        .send_small(
+            MSG_FINAL_MANIFEST,
+            bytes::Bytes::from(encode_final_manifest(st.global_step, &st.versions)),
+        )
+        .await
+}
+
+/// Hold the coordinator alive until every valid learner group that was live
+/// at the final cut confirms it received and applied that exact cut. A target
+/// that disconnects may reconnect within the bounded wait; learners already
+/// abandoned before the cut are not members. SHUTDOWN is never sent as a
+/// legacy escape hatch because that would let an old learner save a locally
+/// blended artifact.
+async fn finalize_learners(
+    cfg: &Config,
+    st: &GlobalState,
+    events: &mut mpsc::Receiver<Event>,
+    registry: &Registry,
+    expected: &HashSet<u32>,
+) -> Result<()> {
+    if expected.is_empty() {
+        bail!("cannot finalize: no live learner groups at the final cut");
+    }
+    for group in current_groups(registry) {
+        if expected.contains(&group.learner_id) {
+            if let Err(error) = send_final_cut(st, &group).await {
+                warn!(learner_id = group.learner_id, %error, "final cut send failed; waiting for reconnect");
+            }
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
+    let mut acknowledged = HashSet::new();
+    while acknowledged.len() < expected.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = tokio::time::timeout(remaining, events.recv())
+            .await
+            .map_err(|_| {
+                let mut missing: Vec<u32> = expected
+                    .iter()
+                    .copied()
+                    .filter(|id| !acknowledged.contains(id))
+                    .collect();
+                missing.sort_unstable();
+                anyhow::anyhow!(
+                    "finalization timed out after {}s waiting for learner acknowledgements: {:?}",
+                    cfg.quorum_timeout_s,
+                    missing
+                )
+            })?
+            .context("event channel closed during finalization")?;
+        match event {
+            Event::FinalAck {
+                learner_id,
+                global_step,
+            } => {
+                if !expected.contains(&learner_id) {
+                    warn!(learner_id, "final acknowledgement from unknown learner dropped");
+                } else if global_step != st.global_step {
+                    warn!(
+                        learner_id,
+                        received = global_step,
+                        expected = st.global_step,
+                        "final acknowledgement for wrong manifest dropped"
+                    );
+                } else if acknowledged.insert(learner_id) {
+                    info!(
+                        learner_id,
+                        step = global_step,
+                        remaining = expected.len() - acknowledged.len(),
+                        "learner finalized authoritative parameters"
+                    );
+                }
+            }
+            Event::Hello { group } => {
+                if expected.contains(&group.learner_id) {
+                    if let Err(error) = send_final_cut(st, &group).await {
+                        warn!(learner_id = group.learner_id, %error, "final cut resend failed");
+                    }
+                } else {
+                    warn!(learner_id = group.learner_id, "unexpected learner during finalization");
+                }
+            }
+            Event::Disconnected { learner_id } => {
+                warn!(learner_id, "learner disconnected during finalization; waiting for reconnect");
+            }
+            Event::Push(_) | Event::Init { .. } => {
+                // The authoritative cut is frozen; late training traffic is
+                // intentionally ignored while learners finalize.
+            }
+        }
+    }
+
+    for group in current_groups(registry) {
+        if expected.contains(&group.learner_id) {
+            let _ = group
+                .send_small(MSG_SHUTDOWN, bytes::Bytes::new())
+                .await;
+        }
+    }
+    info!(learners = acknowledged.len(), "all learners acknowledged final cut");
+    Ok(())
+}
+
 async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>) {
     for p in 0..st.layout.fragments.len() {
         match encode_bcast(st, p) {
@@ -824,6 +1000,19 @@ fn encode_bcast(st: &GlobalState, p: usize) -> Result<bytes::Bytes> {
     // Broadcasts are full parameters, so a q4 session still sends bf16.
     let mut body = Vec::new();
     encode_tensor(bulk_dtype(st.wire_dtype), &st.params[p], &mut body)?;
+    let mut payload = Vec::with_capacity(12 + body.len());
+    payload.extend_from_slice(&(p as u32).to_le_bytes());
+    payload.extend_from_slice(&st.versions[p].to_le_bytes());
+    payload.extend_from_slice(&body);
+    Ok(bytes::Bytes::from(payload))
+}
+
+fn encode_final_fragment(st: &GlobalState, p: usize) -> Result<bytes::Bytes> {
+    // The coordinator's authoritative params and checkpoint are f32. The
+    // terminal path is deliberately independent of the ordinary wire dtype
+    // so bf16/q4 sessions do not round the artifact a second time.
+    let mut body = Vec::new();
+    encode_tensor(DTYPE_F32, &st.params[p], &mut body)?;
     let mut payload = Vec::with_capacity(12 + body.len());
     payload.extend_from_slice(&(p as u32).to_le_bytes());
     payload.extend_from_slice(&st.versions[p].to_le_bytes());

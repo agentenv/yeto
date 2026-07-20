@@ -48,7 +48,7 @@ struct Args {
     /// Pre-merge learner-delta correction: "heloco" or "none".
     #[arg(long, default_value = "heloco")]
     delta_correction: String,
-    /// Give up waiting for quorum and re-send the pull after this long.
+    /// Give up waiting for quorum (or final learner ACKs) after this long.
     #[arg(long, default_value_t = 900)]
     quorum_timeout_s: u64,
     /// Total number of outer steps T (each syncs one fragment).

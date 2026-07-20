@@ -264,6 +264,7 @@ impl GlobalState {
                 f.write_all(&l.tokens.to_le_bytes())?;
             }
             f.flush()?;
+            f.get_ref().sync_all()?;
         }
         std::fs::rename(&tmp, path)?;
         Ok(())
@@ -432,6 +433,32 @@ mod tests {
         assert!(st2.all_initialized());
         assert_eq!(st2.ledger.get(&3).unwrap().tokens, 4096);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn checkpoint_atomically_replaces_previous_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "yeto-atomic-ckpt-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+        std::fs::write(&path, b"old checkpoint bytes").unwrap();
+
+        let mut st = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32);
+        st.init_fragment(0, vec![3.0; 4]).unwrap();
+        st.init_fragment(1, vec![-4.0; 4]).unwrap();
+        st.global_step = 13;
+        st.versions = vec![12, 13];
+        st.save_checkpoint(&path).unwrap();
+
+        let mut restored =
+            GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32);
+        restored.load_checkpoint(&path).unwrap();
+        assert_eq!(restored.global_step, 13);
+        assert_eq!(restored.versions, vec![12, 13]);
+        assert!(!path.with_extension("tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

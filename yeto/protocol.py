@@ -1,10 +1,11 @@
-"""Python side of the learner <-> syncer wire protocol (docs/PROTOCOL.md v2).
+"""Python side of the learner <-> syncer wire protocol (docs/PROTOCOL.md v4).
 
 A learner owns a connection *group*: stream 0 carries control messages
-(HELLO, PULL_REQ, HEARTBEAT, SHUTDOWN); large payloads (INIT_PARAMS,
-PUSH_FRAGMENT, BCAST_FRAGMENT) are split into 4 MiB CHUNK envelopes striped
-round-robin across extra data sockets, which multiplies WAN throughput over
-what a single congestion-window-limited TCP stream can carry.
+(HELLO, PULL_REQ, HEARTBEAT, FINAL_MANIFEST/ACK, SHUTDOWN); large payloads
+(INIT_PARAMS, PUSH_FRAGMENT, BCAST_FRAGMENT, FINAL_FRAGMENT) are split into
+4 MiB CHUNK envelopes striped round-robin across extra data sockets, which
+multiplies WAN throughput over what a single congestion-window-limited TCP
+stream can carry.
 
 The training loop must never block on the WAN, so each socket gets a sender
 thread (draining a queue) and a receiver thread (reassembling chunks and
@@ -46,6 +47,14 @@ MSG_HEARTBEAT = 6
 MSG_SHUTDOWN = 7
 MSG_DATA_HELLO = 8
 MSG_CHUNK = 9
+# Reserved for the protocol-level error frame implemented by protocol v4.
+MSG_ERROR = 10
+MSG_FINAL_MANIFEST = 11
+MSG_FINAL_ACK = 12
+MSG_FINAL_FRAGMENT = 13
+
+FINALIZATION_REVISION = 1
+FINALIZATION_TIMEOUT = 900.0
 
 DTYPE_F32 = 1
 DTYPE_BF16 = 2
@@ -62,6 +71,8 @@ RECONNECT_DIAL_TIMEOUT = 20.0
 
 _HEADER = struct.Struct("<IBQ")  # magic, type, payload length
 _CHUNK_HEAD = struct.Struct("<QQQ")  # msg_id, total_len, offset
+_FINAL_MANIFEST_HEAD = struct.Struct("<HQI")  # revision, global_step, fragments
+_FINAL_ACK = struct.Struct("<HQ")  # revision, global_step
 
 
 def bulk_dtype(dtype: int) -> int:
@@ -110,6 +121,35 @@ def encode_hello(learner_id: int, dtype: int, layout: FragmentLayout, num_stream
     return b"".join(parts)
 
 
+def encode_final_manifest(global_step: int, versions: tuple[int, ...] | list[int]) -> bytes:
+    """Golden-compatible FINAL_MANIFEST encoder used by protocol tests."""
+    return _FINAL_MANIFEST_HEAD.pack(
+        FINALIZATION_REVISION, global_step, len(versions)
+    ) + struct.pack(f"<{len(versions)}Q", *versions)
+
+
+def decode_final_manifest(payload: bytes, expected_fragments: int) -> "FinalManifest":
+    if len(payload) < _FINAL_MANIFEST_HEAD.size:
+        raise ValueError("truncated FINAL_MANIFEST header")
+    revision, global_step, count = _FINAL_MANIFEST_HEAD.unpack_from(payload)
+    if revision != FINALIZATION_REVISION:
+        raise ValueError(
+            f"unsupported finalization revision {revision}; "
+            f"expected {FINALIZATION_REVISION}"
+        )
+    if count != expected_fragments:
+        raise ValueError(
+            f"FINAL_MANIFEST has {count} fragments, expected {expected_fragments}"
+        )
+    expected_size = _FINAL_MANIFEST_HEAD.size + count * 8
+    if len(payload) != expected_size:
+        raise ValueError(
+            f"FINAL_MANIFEST has {len(payload)} bytes, expected {expected_size}"
+        )
+    versions = struct.unpack_from(f"<{count}Q", payload, _FINAL_MANIFEST_HEAD.size)
+    return FinalManifest(global_step, tuple(versions))
+
+
 @dataclass
 class PullRequest:
     fragment_id: int
@@ -121,6 +161,25 @@ class BcastFragment:
     fragment_id: int
     version: int
     data: bytes  # raw tensor bytes in the session dtype
+
+
+@dataclass
+class FinalFragment:
+    fragment_id: int
+    version: int
+    data: bytes  # authoritative coordinator tensor bytes, always f32
+
+
+@dataclass(frozen=True)
+class FinalManifest:
+    global_step: int
+    versions: tuple[int, ...]
+
+
+@dataclass
+class _Outbound:
+    data: bytes
+    sent: threading.Event | None = None
 
 
 class SyncerClient:
@@ -140,6 +199,7 @@ class SyncerClient:
         num_streams: int = 4,
         connect_timeout: float = 900.0,
         max_reconnects: int | None = None,
+        finalization_timeout: float = FINALIZATION_TIMEOUT,
     ):
         self.addr = addr
         self.learner_id = learner_id
@@ -148,11 +208,21 @@ class SyncerClient:
         self.num_streams = num_streams
         self.connect_timeout = connect_timeout
         self.max_reconnects = max_reconnects
-        self._queues: list[queue.Queue[bytes | None]] = []
+        self.finalization_timeout = finalization_timeout
+        self._queues: list[queue.Queue[_Outbound | None]] = []
         self._socks: list[socket.socket] = []
         self._threads: list[threading.Thread] = []
         self._pulls: queue.Queue[PullRequest] = queue.Queue()
         self._bcasts: queue.Queue[BcastFragment] = queue.Queue()
+        # Raw globals are retained independently of the drain queue so a
+        # final fragment that outruns its control-stream manifest can be
+        # re-applied exactly after the manifest arrives.
+        self._final_fragments: dict[int, FinalFragment] = {}
+        self._final_manifest: FinalManifest | None = None
+        self._final_ack_step: int | None = None
+        self.finalizing = threading.Event()
+        self.finalized = threading.Event()
+        self._final_cond = threading.Condition()
         self._reasm: dict[int, tuple[bytearray, list[int]]] = {}
         self._reasm_lock = threading.Lock()
         self._msg_id = itertools.count()
@@ -226,7 +296,7 @@ class SyncerClient:
             self._failure.clear()
             self._connected.set()
             for i, s in enumerate(socks):
-                q: queue.Queue[bytes | None] = queue.Queue(maxsize=256)
+                q: queue.Queue[_Outbound | None] = queue.Queue(maxsize=256)
                 self._queues.append(q)
                 ts = threading.Thread(
                     target=self._send_loop, args=(gen, s, q), name=f"yeto-send-{i}", daemon=True
@@ -235,6 +305,8 @@ class SyncerClient:
                 self._threads += [ts, tr]
                 ts.start()
                 tr.start()
+        with self._final_cond:
+            self._final_cond.notify_all()
 
     def _teardown_group(self) -> None:
         """Kill the current group's sockets/threads and drop state that a
@@ -257,6 +329,8 @@ class SyncerClient:
         self._drain(self._pulls)  # stale pull requests; answering them is pointless
         for t in threads:
             t.join(timeout=5.0)
+        with self._final_cond:
+            self._final_cond.notify_all()
 
     def _supervise(self) -> None:
         """Reconnect loop: on any socket failure of the live group, tear the
@@ -273,6 +347,8 @@ class SyncerClient:
                 if self.max_reconnects is not None and self._reconnects_used >= self.max_reconnects:
                     with self._lock:
                         self._err = self._last_err or ConnectionError("syncer connection lost")
+                    with self._final_cond:
+                        self._final_cond.notify_all()
                     return
                 self._reconnects_used += 1
                 if self._closed.wait(backoff):
@@ -298,12 +374,14 @@ class SyncerClient:
             _close_socket(s)
         if self._supervisor is not None:
             self._supervisor.join(timeout=5.0)
+        with self._final_cond:
+            self._final_cond.notify_all()
 
     def check_health(self) -> None:
         """Raise only for unrecoverable failures. While a reconnect is being
         attempted this is a no-op; the training loop keeps stepping locally."""
         if self._err is not None:
-            raise RuntimeError("syncer connection failed") from self._err
+            raise RuntimeError(f"syncer connection failed: {self._err}") from self._err
 
     # -- learner-facing API ------------------------------------------------------
 
@@ -341,6 +419,103 @@ class SyncerClient:
     def drain_updates(self) -> list[BcastFragment]:
         return self._drain(self._bcasts)
 
+    def wait_for_final_fragments(
+        self, timeout: float | None = None
+    ) -> tuple[FinalManifest, list[FinalFragment]]:
+        """Wait for a manifest and its exact raw fragment versions.
+
+        FINAL_MANIFEST travels on control while fragments may be striped over
+        data sockets, so either can arrive first. The retained raw cache makes
+        both orders equivalent and survives a connection-group redial.
+        """
+        timeout = self.finalization_timeout if timeout is None else timeout
+        deadline = time.monotonic() + timeout
+        with self._final_cond:
+            while True:
+                self.check_health()
+                manifest = self._final_manifest
+                if manifest is not None:
+                    ready = []
+                    missing = []
+                    for fid, version in enumerate(manifest.versions):
+                        cached = self._final_fragments.get(fid)
+                        if cached is None or cached.version != version:
+                            latest = None if cached is None else cached.version
+                            missing.append((fid, version, latest))
+                        else:
+                            ready.append(cached)
+                    if not missing:
+                        return manifest, ready
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    detail = (
+                        "manifest not received"
+                        if manifest is None
+                        else f"missing fragment versions {missing}"
+                    )
+                    raise TimeoutError(
+                        f"finalization timed out after {timeout:.1f}s: {detail}"
+                    )
+                self._final_cond.wait(min(remaining, 0.5))
+
+    def acknowledge_finalization(
+        self, manifest: FinalManifest, timeout: float | None = None
+    ) -> None:
+        """Confirm the exact cut and wait boundedly until ACK bytes are sent.
+
+        The training loop may exit as soon as this returns: the sender thread
+        has completed ``sendall`` for FINAL_ACK, so saving cannot race client
+        teardown and silently lose the acknowledgement.
+        """
+        if manifest != self._final_manifest:
+            raise RuntimeError("cannot acknowledge a stale final manifest")
+        timeout = self.finalization_timeout if timeout is None else timeout
+        deadline = time.monotonic() + timeout
+        payload = _FINAL_ACK.pack(FINALIZATION_REVISION, manifest.global_step)
+        self._final_ack_step = manifest.global_step
+        while True:
+            self.check_health()
+            if self.shutdown.is_set():
+                # The coordinator may receive an ACK from the previous live
+                # generation just before a reconnect. Receipt of SHUTDOWN for
+                # this exact manifest is equivalent confirmation.
+                self.finalized.set()
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"finalization ACK was not sent within {timeout:.1f}s"
+                )
+            with self._lock:
+                connected = self._connected.is_set()
+                gen = self._gen
+            if not connected:
+                with self._final_cond:
+                    self._final_cond.wait(min(remaining, 0.5))
+                continue
+            sent = threading.Event()
+            if not self._enqueue(
+                0,
+                self._frame(MSG_FINAL_ACK, payload),
+                gen=gen,
+                sent=sent,
+            ):
+                continue
+            while not sent.wait(min(0.1, max(0.0, deadline - time.monotonic()))):
+                self.check_health()
+                with self._lock:
+                    if gen != self._gen:
+                        break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"finalization ACK was not sent within {timeout:.1f}s"
+                    )
+            if sent.is_set():
+                self.finalized.set()
+                with self._final_cond:
+                    self._final_cond.notify_all()
+                return
+
     @staticmethod
     def _drain(q: queue.Queue) -> list:
         out = []
@@ -356,7 +531,13 @@ class SyncerClient:
     def _frame(msg_type: int, payload: bytes) -> bytes:
         return _HEADER.pack(MAGIC, msg_type, len(payload)) + payload
 
-    def _enqueue(self, stream: int, data: bytes, gen: int | None = None) -> bool:
+    def _enqueue(
+        self,
+        stream: int,
+        data: bytes,
+        gen: int | None = None,
+        sent: threading.Event | None = None,
+    ) -> bool:
         """Enqueue-or-drop. Never raises and never blocks unboundedly: during
         an outage the message is dropped (the syncer's quorum tolerates
         missing responders, and learner counters only reset on broadcast
@@ -373,7 +554,10 @@ class SyncerClient:
                     return False
                 q = self._queues[stream]
             try:
-                q.put(data, timeout=0.5)  # bounded wait, then re-check the group
+                q.put(
+                    _Outbound(data, sent),
+                    timeout=0.5,
+                )  # bounded wait, then re-check the group
                 return True
             except queue.Full:
                 continue
@@ -405,6 +589,8 @@ class SyncerClient:
             self._last_err = exc
             self._connected.clear()
             self._failure.set()
+        with self._final_cond:
+            self._final_cond.notify_all()
 
     def _send_loop(self, gen: int, sock: socket.socket, q: queue.Queue) -> None:
         try:
@@ -412,7 +598,9 @@ class SyncerClient:
                 item = q.get()
                 if item is None:
                     return
-                sock.sendall(item)
+                sock.sendall(item.data)
+                if item.sent is not None:
+                    item.sent.set()
         except BaseException as e:
             self._socket_failed(gen, e)
 
@@ -449,18 +637,87 @@ class SyncerClient:
         return msg_type, bytes(buf[_HEADER.size :])
 
     def _dispatch(self, gen: int, msg_type: int, payload: bytes) -> None:
-        if msg_type == MSG_SHUTDOWN:
-            self.shutdown.set()
-            return
         with self._lock:
             if gen != self._gen:
                 return  # late message from a dead group
+            # Keep the generation check and every resulting state mutation
+            # atomic with respect to teardown/redial. Otherwise an obsolete
+            # receiver could pass the check, lose the race to a reconnect,
+            # then publish a stale terminal manifest or shutdown afterward.
+            self._dispatch_live(msg_type, payload)
+
+    def _dispatch_live(self, msg_type: int, payload: bytes) -> None:
+        if msg_type == MSG_SHUTDOWN:
+            manifest = self._final_manifest
+            if manifest is None or self._final_ack_step != manifest.global_step:
+                self._set_protocol_error(
+                    "syncer sent legacy SHUTDOWN before the versioned final "
+                    "manifest was applied; upgrade both syncer and learner"
+                )
+                return
+            self.shutdown.set()
+            with self._final_cond:
+                self._final_cond.notify_all()
+            return
         if msg_type == MSG_PULL_REQ:
             fid, step = struct.unpack("<IQ", payload)
             self._pulls.put(PullRequest(fid, step))
         elif msg_type == MSG_BCAST_FRAGMENT:
+            if len(payload) < 12:
+                self._set_protocol_error("truncated BCAST_FRAGMENT")
+                return
             fid, version = struct.unpack_from("<IQ", payload)
-            self._bcasts.put(BcastFragment(fid, version, payload[12:]))
+            if fid >= self.layout.num_fragments:
+                self._set_protocol_error(f"BCAST_FRAGMENT has unknown fragment {fid}")
+                return
+            update = BcastFragment(fid, version, payload[12:])
+            self._bcasts.put(update)
+        elif msg_type == MSG_FINAL_FRAGMENT:
+            if len(payload) < 12:
+                self._set_protocol_error("truncated FINAL_FRAGMENT")
+                return
+            fid, version = struct.unpack_from("<IQ", payload)
+            if fid >= self.layout.num_fragments:
+                self._set_protocol_error(f"FINAL_FRAGMENT has unknown fragment {fid}")
+                return
+            expected_size = 12 + self.layout.fragments[fid].numel * 4
+            if len(payload) != expected_size:
+                self._set_protocol_error(
+                    f"FINAL_FRAGMENT {fid} has {len(payload) - 12} tensor bytes, "
+                    f"expected {expected_size - 12} f32 bytes"
+                )
+                return
+            update = FinalFragment(fid, version, payload[12:])
+            with self._final_cond:
+                current = self._final_fragments.get(fid)
+                if current is None or version >= current.version:
+                    self._final_fragments[fid] = update
+                self._final_cond.notify_all()
+        elif msg_type == MSG_FINAL_MANIFEST:
+            try:
+                manifest = decode_final_manifest(payload, self.layout.num_fragments)
+            except ValueError as exc:
+                self._set_protocol_error(f"invalid FINAL_MANIFEST: {exc}")
+                return
+            with self._final_cond:
+                if self._final_manifest is not None and self._final_manifest != manifest:
+                    self._set_protocol_error(
+                        "syncer sent conflicting FINAL_MANIFEST payloads"
+                    )
+                    return
+                self._final_manifest = manifest
+                self.finalizing.set()
+                self._final_cond.notify_all()
+        else:
+            self._set_protocol_error(
+                f"unsupported syncer message type {msg_type}; upgrade both peers"
+            )
+
+    def _set_protocol_error(self, message: str) -> None:
+        with self._lock:
+            self._err = RuntimeError(message)
+        with self._final_cond:
+            self._final_cond.notify_all()
 
 
 def _close_socket(sock: socket.socket) -> None:
