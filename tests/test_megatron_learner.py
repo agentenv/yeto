@@ -202,3 +202,46 @@ def test_save_output_best_effort_writes_megatron_adapter_fallback(tmp_path, monk
     ]
     assert (tmp_path / meta["weights_file"]).exists()
     assert (tmp_path / "tokenizer_config.json").exists()
+
+
+def test_save_output_best_effort_drops_partial_bridge_export(tmp_path, monkeypatch):
+    import torch
+
+    class PartialBridge:
+        def save_hf_pretrained(self, model, save_dir):
+            Path(save_dir, "model-00001-of-00001.safetensors").write_text("partial")
+            raise AttributeError("'NoneType' object has no attribute 'megatron_to_hf'")
+
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, model_id, trust_remote_code=False):
+            return cls()
+
+        def save_pretrained(self, save_dir):
+            Path(save_dir, "tokenizer_config.json").write_text("{}")
+
+    class FakeChunk:
+        def __init__(self):
+            self.adapter = torch.nn.Parameter(torch.ones(1))
+
+        def named_parameters(self):
+            return [("decoder.layers.0.self_attention.linear_proj.adapter.linear_in.weight", self.adapter)]
+
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(AutoTokenizer=FakeTokenizer))
+    monkeypatch.setattr("yeto.models.resolve", lambda model: f"resolved/{model}")
+
+    args = SimpleNamespace(
+        model="m",
+        tuning="lora",
+        lora_targets="attention",
+        lora_r=8,
+        lora_alpha=16,
+        expert_parallel=1,
+        tensor_parallel=1,
+        pipeline_parallel=1,
+    )
+
+    assert ml._save_output_best_effort(PartialBridge(), [FakeChunk()], tmp_path, args) is True
+    assert not (tmp_path / ".bridge-export-tmp").exists()
+    assert not (tmp_path / "model-00001-of-00001.safetensors").exists()
+    assert (tmp_path / ml.MEGATRON_ADAPTER_METADATA_FILE).exists()

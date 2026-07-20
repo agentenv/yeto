@@ -24,6 +24,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 
 log = logging.getLogger("megatron-learner")
 MEGATRON_ADAPTER_METADATA_FILE = "yeto_megatron_adapter.json"
@@ -248,10 +249,14 @@ def _save_megatron_adapter_artifact(args, model, output_dir):
 def _save_output_best_effort(bridge, model, output_dir, args=None):
     save_dir = os.path.expanduser(output_dir)
     os.makedirs(save_dir, exist_ok=True)
+    bridge_tmp = os.path.join(save_dir, ".bridge-export-tmp")
+    shutil.rmtree(bridge_tmp, ignore_errors=True)
+    os.makedirs(bridge_tmp, exist_ok=True)
     try:
         # Export adapters back to an HF-loadable checkpoint via the bridge.
-        bridge.save_hf_pretrained(model, save_dir)
+        bridge.save_hf_pretrained(model, bridge_tmp)
     except Exception as e:
+        shutil.rmtree(bridge_tmp, ignore_errors=True)
         if args is not None and args.tuning == "lora":
             log.warning(
                 "Megatron-Bridge HF export failed after training; writing a "
@@ -265,6 +270,15 @@ def _save_output_best_effort(bridge, model, output_dir, args=None):
             e,
         )
         return False
+    for name in os.listdir(bridge_tmp):
+        src = os.path.join(bridge_tmp, name)
+        dst = os.path.join(save_dir, name)
+        if os.path.isdir(dst):
+            shutil.rmtree(dst)
+        elif os.path.exists(dst):
+            os.remove(dst)
+        shutil.move(src, dst)
+    shutil.rmtree(bridge_tmp, ignore_errors=True)
     log.info("saved adapters to %s", save_dir)
     return True
 
