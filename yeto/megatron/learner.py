@@ -124,12 +124,10 @@ def _build_model(args, device):
     model_id = resolve(args.model)
     log.info("importing %s into Megatron-Core (EP=%d)", model_id, args.expert_parallel)
     bridge = AutoBridge.from_hf_pretrained(model_id, trust_remote_code=True)
-    to_megatron_kwargs = {"load_weights": True}
-    if "wrap_with_ddp" in inspect.signature(bridge.to_megatron_model).parameters:
-        # Yeto wraps with mcore DDP after adapter attachment so the trainable
-        # LoRA params land in the optimizer buckets. Bridge 0.5 defaults to
-        # wrapping during import unless this is disabled.
-        to_megatron_kwargs["wrap_with_ddp"] = False
+    # Yeto wraps with mcore DDP after adapter attachment so the trainable LoRA
+    # params land in the optimizer buckets. Some Bridge versions expose
+    # wrap_with_ddp in the signature, others accept it through **kwargs.
+    to_megatron_kwargs = {"load_weights": True, "wrap_with_ddp": False}
     model = bridge.to_megatron_model(**to_megatron_kwargs)  # list[MegatronModule], one per VP chunk
 
     targets = list(_ATTENTION_TARGETS)
