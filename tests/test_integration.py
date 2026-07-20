@@ -22,6 +22,7 @@ from yeto.tensor_io import (
     apply_fragment,
     fragment_flat,
     pack_fragment,
+    pack_tensor,
     quantize_q4,
     unpack_fragment,
 )
@@ -54,12 +55,8 @@ class ToyLearner(threading.Thread):
             "model.embed.weight": torch.zeros(DIM // 4),
             "model.body.weight": torch.zeros(DIM),
         }
-        # Q4 pushes are deltas against the last received global value.
-        self.anchors = (
-            [fragment_flat(f, self.params) for f in layout.fragments]
-            if dtype == DTYPE_Q4
-            else None
-        )
+        # Every push is local minus the last raw global broadcast.
+        self.anchors: list[torch.Tensor | None] = [None] * layout.num_fragments
         self.client = SyncerClient(
             ("127.0.0.1", port), learner_id, layout, dtype, num_streams=2
         )
@@ -107,8 +104,7 @@ class ToyLearner(threading.Thread):
             for bc in self.client.drain_updates():
                 frag = self.layout.fragments[bc.fragment_id]
                 flat_new = unpack_fragment(frag, bc.data, bulk_dtype(self.dtype))
-                if self.anchors is not None:
-                    self.anchors[bc.fragment_id] = flat_new.clone()
+                self.anchors[bc.fragment_id] = flat_new.clone()
                 apply_fragment(frag, flat_new, self.params)
                 steps_at_reset[bc.fragment_id] = steps_total
                 versions[bc.fragment_id] = bc.version
@@ -122,13 +118,19 @@ class ToyLearner(threading.Thread):
                     continue
                 c_steps = steps_total - steps_at_reset[fid]
                 frag = self.layout.fragments[fid]
-                if self.anchors is not None:
-                    payload = quantize_q4(fragment_flat(frag, self.params) - self.anchors[fid])
+                anchor = self.anchors[fid]
+                if anchor is None:
+                    still.append(pull)
+                    continue
+                delta = fragment_flat(frag, self.params) - anchor
+                if self.dtype == DTYPE_Q4:
+                    payload = quantize_q4(delta)
                 else:
-                    payload = pack_fragment(frag, self.params, self.dtype)
+                    payload = pack_tensor(delta, self.dtype)
                 self.client.push_fragment(
                     fid,
                     pull.global_step,
+                    pull.round_attempt,
                     versions[fid],
                     steps_total,
                     c_steps,
@@ -204,8 +206,8 @@ def test_two_learners_converge_to_mean():
 
 @pytest.mark.timeout(180)
 def test_single_learner_roundtrip_q4():
-    """Q4 session: INIT/BCAST in bf16, pushes as 4-bit deltas the Rust
-    syncer reconstructs from Θ(base_version) + δ. Must converge like bf16."""
+    """Q4 session: INIT/BCAST in bf16 and pushes as 4-bit base-relative
+    deltas. Stale handling never needs historical parameter reconstruction."""
     binary = build_syncer()
     port = free_port()
     named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
@@ -231,7 +233,6 @@ def test_single_learner_roundtrip_q4():
         if proc.poll() is None:
             proc.kill()
         out = proc.stdout.read() if proc.stdout else ""
-        assert "stale q4 delta dropped" not in out, "steady-state q4 push was dropped"
         print(out[-3000:])
 
 

@@ -1,4 +1,4 @@
-"""Python side of the learner <-> syncer wire protocol (docs/PROTOCOL.md v2).
+"""Python side of the learner <-> syncer wire protocol (docs/PROTOCOL.md v4).
 
 A learner owns a connection *group*: stream 0 carries control messages
 (HELLO, PULL_REQ, HEARTBEAT, SHUTDOWN); large payloads (INIT_PARAMS,
@@ -25,17 +25,21 @@ check_health only raises once reconnection has been given up for good.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import queue
+import secrets
 import socket
 import struct
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .fragments import MERGE_ISO, FragmentLayout
 
 MAGIC = 0xD170C0DE
+PROTOCOL_VERSION = 4
 
 MSG_HELLO = 1
 MSG_INIT_PARAMS = 2
@@ -46,15 +50,25 @@ MSG_HEARTBEAT = 6
 MSG_SHUTDOWN = 7
 MSG_DATA_HELLO = 8
 MSG_CHUNK = 9
+MSG_ERROR = 10
+# Reserved for the independent terminal-artifact protocol. This branch does
+# not send or handle them; keeping the IDs stable avoids merge collisions.
+MSG_FINAL_MANIFEST = 11
+MSG_FINAL_ACK = 12
+MSG_FINAL_FRAGMENT = 13
 
 DTYPE_F32 = 1
 DTYPE_BF16 = 2
 # Session dtype 3: PUSH_FRAGMENT payloads are block-quantized 4-bit E3M0
-# *deltas* against the fragment value at base_version; INIT_PARAMS and
-# BCAST_FRAGMENT stay bf16 (see bulk_dtype and docs/PROTOCOL.md v3).
+# base-relative learner deltas; INIT_PARAMS and BCAST_FRAGMENT stay bf16
+# (see bulk_dtype and docs/PROTOCOL.md v4).
 DTYPE_Q4 = 3
 
 CHUNK_SIZE = 4 * 1024 * 1024
+MAX_HANDSHAKE_FRAME = 16 * 1024 * 1024
+MAX_ERROR_FRAME = 64 * 1024
+Q4_BLOCK = 256
+MAX_PARTIAL_MESSAGES = 64
 
 RECONNECT_BACKOFF_START = 1.0
 RECONNECT_BACKOFF_CAP = 30.0
@@ -62,6 +76,8 @@ RECONNECT_DIAL_TIMEOUT = 20.0
 
 _HEADER = struct.Struct("<IBQ")  # magic, type, payload length
 _CHUNK_HEAD = struct.Struct("<QQQ")  # msg_id, total_len, offset
+_HELLO_HEAD = struct.Struct("<HIQBI")  # version, learner, generation, dtype, fragments
+_DATA_HELLO = struct.Struct("<HIQH")  # version, learner, generation, stream index
 
 
 def bulk_dtype(dtype: int) -> int:
@@ -71,6 +87,29 @@ def bulk_dtype(dtype: int) -> int:
     payloads would not survive 4 bits, so they travel as bf16.
     """
     return DTYPE_BF16 if dtype == DTYPE_Q4 else dtype
+
+
+def layout_fingerprint(layout: FragmentLayout) -> bytes:
+    """Canonical semantic identity for tensor names, order, shapes, and modes."""
+    digest = hashlib.sha256()
+    digest.update(b"yeto-layout-v1\0")
+    digest.update(struct.pack("<I", layout.num_fragments))
+    for frag in layout.fragments:
+        digest.update(struct.pack("<BI", frag.merge_mode, len(frag.tensors)))
+        for name, numel in frag.tensors:
+            encoded_name = name.encode("utf-8")
+            digest.update(struct.pack("<I", len(encoded_name)))
+            digest.update(encoded_name)
+            digest.update(struct.pack("<Q", numel))
+            if frag.identity_shapes is not None:
+                shape = frag.identity_shapes[name]
+            elif frag.shapes is not None and name in frag.shapes:
+                shape = frag.shapes[name]
+            else:
+                shape = (numel,)
+            digest.update(struct.pack("<I", len(shape)))
+            digest.update(struct.pack(f"<{len(shape)}Q", *shape))
+    return digest.digest()
 
 
 def write_frame(sock: socket.socket, msg_type: int, payload: bytes) -> None:
@@ -89,15 +128,38 @@ def _read_exact(sock: socket.socket, n: int) -> bytes:
     return bytes(buf)
 
 
-def read_frame(sock: socket.socket) -> tuple[int, bytes]:
+def read_frame(
+    sock: socket.socket,
+    max_payload: int | Callable[[int], int] = MAX_HANDSHAKE_FRAME,
+) -> tuple[int, bytes]:
+    """Read one frame after checking its type-aware limit before allocation."""
     magic, msg_type, length = _HEADER.unpack(_read_exact(sock, _HEADER.size))
     if magic != MAGIC:
         raise ValueError(f"bad magic {magic:#x}")
+    limit = max_payload(msg_type) if callable(max_payload) else max_payload
+    if length > limit:
+        raise ValueError(
+            f"frame type {msg_type} has length {length}, exceeds limit {limit}"
+        )
     return msg_type, _read_exact(sock, length)
 
 
-def encode_hello(learner_id: int, dtype: int, layout: FragmentLayout, num_streams: int) -> bytes:
-    parts = [struct.pack("<IBI", learner_id, dtype, layout.num_fragments)]
+def encode_hello(
+    learner_id: int,
+    dtype: int,
+    layout: FragmentLayout,
+    num_streams: int,
+    connection_generation: int = 0,
+) -> bytes:
+    parts = [
+        _HELLO_HEAD.pack(
+            PROTOCOL_VERSION,
+            learner_id,
+            connection_generation,
+            dtype,
+            layout.num_fragments,
+        )
+    ]
     for frag in layout.fragments:
         parts.append(struct.pack("<BI", frag.merge_mode, len(frag.tensors)))
         parts.append(struct.pack(f"<{len(frag.tensors)}Q", *(n for _, n in frag.tensors)))
@@ -106,14 +168,39 @@ def encode_hello(learner_id: int, dtype: int, layout: FragmentLayout, num_stream
             # take the 2D view; avg/RDA keep the original wire format.
             dims = [d for name, _ in frag.tensors for d in frag.shapes[name]]
             parts.append(struct.pack(f"<{len(dims)}Q", *dims))
+    parts.append(layout_fingerprint(layout))
     parts.append(struct.pack("<H", num_streams))
     return b"".join(parts)
+
+
+def encode_data_hello(
+    learner_id: int, connection_generation: int, stream_index: int
+) -> bytes:
+    return _DATA_HELLO.pack(
+        PROTOCOL_VERSION, learner_id, connection_generation, stream_index
+    )
+
+
+def _tensor_nbytes(dtype: int, numel: int) -> int:
+    width = {DTYPE_F32: 4, DTYPE_BF16: 2}.get(dtype)
+    if width is None:
+        raise ValueError(f"unknown tensor dtype {dtype}")
+    return numel * width
+
+
+def _q4_nbytes(numel: int) -> int:
+    return -(-numel // Q4_BLOCK) * (4 + Q4_BLOCK // 2)
+
+
+class ProtocolError(RuntimeError):
+    """The peer rejected this client as wire- or session-incompatible."""
 
 
 @dataclass
 class PullRequest:
     fragment_id: int
     global_step: int
+    round_attempt: int
 
 
 @dataclass
@@ -141,6 +228,14 @@ class SyncerClient:
         connect_timeout: float = 900.0,
         max_reconnects: int | None = None,
     ):
+        if not 0 <= learner_id <= 0xFFFF_FFFF:
+            raise ValueError(f"learner_id must fit u32, got {learner_id}")
+        if dtype not in (DTYPE_F32, DTYPE_BF16, DTYPE_Q4):
+            raise ValueError(f"unsupported session dtype {dtype}")
+        if layout.num_fragments < 1:
+            raise ValueError("layout must contain at least one fragment")
+        if not 0 <= num_streams <= 256:
+            raise ValueError(f"num_streams must be in [0, 256], got {num_streams}")
         self.addr = addr
         self.learner_id = learner_id
         self.layout = layout
@@ -148,12 +243,21 @@ class SyncerClient:
         self.num_streams = num_streams
         self.connect_timeout = connect_timeout
         self.max_reconnects = max_reconnects
+        self._max_bcast_payload = max(
+            12 + _tensor_nbytes(bulk_dtype(dtype), fragment.numel)
+            for fragment in layout.fragments
+        )
+        self._max_chunked_inner = _HEADER.size + self._max_bcast_payload
         self._queues: list[queue.Queue[bytes | None]] = []
         self._socks: list[socket.socket] = []
         self._threads: list[threading.Thread] = []
         self._pulls: queue.Queue[PullRequest] = queue.Queue()
         self._bcasts: queue.Queue[BcastFragment] = queue.Queue()
-        self._reasm: dict[int, tuple[bytearray, list[int]]] = {}
+        self._bcast_seen: list[tuple[int, bytes] | None] = [
+            None
+        ] * layout.num_fragments
+        self._bcast_lock = threading.Lock()
+        self._reasm: dict[int, tuple[bytearray, list[int], list[tuple[int, int]]]] = {}
         self._reasm_lock = threading.Lock()
         self._msg_id = itertools.count()
         self._rr = itertools.count()
@@ -165,6 +269,7 @@ class SyncerClient:
         # and ignored. Guarded by _lock together with _socks/_queues.
         self._lock = threading.RLock()
         self._gen = 0
+        self.connection_generation = 0
         self._connected = threading.Event()
         self._failure = threading.Event()  # set by any thread of the live group
         self._closed = threading.Event()
@@ -203,15 +308,30 @@ class SyncerClient:
         single attempt and the supervisor's backoff handles retries.
         """
         socks: list[socket.socket] = []
+        connection_generation = secrets.randbits(64)
+        while connection_generation == 0 or connection_generation == self.connection_generation:
+            connection_generation = secrets.randbits(64)
         try:
             control = self._connect_one() if patient else self._dial(RECONNECT_DIAL_TIMEOUT)
             write_frame(
-                control, MSG_HELLO, encode_hello(self.learner_id, self.dtype, self.layout, self.num_streams)
+                control,
+                MSG_HELLO,
+                encode_hello(
+                    self.learner_id,
+                    self.dtype,
+                    self.layout,
+                    self.num_streams,
+                    connection_generation,
+                ),
             )
             socks.append(control)
             for idx in range(self.num_streams):
                 s = self._connect_one() if patient else self._dial(RECONNECT_DIAL_TIMEOUT)
-                write_frame(s, MSG_DATA_HELLO, struct.pack("<IH", self.learner_id, idx))
+                write_frame(
+                    s,
+                    MSG_DATA_HELLO,
+                    encode_data_hello(self.learner_id, connection_generation, idx),
+                )
                 socks.append(s)
         except BaseException:
             for s in socks:
@@ -220,6 +340,7 @@ class SyncerClient:
         with self._lock:
             self._gen += 1
             gen = self._gen
+            self.connection_generation = connection_generation
             self._socks = socks
             self._queues = []
             self._threads = []
@@ -308,23 +429,52 @@ class SyncerClient:
     # -- learner-facing API ------------------------------------------------------
 
     def send_init(self, fragment_id: int, tensor_bytes: bytes) -> None:
+        if not 0 <= fragment_id < self.layout.num_fragments:
+            raise ValueError(f"INIT_PARAMS for unknown fragment {fragment_id}")
+        expected = _tensor_nbytes(
+            bulk_dtype(self.dtype), self.layout.fragments[fragment_id].numel
+        )
+        if len(tensor_bytes) != expected:
+            raise ValueError(
+                f"INIT_PARAMS fragment {fragment_id} has {len(tensor_bytes)} "
+                f"tensor bytes, expected {expected}"
+            )
         self._send_large(MSG_INIT_PARAMS, struct.pack("<I", fragment_id) + tensor_bytes)
 
     def push_fragment(
         self,
         fragment_id: int,
         global_step: int,
+        round_attempt: int,
         base_version: int,
         local_step: int,
         c_steps: int,
         c_tokens: int,
         tensor_bytes: bytes,
     ) -> None:
+        if not 0 <= fragment_id < self.layout.num_fragments:
+            raise ValueError(f"PUSH_FRAGMENT for unknown fragment {fragment_id}")
+        if round_attempt < 1:
+            raise ValueError("round_attempt must be positive")
+        if c_steps < 1:
+            raise ValueError("c_steps must be positive")
+        numel = self.layout.fragments[fragment_id].numel
+        expected = (
+            _q4_nbytes(numel)
+            if self.dtype == DTYPE_Q4
+            else _tensor_nbytes(self.dtype, numel)
+        )
+        if len(tensor_bytes) != expected:
+            raise ValueError(
+                f"PUSH_FRAGMENT fragment {fragment_id} has {len(tensor_bytes)} "
+                f"delta bytes, expected {expected}"
+            )
         head = struct.pack(
-            "<IIQQQIQ",
+            "<IIQIQQIQ",
             self.learner_id,
             fragment_id,
             global_step,
+            round_attempt,
             base_version,
             local_step,
             c_steps,
@@ -406,6 +556,17 @@ class SyncerClient:
             self._connected.clear()
             self._failure.set()
 
+    def _protocol_failed(self, gen: int, exc: BaseException) -> None:
+        with self._lock:
+            if gen != self._gen:
+                return
+            error = exc if isinstance(exc, ProtocolError) else ProtocolError(str(exc))
+            self._err = error
+            self._last_err = error
+            self._connected.clear()
+            self._closed.set()
+            self._failure.set()
+
     def _send_loop(self, gen: int, sock: socket.socket, q: queue.Queue) -> None:
         try:
             while True:
@@ -419,29 +580,67 @@ class SyncerClient:
     def _recv_loop(self, gen: int, sock: socket.socket) -> None:
         try:
             while True:
-                msg_type, payload = read_frame(sock)
+                msg_type, payload = read_frame(sock, self._incoming_frame_limit)
                 if msg_type == MSG_CHUNK:
                     inner = self._reassemble(gen, payload)
                     if inner is not None:
                         self._dispatch(gen, *inner)
                 else:
                     self._dispatch(gen, msg_type, payload)
+        except (ValueError, ProtocolError) as e:
+            self._protocol_failed(gen, e)
         except BaseException as e:
             self._socket_failed(gen, e)
 
+    def _incoming_frame_limit(self, msg_type: int) -> int:
+        limits = {
+            MSG_PULL_REQ: 16,
+            MSG_BCAST_FRAGMENT: self._max_bcast_payload,
+            MSG_SHUTDOWN: 0,
+            MSG_ERROR: MAX_ERROR_FRAME,
+            MSG_CHUNK: _CHUNK_HEAD.size + CHUNK_SIZE,
+        }
+        try:
+            return limits[msg_type]
+        except KeyError:
+            raise ValueError(f"unexpected syncer message type {msg_type}") from None
+
     def _reassemble(self, gen: int, payload: bytes) -> tuple[int, bytes] | None:
+        if len(payload) < _CHUNK_HEAD.size:
+            raise ValueError("chunk header truncated")
         msg_id, total, offset = _CHUNK_HEAD.unpack_from(payload)
         data = payload[_CHUNK_HEAD.size :]
+        if not data:
+            raise ValueError("empty chunk")
+        if total < _HEADER.size:
+            raise ValueError("chunked inner frame is shorter than its header")
+        if total > self._max_chunked_inner:
+            raise ValueError(
+                f"chunked frame has length {total}, exceeds negotiated limit "
+                f"{self._max_chunked_inner}"
+            )
+        end = offset + len(data)
+        if end > total:
+            raise ValueError("chunk overflow")
         with self._reasm_lock:
             if gen != self._gen:
                 return None  # chunk from a dead group; msg_ids restarted server-side
             if msg_id not in self._reasm:
-                self._reasm[msg_id] = (bytearray(total), [0])
-            buf, filled = self._reasm[msg_id]
-            buf[offset : offset + len(data)] = data
+                if len(self._reasm) >= MAX_PARTIAL_MESSAGES:
+                    raise ValueError("too many partial chunked messages")
+                self._reasm[msg_id] = (bytearray(total), [0], [])
+            buf, filled, ranges = self._reasm[msg_id]
+            if len(buf) != total:
+                raise ValueError("chunk total changed within one message")
+            if any(offset < old_end and old_start < end for old_start, old_end in ranges):
+                raise ValueError("overlapping chunk")
+            buf[offset:end] = data
             filled[0] += len(data)
+            ranges.append((offset, end))
             if filled[0] < total:
                 return None
+            if filled[0] != total:
+                raise ValueError("chunk byte count exceeds frame length")
             del self._reasm[msg_id]
         magic, msg_type, length = _HEADER.unpack_from(bytes(buf[: _HEADER.size]))
         if magic != MAGIC or length != total - _HEADER.size:
@@ -449,18 +648,64 @@ class SyncerClient:
         return msg_type, bytes(buf[_HEADER.size :])
 
     def _dispatch(self, gen: int, msg_type: int, payload: bytes) -> None:
-        if msg_type == MSG_SHUTDOWN:
-            self.shutdown.set()
-            return
         with self._lock:
             if gen != self._gen:
                 return  # late message from a dead group
+        if msg_type == MSG_ERROR:
+            message = payload.decode("utf-8", errors="replace")
+            self._protocol_failed(
+                gen, ProtocolError(f"syncer rejected protocol session: {message}")
+            )
+            return
+        if msg_type == MSG_SHUTDOWN:
+            if payload:
+                raise ValueError("SHUTDOWN payload must be empty")
+            self.shutdown.set()
+            return
         if msg_type == MSG_PULL_REQ:
-            fid, step = struct.unpack("<IQ", payload)
-            self._pulls.put(PullRequest(fid, step))
+            if len(payload) != 16:
+                raise ValueError("PULL_REQ payload must be 16 bytes")
+            fid, step, round_attempt = struct.unpack("<IQI", payload)
+            if fid >= self.layout.num_fragments:
+                raise ValueError(f"PULL_REQ for unknown fragment {fid}")
+            self._pulls.put(PullRequest(fid, step, round_attempt))
         elif msg_type == MSG_BCAST_FRAGMENT:
+            if len(payload) < 12:
+                raise ValueError("BCAST_FRAGMENT header truncated")
             fid, version = struct.unpack_from("<IQ", payload)
-            self._bcasts.put(BcastFragment(fid, version, payload[12:]))
+            if fid >= self.layout.num_fragments:
+                raise ValueError(f"BCAST_FRAGMENT for unknown fragment {fid}")
+            expected = _tensor_nbytes(
+                bulk_dtype(self.dtype), self.layout.fragments[fid].numel
+            )
+            if len(payload) - 12 != expected:
+                raise ValueError(
+                    f"BCAST_FRAGMENT {fid} has {len(payload) - 12} tensor bytes, "
+                    f"expected {expected}"
+                )
+            data = payload[12:]
+            digest = hashlib.sha256(data).digest()
+            with self._bcast_lock:
+                seen = self._bcast_seen[fid]
+                if seen is not None:
+                    seen_version, seen_digest = seen
+                    if version < seen_version:
+                        return
+                    if version == seen_version:
+                        if digest != seen_digest:
+                            raise ProtocolError(
+                                f"conflicting BCAST_FRAGMENT payloads for fragment "
+                                f"{fid} version {version}"
+                            )
+                        return
+                self._bcast_seen[fid] = (version, digest)
+                # Receiver threads run once per striped socket. Queue the
+                # accepted update under the same lock as the monotonicity
+                # check so two versions cannot validate in order but enqueue
+                # in reverse order after a thread reschedule.
+                self._bcasts.put(BcastFragment(fid, version, data))
+        else:
+            raise ValueError(f"unexpected syncer message type {msg_type}")
 
 
 def _close_socket(sock: socket.socket) -> None:

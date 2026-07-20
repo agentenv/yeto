@@ -259,12 +259,19 @@ def main(argv=None) -> None:
 
     from ..fragments import build_layout
     from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
-    from ..tensor_io import fragment_flat, pack_fragment, quantize_q4, unpack_fragment
+    from ..tensor_io import (
+        fragment_flat,
+        pack_fragment,
+        pack_tensor,
+        quantize_q4,
+        unpack_fragment,
+    )
 
     layout = build_layout(
         [(n, int(np.prod(i.shape))) for n, i in registry.items()],
         args.fragments,
         args.fragment_pattern,
+        named_shapes={n: tuple(int(dim) for dim in info.shape) for n, info in registry.items()},
     )
     total = sum(int(np.prod(i.shape)) for i in registry.values())
     log.info(
@@ -291,8 +298,9 @@ def main(argv=None) -> None:
 
     run_inner_loop(
         args, model, registry, layout, tokenizer, client,
-        fragment_flat=fragment_flat, pack_fragment=pack_fragment,
-        quantize_q4=quantize_q4, unpack_fragment=unpack_fragment,
+        fragment_flat=fragment_flat, pack_tensor=pack_tensor,
+        quantize_q4=quantize_q4,
+        unpack_fragment=unpack_fragment,
         bulk_dtype=bulk_dtype, dtype_q4=DTYPE_Q4,
     )
 
@@ -303,7 +311,8 @@ def main(argv=None) -> None:
 
 def run_inner_loop(
     args, model, registry, layout, tokenizer, client,
-    *, fragment_flat, pack_fragment, quantize_q4, unpack_fragment, bulk_dtype, dtype_q4,
+    *, fragment_flat, pack_tensor, quantize_q4, unpack_fragment,
+    bulk_dtype, dtype_q4,
 ):
     """MLX inner AdamW steps + the torch learner's exact sync semantics:
     counters advance every step, pulls are answered once c_steps >= 1,
@@ -337,10 +346,9 @@ def run_inner_loop(
     pending_pulls: list = []
     global_step = 0
     tokens_per_inner_step = args.micro_batch_size * args.grad_accum * args.seq_len
-    anchors: list[torch.Tensor] | None = None
-    if client is not None and client.dtype == dtype_q4:
-        snap = torch_adapters(model, registry)
-        anchors = [fragment_flat(frag, snap) for frag in layout.fragments]
+    anchors: list[torch.Tensor | None] | None = None
+    if client is not None:
+        anchors = [None] * layout.num_fragments
 
     shutdown = False
     t_last = time.monotonic()
@@ -414,14 +422,19 @@ def run_inner_loop(
                 continue
             c_tokens = tokens_total - tokens_at_reset[fid]
             snap = snap if snap is not None else torch_adapters(model, registry)
-            if anchors is not None:
-                delta = fragment_flat(layout.fragments[fid], snap) - anchors[fid]
+            anchor = anchors[fid] if anchors is not None else None
+            if anchor is None:
+                still_pending.append(pull)
+                continue
+            delta = fragment_flat(layout.fragments[fid], snap) - anchor
+            if client.dtype == dtype_q4:
                 payload = quantize_q4(delta)
             else:
-                payload = pack_fragment(layout.fragments[fid], snap, client.dtype)
+                payload = pack_tensor(delta, client.dtype)
             client.push_fragment(
                 fid,
                 pull.global_step,
+                pull.round_attempt,
                 fragment_versions[fid],
                 steps_total,
                 c_steps,
