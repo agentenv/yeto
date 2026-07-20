@@ -1,4 +1,4 @@
-# Learner ↔ Syncer wire protocol (v3)
+# Learner ↔ Syncer wire protocol (v4)
 
 Transport: a **connection group** of `1 + S` persistent TCP sockets per
 learner (stream 0 = control, streams 1..S = data). A single cross-region TCP
@@ -30,22 +30,26 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
 | 4    | PUSH_FRAGMENT  | learner → syncer | learner_id:u32, fragment_id:u32, global_step:u64 (echoed from PULL_REQ), base_version:u64 (version of this fragment the learner last applied), local_step:u64, c_steps:u32, c_tokens:u64, tensor bytes (current θ_m,p; under dtype=q4: the q4-encoded delta θ_m,p − Θ_p(base_version)) |
 | 5    | BCAST_FRAGMENT | syncer → learner | fragment_id:u32, version:u64 (new global step t), tensor bytes (Θ_p^(t)) |
 | 6    | HEARTBEAT      | learner → syncer | learner_id:u32, local_step:u64 |
-| 7    | SHUTDOWN       | syncer → learner | empty (training reached T global steps) |
+| 7    | SHUTDOWN       | syncer → learner | empty; sent only after the learner ACKs the versioned final manifest |
 | 8    | DATA_HELLO     | learner → syncer | learner_id:u32, stream_idx:u16 (attaches this socket to the learner's group as a data stream) |
 | 9    | CHUNK          | either           | msg_id:u64, total_len:u64, offset:u64, bytes (slice of an inner frame) |
+| 10   | ERROR          | either           | protocol-level error frame (reserved by this change; payload defined by protocol v4) |
+| 11   | FINAL_MANIFEST | syncer → learner | revision:u16 (=1), final_global_step:u64, num_fragments:u32, expected_version:u64 × num_fragments |
+| 12   | FINAL_ACK      | learner → syncer | revision:u16 (=1), final_global_step:u64 |
+| 13   | FINAL_FRAGMENT | syncer → learner | fragment_id:u32, version:u64, tensor bytes (authoritative Θ_p, always little-endian f32) |
 
 ## Striping
 
 - HELLO (on stream 0) carries `num_streams:u16` after the layout; the learner
   then opens that many extra sockets, each introduced by DATA_HELLO.
-- Small messages (HELLO, PULL_REQ, HEARTBEAT, SHUTDOWN) travel unchunked on
-  stream 0.
-- Large messages (INIT_PARAMS, PUSH_FRAGMENT, BCAST_FRAGMENT) are serialized
-  as a normal inner frame, split into fixed-size chunks (4 MiB), and the
-  chunks are sent round-robin across the data streams wrapped in CHUNK
-  envelopes. `msg_id` increases monotonically per sender per group; the
-  receiver reassembles by (group, msg_id) and parses the inner frame when all
-  bytes arrived. With zero data streams, large messages go on stream 0.
+- Small messages (HELLO, PULL_REQ, HEARTBEAT, FINAL_MANIFEST, FINAL_ACK,
+  SHUTDOWN) travel unchunked on stream 0.
+- Large messages (INIT_PARAMS, PUSH_FRAGMENT, BCAST_FRAGMENT, FINAL_FRAGMENT)
+  are serialized as a normal inner frame, split into fixed-size chunks
+  (4 MiB), and the chunks are sent round-robin across the data streams wrapped
+  in CHUNK envelopes. `msg_id` increases monotonically per sender per group;
+  the receiver reassembles by (group, msg_id) and parses the inner frame when
+  all bytes arrived. With zero data streams, large messages go on stream 0.
 
 ## Semantics
 
@@ -100,13 +104,44 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
   its global step.
 - **Recovery**: a (re)connecting learner sends HELLO; syncer replies with
   BCAST_FRAGMENT for every initialized fragment at that fragment's version.
+- **Authoritative finalization**: after all launched rounds finish, the syncer
+  atomically writes the final checkpoint, sends every raw global fragment as
+  a dedicated FINAL_FRAGMENT, then sends FINAL_MANIFEST on the control stream.
+  FINAL_FRAGMENT is always f32, independent of the session's ordinary wire
+  dtype, so bf16/q4 training cannot round the coordinator state before save.
+  Control and striped data streams may reorder. Each learner therefore retains
+  the newest FINAL_FRAGMENT per fragment/version independently of its normal
+  training inbox. Once the manifest and every exact listed version are
+  present, the learner broadcasts those raw f32 values to its island ranks and
+  overwrites all trainable parameters with **α = 0**, casting only to each
+  destination parameter's dtype, regardless of the run's normal
+  `--merge-alpha`. Only then does it send FINAL_ACK and leave the training loop
+  to save. Missing versions or an unsent ACK fail after a bounded wait; the
+  coordinator bounds its ACK wait with `--quorum-timeout-s`. Failures never
+  fall back to a locally blended save. A reconnect during this phase receives
+  the complete final cut and manifest again.
+  Final ACK membership is frozen to the valid learner groups connected at the
+  final cut (and must contain at least one learner). A target that disconnects
+  during finalization may reconnect and receive the cut again. Learners the
+  fleet controller already abandoned before the cut are excluded, so a dead
+  historical learner cannot prevent surviving artifact producers from
+  finishing.
 - Merge math runs in f32 on the syncer regardless of wire dtype.
+
+FINAL_MANIFEST/FINAL_ACK carry their own revision. Revision mismatch is a
+hard error. A v4 learner also rejects an empty SHUTDOWN received before it has
+applied and acknowledged a final manifest. Conversely, the v4 syncer does not
+send SHUTDOWN to a learner that never ACKs, so mixed old/new peers fail rather
+than silently emitting a non-authoritative artifact.
 
 ## Q4 delta pushes (dtype = 3)
 
 Full parameters do not survive 4-bit encoding, but push *deltas* have a
 small dynamic range, so a q4 session quantizes only PUSH_FRAGMENT payloads;
 INIT_PARAMS and BCAST_FRAGMENT travel as bf16 (`bulk_dtype`).
+FINAL_FRAGMENT is not a q4 bulk frame: terminal values always travel as f32
+so the delivered artifact has the same authoritative values as checkpoint
+export, modulo an individual destination parameter's own storage dtype.
 
 - **Encoding**: values are grouped into blocks of 256; each block is an f32
   absmax scale followed by 128 bytes of packed nibbles (two values per byte,
@@ -140,6 +175,12 @@ persists:
 - global step t and per-fragment versions,
 - global parameters Θ and outer (Nesterov) momentum,
 - the cumulative merged-token/step ledger per learner.
+
+Periodic checkpoints remain controlled by `--checkpoint-every`, but after the
+last in-flight round the syncer always rewrites `--checkpoint-path` at the
+final quiescent cut before beginning learner finalization. Thus a
+`--total-steps` value that is not a checkpoint interval still leaves a final,
+atomic coordinator checkpoint.
 
 Learner consistency on restore holds because recovery is idempotent: a learner
 (re)connecting after a syncer restart receives the full fragment rebroadcast,

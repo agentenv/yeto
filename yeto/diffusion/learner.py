@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader, IterableDataset
 
 from ..autobatch import int_or_auto, rebalance_grad_accum
 from ..data import _learner_rows, load_rows
+from ..finalization import finalize_torch_island
 from ..fragments import build_layout
 from ..losses import flow_matching_loss
 from ..models import resolve
@@ -3119,24 +3120,40 @@ def main(argv=None) -> None:
             )
 
         actions = []
+        finalizing = False
         if rank == 0 and client is not None:
             client.check_health()
-            for bc in client.drain_updates():
-                flat = unpack_fragment(
-                    layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
-                )
-                if anchors is not None:
-                    anchors[bc.fragment_id] = flat.clone()
-                actions.append((bc.fragment_id, bc.version, flat))
+            finalizing = client.finalizing.is_set()
+            if not finalizing:
+                for bc in client.drain_updates():
+                    flat = unpack_fragment(
+                        layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
+                    )
+                    if anchors is not None:
+                        anchors[bc.fragment_id] = flat.clone()
+                    actions.append((bc.fragment_id, bc.version, flat))
             shutdown = client.shutdown.is_set()
 
         if world > 1:
             meta = [(f, v) for f, v, _ in actions] if rank == 0 else None
-            box = [meta, shutdown]
+            box = [meta, shutdown, finalizing]
             dist.broadcast_object_list(box, src=0)
-            meta, shutdown = box
+            meta, shutdown, finalizing = box
             if rank != 0:
                 actions = [(f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta]
+        if finalizing:
+            manifest = finalize_torch_island(
+                client,
+                layout,
+                params,
+                rank=rank,
+                world=world,
+                device=device,
+            )
+            global_step = max(global_step, manifest.global_step)
+            shutdown = True
+            break
+        if world > 1:
             for fid, version, flat in actions:
                 flat = flat.to(device)
                 dist.broadcast(flat, src=0)
@@ -3190,6 +3207,11 @@ def main(argv=None) -> None:
         if shutdown or steps_total >= args.max_local_steps:
             break
 
+    if rank == 0 and client is not None and not client.finalized.is_set():
+        raise RuntimeError(
+            "diffusion learner stopped before authoritative finalization; "
+            "refusing to save local parameters"
+        )
     if rank == 0:
         save_adapters(pipe, args.output_dir, adapter, args=args, params=params)
         if client is not None:

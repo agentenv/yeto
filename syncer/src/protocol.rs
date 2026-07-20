@@ -14,6 +14,19 @@ pub const MSG_HEARTBEAT: u8 = 6;
 pub const MSG_SHUTDOWN: u8 = 7;
 pub const MSG_DATA_HELLO: u8 = 8;
 pub const MSG_CHUNK: u8 = 9;
+// Reserved for the protocol-level error frame implemented by protocol v4.
+#[allow(dead_code)]
+pub const MSG_ERROR: u8 = 10;
+pub const MSG_FINAL_MANIFEST: u8 = 11;
+pub const MSG_FINAL_ACK: u8 = 12;
+/// Lossless f32 terminal fragment. Ordinary BCAST_FRAGMENT keeps using the
+/// negotiated session dtype; final artifacts must preserve coordinator f32.
+pub const MSG_FINAL_FRAGMENT: u8 = 13;
+
+/// Version of the final-artifact handshake carried inside FINAL_MANIFEST and
+/// FINAL_ACK. Keeping this in the payload makes incompatible peers fail with
+/// a specific error instead of interpreting a differently shaped message.
+pub const FINALIZATION_REVISION: u16 = 1;
 
 pub const DTYPE_F32: u8 = 1;
 pub const DTYPE_BF16: u8 = 2;
@@ -84,6 +97,35 @@ impl<'a> Reader<'a> {
     pub fn rest(&mut self) -> &'a [u8] {
         std::mem::take(&mut self.0)
     }
+}
+
+/// Encode the authoritative final cut: the coordinator's global step and the
+/// exact expected version of every fragment, in layout order.
+pub fn encode_final_manifest(global_step: u64, versions: &[u64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(14 + versions.len() * 8);
+    out.extend_from_slice(&FINALIZATION_REVISION.to_le_bytes());
+    out.extend_from_slice(&global_step.to_le_bytes());
+    out.extend_from_slice(&(versions.len() as u32).to_le_bytes());
+    for version in versions {
+        out.extend_from_slice(&version.to_le_bytes());
+    }
+    out
+}
+
+/// Decode a learner's acknowledgement of the final manifest.
+pub fn decode_final_ack(payload: &[u8]) -> Result<u64> {
+    let mut r = Reader(payload);
+    let revision = r.u16()?;
+    if revision != FINALIZATION_REVISION {
+        bail!(
+            "unsupported finalization revision {revision}; expected {FINALIZATION_REVISION}"
+        );
+    }
+    let global_step = r.u64()?;
+    if !r.rest().is_empty() {
+        bail!("FINAL_ACK has trailing bytes");
+    }
+    Ok(global_step)
 }
 
 /// Decode a tensor payload into f32s.
@@ -247,5 +289,32 @@ mod tests {
         assert_eq!(bulk_dtype(DTYPE_Q4), DTYPE_BF16);
         assert_eq!(bulk_dtype(DTYPE_BF16), DTYPE_BF16);
         assert_eq!(bulk_dtype(DTYPE_F32), DTYPE_F32);
+    }
+
+    #[test]
+    fn final_manifest_and_ack_have_versioned_exact_shapes() {
+        assert_eq!(MSG_ERROR, 10);
+        assert_eq!(MSG_FINAL_MANIFEST, 11);
+        assert_eq!(MSG_FINAL_ACK, 12);
+        assert_eq!(MSG_FINAL_FRAGMENT, 13);
+        let manifest = encode_final_manifest(17, &[15, 16, 17]);
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&FINALIZATION_REVISION.to_le_bytes());
+        expected.extend_from_slice(&17u64.to_le_bytes());
+        expected.extend_from_slice(&3u32.to_le_bytes());
+        for version in [15u64, 16, 17] {
+            expected.extend_from_slice(&version.to_le_bytes());
+        }
+        assert_eq!(manifest, expected);
+
+        let mut ack = Vec::new();
+        ack.extend_from_slice(&FINALIZATION_REVISION.to_le_bytes());
+        ack.extend_from_slice(&17u64.to_le_bytes());
+        assert_eq!(decode_final_ack(&ack).unwrap(), 17);
+        ack[0] = 2;
+        assert!(decode_final_ack(&ack)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported finalization revision"));
     }
 }

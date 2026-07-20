@@ -257,6 +257,7 @@ def _run_inner_loop(
     import torch
     import torch.distributed as dist
 
+    from ..finalization import finalize_torch_island
     mbs = 1 if args.micro_batch_size == "auto" else int(args.micro_batch_size)
     tokenizer = _load_tokenizer(args)
     dataset = _packed_blocks(args, tokenizer)
@@ -318,24 +319,39 @@ def _run_inner_loop(
         # a pipelined syncer's next pull can overtake the previous round's
         # broadcast; answering first would push a stale base_version).
         actions = []
+        finalizing = False
         if rank == 0 and client is not None:
             client.check_health()
-            for bc in client.drain_updates():
-                flat = unpack_fragment(
-                    layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
-                )
-                if anchors is not None:
-                    anchors[bc.fragment_id] = flat.clone()
-                actions.append((bc.fragment_id, bc.version, flat))
+            finalizing = client.finalizing.is_set()
+            if not finalizing:
+                for bc in client.drain_updates():
+                    flat = unpack_fragment(
+                        layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
+                    )
+                    if anchors is not None:
+                        anchors[bc.fragment_id] = flat.clone()
+                    actions.append((bc.fragment_id, bc.version, flat))
             shutdown = client.shutdown.is_set()
 
         if world > 1:
             meta = [(f, v) for f, v, _ in actions] if rank == 0 else None
-            box = [meta, shutdown]
+            box = [meta, shutdown, finalizing]
             dist.broadcast_object_list(box, src=0)
-            meta, shutdown = box
+            meta, shutdown, finalizing = box
             if rank != 0:
                 actions = [(f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta]
+        if finalizing:
+            manifest = finalize_torch_island(
+                client,
+                layout,
+                params,
+                rank=rank,
+                world=world,
+                device=device,
+            )
+            global_step = max(global_step, manifest.global_step)
+            shutdown = True
+            break
         for fid, version, flat in actions:
             flat = flat.to(device)
             if world > 1:
@@ -369,6 +385,11 @@ def _run_inner_loop(
                     c_steps, c_tokens, payload,
                 )
             pending_pulls = still_pending
+    if rank == 0 and client is not None and not client.finalized.is_set():
+        raise RuntimeError(
+            "Megatron learner stopped before authoritative finalization; "
+            "refusing to save local parameters"
+        )
     log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
 
 

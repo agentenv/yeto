@@ -321,6 +321,8 @@ def run_inner_loop(
     import mlx.optimizers as optim
     from mlx.utils import tree_map
 
+    from ..protocol import DTYPE_F32
+
     def loss_fn(mdl, ids, weights):
         # Same math as yeto.losses.sft_loss: next-token logprobs, weighted
         # SUM over trained tokens, normalized by the micro-batch's own
@@ -396,6 +398,23 @@ def run_inner_loop(
         if client is None:
             continue
         client.check_health()
+        if client.finalizing.is_set():
+            manifest, broadcasts = client.wait_for_final_fragments()
+            for update in broadcasts:
+                fid = update.fragment_id
+                flat = unpack_fragment(
+                    layout.fragments[fid],
+                    update.data,
+                    DTYPE_F32,
+                )
+                # Finalization is a raw overwrite: normal delayed-application
+                # blending must not leak into the saved adapter.
+                write_fragment(model, layout.fragments[fid], flat, registry)
+            mx.eval(model.parameters())
+            client.acknowledge_finalization(manifest)
+            global_step = max(global_step, manifest.global_step)
+            shutdown = True
+            break
         snap = None  # torch view of the adapters, built lazily per boundary
         for bc in client.drain_updates():
             fid = bc.fragment_id
@@ -438,6 +457,11 @@ def run_inner_loop(
             )
         pending_pulls = still_pending
         shutdown = client.shutdown.is_set()
+    if client is not None and not client.finalized.is_set():
+        raise RuntimeError(
+            "MLX learner stopped before authoritative finalization; "
+            "refusing to save local parameters"
+        )
     mx.eval(model.parameters())
     log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
 
