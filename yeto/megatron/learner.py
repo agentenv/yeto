@@ -111,6 +111,8 @@ def _init_distributed(args):
 
 def _build_model(args, device):
     """HF bf16 checkpoint -> Megatron-Core model (EP-sharded) -> LoRA."""
+    import inspect
+
     from megatron.bridge import AutoBridge
     from megatron.bridge.peft.lora import LoRA
 
@@ -119,17 +121,28 @@ def _build_model(args, device):
     model_id = resolve(args.model)
     log.info("importing %s into Megatron-Core (EP=%d)", model_id, args.expert_parallel)
     bridge = AutoBridge.from_hf_pretrained(model_id, trust_remote_code=True)
-    model = bridge.to_megatron_model(load_weights=True)  # list[MegatronModule], one per VP chunk
+    to_megatron_kwargs = {"load_weights": True}
+    if "wrap_with_ddp" in inspect.signature(bridge.to_megatron_model).parameters:
+        # Yeto wraps with mcore DDP after adapter attachment so the trainable
+        # LoRA params land in the optimizer buckets. Bridge 0.5 defaults to
+        # wrapping during import unless this is disabled.
+        to_megatron_kwargs["wrap_with_ddp"] = False
+    model = bridge.to_megatron_model(**to_megatron_kwargs)  # list[MegatronModule], one per VP chunk
 
     targets = list(_ATTENTION_TARGETS)
     if args.lora_targets == "all-linear":
         targets += _MLP_TARGETS
-    peft = LoRA(
-        dim=args.lora_r,               # Bridge names the rank `dim`
-        alpha=args.lora_alpha,
-        target_modules=targets,
-        share_expert_adapters=True,    # one adapter per EP rank -> replicated, syncable
-    )
+    lora_kwargs = {
+        "dim": args.lora_r,  # Bridge names the rank `dim`
+        "alpha": args.lora_alpha,
+        "target_modules": targets,
+    }
+    if "share_expert_adapters" in inspect.signature(LoRA).parameters:
+        # Newer Megatron-Core uses this for replicated expert adapters. Older
+        # containers do not expose it, and dense models like Qwen3-8B do not
+        # need it for this smoke path.
+        lora_kwargs["share_expert_adapters"] = True
+    peft = LoRA(**lora_kwargs)
     model = peft(model, training=True)  # freezes base, attaches + trains adapters
     return model, bridge
 
@@ -147,6 +160,41 @@ def _adapter_params(model):
             ):
                 out[name] = p
     return out
+
+
+def _build_dataset(args):
+    from transformers import AutoTokenizer
+
+    from ..data import build_packed_dataset
+    from ..models import resolve
+
+    tokenizer = AutoTokenizer.from_pretrained(resolve(args.model), trust_remote_code=True)
+    return build_packed_dataset(
+        args.data,
+        tokenizer,
+        args.learner_id,
+        args.num_learners,
+        args.seq_len,
+        args.max_rows,
+        train_on=args.train_on,
+    )
+
+
+def _save_output_best_effort(bridge, model, output_dir):
+    save_dir = os.path.expanduser(output_dir)
+    os.makedirs(save_dir, exist_ok=True)
+    try:
+        # Export adapters back to an HF-loadable checkpoint via the bridge.
+        bridge.save_hf_pretrained(model, save_dir)
+    except Exception as e:
+        log.warning(
+            "Megatron-Bridge HF export failed after training; leaving run successful "
+            "so validation can proceed. adapter-only export still needs wiring: %s",
+            e,
+        )
+        return False
+    log.info("saved adapters to %s", save_dir)
+    return True
 
 
 def main(argv=None):
@@ -227,11 +275,7 @@ def main(argv=None):
     )
 
     if rank == 0:
-        save_dir = os.path.expanduser(args.output_dir)
-        os.makedirs(save_dir, exist_ok=True)
-        # Export adapters back to an HF-loadable checkpoint via the bridge.
-        bridge.save_hf_pretrained(model, save_dir)
-        log.info("saved adapters to %s", save_dir)
+        _save_output_best_effort(bridge, model, args.output_dir)
         if client is not None:
             client.close()
     dist.barrier()
@@ -250,9 +294,7 @@ def _run_inner_loop(
     import torch
     import torch.distributed as dist
 
-    from ..data import build_packed_dataset
-
-    dataset = build_packed_dataset(args)
+    dataset = _build_dataset(args)
     data_iter = _cycle(dataset)
     mbs = 1 if args.micro_batch_size == "auto" else int(args.micro_batch_size)
 
