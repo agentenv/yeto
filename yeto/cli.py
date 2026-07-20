@@ -107,7 +107,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         type=loss_spec,
         default="cross_entropy",
         help=f"one of {'|'.join(LOSS_FUNCTIONS)}, or custom:<file.py>[:<fn>] "
-        "defining fn(logits, input_ids, weights) -> (loss, num_tokens). "
+        "defining fn(logits, input_ids, weights) -> (summed_loss, num_tokens). "
+        "num_tokens must count positive shifted target weights. "
         "Diffusion launches default cross_entropy to flow_matching in the "
         "learner task. Custom callables are pickled by value and shipped to "
         "all learners",

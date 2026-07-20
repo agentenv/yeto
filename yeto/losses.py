@@ -98,8 +98,11 @@ def load_custom_loss(spec: str):
     ``input_ids`` (e.g. 1.0 on assistant tokens, 0.0 elsewhere with
     --train-on assistant). Because the learner owns the forward pass, the
     callable receives full logits — no extra forward pass or logprob
-    round-trip is needed. The file must live inside the repo so the workdir
-    sync ships it to every learner.
+    round-trip is needed. ``loss`` must be a token-summed scalar (the learner
+    applies the exact island-global target-token denominator), and
+    ``num_tokens`` must equal the number of positive ``weights[:, 1:]`` after
+    the causal shift. The file must live inside the repo so the workdir sync
+    ships it to every learner.
     """
     import importlib.util
     from pathlib import Path

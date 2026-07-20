@@ -575,22 +575,53 @@ def _tail(path: Path, lines: int = 16) -> str:
 
 
 _TRAINING_METRICS_RE = re.compile(
-    r"inner loop done .*?raw_tokens=(\d+) target_tokens=(\d+)"
+    r"inner loop done [^\r\n]*?raw_tokens=(\d+) target_tokens=(\d+)"
 )
+_METRICS_VERSION_RE = re.compile(r"\bmetrics_version=(\d+)\b")
+_METRICS_SCOPE_RE = re.compile(r"\bmetrics_scope=([a-z][a-z0-9_-]*)\b")
+_SUPPORTED_TRAINING_TELEMETRY = {(1, "rank"), (2, "island")}
+
+
+def _training_telemetry_schema(record: str) -> tuple[int, str]:
+    versions = _METRICS_VERSION_RE.findall(record)
+    scopes = _METRICS_SCOPE_RE.findall(record)
+    if not versions and not scopes:
+        return 1, "rank"
+    if len(versions) != 1 or len(scopes) != 1:
+        raise RuntimeError(
+            "learner log contains malformed final token telemetry; versioned "
+            "records require one metrics_version and one metrics_scope"
+        )
+    schema = int(versions[0]), scopes[0]
+    if schema not in _SUPPORTED_TRAINING_TELEMETRY:
+        raise RuntimeError(
+            "learner log uses unsupported final token telemetry schema "
+            f"version={schema[0]} scope={schema[1]!r}"
+        )
+    return schema
 
 
 def summarize_training_logs(paths: list[Path]) -> dict:
-    """Sum LM-specific raw/target token telemetry across all ranks."""
+    """Sum compatible rank- or island-scoped final token telemetry."""
     raw_tokens = 0
     target_tokens = 0
-    ranks = 0
+    reported_units = 0
+    schema: tuple[int, str] | None = None
     for path in paths:
         text = path.read_text(encoding="utf-8", errors="replace")
         for match in _TRAINING_METRICS_RE.finditer(text):
-            ranks += 1
+            record_schema = _training_telemetry_schema(match.group(0))
+            if schema is None:
+                schema = record_schema
+            elif record_schema != schema:
+                raise RuntimeError(
+                    "learner logs mix final token telemetry schemas; refusing "
+                    "to combine rank- and island-scoped counters"
+                )
+            reported_units += 1
             raw_tokens += int(match.group(1))
             target_tokens += int(match.group(2))
-    if ranks == 0:
+    if reported_units == 0:
         raise RuntimeError(
             "learner logs contain no final token telemetry; the run may have "
             "used an incompatible learner version"
@@ -600,12 +631,36 @@ def summarize_training_logs(paths: list[Path]) -> dict:
             "training processed no positive-weight target tokens; use rows "
             "with assistant responses or pass --train-on all"
         )
+    assert schema is not None
+    version, scope = schema
     return {
-        "reported_ranks": ranks,
+        "telemetry_version": version,
+        "telemetry_scope": scope,
+        "reported_units": reported_units,
         "processed_tokens": raw_tokens,
         "processed_target_tokens": target_tokens,
         "target_density": target_tokens / raw_tokens if raw_tokens else None,
     }
+
+
+def validate_training_telemetry_units(
+    telemetry: dict,
+    *,
+    label: str,
+    total_ranks: int,
+    islands: int,
+) -> None:
+    """Require complete final telemetry for the schema's accounting scope."""
+    scope = telemetry.get("telemetry_scope")
+    expected = {"rank": total_ranks, "island": islands}.get(scope)
+    if expected is None:
+        raise RuntimeError(f"{label}: unknown telemetry scope {scope!r}")
+    actual = telemetry.get("reported_units")
+    if actual != expected:
+        raise RuntimeError(
+            f"{label}: expected {expected} {scope}-scoped telemetry records, "
+            f"found {actual}"
+        )
 
 
 def _stop_process(process: subprocess.Popen, timeout: int = 20) -> None:
@@ -790,6 +845,12 @@ def run_baseline(args, m: int, seed: int, train_data: Path, seed_dir: Path) -> d
     )
     wall = time.monotonic() - started
     telemetry = summarize_training_logs([learner_log])
+    validate_training_telemetry_units(
+        telemetry,
+        label=f"baseline-m{m}",
+        total_ranks=total_ranks,
+        islands=1,
+    )
     expected_tokens = processed_tokens(
         steps,
         args.micro_batch_size,
@@ -797,11 +858,6 @@ def run_baseline(args, m: int, seed: int, train_data: Path, seed_dir: Path) -> d
         total_ranks,
         args.grad_accum,
     )
-    if telemetry["reported_ranks"] != total_ranks:
-        raise RuntimeError(
-            f"baseline-m{m}: expected telemetry from {total_ranks} ranks, "
-            f"found {telemetry['reported_ranks']}"
-        )
     if telemetry["processed_tokens"] != expected_tokens:
         raise RuntimeError(
             f"baseline-m{m}: expected {expected_tokens} raw tokens, learner "
@@ -901,6 +957,12 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
         syncer_log.close()
     wall = time.monotonic() - started
     telemetry = summarize_training_logs(learner_logs)
+    validate_training_telemetry_units(
+        telemetry,
+        label=arm.name,
+        total_ranks=total_ranks,
+        islands=arm.learners,
+    )
     expected_tokens = processed_tokens(
         steps,
         args.micro_batch_size,
@@ -908,11 +970,6 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
         total_ranks,
         args.grad_accum,
     )
-    if telemetry["reported_ranks"] != total_ranks:
-        raise RuntimeError(
-            f"{arm.name}: expected telemetry from {total_ranks} ranks, "
-            f"found {telemetry['reported_ranks']}"
-        )
     if telemetry["processed_tokens"] != expected_tokens:
         raise RuntimeError(
             f"{arm.name}: expected {expected_tokens} raw tokens, learner "
