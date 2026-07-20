@@ -40,6 +40,12 @@ def parse_args(argv=None):
     p.add_argument("--num-learners", type=int, default=1)
     p.add_argument("--loss-function", default="cross_entropy")
     p.add_argument("--train-on", choices=["assistant", "all"], default="assistant")
+    p.add_argument(
+        "--assistant-mask-mode",
+        choices=["native", "legacy"],
+        default="native",
+        help="assistant-only masking: tokenizer-native exact mask or explicit legacy format",
+    )
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
@@ -187,6 +193,7 @@ def _micro_batches(args, tokenizer):
             args.seq_len,
             args.max_rows,
             train_on=args.train_on,
+            assistant_mask_mode=args.assistant_mask_mode,
         )
 
         def gen():
@@ -208,6 +215,7 @@ def _micro_batches(args, tokenizer):
         args.seq_len,
         args.max_rows,
         train_on=args.train_on,
+        assistant_mask_mode=args.assistant_mask_mode,
     )
     log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)
 

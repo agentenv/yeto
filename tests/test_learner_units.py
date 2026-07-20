@@ -199,6 +199,27 @@ def test_learner_accepts_explicit_training_seed():
     assert args.seed == 29
 
 
+def test_torch_and_mlx_learners_parse_assistant_mask_mode():
+    from yeto.learner import parse_args as parse_torch_args
+    from yeto.mlx.learner import parse_args as parse_mlx_args
+
+    base = [
+        "--model",
+        "org/model",
+        "--data",
+        "rows.jsonl",
+        "--syncer",
+        "none",
+        "--learner-id",
+        "0",
+        "--num-learners",
+        "1",
+    ]
+    for parse in (parse_torch_args, parse_mlx_args):
+        assert parse(base).assistant_mask_mode == "native"
+        assert parse(base + ["--assistant-mask-mode", "legacy"]).assistant_mask_mode == "legacy"
+
+
 def test_learner_quantization_default_is_unchanged():
     from yeto.learner import parse_args
 

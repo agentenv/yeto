@@ -2531,6 +2531,7 @@ def test_launcher_routes_diffusion_to_diffusion_learner_and_opt_in_caches():
     assert "--diffusion-loss-weighting" not in task.run
     assert "--diffusion-family" not in task.run
     assert "--train-on" not in task.run and "--seq-len" not in task.run
+    assert "--assistant-mask-mode" not in task.run
     assert "--tokenize" not in task.run
 
 

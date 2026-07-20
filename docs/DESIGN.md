@@ -60,10 +60,16 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   ~568 GB for frozen bf16 weights — more than 8×A100-40GB (320 GB); use
   ≥16×80GB GPUs per learner, or pick `gemma4` (12B) / any smaller HF id.
   `yeto shape` automates this sizing.
-- **Loss masking**: `--train-on assistant` (default) puts loss only on
-  assistant-message tokens (plus the closing EOS); `--train-on all` trains
-  on every token. Tokenization streams asynchronously in DataLoader workers
-  (`--tokenize preload` to materialize upfront).
+- **Loss masking**: `--train-on assistant` (default) tokenizes with the
+  model's selected native chat template and uses its exact
+  `assistant_masks` output. The template's `{% generation %}` blocks decide
+  which assistant control/content/EOS tokens carry loss; Yeto does not add
+  control tokens after templating. A selected template without generation
+  tracking fails clearly. `--assistant-mask-mode legacy` explicitly restores
+  the synthetic `<|role|>` compatibility format, while `--train-on all`
+  retains the existing all-token behavior. Tokenization streams
+  asynchronously in DataLoader workers (`--tokenize preload` to materialize
+  upfront).
 - **Resilience**: learners reconnect automatically through syncer restarts
   and WAN drops (exponential backoff; work continues locally during the
   outage and re-merges after the post-reconnect rebroadcast). The syncer
