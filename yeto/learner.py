@@ -45,6 +45,7 @@ from .tensor_io import (
     apply_fragment,
     fragment_flat,
     pack_fragment,
+    pack_tensor,
     quantize_q4,
     unpack_fragment,
 )
@@ -184,8 +185,8 @@ def parse_args(argv=None):
         "--wire-dtype",
         choices=["bf16", "f32", "q4"],
         default="bf16",
-        help="tensor encoding on the WAN; q4 sends pushes as 4-bit E3M0 "
-        "block-quantized deltas (broadcasts stay bf16)",
+        help="tensor encoding on the WAN; every push is a base-relative "
+        "delta, q4 block-quantizes it as 4-bit E3M0 (broadcasts stay bf16)",
     )
     p.add_argument("--wan-streams", type=int, default=4)
     p.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
@@ -927,12 +928,16 @@ def run_inner_loop(
     fragment_versions = [0] * layout.num_fragments  # last applied version per fragment
     pending_pulls: list = []  # pulls deferred until c_steps >= 1
     global_step = 0
-    # Q4 pushes are deltas anchored at the last *received* global value per
-    # fragment; before any broadcast that is the base-model value, which every
-    # learner loads identically (and learner 0 sends as INIT_PARAMS).
-    anchors: list[torch.Tensor] | None = None
-    if rank == 0 and client is not None and client.dtype == DTYPE_Q4:
-        anchors = [fragment_flat(frag, params).cpu() for frag in layout.fragments]
+    # Every PUSH carries local − raw_anchor, where raw_anchor is the exact
+    # global fragment from the last accepted broadcast, before alpha blending.
+    # A pull that overtakes the initial broadcast waits instead of inventing
+    # an anchor from local initialization.
+    anchors: list[torch.Tensor | None] | None = None
+    if rank == 0 and client is not None:
+        anchors = [None] * layout.num_fragments
+
+    # c_tokens uses tokens_total, which advances by the exact island-global
+    # raw-token count accepted into each optimizer step.
     kernel_backend = getattr(args, "kernel_backend", "native")
     if kernel_backend == "liger":
         compute_loss = None
@@ -1063,8 +1068,8 @@ def run_inner_loop(
                             layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
                         )
                         if anchors is not None:
-                            # The anchor is the raw global value (pre-blend), so
-                            # the syncer can reconstruct pushes from Θ(version)+δ.
+                            # Keep the exact raw global value before normal
+                            # delayed-application blending.
                             anchors[bc.fragment_id] = flat.clone()
                         actions.append((bc.fragment_id, bc.version, flat))
                 shutdown = client.shutdown.is_set()
@@ -1128,14 +1133,19 @@ def run_inner_loop(
                         still_pending.append(pull)
                         continue
                     c_tokens = tokens_total - tokens_at_reset[fid]
-                    if anchors is not None:
-                        delta = fragment_flat(layout.fragments[fid], params).cpu() - anchors[fid]
+                    anchor = anchors[fid] if anchors is not None else None
+                    if anchor is None:
+                        still_pending.append(pull)
+                        continue
+                    delta = fragment_flat(layout.fragments[fid], params).cpu() - anchor
+                    if client.dtype == DTYPE_Q4:
                         payload = quantize_q4(delta)
                     else:
-                        payload = pack_fragment(layout.fragments[fid], params, client.dtype)
+                        payload = pack_tensor(delta, client.dtype)
                     client.push_fragment(
                         fid,
                         pull.global_step,
+                        pull.round_attempt,
                         fragment_versions[fid],
                         steps_total,
                         c_steps,

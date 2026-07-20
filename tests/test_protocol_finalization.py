@@ -11,8 +11,13 @@ import torch
 from yeto.finalization import finalize_torch_island
 from yeto.fragments import build_layout
 from yeto.protocol import (
+    _CHUNK_HEAD,
+    _HEADER,
+    DTYPE_BF16,
     DTYPE_F32,
+    DTYPE_Q4,
     FINALIZATION_REVISION,
+    MAGIC,
     MSG_ERROR,
     MSG_BCAST_FRAGMENT,
     MSG_FINAL_ACK,
@@ -80,6 +85,39 @@ def test_manifest_and_data_stream_reordering_preserves_lossless_final_fragments(
     assert manifest == FinalManifest(9, (8, 9))
     assert [(item.fragment_id, item.version) for item in fragments] == [(0, 8), (1, 9)]
     assert fragments[0].data == struct.pack("<4f", *([1.0001] * 4))
+
+
+@pytest.mark.parametrize("dtype", [DTYPE_BF16, DTYPE_Q4])
+def test_lossless_final_cache_is_independent_monotonic_and_f32_bounded(dtype):
+    client = SyncerClient(("unused", 0), 0, _layout(1), dtype=dtype)
+    client._gen = 1
+    normal = struct.pack("<4e", *([1.0] * 4))
+    final = struct.pack("<4f", *([1.0001] * 4))
+    payload = struct.pack("<IQ", 0, 7) + final
+
+    # The ordinary bf16 cache and terminal f32 cache intentionally hold
+    # different bytes at the same fragment/version.
+    client._dispatch(1, MSG_BCAST_FRAGMENT, struct.pack("<IQ", 0, 7) + normal)
+    client._dispatch(1, MSG_FINAL_FRAGMENT, payload)
+    assert client.drain_updates()[0].data == normal
+    assert client._final_fragments[0].data == final
+
+    # A terminal f32 frame is larger than this session's ordinary broadcast.
+    # Both the direct and chunk-reassembled bounds must admit it.
+    assert client._incoming_frame_limit(MSG_FINAL_FRAGMENT) == len(payload)
+    inner = _HEADER.pack(MAGIC, MSG_FINAL_FRAGMENT, len(payload)) + payload
+    chunk = _CHUNK_HEAD.pack(99, len(inner), 0) + inner
+    assert client._reassemble(1, chunk) == (MSG_FINAL_FRAGMENT, payload)
+
+    lower = struct.pack("<IQ", 0, 6) + struct.pack("<4f", *([2.0] * 4))
+    client._dispatch(1, MSG_FINAL_FRAGMENT, lower)
+    client._dispatch(1, MSG_FINAL_FRAGMENT, payload)  # identical replay
+    assert client._final_fragments[0].data == final
+
+    conflicting = struct.pack("<IQ", 0, 7) + struct.pack("<4f", *([3.0] * 4))
+    client._dispatch(1, MSG_FINAL_FRAGMENT, conflicting)
+    with pytest.raises(RuntimeError, match="conflicting FINAL_FRAGMENT"):
+        client.check_health()
 
 
 def test_missing_manifest_version_fails_with_bounded_diagnostic():

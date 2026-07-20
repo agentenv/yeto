@@ -2,8 +2,11 @@
 
 Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
 
-- **Merging**: per-learner outer gradient Δ_m,p = Θ_p(prev) − θ_m,p anchored
-  at the syncer's previous fragment value; learner weights
+- **Merging**: every learner sends its base-relative update
+  `d_m,p = θ_m,p − raw_anchor_m,p`; the syncer converts this once to the
+  signed outer gradient `Δ_m,p = −d_m,p`. Merge math never subtracts a stale
+  learner parameter from the current global fragment, so intervening global
+  drift cannot enter the update. Learner weights
   w_m = c_tokens²/c_steps (quantity × quality); weighted RDA per tensor on
   non-embedding fragments, direct averaging on the embedding fragment (whose
   deltas lack the near-orthogonality that motivates RDA).
@@ -23,6 +26,10 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   P); merges stay serialized in one scheduler task; rounds may complete out
   of order (per-fragment versions, monotonic global step). `--pipeline 1`
   recovers serial rounds.
+- **Frozen rendezvous**: a round attempt captures learner connection
+  generations and quorum at launch. Joins/reconnects apply only to future
+  attempts, disconnects do not erase accepted work, and a below-quorum
+  timeout discards partial responses before retrying with a new attempt ID.
 - **Sync-interval sensitivity** (legacy measurement, gemma4/Lean-Workbook,
   500k tokens, M=2, held-out eval CE): at the design-point sync interval
   (H≈24 inner steps per fragment) DiLoCo matched the synchronous run within

@@ -176,6 +176,7 @@ def main(argv=None):
         apply_fragment,
         fragment_flat,
         pack_fragment,
+        pack_tensor,
         quantize_q4,
         unpack_fragment,
     )
@@ -188,7 +189,10 @@ def main(argv=None):
     model, bridge = _build_model(args, device)
     params = _adapter_params(model)
     layout = build_layout(
-        [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
+        [(n, p.numel()) for n, p in params.items()],
+        args.fragments,
+        args.fragment_pattern,
+        named_shapes={n: tuple(p.shape) for n, p in params.items()},
     )
     log.info("%d adapter tensors -> %d fragments", len(params), layout.num_fragments)
 
@@ -228,7 +232,7 @@ def main(argv=None):
 
     _run_inner_loop(
         args, model, params, layout, opt, forward_backward, client, rank, world, device,
-        fragment_flat=fragment_flat, pack_fragment=pack_fragment, quantize_q4=quantize_q4,
+        fragment_flat=fragment_flat, pack_tensor=pack_tensor, quantize_q4=quantize_q4,
         unpack_fragment=unpack_fragment, apply_fragment=apply_fragment,
         bulk_dtype=bulk_dtype, DTYPE_Q4=DTYPE_Q4,
     )
@@ -247,7 +251,7 @@ def main(argv=None):
 
 def _run_inner_loop(
     args, model, params, layout, opt, forward_backward, client, rank, world, device,
-    *, fragment_flat, pack_fragment, quantize_q4, unpack_fragment, apply_fragment,
+    *, fragment_flat, pack_tensor, quantize_q4, unpack_fragment, apply_fragment,
     bulk_dtype, DTYPE_Q4,
 ):
     """N inner Megatron steps, pausing at each step boundary to run the DiLoCo
@@ -292,9 +296,7 @@ def _run_inner_loop(
     pending_pulls: list = []
     global_step = 0
     tokens_per_inner_step = world * mbs * args.grad_accum * args.seq_len
-    anchors = None
-    if rank == 0 and client is not None and client.dtype == DTYPE_Q4:
-        anchors = [fragment_flat(frag, params).cpu() for frag in layout.fragments]
+    anchors = [None] * layout.num_fragments if rank == 0 and client is not None else None
     shutdown = False
 
     while not shutdown and steps_total < args.max_local_steps:
@@ -375,13 +377,18 @@ def _run_inner_loop(
                     still_pending.append(pull)
                     continue
                 c_tokens = tokens_total - tokens_at_reset[fid]
-                if anchors is not None:
-                    delta = fragment_flat(layout.fragments[fid], params).cpu() - anchors[fid]
+                anchor = anchors[fid] if anchors is not None else None
+                if anchor is None:
+                    still_pending.append(pull)
+                    continue
+                delta = fragment_flat(layout.fragments[fid], params).cpu() - anchor
+                if client.dtype == DTYPE_Q4:
                     payload = quantize_q4(delta)
                 else:
-                    payload = pack_fragment(layout.fragments[fid], params, client.dtype)
+                    payload = pack_tensor(delta, client.dtype)
                 client.push_fragment(
-                    fid, pull.global_step, fragment_versions[fid], steps_total,
+                    fid, pull.global_step, pull.round_attempt,
+                    fragment_versions[fid], steps_total,
                     c_steps, c_tokens, payload,
                 )
             pending_pulls = still_pending

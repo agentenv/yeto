@@ -9,6 +9,7 @@ from yeto.tensor_io import (
     Q4_BLOCK,
     dequantize_q4,
     fragment_flat,
+    pack_tensor,
     quantize_q4,
 )
 
@@ -27,6 +28,12 @@ def test_q4_golden_bytes_match_rust_test_vector():
     assert data[4] == 0xE7  # 1.0 -> level 7; -0.5 -> sign|level 6
     assert data[5] == 0x05  # 0.25 -> level 5; 0.0 -> zero
     assert all(b == 0 for b in data[6:])
+
+
+def test_unquantized_delta_golden_bytes_preserve_sign():
+    delta = torch.tensor([-1.5, 2.0], dtype=torch.float32)
+    assert pack_tensor(delta, DTYPE_F32) == struct.pack("<2f", -1.5, 2.0)
+    assert pack_tensor(delta, DTYPE_BF16) == bytes.fromhex("c0bf0040")
 
 
 def test_q4_roundtrip_error_bounds():
