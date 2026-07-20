@@ -129,7 +129,17 @@ def _temporary_adamw_footprint(opt) -> list[torch.Tensor]:
     return scratch
 
 
-def _probe_once(model, params, opt, seq_len: int, vocab: int, device, micro_batch: int) -> None:
+def _probe_once(
+    model,
+    params,
+    opt,
+    seq_len: int,
+    vocab: int,
+    device,
+    micro_batch: int,
+    *,
+    loss_forward=None,
+) -> None:
     with _preserve_probe_observables(params, device) as parameters:
         # Keep these live for both passes so the probe sees the same memory
         # available after AdamW has initialized its state on the first real
@@ -137,10 +147,17 @@ def _probe_once(model, params, opt, seq_len: int, vocab: int, device, micro_batc
         optimizer_footprint = _temporary_adamw_footprint(opt)
         for _ in range(_PROBE_ITERATIONS):
             ids = torch.randint(0, vocab, (micro_batch, seq_len), device=device)
-            out = model(input_ids=ids)
-            # Mirror sft_loss's memory peak: the shifted f32 logits copy
-            # dominates the loss computation.
-            loss = out.logits[:, :-1].float().sum()
+            if loss_forward is None:
+                out = model(input_ids=ids)
+                # Mirror native sft_loss's memory peak: the shifted f32
+                # logits copy dominates the loss computation.
+                loss = out.logits[:, :-1].float().sum()
+            else:
+                # Optimized backends can have a materially different peak
+                # (notably fused linear CE, which never materializes logits).
+                # Probe the exact selected loss path instead of a conservative
+                # native-logits surrogate.
+                loss = loss_forward(model, ids)
             loss.backward()
             for param in parameters:
                 param.grad = None
@@ -168,7 +185,17 @@ def exact_grad_accum(effective_batch: int, micro_batch: int) -> int:
     return quotient
 
 
-def resolve_micro_batch_size(args, model, params, opt, tokenizer, device, world: int) -> int:
+def resolve_micro_batch_size(
+    args,
+    model,
+    params,
+    opt,
+    tokenizer,
+    device,
+    world: int,
+    *,
+    loss_forward=None,
+) -> int:
     """The micro batch to train with; probes when --micro-batch-size=auto.
 
     All ranks probe each size in lockstep and agree via a MIN all-reduce
@@ -186,7 +213,16 @@ def resolve_micro_batch_size(args, model, params, opt, tokenizer, device, world:
     for size in _exact_micro_batch_candidates(requested_effective_batch):
         ok = True
         try:
-            _probe_once(model, params, opt, args.seq_len, vocab, device, size)
+            _probe_once(
+                model,
+                params,
+                opt,
+                args.seq_len,
+                vocab,
+                device,
+                size,
+                loss_forward=loss_forward,
+            )
         except torch.cuda.OutOfMemoryError:
             ok = False
         torch.cuda.empty_cache()

@@ -95,7 +95,8 @@ def test_cpu_returns_one_without_probe(monkeypatch):
 def test_probe_uses_largest_fitting_exact_divisor(monkeypatch, caplog):
     sizes = []
 
-    def probe(model, params, opt, seq_len, vocab, device, mb):
+    def probe(model, params, opt, seq_len, vocab, device, mb, *, loss_forward=None):
+        assert loss_forward is None
         sizes.append(mb)
         if mb >= 10:
             raise torch.cuda.OutOfMemoryError("synthetic")
@@ -117,7 +118,8 @@ def test_probe_uses_largest_fitting_exact_divisor(monkeypatch, caplog):
 def test_non_power_of_two_budget_is_not_ceil_increased(monkeypatch):
     sizes = []
 
-    def probe(model, params, opt, seq_len, vocab, device, mb):
+    def probe(model, params, opt, seq_len, vocab, device, mb, *, loss_forward=None):
+        assert loss_forward is None
         sizes.append(mb)
         if mb > 4:
             raise torch.cuda.OutOfMemoryError("synthetic")
@@ -223,6 +225,33 @@ def test_probe_preserves_materialized_adamw_state_and_scheduler():
     _assert_tree_equal(opt.state_dict(), optimizer_state)
     _assert_tree_equal(sched.state_dict(), scheduler_state)
     assert torch.equal(torch.get_rng_state(), cpu_rng)
+
+
+def test_probe_uses_selected_loss_forward_without_materializing_native_logits():
+    torch.manual_seed(99)
+    model = TinyCausalLM()
+    params = dict(model.named_parameters())
+    opt = torch.optim.AdamW(
+        params.values(), lr=1e-3, foreach=False, fused=False
+    )
+    calls = []
+
+    def selected_loss(probe_model, input_ids):
+        calls.append(tuple(input_ids.shape))
+        return probe_model(input_ids=input_ids).logits.square().mean()
+
+    autobatch._probe_once(
+        model,
+        params,
+        opt,
+        5,
+        31,
+        torch.device("cpu"),
+        3,
+        loss_forward=selected_loss,
+    )
+
+    assert calls == [(3, 5), (3, 5)]
 
 
 def test_probe_restores_state_when_forward_raises_oom():

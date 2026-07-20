@@ -760,8 +760,22 @@ def main(argv=None) -> None:
     # the probe). See yeto/autobatch.py.
     requested_mb = args.micro_batch_size
     requested_grad_accum = args.grad_accum
+    probe_loss_forward = None
+    if getattr(args, "kernel_backend", "native") == "liger":
+        def probe_loss_forward(probe_model, input_ids):
+            weights = torch.ones_like(input_ids, dtype=torch.float32)
+            loss, _ = liger_sft_forward(probe_model, input_ids, weights)
+            return loss
+
     args.micro_batch_size = resolve_micro_batch_size(
-        args, model, params, opt, tokenizer, device, world
+        args,
+        model,
+        params,
+        opt,
+        tokenizer,
+        device,
+        world,
+        loss_forward=probe_loss_forward,
     )
     if requested_mb == "auto":
         args.grad_accum = exact_grad_accum(requested_grad_accum, args.micro_batch_size)
