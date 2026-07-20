@@ -33,6 +33,7 @@ def _args(**overrides):
         "weight_decay": 0.01,
         "warmup_steps": 10,
         "train_on": "assistant",
+        "assistant_mask_mode": "native",
         "gradient_checkpointing": "auto",
         "wan_streams": 4,
         "device": "cuda",
@@ -119,9 +120,58 @@ def test_commands_encode_matching_topologies_and_seed():
     assert diloco[diloco.index("--grad-accum") + 1] == "2"
     assert diloco[diloco.index("--tokenize") + 1] == "stream"
     assert diloco[diloco.index("--stream-workers") + 1] == "0"
+    assert diloco[diloco.index("--assistant-mask-mode") + 1] == "native"
     assert diloco[diloco.index("--wire-dtype") + 1] == "q4"
     assert diloco[diloco.index("--base-quantization") + 1] == "none"
     assert "--wire-dtype" not in baseline
+
+
+def test_benchmark_mask_mode_is_fixed_for_training_and_subprocess_eval(monkeypatch, tmp_path):
+    args = _args(
+        assistant_mask_mode="legacy",
+        eval_device="cpu",
+        base_quantization="none",
+    )
+    command = benchmark.learner_command(
+        args,
+        tmp_path / "arm",
+        learner_id=0,
+        num_learners=1,
+        syncer="none",
+        max_steps=1,
+        arm=None,
+    )
+    assert command[command.index("--assistant-mask-mode") + 1] == "legacy"
+
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='EVAL_JSON {"loss_per_token": 1.0}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(benchmark, "wait_for_free_gpus", lambda *args, **kwargs: None)
+    monkeypatch.setattr(benchmark.subprocess, "run", fake_run)
+    result = benchmark.eval_in_subprocess(args, None, tmp_path / "eval.jsonl")
+
+    assert result == {"loss_per_token": 1.0}
+    eval_command = captured["command"]
+    assert eval_command[eval_command.index("--assistant-mask-mode") + 1] == "legacy"
+
+
+def test_benchmark_parser_defaults_to_native_mask_and_accepts_legacy():
+    parser = benchmark.build_parser()
+    assert parser.parse_args(["--data", "rows.jsonl"]).assistant_mask_mode == "native"
+    assert (
+        parser.parse_args(
+            ["--data", "rows.jsonl", "--assistant-mask-mode", "legacy"]
+        ).assistant_mask_mode
+        == "legacy"
+    )
 
 
 @pytest.mark.parametrize("value", ["", "1,1", "1,nope"])

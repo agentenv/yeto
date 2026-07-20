@@ -63,6 +63,13 @@ def parse_args(argv=None):
         help="which tokens carry loss: assistant-message tokens only "
         "(default) or every token",
     )
+    p.add_argument(
+        "--assistant-mask-mode",
+        choices=["native", "legacy"],
+        default="native",
+        help="assistant-only masking: require tokenizer-native exact masks "
+        "(default), or use the legacy synthetic role format",
+    )
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument(
         "--base-quantization",
@@ -603,6 +610,7 @@ def main(argv=None) -> None:
             rank=rank,
             world=world,
             train_on=args.train_on,
+            assistant_mask_mode=args.assistant_mask_mode,
             **stream_kwargs,
         )
         loader = torch.utils.data.DataLoader(
@@ -626,6 +634,7 @@ def main(argv=None) -> None:
             args.seq_len,
             args.max_rows,
             train_on=args.train_on,
+            assistant_mask_mode=args.assistant_mask_mode,
         )
         sampler = None
         if world > 1:

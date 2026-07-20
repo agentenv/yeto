@@ -33,6 +33,11 @@ def _result(counts):
     )
 
 
+def test_launch_cli_defaults_to_native_mask_and_accepts_explicit_legacy():
+    assert _args([]).assistant_mask_mode == "native"
+    assert _args(["--assistant-mask-mode", "legacy"]).assistant_mask_mode == "legacy"
+
+
 def test_gpu_with_budget_rejected(capsys):
     assert cli.main(BASE + ["--gpu", "aws:8xa100", "--budget", "10"]) == 1
     assert "drop them or drop --gpu" in capsys.readouterr().err

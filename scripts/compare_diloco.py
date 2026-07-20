@@ -256,6 +256,7 @@ def learner_command(
         "--tokenize", "stream",
         "--stream-workers", "0",
         "--train-on", getattr(args, "train_on", "assistant"),
+        "--assistant-mask-mode", getattr(args, "assistant_mask_mode", "native"),
         "--gradient-checkpointing", getattr(args, "gradient_checkpointing", "auto"),
         "--wan-streams", str(getattr(args, "wan_streams", 4)),
         "--shard", args.shard,
@@ -376,7 +377,8 @@ def split_data(
 
 def evaluate_loss(model_id: str, adapter_dir: Path | None, eval_file: Path,
                   seq_len: int, device: str, train_on: str = "assistant",
-                  base_quantization: str = "none") -> dict:
+                  base_quantization: str = "none",
+                  assistant_mask_mode: str = "native") -> dict:
     """Held-out masked CE per trained token — the comparison metric."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -425,7 +427,15 @@ def evaluate_loss(model_id: str, adapter_dir: Path | None, eval_file: Path,
     if base_quantization == "none":
         model.to(device)
     model.eval()
-    ds = build_packed_dataset(str(eval_file), tok, 0, 1, seq_len, train_on=train_on)
+    ds = build_packed_dataset(
+        str(eval_file),
+        tok,
+        0,
+        1,
+        seq_len,
+        train_on=train_on,
+        assistant_mask_mode=assistant_mask_mode,
+    )
     total_loss, total_tokens = 0.0, 0.0
     block_losses = []
     with torch.no_grad():
@@ -457,10 +467,17 @@ def evaluate_loss(model_id: str, adapter_dir: Path | None, eval_file: Path,
 
 
 def eval_loss_per_token(model_id: str, adapter_dir: Path | None, eval_file: Path,
-                        seq_len: int, device: str, train_on: str = "assistant") -> float:
+                        seq_len: int, device: str, train_on: str = "assistant",
+                        assistant_mask_mode: str = "native") -> float:
     """Compatibility wrapper for callers that only need the scalar metric."""
     return evaluate_loss(
-        model_id, adapter_dir, eval_file, seq_len, device, train_on
+        model_id,
+        adapter_dir,
+        eval_file,
+        seq_len,
+        device,
+        train_on,
+        assistant_mask_mode=assistant_mask_mode,
     )["loss_per_token"]
 
 
@@ -538,6 +555,7 @@ def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path,
         "--seq-len", str(args.seq_len),
         "--device", args.eval_device,
         "--train-on", args.train_on,
+        "--assistant-mask-mode", args.assistant_mask_mode,
         "--base-quantization", args.base_quantization,
     ]
     if adapter_dir is not None:
@@ -1390,6 +1408,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-steps", type=int, default=10)
     parser.add_argument("--train-on", choices=["assistant", "all"], default="assistant")
+    parser.add_argument(
+        "--assistant-mask-mode",
+        choices=["native", "legacy"],
+        default="native",
+        help="assistant-only masking mode; keep fixed between training and evaluation",
+    )
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument(
@@ -1486,6 +1510,7 @@ def print_plan(args, arms: list[Arm]) -> None:
     print(
         f"[lm-benchmark] model={args.model} tokens={args.token_budget} "
         f"seq_len={args.seq_len} train_on={args.train_on} "
+        f"assistant_mask_mode={args.assistant_mask_mode} "
         f"stream_workers=0 seeds={seeds}"
     )
     for m in sorted({arm.learners for arm in arms}):
@@ -1539,6 +1564,7 @@ def main(argv=None) -> int:
             args.device,
             args.train_on,
             args.base_quantization,
+            args.assistant_mask_mode,
         )
         print("EVAL_JSON " + json.dumps(result, sort_keys=True))
         return 0

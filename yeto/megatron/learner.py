@@ -53,6 +53,12 @@ def parse_args(argv=None):
     p.add_argument("--num-learners", type=int, default=1)
     p.add_argument("--loss-function", default="cross_entropy")
     p.add_argument("--train-on", choices=["assistant", "all"], default="assistant")
+    p.add_argument(
+        "--assistant-mask-mode",
+        choices=["native", "legacy"],
+        default="native",
+        help="assistant-only masking: tokenizer-native exact mask or explicit legacy format",
+    )
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
@@ -250,21 +256,28 @@ def _run_inner_loop(
     import torch
     import torch.distributed as dist
 
-    from ..data import build_packed_dataset
-
-    dataset = build_packed_dataset(args)
-    data_iter = _cycle(dataset)
     mbs = 1 if args.micro_batch_size == "auto" else int(args.micro_batch_size)
+    tokenizer = _load_tokenizer(args)
+    dataset = _packed_blocks(args, tokenizer)
+    data_iter = _cycle(dataset, micro_batch_size=mbs)
 
     def forward_step(it, mdl):
         batch = next(it)
         ids = batch["input_ids"].to(device)
         labels = batch["labels"].to(device)
+        loss_mask = batch["loss_mask"].to(device)
         pos = torch.arange(ids.size(1), device=device).unsqueeze(0).expand_as(ids)
         out = mdl(input_ids=ids, position_ids=pos, attention_mask=None, labels=labels)
 
         def loss_func(output):
-            loss = output.mean() if output.dim() else output
+            token_losses = output.float().reshape(-1)
+            flat_mask = loss_mask.float().reshape(-1)
+            if token_losses.numel() != flat_mask.numel():
+                raise RuntimeError(
+                    "Megatron returned a non-tokenwise LM loss: "
+                    f"{token_losses.numel()} losses for {flat_mask.numel()} mask values"
+                )
+            loss = (token_losses * flat_mask).sum() / flat_mask.sum().clamp(min=1.0)
             return loss, {"lm loss": loss.detach()}
 
         return out, loss_func
@@ -358,15 +371,100 @@ def _run_inner_loop(
     log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
 
 
-def _cycle(dataset):
-    """Endless (input_ids, labels) micro-batches from yeto's packed blocks."""
+def _load_tokenizer(args):
+    """Load the HF tokenizer whose native template defines SFT masking."""
+    from transformers import AutoTokenizer
+
+    from ..learner import _from_pretrained_offline_first
+    from ..models import resolve
+
+    return _from_pretrained_offline_first(
+        AutoTokenizer,
+        resolve(args.model),
+        trust_remote_code=True,
+    )
+
+
+def _packed_blocks(args, tokenizer):
+    """Build Megatron's shared EP input stream with the requested mask mode.
+
+    The currently supported Megatron topology is pure expert parallelism
+    (TP=PP=1), so every rank must consume the same tokens. Streaming therefore
+    uses a single logical data consumer on every rank instead of rank-sharding
+    the rows as the torch data-parallel learner does.
+    """
+    from ..data import StreamingPackedBlocks, build_packed_dataset
+
+    common = {
+        "train_on": args.train_on,
+        "assistant_mask_mode": args.assistant_mask_mode,
+    }
+    if args.tokenize == "stream":
+        return StreamingPackedBlocks(
+            args.data,
+            tokenizer,
+            args.learner_id,
+            args.num_learners,
+            args.seq_len,
+            args.max_rows,
+            rank=0,
+            world=1,
+            **common,
+        )
+    return build_packed_dataset(
+        args.data,
+        tokenizer,
+        args.learner_id,
+        args.num_learners,
+        args.seq_len,
+        args.max_rows,
+        **common,
+    )
+
+
+def _cycle(dataset, micro_batch_size: int = 1):
+    """Endless shifted LM micro-batches from yeto's weighted packed blocks.
+
+    Megatron computes one loss per supplied label position rather than doing
+    the causal shift performed by ``yeto.losses.sft_loss``. Shift labels and
+    weights here so weight[t] still controls prediction of token t. The final
+    position receives a valid dummy label and zero loss weight.
+    """
     import torch
 
+    ids_batch = []
+    weights_batch = []
     while True:
         for block in dataset:
-            ids = block["input_ids"] if isinstance(block, dict) else block[0]
-            ids = torch.as_tensor(ids).unsqueeze(0)
-            yield {"input_ids": ids, "labels": ids.clone()}
+            if isinstance(block, dict):
+                ids = block["input_ids"]
+                weights = block.get("weights")
+            else:
+                ids, weights = block
+            ids = torch.as_tensor(ids)
+            weights = (
+                torch.ones_like(ids, dtype=torch.float32)
+                if weights is None
+                else torch.as_tensor(weights, dtype=torch.float32)
+            )
+            ids_batch.append(ids)
+            weights_batch.append(weights)
+            if len(ids_batch) < micro_batch_size:
+                continue
+
+            input_ids = torch.stack(ids_batch)
+            weights = torch.stack(weights_batch)
+            labels = torch.zeros_like(input_ids)
+            labels[:, :-1] = input_ids[:, 1:]
+            loss_mask = torch.zeros_like(weights)
+            loss_mask[:, :-1] = weights[:, 1:]
+            yield {
+                "input_ids": input_ids,
+                "labels": labels,
+                "loss_mask": loss_mask,
+            }
+            ids_batch.clear()
+            weights_batch.clear()
 
 
 if __name__ == "__main__":
