@@ -52,6 +52,7 @@ def test_torch_backend_uses_shard_and_torch_learner():
     task = make_learner_task(_args(island_backend="torch"), _SPEC, 0, 1, "1.2.3.4:29400")
     assert "-m yeto.learner" in task.run
     assert "--shard fsdp" in task.run
+    assert "--seed 0" in task.run
     assert "--island-backend" not in task.run
     assert "megatron-core" not in task.setup
 
@@ -63,6 +64,7 @@ def test_megatron_backend_swaps_entrypoint_and_runs_in_the_ngc_container():
     task = make_learner_task(args, _SPEC, 0, 1, "1.2.3.4:29400")
     assert "-m yeto.megatron.learner" in task.run
     assert "--island-backend megatron" in task.run
+    assert "--seed 0" in task.run
     assert "--shard" not in task.run  # megatron has its own parallelism
     # The stack lives in the NGC container, so setup does NOT install torch or
     # the megatron stack, nor RAID the NVMe (a host op).

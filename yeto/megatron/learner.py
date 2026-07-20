@@ -53,6 +53,7 @@ def parse_args(argv=None):
     p.add_argument("--num-learners", type=int, default=1)
     p.add_argument("--loss-function", default="cross_entropy")
     p.add_argument("--train-on", choices=["assistant", "all"], default="assistant")
+    p.add_argument("--seed", type=int, default=0)
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
@@ -98,7 +99,7 @@ def _init_distributed(args):
         expert_model_parallel_size=args.expert_parallel,
         expert_tensor_parallel_size=1,  # pure EP over experts; never split an expert tensor
     )
-    model_parallel_cuda_manual_seed(1234)
+    model_parallel_cuda_manual_seed(args.seed)
     if args.tensor_parallel != 1 or args.pipeline_parallel != 1:
         raise NotImplementedError(
             "the Megatron backend's adapter sync currently assumes TP=1, PP=1 "

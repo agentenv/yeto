@@ -147,6 +147,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default="assistant",
         help="which tokens carry loss: assistant-message tokens only (default) or every token",
     )
+    tune.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="causal-LM root seed; shared for model/adapter initialization, "
+        "then deterministically separated by learner and rank for training",
+    )
     tune.add_argument("--lora-r", type=int, default=16)
     tune.add_argument(
         "--lora-targets",

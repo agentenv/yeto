@@ -109,7 +109,12 @@ def parse_args(argv=None):
     p.add_argument("--inner-lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--warmup-steps", type=int, default=10)
-    p.add_argument("--seed", type=int, default=None)
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="shared initialization seed; training streams derive learner/rank seeds",
+    )
     p.add_argument("--fragments", type=int, default=8, help="P (= H, round-robin)")
     p.add_argument(
         "--fragment-pattern",
@@ -396,32 +401,30 @@ def main(argv=None) -> None:
     if not 0.0 <= args.merge_alpha < 1.0:
         raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
 
-    # An explicit root seed gives every rank/island the same LoRA
-    # initialization. With no seed, preserve the learner's original ambient
-    # RNG behavior outside benchmark runs.
-    if args.seed is not None:
-        random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(args.seed)
+    # Every rank/island must start from identical trainable parameters. A
+    # mismatched LoRA initialization is indistinguishable from a local update
+    # to the coordinator and corrupts the first merge. Training randomness is
+    # separated by learner/rank only after model construction below.
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     log.info("loading model %s (%s)", args.model, args.tuning)
     model, tokenizer = load_model_and_tokenizer(args, device)
 
     # Training randomness may differ after initialization while remaining
     # reproducible for a given benchmark seed and topology.
-    training_seed = None
-    if args.seed is not None:
-        # learner + M*rank is the corresponding rank in baseline-mM. This
-        # pairs dropout and zero-worker streaming order across the matching
-        # synchronous and DiLoCo topologies.
-        training_seed = _derived_training_seed(
-            args.seed, args.learner_id, args.num_learners, rank
-        )
-        random.seed(training_seed)
-        torch.manual_seed(training_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(training_seed)
+    # learner + M*rank is the corresponding rank in baseline-mM. This pairs
+    # dropout and zero-worker streaming order across matching synchronous and
+    # asynchronous topologies without changing the shared initialization.
+    training_seed = _derived_training_seed(
+        args.seed, args.learner_id, args.num_learners, rank
+    )
+    random.seed(training_seed)
+    torch.manual_seed(training_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(training_seed)
 
     grad_ckpt = args.gradient_checkpointing == "on"
     if args.gradient_checkpointing == "auto" and device.type == "cuda":

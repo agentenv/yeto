@@ -14,6 +14,12 @@ def test_parse_args_maps_backend_and_parallelism():
     assert a.island_backend == "megatron"
     assert (a.expert_parallel, a.tensor_parallel, a.pipeline_parallel) == (24, 1, 1)
     assert a.lora_r == 16 and a.wire_dtype == "q4"
+    assert a.seed == 0
+
+
+def test_parse_args_accepts_shared_initialization_seed():
+    a = ml.parse_args(["--model", "org/model", "--data", "org/data", "--seed", "29"])
+    assert a.seed == 29
 
 
 def test_attention_targets_are_megatron_names_not_hf():

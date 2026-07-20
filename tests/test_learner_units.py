@@ -199,6 +199,26 @@ def test_learner_accepts_explicit_training_seed():
     assert args.seed == 29
 
 
+def test_learner_defaults_to_shared_initialization_seed():
+    from yeto.learner import parse_args
+
+    args = parse_args(
+        [
+            "--model",
+            "org/model",
+            "--data",
+            "org/data",
+            "--syncer",
+            "none",
+            "--learner-id",
+            "0",
+            "--num-learners",
+            "1",
+        ]
+    )
+    assert args.seed == 0
+
+
 def test_learner_quantization_default_is_unchanged():
     from yeto.learner import parse_args
 

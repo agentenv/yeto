@@ -17,6 +17,11 @@ def _args(extra):
     return cli.build_parser().parse_args(BASE + extra)
 
 
+def test_launch_cli_has_deterministic_lm_seed_by_default():
+    assert _args([]).seed == 0
+    assert _args(["--seed", "29"]).seed == 29
+
+
 def _result(counts):
     cands = [
         Candidate(
