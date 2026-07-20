@@ -25,7 +25,7 @@ import time
 import torch
 import torch.distributed as dist
 
-from .autobatch import int_or_auto, rebalance_grad_accum, resolve_micro_batch_size
+from .autobatch import exact_grad_accum, int_or_auto, resolve_micro_batch_size
 from .data import StreamingPackedBlocks, build_packed_dataset
 from .fragments import FragmentLayout, build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
@@ -94,9 +94,9 @@ def parse_args(argv=None):
         "--micro-batch-size",
         type=int_or_auto,
         default="auto",
-        help="per-GPU micro batch; 'auto' (default) probes the largest size "
-        "that fits VRAM at startup and shrinks --grad-accum to keep the "
-        "effective batch constant",
+        help="per-GPU micro batch; with 'auto' (default), --grad-accum is the "
+        "requested per-rank effective sequence batch and the probe chooses "
+        "its largest fitting divisor",
     )
     p.add_argument(
         "--gradient-checkpointing",
@@ -105,7 +105,13 @@ def parse_args(argv=None):
         help="recompute activations in backward; 'auto' enables it when the "
         "loaded base already occupies more than half of VRAM",
     )
-    p.add_argument("--grad-accum", type=int, default=1)
+    p.add_argument(
+        "--grad-accum",
+        type=int,
+        default=1,
+        help="accumulation steps with an explicit micro batch; with 'auto', "
+        "the requested per-rank effective sequence batch",
+    )
     p.add_argument("--inner-lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--warmup-steps", type=int, default=10)
@@ -561,7 +567,21 @@ def main(argv=None) -> None:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index])
         params = trainable_params(model.module)
 
-    opt = torch.optim.AdamW(params.values(), lr=args.inner_lr, weight_decay=args.weight_decay)
+    # In auto mode, keep optimizer-step peak memory bounded and probeable
+    # without mutating parameters. Single-tensor AdamW creates one
+    # parameter-sized denominator at a time; autobatch reserves the largest
+    # such transient in addition to its scratch moment buffers. CUDA's default
+    # foreach path can instead materialize intermediates for the whole
+    # parameter list. Explicit micro-batch runs retain AdamW's prior defaults.
+    optimizer_kwargs = {}
+    if args.micro_batch_size == "auto":
+        optimizer_kwargs = {"foreach": False, "fused": False}
+    opt = torch.optim.AdamW(
+        params.values(),
+        lr=args.inner_lr,
+        weight_decay=args.weight_decay,
+        **optimizer_kwargs,
+    )
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / max(1, args.warmup_steps))
     )
@@ -570,15 +590,25 @@ def main(argv=None) -> None:
     # (memory-accurate) and BEFORE the loader/syncer exist (nothing counts
     # the probe). See yeto/autobatch.py.
     requested_mb = args.micro_batch_size
+    requested_grad_accum = args.grad_accum
     args.micro_batch_size = resolve_micro_batch_size(
         args, model, params, opt, tokenizer, device, world
     )
     if requested_mb == "auto":
-        args.grad_accum = rebalance_grad_accum(args.grad_accum, args.micro_batch_size)
+        args.grad_accum = exact_grad_accum(requested_grad_accum, args.micro_batch_size)
+        effective_batch = args.micro_batch_size * args.grad_accum
         log.info(
-            "auto micro-batch: %d per GPU (grad-accum -> %d)",
+            "auto batch recipe: --grad-accum requests effective batch=%d sequences/rank "
+            "(%d tokens/rank); resolved micro-batch=%d x grad-accum=%d = %d "
+            "sequences/rank (%d tokens/rank, %d tokens global across %d ranks)",
+            requested_grad_accum,
+            requested_grad_accum * args.seq_len,
             args.micro_batch_size,
             args.grad_accum,
+            effective_batch,
+            effective_batch * args.seq_len,
+            effective_batch * args.seq_len * world,
+            world,
         )
 
     if args.tokenize == "stream":

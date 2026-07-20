@@ -166,11 +166,17 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--micro-batch-size",
         type=int_or_auto,
         default="auto",
-        help="per-GPU micro batch; 'auto' (default) probes the largest size "
-        "that fits each learner's VRAM at startup and shrinks --grad-accum "
-        "to keep the effective batch constant",
+        help="per-GPU micro batch; with 'auto' (default), --grad-accum is the "
+        "requested per-rank effective sequence batch and the probe chooses "
+        "its largest fitting divisor",
     )
-    tune.add_argument("--grad-accum", type=int, default=4)
+    tune.add_argument(
+        "--grad-accum",
+        type=int,
+        default=4,
+        help="accumulation steps with an explicit micro batch; with 'auto', "
+        "the requested per-rank effective sequence batch",
+    )
     tune.add_argument("--inner-lr", type=float, default=3e-4)
     tune.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
     tune.add_argument(
