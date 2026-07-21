@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,12 +65,16 @@ def test_gradient_parity_gate_checks_loss_keys_and_values():
         rtol=1e-5,
         atol=1e-6,
     )
-    assert not bad["passed"] and "gradient parity" in bad["reason"]
+    assert not bad["passed"]
+    assert bad["gradient_status"] == "failed"
+    assert bad["first_failing_gradient_tensor"] == "layer.weight"
 
     missing = benchmark.compare_parity(
         12.0, {}, 12.0, reference, rtol=1e-5, atol=1e-6
     )
-    assert not missing["passed"] and "key mismatch" in missing["reason"]
+    assert not missing["passed"]
+    assert missing["checked_gradient_tensors"] == 0
+    assert "key mismatch" in missing["reason"]
 
     bad_delta = benchmark.compare_parity(
         12.0,
@@ -83,7 +88,319 @@ def test_gradient_parity_gate_checks_loss_keys_and_values():
             "layer.weight": torch.tensor([0.1, 0.2])
         },
     )
-    assert not bad_delta["passed"] and "parameter-delta parity" in bad_delta["reason"]
+    assert not bad_delta["passed"]
+    assert bad_delta["parameter_delta_status"] == "failed"
+    assert bad_delta["first_failing_parameter_delta_tensor"] == "layer.weight"
+
+
+def test_parity_scans_all_gradients_and_deltas_after_early_failures():
+    reference_gradients = {
+        "first": torch.tensor([1.0, 2.0]),
+        "worst": torch.tensor([3.0, 4.0]),
+    }
+    actual_gradients = {
+        "first": torch.tensor([1.0, 2.1]),
+        "worst": torch.tensor([30.0, 4.0]),
+    }
+    reference_deltas = {
+        "first": torch.tensor([0.1]),
+        "worst": torch.tensor([0.2]),
+    }
+    actual_deltas = {
+        "first": torch.tensor([0.3]),
+        "worst": torch.tensor([2.0]),
+    }
+
+    result = benchmark.compare_parity(
+        1.0,
+        actual_gradients,
+        1.0,
+        reference_gradients,
+        rtol=0,
+        atol=1e-6,
+        parameter_deltas=actual_deltas,
+        reference_parameter_deltas=reference_deltas,
+    )
+
+    assert not result["passed"]
+    assert result["checked_gradient_tensors"] == 2
+    assert result["checked_parameter_delta_tensors"] == 2
+    assert result["first_failing_gradient_tensor"] == "first"
+    assert result["worst_failing_gradient_tensor"] == "worst"
+    assert result["first_failing_parameter_delta_tensor"] == "first"
+    assert result["worst_failing_parameter_delta_tensor"] == "worst"
+    assert result["max_gradient_abs_error"] == pytest.approx(27.0)
+    assert result["max_parameter_delta_abs_error"] == pytest.approx(1.8)
+
+
+def test_whole_model_metrics_are_scale_aware_and_count_violations():
+    summary = benchmark.compare_tensor_maps(
+        {
+            "a": torch.tensor([3.0, 0.0]),
+            "b": torch.tensor([0.0, 4.0]),
+        },
+        {
+            "a": torch.tensor([0.0, 0.0]),
+            "b": torch.tensor([0.0, 4.0]),
+        },
+        rtol=0,
+        atol=0,
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["checked_tensors"] == 2
+    assert summary["element_count"] == 4
+    assert summary["allclose_violation_count"] == 1
+    assert summary["allclose_violation_fraction"] == pytest.approx(0.25)
+    assert summary["actual_l2_norm"] == pytest.approx(5.0)
+    assert summary["reference_l2_norm"] == pytest.approx(4.0)
+    assert summary["difference_l2_norm"] == pytest.approx(3.0)
+    assert summary["relative_l2_error"] == pytest.approx(0.75)
+    assert summary["cosine_similarity"] == pytest.approx(0.8)
+    assert summary["max_actual_absolute"] == pytest.approx(4.0)
+    assert summary["max_reference_absolute"] == pytest.approx(4.0)
+
+
+def test_nonfinite_and_structural_failures_are_explicit():
+    summary = benchmark.compare_tensor_maps(
+        {
+            "finite": torch.tensor([float("nan")]),
+            "numeric": torch.tensor([2.0]),
+            "shape": torch.ones(2),
+            "extra": torch.ones(1),
+        },
+        {
+            "finite": torch.ones(1),
+            "numeric": torch.tensor([1.0]),
+            "shape": torch.ones(3),
+            "missing": torch.ones(1),
+        },
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["structural_status"] == "failed"
+    assert summary["finiteness_status"] == "failed"
+    assert summary["numeric_status"] == "partial"
+    assert summary["numeric_scope"] == "compatible_finite_elements"
+    assert summary["checked_tensors"] == 3
+    assert summary["nonfinite_actual_elements"] == 1
+    assert summary["numeric_element_count"] == 1
+    assert summary["max_absolute_error"] == pytest.approx(1.0)
+    assert summary["relative_l2_error"] == pytest.approx(1.0)
+    assert summary["missing_tensors"] == ["missing"]
+    assert summary["extra_tensors"] == ["extra"]
+    assert summary["shape_mismatches"][0]["tensor"] == "shape"
+    json.dumps(summary, allow_nan=False)
+
+
+def test_nonfinite_loss_and_unevaluable_tensors_serialize_as_strict_json():
+    result = benchmark.compare_parity(
+        float("nan"),
+        {"shape": torch.ones(2), "nonfinite": torch.tensor([float("inf")])},
+        1.0,
+        {"shape": torch.ones(3), "nonfinite": torch.ones(1)},
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+    assert result["loss_status"] == "nonfinite"
+    assert result["loss"] is None
+    assert result["loss_abs_error"] is None
+    assert result["gradient_parity"]["max_absolute_error"] is None
+    assert result["gradient_parity"]["relative_l2_error"] is None
+    assert result["gradient_parity"]["nonfinite_actual_elements"] == 1
+    json.dumps(result, allow_nan=False)
+
+
+def test_nonzero_fractions_use_only_jointly_finite_elements():
+    summary = benchmark.compare_tensor_maps(
+        {"weight": torch.tensor([1.0, float("nan"), 2.0])},
+        {"weight": torch.tensor([float("nan"), 3.0, 2.0])},
+        rtol=0,
+        atol=0,
+    )
+
+    assert summary["finite_element_count"] == 1
+    assert summary["actual_nonzero_elements"] == 1
+    assert summary["reference_nonzero_elements"] == 1
+    assert summary["actual_nonzero_fraction"] == pytest.approx(1.0)
+    assert summary["reference_nonzero_fraction"] == pytest.approx(1.0)
+    assert 0 <= summary["actual_nonzero_fraction"] <= 1
+    assert 0 <= summary["reference_nonzero_fraction"] <= 1
+
+
+def test_unmeasured_and_insensitive_parameter_deltas_are_not_zero_errors():
+    gradients = {"weight": torch.tensor([1.0])}
+    not_evaluated = benchmark.compare_parity(
+        1.0, gradients, 1.0, gradients, rtol=0, atol=0
+    )
+    assert not_evaluated["passed"]
+    assert not_evaluated["parameter_delta_status"] == "not_evaluated"
+    assert not_evaluated["max_parameter_delta_abs_error"] is None
+    assert not_evaluated["checked_parameter_delta_tensors"] == 0
+
+    rounded_away = benchmark.compare_parity(
+        1.0,
+        gradients,
+        1.0,
+        gradients,
+        rtol=0,
+        atol=0,
+        parameter_deltas={"weight": torch.zeros(2)},
+        reference_parameter_deltas={"weight": torch.zeros(2)},
+    )
+    assert not rounded_away["passed"]
+    assert rounded_away["parameter_delta_status"] == "not_meaningful"
+    assert rounded_away["max_parameter_delta_abs_error"] == 0
+    assert (
+        rounded_away["parameter_delta_actual_sensitivity"]["status"]
+        == "rounded_away"
+    )
+
+    strict_delta = benchmark.compare_parity(
+        1.0,
+        gradients,
+        1.0,
+        gradients,
+        rtol=0,
+        atol=0.1,
+        parameter_deltas={"weight": torch.tensor([2e-5])},
+        reference_parameter_deltas={"weight": torch.tensor([1e-5])},
+        parameter_delta_rtol=0,
+        parameter_delta_atol=1e-8,
+    )
+    assert strict_delta["parameter_delta_status"] == "failed"
+
+
+def test_bf16_adam_update_rounding_is_detected(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda _device: None)
+    model = torch.nn.Module()
+    model.register_parameter(
+        "weight", torch.nn.Parameter(torch.tensor([0.02], dtype=torch.bfloat16))
+    )
+    model.weight.grad = torch.ones_like(model.weight)
+    optimizer = benchmark.make_optimizer(model, 1e-5, 0.01)
+
+    deltas, _ = benchmark.parameter_delta_witness(
+        model, optimizer, torch.device("cpu")
+    )
+    result = benchmark.compare_parity(
+        1.0,
+        {"weight": torch.ones(1)},
+        1.0,
+        {"weight": torch.ones(1)},
+        rtol=0,
+        atol=0,
+        parameter_deltas=deltas,
+        reference_parameter_deltas={"weight": torch.zeros(1)},
+    )
+
+    assert torch.count_nonzero(deltas["weight"]).item() == 0
+    assert result["parameter_delta_status"] == "not_meaningful"
+    assert not result["passed"]
+
+
+def test_distributed_parity_aggregation_promotes_every_failing_rank():
+    reference = {"weight": torch.tensor([1.0])}
+    deltas = {"weight": torch.tensor([1e-5])}
+    rank_zero = benchmark.compare_parity(
+        1.0,
+        reference,
+        1.0,
+        reference,
+        rtol=0,
+        atol=1e-6,
+        parameter_deltas=deltas,
+        reference_parameter_deltas=deltas,
+        parameter_delta_rtol=0,
+        parameter_delta_atol=1e-8,
+    )
+    rank_one = benchmark.compare_parity(
+        1.0,
+        {"weight": torch.tensor([10.0])},
+        1.0,
+        reference,
+        rtol=0,
+        atol=1e-6,
+        parameter_deltas=deltas,
+        reference_parameter_deltas=deltas,
+        parameter_delta_rtol=0,
+        parameter_delta_atol=1e-8,
+    )
+    rank_two = benchmark.compare_parity(
+        float("nan"),
+        reference,
+        1.0,
+        reference,
+        rtol=0,
+        atol=1e-6,
+        parameter_deltas=deltas,
+        reference_parameter_deltas=deltas,
+        parameter_delta_rtol=0,
+        parameter_delta_atol=1e-8,
+    )
+    diagnostics = [
+        benchmark.compact_parity_diagnostic(rank_zero, 0),
+        benchmark.compact_parity_diagnostic(rank_one, 1),
+        benchmark.compact_parity_diagnostic(rank_two, 2),
+    ]
+
+    aggregate = benchmark.aggregate_parity_diagnostics(diagnostics)
+    assert not aggregate["passed"]
+    assert aggregate["failing_ranks"] == [1, 2]
+    assert aggregate["worst_failing_rank"] == 2
+    assert aggregate["gradient_max_absolute_error_max"] == pytest.approx(9.0)
+    assert aggregate["gradient_nonfinite_actual_elements_total"] == 0
+    assert aggregate["nonfinite_loss_ranks"] == [2]
+    assert aggregate["loss_nonfinite_actual_ranks"] == [2]
+    assert aggregate["loss_nonfinite_reference_ranks"] == []
+
+    promoted = benchmark.apply_distributed_parity(rank_zero, diagnostics, rank=0)
+    assert not promoted["passed"]
+    assert promoted["reason"] == rank_two["reason"]
+    assert promoted["max_gradient_abs_error"] == pytest.approx(9.0)
+    assert promoted["loss_nonfinite_actual"] is True
+    assert promoted["nonfinite_loss_ranks"] == [2]
+    assert promoted["distributed_parity"]["failing_ranks"] == [1, 2]
+    assert len(promoted["rank_diagnostics"]) == 3
+    json.dumps(promoted, allow_nan=False)
+
+
+def test_distributed_parity_aggregation_rejects_duplicate_ranks():
+    parity = benchmark.compare_parity(
+        1.0,
+        {"weight": torch.ones(1)},
+        1.0,
+        {"weight": torch.ones(1)},
+        rtol=0,
+        atol=0,
+    )
+    diagnostic = benchmark.compact_parity_diagnostic(parity, 0)
+    with pytest.raises(ValueError, match="duplicate"):
+        benchmark.aggregate_parity_diagnostics([diagnostic, diagnostic])
+
+
+def test_state_digest_aggregation_identifies_remote_mismatch():
+    reference = "a" * 64
+    different = "b" * 64
+    report = benchmark.aggregate_state_digest_diagnostics(
+        [
+            {"rank": 0, "digest": reference},
+            {"rank": 3, "digest": different},
+        ]
+    )
+
+    assert report["reference_digest"] == reference
+    assert report["passed"] is False
+    assert report["failing_ranks"] == [3]
+    assert report["unique_digest_count"] == 2
+    assert report["rank_digests"] == [
+        {"rank": 0, "digest": reference, "matches_reference": True},
+        {"rank": 3, "digest": different, "matches_reference": False},
+    ]
+    json.dumps(report, allow_nan=False)
 
 
 def test_benchmark_argument_validation_is_cpu_safe():
@@ -91,6 +408,12 @@ def test_benchmark_argument_validation_is_cpu_safe():
     benchmark.validate_args(args)
     assert args.dtype == "bf16"
     assert args.model == "Qwen/Qwen2.5-1.5B-Instruct"
+    assert args.tuning == "lora"
+    assert args.lora_r == 16
+    assert args.lora_alpha == 32
+    assert args.lora_targets == "auto"
+    assert args.learning_rate == pytest.approx(3e-4)
+    assert args.parameter_delta_atol == 1e-8
     assert args.trial_index == 1
     assert args.steps > 0 and args.warmup_steps > 0
 
@@ -98,6 +421,179 @@ def test_benchmark_argument_validation_is_cpu_safe():
     broken.target_fraction = 0
     with pytest.raises(ValueError, match="target-fraction"):
         benchmark.validate_args(broken)
+
+    broken = SimpleNamespace(**vars(args))
+    broken.lora_r = 0
+    with pytest.raises(ValueError, match="lora-r"):
+        benchmark.validate_args(broken)
+
+
+def test_trainable_state_digest_covers_values_names_and_dtypes():
+    first = torch.nn.Module()
+    first.register_parameter("weight", torch.nn.Parameter(torch.tensor([1.0])))
+    first.register_parameter(
+        "frozen", torch.nn.Parameter(torch.tensor([2.0]), requires_grad=False)
+    )
+    second = torch.nn.Module()
+    second.register_parameter("weight", torch.nn.Parameter(torch.tensor([1.0])))
+
+    digest = benchmark.trainable_state_digest(first)
+    assert digest == benchmark.trainable_state_digest(second)
+    second.weight.data.add_(1)
+    assert digest != benchmark.trainable_state_digest(second)
+
+    second.weight = torch.nn.Parameter(torch.tensor([1.0], dtype=torch.float64))
+    assert digest != benchmark.trainable_state_digest(second)
+
+
+def test_trainable_anchor_restore_and_lora_factor_validation():
+    model = torch.nn.Module()
+    model.lora_A = torch.nn.Linear(2, 2, bias=False)
+    model.lora_B = torch.nn.Linear(2, 2, bias=False)
+    model.lora_B.weight.data.zero_()
+    with pytest.raises(RuntimeError, match="lora_B"):
+        benchmark.lora_factor_nonzero_report(
+            benchmark.snapshot_trainable_state(model)
+        )
+
+    model.lora_B.weight.data.fill_(0.25)
+    anchor = benchmark.snapshot_trainable_state(model)
+    anchor_digest = benchmark.trainable_state_digest(model)
+    report = benchmark.lora_factor_nonzero_report(anchor)
+    assert report["lora_A"]["nonzero_elements"] > 0
+    assert report["lora_B"]["nonzero_elements"] == 4
+
+    model.lora_A.weight.data.zero_()
+    benchmark.restore_trainable_state(model, anchor)
+    assert benchmark.trainable_state_digest(model) == anchor_digest
+
+
+def test_exact_global_target_backward_clips_trainable_gradients():
+    model = torch.nn.Module()
+    model.register_parameter("weight", torch.nn.Parameter(torch.tensor([1.0])))
+    report = benchmark.backward_and_clip(
+        model,
+        model.weight.sum() * 10.0,
+        torch.tensor(2),
+        tuning="lora",
+        world=1,
+        device=torch.device("cpu"),
+    )
+
+    assert report["global_target_tokens"] == 2
+    assert report["pre_clip_grad_norm"] == pytest.approx(5.0)
+    assert model.weight.grad.item() == pytest.approx(1.0)
+    optimizer = benchmark.make_optimizer(model, 3e-4, 0.01)
+    assert optimizer.defaults["lr"] == pytest.approx(3e-4)
+    assert optimizer.defaults["foreach"] is None
+    assert optimizer.defaults["fused"] is None
+
+
+def test_lora_output_head_must_be_frozen_and_unadapted():
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lm_head = torch.nn.Linear(2, 2, bias=False)
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+    model = Model()
+    model.lm_head.requires_grad_(False)
+    assert benchmark.validate_lora_output_head(model) == {
+        "frozen": True,
+        "adapted": False,
+        "parameter_count": 4,
+    }
+    model.lm_head.weight.requires_grad_(True)
+    with pytest.raises(RuntimeError, match="frozen, unadapted"):
+        benchmark.validate_lora_output_head(model)
+
+
+def test_source_provenance_environment_overrides_are_strict(monkeypatch):
+    sha = "a" * 40
+    monkeypatch.setenv("YETO_GIT_SHA", sha.upper())
+    monkeypatch.setenv("YETO_GIT_DIRTY", "true")
+    provenance = benchmark.source_provenance()
+    assert provenance["git_sha"] == sha
+    assert provenance["git_dirty"] is True
+    assert provenance["clean_commit_exact"] is False
+    assert provenance["provenance_source"] == "environment_override"
+    assert len(provenance["benchmark_script_sha256"]) == 64
+
+    monkeypatch.setenv("YETO_GIT_SHA", "not-a-sha")
+    with pytest.raises(ValueError, match="YETO_GIT_SHA"):
+        benchmark.source_provenance()
+    monkeypatch.setenv("YETO_GIT_SHA", sha)
+    monkeypatch.setenv("YETO_GIT_DIRTY", "maybe")
+    with pytest.raises(ValueError, match="YETO_GIT_DIRTY"):
+        benchmark.source_provenance()
+
+
+def test_source_provenance_requires_complete_metadata(monkeypatch):
+    monkeypatch.delenv("YETO_GIT_SHA", raising=False)
+    monkeypatch.delenv("YETO_GIT_DIRTY", raising=False)
+    monkeypatch.setattr(benchmark, "_git_output", lambda _arguments: None)
+    with pytest.raises(RuntimeError, match="source provenance is unavailable"):
+        benchmark.source_provenance()
+
+    monkeypatch.setenv("YETO_GIT_SHA", "b" * 40)
+    with pytest.raises(ValueError, match="supplied together"):
+        benchmark.source_provenance()
+
+
+def test_source_provenance_git_fallback_marks_clean_commit(monkeypatch):
+    monkeypatch.delenv("YETO_GIT_SHA", raising=False)
+    monkeypatch.delenv("YETO_GIT_DIRTY", raising=False)
+
+    def git_output(arguments):
+        return "c" * 40 if arguments[0] == "rev-parse" else ""
+
+    monkeypatch.setattr(benchmark, "_git_output", git_output)
+    provenance = benchmark.source_provenance()
+    assert provenance["git_sha"] == "c" * 40
+    assert provenance["git_dirty"] is False
+    assert provenance["clean_commit_exact"] is True
+    assert provenance["provenance_source"] == "git_worktree"
+
+
+@pytest.mark.parametrize(
+    ("variants", "failed", "expected_status"),
+    [
+        (["a", "b"], False, "passed"),
+        (["a"], False, "incomplete"),
+        (["a"], True, "failed"),
+    ],
+)
+def test_report_status_distinguishes_pass_failure_and_incomplete(
+    variants, failed, expected_status
+):
+    report = {
+        "status": "incomplete",
+        "planned_variants": ["a", "b"],
+        "completed_variants": [],
+        "fatal": None,
+        "variants": [
+            {"variant": {"name": name}, "status": "passed"} for name in variants
+        ],
+    }
+    benchmark.finalize_report_status(
+        report,
+        failed=failed,
+        fatal_phase="parity" if failed else None,
+        fatal_reason="mismatch" if failed else None,
+    )
+    assert report["status"] == expected_status
+    assert report["completed_variants"] == variants
+    if failed:
+        assert report["fatal"] == {"phase": "parity", "reason": "mismatch"}
+    else:
+        assert report["fatal"] is None
+
+    if expected_status == "passed":
+        report["variants"][1]["status"] = "skipped"
+        benchmark.finalize_report_status(report, False, None, None)
+        assert report["status"] == "incomplete"
 
 
 def test_model_revision_is_resolved_to_an_immutable_hub_commit(monkeypatch):
