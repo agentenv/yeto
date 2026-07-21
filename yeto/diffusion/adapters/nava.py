@@ -80,7 +80,7 @@ def _load_state_dict(path: str) -> dict[str, torch.Tensor]:
         from safetensors.torch import load_file
 
         return load_file(path, device="cpu")
-    ckpt = torch.load(path, map_location="cpu")
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)
     return ckpt.get("state_dict", ckpt)
 
 
@@ -204,6 +204,8 @@ def _latent_channels(pipe, name: str, default: int) -> int:
 
 
 class NavaAdapter(DiffusionAdapter):
+    supports_pinned_model_source = True
+
     def __init__(
         self,
         *,
@@ -273,8 +275,16 @@ class NavaAdapter(DiffusionAdapter):
         from nava_src.pipeline_nava import AudioVideoPipeline
 
         cfg = self._config(args)
+        from yeto.provenance import materialize_pinned_model
+
+        configured_model = cfg.get("model_id")
+        if configured_model and configured_model != resolve(getattr(args, "model", "nava")):
+            raise ValueError(
+                "NAVA config model_id differs from --model; refusing an unpinned "
+                "secondary model source"
+            )
         pipe = AudioVideoPipeline.create(
-            model_id=cfg.get("model_id") or resolve(getattr(args, "model", "nava")),
+            model_id=materialize_pinned_model(args),
             use_bf16=bool(cfg.get("use_bf16", True)),
             audio_latent_ch=int(cfg.get("audio_latent_ch", 128)),
             video_latent_ch=int(cfg.get("video_latent_ch", 48)),
@@ -442,31 +452,58 @@ class NavaAdapter(DiffusionAdapter):
         if hasattr(module, "save_pretrained"):
             module.save_pretrained(out / "model")
         else:
-            torch.save(module.state_dict(), out / "model_state.pt")
+            from safetensors.torch import save_file
+
+            save_file(
+                {
+                    name: tensor.detach().cpu().contiguous()
+                    for name, tensor in module.state_dict().items()
+                },
+                out / "model_state.safetensors",
+            )
 
     def load_adapters(self, pipe, adapter_dir, meta, args):
         del meta, args
         adapter_dir = Path(adapter_dir)
         model_dir = adapter_dir / "model"
         if model_dir.exists():
+            if (model_dir / "adapter_model.bin").exists() and not (
+                model_dir / "adapter_model.safetensors"
+            ).exists():
+                raise RuntimeError(
+                    f"{model_dir}: legacy binary adapter weights are not accepted; "
+                    "convert them to safetensors"
+                )
             from peft import PeftModel
 
             pipe.model = PeftModel.from_pretrained(pipe.model, str(model_dir))
             return pipe
-        state_path = adapter_dir / "model_state.pt"
-        if state_path.exists():
-            pipe.model.load_state_dict(torch.load(state_path, map_location="cpu"), strict=False)
+        safe_state_path = adapter_dir / "model_state.safetensors"
+        legacy_state_path = adapter_dir / "model_state.pt"
+        if safe_state_path.exists():
+            from safetensors.torch import load_file
+
+            pipe.model.load_state_dict(load_file(safe_state_path, device="cpu"), strict=False)
+            return pipe
+        if legacy_state_path.exists():
+            pipe.model.load_state_dict(
+                torch.load(legacy_state_path, map_location="cpu", weights_only=True),
+                strict=False,
+            )
             return pipe
         raise FileNotFoundError(f"{adapter_dir}: no NAVA adapter weights found")
 
     def load_sample_pipeline(self, adapter_dir, meta, args, device):
-        values = {
-            "model": getattr(args, "model", None) or meta.get("model") or "nava",
-            "tuning": "full",
-            "lora_r": (meta.get("lora") or {}).get("r") or 16,
-            "lora_alpha": (meta.get("lora") or {}).get("alpha") or 32,
-            "lora_targets": (meta.get("lora") or {}).get("targets") or "auto",
-        }
+        values = vars(args).copy()
+        values.update(
+            {
+                "model": getattr(args, "model", None) or meta.get("model") or "nava",
+                "tuning": "full",
+                "lora_r": (meta.get("lora") or {}).get("r") or 16,
+                "lora_alpha": (meta.get("lora") or {}).get("alpha") or 32,
+                "lora_targets": (meta.get("lora") or {}).get("targets") or "auto",
+            }
+        )
         pipe = self.load_pipeline(SimpleNamespace(**values), device)
         self.load_adapters(pipe, Path(adapter_dir), meta, args)
         return self.prepare_sample_pipeline(pipe, adapter_dir, meta, args, device)

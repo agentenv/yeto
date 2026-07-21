@@ -95,6 +95,21 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "(s3://, gs://, r2://, ...) — non-HF sources are shipped to learners "
         "via SkyPilot file mounts; rows are messages-format chat traces",
     )
+    p.add_argument(
+        "--model-revision",
+        default=None,
+        help="HF model branch/tag/commit (resolved to an immutable commit before launch)",
+    )
+    p.add_argument(
+        "--data-revision",
+        default=None,
+        help="HF dataset branch/tag/commit (resolved to an immutable commit before launch)",
+    )
+    p.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="deliberately execute code from the pinned model repository (off by default)",
+    )
     def loss_spec(value: str) -> str:
         if value in LOSS_FUNCTIONS or value.startswith(("custom:", "pickle:")):
             return value
@@ -110,9 +125,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "defining fn(logits, input_ids, weights) -> (summed_loss, num_tokens). "
         "num_tokens must count positive shifted target weights. "
         "Diffusion launches default cross_entropy to flow_matching in the "
-        "learner task. Custom callables are pickled by value and shipped to "
-        "all learners",
+        "learner task. Custom callables use legacy by-value pickle transport "
+        "and therefore require --allow-unsafe-pickled-loss",
     )
+    p.add_argument(
+        "--allow-unsafe-pickled-loss",
+        action="store_true",
+        help="allow legacy custom/callable pickle transport (arbitrary code execution)",
+    )
+    p.add_argument("--loss-sha256", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--source-sha256", default=None, help=argparse.SUPPRESS)
 
     tune = p.add_argument_group("fine-tuning")
     tune.add_argument("--tuning", choices=["lora", "full"], default="lora")
@@ -231,6 +253,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="diffusion only: optional module:factory or file.py:factory hook "
         "for repos whose training step is not covered by the generic "
         "diffusers denoiser path",
+    )
+    diffusion.add_argument(
+        "--diffusion-adapter-sha256", default=None, help=argparse.SUPPRESS
     )
     diffusion.add_argument(
         "--cache-latents",
@@ -462,9 +487,42 @@ def _add_diffusion_sample_args(p: argparse.ArgumentParser) -> None:
     model = p.add_argument_group("diffusion")
     model.add_argument("--model", default=None, help="optional base model override")
     model.add_argument(
+        "--model-revision",
+        default=None,
+        help="base-model branch/tag/commit (resolved before loading)",
+    )
+    model.add_argument(
+        "--data-revision",
+        default=None,
+        help="prompt-dataset branch/tag/commit (resolved before loading)",
+    )
+    model.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="deliberately execute code from the pinned model repository",
+    )
+    model.add_argument("--source-sha256", default=None, help=argparse.SUPPRESS)
+    for provenance_flag in (
+        "model-requested-identifier",
+        "model-requested-revision",
+        "data-requested-identifier",
+        "data-requested-revision",
+    ):
+        model.add_argument(
+            f"--{provenance_flag}", default=None, help=argparse.SUPPRESS
+        )
+    model.add_argument(
         "--diffusion-adapter",
         default=None,
         help="optional module:factory or file.py:factory hook for non-standard artifacts",
+    )
+    model.add_argument(
+        "--diffusion-adapter-sha256", default=None, help=argparse.SUPPRESS
+    )
+    model.add_argument(
+        "--allow-unattested-legacy-adapter",
+        action="store_true",
+        help="allow reviewed adapter code for a legacy artifact with no recorded digest",
     )
     model.add_argument("--dtype", choices=["auto", "bf16", "fp16", "f32"], default="auto")
     model.add_argument("--num-inference-steps", type=int, default=30)
@@ -769,6 +827,13 @@ def cmd_launch(args) -> int:
             file=sys.stderr,
         )
         return 1
+    try:
+        from .launcher import prepare_launch_args
+
+        prepare_launch_args(args)
+    except (ImportError, OSError, PermissionError, ValueError) as exc:
+        print(f"[yeto] provenance validation failed: {exc}", file=sys.stderr)
+        return 1
     if getattr(args, "controller", "local") == "head":
         return cmd_launch_head(args)
 
@@ -850,11 +915,11 @@ def _make_head_task(args, extra_mounts: dict | None = None):
 
     from .launcher import (
         HF_TOKEN_PATH,
-        PICKLED_LOSS_FILE,
         REPO_ROOT,
         SYNCER_PORT,
         SYNCER_REMOTE_BUILD,
         WAN_TUNING,
+        pickled_loss_path,
     )
 
     file_mounts = dict(extra_mounts or {})
@@ -882,9 +947,8 @@ def _make_head_task(args, extra_mounts: dict | None = None):
         # The pickled loss is gitignored, so the workdir sync skips it;
         # mount it into the head's workdir explicitly (the head re-mounts
         # it onto learners from there).
-        file_mounts[f"~/sky_workdir/{PICKLED_LOSS_FILE}"] = str(
-            REPO_ROOT / PICKLED_LOSS_FILE
-        )
+        loss_path = pickled_loss_path(args.loss_function)
+        file_mounts[f"~/sky_workdir/{loss_path.name}"] = str(loss_path)
     task = sky.Task(
         name="yeto-head",
         setup=(
@@ -972,7 +1036,7 @@ def cmd_launch_head(args) -> int:
     specs = parse_gpu_spec(args.gpu)
     # Resolve the loss BEFORE serializing: a custom:<file.py> spec becomes
     # pickle:<file> here, and the pickle is file-mounted onto the head.
-    args.loss_function = launcher.resolve_loss_function(args.loss_function)
+    launcher.prepare_launch_args(args)
     # Likewise stage a local --data path: it is rsynced onto the head, and
     # the rewritten path makes the head's launcher mount it onto learners.
     from .datasource import head_stage
