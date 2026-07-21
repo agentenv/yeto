@@ -1,10 +1,14 @@
 """Tests for yeto.export checkpoint parsing (no network, no HF model)."""
 
+import hashlib
+import json
 import struct
+from pathlib import Path
 
 import pytest
 import torch
 
+from yeto import export as export_module
 from yeto.export import CKPT_MAGIC, parse_checkpoint, validate_against_layout
 from yeto.fragments import build_layout
 from yeto.tensor_io import apply_fragment
@@ -62,6 +66,7 @@ def test_round_trip(tmp_path):
     ckpt = parse_checkpoint(path)
 
     assert ckpt.global_step == 42
+    assert ckpt.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
     assert ckpt.ledger == LEDGER
     assert len(ckpt.fragments) == layout.num_fragments
     for (version, p, m), (exp_version, exp_p, exp_m) in zip(ckpt.fragments, blobs):
@@ -70,6 +75,71 @@ def test_round_trip(tmp_path):
         assert torch.equal(m, exp_m)
 
     validate_against_layout(ckpt, layout)  # matching layout passes
+
+
+def test_causal_export_records_digest_of_parsed_checkpoint_bytes(monkeypatch, tmp_path):
+    params = {"weight": torch.tensor([1.0, 2.0])}
+    checkpoint, _, _ = make_checkpoint(
+        tmp_path,
+        params,
+        num_fragments=1,
+        global_step=11,
+    )
+    original_digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    model_dir = tmp_path / "local-model"
+    model_dir.mkdir()
+    output_dir = tmp_path / "exported"
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(2))
+
+        def save_pretrained(self, output, safe_serialization):
+            assert safe_serialization is True
+            Path(output, "model.marker").write_text("saved", encoding="utf-8")
+
+    class Tokenizer:
+        def save_pretrained(self, output):
+            Path(output, "tokenizer.marker").write_text("saved", encoding="utf-8")
+
+    model = Model()
+    monkeypatch.setattr(
+        "yeto.learner.load_model_and_tokenizer",
+        lambda args, device: (model, Tokenizer()),
+    )
+    monkeypatch.setattr(
+        "yeto.learner.trainable_params",
+        lambda loaded: {"weight": loaded.weight},
+    )
+    real_parse = export_module.parse_checkpoint
+
+    def parse_then_replace(path):
+        parsed = real_parse(path)
+        Path(path).write_bytes(b"replacement checkpoint bytes")
+        return parsed
+
+    monkeypatch.setattr(export_module, "parse_checkpoint", parse_then_replace)
+    export_module.main(
+        [
+            "--checkpoint",
+            str(checkpoint),
+            "--model",
+            str(model_dir),
+            "--tuning",
+            "full",
+            "--fragments",
+            "1",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    record = json.loads(
+        (output_dir / "yeto_provenance.json").read_text(encoding="utf-8")
+    )
+    assert record["artifact"]["checkpoint_sha256"] == original_digest
+    assert record["artifact"]["global_step"] == 11
 
 
 def test_bad_magic(tmp_path):

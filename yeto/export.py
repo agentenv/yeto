@@ -28,6 +28,7 @@ only matters when the syncer itself resumes from the checkpoint.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +49,8 @@ class Checkpoint:
     fragments: list[tuple[int, torch.Tensor, torch.Tensor]]
     # learner_id -> (merges, steps, tokens)
     ledger: dict[int, tuple[int, int, int]]
+    # Digest of the exact byte buffer decoded into this checkpoint.
+    sha256: str
 
 
 def parse_checkpoint(path: str | Path) -> Checkpoint:
@@ -97,7 +100,7 @@ def parse_checkpoint(path: str | Path) -> Checkpoint:
             f"payload (parsed {off} of {len(data)}); file corrupt or from an "
             "incompatible syncer version"
         )
-    return Checkpoint(global_step, fragments, ledger)
+    return Checkpoint(global_step, fragments, ledger, hashlib.sha256(data).hexdigest())
 
 
 def _read_f32(raw: bytes) -> torch.Tensor:
@@ -142,6 +145,9 @@ def parse_args(argv=None):
     )
     p.add_argument("--checkpoint", required=True, help="path to the syncer checkpoint file")
     p.add_argument("--model", required=True, help="HF model id or an alias from yeto/models.py (gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...)")
+    p.add_argument("--model-revision", default=None)
+    p.add_argument("--trust-remote-code", action="store_true")
+    p.add_argument("--source-sha256", default=None, help=argparse.SUPPRESS)
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument(
         "--base-quantization", choices=["none", "nf4"], default="none"
@@ -174,6 +180,10 @@ def parse_args(argv=None):
 
 def main(argv=None) -> None:
     args = parse_args(argv)
+    from .provenance import pin_runtime_provenance, verify_source_tree_sha256
+
+    verify_source_tree_sha256(args.source_sha256)
+    pin_runtime_provenance(args, include_data=False)
 
     ckpt = parse_checkpoint(args.checkpoint)
 
@@ -192,6 +202,11 @@ def main(argv=None) -> None:
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_targets=args.lora_targets,
+        model_revision=args.model_revision,
+        trust_remote_code=args.trust_remote_code,
+        loss_function="cross_entropy",
+        attention_backend="auto",
+        kernel_backend="native",
     )
     model, tokenizer = load_model_and_tokenizer(learner_args, device)
     params = trainable_params(model)
@@ -210,8 +225,20 @@ def main(argv=None) -> None:
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(out)
+    model.save_pretrained(out, safe_serialization=True)
     tokenizer.save_pretrained(out)
+    from .provenance import write_provenance_manifest
+
+    write_provenance_manifest(
+        out,
+        args,
+        artifact_kind="causal-lm-checkpoint-export",
+        extra={
+            "checkpoint": Path(args.checkpoint).name,
+            "checkpoint_sha256": ckpt.sha256,
+            "global_step": ckpt.global_step,
+        },
+    )
 
     print(f"exported checkpoint at global_step={ckpt.global_step} to {out}")
     print(

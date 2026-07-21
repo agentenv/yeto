@@ -157,7 +157,9 @@ def test_pickled_loss_roundtrip_with_closure(tmp_path):
 
     path = tmp_path / "loss.pkl"
     losses.dump_pickled_loss(weighted, path)
-    fn = losses.load_pickled_loss(f"pickle:{path}")
+    with pytest.raises(PermissionError, match="allow-unsafe-pickled-loss"):
+        losses.load_pickled_loss(f"pickle:{path}")
+    fn = losses.load_pickled_loss(f"pickle:{path}", allow_unsafe=True)
     logits = torch.ones(1, 2, 3)
     loss, n = fn(logits, torch.zeros(1, 2, dtype=torch.long), torch.ones(1, 2))
     assert torch.isclose(loss, torch.tensor(6 * 2.5))

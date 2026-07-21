@@ -45,7 +45,9 @@ yeto launch \
 
 The native SFT path uses `torch.nn.functional.cross_entropy`, returns a local
 token sum, and preserves arbitrary nonnegative per-token weights. Custom and
-pickled losses continue to receive materialized logits exactly as before.
+pickled losses continue to receive materialized logits; legacy pickle
+transport additionally requires `--allow-unsafe-pickled-loss` and digest
+verification as described in [PROVENANCE.md](PROVENANCE.md).
 
 The Liger path supports only Hugging Face `model_type="qwen2"` models (Qwen2
 and Qwen2.5 in the pinned Transformers release). Before PEFT wraps the ordinary
