@@ -1,5 +1,11 @@
 # MLX island backend (Apple silicon)
 
+The MLX learner accepts `--model-revision` and `--data-revision`. Remote model
+snapshots are materialized at the resolved model commit before `mlx-lm` sees a
+path, while the matching Hugging Face config and tokenizer use that same
+commit. `--trust-remote-code` remains off unless explicitly requested. See
+[PROVENANCE.md](PROVENANCE.md) for the shared artifact and loading policy.
+
 ## Why
 
 Macs with Apple silicon are abundant idle capacity: unified memory holds

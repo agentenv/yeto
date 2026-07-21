@@ -38,8 +38,9 @@ from .causal_kernels import (
 )
 from .data import StreamingPackedBlocks, build_packed_dataset
 from .finalization import finalize_torch_island
-from .fragments import FragmentLayout, build_layout
+from .fragments import build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
+from .models import MODEL_ALIASES as MODEL_ALIASES
 from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
 from .tensor_io import (
     apply_fragment,
@@ -52,13 +53,26 @@ from .tensor_io import (
 
 log = logging.getLogger("learner")
 
-from .models import MODEL_ALIASES  # single source; see yeto/models.py
-
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Yeto learner")
     p.add_argument("--model", required=True, help="HF model id or an alias from yeto/models.py (gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...)")
     p.add_argument("--data", required=True, help="HF dataset id")
+    p.add_argument(
+        "--model-revision",
+        default=None,
+        help="HF model branch/tag/commit; production launchers resolve it to a commit",
+    )
+    p.add_argument(
+        "--data-revision",
+        default=None,
+        help="HF dataset branch/tag/commit; production launchers resolve it to a commit",
+    )
+    p.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="deliberately allow executable code from the pinned model repository",
+    )
     p.add_argument(
         "--syncer",
         required=True,
@@ -68,6 +82,20 @@ def parse_args(argv=None):
     p.add_argument("--learner-id", type=int, required=True)
     p.add_argument("--num-learners", type=int, required=True)
     p.add_argument("--loss-function", default="cross_entropy")
+    p.add_argument(
+        "--allow-unsafe-pickled-loss",
+        action="store_true",
+        help="allow legacy pickle loss loading (arbitrary code execution)",
+    )
+    p.add_argument("--loss-sha256", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--source-sha256", default=None, help=argparse.SUPPRESS)
+    for provenance_flag in (
+        "model-requested-identifier",
+        "model-requested-revision",
+        "data-requested-identifier",
+        "data-requested-revision",
+    ):
+        p.add_argument(f"--{provenance_flag}", default=None, help=argparse.SUPPRESS)
     p.add_argument(
         "--attention-backend",
         choices=ATTENTION_BACKENDS,
@@ -239,7 +267,7 @@ def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
     """
     try:
         return factory.from_pretrained(model_id, local_files_only=True, **kwargs)
-    except Exception:
+    except OSError:
         return factory.from_pretrained(model_id, **kwargs)
 
 
@@ -263,6 +291,7 @@ def load_model_and_tokenizer(args, device):
     from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     from .models import resolve
+    from .provenance import model_load_kwargs
 
     base_quantization = getattr(args, "base_quantization", "none")
     if base_quantization != "none":
@@ -280,6 +309,7 @@ def load_model_and_tokenizer(args, device):
     # it). NF4 is an explicit QLoRA profile for islands where the frozen bf16
     # base does not fit on one GPU; the trainable adapters remain fp32.
     model_id = resolve(args.model)
+    pinned_load_kwargs = model_load_kwargs(args)
     # fsdp+full: originals stay fp32 (uniform dtype for flat-param groups,
     # fp32 optimizer state) and MixedPrecision computes/communicates in bf16.
     # ddp/single and fsdp+lora: frozen base in bf16; peft leaves LoRA
@@ -307,7 +337,7 @@ def load_model_and_tokenizer(args, device):
         config = _from_pretrained_offline_first(
             AutoConfig,
             model_id,
-            trust_remote_code=True,
+            **pinned_load_kwargs,
         )
         liger_model_type = require_liger_model_support(config)
         try:
@@ -319,7 +349,11 @@ def load_model_and_tokenizer(args, device):
             "cross_entropy": False,
             "fused_linear_cross_entropy": True,
         }
-    tokenizer = _from_pretrained_offline_first(AutoTokenizer, model_id, trust_remote_code=True)
+    tokenizer = _from_pretrained_offline_first(
+        AutoTokenizer,
+        model_id,
+        **pinned_load_kwargs,
+    )
     try:
         if base_quantization == "nf4":
             from transformers import BitsAndBytesConfig
@@ -336,7 +370,8 @@ def load_model_and_tokenizer(args, device):
                 quantization_config=quantization_config,
                 device_map={"": device.index if device.index is not None else 0},
                 low_cpu_mem_usage=True,
-                trust_remote_code=True,
+                use_safetensors=True,
+                **pinned_load_kwargs,
                 **attention_kwargs,
                 **kernel_kwargs,
             )
@@ -345,7 +380,8 @@ def load_model_and_tokenizer(args, device):
                 model_factory,
                 model_id,
                 torch_dtype=dtype,
-                trust_remote_code=True,
+                use_safetensors=True,
+                **pinned_load_kwargs,
                 **attention_kwargs,
                 **kernel_kwargs,
             )
@@ -551,6 +587,12 @@ def main(argv=None) -> None:
         level=logging.INFO,
         format=f"%(asctime)s learner{args.learner_id}.r{rank} %(levelname)s %(message)s",
     )
+    from .provenance import (
+        pin_distributed_runtime_provenance,
+        read_distributed_file_bytes,
+        verify_distributed_source_tree_sha256,
+    )
+
     if args.device:
         device = torch.device(args.device)
     elif torch.cuda.is_available():
@@ -564,6 +606,32 @@ def main(argv=None) -> None:
                 "version against the node's driver instead of training on CPU"
             )
         device = torch.device("cpu")
+
+    verify_distributed_source_tree_sha256(
+        args.source_sha256,
+        rank=rank,
+        world=world,
+    )
+    pin_distributed_runtime_provenance(args, rank=rank, world=world)
+    if args.loss_function.startswith("pickle:") and not args.allow_unsafe_pickled_loss:
+        raise PermissionError(
+            "refusing legacy pickle loss without --allow-unsafe-pickled-loss"
+        )
+    loss_payload = None
+    if args.loss_function.startswith(("pickle:", "custom:")):
+        if args.loss_function.startswith("pickle:"):
+            loss_path = args.loss_function.split(":", 1)[1]
+            artifact = "pickled loss"
+        else:
+            loss_path = args.loss_function.split(":", 1)[1].partition(":")[0]
+            artifact = "custom loss"
+        loss_payload, args.loss_sha256 = read_distributed_file_bytes(
+            loss_path,
+            args.loss_sha256,
+            rank=rank,
+            world=world,
+            artifact=artifact,
+        )
 
     if args.shard == "fsdp" and device.type != "cuda":
         raise RuntimeError(
@@ -818,6 +886,7 @@ def main(argv=None) -> None:
             world=world,
             train_on=args.train_on,
             assistant_mask_mode=args.assistant_mask_mode,
+            revision=args.data_revision,
             **stream_kwargs,
         )
         loader = torch.utils.data.DataLoader(
@@ -842,6 +911,7 @@ def main(argv=None) -> None:
             args.max_rows,
             train_on=args.train_on,
             assistant_mask_mode=args.assistant_mask_mode,
+            revision=args.data_revision,
         )
         sampler = None
         if world > 1:
@@ -884,7 +954,20 @@ def main(argv=None) -> None:
                 client.send_init(fid, pack_fragment(frag, params, bulk_dtype(wire_dtype)))
             log.info("sent INIT_PARAMS for %d fragments", layout.num_fragments)
 
-    run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank, world, device)
+    run_inner_loop(
+        args,
+        model,
+        params,
+        layout,
+        opt,
+        sched,
+        loader,
+        client,
+        rank,
+        world,
+        device,
+        loss_payload=loss_payload,
+    )
 
     if rank == 0:
         if args.shard == "fsdp" and args.tuning == "full":
@@ -902,11 +985,19 @@ def main(argv=None) -> None:
                 peft_model.save_pretrained(
                     save_dir,
                     state_dict={n: p.detach().cpu() for n, p in params.items()},
+                    safe_serialization=True,
                 )
             else:
                 target = model.module if world > 1 else model
-                target.save_pretrained(save_dir)
+                target.save_pretrained(save_dir, safe_serialization=True)
             tokenizer.save_pretrained(save_dir)
+            from .provenance import write_provenance_manifest
+
+            write_provenance_manifest(
+                save_dir,
+                args,
+                artifact_kind="causal-lm-training-output",
+            )
             log.info("saved model to %s", save_dir)
         if client is not None:
             client.close()
@@ -916,7 +1007,19 @@ def main(argv=None) -> None:
 
 
 def run_inner_loop(
-    args, model, params, layout, opt, sched, loader, client, rank, world, device
+    args,
+    model,
+    params,
+    layout,
+    opt,
+    sched,
+    loader,
+    client,
+    rank,
+    world,
+    device,
+    *,
+    loss_payload: bytes | None = None,
 ) -> TrainingCounters:
     # Counters (Alg. 1): incremented for all fragments each step, reset per
     # fragment on receipt. Tracked as global totals + per-fragment snapshots.
@@ -942,9 +1045,18 @@ def run_inner_loop(
     if kernel_backend == "liger":
         compute_loss = None
     elif args.loss_function.startswith("pickle:"):
-        compute_loss = load_pickled_loss(args.loss_function)
+        compute_loss = load_pickled_loss(
+            args.loss_function,
+            allow_unsafe=getattr(args, "allow_unsafe_pickled_loss", False),
+            expected_sha256=getattr(args, "loss_sha256", None),
+            payload_bytes=loss_payload,
+        )
     elif args.loss_function.startswith("custom:"):
-        compute_loss = load_custom_loss(args.loss_function)
+        compute_loss = load_custom_loss(
+            args.loss_function,
+            expected_sha256=getattr(args, "loss_sha256", None),
+            source_bytes=loss_payload,
+        )
     else:
         compute_loss = lambda logits, ids, w: sft_loss(logits, ids, args.loss_function, w)  # noqa: E731
 

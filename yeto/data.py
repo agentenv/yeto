@@ -80,7 +80,7 @@ def render_conversation(tokenizer, messages: list[dict], tools: list | None) -> 
     return _render_fallback(messages, tools)
 
 
-def load_rows(dataset_name, split: str = "train"):
+def load_rows(dataset_name, split: str = "train", revision: str | None = None):
     """Load the raw dataset; a pre-materialized sequence passes through
     unchanged (used by tests). Accepts an HF dataset id or a local path —
     cloud sources arrive as local paths via the launcher's sky file mounts
@@ -91,16 +91,48 @@ def load_rows(dataset_name, split: str = "train"):
 
     path = os.path.expanduser(dataset_name)
     if os.path.exists(path):
+        if revision is not None:
+            raise ValueError(
+                f"dataset revision {revision!r} cannot be used with local path {path!r}"
+            )
         return _load_local(path, split)
     from datasets import load_dataset
 
+    import inspect
+
+    kwargs = {"split": split}
+    # datasets 3.x supports executable dataset scripts behind this flag;
+    # datasets 4+ removed scripts and the argument itself. Do not pass it as
+    # an arbitrary BuilderConfig key on versions where it is no longer a
+    # declared security control.
+    if "trust_remote_code" in inspect.signature(load_dataset).parameters:
+        kwargs["trust_remote_code"] = False
+    if revision is not None:
+        from .provenance import is_immutable_commit
+
+        if not is_immutable_commit(revision):
+            raise ValueError(
+                f"remote dataset revision {revision!r} is not an immutable commit"
+            )
+        kwargs["revision"] = revision
     try:
-        return load_dataset(dataset_name, split=split)
-    except Exception:
+        return load_dataset(dataset_name, **kwargs)
+    except Exception as exc:
+        if revision is not None:
+            # refs/convert/parquet is a separately moving Hub ref.  Falling
+            # back to it after pinning the source dataset would silently load
+            # different data under the recorded commit identity.
+            raise RuntimeError(
+                f"failed to load dataset {dataset_name!r} at pinned revision "
+                f"{revision}; refusing the moving refs/convert/parquet fallback. "
+                "Materialize a normalized local dataset if schema inference fails."
+            ) from exc
         # Raw JSONL with heterogeneous schemas (e.g. message content that is
         # sometimes a string, sometimes content blocks) breaks arrow schema
         # inference; the Hub's parquet conversion is normalized.
-        return load_dataset(dataset_name, revision="refs/convert/parquet", split=split)
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs["revision"] = "refs/convert/parquet"
+        return load_dataset(dataset_name, **fallback_kwargs)
 
 
 _LOCAL_FORMATS = {".jsonl": "json", ".json": "json", ".parquet": "parquet"}
@@ -357,6 +389,7 @@ class StreamingPackedBlocks(IterableDataset):
         split: str = "train",
         train_on: str = "assistant",
         assistant_mask_mode: str = "native",
+        revision: str | None = None,
     ):
         if train_on not in TRAIN_ON_CHOICES:
             raise ValueError(f"train_on must be one of {TRAIN_ON_CHOICES}, got {train_on!r}")
@@ -377,9 +410,10 @@ class StreamingPackedBlocks(IterableDataset):
         self.split = split
         self.train_on = train_on
         self.assistant_mask_mode = assistant_mask_mode
+        self.revision = revision
 
     def __iter__(self):
-        ds = load_rows(self.dataset_name, self.split)
+        ds = load_rows(self.dataset_name, self.split, self.revision)
         info = torch.utils.data.get_worker_info()
         worker_id = info.id if info else 0
         num_workers = info.num_workers if info else 1
@@ -439,8 +473,9 @@ def build_packed_dataset(
     split: str = "train",
     train_on: str = "assistant",
     assistant_mask_mode: str = "native",
+    revision: str | None = None,
 ) -> PackedDataset:
-    ds = load_rows(dataset_name, split)
+    ds = load_rows(dataset_name, split, revision)
     token_stream: list[int] = []
     weight_stream: list[float] = []
     for i in _learner_rows(len(ds), learner_id, num_learners, max_rows):

@@ -48,10 +48,23 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser("yeto.megatron.learner")
     p.add_argument("--model", required=True)
     p.add_argument("--data", required=True)
+    p.add_argument("--model-revision", default=None)
+    p.add_argument("--data-revision", default=None)
+    p.add_argument("--trust-remote-code", action="store_true")
     p.add_argument("--syncer", default="none", help="host:port or 'none'")
     p.add_argument("--learner-id", type=int, default=0)
     p.add_argument("--num-learners", type=int, default=1)
     p.add_argument("--loss-function", default="cross_entropy")
+    p.add_argument("--allow-unsafe-pickled-loss", action="store_true")
+    p.add_argument("--loss-sha256", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--source-sha256", default=None, help=argparse.SUPPRESS)
+    for provenance_flag in (
+        "model-requested-identifier",
+        "model-requested-revision",
+        "data-requested-identifier",
+        "data-requested-revision",
+    ):
+        p.add_argument(f"--{provenance_flag}", default=None, help=argparse.SUPPRESS)
     p.add_argument("--train-on", choices=["assistant", "all"], default="assistant")
     p.add_argument(
         "--assistant-mask-mode",
@@ -122,10 +135,15 @@ def _build_model(args, device):
     from megatron.bridge.peft.lora import LoRA
 
     from ..models import resolve
+    from ..provenance import model_load_kwargs
 
     model_id = resolve(args.model)
     log.info("importing %s into Megatron-Core (EP=%d)", model_id, args.expert_parallel)
-    bridge = AutoBridge.from_hf_pretrained(model_id, trust_remote_code=True)
+    bridge = AutoBridge.from_hf_pretrained(
+        model_id,
+        use_safetensors=True,
+        **model_load_kwargs(args),
+    )
     model = bridge.to_megatron_model(load_weights=True)  # list[MegatronModule], one per VP chunk
 
     targets = list(_ATTENTION_TARGETS)
@@ -184,6 +202,17 @@ def main(argv=None):
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s megatron %(levelname)s %(message)s")
     rank, world, local_rank = _init_distributed(args)
+    from ..provenance import (
+        pin_distributed_runtime_provenance,
+        verify_distributed_source_tree_sha256,
+    )
+
+    verify_distributed_source_tree_sha256(
+        args.source_sha256,
+        rank=rank,
+        world=world,
+    )
+    pin_distributed_runtime_provenance(args, rank=rank, world=world)
     device = torch.device("cuda", local_rank)
 
     model, bridge = _build_model(args, device)
@@ -242,6 +271,13 @@ def main(argv=None):
         os.makedirs(save_dir, exist_ok=True)
         # Export adapters back to an HF-loadable checkpoint via the bridge.
         bridge.save_hf_pretrained(model, save_dir)
+        from ..provenance import write_provenance_manifest
+
+        write_provenance_manifest(
+            save_dir,
+            args,
+            artifact_kind="megatron-causal-lm-training-output",
+        )
         log.info("saved adapters to %s", save_dir)
         if client is not None:
             client.close()
@@ -406,11 +442,12 @@ def _load_tokenizer(args):
 
     from ..learner import _from_pretrained_offline_first
     from ..models import resolve
+    from ..provenance import model_load_kwargs
 
     return _from_pretrained_offline_first(
         AutoTokenizer,
         resolve(args.model),
-        trust_remote_code=True,
+        **model_load_kwargs(args),
     )
 
 
@@ -428,6 +465,8 @@ def _packed_blocks(args, tokenizer):
         "train_on": args.train_on,
         "assistant_mask_mode": args.assistant_mask_mode,
     }
+    if getattr(args, "data_revision", None):
+        common["revision"] = args.data_revision
     if args.tokenize == "stream":
         return StreamingPackedBlocks(
             args.data,

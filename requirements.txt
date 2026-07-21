@@ -17,3 +17,5 @@ sentencepiece
 protobuf
 hf_transfer
 cloudpickle
+huggingface-hub>=0.34
+safetensors>=0.4

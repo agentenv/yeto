@@ -90,7 +90,12 @@ def flow_matching_loss(
     return loss, torch.tensor(per_elem.numel(), device=per_elem.device)
 
 
-def load_custom_loss(spec: str):
+def load_custom_loss(
+    spec: str,
+    *,
+    expected_sha256: str | None = None,
+    source_bytes: bytes | None = None,
+):
     """Load a user-supplied loss from a ``custom:<file.py>[:<fn>]`` spec.
 
     The file must define ``<fn>`` (default name: ``loss_fn``) with signature
@@ -105,18 +110,32 @@ def load_custom_loss(spec: str):
     the causal shift. The file must live inside the repo so the workdir sync
     ships it to every learner.
     """
-    import importlib.util
+    import hashlib
+    import types
     from pathlib import Path
 
     body = spec.split(":", 1)[1]
     path, _, fn_name = body.partition(":")
     fn_name = fn_name or "loss_fn"
     file = Path(path)
-    if not file.exists():
-        raise FileNotFoundError(f"custom loss file {path!r} not found")
-    module_spec = importlib.util.spec_from_file_location("yeto_custom_loss", file)
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    if source_bytes is None:
+        if not file.exists():
+            raise FileNotFoundError(f"custom loss file {path!r} not found")
+        source = file.read_bytes()
+    else:
+        source = source_bytes
+    actual_sha256 = hashlib.sha256(source).hexdigest()
+    if expected_sha256 is not None and actual_sha256 != expected_sha256.lower():
+        raise ValueError(
+            f"custom loss {path!r} SHA256 mismatch: expected "
+            f"{expected_sha256.lower()}, got {actual_sha256}"
+        )
+    # Compile the exact bytes that were hashed.  Reading with an import loader
+    # after hashing would leave a check/use race where the source could change
+    # between attestation and execution.
+    module = types.ModuleType("yeto_custom_loss")
+    module.__file__ = str(file)
+    exec(compile(source, str(file), "exec"), module.__dict__)  # noqa: S102 - explicit custom code
     fn = getattr(module, fn_name, None)
     if fn is None:
         raise AttributeError(f"{path} does not define {fn_name}()")
@@ -133,12 +152,40 @@ def dump_pickled_loss(fn, path) -> None:
         cloudpickle.dump(fn, f)
 
 
-def load_pickled_loss(spec: str):
-    """Load a loss callable from a ``pickle:<file>`` spec."""
+def load_pickled_loss(
+    spec: str,
+    *,
+    allow_unsafe: bool = False,
+    expected_sha256: str | None = None,
+    payload_bytes: bytes | None = None,
+):
+    """Load a legacy pickled callable after an explicit unsafe opt-in.
+
+    Pickle is executable code, not a tensor format.  It is retained only as a
+    compatibility lane for closures that cannot be expressed as a checked-in
+    ``custom:`` source file.
+    """
+    if not allow_unsafe:
+        raise PermissionError(
+            "refusing to load a pickled loss without "
+            "--allow-unsafe-pickled-loss; pickle can execute arbitrary code"
+        )
+    import hashlib
     import pickle
 
-    with open(spec.split(":", 1)[1], "rb") as f:
-        return pickle.load(f)
+    path = spec.split(":", 1)[1]
+    if payload_bytes is None:
+        with open(path, "rb") as f:
+            payload = f.read()
+    else:
+        payload = payload_bytes
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if expected_sha256 is not None and actual_sha256 != expected_sha256.lower():
+        raise ValueError(
+            f"pickled loss {path!r} SHA256 mismatch: expected "
+            f"{expected_sha256.lower()}, got {actual_sha256}"
+        )
+    return pickle.loads(payload)
 
 
 def sft_loss(

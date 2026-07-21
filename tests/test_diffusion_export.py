@@ -14,6 +14,7 @@ from yeto.diffusion import export as diffusion_export
 from yeto.diffusion.learner import DIFFUSION_ADAPTER_METADATA_FILE, trainable_params
 from yeto.export import CKPT_MAGIC
 from yeto.fragments import build_layout
+from yeto.provenance import file_sha256
 
 
 class TinyTrainable(torch.nn.Module):
@@ -91,6 +92,7 @@ def test_generic_export_restores_and_saves_diffusion_adapter(tmp_path, monkeypat
         expected,
         ledger={0: (3, 24, 96), 2: (2, 16, 64)},
     )
+    parsed_digest = file_sha256(checkpoint)
     rebuilt = TinyPipe()
 
     def load_pipeline(args, device, adapter):
@@ -100,10 +102,19 @@ def test_generic_export_restores_and_saves_diffusion_adapter(tmp_path, monkeypat
         return rebuilt
 
     monkeypatch.setattr(diffusion_export, "load_pipeline", load_pipeline)
+    real_save = diffusion_export.save_adapters
+
+    def save_then_replace(*args, **kwargs):
+        result = real_save(*args, **kwargs)
+        checkpoint.write_bytes(b"replacement checkpoint bytes")
+        return result
+
+    monkeypatch.setattr(diffusion_export, "save_adapters", save_then_replace)
     args = _args(tmp_path, checkpoint)
     parsed, exported_layout, params = diffusion_export.export_checkpoint(args)
 
     assert parsed.global_step == 17
+    assert parsed.sha256 == parsed_digest
     assert exported_layout == layout
     for name, value in params.items():
         assert torch.equal(value, expected[name])
@@ -119,6 +130,7 @@ def test_generic_export_restores_and_saves_diffusion_adapter(tmp_path, monkeypat
     assert meta["trainable_tensor_count"] == 2
     assert meta["export"] == {
         "checkpoint": "state.ckpt",
+        "checkpoint_sha256": parsed_digest,
         "fragment_pattern": "binpack",
         "fragment_versions": [100, 101],
         "fragments": 2,
@@ -173,6 +185,9 @@ def test_external_adapter_reconstructs_custom_params_and_save_hook(tmp_path, mon
             torch.save(pipe.adapter_weight.detach(), out / "custom.pt")
 
     adapter = CustomAdapter()
+    adapter_source = tmp_path / "custom_adapter.py"
+    adapter_source.write_text("def make_adapter():\n    raise AssertionError\n")
+    adapter_spec = f"{adapter_source}:make_adapter"
     expected = {"custom.adapter_weight": torch.arange(5, dtype=torch.float32)}
     checkpoint = tmp_path / "state.ckpt"
     _write_checkpoint(checkpoint, expected, fragments=1)
@@ -180,12 +195,12 @@ def test_external_adapter_reconstructs_custom_params_and_save_hook(tmp_path, mon
     monkeypatch.setattr(
         diffusion_export,
         "load_diffusion_adapter",
-        lambda spec: adapter if spec == "custom:make_adapter" else None,
+        lambda spec, **kwargs: adapter if spec == adapter_spec else None,
     )
     args = _args(
         tmp_path,
         checkpoint,
-        diffusion_adapter="custom:make_adapter",
+        diffusion_adapter=adapter_spec,
         fragments=1,
     )
     diffusion_export.export_checkpoint(args)
@@ -201,6 +216,6 @@ def test_external_adapter_reconstructs_custom_params_and_save_hook(tmp_path, mon
     meta = json.loads(
         (Path(args.output_dir) / DIFFUSION_ADAPTER_METADATA_FILE).read_text()
     )
-    assert meta["diffusion_adapter"] == "custom:make_adapter"
+    assert meta["diffusion_adapter"] == adapter_spec
     assert meta["trainable_tensor_count"] == 1
     assert meta["export"]["fragments"] == 1

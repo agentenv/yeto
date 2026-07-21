@@ -40,7 +40,9 @@ yeto launch \
 
 The native SFT path uses `torch.nn.functional.cross_entropy`, returns a local
 token sum, and preserves arbitrary nonnegative per-token weights. Custom and
-pickled losses continue to receive materialized logits exactly as before.
+pickled losses continue to receive materialized logits; legacy pickle
+transport additionally requires `--allow-unsafe-pickled-loss` and digest
+verification as described in [PROVENANCE.md](PROVENANCE.md).
 
 The Liger path uses `AutoLigerKernelForCausalLM` with fused linear
 cross-entropy. Binary token masks are converted to labels with `-100` at

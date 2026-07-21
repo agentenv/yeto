@@ -19,6 +19,8 @@ dependencies = [
     "sentencepiece",
     "protobuf",
     "cloudpickle",
+    "huggingface-hub>=0.34",
+    "safetensors>=0.4",
 ]
 
 [project.optional-dependencies]

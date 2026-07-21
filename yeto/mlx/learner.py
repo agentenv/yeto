@@ -35,10 +35,23 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser("yeto.mlx.learner")
     p.add_argument("--model", required=True, help="HF id or yeto/models.py alias")
     p.add_argument("--data", required=True)
+    p.add_argument("--model-revision", default=None)
+    p.add_argument("--data-revision", default=None)
+    p.add_argument("--trust-remote-code", action="store_true")
     p.add_argument("--syncer", required=True, help="host:port or 'none' (local-only run)")
     p.add_argument("--learner-id", type=int, default=0)
     p.add_argument("--num-learners", type=int, default=1)
     p.add_argument("--loss-function", default="cross_entropy")
+    p.add_argument("--allow-unsafe-pickled-loss", action="store_true")
+    p.add_argument("--loss-sha256", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--source-sha256", default=None, help=argparse.SUPPRESS)
+    for provenance_flag in (
+        "model-requested-identifier",
+        "model-requested-revision",
+        "data-requested-identifier",
+        "data-requested-revision",
+    ):
+        p.add_argument(f"--{provenance_flag}", default=None, help=argparse.SUPPRESS)
     p.add_argument("--train-on", choices=["assistant", "all"], default="assistant")
     p.add_argument(
         "--assistant-mask-mode",
@@ -116,11 +129,28 @@ def load_model_and_tokenizer(args):
 
     from ..learner import _from_pretrained_offline_first
     from ..models import resolve
+    from ..provenance import is_local_reference, model_load_kwargs
 
     model_id = resolve(args.model)
-    hf_config = _from_pretrained_offline_first(AutoConfig, model_id, trust_remote_code=True)
-    model, _ = mlx_lm.load(model_id, model_config=mlx_config_shim(hf_config))
-    tokenizer = _from_pretrained_offline_first(AutoTokenizer, model_id, trust_remote_code=True)
+    load_kwargs = model_load_kwargs(args)
+    hf_config = _from_pretrained_offline_first(AutoConfig, model_id, **load_kwargs)
+    mlx_model_path = model_id
+    if load_kwargs.get("revision") and not is_local_reference(model_id):
+        from huggingface_hub import snapshot_download
+
+        try:
+            mlx_model_path = snapshot_download(
+                repo_id=model_id,
+                revision=load_kwargs["revision"],
+                local_files_only=True,
+            )
+        except OSError:
+            mlx_model_path = snapshot_download(
+                repo_id=model_id,
+                revision=load_kwargs["revision"],
+            )
+    model, _ = mlx_lm.load(mlx_model_path, model_config=mlx_config_shim(hf_config))
+    tokenizer = _from_pretrained_offline_first(AutoTokenizer, model_id, **load_kwargs)
     return model, tokenizer, hf_config
 
 
@@ -194,6 +224,7 @@ def _micro_batches(args, tokenizer):
             args.max_rows,
             train_on=args.train_on,
             assistant_mask_mode=args.assistant_mask_mode,
+            revision=getattr(args, "data_revision", None),
         )
 
         def gen():
@@ -216,6 +247,7 @@ def _micro_batches(args, tokenizer):
         args.max_rows,
         train_on=args.train_on,
         assistant_mask_mode=args.assistant_mask_mode,
+        revision=getattr(args, "data_revision", None),
     )
     log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)
 
@@ -242,6 +274,10 @@ def main(argv=None) -> None:
         level=logging.INFO,
         format=f"%(asctime)s mlx-learner{args.learner_id} %(levelname)s %(message)s",
     )
+    from ..provenance import pin_runtime_provenance, verify_source_tree_sha256
+
+    verify_source_tree_sha256(args.source_sha256)
+    pin_runtime_provenance(args)
     if args.micro_batch_size == "auto":
         args.micro_batch_size = 1
     args.micro_batch_size = int(args.micro_batch_size)
@@ -364,17 +400,17 @@ def run_inner_loop(
     t_last = time.monotonic()
     while not shutdown and steps_total < args.max_local_steps:
         grads_acc = None
-        loss_val = trained_val = 0.0
+        loss_val = 0.0
         for _ in range(args.grad_accum):
             ids_t, w_t = next(batches)
             ids = mx.array(ids_t.numpy().astype(np.int32))
             weights = mx.array(w_t.numpy())
-            (loss, trained), grads = value_and_grad(model, ids, weights)
+            (loss, _trained), grads = value_and_grad(model, ids, weights)
             grads_acc = (
                 grads if grads_acc is None else tree_map(lambda a, b: a + b, grads_acc, grads)
             )
             mx.eval(grads_acc, loss)
-            loss_val, trained_val = loss.item(), trained.item()
+            loss_val = loss.item()
         if args.grad_accum > 1:
             grads_acc = tree_map(lambda g: g / args.grad_accum, grads_acc)
         grads_acc, _ = optim.clip_grad_norm(grads_acc, 1.0)
@@ -507,6 +543,13 @@ def save_adapters(args, model, registry, tokenizer) -> None:
     with open(os.path.join(save_dir, "adapter_config.json"), "w") as f:
         json.dump(config, f, indent=2)
     tokenizer.save_pretrained(save_dir)
+    from ..provenance import write_provenance_manifest
+
+    write_provenance_manifest(
+        save_dir,
+        args,
+        artifact_kind="mlx-causal-lm-training-output",
+    )
     log.info("saved adapters to %s", save_dir)
 
 
