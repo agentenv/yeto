@@ -1,4 +1,4 @@
-"""Python side of the learner <-> syncer wire protocol (docs/PROTOCOL.md v4).
+"""Python side of the learner <-> syncer wire protocol (docs/PROTOCOL.md v5).
 
 A learner owns a connection *group*: stream 0 carries control messages
 (HELLO, PULL_REQ, HEARTBEAT, FINAL_MANIFEST/ACK, SHUTDOWN); large payloads
@@ -27,20 +27,24 @@ check_health only raises once reconnection has been given up for good.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import itertools
+import os
 import queue
 import secrets
 import socket
+import ssl
 import struct
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from .fragments import MERGE_ISO, FragmentLayout
 
 MAGIC = 0xD170C0DE
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 
 MSG_HELLO = 1
 MSG_INIT_PARAMS = 2
@@ -63,7 +67,7 @@ DTYPE_F32 = 1
 DTYPE_BF16 = 2
 # Session dtype 3: PUSH_FRAGMENT payloads are block-quantized 4-bit E3M0
 # base-relative learner deltas; INIT_PARAMS and BCAST_FRAGMENT stay bf16
-# (see bulk_dtype and docs/PROTOCOL.md v4).
+# (see bulk_dtype and docs/PROTOCOL.md v5).
 DTYPE_Q4 = 3
 
 CHUNK_SIZE = 4 * 1024 * 1024
@@ -78,8 +82,12 @@ RECONNECT_DIAL_TIMEOUT = 20.0
 
 _HEADER = struct.Struct("<IBQ")  # magic, type, payload length
 _CHUNK_HEAD = struct.Struct("<QQQ")  # msg_id, total_len, offset
-_HELLO_HEAD = struct.Struct("<HIQBI")  # version, learner, generation, dtype, fragments
-_DATA_HELLO = struct.Struct("<HIQH")  # version, learner, generation, stream index
+_HELLO_HEAD = struct.Struct(
+    "<HIQ32sBI"
+)  # version, learner, generation, run ID, dtype, fragments
+_DATA_HELLO = struct.Struct(
+    "<HIQ32sH"
+)  # version, learner, generation, run ID, stream index
 _FINAL_MANIFEST_HEAD = struct.Struct("<HQI")  # revision, global_step, fragments
 _FINAL_ACK = struct.Struct("<HQ")  # revision, global_step
 
@@ -154,12 +162,16 @@ def encode_hello(
     layout: FragmentLayout,
     num_streams: int,
     connection_generation: int = 0,
+    run_id: bytes | None = None,
 ) -> bytes:
+    if run_id is None or len(run_id) != 32:
+        raise ValueError("HELLO run_id must contain exactly 32 bytes")
     parts = [
         _HELLO_HEAD.pack(
             PROTOCOL_VERSION,
             learner_id,
             connection_generation,
+            run_id,
             dtype,
             layout.num_fragments,
         )
@@ -178,10 +190,15 @@ def encode_hello(
 
 
 def encode_data_hello(
-    learner_id: int, connection_generation: int, stream_index: int
+    learner_id: int,
+    connection_generation: int,
+    stream_index: int,
+    run_id: bytes | None = None,
 ) -> bytes:
+    if run_id is None or len(run_id) != 32:
+        raise ValueError("DATA_HELLO run_id must contain exactly 32 bytes")
     return _DATA_HELLO.pack(
-        PROTOCOL_VERSION, learner_id, connection_generation, stream_index
+        PROTOCOL_VERSION, learner_id, connection_generation, run_id, stream_index
     )
 
 
@@ -198,6 +215,100 @@ def _q4_nbytes(numel: int) -> int:
 
 class ProtocolError(RuntimeError):
     """The peer rejected this client as wire- or session-incompatible."""
+
+
+@dataclass(frozen=True)
+class SyncerTlsConfig:
+    """Strict TLS 1.3 mutual-authentication inputs for one learner identity."""
+
+    ca_file: Path
+    cert_file: Path
+    key_file: Path
+    server_name: str
+
+    def context(self) -> ssl.SSLContext:
+        if not self.server_name or any(
+            character.isspace() for character in self.server_name
+        ):
+            raise ValueError("syncer TLS server name must be a nonempty DNS name or IP address")
+        for path, label in (
+            (self.ca_file, "syncer TLS CA"),
+            (self.cert_file, "learner TLS certificate"),
+            (self.key_file, "learner TLS private key"),
+        ):
+            if not path.is_file():
+                raise ValueError(f"{label} file does not exist: {path}")
+        if os.name == "posix" and self.key_file.stat().st_mode & 0o077:
+            raise ValueError("learner TLS private key must not be accessible by group or other users")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        context.maximum_version = ssl.TLSVersion.TLSv1_3
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.load_verify_locations(cafile=str(self.ca_file))
+        context.load_cert_chain(certfile=str(self.cert_file), keyfile=str(self.key_file))
+        return context
+
+
+def load_run_id(path: str | os.PathLike[str]) -> bytes:
+    """Load a private-mode durable run identifier without ever logging it."""
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f"syncer run ID file does not exist: {path}")
+    if os.name == "posix" and path.stat().st_mode & 0o077:
+        raise ValueError("syncer run ID file must not be accessible by group or other users")
+    value = path.read_bytes()
+    if len(value) != 32:
+        raise ValueError("syncer run ID file must contain exactly 32 raw bytes")
+    return value
+
+
+def add_syncer_security_arguments(parser) -> None:
+    """Add identical transport-security flags to every learner backend."""
+    parser.add_argument("--sync-run-id-file", default=None)
+    parser.add_argument("--sync-tls-ca", default=None)
+    parser.add_argument("--sync-tls-cert", default=None)
+    parser.add_argument("--sync-tls-key", default=None)
+    parser.add_argument("--sync-server-name", default=None)
+    parser.add_argument(
+        "--allow-insecure-loopback",
+        action="store_true",
+        help="explicit plaintext local-development profile; loopback destinations only",
+    )
+
+
+def syncer_security_from_args(args) -> tuple[bytes, SyncerTlsConfig | None, bool]:
+    run_id_file = getattr(args, "sync_run_id_file", None)
+    if not run_id_file:
+        raise ValueError("a networked learner requires --sync-run-id-file")
+    run_id = load_run_id(run_id_file)
+    values = [
+        getattr(args, "sync_tls_ca", None),
+        getattr(args, "sync_tls_cert", None),
+        getattr(args, "sync_tls_key", None),
+        getattr(args, "sync_server_name", None),
+    ]
+    if any(values) and not all(values):
+        raise ValueError(
+            "learner TLS requires --sync-tls-ca, --sync-tls-cert, "
+            "--sync-tls-key, and --sync-server-name together"
+        )
+    allow_plaintext = bool(getattr(args, "allow_insecure_loopback", False))
+    tls = None
+    if all(values):
+        if allow_plaintext:
+            raise ValueError("--allow-insecure-loopback cannot be combined with learner TLS")
+        tls = SyncerTlsConfig(
+            ca_file=Path(values[0]),
+            cert_file=Path(values[1]),
+            key_file=Path(values[2]),
+            server_name=values[3],
+        )
+    elif not allow_plaintext:
+        raise ValueError(
+            "networked learners require TLS, or explicit --allow-insecure-loopback for local development"
+        )
+    return run_id, tls, allow_plaintext
 
 
 def encode_final_manifest(global_step: int, versions: tuple[int, ...] | list[int]) -> bytes:
@@ -280,6 +391,10 @@ class SyncerClient:
         connect_timeout: float = 900.0,
         max_reconnects: int | None = None,
         finalization_timeout: float = FINALIZATION_TIMEOUT,
+        *,
+        run_id: bytes,
+        tls: SyncerTlsConfig | None = None,
+        allow_insecure_loopback: bool = False,
     ):
         if not 0 <= learner_id <= 0xFFFF_FFFF:
             raise ValueError(f"learner_id must fit u32, got {learner_id}")
@@ -289,6 +404,14 @@ class SyncerClient:
             raise ValueError("layout must contain at least one fragment")
         if not 0 <= num_streams <= 256:
             raise ValueError(f"num_streams must be in [0, 256], got {num_streams}")
+        if len(run_id) != 32:
+            raise ValueError("run_id must contain exactly 32 bytes")
+        if tls is None and not allow_insecure_loopback:
+            raise ValueError(
+                "plaintext transport requires explicit allow_insecure_loopback=True"
+            )
+        if tls is not None and allow_insecure_loopback:
+            raise ValueError("TLS and insecure-loopback profiles are mutually exclusive")
         self.addr = addr
         self.learner_id = learner_id
         self.layout = layout
@@ -297,6 +420,10 @@ class SyncerClient:
         self.connect_timeout = connect_timeout
         self.max_reconnects = max_reconnects
         self.finalization_timeout = finalization_timeout
+        self.run_id = bytes(run_id)
+        self.tls = tls
+        self.allow_insecure_loopback = allow_insecure_loopback
+        self._tls_context = tls.context() if tls is not None else None
         self._max_bcast_payload = max(
             12 + _tensor_nbytes(bulk_dtype(dtype), fragment.numel)
             for fragment in layout.fragments
@@ -347,11 +474,51 @@ class SyncerClient:
 
     # -- lifecycle -------------------------------------------------------------
 
+    def _require_loopback_destination(self) -> None:
+        try:
+            literal = ipaddress.ip_address(self.addr[0])
+        except ValueError:
+            try:
+                resolved = {
+                    ipaddress.ip_address(item[4][0])
+                    for item in socket.getaddrinfo(
+                        self.addr[0], self.addr[1], type=socket.SOCK_STREAM
+                    )
+                }
+            except OSError as exc:
+                raise ProtocolError(
+                    "could not resolve plaintext local-development syncer address"
+                ) from exc
+            if not resolved or not all(address.is_loopback for address in resolved):
+                raise ProtocolError(
+                    "plaintext syncer transport is restricted to loopback destinations"
+                )
+        else:
+            if not literal.is_loopback:
+                raise ProtocolError(
+                    "plaintext syncer transport is restricted to loopback destinations"
+                )
+
     def _dial(self, timeout: float) -> socket.socket:
-        sock = socket.create_connection(self.addr, timeout=timeout)
-        sock.settimeout(None)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        return sock
+        if self._tls_context is None:
+            self._require_loopback_destination()
+        raw = socket.create_connection(self.addr, timeout=timeout)
+        try:
+            raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            if self._tls_context is None:
+                raw.settimeout(None)
+                return raw
+            sock = self._tls_context.wrap_socket(
+                raw,
+                server_hostname=self.tls.server_name,
+            )
+            if sock.version() != "TLSv1.3":
+                raise ProtocolError("syncer negotiated a TLS version other than TLS 1.3")
+            sock.settimeout(None)
+            return sock
+        except BaseException:
+            raw.close()
+            raise
 
     def _connect_one(self) -> socket.socket:
         last: OSError | None = None
@@ -359,6 +526,8 @@ class SyncerClient:
         while time.monotonic() - t0 < self.connect_timeout:
             try:
                 return self._dial(30)
+            except (ssl.SSLError, ProtocolError) as exc:
+                raise ProtocolError("syncer TLS authentication failed") from exc
             except OSError as e:  # syncer may not be up yet
                 last = e
                 time.sleep(2.0)
@@ -391,6 +560,7 @@ class SyncerClient:
                     self.layout,
                     self.num_streams,
                     connection_generation,
+                    self.run_id,
                 ),
             )
             socks.append(control)
@@ -399,7 +569,12 @@ class SyncerClient:
                 write_frame(
                     s,
                     MSG_DATA_HELLO,
-                    encode_data_hello(self.learner_id, connection_generation, idx),
+                    encode_data_hello(
+                        self.learner_id,
+                        connection_generation,
+                        idx,
+                        self.run_id,
+                    ),
                 )
                 socks.append(s)
         except BaseException:
@@ -477,6 +652,20 @@ class SyncerClient:
                 try:
                     self._connect_group(patient=False)
                     break
+                except (ssl.SSLError, ProtocolError) as exc:
+                    message = (
+                        "syncer TLS authentication failed"
+                        if self.tls is not None
+                        else str(exc)
+                    )
+                    error = ProtocolError(message)
+                    with self._lock:
+                        self._err = error
+                        self._last_err = error
+                        self._closed.set()
+                    with self._final_cond:
+                        self._final_cond.notify_all()
+                    return
                 except (OSError, ConnectionError) as e:
                     self._last_err = e
 

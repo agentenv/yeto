@@ -12,13 +12,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use tokio::io::AsyncWriteExt;
-use tokio::net::tcp::OwnedWriteHalf;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::protocol::*;
+use crate::security::{peer_fingerprint, TlsServer, TransportSecurity};
 use crate::state::{GlobalState, Layout};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
@@ -29,6 +29,7 @@ const WRITER_QUEUE: usize = 128;
 
 #[derive(Clone)]
 pub struct Config {
+    pub bind_address: std::net::IpAddr,
     pub port: u16,
     pub learners: u32,
     pub quorum: u32,
@@ -74,6 +75,8 @@ pub struct Config {
     pub checkpoint_path: Option<std::path::PathBuf>,
     pub checkpoint_every: u64,
     pub resume: bool,
+    pub run_id: [u8; 32],
+    pub transport: TransportSecurity,
     /// JSONL event tape: one record per merge.
     pub event_tape: Option<std::path::PathBuf>,
 }
@@ -344,29 +347,75 @@ pub async fn run(cfg: Config) -> Result<()> {
     if cfg.quorum == 0 {
         bail!("--quorum must be positive");
     }
-    let listener = TcpListener::bind(("0.0.0.0", cfg.port))
+    let listener = TcpListener::bind((cfg.bind_address, cfg.port))
         .await
-        .with_context(|| format!("bind port {}", cfg.port))?;
-    info!(port = cfg.port, "syncer listening");
+        .with_context(|| format!("bind {}:{}", cfg.bind_address, cfg.port))?;
+    info!(address = %cfg.bind_address, port = cfg.port, "syncer listening");
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
     let registry: Registry = Arc::new(Mutex::new(RegistryState::default()));
     let session: Session = Arc::new(Mutex::new(None));
 
     let accept_registry = registry.clone();
     let accept_session = session.clone();
+    let accept_transport = cfg.transport.clone();
+    let expected_run_id = cfg.run_id;
     let expected_learners = cfg.learners;
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok((stream, peer)) => {
+                    if let Err(error) = stream.set_nodelay(true) {
+                        warn!(%peer, "could not configure accepted socket: {error}");
+                        continue;
+                    }
                     let reg = accept_registry.clone();
                     let session = accept_session.clone();
                     let tx = event_tx.clone();
+                    let transport = accept_transport.clone();
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_connection(stream, reg, session, expected_learners, tx).await
-                        {
-                            warn!(%peer, "connection ended: {e:#}");
+                        let result = match transport {
+                            TransportSecurity::PlaintextLoopback => {
+                                handle_connection(
+                                    stream,
+                                    None,
+                                    None,
+                                    reg,
+                                    session,
+                                    expected_learners,
+                                    expected_run_id,
+                                    tx,
+                                )
+                                .await
+                            }
+                            TransportSecurity::Tls(tls_server) => {
+                                match tls_server.acceptor.accept(stream).await {
+                                    Ok(tls_stream) => {
+                                        let fingerprint = tls_stream
+                                            .get_ref()
+                                            .1
+                                            .peer_certificates()
+                                            .and_then(|certificates| certificates.first())
+                                            .map(peer_fingerprint);
+                                        handle_connection(
+                                            tls_stream,
+                                            fingerprint,
+                                            Some(tls_server),
+                                            reg,
+                                            session,
+                                            expected_learners,
+                                            expected_run_id,
+                                            tx,
+                                        )
+                                        .await
+                                    }
+                                    Err(error) => {
+                                        Err(error).context("TLS 1.3 mutual authentication failed")
+                                    }
+                                }
+                            }
+                        };
+                        if let Err(error) = result {
+                            warn!(%peer, "connection ended: {error:#}");
                         }
                     });
                 }
@@ -402,7 +451,11 @@ fn negotiated_payload_limits(layout: &Layout, dtype: u8) -> Result<(u64, u64)> {
     Ok((max_init, max_push))
 }
 
-fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
+fn parse_hello(
+    payload: &[u8],
+    expected_learners: u32,
+    expected_run_id: &[u8; 32],
+) -> Result<ParsedHello> {
     let mut r = Reader(payload);
     let version = r.u16()?;
     if version != PROTOCOL_VERSION {
@@ -415,6 +468,10 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
     let generation = r.u64()?;
     if generation == 0 {
         bail!("connection generation must be nonzero");
+    }
+    let run_id: [u8; 32] = r.take(32)?.try_into().context("run ID must be 32 bytes")?;
+    if &run_id != expected_run_id {
+        bail!("HELLO run ID does not match this syncer run");
     }
     let dtype = r.u8()?;
     if !matches!(dtype, DTYPE_F32 | DTYPE_BF16 | DTYPE_Q4) {
@@ -446,7 +503,7 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
     })
 }
 
-fn parse_data_hello(payload: &[u8]) -> Result<(Member, u16)> {
+fn parse_data_hello(payload: &[u8], expected_run_id: &[u8; 32]) -> Result<(Member, u16)> {
     let mut r = Reader(payload);
     let version = r.u16()?;
     if version != PROTOCOL_VERSION {
@@ -459,6 +516,10 @@ fn parse_data_hello(payload: &[u8]) -> Result<(Member, u16)> {
     if member.generation == 0 {
         bail!("connection generation must be nonzero");
     }
+    let run_id: [u8; 32] = r.take(32)?.try_into().context("run ID must be 32 bytes")?;
+    if &run_id != expected_run_id {
+        bail!("DATA_HELLO run ID does not match this syncer run");
+    }
     let stream_idx = r.u16()?;
     if r.remaining() != 0 {
         bail!("trailing bytes in DATA_HELLO");
@@ -466,15 +527,44 @@ fn parse_data_hello(payload: &[u8]) -> Result<(Member, u16)> {
     Ok((member, stream_idx))
 }
 
-async fn handle_connection(
-    stream: TcpStream,
+fn verify_transport_identity(
+    learner_id: u32,
+    peer_fingerprint: Option<[u8; 32]>,
+    tls_server: Option<&TlsServer>,
+) -> Result<()> {
+    match tls_server {
+        None => {
+            if peer_fingerprint.is_some() {
+                bail!("unexpected authenticated identity on plaintext transport");
+            }
+        }
+        Some(server) => {
+            let actual = peer_fingerprint.context("mutual TLS supplied no client certificate")?;
+            let expected = server
+                .expected_fingerprint(learner_id)
+                .context("learner ID has no client certificate fingerprint allowlist entry")?;
+            if actual != expected {
+                bail!("client certificate is not authorized for claimed learner ID");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_connection<S>(
+    stream: S,
+    peer_fingerprint: Option<[u8; 32]>,
+    tls_server: Option<TlsServer>,
     registry: Registry,
     session: Session,
     expected_learners: u32,
+    expected_run_id: [u8; 32],
     event_tx: mpsc::Sender<Event>,
-) -> Result<()> {
-    stream.set_nodelay(true)?;
-    let (mut rd, mut wr) = stream.into_split();
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut rd, mut wr) = tokio::io::split(stream);
     let first = match read_frame_limited(&mut rd, |msg_type| match msg_type {
         MSG_HELLO | MSG_DATA_HELLO => Ok(MAX_HELLO_FRAME),
         other => bail!("first frame must be HELLO/DATA_HELLO, got {other}"),
@@ -496,7 +586,7 @@ async fn handle_connection(
     };
     match first.msg_type {
         MSG_HELLO => {
-            let parsed = match parse_hello(&first.payload, expected_learners) {
+            let parsed = match parse_hello(&first.payload, expected_learners, &expected_run_id) {
                 Ok(parsed) => parsed,
                 Err(error) => {
                     let message = format!("invalid HELLO: {error:#}");
@@ -514,6 +604,13 @@ async fn handle_connection(
                 max_init_payload,
                 max_push_payload,
             } = parsed;
+            if let Err(error) =
+                verify_transport_identity(learner_id, peer_fingerprint, tls_server.as_ref())
+            {
+                let message = format!("HELLO transport identity rejected: {error:#}");
+                let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+                return Err(error);
+            }
             let num_fragments = layout.fragments.len();
             let offered = SessionSpec {
                 dtype,
@@ -604,7 +701,7 @@ async fn handle_connection(
             res
         }
         MSG_DATA_HELLO => {
-            let (member, stream_idx) = match parse_data_hello(&first.payload) {
+            let (member, stream_idx) = match parse_data_hello(&first.payload, &expected_run_id) {
                 Ok(parsed) => parsed,
                 Err(error) => {
                     let message = format!("invalid DATA_HELLO: {error:#}");
@@ -614,6 +711,20 @@ async fn handle_connection(
             };
             let learner_id = member.learner_id;
             let generation = member.generation;
+            if learner_id >= expected_learners {
+                let message = format!(
+                    "DATA_HELLO learner id {learner_id} is outside configured range 0..{expected_learners}"
+                );
+                send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
+                bail!(message);
+            }
+            if let Err(error) =
+                verify_transport_identity(learner_id, peer_fingerprint, tls_server.as_ref())
+            {
+                let message = format!("DATA_HELLO transport identity rejected: {error:#}");
+                let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+                return Err(error);
+            }
             // The control socket's HELLO may still be in flight; wait for it.
             let mut group = None;
             for _ in 0..200 {
@@ -659,7 +770,10 @@ async fn handle_connection(
     }
 }
 
-async fn send_direct(wr: &mut OwnedWriteHalf, msg_type: u8, payload: &[u8]) -> Result<()> {
+async fn send_direct<W>(wr: &mut W, msg_type: u8, payload: &[u8]) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let mut header = [0u8; 13];
     header[0..4].copy_from_slice(&MAGIC.to_le_bytes());
     header[4] = msg_type;
@@ -669,7 +783,10 @@ async fn send_direct(wr: &mut OwnedWriteHalf, msg_type: u8, payload: &[u8]) -> R
     Ok(())
 }
 
-async fn writer_task(mut wr: OwnedWriteHalf, mut rx: mpsc::Receiver<OutFrame>) {
+async fn writer_task<W>(mut wr: W, mut rx: mpsc::Receiver<OutFrame>)
+where
+    W: AsyncWrite + Unpin,
+{
     while let Some(frame) = rx.recv().await {
         let len: usize = frame.parts.iter().map(|p| p.len()).sum();
         let mut header = [0u8; 13];
@@ -1474,6 +1591,7 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
         cfg.outer_lr,
         cfg.outer_momentum,
         group.dtype,
+        cfg.run_id,
     )?;
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
@@ -2211,7 +2329,7 @@ mod tests {
         assert!(text.contains("\"grace_ms\":22"));
         assert!(text.contains("\"sync_ms\":33"));
         assert!(text.contains("\"contribution\":1"));
-        assert!(text.contains("\"protocol_version\":4"));
+        assert!(text.contains("\"protocol_version\":5"));
         assert!(text.contains("\"delta_semantics\":\"local_minus_raw_anchor\""));
     }
 }

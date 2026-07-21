@@ -15,7 +15,7 @@ links and preempted islands never block training.
                  │  fragment ingest · RDA merge │
                  │  Nesterov outer step · bcast │
                  └──────┬───────┬───────┬───────┘
-                        │  TCP (binary framing, WAN)
+                        │  TLS 1.3 mTLS (binary framing, WAN)
         ┌───────────────┤               ├───────────────┐
  ┌──────┴──────┐  ┌─────┴───────┐  ┌────┴────────┐
  │ learner 0   │  │ learner 1   │  │ learner 2   │   … one island per --gpu entry

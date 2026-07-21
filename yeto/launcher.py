@@ -20,6 +20,7 @@ Flow:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shlex
 import signal
@@ -31,6 +32,7 @@ from pathlib import Path
 
 from . import delivery
 from .gpu_spec import ClusterSpec, parse_gpu_spec
+from .models import MODEL_WEIGHT_GB
 
 SYNCER_PORT = 29400
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -211,7 +213,6 @@ fi
 
 # Rough per-GPU training capacity sanity check (bf16 LoRA, GB).
 GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48}
-from .models import MODEL_WEIGHT_GB  # single source; see yeto/models.py
 
 
 def build_syncer_binary() -> Path:
@@ -221,12 +222,83 @@ def build_syncer_binary() -> Path:
     return binary
 
 
-def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
+REMOTE_SECURITY_DIR = "~/yeto-security"
+REMOTE_SECURITY_SETUP = (
+    f"chmod 700 {REMOTE_SECURITY_DIR} && chmod 600 {REMOTE_SECURITY_DIR}/*"
+)
+
+
+def security_bundle_name(prefix: str) -> str:
+    safe_prefix = "".join(
+        character.lower() if character.isalnum() else "-" for character in prefix
+    ).strip("-") or "run"
+    identity_suffix = hashlib.sha256(prefix.encode()).hexdigest()[:12]
+    return f"{safe_prefix[:32]}-{identity_suffix}"
+
+
+def ensure_run_security(args, num_learners: int):
+    """Create/reuse one durable per-run CA and distinct transport identities."""
+    current = getattr(args, "_run_security", None)
+    if current is not None:
+        if current.learners != num_learners:
+            raise ValueError("run security learner count changed within one launch")
+        return current
+    from .security import prepare_run_security
+
+    prefix = str(getattr(args, "cluster_prefix", "yeto"))
+    bundle_name = security_bundle_name(prefix)
+    server_name = getattr(args, "sync_server_name", None) or (
+        f"syncer-{bundle_name}.yeto.internal"
+    )
+    configured_root = getattr(args, "sync_security_dir", None)
+    root = configured_root or os.path.join("~/.yeto/security", bundle_name)
+    bundle = prepare_run_security(root, num_learners, server_name)
+    args._run_security = bundle
+    return bundle
+
+
+def controller_security_mounts(security, destination: str) -> dict[str, str]:
+    """Mount a complete usable bundle onto a head controller, without CA key."""
+    files = [
+        security.run_id_file,
+        security.ca_cert,
+        security.server_cert,
+        security.server_key,
+        security.fingerprint_allowlist,
+        security.root / "manifest.json",
+        *security.learner_certs,
+        *security.learner_keys,
+    ]
+    destination = destination.rstrip("/")
+    return {f"{destination}/{path.name}": str(path) for path in files}
+
+
+def security_permission_command(directory: str) -> str:
+    """Return a shell command that restores strict modes after file mounting."""
+    if directory.startswith("~/"):
+        shell_directory = f'"$HOME"/{shlex.quote(directory[2:])}'
+    else:
+        shell_directory = shlex.quote(directory)
+    return f"chmod 700 {shell_directory} && chmod 600 {shell_directory}/*"
+
+
+def syncer_command(
+    args,
+    num_learners: int,
+    binary: str = "~/yeto-syncer",
+    security_dir: str = REMOTE_SECURITY_DIR,
+) -> str:
     """The syncer invocation shared by the syncer-cluster task (local
     controller mode) and the head-node subprocess (head controller mode).
     --resume makes any restart pick up from the on-disk checkpoint."""
+    ensure_run_security(args, num_learners)
+
+    def security_path(name: str) -> str:
+        value = f"{security_dir.rstrip('/')}/{name}"
+        return value if value.startswith("~/") else shlex.quote(value)
     return (
         f"{binary}"
+        f" --bind-address 0.0.0.0"
         f" --port {SYNCER_PORT}"
         f" --learners {num_learners}"
         f" --quorum {args.quorum}"
@@ -240,8 +312,26 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --outer-lr {args.outer_lr}"
         f" --outer-momentum {args.outer_momentum}"
         f" --checkpoint-path ~/yeto-state.ckpt --resume"
+        f" --run-id-file {security_path('run-id.bin')}"
+        f" --tls-cert {security_path('server.crt')}"
+        f" --tls-key {security_path('server.key')}"
+        f" --tls-client-ca {security_path('ca.crt')}"
+        f" --tls-client-fingerprints {security_path('client-fingerprints.txt')}"
         f" --event-tape ~/yeto-tape.jsonl"
     )
+
+
+def syncer_security_mounts(args, num_learners: int) -> dict[str, str]:
+    security = ensure_run_security(args, num_learners)
+    return {
+        f"{REMOTE_SECURITY_DIR}/run-id.bin": str(security.run_id_file),
+        f"{REMOTE_SECURITY_DIR}/ca.crt": str(security.ca_cert),
+        f"{REMOTE_SECURITY_DIR}/server.crt": str(security.server_cert),
+        f"{REMOTE_SECURITY_DIR}/server.key": str(security.server_key),
+        f"{REMOTE_SECURITY_DIR}/client-fingerprints.txt": str(
+            security.fingerprint_allowlist
+        ),
+    }
 
 
 # The syncer VM is x86_64 Linux; a binary built on any other submitting
@@ -251,6 +341,8 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
 SYNCER_REMOTE_BUILD = (
     'if ! command -v cc >/dev/null; then sudo apt-get update -qq && '
     "sudo apt-get install -y -qq build-essential; fi\n"
+    'if ! command -v openssl >/dev/null; then sudo apt-get update -qq && '
+    "sudo apt-get install -y -qq openssl; fi\n"
     "command -v ~/.cargo/bin/cargo >/dev/null || "
     "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal -q\n"
     "~/.cargo/bin/cargo build --release --quiet "
@@ -265,13 +357,15 @@ def make_syncer_task(args, num_learners: int):
     import sky
 
     cross = (platform.system(), platform.machine()) != ("Linux", "x86_64")
+    security_mounts = syncer_security_mounts(args, num_learners)
     if cross:
         print("[launcher] non-x86-Linux submitter: building the syncer on the syncer VM")
         task = sky.Task(
             name="yeto-syncer",
-            setup=WAN_TUNING + "\n" + SYNCER_REMOTE_BUILD,
+            setup=WAN_TUNING + "\n" + REMOTE_SECURITY_SETUP + "\n" + SYNCER_REMOTE_BUILD,
             run=syncer_command(args, num_learners),
             workdir=str(REPO_ROOT),
+            file_mounts=security_mounts,
         )
         infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
         task.set_resources(
@@ -289,9 +383,9 @@ def make_syncer_task(args, num_learners: int):
     cmd = "chmod +x ~/yeto-syncer && " + syncer_command(args, num_learners)
     task = sky.Task(
         name="yeto-syncer",
-        setup=WAN_TUNING,
+        setup=WAN_TUNING + "\n" + REMOTE_SECURITY_SETUP,
         run=cmd,
-        file_mounts={"~/yeto-syncer": str(binary)},
+        file_mounts={"~/yeto-syncer": str(binary), **security_mounts},
     )
     # --syncer-region accepts "region" (AWS assumed) or "cloud/region".
     infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
@@ -493,6 +587,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     from .models import resolve_model_kind
 
     model_kind = resolve_model_kind(args.model, getattr(args, "model_kind", "auto"))
+    security = ensure_run_security(args, num_learners)
     loss_function = args.loss_function
     if model_kind == "diffusion" and loss_function == "cross_entropy":
         loss_function = "flow_matching"
@@ -537,6 +632,11 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f" --merge-alpha {args.merge_alpha}"
         f" --wire-dtype {args.wire_dtype}"
         f" --wan-streams {args.wan_streams}"
+        f" --sync-run-id-file {REMOTE_SECURITY_DIR}/run-id.bin"
+        f" --sync-tls-ca {REMOTE_SECURITY_DIR}/ca.crt"
+        f" --sync-tls-cert {REMOTE_SECURITY_DIR}/learner.crt"
+        f" --sync-tls-key {REMOTE_SECURITY_DIR}/learner.key"
+        f" --sync-server-name {shlex.quote(security.server_name)}"
         f" --output-dir ~/yeto-output"
     )
     learner_flags = common_flags
@@ -636,6 +736,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
                        "pip install -q -r requirements.txt"]
         setup_steps.extend(causal_kernel_setup_steps(args))
 
+    setup_steps.insert(0, REMOTE_SECURITY_SETUP)
+
     run = (
         f"{NVME_ENV}\n"
         f"{HF_TOKEN_ENV}\n"
@@ -658,11 +760,22 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         envs["NCCL_DEBUG"] = "INFO"
     # Non-HF --data sources (local paths, s3://, gs://, ...) ride sky's
     # file_mounts onto every learner; see yeto/datasource.py.
-    file_mounts = dict(learner_file_mounts(args.data)) or None
+    file_mounts = dict(learner_file_mounts(args.data))
+    file_mounts.update(
+        {
+            f"{REMOTE_SECURITY_DIR}/run-id.bin": str(security.run_id_file),
+            f"{REMOTE_SECURITY_DIR}/ca.crt": str(security.ca_cert),
+            f"{REMOTE_SECURITY_DIR}/learner.crt": str(
+                security.learner_cert(learner_id)
+            ),
+            f"{REMOTE_SECURITY_DIR}/learner.key": str(
+                security.learner_key(learner_id)
+            ),
+        }
+    )
     if args.loss_function.startswith("pickle:"):
         # The pickled loss is gitignored, so the workdir sync skips it;
         # mount it into the workdir explicitly.
-        file_mounts = file_mounts or {}
         file_mounts[f"~/sky_workdir/{PICKLED_LOSS_FILE}"] = str(REPO_ROOT / PICKLED_LOSS_FILE)
     # Ride the launching machine's HF token onto every learner: anonymous
     # Hub quota is half the authenticated one and shared per-IP, and a
@@ -670,7 +783,6 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     # copies it wherever NVME_ENV points HF_HOME.
     local_token = os.path.expanduser(HF_TOKEN_PATH)
     if os.path.isfile(local_token):
-        file_mounts = file_mounts or {}
         file_mounts[HF_TOKEN_PATH] = local_token
     # Kick the weight download off in the background at the END of setup:
     # it overlaps sky's remaining bookkeeping and races ahead of the run
@@ -699,7 +811,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         envs=envs,
         num_nodes=spec.num_nodes,
         workdir=str(REPO_ROOT),
-        file_mounts=file_mounts,
+        file_mounts=file_mounts or None,
     )
     infra = f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud
     resources_kwargs = {}
@@ -1010,7 +1122,13 @@ class LocalSyncer:
         binary: str = "~/yeto-syncer",
         log_file: str = "~/yeto-syncer.log",
     ):
-        self.command = syncer_command(args, num_learners, binary=binary)
+        security = ensure_run_security(args, num_learners)
+        self.command = syncer_command(
+            args,
+            num_learners,
+            binary=binary,
+            security_dir=str(security.root),
+        )
         self.binary = os.path.expanduser(binary)
         self.log_file = os.path.expanduser(log_file)
         self.proc: subprocess.Popen | None = None
@@ -1487,6 +1605,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     # simply dial in with the printed join command.
     external = max(0, getattr(args, "external_learners", 0) or 0)
     num_learners = len(specs) + external
+    security = ensure_run_security(args, num_learners)
     args.loss_function = resolve_loss_function(args.loss_function)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
@@ -1516,17 +1635,58 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             print(f"[launcher] syncer up at {syncer_addr}")
 
         if external:
+            external_security_root = Path(
+                getattr(args, "external_security_dir", security.root)
+            ).expanduser()
+            external_data = getattr(args, "external_data", args.data)
             for x in range(external):
+                learner_id = len(specs) + x
+                join_command = shlex.join(
+                    [
+                        "python",
+                        "-m",
+                        "yeto.mlx.learner",
+                        "--model",
+                        str(args.model),
+                        "--data",
+                        str(external_data),
+                        "--syncer",
+                        syncer_addr,
+                        "--learner-id",
+                        str(learner_id),
+                        "--num-learners",
+                        str(num_learners),
+                        "--tuning",
+                        str(args.tuning),
+                        "--lora-r",
+                        str(args.lora_r),
+                        "--lora-targets",
+                        str(getattr(args, "lora_targets", "auto")),
+                        "--seq-len",
+                        str(args.seq_len),
+                        "--fragments",
+                        str(args.fragments),
+                        "--fragment-pattern",
+                        str(args.fragment_pattern),
+                        "--merge-alpha",
+                        str(args.merge_alpha),
+                        "--wire-dtype",
+                        str(args.wire_dtype),
+                        "--sync-run-id-file",
+                        str(external_security_root / "run-id.bin"),
+                        "--sync-tls-ca",
+                        str(external_security_root / "ca.crt"),
+                        "--sync-tls-cert",
+                        str(external_security_root / f"learner-{learner_id}.crt"),
+                        "--sync-tls-key",
+                        str(external_security_root / f"learner-{learner_id}.key"),
+                        "--sync-server-name",
+                        security.server_name,
+                    ]
+                )
                 print(
-                    f"[launcher] external learner slot {len(specs) + x}: join with\n"
-                    f"    python -m yeto.mlx.learner --model {args.model} "
-                    f"--data {args.data} --syncer {syncer_addr} "
-                    f"--learner-id {len(specs) + x} --num-learners {num_learners} "
-                    f"--tuning {args.tuning} --lora-r {args.lora_r} "
-                    f"--lora-targets {getattr(args, 'lora_targets', 'auto')} "
-                    f"--seq-len {args.seq_len} --fragments {args.fragments} "
-                    f"--fragment-pattern {args.fragment_pattern} "
-                    f"--merge-alpha {args.merge_alpha} --wire-dtype {args.wire_dtype}"
+                    f"[launcher] external learner slot {learner_id}: join with\n"
+                    f"    {join_command}"
                 )
             print(
                 f"[launcher] the syncer will wait for all {num_learners} learners "

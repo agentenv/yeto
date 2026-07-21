@@ -48,7 +48,14 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
 - **Delta correction**: stale learner deltas that oppose the outer momentum
   are shrunk/reoriented per tensor before merging (HeLoCo;
   `--delta-correction none` disables).
-- **Transport**: custom binary framing over parallel TCP streams (control on
+- **Transport security**: production WAN connections use TLS 1.3 mutual
+  authentication on every control and data socket. The launcher issues a
+  durable per-run CA, an exact-SAN server certificate, and one distinct client
+  certificate per learner; the syncer pins learner IDs to certificate
+  fingerprints. Protocol v5 also carries a random durable run ID in every
+  HELLO/DATA_HELLO and binds checkpoints to it. Plaintext is available only
+  through an explicit loopback-only local-development profile. The payload
+  path remains custom binary framing over parallel TCP streams (control on
   stream 0; 4 MiB chunks striped across data streams). gRPC was evaluated and
   rejected — protobuf copies and HTTP/2 framing sit on the bulk tensor path.
 - **Q4 pushes**: `--wire-dtype q4` sends learner pushes as blockwise 4-bit
@@ -58,8 +65,10 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   size-balanced) or `strided` (transformer layer i → fragment i mod P,
   interleaving depth across fragments as in Streaming DiLoCo).
 - **Snapshots**: the single-actor syncer checkpoints at the quiescent cut
-  between rounds (params, momentum, per-fragment versions, merged-token
-  ledger). `--resume` restores; a JSONL event tape records every merge.
+  between rounds (run identity, params, momentum, per-fragment versions,
+  merged-token ledger). `--resume` requires the durable run-ID file and
+  rejects a checkpoint from another run; a JSONL event tape records every
+  merge without logging credential or run-ID bytes.
 - **Fine-tuning**: `--tuning lora` (default) syncs only adapter weights —
   fragments are megabytes, so the syncer and WAN stay cheap even for large
   models. `--tuning full` syncs everything.
@@ -79,8 +88,11 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   upfront).
 - **Resilience**: learners reconnect automatically through syncer restarts
   and WAN drops (exponential backoff; work continues locally during the
-  outage and re-merges after the post-reconnect rebroadcast). The syncer
-  checkpoint is the single durable source of truth. Recover a causal LM with
+  outage and re-merges after the post-reconnect rebroadcast). Every redial
+  keeps the learner certificate and run identity but uses a fresh connection
+  generation; certificate or server-identity failures are fatal instead of
+  silently downgrading or exhausting the ordinary outage retry window. The
+  syncer checkpoint is the single durable source of truth. Recover a causal LM with
   `yeto-export --checkpoint yeto-state.ckpt --model <id> --output-dir out/`,
   or use `yeto-diffusion-export` with the same checkpoint/model/output flags
   for a diffusion adapter, even if every learner is gone.

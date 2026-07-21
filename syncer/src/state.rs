@@ -113,6 +113,8 @@ pub struct LearnerLedger {
 }
 
 pub struct GlobalState {
+    /// Cryptographically random durable identity for this training run.
+    pub run_id: [u8; 32],
     pub layout: Layout,
     /// Θ_p, flat f32 per fragment (concatenated tensors in layout order).
     pub params: Vec<Vec<f32>>,
@@ -134,7 +136,13 @@ pub struct GlobalState {
 }
 
 impl GlobalState {
-    pub fn new(layout: Layout, outer_lr: f32, outer_momentum: f32, wire_dtype: u8) -> Result<Self> {
+    pub fn new(
+        layout: Layout,
+        outer_lr: f32,
+        outer_momentum: f32,
+        wire_dtype: u8,
+        run_id: [u8; 32],
+    ) -> Result<Self> {
         // Validate declared sizes now, but do not allocate model-sized state
         // from an unauthenticated HELLO. Params arrive in INIT_PARAMS; the
         // matching momentum is allocated only after that exact-sized payload
@@ -164,6 +172,7 @@ impl GlobalState {
             .context("cannot allocate fragment versions")?;
         versions.resize(fragment_count, 0);
         Ok(Self {
+            run_id,
             layout,
             params,
             momentum,
@@ -321,7 +330,7 @@ impl GlobalState {
     }
 }
 
-const CKPT_MAGIC: u32 = 0xD170_5A7E;
+const CKPT_MAGIC: u32 = 0xD170_5A7F;
 
 impl GlobalState {
     /// Persist a consistent snapshot. Called only at the quiescent cut
@@ -334,6 +343,7 @@ impl GlobalState {
         {
             let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
             f.write_all(&CKPT_MAGIC.to_le_bytes())?;
+            f.write_all(&self.run_id)?;
             f.write_all(&self.global_step.to_le_bytes())?;
             f.write_all(&(self.params.len() as u32).to_le_bytes())?;
             for p in 0..self.params.len() {
@@ -369,6 +379,13 @@ impl GlobalState {
         let mut r = Reader(&buf);
         if r.u32()? != CKPT_MAGIC {
             bail!("bad checkpoint magic");
+        }
+        let checkpoint_run_id: [u8; 32] = r
+            .take(32)?
+            .try_into()
+            .context("checkpoint run ID must be 32 bytes")?;
+        if checkpoint_run_id != self.run_id {
+            bail!("checkpoint run ID does not match the configured run ID");
         }
         self.global_step = r.u64()?;
         let np = r.u32()? as usize;
@@ -409,6 +426,9 @@ impl GlobalState {
             };
             self.ledger.insert(id, l);
         }
+        if r.remaining() != 0 {
+            bail!("checkpoint has trailing bytes");
+        }
         Ok(())
     }
 }
@@ -416,6 +436,19 @@ impl GlobalState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_RUN_ID: [u8; 32] = [0x5A; 32];
+
+    fn new_state(layout: Layout, outer_lr: f32, outer_momentum: f32) -> GlobalState {
+        GlobalState::new(
+            layout,
+            outer_lr,
+            outer_momentum,
+            crate::protocol::DTYPE_F32,
+            TEST_RUN_ID,
+        )
+        .unwrap()
+    }
 
     fn layout2() -> Layout {
         Layout {
@@ -436,7 +469,7 @@ mod tests {
 
     #[test]
     fn init_once() {
-        let mut st = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
+        let mut st = new_state(layout2(), 0.7, 0.9);
         st.init_fragment(0, vec![1.0; 4]).unwrap();
         st.init_fragment(0, vec![2.0; 4]).unwrap(); // ignored
         assert_eq!(st.params[0], vec![1.0; 4]);
@@ -454,14 +487,14 @@ mod tests {
                 tensor_shapes: None,
             }],
         };
-        let st = GlobalState::new(layout, 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
+        let st = new_state(layout, 0.7, 0.9);
         assert!(st.params[0].is_empty());
         assert!(st.momentum[0].is_empty());
     }
 
     #[test]
     fn merge_moves_toward_learners() {
-        let mut st = GlobalState::new(layout2(), 1.0, 0.0, crate::protocol::DTYPE_F32).unwrap();
+        let mut st = new_state(layout2(), 1.0, 0.0);
         st.init_fragment(0, vec![1.0; 4]).unwrap();
         st.init_fragment(1, vec![1.0; 4]).unwrap();
         let outer_gradient = vec![1.0f32; 4];
@@ -521,7 +554,7 @@ mod tests {
                 tensor_shapes: Some(vec![(2, 2)]),
             }],
         };
-        let mut st = GlobalState::new(layout, 1.0, 0.0, crate::protocol::DTYPE_F32).unwrap();
+        let mut st = new_state(layout, 1.0, 0.0);
         st.init_fragment(0, vec![0.0; 4]).unwrap();
         let outer_gradient = [3.0f32, 0.0, 0.0, 1.0];
         let g = st.merge_and_step(0, &[&outer_gradient], &[1.0]).unwrap();
@@ -536,7 +569,7 @@ mod tests {
         let dir = std::env::temp_dir().join("yeto-ckpt-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.ckpt");
-        let mut st = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
+        let mut st = new_state(layout2(), 0.7, 0.9);
         st.init_fragment(0, vec![1.5; 4]).unwrap();
         st.init_fragment(1, vec![-2.0; 4]).unwrap();
         let outer_gradient = vec![1.5f32; 4];
@@ -546,13 +579,19 @@ mod tests {
         st.record_merge(3, 12, 4096);
         st.save_checkpoint(&path).unwrap();
 
-        let mut st2 = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
+        let mut st2 = new_state(layout2(), 0.7, 0.9);
         st2.load_checkpoint(&path).unwrap();
         assert_eq!(st2.global_step, 7);
         assert_eq!(st2.versions, vec![7, 0]);
         assert_eq!(st2.params, st.params);
         assert!(st2.all_initialized());
         assert_eq!(st2.ledger.get(&3).unwrap().tokens, 4096);
+
+        let mut wrong_run =
+            GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32, [0xA5; 32]).unwrap();
+        let error = wrong_run.load_checkpoint(&path).unwrap_err();
+        assert!(error.to_string().contains("run ID does not match"));
+        assert_eq!(wrong_run.global_step, 0);
         std::fs::remove_file(&path).ok();
     }
 
@@ -563,15 +602,14 @@ mod tests {
         let path = dir.join("state.ckpt");
         std::fs::write(&path, b"old checkpoint bytes").unwrap();
 
-        let mut st = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
+        let mut st = new_state(layout2(), 0.7, 0.9);
         st.init_fragment(0, vec![3.0; 4]).unwrap();
         st.init_fragment(1, vec![-4.0; 4]).unwrap();
         st.global_step = 13;
         st.versions = vec![12, 13];
         st.save_checkpoint(&path).unwrap();
 
-        let mut restored =
-            GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
+        let mut restored = new_state(layout2(), 0.7, 0.9);
         restored.load_checkpoint(&path).unwrap();
         assert_eq!(restored.global_step, 13);
         assert_eq!(restored.versions, vec![12, 13]);
@@ -585,7 +623,7 @@ mod tests {
         // opposes it. With correction the outer step must move less far
         // in the opposing direction than without.
         let mk = || {
-            let mut st = GlobalState::new(layout2(), 1.0, 0.0, crate::protocol::DTYPE_F32).unwrap();
+            let mut st = new_state(layout2(), 1.0, 0.0);
             st.init_fragment(0, vec![0.0; 4]).unwrap();
             st.init_fragment(1, vec![0.0; 4]).unwrap();
             // Warm the momentum with a positive outer gradient.
@@ -611,7 +649,7 @@ mod tests {
 
     #[test]
     fn size_mismatch_rejected() {
-        let mut st = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
+        let mut st = new_state(layout2(), 0.7, 0.9);
         assert!(st.init_fragment(0, vec![1.0; 3]).is_err());
         let learner = vec![0.0f32; 3];
         assert!(st.merge_and_step(0, &[&learner], &[1.0]).is_err());
@@ -626,7 +664,7 @@ mod tests {
                 tensor_shapes: None,
             }],
         };
-        let mut st = GlobalState::new(layout, f32::MAX, 0.0, crate::protocol::DTYPE_F32).unwrap();
+        let mut st = new_state(layout, f32::MAX, 0.0);
         st.init_fragment(0, vec![1.0]).unwrap();
         let error = st.merge_and_step(0, &[&[f32::MAX]], &[1.0]).unwrap_err();
         assert!(error.to_string().contains("non-finite state"));

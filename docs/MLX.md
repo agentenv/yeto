@@ -53,16 +53,29 @@ reserved slot:
 yeto launch --gpu aws:1xA10G@us-west-2 --external-learners 1 \
   --model lfm25-1b --data org/chat-traces --quorum 2 ...
 
-# the launch log prints the join command for each reserved slot; on the Mac:
+# the launch log prints the complete TLS-enabled join command for each
+# reserved slot; on the submitting Mac, run that command verbatim:
 pip install "yeto[mlx] @ ." && \
 python -m yeto.mlx.learner --model lfm25-1b --data org/chat-traces \
-  --syncer <syncer-ip>:29400 --learner-id 1 --num-learners 2
+  --syncer <syncer-ip>:29400 --learner-id 1 --num-learners 2 \
+  --sync-run-id-file ~/.yeto/security/<run>/run-id.bin \
+  --sync-tls-ca ~/.yeto/security/<run>/ca.crt \
+  --sync-tls-cert ~/.yeto/security/<run>/learner-1.crt \
+  --sync-tls-key ~/.yeto/security/<run>/learner-1.key \
+  --sync-server-name <exact-name-from-launch-log>
 ```
 
-The syncer's port is already public (`ports=[SYNCER_PORT]` on the syncer
-cluster / head VM) and it waits for all `--learners` before starting, so the
-run begins when the Mac dials in. Learner reconnection/backoff applies to the
-Mac exactly as to cloud learners.
+The launcher creates the identity bundle on the submitting machine, stages
+only the operational certificates and keys onto the head, and keeps the CA
+private key local. The syncer's port is reachable
+(`ports=[SYNCER_PORT]` on the syncer cluster / head VM), but it accepts only
+TLS 1.3 clients whose certificate fingerprint is reserved for the claimed
+learner ID and whose run ID matches. It waits for all `--learners` before
+starting, so the run begins when the Mac dials in. Learner
+reconnection/backoff applies to the Mac exactly as to cloud learners. If the
+joining Mac is not the submitting machine, copy only `run-id.bin`, `ca.crt`,
+and that learner's `.crt`/`.key` files to it over an authenticated channel;
+never copy `ca.key`.
 
 Notes:
 

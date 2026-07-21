@@ -32,7 +32,15 @@ from ..finalization import finalize_torch_island
 from ..fragments import build_layout
 from ..losses import flow_matching_loss
 from ..models import resolve
-from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
+from ..protocol import (
+    DTYPE_BF16,
+    DTYPE_F32,
+    DTYPE_Q4,
+    SyncerClient,
+    add_syncer_security_arguments,
+    bulk_dtype,
+    syncer_security_from_args,
+)
 from ..tensor_io import (
     apply_fragment,
     fragment_flat,
@@ -289,6 +297,7 @@ def parse_args(argv=None):
     p.add_argument("--data", required=True, help="HF dataset id or local latent/media manifest")
     p.add_argument("--syncer", required=True, help="host:port, or 'none' for standalone")
     p.add_argument("--learner-id", type=int, required=True)
+    add_syncer_security_arguments(p)
     p.add_argument("--num-learners", type=int, required=True)
     p.add_argument("--loss-function", default="flow_matching")
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
@@ -3069,7 +3078,17 @@ def main(argv=None) -> None:
     client = None
     if rank == 0 and args.syncer != "none":
         host, port = args.syncer.rsplit(":", 1)
-        client = SyncerClient((host, int(port)), args.learner_id, layout, wire_dtype, args.wan_streams)
+        run_id, tls, allow_insecure_loopback = syncer_security_from_args(args)
+        client = SyncerClient(
+            (host, int(port)),
+            args.learner_id,
+            layout,
+            wire_dtype,
+            args.wan_streams,
+            run_id=run_id,
+            tls=tls,
+            allow_insecure_loopback=allow_insecure_loopback,
+        )
         client.start()
         log.info("connected to syncer at %s", args.syncer)
         if args.learner_id == 0:

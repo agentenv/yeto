@@ -1,4 +1,4 @@
-"""Golden-wire and raw-socket integration tests for protocol v4 invariants."""
+"""Golden-wire and raw-socket integration tests for protocol v5 invariants."""
 
 import socket
 import struct
@@ -39,6 +39,7 @@ from yeto.tensor_io import pack_tensor, quantize_q4
 ROOT = Path(__file__).resolve().parent.parent
 PUSH_HEAD = struct.Struct("<IIQIQQIQ")
 PULL = struct.Struct("<IQI")
+TEST_RUN_ID = bytes(range(32))
 
 
 @pytest.fixture(scope="module")
@@ -80,6 +81,7 @@ class RawLearner:
         generation: int,
         layout: FragmentLayout,
         dtype: int = DTYPE_F32,
+        run_id: bytes = TEST_RUN_ID,
     ):
         self.sock = connect(port)
         self.sock.settimeout(10)
@@ -90,7 +92,7 @@ class RawLearner:
         write_frame(
             self.sock,
             MSG_HELLO,
-            encode_hello(learner_id, dtype, layout, 0, generation),
+            encode_hello(learner_id, dtype, layout, 0, generation, run_id),
         )
 
     def close(self) -> None:
@@ -180,11 +182,17 @@ def launch_syncer(
 ) -> tuple[subprocess.Popen, Path]:
     port = free_port()
     final_state = tmp_path / f"state-{port}.bin"
+    run_id_file = tmp_path / f"run-id-{port}.bin"
+    run_id_file.write_bytes(TEST_RUN_ID)
+    run_id_file.chmod(0o600)
     proc = subprocess.Popen(
         [
             str(binary),
             "--port",
             str(port),
+            "--allow-insecure-loopback",
+            "--run-id-file",
+            str(run_id_file),
             "--learners",
             str(learners),
             "--quorum",
@@ -244,9 +252,17 @@ def receive_error(sock: socket.socket) -> str:
 def test_versioned_hello_golden_bytes_and_reserved_ids():
     layout = one_value_layout(4)
     generation = 0x0102_0304_0506_0708
-    encoded = encode_hello(7, DTYPE_F32, layout, 3, generation)
+    encoded = encode_hello(7, DTYPE_F32, layout, 3, generation, TEST_RUN_ID)
     expected = (
-        struct.pack("<HIQBI", PROTOCOL_VERSION, 7, generation, DTYPE_F32, 1)
+        struct.pack(
+            "<HIQ32sBI",
+            PROTOCOL_VERSION,
+            7,
+            generation,
+            TEST_RUN_ID,
+            DTYPE_F32,
+            1,
+        )
         + struct.pack("<BIQ", MERGE_RDA, 1, 4)
         + layout_fingerprint(layout)
         + struct.pack("<H", 3)
@@ -443,7 +459,9 @@ def test_version_layout_and_dtype_mismatches_fail_clearly(
 
         wrong_version = connect(proc.port)
         sockets.append(wrong_version)
-        hello = bytearray(encode_hello(0, DTYPE_F32, one_value_layout(), 0, 102))
+        hello = bytearray(
+            encode_hello(0, DTYPE_F32, one_value_layout(), 0, 102, TEST_RUN_ID)
+        )
         struct.pack_into("<H", hello, 0, PROTOCOL_VERSION + 1)
         write_frame(wrong_version, MSG_HELLO, bytes(hello))
         assert "protocol version mismatch" in receive_error(wrong_version)
@@ -453,7 +471,7 @@ def test_version_layout_and_dtype_mismatches_fail_clearly(
         write_frame(
             wrong_dtype,
             MSG_HELLO,
-            encode_hello(0, DTYPE_BF16, one_value_layout(), 0, 103),
+            encode_hello(0, DTYPE_BF16, one_value_layout(), 0, 103, TEST_RUN_ID),
         )
         assert "session mismatch" in receive_error(wrong_dtype)
 
@@ -462,7 +480,7 @@ def test_version_layout_and_dtype_mismatches_fail_clearly(
         write_frame(
             wrong_layout,
             MSG_HELLO,
-            encode_hello(0, DTYPE_F32, one_value_layout(2), 0, 104),
+            encode_hello(0, DTYPE_F32, one_value_layout(2), 0, 104, TEST_RUN_ID),
         )
         assert "session mismatch" in receive_error(wrong_layout)
 
@@ -475,7 +493,7 @@ def test_version_layout_and_dtype_mismatches_fail_clearly(
             wrong_semantics,
             MSG_HELLO,
             encode_hello(
-                0, DTYPE_F32, same_sizes_different_tensor, 0, 105
+                0, DTYPE_F32, same_sizes_different_tensor, 0, 105, TEST_RUN_ID
             ),
         )
         assert "session mismatch" in receive_error(wrong_semantics)
@@ -485,7 +503,15 @@ def test_version_layout_and_dtype_mismatches_fail_clearly(
         write_frame(
             malformed,
             MSG_HELLO,
-            struct.pack("<HIQBI", PROTOCOL_VERSION, 0, 106, DTYPE_F32, 0),
+            struct.pack(
+                "<HIQ32sBI",
+                PROTOCOL_VERSION,
+                0,
+                106,
+                TEST_RUN_ID,
+                DTYPE_F32,
+                0,
+            ),
         )
         assert "layout must contain at least one fragment" in receive_error(malformed)
     finally:
@@ -510,7 +536,9 @@ def test_out_of_range_learner_ids_are_rejected_at_startup_and_after_init(
             write_frame(
                 sock,
                 MSG_HELLO,
-                encode_hello(1, DTYPE_F32, one_value_layout(), 0, generation),
+                encode_hello(
+                    1, DTYPE_F32, one_value_layout(), 0, generation, TEST_RUN_ID
+                ),
             )
             assert "outside configured range" in receive_error(sock)
 
@@ -523,7 +551,7 @@ def test_out_of_range_learner_ids_are_rejected_at_startup_and_after_init(
         write_frame(
             sock,
             MSG_HELLO,
-            encode_hello(1, DTYPE_F32, one_value_layout(), 0, 202),
+            encode_hello(1, DTYPE_F32, one_value_layout(), 0, 202, TEST_RUN_ID),
         )
         assert "outside configured range" in receive_error(sock)
 

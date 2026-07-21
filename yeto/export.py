@@ -11,9 +11,10 @@ learner is gone. This module has two layers:
     trainable params, overwrites them with the checkpointed values, and saves
     the result with ``save_pretrained``.
 
-Binary layout (all little-endian):
+Protocol-v5 binary layout (all little-endian):
 
-    magic          u32  (0xD170_5A7E)
+    magic          u32  (0xD170_5A7F)
+    run_id         32 raw bytes
     global_step    u64
     num_fragments  u32
     per fragment:  version u64, numel u64, numel x f32 params,
@@ -37,7 +38,8 @@ import torch
 from .fragments import FragmentLayout, build_layout
 from .tensor_io import apply_fragment
 
-CKPT_MAGIC = 0xD170_5A7E
+CKPT_MAGIC = 0xD170_5A7E  # legacy export-only checkpoint
+CKPT_MAGIC_V5 = 0xD170_5A7F
 
 
 @dataclass
@@ -48,6 +50,8 @@ class Checkpoint:
     fragments: list[tuple[int, torch.Tensor, torch.Tensor]]
     # learner_id -> (merges, steps, tokens)
     ledger: dict[int, tuple[int, int, int]]
+    # Protocol-v5 durable run identity; legacy export-only snapshots have None.
+    run_id: bytes | None = None
 
 
 def parse_checkpoint(path: str | Path) -> Checkpoint:
@@ -68,11 +72,12 @@ def parse_checkpoint(path: str | Path) -> Checkpoint:
         return chunk
 
     (magic,) = struct.unpack("<I", take(4, "magic"))
-    if magic != CKPT_MAGIC:
+    if magic not in (CKPT_MAGIC, CKPT_MAGIC_V5):
         raise ValueError(
             f"{path}: bad checkpoint magic 0x{magic:08X} "
-            f"(expected 0x{CKPT_MAGIC:08X}); not a syncer checkpoint?"
+            f"(expected 0x{CKPT_MAGIC_V5:08X}); not a syncer checkpoint?"
         )
+    run_id = take(32, "run_id") if magic == CKPT_MAGIC_V5 else None
     (global_step,) = struct.unpack("<Q", take(8, "global_step"))
     (num_fragments,) = struct.unpack("<I", take(4, "num_fragments"))
 
@@ -97,7 +102,7 @@ def parse_checkpoint(path: str | Path) -> Checkpoint:
             f"payload (parsed {off} of {len(data)}); file corrupt or from an "
             "incompatible syncer version"
         )
-    return Checkpoint(global_step, fragments, ledger)
+    return Checkpoint(global_step, fragments, ledger, run_id)
 
 
 def _read_f32(raw: bytes) -> torch.Tensor:

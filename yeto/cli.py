@@ -362,6 +362,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "deltas (~4x less learner egress; broadcasts stay bf16)",
     )
     sync.add_argument("--wan-streams", type=int, default=4, help="parallel TCP streams per learner")
+    sync.add_argument(
+        "--sync-security-dir",
+        default=None,
+        help="durable per-run TLS identity directory (default ~/.yeto/security/<run>)",
+    )
+    sync.add_argument(
+        "--sync-server-name",
+        default=None,
+        help="exact DNS/IP SAN learners verify; default is a per-run internal DNS identity",
+    )
 
     infra = p.add_argument_group("infrastructure")
     infra.add_argument(
@@ -853,6 +863,7 @@ def _make_head_task(args, extra_mounts: dict | None = None):
         SYNCER_PORT,
         SYNCER_REMOTE_BUILD,
         WAN_TUNING,
+        security_permission_command,
     )
 
     file_mounts = dict(extra_mounts or {})
@@ -888,6 +899,7 @@ def _make_head_task(args, extra_mounts: dict | None = None):
         setup=(
             "set -e\n"
             f"{WAN_TUNING}\n"
+            f"{security_permission_command(args.sync_security_dir)}\n"
             f"{HEAD_SETUP_PIP}\n"
             f"{SYNCER_REMOTE_BUILD}\n"
             f"touch {HEAD_READY_MARKER}"
@@ -968,9 +980,28 @@ def cmd_launch_head(args) -> int:
     name = args.cluster_prefix
     head_cluster = f"{name}-head"
     specs = parse_gpu_spec(args.gpu)
+    num_learners = len(specs) + max(
+        0, getattr(args, "external_learners", 0) or 0
+    )
     # Resolve the loss BEFORE serializing: a custom:<file.py> spec becomes
     # pickle:<file> here, and the pickle is file-mounted onto the head.
     args.loss_function = launcher.resolve_loss_function(args.loss_function)
+    # Issue the per-run identities on the submitting machine, then mount only
+    # the operational bundle onto the head. The CA private key never leaves
+    # the submitter. External learners can use their reserved identity from
+    # this same local bundle.
+    security = launcher.ensure_run_security(args, num_learners)
+    remote_security_dir = (
+        f"~/.yeto/security/{launcher.security_bundle_name(args.cluster_prefix)}"
+    )
+    security_mounts = launcher.controller_security_mounts(
+        security, remote_security_dir
+    )
+    args.sync_security_dir = remote_security_dir
+    if getattr(args, "external_learners", 0):
+        args.external_security_dir = str(security.root)
+        args.external_data = args.data
+
     # Likewise stage a local --data path: it is rsynced onto the head, and
     # the rewritten path makes the head's launcher mount it onto learners.
     from .datasource import head_stage
@@ -987,7 +1018,9 @@ def cmd_launch_head(args) -> int:
     )
 
     print(f"[yeto] provisioning head cluster {head_cluster} in {args.syncer_region}")
-    handle = _sky_launch_head(_make_head_task(args, data_mounts), head_cluster)
+    handle = _sky_launch_head(
+        _make_head_task(args, {**data_mounts, **security_mounts}), head_cluster
+    )
     head_ip = handle.head_ip
     print(f"[yeto] head is up at {head_ip}; submitting the controller job")
 
@@ -1033,7 +1066,9 @@ def cmd_head(payload: str) -> int:
     from .gpu_spec import parse_gpu_spec
 
     args = argparse.Namespace(**json.loads(payload))
-    num_learners = len(parse_gpu_spec(args.gpu))
+    num_learners = len(parse_gpu_spec(args.gpu)) + max(
+        0, getattr(args, "external_learners", 0) or 0
+    )
     syncer = launcher.LocalSyncer(args, num_learners)
     syncer.start()
     syncer.start_log_forwarder()

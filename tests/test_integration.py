@@ -31,6 +31,14 @@ from yeto.tensor_io import (
 
 ROOT = Path(__file__).resolve().parent.parent
 DIM = 4096  # large enough to require striping across several chunks at bf16? (4KB) — small but exercises the full path
+TEST_RUN_ID = bytes(range(32))
+
+
+def local_security_args(tmp_path: Path, label: str) -> list[str]:
+    path = tmp_path / f"{label}-run-id.bin"
+    path.write_bytes(TEST_RUN_ID)
+    path.chmod(0o600)
+    return ["--allow-insecure-loopback", "--run-id-file", str(path)]
 
 
 def build_syncer() -> Path:
@@ -93,7 +101,13 @@ class ToyLearner(threading.Thread):
         # Every push is local minus the last raw global broadcast.
         self.anchors: list[torch.Tensor | None] = [None] * layout.num_fragments
         self.client = SyncerClient(
-            ("127.0.0.1", port), learner_id, layout, dtype, num_streams=2
+            ("127.0.0.1", port),
+            learner_id,
+            layout,
+            dtype,
+            num_streams=2,
+            run_id=TEST_RUN_ID,
+            allow_insecure_loopback=True,
         )
         # Snapshot of ordinary in-training broadcasts (before the terminal
         # raw overwrite), retained for convergence assertions.
@@ -209,7 +223,7 @@ class ToyLearner(threading.Thread):
 
 
 @pytest.mark.timeout(180)
-def test_two_learners_converge_to_mean():
+def test_two_learners_converge_to_mean(tmp_path):
     binary = build_syncer()
     port = free_port()
     total_steps = 30
@@ -219,6 +233,7 @@ def test_two_learners_converge_to_mean():
     proc = subprocess.Popen(
         [
             str(binary),
+            *local_security_args(tmp_path, "two-learners"),
             "--port", str(port),
             "--learners", "2",
             "--quorum", "2",
@@ -240,13 +255,13 @@ def test_two_learners_converge_to_mean():
             ToyLearner(0, port, t_a, layout),
             ToyLearner(1, port, t_b, layout),
         ]
-        for l in learners:
-            l.start()
-        for l in learners:
-            l.join(timeout=120)
-            assert not l.is_alive(), "learner did not finish"
-            if l.exc:
-                raise l.exc
+        for learner in learners:
+            learner.start()
+        for learner in learners:
+            learner.join(timeout=120)
+            assert not learner.is_alive(), "learner did not finish"
+            if learner.exc:
+                raise learner.exc
         rc = proc.wait(timeout=30)
         assert rc == 0, "syncer exited nonzero"
 
@@ -255,12 +270,12 @@ def test_two_learners_converge_to_mean():
         # motion cancels and the synced state stays near 0. Check the last
         # broadcast state stayed much closer to the consensus (0) than to
         # either learner's own target.
-        for l in learners:
-            assert l.synced, "learner never received a broadcast"
-            flat = torch.cat([p.reshape(-1) for p in l.synced.values()])
-            dist_to_own_target = (flat - l.target).norm()
+        for learner in learners:
+            assert learner.synced, "learner never received a broadcast"
+            flat = torch.cat([p.reshape(-1) for p in learner.synced.values()])
+            dist_to_own_target = (flat - learner.target).norm()
             # Pure local training would reach its own target (dist -> 0).
-            assert dist_to_own_target > 0.5 * l.target.norm(), (
+            assert dist_to_own_target > 0.5 * learner.target.norm(), (
                 "learner collapsed to its own target; merging had no effect"
             )
     finally:
@@ -285,6 +300,7 @@ def test_bf16_session_saves_lossless_authoritative_cut_and_checkpoint(tmp_path):
     proc = subprocess.Popen(
         [
             str(binary),
+            *local_security_args(tmp_path, "bf16"),
             "--port",
             str(port),
             "--learners",
@@ -338,6 +354,7 @@ def test_bf16_session_saves_lossless_authoritative_cut_and_checkpoint(tmp_path):
             assert torch.equal(saved, coordinator[fid]), f"fragment {fid} is not authoritative"
 
         ckpt = parse_checkpoint(checkpoint)
+        assert ckpt.run_id == TEST_RUN_ID
         assert ckpt.global_step == total_steps
         assert tuple(version for version, _params, _momentum in ckpt.fragments) == (
             learner.final_manifest.versions
@@ -352,7 +369,7 @@ def test_bf16_session_saves_lossless_authoritative_cut_and_checkpoint(tmp_path):
 
 
 @pytest.mark.timeout(180)
-def test_final_ack_membership_excludes_previously_abandoned_learner():
+def test_final_ack_membership_excludes_previously_abandoned_learner(tmp_path):
     binary = build_syncer()
     port = free_port()
     named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
@@ -360,6 +377,7 @@ def test_final_ack_membership_excludes_previously_abandoned_learner():
     proc = subprocess.Popen(
         [
             str(binary),
+            *local_security_args(tmp_path, "abandoned"),
             "--port",
             str(port),
             "--learners",
@@ -414,7 +432,7 @@ def test_final_ack_membership_excludes_previously_abandoned_learner():
 
 
 @pytest.mark.timeout(180)
-def test_single_learner_roundtrip_q4():
+def test_single_learner_roundtrip_q4(tmp_path):
     """Q4 session: INIT/BCAST in bf16 and pushes as 4-bit base-relative
     deltas. Stale handling never needs historical parameter reconstruction."""
     binary = build_syncer()
@@ -422,21 +440,21 @@ def test_single_learner_roundtrip_q4():
     named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
     layout = build_layout(named, 3)
     proc = subprocess.Popen(
-        [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
+        [str(binary), *local_security_args(tmp_path, "q4"), "--port", str(port), "--learners", "1", "--quorum", "1",
          "--grace-ms", "50", "--total-steps", "9"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     try:
         target = torch.ones(DIM + DIM // 4)
-        l = ToyLearner(0, port, target, layout, dtype=DTYPE_Q4)
-        l.start()
-        l.join(timeout=120)
-        assert not l.is_alive()
-        if l.exc:
-            raise l.exc
+        learner = ToyLearner(0, port, target, layout, dtype=DTYPE_Q4)
+        learner.start()
+        learner.join(timeout=120)
+        assert not learner.is_alive()
+        if learner.exc:
+            raise learner.exc
         assert proc.wait(timeout=30) == 0
-        assert l.synced, "learner never received a broadcast"
-        flat = torch.cat([p.detach().reshape(-1) for p in l.params.values()])
+        assert learner.synced, "learner never received a broadcast"
+        flat = torch.cat([p.detach().reshape(-1) for p in learner.params.values()])
         assert (flat - target).norm() < target.norm(), "no progress toward target"
     finally:
         if proc.poll() is None:
@@ -446,7 +464,7 @@ def test_single_learner_roundtrip_q4():
 
 
 @pytest.mark.timeout(180)
-def test_min_round_interval_paces_rounds():
+def test_min_round_interval_paces_rounds(tmp_path):
     """--min-round-interval-ms throttles round launches: 6 rounds with a
     250 ms floor cannot finish faster than the 5 enforced gaps (lower-bound
     assert, so slow machines cannot make it flaky)."""
@@ -455,18 +473,18 @@ def test_min_round_interval_paces_rounds():
     named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
     layout = build_layout(named, 3)
     proc = subprocess.Popen(
-        [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
+        [str(binary), *local_security_args(tmp_path, "pacing"), "--port", str(port), "--learners", "1", "--quorum", "1",
          "--grace-ms", "50", "--total-steps", "6", "--min-round-interval-ms", "250"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     try:
         t0 = time.monotonic()
-        l = ToyLearner(0, port, torch.ones(DIM + DIM // 4), layout)
-        l.start()
-        l.join(timeout=120)
-        assert not l.is_alive()
-        if l.exc:
-            raise l.exc
+        learner = ToyLearner(0, port, torch.ones(DIM + DIM // 4), layout)
+        learner.start()
+        learner.join(timeout=120)
+        assert not learner.is_alive()
+        if learner.exc:
+            raise learner.exc
         assert proc.wait(timeout=30) == 0
         elapsed = time.monotonic() - t0
         assert elapsed >= 1.0, f"rounds not paced: finished in {elapsed:.2f}s"
@@ -477,7 +495,7 @@ def test_min_round_interval_paces_rounds():
 
 
 @pytest.mark.timeout(180)
-def test_single_learner_roundtrip_iso():
+def test_single_learner_roundtrip_iso(tmp_path):
     """Iso-C aggregation end to end: the learner HELLO carries (rows, cols)
     per tensor for the iso fragments and the Rust syncer merges through the
     spectrum-flattening path (matrix_merge="iso", arXiv 2607.03011)."""
@@ -495,21 +513,21 @@ def test_single_learner_roundtrip_iso():
     )
     assert any(f.shapes for f in layout.fragments), "iso fragment missing shapes"
     proc = subprocess.Popen(
-        [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
+        [str(binary), *local_security_args(tmp_path, "iso"), "--port", str(port), "--learners", "1", "--quorum", "1",
          "--grace-ms", "50", "--total-steps", "9"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     try:
         target = torch.ones(DIM + DIM // 4)
-        l = ToyLearner(0, port, target, layout)
-        l.start()
-        l.join(timeout=120)
-        assert not l.is_alive()
-        if l.exc:
-            raise l.exc
+        learner = ToyLearner(0, port, target, layout)
+        learner.start()
+        learner.join(timeout=120)
+        assert not learner.is_alive()
+        if learner.exc:
+            raise learner.exc
         assert proc.wait(timeout=30) == 0
-        assert l.synced, "learner never received a broadcast"
-        flat = torch.cat([p.detach().reshape(-1) for p in l.params.values()])
+        assert learner.synced, "learner never received a broadcast"
+        flat = torch.cat([p.detach().reshape(-1) for p in learner.params.values()])
         assert (flat - target).norm() < target.norm(), "no progress toward target"
     finally:
         if proc.poll() is None:
@@ -518,7 +536,7 @@ def test_single_learner_roundtrip_iso():
 
 
 @pytest.mark.timeout(180)
-def test_single_learner_roundtrip():
+def test_single_learner_roundtrip(tmp_path):
     """M=1, K=1: a single self-syncing learner; must run to completion.
     Runs with --pipeline 1 so the serial-round path stays covered (the
     other tests exercise the default pipelined scheduler)."""
@@ -527,21 +545,21 @@ def test_single_learner_roundtrip():
     named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
     layout = build_layout(named, 3)
     proc = subprocess.Popen(
-        [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
+        [str(binary), *local_security_args(tmp_path, "single"), "--port", str(port), "--learners", "1", "--quorum", "1",
          "--grace-ms", "50", "--total-steps", "9", "--pipeline", "1"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     try:
         target = torch.ones(DIM + DIM // 4)
-        l = ToyLearner(0, port, target, layout)
-        l.start()
-        l.join(timeout=120)
-        assert not l.is_alive()
-        if l.exc:
-            raise l.exc
+        learner = ToyLearner(0, port, target, layout)
+        learner.start()
+        learner.join(timeout=120)
+        assert not learner.is_alive()
+        if learner.exc:
+            raise learner.exc
         assert proc.wait(timeout=30) == 0
         # Single learner: global params must track the learner toward target.
-        flat = torch.cat([p.detach().reshape(-1) for p in l.params.values()])
+        flat = torch.cat([p.detach().reshape(-1) for p in learner.params.values()])
         assert (flat - target).norm() < target.norm(), "no progress toward target"
     finally:
         if proc.poll() is None:

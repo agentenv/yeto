@@ -28,6 +28,8 @@ import time
 import numpy as np
 import torch
 
+from ..protocol import add_syncer_security_arguments
+
 log = logging.getLogger("mlx-learner")
 
 
@@ -37,6 +39,7 @@ def parse_args(argv=None):
     p.add_argument("--data", required=True)
     p.add_argument("--syncer", required=True, help="host:port or 'none' (local-only run)")
     p.add_argument("--learner-id", type=int, default=0)
+    add_syncer_security_arguments(p)
     p.add_argument("--num-learners", type=int, default=1)
     p.add_argument("--loss-function", default="cross_entropy")
     p.add_argument("--train-on", choices=["assistant", "all"], default="assistant")
@@ -266,7 +269,14 @@ def main(argv=None) -> None:
     mx.eval(model.parameters())
 
     from ..fragments import build_layout
-    from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
+    from ..protocol import (
+        DTYPE_BF16,
+        DTYPE_F32,
+        DTYPE_Q4,
+        SyncerClient,
+        bulk_dtype,
+        syncer_security_from_args,
+    )
     from ..tensor_io import (
         fragment_flat,
         pack_fragment,
@@ -293,8 +303,16 @@ def main(argv=None) -> None:
     client = None
     if args.syncer != "none":
         host, port = args.syncer.rsplit(":", 1)
+        run_id, tls, allow_insecure_loopback = syncer_security_from_args(args)
         client = SyncerClient(
-            (host, int(port)), args.learner_id, layout, wire_dtype, args.wan_streams
+            (host, int(port)),
+            args.learner_id,
+            layout,
+            wire_dtype,
+            args.wan_streams,
+            run_id=run_id,
+            tls=tls,
+            allow_insecure_loopback=allow_insecure_loopback,
         )
         client.start()
         log.info("connected to syncer at %s", args.syncer)
@@ -364,7 +382,7 @@ def run_inner_loop(
     t_last = time.monotonic()
     while not shutdown and steps_total < args.max_local_steps:
         grads_acc = None
-        loss_val = trained_val = 0.0
+        loss_val = 0.0
         for _ in range(args.grad_accum):
             ids_t, w_t = next(batches)
             ids = mx.array(ids_t.numpy().astype(np.int32))
@@ -374,7 +392,7 @@ def run_inner_loop(
                 grads if grads_acc is None else tree_map(lambda a, b: a + b, grads_acc, grads)
             )
             mx.eval(grads_acc, loss)
-            loss_val, trained_val = loss.item(), trained.item()
+            loss_val = loss.item()
         if args.grad_accum > 1:
             grads_acc = tree_map(lambda g: g / args.grad_accum, grads_acc)
         grads_acc, _ = optim.clip_grad_norm(grads_acc, 1.0)

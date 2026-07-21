@@ -1,9 +1,17 @@
-# Learner ↔ Syncer wire protocol (v4)
+# Learner ↔ Syncer wire protocol (v5)
 
 Transport is a connection group of `1 + S` persistent TCP sockets per
 learner: stream 0 carries control traffic and streams 1..S carry striped bulk
 traffic. All integers are little-endian. Tensors are contiguous bytes in the
 session dtype and fragments concatenate tensors in HELLO layout order.
+
+Every production socket is protected independently by TLS 1.3 with mutual
+certificate authentication. The launcher creates a durable per-run CA, a
+server certificate with an exact DNS/IP SAN, and a distinct client certificate
+for every learner ID. The syncer additionally pins each learner ID to the
+SHA-256 fingerprint of its leaf certificate. Plaintext exists only as an
+explicit `--allow-insecure-loopback` development profile and is rejected for
+non-loopback listeners or destinations.
 
 The syncer owns global step `t` and drives a pull-based, per-fragment schedule;
 learners continue local optimization while network work proceeds.
@@ -32,14 +40,14 @@ or allocation overflows are errors rather than panics.
 
 | type | name | direction | payload |
 |---:|---|---|---|
-| 1 | HELLO | learner → syncer | protocol_version:u16 (=4), learner_id:u32, connection_generation:u64, dtype:u8 (1=f32, 2=bf16, 3=q4), num_fragments:u32, per-fragment layout, layout_fingerprint:[u8;32], num_streams:u16 |
+| 1 | HELLO | learner → syncer | protocol_version:u16 (=5), learner_id:u32, connection_generation:u64, run_id:[u8;32], dtype:u8 (1=f32, 2=bf16, 3=q4), num_fragments:u32, per-fragment layout, layout_fingerprint:[u8;32], num_streams:u16 |
 | 2 | INIT_PARAMS | learner → syncer | fragment_id:u32, full tensor bytes; only learner 0 may initialize |
 | 3 | PULL_REQ | syncer → learner | fragment_id:u32, global_step:u64, round_attempt:u32 |
 | 4 | PUSH_FRAGMENT | learner → syncer | learner_id:u32, fragment_id:u32, global_step:u64, round_attempt:u32, base_version:u64, local_step:u64, c_steps:u32, c_tokens:u64, base-relative learner-delta bytes |
 | 5 | BCAST_FRAGMENT | syncer → learner | fragment_id:u32, version:u64, full global tensor bytes |
 | 6 | HEARTBEAT | learner → syncer | learner_id:u32, local_step:u64 |
 | 7 | SHUTDOWN | syncer → learner | empty; sent only to a generation whose final ACK was accepted |
-| 8 | DATA_HELLO | learner → syncer | protocol_version:u16 (=4), learner_id:u32, connection_generation:u64, stream_idx:u16 |
+| 8 | DATA_HELLO | learner → syncer | protocol_version:u16 (=5), learner_id:u32, connection_generation:u64, run_id:[u8;32], stream_idx:u16 |
 | 9 | CHUNK | either | msg_id:u64, total_len:u64, offset:u64, bytes |
 | 10 | ERROR | syncer → learner | UTF-8 fatal protocol/session error |
 | 11 | FINAL_MANIFEST | syncer → learner | revision:u16 (=1), final_global_step:u64, num_fragments:u32, expected_version:u64 × num_fragments |
@@ -58,15 +66,50 @@ the same session.
 
 The version is checked before a connection can enter a session. A mismatch
 returns ERROR and closes the connection; an older payload is never guessed or
-silently decoded as v4. The first accepted HELLO fixes the session dtype and
+silently decoded as v5. The first accepted HELLO fixes the session dtype and
 layout and semantic fingerprint. Every later HELLO must match them exactly,
 and learner IDs must lie in the configured `0..M` launch set. The learner ID
 repeated inside PUSH and HEARTBEAT must match the connected group.
+
+## Transport identity and run identity
+
+The syncer has two mutually exclusive startup profiles:
+
+- Production: all of `--tls-cert`, `--tls-key`, `--tls-client-ca`, and
+  `--tls-client-fingerprints` are required. The listener may bind a public or
+  private interface. TLS is restricted to 1.3, the learner must validate the
+  server certificate chain and exact SAN, and the syncer must validate the
+  learner chain before reading a protocol frame.
+- Local development: `--allow-insecure-loopback` is required, no TLS option
+  may be present, and both the syncer bind and learner destination must be
+  loopback. Plaintext is never an implicit fallback.
+
+The fingerprint allowlist contains exactly one line per configured learner:
+
+```text
+learner_id sha256_hex_fingerprint
+```
+
+All learner IDs and fingerprints must be present and unique. After TLS
+authentication, every HELLO and DATA_HELLO claim is checked against that
+mapping. Consequently a valid certificate for learner 1 cannot claim learner
+0, attach a data stream to learner 0, or replace learner 0 during a later
+connection generation.
+
+Each run also owns a cryptographically random, durable 32-byte `run_id`. The
+syncer creates its `--run-id-file` with mode 0600 for a fresh run and requires
+the existing file for `--resume`; learners receive the same file through the
+launcher. HELLO and every DATA_HELLO must carry its exact bytes. This prevents
+a valid connection or data stream from a different run from entering the
+session even when network addresses, learner IDs, and layout happen to match.
+The run ID is not logged or placed on a command line.
 
 ## Striping
 
 HELLO declares `num_streams`; each additional socket attaches with a
 versioned DATA_HELLO carrying the same learner ID and connection generation.
+Every attached socket performs a fresh mutual-TLS handshake and must present
+the same allowlisted learner identity as its control stream.
 Small control frames, including FINAL_MANIFEST and FINAL_ACK, use stream 0.
 INIT, PUSH, BCAST, and FINAL_FRAGMENT are serialized as normal inner frames,
 sliced into 4 MiB chunks, and sent round-robin over data streams. With no data
@@ -122,8 +165,10 @@ set. `round_attempt` is echoed in PUSH, so a delayed response from a discarded
 attempt cannot enter its retry.
 
 Each client redial creates a fresh nonzero connection generation and repeats
-HELLO/DATA_HELLO. The syncer sends every initialized fragment at its current
-version to a valid new generation.
+HELLO/DATA_HELLO with the immutable run ID and learner certificate. A changed
+certificate cannot change or take over the logical learner identity. The
+syncer sends every initialized fragment at its current version to a valid new
+generation.
 
 ## Merge and broadcast
 
@@ -196,8 +241,26 @@ ACK for the exact manifest.
 
 The sequential coordinator mutates state only at serialized round completion,
 so a checkpoint at that cut is consistent while other pipelined rounds are
-still gathering. Snapshots contain global/per-fragment versions, f32 params,
-momentum, and the cumulative learner ledger.
+still gathering. Protocol-v5 checkpoints use this exact prefix and body:
+
+```text
+magic:u32 (=0xD1705A7F)
+run_id:[u8;32]
+global_step:u64
+num_fragments:u32
+for each fragment:
+  version:u64 | numel:u64 | params:f32[numel] | momentum:f32[numel]
+num_ledger_entries:u32
+for each entry:
+  learner_id:u32 | merges:u64 | steps:u64 | tokens:u64
+```
+
+Resume validates the checkpoint run ID before restoring state, requires the
+fragment count and numel to match the authenticated HELLO layout, and rejects
+trailing bytes. This prevents an old checkpoint from being silently restored
+into a new run. The export tool can still read the legacy checkpoint magic for
+offline artifact recovery, but the v5 syncer resumes only the run-bound
+format.
 
 Periodic checkpoints remain controlled by `--checkpoint-every`, but the
 coordinator always rewrites `--checkpoint-path` at the final quiescent cut

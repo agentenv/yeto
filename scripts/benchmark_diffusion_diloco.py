@@ -25,6 +25,7 @@ import argparse
 import json
 import math
 import os
+import secrets
 import shutil
 import signal
 import socket
@@ -289,6 +290,9 @@ def learner_command(
         cmd += ["--fps", str(args.fps)]
     if arm is not None:
         cmd += [
+            "--allow-insecure-loopback",
+            "--sync-run-id-file",
+            str(output_dir.parent / "run-id.bin"),
             "--fragments",
             str(arm.fragments),
             "--fragment-pattern",
@@ -310,6 +314,9 @@ def syncer_command(
 ) -> list[str]:
     return [
         str(SYNCER_BIN),
+        "--allow-insecure-loopback",
+        "--run-id-file",
+        str(arm_dir / "run-id.bin"),
         "--port",
         str(port),
         "--learners",
@@ -947,6 +954,9 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
     if run_dir.exists():
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
+    run_id_file = run_dir / "run-id.bin"
+    run_id_file.write_bytes(secrets.token_bytes(32))
+    run_id_file.chmod(0o600)
     total_ranks = arm.learners * args.learner_gpus
     grad_accum = effective_grad_accum(args.micro_batch_size, args.grad_accum)
     steps = steps_for_samples(

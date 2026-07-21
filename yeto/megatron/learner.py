@@ -24,6 +24,8 @@ import argparse
 import logging
 import os
 
+from ..protocol import add_syncer_security_arguments
+
 log = logging.getLogger("megatron-learner")
 
 # Megatron-parallel module names LoRA-A/B attach to. Fused attention
@@ -50,6 +52,7 @@ def parse_args(argv=None):
     p.add_argument("--data", required=True)
     p.add_argument("--syncer", default="none", help="host:port or 'none'")
     p.add_argument("--learner-id", type=int, default=0)
+    add_syncer_security_arguments(p)
     p.add_argument("--num-learners", type=int, default=1)
     p.add_argument("--loss-function", default="cross_entropy")
     p.add_argument("--train-on", choices=["assistant", "all"], default="assistant")
@@ -171,7 +174,14 @@ def main(argv=None):
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 
     from ..fragments import build_layout
-    from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
+    from ..protocol import (
+        DTYPE_BF16,
+        DTYPE_F32,
+        DTYPE_Q4,
+        SyncerClient,
+        bulk_dtype,
+        syncer_security_from_args,
+    )
     from ..tensor_io import (
         apply_fragment,
         fragment_flat,
@@ -222,7 +232,17 @@ def main(argv=None):
     client = None
     if rank == 0 and args.syncer != "none":
         host, port = args.syncer.rsplit(":", 1)
-        client = SyncerClient((host, int(port)), args.learner_id, layout, wire_dtype, args.wan_streams)
+        run_id, tls, allow_insecure_loopback = syncer_security_from_args(args)
+        client = SyncerClient(
+            (host, int(port)),
+            args.learner_id,
+            layout,
+            wire_dtype,
+            args.wan_streams,
+            run_id=run_id,
+            tls=tls,
+            allow_insecure_loopback=allow_insecure_loopback,
+        )
         client.start()
         log.info("connected to syncer at %s", args.syncer)
         if args.learner_id == 0:

@@ -36,6 +36,7 @@ from yeto.protocol import (
 )
 
 LEARNER_ID = 7
+RUN_ID = bytes(range(32))
 
 
 def make_layout() -> FragmentLayout:
@@ -62,19 +63,21 @@ def accept_group(listener: socket.socket, num_streams: int):
             hello = payload
         else:
             assert msg_type == MSG_DATA_HELLO
-            data_hellos.append(struct.unpack("<HIQH", payload))
+            data_hellos.append(struct.unpack("<HIQ32sH", payload))
         socks.append(s)
     assert hello is not None, "group arrived without a HELLO"
-    version, learner_id, generation, _dtype, _fragments = struct.unpack_from(
-        "<HIQBI", hello
+    version, learner_id, generation, run_id, _dtype, _fragments = struct.unpack_from(
+        "<HIQ32sBI", hello
     )
     assert (version, learner_id) == (PROTOCOL_VERSION, LEARNER_ID)
+    assert run_id == RUN_ID
     assert generation != 0
     assert all(
         (data_version, data_id, data_generation)
         == (PROTOCOL_VERSION, LEARNER_ID, generation)
-        for data_version, data_id, data_generation, _index in data_hellos
+        for data_version, data_id, data_generation, data_run_id, _index in data_hellos
     )
+    assert all(item[3] == RUN_ID for item in data_hellos)
     return hello, generation, socks
 
 
@@ -146,7 +149,13 @@ def push_args(tensor_bytes: bytes, global_step: int = 5):
 def test_broadcast_versions_are_monotonic_per_fragment():
     layout = make_layout()
     client = SyncerClient(
-        ("127.0.0.1", 1), LEARNER_ID, layout, dtype=DTYPE_F32, num_streams=0
+        ("127.0.0.1", 1),
+        LEARNER_ID,
+        layout,
+        dtype=DTYPE_F32,
+        num_streams=0,
+        run_id=RUN_ID,
+        allow_insecure_loopback=True,
     )
     client._gen = 1
     newer_data = struct.pack("<4f", 2.0, 2.0, 2.0, 2.0)
@@ -172,7 +181,13 @@ def test_broadcast_versions_are_monotonic_per_fragment():
 def test_concurrent_broadcasts_enqueue_in_version_order():
     layout = make_layout()
     client = SyncerClient(
-        ("127.0.0.1", 1), LEARNER_ID, layout, dtype=DTYPE_F32, num_streams=0
+        ("127.0.0.1", 1),
+        LEARNER_ID,
+        layout,
+        dtype=DTYPE_F32,
+        num_streams=0,
+        run_id=RUN_ID,
+        allow_insecure_loopback=True,
     )
     client._gen = 1
 
@@ -219,7 +234,13 @@ def test_concurrent_broadcasts_enqueue_in_version_order():
 def test_client_rejects_huge_broadcast_header_before_reading_payload():
     layout = make_layout()
     client = SyncerClient(
-        ("127.0.0.1", 1), LEARNER_ID, layout, dtype=DTYPE_F32, num_streams=0
+        ("127.0.0.1", 1),
+        LEARNER_ID,
+        layout,
+        dtype=DTYPE_F32,
+        num_streams=0,
+        run_id=RUN_ID,
+        allow_insecure_loopback=True,
     )
     reader, writer = socket.socketpair()
     try:
@@ -245,6 +266,8 @@ def test_server_error_becomes_clear_fatal_protocol_error():
         dtype=DTYPE_F32,
         num_streams=0,
         connect_timeout=5,
+        run_id=RUN_ID,
+        allow_insecure_loopback=True,
     )
 
     def reject():
@@ -284,13 +307,20 @@ def test_reconnect_after_drop_round_trip():
     port = listener.getsockname()[1]
     layout = make_layout()
     client = SyncerClient(
-        ("127.0.0.1", port), LEARNER_ID, layout, dtype=DTYPE_F32, num_streams=2, connect_timeout=10
+        ("127.0.0.1", port),
+        LEARNER_ID,
+        layout,
+        dtype=DTYPE_F32,
+        num_streams=2,
+        connect_timeout=10,
+        run_id=RUN_ID,
+        allow_insecure_loopback=True,
     )
     try:
         client.start()
         hello1, generation1, group1 = accept_group(listener, 2)
         assert hello1 == encode_hello(
-            LEARNER_ID, DTYPE_F32, layout, 2, generation1
+            LEARNER_ID, DTYPE_F32, layout, 2, generation1, RUN_ID
         )
 
         # Abrupt syncer death: every socket of the group drops at once.
@@ -310,7 +340,7 @@ def test_reconnect_after_drop_round_trip():
         # The client must redial the whole group and re-HELLO on its own.
         hello2, generation2, group2 = accept_group(listener, 2)
         assert hello2 == encode_hello(
-            LEARNER_ID, DTYPE_F32, layout, 2, generation2
+            LEARNER_ID, DTYPE_F32, layout, 2, generation2, RUN_ID
         )
         assert generation2 != generation1
 
@@ -358,6 +388,8 @@ def test_max_reconnects_exhausted_fails_health_check():
         num_streams=1,
         connect_timeout=10,
         max_reconnects=0,
+        run_id=RUN_ID,
+        allow_insecure_loopback=True,
     )
     try:
         client.start()

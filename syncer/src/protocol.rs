@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use tokio::io::AsyncReadExt;
 
 pub const MAGIC: u32 = 0xD170_C0DE;
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 pub const MSG_HELLO: u8 = 1;
 pub const MSG_INIT_PARAMS: u8 = 2;
@@ -31,7 +31,7 @@ pub const DTYPE_F32: u8 = 1;
 pub const DTYPE_BF16: u8 = 2;
 /// Session dtype 3: PUSH_FRAGMENT payloads are block-quantized 4-bit E3M0
 /// base-relative learner deltas; INIT_PARAMS and BCAST_FRAGMENT travel as
-/// bf16 (see `bulk_dtype`, docs/PROTOCOL.md v4).
+/// bf16 (see `bulk_dtype`, docs/PROTOCOL.md v5).
 pub const DTYPE_Q4: u8 = 3;
 
 /// Values per q4 scale block (f32 absmax scale + 128 nibble bytes each).

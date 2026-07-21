@@ -38,6 +38,17 @@ def _layout(count=2):
     return build_layout([(f"model.layer.{i}.weight", 4) for i in range(count)], count)
 
 
+def _client(layout, dtype):
+    return SyncerClient(
+        ("unused", 0),
+        0,
+        layout,
+        dtype=dtype,
+        run_id=bytes(range(32)),
+        allow_insecure_loopback=True,
+    )
+
+
 def _bcast_payload(fid: int, version: int, values: list[float]) -> bytes:
     return struct.pack("<IQ", fid, version) + struct.pack(f"<{len(values)}f", *values)
 
@@ -69,7 +80,7 @@ def test_final_manifest_golden_shape_and_revision_validation():
 
 
 def test_manifest_and_data_stream_reordering_preserves_lossless_final_fragments():
-    client = SyncerClient(("unused", 0), 0, _layout(), dtype=DTYPE_F32)
+    client = _client(_layout(), DTYPE_F32)
     client._gen = 4
 
     # An ordinary broadcast at the final version cannot satisfy terminal
@@ -89,7 +100,7 @@ def test_manifest_and_data_stream_reordering_preserves_lossless_final_fragments(
 
 @pytest.mark.parametrize("dtype", [DTYPE_BF16, DTYPE_Q4])
 def test_lossless_final_cache_is_independent_monotonic_and_f32_bounded(dtype):
-    client = SyncerClient(("unused", 0), 0, _layout(1), dtype=dtype)
+    client = _client(_layout(1), dtype)
     client._gen = 1
     normal = struct.pack("<4e", *([1.0] * 4))
     final = struct.pack("<4f", *([1.0001] * 4))
@@ -121,7 +132,7 @@ def test_lossless_final_cache_is_independent_monotonic_and_f32_bounded(dtype):
 
 
 def test_missing_manifest_version_fails_with_bounded_diagnostic():
-    client = SyncerClient(("unused", 0), 0, _layout(), dtype=DTYPE_F32)
+    client = _client(_layout(), DTYPE_F32)
     client._gen = 1
     client._dispatch(1, MSG_FINAL_MANIFEST, encode_final_manifest(9, [8, 9]))
     client._dispatch(1, MSG_FINAL_FRAGMENT, _bcast_payload(0, 8, [1.0] * 4))
@@ -130,7 +141,7 @@ def test_missing_manifest_version_fails_with_bounded_diagnostic():
 
 
 def test_final_fragment_requires_exact_f32_payload_size():
-    client = SyncerClient(("unused", 0), 0, _layout(1), dtype=DTYPE_F32)
+    client = _client(_layout(1), DTYPE_F32)
     client._gen = 1
     client._dispatch(1, MSG_FINAL_FRAGMENT, _bcast_payload(0, 4, [1.0, 2.0]))
     with pytest.raises(RuntimeError, match="expected 16 f32 bytes"):
@@ -138,7 +149,7 @@ def test_final_fragment_requires_exact_f32_payload_size():
 
 
 def test_stale_generation_final_messages_are_ignored_and_legacy_shutdown_fails():
-    client = SyncerClient(("unused", 0), 0, _layout(1), dtype=DTYPE_F32)
+    client = _client(_layout(1), DTYPE_F32)
     client._gen = 3
     client._dispatch(2, MSG_FINAL_FRAGMENT, _bcast_payload(0, 7, [3.0] * 4))
     client._dispatch(2, MSG_FINAL_MANIFEST, encode_final_manifest(7, [7]))
@@ -156,7 +167,7 @@ def test_stale_generation_final_messages_are_ignored_and_legacy_shutdown_fails()
 
 def test_final_ack_waits_until_sender_thread_has_written_bytes():
     client_sock, server_sock = socket.socketpair()
-    client = SyncerClient(("unused", 0), 0, _layout(1), dtype=DTYPE_F32)
+    client = _client(_layout(1), DTYPE_F32)
     client._gen = 1
     client._connected.set()
     client._queues = [queue.Queue()]

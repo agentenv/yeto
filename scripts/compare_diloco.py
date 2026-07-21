@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -266,6 +267,8 @@ def learner_command(
         cmd += ["--device", args.device]
     if arm is not None:
         cmd += [
+            "--allow-insecure-loopback",
+            "--sync-run-id-file", str(arm_dir / "run-id.bin"),
             "--fragments", str(arm.fragments),
             "--fragment-pattern", arm.fragment_pattern,
             "--matrix-merge", arm.matrix_merge,
@@ -286,6 +289,8 @@ def syncer_command(
     # The syncer takes no fragment count: the layout arrives in HELLO.
     return [
         str(SYNCER_BIN),
+        "--allow-insecure-loopback",
+        "--run-id-file", str(arm_dir / "run-id.bin"),
         "--port", str(port),
         "--learners", str(arm.learners),
         "--quorum", str(arm.quorum or arm.learners),
@@ -896,6 +901,9 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
     if run_dir.exists():
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
+    run_id_file = run_dir / "run-id.bin"
+    run_id_file.write_bytes(secrets.token_bytes(32))
+    run_id_file.chmod(0o600)
     total_ranks = arm.learners * args.learner_gpus
     steps = steps_for(
         args.token_budget,

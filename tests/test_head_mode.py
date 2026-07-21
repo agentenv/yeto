@@ -22,6 +22,7 @@ from yeto.launcher import FleetController, LocalSyncer
 @pytest.fixture(autouse=True)
 def tmp_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
 
 LAUNCH_ARGS = [
@@ -188,6 +189,9 @@ def test_launch_head_records_registry(fake_sky, monkeypatch, capsys):
     (cluster, head_task), = fake_sky["launches"]
     assert cluster == "h1-head"
     assert "~/yeto-syncer" not in head_task.file_mounts
+    assert any(path.endswith("/manifest.json") for path in head_task.file_mounts)
+    assert not any(path.endswith("/ca.key") for path in head_task.file_mounts)
+    assert "chmod 700" in head_task.setup and "chmod 600" in head_task.setup
     assert head_task.resources.kwargs["use_spot"] is False
     assert head_task.resources.kwargs["infra"] == "aws/us-west-2"
     assert 'pip install -q "skypilot[aws,gcp]>=0.12"' in head_task.setup
@@ -201,6 +205,61 @@ def test_launch_head_records_registry(fake_sky, monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "yeto down h1" in out
+
+
+def test_head_stages_external_identity_without_ca_private_key(
+    fake_sky,
+    tmp_path,
+):
+    rc = cli.main(
+        [
+            "launch",
+            *LAUNCH_ARGS,
+            "--cluster-prefix",
+            "external-secure",
+            "--external-learners",
+            "1",
+        ]
+    )
+    assert rc == 0
+
+    meta = runs.load_run("external-secure")
+    assert meta["args"]["sync_security_dir"].startswith("~/.yeto/security/")
+    assert meta["args"]["external_security_dir"].startswith(str(tmp_path))
+    (_, head_task), = fake_sky["launches"]
+    sources = set(head_task.file_mounts.values())
+    destinations = set(head_task.file_mounts)
+    assert any(path.endswith("/learner-2.key") for path in destinations)
+    assert not any(path.endswith("/ca.key") for path in destinations | sources)
+
+
+def test_syncer_and_learner_mount_only_their_required_credentials(
+    fake_sky,
+    monkeypatch,
+    tmp_path,
+):
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args = cli.parse_args(
+        LAUNCH_ARGS
+        + ["--cluster-prefix", "mount-scope", "--sync-security-dir", str(tmp_path / "security")]
+    )
+    syncer_mounts = launcher.syncer_security_mounts(args, 2)
+    assert not any(
+        path.endswith(("ca.key", "learner-0.key", "learner-1.key"))
+        for path in syncer_mounts.values()
+    )
+
+    monkeypatch.setattr(launcher, "learner_image_for", lambda *_args, **_kwargs: None)
+    spec = parse_gpu_spec(args.gpu)[1]
+    task = launcher.make_learner_task(args, spec, 1, 2, "203.0.113.7:29400")
+    mounted_sources = set(task.file_mounts.values())
+    assert str(args._run_security.learner_key(1)) in mounted_sources
+    assert str(args._run_security.learner_key(0)) not in mounted_sources
+    assert str(args._run_security.server_key) not in mounted_sources
+    assert str(args._run_security.root / "ca.key") not in mounted_sources
+    assert "BEGIN PRIVATE KEY" not in task.run
+    assert launcher.REMOTE_SECURITY_SETUP in task.setup
 
 
 def test_launch_head_mounts_aws_credentials_when_present(
@@ -417,6 +476,7 @@ def test_local_syncer_probe_and_restart(tmp_path):
     binary = tmp_path / "yeto-syncer"
     binary.write_text("#!/bin/sh\necho syncer up\nsleep 30\n")
     args = cli.parse_args(LAUNCH_ARGS)
+    args.sync_security_dir = str(tmp_path / "security")
     syncer = LocalSyncer(
         args, 2, binary=str(binary), log_file=str(tmp_path / "syncer.log")
     )
@@ -440,8 +500,9 @@ def test_local_syncer_probe_and_restart(tmp_path):
     assert syncer.probe() is not None  # stopped
 
 
-def test_local_syncer_command_matches_cluster_syncer_flags():
+def test_local_syncer_command_matches_cluster_syncer_flags(tmp_path):
     args = cli.parse_args(LAUNCH_ARGS + ["--quorum", "2", "--total-steps", "17"])
+    args.sync_security_dir = str(tmp_path / "security")
     cmd = launcher.syncer_command(args, 3)
     assert "--learners 3" in cmd
     assert "--quorum 2" in cmd

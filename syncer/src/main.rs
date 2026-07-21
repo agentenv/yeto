@@ -1,5 +1,6 @@
 mod merge;
 mod protocol;
+mod security;
 mod server;
 mod state;
 
@@ -10,6 +11,10 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(version)]
 struct Args {
+    /// IP address to listen on. The default is loopback; a non-loopback
+    /// listener is rejected unless complete mutual-TLS configuration is set.
+    #[arg(long, default_value = "127.0.0.1")]
+    bind_address: std::net::IpAddr,
     /// TCP port to listen on.
     #[arg(long, default_value_t = 29400)]
     port: u16,
@@ -72,6 +77,26 @@ struct Args {
     /// Resume from --checkpoint-path if it exists.
     #[arg(long, default_value_t = false)]
     resume: bool,
+    /// Durable 32-byte run-identity file. A fresh run creates it with mode
+    /// 0600; --resume requires the same file and checkpoint identity.
+    #[arg(long)]
+    run_id_file: std::path::PathBuf,
+    /// Explicit plaintext local-development profile. Valid only on a
+    /// loopback bind and mutually exclusive with every TLS option.
+    #[arg(long, default_value_t = false)]
+    allow_insecure_loopback: bool,
+    /// PEM server certificate for TLS 1.3.
+    #[arg(long)]
+    tls_cert: Option<std::path::PathBuf>,
+    /// PEM private key matching --tls-cert.
+    #[arg(long)]
+    tls_key: Option<std::path::PathBuf>,
+    /// PEM CA bundle used to authenticate learner client certificates.
+    #[arg(long)]
+    tls_client_ca: Option<std::path::PathBuf>,
+    /// Text allowlist: one `learner_id sha256_fingerprint` per line.
+    #[arg(long)]
+    tls_client_fingerprints: Option<std::path::PathBuf>,
     /// JSONL event tape (one record per merge).
     #[arg(long)]
     event_tape: Option<std::path::PathBuf>,
@@ -80,8 +105,7 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let args = Args::parse();
@@ -90,7 +114,18 @@ fn main() -> anyhow::Result<()> {
         "none" => false,
         other => anyhow::bail!("--delta-correction must be 'heloco' or 'none', got {other:?}"),
     };
+    let transport = security::configure_transport(
+        args.bind_address,
+        args.allow_insecure_loopback,
+        args.tls_cert,
+        args.tls_key,
+        args.tls_client_ca,
+        args.tls_client_fingerprints,
+        args.learners,
+    )?;
+    let run_id = security::load_or_create_run_id(&args.run_id_file, args.resume)?;
     let cfg = server::Config {
+        bind_address: args.bind_address,
         port: args.port,
         learners: args.learners,
         quorum: args.quorum,
@@ -109,6 +144,8 @@ fn main() -> anyhow::Result<()> {
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,
         resume: args.resume,
+        run_id,
+        transport,
         event_tape: args.event_tape,
     };
     tokio::runtime::Builder::new_multi_thread()
