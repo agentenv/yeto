@@ -34,6 +34,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from yeto.causal_kernels import (  # noqa: E402
     FUSED_LINEAR_CE_IMPLEMENTATION,
     KernelIsolationError,
+    LIGER_QWEN2_SOURCE_SHA256,
     NATIVE_LAYER_BACKEND,
     NATIVE_LOSS_IMPLEMENTATION,
     PEFT_VERSION,
@@ -282,9 +283,9 @@ def load_raw_model(
     )
     kernel_application = None
     if variant.loss_backend == "liger":
-        # Keep this before PEFT: the application helper accepts only the
-        # native Qwen2 class and proves that only this instance's forward is
-        # rebound. Decoder-layer implementations stay identical to reference.
+        # Keep this before PEFT: the direct-binding helper accepts only the
+        # native Qwen2 class and binds only this instance's forward.
+        # Decoder-layer implementations stay identical to reference.
         kernel_application = apply_liger_fused_linear_ce(model)
     resolved_targets = None
     output_head_report = None
@@ -1743,6 +1744,7 @@ def main(argv=None) -> int:
                 "tuning": "lora",
                 "shard": "ddp",
                 "peft_version": PEFT_VERSION,
+                "forward_source_sha256": LIGER_QWEN2_SOURCE_SHA256,
                 "distributed_policy": (
                     "replicated-frozen-base-manual-adapter-gradient-mean"
                 ),

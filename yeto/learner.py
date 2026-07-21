@@ -357,9 +357,9 @@ def load_model_and_tokenizer(args, device):
     kernel_application = None
     if kernel_backend == "liger":
         try:
-            # This must precede get_peft_model: the strict application helper
-            # rejects wrappers and proves that only this base instance's
-            # forward changes. All transformer layers remain native.
+            # This must precede get_peft_model: the strict direct-binding
+            # helper accepts only the native base instance. All transformer
+            # layers remain native.
             kernel_application = apply_liger_fused_linear_ce(model)
         except KernelIsolationError:
             # Preserve the typed poisoned-process contract for callers. The
@@ -368,7 +368,7 @@ def load_model_and_tokenizer(args, device):
             raise
         except Exception as exc:
             raise RuntimeError(
-                f"failed to apply the isolated fused-linear-CE loss to {model_id!r}"
+                f"failed to bind the isolated fused-linear-CE loss to {model_id!r}"
             ) from exc
     resolved_attention = resolved_attention_backend(model, attention_backend)
     loss_implementation = (
@@ -386,7 +386,7 @@ def load_model_and_tokenizer(args, device):
         f" model_type={liger_model_type}" if liger_model_type else "",
     )
     if kernel_application is not None:
-        log.info("isolated fused-loss application: %s", kernel_application)
+        log.info("isolated fused-loss binding: %s", kernel_application)
     if args.tuning == "lora":
         from peft import LoraConfig, get_peft_model
 

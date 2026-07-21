@@ -48,7 +48,7 @@ def test_variant_plan_has_a_stable_reference_and_component_isolated_candidates()
         benchmark.select_variants("unknown")
 
 
-def test_fused_loss_variant_applies_instance_patch_before_peft(monkeypatch):
+def test_fused_loss_variant_binds_instance_forward_before_peft(monkeypatch):
     events = []
     config = SimpleNamespace(model_type="qwen2", use_cache=True)
 
@@ -89,14 +89,14 @@ def test_fused_loss_variant_applies_instance_patch_before_peft(monkeypatch):
     monkeypatch.setattr(
         benchmark,
         "apply_liger_fused_linear_ce",
-        lambda actual_model: events.append("apply") or application,
+        lambda actual_model: events.append("bind") or application,
     )
     monkeypatch.setattr(benchmark, "resolve_lora_targets", lambda *args: "all-linear")
     monkeypatch.setattr(peft, "LoraConfig", lambda **kwargs: kwargs)
 
     def fake_get_peft_model(actual_model, _config):
         assert actual_model is model
-        assert "apply" in events
+        assert "bind" in events
         events.append("peft")
         return actual_model
 
@@ -135,7 +135,7 @@ def test_fused_loss_variant_applies_instance_patch_before_peft(monkeypatch):
         "config",
         "support",
         "model",
-        "apply",
+        "bind",
         "peft",
         ("to", "cpu"),
         "attention",
@@ -155,7 +155,7 @@ def test_every_kernel_isolation_failure_is_a_fatal_benchmark_load_error():
     )
     signature_failure = benchmark.KernelIsolationError(
         "signature inspection failed after irreversible mutation",
-        failed_invariants=["post_apply_validation_completed"],
+        failed_invariants=["post_binding_validation_completed"],
         rollback_report={"complete": False},
     )
 
@@ -234,6 +234,9 @@ def test_failed_model_load_unconditionally_collects_instance_forward_cycle(
     assert report["supported_evidence_scope"]["fused-linear-ce-sdpa"][
         "peft_version"
     ] == benchmark.PEFT_VERSION
+    assert report["supported_evidence_scope"]["fused-linear-ce-sdpa"][
+        "forward_source_sha256"
+    ] == benchmark.LIGER_QWEN2_SOURCE_SHA256
 
 
 def test_percentile_interpolates_and_validates_input():

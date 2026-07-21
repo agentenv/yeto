@@ -14,10 +14,17 @@ import importlib.util
 import inspect
 from dataclasses import dataclass
 from importlib import metadata
+from pathlib import Path
+from types import MethodType
 
 import torch
 
-from .kernel_deps import FLASH_ATTN_VERSION, LIGER_KERNEL_VERSION, PEFT_VERSION
+from .kernel_deps import (
+    FLASH_ATTN_VERSION,
+    LIGER_KERNEL_VERSION,
+    LIGER_QWEN2_SOURCE_SHA256,
+    PEFT_VERSION,
+)
 
 ATTENTION_BACKENDS = ("auto", "sdpa", "flash-attn-2")
 KERNEL_BACKENDS = ("native", "liger")
@@ -25,15 +32,6 @@ KERNEL_BACKENDS = ("native", "liger")
 NATIVE_LAYER_BACKEND = "transformers-native"
 NATIVE_LOSS_IMPLEMENTATION = "torch-cross-entropy"
 FUSED_LINEAR_CE_IMPLEMENTATION = "liger-fused-linear-cross-entropy"
-
-_QWEN2_APPLY_CONTROLS = (
-    ("rope", True),
-    ("cross_entropy", False),
-    ("fused_linear_cross_entropy", True),
-    ("rms_norm", True),
-    ("swiglu", True),
-    ("model", None),
-)
 
 _HF_ATTENTION_NAMES = {
     "sdpa": "sdpa",
@@ -51,14 +49,14 @@ _STRUCTURAL_CONTAINER_TYPES = (dict, list, tuple, set, frozenset, bytearray)
 
 
 class KernelIsolationError(RuntimeError):
-    """A rejected third-party apply call and its verified rollback status.
+    """A rejected direct forward binding and its verified rollback status.
 
-    ``process_state_poisoned`` is true when the pre-apply model/process state
+    ``process_state_poisoned`` is true when the pre-binding model/process state
     could not be reproduced exactly without retaining a second copy of model
     tensors. Every instance of this exception is fatal for in-process
-    continuation because it is created only after third-party code has begun
-    executing. ``rollback_complete`` remains evidence about the observed state,
-    not permission to run another model or benchmark arm in the same process.
+    continuation because it is created only after the binding transaction has
+    begun. ``rollback_complete`` remains evidence about the observed state, not
+    permission to run another model or benchmark arm in the same process.
     """
 
     def __init__(
@@ -933,41 +931,99 @@ def validate_lora_production_envelope(model) -> dict:
     }
 
 
-def _qwen2_fused_linear_ce_apply_function():
-    """Return the pinned public Qwen2 apply function after an exact ABI check."""
+def _installed_qwen2_source_sha256(lce_forward) -> str:
+    source_file = inspect.getsourcefile(lce_forward)
+    if source_file is None:
+        raise RuntimeError(
+            "the pinned fused Qwen2 forward has no inspectable source file"
+        )
     try:
-        from liger_kernel.transformers import apply_liger_kernel_to_qwen2
-        from liger_kernel.transformers import functional as liger_functional
+        source = Path(source_file).read_bytes()
     except Exception as exc:
         raise RuntimeError(
-            "could not import Liger's public Qwen2 kernel apply function"
+            "could not read the installed fused Qwen2 source module"
+        ) from exc
+    return hashlib.sha256(source).hexdigest()
+
+
+def _qwen2_fused_linear_ce_forward_function():
+    """Return the fused Qwen2 forward after source and ABI verification."""
+    try:
+        from liger_kernel.transformers import functional as liger_functional
+        from liger_kernel.transformers.model.qwen2 import lce_forward
+    except Exception as exc:
+        raise RuntimeError(
+            "could not import Liger's hash-locked fused Qwen2 forward"
         ) from exc
 
-    signature = inspect.signature(apply_liger_kernel_to_qwen2)
-    parameters = tuple(signature.parameters.values())
-    expected_names = tuple(name for name, _default in _QWEN2_APPLY_CONTROLS)
-    if tuple(parameter.name for parameter in parameters) != expected_names:
-        raise RuntimeError(
-            f"Liger {LIGER_KERNEL_VERSION}'s Qwen2 apply function does not expose "
-            f"the exact controls {expected_names}; found {tuple(signature.parameters)}"
-        )
-    for parameter, (_name, expected_default) in zip(
-        parameters, _QWEN2_APPLY_CONTROLS, strict=True
-    ):
-        if parameter.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD:
-            raise RuntimeError(
-                f"Liger {LIGER_KERNEL_VERSION}'s Qwen2 control "
-                f"{parameter.name!r} has unsupported kind {parameter.kind}"
-            )
-        if parameter.default != expected_default:
-            raise RuntimeError(
-                f"Liger {LIGER_KERNEL_VERSION}'s Qwen2 control "
-                f"{parameter.name!r} has unexpected default {parameter.default!r}; "
-                f"expected {expected_default!r}"
-            )
-    fused_signature = inspect.signature(
-        liger_functional.liger_fused_linear_cross_entropy
+    forward_identity = (
+        getattr(lce_forward, "__module__", None),
+        getattr(lce_forward, "__name__", None),
+        getattr(lce_forward, "__qualname__", None),
     )
+    expected_identity = (
+        "liger_kernel.transformers.model.qwen2",
+        "lce_forward",
+        "lce_forward",
+    )
+    if forward_identity != expected_identity:
+        raise RuntimeError(
+            "the fused Qwen2 forward identity does not match the approved "
+            f"module/name/qualname {expected_identity}; found {forward_identity}"
+        )
+
+    actual_source_sha256 = _installed_qwen2_source_sha256(lce_forward)
+    if actual_source_sha256 != LIGER_QWEN2_SOURCE_SHA256:
+        raise RuntimeError(
+            f"Liger {LIGER_KERNEL_VERSION}'s Qwen2 source SHA-256 does not match "
+            f"the approved {LIGER_QWEN2_SOURCE_SHA256}; found "
+            f"{actual_source_sha256}"
+        )
+
+    try:
+        forward_signature = inspect.signature(lce_forward)
+        fused_signature = inspect.signature(
+            liger_functional.liger_fused_linear_cross_entropy
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "could not inspect the hash-locked fused Qwen2 loss contract"
+        ) from exc
+
+    parameters = forward_signature.parameters
+    first_parameter = next(iter(parameters.values()), None)
+    if (
+        first_parameter is None
+        or first_parameter.name != "self"
+        or first_parameter.kind
+        is not inspect.Parameter.POSITIONAL_OR_KEYWORD
+    ):
+        raise RuntimeError(
+            "the hash-locked fused Qwen2 forward has no ordinary self parameter"
+        )
+    for name in ("labels", "use_cache", "skip_logits"):
+        parameter = parameters.get(name)
+        if (
+            parameter is None
+            or parameter.kind
+            not in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+            or parameter.default is not None
+        ):
+            raise RuntimeError(
+                "the hash-locked fused Qwen2 forward does not expose the exact "
+                f"optional {name!r} keyword contract"
+            )
+    if not any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        raise RuntimeError(
+            "the hash-locked fused Qwen2 forward cannot pass loss keywords"
+        )
+
     accum_dtype = fused_signature.parameters.get("accum_dtype")
     if accum_dtype is None or accum_dtype.kind not in (
         inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -978,17 +1034,6 @@ def _qwen2_fused_linear_ce_apply_function():
             "explicitly support accum_dtype; refusing to let FP32 accumulation "
             "be silently filtered"
         )
-    return apply_liger_kernel_to_qwen2
-
-
-def _qwen2_fused_linear_ce_forward_function():
-    """Return the exact fused Qwen2 forward shipped by the pinned package."""
-    try:
-        from liger_kernel.transformers.model.qwen2 import lce_forward
-    except Exception as exc:
-        raise RuntimeError(
-            "could not import Liger's pinned fused-linear-CE Qwen2 forward"
-        ) from exc
     return lce_forward
 
 
@@ -1001,7 +1046,6 @@ def require_liger_model_support(config) -> str:
             "the isolated Liger fused-linear-CE lane supports only Hugging Face "
             f"Qwen2/Qwen2.5 (model_type='qwen2'); found {model_type!r}"
         )
-    _qwen2_fused_linear_ce_apply_function()
     _qwen2_fused_linear_ce_forward_function()
     return str(model_type)
 
@@ -1633,16 +1677,16 @@ def _raise_isolation_error(
     )
     if rollback_report["complete"]:
         suffix = (
-            "pre-apply process and model state was restored and verified, but "
-            "the post-apply failure is fatal and the process must terminate"
+            "pre-binding process and model state was restored and verified, but "
+            "the post-binding failure is fatal and the process must terminate"
         )
     else:
         suffix = (
-            "rollback could not reproduce the exact pre-apply state; the process "
+            "rollback could not reproduce the exact pre-binding state; the process "
             "is poisoned and must terminate"
         )
     error = KernelIsolationError(
-        "the isolated fused-linear-CE apply call violated its state contract "
+        "the isolated fused-linear-CE binding violated its state contract "
         f"({failed_invariants}); {suffix}",
         failed_invariants=failed_invariants,
         rollback_report=rollback_report,
@@ -1656,19 +1700,22 @@ def apply_liger_fused_linear_ce(model) -> dict:
     """Patch only one loaded Qwen2 model instance's loss-producing forward.
 
     Every layer kernel remains the Transformers implementation. Across the
-    explicitly attested surfaces, the only accepted state change is the exact
-    pinned fused ``forward`` bound to this model instance. Attestation covers
+    explicitly attested surfaces, the only intended state change is the
+    imported fused ``forward`` bound to this model instance after its source
+    module and ABI are verified. Attestation covers
     registered parameters, gradients, and buffers; concrete module instances
     and their exact classes; built-in containers; config-like objects; and
     custom Python objects with inspectable ``__dict__`` state. Opaque leaves
     are covered by binding identity. Tensor contents use bounded streaming
     SHA-256 chunks, not a retained duplicate of model weights.
 
-    A rejected call restores restorable Python bindings and module types, then
-    verifies the exact pre-apply fingerprints. If an in-place tensor/container
-    mutation cannot be reversed without a full model copy, the raised
-    ``KernelIsolationError`` marks the process poisoned and callers must exit.
+    A rejected binding restores restorable Python bindings and module types,
+    then verifies the exact pre-binding fingerprints. If an in-place
+    tensor/container mutation cannot be reversed without a full model copy,
+    the raised ``KernelIsolationError`` marks the process poisoned and callers
+    must exit.
     """
+    _require_exact_package("liger-kernel", "liger_kernel", LIGER_KERNEL_VERSION)
     model_type = require_liger_model_support(getattr(model, "config", None))
     try:
         from transformers.models.qwen2 import modeling_qwen2
@@ -1687,24 +1734,16 @@ def apply_liger_fused_linear_ce(model) -> dict:
             "instance with no pre-existing forward override"
         )
 
-    apply_fn = _qwen2_fused_linear_ce_apply_function()
     expected_fused_forward = _qwen2_fused_linear_ce_forward_function()
     process_before = _capture_process_state(modeling_qwen2, expected_class)
     model_before = _capture_model_state(model)
 
     try:
         try:
-            apply_fn(
-                rope=False,
-                cross_entropy=False,
-                fused_linear_cross_entropy=True,
-                rms_norm=False,
-                swiglu=False,
-                model=model,
-            )
+            model.forward = MethodType(expected_fused_forward, model)
         except Exception as exc:
             raise _IsolationViolation(
-                ["third_party_apply_completed"],
+                ["direct_forward_binding_completed"],
                 cause=exc,
             )
 
@@ -1724,7 +1763,7 @@ def apply_liger_fused_linear_ce(model) -> dict:
             patched_forward is not None
             and getattr(patched_forward, "__self__", None) is model
         )
-        forward_is_exact_fused_qwen2_forward = (
+        forward_binding_matches_imported_qwen2_function = (
             forward_is_instance_bound
             and getattr(patched_forward, "__func__", None)
             is expected_fused_forward
@@ -1743,8 +1782,8 @@ def apply_liger_fused_linear_ce(model) -> dict:
             )
 
         invariants["forward_is_instance_bound"] = forward_is_instance_bound
-        invariants["forward_is_exact_fused_qwen2_forward"] = (
-            forward_is_exact_fused_qwen2_forward
+        invariants["forward_binding_matches_imported_qwen2_function"] = (
+            forward_binding_matches_imported_qwen2_function
         )
         invariants["fused_forward_keyword_contract"] = (
             fused_forward_keyword_contract
@@ -1761,20 +1800,33 @@ def apply_liger_fused_linear_ce(model) -> dict:
             "loss_backend": "liger",
             "loss_implementation": FUSED_LINEAR_CE_IMPLEMENTATION,
             "patch_scope": "model-instance-forward-only",
-            "apply_function": (
-                "liger_kernel.transformers.apply_liger_kernel_to_qwen2"
-            ),
+            "binding_implementation": "types.MethodType",
             "forward_function": (
                 "liger_kernel.transformers.model.qwen2.lce_forward"
             ),
-            "apply_controls": {
-                "rope": False,
-                "cross_entropy": False,
-                "fused_linear_cross_entropy": True,
-                "rms_norm": False,
-                "swiglu": False,
+            "forward_identity": {
+                "module": expected_fused_forward.__module__,
+                "name": expected_fused_forward.__name__,
+                "qualname": expected_fused_forward.__qualname__,
             },
+            "forward_source_sha256": LIGER_QWEN2_SOURCE_SHA256,
             "invariants": invariants,
+            "trust_boundary": {
+                "supply_chain": (
+                    "exact-package-version-and-approved-qwen2-module-sha256"
+                ),
+                "attestation_purpose": "accidental-state-and-api-drift-detection",
+                "identity_semantics": "binding-drift-only-not-semantic-integrity",
+                "not_a_sandbox_for": [
+                    "malicious-or-compromised-python-dependencies",
+                    "import-time-code",
+                    "concurrent-mutation",
+                    "native-extensions",
+                    "function-code-tampering",
+                    "builtins",
+                    "arbitrary-inherited-framework-globals",
+                ],
+            },
             "state_attestation": {
                 "tensor_content_digest": "sha256",
                 "tensor_digest_chunk_bytes": _TENSOR_DIGEST_CHUNK_BYTES,
@@ -1810,7 +1862,7 @@ def apply_liger_fused_linear_ce(model) -> dict:
             expected_class=expected_class,
             process_before=process_before,
             model_before=model_before,
-            failed_invariants=["post_apply_validation_completed"],
+            failed_invariants=["post_binding_validation_completed"],
             cause=exc,
         )
     return report

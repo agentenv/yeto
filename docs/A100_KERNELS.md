@@ -13,8 +13,8 @@ The supported controls are:
 An explicit request is fail-closed. A missing or differently-versioned
 dependency, an unsupported model implementation, FlashAttention with FP32,
 a custom loss on the Liger path, fractional token weights, or any drift in the
-pinned Qwen2 apply-function controls produces an error instead of silently
-selecting another implementation.
+pinned Qwen2 source hash, forward signature, or fused-loss primitive contract
+produces an error instead of silently selecting another implementation.
 
 The kernel dependencies and the fused lane's PEFT compatibility point are
 pinned. Kernel packages remain excluded from ordinary CPU/dev installs:
@@ -48,29 +48,26 @@ token sum, and preserves arbitrary nonnegative per-token weights. Custom and
 pickled losses continue to receive materialized logits exactly as before.
 
 The Liger path supports only Hugging Face `model_type="qwen2"` models (Qwen2
-and Qwen2.5 in the pinned Transformers release). Yeto first loads the ordinary
-`AutoModelForCausalLM`, then calls the pinned package's public
-`apply_liger_kernel_to_qwen2` function with exactly:
+and Qwen2.5 in the pinned Transformers release). Before PEFT wraps the ordinary
+`AutoModelForCausalLM`, Yeto verifies `liger-kernel==0.8.0`, imports
+`liger_kernel.transformers.model.qwen2.lce_forward`, and requires the installed
+Qwen2 source module to match SHA-256
+`6df24ecc3d259e84cd833a62d9e08aea2db278ddc97af14fc27dc61b9259e6ed`.
+It verifies the `labels`, `use_cache`, `skip_logits`, and variadic-keyword
+forward contract plus explicit `accum_dtype` support on the fused primitive.
+Yeto then performs one local
+`model.forward = types.MethodType(lce_forward, model)` assignment. It never
+calls the package-wide `apply_liger_kernel_to_qwen2` callback, so that callback
+has no authority to rewrite layer classes or process globals in this lane.
 
-```python
-rope=False
-cross_entropy=False
-fused_linear_cross_entropy=True
-rms_norm=False
-swiglu=False
-model=model
-```
-
-The call occurs before PEFT wraps the base model. Yeto requires the resulting
-root binding to reference the exact `liger_kernel.transformers.model.qwen2`
-fused forward shipped by the pinned package; another callable with a compatible
-signature is rejected. Around the call, Yeto attests the Qwen2 module and class
-bindings, functional cross-entropy, every concrete module instance and unique
-module class present in the model, mutable built-in containers, config-like
-objects (including root `config` and `generation_config` plus nested config
-aliases), and custom Python objects with inspectable `__dict__` state. Opaque
-Python leaves are covered by binding identity rather than an unqualified claim
-about inaccessible internal state.
+Bounded before/after attestation surrounds that direct assignment to detect
+accidental state or API drift. It covers Qwen2 module/class bindings,
+functional cross-entropy, every concrete module instance and unique module
+class present in the model, mutable built-in containers, config-like objects
+(including root `config` and `generation_config` plus nested config aliases),
+and custom Python objects with inspectable `__dict__` state. Opaque Python
+leaves and the forward function are checked for binding identity; identity is
+a drift invariant, not proof of semantic integrity.
 
 Every registered parameter, parameter gradient, and buffer is attested.
 Gradient coverage distinguishes `None` from a tensor and includes exact tensor
@@ -83,21 +80,30 @@ bounded 4 MiB logical-order chunks; Yeto never retains a second copy of model
 or gradient contents. CPU RNG state, all visible CUDA generator states when
 CUDA is initialized, deterministic-algorithm mode, float32 matmul precision,
 and relevant cuDNN, CUDA matmul, and SDPA backend flags are also captured. The
-only accepted change across these explicitly attested surfaces is the exact
-pinned fused forward bound to that one base-model instance.
+only intended change across these explicitly attested surfaces is the
+hash-locked fused forward binding on that one base-model instance.
 
 Rejection is transactional where state is safely reversible: Yeto restores
 the Qwen2 module/class bindings, every captured module-class namespace,
 functional cross-entropy, model namespaces and exact module classes, original
 gradient bindings, RNG states, and backend flags, then repeats the complete
-attestation against the pre-apply snapshot. In-place tensor, gradient,
+attestation against the pre-binding snapshot. In-place tensor, gradient,
 container, config, or inspectable-object contents cannot in general be
 reconstructed without retaining duplicate contents. If any such state does
 not match after rollback, `KernelIsolationError` marks the process poisoned.
 Every `KernelIsolationError` is fatal for in-process continuation because it is
-raised only after third-party code began executing; a verified rollback is
+raised only after direct binding began; a verified rollback is
 reported as evidence but is not permission for the learner or benchmark to
 load another model or run another arm in that process.
+
+This attestation is deliberately not a sandbox against a malicious or
+compromised Python dependency, import-time code, concurrent mutation, native
+extensions, runtime function `__code__` tampering, modified builtins, or
+arbitrary inherited framework globals outside the stated surfaces. Runtime
+enforcement covers the exact package version and approved Qwen2 source-module
+SHA-256. Supply-chain trust for the remaining dependency, import, and runtime
+surface must come from the trusted build and provisioning pipeline; attestation
+provides bounded accidental-drift detection inside that boundary.
 
 The production-approved fused-loss envelope is currently narrower than the
 native learner: it requires `--tuning lora --shard ddp`, a frozen and

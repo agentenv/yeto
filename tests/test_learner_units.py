@@ -14,7 +14,7 @@ from yeto.learner import (
 from yeto.losses import sft_loss
 
 
-def test_isolated_fused_loss_is_applied_before_peft(monkeypatch):
+def test_isolated_fused_loss_is_bound_before_peft(monkeypatch):
     import peft
     import transformers
     import yeto.learner as learner
@@ -58,7 +58,7 @@ def test_isolated_fused_loss_is_applied_before_peft(monkeypatch):
     monkeypatch.setattr(
         learner,
         "apply_liger_fused_linear_ce",
-        lambda model: events.append("apply")
+        lambda model: events.append("bind")
         or {
             "layer_backend": "transformers-native",
             "loss_implementation": "liger-fused-linear-cross-entropy",
@@ -79,7 +79,7 @@ def test_isolated_fused_loss_is_applied_before_peft(monkeypatch):
 
     def fake_get_peft_model(model, _config):
         assert model is base_model
-        assert "apply" in events
+        assert "bind" in events
         events.append("peft")
         return model
 
@@ -106,7 +106,7 @@ def test_isolated_fused_loss_is_applied_before_peft(monkeypatch):
         "support",
         "tokenizer",
         "model",
-        "apply",
+        "bind",
         "attention",
         "peft",
         ("to", "cpu"),
