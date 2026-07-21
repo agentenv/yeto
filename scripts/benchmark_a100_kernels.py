@@ -32,6 +32,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from yeto.causal_kernels import (  # noqa: E402
+    FUSED_LINEAR_CE_IMPLEMENTATION,
+    NATIVE_LAYER_BACKEND,
+    NATIVE_LOSS_IMPLEMENTATION,
+    apply_liger_fused_linear_ce,
     attention_load_kwargs,
     liger_sft_forward,
     require_liger_model_support,
@@ -47,24 +51,32 @@ from yeto.models import resolve  # noqa: E402
 class Variant:
     name: str
     attention_backend: str
-    kernel_backend: str
+    layer_backend: str
+    loss_backend: str
     loss_implementation: str
 
 
 VARIANTS = (
-    Variant("native-sdpa", "sdpa", "native", "torch-fused-cross-entropy"),
+    Variant(
+        "native-sdpa",
+        "sdpa",
+        NATIVE_LAYER_BACKEND,
+        "native",
+        NATIVE_LOSS_IMPLEMENTATION,
+    ),
     Variant(
         "native-flash-attn-2",
         "flash-attn-2",
+        NATIVE_LAYER_BACKEND,
         "native",
-        "torch-fused-cross-entropy",
+        NATIVE_LOSS_IMPLEMENTATION,
     ),
-    Variant("liger-sdpa", "sdpa", "liger", "liger-fused-linear-cross-entropy"),
     Variant(
-        "liger-flash-attn-2",
-        "flash-attn-2",
+        "fused-linear-ce-sdpa",
+        "sdpa",
+        NATIVE_LAYER_BACKEND,
         "liger",
-        "liger-fused-linear-cross-entropy",
+        FUSED_LINEAR_CE_IMPLEMENTATION,
     ),
 )
 VARIANTS_BY_NAME = {variant.name: variant for variant in VARIANTS}
@@ -240,35 +252,36 @@ def load_raw_model(
     lora_alpha: int,
     lora_targets: str,
     adapter_init_seed: int,
-) -> tuple[torch.nn.Module, dict]:
+) -> tuple[torch.nn.Module, dict, dict | None]:
     from transformers import AutoConfig, AutoModelForCausalLM
 
     validate_kernel_request(
-        variant.kernel_backend,
+        variant.loss_backend,
         "cross_entropy",
         device,
         dtype,
     )
     kwargs = attention_load_kwargs(variant.attention_backend, device, dtype)
-    factory = AutoModelForCausalLM
-    if variant.kernel_backend == "liger":
+    if variant.loss_backend == "liger":
         config = AutoConfig.from_pretrained(
             model_id,
             revision=revision,
             trust_remote_code=True,
         )
         require_liger_model_support(config)
-        from liger_kernel.transformers import AutoLigerKernelForCausalLM
-
-        factory = AutoLigerKernelForCausalLM
-        kwargs.update(cross_entropy=False, fused_linear_cross_entropy=True)
-    model = factory.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_id,
         revision=revision,
         torch_dtype=dtype,
         trust_remote_code=True,
         **kwargs,
     )
+    kernel_application = None
+    if variant.loss_backend == "liger":
+        # Keep this before PEFT: the application helper accepts only the
+        # native Qwen2 class and proves that only this instance's forward is
+        # rebound. Decoder-layer implementations stay identical to reference.
+        kernel_application = apply_liger_fused_linear_ce(model)
     resolved_targets = None
     output_head_report = None
     if tuning == "lora":
@@ -322,7 +335,7 @@ def load_raw_model(
             "the production LoRA benchmark requires FP32 trainable adapters; "
             f"found {tuning_report['trainable_dtype_counts']}"
         )
-    return model, tuning_report
+    return model, tuning_report, kernel_application
 
 
 def make_batch(
@@ -351,7 +364,7 @@ def make_batch(
 
 
 def forward_sum(model, variant: Variant, input_ids, weights):
-    if variant.kernel_backend == "liger":
+    if variant.loss_backend == "liger":
         return liger_sft_forward(model, input_ids, weights)
     output = model(input_ids=input_ids, use_cache=False)
     if getattr(output, "logits", None) is None:
@@ -1482,7 +1495,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Hub branch, tag, or commit (default main); always resolved to and loaded by exact SHA",
     )
-    parser.add_argument("--variants", default="all", help="all or comma-separated variant names")
+    parser.add_argument(
+        "--variants",
+        default="all",
+        help=(
+            "all or comma-separated component-isolated variants: "
+            + ", ".join(VARIANTS_BY_NAME)
+        ),
+    )
     parser.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
     parser.add_argument(
         "--tuning",
@@ -1740,12 +1760,13 @@ def main(argv=None) -> int:
         setup_started = time.perf_counter()
         model = None
         tuning_report = None
+        kernel_application = None
         error = None
         fatal_load_error = False
         try:
             torch.manual_seed(model_init_seed)
             torch.cuda.manual_seed_all(model_init_seed)
-            model, tuning_report = load_raw_model(
+            model, tuning_report, kernel_application = load_raw_model(
                 model_id,
                 resolved_revision,
                 variant,
@@ -1821,6 +1842,7 @@ def main(argv=None) -> int:
                 "status": "failed",
                 "reason": state_reason,
                 "tuning": tuning_report,
+                "kernel_application": kernel_application,
                 "construction_trainable_state_sha256": construction_digest,
                 "reference_construction_trainable_state_sha256": (
                     construction_reference_digest
@@ -1925,6 +1947,7 @@ def main(argv=None) -> int:
                 "status": "failed",
                 "reason": anchor_reason,
                 "tuning": tuning_report,
+                "kernel_application": kernel_application,
                 "restored_trainable_state_sha256": restored_anchor_digest,
                 "parity_anchor_trainable_state_sha256": parity_anchor_digest,
                 "state_digest_reports": {
@@ -2165,6 +2188,7 @@ def main(argv=None) -> int:
                 "status": "failed",
                 "setup_seconds": setup_seconds,
                 "tuning": tuning_report,
+                "kernel_application": kernel_application,
                 "model_init_seed": model_init_seed,
                 "adapter_init_seed": (
                     adapter_init_seed if args.tuning == "lora" else None
@@ -2222,6 +2246,7 @@ def main(argv=None) -> int:
                     "status": "passed",
                     "setup_seconds": setup_seconds,
                     "tuning": tuning_report,
+                    "kernel_application": kernel_application,
                     "model_init_seed": model_init_seed,
                     "adapter_init_seed": (
                         adapter_init_seed if args.tuning == "lora" else None

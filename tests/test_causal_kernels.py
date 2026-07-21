@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import MethodType
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -124,32 +125,192 @@ def test_liger_request_fails_closed_for_device_loss_quantization_and_pin(monkeyp
     )
 
 
-def _install_fake_liger_registry(monkeypatch, registry):
+def _install_fake_qwen2_apply(monkeypatch, apply_fn):
     root = ModuleType("liger_kernel")
     root.__path__ = []
     transformers = ModuleType("liger_kernel.transformers")
     transformers.__path__ = []
-    registry_module = ModuleType("liger_kernel.transformers.monkey_patch")
-    registry_module.MODEL_TYPE_TO_APPLY_LIGER_FN = registry
+    transformers.apply_liger_kernel_to_qwen2 = apply_fn
+    functional = ModuleType("liger_kernel.transformers.functional")
+
+    def fused_linear_cross_entropy(input, weight, target, accum_dtype=None):
+        del input, weight, target, accum_dtype
+
+    functional.liger_fused_linear_cross_entropy = fused_linear_cross_entropy
+    transformers.functional = functional
     monkeypatch.setitem(sys.modules, "liger_kernel", root)
     monkeypatch.setitem(sys.modules, "liger_kernel.transformers", transformers)
     monkeypatch.setitem(
-        sys.modules, "liger_kernel.transformers.monkey_patch", registry_module
+        sys.modules, "liger_kernel.transformers.functional", functional
     )
 
 
-def test_liger_model_support_requires_a_fused_linear_ce_registration(monkeypatch):
-    def supported(fused_linear_cross_entropy=True):
-        del fused_linear_cross_entropy
+def _supported_qwen2_apply(
+    rope=True,
+    cross_entropy=False,
+    fused_linear_cross_entropy=True,
+    rms_norm=True,
+    swiglu=True,
+    model=None,
+):
+    del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu, model
 
-    _install_fake_liger_registry(monkeypatch, {"tiny": supported})
+
+def test_liger_model_support_requires_qwen2_and_the_exact_public_controls(monkeypatch):
+    _install_fake_qwen2_apply(monkeypatch, _supported_qwen2_apply)
     assert causal_kernels.require_liger_model_support(
-        SimpleNamespace(model_type="tiny")
-    ) == "tiny"
-    with pytest.raises(RuntimeError, match="does not support model type"):
+        SimpleNamespace(model_type="qwen2")
+    ) == "qwen2"
+    with pytest.raises(RuntimeError, match="supports only Hugging Face Qwen2"):
         causal_kernels.require_liger_model_support(
             SimpleNamespace(model_type="unknown")
         )
+
+    def missing_controls(fused_linear_cross_entropy=True):
+        del fused_linear_cross_entropy
+
+    _install_fake_qwen2_apply(monkeypatch, missing_controls)
+    with pytest.raises(RuntimeError, match="exact controls"):
+        causal_kernels.require_liger_model_support(
+            SimpleNamespace(model_type="qwen2")
+        )
+
+    _install_fake_qwen2_apply(monkeypatch, _supported_qwen2_apply)
+
+    def missing_accum_dtype(input, weight, target):
+        del input, weight, target
+
+    sys.modules[
+        "liger_kernel.transformers.functional"
+    ].liger_fused_linear_cross_entropy = missing_accum_dtype
+    with pytest.raises(RuntimeError, match="silently filtered"):
+        causal_kernels.require_liger_model_support(
+            SimpleNamespace(model_type="qwen2")
+        )
+
+
+def test_fused_linear_ce_application_changes_only_one_qwen2_instance(monkeypatch):
+    from transformers.models.qwen2.modeling_qwen2 import (
+        Qwen2Config,
+        Qwen2ForCausalLM,
+    )
+
+    calls = []
+
+    def replacement_forward(
+        self,
+        input_ids=None,
+        labels=None,
+        use_cache=None,
+        skip_logits=None,
+        **kwargs,
+    ):
+        del self, input_ids, labels, use_cache, skip_logits, kwargs
+
+    def apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        calls.append(
+            {
+                "rope": rope,
+                "cross_entropy": cross_entropy,
+                "fused_linear_cross_entropy": fused_linear_cross_entropy,
+                "rms_norm": rms_norm,
+                "swiglu": swiglu,
+                "model": model,
+            }
+        )
+        model.forward = MethodType(replacement_forward, model)
+
+    _install_fake_qwen2_apply(monkeypatch, apply)
+    config = Qwen2Config(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+    )
+    model = Qwen2ForCausalLM(config)
+    untouched_model = Qwen2ForCausalLM(config)
+    class_forward = Qwen2ForCausalLM.forward
+    untouched_forward = untouched_model.forward.__func__
+
+    report = causal_kernels.apply_liger_fused_linear_ce(model)
+
+    assert calls == [
+        {
+            "rope": False,
+            "cross_entropy": False,
+            "fused_linear_cross_entropy": True,
+            "rms_norm": False,
+            "swiglu": False,
+            "model": model,
+        }
+    ]
+    assert model.forward.__func__ is replacement_forward
+    assert Qwen2ForCausalLM.forward is class_forward
+    assert untouched_model.forward.__func__ is untouched_forward
+    assert report["layer_backend"] == causal_kernels.NATIVE_LAYER_BACKEND
+    assert (
+        report["loss_implementation"]
+        == causal_kernels.FUSED_LINEAR_CE_IMPLEMENTATION
+    )
+    assert report["patch_scope"] == "model-instance-forward-only"
+    assert all(report["invariants"].values())
+
+
+def test_fused_linear_ce_application_rejects_global_class_mutation(monkeypatch):
+    from transformers.models.qwen2.modeling_qwen2 import (
+        Qwen2Config,
+        Qwen2ForCausalLM,
+    )
+
+    original_forward = Qwen2ForCausalLM.forward
+
+    def replacement_forward(
+        self,
+        input_ids=None,
+        labels=None,
+        use_cache=None,
+        skip_logits=None,
+        **kwargs,
+    ):
+        del self, input_ids, labels, use_cache, skip_logits, kwargs
+
+    def bad_apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu
+        Qwen2ForCausalLM.forward = replacement_forward
+        model.forward = MethodType(replacement_forward, model)
+
+    _install_fake_qwen2_apply(monkeypatch, bad_apply)
+    model = Qwen2ForCausalLM(
+        Qwen2Config(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+        )
+    )
+    try:
+        with pytest.raises(RuntimeError, match="outside the approved"):
+            causal_kernels.apply_liger_fused_linear_ce(model)
+    finally:
+        Qwen2ForCausalLM.forward = original_forward
 
 
 def test_binary_mask_labels_shift_count_and_reject_fractional_weights():
@@ -182,6 +343,8 @@ def test_liger_forward_requests_a_sum_and_never_accepts_logits():
     loss, count = causal_kernels.liger_sft_forward(model, ids, weights)
     assert loss == 7.5 and count == 2
     assert model.kwargs["num_items_in_batch"] == 1
+    assert model.kwargs["accum_dtype"] is torch.float32
+    assert model.kwargs["skip_logits"] is True
     assert model.kwargs["use_cache"] is False
     assert model.kwargs["labels"].tolist() == [[-100, 2, 3]]
 

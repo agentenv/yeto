@@ -514,7 +514,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             )
     if kernel_backend == "liger" and loss_function != "cross_entropy":
         raise ValueError(
-            "--kernel-backend liger supports only the built-in cross_entropy loss"
+            "--kernel-backend liger fused-linear-CE supports only the built-in "
+            "cross_entropy loss"
         )
 
     # Flags shared by all learners. The DiLoCo sync, LoRA, and data source

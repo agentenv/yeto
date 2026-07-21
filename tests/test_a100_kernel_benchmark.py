@@ -9,8 +9,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import huggingface_hub
+import peft
 import pytest
 import torch
+import transformers
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -21,17 +23,116 @@ sys.modules[SPEC.name] = benchmark
 SPEC.loader.exec_module(benchmark)
 
 
-def test_variant_plan_has_a_stable_reference_and_all_combinations():
+def test_variant_plan_has_a_stable_reference_and_component_isolated_candidates():
     assert [variant.name for variant in benchmark.select_variants("all")] == [
         "native-sdpa",
         "native-flash-attn-2",
-        "liger-sdpa",
-        "liger-flash-attn-2",
+        "fused-linear-ce-sdpa",
     ]
-    selected = benchmark.select_variants("liger-sdpa")
-    assert [variant.name for variant in selected] == ["native-sdpa", "liger-sdpa"]
+    selected = benchmark.select_variants("fused-linear-ce-sdpa")
+    assert [variant.name for variant in selected] == [
+        "native-sdpa",
+        "fused-linear-ce-sdpa",
+    ]
+    fused_loss = selected[-1]
+    assert fused_loss.layer_backend == benchmark.NATIVE_LAYER_BACKEND
+    assert fused_loss.loss_backend == "liger"
+    assert (
+        fused_loss.loss_implementation
+        == benchmark.FUSED_LINEAR_CE_IMPLEMENTATION
+    )
+    assert not any("liger-flash" in variant.name for variant in benchmark.VARIANTS)
     with pytest.raises(ValueError, match="unknown variants"):
         benchmark.select_variants("unknown")
+
+
+def test_fused_loss_variant_applies_instance_patch_before_peft(monkeypatch):
+    events = []
+    config = SimpleNamespace(model_type="qwen2", use_cache=True)
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = config
+            self.weight = torch.nn.Parameter(torch.ones(1))
+
+        def to(self, device):
+            events.append(("to", device.type))
+            return self
+
+    model = Model()
+    monkeypatch.setattr(benchmark, "validate_kernel_request", lambda *args: None)
+    monkeypatch.setattr(benchmark, "attention_load_kwargs", lambda *args: {})
+    monkeypatch.setattr(
+        transformers.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: events.append("config") or config,
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "require_liger_model_support",
+        lambda actual_config: events.append("support") or actual_config.model_type,
+    )
+    monkeypatch.setattr(
+        transformers.AutoModelForCausalLM,
+        "from_pretrained",
+        lambda *args, **kwargs: events.append("model") or model,
+    )
+    application = {
+        "layer_backend": benchmark.NATIVE_LAYER_BACKEND,
+        "loss_implementation": benchmark.FUSED_LINEAR_CE_IMPLEMENTATION,
+    }
+    monkeypatch.setattr(
+        benchmark,
+        "apply_liger_fused_linear_ce",
+        lambda actual_model: events.append("apply") or application,
+    )
+    monkeypatch.setattr(benchmark, "resolve_lora_targets", lambda *args: "all-linear")
+    monkeypatch.setattr(peft, "LoraConfig", lambda **kwargs: kwargs)
+
+    def fake_get_peft_model(actual_model, _config):
+        assert actual_model is model
+        assert "apply" in events
+        events.append("peft")
+        return actual_model
+
+    monkeypatch.setattr(peft, "get_peft_model", fake_get_peft_model)
+    monkeypatch.setattr(
+        benchmark,
+        "validate_lora_output_head",
+        lambda actual_model: {"frozen": True, "adapted": False},
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "resolved_attention_backend",
+        lambda actual_model, requested: events.append("attention") or requested,
+    )
+
+    loaded, tuning, kernel_application = benchmark.load_raw_model(
+        "Qwen/Qwen2.5-1.5B-Instruct",
+        "a" * 40,
+        benchmark.VARIANTS_BY_NAME["fused-linear-ce-sdpa"],
+        torch.bfloat16,
+        torch.device("cpu"),
+        "lora",
+        16,
+        32,
+        "auto",
+        1234,
+    )
+
+    assert loaded is model
+    assert tuning["mode"] == "lora"
+    assert kernel_application == application
+    assert events == [
+        "config",
+        "support",
+        "model",
+        "apply",
+        "peft",
+        ("to", "cpu"),
+        "attention",
+    ]
 
 
 def test_percentile_interpolates_and_validates_input():

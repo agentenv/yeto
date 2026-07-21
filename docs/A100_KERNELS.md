@@ -8,12 +8,13 @@ The supported controls are:
 | control | values | default | meaning |
 |---|---|---|---|
 | `--attention-backend` | `auto`, `sdpa`, `flash-attn-2` | `auto` | Hugging Face attention implementation |
-| `--kernel-backend` | `native`, `liger` | `native` | model layers and fused SFT loss |
+| `--kernel-backend` | `native`, `liger` | `native` | SFT loss implementation; model layers remain native |
 
 An explicit request is fail-closed. A missing or differently-versioned
 dependency, an unsupported model implementation, FlashAttention with FP32,
-a custom loss on the Liger path, or fractional token weights produces an
-error instead of silently selecting another implementation.
+a custom loss on the Liger path, fractional token weights, or any drift in the
+pinned Qwen2 apply-function controls produces an error instead of silently
+selecting another implementation.
 
 The optional dependencies are pinned and excluded from ordinary CPU/dev
 installs:
@@ -25,7 +26,8 @@ Remote learner setup installs either package only when its corresponding flag
 is selected. FlashAttention is built after the CUDA-matched PyTorch wheel is
 installed and uses `--no-build-isolation` so the build can see that wheel.
 
-For example, an existing launch can opt into Liger while keeping SDPA:
+For example, an existing Qwen2/Qwen2.5 launch can opt into the isolated fused
+linear cross-entropy loss while keeping SDPA and every model layer native:
 
 ```bash
 yeto launch \
@@ -42,11 +44,36 @@ The native SFT path uses `torch.nn.functional.cross_entropy`, returns a local
 token sum, and preserves arbitrary nonnegative per-token weights. Custom and
 pickled losses continue to receive materialized logits exactly as before.
 
-The Liger path uses `AutoLigerKernelForCausalLM` with fused linear
-cross-entropy. Binary token masks are converted to labels with `-100` at
-ignored positions. `num_items_in_batch=1` makes the pinned implementation
-return the required local token sum without materializing logits. Fractional
-weights and non-built-in losses must use `--kernel-backend native`.
+The Liger path supports only Hugging Face `model_type="qwen2"` models (Qwen2
+and Qwen2.5 in the pinned Transformers release). Yeto first loads the ordinary
+`AutoModelForCausalLM`, then calls the pinned package's public
+`apply_liger_kernel_to_qwen2` function with exactly:
+
+```python
+rope=False
+cross_entropy=False
+fused_linear_cross_entropy=True
+rms_norm=False
+swiglu=False
+model=model
+```
+
+The call occurs before PEFT wraps the base model. Yeto snapshots the Qwen2
+module and class globals, functional cross-entropy, the model instance, and
+all nested module instances around that call. It accepts only a new
+instance-bound `forward` on that one base model. A changed class/global, layer
+module, nested instance, model layout, or unexpected apply-function signature
+is fatal. This prevents one experimental model from changing later native
+models in the same process and keeps rope, RMSNorm, and SwiGLU implementations
+identical to the reference.
+
+Binary token masks are converted to labels with `-100` at ignored positions.
+`num_items_in_batch=1` makes the pinned implementation return the required
+local token sum without materializing logits, and `accum_dtype=torch.float32`
+explicitly requests FP32 loss accumulation. `skip_logits=True` makes logit
+elision explicit; materialized logits are still rejected. Fractional weights,
+non-built-in losses, non-Qwen2 model types, wrapped/prepatched models, and
+quantized bases must use `--kernel-backend native`.
 
 This lane is scoped to BF16 and FP32 on A100. FlashAttention 2 is BF16-only;
 FP32 measurements use SDPA. It does not enable FP8 or kernels tied to newer
@@ -88,12 +115,18 @@ do not combine its evidence with default LoRA trials. The optimizer is ordinary
 AdamW with the learner's default learning rate, `3e-4`, followed by gradient
 clipping at norm `1.0`.
 
-The ordered comparison is:
+The publishable default matrix is component-isolated:
 
-1. Native layers with SDPA and PyTorch fused cross-entropy—the parity reference.
-2. Native layers with FlashAttention 2 and PyTorch fused cross-entropy, when installed and supported.
-3. Liger layers/fused loss with SDPA, when installed and supported.
-4. Liger layers/fused loss with FlashAttention 2, when both are available.
+1. Native layers with SDPA and PyTorch cross-entropy—the parity reference.
+2. Native layers with FlashAttention 2 and PyTorch cross-entropy, when installed and supported.
+3. Native layers with SDPA and the instance-only Liger fused-linear-CE loss, when installed and supported.
+
+The benchmark report records `layer_backend`, `loss_backend`, and
+`loss_implementation` independently. It does not publish arms that change both
+model layers and loss, nor an arm that combines FlashAttention with the fused
+loss. Those combinations cannot attribute a parity or speed difference to one
+component. To run only the fused-loss candidate and its automatically included
+native-SDPA reference, pass `--variants fused-linear-ce-sdpa`.
 
 Before parity, native SDPA performs exactly one controlled deterministic LoRA
 update. This makes both `lora_A` and `lora_B` nonzero; the harness verifies and

@@ -7,10 +7,103 @@ import torch
 
 from yeto.learner import (
     allreduce_trainable_grads,
+    load_model_and_tokenizer,
     normalize_param_name,
     run_inner_loop,
 )
 from yeto.losses import sft_loss
+
+
+def test_isolated_fused_loss_is_applied_before_peft(monkeypatch):
+    import peft
+    import transformers
+    import yeto.learner as learner
+
+    events = []
+    config = SimpleNamespace(model_type="qwen2")
+    tokenizer = object()
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = config
+
+        def to(self, device):
+            events.append(("to", device.type))
+            return self
+
+    base_model = Model()
+
+    def fake_from_pretrained(factory, _model_id, **_kwargs):
+        if factory is transformers.AutoConfig:
+            events.append("config")
+            return config
+        if factory is transformers.AutoTokenizer:
+            events.append("tokenizer")
+            return tokenizer
+        assert factory is transformers.AutoModelForCausalLM
+        events.append("model")
+        return base_model
+
+    monkeypatch.setattr(learner, "_from_pretrained_offline_first", fake_from_pretrained)
+    monkeypatch.setattr(learner, "validate_kernel_request", lambda *args: None)
+    monkeypatch.setattr(learner, "attention_load_kwargs", lambda *args: {})
+    monkeypatch.setattr(
+        learner,
+        "require_liger_model_support",
+        lambda actual_config: events.append("support") or actual_config.model_type,
+    )
+    monkeypatch.setattr(
+        learner,
+        "apply_liger_fused_linear_ce",
+        lambda model: events.append("apply")
+        or {
+            "layer_backend": "transformers-native",
+            "loss_implementation": "liger-fused-linear-cross-entropy",
+        },
+    )
+    monkeypatch.setattr(
+        learner,
+        "resolved_attention_backend",
+        lambda model, requested: events.append("attention") or requested,
+    )
+    monkeypatch.setattr(learner, "resolve_lora_targets", lambda *args: "all-linear")
+    monkeypatch.setattr(peft, "LoraConfig", lambda **kwargs: kwargs)
+
+    def fake_get_peft_model(model, _config):
+        assert model is base_model
+        assert "apply" in events
+        events.append("peft")
+        return model
+
+    monkeypatch.setattr(peft, "get_peft_model", fake_get_peft_model)
+    args = SimpleNamespace(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        base_quantization="none",
+        tuning="lora",
+        shard="ddp",
+        kernel_backend="liger",
+        attention_backend="sdpa",
+        loss_function="cross_entropy",
+        lora_r=16,
+        lora_alpha=32,
+        lora_targets="auto",
+    )
+
+    model, loaded_tokenizer = load_model_and_tokenizer(args, torch.device("cpu"))
+
+    assert model is base_model
+    assert loaded_tokenizer is tokenizer
+    assert events == [
+        "config",
+        "support",
+        "tokenizer",
+        "model",
+        "apply",
+        "attention",
+        "peft",
+        ("to", "cpu"),
+    ]
 
 
 # --- normalize_param_name -------------------------------------------------

@@ -29,7 +29,11 @@ import torch.distributed as dist
 from .autobatch import exact_grad_accum, int_or_auto, resolve_micro_batch_size
 from .causal_kernels import (
     ATTENTION_BACKENDS,
+    FUSED_LINEAR_CE_IMPLEMENTATION,
     KERNEL_BACKENDS,
+    NATIVE_LAYER_BACKEND,
+    NATIVE_LOSS_IMPLEMENTATION,
+    apply_liger_fused_linear_ce,
     attention_load_kwargs,
     liger_sft_forward,
     require_liger_model_support,
@@ -79,8 +83,9 @@ def parse_args(argv=None):
         "--kernel-backend",
         choices=KERNEL_BACKENDS,
         default="native",
-        help="causal model/loss kernels: native (default) or the pinned, "
-        "binary-mask-only Liger fused-loss lane",
+        help="causal SFT loss kernel: native (default) or the pinned, "
+        "binary-mask-only instance-scoped Liger fused-linear-CE lane; "
+        "model layers remain native",
     )
     p.add_argument(
         "--train-on",
@@ -300,8 +305,6 @@ def load_model_and_tokenizer(args, device):
         base_quantization,
     )
     attention_kwargs = attention_load_kwargs(attention_backend, device, dtype)
-    model_factory = AutoModelForCausalLM
-    kernel_kwargs = {}
     liger_model_type = None
     if kernel_backend == "liger":
         config = _from_pretrained_offline_first(
@@ -310,15 +313,6 @@ def load_model_and_tokenizer(args, device):
             trust_remote_code=True,
         )
         liger_model_type = require_liger_model_support(config)
-        try:
-            from liger_kernel.transformers import AutoLigerKernelForCausalLM
-        except Exception as exc:
-            raise RuntimeError("could not import AutoLigerKernelForCausalLM") from exc
-        model_factory = AutoLigerKernelForCausalLM
-        kernel_kwargs = {
-            "cross_entropy": False,
-            "fused_linear_cross_entropy": True,
-        }
     tokenizer = _from_pretrained_offline_first(AutoTokenizer, model_id, trust_remote_code=True)
     try:
         if base_quantization == "nf4":
@@ -331,41 +325,58 @@ def load_model_and_tokenizer(args, device):
                 bnb_4bit_use_double_quant=True,
             )
             model = _from_pretrained_offline_first(
-                model_factory,
+                AutoModelForCausalLM,
                 model_id,
                 quantization_config=quantization_config,
                 device_map={"": device.index if device.index is not None else 0},
                 low_cpu_mem_usage=True,
                 trust_remote_code=True,
                 **attention_kwargs,
-                **kernel_kwargs,
             )
         else:
             model = _from_pretrained_offline_first(
-                model_factory,
+                AutoModelForCausalLM,
                 model_id,
                 torch_dtype=dtype,
                 trust_remote_code=True,
                 **attention_kwargs,
-                **kernel_kwargs,
             )
     except Exception as exc:
         if attention_backend != "auto" or kernel_backend != "native":
             raise RuntimeError(
                 f"failed to load {model_id!r} with attention={attention_backend!r} "
-                f"and kernels={kernel_backend!r}; the dependency or model "
+                f"and loss_kernel={kernel_backend!r}; the dependency or model "
                 "implementation does not support the explicit request"
             ) from exc
         raise
+    kernel_application = None
+    if kernel_backend == "liger":
+        try:
+            # This must precede get_peft_model: the strict application helper
+            # rejects wrappers and proves that only this base instance's
+            # forward changes. All transformer layers remain native.
+            kernel_application = apply_liger_fused_linear_ce(model)
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to apply the isolated fused-linear-CE loss to {model_id!r}"
+            ) from exc
     resolved_attention = resolved_attention_backend(model, attention_backend)
+    loss_implementation = (
+        FUSED_LINEAR_CE_IMPLEMENTATION
+        if kernel_backend == "liger"
+        else NATIVE_LOSS_IMPLEMENTATION
+    )
     log.info(
         "causal kernel recipe: attention requested=%s resolved=%s; "
-        "model/loss kernels=%s%s",
+        "layers=%s; loss=%s%s",
         attention_backend,
         resolved_attention,
-        kernel_backend,
+        NATIVE_LAYER_BACKEND,
+        loss_implementation,
         f" model_type={liger_model_type}" if liger_model_type else "",
     )
+    if kernel_application is not None:
+        log.info("isolated fused-loss application: %s", kernel_application)
     if args.tuning == "lora":
         from peft import LoraConfig, get_peft_model
 
