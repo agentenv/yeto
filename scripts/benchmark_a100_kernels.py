@@ -24,7 +24,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import asdict, dataclass
+from datetime import timedelta
 from importlib import metadata
 from pathlib import Path
 from typing import Iterable
@@ -45,6 +47,12 @@ from yeto.causal_kernels import (  # noqa: E402
 from yeto.losses import sft_loss  # noqa: E402
 from yeto.learner import allreduce_trainable_grads, resolve_lora_targets  # noqa: E402
 from yeto.models import resolve  # noqa: E402
+
+
+BENCHMARK_SCHEMA_VERSION = 4
+BENCHMARK_NAME = "a100-causal-training-kernels"
+DEFAULT_DISTRIBUTED_TIMEOUT_SECONDS = 300
+MAX_DISTRIBUTED_TIMEOUT_SECONDS = 3600
 
 
 @dataclass(frozen=True)
@@ -680,11 +688,14 @@ def evaluate_local_sdpa_attribution(
     }
 
 
-def setup_distributed() -> tuple[int, int, torch.device]:
+def setup_distributed(timeout_seconds: int) -> tuple[int, int, torch.device]:
     if not torch.cuda.is_available():
         raise RuntimeError("the A100 kernel benchmark requires CUDA")
     if "RANK" in os.environ:
-        dist.init_process_group("nccl")
+        dist.init_process_group(
+            "nccl",
+            timeout=timedelta(seconds=timeout_seconds),
+        )
         rank = dist.get_rank()
         world = dist.get_world_size()
         local_rank = int(os.environ.get("LOCAL_RANK", rank))
@@ -1640,6 +1651,7 @@ def compare_registered_tensor_states(anchor: dict, current: dict) -> dict:
         "missing_registrations": sorted(anchor_names - current_names),
         "extra_registrations": sorted(current_names - anchor_names),
         "module_identity_changed": [],
+        "module_type_changed": [],
         "object_identity_changed": [],
         "metadata_changed": [],
         "persistence_changed": [],
@@ -1655,6 +1667,8 @@ def compare_registered_tensor_states(anchor: dict, current: dict) -> dict:
         display_path = module_path or "<root>"
         if before_module["module"] is not after_module["module"]:
             failures["module_identity_changed"].append(display_path)
+        if before_module["object_type"] != after_module["object_type"]:
+            failures["module_type_changed"].append(display_path)
         if before_module["registration_order"] != after_module["registration_order"]:
             failures["registration_order_changed"].append(display_path)
         if (
@@ -3122,6 +3136,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument(
+        "--distributed-timeout-seconds",
+        type=int,
+        default=DEFAULT_DISTRIBUTED_TIMEOUT_SECONDS,
+        help=(
+            "bounded process-group collective timeout; unexpected faults inside "
+            "collectives remain fail-stop and may not produce a final report"
+        ),
+    )
+    parser.add_argument(
         "--trial-index",
         type=int,
         default=1,
@@ -3148,6 +3171,11 @@ def validate_args(args) -> None:
         raise ValueError("--target-fraction must be in (0, 1]")
     if args.trial_index < 1:
         raise ValueError("--trial-index must be positive")
+    if not (1 <= args.distributed_timeout_seconds <= MAX_DISTRIBUTED_TIMEOUT_SECONDS):
+        raise ValueError(
+            "--distributed-timeout-seconds must be between 1 and "
+            f"{MAX_DISTRIBUTED_TIMEOUT_SECONDS}"
+        )
     if args.learning_rate <= 0 or args.weight_decay < 0:
         raise ValueError(
             "--learning-rate must be positive and --weight-decay nonnegative"
@@ -3200,8 +3228,63 @@ def _git_output(arguments: list[str]) -> str | None:
     return completed.stdout.strip()
 
 
-def source_provenance() -> dict:
+def _repository_relative_path(path: Path) -> str | None:
+    repository = REPO_ROOT.resolve()
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    try:
+        relative = absolute.resolve().relative_to(repository)
+    except ValueError:
+        return None
+    if not relative.parts:
+        return None
+    return relative.as_posix()
+
+
+def _git_path_is_tracked(path: Path) -> bool:
+    relative = _repository_relative_path(path)
+    if relative is None:
+        return False
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                f":(top,literal){relative}",
+            ],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        if not (REPO_ROOT / ".git").exists():
+            return False
+        raise RuntimeError("could not query the git index for the output path") from exc
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 1:
+        return False
+    if not (REPO_ROOT / ".git").exists():
+        return False
+    detail = completed.stderr.strip() or f"git exited {completed.returncode}"
+    raise RuntimeError(f"could not query the git index for the output path: {detail}")
+
+
+def source_provenance(
+    ignored_worktree_paths: Iterable[Path] = (),
+) -> dict:
     """Resolve strict source identity from overrides or the local git worktree."""
+    excluded_paths = []
+    excluded_pathspecs = []
+    for path in ignored_worktree_paths:
+        normalized = _repository_relative_path(path)
+        if normalized is None or _git_path_is_tracked(path):
+            continue
+        excluded_paths.append(normalized)
+        excluded_pathspecs.append(f":(exclude,top,literal){normalized}")
+
     override_sha = os.environ.get("YETO_GIT_SHA")
     override_dirty = os.environ.get("YETO_GIT_DIRTY")
     if (override_sha is None) != (override_dirty is None):
@@ -3212,7 +3295,16 @@ def source_provenance() -> dict:
         provenance_source = "environment_override"
     else:
         raw_sha = _git_output(["rev-parse", "HEAD"])
-        raw_status = _git_output(["status", "--porcelain", "--untracked-files=normal"])
+        raw_status = _git_output(
+            [
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                ".",
+                *excluded_pathspecs,
+            ]
+        )
         if raw_sha is None or raw_status is None:
             raise RuntimeError(
                 "source provenance is unavailable; in a synchronized workdir "
@@ -3229,12 +3321,13 @@ def source_provenance() -> dict:
         "git_dirty": git_dirty,
         "provenance_source": provenance_source,
         "clean_commit_exact": not git_dirty,
+        "ignored_generated_worktree_paths": excluded_paths,
     }
 
 
 def environment_report(args, world, device) -> dict:
     capability = torch.cuda.get_device_capability(device)
-    provenance = source_provenance()
+    provenance = source_provenance((args.output,))
     return {
         "hostname": socket.gethostname(),
         "platform": platform.platform(),
@@ -3268,6 +3361,10 @@ def finalize_report_status(
     fatal_phase: str | None,
     fatal_reason: str | None,
 ) -> None:
+    report["report_complete"] = True
+    reservation = report.get("output_reservation")
+    if reservation is not None:
+        reservation["final_report_written"] = True
     report["completed_variants"] = [
         record["variant"]["name"] for record in report["variants"]
     ]
@@ -3289,6 +3386,16 @@ def finalize_report_status(
         report["fatal"] = None
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Persist directory-entry changes or fail the publication attempt."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def write_report_atomic(output: Path, serialized: str) -> None:
     """Durably replace one report without exposing a partial JSON artifact."""
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -3305,11 +3412,114 @@ def write_report_atomic(output: Path, serialized: str) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, output)
+        _fsync_directory(output.parent)
     except BaseException:
         if descriptor >= 0:
             os.close(descriptor)
         temporary.unlink(missing_ok=True)
         raise
+
+
+def write_report_exclusive_atomic(output: Path, serialized: str) -> None:
+    """Durably create a complete report while refusing every existing target."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output.name}.", suffix=".tmp", dir=output.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        stream = os.fdopen(descriptor, "w", encoding="utf-8")
+        descriptor = -1
+        with stream:
+            stream.write(serialized)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        # A hard link provides an atomic no-replace publication. Unlike an
+        # exists-then-replace sequence, another writer cannot win the gap.
+        os.link(temporary, output)
+        _fsync_directory(output.parent)
+        temporary.unlink()
+        _fsync_directory(output.parent)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def reserve_report_output_collectively(
+    output: Path,
+    rank: int,
+) -> dict:
+    """Refuse stale targets and reserve a fresh path with a non-passing sentinel."""
+    result = None
+    if rank == 0:
+        reservation_id = uuid.uuid4().hex
+        reservation = {
+            "id": reservation_id,
+            "path": str(output),
+            "preexisting_output_policy": "refuse",
+            "git_index_tracked": False,
+            "initial_sentinel_status": "incomplete",
+            "final_report_written": False,
+        }
+        sentinel = {
+            "schema_version": BENCHMARK_SCHEMA_VERSION,
+            "benchmark": BENCHMARK_NAME,
+            "status": "incomplete",
+            "report_complete": False,
+            "fatal": None,
+            "incomplete_reason": (
+                "the benchmark reserved this output but did not reach collective "
+                "final report publication"
+            ),
+            "output_reservation": reservation,
+        }
+        try:
+            if _git_path_is_tracked(output):
+                raise FileExistsError(
+                    "refusing to use a git-tracked benchmark output path, even "
+                    f"when its worktree file is currently absent: {output}"
+                )
+            if os.path.lexists(output):
+                raise FileExistsError(
+                    f"refusing to overwrite pre-existing benchmark output {output}"
+                )
+            serialized = json.dumps(
+                sentinel,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            write_report_exclusive_atomic(output, serialized)
+            result = {
+                "passed": True,
+                "preexisting": False,
+                "error": None,
+                "reservation": reservation,
+            }
+        except FileExistsError as exc:
+            result = {
+                "passed": False,
+                "preexisting": True,
+                "error": exception_text(exc),
+                "reservation": None,
+            }
+        except Exception as exc:
+            result = {
+                "passed": False,
+                "preexisting": False,
+                "error": exception_text(exc),
+                "reservation": None,
+            }
+    result = broadcast_object(result, rank)
+    if not result["passed"]:
+        message = result["error"] or "benchmark output reservation failed"
+        if result["preexisting"]:
+            raise FileExistsError(message)
+        raise RuntimeError(message)
+    return result["reservation"]
 
 
 def publish_report_collectively(
@@ -3380,12 +3590,22 @@ def restore_sdpa_arm_for_record(
     return reason
 
 
+def initialize_benchmark_runtime(args) -> tuple[int, int, torch.device, dict, dict]:
+    """Initialize distributed state, then reserve output before fallible queries."""
+    rank, world, device = setup_distributed(args.distributed_timeout_seconds)
+    output_reservation = reserve_report_output_collectively(args.output, rank)
+    environment = environment_report(args, world, device)
+    return rank, world, device, output_reservation, environment
+
+
 def _main(argv, backend_controller: SDPAArmController) -> int:
     args = build_parser().parse_args(argv)
     validate_args(args)
     reference_variant = VARIANTS_BY_NAME[args.reference_variant]
     variants = select_variants(args.variants, reference_variant.name)
-    rank, world, device = setup_distributed()
+    rank, world, device, output_reservation, environment = initialize_benchmark_runtime(
+        args
+    )
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
     model_init_seed = args.seed + 30_000
     adapter_init_seed = args.seed + 40_000
@@ -3408,9 +3628,11 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
         raise RuntimeError(revision_result["error"])
     resolved_revision = revision_result["commit"]
     report = {
-        "schema_version": 4,
-        "benchmark": "a100-causal-training-kernels",
+        "schema_version": BENCHMARK_SCHEMA_VERSION,
+        "benchmark": BENCHMARK_NAME,
         "status": "incomplete",
+        "report_complete": False,
+        "output_reservation": dict(output_reservation),
         "reference_variant": reference_variant.name,
         "planned_variants": [variant.name for variant in variants],
         "completed_variants": [],
@@ -3439,12 +3661,24 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
                 "registration, identity, aliasing, persistence, metadata, bytes"
             ),
             "report_publication": "strict JSON, atomic replace, all-rank decision",
+            "preexisting_output_policy": "refuse before model or benchmark work",
+            "in_progress_output": "schema-4 incomplete reservation sentinel",
+            "distributed_failure_contract": {
+                "process_group_timeout_seconds": (args.distributed_timeout_seconds),
+                "unexpected_faults_inside_collectives": "fail-stop",
+                "final_report_guarantee": (
+                    "no final report is guaranteed after an unexpected fault "
+                    "inside an unavoidable distributed collective; the incomplete "
+                    "reservation sentinel remains authoritative"
+                ),
+                "collective_recovery_claimed": False,
+            },
             "reference_variant": reference_variant.name,
             "publishable_variant_limit": (
                 "selected reference plus at most one candidate"
             ),
         },
-        "environment": environment_report(args, world, device),
+        "environment": environment,
         "model": {
             "requested": args.model,
             "model_id": model_id,

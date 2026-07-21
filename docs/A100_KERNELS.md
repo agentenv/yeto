@@ -96,6 +96,21 @@ selected reference. `all` and comma-separated multi-candidate matrices are
 rejected. This keeps every JSON record independently interpretable and prevents
 a later arm from inheriting unreported process-global backend state.
 
+The output path is also part of the evidence boundary. Before model loading or
+benchmark work, rank zero atomically reserves a path that does not already exist
+and every rank receives the reservation result. A pre-existing file, directory,
+or symlink is refused. A git-tracked path is also refused when its worktree file
+is deleted, so recreating and excluding the generated sentinel cannot hide a
+tracked deletion. The harness never silently overwrites an earlier report.
+The reservation is a strict schema-version-4 JSON sentinel with
+`status: incomplete` and `report_complete: false`. A normal final publication
+atomically replaces it. Thus an unexpected early failure or a failed final
+write cannot expose an earlier passing report under the new run's output path.
+Use a fresh output name for every invocation. When that generated path is inside
+the repository, only the reserved output itself is excluded from the subsequent
+git dirty-state query; the exact excluded relative path is recorded, and every
+other tracked or untracked worktree change still marks the source dirty.
+
 The native PyTorch SDPA variants are:
 
 | variant | internal selector | meaning |
@@ -199,6 +214,18 @@ collective. Once every rank has exited that local region, one common evidence
 gather applies the all-rank gate. The ordinary parity witnesses separately cover
 backward gradients and optimizer updates.
 
+This guarded probe does not imply end-to-end recovery from arbitrary distributed
+faults. Parity and timed training necessarily execute NCCL collectives. An
+unexpected device, process, or communication fault inside one of those
+collectives is fail-stop: the launcher/process-group failure is authoritative,
+and a complete failure JSON is not guaranteed. The reserved non-passing sentinel
+remains at the output path when collective finalization cannot run. The process
+group uses a bounded 300-second timeout by default; experiments may set
+`--distributed-timeout-seconds` between 1 and 3600. This timeout configuration
+is recorded in the report and does not add work to measured steps. The harness
+does not claim collective rollback, retry, or continued timing after such a
+fault.
+
 The probe restores the exact warmed trainable anchor, every named buffer, and
 both CPU and local-CUDA default RNG states. Frozen-parameter and
 registered-buffer evidence covers registration names, local object and module
@@ -269,9 +296,12 @@ scope are reported separately, so finite compatible-subset metrics remain
 available even if other keys, shapes, or values fail. Numerically unevaluable
 fields are JSON `null`, never `NaN` or infinity, and report serialization uses
 strict RFC JSON. Rank zero writes through an fsynced temporary file followed by
-an atomic replacement, then broadcasts the publication result. Every rank exits
-with failure if strict serialization or the write fails; no rank waits in a
-post-write barrier that another rank can miss.
+an atomic replacement and an fsync of the containing directory, then broadcasts
+the publication result. Every rank exits with failure if strict serialization or
+the write fails; no rank waits in a post-write barrier that another rank can
+miss. This guarantee applies to handled final publication failures, not to a
+complete failure report after an unexpected fault inside an in-flight
+distributed collective.
 
 The report also records actual and reference update norms, maximum magnitude,
 nonzero count, and nonzero fraction. If BF16 quantization rounds every observed
@@ -319,8 +349,11 @@ selectable-reference/single-candidate contract and mandatory two-shape,
 all-rank SDPA attribution evidence. It also records the explicit all-rank
 selector lifecycle, strict forward-only ATen allowlist, exact registered-state
 scope, normalized cross-rank state digests, collective atomic publication, and
-the full-training-step timing name. It records the benchmark script
-SHA-256, git object ID, dirty state, provenance source, and library versions. A
+the full-training-step timing name. It also distinguishes the non-passing output
+reservation from a complete final report and records the bounded fail-stop
+process-group contract without claiming collective recovery. It records the
+benchmark script SHA-256, git object ID, dirty state, provenance source, and
+library versions. A
 clean tree can be identified by its git object ID; a dirty tree cannot, so its
 report explicitly sets `clean_commit_exact: false` and the script hash
 identifies only the harness file, not every modified source file.

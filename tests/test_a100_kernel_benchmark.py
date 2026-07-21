@@ -1347,6 +1347,10 @@ def test_benchmark_argument_validation_is_cpu_safe():
     assert args.learning_rate == pytest.approx(3e-4)
     assert args.parameter_delta_atol == 1e-8
     assert args.trial_index == 1
+    assert (
+        args.distributed_timeout_seconds
+        == benchmark.DEFAULT_DISTRIBUTED_TIMEOUT_SECONDS
+    )
     assert args.variants == ""
     assert args.reference_variant == "native-sdpa"
     assert args.steps > 0 and args.warmup_steps > 0
@@ -1386,6 +1390,73 @@ def test_benchmark_argument_validation_is_cpu_safe():
     broken.lora_r = 0
     with pytest.raises(ValueError, match="lora-r"):
         benchmark.validate_args(broken)
+
+    broken = SimpleNamespace(**vars(args))
+    broken.distributed_timeout_seconds = benchmark.MAX_DISTRIBUTED_TIMEOUT_SECONDS + 1
+    with pytest.raises(ValueError, match="distributed-timeout-seconds"):
+        benchmark.validate_args(broken)
+
+
+def test_distributed_setup_uses_the_bounded_configured_timeout(monkeypatch):
+    initialized = []
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "set_device", lambda _device: None)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _device: "A100-SXM4")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device: (8, 0))
+    monkeypatch.setattr(
+        benchmark.dist,
+        "init_process_group",
+        lambda backend, timeout: initialized.append((backend, timeout)),
+    )
+    monkeypatch.setattr(benchmark.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(benchmark.dist, "get_world_size", lambda: 8)
+
+    rank, world, device = benchmark.setup_distributed(timeout_seconds=17)
+
+    assert (rank, world, device) == (0, 8, torch.device("cuda", 0))
+    assert initialized[0][0] == "nccl"
+    assert initialized[0][1].total_seconds() == 17
+
+
+def test_runtime_reserves_output_immediately_after_distributed_setup(monkeypatch):
+    events = []
+    args = SimpleNamespace(
+        distributed_timeout_seconds=23,
+        output=Path("fresh.json"),
+    )
+
+    def setup(timeout_seconds):
+        events.append(("setup", timeout_seconds))
+        return 0, 8, torch.device("cuda", 0)
+
+    def reserve(output, rank):
+        events.append(("reserve", output, rank))
+        return {"id": "reservation"}
+
+    def environment(runtime_args, world, device):
+        events.append(("environment", runtime_args.output, world, device))
+        return {"source": "recorded"}
+
+    monkeypatch.setattr(benchmark, "setup_distributed", setup)
+    monkeypatch.setattr(benchmark, "reserve_report_output_collectively", reserve)
+    monkeypatch.setattr(benchmark, "environment_report", environment)
+
+    runtime = benchmark.initialize_benchmark_runtime(args)
+
+    assert runtime == (
+        0,
+        8,
+        torch.device("cuda", 0),
+        {"id": "reservation"},
+        {"source": "recorded"},
+    )
+    assert events == [
+        ("setup", 23),
+        ("reserve", Path("fresh.json"), 0),
+        ("environment", Path("fresh.json"), 8, torch.device("cuda", 0)),
+    ]
 
 
 def test_trainable_state_digest_covers_values_names_and_dtypes():
@@ -1508,6 +1579,40 @@ def test_same_object_storage_swap_is_detected_for_parameters_and_buffers():
         assert metadata["storage_data_ptr"] > 0
         assert metadata["storage_identity"] > 0
         assert metadata["storage_nbytes"] == 16
+
+
+def test_registered_state_detects_compatible_module_class_swaps():
+    class OriginalModule(torch.nn.Module):
+        pass
+
+    class ReplacementModule(torch.nn.Module):
+        pass
+
+    model = OriginalModule()
+    model.register_parameter(
+        "frozen",
+        torch.nn.Parameter(torch.ones(2), requires_grad=False),
+    )
+    model.register_buffer("cache", torch.arange(2.0), persistent=False)
+    frozen_anchor = benchmark.snapshot_frozen_parameter_state(model)
+    buffer_anchor = benchmark.snapshot_named_buffers(model)
+
+    model.__class__ = ReplacementModule
+    frozen_current = benchmark.snapshot_frozen_parameter_state(model)
+    buffer_current = benchmark.snapshot_named_buffers(model)
+    frozen_comparison = benchmark.compare_registered_tensor_states(
+        frozen_anchor, frozen_current
+    )
+    buffer_comparison = benchmark.compare_registered_tensor_states(
+        buffer_anchor, buffer_current
+    )
+
+    assert frozen_comparison["passed"] is False
+    assert buffer_comparison["passed"] is False
+    assert frozen_comparison["module_identity_changed"] == []
+    assert buffer_comparison["module_identity_changed"] == []
+    assert frozen_comparison["module_type_changed"] == ["<root>"]
+    assert buffer_comparison["module_type_changed"] == ["<root>"]
 
 
 def test_registered_state_digest_normalizes_only_device_index():
@@ -1641,6 +1746,67 @@ def test_source_provenance_git_fallback_marks_clean_commit(monkeypatch):
     assert provenance["provenance_source"] == "git_worktree"
 
 
+def test_source_provenance_excludes_only_the_reserved_generated_output(monkeypatch):
+    monkeypatch.delenv("YETO_GIT_SHA", raising=False)
+    monkeypatch.delenv("YETO_GIT_DIRTY", raising=False)
+    calls = []
+
+    def git_output(arguments):
+        calls.append(arguments)
+        return "d" * 40 if arguments[0] == "rev-parse" else ""
+
+    monkeypatch.setattr(benchmark, "_git_output", git_output)
+    monkeypatch.setattr(benchmark, "_git_path_is_tracked", lambda _path: False)
+    generated = benchmark.REPO_ROOT / "results" / "reserved.json"
+    provenance = benchmark.source_provenance(
+        (generated, Path("/tmp/outside-repository.json"))
+    )
+
+    assert provenance["git_dirty"] is False
+    assert provenance["ignored_generated_worktree_paths"] == ["results/reserved.json"]
+    status_arguments = next(call for call in calls if call[0] == "status")
+    assert ":(exclude,top,literal)results/reserved.json" in status_arguments
+    assert all("outside-repository" not in item for item in status_arguments)
+
+
+def test_source_provenance_never_excludes_a_tracked_deleted_output(monkeypatch):
+    monkeypatch.delenv("YETO_GIT_SHA", raising=False)
+    monkeypatch.delenv("YETO_GIT_DIRTY", raising=False)
+    calls = []
+
+    def git_output(arguments):
+        calls.append(arguments)
+        if arguments == ["rev-parse", "HEAD"]:
+            return "e" * 40
+        return " D results/tracked.json"
+
+    monkeypatch.setattr(benchmark, "_git_output", git_output)
+    monkeypatch.setattr(benchmark, "_git_path_is_tracked", lambda _path: True)
+    tracked = benchmark.REPO_ROOT / "results" / "tracked.json"
+    provenance = benchmark.source_provenance((tracked,))
+
+    assert provenance["git_dirty"] is True
+    assert provenance["clean_commit_exact"] is False
+    assert provenance["ignored_generated_worktree_paths"] == []
+    status_arguments = next(call for call in calls if call[0] == "status")
+    assert all("exclude" not in item for item in status_arguments)
+
+
+def test_git_index_query_fails_closed_on_operational_errors(monkeypatch):
+    monkeypatch.setattr(
+        benchmark.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=2,
+            stdout="",
+            stderr="index unavailable",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="index unavailable"):
+        benchmark._git_path_is_tracked(benchmark.REPO_ROOT / "results" / "output.json")
+
+
 @pytest.mark.parametrize(
     ("variants", "failed", "expected_status"),
     [
@@ -1668,6 +1834,7 @@ def test_report_status_distinguishes_pass_failure_and_incomplete(
         fatal_reason="mismatch" if failed else None,
     )
     assert report["status"] == expected_status
+    assert report["report_complete"] is True
     assert report["completed_variants"] == variants
     if failed:
         assert report["fatal"] == {"phase": "parity", "reason": "mismatch"}
@@ -1695,11 +1862,114 @@ def test_report_status_requires_exact_unique_planned_variant_order():
         assert report["status"] == "incomplete"
 
 
-def test_atomic_report_write_and_collective_write_failure(tmp_path, monkeypatch):
+def test_output_reservation_refuses_existing_pass_and_marks_early_failure(
+    tmp_path, monkeypatch
+):
+    existing = tmp_path / "existing.json"
+    existing.write_text('{"status":"passed"}\n')
+    with pytest.raises(FileExistsError, match="pre-existing benchmark output"):
+        benchmark.reserve_report_output_collectively(existing, rank=0)
+    assert json.loads(existing.read_text())["status"] == "passed"
+
+    reserved = tmp_path / "reserved.json"
+
+    def fail_after_reservation():
+        reservation = benchmark.reserve_report_output_collectively(reserved, rank=0)
+        assert reservation["preexisting_output_policy"] == "refuse"
+        raise RuntimeError("rank-local early failure")
+
+    with pytest.raises(RuntimeError, match="rank-local early failure"):
+        fail_after_reservation()
+    sentinel = json.loads(reserved.read_text())
+    assert sentinel["schema_version"] == benchmark.BENCHMARK_SCHEMA_VERSION
+    assert sentinel["status"] == "incomplete"
+    assert sentinel["report_complete"] is False
+    assert sentinel["output_reservation"]["final_report_written"] is False
+    assert not list(tmp_path.glob(f".{reserved.name}.*.tmp"))
+
+    broadcasts = []
+
+    def broadcast(value, rank):
+        if rank == 0:
+            broadcasts.append(value)
+            return value
+        assert value is None
+        return broadcasts[-1]
+
+    monkeypatch.setattr(benchmark, "broadcast_object", broadcast)
+    collective = tmp_path / "collective.json"
+    rank_zero = benchmark.reserve_report_output_collectively(collective, rank=0)
+    rank_one = benchmark.reserve_report_output_collectively(collective, rank=1)
+    assert rank_zero == rank_one
+    assert json.loads(collective.read_text())["output_reservation"] == rank_zero
+
+
+def test_output_reservation_refuses_a_tracked_path_missing_from_worktree(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "tracked-but-deleted.json"
+    monkeypatch.setattr(benchmark, "_git_path_is_tracked", lambda _path: True)
+
+    with pytest.raises(FileExistsError, match="git-tracked benchmark output"):
+        benchmark.reserve_report_output_collectively(output, rank=0)
+
+    assert not output.exists()
+
+
+def test_atomic_report_write_fsyncs_containing_directory(tmp_path, monkeypatch):
     output = tmp_path / "reports" / "result.json"
+    fsynced = []
+    monkeypatch.setattr(
+        benchmark,
+        "_fsync_directory",
+        lambda directory: fsynced.append(Path(directory)),
+    )
+
     benchmark.write_report_atomic(output, '{"status":"passed"}')
+
     assert json.loads(output.read_text()) == {"status": "passed"}
+    assert fsynced == [output.parent]
     assert not list(output.parent.glob(f".{output.name}.*.tmp"))
+
+
+def test_collective_publication_replaces_the_incomplete_reservation(tmp_path):
+    output = tmp_path / "complete.json"
+    reservation = benchmark.reserve_report_output_collectively(output, rank=0)
+    report = {
+        "schema_version": benchmark.BENCHMARK_SCHEMA_VERSION,
+        "benchmark": benchmark.BENCHMARK_NAME,
+        "status": "incomplete",
+        "report_complete": False,
+        "planned_variants": ["a"],
+        "completed_variants": [],
+        "fatal": None,
+        "output_reservation": dict(reservation),
+        "variants": [{"variant": {"name": "a"}, "status": "passed"}],
+    }
+
+    result = benchmark.publish_report_collectively(
+        report,
+        output,
+        rank=0,
+        failed=False,
+        fatal_phase=None,
+        fatal_reason=None,
+    )
+
+    complete = json.loads(output.read_text())
+    assert result["passed"] is True
+    assert result["status"] == "passed"
+    assert complete["status"] == "passed"
+    assert complete["report_complete"] is True
+    assert complete["output_reservation"]["final_report_written"] is True
+
+
+def test_atomic_report_write_and_collective_write_failure(tmp_path, monkeypatch):
+    output = tmp_path / "reports" / "reserved.json"
+    reservation = benchmark.reserve_report_output_collectively(output, rank=0)
+    sentinel = json.loads(output.read_text())
+    assert sentinel["status"] == "incomplete"
+    assert sentinel["output_reservation"] == reservation
 
     published = []
 
@@ -1720,6 +1990,7 @@ def test_atomic_report_write_and_collective_write_failure(tmp_path, monkeypatch)
         "planned_variants": ["a"],
         "completed_variants": [],
         "fatal": None,
+        "output_reservation": dict(reservation),
         "variants": [{"variant": {"name": "a"}, "status": "passed"}],
     }
     rank_zero = benchmark.publish_report_collectively(
@@ -1741,6 +2012,10 @@ def test_atomic_report_write_and_collective_write_failure(tmp_path, monkeypatch)
     assert rank_zero == rank_one
     assert rank_zero["passed"] is False
     assert "disk full" in rank_zero["error"]
+    preserved = json.loads(output.read_text())
+    assert preserved["status"] == "incomplete"
+    assert preserved["report_complete"] is False
+    assert preserved["output_reservation"]["final_report_written"] is False
 
 
 def test_main_uses_guarded_destroy_without_a_final_barrier(monkeypatch):
