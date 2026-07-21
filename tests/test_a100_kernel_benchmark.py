@@ -61,7 +61,9 @@ def test_fused_loss_variant_applies_instance_patch_before_peft(monkeypatch):
             return self
 
     model = Model()
-    monkeypatch.setattr(benchmark, "validate_kernel_request", lambda *args: None)
+    monkeypatch.setattr(
+        benchmark, "validate_kernel_request", lambda *args, **kwargs: None
+    )
     monkeypatch.setattr(benchmark, "attention_load_kwargs", lambda *args: {})
     monkeypatch.setattr(
         transformers.AutoConfig,
@@ -133,6 +135,24 @@ def test_fused_loss_variant_applies_instance_patch_before_peft(monkeypatch):
         ("to", "cpu"),
         "attention",
     ]
+
+
+def test_poisoned_kernel_isolation_failure_is_a_fatal_benchmark_load_error():
+    complete = benchmark.KernelIsolationError(
+        "restored",
+        failed_invariants=["class_binding"],
+        rollback_report={"complete": True},
+    )
+    poisoned = benchmark.KernelIsolationError(
+        "poisoned",
+        failed_invariants=["parameter_contents"],
+        rollback_report={"complete": False},
+    )
+
+    assert not benchmark.is_fatal_model_load_error(complete)
+    assert benchmark.is_fatal_model_load_error(poisoned)
+    assert benchmark.is_fatal_model_load_error(RuntimeError("CUDA out of memory"))
+    assert not benchmark.is_fatal_model_load_error(RuntimeError("missing optional package"))
 
 
 def test_percentile_interpolates_and_validates_input():
@@ -527,6 +547,16 @@ def test_benchmark_argument_validation_is_cpu_safe():
     broken.lora_r = 0
     with pytest.raises(ValueError, match="lora-r"):
         benchmark.validate_args(broken)
+
+    broken = SimpleNamespace(**vars(args))
+    broken.tuning = "full"
+    with pytest.raises(ValueError, match="approved only for --tuning lora"):
+        benchmark.validate_args(broken)
+
+    native_full = SimpleNamespace(**vars(args))
+    native_full.tuning = "full"
+    native_full.variants = "native-sdpa"
+    benchmark.validate_args(native_full)
 
 
 def test_trainable_state_digest_covers_values_names_and_dtypes():

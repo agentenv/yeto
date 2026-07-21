@@ -70,6 +70,7 @@ def test_torch_backend_installs_only_explicit_kernel_dependencies():
             island_backend="torch",
             attention_backend="flash-attn-2",
             kernel_backend="liger",
+            shard="ddp",
         ),
         _SPEC,
         0,
@@ -87,6 +88,25 @@ def test_liger_launcher_rejects_non_builtin_loss():
     with pytest.raises(ValueError, match="only the built-in cross_entropy"):
         make_learner_task(
             _args(kernel_backend="liger", loss_function="pickle:loss.pkl"),
+            _SPEC,
+            0,
+            1,
+            "1.2.3.4:29400",
+        )
+
+
+def test_liger_launcher_rejects_unvalidated_tuning_and_sharding():
+    with pytest.raises(ValueError, match="only for --tuning lora"):
+        make_learner_task(
+            _args(kernel_backend="liger", tuning="full", shard="ddp"),
+            _SPEC,
+            0,
+            1,
+            "1.2.3.4:29400",
+        )
+    with pytest.raises(ValueError, match="only for --shard ddp"):
+        make_learner_task(
+            _args(kernel_backend="liger", tuning="lora", shard="fsdp"),
             _SPEC,
             0,
             1,

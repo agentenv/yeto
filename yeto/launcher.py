@@ -517,6 +517,16 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             "--kernel-backend liger fused-linear-CE supports only the built-in "
             "cross_entropy loss"
         )
+    if kernel_backend == "liger" and args.tuning != "lora":
+        raise ValueError(
+            "--kernel-backend liger fused-linear-CE is production-approved only "
+            "for --tuning lora"
+        )
+    if kernel_backend == "liger" and args.shard != "ddp":
+        raise ValueError(
+            "--kernel-backend liger fused-linear-CE is production-approved only "
+            "for --shard ddp until FSDP has separate CUDA parity evidence"
+        )
 
     # Flags shared by all learners. The DiLoCo sync, LoRA, and data source
     # shape are identical; the per-task forward/loss loop differs.

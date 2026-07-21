@@ -185,7 +185,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default="native",
         help="causal SFT loss kernel: native (default) or the pinned, "
         "binary-mask-only instance-scoped Liger fused-linear-CE lane; "
-        "model layers remain native",
+        "model layers remain native; the fused lane currently requires "
+        "--tuning lora --shard ddp",
     )
 
     def int_or_auto(value: str):

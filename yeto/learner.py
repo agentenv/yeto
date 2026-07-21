@@ -31,6 +31,7 @@ from .causal_kernels import (
     ATTENTION_BACKENDS,
     FUSED_LINEAR_CE_IMPLEMENTATION,
     KERNEL_BACKENDS,
+    KernelIsolationError,
     NATIVE_LAYER_BACKEND,
     NATIVE_LOSS_IMPLEMENTATION,
     apply_liger_fused_linear_ce,
@@ -85,7 +86,8 @@ def parse_args(argv=None):
         default="native",
         help="causal SFT loss kernel: native (default) or the pinned, "
         "binary-mask-only instance-scoped Liger fused-linear-CE lane; "
-        "model layers remain native",
+        "model layers remain native; the fused lane currently requires "
+        "--tuning lora --shard ddp",
     )
     p.add_argument(
         "--train-on",
@@ -302,7 +304,9 @@ def load_model_and_tokenizer(args, device):
         args.loss_function,
         device,
         dtype,
-        base_quantization,
+        base_quantization=base_quantization,
+        tuning=args.tuning,
+        shard=args.shard,
     )
     attention_kwargs = attention_load_kwargs(attention_backend, device, dtype)
     liger_model_type = None
@@ -356,6 +360,11 @@ def load_model_and_tokenizer(args, device):
             # rejects wrappers and proves that only this base instance's
             # forward changes. All transformer layers remain native.
             kernel_application = apply_liger_fused_linear_ce(model)
+        except KernelIsolationError:
+            # Preserve the typed poisoned-process contract for callers. The
+            # learner entrypoint lets it terminate the rank instead of ever
+            # attempting another model load in the same process.
+            raise
         except Exception as exc:
             raise RuntimeError(
                 f"failed to apply the isolated fused-linear-CE loss to {model_id!r}"

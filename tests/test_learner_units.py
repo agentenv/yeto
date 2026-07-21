@@ -46,7 +46,9 @@ def test_isolated_fused_loss_is_applied_before_peft(monkeypatch):
         return base_model
 
     monkeypatch.setattr(learner, "_from_pretrained_offline_first", fake_from_pretrained)
-    monkeypatch.setattr(learner, "validate_kernel_request", lambda *args: None)
+    monkeypatch.setattr(
+        learner, "validate_kernel_request", lambda *args, **kwargs: None
+    )
     monkeypatch.setattr(learner, "attention_load_kwargs", lambda *args: {})
     monkeypatch.setattr(
         learner,

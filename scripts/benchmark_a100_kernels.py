@@ -33,6 +33,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from yeto.causal_kernels import (  # noqa: E402
     FUSED_LINEAR_CE_IMPLEMENTATION,
+    KernelIsolationError,
     NATIVE_LAYER_BACKEND,
     NATIVE_LOSS_IMPLEMENTATION,
     apply_liger_fused_linear_ce,
@@ -175,6 +176,18 @@ def package_version(name: str) -> str | None:
         return None
 
 
+def is_fatal_model_load_error(exc: Exception) -> bool:
+    """Return whether a failed arm makes continuing in-process unsafe."""
+    return (
+        isinstance(exc, torch.cuda.OutOfMemoryError)
+        or "out of memory" in str(exc).lower()
+        or (
+            isinstance(exc, KernelIsolationError)
+            and exc.process_state_poisoned
+        )
+    )
+
+
 def resolve_model_revision(model_id: str, requested_revision: str | None) -> str:
     """Resolve a moving Hub revision to the immutable commit loaded by every rank."""
     if Path(model_id).exists():
@@ -260,6 +273,8 @@ def load_raw_model(
         "cross_entropy",
         device,
         dtype,
+        tuning=tuning,
+        shard="ddp",
     )
     kwargs = attention_load_kwargs(variant.attention_backend, device, dtype)
     if variant.loss_backend == "liger":
@@ -1508,7 +1523,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--tuning",
         choices=["lora", "full"],
         default="lora",
-        help="train FP32 LoRA adapters by default; full is an explicit separate profile",
+        help="train FP32 LoRA adapters by default; full is a native-only separate profile",
     )
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
@@ -1563,6 +1578,14 @@ def validate_args(args) -> None:
         args.parameter_delta_atol,
     ) < 0:
         raise ValueError("parity tolerances must be nonnegative")
+    selected = select_variants(args.variants)
+    if args.tuning != "lora" and any(
+        variant.loss_backend == "liger" for variant in selected
+    ):
+        raise ValueError(
+            "the fused-linear-CE benchmark arm is approved only for --tuning lora; "
+            "select native-only variants for a separate full-tuning profile"
+        )
 
 
 def _validated_git_sha(value: str) -> str:
@@ -1722,6 +1745,16 @@ def main(argv=None) -> int:
         "planned_variants": [variant.name for variant in variants],
         "completed_variants": [],
         "fatal": None,
+        "supported_evidence_scope": {
+            "fused-linear-ce-sdpa": {
+                "tuning": "lora",
+                "shard": "ddp",
+                "distributed_policy": (
+                    "replicated-frozen-base-manual-adapter-gradient-mean"
+                ),
+                "excluded_until_separate_cuda_evidence": ["full", "fsdp"],
+            }
+        },
         "trial": {
             "index": args.trial_index,
             "timing_trials_in_record": 1,
@@ -1780,9 +1813,7 @@ def main(argv=None) -> int:
             )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
-            fatal_load_error = isinstance(exc, torch.cuda.OutOfMemoryError) or (
-                "out of memory" in str(exc).lower()
-            )
+            fatal_load_error = is_fatal_model_load_error(exc)
         loaded_everywhere = all_ranks_succeeded(model is not None, device)
         fatal_load_error = any_rank_true(fatal_load_error, device)
         errors = gather_errors(error, world)

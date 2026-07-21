@@ -8,7 +8,7 @@ The supported controls are:
 | control | values | default | meaning |
 |---|---|---|---|
 | `--attention-backend` | `auto`, `sdpa`, `flash-attn-2` | `auto` | Hugging Face attention implementation |
-| `--kernel-backend` | `native`, `liger` | `native` | SFT loss implementation; model layers remain native |
+| `--kernel-backend` | `native`, `liger` | `native` | SFT loss implementation; model layers remain native; fused requires LoRA/DDP |
 
 An explicit request is fail-closed. A missing or differently-versioned
 dependency, an unsupported model implementation, FlashAttention with FP32,
@@ -58,14 +58,34 @@ swiglu=False
 model=model
 ```
 
-The call occurs before PEFT wraps the base model. Yeto snapshots the Qwen2
-module and class globals, functional cross-entropy, the model instance, and
-all nested module instances around that call. It accepts only a new
-instance-bound `forward` on that one base model. A changed class/global, layer
-module, nested instance, model layout, or unexpected apply-function signature
-is fatal. This prevents one experimental model from changing later native
-models in the same process and keeps rope, RMSNorm, and SwiGLU implementations
-identical to the reference.
+The call occurs before PEFT wraps the base model. Yeto attests the Qwen2 module
+and class bindings, functional cross-entropy, exact nested module identities
+and types, module namespaces, mutable built-in container structure, model
+configuration, and every registered parameter and buffer around that call.
+Tensor attestation covers object identity, shape, dtype, device, layout,
+stride, storage offset, data pointer, storage size, `requires_grad`, mutation
+version, and a strong content digest. Content SHA-256 is computed in bounded
+4 MiB logical-order chunks; Yeto never retains a second copy of the model's
+tensors. The only accepted change is a new instance-bound `forward` on that
+one base model. This proves the accepted arm kept the reference model layers,
+weights, buffers, and process-global bindings unchanged.
+
+Rejection is transactional where state is safely reversible: Yeto restores
+the Qwen2 module/class bindings, functional cross-entropy, model namespace,
+and exact module classes, then repeats the complete attestation against the
+pre-apply snapshot. In-place tensor or nested-container contents cannot in
+general be reconstructed without retaining a duplicate model. If any such
+state does not match after rollback, `KernelIsolationError` marks the process
+poisoned and requires termination. The benchmark treats that condition as
+fatal and never continues to another arm in the same process. Only a fully
+verified rollback permits a caller to continue.
+
+The production-approved fused-loss envelope is currently narrower than the
+native learner: it requires `--tuning lora --shard ddp`. Full tuning and FSDP
+fail before launch/model loading and must use `--kernel-backend native` until
+each has separate real-CUDA loss, gradient, optimizer-delta, and distributed
+parity evidence. This restriction is independent of whether a configuration
+might appear to run; unsupported evidence profiles are never inferred safe.
 
 Binary token masks are converted to labels with `-100` at ignored positions.
 `num_items_in_batch=1` makes the pinned implementation return the required
@@ -110,16 +130,18 @@ PEFT is applied before distributed setup. As in the learner, LoRA leaves the
 frozen base unwrapped and manually averages only trainable adapter gradients;
 DDP is used only by the explicit full-tuning profile. The frozen base remains
 BF16, trainable adapters must remain FP32, and `lm_head` must remain frozen and
-unadapted. Use `--tuning full` only as an explicitly reported separate profile;
-do not combine its evidence with default LoRA trials. The optimizer is ordinary
-AdamW with the learner's default learning rate, `3e-4`, followed by gradient
-clipping at norm `1.0`.
+unadapted. Use `--tuning full` only with explicitly selected native-only
+variants as a separately reported profile; the fused-loss arm rejects it. Do
+not combine full-tuning evidence with default LoRA trials. The optimizer is
+ordinary AdamW with the learner's default learning rate, `3e-4`, followed by
+gradient clipping at norm `1.0`.
 
 The publishable default matrix is component-isolated:
 
 1. Native layers with SDPA and PyTorch cross-entropy—the parity reference.
 2. Native layers with FlashAttention 2 and PyTorch cross-entropy, when installed and supported.
-3. Native layers with SDPA and the instance-only Liger fused-linear-CE loss, when installed and supported.
+3. Native layers with SDPA and the instance-only Liger fused-linear-CE loss,
+   only for the production LoRA/DDP profile when installed and supported.
 
 The benchmark report records `layer_backend`, `loss_backend`, and
 `loss_implementation` independently. It does not publish arms that change both
