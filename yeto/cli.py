@@ -107,7 +107,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         type=loss_spec,
         default="cross_entropy",
         help=f"one of {'|'.join(LOSS_FUNCTIONS)}, or custom:<file.py>[:<fn>] "
-        "defining fn(logits, input_ids, weights) -> (loss, num_tokens). "
+        "defining fn(logits, input_ids, weights) -> (summed_loss, num_tokens). "
+        "num_tokens must count positive shifted target weights. "
         "Diffusion launches default cross_entropy to flow_matching in the "
         "learner task. Custom callables are pickled by value and shipped to "
         "all learners",
@@ -147,6 +148,21 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default="assistant",
         help="which tokens carry loss: assistant-message tokens only (default) or every token",
     )
+    tune.add_argument(
+        "--assistant-mask-mode",
+        choices=["native", "legacy"],
+        default="native",
+        help="assistant-only masking: require the tokenizer's exact native "
+        "assistant mask (default), or explicitly use the legacy synthetic "
+        "<|role|> compatibility format",
+    )
+    tune.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="causal-LM root seed; shared for model/adapter initialization, "
+        "then deterministically separated by learner and rank for training",
+    )
     tune.add_argument("--lora-r", type=int, default=16)
     tune.add_argument(
         "--lora-targets",
@@ -156,6 +172,22 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "(attention for MoE — router and routed experts stay frozen)",
     )
     tune.add_argument("--seq-len", type=int, default=2048)
+    tune.add_argument(
+        "--attention-backend",
+        choices=["auto", "sdpa", "flash-attn-2"],
+        default="auto",
+        help="causal attention implementation: let Transformers choose, "
+        "force PyTorch SDPA, or require pinned FlashAttention 2",
+    )
+    tune.add_argument(
+        "--kernel-backend",
+        choices=["native", "liger"],
+        default="native",
+        help="causal SFT loss kernel: native (default) or the pinned, "
+        "binary-mask-only instance-scoped Liger fused-linear-CE lane; "
+        "model layers remain native; the fused lane currently requires "
+        "--tuning lora --shard ddp",
+    )
 
     def int_or_auto(value: str):
         # duplicated from yeto/autobatch.py: importing it would pull torch
@@ -166,11 +198,17 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--micro-batch-size",
         type=int_or_auto,
         default="auto",
-        help="per-GPU micro batch; 'auto' (default) probes the largest size "
-        "that fits each learner's VRAM at startup and shrinks --grad-accum "
-        "to keep the effective batch constant",
+        help="per-GPU micro batch; with 'auto' (default), --grad-accum is the "
+        "requested per-rank effective sequence batch and the probe chooses "
+        "its largest fitting divisor",
     )
-    tune.add_argument("--grad-accum", type=int, default=4)
+    tune.add_argument(
+        "--grad-accum",
+        type=int,
+        default=4,
+        help="accumulation steps with an explicit micro batch; with 'auto', "
+        "the requested per-rank effective sequence batch",
+    )
     tune.add_argument("--inner-lr", type=float, default=3e-4)
     tune.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
     tune.add_argument(

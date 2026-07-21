@@ -153,7 +153,7 @@ def test_diffusion_learner_parse_cache_defaults_are_off():
     assert args.seed is None
 
 
-def test_launch_cli_parses_diffusion_seed_without_a_generic_lm_seed():
+def test_launch_cli_keeps_diffusion_and_lm_seeds_separate():
     from yeto.cli import parse_args
 
     args = parse_args(
@@ -172,8 +172,8 @@ def test_launch_cli_parses_diffusion_seed_without_a_generic_lm_seed():
     )
 
     assert args.diffusion_seed == 123
+    assert args.seed == 0
     assert args.resize_mode == "center-crop"
-    assert not hasattr(args, "seed")
 
 
 def test_diffusion_seed_derivation_is_stable_and_separates_eval_rows():
@@ -2531,6 +2531,7 @@ def test_launcher_routes_diffusion_to_diffusion_learner_and_opt_in_caches():
     assert "--diffusion-loss-weighting" not in task.run
     assert "--diffusion-family" not in task.run
     assert "--train-on" not in task.run and "--seq-len" not in task.run
+    assert "--assistant-mask-mode" not in task.run
     assert "--tokenize" not in task.run
 
 
@@ -2568,7 +2569,7 @@ def test_launcher_passes_diffusion_loss_weighting_only_for_diffusion():
     assert "--train-on assistant" in lm_task.run
 
 
-def test_launcher_passes_seed_only_to_diffusion_learner():
+def test_launcher_passes_the_model_kind_specific_seed():
     task = make_learner_task(
         _args(diffusion_seed=123),
         _SPEC,
@@ -2579,13 +2580,13 @@ def test_launcher_passes_seed_only_to_diffusion_learner():
     assert " --seed 123" in task.run
 
     lm_task = make_learner_task(
-        _args(model="gemma4", diffusion_seed=123),
+        _args(model="gemma4", diffusion_seed=123, seed=29),
         _SPEC,
         0,
         1,
         "a:1",
     )
-    assert " --seed " not in lm_task.run
+    assert " --seed 29" in lm_task.run
 
 
 def test_launcher_routes_video_aliases_without_model_family_flags():

@@ -21,12 +21,29 @@ import logging
 import os
 import random
 import time
+from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
 
-from .autobatch import int_or_auto, rebalance_grad_accum, resolve_micro_batch_size
+from .autobatch import exact_grad_accum, int_or_auto, resolve_micro_batch_size
+from .causal_kernels import (
+    ATTENTION_BACKENDS,
+    FUSED_LINEAR_CE_IMPLEMENTATION,
+    KERNEL_BACKENDS,
+    KernelIsolationError,
+    NATIVE_LAYER_BACKEND,
+    NATIVE_LOSS_IMPLEMENTATION,
+    apply_liger_fused_linear_ce,
+    attention_load_kwargs,
+    liger_sft_forward,
+    require_liger_model_support,
+    resolved_attention_backend,
+    validate_kernel_request,
+    validate_lora_production_envelope,
+)
 from .data import StreamingPackedBlocks, build_packed_dataset
+from .finalization import finalize_torch_island
 from .fragments import FragmentLayout, build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
 from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
@@ -34,6 +51,7 @@ from .tensor_io import (
     apply_fragment,
     fragment_flat,
     pack_fragment,
+    pack_tensor,
     quantize_q4,
     unpack_fragment,
 )
@@ -57,11 +75,34 @@ def parse_args(argv=None):
     p.add_argument("--num-learners", type=int, required=True)
     p.add_argument("--loss-function", default="cross_entropy")
     p.add_argument(
+        "--attention-backend",
+        choices=ATTENTION_BACKENDS,
+        default="auto",
+        help="causal attention implementation: let Transformers choose, "
+        "force PyTorch SDPA, or require pinned FlashAttention 2",
+    )
+    p.add_argument(
+        "--kernel-backend",
+        choices=KERNEL_BACKENDS,
+        default="native",
+        help="causal SFT loss kernel: native (default) or the pinned, "
+        "binary-mask-only instance-scoped Liger fused-linear-CE lane; "
+        "model layers remain native; the fused lane currently requires "
+        "--tuning lora --shard ddp",
+    )
+    p.add_argument(
         "--train-on",
         choices=["assistant", "all"],
         default="assistant",
         help="which tokens carry loss: assistant-message tokens only "
         "(default) or every token",
+    )
+    p.add_argument(
+        "--assistant-mask-mode",
+        choices=["native", "legacy"],
+        default="native",
+        help="assistant-only masking: require tokenizer-native exact masks "
+        "(default), or use the legacy synthetic role format",
     )
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument(
@@ -94,9 +135,9 @@ def parse_args(argv=None):
         "--micro-batch-size",
         type=int_or_auto,
         default="auto",
-        help="per-GPU micro batch; 'auto' (default) probes the largest size "
-        "that fits VRAM at startup and shrinks --grad-accum to keep the "
-        "effective batch constant",
+        help="per-GPU micro batch; with 'auto' (default), --grad-accum is the "
+        "requested per-rank effective sequence batch and the probe chooses "
+        "its largest fitting divisor",
     )
     p.add_argument(
         "--gradient-checkpointing",
@@ -105,11 +146,22 @@ def parse_args(argv=None):
         help="recompute activations in backward; 'auto' enables it when the "
         "loaded base already occupies more than half of VRAM",
     )
-    p.add_argument("--grad-accum", type=int, default=1)
+    p.add_argument(
+        "--grad-accum",
+        type=int,
+        default=1,
+        help="accumulation steps with an explicit micro batch; with 'auto', "
+        "the requested per-rank effective sequence batch",
+    )
     p.add_argument("--inner-lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--warmup-steps", type=int, default=10)
-    p.add_argument("--seed", type=int, default=None)
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="shared initialization seed; training streams derive learner/rank seeds",
+    )
     p.add_argument("--fragments", type=int, default=8, help="P (= H, round-robin)")
     p.add_argument(
         "--fragment-pattern",
@@ -141,8 +193,8 @@ def parse_args(argv=None):
         "--wire-dtype",
         choices=["bf16", "f32", "q4"],
         default="bf16",
-        help="tensor encoding on the WAN; q4 sends pushes as 4-bit E3M0 "
-        "block-quantized deltas (broadcasts stay bf16)",
+        help="tensor encoding on the WAN; every push is a base-relative "
+        "delta, q4 block-quantizes it as 4-bit E3M0 (broadcasts stay bf16)",
     )
     p.add_argument("--wan-streams", type=int, default=4)
     p.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
@@ -216,7 +268,7 @@ def _prepare_nf4_base_for_lora(model) -> None:
 
 
 def load_model_and_tokenizer(args, device):
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     from .models import resolve
 
@@ -246,31 +298,95 @@ def load_model_and_tokenizer(args, device):
         dtype = torch.float32
     else:
         dtype = torch.bfloat16
+    kernel_backend = getattr(args, "kernel_backend", "native")
+    attention_backend = getattr(args, "attention_backend", "auto")
+    validate_kernel_request(
+        kernel_backend,
+        args.loss_function,
+        device,
+        dtype,
+        base_quantization=base_quantization,
+        tuning=args.tuning,
+        shard=args.shard,
+    )
+    attention_kwargs = attention_load_kwargs(attention_backend, device, dtype)
+    liger_model_type = None
+    if kernel_backend == "liger":
+        config = _from_pretrained_offline_first(
+            AutoConfig,
+            model_id,
+            trust_remote_code=True,
+        )
+        liger_model_type = require_liger_model_support(config)
     tokenizer = _from_pretrained_offline_first(AutoTokenizer, model_id, trust_remote_code=True)
-    if base_quantization == "nf4":
-        from transformers import BitsAndBytesConfig
+    try:
+        if base_quantization == "nf4":
+            from transformers import BitsAndBytesConfig
 
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-        )
-        model = _from_pretrained_offline_first(
-            AutoModelForCausalLM,
-            model_id,
-            quantization_config=quantization_config,
-            device_map={"": device.index if device.index is not None else 0},
-            low_cpu_mem_usage=True,
-            trust_remote_code=True,
-        )
-    else:
-        model = _from_pretrained_offline_first(
-            AutoModelForCausalLM,
-            model_id,
-            torch_dtype=dtype,
-            trust_remote_code=True,
-        )
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+            )
+            model = _from_pretrained_offline_first(
+                AutoModelForCausalLM,
+                model_id,
+                quantization_config=quantization_config,
+                device_map={"": device.index if device.index is not None else 0},
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,
+                **attention_kwargs,
+            )
+        else:
+            model = _from_pretrained_offline_first(
+                AutoModelForCausalLM,
+                model_id,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                **attention_kwargs,
+            )
+    except Exception as exc:
+        if attention_backend != "auto" or kernel_backend != "native":
+            raise RuntimeError(
+                f"failed to load {model_id!r} with attention={attention_backend!r} "
+                f"and loss_kernel={kernel_backend!r}; the dependency or model "
+                "implementation does not support the explicit request"
+            ) from exc
+        raise
+    kernel_application = None
+    if kernel_backend == "liger":
+        try:
+            # This must precede get_peft_model: the strict direct-binding
+            # helper accepts only the native base instance. All transformer
+            # layers remain native.
+            kernel_application = apply_liger_fused_linear_ce(model)
+        except KernelIsolationError:
+            # Preserve the typed poisoned-process contract for callers. The
+            # learner entrypoint lets it terminate the rank instead of ever
+            # attempting another model load in the same process.
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to bind the isolated fused-linear-CE loss to {model_id!r}"
+            ) from exc
+    resolved_attention = resolved_attention_backend(model, attention_backend)
+    loss_implementation = (
+        FUSED_LINEAR_CE_IMPLEMENTATION
+        if kernel_backend == "liger"
+        else NATIVE_LOSS_IMPLEMENTATION
+    )
+    log.info(
+        "causal kernel recipe: attention requested=%s resolved=%s; "
+        "layers=%s; loss=%s%s",
+        attention_backend,
+        resolved_attention,
+        NATIVE_LAYER_BACKEND,
+        loss_implementation,
+        f" model_type={liger_model_type}" if liger_model_type else "",
+    )
+    if kernel_application is not None:
+        log.info("isolated fused-loss binding: %s", kernel_application)
     if args.tuning == "lora":
         from peft import LoraConfig, get_peft_model
 
@@ -288,6 +404,8 @@ def load_model_and_tokenizer(args, device):
         model = get_peft_model(model, lora)
     if base_quantization == "none":
         model.to(device)
+    if kernel_backend == "liger":
+        validate_lora_production_envelope(model)
     return model, tokenizer
 
 
@@ -353,17 +471,100 @@ def allreduce_trainable_grads(params, world: int) -> None:
 
     FSDP leaves params passed via ignored_states unmanaged, so the replicated
     LoRA adapter grads are never reduced; calling this at optimizer-step
-    boundaries (before clipping) reproduces DDP-mean semantics — each rank
-    normalizes its loss by its own trained-token count, and SUM/world of
-    those grads is the cross-rank mean. No-op when world <= 1; params whose
-    grad is None are skipped.
+    boundaries (before clipping) reproduces DDP-mean semantics. Ranks first
+    agree on parameter presence and follow the same reduction schedule,
+    substituting zeros for locally-unused adapters. Globally-unused parameters
+    keep grad=None. No-op when world <= 1.
     """
     if world <= 1:
         return
-    for p in params:
-        if p.grad is not None:
-            dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
-            p.grad.div_(world)
+    params = list(params)
+    if not params:
+        return
+
+    # Every rank must issue the same collectives in the same order. Conditional
+    # modules can leave a parameter unused (grad=None) on only some ranks, so
+    # first agree which parameters were used anywhere, then reduce a real grad
+    # or an explicit zero buffer for every globally-used parameter. Parameters
+    # unused everywhere are skipped identically and stay grad=None so AdamW
+    # does not apply weight decay to them.
+    present = torch.tensor(
+        [p.grad is not None for p in params],
+        dtype=torch.int32,
+        device=params[0].device,
+    )
+    dist.all_reduce(present, op=dist.ReduceOp.SUM)
+    globally_present = present.cpu().tolist()
+    for used, p in zip(globally_present, params):
+        if not used:
+            continue
+        reduced = p.grad if p.grad is not None else torch.zeros_like(p)
+        dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+        reduced.div_(world)
+        if p.grad is None:
+            p.grad = reduced
+
+
+@dataclass(frozen=True)
+class TrainingCounters:
+    """Island-global work accepted into completed optimizer steps."""
+
+    local_steps: int
+    global_step: int
+    raw_tokens: int
+    target_tokens: int
+
+
+def positive_target_tokens(weights: torch.Tensor) -> int:
+    """Count positive-weight causal targets after the one-token LM shift."""
+    if weights.ndim == 0 or weights.shape[-1] < 2:
+        return 0
+    return int((weights[..., 1:] > 0).sum().item())
+
+
+def _next_accumulation_group(iterator, grad_accum: int) -> list:
+    """Look ahead over input tensors only; forward graphs are built one at a time."""
+    group = []
+    for _ in range(grad_accum):
+        try:
+            group.append(next(iterator))
+        except StopIteration:
+            break
+    return group
+
+
+def _common_group_size(local_size: int, device, world: int) -> int:
+    """Largest prefix every rank can process without collective divergence."""
+    if world <= 1:
+        return local_size
+    size = torch.tensor(local_size, dtype=torch.long, device=device)
+    dist.all_reduce(size, op=dist.ReduceOp.MIN)
+    return int(size.item())
+
+
+def _global_group_counts(group: list, device, world: int) -> tuple[int, int, int]:
+    """Return local target count and island-global (target, raw) counts."""
+    local_targets = sum(positive_target_tokens(weights) for _, weights in group)
+    local_raw = sum(int(input_ids.numel()) for input_ids, _ in group)
+    counts = torch.tensor([local_targets, local_raw], dtype=torch.long, device=device)
+    if world > 1:
+        dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+    return local_targets, int(counts[0].item()), int(counts[1].item())
+
+
+def _all_ranks_true(value: bool, device, world: int) -> bool:
+    if world <= 1:
+        return value
+    flag = torch.tensor(1 if value else 0, dtype=torch.int32, device=device)
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+    return bool(flag.item())
+
+
+def _global_loss_sum(local_loss: torch.Tensor, world: int) -> float:
+    total = local_loss.detach().to(dtype=torch.float64).clone()
+    if world > 1:
+        dist.all_reduce(total, op=dist.ReduceOp.SUM)
+    return float(total.item())
 
 
 def main(argv=None) -> None:
@@ -396,32 +597,30 @@ def main(argv=None) -> None:
     if not 0.0 <= args.merge_alpha < 1.0:
         raise ValueError(f"--merge-alpha must be in [0, 1), got {args.merge_alpha}")
 
-    # An explicit root seed gives every rank/island the same LoRA
-    # initialization. With no seed, preserve the learner's original ambient
-    # RNG behavior outside benchmark runs.
-    if args.seed is not None:
-        random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(args.seed)
+    # Every rank/island must start from identical trainable parameters. A
+    # mismatched LoRA initialization is indistinguishable from a local update
+    # to the coordinator and corrupts the first merge. Training randomness is
+    # separated by learner/rank only after model construction below.
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     log.info("loading model %s (%s)", args.model, args.tuning)
     model, tokenizer = load_model_and_tokenizer(args, device)
 
     # Training randomness may differ after initialization while remaining
     # reproducible for a given benchmark seed and topology.
-    training_seed = None
-    if args.seed is not None:
-        # learner + M*rank is the corresponding rank in baseline-mM. This
-        # pairs dropout and zero-worker streaming order across the matching
-        # synchronous and DiLoCo topologies.
-        training_seed = _derived_training_seed(
-            args.seed, args.learner_id, args.num_learners, rank
-        )
-        random.seed(training_seed)
-        torch.manual_seed(training_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(training_seed)
+    # learner + M*rank is the corresponding rank in baseline-mM. This pairs
+    # dropout and zero-worker streaming order across matching synchronous and
+    # asynchronous topologies without changing the shared initialization.
+    training_seed = _derived_training_seed(
+        args.seed, args.learner_id, args.num_learners, rank
+    )
+    random.seed(training_seed)
+    torch.manual_seed(training_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(training_seed)
 
     grad_ckpt = args.gradient_checkpointing == "on"
     if args.gradient_checkpointing == "auto" and device.type == "cuda":
@@ -561,7 +760,21 @@ def main(argv=None) -> None:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index])
         params = trainable_params(model.module)
 
-    opt = torch.optim.AdamW(params.values(), lr=args.inner_lr, weight_decay=args.weight_decay)
+    # In auto mode, keep optimizer-step peak memory bounded and probeable
+    # without mutating parameters. Single-tensor AdamW creates one
+    # parameter-sized denominator at a time; autobatch reserves the largest
+    # such transient in addition to its scratch moment buffers. CUDA's default
+    # foreach path can instead materialize intermediates for the whole
+    # parameter list. Explicit micro-batch runs retain AdamW's prior defaults.
+    optimizer_kwargs = {}
+    if args.micro_batch_size == "auto":
+        optimizer_kwargs = {"foreach": False, "fused": False}
+    opt = torch.optim.AdamW(
+        params.values(),
+        lr=args.inner_lr,
+        weight_decay=args.weight_decay,
+        **optimizer_kwargs,
+    )
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / max(1, args.warmup_steps))
     )
@@ -570,15 +783,39 @@ def main(argv=None) -> None:
     # (memory-accurate) and BEFORE the loader/syncer exist (nothing counts
     # the probe). See yeto/autobatch.py.
     requested_mb = args.micro_batch_size
+    requested_grad_accum = args.grad_accum
+    probe_loss_forward = None
+    if getattr(args, "kernel_backend", "native") == "liger":
+        def probe_loss_forward(probe_model, input_ids):
+            weights = torch.ones_like(input_ids, dtype=torch.float32)
+            loss, _ = liger_sft_forward(probe_model, input_ids, weights)
+            return loss
+
     args.micro_batch_size = resolve_micro_batch_size(
-        args, model, params, opt, tokenizer, device, world
+        args,
+        model,
+        params,
+        opt,
+        tokenizer,
+        device,
+        world,
+        loss_forward=probe_loss_forward,
     )
     if requested_mb == "auto":
-        args.grad_accum = rebalance_grad_accum(args.grad_accum, args.micro_batch_size)
+        args.grad_accum = exact_grad_accum(requested_grad_accum, args.micro_batch_size)
+        effective_batch = args.micro_batch_size * args.grad_accum
         log.info(
-            "auto micro-batch: %d per GPU (grad-accum -> %d)",
+            "auto batch recipe: --grad-accum requests effective batch=%d sequences/rank "
+            "(%d tokens/rank); resolved micro-batch=%d x grad-accum=%d = %d "
+            "sequences/rank (%d tokens/rank, %d tokens global across %d ranks)",
+            requested_grad_accum,
+            requested_grad_accum * args.seq_len,
             args.micro_batch_size,
             args.grad_accum,
+            effective_batch,
+            effective_batch * args.seq_len,
+            effective_batch * args.seq_len * world,
+            world,
         )
 
     if args.tokenize == "stream":
@@ -603,6 +840,7 @@ def main(argv=None) -> None:
             rank=rank,
             world=world,
             train_on=args.train_on,
+            assistant_mask_mode=args.assistant_mask_mode,
             **stream_kwargs,
         )
         loader = torch.utils.data.DataLoader(
@@ -626,6 +864,7 @@ def main(argv=None) -> None:
             args.seq_len,
             args.max_rows,
             train_on=args.train_on,
+            assistant_mask_mode=args.assistant_mask_mode,
         )
         sampler = None
         if world > 1:
@@ -699,28 +938,33 @@ def main(argv=None) -> None:
         dist.destroy_process_group()
 
 
-def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank, world, device):
+def run_inner_loop(
+    args, model, params, layout, opt, sched, loader, client, rank, world, device
+) -> TrainingCounters:
     # Counters (Alg. 1): incremented for all fragments each step, reset per
     # fragment on receipt. Tracked as global totals + per-fragment snapshots.
     steps_total = 0
     tokens_total = 0
-    target_tokens_total = torch.zeros((), dtype=torch.long, device=device)
+    target_tokens_total = 0
     steps_at_reset = [0] * layout.num_fragments
     tokens_at_reset = [0] * layout.num_fragments
     fragment_versions = [0] * layout.num_fragments  # last applied version per fragment
     pending_pulls: list = []  # pulls deferred until c_steps >= 1
     global_step = 0
-    # Q4 pushes are deltas anchored at the last *received* global value per
-    # fragment; before any broadcast that is the base-model value, which every
-    # learner loads identically (and learner 0 sends as INIT_PARAMS).
-    anchors: list[torch.Tensor] | None = None
-    if rank == 0 and client is not None and client.dtype == DTYPE_Q4:
-        anchors = [fragment_flat(frag, params).cpu() for frag in layout.fragments]
-    # c_tokens counts RAW tokens processed (throughput proxy for merge
-    # weighting), not the subset of loss-weighted tokens.
-    tokens_per_inner_step = world * args.micro_batch_size * args.grad_accum * args.seq_len
+    # Every PUSH carries local − raw_anchor, where raw_anchor is the exact
+    # global fragment from the last accepted broadcast, before alpha blending.
+    # A pull that overtakes the initial broadcast waits instead of inventing
+    # an anchor from local initialization.
+    anchors: list[torch.Tensor | None] | None = None
+    if rank == 0 and client is not None:
+        anchors = [None] * layout.num_fragments
 
-    if args.loss_function.startswith("pickle:"):
+    # c_tokens uses tokens_total, which advances by the exact island-global
+    # raw-token count accepted into each optimizer step.
+    kernel_backend = getattr(args, "kernel_backend", "native")
+    if kernel_backend == "liger":
+        compute_loss = None
+    elif args.loss_function.startswith("pickle:"):
         compute_loss = load_pickled_loss(args.loss_function)
     elif args.loss_function.startswith("custom:"):
         compute_loss = load_custom_loss(args.loss_function)
@@ -731,27 +975,67 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
     epoch = 0
     t_last = time.monotonic()
     while not shutdown and steps_total < args.max_local_steps:
-        if hasattr(loader.sampler, "set_epoch"):
-            loader.sampler.set_epoch(epoch)
-        accum = 0
-        opt.zero_grad(set_to_none=True)
-        for input_ids, weights in loader:
-            input_ids = input_ids.to(device, non_blocking=True)
-            weights = weights.to(device, non_blocking=True)
-            out = model(input_ids=input_ids)
-            loss, batch_target_tokens = compute_loss(out.logits, input_ids, weights)
-            target_tokens_total.add_(
-                batch_target_tokens.detach().to(device=device, dtype=torch.long)
+        steps_at_epoch_start = steps_total
+        sampler = getattr(loader, "sampler", None)
+        if hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
+        iterator = iter(loader)
+        while not shutdown and steps_total < args.max_local_steps:
+            group = _next_accumulation_group(iterator, args.grad_accum)
+            common_size = _common_group_size(len(group), device, world)
+            # Preserve the configured optimizer batch: a finite-loader tail is
+            # discarded on every rank instead of becoming a smaller step. The
+            # MIN agreement also makes a shorter rank stop all peers before
+            # any forward/backward collective can diverge.
+            if common_size < args.grad_accum:
+                break
+            group = group[: args.grad_accum]
+            local_targets, global_targets, global_raw = _global_group_counts(
+                group, device, world
             )
-            # DDP averages gradients across ranks, so normalizing each rank's
-            # sum-over-tokens loss by its *own* trained-token count yields
-            # (approximately) the global per-trained-token mean gradient.
-            trained_tokens = weights.sum().clamp(min=1.0)
-            (loss / (trained_tokens * args.grad_accum)).backward()
-            accum += 1
-            if accum < args.grad_accum:
-                continue
-            accum = 0
+            if global_targets == 0:
+                raise ValueError(
+                    "an optimizer-step accumulation group has zero positive "
+                    "causal-LM target tokens across all ranks"
+                )
+
+            # DDP/FSDP and allreduce_trainable_grads produce rank-MEAN grads.
+            # Scaling each local SUM loss by world/global_targets therefore
+            # yields SUM_r grad(loss_r) / SUM_r target_tokens exactly.
+            loss_scale = world / global_targets
+            observed_targets = torch.zeros((), dtype=torch.long, device=device)
+            step_loss_local = torch.zeros((), dtype=torch.float64, device=device)
+            opt.zero_grad(set_to_none=True)
+            for input_ids, weights in group:
+                input_ids = input_ids.to(device, non_blocking=True)
+                weights = weights.to(device, non_blocking=True)
+                if kernel_backend == "liger":
+                    loss, batch_target_tokens = liger_sft_forward(
+                        model, input_ids, weights
+                    )
+                else:
+                    out = model(input_ids=input_ids)
+                    loss, batch_target_tokens = compute_loss(
+                        out.logits, input_ids, weights
+                    )
+                observed_targets.add_(
+                    torch.as_tensor(batch_target_tokens, device=device, dtype=torch.long)
+                    .detach()
+                    .sum()
+                )
+                step_loss_local.add_(loss.detach().to(dtype=torch.float64))
+                (loss * loss_scale).backward()
+
+            local_count_matches = int(observed_targets.item()) == local_targets
+            if not _all_ranks_true(local_count_matches, device, world):
+                opt.zero_grad(set_to_none=True)
+                raise ValueError(
+                    "loss function target-token count does not match the "
+                    "positive shifted loss weights: "
+                    f"rank {rank} reported {int(observed_targets.item())}, "
+                    f"expected {local_targets}"
+                )
+
             if args.tuning == "lora":
                 # The adapters are never grad-synced by a wrapper — fsdp+lora
                 # ignores them, the replicated path has no wrapper — so average
@@ -769,18 +1053,23 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
             sched.step()
             opt.zero_grad(set_to_none=True)
             steps_total += 1
-            tokens_total += tokens_per_inner_step
+            tokens_total += global_raw
+            target_tokens_total += global_targets
 
-            if steps_total % 10 == 0 and rank == 0:
-                dt = time.monotonic() - t_last
-                t_last = time.monotonic()
-                log.info(
-                    "local_step=%d global_step=%d loss/token=%.4f (%.2f s/step)",
-                    steps_total,
-                    global_step,
-                    loss.item() / trained_tokens.item(),  # per trained token
-                    dt / 10,
-                )
+            if steps_total % 10 == 0:
+                loss_sum = _global_loss_sum(step_loss_local, world)
+                if rank == 0:
+                    dt = time.monotonic() - t_last
+                    t_last = time.monotonic()
+                    log.info(
+                        "local_step=%d global_step=%d loss/token=%.4f "
+                        "target_tokens=%d (%.2f s/step)",
+                        steps_total,
+                        global_step,
+                        loss_sum / global_targets,
+                        target_tokens_total,
+                        dt / 10,
+                    )
 
             # --- fragment sync at the step boundary (never blocks) ---
             # Broadcasts are applied BEFORE pulls are answered: with the
@@ -791,27 +1080,43 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
             # counters, so the self-clock defers the answer one step and it
             # then carries the fresh anchor.
             actions = []  # (fid, version, flat_f32) applied this boundary
+            finalizing = False
             if rank == 0 and client is not None:
                 client.check_health()
-                # 1. collect received global fragments
-                for bc in client.drain_updates():
-                    flat = unpack_fragment(
-                        layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
-                    )
-                    if anchors is not None:
-                        # The anchor is the raw global value (pre-blend), so
-                        # the syncer can reconstruct pushes from Θ(version)+δ.
-                        anchors[bc.fragment_id] = flat.clone()
-                    actions.append((bc.fragment_id, bc.version, flat))
+                finalizing = client.finalizing.is_set()
+                if not finalizing:
+                    # 1. collect received global fragments
+                    for bc in client.drain_updates():
+                        flat = unpack_fragment(
+                            layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
+                        )
+                        if anchors is not None:
+                            # Keep the exact raw global value before normal
+                            # delayed-application blending.
+                            anchors[bc.fragment_id] = flat.clone()
+                        actions.append((bc.fragment_id, bc.version, flat))
                 shutdown = client.shutdown.is_set()
 
             if world > 1:
                 meta = [(f, v) for f, v, _ in actions] if rank == 0 else None
-                box = [meta, shutdown]
+                box = [meta, shutdown, finalizing]
                 dist.broadcast_object_list(box, src=0)
-                meta, shutdown = box
+                meta, shutdown, finalizing = box
                 if rank != 0:
                     actions = [(f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta]
+            if finalizing:
+                manifest = finalize_torch_island(
+                    client,
+                    layout,
+                    params,
+                    rank=rank,
+                    world=world,
+                    device=device,
+                )
+                global_step = max(global_step, manifest.global_step)
+                shutdown = True
+                break
+            if world > 1:
                 for fid, version, flat in actions:
                     flat = flat.to(device)
                     dist.broadcast(flat, src=0)
@@ -851,14 +1156,19 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
                         still_pending.append(pull)
                         continue
                     c_tokens = tokens_total - tokens_at_reset[fid]
-                    if anchors is not None:
-                        delta = fragment_flat(layout.fragments[fid], params).cpu() - anchors[fid]
+                    anchor = anchors[fid] if anchors is not None else None
+                    if anchor is None:
+                        still_pending.append(pull)
+                        continue
+                    delta = fragment_flat(layout.fragments[fid], params).cpu() - anchor
+                    if client.dtype == DTYPE_Q4:
                         payload = quantize_q4(delta)
                     else:
-                        payload = pack_fragment(layout.fragments[fid], params, client.dtype)
+                        payload = pack_tensor(delta, client.dtype)
                     client.push_fragment(
                         fid,
                         pull.global_step,
+                        pull.round_attempt,
                         fragment_versions[fid],
                         steps_total,
                         c_steps,
@@ -869,20 +1179,38 @@ def run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank
 
             if shutdown or steps_total >= args.max_local_steps:
                 break
+        if (
+            not shutdown
+            and steps_total < args.max_local_steps
+            and steps_total == steps_at_epoch_start
+        ):
+            raise ValueError(
+                "the data loader produced fewer microbatches than --grad-accum "
+                "on at least one rank; use more data, lower --grad-accum, or "
+                "reduce the number of data-parallel consumers"
+            )
         epoch += 1
-    raw_tokens_local = (
-        steps_total
-        * args.micro_batch_size
-        * args.grad_accum
-        * args.seq_len
+    if rank == 0 and client is not None and not client.finalized.is_set():
+        raise RuntimeError(
+            "learner stopped before authoritative finalization; refusing to save local parameters"
+        )
+    counters = TrainingCounters(
+        local_steps=steps_total,
+        global_step=global_step,
+        raw_tokens=tokens_total,
+        target_tokens=target_tokens_total,
     )
-    log.info(
-        "inner loop done at local_step=%d global_step=%d raw_tokens=%d target_tokens=%d",
-        steps_total,
-        global_step,
-        raw_tokens_local,
-        int(target_tokens_total.item()),
-    )
+    if rank == 0:
+        log.info(
+            "inner loop done at local_step=%d global_step=%d "
+            "metrics_version=2 metrics_scope=island "
+            "raw_tokens=%d target_tokens=%d",
+            counters.local_steps,
+            counters.global_step,
+            counters.raw_tokens,
+            counters.target_tokens,
+        )
+    return counters
 
 
 if __name__ == "__main__":

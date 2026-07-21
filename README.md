@@ -165,6 +165,9 @@ delta correction, q4 wire format, snapshots, resilience.
 [docs/LM_BENCHMARK.md](docs/LM_BENCHMARK.md) — standalone equal-hardware
 causal-LM benchmark contract, workload controls, complete arm and metric
 tables, and reproducibility rules.
+[docs/A100_KERNELS.md](docs/A100_KERNELS.md) — opt-in causal attention/model
+kernels, correctness gates, pinned dependencies, and the standalone 8xA100
+throughput and memory benchmark.
 [docs/DIFFUSION.md](docs/DIFFUSION.md) — the generic Diffusers image/video
 backend, data and conditioning contracts, external adapters, export, sampling,
 validation, and current limitations.

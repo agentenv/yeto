@@ -74,7 +74,8 @@ materializes `messages` and optional `tools` fields into fixed local JSONL
 files so a changing remote dataset cannot affect arms within a run.
 
 Evaluation packs the held-out conversations with the same tokenizer, sequence
-length, and `--train-on` mask as training. Its primary metric is:
+length, `--train-on` setting, and `--assistant-mask-mode` as training. Its
+primary metric is:
 
 ```text
 sum(masked causal cross entropy) / number of positive-weight target tokens
@@ -99,6 +100,7 @@ They must remain fixed across every item in one result set.
 | `--data` | local path, Hugging Face id, or S3 prefix | Supplies `messages` rows and optional `tools`. |
 | `--seq-len` | positive integer | Fixes packed sequence length and raw tokens per micro batch. |
 | `--train-on` | `assistant` or `all` | Defines which causal targets receive positive loss weight. |
+| `--assistant-mask-mode` | `native` or `legacy` | Fixes how assistant targets are derived. `native` requires the selected model chat template to expose exact `{% generation %}` spans; `legacy` is the explicit synthetic-format compatibility path. |
 | `--token-budget` | positive integer | Requested global number of packed input tokens per item. |
 | `--eval-rows` | positive integer | Reserves the final rows as the fixed held-out set. |
 | `--seeds` | one or more training seeds | Repeat full training to estimate optimization variance. |
@@ -162,8 +164,9 @@ comparison.
 
 Use the historical `512`-token profile when reproducing the existing
 gemma4/Lean result. For a production decision, run a separate benchmark with
-the actual production sequence length, chat template, `--train-on` mode, LoRA
-targets, and batch recipe. Compare arms only within a profile.
+the actual production sequence length, chat template, `--train-on` mode,
+assistant-mask mode, LoRA targets, and batch recipe. Compare arms only within
+a profile.
 
 ## Benchmark Items
 

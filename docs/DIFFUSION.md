@@ -208,10 +208,13 @@ not selectable for this learner.
 
 ## Artifacts, export, and sampling
 
-A learner's saved adapter is its local state. The authoritative DiLoCo result
-is the Rust syncer's checkpoint. Rebuild the exact trainable layout and export
-the merged adapter with the same model, LoRA, fragment, and external-adapter
-settings used for training:
+The Rust syncer checkpoint is the durable, exact f32 source of truth. At a
+successful terminal handshake, every surviving connected learner also
+overwrites its trainable parameters from the manifested coordinator cut before
+saving; values are cast only if that learner stores a destination parameter in
+a lower-precision dtype. Rebuild the exact trainable layout and export from the
+coordinator checkpoint with the same model, LoRA, fragment, and
+external-adapter settings used for training:
 
 ```bash
 yeto-diffusion-export \

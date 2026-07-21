@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader, IterableDataset
 
 from ..autobatch import int_or_auto, rebalance_grad_accum
 from ..data import _learner_rows, load_rows
+from ..finalization import finalize_torch_island
 from ..fragments import build_layout
 from ..losses import flow_matching_loss
 from ..models import resolve
@@ -36,6 +37,7 @@ from ..tensor_io import (
     apply_fragment,
     fragment_flat,
     pack_fragment,
+    pack_tensor,
     quantize_q4,
     unpack_fragment,
 )
@@ -2972,7 +2974,10 @@ def main(argv=None) -> None:
         raise RuntimeError("no trainable diffusion parameters; check --lora-targets")
     params = maybe_wrap_for_distributed(pipe, args, params, rank, world, device, adapter)
     layout = build_layout(
-        [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
+        [(n, p.numel()) for n, p in params.items()],
+        args.fragments,
+        args.fragment_pattern,
+        named_shapes={n: tuple(p.shape) for n, p in params.items()},
     )
     log.info(
         "%d trainable tensors -> %d fragments (%.1f MB total)",
@@ -3079,9 +3084,9 @@ def main(argv=None) -> None:
     fragment_versions = [0] * layout.num_fragments
     pending_pulls: list = []
     global_step = 0
-    anchors: list[torch.Tensor] | None = None
-    if rank == 0 and client is not None and client.dtype == DTYPE_Q4:
-        anchors = [fragment_flat(frag, params).cpu() for frag in layout.fragments]
+    anchors: list[torch.Tensor | None] | None = None
+    if rank == 0 and client is not None:
+        anchors = [None] * layout.num_fragments
 
     shutdown = False
     accum = 0
@@ -3119,24 +3124,40 @@ def main(argv=None) -> None:
             )
 
         actions = []
+        finalizing = False
         if rank == 0 and client is not None:
             client.check_health()
-            for bc in client.drain_updates():
-                flat = unpack_fragment(
-                    layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
-                )
-                if anchors is not None:
-                    anchors[bc.fragment_id] = flat.clone()
-                actions.append((bc.fragment_id, bc.version, flat))
+            finalizing = client.finalizing.is_set()
+            if not finalizing:
+                for bc in client.drain_updates():
+                    flat = unpack_fragment(
+                        layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
+                    )
+                    if anchors is not None:
+                        anchors[bc.fragment_id] = flat.clone()
+                    actions.append((bc.fragment_id, bc.version, flat))
             shutdown = client.shutdown.is_set()
 
         if world > 1:
             meta = [(f, v) for f, v, _ in actions] if rank == 0 else None
-            box = [meta, shutdown]
+            box = [meta, shutdown, finalizing]
             dist.broadcast_object_list(box, src=0)
-            meta, shutdown = box
+            meta, shutdown, finalizing = box
             if rank != 0:
                 actions = [(f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta]
+        if finalizing:
+            manifest = finalize_torch_island(
+                client,
+                layout,
+                params,
+                rank=rank,
+                world=world,
+                device=device,
+            )
+            global_step = max(global_step, manifest.global_step)
+            shutdown = True
+            break
+        if world > 1:
             for fid, version, flat in actions:
                 flat = flat.to(device)
                 dist.broadcast(flat, src=0)
@@ -3171,14 +3192,19 @@ def main(argv=None) -> None:
                     still_pending.append(pull)
                     continue
                 c_units = units_total - units_at_reset[fid]
-                if anchors is not None:
-                    delta = fragment_flat(layout.fragments[fid], params).cpu() - anchors[fid]
+                anchor = anchors[fid] if anchors is not None else None
+                if anchor is None:
+                    still_pending.append(pull)
+                    continue
+                delta = fragment_flat(layout.fragments[fid], params).cpu() - anchor
+                if client.dtype == DTYPE_Q4:
                     payload = quantize_q4(delta)
                 else:
-                    payload = pack_fragment(layout.fragments[fid], params, client.dtype)
+                    payload = pack_tensor(delta, client.dtype)
                 client.push_fragment(
                     fid,
                     pull.global_step,
+                    pull.round_attempt,
                     fragment_versions[fid],
                     steps_total,
                     c_steps,
@@ -3190,6 +3216,11 @@ def main(argv=None) -> None:
         if shutdown or steps_total >= args.max_local_steps:
             break
 
+    if rank == 0 and client is not None and not client.finalized.is_set():
+        raise RuntimeError(
+            "diffusion learner stopped before authoritative finalization; "
+            "refusing to save local parameters"
+        )
     if rank == 0:
         save_adapters(pipe, args.output_dir, adapter, args=args, params=params)
         if client is not None:

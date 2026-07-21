@@ -1,9 +1,10 @@
 """Pack/unpack fragments between torch tensors and wire bytes.
 
-Q4 wire format (DTYPE_Q4, used for PUSH_FRAGMENT deltas only): values are
-grouped into blocks of 256; each block is serialized as an f32 absmax scale
-followed by 128 bytes of packed nibbles (two values per byte, low nibble
-first). A nibble is 1 sign bit (bit 3) + a 3-bit magnitude level: level 0 is
+Every PUSH_FRAGMENT is a base-relative learner delta. Q4 wire format
+(DTYPE_Q4) encodes those values in blocks of 256; each block is
+serialized as an f32 absmax scale followed by 128 bytes of packed nibbles
+(two values per byte, low nibble first). A nibble is 1 sign bit (bit 3) + a
+3-bit magnitude level: level 0 is
 exactly zero, level L in 1..7 decodes to sign * 2^(L-7) * scale (E3M0 —
 sign, 3 exponent bits, no mantissa). The last block is zero-padded; the
 decoder truncates to the fragment's numel.
@@ -31,7 +32,12 @@ def fragment_flat(frag: Fragment, params: dict[str, torch.Tensor]) -> torch.Tens
 
 def pack_fragment(frag: Fragment, params: dict[str, torch.Tensor], dtype: int) -> bytes:
     """Concatenate the fragment's tensors (layout order) into wire bytes."""
-    wire = fragment_flat(frag, params).to(_WIRE_TORCH[dtype]).contiguous().cpu()
+    return pack_tensor(fragment_flat(frag, params), dtype)
+
+
+def pack_tensor(flat: torch.Tensor, dtype: int) -> bytes:
+    """Encode one flat f32 tensor in an unquantized wire dtype."""
+    wire = flat.detach().float().to(_WIRE_TORCH[dtype]).contiguous().cpu()
     return wire.view(torch.uint8).numpy().tobytes()
 
 

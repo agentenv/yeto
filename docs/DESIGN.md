@@ -2,8 +2,11 @@
 
 Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
 
-- **Merging**: per-learner outer gradient Δ_m,p = Θ_p(prev) − θ_m,p anchored
-  at the syncer's previous fragment value; learner weights
+- **Merging**: every learner sends its base-relative update
+  `d_m,p = θ_m,p − raw_anchor_m,p`; the syncer converts this once to the
+  signed outer gradient `Δ_m,p = −d_m,p`. Merge math never subtracts a stale
+  learner parameter from the current global fragment, so intervening global
+  drift cannot enter the update. Learner weights
   w_m = c_tokens²/c_steps (quantity × quality); weighted RDA per tensor on
   non-embedding fragments, direct averaging on the embedding fragment (whose
   deltas lack the near-orthogonality that motivates RDA).
@@ -23,6 +26,10 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   P); merges stay serialized in one scheduler task; rounds may complete out
   of order (per-fragment versions, monotonic global step). `--pipeline 1`
   recovers serial rounds.
+- **Frozen rendezvous**: a round attempt captures learner connection
+  generations and quorum at launch. Joins/reconnects apply only to future
+  attempts, disconnects do not erase accepted work, and a below-quorum
+  timeout discards partial responses before retrying with a new attempt ID.
 - **Sync-interval sensitivity** (legacy measurement, gemma4/Lean-Workbook,
   500k tokens, M=2, held-out eval CE): at the design-point sync interval
   (H≈24 inner steps per fragment) DiLoCo matched the synchronous run within
@@ -60,10 +67,16 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   ~568 GB for frozen bf16 weights — more than 8×A100-40GB (320 GB); use
   ≥16×80GB GPUs per learner, or pick `gemma4` (12B) / any smaller HF id.
   `yeto shape` automates this sizing.
-- **Loss masking**: `--train-on assistant` (default) puts loss only on
-  assistant-message tokens (plus the closing EOS); `--train-on all` trains
-  on every token. Tokenization streams asynchronously in DataLoader workers
-  (`--tokenize preload` to materialize upfront).
+- **Loss masking**: `--train-on assistant` (default) tokenizes with the
+  model's selected native chat template and uses its exact
+  `assistant_masks` output. The template's `{% generation %}` blocks decide
+  which assistant control/content/EOS tokens carry loss; Yeto does not add
+  control tokens after templating. A selected template without generation
+  tracking fails clearly. `--assistant-mask-mode legacy` explicitly restores
+  the synthetic `<|role|>` compatibility format, while `--train-on all`
+  retains the existing all-token behavior. Tokenization streams
+  asynchronously in DataLoader workers (`--tokenize preload` to materialize
+  upfront).
 - **Resilience**: learners reconnect automatically through syncer restarts
   and WAN drops (exponential backoff; work continues locally during the
   outage and re-merges after the post-reconnect rebroadcast). The syncer

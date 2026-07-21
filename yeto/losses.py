@@ -10,6 +10,7 @@ Available: cross_entropy | importance_sampling | ppo | cispo | dro | flow_matchi
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 LOSS_FUNCTIONS = ("cross_entropy", "importance_sampling", "ppo", "cispo", "dro", "flow_matching")
 
@@ -98,8 +99,11 @@ def load_custom_loss(spec: str):
     ``input_ids`` (e.g. 1.0 on assistant tokens, 0.0 elsewhere with
     --train-on assistant). Because the learner owns the forward pass, the
     callable receives full logits — no extra forward pass or logprob
-    round-trip is needed. The file must live inside the repo so the workdir
-    sync ships it to every learner.
+    round-trip is needed. ``loss`` must be a token-summed scalar (the learner
+    applies the exact island-global target-token denominator), and
+    ``num_tokens`` must equal the number of positive ``weights[:, 1:]`` after
+    the causal shift. The file must live inside the repo so the workdir sync
+    ships it to every learner.
     """
     import importlib.util
     from pathlib import Path
@@ -164,12 +168,16 @@ def sft_loss(
     shift_logits = logits[:, :-1].float()
     shift_labels = labels[:, 1:]
     mask = shift_labels != -100
-    safe_labels = shift_labels.masked_fill(~mask, 0)
-    logprobs = torch.log_softmax(shift_logits, dim=-1)
-    target_logprobs = logprobs.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
-    w = mask.to(logprobs.dtype)
+    flat_loss = F.cross_entropy(
+        shift_logits.reshape(-1, shift_logits.shape[-1]),
+        shift_labels.reshape(-1),
+        ignore_index=-100,
+        reduction="none",
+    )
+    per_token_loss = flat_loss.view_as(shift_labels)
+    w = mask.to(per_token_loss.dtype)
     if weights is not None:
-        w = w * weights[:, 1:].to(logprobs.dtype)
+        w = w * weights[:, 1:].to(per_token_loss.dtype)
     n_tokens = (w > 0).sum()
-    loss = cross_entropy(target_logprobs, w)
+    loss = (per_token_loss * w).sum()
     return loss, n_tokens

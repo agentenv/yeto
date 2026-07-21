@@ -40,6 +40,12 @@ def parse_args(argv=None):
     p.add_argument("--num-learners", type=int, default=1)
     p.add_argument("--loss-function", default="cross_entropy")
     p.add_argument("--train-on", choices=["assistant", "all"], default="assistant")
+    p.add_argument(
+        "--assistant-mask-mode",
+        choices=["native", "legacy"],
+        default="native",
+        help="assistant-only masking: tokenizer-native exact mask or explicit legacy format",
+    )
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
@@ -187,6 +193,7 @@ def _micro_batches(args, tokenizer):
             args.seq_len,
             args.max_rows,
             train_on=args.train_on,
+            assistant_mask_mode=args.assistant_mask_mode,
         )
 
         def gen():
@@ -208,6 +215,7 @@ def _micro_batches(args, tokenizer):
         args.seq_len,
         args.max_rows,
         train_on=args.train_on,
+        assistant_mask_mode=args.assistant_mask_mode,
     )
     log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)
 
@@ -259,12 +267,19 @@ def main(argv=None) -> None:
 
     from ..fragments import build_layout
     from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
-    from ..tensor_io import fragment_flat, pack_fragment, quantize_q4, unpack_fragment
+    from ..tensor_io import (
+        fragment_flat,
+        pack_fragment,
+        pack_tensor,
+        quantize_q4,
+        unpack_fragment,
+    )
 
     layout = build_layout(
         [(n, int(np.prod(i.shape))) for n, i in registry.items()],
         args.fragments,
         args.fragment_pattern,
+        named_shapes={n: tuple(int(dim) for dim in info.shape) for n, info in registry.items()},
     )
     total = sum(int(np.prod(i.shape)) for i in registry.values())
     log.info(
@@ -291,8 +306,9 @@ def main(argv=None) -> None:
 
     run_inner_loop(
         args, model, registry, layout, tokenizer, client,
-        fragment_flat=fragment_flat, pack_fragment=pack_fragment,
-        quantize_q4=quantize_q4, unpack_fragment=unpack_fragment,
+        fragment_flat=fragment_flat, pack_tensor=pack_tensor,
+        quantize_q4=quantize_q4,
+        unpack_fragment=unpack_fragment,
         bulk_dtype=bulk_dtype, dtype_q4=DTYPE_Q4,
     )
 
@@ -303,7 +319,8 @@ def main(argv=None) -> None:
 
 def run_inner_loop(
     args, model, registry, layout, tokenizer, client,
-    *, fragment_flat, pack_fragment, quantize_q4, unpack_fragment, bulk_dtype, dtype_q4,
+    *, fragment_flat, pack_tensor, quantize_q4, unpack_fragment,
+    bulk_dtype, dtype_q4,
 ):
     """MLX inner AdamW steps + the torch learner's exact sync semantics:
     counters advance every step, pulls are answered once c_steps >= 1,
@@ -312,6 +329,8 @@ def run_inner_loop(
     import mlx.nn as nn
     import mlx.optimizers as optim
     from mlx.utils import tree_map
+
+    from ..protocol import DTYPE_F32
 
     def loss_fn(mdl, ids, weights):
         # Same math as yeto.losses.sft_loss: next-token logprobs, weighted
@@ -337,10 +356,9 @@ def run_inner_loop(
     pending_pulls: list = []
     global_step = 0
     tokens_per_inner_step = args.micro_batch_size * args.grad_accum * args.seq_len
-    anchors: list[torch.Tensor] | None = None
-    if client is not None and client.dtype == dtype_q4:
-        snap = torch_adapters(model, registry)
-        anchors = [fragment_flat(frag, snap) for frag in layout.fragments]
+    anchors: list[torch.Tensor | None] | None = None
+    if client is not None:
+        anchors = [None] * layout.num_fragments
 
     shutdown = False
     t_last = time.monotonic()
@@ -388,6 +406,23 @@ def run_inner_loop(
         if client is None:
             continue
         client.check_health()
+        if client.finalizing.is_set():
+            manifest, broadcasts = client.wait_for_final_fragments()
+            for update in broadcasts:
+                fid = update.fragment_id
+                flat = unpack_fragment(
+                    layout.fragments[fid],
+                    update.data,
+                    DTYPE_F32,
+                )
+                # Finalization is a raw overwrite: normal delayed-application
+                # blending must not leak into the saved adapter.
+                write_fragment(model, layout.fragments[fid], flat, registry)
+            mx.eval(model.parameters())
+            client.acknowledge_finalization(manifest)
+            global_step = max(global_step, manifest.global_step)
+            shutdown = True
+            break
         snap = None  # torch view of the adapters, built lazily per boundary
         for bc in client.drain_updates():
             fid = bc.fragment_id
@@ -414,14 +449,19 @@ def run_inner_loop(
                 continue
             c_tokens = tokens_total - tokens_at_reset[fid]
             snap = snap if snap is not None else torch_adapters(model, registry)
-            if anchors is not None:
-                delta = fragment_flat(layout.fragments[fid], snap) - anchors[fid]
+            anchor = anchors[fid] if anchors is not None else None
+            if anchor is None:
+                still_pending.append(pull)
+                continue
+            delta = fragment_flat(layout.fragments[fid], snap) - anchor
+            if client.dtype == dtype_q4:
                 payload = quantize_q4(delta)
             else:
-                payload = pack_fragment(layout.fragments[fid], snap, client.dtype)
+                payload = pack_tensor(delta, client.dtype)
             client.push_fragment(
                 fid,
                 pull.global_step,
+                pull.round_attempt,
                 fragment_versions[fid],
                 steps_total,
                 c_steps,
@@ -430,6 +470,11 @@ def run_inner_loop(
             )
         pending_pulls = still_pending
         shutdown = client.shutdown.is_set()
+    if client is not None and not client.finalized.is_set():
+        raise RuntimeError(
+            "MLX learner stopped before authoritative finalization; "
+            "refusing to save local parameters"
+        )
     mx.eval(model.parameters())
     log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
 

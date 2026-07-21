@@ -17,6 +17,11 @@ def _args(extra):
     return cli.build_parser().parse_args(BASE + extra)
 
 
+def test_launch_cli_has_deterministic_lm_seed_by_default():
+    assert _args([]).seed == 0
+    assert _args(["--seed", "29"]).seed == 29
+
+
 def _result(counts):
     cands = [
         Candidate(
@@ -31,6 +36,11 @@ def _result(counts):
         plan=plan, candidates=cands, rejections=[], warnings=[], weights_gb=66.0,
         shard="fsdp", est_cost=13.4, price_margin=0.15, head_cost=0.4, fetch_seconds=0.1,
     )
+
+
+def test_launch_cli_defaults_to_native_mask_and_accepts_explicit_legacy():
+    assert _args([]).assistant_mask_mode == "native"
+    assert _args(["--assistant-mask-mode", "legacy"]).assistant_mask_mode == "legacy"
 
 
 def test_gpu_with_budget_rejected(capsys):

@@ -4,6 +4,8 @@ and setup deps."""
 
 import argparse
 
+import pytest
+
 from yeto.gpu_spec import ClusterSpec
 from yeto.launcher import make_learner_task
 
@@ -52,8 +54,84 @@ def test_torch_backend_uses_shard_and_torch_learner():
     task = make_learner_task(_args(island_backend="torch"), _SPEC, 0, 1, "1.2.3.4:29400")
     assert "-m yeto.learner" in task.run
     assert "--shard fsdp" in task.run
+    assert "--assistant-mask-mode native" in task.run
+    assert "--seed 0" in task.run
     assert "--island-backend" not in task.run
     assert "megatron-core" not in task.setup
+    assert "--attention-backend auto" in task.run
+    assert "--kernel-backend native" in task.run
+    assert "liger-kernel" not in task.setup
+    assert "peft==0.19.1" not in task.setup
+    assert "flash-attn" not in task.setup
+
+
+def test_torch_backend_installs_only_explicit_kernel_dependencies():
+    task = make_learner_task(
+        _args(
+            island_backend="torch",
+            attention_backend="flash-attn-2",
+            kernel_backend="liger",
+            shard="ddp",
+        ),
+        _SPEC,
+        0,
+        1,
+        "1.2.3.4:29400",
+    )
+    assert "--attention-backend flash-attn-2" in task.run
+    assert "--kernel-backend liger" in task.run
+    assert "liger-kernel==0.8.0" in task.setup
+    assert "peft==0.19.1" in task.setup
+    assert "flash-attn==2.8.3" in task.setup
+    assert "--no-build-isolation" in task.setup
+
+
+def test_liger_launcher_rejects_non_builtin_loss():
+    with pytest.raises(ValueError, match="only the built-in cross_entropy"):
+        make_learner_task(
+            _args(kernel_backend="liger", loss_function="pickle:loss.pkl"),
+            _SPEC,
+            0,
+            1,
+            "1.2.3.4:29400",
+        )
+
+
+def test_liger_launcher_rejects_unvalidated_tuning_and_sharding():
+    with pytest.raises(ValueError, match="only for --tuning lora"):
+        make_learner_task(
+            _args(kernel_backend="liger", tuning="full", shard="ddp"),
+            _SPEC,
+            0,
+            1,
+            "1.2.3.4:29400",
+        )
+    with pytest.raises(ValueError, match="only for --shard ddp"):
+        make_learner_task(
+            _args(kernel_backend="liger", tuning="lora", shard="fsdp"),
+            _SPEC,
+            0,
+            1,
+            "1.2.3.4:29400",
+        )
+
+
+def test_megatron_rejects_torch_kernel_flags():
+    with pytest.raises(ValueError, match="torch causal-LM island backend"):
+        make_learner_task(
+            _args(island_backend="megatron", attention_backend="sdpa"),
+            _SPEC,
+            0,
+            1,
+            "1.2.3.4:29400",
+        )
+
+
+def test_launcher_forwards_explicit_legacy_mask_mode():
+    task = make_learner_task(
+        _args(assistant_mask_mode="legacy"), _SPEC, 0, 1, "1.2.3.4:29400"
+    )
+    assert "--assistant-mask-mode legacy" in task.run
 
 
 def test_megatron_backend_swaps_entrypoint_and_runs_in_the_ngc_container():
@@ -63,6 +141,8 @@ def test_megatron_backend_swaps_entrypoint_and_runs_in_the_ngc_container():
     task = make_learner_task(args, _SPEC, 0, 1, "1.2.3.4:29400")
     assert "-m yeto.megatron.learner" in task.run
     assert "--island-backend megatron" in task.run
+    assert "--assistant-mask-mode native" in task.run
+    assert "--seed 0" in task.run
     assert "--shard" not in task.run  # megatron has its own parallelism
     # The stack lives in the NGC container, so setup does NOT install torch or
     # the megatron stack, nor RAID the NVMe (a host op).
