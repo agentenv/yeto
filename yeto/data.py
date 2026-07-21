@@ -33,6 +33,25 @@ import torch
 from torch.utils.data import Dataset, IterableDataset
 
 
+def _message_text(msg: dict) -> str:
+    content = msg.get("content") or ""
+    if isinstance(content, list):  # multi-part content blocks
+        content = "\n".join(
+            p.get("text", "") if isinstance(p, dict) else str(p) for p in content
+        )
+    return str(content)
+
+
+def _message_training_parts(msg: dict) -> list[str]:
+    parts = []
+    content = _message_text(msg)
+    if content:
+        parts.append(content)
+    if msg.get("tool_calls"):
+        parts.append(json.dumps(msg["tool_calls"]))
+    return parts
+
+
 def _fallback_segments(messages: list[dict], tools: list | None) -> list[tuple[str, float]]:
     """The fallback rendering as (text, weight) segments, one per message
     (plus the tools preamble). Weight 1.0 marks assistant-authored segments —
@@ -42,11 +61,7 @@ def _fallback_segments(messages: list[dict], tools: list | None) -> list[tuple[s
         segments.append((f"<|system|>\nAvailable tools:\n{json.dumps(tools, indent=None)}\n", 0.0))
     for msg in messages:
         role = msg.get("role", "user")
-        content = msg.get("content") or ""
-        if isinstance(content, list):  # multi-part content blocks
-            content = "\n".join(
-                p.get("text", "") if isinstance(p, dict) else str(p) for p in content
-            )
+        content = _message_text(msg)
         text = content
         if msg.get("tool_calls"):
             calls = json.dumps(msg["tool_calls"])
@@ -68,6 +83,114 @@ def render_conversation(tokenizer, messages: list[dict], tools: list | None) -> 
         except Exception:
             pass  # tool_calls formats vary; fall back to the plain rendering
     return _render_fallback(messages, tools)
+
+
+def _as_list(value) -> list:
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    return list(value)
+
+
+def _chat_template_assistant_tokens(
+    tokenizer, messages: list[dict], tools: list | None
+) -> tuple[list[int], list[float]] | None:
+    """Render with the tokenizer's native chat template and mask assistant text.
+
+    Prefer tokenizer-provided assistant masks when available. If the tokenizer
+    can render a native template but does not expose masks, derive assistant
+    spans from the rendered string using token offset mappings. This keeps
+    model-native role/control tokens in the training sequence instead of
+    silently falling back to synthetic ``<|assistant|>`` delimiters.
+    """
+    if not getattr(tokenizer, "chat_template", None):
+        return None
+
+    try:
+        rendered = tokenizer.apply_chat_template(
+            messages,
+            tools=tools,
+            tokenize=True,
+            add_generation_prompt=False,
+            return_dict=True,
+            return_assistant_tokens_mask=True,
+        )
+    except Exception:
+        rendered = None
+    if isinstance(rendered, dict):
+        input_ids = rendered.get("input_ids")
+        assistant_mask = rendered.get("assistant_masks")
+        if assistant_mask is None:
+            assistant_mask = rendered.get("assistant_tokens_mask")
+        if input_ids is not None and assistant_mask is not None:
+            ids = _as_list(input_ids)
+            mask = _as_list(assistant_mask)
+            if ids and isinstance(ids[0], list):
+                ids = ids[0]
+            if mask and isinstance(mask[0], list):
+                mask = mask[0]
+            if len(ids) == len(mask):
+                has_assistant_content = any(
+                    (msg.get("role") == "assistant")
+                    and bool(_message_text(msg) or msg.get("tool_calls"))
+                    for msg in messages
+                )
+                if not has_assistant_content or any(mask):
+                    weights = [float(w) for w in mask]
+                    if tokenizer.eos_token_id is not None:
+                        if ids and ids[-1] == tokenizer.eos_token_id:
+                            weights[-1] = 1.0
+                        else:
+                            ids.append(tokenizer.eos_token_id)
+                            weights.append(1.0)
+                    return ids, weights
+
+    try:
+        text = tokenizer.apply_chat_template(
+            messages, tools=tools, tokenize=False, add_generation_prompt=False
+        )
+    except Exception:
+        return None
+
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for msg in messages:
+        parts = _message_training_parts(msg)
+        for part in parts:
+            start = text.find(part, cursor)
+            if start < 0:
+                return None
+            end = start + len(part)
+            if msg.get("role") == "assistant":
+                spans.append((start, end))
+            cursor = end
+    if any(msg.get("role") == "assistant" and _message_training_parts(msg) for msg in messages) and not spans:
+        return None
+
+    try:
+        tokenized = tokenizer(
+            text,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+        )
+    except Exception:
+        return None
+    ids = _as_list(tokenized.get("input_ids", []))
+    offsets = _as_list(tokenized.get("offset_mapping", []))
+    if ids and isinstance(ids[0], list):
+        ids = ids[0]
+    if offsets and isinstance(offsets[0], list) and offsets[0] and isinstance(offsets[0][0], tuple):
+        offsets = offsets[0]
+    if len(ids) != len(offsets):
+        return None
+
+    weights = []
+    for offset in offsets:
+        start, end = int(offset[0]), int(offset[1])
+        weights.append(float(any(start < span_end and end > span_start for span_start, span_end in spans)))
+    if tokenizer.eos_token_id is not None:
+        ids.append(tokenizer.eos_token_id)
+        weights.append(1.0)
+    return ids, weights
 
 
 def load_rows(dataset_name, split: str = "train"):
@@ -129,10 +252,10 @@ TRAIN_ON_CHOICES = ("assistant", "all")
 def _row_tokens(tokenizer, row: dict, train_on: str = "assistant") -> tuple[list[int], list[float]]:
     """Tokenize one row into (ids, per-token loss weights).
 
-    train_on="assistant": always the fallback rendering (chat templates don't
-    expose assistant spans), tokenized one message segment at a time so the
-    assistant spans are exact: assistant-segment tokens weigh 1.0, everything
-    else 0.0. The per-row EOS weighs 1.0 (teaches stopping), BOS 0.0.
+    train_on="assistant": native chat template with assistant-token masking
+    when available. If a tokenizer cannot expose or derive assistant spans,
+    fall back to Yeto's synthetic segment rendering. The per-row EOS weighs
+    1.0 (teaches stopping), BOS 0.0.
     train_on="all": whole-conversation rendering (chat template when
     available), all weights 1.0.
     """
@@ -144,6 +267,9 @@ def _row_tokens(tokenizer, row: dict, train_on: str = "assistant") -> tuple[list
     ids: list[int] = []
     weights: list[float] = []
     if train_on == "assistant":
+        native = _chat_template_assistant_tokens(tokenizer, messages, row.get("tools"))
+        if native is not None:
+            return native
         for text, w in _fallback_segments(messages, row.get("tools")):
             seg_ids = list(tokenizer(text, add_special_tokens=False)["input_ids"])
             ids.extend(seg_ids)
@@ -164,6 +290,63 @@ def _row_tokens(tokenizer, row: dict, train_on: str = "assistant") -> tuple[list
 def _learner_rows(num_rows: int, learner_id: int, num_learners: int, max_rows: int | None):
     rows = list(range(learner_id, num_rows, num_learners))
     return rows[:max_rows] if max_rows is not None else rows
+
+
+def _append_target_blocks(
+    out_ids: list[list[int]],
+    out_weights: list[list[float]],
+    ids: list[int],
+    weights: list[float],
+    seq_len: int,
+    carry_ids: list[int],
+    carry_weights: list[float],
+) -> None:
+    """Append assistant-training blocks while skipping pure-context windows.
+
+    Native chat rendering can produce very long user/tool prefixes before the
+    first assistant target. Emitting every fixed window from that stream makes
+    assistant-only SFT spend most optimizer steps on zero-loss blocks. Keep
+    full windows that contain target tokens, and pack target-bearing remainders
+    together across rows so short useful examples are not dropped.
+    """
+    for start in range(0, len(ids), seq_len):
+        chunk_ids = ids[start : start + seq_len]
+        chunk_weights = weights[start : start + seq_len]
+        if not chunk_ids or not any(chunk_weights):
+            continue
+        if len(chunk_ids) == seq_len:
+            out_ids.append(chunk_ids)
+            out_weights.append(chunk_weights)
+            continue
+        carry_ids.extend(chunk_ids)
+        carry_weights.extend(chunk_weights)
+        while len(carry_ids) >= seq_len:
+            out_ids.append(carry_ids[:seq_len])
+            out_weights.append(carry_weights[:seq_len])
+            del carry_ids[:seq_len]
+            del carry_weights[:seq_len]
+
+
+def _target_packed_blocks(rows, tokenizer, row_ids: list[int], seq_len: int, train_on: str):
+    block_ids: list[list[int]] = []
+    block_weights: list[list[float]] = []
+    carry_ids: list[int] = []
+    carry_weights: list[float] = []
+    for i in row_ids:
+        ids, weights = _row_tokens(tokenizer, rows[i], train_on)
+        if train_on == "assistant":
+            _append_target_blocks(
+                block_ids, block_weights, ids, weights, seq_len, carry_ids, carry_weights
+            )
+        else:
+            carry_ids.extend(ids)
+            carry_weights.extend(weights)
+            while len(carry_ids) >= seq_len:
+                block_ids.append(carry_ids[:seq_len])
+                block_weights.append(carry_weights[:seq_len])
+                del carry_ids[:seq_len]
+                del carry_weights[:seq_len]
+    return block_ids, block_weights
 
 
 class StreamingPackedBlocks(IterableDataset):
@@ -222,22 +405,25 @@ class StreamingPackedBlocks(IterableDataset):
                 f"consumers; lower --stream-workers or use more rows"
             )
         rng = random.Random(self.seed + consumer)
-        buf_ids: list[int] = []
-        buf_weights: list[float] = []
         while True:
             order = my_rows[:]
             rng.shuffle(order)
-            for i in order:
-                ids, weights = _row_tokens(self.tokenizer, ds[i], self.train_on)
-                buf_ids.extend(ids)
-                buf_weights.extend(weights)
-                while len(buf_ids) >= self.seq_len:
-                    yield (
-                        torch.tensor(buf_ids[: self.seq_len], dtype=torch.long),
-                        torch.tensor(buf_weights[: self.seq_len], dtype=torch.float),
-                    )
-                    del buf_ids[: self.seq_len]
-                    del buf_weights[: self.seq_len]
+            block_ids, block_weights = _target_packed_blocks(
+                ds, self.tokenizer, order, self.seq_len, self.train_on
+            )
+            if not block_ids:
+                raise ValueError(
+                    f"learner {self.learner_id} rank {self.rank} worker {worker_id}: "
+                    f"no trainable blocks after target-aware packing; use more rows, "
+                    f"a smaller --seq-len, or --train-on all"
+                )
+            paired = list(zip(block_ids, block_weights))
+            rng.shuffle(paired)
+            for ids, weights in paired:
+                yield (
+                    torch.tensor(ids, dtype=torch.long),
+                    torch.tensor(weights, dtype=torch.float),
+                )
 
 
 @dataclass
@@ -263,23 +449,19 @@ def build_packed_dataset(
     train_on: str = "assistant",
 ) -> PackedDataset:
     ds = load_rows(dataset_name, split)
-    token_stream: list[int] = []
-    weight_stream: list[float] = []
-    for i in _learner_rows(len(ds), learner_id, num_learners, max_rows):
-        ids, weights = _row_tokens(tokenizer, ds[i], train_on)
-        token_stream.extend(ids)
-        weight_stream.extend(weights)
+    block_ids, block_weights = _target_packed_blocks(
+        ds,
+        tokenizer,
+        _learner_rows(len(ds), learner_id, num_learners, max_rows),
+        seq_len,
+        train_on,
+    )
 
-    n_blocks = len(token_stream) // seq_len
-    if n_blocks == 0:
+    if not block_ids:
         raise ValueError(
-            f"learner {learner_id}: not enough tokens ({len(token_stream)}) for one "
-            f"block of {seq_len}; use more rows or a smaller --seq-len"
+            f"learner {learner_id}: no trainable blocks of {seq_len} tokens; "
+            f"use more rows, a smaller --seq-len, or --train-on all"
         )
-    blocks = torch.tensor(token_stream[: n_blocks * seq_len], dtype=torch.long).view(
-        n_blocks, seq_len
-    )
-    weights = torch.tensor(weight_stream[: n_blocks * seq_len], dtype=torch.float).view(
-        n_blocks, seq_len
-    )
+    blocks = torch.tensor(block_ids, dtype=torch.long)
+    weights = torch.tensor(block_weights, dtype=torch.float)
     return PackedDataset(blocks, weights)
