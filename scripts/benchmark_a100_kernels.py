@@ -22,6 +22,7 @@ import socket
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from importlib import metadata
@@ -200,9 +201,13 @@ def sdpa_backend_context(name: str | None, control: dict | None = None):
 
     before = snapshot_sdpa_backend_flags()
     control["before"] = before
-    expected = before if name is None else {
-        backend: name == "auto" or backend == name for backend in SDPA_FLAG_GETTERS
-    }
+    expected = (
+        before
+        if name is None
+        else {
+            backend: name == "auto" or backend == name for backend in SDPA_FLAG_GETTERS
+        }
+    )
     control["expected_active"] = expected
     selector = contextlib.nullcontext()
     if name is not None:
@@ -312,16 +317,16 @@ def select_variants(
         )
     unknown = [name for name in names if name not in VARIANTS_BY_NAME]
     if unknown:
-        raise ValueError(f"unknown variants {unknown}; choose from {list(VARIANTS_BY_NAME)}")
+        raise ValueError(
+            f"unknown variants {unknown}; choose from {list(VARIANTS_BY_NAME)}"
+        )
     candidates = set(names) - {reference.name}
     if len(candidates) > 1:
         raise ValueError(
             "publishable runs accept the selected reference plus at most one "
             f"candidate, received {sorted(candidates)}"
         )
-    return [reference] + [
-        variant for variant in VARIANTS if variant.name in candidates
-    ]
+    return [reference] + [variant for variant in VARIANTS if variant.name in candidates]
 
 
 SDPA_PRIMARY_OPERATORS = {
@@ -330,6 +335,10 @@ SDPA_PRIMARY_OPERATORS = {
     "efficient": "aten::_scaled_dot_product_efficient_attention",
     "cudnn": "aten::_scaled_dot_product_cudnn_attention",
 }
+SDPA_GENERIC_OPERATOR = "aten::scaled_dot_product_attention"
+SDPA_FORWARD_ATEN_ALLOWLIST = frozenset(
+    {SDPA_GENERIC_OPERATOR, *SDPA_PRIMARY_OPERATORS.values()}
+)
 
 
 def _strict_json_sha256(value) -> str:
@@ -346,7 +355,9 @@ def _tensor_signature(tensor: torch.Tensor | None) -> dict | None:
     if tensor is None:
         return None
     if not isinstance(tensor, torch.Tensor):
-        raise TypeError(f"expected an SDPA tensor input, received {type(tensor).__name__}")
+        raise TypeError(
+            f"expected an SDPA tensor input, received {type(tensor).__name__}"
+        )
     return {
         "shape": list(tensor.shape),
         "stride": list(tensor.stride()),
@@ -416,7 +427,9 @@ def _sdpa_call_arguments(args: tuple, kwargs: dict) -> dict:
     if unknown:
         raise TypeError(f"unknown scaled_dot_product_attention arguments: {unknown}")
     if duplicate:
-        raise TypeError(f"duplicate scaled_dot_product_attention arguments: {duplicate}")
+        raise TypeError(
+            f"duplicate scaled_dot_product_attention arguments: {duplicate}"
+        )
     values.update(kwargs)
     missing = [name for name in names[:3] if name not in values]
     if missing:
@@ -532,23 +545,40 @@ def parse_sdpa_profiler_events(events: Iterable) -> dict:
         else:
             key, count = event.key, getattr(event, "count", 1)
         if not isinstance(key, str) or not isinstance(count, int) or count < 0:
-            raise ValueError("profiler events require a string key and nonnegative count")
+            raise ValueError(
+                "profiler events require a string key and nonnegative count"
+            )
         if "attention" in key or "scaled_dot_product" in key:
             operator_counts[key] = operator_counts.get(key, 0) + count
 
+    aten_attention_operator_counts = {
+        key: count
+        for key, count in operator_counts.items()
+        if key.startswith("aten::") and count > 0
+    }
+    unexpected_aten_attention_operator_counts = {
+        key: count
+        for key, count in aten_attention_operator_counts.items()
+        if key not in SDPA_FORWARD_ATEN_ALLOWLIST
+    }
     backend_counts = {
         backend: operator_counts.get(operator, 0)
         for backend, operator in SDPA_PRIMARY_OPERATORS.items()
     }
     return {
-        "generic_sdpa_call_count": operator_counts.get(
-            "aten::scaled_dot_product_attention", 0
-        ),
+        "generic_sdpa_call_count": operator_counts.get(SDPA_GENERIC_OPERATOR, 0),
         "primary_backend_call_count": sum(backend_counts.values()),
         "backend_call_counts": backend_counts,
         "observed_backends": [
             backend for backend in SDPA_FLAG_GETTERS if backend_counts[backend] > 0
         ],
+        "forward_only_aten_allowlist": sorted(SDPA_FORWARD_ATEN_ALLOWLIST),
+        "aten_attention_operator_counts": dict(
+            sorted(aten_attention_operator_counts.items())
+        ),
+        "unexpected_aten_attention_operator_counts": dict(
+            sorted(unexpected_aten_attention_operator_counts.items())
+        ),
         "operator_counts": dict(sorted(operator_counts.items())),
     }
 
@@ -567,6 +597,12 @@ def evaluate_local_sdpa_attribution(
     generic_calls = profiler["generic_sdpa_call_count"]
     primary_calls = profiler["primary_backend_call_count"]
     observed = set(profiler["observed_backends"])
+    unexpected_aten = profiler.get("unexpected_aten_attention_operator_counts", {})
+    if unexpected_aten:
+        errors.append(
+            "the forward-only profiler observed unexpected ATen attention "
+            f"operators: {unexpected_aten}"
+        )
 
     if selector_backend is None:
         if recorded_calls or generic_calls or primary_calls:
@@ -579,9 +615,7 @@ def evaluate_local_sdpa_attribution(
         selector_eligibility_all_calls = True
     else:
         allowed = (
-            set(SDPA_FLAG_GETTERS)
-            if selector_backend == "auto"
-            else {selector_backend}
+            set(SDPA_FLAG_GETTERS) if selector_backend == "auto" else {selector_backend}
         )
         if recorded_calls < 1:
             errors.append("the functional recorder observed no SDPA calls")
@@ -821,9 +855,9 @@ def finish_sdpa_arm(
         "flags_before_close": flags_before_close,
         "active_after_phase": controller.active,
         "error": "; ".join(errors) if errors else None,
-        "control": json.loads(
-            json.dumps(controller.control, allow_nan=False)
-        ) if controller.control is not None else None,
+        "control": json.loads(json.dumps(controller.control, allow_nan=False))
+        if controller.control is not None
+        else None,
     }
     reports = gather_rank_records(local, rank, world)
     restoration = aggregate_sdpa_control_phase(
@@ -833,9 +867,7 @@ def finish_sdpa_arm(
         phase="restoration",
     )
     lifecycle["restoration"] = restoration
-    lifecycle["passed"] = lifecycle["activation"]["passed"] and restoration[
-        "passed"
-    ]
+    lifecycle["passed"] = lifecycle["activation"]["passed"] and restoration["passed"]
     return restoration
 
 
@@ -856,9 +888,9 @@ def begin_sdpa_arm(
         "variant": variant.name,
         "active_after_phase": controller.active,
         "error": error,
-        "control": json.loads(
-            json.dumps(controller.control, allow_nan=False)
-        ) if controller.control is not None else None,
+        "control": json.loads(json.dumps(controller.control, allow_nan=False))
+        if controller.control is not None
+        else None,
     }
     reports = gather_rank_records(local, rank, world)
     activation = aggregate_sdpa_control_phase(
@@ -900,9 +932,9 @@ def final_sdpa_controller_audit(
         "had_active_context": was_active,
         "active_after_phase": controller.active,
         "error": error,
-        "control": json.loads(
-            json.dumps(controller.control, allow_nan=False)
-        ) if controller.control is not None else None,
+        "control": json.loads(json.dumps(controller.control, allow_nan=False))
+        if controller.control is not None
+        else None,
     }
     reports = gather_rank_records(local, rank, world)
     return aggregate_sdpa_control_phase(
@@ -962,15 +994,17 @@ def aggregate_sdpa_attribution(
     signature_agreement = len(set(rank_signature_digests)) == 1
 
     backend_vectors = [
-        tuple(item["profiler"]["backend_call_counts"][name] for name in SDPA_FLAG_GETTERS)
+        tuple(
+            item["profiler"]["backend_call_counts"][name] for name in SDPA_FLAG_GETTERS
+        )
         for item in ordered
     ]
     operator_count_agreement = len(set(backend_vectors)) == 1
-    observed_vectors = [tuple(item["profiler"]["observed_backends"]) for item in ordered]
+    observed_vectors = [
+        tuple(item["profiler"]["observed_backends"]) for item in ordered
+    ]
     observed_backend_agreement = len(set(observed_vectors)) == 1
-    selector_agreement = all(
-        item["selector_operator_agreement"] for item in ordered
-    )
+    selector_agreement = all(item["selector_operator_agreement"] for item in ordered)
     state_reports = [item.get("relevant_state_restore") for item in ordered]
     state_restore_agreement = all(
         state is not None and state.get("passed") for state in state_reports
@@ -978,10 +1012,10 @@ def aggregate_sdpa_attribution(
     state_input_vectors = [
         (
             state.get("before_trainable_state_sha256") if state else None,
-            (state.get("frozen_parameters_before") or {}).get("sha256")
+            (state.get("frozen_parameters_before") or {}).get("normalized_sha256")
             if state
             else None,
-            (state.get("named_buffers_before") or {}).get("sha256")
+            (state.get("named_buffers_before") or {}).get("normalized_sha256")
             if state
             else None,
         )
@@ -1022,9 +1056,7 @@ def aggregate_sdpa_attribution(
                 },
             )
             aggregate["total_call_count"] += entry["call_count"]
-            aggregate["per_rank_call_count"][str(item["rank"])] = entry[
-                "call_count"
-            ]
+            aggregate["per_rank_call_count"][str(item["rank"])] = entry["call_count"]
 
     agreement = {
         "input_signatures": signature_agreement,
@@ -1104,8 +1136,13 @@ def resolve_model_revision(model_id: str, requested_revision: str | None) -> str
     except Exception as exc:
         # An explicit full SHA is already immutable and remains usable from a
         # warm offline cache even when the metadata endpoint is unavailable.
-        if requested_revision and len(requested_revision) == 40 and all(
-            character in "0123456789abcdefABCDEF" for character in requested_revision
+        if (
+            requested_revision
+            and len(requested_revision) == 40
+            and all(
+                character in "0123456789abcdefABCDEF"
+                for character in requested_revision
+            )
         ):
             return requested_revision.lower()
         raise RuntimeError(
@@ -1139,7 +1176,9 @@ def validate_lora_output_head(model) -> dict:
         name for name, _ in output_head.named_parameters() if "lora_" in name
     ]
     trainable_names = [
-        name for name, parameter in output_head.named_parameters() if parameter.requires_grad
+        name
+        for name, parameter in output_head.named_parameters()
+        if parameter.requires_grad
     ]
     if adapted_names or trainable_names:
         raise RuntimeError(
@@ -1241,9 +1280,7 @@ def load_raw_model(
                 tuning_report["trainable_dtype_counts"].get(dtype_name, 0)
                 + parameter.numel()
             )
-    if tuning == "lora" and set(tuning_report["trainable_dtype_counts"]) != {
-        "float32"
-    }:
+    if tuning == "lora" and set(tuning_report["trainable_dtype_counts"]) != {"float32"}:
         raise RuntimeError(
             "the production LoRA benchmark requires FP32 trainable adapters; "
             f"found {tuning_report['trainable_dtype_counts']}"
@@ -1365,77 +1402,418 @@ def restore_trainable_state(model, state: dict[str, torch.Tensor]) -> None:
             parameter.copy_(value.to(device=parameter.device))
 
 
-def frozen_parameter_state_report(model) -> dict:
-    """Hash exact frozen parameter metadata and bytes without retaining a copy."""
-    digest = hashlib.sha256()
-    tensor_count = 0
-    element_count = 0
-    for name, parameter in unwrap(model).named_parameters():
-        if parameter.requires_grad:
-            continue
-        value = parameter.detach().cpu().contiguous()
-        tensor_count += 1
-        element_count += value.numel()
-        digest.update(name.encode())
-        digest.update(b"\0")
-        digest.update(str(value.dtype).encode())
-        digest.update(b"\0")
-        digest.update(str(tuple(value.shape)).encode())
-        digest.update(b"\0")
-        digest.update(value.view(torch.uint8).numpy().tobytes())
+def _tensor_state_metadata(value: torch.Tensor) -> dict:
+    storage = value.untyped_storage()
     return {
-        "sha256": digest.hexdigest(),
-        "tensor_count": tensor_count,
-        "element_count": element_count,
+        "object_type": f"{type(value).__module__}.{type(value).__qualname__}",
+        "shape": list(value.shape),
+        "stride": list(value.stride()),
+        "dtype": str(value.dtype).removeprefix("torch."),
+        "device_type": value.device.type,
+        "device_index": value.device.index,
+        "layout": str(value.layout).removeprefix("torch."),
+        "requires_grad": bool(value.requires_grad),
+        "is_contiguous": bool(value.is_contiguous()),
+        "is_nested": bool(getattr(value, "is_nested", False)),
+        "storage_offset": int(value.storage_offset()),
+        "data_ptr": int(value.data_ptr()),
+        "storage_data_ptr": int(storage.data_ptr()),
+        "storage_identity": int(storage._cdata),
+        "storage_nbytes": int(storage.nbytes()),
     }
 
 
-def snapshot_named_buffers(model) -> dict[str, torch.Tensor]:
-    return {
-        name: value.detach().cpu().clone()
-        for name, value in unwrap(model).named_buffers()
-    }
+def _normalized_tensor_state_metadata(metadata: dict | None) -> dict | None:
+    if metadata is None:
+        return None
+    normalized = dict(metadata)
+    normalized["device_index"] = None
+    normalized["data_ptr"] = None
+    normalized["storage_data_ptr"] = None
+    normalized["storage_identity"] = None
+    return normalized
 
 
-def buffer_state_report(state: dict[str, torch.Tensor]) -> dict:
-    digest = hashlib.sha256()
-    element_count = 0
-    for name, value in state.items():
-        value = value.detach().cpu().contiguous()
-        element_count += value.numel()
-        digest.update(name.encode())
-        digest.update(b"\0")
-        digest.update(str(value.dtype).encode())
-        digest.update(b"\0")
-        digest.update(str(tuple(value.shape)).encode())
-        digest.update(b"\0")
-        digest.update(value.view(torch.uint8).numpy().tobytes())
-    return {
-        "sha256": digest.hexdigest(),
-        "tensor_count": len(state),
-        "element_count": element_count,
-    }
+def _tensor_value_sha256(value: torch.Tensor) -> str:
+    contiguous = value.detach().cpu().contiguous()
+    return hashlib.sha256(contiguous.view(torch.uint8).numpy().tobytes()).hexdigest()
 
 
-def restore_named_buffers(model, state: dict[str, torch.Tensor]) -> None:
-    buffers = dict(unwrap(model).named_buffers())
-    if buffers.keys() != state.keys():
-        missing = sorted(state.keys() - buffers.keys())
-        extra = sorted(buffers.keys() - state.keys())
-        raise RuntimeError(
-            "named-buffer layout changed during the attribution probe: "
-            f"missing={missing[:5]} extra={extra[:5]}"
+def _qualified_registration_name(module_path: str, local_name: str) -> str:
+    return f"{module_path}.{local_name}" if module_path else local_name
+
+
+def _snapshot_registered_tensor_state(model, kind: str) -> dict:
+    if kind not in ("frozen_parameters", "named_buffers"):
+        raise ValueError(f"unknown registered tensor state kind {kind!r}")
+    entries = {}
+    modules = {}
+    value_sha256_by_identity: dict[int, str] = {}
+    buffer_values_by_identity: dict[int, torch.Tensor] = {}
+    for module_path, module in unwrap(model).named_modules(remove_duplicate=False):
+        registry = (
+            module._parameters if kind == "frozen_parameters" else module._buffers
         )
+        registration_order = []
+        for local_name, value in registry.items():
+            if (
+                kind == "frozen_parameters"
+                and value is not None
+                and value.requires_grad
+            ):
+                continue
+            registration_order.append(local_name)
+            name = _qualified_registration_name(module_path, local_name)
+            if name in entries:
+                raise RuntimeError(f"duplicate registered tensor name {name!r}")
+            value_identity = id(value) if value is not None else None
+            if value is not None and value_identity not in value_sha256_by_identity:
+                value_sha256_by_identity[value_identity] = _tensor_value_sha256(value)
+                if kind == "named_buffers":
+                    buffer_values_by_identity[value_identity] = (
+                        value.detach().cpu().clone(memory_format=torch.preserve_format)
+                    )
+            entries[name] = {
+                "name": name,
+                "module_path": module_path,
+                "module": module,
+                "local_name": local_name,
+                "object": value,
+                "metadata": (
+                    _tensor_state_metadata(value) if value is not None else None
+                ),
+                "value_sha256": (
+                    value_sha256_by_identity[value_identity]
+                    if value_identity is not None
+                    else None
+                ),
+                "anchor_value": (
+                    buffer_values_by_identity[value_identity]
+                    if kind == "named_buffers" and value_identity is not None
+                    else None
+                ),
+                "persistent": (
+                    local_name not in module._non_persistent_buffers_set
+                    if kind == "named_buffers"
+                    else None
+                ),
+            }
+        if registration_order or (
+            kind == "named_buffers" and module._non_persistent_buffers_set
+        ):
+            modules[module_path] = {
+                "module_path": module_path,
+                "module": module,
+                "object_type": f"{type(module).__module__}.{type(module).__qualname__}",
+                "registration_order": (
+                    list(registry)
+                    if kind == "frozen_parameters"
+                    else registration_order
+                ),
+                "non_persistent_buffer_names": (
+                    sorted(module._non_persistent_buffers_set)
+                    if kind == "named_buffers"
+                    else None
+                ),
+            }
+    return {"kind": kind, "entries": entries, "modules": modules}
+
+
+def _registered_module_descriptors(state: dict) -> list[dict]:
+    first_module_path: dict[int, str] = {}
+    descriptors = []
+    for module_path in sorted(state["modules"]):
+        entry = state["modules"][module_path]
+        descriptors.append(
+            {
+                "module_path": module_path,
+                "module_alias_of": first_module_path.setdefault(
+                    id(entry["module"]), module_path
+                ),
+                "object_type": entry["object_type"],
+                "registration_order": entry["registration_order"],
+                "non_persistent_buffer_names": entry["non_persistent_buffer_names"],
+            }
+        )
+    return descriptors
+
+
+def _registered_state_descriptors(state: dict, normalize_devices: bool) -> list[dict]:
+    entries = state["entries"]
+    first_tensor_name: dict[int, str] = {}
+    first_storage_name: dict[tuple, str] = {}
+    first_module_path: dict[int, str] = {}
+    descriptors = []
+    for name in sorted(entries):
+        entry = entries[name]
+        value = entry["object"]
+        module = entry["module"]
+        module_alias = first_module_path.setdefault(id(module), entry["module_path"])
+        tensor_alias = None
+        storage_alias = None
+        if value is not None:
+            tensor_alias = first_tensor_name.setdefault(id(value), name)
+            storage_key = (
+                entry["metadata"]["device_type"],
+                entry["metadata"]["device_index"],
+                entry["metadata"]["storage_identity"],
+                entry["metadata"]["storage_nbytes"],
+            )
+            storage_alias = first_storage_name.setdefault(storage_key, name)
+        metadata = entry["metadata"]
+        if normalize_devices:
+            metadata = _normalized_tensor_state_metadata(metadata)
+        descriptors.append(
+            {
+                "name": name,
+                "module_path": entry["module_path"],
+                "local_name": entry["local_name"],
+                "registration_is_none": value is None,
+                "module_alias_of": module_alias,
+                "tensor_alias_of": tensor_alias,
+                "storage_alias_of": storage_alias,
+                "persistent": entry["persistent"],
+                "metadata": metadata,
+                "value_sha256": entry["value_sha256"],
+            }
+        )
+    return descriptors
+
+
+def registered_tensor_state_report(state: dict) -> dict:
+    local_descriptors = _registered_state_descriptors(state, normalize_devices=False)
+    normalized_descriptors = _registered_state_descriptors(
+        state, normalize_devices=True
+    )
+    unique_tensors = {
+        id(entry["object"])
+        for entry in state["entries"].values()
+        if entry["object"] is not None
+    }
+    seen_tensors = set()
+    element_count = 0
+    for entry in state["entries"].values():
+        value = entry["object"]
+        if value is None or id(value) in seen_tensors:
+            continue
+        seen_tensors.add(id(value))
+        element_count += value.numel()
+    local_payload = {
+        "modules": _registered_module_descriptors(state),
+        "registrations": local_descriptors,
+    }
+    normalized_payload = {
+        "modules": _registered_module_descriptors(state),
+        "registrations": normalized_descriptors,
+    }
+    return {
+        "kind": state["kind"],
+        "sha256": _strict_json_sha256(local_payload),
+        "normalized_sha256": _strict_json_sha256(normalized_payload),
+        "module_registration_count": len(state["modules"]),
+        "registration_count": len(state["entries"]),
+        "tensor_count": len(unique_tensors),
+        "none_registration_count": sum(
+            entry["object"] is None for entry in state["entries"].values()
+        ),
+        "alias_registration_count": max(
+            0,
+            sum(entry["object"] is not None for entry in state["entries"].values())
+            - len(unique_tensors),
+        ),
+        "element_count": element_count,
+    }
+
+
+def compare_registered_tensor_states(anchor: dict, current: dict) -> dict:
+    if anchor["kind"] != current["kind"]:
+        raise ValueError("registered tensor state kinds do not match")
+    anchor_entries = anchor["entries"]
+    current_entries = current["entries"]
+    anchor_names = set(anchor_entries)
+    current_names = set(current_entries)
+    anchor_modules = anchor["modules"]
+    current_modules = current["modules"]
+    anchor_module_paths = set(anchor_modules)
+    current_module_paths = set(current_modules)
+    failures = {
+        "missing_registrations": sorted(anchor_names - current_names),
+        "extra_registrations": sorted(current_names - anchor_names),
+        "module_identity_changed": [],
+        "object_identity_changed": [],
+        "metadata_changed": [],
+        "persistence_changed": [],
+        "value_changed": [],
+        "missing_module_registries": sorted(anchor_module_paths - current_module_paths),
+        "extra_module_registries": sorted(current_module_paths - anchor_module_paths),
+        "registration_order_changed": [],
+        "module_persistence_set_changed": [],
+    }
+    for module_path in sorted(anchor_module_paths & current_module_paths):
+        before_module = anchor_modules[module_path]
+        after_module = current_modules[module_path]
+        display_path = module_path or "<root>"
+        if before_module["module"] is not after_module["module"]:
+            failures["module_identity_changed"].append(display_path)
+        if before_module["registration_order"] != after_module["registration_order"]:
+            failures["registration_order_changed"].append(display_path)
+        if (
+            before_module["non_persistent_buffer_names"]
+            != after_module["non_persistent_buffer_names"]
+        ):
+            failures["module_persistence_set_changed"].append(display_path)
+    for name in sorted(anchor_names & current_names):
+        before = anchor_entries[name]
+        after = current_entries[name]
+        if before["module"] is not after["module"]:
+            failures["module_identity_changed"].append(name)
+        if before["object"] is not after["object"]:
+            failures["object_identity_changed"].append(name)
+        if before["metadata"] != after["metadata"]:
+            failures["metadata_changed"].append(name)
+        if before["persistent"] != after["persistent"]:
+            failures["persistence_changed"].append(name)
+        if before["value_sha256"] != after["value_sha256"]:
+            failures["value_changed"].append(name)
+
+    before_aliases = {
+        item["name"]: (
+            item["module_alias_of"],
+            item["tensor_alias_of"],
+            item["storage_alias_of"],
+        )
+        for item in _registered_state_descriptors(anchor, normalize_devices=False)
+    }
+    after_aliases = {
+        item["name"]: (
+            item["module_alias_of"],
+            item["tensor_alias_of"],
+            item["storage_alias_of"],
+        )
+        for item in _registered_state_descriptors(current, normalize_devices=False)
+    }
+    aliasing_changed = sorted(
+        name
+        for name in anchor_names | current_names
+        if before_aliases.get(name) != after_aliases.get(name)
+    )
+    failures["aliasing_changed"] = aliasing_changed
+    before_module_aliases = {
+        item["module_path"]: item["module_alias_of"]
+        for item in _registered_module_descriptors(anchor)
+    }
+    after_module_aliases = {
+        item["module_path"]: item["module_alias_of"]
+        for item in _registered_module_descriptors(current)
+    }
+    failures["module_aliasing_changed"] = sorted(
+        path or "<root>"
+        for path in anchor_module_paths | current_module_paths
+        if before_module_aliases.get(path) != after_module_aliases.get(path)
+    )
+    failures["module_identity_changed"] = sorted(
+        set(failures["module_identity_changed"])
+    )
+    return {
+        "passed": not any(failures.values()),
+        **failures,
+    }
+
+
+def snapshot_frozen_parameter_state(model) -> dict:
+    return _snapshot_registered_tensor_state(model, "frozen_parameters")
+
+
+def frozen_parameter_state_report(model_or_state) -> dict:
+    state = (
+        model_or_state
+        if isinstance(model_or_state, dict)
+        and model_or_state.get("kind") == "frozen_parameters"
+        else snapshot_frozen_parameter_state(model_or_state)
+    )
+    return registered_tensor_state_report(state)
+
+
+def snapshot_named_buffers(model) -> dict:
+    return _snapshot_registered_tensor_state(model, "named_buffers")
+
+
+def buffer_state_report(state: dict) -> dict:
+    if state.get("kind") != "named_buffers":
+        raise ValueError("expected a named-buffer state snapshot")
+    return registered_tensor_state_report(state)
+
+
+def restore_named_buffers(model, state: dict) -> None:
+    if state.get("kind") != "named_buffers":
+        raise ValueError("expected a named-buffer state snapshot")
+    module_paths = dict(unwrap(model).named_modules(remove_duplicate=False))
+    errors = []
+    for entry in state["modules"].values():
+        if module_paths.get(entry["module_path"]) is not entry["module"]:
+            errors.append(f"module identity changed at {entry['module_path']!r}")
+    if errors:
+        raise RuntimeError("; ".join(sorted(set(errors))))
+
+    current = snapshot_named_buffers(model)
+    anchor_by_registration = {
+        (id(entry["module"]), entry["local_name"]): entry
+        for entry in state["entries"].values()
+    }
+    current_by_registration = {
+        (id(entry["module"]), entry["local_name"]): entry
+        for entry in current["entries"].values()
+    }
+    for key, entry in current_by_registration.items():
+        if key in anchor_by_registration:
+            continue
+        entry["module"]._buffers.pop(entry["local_name"], None)
+        entry["module"]._non_persistent_buffers_set.discard(entry["local_name"])
+
     with torch.no_grad():
-        for name, buffer in buffers.items():
-            value = state[name]
-            if buffer.shape != value.shape or buffer.dtype != value.dtype:
-                raise RuntimeError(
-                    f"named-buffer metadata changed for {name}: "
-                    f"buffer={buffer.shape}/{buffer.dtype} "
-                    f"anchor={value.shape}/{value.dtype}"
+        for entry in anchor_by_registration.values():
+            module = entry["module"]
+            local_name = entry["local_name"]
+            value = entry["object"]
+            module._buffers[local_name] = value
+            if entry["persistent"]:
+                module._non_persistent_buffers_set.discard(local_name)
+            else:
+                module._non_persistent_buffers_set.add(local_name)
+            if value is None:
+                continue
+            if _tensor_state_metadata(value) != entry["metadata"]:
+                errors.append(
+                    f"named-buffer metadata changed irreversibly for {entry['name']}"
                 )
-            buffer.copy_(value.to(device=buffer.device))
+                continue
+            try:
+                value.copy_(entry["anchor_value"].to(device=value.device))
+            except Exception as exc:
+                errors.append(
+                    f"named-buffer value restore failed for {entry['name']}: "
+                    f"{exception_text(exc)}"
+                )
+    anchor_module_ids = {id(entry["module"]) for entry in state["modules"].values()}
+    for entry in current["modules"].values():
+        if id(entry["module"]) in anchor_module_ids:
+            continue
+        entry["module"]._non_persistent_buffers_set.clear()
+    restored_module_ids = set()
+    for entry in state["modules"].values():
+        module = entry["module"]
+        if id(module) in restored_module_ids:
+            continue
+        restored_module_ids.add(id(module))
+        ordered_buffers = {
+            name: module._buffers[name] for name in entry["registration_order"]
+        }
+        module._buffers.clear()
+        module._buffers.update(ordered_buffers)
+        module._non_persistent_buffers_set.clear()
+        module._non_persistent_buffers_set.update(entry["non_persistent_buffer_names"])
+    if errors:
+        raise RuntimeError("; ".join(sorted(set(errors))))
 
 
 def lora_factor_nonzero_report(state: dict[str, torch.Tensor]) -> dict:
@@ -1535,9 +1913,7 @@ def tensor_parity(actual, reference, rtol, atol, chunk_size=1_000_000) -> dict:
             difference_double = actual_double - reference_double
             difference = difference_double.abs()
             relative = difference / reference_double.abs().clamp_min(1e-12)
-            finite_violations = difference > (
-                atol + rtol * reference_double.abs()
-            )
+            finite_violations = difference > (atol + rtol * reference_double.abs())
             violations = violations.clone()
             violations[finite] = finite_violations
 
@@ -1555,9 +1931,7 @@ def tensor_parity(actual, reference, rtol, atol, chunk_size=1_000_000) -> dict:
                 metrics["max_reference_absolute"],
                 float(finite_reference_chunk.abs().max().item()),
             )
-            metrics["actual_squared_l2"] += float(
-                actual_double.square().sum().item()
-            )
+            metrics["actual_squared_l2"] += float(actual_double.square().sum().item())
             metrics["reference_squared_l2"] += float(
                 reference_double.square().sum().item()
             )
@@ -1655,14 +2029,12 @@ def _finalize_map_parity(summary: dict) -> dict:
                 else None
             ),
             actual_nonzero_fraction=(
-                summary["actual_nonzero_elements"]
-                / summary["finite_element_count"]
+                summary["actual_nonzero_elements"] / summary["finite_element_count"]
                 if summary["finite_element_count"]
                 else None
             ),
             reference_nonzero_fraction=(
-                summary["reference_nonzero_elements"]
-                / summary["finite_element_count"]
+                summary["reference_nonzero_elements"] / summary["finite_element_count"]
                 if summary["finite_element_count"]
                 else None
             ),
@@ -1708,7 +2080,9 @@ def _finalize_map_parity(summary: dict) -> dict:
     return summary
 
 
-def compare_tensor_maps(actual: dict, reference: dict, rtol: float, atol: float) -> dict:
+def compare_tensor_maps(
+    actual: dict, reference: dict, rtol: float, atol: float
+) -> dict:
     """Compare every common tensor and report structural and numeric failures."""
     summary = _empty_map_parity()
     summary["expected_tensors"] = len(reference)
@@ -1891,12 +2265,8 @@ def compare_parity(
             "allclose_violation_fraction"
         ],
         "checked_gradient_tensors": gradient_parity["checked_tensors"],
-        "first_failing_gradient_tensor": gradient_parity[
-            "first_failing_tensor"
-        ],
-        "worst_failing_gradient_tensor": gradient_parity[
-            "worst_failing_tensor"
-        ],
+        "first_failing_gradient_tensor": gradient_parity["first_failing_tensor"],
+        "worst_failing_gradient_tensor": gradient_parity["worst_failing_tensor"],
         "parameter_delta_status": "not_evaluated",
         "parameter_delta_parity": None,
         "parameter_delta_actual_sensitivity": None,
@@ -1942,8 +2312,7 @@ def compare_parity(
         reference_sensitivity = _update_sensitivity(delta_parity, "reference")
         delta_status = delta_parity["status"]
         if delta_status == "passed" and not (
-            actual_sensitivity["meaningful"]
-            and reference_sensitivity["meaningful"]
+            actual_sensitivity["meaningful"] and reference_sensitivity["meaningful"]
         ):
             delta_status = "not_meaningful"
             result["reasons"].append(
@@ -1955,16 +2324,10 @@ def compare_parity(
             parameter_delta_actual_sensitivity=actual_sensitivity,
             parameter_delta_reference_sensitivity=reference_sensitivity,
             max_parameter_delta_abs_error=delta_parity["max_absolute_error"],
-            max_parameter_delta_relative_error=delta_parity[
-                "max_relative_error"
-            ],
+            max_parameter_delta_relative_error=delta_parity["max_relative_error"],
             checked_parameter_delta_tensors=delta_parity["checked_tensors"],
-            first_failing_parameter_delta_tensor=delta_parity[
-                "first_failing_tensor"
-            ],
-            worst_failing_parameter_delta_tensor=delta_parity[
-                "worst_failing_tensor"
-            ],
+            first_failing_parameter_delta_tensor=delta_parity["first_failing_tensor"],
+            worst_failing_parameter_delta_tensor=delta_parity["worst_failing_tensor"],
         )
         result["reasons"].extend(
             f"parameter-delta {reason}" for reason in delta_parity["reasons"]
@@ -1998,22 +2361,14 @@ def compact_parity_diagnostic(parity: dict, rank: int) -> dict:
         "gradient_allclose_violation_fraction": parity[
             "gradient_allclose_violation_fraction"
         ],
-        "gradient_nonfinite_actual_elements": gradient[
-            "nonfinite_actual_elements"
-        ],
+        "gradient_nonfinite_actual_elements": gradient["nonfinite_actual_elements"],
         "gradient_nonfinite_reference_elements": gradient[
             "nonfinite_reference_elements"
         ],
-        "first_failing_gradient_tensor": parity[
-            "first_failing_gradient_tensor"
-        ],
-        "worst_failing_gradient_tensor": parity[
-            "worst_failing_gradient_tensor"
-        ],
+        "first_failing_gradient_tensor": parity["first_failing_gradient_tensor"],
+        "worst_failing_gradient_tensor": parity["worst_failing_gradient_tensor"],
         "parameter_delta_status": parity["parameter_delta_status"],
-        "parameter_delta_max_absolute_error": parity[
-            "max_parameter_delta_abs_error"
-        ],
+        "parameter_delta_max_absolute_error": parity["max_parameter_delta_abs_error"],
         "parameter_delta_max_relative_error": parity[
             "max_parameter_delta_relative_error"
         ],
@@ -2118,8 +2473,7 @@ def aggregate_parity_diagnostics(diagnostics: list[dict]) -> dict:
         "nonfinite_loss_ranks": [
             item["rank"]
             for item in ordered
-            if item["loss_nonfinite_actual"]
-            or item["loss_nonfinite_reference"]
+            if item["loss_nonfinite_actual"] or item["loss_nonfinite_reference"]
         ],
         "loss_nonfinite_actual_ranks": [
             item["rank"] for item in ordered if item["loss_nonfinite_actual"]
@@ -2149,9 +2503,7 @@ def aggregate_parity_diagnostics(diagnostics: list[dict]) -> dict:
         "gradient_nonfinite_reference_elements_total": sum(
             item["gradient_nonfinite_reference_elements"] for item in ordered
         ),
-        "parameter_delta_status": _aggregate_status(
-            ordered, "parameter_delta_status"
-        ),
+        "parameter_delta_status": _aggregate_status(ordered, "parameter_delta_status"),
         "parameter_delta_max_absolute_error_max": _defined_metric(
             ordered, "parameter_delta_max_absolute_error", max
         ),
@@ -2251,25 +2603,17 @@ def apply_distributed_parity(parity: dict, diagnostics: list[dict], rank: int) -
     parity["gradient_status"] = distributed["gradient_status"]
     parity["parameter_delta_status"] = distributed["parameter_delta_status"]
     parity["loss_abs_error"] = distributed["loss_abs_error_max"]
-    parity["loss_nonfinite_actual"] = bool(
-        distributed["loss_nonfinite_actual_ranks"]
-    )
+    parity["loss_nonfinite_actual"] = bool(distributed["loss_nonfinite_actual_ranks"])
     parity["loss_nonfinite_reference"] = bool(
         distributed["loss_nonfinite_reference_ranks"]
     )
     parity["nonfinite_loss_ranks"] = distributed["nonfinite_loss_ranks"]
-    parity["max_gradient_abs_error"] = distributed[
-        "gradient_max_absolute_error_max"
-    ]
+    parity["max_gradient_abs_error"] = distributed["gradient_max_absolute_error_max"]
     parity["max_gradient_relative_error"] = distributed[
         "gradient_max_relative_error_max"
     ]
-    parity["gradient_relative_l2_error"] = distributed[
-        "gradient_relative_l2_error_max"
-    ]
-    parity["gradient_cosine_similarity"] = distributed[
-        "gradient_cosine_similarity_min"
-    ]
+    parity["gradient_relative_l2_error"] = distributed["gradient_relative_l2_error_max"]
+    parity["gradient_cosine_similarity"] = distributed["gradient_cosine_similarity_min"]
     parity["gradient_allclose_violation_fraction"] = distributed[
         "gradient_allclose_violation_fraction_max"
     ]
@@ -2308,7 +2652,9 @@ def backward_and_clip(
     # Scaling every local token-sum loss by world/global_targets therefore
     # yields the exact island-global token-mean gradient after that average.
     (loss * (world / denominator)).backward()
-    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    trainable = [
+        parameter for parameter in model.parameters() if parameter.requires_grad
+    ]
     if tuning == "lora":
         allreduce_trainable_grads(trainable, world)
     pre_clip_norm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
@@ -2377,7 +2723,9 @@ def parameter_delta_witness(model, optimizer, device, restore_parameters=False):
 
 
 def make_optimizer(model, learning_rate: float, weight_decay: float):
-    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    trainable = [
+        parameter for parameter in model.parameters() if parameter.requires_grad
+    ]
     if not trainable:
         raise RuntimeError("the benchmark model has no trainable parameters")
     return torch.optim.AdamW(trainable, lr=learning_rate, weight_decay=weight_decay)
@@ -2419,12 +2767,19 @@ def profile_sdpa_attribution_probe(
     errors: list[str] = []
     before_digest = None
     after_digest = None
+    frozen_anchor = None
     frozen_before = None
+    frozen_after_state = None
     frozen_after = None
+    frozen_comparison = None
     buffer_anchor = None
     buffer_before = None
+    buffer_post_forward_state = None
     buffer_post_forward = None
+    buffer_post_forward_comparison = None
+    buffer_after_restore_state = None
     buffer_after_restore = None
+    buffer_after_restore_comparison = None
     cpu_rng_state = None
     cuda_rng_state = None
     rng_restored = False
@@ -2436,7 +2791,8 @@ def profile_sdpa_attribution_probe(
             raise RuntimeError(
                 "the attribution probe did not start from the exact warmed anchor"
             )
-        frozen_before = frozen_parameter_state_report(model)
+        frozen_anchor = snapshot_frozen_parameter_state(model)
+        frozen_before = frozen_parameter_state_report(frozen_anchor)
         buffer_anchor = snapshot_named_buffers(model)
         buffer_before = buffer_state_report(buffer_anchor)
         cpu_rng_state = torch.random.get_rng_state().clone()
@@ -2466,13 +2822,22 @@ def profile_sdpa_attribution_probe(
         errors.append(exception_text(exc))
     finally:
         try:
-            frozen_after = frozen_parameter_state_report(model)
+            frozen_after_state = snapshot_frozen_parameter_state(model)
+            frozen_after = frozen_parameter_state_report(frozen_after_state)
+            if frozen_anchor is not None:
+                frozen_comparison = compare_registered_tensor_states(
+                    frozen_anchor, frozen_after_state
+                )
         except Exception as exc:
-            errors.append(f"frozen-parameter verification failed: {exception_text(exc)}")
+            errors.append(
+                f"frozen-parameter verification failed: {exception_text(exc)}"
+            )
         if buffer_anchor is not None:
             try:
-                buffer_post_forward = buffer_state_report(
-                    snapshot_named_buffers(model)
+                buffer_post_forward_state = snapshot_named_buffers(model)
+                buffer_post_forward = buffer_state_report(buffer_post_forward_state)
+                buffer_post_forward_comparison = compare_registered_tensor_states(
+                    buffer_anchor, buffer_post_forward_state
                 )
             except Exception as exc:
                 errors.append(f"named-buffer snapshot failed: {exception_text(exc)}")
@@ -2506,7 +2871,12 @@ def profile_sdpa_attribution_probe(
     except Exception as exc:
         errors.append(f"trainable-state verification failed: {exception_text(exc)}")
     try:
-        buffer_after_restore = buffer_state_report(snapshot_named_buffers(model))
+        buffer_after_restore_state = snapshot_named_buffers(model)
+        buffer_after_restore = buffer_state_report(buffer_after_restore_state)
+        if buffer_anchor is not None:
+            buffer_after_restore_comparison = compare_registered_tensor_states(
+                buffer_anchor, buffer_after_restore_state
+            )
     except Exception as exc:
         errors.append(f"named-buffer verification failed: {exception_text(exc)}")
     if cpu_rng_state is not None and cuda_rng_state is not None:
@@ -2520,8 +2890,13 @@ def profile_sdpa_attribution_probe(
     trainable_restored = (
         before_digest == anchor_digest and after_digest == anchor_digest
     )
-    frozen_unchanged = frozen_before is not None and frozen_before == frozen_after
-    buffers_restored = buffer_before is not None and buffer_before == buffer_after_restore
+    frozen_unchanged = bool(
+        frozen_comparison is not None and frozen_comparison["passed"]
+    )
+    buffers_restored = bool(
+        buffer_after_restore_comparison is not None
+        and buffer_after_restore_comparison["passed"]
+    )
     if not trainable_restored:
         errors.append("attribution trainable state was not restored exactly")
     if not frozen_unchanged:
@@ -2531,13 +2906,7 @@ def profile_sdpa_attribution_probe(
     if not rng_restored:
         errors.append("attribution RNG state was not restored exactly")
 
-    local = evaluate_local_sdpa_attribution(
-        variant.internal_sdpa_backend,
-        recorder.report(),
-        profiler_result,
-        error="; ".join(errors) if errors else None,
-    )
-    local["relevant_state_restore"] = {
+    relevant_state_restore = {
         "passed": (
             trainable_restored
             and frozen_unchanged
@@ -2549,19 +2918,29 @@ def profile_sdpa_attribution_probe(
         "expected_trainable_state_sha256": anchor_digest,
         "frozen_parameters_before": frozen_before,
         "frozen_parameters_after": frozen_after,
+        "frozen_parameter_comparison": frozen_comparison,
         "frozen_parameters_unchanged": frozen_unchanged,
         "named_buffers_before": buffer_before,
         "named_buffers_post_forward": buffer_post_forward,
         "named_buffers_after_restore": buffer_after_restore,
+        "named_buffers_post_forward_comparison": (buffer_post_forward_comparison),
+        "named_buffers_after_restore_comparison": (buffer_after_restore_comparison),
         "named_buffers_mutated_during_probe": (
-            buffer_before is not None and buffer_before != buffer_post_forward
+            buffer_post_forward_comparison is None
+            or not buffer_post_forward_comparison["passed"]
         ),
         "named_buffers_restored_exactly": buffers_restored,
         "rng_restored_exactly": rng_restored,
         "scope": {
             "trainable_parameters": "exact bytes restored and verified",
-            "frozen_parameters": "exact bytes verified unchanged",
-            "named_buffers": "exact bytes restored and verified",
+            "frozen_parameters": (
+                "registration, identity, aliasing, metadata, and exact bytes "
+                "verified unchanged"
+            ),
+            "named_buffers": (
+                "registration, identity, aliasing, persistence, metadata, and "
+                "exact bytes restored and verified"
+            ),
             "cpu_rng": "default generator restored exactly",
             "local_cuda_rng": "default generator restored exactly",
             "unregistered_python_state": (
@@ -2570,6 +2949,41 @@ def profile_sdpa_attribution_probe(
             ),
         },
     }
+    try:
+        recorder_report = recorder.report()
+    except Exception as exc:
+        errors.append(f"SDPA recorder reporting failed: {exception_text(exc)}")
+        recorder_report = {
+            "total_calls": 0,
+            "unique_signature_count": 0,
+            "ordered_signature_sha256": _strict_json_sha256([]),
+            "unique_signatures": [],
+        }
+    try:
+        local = evaluate_local_sdpa_attribution(
+            variant.internal_sdpa_backend,
+            recorder_report,
+            profiler_result,
+            error="; ".join(errors) if errors else None,
+        )
+    except Exception as exc:
+        local = evaluate_local_sdpa_attribution(
+            variant.internal_sdpa_backend,
+            {
+                "total_calls": 0,
+                "unique_signature_count": 0,
+                "ordered_signature_sha256": _strict_json_sha256([]),
+                "unique_signatures": [],
+            },
+            parse_sdpa_profiler_events([]),
+            error=(
+                "; ".join(
+                    errors
+                    + [f"SDPA attribution evaluation failed: {exception_text(exc)}"]
+                )
+            ),
+        )
+    local["relevant_state_restore"] = relevant_state_restore
     return gather_sdpa_attribution(
         local,
         rank,
@@ -2597,11 +3011,9 @@ def benchmark_variant(
         dist.barrier()
     torch.cuda.synchronize(device)
     started = time.perf_counter()
-    training_step(
-        model, optimizer, variant, input_ids, weights, tuning, world, device
-    )
+    training_step(model, optimizer, variant, input_ids, weights, tuning, world, device)
     torch.cuda.synchronize(device)
-    first_post_attribution_optimizer_step_seconds = distributed_max(
+    first_post_attribution_training_step_seconds = distributed_max(
         time.perf_counter() - started, device
     )
 
@@ -2633,15 +3045,17 @@ def benchmark_variant(
         "world_size": world,
         "steps": measured_steps,
         "warmup_steps": warmup_steps,
-        "first_post_attribution_optimizer_step_seconds": (
-            first_post_attribution_optimizer_step_seconds
+        "first_post_attribution_training_step_seconds": (
+            first_post_attribution_training_step_seconds
         ),
         "p50_step_seconds": percentile(durations, 0.50),
         "p95_step_seconds": percentile(durations, 0.95),
         "mean_step_seconds": statistics.fmean(durations),
         "raw_tokens_per_step": raw_tokens_per_step,
         "target_tokens_per_step": target_tokens_per_step,
-        "raw_tokens_per_second": raw_tokens_per_step * measured_steps / measured_seconds,
+        "raw_tokens_per_second": raw_tokens_per_step
+        * measured_steps
+        / measured_seconds,
         "target_tokens_per_second": target_tokens_per_step
         * measured_steps
         / measured_seconds,
@@ -2672,9 +3086,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--variants",
         default="",
-        help=(
-            "optional candidate name; the selected reference is added automatically"
-        ),
+        help=("optional candidate name; the selected reference is added automatically"),
     )
     parser.add_argument(
         "--reference-variant",
@@ -2719,7 +3131,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parity-atol", type=float, default=5e-3)
     parser.add_argument("--parameter-delta-rtol", type=float, default=5e-2)
     parser.add_argument("--parameter-delta-atol", type=float, default=1e-8)
-    parser.add_argument("--output", type=Path, default=Path("a100-kernel-benchmark.json"))
+    parser.add_argument(
+        "--output", type=Path, default=Path("a100-kernel-benchmark.json")
+    )
     return parser
 
 
@@ -2735,15 +3149,20 @@ def validate_args(args) -> None:
     if args.trial_index < 1:
         raise ValueError("--trial-index must be positive")
     if args.learning_rate <= 0 or args.weight_decay < 0:
-        raise ValueError("--learning-rate must be positive and --weight-decay nonnegative")
+        raise ValueError(
+            "--learning-rate must be positive and --weight-decay nonnegative"
+        )
     if args.lora_r < 1 or args.lora_alpha < 1:
         raise ValueError("--lora-r and --lora-alpha must be positive")
-    if min(
-        args.parity_rtol,
-        args.parity_atol,
-        args.parameter_delta_rtol,
-        args.parameter_delta_atol,
-    ) < 0:
+    if (
+        min(
+            args.parity_rtol,
+            args.parity_atol,
+            args.parameter_delta_rtol,
+            args.parameter_delta_atol,
+        )
+        < 0
+    ):
         raise ValueError("parity tolerances must be nonnegative")
 
 
@@ -2786,9 +3205,7 @@ def source_provenance() -> dict:
     override_sha = os.environ.get("YETO_GIT_SHA")
     override_dirty = os.environ.get("YETO_GIT_DIRTY")
     if (override_sha is None) != (override_dirty is None):
-        raise ValueError(
-            "YETO_GIT_SHA and YETO_GIT_DIRTY must be supplied together"
-        )
+        raise ValueError("YETO_GIT_SHA and YETO_GIT_DIRTY must be supplied together")
     if override_sha is not None:
         git_sha = _validated_git_sha(override_sha)
         git_dirty = _validated_dirty(override_dirty)
@@ -2861,7 +3278,8 @@ def finalize_report_status(
             "reason": fatal_reason or "benchmark failed without a recorded reason",
         }
     elif (
-        len(report["completed_variants"]) == len(report["planned_variants"])
+        report["completed_variants"] == report["planned_variants"]
+        and len(set(report["completed_variants"])) == len(report["completed_variants"])
         and all(record["status"] == "passed" for record in report["variants"])
     ):
         report["status"] = "passed"
@@ -2869,6 +3287,77 @@ def finalize_report_status(
     else:
         report["status"] = "incomplete"
         report["fatal"] = None
+
+
+def write_report_atomic(output: Path, serialized: str) -> None:
+    """Durably replace one report without exposing a partial JSON artifact."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output.name}.", suffix=".tmp", dir=output.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        stream = os.fdopen(descriptor, "w", encoding="utf-8")
+        descriptor = -1
+        with stream:
+            stream.write(serialized)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def publish_report_collectively(
+    report: dict,
+    output: Path,
+    rank: int,
+    failed: bool,
+    fatal_phase: str | None,
+    fatal_reason: str | None,
+) -> dict:
+    """Publish on rank zero, then give every rank the same success decision."""
+    result = None
+    serialized = None
+    if rank == 0:
+        try:
+            finalize_report_status(report, failed, fatal_phase, fatal_reason)
+            serialized = json.dumps(report, indent=2, sort_keys=True, allow_nan=False)
+            write_report_atomic(output, serialized)
+            result = {
+                "passed": True,
+                "error": None,
+                "output": str(output),
+                "status": report["status"],
+            }
+        except Exception as exc:
+            result = {
+                "passed": False,
+                "error": exception_text(exc),
+                "output": str(output),
+                "status": "failed",
+            }
+    result = broadcast_object(result, rank)
+    if rank == 0:
+        try:
+            if result["passed"]:
+                print(serialized, flush=True)
+                print(f"wrote {output}", file=sys.stderr, flush=True)
+            else:
+                print(
+                    f"report publication failed: {result['error']}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        except Exception:
+            # The atomic report and collective decision are authoritative; a
+            # closed diagnostic stream must not strand other ranks.
+            pass
+    return result
 
 
 def restore_sdpa_arm_for_record(
@@ -2883,10 +3372,7 @@ def restore_sdpa_arm_for_record(
     record["sdpa_backend_control"] = lifecycle
     if restoration["passed"]:
         return None
-    reason = (
-        "SDPA selector restoration failed on ranks "
-        f"{restoration['failing_ranks']}"
-    )
+    reason = f"SDPA selector restoration failed on ranks {restoration['failing_ranks']}"
     previous = record.get("reason")
     record["reason"] = f"{previous}; {reason}" if previous else reason
     record["status"] = "failed"
@@ -2922,7 +3408,7 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
         raise RuntimeError(revision_result["error"])
     resolved_revision = revision_result["commit"]
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
         "benchmark": "a100-causal-training-kernels",
         "status": "incomplete",
         "reference_variant": reference_variant.name,
@@ -2938,6 +3424,8 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             "selector_api": "torch.nn.attention.sdpa_kernel",
             "capability_api": "torch.backends.cuda.SDPAParams and can_use_*_attention",
             "operator_evidence": "torch.profiler",
+            "forward_only_aten_allowlist": sorted(SDPA_FORWARD_ATEN_ALLOWLIST),
+            "unexpected_aten_attention_operator_is_fatal": True,
             "required_shapes": ["parity", "timing"],
             "probe_execution": "rank-local grad-enabled forward only",
             "automatic_backend_policy": (
@@ -2945,7 +3433,12 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             ),
             "timing_requires_attribution_pass": True,
             "timing_shape_is_profiled_before_timing": True,
+            "first_timing_metric": ("first_post_attribution_training_step_seconds"),
             "selector_lifecycle_requires_all_ranks": True,
+            "registered_state_scope": (
+                "registration, identity, aliasing, persistence, metadata, bytes"
+            ),
+            "report_publication": "strict JSON, atomic replace, all-rank decision",
             "reference_variant": reference_variant.name,
             "publishable_variant_limit": (
                 "selected reference plus at most one candidate"
@@ -2979,9 +3472,7 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
     fatal_reason = None
 
     for variant in variants:
-        backend_lifecycle = begin_sdpa_arm(
-            backend_controller, variant, rank, world
-        )
+        backend_lifecycle = begin_sdpa_arm(backend_controller, variant, rank, world)
         if not backend_lifecycle["activation"]["passed"]:
             activation_reason = (
                 "SDPA selector activation failed on ranks "
@@ -3127,7 +3618,9 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
         controlled_warmup_report = None
         if parity_anchor_state is None:
             if variant != reference_variant:
-                raise RuntimeError("the first benchmark variant must establish the anchor")
+                raise RuntimeError(
+                    "the first benchmark variant must establish the anchor"
+                )
             if args.tuning == "lora":
                 warm_ids, warm_weights = make_batch(
                     vocab_size,
@@ -3305,14 +3798,10 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             device,
         )
         repeat_parameter_deltas, repeat_optimizer_step_seconds = (
-            parameter_delta_witness(
-                model, optimizer, device, restore_parameters=True
-            )
+            parameter_delta_witness(model, optimizer, device, restore_parameters=True)
         )
         del optimizer
-        repeat_seconds = distributed_max(
-            time.perf_counter() - repeat_started, device
-        )
+        repeat_seconds = distributed_max(time.perf_counter() - repeat_started, device)
         repeat_forward_backward_seconds = distributed_max(
             repeat_forward_backward_seconds, device
         )
@@ -3367,8 +3856,7 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
                 parity["passed"] = False
                 parity["passed_all_ranks"] = False
                 parity["reason"] = (
-                    "self-repeat control failed: "
-                    f"{self_repeat_parity['reason']}"
+                    f"self-repeat control failed: {self_repeat_parity['reason']}"
                 )
 
         anchor_failing_ranks = parity["distributed_parity"]["failing_ranks"]
@@ -3426,8 +3914,7 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
                 "failed to restore the identical warmed trainable anchor before timing"
             )
             parity["overall_failing_ranks"] = sorted(
-                set(parity["overall_failing_ranks"])
-                | set(timing_anchor_failing_ranks)
+                set(parity["overall_failing_ranks"]) | set(timing_anchor_failing_ranks)
             )
 
         parity_seconds = distributed_max(time.perf_counter() - parity_started, device)
@@ -3437,15 +3924,11 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
         parity["optimizer_init_step_seconds"] = optimizer_init_seconds
         parity["first_backward"] = backward_report
         parity["self_repeat_seconds"] = repeat_seconds
-        parity["self_repeat_forward_backward_seconds"] = (
-            repeat_forward_backward_seconds
-        )
+        parity["self_repeat_forward_backward_seconds"] = repeat_forward_backward_seconds
         parity["self_repeat_optimizer_step_seconds"] = repeat_optimizer_step_seconds
         parity["self_repeat_backward"] = repeat_backward_report
         parity["timing_anchor_restored_all_ranks"] = timing_anchor_matches_all_ranks
-        parity["timing_anchor_restore_failing_ranks"] = (
-            timing_anchor_failing_ranks
-        )
+        parity["timing_anchor_restore_failing_ranks"] = timing_anchor_failing_ranks
         parity["timing_anchor_trainable_state_sha256"] = timing_anchor_digest
         parity["state_digest_reports"] = {
             "construction": construction_state_report,
@@ -3636,9 +4119,7 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             "setup_seconds": setup_seconds,
             "tuning": tuning_report,
             "model_init_seed": model_init_seed,
-            "adapter_init_seed": (
-                adapter_init_seed if args.tuning == "lora" else None
-            ),
+            "adapter_init_seed": (adapter_init_seed if args.tuning == "lora" else None),
             "construction_trainable_state_sha256": construction_digest,
             "reference_construction_trainable_state_sha256": (
                 construction_reference_digest
@@ -3667,9 +4148,7 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             fatal_reason = restoration_reason
             break
 
-    final_selector_audit = final_sdpa_controller_audit(
-        backend_controller, rank, world
-    )
+    final_selector_audit = final_sdpa_controller_audit(backend_controller, rank, world)
     report["sdpa_selector_finalization"] = final_selector_audit
     if not final_selector_audit["passed"]:
         failed = True
@@ -3678,28 +4157,37 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             "final SDPA selector audit failed on ranks "
             f"{final_selector_audit['failing_ranks']}"
         )
-    if rank == 0:
-        finalize_report_status(report, failed, fatal_phase, fatal_reason)
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        serialized = json.dumps(report, indent=2, sort_keys=True, allow_nan=False)
-        args.output.write_text(serialized + "\n")
-        print(serialized, flush=True)
-        print(f"wrote {args.output}", file=sys.stderr, flush=True)
-    if dist.is_initialized():
-        dist.barrier()
-        dist.destroy_process_group()
+    publication = publish_report_collectively(
+        report,
+        args.output,
+        rank,
+        failed,
+        fatal_phase,
+        fatal_reason,
+    )
+    if not publication["passed"]:
+        failed = True
     return 1 if failed else 0
 
 
 def main(argv=None) -> int:
     backend_controller = SDPAArmController()
+    active_exception = (None, None, None)
     try:
         return _main(argv, backend_controller)
     except BaseException:
-        backend_controller.close(sys.exc_info())
+        active_exception = sys.exc_info()
         raise
     finally:
-        backend_controller.close()
+        try:
+            backend_controller.close(active_exception)
+        finally:
+            if dist.is_initialized():
+                try:
+                    dist.destroy_process_group()
+                except Exception:
+                    if active_exception[0] is None:
+                        raise
 
 
 if __name__ == "__main__":

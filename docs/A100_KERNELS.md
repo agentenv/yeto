@@ -175,6 +175,11 @@ scale, grad/autocast state, call counts, and the result of each public
 At the same time, `torch.profiler` records the actual primary aten operator:
 Flash, math, memory-efficient, or cuDNN SDPA. The profiler's generic call count,
 primary-backend call count, and functional recorder count must match exactly.
+The forward probe has an explicit ATen allowlist containing only the generic
+SDPA entry point and those four primary forward operators. Any other ATen
+attention operator—including an unknown extension, a second wrapper, or a
+backward operator—is fatal. CUDA kernel-event names remain recorded as evidence
+but are not confused with ATen dispatch operators.
 An exact selector must agree with the observed operator and be eligible for
 every unique input signature. Because aggregate profiler events do not provide
 a trustworthy per-call signature/operator mapping, the automatic reference is
@@ -195,23 +200,31 @@ gather applies the all-rank gate. The ordinary parity witnesses separately cover
 backward gradients and optimizer updates.
 
 The probe restores the exact warmed trainable anchor, every named buffer, and
-both CPU and local-CUDA default RNG states. It also hashes the exact bytes of
-every frozen parameter before and after the forward; a frozen-parameter mutation
-is fatal. Buffer mutation during a forward is permitted only when the exact
-pre-probe registered-buffer state can be restored. Trainable parameters, frozen
-parameters, named buffers, and relevant state inputs are checked across every
-rank. Arbitrary unregistered Python attributes cannot be enumerated reliably;
-the supported contract therefore requires a model invoked with
-`use_cache=False` not to mutate unregistered Python-side cache state. Such model
-implementations need a model-specific state adapter before their results are
-publishable.
+both CPU and local-CUDA default RNG states. Frozen-parameter and
+registered-buffer evidence covers registration names, local object and module
+identity, registration order, tensor and module aliasing, qualified object type,
+device, layout, stride, storage offset, storage size and identity, dtype, shape,
+gradient state, and exact logical bytes. Buffer evidence additionally covers the
+complete persistent-versus-nonpersistent registration sets. Buffer value
+mutation during a forward is
+permitted only when the original registrations, objects, metadata, aliases,
+persistence, and values can all be restored. A frozen-parameter mutation or
+replacement is fatal. Device indices and storage pointers are retained for exact
+local verification and normalized only in the separate cross-rank digest;
+storage sizes, types, and alias relationships must still agree across ranks.
+Arbitrary unregistered Python attributes cannot be enumerated reliably; the
+supported contract therefore requires a model invoked with `use_cache=False`
+not to mutate unregistered
+Python-side cache state. Such model implementations need a model-specific state
+adapter before their results are publishable.
 
 The timing-shape attribution forward executes before performance timing and can
 populate exact-shape SDPA/cuDNN plan and allocator caches. Steady-state p50,
 p95, mean, and throughput metrics remain intentionally warm measurements. The
-first timed update is therefore reported as
-`first_post_attribution_optimizer_step_seconds`; it is not cold-start or
-first-use compilation latency.
+first timed full update is therefore reported as
+`first_post_attribution_training_step_seconds`; it includes forward, backward,
+distributed gradient work, clipping, and the optimizer application. It is not
+cold-start or first-use compilation latency.
 
 Before parity, the selected reference performs exactly one controlled
 deterministic LoRA update. This makes both `lora_A` and `lora_B` nonzero; the
@@ -255,7 +268,10 @@ compatible finite tensor element. Structural coverage, finiteness, and numeric
 scope are reported separately, so finite compatible-subset metrics remain
 available even if other keys, shapes, or values fail. Numerically unevaluable
 fields are JSON `null`, never `NaN` or infinity, and report serialization uses
-strict RFC JSON.
+strict RFC JSON. Rank zero writes through an fsynced temporary file followed by
+an atomic replacement, then broadcasts the publication result. Every rank exits
+with failure if strict serialization or the write fails; no rank waits in a
+post-write barrier that another rank can miss.
 
 The report also records actual and reference update norms, maximum magnitude,
 nonzero count, and nonzero fraction. If BF16 quantization rounds every observed
@@ -276,8 +292,8 @@ the evidence boundary; fatal reports also include an explicit phase and reason.
 For each passing variant, the JSON report contains:
 
 - total model setup and correctness-validation time;
-- first parity forward/backward compile time and first post-attribution
-  optimizer-step time (explicitly warm, not cold-start latency);
+- first parity forward/backward compile time and first post-attribution full
+  training-step time (explicitly warm, not cold-start latency);
 - p50, p95, and mean synchronized step time;
 - global raw and target tokens per second;
 - maximum peak allocated and reserved memory per GPU across ranks;
@@ -298,12 +314,12 @@ For each passing variant, the JSON report contains:
 The harness resolves `--revision` (default `main`) through the Hub before any
 model load, then gives every rank the returned immutable commit SHA. Both the
 requested revision and resolved SHA are written to JSON; no timed run uses an
-unrecorded moving model revision. Schema version 3 adds the publishable
+unrecorded moving model revision. Schema version 4 includes the publishable
 selectable-reference/single-candidate contract and mandatory two-shape,
-all-rank SDPA attribution evidence. The same schema records the explicit
-all-rank selector lifecycle, rank-local forward-only probe contract, relevant
-model-state restoration scope, and warm first-step timing semantics. It also
-records the benchmark script
+all-rank SDPA attribution evidence. It also records the explicit all-rank
+selector lifecycle, strict forward-only ATen allowlist, exact registered-state
+scope, normalized cross-rank state digests, collective atomic publication, and
+the full-training-step timing name. It records the benchmark script
 SHA-256, git object ID, dirty state, provenance source, and library versions. A
 clean tree can be identified by its git object ID; a dirty tree cannot, so its
 report explicitly sets `clean_commit_exact: false` and the script hash

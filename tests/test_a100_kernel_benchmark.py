@@ -46,9 +46,7 @@ def test_variant_plan_has_a_stable_reference_and_one_candidate_contract():
         "native-sdpa",
         "native-sdpa-math",
     ]
-    forced_reference = benchmark.select_variants(
-        "", reference_name="native-sdpa-cudnn"
-    )
+    forced_reference = benchmark.select_variants("", reference_name="native-sdpa-cudnn")
     assert [variant.name for variant in forced_reference] == ["native-sdpa-cudnn"]
     forced_with_candidate = benchmark.select_variants(
         "native-sdpa-math", reference_name="native-sdpa-cudnn"
@@ -136,9 +134,7 @@ def test_public_sdpa_backend_mapping_and_context_restore_exact_flags(monkeypatch
     with pytest.raises(RuntimeError, match="did not restore"):
         with benchmark.sdpa_backend_context("math"):
             pass
-    assert repairs == [
-        {"flash": True, "math": True, "efficient": True, "cudnn": True}
-    ]
+    assert repairs == [{"flash": True, "math": True, "efficient": True, "cudnn": True}]
 
 
 def test_sdpa_arm_lifecycle_requires_explicit_all_rank_restore():
@@ -151,9 +147,7 @@ def test_sdpa_arm_lifecycle_requires_explicit_all_rank_restore():
     assert lifecycle["restoration"] is None
     assert controller.active is True
 
-    restoration = benchmark.finish_sdpa_arm(
-        controller, lifecycle, rank=0, world=1
-    )
+    restoration = benchmark.finish_sdpa_arm(controller, lifecycle, rank=0, world=1)
     assert restoration["passed"] is True
     assert lifecycle["passed"] is True
     assert controller.active is False
@@ -219,9 +213,10 @@ def test_mid_arm_selector_mutation_invalidates_the_arm():
     assert reason is not None
     assert record["status"] == "failed"
     assert "metrics" not in record
-    assert lifecycle["restoration"]["rank_reports"][0]["flags_before_close"][
-        "flash"
-    ] is True
+    assert (
+        lifecycle["restoration"]["rank_reports"][0]["flags_before_close"]["flash"]
+        is True
+    )
     assert benchmark.snapshot_sdpa_backend_flags() == before
 
 
@@ -300,9 +295,7 @@ def test_failed_selector_restore_invalidates_metrics_and_final_audit():
     active_controller = benchmark.SDPAArmController()
     variant = benchmark.VARIANTS_BY_NAME["native-sdpa-math"]
     active_controller.activate(variant)
-    final = benchmark.final_sdpa_controller_audit(
-        active_controller, rank=0, world=1
-    )
+    final = benchmark.final_sdpa_controller_audit(active_controller, rank=0, world=1)
     assert final["passed"] is False
     assert final["failing_ranks"] == [0]
     assert active_controller.active is False
@@ -324,6 +317,97 @@ def test_failed_selector_restore_invalidates_metrics_and_final_audit():
     serialized = json.dumps(report, allow_nan=False)
     assert json.loads(serialized)["status"] == "failed"
     assert json.loads(serialized)["variants"][0]["status"] == "failed"
+
+
+def test_rank_one_restore_failure_invalidates_rank_zero_record_and_json(monkeypatch):
+    expected = {"flash": False, "math": True, "efficient": False, "cudnn": False}
+    before = {name: True for name in benchmark.SDPA_FLAG_GETTERS}
+
+    class Controller:
+        active = True
+        control = {
+            "api": "torch.nn.attention.sdpa_kernel",
+            "requested": "math",
+            "before": before,
+            "expected_active": expected,
+            "active": expected,
+            "after": before,
+            "restored_exactly": True,
+        }
+
+        def close(self, _exc_info=(None, None, None)):
+            self.active = False
+            return self.control
+
+    def all_gather_object(output, local):
+        output[0] = local
+        remote = json.loads(json.dumps(local))
+        remote["rank"] = 1
+        remote["error"] = "RuntimeError: rank-one restore failed"
+        remote["control"]["restored_exactly"] = False
+        output[1] = remote
+
+    monkeypatch.setattr(benchmark.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(benchmark.dist, "all_gather_object", all_gather_object)
+    monkeypatch.setattr(benchmark, "snapshot_sdpa_backend_flags", lambda: expected)
+    controller = Controller()
+    lifecycle = {
+        "variant": "native-sdpa-math",
+        "requested_internal_backend": "math",
+        "activation": {"passed": True},
+        "restoration": None,
+        "passed": False,
+    }
+    record = {
+        "variant": {"name": "native-sdpa-math"},
+        "status": "passed",
+        "metrics": {"mean_step_seconds": 1.0},
+    }
+    reason = benchmark.restore_sdpa_arm_for_record(
+        record, controller, lifecycle, rank=0, world=2
+    )
+
+    assert lifecycle["restoration"]["failing_ranks"] == [1]
+    assert record["status"] == "failed"
+    assert "metrics" not in record
+    report = {
+        "status": "incomplete",
+        "planned_variants": ["native-sdpa-math"],
+        "completed_variants": [],
+        "fatal": None,
+        "variants": [record],
+    }
+    benchmark.finalize_report_status(report, True, "sdpa_selector_restoration", reason)
+    serialized = json.dumps(report, allow_nan=False)
+    assert json.loads(serialized)["status"] == "failed"
+    assert json.loads(serialized)["variants"][0]["status"] == "failed"
+
+
+def test_arm_transitions_are_activation_then_explicit_restoration(monkeypatch):
+    phases = []
+    original_gather = benchmark.gather_rank_records
+
+    def gather(local, rank, world):
+        phases.append((local["variant"], local["phase"]))
+        return original_gather(local, rank, world)
+
+    monkeypatch.setattr(benchmark, "gather_rank_records", gather)
+    controller = benchmark.SDPAArmController()
+    math_variant = benchmark.VARIANTS_BY_NAME["native-sdpa-math"]
+    flash_variant = benchmark.VARIANTS_BY_NAME["native-sdpa-flash"]
+    math = benchmark.begin_sdpa_arm(controller, math_variant, rank=0, world=1)
+    benchmark.finish_sdpa_arm(controller, math, rank=0, world=1)
+    flash = benchmark.begin_sdpa_arm(controller, flash_variant, rank=0, world=1)
+    benchmark.finish_sdpa_arm(controller, flash, rank=0, world=1)
+
+    assert phases == [
+        (math_variant.name, "activation"),
+        (math_variant.name, "restoration"),
+        (flash_variant.name, "activation"),
+        (flash_variant.name, "restoration"),
+    ]
+    assert math["passed"] is True and flash["passed"] is True
+    assert controller.active is False
 
 
 def test_sdpa_input_recorder_restores_callable_and_aggregates_full_signature():
@@ -364,9 +448,7 @@ def test_attribution_probe_is_forward_only_rank_local_and_restores_state(monkeyp
         def __init__(self):
             super().__init__()
             self.trainable = torch.nn.Parameter(torch.tensor([1.0]))
-            self.frozen = torch.nn.Parameter(
-                torch.tensor([3.0]), requires_grad=False
-            )
+            self.frozen = torch.nn.Parameter(torch.tensor([3.0]), requires_grad=False)
             self.register_buffer("cache", torch.tensor([2.0]))
 
     class Wrapper(torch.nn.Module):
@@ -560,13 +642,97 @@ def test_attribution_probe_is_forward_only_rank_local_and_restores_state(monkeyp
     assert torch.equal(cuda_rng["state"], torch.tensor([17], dtype=torch.uint8))
 
 
+def test_rank_one_profiler_failure_reaches_exactly_one_common_gather(monkeypatch):
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.trainable = torch.nn.Parameter(torch.tensor([1.0]))
+            self.frozen = torch.nn.Parameter(torch.tensor([2.0]), requires_grad=False)
+            self.register_buffer("cache", torch.tensor([3.0]))
+
+    class Recorder:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+        def report(self):
+            events.append("report")
+            raise RuntimeError("rank-local recorder failure")
+
+    class Profiler:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+        def key_averages(self):
+            return []
+
+    model = Model()
+    anchor = benchmark.snapshot_trainable_state(model)
+    anchor_digest = benchmark.trainable_state_digest(model)
+    cuda_rng = {"state": torch.tensor([31], dtype=torch.uint8)}
+    events = []
+
+    def failing_forward(*_args, **_kwargs):
+        events.append("forward")
+        raise RuntimeError("rank-one forward failure")
+
+    def gather(local, rank, world, selector_backend, shape_name):
+        events.append("gather")
+        assert (rank, world, selector_backend, shape_name) == (1, 2, "math", "timing")
+        assert local["passed"] is False
+        assert any("rank-one forward failure" in error for error in local["errors"])
+        assert any("rank-local recorder failure" in error for error in local["errors"])
+        return {"passed": False, "rank_reports": [local]}
+
+    monkeypatch.setattr(benchmark, "SDPAInputRecorder", Recorder)
+    monkeypatch.setattr(torch.profiler, "profile", lambda **_kwargs: Profiler())
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda _device: None)
+    monkeypatch.setattr(
+        torch.cuda, "get_rng_state", lambda _device: cuda_rng["state"].clone()
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_rng_state",
+        lambda state, _device: cuda_rng.__setitem__("state", state.clone()),
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "manual_seed",
+        lambda seed: cuda_rng.__setitem__(
+            "state", torch.tensor([seed % 251], dtype=torch.uint8)
+        ),
+    )
+    monkeypatch.setattr(benchmark, "forward_sum", failing_forward)
+    monkeypatch.setattr(benchmark, "gather_sdpa_attribution", gather)
+
+    result = benchmark.profile_sdpa_attribution_probe(
+        model,
+        benchmark.VARIANTS_BY_NAME["native-sdpa-math"],
+        torch.ones((1, 2), dtype=torch.long),
+        torch.ones((1, 2)),
+        rank=1,
+        world=2,
+        device=torch.device("cpu"),
+        anchor_state=anchor,
+        anchor_digest=anchor_digest,
+        seed=900,
+        shape_name="timing",
+    )
+
+    assert result["passed"] is False
+    assert events == ["forward", "report", "gather"]
+    assert cuda_rng["state"].item() == 31
+
+
 def test_profiler_parser_and_selector_operator_agreement_are_fail_closed():
     events = [
         SimpleNamespace(key="aten::scaled_dot_product_attention", count=3),
         SimpleNamespace(key="aten::_scaled_dot_product_flash_attention", count=3),
-        SimpleNamespace(
-            key="aten::_scaled_dot_product_flash_attention_backward", count=3
-        ),
         SimpleNamespace(key="aten::unrelated", count=99),
     ]
     parsed = benchmark.parse_sdpa_profiler_events(events)
@@ -575,6 +741,7 @@ def test_profiler_parser_and_selector_operator_agreement_are_fail_closed():
     assert parsed["observed_backends"] == ["flash"]
     assert parsed["backend_call_counts"]["flash"] == 3
     assert "aten::unrelated" not in parsed["operator_counts"]
+    assert parsed["unexpected_aten_attention_operator_counts"] == {}
 
     signature = {
         "selector_eligibility": {
@@ -601,6 +768,28 @@ def test_profiler_parser_and_selector_operator_agreement_are_fail_closed():
     assert passed["passed"] is True
     assert passed["selector_operator_agreement"] is True
 
+    for unexpected_operator in (
+        "aten::_scaled_dot_product_flash_attention_backward",
+        "aten::_scaled_dot_product_future_attention",
+        "aten::unrelated_attention_extension",
+    ):
+        unexpected = benchmark.parse_sdpa_profiler_events(
+            [
+                {"key": "aten::scaled_dot_product_attention", "count": 3},
+                {"key": "aten::_scaled_dot_product_flash_attention", "count": 3},
+                {"key": unexpected_operator, "count": 1},
+            ]
+        )
+        rejected = benchmark.evaluate_local_sdpa_attribution(
+            "auto", recorder, unexpected
+        )
+        assert rejected["passed"] is False
+        assert (
+            unexpected_operator
+            in unexpected["unexpected_aten_attention_operator_counts"]
+        )
+        assert any("unexpected ATen" in error for error in rejected["errors"])
+
     wrong = benchmark.evaluate_local_sdpa_attribution("math", recorder, parsed)
     assert wrong["passed"] is False
     assert wrong["selector_operator_agreement"] is False
@@ -622,9 +811,9 @@ def test_profiler_parser_and_selector_operator_agreement_are_fail_closed():
         ]
     )
     mixed_recorder = json.loads(json.dumps(recorder))
-    mixed_recorder["unique_signatures"][0]["signature"][
-        "selector_eligibility"
-    ]["flash"] = False
+    mixed_recorder["unique_signatures"][0]["signature"]["selector_eligibility"][
+        "flash"
+    ] = False
     mixed_auto = benchmark.evaluate_local_sdpa_attribution(
         "auto", mixed_recorder, mixed
     )
@@ -666,7 +855,8 @@ def test_timing_schema_labels_the_first_step_as_post_attribution(monkeypatch):
         world=1,
         device=torch.device("cpu"),
     )
-    assert metrics["first_post_attribution_optimizer_step_seconds"] >= 0
+    assert metrics["first_post_attribution_training_step_seconds"] >= 0
+    assert "first_post_attribution_optimizer_step_seconds" not in metrics
     assert "first_optimizer_step_seconds" not in metrics
     json.dumps(metrics, allow_nan=False)
 
@@ -681,9 +871,7 @@ def test_gradient_parity_gate_checks_loss_keys_and_values():
         rtol=1e-5,
         atol=1e-6,
         parameter_deltas={"layer.weight": torch.tensor([0.1, 0.2])},
-        reference_parameter_deltas={
-            "layer.weight": torch.tensor([0.1, 0.2])
-        },
+        reference_parameter_deltas={"layer.weight": torch.tensor([0.1, 0.2])},
     )
     assert passed["passed"] and passed["checked_parameter_delta_tensors"] == 1
 
@@ -699,9 +887,7 @@ def test_gradient_parity_gate_checks_loss_keys_and_values():
     assert bad["gradient_status"] == "failed"
     assert bad["first_failing_gradient_tensor"] == "layer.weight"
 
-    missing = benchmark.compare_parity(
-        12.0, {}, 12.0, reference, rtol=1e-5, atol=1e-6
-    )
+    missing = benchmark.compare_parity(12.0, {}, 12.0, reference, rtol=1e-5, atol=1e-6)
     assert not missing["passed"]
     assert missing["checked_gradient_tensors"] == 0
     assert "key mismatch" in missing["reason"]
@@ -714,9 +900,7 @@ def test_gradient_parity_gate_checks_loss_keys_and_values():
         rtol=1e-5,
         atol=1e-6,
         parameter_deltas={"layer.weight": torch.tensor([0.1, 0.9])},
-        reference_parameter_deltas={
-            "layer.weight": torch.tensor([0.1, 0.2])
-        },
+        reference_parameter_deltas={"layer.weight": torch.tensor([0.1, 0.2])},
     )
     assert not bad_delta["passed"]
     assert bad_delta["parameter_delta_status"] == "failed"
@@ -885,8 +1069,7 @@ def test_unmeasured_and_insensitive_parameter_deltas_are_not_zero_errors():
     assert rounded_away["parameter_delta_status"] == "not_meaningful"
     assert rounded_away["max_parameter_delta_abs_error"] == 0
     assert (
-        rounded_away["parameter_delta_actual_sensitivity"]["status"]
-        == "rounded_away"
+        rounded_away["parameter_delta_actual_sensitivity"]["status"] == "rounded_away"
     )
 
     strict_delta = benchmark.compare_parity(
@@ -913,9 +1096,7 @@ def test_bf16_adam_update_rounding_is_detected(monkeypatch):
     model.weight.grad = torch.ones_like(model.weight)
     optimizer = benchmark.make_optimizer(model, 1e-5, 0.01)
 
-    deltas, _ = benchmark.parameter_delta_witness(
-        model, optimizer, torch.device("cpu")
-    )
+    deltas, _ = benchmark.parameter_delta_witness(model, optimizer, torch.device("cpu"))
     result = benchmark.compare_parity(
         1.0,
         {"weight": torch.ones(1)},
@@ -1066,18 +1247,28 @@ def test_distributed_sdpa_attribution_aggregates_signatures_and_rank_agreement()
                 },
             ]
         )
-        report = benchmark.evaluate_local_sdpa_attribution(
-            "math", recorder, profiler
-        )
+        report = benchmark.evaluate_local_sdpa_attribution("math", recorder, profiler)
         report["relevant_state_restore"] = {
             "passed": True,
             "before_trainable_state_sha256": "a" * 64,
             "after_trainable_state_sha256": "a" * 64,
             "expected_trainable_state_sha256": "a" * 64,
-            "frozen_parameters_before": {"sha256": "b" * 64},
-            "frozen_parameters_after": {"sha256": "b" * 64},
-            "named_buffers_before": {"sha256": "c" * 64},
-            "named_buffers_after_restore": {"sha256": "c" * 64},
+            "frozen_parameters_before": {
+                "sha256": "b" * 64,
+                "normalized_sha256": "b" * 64,
+            },
+            "frozen_parameters_after": {
+                "sha256": "b" * 64,
+                "normalized_sha256": "b" * 64,
+            },
+            "named_buffers_before": {
+                "sha256": "c" * 64,
+                "normalized_sha256": "c" * 64,
+            },
+            "named_buffers_after_restore": {
+                "sha256": "c" * 64,
+                "normalized_sha256": "c" * 64,
+            },
         }
         report.update(rank=rank, shape="timing")
         return report
@@ -1215,15 +1406,139 @@ def test_trainable_state_digest_covers_values_names_and_dtypes():
     assert digest != benchmark.trainable_state_digest(second)
 
 
+def test_registered_buffer_restore_repairs_identity_aliases_and_persistence():
+    model = torch.nn.Module()
+    original = torch.tensor([[1.0, 2.0], [2.0, 1.0]])
+    model.register_buffer("cache", original, persistent=True)
+    model.register_buffer("cache_alias", original, persistent=False)
+    model.register_buffer("empty", None, persistent=False)
+    anchor = benchmark.snapshot_named_buffers(model)
+    before = benchmark.buffer_state_report(anchor)
+
+    model.cache = model.cache.t()
+    model.cache_alias = model.cache_alias.clone()
+    model._non_persistent_buffers_set.add("cache")
+    model._non_persistent_buffers_set.discard("cache_alias")
+    model._non_persistent_buffers_set.add("ghost")
+    model.empty = torch.ones(1)
+    model.register_buffer("extra", torch.zeros(1), persistent=False)
+    model._buffers["cache"] = model._buffers.pop("cache")
+    mutated = benchmark.snapshot_named_buffers(model)
+    mutation = benchmark.compare_registered_tensor_states(anchor, mutated)
+
+    assert mutation["passed"] is False
+    assert mutation["extra_registrations"] == ["extra"]
+    assert "cache" in mutation["object_identity_changed"]
+    assert "cache" in mutation["metadata_changed"]
+    assert "cache" in mutation["persistence_changed"]
+    assert "cache_alias" in mutation["aliasing_changed"]
+    assert mutation["registration_order_changed"] == ["<root>"]
+    assert mutation["module_persistence_set_changed"] == ["<root>"]
+
+    benchmark.restore_named_buffers(model, anchor)
+    restored = benchmark.snapshot_named_buffers(model)
+    comparison = benchmark.compare_registered_tensor_states(anchor, restored)
+    after = benchmark.buffer_state_report(restored)
+    assert comparison["passed"] is True
+    assert model.cache is original and model.cache_alias is original
+    assert model.empty is None and "extra" not in model._buffers
+    assert "cache" not in model._non_persistent_buffers_set
+    assert "cache_alias" in model._non_persistent_buffers_set
+    assert "ghost" not in model._non_persistent_buffers_set
+    assert list(model._buffers) == ["cache", "cache_alias", "empty"]
+    assert before == after
+
+
+def test_frozen_state_detects_equal_value_identity_metadata_and_alias_changes():
+    model = torch.nn.Module()
+    original = torch.nn.Parameter(
+        torch.tensor([[1.0, 2.0], [2.0, 1.0]]), requires_grad=False
+    )
+    model.register_parameter("frozen", original)
+    model.register_parameter("frozen_alias", original)
+    model.register_parameter("empty", None)
+    anchor = benchmark.snapshot_frozen_parameter_state(model)
+    before = benchmark.frozen_parameter_state_report(anchor)
+
+    model.frozen = torch.nn.Parameter(original.detach().t(), requires_grad=False)
+    current = benchmark.snapshot_frozen_parameter_state(model)
+    comparison = benchmark.compare_registered_tensor_states(anchor, current)
+    after = benchmark.frozen_parameter_state_report(current)
+
+    assert comparison["passed"] is False
+    assert "frozen" in comparison["object_identity_changed"]
+    assert "frozen" in comparison["metadata_changed"]
+    assert comparison["aliasing_changed"] == ["frozen_alias"]
+    assert before["normalized_sha256"] != after["normalized_sha256"]
+
+
+def test_same_object_storage_swap_is_detected_for_parameters_and_buffers():
+    model = torch.nn.Module()
+    parameter = torch.nn.Parameter(torch.ones(4), requires_grad=False)
+    buffer = torch.arange(4.0)
+    model.register_parameter("frozen", parameter)
+    model.register_buffer("cache", buffer)
+    frozen_anchor = benchmark.snapshot_frozen_parameter_state(model)
+    buffer_anchor = benchmark.snapshot_named_buffers(model)
+    parameter_pointer = parameter.data_ptr()
+    buffer_pointer = buffer.data_ptr()
+
+    parameter.data = parameter.detach().clone()
+    buffer.data = buffer.detach().clone()
+    assert parameter.data_ptr() != parameter_pointer
+    assert buffer.data_ptr() != buffer_pointer
+    frozen_current = benchmark.snapshot_frozen_parameter_state(model)
+    buffer_current = benchmark.snapshot_named_buffers(model)
+    frozen_comparison = benchmark.compare_registered_tensor_states(
+        frozen_anchor, frozen_current
+    )
+    buffer_comparison = benchmark.compare_registered_tensor_states(
+        buffer_anchor, buffer_current
+    )
+
+    assert frozen_comparison["object_identity_changed"] == []
+    assert buffer_comparison["object_identity_changed"] == []
+    assert frozen_comparison["metadata_changed"] == ["frozen"]
+    assert buffer_comparison["metadata_changed"] == ["cache"]
+    frozen_metadata = frozen_anchor["entries"]["frozen"]["metadata"]
+    buffer_metadata = buffer_anchor["entries"]["cache"]["metadata"]
+    for metadata in (frozen_metadata, buffer_metadata):
+        assert metadata["object_type"].startswith("torch.")
+        assert metadata["data_ptr"] > 0
+        assert metadata["storage_data_ptr"] > 0
+        assert metadata["storage_identity"] > 0
+        assert metadata["storage_nbytes"] == 16
+
+
+def test_registered_state_digest_normalizes_only_device_index():
+    model = torch.nn.Module()
+    model.register_buffer("cache", torch.ones(2))
+    rank_zero = benchmark.snapshot_named_buffers(model)
+    rank_one = {
+        "kind": rank_zero["kind"],
+        "modules": rank_zero["modules"],
+        "entries": {
+            name: {
+                **entry,
+                "metadata": {**entry["metadata"], "device_index": 1},
+            }
+            for name, entry in rank_zero["entries"].items()
+        },
+    }
+    rank_zero["entries"]["cache"]["metadata"]["device_index"] = 0
+    first = benchmark.buffer_state_report(rank_zero)
+    second = benchmark.buffer_state_report(rank_one)
+    assert first["sha256"] != second["sha256"]
+    assert first["normalized_sha256"] == second["normalized_sha256"]
+
+
 def test_trainable_anchor_restore_and_lora_factor_validation():
     model = torch.nn.Module()
     model.lora_A = torch.nn.Linear(2, 2, bias=False)
     model.lora_B = torch.nn.Linear(2, 2, bias=False)
     model.lora_B.weight.data.zero_()
     with pytest.raises(RuntimeError, match="lora_B"):
-        benchmark.lora_factor_nonzero_report(
-            benchmark.snapshot_trainable_state(model)
-        )
+        benchmark.lora_factor_nonzero_report(benchmark.snapshot_trainable_state(model))
 
     model.lora_B.weight.data.fill_(0.25)
     anchor = benchmark.snapshot_trainable_state(model)
@@ -1363,6 +1678,87 @@ def test_report_status_distinguishes_pass_failure_and_incomplete(
         report["variants"][1]["status"] = "skipped"
         benchmark.finalize_report_status(report, False, None, None)
         assert report["status"] == "incomplete"
+
+
+def test_report_status_requires_exact_unique_planned_variant_order():
+    for completed in (["a", "a"], ["b", "a"], ["a", "c"]):
+        report = {
+            "status": "incomplete",
+            "planned_variants": ["a", "b"],
+            "completed_variants": [],
+            "fatal": None,
+            "variants": [
+                {"variant": {"name": name}, "status": "passed"} for name in completed
+            ],
+        }
+        benchmark.finalize_report_status(report, False, None, None)
+        assert report["status"] == "incomplete"
+
+
+def test_atomic_report_write_and_collective_write_failure(tmp_path, monkeypatch):
+    output = tmp_path / "reports" / "result.json"
+    benchmark.write_report_atomic(output, '{"status":"passed"}')
+    assert json.loads(output.read_text()) == {"status": "passed"}
+    assert not list(output.parent.glob(f".{output.name}.*.tmp"))
+
+    published = []
+
+    def broadcast(value, rank):
+        if rank == 0:
+            published.append(value)
+            return value
+        assert value is None
+        return published[-1]
+
+    def fail_write(_output, _serialized):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(benchmark, "broadcast_object", broadcast)
+    monkeypatch.setattr(benchmark, "write_report_atomic", fail_write)
+    rank_zero_report = {
+        "status": "incomplete",
+        "planned_variants": ["a"],
+        "completed_variants": [],
+        "fatal": None,
+        "variants": [{"variant": {"name": "a"}, "status": "passed"}],
+    }
+    rank_zero = benchmark.publish_report_collectively(
+        rank_zero_report,
+        output,
+        rank=0,
+        failed=False,
+        fatal_phase=None,
+        fatal_reason=None,
+    )
+    rank_one = benchmark.publish_report_collectively(
+        {},
+        output,
+        rank=1,
+        failed=False,
+        fatal_phase=None,
+        fatal_reason=None,
+    )
+    assert rank_zero == rank_one
+    assert rank_zero["passed"] is False
+    assert "disk full" in rank_zero["error"]
+
+
+def test_main_uses_guarded_destroy_without_a_final_barrier(monkeypatch):
+    events = []
+    monkeypatch.setattr(benchmark, "_main", lambda _argv, _controller: 0)
+    monkeypatch.setattr(benchmark.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        benchmark.dist,
+        "destroy_process_group",
+        lambda: events.append("destroy"),
+    )
+    monkeypatch.setattr(
+        benchmark.dist,
+        "barrier",
+        lambda: pytest.fail("main must not use a fallible final barrier"),
+    )
+    assert benchmark.main([]) == 0
+    assert events == ["destroy"]
 
 
 def test_model_revision_is_resolved_to_an_immutable_hub_commit(monkeypatch):
