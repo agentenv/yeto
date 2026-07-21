@@ -10,6 +10,8 @@ converted into a performance result.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import functools
 import gc
 import hashlib
 import json
@@ -24,6 +26,7 @@ import time
 from dataclasses import asdict, dataclass
 from importlib import metadata
 from pathlib import Path
+from typing import Iterable
 
 import torch
 import torch.distributed as dist
@@ -49,26 +52,201 @@ class Variant:
     attention_backend: str
     kernel_backend: str
     loss_implementation: str
+    internal_sdpa_backend: str | None
 
 
 VARIANTS = (
-    Variant("native-sdpa", "sdpa", "native", "torch-fused-cross-entropy"),
+    Variant(
+        "native-sdpa",
+        "sdpa",
+        "native",
+        "torch-fused-cross-entropy",
+        "auto",
+    ),
+    Variant(
+        "native-sdpa-flash",
+        "sdpa",
+        "native",
+        "torch-fused-cross-entropy",
+        "flash",
+    ),
+    Variant(
+        "native-sdpa-math",
+        "sdpa",
+        "native",
+        "torch-fused-cross-entropy",
+        "math",
+    ),
+    Variant(
+        "native-sdpa-efficient",
+        "sdpa",
+        "native",
+        "torch-fused-cross-entropy",
+        "efficient",
+    ),
+    Variant(
+        "native-sdpa-cudnn",
+        "sdpa",
+        "native",
+        "torch-fused-cross-entropy",
+        "cudnn",
+    ),
     Variant(
         "native-flash-attn-2",
         "flash-attn-2",
         "native",
         "torch-fused-cross-entropy",
+        None,
     ),
-    Variant("liger-sdpa", "sdpa", "liger", "liger-fused-linear-cross-entropy"),
+    Variant(
+        "liger-sdpa",
+        "sdpa",
+        "liger",
+        "liger-fused-linear-cross-entropy",
+        "auto",
+    ),
     Variant(
         "liger-flash-attn-2",
         "flash-attn-2",
         "liger",
         "liger-fused-linear-cross-entropy",
+        None,
     ),
 )
 VARIANTS_BY_NAME = {variant.name: variant for variant in VARIANTS}
 REFERENCE_VARIANT = VARIANTS[0]
+
+SDPA_BACKEND_NAMES = ("auto", "flash", "math", "efficient", "cudnn")
+SDPA_FLAG_GETTERS = {
+    "flash": "flash_sdp_enabled",
+    "math": "math_sdp_enabled",
+    "efficient": "mem_efficient_sdp_enabled",
+    "cudnn": "cudnn_sdp_enabled",
+}
+SDPA_FLAG_SETTERS = {
+    "flash": "enable_flash_sdp",
+    "math": "enable_math_sdp",
+    "efficient": "enable_mem_efficient_sdp",
+    "cudnn": "enable_cudnn_sdp",
+}
+
+
+def sdpa_backend_objects(name: str) -> list:
+    """Map a stable report name to PyTorch's public SDPA selector enum."""
+    if name not in SDPA_BACKEND_NAMES:
+        raise ValueError(
+            f"unknown internal SDPA backend {name!r}; choose from {SDPA_BACKEND_NAMES}"
+        )
+    from torch.nn.attention import SDPBackend
+
+    mapping = {
+        "flash": SDPBackend.FLASH_ATTENTION,
+        "math": SDPBackend.MATH,
+        "efficient": SDPBackend.EFFICIENT_ATTENTION,
+        "cudnn": SDPBackend.CUDNN_ATTENTION,
+    }
+    if name == "auto":
+        # This is PyTorch 2.5.1's public all-enabled behavior. Ordering is not
+        # asserted as a priority: the profiler below records the actual choice.
+        return [mapping[item] for item in ("flash", "efficient", "math", "cudnn")]
+    return [mapping[name]]
+
+
+def snapshot_sdpa_backend_flags() -> dict[str, bool]:
+    """Read every public CUDA SDPA enable flag or fail before benchmarking."""
+    flags = {}
+    for name, getter_name in SDPA_FLAG_GETTERS.items():
+        getter = getattr(torch.backends.cuda, getter_name, None)
+        if getter is None:
+            raise RuntimeError(f"PyTorch exposes no public {getter_name}() selector")
+        flags[name] = bool(getter())
+    return flags
+
+
+def restore_sdpa_backend_flags(flags: dict[str, bool]) -> None:
+    if set(flags) != set(SDPA_FLAG_SETTERS):
+        raise ValueError("an SDPA flag snapshot must contain every known backend")
+    for name, setter_name in SDPA_FLAG_SETTERS.items():
+        setter = getattr(torch.backends.cuda, setter_name, None)
+        if setter is None:
+            raise RuntimeError(f"PyTorch exposes no public {setter_name}() selector")
+        setter(flags[name])
+
+
+@contextlib.contextmanager
+def sdpa_backend_context(name: str | None):
+    """Select one internal backend for an entire arm and verify exact restore.
+
+    The context uses only the public PyTorch 2.5.1 selector. A mismatch while
+    active or after exit is fatal even if a manual repair succeeds, because a
+    publishable timing cannot rely on silently leaked process-global flags.
+    """
+    before = snapshot_sdpa_backend_flags()
+    expected = before if name is None else {
+        backend: name == "auto" or backend == name for backend in SDPA_FLAG_GETTERS
+    }
+    control = {
+        "api": "torch.nn.attention.sdpa_kernel",
+        "requested": name,
+        "before": before,
+        "expected_active": expected,
+        "active": None,
+        "after": None,
+        "restored_exactly": False,
+    }
+    selector = contextlib.nullcontext()
+    if name is not None:
+        from torch.nn.attention import sdpa_kernel
+
+        selector = sdpa_kernel(sdpa_backend_objects(name))
+
+    restore_error = None
+    try:
+        with selector:
+            active = snapshot_sdpa_backend_flags()
+            control["active"] = active
+            if active != expected:
+                raise RuntimeError(
+                    f"public SDPA selector activated {active}, expected {expected}"
+                )
+            yield control
+    finally:
+        after = snapshot_sdpa_backend_flags()
+        control["after"] = after
+        control["restored_exactly"] = after == before
+        if after != before:
+            try:
+                restore_sdpa_backend_flags(before)
+            except Exception as exc:  # preserve repair evidence in the failure
+                restore_error = f"{type(exc).__name__}: {exc}"
+            repaired = snapshot_sdpa_backend_flags()
+            control["repair_attempted"] = True
+            control["repair_error"] = restore_error
+            control["after_repair"] = repaired
+            raise RuntimeError(
+                "public sdpa_kernel context did not restore every backend flag "
+                f"exactly: before={before} after={after} repaired={repaired}"
+            )
+
+
+class SDPAArmController:
+    """Keep the selector active across one complete arm without a giant indent."""
+
+    def __init__(self):
+        self._context = None
+
+    def activate(self, variant: Variant) -> dict:
+        self.close()
+        context = sdpa_backend_context(variant.internal_sdpa_backend)
+        control = context.__enter__()
+        self._context = context
+        return control
+
+    def close(self, exc_info=(None, None, None)) -> None:
+        if self._context is None:
+            return
+        context, self._context = self._context, None
+        context.__exit__(*exc_info)
 
 
 def percentile(values: list[float], quantile: float) -> float:
@@ -87,16 +265,348 @@ def percentile(values: list[float], quantile: float) -> float:
     return ordered[lower] * (1 - weight) + ordered[upper] * weight
 
 
-def select_variants(spec: str) -> list[Variant]:
+def select_variants(
+    spec: str,
+    reference_name: str = REFERENCE_VARIANT.name,
+) -> list[Variant]:
+    if reference_name not in VARIANTS_BY_NAME:
+        raise ValueError(
+            f"unknown reference variant {reference_name!r}; choose from "
+            f"{list(VARIANTS_BY_NAME)}"
+        )
+    reference = VARIANTS_BY_NAME[reference_name]
     names = [name.strip() for name in spec.split(",") if name.strip()]
-    if not names or names == ["all"]:
-        return list(VARIANTS)
+    if "all" in names:
+        raise ValueError(
+            "publishable runs accept the selected reference plus at most one "
+            "candidate; select one candidate instead of 'all'"
+        )
     unknown = [name for name in names if name not in VARIANTS_BY_NAME]
     if unknown:
         raise ValueError(f"unknown variants {unknown}; choose from {list(VARIANTS_BY_NAME)}")
-    selected = set(names)
-    selected.add(REFERENCE_VARIANT.name)  # every result needs the same parity anchor
-    return [variant for variant in VARIANTS if variant.name in selected]
+    candidates = set(names) - {reference.name}
+    if len(candidates) > 1:
+        raise ValueError(
+            "publishable runs accept the selected reference plus at most one "
+            f"candidate, received {sorted(candidates)}"
+        )
+    return [reference] + [
+        variant for variant in VARIANTS if variant.name in candidates
+    ]
+
+
+SDPA_PRIMARY_OPERATORS = {
+    "flash": "aten::_scaled_dot_product_flash_attention",
+    "math": "aten::_scaled_dot_product_attention_math",
+    "efficient": "aten::_scaled_dot_product_efficient_attention",
+    "cudnn": "aten::_scaled_dot_product_cudnn_attention",
+}
+
+
+def _strict_json_sha256(value) -> str:
+    encoded = json.dumps(
+        value,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _tensor_signature(tensor: torch.Tensor | None) -> dict | None:
+    if tensor is None:
+        return None
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"expected an SDPA tensor input, received {type(tensor).__name__}")
+    return {
+        "shape": list(tensor.shape),
+        "stride": list(tensor.stride()),
+        "dtype": str(tensor.dtype).removeprefix("torch."),
+        "device_type": tensor.device.type,
+        "device_index": tensor.device.index,
+        "layout": str(tensor.layout).removeprefix("torch."),
+        "requires_grad": bool(tensor.requires_grad),
+        "is_contiguous": bool(tensor.is_contiguous()),
+        "is_nested": bool(getattr(tensor, "is_nested", False)),
+        "storage_offset": int(tensor.storage_offset()),
+    }
+
+
+def sdpa_selector_eligibility(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_mask: torch.Tensor | None,
+    dropout_p: float,
+    is_causal: bool,
+    enable_gqa: bool,
+) -> dict[str, bool]:
+    """Evaluate each public fused-backend predicate on the exact call inputs."""
+    params_type = getattr(torch.backends.cuda, "SDPAParams", None)
+    if params_type is None:
+        raise RuntimeError("PyTorch exposes no public torch.backends.cuda.SDPAParams")
+    params = params_type(
+        query,
+        key,
+        value,
+        attn_mask,
+        float(dropout_p),
+        bool(is_causal),
+        bool(enable_gqa),
+    )
+    checks = {
+        "flash": "can_use_flash_attention",
+        "efficient": "can_use_efficient_attention",
+        "cudnn": "can_use_cudnn_attention",
+    }
+    result = {"math": True}
+    for backend, check_name in checks.items():
+        check = getattr(torch.backends.cuda, check_name, None)
+        if check is None:
+            raise RuntimeError(f"PyTorch exposes no public {check_name}() predicate")
+        result[backend] = bool(check(params, debug=False))
+    return {name: result[name] for name in SDPA_FLAG_GETTERS}
+
+
+def _sdpa_call_arguments(args: tuple, kwargs: dict) -> dict:
+    names = (
+        "query",
+        "key",
+        "value",
+        "attn_mask",
+        "dropout_p",
+        "is_causal",
+        "scale",
+        "enable_gqa",
+    )
+    if len(args) > len(names):
+        raise TypeError("scaled_dot_product_attention received too many arguments")
+    values = dict(zip(names, args))
+    unknown = sorted(set(kwargs) - set(names))
+    duplicate = sorted(set(kwargs) & set(values))
+    if unknown:
+        raise TypeError(f"unknown scaled_dot_product_attention arguments: {unknown}")
+    if duplicate:
+        raise TypeError(f"duplicate scaled_dot_product_attention arguments: {duplicate}")
+    values.update(kwargs)
+    missing = [name for name in names[:3] if name not in values]
+    if missing:
+        raise TypeError(f"missing scaled_dot_product_attention arguments: {missing}")
+    values.setdefault("attn_mask", None)
+    values.setdefault("dropout_p", 0.0)
+    values.setdefault("is_causal", False)
+    values.setdefault("scale", None)
+    values.setdefault("enable_gqa", False)
+    return values
+
+
+def sdpa_input_signature(args: tuple, kwargs: dict) -> dict:
+    values = _sdpa_call_arguments(args, kwargs)
+    scale = values["scale"]
+    if scale is not None:
+        scale = float(scale)
+    eligibility = sdpa_selector_eligibility(
+        values["query"],
+        values["key"],
+        values["value"],
+        values["attn_mask"],
+        float(values["dropout_p"]),
+        bool(values["is_causal"]),
+        bool(values["enable_gqa"]),
+    )
+    return {
+        "query": _tensor_signature(values["query"]),
+        "key": _tensor_signature(values["key"]),
+        "value": _tensor_signature(values["value"]),
+        "attn_mask": _tensor_signature(values["attn_mask"]),
+        "dropout_p": float(values["dropout_p"]),
+        "is_causal": bool(values["is_causal"]),
+        "scale": scale,
+        "enable_gqa": bool(values["enable_gqa"]),
+        "grad_enabled": bool(torch.is_grad_enabled()),
+        "autocast_enabled": bool(torch.is_autocast_enabled()),
+        "selector_eligibility": eligibility,
+    }
+
+
+class SDPAInputRecorder:
+    """Record every public functional SDPA call without retaining tensors."""
+
+    def __init__(self):
+        self._original = None
+        self._wrapper = None
+        self._signatures: list[dict] = []
+
+    def __enter__(self):
+        functional = torch.nn.functional
+        if self._original is not None:
+            raise RuntimeError("SDPA input recorder cannot be nested or reused")
+        original = functional.scaled_dot_product_attention
+        self._original = original
+
+        @functools.wraps(original)
+        def wrapper(*args, **kwargs):
+            self._signatures.append(sdpa_input_signature(args, kwargs))
+            return original(*args, **kwargs)
+
+        self._wrapper = wrapper
+        functional.scaled_dot_product_attention = wrapper
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        functional = torch.nn.functional
+        replaced = functional.scaled_dot_product_attention is not self._wrapper
+        original = self._original
+        functional.scaled_dot_product_attention = original
+        restored = functional.scaled_dot_product_attention is original
+        self._original = None
+        self._wrapper = None
+        if replaced or not restored:
+            raise RuntimeError(
+                "SDPA input recorder observed an unexpected functional patch or "
+                "could not restore the exact original callable"
+            )
+        return False
+
+    def report(self) -> dict:
+        unique: dict[str, dict] = {}
+        ordered_digests = []
+        for index, signature in enumerate(self._signatures):
+            digest = _strict_json_sha256(signature)
+            ordered_digests.append(digest)
+            if digest not in unique:
+                unique[digest] = {
+                    "sha256": digest,
+                    "first_call_index": index,
+                    "call_count": 0,
+                    "signature": signature,
+                }
+            unique[digest]["call_count"] += 1
+        return {
+            "total_calls": len(self._signatures),
+            "unique_signature_count": len(unique),
+            "ordered_signature_sha256": _strict_json_sha256(ordered_digests),
+            "unique_signatures": sorted(
+                unique.values(), key=lambda item: item["first_call_index"]
+            ),
+        }
+
+
+def parse_sdpa_profiler_events(events: Iterable) -> dict:
+    """Extract public SDPA dispatch evidence from profiler key averages."""
+    operator_counts: dict[str, int] = {}
+    for event in events:
+        if isinstance(event, str):
+            key, count = event, 1
+        elif isinstance(event, dict):
+            key, count = event["key"], event.get("count", 1)
+        else:
+            key, count = event.key, getattr(event, "count", 1)
+        if not isinstance(key, str) or not isinstance(count, int) or count < 0:
+            raise ValueError("profiler events require a string key and nonnegative count")
+        if "attention" in key or "scaled_dot_product" in key:
+            operator_counts[key] = operator_counts.get(key, 0) + count
+
+    backend_counts = {
+        backend: operator_counts.get(operator, 0)
+        for backend, operator in SDPA_PRIMARY_OPERATORS.items()
+    }
+    return {
+        "generic_sdpa_call_count": operator_counts.get(
+            "aten::scaled_dot_product_attention", 0
+        ),
+        "primary_backend_call_count": sum(backend_counts.values()),
+        "backend_call_counts": backend_counts,
+        "observed_backends": [
+            backend for backend in SDPA_FLAG_GETTERS if backend_counts[backend] > 0
+        ],
+        "operator_counts": dict(sorted(operator_counts.items())),
+    }
+
+
+def evaluate_local_sdpa_attribution(
+    selector_backend: str | None,
+    recorder: dict,
+    profiler: dict,
+    error: str | None = None,
+) -> dict:
+    """Apply the no-timing attribution gate for one rank and one input shape."""
+    errors = []
+    if error:
+        errors.append(error)
+    recorded_calls = recorder["total_calls"]
+    generic_calls = profiler["generic_sdpa_call_count"]
+    primary_calls = profiler["primary_backend_call_count"]
+    observed = set(profiler["observed_backends"])
+
+    if selector_backend is None:
+        if recorded_calls or generic_calls or primary_calls:
+            errors.append(
+                "the non-SDPA arm unexpectedly executed an internal PyTorch SDPA operator"
+            )
+        selector_operator_agreement = (
+            not recorded_calls and not generic_calls and not primary_calls
+        )
+        selector_eligibility_all_calls = True
+    else:
+        allowed = (
+            set(SDPA_FLAG_GETTERS)
+            if selector_backend == "auto"
+            else {selector_backend}
+        )
+        if recorded_calls < 1:
+            errors.append("the functional recorder observed no SDPA calls")
+        if generic_calls != recorded_calls:
+            errors.append(
+                "functional/profiler SDPA call coverage differed: "
+                f"recorder={recorded_calls} profiler={generic_calls}"
+            )
+        if primary_calls != recorded_calls:
+            errors.append(
+                "profiler primary-backend coverage differed from the full input "
+                f"record: primary={primary_calls} recorder={recorded_calls}"
+            )
+        if not observed:
+            errors.append("the profiler observed no recognized primary SDPA backend")
+        selector_operator_agreement = bool(observed) and observed <= allowed
+        if selector_backend != "auto":
+            selector_operator_agreement = observed == {selector_backend}
+        if not selector_operator_agreement:
+            errors.append(
+                f"selector {selector_backend!r} disagreed with profiler backends "
+                f"{sorted(observed)}"
+            )
+
+        eligibility_by_signature = [
+            item["signature"]["selector_eligibility"]
+            for item in recorder["unique_signatures"]
+        ]
+        if selector_backend == "auto":
+            selector_eligibility_all_calls = all(
+                any(eligibility[name] for name in observed)
+                for eligibility in eligibility_by_signature
+            ) if observed else False
+        else:
+            selector_eligibility_all_calls = all(
+                eligibility[selector_backend]
+                for eligibility in eligibility_by_signature
+            )
+        if not selector_eligibility_all_calls:
+            errors.append(
+                "the public capability predicates did not support the observed "
+                "selector for every unique input signature"
+            )
+
+    return {
+        "selector_backend": selector_backend,
+        "selector_is_exact": selector_backend not in (None, "auto"),
+        "selector_operator_agreement": selector_operator_agreement,
+        "selector_eligibility_all_calls": selector_eligibility_all_calls,
+        "passed": not errors,
+        "errors": errors,
+        "recorder": recorder,
+        "profiler": profiler,
+    }
 
 
 def setup_distributed() -> tuple[int, int, torch.device]:
@@ -154,6 +664,150 @@ def gather_errors(error: str | None, world: int) -> list[str]:
     errors: list[str | None] = [None] * world
     dist.all_gather_object(errors, error)
     return [item for item in errors if item]
+
+
+def _normalized_rank_signature_summary(recorder: dict) -> list[dict]:
+    summary = []
+    for item in recorder["unique_signatures"]:
+        signature = json.loads(json.dumps(item["signature"], allow_nan=False))
+        for tensor_name in ("query", "key", "value", "attn_mask"):
+            tensor = signature[tensor_name]
+            if tensor is not None:
+                tensor["device_index"] = None
+        summary.append(
+            {
+                "call_count": item["call_count"],
+                "signature": signature,
+            }
+        )
+    return sorted(summary, key=_strict_json_sha256)
+
+
+def aggregate_sdpa_attribution(
+    rank_reports: list[dict],
+    expected_world: int,
+    selector_backend: str | None,
+    shape_name: str,
+) -> dict:
+    """Require complete, identical selector evidence from every rank."""
+    if expected_world < 1:
+        raise ValueError("expected_world must be positive")
+    ordered = sorted(rank_reports, key=lambda item: item["rank"])
+    ranks = [item["rank"] for item in ordered]
+    if len(set(ranks)) != len(ranks):
+        raise ValueError("distributed SDPA attribution contains duplicate ranks")
+    expected_ranks = list(range(expected_world))
+    if ranks != expected_ranks:
+        raise ValueError(
+            f"distributed SDPA attribution expected ranks {expected_ranks}, got {ranks}"
+        )
+    if any(item["shape"] != shape_name for item in ordered):
+        raise ValueError("distributed SDPA attribution mixed input-shape probes")
+    if any(item["selector_backend"] != selector_backend for item in ordered):
+        raise ValueError("distributed SDPA attribution mixed selector backends")
+
+    rank_signature_summaries = [
+        _normalized_rank_signature_summary(item["recorder"]) for item in ordered
+    ]
+    rank_signature_digests = [
+        _strict_json_sha256(summary) for summary in rank_signature_summaries
+    ]
+    signature_agreement = len(set(rank_signature_digests)) == 1
+
+    backend_vectors = [
+        tuple(item["profiler"]["backend_call_counts"][name] for name in SDPA_FLAG_GETTERS)
+        for item in ordered
+    ]
+    operator_count_agreement = len(set(backend_vectors)) == 1
+    observed_vectors = [tuple(item["profiler"]["observed_backends"]) for item in ordered]
+    observed_backend_agreement = len(set(observed_vectors)) == 1
+    selector_agreement = all(
+        item["selector_operator_agreement"] for item in ordered
+    )
+    local_passed = all(item["passed"] for item in ordered)
+    agreement_failing_ranks = sorted(
+        {
+            item["rank"]
+            for index, item in enumerate(ordered)
+            if (
+                rank_signature_digests[index] != rank_signature_digests[0]
+                or backend_vectors[index] != backend_vectors[0]
+                or observed_vectors[index] != observed_vectors[0]
+                or not item["selector_operator_agreement"]
+            )
+        }
+    )
+
+    aggregated_signatures: dict[str, dict] = {}
+    for item, summary in zip(ordered, rank_signature_summaries):
+        for entry in summary:
+            digest = _strict_json_sha256(entry["signature"])
+            aggregate = aggregated_signatures.setdefault(
+                digest,
+                {
+                    "sha256": digest,
+                    "signature": entry["signature"],
+                    "total_call_count": 0,
+                    "per_rank_call_count": {},
+                },
+            )
+            aggregate["total_call_count"] += entry["call_count"]
+            aggregate["per_rank_call_count"][str(item["rank"])] = entry[
+                "call_count"
+            ]
+
+    agreement = {
+        "input_signatures": signature_agreement,
+        "observed_backends": observed_backend_agreement,
+        "primary_operator_counts": operator_count_agreement,
+        "selector_operator": selector_agreement,
+    }
+    failing_ranks = sorted(
+        {item["rank"] for item in ordered if not item["passed"]}
+        | set(agreement_failing_ranks)
+    )
+    return {
+        "shape": shape_name,
+        "selector_backend": selector_backend,
+        "passed": local_passed and all(agreement.values()),
+        "failing_ranks": failing_ranks,
+        "agreement_failing_ranks": agreement_failing_ranks,
+        "all_rank_agreement": agreement,
+        "rank_normalized_input_signature_sha256": [
+            {"rank": item["rank"], "sha256": digest}
+            for item, digest in zip(ordered, rank_signature_digests)
+        ],
+        "full_input_signature_aggregation": sorted(
+            aggregated_signatures.values(), key=lambda item: item["sha256"]
+        ),
+        "rank_reports": ordered,
+    }
+
+
+def gather_sdpa_attribution(
+    local_report: dict,
+    rank: int,
+    world: int,
+    selector_backend: str | None,
+    shape_name: str,
+) -> dict:
+    report = dict(local_report)
+    report["rank"] = rank
+    report["shape"] = shape_name
+    if dist.is_initialized():
+        gathered: list[dict | None] = [None] * world
+        dist.all_gather_object(gathered, report)
+        if any(item is None for item in gathered):
+            raise RuntimeError("distributed SDPA attribution gather was incomplete")
+        reports = list(gathered)
+    else:
+        reports = [report]
+    return aggregate_sdpa_attribution(
+        reports,
+        expected_world=world,
+        selector_backend=selector_backend,
+        shape_name=shape_name,
+    )
 
 
 def package_version(name: str) -> str | None:
@@ -1396,6 +2050,125 @@ def training_step(
     return backward_report
 
 
+def profile_sdpa_attribution_probe(
+    model,
+    variant: Variant,
+    input_ids: torch.Tensor,
+    weights: torch.Tensor,
+    tuning: str,
+    world: int,
+    rank: int,
+    device: torch.device,
+    anchor_state: dict[str, torch.Tensor],
+    anchor_digest: str,
+    learning_rate: float,
+    weight_decay: float,
+    seed: int,
+    shape_name: str,
+) -> dict:
+    """Profile one exact training shape, then restore parameters and RNG state."""
+    restore_trainable_state(model, anchor_state)
+    before_digest = trainable_state_digest(model)
+    before_state_report = gather_state_digest_diagnostics(
+        before_digest,
+        rank,
+        world,
+        reference_digest=anchor_digest,
+    )
+    cpu_rng_state = torch.random.get_rng_state().clone()
+    cuda_rng_state = torch.cuda.get_rng_state(device).clone()
+    recorder = SDPAInputRecorder()
+    profiler_result = parse_sdpa_profiler_events([])
+    optimizer = None
+    error = None
+    try:
+        if not before_state_report["passed"]:
+            raise RuntimeError(
+                "the attribution probe did not start from the exact warmed anchor"
+            )
+        optimizer = make_optimizer(model, learning_rate, weight_decay)
+        torch.random.default_generator.manual_seed(seed + rank)
+        torch.cuda.manual_seed(seed + rank)
+        if dist.is_initialized():
+            dist.barrier()
+        torch.cuda.synchronize(device)
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            record_shapes=False,
+            profile_memory=False,
+            with_stack=False,
+        ) as profiler:
+            with recorder:
+                training_step(
+                    model,
+                    optimizer,
+                    variant,
+                    input_ids,
+                    weights,
+                    tuning,
+                    world,
+                    device,
+                )
+            torch.cuda.synchronize(device)
+        profiler_result = parse_sdpa_profiler_events(profiler.key_averages())
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    finally:
+        if optimizer is not None:
+            optimizer.zero_grad(set_to_none=True)
+        model.zero_grad(set_to_none=True)
+        restore_trainable_state(model, anchor_state)
+        torch.random.set_rng_state(cpu_rng_state)
+        torch.cuda.set_rng_state(cuda_rng_state, device)
+        torch.cuda.synchronize(device)
+
+    after_digest = trainable_state_digest(model)
+    after_state_report = gather_state_digest_diagnostics(
+        after_digest,
+        rank,
+        world,
+        reference_digest=anchor_digest,
+    )
+    rng_restored = torch.equal(torch.random.get_rng_state(), cpu_rng_state) and torch.equal(
+        torch.cuda.get_rng_state(device), cuda_rng_state
+    )
+    restore_errors = []
+    if not before_state_report["passed"]:
+        restore_errors.append("attribution start anchor mismatch")
+    if not after_state_report["passed"]:
+        restore_errors.append("attribution end anchor mismatch")
+    if not rng_restored:
+        restore_errors.append("attribution RNG state was not restored exactly")
+    if restore_errors:
+        suffix = "; ".join(restore_errors)
+        error = f"{error}; {suffix}" if error else suffix
+
+    local = evaluate_local_sdpa_attribution(
+        variant.internal_sdpa_backend,
+        recorder.report(),
+        profiler_result,
+        error=error,
+    )
+    local["anchor_and_rng_restore"] = {
+        "before_trainable_state_sha256": before_digest,
+        "after_trainable_state_sha256": after_digest,
+        "expected_trainable_state_sha256": anchor_digest,
+        "before_state_report": before_state_report,
+        "after_state_report": after_state_report,
+        "rng_restored_exactly": rng_restored,
+    }
+    return gather_sdpa_attribution(
+        local,
+        rank,
+        world,
+        variant.internal_sdpa_backend,
+        shape_name,
+    )
+
+
 def benchmark_variant(
     model,
     optimizer,
@@ -1482,7 +2255,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Hub branch, tag, or commit (default main); always resolved to and loaded by exact SHA",
     )
-    parser.add_argument("--variants", default="all", help="all or comma-separated variant names")
+    parser.add_argument(
+        "--variants",
+        default="",
+        help=(
+            "optional candidate name; the selected reference is added automatically"
+        ),
+    )
+    parser.add_argument(
+        "--reference-variant",
+        choices=list(VARIANTS_BY_NAME),
+        default=REFERENCE_VARIANT.name,
+        help=(
+            "parity anchor and standalone arm when --variants is empty; forced "
+            "internal SDPA backends can therefore run without the automatic arm"
+        ),
+    )
     parser.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
     parser.add_argument(
         "--tuning",
@@ -1669,10 +2457,11 @@ def finalize_report_status(
         report["fatal"] = None
 
 
-def main(argv=None) -> int:
+def _main(argv, backend_controller: SDPAArmController) -> int:
     args = build_parser().parse_args(argv)
     validate_args(args)
-    variants = select_variants(args.variants)
+    reference_variant = VARIANTS_BY_NAME[args.reference_variant]
+    variants = select_variants(args.variants, reference_variant.name)
     rank, world, device = setup_distributed()
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
     model_init_seed = args.seed + 30_000
@@ -1696,9 +2485,10 @@ def main(argv=None) -> int:
         raise RuntimeError(revision_result["error"])
     resolved_revision = revision_result["commit"]
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "benchmark": "a100-causal-training-kernels",
         "status": "incomplete",
+        "reference_variant": reference_variant.name,
         "planned_variants": [variant.name for variant in variants],
         "completed_variants": [],
         "fatal": None,
@@ -1706,6 +2496,17 @@ def main(argv=None) -> int:
             "index": args.trial_index,
             "timing_trials_in_record": 1,
             "aggregation": "aggregate separate JSON records by trial.index",
+        },
+        "sdpa_backend_attribution_contract": {
+            "selector_api": "torch.nn.attention.sdpa_kernel",
+            "capability_api": "torch.backends.cuda.SDPAParams and can_use_*_attention",
+            "operator_evidence": "torch.profiler",
+            "required_shapes": ["parity", "timing"],
+            "timing_requires_attribution_pass": True,
+            "reference_variant": reference_variant.name,
+            "publishable_variant_limit": (
+                "selected reference plus at most one candidate"
+            ),
         },
         "environment": environment_report(args, world, device),
         "model": {
@@ -1735,6 +2536,7 @@ def main(argv=None) -> int:
     fatal_reason = None
 
     for variant in variants:
+        backend_control = backend_controller.activate(variant)
         if dist.is_initialized():
             dist.barrier()
         setup_started = time.perf_counter()
@@ -1773,16 +2575,17 @@ def main(argv=None) -> int:
             load_reason = errors[0] if errors else "model load failed on another rank"
             record = {
                 "variant": asdict(variant),
+                "sdpa_backend_control": backend_control,
                 "status": (
                     "failed"
-                    if variant == REFERENCE_VARIANT or fatal_load_error
+                    if variant == reference_variant or fatal_load_error
                     else "skipped"
                 ),
                 "reason": load_reason,
             }
             if rank == 0:
                 report["variants"].append(record)
-            if variant == REFERENCE_VARIANT or fatal_load_error:
+            if variant == reference_variant or fatal_load_error:
                 failed = True
                 fatal_phase = "model_load"
                 fatal_reason = load_reason
@@ -1813,11 +2616,12 @@ def main(argv=None) -> int:
             ]
         if not construction_state_report["passed"]:
             state_reason = (
-                "constructed trainable state did not match the native-SDPA "
+                "constructed trainable state did not match the selected "
                 "reference; check model/adapter initialization seeding"
             )
             record = {
                 "variant": asdict(variant),
+                "sdpa_backend_control": backend_control,
                 "status": "failed",
                 "reason": state_reason,
                 "tuning": tuning_report,
@@ -1841,7 +2645,7 @@ def main(argv=None) -> int:
         vocab_size = int(unwrap(model).config.vocab_size)
         controlled_warmup_report = None
         if parity_anchor_state is None:
-            if variant != REFERENCE_VARIANT:
+            if variant != reference_variant:
                 raise RuntimeError("the first benchmark variant must establish the anchor")
             if args.tuning == "lora":
                 warm_ids, warm_weights = make_batch(
@@ -1864,7 +2668,7 @@ def main(argv=None) -> int:
                 warm_backward = training_step(
                     model,
                     warm_optimizer,
-                    REFERENCE_VARIANT,
+                    reference_variant,
                     warm_ids,
                     warm_weights,
                     args.tuning,
@@ -1881,7 +2685,7 @@ def main(argv=None) -> int:
                 factor_report = lora_factor_nonzero_report(parity_anchor_state)
                 controlled_warmup_report = {
                     "performed": True,
-                    "source_variant": REFERENCE_VARIANT.name,
+                    "source_variant": reference_variant.name,
                     "batch_seed_base": args.seed + 50_000,
                     "forward_seed_base": args.seed + 60_000,
                     "per_rank_seed_rule": "seed_base + rank",
@@ -1917,11 +2721,12 @@ def main(argv=None) -> int:
 
         if not anchor_state_report["passed"]:
             anchor_reason = (
-                "restored trainable parity anchor did not match the native-SDPA "
-                "warmed state"
+                "restored trainable parity anchor did not match the selected "
+                "reference's warmed state"
             )
             record = {
                 "variant": asdict(variant),
+                "sdpa_backend_control": backend_control,
                 "status": "failed",
                 "reason": anchor_reason,
                 "tuning": tuning_report,
@@ -2162,6 +2967,7 @@ def main(argv=None) -> int:
                 parity["reason"] = "parity gate failed on another rank"
             record = {
                 "variant": asdict(variant),
+                "sdpa_backend_control": backend_control,
                 "status": "failed",
                 "setup_seconds": setup_seconds,
                 "tuning": tuning_report,
@@ -2194,7 +3000,6 @@ def main(argv=None) -> int:
         del repeat_signature
         del repeat_parameter_deltas
 
-        optimizer = make_optimizer(model, args.learning_rate, args.weight_decay)
         input_ids, weights = make_batch(
             vocab_size,
             args.micro_batch_size,
@@ -2203,6 +3008,111 @@ def main(argv=None) -> int:
             args.seed + 10_000 + rank,
             device,
         )
+        attribution_started = time.perf_counter()
+        parity_shape_attribution = profile_sdpa_attribution_probe(
+            model,
+            variant,
+            parity_ids,
+            parity_weights,
+            args.tuning,
+            world,
+            rank,
+            device,
+            parity_anchor_state,
+            parity_anchor_digest,
+            args.learning_rate,
+            args.weight_decay,
+            args.seed + 70_000,
+            "parity",
+        )
+        timing_shape_attribution = profile_sdpa_attribution_probe(
+            model,
+            variant,
+            input_ids,
+            weights,
+            args.tuning,
+            world,
+            rank,
+            device,
+            parity_anchor_state,
+            parity_anchor_digest,
+            args.learning_rate,
+            args.weight_decay,
+            args.seed + 80_000,
+            "timing",
+        )
+        restore_trainable_state(model, parity_anchor_state)
+        torch.cuda.synchronize(device)
+        post_attribution_digest = trainable_state_digest(model)
+        post_attribution_state_report = gather_state_digest_diagnostics(
+            post_attribution_digest,
+            rank,
+            world,
+            reference_digest=parity_anchor_digest,
+        )
+        attribution_seconds = distributed_max(
+            time.perf_counter() - attribution_started, device
+        )
+        attribution = {
+            "passed": (
+                parity_shape_attribution["passed"]
+                and timing_shape_attribution["passed"]
+                and post_attribution_state_report["passed"]
+            ),
+            "seconds_not_in_timing_metrics": attribution_seconds,
+            "parity_shape": parity_shape_attribution,
+            "timing_shape": timing_shape_attribution,
+            "post_attribution_anchor_restore": post_attribution_state_report,
+            "post_attribution_trainable_state_sha256": post_attribution_digest,
+        }
+        parity["state_digest_reports"]["post_attribution_restore"] = (
+            post_attribution_state_report
+        )
+        if not attribution["passed"]:
+            failed_shapes = [
+                name
+                for name, result in (
+                    ("parity", parity_shape_attribution),
+                    ("timing", timing_shape_attribution),
+                )
+                if not result["passed"]
+            ]
+            if not post_attribution_state_report["passed"]:
+                failed_shapes.append("anchor_restore")
+            attribution_reason = (
+                "pre-timing SDPA backend attribution failed for "
+                + ", ".join(failed_shapes)
+            )
+            record = {
+                "variant": asdict(variant),
+                "sdpa_backend_control": backend_control,
+                "status": "failed",
+                "reason": attribution_reason,
+                "setup_seconds": setup_seconds,
+                "tuning": tuning_report,
+                "model_init_seed": model_init_seed,
+                "adapter_init_seed": (
+                    adapter_init_seed if args.tuning == "lora" else None
+                ),
+                "construction_trainable_state_sha256": construction_digest,
+                "reference_construction_trainable_state_sha256": (
+                    construction_reference_digest
+                ),
+                "parity_anchor_trainable_state_sha256": parity_anchor_digest,
+                "state_digest_reports": parity["state_digest_reports"],
+                "parity": parity,
+                "sdpa_backend_attribution": attribution,
+            }
+            if rank == 0:
+                report["variants"].append(record)
+            del model
+            cleanup_cuda()
+            failed = True
+            fatal_phase = "sdpa_backend_attribution"
+            fatal_reason = attribution_reason
+            break
+
+        optimizer = make_optimizer(model, args.learning_rate, args.weight_decay)
         metrics = benchmark_variant(
             model,
             optimizer,
@@ -2219,6 +3129,7 @@ def main(argv=None) -> int:
             report["variants"].append(
                 {
                     "variant": asdict(variant),
+                    "sdpa_backend_control": backend_control,
                     "status": "passed",
                     "setup_seconds": setup_seconds,
                     "tuning": tuning_report,
@@ -2233,6 +3144,7 @@ def main(argv=None) -> int:
                     "parity_anchor_trainable_state_sha256": parity_anchor_digest,
                     "state_digest_reports": parity["state_digest_reports"],
                     "parity": parity,
+                    "sdpa_backend_attribution": attribution,
                     "metrics": metrics,
                 }
             )
@@ -2240,6 +3152,9 @@ def main(argv=None) -> int:
         del model
         cleanup_cuda()
 
+    # Closing before serialization makes process-global selector restoration a
+    # part of the evidence gate rather than a post-report best effort.
+    backend_controller.close()
     if rank == 0:
         finalize_report_status(report, failed, fatal_phase, fatal_reason)
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -2251,6 +3166,17 @@ def main(argv=None) -> int:
         dist.barrier()
         dist.destroy_process_group()
     return 1 if failed else 0
+
+
+def main(argv=None) -> int:
+    backend_controller = SDPAArmController()
+    try:
+        return _main(argv, backend_controller)
+    except BaseException:
+        backend_controller.close(sys.exc_info())
+        raise
+    finally:
+        backend_controller.close()
 
 
 if __name__ == "__main__":

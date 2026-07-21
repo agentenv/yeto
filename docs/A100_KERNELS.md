@@ -88,26 +88,114 @@ do not combine its evidence with default LoRA trials. The optimizer is ordinary
 AdamW with the learner's default learning rate, `3e-4`, followed by gradient
 clipping at norm `1.0`.
 
-The ordered comparison is:
+Publishable benchmark invocations are deliberately limited to one selected
+reference plus at most one candidate. `--reference-variant` defaults to
+`native-sdpa`; when `--variants` is omitted (or empty), only that reference runs.
+Supplying one candidate name through `--variants` automatically prepends the
+selected reference. `all` and comma-separated multi-candidate matrices are
+rejected. This keeps every JSON record independently interpretable and prevents
+a later arm from inheriting unreported process-global backend state.
 
-1. Native layers with SDPA and PyTorch fused cross-entropy—the parity reference.
-2. Native layers with FlashAttention 2 and PyTorch fused cross-entropy, when installed and supported.
-3. Liger layers/fused loss with SDPA, when installed and supported.
-4. Liger layers/fused loss with FlashAttention 2, when both are available.
+The native PyTorch SDPA variants are:
 
-Before parity, native SDPA performs exactly one controlled deterministic LoRA
-update. This makes both `lora_A` and `lora_B` nonzero; the harness verifies and
-records their nonzero coverage. That single native trainable state becomes the
-anchor. Candidates never warm themselves: the exact native anchor is restored
-into every model and verified by SHA-256 before any witness.
+| variant | internal selector | meaning |
+|---|---|---|
+| `native-sdpa` | `auto` | backward-compatible reference with every public PyTorch SDPA backend enabled |
+| `native-sdpa-flash` | `flash` | exact `SDPBackend.FLASH_ATTENTION` selector |
+| `native-sdpa-math` | `math` | exact `SDPBackend.MATH` selector |
+| `native-sdpa-efficient` | `efficient` | exact `SDPBackend.EFFICIENT_ATTENTION` selector |
+| `native-sdpa-cudnn` | `cudnn` | exact `SDPBackend.CUDNN_ATTENTION` selector |
 
-Every arm, including native SDPA, then runs the same two-witness self-repeat
-procedure. Each witness starts at the exact anchor with a fresh optimizer, the
-same batch, and the same RNG seed, and restores the anchor after observing its
-parameter delta. The self-repeat must pass, and each candidate's first witness
-must independently match the native reference. After parity, the anchor is
-restored and verified once more and another fresh optimizer is constructed for
-timing. No parity or controlled-warmup update leaks into timed model state.
+The other candidate names remain `native-flash-attn-2`, `liger-sdpa`, and
+`liger-flash-attn-2`. A forced internal backend can also be the reference, so
+its self-repeat and timing do not depend on the automatic selector passing.
+For a standalone forced-cuDNN run whose parity witness uses the complete timing
+shape:
+
+```bash
+torchrun --standalone --nproc_per_node=8 \
+  scripts/benchmark_a100_kernels.py \
+  --reference-variant native-sdpa-cudnn \
+  --micro-batch-size 2 \
+  --seq-len 1024 \
+  --parity-micro-batch-size 2 \
+  --parity-seq-len 1024 \
+  --revision <40-character-model-commit-sha> \
+  --output a100-native-sdpa-cudnn-standalone.json
+```
+
+The explicit parity batch and sequence arguments above are important when the
+claim being tested is production-shape self-repeat. A forced-math standalone
+run changes only the reference name to `native-sdpa-math`.
+
+For comparison against the default automatic reference, use the forced backend
+as the optional candidate instead:
+
+```bash
+torchrun --standalone --nproc_per_node=8 \
+  scripts/benchmark_a100_kernels.py \
+  --variants native-sdpa-flash \
+  --revision <40-character-model-commit-sha> \
+  --output a100-native-sdpa-flash.json
+```
+
+The ordered comparison within any record is therefore:
+
+1. The explicitly selected parity reference (automatic native SDPA by default).
+2. Zero or one explicitly selected candidate.
+
+### Internal SDPA selection and attribution
+
+Each arm holds a public `torch.nn.attention.sdpa_kernel` context for its entire
+lifetime, including model setup, parity, attribution, timing, and cleanup. The
+harness snapshots all four public CUDA enable flags before entry, verifies the
+exact active flag set, and verifies exact restoration on exit. A leak is fatal
+even if an emergency repair restores the original flags. No private dispatcher
+or implementation-detail selector is used; the mapping is compatible with the
+public PyTorch 2.5.1 API.
+
+Parity alone does not prove which fused attention operator executed. After
+parity passes and before timing starts, the harness runs two untimed attribution
+probes: one with the parity shape and one with the timing shape. A temporary
+recorder observes every call to the public functional SDPA entry point and
+retains no tensors. It records every unique input signature without truncation:
+query/key/value/mask shapes, strides, dtypes, devices, layouts, gradient and
+contiguity state, storage offsets, dropout, causal and GQA flags, explicit
+scale, grad/autocast state, call counts, and the result of each public
+`can_use_*_attention(SDPAParams(...))` capability predicate.
+
+At the same time, `torch.profiler` records the actual primary aten operator:
+Flash, math, memory-efficient, or cuDNN SDPA. The profiler's generic call count,
+primary-backend call count, and functional recorder count must match exactly.
+An exact selector must agree with the observed operator and be eligible for
+every unique input signature. The auto reference must resolve to recognized,
+enabled operators supported by its recorded signatures. Every rank contributes
+its full evidence; normalized input signatures, observed backends, and primary
+operator counts must agree across all ranks. Missing calls, an unknown operator,
+mixed-rank dispatch, selector disagreement, or incomplete profiler coverage is
+fatal and produces no timing metrics.
+
+An attribution probe uses a fresh optimizer, then restores the exact warmed
+trainable anchor and both CPU and local-CUDA RNG states. The anchor digest is
+checked across every rank before and after each probe and once more after both
+shapes. Thus neither parameter updates nor profiler-side RNG consumption can
+leak into the timed arm.
+
+Before parity, the selected reference performs exactly one controlled
+deterministic LoRA update. This makes both `lora_A` and `lora_B` nonzero; the
+harness verifies and records their nonzero coverage. That single reference
+trainable state becomes the anchor. Candidates never warm themselves: the exact
+reference anchor is restored into every model and verified by SHA-256 before
+any witness.
+
+Every arm, including the selected reference, then runs the same two-witness
+self-repeat procedure. Each witness starts at the exact anchor with a fresh
+optimizer, the same batch, and the same RNG seed, and restores the anchor after
+observing its parameter delta. The self-repeat must pass, and each candidate's
+first witness must independently match the selected reference. After parity,
+the anchor is restored and verified once more and another fresh optimizer is
+constructed for timing. No parity or controlled-warmup update leaks into timed
+model state.
 
 Model and adapter construction use separate recorded initialization seeds, so
 backend-specific model loading cannot perturb PEFT's adapter RNG stream. The
@@ -124,7 +212,7 @@ it does not model the learner's multi-microbatch gradient accumulation or
 learning-rate scheduler, and its report must not be treated as evidence about
 those separate mechanisms.
 
-Every available variant must match the reference loss and every element of
+Every selected candidate must match the reference loss and every element of
 every trainable parameter gradient. Each applies one identical AdamW update
 and must also match every resulting trainable parameter delta. Reference
 gradients and deltas are kept in host memory and compared in bounded chunks.
@@ -162,6 +250,10 @@ For each passing variant, the JSON report contains:
 - maximum peak allocated and reserved memory per GPU across ranks;
 - independent loss, gradient, and parameter-delta statuses plus full streamed
   parity and update-sensitivity diagnostics;
+- parity-shape and timing-shape SDPA input signatures, public selector
+  eligibility, profiler operator counts, selector/operator agreement, and
+  complete per-rank attribution evidence;
+- before/active/after public SDPA flag snapshots and exact restoration status;
 - tuning mode, requested and resolved adapter configuration, trainable dtype
   counts, deterministic initialization seed, and trainable-state SHA-256;
 - GPU, CUDA, PyTorch, Transformers, PEFT, Accelerate, dependency-version,
@@ -170,11 +262,13 @@ For each passing variant, the JSON report contains:
 The harness resolves `--revision` (default `main`) through the Hub before any
 model load, then gives every rank the returned immutable commit SHA. Both the
 requested revision and resolved SHA are written to JSON; no timed run uses an
-unrecorded moving model revision. Schema version 2 records the benchmark script
+unrecorded moving model revision. Schema version 3 adds the publishable
+selectable-reference/single-candidate contract and mandatory two-shape,
+all-rank SDPA attribution evidence. It also records the benchmark script
 SHA-256, git object ID, dirty state, provenance source, and library versions. A
 clean tree can be identified by its git object ID; a dirty tree cannot, so its
-report explicitly sets `clean_commit_exact: false` and the script hash identifies
-only the harness file, not every modified source file.
+report explicitly sets `clean_commit_exact: false` and the script hash
+identifies only the harness file, not every modified source file.
 
 Sky-synchronized workdirs often omit `.git`. Source provenance is required, so
 such a launch must pass both validated overrides; omitting either one is fatal:
@@ -203,6 +297,7 @@ for trial in 1 2 3; do
     scripts/benchmark_a100_kernels.py \
     --model Qwen/Qwen2.5-1.5B-Instruct \
     --revision <40-character-commit-sha> \
+    --variants native-sdpa-flash \
     --trial-index "$trial" \
     --output "a100-kernel-benchmark-trial-${trial}.json"
 done

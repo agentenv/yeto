@@ -21,17 +21,209 @@ sys.modules[SPEC.name] = benchmark
 SPEC.loader.exec_module(benchmark)
 
 
-def test_variant_plan_has_a_stable_reference_and_all_combinations():
-    assert [variant.name for variant in benchmark.select_variants("all")] == [
+def test_variant_plan_has_a_stable_reference_and_one_candidate_contract():
+    assert [variant.name for variant in benchmark.VARIANTS] == [
         "native-sdpa",
+        "native-sdpa-flash",
+        "native-sdpa-math",
+        "native-sdpa-efficient",
+        "native-sdpa-cudnn",
         "native-flash-attn-2",
         "liger-sdpa",
         "liger-flash-attn-2",
     ]
+    assert benchmark.select_variants("") == [benchmark.REFERENCE_VARIANT]
+    assert benchmark.REFERENCE_VARIANT.internal_sdpa_backend == "auto"
+    assert {
+        variant.internal_sdpa_backend
+        for variant in benchmark.VARIANTS
+        if variant.attention_backend == "sdpa"
+    } == {"auto", "flash", "math", "efficient", "cudnn"}
     selected = benchmark.select_variants("liger-sdpa")
     assert [variant.name for variant in selected] == ["native-sdpa", "liger-sdpa"]
+    selected = benchmark.select_variants("native-sdpa-math,native-sdpa")
+    assert [variant.name for variant in selected] == [
+        "native-sdpa",
+        "native-sdpa-math",
+    ]
+    forced_reference = benchmark.select_variants(
+        "", reference_name="native-sdpa-cudnn"
+    )
+    assert [variant.name for variant in forced_reference] == ["native-sdpa-cudnn"]
+    forced_with_candidate = benchmark.select_variants(
+        "native-sdpa-math", reference_name="native-sdpa-cudnn"
+    )
+    assert [variant.name for variant in forced_with_candidate] == [
+        "native-sdpa-cudnn",
+        "native-sdpa-math",
+    ]
+    with pytest.raises(ValueError, match="at most one candidate"):
+        benchmark.select_variants("all")
+    with pytest.raises(ValueError, match="at most one candidate"):
+        benchmark.select_variants("native-sdpa-math,native-sdpa-flash")
     with pytest.raises(ValueError, match="unknown variants"):
         benchmark.select_variants("unknown")
+    with pytest.raises(ValueError, match="unknown reference variant"):
+        benchmark.select_variants("", reference_name="unknown")
+
+
+def test_public_sdpa_backend_mapping_and_context_restore_exact_flags(monkeypatch):
+    from torch.nn.attention import SDPBackend
+
+    assert benchmark.sdpa_backend_objects("flash") == [SDPBackend.FLASH_ATTENTION]
+    assert benchmark.sdpa_backend_objects("math") == [SDPBackend.MATH]
+    assert benchmark.sdpa_backend_objects("efficient") == [
+        SDPBackend.EFFICIENT_ATTENTION
+    ]
+    assert benchmark.sdpa_backend_objects("cudnn") == [SDPBackend.CUDNN_ATTENTION]
+    assert set(benchmark.sdpa_backend_objects("auto")) == {
+        SDPBackend.FLASH_ATTENTION,
+        SDPBackend.MATH,
+        SDPBackend.EFFICIENT_ATTENTION,
+        SDPBackend.CUDNN_ATTENTION,
+    }
+    with pytest.raises(ValueError, match="unknown internal SDPA backend"):
+        benchmark.sdpa_backend_objects("unknown")
+
+    before = benchmark.snapshot_sdpa_backend_flags()
+    with benchmark.sdpa_backend_context("math") as report:
+        assert benchmark.snapshot_sdpa_backend_flags() == {
+            "flash": False,
+            "math": True,
+            "efficient": False,
+            "cudnn": False,
+        }
+        assert report["active"] == report["expected_active"]
+    assert benchmark.snapshot_sdpa_backend_flags() == before
+    assert report["after"] == before
+    assert report["restored_exactly"] is True
+
+    controller = benchmark.SDPAArmController()
+    math_variant = benchmark.VARIANTS_BY_NAME["native-sdpa-math"]
+    flash_variant = benchmark.VARIANTS_BY_NAME["native-sdpa-flash"]
+    math_control = controller.activate(math_variant)
+    assert benchmark.snapshot_sdpa_backend_flags() == math_control["expected_active"]
+    flash_control = controller.activate(flash_variant)
+    assert math_control["restored_exactly"] is True
+    assert benchmark.snapshot_sdpa_backend_flags() == flash_control["expected_active"]
+    controller.close()
+    assert flash_control["restored_exactly"] is True
+    assert benchmark.snapshot_sdpa_backend_flags() == before
+
+    snapshots = iter(
+        [
+            {"flash": True, "math": True, "efficient": True, "cudnn": True},
+            {"flash": False, "math": True, "efficient": False, "cudnn": False},
+            {"flash": False, "math": True, "efficient": False, "cudnn": False},
+            {"flash": True, "math": True, "efficient": True, "cudnn": True},
+        ]
+    )
+    repairs = []
+    monkeypatch.setattr(
+        benchmark, "snapshot_sdpa_backend_flags", lambda: next(snapshots)
+    )
+    monkeypatch.setattr(
+        benchmark, "restore_sdpa_backend_flags", lambda flags: repairs.append(flags)
+    )
+    monkeypatch.setattr(
+        torch.nn.attention,
+        "sdpa_kernel",
+        lambda _backends: benchmark.contextlib.nullcontext(),
+    )
+    with pytest.raises(RuntimeError, match="did not restore"):
+        with benchmark.sdpa_backend_context("math"):
+            pass
+    assert repairs == [
+        {"flash": True, "math": True, "efficient": True, "cudnn": True}
+    ]
+
+
+def test_sdpa_input_recorder_restores_callable_and_aggregates_full_signature():
+    functional = torch.nn.functional
+    original = functional.scaled_dot_product_attention
+    query = torch.randn(2, 3, 4, 8, requires_grad=True)
+    recorder = benchmark.SDPAInputRecorder()
+    with recorder:
+        functional.scaled_dot_product_attention(
+            query,
+            query,
+            query,
+            dropout_p=0.0,
+            is_causal=True,
+            scale=0.25,
+        ).sum().backward()
+
+    assert functional.scaled_dot_product_attention is original
+    report = recorder.report()
+    assert report["total_calls"] == 1
+    assert report["unique_signature_count"] == 1
+    signature = report["unique_signatures"][0]["signature"]
+    assert signature["query"]["shape"] == [2, 3, 4, 8]
+    assert signature["query"]["stride"] == list(query.stride())
+    assert signature["query"]["dtype"] == "float32"
+    assert signature["query"]["device_type"] == "cpu"
+    assert signature["attn_mask"] is None
+    assert signature["dropout_p"] == 0.0
+    assert signature["is_causal"] is True
+    assert signature["scale"] == pytest.approx(0.25)
+    assert signature["enable_gqa"] is False
+    assert signature["selector_eligibility"]["math"] is True
+    json.dumps(report, allow_nan=False)
+
+
+def test_profiler_parser_and_selector_operator_agreement_are_fail_closed():
+    events = [
+        SimpleNamespace(key="aten::scaled_dot_product_attention", count=3),
+        SimpleNamespace(key="aten::_scaled_dot_product_flash_attention", count=3),
+        SimpleNamespace(
+            key="aten::_scaled_dot_product_flash_attention_backward", count=3
+        ),
+        SimpleNamespace(key="aten::unrelated", count=99),
+    ]
+    parsed = benchmark.parse_sdpa_profiler_events(events)
+    assert parsed["generic_sdpa_call_count"] == 3
+    assert parsed["primary_backend_call_count"] == 3
+    assert parsed["observed_backends"] == ["flash"]
+    assert parsed["backend_call_counts"]["flash"] == 3
+    assert "aten::unrelated" not in parsed["operator_counts"]
+
+    signature = {
+        "selector_eligibility": {
+            "flash": True,
+            "math": True,
+            "efficient": False,
+            "cudnn": False,
+        }
+    }
+    recorder = {
+        "total_calls": 3,
+        "unique_signature_count": 1,
+        "ordered_signature_sha256": "a" * 64,
+        "unique_signatures": [
+            {
+                "sha256": "b" * 64,
+                "first_call_index": 0,
+                "call_count": 3,
+                "signature": signature,
+            }
+        ],
+    }
+    passed = benchmark.evaluate_local_sdpa_attribution("flash", recorder, parsed)
+    assert passed["passed"] is True
+    assert passed["selector_operator_agreement"] is True
+
+    wrong = benchmark.evaluate_local_sdpa_attribution("math", recorder, parsed)
+    assert wrong["passed"] is False
+    assert wrong["selector_operator_agreement"] is False
+    assert any("disagreed" in error for error in wrong["errors"])
+
+    incomplete = dict(parsed)
+    incomplete["generic_sdpa_call_count"] = 2
+    incomplete_result = benchmark.evaluate_local_sdpa_attribution(
+        "flash", recorder, incomplete
+    )
+    assert incomplete_result["passed"] is False
+    assert any("coverage differed" in error for error in incomplete_result["errors"])
 
 
 def test_percentile_interpolates_and_validates_input():
@@ -382,6 +574,107 @@ def test_distributed_parity_aggregation_rejects_duplicate_ranks():
         benchmark.aggregate_parity_diagnostics([diagnostic, diagnostic])
 
 
+def test_distributed_sdpa_attribution_aggregates_signatures_and_rank_agreement():
+    def rank_report(rank: int) -> dict:
+        tensor = {
+            "shape": [1, 4, 128, 64],
+            "stride": [32768, 64, 256, 1],
+            "dtype": "bfloat16",
+            "device_type": "cuda",
+            "device_index": rank,
+            "layout": "strided",
+            "requires_grad": True,
+            "is_contiguous": False,
+            "is_nested": False,
+            "storage_offset": 0,
+        }
+        signature = {
+            "query": dict(tensor),
+            "key": dict(tensor),
+            "value": dict(tensor),
+            "attn_mask": None,
+            "dropout_p": 0.0,
+            "is_causal": True,
+            "scale": None,
+            "enable_gqa": False,
+            "grad_enabled": True,
+            "autocast_enabled": False,
+            "selector_eligibility": {
+                "flash": False,
+                "math": True,
+                "efficient": False,
+                "cudnn": False,
+            },
+        }
+        recorder = {
+            "total_calls": 2,
+            "unique_signature_count": 1,
+            "ordered_signature_sha256": str(rank) * 64,
+            "unique_signatures": [
+                {
+                    "sha256": str(rank) * 64,
+                    "first_call_index": 0,
+                    "call_count": 2,
+                    "signature": signature,
+                }
+            ],
+        }
+        profiler = benchmark.parse_sdpa_profiler_events(
+            [
+                {"key": "aten::scaled_dot_product_attention", "count": 2},
+                {
+                    "key": "aten::_scaled_dot_product_attention_math",
+                    "count": 2,
+                },
+            ]
+        )
+        report = benchmark.evaluate_local_sdpa_attribution(
+            "math", recorder, profiler
+        )
+        report.update(rank=rank, shape="timing")
+        return report
+
+    reports = [rank_report(0), rank_report(1)]
+    aggregate = benchmark.aggregate_sdpa_attribution(
+        reports,
+        expected_world=2,
+        selector_backend="math",
+        shape_name="timing",
+    )
+    assert aggregate["passed"] is True
+    assert all(aggregate["all_rank_agreement"].values())
+    assert aggregate["failing_ranks"] == []
+    assert len(aggregate["full_input_signature_aggregation"]) == 1
+    signature = aggregate["full_input_signature_aggregation"][0]
+    assert signature["total_call_count"] == 4
+    assert signature["per_rank_call_count"] == {"0": 2, "1": 2}
+    assert signature["signature"]["query"]["device_index"] is None
+    json.dumps(aggregate, allow_nan=False)
+
+    reports[1]["profiler"] = benchmark.parse_sdpa_profiler_events(
+        [
+            {"key": "aten::scaled_dot_product_attention", "count": 2},
+            {"key": "aten::_scaled_dot_product_flash_attention", "count": 2},
+        ]
+    )
+    disagreed = benchmark.aggregate_sdpa_attribution(
+        reports,
+        expected_world=2,
+        selector_backend="math",
+        shape_name="timing",
+    )
+    assert disagreed["passed"] is False
+    assert disagreed["all_rank_agreement"]["observed_backends"] is False
+
+    with pytest.raises(ValueError, match="duplicate"):
+        benchmark.aggregate_sdpa_attribution(
+            [rank_report(0), rank_report(0)],
+            expected_world=2,
+            selector_backend="math",
+            shape_name="timing",
+        )
+
+
 def test_state_digest_aggregation_identifies_remote_mismatch():
     reference = "a" * 64
     different = "b" * 64
@@ -415,7 +708,35 @@ def test_benchmark_argument_validation_is_cpu_safe():
     assert args.learning_rate == pytest.approx(3e-4)
     assert args.parameter_delta_atol == 1e-8
     assert args.trial_index == 1
+    assert args.variants == ""
+    assert args.reference_variant == "native-sdpa"
     assert args.steps > 0 and args.warmup_steps > 0
+
+    forced = benchmark.build_parser().parse_args(
+        [
+            "--reference-variant",
+            "native-sdpa-cudnn",
+            "--micro-batch-size",
+            "2",
+            "--seq-len",
+            "1024",
+            "--parity-micro-batch-size",
+            "2",
+            "--parity-seq-len",
+            "1024",
+        ]
+    )
+    benchmark.validate_args(forced)
+    assert [
+        variant.name
+        for variant in benchmark.select_variants(
+            forced.variants, forced.reference_variant
+        )
+    ] == ["native-sdpa-cudnn"]
+    assert (forced.parity_micro_batch_size, forced.parity_seq_len) == (
+        forced.micro_batch_size,
+        forced.seq_len,
+    )
 
     broken = SimpleNamespace(**vars(args))
     broken.target_fraction = 0
