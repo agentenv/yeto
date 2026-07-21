@@ -183,8 +183,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--kernel-backend",
         choices=["native", "liger"],
         default="native",
-        help="causal model/loss kernels: native (default) or the pinned, "
-        "binary-mask-only Liger fused-loss lane",
+        help="causal SFT loss kernel: native (default) or the pinned, "
+        "binary-mask-only instance-scoped Liger fused-linear-CE lane; "
+        "model layers remain native; the fused lane currently requires "
+        "--tuning lora --shard ddp",
     )
 
     def int_or_auto(value: str):

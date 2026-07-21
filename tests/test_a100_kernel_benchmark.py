@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import json
 import sys
+import weakref
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import huggingface_hub
+import peft
 import pytest
 import torch
+import transformers
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -21,17 +25,218 @@ sys.modules[SPEC.name] = benchmark
 SPEC.loader.exec_module(benchmark)
 
 
-def test_variant_plan_has_a_stable_reference_and_all_combinations():
+def test_variant_plan_has_a_stable_reference_and_component_isolated_candidates():
     assert [variant.name for variant in benchmark.select_variants("all")] == [
         "native-sdpa",
         "native-flash-attn-2",
-        "liger-sdpa",
-        "liger-flash-attn-2",
+        "fused-linear-ce-sdpa",
     ]
-    selected = benchmark.select_variants("liger-sdpa")
-    assert [variant.name for variant in selected] == ["native-sdpa", "liger-sdpa"]
+    selected = benchmark.select_variants("fused-linear-ce-sdpa")
+    assert [variant.name for variant in selected] == [
+        "native-sdpa",
+        "fused-linear-ce-sdpa",
+    ]
+    fused_loss = selected[-1]
+    assert fused_loss.layer_backend == benchmark.NATIVE_LAYER_BACKEND
+    assert fused_loss.loss_backend == "liger"
+    assert (
+        fused_loss.loss_implementation
+        == benchmark.FUSED_LINEAR_CE_IMPLEMENTATION
+    )
+    assert not any("liger-flash" in variant.name for variant in benchmark.VARIANTS)
     with pytest.raises(ValueError, match="unknown variants"):
         benchmark.select_variants("unknown")
+
+
+def test_fused_loss_variant_binds_instance_forward_before_peft(monkeypatch):
+    events = []
+    config = SimpleNamespace(model_type="qwen2", use_cache=True)
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = config
+            self.weight = torch.nn.Parameter(torch.ones(1))
+
+        def to(self, device):
+            events.append(("to", device.type))
+            return self
+
+    model = Model()
+    monkeypatch.setattr(
+        benchmark, "validate_kernel_request", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(benchmark, "attention_load_kwargs", lambda *args: {})
+    monkeypatch.setattr(
+        transformers.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: events.append("config") or config,
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "require_liger_model_support",
+        lambda actual_config: events.append("support") or actual_config.model_type,
+    )
+    monkeypatch.setattr(
+        transformers.AutoModelForCausalLM,
+        "from_pretrained",
+        lambda *args, **kwargs: events.append("model") or model,
+    )
+    application = {
+        "layer_backend": benchmark.NATIVE_LAYER_BACKEND,
+        "loss_implementation": benchmark.FUSED_LINEAR_CE_IMPLEMENTATION,
+    }
+    monkeypatch.setattr(
+        benchmark,
+        "apply_liger_fused_linear_ce",
+        lambda actual_model: events.append("bind") or application,
+    )
+    monkeypatch.setattr(benchmark, "resolve_lora_targets", lambda *args: "all-linear")
+    monkeypatch.setattr(peft, "LoraConfig", lambda **kwargs: kwargs)
+
+    def fake_get_peft_model(actual_model, _config):
+        assert actual_model is model
+        assert "bind" in events
+        events.append("peft")
+        return actual_model
+
+    monkeypatch.setattr(peft, "get_peft_model", fake_get_peft_model)
+    monkeypatch.setattr(
+        benchmark,
+        "validate_lora_production_envelope",
+        lambda actual_model: {
+            "output_head": {"frozen": True, "adapted": False},
+            "trainable_dtype_counts": {"float32": 1},
+        },
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "resolved_attention_backend",
+        lambda actual_model, requested: events.append("attention") or requested,
+    )
+
+    loaded, tuning, kernel_application = benchmark.load_raw_model(
+        "Qwen/Qwen2.5-1.5B-Instruct",
+        "a" * 40,
+        benchmark.VARIANTS_BY_NAME["fused-linear-ce-sdpa"],
+        torch.bfloat16,
+        torch.device("cpu"),
+        "lora",
+        16,
+        32,
+        "auto",
+        1234,
+    )
+
+    assert loaded is model
+    assert tuning["mode"] == "lora"
+    assert kernel_application == application
+    assert events == [
+        "config",
+        "support",
+        "model",
+        "bind",
+        "peft",
+        ("to", "cpu"),
+        "attention",
+    ]
+
+
+def test_every_kernel_isolation_failure_is_a_fatal_benchmark_load_error():
+    complete = benchmark.KernelIsolationError(
+        "restored",
+        failed_invariants=["class_binding"],
+        rollback_report={"complete": True},
+    )
+    poisoned = benchmark.KernelIsolationError(
+        "poisoned",
+        failed_invariants=["parameter_contents"],
+        rollback_report={"complete": False},
+    )
+    signature_failure = benchmark.KernelIsolationError(
+        "signature inspection failed after irreversible mutation",
+        failed_invariants=["post_binding_validation_completed"],
+        rollback_report={"complete": False},
+    )
+
+    assert benchmark.is_fatal_model_load_error(complete)
+    assert benchmark.is_fatal_model_load_error(poisoned)
+    assert benchmark.is_fatal_model_load_error(signature_failure)
+    assert benchmark.is_fatal_model_load_error(RuntimeError("CUDA out of memory"))
+    assert not benchmark.is_fatal_model_load_error(RuntimeError("missing optional package"))
+
+    try:
+        raise RuntimeError("wrapped") from complete
+    except RuntimeError as wrapped:
+        assert benchmark.is_fatal_model_load_error(wrapped)
+
+    try:
+        raise poisoned
+    except benchmark.KernelIsolationError:
+        try:
+            raise RuntimeError("implicit context")
+        except RuntimeError as contextual:
+            assert benchmark.is_fatal_model_load_error(contextual)
+
+
+def test_failed_model_load_unconditionally_collects_instance_forward_cycle(
+    monkeypatch,
+    tmp_path,
+):
+    references = []
+    cleanup_observations = []
+
+    class CyclicModel:
+        pass
+
+    def forward(self):
+        return self
+
+    def failing_load(*args, **kwargs):
+        del args, kwargs
+        model = CyclicModel()
+        model.forward = MethodType(forward, model)
+        references.append(weakref.ref(model))
+        raise RuntimeError("load failed after instance patch")
+
+    def observed_cleanup():
+        gc.collect()
+        cleanup_observations.append(references[-1]() is None)
+
+    monkeypatch.setattr(
+        benchmark,
+        "setup_distributed",
+        lambda: (0, 1, torch.device("cpu")),
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "resolve_model_revision",
+        lambda *args: "a" * 40,
+    )
+    monkeypatch.setattr(benchmark, "environment_report", lambda *args: {})
+    monkeypatch.setattr(benchmark, "load_raw_model", failing_load)
+    monkeypatch.setattr(benchmark, "cleanup_cuda", observed_cleanup)
+
+    output = tmp_path / "failed.json"
+    result = benchmark.main(
+        [
+            "--variants",
+            "native-sdpa",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert result == 1
+    assert cleanup_observations == [True]
+    assert references[0]() is None
+    report = json.loads(output.read_text())
+    assert report["supported_evidence_scope"]["fused-linear-ce-sdpa"][
+        "peft_version"
+    ] == benchmark.PEFT_VERSION
+    assert report["supported_evidence_scope"]["fused-linear-ce-sdpa"][
+        "forward_source_sha256"
+    ] == benchmark.LIGER_QWEN2_SOURCE_SHA256
 
 
 def test_percentile_interpolates_and_validates_input():
@@ -427,6 +632,16 @@ def test_benchmark_argument_validation_is_cpu_safe():
     with pytest.raises(ValueError, match="lora-r"):
         benchmark.validate_args(broken)
 
+    broken = SimpleNamespace(**vars(args))
+    broken.tuning = "full"
+    with pytest.raises(ValueError, match="approved only for --tuning lora"):
+        benchmark.validate_args(broken)
+
+    native_full = SimpleNamespace(**vars(args))
+    native_full.tuning = "full"
+    native_full.variants = "native-sdpa"
+    benchmark.validate_args(native_full)
+
 
 def test_trainable_state_digest_covers_values_names_and_dtypes():
     first = torch.nn.Module()
@@ -494,20 +709,29 @@ def test_lora_output_head_must_be_frozen_and_unadapted():
         def __init__(self):
             super().__init__()
             self.lm_head = torch.nn.Linear(2, 2, bias=False)
+            self.adapter = torch.nn.Parameter(torch.ones(2, dtype=torch.float32))
 
         def get_output_embeddings(self):
             return self.lm_head
 
     model = Model()
     model.lm_head.requires_grad_(False)
-    assert benchmark.validate_lora_output_head(model) == {
-        "frozen": True,
-        "adapted": False,
-        "parameter_count": 4,
+    assert benchmark.validate_lora_production_envelope(model) == {
+        "output_head": {
+            "frozen": True,
+            "adapted": False,
+            "parameter_count": 4,
+        },
+        "trainable_dtype_counts": {"float32": 2},
     }
     model.lm_head.weight.requires_grad_(True)
     with pytest.raises(RuntimeError, match="frozen, unadapted"):
-        benchmark.validate_lora_output_head(model)
+        benchmark.validate_lora_production_envelope(model)
+
+    model.lm_head.weight.requires_grad_(False)
+    model.adapter = torch.nn.Parameter(torch.ones(2, dtype=torch.bfloat16))
+    with pytest.raises(RuntimeError, match="FP32 trainable adapters"):
+        benchmark.validate_lora_production_envelope(model)
 
 
 def test_source_provenance_environment_overrides_are_strict(monkeypatch):

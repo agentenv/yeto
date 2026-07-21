@@ -32,11 +32,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from yeto.causal_kernels import (  # noqa: E402
+    FUSED_LINEAR_CE_IMPLEMENTATION,
+    KernelIsolationError,
+    LIGER_QWEN2_SOURCE_SHA256,
+    NATIVE_LAYER_BACKEND,
+    NATIVE_LOSS_IMPLEMENTATION,
+    PEFT_VERSION,
+    apply_liger_fused_linear_ce,
     attention_load_kwargs,
     liger_sft_forward,
     require_liger_model_support,
     resolved_attention_backend,
     validate_kernel_request,
+    validate_lora_production_envelope,
 )
 from yeto.losses import sft_loss  # noqa: E402
 from yeto.learner import allreduce_trainable_grads, resolve_lora_targets  # noqa: E402
@@ -47,24 +55,32 @@ from yeto.models import resolve  # noqa: E402
 class Variant:
     name: str
     attention_backend: str
-    kernel_backend: str
+    layer_backend: str
+    loss_backend: str
     loss_implementation: str
 
 
 VARIANTS = (
-    Variant("native-sdpa", "sdpa", "native", "torch-fused-cross-entropy"),
+    Variant(
+        "native-sdpa",
+        "sdpa",
+        NATIVE_LAYER_BACKEND,
+        "native",
+        NATIVE_LOSS_IMPLEMENTATION,
+    ),
     Variant(
         "native-flash-attn-2",
         "flash-attn-2",
+        NATIVE_LAYER_BACKEND,
         "native",
-        "torch-fused-cross-entropy",
+        NATIVE_LOSS_IMPLEMENTATION,
     ),
-    Variant("liger-sdpa", "sdpa", "liger", "liger-fused-linear-cross-entropy"),
     Variant(
-        "liger-flash-attn-2",
-        "flash-attn-2",
+        "fused-linear-ce-sdpa",
+        "sdpa",
+        NATIVE_LAYER_BACKEND,
         "liger",
-        "liger-fused-linear-cross-entropy",
+        FUSED_LINEAR_CE_IMPLEMENTATION,
     ),
 )
 VARIANTS_BY_NAME = {variant.name: variant for variant in VARIANTS}
@@ -163,6 +179,30 @@ def package_version(name: str) -> str | None:
         return None
 
 
+def is_fatal_model_load_error(exc: Exception) -> bool:
+    """Return whether a failed arm makes continuing in-process unsafe."""
+    pending: list[BaseException] = [exc]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, torch.cuda.OutOfMemoryError):
+            return True
+        try:
+            if "out of memory" in str(current).lower():
+                return True
+        except Exception:
+            pass
+        if isinstance(current, KernelIsolationError) and current.fatal:
+            return True
+        for chained in (current.__cause__, current.__context__):
+            if chained is not None:
+                pending.append(chained)
+    return False
+
+
 def resolve_model_revision(model_id: str, requested_revision: str | None) -> str:
     """Resolve a moving Hub revision to the immutable commit loaded by every rank."""
     if Path(model_id).exists():
@@ -204,31 +244,6 @@ def broadcast_object(value, rank: int):
     return values[0]
 
 
-def validate_lora_output_head(model) -> dict:
-    """Require the production LoRA profile to leave the output head untouched."""
-    output_head = model.get_output_embeddings()
-    if output_head is None:
-        raise RuntimeError("the LoRA benchmark model exposes no output embedding head")
-    adapted_names = [
-        name for name, _ in output_head.named_parameters() if "lora_" in name
-    ]
-    trainable_names = [
-        name for name, parameter in output_head.named_parameters() if parameter.requires_grad
-    ]
-    if adapted_names or trainable_names:
-        raise RuntimeError(
-            "the production LoRA benchmark requires a frozen, unadapted lm_head; "
-            f"adapted={adapted_names[:5]} trainable={trainable_names[:5]}"
-        )
-    return {
-        "frozen": True,
-        "adapted": False,
-        "parameter_count": sum(
-            parameter.numel() for parameter in output_head.parameters()
-        ),
-    }
-
-
 def load_raw_model(
     model_id: str,
     revision: str,
@@ -240,35 +255,38 @@ def load_raw_model(
     lora_alpha: int,
     lora_targets: str,
     adapter_init_seed: int,
-) -> tuple[torch.nn.Module, dict]:
+) -> tuple[torch.nn.Module, dict, dict | None]:
     from transformers import AutoConfig, AutoModelForCausalLM
 
     validate_kernel_request(
-        variant.kernel_backend,
+        variant.loss_backend,
         "cross_entropy",
         device,
         dtype,
+        tuning=tuning,
+        shard="ddp",
     )
     kwargs = attention_load_kwargs(variant.attention_backend, device, dtype)
-    factory = AutoModelForCausalLM
-    if variant.kernel_backend == "liger":
+    if variant.loss_backend == "liger":
         config = AutoConfig.from_pretrained(
             model_id,
             revision=revision,
             trust_remote_code=True,
         )
         require_liger_model_support(config)
-        from liger_kernel.transformers import AutoLigerKernelForCausalLM
-
-        factory = AutoLigerKernelForCausalLM
-        kwargs.update(cross_entropy=False, fused_linear_cross_entropy=True)
-    model = factory.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_id,
         revision=revision,
         torch_dtype=dtype,
         trust_remote_code=True,
         **kwargs,
     )
+    kernel_application = None
+    if variant.loss_backend == "liger":
+        # Keep this before PEFT: the direct-binding helper accepts only the
+        # native Qwen2 class and binds only this instance's forward.
+        # Decoder-layer implementations stay identical to reference.
+        kernel_application = apply_liger_fused_linear_ce(model)
     resolved_targets = None
     output_head_report = None
     if tuning == "lora":
@@ -286,11 +304,17 @@ def load_raw_model(
                 task_type="CAUSAL_LM",
             ),
         )
-        output_head_report = validate_lora_output_head(model)
     model.to(device)
     model.train()
     model.config.use_cache = False
     resolved_attention_backend(model, variant.attention_backend)
+    production_envelope = (
+        validate_lora_production_envelope(model)
+        if tuning == "lora"
+        else None
+    )
+    if production_envelope is not None:
+        output_head_report = production_envelope["output_head"]
     trainable_parameters = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
     )
@@ -306,23 +330,21 @@ def load_raw_model(
         "trainable_parameters": trainable_parameters,
         "total_parameters": total_parameters,
         "trainable_fraction": trainable_parameters / total_parameters,
-        "trainable_dtype_counts": {},
+        "trainable_dtype_counts": (
+            production_envelope["trainable_dtype_counts"]
+            if production_envelope is not None
+            else {}
+        ),
     }
-    for parameter in model.parameters():
-        if parameter.requires_grad:
-            dtype_name = str(parameter.dtype).removeprefix("torch.")
-            tuning_report["trainable_dtype_counts"][dtype_name] = (
-                tuning_report["trainable_dtype_counts"].get(dtype_name, 0)
-                + parameter.numel()
-            )
-    if tuning == "lora" and set(tuning_report["trainable_dtype_counts"]) != {
-        "float32"
-    }:
-        raise RuntimeError(
-            "the production LoRA benchmark requires FP32 trainable adapters; "
-            f"found {tuning_report['trainable_dtype_counts']}"
-        )
-    return model, tuning_report
+    if production_envelope is None:
+        for parameter in model.parameters():
+            if parameter.requires_grad:
+                dtype_name = str(parameter.dtype).removeprefix("torch.")
+                tuning_report["trainable_dtype_counts"][dtype_name] = (
+                    tuning_report["trainable_dtype_counts"].get(dtype_name, 0)
+                    + parameter.numel()
+                )
+    return model, tuning_report, kernel_application
 
 
 def make_batch(
@@ -351,7 +373,7 @@ def make_batch(
 
 
 def forward_sum(model, variant: Variant, input_ids, weights):
-    if variant.kernel_backend == "liger":
+    if variant.loss_backend == "liger":
         return liger_sft_forward(model, input_ids, weights)
     output = model(input_ids=input_ids, use_cache=False)
     if getattr(output, "logits", None) is None:
@@ -1482,13 +1504,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Hub branch, tag, or commit (default main); always resolved to and loaded by exact SHA",
     )
-    parser.add_argument("--variants", default="all", help="all or comma-separated variant names")
+    parser.add_argument(
+        "--variants",
+        default="all",
+        help=(
+            "all or comma-separated component-isolated variants: "
+            + ", ".join(VARIANTS_BY_NAME)
+        ),
+    )
     parser.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
     parser.add_argument(
         "--tuning",
         choices=["lora", "full"],
         default="lora",
-        help="train FP32 LoRA adapters by default; full is an explicit separate profile",
+        help="train FP32 LoRA adapters by default; full is a native-only separate profile",
     )
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
@@ -1543,6 +1572,14 @@ def validate_args(args) -> None:
         args.parameter_delta_atol,
     ) < 0:
         raise ValueError("parity tolerances must be nonnegative")
+    selected = select_variants(args.variants)
+    if args.tuning != "lora" and any(
+        variant.loss_backend == "liger" for variant in selected
+    ):
+        raise ValueError(
+            "the fused-linear-CE benchmark arm is approved only for --tuning lora; "
+            "select native-only variants for a separate full-tuning profile"
+        )
 
 
 def _validated_git_sha(value: str) -> str:
@@ -1702,6 +1739,18 @@ def main(argv=None) -> int:
         "planned_variants": [variant.name for variant in variants],
         "completed_variants": [],
         "fatal": None,
+        "supported_evidence_scope": {
+            "fused-linear-ce-sdpa": {
+                "tuning": "lora",
+                "shard": "ddp",
+                "peft_version": PEFT_VERSION,
+                "forward_source_sha256": LIGER_QWEN2_SOURCE_SHA256,
+                "distributed_policy": (
+                    "replicated-frozen-base-manual-adapter-gradient-mean"
+                ),
+                "excluded_until_separate_cuda_evidence": ["full", "fsdp"],
+            }
+        },
         "trial": {
             "index": args.trial_index,
             "timing_trials_in_record": 1,
@@ -1740,12 +1789,13 @@ def main(argv=None) -> int:
         setup_started = time.perf_counter()
         model = None
         tuning_report = None
+        kernel_application = None
         error = None
         fatal_load_error = False
         try:
             torch.manual_seed(model_init_seed)
             torch.cuda.manual_seed_all(model_init_seed)
-            model, tuning_report = load_raw_model(
+            model, tuning_report, kernel_application = load_raw_model(
                 model_id,
                 resolved_revision,
                 variant,
@@ -1759,17 +1809,19 @@ def main(argv=None) -> int:
             )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
-            fatal_load_error = isinstance(exc, torch.cuda.OutOfMemoryError) or (
-                "out of memory" in str(exc).lower()
-            )
+            fatal_load_error = is_fatal_model_load_error(exc)
         loaded_everywhere = all_ranks_succeeded(model is not None, device)
         fatal_load_error = any_rank_true(fatal_load_error, device)
         errors = gather_errors(error, world)
         if not loaded_everywhere:
             if model is not None:
                 del model
-                gc.collect()
-                torch.cuda.empty_cache()
+            model = None
+            # Always collect after a load failure, including the rank whose
+            # loader raised before returning a model. An instance-bound
+            # forward creates a self-cycle that otherwise survives until a
+            # later, unrelated arm.
+            cleanup_cuda()
             load_reason = errors[0] if errors else "model load failed on another rank"
             record = {
                 "variant": asdict(variant),
@@ -1821,6 +1873,7 @@ def main(argv=None) -> int:
                 "status": "failed",
                 "reason": state_reason,
                 "tuning": tuning_report,
+                "kernel_application": kernel_application,
                 "construction_trainable_state_sha256": construction_digest,
                 "reference_construction_trainable_state_sha256": (
                     construction_reference_digest
@@ -1925,6 +1978,7 @@ def main(argv=None) -> int:
                 "status": "failed",
                 "reason": anchor_reason,
                 "tuning": tuning_report,
+                "kernel_application": kernel_application,
                 "restored_trainable_state_sha256": restored_anchor_digest,
                 "parity_anchor_trainable_state_sha256": parity_anchor_digest,
                 "state_digest_reports": {
@@ -2165,6 +2219,7 @@ def main(argv=None) -> int:
                 "status": "failed",
                 "setup_seconds": setup_seconds,
                 "tuning": tuning_report,
+                "kernel_application": kernel_application,
                 "model_init_seed": model_init_seed,
                 "adapter_init_seed": (
                     adapter_init_seed if args.tuning == "lora" else None
@@ -2222,6 +2277,7 @@ def main(argv=None) -> int:
                     "status": "passed",
                     "setup_seconds": setup_seconds,
                     "tuning": tuning_report,
+                    "kernel_application": kernel_application,
                     "model_init_seed": model_init_seed,
                     "adapter_init_seed": (
                         adapter_init_seed if args.tuning == "lora" else None

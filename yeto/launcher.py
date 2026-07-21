@@ -467,11 +467,15 @@ def causal_kernel_setup_steps(args) -> list[str]:
         LIGER_KERNEL_VERSION,
         NINJA_VERSION,
         PACKAGING_VERSION,
+        PEFT_VERSION,
     )
 
     steps: list[str] = []
     if getattr(args, "kernel_backend", "native") == "liger":
-        steps.append(f"pip install -q 'liger-kernel=={LIGER_KERNEL_VERSION}'")
+        steps.append(
+            f"pip install -q 'liger-kernel=={LIGER_KERNEL_VERSION}' "
+            f"'peft=={PEFT_VERSION}'"
+        )
     if getattr(args, "attention_backend", "auto") == "flash-attn-2":
         steps.extend(
             [
@@ -514,7 +518,18 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             )
     if kernel_backend == "liger" and loss_function != "cross_entropy":
         raise ValueError(
-            "--kernel-backend liger supports only the built-in cross_entropy loss"
+            "--kernel-backend liger fused-linear-CE supports only the built-in "
+            "cross_entropy loss"
+        )
+    if kernel_backend == "liger" and args.tuning != "lora":
+        raise ValueError(
+            "--kernel-backend liger fused-linear-CE is production-approved only "
+            "for --tuning lora"
+        )
+    if kernel_backend == "liger" and args.shard != "ddp":
+        raise ValueError(
+            "--kernel-backend liger fused-linear-CE is production-approved only "
+            "for --shard ddp until FSDP has separate CUDA parity evidence"
         )
 
     # Flags shared by all learners. The DiLoCo sync, LoRA, and data source

@@ -8,24 +8,29 @@ The supported controls are:
 | control | values | default | meaning |
 |---|---|---|---|
 | `--attention-backend` | `auto`, `sdpa`, `flash-attn-2` | `auto` | Hugging Face attention implementation |
-| `--kernel-backend` | `native`, `liger` | `native` | model layers and fused SFT loss |
+| `--kernel-backend` | `native`, `liger` | `native` | SFT loss implementation; model layers remain native; fused requires LoRA/DDP |
 
 An explicit request is fail-closed. A missing or differently-versioned
 dependency, an unsupported model implementation, FlashAttention with FP32,
-a custom loss on the Liger path, or fractional token weights produces an
-error instead of silently selecting another implementation.
+a custom loss on the Liger path, fractional token weights, or any drift in the
+pinned Qwen2 source hash, forward signature, or fused-loss primitive contract
+produces an error instead of silently selecting another implementation.
 
-The optional dependencies are pinned and excluded from ordinary CPU/dev
-installs:
+The kernel dependencies and the fused lane's PEFT compatibility point are
+pinned. Kernel packages remain excluded from ordinary CPU/dev installs:
 
 - `liger-kernel==0.8.0`
+- `peft==0.19.1` for the fused-loss LoRA lane (native modes retain the normal
+  project-wide PEFT compatibility range)
 - `flash-attn==2.8.3`
 
-Remote learner setup installs either package only when its corresponding flag
-is selected. FlashAttention is built after the CUDA-matched PyTorch wheel is
-installed and uses `--no-build-isolation` so the build can see that wheel.
+Remote learner setup installs each lane's exact packages only when its
+corresponding flag is selected. FlashAttention is built after the CUDA-matched
+PyTorch wheel is installed and uses `--no-build-isolation` so the build can see
+that wheel.
 
-For example, an existing launch can opt into Liger while keeping SDPA:
+For example, an existing Qwen2/Qwen2.5 launch can opt into the isolated fused
+linear cross-entropy loss while keeping SDPA and every model layer native:
 
 ```bash
 yeto launch \
@@ -42,11 +47,83 @@ The native SFT path uses `torch.nn.functional.cross_entropy`, returns a local
 token sum, and preserves arbitrary nonnegative per-token weights. Custom and
 pickled losses continue to receive materialized logits exactly as before.
 
-The Liger path uses `AutoLigerKernelForCausalLM` with fused linear
-cross-entropy. Binary token masks are converted to labels with `-100` at
-ignored positions. `num_items_in_batch=1` makes the pinned implementation
-return the required local token sum without materializing logits. Fractional
-weights and non-built-in losses must use `--kernel-backend native`.
+The Liger path supports only Hugging Face `model_type="qwen2"` models (Qwen2
+and Qwen2.5 in the pinned Transformers release). Before PEFT wraps the ordinary
+`AutoModelForCausalLM`, Yeto verifies `liger-kernel==0.8.0`, imports
+`liger_kernel.transformers.model.qwen2.lce_forward`, and requires the installed
+Qwen2 source module to match SHA-256
+`6df24ecc3d259e84cd833a62d9e08aea2db278ddc97af14fc27dc61b9259e6ed`.
+It verifies the `labels`, `use_cache`, `skip_logits`, and variadic-keyword
+forward contract plus explicit `accum_dtype` support on the fused primitive.
+Yeto then performs one local
+`model.forward = types.MethodType(lce_forward, model)` assignment. It never
+calls the package-wide `apply_liger_kernel_to_qwen2` callback, so that callback
+has no authority to rewrite layer classes or process globals in this lane.
+
+Bounded before/after attestation surrounds that direct assignment to detect
+accidental state or API drift. It covers Qwen2 module/class bindings,
+functional cross-entropy, every concrete module instance and unique module
+class present in the model, mutable built-in containers, config-like objects
+(including root `config` and `generation_config` plus nested config aliases),
+and custom Python objects with inspectable `__dict__` state. Opaque Python
+leaves and the forward function are checked for binding identity; identity is
+a drift invariant, not proof of semantic integrity.
+
+Every registered parameter, parameter gradient, and buffer is attested.
+Gradient coverage distinguishes `None` from a tensor and includes exact tensor
+identity. Tensor Python attributes and backward/post-accumulate hook bindings
+and structures are included. Tensor attestation covers object identity, shape,
+dtype, device, layout, stride, storage offset, data pointer, storage size,
+`requires_grad`, mutation version, and a strong content digest. Content SHA-256
+is computed in
+bounded 4 MiB logical-order chunks; Yeto never retains a second copy of model
+or gradient contents. CPU RNG state, all visible CUDA generator states when
+CUDA is initialized, deterministic-algorithm mode, float32 matmul precision,
+and relevant cuDNN, CUDA matmul, and SDPA backend flags are also captured. The
+only intended change across these explicitly attested surfaces is the
+hash-locked fused forward binding on that one base-model instance.
+
+Rejection is transactional where state is safely reversible: Yeto restores
+the Qwen2 module/class bindings, every captured module-class namespace,
+functional cross-entropy, model namespaces and exact module classes, original
+gradient bindings, RNG states, and backend flags, then repeats the complete
+attestation against the pre-binding snapshot. In-place tensor, gradient,
+container, config, or inspectable-object contents cannot in general be
+reconstructed without retaining duplicate contents. If any such state does
+not match after rollback, `KernelIsolationError` marks the process poisoned.
+Every `KernelIsolationError` is fatal for in-process continuation because it is
+raised only after direct binding began; a verified rollback is
+reported as evidence but is not permission for the learner or benchmark to
+load another model or run another arm in that process.
+
+This attestation is deliberately not a sandbox against a malicious or
+compromised Python dependency, import-time code, concurrent mutation, native
+extensions, runtime function `__code__` tampering, modified builtins, or
+arbitrary inherited framework globals outside the stated surfaces. Runtime
+enforcement covers the exact package version and approved Qwen2 source-module
+SHA-256. Supply-chain trust for the remaining dependency, import, and runtime
+surface must come from the trusted build and provisioning pipeline; attestation
+provides bounded accidental-drift detection inside that boundary.
+
+The production-approved fused-loss envelope is currently narrower than the
+native learner: it requires `--tuning lora --shard ddp`, a frozen and
+unadapted `lm_head`, and FP32 for every trainable adapter parameter. The learner
+and benchmark call the same post-PEFT validator, so target-selection drift
+cannot silently adapt the output head. This lane requires exact PEFT 0.19.1;
+the native learner's broader PEFT compatibility remains unchanged. Full tuning
+and FSDP fail before launch/model loading and must use
+`--kernel-backend native` until each has
+separate real-CUDA loss, gradient, optimizer-delta, and distributed parity
+evidence. This restriction is independent of whether a configuration might
+appear to run; unsupported evidence profiles are never inferred safe.
+
+Binary token masks are converted to labels with `-100` at ignored positions.
+`num_items_in_batch=1` makes the pinned implementation return the required
+local token sum without materializing logits, and `accum_dtype=torch.float32`
+explicitly requests FP32 loss accumulation. `skip_logits=True` makes logit
+elision explicit; materialized logits are still rejected. Fractional weights,
+non-built-in losses, non-Qwen2 model types, wrapped/prepatched models, and
+quantized bases must use `--kernel-backend native`.
 
 This lane is scoped to BF16 and FP32 on A100. FlashAttention 2 is BF16-only;
 FP32 measurements use SDPA. It does not enable FP8 or kernels tied to newer
@@ -59,7 +136,7 @@ on an existing 8-GPU A100 node from the repository root:
 
 ```bash
 pip install -e .
-pip install 'liger-kernel==0.8.0'
+pip install 'liger-kernel==0.8.0' 'peft==0.19.1'
 pip install 'ninja==1.13.0' 'packaging==25.0'
 MAX_JOBS=8 pip install --no-build-isolation 'flash-attn==2.8.3'
 
@@ -83,17 +160,25 @@ PEFT is applied before distributed setup. As in the learner, LoRA leaves the
 frozen base unwrapped and manually averages only trainable adapter gradients;
 DDP is used only by the explicit full-tuning profile. The frozen base remains
 BF16, trainable adapters must remain FP32, and `lm_head` must remain frozen and
-unadapted. Use `--tuning full` only as an explicitly reported separate profile;
-do not combine its evidence with default LoRA trials. The optimizer is ordinary
-AdamW with the learner's default learning rate, `3e-4`, followed by gradient
-clipping at norm `1.0`.
+unadapted. Use `--tuning full` only with explicitly selected native-only
+variants as a separately reported profile; the fused-loss arm rejects it. Do
+not combine full-tuning evidence with default LoRA trials. The optimizer is
+ordinary AdamW with the learner's default learning rate, `3e-4`, followed by
+gradient clipping at norm `1.0`.
 
-The ordered comparison is:
+The publishable default matrix is component-isolated:
 
-1. Native layers with SDPA and PyTorch fused cross-entropy—the parity reference.
-2. Native layers with FlashAttention 2 and PyTorch fused cross-entropy, when installed and supported.
-3. Liger layers/fused loss with SDPA, when installed and supported.
-4. Liger layers/fused loss with FlashAttention 2, when both are available.
+1. Native layers with SDPA and PyTorch cross-entropy—the parity reference.
+2. Native layers with FlashAttention 2 and PyTorch cross-entropy, when installed and supported.
+3. Native layers with SDPA and the instance-only Liger fused-linear-CE loss,
+   only for the production LoRA/DDP profile when installed and supported.
+
+The benchmark report records `layer_backend`, `loss_backend`, and
+`loss_implementation` independently. It does not publish arms that change both
+model layers and loss, nor an arm that combines FlashAttention with the fused
+loss. Those combinations cannot attribute a parity or speed difference to one
+component. To run only the fused-loss candidate and its automatically included
+native-SDPA reference, pass `--variants fused-linear-ce-sdpa`.
 
 Before parity, native SDPA performs exactly one controlled deterministic LoRA
 update. This makes both `lora_A` and `lora_B` nonzero; the harness verifies and
