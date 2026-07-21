@@ -79,9 +79,12 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        // Logs are consumed by launchers, tests, and event collectors. Keep
+        // their field syntax stable even when CI advertises a color-capable
+        // terminal through environment variables.
+        .with_ansi(false)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let args = Args::parse();

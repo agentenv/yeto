@@ -404,6 +404,7 @@ def test_final_ack_membership_excludes_previously_abandoned_learner():
         assert survivor.final_manifest is not None
         assert proc.wait(timeout=30) == 0
         output = proc.stdout.read() if proc.stdout else ""
+        assert "\x1b" not in output
         assert "all learners acknowledged final cut learners=1" in output
     finally:
         if proc.poll() is None:
