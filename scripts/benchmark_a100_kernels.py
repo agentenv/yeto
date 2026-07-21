@@ -173,27 +173,37 @@ def restore_sdpa_backend_flags(flags: dict[str, bool]) -> None:
         setter(flags[name])
 
 
+def _empty_sdpa_control(name: str | None) -> dict:
+    return {
+        "api": "torch.nn.attention.sdpa_kernel",
+        "requested": name,
+        "before": None,
+        "expected_active": None,
+        "active": None,
+        "after": None,
+        "restored_exactly": False,
+    }
+
+
 @contextlib.contextmanager
-def sdpa_backend_context(name: str | None):
+def sdpa_backend_context(name: str | None, control: dict | None = None):
     """Select one internal backend for an entire arm and verify exact restore.
 
     The context uses only the public PyTorch 2.5.1 selector. A mismatch while
     active or after exit is fatal even if a manual repair succeeds, because a
     publishable timing cannot rely on silently leaked process-global flags.
     """
+    if control is None:
+        control = _empty_sdpa_control(name)
+    elif control.get("requested") != name:
+        raise ValueError("the SDPA control record does not match the requested backend")
+
     before = snapshot_sdpa_backend_flags()
+    control["before"] = before
     expected = before if name is None else {
         backend: name == "auto" or backend == name for backend in SDPA_FLAG_GETTERS
     }
-    control = {
-        "api": "torch.nn.attention.sdpa_kernel",
-        "requested": name,
-        "before": before,
-        "expected_active": expected,
-        "active": None,
-        "after": None,
-        "restored_exactly": False,
-    }
+    control["expected_active"] = expected
     selector = contextlib.nullcontext()
     if name is not None:
         from torch.nn.attention import sdpa_kernel
@@ -234,19 +244,38 @@ class SDPAArmController:
 
     def __init__(self):
         self._context = None
+        self._control = None
+
+    @property
+    def active(self) -> bool:
+        return self._context is not None
+
+    @property
+    def control(self) -> dict | None:
+        return self._control
 
     def activate(self, variant: Variant) -> dict:
-        self.close()
-        context = sdpa_backend_context(variant.internal_sdpa_backend)
-        control = context.__enter__()
+        if self._context is not None:
+            raise RuntimeError(
+                "an SDPA arm is already active; restore it explicitly before activation"
+            )
+        control = _empty_sdpa_control(variant.internal_sdpa_backend)
+        context = sdpa_backend_context(variant.internal_sdpa_backend, control)
+        self._control = control
+        try:
+            context.__enter__()
+        except BaseException:
+            self._context = None
+            raise
         self._context = context
         return control
 
-    def close(self, exc_info=(None, None, None)) -> None:
+    def close(self, exc_info=(None, None, None)) -> dict | None:
         if self._context is None:
-            return
+            return self._control
         context, self._context = self._context, None
         context.__exit__(*exc_info)
+        return self._control
 
 
 def percentile(values: list[float], quantile: float) -> float:
@@ -582,10 +611,18 @@ def evaluate_local_sdpa_attribution(
             for item in recorder["unique_signatures"]
         ]
         if selector_backend == "auto":
-            selector_eligibility_all_calls = all(
-                any(eligibility[name] for name in observed)
-                for eligibility in eligibility_by_signature
-            ) if observed else False
+            if len(observed) != 1:
+                errors.append(
+                    "automatic SDPA attribution requires exactly one observed "
+                    f"backend per probe, found {sorted(observed)}"
+                )
+                selector_eligibility_all_calls = False
+            else:
+                observed_backend = next(iter(observed))
+                selector_eligibility_all_calls = all(
+                    eligibility[observed_backend]
+                    for eligibility in eligibility_by_signature
+                )
         else:
             selector_eligibility_all_calls = all(
                 eligibility[selector_backend]
@@ -666,6 +703,216 @@ def gather_errors(error: str | None, world: int) -> list[str]:
     return [item for item in errors if item]
 
 
+def exception_text(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+def gather_rank_records(local: dict, rank: int, world: int) -> list[dict]:
+    """Gather one JSON-safe control record and require every expected rank."""
+    report = dict(local)
+    report["rank"] = rank
+    if dist.is_initialized():
+        gathered: list[dict | None] = [None] * world
+        dist.all_gather_object(gathered, report)
+        if any(item is None for item in gathered):
+            raise RuntimeError("distributed control-record gather was incomplete")
+        reports = [item for item in gathered if item is not None]
+    else:
+        reports = [report]
+    ordered = sorted(reports, key=lambda item: item["rank"])
+    ranks = [item["rank"] for item in ordered]
+    expected = list(range(world))
+    if ranks != expected:
+        raise RuntimeError(
+            f"distributed control records expected ranks {expected}, got {ranks}"
+        )
+    return ordered
+
+
+def aggregate_sdpa_control_phase(
+    rank_reports: list[dict],
+    expected_world: int,
+    variant_name: str,
+    phase: str,
+) -> dict:
+    if phase not in ("activation", "restoration", "final_audit"):
+        raise ValueError(f"unknown SDPA control phase {phase!r}")
+    ordered = sorted(rank_reports, key=lambda item: item["rank"])
+    ranks = [item["rank"] for item in ordered]
+    if ranks != list(range(expected_world)) or len(set(ranks)) != len(ranks):
+        raise ValueError(
+            f"SDPA {phase} expected ranks {list(range(expected_world))}, got {ranks}"
+        )
+    if any(item["phase"] != phase for item in ordered):
+        raise ValueError(f"SDPA {phase} records mixed lifecycle phases")
+    if any(item["variant"] != variant_name for item in ordered):
+        raise ValueError(f"SDPA {phase} records mixed variants")
+
+    failing_ranks = []
+    for item in ordered:
+        control = item.get("control")
+        passed = item.get("error") is None
+        if phase == "activation":
+            passed = passed and item["active_after_phase"]
+            passed = passed and control is not None
+            if control is not None:
+                passed = passed and control.get("active") == control.get(
+                    "expected_active"
+                )
+        elif phase == "restoration":
+            passed = passed and not item["active_after_phase"]
+            restore_was_required = item["had_active_context"] or (
+                control is not None and control.get("active") is not None
+            )
+            item["restore_was_required"] = restore_was_required
+            if restore_was_required:
+                passed = passed and control is not None
+                if control is not None:
+                    passed = passed and bool(control.get("restored_exactly"))
+        else:
+            passed = passed and not item["active_after_phase"]
+        item["passed"] = bool(passed)
+        if not passed:
+            failing_ranks.append(item["rank"])
+
+    return {
+        "phase": phase,
+        "variant": variant_name,
+        "passed": not failing_ranks,
+        "failing_ranks": failing_ranks,
+        "rank_reports": ordered,
+    }
+
+
+def finish_sdpa_arm(
+    controller: SDPAArmController,
+    lifecycle: dict,
+    rank: int,
+    world: int,
+) -> dict:
+    """Restore one arm locally, then make restoration an all-rank gate."""
+    if lifecycle.get("restoration") is not None:
+        raise RuntimeError("the SDPA arm has already been restored")
+    variant_name = lifecycle["variant"]
+    had_active_context = controller.active
+    errors = []
+    flags_before_close = None
+    if had_active_context:
+        try:
+            flags_before_close = snapshot_sdpa_backend_flags()
+            expected = (controller.control or {}).get("expected_active")
+            if flags_before_close != expected:
+                errors.append(
+                    "RuntimeError: SDPA flags changed while the arm was active: "
+                    f"expected={expected} before_close={flags_before_close}"
+                )
+        except Exception as exc:
+            errors.append(
+                f"SDPA pre-restoration flag snapshot failed: {exception_text(exc)}"
+            )
+    try:
+        controller.close()
+    except Exception as exc:
+        errors.append(exception_text(exc))
+    local = {
+        "phase": "restoration",
+        "variant": variant_name,
+        "had_active_context": had_active_context,
+        "flags_before_close": flags_before_close,
+        "active_after_phase": controller.active,
+        "error": "; ".join(errors) if errors else None,
+        "control": json.loads(
+            json.dumps(controller.control, allow_nan=False)
+        ) if controller.control is not None else None,
+    }
+    reports = gather_rank_records(local, rank, world)
+    restoration = aggregate_sdpa_control_phase(
+        reports,
+        expected_world=world,
+        variant_name=variant_name,
+        phase="restoration",
+    )
+    lifecycle["restoration"] = restoration
+    lifecycle["passed"] = lifecycle["activation"]["passed"] and restoration[
+        "passed"
+    ]
+    return restoration
+
+
+def begin_sdpa_arm(
+    controller: SDPAArmController,
+    variant: Variant,
+    rank: int,
+    world: int,
+) -> dict:
+    """Activate locally, gather all-rank evidence, and clean up failed entry."""
+    error = None
+    try:
+        controller.activate(variant)
+    except Exception as exc:
+        error = exception_text(exc)
+    local = {
+        "phase": "activation",
+        "variant": variant.name,
+        "active_after_phase": controller.active,
+        "error": error,
+        "control": json.loads(
+            json.dumps(controller.control, allow_nan=False)
+        ) if controller.control is not None else None,
+    }
+    reports = gather_rank_records(local, rank, world)
+    activation = aggregate_sdpa_control_phase(
+        reports,
+        expected_world=world,
+        variant_name=variant.name,
+        phase="activation",
+    )
+    lifecycle = {
+        "variant": variant.name,
+        "requested_internal_backend": variant.internal_sdpa_backend,
+        "activation": activation,
+        "restoration": None,
+        "passed": False,
+    }
+    if not activation["passed"]:
+        finish_sdpa_arm(controller, lifecycle, rank, world)
+    return lifecycle
+
+
+def final_sdpa_controller_audit(
+    controller: SDPAArmController,
+    rank: int,
+    world: int,
+) -> dict:
+    """Synchronize final selector inactivity before rank zero can serialize."""
+    was_active = controller.active
+    error = None
+    if was_active:
+        try:
+            controller.close()
+        except Exception as exc:
+            error = exception_text(exc)
+    if was_active and error is None:
+        error = "RuntimeError: an SDPA arm remained active until final audit"
+    local = {
+        "phase": "final_audit",
+        "variant": "<process-finalization>",
+        "had_active_context": was_active,
+        "active_after_phase": controller.active,
+        "error": error,
+        "control": json.loads(
+            json.dumps(controller.control, allow_nan=False)
+        ) if controller.control is not None else None,
+    }
+    reports = gather_rank_records(local, rank, world)
+    return aggregate_sdpa_control_phase(
+        reports,
+        expected_world=world,
+        variant_name="<process-finalization>",
+        phase="final_audit",
+    )
+
+
 def _normalized_rank_signature_summary(recorder: dict) -> list[dict]:
     summary = []
     for item in recorder["unique_signatures"]:
@@ -724,6 +971,26 @@ def aggregate_sdpa_attribution(
     selector_agreement = all(
         item["selector_operator_agreement"] for item in ordered
     )
+    state_reports = [item.get("relevant_state_restore") for item in ordered]
+    state_restore_agreement = all(
+        state is not None and state.get("passed") for state in state_reports
+    )
+    state_input_vectors = [
+        (
+            state.get("before_trainable_state_sha256") if state else None,
+            (state.get("frozen_parameters_before") or {}).get("sha256")
+            if state
+            else None,
+            (state.get("named_buffers_before") or {}).get("sha256")
+            if state
+            else None,
+        )
+        for state in state_reports
+    ]
+    state_input_agreement = (
+        all(None not in vector for vector in state_input_vectors)
+        and len(set(state_input_vectors)) == 1
+    )
     local_passed = all(item["passed"] for item in ordered)
     agreement_failing_ranks = sorted(
         {
@@ -734,6 +1001,9 @@ def aggregate_sdpa_attribution(
                 or backend_vectors[index] != backend_vectors[0]
                 or observed_vectors[index] != observed_vectors[0]
                 or not item["selector_operator_agreement"]
+                or state_input_vectors[index] != state_input_vectors[0]
+                or state_reports[index] is None
+                or not state_reports[index].get("passed")
             )
         }
     )
@@ -761,6 +1031,8 @@ def aggregate_sdpa_attribution(
         "observed_backends": observed_backend_agreement,
         "primary_operator_counts": operator_count_agreement,
         "selector_operator": selector_agreement,
+        "relevant_state_inputs": state_input_agreement,
+        "relevant_state_restoration": state_restore_agreement,
     }
     failing_ranks = sorted(
         {item["rank"] for item in ordered if not item["passed"]}
@@ -1091,6 +1363,79 @@ def restore_trainable_state(model, state: dict[str, torch.Tensor]) -> None:
                     f"anchor={value.shape}/{value.dtype}"
                 )
             parameter.copy_(value.to(device=parameter.device))
+
+
+def frozen_parameter_state_report(model) -> dict:
+    """Hash exact frozen parameter metadata and bytes without retaining a copy."""
+    digest = hashlib.sha256()
+    tensor_count = 0
+    element_count = 0
+    for name, parameter in unwrap(model).named_parameters():
+        if parameter.requires_grad:
+            continue
+        value = parameter.detach().cpu().contiguous()
+        tensor_count += 1
+        element_count += value.numel()
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(str(value.dtype).encode())
+        digest.update(b"\0")
+        digest.update(str(tuple(value.shape)).encode())
+        digest.update(b"\0")
+        digest.update(value.view(torch.uint8).numpy().tobytes())
+    return {
+        "sha256": digest.hexdigest(),
+        "tensor_count": tensor_count,
+        "element_count": element_count,
+    }
+
+
+def snapshot_named_buffers(model) -> dict[str, torch.Tensor]:
+    return {
+        name: value.detach().cpu().clone()
+        for name, value in unwrap(model).named_buffers()
+    }
+
+
+def buffer_state_report(state: dict[str, torch.Tensor]) -> dict:
+    digest = hashlib.sha256()
+    element_count = 0
+    for name, value in state.items():
+        value = value.detach().cpu().contiguous()
+        element_count += value.numel()
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(str(value.dtype).encode())
+        digest.update(b"\0")
+        digest.update(str(tuple(value.shape)).encode())
+        digest.update(b"\0")
+        digest.update(value.view(torch.uint8).numpy().tobytes())
+    return {
+        "sha256": digest.hexdigest(),
+        "tensor_count": len(state),
+        "element_count": element_count,
+    }
+
+
+def restore_named_buffers(model, state: dict[str, torch.Tensor]) -> None:
+    buffers = dict(unwrap(model).named_buffers())
+    if buffers.keys() != state.keys():
+        missing = sorted(state.keys() - buffers.keys())
+        extra = sorted(buffers.keys() - state.keys())
+        raise RuntimeError(
+            "named-buffer layout changed during the attribution probe: "
+            f"missing={missing[:5]} extra={extra[:5]}"
+        )
+    with torch.no_grad():
+        for name, buffer in buffers.items():
+            value = state[name]
+            if buffer.shape != value.shape or buffer.dtype != value.dtype:
+                raise RuntimeError(
+                    f"named-buffer metadata changed for {name}: "
+                    f"buffer={buffer.shape}/{buffer.dtype} "
+                    f"anchor={value.shape}/{value.dtype}"
+                )
+            buffer.copy_(value.to(device=buffer.device))
 
 
 def lora_factor_nonzero_report(state: dict[str, torch.Tensor]) -> dict:
@@ -2055,42 +2400,50 @@ def profile_sdpa_attribution_probe(
     variant: Variant,
     input_ids: torch.Tensor,
     weights: torch.Tensor,
-    tuning: str,
-    world: int,
     rank: int,
+    world: int,
     device: torch.device,
     anchor_state: dict[str, torch.Tensor],
     anchor_digest: str,
-    learning_rate: float,
-    weight_decay: float,
     seed: int,
     shape_name: str,
 ) -> dict:
-    """Profile one exact training shape, then restore parameters and RNG state."""
-    restore_trainable_state(model, anchor_state)
-    before_digest = trainable_state_digest(model)
-    before_state_report = gather_state_digest_diagnostics(
-        before_digest,
-        rank,
-        world,
-        reference_digest=anchor_digest,
-    )
-    cpu_rng_state = torch.random.get_rng_state().clone()
-    cuda_rng_state = torch.cuda.get_rng_state(device).clone()
+    """Profile one rank-local, grad-enabled forward and restore relevant state.
+
+    The caught region intentionally contains no distributed collective, DDP
+    forward, backward pass, or optimizer step. Every rank reaches the one final
+    evidence gather even when another rank's local forward fails.
+    """
     recorder = SDPAInputRecorder()
     profiler_result = parse_sdpa_profiler_events([])
-    optimizer = None
-    error = None
+    errors: list[str] = []
+    before_digest = None
+    after_digest = None
+    frozen_before = None
+    frozen_after = None
+    buffer_anchor = None
+    buffer_before = None
+    buffer_post_forward = None
+    buffer_after_restore = None
+    cpu_rng_state = None
+    cuda_rng_state = None
+    rng_restored = False
+
     try:
-        if not before_state_report["passed"]:
+        restore_trainable_state(model, anchor_state)
+        before_digest = trainable_state_digest(model)
+        if before_digest != anchor_digest:
             raise RuntimeError(
                 "the attribution probe did not start from the exact warmed anchor"
             )
-        optimizer = make_optimizer(model, learning_rate, weight_decay)
+        frozen_before = frozen_parameter_state_report(model)
+        buffer_anchor = snapshot_named_buffers(model)
+        buffer_before = buffer_state_report(buffer_anchor)
+        cpu_rng_state = torch.random.get_rng_state().clone()
+        cuda_rng_state = torch.cuda.get_rng_state(device).clone()
+        model.zero_grad(set_to_none=True)
         torch.random.default_generator.manual_seed(seed + rank)
         torch.cuda.manual_seed(seed + rank)
-        if dist.is_initialized():
-            dist.barrier()
         torch.cuda.synchronize(device)
         with torch.profiler.profile(
             activities=[
@@ -2102,63 +2455,120 @@ def profile_sdpa_attribution_probe(
             with_stack=False,
         ) as profiler:
             with recorder:
-                training_step(
-                    model,
-                    optimizer,
-                    variant,
-                    input_ids,
-                    weights,
-                    tuning,
-                    world,
-                    device,
-                )
+                with torch.enable_grad():
+                    probe_output = forward_sum(
+                        unwrap(model), variant, input_ids, weights
+                    )
+                del probe_output
             torch.cuda.synchronize(device)
         profiler_result = parse_sdpa_profiler_events(profiler.key_averages())
     except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
+        errors.append(exception_text(exc))
     finally:
-        if optimizer is not None:
-            optimizer.zero_grad(set_to_none=True)
-        model.zero_grad(set_to_none=True)
-        restore_trainable_state(model, anchor_state)
-        torch.random.set_rng_state(cpu_rng_state)
-        torch.cuda.set_rng_state(cuda_rng_state, device)
-        torch.cuda.synchronize(device)
+        try:
+            frozen_after = frozen_parameter_state_report(model)
+        except Exception as exc:
+            errors.append(f"frozen-parameter verification failed: {exception_text(exc)}")
+        if buffer_anchor is not None:
+            try:
+                buffer_post_forward = buffer_state_report(
+                    snapshot_named_buffers(model)
+                )
+            except Exception as exc:
+                errors.append(f"named-buffer snapshot failed: {exception_text(exc)}")
+        try:
+            model.zero_grad(set_to_none=True)
+            restore_trainable_state(model, anchor_state)
+        except Exception as exc:
+            errors.append(f"trainable-state restore failed: {exception_text(exc)}")
+        if buffer_anchor is not None:
+            try:
+                restore_named_buffers(model, buffer_anchor)
+            except Exception as exc:
+                errors.append(f"named-buffer restore failed: {exception_text(exc)}")
+        if cpu_rng_state is not None:
+            try:
+                torch.random.set_rng_state(cpu_rng_state)
+            except Exception as exc:
+                errors.append(f"CPU RNG restore failed: {exception_text(exc)}")
+        if cuda_rng_state is not None:
+            try:
+                torch.cuda.set_rng_state(cuda_rng_state, device)
+            except Exception as exc:
+                errors.append(f"CUDA RNG restore failed: {exception_text(exc)}")
+        try:
+            torch.cuda.synchronize(device)
+        except Exception as exc:
+            errors.append(f"post-restore synchronization failed: {exception_text(exc)}")
 
-    after_digest = trainable_state_digest(model)
-    after_state_report = gather_state_digest_diagnostics(
-        after_digest,
-        rank,
-        world,
-        reference_digest=anchor_digest,
+    try:
+        after_digest = trainable_state_digest(model)
+    except Exception as exc:
+        errors.append(f"trainable-state verification failed: {exception_text(exc)}")
+    try:
+        buffer_after_restore = buffer_state_report(snapshot_named_buffers(model))
+    except Exception as exc:
+        errors.append(f"named-buffer verification failed: {exception_text(exc)}")
+    if cpu_rng_state is not None and cuda_rng_state is not None:
+        try:
+            rng_restored = torch.equal(
+                torch.random.get_rng_state(), cpu_rng_state
+            ) and torch.equal(torch.cuda.get_rng_state(device), cuda_rng_state)
+        except Exception as exc:
+            errors.append(f"RNG verification failed: {exception_text(exc)}")
+
+    trainable_restored = (
+        before_digest == anchor_digest and after_digest == anchor_digest
     )
-    rng_restored = torch.equal(torch.random.get_rng_state(), cpu_rng_state) and torch.equal(
-        torch.cuda.get_rng_state(device), cuda_rng_state
-    )
-    restore_errors = []
-    if not before_state_report["passed"]:
-        restore_errors.append("attribution start anchor mismatch")
-    if not after_state_report["passed"]:
-        restore_errors.append("attribution end anchor mismatch")
+    frozen_unchanged = frozen_before is not None and frozen_before == frozen_after
+    buffers_restored = buffer_before is not None and buffer_before == buffer_after_restore
+    if not trainable_restored:
+        errors.append("attribution trainable state was not restored exactly")
+    if not frozen_unchanged:
+        errors.append("attribution mutated a frozen parameter")
+    if not buffers_restored:
+        errors.append("attribution named buffers were not restored exactly")
     if not rng_restored:
-        restore_errors.append("attribution RNG state was not restored exactly")
-    if restore_errors:
-        suffix = "; ".join(restore_errors)
-        error = f"{error}; {suffix}" if error else suffix
+        errors.append("attribution RNG state was not restored exactly")
 
     local = evaluate_local_sdpa_attribution(
         variant.internal_sdpa_backend,
         recorder.report(),
         profiler_result,
-        error=error,
+        error="; ".join(errors) if errors else None,
     )
-    local["anchor_and_rng_restore"] = {
+    local["relevant_state_restore"] = {
+        "passed": (
+            trainable_restored
+            and frozen_unchanged
+            and buffers_restored
+            and rng_restored
+        ),
         "before_trainable_state_sha256": before_digest,
         "after_trainable_state_sha256": after_digest,
         "expected_trainable_state_sha256": anchor_digest,
-        "before_state_report": before_state_report,
-        "after_state_report": after_state_report,
+        "frozen_parameters_before": frozen_before,
+        "frozen_parameters_after": frozen_after,
+        "frozen_parameters_unchanged": frozen_unchanged,
+        "named_buffers_before": buffer_before,
+        "named_buffers_post_forward": buffer_post_forward,
+        "named_buffers_after_restore": buffer_after_restore,
+        "named_buffers_mutated_during_probe": (
+            buffer_before is not None and buffer_before != buffer_post_forward
+        ),
+        "named_buffers_restored_exactly": buffers_restored,
         "rng_restored_exactly": rng_restored,
+        "scope": {
+            "trainable_parameters": "exact bytes restored and verified",
+            "frozen_parameters": "exact bytes verified unchanged",
+            "named_buffers": "exact bytes restored and verified",
+            "cpu_rng": "default generator restored exactly",
+            "local_cuda_rng": "default generator restored exactly",
+            "unregistered_python_state": (
+                "out of scope; supported models must not mutate unregistered "
+                "Python-side caches when use_cache=False"
+            ),
+        },
     }
     return gather_sdpa_attribution(
         local,
@@ -2191,7 +2601,9 @@ def benchmark_variant(
         model, optimizer, variant, input_ids, weights, tuning, world, device
     )
     torch.cuda.synchronize(device)
-    first_optimizer_step_seconds = distributed_max(time.perf_counter() - started, device)
+    first_post_attribution_optimizer_step_seconds = distributed_max(
+        time.perf_counter() - started, device
+    )
 
     for _ in range(warmup_steps):
         training_step(
@@ -2221,7 +2633,9 @@ def benchmark_variant(
         "world_size": world,
         "steps": measured_steps,
         "warmup_steps": warmup_steps,
-        "first_optimizer_step_seconds": first_optimizer_step_seconds,
+        "first_post_attribution_optimizer_step_seconds": (
+            first_post_attribution_optimizer_step_seconds
+        ),
         "p50_step_seconds": percentile(durations, 0.50),
         "p95_step_seconds": percentile(durations, 0.95),
         "mean_step_seconds": statistics.fmean(durations),
@@ -2457,6 +2871,29 @@ def finalize_report_status(
         report["fatal"] = None
 
 
+def restore_sdpa_arm_for_record(
+    record: dict,
+    controller: SDPAArmController,
+    lifecycle: dict,
+    rank: int,
+    world: int,
+) -> str | None:
+    """Attach all-rank restoration evidence and invalidate leaked-arm timing."""
+    restoration = finish_sdpa_arm(controller, lifecycle, rank, world)
+    record["sdpa_backend_control"] = lifecycle
+    if restoration["passed"]:
+        return None
+    reason = (
+        "SDPA selector restoration failed on ranks "
+        f"{restoration['failing_ranks']}"
+    )
+    previous = record.get("reason")
+    record["reason"] = f"{previous}; {reason}" if previous else reason
+    record["status"] = "failed"
+    record.pop("metrics", None)
+    return reason
+
+
 def _main(argv, backend_controller: SDPAArmController) -> int:
     args = build_parser().parse_args(argv)
     validate_args(args)
@@ -2502,7 +2939,13 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             "capability_api": "torch.backends.cuda.SDPAParams and can_use_*_attention",
             "operator_evidence": "torch.profiler",
             "required_shapes": ["parity", "timing"],
+            "probe_execution": "rank-local grad-enabled forward only",
+            "automatic_backend_policy": (
+                "exactly one recognized observed backend per probe"
+            ),
             "timing_requires_attribution_pass": True,
+            "timing_shape_is_profiled_before_timing": True,
+            "selector_lifecycle_requires_all_ranks": True,
             "reference_variant": reference_variant.name,
             "publishable_variant_limit": (
                 "selected reference plus at most one candidate"
@@ -2536,9 +2979,26 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
     fatal_reason = None
 
     for variant in variants:
-        backend_control = backend_controller.activate(variant)
-        if dist.is_initialized():
-            dist.barrier()
+        backend_lifecycle = begin_sdpa_arm(
+            backend_controller, variant, rank, world
+        )
+        if not backend_lifecycle["activation"]["passed"]:
+            activation_reason = (
+                "SDPA selector activation failed on ranks "
+                f"{backend_lifecycle['activation']['failing_ranks']}"
+            )
+            record = {
+                "variant": asdict(variant),
+                "sdpa_backend_control": backend_lifecycle,
+                "status": "failed",
+                "reason": activation_reason,
+            }
+            if rank == 0:
+                report["variants"].append(record)
+            failed = True
+            fatal_phase = "sdpa_selector_activation"
+            fatal_reason = activation_reason
+            break
         setup_started = time.perf_counter()
         model = None
         tuning_report = None
@@ -2575,7 +3035,6 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             load_reason = errors[0] if errors else "model load failed on another rank"
             record = {
                 "variant": asdict(variant),
-                "sdpa_backend_control": backend_control,
                 "status": (
                     "failed"
                     if variant == reference_variant or fatal_load_error
@@ -2583,8 +3042,20 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
                 ),
                 "reason": load_reason,
             }
+            restoration_reason = restore_sdpa_arm_for_record(
+                record,
+                backend_controller,
+                backend_lifecycle,
+                rank,
+                world,
+            )
             if rank == 0:
                 report["variants"].append(record)
+            if restoration_reason is not None:
+                failed = True
+                fatal_phase = "sdpa_selector_restoration"
+                fatal_reason = restoration_reason
+                break
             if variant == reference_variant or fatal_load_error:
                 failed = True
                 fatal_phase = "model_load"
@@ -2621,7 +3092,6 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             )
             record = {
                 "variant": asdict(variant),
-                "sdpa_backend_control": backend_control,
                 "status": "failed",
                 "reason": state_reason,
                 "tuning": tuning_report,
@@ -2633,13 +3103,24 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
                     "construction": construction_state_report,
                 },
             }
-            if rank == 0:
-                report["variants"].append(record)
             del model
             cleanup_cuda()
+            restoration_reason = restore_sdpa_arm_for_record(
+                record,
+                backend_controller,
+                backend_lifecycle,
+                rank,
+                world,
+            )
+            if rank == 0:
+                report["variants"].append(record)
             failed = True
-            fatal_phase = "construction_state_validation"
-            fatal_reason = state_reason
+            fatal_phase = (
+                "sdpa_selector_restoration"
+                if restoration_reason is not None
+                else "construction_state_validation"
+            )
+            fatal_reason = restoration_reason or state_reason
             break
 
         vocab_size = int(unwrap(model).config.vocab_size)
@@ -2726,7 +3207,6 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             )
             record = {
                 "variant": asdict(variant),
-                "sdpa_backend_control": backend_control,
                 "status": "failed",
                 "reason": anchor_reason,
                 "tuning": tuning_report,
@@ -2737,13 +3217,24 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
                     "warmed_anchor_validation": anchor_state_report,
                 },
             }
-            if rank == 0:
-                report["variants"].append(record)
             del model
             cleanup_cuda()
+            restoration_reason = restore_sdpa_arm_for_record(
+                record,
+                backend_controller,
+                backend_lifecycle,
+                rank,
+                world,
+            )
+            if rank == 0:
+                report["variants"].append(record)
             failed = True
-            fatal_phase = "parity_anchor_restore"
-            fatal_reason = anchor_reason
+            fatal_phase = (
+                "sdpa_selector_restoration"
+                if restoration_reason is not None
+                else "parity_anchor_restore"
+            )
+            fatal_reason = restoration_reason or anchor_reason
             break
 
         setup_seconds = distributed_max(time.perf_counter() - setup_started, device)
@@ -2967,7 +3458,6 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
                 parity["reason"] = "parity gate failed on another rank"
             record = {
                 "variant": asdict(variant),
-                "sdpa_backend_control": backend_control,
                 "status": "failed",
                 "setup_seconds": setup_seconds,
                 "tuning": tuning_report,
@@ -2983,13 +3473,24 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
                 "state_digest_reports": parity["state_digest_reports"],
                 "parity": parity,
             }
-            if rank == 0:
-                report["variants"].append(record)
             del model
             cleanup_cuda()
+            restoration_reason = restore_sdpa_arm_for_record(
+                record,
+                backend_controller,
+                backend_lifecycle,
+                rank,
+                world,
+            )
+            if rank == 0:
+                report["variants"].append(record)
             failed = True
-            fatal_phase = "parity"
-            fatal_reason = parity["reason"]
+            fatal_phase = (
+                "sdpa_selector_restoration"
+                if restoration_reason is not None
+                else "parity"
+            )
+            fatal_reason = restoration_reason or parity["reason"]
             break
 
         if not is_reference:
@@ -3014,14 +3515,11 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             variant,
             parity_ids,
             parity_weights,
-            args.tuning,
-            world,
             rank,
+            world,
             device,
             parity_anchor_state,
             parity_anchor_digest,
-            args.learning_rate,
-            args.weight_decay,
             args.seed + 70_000,
             "parity",
         )
@@ -3030,14 +3528,11 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             variant,
             input_ids,
             weights,
-            args.tuning,
-            world,
             rank,
+            world,
             device,
             parity_anchor_state,
             parity_anchor_digest,
-            args.learning_rate,
-            args.weight_decay,
             args.seed + 80_000,
             "timing",
         )
@@ -3085,7 +3580,6 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             )
             record = {
                 "variant": asdict(variant),
-                "sdpa_backend_control": backend_control,
                 "status": "failed",
                 "reason": attribution_reason,
                 "setup_seconds": setup_seconds,
@@ -3103,13 +3597,24 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
                 "parity": parity,
                 "sdpa_backend_attribution": attribution,
             }
-            if rank == 0:
-                report["variants"].append(record)
             del model
             cleanup_cuda()
+            restoration_reason = restore_sdpa_arm_for_record(
+                record,
+                backend_controller,
+                backend_lifecycle,
+                rank,
+                world,
+            )
+            if rank == 0:
+                report["variants"].append(record)
             failed = True
-            fatal_phase = "sdpa_backend_attribution"
-            fatal_reason = attribution_reason
+            fatal_phase = (
+                "sdpa_selector_restoration"
+                if restoration_reason is not None
+                else "sdpa_backend_attribution"
+            )
+            fatal_reason = restoration_reason or attribution_reason
             break
 
         optimizer = make_optimizer(model, args.learning_rate, args.weight_decay)
@@ -3125,36 +3630,54 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             world,
             device,
         )
-        if rank == 0:
-            report["variants"].append(
-                {
-                    "variant": asdict(variant),
-                    "sdpa_backend_control": backend_control,
-                    "status": "passed",
-                    "setup_seconds": setup_seconds,
-                    "tuning": tuning_report,
-                    "model_init_seed": model_init_seed,
-                    "adapter_init_seed": (
-                        adapter_init_seed if args.tuning == "lora" else None
-                    ),
-                    "construction_trainable_state_sha256": construction_digest,
-                    "reference_construction_trainable_state_sha256": (
-                        construction_reference_digest
-                    ),
-                    "parity_anchor_trainable_state_sha256": parity_anchor_digest,
-                    "state_digest_reports": parity["state_digest_reports"],
-                    "parity": parity,
-                    "sdpa_backend_attribution": attribution,
-                    "metrics": metrics,
-                }
-            )
+        record = {
+            "variant": asdict(variant),
+            "status": "passed",
+            "setup_seconds": setup_seconds,
+            "tuning": tuning_report,
+            "model_init_seed": model_init_seed,
+            "adapter_init_seed": (
+                adapter_init_seed if args.tuning == "lora" else None
+            ),
+            "construction_trainable_state_sha256": construction_digest,
+            "reference_construction_trainable_state_sha256": (
+                construction_reference_digest
+            ),
+            "parity_anchor_trainable_state_sha256": parity_anchor_digest,
+            "state_digest_reports": parity["state_digest_reports"],
+            "parity": parity,
+            "sdpa_backend_attribution": attribution,
+            "metrics": metrics,
+        }
         del optimizer
         del model
         cleanup_cuda()
+        restoration_reason = restore_sdpa_arm_for_record(
+            record,
+            backend_controller,
+            backend_lifecycle,
+            rank,
+            world,
+        )
+        if rank == 0:
+            report["variants"].append(record)
+        if restoration_reason is not None:
+            failed = True
+            fatal_phase = "sdpa_selector_restoration"
+            fatal_reason = restoration_reason
+            break
 
-    # Closing before serialization makes process-global selector restoration a
-    # part of the evidence gate rather than a post-report best effort.
-    backend_controller.close()
+    final_selector_audit = final_sdpa_controller_audit(
+        backend_controller, rank, world
+    )
+    report["sdpa_selector_finalization"] = final_selector_audit
+    if not final_selector_audit["passed"]:
+        failed = True
+        fatal_phase = "sdpa_selector_finalization"
+        fatal_reason = (
+            "final SDPA selector audit failed on ranks "
+            f"{final_selector_audit['failing_ranks']}"
+        )
     if rank == 0:
         finalize_report_status(report, failed, fatal_phase, fatal_reason)
         args.output.parent.mkdir(parents=True, exist_ok=True)

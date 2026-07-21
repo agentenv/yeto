@@ -147,11 +147,19 @@ The ordered comparison within any record is therefore:
 ### Internal SDPA selection and attribution
 
 Each arm holds a public `torch.nn.attention.sdpa_kernel` context for its entire
-lifetime, including model setup, parity, attribution, timing, and cleanup. The
+lifetime, including model setup, parity, attribution, timing, and cleanup. Arm
+activation and restoration are explicit all-rank gates; activating a new arm
+never closes a previous arm implicitly. Every rank contributes its before,
+expected-active, active, pre-restoration, after, restoration, and error
+evidence. A selector mutation observed at the end of an otherwise passing arm
+invalidates that arm even when the outer context subsequently restores it. Rank
+zero cannot serialize a passing record until every rank has restored the selector,
+and one final all-rank inactivity audit runs before report serialization. The
 harness snapshots all four public CUDA enable flags before entry, verifies the
-exact active flag set, and verifies exact restoration on exit. A leak is fatal
-even if an emergency repair restores the original flags. No private dispatcher
-or implementation-detail selector is used; the mapping is compatible with the
+exact active flag set, and verifies exact restoration on exit. A leak is fatal,
+removes any timing metrics from that arm, and remains fatal even if an emergency
+repair restores the original flags. No private dispatcher or
+implementation-detail selector is used; the mapping is compatible with the
 public PyTorch 2.5.1 API.
 
 Parity alone does not prove which fused attention operator executed. After
@@ -168,18 +176,42 @@ At the same time, `torch.profiler` records the actual primary aten operator:
 Flash, math, memory-efficient, or cuDNN SDPA. The profiler's generic call count,
 primary-backend call count, and functional recorder count must match exactly.
 An exact selector must agree with the observed operator and be eligible for
-every unique input signature. The auto reference must resolve to recognized,
-enabled operators supported by its recorded signatures. Every rank contributes
-its full evidence; normalized input signatures, observed backends, and primary
-operator counts must agree across all ranks. Missing calls, an unknown operator,
-mixed-rank dispatch, selector disagreement, or incomplete profiler coverage is
-fatal and produces no timing metrics.
+every unique input signature. Because aggregate profiler events do not provide
+a trustworthy per-call signature/operator mapping, the automatic reference is
+deliberately stricter: each probe must observe exactly one recognized backend,
+and that backend must be eligible for every recorded signature. Mixed automatic
+dispatch fails closed. Every rank contributes its full evidence; normalized
+input signatures, observed backends, primary operator counts, and relevant
+model-state inputs must agree across all ranks. Missing calls, an unknown
+operator, mixed-backend automatic dispatch, mixed-rank dispatch, selector
+disagreement, or incomplete profiler coverage is fatal and produces no timing
+metrics.
 
-An attribution probe uses a fresh optimizer, then restores the exact warmed
-trainable anchor and both CPU and local-CUDA RNG states. The anchor digest is
-checked across every rank before and after each probe and once more after both
-shapes. Thus neither parameter updates nor profiler-side RNG consumption can
-leak into the timed arm.
+Each attribution probe is a rank-local, grad-enabled forward through the
+unwrapped model. Its caught failure region contains no backward pass, optimizer,
+DDP operation, manual gradient all-reduce, barrier, or other distributed
+collective. Once every rank has exited that local region, one common evidence
+gather applies the all-rank gate. The ordinary parity witnesses separately cover
+backward gradients and optimizer updates.
+
+The probe restores the exact warmed trainable anchor, every named buffer, and
+both CPU and local-CUDA default RNG states. It also hashes the exact bytes of
+every frozen parameter before and after the forward; a frozen-parameter mutation
+is fatal. Buffer mutation during a forward is permitted only when the exact
+pre-probe registered-buffer state can be restored. Trainable parameters, frozen
+parameters, named buffers, and relevant state inputs are checked across every
+rank. Arbitrary unregistered Python attributes cannot be enumerated reliably;
+the supported contract therefore requires a model invoked with
+`use_cache=False` not to mutate unregistered Python-side cache state. Such model
+implementations need a model-specific state adapter before their results are
+publishable.
+
+The timing-shape attribution forward executes before performance timing and can
+populate exact-shape SDPA/cuDNN plan and allocator caches. Steady-state p50,
+p95, mean, and throughput metrics remain intentionally warm measurements. The
+first timed update is therefore reported as
+`first_post_attribution_optimizer_step_seconds`; it is not cold-start or
+first-use compilation latency.
 
 Before parity, the selected reference performs exactly one controlled
 deterministic LoRA update. This makes both `lora_A` and `lora_B` nonzero; the
@@ -244,7 +276,8 @@ the evidence boundary; fatal reports also include an explicit phase and reason.
 For each passing variant, the JSON report contains:
 
 - total model setup and correctness-validation time;
-- first parity forward/backward compile time and first optimizer-step time;
+- first parity forward/backward compile time and first post-attribution
+  optimizer-step time (explicitly warm, not cold-start latency);
 - p50, p95, and mean synchronized step time;
 - global raw and target tokens per second;
 - maximum peak allocated and reserved memory per GPU across ranks;
@@ -253,7 +286,10 @@ For each passing variant, the JSON report contains:
 - parity-shape and timing-shape SDPA input signatures, public selector
   eligibility, profiler operator counts, selector/operator agreement, and
   complete per-rank attribution evidence;
-- before/active/after public SDPA flag snapshots and exact restoration status;
+- per-rank before/active/after public SDPA flag snapshots, activation errors,
+  exact restoration status, and the process-finalization inactivity audit;
+- exact trainable/frozen-parameter and named-buffer restoration evidence plus
+  the explicit unregistered-Python-state support boundary;
 - tuning mode, requested and resolved adapter configuration, trainable dtype
   counts, deterministic initialization seed, and trainable-state SHA-256;
 - GPU, CUDA, PyTorch, Transformers, PEFT, Accelerate, dependency-version,
@@ -264,7 +300,10 @@ model load, then gives every rank the returned immutable commit SHA. Both the
 requested revision and resolved SHA are written to JSON; no timed run uses an
 unrecorded moving model revision. Schema version 3 adds the publishable
 selectable-reference/single-candidate contract and mandatory two-shape,
-all-rank SDPA attribution evidence. It also records the benchmark script
+all-rank SDPA attribution evidence. The same schema records the explicit
+all-rank selector lifecycle, rank-local forward-only probe contract, relevant
+model-state restoration scope, and warm first-step timing semantics. It also
+records the benchmark script
 SHA-256, git object ID, dirty state, provenance source, and library versions. A
 clean tree can be identified by its git object ID; a dirty tree cannot, so its
 report explicitly sets `clean_commit_exact: false` and the script hash

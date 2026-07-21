@@ -103,8 +103,11 @@ def test_public_sdpa_backend_mapping_and_context_restore_exact_flags(monkeypatch
     flash_variant = benchmark.VARIANTS_BY_NAME["native-sdpa-flash"]
     math_control = controller.activate(math_variant)
     assert benchmark.snapshot_sdpa_backend_flags() == math_control["expected_active"]
-    flash_control = controller.activate(flash_variant)
+    with pytest.raises(RuntimeError, match="already active"):
+        controller.activate(flash_variant)
+    controller.close()
     assert math_control["restored_exactly"] is True
+    flash_control = controller.activate(flash_variant)
     assert benchmark.snapshot_sdpa_backend_flags() == flash_control["expected_active"]
     controller.close()
     assert flash_control["restored_exactly"] is True
@@ -138,6 +141,191 @@ def test_public_sdpa_backend_mapping_and_context_restore_exact_flags(monkeypatch
     ]
 
 
+def test_sdpa_arm_lifecycle_requires_explicit_all_rank_restore():
+    before = benchmark.snapshot_sdpa_backend_flags()
+    controller = benchmark.SDPAArmController()
+    variant = benchmark.VARIANTS_BY_NAME["native-sdpa-math"]
+
+    lifecycle = benchmark.begin_sdpa_arm(controller, variant, rank=0, world=1)
+    assert lifecycle["activation"]["passed"] is True
+    assert lifecycle["restoration"] is None
+    assert controller.active is True
+
+    restoration = benchmark.finish_sdpa_arm(
+        controller, lifecycle, rank=0, world=1
+    )
+    assert restoration["passed"] is True
+    assert lifecycle["passed"] is True
+    assert controller.active is False
+    assert benchmark.snapshot_sdpa_backend_flags() == before
+
+    audit = benchmark.final_sdpa_controller_audit(controller, rank=0, world=1)
+    assert audit["passed"] is True
+    json.dumps(lifecycle, allow_nan=False)
+    json.dumps(audit, allow_nan=False)
+
+
+def test_sdpa_control_aggregation_promotes_remote_failures():
+    expected = {"flash": False, "math": True, "efficient": False, "cudnn": False}
+    control = {
+        "requested": "math",
+        "before": {name: True for name in benchmark.SDPA_FLAG_GETTERS},
+        "expected_active": expected,
+        "active": expected,
+        "after": None,
+        "restored_exactly": False,
+    }
+    activation = benchmark.aggregate_sdpa_control_phase(
+        [
+            {
+                "rank": 0,
+                "phase": "activation",
+                "variant": "native-sdpa-math",
+                "active_after_phase": True,
+                "error": None,
+                "control": dict(control),
+            },
+            {
+                "rank": 1,
+                "phase": "activation",
+                "variant": "native-sdpa-math",
+                "active_after_phase": False,
+                "error": "RuntimeError: selector mismatch",
+                "control": dict(control),
+            },
+        ],
+        expected_world=2,
+        variant_name="native-sdpa-math",
+        phase="activation",
+    )
+    assert activation["passed"] is False
+    assert activation["failing_ranks"] == [1]
+
+
+def test_mid_arm_selector_mutation_invalidates_the_arm():
+    before = benchmark.snapshot_sdpa_backend_flags()
+    controller = benchmark.SDPAArmController()
+    variant = benchmark.VARIANTS_BY_NAME["native-sdpa-math"]
+    lifecycle = benchmark.begin_sdpa_arm(controller, variant, rank=0, world=1)
+    torch.backends.cuda.enable_flash_sdp(True)
+    record = {
+        "variant": {"name": variant.name},
+        "status": "passed",
+        "metrics": {"mean_step_seconds": 1.0},
+    }
+    reason = benchmark.restore_sdpa_arm_for_record(
+        record, controller, lifecycle, rank=0, world=1
+    )
+    assert reason is not None
+    assert record["status"] == "failed"
+    assert "metrics" not in record
+    assert lifecycle["restoration"]["rank_reports"][0]["flags_before_close"][
+        "flash"
+    ] is True
+    assert benchmark.snapshot_sdpa_backend_flags() == before
+
+
+def test_failed_sdpa_activation_is_cleaned_up_before_arm_work():
+    class ActivationFailureController:
+        def __init__(self):
+            self.active = False
+            self.control = benchmark._empty_sdpa_control("math")
+            self.close_calls = 0
+
+        def activate(self, _variant):
+            raise RuntimeError("activation failed")
+
+        def close(self, _exc_info=(None, None, None)):
+            self.close_calls += 1
+            return self.control
+
+    controller = ActivationFailureController()
+    variant = benchmark.VARIANTS_BY_NAME["native-sdpa-math"]
+    lifecycle = benchmark.begin_sdpa_arm(controller, variant, rank=0, world=1)
+    assert lifecycle["activation"]["passed"] is False
+    assert lifecycle["activation"]["failing_ranks"] == [0]
+    assert lifecycle["restoration"]["passed"] is True
+    assert lifecycle["passed"] is False
+    assert controller.close_calls == 1
+    assert controller.active is False
+
+
+def test_failed_selector_restore_invalidates_metrics_and_final_audit():
+    class FailingController:
+        def __init__(self):
+            self.active = True
+            self.control = {
+                "requested": "math",
+                "before": {name: True for name in benchmark.SDPA_FLAG_GETTERS},
+                "expected_active": {
+                    "flash": False,
+                    "math": True,
+                    "efficient": False,
+                    "cudnn": False,
+                },
+                "active": {
+                    "flash": False,
+                    "math": True,
+                    "efficient": False,
+                    "cudnn": False,
+                },
+                "after": {name: True for name in benchmark.SDPA_FLAG_GETTERS},
+                "restored_exactly": False,
+            }
+
+        def close(self, _exc_info=(None, None, None)):
+            self.active = False
+            raise RuntimeError("restore failed")
+
+    controller = FailingController()
+    lifecycle = {
+        "variant": "native-sdpa-math",
+        "activation": {"passed": True},
+        "restoration": None,
+        "passed": False,
+    }
+    record = {
+        "variant": {"name": "native-sdpa-math"},
+        "status": "passed",
+        "metrics": {"mean_step_seconds": 1.0},
+    }
+    reason = benchmark.restore_sdpa_arm_for_record(
+        record, controller, lifecycle, rank=0, world=1
+    )
+    assert reason is not None
+    assert record["status"] == "failed"
+    assert "metrics" not in record
+    assert lifecycle["restoration"]["failing_ranks"] == [0]
+
+    active_controller = benchmark.SDPAArmController()
+    variant = benchmark.VARIANTS_BY_NAME["native-sdpa-math"]
+    active_controller.activate(variant)
+    final = benchmark.final_sdpa_controller_audit(
+        active_controller, rank=0, world=1
+    )
+    assert final["passed"] is False
+    assert final["failing_ranks"] == [0]
+    assert active_controller.active is False
+
+    report = {
+        "status": "incomplete",
+        "planned_variants": ["native-sdpa-math"],
+        "completed_variants": [],
+        "fatal": None,
+        "variants": [record],
+        "sdpa_selector_finalization": final,
+    }
+    benchmark.finalize_report_status(
+        report,
+        failed=True,
+        fatal_phase="sdpa_selector_restoration",
+        fatal_reason=reason,
+    )
+    serialized = json.dumps(report, allow_nan=False)
+    assert json.loads(serialized)["status"] == "failed"
+    assert json.loads(serialized)["variants"][0]["status"] == "failed"
+
+
 def test_sdpa_input_recorder_restores_callable_and_aggregates_full_signature():
     functional = torch.nn.functional
     original = functional.scaled_dot_product_attention
@@ -169,6 +357,207 @@ def test_sdpa_input_recorder_restores_callable_and_aggregates_full_signature():
     assert signature["enable_gqa"] is False
     assert signature["selector_eligibility"]["math"] is True
     json.dumps(report, allow_nan=False)
+
+
+def test_attribution_probe_is_forward_only_rank_local_and_restores_state(monkeypatch):
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.trainable = torch.nn.Parameter(torch.tensor([1.0]))
+            self.frozen = torch.nn.Parameter(
+                torch.tensor([3.0]), requires_grad=False
+            )
+            self.register_buffer("cache", torch.tensor([2.0]))
+
+    class Wrapper(torch.nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+    class Recorder:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+        def report(self):
+            return {
+                "total_calls": 1,
+                "unique_signature_count": 1,
+                "ordered_signature_sha256": "a" * 64,
+                "unique_signatures": [
+                    {
+                        "sha256": "b" * 64,
+                        "first_call_index": 0,
+                        "call_count": 1,
+                        "signature": {
+                            "query": None,
+                            "key": None,
+                            "value": None,
+                            "attn_mask": None,
+                            "selector_eligibility": {
+                                "flash": False,
+                                "math": True,
+                                "efficient": False,
+                                "cudnn": False,
+                            },
+                        },
+                    }
+                ],
+            }
+
+    class Profiler:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+        def key_averages(self):
+            return [
+                {"key": "aten::scaled_dot_product_attention", "count": 1},
+                {"key": "aten::_scaled_dot_product_attention_math", "count": 1},
+            ]
+
+    base = Model()
+    wrapped = Wrapper(base)
+    anchor = benchmark.snapshot_trainable_state(wrapped)
+    anchor_digest = benchmark.trainable_state_digest(wrapped)
+    cpu_rng_before = torch.random.get_rng_state().clone()
+    cuda_rng = {"state": torch.tensor([17], dtype=torch.uint8)}
+    events = []
+
+    def set_cuda_seed(seed):
+        cuda_rng["state"] = torch.tensor([seed % 251], dtype=torch.uint8)
+
+    def set_cuda_state(state, _device):
+        cuda_rng["state"] = state.clone()
+
+    def forward_sum(model, _variant, _input_ids, _weights):
+        events.append("forward")
+        assert model is base
+        assert torch.is_grad_enabled()
+        with torch.no_grad():
+            model.cache.add_(5)
+        torch.rand(1)
+        cuda_rng["state"].add_(1)
+        return model.trainable.sum(), torch.tensor(1)
+
+    original_gather = benchmark.gather_sdpa_attribution
+
+    def gather(*args, **kwargs):
+        events.append("gather")
+        return original_gather(*args, **kwargs)
+
+    monkeypatch.setattr(benchmark, "SDPAInputRecorder", Recorder)
+    monkeypatch.setattr(torch.profiler, "profile", lambda **_kwargs: Profiler())
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda _device: None)
+    monkeypatch.setattr(
+        torch.cuda, "get_rng_state", lambda _device: cuda_rng["state"].clone()
+    )
+    monkeypatch.setattr(torch.cuda, "set_rng_state", set_cuda_state)
+    monkeypatch.setattr(torch.cuda, "manual_seed", set_cuda_seed)
+    monkeypatch.setattr(benchmark, "forward_sum", forward_sum)
+    monkeypatch.setattr(benchmark, "gather_sdpa_attribution", gather)
+    monkeypatch.setattr(
+        benchmark,
+        "training_step",
+        lambda *_args, **_kwargs: pytest.fail("attribution called training_step"),
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "make_optimizer",
+        lambda *_args, **_kwargs: pytest.fail("attribution created an optimizer"),
+    )
+
+    result = benchmark.profile_sdpa_attribution_probe(
+        wrapped,
+        benchmark.VARIANTS_BY_NAME["native-sdpa-math"],
+        torch.ones((1, 2), dtype=torch.long),
+        torch.ones((1, 2)),
+        rank=0,
+        world=1,
+        device=torch.device("cpu"),
+        anchor_state=anchor,
+        anchor_digest=anchor_digest,
+        seed=123,
+        shape_name="parity",
+    )
+
+    assert result["passed"] is True
+    assert events == ["forward", "gather"]
+    assert base.cache.item() == pytest.approx(2.0)
+    assert torch.equal(torch.random.get_rng_state(), cpu_rng_before)
+    assert torch.equal(cuda_rng["state"], torch.tensor([17], dtype=torch.uint8))
+
+    events.clear()
+    frozen_before = base.frozen.detach().clone()
+
+    def mutate_frozen(model, _variant, _input_ids, _weights):
+        events.append("forward")
+        with torch.no_grad():
+            model.frozen.add_(1)
+        return model.trainable.sum(), torch.tensor(1)
+
+    monkeypatch.setattr(benchmark, "forward_sum", mutate_frozen)
+    mutated = benchmark.profile_sdpa_attribution_probe(
+        wrapped,
+        benchmark.VARIANTS_BY_NAME["native-sdpa-math"],
+        torch.ones((1, 2), dtype=torch.long),
+        torch.ones((1, 2)),
+        rank=0,
+        world=1,
+        device=torch.device("cpu"),
+        anchor_state=anchor,
+        anchor_digest=anchor_digest,
+        seed=789,
+        shape_name="timing",
+    )
+    assert mutated["passed"] is False
+    assert events == ["forward", "gather"]
+    assert any(
+        "mutated a frozen parameter" in error
+        for error in mutated["rank_reports"][0]["errors"]
+    )
+    with torch.no_grad():
+        base.frozen.copy_(frozen_before)
+    state = result["rank_reports"][0]["relevant_state_restore"]
+    assert state["named_buffers_mutated_during_probe"] is True
+    assert state["named_buffers_restored_exactly"] is True
+    assert state["frozen_parameters_unchanged"] is True
+    assert state["rng_restored_exactly"] is True
+    json.dumps(result, allow_nan=False)
+
+    events.clear()
+
+    def failing_forward(*_args, **_kwargs):
+        events.append("forward")
+        raise RuntimeError("rank-local probe failure")
+
+    monkeypatch.setattr(benchmark, "forward_sum", failing_forward)
+    failed = benchmark.profile_sdpa_attribution_probe(
+        wrapped,
+        benchmark.VARIANTS_BY_NAME["native-sdpa-math"],
+        torch.ones((1, 2), dtype=torch.long),
+        torch.ones((1, 2)),
+        rank=0,
+        world=1,
+        device=torch.device("cpu"),
+        anchor_state=anchor,
+        anchor_digest=anchor_digest,
+        seed=456,
+        shape_name="timing",
+    )
+    assert failed["passed"] is False
+    assert events == ["forward", "gather"]
+    assert any(
+        "rank-local probe failure" in error
+        for error in failed["rank_reports"][0]["errors"]
+    )
+    assert base.cache.item() == pytest.approx(2.0)
+    assert torch.equal(torch.random.get_rng_state(), cpu_rng_before)
+    assert torch.equal(cuda_rng["state"], torch.tensor([17], dtype=torch.uint8))
 
 
 def test_profiler_parser_and_selector_operator_agreement_are_fail_closed():
@@ -225,12 +614,61 @@ def test_profiler_parser_and_selector_operator_agreement_are_fail_closed():
     assert incomplete_result["passed"] is False
     assert any("coverage differed" in error for error in incomplete_result["errors"])
 
+    mixed = benchmark.parse_sdpa_profiler_events(
+        [
+            {"key": "aten::scaled_dot_product_attention", "count": 3},
+            {"key": "aten::_scaled_dot_product_flash_attention", "count": 1},
+            {"key": "aten::_scaled_dot_product_attention_math", "count": 2},
+        ]
+    )
+    mixed_recorder = json.loads(json.dumps(recorder))
+    mixed_recorder["unique_signatures"][0]["signature"][
+        "selector_eligibility"
+    ]["flash"] = False
+    mixed_auto = benchmark.evaluate_local_sdpa_attribution(
+        "auto", mixed_recorder, mixed
+    )
+    assert mixed_auto["passed"] is False
+    assert mixed_auto["selector_eligibility_all_calls"] is False
+    assert any(
+        "exactly one observed backend" in error for error in mixed_auto["errors"]
+    )
+
 
 def test_percentile_interpolates_and_validates_input():
     assert benchmark.percentile([1.0, 2.0, 3.0, 4.0], 0.5) == 2.5
     assert benchmark.percentile([1.0, 2.0, 3.0, 4.0], 0.95) == pytest.approx(3.85)
     with pytest.raises(ValueError):
         benchmark.percentile([], 0.5)
+
+
+def test_timing_schema_labels_the_first_step_as_post_attribution(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda _device: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda _device: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda _device: 10)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda _device: 20)
+    monkeypatch.setattr(benchmark, "distributed_max", lambda value, _device: value)
+    monkeypatch.setattr(benchmark, "distributed_sum", lambda value, _device: value)
+    monkeypatch.setattr(
+        benchmark, "training_step", lambda *_args, **_kwargs: {"passed": True}
+    )
+
+    metrics = benchmark.benchmark_variant(
+        model=object(),
+        optimizer=object(),
+        variant=benchmark.REFERENCE_VARIANT,
+        input_ids=torch.ones((2, 3), dtype=torch.long),
+        weights=torch.ones((2, 3)),
+        warmup_steps=0,
+        measured_steps=1,
+        tuning="lora",
+        world=1,
+        device=torch.device("cpu"),
+    )
+    assert metrics["first_post_attribution_optimizer_step_seconds"] >= 0
+    assert "first_optimizer_step_seconds" not in metrics
+    json.dumps(metrics, allow_nan=False)
 
 
 def test_gradient_parity_gate_checks_loss_keys_and_values():
@@ -631,6 +1069,16 @@ def test_distributed_sdpa_attribution_aggregates_signatures_and_rank_agreement()
         report = benchmark.evaluate_local_sdpa_attribution(
             "math", recorder, profiler
         )
+        report["relevant_state_restore"] = {
+            "passed": True,
+            "before_trainable_state_sha256": "a" * 64,
+            "after_trainable_state_sha256": "a" * 64,
+            "expected_trainable_state_sha256": "a" * 64,
+            "frozen_parameters_before": {"sha256": "b" * 64},
+            "frozen_parameters_after": {"sha256": "b" * 64},
+            "named_buffers_before": {"sha256": "c" * 64},
+            "named_buffers_after_restore": {"sha256": "c" * 64},
+        }
         report.update(rank=rank, shape="timing")
         return report
 
