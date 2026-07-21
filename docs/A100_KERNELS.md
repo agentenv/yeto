@@ -111,6 +111,15 @@ the repository, only the reserved output itself is excluded from the subsequent
 git dirty-state query; the exact excluded relative path is recorded, and every
 other tracked or untracked worktree change still marks the source dirty.
 
+If final serialization, replacement, or directory syncing fails, rank zero
+makes a separate best-effort attempt to restore an incomplete schema-version-4
+sentinel derived from the original reservation. The sentinel records the
+publication error and resets `final_report_written` to false. Rank zero then
+reads the visible target back and broadcasts whether the expected reservation
+is visibly non-passing. A successful benchmark therefore requires all three:
+a complete passing JSON, a successful collective publication decision, and a
+zero process exit. JSON status alone is never sufficient evidence.
+
 The native PyTorch SDPA variants are:
 
 | variant | internal selector | meaning |
@@ -218,13 +227,15 @@ This guarded probe does not imply end-to-end recovery from arbitrary distributed
 faults. Parity and timed training necessarily execute NCCL collectives. An
 unexpected device, process, or communication fault inside one of those
 collectives is fail-stop: the launcher/process-group failure is authoritative,
-and a complete failure JSON is not guaranteed. The reserved non-passing sentinel
-remains at the output path when collective finalization cannot run. The process
-group uses a bounded 300-second timeout by default; experiments may set
-`--distributed-timeout-seconds` between 1 and 3600. This timeout configuration
-is recorded in the report and does not add work to measured steps. The harness
-does not claim collective rollback, retry, or continued timing after such a
-fault.
+and a complete failure JSON is not guaranteed. Before durable final replacement,
+the reserved non-passing sentinel remains authoritative. If the result broadcast
+or launcher fails after durable replacement, a complete JSON may remain visible,
+but it is invalid without the successful collective decision and zero process
+exit. The process group uses a bounded 300-second timeout by default;
+experiments may set `--distributed-timeout-seconds` between 1 and 3600. This
+timeout configuration is recorded in the report and does not add work to
+measured steps. The harness does not claim collective rollback, retry, or
+continued timing after such a fault.
 
 The probe restores the exact warmed trainable anchor, every named buffer, and
 both CPU and local-CUDA default RNG states. Frozen-parameter and
@@ -239,6 +250,10 @@ persistence, and values can all be restored. A frozen-parameter mutation or
 replacement is fatal. Device indices and storage pointers are retained for exact
 local verification and normalized only in the separate cross-rank digest;
 storage sizes, types, and alias relationships must still agree across ranks.
+Exact local verification retains and compares the actual Python class objects
+for modules, parameters, and tensors. Serialized and cross-rank evidence uses
+stable qualified class-name strings because class-object identity is necessarily
+process-local.
 Arbitrary unregistered Python attributes cannot be enumerated reliably; the
 supported contract therefore requires a model invoked with `use_cache=False`
 not to mutate unregistered
@@ -302,6 +317,19 @@ the write fails; no rank waits in a post-write barrier that another rank can
 miss. This guarantee applies to handled final publication failures, not to a
 complete failure report after an unexpected fault inside an in-flight
 distributed collective.
+
+The result broadcast occurs after durable final replacement. If that broadcast
+fails, rank zero cannot safely roll back a report that may already have been
+observed, and the complete JSON can remain visible. This is why evidence
+acceptance requires the collective/launcher outcome in addition to JSON fields.
+
+No user-space protocol can guarantee visible recovery when the persistent
+filesystem itself continues rejecting writes, renames, syncs, or reads. In that
+case the collective result reports that non-passing recovery was not verified,
+the process exits unsuccessfully, and any visible target must be treated as
+untrusted regardless of its JSON status. The recovery attempt and read-back
+verification narrow the post-replacement failure window; they do not claim
+durability or rollback through a persistent storage failure.
 
 The report also records actual and reference update norms, maximum magnitude,
 nonzero count, and nonzero fraction. If BF16 quantization rounds every observed

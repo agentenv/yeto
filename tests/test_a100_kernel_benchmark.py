@@ -1615,6 +1615,106 @@ def test_registered_state_detects_compatible_module_class_swaps():
     assert buffer_comparison["module_type_changed"] == ["<root>"]
 
 
+def test_registered_state_uses_class_identity_for_same_qualified_type_name():
+    first_type = type(
+        "IndistinguishableModule",
+        (torch.nn.Module,),
+        {"__module__": "synthetic.model"},
+    )
+    second_type = type(
+        "IndistinguishableModule",
+        (torch.nn.Module,),
+        {"__module__": "synthetic.model"},
+    )
+    assert first_type is not second_type
+    assert first_type.__module__ == second_type.__module__
+    assert first_type.__qualname__ == second_type.__qualname__
+
+    model = first_type()
+    model.register_parameter(
+        "frozen",
+        torch.nn.Parameter(torch.ones(2), requires_grad=False),
+    )
+    model.register_buffer("cache", torch.arange(2.0))
+    frozen_anchor = benchmark.snapshot_frozen_parameter_state(model)
+    buffer_anchor = benchmark.snapshot_named_buffers(model)
+    frozen_report = benchmark.frozen_parameter_state_report(frozen_anchor)
+    buffer_report = benchmark.buffer_state_report(buffer_anchor)
+
+    model.__class__ = second_type
+    frozen_current = benchmark.snapshot_frozen_parameter_state(model)
+    buffer_current = benchmark.snapshot_named_buffers(model)
+    frozen_comparison = benchmark.compare_registered_tensor_states(
+        frozen_anchor, frozen_current
+    )
+    buffer_comparison = benchmark.compare_registered_tensor_states(
+        buffer_anchor, buffer_current
+    )
+
+    # Cross-process evidence intentionally retains the stable qualified string;
+    # exact same-process verification additionally compares the real type object.
+    assert benchmark.frozen_parameter_state_report(frozen_current) == frozen_report
+    assert benchmark.buffer_state_report(buffer_current) == buffer_report
+    assert frozen_comparison["passed"] is False
+    assert buffer_comparison["passed"] is False
+    assert frozen_comparison["module_type_changed"] == ["<root>"]
+    assert buffer_comparison["module_type_changed"] == ["<root>"]
+
+
+def test_registered_state_uses_value_class_identity_for_same_qualified_name():
+    first_tensor_type = type(
+        "IndistinguishableTensor",
+        (torch.Tensor,),
+        {"__module__": "synthetic.values"},
+    )
+    second_tensor_type = type(
+        "IndistinguishableTensor",
+        (torch.Tensor,),
+        {"__module__": "synthetic.values"},
+    )
+    first_parameter_type = type(
+        "IndistinguishableParameter",
+        (torch.nn.Parameter,),
+        {"__module__": "synthetic.values"},
+    )
+    second_parameter_type = type(
+        "IndistinguishableParameter",
+        (torch.nn.Parameter,),
+        {"__module__": "synthetic.values"},
+    )
+    buffer = torch.arange(2.0).as_subclass(first_tensor_type)
+    parameter = first_parameter_type(torch.ones(2), requires_grad=False)
+    model = torch.nn.Module()
+    model.register_parameter("frozen", parameter)
+    model.register_buffer("cache", buffer)
+    frozen_anchor = benchmark.snapshot_frozen_parameter_state(model)
+    buffer_anchor = benchmark.snapshot_named_buffers(model)
+    frozen_report = benchmark.frozen_parameter_state_report(frozen_anchor)
+    buffer_report = benchmark.buffer_state_report(buffer_anchor)
+
+    parameter.__class__ = second_parameter_type
+    buffer.__class__ = second_tensor_type
+    frozen_current = benchmark.snapshot_frozen_parameter_state(model)
+    buffer_current = benchmark.snapshot_named_buffers(model)
+    frozen_comparison = benchmark.compare_registered_tensor_states(
+        frozen_anchor, frozen_current
+    )
+    buffer_comparison = benchmark.compare_registered_tensor_states(
+        buffer_anchor, buffer_current
+    )
+
+    assert benchmark.frozen_parameter_state_report(frozen_current) == frozen_report
+    assert benchmark.buffer_state_report(buffer_current) == buffer_report
+    assert frozen_comparison["object_identity_changed"] == []
+    assert buffer_comparison["object_identity_changed"] == []
+    assert frozen_comparison["metadata_changed"] == []
+    assert buffer_comparison["metadata_changed"] == []
+    assert frozen_comparison["object_type_changed"] == ["frozen"]
+    assert buffer_comparison["object_type_changed"] == ["cache"]
+    assert frozen_comparison["passed"] is False
+    assert buffer_comparison["passed"] is False
+
+
 def test_registered_state_digest_normalizes_only_device_index():
     model = torch.nn.Module()
     model.register_buffer("cache", torch.ones(2))
@@ -1959,9 +2059,50 @@ def test_collective_publication_replaces_the_incomplete_reservation(tmp_path):
     complete = json.loads(output.read_text())
     assert result["passed"] is True
     assert result["status"] == "passed"
+    assert result["recovery"] is None
     assert complete["status"] == "passed"
     assert complete["report_complete"] is True
     assert complete["output_reservation"]["final_report_written"] is True
+
+
+def test_post_replacement_broadcast_failure_leaves_json_unaccepted(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "broadcast-failure.json"
+    reservation = benchmark.reserve_report_output_collectively(output, rank=0)
+    report = {
+        "schema_version": benchmark.BENCHMARK_SCHEMA_VERSION,
+        "benchmark": benchmark.BENCHMARK_NAME,
+        "status": "incomplete",
+        "report_complete": False,
+        "planned_variants": ["a"],
+        "completed_variants": [],
+        "fatal": None,
+        "output_reservation": dict(reservation),
+        "variants": [{"variant": {"name": "a"}, "status": "passed"}],
+    }
+    monkeypatch.setattr(
+        benchmark,
+        "broadcast_object",
+        lambda _value, _rank: (_ for _ in ()).throw(
+            RuntimeError("publication result broadcast failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="result broadcast failed"):
+        benchmark.publish_report_collectively(
+            report,
+            output,
+            rank=0,
+            failed=False,
+            fatal_phase=None,
+            fatal_reason=None,
+        )
+
+    visible = json.loads(output.read_text())
+    assert visible["status"] == "passed"
+    assert visible["report_complete"] is True
+    assert visible["output_reservation"]["final_report_written"] is True
 
 
 def test_atomic_report_write_and_collective_write_failure(tmp_path, monkeypatch):
@@ -2012,10 +2153,127 @@ def test_atomic_report_write_and_collective_write_failure(tmp_path, monkeypatch)
     assert rank_zero == rank_one
     assert rank_zero["passed"] is False
     assert "disk full" in rank_zero["error"]
+    assert rank_zero["recovery"]["write_returned_successfully"] is False
+    assert rank_zero["recovery"]["visible_non_passing_recovery_succeeded"] is True
     preserved = json.loads(output.read_text())
     assert preserved["status"] == "incomplete"
     assert preserved["report_complete"] is False
     assert preserved["output_reservation"]["final_report_written"] is False
+
+
+def test_post_replace_directory_fsync_failure_restores_non_passing_sentinel(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "post-replace-failure.json"
+    reservation = benchmark.reserve_report_output_collectively(output, rank=0)
+    report = {
+        "schema_version": benchmark.BENCHMARK_SCHEMA_VERSION,
+        "benchmark": benchmark.BENCHMARK_NAME,
+        "status": "incomplete",
+        "report_complete": False,
+        "planned_variants": ["a"],
+        "completed_variants": [],
+        "fatal": None,
+        "output_reservation": dict(reservation),
+        "variants": [{"variant": {"name": "a"}, "status": "passed"}],
+    }
+    original_fsync_directory = benchmark._fsync_directory
+    fsync_calls = []
+
+    def fail_first_directory_fsync(directory):
+        fsync_calls.append(Path(directory))
+        if len(fsync_calls) == 1:
+            replaced = json.loads(output.read_text())
+            assert replaced["status"] == "passed"
+            assert replaced["report_complete"] is True
+            raise OSError("post-replace directory fsync failed")
+        return original_fsync_directory(directory)
+
+    monkeypatch.setattr(
+        benchmark,
+        "_fsync_directory",
+        fail_first_directory_fsync,
+    )
+
+    result = benchmark.publish_report_collectively(
+        report,
+        output,
+        rank=0,
+        failed=False,
+        fatal_phase=None,
+        fatal_reason=None,
+    )
+
+    visible = json.loads(output.read_text())
+    assert result["passed"] is False
+    assert "post-replace directory fsync failed" in result["error"]
+    assert result["recovery"]["write_returned_successfully"] is True
+    assert result["recovery"]["visible_non_passing_recovery_succeeded"] is True
+    assert result["recovery"]["verification"]["succeeded"] is True
+    assert visible["schema_version"] == benchmark.BENCHMARK_SCHEMA_VERSION
+    assert visible["status"] == "incomplete"
+    assert visible["report_complete"] is False
+    assert visible["output_reservation"]["id"] == reservation["id"]
+    assert visible["output_reservation"]["final_report_written"] is False
+    assert (
+        "post-replace directory fsync failed" in visible["publication_failure"]["error"]
+    )
+    assert len(fsync_calls) == 2
+    assert not list(tmp_path.glob(f".{output.name}.*.tmp"))
+
+
+def test_persistent_recovery_failure_reports_passing_target_as_unverified(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "persistent-failure.json"
+    reservation = benchmark.reserve_report_output_collectively(output, rank=0)
+    report = {
+        "schema_version": benchmark.BENCHMARK_SCHEMA_VERSION,
+        "benchmark": benchmark.BENCHMARK_NAME,
+        "status": "incomplete",
+        "report_complete": False,
+        "planned_variants": ["a"],
+        "completed_variants": [],
+        "fatal": None,
+        "output_reservation": dict(reservation),
+        "variants": [{"variant": {"name": "a"}, "status": "passed"}],
+    }
+    original_write = benchmark.write_report_atomic
+    write_calls = 0
+
+    def fail_after_final_then_reject_recovery(target, serialized):
+        nonlocal write_calls
+        write_calls += 1
+        if write_calls == 1:
+            original_write(target, serialized)
+            raise OSError("failure after durable final replacement")
+        raise OSError("persistent recovery write failure")
+
+    monkeypatch.setattr(
+        benchmark,
+        "write_report_atomic",
+        fail_after_final_then_reject_recovery,
+    )
+
+    result = benchmark.publish_report_collectively(
+        report,
+        output,
+        rank=0,
+        failed=False,
+        fatal_phase=None,
+        fatal_reason=None,
+    )
+
+    visible = json.loads(output.read_text())
+    assert result["passed"] is False
+    assert result["recovery"]["write_returned_successfully"] is False
+    assert result["recovery"]["visible_non_passing_recovery_succeeded"] is False
+    assert "persistent recovery write failure" in result["recovery"]["write_error"]
+    assert result["recovery"]["verification"]["observed_status"] == "passed"
+    assert "output is untrusted" in result["recovery"]["integrity_diagnostic"]
+    assert visible["status"] == "passed"
+    assert visible["report_complete"] is True
+    assert write_calls == 2
 
 
 def test_main_uses_guarded_destroy_without_a_final_barrier(monkeypatch):

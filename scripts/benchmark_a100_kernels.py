@@ -1490,6 +1490,7 @@ def _snapshot_registered_tensor_state(model, kind: str) -> dict:
                 "module": module,
                 "local_name": local_name,
                 "object": value,
+                "object_type_identity": type(value) if value is not None else None,
                 "metadata": (
                     _tensor_state_metadata(value) if value is not None else None
                 ),
@@ -1516,6 +1517,7 @@ def _snapshot_registered_tensor_state(model, kind: str) -> dict:
                 "module_path": module_path,
                 "module": module,
                 "object_type": f"{type(module).__module__}.{type(module).__qualname__}",
+                "object_type_identity": type(module),
                 "registration_order": (
                     list(registry)
                     if kind == "frozen_parameters"
@@ -1653,6 +1655,7 @@ def compare_registered_tensor_states(anchor: dict, current: dict) -> dict:
         "module_identity_changed": [],
         "module_type_changed": [],
         "object_identity_changed": [],
+        "object_type_changed": [],
         "metadata_changed": [],
         "persistence_changed": [],
         "value_changed": [],
@@ -1667,7 +1670,10 @@ def compare_registered_tensor_states(anchor: dict, current: dict) -> dict:
         display_path = module_path or "<root>"
         if before_module["module"] is not after_module["module"]:
             failures["module_identity_changed"].append(display_path)
-        if before_module["object_type"] != after_module["object_type"]:
+        if (
+            before_module["object_type_identity"]
+            is not after_module["object_type_identity"]
+        ):
             failures["module_type_changed"].append(display_path)
         if before_module["registration_order"] != after_module["registration_order"]:
             failures["registration_order_changed"].append(display_path)
@@ -1683,6 +1689,8 @@ def compare_registered_tensor_states(anchor: dict, current: dict) -> dict:
             failures["module_identity_changed"].append(name)
         if before["object"] is not after["object"]:
             failures["object_identity_changed"].append(name)
+        if before["object_type_identity"] is not after["object_type_identity"]:
+            failures["object_type_changed"].append(name)
         if before["metadata"] != after["metadata"]:
             failures["metadata_changed"].append(name)
         if before["persistent"] != after["persistent"]:
@@ -2948,12 +2956,13 @@ def profile_sdpa_attribution_probe(
         "scope": {
             "trainable_parameters": "exact bytes restored and verified",
             "frozen_parameters": (
-                "registration, identity, aliasing, metadata, and exact bytes "
-                "verified unchanged"
+                "registration, identity, process-local actual class identity, "
+                "aliasing, metadata, and exact bytes verified unchanged"
             ),
             "named_buffers": (
-                "registration, identity, aliasing, persistence, metadata, and "
-                "exact bytes restored and verified"
+                "registration, identity, process-local actual class identity, "
+                "aliasing, persistence, metadata, and exact bytes restored and "
+                "verified"
             ),
             "cpu_rng": "default generator restored exactly",
             "local_cuda_rng": "default generator restored exactly",
@@ -3522,6 +3531,144 @@ def reserve_report_output_collectively(
     return result["reservation"]
 
 
+def _publication_failure_sentinel(
+    report: dict,
+    output: Path,
+    publication_error: str,
+) -> dict:
+    reservation = dict(report.get("output_reservation") or {})
+    reservation.update(
+        {
+            "path": str(output),
+            "initial_sentinel_status": "incomplete",
+            "final_report_written": False,
+        }
+    )
+    return {
+        "schema_version": BENCHMARK_SCHEMA_VERSION,
+        "benchmark": BENCHMARK_NAME,
+        "status": "incomplete",
+        "report_complete": False,
+        "fatal": None,
+        "incomplete_reason": (
+            "final report publication failed; the benchmark did not publish "
+            "complete evidence"
+        ),
+        "publication_failure": {
+            "error": publication_error,
+            "recovery": "best-effort restoration of the incomplete reservation",
+            "acceptance_rule": (
+                "JSON status is insufficient without a successful collective "
+                "publication decision and zero process exit"
+            ),
+        },
+        "output_reservation": reservation,
+    }
+
+
+def verify_visible_non_passing_report(
+    output: Path,
+    expected_reservation_id: str | None,
+) -> dict:
+    """Read back the visible target and verify the strict incomplete sentinel."""
+    try:
+        visible = json.loads(output.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "succeeded": False,
+            "error": exception_text(exc),
+            "observed_status": None,
+            "observed_report_complete": None,
+            "observed_reservation_id": None,
+        }
+    if not isinstance(visible, dict):
+        return {
+            "succeeded": False,
+            "error": (f"visible report is not a JSON object: {type(visible).__name__}"),
+            "observed_status": None,
+            "observed_report_complete": None,
+            "observed_reservation_id": None,
+        }
+    reservation = visible.get("output_reservation")
+    observed_reservation_id = (
+        reservation.get("id") if isinstance(reservation, dict) else None
+    )
+    checks = {
+        "schema_version": visible.get("schema_version") == BENCHMARK_SCHEMA_VERSION,
+        "benchmark": visible.get("benchmark") == BENCHMARK_NAME,
+        "status": visible.get("status") == "incomplete",
+        "report_complete": visible.get("report_complete") is False,
+        "reservation": isinstance(reservation, dict),
+        "reservation_id": (
+            expected_reservation_id is not None
+            and observed_reservation_id == expected_reservation_id
+        ),
+        "final_report_written": (
+            isinstance(reservation, dict)
+            and reservation.get("final_report_written") is False
+        ),
+    }
+    failing_checks = sorted(name for name, passed in checks.items() if not passed)
+    return {
+        "succeeded": not failing_checks,
+        "error": (
+            None
+            if not failing_checks
+            else f"visible report failed checks: {failing_checks}"
+        ),
+        "observed_status": visible.get("status"),
+        "observed_report_complete": visible.get("report_complete"),
+        "observed_reservation_id": observed_reservation_id,
+        "checks": checks,
+    }
+
+
+def recover_non_passing_publication(
+    report: dict,
+    output: Path,
+    publication_error: str,
+) -> dict:
+    """Best-effort reinstall and verification of the original incomplete sentinel."""
+    reservation = report.get("output_reservation")
+    expected_reservation_id = (
+        reservation.get("id") if isinstance(reservation, dict) else None
+    )
+    write_error = None
+    try:
+        sentinel = _publication_failure_sentinel(report, output, publication_error)
+        serialized = json.dumps(
+            sentinel,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        write_report_atomic(output, serialized)
+    except Exception as exc:
+        write_error = exception_text(exc)
+    verification = verify_visible_non_passing_report(
+        output,
+        expected_reservation_id,
+    )
+    visible_recovery_succeeded = verification["succeeded"]
+    integrity_diagnostic = (
+        "visible output is the verified non-passing reservation"
+        if visible_recovery_succeeded
+        else (
+            "visible non-passing recovery was not verified; the output is "
+            "untrusted regardless of JSON status: "
+            f"{verification['error'] or write_error or 'unknown recovery failure'}"
+        )
+    )
+    return {
+        "attempted": True,
+        "write_returned_successfully": write_error is None,
+        "write_error": write_error,
+        "visible_non_passing_recovery_succeeded": visible_recovery_succeeded,
+        "integrity_diagnostic": integrity_diagnostic,
+        "verification": verification,
+    }
+
+
 def publish_report_collectively(
     report: dict,
     output: Path,
@@ -3543,13 +3690,21 @@ def publish_report_collectively(
                 "error": None,
                 "output": str(output),
                 "status": report["status"],
+                "recovery": None,
             }
         except Exception as exc:
+            publication_error = exception_text(exc)
+            recovery = recover_non_passing_publication(
+                report,
+                output,
+                publication_error,
+            )
             result = {
                 "passed": False,
-                "error": exception_text(exc),
+                "error": publication_error,
                 "output": str(output),
                 "status": "failed",
+                "recovery": recovery,
             }
     result = broadcast_object(result, rank)
     if rank == 0:
@@ -3558,8 +3713,16 @@ def publish_report_collectively(
                 print(serialized, flush=True)
                 print(f"wrote {output}", file=sys.stderr, flush=True)
             else:
+                recovery = result.get("recovery") or {}
+                recovery_status = (
+                    "verified"
+                    if recovery.get("visible_non_passing_recovery_succeeded")
+                    else "not verified"
+                )
                 print(
-                    f"report publication failed: {result['error']}",
+                    "report publication failed: "
+                    f"{result['error']}; visible non-passing recovery "
+                    f"{recovery_status}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -3660,16 +3823,35 @@ def _main(argv, backend_controller: SDPAArmController) -> int:
             "registered_state_scope": (
                 "registration, identity, aliasing, persistence, metadata, bytes"
             ),
+            "registered_state_local_type_identity": (
+                "actual Python class objects compared by identity"
+            ),
+            "registered_state_cross_rank_type": "qualified class-name strings",
             "report_publication": "strict JSON, atomic replace, all-rank decision",
             "preexisting_output_policy": "refuse before model or benchmark work",
             "in_progress_output": "schema-4 incomplete reservation sentinel",
+            "publication_failure_recovery": (
+                "best-effort incomplete-sentinel restore plus visible read-back"
+            ),
+            "evidence_acceptance": (
+                "complete passing JSON plus successful collective publication "
+                "decision plus zero process exit"
+            ),
+            "persistent_filesystem_failure_limit": (
+                "visible recovery cannot be guaranteed when storage rejects "
+                "recovery writes, replacement, syncing, or read-back"
+            ),
             "distributed_failure_contract": {
                 "process_group_timeout_seconds": (args.distributed_timeout_seconds),
                 "unexpected_faults_inside_collectives": "fail-stop",
                 "final_report_guarantee": (
                     "no final report is guaranteed after an unexpected fault "
-                    "inside an unavoidable distributed collective; the incomplete "
-                    "reservation sentinel remains authoritative"
+                    "inside an unavoidable distributed collective; before durable "
+                    "final replacement the incomplete reservation is authoritative"
+                ),
+                "post_replacement_broadcast_failure": (
+                    "a complete JSON may remain visible but is invalid without a "
+                    "successful collective decision and zero process exit"
                 ),
                 "collective_recovery_claimed": False,
             },
