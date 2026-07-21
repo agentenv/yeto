@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import json
 import sys
+import weakref
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import huggingface_hub
 import peft
@@ -101,8 +103,11 @@ def test_fused_loss_variant_applies_instance_patch_before_peft(monkeypatch):
     monkeypatch.setattr(peft, "get_peft_model", fake_get_peft_model)
     monkeypatch.setattr(
         benchmark,
-        "validate_lora_output_head",
-        lambda actual_model: {"frozen": True, "adapted": False},
+        "validate_lora_production_envelope",
+        lambda actual_model: {
+            "output_head": {"frozen": True, "adapted": False},
+            "trainable_dtype_counts": {"float32": 1},
+        },
     )
     monkeypatch.setattr(
         benchmark,
@@ -137,7 +142,7 @@ def test_fused_loss_variant_applies_instance_patch_before_peft(monkeypatch):
     ]
 
 
-def test_poisoned_kernel_isolation_failure_is_a_fatal_benchmark_load_error():
+def test_every_kernel_isolation_failure_is_a_fatal_benchmark_load_error():
     complete = benchmark.KernelIsolationError(
         "restored",
         failed_invariants=["class_binding"],
@@ -148,11 +153,87 @@ def test_poisoned_kernel_isolation_failure_is_a_fatal_benchmark_load_error():
         failed_invariants=["parameter_contents"],
         rollback_report={"complete": False},
     )
+    signature_failure = benchmark.KernelIsolationError(
+        "signature inspection failed after irreversible mutation",
+        failed_invariants=["post_apply_validation_completed"],
+        rollback_report={"complete": False},
+    )
 
-    assert not benchmark.is_fatal_model_load_error(complete)
+    assert benchmark.is_fatal_model_load_error(complete)
     assert benchmark.is_fatal_model_load_error(poisoned)
+    assert benchmark.is_fatal_model_load_error(signature_failure)
     assert benchmark.is_fatal_model_load_error(RuntimeError("CUDA out of memory"))
     assert not benchmark.is_fatal_model_load_error(RuntimeError("missing optional package"))
+
+    try:
+        raise RuntimeError("wrapped") from complete
+    except RuntimeError as wrapped:
+        assert benchmark.is_fatal_model_load_error(wrapped)
+
+    try:
+        raise poisoned
+    except benchmark.KernelIsolationError:
+        try:
+            raise RuntimeError("implicit context")
+        except RuntimeError as contextual:
+            assert benchmark.is_fatal_model_load_error(contextual)
+
+
+def test_failed_model_load_unconditionally_collects_instance_forward_cycle(
+    monkeypatch,
+    tmp_path,
+):
+    references = []
+    cleanup_observations = []
+
+    class CyclicModel:
+        pass
+
+    def forward(self):
+        return self
+
+    def failing_load(*args, **kwargs):
+        del args, kwargs
+        model = CyclicModel()
+        model.forward = MethodType(forward, model)
+        references.append(weakref.ref(model))
+        raise RuntimeError("load failed after instance patch")
+
+    def observed_cleanup():
+        gc.collect()
+        cleanup_observations.append(references[-1]() is None)
+
+    monkeypatch.setattr(
+        benchmark,
+        "setup_distributed",
+        lambda: (0, 1, torch.device("cpu")),
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "resolve_model_revision",
+        lambda *args: "a" * 40,
+    )
+    monkeypatch.setattr(benchmark, "environment_report", lambda *args: {})
+    monkeypatch.setattr(benchmark, "load_raw_model", failing_load)
+    monkeypatch.setattr(benchmark, "cleanup_cuda", observed_cleanup)
+
+    output = tmp_path / "failed.json"
+    result = benchmark.main(
+        [
+            "--variants",
+            "native-sdpa",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert result == 1
+    assert cleanup_observations == [True]
+    assert references[0]() is None
+    report = json.loads(output.read_text())
+    assert report["supported_evidence_scope"]["fused-linear-ce-sdpa"][
+        "peft_version"
+    ] == benchmark.PEFT_VERSION
 
 
 def test_percentile_interpolates_and_validates_input():
@@ -625,20 +706,29 @@ def test_lora_output_head_must_be_frozen_and_unadapted():
         def __init__(self):
             super().__init__()
             self.lm_head = torch.nn.Linear(2, 2, bias=False)
+            self.adapter = torch.nn.Parameter(torch.ones(2, dtype=torch.float32))
 
         def get_output_embeddings(self):
             return self.lm_head
 
     model = Model()
     model.lm_head.requires_grad_(False)
-    assert benchmark.validate_lora_output_head(model) == {
-        "frozen": True,
-        "adapted": False,
-        "parameter_count": 4,
+    assert benchmark.validate_lora_production_envelope(model) == {
+        "output_head": {
+            "frozen": True,
+            "adapted": False,
+            "parameter_count": 4,
+        },
+        "trainable_dtype_counts": {"float32": 2},
     }
     model.lm_head.weight.requires_grad_(True)
     with pytest.raises(RuntimeError, match="frozen, unadapted"):
-        benchmark.validate_lora_output_head(model)
+        benchmark.validate_lora_production_envelope(model)
+
+    model.lm_head.weight.requires_grad_(False)
+    model.adapter = torch.nn.Parameter(torch.ones(2, dtype=torch.bfloat16))
+    with pytest.raises(RuntimeError, match="FP32 trainable adapters"):
+        benchmark.validate_lora_production_envelope(model)
 
 
 def test_source_provenance_environment_overrides_are_strict(monkeypatch):

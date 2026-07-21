@@ -40,6 +40,7 @@ from .causal_kernels import (
     require_liger_model_support,
     resolved_attention_backend,
     validate_kernel_request,
+    validate_lora_production_envelope,
 )
 from .data import StreamingPackedBlocks, build_packed_dataset
 from .finalization import finalize_torch_island
@@ -403,6 +404,8 @@ def load_model_and_tokenizer(args, device):
         model = get_peft_model(model, lora)
     if base_quantization == "none":
         model.to(device)
+    if kernel_backend == "liger":
+        validate_lora_production_envelope(model)
     return model, tokenizer
 
 

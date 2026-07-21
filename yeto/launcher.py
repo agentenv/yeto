@@ -467,11 +467,15 @@ def causal_kernel_setup_steps(args) -> list[str]:
         LIGER_KERNEL_VERSION,
         NINJA_VERSION,
         PACKAGING_VERSION,
+        PEFT_VERSION,
     )
 
     steps: list[str] = []
     if getattr(args, "kernel_backend", "native") == "liger":
-        steps.append(f"pip install -q 'liger-kernel=={LIGER_KERNEL_VERSION}'")
+        steps.append(
+            f"pip install -q 'liger-kernel=={LIGER_KERNEL_VERSION}' "
+            f"'peft=={PEFT_VERSION}'"
+        )
     if getattr(args, "attention_backend", "auto") == "flash-attn-2":
         steps.extend(
             [

@@ -61,6 +61,7 @@ def test_torch_backend_uses_shard_and_torch_learner():
     assert "--attention-backend auto" in task.run
     assert "--kernel-backend native" in task.run
     assert "liger-kernel" not in task.setup
+    assert "peft==0.19.1" not in task.setup
     assert "flash-attn" not in task.setup
 
 
@@ -80,6 +81,7 @@ def test_torch_backend_installs_only_explicit_kernel_dependencies():
     assert "--attention-backend flash-attn-2" in task.run
     assert "--kernel-backend liger" in task.run
     assert "liger-kernel==0.8.0" in task.setup
+    assert "peft==0.19.1" in task.setup
     assert "flash-attn==2.8.3" in task.setup
     assert "--no-build-isolation" in task.setup
 

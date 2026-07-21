@@ -71,6 +71,11 @@ def test_isolated_fused_loss_is_applied_before_peft(monkeypatch):
     )
     monkeypatch.setattr(learner, "resolve_lora_targets", lambda *args: "all-linear")
     monkeypatch.setattr(peft, "LoraConfig", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        learner,
+        "validate_lora_production_envelope",
+        lambda model: events.append("envelope"),
+    )
 
     def fake_get_peft_model(model, _config):
         assert model is base_model
@@ -105,7 +110,95 @@ def test_isolated_fused_loss_is_applied_before_peft(monkeypatch):
         "attention",
         "peft",
         ("to", "cpu"),
+        "envelope",
     ]
+
+
+@pytest.mark.parametrize(
+    ("kernel_backend", "should_reject"),
+    [("liger", True), ("native", False)],
+)
+def test_learner_rejects_peft_output_head_drift_only_in_fused_lane(
+    monkeypatch,
+    kernel_backend,
+    should_reject,
+):
+    import peft
+    import transformers
+    import yeto.learner as learner
+
+    config = SimpleNamespace(model_type="qwen2")
+    tokenizer = object()
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = config
+            self.lm_head = torch.nn.Linear(2, 2, bias=False)
+            self.adapter = torch.nn.Parameter(torch.ones(2, dtype=torch.float32))
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+    base_model = Model()
+
+    def fake_from_pretrained(factory, _model_id, **_kwargs):
+        if factory is transformers.AutoConfig:
+            return config
+        if factory is transformers.AutoTokenizer:
+            return tokenizer
+        assert factory is transformers.AutoModelForCausalLM
+        return base_model
+
+    def fake_get_peft_model(model, _config):
+        model.lm_head.requires_grad_(False)
+        model.lm_head.lora_A = torch.nn.ModuleDict(
+            {"default": torch.nn.Linear(2, 1, bias=False)}
+        )
+        return model
+
+    monkeypatch.setattr(learner, "_from_pretrained_offline_first", fake_from_pretrained)
+    monkeypatch.setattr(
+        learner, "validate_kernel_request", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(learner, "attention_load_kwargs", lambda *args: {})
+    monkeypatch.setattr(learner, "require_liger_model_support", lambda config: "qwen2")
+    monkeypatch.setattr(
+        learner,
+        "apply_liger_fused_linear_ce",
+        lambda model: {"loss_implementation": "fused"},
+    )
+    monkeypatch.setattr(
+        learner,
+        "resolved_attention_backend",
+        lambda model, requested: requested,
+    )
+    monkeypatch.setattr(learner, "resolve_lora_targets", lambda *args: "all-linear")
+    monkeypatch.setattr(peft, "LoraConfig", lambda **kwargs: kwargs)
+    monkeypatch.setattr(peft, "get_peft_model", fake_get_peft_model)
+    args = SimpleNamespace(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        base_quantization="none",
+        tuning="lora",
+        shard="ddp",
+        kernel_backend=kernel_backend,
+        attention_backend="auto",
+        loss_function="cross_entropy",
+        lora_r=16,
+        lora_alpha=32,
+        lora_targets="auto",
+    )
+
+    if should_reject:
+        with pytest.raises(RuntimeError, match="frozen, unadapted lm_head"):
+            load_model_and_tokenizer(args, torch.device("cpu"))
+    else:
+        model, loaded_tokenizer = load_model_and_tokenizer(
+            args,
+            torch.device("cpu"),
+        )
+        assert model is base_model
+        assert loaded_tokenizer is tokenizer
 
 
 # --- normalize_param_name -------------------------------------------------

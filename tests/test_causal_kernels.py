@@ -19,7 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_optional_dependency_pins_match_runtime_contract():
     project = (ROOT / "pyproject.toml").read_text()
     assert (
-        f'a100-liger = ["liger-kernel=={causal_kernels.LIGER_KERNEL_VERSION}"]'
+        "a100-liger = "
+        f'["liger-kernel=={causal_kernels.LIGER_KERNEL_VERSION}", '
+        f'"peft=={causal_kernels.PEFT_VERSION}"]'
         in project
     )
     assert (
@@ -154,7 +156,36 @@ def test_liger_request_fails_closed_for_device_loss_quantization_and_pin(monkeyp
     )
 
 
-def _install_fake_qwen2_apply(monkeypatch, apply_fn):
+def test_liger_request_rejects_peft_version_drift(monkeypatch):
+    monkeypatch.setattr(causal_kernels, "_require_a100", lambda device: None)
+
+    def version(distribution):
+        if distribution == "liger-kernel":
+            return causal_kernels.LIGER_KERNEL_VERSION
+        if distribution == "peft":
+            return "0.20.0"
+        raise AssertionError(distribution)
+
+    monkeypatch.setattr(causal_kernels.metadata, "version", version)
+    monkeypatch.setattr(causal_kernels.importlib.util, "find_spec", lambda name: object())
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"peft=={causal_kernels.PEFT_VERSION} is required",
+    ):
+        causal_kernels.validate_kernel_request(
+            "liger",
+            "cross_entropy",
+            SimpleNamespace(type="cuda"),
+            torch.bfloat16,
+            tuning="lora",
+            shard="ddp",
+        )
+
+
+def _install_fake_qwen2_apply(monkeypatch, apply_fn, fused_forward=None):
+    if fused_forward is None:
+        fused_forward = _replacement_forward
     root = ModuleType("liger_kernel")
     root.__path__ = []
     transformers = ModuleType("liger_kernel.transformers")
@@ -167,10 +198,22 @@ def _install_fake_qwen2_apply(monkeypatch, apply_fn):
 
     functional.liger_fused_linear_cross_entropy = fused_linear_cross_entropy
     transformers.functional = functional
+    model_package = ModuleType("liger_kernel.transformers.model")
+    model_package.__path__ = []
+    qwen2_model = ModuleType("liger_kernel.transformers.model.qwen2")
+    qwen2_model.lce_forward = fused_forward
+    model_package.qwen2 = qwen2_model
+    transformers.model = model_package
     monkeypatch.setitem(sys.modules, "liger_kernel", root)
     monkeypatch.setitem(sys.modules, "liger_kernel.transformers", transformers)
     monkeypatch.setitem(
         sys.modules, "liger_kernel.transformers.functional", functional
+    )
+    monkeypatch.setitem(
+        sys.modules, "liger_kernel.transformers.model", model_package
+    )
+    monkeypatch.setitem(
+        sys.modules, "liger_kernel.transformers.model.qwen2", qwen2_model
     )
 
 
@@ -285,7 +328,11 @@ def test_fused_linear_ce_application_changes_only_one_qwen2_instance(monkeypatch
         )
         model.forward = MethodType(replacement_forward, model)
 
-    _install_fake_qwen2_apply(monkeypatch, apply)
+    _install_fake_qwen2_apply(
+        monkeypatch,
+        apply,
+        fused_forward=replacement_forward,
+    )
     config = Qwen2Config(
         vocab_size=32,
         hidden_size=16,
@@ -320,13 +367,20 @@ def test_fused_linear_ce_application_changes_only_one_qwen2_instance(monkeypatch
         == causal_kernels.FUSED_LINEAR_CE_IMPLEMENTATION
     )
     assert report["patch_scope"] == "model-instance-forward-only"
+    assert report["forward_function"] == (
+        "liger_kernel.transformers.model.qwen2.lce_forward"
+    )
     assert all(report["invariants"].values())
     assert report["state_attestation"] == {
         "tensor_content_digest": "sha256",
         "tensor_digest_chunk_bytes": 4 * 1024 * 1024,
         "retains_duplicate_model_tensors": False,
-        "config_and_builtin_containers": "structural-sha256",
-        "failure_contract": "verified-rollback-or-fatal-poisoned-process",
+        "tensor_python_and_hook_state": "binding-and-structural-sha256",
+        "config_containers_and_inspectable_objects": "structural-sha256",
+        "opaque_python_leaves": "binding-identity",
+        "rng_state": "cpu-and-all-visible-cuda-generators",
+        "backend_flags": "deterministic-cudnn-matmul-and-sdpa",
+        "failure_contract": "verified-rollback-evidence-and-fatal-process-exit",
     }
 
 
@@ -365,13 +419,48 @@ def test_fused_linear_ce_application_rejects_global_class_mutation(monkeypatch):
     error = caught.value
     assert error.rollback_complete
     assert not error.process_state_poisoned
-    assert not error.fatal
+    assert error.fatal
     assert Qwen2ForCausalLM.forward is original_forward
     assert modeling_qwen2.Qwen2RMSNorm is original_norm
     assert torch.nn.functional.cross_entropy is original_cross_entropy
     assert "forward" not in vars(model)
     assert all(error.rollback_report["process_invariants"].values())
     assert all(error.rollback_report["model_invariants"].values())
+
+
+def test_fused_linear_ce_rejects_a_different_valid_bound_forward(monkeypatch):
+    def other_forward(
+        self,
+        input_ids=None,
+        labels=None,
+        use_cache=None,
+        skip_logits=None,
+        **kwargs,
+    ):
+        del self, input_ids, labels, use_cache, skip_logits, kwargs
+
+    def bad_apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu
+        model.forward = MethodType(other_forward, model)
+
+    _install_fake_qwen2_apply(monkeypatch, bad_apply)
+    model = _tiny_qwen2_model()
+
+    with pytest.raises(causal_kernels.KernelIsolationError) as caught:
+        causal_kernels.apply_liger_fused_linear_ce(model)
+
+    error = caught.value
+    assert "forward_is_exact_fused_qwen2_forward" in error.failed_invariants
+    assert error.rollback_complete and not error.process_state_poisoned
+    assert error.fatal
+    assert "forward" not in vars(model)
 
 
 def test_fused_linear_ce_rolls_back_a_partially_applied_exception(monkeypatch):
@@ -401,8 +490,66 @@ def test_fused_linear_ce_rolls_back_a_partially_applied_exception(monkeypatch):
     assert isinstance(error.__cause__, ValueError)
     assert error.failed_invariants == ("third_party_apply_completed",)
     assert error.rollback_complete and not error.process_state_poisoned
+    assert error.fatal
     assert Qwen2ForCausalLM.forward is original_forward
     assert "forward" not in vars(model)
+
+
+def test_fused_linear_ce_restores_cpu_rng_state(monkeypatch):
+    model = _tiny_qwen2_model()
+    before_rng_state = torch.get_rng_state().clone()
+
+    def bad_apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu
+        torch.manual_seed(9173)
+        model.forward = MethodType(_replacement_forward, model)
+
+    _install_fake_qwen2_apply(monkeypatch, bad_apply)
+    with pytest.raises(causal_kernels.KernelIsolationError) as caught:
+        causal_kernels.apply_liger_fused_linear_ce(model)
+
+    error = caught.value
+    assert "cpu_rng_state_unchanged" in error.failed_invariants
+    assert torch.equal(torch.get_rng_state(), before_rng_state)
+    assert error.rollback_complete and not error.process_state_poisoned
+    assert error.fatal
+
+
+def test_fused_linear_ce_restores_backend_flags(monkeypatch):
+    model = _tiny_qwen2_model()
+    before_benchmark = torch.backends.cudnn.benchmark
+
+    def bad_apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu
+        torch.backends.cudnn.benchmark = not before_benchmark
+        model.forward = MethodType(_replacement_forward, model)
+
+    _install_fake_qwen2_apply(monkeypatch, bad_apply)
+    with pytest.raises(causal_kernels.KernelIsolationError) as caught:
+        causal_kernels.apply_liger_fused_linear_ce(model)
+
+    error = caught.value
+    assert (
+        "deterministic_cudnn_and_sdpa_backend_flags_unchanged"
+        in error.failed_invariants
+    )
+    assert torch.backends.cudnn.benchmark is before_benchmark
+    assert error.rollback_complete and not error.process_state_poisoned
+    assert error.fatal
 
 
 def test_fused_linear_ce_detects_in_place_parameter_content_mutation(monkeypatch):
@@ -497,8 +644,47 @@ def test_fused_linear_ce_restores_exact_nested_module_class(monkeypatch):
     error = caught.value
     assert "module_types_unchanged" in error.failed_invariants
     assert error.rollback_complete and not error.process_state_poisoned
+    assert error.fatal
     assert type(target) is original_type
     assert "forward" not in vars(model)
+
+
+def test_fused_linear_ce_restores_nested_class_and_global_bindings(monkeypatch):
+    from transformers.models.qwen2 import modeling_qwen2
+
+    model = _tiny_qwen2_model()
+    original_mlp_forward = modeling_qwen2.Qwen2MLP.forward
+    original_norm = modeling_qwen2.Qwen2RMSNorm
+
+    def replacement_mlp_forward(self, hidden_state):
+        del self
+        return hidden_state
+
+    def bad_apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu
+        modeling_qwen2.Qwen2MLP.forward = replacement_mlp_forward
+        modeling_qwen2.Qwen2RMSNorm = object
+        model.forward = MethodType(_replacement_forward, model)
+
+    _install_fake_qwen2_apply(monkeypatch, bad_apply)
+    with pytest.raises(causal_kernels.KernelIsolationError) as caught:
+        causal_kernels.apply_liger_fused_linear_ce(model)
+
+    error = caught.value
+    assert "module_class_bindings_unchanged" in error.failed_invariants
+    assert "qwen2_module_bindings_unchanged" in error.failed_invariants
+    assert modeling_qwen2.Qwen2MLP.forward is original_mlp_forward
+    assert modeling_qwen2.Qwen2RMSNorm is original_norm
+    assert "forward" not in vars(model)
+    assert error.rollback_complete and not error.process_state_poisoned
+    assert error.fatal
 
 
 def test_fused_linear_ce_detects_in_place_module_container_mutation(monkeypatch):
@@ -529,6 +715,38 @@ def test_fused_linear_ce_detects_in_place_module_container_mutation(monkeypatch)
     assert "forward" not in vars(model)
 
 
+def test_fused_linear_ce_detects_custom_mutable_module_leaf(monkeypatch):
+    class MutableProbe:
+        def __init__(self):
+            self.values = [1]
+
+    model = _tiny_qwen2_model()
+    target = model.model.layers[0]
+    target.isolation_probe = MutableProbe()
+
+    def bad_apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu
+        target.isolation_probe.values.append(2)
+        model.forward = MethodType(_replacement_forward, model)
+
+    _install_fake_qwen2_apply(monkeypatch, bad_apply)
+    with pytest.raises(causal_kernels.KernelIsolationError) as caught:
+        causal_kernels.apply_liger_fused_linear_ce(model)
+
+    error = caught.value
+    assert "nested_custom_object_state_unchanged" in error.failed_invariants
+    assert target.isolation_probe.values == [1, 2]
+    assert error.process_state_poisoned and not error.rollback_complete
+    assert error.fatal
+
+
 def test_fused_linear_ce_detects_in_place_config_container_mutation(monkeypatch):
     model = _tiny_qwen2_model()
     model.config.isolation_probe = {"values": [1]}
@@ -551,11 +769,241 @@ def test_fused_linear_ce_detects_in_place_config_container_mutation(monkeypatch)
 
     error = caught.value
     assert (
-        "model_config_identity_type_and_structure_unchanged"
+        "config_like_identity_type_and_structure_unchanged"
         in error.failed_invariants
     )
     assert error.process_state_poisoned and not error.rollback_complete
     assert model.config.isolation_probe == {"values": [1, 2]}
+
+
+def test_fused_linear_ce_restores_generation_config_binding(monkeypatch):
+    model = _tiny_qwen2_model()
+    original_generation_config = model.generation_config
+    replacement_generation_config = SimpleNamespace(probe=[2])
+
+    def bad_apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu
+        model.generation_config = replacement_generation_config
+        model.forward = MethodType(_replacement_forward, model)
+
+    _install_fake_qwen2_apply(monkeypatch, bad_apply)
+    with pytest.raises(causal_kernels.KernelIsolationError) as caught:
+        causal_kernels.apply_liger_fused_linear_ce(model)
+
+    error = caught.value
+    assert (
+        "config_like_identity_type_and_structure_unchanged"
+        in error.failed_invariants
+    )
+    assert model.generation_config is original_generation_config
+    assert error.rollback_complete and not error.process_state_poisoned
+    assert error.fatal
+
+
+def test_fused_linear_ce_detects_generation_config_content_mutation(monkeypatch):
+    model = _tiny_qwen2_model()
+    generation_config = model.generation_config
+    generation_config.isolation_probe = {"values": [1]}
+
+    def bad_apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu
+        generation_config.isolation_probe["values"].append(2)
+        model.forward = MethodType(_replacement_forward, model)
+
+    _install_fake_qwen2_apply(monkeypatch, bad_apply)
+    with pytest.raises(causal_kernels.KernelIsolationError) as caught:
+        causal_kernels.apply_liger_fused_linear_ce(model)
+
+    error = caught.value
+    assert (
+        "config_like_identity_type_and_structure_unchanged"
+        in error.failed_invariants
+    )
+    assert model.generation_config is generation_config
+    assert generation_config.isolation_probe == {"values": [1, 2]}
+    assert error.process_state_poisoned and not error.rollback_complete
+    assert error.fatal
+
+
+def test_fused_linear_ce_restores_parameter_gradient_binding(monkeypatch):
+    model = _tiny_qwen2_model()
+    parameter = model.model.embed_tokens.weight
+    original_gradient = torch.ones_like(parameter)
+    parameter.grad = original_gradient
+
+    def bad_apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu
+        parameter.grad = torch.zeros_like(parameter)
+        model.forward = MethodType(_replacement_forward, model)
+
+    _install_fake_qwen2_apply(monkeypatch, bad_apply)
+    with pytest.raises(causal_kernels.KernelIsolationError) as caught:
+        causal_kernels.apply_liger_fused_linear_ce(model)
+
+    error = caught.value
+    assert "parameter_gradient_identity_unchanged" in error.failed_invariants
+    assert parameter.grad is original_gradient
+    assert torch.equal(parameter.grad, torch.ones_like(parameter))
+    assert error.rollback_complete and not error.process_state_poisoned
+    assert error.fatal
+
+
+def test_fused_linear_ce_restores_parameter_gradient_none_state(monkeypatch):
+    model = _tiny_qwen2_model()
+    parameter = model.model.embed_tokens.weight
+    assert parameter.grad is None
+
+    def bad_apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu
+        parameter.grad = torch.ones_like(parameter)
+        model.forward = MethodType(_replacement_forward, model)
+
+    _install_fake_qwen2_apply(monkeypatch, bad_apply)
+    with pytest.raises(causal_kernels.KernelIsolationError) as caught:
+        causal_kernels.apply_liger_fused_linear_ce(model)
+
+    error = caught.value
+    assert "parameter_gradient_presence_unchanged" in error.failed_invariants
+    assert parameter.grad is None
+    assert error.rollback_complete and not error.process_state_poisoned
+    assert error.fatal
+
+
+def test_fused_linear_ce_detects_parameter_gradient_content_mutation(monkeypatch):
+    model = _tiny_qwen2_model()
+    parameter = model.model.embed_tokens.weight
+    original_gradient = torch.ones_like(parameter)
+    parameter.grad = original_gradient
+    before_version = original_gradient._version
+
+    def bad_apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu
+        parameter.grad.data.add_(1)
+        model.forward = MethodType(_replacement_forward, model)
+
+    _install_fake_qwen2_apply(monkeypatch, bad_apply)
+    with pytest.raises(causal_kernels.KernelIsolationError) as caught:
+        causal_kernels.apply_liger_fused_linear_ce(model)
+
+    error = caught.value
+    assert original_gradient._version == before_version
+    assert parameter.grad is original_gradient
+    assert torch.equal(parameter.grad, torch.full_like(parameter, 2))
+    assert "parameter_gradient_contents_unchanged" in error.failed_invariants
+    assert error.process_state_poisoned and not error.rollback_complete
+    assert error.fatal
+
+
+def test_fused_linear_ce_restores_parameter_hook_binding(monkeypatch):
+    model = _tiny_qwen2_model()
+    parameter = model.model.embed_tokens.weight
+    assert parameter._backward_hooks is None
+
+    def bad_apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu
+        parameter.register_hook(lambda gradient: gradient)
+        model.forward = MethodType(_replacement_forward, model)
+
+    _install_fake_qwen2_apply(monkeypatch, bad_apply)
+    with pytest.raises(causal_kernels.KernelIsolationError) as caught:
+        causal_kernels.apply_liger_fused_linear_ce(model)
+
+    error = caught.value
+    assert "parameter_hook_state_unchanged" in error.failed_invariants
+    assert parameter._backward_hooks is None
+    assert error.rollback_complete and not error.process_state_poisoned
+    assert error.fatal
+
+
+def test_signature_validation_exception_rolls_back_and_poison_is_fatal(monkeypatch):
+    model = _tiny_qwen2_model()
+    parameter = model.model.embed_tokens.weight
+    before = parameter.detach().clone()
+
+    def fused_forward(
+        self,
+        input_ids=None,
+        labels=None,
+        use_cache=None,
+        skip_logits=None,
+        **kwargs,
+    ):
+        del self, input_ids, labels, use_cache, skip_logits, kwargs
+
+    fused_forward.__signature__ = "invalid"
+
+    def bad_apply(
+        rope=True,
+        cross_entropy=False,
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+        model=None,
+    ):
+        del rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu
+        parameter.data.add_(1)
+        model.forward = MethodType(fused_forward, model)
+
+    _install_fake_qwen2_apply(
+        monkeypatch,
+        bad_apply,
+        fused_forward=fused_forward,
+    )
+    try:
+        with pytest.raises(causal_kernels.KernelIsolationError) as caught:
+            causal_kernels.apply_liger_fused_linear_ce(model)
+    finally:
+        del fused_forward.__signature__
+
+    error = caught.value
+    assert isinstance(error.__cause__, (TypeError, ValueError))
+    assert error.failed_invariants == ("post_apply_validation_completed",)
+    assert not torch.equal(parameter, before)
+    assert "forward" not in vars(model)
+    assert error.process_state_poisoned and not error.rollback_complete
+    assert error.fatal
 
 
 def test_binary_mask_labels_shift_count_and_reject_fractional_weights():

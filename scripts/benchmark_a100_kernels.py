@@ -36,12 +36,14 @@ from yeto.causal_kernels import (  # noqa: E402
     KernelIsolationError,
     NATIVE_LAYER_BACKEND,
     NATIVE_LOSS_IMPLEMENTATION,
+    PEFT_VERSION,
     apply_liger_fused_linear_ce,
     attention_load_kwargs,
     liger_sft_forward,
     require_liger_model_support,
     resolved_attention_backend,
     validate_kernel_request,
+    validate_lora_production_envelope,
 )
 from yeto.losses import sft_loss  # noqa: E402
 from yeto.learner import allreduce_trainable_grads, resolve_lora_targets  # noqa: E402
@@ -178,14 +180,26 @@ def package_version(name: str) -> str | None:
 
 def is_fatal_model_load_error(exc: Exception) -> bool:
     """Return whether a failed arm makes continuing in-process unsafe."""
-    return (
-        isinstance(exc, torch.cuda.OutOfMemoryError)
-        or "out of memory" in str(exc).lower()
-        or (
-            isinstance(exc, KernelIsolationError)
-            and exc.process_state_poisoned
-        )
-    )
+    pending: list[BaseException] = [exc]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, torch.cuda.OutOfMemoryError):
+            return True
+        try:
+            if "out of memory" in str(current).lower():
+                return True
+        except Exception:
+            pass
+        if isinstance(current, KernelIsolationError) and current.fatal:
+            return True
+        for chained in (current.__cause__, current.__context__):
+            if chained is not None:
+                pending.append(chained)
+    return False
 
 
 def resolve_model_revision(model_id: str, requested_revision: str | None) -> str:
@@ -227,31 +241,6 @@ def broadcast_object(value, rank: int):
     if values[0] is None:
         raise RuntimeError("rank zero did not provide a value")
     return values[0]
-
-
-def validate_lora_output_head(model) -> dict:
-    """Require the production LoRA profile to leave the output head untouched."""
-    output_head = model.get_output_embeddings()
-    if output_head is None:
-        raise RuntimeError("the LoRA benchmark model exposes no output embedding head")
-    adapted_names = [
-        name for name, _ in output_head.named_parameters() if "lora_" in name
-    ]
-    trainable_names = [
-        name for name, parameter in output_head.named_parameters() if parameter.requires_grad
-    ]
-    if adapted_names or trainable_names:
-        raise RuntimeError(
-            "the production LoRA benchmark requires a frozen, unadapted lm_head; "
-            f"adapted={adapted_names[:5]} trainable={trainable_names[:5]}"
-        )
-    return {
-        "frozen": True,
-        "adapted": False,
-        "parameter_count": sum(
-            parameter.numel() for parameter in output_head.parameters()
-        ),
-    }
 
 
 def load_raw_model(
@@ -314,11 +303,17 @@ def load_raw_model(
                 task_type="CAUSAL_LM",
             ),
         )
-        output_head_report = validate_lora_output_head(model)
     model.to(device)
     model.train()
     model.config.use_cache = False
     resolved_attention_backend(model, variant.attention_backend)
+    production_envelope = (
+        validate_lora_production_envelope(model)
+        if tuning == "lora"
+        else None
+    )
+    if production_envelope is not None:
+        output_head_report = production_envelope["output_head"]
     trainable_parameters = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
     )
@@ -334,22 +329,20 @@ def load_raw_model(
         "trainable_parameters": trainable_parameters,
         "total_parameters": total_parameters,
         "trainable_fraction": trainable_parameters / total_parameters,
-        "trainable_dtype_counts": {},
+        "trainable_dtype_counts": (
+            production_envelope["trainable_dtype_counts"]
+            if production_envelope is not None
+            else {}
+        ),
     }
-    for parameter in model.parameters():
-        if parameter.requires_grad:
-            dtype_name = str(parameter.dtype).removeprefix("torch.")
-            tuning_report["trainable_dtype_counts"][dtype_name] = (
-                tuning_report["trainable_dtype_counts"].get(dtype_name, 0)
-                + parameter.numel()
-            )
-    if tuning == "lora" and set(tuning_report["trainable_dtype_counts"]) != {
-        "float32"
-    }:
-        raise RuntimeError(
-            "the production LoRA benchmark requires FP32 trainable adapters; "
-            f"found {tuning_report['trainable_dtype_counts']}"
-        )
+    if production_envelope is None:
+        for parameter in model.parameters():
+            if parameter.requires_grad:
+                dtype_name = str(parameter.dtype).removeprefix("torch.")
+                tuning_report["trainable_dtype_counts"][dtype_name] = (
+                    tuning_report["trainable_dtype_counts"].get(dtype_name, 0)
+                    + parameter.numel()
+                )
     return model, tuning_report, kernel_application
 
 
@@ -1749,6 +1742,7 @@ def main(argv=None) -> int:
             "fused-linear-ce-sdpa": {
                 "tuning": "lora",
                 "shard": "ddp",
+                "peft_version": PEFT_VERSION,
                 "distributed_policy": (
                     "replicated-frozen-base-manual-adapter-gradient-mean"
                 ),
@@ -1820,8 +1814,12 @@ def main(argv=None) -> int:
         if not loaded_everywhere:
             if model is not None:
                 del model
-                gc.collect()
-                torch.cuda.empty_cache()
+            model = None
+            # Always collect after a load failure, including the rank whose
+            # loader raised before returning a model. An instance-bound
+            # forward creates a self-cycle that otherwise survives until a
+            # later, unrelated arm.
+            cleanup_cuda()
             load_reason = errors[0] if errors else "model load failed on another rank"
             record = {
                 "variant": asdict(variant),

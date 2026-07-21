@@ -16,15 +16,18 @@ a custom loss on the Liger path, fractional token weights, or any drift in the
 pinned Qwen2 apply-function controls produces an error instead of silently
 selecting another implementation.
 
-The optional dependencies are pinned and excluded from ordinary CPU/dev
-installs:
+The kernel dependencies and the fused lane's PEFT compatibility point are
+pinned. Kernel packages remain excluded from ordinary CPU/dev installs:
 
 - `liger-kernel==0.8.0`
+- `peft==0.19.1` for the fused-loss LoRA lane (native modes retain the normal
+  project-wide PEFT compatibility range)
 - `flash-attn==2.8.3`
 
-Remote learner setup installs either package only when its corresponding flag
-is selected. FlashAttention is built after the CUDA-matched PyTorch wheel is
-installed and uses `--no-build-isolation` so the build can see that wheel.
+Remote learner setup installs each lane's exact packages only when its
+corresponding flag is selected. FlashAttention is built after the CUDA-matched
+PyTorch wheel is installed and uses `--no-build-isolation` so the build can see
+that wheel.
 
 For example, an existing Qwen2/Qwen2.5 launch can opt into the isolated fused
 linear cross-entropy loss while keeping SDPA and every model layer native:
@@ -58,34 +61,55 @@ swiglu=False
 model=model
 ```
 
-The call occurs before PEFT wraps the base model. Yeto attests the Qwen2 module
-and class bindings, functional cross-entropy, exact nested module identities
-and types, module namespaces, mutable built-in container structure, model
-configuration, and every registered parameter and buffer around that call.
-Tensor attestation covers object identity, shape, dtype, device, layout,
-stride, storage offset, data pointer, storage size, `requires_grad`, mutation
-version, and a strong content digest. Content SHA-256 is computed in bounded
-4 MiB logical-order chunks; Yeto never retains a second copy of the model's
-tensors. The only accepted change is a new instance-bound `forward` on that
-one base model. This proves the accepted arm kept the reference model layers,
-weights, buffers, and process-global bindings unchanged.
+The call occurs before PEFT wraps the base model. Yeto requires the resulting
+root binding to reference the exact `liger_kernel.transformers.model.qwen2`
+fused forward shipped by the pinned package; another callable with a compatible
+signature is rejected. Around the call, Yeto attests the Qwen2 module and class
+bindings, functional cross-entropy, every concrete module instance and unique
+module class present in the model, mutable built-in containers, config-like
+objects (including root `config` and `generation_config` plus nested config
+aliases), and custom Python objects with inspectable `__dict__` state. Opaque
+Python leaves are covered by binding identity rather than an unqualified claim
+about inaccessible internal state.
+
+Every registered parameter, parameter gradient, and buffer is attested.
+Gradient coverage distinguishes `None` from a tensor and includes exact tensor
+identity. Tensor Python attributes and backward/post-accumulate hook bindings
+and structures are included. Tensor attestation covers object identity, shape,
+dtype, device, layout, stride, storage offset, data pointer, storage size,
+`requires_grad`, mutation version, and a strong content digest. Content SHA-256
+is computed in
+bounded 4 MiB logical-order chunks; Yeto never retains a second copy of model
+or gradient contents. CPU RNG state, all visible CUDA generator states when
+CUDA is initialized, deterministic-algorithm mode, float32 matmul precision,
+and relevant cuDNN, CUDA matmul, and SDPA backend flags are also captured. The
+only accepted change across these explicitly attested surfaces is the exact
+pinned fused forward bound to that one base-model instance.
 
 Rejection is transactional where state is safely reversible: Yeto restores
-the Qwen2 module/class bindings, functional cross-entropy, model namespace,
-and exact module classes, then repeats the complete attestation against the
-pre-apply snapshot. In-place tensor or nested-container contents cannot in
-general be reconstructed without retaining a duplicate model. If any such
-state does not match after rollback, `KernelIsolationError` marks the process
-poisoned and requires termination. The benchmark treats that condition as
-fatal and never continues to another arm in the same process. Only a fully
-verified rollback permits a caller to continue.
+the Qwen2 module/class bindings, every captured module-class namespace,
+functional cross-entropy, model namespaces and exact module classes, original
+gradient bindings, RNG states, and backend flags, then repeats the complete
+attestation against the pre-apply snapshot. In-place tensor, gradient,
+container, config, or inspectable-object contents cannot in general be
+reconstructed without retaining duplicate contents. If any such state does
+not match after rollback, `KernelIsolationError` marks the process poisoned.
+Every `KernelIsolationError` is fatal for in-process continuation because it is
+raised only after third-party code began executing; a verified rollback is
+reported as evidence but is not permission for the learner or benchmark to
+load another model or run another arm in that process.
 
 The production-approved fused-loss envelope is currently narrower than the
-native learner: it requires `--tuning lora --shard ddp`. Full tuning and FSDP
-fail before launch/model loading and must use `--kernel-backend native` until
-each has separate real-CUDA loss, gradient, optimizer-delta, and distributed
-parity evidence. This restriction is independent of whether a configuration
-might appear to run; unsupported evidence profiles are never inferred safe.
+native learner: it requires `--tuning lora --shard ddp`, a frozen and
+unadapted `lm_head`, and FP32 for every trainable adapter parameter. The learner
+and benchmark call the same post-PEFT validator, so target-selection drift
+cannot silently adapt the output head. This lane requires exact PEFT 0.19.1;
+the native learner's broader PEFT compatibility remains unchanged. Full tuning
+and FSDP fail before launch/model loading and must use
+`--kernel-backend native` until each has
+separate real-CUDA loss, gradient, optimizer-delta, and distributed parity
+evidence. This restriction is independent of whether a configuration might
+appear to run; unsupported evidence profiles are never inferred safe.
 
 Binary token masks are converted to labels with `-100` at ignored positions.
 `num_items_in_batch=1` makes the pinned implementation return the required
@@ -106,7 +130,7 @@ on an existing 8-GPU A100 node from the repository root:
 
 ```bash
 pip install -e .
-pip install 'liger-kernel==0.8.0'
+pip install 'liger-kernel==0.8.0' 'peft==0.19.1'
 pip install 'ninja==1.13.0' 'packaging==25.0'
 MAX_JOBS=8 pip install --no-build-isolation 'flash-attn==2.8.3'
 

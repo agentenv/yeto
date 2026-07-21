@@ -17,7 +17,7 @@ from importlib import metadata
 
 import torch
 
-from .kernel_deps import FLASH_ATTN_VERSION, LIGER_KERNEL_VERSION
+from .kernel_deps import FLASH_ATTN_VERSION, LIGER_KERNEL_VERSION, PEFT_VERSION
 
 ATTENTION_BACKENDS = ("auto", "sdpa", "flash-attn-2")
 KERNEL_BACKENDS = ("native", "liger")
@@ -42,6 +42,7 @@ _HF_ATTENTION_NAMES = {
 _DISPLAY_ATTENTION_NAMES = {value: key for key, value in _HF_ATTENTION_NAMES.items()}
 _PACKAGE_INSTALL_HINTS = {
     "liger-kernel": "pip install -e '.[a100-liger]'",
+    "peft": "pip install -e '.[a100-liger]'",
     "flash-attn": "the pinned --no-build-isolation command in docs/A100_KERNELS.md",
 }
 
@@ -54,8 +55,10 @@ class KernelIsolationError(RuntimeError):
 
     ``process_state_poisoned`` is true when the pre-apply model/process state
     could not be reproduced exactly without retaining a second copy of model
-    tensors.  Callers must terminate the process in that case; continuing with
-    another model would make the isolation claim unverifiable.
+    tensors. Every instance of this exception is fatal for in-process
+    continuation because it is created only after third-party code has begun
+    executing. ``rollback_complete`` remains evidence about the observed state,
+    not permission to run another model or benchmark arm in the same process.
     """
 
     def __init__(
@@ -70,7 +73,20 @@ class KernelIsolationError(RuntimeError):
         self.rollback_report = rollback_report
         self.rollback_complete = bool(rollback_report["complete"])
         self.process_state_poisoned = not self.rollback_complete
-        self.fatal = self.process_state_poisoned
+        self.fatal = True
+
+
+class _IsolationViolation(Exception):
+    """Internal control flow carrying a contract failure to one rollback site."""
+
+    def __init__(
+        self,
+        failed_invariants: list[str],
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(str(failed_invariants))
+        self.failed_invariants = failed_invariants
+        self.cause = cause
 
 
 @dataclass(frozen=True)
@@ -85,6 +101,7 @@ class _ContainerFingerprint:
 class _NamespaceSnapshot:
     bindings: dict[str, object]
     containers: tuple[_ContainerFingerprint, ...]
+    custom_objects: tuple[_ContainerFingerprint, ...]
 
 
 @dataclass(frozen=True)
@@ -93,6 +110,21 @@ class _ModuleSnapshot:
     module: torch.nn.Module
     module_type: type
     namespace: _NamespaceSnapshot
+
+
+@dataclass(frozen=True)
+class _ClassSnapshot:
+    module_class: type
+    namespace: _NamespaceSnapshot
+
+
+@dataclass(frozen=True)
+class _MutableAttributeSnapshot:
+    name: str
+    value: object
+    object_id: int
+    object_type: str
+    structural_sha256: str
 
 
 @dataclass(frozen=True)
@@ -114,10 +146,15 @@ class _TensorSnapshot:
     version: int
     is_contiguous: bool
     content_sha256: str
+    python_namespace: _NamespaceSnapshot
+    hook_state: tuple[_MutableAttributeSnapshot, ...]
+    gradient: _TensorSnapshot | None
 
 
 @dataclass(frozen=True)
 class _ConfigSnapshot:
+    path: str
+    value: object
     object_id: int
     object_type: str
     structural_sha256: str
@@ -126,9 +163,10 @@ class _ConfigSnapshot:
 @dataclass(frozen=True)
 class _ModelSnapshot:
     modules: tuple[_ModuleSnapshot, ...]
+    module_classes: tuple[_ClassSnapshot, ...]
     parameters: tuple[_TensorSnapshot, ...]
     buffers: tuple[_TensorSnapshot, ...]
-    config: _ConfigSnapshot
+    config_like_objects: tuple[_ConfigSnapshot, ...]
 
 
 @dataclass(frozen=True)
@@ -136,6 +174,10 @@ class _ProcessSnapshot:
     qwen2_module: _NamespaceSnapshot
     qwen2_class: _NamespaceSnapshot
     functional_cross_entropy: object
+    cpu_rng_state: torch.Tensor
+    cuda_initialized: bool
+    cuda_rng_states: tuple[torch.Tensor, ...]
+    backend_flags: tuple[tuple[str, object], ...]
 
 
 def _qualified_type(value_or_type) -> str:
@@ -158,6 +200,7 @@ def _structural_update(
     *,
     leaf_identity: bool,
     seen: dict[int, int],
+    traverse_object_namespaces: bool = False,
 ) -> None:
     """Hash built-in container structure without calling user equality methods."""
     if value is None:
@@ -216,10 +259,18 @@ def _structural_update(
         if isinstance(value, dict):
             for key, item in value.items():
                 _structural_update(
-                    digest, key, leaf_identity=leaf_identity, seen=seen
+                    digest,
+                    key,
+                    leaf_identity=leaf_identity,
+                    seen=seen,
+                    traverse_object_namespaces=traverse_object_namespaces,
                 )
                 _structural_update(
-                    digest, item, leaf_identity=leaf_identity, seen=seen
+                    digest,
+                    item,
+                    leaf_identity=leaf_identity,
+                    seen=seen,
+                    traverse_object_namespaces=traverse_object_namespaces,
                 )
         elif isinstance(value, (set, frozenset)):
             item_digests = []
@@ -229,7 +280,8 @@ def _structural_update(
                     item_digest,
                     item,
                     leaf_identity=leaf_identity,
-                    seen={},
+                    seen=dict(seen),
+                    traverse_object_namespaces=traverse_object_namespaces,
                 )
                 item_digests.append(item_digest.digest())
             for item_digest in sorted(item_digests):
@@ -237,9 +289,44 @@ def _structural_update(
         else:
             for item in value:
                 _structural_update(
-                    digest, item, leaf_identity=leaf_identity, seen=seen
+                    digest,
+                    item,
+                    leaf_identity=leaf_identity,
+                    seen=seen,
+                    traverse_object_namespaces=traverse_object_namespaces,
                 )
         return
+
+    if (
+        traverse_object_namespaces
+        and not isinstance(value, (torch.nn.Module, type))
+        and not inspect.ismodule(value)
+    ):
+        try:
+            object_namespace = vars(value)
+        except TypeError:
+            object_namespace = None
+        if isinstance(object_namespace, dict):
+            object_id = id(value)
+            if object_id in seen:
+                _hash_field(
+                    digest,
+                    "object-reference",
+                    str(seen[object_id]).encode(),
+                )
+                return
+            seen[object_id] = len(seen)
+            _hash_field(digest, "object-type", _qualified_type(value).encode())
+            if leaf_identity:
+                _hash_field(digest, "object-id", str(object_id).encode())
+            _structural_update(
+                digest,
+                object_namespace,
+                leaf_identity=leaf_identity,
+                seen=seen,
+                traverse_object_namespaces=True,
+            )
+            return
 
     leaf_type = _qualified_type(value)
     if leaf_identity:
@@ -255,13 +342,19 @@ def _structural_update(
     _hash_field(digest, "leaf", payload.encode("utf-8", errors="backslashreplace"))
 
 
-def _structural_sha256(value, *, leaf_identity: bool) -> str:
+def _structural_sha256(
+    value,
+    *,
+    leaf_identity: bool,
+    traverse_object_namespaces: bool = False,
+) -> str:
     digest = hashlib.sha256()
     _structural_update(
         digest,
         value,
         leaf_identity=leaf_identity,
         seen={},
+        traverse_object_namespaces=traverse_object_namespaces,
     )
     return digest.hexdigest()
 
@@ -280,9 +373,43 @@ def _container_fingerprints(namespace: dict[str, object]) -> tuple[_ContainerFin
                     name=name,
                     object_id=id(value),
                     object_type=_qualified_type(value),
-                    sha256=_structural_sha256(value, leaf_identity=True),
+                    sha256=_structural_sha256(
+                        value,
+                        leaf_identity=True,
+                        traverse_object_namespaces=True,
+                    ),
                 )
             )
+    return tuple(fingerprints)
+
+
+def _custom_object_fingerprints(
+    namespace: dict[str, object],
+) -> tuple[_ContainerFingerprint, ...]:
+    fingerprints = []
+    for name, value in namespace.items():
+        if isinstance(value, (_STRUCTURAL_CONTAINER_TYPES, torch.Tensor, torch.nn.Module, type)):
+            continue
+        if inspect.ismodule(value):
+            continue
+        try:
+            object_namespace = vars(value)
+        except TypeError:
+            continue
+        if not isinstance(object_namespace, dict):
+            continue
+        fingerprints.append(
+            _ContainerFingerprint(
+                name=name,
+                object_id=id(value),
+                object_type=_qualified_type(value),
+                sha256=_structural_sha256(
+                    value,
+                    leaf_identity=True,
+                    traverse_object_namespaces=True,
+                ),
+            )
+        )
     return tuple(fingerprints)
 
 
@@ -291,6 +418,7 @@ def _capture_namespace(namespace: dict[str, object]) -> _NamespaceSnapshot:
     return _NamespaceSnapshot(
         bindings=bindings,
         containers=_container_fingerprints(bindings),
+        custom_objects=_custom_object_fingerprints(bindings),
     )
 
 
@@ -311,9 +439,27 @@ def _namespace_is_identical(
 
 
 def _namespace_containers_are_identical(
-    before: _NamespaceSnapshot, after: _NamespaceSnapshot
+    before: _NamespaceSnapshot,
+    after: _NamespaceSnapshot,
+    *,
+    allowed_added: frozenset[str] = frozenset(),
 ) -> bool:
-    return before.containers == after.containers
+    actual = tuple(
+        item for item in after.containers if item.name not in allowed_added
+    )
+    return before.containers == actual
+
+
+def _namespace_custom_objects_are_identical(
+    before: _NamespaceSnapshot,
+    after: _NamespaceSnapshot,
+    *,
+    allowed_added: frozenset[str] = frozenset(),
+) -> bool:
+    actual = tuple(
+        item for item in after.custom_objects if item.name not in allowed_added
+    )
+    return before.custom_objects == actual
 
 
 def _iter_tensor_digest_chunks(tensor: torch.Tensor, max_elements: int):
@@ -363,11 +509,35 @@ def _tensor_content_sha256(tensor: torch.Tensor) -> str:
     return digest.hexdigest()
 
 
+def _capture_tensor_hook_state(
+    tensor: torch.Tensor,
+) -> tuple[_MutableAttributeSnapshot, ...]:
+    snapshots = []
+    for name in ("_backward_hooks", "_post_accumulate_grad_hooks"):
+        value = getattr(tensor, name, None)
+        snapshots.append(
+            _MutableAttributeSnapshot(
+                name=name,
+                value=value,
+                object_id=id(value),
+                object_type=_qualified_type(value),
+                structural_sha256=_structural_sha256(
+                    value,
+                    leaf_identity=True,
+                    traverse_object_namespaces=True,
+                ),
+            )
+        )
+    return tuple(snapshots)
+
+
 def _capture_tensor(
     category: str,
     name: str,
     tensor: torch.Tensor,
     content_cache: dict[int, str],
+    *,
+    capture_gradient: bool = False,
 ) -> _TensorSnapshot:
     try:
         version = int(tensor._version)
@@ -378,6 +548,16 @@ def _capture_tensor(
     if content_sha256 is None:
         content_sha256 = _tensor_content_sha256(tensor)
         content_cache[id(tensor)] = content_sha256
+    gradient = None
+    if capture_gradient:
+        actual_gradient = tensor.grad
+        if actual_gradient is not None:
+            gradient = _capture_tensor(
+                "gradient",
+                f"{name}.grad",
+                actual_gradient,
+                content_cache,
+            )
     return _TensorSnapshot(
         category=category,
         name=name,
@@ -396,6 +576,9 @@ def _capture_tensor(
         version=version,
         is_contiguous=bool(tensor.is_contiguous()),
         content_sha256=content_sha256,
+        python_namespace=_capture_namespace(vars(tensor)),
+        hook_state=_capture_tensor_hook_state(tensor),
+        gradient=gradient,
     )
 
 
@@ -407,23 +590,59 @@ def _named_tensors(model, method_name: str):
         return tuple(method(recurse=True))
 
 
-def _capture_config(config) -> _ConfigSnapshot:
-    if config is None:
-        raise RuntimeError("the isolated fused-linear-CE model exposes no config")
-    to_dict = getattr(config, "to_dict", None)
+def _is_config_like(name: str, value: object) -> bool:
+    if value is None:
+        return False
+    if name == "config" or name.endswith("_config"):
+        return True
+    try:
+        return callable(getattr(value, "to_dict", None))
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not inspect possible config-like attribute {name!r}"
+        ) from exc
+
+
+def _capture_config(path: str, config: object) -> _ConfigSnapshot:
+    try:
+        to_dict = getattr(config, "to_dict", None)
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not inspect config-like object at {path!r}"
+        ) from exc
     try:
         structural_value = to_dict() if callable(to_dict) else dict(vars(config))
         structural_sha256 = _structural_sha256(
             structural_value,
             leaf_identity=False,
+            traverse_object_namespaces=True,
         )
     except Exception as exc:
-        raise RuntimeError("could not structurally fingerprint the model config") from exc
+        raise RuntimeError(
+            f"could not structurally fingerprint config-like object at {path!r}"
+        ) from exc
     return _ConfigSnapshot(
+        path=path,
+        value=config,
         object_id=id(config),
         object_type=_qualified_type(config),
         structural_sha256=structural_sha256,
     )
+
+
+def _capture_config_like_objects(
+    modules: tuple[_ModuleSnapshot, ...],
+) -> tuple[_ConfigSnapshot, ...]:
+    snapshots = []
+    for module in modules:
+        for name, value in module.namespace.bindings.items():
+            if not _is_config_like(name, value):
+                continue
+            path = f"{module.name}.{name}" if module.name else name
+            snapshots.append(_capture_config(path, value))
+    if not any(item.path == "config" for item in snapshots):
+        raise RuntimeError("the isolated fused-linear-CE model exposes no root config")
+    return tuple(snapshots)
 
 
 def _capture_model_state(model) -> _ModelSnapshot:
@@ -437,9 +656,28 @@ def _capture_model_state(model) -> _ModelSnapshot:
         )
         for name, module in modules
     )
+    module_classes = []
+    seen_classes = set()
+    for _name, module in modules:
+        module_class = type(module)
+        if id(module_class) in seen_classes:
+            continue
+        seen_classes.add(id(module_class))
+        module_classes.append(
+            _ClassSnapshot(
+                module_class=module_class,
+                namespace=_capture_namespace(dict(vars(module_class))),
+            )
+        )
     content_cache: dict[int, str] = {}
     parameters = tuple(
-        _capture_tensor("parameter", name, tensor, content_cache)
+        _capture_tensor(
+            "parameter",
+            name,
+            tensor,
+            content_cache,
+            capture_gradient=True,
+        )
         for name, tensor in _named_tensors(model, "named_parameters")
     )
     buffers = tuple(
@@ -448,17 +686,70 @@ def _capture_model_state(model) -> _ModelSnapshot:
     )
     return _ModelSnapshot(
         modules=module_snapshots,
+        module_classes=tuple(module_classes),
         parameters=parameters,
         buffers=buffers,
-        config=_capture_config(getattr(model, "config", None)),
+        config_like_objects=_capture_config_like_objects(module_snapshots),
+    )
+
+
+def _capture_backend_flags() -> tuple[tuple[str, object], ...]:
+    return (
+        (
+            "deterministic_algorithms",
+            bool(torch.are_deterministic_algorithms_enabled()),
+        ),
+        (
+            "deterministic_algorithms_warn_only",
+            bool(torch.is_deterministic_algorithms_warn_only_enabled()),
+        ),
+        (
+            "fill_uninitialized_memory",
+            bool(torch.utils.deterministic.fill_uninitialized_memory),
+        ),
+        ("float32_matmul_precision", torch.get_float32_matmul_precision()),
+        ("cudnn_enabled", bool(torch.backends.cudnn.enabled)),
+        ("cudnn_benchmark", bool(torch.backends.cudnn.benchmark)),
+        ("cudnn_deterministic", bool(torch.backends.cudnn.deterministic)),
+        ("cudnn_allow_tf32", bool(torch.backends.cudnn.allow_tf32)),
+        ("cuda_matmul_allow_tf32", bool(torch.backends.cuda.matmul.allow_tf32)),
+        (
+            "cuda_matmul_allow_fp16_reduced_precision_reduction",
+            bool(
+                torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
+            ),
+        ),
+        (
+            "cuda_matmul_allow_bf16_reduced_precision_reduction",
+            bool(
+                torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
+            ),
+        ),
+        ("flash_sdp_enabled", bool(torch.backends.cuda.flash_sdp_enabled())),
+        (
+            "mem_efficient_sdp_enabled",
+            bool(torch.backends.cuda.mem_efficient_sdp_enabled()),
+        ),
+        ("math_sdp_enabled", bool(torch.backends.cuda.math_sdp_enabled())),
+        ("cudnn_sdp_enabled", bool(torch.backends.cuda.cudnn_sdp_enabled())),
     )
 
 
 def _capture_process_state(modeling_qwen2, expected_class) -> _ProcessSnapshot:
+    cuda_initialized = bool(torch.cuda.is_initialized())
+    cuda_rng_states = (
+        tuple(state.clone() for state in torch.cuda.get_rng_state_all())
+        if cuda_initialized
+        else ()
+    )
     return _ProcessSnapshot(
         qwen2_module=_capture_namespace(vars(modeling_qwen2)),
         qwen2_class=_capture_namespace(dict(vars(expected_class))),
         functional_cross_entropy=torch.nn.functional.cross_entropy,
+        cpu_rng_state=torch.get_rng_state().clone(),
+        cuda_initialized=cuda_initialized,
+        cuda_rng_states=cuda_rng_states,
+        backend_flags=_capture_backend_flags(),
     )
 
 
@@ -579,6 +870,67 @@ def validate_kernel_request(
             "CUDA parity evidence"
         )
     _require_exact_package("liger-kernel", "liger_kernel", LIGER_KERNEL_VERSION)
+    _require_exact_package("peft", "peft", PEFT_VERSION)
+
+
+def validate_lora_production_envelope(model) -> dict:
+    """Require the shared LoRA state contract used by production and evidence."""
+    output_head = model.get_output_embeddings()
+    if output_head is None:
+        raise RuntimeError("the production LoRA model exposes no output embedding head")
+
+    adapted_names = [
+        name for name, _parameter in output_head.named_parameters()
+        if "lora_" in name
+    ]
+    adapted_modules = [
+        name or "<root>"
+        for name, module in output_head.named_modules()
+        if {
+            "lora_A",
+            "lora_B",
+            "lora_embedding_A",
+            "lora_embedding_B",
+        }
+        & vars(module).keys()
+    ]
+    trainable_head_names = [
+        name
+        for name, parameter in output_head.named_parameters()
+        if parameter.requires_grad
+    ]
+    if adapted_names or adapted_modules or trainable_head_names:
+        raise RuntimeError(
+            "the production LoRA profile requires a frozen, unadapted lm_head; "
+            f"adapted_parameters={adapted_names[:5]} "
+            f"adapted_modules={adapted_modules[:5]} "
+            f"trainable={trainable_head_names[:5]}"
+        )
+
+    trainable_dtype_counts: dict[str, int] = {}
+    for parameter in model.parameters():
+        if not parameter.requires_grad:
+            continue
+        dtype_name = str(parameter.dtype).removeprefix("torch.")
+        trainable_dtype_counts[dtype_name] = (
+            trainable_dtype_counts.get(dtype_name, 0) + parameter.numel()
+        )
+    if set(trainable_dtype_counts) != {"float32"}:
+        raise RuntimeError(
+            "the production LoRA profile requires FP32 trainable adapters; "
+            f"found {trainable_dtype_counts}"
+        )
+
+    return {
+        "output_head": {
+            "frozen": True,
+            "adapted": False,
+            "parameter_count": sum(
+                parameter.numel() for parameter in output_head.parameters()
+            ),
+        },
+        "trainable_dtype_counts": trainable_dtype_counts,
+    }
 
 
 def _qwen2_fused_linear_ce_apply_function():
@@ -629,6 +981,17 @@ def _qwen2_fused_linear_ce_apply_function():
     return apply_liger_kernel_to_qwen2
 
 
+def _qwen2_fused_linear_ce_forward_function():
+    """Return the exact fused Qwen2 forward shipped by the pinned package."""
+    try:
+        from liger_kernel.transformers.model.qwen2 import lce_forward
+    except Exception as exc:
+        raise RuntimeError(
+            "could not import Liger's pinned fused-linear-CE Qwen2 forward"
+        ) from exc
+    return lce_forward
+
+
 def require_liger_model_support(config) -> str:
     """Require the one model family approved for isolated fused linear CE."""
 
@@ -639,6 +1002,7 @@ def require_liger_model_support(config) -> str:
             f"Qwen2/Qwen2.5 (model_type='qwen2'); found {model_type!r}"
         )
     _qwen2_fused_linear_ce_apply_function()
+    _qwen2_fused_linear_ce_forward_function()
     return str(model_type)
 
 
@@ -684,6 +1048,107 @@ def _tensor_contents(snapshot: tuple[_TensorSnapshot, ...]) -> tuple:
     )
 
 
+def _tensor_python_namespaces_are_identical(
+    before: tuple[_TensorSnapshot, ...],
+    after: tuple[_TensorSnapshot, ...],
+) -> bool:
+    return len(before) == len(after) and all(
+        actual.category == expected.category
+        and actual.name == expected.name
+        and _namespace_is_identical(
+            expected.python_namespace,
+            actual.python_namespace,
+        )
+        and _namespace_containers_are_identical(
+            expected.python_namespace,
+            actual.python_namespace,
+        )
+        and _namespace_custom_objects_are_identical(
+            expected.python_namespace,
+            actual.python_namespace,
+        )
+        for expected, actual in zip(before, after, strict=True)
+    )
+
+
+def _mutable_attribute_snapshots_are_identical(
+    before: tuple[_MutableAttributeSnapshot, ...],
+    after: tuple[_MutableAttributeSnapshot, ...],
+) -> bool:
+    return len(before) == len(after) and all(
+        actual.name == expected.name
+        and actual.value is expected.value
+        and actual.object_id == expected.object_id
+        and actual.object_type == expected.object_type
+        and actual.structural_sha256 == expected.structural_sha256
+        for expected, actual in zip(before, after, strict=True)
+    )
+
+
+def _tensor_hook_states_are_identical(
+    before: tuple[_TensorSnapshot, ...],
+    after: tuple[_TensorSnapshot, ...],
+) -> bool:
+    return len(before) == len(after) and all(
+        actual.category == expected.category
+        and actual.name == expected.name
+        and _mutable_attribute_snapshots_are_identical(
+            expected.hook_state,
+            actual.hook_state,
+        )
+        for expected, actual in zip(before, after, strict=True)
+    )
+
+
+def _parameter_gradient_presence(
+    snapshot: tuple[_TensorSnapshot, ...],
+) -> tuple[tuple[str, bool], ...]:
+    return tuple((item.name, item.gradient is not None) for item in snapshot)
+
+
+def _parameter_gradient_bindings_are_identical(
+    before: tuple[_TensorSnapshot, ...],
+    after: tuple[_TensorSnapshot, ...],
+) -> bool:
+    if len(before) != len(after):
+        return False
+    for expected_parameter, actual_parameter in zip(before, after, strict=True):
+        expected = expected_parameter.gradient
+        actual = actual_parameter.gradient
+        if expected is None or actual is None:
+            if expected is not actual:
+                return False
+            continue
+        if (
+            actual.tensor is not expected.tensor
+            or actual.object_type != expected.object_type
+        ):
+            return False
+    return True
+
+
+def _parameter_gradients(
+    snapshot: tuple[_TensorSnapshot, ...],
+) -> tuple[_TensorSnapshot, ...]:
+    return tuple(
+        item.gradient for item in snapshot if item.gradient is not None
+    )
+
+
+def _config_like_objects_are_identical(
+    before: tuple[_ConfigSnapshot, ...],
+    after: tuple[_ConfigSnapshot, ...],
+) -> bool:
+    return len(before) == len(after) and all(
+        actual.path == expected.path
+        and actual.value is expected.value
+        and actual.object_id == expected.object_id
+        and actual.object_type == expected.object_type
+        and actual.structural_sha256 == expected.structural_sha256
+        for expected, actual in zip(before, after, strict=True)
+    )
+
+
 def _model_state_invariants(
     before: _ModelSnapshot,
     after: _ModelSnapshot,
@@ -713,7 +1178,9 @@ def _model_state_invariants(
     instance_containers_unchanged = (
         root_after is not None
         and _namespace_containers_are_identical(
-            root_before.namespace, root_after.namespace
+            root_before.namespace,
+            root_after.namespace,
+            allowed_added=allowed_added,
         )
     )
     nested_bindings_unchanged = all(
@@ -732,16 +1199,83 @@ def _model_state_invariants(
         )
         for item in before.modules[1:]
     )
+    instance_custom_objects_unchanged = (
+        root_after is not None
+        and _namespace_custom_objects_are_identical(
+            root_before.namespace,
+            root_after.namespace,
+            allowed_added=allowed_added,
+        )
+    )
+    nested_custom_objects_unchanged = all(
+        id(item.module) in after_modules
+        and _namespace_custom_objects_are_identical(
+            item.namespace,
+            after_modules[id(item.module)].namespace,
+        )
+        for item in before.modules[1:]
+    )
 
-    config_unchanged = before.config == after.config
+    expected_classes = tuple(id(item.module_class) for item in before.module_classes)
+    actual_classes = tuple(id(item.module_class) for item in after.module_classes)
+    module_class_layout_unchanged = actual_classes == expected_classes
+    after_classes = {
+        id(item.module_class): item for item in after.module_classes
+    }
+    module_class_bindings_unchanged = all(
+        id(item.module_class) in after_classes
+        and _namespace_is_identical(
+            item.namespace,
+            after_classes[id(item.module_class)].namespace,
+        )
+        for item in before.module_classes
+    )
+    module_class_containers_unchanged = all(
+        id(item.module_class) in after_classes
+        and _namespace_containers_are_identical(
+            item.namespace,
+            after_classes[id(item.module_class)].namespace,
+        )
+        for item in before.module_classes
+    )
+    module_class_custom_objects_unchanged = all(
+        id(item.module_class) in after_classes
+        and _namespace_custom_objects_are_identical(
+            item.namespace,
+            after_classes[id(item.module_class)].namespace,
+        )
+        for item in before.module_classes
+    )
+
+    before_gradients = _parameter_gradients(before.parameters)
+    after_gradients = _parameter_gradients(after.parameters)
     return {
         "module_layout_unchanged": module_layout_unchanged,
         "module_types_unchanged": module_types_unchanged,
         "instance_bindings_unchanged": instance_bindings_unchanged,
         "instance_container_state_unchanged": instance_containers_unchanged,
+        "instance_custom_object_state_unchanged": (
+            instance_custom_objects_unchanged
+        ),
         "nested_module_bindings_unchanged": nested_bindings_unchanged,
         "nested_container_state_unchanged": nested_containers_unchanged,
-        "model_config_identity_type_and_structure_unchanged": config_unchanged,
+        "nested_custom_object_state_unchanged": (
+            nested_custom_objects_unchanged
+        ),
+        "module_class_layout_unchanged": module_class_layout_unchanged,
+        "module_class_bindings_unchanged": module_class_bindings_unchanged,
+        "module_class_container_state_unchanged": (
+            module_class_containers_unchanged
+        ),
+        "module_class_custom_object_state_unchanged": (
+            module_class_custom_objects_unchanged
+        ),
+        "config_like_identity_type_and_structure_unchanged": (
+            _config_like_objects_are_identical(
+                before.config_like_objects,
+                after.config_like_objects,
+            )
+        ),
         "parameter_registry_and_identity_unchanged": (
             _tensor_registries_are_identical(before.parameters, after.parameters)
         ),
@@ -753,6 +1287,52 @@ def _model_state_invariants(
         ),
         "parameter_contents_unchanged": (
             _tensor_contents(before.parameters) == _tensor_contents(after.parameters)
+        ),
+        "parameter_python_attribute_state_unchanged": (
+            _tensor_python_namespaces_are_identical(
+                before.parameters,
+                after.parameters,
+            )
+        ),
+        "parameter_hook_state_unchanged": (
+            _tensor_hook_states_are_identical(
+                before.parameters,
+                after.parameters,
+            )
+        ),
+        "parameter_gradient_presence_unchanged": (
+            _parameter_gradient_presence(before.parameters)
+            == _parameter_gradient_presence(after.parameters)
+        ),
+        "parameter_gradient_identity_unchanged": (
+            _parameter_gradient_bindings_are_identical(
+                before.parameters,
+                after.parameters,
+            )
+        ),
+        "parameter_gradient_metadata_unchanged": (
+            _tensor_metadata(before_gradients)
+            == _tensor_metadata(after_gradients)
+        ),
+        "parameter_gradient_versions_unchanged": (
+            _tensor_versions(before_gradients)
+            == _tensor_versions(after_gradients)
+        ),
+        "parameter_gradient_contents_unchanged": (
+            _tensor_contents(before_gradients)
+            == _tensor_contents(after_gradients)
+        ),
+        "parameter_gradient_python_attribute_state_unchanged": (
+            _tensor_python_namespaces_are_identical(
+                before_gradients,
+                after_gradients,
+            )
+        ),
+        "parameter_gradient_hook_state_unchanged": (
+            _tensor_hook_states_are_identical(
+                before_gradients,
+                after_gradients,
+            )
         ),
         "buffer_registry_and_identity_unchanged": (
             _tensor_registries_are_identical(before.buffers, after.buffers)
@@ -766,18 +1346,47 @@ def _model_state_invariants(
         "buffer_contents_unchanged": (
             _tensor_contents(before.buffers) == _tensor_contents(after.buffers)
         ),
+        "buffer_python_attribute_state_unchanged": (
+            _tensor_python_namespaces_are_identical(
+                before.buffers,
+                after.buffers,
+            )
+        ),
+        "buffer_hook_state_unchanged": (
+            _tensor_hook_states_are_identical(
+                before.buffers,
+                after.buffers,
+            )
+        ),
     }
 
 
 def _process_state_invariants(
     before: _ProcessSnapshot, after: _ProcessSnapshot
 ) -> dict[str, bool]:
+    cuda_rng_states_unchanged = (
+        before.cuda_initialized == after.cuda_initialized
+        and len(before.cuda_rng_states) == len(after.cuda_rng_states)
+        and all(
+            torch.equal(expected, actual)
+            for expected, actual in zip(
+                before.cuda_rng_states,
+                after.cuda_rng_states,
+                strict=True,
+            )
+        )
+    )
     return {
         "qwen2_module_bindings_unchanged": _namespace_is_identical(
             before.qwen2_module, after.qwen2_module
         ),
         "qwen2_module_container_state_unchanged": (
             _namespace_containers_are_identical(
+                before.qwen2_module, after.qwen2_module
+            )
+        ),
+        "qwen2_module_custom_object_state_unchanged": (
+            _namespace_custom_objects_are_identical(
                 before.qwen2_module, after.qwen2_module
             )
         ),
@@ -789,8 +1398,24 @@ def _process_state_invariants(
                 before.qwen2_class, after.qwen2_class
             )
         ),
+        "qwen2_class_custom_object_state_unchanged": (
+            _namespace_custom_objects_are_identical(
+                before.qwen2_class, after.qwen2_class
+            )
+        ),
         "torch_cross_entropy_global_unchanged": (
             after.functional_cross_entropy is before.functional_cross_entropy
+        ),
+        "cpu_rng_state_unchanged": torch.equal(
+            before.cpu_rng_state,
+            after.cpu_rng_state,
+        ),
+        "cuda_initialization_state_unchanged": (
+            before.cuda_initialized == after.cuda_initialized
+        ),
+        "cuda_rng_states_unchanged": cuda_rng_states_unchanged,
+        "deterministic_cudnn_and_sdpa_backend_flags_unchanged": (
+            before.backend_flags == after.backend_flags
         ),
     }
 
@@ -828,6 +1453,73 @@ def _restore_model_bindings(before: _ModelSnapshot) -> None:
         namespace.update(item.namespace.bindings)
 
 
+def _restore_module_class_bindings(before: _ModelSnapshot) -> None:
+    for item in before.module_classes:
+        _restore_owner_bindings(item.module_class, item.namespace)
+
+
+def _restore_parameter_gradients(before: _ModelSnapshot) -> None:
+    for item in before.parameters:
+        expected_gradient = (
+            None if item.gradient is None else item.gradient.tensor
+        )
+        if item.tensor.grad is not expected_gradient:
+            item.tensor.grad = expected_gradient
+
+
+def _restore_tensor_mutable_bindings(before: _ModelSnapshot) -> None:
+    snapshots = (
+        *before.parameters,
+        *before.buffers,
+        *_parameter_gradients(before.parameters),
+    )
+    restored = set()
+    for item in snapshots:
+        if id(item.tensor) in restored:
+            continue
+        restored.add(id(item.tensor))
+        namespace = vars(item.tensor)
+        namespace.clear()
+        namespace.update(item.python_namespace.bindings)
+        for hook in item.hook_state:
+            if getattr(item.tensor, hook.name, None) is not hook.value:
+                setattr(item.tensor, hook.name, hook.value)
+
+
+def _restore_process_runtime_state(before: _ProcessSnapshot) -> None:
+    flags = dict(before.backend_flags)
+    torch.use_deterministic_algorithms(
+        bool(flags["deterministic_algorithms"]),
+        warn_only=bool(flags["deterministic_algorithms_warn_only"]),
+    )
+    torch.utils.deterministic.fill_uninitialized_memory = bool(
+        flags["fill_uninitialized_memory"]
+    )
+    torch.set_float32_matmul_precision(str(flags["float32_matmul_precision"]))
+    torch.backends.cudnn.enabled = bool(flags["cudnn_enabled"])
+    torch.backends.cudnn.benchmark = bool(flags["cudnn_benchmark"])
+    torch.backends.cudnn.deterministic = bool(flags["cudnn_deterministic"])
+    torch.backends.cudnn.allow_tf32 = bool(flags["cudnn_allow_tf32"])
+    torch.backends.cuda.matmul.allow_tf32 = bool(
+        flags["cuda_matmul_allow_tf32"]
+    )
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = bool(
+        flags["cuda_matmul_allow_fp16_reduced_precision_reduction"]
+    )
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = bool(
+        flags["cuda_matmul_allow_bf16_reduced_precision_reduction"]
+    )
+    torch.backends.cuda.enable_flash_sdp(bool(flags["flash_sdp_enabled"]))
+    torch.backends.cuda.enable_mem_efficient_sdp(
+        bool(flags["mem_efficient_sdp_enabled"])
+    )
+    torch.backends.cuda.enable_math_sdp(bool(flags["math_sdp_enabled"]))
+    torch.backends.cuda.enable_cudnn_sdp(bool(flags["cudnn_sdp_enabled"]))
+    torch.set_rng_state(before.cpu_rng_state)
+    if before.cuda_initialized:
+        torch.cuda.set_rng_state_all(list(before.cuda_rng_states))
+
+
 def _rollback_isolation_state(
     *,
     model,
@@ -838,6 +1530,10 @@ def _rollback_isolation_state(
 ) -> dict:
     restore_errors = []
     for label, operation in (
+        (
+            "rng_and_backend_state",
+            lambda: _restore_process_runtime_state(process_before),
+        ),
         (
             "qwen2_module_bindings",
             lambda: _restore_owner_bindings(
@@ -858,7 +1554,19 @@ def _rollback_isolation_state(
                 process_before.functional_cross_entropy,
             ),
         ),
+        (
+            "module_class_bindings",
+            lambda: _restore_module_class_bindings(model_before),
+        ),
         ("model_bindings_and_types", lambda: _restore_model_bindings(model_before)),
+        (
+            "parameter_gradient_bindings",
+            lambda: _restore_parameter_gradients(model_before),
+        ),
+        (
+            "tensor_python_and_hook_bindings",
+            lambda: _restore_tensor_mutable_bindings(model_before),
+        ),
     ):
         try:
             operation()
@@ -924,7 +1632,10 @@ def _raise_isolation_error(
         model_before=model_before,
     )
     if rollback_report["complete"]:
-        suffix = "pre-apply process and model state was restored and verified"
+        suffix = (
+            "pre-apply process and model state was restored and verified, but "
+            "the post-apply failure is fatal and the process must terminate"
+        )
     else:
         suffix = (
             "rollback could not reproduce the exact pre-apply state; the process "
@@ -944,12 +1655,14 @@ def _raise_isolation_error(
 def apply_liger_fused_linear_ce(model) -> dict:
     """Patch only one loaded Qwen2 model instance's loss-producing forward.
 
-    Every layer kernel remains the Transformers implementation. The only
-    accepted state change is a new ``forward`` binding on this exact model
-    instance. Bindings, module types, built-in container structure, config,
-    and registered tensor metadata/content are attested before and after the
-    call. Tensor contents use bounded streaming SHA-256 chunks, not a retained
-    duplicate of model weights.
+    Every layer kernel remains the Transformers implementation. Across the
+    explicitly attested surfaces, the only accepted state change is the exact
+    pinned fused ``forward`` bound to this model instance. Attestation covers
+    registered parameters, gradients, and buffers; concrete module instances
+    and their exact classes; built-in containers; config-like objects; and
+    custom Python objects with inspectable ``__dict__`` state. Opaque leaves
+    are covered by binding identity. Tensor contents use bounded streaming
+    SHA-256 chunks, not a retained duplicate of model weights.
 
     A rejected call restores restorable Python bindings and module types, then
     verifies the exact pre-apply fingerprints. If an in-place tensor/container
@@ -975,33 +1688,121 @@ def apply_liger_fused_linear_ce(model) -> dict:
         )
 
     apply_fn = _qwen2_fused_linear_ce_apply_function()
-    inherited_forward = model.forward
+    expected_fused_forward = _qwen2_fused_linear_ce_forward_function()
     process_before = _capture_process_state(modeling_qwen2, expected_class)
     model_before = _capture_model_state(model)
 
     try:
-        apply_fn(
-            rope=False,
-            cross_entropy=False,
-            fused_linear_cross_entropy=True,
-            rms_norm=False,
-            swiglu=False,
-            model=model,
-        )
-    except Exception as exc:
-        _raise_isolation_error(
-            model=model,
-            modeling_qwen2=modeling_qwen2,
-            expected_class=expected_class,
-            process_before=process_before,
-            model_before=model_before,
-            failed_invariants=["third_party_apply_completed"],
-            cause=exc,
-        )
+        try:
+            apply_fn(
+                rope=False,
+                cross_entropy=False,
+                fused_linear_cross_entropy=True,
+                rms_norm=False,
+                swiglu=False,
+                model=model,
+            )
+        except Exception as exc:
+            raise _IsolationViolation(
+                ["third_party_apply_completed"],
+                cause=exc,
+            )
 
-    try:
         process_after = _capture_process_state(modeling_qwen2, expected_class)
         model_after = _capture_model_state(model)
+
+        invariants = {
+            **_process_state_invariants(process_before, process_after),
+            **_model_state_invariants(
+                model_before,
+                model_after,
+                allow_forward_addition=True,
+            ),
+        }
+        patched_forward = vars(model).get("forward")
+        forward_is_instance_bound = (
+            patched_forward is not None
+            and getattr(patched_forward, "__self__", None) is model
+        )
+        forward_is_exact_fused_qwen2_forward = (
+            forward_is_instance_bound
+            and getattr(patched_forward, "__func__", None)
+            is expected_fused_forward
+        )
+        fused_forward_keyword_contract = False
+        if callable(patched_forward):
+            patched_signature = inspect.signature(patched_forward)
+            has_forward_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in patched_signature.parameters.values()
+            )
+            fused_forward_keyword_contract = (
+                {"labels", "use_cache", "skip_logits"}
+                <= patched_signature.parameters.keys()
+                and has_forward_kwargs
+            )
+
+        invariants["forward_is_instance_bound"] = forward_is_instance_bound
+        invariants["forward_is_exact_fused_qwen2_forward"] = (
+            forward_is_exact_fused_qwen2_forward
+        )
+        invariants["fused_forward_keyword_contract"] = (
+            fused_forward_keyword_contract
+        )
+        failed_invariants = [
+            name for name, passed in invariants.items() if not passed
+        ]
+        if failed_invariants:
+            raise _IsolationViolation(failed_invariants)
+
+        report = {
+            "model_type": model_type,
+            "layer_backend": NATIVE_LAYER_BACKEND,
+            "loss_backend": "liger",
+            "loss_implementation": FUSED_LINEAR_CE_IMPLEMENTATION,
+            "patch_scope": "model-instance-forward-only",
+            "apply_function": (
+                "liger_kernel.transformers.apply_liger_kernel_to_qwen2"
+            ),
+            "forward_function": (
+                "liger_kernel.transformers.model.qwen2.lce_forward"
+            ),
+            "apply_controls": {
+                "rope": False,
+                "cross_entropy": False,
+                "fused_linear_cross_entropy": True,
+                "rms_norm": False,
+                "swiglu": False,
+            },
+            "invariants": invariants,
+            "state_attestation": {
+                "tensor_content_digest": "sha256",
+                "tensor_digest_chunk_bytes": _TENSOR_DIGEST_CHUNK_BYTES,
+                "retains_duplicate_model_tensors": False,
+                "tensor_python_and_hook_state": (
+                    "binding-and-structural-sha256"
+                ),
+                "config_containers_and_inspectable_objects": (
+                    "structural-sha256"
+                ),
+                "opaque_python_leaves": "binding-identity",
+                "rng_state": "cpu-and-all-visible-cuda-generators",
+                "backend_flags": "deterministic-cudnn-matmul-and-sdpa",
+                "failure_contract": (
+                    "verified-rollback-evidence-and-fatal-process-exit"
+                ),
+            },
+        }
+    except _IsolationViolation as violation:
+        _raise_isolation_error(
+            model=model,
+            modeling_qwen2=modeling_qwen2,
+            expected_class=expected_class,
+            process_before=process_before,
+            model_before=model_before,
+            failed_invariants=violation.failed_invariants,
+            cause=violation.cause,
+        )
     except Exception as exc:
         _raise_isolation_error(
             model=model,
@@ -1009,78 +1810,10 @@ def apply_liger_fused_linear_ce(model) -> dict:
             expected_class=expected_class,
             process_before=process_before,
             model_before=model_before,
-            failed_invariants=["post_apply_state_was_fully_observable"],
+            failed_invariants=["post_apply_validation_completed"],
             cause=exc,
         )
-
-    invariants = {
-        **_process_state_invariants(process_before, process_after),
-        **_model_state_invariants(
-            model_before,
-            model_after,
-            allow_forward_addition=True,
-        ),
-    }
-    patched_forward = vars(model).get("forward")
-    forward_is_instance_bound = (
-        patched_forward is not None
-        and getattr(patched_forward, "__self__", None) is model
-        and getattr(patched_forward, "__func__", None)
-        is not getattr(inherited_forward, "__func__", None)
-    )
-    fused_forward_keyword_contract = False
-    if callable(patched_forward):
-        patched_signature = inspect.signature(patched_forward)
-        has_forward_kwargs = any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in patched_signature.parameters.values()
-        )
-        fused_forward_keyword_contract = (
-            {"labels", "use_cache", "skip_logits"}
-            <= patched_signature.parameters.keys()
-            and has_forward_kwargs
-        )
-
-    invariants["forward_is_instance_bound"] = forward_is_instance_bound
-    invariants["fused_forward_keyword_contract"] = fused_forward_keyword_contract
-    failed_invariants = [name for name, passed in invariants.items() if not passed]
-    if failed_invariants:
-        _raise_isolation_error(
-            model=model,
-            modeling_qwen2=modeling_qwen2,
-            expected_class=expected_class,
-            process_before=process_before,
-            model_before=model_before,
-            failed_invariants=failed_invariants,
-        )
-
-    return {
-        "model_type": model_type,
-        "layer_backend": NATIVE_LAYER_BACKEND,
-        "loss_backend": "liger",
-        "loss_implementation": FUSED_LINEAR_CE_IMPLEMENTATION,
-        "patch_scope": "model-instance-forward-only",
-        "apply_function": (
-            "liger_kernel.transformers.apply_liger_kernel_to_qwen2"
-        ),
-        "apply_controls": {
-            "rope": False,
-            "cross_entropy": False,
-            "fused_linear_cross_entropy": True,
-            "rms_norm": False,
-            "swiglu": False,
-        },
-        "invariants": invariants,
-        "state_attestation": {
-            "tensor_content_digest": "sha256",
-            "tensor_digest_chunk_bytes": _TENSOR_DIGEST_CHUNK_BYTES,
-            "retains_duplicate_model_tensors": False,
-            "config_and_builtin_containers": "structural-sha256",
-            "failure_contract": (
-                "verified-rollback-or-fatal-poisoned-process"
-            ),
-        },
-    }
+    return report
 
 
 def binary_mask_labels(
