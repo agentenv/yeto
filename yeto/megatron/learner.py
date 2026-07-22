@@ -360,11 +360,15 @@ def main(argv=None):
         bulk_dtype=bulk_dtype, DTYPE_Q4=DTYPE_Q4,
     )
 
+    # Make sure all ranks have completed training collectives before rank 0
+    # enters the potentially slow Bridge/HF export path. Do not put a
+    # collective after save: failed Bridge export can take long enough for
+    # nonzero ranks to hit NCCL's watchdog while waiting.
+    dist.barrier()
     if rank == 0:
         _save_output_best_effort(bridge, model, args.output_dir, args)
         if client is not None:
             client.close()
-    dist.barrier()
     dist.destroy_process_group()
 
 
