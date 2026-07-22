@@ -353,6 +353,16 @@ def save_sample_output(sample, output_path: str | Path, *, fps: int = 8) -> list
     if isinstance(value, (str, os.PathLike, Path)):
         source = Path(os.path.expanduser(str(value)))
         if source.exists():
+            if source.is_dir():
+                dest = path if not path.suffix else path.with_suffix("")
+                if dest.exists():
+                    import shutil
+
+                    shutil.rmtree(dest)
+                import shutil
+
+                shutil.copytree(source, dest)
+                return [dest]
             path.parent.mkdir(parents=True, exist_ok=True)
             if path.is_dir() or not path.suffix:
                 path.mkdir(parents=True, exist_ok=True)
@@ -376,7 +386,12 @@ def save_sample_output(sample, output_path: str | Path, *, fps: int = 8) -> list
             source = Path(os.path.expanduser(str(item)))
             if source.exists():
                 dest = root / source.name
-                shutil.copyfile(source, dest)
+                if source.is_dir():
+                    if dest.exists():
+                        shutil.rmtree(dest)
+                    shutil.copytree(source, dest)
+                else:
+                    shutil.copyfile(source, dest)
             else:
                 dest = root / f"asset_{index:06d}"
                 dest.write_text(str(item), encoding="utf-8")

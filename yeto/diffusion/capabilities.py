@@ -366,6 +366,26 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
             "Tencent Hunyuan3D-2.1 README and shape pipeline API",
         ),
     ),
+    "alphafold3": _cap(
+        family="AlphaFold3",
+        pipeline="external adapter",
+        denoisers=("inference-only",),
+        modalities=("protein", "rna", "dna", "ligand", "structure"),
+        conditioning=("msa", "template", "sequence", "chemistry", "adapter-defined"),
+        latent_layout="official AlphaFold3 internal structure representation",
+        scheduler="official AlphaFold3 inference pipeline",
+        forward_kwargs=("json_path", "model_dir", "db_dir", "output_dir"),
+        output_alignment="official AlphaFold3 output directory",
+        status="adapter-required",
+        adapter_boundary=(
+            "Official AlphaFold3 is license-gated and inference-only in Yeto; "
+            "the adapter requires a local official checkout and authorized model parameters."
+        ),
+        evidence=(
+            "yeto.diffusion.adapters.alphafold3",
+            "google-deepmind/alphafold3 README, LICENSE, and WEIGHTS_TERMS_OF_USE",
+        ),
+    ),
 }
 
 

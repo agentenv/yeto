@@ -2,6 +2,7 @@ import argparse
 import io
 import json
 import random
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -80,6 +81,7 @@ def test_diffusion_aliases_resolve_and_infer_kind():
     assert {
         "chroma1-base",
         "chroma1-hd",
+        "alphafold3",
         "flux",
         "flux-schnell",
         "flux2-dev",
@@ -104,6 +106,7 @@ def test_diffusion_aliases_resolve_and_infer_kind():
     assert resolve("qwen-image") == "Qwen/Qwen-Image"
     assert resolve("hunyuan-video") == "hunyuanvideo-community/HunyuanVideo"
     assert resolve("hunyuan3d-21") == "tencent/Hunyuan3D-2.1"
+    assert resolve("alphafold3") == "alphafold3"
     assert resolve("nava") == "baidu/NAVA"
     assert resolve("protenix") == "protenix_base_default_v1.0.0"
     assert resolve_model_kind("flux") == "diffusion"
@@ -111,6 +114,7 @@ def test_diffusion_aliases_resolve_and_infer_kind():
     assert resolve_model_kind("qwen-image") == "diffusion"
     assert resolve_model_kind("protenix") == "diffusion"
     assert resolve_model_kind("hunyuan3d-21") == "diffusion"
+    assert resolve_model_kind("alphafold3") == "diffusion"
     assert resolve_model_kind("org/custom", "diffusion") == "diffusion"
     assert resolve_model_kind("org/custom") == "causal-lm"
 
@@ -135,6 +139,7 @@ def test_diffusion_capability_matrix_covers_aliases():
     assert "flux" in aliases_by_status("needs-real-validation")
     assert "protenix" in aliases_by_status("adapter-required")
     assert "hunyuan3d-21" in aliases_by_status("adapter-required")
+    assert "alphafold3" in aliases_by_status("adapter-required")
     assert "wan21-t2v-14b" in aliases_by_status("generic-covered")
     assert "wan22" in aliases_by_status("generic-covered")
     assert "| `wan22` |" in format_capability_table(("wan22",))
@@ -1395,6 +1400,65 @@ def test_diffusion_sample_saves_mesh_output(tmp_path):
     saved = sample.save_sample_output({"meshes": [Mesh()]}, tmp_path / "asset")
     assert saved == [tmp_path / "asset.glb"]
     assert saved[0].read_text(encoding="utf-8") == "mesh"
+
+
+def test_diffusion_sample_copies_directory_output(tmp_path):
+    from yeto.diffusion import sample
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "result.json").write_text("{}", encoding="utf-8")
+
+    saved = sample.save_sample_output({"paths": [source]}, tmp_path / "copied")
+    assert saved == [tmp_path / "copied" / "source"]
+    assert (saved[0] / "result.json").read_text(encoding="utf-8") == "{}"
+
+
+def test_alphafold3_adapter_is_guarded_and_inference_only(tmp_path):
+    from yeto.diffusion.adapters.alphafold3 import make_adapter
+
+    adapter = make_adapter()
+    with pytest.raises(RuntimeError, match="inference-only"):
+        adapter.load_pipeline(SimpleNamespace(), "cpu")
+    with pytest.raises(RuntimeError, match="YETO_ALPHAFOLD3_ROOT"):
+        adapter.load_sample_pipeline(tmp_path, {}, SimpleNamespace(), "cpu")
+
+
+def test_alphafold3_runtime_builds_official_command(tmp_path):
+    from yeto.diffusion.adapters.alphafold3 import AlphaFold3Runtime
+
+    root = tmp_path / "af3"
+    root.mkdir()
+    runner = root / "run_alphafold.py"
+    runner.write_text(
+        "import argparse, pathlib\n"
+        "p=argparse.ArgumentParser()\n"
+        "p.add_argument('--json_path')\n"
+        "p.add_argument('--model_dir')\n"
+        "p.add_argument('--output_dir')\n"
+        "p.add_argument('--db_dir', default=None)\n"
+        "args=p.parse_args()\n"
+        "out=pathlib.Path(args.output_dir)\n"
+        "out.mkdir(parents=True, exist_ok=True)\n"
+        "(out/'done.txt').write_text(args.json_path)\n",
+        encoding="utf-8",
+    )
+    params = tmp_path / "params"
+    params.mkdir()
+    databases = tmp_path / "db"
+    databases.mkdir()
+    input_json = tmp_path / "input.json"
+    input_json.write_text("{}", encoding="utf-8")
+
+    runtime = AlphaFold3Runtime(
+        root=root,
+        model_parameters_dir=params,
+        databases_dir=databases,
+        output_root=tmp_path / "out",
+    )
+    out = runtime.sample(SimpleNamespace(prompt=str(input_json)))
+    result_dir = Path(out["paths"][0])
+    assert (result_dir / "done.txt").read_text(encoding="utf-8") == str(input_json)
 
 
 def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
@@ -2832,6 +2896,15 @@ def test_launcher_defaults_hunyuan3d_adapter_and_setup():
     assert "--diffusion-adapter yeto.diffusion.adapters.hunyuan3d:make_adapter" in task.run
     assert "Tencent-Hunyuan/Hunyuan3D-2.1" in task.setup
     assert task.envs["YETO_HUNYUAN3D_ROOT"] == "~/Hunyuan3D-2.1"
+
+
+def test_launcher_defaults_alphafold3_adapter_without_prefetch():
+    task = make_learner_task(_args(model="alphafold3"), _SPEC, 0, 1, "a:1")
+
+    assert "--model alphafold3" in task.run
+    assert "--diffusion-adapter yeto.diffusion.adapters.alphafold3:make_adapter" in task.run
+    assert "AlphaFold3 requires local authorized parameters" in task.setup
+    assert "huggingface-cli download alphafold3" not in task.setup
 
 
 def _sample_args(tmp_path, **over):

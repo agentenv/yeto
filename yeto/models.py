@@ -126,6 +126,7 @@ DIFFUSION_MODEL_ALIASES = {
     "protenix": "protenix_base_default_v1.0.0",
     "protenix-v2": "protenix-v2",
     "hunyuan3d-21": "tencent/Hunyuan3D-2.1",
+    "alphafold3": "alphafold3",
 }
 
 MODEL_KINDS = {

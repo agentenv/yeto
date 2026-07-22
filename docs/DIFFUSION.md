@@ -367,6 +367,38 @@ must expose `load_pipeline(args, device, model_id=None, subfolder=None)` and
 return an object with `model.named_parameters()` plus
 `training_step(batch, global_step=...)` or `compute_loss(...)`.
 
+### AlphaFold3
+
+Official AlphaFold3 support is intentionally guarded. The adapter does not
+download, package, or redistribute model parameters. Google DeepMind's upstream
+repository states that the source code is CC-BY-NC-SA 4.0, model parameters
+must be received directly from Google, and use is subject to the AlphaFold3
+model-parameter terms. Treat this path as non-commercial and license-gated until
+your organization has explicit permission.
+
+Set local paths after access is granted:
+
+```bash
+export YETO_ALPHAFOLD3_ROOT=/path/to/alphafold3
+export YETO_ALPHAFOLD3_MODEL_PARAMETERS_DIR=/path/to/authorized/model_parameters
+export YETO_ALPHAFOLD3_DATABASES_DIR=/path/to/public_databases
+```
+
+The adapter invokes the official `run_alphafold.py` subprocess for prediction.
+Pass the AlphaFold3 input JSON path through `--prompt`:
+
+```bash
+yeto-diffusion-sample \
+  --adapter-dir alphafold3-notice-artifact \
+  --model alphafold3 \
+  --diffusion-adapter yeto.diffusion.adapters.alphafold3:make_adapter \
+  --prompt /path/to/input.json \
+  --output alphafold3-output
+```
+
+Yeto does not support official AlphaFold3 DiLoCo training. For trainable
+AF3-style structure diffusion, use the Protenix adapter.
+
 ## Validation status
 
 - Unit coverage lives in `tests/test_diffusion.py`,

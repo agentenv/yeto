@@ -473,6 +473,7 @@ HUNYUAN3D_SETUP = (
     "|| echo '[yeto-setup] Hunyuan3D setup failed; Hunyuan3D adapter unavailable' >&2"
 )
 HUNYUAN3D_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.hunyuan3d:make_adapter"
+ALPHAFOLD3_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.alphafold3:make_adapter"
 
 DIFFUSION_SAMPLE_ADAPTER_DIR = "~/yeto-adapter"
 DIFFUSION_SAMPLE_OUTPUT_DIR = "~/yeto-output"
@@ -488,6 +489,12 @@ def _is_hunyuan3d_request(args) -> bool:
     model = getattr(args, "model", "")
     adapter = getattr(args, "diffusion_adapter", "") or ""
     return model in {"hunyuan3d-21"} or "hunyuan3d" in adapter
+
+
+def _is_alphafold3_request(args) -> bool:
+    model = getattr(args, "model", "")
+    adapter = getattr(args, "diffusion_adapter", "") or ""
+    return model == "alphafold3" or "alphafold3" in adapter
 
 
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
@@ -551,6 +558,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             diffusion_adapter = PROTENIX_DIFFUSION_ADAPTER
         if _is_hunyuan3d_request(args) and not diffusion_adapter:
             diffusion_adapter = HUNYUAN3D_DIFFUSION_ADAPTER
+        if _is_alphafold3_request(args) and not diffusion_adapter:
+            diffusion_adapter = ALPHAFOLD3_DIFFUSION_ADAPTER
         if diffusion_adapter:
             learner_flags += f" --diffusion-adapter {shlex.quote(diffusion_adapter)}"
         if getattr(args, "diffusion_seed", None) is not None:
@@ -669,6 +678,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     repo = resolve(args.model)
     if _is_protenix_request(args):
         prefetch = "true  # Protenix uses native model names/checkpoints, not HF prefetch"
+    elif _is_alphafold3_request(args):
+        prefetch = "true  # AlphaFold3 requires local authorized parameters, not HF prefetch"
     else:
         prefetch = (
             f"(nohup huggingface-cli download {shlex.quote(repo)} "
