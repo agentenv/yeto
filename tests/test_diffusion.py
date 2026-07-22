@@ -1400,8 +1400,16 @@ def test_protenix_export_normalizes_dotlist_arg_str():
         "--data.train_sets [] --dtype bf16 --use_wandb false"
     )
     assert _normalize_arg_str("data.eval_sets=[]") == "--data.test_sets []"
-    assert _normalize_arg_str("data.test_sets=") == '--data.test_sets ""'
+    assert _normalize_arg_str("data.test_sets=") == ""
     assert _normalize_arg_str("--data.train_sets []") == "--data.train_sets []"
+
+
+def test_protenix_export_clears_empty_test_sets_override():
+    from yeto.diffusion.protenix_export import _clear_disabled_sets
+
+    configs = SimpleNamespace(data=SimpleNamespace(test_sets=["recentPDB"]))
+    _clear_disabled_sets(configs, SimpleNamespace(arg_str="data.test_sets="))
+    assert configs.data.test_sets == []
 
 
 def test_protenix_adapter_missing_wrapper_message(monkeypatch):

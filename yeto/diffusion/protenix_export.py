@@ -56,7 +56,8 @@ def _normalize_arg_str(arg_str: str) -> str:
         if key == "data.eval_sets":
             key = "data.test_sets"
         if key:
-            normalized.extend([f"--{key}", value if value else '""'])
+            if value:
+                normalized.extend([f"--{key}", value])
         else:
             normalized.append(token)
     return " ".join(normalized)
@@ -109,6 +110,16 @@ def build_configs(args):
     )
 
 
+def _clear_disabled_sets(configs, args) -> None:
+    tokens = shlex.split(args.arg_str or "")
+    disabled_test_sets = any(
+        token in {"data.test_sets=", "data.eval_sets="}
+        for token in tokens
+    )
+    if disabled_test_sets:
+        configs.data.test_sets = []
+
+
 def _batch_payload(batch):
     required = ("input_feature_dict", "label_dict", "label_full_dict")
     missing = [key for key in required if key not in batch]
@@ -120,6 +131,7 @@ def _batch_payload(batch):
 def export_batches(args) -> Path:
     torch, *_rest, get_dataloaders = _import_protenix_training_api()
     configs = build_configs(args)
+    _clear_disabled_sets(configs, args)
     out = args.output_dir.expanduser().resolve()
     batch_dir = out / "batches"
     batch_dir.mkdir(parents=True, exist_ok=True)
