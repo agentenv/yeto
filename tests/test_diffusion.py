@@ -1374,6 +1374,28 @@ def test_protenix_native_config_preserves_empty_checkpoint_default(monkeypatch):
     assert "--dtype bf16" in captured["arg_str"]
 
 
+def test_protenix_native_pipeline_imports_torch_checkpoint(monkeypatch):
+    from yeto.diffusion.adapters.protenix import ProtenixAdapter
+
+    imported = []
+
+    def fake_import_module(name):
+        imported.append(name)
+        if name == "torch":
+            return SimpleNamespace()
+        if name == "torch.utils.checkpoint":
+            return SimpleNamespace()
+        if name == "protenix":
+            return SimpleNamespace()
+        raise RuntimeError("stop after checkpoint import")
+
+    monkeypatch.setattr("yeto.diffusion.adapters.protenix.importlib.import_module", fake_import_module)
+    with pytest.raises(RuntimeError, match="stop after checkpoint import"):
+        ProtenixAdapter()._load_native_pipeline(SimpleNamespace(model="protenix"), "cpu")
+
+    assert "torch.utils.checkpoint" in imported
+
+
 def test_protenix_export_batch_payload_requires_native_keys():
     from yeto.diffusion.protenix_export import _batch_payload
 

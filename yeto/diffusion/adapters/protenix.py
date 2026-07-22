@@ -260,6 +260,7 @@ class ProtenixAdapter(DiffusionAdapter):
 
     def _load_native_pipeline(self, args, device):
         torch = _torch()
+        importlib.import_module("torch.utils.checkpoint")
         self._require_protenix()
         configs = self._build_native_configs(args, device)
         model_cls = _import_attr("protenix.model.protenix", "Protenix")
