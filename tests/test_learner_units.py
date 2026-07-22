@@ -1,8 +1,204 @@
 """Unit tests for learner helpers that run without GPUs or a process group."""
 
+from types import SimpleNamespace
+
+import pytest
 import torch
 
-from yeto.learner import allreduce_trainable_grads, normalize_param_name
+from yeto.learner import (
+    allreduce_trainable_grads,
+    load_model_and_tokenizer,
+    normalize_param_name,
+    run_inner_loop,
+)
+from yeto.losses import sft_loss
+
+
+def test_isolated_fused_loss_is_bound_before_peft(monkeypatch):
+    import peft
+    import transformers
+    import yeto.learner as learner
+
+    events = []
+    config = SimpleNamespace(model_type="qwen2")
+    tokenizer = object()
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = config
+
+        def to(self, device):
+            events.append(("to", device.type))
+            return self
+
+    base_model = Model()
+
+    def fake_from_pretrained(factory, _model_id, **_kwargs):
+        if factory is transformers.AutoConfig:
+            events.append("config")
+            return config
+        if factory is transformers.AutoTokenizer:
+            events.append("tokenizer")
+            return tokenizer
+        assert factory is transformers.AutoModelForCausalLM
+        events.append("model")
+        return base_model
+
+    monkeypatch.setattr(learner, "_from_pretrained_offline_first", fake_from_pretrained)
+    monkeypatch.setattr(
+        learner, "validate_kernel_request", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(learner, "attention_load_kwargs", lambda *args: {})
+    monkeypatch.setattr(
+        learner,
+        "require_liger_model_support",
+        lambda actual_config: events.append("support") or actual_config.model_type,
+    )
+    monkeypatch.setattr(
+        learner,
+        "apply_liger_fused_linear_ce",
+        lambda model: events.append("bind")
+        or {
+            "layer_backend": "transformers-native",
+            "loss_implementation": "liger-fused-linear-cross-entropy",
+        },
+    )
+    monkeypatch.setattr(
+        learner,
+        "resolved_attention_backend",
+        lambda model, requested: events.append("attention") or requested,
+    )
+    monkeypatch.setattr(learner, "resolve_lora_targets", lambda *args: "all-linear")
+    monkeypatch.setattr(peft, "LoraConfig", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        learner,
+        "validate_lora_production_envelope",
+        lambda model: events.append("envelope"),
+    )
+
+    def fake_get_peft_model(model, _config):
+        assert model is base_model
+        assert "bind" in events
+        events.append("peft")
+        return model
+
+    monkeypatch.setattr(peft, "get_peft_model", fake_get_peft_model)
+    args = SimpleNamespace(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        base_quantization="none",
+        tuning="lora",
+        shard="ddp",
+        kernel_backend="liger",
+        attention_backend="sdpa",
+        loss_function="cross_entropy",
+        lora_r=16,
+        lora_alpha=32,
+        lora_targets="auto",
+    )
+
+    model, loaded_tokenizer = load_model_and_tokenizer(args, torch.device("cpu"))
+
+    assert model is base_model
+    assert loaded_tokenizer is tokenizer
+    assert events == [
+        "config",
+        "support",
+        "tokenizer",
+        "model",
+        "bind",
+        "attention",
+        "peft",
+        ("to", "cpu"),
+        "envelope",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kernel_backend", "should_reject"),
+    [("liger", True), ("native", False)],
+)
+def test_learner_rejects_peft_output_head_drift_only_in_fused_lane(
+    monkeypatch,
+    kernel_backend,
+    should_reject,
+):
+    import peft
+    import transformers
+    import yeto.learner as learner
+
+    config = SimpleNamespace(model_type="qwen2")
+    tokenizer = object()
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = config
+            self.lm_head = torch.nn.Linear(2, 2, bias=False)
+            self.adapter = torch.nn.Parameter(torch.ones(2, dtype=torch.float32))
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+    base_model = Model()
+
+    def fake_from_pretrained(factory, _model_id, **_kwargs):
+        if factory is transformers.AutoConfig:
+            return config
+        if factory is transformers.AutoTokenizer:
+            return tokenizer
+        assert factory is transformers.AutoModelForCausalLM
+        return base_model
+
+    def fake_get_peft_model(model, _config):
+        model.lm_head.requires_grad_(False)
+        model.lm_head.lora_A = torch.nn.ModuleDict(
+            {"default": torch.nn.Linear(2, 1, bias=False)}
+        )
+        return model
+
+    monkeypatch.setattr(learner, "_from_pretrained_offline_first", fake_from_pretrained)
+    monkeypatch.setattr(
+        learner, "validate_kernel_request", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(learner, "attention_load_kwargs", lambda *args: {})
+    monkeypatch.setattr(learner, "require_liger_model_support", lambda config: "qwen2")
+    monkeypatch.setattr(
+        learner,
+        "apply_liger_fused_linear_ce",
+        lambda model: {"loss_implementation": "fused"},
+    )
+    monkeypatch.setattr(
+        learner,
+        "resolved_attention_backend",
+        lambda model, requested: requested,
+    )
+    monkeypatch.setattr(learner, "resolve_lora_targets", lambda *args: "all-linear")
+    monkeypatch.setattr(peft, "LoraConfig", lambda **kwargs: kwargs)
+    monkeypatch.setattr(peft, "get_peft_model", fake_get_peft_model)
+    args = SimpleNamespace(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        base_quantization="none",
+        tuning="lora",
+        shard="ddp",
+        kernel_backend=kernel_backend,
+        attention_backend="auto",
+        loss_function="cross_entropy",
+        lora_r=16,
+        lora_alpha=32,
+        lora_targets="auto",
+    )
+
+    if should_reject:
+        with pytest.raises(RuntimeError, match="frozen, unadapted lm_head"):
+            load_model_and_tokenizer(args, torch.device("cpu"))
+    else:
+        model, loaded_tokenizer = load_model_and_tokenizer(
+            args,
+            torch.device("cpu"),
+        )
+        assert model is base_model
+        assert loaded_tokenizer is tokenizer
 
 
 # --- normalize_param_name -------------------------------------------------
@@ -89,7 +285,7 @@ def test_allreduce_divides_by_world(monkeypatch):
     assert torch.allclose(p.grad, g)
 
 
-def test_allreduce_skips_none_grads(monkeypatch):
+def test_allreduce_keeps_globally_unused_grads_none(monkeypatch):
     import yeto.learner as learner
 
     calls = []
@@ -101,9 +297,303 @@ def test_allreduce_skips_none_grads(monkeypatch):
     with_grad = _param(torch.full((3,), 2.0))
     without_grad = _param(None)
     allreduce_trainable_grads([with_grad, without_grad], world=2)
-    assert len(calls) == 1
+    # One presence-vector reduction, then one reduction for the globally-used grad.
+    assert len(calls) == 2
     assert without_grad.grad is None
     assert torch.allclose(with_grad.grad, torch.ones(3))  # 2.0 (sum stub is id) / 2
+
+
+def test_allreduce_uses_zero_for_a_locally_unused_grad(monkeypatch):
+    import yeto.learner as learner
+
+    used_elsewhere = _param(None)
+    calls = 0
+
+    def fake_all_reduce(t, op=None):
+        nonlocal calls
+        calls += 1
+        if t.dtype == torch.int32:  # another rank used the parameter
+            t.fill_(1)
+        else:  # its gradient contribution was [2, 4, 6]
+            t.add_(torch.tensor([2.0, 4.0, 6.0]))
+
+    monkeypatch.setattr(learner.dist, "all_reduce", fake_all_reduce)
+    allreduce_trainable_grads([used_elsewhere], world=2)
+    assert calls == 2
+    assert torch.allclose(used_elsewhere.grad, torch.tensor([1.0, 2.0, 3.0]))
+
+
+# --- exact target-token normalization -------------------------------------
+
+
+class _TinyLM(torch.nn.Module):
+    def __init__(self, weight=None):
+        super().__init__()
+        initial = torch.tensor(
+            [
+                [0.10, -0.20, 0.30, 0.00],
+                [-0.10, 0.25, 0.05, -0.20],
+                [0.20, 0.10, -0.15, 0.05],
+                [0.00, -0.05, 0.20, 0.15],
+            ]
+        )
+        self.weight = torch.nn.Parameter(initial if weight is None else weight.clone())
+        self.forward_calls = 0
+
+    def forward(self, input_ids):
+        self.forward_calls += 1
+        one_hot = torch.nn.functional.one_hot(input_ids, num_classes=4).float()
+        return SimpleNamespace(logits=one_hot @ self.weight)
+
+
+class _Loader:
+    sampler = None
+
+    def __init__(self, batches):
+        self.batches = batches
+
+    def __iter__(self):
+        return iter(self.batches)
+
+
+class _RecordingOptimizer:
+    def __init__(self, params):
+        self.params = list(params)
+        self.grads = None
+        self.steps = 0
+
+    def zero_grad(self, set_to_none=True):
+        for parameter in self.params:
+            parameter.grad = None if set_to_none else torch.zeros_like(parameter)
+
+    def step(self):
+        self.steps += 1
+        self.grads = [parameter.grad.detach().clone() for parameter in self.params]
+
+
+class _Scheduler:
+    def __init__(self):
+        self.steps = 0
+
+    def step(self):
+        self.steps += 1
+
+
+def _loop_args(grad_accum=2):
+    return SimpleNamespace(
+        grad_accum=grad_accum,
+        loss_function="cross_entropy",
+        max_local_steps=1,
+        merge_alpha=0.0,
+        micro_batch_size=1,
+        seq_len=4,
+        shard="ddp",
+        tuning="lora",
+    )
+
+
+def _layout():
+    return SimpleNamespace(num_fragments=1, fragments=[SimpleNamespace(numel=16)])
+
+
+def _batch(ids, weights):
+    return torch.tensor([ids], dtype=torch.long), torch.tensor([weights], dtype=torch.float32)
+
+
+def _reference_grad(initial_weight, batches):
+    model = _TinyLM(initial_weight)
+    loss_sum = torch.zeros(())
+    targets = 0
+    for input_ids, weights in batches:
+        out = model(input_ids)
+        loss, count = sft_loss(out.logits, input_ids, weights=weights)
+        loss_sum = loss_sum + loss
+        targets += int(count)
+    (loss_sum / targets).backward()
+    torch.nn.utils.clip_grad_norm_([model.weight], 1.0)
+    return model.weight.grad.detach(), targets
+
+
+def test_accumulation_gradient_matches_one_global_target_mean():
+    # The microbatches have one and three targets. Averaging their individual
+    # means would overweight the first; the loop must equal one concatenated
+    # sum(loss) / sum(targets) objective.
+    batches = [
+        _batch([0, 1, 2, 3], [0, 1, 0, 0]),
+        _batch([3, 2, 1, 0], [0, 1, 1, 1]),
+    ]
+    model = _TinyLM()
+    expected, target_count = _reference_grad(model.weight.detach(), batches)
+    opt = _RecordingOptimizer([model.weight])
+    sched = _Scheduler()
+
+    counters = run_inner_loop(
+        _loop_args(),
+        model,
+        {"weight": model.weight},
+        _layout(),
+        opt,
+        sched,
+        _Loader(batches),
+        None,
+        rank=0,
+        world=1,
+        device=torch.device("cpu"),
+    )
+
+    assert opt.steps == sched.steps == 1
+    assert torch.allclose(opt.grads[0], expected, atol=1e-7, rtol=1e-6)
+    assert counters.raw_tokens == 8
+    assert counters.target_tokens == target_count == 4
+
+
+def test_mocked_two_rank_gradient_includes_zero_target_rank(monkeypatch):
+    import yeto.learner as learner
+
+    rank0_batches = [
+        _batch([0, 1, 2, 3], [0, 0, 0, 0]),
+        _batch([3, 2, 1, 0], [0, 0, 0, 0]),
+    ]
+    rank1_batches = [
+        _batch([1, 2, 3, 0], [0, 1, 0, 0]),
+        _batch([2, 3, 0, 1], [0, 1, 1, 0]),
+    ]
+    model = _TinyLM()
+    initial = model.weight.detach().clone()
+    expected, global_targets = _reference_grad(
+        initial, rank0_batches + rank1_batches
+    )
+
+    # Precompute rank 1's local contribution after the loop's world/global
+    # loss scaling. The fake all-reduce adds it to rank 0's local gradient;
+    # allreduce_trainable_grads then divides the sum by world like DDP/FSDP.
+    rank1_model = _TinyLM(initial)
+    rank1_loss = torch.zeros(())
+    for input_ids, weights in rank1_batches:
+        out = rank1_model(input_ids)
+        loss, _ = sft_loss(out.logits, input_ids, weights=weights)
+        rank1_loss = rank1_loss + loss
+    (rank1_loss * (2 / global_targets)).backward()
+    rank1_scaled_grad = rank1_model.weight.grad.detach().clone()
+    rank1_raw = sum(ids.numel() for ids, _ in rank1_batches)
+
+    def fake_all_reduce(tensor, op=None):
+        if tensor.ndim == 0 and tensor.dtype == torch.long:
+            return  # common accumulation size
+        if tensor.shape == (2,) and tensor.dtype == torch.long:
+            tensor.add_(torch.tensor([global_targets, rank1_raw]))
+            # rank 0 has zero targets, so adding global_targets is rank 1's count.
+            return
+        if tensor.ndim == 0 and tensor.dtype == torch.int32:
+            return  # target-count contract is true on both ranks
+        if tensor.shape == (1,) and tensor.dtype == torch.int32:
+            tensor.add_(1)  # rank 1 also has this gradient
+            return
+        if tensor.shape == model.weight.shape:
+            tensor.add_(rank1_scaled_grad)
+            return
+        raise AssertionError(f"unexpected all_reduce tensor {tensor.shape}/{tensor.dtype}")
+
+    monkeypatch.setattr(learner.dist, "all_reduce", fake_all_reduce)
+    monkeypatch.setattr(learner.dist, "broadcast_object_list", lambda *a, **k: None)
+    opt = _RecordingOptimizer([model.weight])
+    counters = run_inner_loop(
+        _loop_args(),
+        model,
+        {"weight": model.weight},
+        _layout(),
+        opt,
+        _Scheduler(),
+        _Loader(rank0_batches),
+        None,
+        rank=0,
+        world=2,
+        device=torch.device("cpu"),
+    )
+
+    assert torch.allclose(opt.grads[0], expected, atol=1e-7, rtol=1e-6)
+    assert counters.raw_tokens == 16
+    assert counters.target_tokens == global_targets == 3
+
+
+def test_globally_zero_target_group_fails_before_forward():
+    batches = [
+        _batch([0, 1, 2, 3], [0, 0, 0, 0]),
+        _batch([3, 2, 1, 0], [0, 0, 0, 0]),
+    ]
+    model = _TinyLM()
+    opt = _RecordingOptimizer([model.weight])
+    with pytest.raises(ValueError, match="zero positive"):
+        run_inner_loop(
+            _loop_args(),
+            model,
+            {"weight": model.weight},
+            _layout(),
+            opt,
+            _Scheduler(),
+            _Loader(batches),
+            None,
+            rank=0,
+            world=1,
+            device=torch.device("cpu"),
+        )
+    assert model.forward_calls == 0
+    assert opt.steps == 0
+
+
+def test_incomplete_accumulation_tail_is_not_an_optimizer_step():
+    batches = [
+        _batch([0, 1, 2, 3], [0, 1, 1, 1]),
+        _batch([3, 2, 1, 0], [0, 1, 0, 0]),
+        _batch([1, 3, 0, 2], [0, 1, 1, 0]),  # incomplete second group
+    ]
+    model = _TinyLM()
+    opt = _RecordingOptimizer([model.weight])
+    args = _loop_args()
+    args.max_local_steps = 2
+    counters = run_inner_loop(
+        args,
+        model,
+        {"weight": model.weight},
+        _layout(),
+        opt,
+        _Scheduler(),
+        _Loader(batches),
+        None,
+        rank=0,
+        world=1,
+        device=torch.device("cpu"),
+    )
+    assert opt.steps == 2
+    # The one-batch tail is dropped; the second step starts with a fresh full
+    # group from the next epoch.
+    assert model.forward_calls == 4
+    assert counters.raw_tokens == 16
+    assert counters.target_tokens == 8
+
+
+def test_dataset_smaller_than_accumulation_group_fails_instead_of_spinning():
+    batches = [_batch([0, 1, 2, 3], [0, 1, 1, 0])]
+    model = _TinyLM()
+    opt = _RecordingOptimizer([model.weight])
+
+    with pytest.raises(ValueError, match="fewer microbatches than --grad-accum"):
+        run_inner_loop(
+            _loop_args(grad_accum=2),
+            model,
+            {"weight": model.weight},
+            _layout(),
+            opt,
+            _Scheduler(),
+            _Loader(batches),
+            None,
+            rank=0,
+            world=1,
+            device=torch.device("cpu"),
+        )
+
+    assert opt.steps == 0
+    assert model.forward_calls == 0
 
 
 def test_lora_targets_resolution():
@@ -197,6 +687,84 @@ def test_learner_accepts_explicit_training_seed():
         ]
     )
     assert args.seed == 29
+
+
+def test_torch_and_mlx_learners_parse_assistant_mask_mode():
+    from yeto.learner import parse_args as parse_torch_args
+    from yeto.mlx.learner import parse_args as parse_mlx_args
+
+    base = [
+        "--model",
+        "org/model",
+        "--data",
+        "rows.jsonl",
+        "--syncer",
+        "none",
+        "--learner-id",
+        "0",
+        "--num-learners",
+        "1",
+    ]
+    for parse in (parse_torch_args, parse_mlx_args):
+        assert parse(base).assistant_mask_mode == "native"
+        assert parse(base + ["--assistant-mask-mode", "legacy"]).assistant_mask_mode == "legacy"
+
+
+def test_learner_defaults_to_shared_initialization_seed():
+    from yeto.learner import parse_args
+
+    args = parse_args(
+        [
+            "--model",
+            "org/model",
+            "--data",
+            "org/data",
+            "--syncer",
+            "none",
+            "--learner-id",
+            "0",
+            "--num-learners",
+            "1",
+        ]
+    )
+    assert args.seed == 0
+
+
+def test_learner_quantization_default_is_unchanged():
+    from yeto.learner import parse_args
+
+    args = parse_args(
+        [
+            "--model", "org/model",
+            "--data", "rows.jsonl",
+            "--syncer", "none",
+            "--learner-id", "0",
+            "--num-learners", "1",
+        ]
+    )
+    assert args.base_quantization == "none"
+
+
+def test_nf4_preparation_freezes_base_and_only_casts_norms():
+    from yeto.learner import _prepare_nf4_base_for_lora
+
+    class RMSNorm(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(4, dtype=torch.bfloat16))
+
+    model = torch.nn.ModuleDict(
+        {
+            "embed": torch.nn.Embedding(8, 4, dtype=torch.bfloat16),
+            "norm": RMSNorm(),
+            "head": torch.nn.Linear(4, 8, bias=False, dtype=torch.bfloat16),
+        }
+    )
+    _prepare_nf4_base_for_lora(model)
+    assert all(not parameter.requires_grad for parameter in model.parameters())
+    assert model["norm"].weight.dtype == torch.float32
+    assert model["embed"].weight.dtype == torch.bfloat16
+    assert model["head"].weight.dtype == torch.bfloat16
 
 
 def test_benchmark_seed_pairs_matching_global_rank():

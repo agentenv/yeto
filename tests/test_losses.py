@@ -4,6 +4,20 @@ import torch
 from yeto import losses
 
 
+def _manual_sft_reference(logits, labels, weights=None):
+    shift_logits = logits[:, :-1].float()
+    shift_labels = labels[:, 1:]
+    mask = shift_labels != -100
+    safe_labels = shift_labels.masked_fill(~mask, 0)
+    target_logprobs = torch.log_softmax(shift_logits, dim=-1).gather(
+        -1, safe_labels.unsqueeze(-1)
+    ).squeeze(-1)
+    token_weights = mask.to(target_logprobs.dtype)
+    if weights is not None:
+        token_weights = token_weights * weights[:, 1:].to(target_logprobs.dtype)
+    return -(target_logprobs * token_weights).sum(), (token_weights > 0).sum()
+
+
 def test_cross_entropy_matches_nll():
     lp = torch.log(torch.tensor([0.5, 0.25]))
     w = torch.ones(2)
@@ -86,6 +100,43 @@ def test_sft_loss_zero_weights_contribute_nothing():
     assert loss == 0
 
 
+@pytest.mark.parametrize("weighted", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_sft_cross_entropy_loss_and_gradient_match_manual_reference(weighted, dtype):
+    torch.manual_seed(123)
+    labels = torch.randint(0, 17, (3, 7))
+    labels[0, 2] = -100
+    labels[2, 5] = -100
+    weights = None
+    if weighted:
+        # Include zero, one, and arbitrary fractional weights. Position zero
+        # is intentionally nonzero to exercise causal shifting.
+        weights = torch.tensor(
+            [
+                [0.25, 1.0, 0.5, 0.0, 0.75, 1.0, 0.125],
+                [1.0, 0.4, 0.0, 0.6, 1.0, 0.2, 0.8],
+                [0.5, 1.0, 0.3, 0.7, 0.0, 0.9, 1.0],
+            ]
+        )
+
+    native_logits = torch.randn(3, 7, 17, dtype=dtype, requires_grad=True)
+    reference_logits = native_logits.detach().clone().requires_grad_(True)
+    native_loss, native_tokens = losses.sft_loss(
+        native_logits, labels, weights=weights
+    )
+    reference_loss, reference_tokens = _manual_sft_reference(
+        reference_logits, labels, weights
+    )
+    native_loss.backward()
+    reference_loss.backward()
+
+    torch.testing.assert_close(native_loss, reference_loss, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(
+        native_logits.grad, reference_logits.grad, rtol=1e-6, atol=1e-6
+    )
+    assert native_tokens == reference_tokens
+
+
 def test_custom_loss_from_file(tmp_path):
     f = tmp_path / "my_loss.py"
     f.write_text(
@@ -106,7 +157,9 @@ def test_pickled_loss_roundtrip_with_closure(tmp_path):
 
     path = tmp_path / "loss.pkl"
     losses.dump_pickled_loss(weighted, path)
-    fn = losses.load_pickled_loss(f"pickle:{path}")
+    with pytest.raises(PermissionError, match="allow-unsafe-pickled-loss"):
+        losses.load_pickled_loss(f"pickle:{path}")
+    fn = losses.load_pickled_loss(f"pickle:{path}", allow_unsafe=True)
     logits = torch.ones(1, 2, 3)
     loss, n = fn(logits, torch.zeros(1, 2, dtype=torch.long), torch.ones(1, 2))
     assert torch.isclose(loss, torch.tensor(6 * 2.5))

@@ -241,6 +241,7 @@ def learner_command(
         "--learner-id", str(learner_id),
         "--num-learners", str(num_learners),
         "--tuning", "lora",
+        "--base-quantization", getattr(args, "base_quantization", "none"),
         "--lora-r", str(args.lora_r),
         "--lora-alpha", str(args.lora_alpha),
         "--lora-targets", getattr(args, "lora_targets", "auto"),
@@ -255,6 +256,7 @@ def learner_command(
         "--tokenize", "stream",
         "--stream-workers", "0",
         "--train-on", getattr(args, "train_on", "assistant"),
+        "--assistant-mask-mode", getattr(args, "assistant_mask_mode", "native"),
         "--gradient-checkpointing", getattr(args, "gradient_checkpointing", "auto"),
         "--wan-streams", str(getattr(args, "wan_streams", 4)),
         "--shard", args.shard,
@@ -374,7 +376,9 @@ def split_data(
 
 
 def evaluate_loss(model_id: str, adapter_dir: Path | None, eval_file: Path,
-                  seq_len: int, device: str, train_on: str = "assistant") -> dict:
+                  seq_len: int, device: str, train_on: str = "assistant",
+                  base_quantization: str = "none",
+                  assistant_mask_mode: str = "native") -> dict:
     """Held-out masked CE per trained token — the comparison metric."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -388,21 +392,50 @@ def evaluate_loss(model_id: str, adapter_dir: Path | None, eval_file: Path,
     tok = _from_pretrained_offline_first(
         AutoTokenizer, resolved, trust_remote_code=True
     )
-    # bf16 on accelerators (a 10B+ base in fp32 would not fit one GPU);
-    # fp32 on cpu, where bf16 matmuls are slow and memory is plentiful.
-    dtype = torch.float32 if device == "cpu" else torch.bfloat16
-    model = _from_pretrained_offline_first(
-        AutoModelForCausalLM,
-        resolved,
-        dtype=dtype,
-        trust_remote_code=True,
-    )
+    if base_quantization == "nf4":
+        if device == "cpu":
+            raise ValueError("NF4 benchmark evaluation requires CUDA")
+        from transformers import BitsAndBytesConfig
+
+        model = _from_pretrained_offline_first(
+            AutoModelForCausalLM,
+            resolved,
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+            ),
+            device_map={"": 0},
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )
+    else:
+        # bf16 on accelerators (a 10B+ base in fp32 would not fit one GPU);
+        # fp32 on cpu, where bf16 matmuls are slow and memory is plentiful.
+        dtype = torch.float32 if device == "cpu" else torch.bfloat16
+        model = _from_pretrained_offline_first(
+            AutoModelForCausalLM,
+            resolved,
+            dtype=dtype,
+            trust_remote_code=True,
+        )
     if adapter_dir is not None:
         from peft import PeftModel
 
         model = PeftModel.from_pretrained(model, str(adapter_dir))
-    model.to(device).eval()
-    ds = build_packed_dataset(str(eval_file), tok, 0, 1, seq_len, train_on=train_on)
+    if base_quantization == "none":
+        model.to(device)
+    model.eval()
+    ds = build_packed_dataset(
+        str(eval_file),
+        tok,
+        0,
+        1,
+        seq_len,
+        train_on=train_on,
+        assistant_mask_mode=assistant_mask_mode,
+    )
     total_loss, total_tokens = 0.0, 0.0
     block_losses = []
     with torch.no_grad():
@@ -434,10 +467,17 @@ def evaluate_loss(model_id: str, adapter_dir: Path | None, eval_file: Path,
 
 
 def eval_loss_per_token(model_id: str, adapter_dir: Path | None, eval_file: Path,
-                        seq_len: int, device: str, train_on: str = "assistant") -> float:
+                        seq_len: int, device: str, train_on: str = "assistant",
+                        assistant_mask_mode: str = "native") -> float:
     """Compatibility wrapper for callers that only need the scalar metric."""
     return evaluate_loss(
-        model_id, adapter_dir, eval_file, seq_len, device, train_on
+        model_id,
+        adapter_dir,
+        eval_file,
+        seq_len,
+        device,
+        train_on,
+        assistant_mask_mode=assistant_mask_mode,
     )["loss_per_token"]
 
 
@@ -515,6 +555,8 @@ def eval_in_subprocess(args, adapter_dir: Path | None, eval_file: Path,
         "--seq-len", str(args.seq_len),
         "--device", args.eval_device,
         "--train-on", args.train_on,
+        "--assistant-mask-mode", args.assistant_mask_mode,
+        "--base-quantization", args.base_quantization,
     ]
     if adapter_dir is not None:
         cmd += ["--adapter-dir", str(adapter_dir)]
@@ -551,22 +593,53 @@ def _tail(path: Path, lines: int = 16) -> str:
 
 
 _TRAINING_METRICS_RE = re.compile(
-    r"inner loop done .*?raw_tokens=(\d+) target_tokens=(\d+)"
+    r"inner loop done [^\r\n]*?raw_tokens=(\d+) target_tokens=(\d+)"
 )
+_METRICS_VERSION_RE = re.compile(r"\bmetrics_version=(\d+)\b")
+_METRICS_SCOPE_RE = re.compile(r"\bmetrics_scope=([a-z][a-z0-9_-]*)\b")
+_SUPPORTED_TRAINING_TELEMETRY = {(1, "rank"), (2, "island")}
+
+
+def _training_telemetry_schema(record: str) -> tuple[int, str]:
+    versions = _METRICS_VERSION_RE.findall(record)
+    scopes = _METRICS_SCOPE_RE.findall(record)
+    if not versions and not scopes:
+        return 1, "rank"
+    if len(versions) != 1 or len(scopes) != 1:
+        raise RuntimeError(
+            "learner log contains malformed final token telemetry; versioned "
+            "records require one metrics_version and one metrics_scope"
+        )
+    schema = int(versions[0]), scopes[0]
+    if schema not in _SUPPORTED_TRAINING_TELEMETRY:
+        raise RuntimeError(
+            "learner log uses unsupported final token telemetry schema "
+            f"version={schema[0]} scope={schema[1]!r}"
+        )
+    return schema
 
 
 def summarize_training_logs(paths: list[Path]) -> dict:
-    """Sum LM-specific raw/target token telemetry across all ranks."""
+    """Sum compatible rank- or island-scoped final token telemetry."""
     raw_tokens = 0
     target_tokens = 0
-    ranks = 0
+    reported_units = 0
+    schema: tuple[int, str] | None = None
     for path in paths:
         text = path.read_text(encoding="utf-8", errors="replace")
         for match in _TRAINING_METRICS_RE.finditer(text):
-            ranks += 1
+            record_schema = _training_telemetry_schema(match.group(0))
+            if schema is None:
+                schema = record_schema
+            elif record_schema != schema:
+                raise RuntimeError(
+                    "learner logs mix final token telemetry schemas; refusing "
+                    "to combine rank- and island-scoped counters"
+                )
+            reported_units += 1
             raw_tokens += int(match.group(1))
             target_tokens += int(match.group(2))
-    if ranks == 0:
+    if reported_units == 0:
         raise RuntimeError(
             "learner logs contain no final token telemetry; the run may have "
             "used an incompatible learner version"
@@ -576,12 +649,36 @@ def summarize_training_logs(paths: list[Path]) -> dict:
             "training processed no positive-weight target tokens; use rows "
             "with assistant responses or pass --train-on all"
         )
+    assert schema is not None
+    version, scope = schema
     return {
-        "reported_ranks": ranks,
+        "telemetry_version": version,
+        "telemetry_scope": scope,
+        "reported_units": reported_units,
         "processed_tokens": raw_tokens,
         "processed_target_tokens": target_tokens,
         "target_density": target_tokens / raw_tokens if raw_tokens else None,
     }
+
+
+def validate_training_telemetry_units(
+    telemetry: dict,
+    *,
+    label: str,
+    total_ranks: int,
+    islands: int,
+) -> None:
+    """Require complete final telemetry for the schema's accounting scope."""
+    scope = telemetry.get("telemetry_scope")
+    expected = {"rank": total_ranks, "island": islands}.get(scope)
+    if expected is None:
+        raise RuntimeError(f"{label}: unknown telemetry scope {scope!r}")
+    actual = telemetry.get("reported_units")
+    if actual != expected:
+        raise RuntimeError(
+            f"{label}: expected {expected} {scope}-scoped telemetry records, "
+            f"found {actual}"
+        )
 
 
 def _stop_process(process: subprocess.Popen, timeout: int = 20) -> None:
@@ -766,6 +863,12 @@ def run_baseline(args, m: int, seed: int, train_data: Path, seed_dir: Path) -> d
     )
     wall = time.monotonic() - started
     telemetry = summarize_training_logs([learner_log])
+    validate_training_telemetry_units(
+        telemetry,
+        label=f"baseline-m{m}",
+        total_ranks=total_ranks,
+        islands=1,
+    )
     expected_tokens = processed_tokens(
         steps,
         args.micro_batch_size,
@@ -773,11 +876,6 @@ def run_baseline(args, m: int, seed: int, train_data: Path, seed_dir: Path) -> d
         total_ranks,
         args.grad_accum,
     )
-    if telemetry["reported_ranks"] != total_ranks:
-        raise RuntimeError(
-            f"baseline-m{m}: expected telemetry from {total_ranks} ranks, "
-            f"found {telemetry['reported_ranks']}"
-        )
     if telemetry["processed_tokens"] != expected_tokens:
         raise RuntimeError(
             f"baseline-m{m}: expected {expected_tokens} raw tokens, learner "
@@ -877,6 +975,12 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
         syncer_log.close()
     wall = time.monotonic() - started
     telemetry = summarize_training_logs(learner_logs)
+    validate_training_telemetry_units(
+        telemetry,
+        label=arm.name,
+        total_ranks=total_ranks,
+        islands=arm.learners,
+    )
     expected_tokens = processed_tokens(
         steps,
         args.micro_batch_size,
@@ -884,11 +988,6 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
         total_ranks,
         args.grad_accum,
     )
-    if telemetry["reported_ranks"] != total_ranks:
-        raise RuntimeError(
-            f"{arm.name}: expected telemetry from {total_ranks} ranks, "
-            f"found {telemetry['reported_ranks']}"
-        )
     if telemetry["processed_tokens"] != expected_tokens:
         raise RuntimeError(
             f"{arm.name}: expected {expected_tokens} raw tokens, learner "
@@ -914,6 +1013,8 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
             args.model,
             "--tuning",
             "lora",
+            "--base-quantization",
+            args.base_quantization,
             "--lora-r",
             str(args.lora_r),
             "--lora-alpha",
@@ -1364,8 +1465,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-steps", type=int, default=10)
     parser.add_argument("--train-on", choices=["assistant", "all"], default="assistant")
+    parser.add_argument(
+        "--assistant-mask-mode",
+        choices=["native", "legacy"],
+        default="native",
+        help="assistant-only masking mode; keep fixed between training and evaluation",
+    )
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument(
+        "--base-quantization", choices=["none", "nf4"], default="none"
+    )
     parser.add_argument(
         "--lora-targets",
         choices=["auto", "attention", "all-linear"],
@@ -1457,6 +1567,7 @@ def print_plan(args, arms: list[Arm]) -> None:
     print(
         f"[lm-benchmark] model={args.model} tokens={args.token_budget} "
         f"seq_len={args.seq_len} train_on={args.train_on} "
+        f"assistant_mask_mode={args.assistant_mask_mode} "
         f"stream_workers=0 seeds={seeds}"
     )
     for m in sorted({arm.learners for arm in arms}):
@@ -1509,6 +1620,8 @@ def main(argv=None) -> int:
             args.seq_len,
             args.device,
             args.train_on,
+            args.base_quantization,
+            args.assistant_mask_mode,
         )
         print("EVAL_JSON " + json.dumps(result, sort_keys=True))
         return 0

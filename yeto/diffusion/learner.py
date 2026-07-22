@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader, IterableDataset
 
 from ..autobatch import int_or_auto, rebalance_grad_accum
 from ..data import _learner_rows, load_rows
+from ..finalization import finalize_torch_island
 from ..fragments import build_layout
 from ..losses import flow_matching_loss
 from ..models import resolve
@@ -36,6 +37,7 @@ from ..tensor_io import (
     apply_fragment,
     fragment_flat,
     pack_fragment,
+    pack_tensor,
     quantize_q4,
     unpack_fragment,
 )
@@ -285,10 +287,23 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Yeto diffusion learner")
     p.add_argument("--model", required=True, help="diffusers repo id or alias from yeto.models")
     p.add_argument("--data", required=True, help="HF dataset id or local latent/media manifest")
+    p.add_argument("--model-revision", default=None)
+    p.add_argument("--data-revision", default=None)
+    p.add_argument("--trust-remote-code", action="store_true")
     p.add_argument("--syncer", required=True, help="host:port, or 'none' for standalone")
     p.add_argument("--learner-id", type=int, required=True)
     p.add_argument("--num-learners", type=int, required=True)
     p.add_argument("--loss-function", default="flow_matching")
+    p.add_argument("--allow-unsafe-pickled-loss", action="store_true")
+    p.add_argument("--loss-sha256", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--source-sha256", default=None, help=argparse.SUPPRESS)
+    for provenance_flag in (
+        "model-requested-identifier",
+        "model-requested-revision",
+        "data-requested-identifier",
+        "data-requested-revision",
+    ):
+        p.add_argument(f"--{provenance_flag}", default=None, help=argparse.SUPPRESS)
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument("--shard", choices=["ddp", "fsdp"], default="ddp")
     p.add_argument(
@@ -296,6 +311,7 @@ def parse_args(argv=None):
         default=None,
         help="optional module:factory or file.py:factory hook for non-standard diffusion repos",
     )
+    p.add_argument("--diffusion-adapter-sha256", default=None, help=argparse.SUPPRESS)
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
     p.add_argument("--lora-targets", choices=["auto", "attention", "all-linear"], default="auto")
@@ -359,7 +375,7 @@ def setup_distributed() -> tuple[int, int]:
 def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
     try:
         return factory.from_pretrained(model_id, local_files_only=True, **kwargs)
-    except Exception:
+    except OSError:
         return factory.from_pretrained(model_id, **kwargs)
 
 
@@ -392,25 +408,50 @@ def resolve_lora_targets(choice: str, model: str | None = None):
     return _ATTENTION_TARGETS + _MLP_TARGETS
 
 
-def load_diffusion_adapter(spec: str | None):
+def load_diffusion_adapter(
+    spec: str | None,
+    *,
+    expected_sha256: str | None = None,
+    source_bytes: bytes | None = None,
+    source_path: str | Path | None = None,
+):
     """Load an optional user adapter without baking model families into Yeto."""
     if not spec:
         return None
-    import importlib
+    import hashlib
     import importlib.util
+    import sys
+
+    from ..provenance import python_spec_path
 
     target, sep, factory_name = spec.partition(":")
     if not sep or not target or not factory_name:
         raise ValueError("--diffusion-adapter must be module:factory or file.py:factory")
+    path = Path(source_path) if source_path is not None else python_spec_path(spec)
+    source = path.read_bytes() if source_bytes is None else source_bytes
+    actual_sha256 = hashlib.sha256(source).hexdigest()
+    if expected_sha256 is not None and actual_sha256 != expected_sha256.lower():
+        raise ValueError(
+            f"diffusion adapter {target!r} SHA256 mismatch: expected "
+            f"{expected_sha256.lower()}, got {actual_sha256}"
+        )
+
     if target.endswith(".py") or os.path.sep in target:
-        path = Path(os.path.expanduser(target))
-        module_spec = importlib.util.spec_from_file_location("yeto_diffusion_adapter", path)
-        if module_spec is None or module_spec.loader is None:
-            raise ImportError(f"cannot import diffusion adapter from {target!r}")
-        module = importlib.util.module_from_spec(module_spec)
-        module_spec.loader.exec_module(module)
+        module_name = f"_yeto_attested_adapter_{actual_sha256}"
     else:
-        module = importlib.import_module(target)
+        package, _, leaf = target.rpartition(".")
+        attested_leaf = f"_yeto_attested_{leaf}_{actual_sha256}"
+        module_name = f"{package}.{attested_leaf}" if package else attested_leaf
+    module_spec = importlib.util.spec_from_file_location(module_name, path)
+    if module_spec is None:
+        raise ValueError(f"cannot create an import spec for diffusion adapter {target!r}")
+    module = importlib.util.module_from_spec(module_spec)
+    sys.modules[module_name] = module
+    try:
+        exec(compile(source, str(path), "exec"), module.__dict__)  # noqa: S102 - explicit adapter
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
     factory = getattr(module, factory_name)
     return factory() if callable(factory) else factory
 
@@ -434,13 +475,23 @@ def _freeze_modules(pipe) -> None:
 
 def load_pipeline(args, device, adapter=None):
     if adapter is not None and hasattr(adapter, "load_pipeline"):
+        from ..provenance import require_custom_loader_contract
+
+        require_custom_loader_contract(adapter, args)
         pipe = adapter.load_pipeline(args, device)
     else:
         from diffusers import DiffusionPipeline
+        from ..provenance import model_load_kwargs
 
         model_id = resolve(args.model)
         dtype = diffusion_torch_dtype(device)
-        pipe = _from_pretrained_offline_first(DiffusionPipeline, model_id, torch_dtype=dtype)
+        pipe = _from_pretrained_offline_first(
+            DiffusionPipeline,
+            model_id,
+            torch_dtype=dtype,
+            use_safetensors=True,
+            **model_load_kwargs(args),
+        )
     if getattr(args, "seed", None) is not None:
         # Base loading may consume a cache-dependent amount of RNG. Reset at
         # the trainable-model boundary so LoRA initialization still matches
@@ -581,6 +632,7 @@ class StreamingDiffusionRows(IterableDataset):
         target_height: int | None = None,
         target_width: int | None = None,
         root_seed: int | None = None,
+        revision: str | None = None,
     ):
         self.dataset_name = dataset_name
         self.learner_id = learner_id
@@ -597,9 +649,10 @@ class StreamingDiffusionRows(IterableDataset):
         self.height = target_height
         self.width = target_width
         self.root_seed = root_seed
+        self.revision = revision
 
     def __iter__(self):
-        ds = load_rows(self.dataset_name, self.split)
+        ds = load_rows(self.dataset_name, self.split, self.revision)
         data_root = None
         if isinstance(self.dataset_name, str):
             path = Path(os.path.expanduser(self.dataset_name))
@@ -709,7 +762,7 @@ def _data_root_for(dataset_name) -> str | None:
 
 
 def _prepare_probe_batches(args, rank: int, world: int) -> list[list[dict]]:
-    ds = load_rows(args.data)
+    ds = load_rows(args.data, revision=getattr(args, "data_revision", None))
     shard = _learner_rows(
         len(ds),
         getattr(args, "learner_id", 0),
@@ -771,13 +824,13 @@ def _tensor_from_value(
         if path.suffix in (".pt", ".pth"):
             if not path.exists():
                 raise FileNotFoundError(f"{context}: tensor file {str(path)!r} does not exist")
-            tensor = torch.load(path, map_location="cpu")
+            tensor = torch.load(path, map_location="cpu", weights_only=True)
         elif path.suffix == ".npy":
             if not path.exists():
                 raise FileNotFoundError(f"{context}: tensor file {str(path)!r} does not exist")
             import numpy as np
 
-            tensor = torch.from_numpy(np.load(path))
+            tensor = torch.from_numpy(np.load(path, allow_pickle=False))
         else:
             raise ValueError(
                 f"{context}: unsupported tensor path {value!r}; "
@@ -2856,15 +2909,27 @@ def diffusion_adapter_metadata(
     adapter=None,
     params: dict[str, torch.Tensor] | None = None,
 ) -> dict:
+    from ..provenance import provenance_metadata
+
     modules = [name for name, _ in _trainable_module_items(pipe, adapter)]
+    provenance = provenance_metadata(args)
+    model_provenance = provenance.get("model") or {}
     meta = {
         "kind": "yeto.diffusion.adapter",
         "schema_version": DIFFUSION_ADAPTER_SCHEMA_VERSION,
         "model": getattr(args, "model", None),
         "resolved_model": (
-            resolve(getattr(args, "model", "")) if getattr(args, "model", None) else None
+            model_provenance.get("resolved_identifier")
+            or (
+                resolve(getattr(args, "model", ""))
+                if getattr(args, "model", None)
+                else None
+            )
         ),
         "diffusion_adapter": getattr(args, "diffusion_adapter", None),
+        "diffusion_adapter_sha256": getattr(
+            args, "diffusion_adapter_sha256", None
+        ),
         "tuning": getattr(args, "tuning", None),
         "trainable_modules": modules,
         "cache": _cache_flags(args),
@@ -2874,6 +2939,7 @@ def diffusion_adapter_metadata(
             "weighting": getattr(args, "diffusion_loss_weighting", "none"),
             "min_snr_gamma": getattr(args, "diffusion_min_snr_gamma", None),
         },
+        "provenance": provenance,
     }
     if getattr(args, "seed", None) is not None:
         meta["seed"] = int(args.seed)
@@ -2929,9 +2995,14 @@ def save_adapters(pipe, output_dir: str, adapter=None, args=None, params=None) -
         pipe.save_lora_weights(str(out))
         saved = True
     if not saved:
-        torch.save(
-            {n: p.detach().cpu() for n, p in trainable_params(pipe, adapter).items()},
-            out / "trainable_state.pt",
+        from safetensors.torch import save_file
+
+        save_file(
+            {
+                n: p.detach().cpu().contiguous()
+                for n, p in trainable_params(pipe, adapter).items()
+            },
+            out / "trainable_state.safetensors",
         )
     if args is not None:
         write_diffusion_adapter_metadata(out, args, pipe, adapter, params)
@@ -2944,6 +3015,12 @@ def main(argv=None) -> None:
         level=logging.INFO,
         format=f"%(asctime)s diffusion{args.learner_id}.r{rank} %(levelname)s %(message)s",
     )
+    from ..provenance import (
+        pin_distributed_runtime_provenance,
+        read_distributed_python_spec_bytes,
+        verify_distributed_source_tree_sha256,
+    )
+
     if args.device:
         device = torch.device(args.device)
     elif torch.cuda.is_available():
@@ -2951,6 +3028,13 @@ def main(argv=None) -> None:
         torch.cuda.set_device(device)
     else:
         device = torch.device("cpu")
+
+    verify_distributed_source_tree_sha256(
+        args.source_sha256,
+        rank=rank,
+        world=world,
+    )
+    pin_distributed_runtime_provenance(args, rank=rank, world=world)
 
     if args.seed is not None:
         seed_diffusion_rng(args.seed)
@@ -2963,7 +3047,25 @@ def main(argv=None) -> None:
         validate_diffusion_cache_metadata(cache_meta, args)
         log.info("loaded diffusion cache metadata from %s", args.data)
 
-    adapter = load_diffusion_adapter(args.diffusion_adapter)
+    adapter_source_path = None
+    adapter_source = None
+    if args.diffusion_adapter:
+        (
+            adapter_source_path,
+            adapter_source,
+            args.diffusion_adapter_sha256,
+        ) = read_distributed_python_spec_bytes(
+            args.diffusion_adapter,
+            args.diffusion_adapter_sha256,
+            rank=rank,
+            world=world,
+        )
+    adapter = load_diffusion_adapter(
+        args.diffusion_adapter,
+        expected_sha256=args.diffusion_adapter_sha256,
+        source_bytes=adapter_source,
+        source_path=adapter_source_path,
+    )
     log.info("loading diffusion model %s (%s)", args.model, args.tuning)
     pipe = load_pipeline(args, device, adapter)
     log_diffusion_parameter_effects(pipe, args, adapter)
@@ -2972,7 +3074,10 @@ def main(argv=None) -> None:
         raise RuntimeError("no trainable diffusion parameters; check --lora-targets")
     params = maybe_wrap_for_distributed(pipe, args, params, rank, world, device, adapter)
     layout = build_layout(
-        [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
+        [(n, p.numel()) for n, p in params.items()],
+        args.fragments,
+        args.fragment_pattern,
+        named_shapes={n: tuple(p.shape) for n, p in params.items()},
     )
     log.info(
         "%d trainable tensors -> %d fragments (%.1f MB total)",
@@ -3050,6 +3155,7 @@ def main(argv=None) -> None:
         target_height=args.height,
         target_width=args.width,
         root_seed=args.seed,
+        revision=args.data_revision,
     )
     loader = DataLoader(
         dataset,
@@ -3079,9 +3185,9 @@ def main(argv=None) -> None:
     fragment_versions = [0] * layout.num_fragments
     pending_pulls: list = []
     global_step = 0
-    anchors: list[torch.Tensor] | None = None
-    if rank == 0 and client is not None and client.dtype == DTYPE_Q4:
-        anchors = [fragment_flat(frag, params).cpu() for frag in layout.fragments]
+    anchors: list[torch.Tensor | None] | None = None
+    if rank == 0 and client is not None:
+        anchors = [None] * layout.num_fragments
 
     shutdown = False
     accum = 0
@@ -3119,24 +3225,40 @@ def main(argv=None) -> None:
             )
 
         actions = []
+        finalizing = False
         if rank == 0 and client is not None:
             client.check_health()
-            for bc in client.drain_updates():
-                flat = unpack_fragment(
-                    layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
-                )
-                if anchors is not None:
-                    anchors[bc.fragment_id] = flat.clone()
-                actions.append((bc.fragment_id, bc.version, flat))
+            finalizing = client.finalizing.is_set()
+            if not finalizing:
+                for bc in client.drain_updates():
+                    flat = unpack_fragment(
+                        layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
+                    )
+                    if anchors is not None:
+                        anchors[bc.fragment_id] = flat.clone()
+                    actions.append((bc.fragment_id, bc.version, flat))
             shutdown = client.shutdown.is_set()
 
         if world > 1:
             meta = [(f, v) for f, v, _ in actions] if rank == 0 else None
-            box = [meta, shutdown]
+            box = [meta, shutdown, finalizing]
             dist.broadcast_object_list(box, src=0)
-            meta, shutdown = box
+            meta, shutdown, finalizing = box
             if rank != 0:
                 actions = [(f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta]
+        if finalizing:
+            manifest = finalize_torch_island(
+                client,
+                layout,
+                params,
+                rank=rank,
+                world=world,
+                device=device,
+            )
+            global_step = max(global_step, manifest.global_step)
+            shutdown = True
+            break
+        if world > 1:
             for fid, version, flat in actions:
                 flat = flat.to(device)
                 dist.broadcast(flat, src=0)
@@ -3171,14 +3293,19 @@ def main(argv=None) -> None:
                     still_pending.append(pull)
                     continue
                 c_units = units_total - units_at_reset[fid]
-                if anchors is not None:
-                    delta = fragment_flat(layout.fragments[fid], params).cpu() - anchors[fid]
+                anchor = anchors[fid] if anchors is not None else None
+                if anchor is None:
+                    still_pending.append(pull)
+                    continue
+                delta = fragment_flat(layout.fragments[fid], params).cpu() - anchor
+                if client.dtype == DTYPE_Q4:
                     payload = quantize_q4(delta)
                 else:
-                    payload = pack_fragment(layout.fragments[fid], params, client.dtype)
+                    payload = pack_tensor(delta, client.dtype)
                 client.push_fragment(
                     fid,
                     pull.global_step,
+                    pull.round_attempt,
                     fragment_versions[fid],
                     steps_total,
                     c_steps,
@@ -3190,6 +3317,11 @@ def main(argv=None) -> None:
         if shutdown or steps_total >= args.max_local_steps:
             break
 
+    if rank == 0 and client is not None and not client.finalized.is_set():
+        raise RuntimeError(
+            "diffusion learner stopped before authoritative finalization; "
+            "refusing to save local parameters"
+        )
     if rank == 0:
         save_adapters(pipe, args.output_dir, adapter, args=args, params=params)
         if client is not None:

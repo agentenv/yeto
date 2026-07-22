@@ -27,7 +27,9 @@ def tmp_registry(tmp_path, monkeypatch):
 LAUNCH_ARGS = [
     "--gpu", "aws:8xa100@us-east-2,aws:8xa100@us-west-2",
     "--model", "gemma4",
+    "--model-revision", "a" * 40,
     "--data", "org/ds",
+    "--data-revision", "b" * 40,
 ]
 
 

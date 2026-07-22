@@ -190,6 +190,143 @@ gap. The best DiLoCo artifact was `direct-rda`, seed 29, at 0.911408
 CE/token; the best trained artifact overall was `baseline-m4`, seed 29,
 at 0.906659.
 
+## Qwen3.6-27B LM Real M8
+
+### Configuration
+
+| item | value |
+|---|---|
+| completed | 2026-07-17 08:38:04 UTC |
+| model | `Qwen/Qwen3.6-27B` at revision `6a9e13bd6fc8f0983b9b99948120bc37f49c13e9` |
+| dataset | `HuggingFaceH4/Multilingual-Thinking` at revision `f423949d2726f5a5633ea10ac45bc1ea1e0de6e7` |
+| baseline topology | one GCP Spot `a2-highgpu-8g`, 8 x A100 40 GB |
+| DiLoCo topology | eight GCP Spot `a2-highgpu-1g`, 1 x A100 40 GB each; one learner cross-region |
+| training | NF4 QLoRA with BF16 compute, attention-only LoRA r16/alpha32, gradient checkpointing |
+| sequence and batch | 512 tokens, micro-batch 1, gradient accumulation 1 |
+| budget | 512 optimizer steps and 2,097,152 raw tokens per item |
+| evaluation | 32 held-out rows, 16,050 assistant target tokens |
+| seeds | 17, 29, 43 |
+| formal wall time | 7.17 hours from baseline training through final evaluation |
+
+Absolute CE is not directly comparable with the earlier BF16, all-linear,
+1024-token run. Relative delta against this run's paired synchronous
+baseline is the authoritative comparison.
+
+### Aggregate Quality Results
+
+| arm | runs | CE/token | perplexity | delta vs paired sync |
+|---|---:|---:|---:|---:|
+| `base` | 1 | 1.227409 +/- 0.000000 | 3.412 +/- 0.000 | - |
+| `baseline-m8` | 3 | 0.922213 +/- 0.000102 | 2.515 +/- 0.000 | - |
+| `m8` | 3 | 0.925140 +/- 0.007353 | 2.522 +/- 0.019 | +0.32% +/- 0.79 |
+| `alpha0-m8` | 3 | 1.100368 +/- 0.010244 | 3.005 +/- 0.031 | +19.32% +/- 1.12 |
+| `q4-m8` | 3 | 0.929367 +/- 0.006055 | 2.533 +/- 0.015 | +0.78% +/- 0.67 |
+| `serial-m8` | 3 | 0.926540 +/- 0.005047 | 2.526 +/- 0.013 | +0.47% +/- 0.54 |
+| `noheloco-m8` | 3 | 0.929534 +/- 0.001852 | 2.533 +/- 0.005 | +0.79% +/- 0.21 |
+| `strided-m8` | 3 | 0.924553 +/- 0.003822 | 2.521 +/- 0.010 | +0.25% +/- 0.40 |
+| `direct-rda-m8` | 3 | 0.924452 +/- 0.004116 | 2.520 +/- 0.010 | +0.24% +/- 0.44 |
+| `unthrottled-m8` | 3 | 0.931392 +/- 0.003851 | 2.538 +/- 0.010 | +1.00% +/- 0.43 |
+
+### Per-Seed Quality Results
+
+| arm | seed | CE/token | perplexity | delta vs paired sync |
+|---|---:|---:|---:|---:|
+| `base` | - | 1.227409 | 3.412 | - |
+| `baseline-m8` | 17 | 0.922207 | 2.515 | - |
+| `m8` | 17 | 0.920297 | 2.510 | -0.21% |
+| `alpha0-m8` | 17 | 1.106854 | 3.025 | +20.02% |
+| `q4-m8` | 17 | 0.928979 | 2.532 | +0.73% |
+| `serial-m8` | 17 | 0.928866 | 2.532 | +0.72% |
+| `noheloco-m8` | 17 | 0.928656 | 2.531 | +0.70% |
+| `strided-m8` | 17 | 0.923458 | 2.518 | +0.14% |
+| `direct-rda-m8` | 17 | 0.928854 | 2.532 | +0.72% |
+| `unthrottled-m8` | 17 | 0.931481 | 2.538 | +1.01% |
+| `baseline-m8` | 29 | 0.922317 | 2.515 | - |
+| `m8` | 29 | 0.933601 | 2.544 | +1.22% |
+| `alpha0-m8` | 29 | 1.088558 | 2.970 | +18.02% |
+| `q4-m8` | 29 | 0.923515 | 2.518 | +0.13% |
+| `serial-m8` | 29 | 0.930005 | 2.535 | +0.83% |
+| `noheloco-m8` | 29 | 0.928284 | 2.530 | +0.65% |
+| `strided-m8` | 29 | 0.928803 | 2.531 | +0.70% |
+| `direct-rda-m8` | 29 | 0.923802 | 2.519 | +0.16% |
+| `unthrottled-m8` | 29 | 0.927498 | 2.528 | +0.56% |
+| `baseline-m8` | 43 | 0.922114 | 2.515 | - |
+| `m8` | 43 | 0.921522 | 2.513 | -0.06% |
+| `alpha0-m8` | 43 | 1.105693 | 3.021 | +19.91% |
+| `q4-m8` | 43 | 0.935607 | 2.549 | +1.46% |
+| `serial-m8` | 43 | 0.920749 | 2.511 | -0.15% |
+| `noheloco-m8` | 43 | 0.931662 | 2.539 | +1.04% |
+| `strided-m8` | 43 | 0.921397 | 2.513 | -0.08% |
+| `direct-rda-m8` | 43 | 0.920699 | 2.511 | -0.15% |
+| `unthrottled-m8` | 43 | 0.935198 | 2.548 | +1.42% |
+
+### Aggregate Systems Results
+
+| arm | train s | raw tok/s | target tok/s | GPU-h | mean H | participation | stale | sync GB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `baseline-m8` | 465.7 | 4503.6 | 4014.7 | 1.035 | - | - | - | - |
+| `m8` | 439.3 | 4774.5 | 4256.1 | 0.976 | 22.58 | 94.3% | 0.00 | 13.011 |
+| `alpha0-m8` | 438.6 | 4781.3 | 4262.2 | 0.975 | 22.68 | 94.5% | 0.00 | 12.949 |
+| `q4-m8` | 446.1 | 4701.4 | 4191.0 | 0.991 | 22.58 | 95.2% | 0.00 | 8.495 |
+| `serial-m8` | 436.1 | 4808.9 | 4286.8 | 0.969 | 22.89 | 95.0% | 0.00 | 12.857 |
+| `noheloco-m8` | 437.4 | 4794.7 | 4274.1 | 0.972 | 22.48 | 95.1% | 0.00 | 13.163 |
+| `strided-m8` | 433.8 | 4834.4 | 4309.6 | 0.964 | 22.64 | 95.8% | 0.00 | 12.927 |
+| `direct-rda-m8` | 436.4 | 4805.7 | 4283.9 | 0.970 | 22.73 | 95.0% | 0.00 | 12.836 |
+| `unthrottled-m8` | 449.7 | 4663.0 | 4156.8 | 0.999 | 8.87 | 90.9% | 0.00 | 30.232 |
+
+### Per-Seed Systems Results
+
+| arm | seed | train s | raw tok/s | target tok/s | mean H | participation | stale | sync GB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `baseline-m8` | 17 | 463.0 | 4529.5 | 4043.3 | - | - | - | - |
+| `m8` | 17 | 446.6 | 4695.9 | 4191.9 | 22.77 | 93.2% | 0.00 | 12.989 |
+| `alpha0-m8` | 17 | 439.3 | 4773.8 | 4261.5 | 22.67 | 94.5% | 0.00 | 12.927 |
+| `q4-m8` | 17 | 446.2 | 4700.4 | 4195.9 | 22.42 | 95.3% | 0.00 | 8.544 |
+| `serial-m8` | 17 | 435.9 | 4811.3 | 4294.9 | 22.99 | 95.3% | 0.00 | 12.750 |
+| `noheloco-m8` | 17 | 435.9 | 4811.4 | 4295.0 | 22.48 | 95.1% | 0.00 | 13.190 |
+| `strided-m8` | 17 | 433.8 | 4834.7 | 4315.8 | 22.66 | 95.6% | 0.00 | 12.905 |
+| `direct-rda-m8` | 17 | 438.5 | 4783.0 | 4269.6 | 22.77 | 94.7% | 0.00 | 12.865 |
+| `unthrottled-m8` | 17 | 448.8 | 4672.4 | 4170.9 | 8.91 | 91.3% | 0.00 | 29.930 |
+| `baseline-m8` | 29 | 468.0 | 4481.1 | 3984.3 | - | - | - | - |
+| `m8` | 29 | 434.7 | 4824.6 | 4289.7 | 22.55 | 95.3% | 0.00 | 12.975 |
+| `alpha0-m8` | 29 | 437.6 | 4792.1 | 4260.7 | 22.76 | 94.5% | 0.00 | 12.850 |
+| `q4-m8` | 29 | 444.2 | 4721.6 | 4198.1 | 22.50 | 95.2% | 0.00 | 8.496 |
+| `serial-m8` | 29 | 437.2 | 4796.8 | 4264.9 | 22.91 | 94.6% | 0.00 | 12.860 |
+| `noheloco-m8` | 29 | 438.2 | 4785.7 | 4255.1 | 22.50 | 95.2% | 0.00 | 13.118 |
+| `strided-m8` | 29 | 433.9 | 4833.0 | 4297.2 | 22.65 | 96.1% | 0.00 | 12.922 |
+| `direct-rda-m8` | 29 | 436.2 | 4807.2 | 4274.2 | 22.71 | 94.7% | 0.00 | 12.865 |
+| `unthrottled-m8` | 29 | 450.2 | 4658.1 | 4141.6 | 8.82 | 91.3% | 0.00 | 30.441 |
+| `baseline-m8` | 43 | 466.0 | 4500.3 | 4016.5 | - | - | - | - |
+| `m8` | 43 | 436.6 | 4802.9 | 4286.6 | 22.43 | 94.4% | 0.00 | 13.070 |
+| `alpha0-m8` | 43 | 438.9 | 4778.0 | 4264.3 | 22.61 | 94.4% | 0.00 | 13.070 |
+| `q4-m8` | 43 | 447.9 | 4682.2 | 4178.8 | 22.82 | 95.0% | 0.00 | 8.444 |
+| `serial-m8` | 43 | 435.2 | 4818.7 | 4300.7 | 22.77 | 95.0% | 0.00 | 12.960 |
+| `noheloco-m8` | 43 | 438.1 | 4786.8 | 4272.2 | 22.47 | 95.0% | 0.00 | 13.180 |
+| `strided-m8` | 43 | 433.7 | 4835.6 | 4315.7 | 22.59 | 95.7% | 0.00 | 12.954 |
+| `direct-rda-m8` | 43 | 434.5 | 4826.9 | 4308.0 | 22.70 | 95.7% | 0.00 | 12.778 |
+| `unthrottled-m8` | 43 | 450.2 | 4658.7 | 4157.8 | 8.90 | 90.1% | 0.00 | 30.327 |
+
+### Interpretation
+
+Default real `m8` averaged +0.32% versus sync, with per-seed deltas
+-0.21%, +1.22%, and -0.06%. `direct-rda-m8` (+0.24%) and `strided-m8`
+(+0.25%) were the strongest aggregate variants, but their advantage over
+default `m8` is small relative to seed variance.
+
+`alpha0-m8` regressed sharply (+19.32%), while direct RDA stayed near sync.
+This confirms that alpha cannot be removed while retaining the default outer
+optimizer; direct RDA works because it changes the whole outer update and
+application rule. `q4-m8` reduced synchronization traffic from 13.011 GB to
+8.495 GB with a +0.78% quality delta. `unthrottled-m8` increased traffic to
+30.232 GB without improving quality.
+
+The earlier single-host simulation reported `m2` +9.91%, `m4` +11.33%, and
+`direct-rda` +0.56%; this real topology reported `m8` +0.32% and
+`direct-rda-m8` +0.24%. The difference cannot be attributed solely to real
+topology because this run also changed to NF4, attention-only LoRA,
+512-token sequences, and gradient checkpointing. The best DiLoCo artifact
+was `m8`, seed 17, at 0.920297 CE/token (-0.21% versus paired sync).
+
 ## LTX-Video Diffusion
 
 ### Configuration

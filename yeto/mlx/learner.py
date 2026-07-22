@@ -35,11 +35,30 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser("yeto.mlx.learner")
     p.add_argument("--model", required=True, help="HF id or yeto/models.py alias")
     p.add_argument("--data", required=True)
+    p.add_argument("--model-revision", default=None)
+    p.add_argument("--data-revision", default=None)
+    p.add_argument("--trust-remote-code", action="store_true")
     p.add_argument("--syncer", required=True, help="host:port or 'none' (local-only run)")
     p.add_argument("--learner-id", type=int, default=0)
     p.add_argument("--num-learners", type=int, default=1)
     p.add_argument("--loss-function", default="cross_entropy")
+    p.add_argument("--allow-unsafe-pickled-loss", action="store_true")
+    p.add_argument("--loss-sha256", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--source-sha256", default=None, help=argparse.SUPPRESS)
+    for provenance_flag in (
+        "model-requested-identifier",
+        "model-requested-revision",
+        "data-requested-identifier",
+        "data-requested-revision",
+    ):
+        p.add_argument(f"--{provenance_flag}", default=None, help=argparse.SUPPRESS)
     p.add_argument("--train-on", choices=["assistant", "all"], default="assistant")
+    p.add_argument(
+        "--assistant-mask-mode",
+        choices=["native", "legacy"],
+        default="native",
+        help="assistant-only masking: tokenizer-native exact mask or explicit legacy format",
+    )
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
@@ -110,11 +129,28 @@ def load_model_and_tokenizer(args):
 
     from ..learner import _from_pretrained_offline_first
     from ..models import resolve
+    from ..provenance import is_local_reference, model_load_kwargs
 
     model_id = resolve(args.model)
-    hf_config = _from_pretrained_offline_first(AutoConfig, model_id, trust_remote_code=True)
-    model, _ = mlx_lm.load(model_id, model_config=mlx_config_shim(hf_config))
-    tokenizer = _from_pretrained_offline_first(AutoTokenizer, model_id, trust_remote_code=True)
+    load_kwargs = model_load_kwargs(args)
+    hf_config = _from_pretrained_offline_first(AutoConfig, model_id, **load_kwargs)
+    mlx_model_path = model_id
+    if load_kwargs.get("revision") and not is_local_reference(model_id):
+        from huggingface_hub import snapshot_download
+
+        try:
+            mlx_model_path = snapshot_download(
+                repo_id=model_id,
+                revision=load_kwargs["revision"],
+                local_files_only=True,
+            )
+        except OSError:
+            mlx_model_path = snapshot_download(
+                repo_id=model_id,
+                revision=load_kwargs["revision"],
+            )
+    model, _ = mlx_lm.load(mlx_model_path, model_config=mlx_config_shim(hf_config))
+    tokenizer = _from_pretrained_offline_first(AutoTokenizer, model_id, **load_kwargs)
     return model, tokenizer, hf_config
 
 
@@ -187,6 +223,8 @@ def _micro_batches(args, tokenizer):
             args.seq_len,
             args.max_rows,
             train_on=args.train_on,
+            assistant_mask_mode=args.assistant_mask_mode,
+            revision=getattr(args, "data_revision", None),
         )
 
         def gen():
@@ -208,6 +246,8 @@ def _micro_batches(args, tokenizer):
         args.seq_len,
         args.max_rows,
         train_on=args.train_on,
+        assistant_mask_mode=args.assistant_mask_mode,
+        revision=getattr(args, "data_revision", None),
     )
     log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)
 
@@ -234,6 +274,10 @@ def main(argv=None) -> None:
         level=logging.INFO,
         format=f"%(asctime)s mlx-learner{args.learner_id} %(levelname)s %(message)s",
     )
+    from ..provenance import pin_runtime_provenance, verify_source_tree_sha256
+
+    verify_source_tree_sha256(args.source_sha256)
+    pin_runtime_provenance(args)
     if args.micro_batch_size == "auto":
         args.micro_batch_size = 1
     args.micro_batch_size = int(args.micro_batch_size)
@@ -259,12 +303,19 @@ def main(argv=None) -> None:
 
     from ..fragments import build_layout
     from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
-    from ..tensor_io import fragment_flat, pack_fragment, quantize_q4, unpack_fragment
+    from ..tensor_io import (
+        fragment_flat,
+        pack_fragment,
+        pack_tensor,
+        quantize_q4,
+        unpack_fragment,
+    )
 
     layout = build_layout(
         [(n, int(np.prod(i.shape))) for n, i in registry.items()],
         args.fragments,
         args.fragment_pattern,
+        named_shapes={n: tuple(int(dim) for dim in info.shape) for n, info in registry.items()},
     )
     total = sum(int(np.prod(i.shape)) for i in registry.values())
     log.info(
@@ -291,8 +342,9 @@ def main(argv=None) -> None:
 
     run_inner_loop(
         args, model, registry, layout, tokenizer, client,
-        fragment_flat=fragment_flat, pack_fragment=pack_fragment,
-        quantize_q4=quantize_q4, unpack_fragment=unpack_fragment,
+        fragment_flat=fragment_flat, pack_tensor=pack_tensor,
+        quantize_q4=quantize_q4,
+        unpack_fragment=unpack_fragment,
         bulk_dtype=bulk_dtype, dtype_q4=DTYPE_Q4,
     )
 
@@ -303,7 +355,8 @@ def main(argv=None) -> None:
 
 def run_inner_loop(
     args, model, registry, layout, tokenizer, client,
-    *, fragment_flat, pack_fragment, quantize_q4, unpack_fragment, bulk_dtype, dtype_q4,
+    *, fragment_flat, pack_tensor, quantize_q4, unpack_fragment,
+    bulk_dtype, dtype_q4,
 ):
     """MLX inner AdamW steps + the torch learner's exact sync semantics:
     counters advance every step, pulls are answered once c_steps >= 1,
@@ -312,6 +365,8 @@ def run_inner_loop(
     import mlx.nn as nn
     import mlx.optimizers as optim
     from mlx.utils import tree_map
+
+    from ..protocol import DTYPE_F32
 
     def loss_fn(mdl, ids, weights):
         # Same math as yeto.losses.sft_loss: next-token logprobs, weighted
@@ -337,26 +392,25 @@ def run_inner_loop(
     pending_pulls: list = []
     global_step = 0
     tokens_per_inner_step = args.micro_batch_size * args.grad_accum * args.seq_len
-    anchors: list[torch.Tensor] | None = None
-    if client is not None and client.dtype == dtype_q4:
-        snap = torch_adapters(model, registry)
-        anchors = [fragment_flat(frag, snap) for frag in layout.fragments]
+    anchors: list[torch.Tensor | None] | None = None
+    if client is not None:
+        anchors = [None] * layout.num_fragments
 
     shutdown = False
     t_last = time.monotonic()
     while not shutdown and steps_total < args.max_local_steps:
         grads_acc = None
-        loss_val = trained_val = 0.0
+        loss_val = 0.0
         for _ in range(args.grad_accum):
             ids_t, w_t = next(batches)
             ids = mx.array(ids_t.numpy().astype(np.int32))
             weights = mx.array(w_t.numpy())
-            (loss, trained), grads = value_and_grad(model, ids, weights)
+            (loss, _trained), grads = value_and_grad(model, ids, weights)
             grads_acc = (
                 grads if grads_acc is None else tree_map(lambda a, b: a + b, grads_acc, grads)
             )
             mx.eval(grads_acc, loss)
-            loss_val, trained_val = loss.item(), trained.item()
+            loss_val = loss.item()
         if args.grad_accum > 1:
             grads_acc = tree_map(lambda g: g / args.grad_accum, grads_acc)
         grads_acc, _ = optim.clip_grad_norm(grads_acc, 1.0)
@@ -388,6 +442,23 @@ def run_inner_loop(
         if client is None:
             continue
         client.check_health()
+        if client.finalizing.is_set():
+            manifest, broadcasts = client.wait_for_final_fragments()
+            for update in broadcasts:
+                fid = update.fragment_id
+                flat = unpack_fragment(
+                    layout.fragments[fid],
+                    update.data,
+                    DTYPE_F32,
+                )
+                # Finalization is a raw overwrite: normal delayed-application
+                # blending must not leak into the saved adapter.
+                write_fragment(model, layout.fragments[fid], flat, registry)
+            mx.eval(model.parameters())
+            client.acknowledge_finalization(manifest)
+            global_step = max(global_step, manifest.global_step)
+            shutdown = True
+            break
         snap = None  # torch view of the adapters, built lazily per boundary
         for bc in client.drain_updates():
             fid = bc.fragment_id
@@ -414,14 +485,19 @@ def run_inner_loop(
                 continue
             c_tokens = tokens_total - tokens_at_reset[fid]
             snap = snap if snap is not None else torch_adapters(model, registry)
-            if anchors is not None:
-                delta = fragment_flat(layout.fragments[fid], snap) - anchors[fid]
+            anchor = anchors[fid] if anchors is not None else None
+            if anchor is None:
+                still_pending.append(pull)
+                continue
+            delta = fragment_flat(layout.fragments[fid], snap) - anchor
+            if client.dtype == dtype_q4:
                 payload = quantize_q4(delta)
             else:
-                payload = pack_fragment(layout.fragments[fid], snap, client.dtype)
+                payload = pack_tensor(delta, client.dtype)
             client.push_fragment(
                 fid,
                 pull.global_step,
+                pull.round_attempt,
                 fragment_versions[fid],
                 steps_total,
                 c_steps,
@@ -430,6 +506,11 @@ def run_inner_loop(
             )
         pending_pulls = still_pending
         shutdown = client.shutdown.is_set()
+    if client is not None and not client.finalized.is_set():
+        raise RuntimeError(
+            "MLX learner stopped before authoritative finalization; "
+            "refusing to save local parameters"
+        )
     mx.eval(model.parameters())
     log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
 
@@ -462,6 +543,13 @@ def save_adapters(args, model, registry, tokenizer) -> None:
     with open(os.path.join(save_dir, "adapter_config.json"), "w") as f:
         json.dump(config, f, indent=2)
     tokenizer.save_pretrained(save_dir)
+    from ..provenance import write_provenance_manifest
+
+    write_provenance_manifest(
+        save_dir,
+        args,
+        artifact_kind="mlx-causal-lm-training-output",
+    )
     log.info("saved adapters to %s", save_dir)
 
 

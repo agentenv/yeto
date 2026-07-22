@@ -153,7 +153,7 @@ def test_diffusion_learner_parse_cache_defaults_are_off():
     assert args.seed is None
 
 
-def test_launch_cli_parses_diffusion_seed_without_a_generic_lm_seed():
+def test_launch_cli_keeps_diffusion_and_lm_seeds_separate():
     from yeto.cli import parse_args
 
     args = parse_args(
@@ -172,8 +172,8 @@ def test_launch_cli_parses_diffusion_seed_without_a_generic_lm_seed():
     )
 
     assert args.diffusion_seed == 123
+    assert args.seed == 0
     assert args.resize_mode == "center-crop"
-    assert not hasattr(args, "seed")
 
 
 def test_diffusion_seed_derivation_is_stable_and_separates_eval_rows():
@@ -1083,13 +1083,93 @@ def test_diffusion_adapter_file_factory(tmp_path):
     assert adapter.marker == "loaded"
 
 
+def test_diffusion_adapter_module_executes_exact_attested_bytes(
+    monkeypatch, tmp_path
+):
+    import importlib
+
+    from yeto import provenance
+    from yeto.diffusion import learner
+
+    package = tmp_path / "adapter_package"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    source = package / "hook.py"
+    source.write_text(
+        "class Adapter:\n"
+        "    marker = 'v1'\n"
+        "\n"
+        "def make_adapter():\n"
+        "    return Adapter()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    cached = importlib.import_module("adapter_package.hook")
+    assert cached.make_adapter().marker == "v1"
+
+    source.write_text(
+        "class Adapter:\n"
+        "    marker = 'v2'\n"
+        "\n"
+        "def make_adapter():\n"
+        "    return Adapter()\n",
+        encoding="utf-8",
+    )
+    expected = provenance.file_sha256(source)
+    adapter = learner.load_diffusion_adapter(
+        "adapter_package.hook:make_adapter",
+        expected_sha256=expected,
+    )
+
+    assert adapter.marker == "v2"
+    assert cached.make_adapter().marker == "v1"
+
+
+def test_diffusion_adapter_executes_collectively_attested_buffer(tmp_path):
+    from yeto import provenance
+    from yeto.diffusion import learner
+
+    source = tmp_path / "adapter.py"
+    source.write_text(
+        "class Adapter:\n"
+        "    marker = 'attested'\n"
+        "\n"
+        "def make_adapter():\n"
+        "    return Adapter()\n",
+        encoding="utf-8",
+    )
+    path, payload, digest = provenance.read_distributed_python_spec_bytes(
+        f"{source}:make_adapter",
+        None,
+        rank=0,
+        world=1,
+    )
+    source.write_text(
+        "class Adapter:\n"
+        "    marker = 'replacement'\n"
+        "\n"
+        "def make_adapter():\n"
+        "    return Adapter()\n",
+        encoding="utf-8",
+    )
+
+    adapter = learner.load_diffusion_adapter(
+        f"{source}:make_adapter",
+        expected_sha256=digest,
+        source_bytes=payload,
+        source_path=path,
+    )
+    assert adapter.marker == "attested"
+
+
 def test_nava_adapter_factory_and_row_conversion(tmp_path):
     pytest.importorskip("torch")
     from yeto.diffusion import learner
     from yeto.diffusion.adapters import nava
 
     adapter = learner.load_diffusion_adapter("yeto.diffusion.adapters.nava:make_adapter")
-    assert isinstance(adapter, nava.NavaAdapter)
+    assert type(adapter).__name__ == "NavaAdapter"
+    assert adapter.supports_pinned_model_source is True
 
     args = SimpleNamespace(
         video_column="video",
@@ -1121,6 +1201,69 @@ def test_nava_adapter_factory_and_row_conversion(tmp_path):
         "prompt": "another caption",
     }
     assert nava._nava_json_row(no_duration, args)["video_info"][0]["duration"] == 5.0
+
+
+def test_nava_sample_hook_preserves_pinned_model_provenance(monkeypatch, tmp_path):
+    pytest.importorskip("torch")
+    import huggingface_hub
+
+    from yeto import provenance
+    from yeto.diffusion.adapters.nava import NavaAdapter
+
+    commit = "a" * 40
+    snapshot_calls = []
+
+    def snapshot_download(**kwargs):
+        snapshot_calls.append(kwargs)
+        return str(tmp_path / "snapshot")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+    adapter = NavaAdapter(nava_root=str(tmp_path), config_path=str(tmp_path / "nava.yaml"))
+
+    def load_pipeline(forwarded, device):
+        assert device == "cpu"
+        assert forwarded.model_revision == commit
+        assert forwarded.trust_remote_code is False
+        assert forwarded._provenance["model"]["resolved_revision"] == commit
+        return SimpleNamespace(snapshot=provenance.materialize_pinned_model(forwarded))
+
+    monkeypatch.setattr(adapter, "load_pipeline", load_pipeline)
+    monkeypatch.setattr(adapter, "load_adapters", lambda pipe, *args: pipe)
+    monkeypatch.setattr(
+        adapter,
+        "prepare_sample_pipeline",
+        lambda pipe, *args: pipe,
+    )
+    args = SimpleNamespace(
+        model="baidu/NAVA",
+        model_revision=commit,
+        trust_remote_code=False,
+        _provenance={
+            "schema_version": 1,
+            "model": {
+                "source": "huggingface",
+                "resolved_identifier": "baidu/NAVA",
+                "resolved_revision": commit,
+            },
+            "trust_remote_code": False,
+        },
+    )
+
+    pipe = adapter.load_sample_pipeline(
+        tmp_path,
+        {"model": "nava", "lora": {"r": 4, "alpha": 8}},
+        args,
+        "cpu",
+    )
+
+    assert pipe.snapshot == str(tmp_path / "snapshot")
+    assert snapshot_calls == [
+        {
+            "repo_id": "baidu/NAVA",
+            "revision": commit,
+            "local_files_only": True,
+        }
+    ]
 
 
 def test_nava_adapter_direct_latent_training_step():
@@ -1182,7 +1325,7 @@ def test_nava_adapter_raw_state_save_and_load(tmp_path):
 
     adapter.save_adapters(pipe, tmp_path)
 
-    assert (tmp_path / "model_state.pt").exists()
+    assert (tmp_path / "model_state.safetensors").exists()
     loaded = SimpleNamespace(model=torch.nn.Linear(2, 2))
     adapter.load_adapters(loaded, tmp_path, {}, SimpleNamespace())
     assert torch.allclose(loaded.model.weight, torch.full_like(loaded.model.weight, 3.0))
@@ -1230,6 +1373,7 @@ def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
         "\n"
         "def make_adapter():\n"
         "    class Adapter:\n"
+        "        supports_pinned_model_source = True\n"
         "        def load_pipeline(self, args, device):\n"
         "            del args, device\n"
         "            return TinyPipe()\n"
@@ -1254,6 +1398,8 @@ def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
     argv = [
         "--model",
         "tiny",
+        "--model-revision",
+        "a" * 40,
         "--data",
         str(data),
         "--syncer",
@@ -1283,7 +1429,9 @@ def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
     ]
     learner.main(argv)
 
-    state = torch.load(out / "trainable_state.pt", map_location="cpu")
+    from safetensors.torch import load_file
+
+    state = load_file(out / "trainable_state.safetensors", device="cpu")
     assert "transformer.proj.weight" in state
     meta = json.loads(
         (out / learner.DIFFUSION_ADAPTER_METADATA_FILE).read_text(encoding="utf-8")
@@ -1304,7 +1452,7 @@ def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
     second_argv = argv.copy()
     second_argv[second_argv.index("--output-dir") + 1] = str(second_out)
     learner.main(second_argv)
-    second_state = torch.load(second_out / "trainable_state.pt", map_location="cpu")
+    second_state = load_file(second_out / "trainable_state.safetensors", device="cpu")
 
     assert state.keys() == second_state.keys()
     for name in state:
@@ -1603,6 +1751,7 @@ def test_raw_image_lora_adapter_round_trip(monkeypatch, tmp_path):
         "\n"
         "def make_adapter():\n"
         "    class Adapter:\n"
+        "        supports_pinned_model_source = True\n"
         "        def load_pipeline(self, args, device):\n"
         "            del args, device\n"
         "            return TinyPipe()\n"
@@ -1620,6 +1769,8 @@ def test_raw_image_lora_adapter_round_trip(monkeypatch, tmp_path):
         [
             "--model",
             "tiny",
+            "--model-revision",
+            "a" * 40,
             "--data",
             str(data),
             "--syncer",
@@ -1681,10 +1832,24 @@ def test_raw_image_lora_adapter_round_trip(monkeypatch, tmp_path):
             del prompt, kwargs
             return {"images": [Image.new("RGB", (1, 1), color="green")]}
 
-    monkeypatch.setattr(sample, "_load_base_pipeline", lambda model_id, device, dtype: TinySamplePipe())
+    monkeypatch.setattr(
+        sample,
+        "_load_base_pipeline",
+        lambda model_id, device, dtype, **kwargs: TinySamplePipe(),
+    )
+    with pytest.raises(PermissionError, match="pass the same --diffusion-adapter explicitly"):
+        sample.load_artifact_pipeline(
+            out,
+            SimpleNamespace(model=None, diffusion_adapter=None, device="cpu", dtype="auto"),
+        )
     pipe, loaded_meta, adapter = sample.load_artifact_pipeline(
         out,
-        SimpleNamespace(model=None, diffusion_adapter=None, device="cpu", dtype="auto"),
+        SimpleNamespace(
+            model=None,
+            diffusion_adapter=f"{adapter_file}:make_adapter",
+            device="cpu",
+            dtype="auto",
+        ),
     )
 
     assert loaded_meta["model"] == "tiny"
@@ -2531,6 +2696,7 @@ def test_launcher_routes_diffusion_to_diffusion_learner_and_opt_in_caches():
     assert "--diffusion-loss-weighting" not in task.run
     assert "--diffusion-family" not in task.run
     assert "--train-on" not in task.run and "--seq-len" not in task.run
+    assert "--assistant-mask-mode" not in task.run
     assert "--tokenize" not in task.run
 
 
@@ -2568,7 +2734,7 @@ def test_launcher_passes_diffusion_loss_weighting_only_for_diffusion():
     assert "--train-on assistant" in lm_task.run
 
 
-def test_launcher_passes_seed_only_to_diffusion_learner():
+def test_launcher_passes_the_model_kind_specific_seed():
     task = make_learner_task(
         _args(diffusion_seed=123),
         _SPEC,
@@ -2579,13 +2745,13 @@ def test_launcher_passes_seed_only_to_diffusion_learner():
     assert " --seed 123" in task.run
 
     lm_task = make_learner_task(
-        _args(model="gemma4", diffusion_seed=123),
+        _args(model="gemma4", diffusion_seed=123, seed=29),
         _SPEC,
         0,
         1,
         "a:1",
     )
-    assert " --seed " not in lm_task.run
+    assert " --seed 29" in lm_task.run
 
 
 def test_launcher_routes_video_aliases_without_model_family_flags():
@@ -2653,6 +2819,7 @@ def test_diffusion_sample_task_uses_yeto_sample_and_mounts_data(tmp_path):
         max_rows=2,
         seed=123,
         diffusion_adapter="hooks:make",
+        allow_unattested_legacy_adapter=True,
     )
 
     task = make_diffusion_sample_task(args, _SPEC)
@@ -2664,6 +2831,7 @@ def test_diffusion_sample_task_uses_yeto_sample_and_mounts_data(tmp_path):
     assert "--max-rows 2" in task.run
     assert "--seed 123" in task.run
     assert "--diffusion-adapter hooks:make" in task.run
+    assert "--allow-unattested-legacy-adapter" in task.run
     assert task.file_mounts["~/yeto-adapter"] == args.adapter_dir
     assert task.file_mounts["~/yeto-data.jsonl"] == str(data)
     assert "diffusers" in task.setup

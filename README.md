@@ -58,6 +58,23 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
   small on-demand box whose checkpoint/resume absorbs preemptions. The
   submitting machine can disconnect after launch.
 
+## Production source safety
+
+Remote model and dataset branches or tags are resolved to immutable Hugging
+Face commits before any learner is provisioned. Config, tokenizer, model,
+dataset, prefetch, export, and sampling paths reuse those commits. Executable
+model code is disabled by default; enabling `--trust-remote-code` is an
+explicit trust decision and still uses the pinned commit. Saved artifacts
+include `yeto_provenance.json` (or embedded diffusion provenance) with
+resolved source identities and a Yeto source-tree digest.
+
+Legacy pickled losses are disabled by default because deserialization executes
+code. Existing custom/callable transport requires
+`--allow-unsafe-pickled-loss` and is SHA-256 attested before every learner
+loads it. See [docs/PROVENANCE.md](docs/PROVENANCE.md) for revision flags,
+local-path behavior, custom diffusion-loader requirements, safe tensor
+formats, and migration guidance.
+
 ## Diffusion
 
 Yeto also has an experimental diffusion learner selected with
@@ -165,6 +182,9 @@ delta correction, q4 wire format, snapshots, resilience.
 [docs/LM_BENCHMARK.md](docs/LM_BENCHMARK.md) — standalone equal-hardware
 causal-LM benchmark contract, workload controls, complete arm and metric
 tables, and reproducibility rules.
+[docs/A100_KERNELS.md](docs/A100_KERNELS.md) — opt-in causal attention/model
+kernels, correctness gates, pinned dependencies, and the standalone 8xA100
+throughput and memory benchmark.
 [docs/DIFFUSION.md](docs/DIFFUSION.md) — the generic Diffusers image/video
 backend, data and conditioning contracts, external adapters, export, sampling,
 validation, and current limitations.

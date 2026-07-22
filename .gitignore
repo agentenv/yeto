@@ -14,6 +14,7 @@ logs/
 wandb/
 syncer/target/
 .yeto_loss.pkl
+.yeto_loss.*.pkl
 compare-work/
 compare-report/
 smoke-report/
