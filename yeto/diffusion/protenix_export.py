@@ -59,7 +59,7 @@ def _normalize_arg_str(arg_str: str) -> str:
             normalized.extend([f"--{key}", value])
         else:
             normalized.append(token)
-    return shlex.join(normalized)
+    return " ".join(normalized)
 
 
 def _import_protenix_training_api():
