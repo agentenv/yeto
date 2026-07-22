@@ -27,6 +27,7 @@ launcher = ["skypilot[aws]>=0.12"]
 # the wire/data path is shared with the CUDA learners.
 mlx = ["mlx>=0.31", "mlx-lm>=0.29"]
 diffusion = ["diffusers>=0.35", "safetensors", "pillow", "imageio[ffmpeg]", "bitsandbytes>=0.46.1"]
+diffusion-protenix = ["protenix; python_version >= '3.11'"]
 dev = ["pytest", "pytest-timeout"]
 
 [project.scripts]
@@ -35,6 +36,7 @@ yeto-export = "yeto.export:main"
 yeto-codex-traces = "yeto.codex_traces:main"
 yeto-diffusion-export = "yeto.diffusion.export:main"
 yeto-diffusion-sample = "yeto.diffusion.sample:main"
+yeto-protenix-export-batch = "yeto.diffusion.protenix_export:main"
 
 [tool.setuptools.packages.find]
 include = ["yeto*"]

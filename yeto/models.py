@@ -123,6 +123,8 @@ DIFFUSION_MODEL_ALIASES = {
     "wan21-t2v-14b": "Wan-AI/Wan2.1-T2V-14B-Diffusers",
     "wan22": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
     "nava": "baidu/NAVA",
+    "protenix": "protenix_base_default_v1.0.0",
+    "protenix-v2": "protenix-v2",
 }
 
 MODEL_KINDS = {

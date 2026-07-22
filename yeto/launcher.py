@@ -459,8 +459,20 @@ MEGATRON_SETUP = (
     "|| echo '[yeto-setup] megatron stack install failed; --island-backend megatron unavailable' >&2"
 )
 
+PROTENIX_SETUP = (
+    "pip install -q 'protenix>=2.0.0' "
+    "|| echo '[yeto-setup] protenix install failed; Protenix adapter unavailable' >&2"
+)
+PROTENIX_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.protenix:make_adapter"
+
 DIFFUSION_SAMPLE_ADAPTER_DIR = "~/yeto-adapter"
 DIFFUSION_SAMPLE_OUTPUT_DIR = "~/yeto-output"
+
+
+def _is_protenix_request(args) -> bool:
+    model = getattr(args, "model", "")
+    adapter = getattr(args, "diffusion_adapter", "") or ""
+    return model in {"protenix", "protenix-v2"} or "protenix" in adapter
 
 
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
@@ -519,8 +531,11 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             f" --resize-mode {shlex.quote(getattr(args, 'resize_mode', 'stretch'))}"
             f" --stream-workers {args.stream_workers}"
         )
-        if getattr(args, "diffusion_adapter", None):
-            learner_flags += f" --diffusion-adapter {shlex.quote(args.diffusion_adapter)}"
+        diffusion_adapter = getattr(args, "diffusion_adapter", None)
+        if _is_protenix_request(args) and not diffusion_adapter:
+            diffusion_adapter = PROTENIX_DIFFUSION_ADAPTER
+        if diffusion_adapter:
+            learner_flags += f" --diffusion-adapter {shlex.quote(diffusion_adapter)}"
         if getattr(args, "diffusion_seed", None) is not None:
             learner_flags += f" --seed {args.diffusion_seed}"
         if getattr(args, "cache_latents", False):
@@ -555,6 +570,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             "pip install -q -r requirements.txt",
             "pip install -q 'diffusers>=0.35' safetensors pillow 'imageio[ffmpeg]' 'bitsandbytes>=0.46.1'",
         ]
+        if _is_protenix_request(args):
+            setup_steps.append(PROTENIX_SETUP)
     elif backend == "megatron":
         gpus = spec.num_nodes * spec.gpus_per_node
         tp = max(1, getattr(args, "tensor_parallel", 1))
@@ -629,10 +646,13 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     from .models import resolve
 
     repo = resolve(args.model)
-    prefetch = (
-        f"(nohup huggingface-cli download {shlex.quote(repo)} "
-        ">/tmp/hf-prefetch.log 2>&1 &) || true"
-    )
+    if _is_protenix_request(args):
+        prefetch = "true  # Protenix uses native model names/checkpoints, not HF prefetch"
+    else:
+        prefetch = (
+            f"(nohup huggingface-cli download {shlex.quote(repo)} "
+            ">/tmp/hf-prefetch.log 2>&1 &) || true"
+        )
     run = (
         f"{NVME_ENV}\n"
         f"{HF_TOKEN_ENV}\n"

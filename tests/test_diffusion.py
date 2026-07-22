@@ -89,6 +89,8 @@ def test_diffusion_aliases_resolve_and_infer_kind():
         "ideogram4",
         "ltx-video",
         "nava",
+        "protenix",
+        "protenix-v2",
         "qwen-image",
         "qwen-image-2512",
         "sd35",
@@ -101,9 +103,11 @@ def test_diffusion_aliases_resolve_and_infer_kind():
     assert resolve("qwen-image") == "Qwen/Qwen-Image"
     assert resolve("hunyuan-video") == "hunyuanvideo-community/HunyuanVideo"
     assert resolve("nava") == "baidu/NAVA"
+    assert resolve("protenix") == "protenix_base_default_v1.0.0"
     assert resolve_model_kind("flux") == "diffusion"
     assert resolve_model_kind("ideogram4") == "diffusion"
     assert resolve_model_kind("qwen-image") == "diffusion"
+    assert resolve_model_kind("protenix") == "diffusion"
     assert resolve_model_kind("org/custom", "diffusion") == "diffusion"
     assert resolve_model_kind("org/custom") == "causal-lm"
 
@@ -126,6 +130,7 @@ def test_diffusion_capability_matrix_covers_aliases():
     assert "nava" in aliases_by_status("adapter-required")
     assert aliases_by_status("generic-gap") == ()
     assert "flux" in aliases_by_status("needs-real-validation")
+    assert "protenix" in aliases_by_status("adapter-required")
     assert "wan21-t2v-14b" in aliases_by_status("generic-covered")
     assert "wan22" in aliases_by_status("generic-covered")
     assert "| `wan22` |" in format_capability_table(("wan22",))
@@ -1187,6 +1192,163 @@ def test_nava_adapter_raw_state_save_and_load(tmp_path):
     adapter.load_adapters(loaded, tmp_path, {}, SimpleNamespace())
     assert torch.allclose(loaded.model.weight, torch.full_like(loaded.model.weight, 3.0))
     assert torch.allclose(loaded.model.bias, torch.full_like(loaded.model.bias, 4.0))
+
+
+def test_protenix_adapter_full_step_contract(tmp_path):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion.adapters.protenix import make_adapter
+
+    class TinyProtenix:
+        def __init__(self):
+            self.model = torch.nn.Linear(1, 1)
+            self.last_batch = None
+
+        def build_batch(self, rows, args, device):
+            del args
+            return {"rows": rows, "device": device}
+
+        def training_step(self, batch, global_step=0):
+            self.last_batch = batch
+            loss = self.model(torch.ones(1, 1)).sum() + global_step
+            return {"loss": loss, "denominator": torch.tensor(2.0)}
+
+    pipe = TinyProtenix()
+    adapter = make_adapter(backend=pipe, model_name="protenix_base_default_v1.0.0")
+    loaded = adapter.load_pipeline(SimpleNamespace(model="protenix"), torch.device("cpu"))
+    assert loaded is pipe
+
+    params = adapter.trainable_params(pipe)
+    assert set(params) == {"protenix.weight", "protenix.bias"}
+
+    loss, denom = adapter.training_step(
+        pipe,
+        [{"sequence": "ACDE"}],
+        SimpleNamespace(model="protenix"),
+        torch.device("cpu"),
+        global_step=3,
+    )
+    assert denom.item() == 2.0
+    assert pipe.last_batch["rows"] == [{"sequence": "ACDE"}]
+    assert loss.requires_grad
+
+    with torch.no_grad():
+        pipe.model.weight.fill_(5.0)
+    adapter.save_adapters(pipe, tmp_path)
+    assert (tmp_path / "trainable_state.pt").exists()
+
+    loaded_pipe = TinyProtenix()
+    adapter.load_adapters(loaded_pipe, tmp_path, {}, SimpleNamespace())
+    assert torch.allclose(
+        loaded_pipe.model.weight,
+        torch.full_like(loaded_pipe.model.weight, 5.0),
+    )
+
+
+def test_native_protenix_pipeline_uses_prebatched_rows(tmp_path):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion.adapters.protenix import NativeProtenixPipeline
+
+    class TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(2.0))
+            self.last = None
+
+        def forward(
+            self,
+            *,
+            input_feature_dict,
+            label_dict,
+            label_full_dict,
+            mode,
+            current_step,
+            symmetric_permutation,
+            mc_dropout_apply_rate,
+        ):
+            self.last = {
+                "input_feature_dict": input_feature_dict,
+                "label_dict": label_dict,
+                "label_full_dict": label_full_dict,
+                "mode": mode,
+                "current_step": current_step,
+                "symmetric_permutation": symmetric_permutation,
+                "mc_dropout_apply_rate": mc_dropout_apply_rate,
+            }
+            return {"x": self.weight * input_feature_dict["x"].sum()}, label_dict, {}
+
+    class TinyLoss:
+        def __call__(self, *, feat_dict, pred_dict, label_dict, mode):
+            del label_dict
+            return pred_dict["x"] + feat_dict["x"].sum(), {"loss": 1.0}
+
+    pipe = NativeProtenixPipeline(
+        configs=SimpleNamespace(),
+        model=TinyModel(),
+        loss=TinyLoss(),
+        symmetric_permutation="perm",
+        device=torch.device("cpu"),
+    )
+    row = {
+        "input_feature_dict": {"x": [1.0, 2.0]},
+        "label_dict": {"y": [1]},
+        "label_full_dict": {"z": [2]},
+    }
+
+    batch = pipe.build_batch([row], SimpleNamespace(), torch.device("cpu"))
+    assert torch.equal(batch["input_feature_dict"]["x"], torch.tensor([1.0, 2.0]))
+    loss = pipe.training_step(batch, global_step=9)
+    assert torch.equal(loss, torch.tensor(9.0))
+    assert pipe.model.last["current_step"] == 9
+    assert pipe.model.last["symmetric_permutation"] == "perm"
+
+    batch_path = tmp_path / "batch.pt"
+    torch.save(row, batch_path)
+    loaded = pipe.build_batch(
+        [{"protenix_batch_path": "batch.pt", "__yeto_data_root__": str(tmp_path)}],
+        SimpleNamespace(),
+        torch.device("cpu"),
+    )
+    assert torch.equal(loaded["input_feature_dict"]["x"], torch.tensor([1.0, 2.0]))
+
+
+def test_protenix_adapter_alias_model_name_defaults():
+    from yeto.diffusion.adapters.protenix import _model_name_from_alias
+
+    assert _model_name_from_alias("protenix") == "protenix_base_default_v1.0.0"
+    assert _model_name_from_alias("protenix-v2") == "protenix-v2"
+    assert _model_name_from_alias("custom") == "protenix_base_default_v1.0.0"
+
+
+def test_protenix_export_batch_payload_requires_native_keys():
+    from yeto.diffusion.protenix_export import _batch_payload
+
+    batch = {
+        "input_feature_dict": {"x": 1},
+        "label_dict": {"y": 2},
+        "label_full_dict": {"z": 3},
+        "ignored": "ok",
+    }
+    assert _batch_payload(batch) == {
+        "input_feature_dict": {"x": 1},
+        "label_dict": {"y": 2},
+        "label_full_dict": {"z": 3},
+    }
+
+    with pytest.raises(RuntimeError, match="missing required keys"):
+        _batch_payload({"input_feature_dict": {}})
+
+
+def test_protenix_adapter_missing_wrapper_message(monkeypatch):
+    pytest.importorskip("torch")
+    from yeto.diffusion.adapters.protenix import make_adapter
+
+    adapter = make_adapter()
+    monkeypatch.delenv("YETO_PROTENIX_WRAPPER", raising=False)
+    with pytest.raises(
+        RuntimeError,
+        match="Protenix is not installed|Protenix support needs a wrapper",
+    ):
+        adapter.load_pipeline(SimpleNamespace(model="protenix"), "cpu")
 
 
 def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
@@ -2605,6 +2767,16 @@ def test_launcher_passes_diffusion_adapter_hook():
     assert "--diffusion-adapter my_adapter:make" in task.run
     assert "--diffusion-family" not in task.run
     assert "libsndfile1" not in task.setup
+
+
+def test_launcher_defaults_protenix_adapter_and_setup():
+    task = make_learner_task(_args(model="protenix"), _SPEC, 0, 1, "a:1")
+
+    assert "--model protenix" in task.run
+    assert "--diffusion-adapter yeto.diffusion.adapters.protenix:make_adapter" in task.run
+    assert "protenix>=2.0.0" in task.setup
+    assert "Protenix uses native model names/checkpoints" in task.setup
+    assert "huggingface-cli download protenix_base_default" not in task.setup
 
 
 def _sample_args(tmp_path, **over):

@@ -268,6 +268,63 @@ upload artifacts, or communicate between learners. See the
 `yeto/diffusion/adapters/template.py`. NAVA is the in-tree example that
 requires this boundary.
 
+### Protenix
+
+Protenix is exposed through `yeto.diffusion.adapters.protenix` because its
+AF3-style structure diffusion stack is not an image/video Diffusers pipeline.
+The adapter can construct the native Protenix model/loss stack for prebatched
+Protenix rows, while Yeto owns data distribution, gradient accumulation, and
+DiLoCo synchronization. MSA/template search and Protenix feature construction
+should happen before Yeto training.
+
+Install the optional dependency under Python 3.11+ and point at an optional
+checkpoint:
+
+```bash
+pip install "yeto[diffusion-protenix] @ ."
+export YETO_PROTENIX_MODEL_NAME=protenix_base_default_v1.0.0
+export YETO_PROTENIX_CHECKPOINT=/path/to/protenix/checkpoint
+```
+
+Then launch with the external adapter:
+
+```bash
+yeto launch \
+  --model protenix --model-kind diffusion \
+  --data /path/to/protenix-ready-rows.jsonl \
+  ...
+```
+
+`--model protenix` and `--model protenix-v2` default to
+`yeto.diffusion.adapters.protenix:make_adapter`; pass `--diffusion-adapter`
+only to override the built-in adapter.
+
+Each Yeto row must contain one complete pre-collated Protenix batch via
+`protenix_batch`, the three native keys `input_feature_dict`, `label_dict`, and
+`label_full_dict`, or a `protenix_batch_path` / `batch_path` pointing to a
+`torch.save`d batch. Keep `--micro-batch-size 1` for native prebatched rows
+unless your row already contains a larger Protenix batch.
+
+To produce those rows from a Protenix training environment, run:
+
+```bash
+yeto-protenix-export-batch \
+  --model-name protenix_base_default_v1.0.0 \
+  --output-dir /path/to/yeto-protenix-batches \
+  --batch-count 8 \
+  --arg-str "--dtype bf16 --diffusion_batch_size 1 --train_crop_size 384 --data.train_sets weightedPDB_before2109_wopb_nometalc_0925 --data.test_sets recentPDB_1536_sample384_0925"
+```
+
+The command writes `batches/batch-*.pt` plus `yeto_protenix_rows.jsonl`.
+
+For custom Protenix APIs or on-the-fly feature construction, set
+`YETO_PROTENIX_WRAPPER=my_project.protenix_yeto`. The wrapper must provide
+`load_pipeline(args, device, model_name=None, checkpoint_path=None)` and return
+an object with `model.named_parameters()` or `trainable_params()`, plus
+`training_step(batch, global_step=...)` or `compute_loss(...)`. If the wrapper
+exposes `build_batch(rows, args, device)`, the adapter calls it before the
+training step.
+
 ## Validation status
 
 - Unit coverage lives in `tests/test_diffusion.py`,
