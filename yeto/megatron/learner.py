@@ -246,9 +246,13 @@ def _save_megatron_adapter_artifact(args, model, output_dir):
     return True
 
 
-def _save_output_best_effort(bridge, model, output_dir, args=None):
+def _save_output_best_effort(bridge, model, output_dir, args=None, prefer_adapter_artifact=False):
     save_dir = os.path.expanduser(output_dir)
     os.makedirs(save_dir, exist_ok=True)
+    if prefer_adapter_artifact and args is not None and args.tuning == "lora":
+        log.info("writing Yeto Megatron adapter artifact without Bridge HF export")
+        return _save_megatron_adapter_artifact(args, model, save_dir)
+
     bridge_tmp = os.path.join(save_dir, ".bridge-export-tmp")
     shutil.rmtree(bridge_tmp, ignore_errors=True)
     os.makedirs(bridge_tmp, exist_ok=True)
@@ -365,7 +369,13 @@ def main(argv=None):
     # versions, and an extra barrier here can trip NCCL's watchdog after the
     # tiny validation loop. Rank 0 saves the replicated adapter artifact.
     if rank == 0:
-        _save_output_best_effort(bridge, model, args.output_dir, args)
+        _save_output_best_effort(
+            bridge,
+            model,
+            args.output_dir,
+            args,
+            prefer_adapter_artifact=(world > 1),
+        )
         if client is not None:
             client.close()
     dist.destroy_process_group()
