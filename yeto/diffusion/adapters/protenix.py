@@ -47,10 +47,25 @@ def _namespace(value):
     if isinstance(value, Mapping):
         ns = _ConfigNamespace()
         for key, item in value.items():
-            setattr(ns, key, _namespace(item))
+            setattr(ns, key, _to_plain_config(item))
         return ns
     if isinstance(value, list):
-        return [_namespace(item) for item in value]
+        return [_to_plain_config(item) for item in value]
+    return value
+
+
+def _to_plain_config(value):
+    if isinstance(value, Mapping):
+        return {key: _to_plain_config(item) for key, item in value.items()}
+    if isinstance(value, SimpleNamespace):
+        return {
+            key: _to_plain_config(item)
+            for key, item in vars(value).items()
+        }
+    if isinstance(value, list):
+        return [_to_plain_config(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_to_plain_config(item) for item in value)
     return value
 
 

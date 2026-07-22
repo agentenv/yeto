@@ -1328,6 +1328,14 @@ def test_protenix_adapter_alias_model_name_defaults():
     assert _model_name_from_alias("custom") == "protenix_base_default_v1.0.0"
 
 
+def test_protenix_namespace_keeps_nested_configs_as_mappings():
+    from yeto.diffusion.adapters.protenix import _namespace
+
+    configs = _namespace({"train_noise_sampler": {"p_mean": -1.2}, "model": {"x": 1}})
+    assert configs.train_noise_sampler == {"p_mean": -1.2}
+    assert configs.get("model") == {"x": 1}
+
+
 def test_protenix_export_batch_payload_requires_native_keys():
     from yeto.diffusion.protenix_export import _batch_payload
 
