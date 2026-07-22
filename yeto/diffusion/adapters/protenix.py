@@ -310,7 +310,8 @@ class ProtenixAdapter(DiffusionAdapter):
         _deep_update(base, model_configs[model_name])
         base["model_name"] = model_name
         base["dtype"] = _dtype_from_args(args, device)
-        base["load_checkpoint_path"] = self.checkpoint_path
+        if self.checkpoint_path:
+            base["load_checkpoint_path"] = self.checkpoint_path
         base.setdefault("load_strict", False)
         parse_configs = _import_attr("protenix.config.config", "parse_configs")
         arg_str = f"--model_name {model_name} --dtype {base['dtype']}"

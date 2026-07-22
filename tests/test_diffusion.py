@@ -1345,6 +1345,35 @@ def test_protenix_namespace_supports_attributes_and_mapping_unpack():
     assert {**configs.train_noise_sampler} == {"p_mean": -1.2}
 
 
+def test_protenix_native_config_preserves_empty_checkpoint_default(monkeypatch):
+    from yeto.diffusion.adapters.protenix import ProtenixAdapter
+
+    captured = {}
+
+    def fake_import_attr(module_name, attr):
+        if attr == "configs":
+            return {"load_checkpoint_path": "", "dtype": "bf16", "model_name": "protenix"}
+        if attr == "data_configs":
+            return {}
+        if attr == "model_configs":
+            return {"protenix_base_default_v1.0.0": {}}
+        if attr == "parse_configs":
+            def parse_configs(*, configs, arg_str, fill_required_with_null):
+                captured.update(configs)
+                captured["arg_str"] = arg_str
+                captured["fill_required_with_null"] = fill_required_with_null
+                return configs
+
+            return parse_configs
+        raise AssertionError((module_name, attr))
+
+    monkeypatch.setattr("yeto.diffusion.adapters.protenix._import_attr", fake_import_attr)
+    ProtenixAdapter()._build_native_configs(SimpleNamespace(model="protenix"), SimpleNamespace(type="cuda"))
+
+    assert captured["load_checkpoint_path"] == ""
+    assert "--dtype bf16" in captured["arg_str"]
+
+
 def test_protenix_export_batch_payload_requires_native_keys():
     from yeto.diffusion.protenix_export import _batch_payload
 
