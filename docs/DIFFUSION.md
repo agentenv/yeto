@@ -367,6 +367,21 @@ must expose `load_pipeline(args, device, model_id=None, subfolder=None)` and
 return an object with `model.named_parameters()` plus
 `training_step(batch, global_step=...)` or `compute_loss(...)`.
 
+To export pre-collated batches from the Hunyuan3D shape training datamodule:
+
+```bash
+export YETO_HUNYUAN3D_ROOT=/path/to/Hunyuan3D-2.1
+yeto-hunyuan3d-export-batch \
+  --config "$YETO_HUNYUAN3D_ROOT/hy3dshape/configs/hunyuandit-mini-overfitting-flowmatching-dinog518-bf16-lr1e4-512.yaml" \
+  --output-dir /path/to/yeto-hunyuan3d-batches \
+  --batch-count 8 \
+  --set dataset.params.batch_size=1
+```
+
+The command calls Hunyuan3D's configured Lightning datamodule, writes
+`batches/batch-*.pt`, and emits `yeto_hunyuan3d_rows.jsonl` containing
+`hunyuan3d_batch_path` rows.
+
 ### AlphaFold3
 
 Official AlphaFold3 support is intentionally guarded. The adapter does not

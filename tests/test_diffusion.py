@@ -1390,6 +1390,43 @@ def test_hunyuan3d_adapter_sampling_contract():
     assert pipe.seen == ("image.png", {"num_inference_steps": 4, "guidance_scale": 3.0})
 
 
+def test_hunyuan3d_export_parse_args_and_loader_selection():
+    from yeto.diffusion import hunyuan3d_export
+
+    args = hunyuan3d_export.parse_args(
+        [
+            "--config",
+            "cfg.yaml",
+            "--output-dir",
+            "out",
+            "--batch-count",
+            "2",
+            "--set",
+            "dataset.params.batch_size=1",
+        ]
+    )
+    assert args.config == Path("cfg.yaml")
+    assert args.batch_count == 2
+    assert args.set == ["dataset.params.batch_size=1"]
+
+    class Data:
+        def train_dataloader(self):
+            return ["train-loader"]
+
+        def val_dataloader(self):
+            return [["val-loader"]]
+
+    assert hunyuan3d_export._loader(Data(), "train") == "train-loader"
+    assert hunyuan3d_export._loader(Data(), "val") == ["val-loader"]
+
+
+def test_hunyuan3d_export_missing_dependency_message(tmp_path):
+    from yeto.diffusion import hunyuan3d_export
+
+    with pytest.raises(RuntimeError, match="Hunyuan3D-2.1 training dependencies"):
+        hunyuan3d_export._import_hunyuan_training_api(tmp_path / "missing")
+
+
 def test_diffusion_sample_saves_mesh_output(tmp_path):
     from yeto.diffusion import sample
 
