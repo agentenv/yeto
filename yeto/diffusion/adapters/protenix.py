@@ -42,15 +42,36 @@ class _ConfigNamespace(SimpleNamespace):
     def get(self, key: str, default=None):
         return getattr(self, key, default)
 
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and hasattr(self, key)
+
+    def __getitem__(self, key: str):
+        return getattr(self, key)
+
+    def __iter__(self):
+        return iter(vars(self))
+
+    def __len__(self) -> int:
+        return len(vars(self))
+
+    def keys(self):
+        return vars(self).keys()
+
+    def items(self):
+        return vars(self).items()
+
+    def values(self):
+        return vars(self).values()
+
 
 def _namespace(value):
     if isinstance(value, Mapping):
         ns = _ConfigNamespace()
         for key, item in value.items():
-            setattr(ns, key, _to_plain_config(item))
+            setattr(ns, key, _namespace(item))
         return ns
     if isinstance(value, list):
-        return [_to_plain_config(item) for item in value]
+        return [_namespace(item) for item in value]
     return value
 
 
