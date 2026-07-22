@@ -312,14 +312,15 @@ class ProtenixAdapter(DiffusionAdapter):
         base["dtype"] = _dtype_from_args(args, device)
         base["load_checkpoint_path"] = self.checkpoint_path
         base.setdefault("load_strict", False)
+        parse_configs = _import_attr("protenix.config.config", "parse_configs")
+        arg_str = f"--model_name {model_name} --dtype {base['dtype']}"
         if self.config_args:
-            parse_configs = _import_attr("protenix.config.config", "parse_configs")
-            return parse_configs(
-                configs=base,
-                arg_str=self.config_args,
-                fill_required_with_null=True,
-            )
-        return _namespace(base)
+            arg_str = f"{arg_str} {self.config_args}"
+        return parse_configs(
+            configs=base,
+            arg_str=arg_str,
+            fill_required_with_null=True,
+        )
 
     def prepare_model(self, pipe, args, device):
         del args
