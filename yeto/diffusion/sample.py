@@ -289,10 +289,10 @@ def artifact_summary(meta: dict) -> dict:
 
 def _primary_output(value: Any):
     if isinstance(value, dict):
-        for key in ("images", "frames", "videos"):
+        for key in ("images", "frames", "videos", "meshes", "mesh", "paths"):
             if key in value:
                 return value[key]
-    for attr in ("images", "frames", "videos"):
+    for attr in ("images", "frames", "videos", "meshes", "mesh", "paths"):
         out = getattr(value, attr, None)
         if out is not None:
             return out
@@ -350,6 +350,47 @@ def _array_frames(value):
 def save_sample_output(sample, output_path: str | Path, *, fps: int = 8) -> list[Path]:
     value = _primary_output(sample)
     path = Path(os.path.expanduser(str(output_path)))
+    if isinstance(value, (str, os.PathLike, Path)):
+        source = Path(os.path.expanduser(str(value)))
+        if source.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.is_dir() or not path.suffix:
+                path.mkdir(parents=True, exist_ok=True)
+                dest = path / source.name
+            else:
+                dest = path
+            import shutil
+
+            shutil.copyfile(source, dest)
+            return [dest]
+
+    if isinstance(value, (list, tuple)) and value and all(
+        isinstance(item, (str, os.PathLike, Path)) for item in value
+    ):
+        root = path if not path.suffix else path.with_suffix("")
+        root.mkdir(parents=True, exist_ok=True)
+        saved = []
+        import shutil
+
+        for index, item in enumerate(value):
+            source = Path(os.path.expanduser(str(item)))
+            if source.exists():
+                dest = root / source.name
+                shutil.copyfile(source, dest)
+            else:
+                dest = root / f"asset_{index:06d}"
+                dest.write_text(str(item), encoding="utf-8")
+            saved.append(dest)
+        return saved
+
+    mesh = value[0] if isinstance(value, (list, tuple)) and len(value) == 1 else value
+    if hasattr(mesh, "export"):
+        if not path.suffix:
+            path = path.with_suffix(".glb")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mesh.export(path)
+        return [path]
+
     if _is_pil_image(value):
         if not path.suffix:
             path = path.with_suffix(".png")

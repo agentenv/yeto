@@ -346,6 +346,26 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         ),
         evidence=("yeto.diffusion.adapters.protenix", "Protenix supported-model documentation"),
     ),
+    "hunyuan3d-21": _cap(
+        family="Hunyuan3D",
+        pipeline="external adapter",
+        denoisers=("model",),
+        modalities=("image", "3d-shape", "mesh"),
+        conditioning=("image", "adapter-defined"),
+        latent_layout="Hunyuan3D shape VAE latents",
+        scheduler="Hunyuan3D flow matching scheduler",
+        forward_kwargs=("latents", "timestep", "condition", "guidance_cond"),
+        output_alignment="adapter-defined shape latent / mesh export",
+        status="adapter-required",
+        adapter_boundary=(
+            "Hunyuan3D-2.1 uses a custom image-to-3D shape pipeline, VAE, "
+            "conditioner, scheduler, mesh extraction, and optional PBR texture stack."
+        ),
+        evidence=(
+            "yeto.diffusion.adapters.hunyuan3d",
+            "Tencent Hunyuan3D-2.1 README and shape pipeline API",
+        ),
+    ),
 }
 
 

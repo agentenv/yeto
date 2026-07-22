@@ -464,6 +464,15 @@ PROTENIX_SETUP = (
     "|| echo '[yeto-setup] protenix install failed; Protenix adapter unavailable' >&2"
 )
 PROTENIX_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.protenix:make_adapter"
+HUNYUAN3D_ROOT = "~/Hunyuan3D-2.1"
+HUNYUAN3D_SETUP = (
+    f"if [ ! -d {HUNYUAN3D_ROOT} ]; then git clone --depth 1 "
+    f"https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git {HUNYUAN3D_ROOT}; fi && "
+    f"pip install -q -r {HUNYUAN3D_ROOT}/requirements.txt && "
+    f"export YETO_HUNYUAN3D_ROOT={HUNYUAN3D_ROOT} "
+    "|| echo '[yeto-setup] Hunyuan3D setup failed; Hunyuan3D adapter unavailable' >&2"
+)
+HUNYUAN3D_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.hunyuan3d:make_adapter"
 
 DIFFUSION_SAMPLE_ADAPTER_DIR = "~/yeto-adapter"
 DIFFUSION_SAMPLE_OUTPUT_DIR = "~/yeto-output"
@@ -473,6 +482,12 @@ def _is_protenix_request(args) -> bool:
     model = getattr(args, "model", "")
     adapter = getattr(args, "diffusion_adapter", "") or ""
     return model in {"protenix", "protenix-v2"} or "protenix" in adapter
+
+
+def _is_hunyuan3d_request(args) -> bool:
+    model = getattr(args, "model", "")
+    adapter = getattr(args, "diffusion_adapter", "") or ""
+    return model in {"hunyuan3d-21"} or "hunyuan3d" in adapter
 
 
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
@@ -534,6 +549,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         diffusion_adapter = getattr(args, "diffusion_adapter", None)
         if _is_protenix_request(args) and not diffusion_adapter:
             diffusion_adapter = PROTENIX_DIFFUSION_ADAPTER
+        if _is_hunyuan3d_request(args) and not diffusion_adapter:
+            diffusion_adapter = HUNYUAN3D_DIFFUSION_ADAPTER
         if diffusion_adapter:
             learner_flags += f" --diffusion-adapter {shlex.quote(diffusion_adapter)}"
         if getattr(args, "diffusion_seed", None) is not None:
@@ -572,6 +589,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         ]
         if _is_protenix_request(args):
             setup_steps.append(PROTENIX_SETUP)
+        if _is_hunyuan3d_request(args):
+            setup_steps.append(HUNYUAN3D_SETUP)
     elif backend == "megatron":
         gpus = spec.num_nodes * spec.gpus_per_node
         tp = max(1, getattr(args, "tensor_parallel", 1))
@@ -623,6 +642,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         # Surface NCCL's chosen transport in the job logs so an EFA-less
         # fallback to TCP sockets is visible, not silent.
         envs["NCCL_DEBUG"] = "INFO"
+    if _is_hunyuan3d_request(args):
+        envs["YETO_HUNYUAN3D_ROOT"] = HUNYUAN3D_ROOT
     # Non-HF --data sources (local paths, s3://, gs://, ...) ride sky's
     # file_mounts onto every learner; see yeto/datasource.py.
     file_mounts = dict(learner_file_mounts(args.data)) or None

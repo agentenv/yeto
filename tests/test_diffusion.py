@@ -85,6 +85,7 @@ def test_diffusion_aliases_resolve_and_infer_kind():
         "flux2-dev",
         "hidream-i1-dev",
         "hidream-i1-full",
+        "hunyuan3d-21",
         "hunyuan-video",
         "ideogram4",
         "ltx-video",
@@ -102,12 +103,14 @@ def test_diffusion_aliases_resolve_and_infer_kind():
     assert resolve("ideogram4") == "ideogram-ai/ideogram-4-nf4-diffusers"
     assert resolve("qwen-image") == "Qwen/Qwen-Image"
     assert resolve("hunyuan-video") == "hunyuanvideo-community/HunyuanVideo"
+    assert resolve("hunyuan3d-21") == "tencent/Hunyuan3D-2.1"
     assert resolve("nava") == "baidu/NAVA"
     assert resolve("protenix") == "protenix_base_default_v1.0.0"
     assert resolve_model_kind("flux") == "diffusion"
     assert resolve_model_kind("ideogram4") == "diffusion"
     assert resolve_model_kind("qwen-image") == "diffusion"
     assert resolve_model_kind("protenix") == "diffusion"
+    assert resolve_model_kind("hunyuan3d-21") == "diffusion"
     assert resolve_model_kind("org/custom", "diffusion") == "diffusion"
     assert resolve_model_kind("org/custom") == "causal-lm"
 
@@ -131,6 +134,7 @@ def test_diffusion_capability_matrix_covers_aliases():
     assert aliases_by_status("generic-gap") == ()
     assert "flux" in aliases_by_status("needs-real-validation")
     assert "protenix" in aliases_by_status("adapter-required")
+    assert "hunyuan3d-21" in aliases_by_status("adapter-required")
     assert "wan21-t2v-14b" in aliases_by_status("generic-covered")
     assert "wan22" in aliases_by_status("generic-covered")
     assert "| `wan22` |" in format_capability_table(("wan22",))
@@ -1349,6 +1353,48 @@ def test_protenix_adapter_missing_wrapper_message(monkeypatch):
         match="Protenix is not installed|Protenix support needs a wrapper",
     ):
         adapter.load_pipeline(SimpleNamespace(model="protenix"), "cpu")
+
+
+def test_hunyuan3d_adapter_sampling_contract():
+    pytest.importorskip("torch")
+    from yeto.diffusion.adapters.hunyuan3d import make_adapter
+
+    class Mesh:
+        pass
+
+    class TinyHunyuanPipe:
+        def __init__(self):
+            self.model = None
+            self.seen = None
+
+        def __call__(self, image=None, **kwargs):
+            self.seen = (image, kwargs)
+            return [Mesh()]
+
+    pipe = TinyHunyuanPipe()
+    adapter = make_adapter(backend=pipe)
+    loaded = adapter.load_pipeline(SimpleNamespace(dtype="auto"), "cpu")
+    assert loaded is pipe
+
+    out = adapter.sample(
+        pipe,
+        SimpleNamespace(prompt="image.png", num_inference_steps=4, guidance_scale=3.0),
+        {},
+    )
+    assert isinstance(out["meshes"][0], Mesh)
+    assert pipe.seen == ("image.png", {"num_inference_steps": 4, "guidance_scale": 3.0})
+
+
+def test_diffusion_sample_saves_mesh_output(tmp_path):
+    from yeto.diffusion import sample
+
+    class Mesh:
+        def export(self, path):
+            path.write_text("mesh", encoding="utf-8")
+
+    saved = sample.save_sample_output({"meshes": [Mesh()]}, tmp_path / "asset")
+    assert saved == [tmp_path / "asset.glb"]
+    assert saved[0].read_text(encoding="utf-8") == "mesh"
 
 
 def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
@@ -2777,6 +2823,15 @@ def test_launcher_defaults_protenix_adapter_and_setup():
     assert "protenix>=2.0.0" in task.setup
     assert "Protenix uses native model names/checkpoints" in task.setup
     assert "huggingface-cli download protenix_base_default" not in task.setup
+
+
+def test_launcher_defaults_hunyuan3d_adapter_and_setup():
+    task = make_learner_task(_args(model="hunyuan3d-21"), _SPEC, 0, 1, "a:1")
+
+    assert "--model hunyuan3d-21" in task.run
+    assert "--diffusion-adapter yeto.diffusion.adapters.hunyuan3d:make_adapter" in task.run
+    assert "Tencent-Hunyuan/Hunyuan3D-2.1" in task.setup
+    assert task.envs["YETO_HUNYUAN3D_ROOT"] == "~/Hunyuan3D-2.1"
 
 
 def _sample_args(tmp_path, **over):

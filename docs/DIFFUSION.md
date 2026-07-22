@@ -325,6 +325,48 @@ an object with `model.named_parameters()` or `trainable_params()`, plus
 exposes `build_batch(rows, args, device)`, the adapter calls it before the
 training step.
 
+### Hunyuan3D-2.1
+
+Hunyuan3D-2.1 is exposed through `yeto.diffusion.adapters.hunyuan3d` because
+the shape model uses Tencent's custom image-to-3D pipeline, shape VAE,
+conditioner, scheduler, and mesh export path. The upstream repository states
+that Hunyuan3D is governed by Tencent Hunyuan community/non-commercial license
+terms; verify your intended use before running it in a commercial setting.
+
+`--model hunyuan3d-21` defaults to the built-in adapter:
+
+```bash
+yeto launch \
+  --model hunyuan3d-21 --model-kind diffusion \
+  --data /path/to/hunyuan3d-ready-rows.jsonl \
+  --micro-batch-size 1 \
+  ...
+```
+
+Remote learner setup clones `Tencent-Hunyuan/Hunyuan3D-2.1` into
+`~/Hunyuan3D-2.1`, installs its requirements, and sets
+`YETO_HUNYUAN3D_ROOT`. To use an existing checkout, set
+`YETO_HUNYUAN3D_ROOT=/path/to/Hunyuan3D-2.1`.
+
+For sampling a saved adapter artifact, pass the input image path through
+`--prompt` and use a mesh extension:
+
+```bash
+yeto-diffusion-sample \
+  --adapter-dir merged-hunyuan3d \
+  --model hunyuan3d-21 \
+  --diffusion-adapter yeto.diffusion.adapters.hunyuan3d:make_adapter \
+  --prompt /path/to/input.png \
+  --output sample.glb
+```
+
+Native training rows currently need `hunyuan3d_batch` or
+`hunyuan3d_batch_path` prebuilt by a Hunyuan3D training wrapper. For raw
+image/mesh feature construction, provide `YETO_HUNYUAN3D_WRAPPER`; the wrapper
+must expose `load_pipeline(args, device, model_id=None, subfolder=None)` and
+return an object with `model.named_parameters()` plus
+`training_step(batch, global_step=...)` or `compute_loss(...)`.
+
 ## Validation status
 
 - Unit coverage lives in `tests/test_diffusion.py`,

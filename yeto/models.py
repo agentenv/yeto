@@ -125,6 +125,7 @@ DIFFUSION_MODEL_ALIASES = {
     "nava": "baidu/NAVA",
     "protenix": "protenix_base_default_v1.0.0",
     "protenix-v2": "protenix-v2",
+    "hunyuan3d-21": "tencent/Hunyuan3D-2.1",
 }
 
 MODEL_KINDS = {
