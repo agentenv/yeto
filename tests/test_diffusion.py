@@ -1351,7 +1351,7 @@ def test_protenix_export_normalizes_dotlist_arg_str():
     from yeto.diffusion.protenix_export import _normalize_arg_str
 
     assert _normalize_arg_str("data.train_sets=[] dtype=bf16 --use_wandb false") == (
-        "--data.train_sets [] dtype=bf16 --use_wandb false"
+        "--data.train_sets [] --dtype bf16 --use_wandb false"
     )
     assert _normalize_arg_str("data.eval_sets=[]") == "--data.test_sets []"
     assert _normalize_arg_str("data.test_sets=") == '--data.test_sets ""'

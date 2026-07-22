@@ -55,7 +55,7 @@ def _normalize_arg_str(arg_str: str) -> str:
         key, value = token.split("=", 1)
         if key == "data.eval_sets":
             key = "data.test_sets"
-        if key and "." in key:
+        if key:
             normalized.extend([f"--{key}", value if value else '""'])
         else:
             normalized.append(token)
