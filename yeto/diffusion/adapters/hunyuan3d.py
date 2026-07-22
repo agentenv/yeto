@@ -10,6 +10,8 @@ tensors to Yeto's DiLoCo sync loop.
 from __future__ import annotations
 
 import importlib
+import inspect
+import json
 import os
 import sys
 from pathlib import Path
@@ -102,6 +104,50 @@ def _maybe_load_image(value, base_dir: str | os.PathLike | None = None):
     return Image.open(path).convert("RGBA")
 
 
+def _read_first_jsonl_row(path_value: str | os.PathLike | None) -> dict[str, Any] | None:
+    if not path_value:
+        return None
+    path = _resolve_path(path_value)
+    if not path.exists() or not path.is_file():
+        return None
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                return json.loads(line)
+    return None
+
+
+def _training_config_from_args(args) -> Path | None:
+    explicit = os.environ.get("YETO_HUNYUAN3D_TRAIN_CONFIG")
+    if explicit:
+        return _resolve_path(explicit).resolve()
+    row = _read_first_jsonl_row(getattr(args, "data", None))
+    if row is None or not row.get("config"):
+        return None
+    return _resolve_path(row["config"], row.get("__yeto_data_root__")).resolve()
+
+
+def _call_training_loss(fn, batch, global_step: int):
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "global_step" in params:
+        return fn(batch, global_step=global_step)
+    if "batch_idx" in params:
+        return fn(batch, batch_idx=global_step)
+    positional = [
+        param
+        for param in params.values()
+        if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+        and param.default is param.empty
+    ]
+    if len(positional) >= 2:
+        return fn(batch, global_step)
+    return fn(batch)
+
+
 class NativeHunyuan3DPipeline:
     """Wrapper around the Hunyuan3D shape pipeline for Yeto hooks."""
 
@@ -141,13 +187,32 @@ class NativeHunyuan3DPipeline:
         for name in ("training_step", "compute_loss"):
             fn = getattr(self.pipe, name, None)
             if fn is not None:
-                return fn(batch, global_step=global_step)
+                return _call_training_loss(fn, batch, global_step)
         raise RuntimeError(
             "Native Hunyuan3D training needs prebatched rows plus a pipeline/wrapper "
             "with training_step(batch, global_step=...) or compute_loss(...)."
         )
 
     compute_loss = training_step
+
+
+class NativeHunyuan3DTrainingPipeline(NativeHunyuan3DPipeline):
+    """Wrapper around Hunyuan3D's Lightning training module."""
+
+    native_training = True
+
+    def __init__(self, model, config_path: Path) -> None:
+        self.pipe = model
+        self.model = model
+        self.config_path = config_path
+
+    def __getattr__(self, name: str):
+        return getattr(self.model, name)
+
+    def to(self, device):
+        if hasattr(self.model, "to"):
+            self.model.to(device)
+        return self
 
 
 class Hunyuan3DAdapter(DiffusionAdapter):
@@ -181,6 +246,20 @@ class Hunyuan3DAdapter(DiffusionAdapter):
             return load(args, device, model_id=self.model_id, subfolder=self.subfolder)
 
         _maybe_add_hunyuan_paths()
+        training_config = _training_config_from_args(args)
+        if training_config is not None:
+            try:
+                from hy3dshape.utils import get_config_from_file, instantiate_from_config
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Hunyuan3D training config was found, but Hunyuan3D training "
+                    "dependencies are not importable. Set YETO_HUNYUAN3D_ROOT/"
+                    "HUNYUAN3D_ROOT to the Hunyuan3D-2.1 checkout."
+                ) from exc
+            config = get_config_from_file(str(training_config))
+            model = instantiate_from_config(config.model)
+            return NativeHunyuan3DTrainingPipeline(model, training_config)
+
         try:
             from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
         except ImportError as exc:

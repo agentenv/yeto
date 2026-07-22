@@ -1390,6 +1390,34 @@ def test_hunyuan3d_adapter_sampling_contract():
     assert pipe.seen == ("image.png", {"num_inference_steps": 4, "guidance_scale": 3.0})
 
 
+def test_hunyuan3d_training_pipeline_uses_lightning_batch_idx():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion.adapters.hunyuan3d import NativeHunyuan3DTrainingPipeline
+
+    class TinyTrainingModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(2.0))
+            self.last = None
+
+        def training_step(self, batch, batch_idx):
+            self.last = (batch, batch_idx)
+            return self.weight * batch["x"].sum()
+
+    module = TinyTrainingModule()
+    pipe = NativeHunyuan3DTrainingPipeline(module, Path("cfg.yaml"))
+    batch = pipe.build_batch(
+        [{"hunyuan3d_batch": {"x": [1.0, 2.0]}}],
+        SimpleNamespace(),
+        torch.device("cpu"),
+    )
+    loss = pipe.training_step(batch, global_step=7)
+
+    assert torch.equal(batch["x"], torch.tensor([1.0, 2.0]))
+    assert loss.item() == 6.0
+    assert module.last[1] == 7
+
+
 def test_hunyuan3d_export_parse_args_and_loader_selection():
     from yeto.diffusion import hunyuan3d_export
 
