@@ -1328,6 +1328,14 @@ def test_protenix_adapter_alias_model_name_defaults():
     assert _model_name_from_alias("custom") == "protenix_base_default_v1.0.0"
 
 
+def test_protenix_auto_dtype_resolves_for_device():
+    from yeto.diffusion.adapters.protenix import _dtype_from_args
+
+    assert _dtype_from_args(SimpleNamespace(dtype="auto"), SimpleNamespace(type="cuda")) == "bf16"
+    assert _dtype_from_args(SimpleNamespace(dtype="auto"), SimpleNamespace(type="cpu")) == "f32"
+    assert _dtype_from_args(SimpleNamespace(dtype="fp16"), SimpleNamespace(type="cuda")) == "fp16"
+
+
 def test_protenix_namespace_supports_attributes_and_mapping_unpack():
     from yeto.diffusion.adapters.protenix import _namespace
 

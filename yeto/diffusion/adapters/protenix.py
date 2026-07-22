@@ -114,6 +114,15 @@ def _model_name_from_alias(model: str | None) -> str:
     return "protenix_base_default_v1.0.0"
 
 
+def _dtype_from_args(args, device) -> str:
+    dtype = getattr(args, "dtype", "bf16")
+    if dtype and dtype != "auto":
+        return dtype
+    if getattr(device, "type", str(device)) == "cpu":
+        return "f32"
+    return "bf16"
+
+
 def _tensorize(value, device):
     torch = _torch()
     if isinstance(value, torch.Tensor):
@@ -252,7 +261,7 @@ class ProtenixAdapter(DiffusionAdapter):
     def _load_native_pipeline(self, args, device):
         torch = _torch()
         self._require_protenix()
-        configs = self._build_native_configs(args)
+        configs = self._build_native_configs(args, device)
         model_cls = _import_attr("protenix.model.protenix", "Protenix")
         loss_cls = _import_attr("protenix.model.loss", "ProtenixLoss")
         permutation_cls = _import_attr(
@@ -286,7 +295,7 @@ class ProtenixAdapter(DiffusionAdapter):
             pipe.model.load_state_dict(cleaned, strict=strict)
         return pipe
 
-    def _build_native_configs(self, args):
+    def _build_native_configs(self, args, device=None):
         configs_base = _import_attr("configs.configs_base", "configs")
         data_configs = _import_attr("configs.configs_data", "data_configs")
         model_configs = _import_attr("configs.configs_model_type", "model_configs")
@@ -300,7 +309,7 @@ class ProtenixAdapter(DiffusionAdapter):
         base["data"] = data_configs
         _deep_update(base, model_configs[model_name])
         base["model_name"] = model_name
-        base["dtype"] = getattr(args, "dtype", "bf16")
+        base["dtype"] = _dtype_from_args(args, device)
         base["load_checkpoint_path"] = self.checkpoint_path
         base.setdefault("load_strict", False)
         if self.config_args:
