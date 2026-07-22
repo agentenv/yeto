@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 from copy import deepcopy
 from pathlib import Path
 from typing import Mapping
@@ -42,6 +43,21 @@ def parse_args(argv=None):
         "crop size, dtype, kernel choices, etc.",
     )
     return p.parse_args(argv)
+
+
+def _normalize_arg_str(arg_str: str) -> str:
+    tokens = shlex.split(arg_str or "")
+    normalized = []
+    for token in tokens:
+        if token.startswith("--") or "=" not in token:
+            normalized.append(token)
+            continue
+        key, value = token.split("=", 1)
+        if key and "." in key:
+            normalized.extend([f"--{key}", value])
+        else:
+            normalized.append(token)
+    return shlex.join(normalized)
 
 
 def _import_protenix_training_api():
@@ -86,7 +102,7 @@ def build_configs(args):
     )
     return parse_configs(
         configs=configs,
-        arg_str=base_arg_str + args.arg_str,
+        arg_str=base_arg_str + _normalize_arg_str(args.arg_str),
         fill_required_with_null=True,
     )
 

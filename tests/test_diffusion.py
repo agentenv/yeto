@@ -1347,6 +1347,15 @@ def test_protenix_export_batch_payload_requires_native_keys():
         _batch_payload({"input_feature_dict": {}})
 
 
+def test_protenix_export_normalizes_dotlist_arg_str():
+    from yeto.diffusion.protenix_export import _normalize_arg_str
+
+    assert _normalize_arg_str("data.train_sets=[] dtype=bf16 --use_wandb false") == (
+        "--data.train_sets '[]' dtype=bf16 --use_wandb false"
+    )
+    assert _normalize_arg_str("--data.train_sets []") == "--data.train_sets '[]'"
+
+
 def test_protenix_adapter_missing_wrapper_message(monkeypatch):
     pytest.importorskip("torch")
     from yeto.diffusion.adapters.protenix import make_adapter
