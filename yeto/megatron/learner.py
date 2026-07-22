@@ -249,7 +249,7 @@ def _save_megatron_adapter_artifact(args, model, output_dir):
 def _save_output_best_effort(bridge, model, output_dir, args=None, prefer_adapter_artifact=False):
     save_dir = os.path.expanduser(output_dir)
     os.makedirs(save_dir, exist_ok=True)
-    if prefer_adapter_artifact and args is not None and args.tuning == "lora":
+    if args is not None and args.tuning == "lora":
         log.info("writing Yeto Megatron adapter artifact without Bridge HF export")
         return _save_megatron_adapter_artifact(args, model, save_dir)
 
@@ -374,7 +374,6 @@ def main(argv=None):
             model,
             args.output_dir,
             args,
-            prefer_adapter_artifact=(world > 1),
         )
         if client is not None:
             client.close()

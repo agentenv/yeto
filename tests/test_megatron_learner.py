@@ -133,22 +133,30 @@ def test_build_dataset_uses_current_data_api(monkeypatch):
     assert dataset_kwargs == {"train_on": "all"}
 
 
-def test_save_output_best_effort_keeps_training_successful(tmp_path, caplog):
+def test_save_output_best_effort_keeps_full_tuning_successful(tmp_path, caplog):
     class FailingBridge:
         def save_hf_pretrained(self, model, save_dir):
             raise AttributeError("'NoneType' object has no attribute 'megatron_to_hf'")
 
-    assert ml._save_output_best_effort(FailingBridge(), ["model"], tmp_path) is False
+    assert (
+        ml._save_output_best_effort(
+            FailingBridge(),
+            ["model"],
+            tmp_path,
+            SimpleNamespace(tuning="full"),
+        )
+        is False
+    )
     assert tmp_path.exists()
     assert "HF export failed after training" in caplog.text
 
 
-def test_save_output_best_effort_writes_megatron_adapter_fallback(tmp_path, monkeypatch):
+def test_save_output_best_effort_writes_megatron_adapter_for_lora(tmp_path, monkeypatch):
     import torch
 
-    class FailingBridge:
+    class BridgeShouldNotRun:
         def save_hf_pretrained(self, model, save_dir):
-            raise AttributeError("'NoneType' object has no attribute 'megatron_to_hf'")
+            raise AssertionError("Bridge export should be skipped for Megatron LoRA")
 
     class FakeTokenizer:
         @classmethod
@@ -185,7 +193,7 @@ def test_save_output_best_effort_writes_megatron_adapter_fallback(tmp_path, monk
         pipeline_parallel=1,
     )
 
-    assert ml._save_output_best_effort(FailingBridge(), [FakeChunk()], tmp_path, args) is True
+    assert ml._save_output_best_effort(BridgeShouldNotRun(), [FakeChunk()], tmp_path, args) is True
 
     meta_path = tmp_path / ml.MEGATRON_ADAPTER_METADATA_FILE
     meta = json.loads(meta_path.read_text())
@@ -204,7 +212,7 @@ def test_save_output_best_effort_writes_megatron_adapter_fallback(tmp_path, monk
     assert (tmp_path / "tokenizer_config.json").exists()
 
 
-def test_save_output_best_effort_drops_partial_bridge_export(tmp_path, monkeypatch):
+def test_save_output_best_effort_drops_partial_bridge_export_for_full_tuning(tmp_path, monkeypatch):
     import torch
 
     class PartialBridge:
@@ -232,7 +240,7 @@ def test_save_output_best_effort_drops_partial_bridge_export(tmp_path, monkeypat
 
     args = SimpleNamespace(
         model="m",
-        tuning="lora",
+        tuning="full",
         lora_targets="attention",
         lora_r=8,
         lora_alpha=16,
@@ -241,10 +249,10 @@ def test_save_output_best_effort_drops_partial_bridge_export(tmp_path, monkeypat
         pipeline_parallel=1,
     )
 
-    assert ml._save_output_best_effort(PartialBridge(), [FakeChunk()], tmp_path, args) is True
+    assert ml._save_output_best_effort(PartialBridge(), [FakeChunk()], tmp_path, args) is False
     assert not (tmp_path / ".bridge-export-tmp").exists()
     assert not (tmp_path / "model-00001-of-00001.safetensors").exists()
-    assert (tmp_path / ml.MEGATRON_ADAPTER_METADATA_FILE).exists()
+    assert not (tmp_path / ml.MEGATRON_ADAPTER_METADATA_FILE).exists()
 
 
 def test_save_output_best_effort_can_skip_bridge_export(tmp_path, monkeypatch):
