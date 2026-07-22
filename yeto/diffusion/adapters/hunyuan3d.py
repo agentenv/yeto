@@ -214,6 +214,21 @@ class NativeHunyuan3DTrainingPipeline(NativeHunyuan3DPipeline):
             self.model.to(device)
         return self
 
+    def training_step(self, batch, global_step=0):
+        del global_step
+        forward = getattr(self.model, "forward", None)
+        if forward is not None:
+            return forward(batch)
+        compute_loss = getattr(self.model, "compute_loss", None)
+        if compute_loss is not None:
+            return _call_training_loss(compute_loss, batch, 0)
+        raise RuntimeError(
+            "Hunyuan3D training module has no forward(batch) or compute_loss(...) "
+            "method usable outside a PyTorch Lightning Trainer."
+        )
+
+    compute_loss = training_step
+
 
 class Hunyuan3DAdapter(DiffusionAdapter):
     """Adapter for Hunyuan3D-2.1 shape generation and trainable state sync."""
