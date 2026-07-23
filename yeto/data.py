@@ -363,6 +363,74 @@ def _learner_rows(num_rows: int, learner_id: int, num_learners: int, max_rows: i
     return rows[:max_rows] if max_rows is not None else rows
 
 
+def _append_target_blocks(
+    out_ids: list[list[int]],
+    out_weights: list[list[float]],
+    ids: list[int],
+    weights: list[float],
+    seq_len: int,
+    carry_ids: list[int],
+    carry_weights: list[float],
+) -> None:
+    """Append assistant-training blocks while skipping pure-context windows."""
+    for start in range(0, len(ids), seq_len):
+        chunk_ids = ids[start : start + seq_len]
+        chunk_weights = weights[start : start + seq_len]
+        if not chunk_ids or not any(chunk_weights):
+            continue
+        if len(chunk_ids) == seq_len:
+            out_ids.append(chunk_ids)
+            out_weights.append(chunk_weights)
+            continue
+        carry_ids.extend(chunk_ids)
+        carry_weights.extend(chunk_weights)
+        while len(carry_ids) >= seq_len:
+            out_ids.append(carry_ids[:seq_len])
+            out_weights.append(carry_weights[:seq_len])
+            del carry_ids[:seq_len]
+            del carry_weights[:seq_len]
+
+
+def _target_packed_blocks(
+    rows,
+    tokenizer,
+    row_ids: list[int],
+    seq_len: int,
+    train_on: str,
+    assistant_mask_mode: str,
+):
+    block_ids: list[list[int]] = []
+    block_weights: list[list[float]] = []
+    carry_ids: list[int] = []
+    carry_weights: list[float] = []
+    for index in row_ids:
+        ids, weights = _row_tokens(
+            tokenizer,
+            rows[index],
+            train_on,
+            assistant_mask_mode,
+        )
+        if train_on == "assistant":
+            _append_target_blocks(
+                block_ids,
+                block_weights,
+                ids,
+                weights,
+                seq_len,
+                carry_ids,
+                carry_weights,
+            )
+        else:
+            carry_ids.extend(ids)
+            carry_weights.extend(weights)
+            while len(carry_ids) >= seq_len:
+                block_ids.append(carry_ids[:seq_len])
+                block_weights.append(carry_weights[:seq_len])
+                del carry_ids[:seq_len]
+                del carry_weights[:seq_len]
+    return block_ids, block_weights
+
+
 class StreamingPackedBlocks(IterableDataset):
     """Infinite stream of (input_ids, weights) block pairs — each a
     (seq_len,) LongTensor and its aligned (seq_len,) FloatTensor of per-token
@@ -428,27 +496,30 @@ class StreamingPackedBlocks(IterableDataset):
                 f"consumers; lower --stream-workers or use more rows"
             )
         rng = random.Random(self.seed + consumer)
-        buf_ids: list[int] = []
-        buf_weights: list[float] = []
         while True:
             order = my_rows[:]
             rng.shuffle(order)
-            for i in order:
-                ids, weights = _row_tokens(
-                    self.tokenizer,
-                    ds[i],
-                    self.train_on,
-                    self.assistant_mask_mode,
+            block_ids, block_weights = _target_packed_blocks(
+                ds,
+                self.tokenizer,
+                order,
+                self.seq_len,
+                self.train_on,
+                self.assistant_mask_mode,
+            )
+            if not block_ids:
+                raise ValueError(
+                    f"learner {self.learner_id} rank {self.rank} worker {worker_id}: "
+                    "no trainable blocks after target-aware packing; use more rows, "
+                    "a smaller --seq-len, or --train-on all"
                 )
-                buf_ids.extend(ids)
-                buf_weights.extend(weights)
-                while len(buf_ids) >= self.seq_len:
-                    yield (
-                        torch.tensor(buf_ids[: self.seq_len], dtype=torch.long),
-                        torch.tensor(buf_weights[: self.seq_len], dtype=torch.float),
-                    )
-                    del buf_ids[: self.seq_len]
-                    del buf_weights[: self.seq_len]
+            paired = list(zip(block_ids, block_weights))
+            rng.shuffle(paired)
+            for ids, weights in paired:
+                yield (
+                    torch.tensor(ids, dtype=torch.long),
+                    torch.tensor(weights, dtype=torch.float),
+                )
 
 
 @dataclass
@@ -476,23 +547,19 @@ def build_packed_dataset(
     revision: str | None = None,
 ) -> PackedDataset:
     ds = load_rows(dataset_name, split, revision)
-    token_stream: list[int] = []
-    weight_stream: list[float] = []
-    for i in _learner_rows(len(ds), learner_id, num_learners, max_rows):
-        ids, weights = _row_tokens(tokenizer, ds[i], train_on, assistant_mask_mode)
-        token_stream.extend(ids)
-        weight_stream.extend(weights)
-
-    n_blocks = len(token_stream) // seq_len
-    if n_blocks == 0:
+    block_ids, block_weights = _target_packed_blocks(
+        ds,
+        tokenizer,
+        _learner_rows(len(ds), learner_id, num_learners, max_rows),
+        seq_len,
+        train_on,
+        assistant_mask_mode,
+    )
+    if not block_ids:
         raise ValueError(
-            f"learner {learner_id}: not enough tokens ({len(token_stream)}) for one "
-            f"block of {seq_len}; use more rows or a smaller --seq-len"
+            f"learner {learner_id}: no trainable blocks of {seq_len} tokens; "
+            "use more rows, a smaller --seq-len, or --train-on all"
         )
-    blocks = torch.tensor(token_stream[: n_blocks * seq_len], dtype=torch.long).view(
-        n_blocks, seq_len
-    )
-    weights = torch.tensor(weight_stream[: n_blocks * seq_len], dtype=torch.float).view(
-        n_blocks, seq_len
-    )
+    blocks = torch.tensor(block_ids, dtype=torch.long)
+    weights = torch.tensor(block_weights, dtype=torch.float)
     return PackedDataset(blocks, weights)

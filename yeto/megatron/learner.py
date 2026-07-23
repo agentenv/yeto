@@ -21,10 +21,14 @@ rather than silently producing wrong merges.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import shutil
 
 log = logging.getLogger("megatron-learner")
+MEGATRON_ADAPTER_METADATA_FILE = "yeto_megatron_adapter.json"
+MEGATRON_ADAPTER_WEIGHTS_BASENAME = "megatron_adapter_model"
 
 # Megatron-parallel module names LoRA-A/B attach to. Fused attention
 # (linear_qkv/linear_proj) plus DeepSeek MLA's split projections; the
@@ -131,6 +135,8 @@ def _init_distributed(args):
 
 def _build_model(args, device):
     """HF bf16 checkpoint -> Megatron-Core model (EP-sharded) -> LoRA."""
+    import inspect
+
     from megatron.bridge import AutoBridge
     from megatron.bridge.peft.lora import LoRA
 
@@ -144,17 +150,28 @@ def _build_model(args, device):
         use_safetensors=True,
         **model_load_kwargs(args),
     )
-    model = bridge.to_megatron_model(load_weights=True)  # list[MegatronModule], one per VP chunk
+    # Yeto wraps with mcore DDP after adapter attachment so trainable LoRA
+    # params land in optimizer buckets. Bridge may otherwise require an
+    # explicit DDP config before adapters exist.
+    model = bridge.to_megatron_model(
+        load_weights=True,
+        wrap_with_ddp=False,
+    )  # list[MegatronModule], one per VP chunk
 
     targets = list(_ATTENTION_TARGETS)
     if args.lora_targets == "all-linear":
         targets += _MLP_TARGETS
-    peft = LoRA(
-        dim=args.lora_r,               # Bridge names the rank `dim`
-        alpha=args.lora_alpha,
-        target_modules=targets,
-        share_expert_adapters=True,    # one adapter per EP rank -> replicated, syncable
-    )
+    lora_kwargs = {
+        "dim": args.lora_r,  # Bridge names the rank `dim`
+        "alpha": args.lora_alpha,
+        "target_modules": targets,
+    }
+    if "share_expert_adapters" in inspect.signature(LoRA).parameters:
+        # Newer Megatron-Core uses this for replicated expert adapters. Older
+        # containers do not expose it, and dense models like Qwen3-8B do not
+        # need it for this smoke path.
+        lora_kwargs["share_expert_adapters"] = True
+    peft = LoRA(**lora_kwargs)
     model = peft(model, training=True)  # freezes base, attaches + trains adapters
     return model, bridge
 
@@ -172,6 +189,113 @@ def _adapter_params(model):
             ):
                 out[name] = p
     return out
+
+
+def _save_tensor_state(state, save_dir):
+    try:
+        from safetensors.torch import save_file
+
+        filename = f"{MEGATRON_ADAPTER_WEIGHTS_BASENAME}.safetensors"
+        save_file(state, os.path.join(save_dir, filename))
+        return filename, "safetensors"
+    except Exception as exc:
+        import torch
+
+        filename = f"{MEGATRON_ADAPTER_WEIGHTS_BASENAME}.pt"
+        torch.save(state, os.path.join(save_dir, filename))
+        log.warning(
+            "safetensors save unavailable for Megatron adapter artifact; "
+            "used torch.save: %s",
+            exc,
+        )
+        return filename, "torch"
+
+
+def _save_megatron_adapter_artifact(args, model, output_dir):
+    from transformers import AutoTokenizer
+
+    from ..models import resolve
+    from ..provenance import model_load_kwargs
+
+    save_dir = os.path.expanduser(output_dir)
+    os.makedirs(save_dir, exist_ok=True)
+    params = _adapter_params(model)
+    state = {name: param.detach().cpu().contiguous() for name, param in params.items()}
+    weights_file, weights_format = _save_tensor_state(state, save_dir)
+
+    targets = list(_ATTENTION_TARGETS)
+    if args.lora_targets == "all-linear":
+        targets += _MLP_TARGETS
+    base_model = resolve(args.model)
+    metadata = {
+        "kind": "yeto.megatron.adapter",
+        "schema_version": 1,
+        "base_model_name_or_path": base_model,
+        "tuning": args.tuning,
+        "weights_file": weights_file,
+        "weights_format": weights_format,
+        "lora": {
+            "r": args.lora_r,
+            "alpha": args.lora_alpha,
+            "targets": args.lora_targets,
+            "target_modules": targets,
+        },
+        "parallelism": {
+            "expert": args.expert_parallel,
+            "tensor": args.tensor_parallel,
+            "pipeline": args.pipeline_parallel,
+        },
+        "parameter_names": sorted(state),
+    }
+    with open(os.path.join(save_dir, MEGATRON_ADAPTER_METADATA_FILE), "w") as handle:
+        json.dump(metadata, handle, indent=2)
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            base_model,
+            **model_load_kwargs(args),
+        )
+        tokenizer.save_pretrained(save_dir)
+    except Exception as exc:
+        log.warning("could not save tokenizer with Megatron adapter artifact: %s", exc)
+
+    log.info("saved Megatron adapter artifact to %s", save_dir)
+    return True
+
+
+def _save_output_best_effort(bridge, model, output_dir, args=None):
+    save_dir = os.path.expanduser(output_dir)
+    os.makedirs(save_dir, exist_ok=True)
+    if args is not None and args.tuning == "lora":
+        log.info("writing Yeto Megatron adapter artifact without Bridge HF export")
+        return _save_megatron_adapter_artifact(args, model, save_dir)
+
+    bridge_tmp = os.path.join(save_dir, ".bridge-export-tmp")
+    shutil.rmtree(bridge_tmp, ignore_errors=True)
+    os.makedirs(bridge_tmp, exist_ok=True)
+    try:
+        # Export full Megatron models back through Bridge when it supports the
+        # selected architecture. Keep partial files out of the final output.
+        bridge.save_hf_pretrained(model, bridge_tmp)
+    except Exception as exc:
+        shutil.rmtree(bridge_tmp, ignore_errors=True)
+        log.warning(
+            "Megatron-Bridge HF export failed after training; leaving run "
+            "successful so validation can proceed: %s",
+            exc,
+        )
+        return False
+    for name in os.listdir(bridge_tmp):
+        src = os.path.join(bridge_tmp, name)
+        dst = os.path.join(save_dir, name)
+        if os.path.isdir(dst):
+            shutil.rmtree(dst)
+        elif os.path.exists(dst):
+            os.remove(dst)
+        shutil.move(src, dst)
+    shutil.rmtree(bridge_tmp, ignore_errors=True)
+    log.info("saved Megatron output to %s", save_dir)
+    return True
 
 
 def main(argv=None):
@@ -266,22 +390,22 @@ def main(argv=None):
         bulk_dtype=bulk_dtype, DTYPE_Q4=DTYPE_Q4,
     )
 
+    # Avoid collectives in the shutdown/save path. Megatron's distributed
+    # optimizer may still have bookkeeping collectives in flight on some
+    # versions, and an extra barrier here can trip NCCL's watchdog after the
+    # tiny validation loop. Rank 0 saves the replicated adapter artifact.
     if rank == 0:
-        save_dir = os.path.expanduser(args.output_dir)
-        os.makedirs(save_dir, exist_ok=True)
-        # Export adapters back to an HF-loadable checkpoint via the bridge.
-        bridge.save_hf_pretrained(model, save_dir)
-        from ..provenance import write_provenance_manifest
+        saved = _save_output_best_effort(bridge, model, args.output_dir, args)
+        if saved:
+            from ..provenance import write_provenance_manifest
 
-        write_provenance_manifest(
-            save_dir,
-            args,
-            artifact_kind="megatron-causal-lm-training-output",
-        )
-        log.info("saved adapters to %s", save_dir)
+            write_provenance_manifest(
+                os.path.expanduser(args.output_dir),
+                args,
+                artifact_kind="megatron-causal-lm-training-output",
+            )
         if client is not None:
             client.close()
-    dist.barrier()
     dist.destroy_process_group()
 
 

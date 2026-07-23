@@ -34,10 +34,21 @@ class FakeTokenizer:
         self.last_encoded = None
         self.last_spans = []
 
-    def __call__(self, text, add_special_tokens=False):
+    def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
         import zlib
 
-        return {"input_ids": [zlib.crc32(w.encode()) % 5000 + 3 for w in text.split()]}
+        words = text.split()
+        out = {"input_ids": [zlib.crc32(w.encode()) % 5000 + 3 for w in words]}
+        if return_offsets_mapping:
+            offsets = []
+            cursor = 0
+            for word in words:
+                start = text.index(word, cursor)
+                end = start + len(word)
+                offsets.append((start, end))
+                cursor = end
+            out["offset_mapping"] = offsets
+        return out
 
     def get_chat_template(self, chat_template=None, tools=None):
         assert chat_template is None
@@ -49,7 +60,13 @@ class FakeTokenizer:
             return json.dumps(content, sort_keys=True)
         return str(content or "")
 
-    def apply_chat_template(self, messages, tools=None, tokenize=True, **kwargs):
+    def apply_chat_template(
+        self,
+        messages,
+        tools=None,
+        tokenize=True,
+        **kwargs,
+    ):
         self.last_messages = messages
         self.last_tools = tools
         self.last_apply_kwargs = dict(kwargs, tokenize=tokenize)
@@ -122,7 +139,7 @@ def stream_ids(ds, k, **kw):
 
 def test_stream_yields_full_blocks_forever():
     rows = make_rows(4)
-    blocks = stream_blocks(rows, 40, learner_id=0, num_learners=1)
+    blocks = stream_blocks(rows, 40, learner_id=0, num_learners=1, train_on="all")
     assert all(ids.shape == (32,) and ids.dtype == torch.long for ids, _ in blocks)
     assert all(w.shape == (32,) and w.dtype == torch.float32 for _, w in blocks)
     # 4 rows x ~52 tokens < 40 blocks x 32 tokens: the stream must have cycled.
@@ -132,15 +149,15 @@ def test_stream_respects_learner_sharding():
     rows = make_rows(6, words_per_row=31)  # one 31+2-token row -> ~1 block each
     # learner 1 of 3 owns rows 1 and 4; with distinct word lengths the block
     # contents must differ from learner 0's.
-    a = torch.stack(stream_ids(rows, 4, learner_id=0, num_learners=3))
-    b = torch.stack(stream_ids(rows, 4, learner_id=1, num_learners=3))
+    a = torch.stack(stream_ids(rows, 4, learner_id=0, num_learners=3, train_on="all"))
+    b = torch.stack(stream_ids(rows, 4, learner_id=1, num_learners=3, train_on="all"))
     assert not torch.equal(a, b)
 
 
 def test_stream_ranks_get_disjoint_rows():
     rows = make_rows(8)
-    r0 = stream_ids(rows, 3, learner_id=0, num_learners=1, rank=0, world=2)
-    r1 = stream_ids(rows, 3, learner_id=0, num_learners=1, rank=1, world=2)
+    r0 = stream_ids(rows, 3, learner_id=0, num_learners=1, rank=0, world=2, train_on="all")
+    r1 = stream_ids(rows, 3, learner_id=0, num_learners=1, rank=1, world=2, train_on="all")
     assert not any(torch.equal(x, y) for x in r0 for y in r1)
 
 
@@ -152,7 +169,7 @@ def test_stream_errors_when_oversplit():
 
 def test_preload_matches_row_budget():
     rows = make_rows(4)
-    ds = build_packed_dataset(rows, FakeTokenizer(), 0, 1, seq_len=32, max_rows=2)
+    ds = build_packed_dataset(rows, FakeTokenizer(), 0, 1, seq_len=32, max_rows=2, train_on="all")
     # 2 rows x 52 tokens = 104 tokens -> 3 full blocks of 32
     assert len(ds) == 3
     ids, weights = ds[0]
@@ -162,7 +179,7 @@ def test_preload_matches_row_budget():
 
 def test_stream_works_under_dataloader_workers():
     rows = make_rows(8)
-    ds = StreamingPackedBlocks(rows, FakeTokenizer(), 0, 1, seq_len=32)
+    ds = StreamingPackedBlocks(rows, FakeTokenizer(), 0, 1, seq_len=32, train_on="all")
     loader = torch.utils.data.DataLoader(ds, batch_size=2, num_workers=2)
     it = iter(loader)
     batches = [next(it) for _ in range(6)]
@@ -250,14 +267,16 @@ def test_native_ids_and_masks_stay_aligned_across_packed_block_boundaries():
     ds = build_packed_dataset(rows, tokenizer, 0, 1, seq_len=7)
     flat_ids = ds.blocks.flatten().tolist()
     flat_weights = ds.weights.flatten().tolist()
-    assert flat_ids == expected_ids[: len(flat_ids)]
-    assert flat_weights == expected_weights[: len(flat_weights)]
-    assert any(0.0 < weights.mean() < 1.0 for _ids, weights in ds)
+    valid_pairs = set(zip(expected_ids, expected_weights))
+    assert all(pair in valid_pairs for pair in zip(flat_ids, flat_weights))
+    assert torch.all(ds.weights.sum(dim=1) > 0)
 
     stream = iter(StreamingPackedBlocks(rows, FakeTokenizer(), 0, 1, seq_len=7))
     blocks = [next(stream) for _ in range(4)]
-    assert torch.cat([ids for ids, _weights in blocks]).tolist() == expected_ids[:28]
-    assert torch.cat([weights for _ids, weights in blocks]).tolist() == expected_weights[:28]
+    stream_ids = torch.cat([ids for ids, _weights in blocks]).tolist()
+    stream_weights = torch.cat([weights for _ids, weights in blocks]).tolist()
+    assert all(pair in valid_pairs for pair in zip(stream_ids, stream_weights))
+    assert all(weights.sum() > 0 for _ids, weights in blocks)
 
 
 def test_native_path_does_not_inject_extra_bos_or_eos_tokens():
@@ -352,6 +371,22 @@ def test_native_mode_rejects_malformed_ids_and_masks_with_legacy_hint(returned, 
     with pytest.raises(ExactAssistantMaskError, match=error) as exc:
         _row_tokens(MalformedTokenizer(), CHAT_ROW)
     assert "--assistant-mask-mode legacy" in str(exc.value)
+
+
+def test_assistant_packing_skips_zero_target_windows():
+    row = {
+        "messages": [
+            {"role": "user", "content": " ".join(f"u{i}" for i in range(60))},
+            {"role": "assistant", "content": "a1 a2 a3 a4"},
+        ]
+    }
+    ds = build_packed_dataset([row] * 3, FakeTokenizer(), 0, 1, seq_len=8, train_on="assistant")
+    assert len(ds) < 12  # old raw packing would emit roughly every user-only window
+    assert torch.all(ds.weights.sum(dim=1) > 0)
+
+    stream = StreamingPackedBlocks([row] * 3, FakeTokenizer(), 0, 1, seq_len=8, train_on="assistant")
+    for _, weights in [next(iter(stream)) for _ in range(3)]:
+        assert weights.sum() > 0
 
 
 def test_train_on_all_gives_all_ones():

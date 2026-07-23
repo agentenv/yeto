@@ -2,6 +2,10 @@
 adapter. The Megatron-Core training path is GPU/multi-node only and validated
 by a live run, not here."""
 
+import json
+import sys
+import types
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -44,6 +48,70 @@ def test_attention_targets_are_megatron_names_not_hf():
     assert ml._MLP_TARGETS == ["linear_fc1", "linear_fc2"]
 
 
+def test_build_model_disables_bridge_ddp_and_uses_lora_signature(monkeypatch):
+    seen = {}
+
+    class FakeBridge:
+        @classmethod
+        def from_hf_pretrained(cls, model_id, **kwargs):
+            seen["model_id"] = model_id
+            seen["from_hf"] = kwargs
+            return cls()
+
+        def to_megatron_model(self, load_weights=True, wrap_with_ddp=True):
+            seen["to_megatron"] = {
+                "load_weights": load_weights,
+                "wrap_with_ddp": wrap_with_ddp,
+            }
+            return ["chunk"]
+
+    class FakeLoRA:
+        def __init__(self, dim, alpha, target_modules):
+            seen["lora"] = {
+                "dim": dim,
+                "alpha": alpha,
+                "target_modules": target_modules,
+            }
+
+        def __call__(self, model, training=False):
+            seen["training"] = training
+            return model
+
+    monkeypatch.setitem(sys.modules, "megatron", types.ModuleType("megatron"))
+    monkeypatch.setitem(
+        sys.modules,
+        "megatron.bridge",
+        types.SimpleNamespace(AutoBridge=FakeBridge),
+    )
+    monkeypatch.setitem(sys.modules, "megatron.bridge.peft", types.ModuleType("peft"))
+    monkeypatch.setitem(
+        sys.modules,
+        "megatron.bridge.peft.lora",
+        types.SimpleNamespace(LoRA=FakeLoRA),
+    )
+    monkeypatch.setattr("yeto.models.resolve", lambda model: f"resolved/{model}")
+
+    args = SimpleNamespace(
+        model="m",
+        model_revision=None,
+        trust_remote_code=True,
+        expert_parallel=1,
+        lora_targets="attention",
+        lora_r=8,
+        lora_alpha=16,
+    )
+    model, _bridge = ml._build_model(args, device=None)
+
+    assert model == ["chunk"]
+    assert seen["model_id"] == "resolved/m"
+    assert seen["from_hf"] == {"use_safetensors": True, "trust_remote_code": True}
+    assert seen["to_megatron"] == {"load_weights": True, "wrap_with_ddp": False}
+    assert seen["lora"]["dim"] == 8 and seen["lora"]["alpha"] == 16
+    assert "linear_qkv" in seen["lora"]["target_modules"]
+    assert "share_expert_adapters" not in seen["lora"]
+    assert seen["training"] is True
+
+
 def test_cycle_shifts_labels_and_exact_loss_weights_in_micro_batches():
     blocks = [
         (torch.tensor([1, 2, 3]), torch.tensor([0.0, 1.0, 0.0])),
@@ -56,6 +124,106 @@ def test_cycle_shifts_labels_and_exact_loss_weights_in_micro_batches():
     assert b0["loss_mask"].tolist() == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
     # Endless preload iteration wraps and produces the same full micro-batch.
     assert next(gen)["input_ids"].tolist() == b0["input_ids"].tolist()
+
+
+def test_save_output_best_effort_keeps_full_tuning_successful(tmp_path, caplog):
+    class FailingBridge:
+        def save_hf_pretrained(self, model, save_dir):
+            raise AttributeError("'NoneType' object has no attribute 'megatron_to_hf'")
+
+    assert (
+        ml._save_output_best_effort(
+            FailingBridge(),
+            ["model"],
+            tmp_path,
+            SimpleNamespace(tuning="full"),
+        )
+        is False
+    )
+    assert tmp_path.exists()
+    assert "HF export failed after training" in caplog.text
+
+
+def test_save_output_best_effort_writes_megatron_adapter_for_lora(tmp_path, monkeypatch):
+    class BridgeShouldNotRun:
+        def save_hf_pretrained(self, model, save_dir):
+            raise AssertionError("Bridge export should be skipped for Megatron LoRA")
+
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, model_id, **kwargs):
+            assert model_id == "resolved/m"
+            assert kwargs == {"trust_remote_code": True}
+            return cls()
+
+        def save_pretrained(self, save_dir):
+            Path(save_dir, "tokenizer_config.json").write_text("{}")
+
+    class FakeChunk:
+        def __init__(self):
+            self.adapter = torch.nn.Parameter(torch.ones(2, 3))
+            self.base = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+
+        def named_parameters(self):
+            return [
+                (
+                    "decoder.layers.0.self_attention.linear_qkv.adapter.linear_in.weight",
+                    self.adapter,
+                ),
+                ("decoder.layers.0.self_attention.linear_qkv.weight", self.base),
+            ]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        types.SimpleNamespace(AutoTokenizer=FakeTokenizer),
+    )
+    monkeypatch.setattr("yeto.models.resolve", lambda model: f"resolved/{model}")
+
+    args = SimpleNamespace(
+        model="m",
+        model_revision=None,
+        trust_remote_code=True,
+        tuning="lora",
+        lora_targets="attention",
+        lora_r=8,
+        lora_alpha=16,
+        expert_parallel=1,
+        tensor_parallel=1,
+        pipeline_parallel=1,
+    )
+
+    assert ml._save_output_best_effort(BridgeShouldNotRun(), [FakeChunk()], tmp_path, args)
+
+    meta_path = tmp_path / ml.MEGATRON_ADAPTER_METADATA_FILE
+    meta = json.loads(meta_path.read_text())
+    assert meta["kind"] == "yeto.megatron.adapter"
+    assert meta["base_model_name_or_path"] == "resolved/m"
+    assert meta["lora"] == {
+        "r": 8,
+        "alpha": 16,
+        "targets": "attention",
+        "target_modules": ml._ATTENTION_TARGETS,
+    }
+    assert meta["parameter_names"] == [
+        "decoder.layers.0.self_attention.linear_qkv.adapter.linear_in.weight"
+    ]
+    assert (tmp_path / meta["weights_file"]).exists()
+    assert (tmp_path / "tokenizer_config.json").exists()
+
+
+def test_save_output_best_effort_drops_partial_bridge_export_for_full_tuning(tmp_path):
+    class PartialBridge:
+        def save_hf_pretrained(self, model, save_dir):
+            Path(save_dir, "model-00001-of-00001.safetensors").write_text("partial")
+            raise AttributeError("'NoneType' object has no attribute 'megatron_to_hf'")
+
+    args = SimpleNamespace(tuning="full")
+
+    assert ml._save_output_best_effort(PartialBridge(), ["model"], tmp_path, args) is False
+    assert not (tmp_path / ".bridge-export-tmp").exists()
+    assert not (tmp_path / "model-00001-of-00001.safetensors").exists()
+    assert not (tmp_path / ml.MEGATRON_ADAPTER_METADATA_FILE).exists()
 
 
 def test_packed_data_path_propagates_mask_mode(monkeypatch):
