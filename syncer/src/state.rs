@@ -117,7 +117,17 @@ pub struct AggregateDelta {
     fragment_id: usize,
     base_version: u64,
     base_state_epoch: u64,
-    base_state_fingerprint: [u64; 2],
+    /// Seal over the base fragment state. `Some` for aggregates built through
+    /// the sealed public builders (`build_full_aggregate` /
+    /// `build_selected_aggregate`), whose previews may cross the action-probe
+    /// sidecar boundary and must be re-verified against the live state at
+    /// commit. `None` for aggregates built through the trusted in-process
+    /// builder (`build_full_aggregate_trusted`), which are consumed
+    /// microseconds later by the same scheduler task that built them from
+    /// `&self`; those rely on the O(1) version + state-epoch checks instead of
+    /// the O(N) fingerprint. A trusted aggregate can never sneak into a sealed
+    /// path: every sealed consumer bails when the fingerprint is absent.
+    base_state_fingerprint: Option<[u64; 2]>,
     responder_ids: Vec<u32>,
     selected_weight: f64,
     selected_weight_mass: f64,
@@ -169,6 +179,19 @@ impl AggregateDelta {
 
     pub const fn disagreement_energy(&self) -> f64 {
         self.disagreement_energy
+    }
+
+    /// The base-state fingerprint, required by every sealed consumer. Bails
+    /// for aggregates built through the trusted in-process builder, so a
+    /// trusted aggregate can never be sealed into a preview that skips
+    /// commit-time state verification.
+    fn sealed_fingerprint(&self) -> Result<[u64; 2]> {
+        self.base_state_fingerprint.ok_or_else(|| {
+            anyhow::anyhow!(
+                "fragment {}: aggregate was built for the trusted in-process path and carries no base-state fingerprint",
+                self.fragment_id
+            )
+        })
     }
 }
 
@@ -690,13 +713,33 @@ impl GlobalState {
 
     /// Build the exact production aggregate for all candidates in a group.
     /// Candidates must be sorted by strictly increasing responder ID.
+    ///
+    /// The result is sealed: it carries the O(N) base-state fingerprint so a
+    /// preview derived from it can be re-verified at commit even after
+    /// crossing the action-probe sidecar boundary.
     pub fn build_full_aggregate(
         &self,
         fid: usize,
         candidates: &[MergeCandidate<'_>],
     ) -> Result<AggregateDelta> {
         let full_weight = self.validate_candidate_group(fid, candidates)?;
-        self.build_aggregate_from_subset(fid, candidates, full_weight)
+        self.build_aggregate_from_subset(fid, candidates, full_weight, true)
+    }
+
+    /// Trusted in-process variant of [`build_full_aggregate`]: identical
+    /// merge math, but skips the O(N) base-state fingerprint. Only for
+    /// aggregates that are consumed by `apply_aggregate_step` in the same
+    /// scheduler task that built them (the token_weighted commit path); the
+    /// O(1) version + state-epoch checks still uniquely identify in-process
+    /// state there. The result cannot enter a sealed path: sealed consumers
+    /// bail on the missing fingerprint.
+    pub(crate) fn build_full_aggregate_trusted(
+        &self,
+        fid: usize,
+        candidates: &[MergeCandidate<'_>],
+    ) -> Result<AggregateDelta> {
+        let full_weight = self.validate_candidate_group(fid, candidates)?;
+        self.build_aggregate_from_subset(fid, candidates, full_weight, false)
     }
 
     /// Build the exact production aggregate for a sorted responder subset.
@@ -737,7 +780,7 @@ impl GlobalState {
             selected.push(candidates[candidate_index]);
             candidate_index += 1;
         }
-        self.build_aggregate_from_subset(fid, &selected, full_weight)
+        self.build_aggregate_from_subset(fid, &selected, full_weight, true)
     }
 
     /// Preview the exact production outer step for `target_version` without
@@ -756,7 +799,7 @@ impl GlobalState {
                 aggregate.base_version
             );
         }
-        self.preview_aggregate_inner(aggregate, target_version)
+        self.preview_aggregate_inner(aggregate, target_version, true)
     }
 
     fn outer_lr_for_fragment(&self, fid: usize) -> Result<f32> {
@@ -802,7 +845,7 @@ impl GlobalState {
             aggregate.fragment_id,
             aggregate.base_version,
             aggregate.base_state_epoch,
-            aggregate.base_state_fingerprint,
+            aggregate.sealed_fingerprint()?,
         )?;
         let fid = aggregate.fragment_id;
         if !mu.is_finite() || !(0.0..1.0).contains(&mu) {
@@ -823,7 +866,7 @@ impl GlobalState {
             aggregate.fragment_id,
             aggregate.base_version,
             aggregate.base_state_epoch,
-            aggregate.base_state_fingerprint,
+            aggregate.sealed_fingerprint()?,
         )?;
         let fid = aggregate.fragment_id;
         if !mu.is_finite() || !(0.0..1.0).contains(&mu) {
@@ -837,17 +880,38 @@ impl GlobalState {
         })
     }
 
+    /// `seal` selects the verification contract for the returned preview.
+    /// Sealed previews (action-probe / CTTN paths) carry the O(N) base-state
+    /// fingerprint plus an action fingerprint over every tensor, and are
+    /// re-verified in full by `commit_preview`. Trusted previews (the
+    /// token_weighted in-process path) are built from `&self` and consumed by
+    /// `install_preview_trusted` in the same scheduler task microseconds
+    /// later; they keep the version + state-epoch checks but skip the O(N)
+    /// hashes, and cannot be committed through the sealed path (their zeroed
+    /// action fingerprint would be rejected).
     fn preview_aggregate_inner(
         &self,
         aggregate: &AggregateDelta,
         target_version: u64,
+        seal: bool,
     ) -> Result<ActionPreview> {
-        self.ensure_current_base(
-            aggregate.fragment_id,
-            aggregate.base_version,
-            aggregate.base_state_epoch,
-            aggregate.base_state_fingerprint,
-        )?;
+        let base_state_fingerprint = if seal {
+            let fingerprint = aggregate.sealed_fingerprint()?;
+            self.ensure_current_base(
+                aggregate.fragment_id,
+                aggregate.base_version,
+                aggregate.base_state_epoch,
+                fingerprint,
+            )?;
+            fingerprint
+        } else {
+            self.ensure_current_base_trusted(
+                aggregate.fragment_id,
+                aggregate.base_version,
+                aggregate.base_state_epoch,
+            )?;
+            [0; 2]
+        };
         let fid = aggregate.fragment_id;
         let outer_lr = self.outer_lr_for_fragment(fid)?;
         if !self.outer_momentum.is_finite() || !self.outer_restart_cos_threshold.is_finite() {
@@ -950,7 +1014,7 @@ impl GlobalState {
             fragment_id: fid,
             base_version: aggregate.base_version,
             base_state_epoch: aggregate.base_state_epoch,
-            base_state_fingerprint: aggregate.base_state_fingerprint,
+            base_state_fingerprint,
             target_version,
             responder_ids: aggregate.responder_ids.clone(),
             selected_weight: aggregate.selected_weight,
@@ -973,7 +1037,9 @@ impl GlobalState {
             unscaled_applied_step_norm: materialized_step_norm,
             action_fingerprint: [0; 2],
         };
-        preview.action_fingerprint = compute_action_fingerprint(&preview);
+        if seal {
+            preview.action_fingerprint = compute_action_fingerprint(&preview);
+        }
         Ok(preview)
     }
 
@@ -992,7 +1058,7 @@ impl GlobalState {
             aggregate.fragment_id,
             aggregate.base_version,
             aggregate.base_state_epoch,
-            aggregate.base_state_fingerprint,
+            aggregate.sealed_fingerprint()?,
         )?;
         if target_version <= aggregate.base_version {
             bail!(
@@ -1057,7 +1123,7 @@ impl GlobalState {
             fragment_id: fid,
             base_version: aggregate.base_version,
             base_state_epoch: aggregate.base_state_epoch,
-            base_state_fingerprint: aggregate.base_state_fingerprint,
+            base_state_fingerprint: aggregate.sealed_fingerprint()?,
             target_version,
             responder_ids: aggregate.responder_ids.clone(),
             selected_weight: aggregate.selected_weight,
@@ -1286,7 +1352,10 @@ impl GlobalState {
                 weight,
             })
             .collect();
-        let aggregate = self.build_full_aggregate(fid, &candidates)?;
+        // Trusted in-process flow: the aggregate and preview are built from
+        // `&self` and installed by the same call, so the O(N) fingerprint
+        // seals add nothing over the version + state-epoch checks.
+        let aggregate = self.build_full_aggregate_trusted(fid, &candidates)?;
         self.apply_aggregate_step(aggregate)
     }
 
@@ -1299,8 +1368,14 @@ impl GlobalState {
         &mut self,
         aggregate: AggregateDelta,
     ) -> Result<MergeStats> {
-        let preview = self.preview_aggregate_inner(&aggregate, aggregate.base_version)?;
-        self.install_preview(preview)
+        // Trusted path: the preview is built from `&self` and installed
+        // immediately by this same `&mut self` call, so nothing can mutate
+        // the fragment in between. Version + state-epoch checks stay; the
+        // O(N) fingerprint hashes and re-scans are skipped (they cost ~2-4s
+        // per commit on ~136M-element fragments and only defend previews
+        // that cross the action-probe sidecar boundary).
+        let preview = self.preview_aggregate_inner(&aggregate, aggregate.base_version, false)?;
+        self.install_preview_trusted(preview)
     }
 
     fn validate_candidate_group(
@@ -1361,7 +1436,17 @@ impl GlobalState {
         fid: usize,
         candidates: &[MergeCandidate<'_>],
         full_weight: f64,
+        seal: bool,
     ) -> Result<AggregateDelta> {
+        // The O(N) fingerprint (serial hash over params + every optimizer
+        // buffer) is only needed when the resulting previews must be
+        // re-verified after crossing the sidecar boundary; the trusted
+        // in-process commit path skips it.
+        let base_state_fingerprint = if seal {
+            Some(self.fragment_state_fingerprint(fid)?)
+        } else {
+            None
+        };
         let frag = &self.layout.fragments[fid];
         let anchor = &self.params[fid];
         let selected_weight: f64 = candidates.iter().map(|candidate| candidate.weight).sum();
@@ -1432,7 +1517,7 @@ impl GlobalState {
                 fragment_id: fid,
                 base_version: self.versions[fid],
                 base_state_epoch: self.state_epochs[fid],
-                base_state_fingerprint: self.fragment_state_fingerprint(fid)?,
+                base_state_fingerprint,
                 responder_ids: candidates
                     .iter()
                     .map(|candidate| candidate.responder_id)
@@ -1502,7 +1587,7 @@ impl GlobalState {
             fragment_id: fid,
             base_version: self.versions[fid],
             base_state_epoch: self.state_epochs[fid],
-            base_state_fingerprint: self.fragment_state_fingerprint(fid)?,
+            base_state_fingerprint,
             responder_ids: candidates
                 .iter()
                 .map(|candidate| candidate.responder_id)
@@ -1637,6 +1722,25 @@ impl GlobalState {
         base_state_epoch: u64,
         base_state_fingerprint: [u64; 2],
     ) -> Result<()> {
+        self.ensure_current_base_trusted(fid, base_version, base_state_epoch)?;
+        if self.fragment_state_fingerprint(fid)? != base_state_fingerprint {
+            bail!("stale fragment {fid} preview: state or outer policy changed");
+        }
+        Ok(())
+    }
+
+    /// The O(1) subset of [`ensure_current_base`]: fragment range, version,
+    /// and state-epoch checks, without the O(N) state-fingerprint hash. Every
+    /// in-process mutation bumps `state_epochs`, so these checks alone
+    /// uniquely identify the base state for previews that never leave this
+    /// process; the fingerprint only adds defense for previews that cross the
+    /// action-probe sidecar boundary.
+    fn ensure_current_base_trusted(
+        &self,
+        fid: usize,
+        base_version: u64,
+        base_state_epoch: u64,
+    ) -> Result<()> {
         if fid >= self.params.len() {
             bail!("fragment id {fid} out of range");
         }
@@ -1651,9 +1755,6 @@ impl GlobalState {
                 "stale fragment {fid} preview: base state epoch {base_state_epoch}, current epoch {}",
                 self.state_epochs[fid]
             );
-        }
-        if self.fragment_state_fingerprint(fid)? != base_state_fingerprint {
-            bail!("stale fragment {fid} preview: state or outer policy changed");
         }
         Ok(())
     }
@@ -1761,6 +1862,27 @@ impl GlobalState {
 
     fn install_preview(&mut self, preview: ActionPreview) -> Result<MergeStats> {
         self.ensure_current_preview(&preview)?;
+        self.install_preview_unchecked(preview)
+    }
+
+    /// Install a preview built by the trusted in-process path
+    /// (`apply_aggregate_step`), which produced it from `&self` microseconds
+    /// earlier in the same scheduler task. Keeps ALL O(1) freshness checks
+    /// (fragment range, base version, state epoch) unconditionally; skips
+    /// the O(N) re-verification of `ensure_current_preview` (state + action
+    /// fingerprints, full finite re-scans, bit-equality replay), which is
+    /// redundant here because `preview_aggregate_inner` already validated the
+    /// tensors it just computed and nothing else can hold `&mut self`.
+    fn install_preview_trusted(&mut self, preview: ActionPreview) -> Result<MergeStats> {
+        self.ensure_current_base_trusted(
+            preview.fragment_id,
+            preview.base_version,
+            preview.base_state_epoch,
+        )?;
+        self.install_preview_unchecked(preview)
+    }
+
+    fn install_preview_unchecked(&mut self, preview: ActionPreview) -> Result<MergeStats> {
         let fid = preview.fragment_id;
         let ActionPreview {
             resulting_params,
@@ -3002,6 +3124,128 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Bit-identity proof for the trusted install path: a multi-commit merge
+    /// sequence through the trusted in-process flow (`merge_and_step` ->
+    /// `build_full_aggregate_trusted` -> `install_preview_trusted`) must leave
+    /// params and EVERY optimizer state buffer bit-identical to the sealed
+    /// flow (`build_full_aggregate` -> `preview_aggregate` ->
+    /// `commit_preview`), which re-verifies all O(N) fingerprints per commit.
+    #[test]
+    fn trusted_merge_sequence_is_bit_identical_to_sealed_preview_commits() {
+        for merge_mode in [MERGE_AVG, MERGE_RDA, MERGE_WORKER_SNR] {
+            for optimizer in [
+                merge::OuterOptimizer::Nesterov,
+                merge::OuterOptimizer::CappedNesterovGc,
+                merge::OuterOptimizer::CappedNesterovCurv,
+                merge::OuterOptimizer::CappedNesterovWsub,
+                merge::OuterOptimizer::BlockYogi,
+                merge::OuterOptimizer::ChebSgd,
+            ] {
+                let make_state = || {
+                    let layout = Layout {
+                        fragments: vec![FragmentInfo {
+                            merge_mode,
+                            tensor_numels: vec![3, 5],
+                            tensor_shapes: None,
+                        }],
+                    };
+                    let mut st =
+                        GlobalState::new(layout, None, 0.4, 0.7, crate::protocol::DTYPE_F32);
+                    st.outer_optimizer = optimizer;
+                    st.outer_restart_cos_threshold = -0.05;
+                    st.init_fragment(0, (0..8).map(|i| 0.25 * i as f32 - 1.0).collect())
+                        .unwrap();
+                    st
+                };
+                let mut trusted = make_state();
+                let mut sealed = make_state();
+                for round in 1u64..=4 {
+                    let base = trusted.params[0].clone();
+                    let learner_a: Vec<f32> = base
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| v + 0.1 * (i as f32 + round as f32) - 0.3)
+                        .collect();
+                    let learner_b: Vec<f32> = base
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| v - 0.05 * i as f32 + 0.02 * round as f32)
+                        .collect();
+                    let weights = [2.0, 3.5];
+
+                    let trusted_stats = trusted
+                        .merge_and_step(0, &[&learner_a, &learner_b], &weights)
+                        .unwrap();
+                    trusted.versions[0] = round;
+                    trusted.global_step = round;
+
+                    let candidates = [
+                        MergeCandidate::new(0, &learner_a, weights[0]),
+                        MergeCandidate::new(1, &learner_b, weights[1]),
+                    ];
+                    let aggregate = sealed.build_full_aggregate(0, &candidates).unwrap();
+                    let preview = sealed.preview_aggregate(&aggregate, round).unwrap();
+                    let sealed_stats = sealed.commit_preview(preview).unwrap();
+
+                    assert_eq!(trusted_stats, sealed_stats);
+                    assert_eq!(trusted.params, sealed.params);
+                    assert_eq!(trusted.momentum, sealed.momentum);
+                    assert_eq!(trusted.rho_ema, sealed.rho_ema);
+                    assert_eq!(trusted.capped_mu, sealed.capped_mu);
+                    assert_eq!(trusted.capped_gain, sealed.capped_gain);
+                    assert_eq!(trusted.block_v, sealed.block_v);
+                    assert_eq!(trusted.cheb_phase, sealed.cheb_phase);
+                    assert_eq!(trusted.curv_prev_delta, sealed.curv_prev_delta);
+                    assert_eq!(trusted.curv_prev_dtheta, sealed.curv_prev_dtheta);
+                    assert_eq!(trusted.state_epochs, sealed.state_epochs);
+                    assert_eq!(trusted.versions, sealed.versions);
+                }
+            }
+        }
+    }
+
+    /// A trusted aggregate (no base-state fingerprint) must be rejected by
+    /// every sealed consumer, so skipping the O(N) seal can never silently
+    /// disable verification for previews that cross the sidecar boundary.
+    #[test]
+    fn trusted_aggregate_is_rejected_by_sealed_consumers() {
+        let mut st = GlobalState::new(layout2(), None, 0.5, 0.9, crate::protocol::DTYPE_F32);
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![0.0; 4]).unwrap();
+        let learner = [0.5f32; 4];
+        let candidates = [MergeCandidate::new(1, &learner, 1.0)];
+        let trusted = st.build_full_aggregate_trusted(0, &candidates).unwrap();
+
+        assert!(st.preview_aggregate(&trusted, 1).is_err());
+        assert!(st.cttn_inputs(&trusted, 0.9).is_err());
+        assert!(st.cttn_shadow_inputs(&trusted, 0.9).is_err());
+        assert!(st
+            .commit_cttn_step(&trusted, 1, &[0.1; 4], &[0.1; 4], 0.5)
+            .is_err());
+
+        // The trusted flow itself still accepts it, and O(1) staleness checks
+        // remain enforced: a second install of the same aggregate must fail on
+        // the state-epoch check.
+        let stale_copy = trusted.clone();
+        st.apply_aggregate_step(trusted).unwrap();
+        let error = st.apply_aggregate_step(stale_copy).unwrap_err();
+        assert!(error.to_string().contains("state epoch"), "{error}");
+    }
+
+    /// The trusted flow must still reject stale base versions unconditionally.
+    #[test]
+    fn trusted_flow_rejects_stale_base_version() {
+        let mut st = GlobalState::new(layout2(), None, 0.5, 0.9, crate::protocol::DTYPE_F32);
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![0.0; 4]).unwrap();
+        let learner = [0.5f32; 4];
+        let candidates = [MergeCandidate::new(1, &learner, 1.0)];
+        let aggregate = st.build_full_aggregate_trusted(0, &candidates).unwrap();
+        st.versions[0] = 9;
+        let error = st.apply_aggregate_step(aggregate).unwrap_err();
+        assert!(error.to_string().contains("base version"), "{error}");
     }
 
     #[test]

@@ -1501,15 +1501,13 @@ async fn complete_round(
     if pushes.is_empty() {
         bail!("round {t} fragment {p} has no admitted pushes");
     }
-    for push in pushes.values() {
-        validate_push_candidate(push, t, p, prev_version, &st.params[p], st.wire_dtype)
-            .with_context(|| {
-                format!(
-                    "invalid admitted push from learner {} for step {t} fragment {p}",
-                    push.learner_id
-                )
-            })?;
-    }
+    // Every push here already passed validate_push_candidate at admission
+    // (admit_push), and the fragment cannot change between admission and
+    // completion: rounds on a fragment are serialized by the busy-fragment
+    // reservation and merges run on the single scheduler task (the Q4
+    // reconstruction below has always relied on exactly this invariant).
+    // Re-running the O(N)-per-push validation here doubled the finite-scan
+    // cost of every commit for no additional safety.
     if st.wire_dtype == DTYPE_Q4 {
         // Q4 pushes are deltas anchored at the learner's base_version;
         // reconstruction needs Θ at that exact version, and the syncer
@@ -1586,7 +1584,9 @@ async fn complete_round(
                     MergeCandidate::new(*id, push.values.as_slice(), weight)
                 })
                 .collect::<Vec<_>>();
-            let aggregate = st.build_full_aggregate(p, &candidates)?;
+            // Trusted in-process aggregate: consumed by apply_aggregate_step
+            // below in this same task; skips the O(N) base-state fingerprint.
+            let aggregate = st.build_full_aggregate_trusted(p, &candidates)?;
             let worker_candidates = ids
                 .iter()
                 .map(|id| {
