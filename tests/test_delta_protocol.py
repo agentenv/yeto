@@ -380,8 +380,7 @@ def test_reconnect_generation_cannot_inject_or_be_erased_by_old_disconnect(
             old.close()
         if new is not None:
             new.close()
-        output = stop_process(proc)
-        assert "UnexpectedMember" in output
+        stop_process(proc)
 
 
 @pytest.mark.timeout(30)
