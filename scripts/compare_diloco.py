@@ -684,6 +684,7 @@ def syncer_command(
     delta_norm_ref: float = 0.0,
     version_matched_anchor: bool = False,
     anchor_drift_log: bool = False,
+    outer_bias_correction: bool = False,
     action_probe_endpoint: str | None = None,
     action_probe_timeout_ms: int = 300_000,
     action_probe_run_uuid: str | None = None,
@@ -763,6 +764,11 @@ def syncer_command(
         cmd += ["--version-matched-anchor"]
     if anchor_drift_log and not version_matched_anchor:
         cmd += ["--anchor-drift-log"]
+    # v3 arm B finite-horizon outer bias correction. Emitted only when active
+    # so default command lines (and the bit-identical syncer OFF path behind
+    # them) stay byte-identical.
+    if outer_bias_correction:
+        cmd += ["--outer-bias-correction"]
     if arm.strict_quorum:
         cmd += ["--strict-quorum"]
     if probe_capture:
@@ -2228,6 +2234,7 @@ def run_diloco(
                 delta_norm_ref=getattr(args, "delta_norm_ref", 0.0),
                 version_matched_anchor=getattr(args, "version_matched_anchor", False),
                 anchor_drift_log=getattr(args, "anchor_drift_log", False),
+                outer_bias_correction=getattr(args, "outer_bias_correction", False),
                 cttn_rho=getattr(args, "cttn_rho", 0.10),
                 cttn_shadow_samples=getattr(args, "cttn_shadow_samples", 32),
                 rho_telemetry=getattr(args, "rho_telemetry", False),
@@ -2716,6 +2723,16 @@ def main() -> int:
         "||true_local_delta||, ratio, cos(drift, outer momentum)) into the event "
         "tape WITHOUT changing the merge (arm C). Implied by "
         "--version-matched-anchor.",
+    )
+    p.add_argument(
+        "--outer-bias-correction",
+        action="store_true",
+        help="v3 arm B: forward --outer-bias-correction to the syncer, which "
+        "divides the applied Nesterov outer step at a fragment's t-th outer "
+        "commit by (1 - mu^(t+1)) so every commit's constant-gradient "
+        "multiplier is the steady-state 1/(1-mu) (finite-horizon bias "
+        "correction, lean-mechanism FiniteHorizonOuter.lean). Off by default "
+        "= byte-identical command lines and a bit-identical syncer path.",
     )
     p.add_argument("--arm-timeout-min", type=int, default=120)
     p.add_argument(
