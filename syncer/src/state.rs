@@ -322,6 +322,39 @@ impl GlobalState {
 }
 
 const CKPT_MAGIC: u32 = 0xD170_5A7E;
+const FINAL_MARKER_MAGIC: &str = "YETO_FINAL_V1";
+
+pub fn final_marker_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(".final");
+    value.into()
+}
+
+pub fn remove_final_marker(path: &std::path::Path) -> Result<()> {
+    let marker = final_marker_path(path);
+    match std::fs::remove_file(&marker) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", marker.display())),
+    }
+}
+
+pub fn write_final_marker(path: &std::path::Path, global_step: u64) -> Result<()> {
+    use std::io::Write;
+
+    let marker = final_marker_path(path);
+    let mut tmp_value = marker.as_os_str().to_os_string();
+    tmp_value.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp_value);
+    {
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        write!(file, "{FINAL_MARKER_MAGIC}\nglobal_step={global_step}\n")?;
+        file.flush()?;
+        file.get_ref().sync_all()?;
+    }
+    std::fs::rename(&tmp, &marker)?;
+    Ok(())
+}
 
 impl GlobalState {
     /// Persist a consistent snapshot. Called only at the quiescent cut
@@ -576,6 +609,38 @@ mod tests {
         assert_eq!(restored.global_step, 13);
         assert_eq!(restored.versions, vec![12, 13]);
         assert!(!path.with_extension("tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn final_marker_uses_adjacent_atomic_file_and_exact_content() {
+        let dir = std::env::temp_dir().join(format!("yeto-final-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("state.ckpt");
+        let marker = final_marker_path(&checkpoint);
+        write_final_marker(&checkpoint, 23).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            "YETO_FINAL_V1\nglobal_step=23\n"
+        );
+        assert!(!std::path::PathBuf::from(format!("{}.tmp", marker.display())).exists());
+        remove_final_marker(&checkpoint).unwrap();
+        assert!(!marker.exists());
+        remove_final_marker(&checkpoint).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn failed_marker_write_never_publishes_the_final_path() {
+        let dir =
+            std::env::temp_dir().join(format!("yeto-final-marker-failure-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("state.ckpt");
+        let marker = final_marker_path(&checkpoint);
+        std::fs::create_dir(format!("{}.tmp", marker.display())).unwrap();
+
+        assert!(write_final_marker(&checkpoint, 23).is_err());
+        assert!(!marker.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -327,6 +327,12 @@ def parse_args(argv=None):
     p.add_argument("--wan-streams", type=int, default=4)
     p.add_argument("--max-rows", type=int, default=None)
     p.add_argument("--max-local-steps", type=int, default=1_000_000)
+    p.add_argument(
+        "--learner-budget-steps",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     p.add_argument("--stream-workers", type=int, default=2)
     p.add_argument(
         "--seed",
@@ -3010,6 +3016,11 @@ def save_adapters(pipe, output_dir: str, adapter=None, args=None, params=None) -
 
 def main(argv=None) -> None:
     args = parse_args(argv)
+    learner_budget_steps = args.learner_budget_steps
+    if learner_budget_steps is not None:
+        from ..budget_finalization import validate_learner_budget_args
+
+        validate_learner_budget_args(args)
     rank, world = setup_distributed()
     logging.basicConfig(
         level=logging.INFO,
@@ -3317,6 +3328,24 @@ def main(argv=None) -> None:
         if shutdown or steps_total >= args.max_local_steps:
             break
 
+    if (
+        learner_budget_steps is not None
+        and steps_total == learner_budget_steps
+        and not shutdown
+    ):
+        from ..budget_finalization import finalize_learner_budget
+
+        manifest = finalize_learner_budget(
+            client,
+            layout,
+            params,
+            rank=rank,
+            world=world,
+            device=device,
+            target_steps=learner_budget_steps,
+            units=units_total,
+        )
+        global_step = max(global_step, manifest.global_step)
     if rank == 0 and client is not None and not client.finalized.is_set():
         raise RuntimeError(
             "diffusion learner stopped before authoritative finalization; "

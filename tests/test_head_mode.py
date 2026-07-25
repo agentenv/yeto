@@ -449,4 +449,5 @@ def test_local_syncer_command_matches_cluster_syncer_flags():
     assert "--quorum 2" in cmd
     assert "--total-steps 17" in cmd
     assert "--resume" in cmd
+    assert "--mark-final-checkpoint" in cmd
     assert f"--port {launcher.SYNCER_PORT}" in cmd

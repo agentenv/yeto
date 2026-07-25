@@ -240,6 +240,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --outer-lr {args.outer_lr}"
         f" --outer-momentum {args.outer_momentum}"
         f" --checkpoint-path ~/yeto-state.ckpt --resume"
+        f" --mark-final-checkpoint"
         f" --event-tape ~/yeto-tape.jsonl"
     )
 

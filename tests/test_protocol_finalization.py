@@ -20,9 +20,11 @@ from yeto.protocol import (
     MAGIC,
     MSG_ERROR,
     MSG_BCAST_FRAGMENT,
+    MSG_BUDGET_DONE,
     MSG_FINAL_ACK,
     MSG_FINAL_FRAGMENT,
     MSG_FINAL_MANIFEST,
+    MSG_PULL_REQ,
     MSG_SHUTDOWN,
     FinalFragment,
     FinalManifest,
@@ -66,6 +68,44 @@ def test_final_manifest_golden_shape_and_revision_validation():
         decode_final_manifest(bytes(bad), 3)
     with pytest.raises(ValueError, match="has 3 fragments, expected 2"):
         decode_final_manifest(payload, 2)
+
+
+def test_budget_report_has_fixed_bytes_and_restart_discards_old_inboxes():
+    client_sock, server_sock = socket.socketpair()
+    client = SyncerClient(("unused", 0), 3, _layout(2), dtype=DTYPE_F32)
+    client._gen = 1
+    client._connected.set()
+    client._queues = [queue.Queue()]
+    sender = threading.Thread(
+        target=client._send_loop,
+        args=(1, client_sock, client._queues[0]),
+        daemon=True,
+    )
+    sender.start()
+    try:
+        generation = client.send_budget_done(17, timeout=1.0)
+        assert generation == 1
+        msg_type, payload = read_frame(server_sock)
+        assert msg_type == MSG_BUDGET_DONE == 14
+        assert payload == struct.pack("<Q", 17)
+
+        client._dispatch(1, MSG_PULL_REQ, struct.pack("<IQI", 0, 20, 1))
+        client._dispatch(1, MSG_BCAST_FRAGMENT, _bcast_payload(0, 7, [1.0] * 4))
+        client._teardown_group()
+        assert client.drain_pulls() == []
+        assert client.drain_updates() == []
+        assert client._bcast_seen == [None, None]
+
+        client._gen = 3
+        client._connected.set()
+        client._dispatch(3, MSG_PULL_REQ, struct.pack("<IQI", 1, 21, 1))
+        assert [(pull.fragment_id, pull.global_step) for pull in client.drain_pulls()] == [
+            (1, 21)
+        ]
+    finally:
+        client.close()
+        server_sock.close()
+        sender.join(timeout=1)
 
 
 def test_manifest_and_data_stream_reordering_preserves_lossless_final_fragments():

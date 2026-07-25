@@ -240,6 +240,12 @@ def parse_args(argv=None):
         help="DataLoader worker processes tokenizing ahead (stream mode)",
     )
     p.add_argument("--max-local-steps", type=int, default=1_000_000, help="safety stop")
+    p.add_argument(
+        "--learner-budget-steps",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     p.add_argument("--output-dir", default="checkpoints/out")
     p.add_argument("--device", default=None)
     return p.parse_args(argv)
@@ -605,6 +611,10 @@ def _global_loss_sum(local_loss: torch.Tensor, world: int) -> float:
 
 def main(argv=None) -> None:
     args = parse_args(argv)
+    if args.learner_budget_steps is not None:
+        from .budget_finalization import validate_learner_budget_args
+
+        validate_learner_budget_args(args)
     rank, world = setup_distributed()
     logging.basicConfig(
         level=logging.INFO,
@@ -1302,6 +1312,25 @@ def run_inner_loop(
                 "reduce the number of data-parallel consumers"
             )
         epoch += 1
+    learner_budget_steps = getattr(args, "learner_budget_steps", None)
+    if (
+        learner_budget_steps is not None
+        and steps_total == learner_budget_steps
+        and not shutdown
+    ):
+        from .budget_finalization import finalize_learner_budget
+
+        manifest = finalize_learner_budget(
+            client,
+            layout,
+            params,
+            rank=rank,
+            world=world,
+            device=device,
+            target_steps=learner_budget_steps,
+            units=tokens_total,
+        )
+        global_step = max(global_step, manifest.global_step)
     if rank == 0 and client is not None and not client.finalized.is_set():
         raise RuntimeError(
             "learner stopped before authoritative finalization; refusing to save local parameters"

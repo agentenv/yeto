@@ -18,8 +18,8 @@ Both peers validate the type and length before allocating or reading the
 payload:
 
 - the first frame must be HELLO or DATA_HELLO and is capped as layout metadata;
-- PULL, HEARTBEAT, FINAL_MANIFEST, FINAL_ACK, SHUTDOWN, and ERROR have exact
-  or small negotiated limits;
+- PULL, HEARTBEAT, BUDGET_DONE, FINAL_MANIFEST, FINAL_ACK, SHUTDOWN, and ERROR
+  have exact or small negotiated limits;
 - each CHUNK is limited to its 24-byte envelope plus one 4 MiB slice;
 - INIT, PUSH, BCAST, FINAL_FRAGMENT, and reassembled-inner limits derive from
   the negotiated fragment numel and dtype.
@@ -45,6 +45,7 @@ or allocation overflows are errors rather than panics.
 | 11 | FINAL_MANIFEST | syncer → learner | revision:u16 (=1), final_global_step:u64, num_fragments:u32, expected_version:u64 × num_fragments |
 | 12 | FINAL_ACK | learner → syncer | revision:u16 (=1), final_global_step:u64 |
 | 13 | FINAL_FRAGMENT | syncer → learner | fragment_id:u32, version:u64, authoritative full tensor bytes, always little-endian f32 |
+| 14 | BUDGET_DONE | learner → syncer | exact_local_steps:u64 |
 
 HELLO fragment layout is, for every fragment: `merge_mode:u8` (0=avg, 1=rda,
 2=iso), `num_tensors:u32`, then `numel:u64 × num_tensors`; iso additionally
@@ -67,7 +68,8 @@ repeated inside PUSH and HEARTBEAT must match the connected group.
 
 HELLO declares `num_streams`; each additional socket attaches with a
 versioned DATA_HELLO carrying the same learner ID and connection generation.
-Small control frames, including FINAL_MANIFEST and FINAL_ACK, use stream 0.
+Small control frames, including BUDGET_DONE, FINAL_MANIFEST, and FINAL_ACK, use
+stream 0.
 INIT, PUSH, BCAST, and FINAL_FRAGMENT are serialized as normal inner frames,
 sliced into 4 MiB chunks, and sent round-robin over data streams. With no data
 streams they use stream 0 directly. A message never straddles connection
@@ -192,6 +194,39 @@ FINAL_MANIFEST and FINAL_ACK carry `FINALIZATION_REVISION=1`; mismatches are
 fatal. A learner also rejects SHUTDOWN before it has applied and initiated the
 ACK for the exact manifest.
 
+## Learner-budget cutoff and consolidation restart
+
+`BUDGET_DONE` is benchmark-only and is accepted only when the syncer and every
+learner receive the same explicit positive learner-budget target. A trailing
+byte, wrong step count, or duplicate report is fatal; learner identity comes
+from the connection group.
+
+The benchmark closes in two syncer processes on the same endpoint:
+
+1. In the cutoff process, the first accepted `BUDGET_DONE` closes ordinary
+   issuance and cancels all in-flight rounds as whole rounds. After exactly
+   one report from every configured learner, the syncer writes an unmarked
+   recovery checkpoint and exits. It sends no final manifest or shutdown.
+2. The harness reads that checkpoint's global step `C`, restarts the syncer
+   from it, and requests exactly `F` ordinary rounds, where `F` is the fragment
+   count. Pipeline depth is one and quorum is the full configured learner set.
+
+Learners stop optimizer and data work before sending `BUDGET_DONE`, retain
+their frozen trainable parameters, and reconnect to the restarted syncer. The
+fresh connection drops queued pulls and broadcasts from the cutoff process.
+The resumed syncer broadcasts its checkpoint state normally. Across the next
+`F` round-robin pulls, each frozen learner answers every fragment with the
+existing `PUSH_FRAGMENT` frame. Its payload is
+`frozen_local - resumed_global`, with `local_step` and `c_steps` equal to the
+budget and `c_tokens` equal to its exact raw unit count.
+
+These are ordinary scheduler rounds: there is no terminal message or terminal
+scheduler branch. The existing merge, correction, outer optimizer, checkpoint,
+final-manifest, and acknowledgement paths are reused unchanged. Only normal
+completion of all `F` rounds can produce a marked final checkpoint. Before
+export, the harness also requires the event tape to show every configured
+learner in every one of these rounds.
+
 ## Snapshots and event tape
 
 The sequential coordinator mutates state only at serialized round completion,
@@ -203,6 +238,14 @@ Periodic checkpoints remain controlled by `--checkpoint-every`, but the
 coordinator always rewrites `--checkpoint-path` at the final quiescent cut
 before terminal delivery. Thus a total-step count not divisible by the
 periodic interval still leaves an atomic final checkpoint.
+
+When `--mark-final-checkpoint` is explicitly enabled, the syncer creates
+`<checkpoint-path>.final` only after that terminal checkpoint write. The
+marker contains `YETO_FINAL_V1` and the checkpoint `global_step`; periodic,
+cutoff-incomplete, timeout, and error checkpoints remain unmarked recovery
+state. The marker is adjacent metadata and does not change the checkpoint or
+wire format. The normal `yeto launch` syncer enables this marker without
+changing its learner-owned artifact path.
 
 Every merge appends event-tape fields for protocol/delta semantics, attempt,
 launch base version, frozen members and generations, responders, staleness,

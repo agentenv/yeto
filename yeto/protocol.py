@@ -55,6 +55,7 @@ MSG_ERROR = 10
 MSG_FINAL_MANIFEST = 11
 MSG_FINAL_ACK = 12
 MSG_FINAL_FRAGMENT = 13
+MSG_BUDGET_DONE = 14
 
 FINALIZATION_REVISION = 1
 FINALIZATION_TIMEOUT = 900.0
@@ -82,6 +83,7 @@ _HELLO_HEAD = struct.Struct("<HIQBI")  # version, learner, generation, dtype, fr
 _DATA_HELLO = struct.Struct("<HIQH")  # version, learner, generation, stream index
 _FINAL_MANIFEST_HEAD = struct.Struct("<HQI")  # revision, global_step, fragments
 _FINAL_ACK = struct.Struct("<HQ")  # revision, global_step
+_BUDGET_DONE = struct.Struct("<Q")  # local steps
 
 
 def bulk_dtype(dtype: int) -> int:
@@ -343,6 +345,7 @@ class SyncerClient:
         self._failure = threading.Event()  # set by any thread of the live group
         self._closed = threading.Event()
         self._reconnects_used = 0
+        self._reset_bcasts_on_reconnect = False
         self._supervisor: threading.Thread | None = None
 
     # -- lifecycle -------------------------------------------------------------
@@ -447,6 +450,13 @@ class SyncerClient:
         with self._reasm_lock:
             self._reasm.clear()  # partial inbound messages died with the sockets
         self._drain(self._pulls)  # stale pull requests; answering them is pointless
+        with self._lock:
+            reset_bcasts = self._reset_bcasts_on_reconnect
+            self._reset_bcasts_on_reconnect = False
+        if reset_bcasts:
+            self._drain(self._bcasts)
+            with self._bcast_lock:
+                self._bcast_seen = [None] * self.layout.num_fragments
         for t in threads:
             t.join(timeout=5.0)
         with self._final_cond:
@@ -561,6 +571,59 @@ class SyncerClient:
 
     def heartbeat(self, local_step: int) -> None:
         self._enqueue(0, self._frame(MSG_HEARTBEAT, struct.pack("<IQ", self.learner_id, local_step)))
+
+    def send_budget_done(
+        self, local_steps: int, timeout: float | None = None
+    ) -> int:
+        """Send the exact frozen learner budget and wait until bytes leave."""
+        if not 0 < local_steps <= 0xFFFF_FFFF_FFFF_FFFF:
+            raise ValueError("local_steps must be a positive u64")
+        timeout = self.finalization_timeout if timeout is None else timeout
+        deadline = time.monotonic() + timeout
+        payload = _BUDGET_DONE.pack(local_steps)
+        with self._lock:
+            if not self._connected.is_set():
+                raise RuntimeError("cannot send BUDGET_DONE while disconnected")
+            gen = self._gen
+            self._reset_bcasts_on_reconnect = True
+        sent = threading.Event()
+        if not self._enqueue(
+            0,
+            self._frame(MSG_BUDGET_DONE, payload),
+            gen=gen,
+            sent=sent,
+        ):
+            raise RuntimeError("connection closed before BUDGET_DONE was queued")
+        while not sent.wait(min(0.1, max(0.0, deadline - time.monotonic()))):
+            self.check_health()
+            with self._lock:
+                if gen != self._gen:
+                    raise RuntimeError("connection lost while sending BUDGET_DONE")
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"BUDGET_DONE was not sent within {timeout:.1f}s"
+                )
+        return gen
+
+    def wait_for_budget_restart(
+        self, previous_generation: int, timeout: float | None = None
+    ) -> None:
+        """Wait for the fresh connection group used by consolidation."""
+        timeout = self.finalization_timeout if timeout is None else timeout
+        deadline = time.monotonic() + timeout
+        while True:
+            self.check_health()
+            with self._lock:
+                ready = self._connected.is_set() and self._gen > previous_generation
+            if ready:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"budget consolidation syncer did not reconnect within {timeout:.1f}s"
+                )
+            with self._final_cond:
+                self._final_cond.wait(min(remaining, 0.5))
 
     def drain_pulls(self) -> list[PullRequest]:
         return self._drain(self._pulls)

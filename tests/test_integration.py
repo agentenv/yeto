@@ -7,6 +7,7 @@ striped chunk transfer, pull/push with counters, RDA+Avg merging, the
 Nesterov outer step, broadcasts, and SHUTDOWN.
 """
 
+import json
 import socket
 import struct
 import subprocess
@@ -19,6 +20,7 @@ import torch
 
 from yeto.fragments import build_layout
 from yeto.export import parse_checkpoint
+from yeto.final_marker import read_checkpoint_global_step, validate_final_checkpoint
 from yeto.protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
 from yeto.tensor_io import (
     apply_fragment,
@@ -76,6 +78,8 @@ class ToyLearner(threading.Thread):
         merge_alpha: float = 0.0,
         abandon_after_steps: int | None = None,
         abandon_after_broadcasts: int | None = None,
+        budget_steps: int | None = None,
+        budget_delay: float = 0.0,
     ):
         super().__init__(daemon=True)
         self.learner_id = learner_id
@@ -83,8 +87,12 @@ class ToyLearner(threading.Thread):
         self.layout = layout
         self.dtype = dtype
         self.merge_alpha = merge_alpha
-        self.abandon_after_steps = abandon_after_steps
+        self.abandon_after_steps = (
+            budget_steps if budget_steps is not None else abandon_after_steps
+        )
         self.abandon_after_broadcasts = abandon_after_broadcasts
+        self.budget_steps = budget_steps
+        self.budget_delay = budget_delay
         self.abandoned = False
         self.params = {
             "model.embed.weight": torch.zeros(DIM // 4),
@@ -103,6 +111,7 @@ class ToyLearner(threading.Thread):
         self.normal_broadcasts = 0
         self.normal_blends = 0
         self.exc: BaseException | None = None
+        self.steps_total = 0
 
     def run(self):
         try:
@@ -201,11 +210,169 @@ class ToyLearner(threading.Thread):
                     and self.normal_broadcasts >= self.abandon_after_broadcasts
                 )
             ):
+                if self.budget_steps is not None:
+                    if self.budget_delay:
+                        time.sleep(self.budget_delay)
+                    from yeto.budget_finalization import finalize_learner_budget
+
+                    manifest = finalize_learner_budget(
+                        self.client,
+                        self.layout,
+                        self.params,
+                        rank=0,
+                        world=1,
+                        device=torch.device("cpu"),
+                        target_steps=self.budget_steps,
+                        units=steps_total * 128,
+                    )
+                    self.steps_total = steps_total
+                    self.final_manifest = manifest
+                    self.saved = {
+                        key: value.detach().clone()
+                        for key, value in self.params.items()
+                    }
+                    break
                 self.abandoned = True
                 self.client.close()
                 return
             time.sleep(0.005)  # ~5ms inner step
         self.client.close()
+
+
+@pytest.mark.timeout(180)
+def test_learner_budget_restart_freezes_exactly_and_marks_complete_checkpoint(tmp_path):
+    binary = build_syncer()
+    port = free_port()
+    budget_steps = 4
+    named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
+    layout = build_layout(named, 2)
+    checkpoint = tmp_path / "state.ckpt"
+    marker = Path(f"{checkpoint}.final")
+    marker.write_text("YETO_FINAL_V1\nglobal_step=999\n", encoding="utf-8")
+    tape = tmp_path / "tape.jsonl"
+    cutoff_proc = subprocess.Popen(
+        [
+            str(binary),
+            "--port",
+            str(port),
+            "--learners",
+            "2",
+            "--quorum",
+            "2",
+            "--grace-ms",
+            "20",
+            "--quorum-timeout-s",
+            "10",
+            "--sync-interval-steps",
+            "0",
+            "--total-steps",
+            "100",
+            "--learner-budget-steps",
+            str(budget_steps),
+            "--checkpoint-path",
+            str(checkpoint),
+            "--event-tape",
+            str(tape),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        targets = [
+            torch.ones(DIM + DIM // 4),
+            -torch.ones(DIM + DIM // 4),
+        ]
+        learners = [
+            ToyLearner(
+                i,
+                port,
+                target,
+                layout,
+                dtype=DTYPE_F32,
+                budget_steps=budget_steps,
+                budget_delay=0.2,
+            )
+            for i, target in enumerate(targets)
+        ]
+        for learner in learners:
+            learner.start()
+        cutoff_output, _ = cutoff_proc.communicate(timeout=120)
+        assert cutoff_proc.returncode == 0, cutoff_output
+        assert checkpoint.exists()
+        assert not marker.exists()
+        cutoff_step = read_checkpoint_global_step(checkpoint)
+
+        final_proc = subprocess.Popen(
+            [
+                str(binary),
+                "--port",
+                str(port),
+                "--learners",
+                "2",
+                "--quorum",
+                "2",
+                "--grace-ms",
+                "20",
+                "--quorum-timeout-s",
+                "10",
+                "--sync-interval-steps",
+                "0",
+                "--pipeline",
+                "1",
+                "--total-steps",
+                str(cutoff_step + layout.num_fragments),
+                "--checkpoint-path",
+                str(checkpoint),
+                "--checkpoint-every",
+                "1",
+                "--resume",
+                "--mark-final-checkpoint",
+                "--event-tape",
+                str(tape),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        for learner in learners:
+            learner.join(timeout=120)
+            assert not learner.is_alive(), "budget learner did not finish"
+            if learner.exc:
+                raise learner.exc
+            assert learner.steps_total == budget_steps
+            assert learner.final_manifest is not None
+        final_output, _ = final_proc.communicate(timeout=30)
+        assert final_proc.returncode == 0, final_output
+
+        parsed = parse_checkpoint(checkpoint)
+        assert validate_final_checkpoint(checkpoint) == parsed.global_step
+        assert parsed.global_step == learners[0].final_manifest.global_step
+        assert parsed.global_step == learners[1].final_manifest.global_step
+        assert all(
+            version == manifested
+            for (version, _params, _momentum), manifested in zip(
+                parsed.fragments, learners[0].final_manifest.versions
+            )
+        )
+        records = [json.loads(line) for line in tape.read_text().splitlines()]
+        terminal_steps = {version for version, _params, _momentum in parsed.fragments}
+        terminal = [record for record in records if record["step"] in terminal_steps]
+        assert {record["fragment"] for record in terminal} == {0, 1}
+        for record in terminal:
+            assert {responder["id"] for responder in record["responders"]} == {0, 1}
+            assert {responder["c_steps"] for responder in record["responders"]} == {
+                budget_steps
+            }
+            assert {responder["c_tokens"] for responder in record["responders"]} == {
+                budget_steps * 128
+            }
+        assert "learner-budget cutoff checkpoint written" in cutoff_output
+    finally:
+        for process in (cutoff_proc, locals().get("final_proc")):
+            if process is not None and process.poll() is None:
+                process.kill()
+        print((locals().get("cutoff_output", "") + locals().get("final_output", ""))[-3000:])
 
 
 @pytest.mark.timeout(180)
