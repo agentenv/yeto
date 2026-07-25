@@ -21,6 +21,8 @@ pub const MSG_FINAL_ACK: u8 = 12;
 /// Lossless f32 terminal fragment. Ordinary BCAST_FRAGMENT keeps using the
 /// negotiated session dtype; final artifacts must preserve coordinator f32.
 pub const MSG_FINAL_FRAGMENT: u8 = 13;
+/// Benchmark-only report that one learner has frozen at its exact budget.
+pub const MSG_BUDGET_DONE: u8 = 14;
 
 /// Version of the final-artifact handshake carried inside FINAL_MANIFEST and
 /// FINAL_ACK. Keeping this in the payload makes incompatible peers fail with
@@ -167,6 +169,16 @@ pub fn decode_final_ack(payload: &[u8]) -> Result<u64> {
     Ok(global_step)
 }
 
+/// Decode the exact local optimizer-step budget reported by a learner.
+pub fn decode_budget_done(payload: &[u8]) -> Result<u64> {
+    let mut r = Reader(payload);
+    let local_steps = r.u64()?;
+    if !r.rest().is_empty() {
+        bail!("BUDGET_DONE has trailing bytes");
+    }
+    Ok(local_steps)
+}
+
 /// Decode a tensor payload into f32s.
 pub fn decode_tensor(dtype: u8, bytes: &[u8], out: &mut Vec<f32>) -> Result<()> {
     out.clear();
@@ -283,6 +295,7 @@ mod tests {
         assert_eq!(MSG_FINAL_MANIFEST, 11);
         assert_eq!(MSG_FINAL_ACK, 12);
         assert_eq!(MSG_FINAL_FRAGMENT, 13);
+        assert_eq!(MSG_BUDGET_DONE, 14);
     }
 
     #[tokio::test]
@@ -403,5 +416,14 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unsupported finalization revision"));
+    }
+
+    #[test]
+    fn budget_done_has_a_fixed_shape() {
+        let mut report = Vec::new();
+        report.extend_from_slice(&17u64.to_le_bytes());
+        assert_eq!(decode_budget_done(&report).unwrap(), 17);
+        report.push(0);
+        assert!(decode_budget_done(&report).is_err());
     }
 }

@@ -75,6 +75,9 @@ struct Args {
     /// Mark the terminal checkpoint as publishable after all merges finish.
     #[arg(long, default_value_t = false)]
     mark_final_checkpoint: bool,
+    /// Exact local optimizer-step budget per learner (benchmark-only).
+    #[arg(long)]
+    learner_budget_steps: Option<u64>,
     /// JSONL event tape (one record per merge).
     #[arg(long)]
     event_tape: Option<std::path::PathBuf>,
@@ -116,6 +119,7 @@ fn main() -> anyhow::Result<()> {
         checkpoint_every: args.checkpoint_every,
         resume: args.resume,
         mark_final_checkpoint: args.mark_final_checkpoint,
+        learner_budget_steps: args.learner_budget_steps,
         event_tape: args.event_tape,
     };
     tokio::runtime::Builder::new_multi_thread()

@@ -76,6 +76,8 @@ pub struct Config {
     pub resume: bool,
     /// Create the adjacent final marker only for a completed terminal cut.
     pub mark_final_checkpoint: bool,
+    /// Benchmark-only exact local optimizer-step target for every learner.
+    pub learner_budget_steps: Option<u64>,
     /// JSONL event tape: one record per merge.
     pub event_tape: Option<std::path::PathBuf>,
 }
@@ -198,6 +200,10 @@ enum Event {
     FinalAck {
         member: Member,
         global_step: u64,
+    },
+    BudgetDone {
+        member: Member,
+        local_steps: u64,
     },
     Disconnected {
         member: Member,
@@ -348,6 +354,17 @@ pub async fn run(cfg: Config) -> Result<()> {
     }
     if cfg.mark_final_checkpoint && cfg.checkpoint_path.is_none() {
         bail!("--mark-final-checkpoint requires --checkpoint-path");
+    }
+    if let Some(steps) = cfg.learner_budget_steps {
+        if !(1..=u32::MAX as u64).contains(&steps) {
+            bail!("--learner-budget-steps must fit a positive u32");
+        }
+        if cfg.checkpoint_path.is_none() || cfg.mark_final_checkpoint || cfg.resume {
+            bail!("--learner-budget-steps requires a fresh unmarked checkpoint");
+        }
+        // Budget runs are always fresh. Remove an old publishable marker
+        // before accepting any learner so every early failure stays recovery-only.
+        remove_final_marker(cfg.checkpoint_path.as_ref().unwrap())?;
     }
     let listener = TcpListener::bind(("0.0.0.0", cfg.port))
         .await
@@ -713,6 +730,7 @@ async fn read_loop(
             MSG_PUSH_FRAGMENT => Ok(group.max_push_payload),
             MSG_HEARTBEAT => Ok(12),
             MSG_FINAL_ACK => Ok(10),
+            MSG_BUDGET_DONE => Ok(8),
             MSG_CHUNK => Ok(CHUNK_HEADER_SIZE + CHUNK_SIZE as u64),
             other => bail!(
                 "unexpected direct message type {other} from learner {} generation {}",
@@ -971,6 +989,16 @@ async fn dispatch_inner(
                 .await
                 .ok();
         }
+        MSG_BUDGET_DONE => {
+            let local_steps = decode_budget_done(payload)?;
+            event_tx
+                .send(Event::BudgetDone {
+                    member: group.member,
+                    local_steps,
+                })
+                .await
+                .ok();
+        }
         t => bail!(
             "unexpected message type {t} from learner {} generation {}",
             group.member.learner_id,
@@ -996,6 +1024,7 @@ async fn scheduler(
     registry: Registry,
 ) -> Result<()> {
     let mut state: Option<GlobalState> = None;
+    let mut budget_reports: HashSet<u32> = HashSet::new();
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
     // a resumed checkpoint) and all expected learners have connected (late
@@ -1007,7 +1036,9 @@ async fn scheduler(
     loop {
         let connected = registry.lock().unwrap().current.len() as u32;
         if let Some(st) = &state {
-            if st.all_initialized() && connected >= cfg.learners {
+            let budget_ready =
+                budget_reports.is_empty() || budget_reports.len() == cfg.learners as usize;
+            if st.all_initialized() && connected >= cfg.learners && budget_ready {
                 break;
             }
         }
@@ -1051,6 +1082,18 @@ async fn scheduler(
                 generation = member.generation,
                 "premature final acknowledgement dropped"
             ),
+            Event::BudgetDone {
+                member,
+                local_steps,
+            } => {
+                let target = cfg
+                    .learner_budget_steps
+                    .context("received BUDGET_DONE outside learner-budget mode")?;
+                if !is_current_member(&registry, member) {
+                    bail!("BUDGET_DONE from a superseded learner");
+                }
+                record_budget_report(&mut budget_reports, target, member, local_steps)?;
+            }
             Event::Disconnected { member } => warn!(
                 learner_id = member.learner_id,
                 generation = member.generation,
@@ -1059,6 +1102,10 @@ async fn scheduler(
         }
     }
     let mut st = state.unwrap();
+    if !budget_reports.is_empty() {
+        save_budget_checkpoint(&cfg, &st)?;
+        return Ok(());
+    }
     let num_fragments = st.layout.fragments.len() as u64;
     let mut step_rates = StepRates::default();
     let mut last_sync_secs = 0.0f64; // previous round's merge+broadcast time
@@ -1086,7 +1133,7 @@ async fn scheduler(
     let mut next_launch = Instant::now(); // earliest allowed next round launch
     let mut next_t = st.global_step + 1;
     let mut inflight: Vec<Round> = Vec::new();
-    while next_t <= cfg.total_steps || !inflight.is_empty() {
+    'outer: while next_t <= cfg.total_steps || !inflight.is_empty() {
         // Keep the pipeline full (throttled by min_round_interval_ms).
         while inflight.len() < depth && next_t <= cfg.total_steps && Instant::now() >= next_launch {
             let p = ((next_t - 1) % num_fragments) as usize;
@@ -1256,6 +1303,27 @@ async fn scheduler(
                         "premature final acknowledgement dropped"
                     )
                 }
+                Event::BudgetDone {
+                    member,
+                    local_steps,
+                } => {
+                    let target = cfg
+                        .learner_budget_steps
+                        .context("received BUDGET_DONE outside learner-budget mode")?;
+                    if !is_current_member(&registry, member) {
+                        bail!("BUDGET_DONE from a superseded learner");
+                    }
+                    record_budget_report(&mut budget_reports, target, member, local_steps)?;
+                    let cancelled = inflight.len();
+                    inflight.clear();
+                    info!(
+                        learner_id = member.learner_id,
+                        cancelled_rounds = cancelled,
+                        target_steps = target,
+                        "learner-budget cutoff established"
+                    );
+                    break 'outer;
+                }
                 Event::Disconnected { member } => {
                     // Membership and accepted responses are immutable for an
                     // attempt. A disconnect never erases work, and a new
@@ -1269,6 +1337,12 @@ async fn scheduler(
                 }
             },
         }
+    }
+
+    if cfg.learner_budget_steps.is_some() {
+        collect_budget_reports(&cfg, &mut budget_reports, &mut events, &registry).await?;
+        save_budget_checkpoint(&cfg, &st)?;
+        return Ok(());
     }
 
     // The outer loop is now quiescent: every launched round has completed.
@@ -1305,6 +1379,69 @@ async fn scheduler(
     // Give writer tasks a moment to flush the final control frames.
     tokio::time::sleep(Duration::from_secs(2)).await;
     return Ok(());
+}
+
+fn record_budget_report(
+    reports: &mut HashSet<u32>,
+    target_steps: u64,
+    member: Member,
+    local_steps: u64,
+) -> Result<()> {
+    if local_steps != target_steps {
+        bail!("BUDGET_DONE reported {local_steps} steps, expected {target_steps}");
+    }
+    if !reports.insert(member.learner_id) {
+        bail!("duplicate BUDGET_DONE");
+    }
+    Ok(())
+}
+
+fn save_budget_checkpoint(cfg: &Config, st: &GlobalState) -> Result<()> {
+    let path = cfg
+        .checkpoint_path
+        .as_ref()
+        .context("learner budget cutoff requires --checkpoint-path")?;
+    st.save_checkpoint(path)?;
+    info!(
+        step = st.global_step,
+        path = %path.display(),
+        "learner-budget cutoff checkpoint written"
+    );
+    Ok(())
+}
+
+async fn collect_budget_reports(
+    cfg: &Config,
+    reports: &mut HashSet<u32>,
+    events: &mut mpsc::Receiver<Event>,
+    registry: &Registry,
+) -> Result<()> {
+    let target = cfg
+        .learner_budget_steps
+        .context("learner budget reports require --learner-budget-steps")?;
+    while reports.len() < cfg.learners as usize {
+        match events.recv().await.context("event channel closed")? {
+            Event::BudgetDone {
+                member,
+                local_steps,
+            } => {
+                if !is_current_member(registry, member) {
+                    bail!("BUDGET_DONE from a superseded learner");
+                }
+                record_budget_report(reports, target, member, local_steps)?;
+            }
+            Event::Disconnected { member } => warn!(
+                learner_id = member.learner_id,
+                generation = member.generation,
+                "disconnected while waiting for learner-budget cutoff"
+            ),
+            Event::Hello { .. }
+            | Event::Push { .. }
+            | Event::Init { .. }
+            | Event::FinalAck { .. } => {}
+        }
+    }
+    Ok(())
 }
 
 /// One in-flight sync round: the pull for fragment `p` at global step `t`
@@ -1708,7 +1845,7 @@ async fn finalize_learners(
                     "learner disconnected during finalization; waiting for reconnect"
                 );
             }
-            Event::Push { .. } | Event::Init { .. } => {
+            Event::Push { .. } | Event::Init { .. } | Event::BudgetDone { .. } => {
                 // The authoritative cut is frozen; late training traffic is
                 // intentionally ignored while learners finalize.
             }
@@ -1943,6 +2080,18 @@ mod tests {
         assert_eq!(registry.current.get(&0), Some(&replacement));
         assert!(registry.groups.contains_key(&first));
         assert!(registry.groups.contains_key(&replacement));
+    }
+
+    #[test]
+    fn budget_reports_are_exact_unique_and_cover_logical_learners() {
+        let mut reports = HashSet::new();
+        record_budget_report(&mut reports, 8, member(0, 10), 8).unwrap();
+        record_budget_report(&mut reports, 8, member(1, 20), 8).unwrap();
+        assert_eq!(reports.len(), 2);
+        assert!(record_budget_report(&mut reports, 8, member(1, 21), 8).is_err());
+
+        let mut wrong = HashSet::new();
+        assert!(record_budget_report(&mut wrong, 8, member(0, 10), 7).is_err());
     }
 
     #[test]
