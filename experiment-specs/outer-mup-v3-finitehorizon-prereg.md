@@ -61,6 +61,26 @@ build requires it). The launch manifest binds the registration commit as
 `source.git_commit` plus the raw sha256 of both contract files. No GCP/AWS. Pushes
 from the Mac clone only.
 
+## 2a. Training data (pre-outcome amendment of commit `fa7206b`)
+
+v3 trains on the expanded no-wrap bundles `/root/yeto-data/outer-mup-v3/seed-<s>/`
+(13,758 train rows per seed = the frozen day-1 5000-row train pool + all unused
+source rows 7048..15806; development and audit rows byte-identical to day-1;
+combined manifest sha256
+`414fce3eae499d619eadaf4c4a667542b39ea262a927f134d8fadad297a1b230`; SmolLM2 packed
+token capacity verified >= 26,192 blocks per learner vs 20,480 required, report
+sha256 `81b3448909ac103ad5949c2de7aa71bb3fbfedbe974d6075292cd37362b38471`; prep and
+verification tools `prepare_outer_mup_v3.py` / `verify_outer_mup_v3_tokens.py`
+committed with this contract).
+
+**Disclosure:** the pilot S-scan ran on 5000-row splits, which wrap the packed
+per-learner dataset at `S=10240` (~9.5k blocks available vs 10,240 required) and
+would wrap ~2x at `S=20480`. The suspect pilot T=20 point (`D=0.50`) is therefore
+confounded with dataset wrap in addition to possible ladder mis-centering. v3
+removes the wrap at every S and keeps the registered WIDE T=20 ladder, so the
+adjudication is clean either way. This amendment was made before any v3 scientific
+process started; no v3 outcome existed.
+
 ## 3. Design — three arms at 135M / M4 / H512 (except ARM S: M1)
 
 Fresh seeds `{301, 311, 313, 317, 331}` everywhere (5 per curve; **307 stays

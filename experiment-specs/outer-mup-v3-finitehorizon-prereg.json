@@ -1,4 +1,9 @@
 {
+  "amendment": {
+    "amendment_of_commit": "fa7206b5988ac622e2f0b6660fac37fb56515196",
+    "pre_outcome": true,
+    "scope": "clarification_that_only_strengthens_fail_closed_evidence_checks + training-data substitution made BEFORE any v3 scientific process: the 5000-row day-1 splits wrap their packed dataset at S=10240 (about 9.5k blocks per learner available vs 10240 required) and would wrap 2x at S=20480; v3 substitutes the expanded no-wrap bundles prepared and token-verified before this registration. No cell had launched and no v3 outcome existed at amendment time."
+  },
   "analysis_contract": {
     "D_definition": "D(T,mu)=[eta_star(mu,T)/eta_star(0,T)]/(1-mu), per arm, per S, mu=0.9, using the same arm's mu0 fit at the same S",
     "eta_star_estimator": {
@@ -105,7 +110,24 @@
     "sequence_length": 128,
     "strict_full_quorum": true,
     "syncer_dtype": "f32",
-    "train_rows": 5000,
+    "train_rows": 13758,
+    "training_data": {
+      "bundle_root": "/root/yeto-data/outer-mup-v3",
+      "bundle_schema": "yeto_outer_mup_v3_inputs_v1",
+      "combined_manifest_sha256": "414fce3eae499d619eadaf4c4a667542b39ea262a927f134d8fadad297a1b230",
+      "max_rows_flag": 13758,
+      "no_wrap_verification": {
+        "minimum_blocks_per_learner_across_seeds": 26192,
+        "report": "/root/yeto-data/outer-mup-v3/token-counts-smollm2.json",
+        "report_sha256": "81b3448909ac103ad5949c2de7aa71bb3fbfedbe974d6075292cd37362b38471",
+        "required_blocks_per_learner_at_S20480": 20480,
+        "tool": "verify_outer_mup_v3_tokens.py (committed with this contract)"
+      },
+      "pilot_wrap_disclosure": "the pilot S-scan ran on 5000-row splits, which wrap the packed per-learner dataset at S=10240; the suspect pilot T=20 point (D=0.50, EXTRAPOLATED_LOW) is therefore confounded with dataset wrap in addition to possible ladder mis-centering; v3 removes the wrap at every S and keeps the registered WIDE T=20 ladder",
+      "pool_rule": "frozen day-1 5000-row train pool + all unused source rows 7048..15806; development and audit rows byte-identical to day-1 (eval sha 533838a0564b13519956a044d23ed8db6705ddc7ae5f0ddb96538f49460bcebc)",
+      "prepared_by": "prepare_outer_mup_v3.py (committed with this contract)",
+      "train_rows_per_seed": 13758
+    },
     "tuning": "full",
     "version_matched_anchor": true,
     "wire_dtype": "bf16",
