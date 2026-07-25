@@ -137,6 +137,7 @@ def test_build_compare_command_is_short_exact_and_enables_telemetry(tmp_path):
         "token_budget": 40960,
         "learner_world_size": 1,
         "gpu_slots": 0,
+        "gpu_offset": 0,
     }
 
 
@@ -198,3 +199,12 @@ def test_m8_preset_is_available_for_registered_m_axis():
     sys.modules[compare_spec.name] = compare
     compare_spec.loader.exec_module(compare)
     assert compare.PRESETS["m8"].m == 8
+
+
+def test_gpu_offset_is_forwarded_for_one_cell_per_gpu_probe(tmp_path):
+    args = _args(tmp_path, "--gpu-slots", "1", "--gpu-offset", "6")
+    command, derived = rho_probe.build_compare_command(args)
+    assert command[command.index("--gpu-slots") + 1] == "1"
+    assert command[command.index("--gpu-offset") + 1] == "6"
+    assert derived["gpu_slots"] == 1
+    assert derived["gpu_offset"] == 6

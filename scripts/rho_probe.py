@@ -135,6 +135,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="single-process CUDA slots (default M on cuda, otherwise zero)",
     )
+    parser.add_argument(
+        "--gpu-offset",
+        type=int,
+        default=0,
+        help="first physical CUDA index used by the probe's learner slots",
+    )
     parser.add_argument("--arm-timeout-min", type=int, default=120)
     parser.add_argument(
         "--overwrite",
@@ -169,6 +175,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--learner-gpus must be non-negative")
     if args.gpu_slots is not None and args.gpu_slots < 0:
         parser.error("--gpu-slots must be non-negative")
+    if args.gpu_offset < 0:
+        parser.error("--gpu-offset must be non-negative")
     if args.learner_gpus > 0 and args.gpu_slots not in (None, 0):
         parser.error("--gpu-slots cannot be used with --learner-gpus")
     if args.arm_timeout_min <= 0:
@@ -292,13 +300,21 @@ def build_compare_command(args: argparse.Namespace) -> tuple[list[str], dict[str
     if args.max_rows is not None:
         command.extend(["--max-rows", str(args.max_rows)])
     if gpu_slots:
-        command.extend(["--gpu-slots", str(gpu_slots)])
+        command.extend(
+            [
+                "--gpu-slots",
+                str(gpu_slots),
+                "--gpu-offset",
+                str(args.gpu_offset),
+            ]
+        )
     return command, {
         "fragment_rounds": fragment_rounds,
         "learner_max_steps": learner_max_steps,
         "token_budget": token_budget,
         "learner_world_size": learner_world,
         "gpu_slots": gpu_slots,
+        "gpu_offset": args.gpu_offset,
     }
 
 
