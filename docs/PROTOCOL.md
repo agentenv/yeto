@@ -204,6 +204,14 @@ coordinator always rewrites `--checkpoint-path` at the final quiescent cut
 before terminal delivery. Thus a total-step count not divisible by the
 periodic interval still leaves an atomic final checkpoint.
 
+When `--mark-final-checkpoint` is explicitly enabled, the syncer creates
+`<checkpoint-path>.final` only after that terminal checkpoint write. The
+marker contains `YETO_FINAL_V1` and the checkpoint `global_step`; periodic,
+cutoff-incomplete, timeout, and error checkpoints remain unmarked recovery
+state. The marker is adjacent metadata and does not change the checkpoint or
+wire format. The normal `yeto launch` syncer enables this marker without
+changing its learner-owned artifact path.
+
 Every merge appends event-tape fields for protocol/delta semantics, attempt,
 launch base version, frozen members and generations, responders, staleness,
 weights, counters, quorum/grace timings, and sync latency.

@@ -72,6 +72,9 @@ struct Args {
     /// Resume from --checkpoint-path if it exists.
     #[arg(long, default_value_t = false)]
     resume: bool,
+    /// Mark the terminal checkpoint as publishable after all merges finish.
+    #[arg(long, default_value_t = false)]
+    mark_final_checkpoint: bool,
     /// JSONL event tape (one record per merge).
     #[arg(long)]
     event_tape: Option<std::path::PathBuf>,
@@ -112,6 +115,7 @@ fn main() -> anyhow::Result<()> {
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,
         resume: args.resume,
+        mark_final_checkpoint: args.mark_final_checkpoint,
         event_tape: args.event_tape,
     };
     tokio::runtime::Builder::new_multi_thread()

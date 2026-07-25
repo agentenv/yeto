@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::protocol::*;
-use crate::state::{GlobalState, Layout};
+use crate::state::{remove_final_marker, write_final_marker, GlobalState, Layout};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const CHUNK_HEADER_SIZE: u64 = 24;
@@ -74,6 +74,8 @@ pub struct Config {
     pub checkpoint_path: Option<std::path::PathBuf>,
     pub checkpoint_every: u64,
     pub resume: bool,
+    /// Create the adjacent final marker only for a completed terminal cut.
+    pub mark_final_checkpoint: bool,
     /// JSONL event tape: one record per merge.
     pub event_tape: Option<std::path::PathBuf>,
 }
@@ -343,6 +345,9 @@ pub async fn run(cfg: Config) -> Result<()> {
     }
     if cfg.quorum == 0 {
         bail!("--quorum must be positive");
+    }
+    if cfg.mark_final_checkpoint && cfg.checkpoint_path.is_none() {
+        bail!("--mark-final-checkpoint requires --checkpoint-path");
     }
     let listener = TcpListener::bind(("0.0.0.0", cfg.port))
         .await
@@ -1058,6 +1063,12 @@ async fn scheduler(
     let mut step_rates = StepRates::default();
     let mut last_sync_secs = 0.0f64; // previous round's merge+broadcast time
 
+    // Once a marked run is actually going to make more progress, the old
+    // marker must stop being publishable before any new round can commit.
+    if cfg.mark_final_checkpoint && st.global_step < cfg.total_steps {
+        remove_final_marker(cfg.checkpoint_path.as_ref().unwrap())?;
+    }
+
     // Send everyone the initial (or resumed) global parameters so all
     // learners start bit-identical (also serves recovery for late joiners).
     broadcast_all_fragments(&st, &registry).await;
@@ -1265,12 +1276,18 @@ async fn scheduler(
     // interval so a non-divisible total_steps can never leave a stale final
     // checkpoint behind.
     if let Some(path) = &cfg.checkpoint_path {
+        if cfg.mark_final_checkpoint {
+            remove_final_marker(path)?;
+        }
         st.save_checkpoint(path)?;
         info!(
             step = st.global_step,
             path = %path.display(),
             "final checkpoint written"
         );
+        if cfg.mark_final_checkpoint {
+            write_final_marker(path, st.global_step)?;
+        }
     }
     if let Some(path) = &cfg.final_state {
         dump_state(&st, path)?;
