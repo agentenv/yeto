@@ -28,6 +28,7 @@ Presets (--settings, comma-separated or 'all'):
 
   m2        M=2, everything default (bf16 wire, alpha 0.5, pipelined)
   m4        M=4
+  m8        M=8
   m16       M=16
   alpha0    broadcasts overwrite (large-M recommendation)
   q4        4-bit E3M0 delta pushes on the wire
@@ -173,6 +174,7 @@ class Arm:
 PRESETS: dict[str, Arm] = {
     "m2": Arm("m2"),
     "m4": Arm("m4", m=4),
+    "m8": Arm("m8", m=8),
     # Best-paper learner-count control: one learner behind the identical syncer stack
     # (fragments, fixed windows, outer step, probe capture) with quorum
     # defaulting to 1. Every "merge" is a single learner's window delta.
