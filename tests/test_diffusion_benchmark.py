@@ -152,6 +152,10 @@ def test_learner_commands_hold_recipe_fixed_and_only_arm_gets_sync_flags():
     ):
         assert diloco[diloco.index(flag) + 1] == baseline[baseline.index(flag) + 1]
     assert diloco[diloco.index("--wire-dtype") + 1] == "q4"
+    assert baseline[baseline.index("--max-local-steps") + 1] == "20"
+    assert diloco[diloco.index("--max-local-steps") + 1] == "20"
+    assert diloco[diloco.index("--learner-budget-steps") + 1] == "20"
+    assert "--learner-budget-steps" not in baseline
     assert "--wire-dtype" not in baseline
 
 
@@ -162,15 +166,37 @@ def test_single_rank_learner_still_uses_torchrun_environment():
     assert "--nproc_per_node=1" in command
 
 
-def test_syncer_command_uses_all_learner_quorum_and_explicit_h(tmp_path):
+def test_syncer_commands_split_budget_cutoff_from_final_consolidation(tmp_path):
     args = SimpleNamespace(grace_ms=1000)
     arm = benchmark.PRESETS["m4"]
-    command = benchmark.syncer_command(args, arm, 1234, tmp_path, total_steps=99)
+    cutoff = benchmark.syncer_command(
+        args,
+        arm,
+        1234,
+        tmp_path,
+        total_steps=99,
+        learner_budget_steps=20,
+    )
+    final = benchmark.syncer_command(
+        args,
+        arm,
+        1234,
+        tmp_path,
+        total_steps=107,
+        resume_consolidation=True,
+    )
 
-    assert command[command.index("--learners") + 1] == "4"
-    assert command[command.index("--quorum") + 1] == "4"
-    assert command[command.index("--sync-interval-steps") + 1] == "24.0"
-    assert command[command.index("--checkpoint-every") + 1] == "1"
+    assert cutoff[cutoff.index("--learners") + 1] == "4"
+    assert cutoff[cutoff.index("--quorum") + 1] == "4"
+    assert cutoff[cutoff.index("--sync-interval-steps") + 1] == "24.0"
+    assert cutoff[cutoff.index("--checkpoint-every") + 1] == "1"
+    assert cutoff[cutoff.index("--learner-budget-steps") + 1] == "20"
+    assert "--mark-final-checkpoint" not in cutoff
+    assert "--resume" in final
+    assert "--mark-final-checkpoint" in final
+    assert final[final.index("--pipeline") + 1] == "1"
+    assert final[final.index("--quorum") + 1] == "4"
+    assert final[final.index("--sync-interval-steps") + 1] == "0.0"
 
 
 def test_seed_parser_rejects_empty_invalid_and_duplicate_values():

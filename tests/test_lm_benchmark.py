@@ -123,7 +123,38 @@ def test_commands_encode_matching_topologies_and_seed():
     assert diloco[diloco.index("--assistant-mask-mode") + 1] == "native"
     assert diloco[diloco.index("--wire-dtype") + 1] == "q4"
     assert diloco[diloco.index("--base-quantization") + 1] == "none"
+    assert baseline[baseline.index("--max-local-steps") + 1] == "100"
+    assert diloco[diloco.index("--max-local-steps") + 1] == "100"
+    assert diloco[diloco.index("--learner-budget-steps") + 1] == "100"
+    assert "--learner-budget-steps" not in baseline
     assert "--wire-dtype" not in baseline
+
+
+def test_syncer_commands_split_budget_cutoff_from_final_consolidation(tmp_path):
+    cutoff = benchmark.syncer_command(
+        benchmark.PRESETS["m2"],
+        1234,
+        tmp_path,
+        total_steps=99,
+        learner_budget_steps=20,
+    )
+    final = benchmark.syncer_command(
+        benchmark.PRESETS["m2"],
+        1234,
+        tmp_path,
+        total_steps=107,
+        resume_consolidation=True,
+    )
+
+    assert cutoff[cutoff.index("--learner-budget-steps") + 1] == "20"
+    assert "--mark-final-checkpoint" not in cutoff
+    assert "--resume" not in cutoff
+    assert "--learner-budget-steps" not in final
+    assert "--resume" in final
+    assert "--mark-final-checkpoint" in final
+    assert final[final.index("--pipeline") + 1] == "1"
+    assert final[final.index("--quorum") + 1] == "2"
+    assert final[final.index("--sync-interval-steps") + 1] == "0.0"
 
 
 def test_benchmark_mask_mode_is_fixed_for_training_and_subprocess_eval(monkeypatch, tmp_path):

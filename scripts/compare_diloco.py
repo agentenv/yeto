@@ -63,7 +63,9 @@ _RESUME_IDENTITY_EXCLUDES = {
 }
 _IMPLEMENTATION_PATHS = (
     Path(__file__),
+    REPO_ROOT / "yeto/budget_finalization.py",
     REPO_ROOT / "yeto/benchmark_resume.py",
+    REPO_ROOT / "yeto/final_marker.py",
     REPO_ROOT / "yeto/learner.py",
     REPO_ROOT / "yeto/data.py",
     REPO_ROOT / "yeto/losses.py",
@@ -266,6 +268,7 @@ def learner_command(
         cmd += ["--device", args.device]
     if arm is not None:
         cmd += [
+            "--learner-budget-steps", str(max_steps),
             "--fragments", str(arm.fragments),
             "--fragment-pattern", arm.fragment_pattern,
             "--matrix-merge", arm.matrix_merge,
@@ -282,24 +285,39 @@ def syncer_command(
     total_steps: int,
     *,
     grace_ms: int = 1000,
+    learner_budget_steps: int | None = None,
+    resume_consolidation: bool = False,
 ) -> list[str]:
+    if learner_budget_steps is not None and resume_consolidation:
+        raise ValueError("budget cutoff and resumed consolidation are separate stages")
     # The syncer takes no fragment count: the layout arrives in HELLO.
-    return [
+    quorum = arm.learners if resume_consolidation else arm.quorum or arm.learners
+    pipeline = 1 if resume_consolidation else arm.pipeline
+    sync_interval = 0.0 if resume_consolidation else arm.sync_interval_steps
+    command = [
         str(SYNCER_BIN),
         "--port", str(port),
         "--learners", str(arm.learners),
-        "--quorum", str(arm.quorum or arm.learners),
+        "--quorum", str(quorum),
         "--grace-ms", str(grace_ms),
         "--total-steps", str(total_steps),
-        "--pipeline", str(arm.pipeline),
+        "--pipeline", str(pipeline),
         "--delta-correction", arm.delta_correction,
         "--outer-lr", str(arm.outer_lr),
         "--outer-momentum", str(arm.outer_momentum),
         "--checkpoint-path", str(arm_dir / "state.ckpt"),
         "--checkpoint-every", "1",
         "--event-tape", str(arm_dir / "tape.jsonl"),
-        "--sync-interval-steps", str(arm.sync_interval_steps),
+        "--sync-interval-steps", str(sync_interval),
     ]
+    if learner_budget_steps is not None:
+        command += ["--learner-budget-steps", str(learner_budget_steps)]
+    if resume_consolidation:
+        command += [
+            "--resume",
+            "--mark-final-checkpoint",
+        ]
+    return command
 
 
 def free_port() -> int:
@@ -721,8 +739,13 @@ def run_checked(cmd: list[str], log: Path, env: dict | None = None,
         )
 
 
-def _wait_for_learners(processes: list[subprocess.Popen], logs: list[Path],
-                       timeout_s: int) -> None:
+def _wait_for_learners(
+    processes: list[subprocess.Popen],
+    logs: list[Path],
+    timeout_s: int,
+    syncer: subprocess.Popen | None = None,
+    syncer_log: Path | None = None,
+) -> None:
     deadline = time.monotonic() + timeout_s
     pending = set(range(len(processes)))
     while pending:
@@ -737,9 +760,42 @@ def _wait_for_learners(processes: list[subprocess.Popen], logs: list[Path],
                 )
         if not pending:
             return
+        if syncer is not None and syncer.poll() not in (None, 0):
+            detail = _tail(syncer_log) if syncer_log is not None else ""
+            raise RuntimeError(
+                f"syncer failed during final consolidation with code "
+                f"{syncer.returncode}:\n{detail}"
+            )
         if time.monotonic() >= deadline:
             raise RuntimeError(f"learners timed out after {timeout_s}s")
         time.sleep(1)
+
+
+def _wait_for_syncer(
+    process: subprocess.Popen,
+    log: Path,
+    timeout_s: int,
+    learners: list[subprocess.Popen] | None = None,
+    learner_logs: list[Path] | None = None,
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    while process.poll() is None:
+        if learners is not None:
+            for index, learner in enumerate(learners):
+                returncode = learner.poll()
+                if returncode is not None:
+                    detail = _tail(learner_logs[index]) if learner_logs else ""
+                    raise RuntimeError(
+                        f"learner {index} exited before the budget cutoff "
+                        f"with code {returncode}:\n{detail}"
+                    )
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"syncer timed out after {timeout_s}s:\n{_tail(log)}")
+        time.sleep(1)
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"syncer failed with exit code {process.returncode}:\n{_tail(log)}"
+        )
 
 
 def summarize_tape(path: Path, learners: int) -> dict:
@@ -908,6 +964,7 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
     port = free_port()
     syncer_steps = max(arm.fragments, steps * arm.learners * arm.fragments * 2)
     syncer_log_path = run_dir / "syncer.log"
+    checkpoint = run_dir / "state.ckpt"
     syncer_log = syncer_log_path.open("w", encoding="utf-8")
     syncer = subprocess.Popen(
         syncer_command(
@@ -916,6 +973,7 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
             run_dir,
             total_steps=syncer_steps,
             grace_ms=args.grace_ms,
+            learner_budget_steps=steps,
         ),
         cwd=REPO_ROOT,
         stdout=syncer_log,
@@ -959,13 +1017,49 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
                     start_new_session=True,
                 )
             )
-        _wait_for_learners(processes, learner_logs, args.arm_timeout_min * 60)
+        timeout_s = args.arm_timeout_min * 60
+        _wait_for_syncer(
+            syncer,
+            syncer_log_path,
+            timeout_s,
+            learners=processes,
+            learner_logs=learner_logs,
+        )
+        from yeto.final_marker import read_checkpoint_global_step
+
+        cutoff_step = read_checkpoint_global_step(checkpoint)
         time.sleep(args.drain_seconds)
-        if syncer.poll() is not None:
-            raise RuntimeError(
-                f"{arm.name}: syncer exited before the token budget ended\n"
-                f"{_tail(syncer_log_path)}"
-            )
+        syncer = subprocess.Popen(
+            syncer_command(
+                arm,
+                port,
+                run_dir,
+                total_steps=cutoff_step + arm.fragments,
+                grace_ms=args.grace_ms,
+                resume_consolidation=True,
+            ),
+            cwd=REPO_ROOT,
+            stdout=syncer_log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        _wait_for_learners(
+            processes,
+            learner_logs,
+            timeout_s,
+            syncer=syncer,
+            syncer_log=syncer_log_path,
+        )
+        _wait_for_syncer(syncer, syncer_log_path, timeout_s)
+        from yeto.budget_finalization import validate_consolidation_tape
+
+        validate_consolidation_tape(
+            run_dir / "tape.jsonl",
+            cutoff_step=cutoff_step,
+            fragments=arm.fragments,
+            learners=arm.learners,
+            budget_steps=steps,
+        )
     finally:
         for process in processes:
             _stop_process(process)
@@ -994,11 +1088,13 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
             f"reported {telemetry['processed_tokens']}"
         )
 
-    checkpoint = run_dir / "state.ckpt"
     if not checkpoint.exists():
         raise RuntimeError(
             f"{arm.name}: no syncer checkpoint was produced\n{_tail(syncer_log_path)}"
         )
+    from yeto.final_marker import validate_final_checkpoint
+
+    validate_final_checkpoint(checkpoint)
     export_dir = run_dir / "export"
     wait_for_free_gpus(args.export_device)
     export_started = time.monotonic()
