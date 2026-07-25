@@ -1,0 +1,600 @@
+{
+  "schema": "yeto_outer_mup_2day_prereg_v1",
+  "schema_version": "1.0.0",
+  "status": "PREREGISTERED",
+  "program_id": "outer-mup-2day",
+  "registered_date": "2026-07-24",
+  "readable_contract": "experiment-specs/outer-mup-2day-prereg.md",
+  "machine_registry": "experiment-specs/outer-mup-2day-prereg.json",
+  "theory_positioning": "Khaled et al. 2509.10439 Thm 2's 1/(1-mu) multiplier is the rho->1 limit of the registered filter law eta_eff=eta(1+mu/(1-mu*rho)); E1 discriminates them.",
+  "objective": "Test whether measured pseudo-gradient persistence replaces the rho=1 learning-rate multiplier, and whether the resulting outer-muP rule predicts tuned outer learning rates across horizon, worker count, and model scale.",
+  "authority": {
+    "contract_kind": "prospective_code_and_analysis_contract",
+    "launch_requires_clean_pushed_commit": true,
+    "launch_manifest_must_hash_both_contract_files": true,
+    "launch_manifest_must_hash_every_materialized_cell_command": true,
+    "unregistered_cell_launch_forbidden": true,
+    "outcome_aware_amendment_forbidden": true,
+    "allowed_pre_outcome_amendment_scope": [
+      "mechanical_typo_that_does_not_change_any_cell_or_analysis",
+      "loss_blind_hardware_substitution_with_identical_numeric_contract",
+      "clarification_that_only_strengthens_fail_closed_evidence_checks"
+    ],
+    "all_amendments_require_new_commit_and_raw_file_sha256": true
+  },
+  "closed_vocabularies": {
+    "cell_status": [
+      "PLANNED",
+      "RUNNING",
+      "COMPLETED",
+      "SCIENTIFIC_DIVERGENCE",
+      "INFRA_FAILURE",
+      "INVALID_WORK",
+      "NOT_RUN_GATE_STOP",
+      "NOT_RUN_WALL_CEILING",
+      "NOT_RUN_OPTIONAL_NO_SLACK"
+    ],
+    "gate_verdict": ["PASS", "FAIL", "NOT_EVALUABLE"],
+    "program_verdict": [
+      "CORE_COMPLETE",
+      "CORE_COMPLETE_WITH_OPTIONALS",
+      "STOP_G1_FAIL_AUDIT_PAPER",
+      "STOP_G1_NOT_EVALUABLE_AUDIT_PAPER",
+      "STOP_G2_FAIL_AUDIT_PAPER",
+      "STOP_G2_NOT_EVALUABLE_AUDIT_PAPER",
+      "STOP_WALL_CEILING_AUDIT_PAPER"
+    ],
+    "e1_scientific_verdict": [
+      "RHO_FILTER_DISCRIMINATED",
+      "RHO1_FIRST_ORDER_NOT_REJECTED",
+      "HIGH_H_DEVIATION_WITHOUT_RHO_ORDERING",
+      "RHO_ORDERING_WITHOUT_HIGH_H_DEVIATION",
+      "NOT_EVALUABLE"
+    ],
+    "prediction_cell_verdict": [
+      "HIT_WITHIN_SEED_CI",
+      "MISS_OUTSIDE_SEED_CI",
+      "MISS_UNBRACKETED",
+      "MISS_INVALID_OR_MISSING_WORK"
+    ],
+    "boundary_verdict": [
+      "STABLE_FILTER_EXTENSION",
+      "MU095_BOUNDARY_BREAK",
+      "BUFFER_CAUSAL_EFFECT_ONLY",
+      "NO_BUFFER_CAUSAL_EFFECT",
+      "NOT_EVALUABLE"
+    ],
+    "snoo_verdict": [
+      "SNOO_GAIN_SURVIVES_TUNING",
+      "SNOO_GAIN_DEFLATED",
+      "SNOO_FIXED_NOT_REPLICATED",
+      "SNOO_REVERSED",
+      "NOT_EVALUABLE",
+      "SKIPPED_NO_SLACK"
+    ],
+    "lean_verdict": ["PROVED", "COUNTEREXAMPLE", "NOT_ATTEMPTED"]
+  },
+  "common_protocol": {
+    "models": {
+      "135m": "HuggingFaceTB/SmolLM2-135M",
+      "360m": "HuggingFaceTB/SmolLM2-360M",
+      "1.7b": "HuggingFaceTB/SmolLM2-1.7B"
+    },
+    "model_revision_and_file_hash_required_before_stage_launch": true,
+    "tuning": "full",
+    "dataset": "trl-lib/Capybara pinned local materialization",
+    "train_rows": 5000,
+    "development_eval_rows": 1024,
+    "train_development_disjointness_required": true,
+    "data_row_and_token_hashes_required_before_launch": true,
+    "primary_outcome": "finite development evaluation NLL per token",
+    "sequence_length": 128,
+    "micro_batch_size": 1,
+    "fragment_count": 4,
+    "inner_optimizer": "AdamW",
+    "inner_learning_rate": 0.001,
+    "outer_optimizer": "Nesterov",
+    "matrix_merge": "RDA",
+    "delta_correction": "none",
+    "wire_dtype": "bf16",
+    "syncer_dtype": "f32",
+    "strict_full_quorum": true,
+    "barrier_sync": true,
+    "version_matched_anchor": true,
+    "fixed_window": true,
+    "zero_injected_delay_and_jitter": true,
+    "total_training_tokens_per_verification_arm": 1310720,
+    "scientific_divergence_analysis_value": "positive_infinity",
+    "poor_finite_loss_retry_forbidden": true,
+    "partial_checkpoint_resume_forbidden": true,
+    "seed_pairing_unit": "complete training seed curve across every eta and compared method",
+    "seed_rule": {
+      "shuffle_seed": "listed scientific seed",
+      "training_seed": "decimal concatenation int(str(seed)+str(seed))"
+    }
+  },
+  "eta_ladder": {
+    "point_count": 4,
+    "scale": "log2",
+    "center_definition": "geometric center of the four points",
+    "log2_offsets": [-0.75, -0.25, 0.25, 0.75],
+    "multipliers": [
+      0.5946035575013605,
+      0.8408964152537145,
+      1.189207115002721,
+      1.681792830507429
+    ],
+    "formula": "eta_j=center*2**offset_j",
+    "one_sided_or_outcome_aware_extension_forbidden": true
+  },
+  "work_evidence_contract": {
+    "completed_cell_requires_all": [
+      "exact registered command hash",
+      "exact clean pushed Git commit",
+      "full registered learner inner steps",
+      "full registered global outer commits",
+      "finite evaluation loss",
+      "rho telemetry JSONL present",
+      "rho telemetry schema yeto_rho_telemetry_v1",
+      "one telemetry row per committed outer round",
+      "telemetry SHA256",
+      "checkpoint SHA256",
+      "evaluation rows and per-example loss SHA256",
+      "start/end timestamps and immutable attempt ID"
+    ],
+    "finite_eval_loss_required": true,
+    "telemetry_required": true,
+    "partial_work_never_counts_as_completed": true,
+    "scientific_divergence_is_retained_but_not_completed_work": true,
+    "missing_or_invalid_cell_remains_in_registered_denominator": true,
+    "retry_reasons": [
+      "preempted_or_lost_host",
+      "hardware_failure",
+      "process_exit_before_scientific_divergence",
+      "missing_or_checksum_invalid_artifact",
+      "loss_blind_validator_failure"
+    ],
+    "retry_must_be_loss_blind_and_whole_seed_curve": true
+  },
+  "analysis_contract": {
+    "eta_star_estimator": {
+      "coordinate": "x=log2(eta)",
+      "curve": "loss=a*x^2+b*x+c fitted to the four seed-mean grid losses",
+      "interior_rule": "a>0 and vertex -b/(2a) strictly inside the numeric grid",
+      "eta_star": "2**(-b/(2a))",
+      "tie_rule_for_discrete_diagnostics": "lower eta wins",
+      "unbracketed_rule": "nonpositive curvature or boundary/outside vertex is UNBRACKETED",
+      "divergence_rule": "any required nonfinite/missing seed cell makes the curve invalid rather than excludable"
+    },
+    "seed_ci": {
+      "unit": "paired training seed curve",
+      "method": "paired nonparametric seed bootstrap, refitting eta_star each replicate",
+      "replicates": 10000,
+      "seed": 20260724,
+      "confidence_level": 0.95,
+      "interval_scale": "log2 eta or log ratio as appropriate",
+      "evaluation_example_bootstrap_is_supplementary_only": true
+    },
+    "rho_estimator": {
+      "source": "mu=0 telemetry at the eta grid point nearest pooled eta_star(mu=0)",
+      "primary_lag": 1,
+      "aggregation": "mean within fragment, then mean across four fragments, then mean across the five primary seeds",
+      "lags_2_4": "registered diagnostics and AR1-adequacy report; not substituted for lag 1 in gates",
+      "topup_seeds_excluded_from_primary_G1": true
+    },
+    "spearman": {
+      "method": "ordinary Spearman rank correlation with midranks for ties",
+      "coordinates": "the four registered H values",
+      "missing_value_rule": "G1 NOT_EVALUABLE"
+    }
+  },
+  "stages": {
+    "E0": {
+      "name": "instrumentation_and_probe_prerequisite",
+      "required": true,
+      "status_at_registration": "IMPLEMENTED",
+      "telemetry_commit": "a49b528",
+      "probe_commit": "3f6c5c1",
+      "telemetry_flag": "--rho-telemetry",
+      "telemetry_artifact": "rho-telemetry.jsonl",
+      "telemetry_schema": "yeto_rho_telemetry_v1",
+      "probe_script": "scripts/rho_probe.py",
+      "probe_report_schema": "yeto_rho_probe_report_v1",
+      "sketch": {
+        "method": "CountSketch sparse signed random projection",
+        "dimension_per_tensor_group": 4096,
+        "fixed_seed": "0x5945544f52484f31",
+        "retained_lags_per_fragment": 4
+      },
+      "required_measurements": [
+        "lag_1_through_lag_4_merged_pseudo_gradient_cosines",
+        "merged_and_worker_pseudo_gradient_L2_norms",
+        "exact_pairwise_cross_worker_pseudo_gradient_cosines"
+      ],
+      "exit_rule": "all telemetry/probe unit tests green and both implementation commits reachable from the experiment branch"
+    },
+    "E1": {
+      "name": "135m_discriminator_grid",
+      "required": true,
+      "depends_on": ["E0"],
+      "scale": "135m",
+      "h": [16, 64, 256, 512],
+      "m": [4],
+      "mu_full": [0.0, 0.9],
+      "mu_partial": {
+        "0.5": [16, 256]
+      },
+      "primary_seeds": [101, 103, 107, 109, 113],
+      "contested_topup_seeds": [127, 131, 137],
+      "contested_topup_coordinates": [
+        {"h": 256, "mu": 0.9},
+        {"h": 512, "mu": 0.9}
+      ],
+      "topup_role": "prespecified robustness report only; excluded from the five-seed G1 CI and Spearman inputs",
+      "eta_center_by_coordinate": {
+        "H16_mu0": 0.021875,
+        "H16_mu0.5": 0.0109375,
+        "H16_mu0.9": 0.002734375,
+        "H64_mu0": 0.021875,
+        "H64_mu0.9": 0.002734375,
+        "H256_mu0": 0.04375,
+        "H256_mu0.5": 0.021875,
+        "H256_mu0.9": 0.0109375,
+        "H512_mu0": 0.04375,
+        "H512_mu0.9": 0.0109375
+      },
+      "eta_center_provenance": {
+        "H16_H64_H256": "sealed prior 135M campaign pooled winners",
+        "H512": "nearest completed H256 winner, frozen because no completed H512 optimum exists"
+      },
+      "eta_grid_by_center": {
+        "0.002734375": [
+          0.0016258691025427825,
+          0.0022993261354593755,
+          0.003251738205085565,
+          0.004598652270918751
+        ],
+        "0.0109375": [
+          0.00650347641017113,
+          0.009197304541837502,
+          0.01300695282034226,
+          0.018394609083675004
+        ],
+        "0.021875": [
+          0.01300695282034226,
+          0.018394609083675004,
+          0.02601390564068452,
+          0.03678921816735001
+        ],
+        "0.04375": [
+          0.02601390564068452,
+          0.03678921816735001,
+          0.05202781128136904,
+          0.07357843633470001
+        ]
+      },
+      "work": {
+        "total_training_tokens_per_arm": 1310720,
+        "learner_inner_steps": 2560,
+        "global_outer_commits_by_h": {
+          "16": 640,
+          "64": 160,
+          "256": 40,
+          "512": 20
+        },
+        "terminal_partial_window": false
+      },
+      "registered_coordinate_families": 10,
+      "registered_eta_curves": 10,
+      "primary_training_runs": 200,
+      "topup_training_runs": 24,
+      "total_training_runs": 224,
+      "outputs": [
+        "eta_star_and_seed_CI_per_H_mu",
+        "rho_lag_1_through_4_per_H_fragment_seed",
+        "pseudo_gradient_norms",
+        "cross_worker_cosines",
+        "G1_inputs_and_verdict"
+      ]
+    },
+    "E2": {
+      "name": "135m_worker_count_axis",
+      "required_if_G1_passes": true,
+      "depends_on": ["E1", "G1_PASS"],
+      "scale": "135m",
+      "new_m": [1, 2, 8],
+      "anchor_m_reused_from_E1": 4,
+      "h": [16, 256],
+      "mu": [0.0, 0.9],
+      "seeds": [101, 103, 107, 109, 113],
+      "eta_ladder_center": "the sealed E1 pooled eta_star at the same H and mu for M=4",
+      "eta_ladder_transform": "common four-point registered log2 ladder for every M",
+      "work": {
+        "total_training_tokens_per_arm": 1310720,
+        "learner_inner_steps_by_m": {"1": 10240, "2": 5120, "8": 1280},
+        "terminal_partial_window": false
+      },
+      "new_training_runs": 240,
+      "output": "log2 eta_star surface at H in {16,256}, M in {1,2,4,8}, mu in {0,0.9} with telemetry",
+      "interpolation_rule_for_later_H": "piecewise linear in log2(H) for M=4; log2 M effect linearly interpolated between H16 and H256 and linearly extrapolated from that fixed slope to H64/H512"
+    },
+    "E3": {
+      "name": "loss_blind_scale_probes_sealed_prediction_and_verification",
+      "required_if_G1_passes": true,
+      "depends_on": ["G1_PASS", "E2_for_prediction_seal"],
+      "probe": {
+        "scales": ["135m", "360m", "1.7b"],
+        "h": [16, 64, 256, 512],
+        "m": [1, 4, 8],
+        "mu": [0.0, 0.9],
+        "seed": 101,
+        "global_outer_rounds": 24,
+        "loss_evaluation_forbidden": true,
+        "script": "scripts/rho_probe.py",
+        "report_schema": "yeto_rho_probe_report_v1",
+        "probe_cells": 72,
+        "probe_eta_135m": "E1/E2 interpolated eta_star for the same H,M,mu",
+        "probe_eta_target_scales": "same numeric 135M eta used only to elicit loss-blind telemetry"
+      },
+      "prediction_rule": {
+        "name": "outer_muP_norm_and_rho_filter_v1",
+        "eta0_135_surface": "E1 M4 eta_star plus the preregistered E2 log-H/log-M interpolation",
+        "norm_statistic": "geometric mean merged pseudo-gradient L2 norm, fragment balanced, from mu=0 probe telemetry",
+        "eta0_target": "eta0_135(H,M) * norm_135(H,M,mu=0) / norm_target(H,M,mu=0)",
+        "rho_target": "fragment-balanced lag-1 rho from target-scale mu=0 probe",
+        "amplification": "A(mu,rho)=1+mu/(1-mu*rho)",
+        "eta_prediction": "eta0_target/A(mu,rho_target)",
+        "mu0_special_case": "A(0,rho)=1",
+        "cross_worker_cosine_role": "sealed diagnostic only; not a fitted degree of freedom",
+        "free_parameter_fit_on_360m_or_1.7b_outcomes_forbidden": true
+      },
+      "sealed_prediction": {
+        "path": "experiment-specs/outer-mup-sealed-predictions.json",
+        "schema": "yeto_outer_mup_sealed_predictions_v1",
+        "target_scales": ["360m", "1.7b"],
+        "target_h": [16, 64, 256, 512],
+        "target_m": [1, 4, 8],
+        "target_mu": [0.0, 0.9],
+        "sealed_cell_count": 48,
+        "required_fields": [
+          "schema",
+          "status",
+          "contract_json_sha256",
+          "contract_md_sha256",
+          "source_git_commit",
+          "probe_report_paths_and_sha256",
+          "E1_E2_selection_artifact_sha256",
+          "prediction_rule",
+          "all_48_cell_ids",
+          "predicted_eta_by_cell",
+          "generated_at_utc",
+          "verification_loss_seen_false"
+        ],
+        "status_required": "SEALED",
+        "canonical_sha256_required": true,
+        "must_be_committed_before_verification_launch": true,
+        "must_be_pushed_and_reachable_from_experiment_branch_before_verification_launch": true,
+        "verification_launch_authorization_must_cite_prediction_commit_and_file_sha256": true,
+        "earliest_verification_process_start_must_be_after_prediction_commit": true,
+        "any_360m_or_1.7b_endpoint_loss_before_seal_invalidates_E3": true
+      },
+      "verification": {
+        "scales": ["360m", "1.7b"],
+        "h": [16, 64, 256, 512],
+        "m": [1, 4, 8],
+        "mu": [0.0, 0.9],
+        "seeds": [101, 103, 107, 109, 113],
+        "eta_ladder_center": "the hash-locked predicted eta for that cell",
+        "eta_points_per_cell": 4,
+        "sealed_cells": 48,
+        "training_runs": 960,
+        "total_training_tokens_per_arm": 1310720,
+        "terminal_partial_fixed_window_only_for": [
+          {"h": 512, "m": 8, "learner_steps": 1280, "final_partial_steps": 256}
+        ],
+        "hit_definition": "predicted log2 eta lies inside the paired-seed bootstrap 95% CI for an interior empirical eta_star",
+        "unbracketed_is_miss": true,
+        "invalid_or_missing_work_is_miss": true
+      }
+    },
+    "E4": {
+      "name": "high_momentum_boundary_and_buffer_surgery",
+      "required_if_G2_passes": true,
+      "depends_on": ["G2_PASS"],
+      "scale": "135m",
+      "m": 4,
+      "h": [256, 512],
+      "mu": [0.9, 0.95],
+      "seeds": [101, 103, 107, 109, 113],
+      "mu09_curves_reused_from_E1": true,
+      "mu095_eta_center": "eta_star(mu=0,H)*[1/A(0.95,rho_hat(H))] using sealed E1 rho",
+      "mu095_eta_ladder": "registered four-point log2 ladder",
+      "new_boundary_training_runs": 40,
+      "buffer_surgery": {
+        "selected_eta": "pooled interior eta_star for each H,mu",
+        "checkpoints_per_seed_coordinate": 3,
+        "checkpoint_positions": ["early", "middle", "late"],
+        "same_checkpoint_and_current_pseudo_gradient_required": true,
+        "causal_pairs": [
+          ["factual_buffer", "zero_buffer"],
+          ["factual_buffer", "same_norm_current_gradient_aligned_buffer"]
+        ],
+        "one_outer_step_evaluation": true,
+        "closed_loop_continuation_commits": 8,
+        "pair_count": 120,
+        "loss_and_telemetry_required_for_both_branches": true
+      }
+    },
+    "E5": {
+      "name": "two_node_real_interconnect_demo",
+      "required_if_G2_passes": true,
+      "depends_on": ["G2_PASS"],
+      "scale": "1.7b",
+      "physical_nodes": 2,
+      "m": 8,
+      "learners_per_node": 4,
+      "h": 256,
+      "mu": 0.9,
+      "eta": "hash-locked E3 prediction for 1.7b,H256,M8,mu0.9",
+      "seed": 101,
+      "total_training_tokens": 1310720,
+      "learner_steps": 1280,
+      "global_outer_commits": 20,
+      "required_interconnect_evidence": [
+        "immutable learner-to-node map",
+        "non-loopback interface identity on both nodes",
+        "cross-node flow endpoints and byte counters",
+        "counter increase spanning the scientific run",
+        "proof that at least one admitted worker pseudo-gradient crossed nodes on every sync",
+        "rho telemetry with all eight worker IDs",
+        "finite evaluation loss",
+        "full registered steps and commits"
+      ],
+      "loopback_only_or_single_node_emulation_forbidden": true
+    },
+    "E6": {
+      "name": "135m_SNOO_deflation",
+      "required": false,
+      "slack_contingent": true,
+      "depends_on": ["E5_COMPLETE"],
+      "authorization_rule": "launch only if all required stages are sealed, at least 8 hours remain before the 48-hour deadline, and a loss-blind P90 forecast is <=6 hours",
+      "skip_rule": "otherwise record SKIPPED_NO_SLACK; no core verdict changes",
+      "scale": "135m",
+      "dataset": "pinned C4 pretraining materialization",
+      "sequence_length": 2048,
+      "m": 1,
+      "h": [100, 400],
+      "mu": [0.0, 0.9],
+      "seeds": [101, 103, 107, 109, 113],
+      "eta_points_per_method": 4,
+      "training_runs_if_authorized": 80,
+      "equal_tuning_budget": true,
+      "fixed_recipe_source": "the source-paper 135M M1 H-specific mu0.9 eta must be transcribed and hash-bound before optional launch",
+      "fixed_recipe_must_be_evaluated_without_replacing_the_equal_tuning_grid": true,
+      "estimand": "independently tuned mu0.9 minus independently tuned mu0 endpoint loss at each H",
+      "equivalence_margin_loss": 0.01,
+      "scope": "SNOO-style 135M M1 deflation audit, not a claim of exact reproduction unless the bound source config matches all paper fields"
+    },
+    "E7": {
+      "name": "Lean_filter_limit_lemma",
+      "required": false,
+      "depends_on": [],
+      "statement": "for real mu with 0<=mu<1, Tendsto (fun rho => 1 + mu/(1-mu*rho)) (nhds 1) (nhds (1/(1-mu)))",
+      "algebraic_corollary": "1 + mu/(1-mu) = 1/(1-mu)",
+      "proof_must_compile_in_lean_project": true,
+      "no_core_verdict_effect": true
+    }
+  },
+  "gates": {
+    "G1": {
+      "after_stage": "E1",
+      "verdict_vocabulary": "gate_verdict",
+      "primary_seeds_only": [101, 103, 107, 109, 113],
+      "mu": 0.9,
+      "first_order_ratio": 0.1,
+      "observed_deviation_factor": "D_obs(H)=[eta_star(0.9,H)/eta_star(0,H)]/(1-0.9)",
+      "rho_prediction_ratio": "R_rho(H)=1/[1+0.9/(1-0.9*rho_hat(H))]",
+      "predicted_deviation_factor": "D_pred(H)=R_rho(H)/(1-0.9)",
+      "requirements_for_PASS": [
+        "at H256 the paired five-seed 95% CI for D_obs excludes 1.0",
+        "at H512 the paired five-seed 95% CI for D_obs excludes 1.0",
+        "Spearman(D_pred,D_obs) across H16,H64,H256,H512 is >=0.8",
+        "all E1 primary work evidence is valid and every required eta_star is interior",
+        "rho telemetry is present and lag-1 rho is defined at all four H"
+      ],
+      "PASS_scientific_verdict": "RHO_FILTER_DISCRIMINATED",
+      "FAIL_rule": "any scientifically evaluable requirement is false",
+      "NOT_EVALUABLE_rule": "missing/invalid work, unbracketed eta_star, or undefined rho prevents evaluation",
+      "on_FAIL": "stop the entire experimental program; launch no E2-E7 scientific cells; fallback is the audit paper",
+      "on_NOT_EVALUABLE": "stop the entire experimental program; fallback is an incomplete-evidence audit paper",
+      "topup_report": "repeat H256/H512 interval summaries with all eight prespecified seeds, labeled secondary and unable to change G1"
+    },
+    "G2": {
+      "after_stage": "E3_verification",
+      "verdict_vocabulary": "gate_verdict",
+      "sealed_cell_count": 48,
+      "minimum_hit_fraction": 0.75,
+      "minimum_hits": 36,
+      "hit_verdict": "HIT_WITHIN_SEED_CI",
+      "requirements_for_PASS": [
+        "prediction file was hash-locked, committed, and pushed before every verification launch",
+        "no 360M or 1.7B endpoint loss was exposed before the prediction seal",
+        "at least 36 of all 48 sealed cells are HIT_WITHIN_SEED_CI",
+        "all 48 cells remain in the denominator",
+        "E3 verification wall clock is <=14 hours"
+      ],
+      "FAIL_rule": "fewer than 36 hits with a valid complete verification registry",
+      "NOT_EVALUABLE_rule": "prediction-order violation, incomplete registry, or invalid work prevents the registered calculation",
+      "on_FAIL": "stop before E4/E5; fallback is the audit paper with failed transfer",
+      "on_NOT_EVALUABLE": "stop before E4/E5; fallback is an incomplete-evidence audit paper"
+    }
+  },
+  "sequencing": {
+    "required_order": [
+      "E0",
+      "E1",
+      "G1",
+      "E2_and_E3_loss_blind_probes_may_overlap",
+      "E3_prediction_seal",
+      "E3_verification",
+      "G2",
+      "E4_and_E5_may_overlap"
+    ],
+    "E6_only_after_required_core_seals": true,
+    "E7_may_run_in_parallel_because_it_uses_no_outcomes": true,
+    "no_outcome_dependent_early_stopping_within_a_stage": true,
+    "only_G1_and_G2_authorize_scientific_program_stop": true
+  },
+  "program_verdict_rules": {
+    "CORE_COMPLETE": "G1 PASS, G2 PASS, and valid complete E4/E5 evidence; neither optional stage completed",
+    "CORE_COMPLETE_WITH_OPTIONALS": "CORE_COMPLETE conditions plus E6 and/or E7 completed under its own contract",
+    "STOP_G1_FAIL_AUDIT_PAPER": "G1 FAIL",
+    "STOP_G1_NOT_EVALUABLE_AUDIT_PAPER": "G1 NOT_EVALUABLE",
+    "STOP_G2_FAIL_AUDIT_PAPER": "G2 FAIL",
+    "STOP_G2_NOT_EVALUABLE_AUDIT_PAPER": "G2 NOT_EVALUABLE",
+    "STOP_WALL_CEILING_AUDIT_PAPER": "a required post-gate stage cannot seal before its stage or program wall ceiling"
+  },
+  "wall_clock_contract": {
+    "resource_principle": "nodes are free for planning purposes; elapsed wall time is the scarce resource",
+    "program_ceiling_hours": 48,
+    "program_clock_start": "first E1 scientific process start",
+    "program_clock_stop": "E5 required evidence seal or earlier registered stop",
+    "stage_ceiling_hours": {
+      "E1": 14,
+      "E2": 8,
+      "E3_loss_blind_probes": 6,
+      "E3_prediction_seal": 1,
+      "E3_verification": 14,
+      "E4": 8,
+      "E5": 6,
+      "E6_optional": 6
+    },
+    "E1_ceiling_required": true,
+    "E3_verification_ceiling_required": true,
+    "ceiling_measurement": "earliest process start through final immutable stage evidence seal, including retries and validation",
+    "ceiling_breach_rule": "terminate remaining stage work, retain every attempt, mark missing cells NOT_RUN_WALL_CEILING, and apply the registered NOT_EVALUABLE/stop rule; never extend after seeing outcomes",
+    "planned_overlap": [
+      "E2 with E3 loss-blind probes after G1",
+      "E4 with E5 after G2",
+      "E7 with any stage"
+    ]
+  },
+  "fallback_paper": {
+    "title_class": "tuned outer-optimizer audit",
+    "trigger": ["G1_FAIL", "G1_NOT_EVALUABLE", "G2_FAIL", "G2_NOT_EVALUABLE", "required wall ceiling breach"],
+    "must_report": [
+      "all registered cells and statuses",
+      "finite losses and divergences without outcome-based exclusion",
+      "rho/norm/cross-worker telemetry",
+      "eta curve brackets and unbracketed cells",
+      "both gate calculations",
+      "prediction ordering evidence if E3 began",
+      "wall-clock and work-evidence failures"
+    ],
+    "forbidden_claims_after_G1_failure": [
+      "rho-filter discrimination",
+      "universal eta prediction",
+      "outer-muP transfer"
+    ]
+  }
+}
