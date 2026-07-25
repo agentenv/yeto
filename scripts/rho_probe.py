@@ -200,6 +200,7 @@ def build_compare_command(args: argparse.Namespace) -> tuple[list[str], dict[str
     fragment_rounds = args.outer_rounds // FRAGMENT_COUNT
     learner_max_steps = fragment_rounds * args.h
     learner_world = max(1, args.learner_gpus)
+    training_seed = int(f"{args.seed}{args.seed}")
     token_budget = (
         args.m
         * learner_max_steps
@@ -238,7 +239,7 @@ def build_compare_command(args: argparse.Namespace) -> tuple[list[str], dict[str
         "--eval-rows",
         str(args.eval_rows),
         "--training-seed",
-        str(args.seed),
+        str(training_seed),
         "--device",
         args.device,
         "--shard",
@@ -315,6 +316,7 @@ def build_compare_command(args: argparse.Namespace) -> tuple[list[str], dict[str
         "learner_world_size": learner_world,
         "gpu_slots": gpu_slots,
         "gpu_offset": args.gpu_offset,
+        "training_seed": training_seed,
     }
 
 

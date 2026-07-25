@@ -138,6 +138,7 @@ def test_build_compare_command_is_short_exact_and_enables_telemetry(tmp_path):
         "learner_world_size": 1,
         "gpu_slots": 0,
         "gpu_offset": 0,
+        "training_seed": 101101,
     }
 
 
@@ -208,3 +209,10 @@ def test_gpu_offset_is_forwarded_for_one_cell_per_gpu_probe(tmp_path):
     assert command[command.index("--gpu-offset") + 1] == "6"
     assert derived["gpu_slots"] == 1
     assert derived["gpu_offset"] == 6
+
+
+def test_scientific_probe_seed_uses_registered_decimal_concatenation(tmp_path):
+    args = _args(tmp_path)
+    command, derived = rho_probe.build_compare_command(args)
+    assert command[command.index("--training-seed") + 1] == "101101"
+    assert derived["training_seed"] == 101101
