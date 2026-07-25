@@ -75,6 +75,11 @@ pub struct Config {
     pub outer_momentum: f32,
     pub outer_optimizer: crate::merge::OuterOptimizer,
     pub outer_restart_cos_threshold: f32,
+    /// v3 finite-horizon outer bias correction: divide the applied Nesterov
+    /// outer step at a fragment's t-th outer commit by `1 - mu^(t+1)` (see
+    /// `GlobalState::outer_bias_correction`). Default false = bit-identical
+    /// production path.
+    pub outer_bias_correction: bool,
     /// CTTN's dimensionless transverse curvature budget.
     pub cttn_rho: f32,
     /// CTTN's internal damping momentum, independent of fallback momentum.
@@ -2120,6 +2125,7 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     }
     st.outer_optimizer = cfg.outer_optimizer;
     st.outer_restart_cos_threshold = cfg.outer_restart_cos_threshold;
+    st.outer_bias_correction = cfg.outer_bias_correction;
     st.delta_norm_ref = cfg.delta_norm_ref;
     st.version_matched_anchor = cfg.version_matched_anchor;
     st.anchor_drift_instrument = cfg.anchor_drift_instrument;
@@ -2271,6 +2277,11 @@ fn format_tape_line(
     responders.sort();
     let outer = stats.outer;
     let gnorm = json_number(stats.gnorm);
+    // v3 arm B: appended only when --outer-bias-correction is active, so the
+    // default tape schema stays byte-identical (same idiom as anchor drift).
+    let outer_bias_correction = stats.outer_bias_correction.map_or_else(String::new, |scale| {
+        format!(",\"outer_bias_correction\":{}", json_number(scale))
+    });
     let outer_step_norm = json_number(outer.applied_step_norm);
     let outer_direction_cosine = optional_json_number(outer.direction_delta_cosine);
     let outer_history_current_ratio = optional_json_number(outer.history_current_norm_ratio);
@@ -2316,7 +2327,7 @@ fn format_tape_line(
         )
     });
     format!(
-        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}{cttn_diagnostics}{cttn_shadow}}}\n",
+        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}{outer_bias_correction}{cttn_diagnostics}{cttn_shadow}}}\n",
         responders.join(","),
         outer.restarted,
         decision.fallback,
@@ -2357,6 +2368,7 @@ mod tests {
                 history_current_norm_ratio,
                 restarted,
             },
+            outer_bias_correction: None,
         }
     }
 
@@ -2697,6 +2709,22 @@ mod tests {
         assert!(line.contains("\"norm_scale\":1"));
         assert!(line.contains("\"step_ratio\":1"));
         assert!(line.contains("\"request_digest\":null"));
+        assert!(line.ends_with("}\n"));
+    }
+
+    /// v3 arm B: the tape gains an `outer_bias_correction` field ONLY when
+    /// the correction is active; the default schema stays byte-free of it.
+    #[test]
+    fn event_tape_appends_bias_correction_only_when_active() {
+        let decision = CommitDecision::token_weighted();
+        let off = merge_stats(1.0, 0.5, None, None, false);
+        let line = format_tape_line(3, 0, &HashMap::new(), &off, &decision, &HashMap::new(), 1);
+        assert!(!line.contains("outer_bias_correction"));
+
+        let mut on = merge_stats(1.0, 0.5, None, None, false);
+        on.outer_bias_correction = Some(1.25);
+        let line = format_tape_line(3, 0, &HashMap::new(), &on, &decision, &HashMap::new(), 1);
+        assert!(line.contains("\"outer_bias_correction\":1.25"));
         assert!(line.ends_with("}\n"));
     }
 

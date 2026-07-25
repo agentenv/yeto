@@ -81,6 +81,16 @@ struct Args {
     /// below this threshold. Used only by restarted-ema.
     #[arg(long, default_value_t = 0.0, value_parser = parse_cosine_threshold)]
     outer_restart_cos_threshold: f32,
+    /// v3 finite-horizon outer bias correction (Adam-style, opt-in): divide
+    /// the applied Nesterov outer step at a fragment's t-th outer commit
+    /// (1-indexed) by (1 - mu^(t+1)), so every commit's constant-gradient
+    /// multiplier is the steady-state 1/(1-mu) instead of the code-true
+    /// finite-horizon (1 - mu^(t+1))/(1 - mu) (lean-mechanism
+    /// FiniteHorizonOuter.lean). Off by default = bit-identical to the
+    /// pre-flag production path. Requires --outer-optimizer nesterov and
+    /// --commit-policy token_weighted.
+    #[arg(long, default_value_t = false)]
+    outer_bias_correction: bool,
     /// CTTN dimensionless transverse curvature budget.
     #[arg(long, default_value_t = 0.10, value_parser = parse_cttn_rho)]
     cttn_rho: f32,
@@ -183,6 +193,18 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
     validate_outer_optimizer(args.outer_optimizer, args.outer_momentum)?;
+    if args.outer_bias_correction {
+        if args.outer_optimizer != merge::OuterOptimizer::Nesterov {
+            anyhow::bail!(
+                "--outer-bias-correction requires --outer-optimizer nesterov (the correction is derived for the code-true Nesterov recursion)"
+            );
+        }
+        if args.commit_policy != action_probe::CommitPolicy::TokenWeighted {
+            anyhow::bail!(
+                "--outer-bias-correction requires --commit-policy token_weighted (CTTN/probe commit paths bypass the corrected outer step)"
+            );
+        }
+    }
     if args.rho_telemetry.is_some()
         && args.commit_policy != action_probe::CommitPolicy::TokenWeighted
     {
@@ -232,6 +254,7 @@ fn main() -> anyhow::Result<()> {
         outer_momentum: args.outer_momentum,
         outer_optimizer: args.outer_optimizer,
         outer_restart_cos_threshold: args.outer_restart_cos_threshold,
+        outer_bias_correction: args.outer_bias_correction,
         cttn_rho: args.cttn_rho,
         cttn_mu: args.cttn_mu,
         cttn_shadow_samples: args.cttn_shadow_samples,
@@ -416,6 +439,7 @@ mod tests {
         assert_eq!(args.outer_optimizer, merge::OuterOptimizer::Nesterov);
         assert_eq!(args.outer_momentum, 0.9);
         assert_eq!(args.outer_restart_cos_threshold, 0.0);
+        assert!(!args.outer_bias_correction);
         assert_eq!(args.cttn_rho, 0.10);
         assert_eq!(args.cttn_mu, 0.9);
         assert_eq!(args.cttn_shadow_samples, 32);

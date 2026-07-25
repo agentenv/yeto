@@ -89,6 +89,11 @@ pub struct MergeStats {
     /// L2 norm of the merged pseudo-gradient before the outer optimizer.
     pub gnorm: f64,
     pub outer: merge::OuterStepStats,
+    /// Finite-horizon outer bias-correction multiplier `1/(1 - mu^(t+1))`
+    /// applied to this commit's outer step (v3 arm B). `None` whenever the
+    /// opt-in `--outer-bias-correction` flag is off, so the default event
+    /// tape schema stays byte-identical to the pre-flag production path.
+    pub outer_bias_correction: Option<f64>,
 }
 
 /// One validated learner candidate presented to the deterministic merge API.
@@ -546,6 +551,19 @@ pub struct GlobalState {
     /// the current global (current-anchor). Default false = byte-identical
     /// current-anchor production path. See docs/ANCHOR_DRIFT_CONTROL.md.
     pub version_matched_anchor: bool,
+    /// v3 finite-horizon outer bias correction (opt-in, arm B). When true,
+    /// the applied Nesterov outer step at the fragment's t-th outer commit
+    /// (1-indexed) is divided by `1 - mu^(t+1)`. Code-true algebra
+    /// (lean-mechanism FiniteHorizonOuter.lean,
+    /// `codeTrue_terminalMultiplier_closed_form`): the production step first
+    /// updates `b_t = mu*b_(t-1) + delta` and applies `delta + mu*b_t`, whose
+    /// constant-gradient multiplier at buffer age t is
+    /// `(1 - mu^(t+1))/(1 - mu)`; dividing by `1 - mu^(t+1)` makes every
+    /// commit's multiplier exactly the steady-state `1/(1 - mu)`, so the
+    /// accumulated coefficient is `T/(1 - mu)` — horizon-invariant per
+    /// commit. Default false = bit-identical to the pre-flag production
+    /// path. Requires the plain Nesterov outer optimizer.
+    pub outer_bias_correction: bool,
     /// EXP2.46: retain prior global snapshots and compute per-push anchor-drift
     /// instrumentation even when NOT version-matching, so the current-anchor
     /// arm still reports the drift it injects into every delta. Implied by
@@ -628,6 +646,7 @@ impl GlobalState {
             delta_correction: None,
             delta_norm_ref: 0.0,
             version_matched_anchor: false,
+            outer_bias_correction: false,
             anchor_drift_instrument: false,
             anchor_history,
         }
@@ -917,6 +936,61 @@ impl GlobalState {
         if !self.outer_momentum.is_finite() || !self.outer_restart_cos_threshold.is_finite() {
             bail!("fragment {fid}: outer optimizer configuration is not finite");
         }
+        // v3 finite-horizon outer bias correction (opt-in; default off is
+        // bit-identical because this branch leaves `outer_lr` untouched).
+        // Code-true Nesterov (FiniteHorizonOuter.lean,
+        // `codeTrue_terminalMultiplier_closed_form`): the t-th outer commit of
+        // a fragment applies direction `delta + mu*b_t` whose constant-gradient
+        // multiplier is `(1 - mu^(t+1))/(1 - mu)`. Dividing the applied step by
+        // `1 - mu^(t+1)` makes every commit's multiplier exactly the
+        // steady-state `1/(1 - mu)`, so the accumulated coefficient over T
+        // commits is `T/(1 - mu)` — horizon-invariant per commit. The scale is
+        // folded into the learning rate BEFORE both `apply_outer_step` and
+        // `materialize_applied_step` below, so the buffer recursion is
+        // untouched and preview bit-exactness is preserved by construction.
+        //
+        // The commit index t (1-indexed, per fragment) is derived from the
+        // round-robin version ledger the server maintains (see
+        // `next_fragment_steps`): fragment fid's k-th commit carries global
+        // version fid+1 + (k-1)*F, so k = ceil(version/F). The upcoming commit
+        // is therefore ceil(base_version/F) + 1; `ensure_current_base(_trusted)`
+        // above guarantees base_version == self.versions[fid]. Because
+        // `versions` are checkpointed, the correction resumes consistently
+        // after a snapshot restore.
+        let bias_correction = if self.outer_bias_correction {
+            if self.outer_optimizer != merge::OuterOptimizer::Nesterov {
+                bail!(
+                    "fragment {fid}: outer bias correction requires the nesterov outer optimizer, got {}",
+                    self.outer_optimizer
+                );
+            }
+            if !(0.0..1.0).contains(&self.outer_momentum) {
+                bail!(
+                    "fragment {fid}: outer bias correction requires outer momentum in [0, 1), got {}",
+                    self.outer_momentum
+                );
+            }
+            let fragments = self.layout.fragments.len() as u64;
+            let t = aggregate.base_version.div_ceil(fragments) + 1;
+            let exponent = (t + 1).min(i32::MAX as u64) as i32;
+            let divisor = 1.0 - f64::from(self.outer_momentum).powi(exponent);
+            if !divisor.is_finite() || divisor <= 0.0 {
+                bail!("fragment {fid}: outer bias correction produced a non-positive divisor");
+            }
+            Some(1.0 / divisor)
+        } else {
+            None
+        };
+        let outer_lr = match bias_correction {
+            Some(scale) => {
+                let corrected = (f64::from(outer_lr) * scale) as f32;
+                if !corrected.is_finite() || corrected <= 0.0 {
+                    bail!("fragment {fid}: bias-corrected outer learning rate is not finite");
+                }
+                corrected
+            }
+            None => outer_lr,
+        };
         // Post-merge renormalization (mediation-control experiments): rescale
         // the merged delta to L2 norm `delta_norm_ref` before the outer step.
         // The scale is a single f32 deterministic from the delta; the SAME
@@ -1032,6 +1106,7 @@ impl GlobalState {
             stats: MergeStats {
                 gnorm: aggregate.gnorm,
                 outer,
+                outer_bias_correction: bias_correction,
             },
             step_scale: 1.0,
             unscaled_applied_step_norm: materialized_step_norm,
@@ -1146,6 +1221,7 @@ impl GlobalState {
                     history_current_norm_ratio,
                     restarted: false,
                 },
+                outer_bias_correction: None,
             },
             step_scale: 1.0,
             unscaled_applied_step_norm: step_norm,
@@ -3204,6 +3280,317 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// OFF-path bit-identity regression for the v3 outer bias correction:
+    /// with the flag at its default (off), a multi-commit merge sequence must
+    /// stay bit-identical to a manual replication of the pre-flag production
+    /// Nesterov recursion (`b = mu*b + d; p -= lr*(d + mu*b)`), and the tape
+    /// stats must carry no correction field. All constants are dyadic so
+    /// every intermediate is exactly representable and the reference is
+    /// rounding-order independent.
+    #[test]
+    fn bias_correction_off_path_is_bit_identical_to_production_nesterov() {
+        let layout = Layout {
+            fragments: vec![
+                FragmentInfo {
+                    merge_mode: MERGE_AVG,
+                    tensor_numels: vec![4],
+                    tensor_shapes: None,
+                },
+                FragmentInfo {
+                    merge_mode: MERGE_AVG,
+                    tensor_numels: vec![4],
+                    tensor_shapes: None,
+                },
+            ],
+        };
+        let lr = 0.5f32;
+        let mu = 0.75f32;
+        let mut st = GlobalState::new(layout, None, lr, mu, crate::protocol::DTYPE_F32);
+        assert!(!st.outer_bias_correction, "flag must default to off");
+        st.init_fragment(0, vec![0.0; 4]).unwrap();
+        st.init_fragment(1, vec![0.0; 4]).unwrap();
+
+        let mut reference_params = vec![vec![0.0f32; 4]; 2];
+        let mut reference_buf = vec![vec![0.0f32; 4]; 2];
+        let deltas = [0.5f32, -0.25, 1.0, 0.125];
+        let mut global = 0u64;
+        for _round in 0..3 {
+            for fid in 0..2usize {
+                let learner: Vec<f32> = st.params[fid]
+                    .iter()
+                    .zip(&deltas)
+                    .map(|(p, d)| p + d)
+                    .collect();
+                let stats = st.merge_and_step(fid, &[&learner], &[1.0]).unwrap();
+                assert_eq!(stats.outer_bias_correction, None);
+                global += 1;
+                st.versions[fid] = global;
+                st.global_step = global;
+
+                for ((p, b), d) in reference_params[fid]
+                    .iter_mut()
+                    .zip(reference_buf[fid].iter_mut())
+                    .zip(&deltas)
+                {
+                    // The merged pseudo-gradient is (global - learner) = -d.
+                    let g = -*d;
+                    *b = mu * *b + g;
+                    let direction = g + mu * *b;
+                    *p -= lr * direction;
+                }
+            }
+        }
+        for fid in 0..2 {
+            for (actual, expected) in st.params[fid].iter().zip(&reference_params[fid]) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+            for (actual, expected) in st.momentum[fid].iter().zip(&reference_buf[fid]) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+        }
+    }
+
+    /// ON-path algebra: at the fragment's t-th outer commit the applied step
+    /// must be `(lr / (1 - mu^(t+1))) * (d + mu*b_t)`, which for a constant
+    /// delta makes every commit's displacement the steady-state
+    /// `lr * d / (1 - mu)` — horizon-invariant, per FiniteHorizonOuter.lean.
+    #[test]
+    fn bias_correction_on_makes_constant_delta_steps_horizon_invariant() {
+        let layout = Layout {
+            fragments: vec![FragmentInfo {
+                merge_mode: MERGE_AVG,
+                tensor_numels: vec![2],
+                tensor_shapes: None,
+            }],
+        };
+        let lr = 0.25f32;
+        let mu = 0.5f32;
+        let mut st = GlobalState::new(layout, None, lr, mu, crate::protocol::DTYPE_F32);
+        st.outer_bias_correction = true;
+        st.init_fragment(0, vec![0.0; 2]).unwrap();
+
+        let mut reference_params = vec![0.0f32; 2];
+        let mut reference_buf = vec![0.0f32; 2];
+        let delta = [1.0f32, -2.0];
+        for t in 1u64..=5 {
+            let params_before = st.params[0].clone();
+            let learner: Vec<f32> = st.params[0]
+                .iter()
+                .zip(&delta)
+                .map(|(p, d)| p + d)
+                .collect();
+            let stats = st.merge_and_step(0, &[&learner], &[1.0]).unwrap();
+            st.versions[0] = t;
+            st.global_step = t;
+
+            let divisor = 1.0 - f64::from(mu).powi((t + 1) as i32);
+            assert_eq!(stats.outer_bias_correction, Some(1.0 / divisor));
+
+            // Bit-exact manual replication of the corrected step.
+            let corrected_lr = (f64::from(lr) / divisor) as f32;
+            for ((p, b), d) in reference_params
+                .iter_mut()
+                .zip(reference_buf.iter_mut())
+                .zip(&delta)
+            {
+                // The merged pseudo-gradient is (global - learner) = -d.
+                let g = -*d;
+                *b = mu * *b + g;
+                let direction = g + mu * *b;
+                *p -= corrected_lr * direction;
+            }
+            for (actual, expected) in st.params[0].iter().zip(&reference_params) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+            for (actual, expected) in st.momentum[0].iter().zip(&reference_buf) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+
+            // Horizon invariance: every commit moves each parameter by
+            // lr*d/(1-mu) toward the learner (pseudo-gradient g = -d).
+            let steady = f64::from(lr) / (1.0 - f64::from(mu));
+            for (before, (after, d)) in params_before
+                .iter()
+                .zip(st.params[0].iter().zip(&delta))
+            {
+                let displacement = f64::from(after - before);
+                assert!(
+                    (displacement - steady * f64::from(*d)).abs() < 1e-6,
+                    "commit {t}: displacement {displacement} != steady {}",
+                    steady * f64::from(*d)
+                );
+            }
+        }
+    }
+
+    /// The per-fragment commit index t must follow the server's round-robin
+    /// version ledger (`next_fragment_steps`): fragment fid's k-th commit
+    /// carries global version fid+1 + (k-1)*F, so t = ceil(base_version/F)+1.
+    #[test]
+    fn bias_correction_commit_index_follows_round_robin_versions() {
+        let layout = Layout {
+            fragments: vec![
+                FragmentInfo {
+                    merge_mode: MERGE_AVG,
+                    tensor_numels: vec![2],
+                    tensor_shapes: None,
+                },
+                FragmentInfo {
+                    merge_mode: MERGE_AVG,
+                    tensor_numels: vec![2],
+                    tensor_shapes: None,
+                },
+            ],
+        };
+        let mu = 0.5f32;
+        let mut st = GlobalState::new(layout, None, 0.25, mu, crate::protocol::DTYPE_F32);
+        st.outer_bias_correction = true;
+        st.init_fragment(0, vec![0.0; 2]).unwrap();
+        st.init_fragment(1, vec![0.0; 2]).unwrap();
+
+        // Server order: (frag0, v1) (frag1, v2) (frag0, v3) (frag1, v4)...
+        let mut global = 0u64;
+        for round in 1u64..=3 {
+            for fid in 0..2usize {
+                let learner: Vec<f32> = st.params[fid].iter().map(|p| p + 1.0).collect();
+                let stats = st.merge_and_step(fid, &[&learner], &[1.0]).unwrap();
+                global += 1;
+                st.versions[fid] = global;
+                st.global_step = global;
+
+                // Per-fragment commit index is the round number, not the
+                // global step.
+                let divisor = 1.0 - f64::from(mu).powi((round + 1) as i32);
+                assert_eq!(
+                    stats.outer_bias_correction,
+                    Some(1.0 / divisor),
+                    "fragment {fid} round {round}"
+                );
+            }
+        }
+    }
+
+    /// With mu = 0 the correction divisor is exactly 1, so the ON path is
+    /// bit-identical to the OFF path (arm B's mu = 0 curves are literally the
+    /// raw curves).
+    #[test]
+    fn bias_correction_with_zero_momentum_is_bit_identical_to_off() {
+        let make_state = |flag: bool| {
+            let layout = Layout {
+                fragments: vec![FragmentInfo {
+                    merge_mode: MERGE_AVG,
+                    tensor_numels: vec![3],
+                    tensor_shapes: None,
+                }],
+            };
+            let mut st = GlobalState::new(layout, None, 0.3, 0.0, crate::protocol::DTYPE_F32);
+            st.outer_bias_correction = flag;
+            st.init_fragment(0, vec![1.0, -0.5, 0.25]).unwrap();
+            st
+        };
+        let mut on = make_state(true);
+        let mut off = make_state(false);
+        for round in 1u64..=4 {
+            let learner: Vec<f32> = on.params[0]
+                .iter()
+                .enumerate()
+                .map(|(i, p)| p + 0.1 * (i as f32 + round as f32))
+                .collect();
+            let on_stats = on.merge_and_step(0, &[&learner], &[1.0]).unwrap();
+            let off_stats = off.merge_and_step(0, &[&learner], &[1.0]).unwrap();
+            on.versions[0] = round;
+            off.versions[0] = round;
+
+            assert_eq!(on_stats.outer, off_stats.outer);
+            assert_eq!(on_stats.outer_bias_correction, Some(1.0));
+            assert_eq!(off_stats.outer_bias_correction, None);
+            assert_eq!(on.params, off.params);
+            assert_eq!(on.momentum, off.momentum);
+        }
+    }
+
+    /// The correction is folded into the learning rate before BOTH
+    /// `apply_outer_step` and `materialize_applied_step`, so the sealed
+    /// preview flow must stay bit-identical to the trusted in-process flow
+    /// with the flag on.
+    #[test]
+    fn bias_correction_trusted_and_sealed_flows_are_bit_identical() {
+        let make_state = || {
+            let layout = Layout {
+                fragments: vec![FragmentInfo {
+                    merge_mode: MERGE_AVG,
+                    tensor_numels: vec![3, 5],
+                    tensor_shapes: None,
+                }],
+            };
+            let mut st = GlobalState::new(layout, None, 0.4, 0.7, crate::protocol::DTYPE_F32);
+            st.outer_bias_correction = true;
+            st.init_fragment(0, (0..8).map(|i| 0.25 * i as f32 - 1.0).collect())
+                .unwrap();
+            st
+        };
+        let mut trusted = make_state();
+        let mut sealed = make_state();
+        for round in 1u64..=4 {
+            let base = trusted.params[0].clone();
+            let learner_a: Vec<f32> = base
+                .iter()
+                .enumerate()
+                .map(|(i, v)| v + 0.1 * (i as f32 + round as f32) - 0.3)
+                .collect();
+            let learner_b: Vec<f32> = base
+                .iter()
+                .enumerate()
+                .map(|(i, v)| v - 0.05 * i as f32 + 0.02 * round as f32)
+                .collect();
+            let weights = [2.0, 3.5];
+
+            let trusted_stats = trusted
+                .merge_and_step(0, &[&learner_a, &learner_b], &weights)
+                .unwrap();
+            trusted.versions[0] = round;
+            trusted.global_step = round;
+
+            let candidates = [
+                MergeCandidate::new(0, &learner_a, weights[0]),
+                MergeCandidate::new(1, &learner_b, weights[1]),
+            ];
+            let aggregate = sealed.build_full_aggregate(0, &candidates).unwrap();
+            let preview = sealed.preview_aggregate(&aggregate, round).unwrap();
+            let sealed_stats = sealed.commit_preview(preview).unwrap();
+
+            assert_eq!(trusted_stats, sealed_stats);
+            assert!(trusted_stats.outer_bias_correction.is_some());
+            assert_eq!(trusted.params, sealed.params);
+            assert_eq!(trusted.momentum, sealed.momentum);
+            assert_eq!(trusted.state_epochs, sealed.state_epochs);
+        }
+    }
+
+    /// The correction is only derived for the plain Nesterov recursion; any
+    /// other outer optimizer must be rejected at step time as well as at the
+    /// CLI.
+    #[test]
+    fn bias_correction_rejects_non_nesterov_optimizers() {
+        let layout = Layout {
+            fragments: vec![FragmentInfo {
+                merge_mode: MERGE_AVG,
+                tensor_numels: vec![2],
+                tensor_shapes: None,
+            }],
+        };
+        let mut st = GlobalState::new(layout, None, 0.25, 0.5, crate::protocol::DTYPE_F32);
+        st.outer_bias_correction = true;
+        st.outer_optimizer = merge::OuterOptimizer::NormalizedEma;
+        st.init_fragment(0, vec![0.0; 2]).unwrap();
+        let learner = [1.0f32, 1.0];
+        let error = st.merge_and_step(0, &[&learner], &[1.0]).unwrap_err();
+        assert!(
+            error.to_string().contains("requires the nesterov outer optimizer"),
+            "{error}"
+        );
     }
 
     /// A trusted aggregate (no base-state fingerprint) must be rejected by
