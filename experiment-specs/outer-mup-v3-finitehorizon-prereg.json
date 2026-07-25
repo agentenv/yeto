@@ -1,0 +1,708 @@
+{
+  "analysis_contract": {
+    "D_definition": "D(T,mu)=[eta_star(mu,T)/eta_star(0,T)]/(1-mu), per arm, per S, mu=0.9, using the same arm's mu0 fit at the same S",
+    "eta_star_estimator": {
+      "coordinate": "x=log2(eta)",
+      "curve": "loss=a*x^2+b*x+c fitted to the four seed-mean grid losses at the exact registered eta values (supports the registered 2x-spaced ARM T S10240 mu0.9 ladder)",
+      "divergence_rule": "any required nonfinite/missing seed cell makes the curve invalid rather than excludable",
+      "eta_star": "2**(-b/(2a))",
+      "interior_rule": "a>0 and vertex -b/(2a) strictly inside the numeric grid",
+      "unbracketed_rule": "nonpositive curvature or boundary/outside vertex is UNBRACKETED"
+    },
+    "seed_ci": {
+      "confidence_level": 0.95,
+      "interval_scale": "log2 eta or log2 D as appropriate",
+      "method": "paired nonparametric seed bootstrap, refitting eta_star each replicate",
+      "replicates": 10000,
+      "seed": 20260724,
+      "unit": "paired training seed curve"
+    },
+    "snoo_estimand": "equal tuning budget: min over the four registered etas of the five-seed mean loss; paired seed bootstrap on tuned-loss differences",
+    "successive_pair_gap": "paired bootstrap of log2 D(T_i) - log2 D(T_j) with one shared seed draw applied to all four underlying curves per replicate"
+  },
+  "authority": {
+    "all_amendments_require_new_commit_and_raw_file_sha256": true,
+    "allowed_pre_outcome_amendment_scope": [
+      "mechanical_typo_that_does_not_change_any_cell_or_analysis",
+      "loss_blind_hardware_substitution_with_identical_numeric_contract",
+      "clarification_that_only_strengthens_fail_closed_evidence_checks"
+    ],
+    "contract_kind": "prospective_code_and_analysis_contract",
+    "execution_commit_note": "v3 executes at THIS registration commit on both nodes (the bias-correction syncer build requires it); the launch manifest binds the registration commit as source.git_commit together with both contract file hashes.",
+    "launch_manifest_must_hash_both_contract_files": true,
+    "launch_manifest_must_hash_every_materialized_cell_command": true,
+    "launch_requires_clean_pushed_commit": true,
+    "outcome_aware_amendment_forbidden": true,
+    "prior_records_immutable": "No v1, v2, or pilot result, evidence file, or sealed record may be modified by v3 activity.",
+    "unregistered_cell_launch_forbidden": true
+  },
+  "closed_vocabularies": {
+    "cell_status": [
+      "PLANNED",
+      "RUNNING",
+      "COMPLETED",
+      "SCIENTIFIC_DIVERGENCE",
+      "INFRA_FAILURE",
+      "INVALID_WORK",
+      "NOT_RUN_GATE_STOP",
+      "NOT_RUN_WALL_CEILING"
+    ],
+    "gate_verdict": [
+      "PASS",
+      "FAIL",
+      "NOT_EVALUABLE"
+    ],
+    "program_verdict": [
+      "CORE_COMPLETE",
+      "STOP_G3A_FAIL_AUDIT_PAPER",
+      "STOP_G3A_NOT_EVALUABLE_AUDIT_PAPER",
+      "STOP_G3B_FAIL_AUDIT_PAPER",
+      "STOP_G3B_NOT_EVALUABLE_AUDIT_PAPER",
+      "STOP_WALL_CEILING_AUDIT_PAPER"
+    ],
+    "snoo_verdict": [
+      "SNOO_GAIN_SURVIVES_TUNING",
+      "SNOO_GAIN_DEFLATED",
+      "SNOO_NO_GAIN",
+      "SNOO_REVERSED",
+      "NOT_EVALUABLE"
+    ]
+  },
+  "common_protocol": {
+    "barrier_sync": true,
+    "dataset": "trl-lib/Capybara pinned local materialization",
+    "delta_correction": "none",
+    "development_eval_rows": 1024,
+    "eval_split_seed": 331,
+    "eval_split_seed_note": "constant 331 as in v1/v2; it also appears as a scientific shuffle seed below, which is immaterial because the development eval is prebound to the fixed seed-337 split file and eval_split_seed only enters split provenance derivation",
+    "fixed_window": true,
+    "fragment_count": 4,
+    "h_fixed": 512,
+    "inner_learning_rate": 0.001,
+    "inner_optimizer": "AdamW",
+    "matrix_merge": "RDA",
+    "micro_batch_size": 1,
+    "model": "HuggingFaceTB/SmolLM2-135M",
+    "model_revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2",
+    "outer_optimizer": "Nesterov",
+    "partial_checkpoint_resume_forbidden": true,
+    "poor_finite_loss_retry_forbidden": true,
+    "primary_outcome": "finite development evaluation NLL per token",
+    "reserved_seed_not_used": 307,
+    "scientific_divergence_analysis_value": "positive_infinity",
+    "seed_pairing_unit": "complete training seed curve across every eta and compared method",
+    "seed_rule": {
+      "shuffle_seed": "listed scientific seed",
+      "training_seed": "decimal concatenation int(str(seed)+str(seed))"
+    },
+    "seeds": [
+      301,
+      311,
+      313,
+      317,
+      331
+    ],
+    "sequence_length": 128,
+    "strict_full_quorum": true,
+    "syncer_dtype": "f32",
+    "train_rows": 5000,
+    "tuning": "full",
+    "version_matched_anchor": true,
+    "wire_dtype": "bf16",
+    "zero_injected_delay_and_jitter": true
+  },
+  "eta_ladder": {
+    "default_log2_offsets": [
+      -0.75,
+      -0.25,
+      0.25,
+      0.75
+    ],
+    "default_multipliers": [
+      0.5946035575013605,
+      0.8408964152537145,
+      1.189207115002721,
+      1.681792830507429
+    ],
+    "default_point_count": 4,
+    "default_scale": "log2",
+    "one_sided_or_outcome_aware_extension_forbidden": true,
+    "registered_exceptions": [
+      "ARM T S10240 mu0.9 uses an explicit WIDE 2x-spaced ladder (log2 step 1.0) centered at D=0.75 to adjudicate the pilot's suspect T=20 point; its quadratic fit in log2-eta uses the actual registered eta values",
+      "ARM S sub-arm c etas are the sub-arm b etas times 4.0951 exactly (eta_eff matching via the registered law)",
+      "all v3 ladders are registered as explicit numeric grids in stages.V3FH.eta_grid_by_curve; the explicit grids are authoritative"
+    ]
+  },
+  "fallback_paper": {
+    "forbidden_claims_after_G3a_failure": [
+      "finite-horizon law confirmation",
+      "bias-correction horizon invariance"
+    ],
+    "must_report": [
+      "all 460 registered cells and statuses",
+      "finite losses and divergences without outcome-based exclusion",
+      "eta curve brackets and unbracketed cells",
+      "all three gate calculations",
+      "the pilot record and every pilot-informed choice",
+      "the T=20 wide-ladder adjudication outcome either way"
+    ],
+    "title_class": "finite-horizon outer-momentum audit (v3)",
+    "trigger": [
+      "G3A_FAIL",
+      "G3A_NOT_EVALUABLE",
+      "G3B_NOT_EVALUABLE",
+      "wall ceiling breach"
+    ]
+  },
+  "frozen_analyzer": {
+    "freeze_rule": "committed and pushed before any v3 scientific process starts; outcome-aware edits forbidden; identical bytes are distributed to both node control planes",
+    "path": "scripts/analyze_v3.py",
+    "sha256": "f608bebe770bda97733db0bbb3d2f5e317a1ea8d5aa676fd28627f7d91a024e7"
+  },
+  "gates": {
+    "G3a": {
+      "after_stage": "V3FH_ARM_T",
+      "gate_id": "G3a_v3_finite_horizon_t_scan",
+      "inputs": "ARM T fits only, five fresh seeds",
+      "not_evaluable_preconditions": [
+        "all 10 ARM T eta optima interior",
+        "all ARM T work evidence valid",
+        "all successive-pair and T=5 ratio bootstraps VALID"
+      ],
+      "on_FAIL": "stop the finite-horizon claim; audit paper fallback",
+      "on_NOT_EVALUABLE": "stop; incomplete-evidence audit paper",
+      "requirements_for_PASS": [
+        "for each successive pair (T=2,5),(5,10),(10,20),(20,40): the paired 95% CI for log2 D(T_small) - log2 D(T_large) has lower endpoint > 0 (strict monotone decrease)",
+        "the paired five-seed 95% CI for D_obs(T=5) contains the pilot value 2.441338 (replication)"
+      ],
+      "verdict_vocabulary": "gate_verdict"
+    },
+    "G3b": {
+      "after_stage": "V3FH_ARM_B",
+      "gate_id": "G3b_v3_bias_correction_invariance",
+      "inputs": "ARM B fits only (own mu0 denominators), five fresh seeds",
+      "not_evaluable_preconditions": [
+        "all 10 ARM B eta optima interior",
+        "all ARM B work evidence valid"
+      ],
+      "on_FAIL": "the bias-correction invariance claim is refuted; audit paper fallback",
+      "on_NOT_EVALUABLE": "stop; incomplete-evidence audit paper",
+      "registered_prediction": "|log2 D_corrected| <= 0.15 at every T while the raw arm's D spans >= 4x (span reported descriptively)",
+      "requirements_for_PASS": [
+        "|log2 D_corrected(T)| <= 0.15 at >= 4 of 5 T values (point estimates from the frozen analyzer)"
+      ],
+      "verdict_vocabulary": "gate_verdict"
+    },
+    "G3c": {
+      "after_stage": "V3FH_ARM_S",
+      "estimand": "tuned(b)-tuned(a) and tuned(b)-tuned(c) with paired seed bootstrap CIs; margin 0.01 loss reported",
+      "gate_id": "G3c_v3_snoo_deflation",
+      "role": "DESCRIPTIVE ONLY: reported with the registered snoo_verdict vocabulary; never stops the program and never gates any claim",
+      "verdict_rules": {
+        "NOT_EVALUABLE": "missing/invalid ARM S work or any invalid bootstrap replicate",
+        "SNOO_GAIN_DEFLATED": "CI(b-a) high < 0 AND NOT CI(b-c) high < 0",
+        "SNOO_GAIN_SURVIVES_TUNING": "CI(b-a) high < 0 AND CI(b-c) high < 0",
+        "SNOO_NO_GAIN": "CI(b-a) contains 0",
+        "SNOO_REVERSED": "CI(b-a) low > 0"
+      }
+    }
+  },
+  "intervention_code": {
+    "bias_correction_commit": "e7930ed4af9399f1f46d128e6afdf55ea1114180",
+    "commit_index_rule": "t = ceil(base_version/F)+1 from the round-robin version ledger; checkpoint-consistent across resume",
+    "harness_forwarding_commit": "e6bb748bdd286465fdfd60188ae310ed7ccbc7c9",
+    "off_path_bit_identity": "flag off is bit-identical to the production path (Rust regression test bias_correction_off_path_is_bit_identical_to_production_nesterov); mu=0 with the flag ON is also bit-identical (test bias_correction_with_zero_momentum_is_bit_identical_to_off)",
+    "semantics": "at the fragment's t-th outer commit (1-indexed) the applied Nesterov outer step is divided by (1 - mu^(t+1)), making every commit's constant-gradient multiplier exactly the steady-state 1/(1-mu); derived from the code-true Lean algebra (FiniteHorizonOuter.codeTrue_terminalMultiplier_closed_form)",
+    "syncer_flag": "--outer-bias-correction"
+  },
+  "machine_registry": "experiment-specs/outer-mup-v3-finitehorizon-prereg.json",
+  "objective": "Confirmatory test of the finite-horizon outer-momentum law D(T,mu)=eta*(mu)/eta*(0)/(1-mu): (ARM T) raw code-true Nesterov tuned-LR deviation is a decreasing function of the per-fragment outer-commit horizon T; (ARM B) an Adam-style outer bias correction dividing the applied step at commit t by (1-mu^(t+1)) makes the tuned optimum horizon-INVARIANT at eta*(0)*(1-mu); (ARM S) SNOO-style M=1 outer momentum gains are or are not explained by the same effective-LR law.",
+  "pilot_and_lane_inputs": {
+    "disclosure": "Every ladder center below is pilot-informed and disclosed before any v3 outcome exists. The pilot S-scan (namespace e1x-*, seeds 401/409, 2 seeds, exploratory shape-check) stays labeled EXPLORATORY and never enters v3 evidence. v3 uses 5 fresh seeds.",
+    "pilot_files": {
+      "lane_a_code_law_audit": {
+        "path": "docs/finite-t-law-verification.md",
+        "sha256": "0176270b4e53bb5e2a1d4cc8b731e8ae137d4c27a99bf32a65326ab50eeff5f3"
+      },
+      "lane_b_pilot_note": {
+        "path": "h200-n1:/root/yeto-results-explore/h200-pilot-note.md",
+        "sha256": "7c5e0dd2eb371a7cf2d71575bbff46db51f94ae087f232b55ddbc544518ffa73"
+      },
+      "lane_b_pilot_summary": {
+        "path": "h200-n1:/root/yeto-results-explore/summary.csv",
+        "sha256": "778cbc9e45e4ec3e3ec4de6fe88cf8ac176de0653f2364a9853df908d5195f36"
+      },
+      "lane_d_lean_mechanism": {
+        "key_theorem": "codeTrue_terminalMultiplier_closed_form: the code-true Nesterov constant-gradient multiplier at buffer age T is (1-mu^(T+1))/(1-mu)",
+        "path": "lean-mechanism/LeanMechanism/FiniteHorizonOuter.lean",
+        "sha256": "e820e78adb74a7a00d79cb4f2fad4baf554e7ad45d43c5ca7185f97f898b593b"
+      },
+      "lane_e_buffer_analysis": {
+        "path": "h200-n1:/root/buffer-analysis/report.md",
+        "sha256": "674ca22a62ca5b34295dab1873686ec368c022b5282a39ee07281add076d040a"
+      }
+    },
+    "pilot_observed_values_used": {
+      "eta_star_mu0_provenance": {
+        "1024": "pilot fit H512_S1024_mu0 eta*=0.0788972 (EXTRAPOLATED_HIGH above the pilot ladder; recentering here brackets it)",
+        "10240": "pilot fit H512_S10240_mu0 eta*=0.0241913 (EXTRAPOLATED_LOW; disclosed)",
+        "20480": "no pilot point; quadratic extrapolation in (log2 S, log2 eta) through the three largest-S pilot points (0.0443, 0.0309, 0.0242) gives 0.021280; registered 0.0213",
+        "2560": "v2 sealed H512 mu0 pooled eta*=0.04429579 (pilot reference 0.0443)",
+        "5120": "pilot fit H512_S5120_mu0 eta*=0.0309156 (INTERIOR)"
+      },
+      "mu_sweep_T5": "eta ratios at mu {0.5,0.8,0.9,0.95} fit 1/(1-mu^T) within 4.4% (D_obs 1.019/1.524/2.441/4.610)",
+      "per_S_eta_star_mu0": {
+        "1024": 0.0789,
+        "2560": 0.0443,
+        "5120": 0.0309,
+        "10240": 0.0242,
+        "20480": 0.0213
+      },
+      "t_scan_mu0.9": {
+        "T10": 1.68,
+        "T160": "1.04 (v2 H16 H-scan)",
+        "T2": 4.11,
+        "T20": "0.50 EXTRAPOLATED_LOW suspect ladder artifact",
+        "T40": "1.00 (v2 H64 H-scan)",
+        "T5": 2.44
+      }
+    },
+    "prior_registrations": {
+      "v1": "experiment-specs/outer-mup-2day-prereg.{json,md}",
+      "v1_closure": "experiment-specs/outer-mup-v1-closure.md",
+      "v2": {
+        "json": "experiment-specs/outer-mup-v2-confirm-prereg.json",
+        "json_sha256": "0f769dbd4e6af8de7b47d9798baf104d02595f628b8e72c0f8a86ff956c8f6f3",
+        "md_sha256": "c2ce6b2074a943866f8d5281ba861319dff6a283c621f97df26aeb97b052b163"
+      }
+    }
+  },
+  "program_id": "outer-mup-v3-finitehorizon",
+  "program_verdict_rules": {
+    "CORE_COMPLETE": "G3a PASS and G3b evaluable (PASS or FAIL both publishable; G3b FAIL refutes the invariance prediction and is reported as such)",
+    "STOP_G3A_FAIL_AUDIT_PAPER": "G3a FAIL",
+    "STOP_G3A_NOT_EVALUABLE_AUDIT_PAPER": "G3a NOT_EVALUABLE",
+    "STOP_G3B_FAIL_AUDIT_PAPER": "G3b FAIL blocks only the invariance claim, not the T-scan result",
+    "STOP_G3B_NOT_EVALUABLE_AUDIT_PAPER": "G3b NOT_EVALUABLE",
+    "STOP_WALL_CEILING_AUDIT_PAPER": "the 12h stage ceiling is breached"
+  },
+  "readable_contract": "experiment-specs/outer-mup-v3-finitehorizon-prereg.md",
+  "registered_date": "2026-07-25",
+  "schema": "yeto_outer_mup_v3_finitehorizon_prereg_v1",
+  "schema_version": "1.0.0",
+  "scoop_check_disclosure": "Searched published work before registration: no published finite-horizon outer-LR law and no outer-loop momentum bias correction anywhere (FedAdam omits it; SNOO applies raw outer Nesterov; OpenDiLoCo uses raw torch SGD).",
+  "sequencing": {
+    "all_three_arms_launch_together": true,
+    "gates_are_post_hoc": "the supervisor runs the frozen analyzer after arm completion; the registrar never computes any gate on outcomes",
+    "no_outcome_dependent_early_stopping_within_a_stage": true
+  },
+  "stages": {
+    "V3FH": {
+      "arms": {
+        "B": {
+          "cells": "5 S x 2 mu x 4 eta x 5 seeds = 200",
+          "m": 4,
+          "mu": [
+            0.0,
+            0.9
+          ],
+          "mu0_duplication_disclosure": "ARM B mu0 cells are bit-identical by construction to ARM T mu0 cells (proven OFF/ON mu0 identity); they are run anyway as a registered production A/A integrity control and to give ARM B a self-contained denominator for D_corrected",
+          "name": "bias_correction_intervention",
+          "outer_bias_correction": true,
+          "registered_prediction": "the bias-corrected optimum is horizon-invariant: |log2 D_corrected(T)| <= 0.15 at every T while the raw arm's D spans >= 4x"
+        },
+        "S": {
+          "cells": "3 sub-arms x 4 eta x 5 seeds = 60",
+          "m": 1,
+          "name": "snoo_deflation_m1",
+          "registered_question": "does (b)'s gain over (a) survive against (c)?",
+          "s": 2560,
+          "sub_arms": {
+            "a": {
+              "mu": 0.0,
+              "outer_bias_correction": false,
+              "role": "plain AdamW baseline: M=1, outer SGD mu=0; eta=1 applies each 512-step AdamW delta exactly"
+            },
+            "b": {
+              "mu": 0.9,
+              "outer_bias_correction": false,
+              "role": "SNOO-style outer Nesterov mu0.9 on top of single-worker AdamW"
+            },
+            "c": {
+              "mu": 0.0,
+              "outer_bias_correction": false,
+              "role": "eta_eff-matched control: mu=0 with each arm-b eta multiplied by (1-0.9^5)/(1-0.9)=4.0951"
+            }
+          },
+          "t": 5
+        },
+        "T": {
+          "cells": "5 S x 2 mu x 4 eta x 5 seeds = 200",
+          "m": 4,
+          "mu": [
+            0.0,
+            0.9
+          ],
+          "name": "confirmatory_t_scan_raw_nesterov",
+          "outer_bias_correction": false
+        }
+      },
+      "cell_count_identity": "200 + 200 + 60 = 460",
+      "eta_grid_by_curve": {
+        "B_S10240_mu0": {
+          "center": 0.0242,
+          "center_rule": "eta*(0) * (1-mu) with mu=0 -> eta*(0); numerically identical to the arm T mu0 grid (intentional flag-ON A/A integrity control)",
+          "etas": [
+            0.014389406091532924,
+            0.02034969324913989,
+            0.028778812183065848,
+            0.04069938649827978
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "centered on pilot per-S eta*(0): pilot fit H512_S10240_mu0 eta*=0.0241913 (EXTRAPOLATED_LOW; disclosed)"
+        },
+        "B_S10240_mu0.9": {
+          "center": 0.0024200000000000003,
+          "center_rule": "eta*(0) * (1-mu) = eta*(0) * 0.1 (registered prediction: bias-corrected optimum is horizon-invariant at D_corrected=1)",
+          "etas": [
+            0.0014389406091532926,
+            0.002034969324913989,
+            0.002877881218306585,
+            0.004069938649827978
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "eta*(0) basis: pilot fit H512_S10240_mu0 eta*=0.0241913 (EXTRAPOLATED_LOW; disclosed)"
+        },
+        "B_S1024_mu0": {
+          "center": 0.0789,
+          "center_rule": "eta*(0) * (1-mu) with mu=0 -> eta*(0); numerically identical to the arm T mu0 grid (intentional flag-ON A/A integrity control)",
+          "etas": [
+            0.04691422068685734,
+            0.06634672716351807,
+            0.09382844137371468,
+            0.13269345432703614
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "centered on pilot per-S eta*(0): pilot fit H512_S1024_mu0 eta*=0.0788972 (EXTRAPOLATED_HIGH above the pilot ladder; recentering here brackets it)"
+        },
+        "B_S1024_mu0.9": {
+          "center": 0.00789,
+          "center_rule": "eta*(0) * (1-mu) = eta*(0) * 0.1 (registered prediction: bias-corrected optimum is horizon-invariant at D_corrected=1)",
+          "etas": [
+            0.004691422068685734,
+            0.006634672716351807,
+            0.009382844137371468,
+            0.013269345432703614
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "eta*(0) basis: pilot fit H512_S1024_mu0 eta*=0.0788972 (EXTRAPOLATED_HIGH above the pilot ladder; recentering here brackets it)"
+        },
+        "B_S20480_mu0": {
+          "center": 0.0213,
+          "center_rule": "eta*(0) * (1-mu) with mu=0 -> eta*(0); numerically identical to the arm T mu0 grid (intentional flag-ON A/A integrity control)",
+          "etas": [
+            0.012665055774778979,
+            0.01791109364490412,
+            0.025330111549557957,
+            0.03582218728980824
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "centered on pilot per-S eta*(0): no pilot point; quadratic extrapolation in (log2 S, log2 eta) through the three largest-S pilot points (0.0443, 0.0309, 0.0242) gives 0.021280; registered 0.0213"
+        },
+        "B_S20480_mu0.9": {
+          "center": 0.00213,
+          "center_rule": "eta*(0) * (1-mu) = eta*(0) * 0.1 (registered prediction: bias-corrected optimum is horizon-invariant at D_corrected=1)",
+          "etas": [
+            0.0012665055774778978,
+            0.0017911093644904117,
+            0.0025330111549557955,
+            0.0035822187289808235
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "eta*(0) basis: no pilot point; quadratic extrapolation in (log2 S, log2 eta) through the three largest-S pilot points (0.0443, 0.0309, 0.0242) gives 0.021280; registered 0.0213"
+        },
+        "B_S2560_mu0": {
+          "center": 0.0443,
+          "center_rule": "eta*(0) * (1-mu) with mu=0 -> eta*(0); numerically identical to the arm T mu0 grid (intentional flag-ON A/A integrity control)",
+          "etas": [
+            0.02634093759731027,
+            0.03725171119573955,
+            0.05268187519462054,
+            0.0745034223914791
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "centered on pilot per-S eta*(0): v2 sealed H512 mu0 pooled eta*=0.04429579 (pilot reference 0.0443)"
+        },
+        "B_S2560_mu0.9": {
+          "center": 0.00443,
+          "center_rule": "eta*(0) * (1-mu) = eta*(0) * 0.1 (registered prediction: bias-corrected optimum is horizon-invariant at D_corrected=1)",
+          "etas": [
+            0.002634093759731027,
+            0.003725171119573955,
+            0.005268187519462054,
+            0.00745034223914791
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "eta*(0) basis: v2 sealed H512 mu0 pooled eta*=0.04429579 (pilot reference 0.0443)"
+        },
+        "B_S5120_mu0": {
+          "center": 0.0309,
+          "center_rule": "eta*(0) * (1-mu) with mu=0 -> eta*(0); numerically identical to the arm T mu0 grid (intentional flag-ON A/A integrity control)",
+          "etas": [
+            0.01837324992679204,
+            0.02598369923133978,
+            0.03674649985358408,
+            0.05196739846267956
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "centered on pilot per-S eta*(0): pilot fit H512_S5120_mu0 eta*=0.0309156 (INTERIOR)"
+        },
+        "B_S5120_mu0.9": {
+          "center": 0.0030900000000000003,
+          "center_rule": "eta*(0) * (1-mu) = eta*(0) * 0.1 (registered prediction: bias-corrected optimum is horizon-invariant at D_corrected=1)",
+          "etas": [
+            0.0018373249926792042,
+            0.0025983699231339782,
+            0.0036746499853584085,
+            0.0051967398462679565
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "eta*(0) basis: pilot fit H512_S5120_mu0 eta*=0.0309156 (INTERIOR)"
+        },
+        "S_a_mu0": {
+          "center": 1.0,
+          "center_rule": "outer eta=1 with mu=0 and M=1 applies each 512-step AdamW delta exactly (plain-AdamW-equivalent); the ladder tunes the baseline fairly",
+          "etas": [
+            0.5946035575013605,
+            0.8408964152537145,
+            1.189207115002721,
+            1.681792830507429
+          ],
+          "ladder": "sqrt2_registered"
+        },
+        "S_b_mu0.9": {
+          "center": 0.244,
+          "center_rule": "1.0 * (1-mu) * D_pilot(T=5) = 0.1 * 2.44 (pilot-informed: expected SNOO optimum if the M=4 finite-T law transfers to M=1)",
+          "etas": [
+            0.14508326803033197,
+            0.20517872532190634,
+            0.29016653606066395,
+            0.4103574506438127
+          ],
+          "ladder": "sqrt2_registered"
+        },
+        "S_c_mu0": {
+          "center": 0.9992044000000001,
+          "center_rule": "eta_eff-matched via the registered pilot law: every arm-b eta times (1-mu^T)/(1-mu) = 4.0951 at T=5; point-for-point paired with arm b",
+          "etas": [
+            0.5941304909110126,
+            0.8402273980657388,
+            1.188260981822025,
+            1.6804547961314775
+          ],
+          "ladder": "sqrt2_registered",
+          "pairing": "eta_c[i] = eta_b[i] * 4.0951 exactly"
+        },
+        "T_S10240_mu0": {
+          "center": 0.0242,
+          "etas": [
+            0.014389406091532924,
+            0.02034969324913989,
+            0.028778812183065848,
+            0.04069938649827978
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "centered on pilot per-S eta*(0): pilot fit H512_S10240_mu0 eta*=0.0241913 (EXTRAPOLATED_LOW; disclosed)"
+        },
+        "T_S10240_mu0.9": {
+          "center": 0.0018150000000000002,
+          "center_rule": "eta*(0) * 0.1 * 0.75 with 2x spacing spanning D 0.2652-2.1213",
+          "d_coverage": [
+            0.26516504294495535,
+            0.5303300858899107,
+            1.0606601717798214,
+            2.121320343559643
+          ],
+          "etas": [
+            0.000641699403926792,
+            0.001283398807853584,
+            0.002566797615707168,
+            0.005133595231414336
+          ],
+          "ladder": "2x_registered_wide",
+          "log2_step": 1.0,
+          "provenance": "pilot fit was EXTRAPOLATED_LOW D=0.4957 (suspect ladder artifact); registered WIDE 2x ladder centered at D=0.75 spanning D 0.2652-2.1213 to adjudicate"
+        },
+        "T_S1024_mu0": {
+          "center": 0.0789,
+          "etas": [
+            0.04691422068685734,
+            0.06634672716351807,
+            0.09382844137371468,
+            0.13269345432703614
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "centered on pilot per-S eta*(0): pilot fit H512_S1024_mu0 eta*=0.0788972 (EXTRAPOLATED_HIGH above the pilot ladder; recentering here brackets it)"
+        },
+        "T_S1024_mu0.9": {
+          "center": 0.032348999999999996,
+          "center_rule": "eta*(0) * (1-mu) * D_center = eta*(0) * 0.1 * D_center",
+          "etas": [
+            0.01923483048161151,
+            0.027202158137042406,
+            0.03846966096322302,
+            0.05440431627408481
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "pilot OBSERVED D_obs(T=2)=4.1127 (h200-pilot-note.md), registered center D=4.1"
+        },
+        "T_S20480_mu0": {
+          "center": 0.0213,
+          "etas": [
+            0.012665055774778979,
+            0.01791109364490412,
+            0.025330111549557957,
+            0.03582218728980824
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "centered on pilot per-S eta*(0): no pilot point; quadratic extrapolation in (log2 S, log2 eta) through the three largest-S pilot points (0.0443, 0.0309, 0.0242) gives 0.021280; registered 0.0213"
+        },
+        "T_S20480_mu0.9": {
+          "center": 0.00213,
+          "center_rule": "eta*(0) * (1-mu) * D_center = eta*(0) * 0.1 * D_center",
+          "etas": [
+            0.0012665055774778978,
+            0.0017911093644904117,
+            0.0025330111549557955,
+            0.0035822187289808235
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "no S-scan pilot point; v2 H64 (T=40, H-scan) D_obs=0.9965~1.0, registered center D=1.0"
+        },
+        "T_S2560_mu0": {
+          "center": 0.0443,
+          "etas": [
+            0.02634093759731027,
+            0.03725171119573955,
+            0.05268187519462054,
+            0.0745034223914791
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "centered on pilot per-S eta*(0): v2 sealed H512 mu0 pooled eta*=0.04429579 (pilot reference 0.0443)"
+        },
+        "T_S2560_mu0.9": {
+          "center": 0.0108092,
+          "center_rule": "eta*(0) * (1-mu) * D_center = eta*(0) * 0.1 * D_center",
+          "etas": [
+            0.006427188773743706,
+            0.00908941753176045,
+            0.012854377547487411,
+            0.0181788350635209
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "pilot/v2 OBSERVED D_obs(T=5)=2.4413 (v2 H512 primary), registered center D=2.44"
+        },
+        "T_S5120_mu0": {
+          "center": 0.0309,
+          "etas": [
+            0.01837324992679204,
+            0.02598369923133978,
+            0.03674649985358408,
+            0.05196739846267956
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "centered on pilot per-S eta*(0): pilot fit H512_S5120_mu0 eta*=0.0309156 (INTERIOR)"
+        },
+        "T_S5120_mu0.9": {
+          "center": 0.0051912,
+          "center_rule": "eta*(0) * (1-mu) * D_center = eta*(0) * 0.1 * D_center",
+          "etas": [
+            0.0030867059877010628,
+            0.004365261470865083,
+            0.0061734119754021256,
+            0.008730522941730165
+          ],
+          "ladder": "sqrt2_registered",
+          "provenance": "pilot OBSERVED D_obs(T=10)=1.6847, registered center D=1.68"
+        }
+      },
+      "expected_costs": "S=20480 cells are 8x S=2560 cost; scheduling is longest-first with greedy cost balancing over the 16 GPU slots",
+      "h": 512,
+      "name": "135m_finite_horizon_t_scan_bias_correction_and_snoo",
+      "required": true,
+      "s_grid": [
+        1024,
+        2560,
+        5120,
+        10240,
+        20480
+      ],
+      "scale": "135m",
+      "t_by_s": {
+        "1024": 2,
+        "10240": 20,
+        "20480": 40,
+        "2560": 5,
+        "5120": 10
+      },
+      "total_training_runs": 460,
+      "work": {
+        "global_outer_commits": "4*T (four fragments, round-robin)",
+        "global_outer_commits_by_s": {
+          "1024": 8,
+          "10240": 80,
+          "20480": 160,
+          "2560": 20,
+          "5120": 40
+        },
+        "learner_inner_steps": "S per learner",
+        "terminal_partial_window": false,
+        "tokens_per_arm_by_s_m4": {
+          "1024": 524288,
+          "10240": 5242880,
+          "20480": 10485760,
+          "2560": 1310720,
+          "5120": 2621440
+        },
+        "tokens_per_arm_s_arm_m1": 327680
+      }
+    }
+  },
+  "status": "PREREGISTERED",
+  "wall_clock_contract": {
+    "ceiling_breach_rule": "terminate remaining stage work, retain every attempt, mark missing cells NOT_RUN_WALL_CEILING, and apply the registered NOT_EVALUABLE/stop rule; never extend after seeing outcomes",
+    "ceiling_measurement": "earliest v3 scientific process start through final immutable stage evidence seal, including retries and validation",
+    "resource_principle": "nodes are free for planning purposes; elapsed wall time is the scarce resource",
+    "stage_ceiling_hours": {
+      "V3FH": 12
+    }
+  },
+  "work_evidence_contract": {
+    "arm_B_tape_requirement": "every ARM B event-tape row must carry the outer_bias_correction field (the syncer emits it only when the flag is active); ARM T and ARM S tapes must NOT carry it",
+    "completed_cell_requires_all": [
+      "exact registered command hash",
+      "exact clean pushed Git commit",
+      "full registered learner inner steps",
+      "full registered global outer commits",
+      "finite evaluation loss",
+      "rho telemetry JSONL present with schema yeto_rho_telemetry_v1",
+      "one telemetry row per committed outer round",
+      "telemetry SHA256",
+      "checkpoint SHA256",
+      "evaluation rows and per-example loss SHA256",
+      "start/end timestamps and immutable attempt ID"
+    ],
+    "finite_eval_loss_required": true,
+    "missing_or_invalid_cell_remains_in_registered_denominator": true,
+    "partial_work_never_counts_as_completed": true,
+    "retry_must_be_loss_blind_and_whole_seed_curve": true,
+    "retry_reasons": [
+      "preempted_or_lost_host",
+      "hardware_failure",
+      "process_exit_before_scientific_divergence",
+      "missing_or_checksum_invalid_artifact",
+      "loss_blind_validator_failure"
+    ],
+    "scientific_divergence_is_retained_but_not_completed_work": true
+  }
+}
