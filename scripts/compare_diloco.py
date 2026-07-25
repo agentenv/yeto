@@ -688,6 +688,7 @@ def syncer_command(
     action_probe_expected_config: Path | None = None,
     cttn_rho: float = 0.10,
     cttn_shadow_samples: int = 32,
+    rho_telemetry: bool = False,
 ) -> list[str]:
     # The syncer takes no fragment count: the layout arrives in HELLO.
     cttn_pseudo_optimizer = arm.outer_optimizer in ("cttn", "cttn-scalar", "cttn-shadow")
@@ -769,6 +770,8 @@ def syncer_command(
             "--probe-capture-every",
             str(probe_capture_every),
         ]
+    if rho_telemetry:
+        cmd += ["--rho-telemetry", str(arm_dir / "rho-telemetry.jsonl")]
     if commit_policy != "token_weighted":
         missing = [
             name
@@ -2225,6 +2228,7 @@ def run_diloco(
                 anchor_drift_log=getattr(args, "anchor_drift_log", False),
                 cttn_rho=getattr(args, "cttn_rho", 0.10),
                 cttn_shadow_samples=getattr(args, "cttn_shadow_samples", 32),
+                rho_telemetry=getattr(args, "rho_telemetry", False),
                 **syncer_args,
             ),
             stdout=syncer_log,
@@ -2843,6 +2847,12 @@ def main() -> int:
         type=int,
         default=1,
         help="capture every Nth outer step when --syncer-probe-capture is set",
+    )
+    p.add_argument(
+        "--rho-telemetry",
+        action="store_true",
+        help="opt in to per-fragment pseudo-gradient autocorrelation, norm, "
+        "and cross-worker cosine JSONL at <work-dir>/<arm>/rho-telemetry.jsonl",
     )
     p.add_argument("--work-dir", type=Path, default=REPO_ROOT / "compare-work")
     p.add_argument("--report-dir", type=Path, default=REPO_ROOT / "compare-report")

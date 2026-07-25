@@ -124,6 +124,22 @@ def test_compare_outer_optimizer_defaults_match_syncer_defaults():
     cmd = compare.syncer_command(arm, 1234, Path("/tmp/w/m4"), total_steps=40)
     assert cmd[cmd.index("--outer-optimizer") + 1] == "nesterov"
     assert cmd[cmd.index("--outer-restart-cos-threshold") + 1] == "0.0"
+    assert "--rho-telemetry" not in cmd
+
+
+def test_compare_syncer_command_can_enable_rho_telemetry():
+    arm = compare.PRESETS["m4"]
+    arm_dir = Path("/tmp/w/m4")
+    cmd = compare.syncer_command(
+        arm,
+        1234,
+        arm_dir,
+        total_steps=40,
+        rho_telemetry=True,
+    )
+    assert cmd[cmd.index("--rho-telemetry") + 1] == str(
+        arm_dir / "rho-telemetry.jsonl"
+    )
 
 
 def test_compare_outer_optimizer_override_applies_to_every_selected_arm():

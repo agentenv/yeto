@@ -1287,6 +1287,18 @@ impl GlobalState {
             })
             .collect();
         let aggregate = self.build_full_aggregate(fid, &candidates)?;
+        self.apply_aggregate_step(aggregate)
+    }
+
+    /// Apply an already-built production aggregate through the same legacy
+    /// outer-step path as `merge_and_step`. Rho telemetry uses this entry
+    /// point after sketching the aggregate in place, avoiding a second merge
+    /// or a full-size pseudo-gradient clone. Version/global-step advancement
+    /// remains the server caller's responsibility, as in `merge_and_step`.
+    pub(crate) fn apply_aggregate_step(
+        &mut self,
+        aggregate: AggregateDelta,
+    ) -> Result<MergeStats> {
         let preview = self.preview_aggregate_inner(&aggregate, aggregate.base_version)?;
         self.install_preview(preview)
     }

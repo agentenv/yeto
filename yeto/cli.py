@@ -164,6 +164,12 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "is at or below this value",
     )
     sync.add_argument(
+        "--rho-telemetry",
+        action="store_true",
+        help="opt in to syncer pseudo-gradient rho/norm/cross-worker JSONL "
+        "at ~/yeto-rho-telemetry.jsonl (off by default)",
+    )
+    sync.add_argument(
         "--fragment-pattern",
         choices=["binpack", "strided"],
         default="binpack",

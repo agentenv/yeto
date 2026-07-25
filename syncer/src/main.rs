@@ -1,6 +1,7 @@
 mod action_probe;
 mod merge;
 mod protocol;
+mod rho_telemetry;
 mod server;
 mod state;
 
@@ -128,6 +129,12 @@ struct Args {
     /// JSONL event tape (one record per merge).
     #[arg(long)]
     event_tape: Option<std::path::PathBuf>,
+    /// Opt-in JSONL pseudo-gradient telemetry. One record is written for each
+    /// committed fragment round with lag-1..4 projected autocorrelations,
+    /// exact pseudo-gradient norms, and exact cross-worker cosines. Disabled
+    /// unless a path is supplied.
+    #[arg(long)]
+    rho_telemetry: Option<std::path::PathBuf>,
     /// Optional directory for offline syncer-current fragment probes.
     /// When set, the syncer writes one pre-merge checkpoint per sampled
     /// round, one f32 candidate-fragment file per admitted responder, and
@@ -176,6 +183,13 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
     validate_outer_optimizer(args.outer_optimizer, args.outer_momentum)?;
+    if args.rho_telemetry.is_some()
+        && args.commit_policy != action_probe::CommitPolicy::TokenWeighted
+    {
+        anyhow::bail!(
+            "--rho-telemetry currently requires --commit-policy token_weighted so the recorded pseudo-gradient is exactly the committed production aggregate"
+        );
+    }
     if args.commit_policy.is_cttn_shadow() {
         if args.outer_optimizer != merge::OuterOptimizer::Nesterov
             || args.outer_momentum.to_bits() != 0.0f32.to_bits()
@@ -229,6 +243,7 @@ fn main() -> anyhow::Result<()> {
         checkpoint_every: args.checkpoint_every,
         resume: args.resume,
         event_tape: args.event_tape,
+        rho_telemetry: args.rho_telemetry,
         probe_capture_dir: args.probe_capture_dir,
         probe_capture_every: args.probe_capture_every,
         commit_policy: args.commit_policy,
@@ -405,11 +420,30 @@ mod tests {
         assert_eq!(args.cttn_mu, 0.9);
         assert_eq!(args.cttn_shadow_samples, 32);
         assert_eq!(args.delta_norm_ref, 0.0);
+        assert!(args.rho_telemetry.is_none());
         assert_eq!(
             args.commit_policy,
             action_probe::CommitPolicy::TokenWeighted
         );
         assert!(action_probe_config(&args).unwrap().is_none());
+    }
+
+    #[test]
+    fn parses_opt_in_rho_telemetry_path() {
+        let args = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "4",
+            "--total-steps",
+            "40",
+            "--rho-telemetry",
+            "/tmp/rho-telemetry.jsonl",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.rho_telemetry.as_deref(),
+            Some(std::path::Path::new("/tmp/rho-telemetry.jsonl"))
+        );
     }
 
     #[test]

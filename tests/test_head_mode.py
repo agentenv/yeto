@@ -451,3 +451,12 @@ def test_local_syncer_command_matches_cluster_syncer_flags():
     assert "--total-steps 17" in cmd
     assert "--resume" in cmd
     assert f"--port {launcher.SYNCER_PORT}" in cmd
+    assert "--rho-telemetry" not in cmd
+
+
+def test_local_syncer_command_can_enable_rho_telemetry():
+    args = cli.parse_args(
+        LAUNCH_ARGS + ["--total-steps", "17", "--rho-telemetry"]
+    )
+    cmd = launcher.syncer_command(args, 3)
+    assert "--rho-telemetry ~/yeto-rho-telemetry.jsonl" in cmd

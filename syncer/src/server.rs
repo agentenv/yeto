@@ -20,6 +20,7 @@ use tracing::{info, warn};
 
 use crate::action_probe::{self, ActionProbeClient, CommitPolicy, RetainedPreviews};
 use crate::protocol::*;
+use crate::rho_telemetry::{PreparedRhoTelemetry, RhoTelemetry};
 use crate::state::{GlobalState, Layout, MergeCandidate, MergeStats};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
@@ -101,6 +102,8 @@ pub struct Config {
     pub resume: bool,
     /// JSONL event tape: one record per merge.
     pub event_tape: Option<std::path::PathBuf>,
+    /// Opt-in pseudo-gradient autocorrelation/norm/worker-cosine JSONL.
+    pub rho_telemetry: Option<std::path::PathBuf>,
     /// Optional offline probe capture directory. When enabled, complete_round
     /// writes a pre-merge syncer checkpoint and admitted candidate fragment
     /// tensors before applying the outer step.
@@ -928,6 +931,16 @@ async fn scheduler(
             0
         },
     )?;
+    if cfg.rho_telemetry.is_some() && cfg.commit_policy != CommitPolicy::TokenWeighted {
+        bail!(
+            "rho telemetry requires token_weighted commits so telemetry matches the committed aggregate"
+        );
+    }
+    let mut rho_telemetry = cfg
+        .rho_telemetry
+        .as_ref()
+        .map(|path| RhoTelemetry::new(path, num_fragments))
+        .transpose()?;
 
     // Send everyone the initial (or resumed) global parameters so all
     // learners start bit-identical (also serves recovery for late joiners).
@@ -1044,6 +1057,7 @@ async fn scheduler(
                     &mut action_probe_client,
                     action_probe_unavailable.as_deref(),
                     &mut cttn_shadow,
+                    &mut rho_telemetry,
                     round,
                 )
                 .await?;
@@ -1472,6 +1486,7 @@ async fn complete_round(
     action_probe_client: &mut Option<ActionProbeClient>,
     action_probe_unavailable: Option<&str>,
     cttn_shadow: &mut CttnShadowTracker,
+    rho_telemetry: &mut Option<RhoTelemetry>,
     round: Round,
 ) -> Result<()> {
     let Round {
@@ -1557,11 +1572,40 @@ async fn complete_round(
         weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
     }
     let sync_start = Instant::now();
+    let mut prepared_rho: Option<PreparedRhoTelemetry> = None;
     let (merge_stats, decision) = if cfg.commit_policy == CommitPolicy::TokenWeighted {
         // Keep the legacy production path intact. In particular, do not
         // replace this with preview+commit: token_weighted is the bit-for-bit
         // baseline comparator for every probe experiment.
-        let merge_stats = st.merge_and_step(p, &learners, &weights)?;
+        let merge_stats = if let Some(telemetry) = rho_telemetry.as_ref() {
+            let candidates = ids
+                .iter()
+                .zip(&weights)
+                .map(|(id, &weight)| {
+                    let push = pushes.get(id).expect("sorted id must exist in push map");
+                    MergeCandidate::new(*id, push.values.as_slice(), weight)
+                })
+                .collect::<Vec<_>>();
+            let aggregate = st.build_full_aggregate(p, &candidates)?;
+            let worker_candidates = ids
+                .iter()
+                .map(|id| {
+                    let push = pushes.get(id).expect("sorted id must exist in push map");
+                    (*id, push.values.as_slice())
+                })
+                .collect::<Vec<_>>();
+            prepared_rho = Some(telemetry.prepare(
+                t,
+                p,
+                &st.layout.fragments[p].tensor_numels,
+                aggregate.delta(),
+                &st.params[p],
+                &worker_candidates,
+            )?);
+            st.apply_aggregate_step(aggregate)?
+        } else {
+            st.merge_and_step(p, &learners, &weights)?
+        };
         st.versions[p] = t;
         // Pipelined rounds can complete out of order; the global step only
         // moves forward.
@@ -1916,6 +1960,12 @@ async fn complete_round(
             &anchor_drift,
             ms,
         );
+    }
+    if let Some(prepared) = prepared_rho {
+        rho_telemetry
+            .as_mut()
+            .expect("prepared rho telemetry requires an enabled writer")
+            .append(prepared)?;
     }
     // Consistent cut: this round is fully applied and broadcast, and every
     // other in-flight round is still gathering (it has not touched state).

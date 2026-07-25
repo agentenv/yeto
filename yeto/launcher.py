@@ -225,7 +225,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
     """The syncer invocation shared by the syncer-cluster task (local
     controller mode) and the head-node subprocess (head controller mode).
     --resume makes any restart pick up from the on-disk checkpoint."""
-    return (
+    command = (
         f"{binary}"
         f" --port {SYNCER_PORT}"
         f" --learners {num_learners}"
@@ -245,6 +245,9 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --checkpoint-path ~/yeto-state.ckpt --resume"
         f" --event-tape ~/yeto-tape.jsonl"
     )
+    if getattr(args, "rho_telemetry", False):
+        command += " --rho-telemetry ~/yeto-rho-telemetry.jsonl"
+    return command
 
 
 # The syncer VM is x86_64 Linux; a binary built on any other submitting
