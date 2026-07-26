@@ -1,0 +1,258 @@
+{
+  "schema": "yeto_outer_mup_v5_snoo_interior_prereg_v1",
+  "schema_version": "1.0.0",
+  "program_id": "outer-mup-v5-snoo-interior",
+  "registered_date": "2026-07-26",
+  "status": "PREREGISTERED",
+  "purpose": "Redo the v3 135M M=1 SNOO-style comparison with independently tuned, interior eta optima. All three v3 ARM S pooled curves selected their lowest registered eta, so the v3 best-grid comparison did not identify tuned optima.",
+  "prospective_scope": "All v5 endpoint losses and all G5 calculations are unavailable at registration. The v3 ARM S readout is disclosed and used only to center the prospective v5 ladders.",
+  "v3_disclosure": {
+    "readout_path": "h200-n1:/root/g3-readout.json",
+    "readout_sha256": "d4a3cde6aa47580dff255c7a66030ab997a95f4072b1883bf71aa54d7da744c8",
+    "source_git_commit": "6ea517425f149f10938e05b4487f217066acb8d7",
+    "arm": "S",
+    "all_pooled_quadratic_optima_status": "UNBRACKETED",
+    "edge_defect": "Every condition's five-seed mean loss was lowest at eta index 0, the lower grid edge.",
+    "conditions": {
+      "a": {
+        "v3_best_cell_eta": 0.5946035575013605,
+        "v3_best_grid_mean_loss": 3.0800110695385667,
+        "v3_grid": [
+          0.5946035575013605,
+          0.8408964152537145,
+          1.189207115002721,
+          1.681792830507429
+        ],
+        "v3_fit_status": "UNBRACKETED",
+        "v3_vertex_log2_eta": -0.8382692667534033
+      },
+      "b": {
+        "v3_best_cell_eta": 0.14508326803033197,
+        "v3_best_grid_mean_loss": 3.193235392050862,
+        "v3_grid": [
+          0.14508326803033197,
+          0.20517872532190634,
+          0.29016653606066395,
+          0.4103574506438127
+        ],
+        "v3_fit_status": "UNBRACKETED",
+        "v3_quadratic_curvature": -0.05753560377443945
+      },
+      "c": {
+        "v3_best_cell_eta": 0.5941304909110126,
+        "v3_best_grid_mean_loss": 3.124638994769012,
+        "v3_grid": [
+          0.5941304909110126,
+          0.8402273980657388,
+          1.188260981822025,
+          1.6804547961314775
+        ],
+        "v3_fit_status": "UNBRACKETED",
+        "v3_vertex_log2_eta": -0.802281027909126
+      }
+    },
+    "v3_descriptive_best_grid_b_minus_a": 0.1132243225122953,
+    "v3_descriptive_best_grid_c_minus_a": 0.04462792523044534,
+    "use_limitation": "The v3 differences are not pooled with v5 and do not enter G5. They disclose the defect and select the v5 ladder centers only."
+  },
+  "v4_drain_gate": {
+    "required_before_any_v5_gpu_process": true,
+    "poll_interval_seconds": 300,
+    "evidence_rule": "The sum of evidence.json files below the two node-local /root/yeto-results-v4 roots must equal 48.",
+    "process_rule": "pgrep -c -f 'run_slot_v[4]' must be zero independently on h200-n1 and h200-n2.",
+    "node_local_result_roots": {
+      "h200-n1": "/root/yeto-results-v4",
+      "h200-n2": "/root/yeto-results-v4"
+    },
+    "why_sum_is_48": "The v4 manifest assigns disjoint cells to node-local result filesystems; the registered stage has 48 cells total, not 48 per node.",
+    "launch_authority_requirement": "scripts/authorize_v5_launch.py must record both node counts, their sum of 48, and both zero process counts before creating authority."
+  },
+  "design": {
+    "model": "HuggingFaceTB/SmolLM2-135M",
+    "scale": "135m",
+    "m": 1,
+    "h": 512,
+    "s": 2560,
+    "t": 5,
+    "token_budget": 327680,
+    "sequence_length": 128,
+    "inner_optimizer": "AdamW",
+    "inner_lr": 0.001,
+    "seeds": [521, 523, 541, 547, 557],
+    "training_seed_rule": "decimal concatenation seed||seed",
+    "conditions": {
+      "a": {
+        "name": "plain_adamw",
+        "outer_optimizer": "Nesterov implementation with mu=0, which is outer SGD",
+        "outer_momentum": 0.0,
+        "interpretation": "At M=1 and eta=1 this applies each 512-step AdamW delta exactly; the surrounding mu0 eta curve tunes the baseline fairly."
+      },
+      "b": {
+        "name": "snoo_style_outer_nesterov",
+        "outer_optimizer": "Nesterov",
+        "outer_momentum": 0.9,
+        "interpretation": "SNOO-style outer Nesterov on top of the single-worker AdamW trajectory."
+      },
+      "c": {
+        "name": "code_true_eta_matched_control",
+        "outer_optimizer": "Nesterov implementation with mu=0, which is outer SGD",
+        "outer_momentum": 0.0,
+        "interpretation": "Condition-b eta mapped point-for-point to mu0 by the finite-T code-true applied-step law."
+      }
+    },
+    "cell_identity": "3 conditions x 6 etas x 5 seeds = 90 cells",
+    "evaluation": "The same frozen 1,024-row development evaluation is used for every cell.",
+    "execution": "strict quorum, barrier synchronization, version-matched anchor, fixed 512-step windows, zero injected delay/jitter, rho telemetry, no outer bias correction"
+  },
+  "eta_design": {
+    "spacing": "sqrt(2)",
+    "points_per_condition": 6,
+    "even_grid_center_rule": "The disclosed v3 best cell is the geometric midpoint in log2 eta between indices 2 and 3. Endpoints are 2.5 sqrt(2)-steps below and above that center.",
+    "no_recenter_rule": "No v5 ladder may be extended, narrowed, shifted, or otherwise changed after any v5 endpoint outcome exists.",
+    "code_true_match_law": {
+      "formula": "eta_c[i] = eta_b[i] * (1-mu^T)/(1-mu)",
+      "mu": 0.9,
+      "t": 5,
+      "factor": 4.0951,
+      "implementation_meaning": "The syncer applies Nesterov as g + mu*v after v <- mu*v + g; over five same-direction commits the cumulative mu.9 multiplier relative to mu0 is the finite geometric sum 1+mu+...+mu^4."
+    },
+    "grids": {
+      "a": {
+        "v3_measured_best_center": 0.5946035575013605,
+        "etas": [
+          0.24999999999999997,
+          0.35355339059327373,
+          0.49999999999999994,
+          0.7071067811865475,
+          0.9999999999999999,
+          1.414213562373095
+        ]
+      },
+      "b": {
+        "v3_measured_best_center": 0.14508326803033197,
+        "etas": [
+          0.061,
+          0.0862670273047588,
+          0.122,
+          0.1725340546095176,
+          0.244,
+          0.3450681092190352
+        ]
+      },
+      "c": {
+        "v3_measured_best_center": 0.5941304909110126,
+        "etas": [
+          0.24980110000000003,
+          0.3532721035157178,
+          0.49960220000000005,
+          0.7065442070314356,
+          0.9992044000000001,
+          1.4130884140628712
+        ],
+        "pairing": "Every c eta is exactly the corresponding b eta multiplied by 4.0951 in the frozen Python float construction."
+      }
+    }
+  },
+  "materialized_inputs": {
+    "pre_outcome_materialization_disclosure": "The five seed-shuffled no-wrap input bundles were materialized on both nodes before registration, using prepare_outer_mup_v3.py's deterministic algorithm with a v5-only output root and a v5 seed allowlist. No GPU work or v5 endpoint evaluation occurred.",
+    "input_manifest": {
+      "path": "/root/yeto-data/outer-mup-v5/input-manifest.json",
+      "sha256": "3b0461c1daa821cef7c67fa087613abb537c4c5ee3e0f1c1bacf2144875581fe",
+      "schema": "yeto_outer_mup_v3_inputs_v1",
+      "seeds": [521, 523, 541, 547, 557],
+      "train_rows_per_seed": 13758,
+      "source_parquet_sha256": "970f88b3f2fa6758f3b5f94052f4e91b872541a2ba530223b44a779168c51409"
+    },
+    "model": {
+      "path": "/root/yeto-data/model",
+      "model_id": "HuggingFaceTB/SmolLM2-135M",
+      "revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2",
+      "files_manifest_path": "/root/yeto-data/model/model-files.sha256",
+      "files_manifest_sha256": "43f9494fad3335a9237f7a3093ae1401b7c4d3164c7486542070e2cc04837132"
+    },
+    "development_eval": {
+      "path": "/root/yeto-data/splits/seed-337/eval.jsonl",
+      "rows": 1024,
+      "sha256": "533838a0564b13519956a044d23ed8db6705ddc7ae5f0ddb96538f49460bcebc"
+    }
+  },
+  "frozen_analysis": {
+    "curve_model": "For each condition, fit loss = A*x^2+B*x+C by ordinary least squares to the six five-seed mean losses, where x=log2(eta).",
+    "interior_rule": "A>0 and the fitted vertex -B/(2A) is strictly inside the numeric six-point log2 grid, with a 1e-12 coordinate tolerance. Boundary, outside, or nonpositive-curvature fits are UNBRACKETED.",
+    "tuned_loss": "Evaluate the fitted quadratic at its interior vertex.",
+    "primary_estimands": [
+      "fitted tuned loss(b) - fitted tuned loss(a)",
+      "fitted tuned loss(c) - fitted tuned loss(a)"
+    ],
+    "bootstrap": {
+      "method": "paired nonparametric training-seed curve bootstrap",
+      "pairing": "Each replicate draws five indices with replacement from the five seeds and uses that same draw for every eta and all three conditions.",
+      "replicates": 10000,
+      "rng_seed": 20260726,
+      "interval": "equal-tailed percentile 95% CI",
+      "invalid_draw": "A draw is invalid if any of its three fitted vertices is not interior.",
+      "minimum_valid_replicates": 9500
+    }
+  },
+  "gate_G5": {
+    "gate_id": "G5_snoo_interior_tuned_optima",
+    "evaluable_requirements": [
+      "all 90 registered cells have COMPLETED hash-bound evidence",
+      "the pooled fitted optimum for each of a, b, and c is INTERIOR",
+      "at least 9500 of 10000 paired bootstrap refits are valid"
+    ],
+    "closed_scientific_verdicts": {
+      "SNOO_HELPS": "the 95% paired-bootstrap CI for b-a has high endpoint < 0",
+      "SNOO_NULL": "the 95% paired-bootstrap CI for b-a contains 0",
+      "SNOO_HURTS": "the 95% paired-bootstrap CI for b-a has low endpoint > 0"
+    },
+    "not_evaluable_handling": "If an evaluability requirement fails, status is NOT_EVALUABLE and no scientific verdict outside the closed three-value vocabulary is assigned.",
+    "condition_c_role": "c-a is a co-reported primary estimand diagnosing the code-true eta-matched mu0 control; the SNOO verdict itself is determined by b-a.",
+    "note_line": "G5 VERDICT: <SNOO_HELPS|SNOO_NULL|SNOO_HURTS> b-a=<signed point> [<signed low>,<signed high>] c-a=<signed point> [<signed low>,<signed high>]",
+    "note_path": "/private/tmp/h200-snoofix-note.md"
+  },
+  "frozen_analyzer": {
+    "path": "scripts/analyze_v5.py",
+    "sha256": "e574294d1d31ad9f8e7431168a877bd4fb58ac5c7c628d7e882eb8a89414a97e",
+    "freeze_event": "This raw file hash is recorded in both preregistration artifacts before git commit, push, and any v5 launch."
+  },
+  "launch_machinery": {
+    "manifest_builder": "scripts/build_v5_launch_manifest.py",
+    "slot_controller": "scripts/run_slot_v5.py",
+    "launch_authorizer": "scripts/authorize_v5_launch.py",
+    "retry_authorizer": "scripts/authorize_v5_retry.py",
+    "execution_commit_rule": "Both nodes execute at the pushed registration commit with clean worktrees.",
+    "randomization": "Global RNG seed 20260726 shuffle followed by round-robin assignment over interleaved h200-n1/h200-n2 GPU slots; 45 cells per node."
+  },
+  "retry_contract": {
+    "maximum_attempts": 2,
+    "unit": "all six etas for one condition-by-seed curve",
+    "loss_blind": true,
+    "allowed_reasons": [
+      "node_reboot_or_preemption",
+      "transient_cuda_or_nccl_failure",
+      "filesystem_or_transport_failure",
+      "scientific_process_launch_failure"
+    ],
+    "forbidden": "No retry for finite unfavorable loss, an edge optimum, scientific divergence, or any outcome-dependent reason. Attempt 2 replaces attempt 1 for every cell in an authorized retry group."
+  },
+  "wall_clock": {
+    "ceiling_seconds": 43200,
+    "ceiling_hours": 12,
+    "start_event": "immutable v5 launch authority creation immediately before slot launch",
+    "stop_rule": "At the deadline, controllers terminate only their recorded scientific process groups and seal remaining registered cells as NOT_RUN_WALL_CEILING."
+  },
+  "storage": {
+    "result_root": "/root/yeto-results-v5",
+    "required_target": "/data/yeto-results-v5",
+    "required_form": "new symlink /root/yeto-results-v5 -> /data/yeto-results-v5 on each node",
+    "minimum_free_bytes_at_preflight": 100000000000,
+    "prior_result_rule": "Never modify, move, delete, or reuse a prior result root."
+  },
+  "operational_rails": {
+    "cloud": "No GCP resources or commands.",
+    "process_control": "Normal control targets recorded process groups. No wildcard pkill; if a name match is unavoidable, use a bracketed pattern such as run_slot_v[5].",
+    "git": "Registration commit and push originate from the Mac clone. Nodes only fast-forward pull after v4 has fully drained.",
+    "prior_results": "Read-only use of v3/v4 evidence; v5 writes only to new v5 roots."
+  }
+}
