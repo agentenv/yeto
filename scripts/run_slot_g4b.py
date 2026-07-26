@@ -16,8 +16,8 @@ except ModuleNotFoundError:  # package import in tests
 
 
 # Filled from the frozen registration artifacts before their registration commit.
-CONTRACT_JSON_SHA256 = "286fa48893cdbb2a921bebe981c84874f02c539a1a86cced67abea230a7adc90"
-CONTRACT_MD_SHA256 = "a52d6d3f0f6b1bd10cc446880100f73d88bafd6b2c0b5da773497baa6c18ccdc"
+CONTRACT_JSON_SHA256 = "df18b72125b08e0594b8e2f33b0460bffff2de68222e5ad453168e67d72bd026"
+CONTRACT_MD_SHA256 = "18ccb8b1cbed5896cf893f84ba6f62f7a2b53fdc1f7db8f53810e2468cd556d4"
 ANALYZER_SHA256 = "9a6bd4110b55a5487501ab4b32eef205854400dd8735c83c88dd7580951cbab5"
 RESULT_LINK = Path("/root/yeto-results-v4b")
 RESULT_TARGET = Path("/data/yeto-results-v4b")

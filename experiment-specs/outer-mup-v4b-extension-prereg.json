@@ -225,13 +225,22 @@
   },
   "fleet_coordination": {
     "v5_status_at_registration_check": "The v5 result symlinks existed on both nodes but contained zero evidence cells and no launch artifacts; no v5 slot controller was active.",
-    "required_preclaim_snapshot": "Immediately before authority, capture tmux sessions, all run_slot processes, compute processes, and per-GPU memory/utilization on both nodes; launch requires PASS.",
+    "required_preclaim_snapshot": "Immediately before authority, capture tmux sessions, all run_slot processes, compute processes, and per-GPU memory/utilization on both nodes; launch requires a fresh PASS snapshot with no active v5 controller or GPU process.",
     "v4b_initial_slots": "GPU 0..5 on each node. The 12 S=10240 cells are one-per-slot and first in every queue.",
-    "v5_initial_slots": "GPU 6..7 on each node begin v5 immediately.",
-    "handoff": "On GPU 0..5, that GPU's v5 queue starts only after its v4b controller exits and releases the GPU. No v4b and v5 scientific process may overlap on one GPU.",
+    "v5_initial_slots": "The initial collision-free plan reserved GPU 6..7 on each node for immediate v5 work.",
+    "handoff": "If v5 has not claimed GPU 0..5, that GPU's v5 queue starts only after its v4b controller exits. If an independently launched v5 controller has already claimed any registered v4b GPU, v4b waits without intervention until all v5 controllers and compute processes drain, then takes a new PASS snapshot and launches. No v4b and v5 scientific process may overlap on one GPU.",
     "v4b_short_cells": "The six S=2560 cells are second behind long cells on six deterministically assigned v4b queues.",
     "v5_planning_duration": "approximately 10 minutes per cell; this estimate affects scheduling only and never analysis or retry decisions",
-    "do_not_disturb_v5": true
+    "do_not_disturb_v5": true,
+    "prelaunch_operational_amendment": {
+      "disclosed_at_utc": "2026-07-26T18:55:32Z",
+      "trigger": "After the first registration commit and before any v4b manifest, authority, result file, or GPU process, the required recheck found independently launched v5 attempt-1 controllers on all eight GPUs of both nodes.",
+      "failed_snapshot_path": "Mac:/private/tmp/h200-v4b-slot-snapshot.json",
+      "failed_snapshot_sha256": "342a18622e4dc39583688da27c1ae7dcfd6a9bc7dee35c0dbc018993be2ad366",
+      "failed_snapshot_status": "FAIL as intended because v5 owned the fleet; it grants no authority",
+      "action": "Do not pull nodes, stop processes, relaunch controllers, or modify v5. Wait until v5 has zero slot controllers and zero GPU compute processes, require all v5 attempt-1 work to be sealed by its own lane, then capture a new PASS snapshot before v4b authority.",
+      "unchanged_contract": "No v4b eta, curve, seed, cell count, scientific command, assignment, result root, analyzer byte, analysis rule, gate threshold, retry rule, or wall-clock rule changed."
+    }
   },
   "evidence_contract": {
     "inheritance": "The v4 validator requirements apply unchanged: exact command hash and source commit, immutable attempt records, complete learner and strict-quorum steps, tape and rho telemetry rows, finite 1024-row endpoint evaluation, clean git evidence, and artifact hashes.",

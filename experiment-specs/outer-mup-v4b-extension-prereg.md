@@ -121,6 +121,25 @@ Thus v5 starts immediately on four GPUs, no v5 process is killed or displaced,
 and no GPU ever carries v4b and v5 scientific work simultaneously. The
 approximately ten-minute v5 cell duration is a scheduling estimate only.
 
+### Prelaunch coordination-race amendment
+
+At `2026-07-26T18:55:32Z`, after the first registration push but before any v4b
+manifest, authority, result file, or GPU process, the mandatory recheck found
+that the independent v5 lane had launched attempt-1 controllers on all eight
+GPUs of both nodes. The deliberately fail-closed snapshot at
+`Mac:/private/tmp/h200-v4b-slot-snapshot.json` has SHA-256
+`342a18622e4dc39583688da27c1ae7dcfd6a9bc7dee35c0dbc018993be2ad366` and
+status `FAIL`; it grants no launch authority.
+
+The pre-outcome operational fallback is frozen as follows: do not pull the
+nodes, stop a process, relaunch a controller, or modify v5. Wait until v5 has
+zero slot controllers and zero GPU compute processes and its attempt-1 work is
+sealed by its own lane. Then take a new passing fleet snapshot and launch the
+unchanged v4b assignments. This changes no eta, curve, seed, cell, command,
+assignment, analyzer byte, gate, retry rule, result root, or wall-clock rule. It
+only serializes v4b behind v5 when the independently launched short lane already
+owns a registered v4b GPU.
+
 ## 5. Evidence, retries, storage, and rails
 
 The v4 evidence validator applies unchanged: exact command hashes and clean
