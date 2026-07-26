@@ -1,0 +1,242 @@
+{
+  "schema": "yeto_outer_mup_v5b_snoo_regrid_prereg_v1",
+  "schema_version": "1.0.0",
+  "program_id": "outer-mup-v5b-snoo-regrid",
+  "registered_date": "2026-07-26",
+  "status": "PREREGISTERED",
+  "purpose": "Second prospective SNOO comparison grid after v5 completed 90/90 valid cells but placed all three pooled optima below the registered low-eta edges.",
+  "prospective_scope": "The complete v5 miss is disclosed before registration. No v5b GPU process, attempt directory, endpoint loss, launch authority, or G5B calculation exists when these artifacts and the frozen analyzer are committed and pushed.",
+  "v5_disclosure": {
+    "operator_audit_path": "h200-n1:/root/yeto-results-v5/_controller/g5-not-evaluable-audit.json",
+    "operator_audit_sha256": "9251d78a9e88dc98f78ff524814454392633ade4315a464450c8c8ad78cec93b",
+    "operator_audit_schema": "yeto_outer_mup_v5_operator_not_evaluable_audit_v1",
+    "generated_at_utc": "2026-07-26T19:28:39.037941+00:00",
+    "source_git_commit": "63ba78026c916e0f1b93bdd233a89a921e72b315",
+    "launch_manifest_path": "/root/yeto-results-v5/_controller/launch-v5/launch-manifest-v5.json",
+    "launch_manifest_sha256": "b9d54918da4e884f0b82db97df28996b0f88805038cd8d7472f4c244030405e8",
+    "contract_sha256": "ed5b9fc2460c7d076900a3f790cf4efff734349c42c5b68f057bd4079d591b43",
+    "completed_cells": 90,
+    "invalid_cells": [],
+    "g5_status": "NOT_EVALUABLE",
+    "g5_scientific_verdict": null,
+    "paired_bootstrap_valid_replicates": 0,
+    "paired_bootstrap_replicates": 10000,
+    "common_edge_defect": "For a, b, and c, every five-seed mean loss strictly increases with eta, so loss strictly decreases toward the low grid edge and the registered range does not bracket the tuned optimum.",
+    "curve_diagnostics": {
+      "a": {
+        "grid_log2_range": [-2.0, 0.5],
+        "grid_low_eta": 0.24999999999999997,
+        "seed_mean_losses": [2.513673633098569, 2.673959997999802, 2.9231987493698717, 3.178124725754283, 3.603202007667909, 4.320073198176075],
+        "quadratic_curvature": 0.24901987501492162,
+        "vertex_log2_eta": -2.135391407590915,
+        "status": "UNBRACKETED"
+      },
+      "b": {
+        "grid_log2_range": [-4.035046947099201, -1.5350469470992008],
+        "grid_low_eta": 0.061,
+        "seed_mean_losses": [2.507104687065168, 2.757977476118962, 3.022292105969565, 3.3429913206758615, 3.6949069841733704, 4.019398191515745],
+        "quadratic_curvature": 0.05132115900219858,
+        "vertex_log2_eta": -8.738010859070739,
+        "status": "UNBRACKETED"
+      },
+      "c": {
+        "grid_log2_range": [-2.001148265014947, 0.49885173498505275],
+        "grid_low_eta": 0.24980110000000003,
+        "seed_mean_losses": [2.4847844713559324, 2.684080955318595, 2.8919134482709357, 3.209973327396601, 3.6653324034245953, 4.287568062713267],
+        "quadratic_curvature": 0.22177158635233296,
+        "vertex_log2_eta": -2.332663782481726,
+        "status": "UNBRACKETED"
+      }
+    },
+    "frozen_v5_analyzer_failure_disclosure": {
+      "sha256": "e574294d1d31ad9f8e7431168a877bd4fb58ac5c7c628d7e882eb8a89414a97e",
+      "bytes_unchanged": true,
+      "failure": "After correctly finding unbracketed fits, the frozen v5 main routine attempted to subtract None tuned losses and raised TypeError, so the operator audit used its unchanged frozen loading, fitting, and bootstrap functions and assigned no scientific verdict.",
+      "v5b_prevention": "The frozen v5b analyzer emits a complete NOT_EVALUABLE readout without subtracting tuned losses unless all three pooled fits are interior."
+    },
+    "use_limitation": "V5 outcomes fix the second grid and are pooled with v5b only by the analysis rule frozen below. V5 cells and artifacts are read-only and are never rerun, moved, modified, or replaced."
+  },
+  "design": {
+    "model": "HuggingFaceTB/SmolLM2-135M",
+    "scale": "135m",
+    "m": 1,
+    "h": 512,
+    "s": 2560,
+    "t": 5,
+    "token_budget": 327680,
+    "sequence_length": 128,
+    "inner_optimizer": "AdamW",
+    "inner_lr": 0.001,
+    "seeds": [521, 523, 541, 547, 557],
+    "seed_reuse": "The v5 seeds and deterministic seed orders are reused for paired inference; every v5b condition-by-eta cell is scientifically new because its eta was absent from v5.",
+    "training_seed_rule": "decimal concatenation seed||seed",
+    "conditions": {
+      "a": {
+        "name": "plain_adamw",
+        "outer_optimizer": "Nesterov implementation with mu=0, equivalent to outer SGD",
+        "outer_momentum": 0.0
+      },
+      "b": {
+        "name": "snoo_style_outer_nesterov",
+        "outer_optimizer": "Nesterov",
+        "outer_momentum": 0.9
+      },
+      "c": {
+        "name": "rung_aligned_code_true_eta_control",
+        "outer_optimizer": "Nesterov implementation with mu=0, equivalent to outer SGD",
+        "outer_momentum": 0.0,
+        "role": "Condition-b eta shifted upward by two registered log2 rungs as the prespecified code-true-law control."
+      }
+    },
+    "cell_identity": "3 conditions x 5 etas x 5 seeds = 75 cells",
+    "evaluation": "The same frozen 1,024-row development evaluation is used for every v5 and v5b cell.",
+    "execution": "strict quorum, barrier synchronization, version-matched anchor, fixed 512-step windows, zero injected delay/jitter, rho telemetry, no outer bias correction"
+  },
+  "eta_design": {
+    "spacing": "2x; one step is exactly +1 in log2 eta",
+    "points_per_condition": 5,
+    "precedent": "The quadratic is fit at the exact registered log2 eta coordinates, as in the v3-analysis precedent for the v2 H64 2x-spaced ladder.",
+    "grids": {
+      "a": {
+        "log2_etas": [-9, -8, -7, -6, -5],
+        "etas": [0.001953125, 0.00390625, 0.0078125, 0.015625, 0.03125]
+      },
+      "b": {
+        "log2_etas": [-11, -10, -9, -8, -7],
+        "etas": [0.00048828125, 0.0009765625, 0.001953125, 0.00390625, 0.0078125]
+      },
+      "c": {
+        "log2_etas": [-9, -8, -7, -6, -5],
+        "etas": [0.001953125, 0.00390625, 0.0078125, 0.015625, 0.03125]
+      }
+    },
+    "code_true_law_disclosure": {
+      "finite_t_formula": "eta_c = eta_b * (1-mu^T)/(1-mu)",
+      "mu": 0.9,
+      "t": 5,
+      "exact_finite_t_factor": 4.0951,
+      "registered_rung_factor": 4.0,
+      "registered_c_relative_to_exact_match": 0.9767771238797587,
+      "reason": "The explicitly registered a/c power-of-two grid and b power-of-two grid take precedence and impose an exact two-rung 4x shift. The 2.3223% difference from 4.0951 is disclosed before outcomes rather than silently calling the numeric cells exact matches."
+    },
+    "no_recenter_rule": "No v5b ladder may be extended, removed, narrowed, shifted, or otherwise changed after any v5b attempt directory or endpoint outcome exists."
+  },
+  "materialized_inputs": {
+    "reuse_disclosure": "V5b reuses the byte-identical v5 no-wrap seed bundles. Reuse is read-only and no materialization is changed.",
+    "input_manifest": {
+      "path": "/root/yeto-data/outer-mup-v5/input-manifest.json",
+      "sha256": "3b0461c1daa821cef7c67fa087613abb537c4c5ee3e0f1c1bacf2144875581fe",
+      "schema": "yeto_outer_mup_v3_inputs_v1",
+      "seeds": [521, 523, 541, 547, 557],
+      "train_rows_per_seed": 13758,
+      "source_parquet_sha256": "970f88b3f2fa6758f3b5f94052f4e91b872541a2ba530223b44a779168c51409"
+    },
+    "model": {
+      "path": "/root/yeto-data/model",
+      "model_id": "HuggingFaceTB/SmolLM2-135M",
+      "revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2",
+      "files_manifest_path": "/root/yeto-data/model/model-files.sha256",
+      "files_manifest_sha256": "43f9494fad3335a9237f7a3093ae1401b7c4d3164c7486542070e2cc04837132"
+    },
+    "development_eval": {
+      "path": "/root/yeto-data/splits/seed-337/eval.jsonl",
+      "rows": 1024,
+      "sha256": "533838a0564b13519956a044d23ed8db6705ddc7ae5f0ddb96538f49460bcebc"
+    }
+  },
+  "frozen_analysis": {
+    "evidence_input": "Require all 90 v5 cells from the disclosed hash-bound manifest and all 75 v5b cells from the prospective manifest to have valid COMPLETED evidence. An authorized attempt 2, if present, replaces attempt 1 for its whole five-eta v5b curve; no fallback is allowed.",
+    "combined_grid": "For each condition, pool the five v5b eta means and the six v5 eta means into one 11-point condition curve. V5b supplies the downward grid and the v5 points remain additional high-eta coverage. Every registered eta point has equal OLS weight after averaging the five paired seeds at that eta.",
+    "curve_model": "For each condition fit loss=A*x^2+B*x+C by ordinary least squares to the 11 five-seed eta means, where x=log2(eta) at the exact registered eta value.",
+    "interior_rule": "A>0 and min(combined grid)+1e-12 < -B/(2A) < max(combined grid)-1e-12 in log2 eta. Nonpositive curvature, boundary, or outside vertices are UNBRACKETED.",
+    "tuned_loss": "Evaluate the fitted quadratic at its interior vertex.",
+    "primary_estimands": [
+      "combined-grid fitted tuned loss(b) - fitted tuned loss(a)",
+      "combined-grid fitted tuned loss(c) - fitted tuned loss(a)"
+    ],
+    "bootstrap": {
+      "method": "paired nonparametric training-seed combined-curve bootstrap",
+      "pairing": "Each replicate draws five indices with replacement from the shared five seeds and applies that same draw to both campaigns, every eta, and all three conditions.",
+      "replicates": 10000,
+      "rng_seed": 20260726,
+      "interval": "equal-tailed percentile 95% CI",
+      "invalid_draw": "A draw is invalid if any of its three combined-grid fitted vertices is not interior.",
+      "minimum_valid_replicates": 9500
+    }
+  },
+  "gate_G5B": {
+    "gate_id": "G5B_snoo_combined_regrid_tuned_optima",
+    "evaluable_requirements": [
+      "all 90 disclosed v5 and all 75 registered v5b cells have valid hash-bound COMPLETED evidence",
+      "the pooled 11-point combined-grid fitted optimum for each of a, b, and c is INTERIOR",
+      "at least 9500 of 10000 paired bootstrap combined-curve refits are valid"
+    ],
+    "closed_scientific_verdicts": {
+      "SNOO_HELPS": "the 95% paired-bootstrap CI for tuned optimum b-a has high endpoint < 0",
+      "SNOO_NULL": "the 95% paired-bootstrap CI for tuned optimum b-a contains 0",
+      "SNOO_HURTS": "the 95% paired-bootstrap CI for tuned optimum b-a has low endpoint > 0"
+    },
+    "not_evaluable_handling": "If an evaluability requirement fails, status is NOT_EVALUABLE and no scientific verdict outside the closed three-value vocabulary is assigned.",
+    "condition_c_role": "c-a is a co-reported primary estimand; the SNOO verdict is determined only by b-a.",
+    "readout_path": "/root/g5b-readout.json",
+    "note_line": "G5B VERDICT: <SNOO_HELPS|SNOO_NULL|SNOO_HURTS> b-a=<signed point> [<signed low>,<signed high>] c-a=<signed point> [<signed low>,<signed high>]",
+    "note_path": "/private/tmp/h200-v5b-note.md"
+  },
+  "frozen_analyzer": {
+    "path": "scripts/analyze_v5b.py",
+    "sha256": "b6ed09595961b81ebd9c2b632211d591f67a36c027faea71ecb86de36cb1e0ef",
+    "freeze_event": "This raw file hash is recorded in both preregistration artifacts before git commit, push, launch-manifest construction, launch authority, any v5b attempt directory, and any v5b GPU process."
+  },
+  "launch_machinery": {
+    "manifest_builder": "scripts/build_v5b_launch_manifest.py",
+    "slot_controller": "scripts/run_slot_v5b.py",
+    "launch_authorizer": "scripts/authorize_v5b_launch.py",
+    "retry_authorizer": "scripts/authorize_v5b_retry.py",
+    "execution_commit_rule": "Both nodes execute at the clean pushed registration commit in isolated /root/yeto-v5b checkouts. The running v4b checkout /root/yeto remains pinned and untouched.",
+    "randomization": "Global RNG seed 20260726 shuffle followed by round-robin assignment over h200-n1/h200-n2 GPUs 6 and 7; four queues receive 18 or 19 cells."
+  },
+  "fleet_coordination": {
+    "observed_v4b_source_commit": "8c5286476231e0d5a783e18f693436a5b991ee2c",
+    "observed_v4b_launch_manifest_path": "/root/yeto-results-v4b/_controller/launch-v4b/launch-manifest-v4b.json",
+    "observed_v4b_launch_manifest_sha256": "f2abf80d975572dde33ee2c750c1fb91598df8bfea5a78696bdc2c5d3608b55b",
+    "observed_v4b_launch_authority_sha256": "4917c48153d8e29750e15a8fb7bad281e1049004636d0cc7f9b3c300e62ce82e",
+    "v4b_assigned_gpus": [0, 1, 2, 3, 4, 5],
+    "v5b_exclusive_gpus": [6, 7],
+    "nodes": ["h200-n1", "h200-n2"],
+    "preauthority_rule": "Each node preflight must hash-verify the active v4b manifest, prove it assigns no GPU 6 or 7, prove both target GPUs have no compute process and at most 16 MiB used, and bind a fresh proof into the immutable v5b authority.",
+    "no_handoff_needed": "All 75 v5b cells are statically assigned to the four currently free GPUs. V5b neither waits for nor claims GPUs 0-5 and never stops, relaunches, or alters v4b.",
+    "checkout_isolation": "V5b uses /root/yeto-v5b so pulling the new registration cannot change the /root/yeto commit or files used by active and queued v4b work."
+  },
+  "retry_contract": {
+    "maximum_attempts": 2,
+    "unit": "all five etas for one v5b condition-by-seed curve",
+    "loss_blind": true,
+    "allowed_reasons": [
+      "node_reboot_or_preemption",
+      "transient_cuda_or_nccl_failure",
+      "filesystem_or_transport_failure",
+      "scientific_process_launch_failure"
+    ],
+    "forbidden": "No retry for finite unfavorable loss, an edge optimum, scientific divergence, or any outcome-dependent reason. Attempt 2 replaces attempt 1 for every cell in an authorized retry group."
+  },
+  "wall_clock": {
+    "ceiling_seconds": 43200,
+    "ceiling_hours": 12,
+    "start_event": "immutable v5b launch authority creation immediately before four free-GPU queues launch",
+    "stop_rule": "At the deadline, controllers terminate only their recorded scientific process groups and seal remaining registered cells as NOT_RUN_WALL_CEILING."
+  },
+  "storage": {
+    "result_root": "/root/yeto-results-v5b",
+    "required_target": "/data/yeto-results-v5b",
+    "required_form": "new symlink /root/yeto-results-v5b -> /data/yeto-results-v5b on each node",
+    "minimum_free_bytes_at_preflight": 100000000000,
+    "prior_result_rule": "Never modify, move, delete, or reuse v5, v4b, or any earlier result root. Sparse read-only analysis mirrors may exist only inside the new v5b controller tree."
+  },
+  "operational_rails": {
+    "cloud": "No GCP resources or commands.",
+    "process_control": "Normal control targets recorded process groups. No wildcard pkill; if a name match is unavoidable, use a bracketed pattern.",
+    "git": "Registration commit and push originate from the Mac clone. Nodes create isolated clean checkouts only after the push; active /root/yeto is not pulled or changed.",
+    "registration_order": "Commit and push the JSON, Markdown, frozen analyzer, and hash-bound launch machinery before creating a v5b result root, manifest, authority, attempt directory, or GPU process.",
+    "prior_results": "V5 is a read-only combined-analysis input; v4b is an untouched concurrent lane; v5b writes only to its new result roots."
+  }
+}
