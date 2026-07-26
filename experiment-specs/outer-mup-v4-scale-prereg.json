@@ -1,0 +1,413 @@
+{
+  "analysis_contract": {
+    "D_definition": "D_obs(T)=[eta_star(mu=0.9,T)/eta_star(mu=0,T)]/(1-0.9)",
+    "bootstrap": {
+      "coordinate": "log2_D_T5_minus_log2_D_T20",
+      "minimum_valid_interior_refits": 9500,
+      "method": "paired nonparametric training-seed curve bootstrap; one shared three-index resample is applied to all four curves and all quadratics are refit",
+      "replicates": 10000,
+      "rng_seed": 20260726
+    },
+    "eta_star_estimator": {
+      "boundary_tolerance_log2": 1e-12,
+      "coordinate": "x=log2(eta)",
+      "curve": "loss=a*x^2+b*x+c fitted to the four exact registered eta values using the three-seed mean at each eta",
+      "interior_rule": "a>0 and min(grid)+1e-12 < -b/(2a) < max(grid)-1e-12",
+      "unbracketed_rule": "nonpositive curvature or boundary/outside vertex is UNBRACKETED"
+    },
+    "gate_G4": {
+      "bands_interpretation": "wide bands mean the same finite-horizon law regime as 135M, not exact-constant replication",
+      "conditions_all_required": [
+        "both pooled mu=0.9 optima are interior; both mu=0 optima are additionally required to define D",
+        "D_obs(T=5) in [1.7,3.2] inclusive",
+        "D_obs(T=20) in [0.8,1.5] inclusive",
+        "paired 95% bootstrap CI for log2 D(T=5)-log2 D(T=20) has lower endpoint > 0"
+      ],
+      "failure_rule": "complete bracketed evidence that violates any condition is FAIL",
+      "not_evaluable_rule": "missing/invalid cell evidence, any ratio-required pooled unbracketed optimum, or fewer than 9500 valid bootstrap refits is NOT_EVALUABLE",
+      "verdicts": [
+        "PASS",
+        "FAIL",
+        "NOT_EVALUABLE"
+      ]
+    },
+    "output": {
+      "note_line": "G4 VERDICT: <PASS|FAIL|NOT_EVALUABLE> D5=<value|NA> D20=<value|NA>",
+      "path": "/root/g4-readout.json"
+    }
+  },
+  "authority": {
+    "amendment_rule": "no outcome-aware amendment or ladder recentering; any pre-outcome mechanical amendment requires a new pushed commit and new raw hashes",
+    "contract_kind": "prospective scale-addendum code and analysis contract",
+    "launch_manifest_requirements": [
+      "clean pushed registration commit",
+      "raw sha256 of both contract files and frozen analyzer",
+      "raw sha256 of every materialized input",
+      "canonical sha256 of every attempt-1 and attempt-2 command"
+    ],
+    "node_execution_commit": "the main 48-cell grid executes at this registration commit on both nodes",
+    "pilot_exception": "the explicitly required three-cell center pilot necessarily precedes ladder registration and is disclosed in full; it is excluded from G4"
+  },
+  "closed_vocabularies": {
+    "cell_status": [
+      "PLANNED",
+      "RUNNING",
+      "COMPLETED",
+      "SCIENTIFIC_DIVERGENCE",
+      "INFRA_FAILURE",
+      "INVALID_WORK",
+      "NOT_RUN_WALL_CEILING"
+    ],
+    "gate_verdict": [
+      "PASS",
+      "FAIL",
+      "NOT_EVALUABLE"
+    ]
+  },
+  "common_protocol": {
+    "barrier_sync": true,
+    "delta_correction": "none",
+    "development_eval_rows": 1024,
+    "fixed_window_microsteps": 512,
+    "fixed_window_tokens": 65536,
+    "fragment_count": 4,
+    "fragment_pattern": "binpack",
+    "gradient_accumulation": 1,
+    "gradient_checkpointing": "learner default auto; production pilot resolved within the measured memory envelope",
+    "h": 512,
+    "inner_learning_rate": 0.001,
+    "inner_optimizer": "AdamW",
+    "inner_warmup_steps": 10,
+    "inner_weight_decay": 0.01,
+    "learner_count": 4,
+    "matrix_merge": "RDA",
+    "merge_alpha": 0.5,
+    "micro_batch_size": 1,
+    "model": "HuggingFaceTB/SmolLM2-1.7B",
+    "model_revision": "effd688a12921b4cc83e3312b6feb579f70f9c71",
+    "outer_bias_correction": false,
+    "outer_optimizer": "raw production Nesterov",
+    "pipeline_depth": 4,
+    "primary_outcome": "finite fixed-development evaluation NLL per trained token",
+    "rho_telemetry": true,
+    "sequence_length": 128,
+    "strict_quorum": true,
+    "train_on": "assistant",
+    "tuning": "full parameter",
+    "version_matched_anchor": true,
+    "wan_streams": 0,
+    "wire_dtype": "bf16"
+  },
+  "disk_preflight": {
+    "action": "created /data/yeto-results-v4 and symlinked /root/yeto-results-v4 to it on both nodes before any v4 checkpoint",
+    "h200-n1_root": "df: 97% used, 55 GB free",
+    "h200-n2_root": "df: 88% used, 207 GB free",
+    "lvm": "each node: eight approximately 3.5-TB NVMe PVs, one approximately 27.9-TB linear LV, zero VG/PV free extents because the full devices are allocated",
+    "mounted_result_filesystem": "XFS at /data, approximately 27.5/27.6 TB free",
+    "preflight_fail_closed": "result symlink must resolve to /data/yeto-results-v4 on the /data device with at least 1,000,000,000,000 bytes free"
+  },
+  "evidence_contract": {
+    "completed_cell_requires": [
+      "exact registered command hash and clean pushed source commit",
+      "immutable attempt id plus start/end records",
+      "full 2560 or 10240 learner steps for each of four learners",
+      "exact 20 or 80 strict-quorum tape rows with H=512 and c_tokens=65536",
+      "one valid yeto_rho_telemetry_v1 row per outer commit",
+      "finite 1024-row endpoint loss and successful learner/syncer exits",
+      "checkpoint, per-example loss, evaluation provenance, result, tape, telemetry, command, git commit, and git diff evidence hashes"
+    ],
+    "heartbeat_seconds": 30,
+    "node_authority_requires": [
+      "manifest and contract hashes",
+      "clean exact Git commit",
+      "eight H200 UUIDs",
+      "all model/input hashes",
+      "roomy result-volume proof"
+    ],
+    "partial_work_never_counts": true,
+    "scientific_divergence_retained": true,
+    "watchdogs_minutes": {
+      "S10240": 420,
+      "S2560": 180
+    }
+  },
+  "frozen_analyzer": {
+    "bootstrap_invalid_rule": "percentile interval conditional on interior refits; require at least 9500 of 10000",
+    "path": "scripts/analyze_v4.py",
+    "sha256": "654eb63d5a830b275dfb64d2c9e178ff83c2355a7ec88e02c8c46e2cf1300471"
+  },
+  "materialized_inputs": {
+    "compatibility": {
+      "available_complete_blocks_by_learner": [
+        27399,
+        26727,
+        26914,
+        27196
+      ],
+      "long_cell_required_blocks_per_learner": 10240,
+      "no_wrap": true,
+      "smollm2_360m_and_1.7b_tokenizer_files_byte_identical": true
+    },
+    "files": [
+      {
+        "bytes": 1519,
+        "path": "/root/yeto-hf-cache/hub/models--HuggingFaceTB--SmolLM2-1.7B/snapshots/effd688a12921b4cc83e3312b6feb579f70f9c71/.gitattributes",
+        "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361"
+      },
+      {
+        "bytes": 7201,
+        "path": "/root/yeto-hf-cache/hub/models--HuggingFaceTB--SmolLM2-1.7B/snapshots/effd688a12921b4cc83e3312b6feb579f70f9c71/README.md",
+        "sha256": "83c5404c1162e01c59e08fec9e8233b357ecf0ca3249e78f4b1ee13c5b3c320c"
+      },
+      {
+        "bytes": 635,
+        "path": "/root/yeto-hf-cache/hub/models--HuggingFaceTB--SmolLM2-1.7B/snapshots/effd688a12921b4cc83e3312b6feb579f70f9c71/config.json",
+        "sha256": "33397f6af8090f7290f27ce6fb1cd23a95fd0915a5c648dfd10b6002aaf7fc48"
+      },
+      {
+        "bytes": 111,
+        "path": "/root/yeto-hf-cache/hub/models--HuggingFaceTB--SmolLM2-1.7B/snapshots/effd688a12921b4cc83e3312b6feb579f70f9c71/generation_config.json",
+        "sha256": "2056c988e990b0d13670f63f2f3b87b3b6d07edaf7a3416998ba27dab2d8a059"
+      },
+      {
+        "bytes": 466391,
+        "path": "/root/yeto-hf-cache/hub/models--HuggingFaceTB--SmolLM2-1.7B/snapshots/effd688a12921b4cc83e3312b6feb579f70f9c71/merges.txt",
+        "sha256": "0b54e8aa4e53d5383e2e4bc635a56b43f9647f7b13832d5d9ecd8f82dac4f510"
+      },
+      {
+        "bytes": 3422777952,
+        "path": "/root/yeto-hf-cache/hub/models--HuggingFaceTB--SmolLM2-1.7B/snapshots/effd688a12921b4cc83e3312b6feb579f70f9c71/model.safetensors",
+        "sha256": "1193528982f4ac0c0b707ce36fd7dc03a0ef6f3e1a432deb886dce2e90c300c0"
+      },
+      {
+        "bytes": 831,
+        "path": "/root/yeto-hf-cache/hub/models--HuggingFaceTB--SmolLM2-1.7B/snapshots/effd688a12921b4cc83e3312b6feb579f70f9c71/special_tokens_map.json",
+        "sha256": "e786b595b9a23148bf1630df78d9037a048ea671e48bfd3549a1e3c233742bb3"
+      },
+      {
+        "bytes": 2104556,
+        "path": "/root/yeto-hf-cache/hub/models--HuggingFaceTB--SmolLM2-1.7B/snapshots/effd688a12921b4cc83e3312b6feb579f70f9c71/tokenizer.json",
+        "sha256": "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c"
+      },
+      {
+        "bytes": 3658,
+        "path": "/root/yeto-hf-cache/hub/models--HuggingFaceTB--SmolLM2-1.7B/snapshots/effd688a12921b4cc83e3312b6feb579f70f9c71/tokenizer_config.json",
+        "sha256": "4bb9af56a342753d39374f4016a16574cab299fe088e896f425ce3c433f61424"
+      },
+      {
+        "bytes": 800662,
+        "path": "/root/yeto-hf-cache/hub/models--HuggingFaceTB--SmolLM2-1.7B/snapshots/effd688a12921b4cc83e3312b6feb579f70f9c71/vocab.json",
+        "sha256": "82b84012e3add4d01d12ba14442026e49b8cbbaead1f79ecf3d919784f82dc79"
+      },
+      {
+        "bytes": 10317,
+        "path": "/root/yeto-data/outer-mup-v3/scale-s2560/manifest.json",
+        "sha256": "b737381d6fbe1ecdfe1c98ae9a4801ef654f0dc65d743a222b7fbbffadc44a36"
+      },
+      {
+        "bytes": 64423638,
+        "path": "/root/yeto-data/outer-mup-v3/scale-s2560/raw/train.jsonl",
+        "sha256": "e680a29ea8c8fc7c99efdceb4f62e485d3eed1ac2afd15bab43b506cb3f4ecaf"
+      },
+      {
+        "bytes": 4666640,
+        "path": "/root/yeto-data/outer-mup-v3/scale-s2560/raw/eval.jsonl",
+        "sha256": "533838a0564b13519956a044d23ed8db6705ddc7ae5f0ddb96538f49460bcebc"
+      },
+      {
+        "bytes": 3932496,
+        "path": "/root/yeto-data/outer-mup-v3/scale-s2560/smollm2/m4/learner-00.safetensors",
+        "sha256": "65c1201a3ce5a68f3f9bc16af0bc3da5f9ffbd865518167a2beef0deeb07195b"
+      },
+      {
+        "bytes": 3932496,
+        "path": "/root/yeto-data/outer-mup-v3/scale-s2560/smollm2/m4/learner-01.safetensors",
+        "sha256": "d9658f2a9b1a34deda27cb7e38dc34aea5c98ddfdb71cca13afb9c2e58af7c63"
+      },
+      {
+        "bytes": 3932496,
+        "path": "/root/yeto-data/outer-mup-v3/scale-s2560/smollm2/m4/learner-02.safetensors",
+        "sha256": "e5c62108a2f712086e0799a3e3d02737d7fc099dc6363915e185a401b75df0b8"
+      },
+      {
+        "bytes": 3932496,
+        "path": "/root/yeto-data/outer-mup-v3/scale-s2560/smollm2/m4/learner-03.safetensors",
+        "sha256": "2077afedbfb177b13431f6f22f01a42059d00f5b5bbece00fa85e046500cf21d"
+      }
+    ],
+    "model": {
+      "exact_parameters": 1711376384,
+      "id": "HuggingFaceTB/SmolLM2-1.7B",
+      "revision": "effd688a12921b4cc83e3312b6feb579f70f9c71"
+    },
+    "scale_manifest_status": "PASS"
+  },
+  "memory_preflight": {
+    "aggregate_evidence_path": "h200-n1:/root/yeto-results-v4/_preflight/memory-smoke/aggregate.json",
+    "aggregate_evidence_sha256": "292002deb97438d374631bee114b0884e00bd8201d01544c3f16fe14130e95f2",
+    "gpu_total_bytes": 150120759296,
+    "learners": 4,
+    "learner_script_sha256": "fcd63360c44ffab40330505be5f6d9af63182a930f7c8fc7bc6eb3e22cc0acc1",
+    "orchestrator_sha256": "39cb5d4bc4a87ab712e6412b0f54041765fc72f5618459ed23a20101015250d7",
+    "peak_sampled_gib": 71.283203125,
+    "peak_sampled_mib": 72994,
+    "production_pilot_peak_sampled_mib": 103216,
+    "status": "PASS"
+  },
+  "pilot": {
+    "cells": [
+      {
+        "eta": 0.02215,
+        "eval_loss": 1.7413021863587197
+      },
+      {
+        "eta": 0.0443,
+        "eval_loss": 1.9114922716149096
+      },
+      {
+        "eta": 0.0886,
+        "eval_loss": 5.444070125279013
+      }
+    ],
+    "excluded_from_G4": true,
+    "compare_diloco_sha256": "d594dae3c517b3b5df7a1631c22bf8b377f8c42ce926fd7c8d29934f9fe5fcff",
+    "fit": {
+      "eta_star": 0.030244878343039974,
+      "estimator": "three-point quadratic in log2(eta)",
+      "status": "INTERIOR"
+    },
+    "manifest_path": "h200-n1:/root/yeto-results-v4/_pilot/manifest.json",
+    "manifest_sha256": "6e81d55011e094cee198baffa4df3ef2b0d96fbbbcb381519f073afed28a280e",
+    "pilot_readout_path": "h200-n1:/root/yeto-results-v4/_pilot/pilot-readout.json",
+    "pilot_readout_sha256": "bc49135ba53c8accb052bf6cc4441f3bd261419c8ff56e4b45bb845dccfe3014",
+    "pilot_seed": 499,
+    "provenance": "wide 2x bracket centered on the disclosed 135M S2560/T5 mu0 center 0.0443",
+    "source_git_commit": "9db854a036b4d53d7ee3424cc52f68a37161c3e0",
+    "runner_sha256": "3fa3e66ad1fecf1990dd1dead0656779bb2f45989253951f0094f48e079ca7f8",
+    "status": "COMPLETED",
+    "training_seed": 499499,
+    "validation_path": "h200-n1:/root/yeto-results-v4/_pilot/pilot-validation.json",
+    "validation_sha256": "38b92ecb54a9502affec01b5b061ae0d868efe7e4f4671a4e58604a8f83b7bcc",
+    "validation_status": "PASS",
+    "validator_script_sha256": "926c53c300a2e155c5958ace32a67bc72036be80223fc5acdd8cd274ddfd0878"
+  },
+  "program_id": "outer-mup-v4-scale",
+  "question": "Does the finite-horizon transient law transfer from SmolLM2-135M to SmolLM2-1.7B (requested 12.6x parameter scale-up)?",
+  "rails": {
+    "clouds_forbidden": [
+      "GCP",
+      "AWS"
+    ],
+    "emergency_process_match": "no wildcard pkill; if a name match is unavoidable use the bracket idiom; normal control targets recorded process groups",
+    "git_pushes": "Mac clone only",
+    "prior_results": "never modify v1, v2, v3, or explore result trees",
+    "v4_result_root": "/root/yeto-results-v4 -> /data/yeto-results-v4 on each node"
+  },
+  "registered_date": "2026-07-26",
+  "retry_contract": {
+    "allowed_reasons": [
+      "preempted_or_lost_host",
+      "hardware_failure",
+      "process_exit_before_scientific_divergence",
+      "missing_or_checksum_invalid_artifact",
+      "loss_blind_validator_failure"
+    ],
+    "attempt_limit": 2,
+    "finite_loss_retry_forbidden": true,
+    "group": "all four eta cells with the same T, mu, and training seed",
+    "selection": "loss-blind only",
+    "wall_extension_forbidden": true
+  },
+  "schema": "yeto_outer_mup_v4_scale_prereg_v1",
+  "schema_version": "1.0.0",
+  "stage": {
+    "arm": "RAW only",
+    "cell_count_identity": "2 S/T x 2 mu x 4 eta x 3 seeds = 48",
+    "eta_grid_construction": {
+      "D_pred_for_ladder": {
+        "T20": 1.123,
+        "T5": 2.134
+      },
+      "log2_offsets": [
+        -0.75,
+        -0.25,
+        0.25,
+        0.75
+      ],
+      "mu0_T20_center_rule": "pilot eta_star * (135M T20 mu0 center 0.0242 / 135M T5 mu0 center 0.0443)",
+      "mu0_T5_center_rule": "required 1.7B three-cell pilot eta_star",
+      "mu0_center_135M_disclosure": {
+        "T20": 0.0242,
+        "T5": 0.0443
+      },
+      "mu0_pilot_center": 0.030244878343039974,
+      "mu0_T20_center": 0.0165220328645952,
+      "mu0.9_center_rule": "0.1 * D_pred(T) * same-T mu0 center"
+    },
+    "eta_grids": {
+      "T20_mu0": {
+        "center": 0.0165220328645952,
+        "etas": [
+          0.0098240595184427,
+          0.013893318208542163,
+          0.0196481190368854,
+          0.027786636417084325
+        ]
+      },
+      "T20_mu0.9": {
+        "center": 0.001855424290694041,
+        "etas": [
+          0.0011032418839211152,
+          0.0015602196348192849,
+          0.0022064837678422303,
+          0.0031204392696385697
+        ]
+      },
+      "T5_mu0": {
+        "center": 0.030244878343039974,
+        "etas": [
+          0.017983712258967423,
+          0.02543280977844702,
+          0.035967424517934846,
+          0.05086561955689404
+        ]
+      },
+      "T5_mu0.9": {
+        "center": 0.0064542570384047305,
+        "etas": [
+          0.0038377241960636478,
+          0.005427361606720593,
+          0.0076754483921272956,
+          0.010854723213441187
+        ]
+      }
+    },
+    "h": 512,
+    "m": 4,
+    "mu": [
+      0.0,
+      0.9
+    ],
+    "s_to_t": {
+      "10240": 20,
+      "2560": 5
+    },
+    "seeds": [
+      501,
+      503,
+      509
+    ],
+    "training_seed_rule": "int(str(seed)+str(seed))"
+  },
+  "status": "PREREGISTERED",
+  "wall_clock": {
+    "ceiling_seconds": 43200,
+    "hard_deadline_unix_s": 1785121359,
+    "hard_deadline_utc": "2026-07-27T03:02:39Z",
+    "pilot_included": true,
+    "start_event": "first v4 pilot scientific process",
+    "start_unix_s": 1785078159,
+    "start_utc": "2026-07-26T15:02:39Z",
+    "stop_rule": "terminate exact remaining process groups; mark remaining work NOT_RUN_WALL_CEILING; never extend after outcomes"
+  }
+}
