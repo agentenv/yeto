@@ -68,16 +68,24 @@ def test_quadratic_rejects_boundary_vertex():
     assert fit["eta_star"] is None
 
 
-def test_registered_surface_exactly_predicts_a_member_of_family():
-    analyzer = load_analyzer()
-    coefficients = (0.2, 0.3, -0.1, 0.05)
-    d_values = {}
+def family_values(analyzer, family_id, coefficients, arm="raw"):
+    values = {}
     for t in analyzer.T_GRID:
         for s in analyzer.S_GRID:
-            features = analyzer.surface_features(t, s)
-            log2_d = sum(left * right for left, right in zip(features, coefficients))
-            d_values[(t, s, "raw")] = 2.0**log2_d
+            features = analyzer.surface_features(t, s, family_id)
+            log2_d = sum(
+                left * right for left, right in zip(features, coefficients)
+            )
+            values[(t, s, arm)] = 2.0**log2_d
+    return values
+
+
+def test_registered_selection_exactly_recovers_f2_interaction_family():
+    analyzer = load_analyzer()
+    coefficients = (0.2, 0.3, -0.1, 0.05)
+    d_values = family_values(analyzer, "F2", coefficients)
     result = analyzer.heldout_analysis(d_values, "raw")
+    assert result["surface"]["family_id"] == "F2"
     assert result["success_count"] == 4
     assert result["pass"] is True
     assert all(
@@ -86,6 +94,37 @@ def test_registered_surface_exactly_predicts_a_member_of_family():
             result["surface"]["coefficients"], coefficients
         )
     )
+
+
+def test_registered_selection_prefers_simpler_f1_on_numerical_tie():
+    analyzer = load_analyzer()
+    coefficients = (0.2, 0.3, -0.1)
+    result = analyzer.heldout_analysis(
+        family_values(analyzer, "F1", coefficients), "raw"
+    )
+    assert result["surface"]["family_id"] == "F1"
+    assert result["success_count"] == 4
+
+
+def test_registered_selection_exactly_recovers_f3_quadratic_family():
+    analyzer = load_analyzer()
+    coefficients = (0.2, 0.3, -0.1, 0.05)
+    result = analyzer.heldout_analysis(
+        family_values(analyzer, "F3", coefficients), "raw"
+    )
+    assert result["surface"]["family_id"] == "F3"
+    assert result["success_count"] == 4
+
+
+def test_model_selection_never_reads_heldout_outcomes():
+    analyzer = load_analyzer()
+    baseline = family_values(analyzer, "F2", (0.2, 0.3, -0.1, 0.05))
+    perturbed = dict(baseline)
+    for t, s in analyzer.HOLDOUTS:
+        perturbed[(t, s, "raw")] *= 8.0
+    first = analyzer.fit_surface(baseline, "raw")
+    second = analyzer.fit_surface(perturbed, "raw")
+    assert first == second
 
 
 def test_holdout_partition_is_fixed_and_exhaustive():
@@ -101,3 +140,10 @@ def test_holdout_partition_is_fixed_and_exhaustive():
     assert holdouts | training == factorial
     assert len(holdouts) == 4
     assert len(training) == 8
+    selection = contract["heldout_prediction"]["model_selection"]
+    assert [record["id"] for record in selection["candidate_families"]] == [
+        "F1",
+        "F2",
+        "F3",
+    ]
+    assert selection["arm_scope"] == "run independently for raw and corrected"

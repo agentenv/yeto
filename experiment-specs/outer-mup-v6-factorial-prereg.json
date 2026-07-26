@@ -10,7 +10,7 @@
     },
     "joint_bootstrap": {
       "gate_role": "evaluable only if at least 9500 of 10000 joint refits retain all 36 interior eta optima",
-      "method": "paired nonparametric training-seed bootstrap; one shared five-index resample refits all 36 eta curves, both eight-cell surfaces, and all held-out errors",
+      "method": "paired nonparametric training-seed bootstrap; one shared five-index resample refits all 36 eta curves, independently repeats the registered eight-cell F1/F2/F3 leave-one-out model selection for both momentum arms, refits each selected surface on all eight training cells, and recomputes all held-out errors",
       "minimum_valid_replicates": 9500,
       "replicates": 10000,
       "rng_seed": 20260727
@@ -19,7 +19,7 @@
     "primary_outcome": "finite fixed-development endpoint NLL per trained token"
   },
   "authority": {
-    "amendment_rule": "no outcome-aware amendment, recentering, ladder extension, holdout substitution, or surface-family change; a pre-outcome mechanical amendment requires a new pushed commit and new raw hashes",
+    "amendment_rule": "this disclosed pre-outcome surface-family amendment supersedes fb78bf9295035ca3189d72f62092aac525467631; after the amended commit is pushed, no outcome-aware amendment, recentering, ladder extension, holdout substitution, candidate-family change, or selection-rule change is allowed",
     "contract_kind": "prospective full-factorial code, execution, and held-out analysis contract",
     "launch_manifest_requirements": [
       "clean pushed registration commit",
@@ -32,6 +32,16 @@
     "node_execution_commit": "all 900 cells execute at the pushed v6 registration commit on both nodes",
     "prior_records_immutable": "v1-v5 and exploratory result trees are read-only to v6",
     "unregistered_cell_launch_forbidden": true
+  },
+  "pre_outcome_amendment": {
+    "amended_at_utc": "2026-07-26T19:09:22Z",
+    "changed_scope": "replace the single log-T/log-S interaction response family with a prospectively fixed F1/F2/F3 model-selection protocol, independently per momentum arm",
+    "outcome_blinding_proof": "at amendment start there was no v6 result root on either node, no run_slot_v6 process, no immutable v6 gate proof, no v6 launch authority, and no v6 scientific outcome",
+    "reason": "pre-v6 evidence showed approximately linear-in-T corrected drift and the referee rejected the prior additive response-surface rationale as overfit; the amendment protects the four already registered held-out cells without changing any scientific run coordinate",
+    "referee_F3_resolution": "the referee record says CONFIRMED lanes: none, so the directive's fixed fallback F3 is used",
+    "status": "DISCLOSED_AND_REGISTERED_BEFORE_V6_LAUNCH",
+    "supersedes_git_commit": "fb78bf9295035ca3189d72f62092aac525467631",
+    "unchanged_scope": "all 900 T,S,H,arm,eta,seed cells; eta centers and ladders; input bytes; held-out and training partitions; success band and 3-of-4 rule; bootstrap count; retry rails; scheduling; storage; fleet gates; and 30-hour ceiling"
   },
   "center_models": {
     "corrected_mu0.9": {
@@ -172,20 +182,50 @@
   "frozen_analyzer": {
     "freeze_rule": "committed and pushed before any v6 scientific process; outcome-aware edits forbidden; identical bytes distributed to both node control planes",
     "path": "scripts/analyze_v6.py",
-    "sha256": "4862681e6d7dbbf55e95ae45e15e0a0170e5a35a17a73f0df01240951b576f1a"
+    "sha256": "8016e03cec5c8ff51171d35861b51553599218079fafa9c7af9798092f2110d6"
   },
   "heldout_prediction": {
     "gate_G6": {
       "failure_rule": "complete bracketed evidence with either momentum arm succeeding on fewer than three held-out cells is FAIL",
-      "not_evaluable_rule": "missing/invalid cell evidence, any of 36 unbracketed optima, singular surface fit, or fewer than 9500 valid joint bootstrap refits is NOT_EVALUABLE",
+      "not_evaluable_rule": "missing/invalid cell evidence, any of 36 unbracketed optima, a singular required candidate/LOO/refit surface, or fewer than 9500 valid joint bootstrap refits is NOT_EVALUABLE",
       "pass_rule": "each of raw and corrected independently has |log2(D_pred)-log2(D_obs)| <= 0.2 on at least 3 of its 4 held-out cells",
       "verdicts": ["PASS", "FAIL", "NOT_EVALUABLE"]
     },
     "heldout_cells": [[2, 10240], [5, 5120], [10, 2560], [20, 5120]],
+    "model_selection": {
+      "arm_scope": "run independently for raw and corrected",
+      "bootstrap_rule": "repeat the complete arm-specific leave-one-out selection and selected-family refit inside every joint paired-seed bootstrap replicate",
+      "candidate_families": [
+        {
+          "analyzer_formula": "log2(D)=gamma+alpha*u+beta*v",
+          "id": "F1",
+          "requested_family_equivalence": "gamma'+alpha'*T+beta*log2(S)"
+        },
+        {
+          "analyzer_formula": "log2(D)=gamma+alpha*u+beta*v+delta*u*v",
+          "id": "F2",
+          "requested_family_equivalence": "gamma'+alpha'*T+beta'*log2(S)+delta'*T*log2(S)"
+        },
+        {
+          "analyzer_formula": "log2(D)=gamma+alpha*u+beta*v+epsilon*u^2",
+          "id": "F3",
+          "requested_family_equivalence": "gamma'+alpha'*T+beta*log2(S)+epsilon'*T^2",
+          "resolution": "fixed fallback because the pre-launch referee confirmed no theory lane"
+        }
+      ],
+      "coordinates": {
+        "u": "(T-5)/5",
+        "v": "log2(S/5120)"
+      },
+      "fit_method": "ordinary least squares in log2(D)",
+      "heldout_exclusion": "the four held-out D outcomes are never read during model selection or the all-eight training refit",
+      "loo_protocol": "for each candidate, leave each of the eight training coordinates out once, fit on the other seven, predict the omitted log2(D), and score root mean squared error over the eight omitted predictions",
+      "refit_and_predict": "select the candidate with minimum LOO RMSE, refit that family on all eight training cells, then predict the four held-out cells",
+      "tie_break": "candidates within 1e-12 bits of the minimum LOO RMSE are tied; choose the first in fixed priority F1, F2, F3"
+    },
     "response_arms": ["raw", "corrected"],
     "structural_reference": "mu0 has D=1 by definition and is excluded from the nontrivial response-surface gate",
     "success_band_bits": 0.2,
-    "surface_family": "per momentum arm: log2(D)=beta0+beta_T*log2(T/5)+beta_S*log2(S/5120)+beta_TS*log2(T/5)*log2(S/5120)",
     "training_cells": [[2, 2560], [2, 5120], [5, 2560], [5, 10240], [10, 5120], [10, 10240], [20, 2560], [20, 10240]]
   },
   "machine_inputs": {
@@ -219,7 +259,7 @@
       "verifier": {"path": "scripts/verify_inputs_v6.py", "sha256": "a1ab3b818deff7b1e0e6c278f4cae61021e1236862764c939079bb18cf8c6ccc"}
     }
   },
-  "objective": "Measure the joint T x S dependence of raw and bias-corrected outer Nesterov at 135M/M=4, and prospectively test whether an interaction response surface trained on eight factorial coordinates predicts four registered held-out coordinates.",
+  "objective": "Measure the joint T x S dependence of raw and bias-corrected outer Nesterov at 135M/M=4, prospectively select an arm-specific response family from F1/F2/F3 using only eight training coordinates, and test the selected surfaces on four registered held-out coordinates.",
   "retry_contract": {
     "allowed_reasons": ["node_reboot", "gpu_xid_or_ecc", "filesystem_or_network_io", "controller_or_process_failure_before_valid_completion"],
     "attempt_limit": 2,

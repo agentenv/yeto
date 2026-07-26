@@ -26,6 +26,35 @@ BOOTSTRAP_SEED = 20260727
 MIN_VALID_BOOTSTRAP_REPLICATES = 9_500
 SUCCESS_ABS_ERROR_BITS = 0.2
 SUCCESS_MIN_HOLDOUTS = 3
+TRAINING_CELLS = tuple(
+    sorted((t, s) for t in T_GRID for s in S_GRID if (t, s) not in HOLDOUTS)
+)
+SURFACE_FAMILY_ORDER = ("F1", "F2", "F3")
+SURFACE_FAMILIES = {
+    "F1": {
+        "formula": "log2_D=gamma+alpha*u+beta*v",
+        "coefficient_order": ("gamma", "alpha_T", "beta_log2_S"),
+    },
+    "F2": {
+        "formula": "log2_D=gamma+alpha*u+beta*v+delta*u*v",
+        "coefficient_order": (
+            "gamma",
+            "alpha_T",
+            "beta_log2_S",
+            "delta_T_x_log2_S",
+        ),
+    },
+    "F3": {
+        "formula": "log2_D=gamma+alpha*u+beta*v+epsilon*u^2",
+        "coefficient_order": (
+            "gamma",
+            "alpha_T",
+            "beta_log2_S",
+            "epsilon_T_squared",
+        ),
+    },
+}
+LOO_TIE_TOLERANCE_BITS = 1e-12
 
 
 class AnalysisError(RuntimeError):
@@ -155,32 +184,119 @@ def fit_quadratic(etas: list[float], losses: list[float]) -> dict:
     }
 
 
-def surface_features(t: int, s: int) -> list[float]:
-    log_t = math.log2(t / 5.0)
-    log_s = math.log2(s / 5120.0)
-    return [1.0, log_t, log_s, log_t * log_s]
+def surface_features(t: int, s: int, family_id: str) -> list[float]:
+    """Return the registered, centered coordinates for one candidate family.
+
+    u=(T-5)/5 and v=log2(S/5120). Centering/scaling changes coefficient units,
+    but not the F1/F2/F3 function spaces named in the preregistration.
+    """
+
+    if family_id not in SURFACE_FAMILIES:
+        raise AnalysisError(f"unknown surface family {family_id!r}")
+    u = (t - 5.0) / 5.0
+    v = math.log2(s / 5120.0)
+    if family_id == "F1":
+        return [1.0, u, v]
+    if family_id == "F2":
+        return [1.0, u, v, u * v]
+    return [1.0, u, v, u * u]
 
 
-def fit_surface(d_values: dict[tuple[int, int, str], float], arm: str) -> dict:
-    training = sorted(
-        (t, s) for t in T_GRID for s in S_GRID if (t, s) not in HOLDOUTS
-    )
-    if len(training) != 8:
+def training_outcomes(
+    d_values: dict[tuple[int, int, str], float], arm: str
+) -> dict[tuple[int, int], float]:
+    if len(TRAINING_CELLS) != 8:
         raise AnalysisError("registered training split is not eight cells")
-    outcomes = []
-    for t, s in training:
+    outcomes = {}
+    for t, s in TRAINING_CELLS:
         value = d_values.get((t, s, arm))
         if value is None or not math.isfinite(value) or value <= 0:
             raise AnalysisError(f"{arm}/T{t}/S{s}: D is unavailable")
-        outcomes.append(math.log2(value))
-    coefficients = least_squares(
-        [surface_features(t, s) for t, s in training], outcomes
+        outcomes[(t, s)] = math.log2(value)
+    return outcomes
+
+
+def fit_candidate_coefficients(
+    outcomes: dict[tuple[int, int], float],
+    family_id: str,
+    cells: tuple[tuple[int, int], ...] | list[tuple[int, int]],
+) -> list[float]:
+    return least_squares(
+        [surface_features(t, s, family_id) for t, s in cells],
+        [outcomes[(t, s)] for t, s in cells],
+    )
+
+
+def candidate_prediction(
+    family_id: str, coefficients: list[float], t: int, s: int
+) -> float:
+    return sum(
+        feature * coefficient
+        for feature, coefficient in zip(
+            surface_features(t, s, family_id), coefficients
+        )
+    )
+
+
+def fit_surface(d_values: dict[tuple[int, int, str], float], arm: str) -> dict:
+    """Select F1/F2/F3 by eight-cell LOO RMSE, then refit on all eight.
+
+    Selection is independent for each momentum arm. Held-out outcomes are not
+    read by this function and therefore cannot influence the selected family.
+    """
+
+    outcomes = training_outcomes(d_values, arm)
+    scores = []
+    for family_id in SURFACE_FAMILY_ORDER:
+        loo_predictions = {}
+        squared_errors = []
+        for left_out in TRAINING_CELLS:
+            fold_cells = tuple(
+                cell for cell in TRAINING_CELLS if cell != left_out
+            )
+            coefficients = fit_candidate_coefficients(
+                outcomes, family_id, fold_cells
+            )
+            t, s = left_out
+            predicted = candidate_prediction(
+                family_id, coefficients, t, s
+            )
+            observed = outcomes[left_out]
+            error = predicted - observed
+            squared_errors.append(error * error)
+            loo_predictions[f"T{t}_S{s}"] = {
+                "observed_log2_D": observed,
+                "predicted_log2_D": predicted,
+                "signed_error_bits_pred_minus_obs": error,
+            }
+        rmse = math.sqrt(sum(squared_errors) / len(squared_errors))
+        scores.append(
+            {
+                "family_id": family_id,
+                "family": SURFACE_FAMILIES[family_id]["formula"],
+                "loo_rmse_bits": rmse,
+                "loo_predictions": loo_predictions,
+            }
+        )
+
+    best_rmse = min(record["loo_rmse_bits"] for record in scores)
+    tied = {
+        record["family_id"]
+        for record in scores
+        if abs(record["loo_rmse_bits"] - best_rmse)
+        <= LOO_TIE_TOLERANCE_BITS
+    }
+    selected_family = next(
+        family_id for family_id in SURFACE_FAMILY_ORDER if family_id in tied
+    )
+    coefficients = fit_candidate_coefficients(
+        outcomes, selected_family, TRAINING_CELLS
     )
     fitted = {}
-    for (t, s), observed in zip(training, outcomes):
-        predicted = sum(
-            left * right
-            for left, right in zip(surface_features(t, s), coefficients)
+    for t, s in TRAINING_CELLS:
+        observed = outcomes[(t, s)]
+        predicted = candidate_prediction(
+            selected_family, coefficients, t, s
         )
         fitted[f"T{t}_S{s}"] = {
             "observed_log2_D": observed,
@@ -188,23 +304,33 @@ def fit_surface(d_values: dict[tuple[int, int, str], float], arm: str) -> dict:
             "residual_bits": observed - predicted,
         }
     return {
-        "family": (
-            "log2_D=beta0+beta_T*log2(T/5)+beta_S*log2(S/5120)"
-            "+beta_TS*log2(T/5)*log2(S/5120)"
+        "family_id": selected_family,
+        "family": SURFACE_FAMILIES[selected_family]["formula"],
+        "coordinates": {"u": "(T-5)/5", "v": "log2(S/5120)"},
+        "coefficient_order": list(
+            SURFACE_FAMILIES[selected_family]["coefficient_order"]
         ),
-        "coefficient_order": ["beta0", "beta_T", "beta_S", "beta_TS"],
         "coefficients": coefficients,
-        "training_cells": [[t, s] for t, s in training],
+        "training_cells": [list(cell) for cell in TRAINING_CELLS],
         "training_fit": fitted,
+        "model_selection": {
+            "criterion": "minimum eight-fold leave-one-out RMSE in log2(D) bits",
+            "selection_uses_heldout_outcomes": False,
+            "family_priority": list(SURFACE_FAMILY_ORDER),
+            "tie_tolerance_bits": LOO_TIE_TOLERANCE_BITS,
+            "tie_break_rule": (
+                "among candidates within 1e-12 bits of the minimum LOO RMSE, "
+                "choose the first of F1,F2,F3"
+            ),
+            "candidate_scores": scores,
+            "selected_family": selected_family,
+        },
     }
 
 
 def predict_surface(surface: dict, t: int, s: int) -> float:
-    return sum(
-        left * right
-        for left, right in zip(
-            surface_features(t, s), surface["coefficients"]
-        )
+    return candidate_prediction(
+        surface["family_id"], surface["coefficients"], t, s
     )
 
 
@@ -416,7 +542,20 @@ def heldout_analysis(d_values: dict, arm: str) -> dict:
 
 def joint_bootstrap(losses: dict) -> dict:
     rng = random.Random(BOOTSTRAP_SEED)
-    coefficient_samples = {arm: [[] for _ in range(4)] for arm in MOMENTUM_ARMS}
+    coefficient_samples = {
+        arm: {
+            family_id: {
+                label: []
+                for label in SURFACE_FAMILIES[family_id]["coefficient_order"]
+            }
+            for family_id in SURFACE_FAMILY_ORDER
+        }
+        for arm in MOMENTUM_ARMS
+    }
+    selection_counts = {
+        arm: {family_id: 0 for family_id in SURFACE_FAMILY_ORDER}
+        for arm in MOMENTUM_ARMS
+    }
     error_samples = {
         arm: {cell: [] for cell in sorted(HOLDOUTS)} for arm in MOMENTUM_ARMS
     }
@@ -429,10 +568,17 @@ def joint_bootstrap(losses: dict) -> dict:
             if not all(curve["interior"] for curve in curves.values()):
                 raise AnalysisError("bootstrap curve unbracketed")
             d_values = d_from_curves(curves)
-            for arm in MOMENTUM_ARMS:
-                result = heldout_analysis(d_values, arm)
-                for index, value in enumerate(result["surface"]["coefficients"]):
-                    coefficient_samples[arm][index].append(value)
+            replicate_results = {
+                arm: heldout_analysis(d_values, arm) for arm in MOMENTUM_ARMS
+            }
+            for arm, result in replicate_results.items():
+                surface = result["surface"]
+                family_id = surface["family_id"]
+                selection_counts[arm][family_id] += 1
+                for label, value in zip(
+                    surface["coefficient_order"], surface["coefficients"]
+                ):
+                    coefficient_samples[arm][family_id][label].append(value)
                 success_counts[arm].append(result["success_count"])
                 for cell in sorted(HOLDOUTS):
                     key = f"T{cell[0]}_S{cell[1]}"
@@ -450,20 +596,23 @@ def joint_bootstrap(losses: dict) -> dict:
     )
     by_arm = {}
     for arm in MOMENTUM_ARMS:
-        coefficients = []
-        for label, values in zip(
-            ("beta0", "beta_T", "beta_S", "beta_TS"),
-            coefficient_samples[arm],
-        ):
-            coefficients.append(
-                {
-                    "name": label,
-                    "ci_95": {
-                        "low": quantile(values, 0.025) if values else None,
-                        "high": quantile(values, 0.975) if values else None,
-                    },
-                }
-            )
+        conditional_coefficients = {}
+        for family_id in SURFACE_FAMILY_ORDER:
+            intervals = []
+            for label, values in coefficient_samples[arm][family_id].items():
+                intervals.append(
+                    {
+                        "name": label,
+                        "ci_95": {
+                            "low": quantile(values, 0.025) if values else None,
+                            "high": quantile(values, 0.975) if values else None,
+                        },
+                    }
+                )
+            conditional_coefficients[family_id] = {
+                "selected_replicates": selection_counts[arm][family_id],
+                "coefficient_intervals_conditional_on_selection": intervals,
+            }
         heldout = {}
         for cell, values in error_samples[arm].items():
             heldout[f"T{cell[0]}_S{cell[1]}"] = {
@@ -474,7 +623,14 @@ def joint_bootstrap(losses: dict) -> dict:
             }
         counts = success_counts[arm]
         by_arm[arm] = {
-            "coefficient_intervals": coefficients,
+            "model_selection_counts": selection_counts[arm],
+            "model_selection_fractions": {
+                family_id: (
+                    selection_counts[arm][family_id] / valid if valid else None
+                )
+                for family_id in SURFACE_FAMILY_ORDER
+            },
+            "conditional_coefficient_intervals": conditional_coefficients,
             "heldout_error_intervals": heldout,
             "fraction_replicates_meeting_3_of_4": (
                 sum(value >= SUCCESS_MIN_HOLDOUTS for value in counts) / len(counts)
@@ -485,14 +641,16 @@ def joint_bootstrap(losses: dict) -> dict:
     return {
         "method": (
             "paired nonparametric training-seed bootstrap; one shared five-index "
-            "resample refits all 36 eta curves, both eight-cell surfaces, and all "
-            "held-out errors"
+            "resample refits all 36 eta curves, independently repeats the "
+            "registered eight-cell F1/F2/F3 LOO selection for both momentum "
+            "arms, refits each selected surface, and recomputes all held-out "
+            "errors"
         ),
         "replicates": BOOTSTRAP_REPLICATES,
         "rng_seed": BOOTSTRAP_SEED,
         "minimum_valid_replicates": MIN_VALID_BOOTSTRAP_REPLICATES,
         "valid_replicates": valid,
-        "invalid_unbracketed_replicates": invalid,
+        "invalid_refit_replicates": invalid,
         "status": status,
         "by_arm": by_arm,
     }

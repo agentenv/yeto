@@ -1,6 +1,12 @@
 # Outer-muP v6 full-factorial preregistration
 
-Status: **prospective and frozen before any v6 scientific process**. The machine-readable JSON is authoritative for every numeric eta, command coordinate, gate rule, and hash.
+Status: **prospective and amended/frozen before any v6 scientific process**. The machine-readable JSON is authoritative for every numeric eta, command coordinate, gate rule, and hash.
+
+### Pre-outcome amendment disclosure
+
+The first registration commit, `fb78bf9295035ca3189d72f62092aac525467631`, fixed one log-T/log-S interaction family. Before the fleet gate opened, a referee/operator review noted that the available pre-v6 corrected-arm drift is approximately linear in `T`, not `log T`, and that no theory lane had been confirmed. At the start of this amendment there was no v6 result root on either node, no `run_slot_v6.py` process, no immutable v6 gate proof, no launch authority, and no v6 outcome.
+
+This amendment prospectively replaces only that single response family with the F1/F2/F3 training-only selection protocol below. It does **not** change any of the 900 run coordinates, eta centers or ladders, seeds, data, held-out cells, training cells, success band, pass rule, bootstrap count, retry rails, scheduling, storage, fleet gates, or 30-hour ceiling. The amended commit and new raw hashes supersede the first registration for launch provenance.
 
 ## Question and design
 
@@ -94,16 +100,30 @@ For each momentum arm separately, define
 D(T,S,arm) = [eta*(T,S,arm) / eta*(T,S,mu0)] / 0.1.
 ```
 
-The response surface is fixed as
+Define centered coordinates
 
 ```text
-log2 D = beta0
-         + beta_T log2(T/5)
-         + beta_S log2(S/5120)
-         + beta_TS log2(T/5) log2(S/5120).
+u = (T-5)/5
+v = log2(S/5120).
 ```
 
-It is fit by ordinary least squares on these eight coordinates:
+Centering and scaling change only coefficient units. The three prospectively fixed candidate families are therefore algebraically identical to the operator-specified families:
+
+```text
+F1: log2 D = gamma + alpha*u + beta*v
+    equivalent to gamma' + alpha'*T + beta*log2(S)
+
+F2: log2 D = gamma + alpha*u + beta*v + delta*u*v
+    equivalent to gamma' + alpha'*T + beta'*log2(S)
+                  + delta'*T*log2(S)
+
+F3: log2 D = gamma + alpha*u + beta*v + epsilon*u^2
+    equivalent to gamma' + alpha'*T + beta*log2(S) + epsilon'*T^2.
+```
+
+The referee record says `CONFIRMED lanes: none`, so F3 is the directive's fixed quadratic-in-T fallback rather than a claimed mechanism-derived law.
+
+Model selection is run **independently for raw and corrected** and uses only these eight training coordinates:
 
 ```text
 (2,2560), (2,5120),
@@ -112,7 +132,9 @@ It is fit by ordinary least squares on these eight coordinates:
 (20,2560), (20,10240).
 ```
 
-It must predict the four held-out coordinates, never used to fit coefficients:
+For each candidate, ordinary least squares in `log2 D` is fit eight times, leaving out one training coordinate each time. Its score is the root mean squared error, in bits, over those eight omitted-coordinate predictions. The candidate with minimum LOO RMSE is selected. Candidates within `1e-12` bits of the minimum are tied and resolve by the fixed priority `F1`, then `F2`, then `F3`. The selected family is refit on all eight training cells.
+
+That refit must predict the four held-out coordinates, whose outcomes are never read during selection or fitting:
 
 ```text
 (2,10240), (5,5120), (10,2560), (20,5120).
@@ -124,11 +146,11 @@ For a held-out cell, success means
 abs(log2 D_pred - log2 D_obs) <= 0.2.
 ```
 
-G6 is `PASS` only if **each** of raw and corrected succeeds on at least three of its four held-out cells. It is `FAIL` if the complete, bracketed evidence is evaluable but either arm misses that rule. It is `NOT_EVALUABLE` for incomplete/invalid evidence, any of the 36 unbracketed eta optima, a singular surface, or fewer than 9,500 valid refits in the registered 10,000-draw joint paired-seed bootstrap. The mu0 arm has structural `D=1`; it supplies every denominator but is excluded from the trivial response-surface gate.
+G6 is `PASS` only if **each** of raw and corrected succeeds on at least three of its four held-out cells. It is `FAIL` if the complete, bracketed evidence is evaluable but either arm misses that rule. It is `NOT_EVALUABLE` for incomplete/invalid evidence, any of the 36 unbracketed eta optima, a singular required candidate/LOO/refit surface, or fewer than 9,500 valid refits in the registered 10,000-draw joint paired-seed bootstrap. The mu0 arm has structural `D=1`; it supplies every denominator but is excluded from the trivial response-surface gate.
 
-The eta optimum is the interior vertex of `loss = a(log2 eta)^2 + b(log2 eta) + c` fitted to the five-seed mean loss at all five exact rungs. A required nonfinite/missing cell is never dropped. The joint bootstrap uses one common five-index seed resample for all 36 curves, both surfaces, and all held-out errors.
+The eta optimum is the interior vertex of `loss = a(log2 eta)^2 + b(log2 eta) + c` fitted to the five-seed mean loss at all five exact rungs. A required nonfinite/missing cell is never dropped. The joint bootstrap uses one common five-index seed resample for all 36 curves; inside every replicate it independently repeats F1/F2/F3 LOO selection for both arms, refits each selected family on all eight training cells, and recomputes all held-out errors.
 
-Frozen analyzer: `scripts/analyze_v6.py`, SHA-256 `4862681e6d7dbbf55e95ae45e15e0a0170e5a35a17a73f0df01240951b576f1a`.
+Frozen analyzer: `scripts/analyze_v6.py`, SHA-256 `8016e03cec5c8ff51171d35861b51553599218079fafa9c7af9798092f2110d6`.
 
 ## Scheduling, storage, and wall ceiling
 
