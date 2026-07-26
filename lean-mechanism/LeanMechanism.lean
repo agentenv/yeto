@@ -5,3 +5,4 @@ import LeanMechanism.Counterexamples
 import LeanMechanism.Correction
 import LeanMechanism.FiniteHorizonOuter
 import LeanMechanism.QuadraticAlignment
+import LeanMechanism.AgeCollapse
