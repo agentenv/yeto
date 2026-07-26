@@ -1,0 +1,280 @@
+{
+  "schema": "yeto_outer_mup_v4b_extension_prereg_v1",
+  "schema_version": "1.0.0",
+  "program_id": "outer-mup-v4b-extension",
+  "registered_date": "2026-07-26",
+  "status": "PREREGISTERED",
+  "purpose": "Repair only the three G4 learning-rate curves whose pooled quadratic vertices were unbracketed LOW by adding two prospectively fixed downward rungs per curve.",
+  "prospective_scope": "G4 and all 48 v4 endpoint losses are disclosed. No v4b GPU process, endpoint loss, or G4b calculation exists at registration. The v4 outcomes select only which curves receive the mechanical downward extension; they do not select among v4b outcomes.",
+  "v4_disclosure": {
+    "g4_readout_path": "h200-n1:/root/g4-readout.json",
+    "g4_readout_sha256": "f2e70767cb06ecc4fcdd7942d4b517eea3c9927159e828f8d6f8ff31379dcded",
+    "launch_manifest_path": "/root/yeto-results-v4/_controller/launch-v4/launch-manifest-v4.json",
+    "launch_manifest_sha256": "150dab251f29ab191aca4bfa8297950f3f22167f5949d1c8795e467706d2fb1e",
+    "source_git_commit": "5abf65d888506642d44ae446d4e1681e7e531645",
+    "completed_cells": 48,
+    "evidence_errors": [],
+    "g4_verdict": "NOT_EVALUABLE",
+    "note_line": "G4 VERDICT: NOT_EVALUABLE D5=NA D20=NA",
+    "curve_fits": [
+      {
+        "s": 2560,
+        "t": 5,
+        "mu": 0.0,
+        "status": "INTERIOR",
+        "vertex_log2_eta": -5.765625656392578,
+        "eta_star": 0.018381194631519118,
+        "v4_grid_bottom": 0.017983712258967423,
+        "v4_grid_bottom_relation": "the pooled optimum is interior; this curve is not extended"
+      },
+      {
+        "s": 2560,
+        "t": 5,
+        "mu": 0.9,
+        "status": "UNBRACKETED_LOW",
+        "vertex_log2_eta": -8.055611407730744,
+        "eta_star": null,
+        "v4_grid_bottom": 0.0038377241960636478
+      },
+      {
+        "s": 10240,
+        "t": 20,
+        "mu": 0.0,
+        "status": "UNBRACKETED_LOW",
+        "vertex_log2_eta": -6.750110462086128,
+        "eta_star": null,
+        "v4_grid_bottom": 0.0098240595184427
+      },
+      {
+        "s": 10240,
+        "t": 20,
+        "mu": 0.9,
+        "status": "UNBRACKETED_LOW",
+        "vertex_log2_eta": -10.226368214945765,
+        "eta_star": null,
+        "v4_grid_bottom": 0.0011032418839211152
+      }
+    ],
+    "trigger_rule": "Exactly the three v4 curves reported UNBRACKETED with vertices below their registered grid bottoms receive the two-rung extension. The interior S2560/mu0 curve receives no new cell.",
+    "use_limitation": "v4 losses are pooled with the new v4b losses only through the frozen combined-grid G4b refits. No v4 cell is rerun, moved, modified, or replaced."
+  },
+  "extension_design": {
+    "spacing": "sqrt(2); one step is -0.5 in log2(eta)",
+    "construction": "For each triggered curve, add exactly v4_bottom/sqrt(2) and v4_bottom/2. The arrays list the lower value first.",
+    "seeds": [501, 503, 509],
+    "training_seed_rule": "decimal concatenation seed||seed",
+    "curves": [
+      {
+        "curve_id": "T5_mu0.9",
+        "s": 2560,
+        "t": 5,
+        "mu": 0.9,
+        "v4_etas": [
+          0.0038377241960636478,
+          0.005427361606720593,
+          0.0076754483921272956,
+          0.010854723213441187
+        ],
+        "new_etas": [
+          0.0019188620980318239,
+          0.0027136808033602967
+        ],
+        "combined_etas": [
+          0.0019188620980318239,
+          0.0027136808033602967,
+          0.0038377241960636478,
+          0.005427361606720593,
+          0.0076754483921272956,
+          0.010854723213441187
+        ]
+      },
+      {
+        "curve_id": "T20_mu0",
+        "s": 10240,
+        "t": 20,
+        "mu": 0.0,
+        "v4_etas": [
+          0.0098240595184427,
+          0.013893318208542163,
+          0.0196481190368854,
+          0.027786636417084325
+        ],
+        "new_etas": [
+          0.00491202975922135,
+          0.006946659104271081
+        ],
+        "combined_etas": [
+          0.00491202975922135,
+          0.006946659104271081,
+          0.0098240595184427,
+          0.013893318208542163,
+          0.0196481190368854,
+          0.027786636417084325
+        ]
+      },
+      {
+        "curve_id": "T20_mu0.9",
+        "s": 10240,
+        "t": 20,
+        "mu": 0.9,
+        "v4_etas": [
+          0.0011032418839211152,
+          0.0015602196348192849,
+          0.0022064837678422303,
+          0.0031204392696385697
+        ],
+        "new_etas": [
+          0.0005516209419605576,
+          0.0007801098174096424
+        ],
+        "combined_etas": [
+          0.0005516209419605576,
+          0.0007801098174096424,
+          0.0011032418839211152,
+          0.0015602196348192849,
+          0.0022064837678422303,
+          0.0031204392696385697
+        ]
+      }
+    ],
+    "cell_identity": "3 triggered curves x 2 new etas x 3 original v4 seeds = 18 cells",
+    "new_eta_count": 6,
+    "cell_count": 18,
+    "no_recenter_rule": "No v4b rung may be extended, removed, shifted, narrowed, or recentered after any v4b endpoint outcome exists."
+  },
+  "common_protocol": {
+    "inheritance": "Every scientific setting, input, model revision, evaluator, evidence rule, and command option is byte-for-byte inherited from v4 except eta, result root, cell identity, assignment, and attempt path.",
+    "model": "HuggingFaceTB/SmolLM2-1.7B",
+    "model_revision": "effd688a12921b4cc83e3312b6feb579f70f9c71",
+    "model_exact_parameters": 1711376384,
+    "m": 4,
+    "h": 512,
+    "sequence_length": 128,
+    "inner_optimizer": "AdamW",
+    "inner_learning_rate": 0.001,
+    "outer_optimizer": "raw production Nesterov",
+    "outer_bias_correction": false,
+    "matrix_merge": "RDA",
+    "merge_alpha": 0.5,
+    "fixed_window_microsteps": 512,
+    "fixed_window_tokens": 65536,
+    "strict_quorum": true,
+    "barrier_sync": true,
+    "version_matched_anchor": true,
+    "rho_telemetry": true,
+    "development_eval_rows": 1024,
+    "primary_outcome": "finite fixed-development evaluation NLL per trained token",
+    "input_binding": "The v4b manifest copies the complete materialized input ledger from the hash-bound v4 manifest."
+  },
+  "frozen_analysis": {
+    "input_evidence": "Load all 48 valid v4 cells and all 18 valid v4b cells. Attempt 2, if present under registered loss-blind authority, replaces attempt 1. Any missing, invalid, overlapping, or hash-mismatched cell makes G4b NOT_EVALUABLE.",
+    "curve_model": "For each curve fit loss=a*x^2+b*x+c by ordinary least squares to the three-seed mean at each registered eta, where x=log2(eta).",
+    "curve_point_counts": {
+      "S2560_mu0": "the unchanged original four-point v4 grid",
+      "S2560_mu0.9": "the six-point combined v4+v4b grid",
+      "S10240_mu0": "the six-point combined v4+v4b grid",
+      "S10240_mu0.9": "the six-point combined v4+v4b grid"
+    },
+    "interior_rule": "a>0 and min(grid)+1e-12 < -b/(2a) < max(grid)-1e-12 in log2 eta. Nonpositive curvature, boundary, or outside vertices are UNBRACKETED.",
+    "D_definition": "D_obs(T)=[eta_star(mu=0.9,T)/eta_star(mu=0,T)]/(1-0.9)",
+    "bootstrap": {
+      "method": "paired nonparametric training-seed curve bootstrap",
+      "pairing": "One common three-index draw with replacement is applied to every eta and all four curve refits.",
+      "replicates": 10000,
+      "rng_seed": 20260726,
+      "minimum_valid_interior_refits": 9500,
+      "invalid_draw": "A draw is invalid if any of the four curve vertices is not interior or either D is nonpositive.",
+      "D_intervals": "Equal-tailed percentile 95% intervals in log2 D, exponentiated for the reported D-scale endpoints.",
+      "monotone_coordinate": "log2 D(T=5)-log2 D(T=20)",
+      "monotone_interval": "Equal-tailed percentile 95% CI over the same all-four-valid paired draws."
+    }
+  },
+  "gate_G4b": {
+    "gate_id": "G4b_combined_downward_extension",
+    "evaluable_requirements": [
+      "all 48 v4 cells and all 18 v4b cells have valid hash-bound COMPLETED evidence",
+      "all four pooled combined-evidence quadratic optima are INTERIOR",
+      "at least 9500 of 10000 shared paired-bootstrap all-four refits are valid"
+    ],
+    "pass_conditions_all_required": [
+      "D_obs(T=5) is in [1.7,3.2] inclusive",
+      "D_obs(T=20) is in [0.8,1.5] inclusive",
+      "the paired 95% bootstrap CI for log2 D(T=5)-log2 D(T=20) has lower endpoint > 0"
+    ],
+    "failure_rule": "Complete evaluable combined evidence that violates any pass condition is FAIL.",
+    "not_evaluable_rule": "Any failed evaluability requirement is NOT_EVALUABLE.",
+    "verdicts": ["PASS", "FAIL", "NOT_EVALUABLE"],
+    "note_line": "G4B VERDICT: <PASS|FAIL|NOT_EVALUABLE> D5=<point [low,high]|NA [NA,NA]> D20=<point [low,high]|NA [NA,NA]>",
+    "readout_path": "/root/g4b-readout.json",
+    "note_path": "/private/tmp/h200-v4b-note.md"
+  },
+  "frozen_analyzer": {
+    "path": "scripts/analyze_v4b.py",
+    "sha256": "9a6bd4110b55a5487501ab4b32eef205854400dd8735c83c88dd7580951cbab5",
+    "freeze_event": "This raw file hash is recorded in both preregistration artifacts before git commit, Mac push, launch-manifest construction, launch authority, and any v4b GPU work."
+  },
+  "launch_machinery": {
+    "manifest_builder": "scripts/build_v4b_launch_manifest.py",
+    "slot_controller": "scripts/run_slot_g4b.py",
+    "launch_authorizer": "scripts/authorize_v4b_launch.py",
+    "retry_authorizer": "scripts/authorize_v4b_retry.py",
+    "slot_snapshot": "scripts/capture_v4b_v5_slot_snapshot.py",
+    "fleet_coordinator": "scripts/coordinate_v4b_v5.py",
+    "execution_commit_rule": "Both nodes execute at the clean pushed v4b registration commit; pushes originate only from the Mac clone.",
+    "registration_before_launch": true
+  },
+  "fleet_coordination": {
+    "v5_status_at_registration_check": "The v5 result symlinks existed on both nodes but contained zero evidence cells and no launch artifacts; no v5 slot controller was active.",
+    "required_preclaim_snapshot": "Immediately before authority, capture tmux sessions, all run_slot processes, compute processes, and per-GPU memory/utilization on both nodes; launch requires PASS.",
+    "v4b_initial_slots": "GPU 0..5 on each node. The 12 S=10240 cells are one-per-slot and first in every queue.",
+    "v5_initial_slots": "GPU 6..7 on each node begin v5 immediately.",
+    "handoff": "On GPU 0..5, that GPU's v5 queue starts only after its v4b controller exits and releases the GPU. No v4b and v5 scientific process may overlap on one GPU.",
+    "v4b_short_cells": "The six S=2560 cells are second behind long cells on six deterministically assigned v4b queues.",
+    "v5_planning_duration": "approximately 10 minutes per cell; this estimate affects scheduling only and never analysis or retry decisions",
+    "do_not_disturb_v5": true
+  },
+  "evidence_contract": {
+    "inheritance": "The v4 validator requirements apply unchanged: exact command hash and source commit, immutable attempt records, complete learner and strict-quorum steps, tape and rho telemetry rows, finite 1024-row endpoint evaluation, clean git evidence, and artifact hashes.",
+    "partial_work_never_counts": true,
+    "scientific_divergence_retained": true,
+    "heartbeat_seconds": 30,
+    "watchdogs_minutes": {
+      "S2560": 180,
+      "S10240": 420
+    }
+  },
+  "retry_contract": {
+    "maximum_attempts": 2,
+    "unit": "both new eta cells for one T-by-mu-by-seed extension curve",
+    "loss_blind": true,
+    "allowed_reasons": [
+      "preempted_or_lost_host",
+      "hardware_failure",
+      "process_exit_before_scientific_divergence",
+      "missing_or_checksum_invalid_artifact",
+      "loss_blind_validator_failure"
+    ],
+    "forbidden": "No retry for finite unfavorable loss, an edge optimum, scientific divergence, or any outcome-dependent reason. Attempt 2 replaces attempt 1 for both new cells in an authorized group.",
+    "wall_extension_forbidden": true
+  },
+  "wall_clock": {
+    "ceiling_seconds": 43200,
+    "ceiling_hours": 12,
+    "start_event": "immutable v4b launch authority creation immediately before coordinated slot launch",
+    "stop_rule": "At the deadline, controllers terminate only recorded scientific process groups and seal remaining registered cells as NOT_RUN_WALL_CEILING."
+  },
+  "storage": {
+    "result_root": "/root/yeto-results-v4b",
+    "required_target": "/data/yeto-results-v4b",
+    "required_form": "new symlink /root/yeto-results-v4b -> /data/yeto-results-v4b on each node",
+    "minimum_free_bytes_at_preflight": 1000000000000,
+    "prior_result_rule": "v1, v2, v3, v4, v5, explore, and all other prior result trees are read-only and are never modified, moved, deleted, or reused. Any cross-node analysis mirror is created only inside the new v4b tree."
+  },
+  "operational_rails": {
+    "cloud": "No GCP resources or commands. No cloud provisioning is part of this lane.",
+    "process_control": "Normal termination targets recorded process groups. Wildcard pkill is forbidden; if process-name matching is unavoidable use a bracketed pattern.",
+    "git": "Registration commit and push originate from the Mac clone. Nodes only fast-forward pull the pushed commit and execute with clean worktrees.",
+    "prior_results": "Never touch prior result trees; v4 and G4 evidence are read-only inputs.",
+    "launch_order": "Commit and push both preregistration files and the analyzer hash before creating any v4b manifest, authority, attempt directory, or GPU process."
+  }
+}
