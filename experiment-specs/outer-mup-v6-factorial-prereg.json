@@ -1,0 +1,265 @@
+{
+  "analysis_contract": {
+    "D_definition": "For arm in {raw,corrected}, D(T,S,arm)=[eta_star(T,S,arm)/eta_star(T,S,mu0)]/(1-0.9). The mu0 reference has structural D=1 and is not given a fitted response surface.",
+    "eta_star_estimator": {
+      "boundary_tolerance_log2": 1e-12,
+      "coordinate": "x=log2(eta)",
+      "curve": "loss=a*x^2+b*x+c fitted to the five exact registered eta values using the five-seed mean endpoint loss",
+      "interior_rule": "a>0 and min(grid)+1e-12 < -b/(2a) < max(grid)-1e-12",
+      "unbracketed_rule": "nonpositive curvature or boundary/outside vertex is UNBRACKETED; no point may be dropped and no ladder may be extended after outcomes"
+    },
+    "joint_bootstrap": {
+      "gate_role": "evaluable only if at least 9500 of 10000 joint refits retain all 36 interior eta optima",
+      "method": "paired nonparametric training-seed bootstrap; one shared five-index resample refits all 36 eta curves, both eight-cell surfaces, and all held-out errors",
+      "minimum_valid_replicates": 9500,
+      "replicates": 10000,
+      "rng_seed": 20260727
+    },
+    "missing_or_nonfinite_rule": "any required missing, invalid, or nonfinite cell makes G6 NOT_EVALUABLE rather than excludable",
+    "primary_outcome": "finite fixed-development endpoint NLL per trained token"
+  },
+  "authority": {
+    "amendment_rule": "no outcome-aware amendment, recentering, ladder extension, holdout substitution, or surface-family change; a pre-outcome mechanical amendment requires a new pushed commit and new raw hashes",
+    "contract_kind": "prospective full-factorial code, execution, and held-out analysis contract",
+    "launch_manifest_requirements": [
+      "clean pushed registration commit",
+      "raw sha256 of both contract files and frozen analyzer",
+      "exact source commit and branch",
+      "exact materialized input manifests and every referenced input hash",
+      "canonical sha256 of every attempt-1 and registered attempt-2 command",
+      "PASS gate proof showing v4 48/48 evidence, zero run_slot_v4 processes on both nodes, and a G5 VERDICT line in the v5 note"
+    ],
+    "node_execution_commit": "all 900 cells execute at the pushed v6 registration commit on both nodes",
+    "prior_records_immutable": "v1-v5 and exploratory result trees are read-only to v6",
+    "unregistered_cell_launch_forbidden": true
+  },
+  "center_models": {
+    "corrected_mu0.9": {
+      "center_rule": "eta_center=0.1*kappa(T,H)*mu0_center",
+      "coefficients": {
+        "beta_0": -0.2033959883796063,
+        "beta_H_log2_H_over_512": -0.10681443714765025,
+        "beta_T_times_T_minus_5": -0.046919366440622
+      },
+      "family": "log2(kappa)=beta_0+beta_T*(T-5)+beta_H*log2(H/512)",
+      "interpretation": "empirical centering model only. It decomposes the measured corrected drift into commit-horizon and local-window components. The common-rho/equal-displacement mechanism was rejected by the two-parameter audit and is not claimed here.",
+      "measured_inputs": [
+        {"D_corrected": 0.9552656777082903, "H": 512, "S": 1024, "T": 2, "source": "v3"},
+        {"D_corrected": 0.8615170030442565, "H": 512, "S": 2560, "T": 5, "source": "v3"},
+        {"D_corrected": 0.7480014394580564, "H": 512, "S": 5120, "T": 10, "source": "v3"},
+        {"D_corrected": 0.5306260060759194, "H": 512, "S": 10240, "T": 20, "source": "v3"},
+        {"D_corrected": 0.8098645298292242, "H": 1024, "S": 5120, "T": 5, "source": "disambiguation"},
+        {"D_corrected": 0.7474213456307855, "H": 2048, "S": 10240, "T": 5, "source": "disambiguation"}
+      ]
+    },
+    "mu0": {
+      "center_rule": "at target 135M, eta0_center=2^(beta_0+beta_S*log2(S/2560)+beta_H*log2(H/512)); the model-size coordinate is zero",
+      "coefficients": {
+        "beta_0": -4.4106518295376675,
+        "beta_H_log2_H_over_512": 0.4886611783077774,
+        "beta_P_log2_parameters_over_135M": -0.17417236407974745,
+        "beta_S_log2_S_over_2560": -0.4505983838816392
+      },
+      "family": "log2(eta0)=beta_0+beta_S*log2(S/2560)+beta_H*log2(H/512)+beta_P*log2(parameters_M/135)",
+      "interpretation": "log-linear interpolation/extrapolation in S and H. The separate parameter-scale coefficient lets the v4 1.7B pilot inform scale without treating a 1.7B eta as a 135M target observation.",
+      "measured_inputs": [
+        {"H": 512, "S": 1024, "eta_star_mu0": 0.0776652631882608, "parameters_M": 135, "source": "v3"},
+        {"H": 512, "S": 2560, "eta_star_mu0": 0.04368465066797047, "parameters_M": 135, "source": "v3"},
+        {"H": 512, "S": 5120, "eta_star_mu0": 0.03225158464510704, "parameters_M": 135, "source": "v3"},
+        {"H": 512, "S": 10240, "eta_star_mu0": 0.027577613352998832, "parameters_M": 135, "source": "v3"},
+        {"H": 1024, "S": 5120, "eta_star_mu0": 0.04438591338300168, "parameters_M": 135, "source": "disambiguation"},
+        {"H": 2048, "S": 10240, "eta_star_mu0": 0.05169098104822205, "parameters_M": 135, "source": "disambiguation"},
+        {"H": 512, "S": 2560, "eta_star_mu0": 0.030244878343039974, "parameters_M": 1700, "source": "v4 1.7B center pilot"}
+      ]
+    },
+    "provenance": {
+      "disambiguation_analyzer_sha256": "32dba875a27590b52bcfac8c681434c0bc8ec41669c4417457d01292d99cf67f",
+      "disambiguation_complete_cells": 72,
+      "disambiguation_evidence_registry_sha256": "14e4b2c729f19a871aa1ffea9679595c9d1a1141998f827fa77c4ec5ca42671c",
+      "disambiguation_manifest_sha256": "b1466effd10e48077990fe678b140ee86a16e2edc771b26aff7608a172834651",
+      "g3_readout_sha256": "d4a3cde6aa47580dff255c7a66030ab997a95f4072b1883bf71aa54d7da744c8",
+      "two_parameter_analysis_sha256": "22d18796d51f6b4413dce22feee4444b247c4c9d7f3005409767c707cd3efb22",
+      "two_parameter_report_sha256": "765c9ce0104c9bb8f82dcb3a1fb8cf8393f80152bfc2eea8f7b9c0c3b11f9f77",
+      "v4_center_pilot_readout_sha256": "bc49135ba53c8accb052bf6cc4441f3bd261419c8ff56e4b45bb845dccfe3014"
+    },
+    "raw_mu0.9": {
+      "center_rule": "eta_center=0.1*D_code_true(T)*mu0_center",
+      "family": "D_code_true(T)=1/(1-0.9^(T+1))",
+      "interpretation": "constant-gradient terminal code-true Nesterov multiplier; the wide ladder, not an outcome-aware shift, absorbs observed departures"
+    }
+  },
+  "closed_vocabularies": {
+    "cell_status": ["PLANNED", "RUNNING", "COMPLETED", "SCIENTIFIC_DIVERGENCE", "INFRA_FAILURE", "INVALID_WORK", "NOT_RUN_WALL_CEILING"],
+    "gate_verdict": ["PASS", "FAIL", "NOT_EVALUABLE"]
+  },
+  "common_protocol": {
+    "barrier_sync": true,
+    "delta_correction": "none",
+    "development_eval_rows": 1024,
+    "fragment_count": 4,
+    "fragment_pattern": "binpack",
+    "gradient_accumulation": 1,
+    "inner_learning_rate": 0.001,
+    "inner_optimizer": "AdamW",
+    "inner_warmup_steps": 10,
+    "inner_weight_decay": 0.01,
+    "learner_count": 4,
+    "matrix_merge": "RDA",
+    "merge_alpha": 0.5,
+    "micro_batch_size": 1,
+    "model": "HuggingFaceTB/SmolLM2-135M",
+    "model_revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2",
+    "outer_optimizer": "production Nesterov",
+    "pipeline_depth": 4,
+    "rho_telemetry": true,
+    "sequence_length": 128,
+    "strict_quorum": true,
+    "train_on": "assistant",
+    "tuning": "full parameter",
+    "version_matched_anchor": true,
+    "wan_streams": 0,
+    "wire_dtype": "bf16",
+    "zero_injected_delay_and_jitter": true
+  },
+  "design": {
+    "arms": [
+      {"arm": "mu0", "mu": 0.0, "outer_bias_correction": false},
+      {"arm": "raw", "mu": 0.9, "outer_bias_correction": false},
+      {"arm": "corrected", "mu": 0.9, "outer_bias_correction": true}
+    ],
+    "cell_count": "12 (T,S) * 3 arms * 5 etas * 5 seeds = 900",
+    "eta_grid": {
+      "adjacent_ratio": "sqrt(2)",
+      "log2_offsets": [-1.0, -0.5, 0.0, 0.5, 1.0],
+      "multipliers": [0.5, 0.7071067811865476, 1.0, 1.4142135623730951, 2.0],
+      "point_count": 5,
+      "span": "center/2 through 2*center (4x endpoint-to-endpoint)",
+      "wide_grid_rationale": "three preceding campaigns lost evaluability to boundary/nonconvex fits; all v6 ladders are symmetric, prospectively wide, and immutable"
+    },
+    "factorial_cells": [
+      {"H": 1280, "S": 2560, "T": 2, "code_true_D": 3.690036900369005, "kappa_model": 0.8682371781021916, "eta_grids": {"corrected": {"center": 0.006387894147146426, "etas": [0.003193947073573213, 0.004516923268949096, 0.006387894147146426, 0.009033846537898191, 0.012775788294292852]}, "mu0": {"center": 0.07357314692638708, "etas": [0.03678657346319354, 0.052024071104882504, 0.07357314692638708, 0.10404814220976501, 0.14714629385277417]}, "raw": {"center": 0.027148762703463877, "etas": [0.013574381351731939, 0.019197074208443736, 0.027148762703463877, 0.03839414841688747, 0.054297525406927755]}}},
+      {"H": 2560, "S": 5120, "T": 2, "code_true_D": 3.690036900369005, "kappa_model": 0.8062765501970927, "eta_grids": {"corrected": {"center": 0.0060906185963945335, "etas": [0.0030453092981972667, 0.004306717711131467, 0.0060906185963945335, 0.008613435422262934, 0.012181237192789067]}, "mu0": {"center": 0.07554006866385601, "etas": [0.03777003433192801, 0.05341489480351001, 0.07554006866385601, 0.10682978960702003, 0.15108013732771203]}, "raw": {"center": 0.027874564082603703, "etas": [0.013937282041301851, 0.019710293285428053, 0.027874564082603703, 0.039420586570856106, 0.055749128165207405]}}},
+      {"H": 5120, "S": 10240, "T": 2, "code_true_D": 3.690036900369005, "kappa_model": 0.7487376626956765, "eta_grids": {"corrected": {"center": 0.005807177456645573, "etas": [0.0029035887283227865, 0.004106294559147733, 0.005807177456645573, 0.008212589118295466, 0.011614354913291146]}, "mu0": {"center": 0.07755957454761953, "etas": [0.03877978727380976, 0.05484290110856532, 0.07755957454761953, 0.10968580221713065, 0.15511914909523905]}, "raw": {"center": 0.02861976920576367, "etas": [0.014309884602881835, 0.020237232881389424, 0.02861976920576367, 0.04047446576277885, 0.05723953841152734]}}},
+      {"H": 512, "S": 2560, "T": 5, "code_true_D": 2.1342029498953177, "kappa_model": 0.8685037670560934, "eta_grids": {"corrected": {"center": 0.004083506068958447, "etas": [0.0020417530344792236, 0.0028874748323769396, 0.004083506068958447, 0.005774949664753879, 0.008167012137916894]}, "mu0": {"center": 0.04701771280509263, "etas": [0.023508856402546314, 0.033246543560362565, 0.04701771280509263, 0.06649308712072513, 0.09403542561018526]}, "raw": {"center": 0.010034534136595955, "etas": [0.005017267068297977, 0.007095487134034898, 0.010034534136595955, 0.014190974268069796, 0.02006906827319191]}}},
+      {"H": 1024, "S": 5120, "T": 5, "code_true_D": 2.1342029498953177, "kappa_model": 0.8065241143736721, "eta_grids": {"corrected": {"center": 0.0038934705912743667, "etas": [0.0019467352956371834, 0.0027530994574405014, 0.0038934705912743667, 0.005506198914881003, 0.007786941182548733]}, "mu0": {"center": 0.04827469534866847, "etas": [0.024137347674334234, 0.03413536444075816, 0.04827469534866847, 0.06827072888151632, 0.09654939069733694]}, "raw": {"center": 0.010302799721842603, "etas": [0.005151399860921301, 0.00728517954852178, 0.010302799721842603, 0.01457035909704356, 0.020605599443685205]}}},
+      {"H": 2048, "S": 10240, "T": 5, "code_true_D": 2.1342029498953177, "kappa_model": 0.7489675597736631, "eta_grids": {"corrected": {"center": 0.003712278857708397, "etas": [0.0018561394288541986, 0.0026249775539410585, 0.003712278857708397, 0.005249955107882117, 0.007424557715416794]}, "mu0": {"center": 0.049565282357893335, "etas": [0.024782641178946668, 0.03504794726669233, 0.049565282357893335, 0.07009589453338466, 0.09913056471578667]}, "raw": {"center": 0.01057823718206103, "etas": [0.005289118591030515, 0.0074799432444350306, 0.01057823718206103, 0.014959886488870061, 0.02115647436412206]}}},
+      {"H": 256, "S": 2560, "T": 10, "code_true_D": 1.4573235819467116, "kappa_model": 0.7948869602991975, "eta_grids": {"corrected": {"center": 0.002663576650783931, "etas": [0.0013317883253919655, 0.0018834331119794703, 0.002663576650783931, 0.0037668662239589406, 0.005327153301567862]}, "mu0": {"center": 0.03350887338473075, "etas": [0.016754436692365374, 0.023694351600264535, 0.03350887338473075, 0.04738870320052907, 0.0670177467694615]}, "raw": {"center": 0.004883327138803465, "etas": [0.0024416635694017325, 0.0034530337346002312, 0.004883327138803465, 0.0069060674692004624, 0.00976665427760693]}}},
+      {"H": 512, "S": 5120, "T": 10, "code_true_D": 1.4573235819467116, "kappa_model": 0.7381608762107816, "eta_grids": {"corrected": {"center": 0.002539620899860068, "etas": [0.001269810449930034, 0.0017957831599341363, 0.002539620899860068, 0.0035915663198682725, 0.005079241799720136]}, "mu0": {"center": 0.03440470745207688, "etas": [0.01720235372603844, 0.02432780194410291, 0.03440470745207688, 0.04865560388820582, 0.06880941490415377]}, "raw": {"center": 0.005013879149988941, "etas": [0.0025069395749944706, 0.0035453479470070235, 0.005013879149988941, 0.007090695894014047, 0.010027758299977882]}}},
+      {"H": 1024, "S": 10240, "T": 10, "code_true_D": 1.4573235819467116, "kappa_model": 0.6854829760487884, "eta_grids": {"corrected": {"center": 0.0024214337188711394, "etas": [0.0012107168594355697, 0.001712212202807543, 0.0024214337188711394, 0.003424424405615086, 0.004842867437742279]}, "mu0": {"center": 0.035324490957143725, "etas": [0.017662245478571863, 0.024978187097759206, 0.035324490957143725, 0.04995637419551841, 0.07064898191428745]}, "raw": {"center": 0.0051479213692108925, "etas": [0.0025739606846054463, 0.0036401301091841588, 0.0051479213692108925, 0.0072802602183683176, 0.010295842738421785]}}},
+      {"H": 128, "S": 2560, "T": 20, "code_true_D": 1.1228624771875697, "kappa_model": 0.6183272058043529, "eta_grids": {"corrected": {"center": 0.0014766463953164444, "etas": [0.0007383231976582222, 0.0010441466795429292, 0.0014766463953164444, 0.0020882933590858585, 0.0029532927906328887]}, "mu0": {"center": 0.0238813104365276, "etas": [0.0119406552182638, 0.016886636553289737, 0.0238813104365276, 0.033773273106579474, 0.0477626208730552]}, "raw": {"center": 0.0026815427395244745, "etas": [0.0013407713697622373, 0.0018961370551593079, 0.0026815427395244745, 0.0037922741103186158, 0.005363085479048949]}}},
+      {"H": 256, "S": 5120, "T": 20, "code_true_D": 1.1228624771875697, "kappa_model": 0.5742010811822928, "eta_grids": {"corrected": {"center": 0.0014079272117605325, "etas": [0.0007039636058802663, 0.0009955548788529408, 0.0014079272117605325, 0.0019911097577058816, 0.002815854423521065]}, "mu0": {"center": 0.024519758981672045, "etas": [0.012259879490836022, 0.01733808784900006, 0.024519758981672045, 0.03467617569800012, 0.04903951796334409]}, "raw": {"center": 0.0027532317310202436, "etas": [0.0013766158655101218, 0.001946828827182391, 0.0027532317310202436, 0.003893657654364782, 0.005506463462040487]}}},
+      {"H": 512, "S": 10240, "T": 20, "code_true_D": 1.1228624771875697, "kappa_model": 0.5332239606083866, "eta_grids": {"corrected": {"center": 0.0013424060356650182, "etas": [0.0006712030178325091, 0.0009492244109244848, 0.0013424060356650182, 0.0018984488218489696, 0.0026848120713300365]}, "mu0": {"center": 0.025175275959718465, "etas": [0.012587637979859232, 0.017801608349359597, 0.025175275959718465, 0.035603216698719194, 0.05035055191943693]}, "raw": {"center": 0.002826837272801015, "etas": [0.0014134186364005074, 0.0019988758049084843, 0.002826837272801015, 0.0039977516098169685, 0.00565367454560203]}}}
+    ],
+    "seeds": [601, 607, 613, 617, 619],
+    "s_grid": [2560, 5120, 10240],
+    "t_grid": [2, 5, 10, 20]
+  },
+  "evidence_contract": {
+    "completed_cell_requires": [
+      "exact registered command hash and clean pushed source commit",
+      "immutable attempt id plus start/end records",
+      "exact S learner steps for each of four learners",
+      "exact 4*T strict-quorum tape rows with every responder c_steps=H and c_tokens=128*H",
+      "one valid yeto_rho_telemetry_v1 row per outer commit",
+      "finite 1024-row endpoint loss and successful learner/syncer exits",
+      "checkpoint, per-example loss, evaluation provenance, result, tape, telemetry, command, git commit, and git diff evidence hashes"
+    ],
+    "heartbeat_seconds": 30,
+    "partial_work_never_counts": true,
+    "scientific_divergence_retained": true,
+    "watchdogs_minutes": {"S10240": 360, "S2560": 180, "S5120": 240}
+  },
+  "frozen_analyzer": {
+    "freeze_rule": "committed and pushed before any v6 scientific process; outcome-aware edits forbidden; identical bytes distributed to both node control planes",
+    "path": "scripts/analyze_v6.py",
+    "sha256": "4862681e6d7dbbf55e95ae45e15e0a0170e5a35a17a73f0df01240951b576f1a"
+  },
+  "heldout_prediction": {
+    "gate_G6": {
+      "failure_rule": "complete bracketed evidence with either momentum arm succeeding on fewer than three held-out cells is FAIL",
+      "not_evaluable_rule": "missing/invalid cell evidence, any of 36 unbracketed optima, singular surface fit, or fewer than 9500 valid joint bootstrap refits is NOT_EVALUABLE",
+      "pass_rule": "each of raw and corrected independently has |log2(D_pred)-log2(D_obs)| <= 0.2 on at least 3 of its 4 held-out cells",
+      "verdicts": ["PASS", "FAIL", "NOT_EVALUABLE"]
+    },
+    "heldout_cells": [[2, 10240], [5, 5120], [10, 2560], [20, 5120]],
+    "response_arms": ["raw", "corrected"],
+    "structural_reference": "mu0 has D=1 by definition and is excluded from the nontrivial response-surface gate",
+    "success_band_bits": 0.2,
+    "surface_family": "per momentum arm: log2(D)=beta0+beta_T*log2(T/5)+beta_S*log2(S/5120)+beta_TS*log2(T/5)*log2(S/5120)",
+    "training_cells": [[2, 2560], [2, 5120], [5, 2560], [5, 10240], [10, 5120], [10, 10240], [20, 2560], [20, 10240]]
+  },
+  "machine_inputs": {
+    "input_builder": {"path": "scripts/prepare_inputs_v6.py", "sha256": "9e514fa54ae64d7e558be53f703db155e12135185d44a94a37ebcb18794e6c80"},
+    "input_manifest": {"path": "/root/yeto-data/outer-mup-v6/input-manifest.json", "schema": "yeto_outer_mup_v6_inputs_v1", "sha256": "b260be9ee97ebf19ca897d5a8ca638ec05527d40f31d989b22a760d2d75d6b47"},
+    "model": {
+      "files": {
+        "config.json": {"bytes": 704, "sha256": "1d556eab73b69c7f11f64c557a2f9c6f440bd4c6b89bb2584a6b498c92603843"},
+        "generation_config.json": {"bytes": 111, "sha256": "2056c988e990b0d13670f63f2f3b87b3b6d07edaf7a3416998ba27dab2d8a059"},
+        "merges.txt": {"bytes": 466391, "sha256": "0b54e8aa4e53d5383e2e4bc635a56b43f9647f7b13832d5d9ecd8f82dac4f510"},
+        "model-id.txt": {"bytes": 27, "sha256": "658bb1a9a4cd06ae39e30e597bd9585330a0da295e265e2a99ec9f207a3b8424"},
+        "model-revision.txt": {"bytes": 41, "sha256": "c701d5cd6ed2c1d78e9fbfae6f5f09a08b8759be48cffb2bbf8c8246ba6f1d40"},
+        "model.safetensors": {"bytes": 269060552, "sha256": "80521b40281d6ce74e35c9282c22539e75aa0ac8578892b2a59955ef78d55da1"},
+        "special_tokens_map.json": {"bytes": 831, "sha256": "e786b595b9a23148bf1630df78d9037a048ea671e48bfd3549a1e3c233742bb3"},
+        "tokenizer.json": {"bytes": 2104556, "sha256": "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c"},
+        "tokenizer_config.json": {"bytes": 3658, "sha256": "4bb9af56a342753d39374f4016a16574cab299fe088e896f425ce3c433f61424"},
+        "vocab.json": {"bytes": 800662, "sha256": "82b84012e3add4d01d12ba14442026e49b8cbbaead1f79ecf3d919784f82dc79"}
+      },
+      "id": "HuggingFaceTB/SmolLM2-135M",
+      "path": "/root/yeto-data/model",
+      "revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2"
+    },
+    "token_capacity": {
+      "minimum_complete_blocks": 26399,
+      "minimum_learner": 1,
+      "minimum_seed": 617,
+      "required_complete_blocks": 10240,
+      "report_path": "/root/yeto-data/outer-mup-v6/token-counts-smollm2.json",
+      "report_sha256": "9e06988092409f1e8c8449425a7348dad2a8f3c22d6a52a6397a69e53ea88a59",
+      "status": "PASS",
+      "verifier": {"path": "scripts/verify_inputs_v6.py", "sha256": "a1ab3b818deff7b1e0e6c278f4cae61021e1236862764c939079bb18cf8c6ccc"}
+    }
+  },
+  "objective": "Measure the joint T x S dependence of raw and bias-corrected outer Nesterov at 135M/M=4, and prospectively test whether an interaction response surface trained on eight factorial coordinates predicts four registered held-out coordinates.",
+  "retry_contract": {
+    "allowed_reasons": ["node_reboot", "gpu_xid_or_ecc", "filesystem_or_network_io", "controller_or_process_failure_before_valid_completion"],
+    "attempt_limit": 2,
+    "poor_finite_loss_retry_forbidden": true,
+    "scope": "loss-blind whole paired-seed curve group T,S,arm,seed: all five etas retry together under a separately hash-bound authority; no individual eta retry"
+  },
+  "runner_and_data_feasibility": {
+    "empirically_completed_H": [16, 64, 256, 512, 1024, 2048],
+    "fixed_window_code_audit": "learner and compare_diloco parsers require only positive integer fixed-window microsteps/tokens and impose no upper H cap; command contract sets learner_max_steps=S and syncer_total_steps=4*T",
+    "infeasible_cells": [],
+    "requested_H_set": [128, 256, 512, 1024, 1280, 2048, 2560, 5120],
+    "requested_cells": [
+      {"H": 1280, "S": 2560, "T": 2}, {"H": 2560, "S": 5120, "T": 2}, {"H": 5120, "S": 10240, "T": 2},
+      {"H": 512, "S": 2560, "T": 5}, {"H": 1024, "S": 5120, "T": 5}, {"H": 2048, "S": 10240, "T": 5},
+      {"H": 256, "S": 2560, "T": 10}, {"H": 512, "S": 5120, "T": 10}, {"H": 1024, "S": 10240, "T": 10},
+      {"H": 128, "S": 2560, "T": 20}, {"H": 256, "S": 5120, "T": 20}, {"H": 512, "S": 10240, "T": 20}
+    ],
+    "verification": "S%T=0, H=S/T, S%H=0, S/H=T for all 12 cells; fixed-window tokens=128*H; each learner has at least 26399 complete blocks and uses at most 10240"
+  },
+  "schema": "yeto_outer_mup_v6_factorial_prereg_v1",
+  "storage": {
+    "minimum_free_bytes_at_preflight": 1000000000000,
+    "result_link": "/root/yeto-results-v6",
+    "result_target": "/data/yeto-results-v6",
+    "volume": "the v4-discovered XFS LVM mounted at /data on each node (approximately 27.9 TB total per node)"
+  },
+  "wall_clock": {
+    "ceiling_hours": 30,
+    "ceiling_seconds": 108000,
+    "measurement": "launch-authority creation immediately before slot-controller start through final immutable evidence seal, including retries and analysis",
+    "on_breach": "terminate remaining process groups, retain every attempt, mark unstarted cells NOT_RUN_WALL_CEILING, and report G6 NOT_EVALUABLE; never extend after outcomes"
+  },
+  "workflow_gates": {
+    "launch_requires_all": [
+      "v4 has 48 unique COMPLETED evidence cells across h200-n1/n2",
+      "pgrep -af '[r]un_slot_v4.py' is empty on h200-n1 and h200-n2",
+      "/private/tmp/h200-snoofix-note.md contains a line beginning G5 VERDICT"
+    ],
+    "poll_cadence_seconds": 600,
+    "preflight_and_registration_allowed_while_waiting": true,
+    "v6_gpu_launch_forbidden_while_waiting": true
+  }
+}
