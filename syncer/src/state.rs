@@ -4,6 +4,7 @@
 use anyhow::{bail, Result};
 
 use crate::merge;
+use crate::outer_lr_controller::{self, BoundController, ControllerMode, ScaleOutput};
 use crate::protocol::Reader;
 
 pub const MERGE_AVG: u8 = 0;
@@ -89,11 +90,21 @@ pub struct MergeStats {
     /// L2 norm of the merged pseudo-gradient before the outer optimizer.
     pub gnorm: f64,
     pub outer: merge::OuterStepStats,
-    /// Finite-horizon outer bias-correction multiplier `1/(1 - mu^(t+1))`
-    /// applied to this commit's outer step (v3 arm B). `None` whenever the
-    /// opt-in `--outer-bias-correction` flag is off, so the default event
-    /// tape schema stays byte-identical to the pre-flag production path.
+    /// Finite-horizon transient multiplier `1/(1 - mu^(t+1))`. Present for
+    /// the legacy `--outer-bias-correction` alias and explicit transient or
+    /// measured-drift modes; absent on the default and oracle paths.
     pub outer_bias_correction: Option<f64>,
+    /// Full age-aware controller output. Absent on the default production
+    /// path; present for the legacy transient alias and all explicit modes.
+    pub outer_lr_controller: Option<OuterLrControllerStats>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OuterLrControllerStats {
+    pub mode: ControllerMode,
+    pub scale: f64,
+    pub transient_scale: Option<f64>,
+    pub drift_scale: Option<f64>,
 }
 
 /// One validated learner candidate presented to the deterministic merge API.
@@ -437,6 +448,22 @@ fn compute_action_fingerprint(preview: &ActionPreview) -> [u64; 2] {
     mix_optional_f64(&mut hash, preview.stats.outer.direction_delta_cosine);
     mix_optional_f64(&mut hash, preview.stats.outer.history_current_norm_ratio);
     mix_action_fingerprint(&mut hash, preview.stats.outer.restarted as u64);
+    if let Some(controller) = preview.stats.outer_lr_controller {
+        // Appended only for opt-in controller paths so default action
+        // fingerprints remain byte-identical to the pre-controller schema.
+        mix_action_fingerprint(&mut hash, 0x6f75_7465_725f_6c72);
+        mix_action_fingerprint(
+            &mut hash,
+            match controller.mode {
+                ControllerMode::Transient => 0,
+                ControllerMode::MeasuredDrift => 1,
+                ControllerMode::Oracle => 2,
+            },
+        );
+        mix_action_fingerprint(&mut hash, controller.scale.to_bits());
+        mix_optional_f64(&mut hash, controller.transient_scale);
+        mix_optional_f64(&mut hash, controller.drift_scale);
+    }
     mix_action_fingerprint(&mut hash, preview.resulting_rho_ema.to_bits() as u64);
     mix_action_fingerprint(&mut hash, preview.resulting_capped_mu.to_bits() as u64);
     mix_action_fingerprint(&mut hash, preview.resulting_capped_gain.to_bits() as u64);
@@ -551,7 +578,7 @@ pub struct GlobalState {
     /// the current global (current-anchor). Default false = byte-identical
     /// current-anchor production path. See docs/ANCHOR_DRIFT_CONTROL.md.
     pub version_matched_anchor: bool,
-    /// v3 finite-horizon outer bias correction (opt-in, arm B). When true,
+    /// Legacy v3 finite-horizon outer bias correction (opt-in, arm B). When true,
     /// the applied Nesterov outer step at the fragment's t-th outer commit
     /// (1-indexed) is divided by `1 - mu^(t+1)`. Code-true algebra
     /// (lean-mechanism FiniteHorizonOuter.lean,
@@ -564,6 +591,10 @@ pub struct GlobalState {
     /// commit. Default false = bit-identical to the pre-flag production
     /// path. Requires the plain Nesterov outer optimizer.
     pub outer_bias_correction: bool,
+    /// Explicit age-aware outer-LR controller. The legacy bias-correction bool
+    /// stays separate as a compatibility alias but evaluates through the same
+    /// scalar transient-normalization function.
+    outer_lr_controller: Option<BoundController>,
     /// EXP2.46: retain prior global snapshots and compute per-push anchor-drift
     /// instrumentation even when NOT version-matching, so the current-anchor
     /// arm still reports the drift it injects into every delta. Implied by
@@ -647,9 +678,24 @@ impl GlobalState {
             delta_norm_ref: 0.0,
             version_matched_anchor: false,
             outer_bias_correction: false,
+            outer_lr_controller: None,
             anchor_drift_instrument: false,
             anchor_history,
         }
+    }
+
+    pub fn set_outer_lr_controller(&mut self, controller: BoundController) -> Result<()> {
+        if self.outer_bias_correction {
+            bail!("explicit outer-LR controller conflicts with legacy outer bias correction");
+        }
+        if self.outer_lr_controller.is_some() {
+            bail!("explicit outer-LR controller is already configured");
+        }
+        if self.initialized.iter().any(|initialized| *initialized) {
+            bail!("explicit outer-LR controller must be configured before fragment initialization");
+        }
+        self.outer_lr_controller = Some(controller);
+        Ok(())
     }
 
     /// EXP2.46: is prior-global retention active? Retention feeds both
@@ -936,8 +982,8 @@ impl GlobalState {
         if !self.outer_momentum.is_finite() || !self.outer_restart_cos_threshold.is_finite() {
             bail!("fragment {fid}: outer optimizer configuration is not finite");
         }
-        // v3 finite-horizon outer bias correction (opt-in; default off is
-        // bit-identical because this branch leaves `outer_lr` untouched).
+        // Age-aware outer-LR control (opt-in; default off is bit-identical
+        // because this branch leaves `outer_lr` untouched).
         // Code-true Nesterov (FiniteHorizonOuter.lean,
         // `codeTrue_terminalMultiplier_closed_form`): the t-th outer commit of
         // a fragment applies direction `delta + mu*b_t` whose constant-gradient
@@ -957,7 +1003,12 @@ impl GlobalState {
         // above guarantees base_version == self.versions[fid]. Because
         // `versions` are checkpointed, the correction resumes consistently
         // after a snapshot restore.
-        let bias_correction = if self.outer_bias_correction {
+        let controller_output = if self.outer_bias_correction {
+            if self.outer_lr_controller.is_some() {
+                bail!(
+                    "fragment {fid}: legacy outer bias correction conflicts with explicit outer-LR controller"
+                );
+            }
             if self.outer_optimizer != merge::OuterOptimizer::Nesterov {
                 bail!(
                     "fragment {fid}: outer bias correction requires the nesterov outer optimizer, got {}",
@@ -972,20 +1023,46 @@ impl GlobalState {
             }
             let fragments = self.layout.fragments.len() as u64;
             let t = aggregate.base_version.div_ceil(fragments) + 1;
-            let exponent = (t + 1).min(i32::MAX as u64) as i32;
-            let divisor = 1.0 - f64::from(self.outer_momentum).powi(exponent);
-            if !divisor.is_finite() || divisor <= 0.0 {
-                bail!("fragment {fid}: outer bias correction produced a non-positive divisor");
+            let scale = outer_lr_controller::transient_normalization_scale(
+                f64::from(self.outer_momentum),
+                t,
+            )?;
+            Some(ScaleOutput {
+                scale,
+                transient_scale: Some(scale),
+                drift_scale: None,
+            })
+        } else if let Some(controller) = &self.outer_lr_controller {
+            if controller.mode().uses_transient_normalization()
+                && self.outer_optimizer != merge::OuterOptimizer::Nesterov
+            {
+                bail!(
+                    "fragment {fid}: outer-LR controller {} requires the nesterov outer optimizer, got {}",
+                    controller.mode().as_str(),
+                    self.outer_optimizer
+                );
             }
-            Some(1.0 / divisor)
+            let fragments = self.layout.fragments.len() as u64;
+            let t = aggregate.base_version.div_ceil(fragments) + 1;
+            Some(controller.scale_for_fragment(self.outer_momentum, fid, t)?)
         } else {
             None
         };
-        let outer_lr = match bias_correction {
-            Some(scale) => {
-                let corrected = (f64::from(outer_lr) * scale) as f32;
+        let controller_stats = controller_output.map(|output| OuterLrControllerStats {
+            mode: self
+                .outer_lr_controller
+                .as_ref()
+                .map_or(ControllerMode::Transient, BoundController::mode),
+            scale: output.scale,
+            transient_scale: output.transient_scale,
+            drift_scale: output.drift_scale,
+        });
+        let bias_correction = controller_output.and_then(|output| output.transient_scale);
+        let outer_lr = match controller_output {
+            Some(output) => {
+                let corrected = (f64::from(outer_lr) * output.scale) as f32;
                 if !corrected.is_finite() || corrected <= 0.0 {
-                    bail!("fragment {fid}: bias-corrected outer learning rate is not finite");
+                    bail!("fragment {fid}: controlled outer learning rate is not finite");
                 }
                 corrected
             }
@@ -1107,6 +1184,7 @@ impl GlobalState {
                 gnorm: aggregate.gnorm,
                 outer,
                 outer_bias_correction: bias_correction,
+                outer_lr_controller: controller_stats,
             },
             step_scale: 1.0,
             unscaled_applied_step_norm: materialized_step_norm,
@@ -1222,6 +1300,7 @@ impl GlobalState {
                     restarted: false,
                 },
                 outer_bias_correction: None,
+                outer_lr_controller: None,
             },
             step_scale: 1.0,
             unscaled_applied_step_norm: step_norm,
@@ -1771,6 +1850,16 @@ impl GlobalState {
                 .outer
                 .history_current_norm_ratio
                 .is_some_and(|value| !value.is_finite())
+            || preview.stats.outer_lr_controller.is_some_and(|controller| {
+                !controller.scale.is_finite()
+                    || controller.scale <= 0.0
+                    || controller
+                        .transient_scale
+                        .is_some_and(|value| !value.is_finite() || value <= 0.0)
+                    || controller
+                        .drift_scale
+                        .is_some_and(|value| !value.is_finite() || value <= 0.0)
+            })
         {
             bail!("malformed action preview: invalid metadata or tensor shape");
         }
@@ -3508,6 +3597,53 @@ mod tests {
             assert_eq!(off_stats.outer_bias_correction, None);
             assert_eq!(on.params, off.params);
             assert_eq!(on.momentum, off.momentum);
+        }
+    }
+
+    /// Compatibility property: the explicit transient controller must be a
+    /// bit-for-bit replacement for the established --outer-bias-correction
+    /// state path, including previews, optimizer buffers, and parameters.
+    #[test]
+    fn transient_controller_bit_matches_legacy_bias_correction_path() {
+        let make_state = |explicit_controller: bool| {
+            let layout = Layout {
+                fragments: vec![FragmentInfo {
+                    merge_mode: MERGE_AVG,
+                    tensor_numels: vec![3, 5],
+                    tensor_shapes: None,
+                }],
+            };
+            let mut st = GlobalState::new(layout, None, 0.4, 0.7, crate::protocol::DTYPE_F32);
+            if explicit_controller {
+                st.set_outer_lr_controller(
+                    crate::outer_lr_controller::ControllerConfig::transient()
+                        .bind(32, 1)
+                        .unwrap(),
+                )
+                .unwrap();
+            }
+            st.init_fragment(0, (0..8).map(|i| 0.125 * i as f32 - 0.5).collect())
+                .unwrap();
+            st
+        };
+        let mut legacy = make_state(false);
+        legacy.outer_bias_correction = true;
+        let mut explicit = make_state(true);
+
+        for round in 1u64..=32 {
+            let learner: Vec<f32> = legacy.params[0]
+                .iter()
+                .enumerate()
+                .map(|(i, value)| value + 0.03 * (i as f32 - 2.0) + 0.01 * (round % 5) as f32)
+                .collect();
+            let legacy_stats = legacy.merge_and_step(0, &[&learner], &[1.0]).unwrap();
+            let explicit_stats = explicit.merge_and_step(0, &[&learner], &[1.0]).unwrap();
+            legacy.versions[0] = round;
+            explicit.versions[0] = round;
+
+            assert_eq!(legacy_stats, explicit_stats, "round {round}");
+            assert_eq!(legacy.params, explicit.params, "round {round}");
+            assert_eq!(legacy.momentum, explicit.momentum, "round {round}");
         }
     }
 

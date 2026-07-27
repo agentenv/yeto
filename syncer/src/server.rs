@@ -80,6 +80,9 @@ pub struct Config {
     /// `GlobalState::outer_bias_correction`). Default false = bit-identical
     /// production path.
     pub outer_bias_correction: bool,
+    /// Explicit opt-in age-aware controller definition, bound to the fragment
+    /// layout and planned total steps after HELLO.
+    pub outer_lr_controller: Option<crate::outer_lr_controller::ControllerConfig>,
     /// CTTN's dimensionless transverse curvature budget.
     pub cttn_rho: f32,
     /// CTTN's internal damping momentum, independent of fallback momentum.
@@ -2126,6 +2129,11 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     st.outer_optimizer = cfg.outer_optimizer;
     st.outer_restart_cos_threshold = cfg.outer_restart_cos_threshold;
     st.outer_bias_correction = cfg.outer_bias_correction;
+    if let Some(controller) = &cfg.outer_lr_controller {
+        st.set_outer_lr_controller(
+            controller.bind(cfg.total_steps, group.layout.fragments.len())?,
+        )?;
+    }
     st.delta_norm_ref = cfg.delta_norm_ref;
     st.version_matched_anchor = cfg.version_matched_anchor;
     st.anchor_drift_instrument = cfg.anchor_drift_instrument;
@@ -2277,10 +2285,21 @@ fn format_tape_line(
     responders.sort();
     let outer = stats.outer;
     let gnorm = json_number(stats.gnorm);
-    // v3 arm B: appended only when --outer-bias-correction is active, so the
-    // default tape schema stays byte-identical (same idiom as anchor drift).
-    let outer_bias_correction = stats.outer_bias_correction.map_or_else(String::new, |scale| {
-        format!(",\"outer_bias_correction\":{}", json_number(scale))
+    // Appended only when transient normalization is active, so the default
+    // tape schema stays byte-identical (same idiom as anchor drift).
+    let outer_bias_correction = stats
+        .outer_bias_correction
+        .map_or_else(String::new, |scale| {
+            format!(",\"outer_bias_correction\":{}", json_number(scale))
+        });
+    let outer_lr_controller = stats.outer_lr_controller.map_or_else(String::new, |controller| {
+        let mode = serde_json::to_string(controller.mode.as_str()).unwrap();
+        format!(
+            ",\"outer_lr_controller_mode\":{mode},\"outer_lr_scale\":{},\"outer_lr_transient_scale\":{},\"outer_lr_drift_scale\":{}",
+            json_number(controller.scale),
+            optional_json_number(controller.transient_scale),
+            optional_json_number(controller.drift_scale),
+        )
     });
     let outer_step_norm = json_number(outer.applied_step_norm);
     let outer_direction_cosine = optional_json_number(outer.direction_delta_cosine);
@@ -2327,7 +2346,7 @@ fn format_tape_line(
         )
     });
     format!(
-        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}{outer_bias_correction}{cttn_diagnostics}{cttn_shadow}}}\n",
+        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}{outer_bias_correction}{outer_lr_controller}{cttn_diagnostics}{cttn_shadow}}}\n",
         responders.join(","),
         outer.restarted,
         decision.fallback,
@@ -2369,6 +2388,7 @@ mod tests {
                 restarted,
             },
             outer_bias_correction: None,
+            outer_lr_controller: None,
         }
     }
 
@@ -2726,6 +2746,27 @@ mod tests {
         let line = format_tape_line(3, 0, &HashMap::new(), &on, &decision, &HashMap::new(), 1);
         assert!(line.contains("\"outer_bias_correction\":1.25"));
         assert!(line.ends_with("}\n"));
+    }
+
+    #[test]
+    fn event_tape_appends_controller_diagnostics_only_when_active() {
+        let decision = CommitDecision::token_weighted();
+        let off = merge_stats(1.0, 0.5, None, None, false);
+        let line = format_tape_line(3, 0, &HashMap::new(), &off, &decision, &HashMap::new(), 1);
+        assert!(!line.contains("outer_lr_controller_mode"));
+
+        let mut on = off;
+        on.outer_lr_controller = Some(crate::state::OuterLrControllerStats {
+            mode: crate::outer_lr_controller::ControllerMode::MeasuredDrift,
+            scale: 1.5,
+            transient_scale: Some(2.0),
+            drift_scale: Some(0.75),
+        });
+        let line = format_tape_line(3, 0, &HashMap::new(), &on, &decision, &HashMap::new(), 1);
+        assert!(line.contains("\"outer_lr_controller_mode\":\"measured-drift\""));
+        assert!(line.contains("\"outer_lr_scale\":1.5"));
+        assert!(line.contains("\"outer_lr_transient_scale\":2"));
+        assert!(line.contains("\"outer_lr_drift_scale\":0.75"));
     }
 
     #[test]

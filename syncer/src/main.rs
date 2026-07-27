@@ -1,5 +1,6 @@
 mod action_probe;
 mod merge;
+mod outer_lr_controller;
 mod protocol;
 mod rho_telemetry;
 mod server;
@@ -91,6 +92,21 @@ struct Args {
     /// --commit-policy token_weighted.
     #[arg(long, default_value_t = false)]
     outer_bias_correction: bool,
+    /// Age-aware outer-LR controller: transient, measured-drift, or oracle.
+    /// This is opt-in and mutually exclusive with the legacy
+    /// --outer-bias-correction alias.
+    #[arg(long, value_enum)]
+    outer_lr_controller: Option<outer_lr_controller::ControllerMode>,
+    /// Versioned factorial response-surface JSON for measured-drift mode.
+    #[arg(long)]
+    outer_lr_drift_surface: Option<std::path::PathBuf>,
+    /// Optional versioned probe-measured spectral-sketch JSON. Named features
+    /// are consumed only when referenced by a nonzero drift-surface term.
+    #[arg(long)]
+    outer_lr_spectral_sketch: Option<std::path::PathBuf>,
+    /// Versioned exact per-fragment scale schedule for oracle mode.
+    #[arg(long)]
+    outer_lr_oracle_schedule: Option<std::path::PathBuf>,
     /// CTTN dimensionless transverse curvature budget.
     #[arg(long, default_value_t = 0.10, value_parser = parse_cttn_rho)]
     cttn_rho: f32,
@@ -193,6 +209,9 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
     validate_outer_optimizer(args.outer_optimizer, args.outer_momentum)?;
+    if args.outer_bias_correction && args.outer_lr_controller.is_some() {
+        anyhow::bail!("--outer-bias-correction and --outer-lr-controller are mutually exclusive");
+    }
     if args.outer_bias_correction {
         if args.outer_optimizer != merge::OuterOptimizer::Nesterov {
             anyhow::bail!(
@@ -205,6 +224,39 @@ fn main() -> anyhow::Result<()> {
             );
         }
     }
+    let outer_lr_controller = match args.outer_lr_controller {
+        Some(mode) => {
+            if mode.uses_transient_normalization()
+                && args.outer_optimizer != merge::OuterOptimizer::Nesterov
+            {
+                anyhow::bail!(
+                    "--outer-lr-controller {} requires --outer-optimizer nesterov",
+                    mode.as_str()
+                );
+            }
+            if args.commit_policy != action_probe::CommitPolicy::TokenWeighted {
+                anyhow::bail!(
+                    "--outer-lr-controller {} requires --commit-policy token_weighted",
+                    mode.as_str()
+                );
+            }
+            Some(outer_lr_controller::ControllerConfig::load(
+                mode,
+                args.outer_lr_drift_surface.as_deref(),
+                args.outer_lr_spectral_sketch.as_deref(),
+                args.outer_lr_oracle_schedule.as_deref(),
+            )?)
+        }
+        None => {
+            if args.outer_lr_drift_surface.is_some()
+                || args.outer_lr_spectral_sketch.is_some()
+                || args.outer_lr_oracle_schedule.is_some()
+            {
+                anyhow::bail!("outer-LR controller JSON flags require --outer-lr-controller");
+            }
+            None
+        }
+    };
     if args.rho_telemetry.is_some()
         && args.commit_policy != action_probe::CommitPolicy::TokenWeighted
     {
@@ -255,6 +307,7 @@ fn main() -> anyhow::Result<()> {
         outer_optimizer: args.outer_optimizer,
         outer_restart_cos_threshold: args.outer_restart_cos_threshold,
         outer_bias_correction: args.outer_bias_correction,
+        outer_lr_controller,
         cttn_rho: args.cttn_rho,
         cttn_mu: args.cttn_mu,
         cttn_shadow_samples: args.cttn_shadow_samples,
@@ -440,6 +493,10 @@ mod tests {
         assert_eq!(args.outer_momentum, 0.9);
         assert_eq!(args.outer_restart_cos_threshold, 0.0);
         assert!(!args.outer_bias_correction);
+        assert!(args.outer_lr_controller.is_none());
+        assert!(args.outer_lr_drift_surface.is_none());
+        assert!(args.outer_lr_spectral_sketch.is_none());
+        assert!(args.outer_lr_oracle_schedule.is_none());
         assert_eq!(args.cttn_rho, 0.10);
         assert_eq!(args.cttn_mu, 0.9);
         assert_eq!(args.cttn_shadow_samples, 32);
@@ -450,6 +507,64 @@ mod tests {
             action_probe::CommitPolicy::TokenWeighted
         );
         assert!(action_probe_config(&args).unwrap().is_none());
+    }
+
+    #[test]
+    fn parses_age_aware_outer_lr_controller_modes_and_json_paths() {
+        let transient = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "1",
+            "--total-steps",
+            "4",
+            "--outer-lr-controller",
+            "transient",
+        ])
+        .unwrap();
+        assert_eq!(
+            transient.outer_lr_controller,
+            Some(outer_lr_controller::ControllerMode::Transient)
+        );
+
+        let drift = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "1",
+            "--total-steps",
+            "4",
+            "--outer-lr-controller",
+            "measured-drift",
+            "--outer-lr-drift-surface",
+            "surface.json",
+            "--outer-lr-spectral-sketch",
+            "sketch.json",
+        ])
+        .unwrap();
+        assert_eq!(
+            drift.outer_lr_controller,
+            Some(outer_lr_controller::ControllerMode::MeasuredDrift)
+        );
+        assert_eq!(
+            drift.outer_lr_drift_surface.as_deref(),
+            Some(std::path::Path::new("surface.json"))
+        );
+
+        let oracle = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "1",
+            "--total-steps",
+            "4",
+            "--outer-lr-controller",
+            "oracle",
+            "--outer-lr-oracle-schedule",
+            "oracle.json",
+        ])
+        .unwrap();
+        assert_eq!(
+            oracle.outer_lr_controller,
+            Some(outer_lr_controller::ControllerMode::Oracle)
+        );
     }
 
     #[test]
