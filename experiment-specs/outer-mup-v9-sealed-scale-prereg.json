@@ -1,0 +1,409 @@
+{
+  "analysis_contract": {
+    "bootstrap": {
+      "draws": 10000,
+      "groups": [
+        {
+          "frequency": 2484,
+          "representative": [
+            1,
+            1
+          ]
+        },
+        {
+          "frequency": 5023,
+          "representative": [
+            0,
+            1
+          ]
+        },
+        {
+          "frequency": 2493,
+          "representative": [
+            0,
+            0
+          ]
+        }
+      ],
+      "sample_size": 2,
+      "seed": 20260728
+    },
+    "frozen_analyzer": {
+      "path": "scripts/analyze_v9.py",
+      "sha256": "efc18c8105a85072e1de3b58fa353488da15ff32a3406878265b8cb10035aba8"
+    },
+    "gates": {
+      "G9A_1P7B": {
+        "absolute_error_band_bits": {
+          "corrected": 0.625,
+          "raw": 0.625
+        },
+        "minimum_valid_bootstrap_refits": 7500,
+        "near_bracket_allowance_bits": 0.5,
+        "pass_rule": "PASS iff complete/evaluable and both point eta-star errors are within their registered absolute log2 bands",
+        "stage": "stage_1p7b",
+        "targets": [
+          "raw",
+          "corrected"
+        ]
+      },
+      "G9B_7B": {
+        "absolute_error_band_bits": {
+          "mu0": 0.5,
+          "raw": 0.5
+        },
+        "minimum_valid_bootstrap_refits": 7500,
+        "near_bracket_allowance_bits": 0.5,
+        "pass_rule": "PASS iff complete/evaluable and both point eta-star errors are within their registered absolute log2 bands",
+        "stage": "stage_7b",
+        "targets": [
+          "mu0",
+          "raw"
+        ]
+      }
+    },
+    "outcome_aware_edits_after_seal_forbidden": true,
+    "overall_rule": "G9 PASS iff G9A and G9B PASS; FAIL iff both are evaluable and at least one fails; otherwise NOT_EVALUABLE",
+    "point_estimator": "OLS quadratic in pooled two-seed mean loss vs log2(eta)"
+  },
+  "design": {
+    "seeds": [
+      901,
+      907
+    ],
+    "stage_1p7b": {
+      "cell_count": 16,
+      "coordinate": {
+        "H": 512,
+        "S": 5120,
+        "T": 10
+      },
+      "eta_levels_per_target": 4,
+      "ladder_offsets_log2": [
+        -1.0,
+        -0.3333333333333333,
+        0.3333333333333333,
+        1.0
+      ],
+      "model": "smollm2_1p7b",
+      "never_run_coordinate_assertion": true,
+      "targets": [
+        "raw",
+        "corrected"
+      ]
+    },
+    "stage_7b": {
+      "cell_count": 12,
+      "coordinate": {
+        "H": 512,
+        "S": 2560,
+        "T": 5
+      },
+      "eta_levels_per_target": 3,
+      "ladder_offsets_log2": [
+        -0.75,
+        0.0,
+        0.75
+      ],
+      "learner_count": 4,
+      "learner_gpu_count": 1,
+      "model": "qwen2p5_7b",
+      "targets": [
+        "mu0",
+        "raw"
+      ]
+    },
+    "stage_7b_requires_complete_1p7b_drain": true,
+    "stage_order": [
+      "stage_1p7b",
+      "stage_7b"
+    ]
+  },
+  "execution": {
+    "cache_environment_required": true,
+    "gpus_per_node": 8,
+    "nodes": [
+      "h200-n1",
+      "h200-n2"
+    ],
+    "registration_commit_must_be_pushed_before_authority": true,
+    "stage_1p7b": "16 simultaneous one-GPU cells",
+    "stage_7b": "four 4-GPU queues, three cells each; M=4 single-GPU learners"
+  },
+  "frozen_code": {
+    "analyzer": {
+      "path": "scripts/analyze_v9.py",
+      "sha256": "efc18c8105a85072e1de3b58fa353488da15ff32a3406878265b8cb10035aba8"
+    },
+    "common_math": {
+      "path": "scripts/v9_common.py",
+      "sha256": "89e2dbddc34174574df2fcc116d6945333a3685cd692e5cb556ad92283af4472"
+    },
+    "fleet_checker": {
+      "path": "scripts/check_v9_fleet.py",
+      "sha256": "86ea4c49c636c72acbe9a3b4bad1288fb0c9502cf68bf565cdd4cad1a8f4445d"
+    },
+    "gate_simulator": {
+      "path": "scripts/gatesim_v9.py",
+      "sha256": "8e56b8d01714b8dafc024dc6499ca5aa6980cc46fa2795ccdf004e14df1a7cb9"
+    },
+    "launch_authorizer": {
+      "path": "scripts/authorize_v9_launch.py",
+      "sha256": "6d03233e4335917892ad54412911f8f59f67c99b918076e358897843d4c75817"
+    },
+    "launch_manifest_builder": {
+      "path": "scripts/build_v9_launch_manifest.py",
+      "sha256": "19a6d60e7ce798d89b5abe383c3a4aa05a216c12c69c5f595b996150307710a0"
+    },
+    "prediction_builder": {
+      "path": "scripts/build_v9_predictions.py",
+      "sha256": "c00bf25b62bd27472db385791b3f7c75024496dda12a097b7a4da3666d450039"
+    },
+    "preseal_checker": {
+      "path": "scripts/check_v9_preseal.py",
+      "sha256": "8f9192d68e2f0d0e6b6260502af9cd13b59ce51adea9cb9fe54332dec987b4d2"
+    },
+    "qwen_smoke": {
+      "path": "scripts/smoke_v9_qwen.py",
+      "sha256": "81354b72c5ca798775e534c6d2a7de66c2a718212f4c49d1c50be9c36ea189fb"
+    },
+    "retry_authorizer": {
+      "path": "scripts/authorize_v9_retry.py",
+      "sha256": "000a3c562a361d7ca508b9d01dfaf820492039f70786a1b97a7ee28b00ca2cda"
+    },
+    "seal_builder": {
+      "path": "scripts/build_v9_seal.py",
+      "sha256": "b4fb05222a1d6618f4e1267698c32f19ea2afffdd81d59f9f39e2bdf678f6c6f"
+    },
+    "stage_launcher": {
+      "path": "scripts/launch_v9_stage.py",
+      "sha256": "a9250d1697e4a54c78dbef03300b8eb70491a08f59e604e9ca312df8fd7e06ee"
+    },
+    "surface_freezer": {
+      "path": "scripts/freeze_v6_selection.py",
+      "sha256": "50681f88d4c99a6474846a4c2bebf1f9f456657a26fb8dca5e5fc207e1c6162a"
+    }
+  },
+  "gate_feasibility": {
+    "G9A_1P7B": {
+      "P_eval": 0.894,
+      "P_pass_given_evaluable": 0.9268456375838926,
+      "ladder_offsets_log2": [
+        -1.0,
+        -0.3333333333333333,
+        0.3333333333333333,
+        1.0
+      ]
+    },
+    "G9B_7B": {
+      "P_eval": 0.929,
+      "P_pass_given_evaluable": 0.9388589881593111,
+      "ladder_offsets_log2": [
+        -0.75,
+        0.0,
+        0.75
+      ]
+    },
+    "narrow_draft_disclosure": "The unregistered narrower draft failed on complete-data noise; the final symmetric widths are the smallest gatesimmed candidates meeting P_eval>=0.8 without adding cells.",
+    "status": "PASS"
+  },
+  "machine_inputs": {
+    "cache_environment": {
+      "HF_HOME": "/root/yeto-hf-cache",
+      "HF_HUB_CACHE": "/root/yeto-hf-cache/hub",
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1"
+    },
+    "development_jsonl": {
+      "bytes": 4666640,
+      "path": "/root/yeto-data/outer-mup-v3/scale-s2560/raw/eval.jsonl",
+      "sha256": "533838a0564b13519956a044d23ed8db6705ddc7ae5f0ddb96538f49460bcebc"
+    },
+    "qwen_smoke_packed_input": {
+      "bytes": 3932496,
+      "path": "/root/yeto-data/outer-mup-v3/scale-s2560/qwen2.5-7b/m4/learner-00.safetensors",
+      "sha256": "0f851c37900ca9b6d70be96852a692a761a6b5ae33b8d61921f1e316c5d30bca"
+    },
+    "scale_manifest": {
+      "bytes": 10317,
+      "path": "/root/yeto-data/outer-mup-v3/scale-s2560/manifest.json",
+      "sha256": "b737381d6fbe1ecdfe1c98ae9a4801ef654f0dc65d743a222b7fbbffadc44a36"
+    },
+    "training_jsonl": {
+      "bytes": 64423638,
+      "path": "/root/yeto-data/outer-mup-v3/scale-s2560/raw/train.jsonl",
+      "sha256": "e680a29ea8c8fc7c99efdceb4f62e485d3eed1ac2afd15bab43b506cb3f4ecaf"
+    }
+  },
+  "models": {
+    "qwen2p5_7b": {
+      "exact_parameters": 7615616512,
+      "files": {
+        "config.json": {
+          "bytes": 686,
+          "sha256": "267ce68584c5f24c3b267d934db2de68dd21d1ca677fb78ed809eb60067f7642"
+        },
+        "generation_config.json": {
+          "bytes": 138,
+          "sha256": "8c970692323e3ea0e9b8b0a4dca79388d31226e41f83c9fd6014804280ebf6e8"
+        },
+        "merges.txt": {
+          "bytes": 1671839,
+          "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+        },
+        "model-00001-of-00004.safetensors": {
+          "bytes": 3945441440,
+          "sha256": "b6d4b6e881d17e9235934419b1c17a8bb0f1108579404e0a468a6afdeae6e868"
+        },
+        "model-00002-of-00004.safetensors": {
+          "bytes": 3864726352,
+          "sha256": "687e8d08dc82b5f7d69322f1d8691d49b59db9039b07e7ea71010fb6434d5274"
+        },
+        "model-00003-of-00004.safetensors": {
+          "bytes": 3864726424,
+          "sha256": "32652eb23537597cca8c7a56ec85b5d5f1c7245b16269a904d57e85aa1aff30e"
+        },
+        "model-00004-of-00004.safetensors": {
+          "bytes": 3556377672,
+          "sha256": "b5a2298dddcf228129975a9a271912a9f8dc817957deecde523e3154481ec3fb"
+        },
+        "model.safetensors.index.json": {
+          "bytes": 27752,
+          "sha256": "624bf7c47cd12468fdc16e38a47cf4f19e0415b859a223ba3c027eed2f0e1028"
+        },
+        "tokenizer.json": {
+          "bytes": 7031645,
+          "sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539"
+        },
+        "tokenizer_config.json": {
+          "bytes": 7228,
+          "sha256": "c91efca15ceff6e9ee9424db58a6f59cd41294e550a86cbd07e3c1fb500b34f9"
+        },
+        "vocab.json": {
+          "bytes": 2776833,
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+        }
+      },
+      "id": "Qwen/Qwen2.5-7B",
+      "path": "/root/yeto-hf-cache/hub/models--Qwen--Qwen2.5-7B/snapshots/d149729398750b98c0af14eb82c78cfe92750796",
+      "revision": "d149729398750b98c0af14eb82c78cfe92750796"
+    },
+    "smollm2_135m": {
+      "exact_parameters": 134515008,
+      "id": "HuggingFaceTB/SmolLM2-135M",
+      "revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2",
+      "role": "V6 parameter-scale anchor only"
+    },
+    "smollm2_1p7b": {
+      "exact_parameters": 1711376384,
+      "files": {
+        "config.json": {
+          "bytes": 635,
+          "sha256": "33397f6af8090f7290f27ce6fb1cd23a95fd0915a5c648dfd10b6002aaf7fc48"
+        },
+        "generation_config.json": {
+          "bytes": 111,
+          "sha256": "2056c988e990b0d13670f63f2f3b87b3b6d07edaf7a3416998ba27dab2d8a059"
+        },
+        "merges.txt": {
+          "bytes": 466391,
+          "sha256": "0b54e8aa4e53d5383e2e4bc635a56b43f9647f7b13832d5d9ecd8f82dac4f510"
+        },
+        "model.safetensors": {
+          "bytes": 3422777952,
+          "sha256": "1193528982f4ac0c0b707ce36fd7dc03a0ef6f3e1a432deb886dce2e90c300c0"
+        },
+        "special_tokens_map.json": {
+          "bytes": 831,
+          "sha256": "e786b595b9a23148bf1630df78d9037a048ea671e48bfd3549a1e3c233742bb3"
+        },
+        "tokenizer.json": {
+          "bytes": 2104556,
+          "sha256": "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c"
+        },
+        "tokenizer_config.json": {
+          "bytes": 3658,
+          "sha256": "4bb9af56a342753d39374f4016a16574cab299fe088e896f425ce3c433f61424"
+        },
+        "vocab.json": {
+          "bytes": 800662,
+          "sha256": "82b84012e3add4d01d12ba14442026e49b8cbbaead1f79ecf3d919784f82dc79"
+        }
+      },
+      "id": "HuggingFaceTB/SmolLM2-1.7B",
+      "path": "/root/yeto-hf-cache/hub/models--HuggingFaceTB--SmolLM2-1.7B/snapshots/effd688a12921b4cc83e3312b6feb579f70f9c71",
+      "revision": "effd688a12921b4cc83e3312b6feb579f70f9c71"
+    }
+  },
+  "objective": "Prospectively test empirical optimal-outer-LR transport at never-run SmolLM2-1.7B T=10 and minimally at Qwen2.5-7B T=5.",
+  "program_id": "outer-mup-v9-sealed-scale",
+  "referee_mechanism_resolution": {
+    "claim_boundary": "The paper may claim prospective empirical surface transport only; it must not claim that the rejected static spectral closure is the identified mechanism.",
+    "coefficient_source": "complete 540-cell mechfit refits equal to G6",
+    "confirmed_referee_lanes": [],
+    "mechanism": "SURFACE-FALLBACK",
+    "referee_note": "/private/tmp/h200-referee-note.md",
+    "selected_empirical_surfaces": {
+      "corrected": "F1",
+      "raw": "F3"
+    },
+    "spectral_mechanism_confirmed_on_full_data": false,
+    "theory_note": "docs/theory-lane-A.md"
+  },
+  "registered_at_utc": "2026-07-27T16:19:52.744023+00:00",
+  "retry_contract": {
+    "allowed_reasons": [
+      "host_or_gpu_failure",
+      "framework_or_driver_failure",
+      "storage_or_network_failure",
+      "registered_process_timeout_without_valid_endpoint"
+    ],
+    "attempt_2_requires_separate_loss_blind_authority": true,
+    "attempts": [
+      1,
+      2
+    ],
+    "retry_unit": "whole seed-by-arm curve",
+    "scientific_recenter_or_extension_forbidden": true
+  },
+  "schema": "yeto_outer_mup_v9_sealed_scale_prereg_v1",
+  "source_artifacts": {
+    "g4c_manifest": {
+      "bytes": 257216,
+      "path": "h200-n1:/root/yeto-results-v4c/_controller/launch-v4c/launch-manifest-v4c.json",
+      "sha256": "9db585200ac19bd1b846e324a1e3500b0c6b67a496650904bece31a0fa250a2d"
+    },
+    "g4c_readout": {
+      "bytes": 73621,
+      "path": "h200-n1:/root/g4c-readout.json",
+      "sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa"
+    },
+    "gate_simulation": {
+      "bytes": 19262,
+      "path": "experiment-specs/outer-mup-v9-sealed-scale-gatesim.json",
+      "sha256": "6813c6cee46ff579309b3055ba635147de32d78acf47a0ea864f6ab305cdc305"
+    },
+    "preseal_proof": {
+      "bytes": 757,
+      "path": "experiment-specs/outer-mup-v9-preseal-proof.json",
+      "sha256": "94f6b01d5eb6343ef0e7591cf0d5e261794273e3c406c09f185ec33bf0a749a7"
+    },
+    "v6_selection": {
+      "bytes": 28577,
+      "path": "experiment-specs/outer-mup-v9-frozen-coefficients.json",
+      "sha256": "413e4d70dbe88a6ca12493884cbd003c47a8c6fd28da1944dc1f2a10b6292d5b"
+    }
+  },
+  "status": "SEALED_PRE_VERIFICATION",
+  "storage": {
+    "lvm_target": "/data/yeto-results-v9",
+    "minimum_free_bytes": 1000000000000,
+    "result_link": "/root/yeto-results-v9"
+  },
+  "verification_loss_seen": false,
+  "wall_clock": {
+    "ceiling_seconds": 108000,
+    "stage_1p7b_cell_timeout_minutes": 480,
+    "stage_7b_cell_timeout_minutes": 720
+  }
+}

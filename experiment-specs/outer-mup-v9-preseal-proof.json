@@ -1,0 +1,31 @@
+{
+  "bracketed_process_patterns": [
+    "[r]un_slot_v9.py",
+    "[c]ompare_diloco.py|[y]eto (learner|syncer)"
+  ],
+  "checked_at_unix_s": 1785169168.7970371,
+  "checked_at_utc": "2026-07-27T16:19:28.795615+00:00",
+  "errors": [],
+  "nodes": {
+    "h200-n1": {
+      "artifacts": [],
+      "controllers": [],
+      "result_processes": [],
+      "result_root_exists": false,
+      "return_code": 0,
+      "stderr": ""
+    },
+    "h200-n2": {
+      "artifacts": [],
+      "controllers": [],
+      "result_processes": [],
+      "result_root_exists": false,
+      "return_code": 0,
+      "stderr": ""
+    }
+  },
+  "result_root_absent_on_both_nodes": true,
+  "schema": "yeto_outer_mup_v9_preseal_proof_v1",
+  "status": "PASS",
+  "verification_loss_seen": false
+}

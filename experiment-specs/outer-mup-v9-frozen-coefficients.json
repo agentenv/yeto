@@ -1,0 +1,886 @@
+{
+  "g6_gate_required_and_observed": "PASS",
+  "mechfit_full_data": {
+    "complete_D": 24,
+    "created_at_utc": "2026-07-27T15:21:09.381000+00:00",
+    "loaded_validated_cells": 540,
+    "path": "/private/tmp/v9-seal-inputs.X9yiV8/mechfit-full.json",
+    "pipeline_scope_disclosure": "the mechanism pre-fit wrapper labels every artifact NON-FINAL; only its nested all-eight empirical surface refits are consumed, and their bytes must exactly equal the frozen G6 refits",
+    "sha256": "0821ffbc0cdc8ecd58654981f62d3616f1d3467bdd61f6776b632c5de36db05b"
+  },
+  "mu0_curve_fits": [
+    {
+      "a": 0.039841790022755286,
+      "accepted": true,
+      "arm": "mu0",
+      "b": 0.3039709107240023,
+      "c": 2.732032813948657,
+      "eta_star": 0.07106462666975855,
+      "etas": [
+        0.03678657346319354,
+        0.052024071104882504,
+        0.07357314692638708,
+        0.10404814220976501,
+        0.14714629385277417
+      ],
+      "h": 1280,
+      "interior": true,
+      "s": 2560,
+      "seed_mean_losses": [
+        2.185632332866628,
+        2.165430791769961,
+        2.152435445951825,
+        2.1590760334659547,
+        2.198779658243023
+      ],
+      "status": "INTERIOR",
+      "t": 2,
+      "vertex_log2_eta": -3.814724571240298
+    },
+    {
+      "a": 0.04087509191578895,
+      "accepted": true,
+      "arm": "mu0",
+      "b": 0.3074119792121899,
+      "c": 2.7174107096088043,
+      "eta_star": 0.07379246262305397,
+      "etas": [
+        0.03777003433192801,
+        0.05341489480351001,
+        0.07554006866385601,
+        0.10682978960702003,
+        0.15108013732771203
+      ],
+      "h": 2560,
+      "interior": true,
+      "s": 5120,
+      "seed_mean_losses": [
+        2.1753273009075462,
+        2.152749340445217,
+        2.1396303239358043,
+        2.1463943467947613,
+        2.185406277500732
+      ],
+      "status": "INTERIOR",
+      "t": 2,
+      "vertex_log2_eta": -3.7603827270348584
+    },
+    {
+      "a": 0.03633699218588449,
+      "accepted": true,
+      "arm": "mu0",
+      "b": 0.2585822947333358,
+      "c": 2.581597649277296,
+      "eta_star": 0.08489870538361341,
+      "etas": [
+        0.03877978727380976,
+        0.05484290110856532,
+        0.07755957454761953,
+        0.10968580221713065,
+        0.15511914909523905
+      ],
+      "h": 5120,
+      "interior": true,
+      "s": 10240,
+      "seed_mean_losses": [
+        2.1657463556246817,
+        2.140527506535827,
+        2.12214264909893,
+        2.122061763795519,
+        2.151280664965254
+      ],
+      "status": "INTERIOR",
+      "t": 2,
+      "vertex_log2_eta": -3.5581136354178624
+    },
+    {
+      "a": 0.04005521583006287,
+      "accepted": true,
+      "arm": "mu0",
+      "b": 0.36254165484590883,
+      "c": 2.956310560807805,
+      "eta_star": 0.04341918114042938,
+      "etas": [
+        0.023508856402546314,
+        0.033246543560362565,
+        0.04701771280509263,
+        0.06649308712072513,
+        0.09403542561018526
+      ],
+      "h": 512,
+      "interior": true,
+      "s": 2560,
+      "seed_mean_losses": [
+        2.1655946424672905,
+        2.145840410372823,
+        2.13520227919422,
+        2.1488964602355742,
+        2.1870726997337147
+      ],
+      "status": "INTERIOR",
+      "t": 5,
+      "vertex_log2_eta": -4.5255236719235
+    },
+    {
+      "a": 0.04065269670230791,
+      "accepted": true,
+      "arm": "mu0",
+      "b": 0.36235359907016085,
+      "c": 2.9299038390624017,
+      "eta_star": 0.04554074859538401,
+      "etas": [
+        0.024137347674334234,
+        0.03413536444075816,
+        0.04827469534866847,
+        0.06827072888151632,
+        0.09654939069733694
+      ],
+      "h": 1024,
+      "interior": true,
+      "s": 5120,
+      "seed_mean_losses": [
+        2.155334169753894,
+        2.132021232016834,
+        2.122459203797884,
+        2.134163234915318,
+        2.1713594867389143
+      ],
+      "status": "INTERIOR",
+      "t": 5,
+      "vertex_log2_eta": -4.456698183193214
+    },
+    {
+      "a": 0.03485242217844575,
+      "accepted": true,
+      "arm": "mu0",
+      "b": 0.2968981241755664,
+      "c": 2.7353467067649326,
+      "eta_star": 0.052216102604854146,
+      "etas": [
+        0.024782641178946668,
+        0.03504794726669233,
+        0.049565282357893335,
+        0.07009589453338466,
+        0.09913056471578667
+      ],
+      "h": 2048,
+      "interior": true,
+      "s": 10240,
+      "seed_mean_losses": [
+        2.1423669971645807,
+        2.116686493532183,
+        2.10274161027702,
+        2.107902263259216,
+        2.1336607303203867
+      ],
+      "status": "INTERIOR",
+      "t": 5,
+      "vertex_log2_eta": -4.259361410455728
+    },
+    {
+      "a": 0.03442462028715894,
+      "accepted": true,
+      "arm": "mu0",
+      "b": 0.34644015748949597,
+      "c": 2.9927203809712437,
+      "eta_star": 0.030567321107098974,
+      "etas": [
+        0.016754436692365374,
+        0.023694351600264535,
+        0.03350887338473075,
+        0.04738870320052907,
+        0.0670177467694615
+      ],
+      "h": 256,
+      "interior": true,
+      "s": 2560,
+      "seed_mean_losses": [
+        2.1473435483507703,
+        2.1253976134559864,
+        2.120715682067932,
+        2.1365437730396106,
+        2.1645859124676163
+      ],
+      "status": "INTERIOR",
+      "t": 10,
+      "vertex_log2_eta": -5.0318660685231285
+    },
+    {
+      "a": 0.032387937717250515,
+      "accepted": true,
+      "arm": "mu0",
+      "b": 0.31957132239299013,
+      "c": 2.8964477832661095,
+      "eta_star": 0.032724321427659964,
+      "etas": [
+        0.01720235372603844,
+        0.02432780194410291,
+        0.03440470745207688,
+        0.04865560388820582,
+        0.06880941490415377
+      ],
+      "h": 512,
+      "interior": true,
+      "s": 5120,
+      "seed_mean_losses": [
+        2.136050101335273,
+        2.114529792526705,
+        2.106785603557958,
+        2.1203346683887085,
+        2.1448466236857713
+      ],
+      "status": "INTERIOR",
+      "t": 10,
+      "vertex_log2_eta": -4.933492913054164
+    },
+    {
+      "a": 0.029967185449717104,
+      "accepted": true,
+      "arm": "mu0",
+      "b": 0.2819937940899726,
+      "c": 2.748578843411981,
+      "eta_star": 0.038339012003775735,
+      "etas": [
+        0.017662245478571863,
+        0.024978187097759206,
+        0.035324490957143725,
+        0.04995637419551841,
+        0.07064898191428745
+      ],
+      "h": 1024,
+      "interior": true,
+      "s": 10240,
+      "seed_mean_losses": [
+        2.1229445631913744,
+        2.0964570705400125,
+        2.084353338100518,
+        2.091390939751767,
+        2.1077753545918685
+      ],
+      "status": "INTERIOR",
+      "t": 10,
+      "vertex_log2_eta": -4.705043030536501
+    },
+    {
+      "a": 0.02128732643258291,
+      "accepted": true,
+      "arm": "mu0",
+      "b": 0.23463739109540827,
+      "c": 2.752312320770389,
+      "eta_star": 0.021926218661920484,
+      "etas": [
+        0.0119406552182638,
+        0.016886636553289737,
+        0.0238813104365276,
+        0.033773273106579474,
+        0.0477626208730552
+      ],
+      "h": 128,
+      "interior": true,
+      "s": 2560,
+      "seed_mean_losses": [
+        2.1226793757950775,
+        2.107617000679587,
+        2.106103839097662,
+        2.115117742418887,
+        2.1320446561090893
+      ],
+      "status": "INTERIOR",
+      "t": 20,
+      "vertex_log2_eta": -5.511199159709095
+    },
+    {
+      "a": 0.018566941024119196,
+      "accepted": true,
+      "arm": "mu0",
+      "b": 0.19985460168692204,
+      "c": 2.632001493850857,
+      "eta_star": 0.02398038603886582,
+      "etas": [
+        0.012259879490836022,
+        0.01733808784900006,
+        0.024519758981672045,
+        0.03467617569800012,
+        0.04903951796334409
+      ],
+      "h": 256,
+      "interior": true,
+      "s": 5120,
+      "seed_mean_losses": [
+        2.1127828866290423,
+        2.096055008714734,
+        2.0936448300651,
+        2.1024078541456355,
+        2.112585521658603
+      ],
+      "status": "INTERIOR",
+      "t": 20,
+      "vertex_log2_eta": -5.382001306173778
+    },
+    {
+      "a": 0.017384641505974296,
+      "accepted": true,
+      "arm": "mu0",
+      "b": 0.17586777213551463,
+      "c": 2.5132076894852804,
+      "eta_star": 0.03001575383211165,
+      "etas": [
+        0.012587637979859232,
+        0.017801608349359597,
+        0.025175275959718465,
+        0.035603216698719194,
+        0.05035055191943693
+      ],
+      "h": 512,
+      "interior": true,
+      "s": 10240,
+      "seed_mean_losses": [
+        2.097325346245558,
+        2.075214828331742,
+        2.0693618067584474,
+        2.0728122754453717,
+        2.0764731350370944
+      ],
+      "status": "INTERIOR",
+      "t": 20,
+      "vertex_log2_eta": -5.058136288720047
+    }
+  ],
+  "schema": "yeto_outer_mup_v6_selected_surfaces_v1",
+  "selected_at_utc": "2026-07-27T16:12:34.166469+00:00",
+  "selected_surfaces": {
+    "corrected": {
+      "coefficient_order": [
+        "gamma",
+        "alpha_T",
+        "beta_log2_S"
+      ],
+      "coefficient_source": "mechfit full-data all-eight refit constrained to G6-selected family",
+      "coefficients": [
+        -0.32632792426345425,
+        -0.12368056701808619,
+        -0.16434770193876422
+      ],
+      "coordinates": {
+        "u": "(T-5)/5",
+        "v": "log2(S/5120)"
+      },
+      "family": "log2_D=gamma+alpha*u+beta*v",
+      "family_id": "F1",
+      "model_selection": {
+        "candidate_scores": [
+          {
+            "family": "log2_D=gamma+alpha*u+beta*v",
+            "family_id": "F1",
+            "loo_predictions": {
+              "T10_S10240": {
+                "observed_log2_D": -0.669683900331834,
+                "predicted_log2_D": -0.5914706416423539,
+                "signed_error_bits_pred_minus_obs": 0.07821325868948015
+              },
+              "T10_S5120": {
+                "observed_log2_D": -0.5064726198840716,
+                "predicted_log2_D": -0.44182765119213874,
+                "signed_error_bits_pred_minus_obs": 0.06464496869193281
+              },
+              "T20_S10240": {
+                "observed_log2_D": -0.8782135038675686,
+                "predicted_log2_D": -0.842656893489008,
+                "signed_error_bits_pred_minus_obs": 0.035556610378560616
+              },
+              "T20_S2560": {
+                "observed_log2_D": -0.4546046764456682,
+                "predicted_log2_D": -0.7109325241540035,
+                "signed_error_bits_pred_minus_obs": -0.25632784770833533
+              },
+              "T2_S2560": {
+                "observed_log2_D": -0.09971738841558478,
+                "predicted_log2_D": -0.08019383945244526,
+                "signed_error_bits_pred_minus_obs": 0.019523548963139514
+              },
+              "T2_S5120": {
+                "observed_log2_D": -0.11688845233001258,
+                "predicted_log2_D": -0.3021027799551011,
+                "signed_error_bits_pred_minus_obs": -0.18521432762508852
+              },
+              "T5_S10240": {
+                "observed_log2_D": -0.458235244039627,
+                "predicted_log2_D": -0.510355326672809,
+                "signed_error_bits_pred_minus_obs": -0.05212008263318202
+              },
+              "T5_S2560": {
+                "observed_log2_D": -0.26783546451625356,
+                "predicted_log2_D": -0.1132768714572101,
+                "signed_error_bits_pred_minus_obs": 0.15455859305904346
+              }
+            },
+            "loo_rmse_bits": 0.13160304977859522
+          },
+          {
+            "family": "log2_D=gamma+alpha*u+beta*v+delta*u*v",
+            "family_id": "F2",
+            "loo_predictions": {
+              "T10_S10240": {
+                "observed_log2_D": -0.669683900331834,
+                "predicted_log2_D": -0.5786815937450756,
+                "signed_error_bits_pred_minus_obs": 0.09100230658675845
+              },
+              "T10_S5120": {
+                "observed_log2_D": -0.5064726198840716,
+                "predicted_log2_D": -0.43572847828591,
+                "signed_error_bits_pred_minus_obs": 0.07074414159816156
+              },
+              "T20_S10240": {
+                "observed_log2_D": -0.8782135038675686,
+                "predicted_log2_D": -1.2808081901791646,
+                "signed_error_bits_pred_minus_obs": -0.402594686311596
+              },
+              "T20_S2560": {
+                "observed_log2_D": -0.4546046764456682,
+                "predicted_log2_D": -0.9779322990252031,
+                "signed_error_bits_pred_minus_obs": -0.5233276225795349
+              },
+              "T2_S2560": {
+                "observed_log2_D": -0.09971738841558478,
+                "predicted_log2_D": -0.15306538986229365,
+                "signed_error_bits_pred_minus_obs": -0.05334800144670887
+              },
+              "T2_S5120": {
+                "observed_log2_D": -0.11688845233001258,
+                "predicted_log2_D": -0.2881715973250749,
+                "signed_error_bits_pred_minus_obs": -0.17128314499506234
+              },
+              "T5_S10240": {
+                "observed_log2_D": -0.458235244039627,
+                "predicted_log2_D": -0.435011565489699,
+                "signed_error_bits_pred_minus_obs": 0.023223678549928017
+              },
+              "T5_S2560": {
+                "observed_log2_D": -0.26783546451625356,
+                "predicted_log2_D": -0.13670999827576602,
+                "signed_error_bits_pred_minus_obs": 0.13112546624048754
+              }
+            },
+            "loo_rmse_bits": 0.24978930810174424
+          },
+          {
+            "family": "log2_D=gamma+alpha*u+beta*v+epsilon*u^2",
+            "family_id": "F3",
+            "loo_predictions": {
+              "T10_S10240": {
+                "observed_log2_D": -0.669683900331834,
+                "predicted_log2_D": -0.6711870612995983,
+                "signed_error_bits_pred_minus_obs": -0.001503160967764261
+              },
+              "T10_S5120": {
+                "observed_log2_D": -0.5064726198840716,
+                "predicted_log2_D": -0.5489185286872833,
+                "signed_error_bits_pred_minus_obs": -0.04244590880321175
+              },
+              "T20_S10240": {
+                "observed_log2_D": -0.8782135038675686,
+                "predicted_log2_D": -0.6372095936794522,
+                "signed_error_bits_pred_minus_obs": 0.2410039101881164
+              },
+              "T20_S2560": {
+                "observed_log2_D": -0.4546046764456682,
+                "predicted_log2_D": -0.6844247069405455,
+                "signed_error_bits_pred_minus_obs": -0.22982003049487726
+              },
+              "T2_S2560": {
+                "observed_log2_D": -0.09971738841558478,
+                "predicted_log2_D": -0.005494654513129353,
+                "signed_error_bits_pred_minus_obs": 0.09422273390245542
+              },
+              "T2_S5120": {
+                "observed_log2_D": -0.11688845233001258,
+                "predicted_log2_D": -0.25357247731708493,
+                "signed_error_bits_pred_minus_obs": -0.13668402498707236
+              },
+              "T5_S10240": {
+                "observed_log2_D": -0.458235244039627,
+                "predicted_log2_D": -0.49694472412822116,
+                "signed_error_bits_pred_minus_obs": -0.03870948008859415
+              },
+              "T5_S2560": {
+                "observed_log2_D": -0.26783546451625356,
+                "predicted_log2_D": -0.1577456945954347,
+                "signed_error_bits_pred_minus_obs": 0.11008976992081887
+              }
+            },
+            "loo_rmse_bits": 0.13869150720678664
+          }
+        ],
+        "criterion": "minimum eight-fold leave-one-out RMSE in log2(D) bits",
+        "family_priority": [
+          "F1",
+          "F2",
+          "F3"
+        ],
+        "selected_family": "F1",
+        "selection_uses_heldout_outcomes": false,
+        "tie_break_rule": "among candidates within 1e-12 bits of the minimum LOO RMSE, choose the first of F1,F2,F3",
+        "tie_tolerance_bits": 1e-12
+      },
+      "training_cells": [
+        [
+          2,
+          2560
+        ],
+        [
+          2,
+          5120
+        ],
+        [
+          5,
+          2560
+        ],
+        [
+          5,
+          10240
+        ],
+        [
+          10,
+          5120
+        ],
+        [
+          10,
+          10240
+        ],
+        [
+          20,
+          2560
+        ],
+        [
+          20,
+          10240
+        ]
+      ],
+      "training_fit": {
+        "T10_S10240": {
+          "fitted_log2_D": -0.6143561932203047,
+          "observed_log2_D": -0.669683900331834,
+          "residual_bits": -0.055327707111529345
+        },
+        "T10_S5120": {
+          "fitted_log2_D": -0.4500084912815404,
+          "observed_log2_D": -0.5064726198840716,
+          "residual_bits": -0.05646412860253114
+        },
+        "T20_S10240": {
+          "fitted_log2_D": -0.8617173272564771,
+          "observed_log2_D": -0.8782135038675686,
+          "residual_bits": -0.016496176611091484
+        },
+        "T20_S2560": {
+          "fitted_log2_D": -0.5330219233789486,
+          "observed_log2_D": -0.4546046764456682,
+          "residual_bits": 0.0784172469332804
+        },
+        "T2_S2560": {
+          "fitted_log2_D": -0.08777188211383832,
+          "observed_log2_D": -0.09971738841558478,
+          "residual_bits": -0.011945506301746456
+        },
+        "T2_S5120": {
+          "fitted_log2_D": -0.25211958405260254,
+          "observed_log2_D": -0.11688845233001258,
+          "residual_bits": 0.13523113172258996
+        },
+        "T5_S10240": {
+          "fitted_log2_D": -0.4906756262022185,
+          "observed_log2_D": -0.458235244039627,
+          "residual_bits": 0.032440382162591486
+        },
+        "T5_S2560": {
+          "fitted_log2_D": -0.16198022232469003,
+          "observed_log2_D": -0.26783546451625356,
+          "residual_bits": -0.10585524219156353
+        }
+      }
+    },
+    "raw": {
+      "coefficient_order": [
+        "gamma",
+        "alpha_T",
+        "beta_log2_S",
+        "epsilon_T_squared"
+      ],
+      "coefficient_source": "mechfit full-data all-eight refit constrained to G6-selected family",
+      "coefficients": [
+        1.3489008177233357,
+        -0.9098513603667141,
+        -0.10723867757601385,
+        0.16020840966569636
+      ],
+      "coordinates": {
+        "u": "(T-5)/5",
+        "v": "log2(S/5120)"
+      },
+      "family": "log2_D=gamma+alpha*u+beta*v+epsilon*u^2",
+      "family_id": "F3",
+      "model_selection": {
+        "candidate_scores": [
+          {
+            "family": "log2_D=gamma+alpha*u+beta*v",
+            "family_id": "F1",
+            "loo_predictions": {
+              "T10_S10240": {
+                "observed_log2_D": 0.5236364957749043,
+                "predicted_log2_D": 0.7944060448611996,
+                "signed_error_bits_pred_minus_obs": 0.27076954908629525
+              },
+              "T10_S5120": {
+                "observed_log2_D": 0.6352936621692391,
+                "predicted_log2_D": 0.9573050495369846,
+                "signed_error_bits_pred_minus_obs": 0.3220113873677455
+              },
+              "T20_S10240": {
+                "observed_log2_D": -0.11272319999221204,
+                "predicted_log2_D": -0.4524204387568642,
+                "signed_error_bits_pred_minus_obs": -0.3396972387646522
+              },
+              "T20_S2560": {
+                "observed_log2_D": 0.22514536552105574,
+                "predicted_log2_D": -0.07791721829275841,
+                "signed_error_bits_pred_minus_obs": -0.3030625838138141
+              },
+              "T2_S2560": {
+                "observed_log2_D": 2.053896504176208,
+                "predicted_log2_D": 1.8127185494480573,
+                "signed_error_bits_pred_minus_obs": -0.2411779547281505
+              },
+              "T2_S5120": {
+                "observed_log2_D": 2.02095725687132,
+                "predicted_log2_D": 1.5881560659040368,
+                "signed_error_bits_pred_minus_obs": -0.4328011909672831
+              },
+              "T5_S10240": {
+                "observed_log2_D": 1.224498584551766,
+                "predicted_log2_D": 1.1978753561685695,
+                "signed_error_bits_pred_minus_obs": -0.026623228383196418
+              },
+              "T5_S2560": {
+                "observed_log2_D": 1.353030870493975,
+                "predicted_log2_D": 1.7292247916873098,
+                "signed_error_bits_pred_minus_obs": 0.3761939211933347
+              }
+            },
+            "loo_rmse_bits": 0.3106370400928235
+          },
+          {
+            "family": "log2_D=gamma+alpha*u+beta*v+delta*u*v",
+            "family_id": "F2",
+            "loo_predictions": {
+              "T10_S10240": {
+                "observed_log2_D": 0.5236364957749043,
+                "predicted_log2_D": 0.7939159052794519,
+                "signed_error_bits_pred_minus_obs": 0.27027940950454754
+              },
+              "T10_S5120": {
+                "observed_log2_D": 0.6352936621692391,
+                "predicted_log2_D": 0.9567041091662529,
+                "signed_error_bits_pred_minus_obs": 0.3214104469970138
+              },
+              "T20_S10240": {
+                "observed_log2_D": -0.11272319999221204,
+                "predicted_log2_D": -1.4170402844169194,
+                "signed_error_bits_pred_minus_obs": -1.3043170844247074
+              },
+              "T20_S2560": {
+                "observed_log2_D": 0.22514536552105574,
+                "predicted_log2_D": -1.790007821478007,
+                "signed_error_bits_pred_minus_obs": -2.0151531869990627
+              },
+              "T2_S2560": {
+                "observed_log2_D": 2.053896504176208,
+                "predicted_log2_D": 1.7642774798719312,
+                "signed_error_bits_pred_minus_obs": -0.28961902430427666
+              },
+              "T2_S5120": {
+                "observed_log2_D": 2.02095725687132,
+                "predicted_log2_D": 1.5732872835369238,
+                "signed_error_bits_pred_minus_obs": -0.44766997333439607
+              },
+              "T5_S10240": {
+                "observed_log2_D": 1.224498584551766,
+                "predicted_log2_D": 1.1617010914627468,
+                "signed_error_bits_pred_minus_obs": -0.06279749308901916
+              },
+              "T5_S2560": {
+                "observed_log2_D": 1.353030870493975,
+                "predicted_log2_D": 1.7683206897288548,
+                "signed_error_bits_pred_minus_obs": 0.41528981923487973
+              }
+            },
+            "loo_rmse_bits": 0.8943669410397348
+          },
+          {
+            "family": "log2_D=gamma+alpha*u+beta*v+epsilon*u^2",
+            "family_id": "F3",
+            "loo_predictions": {
+              "T10_S10240": {
+                "observed_log2_D": 0.5236364957749043,
+                "predicted_log2_D": 0.4659128396217635,
+                "signed_error_bits_pred_minus_obs": -0.057723656153140845
+              },
+              "T10_S5120": {
+                "observed_log2_D": 0.6352936621692391,
+                "predicted_log2_D": 0.5698543394016942,
+                "signed_error_bits_pred_minus_obs": -0.06543932276754494
+              },
+              "T20_S10240": {
+                "observed_log2_D": -0.11272319999221204,
+                "predicted_log2_D": 0.10769766556089233,
+                "signed_error_bits_pred_minus_obs": 0.22042086555310436
+              },
+              "T20_S2560": {
+                "observed_log2_D": 0.22514536552105574,
+                "predicted_log2_D": 0.03730205666798181,
+                "signed_error_bits_pred_minus_obs": -0.18784330885307393
+              },
+              "T2_S2560": {
+                "observed_log2_D": 2.053896504176208,
+                "predicted_log2_D": 2.0647628008139414,
+                "signed_error_bits_pred_minus_obs": 0.01086629663773353
+              },
+              "T2_S5120": {
+                "observed_log2_D": 2.02095725687132,
+                "predicted_log2_D": 1.892661307908928,
+                "signed_error_bits_pred_minus_obs": -0.12829594896239183
+              },
+              "T5_S10240": {
+                "observed_log2_D": 1.224498584551766,
+                "predicted_log2_D": 1.252236871269003,
+                "signed_error_bits_pred_minus_obs": 0.027738286717237104
+              },
+              "T5_S2560": {
+                "observed_log2_D": 1.353030870493975,
+                "predicted_log2_D": 1.5225290500684507,
+                "signed_error_bits_pred_minus_obs": 0.16949817957447566
+              }
+            },
+            "loo_rmse_bits": 0.1311305477605527
+          }
+        ],
+        "criterion": "minimum eight-fold leave-one-out RMSE in log2(D) bits",
+        "family_priority": [
+          "F1",
+          "F2",
+          "F3"
+        ],
+        "selected_family": "F3",
+        "selection_uses_heldout_outcomes": false,
+        "tie_break_rule": "among candidates within 1e-12 bits of the minimum LOO RMSE, choose the first of F1,F2,F3",
+        "tie_tolerance_bits": 1e-12
+      },
+      "training_cells": [
+        [
+          2,
+          2560
+        ],
+        [
+          2,
+          5120
+        ],
+        [
+          5,
+          2560
+        ],
+        [
+          5,
+          10240
+        ],
+        [
+          10,
+          5120
+        ],
+        [
+          10,
+          10240
+        ],
+        [
+          20,
+          2560
+        ],
+        [
+          20,
+          10240
+        ]
+      ],
+      "training_fit": {
+        "T10_S10240": {
+          "fitted_log2_D": 0.4920191894463041,
+          "observed_log2_D": 0.5236364957749043,
+          "residual_bits": 0.03161730632860027
+        },
+        "T10_S5120": {
+          "fitted_log2_D": 0.599257867022318,
+          "observed_log2_D": 0.6352936621692391,
+          "residual_bits": 0.036035795146921124
+        },
+        "T20_S10240": {
+          "fitted_log2_D": -0.046016253961553344,
+          "observed_log2_D": -0.11272319999221204,
+          "residual_bits": -0.0667069460306587
+        },
+        "T20_S2560": {
+          "fitted_log2_D": 0.16846110119047436,
+          "observed_log2_D": 0.22514536552105574,
+          "residual_bits": 0.05668426433058138
+        },
+        "T2_S2560": {
+          "fitted_log2_D": 2.0597253389990287,
+          "observed_log2_D": 2.053896504176208,
+          "residual_bits": -0.0058288348228208164
+        },
+        "T2_S5120": {
+          "fitted_log2_D": 1.9524866614230147,
+          "observed_log2_D": 2.02095725687132,
+          "residual_bits": 0.06847059544830514
+        },
+        "T5_S10240": {
+          "fitted_log2_D": 1.2416621401473218,
+          "observed_log2_D": 1.224498584551766,
+          "residual_bits": -0.017163555595555824
+        },
+        "T5_S2560": {
+          "fitted_log2_D": 1.4561394952993496,
+          "observed_log2_D": 1.353030870493975,
+          "residual_bits": -0.10310862480537453
+        }
+      }
+    }
+  },
+  "selection_diagnostics": {
+    "corrected": {
+      "candidate_loo_rmse_bits": {
+        "F1": 0.13160304977859522,
+        "F2": 0.24978930810174424,
+        "F3": 0.13869150720678664
+      },
+      "selected_family": "F1"
+    },
+    "raw": {
+      "candidate_loo_rmse_bits": {
+        "F1": 0.3106370400928235,
+        "F2": 0.8943669410397348,
+        "F3": 0.1311305477605527
+      },
+      "selected_family": "F3"
+    }
+  },
+  "selection_preimage_canonical_sha256": "339040408a8ac6ff5751274caa447b887bf849a938308705b8e13fe6d235f10e",
+  "selection_step": "training-only F1/F2/F3 arm-specific LOO family selection is frozen by G6; coefficients are copied from mechfit's complete 540-cell all-eight refits after exact equality with the G6 refits",
+  "selection_uses_heldout_outcomes": false,
+  "source_git_commit": "058887e647340d7e29bdf0f1976514ce07588642",
+  "status": "FROZEN",
+  "v6_analyzer_path": "scripts/analyze_v6.py",
+  "v6_analyzer_sha256": "ae97012af3e10b4f4f95fe12395ac131960d72d31c6f39856f6389c3032c0239",
+  "v6_contract_path": "/private/tmp/yeto-h200-seal-worktree/experiment-specs/outer-mup-v6-factorial-prereg.json",
+  "v6_contract_sha256": "5bd845c0909850a681fedbae816d71b57034b023e273ed9911865a205c1e44df",
+  "v6_manifest_path": "/private/tmp/v9-seal-inputs.X9yiV8/launch-manifest-v6.json",
+  "v6_manifest_sha256": "71e621b1a5ebde309a25a1a78d1debe30fb3c3cba2fe504d245212f445261bc5",
+  "v6_readout_path": "/private/tmp/v9-seal-inputs.X9yiV8/g6-readout.json",
+  "v6_readout_sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+}

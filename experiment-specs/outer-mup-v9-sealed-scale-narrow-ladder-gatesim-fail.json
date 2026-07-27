@@ -1,0 +1,556 @@
+{
+  "bootstrap": {
+    "draws": 10000,
+    "groups": [
+      {
+        "frequency": 2484,
+        "representative": [
+          1,
+          1
+        ]
+      },
+      {
+        "frequency": 5023,
+        "representative": [
+          0,
+          1
+        ]
+      },
+      {
+        "frequency": 2493,
+        "representative": [
+          0,
+          0
+        ]
+      }
+    ],
+    "sample_size": 2,
+    "seed": 20260728
+  },
+  "created_at_utc": "2026-07-27T16:13:06.177697+00:00",
+  "elapsed_seconds": 2.7993398749968037,
+  "gates": {
+    "G9A_1P7B": {
+      "P_eval": 0.0,
+      "P_eval_wilson95": [
+        0.0,
+        0.0007677019450571244
+      ],
+      "P_pass_given_evaluable_under_centered_null": 0.0,
+      "P_pass_given_evaluable_wilson95": [
+        null,
+        null
+      ],
+      "feasibility_pass": false,
+      "gate_id": "G9A_1P7B",
+      "ladder_offsets_log2": [
+        -0.75,
+        -0.25,
+        0.25,
+        0.75
+      ],
+      "near_bracket_allowance_bits": 0.5,
+      "point_acceptance_fraction": 0.7732,
+      "registered_absolute_error_band_bits": {
+        "corrected": null,
+        "raw": null
+      },
+      "registered_minimum_valid_bootstrap_refits": null,
+      "seeds_per_eta": 2,
+      "sensitivity": {
+        "truth_offset_+0.5_bits": {
+          "P_eval": 0.0,
+          "P_pass_given_evaluable": null,
+          "P_reject_given_evaluable": null,
+          "simulations": 2500
+        },
+        "truth_offset_+1_bits": {
+          "P_eval": 0.0,
+          "P_pass_given_evaluable": null,
+          "P_reject_given_evaluable": null,
+          "simulations": 2500
+        },
+        "truth_offset_-0.5_bits": {
+          "P_eval": 0.0,
+          "P_pass_given_evaluable": null,
+          "P_reject_given_evaluable": null,
+          "simulations": 2500
+        },
+        "truth_offset_-1_bits": {
+          "P_eval": 0.0,
+          "P_pass_given_evaluable": null,
+          "P_reject_given_evaluable": null,
+          "simulations": 2500
+        }
+      },
+      "simulation_seed": 9101700,
+      "simulations_under_centered_prediction_null": 5000,
+      "strict_point_interior_fraction": 0.7254,
+      "target_priors": {
+        "corrected": {
+          "curvature_a": 0.043208376940932845,
+          "name": "corrected",
+          "rung_sd": [
+            0.021370661555514547,
+            0.019403778318545024,
+            0.015600826169284678,
+            0.030675685683191466
+          ],
+          "sources": [
+            {
+              "S": 5120,
+              "T": 10,
+              "arm": "corrected",
+              "curvature_a": 0.043208376940932845,
+              "label": "v6_135m_T10_corrected",
+              "mu": null,
+              "noise_profile": [
+                {
+                  "offset_log2_from_fitted_vertex": -0.8592775010637876,
+                  "seed_sd_loss": 0.0025915712638740086
+                },
+                {
+                  "offset_log2_from_fitted_vertex": -0.35927750106378753,
+                  "seed_sd_loss": 0.00236741703373127
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.14072249893621236,
+                  "seed_sd_loss": 0.0019813621060959263
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.6407224989362125,
+                  "seed_sd_loss": 0.00856278248645876
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 1.1407224989362124,
+                  "seed_sd_loss": 0.0037383385144271098
+                }
+              ]
+            },
+            {
+              "S": 2560,
+              "T": 5,
+              "arm": null,
+              "curvature_a": 0.06465617060348786,
+              "label": "G4C_1p7b_T5_raw_noise_proxy",
+              "mu": 0.9,
+              "noise_profile": [
+                {
+                  "offset_log2_from_fitted_vertex": -0.7340491064627557,
+                  "seed_sd_loss": 0.009471266260276584
+                },
+                {
+                  "offset_log2_from_fitted_vertex": -0.23404910646275562,
+                  "seed_sd_loss": 0.005530244774407981
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.2659508935372444,
+                  "seed_sd_loss": 0.0098679791035343
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.7659508935372444,
+                  "seed_sd_loss": 0.013418061117138651
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 1.2659508935372443,
+                  "seed_sd_loss": 0.014890616807076727
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 1.7659508935372443,
+                  "seed_sd_loss": 0.01900916127175646
+                }
+              ]
+            },
+            {
+              "S": 10240,
+              "T": 20,
+              "arm": null,
+              "curvature_a": 0.11791007978103771,
+              "label": "G4C_1p7b_T20_raw_noise_proxy",
+              "mu": 0.9,
+              "noise_profile": [
+                {
+                  "offset_log2_from_fitted_vertex": -0.5759911236869547,
+                  "seed_sd_loss": 0.021370661555514547
+                },
+                {
+                  "offset_log2_from_fitted_vertex": -0.0759911236869548,
+                  "seed_sd_loss": 0.018353887333682824
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.4240088763130453,
+                  "seed_sd_loss": 0.014131285912421616
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.9240088763130452,
+                  "seed_sd_loss": 0.03950682311057127
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 1.4240088763130454,
+                  "seed_sd_loss": 0.06466990103745199
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 1.9240088763130452,
+                  "seed_sd_loss": 0.12445464935759958
+                }
+              ]
+            }
+          ]
+        },
+        "raw": {
+          "curvature_a": 0.04209110537504404,
+          "name": "raw",
+          "rung_sd": [
+            0.021370661555514547,
+            0.019403778318545024,
+            0.015600826169284678,
+            0.030675685683191466
+          ],
+          "sources": [
+            {
+              "S": 5120,
+              "T": 10,
+              "arm": "raw",
+              "curvature_a": 0.04209110537504404,
+              "label": "v6_135m_T10_raw",
+              "mu": null,
+              "noise_profile": [
+                {
+                  "offset_log2_from_fitted_vertex": -1.0197297157161151,
+                  "seed_sd_loss": 0.0037767566741381663
+                },
+                {
+                  "offset_log2_from_fitted_vertex": -0.519729715716115,
+                  "seed_sd_loss": 0.001136192096948183
+                },
+                {
+                  "offset_log2_from_fitted_vertex": -0.019729715716115183,
+                  "seed_sd_loss": 0.003009548495388149
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.4802702842838849,
+                  "seed_sd_loss": 0.003175975836333652
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.9802702842838849,
+                  "seed_sd_loss": 0.003200091396215366
+                }
+              ]
+            },
+            {
+              "S": 2560,
+              "T": 5,
+              "arm": null,
+              "curvature_a": 0.06465617060348786,
+              "label": "G4C_1p7b_T5_raw",
+              "mu": 0.9,
+              "noise_profile": [
+                {
+                  "offset_log2_from_fitted_vertex": -0.7340491064627557,
+                  "seed_sd_loss": 0.009471266260276584
+                },
+                {
+                  "offset_log2_from_fitted_vertex": -0.23404910646275562,
+                  "seed_sd_loss": 0.005530244774407981
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.2659508935372444,
+                  "seed_sd_loss": 0.0098679791035343
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.7659508935372444,
+                  "seed_sd_loss": 0.013418061117138651
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 1.2659508935372443,
+                  "seed_sd_loss": 0.014890616807076727
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 1.7659508935372443,
+                  "seed_sd_loss": 0.01900916127175646
+                }
+              ]
+            },
+            {
+              "S": 10240,
+              "T": 20,
+              "arm": null,
+              "curvature_a": 0.11791007978103771,
+              "label": "G4C_1p7b_T20_raw",
+              "mu": 0.9,
+              "noise_profile": [
+                {
+                  "offset_log2_from_fitted_vertex": -0.5759911236869547,
+                  "seed_sd_loss": 0.021370661555514547
+                },
+                {
+                  "offset_log2_from_fitted_vertex": -0.0759911236869548,
+                  "seed_sd_loss": 0.018353887333682824
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.4240088763130453,
+                  "seed_sd_loss": 0.014131285912421616
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.9240088763130452,
+                  "seed_sd_loss": 0.03950682311057127
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 1.4240088763130454,
+                  "seed_sd_loss": 0.06466990103745199
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 1.9240088763130452,
+                  "seed_sd_loss": 0.12445464935759958
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "valid_bootstrap_refits": {
+        "max": 10000,
+        "median": 7516.0,
+        "min": 0,
+        "q10": 0.0,
+        "q90": 10000.0
+      }
+    },
+    "G9B_7B": {
+      "P_eval": 0.0,
+      "P_eval_wilson95": [
+        0.0,
+        0.0007677019450571244
+      ],
+      "P_pass_given_evaluable_under_centered_null": 0.0,
+      "P_pass_given_evaluable_wilson95": [
+        null,
+        null
+      ],
+      "feasibility_pass": false,
+      "gate_id": "G9B_7B",
+      "ladder_offsets_log2": [
+        -0.5,
+        0.0,
+        0.5
+      ],
+      "near_bracket_allowance_bits": 0.5,
+      "point_acceptance_fraction": 0.7084,
+      "registered_absolute_error_band_bits": {
+        "mu0": null,
+        "raw": null
+      },
+      "registered_minimum_valid_bootstrap_refits": null,
+      "seeds_per_eta": 2,
+      "sensitivity": {
+        "truth_offset_+0.5_bits": {
+          "P_eval": 0.0,
+          "P_pass_given_evaluable": null,
+          "P_reject_given_evaluable": null,
+          "simulations": 2500
+        },
+        "truth_offset_+1_bits": {
+          "P_eval": 0.0,
+          "P_pass_given_evaluable": null,
+          "P_reject_given_evaluable": null,
+          "simulations": 2500
+        },
+        "truth_offset_-0.5_bits": {
+          "P_eval": 0.0,
+          "P_pass_given_evaluable": null,
+          "P_reject_given_evaluable": null,
+          "simulations": 2500
+        },
+        "truth_offset_-1_bits": {
+          "P_eval": 0.0,
+          "P_pass_given_evaluable": null,
+          "P_reject_given_evaluable": null,
+          "simulations": 2500
+        }
+      },
+      "simulation_seed": 9700000,
+      "simulations_under_centered_prediction_null": 5000,
+      "strict_point_interior_fraction": 0.6468,
+      "target_priors": {
+        "mu0": {
+          "curvature_a": 0.04005521583006287,
+          "name": "mu0",
+          "rung_sd": [
+            0.008638178495009474,
+            0.008874094610986772,
+            0.014108957978611092
+          ],
+          "sources": [
+            {
+              "S": 2560,
+              "T": 5,
+              "arm": "mu0",
+              "curvature_a": 0.04005521583006287,
+              "label": "v6_135m_T5_mu0",
+              "mu": null,
+              "noise_profile": [
+                {
+                  "offset_log2_from_fitted_vertex": -0.885128157614168,
+                  "seed_sd_loss": 0.0025472304054788286
+                },
+                {
+                  "offset_log2_from_fitted_vertex": -0.38512815761416785,
+                  "seed_sd_loss": 0.0049513963319383425
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.11487184238583205,
+                  "seed_sd_loss": 0.0022385016259384018
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.6148718423858321,
+                  "seed_sd_loss": 0.004638988873425241
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 1.1148718423858321,
+                  "seed_sd_loss": 0.005998752695431526
+                }
+              ]
+            },
+            {
+              "S": 2560,
+              "T": 5,
+              "arm": null,
+              "curvature_a": 0.16836542612980937,
+              "label": "G4C_1p7b_T5_mu0",
+              "mu": 0.0,
+              "noise_profile": [
+                {
+                  "offset_log2_from_fitted_vertex": -0.027182885905990904,
+                  "seed_sd_loss": 0.008638178495009474
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.47281711409400895,
+                  "seed_sd_loss": 0.012977602145485528
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.9728171140940091,
+                  "seed_sd_loss": 0.033787677960066625
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 1.472817114094009,
+                  "seed_sd_loss": 0.07870814728605788
+                }
+              ]
+            }
+          ]
+        },
+        "raw": {
+          "curvature_a": 0.03314136585902158,
+          "name": "raw",
+          "rung_sd": [
+            0.007626481145640447,
+            0.007560730462017652,
+            0.011529766149841497
+          ],
+          "sources": [
+            {
+              "S": 2560,
+              "T": 5,
+              "arm": "raw",
+              "curvature_a": 0.03314136585902158,
+              "label": "v6_135m_T5_raw",
+              "mu": null,
+              "noise_profile": [
+                {
+                  "offset_log2_from_fitted_vertex": -1.1444616537801215,
+                  "seed_sd_loss": 0.003673852383050982
+                },
+                {
+                  "offset_log2_from_fitted_vertex": -0.6444616537801215,
+                  "seed_sd_loss": 0.0037796762210516584
+                },
+                {
+                  "offset_log2_from_fitted_vertex": -0.14446165378012163,
+                  "seed_sd_loss": 0.005108997311900808
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.35553834621987845,
+                  "seed_sd_loss": 0.00618059865289245
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.8555383462198783,
+                  "seed_sd_loss": 0.001903972983428391
+                }
+              ]
+            },
+            {
+              "S": 2560,
+              "T": 5,
+              "arm": null,
+              "curvature_a": 0.06465617060348786,
+              "label": "G4C_1p7b_T5_raw",
+              "mu": 0.9,
+              "noise_profile": [
+                {
+                  "offset_log2_from_fitted_vertex": -0.7340491064627557,
+                  "seed_sd_loss": 0.009471266260276584
+                },
+                {
+                  "offset_log2_from_fitted_vertex": -0.23404910646275562,
+                  "seed_sd_loss": 0.005530244774407981
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.2659508935372444,
+                  "seed_sd_loss": 0.0098679791035343
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 0.7659508935372444,
+                  "seed_sd_loss": 0.013418061117138651
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 1.2659508935372443,
+                  "seed_sd_loss": 0.014890616807076727
+                },
+                {
+                  "offset_log2_from_fitted_vertex": 1.7659508935372443,
+                  "seed_sd_loss": 0.01900916127175646
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "valid_bootstrap_refits": {
+        "max": 10000,
+        "median": 7507.0,
+        "min": 0,
+        "q10": 0.0,
+        "q90": 10000.0
+      }
+    }
+  },
+  "method": {
+    "band_selection": "per-target 95th percentile absolute point-estimation error among evaluable centered-null simulations, rounded up to 0.125 bits, with a prospective minimum substantive band of 0.5 bits",
+    "bootstrap": "one shared two-index resample across every gate target; all three multinomial count vectors evaluated with exact frequency in the registered 10,000-draw PRNG sequence",
+    "curvature": "minimum positive measured curvature among the same sources",
+    "limitations": "The simulation calibrates finite-seed curve estimation and gate evaluability under conservative measured noise/curvature transport; it cannot assume away model-family transport error, which is the scientific object tested by G9. Independent rung noise is used because cross-scale covariance is unidentified.",
+    "noise": "independent Gaussian per seed and rung with SD equal to the largest linearly interpolated measured SD among relevant v6/G4C profiles",
+    "point_estimator": "OLS quadratic in log2 eta on the two-seed rung mean",
+    "threshold_selection": "largest valid-refit threshold, rounded down to 100, retaining at least 0.8 evaluability under the centered prediction null"
+  },
+  "minimum_required_P_eval": 0.8,
+  "minimum_required_P_pass_given_evaluable": 0.8,
+  "pre_outcome": true,
+  "schema": "yeto_outer_mup_v9_gate_simulation_v1",
+  "source_artifacts": {
+    "g4c_readout": {
+      "path": "/private/tmp/v9-seal-inputs.X9yiV8/g4c-readout.json",
+      "sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa"
+    },
+    "v6_readout": {
+      "path": "/private/tmp/v9-seal-inputs.X9yiV8/g6-readout.json",
+      "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+    },
+    "v6_selection": {
+      "path": "/private/tmp/yeto-h200-seal-worktree/experiment-specs/outer-mup-v9-frozen-coefficients.json",
+      "sha256": "413e4d70dbe88a6ca12493884cbd003c47a8c6fd28da1944dc1f2a10b6292d5b"
+    }
+  },
+  "status": "FAIL",
+  "verification_loss_seen": false
+}
