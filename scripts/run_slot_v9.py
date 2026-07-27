@@ -374,6 +374,28 @@ def run_queue(
     retry_authority_path: Path | None,
 ) -> int:
     manifest = read_json(manifest_path)
+    repo = Path("/root/yeto")
+    registered_git_commit = manifest["source"]["git_commit"]
+    execution_git_commit = git(repo, "rev-parse", "HEAD")
+    if git(repo, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise SystemExit("v9 execution worktree is dirty")
+    if attempt_number == 1 and execution_git_commit != registered_git_commit:
+        raise SystemExit("attempt 1 must execute at the registered Git commit")
+    if attempt_number == 2 and subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "merge-base",
+            "--is-ancestor",
+            registered_git_commit,
+            execution_git_commit,
+        ],
+        capture_output=True,
+    ).returncode:
+        raise SystemExit(
+            "attempt 2 execution commit is not a descendant of the registration"
+        )
     proof = read_json(proof_path)
     if (
         proof.get("status") != "PASS"
@@ -467,7 +489,8 @@ def run_queue(
                 "command_hash": expected_hash,
                 "seed": cell["seed"],
                 "training_seed": cell["training_seed"],
-                "git_commit": manifest["source"]["git_commit"],
+                "git_commit": execution_git_commit,
+                "registered_source_git_commit": registered_git_commit,
                 "launch_authority_sha256": sha256_file(launch_authority_path),
             }
             write_json_atomic(attempt_root / "attempt-start.json", start)
@@ -538,6 +561,8 @@ def run_queue(
                 "wall_seconds": time.monotonic() - started_monotonic,
                 "process_return_code": return_code,
                 "wall_ceiling_terminated": wall_stopped,
+                "git_commit": execution_git_commit,
+                "registered_source_git_commit": registered_git_commit,
             }
             write_json_atomic(attempt_root / "attempt-end.json", end)
             if wall_stopped:
@@ -552,7 +577,11 @@ def run_queue(
                     "command_hash": expected_hash,
                 }
             elif return_code == 0:
-                evidence = validate_cell(cell, attempt_root, command)
+                validation_cell = {
+                    **cell,
+                    "source_git_commit": execution_git_commit,
+                }
+                evidence = validate_cell(validation_cell, attempt_root, command)
             else:
                 evidence = {
                     "schema": "yeto_outer_mup_cell_evidence_v1",
@@ -574,6 +603,8 @@ def run_queue(
                     "attempt_end_sha256": sha256_file(
                         attempt_root / "attempt-end.json"
                     ),
+                    "git_commit": execution_git_commit,
+                    "registered_source_git_commit": registered_git_commit,
                 }
             )
             write_json_atomic(evidence_path, evidence)
