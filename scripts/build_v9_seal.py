@@ -264,6 +264,22 @@ def build_contract(
             "SmolLM2-1.7B T=10 and minimally at Qwen2.5-7B T=5."
         ),
         "verification_loss_seen": False,
+        "prelaunch_operational_amendment": {
+            "scientific_outputs_existed": False,
+            "change": (
+                "The loss-blind fleet checker now reads the actual frozen V6 slot "
+                "ledger field names completed/queue_total instead of the obsolete "
+                "completed_cells/queue_cells aliases; empty jq fields are also parsed "
+                "as missing, and the inert tmux server whose retained startup argv "
+                "mentions run_slot_v6.py is excluded from the live-controller list. "
+                "No prediction, ladder, band, target, seed, command, or analyzer rule "
+                "changed."
+            ),
+            "trigger": (
+                "Fresh post-seal, pre-authority fleet proof raised ValueError before "
+                "writing a proof; no V9 process or attempt existed."
+            ),
+        },
         "source_artifacts": source_artifacts,
         "referee_mechanism_resolution": {
             "mechanism": "SURFACE-FALLBACK",

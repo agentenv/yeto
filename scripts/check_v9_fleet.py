@@ -19,7 +19,8 @@ NODES = ("h200-n1", "h200-n2")
 REMOTE = r"""
 set -eu
 echo V6_PROCESSES
-pgrep -af '[r]un_slot_v6.py' 2>/dev/null || true
+pgrep -af '[r]un_slot_v6.py' 2>/dev/null \
+  | awk 'index($0,"tmux new-session")==0' || true
 echo V9_PROCESSES
 pgrep -af '[r]un_slot_v9.py' 2>/dev/null || true
 echo COMPUTE_PROCESSES
@@ -31,7 +32,7 @@ echo V6_SLOTS
 if [ -d /root/yeto-results-v6/_controller/slots-v6 ]; then
   for f in /root/yeto-results-v6/_controller/slots-v6/*.json; do
     [ -f "$f" ] || continue
-    jq -r '[input_filename,.state,.completed_cells,.failures,.queue_cells] | @tsv' "$f"
+    jq -r '[input_filename,.state,.completed,.failures,.queue_total] | @tsv' "$f"
   done
 fi
 echo V9_EVIDENCE
@@ -93,9 +94,9 @@ def inspect_node(node: str) -> dict:
                     {
                         "path": parts[0],
                         "state": parts[1],
-                        "completed": None if parts[2] == "null" else int(parts[2]),
-                        "failures": None if parts[3] == "null" else int(parts[3]),
-                        "queue_total": None if parts[4] == "null" else int(parts[4]),
+                        "completed": None if parts[2] in ("", "null") else int(parts[2]),
+                        "failures": None if parts[3] in ("", "null") else int(parts[3]),
+                        "queue_total": None if parts[4] in ("", "null") else int(parts[4]),
                     }
                 )
         return records

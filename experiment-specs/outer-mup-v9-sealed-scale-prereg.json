@@ -141,7 +141,7 @@
     },
     "fleet_checker": {
       "path": "scripts/check_v9_fleet.py",
-      "sha256": "86ea4c49c636c72acbe9a3b4bad1288fb0c9502cf68bf565cdd4cad1a8f4445d"
+      "sha256": "aa03a08cc0da32c6c02c9193624540680172b00afdd34f65ce6d1dcc51a2d548"
     },
     "gate_simulator": {
       "path": "scripts/gatesim_v9.py",
@@ -173,7 +173,7 @@
     },
     "seal_builder": {
       "path": "scripts/build_v9_seal.py",
-      "sha256": "b4fb05222a1d6618f4e1267698c32f19ea2afffdd81d59f9f39e2bdf678f6c6f"
+      "sha256": "7a0b02cb7fa6f8e0130e3e17fef9eee0805719928dd3bb3386d6aed83dd69d13"
     },
     "stage_launcher": {
       "path": "scripts/launch_v9_stage.py",
@@ -336,6 +336,11 @@
     }
   },
   "objective": "Prospectively test empirical optimal-outer-LR transport at never-run SmolLM2-1.7B T=10 and minimally at Qwen2.5-7B T=5.",
+  "prelaunch_operational_amendment": {
+    "change": "The loss-blind fleet checker now reads the actual frozen V6 slot ledger field names completed/queue_total instead of the obsolete completed_cells/queue_cells aliases; empty jq fields are also parsed as missing, and the inert tmux server whose retained startup argv mentions run_slot_v6.py is excluded from the live-controller list. No prediction, ladder, band, target, seed, command, or analyzer rule changed.",
+    "scientific_outputs_existed": false,
+    "trigger": "Fresh post-seal, pre-authority fleet proof raised ValueError before writing a proof; no V9 process or attempt existed."
+  },
   "program_id": "outer-mup-v9-sealed-scale",
   "referee_mechanism_resolution": {
     "claim_boundary": "The paper may claim prospective empirical surface transport only; it must not claim that the rejected static spectral closure is the identified mechanism.",
@@ -350,7 +355,7 @@
     "spectral_mechanism_confirmed_on_full_data": false,
     "theory_note": "docs/theory-lane-A.md"
   },
-  "registered_at_utc": "2026-07-27T16:19:52.744023+00:00",
+  "registered_at_utc": "2026-07-27T16:27:33.663215+00:00",
   "retry_contract": {
     "allowed_reasons": [
       "host_or_gpu_failure",

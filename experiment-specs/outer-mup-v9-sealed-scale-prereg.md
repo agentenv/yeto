@@ -15,7 +15,7 @@ The referee confirmed no spectral lane on full data. The point predictions there
 | Qwen2.5-7B | mu0 | `0.0110450931863` | `[0.00656745170151272, 0.011045093186307909, 0.018575558533019097]` | 0.500 |
 | Qwen2.5-7B | raw | `0.00303047740489` | `[0.0018019326458734598, 0.0030304774048872667, 0.005096635172554164]` | 0.500 |
 
-Sealed prediction SHA-256: `2c9a93617c0dd017173d50eb51942bbb861c2ad6b28d55f6c08faea21406e2d2`.
+Sealed prediction SHA-256: `97e02dcad63782978ac51b320621e5a681236518cb0d5db19454b8981549ca9c`.
 
 The 1.7B T=10/S=5120/H=512 raw and corrected coordinates were never run before this seal. The 7B stage is T=5/S=2560/H=512 with seeds {901,907}, M=4, and one GPU per learner.
 
