@@ -45,6 +45,16 @@ SUBCOMMANDS = (
 )
 
 
+class _StoreExplicit(argparse.Action):
+    """Store an option and remember that the user, not argparse, set it."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        explicit = set(getattr(namespace, "_explicit_launch_flags", ()))
+        explicit.add(self.dest)
+        setattr(namespace, "_explicit_launch_flags", sorted(explicit))
+
+
 def _add_launch_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--gpu",
@@ -77,6 +87,12 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default="auto",
         help="training loop selector; auto infers diffusion for diffusion aliases, "
         "otherwise uses the causal-LM learner",
+    )
+    p.add_argument(
+        "--training-mode",
+        choices=["sft", "rl"],
+        default="sft",
+        help="training objective: existing supervised fine-tuning or strict Miles RL",
     )
     p.add_argument(
         "--output",
@@ -246,6 +262,29 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="tokenizer worker processes per learner rank (stream mode)",
     )
 
+    rl = p.add_argument_group("reinforcement learning")
+    rl.add_argument("--rl-runtime", choices=["miles"], default="miles")
+    rl.add_argument("--rl-global-rounds", type=int, default=None)
+    rl.add_argument("--rl-groups-per-island-round", type=int, default=None)
+    rl.add_argument("--rl-samples-per-group", type=int, default=None)
+    rl.add_argument("--rl-local-optimizer-steps", type=int, default=None)
+    rl.add_argument(
+        "--reward-function",
+        default=None,
+        help="RL reward callable as package.module:function",
+    )
+    rl.add_argument(
+        "--rl-generate-function",
+        default=None,
+        help="optional complete-trajectory generator as package.module:function",
+    )
+    rl.add_argument(
+        "--rl-round-timeout-s",
+        type=int,
+        default=0,
+        help="strict global-round deadline in seconds (0 disables)",
+    )
+
     diffusion = p.add_argument_group("diffusion")
     diffusion.add_argument(
         "--diffusion-adapter",
@@ -309,9 +348,18 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
 
     sync = p.add_argument_group("async sync")
-    sync.add_argument("--total-steps", type=int, default=64, help="outer steps T (one fragment each)")
-    sync.add_argument("--fragments", type=int, default=8, help="fragments P (= sync interval H)")
-    sync.add_argument("--quorum", type=int, default=1, help="minimum learners per outer step (K)")
+    sync.add_argument(
+        "--total-steps", type=int, default=64, action=_StoreExplicit,
+        help="outer steps T (one fragment each)",
+    )
+    sync.add_argument(
+        "--fragments", type=int, default=8, action=_StoreExplicit,
+        help="fragments P (= sync interval H)",
+    )
+    sync.add_argument(
+        "--quorum", type=int, default=1, action=_StoreExplicit,
+        help="minimum learners per outer step (K)",
+    )
     sync.add_argument(
         "--external-learners",
         type=int,
@@ -344,6 +392,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--sync-interval-steps",
         type=float,
         default=24.0,
+        action=_StoreExplicit,
         help="target sync interval H (inner steps per fragment between "
         "merges); the syncer adapts its round pacing to the measured "
         "learner step time. Never binds where WAN latency already spaces "
@@ -353,6 +402,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--pipeline",
         type=int,
         default=2,
+        action=_StoreExplicit,
         help="fragment sync rounds in flight at once (Decoupled DiLoCo's "
         "'two fragments in flight' at τ=2); 1 = serial rounds. Clamped to "
         "--fragments",
@@ -361,12 +411,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--delta-correction",
         choices=["heloco", "none"],
         default="heloco",
+        action=_StoreExplicit,
         help="pre-merge correction of learner deltas against the outer "
         "momentum (HeLoCo, arXiv 2606.00271); shrinks/reorients stale "
         "deltas that oppose the global trajectory",
     )
-    sync.add_argument("--outer-lr", type=float, default=0.7)
-    sync.add_argument("--outer-momentum", type=float, default=0.9)
+    sync.add_argument("--outer-lr", type=float, default=0.7, action=_StoreExplicit)
+    sync.add_argument("--outer-momentum", type=float, default=0.9, action=_StoreExplicit)
     sync.add_argument(
         "--fragment-pattern",
         choices=["binpack", "strided"],
@@ -385,6 +436,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--wire-dtype",
         choices=["bf16", "f32", "q4"],
         default="bf16",
+        action=_StoreExplicit,
         help="WAN tensor encoding; q4 sends pushes as 4-bit E3M0 block-quantized "
         "deltas (~4x less learner egress; broadcasts stay bf16)",
     )
@@ -883,6 +935,7 @@ HEAD_SETUP_PIP = (
     "pip install -q torch --index-url https://download.pytorch.org/whl/cpu && "
     "pip install -q cloudpickle transformers==5.13.0"
 )
+HEAD_RL_EXPORT_PIP = "pip install -q peft accelerate safetensors"
 HEAD_WAIT_READY = (
     f"for i in $(seq 1 180); do [ -f {HEAD_READY_MARKER} ] && break; sleep 5; done; "
     f"[ -f {HEAD_READY_MARKER} ] || {{ echo 'head setup never completed' >&2; exit 1; }}"
@@ -949,12 +1002,18 @@ def _make_head_task(args, extra_mounts: dict | None = None):
         # it onto learners from there).
         loss_path = pickled_loss_path(args.loss_function)
         file_mounts[f"~/sky_workdir/{loss_path.name}"] = str(loss_path)
+    rl_export_setup = (
+        f"{HEAD_RL_EXPORT_PIP}\n"
+        if getattr(args, "training_mode", "sft") == "rl"
+        else ""
+    )
     task = sky.Task(
         name="yeto-head",
         setup=(
             "set -e\n"
             f"{WAN_TUNING}\n"
             f"{HEAD_SETUP_PIP}\n"
+            f"{rl_export_setup}"
             f"{SYNCER_REMOTE_BUILD}\n"
             f"touch {HEAD_READY_MARKER}"
         ),

@@ -40,6 +40,7 @@ yeto-export = "yeto.export:main"
 yeto-codex-traces = "yeto.codex_traces:main"
 yeto-diffusion-export = "yeto.diffusion.export:main"
 yeto-diffusion-sample = "yeto.diffusion.sample:main"
+yeto-rl-export = "yeto.rl.export:main"
 
 [tool.setuptools.packages.find]
 include = ["yeto*"]

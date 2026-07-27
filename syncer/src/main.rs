@@ -81,6 +81,15 @@ struct Args {
     /// JSONL event tape (one record per merge).
     #[arg(long)]
     event_tape: Option<std::path::PathBuf>,
+    /// Fixed-roster synchronous f32 LoRA FedAvg mode used by Yeto RL.
+    #[arg(long, default_value_t = false)]
+    rl_strict_avg: bool,
+    /// SHA256 of the canonical RL run manifest.
+    #[arg(long)]
+    run_manifest_sha256: Option<String>,
+    /// Fail a strict RL round after this many seconds (0 = no deadline).
+    #[arg(long, default_value_t = 0)]
+    rl_round_timeout_s: u64,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -121,6 +130,9 @@ fn main() -> anyhow::Result<()> {
         mark_final_checkpoint: args.mark_final_checkpoint,
         learner_budget_steps: args.learner_budget_steps,
         event_tape: args.event_tape,
+        rl_strict_avg: args.rl_strict_avg,
+        run_manifest_sha256: args.run_manifest_sha256,
+        rl_round_timeout_s: args.rl_round_timeout_s,
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
