@@ -303,8 +303,16 @@ def validate(cells: list[dict]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--contract", type=Path, default=CONTRACT_PATH)
-    parser.add_argument("--input-manifest", type=Path, required=True)
-    parser.add_argument("--token-report", type=Path, required=True)
+    parser.add_argument("--input-manifest", type=Path)
+    parser.add_argument("--token-report", type=Path)
+    parser.add_argument(
+        "--use-contract-input-proof",
+        action="store_true",
+        help=(
+            "use the contract's already dual-node-verified hashes; node "
+            "preflight still rehashes the canonical files before launch"
+        ),
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if git("status", "--porcelain=v1", "--untracked-files=no"):
@@ -332,16 +340,34 @@ def main() -> int:
         raise SystemExit("v8 feasibility gate is not PASS_PREOUTCOME")
     if contract["cost_and_scope_rule"]["effective_cell_count"] != EXPECTED_CELLS:
         raise SystemExit("v8 registered cost rule did not retain the 900-cell grid")
-    input_hash = sha256_file(args.input_manifest.resolve())
-    token_hash = sha256_file(args.token_report.resolve())
+    supplied_files = args.input_manifest is not None or args.token_report is not None
+    if args.use_contract_input_proof == supplied_files:
+        raise SystemExit(
+            "choose either both --input-manifest/--token-report or "
+            "--use-contract-input-proof"
+        )
+    if args.use_contract_input_proof:
+        input_hash = contract["machine_inputs"]["combined_manifest_sha256"]
+        token_hash = contract["machine_inputs"]["token_capacity_report_sha256"]
+        token_minimum = contract["machine_inputs"][
+            "minimum_complete_blocks_per_learner"
+        ]
+    else:
+        if args.input_manifest is None or args.token_report is None:
+            raise SystemExit("both input files are required together")
+        input_hash = sha256_file(args.input_manifest.resolve())
+        token_hash = sha256_file(args.token_report.resolve())
+        token_report = json.loads(args.token_report.read_text())
+        if token_report.get("status") != "PASS":
+            raise SystemExit("token-capacity report is not PASS")
+        token_minimum = token_report[
+            "minimum_across_all_seeds_and_learners"
+        ]["blocks"]
     if input_hash != contract["machine_inputs"]["combined_manifest_sha256"]:
         raise SystemExit("input-manifest hash differs from contract")
     if token_hash != contract["machine_inputs"]["token_capacity_report_sha256"]:
         raise SystemExit("token-capacity hash differs from contract")
-    token_report = json.loads(args.token_report.read_text())
-    if token_report.get("status") != "PASS" or token_report[
-        "minimum_across_all_seeds_and_learners"
-    ]["blocks"] < 20480:
+    if token_minimum < 20480:
         raise SystemExit("token-capacity report does not prove no-wrap capacity")
 
     cells, loads = build_cells(contract, source_commit)
@@ -402,6 +428,11 @@ def main() -> int:
         },
         "material_hashes": material,
         "inputs": {
+            "manifest_build_input_proof": (
+                "contract_dual_node_verified_hashes"
+                if args.use_contract_input_proof
+                else "local_byte_rehash"
+            ),
             "input_manifest": {
                 "path": str(CANONICAL_INPUT_MANIFEST),
                 "sha256": input_hash,

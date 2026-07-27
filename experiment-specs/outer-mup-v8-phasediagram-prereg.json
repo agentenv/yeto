@@ -983,7 +983,7 @@
     },
     "manifest_builder": {
       "path": "scripts/build_v8_launch_manifest.py",
-      "sha256": "93a306a183c0b73c7d27261dea032efbb41c050092929e4b1765a8904ad4bcf1"
+      "sha256": "f96c1d442bbc47c925e5e2fd81da7d1ad2e668302ed79586db8d0e1505a47651"
     },
     "retry_authorizer": {
       "path": "scripts/authorize_v8_retry.py",
