@@ -92,15 +92,12 @@ def build_miles_argv(
     )
     targets = ",".join(manifest["lora"]["target_modules"])
     global_batch = args.groups_per_round * args.samples_per_group // args.optimizer_steps
-    output = Path(args.cache_dir).expanduser() / "miles-local"
-    output.mkdir(parents=True, exist_ok=True)
 
     values = [
         "train.py",
         "--train-backend", "megatron",
         "--hf-checkpoint", str(model_path),
         "--load", str(model_path),
-        "--save", str(output),
         "--megatron-to-hf-mode", "bridge",
         "--model-name", str(getattr(text, "model_type", "yeto_rl")),
         "--num-layers", str(layers),
@@ -167,6 +164,8 @@ def build_miles_argv(
         "--micro-batch-size", "1",
         "--attention-dropout", "0",
         "--hidden-dropout", "0",
+        "--attention-backend", "flash",
+        "--custom-megatron-init-path", "yeto.rl.miles.configure_miles_bridge",
         "--accumulate-allreduce-grads-in-fp32",
         "--attention-softmax-in-fp32",
         "--no-gradient-accumulation-fusion",
@@ -179,6 +178,8 @@ def build_miles_argv(
         "--finetune",
         "--seed", str(args.seed),
         "--sglang-max-lora-rank", str(args.lora_r),
+        "--sglang-attention-backend", "triton",
+        "--sglang-triton-attention-reduce-in-fp32",
         "--sglang-mem-fraction-static", "0.5",
     ]
     if kv_heads < heads:
@@ -344,12 +345,17 @@ def _validate_miles_args(args, requested) -> None:
         "finetune": True,
         "multi_lora": False,
         "use_fault_tolerance": False,
+        "custom_megatron_init_path": "yeto.rl.miles.configure_miles_bridge",
+        "sglang_attention_backend": "triton",
+        "sglang_triton_attention_reduce_in_fp32": True,
     }
     for name, value in expected.items():
         if getattr(args, name, None) != value:
             raise RuntimeError(
                 f"pinned Miles resolved unsupported {name}={getattr(args, name, None)!r}"
             )
+    if getattr(getattr(args, "attention_backend", None), "name", None) != "flash":
+        raise RuntimeError("RL v0 requires Miles flash trainer attention")
     if not args.colocate or not args.offload_train or not args.offload_rollout:
         raise RuntimeError("RL v0 requires Miles colocated train/rollout offload")
     if args.num_steps_per_rollout != requested.optimizer_steps:

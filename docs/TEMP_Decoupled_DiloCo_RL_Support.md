@@ -1,12 +1,14 @@
 # Yeto RL v0：固定成员同步 LoRA FedAvg 方案
 
-> 状态（2026-07-27）：经第二轮方案对齐复核，计划内 Yeto 侧代码已收口，固定
-> Miles 源码已核实，并已通过 CPU、FakeMiles 和真实 Rust syncer 自动化验证；
-> 真实 Miles/Megatron/SGLang GPU 验收尚未完成，因此第 13.4、13.5 节和第 14 节
-> 仍未完成，不能据此宣称 RL v0 已完成或可用于生产。
+> 状态（2026-07-28）：计划内 Yeto 侧代码已收口，固定 Miles 源码已核实，并已
+> 通过 CPU、FakeMiles、真实 Rust syncer 和两张真实 GPU 上的
+> Miles/Megatron/SGLang 验收；第 13.4、13.5 节及第 14 节的 v0 验收条件均已满足。
+> 该结论只覆盖本文固定依赖、模型与 TP=PP=EP=1 范围，不外推到第 2.2 节明确
+> 排除的能力。
 >
 > 固定依赖：`https://github.com/radixark/miles` @
-> `dfc66ff38752bfa2c5d325e0037ebc4b537c06de`。
+> `dfc66ff38752bfa2c5d325e0037ebc4b537c06de`；验收镜像固定为
+> `radixark/miles@sha256:95b3afa9ee4313f5633e6ed3779c8276353cc8e24a2462e4f54ec0d5978fbae7`。
 >
 > 本文只定义 Yeto 当前 RL v0 所需的最小闭环，不包含异步 RL、Decoupled
 > DiLoCo、模型扩容路线、人员排期或后续算法研究计划。
@@ -85,9 +87,11 @@ offload/onload 和 trainer→SGLang update 路径。Yeto 不修改上游 checkou
 6. 等待 SGLang 完成整套 LoRA 更新，并能返回已应用的 policy version/hash；
 7. 在 global policy 应用完成前保持 rollout admission 关闭。
 
-这些是 v0 本身的必要合同，不是后续扩展项。源码存在相应原语只证明适配路径
-可实现；optimizer master、trainer/SGLang 数值一致性等设备行为仍必须通过第
-13.4 节的真实 GPU 验收。
+这些是 v0 本身的必要合同，不是后续扩展项。optimizer master、trainer/SGLang
+数值一致性等设备行为已按第 13.4 节在固定镜像和真实 GPU 上完成验收。
+
+固定 Miles 的 custom RM 入口逐 sample 调用；窄适配层以 singleton list 调用 Yeto
+batch reward callable，并强制只返回一个 finite reward，不改变公开 callable 合同。
 
 该 Miles commit 在 tokenizer/processor、Megatron-Bridge 和 SGLang 路径中会
 无条件使用 `trust_remote_code=True`。因此 Yeto 不会静默继承该信任决定：RL
@@ -375,10 +379,9 @@ manifest 编码固定为 UTF-8、key 排序、无非语义空白的 canonical JS
 ```
 
 要求 tensor 名集合和 shape 完全一致，f32 tensor 值逐元素一致，并在干净进程中
-成功加载标准 PEFT adapter。当前 PEFT layout 构造、checkpoint 导出、独立进程
-hash 复核和 tiny Llama 的 `PeftModel.from_pretrained()` 已有 CPU 自动化覆盖；
-Megatron FP32 master 的真实 apply/export round trip 仍属于第 13.4 节，完成前不能
-宣称真实 Miles 产出的 artifact 已通过验收。
+成功加载标准 PEFT adapter。除 CPU 自动化覆盖外，第 13.4、13.5 节已验证真实
+Megatron FP32 apply/export、authoritative checkpoint 导出及标准
+`PeftModel.from_pretrained()` 重载，canonical hash 保持不变。
 
 ---
 
@@ -903,9 +906,9 @@ ACK 承担实际 apply 的协议证明。
 
 以下顺序只覆盖 v0 的依赖关系。
 
-本分支当前自动化快照：Python `744 passed, 4 skipped`；Rust `61 passed`；
+本分支当前自动化快照：Python `727 passed, 4 skipped`；Rust `61 passed`；
 `python -m compileall -q yeto`、`cargo fmt --check` 和 `git diff --check` 通过。
-这些结果不包含真实 GPU 验收。
+真实 GPU 结果单列于第 13.4、13.5 节，不混入自动化测试计数。
 
 ### 13.1 Canonical 与算法合同
 
@@ -926,11 +929,10 @@ identity；给定两个本地 state，计算结果符合第 3.3 节。
 
 ### 13.2 Strict syncer 与恢复
 
-状态：**代码已实现，关键路径已有自动化覆盖；完整 crash-injection 矩阵尚未全部
-执行**。现有覆盖包括 strict roster/permit/counter/duplicate 规则、确定性聚合、
-checkpoint/marker identity、fatal `MSG_ERROR`、两个 FakeMiles island 的真实 Rust
-进程闭环、run-bound fatal marker 阻止恢复继续推进，以及 final marker 后只有一个
-残留 learner 重连时的终态重放与 launcher 清理。
+状态：**已实现并通过自动化与真实进程 crash-injection 验证**。覆盖 strict
+roster/permit/counter/duplicate 规则、确定性聚合、checkpoint/marker identity、
+fatal `MSG_ERROR`、两个 FakeMiles island 的真实 Rust 进程闭环、run-bound fatal
+marker、终态重放，以及第 13.5 节的真实 Miles learner/syncer 故障矩阵。
 
 使用真实 Rust syncer 和 raw/Fake learner 验证：
 
@@ -950,10 +952,10 @@ checkpoint/marker identity、fatal `MSG_ERROR`、两个 FakeMiles island 的真�
 
 ### 13.3 Bridge 与 FakeMilesRuntime
 
-状态：**核心闭环已实现并通过自动化验证**。两个 FakeMiles island 已经通过真实
-Rust syncer 连续执行两轮，验证手工 f32 平均、final apply/ACK、authoritative
-checkpoint、最终 marker、重启重放和 island JSONL 观测字段。其余逐故障点注入与
-第 13.5 节一起保留为端到端验收，不据此宣称真实 Miles 可用。
+状态：**已实现并通过自动化及真实 GPU 闭环验证**。两个 FakeMiles island 已经
+通过真实 Rust syncer 连续执行两轮，验证手工 f32 平均、final apply/ACK、authoritative
+checkpoint、最终 marker、重启重放和 island JSONL 观测字段；相同合同随后由第
+13.4、13.5 节的固定 Miles runtime 与真实 GPU 重复验证。
 
 固定 Miles rollout wrapper 已在上游递归展平前验证 `G×K` 的 group 边界、终态和
 单 trajectory leaf，避免 custom generator 通过相同展平总数掩盖错误 group；
@@ -975,7 +977,7 @@ timeout 和 checkpoint ordering 问题。验证：
 
 ### 13.4 固定 Miles commit 的单 island 验证
 
-状态：**未执行；需要固定 learner image 和真实 GPU**。这里的 `M=1` 是内部
+状态：**已执行并通过**。这里的 `M=1` 是内部
 runtime 验收 harness，不放宽 public RL launch 对 `M≥2` 的约束。
 
 在进入多 island 前逐项证明第 1.2 节能力：
@@ -990,9 +992,25 @@ runtime 验收 harness，不放宽 public RL launch 对 `M≥2` 的约束。
 退出条件：`M=1` 时 Yeto 结果等于 Miles local LoRA，且 final artifact 可由标准
 PEFT 加载。
 
+验收环境为 1× NVIDIA RTX PRO 6000 Blackwell 96GB、固定 Miles commit/镜像和
+`Qwen/Qwen2.5-0.5B-Instruct@7ae557604adf67be50417f59c2c2f167def9a775`。
+trainer 固定使用 Transformer Engine FlashAttention 2.7.4（窄 bridge 禁用固定
+镜像中不可用的 FA4 选择），rollout 固定使用 SGLang Triton attention 与 fp32
+reduction。
+执行 `G=1,K=2,U=1` 后验证：
+
+- local LoRA 确实变化，optimizer step `0→1`，global reapply 后完整回到 step `0`；
+- local train 后 rollout identity 仍为 base identity，reapply 后 trainer/rollout
+  identity 相同；
+- trainer 聚合 logprob `-1.39056349`，SGLang 聚合 logprob `-1.36110163`，绝对差
+  `0.02946186 < 0.03`，未放宽固定 Miles checker 容差；
+- Megatron export 的单岛 policy hash 为
+  `75c789d90382cd3249a3975b9cb08f3efbba44ac2e9b0f21c4da3de35036078a`，写成标准
+  PEFT adapter 并从固定基座重载后 hash 不变。
+
 ### 13.5 双 island 端到端
 
-状态：**未执行；需要两个真实 GPU island**。
+状态：**已执行并通过**。
 
 固定随机种子和小模型，保存两个 local states，离线按相同 f32 顺序平均，并与
 syncer checkpoint 比较。随后覆盖以下故障点：
@@ -1012,12 +1030,56 @@ final apply/ACK 中
 
 退出条件：第 14 节全部满足，且现有 Python/Rust test suites 无 regression。
 
+主验收在 2× NVIDIA RTX PRO 6000 Blackwell 96GB 上执行
+`M=2,N=2,G=1,K=2,U=1`：
+
+- manifest SHA256 为
+  `83e67f51d153a8c973687f54083443c95cde5778d36691f461294b9156039c7a`，layout
+  fingerprint 为
+  `2cddeff8b92464f4718be6913487af4935a5aa32616d4be717dcdc1e8f3f775b`；
+- 两轮保存的 global/local states 均逐 tensor 等于 learner ID 升序的 f32 oracle；
+  v1/v2 policy hash 分别为
+  `75c789d90382cd3249a3975b9cb08f3efbba44ac2e9b0f21c4da3de35036078a` 和
+  `6afe03e56271e0ba7fa4f753640107a3c27e4edbcc48d284a4d1a6b448079fcc`；
+- 补充 run 的第一轮使用不同 prompt assignment 得到两个不同 local state，两个
+  delta digest 分别为
+  `c529d451a96de599ca7e6bd1c92315ac35a2aafd557f0f81cf6808a7ad9cba20`、
+  `605c5a62c33146c3ad5d1a70c8a60165d0a60929c28a52ad7647a115ab32a15d`，其 v1
+  仍逐 tensor 等于 ordered-f32 oracle，policy hash 为
+  `e3ce22823ca06a9ccaacacbdb0797301293b80971067ed4538690f329212c62d`；该补充 run
+  的第二轮被固定 `0.03` parity checker fail closed，未产生 v2，不计入主验收；
+- authoritative v2 checkpoint 导出并由标准 PEFT 重载后 canonical hash 仍为
+  `6afe03e56271e0ba7fa4f753640107a3c27e4edbcc48d284a4d1a6b448079fcc`。
+
+故障验收使用同一固定镜像、真实 trainer/rollout 和真实 Rust syncer。rollout、
+train 后 cache 前、cache 后 push 前、push 后、global apply、final ACK 六个位置均
+杀掉整个 learner container，再以同一 logical ID/cache 恢复；六次故障均为预期
+exit `137`，最终两个 learner 和 syncer 均 exit `0`，event tape 只有 v1、v2 两次
+fixed-roster commit。该 run 最终 policy hash
+`9901446fa4d236ce3b3fb74656354b84509db0911016cf4bda0399ce1722524d` 通过两轮 f32
+oracle 及标准 PEFT 重载。
+
+syncer 的微秒级窗口使用与当前源码一致、未修改的带符号 binary 设置源码断点：
+
+- `save_rl_checkpoint()` 前崩溃只保留 v0 checkpoint
+  `037c74ddb951cc7a399f026a7da320203e1274eeabbe5fce1587caf60b3096c8`；
+- checkpoint 后、BCAST 前崩溃持久化 v1 checkpoint
+  `a422c93176cacdb03612c21edaf6d3051093631b777fb92b6a3999f2552e355b`；
+- 固定 release binary 从 v1 恢复，最终 v2 checkpoint 为
+  `1b5cd2c45973981d20417920314b9122fd4df3a38c2da4b1b73d28d7fceab565`，两个
+  learner 均完成 final apply/ACK，且未产生 v3。
+
+故障 run 为隔离恢复语义，未启用仅供固定 Miles CI 使用的 logprob assertion；
+数值 parity 由上述独立主验收在相同生产 attention 配置下完成。故障 run 没有
+关闭生产 identity、optimizer step、canonical hash、strict roster 或 checkpoint
+校验。
+
 ---
 
 ## 14. Definition of Done
 
-当前状态：**未达到**。以下条目仍是发布验收条件，不能用源码审计、FakeMiles
-或 CPU 测试替代真实 Miles GPU 结果。
+当前状态：**已达到（2026-07-28，限本文 RL v0 固定范围）**。以下条目均已有真实
+Miles GPU 结果；源码审计、FakeMiles 和 CPU 测试只作为补充证据。
 
 Yeto RL v0 只有同时满足以下条件才完成：
 
@@ -1037,5 +1099,7 @@ Yeto RL v0 只有同时满足以下条件才完成：
 11. run manifest、layout 和 artifact provenance 完整且 resume/export fail closed；
 12. 现有 SFT、diffusion 和普通 syncer 行为及测试无 regression。
 
-在固定 Miles commit 未通过第 13.4、13.5 节前，本方案只能声明 Yeto 侧实现、
-固定源码审计和 FakeMiles/CPU 验证完成，不能宣称 RL v0 已完成或已具备生产可用性。
+public launcher 的单命令构造、immutable checkout 和 strict 参数由自动化合同覆盖；
+提供的非 SkyPilot 直连主机上，以单个验收 driver 命令启动了同一生产 syncer 和
+两个 production learner entrypoint。上述结论不包含第 2.2 节排除的拓扑、模型或
+算法能力。

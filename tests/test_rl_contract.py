@@ -1,13 +1,15 @@
+import asyncio
 import copy
 import hashlib
 import json
 import struct
+import sys
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from yeto.rl.core import canonical_state, tensors_from_flat
+from yeto.rl.core import PolicyIdentity, canonical_state, tensors_from_flat
 from yeto.rl.export import (
     _transformers_model_family,
     derive_peft_lora_specs,
@@ -28,7 +30,13 @@ from yeto.rl.manifest import (
     path_tree_sha256,
     validate_manifest,
 )
-from yeto.rl.miles import _validate_rollout_groups, verify_miles_revision
+from yeto.rl.miles import (
+    MilesIslandRuntime,
+    configure_miles_bridge,
+    _validate_rollout_groups,
+    verify_miles_revision,
+)
+from yeto.rl.reward import miles_reward
 
 
 def manifest_args(canonical_layout, *, model="org/model", data="org/data"):
@@ -230,9 +238,16 @@ def test_miles_argv_and_resolved_contract_are_strict(tmp_path):
     assert argv[argv.index("--advantage-estimator") + 1] == "grpo"
     assert argv[argv.index("--tensor-model-parallel-size") + 1] == "1"
     assert argv[argv.index("--rotary-base") + 1] == "10000"
+    assert argv[argv.index("--attention-backend") + 1] == "flash"
+    assert argv[argv.index("--custom-megatron-init-path") + 1] == (
+        "yeto.rl.miles.configure_miles_bridge"
+    )
+    assert argv[argv.index("--sglang-attention-backend") + 1] == "triton"
+    assert "--sglang-triton-attention-reduce-in-fp32" in argv
     assert argv[argv.index("--custom-generate-function-path") + 1] == (
         "package.generate.trajectory"
     )
+    assert "--save" not in argv
 
     def model_argv(candidate):
         return build_miles_argv(
@@ -366,6 +381,10 @@ def test_miles_argv_and_resolved_contract_are_strict(tmp_path):
         colocate=True,
         offload_train=True,
         offload_rollout=True,
+        attention_backend=SimpleNamespace(name="flash"),
+        custom_megatron_init_path="yeto.rl.miles.configure_miles_bridge",
+        sglang_attention_backend="triton",
+        sglang_triton_attention_reduce_in_fp32=True,
     )
     _validate_miles_args(resolved, requested)
     resolved.partial_rollout = True
@@ -386,6 +405,149 @@ def test_rollout_groups_are_validated_before_miles_flattens_them():
     pending = SimpleNamespace(status=SimpleNamespace(value="pending"))
     with pytest.raises(RuntimeError, match="complete trajectory"):
         _validate_rollout_groups([[pending, complete()], [complete(), complete()]], 2, 2)
+
+
+def test_miles_train_owns_the_offloaded_actor_wakeup(monkeypatch):
+    events = []
+    steps = {"value": 0}
+    identity = PolicyIdentity(0, "a" * 64)
+
+    class RemoteCall:
+        def __init__(self, name, result=None):
+            self.name = name
+            self.result = result
+
+        async def remote(self, *args, **kwargs):
+            events.append(self.name)
+            return self.result
+
+    class Actor:
+        async def onload(self):
+            events.append("onload")
+
+        async def train(self, rollout_id, data_pack):
+            events.append("train")
+            steps["value"] += 1
+
+    data_pack = {
+        "data_ref": [SimpleNamespace(inner={"weight_versions": [[f"yeto:0:{identity.policy_hash}"]]})]
+    }
+    runtime = MilesIslandRuntime.__new__(MilesIslandRuntime)
+    runtime.actor_model = Actor()
+    runtime.rollout_manager = SimpleNamespace(
+        generate=RemoteCall("generate", data_pack),
+        offload=RemoteCall("offload"),
+    )
+    runtime._trainer_identity = identity
+    runtime._trainer_awake = False
+    runtime._rollout_offloaded = False
+    runtime._rollout_id = 0
+
+    async def engines():
+        return [SimpleNamespace(continue_generation=RemoteCall("continue"))]
+
+    async def pause_rollout():
+        events.append("pause")
+
+    async def actor_call(method, *args):
+        assert method == "yeto_rl_optimizer_steps"
+        events.append("steps")
+        return steps["value"]
+
+    runtime._engines = engines
+    runtime._pause_rollout = pause_rollout
+    runtime._actor_call = actor_call
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(get=lambda value: value))
+    monkeypatch.setitem(sys.modules, "sglang", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "sglang.srt", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang.srt.constants",
+        SimpleNamespace(
+            GPU_MEMORY_TYPE_CUDA_GRAPH="graph",
+            GPU_MEMORY_TYPE_KV_CACHE="kv",
+            GPU_MEMORY_TYPE_WEIGHTS="weights",
+        ),
+    )
+
+    result = asyncio.run(runtime._run_local_round(identity, 1, 1, 1))
+
+    assert result.optimizer_steps == 1
+    assert runtime._trainer_awake
+    assert "onload" not in events
+
+
+def test_miles_lora_bridge_receives_flash_attention_before_build(monkeypatch):
+    backend = SimpleNamespace(name="flash")
+    observed = []
+
+    class AutoBridge:
+        def to_megatron_provider(self):
+            return SimpleNamespace(attention_backend=None)
+
+    def setup(args):
+        provider = AutoBridge().to_megatron_provider()
+        observed.append(provider.attention_backend)
+        return provider
+
+    miles_model = SimpleNamespace(_setup_lora_model_via_bridge=setup)
+    flash = SimpleNamespace(v4_is_installed=True)
+    monkeypatch.setitem(sys.modules, "megatron", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "megatron.bridge", SimpleNamespace(AutoBridge=AutoBridge))
+    monkeypatch.setitem(sys.modules, "miles", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "miles.backends", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "miles.backends.megatron_utils",
+        SimpleNamespace(model=miles_model),
+    )
+    monkeypatch.setitem(sys.modules, "transformer_engine", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "transformer_engine.pytorch", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules, "transformer_engine.pytorch.attention", SimpleNamespace()
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "transformer_engine.pytorch.attention.dot_product_attention",
+        SimpleNamespace(),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "transformer_engine.pytorch.attention.dot_product_attention.utils",
+        SimpleNamespace(FlashAttentionUtils=flash),
+    )
+
+    configure_miles_bridge(SimpleNamespace(attention_backend=backend))
+    provider = miles_model._setup_lora_model_via_bridge(
+        SimpleNamespace(attention_backend=backend)
+    )
+
+    assert provider.attention_backend is backend
+    assert observed == [backend]
+    assert not flash.v4_is_installed
+
+
+def test_miles_per_sample_reward_adapts_to_the_attested_batch_callable(monkeypatch):
+    sample = object()
+    observed = []
+
+    def reward(args, samples):
+        observed.append((args, samples))
+        return [0.75]
+
+    monkeypatch.setenv("YETO_RL_REWARD_FUNCTION", "package.reward:score")
+    monkeypatch.setenv("YETO_RL_REWARD_SHA256", "a" * 64)
+    monkeypatch.setenv("YETO_RL_WORKDIR", "/workdir")
+    monkeypatch.setattr("yeto.rl.reward._load_callable", lambda *args, **kwargs: reward)
+
+    assert asyncio.run(miles_reward("args", sample)) == 0.75
+    assert observed == [("args", [sample])]
+
+    monkeypatch.setattr(
+        "yeto.rl.reward._load_callable", lambda *args, **kwargs: lambda args, samples: []
+    )
+    with pytest.raises(RuntimeError, match="exactly one reward"):
+        asyncio.run(miles_reward("args", sample))
 
 
 def test_supported_model_family_rejects_spoofed_or_mismatched_architecture():

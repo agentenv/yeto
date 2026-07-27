@@ -240,6 +240,37 @@ def _actor_optimizer_steps(self) -> int:
     return int(scheduler.num_steps // batch)
 
 
+def configure_miles_bridge(args) -> None:
+    """Forward runtime attention config through pinned Miles' LoRA helper."""
+
+    if getattr(getattr(args, "attention_backend", None), "name", None) != "flash":
+        raise RuntimeError("RL v0 requires Miles flash trainer attention")
+    from megatron.bridge import AutoBridge
+    from miles.backends.megatron_utils import model as miles_model
+    from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+        FlashAttentionUtils,
+    )
+
+    FlashAttentionUtils.v4_is_installed = False
+    setup = miles_model._setup_lora_model_via_bridge
+
+    def configured_setup(runtime_args):
+        to_provider = AutoBridge.to_megatron_provider
+
+        def configured_provider(bridge, *provider_args, **provider_kwargs):
+            provider = to_provider(bridge, *provider_args, **provider_kwargs)
+            provider.attention_backend = runtime_args.attention_backend
+            return provider
+
+        AutoBridge.to_megatron_provider = configured_provider
+        try:
+            return setup(runtime_args)
+        finally:
+            AutoBridge.to_megatron_provider = to_provider
+
+    miles_model._setup_lora_model_via_bridge = configured_setup
+
+
 def install_miles_actor_adapter() -> None:
     """Install methods before Miles wraps its actor class with ``ray.remote``."""
 
@@ -481,11 +512,10 @@ class MilesIslandRuntime:
             tags=[GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS]
         )
         self._rollout_offloaded = True
-        await self.actor_model.onload()
-        self._trainer_awake = True
         train_started = time.monotonic()
         before = await self._actor_call("yeto_rl_optimizer_steps")
         await self.actor_model.train(self._rollout_id, data_pack)
+        self._trainer_awake = True
         after = await self._actor_call("yeto_rl_optimizer_steps")
         train_seconds = time.monotonic() - train_started
         if after - before != optimizer_steps:

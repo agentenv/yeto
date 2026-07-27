@@ -1,4 +1,4 @@
-"""Attested adapter from a Yeto reward callable to Miles' batch RM API."""
+"""Adapt an attested Yeto batch reward callable to Miles' per-sample RM API."""
 
 from __future__ import annotations
 
@@ -48,8 +48,8 @@ def validate_callable_source(
     _load_callable(spec, expected_sha256, workdir, label=label)
 
 
-async def miles_reward(args, samples):
-    """Invoke the configured callable and enforce Miles' batch reward contract."""
+async def miles_reward(args, sample):
+    """Adapt fixed Miles' per-sample RM call to Yeto's batch reward callable."""
 
     spec = os.environ.get(_FUNCTION_ENV)
     expected = os.environ.get(_SHA_ENV)
@@ -57,18 +57,17 @@ async def miles_reward(args, samples):
     if not spec or not expected or not workdir:
         raise RuntimeError("Yeto RL reward environment is incomplete")
     function = _load_callable(spec, expected, workdir)
-    result = function(args, samples)
+    result = function(args, [sample])
     if inspect.isawaitable(result):
         result = await result
-    if not isinstance(result, (list, tuple)) or len(result) != len(samples):
+    if not isinstance(result, (list, tuple)) or len(result) != 1:
         raise RuntimeError(
-            f"RL reward callable returned {len(result) if isinstance(result, (list, tuple)) else 0} "
-            f"rewards for {len(samples)} samples"
+            "RL reward callable must return exactly one reward for the Miles sample"
         )
-    values = [float(value) for value in result]
-    if any(not math.isfinite(value) for value in values):
+    value = float(result[0])
+    if not math.isfinite(value):
         raise RuntimeError("RL reward callable returned NaN or Inf")
-    return values
+    return value
 
 
 def configure_reward_environment(
