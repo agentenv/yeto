@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove v6 drain and priority seal-cell completion for a future v8-mini launch."""
+"""Prove V6 drain and an idle V9-priority window for a V8-mini launch."""
 
 from __future__ import annotations
 
@@ -17,7 +17,10 @@ ACTIVE_PROCESS_PATTERN = (
     "[r]un_slot_v6.py|[c]ompare_diloco.py.*yeto-results-v6|[a]nalyze_v6.py|"
     "[r]un_slot_v9.py|[s]moke_v9_qwen.py|[f]reeze_v6_selection.py"
 )
-SEAL_COMPLETION_MARKER = "SEAL VERIFICATION CELLS DONE"
+FIRE_NOW_MARKER = "## SUPERVISOR: FIRE NOW"
+PRIORITY_DEADLINE_UTC = "2026-07-27T20:00:00+00:00"
+PRIORITY_DEADLINE_UNIX_S = 1_785_182_400.0
+MINIMUM_LAUNCH_WINDOW_SECONDS = 10_800
 INPUT_MANIFEST_SHA256 = (
     "5f4235e56be5fc968227e02a6c9a6ebe57277d2736fb2947da14f7bd7f15a20b"
 )
@@ -47,9 +50,35 @@ def ssh(node: str, script: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def classify_processes(lines: list[str]) -> tuple[list[str], list[str], list[str]]:
+    active_v6 = []
+    active_v9 = []
+    ignored_stale_tmux = []
+    for line in lines:
+        fields = line.split(maxsplit=2)
+        executable = fields[1] if len(fields) > 1 else ""
+        # A tmux server retains the argv from the first session that created it.
+        # It is not a live V6/V9 worker and may own unrelated sessions.
+        if Path(executable).name == "tmux":
+            ignored_stale_tmux.append(line)
+            continue
+        if (
+            "run_slot_v6.py" in line
+            or ("compare_diloco.py" in line and "yeto-results-v6" in line)
+            or "analyze_v6.py" in line
+        ):
+            active_v6.append(line)
+        if (
+            "run_slot_v9.py" in line
+            or "smoke_v9_qwen.py" in line
+            or "freeze_v6_selection.py" in line
+        ):
+            active_v9.append(line)
+    return active_v6, active_v9, ignored_stale_tmux
+
+
 def inspect_node(node: str) -> dict:
-    # The pgrep expression is deliberately bracketed so the checker cannot
-    # match its own remote shell command line.
+    # The expression is deliberately bracketed so pgrep cannot match itself.
     script = f"""
 set -u
 printf 'PROCESSES_BEGIN\\n'
@@ -99,7 +128,8 @@ PY
         return {
             "return_code": None,
             "stderr": "SSH inspection timed out after 20 seconds",
-            "active_processes": None,
+            "active_v6_processes": None,
+            "active_v9_processes": None,
             "all_slots_drained": False,
             "errors": ["remote inspection timed out"],
         }
@@ -107,7 +137,8 @@ PY
         return {
             "return_code": result.returncode,
             "stderr": result.stderr.strip(),
-            "active_processes": None,
+            "active_v6_processes": None,
+            "active_v9_processes": None,
             "all_slots_drained": False,
             "errors": ["remote inspection failed"],
         }
@@ -115,27 +146,29 @@ PY
     try:
         start = lines.index("PROCESSES_BEGIN")
         end = lines.index("PROCESSES_END")
-        processes = [line for line in lines[start + 1 : end] if line.strip()]
+        raw_processes = [line for line in lines[start + 1 : end] if line.strip()]
         payload = json.loads(lines[end + 1])
     except (ValueError, IndexError, json.JSONDecodeError) as exc:
         return {
             "return_code": result.returncode,
             "stderr": result.stderr.strip(),
-            "active_processes": None,
+            "active_v6_processes": None,
+            "active_v9_processes": None,
             "all_slots_drained": False,
             "errors": [f"cannot parse remote inspection: {exc}"],
         }
+    active_v6, active_v9, ignored_tmux = classify_processes(raw_processes)
     slots = payload["v6_slot_records"]
-    # Exactly 8 node-local slot controllers must have reached DRAINED. An
-    # absent v6 root is WAIT, not PASS: v8 must not jump ahead of unlaunched v6.
     all_slots_drained = (
         payload["v6_result_root_exists"]
         and len(slots) == 8
         and all(record.get("state") == "DRAINED" for record in slots)
     )
     errors = []
-    if processes:
+    if active_v6:
         errors.append("active v6 process")
+    if active_v9:
+        errors.append("active v9 priority process")
     if not all_slots_drained:
         errors.append("v6 has not drained all eight node-local slot queues")
     if payload["v8_scientific_entries"]:
@@ -150,7 +183,10 @@ PY
         "return_code": result.returncode,
         "stderr": result.stderr.strip(),
         "bracketed_pgrep_pattern": ACTIVE_PROCESS_PATTERN,
-        "active_processes": processes,
+        "raw_process_matches": raw_processes,
+        "ignored_stale_tmux_matches": ignored_tmux,
+        "active_v6_processes": active_v6,
+        "active_v9_processes": active_v9,
         "v6_result_root_exists": payload["v6_result_root_exists"],
         "v6_slot_records": slots,
         "all_slots_drained": all_slots_drained,
@@ -166,28 +202,32 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
-        "--seal-note",
+        "--operator-note",
         type=Path,
-        default=Path("/private/tmp/h200-seal-note.md"),
+        default=Path("/private/tmp/h200-phasediag-note.md"),
     )
     args = parser.parse_args()
     nodes = {node: inspect_node(node) for node in NODES}
     all_drained = all(record["all_slots_drained"] for record in nodes.values())
-    no_processes = all(record["active_processes"] == [] for record in nodes.values())
+    no_v6 = all(record["active_v6_processes"] == [] for record in nodes.values())
+    no_v9 = all(record["active_v9_processes"] == [] for record in nodes.values())
     no_errors = all(not record["errors"] for record in nodes.values())
-    seal_text = args.seal_note.read_text() if args.seal_note.is_file() else ""
-    seal_complete = any(
-        line.strip() == SEAL_COMPLETION_MARKER for line in seal_text.splitlines()
+    note_text = args.operator_note.read_text() if args.operator_note.is_file() else ""
+    fire_now = any(
+        line.strip() == FIRE_NOW_MARKER for line in note_text.splitlines()
     )
+    checked = time.time()
+    remaining = PRIORITY_DEADLINE_UNIX_S - checked
+    enough_window = remaining >= MINIMUM_LAUNCH_WINDOW_SECONDS
     status = (
         "PASS"
-        if all_drained and no_processes and no_errors and seal_complete
+        if all_drained and no_v6 and no_v9 and no_errors and fire_now and enough_window
         else "WAIT"
     )
     proof = {
-        "schema": "yeto_outer_mup_v8_gate_proof_v1",
+        "schema": "yeto_outer_mup_v8_gate_proof_v2",
         "checked_at_utc": utc_now(),
-        "checked_at_unix_s": time.time(),
+        "checked_at_unix_s": checked,
         "loss_blind": True,
         "status": status,
         "v6": {
@@ -195,9 +235,16 @@ def main() -> int:
             "nodes": nodes,
         },
         "priority": {
-            "seal_note_path": str(args.seal_note.resolve()),
-            "required_exact_marker": SEAL_COMPLETION_MARKER,
-            "seal_verification_cells_complete": seal_complete,
+            "operator_note_path": str(args.operator_note.resolve()),
+            "required_exact_marker": FIRE_NOW_MARKER,
+            "operator_fire_now": fire_now,
+            "v9_not_active": no_v9,
+            "yield_on_v9_arrival": True,
+            "deadline_utc": PRIORITY_DEADLINE_UTC,
+            "deadline_unix_s": PRIORITY_DEADLINE_UNIX_S,
+            "minimum_launch_window_seconds": MINIMUM_LAUNCH_WINDOW_SECONDS,
+            "remaining_window_seconds": remaining,
+            "enough_window": enough_window,
         },
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

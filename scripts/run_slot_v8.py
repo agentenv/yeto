@@ -40,6 +40,10 @@ RESULT_LINK = Path("/root/yeto-results-v8")
 RESULT_TARGET = Path("/data/yeto-results-v8")
 MIN_FREE_BYTES = 1_000_000_000_000
 EXPECTED_CELLS = 180
+PRIORITY_STOP = RESULT_LINK / "_controller" / "V9_PRIORITY_YIELD"
+PRIORITY_PROCESS_PATTERN = (
+    "[r]un_slot_v9.py|[s]moke_v9_qwen.py|[f]reeze_v6_selection.py"
+)
 
 
 def command_value(command: list[str], flag: str) -> str | None:
@@ -276,18 +280,25 @@ def verify_preflight(manifest_path: Path, node_label: str, proof_path: Path) -> 
 def load_gate_proof(path: Path) -> dict:
     proof = json.loads(path.read_text())
     errors = []
-    if proof.get("schema") != "yeto_outer_mup_v8_gate_proof_v1":
+    if proof.get("schema") != "yeto_outer_mup_v8_gate_proof_v2":
         errors.append("gate-proof schema mismatch")
     if proof.get("status") != "PASS":
         errors.append("gate proof is not PASS")
     if not proof.get("v6", {}).get("all_slot_queues_drained"):
         errors.append("gate proof does not show all v6 slot queues drained")
-    if not proof.get("priority", {}).get("seal_verification_cells_complete"):
-        errors.append("gate proof does not show priority seal-verification cells complete")
+    priority = proof.get("priority", {})
+    if not priority.get("operator_fire_now"):
+        errors.append("gate proof does not contain the prospective FIRE NOW directive")
+    if not priority.get("v9_not_active"):
+        errors.append("gate proof does not show that V9 priority work is absent")
+    if not isinstance(priority.get("deadline_unix_s"), (int, float)):
+        errors.append("gate proof lacks the V9 priority deadline")
     for node in ("h200-n1", "h200-n2"):
         node_record = proof.get("v6", {}).get("nodes", {}).get(node, {})
-        if node_record.get("active_processes") != []:
+        if node_record.get("active_v6_processes") != []:
             errors.append(f"gate proof has active v6 processes on {node}")
+        if node_record.get("active_v9_processes") != []:
+            errors.append(f"gate proof has active v9 processes on {node}")
         if node_record.get("result_root_absent") is not True and not node_record.get(
             "all_slots_drained"
         ):
@@ -302,7 +313,7 @@ def load_launch_authority(
 ) -> dict:
     authority = json.loads(path.read_text())
     errors = []
-    if authority.get("schema") != "yeto_outer_mup_v8_launch_authority_v1":
+    if authority.get("schema") != "yeto_outer_mup_v8_launch_authority_v2":
         errors.append("launch authority schema mismatch")
     if authority.get("status") != "AUTHORIZED":
         errors.append("launch authority is not authorized")
@@ -317,8 +328,12 @@ def load_launch_authority(
         deadline, (int, float)
     ):
         errors.append("launch authority lacks numeric wall times")
-    elif deadline - started != 21_600:
-        errors.append("launch authority does not encode the registered 6h ceiling")
+    else:
+        priority_deadline = authority.get("priority_deadline_unix_s")
+        if not isinstance(priority_deadline, (int, float)):
+            errors.append("launch authority lacks the V9 priority deadline")
+        elif abs(deadline - min(started + 21_600, priority_deadline)) > 1e-6:
+            errors.append("launch authority does not encode both registered ceilings")
     if errors:
         raise SystemExit("; ".join(errors))
     return authority
@@ -374,7 +389,42 @@ def gpu_sample(gpu: int) -> dict:
     return {"raw": result.stdout.strip(), "return_code": result.returncode}
 
 
-def mark_not_run(cell: dict, attempt_root: Path, attempt_number: int) -> None:
+def priority_signal() -> dict | None:
+    if PRIORITY_STOP.is_file():
+        return {"kind": "STOP_FILE", "path": str(PRIORITY_STOP)}
+    try:
+        result = subprocess.run(
+            ["pgrep", "-af", PRIORITY_PROCESS_PATTERN],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"kind": "PRIORITY_CHECK_FAILED", "error": str(exc)}
+    matches = [line for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode not in (0, 1):
+        return {
+            "kind": "PRIORITY_CHECK_FAILED",
+            "return_code": result.returncode,
+            "stderr": result.stderr.strip(),
+        }
+    if matches:
+        return {
+            "kind": "ACTIVE_V9_PROCESS",
+            "bracketed_pgrep_pattern": PRIORITY_PROCESS_PATTERN,
+            "matches": matches,
+        }
+    return None
+
+
+def mark_not_run(
+    cell: dict,
+    attempt_root: Path,
+    attempt_number: int,
+    *,
+    status: str,
+    reason: str,
+) -> None:
     attempt_root.mkdir(parents=True, exist_ok=True)
     write_json_atomic(
         attempt_root / "evidence.json",
@@ -382,8 +432,8 @@ def mark_not_run(cell: dict, attempt_root: Path, attempt_number: int) -> None:
             "schema": "yeto_outer_mup_cell_evidence_v1",
             "cell_id": cell["cell_id"],
             "validated_at_utc": utc_now(),
-            "status": "NOT_RUN_WALL_CEILING",
-            "failures": ["registered 6h wall ceiling reached before launch"],
+            "status": status,
+            "failures": [reason],
             "seed": cell["seed"],
             "training_seed": cell["training_seed"],
             "attempt_number": attempt_number,
@@ -437,6 +487,7 @@ def run_queue(
     completed = 0
     failures = 0
     wall_reached = False
+    priority_reached = False
     with lock_path.open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -455,8 +506,26 @@ def run_queue(
                 )
             if attempt_root.exists():
                 raise SystemExit(f"refusing to overwrite existing attempt: {attempt_root}")
+            priority = priority_signal()
+            if priority is not None:
+                mark_not_run(
+                    cell,
+                    attempt_root,
+                    attempt_number,
+                    status="NOT_RUN_PRIORITY_YIELD",
+                    reason=f"V9 priority yield before launch: {json.dumps(priority, sort_keys=True)}",
+                )
+                failures += 1
+                priority_reached = True
+                continue
             if time.time() >= deadline:
-                mark_not_run(cell, attempt_root, attempt_number)
+                mark_not_run(
+                    cell,
+                    attempt_root,
+                    attempt_number,
+                    status="NOT_RUN_WALL_CEILING",
+                    reason="registered wall or V9 priority deadline reached before launch",
+                )
                 failures += 1
                 wall_reached = True
                 continue
@@ -518,10 +587,18 @@ def run_queue(
                     start_new_session=True,
                 )
                 wall_stopped = False
+                priority_stopped = False
+                priority = None
                 while process.poll() is None:
                     if time.time() >= deadline:
                         wall_stopped = True
                         wall_reached = True
+                        kill_process_group(process)
+                        break
+                    priority = priority_signal()
+                    if priority is not None:
+                        priority_stopped = True
+                        priority_reached = True
                         kill_process_group(process)
                         break
                     write_json_atomic(
@@ -557,7 +634,13 @@ def run_queue(
             if wall_stopped:
                 evidence["status"] = "NOT_RUN_WALL_CEILING"
                 evidence.setdefault("failures", []).append(
-                    "registered 6h wall ceiling reached during cell"
+                    "registered wall or V9 priority deadline reached during cell"
+                )
+            elif priority_stopped:
+                evidence["status"] = "NOT_RUN_PRIORITY_YIELD"
+                evidence.setdefault("failures", []).append(
+                    "V9 priority yield during cell: "
+                    + json.dumps(priority, sort_keys=True)
                 )
             elif return_code != 0 and evidence.get("status") == "COMPLETED":
                 evidence["status"] = "INVALID_WORK"
@@ -599,7 +682,11 @@ def run_queue(
             status_path,
             {
                 "schema": "yeto_outer_mup_v8_slot_status_v1",
-                "state": "WALL_CEILING" if wall_reached else "DRAINED",
+                "state": (
+                    "PRIORITY_YIELD"
+                    if priority_reached
+                    else "WALL_CEILING" if wall_reached else "DRAINED"
+                ),
                 "node": node_label,
                 "gpu": gpu,
                 "completed": completed,
@@ -632,8 +719,8 @@ def main() -> int:
         )
         print(json.dumps({"node": args.node_label, "status": "PASS"}, sort_keys=True))
         return 0
-    if args.gpu is None or args.gpu not in range(4):
-        raise SystemExit("--run requires --gpu in 0..3 for the registered mini grid")
+    if args.gpu is None or args.gpu not in range(8):
+        raise SystemExit("--run requires --gpu in 0..7 for the registered mini grid")
     if args.launch_authority is None or args.gate_proof is None:
         raise SystemExit("--run requires --launch-authority and --gate-proof")
     return run_queue(

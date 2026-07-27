@@ -17,7 +17,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CONTRACT_PATH = REPO / "experiment-specs/outer-mup-v8-phasediagram-prereg.json"
 NODES = ("h200-n1", "h200-n2")
-GPUS = tuple(range(4))
+GPUS = tuple(range(8))
 SHUFFLE_SEED = 20260728
 EXPECTED_CELLS = 180
 RESULT_ROOT = Path("/root/yeto-results-v8")

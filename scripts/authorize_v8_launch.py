@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Issue an immutable 6-hour v8-mini authority after both priority gates."""
+"""Issue an immutable V8-mini authority bounded by wall and V9 priority gates."""
 
 from __future__ import annotations
 
@@ -71,17 +71,29 @@ def main() -> int:
         manifest_path
     ):
         errors.append("manifest sidecar is missing or mismatched")
-    if gate.get("schema") != "yeto_outer_mup_v8_gate_proof_v1" or gate.get(
+    if gate.get("schema") != "yeto_outer_mup_v8_gate_proof_v2" or gate.get(
         "status"
     ) != "PASS":
         errors.append("v6-drain gate proof is not PASS")
     if not gate.get("v6", {}).get("all_slot_queues_drained"):
         errors.append("gate proof does not show all v6 queues drained")
-    if not gate.get("priority", {}).get("seal_verification_cells_complete"):
-        errors.append("gate proof lacks the priority seal-verification completion marker")
+    priority = gate.get("priority", {})
+    if not priority.get("operator_fire_now"):
+        errors.append("gate proof lacks the prospective FIRE NOW directive")
+    if not priority.get("v9_not_active"):
+        errors.append("gate proof does not show V9 priority work absent")
+    priority_deadline = priority.get("deadline_unix_s")
+    if not isinstance(priority_deadline, (int, float)):
+        errors.append("gate proof lacks a numeric V9 priority deadline")
+    elif priority_deadline <= time.time():
+        errors.append("V9 priority deadline has already arrived")
     for node in ("h200-n1", "h200-n2"):
         record = gate.get("v6", {}).get("nodes", {}).get(node, {})
-        if record.get("active_processes") != [] or not record.get("all_slots_drained"):
+        if (
+            record.get("active_v6_processes") != []
+            or record.get("active_v9_processes") != []
+            or not record.get("all_slots_drained")
+        ):
             errors.append(f"gate proof does not show {node} idle and drained")
     now = time.time()
     checked = gate.get("checked_at_unix_s")
@@ -134,8 +146,10 @@ def main() -> int:
         raise SystemExit("; ".join(errors))
 
     started = time.time()
+    full_wall_deadline = started + WALL_SECONDS
+    hard_deadline = min(full_wall_deadline, float(priority_deadline))
     authority = {
-        "schema": "yeto_outer_mup_v8_launch_authority_v1",
+        "schema": "yeto_outer_mup_v8_launch_authority_v2",
         "status": "AUTHORIZED",
         "created_at_utc": utc_now(),
         "manifest_path": str(manifest_path),
@@ -147,8 +161,12 @@ def main() -> int:
         "branch": branch,
         "contract": manifest["contract"],
         "wall_clock_start_unix_s": started,
-        "hard_deadline_unix_s": started + WALL_SECONDS,
-        "wall_ceiling_seconds": WALL_SECONDS,
+        "full_wall_deadline_unix_s": full_wall_deadline,
+        "priority_deadline_unix_s": float(priority_deadline),
+        "hard_deadline_unix_s": hard_deadline,
+        "registered_wall_ceiling_seconds": WALL_SECONDS,
+        "effective_deadline_seconds": hard_deadline - started,
+        "priority_stop_path": "/root/yeto-results-v8/_controller/V9_PRIORITY_YIELD",
     }
     write_json_atomic(args.output.resolve(), authority)
     print(json.dumps(authority, sort_keys=True))

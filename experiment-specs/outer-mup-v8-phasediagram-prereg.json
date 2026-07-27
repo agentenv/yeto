@@ -36,7 +36,7 @@
   "authority": {
     "all_amendments_require_new_commit_and_refreshed_hashes": true,
     "contract_kind": "prospective code, execution, and analysis contract",
-    "fleet_owner": "outer-mup-v6-factorial until every v6 slot drains, then the separately registered seal-verification cells retain priority; v8 MINI may start only after both gates pass",
+    "fleet_owner": "outer-mup-v6-factorial until every v6 slot drains; after the prospective FIRE NOW directive v8 MINI may use the idle fleet only while v9 is absent and must yield immediately when v9 priority work appears or at 2026-07-27T20:00:00Z",
     "launch_forbidden_at_registration": true,
     "launch_requires_clean_pushed_registration_commit": true,
     "outcome_aware_recenter_extension_or_cell_substitution_forbidden": true,
@@ -133,8 +133,8 @@
     "decision": "MINI_RESCOPE_FIXED_180_CELLS",
     "effective_cell_count": 180,
     "effective_curve_count": 15,
-    "estimator": "sum 60 MINI cells at each selected S using measured v3 per-S runtime; registered planning uses p90 plus 10% controller/eval/seal overhead on the bounded eight-GPU subfleet (GPUs 0-3 per node)",
-    "ideal_mean_eight_gpu_fleet_hours": 3.4793038057393275,
+    "estimator": "sum 60 MINI cells at each selected S using measured v3 per-S runtime; registered planning uses p90 plus 10% controller/eval/seal overhead on the full sixteen-GPU fleet (GPUs 0-7 per node)",
+    "ideal_mean_sixteen_gpu_fleet_hours": 1.7396519028696638,
     "observed_v3_attempt1_runtime_seconds_by_S": {
       "1024": {
         "mean": 225.6218506626319,
@@ -152,24 +152,32 @@
         "p90": 378.56285482645035
       }
     },
-    "on_wall_ceiling": "terminate only v8-mini process groups, retain every attempt, mark unstarted cells NOT_RUN_WALL_CEILING, and report NOT_EVALUABLE; never extend after outcomes",
+    "on_wall_ceiling": "at the earlier of the six-hour ceiling or 2026-07-27T20:00:00Z V9 priority deadline, terminate only v8-mini process groups, retain every attempt, mark unstarted cells NOT_RUN_WALL_CEILING, and report NOT_EVALUABLE; never extend after outcomes",
     "p90_gpu_hours": 28.528970584335426,
-    "registered_gpu_count": 8,
+    "registered_gpu_count": 16,
     "registered_gpus_by_node": {
       "h200-n1": [
         0,
         1,
         2,
-        3
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "h200-n2": [
         0,
         1,
         2,
-        3
+        3,
+        4,
+        5,
+        6,
+        7
       ]
     },
-    "registered_planning_fleet_hours": 3.9227334553461213,
+    "registered_planning_fleet_hours": 1.9613667276730607,
     "wall_ceiling_hours_after_launch_authority": 6.0
   },
   "design": {
@@ -482,15 +490,15 @@
   "execution_scripts": {
     "gate_checker": {
       "path": "scripts/check_v8_gates.py",
-      "sha256": "31543b40f8385bff9575c48e5fc250ce08dff382c02165f4d812d50d573e163d"
+      "sha256": "085c20d63286357205ab57a79f34db135ab717b0105d29e49971a8bff6f89b80"
     },
     "launch_authorizer": {
       "path": "scripts/authorize_v8_launch.py",
-      "sha256": "cbb6a6a88cc836ede6c468d4c84980df6d3672cfcd7f485d0c1451a00b4f7608"
+      "sha256": "f11f7a1633fd92c0afb4f69594663b8efb736d64b1d5f1c05c0caf252c5e5337"
     },
     "manifest_builder": {
       "path": "scripts/build_v8_launch_manifest.py",
-      "sha256": "8ade7d50097d5744ca80f3332a033c5c8531eed490aff89800213f672ff4a2a6"
+      "sha256": "06c6749a601295bc945c57350ab8bf238d92c2b078c38157577d4ad71c04e6d6"
     },
     "retry_authorizer": {
       "path": "scripts/authorize_v8_retry.py",
@@ -498,7 +506,7 @@
     },
     "runner": {
       "path": "scripts/run_slot_v8.py",
-      "sha256": "a32766889ef80831b7f3fba6f3679d72b0b23f73cdc29556357084b7336f4ba0"
+      "sha256": "7805c31a6b6f4579d2c6cc19cc86bdf50f9d37ce3652166a9b7a2a435b3e5d16"
     }
   },
   "frozen_analyzer": {
@@ -619,6 +627,13 @@
   "objective": "Produce the deadline-bounded MINI raw- and bias-corrected momentum helps/hurts/neutral phase diagrams over T={2,5,20}, mu={0.8,0.95} at 135M/M=4/H=512, using independently tuned quadratic minima and signed tuned-loss differences to a same-T mu=0 baseline.",
   "pre_outcome_amendment": {
     "amends_commit": "4175b71b72251aa279345e3ed858caa7ce5b39f9",
+    "execution_amendment": {
+      "amends_commit": "30f71e0a00ae1385c1028cc5c747a4a8a1cd3586",
+      "pre_outcome": true,
+      "scientific_design_unchanged": "the exact 180 cells, grids, seeds, commands apart from registered GPU offsets, estimator, evidence rules, and frozen analyzer remain unchanged",
+      "scope": "use all 16 idle H200s to drain before the approximately 13:00 PDT v9 arrival; require fresh proof that v6 drained and v9 is absent; bind authority to the earlier of six hours or 2026-07-27T20:00:00Z; yield process groups if v9 arrives early",
+      "trigger": "the operator appended the exact prospective marker ## SUPERVISOR: FIRE NOW to /private/tmp/h200-phasediag-note.md and explicitly ordered 16 slots before any v8 authority, result root, attempt, process, or outcome"
+    },
     "pre_outcome": true,
     "scope": "replace the unlaunched 900-cell full grid with the Tuesday-deadline MINI grid: T={2,5,20}, mu={0.8,0.95}, raw+corrected, seeds={801,809,811}; v6 drain and seal-verification cells have strict priority",
     "superseded_design": "the 45-curve/900-cell design at commit 4175b71 remains immutable history and is forbidden to launch",
@@ -635,12 +650,13 @@
     "v6_structural_matches": "T5/S2560 and T20/S10240 structural mu0 coordinates exist, but v6 seeds are {601,607,613,617,619}; T2/S1024 is absent; MINI seeds/input bytes/source commit differ"
   },
   "schema": "yeto_outer_mup_v8_phasediagram_prereg_v1",
-  "status": "PREREGISTERED_MINI_PENDING_PRIORITY_FLEET",
+  "status": "PREREGISTERED_MINI_EXECUTION_AMENDED_PENDING_LAUNCH",
   "workflow_gates": {
     "launch_requires_fresh_loss_blind_proof": [
       "both v6 node slot registries report every queue DRAINED",
-      "the exact line SEAL VERIFICATION CELLS DONE exists in /private/tmp/h200-seal-note.md",
-      "no active priority process under bracketed check: pgrep -af '[r]un_slot_v6.py|[c]ompare_diloco.py.*yeto-results-v6|[a]nalyze_v6.py|[r]un_slot_v9.py|[s]moke_v9_qwen.py|[f]reeze_v6_selection.py'",
+      "the exact line ## SUPERVISOR: FIRE NOW exists in /private/tmp/h200-phasediag-note.md",
+      "no active v6 or v9 priority process under bracketed check: pgrep -af '[r]un_slot_v6.py|[c]ompare_diloco.py.*yeto-results-v6|[a]nalyze_v6.py|[r]un_slot_v9.py|[s]moke_v9_qwen.py|[f]reeze_v6_selection.py'; stale tmux-server argv is recorded but excluded",
+      "at least three hours remain before the bound 2026-07-27T20:00:00Z v9 priority deadline",
       "both nodes have >=1 TB free at the registered v8 result target",
       "registration commit and exact 180-cell manifest are pushed and identical on both nodes",
       "no v8-mini scientific attempt, launch authority, controller, learner, or syncer predates the proof"
@@ -648,11 +664,11 @@
     "preparation_while_waiting_allowed": true,
     "standard_execution_rails": [
       "one scientific cell per GPU with four learners packed by the harness",
-      "8 slot queues over h200-n1/h200-n2 GPUs 0-3; v6 and seal-verification cells always have priority",
+      "16 slot queues over h200-n1/h200-n2 GPUs 0-7; v6 must be drained and v9 always has priority",
       "longest-S first with deterministic seeded shuffle within S and greedy measured-runtime balance",
-      "30-second controller heartbeats and registered S-dependent watchdogs",
+      "30-second controller heartbeats, registered S-dependent watchdogs, and bracketed v9-priority checks that stop admitting work and terminate only the active v8 process group",
       "process-group scoped termination only; no broad or unbracketed pgrep kill pattern",
-      "fresh authority age <=600 seconds at controller start"
+      "fresh authority age <=600 seconds at controller start and a hard deadline equal to the earlier of six hours or 2026-07-27T20:00:00Z"
     ],
     "v8_gpu_launch_forbidden_while_v6_owns_fleet": true
   }
