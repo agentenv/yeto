@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the deterministic, hash-bound 900-cell v6 launch manifest."""
+"""Build the deterministic, hash-bound 540-cell v6 launch manifest."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parent.parent
-SEEDS = (601, 607, 613, 617, 619)
+SEEDS = (601, 607, 613)
 ARMS = ("mu0", "raw", "corrected")
 NODES = ("h200-n1", "h200-n2")
 GPUS = tuple(range(8))
@@ -197,8 +197,8 @@ def build_cells(contract: dict, source_commit: str) -> list[dict]:
                             "estimated_cost_units": s // 2560,
                         }
                     )
-    if len(cells) != 900:
-        raise RuntimeError(f"expected 900 cells, built {len(cells)}")
+    if len(cells) != 540:
+        raise RuntimeError(f"expected 540 cells, built {len(cells)}")
 
     rng = random.Random(SHUFFLE_SEED)
     ordered = []
@@ -261,7 +261,7 @@ def build_cells(contract: dict, source_commit: str) -> list[dict]:
 
 
 def validate(cells: list[dict]) -> dict:
-    if len(cells) != 900 or len({cell["cell_id"] for cell in cells}) != 900:
+    if len(cells) != 540 or len({cell["cell_id"] for cell in cells}) != 540:
         raise RuntimeError("cell count or identity failure")
     counts = {}
     for cell in cells:
@@ -275,7 +275,7 @@ def validate(cells: list[dict]) -> dict:
         has_correction = "--outer-bias-correction" in command
         if has_correction != (cell["arm"] == "corrected"):
             raise RuntimeError(f"correction flag failure: {cell['cell_id']}")
-    if len(counts) != 180 or any(count != 5 for count in counts.values()):
+    if len(counts) != 180 or any(count != 3 for count in counts.values()):
         raise RuntimeError(f"eta-level seed balance failure: {counts}")
 
     loads = {}

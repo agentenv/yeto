@@ -59,8 +59,8 @@ def main() -> int:
     errors = []
     if manifest.get("schema") != "yeto_outer_mup_v6_launch_manifest_v1":
         errors.append("manifest schema mismatch")
-    if manifest.get("status") != "REGISTERED" or len(manifest.get("cells", [])) != 900:
-        errors.append("manifest is not the complete registered 900-cell grid")
+    if manifest.get("status") != "REGISTERED" or len(manifest.get("cells", [])) != 540:
+        errors.append("manifest is not the complete registered 540-cell grid")
     sidecar = manifest_path.with_suffix(manifest_path.suffix + ".sha256")
     if not sidecar.is_file() or sidecar.read_text().split()[0] != sha256_file(manifest_path):
         errors.append("manifest sidecar is missing or mismatched")

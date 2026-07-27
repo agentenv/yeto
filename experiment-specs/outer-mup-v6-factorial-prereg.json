@@ -4,13 +4,13 @@
     "eta_star_estimator": {
       "boundary_tolerance_log2": 1e-12,
       "coordinate": "x=log2(eta)",
-      "curve": "loss=a*x^2+b*x+c fitted to the five exact registered eta values using the five-seed mean endpoint loss",
+      "curve": "loss=a*x^2+b*x+c fitted to the five exact registered eta values using the three-seed mean endpoint loss",
       "interior_rule": "a>0 and min(grid)+1e-12 < -b/(2a) < max(grid)-1e-12",
       "unbracketed_rule": "nonpositive curvature or boundary/outside vertex is UNBRACKETED; no point may be dropped and no ladder may be extended after outcomes"
     },
     "joint_bootstrap": {
       "gate_role": "evaluable only if at least 9500 of 10000 joint refits retain all 36 interior eta optima",
-      "method": "paired nonparametric training-seed bootstrap; one shared five-index resample refits all 36 eta curves, independently repeats the registered eight-cell F1/F2/F3 leave-one-out model selection for both momentum arms, refits each selected surface on all eight training cells, and recomputes all held-out errors",
+      "method": "paired nonparametric training-seed bootstrap; one shared three-index resample refits all 36 eta curves, independently repeats the registered eight-cell F1/F2/F3 leave-one-out model selection for both momentum arms, refits each selected surface on all eight training cells, and recomputes all held-out errors",
       "minimum_valid_replicates": 9500,
       "replicates": 10000,
       "rng_seed": 20260727
@@ -19,7 +19,7 @@
     "primary_outcome": "finite fixed-development endpoint NLL per trained token"
   },
   "authority": {
-    "amendment_rule": "this disclosed pre-outcome surface-family amendment supersedes fb78bf9295035ca3189d72f62092aac525467631; after the amended commit is pushed, no outcome-aware amendment, recentering, ladder extension, holdout substitution, candidate-family change, or selection-rule change is allowed",
+    "amendment_rule": "the disclosed pre-outcome three-seed re-scope supersedes 2f1d2aeae30344f0aad823b606739893012d32f9, which itself superseded fb78bf9295035ca3189d72f62092aac525467631; after the re-scoped commit is pushed, no outcome-aware amendment, seed restoration, recentering, ladder extension, holdout substitution, candidate-family change, or selection-rule change is allowed",
     "contract_kind": "prospective full-factorial code, execution, and held-out analysis contract",
     "launch_manifest_requirements": [
       "clean pushed registration commit",
@@ -29,7 +29,7 @@
       "canonical sha256 of every attempt-1 and registered attempt-2 command",
       "PASS gate proof showing v4 48/48 evidence, zero run_slot_v4 processes on both nodes, and a G5 VERDICT line in the v5 note"
     ],
-    "node_execution_commit": "all 900 cells execute at the pushed v6 registration commit on both nodes",
+    "node_execution_commit": "all 540 cells execute at the pushed v6 registration commit on both nodes",
     "prior_records_immutable": "v1-v5 and exploratory result trees are read-only to v6",
     "unregistered_cell_launch_forbidden": true
   },
@@ -42,6 +42,30 @@
     "status": "DISCLOSED_AND_REGISTERED_BEFORE_V6_LAUNCH",
     "supersedes_git_commit": "fb78bf9295035ca3189d72f62092aac525467631",
     "unchanged_scope": "all 900 T,S,H,arm,eta,seed cells; eta centers and ladders; input bytes; held-out and training partitions; success band and 3-of-4 rule; bootstrap count; retry rails; scheduling; storage; fleet gates; and 30-hour ceiling"
+  },
+  "pre_outcome_seed_rescope": {
+    "amended_at_utc": "2026-07-27T04:53:53Z",
+    "changed_scope": "reduce the training-seed set from {601,607,613,617,619} to {601,607,613}, changing the launch from 900 to 540 scientific cells",
+    "gate_feasibility": {
+      "artifact_path": "experiment-specs/outer-mup-v6-factorial-gatesim-3seed.json",
+      "artifact_sha256": "7575006f18a94d464f797509d3e44f516a7b7e306193881c2f21b9f69916474f",
+      "bootstrap_draws": 10000,
+      "candidate_family_results": {
+        "F1": {"P_eval_strict": 1.0, "P_eval_one_rung_near_bracket": 1.0, "strict_minimum_valid_refits": 9610},
+        "F2": {"P_eval_strict": 1.0, "P_eval_one_rung_near_bracket": 1.0, "strict_minimum_valid_refits": 9610},
+        "F3": {"P_eval_strict": 1.0, "P_eval_one_rung_near_bracket": 1.0, "strict_minimum_valid_refits": 10000}
+      },
+      "decision": "retain the existing strict-interior eta rule and 9500-of-10000 joint-refit threshold because every candidate-family scenario is evaluable in 500/500 simulations; no near-bracket or threshold relaxation is needed",
+      "near_bracket_sensitivity": "positive-curvature unconstrained vertex accepted within one registered rung (0.5 log2-eta bits) beyond either endpoint, without clipping",
+      "replicates_per_family": 500,
+      "reproduction_script_path": "/private/tmp/gatesim-g6-3seed-h200.py",
+      "reproduction_script_sha256": "75cc4119d4e890aa855e31e14747255ae98f7f7549d50e8f0d33733e05cb5206"
+    },
+    "materialized_input_disclosure": "the already hash-frozen five-bundle input manifest is retained as a read-only superset; seeds 617 and 619 are not referenced by any launch cell, and the selected three seeds have at least 26696 complete blocks per learner versus 10240 required",
+    "outcome_blinding_proof": "at re-scope start there was no v6 cell attempt, run_slot_v6 process, immutable gate proof, launch authority, or scientific outcome; each result root contained only preflight control-plane copies of the superseded 900-cell manifest and node proof, which are retained as non-outcome provenance",
+    "status": "DISCLOSED_AND_REGISTERED_BEFORE_V6_LAUNCH",
+    "supersedes_git_commit": "2f1d2aeae30344f0aad823b606739893012d32f9",
+    "unchanged_scope": "all 12 T,S,H coordinates; three arms; five eta rungs; eta centers and ladders; selected-seed input bytes; held-out and training partitions; F1/F2/F3 selection; strict eta bracketing; 9500-of-10000 bootstrap threshold; success band and 3-of-4 rule; retry rails; longest-first scheduling; storage; fleet gates; and 30-hour ceiling"
   },
   "center_models": {
     "corrected_mu0.9": {
@@ -137,7 +161,7 @@
       {"arm": "raw", "mu": 0.9, "outer_bias_correction": false},
       {"arm": "corrected", "mu": 0.9, "outer_bias_correction": true}
     ],
-    "cell_count": "12 (T,S) * 3 arms * 5 etas * 5 seeds = 900",
+    "cell_count": "12 (T,S) * 3 arms * 5 etas * 3 seeds = 540",
     "eta_grid": {
       "adjacent_ratio": "sqrt(2)",
       "log2_offsets": [-1.0, -0.5, 0.0, 0.5, 1.0],
@@ -160,7 +184,7 @@
       {"H": 256, "S": 5120, "T": 20, "code_true_D": 1.1228624771875697, "kappa_model": 0.5742010811822928, "eta_grids": {"corrected": {"center": 0.0014079272117605325, "etas": [0.0007039636058802663, 0.0009955548788529408, 0.0014079272117605325, 0.0019911097577058816, 0.002815854423521065]}, "mu0": {"center": 0.024519758981672045, "etas": [0.012259879490836022, 0.01733808784900006, 0.024519758981672045, 0.03467617569800012, 0.04903951796334409]}, "raw": {"center": 0.0027532317310202436, "etas": [0.0013766158655101218, 0.001946828827182391, 0.0027532317310202436, 0.003893657654364782, 0.005506463462040487]}}},
       {"H": 512, "S": 10240, "T": 20, "code_true_D": 1.1228624771875697, "kappa_model": 0.5332239606083866, "eta_grids": {"corrected": {"center": 0.0013424060356650182, "etas": [0.0006712030178325091, 0.0009492244109244848, 0.0013424060356650182, 0.0018984488218489696, 0.0026848120713300365]}, "mu0": {"center": 0.025175275959718465, "etas": [0.012587637979859232, 0.017801608349359597, 0.025175275959718465, 0.035603216698719194, 0.05035055191943693]}, "raw": {"center": 0.002826837272801015, "etas": [0.0014134186364005074, 0.0019988758049084843, 0.002826837272801015, 0.0039977516098169685, 0.00565367454560203]}}}
     ],
-    "seeds": [601, 607, 613, 617, 619],
+    "seeds": [601, 607, 613],
     "s_grid": [2560, 5120, 10240],
     "t_grid": [2, 5, 10, 20]
   },
@@ -182,7 +206,7 @@
   "frozen_analyzer": {
     "freeze_rule": "committed and pushed before any v6 scientific process; outcome-aware edits forbidden; identical bytes distributed to both node control planes",
     "path": "scripts/analyze_v6.py",
-    "sha256": "8016e03cec5c8ff51171d35861b51553599218079fafa9c7af9798092f2110d6"
+    "sha256": "ae97012af3e10b4f4f95fe12395ac131960d72d31c6f39856f6389c3032c0239"
   },
   "heldout_prediction": {
     "gate_G6": {
