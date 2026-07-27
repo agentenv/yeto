@@ -23,6 +23,12 @@ EXPECTED_CELLS = 900
 RESULT_ROOT = Path("/root/yeto-results-v8")
 MODEL = Path("/root/yeto-data/model")
 EVAL = Path("/root/yeto-data/splits/seed-337/eval.jsonl")
+CANONICAL_INPUT_MANIFEST = Path(
+    "/root/yeto-data/outer-mup-v8/input-manifest.json"
+)
+CANONICAL_TOKEN_REPORT = Path(
+    "/root/yeto-data/outer-mup-v8/token-counts-smollm2.json"
+)
 TIMEOUT_MINUTES = {1024: 120, 2560: 180, 5120: 240, 10240: 360, 20480: 480}
 
 
@@ -397,11 +403,11 @@ def main() -> int:
         "material_hashes": material,
         "inputs": {
             "input_manifest": {
-                "path": str(args.input_manifest.resolve()),
+                "path": str(CANONICAL_INPUT_MANIFEST),
                 "sha256": input_hash,
             },
             "token_capacity": {
-                "report_path": str(args.token_report.resolve()),
+                "report_path": str(CANONICAL_TOKEN_REPORT),
                 "report_sha256": token_hash,
                 "minimum_complete_blocks": contract["machine_inputs"]["minimum_complete_blocks_per_learner"],
                 "required_complete_blocks": 20480,
