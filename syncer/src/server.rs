@@ -25,6 +25,12 @@ use crate::state::{GlobalState, Layout, MergeCandidate, MergeStats};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(180);
+// A large full-model HELLO can make the scheduler allocate and zero more than
+// 100 GiB before it validates the control group.  Data sockets are opened
+// immediately after HELLO and must remain patient for that validation; a
+// short wait drops the learner's queued INIT chunks and leaves startup stuck.
+const DATA_HELLO_REGISTRATION_WAIT: Duration = Duration::from_secs(600);
+const DATA_HELLO_REGISTRATION_POLL: Duration = Duration::from_millis(50);
 const WRITER_QUEUE: usize = 128;
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -549,6 +555,24 @@ fn validated_group_count(registry: &Registry) -> usize {
         .count()
 }
 
+async fn wait_for_registered_group(
+    registry: &Registry,
+    learner_id: u32,
+    timeout: Duration,
+) -> Option<Arc<Group>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(group) = registry.lock().unwrap().get(&learner_id).cloned() {
+            return Some(group);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        tokio::time::sleep(remaining.min(DATA_HELLO_REGISTRATION_POLL)).await;
+    }
+}
+
 fn current_connection_ids(registry: &Registry) -> HashMap<u32, u64> {
     registry
         .lock()
@@ -656,17 +680,13 @@ async fn handle_connection(
             let mut r = Reader(&first.payload);
             let learner_id = r.u32()?;
             let _stream_idx = r.u16()?;
-            // The control socket's HELLO may still be in flight; wait for it.
-            let mut group = None;
-            for _ in 0..200 {
-                group = registry.lock().unwrap().get(&learner_id).cloned();
-                if group.is_some() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+            // Validation can include allocating the full f32 global and
+            // optimizer state.  Keep this socket open while that happens so
+            // the client's already-queued INIT chunks are not discarded.
             let group =
-                group.with_context(|| format!("DATA_HELLO for unknown learner {learner_id}"))?;
+                wait_for_registered_group(&registry, learner_id, DATA_HELLO_REGISTRATION_WAIT)
+                    .await
+                    .with_context(|| format!("DATA_HELLO for unknown learner {learner_id}"))?;
             let (tx, rx) = mpsc::channel::<OutFrame>(WRITER_QUEUE);
             tokio::spawn(writer_task(wr, rx));
             group.data.lock().unwrap().push(tx);
@@ -2651,6 +2671,33 @@ mod tests {
 
         group.validated.store(true, Ordering::Release);
         assert_eq!(validated_group_count(&registry), 1);
+    }
+
+    #[tokio::test]
+    async fn data_stream_waits_for_delayed_control_group_validation() {
+        assert_eq!(
+            DATA_HELLO_REGISTRATION_WAIT,
+            Duration::from_secs(600),
+            "the production wait must cover large-model state allocation",
+        );
+        let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
+        let delayed_registry = registry.clone();
+        let group = test_group(9, true);
+        let delayed_group = group.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            delayed_registry.lock().unwrap().insert(9, delayed_group);
+        });
+
+        let observed = wait_for_registered_group(&registry, 9, Duration::from_secs(1))
+            .await
+            .expect("delayed control group should become visible");
+        assert!(Arc::ptr_eq(&observed, &group));
+        assert!(
+            wait_for_registered_group(&registry, 10, Duration::from_millis(25))
+                .await
+                .is_none()
+        );
     }
 
     #[test]
