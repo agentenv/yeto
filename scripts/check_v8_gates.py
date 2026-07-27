@@ -32,9 +32,18 @@ def utc_now() -> str:
 
 def ssh(node: str, script: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", f"root@{node}", script],
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            f"root@{node}",
+            script,
+        ],
         capture_output=True,
         text=True,
+        timeout=20,
     )
 
 
@@ -84,7 +93,16 @@ print(json.dumps({{
 }},sort_keys=True))
 PY
 """
-    result = ssh(node, script)
+    try:
+        result = ssh(node, script)
+    except subprocess.TimeoutExpired:
+        return {
+            "return_code": None,
+            "stderr": "SSH inspection timed out after 20 seconds",
+            "active_processes": None,
+            "all_slots_drained": False,
+            "errors": ["remote inspection timed out"],
+        }
     if result.returncode:
         return {
             "return_code": result.returncode,

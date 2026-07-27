@@ -482,7 +482,7 @@
   "execution_scripts": {
     "gate_checker": {
       "path": "scripts/check_v8_gates.py",
-      "sha256": "12401b11a5c9ed5a7ca8eb6cc0b56fa2eab876b088cb512a8710a3bd72d02569"
+      "sha256": "31543b40f8385bff9575c48e5fc250ce08dff382c02165f4d812d50d573e163d"
     },
     "launch_authorizer": {
       "path": "scripts/authorize_v8_launch.py",
