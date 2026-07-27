@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 
+from . import accel
 from .autobatch import exact_grad_accum, int_or_auto, resolve_micro_batch_size
 from .causal_kernels import (
     ATTENTION_BACKENDS,
@@ -253,7 +254,7 @@ def parse_args(argv=None):
 
 def setup_distributed() -> tuple[int, int]:
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
+        dist.init_process_group(backend=accel.dist_backend())
         return dist.get_rank(), dist.get_world_size()
     return 0, 1
 
@@ -330,7 +331,7 @@ def load_model_and_tokenizer(args, device):
     # adapters in fp32, which keeps AdamW's exp_avg_sq in fp32 — a bf16
     # second moment is too noisy. Wire packing casts to the wire dtype
     # either way.
-    if (args.shard == "fsdp" and args.tuning == "full") or device.type != "cuda":
+    if (args.shard == "fsdp" and args.tuning == "full") or not accel.is_accelerator(device):
         dtype = torch.float32
     else:
         dtype = torch.bfloat16
@@ -626,19 +627,17 @@ def main(argv=None) -> None:
         verify_distributed_source_tree_sha256,
     )
 
-    if args.device:
-        device = torch.device(args.device)
-    elif torch.cuda.is_available():
-        device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", 0)))
-        torch.cuda.set_device(device)
-    else:
-        if os.environ.get("SKYPILOT_NUM_GPUS_PER_NODE", "0") != "0":
-            raise RuntimeError(
-                "GPUs were provisioned but torch.cuda.is_available() is False "
-                f"(torch {torch.__version__}); check the torch wheel's CUDA "
-                "version against the node's driver instead of training on CPU"
-            )
-        device = torch.device("cpu")
+    device = accel.detect(args.device)
+    if (
+        args.device is None  # an explicit --device cpu is the caller's choice
+        and device.type == "cpu"
+        and os.environ.get("SKYPILOT_NUM_GPUS_PER_NODE", "0") != "0"
+    ):
+        raise RuntimeError(
+            "GPUs were provisioned but no accelerator is visible to torch "
+            f"(torch {torch.__version__}); check the torch wheel's CUDA "
+            "version against the node's driver instead of training on CPU"
+        )
 
     verify_distributed_source_tree_sha256(
         args.source_sha256,
@@ -668,8 +667,8 @@ def main(argv=None) -> None:
 
     if args.shard == "fsdp" and device.type != "cuda":
         raise RuntimeError(
-            "--shard fsdp requires a CUDA accelerator (torch FSDP cannot "
-            "shard on cpu); use --shard ddp or run on GPUs"
+            f"--shard fsdp requires a CUDA accelerator, not {device.type!r} "
+            "(no other family has validated sharding evidence); use --shard ddp"
         )
 
     if not 0.0 <= args.merge_alpha < 1.0:
@@ -681,8 +680,7 @@ def main(argv=None) -> None:
     # separated by learner/rank only after model construction below.
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    accel.manual_seed_all(device, args.seed)
 
     log.info("loading model %s (%s)", args.model, args.tuning)
     model, tokenizer = load_model_and_tokenizer(args, device)
@@ -697,15 +695,14 @@ def main(argv=None) -> None:
     )
     random.seed(training_seed)
     torch.manual_seed(training_seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(training_seed)
+    accel.manual_seed_all(device, training_seed)
 
     grad_ckpt = args.gradient_checkpointing == "on"
-    if args.gradient_checkpointing == "auto" and device.type == "cuda":
+    if args.gradient_checkpointing == "auto":
         # The base is fully on-device here (load ends with model.to(device)),
         # so free memory directly reflects what activations must fit into.
-        free, total = torch.cuda.mem_get_info(device)
-        grad_ckpt = free < total / 2
+        memory = accel.mem_get_info(device)
+        grad_ckpt = memory is not None and memory[0] < memory[1] / 2
     if grad_ckpt:
         # Non-reentrant checkpointing composes with FSDP and peft; the input
         # grad hook keeps the graph alive from the embeddings down to the

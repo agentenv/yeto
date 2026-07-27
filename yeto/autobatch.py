@@ -13,7 +13,7 @@ The probe runs after model wrap + optimizer construction (memory-accurate)
 and before the syncer handshake (counters never see it). Probing must not
 change training state. Temporary AdamW buffers account for the steady-state
 optimizer footprint without stepping the real parameters or optimizer; CPU
-and CUDA RNG and any pre-existing gradients are restored on every exit.
+and accelerator RNG and any pre-existing gradients are restored on every exit.
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ from typing import Iterator
 
 import torch
 import torch.distributed as dist
+
+from . import accel
 
 log = logging.getLogger("learner")
 
@@ -54,8 +56,8 @@ def _preserve_probe_observables(params, device) -> Iterator[list[torch.nn.Parame
     Parameters themselves are never stepped, so no full-model backup is
     needed. Gradient backups are allocated only when the caller already had
     gradients; at the startup call site all gradients are normally ``None``.
-    ``fork_rng`` restores the CPU generator and the CUDA generator used by
-    this rank.
+    ``fork_rng`` restores the CPU generator and the accelerator generator
+    used by this rank.
     """
     parameters = _parameters_once(params)
     saved_grads = []
@@ -65,14 +67,8 @@ def _preserve_probe_observables(params, device) -> Iterator[list[torch.nn.Parame
             (param, original, None if original is None else original.detach().clone())
         )
 
-    cuda_devices: list[int] = []
-    if device.type == "cuda":
-        cuda_devices.append(
-            device.index if device.index is not None else torch.cuda.current_device()
-        )
-
     try:
-        with torch.random.fork_rng(devices=cuda_devices):
+        with accel.fork_rng(device):
             yield parameters
     finally:
         for param, original, saved in saved_grads:
@@ -205,7 +201,7 @@ def resolve_micro_batch_size(
     """
     if args.micro_batch_size != "auto":
         return int(args.micro_batch_size)
-    if device.type != "cuda":
+    if not accel.is_accelerator(device):
         return 1
     vocab = max(2, len(tokenizer) - 1)
     requested_effective_batch = int(args.grad_accum)
@@ -223,9 +219,9 @@ def resolve_micro_batch_size(
                 size,
                 loss_forward=loss_forward,
             )
-        except torch.cuda.OutOfMemoryError:
+        except accel.oom_error(device):
             ok = False
-        torch.cuda.empty_cache()
+        accel.empty_cache(device)
         if world > 1:
             flag = torch.tensor([1.0 if ok else 0.0], device=device)
             dist.all_reduce(flag, op=dist.ReduceOp.MIN)

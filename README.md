@@ -198,6 +198,8 @@ per-seed results for the completed Qwen3.6, LTX-Video, and Wan2.2 benchmarks.
 for 1T-class MoE).
 [docs/MLX.md](docs/MLX.md) — the Apple-silicon island backend: Macs as
 learner islands (`yeto launch --external-learners`, cross Mac↔NVIDIA runs).
+[docs/ASCEND.md](docs/ASCEND.md) — Ascend NPU islands: the accelerator
+abstraction, the refused CUDA-only paths, and running a pure-Ascend fleet.
 
 ## Testing
 
