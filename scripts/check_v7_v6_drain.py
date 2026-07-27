@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import subprocess
 from datetime import datetime, timezone
@@ -24,20 +25,39 @@ def utc_now() -> str:
 
 
 def ssh(node: str, command: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            f"root@{node}",
-            command,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    argv = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        f"root@{node}",
+        command,
+    ]
+    try:
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = (
+            exc.stdout.decode(errors="replace")
+            if isinstance(exc.stdout, bytes)
+            else (exc.stdout or "")
+        )
+        stderr = (
+            exc.stderr.decode(errors="replace")
+            if isinstance(exc.stderr, bytes)
+            else (exc.stderr or "")
+        )
+        return subprocess.CompletedProcess(
+            argv,
+            124,
+            stdout=stdout,
+            stderr=(stderr + "\nSSH_CHECK_TIMEOUT").strip(),
+        )
 
 
 def process_check(node: str) -> dict:
@@ -121,10 +141,16 @@ def main() -> int:
     ]
     nodes = {}
     errors = []
+    checks = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        for node in common.NODES:
+            checks[node, "processes"] = executor.submit(process_check, node)
+            checks[node, "gpus"] = executor.submit(gpu_check, node)
+            checks[node, "slots"] = executor.submit(slot_check, node)
     for node in common.NODES:
-        processes = process_check(node)
-        gpus = gpu_check(node)
-        slots = slot_check(node)
+        processes = checks[node, "processes"].result()
+        gpus = checks[node, "gpus"].result()
+        slots = checks[node, "slots"].result()
         if processes["return_code"] != 0 or processes["stderr"]:
             errors.append(f"{node}: bracketed process check failed")
         if processes["active_lines"]:
