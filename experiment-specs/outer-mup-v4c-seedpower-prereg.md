@@ -1,8 +1,11 @@
-# Outer-muP v4c: preregistered seed-power lane
+# Outer-muP v4c: seed-power lane and gatesim amendment
 
 **Program ID:** `outer-mup-v4c-seedpower`
 
-**Status:** **PREREGISTERED before any v4c result root, manifest, attempt, GPU work, endpoint loss, or G4C calculation.**
+**Status:** The 44-cell lane was preregistered before any v4c work. The exact
+G4C gatesim amendment and operator decision were frozen while v4c was still
+running, but this superseding Git formalization is post-outcome. It must not be
+described as a pre-outcome amendment commit.
 
 **Machine contract:** `experiment-specs/outer-mup-v4c-seedpower-prereg.json`
 
@@ -61,12 +64,68 @@ version-matched anchors, fixed 512-step/65,536-token windows, rho telemetry,
 and the frozen 1,024-row development endpoint. The complete hash-bound v4
 materialized-input ledger is reused.
 
-## 3. Frozen five-seed analysis and G4C
+## 3. Gatesim amendment and sequencing disclosure
+
+Before G4C endpoint analysis existed, a CPU-only measured-noise simulation of
+the registered gate found `P_eval=0.040` (20/500) and
+`P(PASS | evaluable)=0.000` (0/20). Strict point-interior acceptance itself
+occurred only 289/500 times, so lowering the 9,500-refit threshold alone could
+not reach the requested 0.8 evaluability target.
+
+The exact simulation and amendment artifacts were frozen during the run:
+
+| artifact | SHA-256 |
+|---|---|
+| `/private/tmp/gatesim-h200.py` | `9dd71dc4186a2dc9e71b5c5d167b0ee9418469d801a64ff5adac97ae4dcf66a3` |
+| `/private/tmp/gatesim-amend-h200.py` | `eb27764a3350d852e17b95f3c0f5e45726d835d2b97dfa322161d1e44a3ecf0f` |
+| `/private/tmp/gatesim-g6-f2stress-h200.py` | `36815635bf3ba91103166a3c247b15092dc8c6d84488e7847dd08eb139b0f1e7` |
+| `/private/tmp/h200-gatesim-note.md` | `6a8a6c475f95da763dbadeea2f6f928234c1fba108154004eb962d5fd36ed75a` |
+
+The adopted amendment changes only bracketing acceptance and the valid-refit
+threshold:
+
+- Positive quadratic curvature remains required.
+- Accept an unconstrained vertex strictly within
+  `[min_registered_log2_eta - 0.5, max_registered_log2_eta + 0.5]`.
+- Label an accepted vertex outside the original endpoints `NEAR_BRACKETED` and
+  use the unconstrained vertex without clipping.
+- Require at least 7,900 accepted all-four shared refits among the unchanged
+  10,000 draws.
+- Preserve the original strict-interior point statuses and 9,500-refit
+  validity calculation as diagnostics.
+
+No eta, seed, endpoint loss, quadratic formula, D definition, D5/D20 band,
+monotonicity condition, bootstrap draw count, pairing, or RNG seed changes.
+
+The operator directive required this superseding contract to be committed
+before `analyze_v4c.py` ran. That sequence was missed: the original analyzer
+ran at `2026-07-27T01:28:19Z` before this commit and produced:
+
+```text
+G4C VERDICT: NOT_EVALUABLE D5=1.741616 [1.589341,1.786473] D20=1.280694 [1.185058,1.406748]
+```
+
+That strict readout has SHA-256
+`5f4eaf3c3c229818c36f589e6e4945315473341ed77b0d4d28666e2574f84d66`;
+all four point fits were strictly interior, but only 6,804/10,000 shared
+refits were strict-valid. It is preserved independently before the canonical
+path is replaced. This commit is a mechanical, post-outcome formalization of
+the exact pre-outcome-frozen rule and decision. No observed v4c value was used
+to tune that rule.
+
+The original registration commit is
+`848a18d662c1da0e8bd03f5d231d1ea7a0c0f5b0`. Its JSON, Markdown, and analyzer
+SHA-256 values are respectively
+`76ed8e7c8b72a77a7d09b77a5cb661d7a0c3be074afdb2f5db4beb86c6b0d899`,
+`3cfacc81a4efa7093a753b868142226093a1792f4f94d2de899608a5329d5a37`,
+and `b8e5470d2b512f487948413104a1783fe45adbbe68871f61873d3a9bae73cf27`.
+
+## 4. Frozen amended five-seed analysis and G4C
 
 The frozen analyzer is `scripts/analyze_v4c.py`, raw SHA-256:
 
 ```text
-b8e5470d2b512f487948413104a1783fe45adbbe68871f61873d3a9bae73cf27
+612d11b6eb4f7fee652e60d98361a5ca8bcfb0cbbf3240a17bca89364be64c79
 ```
 
 It uses `scripts/analyze_v4b.py` only for evidence loading, quadratic
@@ -77,8 +136,9 @@ sealed at SHA-256
 The analyzer loads all 48 v4, 18 v4b, and 44 v4c cells. At each eta it takes
 the mean over the five fixed seeds, then fits
 `loss = a*log2(eta)^2 + b*log2(eta) + c` by ordinary least squares. A fit is
-interior only if `a>0` and its vertex lies strictly between the registered grid
-endpoints with a `1e-12` margin. The estimands remain:
+accepted if it has positive curvature and its unconstrained vertex lies
+strictly within the frozen 0.5-bit extension. Original-grid fits are
+`INTERIOR`; accepted extension fits are `NEAR_BRACKETED`. The estimands remain:
 
 ```text
 D_obs(T) = [eta_star(mu=.9,T) / eta_star(mu=0,T)] / (1-.9).
@@ -87,14 +147,15 @@ D_obs(T) = [eta_star(mu=.9,T) / eta_star(mu=0,T)] / (1-.9).
 The bootstrap has 10,000 replicates and RNG seed `20260726`. Each replicate
 draws five indices with replacement and applies that one common draw to every
 eta and all four curve refits. A replicate is invalid if any optimum is not
-interior or either D is nonpositive. The bootstrap-validity requirement remains
-exactly 95%, hence at least 9,500 of 10,000 shared refits. D intervals are
+accepted or either D is nonpositive. The amended bootstrap-validity requirement
+is at least 7,900 of 10,000 shared refits. D intervals are
 equal-tailed 95% percentiles in log2 D, reported after exponentiation. The
 monotonicity coordinate is `log2 D(T=5)-log2 D(T=20)` over those same draws.
 
 G4C is evaluable only if all 110 combined cells have valid hash-bound evidence,
-all four five-seed optima are interior, and at least 9,500 bootstrap draws are
-valid. It is `PASS` only if every original G4B scientific condition holds:
+all four five-seed optima are `INTERIOR` or `NEAR_BRACKETED`, and at least
+7,900 bootstrap draws are valid. It is `PASS` only if every original G4B
+scientific condition holds:
 
 - D5 is in `[1.7,3.2]` inclusive.
 - D20 is in `[.8,1.5]` inclusive.
@@ -108,7 +169,7 @@ evaluability requirement is `NOT_EVALUABLE`. The readout is
 G4C VERDICT: <PASS|FAIL|NOT_EVALUABLE> D5=<point [low,high]|NA [NA,NA]> D20=<point [low,high]|NA [NA,NA]>
 ```
 
-## 4. Longest-first fleet sharing
+## 5. Longest-first fleet sharing
 
 At registration, v4b is complete and GPUs 0–5 are idle on both nodes. V5B
 exclusively owns GPUs 6–7 on both nodes; v6 is sealed and waiting for the
@@ -129,7 +190,7 @@ When the initial slots are claimed, the lane appends a claim line to
 G4C analysis are complete does it append the exact marker `V4C DONE`, releasing
 the fleet to v6.
 
-## 5. Evidence, retries, storage, and rails
+## 6. Evidence, retries, storage, and rails
 
 V4 validation is inherited unchanged: exact clean source commit and command
 hash; immutable attempt start/end records; four complete learners; exact

@@ -42,8 +42,38 @@ def test_five_seed_curves_and_shared_bootstrap():
     bootstrap = analyze_v4c.bootstrap_all(losses)
     assert bootstrap["status"] == "VALID"
     assert bootstrap["valid_replicates"] == 10_000
-    assert bootstrap["minimum_valid_fraction"] == 0.95
+    assert bootstrap["minimum_valid_fraction"] == 0.79
+    assert bootstrap["strict_interior_diagnostic"]["valid_replicates"] == 10_000
     assert bootstrap["monotone_gap"]["ci_95"]["low"] > 0
+
+
+def fit_with_vertex_offset(offset_bits):
+    s, mu = 2560, 0.0
+    etas = analyze_v4c.COMBINED_ETA_GRIDS[(s, mu)]
+    vertex = min(math.log2(eta) for eta in etas) + offset_bits
+    losses = {}
+    for eta in etas:
+        loss = 3.0 + (math.log2(eta) - vertex) ** 2
+        for seed in analyze_v4c.ALL_SEEDS:
+            losses[(s, mu, seed, eta)] = loss
+    return analyze_v4c.curve_fit(losses, s, mu), vertex
+
+
+def test_near_bracketed_vertex_is_accepted_without_clipping():
+    fit, vertex = fit_with_vertex_offset(-0.25)
+    assert fit["strict_status"] == "UNBRACKETED"
+    assert fit["status"] == "NEAR_BRACKETED"
+    assert fit["interior"] is False
+    assert fit["accepted"] is True
+    assert fit["eta_star"] == pytest.approx(2.0**vertex)
+
+
+def test_vertex_outside_near_bracket_allowance_is_rejected():
+    fit, _vertex = fit_with_vertex_offset(-0.5001)
+    assert fit["strict_status"] == "UNBRACKETED"
+    assert fit["status"] == "UNBRACKETED"
+    assert fit["accepted"] is False
+    assert fit["eta_star"] is None
 
 
 def test_manifest_builder_registered_shape_and_queue_loads():

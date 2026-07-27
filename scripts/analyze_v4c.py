@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Frozen G4C five-seed combined-grid analysis.
+"""Frozen amended G4C five-seed combined-grid analysis.
 
 G4C preserves every v4/v4b endpoint and adds seeds 541 and 547 at each of
 the 22 registered combined-grid eta values.  Quadratics are fit to the
 five-seed mean at each eta.  The paired bootstrap resamples five training
 seeds with one common index draw across every eta and all four curve refits.
+
+The adopted gatesim amendment accepts a positive-curvature unconstrained
+vertex up to 0.5 log2-eta bits beyond either registered endpoint and requires
+7,900 accepted shared refits.  Original strict-interior statuses and the
+strict-valid bootstrap count remain in the readout as diagnostics.
 """
 
 from __future__ import annotations
@@ -33,8 +38,17 @@ V4C_EXPECTED_CELLS = 44
 COMBINED_EXPECTED_CELLS = 110
 BOOTSTRAP_REPLICATES = 10_000
 BOOTSTRAP_SEED = 20260726
-MIN_VALID_BOOTSTRAP_REPLICATES = 9_500
+NEAR_BRACKET_ALLOWANCE_LOG2 = 0.5
+MIN_VALID_BOOTSTRAP_REPLICATES = 7_900
+STRICT_MIN_VALID_BOOTSTRAP_REPLICATES = 9_500
 D_BANDS = {5: (1.7, 3.2), 20: (0.8, 1.5)}
+AMENDMENT_ID = "G4C_NEAR_BRACKET_GATESIM_V1"
+ORIGINAL_STRICT_ANALYZER_SHA256 = (
+    "b8e5470d2b512f487948413104a1783fe45adbbe68871f61873d3a9bae73cf27"
+)
+ORIGINAL_STRICT_READOUT_SHA256 = (
+    "5f4eaf3c3c229818c36f589e6e4945315473341ed77b0d4d28666e2574f84d66"
+)
 
 COMBINED_ETA_GRIDS = {
     (2560, 0.0): (
@@ -100,8 +114,31 @@ def curve_fit(
             values.append(losses[key])
         means.append(sum(values) / len(values))
     fit = base.fit_quadratic(registered_etas, means)
+    strict_interior = bool(fit["interior"])
+    vertex = fit.get("vertex_log2_eta")
+    log2_etas = [math.log2(eta) for eta in registered_etas]
+    accepted = bool(
+        fit["a"] > 0.0
+        and isinstance(vertex, (int, float))
+        and math.isfinite(vertex)
+        and min(log2_etas) - NEAR_BRACKET_ALLOWANCE_LOG2 < vertex
+        < max(log2_etas) + NEAR_BRACKET_ALLOWANCE_LOG2
+    )
+    near_bracketed = accepted and not strict_interior
     fit.update(
         {
+            "eta_star": 2.0**vertex if accepted else None,
+            "accepted": accepted,
+            "near_bracketed": near_bracketed,
+            "strict_interior": strict_interior,
+            "strict_status": "INTERIOR" if strict_interior else "UNBRACKETED",
+            "status": (
+                "INTERIOR"
+                if strict_interior
+                else "NEAR_BRACKETED"
+                if near_bracketed
+                else "UNBRACKETED"
+            ),
             "s": s,
             "t": T_BY_S[s],
             "mu": mu,
@@ -114,8 +151,9 @@ def curve_fit(
     return fit
 
 
-def d_from_fits(fit0: dict, fit9: dict) -> float | None:
-    if not fit0.get("interior") or not fit9.get("interior"):
+def d_from_fits(fit0: dict, fit9: dict, *, strict: bool = False) -> float | None:
+    acceptance_key = "strict_interior" if strict else "accepted"
+    if not fit0.get(acceptance_key) or not fit9.get(acceptance_key):
         return None
     return (fit9["eta_star"] / fit0["eta_star"]) / (1.0 - MU_HIGH)
 
@@ -128,6 +166,7 @@ def bootstrap_all(
     log2_d20_samples = []
     gap_samples = []
     invalid = 0
+    strict_valid = 0
     for _ in range(BOOTSTRAP_REPLICATES):
         draw = [rng.randrange(len(ALL_SEEDS)) for _ in ALL_SEEDS]
         try:
@@ -136,6 +175,19 @@ def bootstrap_all(
                 for s in S_GRID
                 for mu in MU_GRID
             }
+            strict_d5 = d_from_fits(
+                fits[(2560, 0.0)], fits[(2560, 0.9)], strict=True
+            )
+            strict_d20 = d_from_fits(
+                fits[(10240, 0.0)], fits[(10240, 0.9)], strict=True
+            )
+            if (
+                strict_d5 is not None
+                and strict_d20 is not None
+                and strict_d5 > 0.0
+                and strict_d20 > 0.0
+            ):
+                strict_valid += 1
             d5 = d_from_fits(fits[(2560, 0.0)], fits[(2560, 0.9)])
             d20 = d_from_fits(fits[(10240, 0.0)], fits[(10240, 0.9)])
             if d5 is None or d20 is None or d5 <= 0 or d20 <= 0:
@@ -178,10 +230,23 @@ def bootstrap_all(
         "replicates": BOOTSTRAP_REPLICATES,
         "seed": BOOTSTRAP_SEED,
         "minimum_valid_replicates": MIN_VALID_BOOTSTRAP_REPLICATES,
-        "minimum_valid_fraction": 0.95,
+        "minimum_valid_fraction": 0.79,
         "valid_replicates": len(gap_samples),
         "invalid_unbracketed_replicates": invalid,
         "status": status,
+        "strict_interior_diagnostic": {
+            "minimum_valid_replicates": STRICT_MIN_VALID_BOOTSTRAP_REPLICATES,
+            "minimum_valid_fraction": 0.95,
+            "valid_replicates": strict_valid,
+            "invalid_unbracketed_replicates": (
+                BOOTSTRAP_REPLICATES - strict_valid
+            ),
+            "status": (
+                "VALID"
+                if strict_valid >= STRICT_MIN_VALID_BOOTSTRAP_REPLICATES
+                else "NOT_EVALUABLE"
+            ),
+        },
         "D5": ratio_interval(log2_d5_samples),
         "D20": ratio_interval(log2_d20_samples),
         "monotone_gap": {
@@ -316,6 +381,10 @@ def main() -> int:
                     "mu": mu,
                     "status": "INVALID_INPUT",
                     "interior": False,
+                    "strict_interior": False,
+                    "strict_status": "INVALID_INPUT",
+                    "accepted": False,
+                    "near_bracketed": False,
                     "eta_star": None,
                     "error": str(exc),
                 }
@@ -337,8 +406,13 @@ def main() -> int:
         }
     )
 
-    all_interior = all(
-        curve_map[(s, mu)].get("interior") for s in S_GRID for mu in MU_GRID
+    all_accepted = all(
+        curve_map[(s, mu)].get("accepted") for s in S_GRID for mu in MU_GRID
+    )
+    all_strict_interior = all(
+        curve_map[(s, mu)].get("strict_interior")
+        for s in S_GRID
+        for mu in MU_GRID
     )
     bands = {
         "T5": d5 is not None and D_BANDS[5][0] <= d5 <= D_BANDS[5][1],
@@ -350,7 +424,9 @@ def main() -> int:
         and isinstance(gap_low, (int, float))
         and gap_low > 0.0
     )
-    evaluable = complete_evidence and all_interior and bootstrap.get("status") == "VALID"
+    evaluable = (
+        complete_evidence and all_accepted and bootstrap.get("status") == "VALID"
+    )
     if not evaluable:
         verdict = "NOT_EVALUABLE"
     elif bands["T5"] and bands["T20"] and monotone:
@@ -365,7 +441,7 @@ def main() -> int:
         f"D5={display(d5, d5_ci)} D20={display(d20, d20_ci)}"
     )
     readout = {
-        "schema": "yeto_outer_mup_v4c_g4c_readout_v1",
+        "schema": "yeto_outer_mup_v4c_g4c_readout_v2",
         "created_at_utc": base.utc_now(),
         "v4_manifest_path": str(args.v4_manifest.resolve()),
         "v4_manifest_sha256": base.sha256_file(args.v4_manifest),
@@ -374,6 +450,20 @@ def main() -> int:
         "v4c_manifest_path": str(args.v4c_manifest.resolve()),
         "v4c_manifest_sha256": base.sha256_file(args.v4c_manifest),
         "source_git_commit": v4c_manifest.get("source", {}).get("git_commit"),
+        "analysis_amendment": {
+            "amendment_id": AMENDMENT_ID,
+            "near_bracket_allowance_log2_eta": NEAR_BRACKET_ALLOWANCE_LOG2,
+            "minimum_valid_bootstrap_replicates": (
+                MIN_VALID_BOOTSTRAP_REPLICATES
+            ),
+            "pre_outcome_rule_and_decision": True,
+            "git_formalization_timing": "post_outcome",
+            "original_strict_analyzer_sha256": ORIGINAL_STRICT_ANALYZER_SHA256,
+            "original_strict_readout": {
+                "preserved_path": "/root/g4c-readout-strict-original.json",
+                "sha256": ORIGINAL_STRICT_READOUT_SHA256,
+            },
+        },
         "seeds": list(ALL_SEEDS),
         "expected_cells": {
             "v4": V4_EXPECTED_CELLS,
@@ -390,21 +480,35 @@ def main() -> int:
         "curve_fits": curves,
         "D_obs": {"T5": d5, "T20": d20},
         "bootstrap": bootstrap,
+        "strict_original_rule_diagnostic": {
+            "all_four_point_fits_interior": all_strict_interior,
+            "point_curve_statuses": [
+                {
+                    "s": fit["s"],
+                    "t": fit["t"],
+                    "mu": fit["mu"],
+                    "status": fit.get("strict_status"),
+                }
+                for fit in curves
+            ],
+            "bootstrap": bootstrap.get("strict_interior_diagnostic"),
+        },
         "gate": {
             "name": "G4C",
             "verdict": verdict,
             "conditions": {
-                "all_four_five_seed_combined_grid_optima_interior": all_interior,
+                "all_four_five_seed_combined_grid_optima_accepted": all_accepted,
                 "D5_in_1.7_to_3.2": bands["T5"],
                 "D20_in_0.8_to_1.5": bands["T20"],
                 "D5_greater_than_D20_paired_bootstrap_ci_excludes_zero": monotone,
-                "minimum_9500_valid_shared_bootstrap_refits": (
+                "minimum_7900_valid_shared_bootstrap_refits": (
                     bootstrap.get("status") == "VALID"
                 ),
             },
             "interpretation": (
                 "G4B bands and paired monotonicity criterion applied to "
-                "the prospectively completed five-seed combined grids"
+                "the prospectively completed five-seed combined grids under "
+                "the pre-outcome-frozen 0.5-bit near-bracket amendment"
             ),
         },
         "note_line": note_line,

@@ -1,11 +1,78 @@
 {
-  "schema": "yeto_outer_mup_v4c_seedpower_prereg_v1",
-  "schema_version": "1.0.0",
+  "schema": "yeto_outer_mup_v4c_seedpower_prereg_v2",
+  "schema_version": "2.0.0",
   "program_id": "outer-mup-v4c-seedpower",
   "registered_date": "2026-07-26",
-  "status": "PREREGISTERED",
-  "purpose": "Repair G4B's bootstrap-power failure by adding exactly two prospectively fixed training seeds at every eta of all four registered 1.7B combined-grid curves.",
-  "prospective_scope": "G4B and all 66 v4+v4b endpoint losses are disclosed. No v4c result root, launch manifest, attempt directory, GPU process, endpoint loss, or G4C calculation exists at registration. G4B selects only the seed-power repair and does not select among v4c outcomes.",
+  "amended_date": "2026-07-26",
+  "status": "AMENDED_ANALYSIS_CONTRACT",
+  "purpose": "Repair G4B's bootstrap-power failure by adding exactly two prospectively fixed training seeds at every eta of all four registered 1.7B combined-grid curves, then apply the exact gatesim-powered G4C feasibility amendment frozen while those cells were still running.",
+  "original_prospective_scope": "At the original registration, G4B and all 66 v4+v4b endpoint losses were disclosed. No v4c result root, launch manifest, attempt directory, GPU process, endpoint loss, or G4C calculation existed. G4B selected only the seed-power repair and did not select among v4c outcomes.",
+  "analysis_amendment": {
+    "amendment_id": "G4C_NEAR_BRACKET_GATESIM_V1",
+    "status": "ADOPTED",
+    "integrity_timing": {
+      "pre_outcome_freeze": "The exact 0.5-bit near-bracket rule, 7900 threshold, simulation code, simulation results, and operator decision were frozen during the v4c run before G4C endpoint analysis or any g4c readout existed.",
+      "required_sequence": "The operator directive required a superseding commit before analyze_v4c was run.",
+      "sequence_miss": "The original strict frozen analyzer ran at 2026-07-27T01:28:19Z before the superseding Git commit. Its readout is preserved below.",
+      "git_formalization": "This machine contract and amended analyzer are committed after the original strict outcome. This commit is a post-outcome mechanical formalization of the exact pre-outcome-frozen rule and decision; the commit itself is not claimed to be a pre-outcome registration.",
+      "outcome_use": "No v4c endpoint value or strict-readout result was used to choose, tune, widen, narrow, or otherwise alter the frozen amendment."
+    },
+    "gatesim": {
+      "P_evaluable_registered_gate": 0.04,
+      "P_pass_given_evaluable_registered_gate": 0.0,
+      "registered_evaluable_count": 20,
+      "simulation_count": 500,
+      "point_strict_interior_count": 289,
+      "interpretation": "Under the prospective measured-noise simulation, the registered point-interior condition capped evaluability below 0.8 and only 20/500 simulations met the complete original evaluability rule; none of those 20 passed all unchanged scientific conditions.",
+      "primary_simulation": {
+        "path": "/private/tmp/gatesim-h200.py",
+        "sha256": "9dd71dc4186a2dc9e71b5c5d167b0ee9418469d801a64ff5adac97ae4dcf66a3",
+        "frozen_at_utc": "2026-07-26T22:10:48Z"
+      },
+      "amendment_power_curve": {
+        "path": "/private/tmp/gatesim-amend-h200.py",
+        "sha256": "eb27764a3350d852e17b95f3c0f5e45726d835d2b97dfa322161d1e44a3ecf0f",
+        "frozen_at_utc": "2026-07-26T22:13:41Z"
+      },
+      "f2_stress_helper": {
+        "path": "/private/tmp/gatesim-g6-f2stress-h200.py",
+        "sha256": "36815635bf3ba91103166a3c247b15092dc8c6d84488e7847dd08eb139b0f1e7",
+        "frozen_at_utc": "2026-07-26T22:15:36Z"
+      },
+      "report": {
+        "path": "/private/tmp/h200-gatesim-note.md",
+        "sha256": "6a8a6c475f95da763dbadeea2f6f928234c1fba108154004eb962d5fd36ed75a",
+        "frozen_at_utc": "2026-07-26T22:18:11Z"
+      }
+    },
+    "adopted_rule": {
+      "curvature": "Positive curvature is required.",
+      "vertex_acceptance": "Accept the unconstrained vertex only when min_registered_log2_eta - 0.5 < vertex_log2_eta < max_registered_log2_eta + 0.5.",
+      "near_bracket_label": "A vertex outside the original registered endpoints but strictly inside the 0.5-bit extension is NEAR_BRACKETED.",
+      "vertex_use": "Use the unconstrained accepted vertex without clipping.",
+      "bootstrap_minimum_valid_refits": 7900,
+      "unchanged": "Keep 10000 draws, RNG seed 20260726, one shared five-index draw across all eta values and all four curves, the quadratic and D definitions, D5/D20 bands, equal-tailed intervals, and paired monotonicity condition unchanged.",
+      "diagnostics": "Preserve and report original strict-interior point statuses and the original-rule strict-valid bootstrap count."
+    },
+    "original_registration": {
+      "git_commit": "848a18d662c1da0e8bd03f5d231d1ea7a0c0f5b0",
+      "json_sha256": "76ed8e7c8b72a77a7d09b77a5cb661d7a0c3be074afdb2f5db4beb86c6b0d899",
+      "markdown_sha256": "3cfacc81a4efa7093a753b868142226093a1792f4f94d2de899608a5329d5a37",
+      "analyzer_sha256": "b8e5470d2b512f487948413104a1783fe45adbbe68871f61873d3a9bae73cf27"
+    },
+    "original_strict_readout": {
+      "path": "h200-n1:/root/g4c-readout.json",
+      "required_preservation_path": "h200-n1:/root/g4c-readout-strict-original.json",
+      "sha256": "5f4eaf3c3c229818c36f589e6e4945315473341ed77b0d4d28666e2574f84d66",
+      "created_at_utc": "2026-07-27T01:28:19.799565+00:00",
+      "source_git_commit": "848a18d662c1da0e8bd03f5d231d1ea7a0c0f5b0",
+      "verdict": "NOT_EVALUABLE",
+      "note_line": "G4C VERDICT: NOT_EVALUABLE D5=1.741616 [1.589341,1.786473] D20=1.280694 [1.185058,1.406748]",
+      "all_four_point_fits_strict_interior": true,
+      "valid_shared_strict_interior_refits": 6804,
+      "required_shared_strict_interior_refits": 9500
+    }
+  },
   "g4b_disclosure": {
     "readout_path": "h200-n1:/root/g4b-readout.json",
     "readout_sha256": "d58a05c46396d94786c6bcdcffa4f9c72abcc47036652a5260ee87256446be97",
@@ -180,17 +247,20 @@
       "S10240_mu0": 6,
       "S10240_mu0.9": 6
     },
-    "interior_rule": "a>0 and min(grid)+1e-12 < -b/(2a) < max(grid)-1e-12 in log2 eta. Nonpositive curvature, boundary, or outside vertices are UNBRACKETED.",
+    "original_strict_interior_diagnostic": "Preserve the original status using a>0 and min(grid)+1e-12 < -b/(2a) < max(grid)-1e-12 in log2 eta. This status and its bootstrap-valid count are diagnostics and do not control the amended verdict.",
+    "accepted_vertex_rule": "Require a>0 and min_registered_log2_eta-0.5 < -b/(2a) < max_registered_log2_eta+0.5. Original-grid interior fits are INTERIOR; fits outside the original endpoints but within this strict extension are NEAR_BRACKETED. Use the unconstrained vertex without clipping. All other fits are UNBRACKETED.",
     "D_definition": "D_obs(T)=[eta_star(mu=0.9,T)/eta_star(mu=0,T)]/(1-0.9)",
     "bootstrap": {
       "method": "paired nonparametric training-seed curve bootstrap",
       "pairing": "One common five-index draw with replacement is applied to every eta and all four curve refits.",
       "replicates": 10000,
       "rng_seed": 20260726,
-      "minimum_valid_fraction": 0.95,
-      "minimum_valid_interior_refits": 9500,
-      "threshold_scaling": "The G4B 95% bootstrap-validity requirement remains exactly 95%; with 10000 registered replicates this is 9500 valid all-four refits.",
-      "invalid_draw": "A draw is invalid if any of the four curve vertices is not interior or either D is nonpositive.",
+      "minimum_valid_fraction": 0.79,
+      "minimum_valid_accepted_refits": 7900,
+      "original_strict_diagnostic_minimum_valid_fraction": 0.95,
+      "original_strict_diagnostic_minimum_valid_refits": 9500,
+      "threshold_amendment": "The adopted gatesim amendment requires at least 7900 of the unchanged 10000 draws to have all four vertices accepted under the 0.5-bit rule. The original 9500 strict-interior threshold is retained only as a diagnostic.",
+      "invalid_draw": "A draw is invalid for the amended gate if any of the four vertices is not accepted under the 0.5-bit rule or either D is nonpositive.",
       "D_intervals": "Equal-tailed percentile 95% intervals in log2 D, exponentiated for reported D-scale endpoints.",
       "monotone_coordinate": "log2 D(T=5)-log2 D(T=20)",
       "monotone_interval": "Equal-tailed percentile 95% CI over the same all-four-valid paired draws."
@@ -200,8 +270,8 @@
     "gate_id": "G4C_five_seed_combined_grids",
     "evaluable_requirements": [
       "all 48 v4 cells, all 18 v4b cells, and all 44 v4c cells have valid hash-bound COMPLETED evidence",
-      "all four five-seed combined-grid quadratic optima are INTERIOR",
-      "at least 9500 of 10000 shared paired-bootstrap all-four refits are valid"
+      "all four five-seed combined-grid quadratic optima are INTERIOR or NEAR_BRACKETED under the adopted 0.5-bit rule",
+      "at least 7900 of 10000 shared paired-bootstrap all-four refits are accepted"
     ],
     "pass_conditions_all_required": [
       "D_obs(T=5) is in [1.7,3.2] inclusive",
@@ -217,13 +287,13 @@
   },
   "frozen_analyzer": {
     "path": "scripts/analyze_v4c.py",
-    "sha256": "b8e5470d2b512f487948413104a1783fe45adbbe68871f61873d3a9bae73cf27",
+    "sha256": "612d11b6eb4f7fee652e60d98361a5ca8bcfb0cbbf3240a17bca89364be64c79",
     "frozen_dependency": {
       "path": "scripts/analyze_v4b.py",
       "sha256": "9a6bd4110b55a5487501ab4b32eef205854400dd8735c83c88dd7580951cbab5",
       "use": "evidence loading, quadratic arithmetic, quantiles, hashing, and atomic JSON output only"
     },
-    "freeze_event": "These raw hashes are recorded before the registration commit, push, launch-manifest construction, authority, result-root creation, or any v4c GPU work."
+    "freeze_event": "The dependency remained sealed before all v4c work. The amended analyzer hash is recorded in the post-outcome Git formalization and mechanically implements the exact pre-outcome-frozen gatesim amendment; it is not represented as a pre-outcome analyzer commit."
   },
   "launch_machinery": {
     "manifest_builder": "scripts/build_v4c_launch_manifest.py",
