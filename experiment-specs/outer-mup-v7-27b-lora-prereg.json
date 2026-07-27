@@ -1,0 +1,439 @@
+{
+  "schema": "yeto_outer_mup_v7_27b_lora_prereg_v1",
+  "schema_version": "1.0.0",
+  "program_id": "outer-mup-v7-27b-lora",
+  "registered_date": "2026-07-26",
+  "status": "REGISTERED_PREPILOT",
+  "question": "Does the finite-horizon outer-momentum transient law observed at 1.7B transfer to the pinned dense 27B model when only replicated LoRA adapters are trained and synchronized?",
+  "prospective_scope": {
+    "state_at_registration": "The pinned 27B text model had completed standalone compatibility and full-tune FSDP smoke work documented in /private/tmp/h200-27b-note.md. No v7 FSDP+LoRA syncer smoke, v7 pilot cell, v7 main-grid cell, v7 endpoint loss, or G7 calculation existed.",
+    "prior_outcomes_used": "The final five-seed 1.7B G4C readout is disclosed and used only to define the empirical seed-noise prior, wide D bands, horizon center ratios, and feasibility simulation. It is not a 27B LoRA outcome.",
+    "pilot_exception": "The three registered mu=0 center-probe cells necessarily precede exact numeric main-grid materialization. Their commands and deterministic selection rule are frozen here; their outcomes are excluded from G7 and will be disclosed in the hash-bound launch manifest before the main grid starts.",
+    "forbidden": "No smoke, pilot, or main-grid loss may alter the G7 bands, estimator, bootstrap, near-bracket allowance, seeds, horizons, momentum arms, or registered conditional grid rule."
+  },
+  "source": {
+    "base_git_commit": "ea5f034096e54a2f959e6bd73890ca0e47390430",
+    "base_branch": "origin/experiment/best-paper-phase-map",
+    "registration_branch": "experiment/outer-mup-v7-27b-lora",
+    "implementation_files": {
+      "yeto/learner.py": "faf4aec4bd004416d3691ca2725af5efa2ccca96e1c389da911aef6a75c98f20",
+      "scripts/compare_diloco.py": "d594dae3c517b3b5df7a1631c22bf8b377f8c42ce926fd7c8d29934f9fe5fcff",
+      "syncer/src/main.rs": "9e7f35774e403c4ad476ca92c7db107d31480c985df0311647dbebd7dca64f29",
+      "syncer/src/server.rs": "e90cd4899e3c3667448aef3ca70b94f32c9fc1a4f1258544c8e09c1ff288537d",
+      "syncer/src/state.rs": "ece945aff5dab269568c7c9a0c28061effcb8ef63422d74db491952e5ae324fe",
+      "syncer/Cargo.lock": "7f7fe6eb643ccafa90130b6182ea9e7f2fea245d9b55064615d7c4ff424c305b"
+    }
+  },
+  "model": {
+    "id": "Qwen/Qwen3.6-27B",
+    "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
+    "node_path": "/data/yeto-hf-cache/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
+    "resolved_causal_lm_class": "Qwen3_5ForCausalLM",
+    "text_parameters": 26895998464,
+    "hub_safetensors_parameters_including_nontext_state": 27781427952,
+    "dense_text_config": {
+      "hidden_size": 5120,
+      "num_hidden_layers": 64,
+      "intermediate_size": 17408,
+      "num_attention_heads": 24,
+      "moe_or_expert_fields_present": false
+    },
+    "snapshot": {
+      "entry_count": 29,
+      "total_dereferenced_bytes": 55586107940,
+      "canonical_inventory_definition": "SHA-256 of compact sorted-key JSON over the filename, dereferenced blob basename, and byte count of all 29 top-level snapshot entries, ordered by filename",
+      "canonical_inventory_sha256": "32c8f34fa11f07ffde3eedb32435b39a78590ea102b7923bbc1d9b4df7b51c4c",
+      "identical_on_nodes": [
+        "h200-n1",
+        "h200-n2"
+      ],
+      "config_json_sha256": "69db4eb7196bc8190813231b3018ca05d8c2e3abc7b1af19d55c157af44a9d9c",
+      "model_index_sha256": "a8ad2c26fb707ff8c245806315b03e3b4b74595528492423af5dae0ce39b4d9b",
+      "tokenizer_config_sha256": "5186f0defcd7f232382c7f0aebcd2252d073bb921ab240e407b7ae8745d2b29b"
+    }
+  },
+  "materialized_inputs": {
+    "train": {
+      "path": "/root/yeto-data/outer-mup-v3/scale-s2560/raw/train.jsonl",
+      "sha256": "e680a29ea8c8fc7c99efdceb4f62e485d3eed1ac2afd15bab43b506cb3f4ecaf",
+      "bytes": 64423638,
+      "rows": 13758
+    },
+    "development_eval": {
+      "path": "/root/yeto-data/outer-mup-v3/scale-s2560/raw/eval.jsonl",
+      "sha256": "533838a0564b13519956a044d23ed8db6705ddc7ae5f0ddb96538f49460bcebc",
+      "bytes": 4666640,
+      "rows": 1024,
+      "role": "fixed development endpoint used by smoke, pilot, and every main-grid cell"
+    },
+    "identical_on_nodes": [
+      "h200-n1",
+      "h200-n2"
+    ],
+    "qwen_tokenization_preflight": {
+      "tokenizer_class": "Qwen2Tokenizer",
+      "tokenizer_vocab_size": 248077,
+      "sequence_length": 128,
+      "logical_learner_0_blocks": 52831,
+      "logical_learner_1_blocks": 52439,
+      "logical_learner_0_supervised_tokens": 5478861,
+      "logical_learner_1_supervised_tokens": 5429135,
+      "development_blocks": 7631,
+      "development_supervised_tokens": 790341,
+      "interpretation": "Each logical learner has more than five times the 10,240-step requirement before the four-rank DistributedSampler partition; no data-capacity wrap is required within a main cell."
+    }
+  },
+  "hardware_and_environment": {
+    "nodes": [
+      "h200-n1",
+      "h200-n2"
+    ],
+    "gpus_per_node": 8,
+    "gpu_model": "NVIDIA H200",
+    "gpu_memory_mib": 143771,
+    "python_environment": "/root/yeto-venv",
+    "torch": "2.8.0+cu128",
+    "transformers": "5.13.0",
+    "peft": "0.19.1",
+    "result_root": "/root/yeto-results-v7 -> /data/yeto-results-v7",
+    "data_filesystem": "XFS /data, 30,723,891,134,464 bytes total on each node; at pre-registration 28,040,595,001,344 bytes free on h200-n1 and 28,238,464,221,184 bytes free on h200-n2",
+    "minimum_free_bytes_at_every_launch": 1000000000000
+  },
+  "lora_identity": {
+    "rank": 16,
+    "alpha": 32,
+    "alpha_over_rank": 2.0,
+    "target_argument": "auto",
+    "resolved_dense_target": "all-linear",
+    "replication": "All LoRA adapter parameters remain ordinary replicated FP32 tensors on every rank; their gradients are explicitly SUM-all-reduced and divided by world size before clipping and AdamW. Only the frozen BF16 base is FSDP2-sharded.",
+    "trainable_tensor_count": 992,
+    "trainable_parameter_count": 116727808,
+    "bf16_wire_bytes_per_complete_adapter_state": 233455616,
+    "meta_device_measurement": "AutoModelForCausalLM.from_config under accelerate.init_empty_weights followed by the production PEFT LoraConfig and resolve_lora_targets('auto'); no GPU allocation"
+  },
+  "common_protocol": {
+    "tuning": "lora",
+    "shard": "fsdp",
+    "learner_islands_m": 2,
+    "gpus_per_island": 4,
+    "ranks_per_island": 4,
+    "islands_per_cell": 2,
+    "gpus_per_cell": 8,
+    "sequence_length": 128,
+    "micro_batch_size_per_rank": 1,
+    "gradient_accumulation": 1,
+    "raw_tokens_per_island_optimizer_step": 512,
+    "train_on": "assistant",
+    "tokenize": "preload",
+    "gradient_checkpointing": "learner default auto",
+    "inner_optimizer": "AdamW",
+    "inner_learning_rate": 0.0003,
+    "inner_weight_decay": 0.01,
+    "inner_warmup_steps": 10,
+    "gradient_clip_norm": 1.0,
+    "h": 512,
+    "fixed_window_microsteps": 512,
+    "fixed_window_tokens": 262144,
+    "fragment_count": 4,
+    "fragment_pattern": "binpack",
+    "wire_dtype": "bf16",
+    "matrix_merge": "rda",
+    "merge_alpha": 0.5,
+    "delta_correction": "none",
+    "outer_optimizer": "raw production Nesterov",
+    "outer_bias_correction": false,
+    "strict_quorum": true,
+    "barrier_sync": false,
+    "barrier_rationale": "The production learner deliberately rejects --barrier-sync at world size greater than one. G7 therefore uses the supported non-barrier strict-quorum fixed-window path; each fragment push still carries an exact H=512 post-reset snapshot and c_tokens=262144.",
+    "version_matched_anchor": true,
+    "pipeline_depth": 4,
+    "wan_streams": 0,
+    "learner_push_delay_ms": [
+      0,
+      0
+    ],
+    "learner_delay_jitter_ms": 0,
+    "rho_telemetry": true,
+    "syncer_checkpoint_cadence": "final global commit only",
+    "development_eval_rows": 1024,
+    "primary_outcome": "finite fixed-development evaluation NLL per supervised token"
+  },
+  "wiring_smoke": {
+    "status": "REGISTERED_NOT_RUN",
+    "cell_count": 1,
+    "seed": 683,
+    "training_seed": 683683,
+    "s": 64,
+    "h": 16,
+    "t": 4,
+    "mu": 0.0,
+    "eta": 0.28,
+    "fixed_window_microsteps": 16,
+    "fixed_window_tokens": 8192,
+    "syncer_total_steps": 16,
+    "purpose": "Before any pilot cell, prove two four-rank FSDP2+LoRA islands can initialize one M=2 syncer, exchange all four adapter fragments, take replicated-adapter optimizer steps, emit 16 strict-quorum commits and rho rows, save adapters, evaluate a finite endpoint, exit zero, and release all eight GPUs.",
+    "pass_conditions": [
+      "both torchrun islands have four successful ranks and learner ids 0 and 1",
+      "resolved layouts are byte-identical and contain 992 trainable tensors / 116727808 parameters",
+      "event tape has exactly 16 strict-quorum commits with two distinct learner pushes per commit",
+      "rho telemetry has exactly 16 valid rows",
+      "both learner adapters save successfully and the endpoint loss is finite",
+      "syncer and learner exit statuses are zero and all eight GPUs return to baseline occupancy"
+    ],
+    "failure_rule": "Any wiring-smoke failure blocks the pilot. It may receive one loss-blind infrastructure retry only after the exact failure is documented; scientific divergence is retained and blocks the lane."
+  },
+  "pilot": {
+    "status": "REGISTERED_NOT_RUN",
+    "purpose": "Center the LoRA mu=0,T=5 ladder and measure cell wall time before selecting the registered main-grid variant.",
+    "seed": 691,
+    "training_seed": 691691,
+    "s": 2560,
+    "h": 512,
+    "t": 5,
+    "mu": 0.0,
+    "etas": [
+      0.14,
+      0.28,
+      0.56
+    ],
+    "eta_spacing": "2x",
+    "cell_count": 3,
+    "excluded_from_G7": true,
+    "center_provenance": "The 0.28 center is the disclosed tuned outer-SGD scale used by prior Qwen-family LoRA work with the same alpha/r=2; the pilot spans one factor of two below and above because LoRA outer learning rates differ materially from the 1.7B full-tune ladder.",
+    "fit": "Ordinary least-squares quadratic loss=a*x^2+b*x+c in x=log2(eta) over the three finite pilot endpoints.",
+    "selection_rule": "If a>0 and the unconstrained vertex lies strictly within [log2(0.14)-0.5, log2(0.56)+0.5], select eta_pilot_star=2^vertex without clipping. Otherwise select the finite pilot eta with minimum endpoint loss, breaking an exact tie toward the smaller eta. If no pilot endpoint is finite, the main grid is blocked.",
+    "disclosure": "The three losses, cell wall seconds, fit coefficients/status, selected eta_pilot_star, evidence hashes, and pilot readout hash must be recorded in /private/tmp/h200-27blora-note.md and the main launch manifest before GRID STARTED."
+  },
+  "main_design": {
+    "seeds": [
+      701,
+      709,
+      719
+    ],
+    "training_seed_rule": "decimal concatenation seed||seed",
+    "s_to_t": {
+      "2560": 5,
+      "10240": 20
+    },
+    "h": 512,
+    "mu": [
+      0.0,
+      0.9
+    ],
+    "arm": "RAW only",
+    "center_derivation": {
+      "T5_mu0": "eta_pilot_star selected by the registered pilot rule",
+      "T20_mu0": "T5_mu0 * 0.35036736670682456",
+      "T20_mu0_ratio_provenance": "The disclosed final G4C mu0 optimum ratio 0.0064207514470033394 / 0.018325769055929243. It is a placement prior, not a G7 condition.",
+      "T5_mu0.9": "T5_mu0 * 0.1 * 1.7416157949788522",
+      "T20_mu0.9": "T20_mu0 * 0.1 * 1.2806943474449415",
+      "momentum_center_provenance": "The disclosed final G4C D constants place the grid near the hypothesized finite-horizon law; the wide grids and G7 bands allow LoRA constants to differ."
+    },
+    "full_variant": {
+      "id": "FULL_48",
+      "log2_offsets_from_each_center": [
+        -1.5,
+        -0.5,
+        0.5,
+        1.5
+      ],
+      "eta_spacing": "adjacent values differ by exactly 2x",
+      "cell_count_identity": "2 horizons x 2 momenta x 4 etas x 3 seeds = 48 cells"
+    },
+    "conditional_reduced_variant": {
+      "id": "REDUCED_T20_MU0_45",
+      "unchanged_curves": "T5_mu0, T5_mu0.9, and T20_mu0.9 retain the FULL_48 four offsets",
+      "T20_mu0_log2_offsets": [
+        -1.5,
+        0.0,
+        1.5
+      ],
+      "cell_count_identity": "48 - one T20_mu0 eta across 3 seeds = 45 cells",
+      "analysis_note": "The registered analyzer fits the T20_mu0 quadratic to these three symmetric points; all other curves retain four points."
+    },
+    "no_recenter_rule": "After pilot disclosure and mechanical center calculation, no numeric center, eta, seed, horizon, arm, or cell may be moved, substituted, extended, narrowed, or recentered from any main-grid outcome."
+  },
+  "fleet_hour_rule": {
+    "definition": "A fleet-hour is one elapsed wall hour with the two-node/16-H200 fleet available to v7, which can execute two 8-GPU cells concurrently. The projection is a two-slot longest-processing-time makespan, not GPU-hours.",
+    "short_duration_seconds": "maximum of the three successful pilot end-to-end cell wall seconds",
+    "long_duration_seconds": "4 * short_duration_seconds, a prospective conservative scaling from S=2560 to S=10240",
+    "projection": "Apply deterministic longest-processing-time scheduling to 24 short plus 24 long estimated durations on two identical node slots.",
+    "threshold_fleet_hours": 20.0,
+    "selection": "Use FULL_48 when the projected makespan is <=20.0 fleet-hours. Use REDUCED_T20_MU0_45 when it is >20.0 fleet-hours. Equality stays FULL_48.",
+    "immutability": "The selected variant and arithmetic are written to the pilot readout and main launch manifest before any main-grid process starts; actual main-grid speed or losses cannot change the variant."
+  },
+  "gate_feasibility_simulation": {
+    "discipline": "Run before v7 registration and before any v7 GPU process using measured v4/v4b/v4c 1.7B seed noise as the prior.",
+    "source_readout": {
+      "path": "h200-n1:/root/g4c-readout.json",
+      "sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa",
+      "cells": 110
+    },
+    "prior_builder": {
+      "path": "scripts/build_v7_noise_prior.py",
+      "sha256": "bf7af2b0c675dec495066ef9cc405818d91ef698426afacab887db18e9d39bb7"
+    },
+    "prior": {
+      "path": "experiment-specs/outer-mup-v7-27b-lora-noise-prior.json",
+      "sha256": "5d684e9b296ccb35eb89d399a70eacd30cb92ee9d4a56d06acbea25e693d0876",
+      "coordinates": 22,
+      "residuals": 110,
+      "pooled_residual_population_sd": 0.0632194750783273,
+      "method": "At each (S,mu,eta), subtract the five-seed mean and preserve each seed's residual profile jointly across eta and all four curves."
+    },
+    "simulator": {
+      "path": "scripts/gatesim_v7.py",
+      "sha256": "ea3c17bf83e468edc6693e970b3275a9c44229c5d635aa69d2c1ee2e9d0b06da",
+      "rng_seed": 20260727
+    },
+    "report": {
+      "path": "experiment-specs/outer-mup-v7-27b-lora-gatesim.json",
+      "sha256": "3428a266676b7468c243c2d5e153c68609405ab42cc610c86938344b52dea74f"
+    },
+    "primary_results": {
+      "FULL_48": {
+        "simulations": 5000,
+        "evaluable": 5000,
+        "P_eval": 1.0,
+        "passed": 5000,
+        "P_pass": 1.0,
+        "minimum_valid_bootstrap_refits_observed": 10000
+      },
+      "REDUCED_T20_MU0_45": {
+        "simulations": 5000,
+        "evaluable": 5000,
+        "P_eval": 1.0,
+        "passed": 5000,
+        "P_pass": 1.0,
+        "minimum_valid_bootstrap_refits_observed": 10000
+      }
+    },
+    "sensitivity": "At both 0.5x and 1.5x the measured residual amplitude, each variant had P_eval=1.0 and P_pass=1.0 over 2,000 simulations per scale/variant.",
+    "interpretation": "The simulation supports the registered wide 2x-spaced ladder and 7,900-refit threshold. It is a feasibility calculation under a transported full-tune 1.7B prior, not evidence that 27B LoRA has the same noise or scientific constants."
+  },
+  "frozen_analysis": {
+    "path": "scripts/analyze_v7.py",
+    "sha256": "c835189056d407535cb866c4095b49a35361391a43b8f23a3669b40914d18f75",
+    "curve_model": "For each (T,mu), fit loss=a*x^2+b*x+c by ordinary least squares to the three-seed mean at each exact manifest eta, x=log2(eta). FULL_48 uses four points per curve; REDUCED_T20_MU0_45 uses three points only for T20_mu0.",
+    "near_bracket_rule": "Require positive curvature and accept the unconstrained vertex only when min_registered_x-0.5 < vertex < max_registered_x+0.5. A vertex strictly inside the original endpoints is INTERIOR; an accepted outside vertex is NEAR_BRACKETED. Never clip the vertex.",
+    "D_definition": "D(T)=[eta_star(mu=0.9,T)/eta_star(mu=0,T)]/(1-0.9)",
+    "bootstrap": {
+      "method": "paired nonparametric training-seed curve bootstrap",
+      "replicates": 10000,
+      "rng_seed": 20260727,
+      "pairing": "one shared three-index resample across every eta and all four curve refits",
+      "minimum_valid_accepted_refits": 7900,
+      "intervals": "equal-tailed 95% percentile intervals in log2 D, transformed back to D for reporting"
+    },
+    "bands": {
+      "T5": [
+        0.8708078974894261,
+        2.6124236924682784
+      ],
+      "T20": [
+        0.6403471737224707,
+        1.9210415211674121
+      ],
+      "construction": "Final observed 1.7B G4C constants D5=1.7416157949788522 and D20=1.2806943474449415 multiplied by [0.5,1.5]. These deliberately wide +/-50% bands are registered because LoRA-regime constants are unknown."
+    }
+  },
+  "gate_G7": {
+    "gate_id": "G7_27B_LoRA_finite_horizon_transient_law",
+    "evaluable_conditions_all_required": [
+      "complete hash-valid evidence for the selected 48- or 45-cell manifest",
+      "both mu=0.9 point optima are INTERIOR or NEAR_BRACKETED under the registered 0.5-bit rule",
+      "both mu=0 ratio-denominator optima are also accepted under the same rule",
+      "at least 7900 of 10000 shared paired-bootstrap four-curve refits are accepted"
+    ],
+    "pass_conditions_all_required": [
+      "D(T=5) is in [0.8708078974894261,2.6124236924682784] inclusive",
+      "D(T=20) is in [0.6403471737224707,1.9210415211674121] inclusive",
+      "the paired 95% bootstrap CI for log2 D(T=5)-log2 D(T=20) has lower endpoint > 0"
+    ],
+    "verdicts": [
+      "PASS",
+      "FAIL",
+      "NOT_EVALUABLE"
+    ],
+    "failure_rule": "Complete evaluable evidence that violates any pass condition is FAIL. Missing/invalid evidence, an unaccepted ratio-required point optimum, or fewer than 7900 accepted bootstrap refits is NOT_EVALUABLE.",
+    "required_reporting": "Report both D point estimates with 95% CIs, every curve status/vertex, accepted bootstrap count, monotone-gap CI, each band decision, and one line beginning exactly 'G7 VERDICT:'."
+  },
+  "scheduling": {
+    "cell_shape": "one node, eight H200s, two four-GPU FSDP+LoRA learner islands",
+    "parallel_cells": 2,
+    "assignment": "At most one v7 cell on each node. Within each cell learner 0 owns physical GPUs 0-3 and learner 1 owns GPUs 4-7. Across the fleet h200-n1 and h200-n2 run one cell each.",
+    "queue_policy": "Longest S=10240 cells first, deterministic seed/curve/eta tie order, two-slot greedy longest-processing-time balance.",
+    "pilot_schedule": "Run two pilot cells in parallel, then the third on the first released node; no main cell overlaps a pilot cell.",
+    "main_grid_start_condition": "Wiring smoke PASS, all three pilot cells COMPLETED, pilot readout sealed, exact selected-variant manifest hash frozen, both nodes clean at the registration commit, and the v6 drain gate PASS."
+  },
+  "v6_fleet_gate": {
+    "ownership": "v6 factorial has priority until its campaign drains; apparent idle GPUs before a terminal v6 note do not authorize v7.",
+    "note": "/private/tmp/h200-factorial-note.md",
+    "polling": "Poll the note plus both nodes' v6 slot/controller state. Every pgrep expression must use the bracket idiom for every process name, for example [r]un_slot_v6.py, [c]ompare_diloco.py, [y]eto.learner, and [y]eto-syncer.",
+    "pass_conditions": [
+      "the v6 note contains a terminal v6 completion/drain marker and no later line reclaims the fleet",
+      "all v6 slot-state records are terminal",
+      "bracketed process checks find no v6 controller, compare_diloco, learner, or syncer process on either node",
+      "all 16 GPUs report zero foreign compute utilization and zero unexpected memory allocation"
+    ],
+    "forbidden": "Do not terminate, pause, renice, modify, or overlap v6. Do not infer authority from a transiently idle nvidia-smi sample alone."
+  },
+  "evidence_contract": {
+    "cell_completed_requires": [
+      "exact registered command hash and clean pushed source commit",
+      "immutable attempt id with start/end records and physical GPU UUID inventory",
+      "two four-rank learner islands each reaching exactly S optimizer steps",
+      "exact 4*T strict-quorum event-tape commits and rho telemetry rows",
+      "each push reports c_steps=512 and c_tokens=262144 for main cells",
+      "finite 1024-row endpoint loss and zero learner/syncer exits",
+      "hashes for command, Git commit/diff, adapter outputs, results, per-example loss, eval provenance, tape, rho telemetry, logs, and checkpoint"
+    ],
+    "partial_work_never_counts": true,
+    "scientific_divergence_retained": true,
+    "heartbeat_seconds": 30,
+    "watchdogs_minutes": {
+      "smoke": 90,
+      "pilot_and_S2560": 180,
+      "S10240": 420
+    }
+  },
+  "retry_contract": {
+    "attempt_limit": 2,
+    "selection": "loss-blind only",
+    "allowed_reasons": [
+      "preempted_or_lost_host",
+      "hardware_failure",
+      "process_exit_before_endpoint_without_scientific_divergence",
+      "missing_or_checksum_invalid_artifact",
+      "loss_blind_validator_failure"
+    ],
+    "main_grid_group": "every selected-variant eta cell with the same T, mu, and training seed",
+    "pilot_group": "all three pilot cells",
+    "finite_loss_retry_forbidden": true,
+    "wall_extension_forbidden": true,
+    "forbidden": "No retry for unfavorable finite loss, band failure, unaccepted optimum, bootstrap validity, or any other scientific outcome. Attempt 2 replaces attempt 1 for the entire authorized group."
+  },
+  "wall_clock": {
+    "main_grid_ceiling_fleet_hours": 30.0,
+    "start_event": "GRID STARTED after pilot and exact-manifest freeze",
+    "stop_rule": "At 30 elapsed fleet-hours, terminate only recorded v7 process groups, mark unstarted/partial cells NOT_RUN_WALL_CEILING, preserve artifacts, and run G7 as NOT_EVALUABLE. Never extend after outcomes.",
+    "pilot_and_smoke": "Smoke and pilot precede the main-grid ceiling but remain subject to their registered per-cell watchdogs and the 20-fleet-hour variant projection."
+  },
+  "rails": {
+    "pull_first": "Completed before v7 work; git pull --ff-only returned Already up to date.",
+    "clouds_forbidden": [
+      "AWS",
+      "GCP"
+    ],
+    "prior_results": "Never modify v1-v6 result trees or the 27B smoke artifacts. G4C is read-only input to the prior builder.",
+    "process_control": "Normal termination targets recorded v7 process groups. No wildcard pkill. Every pgrep pattern uses the bracket idiom.",
+    "git": "Commit and push registration before any v7 GPU process; nodes execute a clean exact registration/main-manifest commit; pushes originate from the Mac worktree.",
+    "note": "/private/tmp/h200-27blora-note.md",
+    "required_milestones": [
+      "V7 REGISTERED sha=",
+      "PILOT DONE",
+      "GRID STARTED",
+      "G7 VERDICT:"
+    ]
+  }
+}
