@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .bridge import BridgeConfig, StrictRlBridge
-from .export import specs_from_manifest
+from .export import _transformers_model_family, specs_from_manifest
 from .manifest import (
     MILES_COMMIT,
     canonical_json,
@@ -148,6 +148,7 @@ def build_miles_argv(
         "--rollout-max-prompt-len", str(args.seq_len // 2),
         "--rollout-max-response-len", str(args.seq_len - args.seq_len // 2),
         "--rollout-temperature", "1",
+        "--rollout-function-path", "yeto.rl.miles.generate_rollout",
         "--custom-rm-path", "yeto.rl.reward.miles_reward",
         "--advantage-estimator", "grpo",
         "--eps-clip", "0.2",
@@ -314,6 +315,7 @@ def _validate_miles_args(args, requested) -> None:
         "rollout_max_prompt_len": requested.seq_len // 2,
         "rollout_max_response_len": requested.seq_len - requested.seq_len // 2,
         "rollout_temperature": 1.0,
+        "rollout_function_path": "yeto.rl.miles.generate_rollout",
         "custom_rm_path": "yeto.rl.reward.miles_reward",
         "custom_generate_function_path": (
             getattr(requested, "generate_function", None).replace(":", ".")
@@ -447,6 +449,7 @@ def main(argv=None) -> None:
         model_path,
         trust_remote_code=bool(base.get("trust_remote_code")),
     )
+    _transformers_model_family(config)
     dataset = manifest["dataset"]
     if dataset["revision"] is None:
         if path_tree_sha256(args.data) != dataset["content_sha256"]:

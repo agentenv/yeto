@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -565,6 +566,7 @@ def _prepare_rl_launch_args(args) -> None:
         "delta_correction": "none",
         "outer_lr": 1.0,
         "outer_momentum": 0.0,
+        "merge_alpha": 0.0,
         "wire_dtype": "f32",
     }
     explicit = set(getattr(args, "_explicit_launch_flags", ()))
@@ -591,6 +593,14 @@ def _prepare_rl_launch_args(args) -> None:
     if expected_reward is not None and expected_reward != reward_sha256:
         raise ValueError("RL reward source SHA256 mismatch")
     args.reward_sha256 = reward_sha256
+    from .rl.reward import validate_callable_source
+
+    validate_callable_source(
+        args.reward_function,
+        reward_sha256,
+        REPO_ROOT,
+        label="RL reward",
+    )
 
     generate_spec = getattr(args, "rl_generate_function", None)
     if generate_spec:
@@ -1731,6 +1741,47 @@ class LocalSyncer:
         threading.Thread(target=_forward, daemon=True).start()
 
 
+def _read_syncer_marker(cluster: str | None, suffix: str) -> str | None:
+    name = f"yeto-state.ckpt.{suffix}"
+    if cluster is None:
+        path = Path(f"~/{name}").expanduser()
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=5", cluster, "cat", name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+_RL_FINAL_MARKER = re.compile(
+    r"YETO_RL_FINAL_V1\nglobal_step=[0-9]+\nroster_size=[1-9][0-9]*\n"
+    r"run_manifest_sha256=([0-9a-f]{64})\n"
+    r"layout_fingerprint=[0-9a-f]{64}\npolicy_sha256=[0-9a-f]{64}\n"
+)
+
+
+def _rl_final_marker_matches(text: str | None, manifest_sha256: str) -> bool:
+    match = _RL_FINAL_MARKER.fullmatch(text or "")
+    return match is not None and match.group(1) == manifest_sha256
+
+
+def _rl_fatal_marker_reason(text: str | None, manifest_sha256: str) -> str | None:
+    if text is None:
+        return None
+    prefix = f"YETO_RL_FATAL_V1\nrun_manifest_sha256={manifest_sha256}\n"
+    if not text.startswith(prefix):
+        return "RL fatal marker does not match this run manifest"
+    return text[len(prefix) :].strip() or "strict syncer reported a fatal error"
+
+
 # FleetController states.
 RUNNING = "running"
 RECOVERING = "recovering"
@@ -1764,8 +1815,8 @@ class FleetController:
     the same running/recovering cycle but is never abandoned — past the
     timeout it keeps retrying and logs an error every poll (its relaunch
     resumes from the on-VM checkpoint via the --resume flag already in its
-    run command). recover_timeout <= 0 disables recovery: a failed learner
-    is torn down on the spot.
+    run command). A strict RL fatal marker is the exception: it permanently
+    fails the run. recover_timeout <= 0 disables learner recovery.
 
     The syncer can be supervised in one of two ways:
 
@@ -1796,6 +1847,8 @@ class FleetController:
         syncer_probe=None,
         syncer_restart=None,
         strict_roster: bool = False,
+        syncer_final_probe=None,
+        syncer_fatal_probe=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -1808,6 +1861,8 @@ class FleetController:
         self.on_relaunch = on_relaunch
         self.thread_cls = thread_cls
         self.strict_roster = strict_roster
+        self.syncer_final_probe = syncer_final_probe
+        self.syncer_fatal_probe = syncer_fatal_probe
         self.learners = {
             name: self._make_record(name, task, job_id)
             for name, (task, job_id) in learners.items()
@@ -1847,6 +1902,11 @@ class FleetController:
                 self._poll(self.syncer, is_syncer=True)
             else:
                 self._poll_local_syncer()
+            if self.strict_roster:
+                self._raise_if_strict_syncer_fatal()
+                if self._strict_run_finalized():
+                    self._finish_strict_learners()
+                    break
             for rec in self.learners.values():
                 self._poll(rec, is_syncer=False)
             if all(r["state"] in (DONE, ABANDONED) for r in self.learners.values()):
@@ -1875,6 +1935,7 @@ class FleetController:
         reason = self.syncer_probe()
         if reason is None:
             return
+        self._raise_if_strict_syncer_fatal()
         print(
             f"[launcher] syncer: {reason}; restarting the local syncer "
             "(resumes from its checkpoint)",
@@ -1923,6 +1984,8 @@ class FleetController:
         return None, status
 
     def _enter_recovering(self, rec, reason: str, is_syncer: bool) -> None:
+        if is_syncer:
+            self._raise_if_strict_syncer_fatal()
         rec["state"] = RECOVERING
         rec["failed_at"] = self.ops.now()
         print(
@@ -1989,7 +2052,7 @@ class FleetController:
                 attempt.result = None
             finally:
                 attempt.finished = True
-            if attempt.result is not None and rec["state"] in (ABANDONED, FAILED):
+            if attempt.result is not None and rec["state"] in (DONE, ABANDONED, FAILED):
                 # Abandoned while this attempt was in flight, but the
                 # relaunch re-provisioned the cluster anyway: tear it back
                 # down so nothing is left running unattended.
@@ -1998,6 +2061,43 @@ class FleetController:
         thread = self.thread_cls(target=_run, daemon=True)
         thread.start()
         return attempt
+
+    def _strict_run_finalized(self) -> bool:
+        if self.syncer_final_probe is None:
+            return False
+        try:
+            return bool(self.syncer_final_probe())
+        except Exception as error:
+            print(f"[launcher] RL final marker probe failed: {error}", file=sys.stderr)
+            return False
+
+    def _finish_strict_learners(self) -> None:
+        for rec in self.learners.values():
+            if rec["state"] == DONE:
+                continue
+            rec["state"] = DONE
+            rec["exit"] = "SUCCEEDED (authoritative RL final marker)"
+            self._down(rec["name"])
+        print("[launcher] authoritative RL final marker observed; residual learners stopped")
+
+    def _raise_if_strict_syncer_fatal(self) -> None:
+        if not self.strict_roster or self.syncer_fatal_probe is None:
+            return
+        try:
+            reason = self.syncer_fatal_probe()
+        except Exception as error:
+            print(f"[launcher] RL fatal marker probe failed: {error}", file=sys.stderr)
+            return
+        if reason is None:
+            return
+        for rec in self.learners.values():
+            if rec["state"] != DONE:
+                rec["state"] = FAILED
+                rec["exit"] = f"FAILED: strict syncer fatal: {reason}"
+                self._down(rec["name"])
+        if self.syncer is not None:
+            self._down(self.syncer["name"])
+        raise RuntimeError(f"strict RL syncer permanently failed: {reason}")
 
     def _fail_fixed_roster(self, rec, elapsed: float) -> None:
         rec["state"] = FAILED
@@ -2272,6 +2372,22 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         for name, (job_id, _handle) in results.items():
             spawn_tail(name, job_id)
 
+        strict_rl = getattr(args, "training_mode", "sft") == "rl"
+        marker_cluster = None if head_mode else syncer_cluster
+        final_probe = fatal_probe = None
+        if strict_rl:
+            def final_probe():
+                return _rl_final_marker_matches(
+                    _read_syncer_marker(marker_cluster, "final"),
+                    args.run_manifest_sha256,
+                )
+
+            def fatal_probe():
+                return _rl_fatal_marker_reason(
+                    _read_syncer_marker(marker_cluster, "fatal"),
+                    args.run_manifest_sha256,
+                )
+
         controller = FleetController(
             learners={name: (tasks[name], job_id) for name, (job_id, _h) in results.items()},
             syncer=None if head_mode else (syncer_cluster, syncer_task, syncer_job),
@@ -2281,7 +2397,9 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             on_relaunch=spawn_tail,
             syncer_probe=local_syncer.probe if head_mode else None,
             syncer_restart=local_syncer.restart if head_mode else None,
-            strict_roster=getattr(args, "training_mode", "sft") == "rl",
+            strict_roster=strict_rl,
+            syncer_final_probe=final_probe,
+            syncer_fatal_probe=fatal_probe,
         )
         exit_codes = controller.run()
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]

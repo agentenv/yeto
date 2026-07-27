@@ -1,8 +1,9 @@
 # Yeto RL v0：固定成员同步 LoRA FedAvg 方案
 
-> 状态（2026-07-27）：Yeto 侧代码已实现，固定 Miles 源码已核实，并已通过
-> CPU、FakeMiles 和真实 Rust syncer 自动化验证；真实 Miles/Megatron/SGLang
-> GPU 验收尚未完成，因此第 13.4、13.5 节和第 14 节仍未完成。
+> 状态（2026-07-27）：经第二轮方案对齐复核，计划内 Yeto 侧代码已收口，固定
+> Miles 源码已核实，并已通过 CPU、FakeMiles 和真实 Rust syncer 自动化验证；
+> 真实 Miles/Megatron/SGLang GPU 验收尚未完成，因此第 13.4、13.5 节和第 14 节
+> 仍未完成，不能据此宣称 RL v0 已完成或可用于生产。
 >
 > 固定依赖：`https://github.com/radixark/miles` @
 > `dfc66ff38752bfa2c5d325e0037ebc4b537c06de`。
@@ -243,8 +244,13 @@ wire dtype: f32
 
 模型边界采用 fail-closed：
 
+- 只接受 Transformers 精确的 `LlamaConfig/LlamaForCausalLM`、
+  `Qwen2Config/Qwen2ForCausalLM`、`Qwen3Config/Qwen3ForCausalLM` 配对；
+  `architectures` 必须精确声明对应 causal-LM class，remote-code 自定义 subclass
+  即使伪装相同 `model_type` 也拒绝；
 - Llama、Qwen2、Qwen3 都固定使用 SwiGLU、RMSNorm 和 dense decoder；Qwen2
-  显式映射 QKV bias，Qwen3 显式映射 QK layernorm；
+  显式映射 QKV bias，Qwen3 显式映射 QK layernorm；构造 meta model 后还要核验
+  实际 model、RMSNorm 和 gated dense MLP class；
 - `rope_theta` 必须是正整数；同时兼容 Transformers 5 的 `rope_parameters` 和
   旧版 `rope_scaling` 字段；
 - 除默认 RoPE 外，只接受标准 Llama 3 语义：正 `factor`、
@@ -459,6 +465,12 @@ strict 模式不能沿用“900 秒后清空 pushes 并换 membership/attempt”
 - 可选 `rl_round_timeout_s` 是整轮失败上限，默认 `0` 表示不设置算法层上限；
   达到上限时让 run 失败，而不是用 partial quorum merge。
 
+协议违例或显式 RL round/finalization deadline 到期属于 run 级永久失败。syncer
+先原子写入与 `run_manifest_sha256` 绑定的相邻 `.fatal` marker，再发送
+`MSG_ERROR` 并退出；launcher 在重启 syncer 前检查该 marker 并终止固定 roster。
+进程被杀、节点丢失或 checkpoint 写入失败不会生成 fatal marker，仍按最后一个
+authoritative checkpoint 恢复，因而不会把正常 crash recovery 错判为协议失败。
+
 同样的规则适用于终态 ACK：不能使用普通模式的 900 秒 quorum timeout 缩小或
 放弃 final roster；只能等待恢复，或由 RL run 的整体失败上限终止。
 
@@ -503,8 +515,9 @@ SHUTDOWN`。
 resume 时若 checkpoint 已到配置的最终 version、但 final marker 不存在，只能
 重做 final cut/ACK，不能再启动训练 round；若匹配的 marker 已存在，则 run 已
 完成。syncer 不再推进 version，也不重写 checkpoint/marker；它只可向重新连接的
-bridge 幂等重放同一 final cut，重新收取 ACK 并发送 SHUTDOWN，随后由 launcher
-清理可能残留的 island 进程。
+bridge 幂等重放同一 final cut，重新收取该残留连接的 ACK 并发送 SHUTDOWN，不能
+重新等待历史固定 roster 全部同时在线；launcher 直接以绑定本次 manifest 的 final
+marker 为完成事实，停止可能仍未退出的 island 进程。
 
 ### 6.7 RL checkpoint envelope
 
@@ -619,6 +632,10 @@ boundary 还必须控制 rollout admission、任务 drain/cancel 和原有 train
 直接使用 Megatron-Bridge conversion task 和 FP32 optimizer master；每次全局
 apply 都重建 optimizer/scheduler，再同步 compute copy 和 SGLang。该适配层只对
 固定 commit 生效，不在 Miles checkout 中打补丁，也不对未知上游版本做兼容猜测。
+固定的 `yeto.rl.miles.generate_rollout` 包装 Miles 默认 rollout function，在 Miles
+递归展平 train data 之前强校验恰好 `G` 个 group、每组恰好 `K` 个
+`COMPLETED/TRUNCATED` 终态 trajectory；custom generator 返回嵌套的多 sample
+leaf 会直接失败，不能靠展平后的总数通过合同。
 
 ### 7.3 Policy version 规则
 
@@ -724,7 +741,8 @@ local model 继续训练。
 - TP=PP=EP=1，所有 island 拓扑一致；
 - model、dataset、Miles、image、reward source 和可选 generate source 已固定
   revision/hash；
-- reward callable 在固定容器中可导入；
+- reward callable 在 controller preflight 环境中可导入且为 callable；learner 在
+  固定 image 内、校验 source hash 后再次导入，任一阶段失败都在训练前终止；
 - strict sync 派生配置与第 6.1 节完全一致；
 - authoritative checkpoint 路径可用；
 - 不存在与 strict 值冲突的通用 sync flag。
@@ -788,6 +806,8 @@ bridge 必须完整实现现有终态流程：
 的 ACK；缺失成员意味着 run 未正常完成。
 bridge 的 final wait 使用 RL run 的整体 deadline；不能让普通
 `SyncerClient.finalization_timeout` 先把一个仍可恢复的 strict run 结束。
+`--rl-round-timeout-s=0` 映射为无穷 deadline，而不是任意大的有限秒数；普通 SFT
+仍保留原有 900 秒默认值。
 
 ### 10.3 专用 RL exporter
 
@@ -868,9 +888,9 @@ ACK 承担实际 apply 的协议证明。
 
 | 组件 | 最小改动 |
 | --- | --- |
-| Rust syncer | 增加 `rl-strict-avg` 模式；固定 logical roster；严格 base/weight/duplicate 校验；长 round 重发；按 learner ID 聚合；commit-before-broadcast；RL checkpoint envelope |
+| Rust syncer | 增加 `rl-strict-avg` 模式；固定 logical roster；严格 base/weight/duplicate 校验；长 round 重发；按 learner ID 聚合；commit-before-broadcast；RL checkpoint/final/fatal markers |
 | Yeto RL core | canonical LoRA/PEFT mapping、显式 AVG layout、policy hash、result cache、`SyncerClient` bridge、终态处理 |
-| CLI/launcher | `training-mode=rl`、resolved manifest、strict 参数派生、Miles task、禁止 fleet shrink |
+| CLI/launcher | `training-mode=rl`、resolved manifest、strict 参数派生、Miles task、禁止 fleet shrink、按 final/fatal marker 收口 run |
 | 固定 Miles 窄适配层 | admission/drain、禁止 local publish、canonical export/apply、完整 optimizer reset、rollout identity、SGLang apply confirmation |
 | RL exporter | strict checkpoint 到标准 PEFT LoRA 的名称/shape/hash 强校验导出 |
 
@@ -883,7 +903,7 @@ ACK 承担实际 apply 的协议证明。
 
 以下顺序只覆盖 v0 的依赖关系。
 
-本分支当前自动化快照：Python `737 passed, 4 skipped`；Rust `60 passed`；
+本分支当前自动化快照：Python `744 passed, 4 skipped`；Rust `61 passed`；
 `python -m compileall -q yeto`、`cargo fmt --check` 和 `git diff --check` 通过。
 这些结果不包含真实 GPU 验收。
 
@@ -897,7 +917,9 @@ ACK 承担实际 apply 的协议证明。
 - canonical name/order/shape/fingerprint/policy hash 稳定；
 - PEFT↔canonical round trip；
 - 两个 tiny local states 的手工等权 oracle；
-- strict CLI 对每个冲突参数 fail closed。
+- strict CLI 对每个冲突参数（包括 `merge_alpha`）fail closed；
+- 精确 Transformers config/model/architecture 白名单拒绝 remote-code subclass
+  伪装，并核验 RMSNorm/gated dense MLP 结构。
 
 退出条件：给定相同 canonical tensors，所有进程生成完全相同 layout/policy
 identity；给定两个本地 state，计算结果符合第 3.3 节。
@@ -907,7 +929,8 @@ identity；给定两个本地 state，计算结果符合第 3.3 节。
 状态：**代码已实现，关键路径已有自动化覆盖；完整 crash-injection 矩阵尚未全部
 执行**。现有覆盖包括 strict roster/permit/counter/duplicate 规则、确定性聚合、
 checkpoint/marker identity、fatal `MSG_ERROR`、两个 FakeMiles island 的真实 Rust
-进程闭环，以及 final marker 后重启重放。
+进程闭环、run-bound fatal marker 阻止恢复继续推进，以及 final marker 后只有一个
+残留 learner 重连时的终态重放与 launcher 清理。
 
 使用真实 Rust syncer 和 raw/Fake learner 验证：
 
@@ -931,6 +954,10 @@ checkpoint/marker identity、fatal `MSG_ERROR`、两个 FakeMiles island 的真�
 Rust syncer 连续执行两轮，验证手工 f32 平均、final apply/ACK、authoritative
 checkpoint、最终 marker、重启重放和 island JSONL 观测字段。其余逐故障点注入与
 第 13.5 节一起保留为端到端验收，不据此宣称真实 Miles 可用。
+
+固定 Miles rollout wrapper 已在上游递归展平前验证 `G×K` 的 group 边界、终态和
+单 trajectory leaf，避免 custom generator 通过相同展平总数掩盖错误 group；
+`U` 继续由 Megatron optimizer step counter 在训练后强校验。
 
 测试必须使用真实 Rust syncer，不能只用 FakeSyncer，否则会掩盖 membership、
 timeout 和 checkpoint ordering 问题。验证：

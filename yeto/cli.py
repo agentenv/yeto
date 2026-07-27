@@ -429,6 +429,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--merge-alpha",
         type=float,
         default=0.5,
+        action=_StoreExplicit,
         help="local weight when a learner applies a broadcast fragment "
         "(0 = overwrite, 0.5 = keep half the in-flight local progress)",
     )

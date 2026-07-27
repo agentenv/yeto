@@ -9,6 +9,7 @@ import torch
 
 from yeto.rl.core import canonical_state, tensors_from_flat
 from yeto.rl.export import (
+    _transformers_model_family,
     derive_peft_lora_specs,
     export_rl_checkpoint,
     specs_manifest,
@@ -27,7 +28,7 @@ from yeto.rl.manifest import (
     path_tree_sha256,
     validate_manifest,
 )
-from yeto.rl.miles import verify_miles_revision
+from yeto.rl.miles import _validate_rollout_groups, verify_miles_revision
 
 
 def manifest_args(canonical_layout, *, model="org/model", data="org/data"):
@@ -337,6 +338,7 @@ def test_miles_argv_and_resolved_contract_are_strict(tmp_path):
         rollout_max_prompt_len=16,
         rollout_max_response_len=16,
         rollout_temperature=1.0,
+        rollout_function_path="yeto.rl.miles.generate_rollout",
         custom_rm_path="yeto.rl.reward.miles_reward",
         custom_generate_function_path="package.generate.trajectory",
         input_key="messages",
@@ -371,6 +373,41 @@ def test_miles_argv_and_resolved_contract_are_strict(tmp_path):
         _validate_miles_args(resolved, requested)
 
 
+def test_rollout_groups_are_validated_before_miles_flattens_them():
+    def complete():
+        return SimpleNamespace(status=SimpleNamespace(value="completed"))
+
+    _validate_rollout_groups([[complete(), complete()], [complete(), complete()]], 2, 2)
+
+    with pytest.raises(RuntimeError, match="group 0 contains 1 trajectories"):
+        _validate_rollout_groups([[complete()], [complete(), complete()]], 2, 2)
+    with pytest.raises(RuntimeError, match="exactly one complete trajectory"):
+        _validate_rollout_groups([[[complete()], complete()], [complete(), complete()]], 2, 2)
+    pending = SimpleNamespace(status=SimpleNamespace(value="pending"))
+    with pytest.raises(RuntimeError, match="complete trajectory"):
+        _validate_rollout_groups([[pending, complete()], [complete(), complete()]], 2, 2)
+
+
+def test_supported_model_family_rejects_spoofed_or_mismatched_architecture():
+    from transformers import LlamaConfig
+
+    config = LlamaConfig()
+    config.architectures = ["LlamaForCausalLM"]
+    assert _transformers_model_family(config)[0].__name__ == "LlamaForCausalLM"
+
+    class SpoofedLlamaConfig(LlamaConfig):
+        pass
+
+    spoofed = SpoofedLlamaConfig()
+    spoofed.architectures = ["LlamaForCausalLM"]
+    with pytest.raises(ValueError, match="exact supported Transformers config"):
+        _transformers_model_family(spoofed)
+
+    config.architectures = ["CustomForCausalLM"]
+    with pytest.raises(ValueError, match="exact causal-LM class"):
+        _transformers_model_family(config)
+
+
 def test_tiny_llama_checkpoint_exports_as_standard_peft_adapter(tmp_path):
     from peft import PeftModel, get_peft_model_state_dict
     from transformers import AutoModelForCausalLM, LlamaConfig
@@ -385,6 +422,7 @@ def test_tiny_llama_checkpoint_exports_as_standard_peft_adapter(tmp_path):
         vocab_size=32,
         max_position_embeddings=32,
     )
+    config.architectures = ["LlamaForCausalLM"]
     config.save_pretrained(model_dir)
     specs = derive_peft_lora_specs(
         str(model_dir),

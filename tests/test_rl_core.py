@@ -1,10 +1,12 @@
 import hashlib
+import math
 
 import pytest
 import torch
 
 from yeto.fragments import MERGE_AVG
 from yeto.rl.cache import ResultCache
+from yeto.rl.bridge import BridgeConfig, StrictRlBridge
 from yeto.rl.core import (
     PolicyIdentity,
     build_avg_layout,
@@ -113,3 +115,23 @@ def test_local_result_cache_is_identity_bound_and_corruption_is_not_reused(tmp_p
         cache.load(base_identity=state.identity, target_step=5, expected_numel=14)
         is None
     )
+
+
+def test_zero_rl_round_timeout_is_unbounded(tmp_path):
+    runtime = type("Runtime", (), {"initialize": lambda self: lora_tensors()})()
+    bridge = StrictRlBridge(
+        runtime,
+        BridgeConfig(
+            ("127.0.0.1", 1),
+            0,
+            "ab" * 32,
+            groups_per_round=1,
+            samples_per_group=1,
+            local_optimizer_steps=1,
+            cache_dir=tmp_path / "cache",
+            run_id="timeout-test",
+            event_tape=tmp_path / "events.jsonl",
+            round_timeout_s=0,
+        ),
+    )
+    assert math.isinf(bridge.client.finalization_timeout)

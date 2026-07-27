@@ -7,6 +7,7 @@
 //! delays pulling the next.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,8 +22,8 @@ use tracing::{info, warn};
 
 use crate::protocol::*;
 use crate::state::{
-    read_rl_final_marker, remove_final_marker, write_final_marker, write_rl_final_marker,
-    GlobalState, Layout, RlCheckpointIdentity,
+    read_rl_fatal_marker, read_rl_final_marker, remove_final_marker, write_final_marker,
+    write_rl_fatal_marker, write_rl_final_marker, GlobalState, Layout, RlCheckpointIdentity,
 };
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
@@ -360,6 +361,27 @@ impl StepRates {
 type Registry = Arc<Mutex<RegistryState>>;
 type Session = Arc<Mutex<Option<SessionSpec>>>;
 
+#[derive(Debug)]
+struct StrictFatal(String);
+
+impl fmt::Display for StrictFatal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StrictFatal {}
+
+fn strict_fatal(message: impl Into<String>) -> anyhow::Error {
+    StrictFatal(message.into()).into()
+}
+
+macro_rules! strict_bail {
+    ($($arg:tt)*) => {
+        return Err(strict_fatal(format!($($arg)*)))
+    };
+}
+
 pub async fn run(cfg: Config) -> Result<()> {
     if cfg.learners == 0 {
         bail!("--learners must be positive");
@@ -386,11 +408,16 @@ pub async fn run(cfg: Config) -> Result<()> {
         {
             bail!("rl-strict-avg requires quorum=learners, pipeline=1, unthrottled sync, no correction, outer-lr=1, outer-momentum=0, checkpoint-every=1, and a marked checkpoint");
         }
-        parse_sha256(
+        let manifest_sha256 = parse_sha256(
             cfg.run_manifest_sha256
                 .as_deref()
                 .context("rl-strict-avg requires --run-manifest-sha256")?,
         )?;
+        if let Some(message) =
+            read_rl_fatal_marker(cfg.checkpoint_path.as_ref().unwrap(), &manifest_sha256)?
+        {
+            bail!("rl-strict-avg run is permanently failed: {message}");
+        }
     } else if cfg.run_manifest_sha256.is_some() || cfg.rl_round_timeout_s != 0 {
         bail!("RL manifest and round timeout flags require --rl-strict-avg");
     }
@@ -417,6 +444,12 @@ pub async fn run(cfg: Config) -> Result<()> {
     let accept_session = session.clone();
     let expected_learners = cfg.learners;
     let rl_strict_avg = cfg.rl_strict_avg;
+    let strict_checkpoint = cfg.checkpoint_path.clone();
+    let strict_manifest = cfg
+        .run_manifest_sha256
+        .as_deref()
+        .map(parse_sha256)
+        .transpose()?;
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -449,6 +482,15 @@ pub async fn run(cfg: Config) -> Result<()> {
         if let Err(error) = &result {
             let mut message = format!("rl-strict-avg failed: {error:#}").into_bytes();
             message.truncate(64 * 1024);
+            if error.downcast_ref::<StrictFatal>().is_some() {
+                if let Err(marker_error) = write_rl_fatal_marker(
+                    strict_checkpoint.as_ref().unwrap(),
+                    strict_manifest.as_ref().unwrap(),
+                    &String::from_utf8_lossy(&message),
+                ) {
+                    warn!(%marker_error, "failed to persist strict fatal marker");
+                }
+            }
             let payload = bytes::Bytes::from(message);
             for group in current_groups(&registry) {
                 let _ = group.send_small(MSG_ERROR, payload.clone()).await;
@@ -1125,7 +1167,25 @@ async fn scheduler(
         if let Some(st) = &state {
             let budget_ready =
                 budget_reports.is_empty() || budget_reports.len() == cfg.learners as usize;
-            if st.all_initialized() && connected >= cfg.learners && budget_ready {
+            let already_finalized = if cfg.rl_strict_avg && st.all_initialized() {
+                let identity = rl_identity.as_ref().unwrap();
+                let policy_sha256 = st
+                    .rl_policy_sha256(&identity.layout_fingerprint)
+                    .map_err(|error| strict_fatal(format!("invalid strict policy: {error:#}")))?;
+                read_rl_final_marker(
+                    cfg.checkpoint_path.as_ref().unwrap(),
+                    identity,
+                    st.global_step,
+                    &policy_sha256,
+                )
+                .map_err(|error| strict_fatal(format!("invalid RL final marker: {error:#}")))?
+            } else {
+                false
+            };
+            if st.all_initialized()
+                && (connected >= cfg.learners || already_finalized)
+                && budget_ready
+            {
                 break;
             }
         }
@@ -1147,7 +1207,11 @@ async fn scheduler(
                     if cfg.resume {
                         if let Some(path) = cfg.checkpoint_path.as_ref().filter(|p| p.exists()) {
                             if let Some(identity) = &rl_identity {
-                                st.load_rl_checkpoint(path, identity)?;
+                                st.load_rl_checkpoint(path, identity).map_err(|error| {
+                                    strict_fatal(format!(
+                                        "cannot resume strict checkpoint: {error:#}"
+                                    ))
+                                })?;
                             } else {
                                 st.load_checkpoint(path)?;
                             }
@@ -1163,7 +1227,7 @@ async fn scheduler(
                 values,
             } => {
                 if cfg.rl_strict_avg && member.learner_id != 0 {
-                    bail!("rl-strict-avg accepts INIT_PARAMS only from learner 0");
+                    strict_bail!("rl-strict-avg accepts INIT_PARAMS only from learner 0");
                 }
                 if !is_current_member(&registry, member) {
                     warn!(
@@ -1174,7 +1238,14 @@ async fn scheduler(
                     continue;
                 }
                 let st = state.as_mut().context("INIT before HELLO")?;
-                st.init_fragment(fragment_id as usize, values)?;
+                if let Err(error) = st.init_fragment(fragment_id as usize, values) {
+                    if cfg.rl_strict_avg {
+                        return Err(strict_fatal(format!(
+                            "invalid strict initialization: {error:#}"
+                        )));
+                    }
+                    return Err(error);
+                }
                 if st.all_initialized() {
                     info!("global parameters initialized");
                 }
@@ -1189,6 +1260,9 @@ async fn scheduler(
                 member,
                 local_steps,
             } => {
+                if cfg.rl_strict_avg {
+                    strict_bail!("BUDGET_DONE is invalid in rl-strict-avg mode");
+                }
                 let target = cfg
                     .learner_budget_steps
                     .context("received BUDGET_DONE outside learner-budget mode")?;
@@ -1533,7 +1607,7 @@ fn route_strict_push(
         || push.c_steps != 1
         || push.c_tokens != 1
     {
-        bail!(
+        strict_bail!(
             "strict push from learner {} does not match permit step={} base={} counters=(1,1)",
             member.learner_id,
             round.step,
@@ -1545,14 +1619,14 @@ fn route_strict_push(
         .get(&member.learner_id)
         .is_some_and(|members| members.contains(&member))
     {
-        bail!(
+        strict_bail!(
             "strict push from learner {} generation {} has no permit",
             member.learner_id,
             member.generation
         );
     }
     if push.outer_gradient.iter().any(|value| !value.is_finite()) {
-        bail!(
+        strict_bail!(
             "strict push from learner {} is non-finite",
             member.learner_id
         );
@@ -1561,7 +1635,7 @@ fn route_strict_push(
         if previous.push.payload_digest == push.payload_digest {
             return Ok(StrictPushDisposition::Duplicate);
         }
-        bail!(
+        strict_bail!(
             "conflicting duplicate strict push from learner {}",
             member.learner_id
         );
@@ -1613,28 +1687,23 @@ async fn strict_scheduler(
         || st.versions[0] != st.global_step
         || st.global_step > cfg.total_steps
     {
-        bail!("invalid state for rl-strict-avg");
+        strict_bail!("invalid state for rl-strict-avg");
     }
 
-    let mut policy_sha256 = st.rl_policy_sha256(&identity.layout_fingerprint)?;
-    if read_rl_final_marker(checkpoint, &identity, st.global_step, &policy_sha256)? {
+    let mut policy_sha256 = st
+        .rl_policy_sha256(&identity.layout_fingerprint)
+        .map_err(|error| strict_fatal(format!("invalid strict policy: {error:#}")))?;
+    if read_rl_final_marker(checkpoint, &identity, st.global_step, &policy_sha256)
+        .map_err(|error| strict_fatal(format!("invalid RL final marker: {error:#}")))?
+    {
         if st.global_step != cfg.total_steps {
-            bail!("RL final marker exists before the configured terminal step");
+            strict_bail!("RL final marker exists before the configured terminal step");
         }
         info!(
             step = st.global_step,
             "strict run was already finalized; replaying the terminal cut"
         );
-        return finish_strict_run(
-            cfg,
-            &st,
-            &mut events,
-            &registry,
-            &identity,
-            &policy_sha256,
-            false,
-        )
-        .await;
+        return replay_finalized_strict_run(cfg, &st, &mut events, &registry).await;
     }
     remove_final_marker(checkpoint)?;
 
@@ -1675,7 +1744,7 @@ async fn strict_scheduler(
                         let missing: Vec<u32> = (0..cfg.learners)
                             .filter(|id| !round.pushes.contains_key(id))
                             .collect();
-                        bail!(
+                        strict_bail!(
                             "strict round {step} timed out after {}s waiting for {:?}",
                             cfg.rl_round_timeout_s,
                             missing
@@ -1732,7 +1801,7 @@ async fn strict_scheduler(
                         "premature final acknowledgement dropped"
                     ),
                     Event::BudgetDone { .. } => {
-                        bail!("BUDGET_DONE is invalid in rl-strict-avg mode")
+                        strict_bail!("BUDGET_DONE is invalid in rl-strict-avg mode");
                     }
                 },
             }
@@ -1744,7 +1813,9 @@ async fn strict_scheduler(
             .map(|accepted| accepted.push.outer_gradient.as_slice())
             .collect();
         let weights = vec![1.0; gradients.len()];
-        let gnorm = st.merge_and_step(0, &gradients, &weights)?;
+        let gnorm = st
+            .merge_and_step(0, &gradients, &weights)
+            .map_err(|error| strict_fatal(format!("strict average failed: {error:#}")))?;
         st.global_step = step;
         st.versions[0] = step;
         for accepted in round.pushes.values() {
@@ -1801,20 +1872,36 @@ async fn strict_scheduler(
         }
     }
 
-    finish_strict_run(
-        cfg,
-        &st,
-        &mut events,
-        &registry,
-        &identity,
-        &policy_sha256,
-        true,
-    )
-    .await
+    finish_strict_run(cfg, &st, &mut events, &registry, &identity, &policy_sha256).await
 }
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+async fn replay_finalized_strict_run(
+    cfg: &Config,
+    st: &GlobalState,
+    events: &mut mpsc::Receiver<Event>,
+    registry: &Registry,
+) -> Result<()> {
+    let expected = current_groups(registry)
+        .into_iter()
+        .map(|group| group.member.learner_id)
+        .collect::<HashSet<_>>();
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let timeout = (cfg.rl_round_timeout_s > 0).then_some(cfg.rl_round_timeout_s);
+    let finalized = finalize_learners(st, events, registry, &expected, timeout).await?;
+    shutdown_groups(finalized).await;
+    info!(
+        step = st.global_step,
+        learners = expected.len(),
+        "replayed finalized strict run to residual learners"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    Ok(())
 }
 
 async fn finish_strict_run(
@@ -1824,26 +1911,25 @@ async fn finish_strict_run(
     registry: &Registry,
     identity: &RlCheckpointIdentity,
     policy_sha256: &[u8; 32],
-    write_marker: bool,
 ) -> Result<()> {
     if st.global_step != cfg.total_steps
         || st.rl_policy_sha256(&identity.layout_fingerprint)? != *policy_sha256
     {
-        bail!("strict terminal policy does not match its committed checkpoint");
+        strict_bail!("strict terminal policy does not match its committed checkpoint");
     }
     let expected: HashSet<u32> = (0..cfg.learners).collect();
     let timeout = (cfg.rl_round_timeout_s > 0).then_some(cfg.rl_round_timeout_s);
-    let finalized = finalize_learners(st, events, registry, &expected, timeout).await?;
+    let finalized = finalize_learners(st, events, registry, &expected, timeout)
+        .await
+        .map_err(|error| strict_fatal(format!("strict finalization failed: {error:#}")))?;
 
-    if write_marker {
-        // This marker means every fixed-roster member applied and verified the cut.
-        write_rl_final_marker(
-            cfg.checkpoint_path.as_ref().unwrap(),
-            identity,
-            st.global_step,
-            policy_sha256,
-        )?;
-    }
+    // This marker means every fixed-roster member applied and verified the cut.
+    write_rl_final_marker(
+        cfg.checkpoint_path.as_ref().unwrap(),
+        identity,
+        st.global_step,
+        policy_sha256,
+    )?;
     if let Some(path) = &cfg.final_state {
         dump_state(st, path)?;
         info!(path = %path.display(), "strict final global state written");

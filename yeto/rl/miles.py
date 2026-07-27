@@ -270,6 +270,42 @@ def _identity_from_token(token: object) -> PolicyIdentity:
     return PolicyIdentity(int(version), digest)
 
 
+def _validate_rollout_groups(data: object, groups: int, samples_per_group: int) -> None:
+    if not isinstance(data, list) or len(data) != groups:
+        raise RuntimeError(
+            f"Miles produced {len(data) if isinstance(data, list) else 0} groups, "
+            f"expected {groups}"
+        )
+    for index, group in enumerate(data):
+        if not isinstance(group, list) or len(group) != samples_per_group:
+            raise RuntimeError(
+                f"Miles group {index} contains "
+                f"{len(group) if isinstance(group, list) else 0} trajectories, "
+                f"expected {samples_per_group}"
+            )
+        for sample in group:
+            status = getattr(getattr(sample, "status", None), "value", None)
+            if isinstance(sample, list) or status not in {"completed", "truncated"}:
+                raise RuntimeError(
+                    "Miles groups must contain exactly one complete trajectory per sample"
+                )
+
+
+def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = False):
+    """Pinned Miles rollout with Yeto's pre-flatten G/K contract check."""
+
+    from miles.rollout.sglang_rollout import generate_rollout as miles_generate_rollout
+
+    output = miles_generate_rollout(args, rollout_id, data_source, evaluation=evaluation)
+    if not evaluation:
+        _validate_rollout_groups(
+            output.samples,
+            args.rollout_batch_size,
+            args.n_samples_per_prompt,
+        )
+    return output
+
+
 class MilesIslandRuntime:
     """Synchronous ``IslandRuntime`` wrapper over pinned Miles async APIs."""
 

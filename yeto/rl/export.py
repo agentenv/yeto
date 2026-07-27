@@ -79,6 +79,49 @@ def _rope_scaling_factor(config) -> float | None:
     return float(factor)
 
 
+def _transformers_model_family(config):
+    from transformers import (
+        LlamaConfig,
+        LlamaForCausalLM,
+        Qwen2Config,
+        Qwen2ForCausalLM,
+        Qwen3Config,
+        Qwen3ForCausalLM,
+    )
+    from transformers.models.llama.modeling_llama import LlamaMLP, LlamaRMSNorm
+    from transformers.models.qwen2.modeling_qwen2 import Qwen2MLP, Qwen2RMSNorm
+    from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP, Qwen3RMSNorm
+
+    families = {
+        LlamaConfig: (LlamaForCausalLM, LlamaRMSNorm, LlamaMLP),
+        Qwen2Config: (Qwen2ForCausalLM, Qwen2RMSNorm, Qwen2MLP),
+        Qwen3Config: (Qwen3ForCausalLM, Qwen3RMSNorm, Qwen3MLP),
+    }
+    family = families.get(type(config))
+    if family is None:
+        raise ValueError("RL v0 requires an exact supported Transformers config class")
+    if getattr(config, "architectures", None) != [family[0].__name__]:
+        raise ValueError("RL v0 model architectures must name the exact causal-LM class")
+    return family
+
+
+def _validate_transformers_model(model, family) -> None:
+    model_class, norm_class, mlp_class = family
+    if type(model) is not model_class:
+        raise ValueError("RL v0 requires the exact supported Transformers model class")
+    body = getattr(model, "model", None)
+    layers = list(getattr(body, "layers", ()))
+    if not layers or type(getattr(body, "norm", None)) is not norm_class:
+        raise ValueError("RL v0 requires the supported RMSNorm decoder architecture")
+    if any(
+        type(getattr(layer, "input_layernorm", None)) is not norm_class
+        or type(getattr(layer, "post_attention_layernorm", None)) is not norm_class
+        or type(getattr(layer, "mlp", None)) is not mlp_class
+        for layer in layers
+    ):
+        raise ValueError("RL v0 requires the supported RMSNorm gated dense MLP")
+
+
 def _reject_unsupported_config(config) -> None:
     if hasattr(config, "text_config"):
         raise ValueError("RL v0 does not support multimodal base models")
@@ -96,8 +139,15 @@ def _reject_unsupported_config(config) -> None:
             raise ValueError("RL v0 does not support MoE base models")
     if getattr(config, "quantization_config", None):
         raise ValueError("RL v0 does not support quantized base models")
-    if "silu" not in str(getattr(text_config, "hidden_act", "")).lower():
+    if getattr(text_config, "hidden_act", None) != "silu":
         raise ValueError("RL v0 requires a SwiGLU-compatible base model")
+    norm_epsilon = getattr(text_config, "rms_norm_eps", None)
+    if (
+        type(norm_epsilon) not in {int, float}
+        or not math.isfinite(norm_epsilon)
+        or norm_epsilon <= 0
+    ):
+        raise ValueError("RL v0 requires RMSNorm with a positive epsilon")
     if getattr(text_config, "mlp_bias", False):
         raise ValueError("RL v0 does not support MLP bias parameters")
     if text_config.model_type != "qwen2" and getattr(
@@ -132,12 +182,14 @@ def derive_peft_lora_specs(
         revision=revision,
         trust_remote_code=trust_remote_code,
     )
+    family = _transformers_model_family(config)
     _reject_unsupported_config(config)
     with init_empty_weights():
         base = AutoModelForCausalLM.from_config(
             config,
             trust_remote_code=trust_remote_code,
         )
+        _validate_transformers_model(base, family)
         adapter = get_peft_model(
             base,
             LoraConfig(

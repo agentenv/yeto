@@ -104,7 +104,7 @@ class StrictRlBridge:
         self.specs = initial.specs
         self.layout = build_avg_layout(self.specs)
         self.initial = initial
-        timeout = config.round_timeout_s if config.round_timeout_s > 0 else 365 * 24 * 3600
+        timeout = config.round_timeout_s if config.round_timeout_s > 0 else math.inf
         self.client = SyncerClient(
             config.syncer_addr,
             config.learner_id,

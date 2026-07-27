@@ -328,6 +328,7 @@ const RL_CKPT_MAGIC: u32 = 0xD170_52A1;
 const RL_CKPT_SCHEMA: u16 = 1;
 const FINAL_MARKER_MAGIC: &str = "YETO_FINAL_V1";
 const RL_FINAL_MARKER_MAGIC: &str = "YETO_RL_FINAL_V1";
+const RL_FATAL_MARKER_MAGIC: &str = "YETO_RL_FATAL_V1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RlCheckpointIdentity {
@@ -340,6 +341,56 @@ pub fn final_marker_path(path: &std::path::Path) -> std::path::PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(".final");
     value.into()
+}
+
+pub fn rl_fatal_marker_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(".fatal");
+    value.into()
+}
+
+pub fn write_rl_fatal_marker(
+    path: &std::path::Path,
+    run_manifest_sha256: &[u8; 32],
+    message: &str,
+) -> Result<()> {
+    let marker = rl_fatal_marker_path(path);
+    let mut tmp_value = marker.as_os_str().to_os_string();
+    tmp_value.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp_value);
+    {
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        write!(
+            file,
+            "{RL_FATAL_MARKER_MAGIC}\nrun_manifest_sha256={}\n{message}\n",
+            hex(run_manifest_sha256)
+        )?;
+        file.flush()?;
+        file.get_ref().sync_all()?;
+    }
+    std::fs::rename(&tmp, &marker)?;
+    sync_parent(&marker)?;
+    Ok(())
+}
+
+pub fn read_rl_fatal_marker(
+    path: &std::path::Path,
+    run_manifest_sha256: &[u8; 32],
+) -> Result<Option<String>> {
+    let marker = rl_fatal_marker_path(path);
+    let text = match std::fs::read_to_string(&marker) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", marker.display())),
+    };
+    let prefix = format!(
+        "{RL_FATAL_MARKER_MAGIC}\nrun_manifest_sha256={}\n",
+        hex(run_manifest_sha256)
+    );
+    if !text.starts_with(&prefix) {
+        bail!("RL fatal marker identity does not match the configured run");
+    }
+    Ok(Some(text[prefix.len()..].trim_end().to_string()))
 }
 
 pub fn remove_final_marker(path: &std::path::Path) -> Result<()> {
@@ -877,6 +928,24 @@ mod tests {
         write_rl_final_marker(&checkpoint, &identity, 7, &policy).unwrap();
         assert!(read_rl_final_marker(&checkpoint, &identity, 7, &policy).unwrap());
         assert!(read_rl_final_marker(&checkpoint, &identity, 8, &policy).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rl_fatal_marker_is_durable_and_bound_to_the_run_manifest() {
+        let dir = std::env::temp_dir().join(format!("yeto-rl-fatal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("state.ckpt");
+        let manifest = [0x44; 32];
+        write_rl_fatal_marker(&checkpoint, &manifest, "strict round timed out").unwrap();
+        assert_eq!(
+            read_rl_fatal_marker(&checkpoint, &manifest).unwrap(),
+            Some("strict round timed out".to_string())
+        );
+        assert!(read_rl_fatal_marker(&checkpoint, &[0x45; 32]).is_err());
+        assert!(!rl_fatal_marker_path(&checkpoint)
+            .with_extension("fatal.tmp")
+            .exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

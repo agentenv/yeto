@@ -10,6 +10,8 @@ from yeto import cli
 from yeto.gpu_spec import parse_gpu_spec
 from yeto.launcher import (
     _prepare_rl_launch_args,
+    _rl_fatal_marker_reason,
+    _rl_final_marker_matches,
     _stage_rl_checkpoint,
     make_miles_island_task,
     syncer_command,
@@ -92,6 +94,7 @@ def test_rl_launch_preparation_keeps_island_roster_and_reuses_manifest(
     assert manifest["generation"]["custom_generate"] is None
     assert args.quorum == 2
     assert args.fragments == args.pipeline == 1
+    assert args.merge_alpha == 0.0
     assert args.wire_dtype == "f32"
 
     _prepare_rl_launch_args(args)
@@ -127,14 +130,33 @@ def test_rl_launch_rejects_an_explicit_conflicting_sync_flag():
     with pytest.raises(ValueError, match="outer-lr"):
         _prepare_rl_launch_args(args)
 
+    args = rl_args()
+    args._explicit_launch_flags = ["merge_alpha"]
+    args.merge_alpha = 0.5
+    with pytest.raises(ValueError, match="merge-alpha"):
+        _prepare_rl_launch_args(args)
+
+
+def test_rl_launch_imports_the_reward_callable_before_provisioning():
+    args = rl_args()
+    args.reward_function = "yeto.rl.reward:_FUNCTION_ENV"
+    with pytest.raises(TypeError, match="not callable"):
+        _prepare_rl_launch_args(args)
+
 
 def test_cli_tracks_only_explicit_strict_flags():
     parser = cli.build_parser()
     base = ["launch", "--model", "org/model", "--data", "org/data"]
     defaults = parser.parse_args(base)
-    explicit = parser.parse_args(base + ["--outer-lr", "1", "--wire-dtype", "f32"])
+    explicit = parser.parse_args(
+        base + ["--outer-lr", "1", "--merge-alpha", "0", "--wire-dtype", "f32"]
+    )
     assert not hasattr(defaults, "_explicit_launch_flags")
-    assert set(explicit._explicit_launch_flags) == {"outer_lr", "wire_dtype"}
+    assert set(explicit._explicit_launch_flags) == {
+        "merge_alpha",
+        "outer_lr",
+        "wire_dtype",
+    }
 
 
 def test_syncer_command_contains_the_atomic_strict_rl_configuration():
@@ -215,3 +237,20 @@ def test_rl_checkpoint_staging_uses_the_authoritative_syncer_copy(tmp_path, monk
 
 def test_head_installs_only_the_dependencies_needed_by_the_rl_exporter():
     assert cli.HEAD_RL_EXPORT_PIP == "pip install -q peft accelerate safetensors"
+
+
+def test_launcher_terminal_markers_are_bound_to_the_rl_manifest():
+    manifest = "a" * 64
+    final = (
+        "YETO_RL_FINAL_V1\n"
+        "global_step=2\n"
+        "roster_size=2\n"
+        f"run_manifest_sha256={manifest}\n"
+        f"layout_fingerprint={'b' * 64}\n"
+        f"policy_sha256={'c' * 64}\n"
+    )
+    assert _rl_final_marker_matches(final, manifest)
+    assert not _rl_final_marker_matches(final, "d" * 64)
+    fatal = f"YETO_RL_FATAL_V1\nrun_manifest_sha256={manifest}\nround timed out\n"
+    assert _rl_fatal_marker_reason(fatal, manifest) == "round timed out"
+    assert "does not match" in _rl_fatal_marker_reason(fatal, "d" * 64)

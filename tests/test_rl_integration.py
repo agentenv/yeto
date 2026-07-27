@@ -251,7 +251,9 @@ def test_two_fake_miles_islands_match_manual_f32_average_with_real_syncer(tmp_pa
             manifest_sha,
             resume=True,
         )
-        resumed_runtimes = [FakeMilesRuntime(0), FakeMilesRuntime(1)]
+        # A final marker is the run-completion fact: replay must not wait for
+        # the full historical roster when only one residual learner reconnects.
+        resumed_runtimes = [FakeMilesRuntime(0)]
         resumed_threads = [
             BridgeThread(
                 StrictRlBridge(
@@ -347,6 +349,19 @@ def test_strict_scheduler_reports_a_fatal_contract_error_to_learners(tmp_path):
         output, _ = process.communicate(timeout=10)
         assert process.returncode != 0
         assert "does not match permit" in output
+        fatal_marker = tmp_path / "state.ckpt.fatal"
+        assert f"run_manifest_sha256={manifest_sha}\n" in fatal_marker.read_text()
+
+        resumed = start_syncer(
+            binary,
+            free_port(),
+            tmp_path / "state.ckpt",
+            manifest_sha,
+            resume=True,
+        )
+        resumed_output, _ = resumed.communicate(timeout=10)
+        assert resumed.returncode != 0
+        assert "permanently failed" in resumed_output
     finally:
         for client in clients:
             client.close()
