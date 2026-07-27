@@ -446,12 +446,7 @@ def main() -> int:
                 "verifier": contract["machine_inputs"]["token_verifier"],
             },
             "input_builder": contract["machine_inputs"]["input_builder"],
-            "model": {
-                "path": "/root/yeto-data/model",
-                "id": contract["common_protocol"]["model"],
-                "revision": contract["common_protocol"]["model_revision"],
-                "files": {},
-            },
+            "model": contract["machine_inputs"]["model"],
         },
         "reuse": contract["reuse_audit"],
         "cost_and_scope_rule": contract["cost_and_scope_rule"],
