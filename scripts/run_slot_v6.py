@@ -36,13 +36,13 @@ except ModuleNotFoundError:
     )
 
 
-CONTRACT_JSON_SHA256 = "a7ae6b3d40871a22abf1227c48f9628555968a4296b1223d3bf4e8fe8deb3482"
-CONTRACT_MD_SHA256 = "ed83df06dbf12ff8e4b3359526b7ebbe4d186211cc18cdc20e03649f430c06dc"
-ANALYZER_SHA256 = "8016e03cec5c8ff51171d35861b51553599218079fafa9c7af9798092f2110d6"
+CONTRACT_JSON_SHA256 = "5bd845c0909850a681fedbae816d71b57034b023e273ed9911865a205c1e44df"
+CONTRACT_MD_SHA256 = "66333e39e5ebed95954fbc9a6fb7197e797a6a73b4751a9e55d9ced35bafd283"
+ANALYZER_SHA256 = "ae97012af3e10b4f4f95fe12395ac131960d72d31c6f39856f6389c3032c0239"
 RESULT_LINK = Path("/root/yeto-results-v6")
 RESULT_TARGET = Path("/data/yeto-results-v6")
 MIN_FREE_BYTES = 1_000_000_000_000
-EXPECTED_CELLS = 900
+EXPECTED_CELLS = 540
 
 
 def command_value(command: list[str], flag: str) -> str | None:
@@ -181,7 +181,7 @@ def verify_preflight(manifest_path: Path, node_label: str, proof_path: Path) -> 
     if manifest.get("stage") != "V6_FACTORIAL" or len(
         manifest.get("cells", [])
     ) != EXPECTED_CELLS:
-        errors.append("manifest is not the complete 900-cell V6_FACTORIAL stage")
+        errors.append("manifest is not the complete 540-cell V6_FACTORIAL stage")
     if manifest.get("status") != "REGISTERED":
         errors.append("launch manifest status is not REGISTERED")
     sidecar = manifest_path.with_suffix(manifest_path.suffix + ".sha256")

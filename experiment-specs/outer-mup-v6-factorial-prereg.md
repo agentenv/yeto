@@ -1,12 +1,20 @@
 # Outer-muP v6 full-factorial preregistration
 
-Status: **prospective and amended/frozen before any v6 scientific process**. The machine-readable JSON is authoritative for every numeric eta, command coordinate, gate rule, and hash.
+Status: **prospective, re-scoped, and frozen before any v6 scientific process**. The machine-readable JSON is authoritative for every numeric eta, command coordinate, gate rule, and hash.
 
 ### Pre-outcome amendment disclosure
 
 The first registration commit, `fb78bf9295035ca3189d72f62092aac525467631`, fixed one log-T/log-S interaction family. Before the fleet gate opened, a referee/operator review noted that the available pre-v6 corrected-arm drift is approximately linear in `T`, not `log T`, and that no theory lane had been confirmed. At the start of this amendment there was no v6 result root on either node, no `run_slot_v6.py` process, no immutable v6 gate proof, no launch authority, and no v6 outcome.
 
 This amendment prospectively replaces only that single response family with the F1/F2/F3 training-only selection protocol below. It does **not** change any of the 900 run coordinates, eta centers or ladders, seeds, data, held-out cells, training cells, success band, pass rule, bootstrap count, retry rails, scheduling, storage, fleet gates, or 30-hour ceiling. The amended commit and new raw hashes supersede the first registration for launch provenance.
+
+### Pre-outcome three-seed re-scope
+
+After the F1/F2/F3 amendment was pushed at `2f1d2aeae30344f0aad823b606739893012d32f9`, but still before any v6 cell attempt, `run_slot_v6.py` process, immutable gate proof, launch authority, or scientific outcome existed, the operator reduced the training-seed set to `{601,607,613}` for the Tuesday-critical schedule. The only node-side v6 artifacts were preflight control-plane copies of the superseded 900-cell manifest and node proofs; they contain no outcome and are retained as provenance. Seeds 617 and 619 are removed from the scientific launch, changing the grid from 900 to 540 cells. The already frozen five-bundle input manifest remains a read-only superset; no command in this re-scoped launch references 617 or 619. Among the selected seeds, the no-wrap minimum is 26,696 complete 128-token blocks per learner versus 10,240 required.
+
+The mandatory prospective three-seed feasibility simulation is committed as `experiment-specs/outer-mup-v6-factorial-gatesim-3seed.json`, raw SHA-256 `7575006f18a94d464f797509d3e44f516a7b7e306193881c2f21b9f69916474f`. It generated 500 independent synthetic datasets for each exact candidate-family truth under the unchanged v3-measured noise transport and applied the full arm-specific F1/F2/F3 LOO pipeline. With the existing strict-interior rule and 9,500-of-10,000 threshold, `P_eval=1.000` for F1, F2, and F3 (500/500 each; Wilson 95% interval `[0.9924,1.0000]`); the minimum valid-refit counts were 9,610, 9,610, and 10,000. The requested one-rung near-bracket sensitivity also had `P_eval=1.000` and 10,000 valid refits in every replicate. Therefore no near-bracket or valid-refit-threshold relaxation is adopted: strict bracketing and 9,500 remain frozen. The CPU-only reproduction helper is `/private/tmp/gatesim-g6-3seed-h200.py`, SHA-256 `75cc4119d4e890aa855e31e14747255ae98f7f7549d50e8f0d33733e05cb5206`.
+
+Everything other than the seed set, cell count, three-index bootstrap wording, and dependent hashes remains unchanged. This re-scoped commit supersedes `2f1d2aeae30344f0aad823b606739893012d32f9` for v6 execution provenance.
 
 ## Question and design
 
@@ -19,9 +27,9 @@ The design is the complete factorial
 - `H = S/T` exactly in every cell;
 - arms `mu0`, raw Nesterov `mu=0.9`, and bias-corrected Nesterov `mu=0.9`;
 - five prospectively fixed etas per arm and coordinate;
-- seeds `{601,607,613,617,619}` with training seed `int(str(seed)+str(seed))`.
+- seeds `{601,607,613}` with training seed `int(str(seed)+str(seed))`.
 
-This gives `12 × 3 × 5 × 5 = 900` scientific cells. Each cell is one `compare_diloco.py` process packing four full-parameter learners on one GPU. It uses exact strict-quorum fixed windows, `4*T` syncer commits, `S` steps per learner, a fixed 1,024-row development set, rho telemetry, no injected delay, and no data wrap.
+This gives `12 × 3 × 5 × 3 = 540` scientific cells. Each cell is one `compare_diloco.py` process packing four full-parameter learners on one GPU. It uses exact strict-quorum fixed windows, `4*T` syncer commits, `S` steps per learner, a fixed 1,024-row development set, rho telemetry, no injected delay, and no data wrap.
 
 ## H feasibility and data proof
 
@@ -36,7 +44,7 @@ All requested coordinates close exactly:
 
 The requested H set is `{128,256,512,1024,1280,2048,2560,5120}`. The learner and comparison-runner parsers accept positive integer fixed-window steps/tokens without an upper-H cap. Exact commands bind `--fixed-window-microsteps H`, `--fixed-window-tokens 128*H`, `--learner-max-steps S`, and `--syncer-total-steps 4*T`. H values through 2,048 have already completed end-to-end in prior 135M campaigns; H=2,560 and 5,120 exercise the same fixed-window path with fewer commits and no additional model-state allocation.
 
-The new seed bundles are isolated under `/root/yeto-data/outer-mup-v6`; no earlier data tree was changed. Both nodes independently produced the same combined input-manifest hash `b260be9ee97ebf19ca897d5a8ca638ec05527d40f31d989b22a760d2d75d6b47`. The frozen verifier found a minimum of 26,399 complete 128-token blocks (seed 617, learner 1), versus 10,240 required by the longest cell. Its report hash is `9e06988092409f1e8c8449425a7348dad2a8f3c22d6a52a6397a69e53ea88a59`.
+The new seed bundles are isolated under `/root/yeto-data/outer-mup-v6`; no earlier data tree was changed. Both nodes independently produced the same combined input-manifest hash `b260be9ee97ebf19ca897d5a8ca638ec05527d40f31d989b22a760d2d75d6b47`. That immutable manifest contains the original five prepared bundles, while the re-scoped commands reference only 601/607/613. The frozen verifier found a selected-seed minimum of 26,696 complete 128-token blocks (seed 601, learner 1), versus 10,240 required by the longest cell; the full prepared superset has a conservative minimum of 26,399. Its report hash is `9e06988092409f1e8c8449425a7348dad2a8f3c22d6a52a6397a69e53ea88a59`.
 
 **No requested cell is infeasible.** Any later failure to reproduce the hash, exact-window arithmetic, GPU inventory, or roomy-volume proof is an infrastructure preflight failure and blocks launch; it does not silently delete a factorial coordinate.
 
@@ -148,9 +156,9 @@ abs(log2 D_pred - log2 D_obs) <= 0.2.
 
 G6 is `PASS` only if **each** of raw and corrected succeeds on at least three of its four held-out cells. It is `FAIL` if the complete, bracketed evidence is evaluable but either arm misses that rule. It is `NOT_EVALUABLE` for incomplete/invalid evidence, any of the 36 unbracketed eta optima, a singular required candidate/LOO/refit surface, or fewer than 9,500 valid refits in the registered 10,000-draw joint paired-seed bootstrap. The mu0 arm has structural `D=1`; it supplies every denominator but is excluded from the trivial response-surface gate.
 
-The eta optimum is the interior vertex of `loss = a(log2 eta)^2 + b(log2 eta) + c` fitted to the five-seed mean loss at all five exact rungs. A required nonfinite/missing cell is never dropped. The joint bootstrap uses one common five-index seed resample for all 36 curves; inside every replicate it independently repeats F1/F2/F3 LOO selection for both arms, refits each selected family on all eight training cells, and recomputes all held-out errors.
+The eta optimum is the interior vertex of `loss = a(log2 eta)^2 + b(log2 eta) + c` fitted to the three-seed mean loss at all five exact rungs. A required nonfinite/missing cell is never dropped. The joint bootstrap uses one common three-index seed resample for all 36 curves; inside every replicate it independently repeats F1/F2/F3 LOO selection for both arms, refits each selected family on all eight training cells, and recomputes all held-out errors.
 
-Frozen analyzer: `scripts/analyze_v6.py`, SHA-256 `8016e03cec5c8ff51171d35861b51553599218079fafa9c7af9798092f2110d6`.
+Frozen analyzer: `scripts/analyze_v6.py`, SHA-256 `ae97012af3e10b4f4f95fe12395ac131960d72d31c6f39856f6389c3032c0239`.
 
 ## Scheduling, storage, and wall ceiling
 

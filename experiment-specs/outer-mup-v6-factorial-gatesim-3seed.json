@@ -1,0 +1,219 @@
+{
+  "bootstrap": {
+    "draws": 10000,
+    "rng_seed": 20260727,
+    "sample_size": 3,
+    "unique_multinomial_count_vectors": 10
+  },
+  "elapsed_seconds": 129.96485781669617,
+  "literal_compression_spot_check": {
+    "compressed_valid": 10000,
+    "literal_valid": 10000,
+    "match": true,
+    "scenario": "F1 replicate 0 under one-rung near-bracket rule"
+  },
+  "modes": {
+    "one_rung_near_bracket": {
+      "equal_weight_pooled_at_9500": {
+        "P_eval": 1.0,
+        "P_eval_wilson95": [
+          0.9974455692798185,
+          1.0
+        ],
+        "P_pass_given_evaluable": 1.0,
+        "evaluable": 1500,
+        "max_valid_refit_threshold_for_80pct_eval": 10000,
+        "passed": 1500,
+        "point_accepted": 1500,
+        "replicates": 1500,
+        "valid_refits": {
+          "max": 10000,
+          "median": 10000.0,
+          "min": 10000,
+          "q10": 10000.0,
+          "q20": 10000.0,
+          "q80": 10000.0,
+          "q90": 10000.0
+        }
+      },
+      "rounded_down_hundreds_threshold": 10000,
+      "scenarios": {
+        "F1": {
+          "P_eval": 1.0,
+          "P_eval_wilson95": [
+            0.9923756595384479,
+            1.0
+          ],
+          "P_pass_given_evaluable": 1.0,
+          "evaluable": 500,
+          "max_valid_refit_threshold_for_80pct_eval": 10000,
+          "passed": 500,
+          "point_accepted": 500,
+          "replicates": 500,
+          "valid_refits": {
+            "max": 10000,
+            "median": 10000.0,
+            "min": 10000,
+            "q10": 10000.0,
+            "q20": 10000.0,
+            "q80": 10000.0,
+            "q90": 10000.0
+          }
+        },
+        "F2": {
+          "P_eval": 1.0,
+          "P_eval_wilson95": [
+            0.9923756595384479,
+            1.0
+          ],
+          "P_pass_given_evaluable": 1.0,
+          "evaluable": 500,
+          "max_valid_refit_threshold_for_80pct_eval": 10000,
+          "passed": 500,
+          "point_accepted": 500,
+          "replicates": 500,
+          "valid_refits": {
+            "max": 10000,
+            "median": 10000.0,
+            "min": 10000,
+            "q10": 10000.0,
+            "q20": 10000.0,
+            "q80": 10000.0,
+            "q90": 10000.0
+          }
+        },
+        "F3": {
+          "P_eval": 1.0,
+          "P_eval_wilson95": [
+            0.9923756595384479,
+            1.0
+          ],
+          "P_pass_given_evaluable": 1.0,
+          "evaluable": 500,
+          "max_valid_refit_threshold_for_80pct_eval": 10000,
+          "passed": 500,
+          "point_accepted": 500,
+          "replicates": 500,
+          "valid_refits": {
+            "max": 10000,
+            "median": 10000.0,
+            "min": 10000,
+            "q10": 10000.0,
+            "q20": 10000.0,
+            "q80": 10000.0,
+            "q90": 10000.0
+          }
+        }
+      },
+      "worst_family_max_threshold_for_80pct_eval": 10000
+    },
+    "strict_interior": {
+      "equal_weight_pooled_at_9500": {
+        "P_eval": 1.0,
+        "P_eval_wilson95": [
+          0.9974455692798185,
+          1.0
+        ],
+        "P_pass_given_evaluable": 1.0,
+        "evaluable": 1500,
+        "max_valid_refit_threshold_for_80pct_eval": 10000,
+        "passed": 1500,
+        "point_accepted": 1500,
+        "replicates": 1500,
+        "valid_refits": {
+          "max": 10000,
+          "median": 10000.0,
+          "min": 9610,
+          "q10": 10000.0,
+          "q20": 10000.0,
+          "q80": 10000.0,
+          "q90": 10000.0
+        }
+      },
+      "rounded_down_hundreds_threshold": 10000,
+      "scenarios": {
+        "F1": {
+          "P_eval": 1.0,
+          "P_eval_wilson95": [
+            0.9923756595384479,
+            1.0
+          ],
+          "P_pass_given_evaluable": 1.0,
+          "evaluable": 500,
+          "max_valid_refit_threshold_for_80pct_eval": 10000,
+          "passed": 500,
+          "point_accepted": 500,
+          "replicates": 500,
+          "valid_refits": {
+            "max": 10000,
+            "median": 10000.0,
+            "min": 9610,
+            "q10": 10000.0,
+            "q20": 10000.0,
+            "q80": 10000.0,
+            "q90": 10000.0
+          }
+        },
+        "F2": {
+          "P_eval": 1.0,
+          "P_eval_wilson95": [
+            0.9923756595384479,
+            1.0
+          ],
+          "P_pass_given_evaluable": 1.0,
+          "evaluable": 500,
+          "max_valid_refit_threshold_for_80pct_eval": 10000,
+          "passed": 500,
+          "point_accepted": 500,
+          "replicates": 500,
+          "valid_refits": {
+            "max": 10000,
+            "median": 10000.0,
+            "min": 9610,
+            "q10": 10000.0,
+            "q20": 10000.0,
+            "q80": 10000.0,
+            "q90": 10000.0
+          }
+        },
+        "F3": {
+          "P_eval": 1.0,
+          "P_eval_wilson95": [
+            0.9923756595384479,
+            1.0
+          ],
+          "P_pass_given_evaluable": 1.0,
+          "evaluable": 500,
+          "max_valid_refit_threshold_for_80pct_eval": 10000,
+          "passed": 500,
+          "point_accepted": 500,
+          "replicates": 500,
+          "valid_refits": {
+            "max": 10000,
+            "median": 10000.0,
+            "min": 10000,
+            "q10": 10000.0,
+            "q20": 10000.0,
+            "q80": 10000.0,
+            "q90": 10000.0
+          }
+        }
+      },
+      "worst_family_max_threshold_for_80pct_eval": 10000
+    }
+  },
+  "near_bracket_rule": {
+    "allowance_log2_eta_bits": 0.5,
+    "positive_curvature_required": true,
+    "unconstrained_vertex_used_without_clipping": true
+  },
+  "noise_model": "unchanged prospective G6 model: v3 five-seed unbiased per-cell variance transported by T/arm/relative eta offset; three independent synthetic v6 seed observations; exact F1/F2/F3 truths and full arm-specific LOO",
+  "schema": "yeto_g6_three_seed_gate_feasibility_v1",
+  "seeds": [
+    601,
+    607,
+    613
+  ],
+  "status": "PRE_OUTCOME",
+  "synthetic_datasets_per_family": 500
+}

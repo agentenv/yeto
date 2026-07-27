@@ -12,13 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SEEDS = (601, 607, 613, 617, 619)
+SEEDS = (601, 607, 613)
 T_GRID = (2, 5, 10, 20)
 S_GRID = (2560, 5120, 10240)
 ARMS = ("mu0", "raw", "corrected")
 MOMENTUM_ARMS = ("raw", "corrected")
 MU_HIGH = 0.9
-EXPECTED_CELLS = 900
+EXPECTED_CELLS = 540
 ETA_POINTS = 5
 HOLDOUTS = frozenset(((2, 10240), (5, 5120), (10, 2560), (20, 5120)))
 BOOTSTRAP_REPLICATES = 10_000
@@ -640,7 +640,7 @@ def joint_bootstrap(losses: dict) -> dict:
         }
     return {
         "method": (
-            "paired nonparametric training-seed bootstrap; one shared five-index "
+            "paired nonparametric training-seed bootstrap; one shared three-index "
             "resample refits all 36 eta curves, independently repeats the "
             "registered eight-cell F1/F2/F3 LOO selection for both momentum "
             "arms, refits each selected surface, and recomputes all held-out "
@@ -674,7 +674,7 @@ def main() -> int:
     if manifest.get("stage") != "V6_FACTORIAL" or len(
         manifest.get("cells", [])
     ) != EXPECTED_CELLS:
-        raise SystemExit("manifest is not the complete 900-cell V6_FACTORIAL stage")
+        raise SystemExit("manifest is not the complete 540-cell V6_FACTORIAL stage")
     node_roots = parse_node_roots(args.node_root)
     losses, cell_records, evidence_errors = load_losses(manifest, node_roots)
 
@@ -769,7 +769,7 @@ def main() -> int:
             "verdict": verdict,
             "evaluable": evaluable,
             "conditions": {
-                "complete_900_cell_evidence": evidence_complete,
+                "complete_540_cell_evidence": evidence_complete,
                 "all_36_eta_optima_interior": all_curves_interior,
                 "joint_bootstrap_at_least_9500_valid": (
                     bootstrap.get("status") == "VALID"

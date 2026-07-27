@@ -23,7 +23,8 @@ def test_registered_factorial_and_hashes_close_exactly():
     cells = contract["design"]["factorial_cells"]
     seeds = contract["design"]["seeds"]
     assert len(cells) == 12
-    assert len(cells) * 3 * 5 * len(seeds) == 900
+    assert seeds == [601, 607, 613]
+    assert len(cells) * 3 * 5 * len(seeds) == 540
     assert {(cell["T"], cell["S"]) for cell in cells} == {
         (t, s)
         for t in (2, 5, 10, 20)

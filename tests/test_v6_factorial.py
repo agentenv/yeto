@@ -21,23 +21,23 @@ def load_script(name: str):
     return module
 
 
-def test_builder_materializes_balanced_hash_bound_900_cell_grid():
+def test_builder_materializes_balanced_hash_bound_540_cell_grid():
     builder = load_script("build_v6_launch_manifest")
     contract = json.loads(JSON_SPEC.read_text())
     cells = builder.build_cells(contract, "f" * 40)
     balance = builder.validate(cells)
-    assert len(cells) == 900
-    assert len({cell["cell_id"] for cell in cells}) == 900
+    assert len(cells) == 540
+    assert len({cell["cell_id"] for cell in cells}) == 540
     eta_counts = Counter(
         (cell["t"], cell["s"], cell["arm"], cell["eta_index"])
         for cell in cells
     )
     assert len(eta_counts) == 4 * 3 * 3 * 5
-    assert set(eta_counts.values()) == {5}
+    assert set(eta_counts.values()) == {3}
     assert max(balance["cost_loads"].values()) - min(
         balance["cost_loads"].values()
     ) <= 1
-    assert sum(balance["queue_lengths"].values()) == 900
+    assert sum(balance["queue_lengths"].values()) == 540
 
 
 def test_commands_bind_H_work_arm_seed_gpu_and_roomy_volume():
@@ -69,7 +69,7 @@ def test_retry_groups_are_whole_five_eta_paired_seed_curves():
     groups = defaultdict(list)
     for cell in cells:
         groups[cell["retry_group_id"]].append(cell)
-    assert len(groups) == 4 * 3 * 3 * 5
+    assert len(groups) == 4 * 3 * 3 * 3
     for group in groups.values():
         assert len(group) == 5
         assert sorted(cell["eta_index"] for cell in group) == list(range(5))
