@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Issue an immutable 18-hour v8 authority after a fresh v6-drain proof."""
+"""Issue an immutable 6-hour v8-mini authority after both priority gates."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 MAX_GATE_PROOF_AGE_SECONDS = 600
-WALL_SECONDS = 64_800
+WALL_SECONDS = 21_600
 
 
 def utc_now() -> str:
@@ -62,8 +62,8 @@ def main() -> int:
         errors.append("manifest schema mismatch")
     if manifest.get("stage") != "V8_PHASE_DIAGRAM":
         errors.append("manifest stage mismatch")
-    if manifest.get("status") != "REGISTERED" or len(manifest.get("cells", [])) != 900:
-        errors.append("manifest is not the complete registered 900-cell grid")
+    if manifest.get("status") != "REGISTERED" or len(manifest.get("cells", [])) != 180:
+        errors.append("manifest is not the complete registered 180-cell mini grid")
     if manifest.get("reuse", {}).get("reused_cell_count") != 0:
         errors.append("manifest differs from the zero-reuse registration")
     sidecar = manifest_path.with_suffix(manifest_path.suffix + ".sha256")
@@ -77,6 +77,8 @@ def main() -> int:
         errors.append("v6-drain gate proof is not PASS")
     if not gate.get("v6", {}).get("all_slot_queues_drained"):
         errors.append("gate proof does not show all v6 queues drained")
+    if not gate.get("priority", {}).get("seal_verification_cells_complete"):
+        errors.append("gate proof lacks the priority seal-verification completion marker")
     for node in ("h200-n1", "h200-n2"):
         record = gate.get("v6", {}).get("nodes", {}).get(node, {})
         if record.get("active_processes") != [] or not record.get("all_slots_drained"):

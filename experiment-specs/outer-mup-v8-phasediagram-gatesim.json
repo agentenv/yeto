@@ -1,8 +1,8 @@
 {
   "cpu_only": true,
-  "design_sha256": "8ed2d3a743066402cc56a9d645eed4ace3dcdc46971fa5e85b1114406eb6c3a5",
+  "design_sha256": "f7ca53ccceddb30aae0fdad982685002d8757bc91623145b9aed2f09758a4d0f",
   "independence_note": "eta-cell noises are independent, deliberately discarding favorable cross-curve seed covariance; this is conservative for paired loss differences but remains a transport model rather than a guarantee",
-  "model": "exact centered quadratic mean curves; curvature transported by T/arm from sealed v3; independent Gaussian eta-cell noise with sealed v3 unbiased five-seed SD transported by T/arm/rung; shared five-seed paired bootstrap across the full 45-curve diagram",
+  "model": "exact centered quadratic mean curves; curvature transported by T/arm from sealed v3; independent Gaussian eta-cell noise with sealed v3 unbiased five-seed SD transported by T/arm/rung; shared three-seed paired bootstrap across the full 15-curve diagram",
   "outer_seed_rule": "8080000 + replicate",
   "pre_outcome": true,
   "primary_scenario": "centered",
@@ -15,68 +15,24 @@
     },
     "minimum_valid_complete_refits": 9500,
     "rng_seed": 20260728,
-    "unique_multinomial_count_vectors": 126
+    "unique_multinomial_count_vectors": 10
   },
   "scenario_definitions": {
     "centered": "every true eta optimum equals its registered ladder center",
-    "v3_vertex_shift_sensitivity": "move each T/arm truth by the pre-existing sealed v3 fitted-vertex offset, log-interpolated from mu=0 to mu=0.9 and clamped above 0.9; corrected T40 inherits the mu0 offset because its v3 curve has negative curvature"
+    "v3_vertex_shift_sensitivity": "move each T/arm truth by the pre-existing sealed v3 fitted-vertex offset, log-interpolated from mu=0 to mu=0.9 and clamped above 0.9"
   },
   "scenarios": {
     "centered": {
-      "P_all_45_point_interior": 1.0,
+      "P_all_15_point_interior": 1.0,
       "P_eval": 1.0,
       "P_eval_wilson95": [
         0.9923756595384479,
         1.0
       ],
-      "all_45_point_interior": 500,
+      "all_15_point_interior": 500,
       "evaluable": 500,
       "per_curve_point_interior": {
-        "T10_corrected_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_corrected_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_corrected_mu0.9": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_corrected_mu0.95": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_mu0_mu0": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_raw_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_raw_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_raw_mu0.9": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_raw_mu0.95": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T20_corrected_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
         "T20_corrected_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T20_corrected_mu0.9": {
           "P_point_interior": 1.0,
           "point_interior": 500
         },
@@ -88,15 +44,7 @@
           "P_point_interior": 1.0,
           "point_interior": 500
         },
-        "T20_raw_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
         "T20_raw_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T20_raw_mu0.9": {
           "P_point_interior": 1.0,
           "point_interior": 500
         },
@@ -104,15 +52,7 @@
           "P_point_interior": 1.0,
           "point_interior": 500
         },
-        "T2_corrected_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
         "T2_corrected_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T2_corrected_mu0.9": {
           "P_point_interior": 1.0,
           "point_interior": 500
         },
@@ -124,15 +64,7 @@
           "P_point_interior": 1.0,
           "point_interior": 500
         },
-        "T2_raw_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
         "T2_raw_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T2_raw_mu0.9": {
           "P_point_interior": 1.0,
           "point_interior": 500
         },
@@ -140,51 +72,7 @@
           "P_point_interior": 1.0,
           "point_interior": 500
         },
-        "T40_corrected_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_corrected_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_corrected_mu0.9": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_corrected_mu0.95": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_mu0_mu0": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_raw_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_raw_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_raw_mu0.9": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_raw_mu0.95": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T5_corrected_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
         "T5_corrected_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T5_corrected_mu0.9": {
           "P_point_interior": 1.0,
           "point_interior": 500
         },
@@ -196,15 +84,7 @@
           "P_point_interior": 1.0,
           "point_interior": 500
         },
-        "T5_raw_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
         "T5_raw_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T5_raw_mu0.9": {
           "P_point_interior": 1.0,
           "point_interior": 500
         },
@@ -223,60 +103,16 @@
       }
     },
     "v3_vertex_shift_sensitivity": {
-      "P_all_45_point_interior": 1.0,
+      "P_all_15_point_interior": 1.0,
       "P_eval": 1.0,
       "P_eval_wilson95": [
         0.9923756595384479,
         1.0
       ],
-      "all_45_point_interior": 500,
+      "all_15_point_interior": 500,
       "evaluable": 500,
       "per_curve_point_interior": {
-        "T10_corrected_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_corrected_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_corrected_mu0.9": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_corrected_mu0.95": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_mu0_mu0": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_raw_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_raw_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_raw_mu0.9": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T10_raw_mu0.95": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T20_corrected_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
         "T20_corrected_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T20_corrected_mu0.9": {
           "P_point_interior": 1.0,
           "point_interior": 500
         },
@@ -288,15 +124,7 @@
           "P_point_interior": 1.0,
           "point_interior": 500
         },
-        "T20_raw_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
         "T20_raw_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T20_raw_mu0.9": {
           "P_point_interior": 1.0,
           "point_interior": 500
         },
@@ -304,15 +132,7 @@
           "P_point_interior": 1.0,
           "point_interior": 500
         },
-        "T2_corrected_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
         "T2_corrected_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T2_corrected_mu0.9": {
           "P_point_interior": 1.0,
           "point_interior": 500
         },
@@ -324,15 +144,7 @@
           "P_point_interior": 1.0,
           "point_interior": 500
         },
-        "T2_raw_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
         "T2_raw_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T2_raw_mu0.9": {
           "P_point_interior": 1.0,
           "point_interior": 500
         },
@@ -340,51 +152,7 @@
           "P_point_interior": 1.0,
           "point_interior": 500
         },
-        "T40_corrected_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_corrected_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_corrected_mu0.9": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_corrected_mu0.95": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_mu0_mu0": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_raw_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_raw_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_raw_mu0.9": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T40_raw_mu0.95": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T5_corrected_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
         "T5_corrected_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T5_corrected_mu0.9": {
           "P_point_interior": 1.0,
           "point_interior": 500
         },
@@ -396,15 +164,7 @@
           "P_point_interior": 1.0,
           "point_interior": 500
         },
-        "T5_raw_mu0.5": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
         "T5_raw_mu0.8": {
-          "P_point_interior": 1.0,
-          "point_interior": 500
-        },
-        "T5_raw_mu0.9": {
           "P_point_interior": 1.0,
           "point_interior": 500
         },
@@ -437,14 +197,14 @@
     ],
     "transported_cell_sd": {
       "max": 0.00869207550176943,
-      "median": 0.003449946234581298,
-      "min": 0.00047331030424436544
+      "median": 0.004432502235297616,
+      "min": 0.0005088443069457512
     },
     "transported_curvature": {
-      "T40_rule": "absolute magnitude of the sealed v3 quadratic coefficient, floored at 0.0039; mu interpolation is geometric and clamps above mu=0.9",
+      "convexity_rule": "absolute magnitude of the sealed v3 quadratic coefficient, floored at 0.0039; mu interpolation is geometric and clamps above mu=0.9",
       "max": 0.05158813715996274,
       "median": 0.040016555717269794,
-      "min": 0.003909141027674021
+      "min": 0.02021858063101918
     }
   }
 }

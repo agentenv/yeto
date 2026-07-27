@@ -39,7 +39,7 @@ except ModuleNotFoundError:
 RESULT_LINK = Path("/root/yeto-results-v8")
 RESULT_TARGET = Path("/data/yeto-results-v8")
 MIN_FREE_BYTES = 1_000_000_000_000
-EXPECTED_CELLS = 900
+EXPECTED_CELLS = 180
 
 
 def command_value(command: list[str], flag: str) -> str | None:
@@ -176,7 +176,7 @@ def verify_preflight(manifest_path: Path, node_label: str, proof_path: Path) -> 
     if manifest.get("stage") != "V8_PHASE_DIAGRAM" or len(
         manifest.get("cells", [])
     ) != EXPECTED_CELLS:
-        errors.append("manifest is not the complete 900-cell V8_PHASE_DIAGRAM stage")
+        errors.append("manifest is not the complete 180-cell V8_PHASE_DIAGRAM mini stage")
     if manifest.get("status") != "REGISTERED":
         errors.append("launch manifest status is not REGISTERED")
     sidecar = manifest_path.with_suffix(manifest_path.suffix + ".sha256")
@@ -282,6 +282,8 @@ def load_gate_proof(path: Path) -> dict:
         errors.append("gate proof is not PASS")
     if not proof.get("v6", {}).get("all_slot_queues_drained"):
         errors.append("gate proof does not show all v6 slot queues drained")
+    if not proof.get("priority", {}).get("seal_verification_cells_complete"):
+        errors.append("gate proof does not show priority seal-verification cells complete")
     for node in ("h200-n1", "h200-n2"):
         node_record = proof.get("v6", {}).get("nodes", {}).get(node, {})
         if node_record.get("active_processes") != []:
@@ -315,8 +317,8 @@ def load_launch_authority(
         deadline, (int, float)
     ):
         errors.append("launch authority lacks numeric wall times")
-    elif deadline - started != 64_800:
-        errors.append("launch authority does not encode the registered 18h ceiling")
+    elif deadline - started != 21_600:
+        errors.append("launch authority does not encode the registered 6h ceiling")
     if errors:
         raise SystemExit("; ".join(errors))
     return authority
@@ -381,7 +383,7 @@ def mark_not_run(cell: dict, attempt_root: Path, attempt_number: int) -> None:
             "cell_id": cell["cell_id"],
             "validated_at_utc": utc_now(),
             "status": "NOT_RUN_WALL_CEILING",
-            "failures": ["registered 18h wall ceiling reached before launch"],
+            "failures": ["registered 6h wall ceiling reached before launch"],
             "seed": cell["seed"],
             "training_seed": cell["training_seed"],
             "attempt_number": attempt_number,
@@ -555,7 +557,7 @@ def run_queue(
             if wall_stopped:
                 evidence["status"] = "NOT_RUN_WALL_CEILING"
                 evidence.setdefault("failures", []).append(
-                    "registered 18h wall ceiling reached during cell"
+                    "registered 6h wall ceiling reached during cell"
                 )
             elif return_code != 0 and evidence.get("status") == "COMPLETED":
                 evidence["status"] = "INVALID_WORK"
@@ -630,8 +632,8 @@ def main() -> int:
         )
         print(json.dumps({"node": args.node_label, "status": "PASS"}, sort_keys=True))
         return 0
-    if args.gpu is None or args.gpu not in range(8):
-        raise SystemExit("--run requires --gpu in 0..7")
+    if args.gpu is None or args.gpu not in range(4):
+        raise SystemExit("--run requires --gpu in 0..3 for the registered mini grid")
     if args.launch_authority is None or args.gate_proof is None:
         raise SystemExit("--run requires --launch-authority and --gate-proof")
     return run_queue(

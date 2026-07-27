@@ -3,8 +3,8 @@
 
 The simulation transports the sealed v3 five-seed, eta-cell noise scale to the
 registered v8 ladders.  It evaluates the exact v8 strict-interior point rule
-and exact 10,000-draw shared paired-seed bootstrap, compressed to the 126
-distinct five-index multinomial count vectors.  No GPU work or v8 outcome is
+and exact 10,000-draw shared paired-seed bootstrap, compressed to the 10
+distinct three-index multinomial count vectors.  No GPU work or v8 outcome is
 read or produced.
 """
 
@@ -92,7 +92,8 @@ def draw_groups() -> list[tuple[list[int], int]]:
         counts = tuple(draw.count(index) for index in range(len(a8.SEEDS)))
         frequencies[counts] += 1
         representatives.setdefault(counts, draw)
-    if len(frequencies) != 126 or sum(frequencies.values()) != 10_000:
+    expected_support = math.comb(2 * len(a8.SEEDS) - 1, len(a8.SEEDS) - 1)
+    if len(frequencies) != expected_support or sum(frequencies.values()) != 10_000:
         raise RuntimeError("unexpected registered bootstrap support")
     return [
         (representatives[counts], frequencies[counts])
@@ -124,7 +125,7 @@ def build_config(contract_path: Path, readout_path: Path, manifest_path: Path) -
 
     curves = contract.get("design", {}).get("curves", [])
     if len(curves) != a8.EXPECTED_CURVES:
-        raise RuntimeError("v8 contract does not enumerate 45 curves")
+        raise RuntimeError("v8 contract does not enumerate 15 curves")
     design = {}
     for curve in curves:
         key = a8.curve_key(curve["T"], curve["arm"], curve["mu"])
@@ -212,6 +213,7 @@ def build_config(contract_path: Path, readout_path: Path, manifest_path: Path) -
         target_curvatures.append(curve_curvature)
 
     measured_shift_truth = {}
+    transfer = contract["center_models"]["momentum_transfer"]
     for t in a8.T_GRID:
         baseline_center = design[a8.curve_key(t, a8.BASELINE_ARM, 0.0)]["center"]
         baseline_vertex = vertex[(t, a8.BASELINE_ARM)]
@@ -222,9 +224,18 @@ def build_config(contract_path: Path, readout_path: Path, manifest_path: Path) -
             baseline_center * baseline_ratio
         )
         for arm in a8.MOMENTUM_ARMS:
-            high_center = design[a8.curve_key(t, arm, 0.9)]["center"]
+            q = (t - 5.0) / 10.0
+            if arm == "raw":
+                coefficients = transfer["raw_coefficients"]
+                log2_d_high = -math.log2(1.0 - 0.9 ** (t + 1)) + (
+                    coefficients["b0"] + coefficients["bq"] * q
+                )
+            else:
+                coefficients = transfer["corrected_coefficients"]
+                log2_d_high = coefficients["b0"] + coefficients["bq"] * q
+            high_center = baseline_center * 0.1 * (2.0**log2_d_high)
             high_vertex = vertex[(t, arm)]
-            if high_vertex is None or (t == 40 and arm == "corrected"):
+            if high_vertex is None:
                 high_ratio = baseline_ratio
             else:
                 high_ratio = high_vertex / high_center
@@ -255,7 +266,7 @@ def build_config(contract_path: Path, readout_path: Path, manifest_path: Path) -
                 "min": min(target_curvatures),
                 "median": statistics.median(target_curvatures),
                 "max": max(target_curvatures),
-                "T40_rule": (
+                "convexity_rule": (
                     "absolute magnitude of the sealed v3 quadratic coefficient, "
                     "floored at 0.0039; mu interpolation is geometric and clamps "
                     "above mu=0.9"
@@ -339,8 +350,8 @@ def summarize(records: list[dict]) -> dict:
         "evaluable": evaluable,
         "P_eval": evaluable / len(records),
         "P_eval_wilson95": wilson(evaluable, len(records)),
-        "all_45_point_interior": point_interior,
-        "P_all_45_point_interior": point_interior / len(records),
+        "all_15_point_interior": point_interior,
+        "P_all_15_point_interior": point_interior / len(records),
         "valid_complete_refits": {
             "min": min(valid_counts),
             "q10": a8.quantile(valid_counts, 0.10),
@@ -416,7 +427,7 @@ def main() -> int:
             "exact centered quadratic mean curves; curvature transported by "
             "T/arm from sealed v3; independent Gaussian eta-cell noise with "
             "sealed v3 unbiased five-seed SD transported by T/arm/rung; shared "
-            "five-seed paired bootstrap across the full 45-curve diagram"
+            "three-seed paired bootstrap across the full 15-curve diagram"
         ),
         "independence_note": (
             "eta-cell noises are independent, deliberately discarding favorable "
@@ -429,8 +440,7 @@ def main() -> int:
             "v3_vertex_shift_sensitivity": (
                 "move each T/arm truth by the pre-existing sealed v3 fitted-vertex "
                 "offset, log-interpolated from mu=0 to mu=0.9 and clamped above "
-                "0.9; corrected T40 inherits the mu0 offset because its v3 curve "
-                "has negative curvature"
+                "0.9"
             ),
         },
         "source": config["source_summary"],

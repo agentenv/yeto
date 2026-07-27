@@ -1,110 +1,79 @@
-# Outer-muP v8 tuned-loss phase-diagram preregistration
+# Outer-muP v8 MINI tuned-loss phase-diagram preregistration
 
 **Program ID:** `outer-mup-v8-phasediagram`
 
-**Status:** `PREREGISTERED_PENDING_FLEET` — design and analysis are frozen; no v8 GPU process, result root, or launch authority may exist yet.
+**Status:** `PREREGISTERED_PENDING_PRIORITY_FLEET` — no v8 launch authority, GPU process, scientific attempt, or outcome exists.
 
-**Registered:** 2026-07-26 (prospective for every v8 outcome).
+**Registered:** 2026-07-26; prospectively amended to MINI before any v8 launch/outcome.
 
-**Authoritative machine contract:** `experiment-specs/outer-mup-v8-phasediagram-prereg.json`.
+**Authoritative contract:** `experiment-specs/outer-mup-v8-phasediagram-prereg.json`.
 
-## 1. Question and deliverable
+## Pre-outcome MINI amendment
 
-At SmolLM2-135M, `M=4`, and fixed local window `H=512`, v8 asks the question the preceding LR-ratio studies could not answer: after giving every method its own fair LR tuning curve, does outer momentum improve, harm, or practically tie the no-momentum optimum?
+This contract prospectively supersedes the unlaunched 45-curve/900-cell design frozen at commit `4175b71b72251aa279345e3ed858caa7ce5b39f9`. The operator re-scoped the Tuesday-deadline deliverable in `/private/tmp/h200-phasediag-note.md` before any v8 authority, process, result root, attempt, or outcome: retain only `T={2,5,20}`, `mu={.8,.95}`, raw and corrected arms, and three paired seeds `{801,809,811}`. The superseded full manifest is forbidden to launch. v6 drain and the separate seal-verification cells have strict scheduling priority.
 
-The deliverable is two registered phase diagrams—raw production Nesterov and the opt-in bias-corrected Nesterov arm—over `T in {2,5,10,20,40}` and `mu in {.5,.8,.9,.95}`. Each plotted cell reports the fitted tuned-optimum loss difference
+## Design and deliverable
+
+At SmolLM2-135M, `M=4`, fixed `H=512`, and `S=512T`, v8 MINI produces separate raw- and bias-corrected maps of the independently tuned optimum relative to a same-T no-momentum optimum:
 
 ```text
 Delta(T,mu,arm) = L*_arm(T,mu) - L*_mu0(T)
 ```
 
-with a paired pointwise interval, a familywise simultaneous interval across all 40 comparisons, and the frozen phase label below. This is a best-loss map, not the earlier `D` map of whether a conventional LR rule understeps or oversteps.
+There are three T values, one shared mu0 curve plus two raw and two corrected curves per T, four LR points per curve, and three seeds: `15 * 4 * 3 = 180` fresh cells and 12 momentum comparisons.
 
-## 2. Design
+Every ladder is symmetric in `log2(eta)` at offsets `{-1.5,-.5,+.5,+1.5}` bits (2x adjacent, 8x endpoint span). Exact numbers are authoritative in the JSON. Centers are:
 
-- `H=512` and `S=512T`, hence `S={1024,2560,5120,10240,20480}`.
-- Five new paired scientific seeds `{801,809,811,821,823}`; `training_seed=int(str(seed)+str(seed))`.
-- One common correction-OFF `mu=0` baseline curve per T, four raw curves per T, and four corrected curves per T.
-- Four LR values and five seeds per curve: `45 curves * 4 etas * 5 seeds = 900 fresh cells`.
-- Every LR ladder is symmetric in `log2(eta)` at offsets `{-1.5,-.5,+.5,+1.5}` bits. Adjacent rungs differ by 2x; endpoints span 8x. No outcome-aware extension or point removal is allowed.
-- Primary outcome is finite NLL/token on the same fixed 1,024-row development set used by v3/v6.
+| T | S | mu0 | raw .8 | raw .95 | corrected .8 | corrected .95 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 1024 | 0.07105139738 | 0.03476018487 | 0.03073723984 | 0.01367230955 | 0.003393432799 |
+| 5 | 2560 | 0.04701771281 | 0.01450956336 | 0.01035221835 | 0.008295954957 | 0.00202582388 |
+| 20 | 10240 | 0.02517527596 | 0.004566030958 | 0.001680984048 | 0.00287910341 | 0.0006481599845 |
 
-### Registered centers
+Centers use the already-registered v3/v4-informed absolute-rate surface and frozen Theory Lane C momentum transfer. Raw transfer includes the exact code-true transient `1/(1-mu^(T+1))`; corrected transfer uses the frozen measured drift surface. No result-aware recentering, ladder extension, or point removal is permitted.
 
-The table gives centers; each exact four-number ladder is enumerated in the JSON contract. `r50...r95` are raw centers and `c50...c95` corrected centers.
+## Exact reuse
 
-| T | S | mu0 | r50 | r80 | r90 | r95 | c50 | c80 | c90 | c95 |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 2 | 1024 | 0.0710513974 | 0.0453520189 | 0.0347601849 | 0.0319974245 | 0.0307372398 | 0.0346790481 | 0.0136723096 | 0.00680325571 | 0.0033934328 |
-| 5 | 2560 | 0.0470177128 | 0.0258988194 | 0.0145095634 | 0.0116111032 | 0.0103522183 | 0.0217378111 | 0.00829595496 | 0.0040835065 | 0.00202582388 |
-| 10 | 5120 | 0.0344047075 | 0.017765905 | 0.00791978897 | 0.00530873561 | 0.00423745583 | 0.0145324373 | 0.00525350079 | 0.00253962108 | 0.00124857313 |
-| 20 | 10240 | 0.025175276 | 0.0117730349 | 0.00456603096 | 0.00250610911 | 0.00168098405 | 0.00887620629 | 0.00287910341 | 0.00134240604 | 0.000648159985 |
-| 40 | 20480 | 0.0506602231 | 0.0194488685 | 0.00663979786 | 0.00319114271 | 0.00174652236 | 0.0124447266 | 0.00324978258 | 0.00140959374 | 0.000656445675 |
+Reuse count is zero. v3 and v6 structural mu0 coordinates fail exact identity because scientific/training seeds, shuffled input bytes, and source commits differ. The already verified v8 input pool contains two inert shards for seeds 821/823 from the prospectively superseded full design; no MINI command or analysis key references them. Only seeds 801/809/811 are scientific.
 
-### Center provenance and the T=40 hedge
+## Frozen estimator and labels
 
-The `mu=0` anchor is the already-registered v6 absolute-rate surface fitted from the v3 135M anchors, fixed-T disambiguation, and v4 1.7B center pilot. Momentum transfer uses the frozen Theory Lane C surface. For raw Nesterov it retains the exact code-true transient `1/(1-mu^(T+1))` and fits only its measured residual; corrected transfer uses the frozen measured drift surface. In both cases `eta_center=eta0_center*(1-mu)*D_arm`. At `mu=0` both formulas return `D=1` exactly.
+For each curve fit `loss=a*x^2+b*x+c`, `x=log2(eta)`, to the four three-seed means. Accept only `a>0` with the vertex strictly inside the registered ladder; then `eta*=2^(-b/(2a))` and `L*=c-b^2/(4a)`. Any missing/nonfinite cell, nonpositive curvature, or boundary/outside vertex is unbracketed and never extrapolated.
 
-The sole prospective exception is disclosed rather than hidden: v3 T=40 `mu=0` was still improving at its highest registered eta `0.03582218728980824`, while the absolute-rate surface predicts `0.01842173837783116`. v8 therefore applies the pre-outcome rule `max(surface, sqrt(2)*v3_high_edge)` and centers the T=40 baseline at `0.05066022309911592`. The wide symmetric ladder then covers both the surface prediction and the v3 boundary evidence.
+The analyzer runs 10,000 paired three-seed bootstrap draws (`seed=20260728`), sharing one three-index draw across all 15 curves. MINI is evaluable only with 180/180 valid cells, 15/15 interior point fits, and at least 9,500 complete interior refits. It reports pointwise intervals and a primary simultaneous 95% interval using the 95th percentile of the valid-draw maximum absolute deviation across all 12 Delta values. At practical margin `0.01`:
 
-## 3. Exact-reuse audit
+- `HELPS`: simultaneous high < -0.01.
+- `HURTS`: simultaneous low > +0.01.
+- `NEUTRAL`: the full simultaneous interval is inside [-0.01,+0.01].
+- `UNCERTAIN`: evaluable but none of those three.
+- `NOT_EVALUABLE`: incomplete/invalid/unbracketed or <9,500 valid refits.
 
-No prior cell is reused. Exact identity includes the scientific/training seed, shuffled input bytes, eta, all protocol flags, source commit, and optimizer semantics—not merely `(T,S,H,mu)`.
+Frozen analyzer SHA-256: `00166147bae8566e2d2980c50cb94a282b3ecfb302a58025f98c88cdb870b699`.
 
-- v3 has all five structural `mu=0` coordinates, but its seeds are `{301,311,313,317,331}` and its shuffled training inputs/source commit differ.
-- v6 has structural `mu=0` matches only at T=5/10/20, but its seeds are `{601,607,613,617,619}`; T=2 and T=40 are absent, and its input bytes/source commit differ everywhere.
-- Therefore the registered reuse count is `0` and the fresh count is `900`. v3/v4/v6 data inform centers, noise, and runtime only; they never enter the v8 outcome estimator.
+## Mandatory MINI feasibility simulation
 
-The single v8 `mu=0` curve at each T is legitimately shared within v8: the production regression proves correction ON at `mu=0` bit-identical to correction OFF, so duplicating it would be an A/A expenditure rather than an independent control.
+The CPU-only artifact `outer-mup-v8-phasediagram-gatesim.json` has SHA-256 `a5bf834db795dfbbfd2413ceda628a4bd6df0f2fb569b6bfbffb4aa81ae5bf84`. It transports sealed v3 five-seed per-rung SDs and T/arm curvature, then applies the exact MINI point gate and exact 10,000-draw shared bootstrap (10 unique multinomial count vectors; literal spot check exact).
 
-## 4. Frozen analysis and phase labels
+Primary **`P_eval=1.000`** (500/500; Wilson 95% `[0.9924,1.0000]`); all primary datasets retain all 15 point fits and 10,000/10,000 refits. The pre-existing v3 fitted-vertex-shift sensitivity is also 500/500. This clears the fixed 0.8 readiness threshold but remains a measured-noise transport model, not a guarantee.
 
-For each curve, fit `loss=a*x^2+b*x+c` in `x=log2(eta)` to the four five-seed means. A fit is usable only when `a>0` and its vertex is strictly inside the exact ladder (1e-12-bit boundary tolerance). Then `eta*=2^(-b/(2a))` and `L*=c-b^2/(4a)`. Missing/nonfinite work, nonpositive curvature, or a boundary/outside vertex is `UNBRACKETED`; no extrapolated minimum is accepted.
+## Cost and scheduling priority
 
-The frozen analyzer performs 10,000 paired training-seed bootstrap draws with RNG seed `20260728`. One five-index draw is shared across all 45 curves. The complete diagram requires at least 9,500 draws in which all 45 refits remain interior. It reports ordinary paired 95% intervals and a primary simultaneous 95% interval whose common radius is the 95th percentile of the valid-draw maximum absolute deviation across all 40 Delta estimates.
+Measured v3 p90 runtimes imply 28.529 GPU-hours. On the registered bounded eight-GPU subfleet (GPUs 0-3 on each node), plus 10% controller/eval/seal overhead, planning cost is **3.923 fleet-hours**; ideal mean is 3.479 hours. The post-authority wall ceiling is 6 hours.
 
-With the practical margin `epsilon=0.01` loss, the primary familywise label is:
-
-- `HELPS` if the simultaneous upper endpoint is below `-0.01`.
-- `HURTS` if the simultaneous lower endpoint is above `+0.01`.
-- `NEUTRAL` if the entire simultaneous interval lies inside `[-0.01,+0.01]`.
-- `UNCERTAIN` if the evidence is evaluable but supports none of those three statements.
-- `NOT_EVALUABLE` for incomplete/invalid evidence, any unbracketed point curve, or fewer than 9,500 valid complete refits.
-
-`UNCERTAIN` is deliberately retained: forcing every noisy coordinate into helps/hurts/neutral would turn absence of resolution into a scientific sign claim. The requested diagram still displays all cells, with uncertainty visibly distinct.
-
-Frozen analyzer: `scripts/analyze_v8.py`, SHA-256 `23f0bf723d911bae4fcccbc6f5c8e759bb78a482ef1bd4173915a78921159f44`.
-
-## 5. Mandatory gate-feasibility simulation
-
-The pre-outcome CPU simulation is frozen at `experiment-specs/outer-mup-v8-phasediagram-gatesim.json` (SHA-256 `54070c480c1b5e373adba4c6cea5a58321de276cc853631886695c74d46c9e70`). It transports the sealed v3 five-seed per-eta standard deviations by T/arm/rung, transports v3 quadratic curvature, generates independent Gaussian eta-cell noise, and runs the exact all-45 point gate plus the exact registered 10,000-draw shared bootstrap (compressed to the 126 distinct count vectors; a literal-loop spot check matches 10,000/10,000). The sealed inputs are g3 readout `d4a3cde...44c8` and v3 launch manifest `8fae6137...54fc`.
-
-Primary result: **`P_eval=1.000` (500/500; Wilson 95% `[0.9924,1.0000]`)**. Every primary simulation retained all 45 point vertices and all 10,000 bootstrap refits. A sensitivity that shifts true vertices by the pre-existing v3 fitted-vertex offsets also gives `P_eval=1.000` (500/500). This clears the prospectively fixed `P_eval>=0.8` readiness threshold.
-
-The calculation is a measured-noise transport model, not a guarantee: it assumes the v3 seed-noise scale and local curvature transport to the new mu values. Independence discards favorable cross-curve seed covariance and is conservative for paired differences, but model transport remains the dominant limitation.
-
-## 6. Cost and the registered T=40 rule
-
-Observed successful v3 attempt-1 runtimes (80 cells at each S) give ideal mean cost `215.872 GPU-hours / 16 = 13.492 fleet-hours`. The registered planning estimate uses each S stratum’s measured p90 runtime plus 10% controller/eval/seal overhead: **15.255 fleet-hours**.
-
-The pre-outcome rule is: only if that planning estimate exceeds 18.0 fleet-hours, omit all 160 T=40 momentum cells (both arms, four mus, four etas, five seeds), retain the 20-cell T=40 baseline anchor, and label the eight missing comparisons `NOT_RUN_COST_RULE`. Equality retains them. Because `15.255 < 18`, the rule does not fire: all 900 cells, including the complete T=40 momentum subset, remain registered. The post-authority wall ceiling is 18 hours; breach stops only v8 process groups and never authorizes an extension.
-
-## 7. Inputs, evidence, retry, and fleet gate
-
-New no-wrap bundles use the frozen Day-1 partition and fixed development/audit bytes under `/root/yeto-data/outer-mup-v8`, with deterministic prep/verification scripts for seeds 801/809/811/821/823. CPU-only preparation and verification passed on both nodes with byte-identical combined manifest SHA-256 `5f4235e56be5fc968227e02a6c9a6ebe57277d2736fb2947da14f7bd7f15a20b` and capacity-report SHA-256 `de532769475ef116001748ffedc3824ab4292b93664cb0b2c5b27bdd48294d94`; the minimum is 26,573 complete 128-token blocks per learner versus 20,480 required. Both hashes must be rebound in the eventual launch manifest.
-
-A cell counts only with its exact registered command hash, pushed source commit, exact S steps on all four learners, `4T` strict-quorum tape rows with `c_steps=512`/`c_tokens=65536`, one rho row per commit, a finite 1,024-row endpoint loss, successful exits, and all registered artifact hashes. Retry authority is loss-blind, limited to the full 20-cell paired curve, an enumerated infrastructure cause, and one retry.
-
-The registered execution stack is `build_v8_launch_manifest.py`, `check_v8_gates.py`, `authorize_v8_launch.py`, `authorize_v8_retry.py`, and `run_slot_v8.py`; the authoritative JSON binds every raw-file hash. The manifest builder materializes and hashes all 900 attempt-1 commands and all registered attempt-2 commands, then balances deterministic longest-first queues with the measured v3 p90 runtime weights.
-
-v8 is **not launched by this registration**. The v6 factorial owns the fleet until every v6 slot queue is drained. A future v8 authority requires a fresh loss-blind proof on both nodes, including empty bracketed checks
+Launch is forbidden until both conditions hold: (1) all v6 slot queues are `DRAINED`; and (2) `/private/tmp/h200-seal-note.md` contains the exact line `SEAL VERIFICATION CELLS DONE`. A fresh gate proof also requires an empty bracketed priority-process check:
 
 ```bash
-pgrep -af '[r]un_slot_v6.py|[c]ompare_diloco.py.*yeto-results-v6|[a]nalyze_v6.py'
+pgrep -af '[r]un_slot_v6.py|[c]ompare_diloco.py.*yeto-results-v6|[a]nalyze_v6.py|[r]un_slot_v9.py|[s]moke_v9_qwen.py|[f]reeze_v6_selection.py'
 ```
 
-plus drained v6 slot registries, >=1 TB free per node, identical clean pushed registration/manifest/input hashes, and proof that no v8 result root or process predates authority. Execution then uses 16 deterministic longest-S-first queues (one cell/GPU, four learners packed), 30-second heartbeats, registered watchdogs, and process-group-scoped termination only. Broad/unbracketed pgrep kill patterns are forbidden.
+v8 MINI may use only GPUs 0-3 per node and only after those higher-priority conditions. Apparent idle GPUs alone never authorize launch.
 
-## 8. Claim boundary
+## Input/evidence/rails
 
-v8 may claim only the registered tuned-loss phase labels at these exact 135M/M4/H512/T/mu/protocol coordinates. It may not convert a `D` tuning-ratio boundary into a performance boundary, treat `UNCERTAIN` as neutral, pool raw and corrected arms, extrapolate beyond the grid, or silently reuse any earlier seed. All 900 statuses, all fitted/unbracketed curves, and all 40 simultaneous intervals must be reported.
+Dual-node CPU preparation already sealed input manifest `5f4235e56be5fc968227e02a6c9a6ebe57277d2736fb2947da14f7bd7f15a20b` and capacity report `de532769475ef116001748ffedc3824ab4292b93664cb0b2c5b27bdd48294d94` (minimum 26,573 blocks/learner versus 20,480 required). The model files, input bytes, every command, and execution scripts are hash-bound.
+
+A cell counts only with exact command/source hashes, exact S steps on four learners, `4T` strict-quorum tape/rho rows, fixed `c_steps=512`/`c_tokens=65536`, finite 1,024-row evaluation, and complete artifact evidence. Retry is loss-blind, whole-curve (12 cells), one attempt, and only for an enumerated infrastructure cause. Execution uses eight deterministic longest-S-first queues, one cell/GPU, four learners packed, 30-second heartbeats, watchdogs, and process-group-scoped termination.
+
+## Claim boundary
+
+Claims are limited to the 12 registered tuned-loss contrasts at these exact coordinates. `D` cannot substitute for a performance map; `UNCERTAIN` cannot be called neutral; prior outcomes cannot be pooled into MINI; and all statuses, fits, intervals, and labels must be reported.

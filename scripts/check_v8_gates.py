@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a fresh loss-blind v6-drain proof for a future v8 launch."""
+"""Prove v6 drain and priority seal-cell completion for a future v8-mini launch."""
 
 from __future__ import annotations
 
@@ -13,9 +13,11 @@ from pathlib import Path
 
 
 NODES = ("h200-n1", "h200-n2")
-V6_PROCESS_PATTERN = (
-    "[r]un_slot_v6.py|[c]ompare_diloco.py.*yeto-results-v6|[a]nalyze_v6.py"
+ACTIVE_PROCESS_PATTERN = (
+    "[r]un_slot_v6.py|[c]ompare_diloco.py.*yeto-results-v6|[a]nalyze_v6.py|"
+    "[r]un_slot_v9.py|[s]moke_v9_qwen.py|[f]reeze_v6_selection.py"
 )
+SEAL_COMPLETION_MARKER = "SEAL VERIFICATION CELLS DONE"
 INPUT_MANIFEST_SHA256 = (
     "5f4235e56be5fc968227e02a6c9a6ebe57277d2736fb2947da14f7bd7f15a20b"
 )
@@ -42,7 +44,7 @@ def inspect_node(node: str) -> dict:
     script = f"""
 set -u
 printf 'PROCESSES_BEGIN\\n'
-pgrep -af {shlex.quote(V6_PROCESS_PATTERN)} || true
+pgrep -af {shlex.quote(ACTIVE_PROCESS_PATTERN)} || true
 printf 'PROCESSES_END\\n'
 python3 - <<'PY'
 import hashlib, json, os
@@ -129,7 +131,7 @@ PY
     return {
         "return_code": result.returncode,
         "stderr": result.stderr.strip(),
-        "bracketed_pgrep_pattern": V6_PROCESS_PATTERN,
+        "bracketed_pgrep_pattern": ACTIVE_PROCESS_PATTERN,
         "active_processes": processes,
         "v6_result_root_exists": payload["v6_result_root_exists"],
         "v6_slot_records": slots,
@@ -145,12 +147,25 @@ PY
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--seal-note",
+        type=Path,
+        default=Path("/private/tmp/h200-seal-note.md"),
+    )
     args = parser.parse_args()
     nodes = {node: inspect_node(node) for node in NODES}
     all_drained = all(record["all_slots_drained"] for record in nodes.values())
     no_processes = all(record["active_processes"] == [] for record in nodes.values())
     no_errors = all(not record["errors"] for record in nodes.values())
-    status = "PASS" if all_drained and no_processes and no_errors else "WAIT"
+    seal_text = args.seal_note.read_text() if args.seal_note.is_file() else ""
+    seal_complete = any(
+        line.strip() == SEAL_COMPLETION_MARKER for line in seal_text.splitlines()
+    )
+    status = (
+        "PASS"
+        if all_drained and no_processes and no_errors and seal_complete
+        else "WAIT"
+    )
     proof = {
         "schema": "yeto_outer_mup_v8_gate_proof_v1",
         "checked_at_utc": utc_now(),
@@ -160,6 +175,11 @@ def main() -> int:
         "v6": {
             "all_slot_queues_drained": all_drained,
             "nodes": nodes,
+        },
+        "priority": {
+            "seal_note_path": str(args.seal_note.resolve()),
+            "required_exact_marker": SEAL_COMPLETION_MARKER,
+            "seal_verification_cells_complete": seal_complete,
         },
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

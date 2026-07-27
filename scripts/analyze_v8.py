@@ -3,9 +3,9 @@
 
 The primary estimand at each (T, mu, arm) coordinate is the independently
 tuned quadratic minimum minus the independently tuned mu=0 minimum at the
-same T.  Every curve is fit in x=log2(eta) from the five-seed mean loss at the
+same T.  Every curve is fit in x=log2(eta) from the three-seed mean loss at the
 four prospectively registered eta values.  One paired training-seed bootstrap
-draw is shared by all 45 curves so both the per-coordinate intervals and the
+draw is shared by all 15 curves so both the per-coordinate intervals and the
 simultaneous phase-map interval retain the registered pairing.
 """
 
@@ -21,15 +21,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-T_GRID = (2, 5, 10, 20, 40)
-MU_GRID = (0.5, 0.8, 0.9, 0.95)
+T_GRID = (2, 5, 20)
+MU_GRID = (0.8, 0.95)
 MOMENTUM_ARMS = ("raw", "corrected")
 BASELINE_ARM = "mu0"
-SEEDS = (801, 809, 811, 821, 823)
+SEEDS = (801, 809, 811)
 ETA_POINTS = 4
-EXPECTED_CURVES = 45
-EXPECTED_COMPARISONS = 40
-EXPECTED_CELLS = 900
+EXPECTED_CURVES = 15
+EXPECTED_COMPARISONS = 12
+EXPECTED_CELLS = 180
 BOOTSTRAP_REPLICATES = 10_000
 BOOTSTRAP_SEED = 20260728
 MIN_VALID_BOOTSTRAP_REPLICATES = 9_500
@@ -350,8 +350,8 @@ def joint_bootstrap(
         )
     return {
         "method": (
-            "paired nonparametric training-seed bootstrap; one shared five-index "
-            "draw refits all 45 curves and recomputes all 40 tuned-minimum "
+            "paired nonparametric training-seed bootstrap; one shared three-index "
+            "draw refits all 15 curves and recomputes all 12 tuned-minimum "
             "differences"
         ),
         "replicates": BOOTSTRAP_REPLICATES,
@@ -362,7 +362,7 @@ def joint_bootstrap(
         "status": status,
         "simultaneous_interval_method": (
             "95th percentile of the valid-draw maximum absolute deviation from "
-            "the 40 point estimates; one common unstudentized radius"
+            "the 12 point estimates; one common unstudentized radius"
         ),
         "simultaneous_radius_loss": simultaneous_radius,
         "comparisons": comparisons,
@@ -488,7 +488,7 @@ def main() -> int:
     if manifest.get("stage") != "V8_PHASE_DIAGRAM" or len(
         manifest.get("cells", [])
     ) != EXPECTED_CELLS:
-        raise SystemExit("manifest is not the complete registered 900-cell v8 grid")
+        raise SystemExit("manifest is not the complete registered 180-cell v8 mini grid")
     if manifest.get("reuse", {}).get("reused_cell_count") != 0:
         raise SystemExit("v8 analyzer is frozen for the registered zero-reuse audit")
 
@@ -533,7 +533,7 @@ def main() -> int:
         bootstrap = {
             "status": "NOT_EVALUABLE",
             "valid_replicates": 0,
-            "error": "complete evidence and 45 interior point fits are required",
+            "error": "complete evidence and 15 interior point fits are required",
         }
 
     evaluable = (
@@ -585,8 +585,8 @@ def main() -> int:
             "verdict": "COMPLETE" if evaluable else "NOT_EVALUABLE",
             "evaluable": evaluable,
             "conditions": {
-                "complete_900_cell_evidence": evidence_complete,
-                "all_45_eta_optima_interior": all_curves_interior,
+                "complete_180_cell_evidence": evidence_complete,
+                "all_15_eta_optima_interior": all_curves_interior,
                 "joint_bootstrap_at_least_9500_valid": (
                     bootstrap.get("status") == "VALID"
                 ),

@@ -61,8 +61,8 @@ def main() -> int:
             (cell["t"], cell["arm"], cell["mu"]) for cell in selected
         }
         eta_seed = {(cell["eta_index"], cell["seed"]) for cell in selected}
-        if len(selected) != 20 or len(coordinates) != 1 or len(eta_seed) != 20:
-            raise SystemExit(f"retry group {group} is not one complete 4x5 curve")
+        if len(selected) != 12 or len(coordinates) != 1 or len(eta_seed) != 12:
+            raise SystemExit(f"retry group {group} is not one complete 4x3 curve")
         grouped[group] = sorted(cell["cell_id"] for cell in selected)
     if args.output.exists():
         raise SystemExit("refusing to overwrite an existing retry authority")

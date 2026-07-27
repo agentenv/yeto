@@ -1,17 +1,17 @@
 {
   "analysis_contract": {
     "bootstrap": {
-      "method": "paired nonparametric training-seed bootstrap refitting all curves",
+      "method": "paired nonparametric three-training-seed bootstrap refitting all 15 curves",
       "minimum_valid_complete_refits": 9500,
       "pointwise_interval": 0.95,
       "replicates": 10000,
       "rng_seed": 20260728,
-      "simultaneous_interval": "95th percentile of the valid-draw maximum absolute deviation across all 40 Delta estimates; one common unstudentized radius"
+      "simultaneous_interval": "95th percentile of the valid-draw maximum absolute deviation across all 12 Delta estimates; one common unstudentized radius"
     },
     "curve_estimator": {
       "coordinate": "x=log2(eta)",
       "eta_star": "2^(-b/(2a))",
-      "formula": "loss=a*x^2+b*x+c fit by OLS to the four five-seed mean losses",
+      "formula": "loss=a*x^2+b*x+c fit by OLS to the four three-seed mean losses",
       "interior_rule": "a>0 and min(grid)+1e-12 < -b/(2a) < max(grid)-1e-12",
       "tuned_optimum_loss": "c-b^2/(4a)",
       "unbracketed_rule": "nonpositive curvature or a boundary/outside vertex is UNBRACKETED; no point may be dropped"
@@ -21,8 +21,8 @@
       "eta_star and fitted tuned loss for every curve",
       "raw-minus-corrected tuned-loss contrast may be reported descriptively but is not a registered phase label"
     ],
-    "full_quorum": "the diagram gate is evaluable only with all 900 cells, all 45 point fits interior, and at least 9500 valid complete shared-bootstrap refits",
-    "pairing": "one shared five-index training-seed resample is applied to all 45 curves in every bootstrap draw",
+    "full_quorum": "the MINI diagram gate is evaluable only with all 180 cells, all 15 point fits interior, and at least 9500 valid complete shared-bootstrap refits",
+    "pairing": "one shared three-index training-seed resample is applied to all 15 curves in every bootstrap draw",
     "practical_margin_loss": 0.01,
     "primary_estimand": "Delta(T,mu,arm)=fitted tuned-optimum loss(T,mu,arm)-fitted tuned-optimum loss(T,mu0), separately for raw and corrected",
     "primary_phase_labels": {
@@ -36,7 +36,7 @@
   "authority": {
     "all_amendments_require_new_commit_and_refreshed_hashes": true,
     "contract_kind": "prospective code, execution, and analysis contract",
-    "fleet_owner": "outer-mup-v6-factorial until every v6 slot queue is drained and a fresh loss-blind drain proof passes",
+    "fleet_owner": "outer-mup-v6-factorial until every v6 slot drains, then the separately registered seal-verification cells retain priority; v8 MINI may start only after both gates pass",
     "launch_forbidden_at_registration": true,
     "launch_requires_clean_pushed_registration_commit": true,
     "outcome_aware_recenter_extension_or_cell_substitution_forbidden": true,
@@ -49,13 +49,6 @@
   },
   "center_models": {
     "eta0": {
-      "T40_exception": {
-        "reason": "v3 T40 mu0 loss was still decreasing at its high edge; one pre-outcome registered rung above that measured boundary prevents knowingly repeating the miss",
-        "rule": "eta0_center=max(surface_prediction, sqrt(2)*v3_registered_high_eta)",
-        "selected_center": 0.05066022309911592,
-        "surface_prediction": 0.01842173837783116,
-        "v3_registered_high_eta": 0.03582218728980824
-      },
       "coefficients": {
         "beta_0": -4.4106518295376675,
         "beta_H_log2_H_over_512": 0.4886611783077774,
@@ -124,9 +117,7 @@
     "seeds": [
       801,
       809,
-      811,
-      821,
-      823
+      811
     ],
     "sequence_length": 128,
     "strict_quorum": true,
@@ -139,13 +130,11 @@
     "zero_injected_delay_and_jitter": true
   },
   "cost_and_scope_rule": {
-    "decision": "RETAIN_T40_MOMENTUM_SUBSET",
-    "drop_rule": "If and only if the pre-outcome registered planning estimate is >18.0 fleet-hours, omit all 160 T=40 momentum cells (raw+corrected, four mus, four etas, five seeds) and retain the 20-cell T40 mu0 anchor; label the eight T40 momentum comparisons NOT_RUN_COST_RULE. Equality at 18.0 retains them.",
-    "effective_cell_count": 900,
-    "effective_curve_count": 45,
-    "estimator": "sum 180 cells at each S using measured v3 per-S runtime, divide GPU-hours by 16 H200s; planning value uses p90 plus 10% controller/eval/seal overhead",
-    "ideal_mean_fleet_hours": 13.491974696690596,
-    "mean_gpu_hours": 215.87159514704953,
+    "decision": "MINI_RESCOPE_FIXED_180_CELLS",
+    "effective_cell_count": 180,
+    "effective_curve_count": 15,
+    "estimator": "sum 60 MINI cells at each selected S using measured v3 per-S runtime; registered planning uses p90 plus 10% controller/eval/seal overhead on the bounded eight-GPU subfleet (GPUs 0-3 per node)",
+    "ideal_mean_eight_gpu_fleet_hours": 3.4793038057393275,
     "observed_v3_attempt1_runtime_seconds_by_S": {
       "1024": {
         "mean": 225.6218506626319,
@@ -157,27 +146,31 @@
         "n": 80,
         "p90": 1100.9825773127377
       },
-      "20480": {
-        "mean": 2039.6692240558564,
-        "n": 80,
-        "p90": 2104.7707550935447
-      },
       "2560": {
         "mean": 369.16071842228996,
         "n": 80,
         "p90": 378.56285482645035
-      },
-      "5120": {
-        "mean": 607.6968521302566,
-        "n": 80,
-        "p90": 621.230812497437
       }
     },
-    "on_wall_ceiling": "terminate only v8 process groups, retain every attempt, mark unstarted cells NOT_RUN_WALL_CEILING, and report NOT_EVALUABLE; never extend after outcomes",
-    "p90_gpu_hours": 221.88699013255538,
-    "registered_planning_fleet_hours": 15.254730571613184,
-    "threshold_fleet_hours": 18.0,
-    "wall_ceiling_hours_after_launch_authority": 18.0
+    "on_wall_ceiling": "terminate only v8-mini process groups, retain every attempt, mark unstarted cells NOT_RUN_WALL_CEILING, and report NOT_EVALUABLE; never extend after outcomes",
+    "p90_gpu_hours": 28.528970584335426,
+    "registered_gpu_count": 8,
+    "registered_gpus_by_node": {
+      "h200-n1": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "h200-n2": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    "registered_planning_fleet_hours": 3.9227334553461213,
+    "wall_ceiling_hours_after_launch_authority": 6.0
   },
   "design": {
     "axes": {
@@ -185,18 +178,14 @@
         512
       ],
       "S_by_T": {
-        "10": 5120,
         "2": 1024,
         "20": 10240,
-        "40": 20480,
         "5": 2560
       },
       "T": [
         2,
         5,
-        10,
-        20,
-        40
+        20
       ],
       "arms": [
         "mu0",
@@ -204,16 +193,14 @@
         "corrected"
       ],
       "mu_momentum": [
-        0.5,
         0.8,
-        0.9,
         0.95
       ]
     },
-    "baseline_rule": "one correction-OFF mu=0 curve per T; it is the common baseline for all eight same-T momentum curves because correction ON at mu=0 is code- and regression-proven bit-identical",
-    "cell_formula": "5 T * (1 mu0 + 4 raw + 4 corrected curves) * 4 etas * 5 seeds",
-    "comparison_count": 40,
-    "curve_count": 45,
+    "baseline_rule": "one correction-OFF mu=0 curve per registered T; it is the common baseline for the four same-T momentum curves because correction ON at mu=0 is bit-identical",
+    "cell_formula": "3 T * (1 mu0 + 2 raw + 2 corrected curves) * 4 etas * 3 seeds",
+    "comparison_count": 12,
+    "curve_count": 15,
     "curves": [
       {
         "D_center": 1.0,
@@ -229,22 +216,6 @@
           0.20096369959006
         ],
         "mu": 0.0,
-        "outer_bias_correction": false
-      },
-      {
-        "D_center": 1.2765975221864987,
-        "H": 512,
-        "S": 1024,
-        "T": 2,
-        "arm": "raw",
-        "eta_center": 0.04535201891919419,
-        "eta_grid": [
-          0.016034360059131406,
-          0.03206872011826281,
-          0.06413744023652562,
-          0.12827488047305124
-        ],
-        "mu": 0.5,
         "outer_bias_correction": false
       },
       {
@@ -264,22 +235,6 @@
         "outer_bias_correction": false
       },
       {
-        "D_center": 4.503419452648394,
-        "H": 512,
-        "S": 1024,
-        "T": 2,
-        "arm": "raw",
-        "eta_center": 0.03199742450819824,
-        "eta_grid": [
-          0.011312797925125804,
-          0.022625595850251607,
-          0.045251191700503214,
-          0.09050238340100643
-        ],
-        "mu": 0.9,
-        "outer_bias_correction": false
-      },
-      {
         "D_center": 8.652114096531598,
         "H": 512,
         "S": 1024,
@@ -296,22 +251,6 @@
         "outer_bias_correction": false
       },
       {
-        "D_center": 0.976167938714258,
-        "H": 512,
-        "S": 1024,
-        "T": 2,
-        "arm": "corrected",
-        "eta_center": 0.0346790480597629,
-        "eta_grid": [
-          0.012260895024076266,
-          0.024521790048152532,
-          0.049043580096305064,
-          0.09808716019261013
-        ],
-        "mu": 0.5,
-        "outer_bias_correction": true
-      },
-      {
         "D_center": 0.962142199775189,
         "H": 512,
         "S": 1024,
@@ -325,22 +264,6 @@
           0.03867113119970811
         ],
         "mu": 0.8,
-        "outer_bias_correction": true
-      },
-      {
-        "D_center": 0.9575118804444778,
-        "H": 512,
-        "S": 1024,
-        "T": 2,
-        "arm": "corrected",
-        "eta_center": 0.0068032557109925455,
-        "eta_grid": [
-          0.002405314123694468,
-          0.004810628247388936,
-          0.009621256494777871,
-          0.019242512989555743
-        ],
-        "mu": 0.9,
         "outer_bias_correction": true
       },
       {
@@ -376,22 +299,6 @@
         "outer_bias_correction": false
       },
       {
-        "D_center": 1.1016622377686056,
-        "H": 512,
-        "S": 2560,
-        "T": 5,
-        "arm": "raw",
-        "eta_center": 0.025898819351809984,
-        "eta_grid": [
-          0.009156615394195112,
-          0.018313230788390224,
-          0.03662646157678045,
-          0.0732529231535609
-        ],
-        "mu": 0.5,
-        "outer_bias_correction": false
-      },
-      {
         "D_center": 1.542989066275753,
         "H": 512,
         "S": 2560,
@@ -405,22 +312,6 @@
           0.04103924256407999
         ],
         "mu": 0.8,
-        "outer_bias_correction": false
-      },
-      {
-        "D_center": 2.4695168022040157,
-        "H": 512,
-        "S": 2560,
-        "T": 5,
-        "arm": "raw",
-        "eta_center": 0.011611103177337913,
-        "eta_grid": [
-          0.004105144896876153,
-          0.008210289793752306,
-          0.016420579587504612,
-          0.032841159175009224
-        ],
-        "mu": 0.9,
         "outer_bias_correction": false
       },
       {
@@ -440,22 +331,6 @@
         "outer_bias_correction": false
       },
       {
-        "D_center": 0.9246647605995,
-        "H": 512,
-        "S": 2560,
-        "T": 5,
-        "arm": "corrected",
-        "eta_center": 0.02173781107742851,
-        "eta_grid": [
-          0.007685476810500876,
-          0.015370953621001751,
-          0.030741907242003503,
-          0.061483814484007006
-        ],
-        "mu": 0.5,
-        "outer_bias_correction": true
-      },
-      {
         "D_center": 0.8822159205873714,
         "H": 512,
         "S": 2560,
@@ -469,22 +344,6 @@
           0.023464504026762725
         ],
         "mu": 0.8,
-        "outer_bias_correction": true
-      },
-      {
-        "D_center": 0.8685038584592465,
-        "H": 512,
-        "S": 2560,
-        "T": 5,
-        "arm": "corrected",
-        "eta_center": 0.004083506498715166,
-        "eta_grid": [
-          0.001443737568130415,
-          0.00288747513626083,
-          0.00577495027252166,
-          0.01154990054504332
-        ],
-        "mu": 0.9,
         "outer_bias_correction": true
       },
       {
@@ -506,150 +365,6 @@
       {
         "D_center": 1.0,
         "H": 512,
-        "S": 5120,
-        "T": 10,
-        "arm": "mu0",
-        "eta_center": 0.03440470745207688,
-        "eta_grid": [
-          0.012163900972051455,
-          0.02432780194410291,
-          0.04865560388820582,
-          0.09731120777641164
-        ],
-        "mu": 0.0,
-        "outer_bias_correction": false
-      },
-      {
-        "D_center": 1.0327601272362725,
-        "H": 512,
-        "S": 5120,
-        "T": 10,
-        "arm": "raw",
-        "eta_center": 0.01776590502286683,
-        "eta_grid": [
-          0.00628119595779264,
-          0.01256239191558528,
-          0.02512478383117056,
-          0.05024956766234112
-        ],
-        "mu": 0.5,
-        "outer_bias_correction": false
-      },
-      {
-        "D_center": 1.1509746133339762,
-        "H": 512,
-        "S": 5120,
-        "T": 10,
-        "arm": "raw",
-        "eta_center": 0.00791978897130455,
-        "eta_grid": [
-          0.0028000682435879395,
-          0.005600136487175879,
-          0.011200272974351758,
-          0.022400545948703516
-        ],
-        "mu": 0.8,
-        "outer_bias_correction": false
-      },
-      {
-        "D_center": 1.5430259412779104,
-        "H": 512,
-        "S": 5120,
-        "T": 10,
-        "arm": "raw",
-        "eta_center": 0.005308735610063206,
-        "eta_grid": [
-          0.0018769214747010982,
-          0.0037538429494021965,
-          0.007507685898804393,
-          0.015015371797608786
-        ],
-        "mu": 0.9,
-        "outer_bias_correction": false
-      },
-      {
-        "D_center": 2.4633000230891726,
-        "H": 512,
-        "S": 5120,
-        "T": 10,
-        "arm": "raw",
-        "eta_center": 0.004237455833053865,
-        "eta_grid": [
-          0.0014981668772654393,
-          0.0029963337545308786,
-          0.005992667509061757,
-          0.011985335018123515
-        ],
-        "mu": 0.95,
-        "outer_bias_correction": false
-      },
-      {
-        "D_center": 0.8447935424026148,
-        "H": 512,
-        "S": 5120,
-        "T": 10,
-        "arm": "corrected",
-        "eta_center": 0.014532437341882835,
-        "eta_grid": [
-          0.00513799249580698,
-          0.01027598499161396,
-          0.02055196998322792,
-          0.04110393996645584
-        ],
-        "mu": 0.5,
-        "outer_bias_correction": true
-      },
-      {
-        "D_center": 0.7634857519482101,
-        "H": 512,
-        "S": 5120,
-        "T": 10,
-        "arm": "corrected",
-        "eta_center": 0.00525350078792142,
-        "eta_grid": [
-          0.0018573930160540534,
-          0.003714786032108107,
-          0.007429572064216214,
-          0.014859144128432427
-        ],
-        "mu": 0.8,
-        "outer_bias_correction": true
-      },
-      {
-        "D_center": 0.7381609283989281,
-        "H": 512,
-        "S": 5120,
-        "T": 10,
-        "arm": "corrected",
-        "eta_center": 0.0025396210794118588,
-        "eta_grid": [
-          0.0008978916434482125,
-          0.001795783286896425,
-          0.00359156657379285,
-          0.0071831331475857
-        ],
-        "mu": 0.9,
-        "outer_bias_correction": true
-      },
-      {
-        "D_center": 0.7258152892914879,
-        "H": 512,
-        "S": 5120,
-        "T": 10,
-        "arm": "corrected",
-        "eta_center": 0.0012485731346159107,
-        "eta_grid": [
-          0.00044143726514712727,
-          0.0008828745302942545,
-          0.001765749060588509,
-          0.003531498121177018
-        ],
-        "mu": 0.95,
-        "outer_bias_correction": true
-      },
-      {
-        "D_center": 1.0,
-        "H": 512,
         "S": 10240,
         "T": 20,
         "arm": "mu0",
@@ -661,22 +376,6 @@
           0.07120643339743839
         ],
         "mu": 0.0,
-        "outer_bias_correction": false
-      },
-      {
-        "D_center": 0.9352854710936713,
-        "H": 512,
-        "S": 10240,
-        "T": 20,
-        "arm": "raw",
-        "eta_center": 0.011773034917949232,
-        "eta_grid": [
-          0.004162396412813956,
-          0.008324792825627913,
-          0.016649585651255825,
-          0.03329917130251165
-        ],
-        "mu": 0.5,
         "outer_bias_correction": false
       },
       {
@@ -696,22 +395,6 @@
         "outer_bias_correction": false
       },
       {
-        "D_center": 0.99546440346141,
-        "H": 512,
-        "S": 10240,
-        "T": 20,
-        "arm": "raw",
-        "eta_center": 0.0025061091065217513,
-        "eta_grid": [
-          0.0008860433718074452,
-          0.0017720867436148903,
-          0.0035441734872297807,
-          0.007088346974459561
-        ],
-        "mu": 0.9,
-        "outer_bias_correction": false
-      },
-      {
         "D_center": 1.335424525439052,
         "H": 512,
         "S": 10240,
@@ -726,22 +409,6 @@
         ],
         "mu": 0.95,
         "outer_bias_correction": false
-      },
-      {
-        "D_center": 0.7051526507513299,
-        "H": 512,
-        "S": 10240,
-        "T": 20,
-        "arm": "corrected",
-        "eta_center": 0.008876206288195854,
-        "eta_grid": [
-          0.0031382128287969816,
-          0.006276425657593963,
-          0.012552851315187926,
-          0.025105702630375853
-        ],
-        "mu": 0.5,
-        "outer_bias_correction": true
       },
       {
         "D_center": 0.5718116883645937,
@@ -760,22 +427,6 @@
         "outer_bias_correction": true
       },
       {
-        "D_center": 0.5332239614703544,
-        "H": 512,
-        "S": 10240,
-        "T": 20,
-        "arm": "corrected",
-        "eta_center": 0.0013424060378350456,
-        "eta_grid": [
-          0.00047461220622946294,
-          0.0009492244124589259,
-          0.0018984488249178518,
-          0.0037968976498357035
-        ],
-        "mu": 0.9,
-        "outer_bias_correction": true
-      },
-      {
         "D_center": 0.5149178785973442,
         "H": 512,
         "S": 10240,
@@ -787,150 +438,6 @@
           0.000458318320343651,
           0.000916636640687302,
           0.001833273281374604
-        ],
-        "mu": 0.95,
-        "outer_bias_correction": true
-      },
-      {
-        "D_center": 1.0,
-        "H": 512,
-        "S": 20480,
-        "T": 40,
-        "arm": "mu0",
-        "eta_center": 0.05066022309911592,
-        "eta_grid": [
-          0.017911093644904123,
-          0.035822187289808245,
-          0.07164437457961649,
-          0.14328874915923298
-        ],
-        "mu": 0.0,
-        "outer_bias_correction": false
-      },
-      {
-        "D_center": 0.7678161403905803,
-        "H": 512,
-        "S": 20480,
-        "T": 40,
-        "arm": "raw",
-        "eta_center": 0.019448868485644456,
-        "eta_grid": [
-          0.006876213396302268,
-          0.013752426792604536,
-          0.02750485358520907,
-          0.05500970717041814
-        ],
-        "mu": 0.5,
-        "outer_bias_correction": false
-      },
-      {
-        "D_center": 0.655326551186711,
-        "H": 512,
-        "S": 20480,
-        "T": 40,
-        "arm": "raw",
-        "eta_center": 0.0066397978571785966,
-        "eta_grid": [
-          0.0023475230452594466,
-          0.004695046090518893,
-          0.009390092181037786,
-          0.018780184362075573
-        ],
-        "mu": 0.8,
-        "outer_bias_correction": false
-      },
-      {
-        "D_center": 0.6299109079104628,
-        "H": 512,
-        "S": 20480,
-        "T": 40,
-        "arm": "raw",
-        "eta_center": 0.00319114271273107,
-        "eta_grid": [
-          0.0011282393259530873,
-          0.0022564786519061746,
-          0.004512957303812349,
-          0.009025914607624698
-        ],
-        "mu": 0.9,
-        "outer_bias_correction": false
-      },
-      {
-        "D_center": 0.6895044088638383,
-        "H": 512,
-        "S": 20480,
-        "T": 40,
-        "arm": "raw",
-        "eta_center": 0.001746522359043306,
-        "eta_grid": [
-          0.000617488901786724,
-          0.001234977803573448,
-          0.002469955607146896,
-          0.004939911214293792
-        ],
-        "mu": 0.95,
-        "outer_bias_correction": false
-      },
-      {
-        "D_center": 0.4913016894064566,
-        "H": 512,
-        "S": 20480,
-        "T": 40,
-        "arm": "corrected",
-        "eta_center": 0.012444726597151824,
-        "eta_grid": [
-          0.004399875283429322,
-          0.008799750566858644,
-          0.017599501133717287,
-          0.035199002267434575
-        ],
-        "mu": 0.5,
-        "outer_bias_correction": true
-      },
-      {
-        "D_center": 0.32074301850876996,
-        "H": 512,
-        "S": 20480,
-        "T": 40,
-        "arm": "corrected",
-        "eta_center": 0.0032497825750276302,
-        "eta_grid": [
-          0.0011489716480919587,
-          0.0022979432961839174,
-          0.004595886592367835,
-          0.00919177318473567
-        ],
-        "mu": 0.8,
-        "outer_bias_correction": true
-      },
-      {
-        "D_center": 0.27824467621685456,
-        "H": 512,
-        "S": 20480,
-        "T": 40,
-        "arm": "corrected",
-        "eta_center": 0.0014095937373287122,
-        "eta_grid": [
-          0.0004983666451916107,
-          0.0009967332903832215,
-          0.001993466580766443,
-          0.003986933161532886
-        ],
-        "mu": 0.9,
-        "outer_bias_correction": true
-      },
-      {
-        "D_center": 0.2591562513246153,
-        "H": 512,
-        "S": 20480,
-        "T": 40,
-        "arm": "corrected",
-        "eta_center": 0.0006564456754817789,
-        "eta_grid": [
-          0.00023208859430687482,
-          0.00046417718861374964,
-          0.0009283543772274993,
-          0.0018567087544549986
         ],
         "mu": 0.95,
         "outer_bias_correction": true
@@ -949,7 +456,7 @@
       "point_count": 4,
       "scale": "log2"
     },
-    "fresh_cell_count": 900
+    "fresh_cell_count": 180
   },
   "evidence_and_retry_contract": {
     "allowed_retry_reasons": [
@@ -970,40 +477,40 @@
     ],
     "maximum_attempts": 2,
     "partial_work_never_counts": true,
-    "retry_unit": "whole five-seed paired curve across all four eta values (20 cells) when any member has an enumerated infrastructure failure; never choose from loss values"
+    "retry_unit": "whole three-seed curve across all four eta values (12 cells) when any member has an enumerated infrastructure failure; never choose from loss values"
   },
   "execution_scripts": {
     "gate_checker": {
       "path": "scripts/check_v8_gates.py",
-      "sha256": "328eb8bb2d6d55bcdfb027fe6afccff7154ca5c89890cde7eaaab47cbf0a9342"
+      "sha256": "12401b11a5c9ed5a7ca8eb6cc0b56fa2eab876b088cb512a8710a3bd72d02569"
     },
     "launch_authorizer": {
       "path": "scripts/authorize_v8_launch.py",
-      "sha256": "1d2703e56f5f54181cc84a842cb30ea0c3b982225f426e03dd03c8208816a83b"
+      "sha256": "cbb6a6a88cc836ede6c468d4c84980df6d3672cfcd7f485d0c1451a00b4f7608"
     },
     "manifest_builder": {
       "path": "scripts/build_v8_launch_manifest.py",
-      "sha256": "464980b459ddff4e42eb322bd0c79b0c23324a2593e28d723538ba65ac8620a6"
+      "sha256": "8ade7d50097d5744ca80f3332a033c5c8531eed490aff89800213f672ff4a2a6"
     },
     "retry_authorizer": {
       "path": "scripts/authorize_v8_retry.py",
-      "sha256": "5ebf5642de5051eeb012ce5694fc6a11c79281f0a6a0864503ca9bf576b5e72c"
+      "sha256": "ac82a8af9d12f27da8747e9a1a853a0065d76169eccfda4c51d6729c716686cd"
     },
     "runner": {
       "path": "scripts/run_slot_v8.py",
-      "sha256": "8a3b96cfc2387f34ca77461ad446dcba9fb3d025908f0b67af42c7e68830f3d9"
+      "sha256": "a32766889ef80831b7f3fba6f3679d72b0b23f73cdc29556357084b7336f4ba0"
     }
   },
   "frozen_analyzer": {
     "path": "scripts/analyze_v8.py",
-    "sha256": "23f0bf723d911bae4fcccbc6f5c8e759bb78a482ef1bd4173915a78921159f44"
+    "sha256": "00166147bae8566e2d2980c50cb94a282b3ecfb302a58025f98c88cdb870b699"
   },
   "gate_feasibility_sim": {
     "artifact": {
       "path": "experiment-specs/outer-mup-v8-phasediagram-gatesim.json",
-      "sha256": "54070c480c1b5e373adba4c6cea5a58321de276cc853631886695c74d46c9e70"
+      "sha256": "a5bf834db795dfbbfd2413ceda628a4bd6df0f2fb569b6bfbffb4aa81ae5bf84"
     },
-    "design_sha256": "8ed2d3a743066402cc56a9d645eed4ace3dcdc46971fa5e85b1114406eb6c3a5",
+    "design_sha256": "f7ca53ccceddb30aae0fdad982685002d8757bc91623145b9aed2f09758a4d0f",
     "mandatory": true,
     "minimum_acceptable_P_eval": 0.8,
     "on_below_threshold": "registration must not be marked ready; revise prospectively and rerun before any v8 process",
@@ -1014,11 +521,11 @@
       0.9923756595384479,
       1.0
     ],
-    "result_interpretation": "PASS: P_eval exceeds the prospective 0.8 threshold. Every primary simulation retained all 45 point optima and 10000/10000 complete shared-bootstrap refits. This is a v3 measured-noise transport calculation, not a guarantee about realized v8 outcomes.",
+    "result_interpretation": "PASS: MINI P_eval exceeds 0.8; every primary simulation retained all 15 point optima and all 10000 complete shared-bootstrap refits. This remains a measured-v3-noise transport calculation, not an outcome guarantee.",
     "sensitivity_P_eval": {
+      "count": "500/500",
       "scenario": "v3_vertex_shift_sensitivity",
       "value": 1.0,
-      "count": "500/500",
       "wilson95": [
         0.9923756595384479,
         1.0
@@ -1026,13 +533,13 @@
     },
     "script": {
       "path": "scripts/simulate_v8_gate_feasibility.py",
-      "sha256": "35c979078d71a754fb3b219ddd3236dddabcd8a54c8a94829c2c84ef1170a412"
+      "sha256": "80784738ec7b68c2cf4f7a64bb3c5ec7974410714b0777005fc538ab8c0bcd1d"
     },
     "source_inputs": {
       "g3_launch_manifest_sha256": "8fae6137d673d4c57861b37de09a42c5c462b0dff692cf10bde49e73caa554fc",
       "g3_readout_sha256": "d4a3cde6aa47580dff255c7a66030ab997a95f4072b1883bf71aa54d7da744c8"
     },
-    "status": "PASS_PREOUTCOME"
+    "status": "PASS_MINI_PREOUTCOME"
   },
   "machine_inputs": {
     "bundle_root": "/root/yeto-data/outer-mup-v8",
@@ -1092,39 +599,56 @@
     },
     "no_wrap_required_blocks_per_learner": 20480,
     "schema": "yeto_outer_mup_v8_inputs_v1",
+    "scientific_seed_subset": [
+      801,
+      809,
+      811
+    ],
+    "token_capacity_report_sha256": "de532769475ef116001748ffedc3824ab4292b93664cb0b2c5b27bdd48294d94",
     "token_verifier": {
       "path": "scripts/verify_inputs_v8.py",
       "sha256": "209135c5ec43a4ef1c1b3a2e811fa4f8bc7fbc06faa7e9eefc2536cf33b8a220"
     },
-    "token_capacity_report_sha256": "de532769475ef116001748ffedc3824ab4292b93664cb0b2c5b27bdd48294d94",
-    "train_rows_per_seed": 13758
+    "train_rows_per_seed": 13758,
+    "unused_prepared_seed_shards": [
+      821,
+      823
+    ],
+    "unused_seed_note": "the already dual-node-verified input pool contains two extra inert shards from the superseded full design; no MINI command or analysis key may reference them"
   },
-  "objective": "Produce separate raw- and bias-corrected momentum helps/hurts/neutral phase diagrams over (T,mu) at 135M/M=4/H=512, using independently tuned quadratic minima and signed tuned-loss differences to a same-T mu=0 baseline.",
+  "objective": "Produce the deadline-bounded MINI raw- and bias-corrected momentum helps/hurts/neutral phase diagrams over T={2,5,20}, mu={0.8,0.95} at 135M/M=4/H=512, using independently tuned quadratic minima and signed tuned-loss differences to a same-T mu=0 baseline.",
+  "pre_outcome_amendment": {
+    "amends_commit": "4175b71b72251aa279345e3ed858caa7ce5b39f9",
+    "pre_outcome": true,
+    "scope": "replace the unlaunched 900-cell full grid with the Tuesday-deadline MINI grid: T={2,5,20}, mu={0.8,0.95}, raw+corrected, seeds={801,809,811}; v6 drain and seal-verification cells have strict priority",
+    "superseded_design": "the 45-curve/900-cell design at commit 4175b71 remains immutable history and is forbidden to launch",
+    "trigger": "operator re-scope appended prospectively to /private/tmp/h200-phasediag-note.md after the full-grid registration and before any v8 launch authority, process, result root, attempt, or outcome"
+  },
   "program_id": "outer-mup-v8-phasediagram",
   "registered_date": "2026-07-26",
   "reuse_audit": {
-    "decision": "NO_REUSE: no v3 or v6 mu0 cell matches the full registered configuration exactly; prior cells inform centers and noise only and never enter the v8 outcome estimator",
-    "fresh_cell_count": 900,
+    "decision": "NO_REUSE: no v3 or v6 mu0 cell matches the MINI scientific seeds and shuffled inputs exactly; prior cells inform centers and noise only",
+    "fresh_cell_count": 180,
     "identity_rule": "reuse requires equality of model/revision, M, H, S, T, arm semantics, mu, eta, scientific seed, training seed, shuffled training bytes, fixed eval bytes, all optimizer/protocol flags, and executable source commit",
     "reused_cell_count": 0,
-    "v3_structural_matches": "all five T/S/H mu0 coordinates exist, but v3 seeds are {301,311,313,317,331}; v8 seeds and shuffled input bytes are different",
-    "v6_structural_matches": "T5/S2560, T10/S5120, and T20/S10240 mu0 coordinates exist, but v6 seeds are {601,607,613,617,619}; T2/S1024 and T40/S20480 are absent; v8 seeds/input bytes/source commit differ everywhere"
+    "v3_structural_matches": "T={2,5,20} structural mu0 coordinates exist, but v3 seeds are {301,311,313,317,331}; MINI seeds and shuffled input bytes differ",
+    "v6_structural_matches": "T5/S2560 and T20/S10240 structural mu0 coordinates exist, but v6 seeds are {601,607,613,617,619}; T2/S1024 is absent; MINI seeds/input bytes/source commit differ"
   },
   "schema": "yeto_outer_mup_v8_phasediagram_prereg_v1",
-  "status": "PREREGISTERED_PENDING_FLEET",
+  "status": "PREREGISTERED_MINI_PENDING_PRIORITY_FLEET",
   "workflow_gates": {
     "launch_requires_fresh_loss_blind_proof": [
       "both v6 node slot registries report every queue DRAINED",
-      "no active v6 learner/syncer/controller/analysis process on either node",
-      "all bracketed process checks return empty: pgrep -af '[r]un_slot_v6.py|[c]ompare_diloco.py.*yeto-results-v6|[a]nalyze_v6.py'",
+      "the exact line SEAL VERIFICATION CELLS DONE exists in /private/tmp/h200-seal-note.md",
+      "no active priority process under bracketed check: pgrep -af '[r]un_slot_v6.py|[c]ompare_diloco.py.*yeto-results-v6|[a]nalyze_v6.py|[r]un_slot_v9.py|[s]moke_v9_qwen.py|[f]reeze_v6_selection.py'",
       "both nodes have >=1 TB free at the registered v8 result target",
-      "registration commit and exact manifest are pushed and identical on both nodes",
-      "no v8 scientific attempt, launch authority, controller, learner, or syncer predates the proof; an empty storage symlink/controller directory is allowed"
+      "registration commit and exact 180-cell manifest are pushed and identical on both nodes",
+      "no v8-mini scientific attempt, launch authority, controller, learner, or syncer predates the proof"
     ],
     "preparation_while_waiting_allowed": true,
     "standard_execution_rails": [
       "one scientific cell per GPU with four learners packed by the harness",
-      "16 slot queues over h200-n1/h200-n2 GPUs 0-7",
+      "8 slot queues over h200-n1/h200-n2 GPUs 0-3; v6 and seal-verification cells always have priority",
       "longest-S first with deterministic seeded shuffle within S and greedy measured-runtime balance",
       "30-second controller heartbeats and registered S-dependent watchdogs",
       "process-group scoped termination only; no broad or unbracketed pgrep kill pattern",

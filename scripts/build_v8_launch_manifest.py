@@ -17,9 +17,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CONTRACT_PATH = REPO / "experiment-specs/outer-mup-v8-phasediagram-prereg.json"
 NODES = ("h200-n1", "h200-n2")
-GPUS = tuple(range(8))
+GPUS = tuple(range(4))
 SHUFFLE_SEED = 20260728
-EXPECTED_CELLS = 900
+EXPECTED_CELLS = 180
 RESULT_ROOT = Path("/root/yeto-results-v8")
 MODEL = Path("/root/yeto-data/model")
 EVAL = Path("/root/yeto-data/splits/seed-337/eval.jsonl")
@@ -256,7 +256,7 @@ def build_cells(contract: dict, source_commit: str) -> tuple[list[dict], dict]:
                     "command": retry,
                     "command_hash": canonical_sha256(retry),
                     "allowed_only_under": (
-                        "loss-blind whole 20-cell paired-curve retry authority "
+                        "loss-blind whole 12-cell paired-curve retry authority "
                         "for an enumerated infrastructure reason"
                     ),
                 }
@@ -283,7 +283,7 @@ def validate(cells: list[dict]) -> None:
             raise RuntimeError(f"correction flag failure: {cell['cell_id']}")
         if cell["h"] != 512 or cell["s"] != 512 * cell["t"]:
             raise RuntimeError(f"fixed-H closure failure: {cell['cell_id']}")
-    if len(curve_counts) != 45 or any(count != 20 for count in curve_counts.values()):
+    if len(curve_counts) != 15 or any(count != 12 for count in curve_counts.values()):
         raise RuntimeError("curve balance failure")
     for node in NODES:
         for gpu in GPUS:
@@ -336,10 +336,10 @@ def main() -> int:
     contract = json.loads(contract_path.read_text())
     if contract.get("schema") != "yeto_outer_mup_v8_phasediagram_prereg_v1":
         raise SystemExit("not the v8 phase-diagram contract")
-    if contract["gate_feasibility_sim"]["status"] != "PASS_PREOUTCOME":
-        raise SystemExit("v8 feasibility gate is not PASS_PREOUTCOME")
+    if contract["gate_feasibility_sim"]["status"] != "PASS_MINI_PREOUTCOME":
+        raise SystemExit("v8 feasibility gate is not PASS_MINI_PREOUTCOME")
     if contract["cost_and_scope_rule"]["effective_cell_count"] != EXPECTED_CELLS:
-        raise SystemExit("v8 registered cost rule did not retain the 900-cell grid")
+        raise SystemExit("v8 mini registered cost rule does not specify 180 cells")
     supplied_files = args.input_manifest is not None or args.token_report is not None
     if args.use_contract_input_proof == supplied_files:
         raise SystemExit(
