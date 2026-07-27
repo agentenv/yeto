@@ -420,10 +420,11 @@ def main() -> int:
             "is_execution_commit": True,
         },
         "contract": {
-            "json_path": str(contract_path),
+            "json_path": str(contract_path.relative_to(REPO)),
             "json_sha256": material["contract_json"],
-            "md_path": str(md_path),
+            "md_path": str(md_path.relative_to(REPO)),
             "md_sha256": material["contract_md"],
+            "analyzer_path": "scripts/analyze_v8.py",
             "analyzer_sha256": material["analyzer"],
         },
         "material_hashes": material,
