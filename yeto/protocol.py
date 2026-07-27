@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import queue
 import socket
 import struct
@@ -56,6 +57,13 @@ DTYPE_BF16 = 2
 DTYPE_Q4 = 3
 
 CHUNK_SIZE = 4 * 1024 * 1024
+# A control-only connection writes a bulk message as one frame under the
+# syncer's fixed per-frame write deadline.  Above 2 GiB that is not a safe
+# transport for full-model fragments: Qwen2.5-7B's four-way layout reaches
+# 4.35 GB per fragment and repeatedly timed out before the first barrier.
+# Keep explicitly unstriped small-model traffic unchanged, but use the
+# minimum one data stream (and therefore 4 MiB CHUNK frames) above this cap.
+MAX_UNSTRIPED_BULK_BYTES = 2 * 1024 * 1024 * 1024
 
 RECONNECT_BACKOFF_START = 1.0
 RECONNECT_BACKOFF_CAP = 30.0
@@ -63,6 +71,8 @@ RECONNECT_DIAL_TIMEOUT = 20.0
 
 _HEADER = struct.Struct("<IBQ")  # magic, type, payload length
 _CHUNK_HEAD = struct.Struct("<QQQ")  # msg_id, total_len, offset
+
+log = logging.getLogger(__name__)
 
 
 def bulk_dtype(dtype: int) -> int:
@@ -72,6 +82,22 @@ def bulk_dtype(dtype: int) -> int:
     payloads would not survive 4 bits, so they travel as bf16.
     """
     return DTYPE_BF16 if dtype == DTYPE_Q4 else dtype
+
+
+def effective_num_streams(layout: FragmentLayout, dtype: int, requested: int) -> int:
+    """Resolve the safe data-stream count without changing small layouts.
+
+    ``requested=0`` remains genuinely control-only while every full-parameter
+    bulk fragment fits below ``MAX_UNSTRIPED_BULK_BYTES``.  Larger fragments
+    get one chunked data stream so a single multi-gigabyte socket write cannot
+    consume the syncer's entire fixed write deadline.  Explicit positive
+    stream counts pass through unchanged.
+    """
+    if requested != 0:
+        return requested
+    wire_bytes = {DTYPE_F32: 4, DTYPE_BF16: 2}[bulk_dtype(dtype)]
+    largest = max((fragment.numel for fragment in layout.fragments), default=0)
+    return 1 if largest * wire_bytes > MAX_UNSTRIPED_BULK_BYTES else 0
 
 
 def write_frame(sock: socket.socket, msg_type: int, payload: bytes) -> None:
@@ -162,7 +188,16 @@ class SyncerClient:
         self.learner_id = learner_id
         self.layout = layout
         self.dtype = dtype
-        self.num_streams = num_streams
+        self.num_streams = effective_num_streams(layout, dtype, num_streams)
+        if self.num_streams != num_streams:
+            largest = max(fragment.numel for fragment in layout.fragments)
+            wire_bytes = {DTYPE_F32: 4, DTYPE_BF16: 2}[bulk_dtype(dtype)]
+            log.warning(
+                "enabling one chunked data stream for %d-byte bulk fragment "
+                "(requested --wan-streams=0; safe unstriped limit=%d)",
+                largest * wire_bytes,
+                MAX_UNSTRIPED_BULK_BYTES,
+            )
         self.layout_metadata = layout_metadata
         self.connect_timeout = connect_timeout
         self.max_reconnects = max_reconnects
@@ -171,6 +206,13 @@ class SyncerClient:
         self._threads: list[threading.Thread] = []
         self._pulls: queue.Queue[PullRequest] = queue.Queue()
         self._bcasts: queue.Queue[BcastFragment] = queue.Queue()
+        # Reconnect recovery deliberately replays every current fragment while
+        # the client deliberately retains broadcasts already received from the
+        # old group.  Suppress equal/older per-fragment replays before they can
+        # reset a learner window or violate the barrier startup uniqueness
+        # invariant.  This state intentionally survives group teardown.
+        self._latest_bcast_versions: dict[int, int] = {}
+        self._bcast_lock = threading.Lock()
         self._reasm: dict[int, tuple[bytearray, list[int]]] = {}
         self._reasm_lock = threading.Lock()
         self._msg_id = itertools.count()
@@ -486,7 +528,17 @@ class SyncerClient:
             self._pulls.put(PullRequest(fid, step))
         elif msg_type == MSG_BCAST_FRAGMENT:
             fid, version = struct.unpack_from("<IQ", payload)
-            self._bcasts.put(BcastFragment(fid, version, payload[12:]))
+            # Data streams can finish different messages concurrently, so the
+            # version check and queue insertion must be one ordered operation.
+            with self._bcast_lock:
+                previous = self._latest_bcast_versions.get(fid)
+                if previous is not None and version <= previous:
+                    return
+                with self._lock:
+                    if gen != self._gen:
+                        return
+                    self._latest_bcast_versions[fid] = version
+                    self._bcasts.put(BcastFragment(fid, version, payload[12:]))
 
 
 def _close_socket(sock: socket.socket) -> None:

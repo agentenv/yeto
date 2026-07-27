@@ -48,7 +48,12 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
   chunks are sent round-robin across the data streams wrapped in CHUNK
   envelopes. `msg_id` increases monotonically per sender per group; the
   receiver reassembles by (group, msg_id) and parses the inner frame when all
-  bytes arrived. With zero data streams, large messages go on stream 0.
+  bytes arrived. With zero requested data streams, large messages go on stream
+  0 only while every bulk fragment is at most 2 GiB. A larger layout
+  automatically opens one data stream so no multi-gigabyte monolithic frame
+  can exhaust the syncer's fixed per-frame write deadline. This leaves the
+  explicitly unstriped SmolLM2 layouts unchanged while safely chunking the
+  larger Qwen2.5-7B fragments.
 
 ## Semantics
 
@@ -107,6 +112,9 @@ frame := magic:u32 (0xD170C0DE) | type:u8 | len:u64 | payload[len]
   its global step.
 - **Recovery**: a (re)connecting learner sends HELLO; syncer replies with
   BCAST_FRAGMENT for every initialized fragment at that fragment's version.
+  The learner retains broadcasts received before a disconnect, so recovery is
+  at-least-once on the wire: it discards any replay whose version is equal to
+  or older than the latest broadcast already queued for that fragment.
 - Merge math runs in f32 on the syncer regardless of wire dtype.
 
 ## Q4 delta pushes (dtype = 3)
