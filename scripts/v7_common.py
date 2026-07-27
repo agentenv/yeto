@@ -27,9 +27,9 @@ CONTRACT_JSON = REPO / "experiment-specs/outer-mup-v7-27b-lora-prereg.json"
 CONTRACT_MD = REPO / "experiment-specs/outer-mup-v7-27b-lora-prereg.md"
 ANALYZER = REPO / "scripts/analyze_v7.py"
 CONTRACT_JSON_SHA256 = (
-    "fe9dab44fde1aabdb5733377af9b423d7819be51032d5af3c57ddc07ced921fd"
+    "59fafd84e8cc9308148029a2422032b1c7916bbb84ebdaa90f1a598cd6c64ac1"
 )
-CONTRACT_MD_SHA256 = "9f1d628e81e3ec521224dbdd632e62c031496db144afabb460b4d40cc5cb0f9f"
+CONTRACT_MD_SHA256 = "a6493cb1596d661747b7fc8274bde243990d03f27c7a3fc2a7e1c70f1d5dabb4"
 ANALYZER_SHA256 = "c835189056d407535cb866c4095b49a35361391a43b8f23a3669b40914d18f75"
 REGISTRATION_COMMIT = "6dcf53a821761959ec960f10ccc36189b6a1c6d9"
 NODES = ("h200-n1", "h200-n2")
@@ -162,6 +162,7 @@ def command_for(cell: dict, attempt_number: int) -> list[str]:
         "--learner-max-steps",
         str(cell["s"]),
         "--strict-quorum",
+        "--barrier-sync",
         "--pipeline-depth",
         "4",
         "--wan-streams",

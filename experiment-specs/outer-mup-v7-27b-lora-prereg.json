@@ -1,9 +1,10 @@
 {
-  "schema": "yeto_outer_mup_v7_27b_lora_prereg_v1",
-  "schema_version": "1.0.0",
+  "schema": "yeto_outer_mup_v7_27b_lora_prereg_v2",
+  "schema_version": "2.0.0",
   "program_id": "outer-mup-v7-27b-lora",
   "registered_date": "2026-07-26",
-  "status": "REGISTERED_PREPILOT",
+  "amended_date": "2026-07-26",
+  "status": "AMENDED_PREPILOT",
   "question": "Does the finite-horizon outer-momentum transient law observed at 1.7B transfer to the pinned dense 27B model when only replicated LoRA adapters are trained and synchronized?",
   "prospective_scope": {
     "state_at_registration": "The pinned 27B text model had completed standalone compatibility and full-tune FSDP smoke work documented in /private/tmp/h200-27b-note.md. No v7 FSDP+LoRA syncer smoke, v7 pilot cell, v7 main-grid cell, v7 endpoint loss, or G7 calculation existed.",
@@ -11,12 +12,26 @@
     "pilot_exception": "The three registered mu=0 center-probe cells necessarily precede exact numeric main-grid materialization. Their commands and deterministic selection rule are frozen here; their outcomes are excluded from G7 and will be disclosed in the hash-bound launch manifest before the main grid starts.",
     "forbidden": "No smoke, pilot, or main-grid loss may alter the G7 bands, estimator, bootstrap, near-bracket allowance, seeds, horizons, momentum arms, or registered conditional grid rule."
   },
+  "prelaunch_execution_amendment": {
+    "status": "ADOPTED_BEFORE_ANY_V7_GPU_PROCESS",
+    "trigger": "A post-registration exact-closure audit proved that the default non-barrier fixed-window path cannot produce T complete post-reset windows in exactly S=T*H optimizer steps. A broadcast is applied no earlier than the next optimizer-step boundary, so every round after the first shifts its next H-step snapshot beyond the requested S ceiling.",
+    "scientific_requirement": "Retain exact S in {2560,10240}, H=512, T=S/H, four fragments, and 4*T complete strict-quorum commits without partial terminal windows or unregistered padding steps.",
+    "adopted_repair": "Extend the existing --barrier-sync scheduler to world size greater than one for replicated LoRA adapters. All island ranks enter one collective stop together; rank 0 answers syncer pulls from the exact fixed-window snapshots; returned fragments are broadcast and applied to every rank; the complete four-fragment round closes before any rank begins the next optimizer step.",
+    "why_this_is_not_outcome_aware": "The defect and repair were established from control-flow arithmetic before the wiring smoke and before any v7 endpoint. No scientific coordinate, gate rule, prior, simulation result, or expected direction changed.",
+    "rejected_alternatives": [
+      "Do not add unregistered optimizer-step padding beyond S.",
+      "Do not allow undersized terminal fixed windows.",
+      "Do not relabel c_steps/c_tokens or reduce H.",
+      "Do not inject broadcast lag to obtain push-time resets."
+    ],
+    "verification": "A two-rank deterministic barrier worker is registered in tests/multirank_barrier_worker.py. The required real eight-H200 wiring smoke remains the authoritative FSDP2+LoRA integration gate before the pilot."
+  },
   "source": {
     "base_git_commit": "ea5f034096e54a2f959e6bd73890ca0e47390430",
     "base_branch": "origin/experiment/best-paper-phase-map",
     "registration_branch": "experiment/outer-mup-v7-27b-lora",
     "implementation_files": {
-      "yeto/learner.py": "faf4aec4bd004416d3691ca2725af5efa2ccca96e1c389da911aef6a75c98f20",
+      "yeto/learner.py": "3cf1df0442722c7bdb84e89e0500ecdd1fecc6f287459d8760ddbfbaa08edf8a",
       "scripts/compare_diloco.py": "d594dae3c517b3b5df7a1631c22bf8b377f8c42ce926fd7c8d29934f9fe5fcff",
       "syncer/src/main.rs": "9e7f35774e403c4ad476ca92c7db107d31480c985df0311647dbebd7dca64f29",
       "syncer/src/server.rs": "e90cd4899e3c3667448aef3ca70b94f32c9fc1a4f1258544c8e09c1ff288537d",
@@ -143,8 +158,8 @@
     "outer_optimizer": "raw production Nesterov",
     "outer_bias_correction": false,
     "strict_quorum": true,
-    "barrier_sync": false,
-    "barrier_rationale": "The production learner deliberately rejects --barrier-sync at world size greater than one. G7 therefore uses the supported non-barrier strict-quorum fixed-window path; each fragment push still carries an exact H=512 post-reset snapshot and c_tokens=262144.",
+    "barrier_sync": true,
+    "barrier_rationale": "The prelaunch exact-closure amendment makes the original DiLoCo barrier collective across all four island ranks. It is required to close exactly T complete post-reset H-step windows in exactly S=T*H optimizer steps; no rank trains while any fragment round is in flight.",
     "version_matched_anchor": true,
     "pipeline_depth": 4,
     "wan_streams": 0,
@@ -178,6 +193,7 @@
       "event tape has exactly 16 strict-quorum commits with two distinct learner pushes per commit",
       "rho telemetry has exactly 16 valid rows",
       "both learner adapters save successfully and the endpoint loss is finite",
+      "both learner barrier traces prove no inner optimizer step occurs between a fragment push and its strictly newer merged broadcast",
       "syncer and learner exit statuses are zero and all eight GPUs return to baseline occupancy"
     ],
     "failure_rule": "Any wiring-smoke failure blocks the pilot. It may receive one loss-blind infrastructure retry only after the exact failure is documented; scientific divergence is retained and blocks the lane."
@@ -385,6 +401,7 @@
       "two four-rank learner islands each reaching exactly S optimizer steps",
       "exact 4*T strict-quorum event-tape commits and rho telemetry rows",
       "each push reports c_steps=512 and c_tokens=262144 for main cells",
+      "the barrier trace registry hashes both logical learners' rank-0 causal traces and proves each four-fragment round closes before the next inner step",
       "finite 1024-row endpoint loss and zero learner/syncer exits",
       "hashes for command, Git commit/diff, adapter outputs, results, per-example loss, eval provenance, tape, rho telemetry, logs, and checkpoint"
     ],

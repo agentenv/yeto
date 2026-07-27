@@ -1,6 +1,6 @@
 # Outer-muP v7: 27B FSDP+LoRA finite-horizon T-scan
 
-Status: **REGISTERED_PREPILOT**. This contract is prospective for the wiring
+Status: **AMENDED_PREPILOT**. This contract is prospective for the wiring
 smoke, the three-cell center pilot, and the conditional 48/45-cell G7 grid.
 The JSON file is authoritative:
 `experiment-specs/outer-mup-v7-27b-lora-prereg.json`.
@@ -9,6 +9,17 @@ Registered 2026-07-26 from clean base commit
 `ea5f034096e54a2f959e6bd73890ca0e47390430`. At registration there was no
 v7 FSDP+LoRA syncer smoke, pilot endpoint, main-grid endpoint, or G7 readout.
 The completed full-tune 27B smoke lane is prior engineering evidence only.
+
+Prelaunch amendment, still before any v7 GPU process: an exact-closure audit
+found that non-barrier fixed windows cannot complete `T` post-reset windows in
+exactly `S=T*H` optimizer steps. Even at zero transport latency, a merge pushed
+at step `H` is applied no earlier than the next optimizer-step boundary, moving
+the next complete snapshot beyond `2H`; the final registered syncer round would
+therefore be stranded. The execution contract now uses a multi-rank extension
+of the existing true DiLoCo barrier. All four ranks stop together, rank 0
+exchanges the frozen adapter fragments, and the merged adapters are broadcast
+and applied on every rank before training resumes. No G7 coordinate, prior,
+simulation, estimator, band, seed, or expected direction changed.
 
 ## 1. Question
 
@@ -69,12 +80,13 @@ production Nesterov, strict quorum 2, pipeline depth 4, version-matched anchors,
 final-only checkpointing, and rho telemetry. There is no injected delay or
 jitter.
 
-`--barrier-sync` is deliberately **off**. The learner rejects barrier mode for
-world size greater than one; using it would make this registered island shape
-unexecutable. G7 instead uses the supported non-barrier strict-quorum path.
-Every pushed fragment still comes from an exact post-reset `H=512` snapshot
-and reports `c_steps=512`, `c_tokens=262144`. This protocol choice is fixed and
-is part of what G7 tests.
+`--barrier-sync` is **on** under the prelaunch exact-closure amendment. The
+multi-rank scheduler holds every island rank in the same collective stop,
+closes the complete four-fragment strict-quorum round, broadcasts/applies each
+merged adapter fragment, and only then permits the next optimizer step. Every
+push therefore comes from an exact post-reset `H=512` snapshot and reports
+`c_steps=512`, `c_tokens=262144`; `T` complete rounds fit exactly in `S=T*H`
+without padding or a partial terminal window.
 
 ## 4. Required wiring smoke
 
@@ -92,6 +104,7 @@ Before the pilot, one short cell must prove the complete topology:
 The smoke passes only if both four-rank islands initialize against one M=2
 syncer; their resolved 992-tensor layouts match; all four fragments complete
 16 strict-quorum commits with two learner pushes each; rho has 16 valid rows;
+both rank-0 barrier traces show no inner step between push and merged broadcast;
 both adapters save; endpoint loss is finite; every learner/syncer exits zero;
 and all eight GPUs are released. Failure blocks the pilot. Only one documented,
 loss-blind infrastructure retry is allowed.

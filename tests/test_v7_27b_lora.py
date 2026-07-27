@@ -19,7 +19,7 @@ def sha256(path):
 def test_contract_binds_frozen_analysis_and_simulation_artifacts():
     contract = json.loads(CONTRACT.read_text())
     feasibility = contract["gate_feasibility_simulation"]
-    assert contract["schema"] == "yeto_outer_mup_v7_27b_lora_prereg_v1"
+    assert contract["schema"] == "yeto_outer_mup_v7_27b_lora_prereg_v2"
     assert contract["frozen_analysis"]["sha256"] == sha256(ANALYZER)
     assert feasibility["prior_builder"]["sha256"] == sha256(PRIOR_BUILDER)
     assert feasibility["prior"]["sha256"] == sha256(PRIOR)
@@ -35,7 +35,7 @@ def test_design_closes_cell_counts_and_multirank_token_windows():
     assert protocol["ranks_per_island"] == 4
     assert protocol["gpus_per_cell"] == 8
     assert protocol["fixed_window_tokens"] == 512 * 4 * 128
-    assert protocol["barrier_sync"] is False
+    assert protocol["barrier_sync"] is True
     assert protocol["strict_quorum"] is True
     assert design["full_variant"]["log2_offsets_from_each_center"] == [
         -1.5,

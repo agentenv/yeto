@@ -28,6 +28,8 @@ MODEL_INVENTORY_SHA256 = (
     "32c8f34fa11f07ffde3eedb32435b39a78590ea102b7923bbc1d9b4df7b51c4c"
 )
 TELEMETRY_SCHEMA = "yeto_rho_telemetry_v1"
+BARRIER_TRACE_SCHEMA = "yeto_barrier_trace_v1"
+FRAGMENT_COUNT = 4
 STAGES = ("SMOKE", "PILOT", "MAIN")
 
 
@@ -194,6 +196,7 @@ def validate_command(cell: dict, errors: list[str]) -> None:
             errors.append(f"{cell_id}: {flag} binding mismatch")
     for flag in (
         "--strict-quorum",
+        "--barrier-sync",
         "--version-matched-anchor",
         "--rho-telemetry",
         "--skip-baseline",
@@ -201,8 +204,6 @@ def validate_command(cell: dict, errors: list[str]) -> None:
     ):
         if flag not in command:
             errors.append(f"{cell_id}: required flag missing: {flag}")
-    if "--barrier-sync" in command:
-        errors.append(f"{cell_id}: multi-rank barrier sync is forbidden")
     for flag in ("--work-dir", "--report-dir"):
         value = command_value(command, flag)
         if value is None or not value.startswith(str(common.RESULT_LINK) + "/"):
@@ -411,6 +412,235 @@ def require_file(failures: list[str], artifacts: dict, label: str, path: Path) -
     return True
 
 
+def validate_barrier_registry(
+    attempt_root: Path, tape_rows: list[dict], expected: dict
+) -> dict:
+    """Verify trace hashes and replay each logical learner's barrier state."""
+
+    registry_path = attempt_root / "report" / "barrier-version-trace.json"
+    registry = json.loads(registry_path.read_text())
+    learner_count = int(expected["learner_count"])
+    if (
+        registry.get("schema") != "yeto_barrier_version_trace_v1"
+        or registry.get("learner_count") != learner_count
+    ):
+        raise ValueError("barrier registry schema/learner count mismatch")
+
+    def verify_entry(entry: object, relative: str, label: str) -> Path:
+        if not isinstance(entry, dict) or entry.get("path") != relative:
+            raise ValueError(f"{label} registry path mismatch")
+        path = attempt_root / relative
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"{label} registry artifact is missing or unsafe")
+        size = entry.get("size_bytes")
+        if isinstance(size, bool) or not isinstance(size, int):
+            raise ValueError(f"{label} registry size is malformed")
+        if size != path.stat().st_size:
+            raise ValueError(f"{label} registry size mismatch")
+        if entry.get("sha256") != common.sha256_file(path):
+            raise ValueError(f"{label} registry hash mismatch")
+        return path
+
+    tape_path = verify_entry(
+        registry.get("syncer_tape"), "work/m2/tape.jsonl", "syncer tape"
+    )
+    if read_jsonl(tape_path) != tape_rows:
+        raise ValueError("barrier registry tape differs from validated event tape")
+
+    entries = registry.get("learner_traces")
+    if not isinstance(entries, list) or len(entries) != learner_count:
+        raise ValueError("barrier registry learner trace count mismatch")
+    trace_paths = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("barrier registry learner entry is malformed")
+        learner_id = entry.get("learner_id")
+        if (
+            isinstance(learner_id, bool)
+            or not isinstance(learner_id, int)
+            or learner_id not in range(learner_count)
+            or learner_id in trace_paths
+        ):
+            raise ValueError("barrier registry learner IDs are not exact")
+        trace_paths[learner_id] = verify_entry(
+            entry,
+            f"work/m2/learner-{learner_id}/barrier-version-trace.jsonl",
+            f"learner {learner_id} trace",
+        )
+    if set(trace_paths) != set(range(learner_count)):
+        raise ValueError("barrier registry learner coverage is incomplete")
+
+    expected_pushes = {}
+    for tape_row in tape_rows:
+        step = tape_row.get("step")
+        fragment = tape_row.get("fragment")
+        if (
+            isinstance(step, bool)
+            or not isinstance(step, int)
+            or isinstance(fragment, bool)
+            or not isinstance(fragment, int)
+            or fragment not in range(FRAGMENT_COUNT)
+        ):
+            raise ValueError("event tape cannot define barrier push identities")
+        for responder in tape_row.get("responders", []):
+            learner_id = responder.get("id")
+            key = (learner_id, step)
+            if (
+                isinstance(learner_id, bool)
+                or not isinstance(learner_id, int)
+                or learner_id not in range(learner_count)
+                or key in expected_pushes
+            ):
+                raise ValueError("event tape barrier responder identity is malformed")
+            expected_pushes[key] = {
+                "fragment": fragment,
+                "base_version": responder.get("base_version"),
+                "c_steps": responder.get("c_steps"),
+                "c_tokens": responder.get("c_tokens"),
+            }
+
+    full_fragments = set(range(FRAGMENT_COUNT))
+    push_counts = {}
+    broadcast_counts = {}
+    inner_counts = {}
+    for learner_id in range(learner_count):
+        awaiting = {}
+        reset_step = {fragment: 0 for fragment in full_fragments}
+        initial_fragments = set()
+        seen_pushes = set()
+        seen_broadcasts = set()
+        next_inner_step = 1
+        previous_local_step = 0
+        for sequence, row in enumerate(read_jsonl(trace_paths[learner_id]), 1):
+            if (
+                row.get("schema") != BARRIER_TRACE_SCHEMA
+                or row.get("event_seq") != sequence
+                or row.get("learner_id") != learner_id
+            ):
+                raise ValueError(f"learner {learner_id} trace identity/sequence mismatch")
+            local_step = row.get("local_step")
+            if (
+                isinstance(local_step, bool)
+                or not isinstance(local_step, int)
+                or local_step < previous_local_step
+            ):
+                raise ValueError(f"learner {learner_id} trace local step is not monotone")
+            previous_local_step = local_step
+            event = row.get("event")
+            declared_awaiting = row.get("awaiting_fragments")
+            if event == "initial_broadcast_applied":
+                fragment = row.get("fragment")
+                if (
+                    local_step != 0
+                    or isinstance(fragment, bool)
+                    or not isinstance(fragment, int)
+                    or fragment not in full_fragments
+                    or fragment in initial_fragments
+                    or row.get("broadcast_version") != 0
+                    or declared_awaiting != []
+                    or awaiting
+                    or next_inner_step != 1
+                ):
+                    raise ValueError(f"learner {learner_id} initial barrier prefix is invalid")
+                initial_fragments.add(fragment)
+                continue
+            if event == "inner_step_started":
+                if (
+                    initial_fragments != full_fragments
+                    or awaiting
+                    or declared_awaiting != []
+                    or local_step != next_inner_step
+                ):
+                    raise ValueError(f"learner {learner_id} stepped while barrier-blocked")
+                next_inner_step += 1
+                continue
+            if event == "push_sent":
+                fragment = row.get("fragment")
+                pull_step = row.get("pull_step")
+                if (
+                    isinstance(fragment, bool)
+                    or not isinstance(fragment, int)
+                    or fragment not in full_fragments
+                    or isinstance(pull_step, bool)
+                    or not isinstance(pull_step, int)
+                ):
+                    raise ValueError(f"learner {learner_id} push identity is malformed")
+                expected_push = expected_pushes.get((learner_id, pull_step))
+                observed_push = {
+                    "fragment": fragment,
+                    "base_version": row.get("base_version"),
+                    "c_steps": row.get("c_steps"),
+                    "c_tokens": row.get("c_tokens"),
+                }
+                if (
+                    initial_fragments != full_fragments
+                    or expected_push != observed_push
+                    or pull_step in seen_pushes
+                    or fragment in awaiting
+                    or local_step - reset_step[fragment] != expected["c_steps"]
+                    or row.get("c_steps") != expected["c_steps"]
+                    or row.get("c_tokens") != expected["c_tokens"]
+                ):
+                    raise ValueError(f"learner {learner_id} push does not match tape/window")
+                awaiting[fragment] = (
+                    pull_step,
+                    row.get("base_version"),
+                    local_step,
+                )
+                seen_pushes.add(pull_step)
+            elif event == "broadcast_applied":
+                fragment = row.get("fragment")
+                pending = awaiting.get(fragment)
+                if pending is None:
+                    raise ValueError(f"learner {learner_id} broadcast has no pending push")
+                pull_step, base_version, push_local_step = pending
+                if (
+                    row.get("pushed_base_version") != base_version
+                    or row.get("broadcast_version") != pull_step
+                    or isinstance(base_version, bool)
+                    or not isinstance(base_version, int)
+                    or pull_step <= base_version
+                    or local_step != push_local_step
+                    or pull_step in seen_broadcasts
+                ):
+                    raise ValueError(f"learner {learner_id} broadcast release is invalid")
+                del awaiting[fragment]
+                reset_step[fragment] = local_step
+                seen_broadcasts.add(pull_step)
+            else:
+                raise ValueError(f"learner {learner_id} trace event is unknown: {event!r}")
+            if declared_awaiting != sorted(awaiting):
+                raise ValueError(f"learner {learner_id} declared barrier state is false")
+
+        expected_steps = {
+            step
+            for expected_learner, step in expected_pushes
+            if expected_learner == learner_id
+        }
+        if (
+            awaiting
+            or seen_pushes != expected_steps
+            or seen_broadcasts != expected_steps
+            or initial_fragments != full_fragments
+            or next_inner_step - 1 != expected["learner_steps_per_learner"]
+            or set(reset_step.values()) != {expected["learner_steps_per_learner"]}
+        ):
+            raise ValueError(f"learner {learner_id} barrier trace coverage is incomplete")
+        push_counts[str(learner_id)] = len(seen_pushes)
+        broadcast_counts[str(learner_id)] = len(seen_broadcasts)
+        inner_counts[str(learner_id)] = next_inner_step - 1
+
+    return {
+        "validated": True,
+        "registry_sha256": common.sha256_file(registry_path),
+        "learner_count": learner_count,
+        "commit_count": len(tape_rows),
+        "push_counts": push_counts,
+        "broadcast_counts": broadcast_counts,
+        "inner_step_counts": inner_counts,
+    }
+
+
 def validate_layouts(
     work: Path, expected: dict, failures: list[str], artifacts: dict
 ) -> None:
@@ -453,6 +683,8 @@ def validate_cell(cell: dict, attempt_root: Path, command: list[str]) -> dict:
     report = attempt_root / "report"
     failures = []
     artifacts = {}
+    tape_rows = []
+    barrier_validation = None
 
     telemetry_path = work / "rho-telemetry.jsonl"
     if require_file(failures, artifacts, "rho_telemetry", telemetry_path):
@@ -515,6 +747,7 @@ def validate_cell(cell: dict, attempt_root: Path, command: list[str]) -> dict:
         ("eval_rows", report / "eval-provenance" / "eval_rows.jsonl"),
         ("eval_provenance", report / "eval-provenance" / "eval_provenance.json"),
         ("acquisition_state", report / "acquisition-state.json"),
+        ("barrier_registry", report / "barrier-version-trace.json"),
         ("recorded_command", attempt_root / "command.sh"),
         ("recorded_git_commit", attempt_root / "git_commit.txt"),
         ("recorded_git_diff", attempt_root / "git_diff.patch"),
@@ -533,6 +766,14 @@ def validate_cell(cell: dict, attempt_root: Path, command: list[str]) -> dict:
                 work / filename,
             )
     validate_layouts(work, expected, failures, artifacts)
+    registry_path = report / "barrier-version-trace.json"
+    if tape_path.is_file() and registry_path.is_file():
+        try:
+            barrier_validation = validate_barrier_registry(
+                attempt_root, tape_rows, expected
+            )
+        except Exception as exc:
+            failures.append(f"barrier trace validation error: {exc}")
 
     command_path = attempt_root / "command.sh"
     if (
@@ -619,6 +860,7 @@ def validate_cell(cell: dict, attempt_root: Path, command: list[str]) -> dict:
         "failures": failures,
         "expected": expected,
         "observed_artifacts": artifacts,
+        "barrier_trace_validation": barrier_validation,
         "seed": cell["seed"],
         "training_seed": cell["training_seed"],
         "command_hash": common.canonical_sha256(command),

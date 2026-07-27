@@ -1,6 +1,9 @@
+import json
 import math
 import sys
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +30,7 @@ def test_prep_manifest_binds_exact_multirank_commands():
     for cell in cells:
         command = cell["command"]
         assert common.command_for(cell, 1) == command
-        assert "--barrier-sync" not in command
+        assert "--barrier-sync" in command
         assert runner.command_value(command, "--learner-gpus") == "4"
         assert runner.command_value(command, "--settings") == "m2"
         assert runner.command_value(command, "--fixed-window-tokens") == str(
@@ -110,3 +113,133 @@ def test_every_registered_process_poll_name_uses_bracket_idiom():
     )
     assert "run_slot_v6.py" not in drain.PROCESS_PATTERN
     assert "compare_diloco.py" not in drain.PROCESS_PATTERN
+
+
+def build_barrier_evidence(root: Path):
+    attempt = root / "attempt-1"
+    work = attempt / "work" / "m2"
+    report = attempt / "report"
+    work.mkdir(parents=True)
+    report.mkdir(parents=True)
+    expected = {
+        "learner_count": 2,
+        "learner_steps_per_learner": 2,
+        "outer_steps": 4,
+        "c_steps": 2,
+        "c_tokens": 1024,
+    }
+    tape = [
+        {
+            "step": step,
+            "fragment": step - 1,
+            "responders": [
+                {
+                    "id": learner,
+                    "base_version": 0,
+                    "c_steps": 2,
+                    "c_tokens": 1024,
+                }
+                for learner in range(2)
+            ],
+        }
+        for step in range(1, 5)
+    ]
+    tape_path = work / "tape.jsonl"
+    tape_path.write_text("".join(json.dumps(row) + "\n" for row in tape))
+
+    trace_paths = []
+    for learner in range(2):
+        trace_dir = work / f"learner-{learner}"
+        trace_dir.mkdir()
+        rows = []
+
+        def append(event, local_step, **fields):
+            rows.append(
+                {
+                    "schema": "yeto_barrier_trace_v1",
+                    "event_seq": len(rows) + 1,
+                    "learner_id": learner,
+                    "local_step": local_step,
+                    "event": event,
+                    **fields,
+                }
+            )
+
+        for fragment in range(4):
+            append(
+                "initial_broadcast_applied",
+                0,
+                fragment=fragment,
+                broadcast_version=0,
+                awaiting_fragments=[],
+            )
+        append("inner_step_started", 1, awaiting_fragments=[])
+        append("inner_step_started", 2, awaiting_fragments=[])
+        awaiting = []
+        for pull_step, fragment in enumerate(range(4), 1):
+            awaiting.append(fragment)
+            append(
+                "push_sent",
+                2,
+                fragment=fragment,
+                pull_step=pull_step,
+                base_version=0,
+                c_steps=2,
+                c_tokens=1024,
+                awaiting_fragments=list(awaiting),
+            )
+        for pull_step, fragment in enumerate(range(4), 1):
+            awaiting.remove(fragment)
+            append(
+                "broadcast_applied",
+                2,
+                fragment=fragment,
+                pushed_base_version=0,
+                broadcast_version=pull_step,
+                awaiting_fragments=list(awaiting),
+            )
+        trace_path = trace_dir / "barrier-version-trace.jsonl"
+        trace_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        trace_paths.append(trace_path)
+
+    def entry(path):
+        return {
+            "path": path.relative_to(attempt).as_posix(),
+            "sha256": common.sha256_file(path),
+            "size_bytes": path.stat().st_size,
+        }
+
+    registry = {
+        "schema": "yeto_barrier_version_trace_v1",
+        "learner_count": 2,
+        "syncer_tape": entry(tape_path),
+        "learner_traces": [
+            {"learner_id": learner, **entry(path)}
+            for learner, path in enumerate(trace_paths)
+        ],
+    }
+    registry_path = report / "barrier-version-trace.json"
+    common.write_json_atomic(registry_path, registry)
+    return attempt, tape, expected, trace_paths, registry_path
+
+
+def test_barrier_registry_replays_exact_multirank_state_machines(tmp_path):
+    attempt, tape, expected, _traces, _registry = build_barrier_evidence(tmp_path)
+    proof = runner.validate_barrier_registry(attempt, tape, expected)
+    assert proof["validated"] is True
+    assert proof["push_counts"] == {"0": 4, "1": 4}
+    assert proof["inner_step_counts"] == {"0": 2, "1": 2}
+
+
+def test_barrier_registry_rejects_rehashed_inner_step_while_blocked(tmp_path):
+    attempt, tape, expected, traces, registry_path = build_barrier_evidence(tmp_path)
+    rows = runner.read_jsonl(traces[0])
+    pushed = next(row for row in rows if row["event"] == "push_sent")
+    pushed["event"] = "inner_step_started"
+    traces[0].write_text("".join(json.dumps(row) + "\n" for row in rows))
+    registry = json.loads(registry_path.read_text())
+    registry["learner_traces"][0]["sha256"] = common.sha256_file(traces[0])
+    registry["learner_traces"][0]["size_bytes"] = traces[0].stat().st_size
+    common.write_json_atomic(registry_path, registry)
+    with pytest.raises(ValueError, match="stepped while barrier-blocked"):
+        runner.validate_barrier_registry(attempt, tape, expected)

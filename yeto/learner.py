@@ -957,16 +957,6 @@ def main(argv=None) -> None:
     if getattr(args, "barrier_sync", False):
         if args.syncer == "none":
             raise RuntimeError("--barrier-sync requires an async syncer run")
-        if world > 1:
-            # The block-until-broadcast gate runs on the syncer-facing rank 0
-            # only; a multi-rank learner would need every rank to hold the
-            # collective in lockstep while rank 0 waits. Not implemented — the
-            # barrier experiments run one process per learner.
-            raise RuntimeError(
-                "--barrier-sync currently supports single-process learners "
-                "(world size 1); this learner has world size "
-                f"{world}. Use --gpu-slots / one process per learner."
-            )
 
     log.info("loading model %s (%s)", args.model, args.tuning)
     log.info("rng seed=%d", process_seed)
@@ -1348,6 +1338,13 @@ def run_inner_loop(
     fixed_window_snapshots: list[dict | None] | None = (
         [None] * layout.num_fragments if fixed_window_enabled else None
     )
+    if barrier_sync and world > 1:
+        if not fixed_window_enabled:
+            raise RuntimeError("multi-rank barrier-sync requires a fixed window")
+        if lag_commits > 0:
+            raise RuntimeError("multi-rank barrier-sync does not support broadcast lag")
+        if fixed_window_schedule is not None:
+            raise RuntimeError("multi-rank barrier-sync requires a constant fixed window")
     if fixed_window_enabled and rank == 0:
         log.info(
             "fixed response window enabled: %d step(s), %d token(s)/step, "
@@ -1444,13 +1441,249 @@ def run_inner_loop(
                         awaiting_fragments=sorted(awaiting_broadcast),
                     )
 
+    def apply_broadcast_worldn(acts: list, shutdown_value: bool) -> bool:
+        """Broadcast rank-0 syncer actions to every island rank and apply.
+
+        All ranks call this helper in the same order. It is the multi-rank
+        counterpart of ``apply_broadcast_world1`` and is also used while a
+        barrier round is stopped, so no rank can enter the next gradient
+        collective before the merged adapters have been applied everywhere.
+        """
+
+        nonlocal global_step
+        if world <= 1:
+            apply_broadcast_world1(acts)
+            return shutdown_value
+        meta = [(fid, version) for fid, version, _flat in acts] if rank == 0 else None
+        box = [meta, shutdown_value]
+        dist.broadcast_object_list(box, src=0)
+        meta, shutdown_value = box
+        if rank != 0:
+            acts = [
+                (fid, version, torch.empty(layout.fragments[fid].numel))
+                for fid, version in meta
+            ]
+        for fid, version, flat in acts:
+            flat = flat.to(device)
+            dist.broadcast(flat, src=0)
+            if args.merge_alpha > 0:
+                local = fragment_flat(layout.fragments[fid], params)
+                flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
+            apply_fragment(layout.fragments[fid], flat, params)
+            if rank == 0:
+                fragment_versions[fid] = version
+                steps_at_reset[fid] = steps_total
+                tokens_at_reset[fid] = tokens_total
+                if fixed_window_snapshots is not None:
+                    fixed_window_snapshots[fid] = None
+                if lag_applied_since_push is not None:
+                    lag_applied_since_push[fid] = True
+                if awaiting_broadcast:
+                    pushed_base_version = awaiting_broadcast.get(fid)
+                    if barrier_release(awaiting_broadcast, fid, version):
+                        emit_barrier_trace(
+                            "broadcast_applied",
+                            steps_total,
+                            fragment=int(fid),
+                            pushed_base_version=int(pushed_base_version),
+                            broadcast_version=int(version),
+                            awaiting_fragments=sorted(awaiting_broadcast),
+                        )
+            global_step = max(global_step, version)
+        return bool(shutdown_value)
+
+    def wait_distributed_barrier(shutdown_value: bool) -> bool:
+        """Hold all ranks until rank 0 has received every awaited merge."""
+
+        deadline = (
+            time.monotonic() + float(client.connect_timeout) if rank == 0 else 0.0
+        )
+        while True:
+            actions = []
+            error = None
+            if rank == 0:
+                try:
+                    client.check_health()
+                    actions = drain_broadcast_actions()
+                    shutdown_value = client.shutdown.is_set()
+                    if time.monotonic() >= deadline and awaiting_broadcast:
+                        error = (
+                            "multi-rank barrier timed out waiting for fragments "
+                            f"{sorted(awaiting_broadcast)}"
+                        )
+                except Exception as exc:
+                    error = str(exc)
+            shutdown_value = apply_broadcast_worldn(actions, shutdown_value)
+            state = [
+                bool(awaiting_broadcast) if rank == 0 else None,
+                error,
+            ]
+            dist.broadcast_object_list(state, src=0)
+            waiting, error = state
+            if error:
+                raise RuntimeError(error)
+            if not waiting:
+                return shutdown_value
+            if rank == 0 and not actions:
+                time.sleep(0.002)
+
+    def answer_distributed_barrier_pull(pull) -> None:
+        """Push one already-frozen fixed-window snapshot from island rank 0."""
+
+        nonlocal fixed_window_steps, local_commits
+        fid = pull.fragment_id
+        if fixed_window_snapshots is None:
+            raise RuntimeError("multi-rank barrier requires fixed-window snapshots")
+        snap = fixed_window_snapshots[fid]
+        if snap is None:
+            raise RuntimeError(f"fragment {fid} has no barrier snapshot")
+        local_flat = snap["flat"]
+        c_steps = int(snap["c_steps"])
+        c_tokens = int(snap["c_tokens"])
+        local_step_for_push = int(snap["local_step"])
+        base_version_for_push = int(snap["base_version"])
+        if probe is not None:
+            if anchors is None:
+                raise RuntimeError("fragment utility probe requires anchors")
+            probe.maybe_record(
+                learner_id=args.learner_id,
+                fid=fid,
+                pull_step=pull.global_step,
+                base_version=base_version_for_push,
+                local_step=local_step_for_push,
+                c_steps=c_steps,
+                c_tokens=c_tokens,
+                local_flat=local_flat,
+                anchors=anchors,
+            )
+        if anchors is not None and client.dtype == DTYPE_Q4:
+            payload = quantize_q4(local_flat - anchors[fid])
+        else:
+            payload = pack_flat(local_flat, client.dtype)
+        _debug_sleep(args.debug_push_delay_ms, args.debug_delay_jitter_ms)
+        client.push_fragment(
+            fid,
+            pull.global_step,
+            base_version_for_push,
+            local_step_for_push,
+            c_steps,
+            c_tokens,
+            payload,
+        )
+        awaiting_broadcast[fid] = base_version_for_push
+        emit_barrier_trace(
+            "push_sent",
+            steps_total,
+            fragment=int(fid),
+            pull_step=int(pull.global_step),
+            base_version=int(base_version_for_push),
+            c_steps=int(c_steps),
+            c_tokens=int(c_tokens),
+            awaiting_fragments=sorted(awaiting_broadcast),
+        )
+        if fixed_window_schedule is not None:
+            round_key = (fid, pull.global_step)
+            if round_key not in answered_rounds:
+                answered_rounds.add(round_key)
+                local_commits += 1
+                new_window = scheduled_window_steps(
+                    fixed_window_schedule,
+                    base_fixed_window_steps,
+                    local_commits,
+                )
+                if new_window != fixed_window_steps:
+                    fixed_window_steps = new_window
+                    invalidate_undersized_snapshots(fixed_window_snapshots, new_window)
+
+    def close_distributed_barrier_round(shutdown_value: bool) -> bool:
+        """Close one complete P-fragment round without another inner step."""
+
+        nonlocal pending_pulls
+        trigger = None
+        snapshot_error = None
+        if rank == 0 and fixed_window_snapshots is not None:
+            ready = [snapshot is not None for snapshot in fixed_window_snapshots]
+            trigger = any(ready)
+            if trigger and not all(ready):
+                snapshot_error = (
+                    "multi-rank barrier fragment snapshots became ready out of lockstep"
+                )
+        state = [
+            trigger,
+            global_step + layout.num_fragments if trigger else None,
+            snapshot_error,
+        ]
+        dist.broadcast_object_list(state, src=0)
+        trigger, target, snapshot_error = state
+        if snapshot_error:
+            raise RuntimeError(snapshot_error)
+        if not trigger:
+            return shutdown_value
+        deadline = (
+            time.monotonic() + float(client.connect_timeout) if rank == 0 else 0.0
+        )
+        while global_step < target:
+            pushed = 0
+            error = None
+            if rank == 0:
+                try:
+                    client.check_health()
+                    pending_pulls.extend(client.drain_pulls())
+                    still_pending = []
+                    for pull in pending_pulls:
+                        round_key = (int(pull.fragment_id), int(pull.global_step))
+                        if int(pull.global_step) <= int(global_step):
+                            answered_rounds.add(round_key)
+                            continue
+                        if int(pull.global_step) > int(target):
+                            still_pending.append(pull)
+                            continue
+                        fid = pull.fragment_id
+                        if (
+                            fixed_window_snapshots is None
+                            or fixed_window_snapshots[fid] is None
+                        ):
+                            still_pending.append(pull)
+                            continue
+                        answer_distributed_barrier_pull(pull)
+                        answered_rounds.add(round_key)
+                        pushed += 1
+                    pending_pulls = still_pending
+                    if (
+                        pushed == 0
+                        and not awaiting_broadcast
+                        and time.monotonic() >= deadline
+                    ):
+                        error = (
+                            "multi-rank barrier timed out closing fragment round "
+                            f"at global_step={global_step} target={target}"
+                        )
+                except Exception as exc:
+                    error = str(exc)
+            control = [pushed, bool(awaiting_broadcast) if rank == 0 else None, error]
+            dist.broadcast_object_list(control, src=0)
+            pushed, waiting, error = control
+            if error:
+                raise RuntimeError(error)
+            if waiting:
+                shutdown_value = wait_distributed_barrier(shutdown_value)
+                if rank == 0:
+                    deadline = time.monotonic() + float(client.connect_timeout)
+            elif pushed == 0 and rank == 0:
+                time.sleep(0.002)
+            if shutdown_value and global_step < target:
+                raise RuntimeError(
+                    "syncer shut down before the multi-rank barrier round closed"
+                )
+        return shutdown_value
+
     # A barrier-synchronized run must begin from one fully registered global
     # state.  INIT_PARAMS is sent asynchronously, so without this startup
     # gate a learner can take local steps before version-zero broadcasts
     # arrive; those late applies reset fragment windows after training has
     # begun and invalidate the exact H-step schedule.  The phase-map transport
     # pins every frame to one FIFO socket, making the 0..P-1 prefix exact.
-    if barrier_sync and rank == 0 and client is not None:
+    if barrier_sync and world == 1 and rank == 0 and client is not None:
         initial_fragments: set[int] = set()
         startup_deadline = time.monotonic() + float(client.connect_timeout)
         while len(initial_fragments) < layout.num_fragments:
@@ -1490,6 +1723,64 @@ def run_inner_loop(
                 )
         if initial_fragments != set(range(layout.num_fragments)):
             raise RuntimeError("barrier-sync initial fragment coverage is incomplete")
+
+    if barrier_sync and world > 1:
+        initial_fragments: set[int] = set()
+        startup_deadline = (
+            time.monotonic() + float(client.connect_timeout) if rank == 0 else 0.0
+        )
+        while True:
+            initial_actions = []
+            error = None
+            startup_shutdown = False
+            if rank == 0:
+                try:
+                    client.check_health()
+                    initial_actions = drain_broadcast_actions()
+                    startup_shutdown = client.shutdown.is_set()
+                    for fid, version, _flat in initial_actions:
+                        if (
+                            steps_total != 0
+                            or version != 0
+                            or fid in initial_fragments
+                            or fid not in range(layout.num_fragments)
+                        ):
+                            raise RuntimeError(
+                                "multi-rank barrier initial broadcasts must be "
+                                "unique version-zero fragments"
+                            )
+                        initial_fragments.add(fid)
+                    if (
+                        time.monotonic() >= startup_deadline
+                        and len(initial_fragments) < layout.num_fragments
+                    ):
+                        error = "multi-rank barrier timed out during initial broadcast"
+                    if startup_shutdown:
+                        error = "multi-rank barrier syncer shut down during initial broadcast"
+                except Exception as exc:
+                    error = str(exc)
+            shutdown = apply_broadcast_worldn(initial_actions, startup_shutdown)
+            if rank == 0:
+                for fid, version, _flat in initial_actions:
+                    emit_barrier_trace(
+                        "initial_broadcast_applied",
+                        0,
+                        fragment=int(fid),
+                        broadcast_version=int(version),
+                        awaiting_fragments=[],
+                    )
+            state = [
+                len(initial_fragments) == layout.num_fragments if rank == 0 else None,
+                error,
+            ]
+            dist.broadcast_object_list(state, src=0)
+            complete, error = state
+            if error:
+                raise RuntimeError(error)
+            if complete:
+                break
+            if rank == 0 and not initial_actions:
+                time.sleep(0.002)
 
     shutdown = False
     epoch = 0
@@ -1605,41 +1896,13 @@ def run_inner_loop(
                 shutdown = client.shutdown.is_set()
 
             if world > 1:
-                meta = [(f, v) for f, v, _ in actions] if rank == 0 else None
-                box = [meta, shutdown]
-                dist.broadcast_object_list(box, src=0)
-                meta, shutdown = box
-                if rank != 0:
-                    actions = [(f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta]
-                for fid, version, flat in actions:
-                    flat = flat.to(device)
-                    dist.broadcast(flat, src=0)
-                    # α-blend: keep a share of the inner steps taken while the
-                    # merge was in flight. Ranks hold identical params, so
-                    # blending after the broadcast stays consistent.
-                    if args.merge_alpha > 0:
-                        local = fragment_flat(layout.fragments[fid], params)
-                        flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
-                    apply_fragment(layout.fragments[fid], flat, params)
-                    if rank == 0:
-                        fragment_versions[fid] = version
-                        # Both modes restart the window at apply time. In lag
-                        # mode this starts the window that must be trained
-                        # entirely on the just-applied released (K-stale)
-                        # base; the matching pull is held until this apply.
-                        steps_at_reset[fid] = steps_total
-                        tokens_at_reset[fid] = tokens_total
-                        if fixed_window_snapshots is not None:
-                            fixed_window_snapshots[fid] = None
-                        if lag_applied_since_push is not None:
-                            lag_applied_since_push[fid] = True
-                    global_step = max(global_step, version)
+                shutdown = apply_broadcast_worldn(actions, shutdown)
             else:
                 apply_broadcast_world1(actions)
 
             # 2. answer pulls whose fragment has made progress since the
             # (just-applied) broadcasts.
-            if rank == 0 and client is not None:
+            if rank == 0 and client is not None and not (barrier_sync and world > 1):
                 pending_pulls.extend(client.drain_pulls())
                 still_pending = []
                 for pull in pending_pulls:
@@ -1777,7 +2040,7 @@ def run_inner_loop(
                 # merged global. drain/apply reuse the boundary helpers so the
                 # applied state is bit-identical to a broadcast picked up at a
                 # step boundary. A no-op unless --barrier-sync pushed above.
-                if barrier_sync and awaiting_broadcast:
+                if barrier_sync and world == 1 and awaiting_broadcast:
                     drain_required_broadcasts(
                         awaiting_broadcast,
                         client,
@@ -1786,8 +2049,11 @@ def run_inner_loop(
                     )
                 shutdown = client.shutdown.is_set()
 
+            if barrier_sync and world > 1:
+                shutdown = close_distributed_barrier_round(shutdown)
+
             boundary_target = barrier_round_closure_target(
-                barrier_sync=barrier_sync,
+                barrier_sync=barrier_sync and world == 1,
                 shutdown=shutdown,
                 steps_total=steps_total,
                 max_local_steps=args.max_local_steps,
