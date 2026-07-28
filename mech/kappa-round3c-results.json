@@ -1,0 +1,518 @@
+{
+  "adjudication": {
+    "closed_numeric_vocabulary_not_entered": true,
+    "label": "VOID"
+  },
+  "curvature": {
+    "adapter": "/home/c/yeto-mechR3-20260727/repo/mech/lane-e/checkpoint_spectrum_probe.py",
+    "adapter_sha256": "857c88c2a227c32f983c5d206c48d43f49792cdda2f797db691df1386e46d8bd",
+    "ages": [
+      5,
+      10,
+      15,
+      20
+    ],
+    "arm_specific_diagnostics": {
+      "corrected": {
+        "gamma": 0.5967524579951781,
+        "intercept": 3.613767900820456,
+        "n": 4,
+        "r2": 0.817568482878825,
+        "slope": -0.5967524579951781,
+        "sse": 0.08615422223975717
+      },
+      "mu0": {
+        "gamma": -0.8939405867550805,
+        "intercept": 1.3200686208022652,
+        "n": 4,
+        "r2": 0.47732834473215446,
+        "slope": 0.8939405867550805,
+        "sse": 0.948727392259988
+      }
+    },
+    "common_slope": {
+      "intercept": 2.466918260811361,
+      "n": 4,
+      "r2": 0.16026465649664834,
+      "slope": 0.14859406437995107,
+      "sse": 0.12543536663745505
+    },
+    "estimator": "unweighted OLS with arm fixed effects",
+    "gamma": -0.14859406437995107,
+    "invalid_probe_count": 0,
+    "invalid_records": [],
+    "n": 8,
+    "records": [
+      {
+        "age": 5,
+        "arm": "mu0",
+        "checkpoint_sha256": "80abf3a6528f12c2c0f96ebc9c8f0492c6c149ca2d17a3497e81b5f3c6034d1a",
+        "checks_pass": true,
+        "failures": [],
+        "global_step": 20,
+        "gradient_mass": 1.0321398269175293,
+        "gradient_ritz_coordinates": [
+          0.43038121797940454,
+          0.0004731642560892648,
+          0.12935079240983446,
+          0.8063180659492708,
+          0.2654319255149718,
+          -0.11294881787052007,
+          -0.27938277661368394,
+          -0.13698496582162004
+        ],
+        "inverse_quadratic_form": 0.0581540899254093,
+        "lambda_eff": 17.748361778877324,
+        "path": "/home/c/yeto-mechR3-20260727/output/round3c/spectrum/mu0/age_05_step_00000020.json",
+        "result_sha256": "0eed3aa36b406a944b675e72c84e9b31e723aff25c88569942a2abed87481a32",
+        "ritz_values": [
+          -16.056004633502074,
+          -0.0005396134223018635,
+          4.751025811660811,
+          10.111941050853556,
+          52.115796545119,
+          59.076909154425024,
+          132.6300259934219,
+          141.9684943409303
+        ]
+      },
+      {
+        "age": 10,
+        "arm": "mu0",
+        "checkpoint_sha256": "f1ce70021c42c5ef6825a4a56a9051b17b02760a95d50d63f0cb89d95cb519af",
+        "checks_pass": true,
+        "failures": [],
+        "global_step": 40,
+        "gradient_mass": 1.0337394312908539,
+        "gradient_ritz_coordinates": [
+          0.2788756447388074,
+          -0.45586526195386595,
+          -0.005094117159530171,
+          -0.7092367728094876,
+          -0.22975480029888387,
+          -0.33517005482898904,
+          -0.18353065042356562,
+          -0.2151794263211638
+        ],
+        "inverse_quadratic_form": 0.06055193249676614,
+        "lambda_eff": 17.071947808537114,
+        "path": "/home/c/yeto-mechR3-20260727/output/round3c/spectrum/mu0/age_10_step_00000040.json",
+        "result_sha256": "252cc57661832104648883d0d1b38e6d99c15d7687f85a0f6ed1cd4eaf4c2612",
+        "ritz_values": [
+          -14.371731502518132,
+          -3.743442225678709,
+          0.0005737825424049153,
+          7.29061331539147,
+          19.7733670798435,
+          32.22241648092585,
+          68.06750922055878,
+          76.52285232272428
+        ]
+      },
+      {
+        "age": 15,
+        "arm": "mu0",
+        "checkpoint_sha256": "ee93ffec6499367ca9851b435ddcc14869622cbffd0ba5fe883cf8f2bea4d4cd",
+        "checks_pass": true,
+        "failures": [],
+        "global_step": 60,
+        "gradient_mass": 1.03271802620072,
+        "gradient_ritz_coordinates": [
+          -0.5330693838141043,
+          -0.002142099828696452,
+          -0.046819386418127024,
+          -0.7294768790170365,
+          0.15335443455634287,
+          0.344980059671853,
+          -0.10710332142066363,
+          -0.24540161379962447
+        ],
+        "inverse_quadratic_form": 0.011724301884330322,
+        "lambda_eff": 88.0835410405937,
+        "path": "/home/c/yeto-mechR3-20260727/output/round3c/spectrum/mu0/age_15_step_00000060.json",
+        "result_sha256": "9d0a4cc5de178913b031b1b9f2df8ffa7f2660257160f94c46e382d7ed63dd1a",
+        "ritz_values": [
+          -4.862385022856627,
+          -0.0007149793719496612,
+          1.049673928475555,
+          7.796087275117566,
+          19.564132656135175,
+          30.78147636450143,
+          50.92147838092874,
+          63.7741274026384
+        ]
+      },
+      {
+        "age": 20,
+        "arm": "mu0",
+        "checkpoint_sha256": "1d7d3a3ee4471e8ae55bfd51d2165823397f1627b2f41186ce7b7625d0fde5b0",
+        "checks_pass": true,
+        "failures": [],
+        "global_step": 80,
+        "gradient_mass": 1.0335819138465798,
+        "gradient_ritz_coordinates": [
+          0.45067767843731826,
+          -0.30071910292839205,
+          -0.006431180350637952,
+          -0.7247992029668566,
+          -0.12767937982115377,
+          0.3678121153030258,
+          -0.005410863801589307,
+          -0.2510921480144268
+        ],
+        "inverse_quadratic_form": 0.025960285969525678,
+        "lambda_eff": 39.81396487927303,
+        "path": "/home/c/yeto-mechR3-20260727/output/round3c/spectrum/mu0/age_20_step_00000080.json",
+        "result_sha256": "4b33af1f4f01c3354571a694c0de3c6e69a45214f05a0c08b57d932989eef7b2",
+        "ritz_values": [
+          -5.691409964984768,
+          -0.9451639115436609,
+          0.0005322570457088402,
+          7.213320789247881,
+          16.283260756419516,
+          28.598078136205693,
+          43.07441145679231,
+          59.568547502344394
+        ]
+      },
+      {
+        "age": 5,
+        "arm": "corrected",
+        "checkpoint_sha256": "b81d16335ceba79e71dd5ed2131c2015476c00e4540bd4238be3317fd50a07eb",
+        "checks_pass": true,
+        "failures": [],
+        "global_step": 20,
+        "gradient_mass": 1.0317646303059056,
+        "gradient_ritz_coordinates": [
+          -0.4083243003379277,
+          -0.1627765231309895,
+          -0.006550739356841773,
+          -0.7931859704514943,
+          -0.119582507955459,
+          0.2920764164968845,
+          -0.09915225165996742,
+          -0.3160902171498088
+        ],
+        "inverse_quadratic_form": 0.07827518535195566,
+        "lambda_eff": 13.181247999179956,
+        "path": "/home/c/yeto-mechR3-20260727/output/round3c/spectrum/corrected/age_05_step_00000020.json",
+        "result_sha256": "401ffde81916ac5f3558c30c2a441967a55e09fd810d7f430fb5fc9e6f3396ee",
+        "ritz_values": [
+          -17.21742501973238,
+          -2.1155244250655256,
+          0.0015761968630391482,
+          8.973018383437967,
+          28.70889164446124,
+          50.45348680823814,
+          72.16857977667087,
+          122.1199052040783
+        ]
+      },
+      {
+        "age": 10,
+        "arm": "corrected",
+        "checkpoint_sha256": "7a27f4c5235ba387919b16e6e53e9b7680f75be22c7338943f0c9cba4c6981e2",
+        "checks_pass": true,
+        "failures": [],
+        "global_step": 40,
+        "gradient_mass": 1.0321595725937203,
+        "gradient_ritz_coordinates": [
+          0.44138540277968574,
+          0.1350986851199313,
+          0.000750329236271801,
+          0.7569449422059061,
+          -0.1797674123767116,
+          -0.36156903766852544,
+          -0.20505582962467145,
+          -0.20254444140560957
+        ],
+        "inverse_quadratic_form": 0.08805622383450822,
+        "lambda_eff": 11.721597039336462,
+        "path": "/home/c/yeto-mechR3-20260727/output/round3c/spectrum/corrected/age_10_step_00000040.json",
+        "result_sha256": "18c30b302134b658d5971c2bb4a80caf7b795d2ce792fb47623fb70190ec9800",
+        "ritz_values": [
+          -9.949908004906863,
+          -4.194763072653346,
+          0.0007360629489422348,
+          5.546673729262168,
+          16.598307295601483,
+          28.285181224754286,
+          58.989480042263246,
+          63.90719973268006
+        ]
+      },
+      {
+        "age": 15,
+        "arm": "corrected",
+        "checkpoint_sha256": "7cd0656fe5f269039bf09de398af31c7163977a432f74009097cca511a6e5d74",
+        "checks_pass": true,
+        "failures": [],
+        "global_step": 60,
+        "gradient_mass": 1.030861763028495,
+        "gradient_ritz_coordinates": [
+          -0.41197934147667326,
+          -0.07774608830848113,
+          0.0035272155887469928,
+          -0.7873288507784264,
+          0.034774836837613406,
+          -0.4125040376098758,
+          -0.02310971195772563,
+          -0.25157154320686376
+        ],
+        "inverse_quadratic_form": 0.16658388728110188,
+        "lambda_eff": 6.188244132453026,
+        "path": "/home/c/yeto-mechR3-20260727/output/round3c/spectrum/corrected/age_15_step_00000060.json",
+        "result_sha256": "be39c6afeab540ff41b04e662fa87dcf685afa84bf4614146e9349f58ae2596c",
+        "ritz_values": [
+          -10.06579866492309,
+          -3.7042914700464493,
+          0.00036505934371724606,
+          4.3513282539085045,
+          11.280497766657042,
+          23.878887803262167,
+          44.033071664974926,
+          48.95295216282819
+        ]
+      },
+      {
+        "age": 20,
+        "arm": "corrected",
+        "checkpoint_sha256": "9dc8c5e084aa6ed197375cc0cffe4f0b65ad5026ce7834a18a34794fa0e46697",
+        "checks_pass": true,
+        "failures": [],
+        "global_step": 80,
+        "gradient_mass": 1.0323217907831186,
+        "gradient_ritz_coordinates": [
+          0.019299009715699013,
+          0.3482237836578167,
+          -0.0060985843788007536,
+          -0.7289259398434604,
+          0.33790571220582,
+          -0.45671942982565467,
+          0.07990719797392311,
+          -0.22396707075909933
+        ],
+        "inverse_quadratic_form": 0.16168165377594193,
+        "lambda_eff": 6.384903708454812,
+        "path": "/home/c/yeto-mechR3-20260727/output/round3c/spectrum/corrected/age_20_step_00000080.json",
+        "result_sha256": "3d2b2b6f9b137441b8a2fcd52c2ae11c7e4f5c99c7c04cb3a8a06ec84cc85cfd",
+        "ritz_values": [
+          -95.0574249193728,
+          -12.921784976037278,
+          -0.000386260885279813,
+          2.3475329772051525,
+          3.9173913992116853,
+          19.798188941310723,
+          37.224550327050316,
+          42.961101767446195
+        ]
+      }
+    ],
+    "valid_probe_count": 8
+  },
+  "loss_floor": {
+    "beta": 0.12036643696558891,
+    "boundary_optimum": true,
+    "cells": [
+      "v8-t20-mu0-mu0-e1-seed801",
+      "v8-t20-mu0-mu0-e1-seed809",
+      "v8-t20-mu0-mu0-e1-seed811",
+      "v8-t20-mu0-mu0-e2-seed801",
+      "v8-t20-mu0-mu0-e2-seed809",
+      "v8-t20-mu0-mu0-e2-seed811"
+    ],
+    "ell_inf": 0.0,
+    "evidence": [
+      {
+        "cell": "v8-t20-mu0-mu0-e1-seed801",
+        "evidence": "/home/c/h200-evac/n1/yeto-results-v8/v8-t20-mu0-mu0-e1-seed801/attempt-1/evidence.json",
+        "evidence_sha256": "02598fe763271923243e9f82d64545a296b3c535b8289382000c993b2dc70836",
+        "learner_log_sha256": {
+          "learner_0_log": "55428950e33676a4317c8cc4e3c44235b0d58095353d455d5c5b836827e2758e",
+          "learner_1_log": "a3213532b40213f9724026e2440a3bc1a5c54763f9826cbe70e0d3a1fb292072",
+          "learner_2_log": "0dc52b48570495c0a4cda76b719ba45bd9e0876bff0eaf5ac27f49cfe713a40a",
+          "learner_3_log": "31bca7331b6c8727bb212f9e16ad727255c2596bc7d5075337123f1d86f96cd1"
+        }
+      },
+      {
+        "cell": "v8-t20-mu0-mu0-e1-seed809",
+        "evidence": "/home/c/h200-evac/n1/yeto-results-v8/v8-t20-mu0-mu0-e1-seed809/attempt-1/evidence.json",
+        "evidence_sha256": "c0f205ab4d4528dec46f3cc153260b1e4b74907a1088bf487ba79684e5a2e079",
+        "learner_log_sha256": {
+          "learner_0_log": "2ed013af2b48db63a5b7b46cdd1f4889e450b6dc6bc96eee801ce7e063382e8c",
+          "learner_1_log": "aab972b894c514709f7370e31c4f5d38aa278af22e41e642da6409c17cb70338",
+          "learner_2_log": "3659a8e731cb1c415bd8edcfd7ba695031bd0e46e9570f943b588cd2dd8b2e7e",
+          "learner_3_log": "de997d82888a3b07713860b72f85ce22d1a1a6ddfb0b4eb6b57301964923751d"
+        }
+      },
+      {
+        "cell": "v8-t20-mu0-mu0-e1-seed811",
+        "evidence": "/home/c/h200-evac/n2/yeto-results-v8/v8-t20-mu0-mu0-e1-seed811/attempt-1/evidence.json",
+        "evidence_sha256": "d1a6bb1bfb58857509238326983e6be8bba75aa86e4db9a29478674fae0ed623",
+        "learner_log_sha256": {
+          "learner_0_log": "e381ff165c579754d1235113ee6799e6d1d654a7c99527e2324722db1c8ec822",
+          "learner_1_log": "db430faba633837cdb136dcc105eeea79b021489c5031c8855a33c36fb291664",
+          "learner_2_log": "96f1714c576c9960827d7149a31b7f9091520e0cc2d6f6e1fcf69289626b718f",
+          "learner_3_log": "652c9438e1fbd7886b9fbd183495c272d07e7fe0e4f61d19dbda59750dd04b1f"
+        }
+      },
+      {
+        "cell": "v8-t20-mu0-mu0-e2-seed801",
+        "evidence": "/home/c/h200-evac/n1/yeto-results-v8/v8-t20-mu0-mu0-e2-seed801/attempt-1/evidence.json",
+        "evidence_sha256": "41d886b72d21a4d629cfbf027b47e51a9d7372e87c527319c3b4e5d0aa3c061c",
+        "learner_log_sha256": {
+          "learner_0_log": "b4a2cec66472ab2d6d24ecb76d1cfd859bf9ee1b4bc9bf6c2e47552a1db48074",
+          "learner_1_log": "411547a7eb5b9d337236e0731e06b310feb5a5e4bbd8e9cf24129a58cc33f398",
+          "learner_2_log": "ce156e7fd75a2582f20da027a90be31da4086b18e6c0c0803d65ab0beb954bb8",
+          "learner_3_log": "69b1e62b3d47fa3253617c6142d98e90d7c42c6d435c02e3592c3c6bfaf46557"
+        }
+      },
+      {
+        "cell": "v8-t20-mu0-mu0-e2-seed809",
+        "evidence": "/home/c/h200-evac/n2/yeto-results-v8/v8-t20-mu0-mu0-e2-seed809/attempt-1/evidence.json",
+        "evidence_sha256": "beddc5c39b0cdb830218e75c6ee1074a822a5c5c56a653f49db3bfbc5b817b08",
+        "learner_log_sha256": {
+          "learner_0_log": "2782617fc161ea919e63437c6518acff73b06ef1bbb4c1aa098c868ec31428ab",
+          "learner_1_log": "007b139c4773af8158d9d080f76f36676c7f6c45b0941ac0e9fdfebe16f921bd",
+          "learner_2_log": "ecda80e98ae56174ecdc17afd9258f31fbb7ac4aaeb9f4d6d26e421216f42bc7",
+          "learner_3_log": "5c9ec097d3c08bf5302feffbe60295d60b8134558dfbc384fadebd766944de43"
+        }
+      },
+      {
+        "cell": "v8-t20-mu0-mu0-e2-seed811",
+        "evidence": "/home/c/h200-evac/n1/yeto-results-v8/v8-t20-mu0-mu0-e2-seed811/attempt-1/evidence.json",
+        "evidence_sha256": "0c57921008d821e7a82559233c1c2a2a0d130c7b712cfa758a888eae1a53d2b3",
+        "learner_log_sha256": {
+          "learner_0_log": "ce4d2bf396eada651bc85ffa94c7722f48d34085d415726a951f718ff04aafc9",
+          "learner_1_log": "2d46eac6df82c0257e0cae1d9db1ca7c9de345742362ea9158e4066abad109e9",
+          "learner_2_log": "c4080d344f5982a61fd1ac632abfa299df3fc8b1bf7a25c726f2deaf4b80f3ef",
+          "learner_3_log": "a42fb7331e4c75dceae074b783700810610d86b1a0d5b9eb2b4d04c4f71f762a"
+        }
+      }
+    ],
+    "excluded_nonpositive_rows": 2068,
+    "floor_domain_high": 1.801074999998199,
+    "log_amplitude": 1.9659022793706806,
+    "log_r2": 0.5742001658888909,
+    "log_sse": 10.679028317375503,
+    "n": 1024,
+    "positive_rows": 22508,
+    "round2_exact_crosscheck": true
+  },
+  "protocol": {
+    "path": "/home/c/yeto-mechR3-20260727/control/kappa-zeroshot-round3c-protocol.md",
+    "post_hoc_instrumentation_not_gated_science": true,
+    "remaining_free_choices": [],
+    "sha256": "7e61343200d5248e24bb35e25c09c6499c9076f8c44f251185f5666c932ef2da"
+  },
+  "reason": "nonpositive/non-finite alpha: -0.01411381370718108",
+  "schedule": {
+    "fragments": 4,
+    "records": [
+      {
+        "arm": "mu0",
+        "path": "/home/c/yeto-mechR3-20260727/trajectory/mu0/tape.jsonl",
+        "rows": 80,
+        "sha256": "99cc3be97d9a4a000798374985bf93f09269ab55b17baef2c634f60bd22d302f"
+      },
+      {
+        "arm": "corrected",
+        "path": "/home/c/yeto-mechR3-20260727/trajectory/corrected/tape.jsonl",
+        "rows": 80,
+        "sha256": "b9a5fe2fe0844ddddb9a3928ca6b1b382cab9c487584c0140fb89c1517b3e906"
+      }
+    ],
+    "rows_checked": 160,
+    "rule": "fragment=(step-1)%4; per-fragment age=floor((step-1)/4)+1",
+    "status": "PASS"
+  },
+  "schema": "yeto_kappa_round3_identification_v1",
+  "status": "VOID",
+  "target_interval": [
+    0.9932,
+    0.9938
+  ],
+  "trajectory": {
+    "checkpoint_count": 8,
+    "manifests": [
+      {
+        "arm": "mu0",
+        "checkpoints": [
+          {
+            "age": 5,
+            "arm": "mu0",
+            "global_step": 20,
+            "path": "/home/c/yeto-mechR3-20260727/trajectory/mu0/state_after_step_00000020.ckpt",
+            "sha256": "80abf3a6528f12c2c0f96ebc9c8f0492c6c149ca2d17a3497e81b5f3c6034d1a",
+            "size_bytes": 1076137912
+          },
+          {
+            "age": 10,
+            "arm": "mu0",
+            "global_step": 40,
+            "path": "/home/c/yeto-mechR3-20260727/trajectory/mu0/state_after_step_00000040.ckpt",
+            "sha256": "f1ce70021c42c5ef6825a4a56a9051b17b02760a95d50d63f0cb89d95cb519af",
+            "size_bytes": 1076137912
+          },
+          {
+            "age": 15,
+            "arm": "mu0",
+            "global_step": 60,
+            "path": "/home/c/yeto-mechR3-20260727/trajectory/mu0/state_after_step_00000060.ckpt",
+            "sha256": "ee93ffec6499367ca9851b435ddcc14869622cbffd0ba5fe883cf8f2bea4d4cd",
+            "size_bytes": 1076137912
+          },
+          {
+            "age": 20,
+            "arm": "mu0",
+            "global_step": 80,
+            "path": "/home/c/yeto-mechR3-20260727/trajectory/mu0/state_after_step_00000080.ckpt",
+            "sha256": "1d7d3a3ee4471e8ae55bfd51d2165823397f1627b2f41186ce7b7625d0fde5b0",
+            "size_bytes": 1076137912
+          }
+        ],
+        "path": "/home/c/yeto-mechR3-20260727/trajectory/mu0/trajectory-manifest.json",
+        "sha256": "08171f726e9585e06f162e1bcb6d8b4a3873c1da911aa391c1b820dc40927d2d"
+      },
+      {
+        "arm": "corrected",
+        "checkpoints": [
+          {
+            "age": 5,
+            "arm": "corrected",
+            "global_step": 20,
+            "path": "/home/c/yeto-mechR3-20260727/trajectory/corrected/state_after_step_00000020.ckpt",
+            "sha256": "b81d16335ceba79e71dd5ed2131c2015476c00e4540bd4238be3317fd50a07eb",
+            "size_bytes": 1076137912
+          },
+          {
+            "age": 10,
+            "arm": "corrected",
+            "global_step": 40,
+            "path": "/home/c/yeto-mechR3-20260727/trajectory/corrected/state_after_step_00000040.ckpt",
+            "sha256": "7a27f4c5235ba387919b16e6e53e9b7680f75be22c7338943f0c9cba4c6981e2",
+            "size_bytes": 1076137912
+          },
+          {
+            "age": 15,
+            "arm": "corrected",
+            "global_step": 60,
+            "path": "/home/c/yeto-mechR3-20260727/trajectory/corrected/state_after_step_00000060.ckpt",
+            "sha256": "7cd0656fe5f269039bf09de398af31c7163977a432f74009097cca511a6e5d74",
+            "size_bytes": 1076137912
+          },
+          {
+            "age": 20,
+            "arm": "corrected",
+            "global_step": 80,
+            "path": "/home/c/yeto-mechR3-20260727/trajectory/corrected/state_after_step_00000080.ckpt",
+            "sha256": "9dc8c5e084aa6ed197375cc0cffe4f0b65ad5026ce7834a18a34794fa0e46697",
+            "size_bytes": 1076137912
+          }
+        ],
+        "path": "/home/c/yeto-mechR3-20260727/trajectory/corrected/trajectory-manifest.json",
+        "sha256": "9758ed608bd3e3d436e0adc4ca4e5b65eb490593db04aa29f69fe58d59e43a5c"
+      }
+    ]
+  }
+}
