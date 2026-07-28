@@ -1,8 +1,9 @@
 # Yeto RL v0：固定成员同步 LoRA FedAvg 方案
 
 > 状态（2026-07-28）：计划内 Yeto 侧代码已收口，固定 Miles 源码已核实，并已
-> 通过 CPU、FakeMiles、真实 Rust syncer 和两张真实 GPU 上的
-> Miles/Megatron/SGLang 验收；第 13.4、13.5 节及第 14 节的 v0 验收条件均已满足。
+> 通过 CPU、FakeMiles、真实 Rust syncer，以及固定支持的 Llama/Qwen2/Qwen3
+> 三类模型的真实 GPU Miles/Megatron/SGLang 验收；第 13.4、13.5 节及第 14 节的
+> v0 验收条件均已满足。
 > 该结论只覆盖本文固定依赖、模型与 TP=PP=EP=1 范围，不外推到第 2.2 节明确
 > 排除的能力。
 >
@@ -1008,6 +1009,23 @@ reduction。
 - Megatron export 的单岛 policy hash 为
   `75c789d90382cd3249a3975b9cb08f3efbba44ac2e9b0f21c4da3de35036078a`，写成标准
   PEFT adapter 并从固定基座重载后 hash 不变。
+
+为确认上述运行时修复没有耦合 Qwen2，又以完全相同的 harness 和固定
+Miles commit/镜像执行 Llama、Qwen3；两次运行只替换 model revision 及其派生
+manifest。Yeto 源码树 SHA256 均为
+`db1693a0a54ef9b4e6e7f5e63a91cf58c938f526e2341a3cef0faa978c0c88b7`，容器
+CUDA 为 13.0.1，宿主驱动均为 580.126.09。
+
+| family / GPU | 固定基座 | manifest / layout fingerprint | runtime 与标准 PEFT 结果 |
+| --- | --- | --- | --- |
+| Llama / H200 141GB | `TinyLlama/TinyLlama-1.1B-Chat-v1.0@fe8a4ea1ffedaf415f4da2f062534de366a451e6` | `fa1579a5e7c6596cffaa735d4d88908b90f6aae9943858464589824714529dce` / `90cb11ab3683ed615f0f0c486a29cefe9ff10de2fa35cfc0d520a3790440ee0b` | checker 差值 `0.009408043697476387 < 0.03`；local 与 PEFT reload hash 均为 `848fbe3526372848ed3945e3c99027341c4ff09ba6ef468919a4bd71e0bc4e87` |
+| Qwen3 / H100 80GB | `Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca` | `aa82198c55e89599500920da4de1aae37220ec399dc0fa4751ee687b743dde84` / `b3eaba1155f2522024a827d8aad911dd401f1de24fe0152dccf7cff71be43bcf` | checker 差值 `0.01534944586455822 < 0.03`；local 与 PEFT reload hash 均为 `e7814fcfb1192ee5540a5c826aecc96f19fba390711fc12ade7a5a3f00fcb6d3` |
+
+两类模型都验证 local LoRA 发生变化、optimizer step `0→1→0`、local train 后
+rollout identity 仍为 base identity、global reapply 无损，且最终 trainer/rollout
+identity 相同。标准 artifact 验收从固定 revision 的 `AutoConfig` 构造对应标准
+Transformers base，再用 `PeftModel.from_pretrained()` 重载真实 Megatron export；
+重载后的 canonical hash 均保持不变。
 
 ### 13.5 双 island 端到端
 
