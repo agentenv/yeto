@@ -1,0 +1,145 @@
+{
+  "adjudication": {
+    "closed_numeric_vocabulary_not_entered": true,
+    "label": "VOID",
+    "target_interval": [
+      0.9932,
+      0.9938
+    ]
+  },
+  "curvature": {
+    "adapter_exec_count": 0,
+    "adapter_sha256": "857c88c2a227c32f983c5d206c48d43f49792cdda2f797db691df1386e46d8bd",
+    "complete_probe_count": 0,
+    "expected_probe_count": 8,
+    "gamma": null,
+    "json_output_count": 0,
+    "prelaunch_failure": {
+      "adapter_started": false,
+      "log_sha256": "cf4e433d08c23482cf378519551e1ad3dcf29a3bcff2f4776ffbc4250a33ac19",
+      "reason": "CPU shell wrapper referenced absent /usr/bin/time; failure occurred before adapter exec"
+    }
+  },
+  "execution": {
+    "block_wide_rail": "never use h200-n2:4-7 while any v10 compute is present in that block",
+    "discovered_free_choices": [
+      "whether the ten-minute idle exception was device-local or block-wide"
+    ],
+    "gpu_vacate_audit": {
+      "h200-n2:6_memory_mib": 0,
+      "h200-n2:7_memory_mib": 0,
+      "round3_archiver_processes": 0,
+      "round3_producer_processes": 0,
+      "spectrum_probe_processes": 0
+    },
+    "orchestrator_directive": "GPU DISCIPLINE VIOLATION, vacate now; a between-cells idle gap is not release",
+    "rail_status": "FAIL",
+    "r3_vacated": true,
+    "violation": "Both Round-3 cells used devices with device-local 10-minute proofs while v10 compute remained on other GPUs in the reserved n2:4-7 block"
+  },
+  "fold": {
+    "shipping_paper_eligible": false,
+    "v2_iclr_disposition": true
+  },
+  "loss_floor": {
+    "beta": 0.12036643696558891,
+    "ell_inf": 0.0,
+    "source": "frozen Round-2 banked v8 mu0 curves",
+    "status": "PASS_BEFORE_EXECUTION_FAILURE"
+  },
+  "prediction": {
+    "D_pred": null,
+    "alpha": null,
+    "kappa_pred": null,
+    "q_pred": null
+  },
+  "protocol": {
+    "analyzer_commit": "2dcdd8a",
+    "analyzer_sha256": "41165a65ed49ed6d45091560232bd2a034d21e51686930514be4e42df8bc3ef9",
+    "commit": "2fa9710",
+    "path": "mech/kappa-zeroshot-round3-protocol.md",
+    "remaining_free_choices_at_freeze": [],
+    "sha256": "650a465546ca0d69a1bfa8ca0f32cd55a12b0d58836e8b870c417fe402f2f977"
+  },
+  "reason": "Frozen fleet-execution rail failed and a post-freeze eligibility-scope choice was discovered. Per the absolute-honesty rule, the chain stopped before spectra or a kappa calculation.",
+  "schedule": {
+    "corrected_tape_rows": 80,
+    "corrected_tape_sha256": "b9a5fe2fe0844ddddb9a3928ca6b1b382cab9c487584c0140fb89c1517b3e906",
+    "mu0_tape_rows": 80,
+    "mu0_tape_sha256": "99cc3be97d9a4a000798374985bf93f09269ab55b17baef2c634f60bd22d302f",
+    "status": "NOT_ADJUDICATED_AFTER_VOID"
+  },
+  "schema": "yeto_kappa_round3_void_audit_v1",
+  "status": "VOID",
+  "trajectory_artifacts": {
+    "admissible_as_frozen_round3_panel": false,
+    "checkpoint_count": 8,
+    "corrected": {
+      "command_sha256": "acba8d8c93d5c1b74e7d3a89606ed8e8e2f6d632f3c47da7abfce67753116a48",
+      "completed_at_utc": "2026-07-28T05:39:25.624640687+00:00",
+      "device": "h200-n2:6",
+      "device_local_clear_samples": 21,
+      "device_local_clear_seconds": 616,
+      "files": [
+        {
+          "global_step": 20,
+          "sha256": "b81d16335ceba79e71dd5ed2131c2015476c00e4540bd4238be3317fd50a07eb",
+          "size_bytes": 1076137912
+        },
+        {
+          "global_step": 40,
+          "sha256": "7a27f4c5235ba387919b16e6e53e9b7680f75be22c7338943f0c9cba4c6981e2",
+          "size_bytes": 1076137912
+        },
+        {
+          "global_step": 60,
+          "sha256": "7cd0656fe5f269039bf09de398af31c7163977a432f74009097cca511a6e5d74",
+          "size_bytes": 1076137912
+        },
+        {
+          "global_step": 80,
+          "sha256": "9dc8c5e084aa6ed197375cc0cffe4f0b65ad5026ce7834a18a34794fa0e46697",
+          "size_bytes": 1076137912
+        }
+      ],
+      "manifest_complete": true,
+      "manifest_sha256": "9758ed608bd3e3d436e0adc4ca4e5b65eb490593db04aa29f69fe58d59e43a5c",
+      "producer_pid": 440493,
+      "started_at_utc": "2026-07-28T05:22:43.860148884+00:00"
+    },
+    "mu0": {
+      "command_sha256": "386d391c3ea10e8e3d9523814f8ac5101166d3bb2768fc2764e8cff40b65f79a",
+      "completed_at_utc": "2026-07-28T04:40:43.338030159+00:00",
+      "device": "h200-n2:7",
+      "device_local_clear_samples": 21,
+      "device_local_clear_seconds": 620,
+      "files": [
+        {
+          "global_step": 20,
+          "sha256": "80abf3a6528f12c2c0f96ebc9c8f0492c6c149ca2d17a3497e81b5f3c6034d1a",
+          "size_bytes": 1076137912
+        },
+        {
+          "global_step": 40,
+          "sha256": "f1ce70021c42c5ef6825a4a56a9051b17b02760a95d50d63f0cb89d95cb519af",
+          "size_bytes": 1076137912
+        },
+        {
+          "global_step": 60,
+          "sha256": "ee93ffec6499367ca9851b435ddcc14869622cbffd0ba5fe883cf8f2bea4d4cd",
+          "size_bytes": 1076137912
+        },
+        {
+          "global_step": 80,
+          "sha256": "1d7d3a3ee4471e8ae55bfd51d2165823397f1627b2f41186ce7b7625d0fde5b0",
+          "size_bytes": 1076137912
+        }
+      ],
+      "manifest_complete": true,
+      "manifest_sha256": "08171f726e9585e06f162e1bcb6d8b4a3873c1da911aa391c1b820dc40927d2d",
+      "producer_pid": 382560,
+      "started_at_utc": "2026-07-28T04:23:51.674064781+00:00"
+    },
+    "orchestrator_reuse_note": "The live orchestrator note states protocol/checkpoints-so-far remain valid for a separately authorized follow-up; this audit does not treat them as an admissible Round-3 prediction panel."
+  }
+}
