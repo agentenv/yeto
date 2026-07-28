@@ -1,0 +1,406 @@
+{
+  "aggregate_asymmetry": {
+    "P_ASYMMETRY_CONFIRMED": 0.91335,
+    "P_ASYMMETRY_NULL": 0.08665,
+    "P_ASYMMETRY_REVERSED": 0.0,
+    "alternative": "upward source_T<target_T penalties have a conservative 0.31-bit one-octave floor, rise by 0.08 bit per additional log2 horizon octave, and cap at the stable fresh G10 +0.52 result; downward penalties scale as 0.025 bits per octave capped at 0.075",
+    "closed_vocabulary": [
+      "ASYMMETRY_CONFIRMED",
+      "ASYMMETRY_NULL",
+      "ASYMMETRY_REVERSED"
+    ]
+  },
+  "estimator": {
+    "interval": "two-sided 95% paired Student t interval across five fresh seeds",
+    "practical_margin_bits": 0.1,
+    "raw_values": "all unclipped seed values, including scientific divergence, are mandatory descriptive outputs",
+    "seed_level_penalty": "raw transfer-minus-fresh-comparator endpoint NLL in bits/token, symmetrically clipped to [-0.75,+0.75] only for the bounded primary estimand"
+  },
+  "per_pair": {
+    "FIXED_H512:T20_TO_T2": {
+      "P_expected_label": 0.99985,
+      "context": "FIXED_H512",
+      "expected_label": "PAIR_NO_DECISIVE_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.99985,
+        "PAIR_PENALTY": 0.00015
+      },
+      "prospective_alternative_penalty_bits": 0.075,
+      "source_T": 20,
+      "source_eta_exact": 0.0008223020084526104,
+      "target_T": 2,
+      "target_comparator_eta_exact": 0.007821882581822885
+    },
+    "FIXED_H512:T20_TO_T40": {
+      "P_expected_label": 0.9353,
+      "context": "FIXED_H512",
+      "expected_label": "PAIR_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.0647,
+        "PAIR_PENALTY": 0.9353
+      },
+      "prospective_alternative_penalty_bits": 0.31,
+      "source_T": 20,
+      "source_eta_exact": 0.0008223020084526104,
+      "target_T": 40,
+      "target_comparator_eta_exact": 0.0003971228256207733
+    },
+    "FIXED_H512:T20_TO_T5": {
+      "P_expected_label": 0.99995,
+      "context": "FIXED_H512",
+      "expected_label": "PAIR_NO_DECISIVE_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.99995,
+        "PAIR_PENALTY": 5e-05
+      },
+      "prospective_alternative_penalty_bits": 0.05,
+      "source_T": 20,
+      "source_eta_exact": 0.0008223020084526104,
+      "target_T": 5,
+      "target_comparator_eta_exact": 0.003191644884294105
+    },
+    "FIXED_H512:T2_TO_T20": {
+      "P_expected_label": 1.0,
+      "context": "FIXED_H512",
+      "expected_label": "PAIR_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.0,
+        "PAIR_PENALTY": 1.0
+      },
+      "prospective_alternative_penalty_bits": 0.49575424759098896,
+      "source_T": 2,
+      "source_eta_exact": 0.007821882581822885,
+      "target_T": 20,
+      "target_comparator_eta_exact": 0.0008223020084526104
+    },
+    "FIXED_H512:T2_TO_T40": {
+      "P_expected_label": 1.0,
+      "context": "FIXED_H512",
+      "expected_label": "PAIR_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.0,
+        "PAIR_PENALTY": 1.0
+      },
+      "prospective_alternative_penalty_bits": 0.52,
+      "source_T": 2,
+      "source_eta_exact": 0.007821882581822885,
+      "target_T": 40,
+      "target_comparator_eta_exact": 0.0003971228256207733
+    },
+    "FIXED_H512:T2_TO_T5": {
+      "P_expected_label": 0.9641,
+      "context": "FIXED_H512",
+      "expected_label": "PAIR_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.0359,
+        "PAIR_PENALTY": 0.9641
+      },
+      "prospective_alternative_penalty_bits": 0.335754247590989,
+      "source_T": 2,
+      "source_eta_exact": 0.007821882581822885,
+      "target_T": 5,
+      "target_comparator_eta_exact": 0.003191644884294105
+    },
+    "FIXED_H512:T40_TO_T2": {
+      "P_expected_label": 0.99985,
+      "context": "FIXED_H512",
+      "expected_label": "PAIR_NO_DECISIVE_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.99985,
+        "PAIR_PENALTY": 0.00015
+      },
+      "prospective_alternative_penalty_bits": 0.075,
+      "source_T": 40,
+      "source_eta_exact": 0.0003971228256207733,
+      "target_T": 2,
+      "target_comparator_eta_exact": 0.007821882581822885
+    },
+    "FIXED_H512:T40_TO_T20": {
+      "P_expected_label": 1.0,
+      "context": "FIXED_H512",
+      "expected_label": "PAIR_NO_DECISIVE_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 1.0,
+        "PAIR_PENALTY": 0.0
+      },
+      "prospective_alternative_penalty_bits": 0.025,
+      "source_T": 40,
+      "source_eta_exact": 0.0003971228256207733,
+      "target_T": 20,
+      "target_comparator_eta_exact": 0.0008223020084526104
+    },
+    "FIXED_H512:T40_TO_T5": {
+      "P_expected_label": 0.99985,
+      "context": "FIXED_H512",
+      "expected_label": "PAIR_NO_DECISIVE_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.99985,
+        "PAIR_PENALTY": 0.00015
+      },
+      "prospective_alternative_penalty_bits": 0.075,
+      "source_T": 40,
+      "source_eta_exact": 0.0003971228256207733,
+      "target_T": 5,
+      "target_comparator_eta_exact": 0.003191644884294105
+    },
+    "FIXED_H512:T5_TO_T2": {
+      "P_expected_label": 0.99995,
+      "context": "FIXED_H512",
+      "expected_label": "PAIR_NO_DECISIVE_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.99995,
+        "PAIR_PENALTY": 5e-05
+      },
+      "prospective_alternative_penalty_bits": 0.03304820237218405,
+      "source_T": 5,
+      "source_eta_exact": 0.003191644884294105,
+      "target_T": 2,
+      "target_comparator_eta_exact": 0.007821882581822885
+    },
+    "FIXED_H512:T5_TO_T20": {
+      "P_expected_label": 0.9977,
+      "context": "FIXED_H512",
+      "expected_label": "PAIR_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.0023,
+        "PAIR_PENALTY": 0.9977
+      },
+      "prospective_alternative_penalty_bits": 0.39,
+      "source_T": 5,
+      "source_eta_exact": 0.003191644884294105,
+      "target_T": 20,
+      "target_comparator_eta_exact": 0.0008223020084526104
+    },
+    "FIXED_H512:T5_TO_T40": {
+      "P_expected_label": 1.0,
+      "context": "FIXED_H512",
+      "expected_label": "PAIR_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.0,
+        "PAIR_PENALTY": 1.0
+      },
+      "prospective_alternative_penalty_bits": 0.47,
+      "source_T": 5,
+      "source_eta_exact": 0.003191644884294105,
+      "target_T": 40,
+      "target_comparator_eta_exact": 0.0003971228256207733
+    },
+    "FIXED_S2560:T20_TO_T2": {
+      "P_expected_label": 0.99985,
+      "context": "FIXED_S2560",
+      "expected_label": "PAIR_NO_DECISIVE_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.99985,
+        "PAIR_PENALTY": 0.00015
+      },
+      "prospective_alternative_penalty_bits": 0.075,
+      "source_T": 20,
+      "source_eta_exact": 0.0009050641916564297,
+      "target_T": 2,
+      "target_comparator_eta_exact": 0.007341476969217584
+    },
+    "FIXED_S2560:T20_TO_T40": {
+      "P_expected_label": 0.86795,
+      "context": "FIXED_S2560",
+      "expected_label": "PAIR_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.13205,
+        "PAIR_PENALTY": 0.86795
+      },
+      "prospective_alternative_penalty_bits": 0.31,
+      "source_T": 20,
+      "source_eta_exact": 0.0009050641916564297,
+      "target_T": 40,
+      "target_comparator_eta_exact": 0.00045856076934387404
+    },
+    "FIXED_S2560:T20_TO_T5": {
+      "P_expected_label": 0.99995,
+      "context": "FIXED_S2560",
+      "expected_label": "PAIR_NO_DECISIVE_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.99995,
+        "PAIR_PENALTY": 5e-05
+      },
+      "prospective_alternative_penalty_bits": 0.05,
+      "source_T": 20,
+      "source_eta_exact": 0.0009050641916564297,
+      "target_T": 5,
+      "target_comparator_eta_exact": 0.003191644884294105
+    },
+    "FIXED_S2560:T2_TO_T20": {
+      "P_expected_label": 1.0,
+      "context": "FIXED_S2560",
+      "expected_label": "PAIR_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.0,
+        "PAIR_PENALTY": 1.0
+      },
+      "prospective_alternative_penalty_bits": 0.49575424759098896,
+      "source_T": 2,
+      "source_eta_exact": 0.007341476969217584,
+      "target_T": 20,
+      "target_comparator_eta_exact": 0.0009050641916564297
+    },
+    "FIXED_S2560:T2_TO_T40": {
+      "P_expected_label": 1.0,
+      "context": "FIXED_S2560",
+      "expected_label": "PAIR_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.0,
+        "PAIR_PENALTY": 1.0
+      },
+      "prospective_alternative_penalty_bits": 0.52,
+      "source_T": 2,
+      "source_eta_exact": 0.007341476969217584,
+      "target_T": 40,
+      "target_comparator_eta_exact": 0.00045856076934387404
+    },
+    "FIXED_S2560:T2_TO_T5": {
+      "P_expected_label": 0.94895,
+      "context": "FIXED_S2560",
+      "expected_label": "PAIR_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.05105,
+        "PAIR_PENALTY": 0.94895
+      },
+      "prospective_alternative_penalty_bits": 0.335754247590989,
+      "source_T": 2,
+      "source_eta_exact": 0.007341476969217584,
+      "target_T": 5,
+      "target_comparator_eta_exact": 0.003191644884294105
+    },
+    "FIXED_S2560:T40_TO_T2": {
+      "P_expected_label": 0.99985,
+      "context": "FIXED_S2560",
+      "expected_label": "PAIR_NO_DECISIVE_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.99985,
+        "PAIR_PENALTY": 0.00015
+      },
+      "prospective_alternative_penalty_bits": 0.075,
+      "source_T": 40,
+      "source_eta_exact": 0.00045856076934387404,
+      "target_T": 2,
+      "target_comparator_eta_exact": 0.007341476969217584
+    },
+    "FIXED_S2560:T40_TO_T20": {
+      "P_expected_label": 0.99995,
+      "context": "FIXED_S2560",
+      "expected_label": "PAIR_NO_DECISIVE_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.99995,
+        "PAIR_PENALTY": 5e-05
+      },
+      "prospective_alternative_penalty_bits": 0.025,
+      "source_T": 40,
+      "source_eta_exact": 0.00045856076934387404,
+      "target_T": 20,
+      "target_comparator_eta_exact": 0.0009050641916564297
+    },
+    "FIXED_S2560:T40_TO_T5": {
+      "P_expected_label": 0.99985,
+      "context": "FIXED_S2560",
+      "expected_label": "PAIR_NO_DECISIVE_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.99985,
+        "PAIR_PENALTY": 0.00015
+      },
+      "prospective_alternative_penalty_bits": 0.075,
+      "source_T": 40,
+      "source_eta_exact": 0.00045856076934387404,
+      "target_T": 5,
+      "target_comparator_eta_exact": 0.003191644884294105
+    },
+    "FIXED_S2560:T5_TO_T2": {
+      "P_expected_label": 0.99995,
+      "context": "FIXED_S2560",
+      "expected_label": "PAIR_NO_DECISIVE_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.99995,
+        "PAIR_PENALTY": 5e-05
+      },
+      "prospective_alternative_penalty_bits": 0.03304820237218405,
+      "source_T": 5,
+      "source_eta_exact": 0.003191644884294105,
+      "target_T": 2,
+      "target_comparator_eta_exact": 0.007341476969217584
+    },
+    "FIXED_S2560:T5_TO_T20": {
+      "P_expected_label": 0.9885,
+      "context": "FIXED_S2560",
+      "expected_label": "PAIR_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.0115,
+        "PAIR_PENALTY": 0.9885
+      },
+      "prospective_alternative_penalty_bits": 0.39,
+      "source_T": 5,
+      "source_eta_exact": 0.003191644884294105,
+      "target_T": 20,
+      "target_comparator_eta_exact": 0.0009050641916564297
+    },
+    "FIXED_S2560:T5_TO_T40": {
+      "P_expected_label": 0.99985,
+      "context": "FIXED_S2560",
+      "expected_label": "PAIR_PENALTY",
+      "label_probabilities": {
+        "PAIR_BENEFIT": 0.0,
+        "PAIR_NO_DECISIVE_PENALTY": 0.00015,
+        "PAIR_PENALTY": 0.99985
+      },
+      "prospective_alternative_penalty_bits": 0.47,
+      "source_T": 5,
+      "source_eta_exact": 0.003191644884294105,
+      "target_T": 40,
+      "target_comparator_eta_exact": 0.00045856076934387404
+    }
+  },
+  "pre_outcome": true,
+  "schema": "yeto_outer_mup_v14_transfer_matrix_gatesim_v1",
+  "scope": "gate evaluability and power under the declared G10-derived asymmetry alternative; not scientific evidence for transfer penalties",
+  "simulation": {
+    "P_evaluable": 1.0,
+    "clears_evaluability_bar": true,
+    "fresh_seeds": [
+      1401,
+      1409,
+      1423,
+      1427,
+      1429
+    ],
+    "mandatory_P_evaluable": 0.8,
+    "replicates": 20000,
+    "rng_seed": 20260814
+  },
+  "sources": {
+    "g10_raw_scientific_divergence_retained_bits": 9.504813567101717,
+    "g10_readout_sha256": "46adf7b8b11a9434632e3470248b3adc3b6bb9e6a71d1aa5b4df59e84390386f",
+    "g4c_maximum_paired_contrast_sd_bits": 0.1636054316045999,
+    "g4c_pooled_paired_contrast_sd_bits": 0.06817707523738205,
+    "g4c_readout_sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa"
+  },
+  "status": "PASS"
+}
