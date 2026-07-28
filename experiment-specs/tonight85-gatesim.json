@@ -1,0 +1,116 @@
+{
+  "G11": {
+    "P_evaluable": 1.0,
+    "anchor_offsets": [
+      -0.75,
+      0.0,
+      0.75
+    ],
+    "band_candidates": {
+      "0.25": {
+        "P_pass_given_evaluable": 1.0,
+        "P_pass_unconditional": 1.0,
+        "passes": 2000
+      },
+      "0.35": {
+        "P_pass_given_evaluable": 1.0,
+        "P_pass_unconditional": 1.0,
+        "passes": 2000
+      },
+      "0.5": {
+        "P_pass_given_evaluable": 1.0,
+        "P_pass_unconditional": 1.0,
+        "passes": 2000
+      }
+    },
+    "evaluable": 2000,
+    "placements": {
+      "smollm2_135m_t80": 0.0200817682345007,
+      "smollm2_1p7b_t40": 0.003800560784723474
+    },
+    "ratio_rule": {
+      "D_T40": 1.044905865516022,
+      "D_T80": 1.01326103825243,
+      "donors": [
+        "F3(T=5,S=2560)",
+        "F3(T=10,S=5120)"
+      ],
+      "extrapolation": "OLS-free two-point power law in D-1 versus T, asymptote D=1",
+      "raw_F3_not_evaluated_beyond_T20": true
+    },
+    "selected_band_bits": 0.35,
+    "selection_rule": "0.35 bits is the user-mandated confirmatory band; 0.25 and 0.50 are retained only as pre-outcome sensitivity diagnostics",
+    "truth_offsets": [
+      -1.0,
+      -0.5,
+      0.0,
+      0.5,
+      1.0
+    ]
+  },
+  "G12_G13": {
+    "centers": {
+      "mu0": {
+        "T2": 0.07106462666975855,
+        "T20": 0.021926218661920484,
+        "T5": 0.04341918114042938
+      },
+      "v12_heavy_ball_mu09": {
+        "T2": 0.04225793576801869,
+        "T20": 0.0024983032153624908,
+        "T5": 0.013630854038377603
+      },
+      "v13_nesterov_mu09": {
+        "T2": 0.029627335040308306,
+        "T20": 0.0024641979129397013,
+        "T5": 0.011913059053942006
+      }
+    },
+    "offsets": {
+      "v12": [
+        -1.0,
+        -0.3333333333333333,
+        0.3333333333333333,
+        1.0
+      ],
+      "v13": [
+        -1.5,
+        -0.5,
+        0.5,
+        1.5
+      ]
+    },
+    "v12": {
+      "P_evaluable": 1.0,
+      "P_pass_given_evaluable": 1.0,
+      "P_pass_unconditional": 1.0,
+      "evaluable": 2000,
+      "pass": 2000
+    },
+    "v13": {
+      "P_evaluable": 1.0,
+      "P_pass_given_evaluable": 1.0,
+      "P_pass_unconditional": 1.0,
+      "evaluable": 2000,
+      "pass": 2000,
+      "placement_stress": {
+        "per_horizon_log2_D_sd_bits": 0.1,
+        "shared_log2_eta_sd_bits": 0.35
+      }
+    }
+  },
+  "pre_outcome": true,
+  "replicates": 2000,
+  "rng_seed": 2026072785,
+  "schema": "yeto_tonight85_gate_feasibility_v1",
+  "scope": "measurement-noise/bracketing feasibility only; no simulation result is evidence that a new family or far-horizon transport law is true",
+  "source": {
+    "coefficients_path": "experiment-specs/outer-mup-v9-frozen-coefficients.json",
+    "coefficients_sha256": "413e4d70dbe88a6ca12493884cbd003c47a8c6fd28da1944dc1f2a10b6292d5b",
+    "g4c_path": "/private/tmp/g4c-readout-tonight85.json",
+    "g4c_sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa",
+    "g6_path": "/private/tmp/g6-readout-tonight85.json",
+    "g6_sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+  },
+  "status": "PASS"
+}

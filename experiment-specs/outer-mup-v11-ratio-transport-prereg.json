@@ -1,0 +1,219 @@
+{
+  "analysis_cutoff": "2026-07-28T08:30:00-07:00",
+  "anchor_probe": {
+    "acceptance": "a>0 and the unconstrained vertex lies within 0.5 bits of the three-rung range; an unaccepted fit blocks prediction and makes G11 NOT_EVALUABLE",
+    "cells_per_coordinate": 3,
+    "estimator": "OLS quadratic endpoint loss versus log2(eta)",
+    "excluded_from_G11_ground_truth_fit": true,
+    "mu": 0.0,
+    "offsets_log2": [
+      -0.75,
+      0.0,
+      0.75
+    ],
+    "seed": 967,
+    "training_seed": 967967
+  },
+  "coordinates": {
+    "smollm2_135m_t80": {
+      "H": 512,
+      "S": 40960,
+      "T": 80,
+      "model": "HuggingFaceTB/SmolLM2-135M",
+      "model_revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2",
+      "mu0_placement_center": 0.0200817682345007,
+      "never_measured_assertion": true
+    },
+    "smollm2_1p7b_t40": {
+      "H": 512,
+      "S": 20480,
+      "T": 40,
+      "model": "HuggingFaceTB/SmolLM2-1.7B",
+      "model_revision": "effd688a12921b4cc83e3312b6feb579f70f9c71",
+      "mu0_placement_center": 0.003800560784723474,
+      "never_measured_assertion": true
+    }
+  },
+  "cutoff_rule": "a gate not fully drained and analyzed by the cutoff is DEFERRED_ARXIV_V2; partial evidence cannot be promoted into tomorrow's submission",
+  "frozen_analysis_core": {
+    "bytes": 16638,
+    "path": "scripts/tonight85_analysis.py",
+    "sha256": "810256b6f897c2347aabaddfe266b07a866835885c25e623b6da3d08aedb53cd"
+  },
+  "frozen_analyzer": {
+    "bytes": 1265,
+    "path": "scripts/analyze_v11.py",
+    "sha256": "74477e0dbde76226186f80b30e0276ffb4d8dc585f10edfab6ea9d6dcf08e960"
+  },
+  "frozen_execution": {
+    "common": {
+      "bytes": 6911,
+      "path": "scripts/tonight85_common.py",
+      "sha256": "7fc6b479ac45430d4f014ad5d0b86a47f0df79fe8cf0051b6b96c8eff1618969"
+    },
+    "gate_simulator": {
+      "bytes": 16933,
+      "path": "scripts/gatesim_tonight85.py",
+      "sha256": "d819bbbcb1a0ec6654079412d3bf4c6d3596bc69efe2cd517e66e4b4a77a0010"
+    },
+    "mac_conductor": {
+      "bytes": 22390,
+      "path": "scripts/tonight85_conductor.py",
+      "sha256": "27b76e9dfc1786eea5b88cf89347d2e3e44c7856e2336c299dea9b28ad9a81aa"
+    },
+    "manifest_builder": {
+      "bytes": 16650,
+      "path": "scripts/build_tonight85_manifest.py",
+      "sha256": "857df876100b657999da956db66da4c59d3e853bbe1db8701730aced60e00283"
+    },
+    "slot_runner": {
+      "bytes": 13935,
+      "path": "scripts/run_slot_tonight85.py",
+      "sha256": "98ad6207e313578776140911340e8cd4d78d52947abcb1ff4eaed56b95d810b5"
+    }
+  },
+  "frozen_prediction_builder": {
+    "bytes": 4223,
+    "path": "scripts/build_v11_predictions.py",
+    "sha256": "a4a9c2aa165698f981cafc427da026ea2a3fd8be4c75c31484760d587691c3d0"
+  },
+  "gate": {
+    "absolute_prediction_error_band_bits": 0.35,
+    "missing_or_unbracketed_rule": "NOT_EVALUABLE; never extend or recenter",
+    "name": "G11",
+    "success_rule": "PASS iff both coordinates are complete/evaluable and absolute log2(predicted eta-star / fitted ground-truth eta-star)<=0.35 at at least one of the two coordinates"
+  },
+  "gate_feasibility": {
+    "G11": {
+      "P_evaluable": 1.0,
+      "anchor_offsets": [
+        -0.75,
+        0.0,
+        0.75
+      ],
+      "band_candidates": {
+        "0.25": {
+          "P_pass_given_evaluable": 1.0,
+          "P_pass_unconditional": 1.0,
+          "passes": 2000
+        },
+        "0.35": {
+          "P_pass_given_evaluable": 1.0,
+          "P_pass_unconditional": 1.0,
+          "passes": 2000
+        },
+        "0.5": {
+          "P_pass_given_evaluable": 1.0,
+          "P_pass_unconditional": 1.0,
+          "passes": 2000
+        }
+      },
+      "evaluable": 2000,
+      "placements": {
+        "smollm2_135m_t80": 0.0200817682345007,
+        "smollm2_1p7b_t40": 0.003800560784723474
+      },
+      "ratio_rule": {
+        "D_T40": 1.044905865516022,
+        "D_T80": 1.01326103825243,
+        "donors": [
+          "F3(T=5,S=2560)",
+          "F3(T=10,S=5120)"
+        ],
+        "extrapolation": "OLS-free two-point power law in D-1 versus T, asymptote D=1",
+        "raw_F3_not_evaluated_beyond_T20": true
+      },
+      "selected_band_bits": 0.35,
+      "selection_rule": "0.35 bits is the user-mandated confirmatory band; 0.25 and 0.50 are retained only as pre-outcome sensitivity diagnostics",
+      "truth_offsets": [
+        -1.0,
+        -0.5,
+        0.0,
+        0.5,
+        1.0
+      ]
+    },
+    "report": {
+      "bytes": 3113,
+      "path": "experiment-specs/tonight85-gatesim.json",
+      "sha256": "1c4841b86120453364af85756bece1982f20f018a0985b5de6199feec0b8b47e"
+    }
+  },
+  "ground_truth": {
+    "arm": "raw",
+    "cells_per_coordinate": 10,
+    "estimator": "OLS quadratic over the pooled two-seed mean endpoint loss",
+    "eta_levels": 5,
+    "mu": 0.9,
+    "near_bracket_allowance_bits": 0.5,
+    "offsets_from_sealed_prediction_log2": [
+      -1.0,
+      -0.5,
+      0.0,
+      0.5,
+      1.0
+    ],
+    "outer_optimizer": "nesterov",
+    "seeds": [
+      971,
+      977
+    ],
+    "total_cells_including_anchors": 26,
+    "training_seeds": [
+      971971,
+      977977
+    ]
+  },
+  "note": "/private/tmp/h200-tonight85-note.md",
+  "outcome_aware_changes_forbidden": true,
+  "pre_outcome": true,
+  "prediction_seal": {
+    "artifact": "experiment-specs/outer-mup-v11-sealed-predictions.json",
+    "ground_truth_launch_is_forbidden_until_origin_contains_prediction_commit": true,
+    "must_be_committed_and_pushed_from_mac": true,
+    "must_be_hash_committed_after_anchor_before_truth": true
+  },
+  "program_id": "outer-mup-v11-ratio-transport",
+  "question": "Can the raw-vs-mu0 ratio structure extracted from the fitted 135M surface predict raw eta-star after only a three-cell mu0 re-anchor at two never-measured coordinates?",
+  "ratio_rule": {
+    "D_T40": 1.044905865516022,
+    "D_T80": 1.01326103825243,
+    "far_horizon_extraction": "Evaluate F3 only at constant-H donors (T=5,S=2560) and (T=10,S=5120); fit the unique D(T)=1+(D5-1)*(T/5)^p with p=log2((D10-1)/(D5-1)); do not evaluate F3's u^2 polynomial outside its registered T<=20 domain",
+    "fitted_surface": {
+      "coefficients": [
+        1.3489008177233357,
+        -0.9098513603667141,
+        -0.10723867757601385,
+        0.16020840966569636
+      ],
+      "family": "F3",
+      "formula": "log2(D)=gamma+alpha*u+beta*v+epsilon*u^2",
+      "source": {
+        "bytes": 28577,
+        "path": "experiment-specs/outer-mup-v9-frozen-coefficients.json",
+        "sha256": "413e4d70dbe88a6ca12493884cbd003c47a8c6fd28da1944dc1f2a10b6292d5b"
+      },
+      "u": "(T-5)/5",
+      "v": "log2(S/5120)"
+    },
+    "prediction": "eta_star_raw=eta_star_mu0_anchor*(1-0.9)*D(T)"
+  },
+  "registered_at_utc": "2026-07-28T00:34:04Z",
+  "registration_commit_rule": "the Git commit containing this contract, its frozen analyzer, simulator, and launcher must be present on origin/experiment/tonight-8.5-lean before any corresponding GPU process starts",
+  "result_root": "/root/yeto-results-tonight85 -> /data/yeto-results-tonight85",
+  "retry_contract": {
+    "allowed_reasons": [
+      "host_or_gpu_failure",
+      "framework_or_driver_failure",
+      "storage_or_network_failure",
+      "registered_process_timeout_without_valid_endpoint"
+    ],
+    "attempt_limit": 2,
+    "finite_loss_retry_forbidden": true,
+    "retry_unit": "all eta cells sharing program, coordinate/T, arm, and training seed; an anchor retry unit is all three cells at that coordinate",
+    "scientific_recenter_or_extension_forbidden": true
+  },
+  "schema": "yeto_outer_mup_v11_ratio_transport_prereg_v1",
+  "source_base_commit": "6ca24447a43e52369c5369610e7e873b14af5cc7",
+  "status": "REGISTERED_PRE_ANCHOR"
+}

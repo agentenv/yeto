@@ -251,9 +251,7 @@ def main() -> int:
             },
             "model": model_inventory(model),
             "tokenizer_smoke": tokenizer_smoke(model, train_path),
-            "required_environment": {
-                "HF_DATASETS_CACHE": "/data/hf-datasets-cache"
-            },
+            "required_environment": {"HF_DATASETS_CACHE": "/data/hf-datasets-cache"},
         }
         write_json_atomic(temporary / "manifest.json", manifest)
         temporary.replace(out)

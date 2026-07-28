@@ -1,0 +1,325 @@
+{
+  "D_definition": "D(T)=[eta_star(T,mu=0.9)/eta_star(T,mu=0)]/(1-0.9)",
+  "analysis_cutoff": "2026-07-28T08:30:00-07:00",
+  "comparison_role": "descriptive only; not part of the gate",
+  "cutoff_rule": "a gate not fully drained and analyzed by the cutoff is DEFERRED_ARXIV_V2; partial evidence cannot be promoted into tomorrow's submission",
+  "data": {
+    "HF_DATASETS_CACHE": "/data/hf-datasets-cache",
+    "corpus_is_different": true,
+    "dataset": "HuggingFaceH4/ultrachat_200k",
+    "eval_split": "test_sft",
+    "files": {
+      "eval": {
+        "bytes": 6034403,
+        "path": "/root/yeto-data/tonight85-v13/eval.jsonl",
+        "rows": 1024,
+        "sha256": "08ac254552fbd6529c68577c94920e4f33f6e75b5c94c518350c18948ec48df4"
+      },
+      "train": {
+        "bytes": 88832649,
+        "path": "/root/yeto-data/tonight85-v13/train.jsonl",
+        "rows": 15000,
+        "sha256": "f9bcb68e84370667cfe2418450c9fcd112cd0cc9236936e48e3aa35f9dd27ace"
+      }
+    },
+    "input_builder": {
+      "bytes": 9937,
+      "path": "scripts/prepare_v13_ultrachat.py",
+      "sha256": "73c6e34c8e7f9e7d4065e11cef4b9b7be7780483bfa4a4186dee854e2c2d6229"
+    },
+    "input_manifest_sha256": "b77b353dcc8a548c8e4ff31a252ed74919f325482795a15732b4ae9261b08164",
+    "revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+    "selection": {
+      "algorithm": "python_random_mt19937_full_index_shuffle_then_prefix",
+      "eval_index_seed": 20260728,
+      "eval_indices_sha256": "66cba5560233713a2b05fd7dca88bf6c22cc81358883c9294c72fcf7b100cb85",
+      "eval_rows": 1024,
+      "split_disjoint_by_source": true,
+      "train_index_seed": 20260727,
+      "train_indices_sha256": "1d44a6b5ba504fe3053ace21cd934093b9a095d9f0b690ab8e23568df691d639",
+      "train_rows": 15000
+    },
+    "smollm2_pipeline_corpus": "trl-lib/Capybara",
+    "tokenizer_smoke": {
+      "assistant_weight_sum": 58881.0,
+      "rows": 64,
+      "tokenizer_class": "GPTNeoXTokenizer",
+      "tokens": 75606,
+      "vocab_size": 50277
+    },
+    "train_split": "train_sft"
+  },
+  "descriptive_reference": {
+    "D": {
+      "T2": 4.153638091620729,
+      "T20": 1.168877658562076,
+      "T5": 2.554472462361996
+    },
+    "family": "SmolLM2-135M on Capybara"
+  },
+  "design": {
+    "S": 2560,
+    "T": [
+      2,
+      5,
+      20
+    ],
+    "cells": 72,
+    "eta_levels": 4,
+    "grids": [
+      {
+        "H": 1280,
+        "S": 2560,
+        "T": 2,
+        "mu0": {
+          "center": 0.07106462666975855,
+          "etas": [
+            0.025125139710338324,
+            0.05025027942067665,
+            0.1005005588413533,
+            0.2010011176827066
+          ],
+          "offsets_log2": [
+            -1.5,
+            -0.5,
+            0.5,
+            1.5
+          ]
+        },
+        "mu0.9": {
+          "center": 0.029627335040308306,
+          "etas": [
+            0.01047484475774391,
+            0.02094968951548782,
+            0.04189937903097564,
+            0.08379875806195128
+          ],
+          "offsets_log2": [
+            -1.5,
+            -0.5,
+            0.5,
+            1.5
+          ]
+        }
+      },
+      {
+        "H": 512,
+        "S": 2560,
+        "T": 5,
+        "mu0": {
+          "center": 0.04341918114042938,
+          "etas": [
+            0.015350998708982334,
+            0.030701997417964668,
+            0.061403994835929336,
+            0.12280798967185867
+          ],
+          "offsets_log2": [
+            -1.5,
+            -0.5,
+            0.5,
+            1.5
+          ]
+        },
+        "mu0.9": {
+          "center": 0.011913059053942006,
+          "etas": [
+            0.004211902420859095,
+            0.00842380484171819,
+            0.01684760968343638,
+            0.03369521936687276
+          ],
+          "offsets_log2": [
+            -1.5,
+            -0.5,
+            0.5,
+            1.5
+          ]
+        }
+      },
+      {
+        "H": 128,
+        "S": 2560,
+        "T": 20,
+        "mu0": {
+          "center": 0.021926218661920484,
+          "etas": [
+            0.007752088950811502,
+            0.015504177901623005,
+            0.03100835580324601,
+            0.06201671160649202
+          ],
+          "offsets_log2": [
+            -1.5,
+            -0.5,
+            0.5,
+            1.5
+          ]
+        },
+        "mu0.9": {
+          "center": 0.0024641979129397013,
+          "etas": [
+            0.0008712255272127002,
+            0.0017424510544254005,
+            0.003484902108850801,
+            0.006969804217701602
+          ],
+          "offsets_log2": [
+            -1.5,
+            -0.5,
+            0.5,
+            1.5
+          ]
+        }
+      }
+    ],
+    "mu": [
+      0.0,
+      0.9
+    ],
+    "seeds": [
+      981,
+      983,
+      991
+    ],
+    "training_seeds": [
+      981981,
+      983983,
+      991991
+    ]
+  },
+  "estimator": {
+    "bootstrap": "10000 paired training-seed resamples shared across all six curves; rng seed 20260741 for G12 and 20260742 for G13",
+    "near_bracket_allowance_bits": 0.5,
+    "point": "OLS quadratic in pooled three-seed mean endpoint loss versus log2(eta)"
+  },
+  "frozen_analysis_core": {
+    "bytes": 16638,
+    "path": "scripts/tonight85_analysis.py",
+    "sha256": "810256b6f897c2347aabaddfe266b07a866835885c25e623b6da3d08aedb53cd"
+  },
+  "frozen_analyzer": {
+    "bytes": 1148,
+    "path": "scripts/analyze_v13.py",
+    "sha256": "b939e8b717af3f0e1292c37327158f2d1420761af096cf58dc2751abe407d23b"
+  },
+  "frozen_execution": {
+    "common": {
+      "bytes": 6911,
+      "path": "scripts/tonight85_common.py",
+      "sha256": "7fc6b479ac45430d4f014ad5d0b86a47f0df79fe8cf0051b6b96c8eff1618969"
+    },
+    "gate_simulator": {
+      "bytes": 16933,
+      "path": "scripts/gatesim_tonight85.py",
+      "sha256": "d819bbbcb1a0ec6654079412d3bf4c6d3596bc69efe2cd517e66e4b4a77a0010"
+    },
+    "mac_conductor": {
+      "bytes": 22390,
+      "path": "scripts/tonight85_conductor.py",
+      "sha256": "27b76e9dfc1786eea5b88cf89347d2e3e44c7856e2336c299dea9b28ad9a81aa"
+    },
+    "manifest_builder": {
+      "bytes": 16650,
+      "path": "scripts/build_tonight85_manifest.py",
+      "sha256": "857df876100b657999da956db66da4c59d3e853bbe1db8701730aced60e00283"
+    },
+    "slot_runner": {
+      "bytes": 13935,
+      "path": "scripts/run_slot_tonight85.py",
+      "sha256": "98ad6207e313578776140911340e8cd4d78d52947abcb1ff4eaed56b95d810b5"
+    }
+  },
+  "gate": {
+    "minimum_valid_bootstrap_refits": 7500,
+    "missing_or_unbracketed_rule": "NOT_EVALUABLE; no rung may be added or moved",
+    "name": "G13",
+    "success_rule": "D(2)>D(5)>D(20) in point estimates and both paired 95% percentile CIs for log2(D(2))-log2(D(5)) and log2(D(5))-log2(D(20)) have lower endpoint >0"
+  },
+  "gate_feasibility": {
+    "report": {
+      "bytes": 3113,
+      "path": "experiment-specs/tonight85-gatesim.json",
+      "sha256": "1c4841b86120453364af85756bece1982f20f018a0985b5de6199feec0b8b47e"
+    },
+    "result": {
+      "P_evaluable": 1.0,
+      "P_pass_given_evaluable": 1.0,
+      "P_pass_unconditional": 1.0,
+      "evaluable": 2000,
+      "pass": 2000,
+      "placement_stress": {
+        "per_horizon_log2_D_sd_bits": 0.1,
+        "shared_log2_eta_sd_bits": 0.35
+      }
+    }
+  },
+  "model": {
+    "architecture": "GPTNeoXForCausalLM",
+    "canonical_inventory_sha256": "49840eba946d992e68bded1e7dc3688a8b0186416bd4e2c9b27026d602699b19",
+    "cpu_load_verified_on": [
+      "h200-n1",
+      "h200-n2"
+    ],
+    "exact_parameters": 162322944,
+    "files": {
+      "config.json": {
+        "bytes": 569,
+        "sha256": "76eb275107220e450d31258f792a2efcbee109d8b62ae0088260057dec06362f"
+      },
+      "model.safetensors": {
+        "bytes": 374998696,
+        "sha256": "29d2e457a664e41c12c735f20a36dc0956a665f614a54ce5db21a32e75965270"
+      },
+      "pytorch_model.bin": {
+        "bytes": 375036845,
+        "sha256": "8d856725c4a8266f10568cc1269948fc851e2aed1fb230036af2eac68e9df072"
+      },
+      "special_tokens_map.json": {
+        "bytes": 99,
+        "sha256": "6f50ab5a5a509a1c309d6171f339b196a900dc9c99ad0408ff23bb615fdae7ad"
+      },
+      "tokenizer.json": {
+        "bytes": 2113710,
+        "sha256": "c24618a1b3e6a38167beff1c72cffd126c3a66254347304b50547d12c5f25624"
+      },
+      "tokenizer_config.json": {
+        "bytes": 396,
+        "sha256": "70e38394e494931c6f773ba41e19460dd4436526b852207367f04341b4066d3f"
+      }
+    },
+    "id": "EleutherAI/pythia-160m",
+    "path": "/root/yeto-hf-cache/hub/models--EleutherAI--pythia-160m/snapshots/50f5173d932e8e61f858120bcb800b97af589f46",
+    "production_h200_dtype": "torch.bfloat16 via accelerator_model_dtype",
+    "revision": "50f5173d932e8e61f858120bcb800b97af589f46",
+    "snapshot_load_dtype": "torch.float16",
+    "total_bytes": 752150315
+  },
+  "note": "/private/tmp/h200-tonight85-note.md",
+  "outcome_aware_changes_forbidden": true,
+  "outer_convention": {
+    "flag": "--outer-optimizer nesterov",
+    "mu0.9_has_no_bias_correction": true
+  },
+  "pre_outcome": true,
+  "program_id": "outer-mup-v13-pythia-ultrachat",
+  "question": "Does the Nesterov D(T) monotonicity reproduce in a second model family on a different public corpus?",
+  "registered_at_utc": "2026-07-28T00:34:04Z",
+  "registration_commit_rule": "the Git commit containing this contract, its frozen analyzer, simulator, and launcher must be present on origin/experiment/tonight-8.5-lean before any corresponding GPU process starts",
+  "result_root": "/root/yeto-results-tonight85 -> /data/yeto-results-tonight85",
+  "retry_contract": {
+    "allowed_reasons": [
+      "host_or_gpu_failure",
+      "framework_or_driver_failure",
+      "storage_or_network_failure",
+      "registered_process_timeout_without_valid_endpoint"
+    ],
+    "attempt_limit": 2,
+    "finite_loss_retry_forbidden": true,
+    "retry_unit": "all eta cells sharing program, coordinate/T, arm, and training seed; an anchor retry unit is all three cells at that coordinate",
+    "scientific_recenter_or_extension_forbidden": true
+  },
+  "schema": "yeto_outer_mup_v13_prereg_v1",
+  "source_base_commit": "6ca24447a43e52369c5369610e7e873b14af5cc7",
+  "status": "REGISTERED"
+}

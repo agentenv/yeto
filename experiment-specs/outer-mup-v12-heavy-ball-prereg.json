@@ -1,0 +1,266 @@
+{
+  "D_definition": "D(T)=[eta_star(T,mu=0.9)/eta_star(T,mu=0)]/(1-0.9)",
+  "analysis_cutoff": "2026-07-28T08:30:00-07:00",
+  "comparison_role": "descriptive only; not part of the gate",
+  "cutoff_rule": "a gate not fully drained and analyzed by the cutoff is DEFERRED_ARXIV_V2; partial evidence cannot be promoted into tomorrow's submission",
+  "data": {
+    "corpus": "trl-lib/Capybara",
+    "eval_path": "/root/yeto-data/outer-mup-v3/scale-s2560/raw/eval.jsonl",
+    "eval_sha256": "533838a0564b13519956a044d23ed8db6705ddc7ae5f0ddb96538f49460bcebc",
+    "train_path": "/root/yeto-data/outer-mup-v3/scale-s2560/raw/train.jsonl",
+    "train_sha256": "e680a29ea8c8fc7c99efdceb4f62e485d3eed1ac2afd15bab43b506cb3f4ecaf"
+  },
+  "design": {
+    "S": 2560,
+    "T": [
+      2,
+      5,
+      20
+    ],
+    "cells": 72,
+    "eta_levels": 4,
+    "grids": [
+      {
+        "H": 1280,
+        "S": 2560,
+        "T": 2,
+        "mu0": {
+          "center": 0.07106462666975855,
+          "etas": [
+            0.03553231333487927,
+            0.056404031566651046,
+            0.0895358190441494,
+            0.1421292533395171
+          ],
+          "offsets_log2": [
+            -1.0,
+            -0.3333333333333333,
+            0.3333333333333333,
+            1.0
+          ]
+        },
+        "mu0.9": {
+          "center": 0.04225793576801869,
+          "etas": [
+            0.021128967884009343,
+            0.033540145846078735,
+            0.05324166279923222,
+            0.08451587153603737
+          ],
+          "offsets_log2": [
+            -1.0,
+            -0.3333333333333333,
+            0.3333333333333333,
+            1.0
+          ]
+        }
+      },
+      {
+        "H": 512,
+        "S": 2560,
+        "T": 5,
+        "mu0": {
+          "center": 0.04341918114042938,
+          "etas": [
+            0.02170959057021469,
+            0.0344618269089577,
+            0.05470474028802546,
+            0.08683836228085876
+          ],
+          "offsets_log2": [
+            -1.0,
+            -0.3333333333333333,
+            0.3333333333333333,
+            1.0
+          ]
+        },
+        "mu0.9": {
+          "center": 0.013630854038377603,
+          "etas": [
+            0.006815427019188801,
+            0.010818816019872795,
+            0.01717379993099648,
+            0.027261708076755205
+          ],
+          "offsets_log2": [
+            -1.0,
+            -0.3333333333333333,
+            0.3333333333333333,
+            1.0
+          ]
+        }
+      },
+      {
+        "H": 128,
+        "S": 2560,
+        "T": 20,
+        "mu0": {
+          "center": 0.021926218661920484,
+          "etas": [
+            0.010963109330960242,
+            0.017402851284808674,
+            0.02762530443675142,
+            0.04385243732384097
+          ],
+          "offsets_log2": [
+            -1.0,
+            -0.3333333333333333,
+            0.3333333333333333,
+            1.0
+          ]
+        },
+        "mu0.9": {
+          "center": 0.0024983032153624908,
+          "etas": [
+            0.0012491516076812454,
+            0.0019829045761009766,
+            0.003147664810055247,
+            0.0049966064307249815
+          ],
+          "offsets_log2": [
+            -1.0,
+            -0.3333333333333333,
+            0.3333333333333333,
+            1.0
+          ]
+        }
+      }
+    ],
+    "mu": [
+      0.0,
+      0.9
+    ],
+    "seeds": [
+      981,
+      983,
+      991
+    ],
+    "training_seeds": [
+      981981,
+      983983,
+      991991
+    ]
+  },
+  "estimator": {
+    "bootstrap": "10000 paired training-seed resamples shared across all six curves; rng seed 20260741 for G12 and 20260742 for G13",
+    "near_bracket_allowance_bits": 0.5,
+    "point": "OLS quadratic in pooled three-seed mean endpoint loss versus log2(eta)"
+  },
+  "finite_horizon_constants": {
+    "descriptive_nesterov_D": {
+      "T2": 4.153638091620729,
+      "T20": 1.168877658562076,
+      "T5": 2.554472462361996
+    },
+    "lean_citation": "FiniteHorizonOuter.lean terminalMultiplier .heavyBall; heavyBallCoeff is the accumulated sum and heavyBallCoeff_eq_sum_div expands it as sum_{t<T}(1-mu^(t+1))/(1-mu)",
+    "terminal_multiplier": "(1-mu^T)/(1-mu)"
+  },
+  "frozen_analysis_core": {
+    "bytes": 16638,
+    "path": "scripts/tonight85_analysis.py",
+    "sha256": "810256b6f897c2347aabaddfe266b07a866835885c25e623b6da3d08aedb53cd"
+  },
+  "frozen_analyzer": {
+    "bytes": 1142,
+    "path": "scripts/analyze_v12.py",
+    "sha256": "e9aaa61c4e5f874e6ee547bc7183d69162ad51c3bd7ffd547348cbab18a63f9b"
+  },
+  "frozen_execution": {
+    "common": {
+      "bytes": 6911,
+      "path": "scripts/tonight85_common.py",
+      "sha256": "7fc6b479ac45430d4f014ad5d0b86a47f0df79fe8cf0051b6b96c8eff1618969"
+    },
+    "gate_simulator": {
+      "bytes": 16933,
+      "path": "scripts/gatesim_tonight85.py",
+      "sha256": "d819bbbcb1a0ec6654079412d3bf4c6d3596bc69efe2cd517e66e4b4a77a0010"
+    },
+    "mac_conductor": {
+      "bytes": 22390,
+      "path": "scripts/tonight85_conductor.py",
+      "sha256": "27b76e9dfc1786eea5b88cf89347d2e3e44c7856e2336c299dea9b28ad9a81aa"
+    },
+    "manifest_builder": {
+      "bytes": 16650,
+      "path": "scripts/build_tonight85_manifest.py",
+      "sha256": "857df876100b657999da956db66da4c59d3e853bbe1db8701730aced60e00283"
+    },
+    "slot_runner": {
+      "bytes": 13935,
+      "path": "scripts/run_slot_tonight85.py",
+      "sha256": "98ad6207e313578776140911340e8cd4d78d52947abcb1ff4eaed56b95d810b5"
+    }
+  },
+  "gate": {
+    "minimum_valid_bootstrap_refits": 7500,
+    "missing_or_unbracketed_rule": "NOT_EVALUABLE; no rung may be added or moved",
+    "name": "G12",
+    "success_rule": "D(2)>D(5)>D(20) in point estimates and both paired 95% percentile CIs for log2(D(2))-log2(D(5)) and log2(D(5))-log2(D(20)) have lower endpoint >0"
+  },
+  "gate_feasibility": {
+    "report": {
+      "bytes": 3113,
+      "path": "experiment-specs/tonight85-gatesim.json",
+      "sha256": "1c4841b86120453364af85756bece1982f20f018a0985b5de6199feec0b8b47e"
+    },
+    "result": {
+      "P_evaluable": 1.0,
+      "P_pass_given_evaluable": 1.0,
+      "P_pass_unconditional": 1.0,
+      "evaluable": 2000,
+      "pass": 2000
+    }
+  },
+  "model": {
+    "id": "HuggingFaceTB/SmolLM2-135M",
+    "path": "/root/yeto-data/model",
+    "revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2"
+  },
+  "note": "/private/tmp/h200-tonight85-note.md",
+  "outcome_aware_changes_forbidden": true,
+  "outer_convention": {
+    "cli": {
+      "bytes": 28175,
+      "path": "syncer/src/main.rs",
+      "sha256": "e9b730118bdf27d7bbe2bef233c9fdd8ebbc5a96ccd4b3c0a9e3cce1bc75a9b8"
+    },
+    "flag": "--outer-optimizer heavy-ball",
+    "harness": {
+      "bytes": 123837,
+      "path": "scripts/compare_diloco.py",
+      "sha256": "1f15e487d4a454bf85ed66bbebe75a0e81dee795de291d6260e6308f05eb0b78"
+    },
+    "implementation": {
+      "bytes": 174504,
+      "path": "syncer/src/merge.rs",
+      "sha256": "d5f0a7749c32190aaedbc598bb33be8d6d7552dfa659e457450f44dc4479c9cf"
+    },
+    "implementation_commit": "44bad06991c8ea134ccde373c47c98b06b89c062",
+    "no_nesterov_lookahead": true,
+    "off_path_result": "PASS",
+    "off_path_test": "merge::tests::heavy_ball_off_path_is_bit_identical_to_production_nesterov",
+    "recursion": "b_t=mu*b_(t-1)+delta_t; theta_t=theta_(t-1)-eta*b_t"
+  },
+  "pre_outcome": true,
+  "program_id": "outer-mup-v12-heavy-ball",
+  "question": "Under classical heavy-ball outer momentum without Nesterov lookahead, does D(T) decrease over T={2,5,20}?",
+  "registered_at_utc": "2026-07-28T00:34:04Z",
+  "registration_commit_rule": "the Git commit containing this contract, its frozen analyzer, simulator, and launcher must be present on origin/experiment/tonight-8.5-lean before any corresponding GPU process starts",
+  "result_root": "/root/yeto-results-tonight85 -> /data/yeto-results-tonight85",
+  "retry_contract": {
+    "allowed_reasons": [
+      "host_or_gpu_failure",
+      "framework_or_driver_failure",
+      "storage_or_network_failure",
+      "registered_process_timeout_without_valid_endpoint"
+    ],
+    "attempt_limit": 2,
+    "finite_loss_retry_forbidden": true,
+    "retry_unit": "all eta cells sharing program, coordinate/T, arm, and training seed; an anchor retry unit is all three cells at that coordinate",
+    "scientific_recenter_or_extension_forbidden": true
+  },
+  "schema": "yeto_outer_mup_v12_prereg_v1",
+  "source_base_commit": "6ca24447a43e52369c5369610e7e873b14af5cc7",
+  "status": "REGISTERED"
+}

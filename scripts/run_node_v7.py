@@ -714,6 +714,7 @@ def validate_cell(cell: dict, attempt_root: Path, command: list[str]) -> dict:
     if require_file(failures, artifacts, "event_tape", tape_path):
         try:
             rows = read_jsonl(tape_path)
+            tape_rows = rows
             if len(rows) != expected["outer_steps"]:
                 failures.append("event tape row count mismatch")
             for index, row in enumerate(rows, 1):

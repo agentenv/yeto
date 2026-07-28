@@ -67,7 +67,7 @@ struct Args {
     /// these replace --outer-lr for the corresponding fragment.
     #[arg(long)]
     outer_lr_by_fragment: Option<String>,
-    /// Outer Nesterov momentum, or beta for normalized EMA variants.
+    /// Outer Nesterov/heavy-ball momentum, or beta for normalized EMA variants.
     #[arg(long, default_value_t = 0.9)]
     outer_momentum: f32,
     /// Outer optimizer: nesterov, heavy-ball, normalized-ema, restarted-ema,
@@ -364,6 +364,13 @@ fn validate_outer_optimizer(
     optimizer: merge::OuterOptimizer,
     outer_momentum: f32,
 ) -> anyhow::Result<()> {
+    if optimizer == merge::OuterOptimizer::HeavyBall
+        && (!outer_momentum.is_finite() || !(0.0..1.0).contains(&outer_momentum))
+    {
+        anyhow::bail!(
+            "--outer-momentum for heavy-ball must be finite and in [0, 1), got {outer_momentum}"
+        );
+    }
     if optimizer.uses_normalized_ema()
         && (!outer_momentum.is_finite() || !(0.0..1.0).contains(&outer_momentum))
     {
@@ -654,6 +661,8 @@ mod tests {
 
     #[test]
     fn validates_ema_beta_and_restart_threshold() {
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::HeavyBall, 0.9).is_ok());
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::HeavyBall, 1.0).is_err());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::NormalizedEma, 0.9).is_ok());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::RestartedEma, 1.0).is_err());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::CappedNesterov, 0.9).is_ok());

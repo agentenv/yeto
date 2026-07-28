@@ -1,0 +1,150 @@
+{
+  "analysis_cutoff": "2026-07-28T08:30:00-07:00",
+  "cutoff_rule": "a gate not fully drained and analyzed by the cutoff is DEFERRED_ARXIV_V2; partial evidence cannot be promoted into tomorrow's submission",
+  "forbidden": "No raw rung, seed, D constant, pilot eta, or fallback rule may be changed after any pilot or raw endpoint is observed",
+  "frozen_analysis_core": {
+    "bytes": 16638,
+    "path": "scripts/tonight85_analysis.py",
+    "sha256": "810256b6f897c2347aabaddfe266b07a866835885c25e623b6da3d08aedb53cd"
+  },
+  "frozen_descriptive_analyzer": {
+    "bytes": 3035,
+    "path": "scripts/analyze_v7_lean.py",
+    "sha256": "f527d75802a9d7c32131aa90703b6149a6bf49f5f9b2a367acc9d4ddc0d3ab4a"
+  },
+  "frozen_execution": {
+    "common": {
+      "bytes": 6911,
+      "path": "scripts/tonight85_common.py",
+      "sha256": "7fc6b479ac45430d4f014ad5d0b86a47f0df79fe8cf0051b6b96c8eff1618969"
+    },
+    "gate_simulator": {
+      "bytes": 16933,
+      "path": "scripts/gatesim_tonight85.py",
+      "sha256": "d819bbbcb1a0ec6654079412d3bf4c6d3596bc69efe2cd517e66e4b4a77a0010"
+    },
+    "mac_conductor": {
+      "bytes": 22390,
+      "path": "scripts/tonight85_conductor.py",
+      "sha256": "27b76e9dfc1786eea5b88cf89347d2e3e44c7856e2336c299dea9b28ad9a81aa"
+    },
+    "manifest_builder": {
+      "bytes": 16650,
+      "path": "scripts/build_tonight85_manifest.py",
+      "sha256": "857df876100b657999da956db66da4c59d3e853bbe1db8701730aced60e00283"
+    },
+    "slot_runner": {
+      "bytes": 13935,
+      "path": "scripts/run_slot_tonight85.py",
+      "sha256": "98ad6207e313578776140911340e8cd4d78d52947abcb1ff4eaed56b95d810b5"
+    }
+  },
+  "frozen_prediction_builder": {
+    "bytes": 2535,
+    "path": "scripts/build_v7_lean_prediction.py",
+    "sha256": "da6469e19db3c19deb93824f8084222da2168696b70af65d2a5daed1265fe0ea"
+  },
+  "note": "/private/tmp/h200-tonight85-note.md",
+  "original_registration": {
+    "branch": "origin/experiment/outer-mup-v7-27b-lora",
+    "commit": "a8f113b0858d17749dfb08ae9702bc29effcc395",
+    "contract": {
+      "bytes": 25580,
+      "path": "experiment-specs/outer-mup-v7-27b-lora-prereg.json",
+      "sha256": "59fafd84e8cc9308148029a2422032b1c7916bbb84ebdaa90f1a598cd6c64ac1"
+    }
+  },
+  "outcome_aware_changes_forbidden": true,
+  "pilot": {
+    "H": 512,
+    "S": 2560,
+    "T": 5,
+    "cells": 3,
+    "etas": [
+      0.14,
+      0.28,
+      0.56
+    ],
+    "mu": 0.0,
+    "seed": 691,
+    "selection_rule": "retain the original v7 quadratic/fallback pilot rule exactly; pilot cells are excluded from any confirmatory claim",
+    "training_seed": 691691
+  },
+  "pre_outcome": true,
+  "pre_outcome_state": {
+    "checked_at_utc": "2026-07-28T00:34:04Z",
+    "v7_evidence_files_on_h200_n1_n2": 0,
+    "v7_processes_on_h200_n1_n2": 0,
+    "v7_scientific_losses_seen": false
+  },
+  "prelaunch_validator_repair": {
+    "repair": "Assign tape_rows=rows immediately after the already-registered event-tape JSONL parse; training, commands, cells, estimators, and scientific outcomes are unchanged.",
+    "scientific_change": false,
+    "status": "ADOPTED_BEFORE_ANY_V7_PROCESS_OR_EVIDENCE",
+    "trigger": "The v7 validator loaded the event tape into local variable rows but left tape_rows empty before barrier-registry replay, making every valid registry compare unequal to the validated tape.",
+    "validator": {
+      "bytes": 49430,
+      "path": "scripts/run_node_v7.py",
+      "sha256": "70de79c8d5cc150e014090e3eb725954aa197f53993480d9319f7eba0fde9b8f"
+    }
+  },
+  "program_id": "outer-mup-v7-27b-lora",
+  "raw_spot_check": {
+    "D5_source": "final disclosed G4C constant already frozen in v7",
+    "cells": 4,
+    "formula": "predicted_eta=selected_pilot_mu0_eta*0.1*1.7416157949788522",
+    "interpretation": "one original-grid rung below and above the prediction",
+    "offsets_log2": [
+      -0.5,
+      0.5
+    ],
+    "prediction_artifact_must_be_committed_and_pushed_from_mac_before_launch": true,
+    "seeds": [
+      701,
+      709
+    ],
+    "training_seeds": [
+      701701,
+      709709
+    ]
+  },
+  "reason": "Use the extended lease for a descriptive T=5 pilot/spot check while preserving the 8-GPU island requirement; withdraw the confirmatory G7 main grid before any v7 outcome rather than underpowering it after outcomes.",
+  "registered_at_utc": "2026-07-28T00:34:04Z",
+  "registration_commit_rule": "the Git commit containing this contract, its frozen analyzer, simulator, and launcher must be present on origin/experiment/tonight-8.5-lean before any corresponding GPU process starts",
+  "result_root": "/root/yeto-results-tonight85 -> /data/yeto-results-tonight85",
+  "retained_wiring_smoke": {
+    "H": 16,
+    "S": 64,
+    "T": 4,
+    "eta": 0.28,
+    "mu": 0.0,
+    "required_before_pilot": true,
+    "scientific_cell": false,
+    "seed": 683
+  },
+  "retry_contract": {
+    "allowed_reasons": [
+      "host_or_gpu_failure",
+      "framework_or_driver_failure",
+      "storage_or_network_failure",
+      "registered_process_timeout_without_valid_endpoint"
+    ],
+    "attempt_limit": 2,
+    "finite_loss_retry_forbidden": true,
+    "retry_unit": "all eta cells sharing program, coordinate/T, arm, and training seed; an anchor retry unit is all three cells at that coordinate",
+    "scientific_recenter_or_extension_forbidden": true
+  },
+  "schema": "yeto_outer_mup_v7_lean_scope_amendment_v1",
+  "scope": {
+    "T": [
+      5
+    ],
+    "analysis": "descriptive; partial result acceptable and no PASS/FAIL gate is defined",
+    "confirmatory_G7_withdrawn_pre_outcome": true,
+    "island_width_gpus": 8,
+    "plus_wiring_smoke": 1,
+    "scientific_cells": 7
+  },
+  "source_base_commit": "6ca24447a43e52369c5369610e7e873b14af5cc7",
+  "status": "ADOPTED_PRE_OUTCOME_SCOPE_REDUCTION"
+}

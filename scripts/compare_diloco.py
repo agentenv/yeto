@@ -2788,7 +2788,7 @@ def main() -> int:
         "--outer-momentum",
         type=float,
         default=None,
-        help="override outer Nesterov momentum or EMA beta for every selected async arm",
+        help="override outer Nesterov/heavy-ball momentum or EMA beta for every selected async arm",
     )
     p.add_argument(
         "--outer-optimizer",
