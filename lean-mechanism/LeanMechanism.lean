@@ -4,6 +4,7 @@ import LeanMechanism.AnchorDrift
 import LeanMechanism.Counterexamples
 import LeanMechanism.Correction
 import LeanMechanism.FiniteHorizonOuter
+import LeanMechanism.AdaptiveFiniteAge
 import LeanMechanism.QuadraticAlignment
 import LeanMechanism.TransferPenalty
 import LeanMechanism.PhaseBoundary
