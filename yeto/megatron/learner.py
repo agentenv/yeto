@@ -175,8 +175,30 @@ def _set_trainable(model, trainable: bool):
             p.requires_grad_(trainable)
 
 
+def _patch_transformers_bridge_compat():
+    """Paper over narrow Transformers/Bridge symbol drift.
+
+    Megatron-Bridge 0.5.x imports Ernie-VL registration modules when importing
+    megatron.bridge, even for Qwen. Transformers 5.2.0 spells several Ernie
+    classes with ``VL_Moe`` while Bridge imports ``VLMoe``. Alias them before
+    Bridge registration runs so unrelated Ernie imports do not block Qwen.
+    """
+    try:
+        from transformers.models.ernie4_5_vl_moe import modeling_ernie4_5_vl_moe as ernie
+    except Exception:
+        return
+    for name in dir(ernie):
+        if "VL_Moe" not in name:
+            continue
+        compat_name = name.replace("VL_Moe", "VLMoe")
+        if not hasattr(ernie, compat_name):
+            setattr(ernie, compat_name, getattr(ernie, name))
+
+
 def _build_model(args, device):
     """HF bf16 checkpoint -> Megatron-Core model, then optional LoRA."""
+
+    _patch_transformers_bridge_compat()
 
     from megatron.bridge import AutoBridge
 

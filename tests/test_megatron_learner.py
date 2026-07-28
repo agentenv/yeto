@@ -198,6 +198,33 @@ def test_build_model_full_tuning_skips_lora_and_enables_base_params(monkeypatch)
     assert all(p.requires_grad for p in model[0].parameters())
 
 
+def test_patch_transformers_bridge_compat_aliases_ernie_vl_moe_names(monkeypatch):
+    fake_module = types.SimpleNamespace(
+        Ernie4_5_VL_MoeModel=object(),
+        Ernie4_5_VL_MoeVariableResolutionResamplerModel=object(),
+        OtherName=object(),
+    )
+    fake_package = types.ModuleType("ernie")
+    fake_package.modeling_ernie4_5_vl_moe = fake_module
+    monkeypatch.setitem(sys.modules, "transformers", types.ModuleType("transformers"))
+    monkeypatch.setitem(sys.modules, "transformers.models", types.ModuleType("models"))
+    monkeypatch.setitem(sys.modules, "transformers.models.ernie4_5_vl_moe", fake_package)
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers.models.ernie4_5_vl_moe.modeling_ernie4_5_vl_moe",
+        fake_module,
+    )
+
+    ml._patch_transformers_bridge_compat()
+
+    assert fake_module.Ernie4_5_VLMoeModel is fake_module.Ernie4_5_VL_MoeModel
+    assert (
+        fake_module.Ernie4_5_VLMoeVariableResolutionResamplerModel
+        is fake_module.Ernie4_5_VL_MoeVariableResolutionResamplerModel
+    )
+    assert fake_module.OtherName is not fake_module.Ernie4_5_VLMoeModel
+
+
 def test_build_dataset_uses_current_data_api(monkeypatch):
     calls = {}
 
