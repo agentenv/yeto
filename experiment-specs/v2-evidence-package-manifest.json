@@ -1,0 +1,673 @@
+{
+  "schema": "yeto_v2_evidence_package_manifest_v1",
+  "created_date": "2026-07-28",
+  "scope": "Manifest of paper-facing readouts, analyzers, derived analysis files, mechanism records, and Lean sources. This file inventories evidence; it does not silently copy missing scientific artifacts or change any verdict.",
+  "binding_paper_source": {
+    "path": "/private/tmp/frozen.txt",
+    "sha256": "4924f450675d1967de79fb797cae871d45a4519dbea4f62b9ce0ee658f2a77bc",
+    "role": "newer frozen paper text containing G9/G10/G12/G13, theorem maps, mechanism chronicle, and reproducibility statement",
+    "archive_status": "MISSING_FROM_CPU_ARCHIVE",
+    "checked_in_paper_main": {
+      "path": "paper/main.md",
+      "sha256": "89930555803dc2e0f6d8b02f734bf5d3e125dcef3f0f872c38d7dfcbcf140dfc",
+      "status": "OLDER_NONBINDING_PAPER_STATE"
+    },
+    "warning": "The evidence inventory is audited against /private/tmp/frozen.txt. Auditing only the checked-in paper/main.md would omit newer claims and provenance."
+  },
+  "archive_under_audit": {
+    "location": "c@65.19.161.135:~/h200-evac/",
+    "repository": false,
+    "audit_date": "2026-07-28",
+    "canonical_readouts_found": [
+      {
+        "id": "G8",
+        "path": "/home/c/h200-evac/n1/yeto-results-v8/_controller/g8-readout.json",
+        "sha256": "9884f0775b30a35964e7df878bd0569b62f24af23619d90b4ff346d1afae596c"
+      }
+    ],
+    "noncanonical_or_partial_readouts_found": [
+      {
+        "id": "G9_STALE",
+        "path": "/home/c/h200-evac/g9-readout.json",
+        "sha256": "fe49acafab13132f8a134969750ed372a84b09cfb738b833e400f17302b90fcf",
+        "status": "16_OF_22_EVIDENCE_ONLY_NO_COMPLETED_7B_GATE"
+      },
+      {
+        "id": "G9_SUPPLEMENTAL_1P7B",
+        "path": "/home/c/h200-evac/supplemental-1p7b-readout.json",
+        "sha256": "b572c017250414a96adaba472f75e4452933e26bc21e4ff9f207d032095b648a",
+        "status": "OUT_OF_GATE_SUPPLEMENT_NOT_JOINT_READOUT"
+      }
+    ],
+    "analyzer_found_but_stale": {
+      "path": "/home/c/h200-evac/analyze_v9.py",
+      "sha256": "efc18c8105a85072e1de3b58fa353488da15ff32a3406878265b8cb10035aba8",
+      "canonical_required_sha256": "ef140f0a3e6d2a543bf6f422af85ec716dd4b355c65961ad5ba5a100335f1ea1"
+    },
+    "sealed_prediction_present": {
+      "path": "/home/c/h200-evac/v9-sealed-predictions.json",
+      "sha256": "97e02dcad63782978ac51b320621e5a681236518cb0d5db19454b8981549ca9c"
+    }
+  },
+  "canonical_readouts": [
+    {
+      "id": "G1_PILOT",
+      "paper_role": "pilot fixed-S synchronization scan",
+      "canonical_location": "/private/tmp/number-audit.HmdmkU/readouts/g1-readout.json",
+      "sha256": "c2dcd6b9ab7dce0dc28d1e2473a72c7e0bdb8d6221728f09503a6354a39cae2b",
+      "source_git_commit": "ace897824b396018e0090bec0f1f3a9b707aa709",
+      "verdict": "NOT_EVALUABLE",
+      "mac_status": "PRESENT_IN_NUMBER_AUDIT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G1V2_REPLICATION",
+      "paper_role": "disjoint-seed H-scan replication",
+      "canonical_location": "/private/tmp/number-audit.HmdmkU/readouts/g1v2-readout.json",
+      "sha256": "5d4eed9685f25fd1db3135319908a045a389300a008a67bc009cd178cabe2fc8",
+      "source_git_commit": "a886a3996905913d37ec56cc14914878f636283d",
+      "verdict": "NOT_EVALUABLE",
+      "mac_status": "PRESENT_IN_NUMBER_AUDIT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G3_INTERVENTION",
+      "paper_role": "unique-input horizon scan, normalization intervention, and optimizer comparison",
+      "canonical_location": "/private/tmp/number-audit.HmdmkU/readouts/g3-readout.json",
+      "sha256": "d4a3cde6aa47580dff255c7a66030ab997a95f4072b1883bf71aa54d7da744c8",
+      "source_git_commit": "6ea517425f149f10938e05b4487f217066acb8d7",
+      "verdict": "FORMALLY_INCOMPLETE_OR_NOT_EVALUABLE_BY_COMPONENT",
+      "mac_status": "PRESENT_IN_NUMBER_AUDIT",
+      "cpu_archive_status": "MISSING",
+      "adjudication": "The preregistered corrected T20 curve records 2,244 invalid refits; see discrepancy_2238_vs_2244."
+    },
+    {
+      "id": "G4_INITIAL_1P7B",
+      "paper_role": "initial 1.7B scale-transfer grid",
+      "canonical_location": "/private/tmp/number-audit.HmdmkU/readouts/g4-readout.json",
+      "sha256": "f2e70767cb06ecc4fcdd7942d4b517eea3c9927159e828f8d6f8ff31379dcded",
+      "source_git_commit": "5abf65d888506642d44ae446d4e1681e7e531645",
+      "verdict": "NOT_EVALUABLE",
+      "mac_status": "PRESENT_IN_NUMBER_AUDIT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G4B_EXTENSION",
+      "paper_role": "1.7B grid extension",
+      "canonical_location": "/private/tmp/number-audit.HmdmkU/readouts/g4b-readout.json",
+      "sha256": "d58a05c46396d94786c6bcdcffa4f9c72abcc47036652a5260ee87256446be97",
+      "source_git_commit": "8c5286476231e0d5a783e18f693436a5b991ee2c",
+      "verdict": "NOT_EVALUABLE",
+      "mac_status": "PRESENT_IN_NUMBER_AUDIT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G4C_STRICT_ORIGINAL",
+      "paper_role": "preserved original strict five-seed analysis before the gatesim amendment formalization",
+      "canonical_location": "/private/tmp/diloco-artifact-fetch.fPWC6x/readouts/g4c-readout-strict-original.json",
+      "sha256": "5f4eaf3c3c229818c36f589e6e4945315473341ed77b0d4d28666e2574f84d66",
+      "verdict": "NOT_EVALUABLE_6804_OF_10000_STRICT_VALID",
+      "mac_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G4C_AMENDED",
+      "paper_role": "paper's final 1.7B horizon-transfer decision",
+      "canonical_location": "/private/tmp/number-audit.HmdmkU/readouts/g4c-readout.json",
+      "sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa",
+      "source_git_commit": "848a18d662c1da0e8bd03f5d231d1ea7a0c0f5b0",
+      "verdict": "PASS",
+      "provenance_caveat": "The exact amended rule was frozen in a pre-outcome gatesim note, but its Git formalization and analyzer commit ea5f034 followed the original strict outcome. The manifest preserves both paths.",
+      "mac_status": "PRESENT_IN_NUMBER_AUDIT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G5_ORIGINAL_OPERATOR_AUDIT",
+      "paper_role": "original SNOO comparison not-evaluable path after frozen analyzer exception",
+      "canonical_location": "/private/tmp/v5-launch/g5-not-evaluable-audit.json",
+      "sha256": "9251d78a9e88dc98f78ff524814454392633ade4315a464450c8c8ad78cec93b",
+      "verdict": "NOT_EVALUABLE",
+      "readout_status": "NO_CANONICAL_ANALYZER_READOUT_WRITTEN_BECAUSE_FROZEN_ANALYZER_RAISED_ON_NONE",
+      "mac_status": "PRESENT_OPERATOR_AUDIT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G5B_SNOO_REGRID",
+      "paper_role": "registered pooled SNOO estimator and post-review robust sensitivity source",
+      "canonical_location": "/private/tmp/number-audit.HmdmkU/readouts/g5b-readout.json",
+      "sha256": "60fd6549d06d38f34720a5b68792dd2b1cb603e11b061ef78d199c9160fcde5b",
+      "source_git_commit": "8316d8666f417ed0f157aecff4aa206cad7a70e8",
+      "verdict": "COMPLETE_FORMAL_WORSE_WITH_SEPARATE_ESTIMATOR_AUDIT",
+      "mac_status": "PRESENT_IN_NUMBER_AUDIT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G6_FACTORIAL",
+      "paper_role": "complete 540-run factorial held-out surface test",
+      "canonical_location": "/private/tmp/g6-readout-tonight85.json",
+      "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c",
+      "source_git_commit": "058887e647340d7e29bdf0f1976514ce07588642",
+      "verdict": "PASS",
+      "mac_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G8_TUNED_LOSS_DIAGRAM",
+      "paper_role": "complete 180-run age-matched tuned-loss diagram",
+      "canonical_location": "c@65.19.161.135:/home/c/h200-evac/n1/yeto-results-v8/_controller/g8-readout.json",
+      "mac_mirror": "/private/tmp/h200-mechA-data/v8/g8-readout.json",
+      "sha256": "9884f0775b30a35964e7df878bd0569b62f24af23619d90b4ff346d1afae596c",
+      "source_git_commit": "8f46301f6484cc706fb32bc3cb34058528b8862e",
+      "verdict": "COMPLETE_EVALUABLE_0_HELP_3_HURT_7_NEUTRAL_2_UNCERTAIN",
+      "mac_status": "PRESENT",
+      "cpu_archive_status": "PRESENT_CANONICAL"
+    },
+    {
+      "id": "G9_JOINT_SCALE",
+      "paper_role": "registered joint 1.7B plus 7B scale verdict",
+      "canonical_location": "/root/g9-joint-readout.json in the original control plane",
+      "sha256": "4d42a5f133684822f0fc81c69c3348610c7b3824836b1ecf937abb6e9515bcaf",
+      "verdict": "FAIL_G9A_PASS_G9B_FAIL",
+      "expected_evidence": "22_OF_22",
+      "mac_status": "MISSING_BYTES_SHA_AND_RESULTS_RECORDED_IN_NIGHT_LEDGER",
+      "cpu_archive_status": "MISSING_CANONICAL_STALE_16_OF_22_FILE_PRESENT",
+      "must_not_substitute": "The CPU archive's fe49acaf... g9-readout.json and b572c017... supplemental readout are not this joint readout."
+    },
+    {
+      "id": "G10_FRESH_TRANSFER",
+      "paper_role": "fresh held-out exact-rate transfer test",
+      "canonical_location": "/private/tmp/v10-control/g10-readout.json",
+      "sha256": "46adf7b8b11a9434632e3470248b3adc3b6bb9e6a71d1aa5b4df59e84390386f",
+      "source_git_commit": "c2ce9eb4d7dec48e58dc283727491fdb3001a277",
+      "verdict": "PENALTY_NULL",
+      "mac_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G12_HEAVY_BALL",
+      "paper_role": "heavy-ball convention replication",
+      "canonical_location": "/private/tmp/tonight85-control/v12-readout.json",
+      "sha256": "0162dbdd2a78492c0b167e2dd516396ab7ea0d1bcb34ac0293abf6abdfc67ae5",
+      "verdict": "PASS",
+      "mac_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G13_PYTHIA_INITIAL",
+      "paper_role": "initial second-family Pythia-160M/UltraChat scan",
+      "canonical_location": "/private/tmp/tonight85-control/v13-readout.json",
+      "sha256": "be69b796d80bf5a32828d803aee65459639643991bb8230eee30e1f6be0eef5a",
+      "verdict": "NOT_EVALUABLE_1_OF_6_CURVES_ACCEPTED",
+      "mac_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G13B_PYTHIA_REGRID",
+      "paper_role": "pre-outcome second-family regrid chronicle",
+      "canonical_location": "/private/tmp/v13b-control/v13b-readout.json",
+      "sha256": "868d8aaa3c422bdb4475302d2071ca0082108e813aab70c5f9061ef90f156f48",
+      "verdict": "NOT_EVALUABLE_3_OF_6_CURVES_ACCEPTED_0_OF_10000_SHARED_REFITS",
+      "mac_status": "PRESENT_WITH_BYTE_IDENTICAL_RERUN",
+      "cpu_archive_status": "MISSING"
+    }
+  ],
+  "registered_studies_without_canonical_readout": [
+    {
+      "id": "G7_27B_LORA_REDUCED",
+      "disposition": "running but not analyzed at frozen paper cutoff; no canonical readout found",
+      "analyzer_sha256": "c835189056d407535cb866c4095b49a35361391a43b8f23a3669b40914d18f75",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G11_RATIO_TRANSPORT",
+      "disposition": "deferred at frozen 08:30 PDT cutoff; no canonical readout found",
+      "analyzer_sha256": "74477e0dbde76226186f80b30e0276ffb4d8dc585f10edfab6ea9d6dcf08e960",
+      "cpu_archive_status": "MISSING"
+    }
+  ],
+  "canonical_analyzers": [
+    {
+      "id": "G1",
+      "path": "scripts/analyze_e1.py",
+      "sha256": "b8a3d54236b7faad17c2c242b79fca608c49ff3cfe15b5b4f3b2cc85452bbef1",
+      "canonical_evidence": "/private/tmp/h200-day1-note.md",
+      "git_status": "MISSING_FROM_ALL_REACHABLE_GIT_OBJECTS",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G1V2",
+      "path": "scripts/analyze_e1v2.py",
+      "sha256": "41f7dd17421edfaa2d86746a4cc5eb6b273931502eefdb9b7287e1bd79b721dd",
+      "git_location": "44359f557376e9e3d13f5bf9de152e7e3317f80d:scripts/analyze_e1v2.py",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G3",
+      "path": "scripts/analyze_v3.py",
+      "sha256": "f608bebe770bda97733db0bbb3d2f5e317a1ea8d5aa676fd28627f7d91a024e7",
+      "git_location": "fa7206b5988ac622e2f0b6660fac37fb56515196:scripts/analyze_v3.py",
+      "rng": "python random.Random(20260724)",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G4",
+      "path": "scripts/analyze_v4.py",
+      "sha256": "654eb63d5a830b275dfb64d2c9e178ff83c2355a7ec88e02c8c46e2cf1300471",
+      "git_location": "5abf65d888506642d44ae446d4e1681e7e531645:scripts/analyze_v4.py",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G4B",
+      "path": "scripts/analyze_v4b.py",
+      "sha256": "9a6bd4110b55a5487501ab4b32eef205854400dd8735c83c88dd7580951cbab5",
+      "git_location": "94212983e46e4c4cc72fc815628d84750ac9fddd:scripts/analyze_v4b.py",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G4C_STRICT",
+      "path": "scripts/analyze_v4c.py",
+      "sha256": "b8e5470d2b512f487948413104a1783fe45adbbe68871f61873d3a9bae73cf27",
+      "git_location": "848a18d662c1da0e8bd03f5d231d1ea7a0c0f5b0:scripts/analyze_v4c.py",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G4C_AMENDED",
+      "path": "scripts/analyze_v4c.py",
+      "sha256": "612d11b6eb4f7fee652e60d98361a5ca8bcfb0cbbf3240a17bca89364be64c79",
+      "git_location": "ea5f034096e54a2f959e6bd73890ca0e47390430:scripts/analyze_v4c.py",
+      "provenance_caveat": "post-outcome Git formalization of the exact pre-outcome-frozen gatesim amendment",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G5",
+      "path": "scripts/analyze_v5.py",
+      "sha256": "e574294d1d31ad9f8e7431168a877bd4fb58ac5c7c628d7e882eb8a89414a97e",
+      "git_location": "63ba78026c916e0f1b93bdd233a89a921e72b315:scripts/analyze_v5.py",
+      "known_behavior": "raised on preregistered unbracketed None path after correctly detecting non-evaluability",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G5B",
+      "path": "scripts/analyze_v5b.py",
+      "sha256": "b6ed09595961b81ebd9c2b632211d591f67a36c027faea71ecb86de36cb1e0ef",
+      "git_location": "8316d8666f417ed0f157aecff4aa206cad7a70e8:scripts/analyze_v5b.py",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G6",
+      "path": "scripts/analyze_v6.py",
+      "sha256": "8016e03cec5c8ff51171d35861b51553599218079fafa9c7af9798092f2110d6",
+      "git_location": "2f1d2aeae30344f0aad823b606739893012d32f9:scripts/analyze_v6.py",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G7_27B_LORA",
+      "path": "scripts/analyze_v7.py",
+      "sha256": "c835189056d407535cb866c4095b49a35361391a43b8f23a3669b40914d18f75",
+      "git_location": "origin/experiment/outer-mup-v7-27b-lora:scripts/analyze_v7.py",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G8",
+      "path": "scripts/analyze_v8.py",
+      "sha256": "00166147bae8566e2d2980c50cb94a282b3ecfb302a58025f98c88cdb870b699",
+      "git_location": "origin/experiment/outer-mup-v8-phasediagram:scripts/analyze_v8.py",
+      "cpu_archive_status": "MISSING_ANALYZER_READOUT_ONLY_PRESENT"
+    },
+    {
+      "id": "G9_JOINT",
+      "path": "scripts/analyze_v9.py",
+      "sha256": "ef140f0a3e6d2a543bf6f422af85ec716dd4b355c65961ad5ba5a100335f1ea1",
+      "git_location": "origin/experiment/outer-mup-v9-sealed-scale:scripts/analyze_v9.py",
+      "execution_commit_recorded_by_paper": "3e28f68b689e4b3e02e0e450a93cdae11ccb27c0",
+      "cpu_archive_status": "MISSING_CANONICAL_STALE_HASH_EFC18C_PRESENT"
+    },
+    {
+      "id": "G10",
+      "path": "scripts/analyze_v10.py",
+      "sha256": "a5f326275c3462cb1663e6d0084b7248d827ee413d524c951b51d921463aff76",
+      "git_location": "c2ce9eb4d7dec48e58dc283727491fdb3001a277:scripts/analyze_v10.py",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G11",
+      "path": "scripts/analyze_v11.py",
+      "sha256": "74477e0dbde76226186f80b30e0276ffb4d8dc585f10edfab6ea9d6dcf08e960",
+      "git_location": "c310dc69f471c60f208995602c144a34e57f86da:scripts/analyze_v11.py",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G12",
+      "path": "scripts/analyze_v12.py",
+      "sha256": "e9aaa61c4e5f874e6ee547bc7183d69162ad51c3bd7ffd547348cbab18a63f9b",
+      "git_location": "c310dc69f471c60f208995602c144a34e57f86da:scripts/analyze_v12.py",
+      "shared_core_sha256": "810256b6f897c2347aabaddfe266b07a866835885c25e623b6da3d08aedb53cd",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G13",
+      "path": "scripts/analyze_v13.py",
+      "sha256": "b939e8b717af3f0e1292c37327158f2d1420761af096cf58dc2751abe407d23b",
+      "git_location": "c310dc69f471c60f208995602c144a34e57f86da:scripts/analyze_v13.py",
+      "shared_core_sha256": "810256b6f897c2347aabaddfe266b07a866835885c25e623b6da3d08aedb53cd",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "G13B",
+      "path": "scripts/analyze_v13b.py",
+      "sha256": "baf1cc89996960ec869a79606dcef8d61c69a77a7b46a6cfecaeeb4160ca8927",
+      "git_location": "c2893c6:scripts/analyze_v13b.py",
+      "shared_core_sha256": "810256b6f897c2347aabaddfe266b07a866835885c25e623b6da3d08aedb53cd",
+      "cpu_archive_status": "MISSING"
+    }
+  ],
+  "paper_derived_analysis": [
+    {
+      "id": "TWO_PARAMETER_ANALYZER",
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/analyze_twoparam.py",
+      "sha256": "740b9f7b8edfa029b030ed6097ebdbb7eb362d6f77265832c9f1311ea0b26562",
+      "rng": "numpy.random.default_rng(20260724)",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "TWO_PARAMETER_MASTER_ETA",
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/data/master_eta.csv",
+      "sha256": "610f8e302d3a3ba7e888e268ad832d1be7e5015c0b93ab000208c57d0cf5d649",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "TWO_PARAMETER_MASTER_D",
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/data/master_D.csv",
+      "sha256": "f1b132a5b4580a396da344a959f195c747d3b759d6db54243d303316eed77427",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "TWO_PARAMETER_RESULTS",
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/data/analysis_results.json",
+      "sha256": "22d18796d51f6b4413dce22feee4444b247c4c9d7f3005409767c707cd3efb22",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "TWO_PARAMETER_REPORT",
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/REPORT.md",
+      "sha256": "765c9ce0104c9bb8f82dcb3a1fb8cf8393f80152bfc2eea8f7b9c0c3b11f9f77",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "BUFFER_ANALYZER",
+      "path": "/private/tmp/number-audit.HmdmkU/buffer-analysis/analyze.py",
+      "sha256": "3c53cfdcb9b6e196c2d480c601cbcd7fc8f6faa1435fa994576d556d55249492",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "BUFFER_KEY_NUMBERS",
+      "path": "/private/tmp/number-audit.HmdmkU/buffer-analysis/key_numbers.json",
+      "sha256": "c4f6c89bceeafb4e2394e7b81d1840bff8af6ff39f72088e8ae8ef5f8777386b",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "BUFFER_REPORT",
+      "path": "/private/tmp/number-audit.HmdmkU/buffer-analysis/report.md",
+      "sha256": "674ca22a62ca5b34295dab1873686ec368c022b5282a39ee07281add076d040a",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "DISAMBIG_ANALYZER",
+      "path": "/private/tmp/number-audit.HmdmkU/disambig/analyze_disambig.py",
+      "sha256": "41df88c6bc69620fb41c1ce3091e8c3fc98807029c41c305e97ec65e98f4d937",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "DISAMBIG_MANIFEST",
+      "path": "/private/tmp/number-audit.HmdmkU/disambig/disambig-manifest.json",
+      "sha256": "b1466effd10e48077990fe678b140ee86a16e2edc771b26aff7608a172834651",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "TRANSFER_INDEPENDENT_AUDIT",
+      "path": "/private/tmp/number-audit.HmdmkU/transfer-independent.md",
+      "sha256": "b6d78c4c7927f5ae96832a44cc4878e28b97536c9de765434e613ef4fd6dee36",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "id": "SNOO_INDEPENDENT_AUDIT",
+      "path": "/private/tmp/number-audit.HmdmkU/snoo-independent.md",
+      "sha256": "50a47be43502b7f4a062feab07260421c00bb830a1e5a2ac6b28618c711b0552",
+      "cpu_archive_status": "MISSING"
+    }
+  ],
+  "discrepancy_2238_vs_2244": {
+    "status": "UNADJUDICATED_IN_CURRENT_ARCHIVE_EXPLICITLY_ADJUDICATED_HERE",
+    "scientific_coordinate": "G3 v3 corrected arm, T=20, S=10240 paired curve bootstrap",
+    "preregistered_path": {
+      "analyzer": "scripts/analyze_v3.py",
+      "analyzer_sha256": "f608bebe770bda97733db0bbb3d2f5e317a1ea8d5aa676fd28627f7d91a024e7",
+      "registration_commit": "fa7206b5988ac622e2f0b6660fac37fb56515196",
+      "rng_implementation": "python random.Random(20260724)",
+      "canonical_readout_sha256": "d4a3cde6aa47580dff255c7a66030ab997a95f4072b1883bf71aa54d7da744c8",
+      "invalid_refits": 2244,
+      "decision_role": "binding preregistered G3 decision path"
+    },
+    "paper_reanalysis_path": {
+      "analyzer": "/private/tmp/number-audit.HmdmkU/two-param-analysis/analyze_twoparam.py",
+      "analyzer_sha256": "740b9f7b8edfa029b030ed6097ebdbb7eb362d6f77265832c9f1311ea0b26562",
+      "rng_implementation": "numpy.random.default_rng(20260724)",
+      "master_eta_sha256": "610f8e302d3a3ba7e888e268ad832d1be7e5015c0b93ab000208c57d0cf5d649",
+      "invalid_refits": 2238,
+      "decision_role": "post-hoc paper analysis path printed by the paper"
+    },
+    "finding": "The six-count difference is not an arithmetic discrepancy. The same numeric seed drives two different deterministic RNG algorithms and therefore two different ordered bootstrap streams.",
+    "required_paper_action": "Either label and cite 2,238 as the post-hoc NumPy reanalysis or restore 2,244 when describing the preregistered decision. Do not present the paths as byte-identical.",
+    "archive_gap": "The CPU archive contains neither analyzer/readout path nor an adjudication record linking them."
+  },
+  "g9_immutable_provenance": {
+    "source_registration_commit": "1001572d10b921c07ddfd94ce95f78964bcf1962",
+    "pre_terminal_lineage_commit": "084d58c1305ab7086d227a625cd1cf70d330dc21",
+    "retry_bridge_commit": "57711ba1f3ef4f4b30f85904c623dbc91930933c",
+    "terminal_fix_execution_commit": "3e28f68b689e4b3e02e0e450a93cdae11ccb27c0",
+    "manifest_sha256": "26efd59b51cd9121d1157889bf4f58d47cf0d9cfba7f56c31d999e95d4eec567",
+    "retry_authority_sha256": "91e8b74ea085a15bafac45e1cd8876dbc663ea6e65bde35ee375f400bb364684",
+    "sealed_predictions_sha256": "97e02dcad63782978ac51b320621e5a681236518cb0d5db19454b8981549ca9c",
+    "scope_amendment_sha256": "1b270b4ace9bba2a53c9e9f871fd1adcbaa8d908c33f80b2dce5301a687acac7",
+    "frozen_analyzer_sha256": "ef140f0a3e6d2a543bf6f422af85ec716dd4b355c65961ad5ba5a100335f1ea1",
+    "joint_readout_sha256": "4d42a5f133684822f0fc81c69c3348610c7b3824836b1ecf937abb6e9515bcaf",
+    "barrier_failure_evidence_sha256": "235518fa8764fe38c4eacd712741d52cf5300c28274a32c3815a9a8fd1914518",
+    "livelock_failure_evidence_sha256": "0eaa952e4407250c1e5b1f8a8deaa2a905435d79f1befb9f141a30b565597977"
+  },
+  "mechanism_campaign": {
+    "paper_claim": "Rounds 1, 2, 3, 3b, and 3c all miss or void; none is promoted to an identified mechanism.",
+    "round_1": {
+      "status": "COMPOSITE_LANES_NO_SINGLE_CANONICAL_ROUND1_RESULT_FILE",
+      "lane_A_analyzer": {
+        "path": "/private/tmp/yeto-h200-mechA/mech/buffer-spectrum/analyze_loss_power.py",
+        "sha256": "246d1f7a742117ebe5a477343454168c95706570d246db81b253f1134a72a317"
+      },
+      "lane_A_results": {
+        "path": "/private/tmp/yeto-h200-mechA/mech/buffer-spectrum/results.json",
+        "sha256": "0ea54f5ab37adb166af6fba8ab33f5773880339475b84588e2b3d9522337bcb8"
+      },
+      "lane_B_analyzer": {
+        "path": "/private/tmp/yeto-h200-mechB/mech/lane-b/analyze_schedule_interaction.py",
+        "sha256": "1525d25b1de3a886f69abc8f2adde0cf0472114df96d7919ed208b90d698a0d2"
+      },
+      "lane_B_validation": {
+        "path": "/private/tmp/yeto-h200-mechB/mech/lane-b/validation.json",
+        "sha256": "755233c2fe4c6fd4b435256ed35edd33963a8fb007ace4bf3f2cebe477441ca0"
+      },
+      "lane_C_analyzer": {
+        "path": "/private/tmp/yeto-h200-mechC/mech/lane-c/analyze_banked_signatures.py",
+        "sha256": "6adf8349fd6c0e69783858bafd5a29f64720f504896da44a54c72921d7f9dae4"
+      },
+      "archive_status": "ALL_MISSING_FROM_CPU_ARCHIVE_AND_NO_SINGLE_ROUND1_ADJUDICATION_JSON"
+    },
+    "round_2": {
+      "protocol_path": "/private/tmp/yeto-h200/mech/kappa-zeroshot-round2-protocol.md",
+      "protocol_sha256": "1e14409b7f875961417f799cd579a8a9deeb4ab096a3ea72f84ff77eb401b20e",
+      "analyzer_path": "/private/tmp/yeto-h200/mech/kappa_round2_measure.py",
+      "analyzer_sha256": "4902dfff95b74bb089eb7fa10a483d9a3082d529c7b39966cda718310a9f6b16",
+      "results_path": "/private/tmp/yeto-h200/mech/kappa-round2-results.json",
+      "results_sha256": "28358ada20742685128003d19cf63b8fb807a0e3851ccc5b602b712cd617b0e7",
+      "verdict": "VOID_NONPOSITIVE_HARMONIC_CURVATURE_3_OF_18",
+      "archive_status": "MISSING_FROM_CLEAN_GIT_BRANCH_AND_CPU_ARCHIVE_PRESENT_ONLY_AS_UNTRACKED_MAC_WORKTREE_FILES"
+    },
+    "round_3": {
+      "protocol_path": "mech/kappa-zeroshot-round3-protocol.md",
+      "protocol_sha256": "650a465546ca0d69a1bfa8ca0f32cd55a12b0d58836e8b870c417fe402f2f977",
+      "analyzer_path": "mech/kappa_round3_measure.py",
+      "analyzer_sha256": "41165a65ed49ed6d45091560232bd2a034d21e51686930514be4e42df8bc3ef9",
+      "results_path": "mech/kappa-round3-results.json",
+      "results_sha256": "5b2a1b1e188cacee289d1b9ac802d8b7b02657dc0de6886553711595126f2b8a",
+      "verdict": "VOID_EXECUTION_RAIL",
+      "archive_status": "PRESENT_IN_GIT_MISSING_FROM_CPU_ARCHIVE"
+    },
+    "round_3b": {
+      "protocol_sha256": "650a465546ca0d69a1bfa8ca0f32cd55a12b0d58836e8b870c417fe402f2f977",
+      "probe_launcher_sha256": "24a14ee158cbdc8a853ae6036128d23d4848d0c94e54bb6878ebd0547574796a",
+      "failing_adapter_log_sha256": "7fc246a47e40c6225c387c4b897b25de510f666e1309720842aa3d7821aa1869",
+      "suite_log_sha256": "d45822e7f8f36f2de61449d60af76ed96b08f3ad2e7da6ace02db5334707096d",
+      "verdict": "VOID_PERMISSION_ERROR_BEFORE_FIRST_JSON",
+      "archive_status": "NO_MACHINE_READABLE_RESULTS_FILE_FOUND; SURVIVES_ONLY_IN_/private/tmp/h200-mechR3-note.md; MISSING_FROM_CPU_ARCHIVE"
+    },
+    "round_3c": {
+      "protocol_path": "mech/kappa-zeroshot-round3c-protocol.md",
+      "protocol_sha256": "7e61343200d5248e24bb35e25c09c6499c9076f8c44f251185f5666c932ef2da",
+      "analyzer_path": "mech/kappa_round3c_measure.py",
+      "analyzer_sha256": "e179fd64d38ea44ead60da7643cb11efb6ce7641b1eb04423731ccadbd3fa8e6",
+      "results_path": "mech/kappa-round3c-results.json",
+      "results_sha256": "86045f1543a55ea2b730b4f8ff4a6dcaf2309fe0762ee1ee5459b7731d060865",
+      "verdict": "VOID_NONPOSITIVE_ALPHA",
+      "archive_status": "PRESENT_IN_GIT_MISSING_FROM_CPU_ARCHIVE"
+    }
+  },
+  "lean_sources": [
+    {
+      "path": "lean-mechanism/LeanMechanism/FiniteHorizonOuter.lean",
+      "sha256": "e820e78adb74a7a00d79cb4f2fad4baf554e7ad45d43c5ca7185f97f898b593b",
+      "paper_map": "Theorem 2.1 and Corollary 2.2 finite-horizon coefficients and limits",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/QuadraticAlignment.lean",
+      "sha256": "a7da4a51a597d6eca426c1102bc4933e0f2f4aedc8a18bb3d8d712d52a5abad9",
+      "paper_map": "Theorem 2.3 quadratic alignment and counterexample",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/StochasticBuffer.lean",
+      "sha256": "582bc7e6c0fe9bf5b429d123f7bc4ca8dd006fa3d4cf90e844e01d530c5b1720",
+      "paper_map": "Theorem 2.5 finite correlated-buffer second moment and limits",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/CorrectionCosts.lean",
+      "sha256": "22c90d9c1b098939efd48a96cf134997ed5b0ec8ae3ac54a7c1134c9c09594ee",
+      "paper_map": "normalization variance cost and mean-multiplier support statements",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/ElasticInvariance.lean",
+      "sha256": "d4277a1a9134dae4bb310f602fbc7442300cc8dd9ad94b53b24fff3634501c4e",
+      "paper_map": "cadence-pattern invariance support statements",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/NadamEquivalence.lean",
+      "sha256": "c0fa81fad6a1fba4ed4acacfc7a4d33eb2b8e1f1d06f1d977f211e3c055764d0",
+      "paper_map": "constant-product identity without full optimizer equivalence",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/AgeCollapse.lean",
+      "sha256": "f237641d24525f37ae40b92b560f787431b34f89eae235def030da01bcadf8b5",
+      "paper_map": "dimensionless-age bounds and registered final-D monotonicity",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/KappaDrift.lean",
+      "sha256": "b286dc3c514eeabe2a566426ee85efdd8d8411ba0a3d7f01ce01ed895e18d99f",
+      "paper_map": "mechanism-campaign geometric EMA identities and coordinate guardrail",
+      "git_location": "mechanism/lane-d-lean-formalizer@fd8568d",
+      "git_status": "MISSING_FROM_CURRENT_BRANCH_PRESENT_ON_SEPARATE_BRANCH_AND_/private/tmp/yeto-h200-mechD",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/Basic.lean",
+      "sha256": "ef4b709f336847afa9b3654de5c25824ea9c9ec2e836edce4c390b93b613700a",
+      "paper_map": "support dependency",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/Correction.lean",
+      "sha256": "3efbf44370f39cdd05224f84648d8a2295a7fdab2290c3e341740e4223918667",
+      "paper_map": "Theorem 2.4 correction identities support dependency",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/AnchorDrift.lean",
+      "sha256": "4477df5f029d3c457f701cd9a7f3786cc5c8f003c7f39fed33a7352083adcf91",
+      "paper_map": "support dependency",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/MergeSemantics.lean",
+      "sha256": "ca29b8b8896b13a0162ba85c5f26d8195580cda7113052f2997fcda4c8727f8c",
+      "paper_map": "support dependency",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/TransferPenalty.lean",
+      "sha256": "277479b9d0027cdaf9904e9aa0af53820c25231e44a8d0a781e177332865a8ca",
+      "paper_map": "support dependency",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/PhaseBoundary.lean",
+      "sha256": "e5e57b8f756d3affbdbdf52c02647f0e1bbc3c8d8f9599b49433dbcd94abcd73",
+      "paper_map": "support dependency",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism/Counterexamples.lean",
+      "sha256": "06f3951f4d201c0e8314778dfecad7b2af2a969a083f5eb8d4173422a02066b6",
+      "paper_map": "support dependency",
+      "git_status": "PRESENT",
+      "cpu_archive_status": "MISSING"
+    },
+    {
+      "path": "lean-mechanism/LeanMechanism.lean",
+      "sha256": "f8e9e5b31acb580347628e5ed3e6be73e5e29c6a4c8f4763959cce7c579d377a",
+      "paper_map": "root import file",
+      "git_status": "PRESENT_BUT_DOES_NOT_IMPORT_SEPARATE_BRANCH_KappaDrift",
+      "cpu_archive_status": "MISSING"
+    }
+  ],
+  "missing_from_current_cpu_archive": [
+    "binding paper source /private/tmp/frozen.txt and its exact newer paper state",
+    "canonical G1, G1V2, G3, G4, G4B, strict G4C, amended G4C, G5/G5B, G6, G10, G12, G13, and G13B readout or audit bytes",
+    "canonical completed 22/22 G9 joint readout SHA 4d42a5f...; the resident 16/22 and supplemental files are not substitutes",
+    "every canonical frozen analyzer; the resident analyze_v9.py has the wrong stale SHA",
+    "the two-parameter analyzer, tables, result JSON, report, buffer analysis, and disambiguation analysis",
+    "an explicit 2,238-versus-2,244 G3 bootstrap adjudication record",
+    "all Lean theorem-map and support sources, including KappaDrift.lean",
+    "mechanism round-1 composite adjudication, round-2 files, round-3/3c results, and any round-3b machine-readable result",
+    "canonical G7 and G11 readouts do not exist because those studies were not analyzed at the frozen fold boundary"
+  ],
+  "reproducibility_statement_audit": {
+    "paper_statement": "The released artifact archive contains the registrations, immutable analyzers, run-validity evidence, scalar result rows, canonical readouts, figure-generation code, derived tables, Lean development, and theorem map needed to reproduce every reported fit and decision.",
+    "finding_for_current_cpu_archive": "NOT_SATISFIED",
+    "reason": "The currently available evacuation archive is a partial operational evacuation, not the complete released artifact archive described by the paper. It must not be represented as complete until the missing canonical bytes above are restored and hash-verified."
+  }
+}
