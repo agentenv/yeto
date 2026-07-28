@@ -42,13 +42,20 @@ yeto launch --island-backend megatron --gpu aws:3x8xB200@us-east-2 \
                   └── DiLoCo sync at outer-step boundaries  [reuses yeto sync]
 ```
 
-The **DiLoCo bridge is backend-agnostic**: the syncer only ever moves the
-LoRA adapters, which are ordinary replicated tensors (attention/dense adapters
-are replicated across EP ranks — they are not expert weights). So the megatron
-learner builds a `{canonical_name: adapter_tensor}` dict and reuses yeto's
-existing `build_layout` / `pack_fragment` / `SyncerClient` unchanged. Only the
-model construction, weight import, adapter attachment, inner step, and adapter
-enumeration are Megatron-specific.
+The **DiLoCo bridge is backend-agnostic for LoRA**: the syncer only ever moves
+the LoRA adapters, which are ordinary replicated tensors (attention/dense
+adapters are replicated across EP ranks — they are not expert weights). So the
+megatron learner builds a `{canonical_name: adapter_tensor}` dict and reuses
+yeto's existing `build_layout` / `pack_fragment` / `SyncerClient` unchanged.
+Only the model construction, weight import, adapter attachment, inner step, and
+adapter enumeration are Megatron-specific.
+
+`--tuning full` is a separate synchronous SFT path for models that should be
+trained as full Megatron-Core weights, for example dense 27B validation runs.
+It intentionally requires `--syncer none` today: full-parameter DiLoCo would
+need a full-model sharded sync protocol, not the adapter-fragment protocol.
+Unlike the LoRA DiLoCo path, full tuning can use Megatron TP/PP because there
+are no Yeto adapter fragments to gather or sync.
 
 ## Parallelism mapping (from the EP research)
 
@@ -73,9 +80,16 @@ enumeration are Megatron-specific.
   loop, adapter enumeration (`linear_in`/`linear_out`), and the DiLoCo sync
   reusing yeto's `build_layout`/`pack_fragment`/`apply_fragment`/`SyncerClient`
   with the torch learner's exact counter + α-blend semantics.
+- ✅ `--tuning full` synchronous Megatron SFT smoke path: skips LoRA/freezing,
+  leaves model parameters trainable, runs with the same Megatron inner loop,
+  and delegates full checkpoint export to Megatron-Bridge.
+- ✅ PP-stage adapter export for local/no-sync LoRA validation: gathers one
+  representative EP/TP rank per PP stage and writes a single Yeto adapter
+  artifact.
 - ⏳ Shape planner EP-aware sizing (megatron fits far larger MoE than FSDP2).
-- ⏳ **TP>1 / PP>1** adapter gather (guarded with a clear error today; TP shards
-  `linear_in`/`linear_out`, PP splits adapters across stages).
+- ⏳ **TP>1 LoRA adapter gather and synced PP LoRA** (guarded with a clear
+  error today; TP shards `linear_in`/`linear_out`, and synced PP needs global
+  fragment ownership across stages).
 - ⏳ **Validation**: Megatron-Core is GPU/multi-node only, so the trainer is
   written against the researched API but UNVALIDATED — it needs a live
   multi-node B200 run to shake out, exactly as the torch backend needed the

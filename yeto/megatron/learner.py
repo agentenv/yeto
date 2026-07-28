@@ -8,14 +8,13 @@ researched Megatron-Core / Megatron-Bridge API (see docs/MEGATRON.md) and
 needs a live multi-node B200 run to validate and iterate — exactly as the
 torch backend needed the gemma4 smokes.
 
-Scope of this first cut: TP=1, PP=1, EP=N (the natural "fill the island with
-expert parallelism" default). In that regime, with attention/dense LoRA
-targets and share_expert_adapters=True, every trainable adapter is REPLICATED
-on every rank, so the DiLoCo fragment layout is identical to the torch
-backend's and the sync reuses yeto's primitives unchanged. TP>1 (adapters
-TP-sharded) and PP>1 (adapters split across pipeline stages) need cross-
-parallel adapter gather before sync — guarded below as an explicit error
-rather than silently producing wrong merges.
+Scope: TP=1, EP=N with PP=1 for synced DiLoCo runs and PP>=1 for local
+smoke/validation runs. With attention/dense LoRA targets and
+share_expert_adapters=True, adapters are replicated across EP ranks and split
+across PP stages. The local/no-sync path gathers those PP-stage adapter
+tensors for export. Synced PP still needs a global fragment layout and
+cross-stage push/pull ownership, so it remains guarded instead of silently
+producing wrong merges.
 """
 
 from __future__ import annotations
@@ -85,9 +84,33 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def _validate_parallelism(args):
+    if args.tuning == "full":
+        if args.syncer != "none":
+            raise NotImplementedError(
+                "Megatron full-parameter tuning is currently supported only with "
+                "--syncer none. Full-parameter DiLoCo needs a full-model sync protocol."
+            )
+        return
+
+    if args.tensor_parallel != 1:
+        raise NotImplementedError(
+            "the Megatron backend currently assumes TP=1 for adapter tensors. "
+            "TP>1 needs a TP all-gather of linear_in/linear_out before sync/export."
+        )
+    if args.pipeline_parallel != 1 and args.syncer != "none":
+        raise NotImplementedError(
+            "PP>1 is currently supported only for --syncer none validation runs. "
+            "DiLoCo sync needs a global PP fragment layout and cross-stage "
+            "push/pull ownership before it can be enabled safely."
+        )
+
+
 def _init_distributed(args):
     """torch.distributed first, then Megatron parallel state, then the
     model-parallel RNG (the order Megatron-Core asserts)."""
+    _validate_parallelism(args)
+
     import torch
     import torch.distributed as dist
     from megatron.core import parallel_state
@@ -103,33 +126,79 @@ def _init_distributed(args):
         expert_tensor_parallel_size=1,  # pure EP over experts; never split an expert tensor
     )
     model_parallel_cuda_manual_seed(1234)
-    if args.tensor_parallel != 1 or args.pipeline_parallel != 1:
-        raise NotImplementedError(
-            "the Megatron backend's adapter sync currently assumes TP=1, PP=1 "
-            "(adapters fully replicated per rank). TP>1 needs a TP all-gather "
-            "of linear_in/linear_out and PP>1 a cross-stage gather before the "
-            "DiLoCo push — implement those before enabling."
-        )
     return dist.get_rank(), dist.get_world_size(), local_rank
 
 
+def _maybe_apply_model_specific_parallel_layout(args, bridge):
+    """Let Bridge install model-specific PP layouts when it exposes a helper.
+
+    DeepSeek-V4 needs an explicit PP layout because its hash-routed layers must
+    co-locate with embeddings. Bridge has grown a helper for this; keep this
+    best-effort so older containers still run Qwen/PP smoke tests unchanged.
+    """
+    if args.pipeline_parallel <= 1 or "deepseek" not in args.model.lower():
+        return
+    try:
+        from megatron.bridge.models.deepseek.deepseek_v4_bridge import (
+            set_deepseek_v4_pipeline_model_parallel_layout,
+        )
+    except Exception as e:
+        log.info("DeepSeek-V4 PP layout helper unavailable: %s", e)
+        return
+
+    candidates = [
+        bridge,
+        getattr(bridge, "provider", None),
+        getattr(bridge, "model_provider", None),
+        getattr(bridge, "model", None),
+        getattr(bridge, "config", None),
+    ]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            set_deepseek_v4_pipeline_model_parallel_layout(candidate)
+            log.info("applied DeepSeek-V4 pipeline layout for PP=%d", args.pipeline_parallel)
+            return
+        except Exception:
+            continue
+    log.warning(
+        "DeepSeek-V4 PP>1 requested, but Bridge did not expose a provider/config "
+        "that accepted set_deepseek_v4_pipeline_model_parallel_layout"
+    )
+
+
+def _set_trainable(model, trainable: bool):
+    for chunk in model:
+        module = getattr(chunk, "module", chunk)
+        for p in module.parameters():
+            p.requires_grad_(trainable)
+
+
 def _build_model(args, device):
-    """HF bf16 checkpoint -> Megatron-Core model (EP-sharded) -> LoRA."""
-    import inspect
+    """HF bf16 checkpoint -> Megatron-Core model, then optional LoRA."""
 
     from megatron.bridge import AutoBridge
-    from megatron.bridge.peft.lora import LoRA
 
     from ..models import resolve
 
     model_id = resolve(args.model)
-    log.info("importing %s into Megatron-Core (EP=%d)", model_id, args.expert_parallel)
+    log.info("importing %s into Megatron-Core (EP=%d, tuning=%s)", model_id, args.expert_parallel, args.tuning)
     bridge = AutoBridge.from_hf_pretrained(model_id, trust_remote_code=True)
+    _maybe_apply_model_specific_parallel_layout(args, bridge)
     # Yeto wraps with mcore DDP after adapter attachment so the trainable LoRA
     # params land in the optimizer buckets. Some Bridge versions expose
     # wrap_with_ddp in the signature, others accept it through **kwargs.
     to_megatron_kwargs = {"load_weights": True, "wrap_with_ddp": False}
     model = bridge.to_megatron_model(**to_megatron_kwargs)  # list[MegatronModule], one per VP chunk
+
+    if args.tuning == "full":
+        _set_trainable(model, True)
+        return model, bridge
+
+    import inspect
+
+    from megatron.bridge.peft.lora import LoRA
 
     targets = list(_ATTENTION_TARGETS)
     if args.lora_targets == "all-linear":
@@ -147,6 +216,16 @@ def _build_model(args, device):
     peft = LoRA(**lora_kwargs)
     model = peft(model, training=True)  # freezes base, attaches + trains adapters
     return model, bridge
+
+
+def _trainable_params(model):
+    out = {}
+    for chunk in model:
+        module = getattr(chunk, "module", chunk)
+        for name, p in module.named_parameters():
+            if p.requires_grad:
+                out[name] = p
+    return out
 
 
 def _adapter_params(model):
@@ -198,7 +277,7 @@ def _save_tensor_state(state, save_dir):
         return filename, "torch"
 
 
-def _save_megatron_adapter_artifact(args, model, output_dir):
+def _save_megatron_adapter_artifact(args, model, output_dir, state_override=None):
     from transformers import AutoTokenizer
 
     from ..models import resolve
@@ -206,7 +285,11 @@ def _save_megatron_adapter_artifact(args, model, output_dir):
     save_dir = os.path.expanduser(output_dir)
     os.makedirs(save_dir, exist_ok=True)
     params = _adapter_params(model)
-    state = {n: p.detach().cpu().contiguous() for n, p in params.items()}
+    state = (
+        {n: t.detach().cpu().contiguous() for n, t in state_override.items()}
+        if state_override is not None
+        else {n: p.detach().cpu().contiguous() for n, p in params.items()}
+    )
     weights_file, weights_format = _save_tensor_state(state, save_dir)
 
     targets = list(_ATTENTION_TARGETS)
@@ -231,6 +314,9 @@ def _save_megatron_adapter_artifact(args, model, output_dir):
             "tensor": args.tensor_parallel,
             "pipeline": args.pipeline_parallel,
         },
+        "export": {
+            "pipeline_stage_gathered": bool(args.pipeline_parallel != 1 and state_override is not None),
+        },
         "parameter_names": sorted(state),
     }
     with open(os.path.join(save_dir, MEGATRON_ADAPTER_METADATA_FILE), "w") as f:
@@ -246,12 +332,96 @@ def _save_megatron_adapter_artifact(args, model, output_dir):
     return True
 
 
-def _save_output_best_effort(bridge, model, output_dir, args=None, prefer_adapter_artifact=False):
+def _parallel_rank(getter_name, default=0):
+    try:
+        from megatron.core import parallel_state
+
+        getter = getattr(parallel_state, getter_name, None)
+        if getter is None:
+            return default
+        return int(getter())
+    except Exception:
+        return default
+
+
+def _pipeline_stage_roles():
+    try:
+        from megatron.core import parallel_state
+
+        return (
+            bool(parallel_state.is_pipeline_first_stage()),
+            bool(parallel_state.is_pipeline_last_stage()),
+        )
+    except Exception:
+        return True, True
+
+
+def _adapter_state_for_export(model):
+    return {n: p.detach().cpu().contiguous() for n, p in _adapter_params(model).items()}
+
+
+def _gather_adapter_state_for_export(args, model, rank, world):
+    """Return the canonical adapter state on rank 0.
+
+    PP stages own disjoint layer ranges, while attention LoRA is replicated
+    across EP ranks when share_expert_adapters=True. For local validation runs,
+    gather one representative EP/TP rank per PP stage onto rank 0 for the final
+    Yeto adapter artifact. Synced PP runs are still guarded in _init_distributed.
+    """
+    if args.pipeline_parallel == 1 or world == 1:
+        return _adapter_state_for_export(model) if rank == 0 else None
+
+    import torch.distributed as dist
+
+    tp_rank = _parallel_rank("get_tensor_model_parallel_rank")
+    ep_rank = _parallel_rank("get_expert_model_parallel_rank")
+    pp_rank = _parallel_rank("get_pipeline_model_parallel_rank")
+    payload = None
+    if tp_rank == 0 and ep_rank == 0:
+        payload = {
+            "pipeline_rank": pp_rank,
+            "state": _adapter_state_for_export(model),
+        }
+
+    gathered = [None] * world
+    dist.all_gather_object(gathered, payload)
+    if rank != 0:
+        return None
+
+    merged = {}
+    seen_pp = set()
+    for item in gathered:
+        if not item:
+            continue
+        pp = item["pipeline_rank"]
+        if pp in seen_pp:
+            continue
+        seen_pp.add(pp)
+        for name, tensor in item["state"].items():
+            if name in merged:
+                if tuple(merged[name].shape) != tuple(tensor.shape):
+                    raise RuntimeError(
+                        "duplicate Megatron adapter tensor with mismatched shape "
+                        f"during PP export: {name}"
+                    )
+                continue
+            merged[name] = tensor
+    if len(seen_pp) != args.pipeline_parallel:
+        raise RuntimeError(
+            "could not gather one adapter shard from every PP stage for export "
+            f"(got {sorted(seen_pp)}, expected {args.pipeline_parallel} stages)"
+        )
+    return merged
+
+
+def _save_output_best_effort(
+    bridge, model, output_dir, args=None, prefer_adapter_artifact=False, state_override=None
+):
     save_dir = os.path.expanduser(output_dir)
     os.makedirs(save_dir, exist_ok=True)
     if args is not None and args.tuning == "lora":
         log.info("writing Yeto Megatron adapter artifact without Bridge HF export")
-        return _save_megatron_adapter_artifact(args, model, save_dir)
+        return _save_megatron_adapter_artifact(args, model, save_dir, state_override=state_override)
 
     bridge_tmp = os.path.join(save_dir, ".bridge-export-tmp")
     shutil.rmtree(bridge_tmp, ignore_errors=True)
@@ -267,7 +437,9 @@ def _save_output_best_effort(bridge, model, output_dir, args=None, prefer_adapte
                 "Yeto Megatron adapter artifact instead: %s",
                 e,
             )
-            return _save_megatron_adapter_artifact(args, model, save_dir)
+            return _save_megatron_adapter_artifact(
+                args, model, save_dir, state_override=state_override
+            )
         log.warning(
             "Megatron-Bridge HF export failed after training; leaving run successful "
             "so validation can proceed. adapter-only export still needs wiring: %s",
@@ -313,15 +485,20 @@ def main(argv=None):
 
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s megatron %(levelname)s %(message)s")
+    _validate_parallelism(args)
     rank, world, local_rank = _init_distributed(args)
     device = torch.device("cuda", local_rank)
 
     model, bridge = _build_model(args, device)
-    params = _adapter_params(model)
-    layout = build_layout(
-        [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
-    )
-    log.info("%d adapter tensors -> %d fragments", len(params), layout.num_fragments)
+    params = _adapter_params(model) if args.tuning == "lora" else {}
+    layout = None
+    if args.tuning == "lora":
+        layout = build_layout(
+            [(n, p.numel()) for n, p in params.items()], args.fragments, args.fragment_pattern
+        )
+        log.info("%d adapter tensors -> %d fragments", len(params), layout.num_fragments)
+    else:
+        log.info("%d trainable tensors for full-parameter tuning", len(_trainable_params(model)))
 
     # mcore DDP wrap so grads land in the distributed optimizer's buckets.
     ddp_cfg = DistributedDataParallelConfig(
@@ -348,6 +525,7 @@ def main(argv=None):
     wire_dtype = {"bf16": DTYPE_BF16, "f32": DTYPE_F32, "q4": DTYPE_Q4}[args.wire_dtype]
     client = None
     if rank == 0 and args.syncer != "none":
+        assert layout is not None
         host, port = args.syncer.rsplit(":", 1)
         client = SyncerClient((host, int(port)), args.learner_id, layout, wire_dtype, args.wan_streams)
         client.start()
@@ -364,16 +542,20 @@ def main(argv=None):
         bulk_dtype=bulk_dtype, DTYPE_Q4=DTYPE_Q4,
     )
 
-    # Avoid collectives in the shutdown/save path. Megatron's distributed
-    # optimizer may still have bookkeeping collectives in flight on some
-    # versions, and an extra barrier here can trip NCCL's watchdog after the
-    # tiny validation loop. Rank 0 saves the replicated adapter artifact.
+    # Avoid barriers in the shutdown/save path. For PP local validation, gather
+    # one adapter shard per pipeline stage, then rank 0 writes the artifact.
+    export_state = (
+        _gather_adapter_state_for_export(args, model, rank, world)
+        if args.tuning == "lora"
+        else None
+    )
     if rank == 0:
         _save_output_best_effort(
             bridge,
             model,
             args.output_dir,
             args,
+            state_override=export_state,
         )
         if client is not None:
             client.close()
@@ -401,7 +583,13 @@ def _run_inner_loop(
         ids = batch["input_ids"].to(device)
         labels = batch["labels"].to(device)
         pos = torch.arange(ids.size(1), device=device).unsqueeze(0).expand_as(ids)
-        out = mdl(input_ids=ids, position_ids=pos, attention_mask=None, labels=labels)
+        is_first_stage, is_last_stage = _pipeline_stage_roles()
+        out = mdl(
+            input_ids=ids if is_first_stage else None,
+            position_ids=pos,
+            attention_mask=None,
+            labels=labels if is_last_stage else None,
+        )
 
         def loss_func(output):
             loss = output.mean() if output.dim() else output
@@ -411,9 +599,9 @@ def _run_inner_loop(
 
     # Counters (Alg. 1): global totals + per-fragment snapshots reset on receipt.
     steps_total = tokens_total = 0
-    steps_at_reset = [0] * layout.num_fragments
-    tokens_at_reset = [0] * layout.num_fragments
-    fragment_versions = [0] * layout.num_fragments
+    steps_at_reset = [0] * layout.num_fragments if layout is not None else []
+    tokens_at_reset = [0] * layout.num_fragments if layout is not None else []
+    fragment_versions = [0] * layout.num_fragments if layout is not None else []
     pending_pulls: list = []
     global_step = 0
     tokens_per_inner_step = world * mbs * args.grad_accum * args.seq_len
