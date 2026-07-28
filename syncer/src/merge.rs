@@ -31,6 +31,8 @@ use std::str::FromStr;
 pub enum OuterOptimizer {
     #[default]
     Nesterov,
+    /// Classical heavy-ball / SGD momentum without Nesterov lookahead.
+    HeavyBall,
     NormalizedEma,
     RestartedEma,
     RhoAdaptive,
@@ -48,6 +50,7 @@ impl OuterOptimizer {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Nesterov => "nesterov",
+            Self::HeavyBall => "heavy-ball",
             Self::NormalizedEma => "normalized-ema",
             Self::RestartedEma => "restarted-ema",
             Self::RhoAdaptive => "rho-adaptive",
@@ -79,6 +82,7 @@ impl FromStr for OuterOptimizer {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "nesterov" => Ok(Self::Nesterov),
+            "heavy-ball" => Ok(Self::HeavyBall),
             "normalized-ema" => Ok(Self::NormalizedEma),
             "restarted-ema" => Ok(Self::RestartedEma),
             "rho-adaptive" => Ok(Self::RhoAdaptive),
@@ -91,7 +95,7 @@ impl FromStr for OuterOptimizer {
             "block-yogi" => Ok(Self::BlockYogi),
             "cheb-sgd" => Ok(Self::ChebSgd),
             other => Err(format!(
-                "outer optimizer must be one of nesterov, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov, capped-nesterov-gc, capped-nesterov-r, capped-nesterov-curv, capped-nesterov-wsub, block-rms, block-yogi, cheb-sgd; got {other:?}"
+                "outer optimizer must be one of nesterov, heavy-ball, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov, capped-nesterov-gc, capped-nesterov-r, capped-nesterov-curv, capped-nesterov-wsub, block-rms, block-yogi, cheb-sgd; got {other:?}"
             )),
         }
     }
@@ -155,6 +159,7 @@ pub fn apply_outer_step(
 ) -> OuterStepStats {
     match optimizer {
         OuterOptimizer::Nesterov => nesterov_step(params, buf, delta, lr, momentum),
+        OuterOptimizer::HeavyBall => heavy_ball_step(params, buf, delta, lr, momentum),
         OuterOptimizer::NormalizedEma => normalized_ema_step(params, buf, delta, lr, momentum),
         OuterOptimizer::RestartedEma => {
             restarted_ema_step(params, buf, delta, lr, momentum, restart_cos_threshold)
@@ -227,7 +232,8 @@ pub fn materialize_applied_step(
             .zip(delta)
             .map(|(buf, value)| lr * (gain * (*value + momentum * *buf)))
             .collect(),
-        OuterOptimizer::NormalizedEma
+        OuterOptimizer::HeavyBall
+        | OuterOptimizer::NormalizedEma
         | OuterOptimizer::RestartedEma
         | OuterOptimizer::RhoAdaptive
         | OuterOptimizer::BlockRms
@@ -1615,6 +1621,55 @@ pub fn nesterov_step(
     )
 }
 
+/// Classical heavy-ball / SGD momentum treating `delta` as the gradient:
+/// `buf <- mu*buf + delta; theta <- theta - lr*buf`.
+///
+/// This is intentionally a separate opt-in optimizer rather than a mode bit
+/// inside [`nesterov_step`].  Selecting any pre-existing optimizer therefore
+/// retains its original dispatch and arithmetic path byte-for-byte.
+pub fn heavy_ball_step(
+    params: &mut [f32],
+    buf: &mut [f32],
+    delta: &[f32],
+    lr: f32,
+    mu: f32,
+) -> OuterStepStats {
+    let mut step_norm_sq = 0.0;
+    let mut direction_norm_sq = 0.0;
+    let mut delta_norm_sq = 0.0;
+    let mut direction_delta_dot = 0.0;
+    let mut history_norm_sq = 0.0;
+    let mut current_norm_sq = 0.0;
+    for ((p, b), d) in params.iter_mut().zip(buf.iter_mut()).zip(delta) {
+        let previous_buffer = *b;
+        *b = mu * *b + *d;
+        let direction = *b;
+        let step = lr * direction;
+        *p -= step;
+
+        let direction = direction as f64;
+        let delta = *d as f64;
+        let step = step as f64;
+        let history = (mu * previous_buffer) as f64;
+        let current = *d as f64;
+        step_norm_sq += step * step;
+        direction_norm_sq += direction * direction;
+        delta_norm_sq += delta * delta;
+        direction_delta_dot += direction * delta;
+        history_norm_sq += history * history;
+        current_norm_sq += current * current;
+    }
+    finish_outer_step_stats(
+        step_norm_sq,
+        direction_norm_sq,
+        delta_norm_sq,
+        direction_delta_dot,
+        history_norm_sq,
+        current_norm_sq,
+        false,
+    )
+}
+
 fn norm_sq(values: &[f32]) -> f64 {
     values.iter().map(|value| (*value as f64).powi(2)).sum()
 }
@@ -2272,6 +2327,109 @@ mod tests {
         assert_close(stats.direction_delta_cosine.unwrap(), 1.0);
         assert_eq!(stats.history_current_norm_ratio, Some(0.0));
         assert!(!stats.restarted);
+    }
+
+    #[test]
+    fn heavy_ball_matches_reference_without_lookahead() {
+        // Constant deltas expose the exact finite-age geometric multiplier:
+        // b_T = (1 + mu + ... + mu^(T-1)) * delta.
+        let mut params = [0.0f32];
+        let mut buffer = [0.0f32];
+        let mu = 0.5f32;
+        let lr = 0.25f32;
+        let delta = [2.0f32];
+
+        let first = heavy_ball_step(&mut params, &mut buffer, &delta, lr, mu);
+        assert_eq!(buffer, [2.0]);
+        assert_eq!(params, [-0.5]);
+        assert_eq!(first.applied_step_norm, 0.5);
+        assert_eq!(first.history_current_norm_ratio, Some(0.0));
+
+        let second = heavy_ball_step(&mut params, &mut buffer, &delta, lr, mu);
+        assert_eq!(buffer, [3.0]);
+        assert_eq!(params, [-1.25]);
+        assert_eq!(second.applied_step_norm, 0.75);
+        assert_eq!(second.history_current_norm_ratio, Some(0.5));
+
+        let materialized = materialize_applied_step(
+            OuterOptimizer::HeavyBall,
+            &buffer,
+            &delta,
+            lr,
+            mu,
+            1.0,
+        );
+        assert_eq!(materialized, [0.75]);
+    }
+
+    #[test]
+    fn heavy_ball_off_path_is_bit_identical_to_production_nesterov() {
+        // The new convention is selected solely by a new enum value.  A
+        // default/Nesterov dispatch must still execute the pre-existing
+        // kernel with identical f32 bytes and diagnostics.
+        let delta = [0.125f32, -3.5, 0.0, 7.25];
+        let mut expected_params = [1.0f32, -2.0, 3.0, -4.0];
+        let mut expected_buffer = [0.75f32, -0.5, 2.25, -1.0];
+        let mut actual_params = expected_params;
+        let mut actual_buffer = expected_buffer;
+        let expected = nesterov_step(
+            &mut expected_params,
+            &mut expected_buffer,
+            &delta,
+            0.03125,
+            0.9,
+        );
+        let mut rho_ema = 0.5f32;
+        let mut capped_mu = 0.9f32;
+        let mut capped_gain = 1.0f32;
+        let mut curv_prev_delta = vec![11.0f32; delta.len()];
+        let mut curv_prev_dtheta = vec![-13.0f32; delta.len()];
+        let mut block_v = vec![17.0f32];
+        let mut cheb_phase = 19.0f32;
+        let untouched = (
+            rho_ema,
+            capped_mu,
+            capped_gain,
+            curv_prev_delta.clone(),
+            curv_prev_dtheta.clone(),
+            block_v.clone(),
+            cheb_phase,
+        );
+        let actual = apply_outer_step(
+            OuterOptimizer::default(),
+            &mut actual_params,
+            &mut actual_buffer,
+            &delta,
+            0.03125,
+            0.9,
+            0.0,
+            &mut rho_ema,
+            &mut capped_mu,
+            &mut capped_gain,
+            &mut curv_prev_delta,
+            &mut curv_prev_dtheta,
+            &[delta.len()],
+            &mut block_v,
+            23.0,
+            &mut cheb_phase,
+        );
+
+        assert_eq!(OuterOptimizer::default(), OuterOptimizer::Nesterov);
+        assert_eq!(actual_params.map(f32::to_bits), expected_params.map(f32::to_bits));
+        assert_eq!(actual_buffer.map(f32::to_bits), expected_buffer.map(f32::to_bits));
+        assert_eq!(actual, expected);
+        assert_eq!(
+            (
+                rho_ema,
+                capped_mu,
+                capped_gain,
+                curv_prev_delta,
+                curv_prev_dtheta,
+                block_v,
+                cheb_phase,
+            ),
+            untouched,
+        );
     }
 
     #[test]
@@ -3368,6 +3526,8 @@ mod tests {
     #[test]
     fn outer_optimizer_names_are_strict() {
         assert_eq!("nesterov".parse(), Ok(OuterOptimizer::Nesterov));
+        assert_eq!("heavy-ball".parse(), Ok(OuterOptimizer::HeavyBall));
+        assert_eq!(OuterOptimizer::HeavyBall.to_string(), "heavy-ball");
         assert_eq!("normalized-ema".parse(), Ok(OuterOptimizer::NormalizedEma));
         assert_eq!("restarted-ema".parse(), Ok(OuterOptimizer::RestartedEma));
         assert_eq!("capped-nesterov".parse(), Ok(OuterOptimizer::CappedNesterov));

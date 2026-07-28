@@ -70,7 +70,7 @@ struct Args {
     /// Outer Nesterov momentum, or beta for normalized EMA variants.
     #[arg(long, default_value_t = 0.9)]
     outer_momentum: f32,
-    /// Outer optimizer: nesterov, normalized-ema, restarted-ema,
+    /// Outer optimizer: nesterov, heavy-ball, normalized-ema, restarted-ema,
     /// rho-adaptive, capped-nesterov[-gc|-r], block-rms, block-yogi, or cheb-sgd.
     /// block-rms/block-yogi are memoryless (beta1=0) per-tensor second-moment
     /// optimizers with a global norm-match back to the plain-SGD step. cheb-sgd
@@ -622,6 +622,7 @@ mod tests {
     fn parses_outer_optimizer_contract() {
         for (name, expected) in [
             ("nesterov", merge::OuterOptimizer::Nesterov),
+            ("heavy-ball", merge::OuterOptimizer::HeavyBall),
             ("normalized-ema", merge::OuterOptimizer::NormalizedEma),
             ("restarted-ema", merge::OuterOptimizer::RestartedEma),
             ("capped-nesterov", merge::OuterOptimizer::CappedNesterov),

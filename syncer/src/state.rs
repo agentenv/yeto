@@ -1905,6 +1905,9 @@ impl GlobalState {
         mix(self.outer_restart_cos_threshold.to_bits() as u64);
         mix(match self.outer_optimizer {
             merge::OuterOptimizer::Nesterov => 0,
+            // Append-only discriminator: all pre-existing optimizer
+            // fingerprints retain their exact historical values.
+            merge::OuterOptimizer::HeavyBall => 12,
             merge::OuterOptimizer::NormalizedEma => 1,
             merge::OuterOptimizer::RestartedEma => 2,
             merge::OuterOptimizer::RhoAdaptive => 3,
