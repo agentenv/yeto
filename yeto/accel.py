@@ -1,4 +1,4 @@
-"""Accelerator-family abstraction for the causal-LM learner.
+"""Accelerator-family abstraction for torch learners.
 
 torch has no device-generic API for seeding, memory queries, or the caching
 allocator: each vendor gets its own namespace (``torch.cuda``, ``torch.npu``)
@@ -28,6 +28,8 @@ _DIST_BACKENDS = {"cuda": "nccl", "npu": "hccl", "cpu": "gloo"}
 
 def register_backends() -> None:
     """Register out-of-tree device types. Idempotent; safe without the card."""
+    if hasattr(torch, "npu"):
+        return
     try:
         import torch_npu  # noqa: F401  (registers torch.npu and the npu device)
     except ImportError:
@@ -56,9 +58,10 @@ def available_type() -> str:
     return "cpu"
 
 
-def dist_backend() -> str:
-    """The collective backend matching this node's accelerator."""
-    return _DIST_BACKENDS[available_type()]
+def dist_backend(device: torch.device | None = None) -> str:
+    """The collective backend matching the selected device or this node."""
+    device_type = available_type() if device is None else device.type
+    return _DIST_BACKENDS.get(device_type, "gloo")
 
 
 def detect(explicit: str | None) -> torch.device:
@@ -70,7 +73,15 @@ def detect(explicit: str | None) -> torch.device:
                 "--device npu needs the torch_npu extension; install the "
                 "torch_npu build matching this torch and CANN release"
             )
-        return torch.device(explicit)
+        device = torch.device(explicit)
+        if not is_accelerator(device):
+            return device
+        index = device.index
+        if index is None:
+            index = int(os.environ.get("LOCAL_RANK", 0))
+        device = torch.device(device.type, index)
+        getattr(torch, device.type).set_device(device)
+        return device
     device_type = available_type()
     if device_type == "cpu":
         return torch.device("cpu")

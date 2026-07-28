@@ -2,7 +2,8 @@ import argparse
 import io
 import json
 import random
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -608,6 +609,248 @@ def test_diffusion_dtype_matches_cuda_bf16_support(monkeypatch):
     assert learner.diffusion_torch_dtype(SimpleNamespace(type="cuda")) is torch.float16
     monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: True)
     assert learner.diffusion_torch_dtype(SimpleNamespace(type="cuda")) is torch.bfloat16
+
+
+def test_diffusion_dtype_uses_bfloat16_on_npu():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    assert learner.diffusion_torch_dtype(SimpleNamespace(type="npu")) is torch.bfloat16
+
+
+def test_npu_bitsandbytes_load_uses_npu_device_map_and_restores_vendor_hooks(
+    monkeypatch,
+):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion.quantization import npu_bitsandbytes_load
+
+    class BnB4BitDiffusersQuantizer:
+        def validate_environment(self):
+            return torch.cuda.is_available()
+
+        def update_device_map(self, device_map):
+            return {"vendor": device_map}
+
+    diffusers = ModuleType("diffusers")
+    quantizers = ModuleType("diffusers.quantizers")
+    bnb_quantizers = ModuleType("diffusers.quantizers.bitsandbytes")
+    bnb_quantizers.BnB4BitDiffusersQuantizer = BnB4BitDiffusersQuantizer
+    monkeypatch.setitem(sys.modules, "diffusers", diffusers)
+    monkeypatch.setitem(sys.modules, "diffusers.quantizers", quantizers)
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers.quantizers.bitsandbytes",
+        bnb_quantizers,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "bitsandbytes",
+        SimpleNamespace(supported_torch_devices={"cpu", "cuda", "npu"}),
+    )
+    original_cuda_available = torch.cuda.is_available
+    vendor_validate = BnB4BitDiffusersQuantizer.validate_environment
+    vendor_device_map = BnB4BitDiffusersQuantizer.update_device_map
+    quantizer = object.__new__(BnB4BitDiffusersQuantizer)
+
+    with npu_bitsandbytes_load(SimpleNamespace(type="npu", index=2)):
+        assert quantizer.validate_environment() is True
+        assert torch.cuda.is_available is original_cuda_available
+        assert quantizer.update_device_map(None) == {"": "npu:2"}
+        assert quantizer.update_device_map({"x": "cpu"}) == {
+            "vendor": {"x": "cpu"}
+        }
+
+    assert BnB4BitDiffusersQuantizer.validate_environment is vendor_validate
+    assert BnB4BitDiffusersQuantizer.update_device_map is vendor_device_map
+    assert torch.cuda.is_available is original_cuda_available
+
+
+def test_diffusion_setup_distributed_uses_selected_device(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    device = torch.device("cuda", 2)
+    calls = []
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setattr(learner.accel, "dist_backend", lambda actual: "nccl")
+    monkeypatch.setattr(
+        learner.dist,
+        "init_process_group",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(learner.dist, "get_rank", lambda: 2)
+    monkeypatch.setattr(learner.dist, "get_world_size", lambda: 4)
+
+    assert learner.setup_distributed(device) == (2, 4)
+    assert calls == [{"backend": "nccl", "device_id": device}]
+
+
+def test_diffusion_fsdp_accepts_npu_and_keeps_lora_names(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from torch.distributed import fsdp
+
+    from yeto.diffusion import learner
+
+    module = torch.nn.Linear(2, 2)
+    module.weight.requires_grad_(False)
+    pipe = SimpleNamespace(transformer=module)
+    params = learner.trainable_params(pipe)
+    calls = []
+
+    monkeypatch.setattr(
+        fsdp,
+        "fully_shard",
+        lambda wrapped, **kwargs: calls.append((wrapped, kwargs)),
+    )
+
+    wrapped = learner.maybe_wrap_for_distributed(
+        pipe,
+        SimpleNamespace(shard="fsdp", tuning="lora", syncer="none"),
+        params,
+        rank=0,
+        world=2,
+        device=SimpleNamespace(type="npu"),
+    )
+
+    assert wrapped == params
+    assert calls == [(module, {"ignored_params": set(params.values())})]
+
+
+def test_diffusion_fsdp_rejects_cpu():
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    with pytest.raises(RuntimeError, match="CUDA or NPU accelerator"):
+        learner.maybe_wrap_for_distributed(
+            SimpleNamespace(),
+            SimpleNamespace(shard="fsdp", tuning="lora", syncer="none"),
+            {},
+            rank=0,
+            world=1,
+            device=SimpleNamespace(type="cpu"),
+        )
+
+
+def test_diffusion_seed_dispatches_to_selected_accelerator(monkeypatch):
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    device = SimpleNamespace(type="npu")
+    calls = []
+    monkeypatch.setattr(
+        learner.accel,
+        "manual_seed_all",
+        lambda actual, seed: calls.append((actual, seed)),
+    )
+
+    learner.seed_diffusion_rng(123, device)
+
+    assert calls == [(device, 123)]
+
+
+def test_diffusion_aligns_vae_video_latents_to_pipeline_frames_first_contract():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class Pipe:
+        vae_scale_factor_spatial = 8
+
+        def __init__(self):
+            self.calls = 0
+
+        def prepare_latents(
+            self,
+            batch_size,
+            num_channels_latents,
+            num_frames,
+            height,
+            width,
+            dtype,
+            device,
+            generator,
+            latents=None,
+        ):
+            self.calls += 1
+            return torch.zeros(
+                batch_size,
+                (num_frames - 1) // 4 + 1,
+                num_channels_latents,
+                height // 8,
+                width // 8,
+                dtype=dtype,
+                device=device,
+            )
+
+    pipe = Pipe()
+    latents = torch.arange(1 * 16 * 2 * 8 * 8).reshape(1, 16, 2, 8, 8).float()
+    args = SimpleNamespace(num_frames=5, height=64, width=64, cache_latents=False)
+
+    aligned = learner._align_video_latents_for_pipeline(
+        pipe,
+        latents,
+        [{"video": "clip.mp4"}],
+        args,
+        torch.device("cpu"),
+        torch.float32,
+    )
+    again = learner._align_video_latents_for_pipeline(
+        pipe,
+        latents,
+        [{"video": "clip.mp4"}],
+        args,
+        torch.device("cpu"),
+        torch.float32,
+    )
+
+    assert torch.equal(aligned, latents.permute(0, 2, 1, 3, 4))
+    assert torch.equal(again, aligned)
+    assert pipe.calls == 1
+
+
+def test_diffusion_keeps_vae_video_latents_for_channels_first_pipeline():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class Pipe:
+        vae_scale_factor_spatial = 8
+
+        def prepare_latents(
+            self,
+            batch_size,
+            num_channels_latents,
+            num_frames,
+            height,
+            width,
+            dtype,
+            device,
+            generator,
+            latents=None,
+        ):
+            return torch.zeros(
+                batch_size,
+                num_channels_latents,
+                (num_frames - 1) // 4 + 1,
+                height // 8,
+                width // 8,
+                dtype=dtype,
+                device=device,
+            )
+
+    pipe = Pipe()
+    latents = torch.zeros(1, 16, 2, 8, 8)
+    args = SimpleNamespace(num_frames=5, height=64, width=64, cache_latents=False)
+
+    aligned = learner._align_video_latents_for_pipeline(
+        pipe,
+        latents,
+        [{"video": "clip.mp4"}],
+        args,
+        torch.device("cpu"),
+        torch.float32,
+    )
+
+    assert aligned is latents
+    assert pipe._yeto_video_latent_layout == "channels-first"
 
 
 def test_flow_matching_loss_counts_elements():

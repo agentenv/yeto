@@ -1,10 +1,9 @@
 # Ascend NPU islands (Huawei 910x)
 
-Ascend cards run the ordinary `yeto.learner` — there is no separate backend
-module. `torch_npu` registers an `npu` device type into torch, so the only
-thing standing between the existing learner and an Ascend card was a handful
-of calls that torch spells per-vendor rather than per-device. Those live in
-`yeto/accel.py`.
+Ascend cards run the ordinary torch learners: `yeto.learner` for causal LMs and
+`yeto.diffusion.learner` for diffusion. There is no separate Ascend backend
+module. `torch_npu` registers an `npu` device type into torch, so the vendor
+calls shared by both learners live in `yeto/accel.py`.
 
 ## Why no peer backend
 
@@ -101,18 +100,23 @@ actually been executed on a 910x.
 | LoRA tuning, `--shard ddp` | ✅ | — |
 | bf16 base + fp32 adapters | ✅ | `load_model_and_tokenizer` |
 | SDPA attention (`--attention-backend auto`/`sdpa`) | ✅ | — |
-| `--micro-batch-size auto` OOM probing | ✅ | `autobatch.py` |
+| causal-LM `--micro-batch-size auto` OOM probing | ✅ | `autobatch.py` |
 | `--gradient-checkpointing auto` | ✅ | via `accel.mem_get_info` |
 | multi-card islands under `torchrun` | ✅ (hccl) | `setup_distributed` |
-| `--base-quantization nf4` | ❌ refused | bitsandbytes is CUDA-only |
+| Diffusers LoRA, raw images/video, `--shard ddp` | ✅ | `yeto.diffusion.learner` |
+| Diffusers BnB/NF4 pipelines | ✅ | `yeto.diffusion.quantization` |
+| diffusion `--shard fsdp` | ✅ (FSDP2/hccl) | `maybe_wrap_for_distributed` |
+| diffusion adapter reload and image/video sampling | ✅ | `yeto.diffusion.sample` |
+| causal-LM `--base-quantization nf4` | ❌ refused | `validate_base_quantization` |
 | `--kernel-backend liger` | ❌ refused | Triton; `validate_kernel_request` |
 | `--attention-backend flash-attn-2` | ❌ refused | `attention_load_kwargs` |
-| `--shard fsdp` | ❌ refused | no validated sharding evidence |
+| causal-LM `--shard fsdp` | ❌ refused | no validated sharding evidence |
 
-The three CUDA-only kernel paths already refused every non-CUDA device before
-this change, so they reject Ascend with their existing messages and needed no
-new code. Only the FSDP message was reworded, since "cannot shard on cpu" is
-no longer the only way to reach it.
+The causal-LM NF4, Liger, and FlashAttention paths still reject every non-CUDA
+device. Diffusion quantization is a separate Diffusers load path: it is enabled
+only when the installed bitsandbytes explicitly reports NPU support. The
+compatibility context supplies Diffusers 0.39's missing NPU device map during
+load and restores its original quantizer hooks afterwards.
 
 ## Running a pure-Ascend fleet
 
@@ -174,7 +178,7 @@ exercised below sits above the bound and needed no shim anywhere in
 | torch_npu | 2.10.0.post2 |
 | CANN, in container | 9.0.1 |
 | CANN / driver, on host | 8.3.RC1 / 25.3.rc1 |
-| transformers / peft | 5.13.0 / 0.19.1 |
+| transformers / peft / diffusers / bitsandbytes | 5.13.0 / 0.19.1 / 0.39.0 / 0.50.0 |
 
 Container CANN may differ from host CANN, as it does here: only the host
 *driver* is shared into the container, and 25.3.rc1 lists C19–C23 as compatible.
@@ -195,70 +199,110 @@ Deliberately out of scope for this change, listed so the boundary is explicit:
 - **`npu_fusion_attention`.** Ascend's fused attention kernel would need a new
   `--attention-backend` value and an NPU analogue of the CUDA-flag attestation
   in `causal_kernels.py`. Until then Ascend runs SDPA.
-- **FSDP on NPU**, **Megatron/MindSpeed**, **the diffusion backend**, and the
-  **`yeto shape` ILP planner** (which has no Ascend offering catalog). Ascend
-  islands are always declared explicitly.
+- **Causal-LM FSDP on NPU**, **Megatron/MindSpeed**, and the **`yeto shape` ILP
+  planner** (which has no Ascend offering catalog). Ascend islands are always
+  declared explicitly.
 
-These three fail in three different ways, which is worth knowing before pointing
-one of them at a 910x. `--shard fsdp` is refused at load with a message naming
-the device. `yeto.megatron.learner` raises, because it hardcodes
-`torch.cuda.set_device` and `backend="nccl"`. `yeto.diffusion.learner` does
-neither: its device selection is an `elif torch.cuda.is_available()` chain, so on
-an Ascend node it silently falls through to the CPU and `gloo` and trains at
-unusable speed without warning. That is pre-existing behaviour on any non-CUDA
-host rather than something introduced here, and it was left alone to keep this
-change inside its stated boundary — but it does contradict the load-time-refusal
-principle above, and it is the one gap worth closing first if diffusion on
-Ascend ever becomes interesting.
+`yeto.learner --shard fsdp` is refused at load with a message naming the
+device. `yeto.megatron.learner` raises, because it still hardcodes
+`torch.cuda.set_device` and `backend="nccl"`. In contrast,
+`yeto.diffusion.learner --shard fsdp` accepts CUDA or NPU accelerators and has
+two-card FSDP2/HCCL evidence below. Generic Diffusers image, video, quantized,
+DDP, and FSDP paths have now been exercised on Ascend. Executable external
+diffusion adapters remain a separate, unverified boundary on this hardware.
 
 ## Validation status
 
-- ✅ Unit tests (`tests/test_accel.py`): family resolution and priority,
-  `hccl`/`nccl`/`gloo` selection, `LOCAL_RANK` binding, the missing-`torch_npu`
-  message, per-device seeding/memory/allocator/OOM dispatch, and that
-  `fork_rng` names the family only off CUDA (torch <2.7 has no such kwarg).
-  The Ascend namespace is stubbed, since `torch.device("npu")` cannot be
-  constructed without the extension.
-- ✅ Existing suites unaffected (`tests/test_autobatch.py`,
-  `tests/test_learner_units.py`, `tests/test_causal_kernels.py`).
-- ✅ **On hardware**: 8× Ascend 910B4-1 (64 GB, aarch64), in the container stack
-  tabulated above. Confirmed there:
-  - `torch_npu` registers the family, `torch.npu.device_count()` reports 8, and
-    `accel.detect` binds a rank to its card.
-  - `load_model_and_tokenizer` places Qwen3-0.6B on the NPU with a bf16 base and
-    fp32 adapters — 392 trainable tensors, names and shapes identical to a CPU
-    load, weights bit-identical at matching dtype (see the parity table above).
-  - SDPA runs on the NPU across every shape the learner asks of it: forward and
-    backward, bf16 and fp32, `is_causal` and an explicit additive mask, batch 1
-    and 8, `--seq-len` 512 and 1024. `npu_fusion_attention` is not needed to
-    train.
+- ✅ Unit and regression tests (2026-07-28): 148 passed in the Ascend container
+  for the diffusion/accelerator/learner-focused suites (8 launcher-only tests
+  deselected because that image does not contain SkyPilot); 726 passed and 4
+  skipped for the complete Python suite on the development host; all 56 Rust
+  syncer tests passed. Coverage includes selected-family backend resolution,
+  explicit-device rank binding, accelerator-aware process-group setup, NPU
+  diffusion dtype/RNG dispatch, and the NPU loss-metric dtype.
+- ✅ **Single-card training** on an Ascend 910B4-1:
+  - Qwen3-0.6B completed three fixed-micro-batch optimizer steps, and the real
+    auto-batch probe selected micro-batch 4 and then completed training. The
+    saved LoRA adapter reloaded and produced finite bf16 NPU logits with shape
+    `(1, 4, 151936)`.
+  - Qwen3-8B completed two optimizer steps with explicit `--device npu`: 504
+    trainable tensors (87.3 MB) and 241 target tokens. Its saved adapter also
+    reloaded through `PeftModel.from_pretrained`; an independent NPU forward
+    produced finite bf16 logits with shape `(1, 4, 151936)`.
+  - TinyLlama-1.1B completed three optimizer steps on the English
+    `alpaca-gpt4-data-en` dataset. Its 308-tensor adapter reloaded and produced
+    finite bf16 NPU logits with shape `(1, 4, 32000)`.
+  - Phi-3.5-mini completed two optimizer steps on Databricks Dolly-15k. Its
+    256-tensor adapter reloaded and produced finite bf16 NPU logits with shape
+    `(1, 4, 32064)`.
+- ✅ **Standard diffusion training and sampling:** SD 1.5 trained a 256-tensor
+  UNet LoRA for two optimizer steps on real Pokemon BLIP caption/image rows at
+  128×128. The adapter reloaded through `yeto.diffusion.sample` on NPU and
+  generated a valid 128×128 RGB PNG. A separate two-card HCCL run completed two
+  optimizer steps per rank; its saved 256 tensors (797,184 values) were all
+  finite.
+- ✅ **Diffusion FSDP2:** a fresh two-card SD 1.5 LoRA run completed two
+  optimizer steps per rank through FSDP2/HCCL. All 797,184 values in its 256
+  adapter tensors were finite and 797,181 were nonzero. The FSDP artifact then
+  reloaded on NPU and generated a valid 128×128 image. Evidence is retained at
+  `extended-diffusion/fsdp-sd15` under the validation root below.
+- ✅ **Quantized video diffusion:** `diffusers/CogVideoX-5b-nf4` at commit
+  `8c165c88c289ab9f35cbbd5c4e084ef1a0665edc` loaded with 341 `Linear4bit`
+  modules and 341 `Params4bit` tensors, remained quantized after NPU placement,
+  and trained for two optimizer steps on two real MP4/caption rows from
+  `svjack/Lelouch_Vi_Britannia_FramePack_First_Last_Frame_Video_Captioned` at
+  commit `851e88358fad2aad65576418d0ca368fa0b0a99c`. Its 336 LoRA tensors contain
+  4,128,768 finite values, of which 4,128,737 are nonzero. Reloading that adapter
+  through `yeto.diffusion.sample` produced a decodable 8-frame 64×64 RGB MP4
+  (SHA256
+  `145f6fba56e478494e1f4ea0956200ca7a3eec309165da6f0d5e4040b3f64646`).
+  Eight frames is the exact native profile here: with this Diffusers/VAE pair a
+  five-frame request also decodes to the next eight-frame temporal block, while
+  an eight-frame request produces exactly eight. Evidence is retained at
+  `extended-diffusion/cogvideox-nf4` under the validation root below.
+- ✅ **Eight-card HCCL and syncer E2E** on all 8 cards of the same host. A fresh
+  post-fix `torchrun --nproc-per-node 8` smoke completed two optimizer steps.
+  The full run completed 34 local steps and four outer merges, wrote checkpoint,
+  final marker, final state and event tape, and completed `FINAL_FRAGMENT` /
+  `FINAL_ACK` for every rank. All 392 LoRA tensors exported from the syncer
+  checkpoint were exactly equal to the learner's final saved adapter (maximum
+  absolute difference 0.0).
+- ✅ **Two logical islands** were exercised concurrently as two independent
+  four-card HCCL groups with syncer quorum 2. They completed 95 and 52 local
+  steps respectively; every one of the four event-tape rounds recorded exactly
+  responders `[0, 1]`, and the two final adapters were bit-identical (maximum
+  absolute difference 0.0).
 
-  Parity was checked directly, by hashing trainable tensors from a CPU load and
-  an NPU load of the same seed. `scripts/check_name_parity.py` is not the tool
-  for this: it compares torch against MLX and imports `mlx`, so it cannot run on
-  an Ascend node at all.
+Hardware validation exposed one blocking bug and two initialization hazards:
+HCCL rejects float64 `all_reduce`, so NPU loss telemetry now accumulates and
+reduces in float32; explicit accelerator devices without an index now bind to
+`LOCAL_RANK`; and device selection/binding now precedes process-group creation,
+whose backend and `device_id` come from that selected device. Backend
+registration was also made genuinely idempotent when `torch.npu` is already
+registered. The final eight-card smoke completed without the earlier
+process-group device/barrier warning.
 
-  Everything above ran single-process with `--syncer none`. No part of the wire
-  protocol — HELLO, the `layout_fingerprint` handshake, PUSH/PULL, merging — has
-  been exercised from an Ascend learner.
-- ⛔ **The training loop itself has not completed a run.** Two attempts stopped
-  early, neither of them inside the accelerator abstraction:
-  1. A co-tenant `vllm serve` held all 8 cards at 97% HBM, leaving ~345 MB free.
-     The shortage surfaced *inside* SDPA as `aclnnFlashAttentionScore` rather
-     than as a clean OOM. Worth remembering: an acl operator error on a busy
-     card usually means memory, not an unsupported operator — check `npu-smi`
-     before suspecting the op.
-  2. `ExactAssistantMaskError` from Qwen3's chat template; fixed by
-     `--assistant-mask-mode legacy` as described above.
-- ⛔ **Still unverified.** Once cards are free, run in this order:
-  1. Single-card smoke to completion: loss decreasing, then adapters saved and
-     re-loaded through `PeftModel.from_pretrained`.
-  2. Multi-card under `torchrun --nproc-per-node 8`. This is the first real
-     exercise of `hccl`, through `dist.all_reduce` (gradient averaging, token
-     counts) and `dist.broadcast_object_list` (metadata to non-zero ranks) — the
-     two collectives most likely to need attention, and the largest remaining
-     risk in this change.
-  3. `--micro-batch-size auto` on an idle card, so the probe's OOM path is
-     measured against real free memory instead of a co-tenant's leftovers.
-  4. Two-node run with `--quorum 2`; the event tape must show both islands as
-     responders on every merge.
+The extended diffusion check found that its learner and sampler still selected
+only CUDA or CPU, so an Ascend run could silently train on CPU. Both now use the
+same accelerator detection and rank binding as the causal-LM learner; diffusion
+also selects bf16 on NPU, seeds the NPU RNG, uses NPU autocast, and creates HCCL
+process groups from the selected device. Real-model testing then exposed two
+additional upstream-contract gaps. Diffusers 0.39 rejects BnB quantization
+unless CUDA/XPU/MPS is present even when bitsandbytes supports NPU, so Yeto now
+applies a load-scoped NPU gate and device map. CogVideoX's VAE returns
+channels-first video latents while its pipeline prepares frames-first latents,
+so Yeto now infers the expected layout through the public `prepare_latents()`
+interface and aligns it without model-name switches.
+
+The retained hardware logs and artifacts are under
+`/workspace/yeto-ascend-validation-20260728` in the container, with syncer-side
+artifacts under `/root/yeto-ascend-validation-20260728` on the bastion.
+
+- ⛔ **Still unverified:** executable external diffusion adapters have not been
+  trained and reloaded on Ascend. Their attestation and hook behavior remains
+  covered by unit tests and non-Ascend validation only.
+- ⛔ **Still unverified:** there was only one physical Ascend host available.
+  The two-island run validates independent HCCL groups and the complete wire
+  protocol, but it does not validate HCCL or learner-to-syncer networking across
+  two physical Ascend nodes. A real multi-node run remains required before
+  claiming that topology.

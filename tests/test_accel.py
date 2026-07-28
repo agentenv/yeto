@@ -118,11 +118,27 @@ def test_dist_backend_is_nccl_on_cuda(monkeypatch):
     assert accel.dist_backend() == "nccl"
 
 
+def test_dist_backend_honors_the_selected_family(npu, monkeypatch):
+    monkeypatch.setattr(torch, "cuda", FakeAccelerator(available=True))
+    assert accel.dist_backend(device("npu", 0)) == "hccl"
+
+
 # --- device detection ----------------------------------------------------
 
 
 def test_explicit_device_is_honored(no_cuda):
     assert accel.detect("cpu").type == "cpu"
+
+
+def test_explicit_accelerator_without_index_binds_this_rank(monkeypatch):
+    stub = FakeAccelerator(available=True)
+    monkeypatch.setattr(torch, "cuda", stub)
+    monkeypatch.setenv("LOCAL_RANK", "2")
+
+    resolved = accel.detect("cuda")
+
+    assert (resolved.type, resolved.index) == ("cuda", 2)
+    assert stub.bound == [resolved]
 
 
 def test_explicit_npu_without_the_extension_names_torch_npu(monkeypatch):

@@ -52,6 +52,19 @@ def test_read_adapter_metadata_rejects_wrong_kind(tmp_path):
         sample.read_adapter_metadata(tmp_path)
 
 
+def test_select_device_uses_accelerator_detection(monkeypatch):
+    selected = object()
+    calls = []
+    monkeypatch.setattr(
+        sample.accel,
+        "detect",
+        lambda explicit: calls.append(explicit) or selected,
+    )
+
+    assert sample._select_device("npu") is selected
+    assert calls == ["npu"]
+
+
 def test_validate_args_modes():
     with pytest.raises(ValueError, match="--prompt and --output"):
         sample.validate_args(SimpleNamespace(data=None, prompt=None, output=None))

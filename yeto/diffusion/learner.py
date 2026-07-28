@@ -26,6 +26,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, IterableDataset
 
+from .. import accel
 from ..autobatch import int_or_auto, rebalance_grad_accum
 from ..data import _learner_rows, load_rows
 from ..finalization import finalize_torch_island
@@ -135,7 +136,7 @@ def diffusion_data_seed(
     return derive_diffusion_seed(base_seed, "data", logical_consumer)
 
 
-def seed_diffusion_rng(seed: int) -> None:
+def seed_diffusion_rng(seed: int, device: torch.device | None = None) -> None:
     """Seed process RNGs used by diffusion model construction and training."""
     seed = int(seed) % _MAX_SEED
     random.seed(seed)
@@ -146,10 +147,12 @@ def seed_diffusion_rng(seed: int) -> None:
     else:
         np.random.seed(seed % (1 << 32))
     torch.manual_seed(seed)
+    if device is not None:
+        accel.manual_seed_all(device, seed)
 
 
 @contextmanager
-def isolated_diffusion_rng(seed: int | None):
+def isolated_diffusion_rng(seed: int | None, device: torch.device | None = None):
     """Temporarily seed diffusion RNGs and restore the caller's RNG states.
 
     This makes paired loss evaluation repeatable without perturbing a running
@@ -170,9 +173,13 @@ def isolated_diffusion_rng(seed: int | None):
     else:
         numpy_module = np
         numpy_state = np.random.get_state()
-    cuda_devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
-    with torch.random.fork_rng(devices=cuda_devices):
-        seed_diffusion_rng(seed)
+    if device is None:
+        cuda_devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+        rng_context = torch.random.fork_rng(devices=cuda_devices)
+    else:
+        rng_context = accel.fork_rng(device)
+    with rng_context:
+        seed_diffusion_rng(seed, device)
         try:
             yield
         finally:
@@ -371,9 +378,12 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def setup_distributed() -> tuple[int, int]:
+def setup_distributed(device: torch.device) -> tuple[int, int]:
     if "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
-        dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
+        kwargs = {"backend": accel.dist_backend(device)}
+        if accel.is_accelerator(device):
+            kwargs["device_id"] = device
+        dist.init_process_group(**kwargs)
         return dist.get_rank(), dist.get_world_size()
     return 0, 1
 
@@ -386,6 +396,8 @@ def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
 
 
 def diffusion_torch_dtype(device) -> torch.dtype:
+    if device.type == "npu":
+        return torch.bfloat16
     if device.type != "cuda":
         return torch.float32
     get_capability = getattr(torch.cuda, "get_device_capability", None)
@@ -491,18 +503,21 @@ def load_pipeline(args, device, adapter=None):
 
         model_id = resolve(args.model)
         dtype = diffusion_torch_dtype(device)
-        pipe = _from_pretrained_offline_first(
-            DiffusionPipeline,
-            model_id,
-            torch_dtype=dtype,
-            use_safetensors=True,
-            **model_load_kwargs(args),
-        )
+        from .quantization import npu_bitsandbytes_load
+
+        with npu_bitsandbytes_load(device):
+            pipe = _from_pretrained_offline_first(
+                DiffusionPipeline,
+                model_id,
+                torch_dtype=dtype,
+                use_safetensors=True,
+                **model_load_kwargs(args),
+            )
     if getattr(args, "seed", None) is not None:
         # Base loading may consume a cache-dependent amount of RNG. Reset at
         # the trainable-model boundary so LoRA initialization still matches
         # across learners that took different local/offline load paths.
-        seed_diffusion_rng(args.seed)
+        seed_diffusion_rng(args.seed, device)
     if adapter is not None and hasattr(adapter, "prepare_model"):
         return adapter.prepare_model(pipe, args, device)
     _freeze_modules(pipe)
@@ -582,8 +597,10 @@ def _outer_module_lists(root):
 
 def maybe_wrap_for_distributed(pipe, args, params, rank: int, world: int, device, adapter=None):
     if args.shard == "fsdp":
-        if device.type != "cuda":
-            raise RuntimeError("diffusion --shard fsdp requires CUDA")
+        if not accel.is_accelerator(device):
+            raise RuntimeError(
+                "diffusion --shard fsdp requires a CUDA or NPU accelerator"
+            )
         if args.tuning == "full" and args.syncer != "none":
             raise ValueError(
                 "diffusion --shard fsdp with --tuning full cannot sync sharded "
@@ -612,7 +629,7 @@ def maybe_wrap_for_distributed(pipe, args, params, rank: int, world: int, device
                 name,
                 torch.nn.parallel.DistributedDataParallel(
                     module,
-                    device_ids=[device.index] if device.type == "cuda" else None,
+                    device_ids=[device.index] if accel.is_accelerator(device) else None,
                     find_unused_parameters=False,
                 ),
             )
@@ -1076,6 +1093,81 @@ def _latent_meta(rows, latents: torch.Tensor) -> tuple[int | None, int | None, i
     )
 
 
+def _pipeline_video_latent_shape(pipe, latents, rows, args, device, dtype):
+    prepare = getattr(pipe, "prepare_latents", None)
+    if not callable(prepare) or latents.ndim != 5:
+        return None
+    frames, height, width = _batch_shape_key(rows, args)
+    if frames is None:
+        return None
+    scale = _vae_scale_factor(pipe)
+    height = height or int(latents.shape[-2]) * scale
+    width = width or int(latents.shape[-1]) * scale
+    values = {
+        "batch_size": int(latents.shape[0]),
+        "num_channels_latents": int(latents.shape[1]),
+        "num_frames": int(frames),
+        "height": int(height),
+        "width": int(width),
+        "dtype": dtype,
+        "device": device,
+        "generator": None,
+        "latents": None,
+    }
+    try:
+        params = inspect.signature(prepare).parameters
+    except (TypeError, ValueError):
+        return None
+    kwargs = {}
+    for name, param in params.items():
+        if param.kind not in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            continue
+        if name in values:
+            kwargs[name] = values[name]
+        elif param.default is inspect.Parameter.empty:
+            return None
+    try:
+        with isolated_diffusion_rng(0, device):
+            expected = prepare(**kwargs)
+    except (RuntimeError, TypeError, ValueError):
+        log.debug("could not infer pipeline video latent layout", exc_info=True)
+        return None
+    return tuple(expected.shape) if torch.is_tensor(expected) else None
+
+
+def _align_video_latents_for_pipeline(pipe, latents, rows, args, device, dtype):
+    if latents.ndim != 5:
+        return latents
+    layout = getattr(pipe, "_yeto_video_latent_layout", None)
+    if layout is None:
+        expected = _pipeline_video_latent_shape(
+            pipe,
+            latents,
+            rows,
+            args,
+            device,
+            dtype,
+        )
+        frames_first = tuple(latents.permute(0, 2, 1, 3, 4).shape)
+        if expected == frames_first and expected != tuple(latents.shape):
+            layout = "frames-first"
+        else:
+            layout = "channels-first"
+        setattr(pipe, "_yeto_video_latent_layout", layout)
+        if layout == "frames-first":
+            log.info(
+                "aligning VAE video latents from channels-first %s to pipeline layout %s",
+                tuple(latents.shape),
+                frames_first,
+            )
+    if layout == "frames-first":
+        return latents.permute(0, 2, 1, 3, 4).contiguous()
+    return latents
+
+
 def _maybe_pack_latents(pipe, latents: torch.Tensor) -> torch.Tensor:
     pack = getattr(pipe, "_pack_latents", None) or getattr(pipe, "pack_latents", None)
     if pack is None:
@@ -1354,6 +1446,14 @@ def encode_latents(pipe, rows, args, device, dtype, adapter=None) -> LatentBatch
             shift = getattr(vae_config, "shift_factor", None) or 0.0
             latents = (latents - shift) * scale
     meta = _latent_meta(rows, latents)
+    latents = _align_video_latents_for_pipeline(
+        pipe,
+        latents,
+        rows,
+        args,
+        device,
+        dtype,
+    )
     latents = _maybe_pack_latents(pipe, latents)
     return LatentBatch(latents, *meta)
 
@@ -2617,8 +2717,14 @@ def _denoise_forward_one(pipe, model, noisy: LatentBatch, timesteps, cond: TextC
         kwargs["return_dict"] = False
     _auto_fill_denoiser_kwargs(pipe, noisy, cond, args, params, kwargs)
     autocast = nullcontext()
-    if noisy.latents.is_cuda and noisy.latents.dtype in (torch.float16, torch.bfloat16):
-        autocast = torch.autocast(device_type="cuda", dtype=noisy.latents.dtype)
+    if accel.is_accelerator(noisy.latents.device) and noisy.latents.dtype in (
+        torch.float16,
+        torch.bfloat16,
+    ):
+        autocast = torch.autocast(
+            device_type=noisy.latents.device.type,
+            dtype=noisy.latents.dtype,
+        )
     with autocast:
         out = model(**kwargs)
     return _extract_model_output(out)
@@ -2777,7 +2883,7 @@ def compute_diffusion_loss(
     rng_seed: int | None = None,
 ):
     """Compute one diffusion loss, optionally under an isolated eval seed."""
-    with isolated_diffusion_rng(rng_seed):
+    with isolated_diffusion_rng(rng_seed, device):
         return _compute_diffusion_loss(pipe, rows, args, device, global_step, adapter)
 
 
@@ -3021,7 +3127,8 @@ def main(argv=None) -> None:
         from ..budget_finalization import validate_learner_budget_args
 
         validate_learner_budget_args(args)
-    rank, world = setup_distributed()
+    device = accel.detect(args.device)
+    rank, world = setup_distributed(device)
     logging.basicConfig(
         level=logging.INFO,
         format=f"%(asctime)s diffusion{args.learner_id}.r{rank} %(levelname)s %(message)s",
@@ -3032,14 +3139,6 @@ def main(argv=None) -> None:
         verify_distributed_source_tree_sha256,
     )
 
-    if args.device:
-        device = torch.device(args.device)
-    elif torch.cuda.is_available():
-        device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", 0)))
-        torch.cuda.set_device(device)
-    else:
-        device = torch.device("cpu")
-
     verify_distributed_source_tree_sha256(
         args.source_sha256,
         rank=rank,
@@ -3048,7 +3147,7 @@ def main(argv=None) -> None:
     pin_distributed_runtime_provenance(args, rank=rank, world=world)
 
     if args.seed is not None:
-        seed_diffusion_rng(args.seed)
+        seed_diffusion_rng(args.seed, device)
         log.info("diffusion model initialization seed=%d", args.seed)
 
     if not 0.0 <= args.merge_alpha < 1.0:
@@ -3142,7 +3241,7 @@ def main(argv=None) -> None:
             args.num_learners,
             rank,
         )
-        seed_diffusion_rng(train_seed)
+        seed_diffusion_rng(train_seed, device)
         loader_generator = torch.Generator().manual_seed(loader_seed)
         log.info(
             "diffusion logical_rank=%d training_seed=%d data_seed=%d loader_seed=%d",

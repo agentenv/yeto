@@ -252,9 +252,12 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def setup_distributed() -> tuple[int, int]:
+def setup_distributed(device: torch.device) -> tuple[int, int]:
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        dist.init_process_group(backend=accel.dist_backend())
+        kwargs = {"backend": accel.dist_backend(device)}
+        if accel.is_accelerator(device):
+            kwargs["device_id"] = device
+        dist.init_process_group(**kwargs)
         return dist.get_rank(), dist.get_world_size()
     return 0, 1
 
@@ -603,8 +606,13 @@ def _all_ranks_true(value: bool, device, world: int) -> bool:
     return bool(flag.item())
 
 
+def _loss_metric_dtype(device) -> torch.dtype:
+    """Highest-precision loss telemetry dtype supported by the collective."""
+    return torch.float32 if device.type == "npu" else torch.float64
+
+
 def _global_loss_sum(local_loss: torch.Tensor, world: int) -> float:
-    total = local_loss.detach().to(dtype=torch.float64).clone()
+    total = local_loss.detach().to(dtype=_loss_metric_dtype(local_loss.device)).clone()
     if world > 1:
         dist.all_reduce(total, op=dist.ReduceOp.SUM)
     return float(total.item())
@@ -616,7 +624,8 @@ def main(argv=None) -> None:
         from .budget_finalization import validate_learner_budget_args
 
         validate_learner_budget_args(args)
-    rank, world = setup_distributed()
+    device = accel.detect(args.device)
+    rank, world = setup_distributed(device)
     logging.basicConfig(
         level=logging.INFO,
         format=f"%(asctime)s learner{args.learner_id}.r{rank} %(levelname)s %(message)s",
@@ -627,7 +636,6 @@ def main(argv=None) -> None:
         verify_distributed_source_tree_sha256,
     )
 
-    device = accel.detect(args.device)
     if (
         args.device is None  # an explicit --device cpu is the caller's choice
         and device.type == "cpu"
@@ -1123,7 +1131,8 @@ def run_inner_loop(
             # yields SUM_r grad(loss_r) / SUM_r target_tokens exactly.
             loss_scale = world / global_targets
             observed_targets = torch.zeros((), dtype=torch.long, device=device)
-            step_loss_local = torch.zeros((), dtype=torch.float64, device=device)
+            metric_dtype = _loss_metric_dtype(device)
+            step_loss_local = torch.zeros((), dtype=metric_dtype, device=device)
             opt.zero_grad(set_to_none=True)
             for input_ids, weights in group:
                 input_ids = input_ids.to(device, non_blocking=True)
@@ -1142,7 +1151,7 @@ def run_inner_loop(
                     .detach()
                     .sum()
                 )
-                step_loss_local.add_(loss.detach().to(dtype=torch.float64))
+                step_loss_local.add_(loss.detach().to(dtype=metric_dtype))
                 (loss * loss_scale).backward()
 
             local_count_matches = int(observed_targets.item()) == local_targets

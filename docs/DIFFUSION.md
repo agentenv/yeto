@@ -81,9 +81,9 @@ This covers standard UNets, DiTs, and dual-denoiser pipelines such as Wan2.2.
 | `--shard ddp` | Replicate the base inside the island and explicitly all-reduce LoRA gradients. |
 | `--shard fsdp` | Use FSDP2 to shard the frozen base while keeping LoRA tensors replicated and name-stable. |
 
-FSDP2 requires CUDA and a torch build that provides composable
-`fully_shard`. Full-parameter tuning is exposed for experiments, but a
-syncer-connected FSDP full-tuning run is rejected because the trainable
+FSDP2 requires a CUDA or NPU accelerator and a torch build that provides
+composable `fully_shard`. Full-parameter tuning is exposed for experiments,
+but a syncer-connected FSDP full-tuning run is rejected because the trainable
 parameters are sharded. LoRA is the benchmarked asynchronous path.
 
 After wrapping, parameter names are normalized and converted into the same
@@ -259,6 +259,10 @@ yeto sample-diffusion \
 ```
 
 Both samplers also accept a prompt dataset for batch generation.
+Generation arguments are forwarded to the selected pipeline, so its native
+shape rules still apply. For example, the validated Diffusers 0.39 CogVideoX
+VAE decoded a five-frame request to its next eight-frame temporal block; use 8
+when an exact eight-frame small profile is required.
 
 ## External adapter boundary
 
@@ -288,6 +292,12 @@ requires this boundary.
 - Raw-video LoRA has been exercised on LTX-Video and Wan2.1; Wan2.1 14B and
   dual-denoiser Wan2.2 have completed 8-GPU FSDP2 validation.
 - The NAVA external adapter has completed GPU train/save/reload validation.
+- Ascend 910B4 validation includes SD 1.5 raw-image LoRA under DDP and two-card
+  FSDP2/HCCL, plus CogVideoX-5b-nf4 raw-MP4 LoRA training, adapter reload, and
+  MP4 generation. The quantized load contained 341 real BnB 4-bit layers; the
+  saved 336-tensor adapter contained 4,128,768 finite values.
+- External diffusion adapters have not yet completed equivalent Ascend
+  train/save/reload validation.
 - Held-out quality and equal-hardware synchronization are separate concerns;
   use [DIFFUSION_BENCHMARK.md](DIFFUSION_BENCHMARK.md) for that experiment.
 

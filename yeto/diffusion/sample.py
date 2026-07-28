@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from .. import accel
 from ..models import resolve
 
 DIFFUSION_ADAPTER_METADATA_FILE = "yeto_diffusion_adapter.json"
@@ -122,11 +123,7 @@ def _load_external_adapter(spec: str | None, expected_sha256: str | None = None)
 
 
 def _select_device(device: str | None):
-    import torch
-
-    if device:
-        return torch.device(device)
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return accel.detect(device)
 
 
 def _torch_dtype(dtype: str, device):
@@ -190,6 +187,7 @@ def _load_base_pipeline(
     trust_remote_code: bool = False,
 ):
     from diffusers import DiffusionPipeline
+    from .quantization import npu_bitsandbytes_load
 
     kwargs = {
         "torch_dtype": dtype,
@@ -198,10 +196,11 @@ def _load_base_pipeline(
     }
     if revision:
         kwargs["revision"] = revision
-    try:
-        pipe = DiffusionPipeline.from_pretrained(model_id, local_files_only=True, **kwargs)
-    except OSError:
-        pipe = DiffusionPipeline.from_pretrained(model_id, **kwargs)
+    with npu_bitsandbytes_load(device):
+        try:
+            pipe = DiffusionPipeline.from_pretrained(model_id, local_files_only=True, **kwargs)
+        except OSError:
+            pipe = DiffusionPipeline.from_pretrained(model_id, **kwargs)
     return pipe.to(device) if hasattr(pipe, "to") else pipe
 
 
@@ -409,7 +408,7 @@ def _pipeline_kwargs(pipe, args):
     if getattr(args, "seed", None) is not None and _accepts(params, "generator"):
         import torch
 
-        device = getattr(args, "device", None) or ("cuda" if torch.cuda.is_available() else "cpu")
+        device = _select_device(getattr(args, "device", None))
         kwargs["generator"] = torch.Generator(device=device).manual_seed(args.seed)
     return kwargs
 
