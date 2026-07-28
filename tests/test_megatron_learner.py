@@ -166,6 +166,16 @@ def test_scheduler_kwargs_clamps_warmup_for_short_runs():
     assert kwargs["lr_decay_style"] == "cosine"
 
 
+def test_optimizer_config_kwargs_sets_per_group_lr_bounds():
+    args = SimpleNamespace(inner_lr=5e-6, min_lr=5e-7, weight_decay=0.01)
+
+    kwargs = ml._optimizer_config_kwargs(args)
+
+    assert kwargs["lr"] == 5e-6
+    assert kwargs["min_lr"] == 5e-7
+    assert kwargs["weight_decay"] == 0.01
+
+
 def test_build_model_disables_bridge_ddp_and_uses_lora_signature(monkeypatch):
     seen = {}
 

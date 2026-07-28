@@ -459,6 +459,18 @@ def _scheduler_kwargs(args, max_steps):
     }
 
 
+def _optimizer_config_kwargs(args):
+    return {
+        "optimizer": "adam",
+        "lr": args.inner_lr,
+        "min_lr": args.min_lr,
+        "weight_decay": args.weight_decay,
+        "use_distributed_optimizer": True,
+        "bf16": True,
+        "clip_grad": 1.0,
+    }
+
+
 def _adapter_state_for_export(model):
     return {n: p.detach().cpu().contiguous() for n, p in _adapter_params(model).items()}
 
@@ -621,14 +633,7 @@ def main(argv=None):
     cfg = _prepare_model_config(model, finalize_model_grads, args.pipeline_parallel)
     model = [DDP(config=cfg, ddp_config=ddp_cfg, module=m) for m in model]
     opt = get_megatron_optimizer(
-        config=OptimizerConfig(
-            optimizer="adam",
-            lr=args.inner_lr,
-            weight_decay=args.weight_decay,
-            use_distributed_optimizer=True,
-            bf16=True,
-            clip_grad=1.0,
-        ),
+        config=OptimizerConfig(**_optimizer_config_kwargs(args)),
         model_chunks=model,
     )
     forward_backward = get_forward_backward_func()
