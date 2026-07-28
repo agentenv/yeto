@@ -404,6 +404,18 @@ def _pipeline_stage_roles():
         return True, True
 
 
+def _pipeline_forward_kwargs(input_ids, position_ids, labels, is_last_stage):
+    """Build model inputs shared by dense and multimodal Megatron wrappers."""
+    return {
+        # Qwen3-VL/Qwen3.5 recomputes MRoPE positions from token IDs on every
+        # pipeline stage, including stages that do not own the embedding.
+        "input_ids": input_ids,
+        "position_ids": position_ids,
+        "attention_mask": None,
+        "labels": labels if is_last_stage else None,
+    }
+
+
 def _adapter_state_for_export(model):
     return {n: p.detach().cpu().contiguous() for n, p in _adapter_params(model).items()}
 
@@ -631,13 +643,8 @@ def _run_inner_loop(
         labels = batch["labels"].to(device)
         weights = batch["weights"].to(device)
         pos = torch.arange(ids.size(1), device=device).unsqueeze(0).expand_as(ids)
-        is_first_stage, is_last_stage = _pipeline_stage_roles()
-        out = mdl(
-            input_ids=ids if is_first_stage else None,
-            position_ids=pos,
-            attention_mask=None,
-            labels=labels if is_last_stage else None,
-        )
+        _, is_last_stage = _pipeline_stage_roles()
+        out = mdl(**_pipeline_forward_kwargs(ids, pos, labels, is_last_stage))
 
         def loss_func(output):
             loss = _weighted_token_loss(output, weights)

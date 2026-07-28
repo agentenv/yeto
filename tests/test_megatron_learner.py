@@ -117,6 +117,24 @@ def test_prepare_model_config_sets_pipeline_dtype_from_params_dtype():
     assert cfg.finalize_model_grads_func is finalize
 
 
+def test_pipeline_forward_kwargs_keeps_input_ids_on_non_first_stage():
+    ids = object()
+    pos = object()
+    labels = object()
+
+    middle = ml._pipeline_forward_kwargs(ids, pos, labels, is_last_stage=False)
+    last = ml._pipeline_forward_kwargs(ids, pos, labels, is_last_stage=True)
+
+    assert middle == {
+        "input_ids": ids,
+        "position_ids": pos,
+        "attention_mask": None,
+        "labels": None,
+    }
+    assert last["input_ids"] is ids
+    assert last["labels"] is labels
+
+
 def test_build_model_disables_bridge_ddp_and_uses_lora_signature(monkeypatch):
     seen = {}
 
