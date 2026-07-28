@@ -477,20 +477,28 @@ def _gather_adapter_state_for_export(args, model, rank, world):
 def _save_output_best_effort(
     bridge, model, output_dir, args=None, prefer_adapter_artifact=False, state_override=None
 ):
+    import torch.distributed as dist
+
     save_dir = os.path.expanduser(output_dir)
     os.makedirs(save_dir, exist_ok=True)
     if args is not None and args.tuning == "lora":
         log.info("writing Yeto Megatron adapter artifact without Bridge HF export")
         return _save_megatron_adapter_artifact(args, model, save_dir, state_override=state_override)
 
+    distributed = dist.is_available() and dist.is_initialized()
+    rank = dist.get_rank() if distributed else 0
     bridge_tmp = os.path.join(save_dir, ".bridge-export-tmp")
-    shutil.rmtree(bridge_tmp, ignore_errors=True)
-    os.makedirs(bridge_tmp, exist_ok=True)
+    if rank == 0:
+        shutil.rmtree(bridge_tmp, ignore_errors=True)
+        os.makedirs(bridge_tmp, exist_ok=True)
+    if distributed:
+        dist.barrier()
     try:
-        # Export adapters back to an HF-loadable checkpoint via the bridge.
+        # Bridge HF export gathers TP/PP shards and must run on every rank.
         bridge.save_hf_pretrained(model, bridge_tmp)
     except Exception as e:
-        shutil.rmtree(bridge_tmp, ignore_errors=True)
+        if rank == 0:
+            shutil.rmtree(bridge_tmp, ignore_errors=True)
         if args is not None and args.tuning == "lora":
             log.warning(
                 "Megatron-Bridge HF export failed after training; writing a "
@@ -506,16 +514,19 @@ def _save_output_best_effort(
             e,
         )
         return False
-    for name in os.listdir(bridge_tmp):
-        src = os.path.join(bridge_tmp, name)
-        dst = os.path.join(save_dir, name)
-        if os.path.isdir(dst):
-            shutil.rmtree(dst)
-        elif os.path.exists(dst):
-            os.remove(dst)
-        shutil.move(src, dst)
-    shutil.rmtree(bridge_tmp, ignore_errors=True)
-    log.info("saved adapters to %s", save_dir)
+    if rank == 0:
+        for name in os.listdir(bridge_tmp):
+            src = os.path.join(bridge_tmp, name)
+            dst = os.path.join(save_dir, name)
+            if os.path.isdir(dst):
+                shutil.rmtree(dst)
+            elif os.path.exists(dst):
+                os.remove(dst)
+            shutil.move(src, dst)
+        shutil.rmtree(bridge_tmp, ignore_errors=True)
+        log.info("saved checkpoint to %s", save_dir)
+    if distributed:
+        dist.barrier()
     return True
 
 
@@ -608,7 +619,7 @@ def main(argv=None):
         if args.tuning == "lora"
         else None
     )
-    if rank == 0:
+    if args.tuning == "full" or rank == 0:
         _save_output_best_effort(
             bridge,
             model,

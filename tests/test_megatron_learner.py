@@ -340,6 +340,33 @@ def test_save_output_best_effort_exports_full_tuning_with_bridge(tmp_path):
     assert (tmp_path / "model.safetensors").exists()
 
 
+def test_save_output_best_effort_participates_on_nonzero_distributed_rank(
+    tmp_path, monkeypatch
+):
+    import torch.distributed as dist
+
+    calls = []
+    bridge_tmp = tmp_path / ".bridge-export-tmp"
+    bridge_tmp.mkdir()
+    marker = bridge_tmp / "rank-zero-prepared"
+    marker.write_text("ready")
+
+    class CollectiveBridge:
+        def save_hf_pretrained(self, model, save_dir):
+            calls.append((model, Path(save_dir)))
+
+    monkeypatch.setattr(dist, "is_available", lambda: True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_rank", lambda: 1)
+    monkeypatch.setattr(dist, "barrier", lambda: calls.append("barrier"))
+
+    assert ml._save_output_best_effort(
+        CollectiveBridge(), ["model"], tmp_path, SimpleNamespace(tuning="full")
+    )
+    assert calls == ["barrier", (["model"], bridge_tmp), "barrier"]
+    assert marker.exists()
+
+
 def test_save_output_best_effort_writes_megatron_adapter_for_lora(tmp_path, monkeypatch):
     import torch
 
