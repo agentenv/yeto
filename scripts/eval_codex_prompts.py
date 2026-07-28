@@ -61,14 +61,44 @@ def _model_class(source: str):
     return AutoModelForCausalLM
 
 
+def _patch_qwen35_causal_conv_update(model) -> int:
+    """Adapt the Qwen3.5 cached decode input to causal-conv1d's 2D API."""
+    if getattr(getattr(model, "config", None), "model_type", None) != "qwen3_5":
+        return 0
+
+    patched = 0
+    for module in model.modules():
+        update = getattr(module, "causal_conv1d_update", None)
+        if (
+            update is None
+            or getattr(module, "_yeto_causal_conv_update_patched", False)
+            or not getattr(update, "__module__", "").startswith("causal_conv1d")
+        ):
+            continue
+
+        def compatible_update(hidden_states, *args, _update=update, **kwargs):
+            if hidden_states.ndim == 3 and hidden_states.shape[-1] == 1:
+                return _update(hidden_states.squeeze(-1), *args, **kwargs).unsqueeze(-1)
+            return _update(hidden_states, *args, **kwargs)
+
+        module.causal_conv1d_update = compatible_update
+        module._yeto_causal_conv_update_patched = True
+        patched += 1
+    return patched
+
+
 def load_full_model(source: str, device: str):
-    return _model_class(source).from_pretrained(
+    model = _model_class(source).from_pretrained(
         source,
         trust_remote_code=True,
         dtype=torch.bfloat16,
         device_map={"": device},
         low_cpu_mem_usage=True,
     ).eval()
+    patched = _patch_qwen35_causal_conv_update(model)
+    if patched:
+        print(f"patched cached Qwen3.5 generation in {patched} linear-attention layers")
+    return model
 
 
 def load_candidate(base_model: str, candidate: str, kind: str, device: str):

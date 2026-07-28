@@ -21,6 +21,29 @@ def test_model_class_selects_multimodal_auto_model_for_qwen35(monkeypatch):
     )
 
 
+def test_qwen35_causal_conv_update_adapts_single_token_for_cuda_kernel():
+    seen_shapes = []
+
+    def causal_conv_update(hidden_states, *args, **kwargs):
+        seen_shapes.append(tuple(hidden_states.shape))
+        return hidden_states + 1
+
+    causal_conv_update.__module__ = "causal_conv1d.causal_conv1d_interface"
+    linear_attention = SimpleNamespace(causal_conv1d_update=causal_conv_update)
+    model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_5"),
+        modules=lambda: [linear_attention],
+    )
+
+    assert evaluation._patch_qwen35_causal_conv_update(model) == 1
+    output = linear_attention.causal_conv1d_update(torch.zeros(2, 3, 1))
+
+    assert seen_shapes == [(2, 3)]
+    assert output.shape == (2, 3, 1)
+    assert torch.all(output == 1)
+    assert evaluation._patch_qwen35_causal_conv_update(model) == 0
+
+
 def test_heldout_loss_uses_only_weighted_assistant_targets(monkeypatch):
     dataset = [
         (
