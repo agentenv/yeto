@@ -135,6 +135,37 @@ def test_pipeline_forward_kwargs_keeps_input_ids_on_non_first_stage():
     assert last["labels"] is labels
 
 
+def test_training_steps_uses_packed_blocks_and_gradient_accumulation():
+    args = SimpleNamespace(epochs=1.5, grad_accum=4, max_local_steps=999)
+
+    assert ml._training_steps(args, packed_blocks=10) == 4
+
+
+def test_training_steps_falls_back_to_max_local_steps():
+    args = SimpleNamespace(epochs=None, grad_accum=4, max_local_steps=27)
+
+    assert ml._training_steps(args, packed_blocks=10) == 27
+
+
+def test_scheduler_kwargs_clamps_warmup_for_short_runs():
+    args = SimpleNamespace(
+        warmup_steps=10,
+        inner_lr=5e-6,
+        min_lr=5e-7,
+        lr_decay_style="cosine",
+        weight_decay=0.01,
+    )
+
+    kwargs = ml._scheduler_kwargs(args, max_steps=4)
+
+    assert kwargs["init_lr"] == 0.0
+    assert kwargs["max_lr"] == 5e-6
+    assert kwargs["min_lr"] == 5e-7
+    assert kwargs["lr_warmup_steps"] == 3
+    assert kwargs["lr_decay_steps"] == 4
+    assert kwargs["lr_decay_style"] == "cosine"
+
+
 def test_build_model_disables_bridge_ddp_and_uses_lora_signature(monkeypatch):
     seen = {}
 

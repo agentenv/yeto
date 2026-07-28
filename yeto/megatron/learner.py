@@ -1,15 +1,12 @@
 """Megatron-Core island learner — a peer of yeto.learner that distributes
-the frozen base with expert/tensor/pipeline parallelism instead of FSDP2,
-while speaking the exact same DiLoCo adapter sync to the Rust syncer.
+models with expert/tensor/pipeline parallelism instead of FSDP2, while
+speaking the same DiLoCo adapter sync to the Rust syncer.
 
-FIRST IMPLEMENTATION, NOT YET HARDWARE-VALIDATED. Megatron-Core is
-GPU/multi-node only, so this cannot be unit-tested; it is written against the
-researched Megatron-Core / Megatron-Bridge API (see docs/MEGATRON.md) and
-needs a live multi-node B200 run to validate and iterate — exactly as the
-torch backend needed the gemma4 smokes.
+The full-parameter Qwen3.6-27B path is hardware-validated on two 8xH200 nodes
+with TP=8 and PP=2, including distributed Hugging Face checkpoint export.
 
-Scope: TP=1, EP=N with PP=1 for synced DiLoCo runs and PP>=1 for local
-smoke/validation runs. With attention/dense LoRA targets and
+Scope: TP=1, EP=N with PP=1 for synced DiLoCo runs and model parallelism for
+local full-parameter runs. With attention/dense LoRA targets and
 share_expert_adapters=True, adapters are replicated across EP ranks and split
 across PP stages. The local/no-sync path gathers those PP-stage adapter
 tensors for export. Synced PP still needs a global fragment layout and
@@ -22,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import shutil
 
@@ -64,9 +62,22 @@ def parse_args(argv=None):
     p.add_argument("--micro-batch-size", default="1")
     p.add_argument("--grad-accum", type=int, default=4)
     p.add_argument("--inner-lr", type=float, default=3e-4)
+    p.add_argument("--min-lr", type=float, default=0.0)
+    p.add_argument(
+        "--lr-decay-style",
+        choices=["constant", "linear", "cosine"],
+        default="cosine",
+    )
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--warmup-steps", type=int, default=10)
     p.add_argument("--max-local-steps", type=int, default=10_000)
+    p.add_argument("--log-every", type=int, default=10)
+    p.add_argument(
+        "--epochs",
+        type=float,
+        default=None,
+        help="Dataset passes; when set, overrides --max-local-steps using packed blocks",
+    )
     p.add_argument("--fragments", type=int, default=8)
     p.add_argument("--fragment-pattern", choices=["binpack", "strided"], default="binpack")
     p.add_argument("--merge-alpha", type=float, default=0.5)
@@ -416,6 +427,38 @@ def _pipeline_forward_kwargs(input_ids, position_ids, labels, is_last_stage):
     }
 
 
+def _training_steps(args, packed_blocks):
+    if args.epochs is None:
+        return args.max_local_steps
+    if args.epochs <= 0:
+        raise ValueError("--epochs must be greater than zero")
+    if args.grad_accum <= 0:
+        raise ValueError("--grad-accum must be greater than zero")
+    return max(1, math.ceil(packed_blocks * args.epochs / args.grad_accum))
+
+
+def _scheduler_kwargs(args, max_steps):
+    if args.warmup_steps < 0:
+        raise ValueError("--warmup-steps cannot be negative")
+    if args.min_lr < 0 or args.min_lr > args.inner_lr:
+        raise ValueError("--min-lr must be between zero and --inner-lr")
+    warmup_steps = min(args.warmup_steps, max(0, max_steps - 1))
+    return {
+        "init_lr": 0.0 if warmup_steps else args.inner_lr,
+        "max_lr": args.inner_lr,
+        "min_lr": args.min_lr,
+        "lr_warmup_steps": warmup_steps,
+        "lr_decay_steps": max_steps,
+        "lr_decay_style": args.lr_decay_style,
+        "start_wd": args.weight_decay,
+        "end_wd": args.weight_decay,
+        "wd_incr_steps": max_steps,
+        "wd_incr_style": "constant",
+        "use_checkpoint_opt_param_scheduler": False,
+        "override_opt_param_scheduler": False,
+    }
+
+
 def _adapter_state_for_export(model):
     return {n: p.detach().cpu().contiguous() for n, p in _adapter_params(model).items()}
 
@@ -643,10 +686,22 @@ def _run_inner_loop(
     yeto.learner.run_inner_loop's protocol and counter semantics exactly."""
     import torch
     import torch.distributed as dist
+    from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
     dataset = _build_dataset(args)
     data_iter = _cycle(dataset)
     mbs = 1 if args.micro_batch_size == "auto" else int(args.micro_batch_size)
+    max_steps = _training_steps(args, len(dataset))
+    if args.log_every <= 0:
+        raise ValueError("--log-every must be greater than zero")
+    scheduler = OptimizerParamScheduler(opt, **_scheduler_kwargs(args, max_steps))
+    log.info(
+        "%d packed blocks; running %d optimizer steps (%s epochs, grad_accum=%d)",
+        len(dataset),
+        max_steps,
+        args.epochs if args.epochs is not None else "step-limited",
+        args.grad_accum,
+    )
 
     def forward_step(it, mdl):
         batch = next(it)
@@ -676,7 +731,7 @@ def _run_inner_loop(
         anchors = [fragment_flat(frag, params).cpu() for frag in layout.fragments]
     shutdown = False
 
-    while not shutdown and steps_total < args.max_local_steps:
+    while not shutdown and steps_total < max_steps:
         for m in model:
             m.zero_grad_buffer()
         opt.zero_grad()
@@ -689,9 +744,13 @@ def _run_inner_loop(
             micro_batch_size=mbs,
             forward_only=False,
         )
-        opt.step()  # grads reduced across DP/EP inside finalize_model_grads
+        update_successful, _, _ = opt.step()  # grads reduced inside finalize_model_grads
+        if update_successful:
+            scheduler.step(increment=1)
         steps_total += 1
         tokens_total += tokens_per_inner_step
+        if rank == 0 and (steps_total % args.log_every == 0 or steps_total == max_steps):
+            log.info("training progress local_step=%d/%d", steps_total, max_steps)
 
         # --- fragment sync at the step boundary (never blocks) ---
         # Broadcasts apply BEFORE pulls are answered (see yeto/learner.py:
