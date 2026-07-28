@@ -1,0 +1,229 @@
+{
+  "gate": {
+    "D_bands": {
+      "T20": [
+        0.6403471737224707,
+        1.9210415211674121
+      ],
+      "T5": [
+        0.8708078974894261,
+        2.6124236924682784
+      ]
+    },
+    "bootstrap_replicates": 10000,
+    "bootstrap_seed": 20260727,
+    "minimum_valid_bootstrap_replicates": 7900,
+    "near_bracket_allowance_log2_eta": 0.5
+  },
+  "interpretation": "P_eval is the probability that all four ratio-required point fits are accepted and at least 7,900 of the analyzer's exact 10,000 paired bootstrap draws are accepted. This is a transport prior from 1.7B full tuning, not a claim that 27B LoRA has identical noise.",
+  "noise_model": {
+    "description": "Each simulated G7 training seed samples with replacement one of the five complete 1.7B seed-residual profiles. The same sampled profile is used jointly across all four curves; each source curve is linearly interpolated by ordinal eta quantile onto the registered three- or four-point target ladder.",
+    "primary_scale": 1.0,
+    "sensitivity_scales": [
+      0.5,
+      1.5
+    ]
+  },
+  "primary": [
+    {
+      "P_bands": 1.0,
+      "P_eval": 1.0,
+      "P_monotone_ci": 1.0,
+      "P_pass": 1.0,
+      "P_point_accepted": 1.0,
+      "counts": {
+        "evaluable": 5000,
+        "passed": 5000
+      },
+      "noise_scale": 1.0,
+      "rng_seed": 20260727,
+      "simulations": 5000,
+      "valid_bootstrap_replicates": {
+        "max": 10000,
+        "median": 10000.0,
+        "min": 10000,
+        "p05": 10000
+      },
+      "variant": "FULL_48"
+    },
+    {
+      "P_bands": 1.0,
+      "P_eval": 1.0,
+      "P_monotone_ci": 1.0,
+      "P_pass": 1.0,
+      "P_point_accepted": 1.0,
+      "counts": {
+        "evaluable": 5000,
+        "passed": 5000
+      },
+      "noise_scale": 1.0,
+      "rng_seed": 20260727,
+      "simulations": 5000,
+      "valid_bootstrap_replicates": {
+        "max": 10000,
+        "median": 10000.0,
+        "min": 10000,
+        "p05": 10000
+      },
+      "variant": "REDUCED_T20_MU0_45"
+    }
+  ],
+  "prior": {
+    "measured_pooled_residual_population_sd": 0.0632194750783273,
+    "path": "experiment-specs/outer-mup-v7-27b-lora-noise-prior.json",
+    "sha256": "5d684e9b296ccb35eb89d399a70eacd30cb92ee9d4a56d06acbea25e693d0876",
+    "source_g4c_readout_sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa"
+  },
+  "schema": "yeto_outer_mup_v7_gate_feasibility_simulation_v1",
+  "sensitivity": [
+    {
+      "P_bands": 1.0,
+      "P_eval": 1.0,
+      "P_monotone_ci": 1.0,
+      "P_pass": 1.0,
+      "P_point_accepted": 1.0,
+      "counts": {
+        "evaluable": 2000,
+        "passed": 2000
+      },
+      "noise_scale": 0.5,
+      "rng_seed": 20261227,
+      "simulations": 2000,
+      "valid_bootstrap_replicates": {
+        "max": 10000,
+        "median": 10000.0,
+        "min": 10000,
+        "p05": 10000
+      },
+      "variant": "FULL_48"
+    },
+    {
+      "P_bands": 1.0,
+      "P_eval": 1.0,
+      "P_monotone_ci": 1.0,
+      "P_pass": 1.0,
+      "P_point_accepted": 1.0,
+      "counts": {
+        "evaluable": 2000,
+        "passed": 2000
+      },
+      "noise_scale": 0.5,
+      "rng_seed": 20261227,
+      "simulations": 2000,
+      "valid_bootstrap_replicates": {
+        "max": 10000,
+        "median": 10000.0,
+        "min": 10000,
+        "p05": 10000
+      },
+      "variant": "REDUCED_T20_MU0_45"
+    },
+    {
+      "P_bands": 1.0,
+      "P_eval": 1.0,
+      "P_monotone_ci": 1.0,
+      "P_pass": 1.0,
+      "P_point_accepted": 1.0,
+      "counts": {
+        "evaluable": 2000,
+        "passed": 2000
+      },
+      "noise_scale": 1.5,
+      "rng_seed": 20262227,
+      "simulations": 2000,
+      "valid_bootstrap_replicates": {
+        "max": 10000,
+        "median": 10000.0,
+        "min": 10000,
+        "p05": 10000
+      },
+      "variant": "FULL_48"
+    },
+    {
+      "P_bands": 1.0,
+      "P_eval": 1.0,
+      "P_monotone_ci": 1.0,
+      "P_pass": 1.0,
+      "P_point_accepted": 1.0,
+      "counts": {
+        "evaluable": 2000,
+        "passed": 2000
+      },
+      "noise_scale": 1.5,
+      "rng_seed": 20262227,
+      "simulations": 2000,
+      "valid_bootstrap_replicates": {
+        "max": 10000,
+        "median": 10000.0,
+        "min": 10000,
+        "p05": 10000
+      },
+      "variant": "REDUCED_T20_MU0_45"
+    }
+  ],
+  "simulation_seed": 20260727,
+  "target_offsets_log2_eta": {
+    "FULL_48": {
+      "S10240_mu0.0": [
+        -1.5,
+        -0.5,
+        0.5,
+        1.5
+      ],
+      "S10240_mu0.9": [
+        -1.5,
+        -0.5,
+        0.5,
+        1.5
+      ],
+      "S2560_mu0.0": [
+        -1.5,
+        -0.5,
+        0.5,
+        1.5
+      ],
+      "S2560_mu0.9": [
+        -1.5,
+        -0.5,
+        0.5,
+        1.5
+      ]
+    },
+    "REDUCED_T20_MU0_45": {
+      "S10240_mu0.0": [
+        -1.5,
+        0.0,
+        1.5
+      ],
+      "S10240_mu0.9": [
+        -1.5,
+        -0.5,
+        0.5,
+        1.5
+      ],
+      "S2560_mu0.0": [
+        -1.5,
+        -0.5,
+        0.5,
+        1.5
+      ],
+      "S2560_mu0.9": [
+        -1.5,
+        -0.5,
+        0.5,
+        1.5
+      ]
+    }
+  },
+  "true_science_model": {
+    "D20": 1.2806943474449415,
+    "D5": 1.7416157949788522,
+    "curve_curvatures": {
+      "S10240_mu0.0": 0.09717574463064645,
+      "S10240_mu0.9": 0.11791007978103771,
+      "S2560_mu0.0": 0.16836542612980937,
+      "S2560_mu0.9": 0.06465617060348786
+    },
+    "mean_curve": "loss=1.7+a*(log2(eta)-log2(eta_star))^2"
+  }
+}
