@@ -1,0 +1,182 @@
+{
+  "analysis_model": {
+    "acceptance": "positive curvature and unconstrained vertex within 0.5 log2 bits outside the registered endpoint range",
+    "bootstrap": "10,000 shared paired seed resamples; refit all rung medians and six quadratics; require at least 7,000 all-six accepted refits",
+    "curve_fit": "OLS quadratic in log2(eta) through the six rung medians",
+    "rung_estimator": "median endpoint NLL across all 17 registered seeds; no finite scientific-divergence value is dropped"
+  },
+  "pre_outcome": true,
+  "registered_grids": {
+    "T20_mu0": {
+      "center": 0.2480668464259681,
+      "etas": [
+        0.04385243732384098,
+        0.08770487464768197,
+        0.17540974929536393,
+        0.35081949859072786,
+        0.7016389971814557,
+        1.4032779943629115
+      ],
+      "offsets_log2": [
+        -2.5,
+        -1.5,
+        -0.5,
+        0.5,
+        1.5,
+        2.5
+      ]
+    },
+    "T20_mu09": {
+      "center": 0.0004249680901238146,
+      "etas": [
+        7.51244545786113e-05,
+        0.0001502489091572226,
+        0.0003004978183144452,
+        0.0006009956366288904,
+        0.001201991273257781,
+        0.002403982546515562
+      ],
+      "offsets_log2": [
+        -2.5,
+        -1.5,
+        -0.5,
+        0.5,
+        1.5,
+        2.5
+      ]
+    },
+    "T2_mu0": {
+      "center": 0.007959003015874582,
+      "etas": [
+        0.0014069662510022751,
+        0.0028139325020045502,
+        0.0056278650040091005,
+        0.011255730008018201,
+        0.022511460016036402,
+        0.045022920032072804
+      ],
+      "offsets_log2": [
+        -2.5,
+        -1.5,
+        -0.5,
+        0.5,
+        1.5,
+        2.5
+      ]
+    },
+    "T2_mu09": {
+      "center": 0.0034223165582977205,
+      "etas": [
+        0.0006049858114348312,
+        0.0012099716228696623,
+        0.0024199432457393246,
+        0.004839886491478649,
+        0.009679772982957299,
+        0.019359545965914597
+      ],
+      "offsets_log2": [
+        -2.5,
+        -1.5,
+        -0.5,
+        0.5,
+        1.5,
+        2.5
+      ]
+    },
+    "T5_mu0": {
+      "center": 0.0038377496772455835,
+      "etas": [
+        0.0006784247053192091,
+        0.0013568494106384183,
+        0.0027136988212768365,
+        0.005427397642553673,
+        0.010854795285107346,
+        0.021709590570214692
+      ],
+      "offsets_log2": [
+        -2.5,
+        -1.5,
+        -0.5,
+        0.5,
+        1.5,
+        2.5
+      ]
+    },
+    "T5_mu09": {
+      "center": 0.0010529756052147737,
+      "etas": [
+        0.0001861415477178439,
+        0.0003722830954356878,
+        0.0007445661908713756,
+        0.0014891323817427511,
+        0.0029782647634855022,
+        0.0059565295269710045
+      ],
+      "offsets_log2": [
+        -2.5,
+        -1.5,
+        -0.5,
+        0.5,
+        1.5,
+        2.5
+      ]
+    }
+  },
+  "schema": "yeto_outer_mup_v16_pythia_redesign_gatesim_v1",
+  "scope": "bracketing, robust-estimator evaluability, and power under a declared monotone D alternative; not evidence that the Pythia family follows that law",
+  "simulation": {
+    "P_evaluable": 0.8247,
+    "P_monotone_pass_given_evaluable": 1.0,
+    "P_monotone_pass_unconditional": 0.8247,
+    "clears_evaluability_bar": true,
+    "fresh_seed_count": 17,
+    "fresh_seeds": [
+      1601,
+      1607,
+      1609,
+      1613,
+      1619,
+      1621,
+      1627,
+      1637,
+      1657,
+      1663,
+      1667,
+      1669,
+      1693,
+      1697,
+      1699,
+      1709,
+      1721
+    ],
+    "mandatory_P_evaluable": 0.8,
+    "per_curve_P_accepted": {
+      "T20_mu0": 0.9225,
+      "T20_mu09": 1.0,
+      "T2_mu0": 1.0,
+      "T2_mu09": 1.0,
+      "T5_mu0": 1.0,
+      "T5_mu09": 1.0
+    },
+    "replicates": 20000,
+    "rng_seed": 20260816,
+    "valid_bootstrap_refits": {
+      "median": 8959.0,
+      "minimum": 81,
+      "minimum_required": 7000,
+      "p05": 4027.0
+    }
+  },
+  "source": {
+    "observed_accepted_curves": 3,
+    "observed_complete_cells": 72,
+    "observed_one_sided_divergence_spikes_nll": {
+      "T20_mu0": 129.75700971048354,
+      "T20_mu09": 39.37726015831847
+    },
+    "observed_valid_shared_bootstrap_refits": 0,
+    "robust_core_sd_rule": "1.4826 times each curve's observed v13b 75th percentile absolute residual about its rung median",
+    "v13b_readout_sha256": "868d8aaa3c422bdb4475302d2071ca0082108e813aab70c5f9061ef90f156f48"
+  },
+  "status": "PASS"
+}
