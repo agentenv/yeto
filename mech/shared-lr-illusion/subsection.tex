@@ -1,0 +1,14 @@
+\subsection{Shared learning rates do not identify a momentum benefit}
+\label{sec:shared-lr-illusion}
+
+Because optimizer age changes the map from the nominal outer learning rate to the accumulated update, comparing momentum and no momentum at one nominal rate can answer a different question from comparing their independently tuned optima. We therefore performed a post-hoc descriptive audit of every sealed standard-Nesterov $\mu=.9$ grid with a complete $\mu=0$ partner. For each campaign cell we refit the registered quadratic $L=a(\log_2\eta)^2+b\log_2\eta+c$ under the campaign's frozen paired-seed bootstrap (10,000 refits) and defined gain as $L_{\mu=0}-L_{\mu=.9}$, so positive values favor momentum.
+
+For accepted convex fits, however, this particular a1 construction is one-sided:
+\[
+G_b-G_{\mathrm{a1}}=L_{.9}(\eta_0^\star)-L_{.9}(\eta_{.9}^\star)=a_{.9}\!\left(\log_2\eta_0^\star-\log_2\eta_{.9}^\star\right)^2\ge 0.
+\]
+Consequently, a HELP-to-NULL/HURT point-estimate reversal is impossible under a1; only an interval-label reversal can occur because the bootstrap refits change uncertainty.
+
+At the no-momentum fitted optimum, the shared-rate comparison labeled momentum HELP in 0 of 28 bootstrap-evaluable shared-rate cells. Among the 26 cells with accepted optima for both arms, 0 changed from HELP to NULL or HURT after independent retuning, while 0 retained a HELP interval. This apparent precision must not be overread: only 0 a1 evaluations lie inside the momentum ladder and 28 require quadratic extrapolation. Moreover, none of the exact $\mu=0/.9$ ladder pairs contains the community-default $\eta\simeq0.7$, leaving 0 supported default-rate comparisons. After honest per-arm retuning the cells are HELP/NULL/HURT in 1/5/20 cases, respectively (Table~\ref{tab:shared-lr-illusion}).
+
+This audit was conceived after the outcomes were available and is not a preregistered test of the age mechanism. The grids contain only four to six rates and two to five seeds; intervals are pointwise; repeated campaign coordinates are not independent; and the v8 phase-diagram bank cannot be substituted because it sampled $\mu\in\{.8,.95\}$ rather than $.9$. We therefore treat the table as a transparent measurement of what these sealed curves can and cannot say, not as a causal estimate of momentum's effect or as evidence at the DiLoCo default.

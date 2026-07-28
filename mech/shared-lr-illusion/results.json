@@ -1,0 +1,3639 @@
+{
+  "analysis_status": "POST_HOC_DESCRIPTIVE_ONLY",
+  "estimand": {
+    "a1": "both quadratics at fitted mu0 optimum",
+    "a2": "both quadratics at eta=.7, only if both observed grids contain .7",
+    "b": "each quadratic at its own accepted fitted optimum",
+    "bootstrap_evaluability": {
+      "a1": "accepted mu0 optimum; momentum curve need not have an accepted optimum",
+      "a2": "eta=.7 in both observed grid ranges; no fitted optimum required",
+      "b": "accepted optima for both arms",
+      "flip": "both the selected shared metric and b must be evaluable"
+    },
+    "flip": "shared label HELP and tuned label NULL or HURT",
+    "gain": "eval_loss(mu=0) - eval_loss(raw Nesterov mu=.9)",
+    "positive_direction": "momentum helps"
+  },
+  "frozen_point_fit_validation": {
+    "checked_curve_fits": 60,
+    "checks": [
+      {
+        "S": 1024,
+        "T": 2,
+        "campaign": "135M pilot S-scan",
+        "eta_star_absolute_error": 3.2264885208022065e-12,
+        "frozen_source": "master_eta.csv",
+        "max_coefficient_absolute_error": 0.0,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.0
+      },
+      {
+        "S": 1024,
+        "T": 2,
+        "campaign": "135M pilot S-scan",
+        "eta_star_absolute_error": 2.504232932132311e-12,
+        "frozen_source": "master_eta.csv",
+        "max_coefficient_absolute_error": 0.0,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 5120,
+        "T": 10,
+        "campaign": "135M pilot S-scan",
+        "eta_star_absolute_error": 9.467704398247179e-13,
+        "frozen_source": "master_eta.csv",
+        "max_coefficient_absolute_error": 0.0,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.0
+      },
+      {
+        "S": 5120,
+        "T": 10,
+        "campaign": "135M pilot S-scan",
+        "eta_star_absolute_error": 2.6771987404750064e-13,
+        "frozen_source": "master_eta.csv",
+        "max_coefficient_absolute_error": 0.0,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 10240,
+        "T": 20,
+        "campaign": "135M pilot S-scan",
+        "eta_star_absolute_error": 3.927976000017708e-12,
+        "frozen_source": "master_eta.csv",
+        "max_coefficient_absolute_error": 0.0,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.0
+      },
+      {
+        "S": 10240,
+        "T": 20,
+        "campaign": "135M pilot S-scan",
+        "eta_star_absolute_error": 5.5575552840303466e-14,
+        "frozen_source": "master_eta.csv",
+        "max_coefficient_absolute_error": 0.0,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 160,
+        "campaign": "135M v1",
+        "eta_star_absolute_error": 3.5752650839881994e-14,
+        "frozen_source": "H16_mu0",
+        "max_coefficient_absolute_error": 6.955325204671681e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 160,
+        "campaign": "135M v1",
+        "eta_star_absolute_error": 4.3489517542738554e-14,
+        "frozen_source": "H16_mu0.9",
+        "max_coefficient_absolute_error": 9.862866079402011e-11,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 40,
+        "campaign": "135M v1",
+        "eta_star_absolute_error": 4.12274381300648e-14,
+        "frozen_source": "H64_mu0",
+        "max_coefficient_absolute_error": 6.724398815549648e-12,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 40,
+        "campaign": "135M v1",
+        "eta_star_absolute_error": 0.0,
+        "frozen_source": "H64_mu0.9",
+        "max_coefficient_absolute_error": 2.7459368112658922e-11,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 10,
+        "campaign": "135M v1",
+        "eta_star_absolute_error": 1.825969930813187e-14,
+        "frozen_source": "H256_mu0",
+        "max_coefficient_absolute_error": 8.126832540256146e-13,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 10,
+        "campaign": "135M v1",
+        "eta_star_absolute_error": 0.0,
+        "frozen_source": "H256_mu0.9",
+        "max_coefficient_absolute_error": 5.3940851785228006e-11,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 5,
+        "campaign": "135M v1",
+        "eta_star_absolute_error": 4.5102810375396984e-15,
+        "frozen_source": "H512_mu0",
+        "max_coefficient_absolute_error": 2.0667911826421914e-12,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 5,
+        "campaign": "135M v1",
+        "eta_star_absolute_error": 1.119243586700236e-14,
+        "frozen_source": "H512_mu0.9",
+        "max_coefficient_absolute_error": 7.290434922424538e-11,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 160,
+        "campaign": "135M v2",
+        "eta_star_absolute_error": 4.21399026784286e-14,
+        "frozen_source": "H16_mu0",
+        "max_coefficient_absolute_error": 9.054978988842777e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 160,
+        "campaign": "135M v2",
+        "eta_star_absolute_error": 3.496161693483657e-14,
+        "frozen_source": "H16_mu0.9",
+        "max_coefficient_absolute_error": 8.023359754361081e-11,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 40,
+        "campaign": "135M v2",
+        "eta_star_absolute_error": 1.14810938534049e-13,
+        "frozen_source": "H64_mu0",
+        "max_coefficient_absolute_error": 8.1503692683782e-12,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 40,
+        "campaign": "135M v2",
+        "eta_star_absolute_error": 5.676015213396113e-15,
+        "frozen_source": "H64_mu0.9",
+        "max_coefficient_absolute_error": 1.2535750215647568e-11,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 10,
+        "campaign": "135M v2",
+        "eta_star_absolute_error": 6.314393452555578e-15,
+        "frozen_source": "H256_mu0",
+        "max_coefficient_absolute_error": 1.4526158054195548e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 10,
+        "campaign": "135M v2",
+        "eta_star_absolute_error": 0.0,
+        "frozen_source": "H256_mu0.9",
+        "max_coefficient_absolute_error": 4.850297941061399e-11,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 5,
+        "campaign": "135M v2",
+        "eta_star_absolute_error": 4.746203430272544e-15,
+        "frozen_source": "H512_mu0",
+        "max_coefficient_absolute_error": 2.944311461305915e-12,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 5,
+        "campaign": "135M v2",
+        "eta_star_absolute_error": 1.4242079737769586e-15,
+        "frozen_source": "H512_mu0.9",
+        "max_coefficient_absolute_error": 6.399059060413492e-11,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 1024,
+        "T": 2,
+        "campaign": "135M v3 T-scan",
+        "eta_star_absolute_error": 1.2628786905111156e-15,
+        "frozen_source": "T_S1024_mu0",
+        "max_coefficient_absolute_error": 2.347899652477281e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 1024,
+        "T": 2,
+        "campaign": "135M v3 T-scan",
+        "eta_star_absolute_error": 3.400058012914542e-16,
+        "frozen_source": "T_S1024_mu0.9",
+        "max_coefficient_absolute_error": 3.4434677331773855e-12,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 5,
+        "campaign": "135M v3 T-scan",
+        "eta_star_absolute_error": 7.743805596760467e-15,
+        "frozen_source": "T_S2560_mu0",
+        "max_coefficient_absolute_error": 8.737899293009832e-12,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 5,
+        "campaign": "135M v3 T-scan",
+        "eta_star_absolute_error": 1.4890866317784912e-14,
+        "frozen_source": "T_S2560_mu0.9",
+        "max_coefficient_absolute_error": 6.033973320995756e-11,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 5120,
+        "T": 10,
+        "campaign": "135M v3 T-scan",
+        "eta_star_absolute_error": 4.364564265557647e-15,
+        "frozen_source": "T_S5120_mu0",
+        "max_coefficient_absolute_error": 1.4921397450962104e-12,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.0
+      },
+      {
+        "S": 5120,
+        "T": 10,
+        "campaign": "135M v3 T-scan",
+        "eta_star_absolute_error": 4.510281037539698e-16,
+        "frozen_source": "T_S5120_mu0.9",
+        "max_coefficient_absolute_error": 3.8269831748038996e-11,
+        "max_seed_mean_loss_absolute_error": 8.881784197001252e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 10240,
+        "T": 20,
+        "campaign": "135M v3 T-scan",
+        "eta_star_absolute_error": 5.349540255217278e-14,
+        "frozen_source": "T_S10240_mu0",
+        "max_coefficient_absolute_error": 8.641087845262518e-12,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.0
+      },
+      {
+        "S": 10240,
+        "T": 20,
+        "campaign": "135M v3 T-scan",
+        "eta_star_absolute_error": 5.724153789854469e-15,
+        "frozen_source": "T_S10240_mu0.9",
+        "max_coefficient_absolute_error": 9.78772618509538e-12,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 20480,
+        "T": 40,
+        "campaign": "135M v3 T-scan",
+        "eta_star_absolute_error": 0.0,
+        "frozen_source": "T_S20480_mu0",
+        "max_coefficient_absolute_error": 6.80877576542116e-12,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.0
+      },
+      {
+        "S": 20480,
+        "T": 40,
+        "campaign": "135M v3 T-scan",
+        "eta_star_absolute_error": 2.972231835651762e-14,
+        "frozen_source": "T_S20480_mu0.9",
+        "max_coefficient_absolute_error": 1.3929746245366914e-11,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 2,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 3.3306690738754696e-16,
+        "frozen_source": "G6/mu0",
+        "max_coefficient_absolute_error": 1.9984014443252818e-13,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 2,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 7.105427357601002e-15,
+        "frozen_source": "G6/raw",
+        "max_coefficient_absolute_error": 2.9687363678476686e-12,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 5120,
+        "T": 2,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 3.733124920302089e-15,
+        "frozen_source": "G6/mu0",
+        "max_coefficient_absolute_error": 1.687983086640088e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 5120,
+        "T": 2,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 8.867906409193438e-15,
+        "frozen_source": "G6/raw",
+        "max_coefficient_absolute_error": 3.0535574069290305e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 10240,
+        "T": 2,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 1.0033640585049852e-14,
+        "frozen_source": "G6/mu0",
+        "max_coefficient_absolute_error": 4.2543746303636e-13,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 10240,
+        "T": 2,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 7.494005416219807e-15,
+        "frozen_source": "G6/raw",
+        "max_coefficient_absolute_error": 1.0542677841840487e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 5,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 2.1510571102112408e-16,
+        "frozen_source": "G6/mu0",
+        "max_coefficient_absolute_error": 1.141309269314661e-13,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 5,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 3.516284485804988e-15,
+        "frozen_source": "G6/raw",
+        "max_coefficient_absolute_error": 4.852562796031634e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 5120,
+        "T": 5,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 4.961309141293668e-15,
+        "frozen_source": "G6/mu0",
+        "max_coefficient_absolute_error": 1.7355006320940447e-12,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.0
+      },
+      {
+        "S": 5120,
+        "T": 5,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 3.5388358909926865e-15,
+        "frozen_source": "G6/raw",
+        "max_coefficient_absolute_error": 4.006128762057415e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 10240,
+        "T": 5,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 2.5396351688300456e-15,
+        "frozen_source": "G6/mu0",
+        "max_coefficient_absolute_error": 6.590283874174929e-13,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 10240,
+        "T": 5,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 1.4611575838152646e-14,
+        "frozen_source": "G6/raw",
+        "max_coefficient_absolute_error": 1.1544987188472078e-11,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 10,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 8.656270145124267e-15,
+        "frozen_source": "G6/mu0",
+        "max_coefficient_absolute_error": 2.263522702605769e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 10,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 5.100954381109801e-15,
+        "frozen_source": "G6/raw",
+        "max_coefficient_absolute_error": 5.67395019857031e-11,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 5120,
+        "T": 10,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 6.0021432268797525e-15,
+        "frozen_source": "G6/mu0",
+        "max_coefficient_absolute_error": 3.1898927943529998e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 5120,
+        "T": 10,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 1.7052331768852014e-15,
+        "frozen_source": "G6/raw",
+        "max_coefficient_absolute_error": 5.132783087447024e-11,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 10240,
+        "T": 10,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 2.3744894939170536e-14,
+        "frozen_source": "G6/mu0",
+        "max_coefficient_absolute_error": 4.688249788387111e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 10240,
+        "T": 10,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 8.985000243821872e-15,
+        "frozen_source": "G6/raw",
+        "max_coefficient_absolute_error": 5.325073715312101e-11,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 20,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 1.0796918914479647e-14,
+        "frozen_source": "G6/mu0",
+        "max_coefficient_absolute_error": 3.796074565798335e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 20,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 2.8189256484623115e-17,
+        "frozen_source": "G6/raw",
+        "max_coefficient_absolute_error": 5.666578317686799e-13,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 5120,
+        "T": 20,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 1.2420620087993939e-15,
+        "frozen_source": "G6/mu0",
+        "max_coefficient_absolute_error": 2.0898838215543947e-12,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 5120,
+        "T": 20,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 3.314622881722684e-15,
+        "frozen_source": "G6/raw",
+        "max_coefficient_absolute_error": 4.384403951007698e-11,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.9
+      },
+      {
+        "S": 10240,
+        "T": 20,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 7.504413757075667e-15,
+        "frozen_source": "G6/mu0",
+        "max_coefficient_absolute_error": 6.203926261605375e-13,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 10240,
+        "T": 20,
+        "campaign": "135M v6 factorial",
+        "eta_star_absolute_error": 2.0816681711721685e-17,
+        "frozen_source": "G6/raw",
+        "max_coefficient_absolute_error": 7.815081914941402e-12,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 2560,
+        "T": 5,
+        "campaign": "1.7B v4-family combined",
+        "eta_star_absolute_error": 4.4891174111327814e-14,
+        "frozen_source": "G4C",
+        "max_coefficient_absolute_error": 2.098410334383516e-11,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 2560,
+        "T": 5,
+        "campaign": "1.7B v4-family combined",
+        "eta_star_absolute_error": 8.496241904465407e-15,
+        "frozen_source": "G4C",
+        "max_coefficient_absolute_error": 3.04778424720098e-11,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      },
+      {
+        "S": 10240,
+        "T": 20,
+        "campaign": "1.7B v4-family combined",
+        "eta_star_absolute_error": 2.0713465664901065e-14,
+        "frozen_source": "G4C",
+        "max_coefficient_absolute_error": 2.234834539649455e-11,
+        "max_seed_mean_loss_absolute_error": 4.440892098500626e-16,
+        "mu": 0.0
+      },
+      {
+        "S": 10240,
+        "T": 20,
+        "campaign": "1.7B v4-family combined",
+        "eta_star_absolute_error": 1.2716824121516979e-14,
+        "frozen_source": "G4C",
+        "max_coefficient_absolute_error": 3.6549074877711973e-10,
+        "max_seed_mean_loss_absolute_error": 0.0,
+        "mu": 0.9
+      }
+    ],
+    "maximum_eta_star_absolute_error": 3.927976000017708e-12,
+    "maximum_quadratic_coefficient_absolute_error": 3.6549074877711973e-10,
+    "maximum_seed_mean_loss_absolute_error": 8.881784197001252e-16,
+    "status": "PASS"
+  },
+  "gate_changes": 0,
+  "new_training_runs": 0,
+  "provenance": {
+    "1.7B canonical G4C": {
+      "path": "/private/tmp/diloco-artifact-fetch.fPWC6x/readouts/g4c-readout.json",
+      "sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa"
+    },
+    "135M canonical G6": {
+      "path": "/private/tmp/g6-readout-tonight85.json",
+      "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+    },
+    "135M canonical G8": {
+      "path": "/private/tmp/h200-mechA-data/v8/g8-readout.json",
+      "sha256": "9884f0775b30a35964e7df878bd0569b62f24af23619d90b4ff346d1afae596c"
+    },
+    "135M frozen G3 readout": {
+      "path": "/private/tmp/diloco-artifact-fetch.fPWC6x/readouts/g3-readout.json",
+      "sha256": "d4a3cde6aa47580dff255c7a66030ab997a95f4072b1883bf71aa54d7da744c8"
+    },
+    "two-parameter pilot cells": {
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/data/pilot_cells_eval_loss.csv",
+      "sha256": "26b5e4860fa7aaafe83b70bb1155331985a77a68d7105348560253817bd28bca"
+    },
+    "two-parameter pilot raw hash list": {
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/data/raw-pilot-sha256.txt",
+      "sha256": "32f5b06698dbf05c9154f98d60e9965d67a4e3d8acc9bba49611df08ca618dd4",
+      "verified_file_hashes": 144
+    },
+    "two-parameter v1 readout": {
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/data/g1-readout.json",
+      "sha256": "c2dcd6b9ab7dce0dc28d1e2473a72c7e0bdb8d6221728f09503a6354a39cae2b"
+    },
+    "two-parameter v2 readout": {
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/data/g1v2-readout.json",
+      "sha256": "5d4eed9685f25fd1db3135319908a045a389300a008a67bc009cd178cabe2fc8"
+    },
+    "two-parameter v3 cells": {
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/data/v3_cells_eval_loss.csv",
+      "sha256": "29970559ff513ec19a9d5d0ab9f802bb6fba1898984877854c9b3485b89e320c"
+    },
+    "two-parameter v3 manifest": {
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/data/v3-launch-manifest.json",
+      "sha256": "8fae6137d673d4c57861b37de09a42c5c462b0dff692cf10bde49e73caa554fc",
+      "verified_cells": 460
+    },
+    "two-parameter v3 raw hash list": {
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/data/raw-v3-sha256.txt",
+      "sha256": "ed1433898b61824b485e043a751d7b998c2cadbd875a9509725e6d1685f4fbb5",
+      "verified_file_hashes": 1413
+    }
+  },
+  "raw_snapshot_validation": {
+    "pilot_csv_rows_matched_to_raw": 72,
+    "pilot_hash_list": {
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/data/raw-pilot-sha256.txt",
+      "sha256": "32f5b06698dbf05c9154f98d60e9965d67a4e3d8acc9bba49611df08ca618dd4",
+      "verified_file_hashes": 144
+    },
+    "recorded_raw_hashes_verified": 1557,
+    "status": "PASS",
+    "v3_csv_rows_matched_to_manifest_evidence_and_raw": 460,
+    "v3_hash_list": {
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/data/raw-v3-sha256.txt",
+      "sha256": "ed1433898b61824b485e043a751d7b998c2cadbd875a9509725e6d1685f4fbb5",
+      "verified_file_hashes": 1413
+    },
+    "v3_manifest": {
+      "path": "/private/tmp/number-audit.HmdmkU/two-param-analysis/data/v3-launch-manifest.json",
+      "sha256": "8fae6137d673d4c57861b37de09a42c5c462b0dff692cf10bde49e73caa554fc",
+      "verified_cells": 460
+    }
+  },
+  "records": [
+    {
+      "H": 512,
+      "S": 1024,
+      "T": 2,
+      "bootstrap": {
+        "draw_stream_position": "second matrix after the five-seed v3 matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "NumPy Generator PCG64",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M pilot S-scan",
+      "campaign_order": 10,
+      "fit_policy": "pilot_convex_extrapolation",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.02634093759731027,
+        0.03725171119573955,
+        0.05268187519462054,
+        0.0745034223914791
+      ],
+      "mu0_seed_count": 2,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.013863235457464396,
+        0.019605575602317727,
+        0.027726470914928792,
+        0.039211151204635454
+      ],
+      "mu9_seed_count": 2,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": 0.007876482631276716,
+          "low": -0.006679773015630719
+        },
+        "eta_mu0": 0.07889721711644405,
+        "eta_mu9": 0.03244820149733054,
+        "gain": 0.0035300934161632824,
+        "invalid_bootstrap_replicates": 0,
+        "label": "NULL",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "EXTRAPOLATED",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": false,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.026862950837298172,
+          "low": -0.0645314543637947
+        },
+        "eta": 0.07889721711644405,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.03722592433405314,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 2.012111725684733,
+          "distance_bits": 1.0087104152906394,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "sealed pilot_cells_eval_loss.csv",
+        "sha256": "26b5e4860fa7aaafe83b70bb1155331985a77a68d7105348560253817bd28bca"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.04075601775021642
+    },
+    {
+      "H": 512,
+      "S": 5120,
+      "T": 10,
+      "bootstrap": {
+        "draw_stream_position": "second matrix after the five-seed v3 matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "NumPy Generator PCG64",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M pilot S-scan",
+      "campaign_order": 11,
+      "fit_policy": "pilot_convex_extrapolation",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.02634093759731027,
+        0.03725171119573955,
+        0.05268187519462054,
+        0.0745034223914791
+      ],
+      "mu0_seed_count": 2,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.004043333921187126,
+        0.0057181376685460205,
+        0.008086667842374252,
+        0.011436275337092041
+      ],
+      "mu9_seed_count": 2,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.010331564039064212,
+          "low": -0.01274474976596407
+        },
+        "eta_mu0": 0.030915581779468425,
+        "eta_mu9": 0.005208472183693894,
+        "gain": -0.011486783533404044,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.3542275457543651,
+          "low": -0.40742915438703653
+        },
+        "eta": 0.030915581779468425,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.3805005440770888,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 2.7032911387851812,
+          "distance_bits": 1.4347168954696856,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "sealed pilot_cells_eval_loss.csv",
+        "sha256": "26b5e4860fa7aaafe83b70bb1155331985a77a68d7105348560253817bd28bca"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.36901376054368473
+    },
+    {
+      "H": 512,
+      "S": 10240,
+      "T": 20,
+      "bootstrap": {
+        "draw_stream_position": "second matrix after the five-seed v3 matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "NumPy Generator PCG64",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M pilot S-scan",
+      "campaign_order": 12,
+      "fit_policy": "pilot_convex_extrapolation",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.02634093759731027,
+        0.03725171119573955,
+        0.05268187519462054,
+        0.0745034223914791
+      ],
+      "mu0_seed_count": 2,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.00300023279233364,
+        0.004242969905194735,
+        0.00600046558466728,
+        0.00848593981038947
+      ],
+      "mu9_seed_count": 2,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": 0.007821517135672806,
+          "low": -0.0027804663509045646
+        },
+        "eta_mu0": 0.024191279999538753,
+        "eta_mu9": 0.0011991657300677882,
+        "gain": 0.0016870476445087768,
+        "invalid_bootstrap_replicates": 0,
+        "label": "NULL",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "EXTRAPOLATED",
+        "mu9": "EXTRAPOLATED"
+      },
+      "point_fit_strict_interior": {
+        "mu0": false,
+        "mu9": false
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.22459627982520747,
+          "low": -0.23064744377289204
+        },
+        "eta": 0.024191279999538753,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.2280742382016725,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 2.850748478079115,
+          "distance_bits": 1.5113407557137912,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "sealed pilot_cells_eval_loss.csv",
+        "sha256": "26b5e4860fa7aaafe83b70bb1155331985a77a68d7105348560253817bd28bca"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.22976128584618127
+    },
+    {
+      "H": 16,
+      "S": 2560,
+      "T": 160,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M v1",
+      "campaign_order": 20,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.01300695282034226,
+        0.018394609083675004,
+        0.02601390564068452,
+        0.03678921816735001
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.0016258691025427825,
+        0.0022993261354593755,
+        0.003251738205085565,
+        0.004598652270918751
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.001553439145800084,
+          "low": -0.0017694294625525409
+        },
+        "eta_mu0": 0.023248991460215012,
+        "eta_mu9": 0.002386693274672115,
+        "gain": -0.0016577212846948797,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.10426620362965489,
+          "low": -0.10868575197911223
+        },
+        "eta": 0.023248991460215012,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.10645537761833168,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 5.055609794034321,
+          "distance_bits": 2.337885116613117,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "sealed g1-readout.json",
+        "sha256": "c2dcd6b9ab7dce0dc28d1e2473a72c7e0bdb8d6221728f09503a6354a39cae2b"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.1047976563336368
+    },
+    {
+      "H": 64,
+      "S": 2560,
+      "T": 40,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M v1",
+      "campaign_order": 21,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": null,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.01300695282034226,
+        0.018394609083675004,
+        0.02601390564068452,
+        0.03678921816735001
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.0016258691025427825,
+        0.0022993261354593755,
+        0.003251738205085565,
+        0.004598652270918751
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": null,
+        "eta_mu0": 0.018741287437382816,
+        "eta_mu9": null,
+        "gain": null,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 0
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "UNBRACKETED_LOW"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": false
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.08688724757889199,
+          "low": -0.10817959355604545
+        },
+        "eta": 0.018741287437382816,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.0967251584056692,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 4.075386946714836,
+          "distance_bits": 2.0269370457495515,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "sealed g1-readout.json",
+        "sha256": "c2dcd6b9ab7dce0dc28d1e2473a72c7e0bdb8d6221728f09503a6354a39cae2b"
+      },
+      "tuned_minus_a1_gain_dominance_gap": null
+    },
+    {
+      "H": 256,
+      "S": 2560,
+      "T": 10,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M v1",
+      "campaign_order": 22,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": null,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.02601390564068452,
+        0.03678921816735001,
+        0.05202781128136904,
+        0.07357843633470001
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.00650347641017113,
+        0.009197304541837502,
+        0.01300695282034226,
+        0.018394609083675004
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.023293662288832895,
+          "low": -0.03549306611895986
+        },
+        "eta_mu0": 0.027033408102831738,
+        "eta_mu9": null,
+        "gain": null,
+        "invalid_bootstrap_replicates": 9099,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 901
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "UNBRACKETED_LOW"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": false
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.2641819960420584,
+          "low": -0.34150264308444545
+        },
+        "eta": 0.027033408102831738,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.27669514315662447,
+        "invalid_bootstrap_replicates": 3639,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 1.4696375432530158,
+          "distance_bits": 0.5554603870144796,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 6361
+      },
+      "source": {
+        "label": "sealed g1-readout.json",
+        "sha256": "c2dcd6b9ab7dce0dc28d1e2473a72c7e0bdb8d6221728f09503a6354a39cae2b"
+      },
+      "tuned_minus_a1_gain_dominance_gap": null
+    },
+    {
+      "H": 512,
+      "S": 2560,
+      "T": 5,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M v1",
+      "campaign_order": 23,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.02601390564068452,
+        0.03678921816735001,
+        0.05202781128136904,
+        0.07357843633470001
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.00650347641017113,
+        0.009197304541837502,
+        0.01300695282034226,
+        0.018394609083675004
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.0029306072521517734,
+          "low": -0.005914833819962606
+        },
+        "eta_mu0": 0.04440765882962794,
+        "eta_mu9": 0.011153409369293174,
+        "gain": -0.0044745802579551075,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.1656823952337767,
+          "low": -0.22518351795792135
+        },
+        "eta": 0.04440765882962794,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.18738619024503267,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 2.4141670327226037,
+          "distance_bits": 1.271525497527872,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "sealed g1-readout.json",
+        "sha256": "c2dcd6b9ab7dce0dc28d1e2473a72c7e0bdb8d6221728f09503a6354a39cae2b"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.18291160998707756
+    },
+    {
+      "H": 16,
+      "S": 2560,
+      "T": 160,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M v2",
+      "campaign_order": 30,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.01300695282034226,
+        0.018394609083675004,
+        0.02601390564068452,
+        0.03678921816735001
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.0016258691025427825,
+        0.0022993261354593755,
+        0.003251738205085565,
+        0.004598652270918751
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.0011386811180638112,
+          "low": -0.0015135653085773804
+        },
+        "eta_mu0": 0.02306165614327405,
+        "eta_mu9": 0.0023900979060092107,
+        "gain": -0.001313919569218669,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.1053078446407194,
+          "low": -0.11048944242604408
+        },
+        "eta": 0.02306165614327405,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.10828630011682172,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 5.014872789819925,
+          "distance_bits": 2.3262131050600616,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "sealed g1v2-readout.json",
+        "sha256": "5d4eed9685f25fd1db3135319908a045a389300a008a67bc009cd178cabe2fc8"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.10697238054760305
+    },
+    {
+      "H": 64,
+      "S": 2560,
+      "T": 40,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M v2",
+      "campaign_order": 31,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.01300695282034226,
+        0.018394609083675004,
+        0.02601390564068452,
+        0.03678921816735001
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.0008129346,
+        0.0016258691,
+        0.0032517382,
+        0.0065034764
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.015412268676430863,
+          "low": -0.016883494394065224
+        },
+        "eta_mu0": 0.01963529535996896,
+        "eta_mu9": 0.0019565651798894262,
+        "gain": -0.016033782632002502,
+        "invalid_bootstrap_replicates": 4,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 9996
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.10115526680400766,
+          "low": -0.11782437355182829
+        },
+        "eta": 0.01963529535996896,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.11205479457005962,
+        "invalid_bootstrap_replicates": 4,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 3.01919990975426,
+          "distance_bits": 1.5941662849279556,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 9996
+      },
+      "source": {
+        "label": "sealed g1v2-readout.json",
+        "sha256": "5d4eed9685f25fd1db3135319908a045a389300a008a67bc009cd178cabe2fc8"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.09602101193805712
+    },
+    {
+      "H": 256,
+      "S": 2560,
+      "T": 10,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M v2",
+      "campaign_order": 32,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": null,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.0183946766,
+        0.02601390564068452,
+        0.03678921816735001,
+        0.05202781128136904
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.0032517382,
+        0.0045987253,
+        0.0065034764,
+        0.0091974507
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.0063621933611899386,
+          "low": -0.018138444756088834
+        },
+        "eta_mu0": 0.02705318346965591,
+        "eta_mu9": null,
+        "gain": null,
+        "invalid_bootstrap_replicates": 5662,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 4338
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "UNBRACKETED_LOW"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": false
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": 0.0860872108678783,
+          "low": -0.3012306111441516
+        },
+        "eta": 0.02705318346965591,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.09729059007886587,
+        "invalid_bootstrap_replicates": 39,
+        "label": "NULL",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 2.9413784701945627,
+          "distance_bits": 1.556492429224305,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 9961
+      },
+      "source": {
+        "label": "sealed g1v2-readout.json",
+        "sha256": "5d4eed9685f25fd1db3135319908a045a389300a008a67bc009cd178cabe2fc8"
+      },
+      "tuned_minus_a1_gain_dominance_gap": null
+    },
+    {
+      "H": 512,
+      "S": 2560,
+      "T": 5,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M v2",
+      "campaign_order": 33,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.02601390564068452,
+        0.03678921816735001,
+        0.05202781128136904,
+        0.07357843633470001
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.00650347641017113,
+        0.009197304541837502,
+        0.01300695282034226,
+        0.018394609083675004
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": 0.006095186414404541,
+          "low": -0.011066518962080885
+        },
+        "eta_mu0": 0.04429579005615981,
+        "eta_mu9": 0.010814101576198998,
+        "gain": -0.0034244772719631555,
+        "invalid_bootstrap_replicates": 0,
+        "label": "NULL",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.14386001976186247,
+          "low": -0.34255021642212435
+        },
+        "eta": 0.04429579005615981,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.21982787928646008,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 2.4080854262606644,
+          "distance_bits": 1.267886572270609,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "sealed g1v2-readout.json",
+        "sha256": "5d4eed9685f25fd1db3135319908a045a389300a008a67bc009cd178cabe2fc8"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.21640340201449693
+    },
+    {
+      "H": 512,
+      "S": 1024,
+      "T": 2,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "NumPy Generator PCG64",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M v3 T-scan",
+      "campaign_order": 40,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.04691422068685734,
+        0.06634672716351807,
+        0.09382844137371468,
+        0.13269345432703614
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.01923483048161151,
+        0.027202158137042406,
+        0.03846966096322302,
+        0.05440431627408481
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": 0.0016052751539432641,
+          "low": -0.002794256282228069
+        },
+        "eta_mu0": 0.07766526318825953,
+        "eta_mu9": 0.0323667074761506,
+        "gain": -0.0008455254827373082,
+        "invalid_bootstrap_replicates": 0,
+        "label": "NULL",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.05862545129176987,
+          "low": -0.06970710432293226
+        },
+        "eta": 0.07766526318825953,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.06417684993088679,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 1.4275570121493273,
+          "distance_bits": 0.5135483634533767,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "sealed v3_cells_eval_loss.csv",
+        "sha256": "29970559ff513ec19a9d5d0ab9f802bb6fba1898984877854c9b3485b89e320c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.06333132444814948
+    },
+    {
+      "H": 512,
+      "S": 2560,
+      "T": 5,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "NumPy Generator PCG64",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M v3 T-scan",
+      "campaign_order": 41,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.02634093759731027,
+        0.03725171119573955,
+        0.05268187519462054,
+        0.0745034223914791
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.006427188773743706,
+        0.00908941753176045,
+        0.012854377547487411,
+        0.0181788350635209
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.003257584864962304,
+          "low": -0.00813737051047303
+        },
+        "eta_mu0": 0.04368465066797821,
+        "eta_mu9": 0.011213071025107161,
+        "gain": -0.005703201626559018,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.14115474872243405,
+          "low": -0.18680398799214748
+        },
+        "eta": 0.04368465066797821,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.16391975963878025,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 2.4030500587817816,
+          "distance_bits": 1.2648667020691144,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "sealed v3_cells_eval_loss.csv",
+        "sha256": "29970559ff513ec19a9d5d0ab9f802bb6fba1898984877854c9b3485b89e320c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.15821655801222123
+    },
+    {
+      "H": 512,
+      "S": 5120,
+      "T": 10,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "NumPy Generator PCG64",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M v3 T-scan",
+      "campaign_order": 42,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.01837324992679204,
+        0.02598369923133978,
+        0.03674649985358408,
+        0.05196739846267956
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.0030867059877010628,
+        0.004365261470865083,
+        0.0061734119754021256,
+        0.008730522941730165
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.011882350333703773,
+          "low": -0.013915036344132048
+        },
+        "eta_mu0": 0.0322515846451114,
+        "eta_mu9": 0.0051226375201121254,
+        "gain": -0.012887310005741615,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.332758725436467,
+          "low": -0.3747682634608025
+        },
+        "eta": 0.0322515846451114,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.35367395141986213,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 3.694118308876463,
+          "distance_bits": 1.885230071219148,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "sealed v3_cells_eval_loss.csv",
+        "sha256": "29970559ff513ec19a9d5d0ab9f802bb6fba1898984877854c9b3485b89e320c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.3407866414141205
+    },
+    {
+      "H": 512,
+      "S": 10240,
+      "T": 20,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "NumPy Generator PCG64",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M v3 T-scan",
+      "campaign_order": 43,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.014389406091532924,
+        0.02034969324913989,
+        0.028778812183065848,
+        0.04069938649827978
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.000641699403926792,
+        0.001283398807853584,
+        0.002566797615707168,
+        0.005133595231414336
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.026988074673000018,
+          "low": -0.02899000086057768
+        },
+        "eta_mu0": 0.027577613352945337,
+        "eta_mu9": 0.0027297607172769058,
+        "gain": -0.02796819715772436,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.2909966031341935,
+          "low": -0.3023434207534659
+        },
+        "eta": 0.027577613352945337,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.29750641419276436,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 5.37198826744031,
+          "distance_bits": 2.42545615388595,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "sealed v3_cells_eval_loss.csv",
+        "sha256": "29970559ff513ec19a9d5d0ab9f802bb6fba1898984877854c9b3485b89e320c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.26953821703504
+    },
+    {
+      "H": 512,
+      "S": 20480,
+      "T": 40,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "NumPy Generator PCG64",
+        "rng_seed": 20260724
+      },
+      "campaign": "135M v3 T-scan",
+      "campaign_order": 44,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": null,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.012665055774778979,
+        0.01791109364490412,
+        0.025330111549557957,
+        0.03582218728980824
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 4,
+      "mu9_eta_grid": [
+        0.0012665055774778978,
+        0.0017911093644904117,
+        0.0025330111549557955,
+        0.0035822187289808235
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": null,
+        "eta_mu0": null,
+        "eta_mu9": 0.002844978026507276,
+        "gain": null,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 0
+      },
+      "point_fit_status": {
+        "mu0": "UNBRACKETED_HIGH",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": false,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": null,
+        "eta": null,
+        "eta_source": "mu0 fitted optimum",
+        "gain": null,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": null,
+          "distance_bits": null,
+          "in_grid": false,
+          "position": "not_evaluable"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "source": {
+        "label": "sealed v3_cells_eval_loss.csv",
+        "sha256": "29970559ff513ec19a9d5d0ab9f802bb6fba1898984877854c9b3485b89e320c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": null
+    },
+    {
+      "H": 1280,
+      "S": 2560,
+      "T": 2,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260727
+      },
+      "campaign": "135M v6 factorial",
+      "campaign_order": 50,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 5,
+      "mu0_eta_grid": [
+        0.03678657346319354,
+        0.052024071104882504,
+        0.07357314692638708,
+        0.10404814220976501,
+        0.14714629385277417
+      ],
+      "mu0_seed_count": 3,
+      "mu9_eta_count": 5,
+      "mu9_eta_grid": [
+        0.013574381351731939,
+        0.019197074208443736,
+        0.027148762703463877,
+        0.03839414841688747,
+        0.054297525406927755
+      ],
+      "mu9_seed_count": 3,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.0008702287482540427,
+          "low": -0.0037568092428346134
+        },
+        "eta_mu0": 0.07106462666975821,
+        "eta_mu9": 0.029507874969837835,
+        "gain": -0.0025766699125950865,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.054759440479627663,
+          "low": -0.06025337332013159
+        },
+        "eta": 0.07106462666975821,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.05724568570415656,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 1.3088004681091998,
+          "distance_bits": 0.3882451693906952,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical G6 factorial readout",
+        "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.05466901579156147
+    },
+    {
+      "H": 2560,
+      "S": 5120,
+      "T": 2,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260727
+      },
+      "campaign": "135M v6 factorial",
+      "campaign_order": 51,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 5,
+      "mu0_eta_grid": [
+        0.03777003433192801,
+        0.05341489480351001,
+        0.07554006866385601,
+        0.10682978960702003,
+        0.15108013732771203
+      ],
+      "mu0_seed_count": 3,
+      "mu9_eta_count": 5,
+      "mu9_eta_grid": [
+        0.013937282041301851,
+        0.019710293285428053,
+        0.027874564082603703,
+        0.039420586570856106,
+        0.055749128165207405
+      ],
+      "mu9_seed_count": 3,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.004903916124192165,
+          "low": -0.0070862992864269
+        },
+        "eta_mu0": 0.07379246262305024,
+        "eta_mu9": 0.0299488919000997,
+        "gain": -0.0057676536815134405,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.0639658431130603,
+          "low": -0.06924418402655075
+        },
+        "eta": 0.07379246262305024,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.06669918353307525,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 1.3236523162187053,
+          "distance_bits": 0.40452421916993103,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical G6 factorial readout",
+        "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.060931529851561805
+    },
+    {
+      "H": 5120,
+      "S": 10240,
+      "T": 2,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260727
+      },
+      "campaign": "135M v6 factorial",
+      "campaign_order": 52,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 5,
+      "mu0_eta_grid": [
+        0.03877978727380976,
+        0.05484290110856532,
+        0.07755957454761953,
+        0.10968580221713065,
+        0.15511914909523905
+      ],
+      "mu0_seed_count": 3,
+      "mu9_eta_count": 5,
+      "mu9_eta_grid": [
+        0.014309884602881835,
+        0.020237232881389424,
+        0.02861976920576367,
+        0.04047446576277885,
+        0.05723953841152734
+      ],
+      "mu9_seed_count": 3,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.004939612426920537,
+          "low": -0.0072625171046665216
+        },
+        "eta_mu0": 0.08489870538360338,
+        "eta_mu9": 0.03428628442766886,
+        "gain": -0.005762828936136888,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.05744302589744521,
+          "low": -0.06534833008664753
+        },
+        "eta": 0.08489870538360338,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.06184518229728919,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 1.4832178549941943,
+          "distance_bits": 0.5687305163606912,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical G6 factorial readout",
+        "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.056082353361152304
+    },
+    {
+      "H": 512,
+      "S": 2560,
+      "T": 5,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260727
+      },
+      "campaign": "135M v6 factorial",
+      "campaign_order": 53,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 5,
+      "mu0_eta_grid": [
+        0.023508856402546314,
+        0.033246543560362565,
+        0.04701771280509263,
+        0.06649308712072513,
+        0.09403542561018526
+      ],
+      "mu0_seed_count": 3,
+      "mu9_eta_count": 5,
+      "mu9_eta_grid": [
+        0.005017267068297977,
+        0.007095487134034898,
+        0.010034534136595955,
+        0.014190974268069796,
+        0.02006906827319191
+      ],
+      "mu9_seed_count": 3,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.006191283706260542,
+          "low": -0.010977473713673191
+        },
+        "eta_mu0": 0.04341918114042959,
+        "eta_mu9": 0.011091352441070394,
+        "gain": -0.009076627526085623,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.1260933395998043,
+          "low": -0.1518941898335835
+        },
+        "eta": 0.04341918114042959,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.13755099748158672,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 2.163487639255708,
+          "distance_bits": 1.1133588781735162,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical G6 factorial readout",
+        "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.1284743699555011
+    },
+    {
+      "H": 1024,
+      "S": 5120,
+      "T": 5,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260727
+      },
+      "campaign": "135M v6 factorial",
+      "campaign_order": 54,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 5,
+      "mu0_eta_grid": [
+        0.024137347674334234,
+        0.03413536444075816,
+        0.04827469534866847,
+        0.06827072888151632,
+        0.09654939069733694
+      ],
+      "mu0_seed_count": 3,
+      "mu9_eta_count": 5,
+      "mu9_eta_grid": [
+        0.005151399860921301,
+        0.00728517954852178,
+        0.010302799721842603,
+        0.01457035909704356,
+        0.020605599443685205
+      ],
+      "mu9_seed_count": 3,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.008503685438180142,
+          "low": -0.011316591769966688
+        },
+        "eta_mu0": 0.04554074859538897,
+        "eta_mu9": 0.011137136401055563,
+        "gain": -0.009697165081626657,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.16353435807136618,
+          "low": -0.17229986663927832
+        },
+        "eta": 0.04554074859538897,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.1675057615156823,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 2.2101152029015783,
+          "distance_bits": 1.144121572477814,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical G6 factorial readout",
+        "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.15780859643405565
+    },
+    {
+      "H": 2048,
+      "S": 10240,
+      "T": 5,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260727
+      },
+      "campaign": "135M v6 factorial",
+      "campaign_order": 55,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 5,
+      "mu0_eta_grid": [
+        0.024782641178946668,
+        0.03504794726669233,
+        0.049565282357893335,
+        0.07009589453338466,
+        0.09913056471578667
+      ],
+      "mu0_seed_count": 3,
+      "mu9_eta_count": 5,
+      "mu9_eta_grid": [
+        0.005289118591030515,
+        0.0074799432444350306,
+        0.01057823718206103,
+        0.014959886488870061,
+        0.02115647436412206
+      ],
+      "mu9_seed_count": 3,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.013297575317460009,
+          "low": -0.015784664864379128
+        },
+        "eta_mu0": 0.05221610260485161,
+        "eta_mu9": 0.012201557101010094,
+        "gain": -0.01456450338217019,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.16531177579887535,
+          "low": -0.17366195815485996
+        },
+        "eta": 0.05221610260485161,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.17076393276760138,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 2.4680909354822194,
+          "distance_bits": 1.303395550788934,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical G6 factorial readout",
+        "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.1561994293854312
+    },
+    {
+      "H": 256,
+      "S": 2560,
+      "T": 10,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260727
+      },
+      "campaign": "135M v6 factorial",
+      "campaign_order": 56,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 5,
+      "mu0_eta_grid": [
+        0.016754436692365374,
+        0.023694351600264535,
+        0.03350887338473075,
+        0.04738870320052907,
+        0.0670177467694615
+      ],
+      "mu0_seed_count": 3,
+      "mu9_eta_count": 5,
+      "mu9_eta_grid": [
+        0.0024416635694017325,
+        0.0034530337346002312,
+        0.004883327138803465,
+        0.0069060674692004624,
+        0.00976665427760693
+      ],
+      "mu9_seed_count": 3,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.00816147733124195,
+          "low": -0.01650192434548936
+        },
+        "eta_mu0": 0.030567321107090317,
+        "eta_mu9": 0.005061469298690091,
+        "gain": -0.011420907400246705,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.24227311829347187,
+          "low": -0.2885324732945982
+        },
+        "eta": 0.030567321107090317,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.26598105275982276,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 3.1297638104356102,
+          "distance_bits": 1.6460537873910028,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical G6 factorial readout",
+        "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.25456014535957605
+    },
+    {
+      "H": 512,
+      "S": 5120,
+      "T": 10,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260727
+      },
+      "campaign": "135M v6 factorial",
+      "campaign_order": 57,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 5,
+      "mu0_eta_grid": [
+        0.01720235372603844,
+        0.02432780194410291,
+        0.03440470745207688,
+        0.04865560388820582,
+        0.06880941490415377
+      ],
+      "mu0_seed_count": 3,
+      "mu9_eta_count": 5,
+      "mu9_eta_grid": [
+        0.0025069395749944706,
+        0.0035453479470070235,
+        0.005013879149988941,
+        0.007090695894014047,
+        0.010027758299977882
+      ],
+      "mu9_seed_count": 3,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.012358345202551746,
+          "low": -0.0133236335610456
+        },
+        "eta_mu0": 0.032724321427665966,
+        "eta_mu9": 0.005082917937087462,
+        "gain": -0.01280413119520274,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.3085268778228252,
+          "low": -0.32194108624891093
+        },
+        "eta": 0.032724321427665966,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.3166179223684491,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 3.2633735725100337,
+          "distance_bits": 1.7063641484345031,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical G6 factorial readout",
+        "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.30381379117324636
+    },
+    {
+      "H": 1024,
+      "S": 10240,
+      "T": 10,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260727
+      },
+      "campaign": "135M v6 factorial",
+      "campaign_order": 58,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 5,
+      "mu0_eta_grid": [
+        0.017662245478571863,
+        0.024978187097759206,
+        0.035324490957143725,
+        0.04995637419551841,
+        0.07064898191428745
+      ],
+      "mu0_seed_count": 3,
+      "mu9_eta_count": 5,
+      "mu9_eta_grid": [
+        0.0025739606846054463,
+        0.0036401301091841588,
+        0.0051479213692108925,
+        0.0072802602183683176,
+        0.010295842738421785
+      ],
+      "mu9_seed_count": 3,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.017831637246445542,
+          "low": -0.02020191812546468
+        },
+        "eta_mu0": 0.03833901200379948,
+        "eta_mu9": 0.005511517731738185,
+        "gain": -0.018982167731421917,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.33894440680701887,
+          "low": -0.3460011687728217
+        },
+        "eta": 0.03833901200379948,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.3416055743339532,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 3.7237371410818905,
+          "distance_bits": 1.8967512365266566,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical G6 factorial readout",
+        "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.3226234066025313
+    },
+    {
+      "H": 128,
+      "S": 2560,
+      "T": 20,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260727
+      },
+      "campaign": "135M v6 factorial",
+      "campaign_order": 59,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 5,
+      "mu0_eta_grid": [
+        0.0119406552182638,
+        0.016886636553289737,
+        0.0238813104365276,
+        0.033773273106579474,
+        0.0477626208730552
+      ],
+      "mu0_seed_count": 3,
+      "mu9_eta_count": 5,
+      "mu9_eta_grid": [
+        0.0013407713697622373,
+        0.0018961370551593079,
+        0.0026815427395244745,
+        0.0037922741103186158,
+        0.005363085479048949
+      ],
+      "mu9_seed_count": 3,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.009334112182155963,
+          "low": -0.01079966759547224
+        },
+        "eta_mu0": 0.02192621866193128,
+        "eta_mu9": 0.002562944780443397,
+        "gain": -0.00998730663074765,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.3289779942372886,
+          "low": -0.35040558230269037
+        },
+        "eta": 0.02192621866193128,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.34029709811836373,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 4.08835897685888,
+          "distance_bits": 2.0315218771455643,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical G6 factorial readout",
+        "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.3303097914876161
+    },
+    {
+      "H": 256,
+      "S": 5120,
+      "T": 20,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260727
+      },
+      "campaign": "135M v6 factorial",
+      "campaign_order": 60,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 5,
+      "mu0_eta_grid": [
+        0.012259879490836022,
+        0.01733808784900006,
+        0.024519758981672045,
+        0.03467617569800012,
+        0.04903951796334409
+      ],
+      "mu0_seed_count": 3,
+      "mu9_eta_count": 5,
+      "mu9_eta_grid": [
+        0.0013766158655101218,
+        0.001946828827182391,
+        0.0027532317310202436,
+        0.003893657654364782,
+        0.005506463462040487
+      ],
+      "mu9_seed_count": 3,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.011628009058962885,
+          "low": -0.019234520618714335
+        },
+        "eta_mu0": 0.02398038603886706,
+        "eta_mu9": 0.0025300390803687615,
+        "gain": -0.015025225461921199,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.32792314691604796,
+          "low": -0.41716687834941046
+        },
+        "eta": 0.02398038603886706,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.37322664187601884,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 4.354952358111324,
+          "distance_bits": 2.122656936254108,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical G6 factorial readout",
+        "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.35820141641409764
+    },
+    {
+      "H": 512,
+      "S": 10240,
+      "T": 20,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260727
+      },
+      "campaign": "135M v6 factorial",
+      "campaign_order": 61,
+      "fit_policy": "strict",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 5,
+      "mu0_eta_grid": [
+        0.012587637979859232,
+        0.017801608349359597,
+        0.025175275959718465,
+        0.035603216698719194,
+        0.05035055191943693
+      ],
+      "mu0_seed_count": 3,
+      "mu9_eta_count": 5,
+      "mu9_eta_grid": [
+        0.0014134186364005074,
+        0.0019988758049084843,
+        0.002826837272801015,
+        0.0039977516098169685,
+        0.00565367454560203
+      ],
+      "mu9_seed_count": 3,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": -0.02003150123919939,
+          "low": -0.022003589837634507
+        },
+        "eta_mu0": 0.030015753832119154,
+        "eta_mu9": 0.002775979090333439,
+        "gain": -0.02118055300937849,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "135M",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 9500,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.4378062781353669,
+          "low": -0.4579581860715658
+        },
+        "eta": 0.030015753832119154,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.4457044508441199,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 9500,
+        "momentum_grid_position": {
+          "boundary_ratio": 5.309069984487927,
+          "distance_bits": 2.4084591592819864,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical G6 factorial readout",
+        "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.4245238978347414
+    },
+    {
+      "H": 512,
+      "S": 2560,
+      "T": 5,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260726
+      },
+      "campaign": "1.7B v4-family combined",
+      "campaign_order": 70,
+      "fit_policy": "g4c_near_bracket",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 4,
+      "mu0_eta_grid": [
+        0.017983712258967423,
+        0.02543280977844702,
+        0.035967424517934846,
+        0.05086561955689404
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 6,
+      "mu9_eta_grid": [
+        0.0019188620980318239,
+        0.0027136808033602967,
+        0.0038377241960636478,
+        0.005427361606720593,
+        0.0076754483921272956,
+        0.010854723213441187
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": 0.03234402558442362,
+          "low": 0.016082372312345328
+        },
+        "eta_mu0": 0.018325769055974134,
+        "eta_mu9": 0.003191644884302601,
+        "gain": 0.024018479023142802,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HELP",
+        "minimum_valid_replicates": 7900,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "1.7B",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 7900,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.36225996172184605,
+          "low": -0.41626566960240563
+        },
+        "eta": 0.018325769055974134,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -0.387063566613258,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 7900,
+        "momentum_grid_position": {
+          "boundary_ratio": 1.6882760339095244,
+          "distance_bits": 0.7555508046345497,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical amended G4C combined-grid readout",
+        "sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 0.41108204563640083
+    },
+    {
+      "H": 512,
+      "S": 10240,
+      "T": 20,
+      "bootstrap": {
+        "draw_stream_position": "first matrix",
+        "interval": "pointwise percentile 95%",
+        "method": "paired nonparametric training-seed curve bootstrap",
+        "pairing": "one common seed-index draw for both arms and every eta",
+        "replicates": 10000,
+        "rng_engine": "Python random.Random MT19937",
+        "rng_seed": 20260726
+      },
+      "campaign": "1.7B v4-family combined",
+      "campaign_order": 71,
+      "fit_policy": "g4c_near_bracket",
+      "flip": {
+        "a1_mu0_optimum": false,
+        "a2_default_0p7": null
+      },
+      "mu0_eta_count": 6,
+      "mu0_eta_grid": [
+        0.00491202975922135,
+        0.006946659104271081,
+        0.0098240595184427,
+        0.013893318208542163,
+        0.0196481190368854,
+        0.027786636417084325
+      ],
+      "mu0_seed_count": 5,
+      "mu9_eta_count": 6,
+      "mu9_eta_grid": [
+        0.0005516209419605576,
+        0.0007801098174096424,
+        0.0011032418839211152,
+        0.0015602196348192849,
+        0.0022064837678422303,
+        0.0031204392696385697
+      ],
+      "mu9_seed_count": 5,
+      "per_arm_tuned": {
+        "ci_95": {
+          "high": 0.014515423330147215,
+          "low": -0.0021425891016457754
+        },
+        "eta_mu0": 0.006420751446982626,
+        "eta_mu9": 0.0008223020084398935,
+        "gain": 0.005992118100910382,
+        "invalid_bootstrap_replicates": 0,
+        "label": "NULL",
+        "minimum_valid_replicates": 7900,
+        "valid_bootstrap_replicates": 10000
+      },
+      "point_fit_status": {
+        "mu0": "INTERIOR",
+        "mu9": "INTERIOR"
+      },
+      "point_fit_strict_interior": {
+        "mu0": true,
+        "mu9": true
+      },
+      "scale": "1.7B",
+      "shared_at_default_0p7": {
+        "ci_95": null,
+        "eta": 0.7,
+        "gain": null,
+        "in_both_observed_grids": false,
+        "invalid_bootstrap_replicates": 10000,
+        "label": "NOT_EVALUABLE",
+        "minimum_valid_replicates": 7900,
+        "no_extrapolation_rule": true,
+        "valid_bootstrap_replicates": 0
+      },
+      "shared_at_mu0_optimum": {
+        "ci_95": {
+          "high": -0.7917792291555394,
+          "low": -1.3013763290591536
+        },
+        "eta": 0.006420751446982626,
+        "eta_source": "mu0 fitted optimum",
+        "gain": -1.0305832473153158,
+        "invalid_bootstrap_replicates": 0,
+        "label": "HURT",
+        "minimum_valid_replicates": 7900,
+        "momentum_grid_position": {
+          "boundary_ratio": 2.0576434572707836,
+          "distance_bits": 1.0409930177080189,
+          "in_grid": false,
+          "position": "above"
+        },
+        "quadratic_extrapolation_on_momentum_arm": true,
+        "valid_bootstrap_replicates": 10000
+      },
+      "source": {
+        "label": "canonical amended G4C combined-grid readout",
+        "sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa"
+      },
+      "tuned_minus_a1_gain_dominance_gap": 1.0365753654162262
+    }
+  ],
+  "schema": "yeto_shared_lr_illusion_posthoc_v1",
+  "summary": {
+    "a1_extrapolated": 28,
+    "a1_in_momentum_grid": 0,
+    "a1_mu0_optimum": {
+      "evaluable_comparisons": 28,
+      "flips": 0,
+      "retuning_comparable_comparisons": 26,
+      "shared_lr_helps": 0,
+      "shared_lr_helps_surviving_retuning": 0
+    },
+    "a2_default_0p7": {
+      "evaluable_comparisons": 0,
+      "flips": 0,
+      "retuning_comparable_comparisons": 0,
+      "shared_lr_helps": 0,
+      "shared_lr_helps_surviving_retuning": 0
+    },
+    "full_sweep_rows": 30,
+    "per_arm_tuned": {
+      "evaluable_comparisons": 26,
+      "helps": 1,
+      "hurts": 20,
+      "null": 5
+    }
+  },
+  "v8_exact_mu_audit": {
+    "exact_mu0p9_cells": 0,
+    "excluded_cells": [
+      {
+        "H": 512,
+        "S": 1024,
+        "T": 2,
+        "campaign": "135M v8 phase diagram",
+        "observed_raw_momentum_mus": [
+          0.8,
+          0.95
+        ],
+        "reason": "excluded from the exact-mu table: v8 banked raw-Nesterov sweeps are mu=.8 and .95, not mu=.9; no interpolation in mu",
+        "scale": "135M"
+      },
+      {
+        "H": 512,
+        "S": 2560,
+        "T": 5,
+        "campaign": "135M v8 phase diagram",
+        "observed_raw_momentum_mus": [
+          0.8,
+          0.95
+        ],
+        "reason": "excluded from the exact-mu table: v8 banked raw-Nesterov sweeps are mu=.8 and .95, not mu=.9; no interpolation in mu",
+        "scale": "135M"
+      },
+      {
+        "H": 512,
+        "S": 10240,
+        "T": 20,
+        "campaign": "135M v8 phase diagram",
+        "observed_raw_momentum_mus": [
+          0.8,
+          0.95
+        ],
+        "reason": "excluded from the exact-mu table: v8 banked raw-Nesterov sweeps are mu=.8 and .95, not mu=.9; no interpolation in mu",
+        "scale": "135M"
+      }
+    ],
+    "source_sha256": "9884f0775b30a35964e7df878bd0569b62f24af23619d90b4ff346d1afae596c"
+  }
+}

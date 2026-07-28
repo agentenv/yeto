@@ -1,0 +1,60 @@
+% Requires \usepackage{booktabs,longtable,threeparttablex,pdflscape}.
+\begin{landscape}
+\begingroup\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{ThreePartTable}
+\begin{TableNotes}[flushleft]\footnotesize
+\item Gain is $L_{\mu=0}-L_{\mu=.9}$; positive values favor standard raw Nesterov momentum. Brackets are pointwise paired-seed bootstrap 95\% intervals from 10,000 quadratic refits. HELP/NULL/HURT indicate an interval above/containing/below zero; NOT EVALUABLE means the frozen valid-refit threshold was missed. The parenthetical a1 position is relative to the observed momentum eta ladder. NA means a required fitted optimum or the in-grid $\eta=.7$ comparison is unavailable; an NA flip is not a no-flip result. This is a post-hoc descriptive analysis of sealed data.
+\end{TableNotes}
+\begin{longtable}{@{}p{3.2cm}lrrr p{5.3cm} p{2.0cm} p{5.0cm} c@{}}
+\caption{Shared-learning-rate comparisons versus per-arm retuning.}\label{tab:shared-lr-illusion}\\
+\toprule
+Campaign & Scale & $T$ & $S$ & $H$ & Shared at $\eta_0^\star$ (a1) & Shared at $.7$ (a2) & Per-arm tuned (b) & Flip a1/a2 \\
+\midrule
+\endfirsthead
+\multicolumn{9}{c}{\tablename\ \thetable\ -- continued}\\
+\toprule
+Campaign & Scale & $T$ & $S$ & $H$ & Shared at $\eta_0^\star$ (a1) & Shared at $.7$ (a2) & Per-arm tuned (b) & Flip a1/a2 \\
+\midrule
+\endhead
+\midrule \multicolumn{9}{r}{Continued on next page}\\
+\endfoot
+\bottomrule
+\insertTableNotes
+\endlastfoot
+135M pilot S-scan & 135M & 2 & 1024 & 512 & $-0.0372$ $[-0.0645,-0.0269]$ HURT (above 2.01x) & -- & $+0.0035$ $[-0.0067,+0.0079]$ NULL & N/NA \\
+135M pilot S-scan & 135M & 10 & 5120 & 512 & $-0.3805$ $[-0.4074,-0.3542]$ HURT (above 2.70x) & -- & $-0.0115$ $[-0.0127,-0.0103]$ HURT & N/NA \\
+135M pilot S-scan & 135M & 20 & 10240 & 512 & $-0.2281$ $[-0.2306,-0.2246]$ HURT (above 2.85x) & -- & $+0.0017$ $[-0.0028,+0.0078]$ NULL & N/NA \\
+135M v1 & 135M & 160 & 2560 & 16 & $-0.1065$ $[-0.1087,-0.1043]$ HURT (above 5.06x) & -- & $-0.0017$ $[-0.0018,-0.0016]$ HURT & N/NA \\
+135M v1 & 135M & 40 & 2560 & 64 & $-0.0967$ $[-0.1082,-0.0869]$ HURT (above 4.08x) & -- & -- & NA/NA \\
+135M v1 & 135M & 10 & 2560 & 256 & $-0.2767$ $[-0.3415,-0.2642]$ NOT EVAL. (above 1.47x) & -- & -- & NA/NA \\
+135M v1 & 135M & 5 & 2560 & 512 & $-0.1874$ $[-0.2252,-0.1657]$ HURT (above 2.41x) & -- & $-0.0045$ $[-0.0059,-0.0029]$ HURT & N/NA \\
+135M v2 & 135M & 160 & 2560 & 16 & $-0.1083$ $[-0.1105,-0.1053]$ HURT (above 5.01x) & -- & $-0.0013$ $[-0.0015,-0.0011]$ HURT & N/NA \\
+135M v2 & 135M & 40 & 2560 & 64 & $-0.1121$ $[-0.1178,-0.1012]$ HURT (above 3.02x) & -- & $-0.0160$ $[-0.0169,-0.0154]$ HURT & N/NA \\
+135M v2 & 135M & 10 & 2560 & 256 & $-0.0973$ $[-0.3012,+0.0861]$ NULL (above 2.94x) & -- & -- & NA/NA \\
+135M v2 & 135M & 5 & 2560 & 512 & $-0.2198$ $[-0.3426,-0.1439]$ HURT (above 2.41x) & -- & $-0.0034$ $[-0.0111,+0.0061]$ NULL & N/NA \\
+135M v3 T-scan & 135M & 2 & 1024 & 512 & $-0.0642$ $[-0.0697,-0.0586]$ HURT (above 1.43x) & -- & $-0.0008$ $[-0.0028,+0.0016]$ NULL & N/NA \\
+135M v3 T-scan & 135M & 5 & 2560 & 512 & $-0.1639$ $[-0.1868,-0.1412]$ HURT (above 2.40x) & -- & $-0.0057$ $[-0.0081,-0.0033]$ HURT & N/NA \\
+135M v3 T-scan & 135M & 10 & 5120 & 512 & $-0.3537$ $[-0.3748,-0.3328]$ HURT (above 3.69x) & -- & $-0.0129$ $[-0.0139,-0.0119]$ HURT & N/NA \\
+135M v3 T-scan & 135M & 20 & 10240 & 512 & $-0.2975$ $[-0.3023,-0.2910]$ HURT (above 5.37x) & -- & $-0.0280$ $[-0.0290,-0.0270]$ HURT & N/NA \\
+135M v3 T-scan & 135M & 40 & 20480 & 512 & -- & -- & -- & NA/NA \\
+135M v6 factorial & 135M & 2 & 2560 & 1280 & $-0.0572$ $[-0.0603,-0.0548]$ HURT (above 1.31x) & -- & $-0.0026$ $[-0.0038,-0.0009]$ HURT & N/NA \\
+135M v6 factorial & 135M & 2 & 5120 & 2560 & $-0.0667$ $[-0.0692,-0.0640]$ HURT (above 1.32x) & -- & $-0.0058$ $[-0.0071,-0.0049]$ HURT & N/NA \\
+135M v6 factorial & 135M & 2 & 10240 & 5120 & $-0.0618$ $[-0.0653,-0.0574]$ HURT (above 1.48x) & -- & $-0.0058$ $[-0.0073,-0.0049]$ HURT & N/NA \\
+135M v6 factorial & 135M & 5 & 2560 & 512 & $-0.1376$ $[-0.1519,-0.1261]$ HURT (above 2.16x) & -- & $-0.0091$ $[-0.0110,-0.0062]$ HURT & N/NA \\
+135M v6 factorial & 135M & 5 & 5120 & 1024 & $-0.1675$ $[-0.1723,-0.1635]$ HURT (above 2.21x) & -- & $-0.0097$ $[-0.0113,-0.0085]$ HURT & N/NA \\
+135M v6 factorial & 135M & 5 & 10240 & 2048 & $-0.1708$ $[-0.1737,-0.1653]$ HURT (above 2.47x) & -- & $-0.0146$ $[-0.0158,-0.0133]$ HURT & N/NA \\
+135M v6 factorial & 135M & 10 & 2560 & 256 & $-0.2660$ $[-0.2885,-0.2423]$ HURT (above 3.13x) & -- & $-0.0114$ $[-0.0165,-0.0082]$ HURT & N/NA \\
+135M v6 factorial & 135M & 10 & 5120 & 512 & $-0.3166$ $[-0.3219,-0.3085]$ HURT (above 3.26x) & -- & $-0.0128$ $[-0.0133,-0.0124]$ HURT & N/NA \\
+135M v6 factorial & 135M & 10 & 10240 & 1024 & $-0.3416$ $[-0.3460,-0.3389]$ HURT (above 3.72x) & -- & $-0.0190$ $[-0.0202,-0.0178]$ HURT & N/NA \\
+135M v6 factorial & 135M & 20 & 2560 & 128 & $-0.3403$ $[-0.3504,-0.3290]$ HURT (above 4.09x) & -- & $-0.0100$ $[-0.0108,-0.0093]$ HURT & N/NA \\
+135M v6 factorial & 135M & 20 & 5120 & 256 & $-0.3732$ $[-0.4172,-0.3279]$ HURT (above 4.35x) & -- & $-0.0150$ $[-0.0192,-0.0116]$ HURT & N/NA \\
+135M v6 factorial & 135M & 20 & 10240 & 512 & $-0.4457$ $[-0.4580,-0.4378]$ HURT (above 5.31x) & -- & $-0.0212$ $[-0.0220,-0.0200]$ HURT & N/NA \\
+1.7B v4-family combined & 1.7B & 5 & 2560 & 512 & $-0.3871$ $[-0.4163,-0.3623]$ HURT (above 1.69x) & -- & $+0.0240$ $[+0.0161,+0.0323]$ HELP & N/NA \\
+1.7B v4-family combined & 1.7B & 20 & 10240 & 512 & $-1.0306$ $[-1.3014,-0.7918]$ HURT (above 2.06x) & -- & $+0.0060$ $[-0.0021,+0.0145]$ NULL & N/NA \\
+\end{longtable}
+\end{ThreePartTable}
+\endgroup
+\end{landscape}
+
+% Summary: shared eta0* HELP in 0/28; flips 0/26; survives 0. In-grid eta=.7 comparisons 0.
