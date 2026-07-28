@@ -1,0 +1,107 @@
+{
+  "audit_date": "2026-07-28",
+  "banked_data_only": true,
+  "bootstrap_reconstruction": {
+    "G4C_acceptance": "canonical positive-curvature vertex within 0.5 log2 bits of bracket",
+    "G6_G8_G12_acceptance": "positive-curvature strict-interior vertex",
+    "paired_seed_resampling": true,
+    "replicates": 10000,
+    "rng_seeds": {
+      "G12": 20260741,
+      "G4C": 20260726,
+      "G6": 20260727,
+      "G8": 20260728
+    }
+  },
+  "excluded_ledger_rows": 24,
+  "g9_7b_provenance": {
+    "archive_lookup_result": "root/g9-joint-readout.json not found",
+    "canonical_derived_artifact": "scale_predictions.json",
+    "handling": "retain two final one-seed optima in OLS/figure; exclude point-mass CIs from WLS/noise calibration",
+    "raw_joint_readout_available_in_evacuation_archive": false,
+    "upstream_joint_readout_sha256": "4d42a5f133684822f0fc81c69c3348610c7b3824836b1ecf937abb6e9515bcaf"
+  },
+  "included_by_campaign": {
+    "DISAMBIG": 6,
+    "G12": 6,
+    "G4C": 4,
+    "G5B": 3,
+    "G6": 36,
+    "G8": 15,
+    "G9A": 2,
+    "G9B": 2,
+    "TP-pilot": 6,
+    "TP-v1": 8,
+    "TP-v2": 7,
+    "TP-v3": 17
+  },
+  "included_by_scale": {
+    "1.7B": 6,
+    "135M": 104,
+    "7B": 2
+  },
+  "included_points": 112,
+  "schema": "law_unification_source_manifest_v1",
+  "source_files": [
+    {
+      "bytes": 2166,
+      "name": "disambiguation_source.md",
+      "role": "six exploratory fixed-T=5 H/S disambiguation optima",
+      "sha256": "4be85f66125472fca267f284912442d5bf4ce6e25dbaae9dbca8f381e4af4835"
+    },
+    {
+      "bytes": 51722,
+      "name": "g12-readout.json",
+      "role": "complete 135M heavy-ball scan cell records and fits",
+      "sha256": "0162dbdd2a78492c0b167e2dd516396ab7ea0d1bcb34ac0293abf6abdfc67ae5"
+    },
+    {
+      "bytes": 73621,
+      "name": "g4c-readout.json",
+      "role": "final canonical five-seed 1.7B v4-family cell records and fits",
+      "sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa"
+    },
+    {
+      "bytes": 103516,
+      "name": "g5b-readout.json",
+      "role": "final combined SNOO fits and confidence intervals",
+      "sha256": "4552330266cf1ab6b59c6e658117872732e6990c65f9ac7b73168db41ca1a446"
+    },
+    {
+      "bytes": 370022,
+      "name": "g6-readout.json",
+      "role": "complete 135M T-by-S factorial cell records and fits",
+      "sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+    },
+    {
+      "bytes": 129032,
+      "name": "g8-readout.json",
+      "role": "complete 135M mu=.8/.95 phase scan cell records and fits",
+      "sha256": "9884f0775b30a35964e7df878bd0569b62f24af23619d90b4ff346d1afae596c"
+    },
+    {
+      "bytes": 5350,
+      "name": "scale_predictions.json",
+      "role": "final SHA-bound G9 joint panel, including two 7B singleton-seed optima",
+      "sha256": "6faab136f8d84347660e0891ed25b43a30a672dc774c56112b8092098402fbc6"
+    },
+    {
+      "bytes": 28344,
+      "name": "supplemental-1p7b-readout.json",
+      "role": "prospective 1.7B T=10 raw/corrected fits and intervals",
+      "sha256": "b572c017250414a96adaba472f75e4452933e26bc21e4ff9f207d032095b648a"
+    },
+    {
+      "bytes": 7653,
+      "name": "two_param_master_D.csv",
+      "role": "paired displacement master table; audited provenance, not a second optimum unit",
+      "sha256": "f1b132a5b4580a396da344a959f195c747d3b759d6db54243d303316eed77427"
+    },
+    {
+      "bytes": 6906,
+      "name": "two_param_master_eta.csv",
+      "role": "canonical 135M two-parameter optimum/CI ledger",
+      "sha256": "610f8e302d3a3ba7e888e268ad832d1be7e5015c0b93ab000208c57d0cf5d649"
+    }
+  ]
+}

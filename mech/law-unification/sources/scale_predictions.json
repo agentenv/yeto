@@ -1,0 +1,162 @@
+{
+  "error_y_limits": [
+    -0.72,
+    0.72
+  ],
+  "generated_at_utc": "2026-07-28T10:27:50Z",
+  "main_y_limits": [
+    -1.05,
+    1.65
+  ],
+  "provenance": {
+    "existing_predictions": "aligned-input finite-age law fixed before the 1.7B bridge outcomes",
+    "g4c_sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa",
+    "g9_joint_status": "FAIL",
+    "g9_readout_sha256": "4d42a5f133684822f0fc81c69c3348610c7b3824836b1ecf937abb6e9515bcaf",
+    "manifest_sha256": "26efd59b51cd9121d1157889bf4f58d47cf0d9cfba7f56c31d999e95d4eec567",
+    "prospective_completed_records": 22,
+    "prospective_component_status": {
+      "stage_1p7b": "PASS",
+      "stage_7b": "FAIL"
+    },
+    "prospective_observed_by_stage": {
+      "stage_1p7b": 16,
+      "stage_7b": 6
+    },
+    "prospective_prediction_sha256": "97e02dcad63782978ac51b320621e5a681236518cb0d5db19454b8981549ca9c",
+    "prospective_valid_replicates": {
+      "stage_1p7b": 10000,
+      "stage_7b": 10000
+    },
+    "scope_amendment_sha256": "1b270b4ace9bba2a53c9e9f871fd1adcbaa8d908c33f80b2dce5301a687acac7"
+  },
+  "schema": "figure_factory_scale_predictions_v2",
+  "slots": [
+    {
+      "actual_parameters": 135000000,
+      "label": "135M\ncalibration",
+      "plot_parameters": 135000000,
+      "role": "calibration",
+      "status": "observed",
+      "values": {
+        "20": {
+          "observed_D": 0.989846613037108,
+          "observed_ci_high": 1.0068800004882397,
+          "observed_ci_low": 0.9773372306736521,
+          "predicted_D": 1.1228624771875697
+        },
+        "5": {
+          "observed_D": 2.566821721877774,
+          "observed_ci_high": 2.6545808681591083,
+          "observed_ci_low": 2.5075289287930786,
+          "predicted_D": 2.1342029498953177
+        }
+      }
+    },
+    {
+      "actual_parameters": 1711376384,
+      "label": "1.7B\nexisting study",
+      "plot_parameters": 1400000000,
+      "role": "existing_anchor",
+      "status": "observed",
+      "values": {
+        "20": {
+          "observed_D": 1.2806943474449415,
+          "observed_ci_high": 1.4413364086824705,
+          "observed_ci_low": 1.1831198935458236,
+          "predicted_D": 1.1228624771875697
+        },
+        "5": {
+          "observed_D": 1.7416157949788522,
+          "observed_ci_high": 1.9186486070937334,
+          "observed_ci_low": 1.5902480141880857,
+          "predicted_D": 2.1342029498953177
+        }
+      }
+    },
+    {
+      "actual_parameters": 1711376384,
+      "label": "1.7B\nG9A PASS",
+      "plot_parameters": 2050000000,
+      "registered_band_bits": 0.625,
+      "role": "prospective_test",
+      "status": "registered_component_pass",
+      "values": {
+        "corrected_T10": {
+          "T": 10,
+          "observed_D": 0.5550443849913698,
+          "observed_ci_high": 0.5748838739913433,
+          "observed_ci_low": 0.5375701185533858,
+          "observed_eta_star": 0.0006020765984020133,
+          "predicted_D": 0.7320385393951487,
+          "predicted_eta_star": 0.0007940685206734635,
+          "series": "prospective_corrected",
+          "signed_error_bits": -0.3993164601672566,
+          "signed_error_bits_ci_95": [
+            -0.44546665710554895,
+            -0.3486490411776201
+          ],
+          "status": "INSIDE_REGISTERED_BAND"
+        },
+        "raw_T10": {
+          "T": 10,
+          "observed_D": 1.1486171877779634,
+          "observed_ci_high": 1.3408317578125755,
+          "observed_ci_low": 1.147635324765375,
+          "observed_eta_star": 0.0012459463566939707,
+          "predicted_D": 1.514937071227211,
+          "predicted_eta_star": 0.0016433067035742915,
+          "series": "prospective_raw",
+          "signed_error_bits": -0.3993598116984459,
+          "signed_error_bits_ci_95": [
+            -0.400593586274793,
+            -0.17612964200717235
+          ],
+          "status": "INSIDE_REGISTERED_BAND"
+        }
+      }
+    },
+    {
+      "actual_parameters": 7615616512,
+      "label": "7B\nG9B FAIL",
+      "plot_parameters": 7615616512,
+      "registered_band_bits": 0.5,
+      "role": "prospective_test",
+      "status": "registered_component_fail",
+      "values": {
+        "mu0_T5": {
+          "T": 5,
+          "observed_D": 0.7086416422771614,
+          "observed_ci_high": 0.7086416422771614,
+          "observed_ci_low": 0.7086416422771614,
+          "observed_eta_star": 0.007827012974649522,
+          "predicted_D": 1.0,
+          "predicted_eta_star": 0.011045093186307909,
+          "series": "prospective_mu0",
+          "signed_error_bits": -0.49687184910154747,
+          "signed_error_bits_ci_95": [
+            -0.49687184910154747,
+            -0.49687184910154747
+          ],
+          "status": "INSIDE_REGISTERED_BAND"
+        },
+        "raw_T5": {
+          "T": 5,
+          "observed_D": 1.8756107277950538,
+          "observed_ci_high": 1.8756107277950538,
+          "observed_ci_low": 1.8756107277950538,
+          "observed_eta_star": 0.0020716295269735162,
+          "predicted_D": 2.7437318579113574,
+          "predicted_eta_star": 0.0030304774048872667,
+          "series": "prospective_raw",
+          "signed_error_bits": -0.5487790594258765,
+          "signed_error_bits_ci_95": [
+            -0.5487790594258765,
+            -0.5487790594258765
+          ],
+          "status": "OUTSIDE_REGISTERED_BAND"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+dimension,scope,method,test,statistic,df_num,df_den,p_value,survives_p_ge_0p05,survives_both_ols_and_wls
+mu,all scales and all eligible points,OLS,partial_F,6.997326613529028,4,104,4.987415279513626e-05,False,False
+mu,all scales and all eligible points,WLS,delta_chi_square,921925.2326209326,4,,0.0,False,False
+convention,all scales and all eligible points,OLS,partial_F,6.115141886205704,3,105,0.0007110732431491425,False,False
+convention,all scales and all eligible points,WLS,delta_chi_square,587713.1317578736,3,,0.0,False,False
+scale,"135M and 1.7B only; the two 7B points share T=5, so a 7B slope is not identifiable",OLS,partial_F,1.7009048337992985,1,106,0.19499456414282737,True,False
+scale,"135M and 1.7B only; the two 7B points share T=5, so a 7B slope is not identifiable",WLS,delta_chi_square,3693.7124556154013,1,,0.0,False,False
