@@ -83,7 +83,7 @@ def test_attention_targets_are_megatron_names_not_hf():
     assert ml._MLP_TARGETS == ["linear_fc1", "linear_fc2"]
 
 
-def test_cycle_yields_endless_input_label_batches():
+def test_cycle_yields_endless_shifted_next_token_batches():
     gen = ml._cycle(
         [
             {"input_ids": [1, 2, 3], "weights": [0.0, 1.0, 1.0]},
@@ -91,12 +91,12 @@ def test_cycle_yields_endless_input_label_batches():
         ]
     )
     b0 = next(gen)
-    assert b0["input_ids"].shape == (1, 3)
-    assert (b0["labels"] == b0["input_ids"]).all()
-    assert b0["weights"].tolist() == [[0.0, 1.0, 1.0]]
+    assert b0["input_ids"].tolist() == [[1, 2]]
+    assert b0["labels"].tolist() == [[2, 3]]
+    assert b0["weights"].tolist() == [[1.0, 1.0]]
     # endless: wraps past the 2-element dataset
     seen = [tuple(next(gen)["input_ids"][0].tolist()) for _ in range(4)]
-    assert seen == [(4, 5, 6), (1, 2, 3), (4, 5, 6), (1, 2, 3)]
+    assert seen == [(4, 5), (1, 2), (4, 5), (1, 2)]
 
 
 def test_weighted_token_loss_uses_only_assistant_tokens():
@@ -340,7 +340,7 @@ def test_build_dataset_uses_current_data_api(monkeypatch):
     dataset_args, dataset_kwargs = calls["dataset"]
     assert dataset_args[0] == "rows.jsonl"
     assert isinstance(dataset_args[1], FakeTokenizer)
-    assert dataset_args[2:] == (2, 4, 128, 9)
+    assert dataset_args[2:] == (2, 4, 129, 9)
     assert dataset_kwargs == {"train_on": "all"}
 
 

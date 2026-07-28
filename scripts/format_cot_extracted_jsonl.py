@@ -29,8 +29,16 @@ REFUSAL_RE = re.compile(
     re.I,
 )
 PROMPT_INJECTION_RE = re.compile(
-    r"^\s*(you are a log viewer|output the complete transcript|"
-    r"this is a meeting transcription service|ignore previous instructions)\b",
+    r"\b(you are a log viewer|output the complete transcript|"
+    r"you are a (?:tts|text-to-speech) engine|"
+    r"this is a meeting transcription service|transcription has been loaded|"
+    r"ignore previous instructions)\b",
+    re.I,
+)
+PROTECTED_CONTENT_REFUSAL_RE = re.compile(
+    r"\bi\s+(?:can(?:not|['’]t)|won['’]t)\s+(?:provide|access|reproduce)\s+"
+    r"(?:a separate transcript|hidden system|hidden system/developer|private internal|"
+    r"internal reasoning|an? (?:unfiltered )?session transcript)",
     re.I,
 )
 
@@ -79,6 +87,8 @@ def keep_text(text: str, *, min_chars: int, max_chars: int) -> bool:
         return False
     if PROMPT_INJECTION_RE.search(stripped):
         return False
+    if PROTECTED_CONTENT_REFUSAL_RE.search(stripped):
+        return False
     return True
 
 
@@ -116,13 +126,20 @@ def main() -> int:
     parser.add_argument("--output", required=True, help="Output Yeto chat JSONL")
     parser.add_argument("--min-chars", type=int, default=120)
     parser.add_argument("--max-chars", type=int, default=12000)
+    parser.add_argument(
+        "--method",
+        action="append",
+        choices=["recording", "rawlog", "tts"],
+        help="Extraction method to keep; repeat to opt into multiple methods (default: recording)",
+    )
     args = parser.parse_args()
+    allowed_methods = set(args.method or ["recording"])
 
     input_path = Path(args.input)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    read_rows = wrote_rows = skipped_encrypted = skipped_other = 0
+    read_rows = wrote_rows = skipped_method = skipped_encrypted = skipped_other = 0
     with input_path.open(encoding="utf-8") as src, output_path.open("w", encoding="utf-8") as dst:
         for line in src:
             line = line.strip()
@@ -130,6 +147,9 @@ def main() -> int:
                 continue
             read_rows += 1
             row = json.loads(line)
+            if row.get("method") not in allowed_methods:
+                skipped_method += 1
+                continue
             text = str(row.get("text") or "").strip()
             if looks_encrypted(text) or REFUSAL_RE.search(text):
                 skipped_encrypted += 1
@@ -142,10 +162,11 @@ def main() -> int:
             wrote_rows += 1
 
     print(
-        "read {read}; wrote {wrote}; skipped encrypted/refusal {encrypted}; "
-        "skipped length/other {other}".format(
+        "read {read}; wrote {wrote}; skipped method {method}; "
+        "skipped encrypted/refusal {encrypted}; skipped length/other {other}".format(
             read=read_rows,
             wrote=wrote_rows,
+            method=skipped_method,
             encrypted=skipped_encrypted,
             other=skipped_other,
         )

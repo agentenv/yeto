@@ -314,7 +314,9 @@ def _build_dataset(args):
         tokenizer,
         args.learner_id,
         args.num_learners,
-        args.seq_len,
+        # Megatron consumes labels that are already shifted one token ahead.
+        # Request one extra token so _cycle can still emit args.seq_len tokens.
+        args.seq_len + 1,
         args.max_rows,
         train_on=args.train_on,
     )
@@ -817,7 +819,7 @@ def _run_inner_loop(
 
 
 def _cycle(dataset):
-    """Endless Megatron batches from Yeto's packed token/weight blocks."""
+    """Endless next-token Megatron batches from Yeto packed blocks."""
     import torch
 
     while True:
@@ -832,7 +834,13 @@ def _cycle(dataset):
                 weights = torch.ones_like(ids, dtype=torch.float)
             else:
                 weights = torch.as_tensor(weights, dtype=torch.float).unsqueeze(0)
-            yield {"input_ids": ids, "labels": ids.clone(), "weights": weights}
+            if ids.shape[1] < 2:
+                raise ValueError("Megatron training blocks need at least two tokens")
+            yield {
+                "input_ids": ids[:, :-1].contiguous(),
+                "labels": ids[:, 1:].contiguous(),
+                "weights": weights[:, 1:].contiguous(),
+            }
 
 
 if __name__ == "__main__":
