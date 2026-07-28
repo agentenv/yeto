@@ -1,0 +1,189 @@
+{
+  "bootstrap": {
+    "draws": 10000,
+    "rng_seed": 20260728,
+    "sample_size_at_replicated_rungs": 2,
+    "singleton_rung_rule": "reuse the singleton as its empirical distribution"
+  },
+  "candidate_order": [
+    "symmetric_6_single_seed",
+    "symmetric_8_center_replicated",
+    "symmetric_10_center_high_replicated",
+    "symmetric_12_full_panel"
+  ],
+  "created_at_utc": "2026-07-28T00:50:57.111251+00:00",
+  "elapsed_seconds": 1.9797675829613581,
+  "fixed_minimum_valid_bootstrap_refits": 7500,
+  "fixed_near_bracket_allowance_bits": 0.5,
+  "layouts": {
+    "symmetric_10_center_high_replicated": {
+      "P_eval": 0.9182,
+      "P_eval_wilson95": [
+        0.9102786696738933,
+        0.925479224419261
+      ],
+      "P_pass_given_evaluable": 0.9259420605532563,
+      "P_pass_given_evaluable_wilson95": [
+        0.9180059375212982,
+        0.9331659766895984
+      ],
+      "cell_count": 10,
+      "feasibility_pass": true,
+      "point_acceptance_fraction": 0.9284,
+      "retained_seeds_by_eta_index_per_arm": {
+        "0": [
+          907
+        ],
+        "1": [
+          901,
+          907
+        ],
+        "2": [
+          901,
+          907
+        ]
+      },
+      "simulation_seed": 9700000,
+      "simulations_under_centered_prediction_null": 5000,
+      "strict_point_interior_fraction": 0.8974,
+      "valid_bootstrap_refits": {
+        "max": 10000,
+        "median": 10000.0,
+        "min": 0,
+        "q10": 7507.0,
+        "q90": 10000.0
+      }
+    },
+    "symmetric_12_full_panel": {
+      "P_eval": 0.929,
+      "P_eval_wilson95": [
+        0.9215470809096299,
+        0.9357942308215114
+      ],
+      "P_pass_given_evaluable": 0.9388589881593111,
+      "P_pass_given_evaluable_wilson95": [
+        0.9315996144059866,
+        0.9453930806802946
+      ],
+      "cell_count": 12,
+      "feasibility_pass": true,
+      "point_acceptance_fraction": 0.9398,
+      "retained_seeds_by_eta_index_per_arm": {
+        "0": [
+          901,
+          907
+        ],
+        "1": [
+          901,
+          907
+        ],
+        "2": [
+          901,
+          907
+        ]
+      },
+      "simulation_seed": 9700000,
+      "simulations_under_centered_prediction_null": 5000,
+      "strict_point_interior_fraction": 0.9132,
+      "valid_bootstrap_refits": {
+        "max": 10000,
+        "median": 10000.0,
+        "min": 0,
+        "q10": 7507.0,
+        "q90": 10000.0
+      }
+    },
+    "symmetric_6_single_seed": {
+      "P_eval": 0.825,
+      "P_eval_wilson95": [
+        0.814219627002049,
+        0.8352813667336638
+      ],
+      "P_pass_given_evaluable": 0.8727272727272727,
+      "P_pass_given_evaluable_wilson95": [
+        0.8622087900894221,
+        0.8825521872134702
+      ],
+      "cell_count": 6,
+      "feasibility_pass": true,
+      "point_acceptance_fraction": 0.825,
+      "retained_seeds_by_eta_index_per_arm": {
+        "0": [
+          907
+        ],
+        "1": [
+          907
+        ],
+        "2": [
+          907
+        ]
+      },
+      "simulation_seed": 9700000,
+      "simulations_under_centered_prediction_null": 5000,
+      "strict_point_interior_fraction": 0.7792,
+      "valid_bootstrap_refits": {
+        "max": 10000,
+        "median": 10000.0,
+        "min": 0,
+        "q10": 0.0,
+        "q90": 10000.0
+      }
+    },
+    "symmetric_8_center_replicated": {
+      "P_eval": 0.8582,
+      "P_eval_wilson95": [
+        0.8482555009797352,
+        0.8675945173468258
+      ],
+      "P_pass_given_evaluable": 0.8771848054066651,
+      "P_pass_given_evaluable_wilson95": [
+        0.8670253806763384,
+        0.8866694951500762
+      ],
+      "cell_count": 8,
+      "feasibility_pass": true,
+      "point_acceptance_fraction": 0.8614,
+      "retained_seeds_by_eta_index_per_arm": {
+        "0": [
+          907
+        ],
+        "1": [
+          901,
+          907
+        ],
+        "2": [
+          907
+        ]
+      },
+      "simulation_seed": 9700000,
+      "simulations_under_centered_prediction_null": 5000,
+      "strict_point_interior_fraction": 0.813,
+      "valid_bootstrap_refits": {
+        "max": 10000,
+        "median": 10000.0,
+        "min": 0,
+        "q10": 2484.0,
+        "q90": 10000.0
+      }
+    }
+  },
+  "minimum_required_P_eval": 0.8,
+  "minimum_required_P_pass_given_evaluable": 0.8,
+  "pre_outcome": true,
+  "schema": "yeto_outer_mup_v9_7b_scope_reduction_gatesim_v1",
+  "selected_layout": "symmetric_6_single_seed",
+  "selection_rule": "first symmetric candidate in ascending cell count with both P_eval and P_pass_given_evaluable at least 0.8 under the centered prediction null",
+  "source_artifacts": {
+    "original_gatesim": {
+      "path": "experiment-specs/outer-mup-v9-sealed-scale-gatesim.json",
+      "sha256": "6813c6cee46ff579309b3055ba635147de32d78acf47a0ea864f6ab305cdc305"
+    },
+    "sealed_predictions": {
+      "path": "experiment-specs/outer-mup-v9-sealed-predictions.json",
+      "sha256": "97e02dcad63782978ac51b320621e5a681236518cb0d5db19454b8981549ca9c",
+      "untouched": true
+    }
+  },
+  "status": "PASS",
+  "verification_loss_seen": false
+}

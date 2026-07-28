@@ -26,7 +26,9 @@ from run_slot_v3 import (  # noqa: E402
 )
 
 
-CONTRACT_JSON_SHA256 = "46686fd91e301555bf9f337bf58398d4ad81bdbbd5c249ac5bc081a56670d22c"
+CONTRACT_JSON_SHA256 = (
+    "46686fd91e301555bf9f337bf58398d4ad81bdbbd5c249ac5bc081a56670d22c"
+)
 CONTRACT_MD_SHA256 = "07032889dc02c4d76e0c894e803a63fe232c1c3ddbc1e9ff69fc073487c29fe8"
 ANALYZER_SHA256 = "efc18c8105a85072e1de3b58fa353488da15ff32a3406878265b8cb10035aba8"
 PREDICTIONS_SHA256 = "97e02dcad63782978ac51b320621e5a681236518cb0d5db19454b8981549ca9c"
@@ -318,6 +320,49 @@ def load_retry_authority(
     return set(groups)
 
 
+def load_scope_retained_ids(path: Path, manifest: dict, stage: str) -> set[str]:
+    if stage != "stage_7b":
+        raise SystemExit("the v9 scope-reduction overlay applies only to stage_7b")
+    scope = read_json(path)
+    errors = []
+    if scope.get("schema") != "yeto_outer_mup_v9_7b_scope_reduction_v1":
+        errors.append("scope-reduction schema mismatch")
+    if scope.get("status") != "REGISTERED" or scope.get("pre_outcome") is not True:
+        errors.append("scope reduction is not registered pre-outcome")
+    if scope.get("verification_loss_seen") is not False:
+        errors.append("scope reduction is not outcome-blind")
+    if scope.get("inventory", {}).get("completed_cells") != 0:
+        errors.append("scope reduction was not frozen at zero completions")
+    if scope.get("sealed_predictions", {}).get("sha256") != PREDICTIONS_SHA256:
+        errors.append("scope reduction binds another prediction seal")
+    reduction = scope.get("reduction", {})
+    retained = reduction.get("retained_cell_ids")
+    removed = reduction.get("removed_cell_ids")
+    if not isinstance(retained, list) or not isinstance(removed, list):
+        errors.append("scope-reduction cell lists are malformed")
+        retained = []
+        removed = []
+    retained_set = set(retained)
+    removed_set = set(removed)
+    stage_ids = {
+        cell["cell_id"]
+        for cell in manifest.get("cells", [])
+        if cell.get("stage") == "stage_7b"
+    }
+    if (
+        len(retained) != 6
+        or len(retained_set) != 6
+        or len(removed) != 6
+        or len(removed_set) != 6
+        or retained_set & removed_set
+        or retained_set | removed_set != stage_ids
+    ):
+        errors.append("scope reduction does not partition the registered 7B cells")
+    if errors:
+        raise SystemExit("; ".join(errors))
+    return retained_set
+
+
 def kill_process_group(process: subprocess.Popen) -> None:
     if process.poll() is not None:
         return
@@ -372,6 +417,7 @@ def run_queue(
     launch_authority_path: Path,
     attempt_number: int,
     retry_authority_path: Path | None,
+    scope_amendment_path: Path | None,
 ) -> int:
     manifest = read_json(manifest_path)
     repo = Path("/root/yeto")
@@ -381,18 +427,21 @@ def run_queue(
         raise SystemExit("v9 execution worktree is dirty")
     if attempt_number == 1 and execution_git_commit != registered_git_commit:
         raise SystemExit("attempt 1 must execute at the registered Git commit")
-    if attempt_number == 2 and subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repo),
-            "merge-base",
-            "--is-ancestor",
-            registered_git_commit,
-            execution_git_commit,
-        ],
-        capture_output=True,
-    ).returncode:
+    if (
+        attempt_number == 2
+        and subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "merge-base",
+                "--is-ancestor",
+                registered_git_commit,
+                execution_git_commit,
+            ],
+            capture_output=True,
+        ).returncode
+    ):
         raise SystemExit(
             "attempt 2 execution commit is not a descendant of the registration"
         )
@@ -426,6 +475,9 @@ def run_queue(
         queue = [cell for cell in queue if cell["retry_group_id"] in retry_groups]
     elif retry_authority_path is not None:
         raise SystemExit("retry authority is forbidden for attempt 1")
+    if scope_amendment_path is not None:
+        retained_ids = load_scope_retained_ids(scope_amendment_path, manifest, stage)
+        queue = [cell for cell in queue if cell["cell_id"] in retained_ids]
     queue.sort(key=lambda cell: cell["slot_queue_index"])
     status_path = RESULT_LINK / "_controller" / "slots-v9" / stage / f"{slot_id}.json"
     lock_path = RESULT_LINK / "_controller" / "locks-v9" / stage / f"{slot_id}.lock"
@@ -522,6 +574,11 @@ def run_queue(
                     env=dict(os.environ),
                     start_new_session=True,
                 )
+                process_identity = {
+                    "controller_pid": os.getpid(),
+                    "scientific_process_pid": process.pid,
+                    "scientific_process_group_id": os.getpgid(process.pid),
+                }
                 wall_stopped = False
                 while process.poll() is None:
                     if time.time() >= deadline:
@@ -542,6 +599,12 @@ def run_queue(
                             "queue_total": len(queue),
                             "completed": completed,
                             "failures": failures,
+                            **process_identity,
+                            "scope_amendment_sha256": (
+                                sha256_file(scope_amendment_path)
+                                if scope_amendment_path is not None
+                                else None
+                            ),
                             "elapsed_seconds": time.monotonic() - started_monotonic,
                             "gpu_sample": gpu_sample(gpus),
                             "updated_at_utc": utc_now(),
@@ -660,6 +723,7 @@ def main() -> int:
     parser.add_argument("--launch-authority", type=Path)
     parser.add_argument("--attempt", type=int, choices=(1, 2), default=1)
     parser.add_argument("--retry-authority", type=Path)
+    parser.add_argument("--scope-amendment", type=Path)
     parser.add_argument("--preflight", action="store_true")
     args = parser.parse_args()
     if args.preflight:
@@ -686,6 +750,7 @@ def main() -> int:
         launch_authority_path=args.launch_authority,
         attempt_number=args.attempt,
         retry_authority_path=args.retry_authority,
+        scope_amendment_path=args.scope_amendment,
     )
 
 

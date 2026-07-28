@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply the frozen G9 analysis to the sealed 1.7B and 7B verification cells."""
+"""Apply amended G9 analysis to the sealed 1.7B and reduced 7B cells."""
 
 from __future__ import annotations
 
@@ -28,8 +28,15 @@ except ModuleNotFoundError:  # imported through repository root in tests
 
 MANIFEST_SCHEMA = "yeto_outer_mup_v9_launch_manifest_v1"
 PREDICTION_SCHEMA = "yeto_outer_mup_v9_sealed_predictions_v1"
-EXPECTED_CELLS = 28
-SEEDS = (901, 907)
+REGISTERED_MANIFEST_CELLS = 28
+EXPECTED_EVIDENCE_CELLS = 22
+STAGE_SEEDS = {
+    "stage_1p7b": (901, 907),
+    # Outcome-blind scope amendment retains the complete three-rung seed-907
+    # panel symmetrically for both 7B targets.  A bootstrap draw from the
+    # singleton empirical seed distribution therefore always maps to 907.
+    "stage_7b": (907,),
+}
 GATE_TO_STAGE = {"G9A_1P7B": "stage_1p7b", "G9B_7B": "stage_7b"}
 STAGE_TARGETS = {
     "stage_1p7b": ("raw", "corrected"),
@@ -68,13 +75,15 @@ def completed_attempt(cell: dict, root: Path) -> tuple[Path, dict, int]:
 
 
 def load_losses(
-    manifest: dict, node_roots: dict[str, Path]
+    manifest: dict, node_roots: dict[str, Path], retained_7b_cell_ids: set[str]
 ) -> tuple[dict, list[dict], list[str]]:
     losses = {}
     records = []
     errors = []
     for cell in manifest.get("cells", []):
         cell_id = cell.get("cell_id", "<missing-cell-id>")
+        if cell.get("stage") == "stage_7b" and cell_id not in retained_7b_cell_ids:
+            continue
         try:
             node = cell["assignment"]["node"]
             if node not in node_roots:
@@ -162,10 +171,11 @@ def fit_curve(
 ) -> dict:
     target = predictions[stage]["targets"][arm]
     etas = [float(value) for value in target["verification_etas"]]
+    available_seeds = STAGE_SEEDS[stage]
     selected_seeds = (
-        [SEEDS[index] for index in sampled_indices]
+        [available_seeds[index % len(available_seeds)] for index in sampled_indices]
         if sampled_indices is not None
-        else list(SEEDS)
+        else list(available_seeds)
     )
     means = []
     for eta in etas:
@@ -340,10 +350,59 @@ def display_error(gate: dict, arm: str) -> str:
     return "NA" if value is None else f"{float(value):+.6f}"
 
 
+def validate_scope_amendment(
+    scope: dict, manifest: dict, predictions_path: Path
+) -> set[str]:
+    if scope.get("schema") != "yeto_outer_mup_v9_7b_scope_reduction_v1":
+        raise V9Error("not the registered v9 7B scope-reduction amendment")
+    if scope.get("status") != "REGISTERED" or not scope.get("pre_outcome"):
+        raise V9Error("scope reduction is not registered pre-outcome")
+    if scope.get("verification_loss_seen") is not False:
+        raise V9Error("scope amendment is not outcome-blind")
+    if scope.get("inventory", {}).get("completed_cells") != 0:
+        raise V9Error("scope amendment was not registered at zero completions")
+    sealed = scope.get("sealed_predictions", {})
+    if sealed.get("sha256") != sha256_file(predictions_path):
+        raise V9Error("scope amendment binds another sealed prediction file")
+    if sealed.get("untouched") is not True:
+        raise V9Error("scope amendment does not attest predictions were untouched")
+    reduction = scope.get("reduction", {})
+    retained = reduction.get("retained_cell_ids")
+    removed = reduction.get("removed_cell_ids")
+    if not isinstance(retained, list) or not isinstance(removed, list):
+        raise V9Error("scope amendment cell lists are malformed")
+    retained_set = set(retained)
+    removed_set = set(removed)
+    if len(retained) != 6 or len(retained_set) != 6:
+        raise V9Error("scope amendment must retain exactly six unique 7B cells")
+    if len(removed) != 6 or len(removed_set) != 6 or retained_set & removed_set:
+        raise V9Error("scope amendment must remove the complementary six cells")
+    stage_cells = [
+        cell for cell in manifest.get("cells", []) if cell.get("stage") == "stage_7b"
+    ]
+    by_id = {cell.get("cell_id"): cell for cell in stage_cells}
+    if len(stage_cells) != 12 or set(by_id) != retained_set | removed_set:
+        raise V9Error("scope amendment does not partition the registered 7B cells")
+    retained_coordinates = {
+        (cell.get("arm"), int(cell.get("eta_index", -1)), int(cell.get("seed", -1)))
+        for cell_id, cell in by_id.items()
+        if cell_id in retained_set
+    }
+    expected_coordinates = {
+        (arm, eta_index, 907)
+        for arm in STAGE_TARGETS["stage_7b"]
+        for eta_index in range(3)
+    }
+    if retained_coordinates != expected_coordinates:
+        raise V9Error("scope amendment is not the symmetric seed-907 three-rung panel")
+    return retained_set
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--predictions", type=Path, required=True)
+    parser.add_argument("--scope-amendment", type=Path, required=True)
     parser.add_argument(
         "--node-root",
         action="append",
@@ -354,9 +413,10 @@ def main() -> int:
     args = parser.parse_args()
     manifest = read_json(args.manifest)
     predictions = read_json(args.predictions)
+    scope = read_json(args.scope_amendment)
     if (
         manifest.get("schema") != MANIFEST_SCHEMA
-        or len(manifest.get("cells", [])) != EXPECTED_CELLS
+        or len(manifest.get("cells", [])) != REGISTERED_MANIFEST_CELLS
     ):
         raise SystemExit("manifest is not the complete 28-cell v9 launch")
     if (
@@ -366,9 +426,17 @@ def main() -> int:
         raise SystemExit("predictions are not the sealed v9 predictions")
     if manifest.get("predictions", {}).get("sha256") != sha256_file(args.predictions):
         raise SystemExit("manifest binds another prediction file")
+    try:
+        retained_7b_cell_ids = validate_scope_amendment(
+            scope, manifest, args.predictions
+        )
+    except V9Error as exc:
+        raise SystemExit(str(exc)) from exc
     roots = parse_node_roots(args.node_root)
-    losses, cell_records, evidence_errors = load_losses(manifest, roots)
-    expected_by_stage = {"stage_1p7b": 16, "stage_7b": 12}
+    losses, cell_records, evidence_errors = load_losses(
+        manifest, roots, retained_7b_cell_ids
+    )
+    expected_by_stage = {"stage_1p7b": 16, "stage_7b": 6}
     observed_by_stage = {
         stage: sum(record["stage"] == stage for record in cell_records)
         for stage in expected_by_stage
@@ -408,8 +476,12 @@ def main() -> int:
         "manifest_sha256": sha256_file(args.manifest),
         "predictions_path": str(args.predictions.resolve()),
         "predictions_sha256": sha256_file(args.predictions),
+        "scope_amendment_path": str(args.scope_amendment.resolve()),
+        "scope_amendment_sha256": sha256_file(args.scope_amendment),
         "source_git_commit": manifest.get("source", {}).get("git_commit"),
-        "expected_cells": EXPECTED_CELLS,
+        "registered_manifest_cells": REGISTERED_MANIFEST_CELLS,
+        "expected_cells": EXPECTED_EVIDENCE_CELLS,
+        "expected_by_stage": expected_by_stage,
         "observed_completed_cells": len(cell_records),
         "observed_by_stage": observed_by_stage,
         "evidence_errors": evidence_errors,

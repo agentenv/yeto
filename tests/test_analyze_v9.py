@@ -94,6 +94,29 @@ def test_exact_centered_predictions_pass_both_gates():
     assert all(gate["verdict"] == "PASS" for gate in result["gates"].values())
     for gate in result["gates"].values():
         assert gate["bootstrap"]["valid_replicates"] == 10_000
+    assert result["gates"]["G9A_1P7B"]["curve_fits"]["raw"]["seeds"] == [
+        901,
+        907,
+    ]
+    assert result["gates"]["G9B_7B"]["curve_fits"]["raw"]["seeds"] == [907]
+
+
+def test_reduced_7b_gate_does_not_require_removed_seed_901():
+    module = load()
+    losses, predictions, manifest = fixture(module)
+    losses = {
+        key: value
+        for key, value in losses.items()
+        if key[0] != "stage_7b" or key[2] == 907
+    }
+    result = module.analyze_losses(
+        losses=losses,
+        predictions=predictions,
+        manifest=manifest,
+        stage_complete={"stage_1p7b": True, "stage_7b": True},
+    )
+    assert result["verdict"] == "PASS"
+    assert result["gates"]["G9B_7B"]["bootstrap"]["valid_replicates"] == 10_000
 
 
 def test_one_bit_transport_miss_fails_when_evaluable():

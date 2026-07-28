@@ -1,0 +1,302 @@
+{
+  "schema": "yeto_outer_mup_v9_7b_scope_reduction_v1",
+  "status": "REGISTERED",
+  "amendment_id": "v9-7b-pre-outcome-seed-panel-reduction-20260728",
+  "created_at_utc": "2026-07-28T00:54:38Z",
+  "pre_outcome": true,
+  "verification_loss_seen": false,
+  "scientific_outcome_fields_read": false,
+  "reason": "Urgent wall-clock reduction ordered before any valid 7B completion",
+  "base_registration": {
+    "branch": "experiment/outer-mup-v9-sealed-scale",
+    "original_registration_git_commit": "1001572d10b921c07ddfd94ce95f78964bcf1962",
+    "barrier_fix_git_commit": "084d58c1305ab7086d227a625cd1cf70d330dc21",
+    "retry_execution_git_commit": "57711ba1f3ef4f4b30f85904c623dbc91930933c",
+    "launch_manifest_path": "/root/yeto-results-v9/_controller/launch-v9/launch-manifest-v9.json",
+    "launch_manifest_sha256": "26efd59b51cd9121d1157889bf4f58d47cf0d9cfba7f56c31d999e95d4eec567",
+    "live_manifest_registered_source_git_commit": "1001572d10b921c07ddfd94ce95f78964bcf1962",
+    "provenance_note": "The live registered manifest remains bound to 1001572; attempt-2 executes at descendant 57711ba, which contains barrier fix 084d58c and retry provenance. This overlay changes scientific scope without rewriting the live launch record."
+  },
+  "sealed_predictions": {
+    "path": "experiment-specs/outer-mup-v9-sealed-predictions.json",
+    "sha256": "97e02dcad63782978ac51b320621e5a681236518cb0d5db19454b8981549ca9c",
+    "untouched": true,
+    "targets_referenced_by_stage_7b": [
+      "mu0",
+      "raw"
+    ]
+  },
+  "inventory": {
+    "captured_from_slot_updates_at_utc": "2026-07-28T00:53:55Z",
+    "classification_rule": "RUNNING is read only from slot-state state=RUNNING and its cell_id; QUEUED is a later registered queue position in that same RUNNING slot; COMPLETED requires evidence status=COMPLETED and is cross-checked against the slot completed counter. Directory presence is not a status signal.",
+    "running_cells": 4,
+    "queued_cells": 8,
+    "completed_cells": 0,
+    "slot_completed_counter_sum": 0,
+    "completed_evidence_status_records": 0,
+    "evidence_status_values_observed": [
+      "INFRA_FAILURE"
+    ],
+    "slot_snapshots": [
+      {
+        "path": "/root/yeto-results-v9/_controller/slots-v9/stage_7b/h200-n1-gpu0-3.json",
+        "sha256_at_capture": "f13e199968a2cbcfef1a210479ec574b4356b348e4e3a3005c55bc4afaf1034f",
+        "updated_at_utc": "2026-07-28T00:53:55.399358+00:00",
+        "node": "h200-n1",
+        "slot_id": "h200-n1-gpu0-3",
+        "state": "RUNNING",
+        "cell_id": "v9-7b-t05-raw-e1-seed907",
+        "queue_index": 0,
+        "queue_total": 3,
+        "completed": 0,
+        "failures": 0
+      },
+      {
+        "path": "/root/yeto-results-v9/_controller/slots-v9/stage_7b/h200-n1-gpu4-7.json",
+        "sha256_at_capture": "c3a7aa83aee128c22e3056dbf0948b93dbe974c7ed639896cc62c3f5f92e8387",
+        "updated_at_utc": "2026-07-28T00:53:55.368012+00:00",
+        "node": "h200-n1",
+        "slot_id": "h200-n1-gpu4-7",
+        "state": "RUNNING",
+        "cell_id": "v9-7b-t05-raw-e2-seed907",
+        "queue_index": 0,
+        "queue_total": 3,
+        "completed": 0,
+        "failures": 0
+      },
+      {
+        "path": "/root/yeto-results-v9/_controller/slots-v9/stage_7b/h200-n2-gpu0-3.json",
+        "sha256_at_capture": "3e04a3eb2bde8424d98e50d2f29281c9a8b642ded75e4f4204c43684e12a2251",
+        "updated_at_utc": "2026-07-28T00:53:55.930233+00:00",
+        "node": "h200-n2",
+        "slot_id": "h200-n2-gpu0-3",
+        "state": "RUNNING",
+        "cell_id": "v9-7b-t05-mu0-e2-seed907",
+        "queue_index": 0,
+        "queue_total": 3,
+        "completed": 0,
+        "failures": 0
+      },
+      {
+        "path": "/root/yeto-results-v9/_controller/slots-v9/stage_7b/h200-n2-gpu4-7.json",
+        "sha256_at_capture": "01d8abb8c479a13f6e769b01a08af8bfad363d92c51422e69cf7849c4839b008",
+        "updated_at_utc": "2026-07-28T00:53:55.930280+00:00",
+        "node": "h200-n2",
+        "slot_id": "h200-n2-gpu4-7",
+        "state": "RUNNING",
+        "cell_id": "v9-7b-t05-raw-e1-seed901",
+        "queue_index": 0,
+        "queue_total": 3,
+        "completed": 0,
+        "failures": 0
+      }
+    ],
+    "evidence_status_records": [
+      {
+        "cell_id": "v9-7b-t05-raw-e1-seed901",
+        "attempt_number": 1,
+        "status": "INFRA_FAILURE",
+        "validated_at_utc": "2026-07-27T17:32:00.613862+00:00"
+      },
+      {
+        "cell_id": "v9-7b-t05-mu0-e0-seed907",
+        "attempt_number": 1,
+        "status": "INFRA_FAILURE",
+        "validated_at_utc": "2026-07-27T17:40:33.356877+00:00"
+      },
+      {
+        "cell_id": "v9-7b-t05-mu0-e1-seed901",
+        "attempt_number": 1,
+        "status": "INFRA_FAILURE",
+        "validated_at_utc": "2026-07-27T17:45:34.943744+00:00"
+      }
+    ],
+    "cells": [
+      {
+        "cell_id": "v9-7b-t05-raw-e1-seed907",
+        "node": "h200-n1",
+        "slot_id": "h200-n1-gpu0-3",
+        "slot_queue_index": 0,
+        "inventory_state": "RUNNING"
+      },
+      {
+        "cell_id": "v9-7b-t05-mu0-e0-seed901",
+        "node": "h200-n1",
+        "slot_id": "h200-n1-gpu0-3",
+        "slot_queue_index": 1,
+        "inventory_state": "QUEUED"
+      },
+      {
+        "cell_id": "v9-7b-t05-raw-e2-seed901",
+        "node": "h200-n1",
+        "slot_id": "h200-n1-gpu0-3",
+        "slot_queue_index": 2,
+        "inventory_state": "QUEUED"
+      },
+      {
+        "cell_id": "v9-7b-t05-raw-e2-seed907",
+        "node": "h200-n1",
+        "slot_id": "h200-n1-gpu4-7",
+        "slot_queue_index": 0,
+        "inventory_state": "RUNNING"
+      },
+      {
+        "cell_id": "v9-7b-t05-raw-e0-seed901",
+        "node": "h200-n1",
+        "slot_id": "h200-n1-gpu4-7",
+        "slot_queue_index": 1,
+        "inventory_state": "QUEUED"
+      },
+      {
+        "cell_id": "v9-7b-t05-mu0-e1-seed907",
+        "node": "h200-n1",
+        "slot_id": "h200-n1-gpu4-7",
+        "slot_queue_index": 2,
+        "inventory_state": "QUEUED"
+      },
+      {
+        "cell_id": "v9-7b-t05-mu0-e2-seed907",
+        "node": "h200-n2",
+        "slot_id": "h200-n2-gpu0-3",
+        "slot_queue_index": 0,
+        "inventory_state": "RUNNING"
+      },
+      {
+        "cell_id": "v9-7b-t05-raw-e0-seed907",
+        "node": "h200-n2",
+        "slot_id": "h200-n2-gpu0-3",
+        "slot_queue_index": 1,
+        "inventory_state": "QUEUED"
+      },
+      {
+        "cell_id": "v9-7b-t05-mu0-e2-seed901",
+        "node": "h200-n2",
+        "slot_id": "h200-n2-gpu0-3",
+        "slot_queue_index": 2,
+        "inventory_state": "QUEUED"
+      },
+      {
+        "cell_id": "v9-7b-t05-raw-e1-seed901",
+        "node": "h200-n2",
+        "slot_id": "h200-n2-gpu4-7",
+        "slot_queue_index": 0,
+        "inventory_state": "RUNNING"
+      },
+      {
+        "cell_id": "v9-7b-t05-mu0-e0-seed907",
+        "node": "h200-n2",
+        "slot_id": "h200-n2-gpu4-7",
+        "slot_queue_index": 1,
+        "inventory_state": "QUEUED"
+      },
+      {
+        "cell_id": "v9-7b-t05-mu0-e1-seed901",
+        "node": "h200-n2",
+        "slot_id": "h200-n2-gpu4-7",
+        "slot_queue_index": 2,
+        "inventory_state": "QUEUED"
+      }
+    ]
+  },
+  "reduction": {
+    "registered_7b_cells_before": 12,
+    "required_7b_cells_after": 6,
+    "selection_rule": "Retain the first smallest symmetric design in ascending cell count whose frozen-pattern prospective GATESIM has both P_eval and P_pass_given_evaluable at least 0.8.",
+    "retained_seed": 907,
+    "removed_seed": 901,
+    "eta_indices_retained_for_every_arm": [
+      0,
+      1,
+      2
+    ],
+    "retained_cell_ids": [
+      "v9-7b-t05-mu0-e0-seed907",
+      "v9-7b-t05-mu0-e1-seed907",
+      "v9-7b-t05-mu0-e2-seed907",
+      "v9-7b-t05-raw-e0-seed907",
+      "v9-7b-t05-raw-e1-seed907",
+      "v9-7b-t05-raw-e2-seed907"
+    ],
+    "removed_cell_ids": [
+      "v9-7b-t05-mu0-e0-seed901",
+      "v9-7b-t05-mu0-e1-seed901",
+      "v9-7b-t05-mu0-e2-seed901",
+      "v9-7b-t05-raw-e0-seed901",
+      "v9-7b-t05-raw-e1-seed901",
+      "v9-7b-t05-raw-e2-seed901"
+    ],
+    "arm_balance": {
+      "mu0": {
+        "cells": 3,
+        "seed": 907,
+        "eta_indices": [
+          0,
+          1,
+          2
+        ]
+      },
+      "raw": {
+        "cells": 3,
+        "seed": 907,
+        "eta_indices": [
+          0,
+          1,
+          2
+        ]
+      }
+    },
+    "gate_arithmetic": {
+      "point_estimator": "OLS quadratic in loss versus log2(eta), using the one retained seed at each of the three sealed verification etas for each arm",
+      "bootstrap": "The original shared 10,000-draw two-index sequence is retained; the singleton seed-907 empirical distribution maps every draw to seed 907, so every accepted point fit has 10,000 valid refits.",
+      "minimum_valid_bootstrap_refits": 7500,
+      "near_bracket_allowance_bits": 0.5,
+      "absolute_error_band_bits": {
+        "mu0": 0.5,
+        "raw": 0.5
+      },
+      "not_evaluable_policy": "No missing retained cell may be dropped; all six COMPLETED evidence records and accepted fits for both arms remain mandatory."
+    }
+  },
+  "prospective_gatesim": {
+    "path": "experiment-specs/outer-mup-v9-7b-scope-reduction-gatesim.json",
+    "sha256": "cc0bea6d6444e39e140ed3e26a580116c50cc67ad1210ee8b019ecd4154d4d3d",
+    "reproduction_script": "scripts/gatesim_v9_scope_reduction.py",
+    "reproduction_script_sha256": "0258927521d921d87a625f448b354fd1578e6fa306e91e0278ad32fd879eb714",
+    "selected_layout": "symmetric_6_single_seed",
+    "simulations": 5000,
+    "P_eval": 0.825,
+    "P_pass_given_evaluable": 0.8727272727272727,
+    "minimum_required": 0.8,
+    "status": "PASS"
+  },
+  "amended_analyzer": {
+    "path": "scripts/analyze_v9.py",
+    "sha256": "ef140f0a3e6d2a543bf6f422af85ec716dd4b355c65961ad5ba5a100335f1ea1",
+    "expected_registered_manifest_cells": 28,
+    "expected_completed_evidence_cells": 22,
+    "expected_completed_by_stage": {
+      "stage_1p7b": 16,
+      "stage_7b": 6
+    }
+  },
+  "amended_runner": {
+    "path": "scripts/run_slot_v9.py",
+    "sha256": "a4246fb754793583951f628f4892ad4ec180526bc5305e47ace86612d92a58ea",
+    "scope_filter": "--scope-amendment filters future or resumed stage_7b queues to the six retained cell IDs",
+    "slot_pid_fields": [
+      "controller_pid",
+      "scientific_process_pid",
+      "scientific_process_group_id"
+    ]
+  },
+  "enactment_rails": {
+    "kill_only_removed_running_cells": true,
+    "kill_source": "exact scientific PID resolved for the cell named by the RUNNING slot-state; bracketed pgrep may only be used to verify that PID",
+    "park_name": "attempt-2-descoped",
+    "park_requires_unchanged_mtime": true,
+    "completed_trees_immutable": true,
+    "sealed_predictions_immutable": true,
+    "freed_gpu_owner": "tonight85",
+    "launch_unrelated_work": false
+  }
+}
