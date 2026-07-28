@@ -277,6 +277,20 @@ def _weighted_token_loss(output, weights):
     return (output * loss_weights).sum() / loss_weights.sum().clamp_min(1)
 
 
+def _prepare_model_config(model, finalize_model_grads, pipeline_parallel):
+    """Install Yeto's training hooks and required pipeline metadata."""
+    cfg = getattr(model[0], "config", None) or getattr(
+        getattr(model[0], "module", None), "config"
+    )
+    cfg.finalize_model_grads_func = finalize_model_grads
+    if pipeline_parallel > 1 and getattr(cfg, "pipeline_dtype", None) is None:
+        pipeline_dtype = getattr(cfg, "params_dtype", None)
+        if pipeline_dtype is None:
+            raise RuntimeError("Megatron PP requires model config.params_dtype")
+        cfg.pipeline_dtype = pipeline_dtype
+    return cfg
+
+
 def _build_dataset(args):
     from transformers import AutoTokenizer
 
@@ -538,8 +552,7 @@ def main(argv=None):
     ddp_cfg = DistributedDataParallelConfig(
         use_distributed_optimizer=True, overlap_grad_reduce=True, grad_reduce_in_fp32=True
     )
-    cfg = getattr(model[0], "config", None) or getattr(getattr(model[0], "module", None), "config")
-    cfg.finalize_model_grads_func = finalize_model_grads
+    cfg = _prepare_model_config(model, finalize_model_grads, args.pipeline_parallel)
     model = [DDP(config=cfg, ddp_config=ddp_cfg, module=m) for m in model]
     opt = get_megatron_optimizer(
         config=OptimizerConfig(

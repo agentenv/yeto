@@ -108,6 +108,15 @@ def test_weighted_token_loss_uses_only_assistant_tokens():
     assert ml._weighted_token_loss(losses, weights).item() == 3.0
 
 
+def test_prepare_model_config_sets_pipeline_dtype_from_params_dtype():
+    finalize = object()
+    cfg = SimpleNamespace(params_dtype="bf16", pipeline_dtype=None)
+
+    assert ml._prepare_model_config([SimpleNamespace(config=cfg)], finalize, 2) is cfg
+    assert cfg.pipeline_dtype == "bf16"
+    assert cfg.finalize_model_grads_func is finalize
+
+
 def test_build_model_disables_bridge_ddp_and_uses_lora_signature(monkeypatch):
     seen = {}
 
