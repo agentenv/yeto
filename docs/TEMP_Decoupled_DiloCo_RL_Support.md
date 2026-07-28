@@ -906,7 +906,7 @@ ACK 承担实际 apply 的协议证明。
 
 以下顺序只覆盖 v0 的依赖关系。
 
-本分支当前自动化快照：Python `727 passed, 4 skipped`；Rust `61 passed`；
+本分支当前自动化快照：Python `729 passed, 4 skipped`；Rust `61 passed`；
 `python -m compileall -q yeto`、`cargo fmt --check` 和 `git diff --check` 通过。
 真实 GPU 结果单列于第 13.4、13.5 节，不混入自动化测试计数。
 
@@ -918,7 +918,8 @@ ACK 承担实际 apply 的协议证明。
 
 - 显式单 AVG fragment，证明不经过 RDA；
 - canonical name/order/shape/fingerprint/policy hash 稳定；
-- PEFT↔canonical round trip；
+- Llama、Qwen2、Qwen3 三类精确 Transformers config 均通过公共 Miles
+  attention 配置、family-specific 参数和 PEFT↔canonical round trip；
 - 两个 tiny local states 的手工等权 oracle；
 - strict CLI 对每个冲突参数（包括 `merge_alpha`）fail closed；
 - 精确 Transformers config/model/architecture 白名单拒绝 remote-code subclass

@@ -258,13 +258,33 @@ def test_miles_argv_and_resolved_contract_are_strict(tmp_path):
             config=candidate,
         )
 
-    qwen2 = copy.copy(config)
-    qwen2.model_type = "qwen2"
-    assert "--add-qkv-bias" in model_argv(qwen2)
+    from transformers import LlamaConfig, Qwen2Config, Qwen3Config
 
-    qwen3 = copy.copy(config)
-    qwen3.model_type = "qwen3"
-    assert "--qk-layernorm" in model_argv(qwen3)
+    common = {
+        "hidden_size": 8,
+        "intermediate_size": 16,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "vocab_size": 32,
+        "max_position_embeddings": 32,
+    }
+    for config_class, architecture, family_flag in (
+        (LlamaConfig, "LlamaForCausalLM", None),
+        (Qwen2Config, "Qwen2ForCausalLM", "--add-qkv-bias"),
+        (Qwen3Config, "Qwen3ForCausalLM", "--qk-layernorm"),
+    ):
+        candidate = config_class(
+            **common,
+            **({"head_dim": 4} if config_class is Qwen3Config else {}),
+        )
+        candidate.architectures = [architecture]
+        family_argv = model_argv(candidate)
+        assert _transformers_model_family(candidate)[0].__name__ == architecture
+        assert ("--add-qkv-bias" in family_argv) == (family_flag == "--add-qkv-bias")
+        assert ("--qk-layernorm" in family_argv) == (family_flag == "--qk-layernorm")
+        assert family_argv[family_argv.index("--attention-backend") + 1] == "flash"
+        assert family_argv[family_argv.index("--sglang-attention-backend") + 1] == "triton"
 
     nested_rope = copy.copy(config)
     del nested_rope.rope_theta
@@ -570,12 +590,24 @@ def test_supported_model_family_rejects_spoofed_or_mismatched_architecture():
         _transformers_model_family(config)
 
 
-def test_tiny_llama_checkpoint_exports_as_standard_peft_adapter(tmp_path):
+@pytest.mark.parametrize(
+    ("config_name", "architecture"),
+    (
+        ("LlamaConfig", "LlamaForCausalLM"),
+        ("Qwen2Config", "Qwen2ForCausalLM"),
+        ("Qwen3Config", "Qwen3ForCausalLM"),
+    ),
+)
+def test_supported_dense_family_exports_as_standard_peft_adapter(
+    tmp_path, config_name, architecture
+):
+    import transformers
     from peft import PeftModel, get_peft_model_state_dict
-    from transformers import AutoModelForCausalLM, LlamaConfig
+    from transformers import AutoModelForCausalLM
 
     model_dir = tmp_path / "model"
-    config = LlamaConfig(
+    config_class = getattr(transformers, config_name)
+    config = config_class(
         hidden_size=8,
         intermediate_size=16,
         num_hidden_layers=1,
@@ -583,8 +615,9 @@ def test_tiny_llama_checkpoint_exports_as_standard_peft_adapter(tmp_path):
         num_key_value_heads=2,
         vocab_size=32,
         max_position_embeddings=32,
+        **({"head_dim": 4} if config_name == "Qwen3Config" else {}),
     )
-    config.architectures = ["LlamaForCausalLM"]
+    config.architectures = [architecture]
     config.save_pretrained(model_dir)
     specs = derive_peft_lora_specs(
         str(model_dir),
