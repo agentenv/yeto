@@ -1,0 +1,40 @@
+{
+  "P_evaluable": 1.0,
+  "P_pass_given_evaluable": 1.0,
+  "P_pass_unconditional": 1.0,
+  "evaluable": 2000,
+  "implied_center_D_descriptive": {
+    "T2": 4.169069258322886,
+    "T20": 0.14048238041720013,
+    "T5": 2.743731857911357
+  },
+  "offsets_log2": [
+    -1.5,
+    -0.5,
+    0.5,
+    1.5
+  ],
+  "pass": 2000,
+  "placement_stress": {
+    "per_horizon_mu09_relative_sd_bits": 0.1,
+    "shared_log2_eta_sd_bits": 0.35
+  },
+  "pre_outcome_v13b": true,
+  "registered_centers": {
+    "T20_mu0": 0.06201671160649202,
+    "T20_mu09": 0.0008712255272127002,
+    "T2_mu0": 0.025125139710338324,
+    "T2_mu09": 0.01047484475774391,
+    "T5_mu0": 0.015350998708982334,
+    "T5_mu09": 0.004211902420859095
+  },
+  "replicates": 2000,
+  "rng_seed": 20260743,
+  "schema": "yeto_v13b_gate_feasibility_v1",
+  "scope": "bracketing and sampling-noise feasibility only; v13 edge locations set the centers, while no v13 arm-comparison estimand or G13B outcome is used",
+  "source": {
+    "g6_path": "/private/tmp/g6-readout-tonight85.json",
+    "g6_sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+  },
+  "status": "PASS"
+}

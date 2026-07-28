@@ -1,0 +1,485 @@
+{
+  "analysis": {
+    "bootstrap": "unchanged 10000 paired three-seed resamples with RNG seed 20260742",
+    "gate_name": "G13B",
+    "minimum_valid_bootstrap_refits": 7500,
+    "missing_or_unbracketed_rule": "NOT_EVALUABLE; no v13b rung may be added or moved",
+    "near_bracket_allowance_bits": 0.5,
+    "point": "unchanged OLS quadratic in pooled three-seed mean endpoint loss versus log2(eta)",
+    "success_rule": "D(2)>D(5)>D(20) in point estimates and the lower endpoint of each paired 95% bootstrap CI for adjacent log2-D differences is >0",
+    "unchanged_v13_core": {
+      "bytes": 16638,
+      "path": "scripts/tonight85_analysis.py",
+      "sha256": "810256b6f897c2347aabaddfe266b07a866835885c25e623b6da3d08aedb53cd"
+    }
+  },
+  "defect_classification": {
+    "analyzer_validity_vocabulary_changed": false,
+    "cause": "GRID_MISCENTERING_FOR_NEW_MODEL_FAMILY",
+    "direction": {
+      "higher_eta": [
+        "T20/mu0"
+      ],
+      "lower_eta": [
+        "T2/mu0",
+        "T2/mu0.9",
+        "T5/mu0",
+        "T5/mu0.9",
+        "T20/mu0.9"
+      ]
+    },
+    "eval_stream_or_tokenizer_mismatch_not_observed": {
+      "all_72_example_registry_hash": "010349b61e0b4bd6e2221e5b3b1ef1667b08087e81ea963a64282d20a1f51483",
+      "all_72_token_registry_hash": "f047360d7833ce6db96dcef80ddcb64229b7becb574bf501598e819de6fcf7a9",
+      "eval_rows": 1024,
+      "eval_supervised_tokens": 985008,
+      "same_model_tokenizer_path_for_train_and_eval": true
+    }
+  },
+  "design": {
+    "S": 2560,
+    "T": [
+      2,
+      5,
+      20
+    ],
+    "cells": 72,
+    "data": "HuggingFaceH4/ultrachat_200k frozen v13 train/eval files",
+    "eta_levels": 4,
+    "grids": [
+      {
+        "H": 1280,
+        "S": 2560,
+        "T": 2,
+        "mu0": {
+          "center": 0.025125139710338324,
+          "center_source": "sealed G13 pooled discrete LOWER_ETA edge",
+          "etas": [
+            0.00888307833371982,
+            0.01776615666743964,
+            0.03553231333487928,
+            0.07106462666975856
+          ],
+          "offsets_log2": [
+            -1.5,
+            -0.5,
+            0.5,
+            1.5
+          ]
+        },
+        "mu0.9": {
+          "center": 0.01047484475774391,
+          "center_source": "sealed G13 pooled discrete LOWER_ETA edge",
+          "etas": [
+            0.0037034168800385387,
+            0.0074068337600770775,
+            0.014813667520154155,
+            0.02962733504030831
+          ],
+          "offsets_log2": [
+            -1.5,
+            -0.5,
+            0.5,
+            1.5
+          ]
+        }
+      },
+      {
+        "H": 512,
+        "S": 2560,
+        "T": 5,
+        "mu0": {
+          "center": 0.015350998708982334,
+          "center_source": "sealed G13 pooled discrete LOWER_ETA edge",
+          "etas": [
+            0.005427397642553673,
+            0.010854795285107346,
+            0.021709590570214692,
+            0.043419181140429385
+          ],
+          "offsets_log2": [
+            -1.5,
+            -0.5,
+            0.5,
+            1.5
+          ]
+        },
+        "mu0.9": {
+          "center": 0.004211902420859095,
+          "center_source": "sealed G13 pooled discrete LOWER_ETA edge",
+          "etas": [
+            0.0014891323817427511,
+            0.0029782647634855022,
+            0.0059565295269710045,
+            0.011913059053942009
+          ],
+          "offsets_log2": [
+            -1.5,
+            -0.5,
+            0.5,
+            1.5
+          ]
+        }
+      },
+      {
+        "H": 128,
+        "S": 2560,
+        "T": 20,
+        "mu0": {
+          "center": 0.06201671160649202,
+          "center_source": "sealed G13 pooled discrete HIGHER_ETA edge",
+          "etas": [
+            0.021926218661920488,
+            0.043852437323840976,
+            0.08770487464768195,
+            0.1754097492953639
+          ],
+          "offsets_log2": [
+            -1.5,
+            -0.5,
+            0.5,
+            1.5
+          ]
+        },
+        "mu0.9": {
+          "center": 0.0008712255272127002,
+          "center_source": "sealed G13 pooled discrete LOWER_ETA edge",
+          "etas": [
+            0.0003080247391174627,
+            0.0006160494782349254,
+            0.0012320989564698509,
+            0.0024641979129397017
+          ],
+          "offsets_log2": [
+            -1.5,
+            -0.5,
+            0.5,
+            1.5
+          ]
+        }
+      }
+    ],
+    "model": "EleutherAI/pythia-160m",
+    "model_revision": "50f5173d932e8e61f858120bcb800b97af589f46",
+    "mu": [
+      0.0,
+      0.9
+    ],
+    "same_as_v13_except_registered_eta_grids": true,
+    "seeds": [
+      981,
+      983,
+      991
+    ],
+    "training_seeds": [
+      981981,
+      983983,
+      991991
+    ]
+  },
+  "execution": {
+    "analysis_cutoff": "2026-07-28T08:30:00-07:00",
+    "cutoff_rule": "if not fully drained and analyzed by cutoff, DEFERRED_ARXIV_V2",
+    "isolated_checkout": "/root/yeto-v13b",
+    "registration_order": "commit and push contract plus every frozen artifact before manifest, authority, result-root creation, attempt directory, or GPU process",
+    "result_root": "/root/yeto-results-v13b -> /data/yeto-results-v13b",
+    "slots": [
+      {
+        "gpus": [
+          6,
+          7
+        ],
+        "node": "h200-n1"
+      },
+      {
+        "gpus": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "node": "h200-n2"
+      }
+    ],
+    "v11_reserved_queues": {
+      "gpus": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "must_not_be_stopped_or_modified": true,
+      "node": "h200-n1"
+    }
+  },
+  "frozen_artifacts": {
+    "analyzer": {
+      "bytes": 2136,
+      "path": "scripts/analyze_v13b.py",
+      "sha256": "baf1cc89996960ec869a79606dcef8d61c69a77a7b46a6cfecaeeb4160ca8927"
+    },
+    "gatesim": {
+      "bytes": 4870,
+      "path": "scripts/gatesim_v13b.py",
+      "sha256": "da35c17e6a11fa0df4fc5270032875f6557d227dd2eb60c5c2686fc75d8491b8"
+    },
+    "launch_authorizer": {
+      "bytes": 3425,
+      "path": "scripts/authorize_v13b_launch.py",
+      "sha256": "ee96f9e300eb75570f8864753481180b8cec64056a4000da9bee228f74e5d1f5"
+    },
+    "manifest_builder": {
+      "bytes": 8972,
+      "path": "scripts/build_v13b_manifest.py",
+      "sha256": "1dce67c9ec023732ed810d3cd40268f0203bc770a55c8d6b4616293d86653926"
+    },
+    "node_preflight": {
+      "bytes": 4287,
+      "path": "scripts/preflight_v13b.py",
+      "sha256": "4b54133371311ed1ad984b49b4ec4e1c299a1ceac8457c7f4b582146e96fc682"
+    },
+    "original_analysis_core": {
+      "bytes": 16638,
+      "path": "scripts/tonight85_analysis.py",
+      "sha256": "810256b6f897c2347aabaddfe266b07a866835885c25e623b6da3d08aedb53cd"
+    },
+    "slot_runner": {
+      "bytes": 9619,
+      "path": "scripts/run_slot_v13b.py",
+      "sha256": "c34f34ff0226b3d7dd5c10343d2c2f1cdbd774e5946f19b9dd8ccde48f6b5af2"
+    }
+  },
+  "gate_feasibility": {
+    "report": {
+      "bytes": 1137,
+      "path": "experiment-specs/tonight85-v13b-gatesim.json",
+      "sha256": "0a2c67ede4e76d083f97dd7810a3f69284a97c28385f63eb7ba378dce1e884fb"
+    },
+    "result": {
+      "P_evaluable": 1.0,
+      "P_pass_given_evaluable": 1.0,
+      "P_pass_unconditional": 1.0,
+      "evaluable": 2000,
+      "implied_center_D_descriptive": {
+        "T2": 4.169069258322886,
+        "T20": 0.14048238041720013,
+        "T5": 2.743731857911357
+      },
+      "offsets_log2": [
+        -1.5,
+        -0.5,
+        0.5,
+        1.5
+      ],
+      "pass": 2000,
+      "placement_stress": {
+        "per_horizon_mu09_relative_sd_bits": 0.1,
+        "shared_log2_eta_sd_bits": 0.35
+      },
+      "pre_outcome_v13b": true,
+      "registered_centers": {
+        "T20_mu0": 0.06201671160649202,
+        "T20_mu09": 0.0008712255272127002,
+        "T2_mu0": 0.025125139710338324,
+        "T2_mu09": 0.01047484475774391,
+        "T5_mu0": 0.015350998708982334,
+        "T5_mu09": 0.004211902420859095
+      },
+      "replicates": 2000,
+      "rng_seed": 20260743,
+      "schema": "yeto_v13b_gate_feasibility_v1",
+      "scope": "bracketing and sampling-noise feasibility only; v13 edge locations set the centers, while no v13 arm-comparison estimand or G13B outcome is used",
+      "source": {
+        "g6_path": "/private/tmp/g6-readout-tonight85.json",
+        "g6_sha256": "7e7e9cd8901520cc8f0ca822151af92c4c6183ee99bf02199bc1452a2763af8c"
+      },
+      "status": "PASS"
+    }
+  },
+  "immutability": {
+    "never_modify": [
+      "v11 trees or processes",
+      "v12 tree or G12 verdict",
+      "v7 trees or sealed verdicts",
+      "original v13 results or G13 verdict"
+    ],
+    "no_further_regrid_after_v13b_outcome": true
+  },
+  "original_v13_disposition_is_immutable": "G13 VERDICT: NOT_EVALUABLE",
+  "pre_outcome_v13b": true,
+  "program_id": "outer-mup-v13b-pythia-ultrachat-regrid",
+  "purpose": "Repeat the same 72-cell second-family scan on prospectively frozen grids whose centers equal each curve's sealed v13 discrete edge location.",
+  "registered_at_utc": "2026-07-28T11:28:30.358147+00:00",
+  "retry_contract": {
+    "allowed_reasons": [
+      "host_or_gpu_failure",
+      "framework_or_driver_failure",
+      "storage_or_network_failure",
+      "registered_process_timeout_without_valid_endpoint"
+    ],
+    "attempt_limit": 2,
+    "finite_loss_or_edge_retry_forbidden": true,
+    "unit": "all four eta cells sharing T, arm, and training seed"
+  },
+  "schema": "yeto_outer_mup_v13b_pythia_ultrachat_regrid_prereg_v1",
+  "status": "REGISTERED_PRE_OUTCOME",
+  "v13_trigger_disclosure": {
+    "arm_comparison_blinding": "Each new arm grid is fixed solely by the eta index of that same arm's pooled discrete boundary minimum. No loss difference, D ratio, cross-arm ranking, G13 scientific ordering, or fitted arm-comparison estimand selects a center.",
+    "completed_cells": 72,
+    "contract_sha256": "0947cfbd809c9437843b70ce231b48b200fe7cc92eed1d1dbe92952dd1798223",
+    "curve_diagnostics": {
+      "T20_mu0": {
+        "edge_direction": "HIGHER_ETA",
+        "etas": [
+          0.007752088950811502,
+          0.015504177901623005,
+          0.03100835580324601,
+          0.06201671160649202
+        ],
+        "frozen_fit_accepted": false,
+        "frozen_fit_status": "UNBRACKETED",
+        "pooled_discrete_minimum_eta": 0.06201671160649202,
+        "pooled_discrete_minimum_eta_index": 3,
+        "pooled_three_seed_losses": [
+          7.912546289420632,
+          29.56954518921557,
+          6.943658828170776,
+          5.890323352994016
+        ],
+        "quadratic_curvature": -5.677583593745205,
+        "v13b_center_equals_this_edge": true,
+        "vertex_log2_eta": -5.763881966545572
+      },
+      "T20_mu09": {
+        "edge_direction": "LOWER_ETA",
+        "etas": [
+          0.0008712255272127002,
+          0.0017424510544254005,
+          0.003484902108850801,
+          0.006969804217701602
+        ],
+        "frozen_fit_accepted": true,
+        "frozen_fit_status": "INTERIOR",
+        "pooled_discrete_minimum_eta": 0.0008712255272127002,
+        "pooled_discrete_minimum_eta_index": 0,
+        "pooled_three_seed_losses": [
+          6.605658079748545,
+          9.208842931454571,
+          7.668161935110411,
+          43.05362883870367
+        ],
+        "quadratic_curvature": 8.195570512984402,
+        "v13b_center_equals_this_edge": true,
+        "vertex_log2_eta": -9.32235820248135
+      },
+      "T2_mu0": {
+        "edge_direction": "LOWER_ETA",
+        "etas": [
+          0.025125139710338324,
+          0.05025027942067665,
+          0.1005005588413533,
+          0.2010011176827066
+        ],
+        "frozen_fit_accepted": false,
+        "frozen_fit_status": "UNBRACKETED",
+        "pooled_discrete_minimum_eta": 0.025125139710338324,
+        "pooled_discrete_minimum_eta_index": 0,
+        "pooled_three_seed_losses": [
+          4.682967845663209,
+          8.832297249613406,
+          9.574731454818055,
+          8.01834763775778
+        ],
+        "quadratic_curvature": -1.4264283052526432,
+        "v13b_center_equals_this_edge": true,
+        "vertex_log2_eta": -3.4379592777478702
+      },
+      "T2_mu09": {
+        "edge_direction": "LOWER_ETA",
+        "etas": [
+          0.01047484475774391,
+          0.02094968951548782,
+          0.04189937903097564,
+          0.08379875806195128
+        ],
+        "frozen_fit_accepted": false,
+        "frozen_fit_status": "UNBRACKETED",
+        "pooled_discrete_minimum_eta": 0.01047484475774391,
+        "pooled_discrete_minimum_eta_index": 0,
+        "pooled_three_seed_losses": [
+          4.613769720951869,
+          8.833947122185444,
+          9.647373107619797,
+          8.001383654970141
+        ],
+        "quadratic_curvature": -1.4665417134708374,
+        "v13b_center_equals_this_edge": true,
+        "vertex_log2_eta": -4.702704497778906
+      },
+      "T5_mu0": {
+        "edge_direction": "LOWER_ETA",
+        "etas": [
+          0.015350998708982334,
+          0.030701997417964668,
+          0.061403994835929336,
+          0.12280798967185867
+        ],
+        "frozen_fit_accepted": false,
+        "frozen_fit_status": "UNBRACKETED",
+        "pooled_discrete_minimum_eta": 0.015350998708982334,
+        "pooled_discrete_minimum_eta_index": 0,
+        "pooled_three_seed_losses": [
+          5.145050664766509,
+          9.85661188735704,
+          8.86681408177693,
+          6.9336162189172015
+        ],
+        "quadratic_curvature": -1.661189771362288,
+        "v13b_center_equals_this_edge": true,
+        "vertex_log2_eta": -4.393813889805002
+      },
+      "T5_mu09": {
+        "edge_direction": "LOWER_ETA",
+        "etas": [
+          0.004211902420859095,
+          0.00842380484171819,
+          0.01684760968343638,
+          0.03369521936687276
+        ],
+        "frozen_fit_accepted": false,
+        "frozen_fit_status": "UNBRACKETED",
+        "pooled_discrete_minimum_eta": 0.004211902420859095,
+        "pooled_discrete_minimum_eta_index": 0,
+        "pooled_three_seed_losses": [
+          4.9109087228372905,
+          9.599317727947893,
+          9.10741987445055,
+          7.122808957450104
+        ],
+        "quadratic_curvature": -1.6682549805290507,
+        "v13b_center_equals_this_edge": true,
+        "vertex_log2_eta": -6.207173667939302
+      }
+    },
+    "failed_cells": 0,
+    "gate_conditions": {
+      "adjacent_difference_cis_above_zero": false,
+      "all_six_curves_accepted": false,
+      "complete_72_cells": true,
+      "point_estimates_monotone": false,
+      "valid_bootstrap_at_least_7500": false
+    },
+    "registration_commit": "c310dc69f471c60f208995602c144a34e57f86da",
+    "sealed_readout_path": "/private/tmp/tonight85-control/v13-readout.json",
+    "sealed_readout_sha256": "be69b796d80bf5a32828d803aee65459639643991bb8230eee30e1f6be0eef5a",
+    "static_manifest_sha256": "de7f9e78a328b469d2aeeb3613cfadd2b619ea0137a8366af80a7384481610b2",
+    "summary": "All six pooled discrete minima were on a registered boundary: T2/mu0, T2/mu0.9, T5/mu0, T5/mu0.9, and T20/mu0.9 at the low-eta edge; T20/mu0 at the high-eta edge. Five of six frozen quadratic fits were unaccepted; the only accepted fit was T20/mu0.9.",
+    "valid_bootstrap_draws": 0
+  }
+}
