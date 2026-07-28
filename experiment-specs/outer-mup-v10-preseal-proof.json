@@ -1,0 +1,35 @@
+{
+  "schema": "yeto_outer_mup_v10_preseal_proof_v1",
+  "captured_at_utc": "2026-07-28T02:08:00Z",
+  "pre_outcome": true,
+  "nodes": {
+    "h200-n1": {
+      "root_result_link": "ABSENT",
+      "data_result_target": "ABSENT",
+      "matching_v10_priority_processes": []
+    },
+    "h200-n2": {
+      "root_result_link": "ABSENT",
+      "data_result_target": "ABSENT",
+      "matching_v10_priority_processes": []
+    }
+  },
+  "paths_checked": [
+    "/root/yeto-results-v10",
+    "/data/yeto-results-v10"
+  ],
+  "bracketed_process_query": "pgrep -af '[r]un_slot_v10.py|[v]10-transfer'",
+  "tonight85_fleet_gate": {
+    "source": "/private/tmp/yeto-tonight85/scripts/tonight85_conductor.py",
+    "priority_section_pattern": "[r]un_slot_v9.py|[l]aunch_v9_stage.py|[r]un_slot_v10.py|[v]10-transfer|[7][bB]-wave",
+    "v10_registration_choice": "run_slot_v10.py plus v10-transfer priority guard",
+    "effect": "fleet_clear_for_tonight() remains false until V10 explicitly releases its guards"
+  },
+  "gatesim_completed_before_cells": {
+    "path": "experiment-specs/outer-mup-v10-freshtransfer-gatesim.json",
+    "sha256": "17f5181675eabba78f5697c7c5114afcecaa14cf581d0851ae54a6f0ed6ea131",
+    "P_eval": 1.0,
+    "mandatory_bar": 0.8
+  },
+  "assertion": "No V10 result directory, controller, cell attempt, endpoint, or scientific outcome existed on either H200 node when the frozen registration packet was sealed."
+}
