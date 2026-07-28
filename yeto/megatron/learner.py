@@ -265,6 +265,18 @@ def _adapter_params(model):
     return out
 
 
+def _weighted_token_loss(output, weights):
+    """Reduce Megatron's per-token losses using Yeto's assistant mask."""
+    if not output.dim():
+        return output
+    if output.numel() != weights.numel():
+        raise ValueError(
+            f"loss/mask size mismatch: {output.numel()} losses for {weights.numel()} weights"
+        )
+    loss_weights = weights.reshape(output.shape).to(output.dtype)
+    return (output * loss_weights).sum() / loss_weights.sum().clamp_min(1)
+
+
 def _build_dataset(args):
     from transformers import AutoTokenizer
 
@@ -604,6 +616,7 @@ def _run_inner_loop(
         batch = next(it)
         ids = batch["input_ids"].to(device)
         labels = batch["labels"].to(device)
+        weights = batch["weights"].to(device)
         pos = torch.arange(ids.size(1), device=device).unsqueeze(0).expand_as(ids)
         is_first_stage, is_last_stage = _pipeline_stage_roles()
         out = mdl(
@@ -614,7 +627,7 @@ def _run_inner_loop(
         )
 
         def loss_func(output):
-            loss = output.mean() if output.dim() else output
+            loss = _weighted_token_loss(output, weights)
             return loss, {"lm loss": loss.detach()}
 
         return out, loss_func
@@ -709,14 +722,22 @@ def _run_inner_loop(
 
 
 def _cycle(dataset):
-    """Endless (input_ids, labels) micro-batches from yeto's packed blocks."""
+    """Endless Megatron batches from Yeto's packed token/weight blocks."""
     import torch
 
     while True:
         for block in dataset:
-            ids = block["input_ids"] if isinstance(block, dict) else block[0]
+            if isinstance(block, dict):
+                ids = block["input_ids"]
+                weights = block.get("weights")
+            else:
+                ids, weights = block
             ids = torch.as_tensor(ids).unsqueeze(0)
-            yield {"input_ids": ids, "labels": ids.clone()}
+            if weights is None:
+                weights = torch.ones_like(ids, dtype=torch.float)
+            else:
+                weights = torch.as_tensor(weights, dtype=torch.float).unsqueeze(0)
+            yield {"input_ids": ids, "labels": ids.clone(), "weights": weights}
 
 
 if __name__ == "__main__":

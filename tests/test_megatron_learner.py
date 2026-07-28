@@ -84,13 +84,28 @@ def test_attention_targets_are_megatron_names_not_hf():
 
 
 def test_cycle_yields_endless_input_label_batches():
-    gen = ml._cycle([{"input_ids": [1, 2, 3]}, {"input_ids": [4, 5, 6]}])
+    gen = ml._cycle(
+        [
+            {"input_ids": [1, 2, 3], "weights": [0.0, 1.0, 1.0]},
+            {"input_ids": [4, 5, 6], "weights": [1.0, 0.0, 1.0]},
+        ]
+    )
     b0 = next(gen)
     assert b0["input_ids"].shape == (1, 3)
     assert (b0["labels"] == b0["input_ids"]).all()
+    assert b0["weights"].tolist() == [[0.0, 1.0, 1.0]]
     # endless: wraps past the 2-element dataset
     seen = [tuple(next(gen)["input_ids"][0].tolist()) for _ in range(4)]
     assert seen == [(4, 5, 6), (1, 2, 3), (4, 5, 6), (1, 2, 3)]
+
+
+def test_weighted_token_loss_uses_only_assistant_tokens():
+    import torch
+
+    losses = torch.tensor([[100.0, 2.0, 4.0, 100.0]])
+    weights = torch.tensor([[0.0, 1.0, 1.0, 0.0]])
+
+    assert ml._weighted_token_loss(losses, weights).item() == 3.0
 
 
 def test_build_model_disables_bridge_ddp_and_uses_lora_signature(monkeypatch):
