@@ -1,0 +1,4 @@
+convention,mu,scale,T,campaign,best_model,log2_r,log2_r_pred_135M,residual_bits,momentum_point_id
+nesterov_raw,0.9,1.7B,5,G4C,sat_exp_to_one,0.8004263967191038,1.3076948588460047,-0.5072684621269009,G4C:1.7B:T5:mu0.9:raw:H512:S2560
+nesterov_raw,0.9,7B,5,G9B,sat_exp_to_one,1.404232284975014,1.3076948588460047,0.09653742612900928,G9B:7B:T5:mu0.9:raw:H512:S2560
+nesterov_raw,0.9,1.7B,20,G4C,sat_exp_to_one,0.3569262008616348,0.14122005045903488,0.2157061504025999,G4C:1.7B:T20:mu0.9:raw:H512:S10240
