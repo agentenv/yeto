@@ -530,7 +530,7 @@ def test_diffusion_aligns_extra_output_tokens_to_target_tokens():
     assert aligned_target is target
 
 
-def test_diffusion_aligns_learned_variance_image_channels():
+def test_diffusion_does_not_align_learned_variance_channels_without_adapter():
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
 
@@ -539,6 +539,29 @@ def test_diffusion_aligns_learned_variance_image_channels():
 
     aligned_pred, aligned_target = learner._align_prediction_and_target(
         SimpleNamespace(),
+        pred,
+        target,
+        learner.LatentBatch(pred, latent_height=3, latent_width=3),
+        learner.TextConditioning(None),
+    )
+
+    assert aligned_pred is pred
+    assert aligned_target is target
+
+
+def test_pixart_adapter_aligns_learned_variance_image_channels():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class PixArtTransformer2DModel:
+        pass
+
+    pred = torch.arange(2 * 8 * 3 * 3, dtype=torch.float32).reshape(2, 8, 3, 3)
+    target = torch.zeros(2, 4, 3, 3)
+    pipe = SimpleNamespace(transformer=PixArtTransformer2DModel())
+
+    aligned_pred, aligned_target = learner._align_prediction_and_target(
+        pipe,
         pred,
         target,
         learner.LatentBatch(pred, latent_height=3, latent_width=3),
@@ -577,14 +600,22 @@ def test_diffusion_unpack_with_ids_crops_extra_output_tokens():
 
 def test_diffusion_adapter_base_is_marker_not_hook_provider():
     pytest.importorskip("torch")
-    from yeto.diffusion.adapters import DiffusionAdapter, DiffusionAdapterProtocol
+    from yeto.diffusion.adapters import (
+        DiffusionAdapter,
+        DiffusionAdapterProtocol,
+        PixArtAdapter,
+    )
     from yeto.diffusion.adapters.nava import NavaAdapter
 
     marker = DiffusionAdapter()
     assert not hasattr(marker, "load_pipeline")
     assert not hasattr(marker, "training_step")
+    assert not hasattr(marker, "denoiser_kwargs")
     assert hasattr(DiffusionAdapterProtocol, "load_pipeline")
+    assert hasattr(DiffusionAdapterProtocol, "denoiser_kwargs")
+    assert hasattr(DiffusionAdapterProtocol, "align_prediction_and_target")
     assert issubclass(NavaAdapter, DiffusionAdapter)
+    assert issubclass(PixArtAdapter, DiffusionAdapter)
 
 
 def test_diffusion_adapter_template_loads():
@@ -1218,6 +1249,55 @@ def test_diffusion_autobatch_doubles_until_oom(monkeypatch):
 
     assert got == 4
     assert sizes == [1, 2, 4, 8]
+
+
+def test_diffusion_autobatch_uses_npu_allocator_abstraction(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class NpuOutOfMemory(RuntimeError):
+        pass
+
+    sizes = []
+    cache_clears = []
+
+    def probe(pipe, params, opt, rows, args, device, micro_batch, adapter=None):
+        del pipe, params, opt, rows, args, device, adapter
+        sizes.append(micro_batch)
+        if micro_batch >= 4:
+            raise NpuOutOfMemory("synthetic")
+
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(
+            OutOfMemoryError=NpuOutOfMemory,
+            empty_cache=lambda: cache_clears.append(True),
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(learner, "_probe_diffusion_once", probe)
+    opt = SimpleNamespace(zero_grad=lambda set_to_none=True: None)
+    args = _args(
+        data=[{"latents": [0.0], "prompt_embeds": [[0.0]]}],
+        cache_latents=True,
+        cache_text_embeds=True,
+        micro_batch_size="auto",
+    )
+
+    got = learner.resolve_diffusion_micro_batch_size(
+        args,
+        None,
+        {},
+        opt,
+        SimpleNamespace(type="npu"),
+        rank=0,
+        world=1,
+    )
+
+    assert got == 2
+    assert sizes == [1, 2, 4]
+    assert len(cache_clears) == 3
 
 
 def test_diffusion_autobatch_bucket_by_shape_uses_smallest_fit(monkeypatch):
@@ -2756,7 +2836,7 @@ def test_denoise_forward_auto_fills_additional_size_conditions():
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
 
-    class TinyDenoiser(torch.nn.Module):
+    class PixArtTransformer2DModel(torch.nn.Module):
         use_additional_conditions = True
 
         def __init__(self):
@@ -2777,7 +2857,7 @@ def test_denoise_forward_auto_fills_additional_size_conditions():
             self.seen = added_cond_kwargs
             return hidden_states + 1
 
-    pipe = argparse.Namespace(transformer=TinyDenoiser(), vae_scale_factor=8)
+    pipe = argparse.Namespace(transformer=PixArtTransformer2DModel(), vae_scale_factor=8)
     noisy = learner.LatentBatch(
         torch.zeros(2, 4, 32, 48),
         latent_height=32,
@@ -2803,11 +2883,13 @@ def test_denoise_forward_auto_fills_additional_size_conditions():
     )
 
 
-def test_denoise_forward_leaves_optional_additional_conditions_unset():
+def test_denoise_forward_does_not_apply_pixart_contract_by_config_flag_alone():
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
 
     class TinyDenoiser(torch.nn.Module):
+        use_additional_conditions = True
+
         def __init__(self):
             super().__init__()
             self.seen = "not-called"
@@ -2827,6 +2909,52 @@ def test_denoise_forward_leaves_optional_additional_conditions_unset():
     )
 
     assert pipe.transformer.seen is None
+
+
+def test_denoise_forward_adapter_can_override_generic_kwargs():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+    from yeto.diffusion.adapters import DiffusionAdapter
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.return_dict = None
+
+        def forward(self, hidden_states, timestep, return_dict=False):
+            del timestep
+            self.return_dict = return_dict
+            return hidden_states
+
+    class OverrideAdapter(DiffusionAdapter):
+        def denoiser_kwargs(
+            self,
+            pipe,
+            model,
+            noisy,
+            cond,
+            args,
+            params,
+            kwargs,
+            *,
+            pixel_height,
+            pixel_width,
+        ):
+            del pipe, model, noisy, cond, args, params, kwargs
+            del pixel_height, pixel_width
+            return {"return_dict": True}
+
+    pipe = argparse.Namespace(transformer=TinyDenoiser())
+    learner.denoise_forward(
+        pipe,
+        learner.LatentBatch(torch.zeros(1, 4, 8, 8)),
+        torch.tensor([1]),
+        learner.TextConditioning(None),
+        argparse.Namespace(),
+        OverrideAdapter(),
+    )
+
+    assert pipe.transformer.return_dict is True
 
 
 def test_denoise_forward_auto_fills_rotary_size_and_fps_signature_fields():
