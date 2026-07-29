@@ -448,6 +448,22 @@ fn compute_action_fingerprint(preview: &ActionPreview) -> [u64; 2] {
     mix_optional_f64(&mut hash, preview.stats.outer.direction_delta_cosine);
     mix_optional_f64(&mut hash, preview.stats.outer.history_current_norm_ratio);
     mix_action_fingerprint(&mut hash, preview.stats.outer.restarted as u64);
+    if let Some(trace) = preview.stats.outer.fedadam {
+        // Append-only opt-in block: legacy action fingerprints are unchanged.
+        mix_action_fingerprint(&mut hash, 0x6665_6461_6461_6d31);
+        for value in [
+            trace.beta1,
+            trace.beta2,
+            trace.m_before_l2,
+            trace.v_before_l1,
+            trace.m_after_l2,
+            trace.v_after_l1,
+            trace.recurrence_max_abs_error,
+        ] {
+            mix_action_fingerprint(&mut hash, value.to_bits());
+        }
+        mix_action_fingerprint(&mut hash, trace.zero_safe_coordinates);
+    }
     if let Some(controller) = preview.stats.outer_lr_controller {
         // Appended only for opt-in controller paths so default action
         // fingerprints remain byte-identical to the pre-controller schema.
@@ -1124,14 +1140,21 @@ impl GlobalState {
         } else {
             self.outer_momentum
         };
-        let applied_step = merge::materialize_applied_step(
-            self.outer_optimizer,
-            &resulting_optimizer_buffer,
-            delta,
-            outer_lr,
-            materialize_momentum,
-            resulting_capped_gain,
-        );
+        let applied_step = if self.outer_optimizer == merge::OuterOptimizer::FedAdam {
+            resulting_curv_prev_dtheta
+                .iter()
+                .map(|direction| outer_lr * *direction)
+                .collect()
+        } else {
+            merge::materialize_applied_step(
+                self.outer_optimizer,
+                &resulting_optimizer_buffer,
+                delta,
+                outer_lr,
+                materialize_momentum,
+                resulting_capped_gain,
+            )
+        };
         let materialized_step_norm = flat_l2_norm(&applied_step);
         let norm_tolerance = 1e-6 * outer.applied_step_norm.abs().max(1.0);
         if resulting_params.iter().any(|value| !value.is_finite())
@@ -1157,6 +1180,19 @@ impl GlobalState {
             || outer
                 .history_current_norm_ratio
                 .is_some_and(|value| !value.is_finite())
+            || outer.fedadam.is_some_and(|trace| {
+                [
+                    trace.beta1,
+                    trace.beta2,
+                    trace.m_before_l2,
+                    trace.v_before_l1,
+                    trace.m_after_l2,
+                    trace.v_after_l1,
+                    trace.recurrence_max_abs_error,
+                ]
+                .into_iter()
+                .any(|value| !value.is_finite())
+            })
             || (materialized_step_norm - outer.applied_step_norm).abs() > norm_tolerance
         {
             bail!("fragment {fid}: outer-step preview produced a non-finite result");
@@ -1298,6 +1334,7 @@ impl GlobalState {
                     direction_delta_cosine,
                     history_current_norm_ratio,
                     restarted: false,
+                    fedadam: None,
                 },
                 outer_bias_correction: None,
                 outer_lr_controller: None,
@@ -1850,6 +1887,19 @@ impl GlobalState {
                 .outer
                 .history_current_norm_ratio
                 .is_some_and(|value| !value.is_finite())
+            || preview.stats.outer.fedadam.is_some_and(|trace| {
+                [
+                    trace.beta1,
+                    trace.beta2,
+                    trace.m_before_l2,
+                    trace.v_before_l1,
+                    trace.m_after_l2,
+                    trace.v_after_l1,
+                    trace.recurrence_max_abs_error,
+                ]
+                .into_iter()
+                .any(|value| !value.is_finite())
+            })
             || preview.stats.outer_lr_controller.is_some_and(|controller| {
                 !controller.scale.is_finite()
                     || controller.scale <= 0.0
@@ -1997,6 +2047,7 @@ impl GlobalState {
             // Append-only discriminator: all pre-existing optimizer
             // fingerprints retain their exact historical values.
             merge::OuterOptimizer::HeavyBall => 12,
+            merge::OuterOptimizer::FedAdam => 13,
             merge::OuterOptimizer::NormalizedEma => 1,
             merge::OuterOptimizer::RestartedEma => 2,
             merge::OuterOptimizer::RhoAdaptive => 3,

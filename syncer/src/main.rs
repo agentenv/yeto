@@ -71,7 +71,7 @@ struct Args {
     /// Outer Nesterov momentum, or beta for normalized EMA variants.
     #[arg(long, default_value_t = 0.9)]
     outer_momentum: f32,
-    /// Outer optimizer: nesterov, heavy-ball, normalized-ema, restarted-ema,
+    /// Outer optimizer: nesterov, heavy-ball, fedadam, normalized-ema, restarted-ema,
     /// rho-adaptive, capped-nesterov[-gc|-r], block-rms, block-yogi, or cheb-sgd.
     /// block-rms/block-yogi are memoryless (beta1=0) per-tensor second-moment
     /// optimizers with a global norm-match back to the plain-SGD step. cheb-sgd
@@ -209,6 +209,9 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
     validate_outer_optimizer(args.outer_optimizer, args.outer_momentum)?;
+    if args.outer_optimizer == merge::OuterOptimizer::FedAdam && args.resume {
+        anyhow::bail!("raw FedAdam scientific runs forbid --resume because v state is fresh-only");
+    }
     if args.outer_bias_correction && args.outer_lr_controller.is_some() {
         anyhow::bail!("--outer-bias-correction and --outer-lr-controller are mutually exclusive");
     }
@@ -417,6 +420,13 @@ fn validate_outer_optimizer(
     optimizer: merge::OuterOptimizer,
     outer_momentum: f32,
 ) -> anyhow::Result<()> {
+    if optimizer == merge::OuterOptimizer::FedAdam
+        && outer_momentum.to_bits() != merge::FEDADAM_BETA1.to_bits()
+    {
+        anyhow::bail!(
+            "--outer-optimizer fedadam fixes --outer-momentum to beta1=0.9, got {outer_momentum}"
+        );
+    }
     if optimizer.uses_normalized_ema()
         && (!outer_momentum.is_finite() || !(0.0..1.0).contains(&outer_momentum))
     {
@@ -738,6 +748,7 @@ mod tests {
         for (name, expected) in [
             ("nesterov", merge::OuterOptimizer::Nesterov),
             ("heavy-ball", merge::OuterOptimizer::HeavyBall),
+            ("fedadam", merge::OuterOptimizer::FedAdam),
             ("normalized-ema", merge::OuterOptimizer::NormalizedEma),
             ("restarted-ema", merge::OuterOptimizer::RestartedEma),
             ("capped-nesterov", merge::OuterOptimizer::CappedNesterov),
@@ -779,6 +790,8 @@ mod tests {
         );
         assert!(validate_outer_optimizer(merge::OuterOptimizer::ChebSgd, 0.9).is_ok());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::ChebSgd, f32::NAN).is_err());
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::FedAdam, 0.9).is_ok());
+        assert!(validate_outer_optimizer(merge::OuterOptimizer::FedAdam, 0.0).is_err());
         assert!(validate_outer_optimizer(merge::OuterOptimizer::CappedNesterovR, 0.9).is_ok());
         assert!(
             validate_outer_optimizer(merge::OuterOptimizer::CappedNesterovR, f32::NAN).is_err()

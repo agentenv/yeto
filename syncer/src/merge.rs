@@ -33,6 +33,8 @@ pub enum OuterOptimizer {
     Nesterov,
     /// Classical heavy-ball / SGD momentum without Nesterov lookahead.
     HeavyBall,
+    /// Coordinatewise, uncorrected Reddi-style FedAdam (beta1=.9, beta2=.99).
+    FedAdam,
     NormalizedEma,
     RestartedEma,
     RhoAdaptive,
@@ -51,6 +53,7 @@ impl OuterOptimizer {
         match self {
             Self::Nesterov => "nesterov",
             Self::HeavyBall => "heavy-ball",
+            Self::FedAdam => "fedadam",
             Self::NormalizedEma => "normalized-ema",
             Self::RestartedEma => "restarted-ema",
             Self::RhoAdaptive => "rho-adaptive",
@@ -83,6 +86,7 @@ impl FromStr for OuterOptimizer {
         match value {
             "nesterov" => Ok(Self::Nesterov),
             "heavy-ball" => Ok(Self::HeavyBall),
+            "fedadam" => Ok(Self::FedAdam),
             "normalized-ema" => Ok(Self::NormalizedEma),
             "restarted-ema" => Ok(Self::RestartedEma),
             "rho-adaptive" => Ok(Self::RhoAdaptive),
@@ -95,7 +99,7 @@ impl FromStr for OuterOptimizer {
             "block-yogi" => Ok(Self::BlockYogi),
             "cheb-sgd" => Ok(Self::ChebSgd),
             other => Err(format!(
-                "outer optimizer must be one of nesterov, heavy-ball, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov, capped-nesterov-gc, capped-nesterov-r, capped-nesterov-curv, capped-nesterov-wsub, block-rms, block-yogi, cheb-sgd; got {other:?}"
+                "outer optimizer must be one of nesterov, heavy-ball, fedadam, normalized-ema, restarted-ema, rho-adaptive, capped-nesterov, capped-nesterov-gc, capped-nesterov-r, capped-nesterov-curv, capped-nesterov-wsub, block-rms, block-yogi, cheb-sgd; got {other:?}"
             )),
         }
     }
@@ -115,6 +119,24 @@ pub struct OuterStepStats {
     pub history_current_norm_ratio: Option<f64>,
     /// Whether restarted EMA discarded nonzero history on this commit.
     pub restarted: bool,
+    /// Run-specific recurrence evidence, present only for raw FedAdam.
+    pub fedadam: Option<FedAdamTraceStats>,
+}
+
+/// Scalar evidence emitted for every raw-FedAdam commit. The implementation
+/// and its unit tests bind the coordinatewise recurrence; these summaries let
+/// a frozen analyzer additionally verify zero initialization and exact beta
+/// constants for each fragment in the actual scientific run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FedAdamTraceStats {
+    pub beta1: f64,
+    pub beta2: f64,
+    pub m_before_l2: f64,
+    pub v_before_l1: f64,
+    pub m_after_l2: f64,
+    pub v_after_l1: f64,
+    pub recurrence_max_abs_error: f64,
+    pub zero_safe_coordinates: u64,
 }
 
 /// Apply one configured outer-optimizer step.
@@ -160,6 +182,18 @@ pub fn apply_outer_step(
     match optimizer {
         OuterOptimizer::Nesterov => nesterov_step(params, buf, delta, lr, momentum),
         OuterOptimizer::HeavyBall => heavy_ball_step(params, buf, delta, lr, momentum),
+        // The curvature-history vectors are otherwise unused under FedAdam.
+        // Reusing those already per-fragment, preview-bound f32 vectors as
+        // coordinatewise v-state and direction trace preserves every legacy
+        // state layout and keeps all pre-existing optimizer paths bit-exact.
+        OuterOptimizer::FedAdam => fedadam_step(
+            params,
+            buf,
+            curv_prev_delta,
+            curv_prev_dtheta,
+            delta,
+            lr,
+        ),
         OuterOptimizer::NormalizedEma => normalized_ema_step(params, buf, delta, lr, momentum),
         OuterOptimizer::RestartedEma => {
             restarted_ema_step(params, buf, delta, lr, momentum, restart_cos_threshold)
@@ -232,6 +266,9 @@ pub fn materialize_applied_step(
             .zip(delta)
             .map(|(buf, value)| lr * (gain * (*value + momentum * *buf)))
             .collect(),
+        OuterOptimizer::FedAdam => {
+            panic!("FedAdam materialization requires its coordinatewise v state")
+        }
         OuterOptimizer::HeavyBall
         | OuterOptimizer::NormalizedEma
         | OuterOptimizer::RestartedEma
@@ -333,6 +370,7 @@ pub fn rho_adaptive_step(
         direction_delta_cosine: Some(1.0),
         history_current_norm_ratio: Some(rho),
         restarted: false,
+        fedadam: None,
     }
 }
 
@@ -1670,6 +1708,96 @@ pub fn heavy_ball_step(
     )
 }
 
+pub const FEDADAM_BETA1: f32 = 0.9;
+pub const FEDADAM_BETA2: f32 = 0.99;
+
+/// Coordinatewise raw FedAdam/FedOpt in the registered Reddi convention:
+/// `m <- .9*m + .1*delta`, `v <- .99*v + .01*delta^2`, and
+/// `theta <- theta - lr*(m/sqrt(v))`, with a literal zero-safe branch and no
+/// epsilon or bias correction. `m` and `v` are zero-filled, per-fragment
+/// states supplied by `GlobalState`; `direction_trace` is evidence-only.
+pub fn fedadam_step(
+    params: &mut [f32],
+    m: &mut [f32],
+    v: &mut [f32],
+    direction_trace: &mut [f32],
+    delta: &[f32],
+    lr: f32,
+) -> OuterStepStats {
+    debug_assert_eq!(params.len(), m.len());
+    debug_assert_eq!(params.len(), v.len());
+    debug_assert_eq!(params.len(), direction_trace.len());
+    debug_assert_eq!(params.len(), delta.len());
+    let m_before_l2 = norm_sq(m).sqrt();
+    let v_before_l1: f64 = v.iter().map(|value| *value as f64).sum();
+    let mut step_norm_sq = 0.0;
+    let mut direction_norm_sq = 0.0;
+    let mut delta_norm_sq = 0.0;
+    let mut direction_delta_dot = 0.0;
+    let mut history_norm_sq = 0.0;
+    let mut current_norm_sq = 0.0;
+    let mut recurrence_max_abs_error = 0.0f64;
+    let mut zero_safe_coordinates = 0u64;
+    for ((((p, m_value), v_value), trace), d) in params
+        .iter_mut()
+        .zip(m.iter_mut())
+        .zip(v.iter_mut())
+        .zip(direction_trace.iter_mut())
+        .zip(delta)
+    {
+        let previous_m = *m_value;
+        let previous_v = *v_value;
+        let expected_m = FEDADAM_BETA1 * previous_m + (1.0 - FEDADAM_BETA1) * *d;
+        let expected_v =
+            FEDADAM_BETA2 * previous_v + (1.0 - FEDADAM_BETA2) * (*d * *d);
+        *m_value = expected_m;
+        *v_value = expected_v;
+        recurrence_max_abs_error = recurrence_max_abs_error
+            .max((*m_value as f64 - expected_m as f64).abs())
+            .max((*v_value as f64 - expected_v as f64).abs());
+        let direction = if *v_value == 0.0 {
+            zero_safe_coordinates += 1;
+            0.0
+        } else {
+            *m_value / v_value.sqrt()
+        };
+        *trace = direction;
+        let step = lr * direction;
+        *p -= step;
+
+        let direction64 = direction as f64;
+        let delta64 = *d as f64;
+        let history = (FEDADAM_BETA1 * previous_m) as f64;
+        let current = ((1.0 - FEDADAM_BETA1) * *d) as f64;
+        step_norm_sq += (step as f64).powi(2);
+        direction_norm_sq += direction64 * direction64;
+        delta_norm_sq += delta64 * delta64;
+        direction_delta_dot += direction64 * delta64;
+        history_norm_sq += history * history;
+        current_norm_sq += current * current;
+    }
+    let mut stats = finish_outer_step_stats(
+        step_norm_sq,
+        direction_norm_sq,
+        delta_norm_sq,
+        direction_delta_dot,
+        history_norm_sq,
+        current_norm_sq,
+        false,
+    );
+    stats.fedadam = Some(FedAdamTraceStats {
+        beta1: FEDADAM_BETA1 as f64,
+        beta2: FEDADAM_BETA2 as f64,
+        m_before_l2,
+        v_before_l1,
+        m_after_l2: norm_sq(m).sqrt(),
+        v_after_l1: v.iter().map(|value| *value as f64).sum(),
+        recurrence_max_abs_error,
+        zero_safe_coordinates,
+    });
+    stats
+}
+
 fn norm_sq(values: &[f32]) -> f64 {
     values.iter().map(|value| (*value as f64).powi(2)).sum()
 }
@@ -1742,6 +1870,7 @@ fn finish_outer_step_stats(
         direction_delta_cosine,
         history_current_norm_ratio,
         restarted,
+        fedadam: None,
     }
 }
 
@@ -2420,6 +2549,93 @@ mod tests {
                 "fragment B params mismatch at call {call}",
             );
         }
+    }
+
+    #[test]
+    fn fedadam_first_five_calls_zero_safety_and_raw_multiplier_are_exact() {
+        let mut params = [0.0f32, 4.0];
+        let mut m = [0.0f32; 2];
+        let mut v = [0.0f32; 2];
+        let mut direction = [0.0f32; 2];
+        let delta = [2.0f32, 0.0];
+        let mut expected_m = 0.0f32;
+        let mut expected_v = 0.0f32;
+        let lr = 0.125f32;
+        for call in 1..=5 {
+            let before_m = expected_m;
+            let before_v = expected_v;
+            expected_m = FEDADAM_BETA1 * expected_m + (1.0 - FEDADAM_BETA1) * delta[0];
+            expected_v =
+                FEDADAM_BETA2 * expected_v + (1.0 - FEDADAM_BETA2) * delta[0].powi(2);
+            let expected_direction = expected_m / expected_v.sqrt();
+            let stats = fedadam_step(
+                &mut params,
+                &mut m,
+                &mut v,
+                &mut direction,
+                &delta,
+                lr,
+            );
+            assert_eq!(m[0].to_bits(), expected_m.to_bits(), "m at call {call}");
+            assert_eq!(v[0].to_bits(), expected_v.to_bits(), "v at call {call}");
+            assert_eq!(direction[0].to_bits(), expected_direction.to_bits());
+            assert_eq!(m[1].to_bits(), 0);
+            assert_eq!(v[1].to_bits(), 0);
+            assert_eq!(direction[1].to_bits(), 0);
+            let trace = stats.fedadam.expect("FedAdam trace must be present");
+            assert_eq!(trace.beta1, FEDADAM_BETA1 as f64);
+            assert_eq!(trace.beta2, FEDADAM_BETA2 as f64);
+            assert_eq!(trace.zero_safe_coordinates, 1);
+            assert_eq!(trace.recurrence_max_abs_error, 0.0);
+            assert_close(trace.m_before_l2, before_m as f64);
+            assert_close(trace.v_before_l1, before_v as f64);
+            let closed_form_direction =
+                (1.0 - 0.9f64.powi(call)) / (1.0 - 0.99f64.powi(call)).sqrt();
+            assert!((direction[0] as f64 - closed_form_direction).abs() < 2e-5);
+        }
+    }
+
+    #[test]
+    fn fedadam_fragment_states_are_disjoint_and_persistent() {
+        let mut params_a = [0.0f32];
+        let mut params_b = [0.0f32];
+        let mut m_a = [0.0f32];
+        let mut m_b = [0.0f32];
+        let mut v_a = [0.0f32];
+        let mut v_b = [0.0f32];
+        let mut direction_a = [0.0f32];
+        let mut direction_b = [0.0f32];
+        for call in 1..=5 {
+            let b_before = (m_b[0].to_bits(), v_b[0].to_bits());
+            fedadam_step(
+                &mut params_a,
+                &mut m_a,
+                &mut v_a,
+                &mut direction_a,
+                &[1.0],
+                0.1,
+            );
+            assert_eq!((m_b[0].to_bits(), v_b[0].to_bits()), b_before);
+            let trace_b = fedadam_step(
+                &mut params_b,
+                &mut m_b,
+                &mut v_b,
+                &mut direction_b,
+                &[-2.0],
+                0.1,
+            )
+            .fedadam
+            .unwrap();
+            if call == 1 {
+                assert_eq!(trace_b.m_before_l2, 0.0);
+                assert_eq!(trace_b.v_before_l1, 0.0);
+            } else {
+                assert!(trace_b.m_before_l2 > 0.0);
+                assert!(trace_b.v_before_l1 > 0.0);
+            }
+        }
+        assert_ne!(m_a[0].to_bits(), m_b[0].to_bits());
+        assert_ne!(direction_a[0].to_bits(), direction_b[0].to_bits());
     }
 
     #[test]
@@ -3588,6 +3804,8 @@ mod tests {
         assert_eq!("nesterov".parse(), Ok(OuterOptimizer::Nesterov));
         assert_eq!("heavy-ball".parse(), Ok(OuterOptimizer::HeavyBall));
         assert_eq!(OuterOptimizer::HeavyBall.to_string(), "heavy-ball");
+        assert_eq!("fedadam".parse(), Ok(OuterOptimizer::FedAdam));
+        assert_eq!(OuterOptimizer::FedAdam.to_string(), "fedadam");
         assert_eq!("normalized-ema".parse(), Ok(OuterOptimizer::NormalizedEma));
         assert_eq!("restarted-ema".parse(), Ok(OuterOptimizer::RestartedEma));
         assert_eq!("capped-nesterov".parse(), Ok(OuterOptimizer::CappedNesterov));

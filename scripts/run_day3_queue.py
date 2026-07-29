@@ -63,8 +63,9 @@ def verify_manifest(path: Path, manifest: dict, node: str, queue_id: str) -> dic
         raise SystemExit("day-3 manifest SHA-256 sidecar is missing or mismatched")
     if manifest.get("schema") != "yeto_day3_launch_manifest_v1":
         raise SystemExit("day-3 manifest schema mismatch")
-    if manifest.get("status") != "AUTHORIZED" or manifest.get("program") != "v19":
-        raise SystemExit("manifest does not authorize V19")
+    program = manifest.get("program")
+    if manifest.get("status") != "AUTHORIZED" or program not in {"v19", "v18"}:
+        raise SystemExit("manifest does not authorize a supported day-3 program")
     queues = [queue for queue in manifest["queues"] if queue["queue_id"] == queue_id]
     if len(queues) != 1 or queues[0]["node"] != node:
         raise SystemExit(f"no unique {queue_id} authority for {node}")
@@ -106,28 +107,46 @@ def verify_manifest(path: Path, manifest: dict, node: str, queue_id: str) -> dic
     if not findmnt.startswith("/dev/mapper/"):
         raise SystemExit(f"day-3 result target is not on an LVM root: {findmnt}")
 
-    input_record = manifest["inputs"]["manifest"]
-    input_path = Path(input_record["path"])
-    if not input_path.is_file() or common.sha256_file(input_path) != input_record["sha256"]:
-        raise SystemExit("V19 combined input manifest hash mismatch")
-    inputs = manifest["inputs"]["content"]
+    inputs = manifest["inputs"].get("content", manifest["inputs"])
+    input_record = manifest["inputs"].get("manifest")
+    if input_record is not None:
+        input_path = Path(input_record["path"])
+        if not input_path.is_file() or common.sha256_file(input_path) != input_record["sha256"]:
+            raise SystemExit("combined input manifest hash mismatch")
     model = inputs["model"]
     for name, record in model["files"].items():
         model_file = Path(model["path"]) / name
         if not model_file.is_file() or common.sha256_file(model_file) != record["sha256"]:
             raise SystemExit(f"V19 model file mismatch: {model_file}")
     queue_cells = [cell for cell in manifest["cells"] if cell["queue_id"] == queue_id]
-    if len(queue_cells) != 6:
-        raise SystemExit("V19 queue must contain exactly six rungs")
-    seed = str(queue_cells[0]["seed"])
-    for label in ("train", "audit", "split_provenance"):
-        record = inputs["seeds"][seed]["files"][label]
-        input_file = Path(record["path"])
-        if not input_file.is_file() or common.sha256_file(input_file) != record["sha256"]:
-            raise SystemExit(f"V19 seed input mismatch: {input_file}")
-    audit_hashes = {cell["eval_path"] for cell in queue_cells}
-    if audit_hashes != {inputs["seeds"][seed]["files"]["audit"]["path"]}:
-        raise SystemExit("V19 queue endpoint is not the frozen audit stream")
+    if len(queue_cells) != int(queue["scientific_cells"]):
+        raise SystemExit("day-3 queue cardinality differs from its authority")
+    if program == "v19":
+        seeds = {str(cell["seed"]) for cell in queue_cells}
+        if len(seeds) != 1:
+            raise SystemExit("a V19 queue must contain one paired seed")
+        seed = next(iter(seeds))
+        for label in ("train", "audit", "split_provenance"):
+            record = inputs["seeds"][seed]["files"][label]
+            input_file = Path(record["path"])
+            if not input_file.is_file() or common.sha256_file(input_file) != record["sha256"]:
+                raise SystemExit(f"V19 seed input mismatch: {input_file}")
+        endpoint_paths = {cell["eval_path"] for cell in queue_cells}
+        if endpoint_paths != {inputs["seeds"][seed]["files"]["audit"]["path"]}:
+            raise SystemExit("V19 queue endpoint is not the frozen audit stream")
+    else:
+        for label in ("train", "eval"):
+            record = inputs["files"][label]
+            input_file = Path(record["path"])
+            if not input_file.is_file() or common.sha256_file(input_file) != record["sha256"]:
+                raise SystemExit(f"V18 frozen input mismatch: {input_file}")
+            rows = sum(1 for line in input_file.open(encoding="utf-8") if line.strip())
+            if rows != int(record["rows"]):
+                raise SystemExit(f"V18 frozen input row count mismatch: {input_file}")
+        if {cell["train_path"] for cell in queue_cells} != {inputs["files"]["train"]["path"]}:
+            raise SystemExit("V18 queue train path mismatch")
+        if {cell["eval_path"] for cell in queue_cells} != {inputs["files"]["eval"]["path"]}:
+            raise SystemExit("V18 queue endpoint path mismatch")
     for cell in queue_cells:
         if common.canonical_sha256(cell["command"]) != cell["command_hash"]:
             raise SystemExit(f"initial command hash mismatch: {cell['cell_id']}")
@@ -137,6 +156,14 @@ def verify_manifest(path: Path, manifest: dict, node: str, queue_id: str) -> dic
     sample = gpu_sample(int(queue["gpu"]))
     if sample["return_code"] != 0:
         raise SystemExit("assigned GPU inventory query failed")
+    try:
+        memory_used_mib = int(str(sample["raw"]).split(",")[2].strip())
+    except (IndexError, ValueError) as exc:
+        raise SystemExit(f"cannot parse assigned GPU inventory: {sample['raw']}") from exc
+    if memory_used_mib > 1024:
+        raise SystemExit(
+            f"assigned GPU {queue['gpu']} is not free: {memory_used_mib} MiB in use"
+        )
     return queue
 
 
@@ -188,16 +215,21 @@ def run_queue(
         if (
             authority.get("schema") != "yeto_day3_retry_authority_v1"
             or authority.get("manifest_sha256") != common.sha256_file(manifest_path)
-            or authority.get("retry_group_id") != queue_id
+            or authority.get("retry_group_id")
+            not in {cell["retry_group_id"] for cell in queue}
             or authority.get("attempt") != 2
         ):
             raise SystemExit("attempt-2 retry authority mismatch")
         retry_authority_sha256 = common.sha256_file(retry_authority)
+        queue = [cell for cell in queue if cell["retry_group_id"] == authority["retry_group_id"]]
+        if not queue:
+            raise SystemExit("retry authority selects no cells from this queue")
+    program = manifest["program"]
     status_path = (
-        common.RESULT_ROOT / "_controller" / "slots" / "v19" / f"{queue_id}-a{attempt}.json"
+        common.RESULT_ROOT / "_controller" / "slots" / program / f"{queue_id}-a{attempt}.json"
     )
     lock_path = (
-        common.RESULT_ROOT / "_controller" / "locks" / "v19" / f"{queue_id}-a{attempt}.lock"
+        common.RESULT_ROOT / "_controller" / "locks" / program / f"{queue_id}-a{attempt}.lock"
     )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     completed = 0
@@ -231,7 +263,7 @@ def run_queue(
                     "attempt_id": attempt_id,
                     "attempt_number": attempt,
                     "cell_id": cell["cell_id"],
-                    "program": "v19",
+                    "program": program,
                     "queue_id": queue_id,
                     "node": node,
                     "gpus": cell["assignment"]["gpus"],
@@ -248,7 +280,7 @@ def run_queue(
                 {
                     "schema": "yeto_day3_slot_status_v1",
                     "state": "RUNNING",
-                    "program": "v19",
+                    "program": program,
                     "queue_id": queue_id,
                     "node": node,
                     "gpu": queue_authority["gpu"],
@@ -290,7 +322,7 @@ def run_queue(
                         {
                             "schema": "yeto_day3_slot_status_v1",
                             "state": "RUNNING",
-                            "program": "v19",
+                            "program": program,
                             "queue_id": queue_id,
                             "node": node,
                             "gpu": queue_authority["gpu"],
@@ -359,7 +391,7 @@ def run_queue(
             {
                 "schema": "yeto_day3_slot_status_v1",
                 "state": "DRAINED",
-                "program": "v19",
+                "program": program,
                 "queue_id": queue_id,
                 "node": node,
                 "gpu": queue_authority["gpu"],

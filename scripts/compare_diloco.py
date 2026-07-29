@@ -82,6 +82,7 @@ SYNCER_BIN = REPO_ROOT / "syncer/target/release/yeto-syncer"
 OUTER_OPTIMIZERS = (
     "nesterov",
     "heavy-ball",
+    "fedadam",
     "normalized-ema",
     "restarted-ema",
     "rho-adaptive",

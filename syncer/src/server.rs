@@ -2304,6 +2304,19 @@ fn format_tape_line(
     let outer_step_norm = json_number(outer.applied_step_norm);
     let outer_direction_cosine = optional_json_number(outer.direction_delta_cosine);
     let outer_history_current_ratio = optional_json_number(outer.history_current_norm_ratio);
+    let fedadam = outer.fedadam.map_or_else(String::new, |trace| {
+        format!(
+            ",\"fedadam_beta1\":{},\"fedadam_beta2\":{},\"fedadam_m_before_l2\":{},\"fedadam_v_before_l1\":{},\"fedadam_m_after_l2\":{},\"fedadam_v_after_l1\":{},\"fedadam_recurrence_max_abs_error\":{},\"fedadam_zero_safe_coordinates\":{}",
+            json_number(trace.beta1),
+            json_number(trace.beta2),
+            json_number(trace.m_before_l2),
+            json_number(trace.v_before_l1),
+            json_number(trace.m_after_l2),
+            json_number(trace.v_after_l1),
+            json_number(trace.recurrence_max_abs_error),
+            trace.zero_safe_coordinates,
+        )
+    });
     let policy = serde_json::to_string(&decision.policy.to_string()).unwrap();
     let selected_action = serde_json::to_string(&decision.selected_action).unwrap();
     let committed_action = serde_json::to_string(&decision.committed_action).unwrap();
@@ -2346,7 +2359,7 @@ fn format_tape_line(
         )
     });
     format!(
-        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}{outer_bias_correction}{outer_lr_controller}{cttn_diagnostics}{cttn_shadow}}}\n",
+        "{{\"step\":{step},\"fragment\":{fragment},\"gnorm\":{gnorm},\"ms\":{ms},\"responders\":[{}],\"outer_step_norm\":{outer_step_norm},\"outer_direction_cosine\":{outer_direction_cosine},\"outer_history_current_ratio\":{outer_history_current_ratio},\"outer_restarted\":{},\"policy\":{policy},\"selected_action\":{selected_action},\"committed_action\":{committed_action},\"selected_multiplier\":{selected_multiplier},\"committed_multiplier\":{committed_multiplier},\"fallback\":{},\"fallback_reason\":{fallback_reason},\"probe_latency_ms\":{probe_latency_ms},\"selected_mass\":{selected_mass},\"norm_scale\":{norm_scale},\"step_ratio\":{step_ratio},\"request_digest\":{request_digest}{outer_bias_correction}{outer_lr_controller}{fedadam}{cttn_diagnostics}{cttn_shadow}}}\n",
         responders.join(","),
         outer.restarted,
         decision.fallback,
@@ -2386,6 +2399,7 @@ mod tests {
                 direction_delta_cosine,
                 history_current_norm_ratio,
                 restarted,
+                fedadam: None,
             },
             outer_bias_correction: None,
             outer_lr_controller: None,
@@ -2730,6 +2744,32 @@ mod tests {
         assert!(line.contains("\"step_ratio\":1"));
         assert!(line.contains("\"request_digest\":null"));
         assert!(line.ends_with("}\n"));
+    }
+
+    #[test]
+    fn event_tape_appends_fedadam_recurrence_evidence_only_when_active() {
+        let pushes = HashMap::new();
+        let decision = CommitDecision::token_weighted();
+        let mut stats = merge_stats(2.5, 0.75, Some(1.0), Some(0.0), false);
+        let legacy = format_tape_line(1, 0, &pushes, &stats, &decision, &HashMap::new(), 1);
+        assert!(!legacy.contains("fedadam_beta1"));
+        stats.outer.fedadam = Some(crate::merge::FedAdamTraceStats {
+            beta1: crate::merge::FEDADAM_BETA1 as f64,
+            beta2: crate::merge::FEDADAM_BETA2 as f64,
+            m_before_l2: 0.0,
+            v_before_l1: 0.0,
+            m_after_l2: 1.25,
+            v_after_l1: 2.5,
+            recurrence_max_abs_error: 0.0,
+            zero_safe_coordinates: 7,
+        });
+        let line = format_tape_line(1, 0, &pushes, &stats, &decision, &HashMap::new(), 1);
+        assert!(line.contains("\"fedadam_beta1\":0.8999999761581421"));
+        assert!(line.contains("\"fedadam_beta2\":0.9900000095367432"));
+        assert!(line.contains("\"fedadam_m_before_l2\":0"));
+        assert!(line.contains("\"fedadam_v_before_l1\":0"));
+        assert!(line.contains("\"fedadam_recurrence_max_abs_error\":0"));
+        assert!(line.contains("\"fedadam_zero_safe_coordinates\":7"));
     }
 
     /// v3 arm B: the tape gains an `outer_bias_correction` field ONLY when
