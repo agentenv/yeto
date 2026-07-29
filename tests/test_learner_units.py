@@ -739,7 +739,7 @@ def test_learner_accepts_explicit_training_seed():
     assert args.seed == 29
 
 
-def test_torch_and_mlx_learners_parse_assistant_mask_mode():
+def test_torch_and_mlx_learners_parse_data_format_and_assistant_mask_mode():
     from yeto.learner import parse_args as parse_torch_args
     from yeto.mlx.learner import parse_args as parse_mlx_args
 
@@ -756,6 +756,8 @@ def test_torch_and_mlx_learners_parse_assistant_mask_mode():
         "1",
     ]
     for parse in (parse_torch_args, parse_mlx_args):
+        assert parse(base).data_format == "auto"
+        assert parse(base + ["--data-format", "sharegpt"]).data_format == "sharegpt"
         assert parse(base).assistant_mask_mode == "native"
         assert parse(base + ["--assistant-mask-mode", "legacy"]).assistant_mask_mode == "legacy"
 

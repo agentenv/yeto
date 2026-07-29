@@ -35,6 +35,11 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser("yeto.mlx.learner")
     p.add_argument("--model", required=True, help="HF id or yeto/models.py alias")
     p.add_argument("--data", required=True)
+    p.add_argument(
+        "--data-format",
+        choices=["auto", "openai", "sharegpt", "alpaca"],
+        default="auto",
+    )
     p.add_argument("--model-revision", default=None)
     p.add_argument("--data-revision", default=None)
     p.add_argument("--trust-remote-code", action="store_true")
@@ -224,6 +229,7 @@ def _micro_batches(args, tokenizer):
             args.max_rows,
             train_on=args.train_on,
             assistant_mask_mode=args.assistant_mask_mode,
+            data_format=getattr(args, "data_format", "auto"),
             revision=getattr(args, "data_revision", None),
         )
 
@@ -247,6 +253,7 @@ def _micro_batches(args, tokenizer):
         args.max_rows,
         train_on=args.train_on,
         assistant_mask_mode=args.assistant_mask_mode,
+        data_format=getattr(args, "data_format", "auto"),
         revision=getattr(args, "data_revision", None),
     )
     log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)

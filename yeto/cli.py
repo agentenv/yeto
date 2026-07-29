@@ -96,6 +96,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "via SkyPilot file mounts; rows are messages-format chat traces",
     )
     p.add_argument(
+        "--data-format",
+        choices=["auto", "openai", "sharegpt", "alpaca"],
+        default="auto",
+        help="causal-LM row schema; auto detects standard OpenAI messages, "
+        "ShareGPT conversations, or Alpaca instruction/input/output rows",
+    )
+    p.add_argument(
         "--model-revision",
         default=None,
         help="HF model branch/tag/commit (resolved to an immutable commit before launch)",

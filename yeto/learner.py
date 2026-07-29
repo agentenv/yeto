@@ -63,6 +63,12 @@ def parse_args(argv=None):
     p.add_argument("--model", required=True, help="HF model id or an alias from yeto/models.py (gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...)")
     p.add_argument("--data", required=True, help="HF dataset id")
     p.add_argument(
+        "--data-format",
+        choices=["auto", "openai", "sharegpt", "alpaca"],
+        default="auto",
+        help="raw SFT row schema normalized before tokenization",
+    )
+    p.add_argument(
         "--model-revision",
         default=None,
         help="HF model branch/tag/commit; production launchers resolve it to a commit",
@@ -928,6 +934,7 @@ def main(argv=None) -> None:
             world=world,
             train_on=args.train_on,
             assistant_mask_mode=args.assistant_mask_mode,
+            data_format=args.data_format,
             revision=args.data_revision,
             **stream_kwargs,
         )
@@ -953,6 +960,7 @@ def main(argv=None) -> None:
             args.max_rows,
             train_on=args.train_on,
             assistant_mask_mode=args.assistant_mask_mode,
+            data_format=args.data_format,
             revision=args.data_revision,
         )
         sampler = None
