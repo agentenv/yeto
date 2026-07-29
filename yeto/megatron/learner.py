@@ -316,11 +316,7 @@ def main(argv=None):
     from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
     from ..tensor_io import (
         apply_fragment,
-        fragment_flat,
         pack_fragment,
-        pack_tensor,
-        quantize_q4,
-        unpack_fragment,
     )
 
     args = parse_args(argv)
@@ -385,9 +381,7 @@ def main(argv=None):
 
     _run_inner_loop(
         args, model, params, layout, opt, forward_backward, client, rank, world, device,
-        fragment_flat=fragment_flat, pack_tensor=pack_tensor, quantize_q4=quantize_q4,
-        unpack_fragment=unpack_fragment, apply_fragment=apply_fragment,
-        bulk_dtype=bulk_dtype, DTYPE_Q4=DTYPE_Q4,
+        apply_fragment=apply_fragment,
     )
 
     # Avoid collectives in the shutdown/save path. Megatron's distributed
@@ -411,16 +405,15 @@ def main(argv=None):
 
 def _run_inner_loop(
     args, model, params, layout, opt, forward_backward, client, rank, world, device,
-    *, fragment_flat, pack_tensor, quantize_q4, unpack_fragment, apply_fragment,
-    bulk_dtype, DTYPE_Q4,
+    *, apply_fragment,
 ):
     """N inner Megatron steps, pausing at each step boundary to run the DiLoCo
     fragment sync. The inner step differs from the torch learner (Megatron's
     forward_backward schedule vs a manual loop), but the sync half mirrors
     yeto.learner.run_inner_loop's protocol and counter semantics exactly."""
     import torch
-    import torch.distributed as dist
 
+    from ..diloco_sync import DiLoCoSyncState, sync_diloco_boundary
     from ..finalization import finalize_torch_island
     mbs = 1 if args.micro_batch_size == "auto" else int(args.micro_batch_size)
     tokenizer = _load_tokenizer(args)
@@ -450,16 +443,29 @@ def _run_inner_loop(
 
     # Counters (Alg. 1): global totals + per-fragment snapshots reset on receipt.
     steps_total = tokens_total = 0
-    steps_at_reset = [0] * layout.num_fragments
-    tokens_at_reset = [0] * layout.num_fragments
-    fragment_versions = [0] * layout.num_fragments
-    pending_pulls: list = []
-    global_step = 0
     tokens_per_inner_step = world * mbs * args.grad_accum * args.seq_len
-    anchors = [None] * layout.num_fragments if rank == 0 and client is not None else None
-    shutdown = False
+    sync_state = DiLoCoSyncState.create(
+        layout.num_fragments,
+        track_anchors=rank == 0 and client is not None,
+    )
 
-    while not shutdown and steps_total < args.max_local_steps:
+    def snapshot_sync_params():
+        return params
+
+    def apply_sync_flat(fragment, flat):
+        apply_fragment(fragment, flat, params)
+
+    def finalize_sync():
+        return finalize_torch_island(
+            client,
+            layout,
+            params,
+            rank=rank,
+            world=world,
+            device=device,
+        )
+
+    while not sync_state.shutdown and steps_total < args.max_local_steps:
         for m in model:
             m.zero_grad_buffer()
         opt.zero_grad()
@@ -477,87 +483,32 @@ def _run_inner_loop(
         tokens_total += tokens_per_inner_step
 
         # --- fragment sync at the step boundary (never blocks) ---
-        # Broadcasts apply BEFORE pulls are answered (see yeto/learner.py:
-        # a pipelined syncer's next pull can overtake the previous round's
-        # broadcast; answering first would push a stale base_version).
-        actions = []
-        finalizing = False
-        if rank == 0 and client is not None:
-            client.check_health()
-            finalizing = client.finalizing.is_set()
-            if not finalizing:
-                for bc in client.drain_updates():
-                    flat = unpack_fragment(
-                        layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
-                    )
-                    if anchors is not None:
-                        anchors[bc.fragment_id] = flat.clone()
-                    actions.append((bc.fragment_id, bc.version, flat))
-            shutdown = client.shutdown.is_set()
-
-        if world > 1:
-            meta = [(f, v) for f, v, _ in actions] if rank == 0 else None
-            box = [meta, shutdown, finalizing]
-            dist.broadcast_object_list(box, src=0)
-            meta, shutdown, finalizing = box
-            if rank != 0:
-                actions = [(f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta]
-        if finalizing:
-            manifest = finalize_torch_island(
-                client,
-                layout,
-                params,
-                rank=rank,
-                world=world,
-                device=device,
-            )
-            global_step = max(global_step, manifest.global_step)
-            shutdown = True
+        if sync_diloco_boundary(
+            client,
+            layout,
+            sync_state,
+            steps_total=steps_total,
+            units_total=tokens_total,
+            merge_alpha=args.merge_alpha,
+            snapshot_params=snapshot_sync_params,
+            apply_flat=apply_sync_flat,
+            finalize=finalize_sync,
+            rank=rank,
+            world=world,
+            device=device,
+            reset_counters_on_replicas=True,
+        ):
             break
-        for fid, version, flat in actions:
-            flat = flat.to(device)
-            if world > 1:
-                dist.broadcast(flat, src=0)
-            if args.merge_alpha > 0:
-                local = fragment_flat(layout.fragments[fid], params)
-                flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
-            apply_fragment(layout.fragments[fid], flat, params)
-            steps_at_reset[fid] = steps_total
-            tokens_at_reset[fid] = tokens_total
-            fragment_versions[fid] = version
-            global_step = max(global_step, version)
-
-        if rank == 0 and client is not None:
-            pending_pulls.extend(client.drain_pulls())
-            still_pending = []
-            for pull in pending_pulls:
-                fid = pull.fragment_id
-                c_steps = steps_total - steps_at_reset[fid]
-                if c_steps < 1:
-                    still_pending.append(pull)
-                    continue
-                c_tokens = tokens_total - tokens_at_reset[fid]
-                anchor = anchors[fid] if anchors is not None else None
-                if anchor is None:
-                    still_pending.append(pull)
-                    continue
-                delta = fragment_flat(layout.fragments[fid], params).cpu() - anchor
-                if client.dtype == DTYPE_Q4:
-                    payload = quantize_q4(delta)
-                else:
-                    payload = pack_tensor(delta, client.dtype)
-                client.push_fragment(
-                    fid, pull.global_step, pull.round_attempt,
-                    fragment_versions[fid], steps_total,
-                    c_steps, c_tokens, payload,
-                )
-            pending_pulls = still_pending
     if rank == 0 and client is not None and not client.finalized.is_set():
         raise RuntimeError(
             "Megatron learner stopped before authoritative finalization; "
             "refusing to save local parameters"
         )
-    log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
+    log.info(
+        "inner loop done at local_step=%d global_step=%d",
+        steps_total,
+        sync_state.global_step,
+    )
 
 
 def _load_tokenizer(args):
