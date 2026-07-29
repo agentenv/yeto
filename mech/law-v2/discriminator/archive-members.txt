@@ -1,0 +1,7 @@
+data/yeto-results-v8/v8-t20-corrected-mu0p80-e2-seed811/attempt-1/work/m4/state.ckpt
+data/yeto-results-v8/v8-t20-corrected-mu0p95-e2-seed801/attempt-1/work/m4/state.ckpt
+data/yeto-results-v8/v8-t20-mu0-mu0-e2-seed801/attempt-1/work/m4/state.ckpt
+data/yeto-results-v8/v8-t20-mu0-mu0-e2-seed811/attempt-1/work/m4/state.ckpt
+data/yeto-results-v8/v8-t20-raw-mu0p80-e2-seed801/attempt-1/work/m4/state.ckpt
+data/yeto-results-v8/v8-t20-raw-mu0p95-e2-seed801/attempt-1/work/m4/state.ckpt
+data/yeto-results-v8/v8-t20-raw-mu0p95-e2-seed811/attempt-1/work/m4/state.ckpt
