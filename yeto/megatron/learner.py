@@ -173,16 +173,45 @@ def _build_model(args, device):
         lora_kwargs["share_expert_adapters"] = True
     peft = LoRA(**lora_kwargs)
     model = peft(model, training=True)  # freezes base, attaches + trains adapters
+
+    # Bridge attaches the adapter modules but defers weight init to its own
+    # training harness / checkpoint load, neither of which runs here — H200
+    # validation found raw uninitialized memory (absmax ~7e34) in the fresh
+    # adapters. Apply the LoRA contract explicitly: kaiming-uniform A so the
+    # low-rank basis is trainable, zero B so the adapter starts as a no-op.
+    import math
+
+    import torch
+
+    with torch.no_grad():
+        for name, p in _adapter_params(model).items():
+            if "linear_in" in name:
+                torch.nn.init.kaiming_uniform_(p, a=math.sqrt(5))
+            elif "linear_out" in name:
+                p.zero_()
+            else:
+                raise RuntimeError(
+                    f"adapter tensor {name} is neither linear_in nor linear_out; "
+                    "add an explicit init rule before training with it"
+                )
     return model, bridge
 
 
 def _adapter_params(model):
     """Canonical {name: tensor} of the trainable LoRA adapters. Bridge names
     them linear_in (A) / linear_out (B); with TP=1/PP=1 they are replicated on
-    every rank, so the local view IS the canonical value."""
+    every rank, so the local view IS the canonical value.
+
+    Unwraps recursively: mcore stacks wrappers (DDP over Float16Module over
+    the MegatronModule), and the wrapper depth depends on when this is called.
+    A single-level unwrap yields capture-point-dependent parameter names
+    (`module.decoder...` vs `decoder...`), which breaks the sync layout's
+    name-stability contract."""
     out = {}
     for chunk in model:
-        module = getattr(chunk, "module", chunk)  # unwrap mcore DDP
+        module = chunk
+        while hasattr(module, "module"):  # unwrap DDP / Float16Module stack
+            module = module.module
         for name, p in module.named_parameters():
             if p.requires_grad and (
                 ".adapter" in name or name.endswith((".linear_in.weight", ".linear_out.weight"))
@@ -336,14 +365,15 @@ def main(argv=None):
     device = torch.device("cuda", local_rank)
 
     model, bridge = _build_model(args, device)
-    params = _adapter_params(model)
-    layout = build_layout(
-        [(n, p.numel()) for n, p in params.items()],
-        args.fragments,
-        args.fragment_pattern,
-        named_shapes={n: tuple(p.shape) for n, p in params.items()},
-    )
-    log.info("%d adapter tensors -> %d fragments", len(params), layout.num_fragments)
+
+    # mcore DDP re-buckets TRAINABLE params into freshly-allocated buffers
+    # without copying their values (Megatron's own flow loads checkpoints
+    # after the wrap, so upstream never needs the copy). Frozen base weights
+    # keep their storage, but the LoRA init would be lost to uninitialized
+    # bucket memory — H200 validation saw garbage-magnitude adapters and
+    # loss=NaN on the first step. Snapshot the init here and restore after
+    # the wrap, before the optimizer clones its fp32 main params.
+    adapter_init = {n: p.detach().clone() for n, p in _adapter_params(model).items()}
 
     # mcore DDP wrap so grads land in the distributed optimizer's buckets.
     ddp_cfg = DistributedDataParallelConfig(
@@ -352,6 +382,16 @@ def main(argv=None):
     cfg = getattr(model[0], "config", None) or getattr(getattr(model[0], "module", None), "config")
     cfg.finalize_model_grads_func = finalize_model_grads
     model = [DDP(config=cfg, ddp_config=ddp_cfg, module=m) for m in model]
+    with torch.no_grad():
+        restored = _adapter_params(model)
+        if set(restored) != set(adapter_init):
+            raise RuntimeError(
+                "adapter tensor names changed across the DDP wrap: "
+                f"{set(restored) ^ set(adapter_init)}"
+            )
+        for name, p in restored.items():
+            p.copy_(adapter_init[name])
+    del adapter_init, restored
     opt = get_megatron_optimizer(
         config=OptimizerConfig(
             optimizer="adam",
@@ -365,6 +405,20 @@ def main(argv=None):
     )
     forward_backward = get_forward_backward_func()
 
+    # Capture the adapter dict only AFTER the DDP wrap + optimizer exist: the
+    # distributed-optimizer wrap rebuckets parameter storage, so tensors
+    # captured before it reference memory the wrap abandons. A pre-wrap dict
+    # stays silently disconnected from training — H200 validation saw its
+    # storage reused and every synced/saved tensor come out non-finite.
+    params = _adapter_params(model)
+    layout = build_layout(
+        [(n, p.numel()) for n, p in params.items()],
+        args.fragments,
+        args.fragment_pattern,
+        named_shapes={n: tuple(p.shape) for n, p in params.items()},
+    )
+    log.info("%d adapter tensors -> %d fragments", len(params), layout.num_fragments)
+
     # DiLoCo sync setup — identical to the torch learner: rank 0 drives the
     # syncer, sends INIT, and the fragment protocol reuses yeto primitives.
     wire_dtype = {"bf16": DTYPE_BF16, "f32": DTYPE_F32, "q4": DTYPE_Q4}[args.wire_dtype]
@@ -375,6 +429,13 @@ def main(argv=None):
         client.start()
         log.info("connected to syncer at %s", args.syncer)
         if args.learner_id == 0:
+            for name, p in params.items():
+                if not torch.isfinite(p).all():
+                    raise RuntimeError(
+                        f"adapter tensor {name} is non-finite before INIT; "
+                        "refusing to seed the syncer with a corrupt snapshot "
+                        "(was the params dict captured before the DDP wrap?)"
+                    )
             for fid, frag in enumerate(layout.fragments):
                 client.send_init(fid, pack_fragment(frag, params, bulk_dtype(wire_dtype)))
             log.info("sent INIT_PARAMS for %d fragments", layout.num_fragments)

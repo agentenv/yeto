@@ -63,7 +63,13 @@ def test_build_model_disables_bridge_ddp_and_uses_lora_signature(monkeypatch):
                 "load_weights": load_weights,
                 "wrap_with_ddp": wrap_with_ddp,
             }
-            return ["chunk"]
+            return [FakeChunk()]
+
+    class FakeChunk:
+        # _build_model now initializes adapter weights in place; a fresh
+        # bridge model with no adapters is a valid (empty) case.
+        def named_parameters(self):
+            return iter(())
 
     class FakeLoRA:
         def __init__(self, dim, alpha, target_modules):
@@ -102,7 +108,7 @@ def test_build_model_disables_bridge_ddp_and_uses_lora_signature(monkeypatch):
     )
     model, _bridge = ml._build_model(args, device=None)
 
-    assert model == ["chunk"]
+    assert len(model) == 1 and isinstance(model[0], FakeChunk)
     assert seen["model_id"] == "resolved/m"
     assert seen["from_hf"] == {"use_safetensors": True, "trust_remote_code": True}
     assert seen["to_megatron"] == {"load_weights": True, "wrap_with_ddp": False}
