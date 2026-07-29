@@ -46,9 +46,11 @@ not contain admissible weights.
 For G6 and G8, candidate records are frozen readout records with 135M scale,
 `T=20`, attempt 1.  Within each `(campaign,T,H,S,convention,mu)` curve, use
 the sampled eta rung having the lowest frozen pooled `seed_mean_losses` value.
-The frozen readouts make this rung `e2` for every G6/G8 T=20 curve.  A matched
-checkpoint pair must have the same campaign, T, H, S, rung, and training seed;
-one arm is momentum and the other is `mu0`.  The pair is probeable only when
+The frozen readouts select `e2` except for G6 raw
+`(T=20,H=256,S=5120)`, which selects `e1`.  A matched checkpoint pair must
+have the same campaign, T, H, S, and training seed; each arm uses its own
+independently frozen minimum-loss sampled rung.  One arm is momentum and the
+other is `mu0`.  The pair is probeable only when
 both runs are recorded as `h200-n1` and both exact terminal checkpoint members
 exist in the completed full-fidelity archive listing.  Any pair with either
 member resident on `h200-n2` is recorded as lost, not replaced by a different
