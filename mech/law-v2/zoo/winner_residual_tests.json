@@ -1,28 +1,28 @@
 {
- "winner": "H7-rho-floor-S",
+ "winner": "C1sat-H7kin",
  "tests": {
   "spearman_T": {
-   "statistic": 0.07732213841120693,
-   "pvalue": 0.4177478457844547,
-   "correlation": 0.07732213841120693
+   "statistic": 0.02140596312223859,
+   "pvalue": 0.8227388909050879,
+   "correlation": 0.02140596312223859
   },
   "spearman_mu": {
-   "statistic": 0.12117085076823006,
-   "pvalue": 0.20313844087999341,
-   "correlation": 0.12117085076823006
+   "statistic": -0.46724020352930995,
+   "pvalue": 2.0633768069998367e-07,
+   "correlation": -0.46724020352930995
   },
   "spearman_S": {
-   "statistic": -0.09162237616058583,
-   "pvalue": 0.3366602831718882,
-   "correlation": -0.09162237616058583
+   "statistic": 0.020173148785531437,
+   "pvalue": 0.8327944446223813,
+   "correlation": 0.020173148785531437
   },
   "kruskal_convention": {
-   "statistic": 4.142474599188229,
-   "pvalue": 0.24648474628706868
+   "statistic": 24.807451986791282,
+   "pvalue": 1.69400445044768e-05
   },
   "kruskal_scale": {
-   "statistic": 5.1118221115242415,
-   "pvalue": 0.0776214823449702
+   "statistic": 4.448677455452473,
+   "pvalue": 0.1081389042555942
   }
  }
 }

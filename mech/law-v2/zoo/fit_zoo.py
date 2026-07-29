@@ -90,6 +90,22 @@ def finite_age_M(T: float, mu: float, conv: str) -> float:
     raise ValueError(conv)
 
 
+def accumulated_C(T: float, mu: float, conv: str) -> float:
+    """Accumulated per-fragment displacement coefficient from
+    lean-mechanism/LeanMechanism/FiniteHorizonOuter.lean (theory lane C1):
+    the frozen-gradient optimum equalizes eta* x C across arms, so the
+    kinematic factor in the law is T/C (not the terminal multiplier M)."""
+    if mu == 0.0 or conv == "mu0":
+        return float(T)
+    if conv == "nesterov_raw":
+        return T / (1 - mu) - mu ** 2 * (1 - mu ** T) / (1 - mu) ** 2
+    if conv == "heavy_ball":
+        return T / (1 - mu) - mu * (1 - mu ** T) / (1 - mu) ** 2
+    if conv == "nesterov_corrected":
+        return T / (1 - mu)
+    raise ValueError(conv)
+
+
 # --------------------------------------------------------------------------
 # model framework
 # --------------------------------------------------------------------------
@@ -112,6 +128,15 @@ class Model:
     # optional callable(train_df, theta)->theta applying the declared
     # unseen-convention fallback (heavy_ball -> nesterov_raw) at predict time
     fallback: object = None
+    # round 2: models whose scale intercepts enter the law nonlinearly (the
+    # C3 interference term needs eta0[scale] inside an exponent) carry the
+    # three intercepts as theta[0:3] = log2 eta0[135M, 1.7B, 7B] instead of
+    # profiling them.  Same equal-point objective, same parameter counting.
+    explicit_intercepts: bool = False
+    # optional callable(train, rng)->theta0 giving data-informed multistart
+    # points (used by explicit-intercept models so Nelder-Mead does not have
+    # to discover the intercepts from random corners)
+    make_start: object = None
 
     @property
     def k(self) -> int:
@@ -132,6 +157,11 @@ def pack(df: pd.DataFrame) -> dict:
     )
     d["l2M"] = np.log2(d["M"])
     d["l2T"] = np.log2(d["T"])
+    d["H"] = df["H"].to_numpy(dtype=float)
+    d["C"] = np.array([accumulated_C(t, m, c) for t, m, c in
+                       zip(d["T"], d["mu"], d["conv"])])
+    d["l2kin"] = d["l2T"] - np.log2(d["C"])  # log2(T/C), theory C1 factor
+    d["scale_idx"] = np.array([SCALES.index(s) for s in d["scale"]])
     d["scale_masks"] = {s: d["scale"] == s for s in SCALES
                         if (d["scale"] == s).any()}
     return d
@@ -156,6 +186,8 @@ def predict(model: Model, theta: np.ndarray, train: dict,
             test: dict) -> np.ndarray:
     if model.fallback is not None:
         theta = model.fallback(train, np.array(theta, dtype=float))
+    if model.explicit_intercepts:
+        return model.g(test, theta)
     a = profile_intercepts(train, model.g(train, theta))
     gt = model.g(test, theta)
     aa = np.array([intercept_for(s, a) for s in test["scale"]])
@@ -167,24 +199,33 @@ def fit(model: Model, train: dict, rng: np.random.Generator) -> np.ndarray:
     y = train["y"]
     masks = list(train["scale_masks"].values())
 
-    def sse(theta: np.ndarray) -> float:
-        g = model.g(train, theta)
-        r = y - g
-        tot = 0.0
-        for m in masks:
-            rm = r[m]
-            rm = rm - rm.mean()
-            tot += float(rm @ rm)
-        return tot
+    if model.explicit_intercepts:
+        def sse(theta: np.ndarray) -> float:
+            r = y - model.g(train, theta)
+            return float(r @ r)
+    else:
+        def sse(theta: np.ndarray) -> float:
+            g = model.g(train, theta)
+            r = y - g
+            tot = 0.0
+            for m in masks:
+                rm = r[m]
+                rm = rm - rm.mean()
+                tot += float(rm @ rm)
+            return tot
 
     if len(model.theta_names) == 0:
         return np.zeros(0)
 
     best_x, best_f = None, np.inf
-    mid = (model.lo + model.hi) / 2.0
-    starts = [mid]
-    for _ in range(N_STARTS - 1):
-        starts.append(model.lo + rng.random(len(model.lo)) * (model.hi - model.lo))
+    if model.make_start is not None:
+        starts = [model.make_start(train, rng) for _ in range(N_STARTS)]
+    else:
+        mid = (model.lo + model.hi) / 2.0
+        starts = [mid]
+        for _ in range(N_STARTS - 1):
+            starts.append(model.lo
+                          + rng.random(len(model.lo)) * (model.hi - model.lo))
     for x0 in starts:
         res = optimize.minimize(
             sse, x0, method="Nelder-Mead",
@@ -480,6 +521,142 @@ def add_own_designs(zoo: list[Model]) -> None:
 
 
 # --------------------------------------------------------------------------
+# round 2: theory-lane candidates (mech/law-v2/theory/CANDIDATES.md, 0dde35e)
+# --------------------------------------------------------------------------
+# C1: replace the terminal multiplier (1-mu)M by the theorem-backed kinematic
+# factor T/C_conv (accumulated displacement, FiniteHorizonOuter.lean).  Zero
+# free parameters in the transform.  Scored with both clocks: q^T and the
+# round-1 saturating power law (refit, not frozen at H7's values).
+# C1+C3: times the interference factor
+#     phi = exp(-beta * sqrt(H) * eta0[scale] * base(T) * (C - T)),
+# ONE global beta, refit inside every LOCO fold (no leakage of theory beta).
+
+LOG2E = 1.0 / LN2
+
+
+def add_theory_candidates(zoo: list[Model]) -> None:
+    # ---- C1 pure, q^T clock (theory keystone form, params same as B0) ----
+    def g_C1q(df, th):
+        (q,) = th
+        return df["l2kin"] + df["T"] * math.log2(q)
+    zoo.append(Model("C1q-pure", "eta0[s]*(T/C_conv)*q^T (theorem kinematics)",
+                     ["q"], np.array([0.85]), np.array([1.05]), g_C1q,
+                     n_global=1))
+
+    # ---- C1 pure, saturating power-law clock (shape refit) ----
+    def g_C1sat(df, th):
+        alpha, f = th
+        return df["l2kin"] + np.log2(df["T"] ** (-alpha) + f)
+    zoo.append(Model("C1sat-pure", "eta0[s]*(T/C_conv)*(T^-a+f)",
+                     ["alpha", "f"], np.array([-0.5, 0.0]),
+                     np.array([2.5, 0.9]), g_C1sat, n_global=2))
+
+    # ---- helpers for explicit-intercept C3 models ----
+    def fb_expl(train, th):
+        sm = train["scale_masks"]
+        if "1.7B" not in sm:
+            th[1] = th[0]
+        if "7B" not in sm:
+            th[2] = th[1]  # declared fallback: unseen 7B -> trained 1.7B
+        return th
+
+    def smart_start(shape_sampler, g_shape):
+        """Start with random shape params, intercepts from one profiling
+        pass at beta=0, small random beta."""
+        def _mk(train, rng):
+            shape = shape_sampler(rng)
+            gs = g_shape(train, shape)
+            resid = train["y"] - gs
+            a = []
+            prev = -3.0
+            for s in SCALES:
+                m = train["scale_masks"].get(s)
+                a.append(float(resid[m].mean()) if m is not None else prev)
+                prev = a[-1]
+            beta = rng.uniform(0.0, 0.02)
+            return np.array(a + list(shape) + [beta])
+        return _mk
+
+    # ---- C1 + C3, q^T clock ----
+    def g_C1qC3(df, th):
+        a = np.asarray(th[0:3])[df["scale_idx"]]
+        q, beta = th[3], th[4]
+        base = q ** df["T"]
+        phi_l2 = (-beta * np.sqrt(df["H"]) * 2.0 ** a * base
+                  * (df["C"] - df["T"])) * LOG2E
+        return a + df["l2kin"] + df["T"] * math.log2(q) + phi_l2
+    zoo.append(Model(
+        "C1q+C3", "eta0[s]*(T/C)*q^T * exp(-beta sqrt(H) eta0 q^T (C-T))",
+        ["a_135M", "a_1.7B", "a_7B", "q", "beta"],
+        np.array([-9.0, -9.0, -9.0, 0.85, 0.0]),
+        np.array([-1.0, -1.0, -1.0, 1.05, 0.1]),
+        g_C1qC3, n_global=2, n_stratum=3,
+        stratum_note="3 scale intercepts (explicit)",
+        fallback=fb_expl, explicit_intercepts=True,
+        make_start=smart_start(
+            lambda rng: [rng.uniform(0.92, 1.01)],
+            lambda tr, sh: tr["l2kin"] + tr["T"] * math.log2(sh[0]))))
+
+    # ---- C1 + C3, saturating clock ----
+    def g_C1satC3(df, th):
+        a = np.asarray(th[0:3])[df["scale_idx"]]
+        alpha, f, beta = th[3], th[4], th[5]
+        base = df["T"] ** (-alpha) + f
+        phi_l2 = (-beta * np.sqrt(df["H"]) * 2.0 ** a * base
+                  * (df["C"] - df["T"])) * LOG2E
+        return a + df["l2kin"] + np.log2(base) + phi_l2
+    zoo.append(Model(
+        "C1sat+C3", "eta0[s]*(T/C)*(T^-a+f) * exp(-beta sqrt(H) eta0 base "
+                    "(C-T))",
+        ["a_135M", "a_1.7B", "a_7B", "alpha", "f", "beta"],
+        np.array([-9.0, -9.0, -9.0, -0.5, 0.0, 0.0]),
+        np.array([-1.0, -1.0, -1.0, 2.5, 0.9, 0.1]),
+        g_C1satC3, n_global=3, n_stratum=3,
+        stratum_note="3 scale intercepts (explicit)",
+        fallback=fb_expl, explicit_intercepts=True,
+        make_start=smart_start(
+            lambda rng: [rng.uniform(0.2, 2.0), rng.uniform(0.0, 0.4)],
+            lambda tr, sh: tr["l2kin"]
+            + np.log2(tr["T"] ** (-sh[0]) + sh[1]))))
+
+    # ---- H7 with its fitted alignment term REPLACED by T/C ----
+    def g_C1H7(df, th):
+        alpha, f, sigma, beta_c = th
+        extra = np.where(df["conv"] == "nesterov_corrected", beta_c, 0.0)
+        return (df["l2kin"] + np.log2(df["T"] ** (-alpha) + f)
+                - extra * df["l2T"] + sigma * np.log2(df["S"] / 2560.0))
+    zoo.append(Model("C1sat-H7kin",
+                     "H7 with (1-mu)M_eff replaced by theorem T/C (rho0,d "
+                     "dropped)",
+                     ["alpha", "f", "sigma", "beta_c"],
+                     np.array([-0.5, 0.0, -1.0, -1.0]),
+                     np.array([2.5, 0.9, 1.0, 2.0]), g_C1H7,
+                     n_global=3, n_stratum=4,
+                     stratum_note="3 scale intercepts + 1 corrected-arm "
+                                  "tilt"))
+
+    # ---- subsumption test: H7's alignment factor kept ON TOP of T/C ----
+    # If the theorem kinematics already carries the alignment decay, the
+    # refit rho0 should go to ~0 and LOCO should not improve.
+    def g_C1H7a(df, th):
+        rho0, d, alpha, f, sigma, beta_c = th
+        align = 1.0 + rho0 * d ** df["T"] * (df["M"] - 1.0)
+        extra = np.where(df["conv"] == "nesterov_corrected", beta_c, 0.0)
+        return (df["l2kin"] + np.log2(align)
+                + np.log2(df["T"] ** (-alpha) + f)
+                - extra * df["l2T"] + sigma * np.log2(df["S"] / 2560.0))
+    zoo.append(Model("C1sat-H7kin+align",
+                     "C1sat-H7kin with H7's rho0*d^T*(M-1) alignment kept on "
+                     "top of T/C",
+                     ["rho0", "d", "alpha", "f", "sigma", "beta_c"],
+                     np.array([0.0, 0.05, -0.5, 0.0, -1.0, -1.0]),
+                     np.array([64.0, 0.999, 2.5, 0.9, 1.0, 2.0]), g_C1H7a,
+                     n_global=5, n_stratum=4,
+                     stratum_note="3 scale intercepts + 1 corrected-arm "
+                                  "tilt"))
+
+
+# --------------------------------------------------------------------------
 # evaluation
 # --------------------------------------------------------------------------
 
@@ -574,25 +751,86 @@ def style_ax(ax):
     ax.tick_params(colors="#5f5e56", labelsize=9)
 
 
-def make_collapse_figure(df: pd.DataFrame, model: Model):
-    """Winner collapse: strip everything except the base age curve; every
-    convention/scale/S cell should land on log2(T^-alpha + f)."""
+def winner_strip(dp: dict, model: Model):
+    """Return (strip, curve_fn, subtitle): y - strip should fall on
+    curve_fn(T) for the given fitted model."""
     th = model.theta_hat
-    rho0, d, alpha, f, beta_c, sigma = th
-    dp = pack(df)
-    a = profile_intercepts(dp, model.g(dp, th))
+    name = model.name
     T = dp["T"]
-    Meff = 1.0 + rho0 * d ** T * (dp["M"] - 1.0)
-    extra = np.where(dp["conv"] == "nesterov_corrected", beta_c, 0.0)
-    strip = (np.array([a[s] for s in dp["scale"]]) + dp["l1m"]
-             + np.log2(Meff) - extra * np.log2(T)
-             + sigma * np.log2(dp["S"] / 2560.0))
+    if model.explicit_intercepts:
+        aa = np.asarray(th[0:3])[dp["scale_idx"]]
+    else:
+        a = profile_intercepts(dp, model.g(dp, th))
+        aa = np.array([a[s] for s in dp["scale"]])
+    if name == "H7-rho-floor-S":
+        rho0, d, alpha, f, beta_c, sigma = th
+        Meff = 1.0 + rho0 * d ** T * (dp["M"] - 1.0)
+        extra = np.where(dp["conv"] == "nesterov_corrected", beta_c, 0.0)
+        strip = (aa + dp["l1m"] + np.log2(Meff) - extra * np.log2(T)
+                 + sigma * np.log2(dp["S"] / 2560.0))
+        return (strip, lambda t: np.log2(t ** (-alpha) + f),
+                "line = log2(T^-alpha + f), alpha=%.3f, f=%.3f" % (alpha, f))
+    if name == "C1sat-H7kin":
+        alpha, f, sigma, beta_c = th
+        extra = np.where(dp["conv"] == "nesterov_corrected", beta_c, 0.0)
+        strip = (aa + dp["l2kin"] - extra * dp["l2T"]
+                 + sigma * np.log2(dp["S"] / 2560.0))
+        return (strip, lambda t: np.log2(t ** (-alpha) + f),
+                "kinematics = theorem T/C; line = log2(T^-alpha + f), "
+                "alpha=%.3f, f=%.3f" % (alpha, f))
+    if name == "C1sat-H7kin+align":
+        rho0, d, alpha, f, sigma, beta_c = th
+        align = 1.0 + rho0 * d ** T * (dp["M"] - 1.0)
+        extra = np.where(dp["conv"] == "nesterov_corrected", beta_c, 0.0)
+        strip = (aa + dp["l2kin"] + np.log2(align) - extra * dp["l2T"]
+                 + sigma * np.log2(dp["S"] / 2560.0))
+        return (strip, lambda t: np.log2(t ** (-alpha) + f),
+                "T/C + residual alignment; line = log2(T^-alpha + f), "
+                "alpha=%.3f, f=%.3f" % (alpha, f))
+    if name == "C1sat+C3":
+        alpha, f, beta = th[3], th[4], th[5]
+        base = T ** (-alpha) + f
+        phi = (-beta * np.sqrt(dp["H"]) * 2.0 ** aa * base
+               * (dp["C"] - T)) * LOG2E
+        strip = aa + dp["l2kin"] + phi
+        return (strip, lambda t: np.log2(t ** (-alpha) + f),
+                "T/C * C3 interference; line = log2(T^-alpha + f), "
+                "alpha=%.3f, f=%.3f" % (alpha, f))
+    if name == "C1q+C3":
+        q, beta = th[3], th[4]
+        phi = (-beta * np.sqrt(dp["H"]) * 2.0 ** aa * q ** T
+               * (dp["C"] - T)) * LOG2E
+        strip = aa + dp["l2kin"] + phi
+        return (strip, lambda t: t * math.log2(q),
+                "T/C * C3 interference; line = T log2 q, q=%.4f" % q)
+    if name in ("C1q-pure", "C1sat-pure"):
+        strip = aa + dp["l2kin"]
+        if name == "C1q-pure":
+            q = th[0]
+            return (strip, lambda t: t * math.log2(q),
+                    "kinematics = theorem T/C; line = T log2 q, q=%.4f" % q)
+        alpha, f = th
+        return (strip, lambda t: np.log2(t ** (-alpha) + f),
+                "kinematics = theorem T/C; line = log2(T^-alpha + f), "
+                "alpha=%.3f, f=%.3f" % (alpha, f))
+    return None
+
+
+def make_collapse_figure(df: pd.DataFrame, model: Model,
+                         fname: str = "collapse_winner"):
+    """Winner collapse: strip everything except the base age curve; every
+    convention/scale/S cell should land on the common clock curve."""
+    dp = pack(df)
+    spec = winner_strip(dp, model)
+    if spec is None:
+        return False
+    strip, curve, subtitle = spec
+    T = dp["T"]
     ynorm = dp["y"] - strip
 
     fig, ax = plt.subplots(figsize=(7.0, 4.6), dpi=200)
     tt = np.geomspace(1.8, 190, 300)
-    ax.plot(tt, np.log2(tt ** (-alpha) + f), color="#5f5e56", lw=2.0,
-            zorder=2, label=None)
+    ax.plot(tt, curve(tt), color="#5f5e56", lw=2.0, zorder=2, label=None)
     rng = np.random.default_rng(SEED)
     for conv in CONVS:
         m = dp["conv"] == conv
@@ -629,17 +867,19 @@ def make_collapse_figure(df: pd.DataFrame, model: Model):
     ax.set_ylabel("normalized tuned rate (bits)", fontsize=10,
                   color="#33322e")
     ax.set_title(
-        "H7 collapse: log2 eta* minus scale, momentum, convention and S "
-        "terms\nline = log2(T^-alpha + f), alpha=%.3f, f=%.3f" % (alpha, f),
+        "%s collapse: log2 eta* minus scale/kinematic/convention/S terms\n%s"
+        % (model.name, subtitle),
         fontsize=10, color="#33322e", loc="left")
     style_ax(ax)
     fig.tight_layout()
-    fig.savefig(OUT / "collapse_winner.png")
-    fig.savefig(OUT / "collapse_winner.pdf")
+    fig.savefig(OUT / f"{fname}.png")
+    fig.savefig(OUT / f"{fname}.pdf")
     plt.close(fig)
+    return True
 
 
-def make_residual_figure(df: pd.DataFrame, resid: np.ndarray, winner: str):
+def make_residual_figure(df: pd.DataFrame, resid: np.ndarray, winner: str,
+                         fname: str = "residuals_holdout"):
     fig, axes = plt.subplots(1, 3, figsize=(11, 3.8), dpi=200, sharey=True)
     rng = np.random.default_rng(SEED + 1)
     conv = df["convention"].to_numpy()
@@ -686,8 +926,8 @@ def make_residual_figure(df: pd.DataFrame, resid: np.ndarray, winner: str):
     fig.suptitle(f"{winner}: leave-one-campaign-out residuals",
                  fontsize=10, color="#33322e", x=0.01, ha="left")
     fig.tight_layout(rect=(0, 0, 1, 0.95))
-    fig.savefig(OUT / "residuals_holdout.png")
-    fig.savefig(OUT / "residuals_holdout.pdf")
+    fig.savefig(OUT / f"{fname}.png")
+    fig.savefig(OUT / f"{fname}.pdf")
     plt.close(fig)
 
 
@@ -699,6 +939,7 @@ def main():
     df = load()
     zoo = make_zoo()
     add_own_designs(zoo)
+    add_theory_candidates(zoo)
 
     rows = []
     loco_resids = {}
@@ -743,28 +984,33 @@ def main():
     with open(OUT / "fit_details.json", "w") as f:
         json.dump(rows, f, indent=1, default=str)
 
-    # winner residual-structure tests (held-out residuals)
+    # residual-structure tests (held-out residuals) for every model
+    def structure_tests(r: np.ndarray) -> dict:
+        tests = {}
+        tests["spearman_T"] = stats.spearmanr(df["T"], r)._asdict()
+        tests["spearman_mu"] = stats.spearmanr(df["mu"], r)._asdict()
+        tests["spearman_S"] = stats.spearmanr(df["S"], r)._asdict()
+        groups = [r[(df["convention"] == c).to_numpy()] for c in CONVS
+                  if (df["convention"] == c).any()]
+        kw = stats.kruskal(*groups)
+        tests["kruskal_convention"] = dict(statistic=float(kw.statistic),
+                                           pvalue=float(kw.pvalue))
+        groups = [r[(df["scale"] == s).to_numpy()] for s in SCALES
+                  if (df["scale"] == s).any()]
+        kw = stats.kruskal(*groups)
+        tests["kruskal_scale"] = dict(statistic=float(kw.statistic),
+                                      pvalue=float(kw.pvalue))
+        return tests
+
+    all_tests = {m.name: structure_tests(loco_resids[m.name]) for m in zoo}
     winner = lg.iloc[0]["model"]
-    r = loco_resids[winner]
-    tests = {}
-    tests["spearman_T"] = stats.spearmanr(df["T"], r)._asdict()
-    tests["spearman_mu"] = stats.spearmanr(df["mu"], r)._asdict()
-    tests["spearman_S"] = stats.spearmanr(df["S"], r)._asdict()
-    groups = [r[(df["convention"] == c).to_numpy()] for c in CONVS
-              if (df["convention"] == c).any()]
-    kw = stats.kruskal(*groups)
-    tests["kruskal_convention"] = dict(statistic=float(kw.statistic),
-                                       pvalue=float(kw.pvalue))
-    groups = [r[(df["scale"] == s).to_numpy()] for s in SCALES
-              if (df["scale"] == s).any()]
-    kw = stats.kruskal(*groups)
-    tests["kruskal_scale"] = dict(statistic=float(kw.statistic),
-                                  pvalue=float(kw.pvalue))
     with open(OUT / "winner_residual_tests.json", "w") as f:
-        json.dump({"winner": winner, "tests": tests}, f, indent=1,
-                  default=float)
+        json.dump({"winner": winner, "tests": all_tests[winner]}, f,
+                  indent=1, default=float)
+    with open(OUT / "residual_tests_all.json", "w") as f:
+        json.dump(all_tests, f, indent=1, default=float)
     print("\nwinner:", winner)
-    for k, v in tests.items():
+    for k, v in all_tests[winner].items():
         print(f"  {k}: {v}")
 
     # per-campaign held-out RMSE matrix
@@ -772,12 +1018,19 @@ def main():
     pc.index.name = "model"
     pc.round(4).to_csv(OUT / "loco_per_campaign.csv")
 
-    # figures for the winner
-    wmodel = {m.name: m for m in zoo}[winner]
-    make_collapse_figure(df, wmodel)
+    # figures: winner, plus the best theory C-variant if it is not the winner
+    by_name = {m.name: m for m in zoo}
+    make_collapse_figure(df, by_name[winner])
     make_residual_figure(df, loco_resids[winner], winner)
-    print("figures written:", OUT / "collapse_winner.png",
-          OUT / "residuals_holdout.png")
+    cbest = lg[lg["model"].str.startswith("C1")].iloc[0]["model"]
+    if cbest != winner:
+        make_collapse_figure(df, by_name[cbest], fname="collapse_best_C")
+        make_residual_figure(df, loco_resids[cbest], cbest,
+                             fname="residuals_holdout_best_C")
+        print("best C-variant:", cbest)
+        for k, v in all_tests[cbest].items():
+            print(f"  {k}: {v}")
+    print("figures written to", OUT)
 
 
 if __name__ == "__main__":

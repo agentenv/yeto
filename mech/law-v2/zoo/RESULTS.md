@@ -95,7 +95,9 @@ local-work exponent (S/2560)^0.105.
   odd ones: G5B (SNOO; sits ~1.3 bits below every no-campaign-dial model) and
   G9B (7B, scored through the declared unseen-scale intercept fallback that
   penalizes all models identically).
-* **Held-out residual structure (plots: `residuals_holdout.png`):** no
+* **Held-out residual structure (plots: `residuals_holdout_H7.png`;
+  the unsuffixed `residuals_holdout.png` / `collapse_winner.png` now show the
+  round-2 league winner, and `collapse_H7.png` keeps the H7 collapse):** no
   remaining structure at the 0.05 level -- Spearman vs T rho=0.077 (p=0.42),
   vs mu rho=0.121 (p=0.20), vs S rho=-0.092 (p=0.34); Kruskal-Wallis across
   conventions p=0.25; across scales p=0.078.  For contrast, H6 (no S term)
@@ -106,7 +108,7 @@ local-work exponent (S/2560)^0.105.
   indistinguishable.  H7 is named winner on the residual-structure criterion
   (H6 fails the no-S-structure requirement) and on AIC/BIC; H6 is the
   fallback if one insists on one fewer parameter.
-* Collapse figure: `collapse_winner.png` -- after stripping scale, (1-mu),
+* Collapse figure: `collapse_H7.png` -- after stripping scale, (1-mu),
   M_eff, corrected-tilt and S terms, all 112 points from every convention and
   scale fall on the single curve log2(T^-alpha + f).  The visible low cluster
   at T=5 is G5B.
@@ -134,3 +136,127 @@ X2, R1, R2; H1-H3 are first-round hybrids; H4/H5 respond to the convex-in-
 log-T mu0 residual, H6 to the T=160 upturn (seen in two independent
 campaigns), H7 to the S trend unmasked by H6.  All refinements were selected
 on held-out (LOCO) error, never on full-fit error.
+
+---
+
+# Round 2: theory-lane candidates (C1 / C1+C3) scored in the same harness
+
+Added per coordinator instruction from `mech/law-v2/theory/CANDIDATES.md`
+(commit 0dde35e).  Same data, same equal-point objective, same LOCO protocol,
+same fallbacks, same seed.  New kinematic factor: `T/C_conv(T,mu)` with the
+accumulated per-step coefficient from
+`lean-mechanism/LeanMechanism/FiniteHorizonOuter.lean`:
+`C_raw = T/(1-mu) - mu^2(1-mu^T)/(1-mu)^2`,
+`C_hb = T/(1-mu) - mu(1-mu^T)/(1-mu)^2`, `C_corr = T/(1-mu)`, `C_mu0 = T`.
+The C3 interference factor `phi = exp(-beta sqrt(H) eta0[scale] base(T)
+(C-T))` needs `eta0` inside the exponent, so those two models carry the three
+scale intercepts explicitly in theta (same parameter count, same objective);
+beta is ONE global parameter refit inside every LOCO fold -- the theory
+lane's beta=0.006 was never used as input.
+
+## Updated league (new entries interleaved; full 21-model table in `league.csv`)
+
+| model | form | k (global+stratum) | LOCO RMSE | full RMSE | AIC | BIC | Delta vs B0 (jk SE) | 95% cov | het chi2 (dof) |
+|---|---|---|---:|---:|---:|---:|---|---:|---|
+| **C1sat-H7kin** (round-2 league winner) | H7 with (1-mu)M_eff -> theorem T/C; rho0,d dropped | 7 (3+4) | **0.331** | 0.294 | **-257.9** | **-236.1** | -1.043 (0.091) | 9.4% | 162k (99) |
+| C1sat-H7kin+align | + H7's rho0 d^T (M-1) kept on top of T/C | 9 (5+4) | 0.331 | 0.295 | -253.8 | -226.6 | -1.042 (0.091) | 9.4% | 162k (97) |
+| C1sat+C3 | eta0[s] (T/C)(T^-a+f) exp(-beta sqrt(H) eta0 base (C-T)) | 6 (3+3) | 0.346 | 0.303 | -253.2 | -234.1 | -1.028 (0.091) | 10.4% | 166k (100) |
+| C1sat-pure | eta0[s] (T/C)(T^-a+f) | 5 (2+3) | 0.357 | 0.319 | -243.9 | -227.5 | -1.016 (0.084) | 10.4% | 233k (101) |
+| H7-rho-floor-S (round-1 winner) | fitted alignment decay | 9 (5+4) | 0.363 | 0.317 | -237.2 | -210.0 | -1.010 (0.098) | 10.4% | 108k (97) |
+| C1q+C3 | eta0[s] (T/C) q^T exp(-beta ...) | 5 (2+3) | 0.619 | 0.577 | -111.3 | -95.0 | -0.754 (0.063) | 0.9% | 490k (101) |
+| C1q-pure | eta0[s] (T/C) q^T (theory keystone form) | 4 (1+3) | 0.692 | 0.649 | -87.0 | -73.4 | -0.681 (0.060) | 2.8% | 661k (102) |
+
+Fitted round-2 parameters: C1sat-H7kin alpha=1.195, f=0.143, sigma=0.070,
+beta_c=0.093; C1sat+C3 alpha=1.225, f=0.161, **beta=0.0021**; C1q+C3
+q=0.9951, **beta=0.0042** (theory lane's independent estimate: 0.006 -- same
+order, fold-refit, no leakage); C1q-pure q=0.9947.
+
+## Per-campaign LOCO RMSE deltas vs H7 (bits; negative = C-variant better)
+
+| campaign | H7 | C1sat-H7kin | delta | C1sat+C3 | delta |
+|---|---:|---:|---:|---:|---:|
+| DISAMBIG | 0.126 | 0.210 | +0.084 | 0.281 | +0.155 |
+| G12 | 0.518 | 0.248 | -0.270 | 0.253 | -0.265 |
+| G4C (1.7B) | 0.408 | 0.567 | +0.159 | 0.634 | +0.226 |
+| G5B | 1.317 | 1.220 | -0.097 | 1.237 | -0.080 |
+| G6 | 0.234 | 0.217 | -0.017 | 0.256 | +0.022 |
+| G8 | 0.396 | 0.271 | -0.125 | 0.265 | -0.131 |
+| G9A (1.7B) | 0.122 | 0.386 | +0.264 | 0.487 | +0.365 |
+| G9B (7B) | 0.640 | 0.494 | -0.146 | 0.495 | -0.145 |
+| TP-pilot | 0.414 | 0.132 | -0.282 | 0.102 | -0.312 |
+| TP-v1 | 0.146 | 0.295 | +0.149 | 0.259 | +0.113 |
+| TP-v2 | 0.153 | 0.246 | +0.093 | 0.258 | +0.105 |
+| TP-v3 | 0.192 | 0.247 | +0.055 | 0.228 | +0.036 |
+
+Pooled: C1sat-H7kin beats H7 by 0.032 bits = **1.1x** the jackknife SE
+(0.029) -- a real-looking but NOT individually significant pooled gain under
+the round-1 margin standard; the wins concentrate in the momentum-heavy
+campaigns (G12 heavy-ball, G8, TP-pilot, G9B) and the losses in the two 1.7B
+campaigns (G4C, G9A) -- exactly where the theory lane's scale-lever
+signature lives.
+
+## Structure tests, best C-variant (C1sat-H7kin; plots
+`collapse_winner.png`, `residuals_holdout.png`)
+
+Held-out residuals: Spearman vs T rho=0.021 (p=0.82) and vs S rho=0.020
+(p=0.83) -- clean; **but vs mu rho=-0.467 (p=2.1e-7) and Kruskal-Wallis
+across conventions p=1.7e-5** -- NOT clean.  The pattern: mu0 rows sit
+systematically high (+0.16..+0.41 bits at T>=5) while momentum rows sit low
+(heavy-ball -0.25, raw at mu=0.95 -0.21), i.e. under the parameter-free T/C
+transform the momentum arms are still overpredicted by a roughly
+convention-blind ~0.3-bit deficit that the theory lane calls phi.  H7 showed
+no such structure (mu p=0.20, convention p=0.25) because its two extra
+fitted parameters (rho0, d) bend the transform to absorb exactly this.  The
+C3 term is the theory lane's proposed phi closure, and with the saturating
+clock it only reduces LOCO by 0.012 +/- 0.012 bits (n.s.) and does not
+remove the mu/convention structure (C1sat+C3 medians: mu0 +0.22 vs momentum
+-0.25..0).  On the q^T clock C3 is clearly real (-0.073 +/- 0.023, >3x SE,
+beta=0.0042), but the saturating floor f and the self-quenching phi are
+partially degenerate on banked data -- both flatten the large-T tail.
+
+## Frozen coverage/heterogeneity bars
+
+No variant approaches them.  Best coverage in the entire 21-model zoo:
+14.2% (H4); round-2 winner 9.4%; heterogeneity chi2 stays O(10^5) on ~100
+dof (p ~ 0) everywhere, versus the frozen bars of >=90% coverage and
+p>=0.05.  The verdict category remains **best-so-far descriptive** for
+every model, rounds 1 and 2 alike.
+
+## Honest read on C1's status: **confirmed as the kinematic factor, with a
+measured residual transform still missing -- "mixed, leaning confirmed"**
+
+1. **The theorem-backed kinematics subsumes my fitted alignment-decay
+   term.**  Refit with H7's alignment factor kept on top of T/C, the
+   optimizer drives it to irrelevance (rho0=1.26 at d=0.05, the lower
+   bound: the factor is <=0.008 bits at T=2 and 0 beyond) and held-out
+   error is unchanged (+0.0002 +/- 0.0008 bits).  H7's phenomenological
+   4.07 x 0.657^T alignment decay was a curve-fit shadow of T/C: the
+   theorem explains where round 1's best fitted structure came from, with
+   zero parameters.  This is the cleanest positive result of the round.
+2. C1 kinematics + refit saturating clock beats every round-1 model on
+   AIC/BIC by >20 points with two fewer parameters, and posts the best
+   pooled LOCO (0.331); the pooled gain over H7 itself is 1.1x SE (not
+   individually significant).
+3. **But T/C is not yet the complete convention transform**: it leaves the
+   significant, roughly convention-blind mu/momentum deficit described
+   above, which H7's fitted parameters were absorbing.  The theory lane's
+   own phi ledger predicted exactly such a shared residual; its C3 closure
+   is the right order of magnitude (fold-refit beta 0.002-0.004 vs the
+   theory's 0.006) but is statistically inseparable from the floor f on
+   banked data, and neither removes the structure.
+4. **G5B outlier:** unchanged in kind under every C-variant -- still the
+   worst campaign by ~3x (1.18-1.24 bits vs 1.32 under H7; a slight
+   improvement, direction consistent with the kinematics helping its raw
+   arm, but the ~1.2-bit campaign-level offset survives all admissible
+   models).  C1/C3 do not explain G5B.
+5. The 1.7B regressions (G4C +0.16, G9A +0.26 bits vs H7) are the banked
+   shadow of the theory lane's scale-lever discriminator; the banked 1.7B
+   data are too thin to settle it, which makes the proposed corrected-1.7B
+   (T=20, H=512) curve the right next probe.
+
+Round-2 verdict on the league: **C1sat-H7kin is the new best-so-far
+descriptive law** (best LOCO, best AIC/BIC, fewest assumptions per bit of
+error removed, theorem-backed kinematics), with the explicit caveat that it
+fails the round-1 "no remaining structure" clause that H7 passes -- the
+remaining structure is now localized, measured (~0.3 bits, mu/convention),
+and is the object the C3/C4 discrimination experiments should target.
