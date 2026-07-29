@@ -108,6 +108,30 @@ def test_weighted_token_loss_uses_only_assistant_tokens():
     assert ml._weighted_token_loss(losses, weights).item() == 3.0
 
 
+def test_reduced_loss_sum_count_extracts_megatron_loss_dicts():
+    import torch
+
+    total, count = ml._reduced_loss_sum_count(
+        [{"lm loss": torch.tensor(2.0)}, {}, {"lm loss": torch.tensor([3.0, 5.0])}]
+    )
+
+    assert total == 6.0
+    assert count == 2
+
+
+def test_append_training_metric_resets_and_appends_jsonl(tmp_path):
+    path = tmp_path / "run" / "train.metrics.jsonl"
+
+    ml._append_training_metric(str(path), None, reset=True)
+    ml._append_training_metric(str(path), {"step": 1, "loss": 2.5})
+    ml._append_training_metric(str(path), {"step": 2, "loss": 2.0})
+
+    assert [json.loads(line) for line in path.read_text().splitlines()] == [
+        {"loss": 2.5, "step": 1},
+        {"loss": 2.0, "step": 2},
+    ]
+
+
 def test_prepare_model_config_sets_pipeline_dtype_from_params_dtype():
     finalize = object()
     cfg = SimpleNamespace(params_dtype="bf16", pipeline_dtype=None)

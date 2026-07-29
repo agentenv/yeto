@@ -288,6 +288,29 @@ def _weighted_token_loss(output, weights):
     return (output * loss_weights).sum() / loss_weights.sum().clamp_min(1)
 
 
+def _reduced_loss_sum_count(losses_reduced):
+    """Extract scalar LM losses returned by a Megatron pipeline schedule."""
+    loss_sum = 0.0
+    loss_count = 0
+    for item in losses_reduced or []:
+        if not isinstance(item, dict) or "lm loss" not in item:
+            continue
+        value = item["lm loss"]
+        if hasattr(value, "detach"):
+            value = value.detach().float().mean().item()
+        loss_sum += float(value)
+        loss_count += 1
+    return loss_sum, loss_count
+
+
+def _append_training_metric(path, record, *, reset=False):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w" if reset else "a", encoding="utf-8") as f:
+        if not reset:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
+            f.flush()
+
+
 def _prepare_model_config(model, finalize_model_grads, pipeline_parallel):
     """Install Yeto's training hooks and required pipeline metadata."""
     cfg = getattr(model[0], "config", None) or getattr(
@@ -709,6 +732,9 @@ def _run_inner_loop(
         args.epochs if args.epochs is not None else "step-limited",
         args.grad_accum,
     )
+    metrics_path = os.path.join(os.path.expanduser(args.output_dir), "train.metrics.jsonl")
+    if rank == 0:
+        _append_training_metric(metrics_path, None, reset=True)
 
     def forward_step(it, mdl):
         batch = next(it)
@@ -742,7 +768,7 @@ def _run_inner_loop(
         for m in model:
             m.zero_grad_buffer()
         opt.zero_grad()
-        forward_backward(
+        losses_reduced = forward_backward(
             forward_step_func=forward_step,
             data_iterator=data_iter,
             model=model,
@@ -751,13 +777,39 @@ def _run_inner_loop(
             micro_batch_size=mbs,
             forward_only=False,
         )
+        local_loss_sum, local_loss_count = _reduced_loss_sum_count(losses_reduced)
+        loss_stats = torch.tensor(
+            [local_loss_sum, local_loss_count], dtype=torch.float64, device=device
+        )
+        if world > 1:
+            dist.all_reduce(loss_stats)
+        step_loss = (
+            float((loss_stats[0] / loss_stats[1]).item())
+            if loss_stats[1].item() > 0
+            else None
+        )
         update_successful, _, _ = opt.step()  # grads reduced inside finalize_model_grads
         if update_successful:
             scheduler.step(increment=1)
         steps_total += 1
         tokens_total += tokens_per_inner_step
+        if rank == 0:
+            _append_training_metric(
+                metrics_path,
+                {
+                    "loss": step_loss,
+                    "step": steps_total,
+                    "tokens": tokens_total,
+                    "update_successful": bool(update_successful),
+                },
+            )
         if rank == 0 and (steps_total % args.log_every == 0 or steps_total == max_steps):
-            log.info("training progress local_step=%d/%d", steps_total, max_steps)
+            log.info(
+                "training progress local_step=%d/%d lm_loss=%s",
+                steps_total,
+                max_steps,
+                "unavailable" if step_loss is None else f"{step_loss:.6f}",
+            )
 
         # --- fragment sync at the step boundary (never blocks) ---
         # Broadcasts apply BEFORE pulls are answered (see yeto/learner.py:
