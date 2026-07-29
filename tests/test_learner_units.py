@@ -109,16 +109,27 @@ def test_allreduce_skips_none_grads(monkeypatch):
 def test_lora_targets_resolution():
     from types import SimpleNamespace
 
-    from yeto.learner import _ATTENTION_TARGETS, is_moe_config, resolve_lora_targets
+    from yeto.learner import (
+        _ATTENTION_TARGETS,
+        _GEMMA4_CLIPPABLE_ATTENTION_TARGETS,
+        is_gemma4_clippable_config,
+        is_moe_config,
+        resolve_lora_targets,
+    )
 
     dense = SimpleNamespace()
     moe = SimpleNamespace(n_routed_experts=256)
+    gemma4 = SimpleNamespace(model_type="gemma4")
     assert not is_moe_config(dense) and is_moe_config(moe)
+    assert is_gemma4_clippable_config(gemma4)
     # auto: attention for MoE, all-linear for dense.
     assert resolve_lora_targets("auto", moe) == _ATTENTION_TARGETS
     assert resolve_lora_targets("auto", dense) == "all-linear"
     assert resolve_lora_targets("attention", dense) == _ATTENTION_TARGETS
     assert resolve_lora_targets("all-linear", moe) == "all-linear"  # warned, honored
+    assert resolve_lora_targets("auto", gemma4) == _GEMMA4_CLIPPABLE_ATTENTION_TARGETS
+    assert resolve_lora_targets("attention", gemma4) == _GEMMA4_CLIPPABLE_ATTENTION_TARGETS
+    assert resolve_lora_targets("all-linear", gemma4) == r".*\.linear$"
 
 
 def test_attention_target_regex_matches_common_archs():
@@ -141,6 +152,26 @@ def test_attention_target_regex_matches_common_archs():
         assert re.fullmatch(_ATTENTION_TARGETS, name), name
     for name in frozen:
         assert not re.fullmatch(_ATTENTION_TARGETS, name), name
+
+
+def test_gemma4_clippable_attention_targets_inner_linear():
+    import re
+
+    from yeto.learner import _GEMMA4_CLIPPABLE_ATTENTION_TARGETS
+
+    matching = [
+        "model.layers.3.self_attn.q_proj.linear",
+        "model.layers.3.self_attn.o_proj.linear",
+    ]
+    frozen = [
+        "model.layers.3.self_attn.q_proj",
+        "model.layers.3.mlp.up_proj.linear",
+        "lm_head",
+    ]
+    for name in matching:
+        assert re.fullmatch(_GEMMA4_CLIPPABLE_ATTENTION_TARGETS, name), name
+    for name in frozen:
+        assert not re.fullmatch(_GEMMA4_CLIPPABLE_ATTENTION_TARGETS, name), name
 
 
 def test_offline_first_uses_cache_hit():

@@ -240,12 +240,22 @@ _ATTENTION_TARGETS = (
     r".*\.(q_proj|k_proj|v_proj|o_proj|qkv_proj|out_proj"
     r"|q_a_proj|q_b_proj|kv_a_proj_with_mqa|kv_b_proj)$"
 )
+_GEMMA4_CLIPPABLE_ATTENTION_TARGETS = (
+    r".*\.(q_proj|k_proj|v_proj|o_proj|qkv_proj|out_proj"
+    r"|q_a_proj|q_b_proj|kv_a_proj_with_mqa|kv_b_proj)\.linear$"
+)
 # Config attributes that mark a mixture-of-experts architecture.
 _MOE_CONFIG_MARKERS = ("n_routed_experts", "num_experts", "num_local_experts")
 
 
 def is_moe_config(config) -> bool:
     return any(getattr(config, a, None) for a in _MOE_CONFIG_MARKERS)
+
+
+def is_gemma4_clippable_config(config) -> bool:
+    model_type = str(getattr(config, "model_type", "") or "").lower()
+    architectures = [str(a).lower() for a in getattr(config, "architectures", []) or []]
+    return model_type == "gemma4" or any("gemma4" in a for a in architectures)
 
 
 def resolve_lora_targets(choice: str, config) -> str:
@@ -258,6 +268,10 @@ def resolve_lora_targets(choice: str, config) -> str:
     established MoE fine-tuning recipe; anyone overriding gets a loud
     warning rather than a silent foot-gun.
     """
+    if is_gemma4_clippable_config(config):
+        if choice == "all-linear":
+            return r".*\.linear$"
+        return _GEMMA4_CLIPPABLE_ATTENTION_TARGETS
     if choice == "auto":
         return _ATTENTION_TARGETS if is_moe_config(config) else "all-linear"
     if choice == "attention":
@@ -348,6 +362,13 @@ def main(argv=None) -> None:
 
     log.info("loading model %s (%s)", args.model, args.tuning)
     model, tokenizer = load_model_and_tokenizer(args, device)
+    if args.shard == "fsdp" and args.tuning == "full" and getattr(model, "lm_head", None) is not None:
+        # Gemma4's output head does not compose cleanly with FSDP flattening in
+        # the current torch/transformers stack. Keep it replicated and frozen;
+        # full SFT still updates the transformer body, while the vocab head
+        # stays in its native 2-D shape for the forward pass.
+        model.lm_head.requires_grad_(False)
+        log.info("freezing lm_head for fsdp full tuning")
 
     # Training randomness may differ after initialization while remaining
     # reproducible for a given benchmark seed and topology.
@@ -464,9 +485,17 @@ def main(argv=None) -> None:
             from torch.distributed.fsdp import MixedPrecision
             from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 
-            wrap_policy = functools.partial(
-                size_based_auto_wrap_policy, min_num_params=1_000_000
-            )
+            lm_head = getattr(model, "lm_head", None)
+
+            def wrap_policy(module, recurse, nonwrapped_numel):
+                if module is lm_head:
+                    return False
+                return size_based_auto_wrap_policy(
+                    module,
+                    recurse,
+                    nonwrapped_numel,
+                    min_num_params=1_000_000,
+                )
             if args.syncer != "none":
                 raise ValueError(
                     "--shard fsdp with --tuning full: full-parameter sync "
@@ -611,28 +640,39 @@ def main(argv=None) -> None:
 
     run_inner_loop(args, model, params, layout, opt, sched, loader, client, rank, world, device)
 
-    if rank == 0:
-        if args.shard == "fsdp" and args.tuning == "full":
-            # Gathering a full state dict from shards is not needed for the
-            # baseline-comparison use of this mode.
-            log.info("skipping checkpoint save in fsdp baseline mode")
-        else:
-            save_dir = args.output_dir
+    if args.shard == "fsdp" and args.tuning == "full":
+        from torch.distributed.fsdp import FullStateDictConfig, StateDictType
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+        save_dir = args.output_dir
+        if rank == 0:
             os.makedirs(save_dir, exist_ok=True)
-            if peft_model is not None:
-                # lora (fsdp-sharded or replicated base): the adapters are
-                # replicated ordinary tensors in `params`, so hand
-                # save_pretrained an explicit state dict through the unwrapped
-                # peft handle — the frozen base is never gathered or touched.
-                peft_model.save_pretrained(
-                    save_dir,
-                    state_dict={n: p.detach().cpu() for n, p in params.items()},
-                )
-            else:
-                target = model.module if world > 1 else model
-                target.save_pretrained(save_dir)
+        if dist.is_initialized():
+            dist.barrier()
+        cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
+            state_dict = model.state_dict()
+        if rank == 0:
+            model.module.save_pretrained(save_dir, state_dict=state_dict)
             tokenizer.save_pretrained(save_dir)
             log.info("saved model to %s", save_dir)
+    elif rank == 0:
+        save_dir = args.output_dir
+        os.makedirs(save_dir, exist_ok=True)
+        if peft_model is not None:
+            # lora (fsdp-sharded or replicated base): the adapters are
+            # replicated ordinary tensors in `params`, so hand
+            # save_pretrained an explicit state dict through the unwrapped
+            # peft handle — the frozen base is never gathered or touched.
+            peft_model.save_pretrained(
+                save_dir,
+                state_dict={n: p.detach().cpu() for n, p in params.items()},
+            )
+        else:
+            target = model.module if world > 1 else model
+            target.save_pretrained(save_dir)
+        tokenizer.save_pretrained(save_dir)
+        log.info("saved model to %s", save_dir)
         if client is not None:
             client.close()
     if dist.is_initialized():
