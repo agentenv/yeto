@@ -312,15 +312,14 @@ channels-first video latents while its pipeline prepares frames-first latents,
 so Yeto now infers the expected layout through the public `prepare_latents()`
 interface and aligns it without model-name switches.
 
-The subsequent PixArt Alpha run exposed three more generic denoiser contracts.
-A transformer that advertises `use_additional_conditions` needs pixel
-`resolution` and `aspect_ratio` inside `added_cond_kwargs`; a prompt mask must
-go to the encoder-specific mask argument instead of also becoming a
-self-attention mask; and a learned-variance denoiser can return twice the
-target channel count, with the prediction in the first half. Yeto now derives
-all three behaviors from the denoiser signature, configuration, and tensor
-shape rather than a model-name branch. Four regression tests cover these
-contracts. The retained `train.log`, `train-fixed.log`, `train-fixed2.log`, and
+The subsequent PixArt Alpha run exposed three more denoiser contracts. PixArt's
+`use_additional_conditions` path needs pixel `resolution` and `aspect_ratio`
+inside `added_cond_kwargs`, and its learned-variance denoiser can return twice
+the target channel count, with the prediction in the first half. Those two
+family semantics now live in the in-tree PixArt behavior adapter. The third
+contract remains generic: when a signature exposes a dedicated encoder mask,
+the prompt mask goes there instead of also becoming a self-attention mask. The
+retained `train.log`, `train-fixed.log`, `train-fixed2.log`, and
 `sample-final.log` record the failures that exposed them; `train-final.log` and
 `sample-final-2step.log` record the successful reruns.
 
