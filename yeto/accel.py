@@ -2,8 +2,8 @@
 
 torch has no device-generic API for seeding, memory queries, or the caching
 allocator: each vendor gets its own namespace (``torch.cuda``, ``torch.npu``)
-that happens to spell those calls identically. The learner needs six of them
-plus the matching collective backend, so the namespace is resolved once here
+that happens to spell those calls identically. The learners also have a few
+family-specific dtype and launcher policies, so those decisions live here
 rather than letting a second accelerator family spread ``device.type ==
 "cuda"`` through model loading and the training loop.
 
@@ -19,8 +19,12 @@ from types import ModuleType
 
 import torch
 
-# Accelerator device types, in auto-detection priority order.
-_ACCELERATORS = ("cuda", "npu")
+# Visible-card environment variables, in accelerator auto-detection priority.
+_VISIBLE_DEVICE_ENVS = {
+    "cuda": "CUDA_VISIBLE_DEVICES",
+    "npu": "ASCEND_RT_VISIBLE_DEVICES",
+}
+_ACCELERATORS = tuple(_VISIBLE_DEVICE_ENVS)
 
 # torch.distributed backend per device family.
 _DIST_BACKENDS = {"cuda": "nccl", "npu": "hccl", "cpu": "gloo"}
@@ -48,6 +52,11 @@ def is_accelerator(device: torch.device) -> bool:
     return device.type in _ACCELERATORS
 
 
+def visible_devices_env(device_type: str) -> str | None:
+    """The environment variable that limits visible cards of this family."""
+    return _VISIBLE_DEVICE_ENVS.get(device_type)
+
+
 def available_type() -> str:
     """The accelerator family visible on this node, or ``"cpu"``."""
     register_backends()
@@ -56,6 +65,25 @@ def available_type() -> str:
         if module is not None and module.is_available():
             return name
     return "cpu"
+
+
+def device_count(device: torch.device | None = None) -> int:
+    """Number of cards in the selected family, or zero for the CPU.
+
+    With no explicit device, count the family auto-detection would select.
+    This is also the set whose RNG state must be preserved before a device is
+    selected, such as while constructing a diffusion pipeline.
+    """
+    if device is None:
+        device_type = available_type()
+        module = (
+            getattr(torch, device_type, None)
+            if device_type in _ACCELERATORS
+            else None
+        )
+    else:
+        module = backend(device)
+    return 0 if module is None else module.device_count()
 
 
 def dist_backend(device: torch.device | None = None) -> str:
@@ -115,13 +143,59 @@ def oom_error(device: torch.device) -> type[BaseException]:
     return getattr(backend(device), "OutOfMemoryError", torch.cuda.OutOfMemoryError)
 
 
-def fork_rng(device: torch.device):
-    """Fork the CPU RNG plus ``device``'s generator; both restore on exit.
+def loss_metric_dtype(device: torch.device) -> torch.dtype:
+    """Highest-precision loss telemetry dtype supported by its collective.
+
+    HCCL reductions use float32 for this scalar. The established CUDA and CPU
+    paths retain float64 telemetry; this policy does not affect model math.
+    """
+    return torch.float32 if device.type == "npu" else torch.float64
+
+
+def diffusion_dtype(device: torch.device) -> torch.dtype:
+    """Floating dtype used to load a diffusion pipeline on ``device``.
+
+    Ascend uses bfloat16 and non-accelerator devices stay in float32. CUDA
+    uses bfloat16 when both the architecture and torch report support,
+    otherwise float16. A failed capability query retains the historical
+    fallback to torch's bfloat16 support probe.
+    """
+    if device.type == "npu":
+        return torch.bfloat16
+    if device.type != "cuda":
+        return torch.float32
+
+    module = backend(device)
+    get_capability = getattr(module, "get_device_capability", None)
+    if get_capability is not None:
+        try:
+            major, _ = get_capability(device)
+        except (AssertionError, RuntimeError, TypeError):
+            try:
+                major, _ = get_capability()
+            except (AssertionError, RuntimeError, TypeError):
+                major = None
+        if major is not None and major < 8:
+            return torch.float16
+    if getattr(module, "is_bf16_supported", lambda: False)():
+        return torch.bfloat16
+    return torch.float16
+
+
+def fork_rng(device: torch.device | None):
+    """Fork the CPU RNG plus selected accelerator generators; restore all.
 
     ``fork_rng`` forks the CUDA generators unless told otherwise, so only a
     non-CUDA accelerator has to name its family. Passing ``device_type`` in
     just that case keeps the call compatible with the oldest supported torch.
+    With no selected device, every card in the auto-detected family is forked.
     """
+    if device is None:
+        device_type = available_type()
+        devices = list(range(device_count()))
+        named = {} if device_type in ("cpu", "cuda") else {"device_type": device_type}
+        return torch.random.fork_rng(devices=devices, **named)
+
     module = backend(device)
     if module is None:
         return torch.random.fork_rng(devices=[])

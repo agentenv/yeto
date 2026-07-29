@@ -27,9 +27,15 @@ class FakeAccelerator:
 
     OutOfMemoryError = FakeOutOfMemory
 
-    def __init__(self, available: bool = True, free_total: tuple[int, int] = (2, 8)):
+    def __init__(
+        self,
+        available: bool = True,
+        free_total: tuple[int, int] = (2, 8),
+        count: int = 4,
+    ):
         self.available = available
         self.free_total = free_total
+        self.count = count
         self.seeded: list[int] = []
         self.bound: list[torch.device] = []
         self.empties = 0
@@ -51,6 +57,9 @@ class FakeAccelerator:
 
     def current_device(self) -> int:
         return 3
+
+    def device_count(self) -> int:
+        return self.count
 
 
 def device(device_type: str, index: int | None = None):
@@ -87,6 +96,12 @@ def test_cpu_is_not_an_accelerator():
     assert not accel.is_accelerator(device("cpu"))
 
 
+def test_visible_devices_env_is_owned_by_the_accelerator_abstraction():
+    assert accel.visible_devices_env("cuda") == "CUDA_VISIBLE_DEVICES"
+    assert accel.visible_devices_env("npu") == "ASCEND_RT_VISIBLE_DEVICES"
+    assert accel.visible_devices_env("cpu") is None
+
+
 def test_available_type_falls_back_to_cpu(no_cuda, monkeypatch):
     monkeypatch.delattr(torch, "npu", raising=False)
     assert accel.available_type() == "cpu"
@@ -94,6 +109,18 @@ def test_available_type_falls_back_to_cpu(no_cuda, monkeypatch):
 
 def test_available_type_finds_the_npu_when_cuda_is_absent(no_cuda, npu):
     assert accel.available_type() == "npu"
+
+
+def test_device_count_uses_the_selected_family(no_cuda, npu):
+    npu.count = 2
+    assert accel.device_count() == 2
+    assert accel.device_count(device("npu")) == 2
+    assert accel.device_count(device("cpu")) == 0
+
+
+def test_device_count_is_zero_when_auto_detection_selects_cpu(no_cuda, monkeypatch):
+    monkeypatch.delattr(torch, "npu", raising=False)
+    assert accel.device_count() == 0
 
 
 def test_cuda_wins_when_both_families_are_present(npu, monkeypatch):
@@ -195,6 +222,21 @@ def test_oom_error_is_the_vendor_exception(npu):
     assert accel.oom_error(device("cpu")) is torch.cuda.OutOfMemoryError
 
 
+def test_dtype_policies_preserve_each_device_family(monkeypatch):
+    assert accel.loss_metric_dtype(device("npu")) is torch.float32
+    assert accel.loss_metric_dtype(device("cuda")) is torch.float64
+    assert accel.loss_metric_dtype(device("cpu")) is torch.float64
+    assert accel.diffusion_dtype(device("npu")) is torch.bfloat16
+    assert accel.diffusion_dtype(device("cpu")) is torch.float32
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (7, 5))
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: True)
+    assert accel.diffusion_dtype(device("cuda")) is torch.float16
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (8, 0))
+    assert accel.diffusion_dtype(device("cuda")) is torch.bfloat16
+
+
 # --- probe RNG isolation -------------------------------------------------
 
 
@@ -231,5 +273,23 @@ def test_fork_rng_defaults_to_the_current_card(npu, recorded_fork):
 
 def test_fork_rng_forks_no_accelerator_on_cpu(recorded_fork):
     with accel.fork_rng(device("cpu")):
+        pass
+    assert recorded_fork == [{"devices": []}]
+
+
+def test_fork_rng_without_a_device_forks_every_card_in_detected_family(
+    no_cuda, npu, recorded_fork
+):
+    npu.count = 2
+    with accel.fork_rng(None):
+        pass
+    assert recorded_fork == [{"devices": [0, 1], "device_type": "npu"}]
+
+
+def test_fork_rng_without_a_device_forks_no_cards_on_cpu(
+    no_cuda, monkeypatch, recorded_fork
+):
+    monkeypatch.delattr(torch, "npu", raising=False)
+    with accel.fork_rng(None):
         pass
     assert recorded_fork == [{"devices": []}]
