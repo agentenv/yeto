@@ -6,10 +6,12 @@ import pytest
 import torch
 
 from yeto.learner import (
+    _loss_metric_dtype,
     allreduce_trainable_grads,
     load_model_and_tokenizer,
     normalize_param_name,
     run_inner_loop,
+    setup_distributed,
 )
 from yeto.losses import sft_loss
 
@@ -245,6 +247,32 @@ def test_normalized_names_match_unwrapped_layout_names():
     ]
     wrapped = ["_fsdp_wrapped_module." + n for n in unwrapped]
     assert [normalize_param_name(n) for n in wrapped] == unwrapped
+
+
+def test_loss_metric_dtype_uses_hccl_supported_float32_on_npu():
+    assert _loss_metric_dtype(SimpleNamespace(type="npu")) is torch.float32
+    assert _loss_metric_dtype(torch.device("cuda")) is torch.float64
+    assert _loss_metric_dtype(torch.device("cpu")) is torch.float64
+
+
+def test_setup_distributed_uses_the_selected_device(monkeypatch):
+    import yeto.learner as learner
+
+    device = torch.device("cuda", 2)
+    calls = []
+    monkeypatch.setenv("RANK", "2")
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setattr(learner.accel, "dist_backend", lambda actual: "nccl")
+    monkeypatch.setattr(
+        learner.dist,
+        "init_process_group",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(learner.dist, "get_rank", lambda: 2)
+    monkeypatch.setattr(learner.dist, "get_world_size", lambda: 4)
+
+    assert setup_distributed(device) == (2, 4)
+    assert calls == [{"backend": "nccl", "device_id": device}]
 
 
 # --- allreduce_trainable_grads --------------------------------------------

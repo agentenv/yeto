@@ -15,6 +15,7 @@ from pathlib import Path
 
 import torch
 
+from .. import accel
 from ..export import Checkpoint, parse_checkpoint, validate_against_layout
 from ..fragments import FragmentLayout, build_layout
 from ..tensor_io import apply_fragment
@@ -99,7 +100,7 @@ def _annotate_export_metadata(
 def export_checkpoint(args) -> tuple[Checkpoint, FragmentLayout, dict[str, torch.Tensor]]:
     """Rebuild a diffusion trainable layout and export the merged checkpoint."""
     checkpoint = parse_checkpoint(args.checkpoint)
-    device = torch.device(args.device)
+    device = accel.detect(args.device)
     from ..provenance import python_spec_sha256
 
     if args.diffusion_adapter:
