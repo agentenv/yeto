@@ -27,6 +27,14 @@ and derives the training contract from public Diffusers interfaces:
 - VAE and pipeline packing/unpacking helpers;
 - latent, mask, id, size, guidance, and temporal-conditioning shapes.
 
+Production loads resolve `--model-revision` and `--data-revision` to immutable
+commits and keep `trust_remote_code=False` unless `--trust-remote-code` is
+explicit. Custom adapter metadata is descriptive only: the sampler never
+imports its Python adapter implicitly, so pass `--diffusion-adapter` again
+after review. Custom remote loaders must follow the pinned-source contract in
+[PROVENANCE.md](PROVENANCE.md). Raw fallback state is saved as safetensors;
+legacy `.pt` tensor state is weights-only on read.
+
 This keeps model aliases as repository shortcuts rather than switches that
 select separate hard-coded trainers. Reusable behavior belongs in the generic
 learner. `--diffusion-adapter module:factory` is reserved for model semantics
@@ -73,9 +81,9 @@ This covers standard UNets, DiTs, and dual-denoiser pipelines such as Wan2.2.
 | `--shard ddp` | Replicate the base inside the island and explicitly all-reduce LoRA gradients. |
 | `--shard fsdp` | Use FSDP2 to shard the frozen base while keeping LoRA tensors replicated and name-stable. |
 
-FSDP2 requires CUDA and a torch build that provides composable
-`fully_shard`. Full-parameter tuning is exposed for experiments, but a
-syncer-connected FSDP full-tuning run is rejected because the trainable
+FSDP2 requires a CUDA or NPU accelerator and a torch build that provides
+composable `fully_shard`. Full-parameter tuning is exposed for experiments,
+but a syncer-connected FSDP full-tuning run is rejected because the trainable
 parameters are sharded. LoRA is the benchmarked asynchronous path.
 
 After wrapping, parameter names are normalized and converted into the same
@@ -148,8 +156,16 @@ The generic inner step is:
 The denoiser dispatcher supplies common fields such as prompt masks, pooled
 embeddings, image/text ids, packed shapes, guidance, crop/size conditioning,
 rotary embeddings, FPS, and LTX-style rope interpolation when the model
-signature requests them. Multi-denoiser pipelines route samples by timestep
-and combine their predictions back into batch order.
+signature requests them. When a signature has a dedicated encoder mask, prompt
+masks are not also sent as self-attention masks: that distinction follows the
+declared encoder-vs-self-attention interface and is model-agnostic.
+
+Family semantics that cannot be inferred safely from a signature live behind
+the adapter boundary. The in-tree PixArt behavior adapter supplies pixel
+resolution and aspect ratio through `added_cond_kwargs` when its transformer
+advertises `use_additional_conditions`, and selects the prediction half of a
+PixArt learned-sigma output before loss computation. Multi-denoiser pipelines
+route samples by timestep and combine their predictions back into batch order.
 
 `flow_matching` is currently the only accepted loss-function name. The
 scheduler may still provide sigma interpolation, epsilon prediction, sample
@@ -208,10 +224,13 @@ not selectable for this learner.
 
 ## Artifacts, export, and sampling
 
-A learner's saved adapter is its local state. The authoritative DiLoCo result
-is the Rust syncer's checkpoint. Rebuild the exact trainable layout and export
-the merged adapter with the same model, LoRA, fragment, and external-adapter
-settings used for training:
+The Rust syncer checkpoint is the durable, exact f32 source of truth. At a
+successful terminal handshake, every surviving connected learner also
+overwrites its trainable parameters from the manifested coordinator cut before
+saving; values are cast only if that learner stores a destination parameter in
+a lower-precision dtype. Rebuild the exact trainable layout and export from the
+coordinator checkpoint with the same model, LoRA, fragment, and
+external-adapter settings used for training:
 
 ```bash
 yeto-diffusion-export \
@@ -248,6 +267,10 @@ yeto sample-diffusion \
 ```
 
 Both samplers also accept a prompt dataset for batch generation.
+Generation arguments are forwarded to the selected pipeline, so its native
+shape rules still apply. For example, the validated Diffusers 0.39 CogVideoX
+VAE decoded a five-frame request to its next eight-frame temporal block; use 8
+when an exact eight-frame small profile is required.
 
 ## External adapter boundary
 
@@ -258,6 +281,7 @@ hook set:
 - pipeline loading or model preparation;
 - trainable module or parameter discovery;
 - latent or text/audio conditioning encoders;
+- model-specific denoiser keyword contributions or output/target alignment;
 - a complete rows-to-loss training step;
 - artifact save/load and generation behavior.
 
@@ -265,8 +289,8 @@ Trainable names must remain deterministic across learners, restarts, and
 checkpoint export. Adapters must not start syncers, launch infrastructure,
 upload artifacts, or communicate between learners. See the
 [adapter guide](../yeto/diffusion/adapters/README.md) and
-`yeto/diffusion/adapters/template.py`. NAVA is the in-tree example that
-requires this boundary.
+`yeto/diffusion/adapters/template.py`. PixArt is the minimal in-tree behavior
+adapter layered over the generic Diffusers path; NAVA is the full-step example.
 
 ### Protenix
 
@@ -423,6 +447,18 @@ AF3-style structure diffusion, use the Protenix adapter.
 - Raw-video LoRA has been exercised on LTX-Video and Wan2.1; Wan2.1 14B and
   dual-denoiser Wan2.2 have completed 8-GPU FSDP2 validation.
 - The NAVA external adapter has completed GPU train/save/reload validation.
+- Ascend 910B4 validation includes SD 1.5 raw-image LoRA under DDP and two-card
+  FSDP2/HCCL, plus CogVideoX-5b-nf4 raw-MP4 LoRA training, adapter reload, and
+  MP4 generation. The quantized load contained 341 real BnB 4-bit layers; the
+  saved 336-tensor adapter contained 4,128,768 finite values.
+- PixArt Alpha XL-2 at ModelScope commit
+  `9330fbbca134bd66ba7d25f8267213db0451acdd` completed two single-card Ascend
+  optimizer steps over real Pokemon BLIP image/caption rows at 256×256. Its
+  448-tensor attention LoRA contained 2,064,384 finite values, and all 224
+  LoRA-B tensors changed. A separate base-plus-adapter reload completed
+  two-step sampling and wrote a valid 256×256 RGB PNG.
+- External diffusion adapters have not yet completed equivalent Ascend
+  train/save/reload validation.
 - Held-out quality and equal-hardware synchronization are separate concerns;
   use [DIFFUSION_BENCHMARK.md](DIFFUSION_BENCHMARK.md) for that experiment.
 

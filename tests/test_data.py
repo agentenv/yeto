@@ -1,17 +1,38 @@
-"""Streaming tokenization tests using a fake tokenizer and in-memory rows."""
+"""Streaming tokenization tests using fake tokenizers and in-memory rows."""
+
+import json
 
 import pytest
 import torch
 
-from yeto.data import StreamingPackedBlocks, build_packed_dataset
+from yeto.data import (
+    ExactAssistantMaskError,
+    StreamingPackedBlocks,
+    _row_tokens,
+    build_packed_dataset,
+)
 
 
 class FakeTokenizer:
-    """Whitespace tokenizer: token id = crc of the word (deterministic, no I/O)."""
+    """Small model-native tokenizer with faithful assistant-mask semantics."""
 
+    name_or_path = "fake/native"
     bos_token_id = 1
     eos_token_id = 2
-    chat_template = None
+    chat_template = (
+        "{% for message in messages %}"
+        "{% if message.role == 'assistant' %}"
+        "{% generation %}{{ message.content }}{% endgeneration %}"
+        "{% else %}{{ message.content }}{% endif %}"
+        "{% endfor %}"
+    )
+
+    def __init__(self):
+        self.last_apply_kwargs = None
+        self.last_messages = None
+        self.last_tools = None
+        self.last_encoded = None
+        self.last_spans = []
 
     def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
         import zlib
@@ -29,85 +50,72 @@ class FakeTokenizer:
             out["offset_mapping"] = offsets
         return out
 
+    def get_chat_template(self, chat_template=None, tools=None):
+        assert chat_template is None
+        return self.chat_template
 
-class MaskedTemplateTokenizer(FakeTokenizer):
-    chat_template = "{{ native }}"
-
-    def apply_chat_template(
-        self,
-        messages,
-        tools=None,
-        tokenize=False,
-        add_generation_prompt=False,
-        return_dict=False,
-        return_assistant_tokens_mask=False,
-    ):
-        text = "".join(
-            f"<native_{msg.get('role', 'user')}> {msg.get('content') or ''} </native_{msg.get('role', 'user')}> "
-            for msg in messages
-        )
-        if not tokenize:
-            return text
-        tokenized = self(text, add_special_tokens=False)
-        if return_dict:
-            masks = []
-            for msg in messages:
-                role = msg.get("role", "user")
-                tokens = f"<native_{role}> {msg.get('content') or ''} </native_{role}>".split()
-                masks.extend([1.0 if role == "assistant" and i > 0 else 0.0 for i in range(len(tokens))])
-            return {"input_ids": tokenized["input_ids"], "assistant_masks": masks}
-        return tokenized["input_ids"]
-
-
-class UnmaskedTemplateTokenizer(MaskedTemplateTokenizer):
-    def apply_chat_template(self, *args, **kwargs):
-        rendered = super().apply_chat_template(*args, **kwargs)
-        if kwargs.get("tokenize") and kwargs.get("return_dict"):
-            rendered.pop("assistant_masks", None)
-        return rendered
-
-
-class FamilyTemplateTokenizer(FakeTokenizer):
-    chat_template = "{{ family }}"
-
-    TEMPLATES = {
-        "qwen": ("<|im_start|>{role}\n", "<|im_end|>\n"),
-        "gemma": ("<start_of_turn>{role}\n", "<end_of_turn>\n"),
-        "deepseek": ("<｜{role_title}｜>", "<｜end▁of▁sentence｜>"),
-        "kimi": ("<|im_{role}|>\n", "<|im_end|>\n"),
-        "glm": ("<|{role}|>\n", "<|end|>\n"),
-    }
-
-    def __init__(self, family):
-        self.family = family
+    @staticmethod
+    def _content_text(content):
+        if isinstance(content, list):
+            return json.dumps(content, sort_keys=True)
+        return str(content or "")
 
     def apply_chat_template(
         self,
         messages,
         tools=None,
-        tokenize=False,
-        add_generation_prompt=False,
-        return_dict=False,
-        return_assistant_tokens_mask=False,
+        tokenize=True,
+        **kwargs,
     ):
-        prefix_tmpl, suffix = self.TEMPLATES[self.family]
-        rendered = []
-        for msg in messages:
-            role = msg.get("role", "user")
-            role_title = "Assistant" if role == "assistant" else role.title()
-            rendered.append(prefix_tmpl.format(role=role, role_title=role_title))
-            rendered.append(msg.get("content") or "")
-            if msg.get("tool_calls"):
-                rendered.append("\n")
-                rendered.append(__import__("json").dumps(msg["tool_calls"]))
-            rendered.append(suffix)
-        text = "".join(rendered)
+        self.last_messages = messages
+        self.last_tools = tools
+        self.last_apply_kwargs = dict(kwargs, tokenize=tokenize)
         if not tokenize:
-            return text
-        tokenized = self(text, add_special_tokens=False)
-        if return_dict:
-            return {"input_ids": tokenized["input_ids"]}
-        return tokenized["input_ids"]
+            return " ".join(
+                f"native-{message['role']} {self._content_text(message.get('content'))}"
+                for message in messages
+            )
+
+        ids = [self.bos_token_id]
+        mask = [0]
+        self.last_spans = []
+        role_ids = {"system": 6001, "user": 6002, "assistant": 6003, "tool": 6004}
+        for message in messages:
+            role = message["role"]
+            ids.append(role_ids[role])
+            mask.append(0)  # role/control token: the native template owns this choice
+            text = self._content_text(message.get("content"))
+            if message.get("tool_calls"):
+                text += " " + json.dumps(message["tool_calls"], sort_keys=True)
+            payload = self(text, add_special_tokens=False)["input_ids"]
+            start = len(ids)
+            ids.extend(payload)
+            mask.extend([1 if role == "assistant" else 0] * len(payload))
+            end = len(ids)
+            ids.append(self.eos_token_id if role == "assistant" else 6005)
+            mask.append(1 if role == "assistant" else 0)
+            self.last_spans.append((role, start, end, len(ids) - 1))
+
+        self.last_encoded = {"input_ids": ids, "assistant_masks": mask}
+        return self.last_encoded
+
+
+class LegacyTokenizer:
+    """The pre-native whitespace tokenizer, used only by explicit legacy tests."""
+
+    name_or_path = "fake/legacy"
+    bos_token_id = 1
+    eos_token_id = 2
+    chat_template = None
+
+    def __init__(self):
+        self.plain_tokenize_calls = 0
+
+    def __call__(self, text, add_special_tokens=False):
+        import zlib
+
+        self.plain_tokenize_calls += 1
+        return {"input_ids": [zlib.crc32(w.encode()) % 5000 + 3 for w in text.split()]}
 
 
 def make_rows(n, words_per_row=50):
@@ -186,43 +194,183 @@ CHAT_ROW = {
         {"role": "assistant", "content": "a1 a2 a3"},
     ]
 }
-# Fallback segments tokenize to 4 tokens each ("<|role|>" + 3 words); with
-# BOS/EOS every row is 10 tokens, so seq_len=7 puts a block boundary inside
-# the assistant span of the first row.
+def test_native_multi_turn_tools_results_and_multipart_content_are_preserved():
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "weather", "parameters": {"type": "object"}},
+        }
+    ]
+    row = {
+        "tools": tools,
+        "messages": [
+            {"role": "system", "content": "be concise"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "weather here?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "weather", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "sunny"},
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "It is sunny."}],
+            },
+        ],
+    }
+    tokenizer = FakeTokenizer()
+
+    ids, weights = _row_tokens(tokenizer, row)
+
+    assert tokenizer.last_messages == row["messages"]
+    assert tokenizer.last_tools == tools
+    assert tokenizer.last_apply_kwargs == {
+        "add_generation_prompt": False,
+        "return_dict": True,
+        "return_assistant_tokens_mask": True,
+        "tokenize": True,
+    }
+    assert ids == tokenizer.last_encoded["input_ids"]
+    assert weights == [float(value) for value in tokenizer.last_encoded["assistant_masks"]]
+    assert ids[0] == tokenizer.bos_token_id and weights[0] == 0.0
+
+    for role, start, end, terminator in tokenizer.last_spans:
+        expected = 1.0 if role == "assistant" else 0.0
+        assert all(value == expected for value in weights[start:end])
+        assert weights[terminator] == expected
+    assistant_terminators = [
+        terminator for role, _start, _end, terminator in tokenizer.last_spans if role == "assistant"
+    ]
+    assert len(assistant_terminators) == 2
+    assert all(ids[index] == tokenizer.eos_token_id for index in assistant_terminators)
 
 
-def expected_weight_by_id():
-    tok = FakeTokenizer()
-    one_ids = set(tok("<|assistant|> a1 a2 a3")["input_ids"]) | {tok.eos_token_id}
-    zero_ids = set(tok("<|user|> u1 u2 u3")["input_ids"]) | {tok.bos_token_id}
-    assert not one_ids & zero_ids  # distinct words -> distinct fake ids
-    return one_ids, zero_ids
-
-
-def check_weights_match_ids(ids, weights, one_ids, zero_ids):
-    for t, w in zip(ids.tolist(), weights.tolist()):
-        assert t in one_ids or t in zero_ids
-        assert w == (1.0 if t in one_ids else 0.0)
-
-
-def test_assistant_weights_stay_aligned_across_block_boundary():
+def test_native_ids_and_masks_stay_aligned_across_packed_block_boundaries():
     rows = [CHAT_ROW] * 4
-    one_ids, zero_ids = expected_weight_by_id()
-    it = iter(StreamingPackedBlocks(rows, FakeTokenizer(), 0, 1, seq_len=7))
-    blocks = [next(it) for _ in range(4)]  # 4 x 7 tokens spans several 10-token rows
-    for ids, weights in blocks:
-        check_weights_match_ids(ids, weights, one_ids, zero_ids)
-    # rows straddle block boundaries, so some block must mix 0- and 1-weights
-    assert any(0.0 < w.mean() < 1.0 for _, w in blocks)
+    tokenizer = FakeTokenizer()
+    row_ids, row_weights = _row_tokens(tokenizer, CHAT_ROW)
+    expected_ids = (row_ids * len(rows))
+    expected_weights = (row_weights * len(rows))
+
+    ds = build_packed_dataset(rows, tokenizer, 0, 1, seq_len=7)
+    flat_ids = ds.blocks.flatten().tolist()
+    flat_weights = ds.weights.flatten().tolist()
+    valid_pairs = set(zip(expected_ids, expected_weights))
+    assert all(pair in valid_pairs for pair in zip(flat_ids, flat_weights))
+    assert torch.all(ds.weights.sum(dim=1) > 0)
+
+    stream = iter(StreamingPackedBlocks(rows, FakeTokenizer(), 0, 1, seq_len=7))
+    blocks = [next(stream) for _ in range(4)]
+    stream_ids = torch.cat([ids for ids, _weights in blocks]).tolist()
+    stream_weights = torch.cat([weights for _ids, weights in blocks]).tolist()
+    assert all(pair in valid_pairs for pair in zip(stream_ids, stream_weights))
+    assert all(weights.sum() > 0 for _ids, weights in blocks)
 
 
-def test_assistant_weights_in_preload_mode():
-    rows = [CHAT_ROW] * 4
-    one_ids, zero_ids = expected_weight_by_id()
-    ds = build_packed_dataset(rows, FakeTokenizer(), 0, 1, seq_len=7, train_on="assistant")
-    for i in range(len(ds)):
-        ids, weights = ds[i]
-        check_weights_match_ids(ids, weights, one_ids, zero_ids)
+def test_native_path_does_not_inject_extra_bos_or_eos_tokens():
+    tokenizer = FakeTokenizer()
+    ids, weights = _row_tokens(tokenizer, CHAT_ROW)
+
+    assert ids == tokenizer.last_encoded["input_ids"]
+    assert weights == [float(value) for value in tokenizer.last_encoded["assistant_masks"]]
+    assert ids.count(tokenizer.bos_token_id) == 1
+    assert ids.count(tokenizer.eos_token_id) == 1
+
+
+def test_explicit_legacy_mode_preserves_synthetic_roles_and_bos_eos_weights():
+    tokenizer = LegacyTokenizer()
+    ids, weights = _row_tokens(tokenizer, CHAT_ROW, assistant_mask_mode="legacy")
+    assistant_ids = set(tokenizer("<|assistant|> a1 a2 a3")["input_ids"])
+    user_ids = set(tokenizer("<|user|> u1 u2 u3")["input_ids"])
+
+    assert ids[0] == tokenizer.bos_token_id and weights[0] == 0.0
+    assert ids[-1] == tokenizer.eos_token_id and weights[-1] == 1.0
+    for token_id, weight in zip(ids[1:-1], weights[1:-1]):
+        assert weight == (1.0 if token_id in assistant_ids else 0.0)
+        assert token_id in assistant_ids | user_ids
+
+
+@pytest.mark.parametrize(
+    "template,error",
+    [
+        (None, "has no native chat template"),
+        ("{% for message in messages %}{{ message.content }}{% endfor %}", "does not contain"),
+    ],
+)
+def test_native_mode_rejects_templates_without_exact_mask_support(template, error):
+    class UnsupportedTokenizer(LegacyTokenizer):
+        chat_template = template
+
+        def get_chat_template(self, chat_template=None, tools=None):
+            return self.chat_template
+
+    with pytest.raises(ExactAssistantMaskError, match=error) as exc:
+        _row_tokens(UnsupportedTokenizer(), CHAT_ROW)
+    assert "--assistant-mask-mode legacy" in str(exc.value)
+
+
+def test_native_template_failure_never_silently_uses_plain_tokenization():
+    class BrokenNativeTokenizer(FakeTokenizer):
+        def apply_chat_template(self, *args, **kwargs):
+            raise RuntimeError("template rejected tool result")
+
+        def __call__(self, text, add_special_tokens=False):
+            raise AssertionError("plain tokenization is a forbidden implicit fallback")
+
+    with pytest.raises(ExactAssistantMaskError, match="template rejected tool result") as exc:
+        _row_tokens(BrokenNativeTokenizer(), CHAT_ROW)
+    assert "--assistant-mask-mode legacy" in str(exc.value)
+
+
+def test_native_mode_rejects_missing_or_all_zero_assistant_masks():
+    class BadMaskTokenizer(FakeTokenizer):
+        def __init__(self, returned):
+            super().__init__()
+            self.returned = returned
+
+        def apply_chat_template(self, *args, **kwargs):
+            return self.returned
+
+    with pytest.raises(ExactAssistantMaskError, match="did not return assistant_masks"):
+        _row_tokens(BadMaskTokenizer({"input_ids": [1, 2]}), CHAT_ROW)
+    with pytest.raises(ExactAssistantMaskError, match="all-zero assistant mask"):
+        _row_tokens(
+            BadMaskTokenizer({"input_ids": [1, 2], "assistant_masks": [0, 0]}),
+            CHAT_ROW,
+        )
+
+
+@pytest.mark.parametrize(
+    "returned,error",
+    [
+        ([], "instead of a mapping"),
+        ({"assistant_masks": [1]}, "did not return input_ids"),
+        ({"input_ids": [[1, 2]], "assistant_masks": [0, 1]}, "batched input_ids"),
+        ({"input_ids": [1, 2], "assistant_masks": [[0, 1]]}, "batched assistant_masks"),
+        ({"input_ids": [1, 2], "assistant_masks": [1]}, "2 input ids but 1"),
+        ({"input_ids": [1, 2], "assistant_masks": [0, 0.5]}, "non-binary"),
+    ],
+)
+def test_native_mode_rejects_malformed_ids_and_masks_with_legacy_hint(returned, error):
+    class MalformedTokenizer(FakeTokenizer):
+        def apply_chat_template(self, *args, **kwargs):
+            return returned
+
+    with pytest.raises(ExactAssistantMaskError, match=error) as exc:
+        _row_tokens(MalformedTokenizer(), CHAT_ROW)
+    assert "--assistant-mask-mode legacy" in str(exc.value)
 
 
 def test_assistant_packing_skips_zero_target_windows():
@@ -232,101 +380,22 @@ def test_assistant_packing_skips_zero_target_windows():
             {"role": "assistant", "content": "a1 a2 a3 a4"},
         ]
     }
-    ds = build_packed_dataset([row] * 3, FakeTokenizer(), 0, 1, seq_len=16, train_on="assistant")
+    ds = build_packed_dataset([row] * 3, FakeTokenizer(), 0, 1, seq_len=8, train_on="assistant")
     assert len(ds) < 12  # old raw packing would emit roughly every user-only window
     assert torch.all(ds.weights.sum(dim=1) > 0)
 
-    stream = StreamingPackedBlocks([row] * 3, FakeTokenizer(), 0, 1, seq_len=16, train_on="assistant")
+    stream = StreamingPackedBlocks([row] * 3, FakeTokenizer(), 0, 1, seq_len=8, train_on="assistant")
     for _, weights in [next(iter(stream)) for _ in range(3)]:
         assert weights.sum() > 0
 
 
-def test_assistant_mode_uses_chat_template_assistant_mask():
-    tok = MaskedTemplateTokenizer()
-    rows = [CHAT_ROW] * 3
-    ds = build_packed_dataset(rows, tok, 0, 1, seq_len=7, train_on="assistant")
-    native_assistant_ids = set(tok("a1 a2 a3")["input_ids"])
-    synthetic_assistant_id = tok("<|assistant|>")["input_ids"][0]
-    block_ids = ds.blocks.flatten().tolist()
-
-    assert synthetic_assistant_id not in block_ids
-    for token_id, weight in zip(block_ids, ds.weights.flatten().tolist()):
-        if token_id in native_assistant_ids or token_id == tok.eos_token_id:
-            assert weight == 1.0
-
-
-def test_assistant_mode_derives_native_spans_when_template_has_no_mask():
-    tok = UnmaskedTemplateTokenizer()
-    rows = [CHAT_ROW] * 3
-    ds = build_packed_dataset(rows, tok, 0, 1, seq_len=7, train_on="assistant")
-    native_assistant_ids = set(tok("a1 a2 a3")["input_ids"])
-    native_user_ids = set(tok("u1 u2 u3")["input_ids"])
-    synthetic_assistant_id = tok("<|assistant|>")["input_ids"][0]
-    block_ids = ds.blocks.flatten().tolist()
-
-    assert synthetic_assistant_id not in block_ids
-    assert native_assistant_ids <= set(block_ids)
-    for token_id, weight in zip(block_ids, ds.weights.flatten().tolist()):
-        if token_id in native_assistant_ids or token_id == tok.eos_token_id:
-            assert weight == 1.0
-        elif token_id in native_user_ids:
-            assert weight == 0.0
-
-
-@pytest.mark.parametrize("family", ["glm", "deepseek", "kimi", "qwen", "gemma"])
-def test_assistant_mode_derives_native_spans_for_target_model_families(family):
-    tok = FamilyTemplateTokenizer(family)
-    row = {
-        "messages": [
-            {"role": "system", "content": "system rules"},
-            {"role": "user", "content": "repeat shared phrase"},
-            {"role": "assistant", "content": "shared phrase answer"},
-        ]
-    }
-    ds = build_packed_dataset([row] * 2, tok, 0, 1, seq_len=8, train_on="assistant")
-    rendered = tok.apply_chat_template(row["messages"], tokenize=False)
-    block_ids = ds.blocks.flatten().tolist()
-    synthetic_assistant_id = tok("<|assistant|>")["input_ids"][0]
-    assistant_ids = set(tok("shared phrase answer")["input_ids"])
-    user_ids = set(tok("repeat shared phrase")["input_ids"])
-
-    if family != "glm":
-        assert synthetic_assistant_id not in block_ids
-    assert any(marker in rendered for marker in ("<|im_start|>", "<start_of_turn>", "<｜Assistant｜>", "<|im_assistant|>", "<|assistant|>"))
-    for token_id, weight in zip(block_ids, ds.weights.flatten().tolist()):
-        if token_id == tok.eos_token_id or token_id in assistant_ids - user_ids:
-            assert weight == 1.0
-
-
-def test_assistant_mode_derives_native_tool_call_span():
-    tok = FamilyTemplateTokenizer("qwen")
-    tool_call = {
-        "id": "call-1",
-        "function": {"name": "Read", "arguments": '{"path": "a.py"}'},
-    }
-    row = {
-        "messages": [
-            {"role": "user", "content": "inspect a file"},
-            {"role": "assistant", "content": "", "tool_calls": [tool_call]},
-        ]
-    }
-    ds = build_packed_dataset([row] * 2, tok, 0, 1, seq_len=8, train_on="assistant")
-    tool_ids = set(tok(__import__("json").dumps([tool_call]))["input_ids"])
-    user_ids = set(tok("inspect a file")["input_ids"])
-
-    assert tool_ids & set(ds.blocks.flatten().tolist())
-    for token_id, weight in zip(ds.blocks.flatten().tolist(), ds.weights.flatten().tolist()):
-        if token_id in tool_ids - user_ids or token_id == tok.eos_token_id:
-            assert weight == 1.0
-        elif token_id in user_ids:
-            assert weight == 0.0
-
-
 def test_train_on_all_gives_all_ones():
     rows = [CHAT_ROW] * 4
-    ds = build_packed_dataset(rows, FakeTokenizer(), 0, 1, seq_len=7, train_on="all")
+    # A tokenizer without native mask support retains the historical all-token
+    # fallback behavior; assistant_mask_mode is irrelevant to train_on="all".
+    ds = build_packed_dataset(rows, LegacyTokenizer(), 0, 1, seq_len=7, train_on="all")
     assert torch.equal(ds.weights, torch.ones_like(ds.weights))
-    it = iter(StreamingPackedBlocks(rows, FakeTokenizer(), 0, 1, seq_len=7, train_on="all"))
+    it = iter(StreamingPackedBlocks(rows, LegacyTokenizer(), 0, 1, seq_len=7, train_on="all"))
     ids, weights = next(it)
     assert torch.equal(weights, torch.ones(7))
 
@@ -336,6 +405,22 @@ def test_train_on_rejects_unknown_mode():
         StreamingPackedBlocks([CHAT_ROW], FakeTokenizer(), 0, 1, seq_len=7, train_on="user")
     with pytest.raises(ValueError):
         build_packed_dataset([CHAT_ROW] * 2, FakeTokenizer(), 0, 1, seq_len=7, train_on="user")
+
+
+def test_assistant_mask_mode_rejects_unknown_value():
+    with pytest.raises(ValueError, match="assistant_mask_mode"):
+        StreamingPackedBlocks(
+            [CHAT_ROW], FakeTokenizer(), 0, 1, seq_len=7, assistant_mask_mode="guess"
+        )
+    with pytest.raises(ValueError, match="assistant_mask_mode"):
+        build_packed_dataset(
+            [CHAT_ROW] * 2,
+            FakeTokenizer(),
+            0,
+            1,
+            seq_len=7,
+            assistant_mask_mode="guess",
+        )
 
 
 def test_load_rows_local_jsonl(tmp_path):

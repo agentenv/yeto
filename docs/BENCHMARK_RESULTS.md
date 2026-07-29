@@ -190,6 +190,143 @@ gap. The best DiLoCo artifact was `direct-rda`, seed 29, at 0.911408
 CE/token; the best trained artifact overall was `baseline-m4`, seed 29,
 at 0.906659.
 
+## Qwen3.6-27B LM Real M8
+
+### Configuration
+
+| item | value |
+|---|---|
+| completed | 2026-07-17 08:38:04 UTC |
+| model | `Qwen/Qwen3.6-27B` at revision `6a9e13bd6fc8f0983b9b99948120bc37f49c13e9` |
+| dataset | `HuggingFaceH4/Multilingual-Thinking` at revision `f423949d2726f5a5633ea10ac45bc1ea1e0de6e7` |
+| baseline topology | one GCP Spot `a2-highgpu-8g`, 8 x A100 40 GB |
+| DiLoCo topology | eight GCP Spot `a2-highgpu-1g`, 1 x A100 40 GB each; one learner cross-region |
+| training | NF4 QLoRA with BF16 compute, attention-only LoRA r16/alpha32, gradient checkpointing |
+| sequence and batch | 512 tokens, micro-batch 1, gradient accumulation 1 |
+| budget | 512 optimizer steps and 2,097,152 raw tokens per item |
+| evaluation | 32 held-out rows, 16,050 assistant target tokens |
+| seeds | 17, 29, 43 |
+| formal wall time | 7.17 hours from baseline training through final evaluation |
+
+Absolute CE is not directly comparable with the earlier BF16, all-linear,
+1024-token run. Relative delta against this run's paired synchronous
+baseline is the authoritative comparison.
+
+### Aggregate Quality Results
+
+| arm | runs | CE/token | perplexity | delta vs paired sync |
+|---|---:|---:|---:|---:|
+| `base` | 1 | 1.227409 +/- 0.000000 | 3.412 +/- 0.000 | - |
+| `baseline-m8` | 3 | 0.922213 +/- 0.000102 | 2.515 +/- 0.000 | - |
+| `m8` | 3 | 0.925140 +/- 0.007353 | 2.522 +/- 0.019 | +0.32% +/- 0.79 |
+| `alpha0-m8` | 3 | 1.100368 +/- 0.010244 | 3.005 +/- 0.031 | +19.32% +/- 1.12 |
+| `q4-m8` | 3 | 0.929367 +/- 0.006055 | 2.533 +/- 0.015 | +0.78% +/- 0.67 |
+| `serial-m8` | 3 | 0.926540 +/- 0.005047 | 2.526 +/- 0.013 | +0.47% +/- 0.54 |
+| `noheloco-m8` | 3 | 0.929534 +/- 0.001852 | 2.533 +/- 0.005 | +0.79% +/- 0.21 |
+| `strided-m8` | 3 | 0.924553 +/- 0.003822 | 2.521 +/- 0.010 | +0.25% +/- 0.40 |
+| `direct-rda-m8` | 3 | 0.924452 +/- 0.004116 | 2.520 +/- 0.010 | +0.24% +/- 0.44 |
+| `unthrottled-m8` | 3 | 0.931392 +/- 0.003851 | 2.538 +/- 0.010 | +1.00% +/- 0.43 |
+
+### Per-Seed Quality Results
+
+| arm | seed | CE/token | perplexity | delta vs paired sync |
+|---|---:|---:|---:|---:|
+| `base` | - | 1.227409 | 3.412 | - |
+| `baseline-m8` | 17 | 0.922207 | 2.515 | - |
+| `m8` | 17 | 0.920297 | 2.510 | -0.21% |
+| `alpha0-m8` | 17 | 1.106854 | 3.025 | +20.02% |
+| `q4-m8` | 17 | 0.928979 | 2.532 | +0.73% |
+| `serial-m8` | 17 | 0.928866 | 2.532 | +0.72% |
+| `noheloco-m8` | 17 | 0.928656 | 2.531 | +0.70% |
+| `strided-m8` | 17 | 0.923458 | 2.518 | +0.14% |
+| `direct-rda-m8` | 17 | 0.928854 | 2.532 | +0.72% |
+| `unthrottled-m8` | 17 | 0.931481 | 2.538 | +1.01% |
+| `baseline-m8` | 29 | 0.922317 | 2.515 | - |
+| `m8` | 29 | 0.933601 | 2.544 | +1.22% |
+| `alpha0-m8` | 29 | 1.088558 | 2.970 | +18.02% |
+| `q4-m8` | 29 | 0.923515 | 2.518 | +0.13% |
+| `serial-m8` | 29 | 0.930005 | 2.535 | +0.83% |
+| `noheloco-m8` | 29 | 0.928284 | 2.530 | +0.65% |
+| `strided-m8` | 29 | 0.928803 | 2.531 | +0.70% |
+| `direct-rda-m8` | 29 | 0.923802 | 2.519 | +0.16% |
+| `unthrottled-m8` | 29 | 0.927498 | 2.528 | +0.56% |
+| `baseline-m8` | 43 | 0.922114 | 2.515 | - |
+| `m8` | 43 | 0.921522 | 2.513 | -0.06% |
+| `alpha0-m8` | 43 | 1.105693 | 3.021 | +19.91% |
+| `q4-m8` | 43 | 0.935607 | 2.549 | +1.46% |
+| `serial-m8` | 43 | 0.920749 | 2.511 | -0.15% |
+| `noheloco-m8` | 43 | 0.931662 | 2.539 | +1.04% |
+| `strided-m8` | 43 | 0.921397 | 2.513 | -0.08% |
+| `direct-rda-m8` | 43 | 0.920699 | 2.511 | -0.15% |
+| `unthrottled-m8` | 43 | 0.935198 | 2.548 | +1.42% |
+
+### Aggregate Systems Results
+
+| arm | train s | raw tok/s | target tok/s | GPU-h | mean H | participation | stale | sync GB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `baseline-m8` | 465.7 | 4503.6 | 4014.7 | 1.035 | - | - | - | - |
+| `m8` | 439.3 | 4774.5 | 4256.1 | 0.976 | 22.58 | 94.3% | 0.00 | 13.011 |
+| `alpha0-m8` | 438.6 | 4781.3 | 4262.2 | 0.975 | 22.68 | 94.5% | 0.00 | 12.949 |
+| `q4-m8` | 446.1 | 4701.4 | 4191.0 | 0.991 | 22.58 | 95.2% | 0.00 | 8.495 |
+| `serial-m8` | 436.1 | 4808.9 | 4286.8 | 0.969 | 22.89 | 95.0% | 0.00 | 12.857 |
+| `noheloco-m8` | 437.4 | 4794.7 | 4274.1 | 0.972 | 22.48 | 95.1% | 0.00 | 13.163 |
+| `strided-m8` | 433.8 | 4834.4 | 4309.6 | 0.964 | 22.64 | 95.8% | 0.00 | 12.927 |
+| `direct-rda-m8` | 436.4 | 4805.7 | 4283.9 | 0.970 | 22.73 | 95.0% | 0.00 | 12.836 |
+| `unthrottled-m8` | 449.7 | 4663.0 | 4156.8 | 0.999 | 8.87 | 90.9% | 0.00 | 30.232 |
+
+### Per-Seed Systems Results
+
+| arm | seed | train s | raw tok/s | target tok/s | mean H | participation | stale | sync GB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `baseline-m8` | 17 | 463.0 | 4529.5 | 4043.3 | - | - | - | - |
+| `m8` | 17 | 446.6 | 4695.9 | 4191.9 | 22.77 | 93.2% | 0.00 | 12.989 |
+| `alpha0-m8` | 17 | 439.3 | 4773.8 | 4261.5 | 22.67 | 94.5% | 0.00 | 12.927 |
+| `q4-m8` | 17 | 446.2 | 4700.4 | 4195.9 | 22.42 | 95.3% | 0.00 | 8.544 |
+| `serial-m8` | 17 | 435.9 | 4811.3 | 4294.9 | 22.99 | 95.3% | 0.00 | 12.750 |
+| `noheloco-m8` | 17 | 435.9 | 4811.4 | 4295.0 | 22.48 | 95.1% | 0.00 | 13.190 |
+| `strided-m8` | 17 | 433.8 | 4834.7 | 4315.8 | 22.66 | 95.6% | 0.00 | 12.905 |
+| `direct-rda-m8` | 17 | 438.5 | 4783.0 | 4269.6 | 22.77 | 94.7% | 0.00 | 12.865 |
+| `unthrottled-m8` | 17 | 448.8 | 4672.4 | 4170.9 | 8.91 | 91.3% | 0.00 | 29.930 |
+| `baseline-m8` | 29 | 468.0 | 4481.1 | 3984.3 | - | - | - | - |
+| `m8` | 29 | 434.7 | 4824.6 | 4289.7 | 22.55 | 95.3% | 0.00 | 12.975 |
+| `alpha0-m8` | 29 | 437.6 | 4792.1 | 4260.7 | 22.76 | 94.5% | 0.00 | 12.850 |
+| `q4-m8` | 29 | 444.2 | 4721.6 | 4198.1 | 22.50 | 95.2% | 0.00 | 8.496 |
+| `serial-m8` | 29 | 437.2 | 4796.8 | 4264.9 | 22.91 | 94.6% | 0.00 | 12.860 |
+| `noheloco-m8` | 29 | 438.2 | 4785.7 | 4255.1 | 22.50 | 95.2% | 0.00 | 13.118 |
+| `strided-m8` | 29 | 433.9 | 4833.0 | 4297.2 | 22.65 | 96.1% | 0.00 | 12.922 |
+| `direct-rda-m8` | 29 | 436.2 | 4807.2 | 4274.2 | 22.71 | 94.7% | 0.00 | 12.865 |
+| `unthrottled-m8` | 29 | 450.2 | 4658.1 | 4141.6 | 8.82 | 91.3% | 0.00 | 30.441 |
+| `baseline-m8` | 43 | 466.0 | 4500.3 | 4016.5 | - | - | - | - |
+| `m8` | 43 | 436.6 | 4802.9 | 4286.6 | 22.43 | 94.4% | 0.00 | 13.070 |
+| `alpha0-m8` | 43 | 438.9 | 4778.0 | 4264.3 | 22.61 | 94.4% | 0.00 | 13.070 |
+| `q4-m8` | 43 | 447.9 | 4682.2 | 4178.8 | 22.82 | 95.0% | 0.00 | 8.444 |
+| `serial-m8` | 43 | 435.2 | 4818.7 | 4300.7 | 22.77 | 95.0% | 0.00 | 12.960 |
+| `noheloco-m8` | 43 | 438.1 | 4786.8 | 4272.2 | 22.47 | 95.0% | 0.00 | 13.180 |
+| `strided-m8` | 43 | 433.7 | 4835.6 | 4315.7 | 22.59 | 95.7% | 0.00 | 12.954 |
+| `direct-rda-m8` | 43 | 434.5 | 4826.9 | 4308.0 | 22.70 | 95.7% | 0.00 | 12.778 |
+| `unthrottled-m8` | 43 | 450.2 | 4658.7 | 4157.8 | 8.90 | 90.1% | 0.00 | 30.327 |
+
+### Interpretation
+
+Default real `m8` averaged +0.32% versus sync, with per-seed deltas
+-0.21%, +1.22%, and -0.06%. `direct-rda-m8` (+0.24%) and `strided-m8`
+(+0.25%) were the strongest aggregate variants, but their advantage over
+default `m8` is small relative to seed variance.
+
+`alpha0-m8` regressed sharply (+19.32%), while direct RDA stayed near sync.
+This confirms that alpha cannot be removed while retaining the default outer
+optimizer; direct RDA works because it changes the whole outer update and
+application rule. `q4-m8` reduced synchronization traffic from 13.011 GB to
+8.495 GB with a +0.78% quality delta. `unthrottled-m8` increased traffic to
+30.232 GB without improving quality.
+
+The earlier single-host simulation reported `m2` +9.91%, `m4` +11.33%, and
+`direct-rda` +0.56%; this real topology reported `m8` +0.32% and
+`direct-rda-m8` +0.24%. The difference cannot be attributed solely to real
+topology because this run also changed to NF4, attention-only LoRA,
+512-token sequences, and gradient checkpointing. The best DiLoCo artifact
+was `m8`, seed 17, at 0.920297 CE/token (-0.21% versus paired sync).
+
 ## LTX-Video Diffusion
 
 ### Configuration
@@ -367,11 +504,11 @@ overall was `baseline-m2`, seed 29, at 0.119672.
 
 | item | value |
 |---|---|
-| completed | 2026-07-15 |
+| completed | short: 2026-07-25; long: 2026-07-15 |
 | model | `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
 | model revision | `5be7df9619b54f4e2667b2755bc6a756675b5cd7` |
 | dataset | LTX Yeto compressed raw-video dataset, 4,352 rows |
-| hardware | AWS Spot `p4de.24xlarge`, 8 x A100 80 GB, `us-east-1c` |
+| hardware | short: GCP Spot `a2-highgpu-8g`, 8 x A100 40 GB, `asia-northeast1-a`; long: AWS Spot `p4de.24xlarge`, 8 x A100 80 GB, `us-east-1c` |
 | workload | 49 frames at 9.3 FPS, 512 x 512, aspect-preserving center crop |
 | topology | `m2`: 2 islands x 4 GPUs; baseline: one 8-rank FSDP2 group |
 | recipe | LoRA rank 16/alpha 32, LR `1e-4`, weight decay `0.01`, 5 warmup steps, gradient checkpointing |
@@ -389,115 +526,122 @@ covers seed 17 only.
 
 | arm | M | runs | GPUs | samples | loss/elem | delta vs sync |
 |---|---:|---:|---:|---:|---:|---:|
-| `base` | - | 1 | - | - | 3.271629 +/- 0.000000 | - |
-| `baseline-m2` | 2 | 3 | 8 | 320 | 1.103284 +/- 0.139764 | - |
-| `m2` | 2 | 3 | 8 | 320 | 1.182897 +/- 0.217595 | +7.50% +/- 17.57 |
-| `alpha0` | 2 | 3 | 8 | 320 | 1.134582 +/- 0.061485 | +3.62% +/- 9.93 |
-| `q4` | 2 | 3 | 8 | 320 | 1.275897 +/- 0.128164 | +16.50% +/- 14.37 |
-| `serial` | 2 | 3 | 8 | 320 | 1.340451 +/- 0.149446 | +22.00% +/- 11.52 |
-| `noheloco` | 2 | 3 | 8 | 320 | 1.095095 +/- 0.118439 | -0.52% +/- 5.09 |
-| `direct-rda` | 2 | 3 | 8 | 320 | 1.057323 +/- 0.094074 | -3.73% +/- 7.01 |
-| `unthrottled` | 2 | 3 | 8 | 320 | 1.046793 +/- 0.126155 | -4.99% +/- 4.12 |
+| `base` | - | 1 | - | - | 3.271674 +/- 0.000000 | - |
+| `baseline-m2` | 2 | 3 | 8 | 320 | 1.037789 +/- 0.041039 | - |
+| `m2` | 2 | 3 | 8 | 320 | 1.180835 +/- 0.058102 | +13.77% +/- 2.38 |
+| `alpha0` | 2 | 3 | 8 | 320 | 1.212067 +/- 0.054356 | +16.82% +/- 3.77 |
+| `q4` | 2 | 3 | 8 | 320 | 1.197410 +/- 0.083016 | +15.36% +/- 6.05 |
+| `serial` | 2 | 3 | 8 | 320 | 1.200051 +/- 0.047891 | +15.65% +/- 2.13 |
+| `noheloco` | 2 | 3 | 8 | 320 | 1.170160 +/- 0.075128 | +12.69% +/- 3.06 |
+| `direct-rda` | 2 | 3 | 8 | 320 | 1.053648 +/- 0.030809 | +1.67% +/- 6.06 |
+| `unthrottled` | 2 | 3 | 8 | 320 | 0.837483 +/- 0.099237 | -19.25% +/- 9.53 |
 
 #### Aggregate Systems Results
 
 | arm | M | train s | samples/s | GPU-h | mean H | participation % | stale | sync GB |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | `base` | - | 0.0 | - | 0.000 | - | - | - | - |
-| `baseline-m2` | 2 | 796.6 | 0.402 | 1.770 | - | - | - | - |
-| `m2` | 2 | 780.0 | 0.410 | 1.733 | 12.67 | 99.0 | 0.00 | 2.340 |
-| `alpha0` | 2 | 774.1 | 0.413 | 1.720 | 12.72 | 99.0 | 0.00 | 2.343 |
-| `q4` | 2 | 786.0 | 0.407 | 1.747 | 12.56 | 98.0 | 0.00 | 1.708 |
-| `serial` | 2 | 775.4 | 0.413 | 1.723 | 14.53 | 97.8 | 0.00 | 2.195 |
-| `noheloco` | 2 | 778.3 | 0.411 | 1.729 | 12.55 | 97.1 | 0.00 | 2.342 |
-| `direct-rda` | 2 | 783.0 | 0.409 | 1.740 | 12.60 | 97.1 | 0.00 | 2.342 |
-| `unthrottled` | 2 | 787.4 | 0.406 | 1.750 | 2.97 | 98.7 | 0.00 | 8.829 |
+| `baseline-m2` | 2 | 837.6 | 0.382 | 1.861 | - | - | - | - |
+| `m2` | 2 | 877.6 | 0.365 | 1.950 | 21.46 | 100.0 | 0.00 | 3.184 |
+| `alpha0` | 2 | 880.3 | 0.364 | 1.956 | 21.48 | 100.0 | 0.00 | 3.184 |
+| `q4` | 2 | 885.0 | 0.362 | 1.967 | 21.33 | 100.0 | 0.00 | 2.243 |
+| `serial` | 2 | 880.6 | 0.363 | 1.957 | 23.59 | 100.0 | 0.00 | 2.945 |
+| `noheloco` | 2 | 875.0 | 0.366 | 1.944 | 21.46 | 100.0 | 0.00 | 3.184 |
+| `direct-rda` | 2 | 881.0 | 0.363 | 1.958 | 21.51 | 100.0 | 0.00 | 3.184 |
+| `unthrottled` | 2 | 886.0 | 0.361 | 1.969 | 6.63 | 100.0 | 0.00 | 9.258 |
 
 #### Per-Seed Quality Results
 
 | arm | seed | M | loss/elem | delta vs sync | total loss | case mean | case std | cases | elements |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `base` | - | - | 3.271629 | - | 22298585.969 | 3.271629 | 2.429142 | 8 | 6815744 |
-| `baseline-m2` | 17 | 2 | 1.106086 | - | 7538801.500 | 1.106086 | 0.696407 | 8 | 6815744 |
-| `baseline-m2` | 29 | 2 | 0.962141 | - | 6557706.500 | 0.962141 | 0.316627 | 8 | 6815744 |
-| `baseline-m2` | 43 | 2 | 1.241626 | - | 8462605.234 | 1.241626 | 1.547871 | 8 | 6815744 |
-| `m2` | 17 | 2 | 1.408522 | +27.34% | 9600126.000 | 1.408522 | 1.609959 | 8 | 6815744 |
-| `m2` | 29 | 2 | 0.974337 | +1.27% | 6640833.000 | 0.974337 | 0.311690 | 8 | 6815744 |
-| `m2` | 43 | 2 | 1.165830 | -6.10% | 7946000.844 | 1.165830 | 0.661254 | 8 | 6815744 |
-| `alpha0` | 17 | 2 | 1.189257 | +7.52% | 8105669.875 | 1.189257 | 0.649443 | 8 | 6815744 |
-| `alpha0` | 29 | 2 | 1.068022 | +11.00% | 7279363.688 | 1.068022 | 0.331735 | 8 | 6815744 |
-| `alpha0` | 43 | 2 | 1.146466 | -7.66% | 7814021.250 | 1.146466 | 0.491441 | 8 | 6815744 |
-| `q4` | 17 | 2 | 1.416170 | +28.03% | 9652249.781 | 1.416170 | 1.529680 | 8 | 6815744 |
-| `q4` | 29 | 2 | 1.164912 | +21.07% | 7939743.062 | 1.164912 | 0.737843 | 8 | 6815744 |
-| `q4` | 43 | 2 | 1.246608 | +0.40% | 8496562.031 | 1.246608 | 0.765710 | 8 | 6815744 |
-| `serial` | 17 | 2 | 1.473843 | +33.25% | 10045339.625 | 1.473843 | 1.723497 | 8 | 6815744 |
-| `serial` | 29 | 2 | 1.178945 | +22.53% | 8035389.312 | 1.178945 | 0.939725 | 8 | 6815744 |
-| `serial` | 43 | 2 | 1.368563 | +10.22% | 9327776.734 | 1.368563 | 1.667700 | 8 | 6815744 |
-| `noheloco` | 17 | 2 | 1.155655 | +4.48% | 7876650.375 | 1.155655 | 0.354029 | 8 | 6815744 |
-| `noheloco` | 29 | 2 | 0.958622 | -0.37% | 6533719.844 | 0.958622 | 0.303734 | 8 | 6815744 |
-| `noheloco` | 43 | 2 | 1.171009 | -5.69% | 7981294.500 | 1.171009 | 0.332433 | 8 | 6815744 |
-| `direct-rda` | 17 | 2 | 1.124994 | +1.71% | 7667674.375 | 1.124994 | 1.065582 | 8 | 6815744 |
-| `direct-rda` | 29 | 2 | 0.949899 | -1.27% | 6474268.500 | 0.949899 | 0.610912 | 8 | 6815744 |
-| `direct-rda` | 43 | 2 | 1.097076 | -11.64% | 7477390.188 | 1.097076 | 0.987416 | 8 | 6815744 |
-| `unthrottled` | 17 | 2 | 1.001599 | -9.45% | 6826640.000 | 1.001599 | 1.064166 | 8 | 6815744 |
-| `unthrottled` | 29 | 2 | 0.949460 | -1.32% | 6471277.344 | 0.949460 | 0.636390 | 8 | 6815744 |
-| `unthrottled` | 43 | 2 | 1.189320 | -4.21% | 8106100.156 | 1.189320 | 0.774575 | 8 | 6815744 |
+| `base` | - | - | 3.271674 | - | 22298894.438 | 3.271674 | 2.429144 | 8 | 6815744 |
+| `baseline-m2` | 17 | 2 | 1.074439 | - | 7323101.156 | 1.074439 | 0.913943 | 8 | 6815744 |
+| `baseline-m2` | 29 | 2 | 1.045479 | - | 7125718.875 | 1.045479 | 0.467911 | 8 | 6815744 |
+| `baseline-m2` | 43 | 2 | 0.993448 | - | 6771090.000 | 0.993448 | 0.633992 | 8 | 6815744 |
+| `m2` | 17 | 2 | 1.210635 | +12.68% | 8251377.500 | 1.210635 | 0.258238 | 8 | 6815744 |
+| `m2` | 29 | 2 | 1.217991 | +16.50% | 8301516.062 | 1.217991 | 0.287646 | 8 | 6815744 |
+| `m2` | 43 | 2 | 1.113880 | +12.12% | 7591918.375 | 1.113880 | 0.328675 | 8 | 6815744 |
+| `alpha0` | 17 | 2 | 1.217940 | +13.36% | 8301170.250 | 1.217940 | 0.331133 | 8 | 6815744 |
+| `alpha0` | 29 | 2 | 1.263248 | +20.83% | 8609976.125 | 1.263248 | 0.288256 | 8 | 6815744 |
+| `alpha0` | 43 | 2 | 1.155012 | +16.26% | 7872268.938 | 1.155012 | 0.333780 | 8 | 6815744 |
+| `q4` | 17 | 2 | 1.200078 | +11.69% | 8179426.000 | 1.200078 | 0.250862 | 8 | 6815744 |
+| `q4` | 29 | 2 | 1.279060 | +22.34% | 8717743.188 | 1.279060 | 0.280327 | 8 | 6815744 |
+| `q4` | 43 | 2 | 1.113092 | +12.04% | 7586548.062 | 1.113092 | 0.320217 | 8 | 6815744 |
+| `serial` | 17 | 2 | 1.221927 | +13.73% | 8328339.438 | 1.221927 | 0.285326 | 8 | 6815744 |
+| `serial` | 29 | 2 | 1.233098 | +17.95% | 8404483.375 | 1.233098 | 0.270887 | 8 | 6815744 |
+| `serial` | 43 | 2 | 1.145129 | +15.27% | 7804903.250 | 1.145129 | 0.308263 | 8 | 6815744 |
+| `noheloco` | 17 | 2 | 1.248434 | +16.19% | 8509005.375 | 1.248434 | 0.264586 | 8 | 6815744 |
+| `noheloco` | 29 | 2 | 1.163414 | +11.28% | 7929531.812 | 1.163414 | 0.310052 | 8 | 6815744 |
+| `noheloco` | 43 | 2 | 1.098633 | +10.59% | 7488001.094 | 1.098633 | 0.320015 | 8 | 6815744 |
+| `direct-rda` | 17 | 2 | 1.020165 | -5.05% | 6953185.500 | 1.020165 | 0.744625 | 8 | 6815744 |
+| `direct-rda` | 29 | 2 | 1.080800 | +3.38% | 7366458.500 | 1.080800 | 0.781046 | 8 | 6815744 |
+| `direct-rda` | 43 | 2 | 1.059977 | +6.70% | 7224533.656 | 1.059977 | 0.493582 | 8 | 6815744 |
+| `unthrottled` | 17 | 2 | 0.776269 | -27.75% | 5290853.344 | 0.776269 | 0.422180 | 8 | 6815744 |
+| `unthrottled` | 29 | 2 | 0.951981 | -8.94% | 6488461.375 | 0.951981 | 0.599208 | 8 | 6815744 |
+| `unthrottled` | 43 | 2 | 0.784200 | -21.06% | 5344904.375 | 0.784200 | 0.332438 | 8 | 6815744 |
 
 #### Per-Seed Execution Results
 
 | arm | seed | kind | M | ranks | GPUs | steps | samples | train s | samples/s | GPU-h | export s |
 |---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | `base` | - | base | - | 0 | 0 | 0 | 0 | 0.0 | - | 0.000 | 0 |
-| `baseline-m2` | 17 | baseline | 2 | 8 | 8 | 40 | 320 | 794.9 | 0.403 | 1.766 | 0 |
-| `baseline-m2` | 29 | baseline | 2 | 8 | 8 | 40 | 320 | 797.5 | 0.401 | 1.772 | 0 |
-| `baseline-m2` | 43 | baseline | 2 | 8 | 8 | 40 | 320 | 797.3 | 0.401 | 1.772 | 0 |
-| `m2` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 781.3 | 0.410 | 1.736 | 21.8 |
-| `m2` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 786.4 | 0.407 | 1.748 | 22 |
-| `m2` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 772.2 | 0.414 | 1.716 | 21.8 |
-| `alpha0` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 781.5 | 0.409 | 1.737 | 21.7 |
-| `alpha0` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 773.4 | 0.414 | 1.719 | 22.4 |
-| `alpha0` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 767.5 | 0.417 | 1.705 | 22.1 |
-| `q4` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 801.4 | 0.399 | 1.781 | 21.7 |
-| `q4` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 777.4 | 0.412 | 1.728 | 21.9 |
-| `q4` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 779.3 | 0.411 | 1.732 | 22.2 |
-| `serial` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 780.4 | 0.410 | 1.734 | 22.2 |
-| `serial` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 774.4 | 0.413 | 1.721 | 22.1 |
-| `serial` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 771.4 | 0.415 | 1.714 | 22.2 |
-| `noheloco` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 782.2 | 0.409 | 1.738 | 21.9 |
-| `noheloco` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 781.3 | 0.410 | 1.736 | 22 |
-| `noheloco` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 771.2 | 0.415 | 1.714 | 21.8 |
-| `direct-rda` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 788.4 | 0.406 | 1.752 | 21.5 |
-| `direct-rda` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 774.3 | 0.413 | 1.721 | 21.8 |
-| `direct-rda` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 786.4 | 0.407 | 1.748 | 22.1 |
-| `unthrottled` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 798.4 | 0.401 | 1.774 | 21.3 |
-| `unthrottled` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 782.4 | 0.409 | 1.739 | 21.8 |
-| `unthrottled` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 781.4 | 0.410 | 1.736 | 21.9 |
+| `baseline-m2` | 17 | baseline | 2 | 8 | 8 | 40 | 320 | 837.7 | 0.382 | 1.862 | 0 |
+| `baseline-m2` | 29 | baseline | 2 | 8 | 8 | 40 | 320 | 832.3 | 0.384 | 1.850 | 0 |
+| `baseline-m2` | 43 | baseline | 2 | 8 | 8 | 40 | 320 | 842.7 | 0.380 | 1.873 | 0 |
+| `m2` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 874.9 | 0.366 | 1.944 | 24.4 |
+| `m2` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 878.0 | 0.364 | 1.951 | 24.9 |
+| `m2` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 880.0 | 0.364 | 1.955 | 25.8 |
+| `alpha0` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 883.0 | 0.362 | 1.962 | 24.9 |
+| `alpha0` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 872.9 | 0.367 | 1.940 | 25.5 |
+| `alpha0` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 884.9 | 0.362 | 1.967 | 24.9 |
+| `q4` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 883.0 | 0.362 | 1.962 | 25.1 |
+| `q4` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 881.0 | 0.363 | 1.958 | 24.6 |
+| `q4` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 891.0 | 0.359 | 1.980 | 25.0 |
+| `serial` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 887.0 | 0.361 | 1.971 | 25.0 |
+| `serial` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 870.9 | 0.367 | 1.935 | 25.2 |
+| `serial` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 884.0 | 0.362 | 1.964 | 25.1 |
+| `noheloco` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 872.0 | 0.367 | 1.938 | 24.7 |
+| `noheloco` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 872.0 | 0.367 | 1.938 | 25.0 |
+| `noheloco` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 881.0 | 0.363 | 1.958 | 25.3 |
+| `direct-rda` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 879.0 | 0.364 | 1.953 | 24.9 |
+| `direct-rda` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 875.0 | 0.366 | 1.944 | 25.5 |
+| `direct-rda` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 889.0 | 0.360 | 1.975 | 24.8 |
+| `unthrottled` | 17 | diloco | 2 | 8 | 8 | 40 | 320 | 886.0 | 0.361 | 1.969 | 25.0 |
+| `unthrottled` | 29 | diloco | 2 | 8 | 8 | 40 | 320 | 889.0 | 0.360 | 1.975 | 25.1 |
+| `unthrottled` | 43 | diloco | 2 | 8 | 8 | 40 | 320 | 883.0 | 0.362 | 1.962 | 25.1 |
 
 #### Per-Seed Synchronization Results
 
 | arm | seed | global step | fragment versions | merges | responses | mean responders | mean H | median H | participation % | stale mean/max | sync ms | sync GB |
 |---|---:|---:|---|---:|---:|---:|---:|---:|---:|---|---:|---:|
-| `m2` | 17 | 16 | `9,10,11,12,13,14,15,16` | 16 | 32 | 2.00 | 12.47 | 13.00 | 100.0 | 0.00/0.00 | 17046.4 | 2.335 |
-| `m2` | 29 | 17 | `17,10,11,12,13,14,15,16` | 17 | 33 | 1.94 | 12.82 | 13.00 | 97.1 | 0.00/0.00 | 18313.2 | 2.342 |
-| `m2` | 43 | 17 | `17,10,11,12,13,14,15,16` | 17 | 34 | 2.00 | 12.74 | 12.00 | 100.0 | 0.00/0.00 | 16595.3 | 2.344 |
-| `alpha0` | 17 | 17 | `17,10,11,12,13,14,15,16` | 17 | 34 | 2.00 | 12.88 | 13.00 | 100.0 | 0.00/0.00 | 12582.2 | 2.344 |
-| `alpha0` | 29 | 17 | `17,10,11,12,13,14,15,16` | 17 | 34 | 2.00 | 12.88 | 13.00 | 100.0 | 0.00/0.00 | 15517.6 | 2.344 |
-| `alpha0` | 43 | 17 | `17,10,11,12,13,14,15,16` | 17 | 33 | 1.94 | 12.39 | 12.00 | 97.1 | 0.00/0.00 | 15442.3 | 2.342 |
-| `q4` | 17 | 16 | `9,10,11,12,13,14,15,16` | 16 | 32 | 2.00 | 12.53 | 13.00 | 100.0 | 0.00/0.00 | 13328.9 | 1.705 |
-| `q4` | 29 | 17 | `17,10,11,12,13,14,15,16` | 17 | 33 | 1.94 | 12.58 | 13.00 | 97.1 | 0.00/0.00 | 17117.1 | 1.710 |
-| `q4` | 43 | 17 | `17,10,11,12,13,14,15,16` | 17 | 33 | 1.94 | 12.58 | 13.00 | 97.1 | 0.00/0.00 | 15001.2 | 1.710 |
-| `serial` | 17 | 15 | `9,10,11,12,13,14,15,8` | 15 | 30 | 2.00 | 14.73 | 18.00 | 100.0 | 0.00/0.00 | 8572.8 | 2.215 |
-| `serial` | 29 | 15 | `9,10,11,12,13,14,15,8` | 15 | 29 | 1.93 | 14.45 | 18.00 | 96.7 | 0.00/0.00 | 14099.7 | 2.185 |
-| `serial` | 43 | 15 | `9,10,11,12,13,14,15,8` | 15 | 29 | 1.93 | 14.41 | 18.00 | 96.7 | 0.00/0.00 | 15047.2 | 2.185 |
-| `noheloco` | 17 | 17 | `17,10,11,12,13,14,15,16` | 17 | 33 | 1.94 | 12.58 | 13.00 | 97.1 | 0.00/0.00 | 13380.9 | 2.342 |
-| `noheloco` | 29 | 17 | `17,10,11,12,13,14,15,16` | 17 | 33 | 1.94 | 12.58 | 13.00 | 97.1 | 0.00/0.00 | 15182.2 | 2.342 |
-| `noheloco` | 43 | 17 | `17,10,11,12,13,14,15,16` | 17 | 33 | 1.94 | 12.48 | 12.00 | 97.1 | 0.00/0.00 | 15325.3 | 2.342 |
-| `direct-rda` | 17 | 17 | `17,10,11,12,13,14,15,16` | 17 | 33 | 1.94 | 12.82 | 13.00 | 97.1 | 0.00/0.00 | 16193.8 | 2.342 |
-| `direct-rda` | 29 | 17 | `17,10,11,12,13,14,15,16` | 17 | 33 | 1.94 | 12.58 | 13.00 | 97.1 | 0.00/0.00 | 16272.2 | 2.342 |
-| `direct-rda` | 43 | 17 | `17,10,11,12,13,14,15,16` | 17 | 33 | 1.94 | 12.39 | 12.00 | 97.1 | 0.00/0.00 | 13796.4 | 2.342 |
-| `unthrottled` | 17 | 78 | `73,74,75,76,77,78,71,72` | 78 | 153 | 1.96 | 3.00 | 3.00 | 98.1 | 0.00/0.00 | 16340.5 | 8.799 |
-| `unthrottled` | 29 | 78 | `73,74,75,76,77,78,71,72` | 78 | 154 | 1.97 | 2.95 | 3.00 | 98.7 | 0.00/0.00 | 16104.6 | 8.829 |
-| `unthrottled` | 43 | 78 | `73,74,75,76,77,78,71,72` | 78 | 155 | 1.99 | 2.95 | 3.00 | 99.4 | 0.00/0.00 | 16039.3 | 8.859 |
+| `m2` | 17 | 24 | `17,18,19,20,21,22,23,24` | 24 | 48 | 2.00 | 21.58 | 22.50 | 100.0 | 0.00/0.00 | 12521.2 | 3.184 |
+| `m2` | 29 | 24 | `17,18,19,20,21,22,23,24` | 24 | 48 | 2.00 | 21.50 | 22.00 | 100.0 | 0.00/0.00 | 9970.4 | 3.184 |
+| `m2` | 43 | 24 | `17,18,19,20,21,22,23,24` | 24 | 48 | 2.00 | 21.29 | 21.00 | 100.0 | 0.00/0.00 | 10720.8 | 3.184 |
+| `alpha0` | 17 | 24 | `17,18,19,20,21,22,23,24` | 24 | 48 | 2.00 | 21.65 | 22.50 | 100.0 | 0.00/0.00 | 10873.9 | 3.184 |
+| `alpha0` | 29 | 24 | `17,18,19,20,21,22,23,24` | 24 | 48 | 2.00 | 21.46 | 22.00 | 100.0 | 0.00/0.00 | 11494.8 | 3.184 |
+| `alpha0` | 43 | 24 | `17,18,19,20,21,22,23,24` | 24 | 48 | 2.00 | 21.33 | 21.00 | 100.0 | 0.00/0.00 | 11274.9 | 3.184 |
+| `q4` | 17 | 25 | `25,18,19,20,21,22,23,24` | 25 | 50 | 2.00 | 21.22 | 22.00 | 100.0 | 0.00/0.00 | 12408.0 | 2.245 |
+| `q4` | 29 | 24 | `17,18,19,20,21,22,23,24` | 24 | 48 | 2.00 | 21.54 | 22.00 | 100.0 | 0.00/0.00 | 11323.2 | 2.239 |
+| `q4` | 43 | 25 | `25,18,19,20,21,22,23,24` | 25 | 50 | 2.00 | 21.22 | 22.00 | 100.0 | 0.00/0.00 | 12896.0 | 2.245 |
+| `serial` | 17 | 22 | `17,18,19,20,21,22,15,16` | 22 | 44 | 2.00 | 23.73 | 23.00 | 100.0 | 0.00/0.00 | 7271.6 | 2.945 |
+| `serial` | 29 | 22 | `17,18,19,20,21,22,15,16` | 22 | 44 | 2.00 | 23.57 | 23.00 | 100.0 | 0.00/0.00 | 9031.1 | 2.945 |
+| `serial` | 43 | 22 | `17,18,19,20,21,22,15,16` | 22 | 44 | 2.00 | 23.48 | 23.00 | 100.0 | 0.00/0.00 | 11367.0 | 2.945 |
+| `noheloco` | 17 | 24 | `17,18,19,20,21,22,23,24` | 24 | 48 | 2.00 | 21.52 | 21.50 | 100.0 | 0.00/0.00 | 9509.5 | 3.184 |
+| `noheloco` | 29 | 24 | `17,18,19,20,21,22,23,24` | 24 | 48 | 2.00 | 21.48 | 22.00 | 100.0 | 0.00/0.00 | 10836.5 | 3.184 |
+| `noheloco` | 43 | 24 | `17,18,19,20,21,22,23,24` | 24 | 48 | 2.00 | 21.38 | 21.50 | 100.0 | 0.00/0.00 | 10596.4 | 3.184 |
+| `direct-rda` | 17 | 24 | `17,18,19,20,21,22,23,24` | 24 | 48 | 2.00 | 21.50 | 21.50 | 100.0 | 0.00/0.00 | 12715.5 | 3.184 |
+| `direct-rda` | 29 | 24 | `17,18,19,20,21,22,23,24` | 24 | 48 | 2.00 | 21.54 | 22.00 | 100.0 | 0.00/0.00 | 10845.3 | 3.184 |
+| `direct-rda` | 43 | 24 | `17,18,19,20,21,22,23,24` | 24 | 48 | 2.00 | 21.50 | 22.00 | 100.0 | 0.00/0.00 | 12056.2 | 3.184 |
+| `unthrottled` | 17 | 81 | `81,74,75,76,77,78,79,80` | 81 | 162 | 2.00 | 6.69 | 3.00 | 100.0 | 0.00/0.00 | 13441.7 | 9.138 |
+| `unthrottled` | 29 | 82 | `81,82,75,76,77,78,79,80` | 82 | 164 | 2.00 | 6.63 | 3.00 | 100.0 | 0.00/0.00 | 13084.2 | 9.258 |
+| `unthrottled` | 43 | 83 | `81,82,83,76,77,78,79,80` | 83 | 166 | 2.00 | 6.57 | 3.00 | 100.0 | 0.00/0.00 | 13471.9 | 9.378 |
+
+#### Terminal Finalization Results
+
+All 21 short DiLoCo runs passed terminal validation. Both learners stopped
+at exactly 40 steps without reporting past the budget, every final tail
+contained each of the eight fragments once with both learners represented,
+and every exported checkpoint matched its final marker.
 
 ### Long Run
 
@@ -570,20 +714,24 @@ covers seed 17 only.
 Short and long absolute losses are not cross-comparable because they used
 different held-out sets. Compare arms only inside the same result set.
 
-Default `m2` was strongly seed-sensitive. Short deltas were +27.34%,
-+1.27%, and -6.10%; long deltas were +37.93%, +15.67%, and -2.40% for
-seeds 17, 29, and 43. Longer training did not remove the variance.
+Default `m2` short deltas were +12.68%, +16.50%, and +12.12% for seeds
+17, 29, and 43. Its paired-delta standard deviation was 2.38 percentage
+points, so the short result was consistent across seeds. The long deltas
+were +37.93%, +15.67%, and -2.40%; longer training did not remove the
+variance in that result set.
 
-`noheloco` restored the short mean to parity. `alpha0` improved over
-default `m2`, but `direct-rda` was better, showing that local blending
-alone did not explain the gap; outer Nesterov gain and learning rate also
-mattered. `serial` and `q4` both regressed in the short matrix.
+`direct-rda` brought the short mean close to parity at +1.67%.
+`noheloco`, `alpha0`, `serial`, and `q4` all remained 12.69% to 16.82%
+above the synchronous baseline, showing that local blending alone did not
+explain the gap; outer Nesterov gain and learning rate also mattered.
 
-`unthrottled` had the best long mean, with per-seed deltas of +0.52%,
--9.60%, and -7.36%, but used about 5x the long `m2` payload.
-`direct-rda` is the lower-traffic alternative, but its long result is only
-one seed. The best short and long artifacts were both `unthrottled`,
-seed 29, at 0.949460 and 0.305034 respectively.
+`unthrottled` had the best short and long means. Its short deltas were
+-27.75%, -8.94%, and -21.06%, using about 2.9x the short `m2` payload;
+its long deltas were +0.52%, -9.60%, and -7.36%, using about 5x the long
+`m2` payload. `direct-rda` is the lower-traffic alternative, but its long
+result covers only seed 17. The best short artifact was `unthrottled`,
+seed 17, at 0.776269; the best long artifact was `unthrottled`, seed 29,
+at 0.305034.
 
 ## Cross-Benchmark Summary
 
@@ -596,13 +744,14 @@ benchmarks measured real fine-tuning rather than a failed training recipe.
 |---|---:|---|---|
 | Qwen3.6-27B | +9.91% | `direct-rda` +0.56% | Changing outer update/application fixed most of the gap; slightly faster synchronization did not. |
 | LTX-Video | +1.44% | `m2` seed 17 at parity | The default path was already stable; `q4` cut payload by about 33% with a modest quality tradeoff. |
-| Wan2.2 short / long | +7.50% / +17.07% | `unthrottled` -4.99% / -5.48% | Quality depended strongly on synchronization cadence and seed; the gain cost 3.8x / 5.0x payload. |
+| Wan2.2 short / long | +13.77% / +17.07% | `unthrottled` -19.25% / -5.48% | Quality depended strongly on synchronization cadence; short `m2` was seed-stable, while the gain cost 2.9x / 5.0x payload. |
 
 The central result is that one synchronization preset is not optimal for
 every model. Qwen primarily exposed an outer Nesterov/LR/blending problem;
-LTX tolerated delayed synchronization; Wan was cadence-sensitive and much
-less seed-stable. `q4` reliably reduced bytes, but compression was only useful
-when the underlying optimization recipe was already sound.
+LTX tolerated delayed synchronization; Wan was cadence-sensitive, with a
+seed-stable short `m2` result but substantial long-run seed variance. `q4`
+reliably reduced bytes, but compression was only useful when the underlying
+optimization recipe was already sound.
 
 For LM, `direct-rda` is the strongest production candidate. For LTX, default
 `m2` is acceptable and `q4` is a reasonable bandwidth tradeoff. Wan should

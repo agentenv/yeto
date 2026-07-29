@@ -1,17 +1,12 @@
 # Yeto
 
-**Yeto** fine-tunes language models across cheap, geographically scattered
-GPU capacity — spot instances, mixed regions, mixed clouds — via the
-[SkyPilot](https://skypilot.co) SDK. Its asynchronous synchronization is
-based on **Decoupled DiLoCo**
-([Douillard et al., arXiv 2604.21428](https://arxiv.org/abs/2604.21428)):
-a Rust syncer merges parameter fragments from independent learner islands
-(quorum + adaptive grace, token-weighted RDA, Nesterov outer step), so slow
-links and preempted islands never block training.
+**Yeto** fine-tunes language and diffusion models across cheap, geographically
+scattered GPU capacity — spot instances, mixed regions, mixed clouds, even
+mixed hardware families.
 
 ```
                  ┌──────────────────────────────┐
-                 │  syncer (Rust, hot path)     │
+                 │  syncer (hot path)           │
                  │  fragment ingest · RDA merge │
                  │  Nesterov outer step · bcast │
                  └──────┬───────┬───────┬───────┘
@@ -23,7 +18,7 @@ links and preempted islands never block training.
  └─────────────┘  └─────────────┘  └─────────────┘
 ```
 
-## Usage
+## Quick start
 
 ```bash
 pip install "yeto[launcher] @ ."
@@ -58,40 +53,32 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
   small on-demand box whose checkpoint/resume absorbs preemptions. The
   submitting machine can disconnect after launch.
 
-## Diffusion
+## Architecture
 
-Yeto also has an experimental diffusion learner selected with
-`--model-kind diffusion`. It keeps the LM-style contract where aliases are only
-repo-id shortcuts and raw Hugging Face ids pass through unchanged. Models that
-Diffusers can load should use the generic path first: Yeto loads the pipeline,
-discovers the trainable denoiser, attaches LoRA, builds conditioning from data
-rows, and reuses the normal DiLoCo sync machinery.
+Fleets launch via the [SkyPilot](https://skypilot.co) SDK; asynchronous
+synchronization is based on **Decoupled DiLoCo**
+([Douillard et al., arXiv 2604.21428](https://arxiv.org/abs/2604.21428)):
+the syncer merges parameter fragments from independent learner islands
+(quorum + adaptive grace, token-weighted RDA, Nesterov outer step), so slow
+links and preempted islands never block training.
 
-Use `--diffusion-adapter module:factory` only when a model needs behavior that
-cannot be inferred from public Diffusers components, configs, signatures,
-scheduler methods, or tensor shapes. Adapter guidance and templates live in
-`yeto/diffusion/adapters/`.
+One protocol, one syncer, four learner backends. Every backend speaks the
+same fragment protocol and runs the same DiLoCo step boundary — the
+pull/merge/α-blend/push loop lives in one shared module
+(`yeto/diloco_sync.py`), so protocol changes land once and apply everywhere.
 
-Recover the authoritative merged adapter from a syncer checkpoint with:
+| backend | selector | scope |
+|---|---|---|
+| PyTorch (FSDP2/DDP) | default | causal LM, LoRA/full |
+| Diffusers | `--model-kind diffusion` | image/video LoRA |
+| Megatron-Core | `--island-backend megatron` | EP islands for 1T-class MoE |
+| MLX | `--external-learners` | Apple-silicon islands |
 
-```bash
-yeto-diffusion-export --checkpoint yeto-state.ckpt --model <id> --output-dir out/
-```
-
-Pass the same LoRA, fragment-pattern, and external-adapter flags used by the
-training run.
-
-For reproducible diffusion initialization, data ordering, timestep sampling,
-and noise, pass `--diffusion-seed <integer>`. It is diffusion-only and does not
-change causal-LM learner flags or behavior. It controls RNG streams but does
-not force deterministic CUDA kernels.
-
-Raw diffusion media keeps the existing direct-resize behavior by default. Pass
-`--resize-mode center-crop` with `--height` and `--width` to preserve aspect
-ratio by scaling to fill the target and then taking a centered crop.
-
-The complete backend architecture, data contract, artifact flow, adapter
-boundary, and current limitations are in [docs/DIFFUSION.md](docs/DIFFUSION.md).
+Hardware families are isolated behind `yeto/accel.py` (CUDA / Ascend NPU
+policy functions) rather than `device.type` branches in shared code. The
+terminal contract — budget cutoff, authoritative final cut, checkpoint
+marking — is shared by all backends (`finalization.py`,
+`budget_finalization.py`, `final_marker.py`).
 
 ## Supported models
 
@@ -101,17 +88,29 @@ is the frozen-base footprint an island's GPUs must jointly hold (bf16 base,
 LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
 "(Hub)" means the size is resolved from safetensors metadata at plan time.
 
+Tested — a completed Yeto fine-tuning run on real hardware:
+
+| alias | Hugging Face id | min island VRAM (GB) |
+|---|---|---|
+| `deepseek4flash` | `deepseek-ai/DeepSeek-V4-Flash` | 568 |
+| `qwen3-0.6b` | `Qwen/Qwen3-0.6B` | (Hub) |
+| `qwen36-27b` | `Qwen/Qwen3.6-27B` | 54 |
+| `kimi-k3` | `moonshotai/Kimi-K3` | (Hub) |
+| `glm52` | `zai-org/GLM-5.2` | 1488 |
+| `laguna-s-2.1` | `poolside/Laguna-S-2.1` | (Hub) |
+
+<details>
+<summary>All other supported aliases (untested)</summary>
+
 | alias | Hugging Face id | min island VRAM (GB) |
 |---|---|---|
 | `gemma4` | `google/gemma-4-12B-it` | 66 |
-| `deepseek4flash` | `deepseek-ai/DeepSeek-V4-Flash` | 568 |
 | `qwen3-8b` | `Qwen/Qwen3-8B` | 17 |
 | `qwen35-4b` | `Qwen/Qwen3.5-4B` | 8 |
 | `qwen35-9b` | `Qwen/Qwen3.5-9B` | 18 |
 | `qwen35-9b-base` | `Qwen/Qwen3.5-9B-Base` | 18 |
 | `qwen35-35b-a3b` | `Qwen/Qwen3.5-35B-A3B-Base` | 70 |
 | `qwen35-397b-a17b` | `Qwen/Qwen3.5-397B-A17B` | 794 |
-| `qwen36-27b` | `Qwen/Qwen3.6-27B` | 54 |
 | `qwen36-35b-a3b` | `Qwen/Qwen3.6-35B-A3B` | 70 |
 | `llama32-1b` | `meta-llama/Llama-3.2-1B` | 3 |
 | `llama32-3b` | `meta-llama/Llama-3.2-3B` | 7 |
@@ -132,7 +131,6 @@ LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
 | `nemotron3-ultra` | `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16` | 1100 |
 | `glm45-air` | `zai-org/GLM-4.5-Air` | 212 |
 | `glm46` | `zai-org/GLM-4.6` | 714 |
-| `glm52` | `zai-org/GLM-5.2` | 1488 |
 | `llama4-scout` | `meta-llama/Llama-4-Scout-17B-16E-Instruct` | 218 |
 | `llama4-maverick` | `meta-llama/Llama-4-Maverick-17B-128E-Instruct` | 800 |
 | `qwen3-coder-480b` | `Qwen/Qwen3-Coder-480B-A35B-Instruct` | 960 |
@@ -158,31 +156,46 @@ LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
 | `deepseek31-base-bf16` | `unsloth/DeepSeek-V3.1-Base-BF16` | 1343 |
 | `kimi-k2-base-bf16` | `unsloth/Kimi-K2-Base-BF16` | 2060 |
 
+</details>
+
 ## Docs
 
 [docs/DESIGN.md](docs/DESIGN.md) — merge math, blending, adaptive grace,
 delta correction, q4 wire format, snapshots, resilience.
-[docs/LM_BENCHMARK.md](docs/LM_BENCHMARK.md) — standalone equal-hardware
-causal-LM benchmark contract, workload controls, complete arm and metric
-tables, and reproducibility rules.
+[docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
+[docs/PROVENANCE.md](docs/PROVENANCE.md) — source pinning, attestation, and
+artifact provenance.
 [docs/DIFFUSION.md](docs/DIFFUSION.md) — the generic Diffusers image/video
 backend, data and conditioning contracts, external adapters, export, sampling,
 validation, and current limitations.
+[docs/MEGATRON.md](docs/MEGATRON.md) — the Megatron-Core island backend (EP
+for 1T-class MoE; runs inside the NGC NeMo container).
+[docs/MLX.md](docs/MLX.md) — the Apple-silicon island backend: Macs as
+learner islands (`yeto launch --external-learners`, cross Mac↔NVIDIA runs).
+[docs/ASCEND.md](docs/ASCEND.md) — Ascend NPU islands: the accelerator
+abstraction, the refused CUDA-only paths, and running a pure-Ascend fleet.
+[docs/A100_KERNELS.md](docs/A100_KERNELS.md) — opt-in causal attention/model
+kernels, correctness gates, pinned dependencies, and the standalone 8xA100
+throughput and memory benchmark.
+[docs/LM_BENCHMARK.md](docs/LM_BENCHMARK.md) — standalone equal-hardware
+causal-LM benchmark contract, workload controls, complete arm and metric
+tables, and reproducibility rules.
 [docs/DIFFUSION_BENCHMARK.md](docs/DIFFUSION_BENCHMARK.md) — standalone
 equal-hardware diffusion benchmark contract, media controls, complete arm and
 metric tables, and reproducibility rules.
 [docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) — aggregate and
 per-seed results for the completed Qwen3.6, LTX-Video, and Wan2.2 benchmarks.
-[docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
-[docs/MEGATRON.md](docs/MEGATRON.md) — the Megatron-Core island backend (EP
-for 1T-class MoE).
-[docs/MLX.md](docs/MLX.md) — the Apple-silicon island backend: Macs as
-learner islands (`yeto launch --external-learners`, cross Mac↔NVIDIA runs).
 
-## Testing
+## Testing and CI
 
     python3 -m pytest tests/          # includes a real syncer+learner loop
     (cd syncer && cargo test)
+
+CI runs three jobs on every PR and push to main: the Rust syncer suite, the
+Python suite on CPU, and a **GPU smoke test** on a self-hosted runner
+(`[self-hosted, gpu]` labels) — the real syncer plus two real learners
+training SmolLM2-135M on CUDA, with event-tape assertions that every outer
+step merged pushed deltas from both learners.
 
 Three heavier harnesses (all support `--dry-run`):
 

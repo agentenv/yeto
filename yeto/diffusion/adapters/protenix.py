@@ -186,7 +186,7 @@ class NativeProtenixPipeline:
                 )
             torch = _torch()
             path = _resolve_path(batch_path, row.get("__yeto_data_root__"))
-            batch = torch.load(path, map_location="cpu", weights_only=False)
+            batch = torch.load(path, map_location="cpu", weights_only=True)
         del args
         return _tensorize(batch, device)
 
@@ -285,7 +285,7 @@ class ProtenixAdapter(DiffusionAdapter):
             checkpoint = torch.load(
                 Path(os.path.expanduser(checkpoint_path)),
                 map_location=device,
-                weights_only=False,
+                weights_only=True,
             )
             state = checkpoint.get("model", checkpoint)
             cleaned = {
@@ -399,7 +399,7 @@ class ProtenixAdapter(DiffusionAdapter):
             load(Path(adapter_dir))
             return pipe
         state_path = Path(adapter_dir) / "trainable_state.pt"
-        state = torch.load(state_path, map_location="cpu")
+        state = torch.load(state_path, map_location="cpu", weights_only=True)
         current = self.trainable_params(pipe)
         for name, tensor in state.items():
             if name in current:

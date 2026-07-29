@@ -40,6 +40,11 @@ class LoadOnlyAdapter(DiffusionAdapter):
     def __init__(self, **kwargs):
         self.kwargs = kwargs
 
+    # Set this to True only after load_pipeline uses
+    # yeto.provenance.materialize_pinned_model(args), or passes
+    # args.model_revision and args.trust_remote_code through every loader.
+    supports_pinned_model_source = False
+
     def load_pipeline(self, args, device):
         del args, device
         raise NotImplementedError("load and return the model-specific pipeline here")
@@ -112,14 +117,26 @@ class ArtifactAdapter(FullStepAdapter):
         """
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
-        torch.save(pipe.model.state_dict(), out / "model_state.pt")
+        from safetensors.torch import save_file
+
+        save_file(
+            {name: tensor.detach().cpu().contiguous() for name, tensor in pipe.model.state_dict().items()},
+            out / "model_state.safetensors",
+        )
 
     save = save_adapters
 
     def load_adapters(self, pipe, adapter_dir, meta, args):
         """Reload custom weights into an already loaded pipeline for sampling."""
         del meta, args
-        state = torch.load(Path(adapter_dir) / "model_state.pt", map_location="cpu")
+        from safetensors.torch import load_file
+
+        safe_path = Path(adapter_dir) / "model_state.safetensors"
+        legacy_path = Path(adapter_dir) / "model_state.pt"
+        if safe_path.exists():
+            state = load_file(safe_path, device="cpu")
+        else:
+            state = torch.load(legacy_path, map_location="cpu", weights_only=True)
         pipe.model.load_state_dict(state, strict=False)
         return pipe
 

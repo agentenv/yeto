@@ -6,7 +6,6 @@ import argparse
 import json
 import os
 import subprocess
-import sys
 import time
 
 import pytest
@@ -23,7 +22,9 @@ def tmp_registry(tmp_path, monkeypatch):
 # These tests exercise the local controller mode (a detached worker on this
 # machine); head mode is covered by test_head_mode.py.
 LAUNCH_ARGS = [
-    "--gpu", "aws:8xa100@us-east-2", "--model", "gemma4", "--data", "org/ds",
+    "--gpu", "aws:8xa100@us-east-2", "--model", "gemma4",
+    "--model-revision", "a" * 40, "--data", "org/ds",
+    "--data-revision", "b" * 40,
     "--controller", "local",
 ]
 

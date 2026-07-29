@@ -176,7 +176,7 @@ class NativeHunyuan3DPipeline:
         if batch_path:
             torch = _torch()
             path = _resolve_path(batch_path, row.get("__yeto_data_root__"))
-            return _tensorize(torch.load(path, map_location="cpu", weights_only=False), device)
+            return _tensorize(torch.load(path, map_location="cpu", weights_only=True), device)
         raise RuntimeError(
             "Hunyuan3D training rows need a native 'hunyuan3d_batch' or "
             "'hunyuan3d_batch_path'. Use YETO_HUNYUAN3D_WRAPPER for custom "
@@ -400,7 +400,7 @@ class Hunyuan3DAdapter(DiffusionAdapter):
             return pipe
         state_path = adapter_dir / "trainable_state.pt"
         if state_path.exists():
-            state = torch.load(state_path, map_location="cpu")
+            state = torch.load(state_path, map_location="cpu", weights_only=True)
             current = self.trainable_params(pipe)
             for name, tensor in state.items():
                 if name in current:

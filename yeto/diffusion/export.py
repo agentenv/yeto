@@ -15,6 +15,7 @@ from pathlib import Path
 
 import torch
 
+from .. import accel
 from ..export import Checkpoint, parse_checkpoint, validate_against_layout
 from ..fragments import FragmentLayout, build_layout
 from ..tensor_io import apply_fragment
@@ -34,11 +35,15 @@ def parse_args(argv=None):
     )
     p.add_argument("--checkpoint", required=True, help="path to the syncer checkpoint file")
     p.add_argument("--model", required=True, help="diffusers repo id or alias from yeto.models")
+    p.add_argument("--model-revision", default=None)
+    p.add_argument("--trust-remote-code", action="store_true")
+    p.add_argument("--source-sha256", default=None, help=argparse.SUPPRESS)
     p.add_argument(
         "--diffusion-adapter",
         default=None,
         help="module:factory or file.py:factory used by the training run",
     )
+    p.add_argument("--diffusion-adapter-sha256", default=None, help=argparse.SUPPRESS)
     p.add_argument("--tuning", choices=["lora", "full"], default="lora")
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
@@ -74,6 +79,7 @@ def _annotate_export_metadata(
     meta["export"] = {
         "source": "syncer-checkpoint",
         "checkpoint": Path(checkpoint_path).name,
+        "checkpoint_sha256": checkpoint.sha256,
         "global_step": checkpoint.global_step,
         "requested_fragments": args.fragments,
         "fragments": layout.num_fragments,
@@ -94,8 +100,22 @@ def _annotate_export_metadata(
 def export_checkpoint(args) -> tuple[Checkpoint, FragmentLayout, dict[str, torch.Tensor]]:
     """Rebuild a diffusion trainable layout and export the merged checkpoint."""
     checkpoint = parse_checkpoint(args.checkpoint)
-    device = torch.device(args.device)
-    adapter = load_diffusion_adapter(args.diffusion_adapter)
+    device = accel.detect(args.device)
+    from ..provenance import python_spec_sha256
+
+    if args.diffusion_adapter:
+        actual_adapter_sha256 = python_spec_sha256(args.diffusion_adapter)
+        expected_adapter_sha256 = getattr(args, "diffusion_adapter_sha256", None)
+        if (
+            expected_adapter_sha256 is not None
+            and actual_adapter_sha256 != expected_adapter_sha256.lower()
+        ):
+            raise ValueError("diffusion adapter SHA256 mismatch during export")
+        args.diffusion_adapter_sha256 = actual_adapter_sha256
+    adapter = load_diffusion_adapter(
+        args.diffusion_adapter,
+        expected_sha256=getattr(args, "diffusion_adapter_sha256", None),
+    )
 
     # Export is deliberately single-process and unwrapped. The learner's
     # normalized trainable names make this layout identical to DDP/FSDP runs.
@@ -140,6 +160,10 @@ def export_checkpoint(args) -> tuple[Checkpoint, FragmentLayout, dict[str, torch
 
 def main(argv=None) -> None:
     args = parse_args(argv)
+    from ..provenance import pin_runtime_provenance, verify_source_tree_sha256
+
+    verify_source_tree_sha256(args.source_sha256)
+    pin_runtime_provenance(args, include_data=False)
     checkpoint, layout, params = export_checkpoint(args)
     out = Path(args.output_dir).expanduser()
 

@@ -62,6 +62,9 @@ class Fragment:
     tensors: list[tuple[str, int]] = field(default_factory=list)  # (name, numel)
     # {name: (rows, cols)}, populated exactly for MERGE_ISO fragments.
     shapes: dict[str, tuple[int, int]] | None = None
+    # Full tensor shapes used only by the semantic layout fingerprint. This
+    # is kept separate because non-iso merge math needs no matrix metadata.
+    identity_shapes: dict[str, tuple[int, ...]] | None = None
 
     @property
     def numel(self) -> int:
@@ -155,4 +158,10 @@ def build_layout(
                     name: (int(named_shapes[name][0]), int(named_shapes[name][1]))
                     for name, _ in frag.tensors
                 }
+    if named_shapes is not None:
+        for frag in fragments:
+            frag.identity_shapes = {
+                name: tuple(int(dim) for dim in named_shapes[name])
+                for name, _ in frag.tensors
+            }
     return FragmentLayout(fragments)
