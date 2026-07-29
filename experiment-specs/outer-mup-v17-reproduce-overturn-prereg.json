@@ -1,0 +1,223 @@
+{
+  "schema": "yeto_outer_mup_v17_reproduce_overturn_prereg_v1",
+  "program_id": "outer-mup-v17-reproduce-overturn",
+  "status": "REGISTERED_PRE_OUTCOME",
+  "registered_date": "2026-07-28",
+  "question": "Can the strongest fully specified, runnable published SNOO gain be reproduced at 1.7B under its original protocol, and does a momentum-specific advantage survive age-matched independent retuning?",
+  "authority": {
+    "scope": "DESIGN_AND_GATESIM_ONLY",
+    "launch_authority": "NONE",
+    "nodes_offline": true,
+    "forbidden_now": [
+      "materialize 51B-token training streams or create a v17 result root",
+      "create a node-facing manifest, controller, queue, or command packet",
+      "start, reserve, or benchmark an H200 scientific process",
+      "use Phase A outcomes to change the Phase B grid or final vocabulary"
+    ],
+    "future_launch_prerequisites": [
+      "a clean pushed descendant preserving this scientific contract",
+      "hash-frozen data materializer, run implementation, analyzer, and validation identities",
+      "a resource and wall-clock forecast showing the 1.7B protocol is executable without truncating any registered arm",
+      "a loss-blind Phase A authority; later, a hash-committed Phase B selection record before confirmation",
+      "a separate explicit launch authority created before any corresponding outcome exists"
+    ],
+    "outcome_aware_changes_forbidden": "No source recipe, bridge disclosure, token budget, evaluation cadence, tuning grid, selection rule, threshold, seed, or closed-vocabulary precedence may change after its relevant outcome exists."
+  },
+  "published_configuration_selection": {
+    "primary_source": {
+      "citation": "Kallusky et al., SNOO: Step-K Nesterov Outer Optimizer, arXiv:2510.15830v1 (2025)",
+      "url": "https://arxiv.org/abs/2510.15830",
+      "local_extracted_text": "/private/tmp/2510.15830.raw.txt",
+      "local_text_sha256": "b8a1fce9c0ddcb8debdc9c9bc3e714ac60d0c93895922cc5d44b6d6a35ef4aec",
+      "open_source_url_quoted_by_paper": "https://github.com/vishal9-team/torchtitan-snoo"
+    },
+    "selection_rule": "Among survey configurations, require a primary-source numeric gain, exact outer hyperparameters, an open implementation, public data, and a protocol that can be bridged to the pinned 1.7B model. Select the largest exact illustrated gain satisfying all requirements rather than an abstract or fitted headline without one runnable recipe.",
+    "selected_recipe": {
+      "illustrated_model_scale": "300M dense OSS Llama-3",
+      "K": 100,
+      "outer_eta": 0.8,
+      "outer_mu": 0.75,
+      "reported_step_fraction": 0.78,
+      "reported_step_speedup": 1.28
+    },
+    "verbatim_protocol_quotes": [
+      {
+        "location": "Section 3.2.1",
+        "quote": "All models were trained using Fully Sharded Data Parallel (FSDP) with a global batch size of B = 64 sequences and a sequence length of L = 8,192. The training budget was set to achieve a token-to-parameter ratio of approximately 30:1. Gradient clipping with a maximum norm of 1.0 was employed to ensure stability."
+      },
+      {
+        "location": "Section 3.2.1",
+        "quote": "A learning rate of 3 x 10^-4 yielded near-optimal validation loss across all model scales and was thus fixed for all baseline comparisons. We further fixed beta1 = 0.9, beta2 = 0.95, and epsilon = 1e-8 as default values."
+      },
+      {
+        "location": "Section 2",
+        "quote": "the algorithm does not reset the inner optimizer's states or learning rate schedule between outer steps, instead using a learning rate schedule tuned across all inner iterations"
+      },
+      {
+        "location": "Section 3.2.2",
+        "quote": "For this run, the SNOO configuration utilized K = 100, eta = 0.8, and mu = 0.75. Critically, SNOO reaches the baseline's final validation loss in only 78% of the training steps, corresponding to the 1.28x training speedup in total steps."
+      }
+    ],
+    "paper_grid_for_context": {
+      "K": [10, 50, 100],
+      "outer_eta": [0.5, 0.8, 0.95],
+      "outer_mu": [0.25, 0.5, 0.75]
+    }
+  },
+  "algorithm_identity": {
+    "pseudo_gradient": "s_t = w_t - w_fast_after_K",
+    "buffer": "b_t = mu*b_{t-1} + s_t",
+    "outer_update": "w_{t+1} = w_t - eta*(mu*b_t + s_t)",
+    "fast_reset": "after every complete K-step block, synchronize fast weights to the new slow weights",
+    "state_continuity": "AdamW moments and the global learning-rate schedule are not reset at outer updates",
+    "incomplete_block_rule": "forbidden by choosing a total step count divisible by K"
+  },
+  "bridge_to_1p7B": {
+    "model": "HuggingFaceTB/SmolLM2-1.7B",
+    "revision": "effd688a12921b4cc83e3312b6feb579f70f9c71",
+    "exact_parameters": 1711376384,
+    "architecture_disclosure": "The primary source used scaled dense Llama-3 architectures up to 1B and illustrated the selected recipe at 300M. v17 substitutes a pinned SmolLM2 1.7B architecture. Phase A is therefore a protocol reproduction under a disclosed model-family and scale bridge, not byte-identical replication.",
+    "training_steps": 98000,
+    "global_sequences_per_step": 64,
+    "sequence_length": 8192,
+    "tokens_per_step": 524288,
+    "total_training_tokens": 51380224000,
+    "tokens_per_parameter": 30.02274922124904,
+    "outer_updates_at_K100": 980,
+    "step_choice": "98,000 is the nearest convenient K-divisible count to the exact 30:1 value 97,925.742 steps; the resulting 30.0227:1 ratio remains within the paper's approximately-30:1 protocol and prevents an unevaluated partial outer block.",
+    "warmup_steps": 12760,
+    "warmup_bridge": "scale the paper's 1B warmup fraction 7,500/57,600 to 98,000 steps and round to 12,760",
+    "schedule": "linear warmup followed by linear decay to minimum learning-rate factor 0.1 at step 98,000",
+    "gradient_clip_norm": 1.0,
+    "weight_decay": 0.01,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.95,
+    "adam_epsilon": 1e-8,
+    "distributed": "FSDP; a future implementation may choose the exact loss-blind GPU count only if global batch, optimizer arithmetic, and all registered numeric identities remain exact"
+  },
+  "data_contract": {
+    "dataset": "allenai/c4",
+    "config": "en",
+    "revision": "1588ec454efa1a09f29cd18ddd04fe05fc8653a2",
+    "train_split": "train",
+    "validation_split": "validation",
+    "packing": "tokenize with the pinned SmolLM2 tokenizer, append EOS between documents, concatenate within deterministic shard order, emit exact nonoverlapping 8192-token sequences, and drop only each shard's final incomplete sequence",
+    "validation_sequences": 4096,
+    "validation_selection": "hash each packed validation sequence with SHA-256, sort by digest, and take the first 4,096; one fixed validation file is shared by every arm and seed",
+    "training_order": "for each registered training seed, deterministically permute source shard identities and within-shard documents before packing; paired arms use byte-identical packed sequence order",
+    "future_materialization_requirement": "Before any Phase A run, commit and push a manifest containing dataset snapshot identity, tokenizer inventory, materializer SHA-256, exact train/validation file hashes and rows, per-seed stream hashes, and a proof of train/validation split disjointness. The hashes instantiate this frozen algorithm and may not select on losses."
+  },
+  "evaluation_and_speedup_estimand": {
+    "validation_cadence_steps": 500,
+    "mandatory_evaluations": "step 0, every 500 steps, and step 98,000",
+    "validation_metric": "mean C4 validation negative log-likelihood per nonpadding token in natural-log nats; bits may be reported descriptively",
+    "baseline_final_threshold": "for each seed and phase, mean of the retuned-or-fixed AdamW validation NLL at steps 97,000, 97,500, and 98,000",
+    "curve_smoothing": "fit the unique least-squares nonincreasing isotonic regression to each arm's complete scheduled validation series with equal checkpoint weights",
+    "crossing_step": "first step where the isotonic arm curve is <= the paired AdamW final threshold, linearly interpolated between adjacent scheduled checkpoints",
+    "right_censoring": "if an arm never crosses by step 98,000, set its gate speedup to 1.0 (log2 gain 0) and separately report NOT_CROSSED plus its final NLL gap; censoring is scientific evidence against a positive-gain gate, not NOT_EVALUABLE",
+    "speedup": "98000/crossing_step",
+    "primary_scale": "log2 speedup bits",
+    "throughput": "wall-clock throughput and FLOPs are mandatory descriptive outputs but do not replace the registered step-speedup gate"
+  },
+  "phase_A_original_protocol_reproduction": {
+    "purpose": "reproduce the fixed published recipe against the fixed published AdamW protocol under the disclosed 1.7B bridge",
+    "arms": {
+      "adamw_fixed": {"inner_lr": 0.0003, "outer": "none"},
+      "snoo_fixed": {"inner_lr": 0.0003, "K": 100, "outer_eta": 0.8, "mu": 0.75}
+    },
+    "paired_confirmation_seeds": [17011, 17021, 17027, 17029, 17033, 17041, 17047],
+    "cell_count_identity": "2 arms * 7 paired seeds = 14 full-budget runs",
+    "reproduction_rule": "mean paired log2 step-speedup >= log2(1.15)=0.2016338611696504 and the lower endpoint of its two-sided 95% paired Student t interval is >0",
+    "interval": "seven paired seeds, df=6, t*=2.4469118487916806",
+    "failure_rule": "Any complete result not meeting both reproduction conditions is not reproduced, including right-censored crossings."
+  },
+  "phase_B_age_matched_retune": {
+    "purpose": "test whether the momentum-specific gain survives when SNOO, Lookahead, and AdamW receive prospective independent retuning",
+    "age_match_definition": "Every outer arm uses K=100, exactly 98,000 inner steps, exactly 980 complete outer updates, the same paired packed sequence order, the same evaluation checkpoints, and one uninterrupted AdamW state and schedule clock. Thus token age and outer-call age are identical. No claim is made that exponential buffer memory is identical when mu differs.",
+    "outer_arm_grid": {
+      "arms": [
+        {"id": "snoo_mu0p75", "mu": 0.75},
+        {"id": "lookahead_mu0", "mu": 0.0}
+      ],
+      "K": 100,
+      "inner_learning_rates": [0.00015, 0.0003, 0.0006],
+      "outer_etas": [0.5, 0.8, 0.95],
+      "configurations_per_arm": 9,
+      "equal_budget": true
+    },
+    "adamw_grid": {
+      "inner_learning_rates": [0.00015, 0.0003, 0.0006],
+      "configurations": 3
+    },
+    "successive_halving": {
+      "tuning_seeds": [17111, 17117],
+      "round_1": "Run all 9 configurations per outer arm and all 3 AdamW configurations for 16,300 steps (approximately 5 tokens/parameter) on seed 17111; rank independently within arm by normalized area under the complete validation-NLL curve, lower is better.",
+      "round_1_keep": "Keep exactly 3 configurations per outer arm; all 3 AdamW learning rates advance. Ties within 1e-12 resolve by lower inner LR, then lower outer eta.",
+      "round_2": "Continue the kept seed-17111 checkpoints and run the same kept configurations from initialization on seed 17117 to 32,700 steps (approximately 10 tokens/parameter).",
+      "final_selection": "Within each arm independently, minimize the mean of the two seed-specific normalized validation-NLL AUC values through 32,700 steps. Ties within 1e-12 use the same lower-LR/lower-eta rule.",
+      "selection_seal": "The three selected configurations, all tuning losses, ranks, command hashes, and selection arithmetic must be committed and pushed before any Phase B confirmation run starts.",
+      "confirmation": "Run the independently selected AdamW, snoo_mu0p75, and lookahead_mu0 configurations for the full 98,000 steps at all seven confirmation seeds [17011,17021,17027,17029,17033,17041,17047]."
+    },
+    "primary_survival_estimand": "For each confirmation seed, compute each selected outer arm's log2 step-speedup to the selected AdamW final threshold, then subtract lookahead_mu0 from snoo_mu0p75.",
+    "survival_rule": "the lower endpoint of the seven-seed paired 95% Student interval for the momentum-minus-Lookahead log2 speedup is >log2(1.05)=0.070389327891398",
+    "equivalence_diagnostic": "Separately report whether the entire 95% interval lies inside [-log2(1.05),+log2(1.05)]. Failure of survival is not called equivalence unless this diagnostic passes.",
+    "full_confirmation_cell_count": 21,
+    "adaptive_tuning_run_count": "21 round-1 runs; 9 configurations advance to round 2, with the six outer-arm runs continuing seed 17111 and all nine also run on seed 17117 as specified"
+  },
+  "final_gate": {
+    "name": "G17",
+    "closed_vocabulary": [
+      "GAIN_REPRODUCED_AND_SURVIVES",
+      "GAIN_REPRODUCED_VANISHES",
+      "GAIN_NOT_REPRODUCED"
+    ],
+    "precedence": [
+      "If Phase A does not meet both reproduction conditions, emit GAIN_NOT_REPRODUCED regardless of Phase B.",
+      "If Phase A reproduces and Phase B meets the survival rule, emit GAIN_REPRODUCED_AND_SURVIVES.",
+      "If Phase A reproduces and Phase B does not meet the survival rule, emit GAIN_REPRODUCED_VANISHES."
+    ],
+    "vanishes_semantics": "GAIN_REPRODUCED_VANISHES means the preregistered positive survival criterion failed after fixed-recipe reproduction. It is not strict equivalence unless the separately reported equivalence diagnostic also passes.",
+    "not_evaluable_handling": "Infrastructure-incomplete required work emits no G17 scientific verdict and must be recovered under the loss-blind retry rule. Complete right-censored scientific crossings remain evaluable and count against reproduction/survival."
+  },
+  "gate_feasibility": {
+    "simulator": {
+      "path": "experiment-specs/v2pack-gatesim.py",
+      "sha256": "ec23cf6e762d7b65f8740d770646e34698cc9d1a8ad2cb6a98fcb6a0b4b5c5d5"
+    },
+    "report": {
+      "path": "experiment-specs/outer-mup-v17-reproduce-overturn-gatesim.json",
+      "sha256": "67ac755fe1823be71464d2e9a676be89b41641a03287cf51eef2a96809dcbd13"
+    },
+    "replicates_per_scenario": 20000,
+    "rng_seeds": {"tuned_null": 20260817, "tuned_survival": 20261817},
+    "assumed_seed_sd_log2_speedup_bits": 0.1,
+    "P_evaluable": 1.0,
+    "mandatory_P_evaluable": 0.8,
+    "under_published_reproduction_plus_tuned_null": {
+      "P_GAIN_REPRODUCED_AND_SURVIVES": 0.00005,
+      "P_GAIN_REPRODUCED_VANISHES": 0.9999,
+      "P_GAIN_NOT_REPRODUCED": 0.00005
+    },
+    "under_published_reproduction_plus_1p15x_tuned_survival": {
+      "P_GAIN_REPRODUCED_AND_SURVIVES": 0.8237,
+      "P_GAIN_REPRODUCED_VANISHES": 0.1762,
+      "P_GAIN_NOT_REPRODUCED": 0.0001
+    },
+    "status": "PASS",
+    "interpretation": "The 0.10-bit seed SD is a conservative feasibility prior relative to the measured 0.063219 pooled G4C/v7 residual scale. Gatesim validates classification power under declared alternatives; it does not reproduce SNOO."
+  },
+  "evidence_and_retry": {
+    "completed_run_requires": [
+      "exact model, data stream, seed, global batch, step count, optimizer, schedule, and command identity",
+      "complete validation series at every registered checkpoint",
+      "uninterrupted optimizer-state and schedule-clock evidence for SNOO/Lookahead",
+      "finite train and validation losses, successful exits, and checkpoint hashes",
+      "source commit/diff, environment, GPU topology, wall time, throughput, and all result hashes"
+    ],
+    "attempt_limit": 2,
+    "allowed_retry_reasons": ["host or GPU failure", "framework or driver failure", "storage or network failure", "registered timeout without a valid endpoint"],
+    "retry_unit": "the complete paired arm set sharing phase, budget stage, and seed; for a Phase B selected confirmation seed this is selected AdamW, SNOO, and Lookahead",
+    "finite_unfavorable_loss_or_no_crossing_retry_forbidden": true,
+    "selection_or_hyperparameter_change_on_retry_forbidden": true
+  }
+}

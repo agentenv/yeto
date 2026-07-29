@@ -1,0 +1,238 @@
+{
+  "schema": "yeto_outer_mup_v14_transfer_matrix_prereg_v1",
+  "program_id": "outer-mup-v14-transfer-matrix",
+  "status": "REGISTERED_PRE_OUTCOME",
+  "registered_date": "2026-07-28",
+  "question": "Across two schedule geometries, how asymmetric is the held-out cost of deploying an exact raw-Nesterov rate fitted for one outer age at every other target age?",
+  "authority": {
+    "scope": "DESIGN_AND_GATESIM_ONLY",
+    "launch_authority": "NONE",
+    "nodes_offline": true,
+    "forbidden_now": [
+      "create a v14 result root or attempt directory",
+      "create a node-facing launch manifest, controller, queue, or command packet",
+      "start, reserve, or probe an H200 scientific process",
+      "treat a gatesim draw as scientific evidence"
+    ],
+    "future_launch_prerequisites": [
+      "a clean pushed descendant containing this unchanged scientific contract",
+      "a frozen analyzer that mechanically implements this contract and cites its own raw SHA-256",
+      "hash-bound materialized train and held-out files identical across execution nodes",
+      "a loss-blind launch manifest enumerating exactly the 160 registered cells",
+      "an explicit future launch authority created while no v14 outcome exists"
+    ],
+    "outcome_aware_changes_forbidden": "No pair, context, rate, seed, estimand, clipping limit, interval, margin, label, or asymmetry rule may change after any v14 endpoint exists."
+  },
+  "pre_outcome_provenance": {
+    "g4c_readout": {
+      "canonical_location": "h200-n1:/root/g4c-readout.json (banked; absent from the CPU evacuation archive)",
+      "sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa"
+    },
+    "g10_registration": {
+      "git_commit": "c2ce9eb",
+      "branch": "experiment/outer-mup-v10-freshtransfer"
+    },
+    "g10_readout": {
+      "canonical_location": "/private/tmp/v10-control/g10-readout.json on the registration Mac",
+      "sha256": "46adf7b8b11a9434632e3470248b3adc3b6bb9e6a71d1aa5b4df59e84390386f",
+      "verdict": "PENALTY_NULL",
+      "reason_for_null": "the strict original rule required all three directed intervals to clear 0.178542 bits; the downward T20-to-T5 interval was mild",
+      "observed_fresh_penalties_bits": {
+        "T5_TO_T20": {
+          "mean": 3.541034349334269,
+          "ci95": [0.5298187629915827, 7.5777981950615985]
+        },
+        "T5_TO_T40": {
+          "mean": 0.5200939317492312,
+          "ci95": [0.4918537872271067, 0.5497238365274676]
+        },
+        "T20_TO_T5": {
+          "mean": 0.07683256801284129,
+          "ci95": [0.07086050307547069, 0.0836588339862116]
+        }
+      }
+    },
+    "independent_pre_fresh_audit": {
+      "canonical_location": "/private/tmp/number-audit.HmdmkU/transfer-independent.md",
+      "T5_TO_T20_bits": 0.432229,
+      "T20_TO_T5_bits": 0.016341
+    }
+  },
+  "common_protocol": {
+    "model": "HuggingFaceTB/SmolLM2-1.7B",
+    "model_revision": "effd688a12921b4cc83e3312b6feb579f70f9c71",
+    "exact_parameters": 1711376384,
+    "tuning": "full parameter",
+    "learner_count": 4,
+    "sequence_length": 128,
+    "inner_optimizer": "AdamW",
+    "inner_learning_rate": 0.001,
+    "inner_weight_decay": 0.01,
+    "inner_warmup_steps": 10,
+    "outer_optimizer": "production raw Nesterov",
+    "outer_momentum": 0.9,
+    "outer_bias_correction": false,
+    "matrix_merge": "RDA",
+    "merge_alpha": 0.5,
+    "fragment_count": 4,
+    "fragment_pattern": "binpack",
+    "barrier_sync": true,
+    "strict_quorum": true,
+    "version_matched_anchor": true,
+    "pipeline_depth": 4,
+    "wire_dtype": "bf16",
+    "zero_injected_delay_or_jitter": true
+  },
+  "rate_prescriptions": {
+    "exact_decimal_rule": "Every decimal below is passed verbatim; rate-grid snapping, float rounding for presentation, target refitting, and outcome-aware replacement are forbidden.",
+    "fixed_H512": {
+      "T2": 0.007821882581822885,
+      "T5": 0.003191644884294105,
+      "T20": 0.0008223020084526104,
+      "T40": 0.0003971228256207733
+    },
+    "fixed_H512_derivation": {
+      "T5": "direct five-seed G4C raw fit",
+      "T20": "direct five-seed G4C raw fit",
+      "T2": "eta5*(2/5)^p with p=log(eta20/eta5)/log(20/5)=-0.9782799412400243; this is a prospective extrapolated prescription, not a measured 1.7B T2 optimum",
+      "T40": "v11 pre-outcome far-horizon prescription 0.003800560784723474*(1-0.9)*1.044905865516022; v11 was deferred, so this remains predicted rather than measured"
+    },
+    "fixed_S2560": {
+      "T2": 0.007341476969217584,
+      "T5": 0.003191644884294105,
+      "T20": 0.0009050641916564297,
+      "T40": 0.00045856076934387404
+    },
+    "fixed_S2560_transport": {
+      "rule": "eta_fixedS(T)=eta_fixedH(T)*2^[beta_S*log2(2560/(512T))+beta_H*log2((2560/T)/512)+beta_D*log2(2560/(512T))]",
+      "beta_S_mu0": -0.4505983838816392,
+      "beta_H_mu0": 0.4886611783077774,
+      "beta_D_raw_surface": -0.10723867757601385,
+      "multipliers_by_T": {
+        "T2": 0.9385818429796292,
+        "T5": 1.0,
+        "T20": 1.100646942793633,
+        "T40": 1.154707661608376
+      },
+      "disclosure": "The coefficients are frozen G6/G9 placement coefficients. Fixed-S prescriptions, and especially T40, are transported placements rather than measured 1.7B optima."
+    }
+  },
+  "design": {
+    "T": [2, 5, 20, 40],
+    "contexts": {
+      "FIXED_H512": [
+        {"T": 2, "H": 512, "S": 1024},
+        {"T": 5, "H": 512, "S": 2560},
+        {"T": 20, "H": 512, "S": 10240},
+        {"T": 40, "H": 512, "S": 20480}
+      ],
+      "FIXED_S2560": [
+        {"T": 2, "H": 1280, "S": 2560},
+        {"T": 5, "H": 512, "S": 2560},
+        {"T": 20, "H": 128, "S": 2560},
+        {"T": 40, "H": 64, "S": 2560}
+      ]
+    },
+    "directed_pairs_per_context": 12,
+    "pair_rule": "all ordered source-target pairs with source_T != target_T",
+    "fresh_comparator_rule": "For each context, target T, and seed, execute one fresh comparator at the exact target prescription. Its endpoint is shared by the three directed transfers entering that target and is never imported from banked work.",
+    "fresh_transfer_rule": "For each directed pair, context, and seed, deploy the exact source prescription at the target H,S schedule.",
+    "fresh_seeds": [1401, 1409, 1423, 1427, 1429],
+    "training_seed_rule": "decimal concatenation seed||seed",
+    "cell_count_identity": "(12 directed transfers + 4 per-target comparators) * 2 contexts * 5 seeds = 160",
+    "cell_count": 160
+  },
+  "data_and_evaluation": {
+    "training_jsonl": {
+      "path": "/root/yeto-data/outer-mup-v3/scale-s2560/raw/train.jsonl",
+      "bytes": 64423638,
+      "sha256": "e680a29ea8c8fc7c99efdceb4f62e485d3eed1ac2afd15bab43b506cb3f4ecaf"
+    },
+    "heldout_jsonl": {
+      "path": "/root/yeto-data/outer-mup-v3/scale-s2560/raw/confirmation-audit.jsonl",
+      "rows": 1024,
+      "bytes": 4774107,
+      "sha256": "d71b90040a57731f25c78a2d191017ce90a12c1bb79f55a1cd2f3d085a706d7b",
+      "exclusion": "not used to derive any registered source or target rate"
+    },
+    "stored_units": "natural-log nats per supervised token",
+    "primary_units": "bits per supervised token",
+    "conversion": "bits=nats/ln(2)",
+    "paired_raw_penalty": "heldout_bits(exact source rate at target)-heldout_bits(exact target comparator), paired by context, target, and fresh seed"
+  },
+  "analysis_contract": {
+    "pair_primary_estimand": "the mean across five seeds after symmetrically clipping each paired raw penalty to [-0.75,+0.75] bits/token",
+    "bounded_influence_rationale": "G10 retained a finite +9.504814-bit scientific-divergence seed. The fixed symmetric cap prevents one endpoint from defining a five-seed inferential claim; no raw endpoint is deleted or relabeled.",
+    "mandatory_raw_reporting": "For every pair report all five unclipped penalties, their raw mean and SD, the bounded values, bounded mean, and interval.",
+    "interval": "two-sided 95% paired Student t interval with df=4 and t*=2.7764451051977987",
+    "practical_margin_bits": 0.1,
+    "per_pair_closed_vocabulary": [
+      "PAIR_PENALTY",
+      "PAIR_NO_DECISIVE_PENALTY",
+      "PAIR_BENEFIT"
+    ],
+    "per_pair_classification": {
+      "PAIR_PENALTY": "bounded interval lower endpoint > +0.10 bits/token",
+      "PAIR_BENEFIT": "bounded interval upper endpoint < -0.10 bits/token",
+      "PAIR_NO_DECISIVE_PENALTY": "every other complete finite result; this label is not an equivalence claim"
+    },
+    "execution_incomplete_rule": "Missing or invalid required evidence emits no pair label and no v14 asymmetry verdict; it is recovered only under the registered loss-blind retry rule.",
+    "shared_pairing": "All pair and aggregate intervals preserve the same five seed indices; reuse of a target comparator is retained in the covariance rather than treated as independent evidence."
+  },
+  "preregistered_asymmetry_hypothesis": {
+    "scientific_statement": "Upward transfer (a short-age rate deployed at a longer target age) is penalized, whereas downward transfer is mild and lies inside the 0.10-bit practical band.",
+    "origin": "G10 and its independent audit: young-to-mature transfers were large and positive while T20-to-T5 was mild.",
+    "seed_statistics": {
+      "upward": "for each seed, equal-weight mean of all 12 upward bounded penalties across both contexts",
+      "downward": "for each seed, equal-weight mean of all 12 downward bounded penalties across both contexts",
+      "difference": "upward minus downward, paired by seed"
+    },
+    "closed_vocabulary": [
+      "ASYMMETRY_CONFIRMED",
+      "ASYMMETRY_NULL",
+      "ASYMMETRY_REVERSED"
+    ],
+    "classification": {
+      "ASYMMETRY_CONFIRMED": "the paired 95% interval lower endpoint for upward-minus-downward is >0.10, the upward interval lower endpoint is >0.10, and abs(downward point estimate)<=0.10",
+      "ASYMMETRY_REVERSED": "the paired 95% interval upper endpoint for upward-minus-downward is <-0.10",
+      "ASYMMETRY_NULL": "every other complete finite result"
+    }
+  },
+  "gate_feasibility": {
+    "simulator": {
+      "path": "experiment-specs/v2pack-gatesim.py",
+      "sha256": "ec23cf6e762d7b65f8740d770646e34698cc9d1a8ad2cb6a98fcb6a0b4b5c5d5"
+    },
+    "report": {
+      "path": "experiment-specs/outer-mup-v14-transfer-matrix-gatesim.json",
+      "sha256": "7d9a6681a7bc484233db5c0e099fa35f75d74606bed812bf767f4cae0dc79a78"
+    },
+    "replicates": 20000,
+    "rng_seed": 20260814,
+    "P_evaluable": 1.0,
+    "minimum_per_upward_pair_P_expected_label": 0.86795,
+    "minimum_per_downward_pair_P_expected_label": 0.99985,
+    "P_ASYMMETRY_CONFIRMED": 0.91335,
+    "mandatory_P_evaluable": 0.8,
+    "status": "PASS",
+    "interpretation": "Every one of the 24 pairs is separately simulated with bounded G10 and worst-SD G4C banked seed profiles. These probabilities measure rule behavior under the declared alternative, not the truth of the alternative."
+  },
+  "evidence_and_retry": {
+    "completed_cell_requires": [
+      "exact registered source commit and command identity",
+      "all four learners complete exactly S optimizer steps",
+      "exactly 4*T strict-quorum fragment commits and matching rho telemetry",
+      "finite 1024-row held-out endpoint and successful learner/syncer exits",
+      "hashes for command, evidence, results, tape, telemetry, checkpoint, source commit, and source diff"
+    ],
+    "attempt_limit": 2,
+    "allowed_retry_reasons": [
+      "host_or_gpu_failure",
+      "framework_or_driver_failure",
+      "storage_or_network_failure",
+      "registered process timeout without a valid endpoint"
+    ],
+    "retry_unit": "all four cells sharing context, target T, and seed: the three source transfers plus their fresh target comparator",
+    "forbidden_retry_reasons": "finite unfavorable loss, scientific divergence, pair label, asymmetry label, or any desire to change a rate"
+  }
+}

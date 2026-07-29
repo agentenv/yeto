@@ -1,0 +1,56 @@
+{
+  "decision_model": {
+    "closed_vocabulary": [
+      "GAIN_REPRODUCED_AND_SURVIVES",
+      "GAIN_REPRODUCED_VANISHES",
+      "GAIN_NOT_REPRODUCED"
+    ],
+    "phase_A_reproduced": "mean log2 step-speedup >= log2(1.15) and lower endpoint of the paired seven-seed 95% Student interval > 0",
+    "phase_B_survives": "lower endpoint of the paired seven-seed 95% Student interval for retuned mu=.75 minus retuned mu=0 log2 step-speedup > log2(1.05)",
+    "vanishes_semantics": "failure of the preregistered survival test after Phase A reproduction; not an equivalence claim unless the separately reported CI lies inside the equivalence band"
+  },
+  "pre_outcome": true,
+  "schema": "yeto_outer_mup_v17_reproduce_overturn_gatesim_v1",
+  "scope": "decision-rule power under the published fixed-recipe alternative and either a tuned null or tuned survival alternative; not evidence that SNOO reproduces",
+  "simulation": {
+    "P_evaluable": 1.0,
+    "assumed_seed_sd_log2_speedup_bits": 0.1,
+    "fresh_confirmation_seeds": [
+      17011,
+      17021,
+      17027,
+      17029,
+      17033,
+      17041,
+      17047
+    ],
+    "mandatory_P_evaluable": 0.8,
+    "replicates_per_scenario": 20000,
+    "rng_seeds": {
+      "tuned_null": 20260817,
+      "tuned_survival": 20261817
+    },
+    "under_reproduction_plus_1p15x_tuned_survival": {
+      "GAIN_NOT_REPRODUCED": 0.0001,
+      "GAIN_REPRODUCED_AND_SURVIVES": 0.8237,
+      "GAIN_REPRODUCED_VANISHES": 0.1762
+    },
+    "under_reproduction_plus_tuned_null": {
+      "GAIN_NOT_REPRODUCED": 5e-05,
+      "GAIN_REPRODUCED_AND_SURVIVES": 5e-05,
+      "GAIN_REPRODUCED_VANISHES": 0.9999
+    }
+  },
+  "source": {
+    "primary_source": "Kallusky et al., SNOO: Step-K Nesterov Outer Optimizer, arXiv:2510.15830v1",
+    "primary_source_text_sha256": "b8a1fce9c0ddcb8debdc9c9bc3e714ac60d0c93895922cc5d44b6d6a35ef4aec",
+    "published_configuration": {
+      "K": 100,
+      "mu": 0.75,
+      "outer_eta": 0.8
+    },
+    "published_speedup": 1.28,
+    "published_step_fraction": 0.78
+  },
+  "status": "PASS"
+}
