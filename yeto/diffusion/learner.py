@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from .. import accel
 from ..autobatch import int_or_auto, rebalance_grad_accum
 from ..data import _learner_rows, load_rows
+from ..diloco_sync import DiLoCoSyncState, sync_diloco_boundary
 from ..finalization import finalize_torch_island
 from ..fragments import build_layout
 from ..losses import flow_matching_loss
@@ -36,12 +37,9 @@ from ..models import resolve
 from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
 from ..tensor_io import (
     apply_fragment,
-    fragment_flat,
     pack_fragment,
-    pack_tensor,
-    quantize_q4,
-    unpack_fragment,
 )
+from .adapters import diffusion_behavior_adapters
 
 log = logging.getLogger("diffusion-learner")
 
@@ -173,12 +171,7 @@ def isolated_diffusion_rng(seed: int | None, device: torch.device | None = None)
     else:
         numpy_module = np
         numpy_state = np.random.get_state()
-    if device is None:
-        cuda_devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
-        rng_context = torch.random.fork_rng(devices=cuda_devices)
-    else:
-        rng_context = accel.fork_rng(device)
-    with rng_context:
+    with accel.fork_rng(device):
         seed_diffusion_rng(seed, device)
         try:
             yield
@@ -391,29 +384,15 @@ def setup_distributed(device: torch.device) -> tuple[int, int]:
 def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
     try:
         return factory.from_pretrained(model_id, local_files_only=True, **kwargs)
-    except OSError:
+    except Exception:
+        # Broad on purpose: a PARTIAL cache fails offline load with arbitrary
+        # exceptions (e.g. sentencepiece TypeError on a config-only tokenizer
+        # cache, observed on the megatron island). See yeto/learner.py.
         return factory.from_pretrained(model_id, **kwargs)
 
 
 def diffusion_torch_dtype(device) -> torch.dtype:
-    if device.type == "npu":
-        return torch.bfloat16
-    if device.type != "cuda":
-        return torch.float32
-    get_capability = getattr(torch.cuda, "get_device_capability", None)
-    if get_capability is not None:
-        try:
-            major, _ = get_capability(device)
-        except (AssertionError, RuntimeError, TypeError):
-            try:
-                major, _ = get_capability()
-            except (AssertionError, RuntimeError, TypeError):
-                major = None
-        if major is not None and major < 8:
-            return torch.float16
-    if getattr(torch.cuda, "is_bf16_supported", lambda: False)():
-        return torch.bfloat16
-    return torch.float16
+    return accel.diffusion_dtype(device)
 
 
 def resolve_lora_targets(choice: str, model: str | None = None):
@@ -2383,19 +2362,6 @@ def _size_conditioning_tensor(
     ).repeat(int(noisy.latents.shape[0]), 1)
 
 
-def _aspect_ratio_conditioning_tensor(
-    noisy: LatentBatch,
-    height: int,
-    width: int,
-) -> torch.Tensor:
-    return torch.full(
-        (int(noisy.latents.shape[0]), 1),
-        float(height) / float(width),
-        device=noisy.latents.device,
-        dtype=noisy.latents.dtype,
-    )
-
-
 def _crop_conditioning_tensor(noisy: LatentBatch) -> torch.Tensor:
     return torch.zeros(
         (int(noisy.latents.shape[0]), 2),
@@ -2594,7 +2560,6 @@ def log_diffusion_parameter_effects(pipe, args, adapter=None) -> None:
 
 def _auto_fill_denoiser_kwargs(
     pipe,
-    model,
     noisy: LatentBatch,
     cond: TextConditioning,
     args,
@@ -2658,32 +2623,6 @@ def _auto_fill_denoiser_kwargs(
     if "crops_coords_top_left" in params and "crops_coords_top_left" not in kwargs:
         kwargs["crops_coords_top_left"] = _crop_conditioning_tensor(noisy)
 
-    additional_conditions = getattr(model, "use_additional_conditions", None)
-    if additional_conditions is None:
-        additional_conditions = _config_value(
-            getattr(model, "config", None),
-            "use_additional_conditions",
-        )
-    if (
-        "added_cond_kwargs" in params
-        and "added_cond_kwargs" not in kwargs
-        and additional_conditions
-    ):
-        resolution = _size_conditioning_tensor(noisy, pixel_height, pixel_width)
-        if resolution is None:
-            raise RuntimeError(
-                "denoiser requires additional size conditions, but pixel height/width "
-                "are unavailable; set --height/--width or provide latent shape metadata"
-            )
-        kwargs["added_cond_kwargs"] = {
-            "resolution": resolution,
-            "aspect_ratio": _aspect_ratio_conditioning_tensor(
-                noisy,
-                pixel_height,
-                pixel_width,
-            ),
-        }
-
     if _auto_guidance_enabled(pipe, params) and "guidance" not in kwargs:
         kwargs["guidance"] = _guidance_value(pipe, args, noisy)
 
@@ -2700,6 +2639,9 @@ def _auto_fill_denoiser_kwargs(
         name in params
         for name in ("encoder_attention_mask", "encoder_hidden_states_mask")
     )
+    # TextConditioning carries the prompt/encoder mask. If the signature has a
+    # dedicated encoder-mask parameter, forwarding that same mask as the image
+    # self-attention mask would be semantically wrong for any denoiser family.
     for name in (
         "attention_mask",
         "encoder_hidden_states_mask",
@@ -2712,12 +2654,16 @@ def _auto_fill_denoiser_kwargs(
         if name in params and name not in kwargs:
             kwargs[name] = cond.attention_mask
 
-    for name in list(kwargs):
-        if kwargs[name] is None:
-            kwargs.pop(name)
 
-
-def _denoise_forward_one(pipe, model, noisy: LatentBatch, timesteps, cond: TextConditioning, args):
+def _denoise_forward_one(
+    pipe,
+    model,
+    noisy: LatentBatch,
+    timesteps,
+    cond: TextConditioning,
+    args,
+    adapter=None,
+):
     inspect_model = _signature_model_for_forward(model)
     sig = inspect.signature(inspect_model.forward)
     params = sig.parameters
@@ -2768,7 +2714,28 @@ def _denoise_forward_one(pipe, model, noisy: LatentBatch, timesteps, cond: TextC
         kwargs["width"] = int(noisy.latent_width)
     if "return_dict" in params:
         kwargs["return_dict"] = False
-    _auto_fill_denoiser_kwargs(pipe, inspect_model, noisy, cond, args, params, kwargs)
+    _auto_fill_denoiser_kwargs(pipe, noisy, cond, args, params, kwargs)
+    pixel_height, pixel_width = _pixel_shape_from_latents(pipe, noisy, args)
+    for behavior_adapter in diffusion_behavior_adapters(pipe, inspect_model, adapter):
+        hook = getattr(behavior_adapter, "denoiser_kwargs", None)
+        if hook is None:
+            continue
+        contributed = hook(
+            pipe,
+            inspect_model,
+            noisy,
+            cond,
+            args,
+            params,
+            kwargs,
+            pixel_height=pixel_height,
+            pixel_width=pixel_width,
+        )
+        if contributed is not None:
+            kwargs.update(contributed)
+    for name in list(kwargs):
+        if kwargs[name] is None:
+            kwargs.pop(name)
     autocast = nullcontext()
     if accel.is_accelerator(noisy.latents.device) and noisy.latents.dtype in (
         torch.float16,
@@ -2790,7 +2757,15 @@ def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning,
     batch = int(noisy.latents.shape[0])
     routes = _denoiser_routes(pipe, modules, timesteps, batch)
     if len(routes) == 1 and _is_full_batch_indices(routes[0][2], batch):
-        return _denoise_forward_one(pipe, routes[0][1], noisy, timesteps, cond, args)
+        return _denoise_forward_one(
+            pipe,
+            routes[0][1],
+            noisy,
+            timesteps,
+            cond,
+            args,
+            adapter,
+        )
 
     chunks: list[tuple[torch.Tensor, torch.Tensor]] = []
     for _, model, indices in routes:
@@ -2799,7 +2774,20 @@ def denoise_forward(pipe, noisy: LatentBatch, timesteps, cond: TextConditioning,
         part_noisy = _slice_latent_batch(noisy, indices)
         part_cond = _slice_text_conditioning(cond, indices, batch)
         part_timesteps = _slice_timesteps(timesteps, indices, batch)
-        chunks.append((indices, _denoise_forward_one(pipe, model, part_noisy, part_timesteps, part_cond, args)))
+        chunks.append(
+            (
+                indices,
+                _denoise_forward_one(
+                    pipe,
+                    model,
+                    part_noisy,
+                    part_timesteps,
+                    part_cond,
+                    args,
+                    adapter,
+                ),
+            )
+        )
 
     first = chunks[0][1]
     output = first.new_empty((batch, *first.shape[1:]))
@@ -2904,16 +2892,17 @@ def _align_prediction_and_target(
     target: torch.Tensor,
     noisy: LatentBatch,
     cond: TextConditioning,
+    adapter=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if tuple(pred.shape) == tuple(target.shape):
         return pred, target
-    if (
-        pred.ndim == target.ndim == 4
-        and pred.shape[0] == target.shape[0]
-        and pred.shape[2:] == target.shape[2:]
-        and pred.shape[1] == 2 * target.shape[1]
-    ):
-        return pred[:, : target.shape[1]], target
+    for behavior_adapter in reversed(diffusion_behavior_adapters(pipe, adapter=adapter)):
+        hook = getattr(behavior_adapter, "align_prediction_and_target", None)
+        if hook is None:
+            continue
+        aligned = hook(pipe, pred, target, noisy, cond)
+        if aligned is not None:
+            return aligned
     if (
         pred.ndim == target.ndim == 3
         and pred.shape[0] == target.shape[0]
@@ -2968,7 +2957,14 @@ def _compute_diffusion_loss(pipe, rows, args, device, global_step: int = 0, adap
     )
     noisy, target, timesteps = add_noise_and_target(pipe, latents)
     pred = denoise_forward(pipe, noisy, timesteps, cond, args, adapter)
-    pred, target = _align_prediction_and_target(pipe, pred, target, noisy, cond)
+    pred, target = _align_prediction_and_target(
+        pipe,
+        pred,
+        target,
+        noisy,
+        cond,
+        adapter,
+    )
     if args.loss_function != "flow_matching":
         raise ValueError("diffusion learner currently supports --loss-function flow_matching")
     weights = diffusion_loss_weights(pipe, timesteps, target, args)
@@ -3021,10 +3017,10 @@ def _probe_max_micro_batch(
         ok = True
         try:
             _probe_diffusion_once(pipe, params, opt, probe_rows, args, device, size, adapter)
-        except torch.cuda.OutOfMemoryError:
+        except accel.oom_error(device):
             ok = False
         opt.zero_grad(set_to_none=True)
-        torch.cuda.empty_cache()
+        accel.empty_cache(device)
         if world > 1:
             flag = torch.tensor([1.0 if ok else 0.0], device=device)
             dist.all_reduce(flag, op=dist.ReduceOp.MIN)
@@ -3061,7 +3057,7 @@ def resolve_diffusion_micro_batch_size(
     """Probe the largest diffusion micro batch that fits the current latent shape."""
     if args.micro_batch_size != "auto":
         return int(args.micro_batch_size)
-    if device.type != "cuda":
+    if not accel.is_accelerator(device):
         return 1
 
     probe_batches = _prepare_probe_batches(args, rank, world)
@@ -3350,21 +3346,39 @@ def main(argv=None) -> None:
 
     steps_total = 0
     units_total = 0
-    steps_at_reset = [0] * layout.num_fragments
-    units_at_reset = [0] * layout.num_fragments
-    fragment_versions = [0] * layout.num_fragments
-    pending_pulls: list = []
-    global_step = 0
-    anchors: list[torch.Tensor | None] | None = None
-    if rank == 0 and client is not None:
-        anchors = [None] * layout.num_fragments
+    sync_state = DiLoCoSyncState.create(
+        layout.num_fragments,
+        track_anchors=rank == 0 and client is not None,
+    )
 
-    shutdown = False
+    def snapshot_sync_params():
+        return params
+
+    def apply_sync_flat(fragment, flat):
+        apply_fragment(fragment, flat, params)
+
+    def finalize_sync():
+        return finalize_torch_island(
+            client,
+            layout,
+            params,
+            rank=rank,
+            world=world,
+            device=device,
+        )
+
     accum = 0
     t_last = time.monotonic()
     opt.zero_grad(set_to_none=True)
     for rows in loader:
-        loss, denom = compute_diffusion_loss(pipe, rows, args, device, global_step=global_step, adapter=adapter)
+        loss, denom = compute_diffusion_loss(
+            pipe,
+            rows,
+            args,
+            device,
+            global_step=sync_state.global_step,
+            adapter=adapter,
+        )
         (loss / (denom.clamp(min=1) * args.grad_accum)).backward()
         accum += 1
         if accum < args.grad_accum:
@@ -3389,108 +3403,34 @@ def main(argv=None) -> None:
             log.info(
                 "local_step=%d global_step=%d loss/elem=%.6f (%.2f s/step)",
                 steps_total,
-                global_step,
+                sync_state.global_step,
                 loss.item() / max(1, denom.item()),
                 dt / 10,
             )
 
-        actions = []
-        finalizing = False
-        if rank == 0 and client is not None:
-            client.check_health()
-            finalizing = client.finalizing.is_set()
-            if not finalizing:
-                for bc in client.drain_updates():
-                    flat = unpack_fragment(
-                        layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
-                    )
-                    if anchors is not None:
-                        anchors[bc.fragment_id] = flat.clone()
-                    actions.append((bc.fragment_id, bc.version, flat))
-            shutdown = client.shutdown.is_set()
-
-        if world > 1:
-            meta = [(f, v) for f, v, _ in actions] if rank == 0 else None
-            box = [meta, shutdown, finalizing]
-            dist.broadcast_object_list(box, src=0)
-            meta, shutdown, finalizing = box
-            if rank != 0:
-                actions = [(f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta]
-        if finalizing:
-            manifest = finalize_torch_island(
-                client,
-                layout,
-                params,
-                rank=rank,
-                world=world,
-                device=device,
-            )
-            global_step = max(global_step, manifest.global_step)
-            shutdown = True
+        if sync_diloco_boundary(
+            client,
+            layout,
+            sync_state,
+            steps_total=steps_total,
+            units_total=units_total,
+            merge_alpha=args.merge_alpha,
+            snapshot_params=snapshot_sync_params,
+            apply_flat=apply_sync_flat,
+            finalize=finalize_sync,
+            rank=rank,
+            world=world,
+            device=device,
+        ):
             break
-        if world > 1:
-            for fid, version, flat in actions:
-                flat = flat.to(device)
-                dist.broadcast(flat, src=0)
-                if args.merge_alpha > 0:
-                    local = fragment_flat(layout.fragments[fid], params)
-                    flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
-                apply_fragment(layout.fragments[fid], flat, params)
-                if rank == 0:
-                    steps_at_reset[fid] = steps_total
-                    units_at_reset[fid] = units_total
-                    fragment_versions[fid] = version
-                global_step = max(global_step, version)
-        else:
-            for fid, version, flat in actions:
-                flat = flat.to(device)
-                if args.merge_alpha > 0:
-                    local = fragment_flat(layout.fragments[fid], params)
-                    flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
-                apply_fragment(layout.fragments[fid], flat, params)
-                steps_at_reset[fid] = steps_total
-                units_at_reset[fid] = units_total
-                fragment_versions[fid] = version
-                global_step = max(global_step, version)
 
-        if rank == 0 and client is not None:
-            pending_pulls.extend(client.drain_pulls())
-            still_pending = []
-            for pull in pending_pulls:
-                fid = pull.fragment_id
-                c_steps = steps_total - steps_at_reset[fid]
-                if c_steps < 1:
-                    still_pending.append(pull)
-                    continue
-                c_units = units_total - units_at_reset[fid]
-                anchor = anchors[fid] if anchors is not None else None
-                if anchor is None:
-                    still_pending.append(pull)
-                    continue
-                delta = fragment_flat(layout.fragments[fid], params).cpu() - anchor
-                if client.dtype == DTYPE_Q4:
-                    payload = quantize_q4(delta)
-                else:
-                    payload = pack_tensor(delta, client.dtype)
-                client.push_fragment(
-                    fid,
-                    pull.global_step,
-                    pull.round_attempt,
-                    fragment_versions[fid],
-                    steps_total,
-                    c_steps,
-                    c_units,
-                    payload,
-                )
-            pending_pulls = still_pending
-
-        if shutdown or steps_total >= args.max_local_steps:
+        if sync_state.shutdown or steps_total >= args.max_local_steps:
             break
 
     if (
         learner_budget_steps is not None
         and steps_total == learner_budget_steps
-        and not shutdown
+        and not sync_state.shutdown
     ):
         from ..budget_finalization import finalize_learner_budget
 
@@ -3504,7 +3444,7 @@ def main(argv=None) -> None:
             target_steps=learner_budget_steps,
             units=units_total,
         )
-        global_step = max(global_step, manifest.global_step)
+        sync_state.global_step = max(sync_state.global_step, manifest.global_step)
     if rank == 0 and client is not None and not client.finalized.is_set():
         raise RuntimeError(
             "diffusion learner stopped before authoritative finalization; "
@@ -3517,7 +3457,11 @@ def main(argv=None) -> None:
     if world > 1:
         dist.barrier()
         dist.destroy_process_group()
-    log.info("diffusion loop done at local_step=%d global_step=%d", steps_total, global_step)
+    log.info(
+        "diffusion loop done at local_step=%d global_step=%d",
+        steps_total,
+        sync_state.global_step,
+    )
 
 
 if __name__ == "__main__":

@@ -612,7 +612,7 @@ def _all_ranks_true(value: bool, device, world: int) -> bool:
 
 def _loss_metric_dtype(device) -> torch.dtype:
     """Highest-precision loss telemetry dtype supported by the collective."""
-    return torch.float32 if device.type == "npu" else torch.float64
+    return accel.loss_metric_dtype(device)
 
 
 def _global_loss_sum(local_loss: torch.Tensor, world: int) -> float:

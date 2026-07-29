@@ -23,6 +23,10 @@ Integration modes:
 - Encoding adapter: implement ``encode_latents`` and/or ``encode_prompt_embeds``
   when media/text/audio feature construction is not exposed by standard
   Diffusers helpers.
+- Denoiser-contract adapter: implement ``denoiser_kwargs`` and/or
+  ``align_prediction_and_target`` when a model family has forward or output
+  semantics that cannot be inferred safely from public signatures and tensor
+  layouts alone.
 - Full-step adapter: implement ``training_step`` or ``compute_loss`` when the
   model owns the whole batch -> loss flow.
 - Artifact/sampling adapter: implement save/load/sample hooks when the artifact
@@ -86,6 +90,33 @@ class DiffusionAdapterProtocol(Protocol):
 
     def encode_prompt_embeds(self, pipe, rows: list[dict], args, device, dtype) -> Any:
         """Return ``yeto.diffusion.learner.TextConditioning`` for a row batch."""
+        ...
+
+    def denoiser_kwargs(
+        self,
+        pipe,
+        model,
+        noisy,
+        cond,
+        args,
+        params: Mapping[str, Any],
+        kwargs: Mapping[str, Any],
+        *,
+        pixel_height: int | None,
+        pixel_width: int | None,
+    ) -> Mapping[str, Any]:
+        """Return model-specific denoiser keyword contributions or overrides."""
+        ...
+
+    def align_prediction_and_target(
+        self,
+        pipe,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        noisy,
+        cond,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Return a model-specific loss alignment, or ``None`` to use core."""
         ...
 
     def training_step(self, pipe, rows: list[dict], args, device, global_step: int = 0):

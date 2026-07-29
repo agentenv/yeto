@@ -156,12 +156,15 @@ The generic inner step is:
 The denoiser dispatcher supplies common fields such as prompt masks, pooled
 embeddings, image/text ids, packed shapes, guidance, crop/size conditioning,
 rotary embeddings, FPS, and LTX-style rope interpolation when the model
-signature requests them. Transformers that advertise
-`use_additional_conditions` receive pixel resolution and aspect ratio through
-`added_cond_kwargs`. When a signature has a dedicated encoder mask, prompt
-masks are not also sent as self-attention masks. If an image denoiser emits a
-learned-variance prediction with exactly twice the target channels, the
-prediction half is selected before loss computation. Multi-denoiser pipelines
+signature requests them. When a signature has a dedicated encoder mask, prompt
+masks are not also sent as self-attention masks: that distinction follows the
+declared encoder-vs-self-attention interface and is model-agnostic.
+
+Family semantics that cannot be inferred safely from a signature live behind
+the adapter boundary. The in-tree PixArt behavior adapter supplies pixel
+resolution and aspect ratio through `added_cond_kwargs` when its transformer
+advertises `use_additional_conditions`, and selects the prediction half of a
+PixArt learned-sigma output before loss computation. Multi-denoiser pipelines
 route samples by timestep and combine their predictions back into batch order.
 
 `flow_matching` is currently the only accepted loss-function name. The
@@ -278,6 +281,7 @@ hook set:
 - pipeline loading or model preparation;
 - trainable module or parameter discovery;
 - latent or text/audio conditioning encoders;
+- model-specific denoiser keyword contributions or output/target alignment;
 - a complete rows-to-loss training step;
 - artifact save/load and generation behavior.
 
@@ -285,8 +289,8 @@ Trainable names must remain deterministic across learners, restarts, and
 checkpoint export. Adapters must not start syncers, launch infrastructure,
 upload artifacts, or communicate between learners. See the
 [adapter guide](../yeto/diffusion/adapters/README.md) and
-`yeto/diffusion/adapters/template.py`. NAVA is the in-tree example that
-requires this boundary.
+`yeto/diffusion/adapters/template.py`. PixArt is the minimal in-tree behavior
+adapter layered over the generic Diffusers path; NAVA is the full-step example.
 
 ## Validation status
 

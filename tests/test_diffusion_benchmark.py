@@ -247,13 +247,13 @@ def test_formal_benchmark_requires_zero_data_workers():
         )
 
 
-def test_cuda_env_respects_parent_visible_device_mapping(monkeypatch):
+def test_accelerator_env_respects_parent_visible_cuda_mapping(monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,7,8,9")
-    env = benchmark.cuda_env(1, 2, "cuda")
+    env = benchmark.accelerator_env(1, 2, "cuda")
     assert env["CUDA_VISIBLE_DEVICES"] == "7,8"
     with pytest.raises(ValueError):
-        benchmark.cuda_env(3, 2, "cuda")
-    assert benchmark.cuda_env(0, 1, "cpu") is None
+        benchmark.accelerator_env(3, 2, "cuda")
+    assert benchmark.accelerator_env(0, 1, "cpu") is None
 
 
 def test_accelerator_env_slices_visible_npus(monkeypatch):

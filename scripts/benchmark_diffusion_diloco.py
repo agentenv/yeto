@@ -39,6 +39,7 @@ from types import SimpleNamespace
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from yeto import accel  # noqa: E402
 from yeto.benchmark_resume import (  # noqa: E402
     build_data_manifest,
     implementation_fingerprint,
@@ -358,57 +359,44 @@ def syncer_command(
     return command
 
 
-_VISIBLE_DEVICE_ENV = {
-    "cuda": "CUDA_VISIBLE_DEVICES",
-    "npu": "ASCEND_RT_VISIBLE_DEVICES",
-}
-
-
 def _accelerator_type(device: str) -> str | None:
     device_type = device.partition(":")[0]
-    return device_type if device_type in _VISIBLE_DEVICE_ENV else None
+    return device_type if accel.visible_devices_env(device_type) is not None else None
 
 
 def _visible_accelerator_devices(device_type: str) -> list[str] | None:
-    raw = os.environ.get(_VISIBLE_DEVICE_ENV[device_type])
+    variable = accel.visible_devices_env(device_type)
+    if variable is None:
+        return None
+    raw = os.environ.get(variable)
     if raw is None or not raw.strip():
         return None
     return [value.strip() for value in raw.split(",") if value.strip()]
-
-
-def _visible_cuda_devices() -> list[str] | None:
-    return _visible_accelerator_devices("cuda")
 
 
 def accelerator_env(start: int, count: int, device: str) -> dict[str, str] | None:
     device_type = _accelerator_type(device)
     if device_type is None:
         return None
+    variable = accel.visible_devices_env(device_type)
+    assert variable is not None
     visible = _visible_accelerator_devices(device_type)
     if visible is None:
         chosen = [str(index) for index in range(start, start + count)]
     else:
         chosen = visible[start : start + count]
         if len(chosen) != count:
-            variable = _VISIBLE_DEVICE_ENV[device_type]
             raise ValueError(
                 f"need {device_type.upper()} device slice "
                 f"[{start}:{start + count}], but {variable} exposes only {visible}"
             )
     env = dict(os.environ)
-    env[_VISIBLE_DEVICE_ENV[device_type]] = ",".join(chosen)
+    env[variable] = ",".join(chosen)
     return env
 
 
-def cuda_env(start: int, count: int, device: str) -> dict[str, str] | None:
-    """Backward-compatible CUDA-only device slice helper."""
-    if not device.startswith("cuda"):
-        return None
-    return accelerator_env(start, count, device)
-
-
-def _visible_gpu_uuids() -> set[str] | None:
-    visible = _visible_cuda_devices()
+def _visible_cuda_uuids() -> set[str] | None:
+    visible = _visible_accelerator_devices("cuda")
     if visible is None:
         return None
     result = subprocess.run(
@@ -432,7 +420,7 @@ def wait_for_free_gpus(device: str, limit_mb: int = 2000, timeout_s: int = 300) 
     device_type = _accelerator_type(device)
     if device_type is None:
         return
-    visible_uuids = _visible_gpu_uuids() if device_type == "cuda" else None
+    visible_uuids = _visible_cuda_uuids() if device_type == "cuda" else None
     visible_npus = (
         set(_visible_accelerator_devices("npu") or [])
         if device_type == "npu"
