@@ -1,0 +1,414 @@
+{
+  "bands": {
+    "C3_SUPPORTED": [
+      0.8,
+      1.25
+    ],
+    "C4_SUPPORTED": [
+      1.8,
+      3.4
+    ],
+    "max_stability_quotient": 1.25
+  },
+  "inventory": {
+    "pair_count": 9,
+    "primary_exact_target_pair_count": 1,
+    "seed_ratio_count": 18
+  },
+  "overall_exact_target_verdict": "AMBIGUOUS",
+  "pair_results": [
+    {
+      "checkpoint_age": 20,
+      "convention": "nesterov_corrected",
+      "log_half_spread": 0.015366451986181653,
+      "momentum_mu": 0.8,
+      "pair_id": "g8-corrected-mu0p80-seed811",
+      "ratio_geometric_mean": 0.7845435368876832,
+      "ratio_uncertainty_high": 0.796692290040374,
+      "ratio_uncertainty_low": 0.7725800399562589,
+      "role": "contextual_g8",
+      "seeds": [
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-corrected-mu0p80-seed811/seed_20260727/control.json",
+          "control_result_sha256": "d17a726bef83ff1587dc99df8bec023481deb9b6b2af26d471350c7b812a8f05",
+          "control_runtime_seconds": 81.6789278750075,
+          "lambda_momentum": 55.87761807163469,
+          "lambda_mu0": 70.13701371303968,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-corrected-mu0p80-seed811/seed_20260727/momentum.json",
+          "momentum_result_sha256": "a7f26282ac3ff3d4bb193ae674e0cea3b616c9b8b4beaaf14e75c3cdf8b7d835",
+          "momentum_runtime_seconds": 81.61175634700339,
+          "ratio": 0.796692290040374,
+          "seed": 20260727
+        },
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-corrected-mu0p80-seed811/seed_20260728/control.json",
+          "control_result_sha256": "7bf9604054b0841a9030f10ff44ce9accaf9cb8f6ce63b95ad8a284ab3e23316",
+          "control_runtime_seconds": 80.69691080600023,
+          "lambda_momentum": 55.85602096176431,
+          "lambda_mu0": 72.2980378381594,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-corrected-mu0p80-seed811/seed_20260728/momentum.json",
+          "momentum_result_sha256": "42f1b2fc9319934c3044e5a3122030ba51b110bbd0f17e72feae9dce6eae06ff",
+          "momentum_runtime_seconds": 80.97535660304129,
+          "ratio": 0.7725800399562589,
+          "seed": 20260728
+        }
+      ],
+      "source": "archive",
+      "stability_pass": true,
+      "stability_quotient": 1.0312100349958306,
+      "training_seed": 811,
+      "verdict": "AMBIGUOUS"
+    },
+    {
+      "checkpoint_age": 20,
+      "convention": "nesterov_corrected",
+      "log_half_spread": 0.03542442420477976,
+      "momentum_mu": 0.95,
+      "pair_id": "g8-corrected-mu0p95-seed801",
+      "ratio_geometric_mean": 1.1814215583904109,
+      "ratio_uncertainty_high": 1.2240228449628434,
+      "ratio_uncertainty_low": 1.1403029807601317,
+      "role": "contextual_g8",
+      "seeds": [
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-corrected-mu0p95-seed801/seed_20260727/control.json",
+          "control_result_sha256": "16a24fc4fca15f614a9175848bcf9fe96f5f42e53c83110dba412a9aac95c419",
+          "control_runtime_seconds": 80.24679497990292,
+          "lambda_momentum": 45.89427331063442,
+          "lambda_mu0": 37.49462152565265,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-corrected-mu0p95-seed801/seed_20260727/momentum.json",
+          "momentum_result_sha256": "3a39b4e0bb648b5e9a6737c5dbf77840ea5bc5da51c76bd7c77f9ca425c11254",
+          "momentum_runtime_seconds": 80.15655318496283,
+          "ratio": 1.2240228449628434,
+          "seed": 20260727
+        },
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-corrected-mu0p95-seed801/seed_20260728/control.json",
+          "control_result_sha256": "8057b53c58b0ba43b806636b2c4ba29810b48af8acde7717afdc8acf4b255ec9",
+          "control_runtime_seconds": 79.75692413595971,
+          "lambda_momentum": 43.44998547414721,
+          "lambda_mu0": 38.10389537452865,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-corrected-mu0p95-seed801/seed_20260728/momentum.json",
+          "momentum_result_sha256": "4caff6fc0704df6bea3445fa51be5e93cbc181b0be8515fefdb2a48d6b2c0fee",
+          "momentum_runtime_seconds": 79.27348380710464,
+          "ratio": 1.1403029807601317,
+          "seed": 20260728
+        }
+      ],
+      "source": "archive",
+      "stability_pass": true,
+      "stability_quotient": 1.073418964621932,
+      "training_seed": 801,
+      "verdict": "C3_SUPPORTED"
+    },
+    {
+      "checkpoint_age": 20,
+      "convention": "nesterov_raw",
+      "log_half_spread": 0.004651218056859419,
+      "momentum_mu": 0.8,
+      "pair_id": "g8-raw-mu0p80-seed801",
+      "ratio_geometric_mean": 2.1628275304953104,
+      "ratio_uncertainty_high": 2.1729107443940974,
+      "ratio_uncertainty_low": 2.1527911069227215,
+      "role": "contextual_g8",
+      "seeds": [
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-raw-mu0p80-seed801/seed_20260727/control.json",
+          "control_result_sha256": "0121fc66c9bbb3f09b3d2a7120fcf5ab31a494e360a150cdda9701286d09bec5",
+          "control_runtime_seconds": 80.6334768210072,
+          "lambda_momentum": 81.47246597008085,
+          "lambda_mu0": 37.49462152565265,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-raw-mu0p80-seed801/seed_20260727/momentum.json",
+          "momentum_result_sha256": "1e74005054e9e3e752077474fadd170a2338882cd965ab392993e66975fdea77",
+          "momentum_runtime_seconds": 80.73182824102696,
+          "ratio": 2.1729107443940974,
+          "seed": 20260727
+        },
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-raw-mu0p80-seed801/seed_20260728/control.json",
+          "control_result_sha256": "11df047704d0d8cf06e830176d5c6f7eeab74b17d6be2293dc5bacb0e36d03a5",
+          "control_runtime_seconds": 81.2321605529869,
+          "lambda_momentum": 82.02972710139909,
+          "lambda_mu0": 38.10389537452865,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-raw-mu0p80-seed801/seed_20260728/momentum.json",
+          "momentum_result_sha256": "dd9a978a87bf28be84d4f0c95d121465ccce0248b32d14c93ca779068176cdee",
+          "momentum_runtime_seconds": 80.95072782796342,
+          "ratio": 2.1527911069227215,
+          "seed": 20260728
+        }
+      ],
+      "source": "archive",
+      "stability_pass": true,
+      "stability_quotient": 1.0093458382500176,
+      "training_seed": 801,
+      "verdict": "C4_SUPPORTED"
+    },
+    {
+      "checkpoint_age": 20,
+      "convention": "nesterov_raw",
+      "log_half_spread": 0.027898997994058213,
+      "momentum_mu": 0.95,
+      "pair_id": "g8-raw-mu0p95-seed801",
+      "ratio_geometric_mean": 1.0856095820381615,
+      "ratio_uncertainty_high": 1.116323452532381,
+      "ratio_uncertainty_low": 1.0557407550110445,
+      "role": "contextual_g8",
+      "seeds": [
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-raw-mu0p95-seed801/seed_20260727/control.json",
+          "control_result_sha256": "cb145e148bceec07f835230525a01485643c08dca285a3785f7f21e840e8d323",
+          "control_runtime_seconds": 79.01484612992499,
+          "lambda_momentum": 41.8561253529115,
+          "lambda_mu0": 37.49462152565265,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-raw-mu0p95-seed801/seed_20260727/momentum.json",
+          "momentum_result_sha256": "90077a204a19d4aeb872502f907e11d595697afd0427e4d760e5d41926560211",
+          "momentum_runtime_seconds": 80.44405246793758,
+          "ratio": 1.116323452532381,
+          "seed": 20260727
+        },
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-raw-mu0p95-seed801/seed_20260728/control.json",
+          "control_result_sha256": "8890c86329981b878e188d0e3fa15f36f6879c1d8fa81b7328482ff2bbad77db",
+          "control_runtime_seconds": 80.20815183105879,
+          "lambda_momentum": 40.22783527156672,
+          "lambda_mu0": 38.10389537452865,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-raw-mu0p95-seed801/seed_20260728/momentum.json",
+          "momentum_result_sha256": "189be07e15236de6a83558a9afcc03bf9f174cac229f3ee49166d837fe38344c",
+          "momentum_runtime_seconds": 80.68034876394086,
+          "ratio": 1.0557407550110445,
+          "seed": 20260728
+        }
+      ],
+      "source": "archive",
+      "stability_pass": true,
+      "stability_quotient": 1.0573840663380498,
+      "training_seed": 801,
+      "verdict": "C3_SUPPORTED"
+    },
+    {
+      "checkpoint_age": 20,
+      "convention": "nesterov_raw",
+      "log_half_spread": 0.015172984704529768,
+      "momentum_mu": 0.95,
+      "pair_id": "g8-raw-mu0p95-seed811",
+      "ratio_geometric_mean": 3.821216897764997,
+      "ratio_uncertainty_high": 3.879638255685705,
+      "ratio_uncertainty_low": 3.7636752752310363,
+      "role": "contextual_g8",
+      "seeds": [
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-raw-mu0p95-seed811/seed_20260727/control.json",
+          "control_result_sha256": "26a6147c5dc517893e480fb143dd2f058e0c361e2683a08e0fd6065bf0382bb8",
+          "control_runtime_seconds": 80.37781378393993,
+          "lambda_momentum": 272.10624154066164,
+          "lambda_mu0": 70.13701371303968,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-raw-mu0p95-seed811/seed_20260727/momentum.json",
+          "momentum_result_sha256": "86caf431c91495247b95f3f449265fc5fbe3636a3a13e6beef44255df29881ef",
+          "momentum_runtime_seconds": 80.59512573806569,
+          "ratio": 3.879638255685705,
+          "seed": 20260727
+        },
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-raw-mu0p95-seed811/seed_20260728/control.json",
+          "control_result_sha256": "0f28e9daf77074afdf61afaa13e6fd995cd9744b4fe7014a9109335719e13672",
+          "control_runtime_seconds": 80.16812579799443,
+          "lambda_momentum": 272.10633745919847,
+          "lambda_mu0": 72.2980378381594,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/g8-raw-mu0p95-seed811/seed_20260728/momentum.json",
+          "momentum_result_sha256": "87fb27390768dd7d09d6cccedec75121488136fcda8a1130af1b0a5824d535ec",
+          "momentum_runtime_seconds": 80.36698776902631,
+          "ratio": 3.7636752752310363,
+          "seed": 20260728
+        }
+      ],
+      "source": "archive",
+      "stability_pass": true,
+      "stability_quotient": 1.030811101376845,
+      "training_seed": 811,
+      "verdict": "AMBIGUOUS"
+    },
+    {
+      "checkpoint_age": 5,
+      "convention": "nesterov_corrected",
+      "log_half_spread": 0.0028269348981912606,
+      "momentum_mu": 0.9,
+      "pair_id": "round3-age05",
+      "ratio_geometric_mean": 0.7900788389027225,
+      "ratio_uncertainty_high": 0.7923155003032889,
+      "ratio_uncertainty_low": 0.7878484914695325,
+      "role": "trajectory_diagnostic",
+      "seeds": [
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age05/seed_20260727/control.json",
+          "control_result_sha256": "4e803bd9d6235b9014d34c38d1fd2cfb3347f20da409e889415dad4e81bbd04b",
+          "control_runtime_seconds": 80.91902621800546,
+          "lambda_momentum": 122.18749669915701,
+          "lambda_mu0": 154.21570908607126,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age05/seed_20260727/momentum.json",
+          "momentum_result_sha256": "a7292ce03e2eed83b742179261fff41e84f1006f1e892272a3bbedd5d47f9e24",
+          "momentum_runtime_seconds": 80.00013023300562,
+          "ratio": 0.7923155003032889,
+          "seed": 20260727
+        },
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age05/seed_20260728/control.json",
+          "control_result_sha256": "fdfc40e8285838f6cafef7056127cb7ee150d8ac6b1749dc863e78d28ea1621a",
+          "control_runtime_seconds": 79.76258977898397,
+          "lambda_momentum": 122.15876159692156,
+          "lambda_mu0": 155.05362124774172,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age05/seed_20260728/momentum.json",
+          "momentum_result_sha256": "3e80c0a90a22e962453916274e4cc0fef34a42e910888927e0aa36196d21eb9e",
+          "momentum_runtime_seconds": 80.84813078702427,
+          "ratio": 0.7878484914695325,
+          "seed": 20260728
+        }
+      ],
+      "source": "round3",
+      "stability_pass": true,
+      "stability_quotient": 1.005669883083008,
+      "training_seed": 313,
+      "verdict": "AMBIGUOUS"
+    },
+    {
+      "checkpoint_age": 10,
+      "convention": "nesterov_corrected",
+      "log_half_spread": 0.00029456457495449784,
+      "momentum_mu": 0.9,
+      "pair_id": "round3-age10",
+      "ratio_geometric_mean": 0.8373206097098028,
+      "ratio_uncertainty_high": 0.8375672910293079,
+      "ratio_uncertainty_low": 0.8370740010431746,
+      "role": "trajectory_diagnostic",
+      "seeds": [
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age10/seed_20260727/control.json",
+          "control_result_sha256": "c5e7ab0d85caa557cd269a738aca70f2484bb36e1e56af50bfd5883eece37553",
+          "control_runtime_seconds": 80.65441594703589,
+          "lambda_momentum": 62.63474669838698,
+          "lambda_mu0": 74.78174872542304,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age10/seed_20260727/momentum.json",
+          "momentum_result_sha256": "0eaa14162a17671e47c2a7a5a45b9d1a08d842d8cee03b3673ab3045064a9be9",
+          "momentum_runtime_seconds": 80.66310554498341,
+          "ratio": 0.8375672910293079,
+          "seed": 20260727
+        },
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age10/seed_20260728/control.json",
+          "control_result_sha256": "c8664c0f950bcd6ba53806a58a80cb585230f53a89d75b2fc97d15b7c3bca829",
+          "control_runtime_seconds": 79.53881400101818,
+          "lambda_momentum": 64.24763642446764,
+          "lambda_mu0": 76.75263637910297,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age10/seed_20260728/momentum.json",
+          "momentum_result_sha256": "e4163a643c971f3af393d3541e2e88a133a20eee46d7f11c4f100fa13db24a29",
+          "momentum_runtime_seconds": 79.6608034169767,
+          "ratio": 0.8370740010431746,
+          "seed": 20260728
+        }
+      ],
+      "source": "round3",
+      "stability_pass": true,
+      "stability_quotient": 1.0005893027205701,
+      "training_seed": 313,
+      "verdict": "C3_SUPPORTED"
+    },
+    {
+      "checkpoint_age": 15,
+      "convention": "nesterov_corrected",
+      "log_half_spread": 0.0027656127296825928,
+      "momentum_mu": 0.9,
+      "pair_id": "round3-age15",
+      "ratio_geometric_mean": 0.7709004964173837,
+      "ratio_uncertainty_high": 0.7730354595233737,
+      "ratio_uncertainty_low": 0.7687714296353045,
+      "role": "trajectory_diagnostic",
+      "seeds": [
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age15/seed_20260727/control.json",
+          "control_result_sha256": "819f6d6b4ea11c4022950e3f6158d10e9241d710b6dbc4f6d0cca4f19943b4f5",
+          "control_runtime_seconds": 80.22019277105574,
+          "lambda_momentum": 49.05368444695966,
+          "lambda_mu0": 63.45593056908983,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age15/seed_20260727/momentum.json",
+          "momentum_result_sha256": "3f5f1ef5f56289a3816b2d0eb596c25fcfb807972d05a73620a6c50132c7e3ee",
+          "momentum_runtime_seconds": 80.18992072704714,
+          "ratio": 0.7730354595233737,
+          "seed": 20260727
+        },
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age15/seed_20260728/control.json",
+          "control_result_sha256": "d88a8474e370d67483dd34bc61cc2f8e60de48084a58394f92b81884be746485",
+          "control_runtime_seconds": 80.26483713299967,
+          "lambda_momentum": 49.101561698658,
+          "lambda_mu0": 63.87016973556258,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age15/seed_20260728/momentum.json",
+          "momentum_result_sha256": "13fc3a7b13eac0de320c52eaec900411e8ebcbe6a3385d03c734a4040d0dfed0",
+          "momentum_runtime_seconds": 80.73463227599859,
+          "ratio": 0.7687714296353045,
+          "seed": 20260728
+        }
+      ],
+      "source": "round3",
+      "stability_pass": true,
+      "stability_quotient": 1.0055465509300885,
+      "training_seed": 313,
+      "verdict": "AMBIGUOUS"
+    },
+    {
+      "checkpoint_age": 20,
+      "convention": "nesterov_corrected",
+      "log_half_spread": 0.0013312197688100658,
+      "momentum_mu": 0.9,
+      "pair_id": "round3-age20",
+      "ratio_geometric_mean": 0.7180735992456445,
+      "ratio_uncertainty_high": 0.7190301495645058,
+      "ratio_uncertainty_low": 0.71711832145828,
+      "role": "primary_exact_target",
+      "seeds": [
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age20/seed_20260727/control.json",
+          "control_result_sha256": "0e3de1c3e578859b2e9b5f11b6c1496299d764fa18a345cb2e638c8d1a1597fc",
+          "control_runtime_seconds": 79.60685929900501,
+          "lambda_momentum": 42.82969232151473,
+          "lambda_mu0": 59.565919937370275,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age20/seed_20260727/momentum.json",
+          "momentum_result_sha256": "66bcdc347f97ff3458bd8b2a3a8a61d091f9d28d6f83a989d411421dc67c7730",
+          "momentum_runtime_seconds": 79.87761349696666,
+          "ratio": 0.7190301495645058,
+          "seed": 20260727
+        },
+        {
+          "control_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age20/seed_20260728/control.json",
+          "control_result_sha256": "7fad979c58309ceeeacf98e72c227ac1d926a435cdaa37ac6b0831f331b0e924",
+          "control_runtime_seconds": 80.87677246402018,
+          "lambda_momentum": 42.74789957928859,
+          "lambda_mu0": 59.61066437733672,
+          "momentum_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/spectrum/round3-age20/seed_20260728/momentum.json",
+          "momentum_result_sha256": "e5776ba129b6afd5c67d9b467300125e4df7fa6b36328a883d63de20364709a1",
+          "momentum_runtime_seconds": 80.48114206595346,
+          "ratio": 0.71711832145828,
+          "seed": 20260728
+        }
+      ],
+      "source": "round3",
+      "stability_pass": true,
+      "stability_quotient": 1.0026659869773484,
+      "training_seed": 313,
+      "verdict": "AMBIGUOUS"
+    }
+  ],
+  "probe": {
+    "adapter": "/home/c/yeto-mechR3-20260727/repo/mech/law-v2/discriminator/checkpoint_lambda_probe.py",
+    "adapter_sha256": "fd75968eb091b3282e79eb8ad911d82c07b14938c119411e14ccead308f907b1",
+    "equivalence": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/validation/equivalence.json",
+    "equivalence_sha256": "807a4c45b8a340943e78d4881a54499d99d5cda8aa16256d7f5c43a304f7aa6a",
+    "lambda_definition": "largest algebraic Ritz value",
+    "protocol": "/mnt/nvme1/yeto-mech-discriminator-20260728/control/protocol.md",
+    "protocol_sha256": "cd85592d2594bd513b72ac4ad1d043c795d3f612a3089fdd6cb53e45997fd9c2",
+    "seeds": [
+      20260727,
+      20260728
+    ]
+  },
+  "schema": "yeto_c3_c4_curvature_discriminator_v1",
+  "status": "COMPLETE"
+}

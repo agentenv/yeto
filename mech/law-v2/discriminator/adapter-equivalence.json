@@ -1,0 +1,11 @@
+{
+  "differences": [],
+  "extension_result": "/mnt/nvme1/yeto-mech-discriminator-20260728/output/validation/default-mode.json",
+  "lane_e_result": "/home/c/yeto-mechR3-20260727/output/round3c/spectrum/mu0/age_20_step_00000080.json",
+  "schema": "yeto_discriminator_adapter_equivalence_v1",
+  "status": "PASS",
+  "tolerance": {
+    "absolute": 1e-06,
+    "relative": 1e-06
+  }
+}
