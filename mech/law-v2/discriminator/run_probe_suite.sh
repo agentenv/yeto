@@ -13,7 +13,7 @@ DISCRIM_MODEL="$DISCRIM_MECHR3/inputs/model"
 DISCRIM_EVAL="$DISCRIM_MECHR3/inputs/eval.jsonl"
 DISCRIM_OUTPUT="$DISCRIM_ROOT/output"
 DISCRIM_LOGS="$DISCRIM_ROOT/logs"
-DISCRIM_CACHE="$DISCRIM_MECHR3/scratch/round3/hf-datasets-cache"
+DISCRIM_CACHE="$DISCRIM_ROOT/hf-cache"
 DISCRIM_TMP="$DISCRIM_ROOT/tmp"
 
 test "$(hostname)" = dev16
