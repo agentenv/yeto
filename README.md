@@ -67,12 +67,12 @@ same fragment protocol and runs the same DiLoCo step boundary — the
 pull/merge/α-blend/push loop lives in one shared module
 (`yeto/diloco_sync.py`), so protocol changes land once and apply everywhere.
 
-| backend | selector | scope | validation |
-|---|---|---|---|
-| PyTorch (FSDP2/DDP) | default | causal LM, LoRA/full | production; CUDA + Ascend NPU |
-| Diffusers | `--model-kind diffusion` | image/video LoRA | experimental; per-model status in `yeto/diffusion/capabilities.py` |
-| Megatron-Core | `--island-backend megatron` | EP islands for 1T-class MoE | TP=1/PP=1 smoke-validated on H200 (single GPU); TP>1/PP>1 guarded off |
-| MLX | `--external-learners` | Apple-silicon islands | cross Mac↔NVIDIA runs; name parity enforced by `scripts/check_name_parity.py` |
+| backend | selector | scope |
+|---|---|---|
+| PyTorch (FSDP2/DDP) | default | causal LM, LoRA/full |
+| Diffusers | `--model-kind diffusion` | image/video LoRA |
+| Megatron-Core | `--island-backend megatron` | EP islands for 1T-class MoE |
+| MLX | `--external-learners` | Apple-silicon islands |
 
 Hardware families are isolated behind `yeto/accel.py` (CUDA / Ascend NPU
 policy functions) rather than `device.type` branches in shared code. The
