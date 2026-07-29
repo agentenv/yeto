@@ -3,7 +3,11 @@
 import pytest
 import torch
 
-from yeto.data import StreamingPackedBlocks, build_packed_dataset
+from yeto.data import (
+    StreamingPackedBlocks,
+    _ensure_weighted_terminal_eos,
+    build_packed_dataset,
+)
 
 
 class FakeTokenizer:
@@ -28,6 +32,34 @@ class FakeTokenizer:
                 cursor = end
             out["offset_mapping"] = offsets
         return out
+
+
+class TrailingWhitespaceTokenizer:
+    eos_token_id = 2
+
+    def decode(self, ids, skip_special_tokens=False):
+        assert skip_special_tokens is False
+        return "\n" if ids == [3] else "content"
+
+
+def test_terminal_eos_reuses_template_token_before_trailing_whitespace():
+    ids = [10, 2, 3]
+    weights = [1.0, 0.0, 0.0]
+
+    _ensure_weighted_terminal_eos(TrailingWhitespaceTokenizer(), ids, weights)
+
+    assert ids == [10, 2, 3]
+    assert weights == [1.0, 1.0, 0.0]
+
+
+def test_terminal_eos_is_appended_when_template_has_no_terminal_eos():
+    ids = [10, 2, 3, 11]
+    weights = [1.0, 0.0, 0.0, 1.0]
+
+    _ensure_weighted_terminal_eos(TrailingWhitespaceTokenizer(), ids, weights)
+
+    assert ids == [10, 2, 3, 11, 2]
+    assert weights == [1.0, 0.0, 0.0, 1.0, 1.0]
 
 
 class MaskedTemplateTokenizer(FakeTokenizer):

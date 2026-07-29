@@ -91,6 +91,24 @@ def _as_list(value) -> list:
     return list(value)
 
 
+def _ensure_weighted_terminal_eos(tokenizer, ids: list[int], weights: list[float]) -> None:
+    """Teach stopping without duplicating an EOS already emitted by a template."""
+    eos_token_id = tokenizer.eos_token_id
+    if eos_token_id is None:
+        return
+    if eos_token_id in ids:
+        eos_index = len(ids) - 1 - ids[::-1].index(eos_token_id)
+        try:
+            trailing_text = tokenizer.decode(ids[eos_index + 1 :], skip_special_tokens=False)
+        except Exception:
+            trailing_text = None
+        if eos_index == len(ids) - 1 or (trailing_text is not None and not trailing_text.strip()):
+            weights[eos_index] = 1.0
+            return
+    ids.append(eos_token_id)
+    weights.append(1.0)
+
+
 def _chat_template_assistant_tokens(
     tokenizer, messages: list[dict], tools: list | None
 ) -> tuple[list[int], list[float]] | None:
@@ -136,12 +154,7 @@ def _chat_template_assistant_tokens(
                 )
                 if not has_assistant_content or any(mask):
                     weights = [float(w) for w in mask]
-                    if tokenizer.eos_token_id is not None:
-                        if ids and ids[-1] == tokenizer.eos_token_id:
-                            weights[-1] = 1.0
-                        else:
-                            ids.append(tokenizer.eos_token_id)
-                            weights.append(1.0)
+                    _ensure_weighted_terminal_eos(tokenizer, ids, weights)
                     return ids, weights
 
     try:
@@ -187,9 +200,7 @@ def _chat_template_assistant_tokens(
     for offset in offsets:
         start, end = int(offset[0]), int(offset[1])
         weights.append(float(any(start < span_end and end > span_start for span_start, span_end in spans)))
-    if tokenizer.eos_token_id is not None:
-        ids.append(tokenizer.eos_token_id)
-        weights.append(1.0)
+    _ensure_weighted_terminal_eos(tokenizer, ids, weights)
     return ids, weights
 
 
