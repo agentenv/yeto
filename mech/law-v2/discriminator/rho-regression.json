@@ -1,0 +1,43 @@
+{
+  "coverage": {
+    "excluded_rows": 50,
+    "ledger_rows": 62,
+    "mapped_campaigns": [
+      "G8"
+    ],
+    "mapped_rows": 12,
+    "telemetry_runs": 36
+  },
+  "provenance": {
+    "g8_readout": "/private/tmp/yeto-h200/mech/law-unification/sources/g8-readout.json",
+    "g8_readout_sha256": "9884f0775b30a35964e7df878bd0569b62f24af23619d90b4ff346d1afae596c",
+    "ledger": "/private/tmp/yeto-h200/mech/law-unification/paired_cancellation.csv",
+    "ledger_sha256": "15759bec558807f1ed3834f4465f18fdabaa1a10e678f6fd47f836ad870c3566",
+    "telemetry_root": "/private/tmp/yeto-discriminator-rho-20260728"
+  },
+  "raw_unstratified_diagnostic": {
+    "intercept": 2.4707944073765375,
+    "n": 12,
+    "ordinary_normal_p_two_sided": 0.030177753801441044,
+    "ordinary_se": 1.874757036166856,
+    "ordinary_z": -2.167749463485683,
+    "pearson_r": -0.5654095735242006,
+    "slope_ln_phi_per_fisher_z_rho": -4.064003559316711,
+    "sse": 0.6882354503344491
+  },
+  "schema": "yeto_c3_c4_rho_regression_v1",
+  "within_stratum": {
+    "hc1_normal_p_two_sided": 0.01486434330123548,
+    "hc1_se": 1.6694335887352727,
+    "hc1_z": -2.435667441293469,
+    "n": 12,
+    "ordinary_normal_p_two_sided": 0.054723631056223694,
+    "ordinary_se": 2.1166316668523617,
+    "ordinary_z": -1.9210640666314085,
+    "residual_df": 7,
+    "slope_ln_phi_per_fisher_z_rho": -4.066185037484215,
+    "sse": 0.6128103449218212,
+    "strata": 4,
+    "within_stratum_pearson_r": -0.5875476597199142
+  }
+}
