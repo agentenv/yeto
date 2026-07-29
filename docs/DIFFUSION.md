@@ -292,6 +292,152 @@ upload artifacts, or communicate between learners. See the
 `yeto/diffusion/adapters/template.py`. PixArt is the minimal in-tree behavior
 adapter layered over the generic Diffusers path; NAVA is the full-step example.
 
+### Protenix
+
+Protenix is exposed through `yeto.diffusion.adapters.protenix` because its
+AF3-style structure diffusion stack is not an image/video Diffusers pipeline.
+The adapter can construct the native Protenix model/loss stack for prebatched
+Protenix rows, while Yeto owns data distribution, gradient accumulation, and
+DiLoCo synchronization. MSA/template search and Protenix feature construction
+should happen before Yeto training.
+
+Install the optional dependency under Python 3.11+ and point at an optional
+checkpoint:
+
+```bash
+pip install "yeto[diffusion-protenix] @ ."
+export YETO_PROTENIX_MODEL_NAME=protenix_base_default_v1.0.0
+export YETO_PROTENIX_CHECKPOINT=/path/to/protenix/checkpoint
+```
+
+Then launch with the external adapter:
+
+```bash
+yeto launch \
+  --model protenix --model-kind diffusion \
+  --data /path/to/protenix-ready-rows.jsonl \
+  ...
+```
+
+`--model protenix` and `--model protenix-v2` default to
+`yeto.diffusion.adapters.protenix:make_adapter`; pass `--diffusion-adapter`
+only to override the built-in adapter.
+
+Each Yeto row must contain one complete pre-collated Protenix batch via
+`protenix_batch`, the three native keys `input_feature_dict`, `label_dict`, and
+`label_full_dict`, or a `protenix_batch_path` / `batch_path` pointing to a
+`torch.save`d batch. Keep `--micro-batch-size 1` for native prebatched rows
+unless your row already contains a larger Protenix batch.
+
+To produce those rows from a Protenix training environment, run:
+
+```bash
+yeto-protenix-export-batch \
+  --model-name protenix_base_default_v1.0.0 \
+  --output-dir /path/to/yeto-protenix-batches \
+  --batch-count 8 \
+  --arg-str "--dtype bf16 --diffusion_batch_size 1 --train_crop_size 384 --data.train_sets weightedPDB_before2109_wopb_nometalc_0925 --data.test_sets recentPDB_1536_sample384_0925"
+```
+
+The command writes `batches/batch-*.pt` plus `yeto_protenix_rows.jsonl`.
+
+For custom Protenix APIs or on-the-fly feature construction, set
+`YETO_PROTENIX_WRAPPER=my_project.protenix_yeto`. The wrapper must provide
+`load_pipeline(args, device, model_name=None, checkpoint_path=None)` and return
+an object with `model.named_parameters()` or `trainable_params()`, plus
+`training_step(batch, global_step=...)` or `compute_loss(...)`. If the wrapper
+exposes `build_batch(rows, args, device)`, the adapter calls it before the
+training step.
+
+### Hunyuan3D-2.1
+
+Hunyuan3D-2.1 is exposed through `yeto.diffusion.adapters.hunyuan3d` because
+the shape model uses Tencent's custom image-to-3D pipeline, shape VAE,
+conditioner, scheduler, and mesh export path. The upstream repository states
+that Hunyuan3D is governed by Tencent Hunyuan community/non-commercial license
+terms; verify your intended use before running it in a commercial setting.
+
+`--model hunyuan3d-21` defaults to the built-in adapter:
+
+```bash
+yeto launch \
+  --model hunyuan3d-21 --model-kind diffusion \
+  --data /path/to/hunyuan3d-ready-rows.jsonl \
+  --micro-batch-size 1 \
+  ...
+```
+
+Remote learner setup clones `Tencent-Hunyuan/Hunyuan3D-2.1` into
+`~/Hunyuan3D-2.1`, installs its requirements, and sets
+`YETO_HUNYUAN3D_ROOT`. To use an existing checkout, set
+`YETO_HUNYUAN3D_ROOT=/path/to/Hunyuan3D-2.1`.
+
+For sampling a saved adapter artifact, pass the input image path through
+`--prompt` and use a mesh extension:
+
+```bash
+yeto-diffusion-sample \
+  --adapter-dir merged-hunyuan3d \
+  --model hunyuan3d-21 \
+  --diffusion-adapter yeto.diffusion.adapters.hunyuan3d:make_adapter \
+  --prompt /path/to/input.png \
+  --output sample.glb
+```
+
+Native training rows currently need `hunyuan3d_batch` or
+`hunyuan3d_batch_path` prebuilt by a Hunyuan3D training wrapper. For raw
+image/mesh feature construction, provide `YETO_HUNYUAN3D_WRAPPER`; the wrapper
+must expose `load_pipeline(args, device, model_id=None, subfolder=None)` and
+return an object with `model.named_parameters()` plus
+`training_step(batch, global_step=...)` or `compute_loss(...)`.
+
+To export pre-collated batches from the Hunyuan3D shape training datamodule:
+
+```bash
+export YETO_HUNYUAN3D_ROOT=/path/to/Hunyuan3D-2.1
+yeto-hunyuan3d-export-batch \
+  --config "$YETO_HUNYUAN3D_ROOT/hy3dshape/configs/hunyuandit-mini-overfitting-flowmatching-dinog518-bf16-lr1e4-512.yaml" \
+  --output-dir /path/to/yeto-hunyuan3d-batches \
+  --batch-count 8 \
+  --set dataset.params.batch_size=1
+```
+
+The command calls Hunyuan3D's configured Lightning datamodule, writes
+`batches/batch-*.pt`, and emits `yeto_hunyuan3d_rows.jsonl` containing
+`hunyuan3d_batch_path` rows.
+
+### AlphaFold3
+
+Official AlphaFold3 support is intentionally guarded. The adapter does not
+download, package, or redistribute model parameters. Google DeepMind's upstream
+repository states that the source code is CC-BY-NC-SA 4.0, model parameters
+must be received directly from Google, and use is subject to the AlphaFold3
+model-parameter terms. Treat this path as non-commercial and license-gated until
+your organization has explicit permission.
+
+Set local paths after access is granted:
+
+```bash
+export YETO_ALPHAFOLD3_ROOT=/path/to/alphafold3
+export YETO_ALPHAFOLD3_MODEL_PARAMETERS_DIR=/path/to/authorized/model_parameters
+export YETO_ALPHAFOLD3_DATABASES_DIR=/path/to/public_databases
+```
+
+The adapter invokes the official `run_alphafold.py` subprocess for prediction.
+Pass the AlphaFold3 input JSON path through `--prompt`:
+
+```bash
+yeto-diffusion-sample \
+  --adapter-dir alphafold3-notice-artifact \
+  --model alphafold3 \
+  --diffusion-adapter yeto.diffusion.adapters.alphafold3:make_adapter \
+  --prompt /path/to/input.json \
+  --output alphafold3-output
+```
+
+Yeto does not support official AlphaFold3 DiLoCo training. For trainable
+AF3-style structure diffusion, use the Protenix adapter.
+
 ## Validation status
 
 - Unit coverage lives in `tests/test_diffusion.py`,

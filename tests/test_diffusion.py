@@ -3,6 +3,7 @@ import io
 import json
 import random
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -81,15 +82,19 @@ def test_diffusion_aliases_resolve_and_infer_kind():
     assert {
         "chroma1-base",
         "chroma1-hd",
+        "alphafold3",
         "flux",
         "flux-schnell",
         "flux2-dev",
         "hidream-i1-dev",
         "hidream-i1-full",
+        "hunyuan3d-21",
         "hunyuan-video",
         "ideogram4",
         "ltx-video",
         "nava",
+        "protenix",
+        "protenix-v2",
         "qwen-image",
         "qwen-image-2512",
         "sd35",
@@ -101,10 +106,16 @@ def test_diffusion_aliases_resolve_and_infer_kind():
     assert resolve("ideogram4") == "ideogram-ai/ideogram-4-nf4-diffusers"
     assert resolve("qwen-image") == "Qwen/Qwen-Image"
     assert resolve("hunyuan-video") == "hunyuanvideo-community/HunyuanVideo"
+    assert resolve("hunyuan3d-21") == "tencent/Hunyuan3D-2.1"
+    assert resolve("alphafold3") == "alphafold3"
     assert resolve("nava") == "baidu/NAVA"
+    assert resolve("protenix") == "protenix_base_default_v1.0.0"
     assert resolve_model_kind("flux") == "diffusion"
     assert resolve_model_kind("ideogram4") == "diffusion"
     assert resolve_model_kind("qwen-image") == "diffusion"
+    assert resolve_model_kind("protenix") == "diffusion"
+    assert resolve_model_kind("hunyuan3d-21") == "diffusion"
+    assert resolve_model_kind("alphafold3") == "diffusion"
     assert resolve_model_kind("org/custom", "diffusion") == "diffusion"
     assert resolve_model_kind("org/custom") == "causal-lm"
 
@@ -127,6 +138,9 @@ def test_diffusion_capability_matrix_covers_aliases():
     assert "nava" in aliases_by_status("adapter-required")
     assert aliases_by_status("generic-gap") == ()
     assert "flux" in aliases_by_status("needs-real-validation")
+    assert "protenix" in aliases_by_status("adapter-required")
+    assert "hunyuan3d-21" in aliases_by_status("adapter-required")
+    assert "alphafold3" in aliases_by_status("adapter-required")
     assert "wan21-t2v-14b" in aliases_by_status("generic-covered")
     assert "wan22" in aliases_by_status("generic-covered")
     assert "| `wan22` |" in format_capability_table(("wan22",))
@@ -1672,6 +1686,419 @@ def test_nava_adapter_raw_state_save_and_load(tmp_path):
     adapter.load_adapters(loaded, tmp_path, {}, SimpleNamespace())
     assert torch.allclose(loaded.model.weight, torch.full_like(loaded.model.weight, 3.0))
     assert torch.allclose(loaded.model.bias, torch.full_like(loaded.model.bias, 4.0))
+
+
+def test_protenix_adapter_full_step_contract(tmp_path):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion.adapters.protenix import make_adapter
+
+    class TinyProtenix:
+        def __init__(self):
+            self.model = torch.nn.Linear(1, 1)
+            self.last_batch = None
+
+        def build_batch(self, rows, args, device):
+            del args
+            return {"rows": rows, "device": device}
+
+        def training_step(self, batch, global_step=0):
+            self.last_batch = batch
+            loss = self.model(torch.ones(1, 1)).sum() + global_step
+            return {"loss": loss, "denominator": torch.tensor(2.0)}
+
+    pipe = TinyProtenix()
+    adapter = make_adapter(backend=pipe, model_name="protenix_base_default_v1.0.0")
+    loaded = adapter.load_pipeline(SimpleNamespace(model="protenix"), torch.device("cpu"))
+    assert loaded is pipe
+
+    params = adapter.trainable_params(pipe)
+    assert set(params) == {"protenix.weight", "protenix.bias"}
+
+    loss, denom = adapter.training_step(
+        pipe,
+        [{"sequence": "ACDE"}],
+        SimpleNamespace(model="protenix"),
+        torch.device("cpu"),
+        global_step=3,
+    )
+    assert denom.item() == 2.0
+    assert pipe.last_batch["rows"] == [{"sequence": "ACDE"}]
+    assert loss.requires_grad
+
+    with torch.no_grad():
+        pipe.model.weight.fill_(5.0)
+    adapter.save_adapters(pipe, tmp_path)
+    assert (tmp_path / "trainable_state.pt").exists()
+
+    loaded_pipe = TinyProtenix()
+    adapter.load_adapters(loaded_pipe, tmp_path, {}, SimpleNamespace())
+    assert torch.allclose(
+        loaded_pipe.model.weight,
+        torch.full_like(loaded_pipe.model.weight, 5.0),
+    )
+
+
+def test_native_protenix_pipeline_uses_prebatched_rows(tmp_path):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion.adapters.protenix import NativeProtenixPipeline
+
+    class TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(2.0))
+            self.last = None
+
+        def forward(
+            self,
+            *,
+            input_feature_dict,
+            label_dict,
+            label_full_dict,
+            mode,
+            current_step,
+            symmetric_permutation,
+            mc_dropout_apply_rate,
+        ):
+            self.last = {
+                "input_feature_dict": input_feature_dict,
+                "label_dict": label_dict,
+                "label_full_dict": label_full_dict,
+                "mode": mode,
+                "current_step": current_step,
+                "symmetric_permutation": symmetric_permutation,
+                "mc_dropout_apply_rate": mc_dropout_apply_rate,
+            }
+            return {"x": self.weight * input_feature_dict["x"].sum()}, label_dict, {}
+
+    class TinyLoss:
+        def __call__(self, *, feat_dict, pred_dict, label_dict, mode):
+            del label_dict
+            return pred_dict["x"] + feat_dict["x"].sum(), {"loss": 1.0}
+
+    pipe = NativeProtenixPipeline(
+        configs=SimpleNamespace(),
+        model=TinyModel(),
+        loss=TinyLoss(),
+        symmetric_permutation="perm",
+        device=torch.device("cpu"),
+    )
+    row = {
+        "input_feature_dict": {"x": [1.0, 2.0]},
+        "label_dict": {"y": [1]},
+        "label_full_dict": {"z": [2]},
+    }
+
+    batch = pipe.build_batch([row], SimpleNamespace(), torch.device("cpu"))
+    assert torch.equal(batch["input_feature_dict"]["x"], torch.tensor([1.0, 2.0]))
+    loss = pipe.training_step(batch, global_step=9)
+    assert torch.equal(loss, torch.tensor(9.0))
+    assert pipe.model.last["current_step"] == 9
+    assert pipe.model.last["symmetric_permutation"] == "perm"
+
+    batch_path = tmp_path / "batch.pt"
+    torch.save(row, batch_path)
+    loaded = pipe.build_batch(
+        [{"protenix_batch_path": "batch.pt", "__yeto_data_root__": str(tmp_path)}],
+        SimpleNamespace(),
+        torch.device("cpu"),
+    )
+    assert torch.equal(loaded["input_feature_dict"]["x"], torch.tensor([1.0, 2.0]))
+
+
+def test_protenix_adapter_alias_model_name_defaults():
+    from yeto.diffusion.adapters.protenix import _model_name_from_alias
+
+    assert _model_name_from_alias("protenix") == "protenix_base_default_v1.0.0"
+    assert _model_name_from_alias("protenix-v2") == "protenix-v2"
+    assert _model_name_from_alias("custom") == "protenix_base_default_v1.0.0"
+
+
+def test_protenix_auto_dtype_resolves_for_device():
+    from yeto.diffusion.adapters.protenix import _dtype_from_args
+
+    assert _dtype_from_args(SimpleNamespace(dtype="auto"), SimpleNamespace(type="cuda")) == "bf16"
+    assert _dtype_from_args(SimpleNamespace(dtype="auto"), SimpleNamespace(type="cpu")) == "f32"
+    assert _dtype_from_args(SimpleNamespace(dtype="fp16"), SimpleNamespace(type="cuda")) == "fp16"
+
+
+def test_protenix_namespace_supports_attributes_and_mapping_unpack():
+    from yeto.diffusion.adapters.protenix import _namespace
+
+    configs = _namespace({"train_noise_sampler": {"p_mean": -1.2}, "model": {"x": 1}})
+    assert configs.model.x == 1
+    assert dict(configs.train_noise_sampler.items()) == {"p_mean": -1.2}
+    assert {**configs.train_noise_sampler} == {"p_mean": -1.2}
+
+
+def test_protenix_native_config_preserves_empty_checkpoint_default(monkeypatch):
+    from yeto.diffusion.adapters.protenix import ProtenixAdapter
+
+    captured = {}
+
+    def fake_import_attr(module_name, attr):
+        if attr == "configs":
+            return {"load_checkpoint_path": "", "dtype": "bf16", "model_name": "protenix"}
+        if attr == "data_configs":
+            return {}
+        if attr == "model_configs":
+            return {"protenix_base_default_v1.0.0": {}}
+        if attr == "parse_configs":
+            def parse_configs(*, configs, arg_str, fill_required_with_null):
+                captured.update(configs)
+                captured["arg_str"] = arg_str
+                captured["fill_required_with_null"] = fill_required_with_null
+                return configs
+
+            return parse_configs
+        raise AssertionError((module_name, attr))
+
+    monkeypatch.setattr("yeto.diffusion.adapters.protenix._import_attr", fake_import_attr)
+    ProtenixAdapter()._build_native_configs(SimpleNamespace(model="protenix"), SimpleNamespace(type="cuda"))
+
+    assert captured["load_checkpoint_path"] == ""
+    assert "--dtype bf16" in captured["arg_str"]
+
+
+def test_protenix_native_pipeline_imports_torch_checkpoint(monkeypatch):
+    from yeto.diffusion.adapters.protenix import ProtenixAdapter
+
+    imported = []
+
+    def fake_import_module(name):
+        imported.append(name)
+        if name == "torch":
+            return SimpleNamespace()
+        if name == "torch.utils.checkpoint":
+            return SimpleNamespace()
+        if name == "protenix":
+            return SimpleNamespace()
+        raise RuntimeError("stop after checkpoint import")
+
+    monkeypatch.setattr("yeto.diffusion.adapters.protenix.importlib.import_module", fake_import_module)
+    with pytest.raises(RuntimeError, match="stop after checkpoint import"):
+        ProtenixAdapter()._load_native_pipeline(SimpleNamespace(model="protenix"), "cpu")
+
+    assert "torch.utils.checkpoint" in imported
+
+
+def test_protenix_export_batch_payload_requires_native_keys():
+    from yeto.diffusion.protenix_export import _batch_payload
+
+    batch = {
+        "input_feature_dict": {"x": 1},
+        "label_dict": {"y": 2},
+        "label_full_dict": {"z": 3},
+        "ignored": "ok",
+    }
+    assert _batch_payload(batch) == {
+        "input_feature_dict": {"x": 1},
+        "label_dict": {"y": 2},
+        "label_full_dict": {"z": 3},
+    }
+
+    with pytest.raises(RuntimeError, match="missing required keys"):
+        _batch_payload({"input_feature_dict": {}})
+
+
+def test_protenix_export_normalizes_dotlist_arg_str():
+    from yeto.diffusion.protenix_export import _normalize_arg_str
+
+    assert _normalize_arg_str("data.train_sets=[] dtype=bf16 --use_wandb false") == (
+        "--data.train_sets [] --dtype bf16 --use_wandb false"
+    )
+    assert _normalize_arg_str("data.eval_sets=[]") == "--data.test_sets []"
+    assert _normalize_arg_str("data.test_sets=") == ""
+    assert _normalize_arg_str("--data.train_sets []") == "--data.train_sets []"
+
+
+def test_protenix_export_clears_empty_test_sets_override():
+    from yeto.diffusion.protenix_export import _clear_disabled_sets
+
+    configs = SimpleNamespace(data=SimpleNamespace(test_sets=["recentPDB"]))
+    _clear_disabled_sets(configs, SimpleNamespace(arg_str="data.test_sets="))
+    assert configs.data.test_sets == []
+
+
+def test_protenix_adapter_missing_wrapper_message(monkeypatch):
+    pytest.importorskip("torch")
+    from yeto.diffusion.adapters.protenix import make_adapter
+
+    adapter = make_adapter()
+    monkeypatch.delenv("YETO_PROTENIX_WRAPPER", raising=False)
+    with pytest.raises(
+        RuntimeError,
+        match="Protenix is not installed|Protenix support needs a wrapper",
+    ):
+        adapter.load_pipeline(SimpleNamespace(model="protenix"), "cpu")
+
+
+def test_hunyuan3d_adapter_sampling_contract():
+    pytest.importorskip("torch")
+    from yeto.diffusion.adapters.hunyuan3d import make_adapter
+
+    class Mesh:
+        pass
+
+    class TinyHunyuanPipe:
+        def __init__(self):
+            self.model = None
+            self.seen = None
+
+        def __call__(self, image=None, **kwargs):
+            self.seen = (image, kwargs)
+            return [Mesh()]
+
+    pipe = TinyHunyuanPipe()
+    adapter = make_adapter(backend=pipe)
+    loaded = adapter.load_pipeline(SimpleNamespace(dtype="auto"), "cpu")
+    assert loaded is pipe
+
+    out = adapter.sample(
+        pipe,
+        SimpleNamespace(prompt="image.png", num_inference_steps=4, guidance_scale=3.0),
+        {},
+    )
+    assert isinstance(out["meshes"][0], Mesh)
+    assert pipe.seen == ("image.png", {"num_inference_steps": 4, "guidance_scale": 3.0})
+
+
+def test_hunyuan3d_training_pipeline_uses_forward_outside_trainer():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion.adapters.hunyuan3d import NativeHunyuan3DTrainingPipeline
+
+    class TinyTrainingModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(2.0))
+            self.last = None
+
+        def forward(self, batch):
+            self.last = ("forward", batch)
+            return self.weight * batch["x"].sum()
+
+        def training_step(self, batch, batch_idx):
+            raise RuntimeError("requires Trainer")
+
+    module = TinyTrainingModule()
+    pipe = NativeHunyuan3DTrainingPipeline(module, Path("cfg.yaml"))
+    batch = pipe.build_batch(
+        [{"hunyuan3d_batch": {"x": [1.0, 2.0]}}],
+        SimpleNamespace(),
+        torch.device("cpu"),
+    )
+    loss = pipe.training_step(batch, global_step=7)
+
+    assert torch.equal(batch["x"], torch.tensor([1.0, 2.0]))
+    assert loss.item() == 6.0
+    assert module.last[0] == "forward"
+
+
+def test_hunyuan3d_export_parse_args_and_loader_selection():
+    from yeto.diffusion import hunyuan3d_export
+
+    args = hunyuan3d_export.parse_args(
+        [
+            "--config",
+            "cfg.yaml",
+            "--output-dir",
+            "out",
+            "--batch-count",
+            "2",
+            "--set",
+            "dataset.params.batch_size=1",
+        ]
+    )
+    assert args.config == Path("cfg.yaml")
+    assert args.batch_count == 2
+    assert args.set == ["dataset.params.batch_size=1"]
+
+    class Data:
+        def train_dataloader(self):
+            return ["train-loader"]
+
+        def val_dataloader(self):
+            return [["val-loader"]]
+
+    assert hunyuan3d_export._loader(Data(), "train") == "train-loader"
+    assert hunyuan3d_export._loader(Data(), "val") == ["val-loader"]
+
+
+def test_hunyuan3d_export_missing_dependency_message(tmp_path):
+    from yeto.diffusion import hunyuan3d_export
+
+    with pytest.raises(RuntimeError, match="Hunyuan3D-2.1 training dependencies"):
+        hunyuan3d_export._import_hunyuan_training_api(tmp_path / "missing")
+
+
+def test_diffusion_sample_saves_mesh_output(tmp_path):
+    from yeto.diffusion import sample
+
+    class Mesh:
+        def export(self, path):
+            path.write_text("mesh", encoding="utf-8")
+
+    saved = sample.save_sample_output({"meshes": [Mesh()]}, tmp_path / "asset")
+    assert saved == [tmp_path / "asset.glb"]
+    assert saved[0].read_text(encoding="utf-8") == "mesh"
+
+
+def test_diffusion_sample_copies_directory_output(tmp_path):
+    from yeto.diffusion import sample
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "result.json").write_text("{}", encoding="utf-8")
+
+    saved = sample.save_sample_output({"paths": [source]}, tmp_path / "copied")
+    assert saved == [tmp_path / "copied" / "source"]
+    assert (saved[0] / "result.json").read_text(encoding="utf-8") == "{}"
+
+
+def test_alphafold3_adapter_is_guarded_and_inference_only(tmp_path):
+    from yeto.diffusion.adapters.alphafold3 import make_adapter
+
+    adapter = make_adapter()
+    with pytest.raises(RuntimeError, match="inference-only"):
+        adapter.load_pipeline(SimpleNamespace(), "cpu")
+    with pytest.raises(RuntimeError, match="YETO_ALPHAFOLD3_ROOT"):
+        adapter.load_sample_pipeline(tmp_path, {}, SimpleNamespace(), "cpu")
+
+
+def test_alphafold3_runtime_builds_official_command(tmp_path):
+    from yeto.diffusion.adapters.alphafold3 import AlphaFold3Runtime
+
+    root = tmp_path / "af3"
+    root.mkdir()
+    runner = root / "run_alphafold.py"
+    runner.write_text(
+        "import argparse, pathlib\n"
+        "p=argparse.ArgumentParser()\n"
+        "p.add_argument('--json_path')\n"
+        "p.add_argument('--model_dir')\n"
+        "p.add_argument('--output_dir')\n"
+        "p.add_argument('--db_dir', default=None)\n"
+        "args=p.parse_args()\n"
+        "out=pathlib.Path(args.output_dir)\n"
+        "out.mkdir(parents=True, exist_ok=True)\n"
+        "(out/'done.txt').write_text(args.json_path)\n",
+        encoding="utf-8",
+    )
+    params = tmp_path / "params"
+    params.mkdir()
+    databases = tmp_path / "db"
+    databases.mkdir()
+    input_json = tmp_path / "input.json"
+    input_json.write_text("{}", encoding="utf-8")
+
+    runtime = AlphaFold3Runtime(
+        root=root,
+        model_parameters_dir=params,
+        databases_dir=databases,
+        output_root=tmp_path / "out",
+    )
+    out = runtime.sample(SimpleNamespace(prompt=str(input_json)))
+    result_dir = Path(out["paths"][0])
+    assert (result_dir / "done.txt").read_text(encoding="utf-8") == str(input_json)
 
 
 def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
@@ -3272,6 +3699,34 @@ def test_launcher_passes_diffusion_adapter_hook():
     assert "--diffusion-adapter my_adapter:make" in task.run
     assert "--diffusion-family" not in task.run
     assert "libsndfile1" not in task.setup
+
+
+def test_launcher_defaults_protenix_adapter_and_setup():
+    task = make_learner_task(_args(model="protenix"), _SPEC, 0, 1, "a:1")
+
+    assert "--model protenix" in task.run
+    assert "--diffusion-adapter yeto.diffusion.adapters.protenix:make_adapter" in task.run
+    assert "protenix>=2.0.0" in task.setup
+    assert "Protenix uses native model names/checkpoints" in task.setup
+    assert "huggingface-cli download protenix_base_default" not in task.setup
+
+
+def test_launcher_defaults_hunyuan3d_adapter_and_setup():
+    task = make_learner_task(_args(model="hunyuan3d-21"), _SPEC, 0, 1, "a:1")
+
+    assert "--model hunyuan3d-21" in task.run
+    assert "--diffusion-adapter yeto.diffusion.adapters.hunyuan3d:make_adapter" in task.run
+    assert "Tencent-Hunyuan/Hunyuan3D-2.1" in task.setup
+    assert task.envs["YETO_HUNYUAN3D_ROOT"] == "~/Hunyuan3D-2.1"
+
+
+def test_launcher_defaults_alphafold3_adapter_without_prefetch():
+    task = make_learner_task(_args(model="alphafold3"), _SPEC, 0, 1, "a:1")
+
+    assert "--model alphafold3" in task.run
+    assert "--diffusion-adapter yeto.diffusion.adapters.alphafold3:make_adapter" in task.run
+    assert "AlphaFold3 requires local authorized parameters" in task.setup
+    assert "huggingface-cli download alphafold3" not in task.setup
 
 
 def _sample_args(tmp_path, **over):
