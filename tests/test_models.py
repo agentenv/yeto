@@ -42,7 +42,7 @@ def test_readme_table_matches_alias_table():
     import re
 
     readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
-    table_aliases = set(re.findall(r"^\| `([a-z0-9\-]+)` \| `", readme, flags=re.M))
+    table_aliases = set(re.findall(r"^\| `([a-z0-9.\-]+)` \| `", readme, flags=re.M))
     assert table_aliases == set(MODEL_ALIASES), (
         "README model table is out of sync with yeto/models.py — regenerate it"
     )
