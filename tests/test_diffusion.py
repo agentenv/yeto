@@ -530,6 +530,25 @@ def test_diffusion_aligns_extra_output_tokens_to_target_tokens():
     assert aligned_target is target
 
 
+def test_diffusion_aligns_learned_variance_image_channels():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    pred = torch.arange(2 * 8 * 3 * 3, dtype=torch.float32).reshape(2, 8, 3, 3)
+    target = torch.zeros(2, 4, 3, 3)
+
+    aligned_pred, aligned_target = learner._align_prediction_and_target(
+        SimpleNamespace(),
+        pred,
+        target,
+        learner.LatentBatch(pred, latent_height=3, latent_width=3),
+        learner.TextConditioning(None),
+    )
+
+    assert torch.equal(aligned_pred, pred[:, :4])
+    assert aligned_target is target
+
+
 def test_diffusion_unpack_with_ids_crops_extra_output_tokens():
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
@@ -2697,6 +2716,117 @@ def test_denoise_forward_auto_fills_shape_and_mask_aliases():
     assert pipe.transformer.seen["prompt_embeds_mask"] is mask
     assert pipe.transformer.seen["img_shapes"] == [(3, 2, 2), (3, 2, 2)]
     assert pipe.transformer.seen["img_sizes"] == [(2, 2), (2, 2)]
+
+
+def test_denoise_forward_prefers_encoder_mask_over_self_attention_mask():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(
+            self,
+            hidden_states,
+            timestep,
+            encoder_hidden_states=None,
+            attention_mask=None,
+            encoder_attention_mask=None,
+        ):
+            del timestep, encoder_hidden_states
+            self.seen = (attention_mask, encoder_attention_mask)
+            return hidden_states
+
+    pipe = argparse.Namespace(transformer=TinyDenoiser())
+    mask = torch.ones(1, 6, dtype=torch.long)
+    learner.denoise_forward(
+        pipe,
+        learner.LatentBatch(torch.zeros(1, 4, 4, 4)),
+        torch.tensor([1]),
+        learner.TextConditioning(torch.ones(1, 6, 8), attention_mask=mask),
+        argparse.Namespace(),
+    )
+
+    assert pipe.transformer.seen == (None, mask)
+
+
+def test_denoise_forward_auto_fills_additional_size_conditions():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        use_additional_conditions = True
+
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(
+            self,
+            hidden_states,
+            timestep,
+            encoder_hidden_states=None,
+            added_cond_kwargs=None,
+            return_dict=False,
+        ):
+            del timestep, encoder_hidden_states
+            if added_cond_kwargs is None:
+                raise ValueError("added_cond_kwargs is required")
+            self.seen = added_cond_kwargs
+            return hidden_states + 1
+
+    pipe = argparse.Namespace(transformer=TinyDenoiser(), vae_scale_factor=8)
+    noisy = learner.LatentBatch(
+        torch.zeros(2, 4, 32, 48),
+        latent_height=32,
+        latent_width=48,
+    )
+
+    out = learner.denoise_forward(
+        pipe,
+        noisy,
+        torch.tensor([1, 2]),
+        learner.TextConditioning(torch.ones(2, 4, 8)),
+        argparse.Namespace(height=256, width=384),
+    )
+
+    assert torch.equal(out, torch.ones_like(noisy.latents))
+    assert torch.equal(
+        pipe.transformer.seen["resolution"],
+        torch.tensor([[256.0, 384.0], [256.0, 384.0]]),
+    )
+    assert torch.equal(
+        pipe.transformer.seen["aspect_ratio"],
+        torch.full((2, 1), 256 / 384),
+    )
+
+
+def test_denoise_forward_leaves_optional_additional_conditions_unset():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = "not-called"
+
+        def forward(self, hidden_states, timestep, added_cond_kwargs=None):
+            del timestep
+            self.seen = added_cond_kwargs
+            return hidden_states
+
+    pipe = argparse.Namespace(transformer=TinyDenoiser(), vae_scale_factor=8)
+    learner.denoise_forward(
+        pipe,
+        learner.LatentBatch(torch.zeros(1, 4, 8, 8), latent_height=8, latent_width=8),
+        torch.tensor([1]),
+        learner.TextConditioning(None),
+        argparse.Namespace(height=64, width=64),
+    )
+
+    assert pipe.transformer.seen is None
 
 
 def test_denoise_forward_auto_fills_rotary_size_and_fps_signature_fields():

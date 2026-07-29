@@ -156,8 +156,13 @@ The generic inner step is:
 The denoiser dispatcher supplies common fields such as prompt masks, pooled
 embeddings, image/text ids, packed shapes, guidance, crop/size conditioning,
 rotary embeddings, FPS, and LTX-style rope interpolation when the model
-signature requests them. Multi-denoiser pipelines route samples by timestep
-and combine their predictions back into batch order.
+signature requests them. Transformers that advertise
+`use_additional_conditions` receive pixel resolution and aspect ratio through
+`added_cond_kwargs`. When a signature has a dedicated encoder mask, prompt
+masks are not also sent as self-attention masks. If an image denoiser emits a
+learned-variance prediction with exactly twice the target channels, the
+prediction half is selected before loss computation. Multi-denoiser pipelines
+route samples by timestep and combine their predictions back into batch order.
 
 `flow_matching` is currently the only accepted loss-function name. The
 scheduler may still provide sigma interpolation, epsilon prediction, sample
@@ -296,6 +301,12 @@ requires this boundary.
   FSDP2/HCCL, plus CogVideoX-5b-nf4 raw-MP4 LoRA training, adapter reload, and
   MP4 generation. The quantized load contained 341 real BnB 4-bit layers; the
   saved 336-tensor adapter contained 4,128,768 finite values.
+- PixArt Alpha XL-2 at ModelScope commit
+  `9330fbbca134bd66ba7d25f8267213db0451acdd` completed two single-card Ascend
+  optimizer steps over real Pokemon BLIP image/caption rows at 256×256. Its
+  448-tensor attention LoRA contained 2,064,384 finite values, and all 224
+  LoRA-B tensors changed. A separate base-plus-adapter reload completed
+  two-step sampling and wrote a valid 256×256 RGB PNG.
 - External diffusion adapters have not yet completed equivalent Ascend
   train/save/reload validation.
 - Held-out quality and equal-hardware synchronization are separate concerns;
