@@ -279,10 +279,17 @@ def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
     revalidate every config/tokenizer file per crash-loop cycle, which adds
     up against the Hub's per-IP rate limit. A cold cache (fresh spot node)
     falls back to a normal online load.
+
+    The fallback catches broadly, not just OSError: a PARTIAL cache (another
+    loader fetched the config but not every tokenizer file) fails offline
+    load in arbitrary ways — observed on the megatron island as sentencepiece
+    `TypeError: not a string` when tokenizer_config.json resolved without its
+    vocab file. Any offline failure means "the cache cannot serve this";
+    the online retry either completes the cache or raises the real error.
     """
     try:
         return factory.from_pretrained(model_id, local_files_only=True, **kwargs)
-    except OSError:
+    except Exception:
         return factory.from_pretrained(model_id, **kwargs)
 
 
