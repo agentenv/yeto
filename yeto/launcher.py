@@ -634,8 +634,12 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     run = (
         f"{NVME_ENV}\n"
         f"{HF_TOKEN_ENV}\n"
+        "export TORCH_DISTRIBUTED_DEBUG=DETAIL\n"
+        "export NCCL_DEBUG=INFO\n"
+        "mkdir -p /tmp/torchelastic\n"
         'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
-        "torchrun --nnodes=$SKYPILOT_NUM_NODES --node_rank=$SKYPILOT_NODE_RANK "
+        "torchrun --tee 3 --log-dir /tmp/torchelastic "
+        "--nnodes=$SKYPILOT_NUM_NODES --node_rank=$SKYPILOT_NODE_RANK "
         "--nproc_per_node=$SKYPILOT_NUM_GPUS_PER_NODE "
         "--master_addr=$MASTER_ADDR --master_port=29500 "
         f"-m {entrypoint}{learner_flags}"
@@ -688,8 +692,12 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     run = (
         f"{NVME_ENV}\n"
         f"{HF_TOKEN_ENV}\n"
+        "export TORCH_DISTRIBUTED_DEBUG=DETAIL\n"
+        "export NCCL_DEBUG=INFO\n"
+        "mkdir -p /tmp/torchelastic\n"
         'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
-        "torchrun --nnodes=$SKYPILOT_NUM_NODES --node_rank=$SKYPILOT_NODE_RANK "
+        "torchrun --tee 3 --log-dir /tmp/torchelastic "
+        "--nnodes=$SKYPILOT_NUM_NODES --node_rank=$SKYPILOT_NODE_RANK "
         "--nproc_per_node=$SKYPILOT_NUM_GPUS_PER_NODE "
         "--master_addr=$MASTER_ADDR --master_port=29500 "
         f"-m {entrypoint}{learner_flags}"
@@ -708,7 +716,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     image = learner_image_for(args, spec, learner_id)
     if image is not None:
         resources_kwargs["image_id"] = image
-    if spec.num_nodes > 1:
+    if spec.num_nodes > 1 and spec.cloud.lower() != "gcp":
         # Multi-node learner: inner DDP all-reduce crosses the node fabric,
         # so request the cloud's RDMA-class interconnect (EFA on AWS,
         # GPUDirect on GCP). Single-node clusters stay on NVLink and don't
