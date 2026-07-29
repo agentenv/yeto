@@ -1,4 +1,7 @@
 import json
+import urllib.error
+
+import pytest
 
 from yeto.codex_traces import (
     _openai_teacher_backfill,
@@ -337,6 +340,75 @@ def test_openai_compatible_teacher_can_use_responses_format(monkeypatch):
     assert seen["headers"]["Authorization"] == "Bearer test-key"
     assert seen["body"]["model"] == "gpt-5.4"
     assert seen["body"]["max_output_tokens"] == 160
+
+
+def test_openai_compatible_teacher_retries_transient_errors(monkeypatch):
+    attempts = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": "recovered rationale"}}]}
+            ).encode()
+
+    def fake_urlopen(request, timeout):
+        attempts.append(timeout)
+        if len(attempts) == 1:
+            raise urllib.error.URLError("temporary outage")
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    teacher = _openai_teacher_backfill(
+        "teacher-model",
+        base_url="http://localhost:8000/v1",
+        timeout=7,
+        retries=2,
+    )
+
+    assert teacher([{"role": "user", "content": "task"}], "answer") == "recovered rationale"
+    assert attempts == [7, 7]
+
+
+def test_openai_compatible_teacher_can_skip_after_retries(monkeypatch):
+    attempts = []
+
+    def fake_urlopen(request, timeout):
+        attempts.append(timeout)
+        raise urllib.error.URLError("temporary outage")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    teacher = _openai_teacher_backfill(
+        "teacher-model",
+        base_url="http://localhost:8000/v1",
+        retries=1,
+        on_error="skip",
+    )
+
+    assert teacher([{"role": "user", "content": "task"}], "answer") is None
+    assert len(attempts) == 2
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"timeout": 0}, "timeout"),
+        ({"retries": -1}, "retries"),
+        ({"on_error": "ignore"}, "on_error"),
+    ],
+)
+def test_openai_compatible_teacher_validates_retry_options(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        _openai_teacher_backfill("teacher-model", **kwargs)
 
 
 def test_convert_paths_reads_directories_and_writes_rows(tmp_path):

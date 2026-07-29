@@ -13,6 +13,8 @@ import base64
 import json
 import os
 import re
+import socket
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -213,9 +215,18 @@ def _openai_teacher_backfill(
     base_url: str | None = None,
     max_output_tokens: int = 160,
     api_format: str = "chat-completions",
+    timeout: float = 60,
+    retries: int = 2,
+    on_error: str = "raise",
 ) -> TeacherBackfillFn:
     if api_format not in TEACHER_API_FORMATS:
         raise ValueError(f"api_format must be one of {TEACHER_API_FORMATS}")
+    if on_error not in {"raise", "skip"}:
+        raise ValueError("on_error must be 'raise' or 'skip'")
+    if timeout <= 0:
+        raise ValueError("timeout must be greater than zero")
+    if retries < 0:
+        raise ValueError("retries must be non-negative")
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
     root = (base_url or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
     endpoint = "responses" if api_format == "responses" else "chat/completions"
@@ -262,12 +273,33 @@ def _openai_teacher_backfill(
             headers=headers,
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(req, timeout=60) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"teacher backfill request failed: {detail}") from error
+        payload = None
+        for attempt in range(retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as error:
+                detail = error.read().decode("utf-8", errors="replace")
+                # Retry throttles and transient server failures; surface hard
+                # request errors immediately so bad credentials/models are loud.
+                if error.code not in {408, 409, 425, 429, 500, 502, 503, 504}:
+                    raise RuntimeError(f"teacher backfill request failed: {detail}") from error
+                last_error: Exception = RuntimeError(
+                    f"teacher backfill request failed: HTTP {error.code}: {detail}"
+                )
+            except (TimeoutError, socket.timeout, urllib.error.URLError, json.JSONDecodeError) as error:
+                last_error = error
+
+            if attempt < retries:
+                time.sleep(min(2**attempt, 8))
+                continue
+            if on_error == "skip":
+                return None
+            raise RuntimeError("teacher backfill request failed after retries") from last_error
+
+        if payload is None:
+            return None
         if api_format == "responses":
             return _extract_response_text(payload) or None
         return _extract_chat_completion_text(payload) or None
@@ -699,6 +731,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Max output tokens for each teacher backfill rationale",
     )
     p.add_argument(
+        "--teacher-timeout",
+        type=float,
+        default=60,
+        help="Timeout in seconds for each teacher backfill request",
+    )
+    p.add_argument(
+        "--teacher-retries",
+        type=int,
+        default=2,
+        help="Retries for transient teacher backfill failures",
+    )
+    p.add_argument(
+        "--teacher-on-error",
+        choices=["raise", "skip"],
+        default="raise",
+        help="After retries, raise or skip that synthetic reasoning block",
+    )
+    p.add_argument(
         "--max-tool-output-chars",
         type=int,
         default=4000,
@@ -717,6 +767,9 @@ def main(argv: list[str] | None = None) -> int:
             base_url=args.teacher_base_url,
             max_output_tokens=args.teacher_max_output_tokens,
             api_format=args.teacher_api_format,
+            timeout=args.teacher_timeout,
+            retries=args.teacher_retries,
+            on_error=args.teacher_on_error,
         )
     rows = convert_paths(
         [Path(p) for p in args.input],
