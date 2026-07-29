@@ -1,9 +1,9 @@
 # Yeto
 
-**Yeto** fine-tunes language models across cheap, geographically scattered
-GPU capacity — spot instances, mixed regions, mixed clouds — via the
-[SkyPilot](https://skypilot.co) SDK. Its asynchronous synchronization is
-based on **Decoupled DiLoCo**
+**Yeto** fine-tunes language and diffusion models across cheap, geographically
+scattered GPU capacity — spot instances, mixed regions, mixed clouds, even
+mixed hardware families — via the [SkyPilot](https://skypilot.co) SDK. Its
+asynchronous synchronization is based on **Decoupled DiLoCo**
 ([Douillard et al., arXiv 2604.21428](https://arxiv.org/abs/2604.21428)):
 a Rust syncer merges parameter fragments from independent learner islands
 (quorum + adaptive grace, token-weighted RDA, Nesterov outer step), so slow
@@ -23,7 +23,7 @@ links and preempted islands never block training.
  └─────────────┘  └─────────────┘  └─────────────┘
 ```
 
-## Usage
+## Quick start
 
 ```bash
 pip install "yeto[launcher] @ ."
@@ -58,6 +58,26 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
   small on-demand box whose checkpoint/resume absorbs preemptions. The
   submitting machine can disconnect after launch.
 
+## Architecture
+
+One protocol, one syncer, four learner backends. Every backend speaks the
+same fragment protocol to the Rust syncer and runs the same DiLoCo step
+boundary — the pull/merge/α-blend/push loop lives in one shared module
+(`yeto/diloco_sync.py`), so protocol changes land once and apply everywhere.
+
+| backend | selector | scope | validation |
+|---|---|---|---|
+| PyTorch (FSDP2/DDP) | default | causal LM, LoRA/full | production; CUDA + Ascend NPU |
+| Diffusers | `--model-kind diffusion` | image/video LoRA | experimental; per-model status in `yeto/diffusion/capabilities.py` |
+| Megatron-Core | `--island-backend megatron` | EP islands for 1T-class MoE | TP=1/PP=1 smoke-validated on H200 (single GPU); TP>1/PP>1 guarded off |
+| MLX | `--external-learners` | Apple-silicon islands | cross Mac↔NVIDIA runs; name parity enforced by `scripts/check_name_parity.py` |
+
+Hardware families are isolated behind `yeto/accel.py` (CUDA / Ascend NPU
+policy functions) rather than `device.type` branches in shared code. The
+terminal contract — budget cutoff, authoritative final cut, checkpoint
+marking — is shared by all backends (`finalization.py`,
+`budget_finalization.py`, `final_marker.py`).
+
 ## Production source safety
 
 Remote model and dataset branches or tags are resolved to immutable Hugging
@@ -77,17 +97,14 @@ formats, and migration guidance.
 
 ## Diffusion
 
-Yeto also has an experimental diffusion learner selected with
-`--model-kind diffusion`. It keeps the LM-style contract where aliases are only
-repo-id shortcuts and raw Hugging Face ids pass through unchanged. Models that
-Diffusers can load should use the generic path first: Yeto loads the pipeline,
-discovers the trainable denoiser, attaches LoRA, builds conditioning from data
-rows, and reuses the normal DiLoCo sync machinery.
-
-Use `--diffusion-adapter module:factory` only when a model needs behavior that
-cannot be inferred from public Diffusers components, configs, signatures,
-scheduler methods, or tensor shapes. Adapter guidance and templates live in
-`yeto/diffusion/adapters/`.
+Yeto's diffusion learner (`--model-kind diffusion`) keeps the LM-style
+contract: aliases are only repo-id shortcuts and raw Hugging Face ids pass
+through unchanged. Models that Diffusers can load use the generic path first —
+Yeto loads the pipeline, discovers the trainable denoiser, attaches LoRA,
+builds conditioning from data rows, and reuses the normal DiLoCo sync
+machinery. Model-family behavior that the generic path cannot infer lives in
+behavior adapters under `yeto/diffusion/adapters/` (in-tree: PixArt); use
+`--diffusion-adapter module:factory` for external models that need one.
 
 Recover the authoritative merged adapter from a syncer checkpoint with:
 
@@ -98,14 +115,12 @@ yeto-diffusion-export --checkpoint yeto-state.ckpt --model <id> --output-dir out
 Pass the same LoRA, fragment-pattern, and external-adapter flags used by the
 training run.
 
-For reproducible diffusion initialization, data ordering, timestep sampling,
-and noise, pass `--diffusion-seed <integer>`. It is diffusion-only and does not
-change causal-LM learner flags or behavior. It controls RNG streams but does
-not force deterministic CUDA kernels.
-
-Raw diffusion media keeps the existing direct-resize behavior by default. Pass
-`--resize-mode center-crop` with `--height` and `--width` to preserve aspect
-ratio by scaling to fill the target and then taking a centered crop.
+- `--diffusion-seed <integer>`: reproducible initialization, data ordering,
+  timestep sampling, and noise (RNG streams only; does not force
+  deterministic CUDA kernels). Diffusion-only.
+- `--resize-mode center-crop` with `--height`/`--width`: preserve aspect
+  ratio by scaling to fill the target then center-cropping (default is
+  direct resize).
 
 The complete backend architecture, data contract, artifact flow, adapter
 boundary, and current limitations are in [docs/DIFFUSION.md](docs/DIFFUSION.md).
@@ -179,32 +194,40 @@ LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
 
 [docs/DESIGN.md](docs/DESIGN.md) — merge math, blending, adaptive grace,
 delta correction, q4 wire format, snapshots, resilience.
-[docs/LM_BENCHMARK.md](docs/LM_BENCHMARK.md) — standalone equal-hardware
-causal-LM benchmark contract, workload controls, complete arm and metric
-tables, and reproducibility rules.
-[docs/A100_KERNELS.md](docs/A100_KERNELS.md) — opt-in causal attention/model
-kernels, correctness gates, pinned dependencies, and the standalone 8xA100
-throughput and memory benchmark.
+[docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
+[docs/PROVENANCE.md](docs/PROVENANCE.md) — source pinning, attestation, and
+artifact provenance.
 [docs/DIFFUSION.md](docs/DIFFUSION.md) — the generic Diffusers image/video
 backend, data and conditioning contracts, external adapters, export, sampling,
 validation, and current limitations.
+[docs/MEGATRON.md](docs/MEGATRON.md) — the Megatron-Core island backend (EP
+for 1T-class MoE; runs inside the NGC NeMo container).
+[docs/MLX.md](docs/MLX.md) — the Apple-silicon island backend: Macs as
+learner islands (`yeto launch --external-learners`, cross Mac↔NVIDIA runs).
+[docs/ASCEND.md](docs/ASCEND.md) — Ascend NPU islands: the accelerator
+abstraction, the refused CUDA-only paths, and running a pure-Ascend fleet.
+[docs/A100_KERNELS.md](docs/A100_KERNELS.md) — opt-in causal attention/model
+kernels, correctness gates, pinned dependencies, and the standalone 8xA100
+throughput and memory benchmark.
+[docs/LM_BENCHMARK.md](docs/LM_BENCHMARK.md) — standalone equal-hardware
+causal-LM benchmark contract, workload controls, complete arm and metric
+tables, and reproducibility rules.
 [docs/DIFFUSION_BENCHMARK.md](docs/DIFFUSION_BENCHMARK.md) — standalone
 equal-hardware diffusion benchmark contract, media controls, complete arm and
 metric tables, and reproducibility rules.
 [docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) — aggregate and
 per-seed results for the completed Qwen3.6, LTX-Video, and Wan2.2 benchmarks.
-[docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
-[docs/MEGATRON.md](docs/MEGATRON.md) — the Megatron-Core island backend (EP
-for 1T-class MoE).
-[docs/MLX.md](docs/MLX.md) — the Apple-silicon island backend: Macs as
-learner islands (`yeto launch --external-learners`, cross Mac↔NVIDIA runs).
-[docs/ASCEND.md](docs/ASCEND.md) — Ascend NPU islands: the accelerator
-abstraction, the refused CUDA-only paths, and running a pure-Ascend fleet.
 
-## Testing
+## Testing and CI
 
     python3 -m pytest tests/          # includes a real syncer+learner loop
     (cd syncer && cargo test)
+
+CI runs three jobs on every PR and push to main: the Rust syncer suite, the
+Python suite on CPU, and a **GPU smoke test** on a self-hosted runner
+(`[self-hosted, gpu]` labels) — the real syncer plus two real learners
+training SmolLM2-135M on CUDA, with event-tape assertions that every outer
+step merged pushed deltas from both learners.
 
 Three heavier harnesses (all support `--dry-run`):
 
