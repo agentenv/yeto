@@ -146,6 +146,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     tune = p.add_argument_group("fine-tuning")
     tune.add_argument("--tuning", choices=["lora", "full"], default="lora")
     tune.add_argument(
+        "--base-quantization",
+        choices=["none", "nf4"],
+        default="none",
+        help="frozen-base storage for LoRA; nf4 enables bitsandbytes QLoRA "
+        "on CUDA and requires --shard ddp",
+    )
+    tune.add_argument(
         "--shard",
         choices=["ddp", "fsdp"],
         default="ddp",
@@ -762,11 +769,31 @@ def _fleet_args_error(args) -> str | None:
     """Validate the --gpu / --budget / --flops combination."""
     from .models import resolve_model_kind
 
+    model_kind = resolve_model_kind(args.model, args.model_kind)
+    base_quantization = getattr(args, "base_quantization", "none")
+    if base_quantization != "none":
+        if model_kind != "causal-lm":
+            return "--base-quantization applies only to causal-LM models"
+        if getattr(args, "island_backend", "torch") != "torch":
+            return "--base-quantization nf4 requires --island-backend torch"
+        if args.tuning != "lora":
+            return "--base-quantization nf4 requires --tuning lora"
+        if args.shard != "ddp":
+            return "--base-quantization nf4 requires --shard ddp"
+        if getattr(args, "kernel_backend", "native") != "native":
+            return "--base-quantization nf4 requires --kernel-backend native"
+        if getattr(args, "external_learners", 0):
+            return "--base-quantization nf4 does not support external MLX learners"
     if args.gpu is not None and (args.budget is not None or args.flops is not None):
         return "--budget/--flops belong to auto-fleet planning; drop them or drop --gpu"
     if args.gpu is None and args.budget is None and args.flops is None:
         return "pass --gpu, or --budget and/or --flops for an auto-planned fleet"
-    if args.gpu is None and resolve_model_kind(args.model, args.model_kind) == "diffusion":
+    if args.gpu is None and getattr(args, "base_quantization", "none") != "none":
+        return (
+            "QLoRA auto-fleet sizing is not calibrated yet; pass --gpu explicitly "
+            "with --shard ddp"
+        )
+    if args.gpu is None and model_kind == "diffusion":
         return "diffusion launch currently requires --gpu; auto-fleet sizing is causal-LM only"
     return None
 

@@ -613,6 +613,7 @@ MEGATRON_SETUP = (
 def causal_kernel_setup_steps(args) -> list[str]:
     """Pinned remote installs selected explicitly for a causal torch learner."""
     from .kernel_deps import (
+        BITSANDBYTES_MIN_VERSION,
         FLASH_ATTN_VERSION,
         LIGER_KERNEL_VERSION,
         NINJA_VERSION,
@@ -621,6 +622,8 @@ def causal_kernel_setup_steps(args) -> list[str]:
     )
 
     steps: list[str] = []
+    if getattr(args, "base_quantization", "none") == "nf4":
+        steps.append(f"pip install -q 'bitsandbytes>={BITSANDBYTES_MIN_VERSION}'")
     if getattr(args, "kernel_backend", "native") == "liger":
         steps.append(
             f"pip install -q 'liger-kernel=={LIGER_KERNEL_VERSION}' "
@@ -656,6 +659,10 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     backend = getattr(args, "island_backend", "torch")
     attention_backend = getattr(args, "attention_backend", "auto")
     kernel_backend = getattr(args, "kernel_backend", "native")
+    data_format = getattr(args, "data_format", "auto")
+    base_quantization = getattr(args, "base_quantization", "none")
+    if model_kind != "causal-lm" and data_format != "auto":
+        raise ValueError("--data-format applies only to causal-LM models")
     if model_kind != "causal-lm" and (
         attention_backend != "auto" or kernel_backend != "native"
     ):
@@ -667,6 +674,22 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             raise ValueError(
                 "--attention-backend and --kernel-backend are supported only "
                 "by the torch causal-LM island backend"
+            )
+    if base_quantization != "none":
+        if model_kind != "causal-lm":
+            raise ValueError("--base-quantization applies only to causal-LM models")
+        if backend != "torch":
+            raise ValueError(
+                "--base-quantization nf4 is supported only by the torch "
+                "causal-LM island backend"
+            )
+        if args.tuning != "lora":
+            raise ValueError("--base-quantization nf4 requires --tuning lora")
+        if args.shard != "ddp":
+            raise ValueError("--base-quantization nf4 requires --shard ddp")
+        if kernel_backend != "native":
+            raise ValueError(
+                "--base-quantization nf4 requires --kernel-backend native"
             )
     if kernel_backend == "liger" and loss_function != "cross_entropy":
         raise ValueError(
@@ -742,6 +765,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         )
         if backend == "torch":
             learner_flags += (
+                f" --base-quantization {base_quantization}"
                 f" --attention-backend {attention_backend}"
                 f" --kernel-backend {kernel_backend}"
             )

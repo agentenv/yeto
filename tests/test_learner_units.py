@@ -797,6 +797,71 @@ def test_learner_quantization_default_is_unchanged():
     assert args.base_quantization == "none"
 
 
+def test_nf4_load_uses_qlora_quantization_recipe(monkeypatch):
+    import peft
+    import transformers
+    import yeto.learner as learner
+
+    seen = {}
+    tokenizer = object()
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace()
+            self.norm = torch.nn.LayerNorm(2, dtype=torch.bfloat16)
+            self.proj = torch.nn.Linear(2, 2, dtype=torch.bfloat16)
+
+    base_model = Model()
+
+    class FakeBitsAndBytesConfig:
+        def __init__(self, **kwargs):
+            seen["quantization"] = kwargs
+
+    def fake_from_pretrained(factory, _model_id, **kwargs):
+        if factory is transformers.AutoTokenizer:
+            return tokenizer
+        assert factory is transformers.AutoModelForCausalLM
+        seen["model_kwargs"] = kwargs
+        return base_model
+
+    monkeypatch.setattr(transformers, "BitsAndBytesConfig", FakeBitsAndBytesConfig)
+    monkeypatch.setattr(learner, "_from_pretrained_offline_first", fake_from_pretrained)
+    monkeypatch.setattr(learner, "attention_load_kwargs", lambda *args: {})
+    monkeypatch.setattr(learner, "resolved_attention_backend", lambda *args: "sdpa")
+    monkeypatch.setattr(peft, "LoraConfig", lambda **kwargs: kwargs)
+    monkeypatch.setattr(peft, "get_peft_model", lambda model, _config: model)
+
+    args = SimpleNamespace(
+        model="org/model",
+        base_quantization="nf4",
+        tuning="lora",
+        shard="ddp",
+        kernel_backend="native",
+        attention_backend="auto",
+        loss_function="cross_entropy",
+        lora_r=16,
+        lora_alpha=32,
+        lora_targets="auto",
+    )
+
+    model, loaded_tokenizer = load_model_and_tokenizer(
+        args, torch.device("cuda", 0)
+    )
+
+    assert model is base_model and loaded_tokenizer is tokenizer
+    assert seen["quantization"] == {
+        "load_in_4bit": True,
+        "bnb_4bit_quant_type": "nf4",
+        "bnb_4bit_compute_dtype": torch.bfloat16,
+        "bnb_4bit_use_double_quant": True,
+    }
+    assert seen["model_kwargs"]["device_map"] == {"": 0}
+    assert seen["model_kwargs"]["low_cpu_mem_usage"] is True
+    assert all(not parameter.requires_grad for parameter in base_model.parameters())
+    assert base_model.norm.weight.dtype == torch.float32
+
+
 def test_nf4_preparation_freezes_base_and_only_casts_norms():
     from yeto.learner import _prepare_nf4_base_for_lora
 
