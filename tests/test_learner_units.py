@@ -695,6 +695,28 @@ def test_offline_first_falls_back_online_on_cold_cache():
     assert [c.get("local_files_only") for c in calls] == [True, None]
 
 
+def test_offline_first_falls_back_online_on_partial_cache():
+    """A partial cache fails offline load with arbitrary exceptions, not just
+    OSError — e.g. sentencepiece raising `TypeError: not a string` when
+    tokenizer_config.json is cached without its vocab file (observed on the
+    megatron island's first hardware run). Any offline failure must fall
+    back to the online path."""
+    from yeto.learner import _from_pretrained_offline_first
+
+    calls = []
+
+    class Factory:
+        @staticmethod
+        def from_pretrained(model_id, **kw):
+            calls.append(kw)
+            if kw.get("local_files_only"):
+                raise TypeError("not a string")
+            return "downloaded-model"
+
+    assert _from_pretrained_offline_first(Factory, "org/model") == "downloaded-model"
+    assert [c.get("local_files_only") for c in calls] == [True, None]
+
+
 def test_learner_accepts_explicit_training_seed():
     from yeto.learner import parse_args
 
