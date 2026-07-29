@@ -362,7 +362,6 @@ def launch_queue(
 ) -> None:
     node = queue["node"] if authority is None else common.read_json(authority)["node"]
     queue_id = queue["queue_id"]
-    pattern = controller_pattern(program, queue_id)
     authority_arg = (
         f" --retry-authority {shlex.quote('/root/day3-control/' + authority.name)}"
         if authority is not None
@@ -380,7 +379,6 @@ def launch_queue(
     )
     script = f"""
 set -eu
-test -z "$(pgrep -af {shlex.quote(pattern)} || true)"
 mkdir -p /data/yeto-results-day3/_controller/logs /data/yeto-results-day3/_controller/pids
 nohup env HF_DATASETS_CACHE=/data/hf-datasets-cache TMPDIR=/data/tmp \
   {command} \
