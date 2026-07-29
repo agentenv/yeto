@@ -2363,6 +2363,66 @@ mod tests {
     }
 
     #[test]
+    fn heavy_ball_v19_first_40_calls_and_fragment_state_are_exact() {
+        // V19 freezes zero initialization, 40 persistent calls, and one
+        // disjoint momentum state per fragment.  Exercise those requirements
+        // directly with bitwise f32 comparisons against the registered
+        // recurrence b_t = 0.9*b_(t-1) + p_t; theta -= eta*b_t.
+        let mu = 0.9f32;
+        let lr = 0.003642244f32;
+        let delta_a = [0.25f32, -0.5];
+        let delta_b = [-1.0f32, 0.125];
+        let mut params_a = [2.0f32, -3.0];
+        let mut params_b = [-5.0f32, 7.0];
+        let mut buffer_a = [0.0f32; 2];
+        let mut buffer_b = [0.0f32; 2];
+        let mut expected_params_a = params_a;
+        let mut expected_params_b = params_b;
+        let mut expected_buffer_a = [0.0f32; 2];
+        let mut expected_buffer_b = [0.0f32; 2];
+
+        assert_eq!(buffer_a.map(f32::to_bits), [0, 0]);
+        assert_eq!(buffer_b.map(f32::to_bits), [0, 0]);
+        for call in 1..=40 {
+            for coordinate in 0..2 {
+                expected_buffer_a[coordinate] =
+                    mu * expected_buffer_a[coordinate] + delta_a[coordinate];
+                expected_params_a[coordinate] -= lr * expected_buffer_a[coordinate];
+                expected_buffer_b[coordinate] =
+                    mu * expected_buffer_b[coordinate] + delta_b[coordinate];
+                expected_params_b[coordinate] -= lr * expected_buffer_b[coordinate];
+            }
+            let b_before = buffer_b.map(f32::to_bits);
+            heavy_ball_step(&mut params_a, &mut buffer_a, &delta_a, lr, mu);
+            // Fragment B advances on alternating global commits but retains
+            // only its own history; touching A cannot mutate B's buffer.
+            assert_eq!(buffer_b.map(f32::to_bits), b_before);
+            heavy_ball_step(&mut params_b, &mut buffer_b, &delta_b, lr, mu);
+
+            assert_eq!(
+                buffer_a.map(f32::to_bits),
+                expected_buffer_a.map(f32::to_bits),
+                "fragment A buffer mismatch at call {call}",
+            );
+            assert_eq!(
+                params_a.map(f32::to_bits),
+                expected_params_a.map(f32::to_bits),
+                "fragment A params mismatch at call {call}",
+            );
+            assert_eq!(
+                buffer_b.map(f32::to_bits),
+                expected_buffer_b.map(f32::to_bits),
+                "fragment B buffer mismatch at call {call}",
+            );
+            assert_eq!(
+                params_b.map(f32::to_bits),
+                expected_params_b.map(f32::to_bits),
+                "fragment B params mismatch at call {call}",
+            );
+        }
+    }
+
+    #[test]
     fn heavy_ball_off_path_is_bit_identical_to_production_nesterov() {
         // The new convention is selected solely by a new enum value.  A
         // default/Nesterov dispatch must still execute the pre-existing
