@@ -44,6 +44,9 @@ def _message_text(msg: dict) -> str:
 
 def _message_training_parts(msg: dict) -> list[str]:
     parts = []
+    reasoning = msg.get("reasoning_content")
+    if msg.get("role") == "assistant" and isinstance(reasoning, str) and reasoning.strip():
+        parts.append(reasoning.strip())
     content = _message_text(msg)
     if content:
         parts.append(content)

@@ -99,6 +99,33 @@ class UnmaskedTemplateTokenizer(MaskedTemplateTokenizer):
         return rendered
 
 
+class ReasoningTemplateTokenizer(FakeTokenizer):
+    chat_template = "{{ reasoning }}"
+
+    def apply_chat_template(
+        self,
+        messages,
+        tools=None,
+        tokenize=False,
+        add_generation_prompt=False,
+        return_dict=False,
+        return_assistant_tokens_mask=False,
+    ):
+        parts = []
+        for msg in messages:
+            parts.append(f"<{msg['role']}> ")
+            if msg.get("reasoning_content"):
+                parts.append(f"{msg['reasoning_content']} ")
+            parts.append(f"{msg.get('content') or ''} </{msg['role']}> ")
+        text = "".join(parts)
+        if not tokenize:
+            return text
+        tokenized = self(text, add_special_tokens=False)
+        if return_dict:
+            return {"input_ids": tokenized["input_ids"]}
+        return tokenized["input_ids"]
+
+
 class FamilyTemplateTokenizer(FakeTokenizer):
     chat_template = "{{ family }}"
 
@@ -352,6 +379,28 @@ def test_assistant_mode_derives_native_tool_call_span():
             assert weight == 1.0
         elif token_id in user_ids:
             assert weight == 0.0
+
+
+def test_assistant_mode_weights_native_reasoning_content():
+    from yeto.data import _row_tokens
+
+    tok = ReasoningTemplateTokenizer()
+    row = {
+        "messages": [
+            {"role": "user", "content": "inspect the failure"},
+            {
+                "role": "assistant",
+                "reasoning_content": "public rationale uniqueplan",
+                "content": "fixed response uniqueanswer",
+            },
+        ]
+    }
+
+    ids, weights = _row_tokens(tok, row, "assistant")
+    weighted_ids = {token_id for token_id, weight in zip(ids, weights) if weight}
+
+    assert tok("uniqueplan")["input_ids"][0] in weighted_ids
+    assert tok("uniqueanswer")["input_ids"][0] in weighted_ids
 
 
 def test_train_on_all_gives_all_ones():
