@@ -162,11 +162,7 @@ def analyze(manifest_path: Path, result_root: Path) -> dict[str, object]:
                 f"{cell['cell_id']}: terminal status {evidence.get('status')}"
             )
             continue
-        if evidence.get("command_hash") != (
-            cell["command_hash"]
-            if attempt == 1
-            else cell["registered_retry_commands"][0]["command_hash"]
-        ):
+        if not common.command_hash_allowed(cell, attempt, evidence.get("command_hash")):
             invalid_reasons.append(f"{cell['cell_id']}: command hash mismatch")
             continue
         if evidence.get("git_commit") != manifest["source"]["git_commit"]:

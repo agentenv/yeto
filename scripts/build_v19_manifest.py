@@ -151,6 +151,8 @@ def main() -> int:
         "scripts/day3_common.py",
         "scripts/build_v19_manifest.py",
         "scripts/run_day3_queue.py",
+        "scripts/day3_status.py",
+        "scripts/day3_conductor.py",
         "scripts/analyze_v19.py",
         "scripts/prepare_v19_inputs.py",
         "scripts/run_slot_v3.py",
@@ -204,7 +206,12 @@ def main() -> int:
                     "m": 4,
                     "timeout_minutes": 360,
                 }
-                cells.append(common.bind_cell(cell, head))
+                retry_gpus = tuple(
+                    slot_gpu
+                    for slot_node, slot_gpu in QUEUE_SLOTS
+                    if slot_node == node
+                )
+                cells.append(common.bind_cell(cell, head, retry_gpus=retry_gpus))
             queue_index += 1
     if len(cells) != 54 or len(queue_records) != 9:
         raise SystemExit("internal V19 design cardinality mismatch")
@@ -231,7 +238,7 @@ def main() -> int:
             "status": "PASS_BEFORE_MANIFEST",
         },
         "syncer": {
-            "path": "/root/yeto/syncer/target/release/yeto-syncer",
+            "path": str(common.REMOTE_REPO / "syncer/target/release/yeto-syncer"),
             "sha256": args.syncer_sha256,
         },
         "inputs": {
@@ -260,6 +267,7 @@ def main() -> int:
             "symlink": str(common.RESULT_ROOT),
             "lvm_target": str(common.RESULT_TARGET),
         },
+        "capacity": common.capacity_contract(estimated_peak_mib=32768),
         "environment": {
             "HF_DATASETS_CACHE": "/data/hf-datasets-cache",
             "TMPDIR": "/data/tmp",

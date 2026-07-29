@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Frozen V18 FedAdam analyzer with evidence-first endpoint gating."""
+"""Frozen robust analyzer for the 612-cell V16 second-family program."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import random
+import statistics
 from pathlib import Path
 
 import day3_common as common
@@ -20,8 +21,8 @@ from analyze_v19 import (
 
 
 def fit_curve(etas: list[float], losses: list[float]) -> dict[str, object]:
-    if len(etas) != 4 or len(losses) != 4:
-        raise NotEvaluable("V18 curve does not contain four rung means")
+    if len(etas) != 6 or len(losses) != 6:
+        raise NotEvaluable("V16 curve does not contain six rung medians")
     if any(not math.isfinite(value) for value in etas + losses):
         return {"accepted": False, "reason": "nonfinite_input"}
     x = [math.log2(eta) for eta in etas]
@@ -41,11 +42,11 @@ def fit_curve(etas: list[float], losses: list[float]) -> dict[str, object]:
     accepted = (
         a > 0.0
         and math.isfinite(vertex)
-        and min(x) - 0.5 <= vertex <= max(x) + 0.5
+        and min(x) - 0.5 < vertex < max(x) + 0.5
     )
     label = (
-        "BRACKETED"
-        if accepted and min(x) <= vertex <= max(x)
+        "INTERIOR"
+        if accepted and min(x) < vertex < max(x)
         else "NEAR_BRACKETED" if accepted else "UNACCEPTED"
     )
     return {
@@ -56,102 +57,33 @@ def fit_curve(etas: list[float], losses: list[float]) -> dict[str, object]:
         "c": c,
         "vertex_log2_eta": vertex,
         "eta_star": 2.0**vertex if math.isfinite(vertex) else None,
-        "rung_means": losses,
+        "rung_medians": losses,
     }
 
 
 def validate_manifest(path: Path, manifest: dict) -> None:
     sidecar = path.with_suffix(path.suffix + ".sha256")
     if not sidecar.is_file() or sidecar.read_text().split()[0] != common.sha256_file(path):
-        raise NotEvaluable("V18 manifest sidecar mismatch")
+        raise NotEvaluable("V16 manifest sidecar mismatch")
     if (
         manifest.get("schema") != "yeto_day3_launch_manifest_v1"
-        or manifest.get("program") != "v18"
+        or manifest.get("program") != "v16"
         or manifest.get("status") != "AUTHORIZED"
     ):
-        raise NotEvaluable("V18 launch manifest schema/status mismatch")
-    if len(manifest.get("cells", [])) != 96:
-        raise NotEvaluable("V18 manifest does not contain 96 cells")
-    analyzer = manifest.get("execution_files", {}).get("scripts/analyze_v18.py")
+        raise NotEvaluable("V16 launch manifest schema/status mismatch")
+    if len(manifest.get("cells", [])) != 612:
+        raise NotEvaluable("V16 manifest does not contain 612 cells")
+    analyzer = manifest.get("execution_files", {}).get("scripts/analyze_v16.py")
     if analyzer is None or common.sha256_file(Path(__file__)) != analyzer.get("sha256"):
-        raise NotEvaluable("frozen V18 analyzer hash mismatch")
-
-
-def validate_fedadam_trace(cell: dict, tape_path: Path, manifest: dict) -> dict[str, object]:
-    rows = read_jsonl(tape_path)
-    expected_rows = 4 * int(cell["t"])
-    if len(rows) != expected_rows:
-        raise NotEvaluable(f"{cell['cell_id']}: FedAdam tape row count mismatch")
-    fedadam_keys = {
-        "fedadam_beta1",
-        "fedadam_beta2",
-        "fedadam_m_before_l2",
-        "fedadam_v_before_l1",
-        "fedadam_m_after_l2",
-        "fedadam_v_after_l1",
-        "fedadam_recurrence_max_abs_error",
-        "fedadam_zero_safe_coordinates",
-    }
-    if cell["arm"] == "sgd":
-        if any(fedadam_keys & set(row) for row in rows):
-            raise NotEvaluable(f"{cell['cell_id']}: SGD tape contains FedAdam state")
-        return {"rows": len(rows), "fedadam_fields": False}
-
-    beta1 = float(manifest["contract"]["fedadam"]["beta1_f32"])
-    beta2 = float(manifest["contract"]["fedadam"]["beta2_f32"])
-    by_fragment: dict[int, list[dict]] = {fragment: [] for fragment in range(4)}
-    for row in rows:
-        if not fedadam_keys <= set(row):
-            raise NotEvaluable(f"{cell['cell_id']}: incomplete FedAdam trace row")
-        fragment = row.get("fragment")
-        if fragment not in by_fragment:
-            raise NotEvaluable(f"{cell['cell_id']}: invalid trace fragment")
-        if row["fedadam_beta1"] != beta1 or row["fedadam_beta2"] != beta2:
-            raise NotEvaluable(f"{cell['cell_id']}: FedAdam beta trace mismatch")
-        if row["fedadam_recurrence_max_abs_error"] != 0.0:
-            raise NotEvaluable(f"{cell['cell_id']}: nonzero FedAdam recurrence residual")
-        for key in (
-            "fedadam_m_before_l2",
-            "fedadam_v_before_l1",
-            "fedadam_m_after_l2",
-            "fedadam_v_after_l1",
-        ):
-            value = row[key]
-            if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0.0:
-                raise NotEvaluable(f"{cell['cell_id']}: invalid {key}")
-        zero_safe = row["fedadam_zero_safe_coordinates"]
-        if not isinstance(zero_safe, int) or zero_safe < 0:
-            raise NotEvaluable(f"{cell['cell_id']}: invalid zero-safe trace count")
-        by_fragment[fragment].append(row)
-    for fragment, fragment_rows in by_fragment.items():
-        fragment_rows.sort(key=lambda row: row["step"])
-        if len(fragment_rows) != int(cell["t"]):
-            raise NotEvaluable(f"{cell['cell_id']}: fragment {fragment} age mismatch")
-        first = fragment_rows[0]
-        if first["fedadam_m_before_l2"] != 0.0 or first["fedadam_v_before_l1"] != 0.0:
-            raise NotEvaluable(f"{cell['cell_id']}: fragment {fragment} is not zero initialized")
-        for previous, current in zip(fragment_rows, fragment_rows[1:]):
-            if current["fedadam_m_before_l2"] != previous["fedadam_m_after_l2"]:
-                raise NotEvaluable(f"{cell['cell_id']}: fragment {fragment} m state did not persist")
-            if current["fedadam_v_before_l1"] != previous["fedadam_v_after_l1"]:
-                raise NotEvaluable(f"{cell['cell_id']}: fragment {fragment} v state did not persist")
-    return {
-        "rows": len(rows),
-        "fedadam_fields": True,
-        "zero_initialized_fragments": 4,
-        "calls_per_fragment": int(cell["t"]),
-        "beta1_f32": beta1,
-        "beta2_f32": beta2,
-        "max_recurrence_error": 0.0,
-    }
+        raise NotEvaluable("frozen V16 analyzer hash mismatch")
 
 
 def analyze(manifest_path: Path, result_root: Path) -> dict[str, object]:
     manifest = common.read_json(manifest_path)
     validate_manifest(manifest_path, manifest)
 
-    # Evidence-only pass: endpoint and event-tape files stay unopened until
-    # all 96 cells have terminal evidence states.
+    # Evidence-only drainage proof comes first. No endpoint result is opened
+    # unless all 612 scientific cells have terminal evidence states.
     selections = {
         cell["cell_id"]: selected_evidence(cell, result_root)
         for cell in manifest["cells"]
@@ -159,7 +91,6 @@ def analyze(manifest_path: Path, result_root: Path) -> dict[str, object]:
     manifest_sha = common.sha256_file(manifest_path)
     invalid_reasons = []
     endpoint_rows = []
-    trace_rows = []
     losses: dict[tuple[int, str, int], dict[int, float]] = {}
     eta_values: dict[tuple[int, str, int], float] = {}
     for cell in manifest["cells"]:
@@ -179,22 +110,6 @@ def analyze(manifest_path: Path, result_root: Path) -> dict[str, object]:
         if evidence.get("manifest_sha256") != manifest_sha:
             invalid_reasons.append(f"{cell['cell_id']}: manifest hash mismatch")
             continue
-        tape_path = evidence_path.parent / "work" / "m4" / "tape.jsonl"
-        if not tape_path.is_file():
-            invalid_reasons.append(f"{cell['cell_id']}: missing optimizer trace")
-            continue
-        try:
-            trace = validate_fedadam_trace(cell, tape_path, manifest)
-        except NotEvaluable as exc:
-            invalid_reasons.append(str(exc))
-            continue
-        trace_rows.append(
-            {
-                "cell_id": cell["cell_id"],
-                "tape_sha256": common.sha256_file(tape_path),
-                **trace,
-            }
-        )
         result_path = evidence_path.parent / "report" / "results.jsonl"
         if not result_path.is_file():
             invalid_reasons.append(f"{cell['cell_id']}: missing endpoint")
@@ -231,48 +146,49 @@ def analyze(manifest_path: Path, result_root: Path) -> dict[str, object]:
     curve_fits = {}
     ordered_losses = {}
     ordered_etas = {}
-    for t in (2, 5, 20, 40):
-        for arm in ("sgd", "fedadam"):
+    for t in (2, 5, 20):
+        for arm in ("mu0", "mu09"):
             curve_key = f"T{t}_{arm}"
             etas = []
             rung_seed_losses = []
-            means = []
-            for eta_index in range(4):
+            medians = []
+            for eta_index in range(6):
                 key = (t, arm, eta_index)
                 seed_map = losses.get(key, {})
                 if tuple(sorted(seed_map)) != tuple(sorted(seeds)):
-                    raise NotEvaluable(f"{curve_key}/rung{eta_index}: paired seed mismatch")
+                    raise NotEvaluable(f"{curve_key}/rung{eta_index}: 17-seed mismatch")
                 values = [seed_map[seed] for seed in seeds]
                 etas.append(eta_values[key])
                 rung_seed_losses.append(values)
-                means.append(sum(values) / 3.0)
-            fitted = fit_curve(etas, means)
+                medians.append(float(statistics.median(values)))
+            fitted = fit_curve(etas, medians)
             if not fitted["accepted"]:
-                raise NotEvaluable(f"{curve_key}: pooled fit is unaccepted")
+                raise NotEvaluable(f"{curve_key}: pooled median fit is unaccepted")
             curve_fits[curve_key] = fitted
             ordered_losses[(t, arm)] = rung_seed_losses
             ordered_etas[(t, arm)] = etas
 
     d_obs = {
-        t: float(curve_fits[f"T{t}_fedadam"]["eta_star"])
-        / float(curve_fits[f"T{t}_sgd"]["eta_star"])
-        for t in (2, 5, 20, 40)
+        t: 10.0
+        * float(curve_fits[f"T{t}_mu09"]["eta_star"])
+        / float(curve_fits[f"T{t}_mu0"]["eta_star"])
+        for t in (2, 5, 20)
     }
     rng = random.Random(int(manifest["bootstrap"]["seed"]))
-    log_d_draws = {t: [] for t in (2, 5, 20, 40)}
-    eta_draws = {(t, arm): [] for t in (2, 5, 20, 40) for arm in ("sgd", "fedadam")}
+    log_d_draws = {t: [] for t in (2, 5, 20)}
+    adjacent_draws = {"D2_gt_D5": [], "D5_gt_D20": []}
     valid = 0
     for _ in range(int(manifest["bootstrap"]["draws"])):
-        indices = [rng.randrange(3) for _ in range(3)]
+        indices = [rng.randrange(17) for _ in range(17)]
         draw_fits = {}
         accepted = True
-        for t in (2, 5, 20, 40):
-            for arm in ("sgd", "fedadam"):
-                draw_means = [
-                    sum(rung[index] for index in indices) / 3.0
+        for t in (2, 5, 20):
+            for arm in ("mu0", "mu09"):
+                draw_medians = [
+                    float(statistics.median(rung[index] for index in indices))
                     for rung in ordered_losses[(t, arm)]
                 ]
-                fitted = fit_curve(ordered_etas[(t, arm)], draw_means)
+                fitted = fit_curve(ordered_etas[(t, arm)], draw_medians)
                 if not fitted["accepted"]:
                     accepted = False
                     break
@@ -281,53 +197,55 @@ def analyze(manifest_path: Path, result_root: Path) -> dict[str, object]:
                 break
         if not accepted:
             continue
-        valid += 1
-        for t in (2, 5, 20, 40):
-            for arm in ("sgd", "fedadam"):
-                eta_draws[(t, arm)].append(float(draw_fits[(t, arm)]["eta_star"]))
-            ratio = float(draw_fits[(t, "fedadam")]["eta_star"]) / float(
-                draw_fits[(t, "sgd")]["eta_star"]
+        log_d = {}
+        for t in (2, 5, 20):
+            ratio = (
+                10.0
+                * float(draw_fits[(t, "mu09")]["eta_star"])
+                / float(draw_fits[(t, "mu0")]["eta_star"])
             )
-            log_d_draws[t].append(math.log2(ratio))
+            log_d[t] = math.log2(ratio)
+            log_d_draws[t].append(log_d[t])
+        adjacent_draws["D2_gt_D5"].append(log_d[2] - log_d[5])
+        adjacent_draws["D5_gt_D20"].append(log_d[5] - log_d[20])
+        valid += 1
     minimum_valid = int(manifest["bootstrap"]["minimum_valid"])
     if valid < minimum_valid:
         raise NotEvaluable(f"only {valid} valid joint bootstrap draws; need {minimum_valid}")
 
-    predictions = {int(t): float(value) for t, value in manifest["predictions"].items()}
-    band = float(manifest["band_bits"])
-    hits = {}
-    d_ci = {}
-    prediction_error_ci = {}
-    eta_ci = {}
-    for t in (2, 5, 20, 40):
-        lower = percentile(log_d_draws[t], 0.025)
-        upper = percentile(log_d_draws[t], 0.975)
-        d_ci[t] = [2.0**lower, 2.0**upper]
-        errors = [value - math.log2(predictions[t]) for value in log_d_draws[t]]
-        prediction_error_ci[t] = [percentile(errors, 0.025), percentile(errors, 0.975)]
-        hits[t] = abs(math.log2(d_obs[t] / predictions[t])) <= band
-        for arm in ("sgd", "fedadam"):
-            eta_ci[f"T{t}_{arm}"] = [
-                percentile(eta_draws[(t, arm)], 0.025),
-                percentile(eta_draws[(t, arm)], 0.975),
-            ]
-    verdict = "SHAPE_CONFIRMED" if sum(hits.values()) >= 3 else "SHAPE_WRONG"
+    d_ci = {
+        str(t): [
+            2.0 ** percentile(log_d_draws[t], 0.025),
+            2.0 ** percentile(log_d_draws[t], 0.975),
+        ]
+        for t in (2, 5, 20)
+    }
+    adjacent_ci = {
+        label: [percentile(values, 0.025), percentile(values, 0.975)]
+        for label, values in adjacent_draws.items()
+    }
+    point_monotone = d_obs[2] > d_obs[5] > d_obs[20]
+    interval_monotone = (
+        adjacent_ci["D2_gt_D5"][0] > 0.0
+        and adjacent_ci["D5_gt_D20"][0] > 0.0
+    )
+    verdict = (
+        "SECOND_FAMILY_MONOTONE"
+        if point_monotone and interval_monotone
+        else "SECOND_FAMILY_NONMONOTONE"
+    )
     return {
-        "schema": "yeto_v18_frozen_readout_v1",
+        "schema": "yeto_v16_frozen_readout_v1",
         "status": "EVALUABLE",
         "manifest_sha256": manifest_sha,
         "source_git_commit": manifest["source"]["git_commit"],
         "scientific_cells": len(endpoint_rows),
         "curve_fits": curve_fits,
-        "eta_star_ci95": eta_ci,
         "D_obs": {str(t): d_obs[t] for t in d_obs},
-        "D_pred": {str(t): predictions[t] for t in predictions},
-        "D_ci95": {str(t): d_ci[t] for t in d_ci},
-        "prediction_error_log2_ci95": {
-            str(t): prediction_error_ci[t] for t in prediction_error_ci
-        },
-        "hits": {str(t): hits[t] for t in hits},
-        "hit_count": sum(hits.values()),
+        "D_ci95": d_ci,
+        "adjacent_log2_difference_ci95": adjacent_ci,
+        "point_monotone": point_monotone,
+        "interval_monotone": interval_monotone,
         "bootstrap": {
             "requested": int(manifest["bootstrap"]["draws"]),
             "valid": valid,
@@ -336,7 +254,6 @@ def analyze(manifest_path: Path, result_root: Path) -> dict[str, object]:
             "rng": "python_random.Random/randrange",
         },
         "verdict": verdict,
-        "trace_evidence": sorted(trace_rows, key=lambda row: row["cell_id"]),
         "endpoints": sorted(endpoint_rows, key=lambda row: row["cell_id"]),
     }
 
@@ -357,14 +274,14 @@ def main() -> int:
         readout = analyze(args.manifest, args.result_root)
     except NotEvaluable as exc:
         readout = {
-            "schema": "yeto_v18_frozen_readout_v1",
+            "schema": "yeto_v16_frozen_readout_v1",
             "status": "NOT_EVALUABLE",
-            "verdict": "NOT_EVALUABLE",
+            "verdict": "SECOND_FAMILY_NOT_EVALUABLE",
             "reason": str(exc),
             "manifest_sha256": common.sha256_file(args.manifest),
         }
     common.write_json_atomic(args.output, readout)
-    line = f"V18 VERDICT: {readout['verdict']}"
+    line = f"V16 VERDICT: {readout['verdict']}"
     append_note(args.note, line)
     print(line)
     print(json.dumps({"output": str(args.output), "verdict": readout["verdict"]}, sort_keys=True))

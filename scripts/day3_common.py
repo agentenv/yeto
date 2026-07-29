@@ -11,11 +11,17 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parent.parent
+REMOTE_REPO = Path("/root/yeto-day3")
 RESULT_ROOT = Path("/root/yeto-results-day3")
 RESULT_TARGET = Path("/data/yeto-results-day3")
 NODES = ("h200-n1", "h200-n2")
 GPUS = tuple(range(8))
 V19_SEEDS = (1201, 1213, 1217)
+# Populated only by live protected foreign GPU processes at manifest-freeze time.
+# The previously protected n1:0 process drained before this execution was frozen.
+PROTECTED_SLOTS: tuple[tuple[str, int], ...] = ()
+CAPACITY_HEADROOM_MIB = 10 * 1024
+CAPACITY_EXCLUSIVE_MAX_USED_MIB = 1024
 
 
 def utc_now() -> str:
@@ -78,11 +84,14 @@ def expected_standard_cell(cell: dict) -> dict:
     }
 
 
-def command_for(cell: dict, attempt_number: int) -> list[str]:
+def command_for(
+    cell: dict, attempt_number: int, *, gpu_override: int | None = None
+) -> list[str]:
     attempt = RESULT_ROOT / cell["cell_id"] / f"attempt-{attempt_number}"
+    gpu = int(cell["assignment"]["gpus"][0]) if gpu_override is None else gpu_override
     return [
         "/root/yeto-venv/bin/python",
-        "/root/yeto/scripts/compare_diloco.py",
+        str(REMOTE_REPO / "scripts/compare_diloco.py"),
         "--model",
         cell["model_path"],
         "--data",
@@ -106,7 +115,7 @@ def command_for(cell: dict, attempt_number: int) -> list[str]:
         "--eval-rows",
         "1024",
         "--max-rows",
-        "13758",
+        str(cell.get("max_rows", 13758)),
         "--shuffle-rows-seed",
         str(cell["seed"]),
         "--eval-split-seed",
@@ -118,7 +127,7 @@ def command_for(cell: dict, attempt_number: int) -> list[str]:
         "--gpu-slots",
         "1",
         "--gpu-offset",
-        str(cell["assignment"]["gpus"][0]),
+        str(gpu),
         "--delta-correction",
         "none",
         "--matrix-merge",
@@ -162,22 +171,69 @@ def command_for(cell: dict, attempt_number: int) -> list[str]:
     ]
 
 
-def bind_cell(cell: dict, source_commit: str) -> dict:
+def bind_cell(
+    cell: dict,
+    source_commit: str,
+    *,
+    retry_gpus: tuple[int, ...] | list[int] | None = None,
+) -> dict:
     cell["source_git_commit"] = source_commit
     cell["expected"] = expected_standard_cell(cell)
     cell["arm_name"] = "m4"
     initial = command_for(cell, 1)
-    retry = command_for(cell, 2)
     cell["command"] = initial
     cell["command_hash"] = canonical_sha256(initial)
     cell["attempts"] = [1, 2]
     cell["attempt2_supersedes_attempt1"] = True
-    cell["registered_retry_commands"] = [
-        {
-            "attempt_number": 2,
-            "command": retry,
-            "command_hash": canonical_sha256(retry),
-            "allowed_only_under": "registered loss-blind whole-group infrastructure retry",
-        }
-    ]
+    node = str(cell["assignment"]["node"])
+    primary_gpu = int(cell["assignment"]["gpus"][0])
+    alternatives = tuple(
+        gpu for gpu in (retry_gpus or (primary_gpu,)) if int(gpu) != primary_gpu
+    )
+    if not alternatives:
+        alternatives = (primary_gpu,)
+    cell["registered_retry_commands"] = []
+    for gpu_value in alternatives:
+        gpu = int(gpu_value)
+        retry = command_for(cell, 2, gpu_override=gpu)
+        cell["registered_retry_commands"].append(
+            {
+                "attempt_number": 2,
+                "node": node,
+                "gpu": gpu,
+                "command": retry,
+                "command_hash": canonical_sha256(retry),
+                "allowed_only_under": (
+                    "registered loss-blind whole-group infrastructure retry; "
+                    "relocated away from the attempt-1 GPU"
+                ),
+            }
+        )
     return cell
+
+
+def command_hash_allowed(cell: dict, attempt: int, command_hash: object) -> bool:
+    if attempt == 1:
+        return command_hash == cell["command_hash"]
+    return command_hash in {
+        record["command_hash"]
+        for record in cell["registered_retry_commands"]
+        if int(record["attempt_number"]) == attempt
+    }
+
+
+def capacity_contract(*, estimated_peak_mib: int) -> dict[str, object]:
+    return {
+        "class": "135M-class",
+        "estimated_cell_peak_mib": int(estimated_peak_mib),
+        "required_headroom_mib": CAPACITY_HEADROOM_MIB,
+        "minimum_free_before_launch_mib": int(estimated_peak_mib)
+        + CAPACITY_HEADROOM_MIB,
+        "exclusive_max_prelaunch_used_mib": CAPACITY_EXCLUSIVE_MAX_USED_MIB,
+        "consecutive_clear_samples": 2,
+        "clear_sample_interval_seconds": 5,
+        "recheck_before_every_cell": True,
+        "protected_slots": [
+            {"node": node, "gpu": gpu} for node, gpu in PROTECTED_SLOTS
+        ],
+    }
