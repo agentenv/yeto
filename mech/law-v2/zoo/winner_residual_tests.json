@@ -1,0 +1,28 @@
+{
+ "winner": "H7-rho-floor-S",
+ "tests": {
+  "spearman_T": {
+   "statistic": 0.07732213841120693,
+   "pvalue": 0.4177478457844547,
+   "correlation": 0.07732213841120693
+  },
+  "spearman_mu": {
+   "statistic": 0.12117085076823006,
+   "pvalue": 0.20313844087999341,
+   "correlation": 0.12117085076823006
+  },
+  "spearman_S": {
+   "statistic": -0.09162237616058583,
+   "pvalue": 0.3366602831718882,
+   "correlation": -0.09162237616058583
+  },
+  "kruskal_convention": {
+   "statistic": 4.142474599188229,
+   "pvalue": 0.24648474628706868
+  },
+  "kruskal_scale": {
+   "statistic": 5.1118221115242415,
+   "pvalue": 0.0776214823449702
+  }
+ }
+}
