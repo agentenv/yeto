@@ -1,0 +1,65 @@
+{
+ "pooled_outer_rmse": 0.333953137722412,
+ "picks": {
+  "DISAMBIG": {
+   "selected": "C1sat-H7kin+align",
+   "inner_rmse": 0.34459106599172007,
+   "outer_rmse": 0.2120863316362684
+  },
+  "G12": {
+   "selected": "C1sat-H7kin",
+   "inner_rmse": 0.3350776596390584,
+   "outer_rmse": 0.2474626345454735
+  },
+  "G4C": {
+   "selected": "C1sat-H7kin",
+   "inner_rmse": 0.41732281118739784,
+   "outer_rmse": 0.5666513850985708
+  },
+  "G5B": {
+   "selected": "C1sat-H7kin",
+   "inner_rmse": 0.262740008857917,
+   "outer_rmse": 1.2204302458381113
+  },
+  "G6": {
+   "selected": "C1sat-H7kin",
+   "inner_rmse": 0.3815124008333604,
+   "outer_rmse": 0.21738762551711563
+  },
+  "G8": {
+   "selected": "C1sat-H7kin+align",
+   "inner_rmse": 0.34208436948400556,
+   "outer_rmse": 0.28062380879768484
+  },
+  "G9A": {
+   "selected": "C1sat+C3",
+   "inner_rmse": 0.4599863399937049,
+   "outer_rmse": 0.4866032030688706
+  },
+  "G9B": {
+   "selected": "C1sat-H7kin+align",
+   "inner_rmse": 0.3260461354925382,
+   "outer_rmse": 0.49396623979334536
+  },
+  "TP-pilot": {
+   "selected": "C1sat-H7kin+align",
+   "inner_rmse": 0.3395138174472047,
+   "outer_rmse": 0.1294195245545808
+  },
+  "TP-v1": {
+   "selected": "C1sat-H7kin+align",
+   "inner_rmse": 0.33954944630007666,
+   "outer_rmse": 0.29490602525225657
+  },
+  "TP-v2": {
+   "selected": "C1sat-H7kin+align",
+   "inner_rmse": 0.3474465242156579,
+   "outer_rmse": 0.24550296610586939
+  },
+  "TP-v3": {
+   "selected": "C1sat-H7kin",
+   "inner_rmse": 0.34436826055919895,
+   "outer_rmse": 0.2471596038807315
+  }
+ }
+}
