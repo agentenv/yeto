@@ -1,0 +1,226 @@
+{
+  "schema": "yeto_outer_mup_v16_pythia_redesign_prereg_v1",
+  "program_id": "outer-mup-v16-pythia-redesign",
+  "status": "REGISTERED_PRE_OUTCOME",
+  "registered_date": "2026-07-28",
+  "question": "With per-curve six-rung grids derived from the observed v13b failure directions and an estimator robust to the observed one-sided family noise, is D(2)>D(5)>D(20) evaluable in Pythia-160M on UltraChat?",
+  "authority": {
+    "scope": "DESIGN_AND_GATESIM_ONLY",
+    "launch_authority": "NONE",
+    "nodes_offline": true,
+    "new_program_not_amendment": "v16 does not alter or rescue the immutable G13 or G13B verdicts. It is the newly designed prospective study required by v13b's registered no-further-regrid rule.",
+    "forbidden_now": [
+      "create a v16 result root, attempt directory, launch manifest, queue, or controller",
+      "start or reserve an H200 process",
+      "discard a finite scientific-divergence loss",
+      "recenter or extend a v16 curve after any v16 outcome"
+    ],
+    "future_launch_prerequisites": [
+      "a clean pushed descendant preserving this scientific contract",
+      "a frozen robust analyzer and loss-blind 612-cell manifest",
+      "byte-identical model and materialized UltraChat inputs on execution nodes",
+      "a separate explicit launch authority created before any v16 loss exists"
+    ]
+  },
+  "v13b_trigger": {
+    "canonical_readout": {
+      "path_on_registration_mac": "/private/tmp/v13b-control/v13b-readout.json",
+      "sha256": "868d8aaa3c422bdb4475302d2071ca0082108e813aab70c5f9061ef90f156f48",
+      "cpu_archive_status": "missing"
+    },
+    "contract_sha256": "558efacc80f81598d6cf7037ee3202660298b79d4769cea43a7caa8095f0db9b",
+    "analyzer_sha256": "baf1cc89996960ec869a79606dcef8d61c69a77a7b46a6cfecaeeb4160ca8927",
+    "analysis_core_sha256": "810256b6f897c2347aabaddfe266b07a866835885c25e623b6da3d08aedb53cd",
+    "verdict": "G13B NOT_EVALUABLE",
+    "complete_cells": 72,
+    "accepted_curves": 3,
+    "valid_shared_bootstrap_refits": 0,
+    "curve_diagnostics": {
+      "T2_mu0": {"status": "NEAR_BRACKETED", "eta_star": 0.007959003015874582},
+      "T2_mu09": {"status": "NEAR_BRACKETED", "eta_star": 0.0034223165582977205},
+      "T5_mu0": {"status": "UNBRACKETED_LOWER_ETA", "failed_low_edge": 0.005427397642553673},
+      "T5_mu09": {"status": "UNBRACKETED_LOWER_ETA", "failed_low_edge": 0.0014891323817427511},
+      "T20_mu0": {"status": "UNBRACKETED_HIGHER_ETA", "failed_high_edge": 0.1754097492953639, "negative_curvature": true},
+      "T20_mu09": {"status": "INTERIOR", "eta_star": 0.0004249680901238146}
+    },
+    "noise_diagnostics": {
+      "T20_mu0_observed_single_cell_nll": 135.4878053768951,
+      "T20_mu0_one_sided_residual_above_rung_median": 129.75700971048354,
+      "T20_mu09_observed_single_cell_nll": 48.135418420031066,
+      "T20_mu09_one_sided_residual_above_rung_median": 39.37726015831847,
+      "rule": "Both finite values remain scientific data. Their one-sided incidence and amplitude are included in gatesim rather than censored."
+    }
+  },
+  "model_and_data": {
+    "model": {
+      "id": "EleutherAI/pythia-160m",
+      "revision": "50f5173d932e8e61f858120bcb800b97af589f46",
+      "architecture": "GPTNeoXForCausalLM",
+      "exact_parameters": 162322944,
+      "canonical_inventory_sha256": "49840eba946d992e68bded1e7dc3688a8b0186416bd4e2c9b27026d602699b19"
+    },
+    "dataset": {
+      "id": "HuggingFaceH4/ultrachat_200k",
+      "revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+      "train_split": "train_sft",
+      "eval_split": "test_sft",
+      "train": {
+        "path": "/root/yeto-data/tonight85-v13/train.jsonl",
+        "rows": 15000,
+        "bytes": 88832649,
+        "sha256": "f9bcb68e84370667cfe2418450c9fcd112cd0cc9236936e48e3aa35f9dd27ace"
+      },
+      "eval": {
+        "path": "/root/yeto-data/tonight85-v13/eval.jsonl",
+        "rows": 1024,
+        "bytes": 6034403,
+        "sha256": "08ac254552fbd6529c68577c94920e4f33f6e75b5c94c518350c18948ec48df4"
+      },
+      "input_manifest_sha256": "b77b353dcc8a548c8e4ff31a252ed74919f325482795a15732b4ae9261b08164",
+      "v13_input_builder_sha256": "73c6e34c8e7f9e7d4065e11cef4b9b7be7780483bfa4a4186dee854e2c2d6229"
+    },
+    "same_bytes_as_v13b_required": true
+  },
+  "common_protocol": {
+    "S": 2560,
+    "horizons": [
+      {"T": 2, "H": 1280, "S": 2560},
+      {"T": 5, "H": 512, "S": 2560},
+      {"T": 20, "H": 128, "S": 2560}
+    ],
+    "arms": [
+      {"id": "mu0", "mu": 0.0, "outer_bias_correction": false},
+      {"id": "mu09", "mu": 0.9, "outer_bias_correction": false}
+    ],
+    "learner_count": 4,
+    "sequence_length": 128,
+    "inner_optimizer": "AdamW",
+    "inner_learning_rate": 0.001,
+    "inner_weight_decay": 0.01,
+    "inner_warmup_steps": 10,
+    "outer_optimizer": "production raw Nesterov",
+    "matrix_merge": "RDA",
+    "merge_alpha": 0.5,
+    "fragment_count": 4,
+    "fragment_pattern": "binpack",
+    "barrier_sync": true,
+    "strict_quorum": true,
+    "version_matched_anchor": true,
+    "pipeline_depth": 4,
+    "wire_dtype": "bf16",
+    "primary_outcome": "fixed 1024-row UltraChat endpoint NLL per supervised token"
+  },
+  "grid_construction": {
+    "center_rule": {
+      "accepted_v13b_curve": "center at the measured v13b fitted eta_star",
+      "lower_eta_failure": "center=failed_low_edge/sqrt(2)",
+      "higher_eta_failure": "center=failed_high_edge*sqrt(2)",
+      "rationale": "The failed edge becomes the +0.5 rung for a lower failure or the -0.5 rung for a higher failure, leaving three newly registered rungs in the observed failure direction."
+    },
+    "offsets_log2": [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5],
+    "adjacent_ratio": 2.0,
+    "curves": {
+      "T2_mu0": {
+        "center": 0.007959003015874582,
+        "source_rule": "accepted v13b eta_star",
+        "etas": [0.0014069662510022751, 0.0028139325020045502, 0.0056278650040091005, 0.011255730008018201, 0.022511460016036402, 0.045022920032072804]
+      },
+      "T2_mu09": {
+        "center": 0.0034223165582977205,
+        "source_rule": "accepted v13b eta_star",
+        "etas": [0.0006049858114348312, 0.0012099716228696623, 0.0024199432457393246, 0.004839886491478649, 0.009679772982957299, 0.019359545965914597]
+      },
+      "T5_mu0": {
+        "center": 0.0038377496772455835,
+        "source_rule": "0.005427397642553673/sqrt(2)",
+        "etas": [0.0006784247053192091, 0.0013568494106384183, 0.0027136988212768365, 0.005427397642553673, 0.010854795285107346, 0.021709590570214692]
+      },
+      "T5_mu09": {
+        "center": 0.0010529756052147737,
+        "source_rule": "0.0014891323817427511/sqrt(2)",
+        "etas": [0.0001861415477178439, 0.0003722830954356878, 0.0007445661908713756, 0.0014891323817427511, 0.0029782647634855022, 0.0059565295269710045]
+      },
+      "T20_mu0": {
+        "center": 0.2480668464259681,
+        "source_rule": "0.1754097492953639*sqrt(2); the v13b negative-curvature vertex is not used as truth",
+        "etas": [0.04385243732384098, 0.08770487464768197, 0.17540974929536393, 0.35081949859072786, 0.7016389971814557, 1.4032779943629115]
+      },
+      "T20_mu09": {
+        "center": 0.0004249680901238146,
+        "source_rule": "accepted v13b eta_star",
+        "etas": [0.0000751244545786113, 0.0001502489091572226, 0.0003004978183144452, 0.0006009956366288904, 0.001201991273257781, 0.002403982546515562]
+      }
+    },
+    "immutability": "All 36 eta decimals are exact. No rung may be clipped for being large, moved, extended, or removed after registration."
+  },
+  "seeds_and_cells": {
+    "fresh_seeds": [1601, 1607, 1609, 1613, 1619, 1621, 1627, 1637, 1657, 1663, 1667, 1669, 1693, 1697, 1699, 1709, 1721],
+    "training_seed_rule": "decimal concatenation seed||seed",
+    "why_17": "The measured one-in-three Pythia divergence profile does not clear P_evaluable>=0.80 with the conventional three-seed mean. Seventeen seeds plus a rung median and 70% valid-refit threshold is the smallest prospectively tested robust design retained here that clears the bar under the full registered gatesim.",
+    "cell_count_identity": "3 T * 2 arms * 6 etas * 17 seeds = 612",
+    "cell_count": 612
+  },
+  "analysis_contract": {
+    "rung_estimator": "median endpoint NLL across all 17 registered seed values at the exact rung",
+    "scientific_divergence_rule": "Every finite value remains in the ordered sample and evidence package. The median is the registered estimand; no value is deleted, winsorized, or replaced.",
+    "curve_fit": "OLS loss=a*x^2+b*x+c through the six rung medians, x=log2(eta)",
+    "acceptance": "a>0 and the unconstrained vertex lies strictly inside [min_registered_x-0.5,max_registered_x+0.5]; report INTERIOR versus NEAR_BRACKETED and never clip the vertex",
+    "D_definition": "D(T)=[eta_star(T,mu=.9)/eta_star(T,mu=0)]/(1-.9)",
+    "bootstrap": {
+      "method": "paired nonparametric seed bootstrap; one shared 17-index resample recomputes every rung median and all six quadratics",
+      "replicates": 10000,
+      "rng_seed": 2026081601,
+      "minimum_valid_all_six_refits": 7000,
+      "intervals": "equal-tailed 95% percentile intervals for log2 D and adjacent differences; invalid refits are counted"
+    },
+    "gate": {
+      "name": "G16",
+      "closed_vocabulary": ["SECOND_FAMILY_MONOTONE", "SECOND_FAMILY_NONMONOTONE", "SECOND_FAMILY_NOT_EVALUABLE"],
+      "SECOND_FAMILY_MONOTONE": "all 612 cells are valid, all six point fits are accepted, at least 7000 shared refits are valid, D(2)>D(5)>D(20), and both adjacent log2-D 95% interval lower endpoints are >0",
+      "SECOND_FAMILY_NONMONOTONE": "complete evaluable evidence that does not meet every monotonicity condition",
+      "SECOND_FAMILY_NOT_EVALUABLE": "missing/invalid evidence, any unaccepted point fit, or fewer than 7000 all-six valid refits"
+    },
+    "no_regrid": "Any NOT_EVALUABLE v16 outcome remains final for v16. It cannot authorize a seventh rung or an in-program estimator change."
+  },
+  "gate_feasibility": {
+    "simulator": {
+      "path": "experiment-specs/v2pack-gatesim.py",
+      "sha256": "ec23cf6e762d7b65f8740d770646e34698cc9d1a8ad2cb6a98fcb6a0b4b5c5d5"
+    },
+    "report": {
+      "path": "experiment-specs/outer-mup-v16-pythia-redesign-gatesim.json",
+      "sha256": "973aee242973c9711185d28c058af2d0763f92c475bd7f25d755bdca09906419"
+    },
+    "replicates": 20000,
+    "rng_seed": 20260816,
+    "P_evaluable": 0.8247,
+    "mandatory_P_evaluable": 0.8,
+    "P_monotone_pass_given_evaluable_under_declared_alternative": 1.0,
+    "P_monotone_pass_unconditional_under_declared_alternative": 0.8247,
+    "per_curve_P_accepted": {
+      "T2_mu0": 1.0,
+      "T2_mu09": 1.0,
+      "T5_mu0": 1.0,
+      "T5_mu09": 1.0,
+      "T20_mu0": 0.9225,
+      "T20_mu09": 1.0
+    },
+    "status": "PASS",
+    "noise_model": "curve-specific robust core scales from v13b plus paired one-in-three one-sided spikes at their measured 129.757010 and 39.377260 NLL amplitudes",
+    "interpretation": "The declared monotone alternative places truth at the registered centers solely to test gate mechanics. Its extreme T20 center ratio is not scientific evidence or a prediction that the family law is true."
+  },
+  "evidence_and_retry": {
+    "completed_cell_requires": [
+      "exact source, model, data, command, seed, T,H,S,mu,eta identity",
+      "four learners each complete exactly S steps",
+      "exactly 4*T strict-quorum fragment commits and matching telemetry",
+      "finite 1024-row endpoint and successful exits",
+      "hashes for all command, result, evidence, tape, telemetry, and checkpoint artifacts"
+    ],
+    "attempt_limit": 2,
+    "allowed_retry_reasons": ["host or GPU failure", "framework or driver failure", "storage or network failure", "registered timeout without a valid endpoint"],
+    "retry_unit": "all six eta rungs sharing T,arm,seed",
+    "finite_scientific_divergence_retry_forbidden": true,
+    "fit_or_bootstrap_failure_retry_forbidden": true
+  }
+}

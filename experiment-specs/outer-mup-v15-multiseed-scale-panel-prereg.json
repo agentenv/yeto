@@ -1,0 +1,232 @@
+{
+  "schema": "yeto_outer_mup_v15_multiseed_scale_panel_prereg_v1",
+  "program_id": "outer-mup-v15-multiseed-scale-panel",
+  "status": "REGISTERED_PRE_OUTCOME",
+  "registered_date": "2026-07-28",
+  "question": "After removing the measured model-scale common drift, does the finite-age raw-vs-no-momentum rate structure replicate across fresh seeds at 7B, and is the same decomposition informative for a 27B LoRA arm?",
+  "authority": {
+    "scope": "DESIGN_AND_GATESIM_ONLY",
+    "launch_authority": "NONE",
+    "nodes_offline": true,
+    "forbidden_now": [
+      "create a v15 result root, attempt directory, launch manifest, queue, or controller",
+      "start or reserve any H200 process",
+      "replace multi-seed evidence with the one-seed G9 interval",
+      "make the arm-relative verdict conditional on the absolute verdict"
+    ],
+    "future_launch_prerequisites": [
+      "a clean pushed descendant preserving this scientific contract",
+      "a hash-frozen analyzer mechanically implementing both independent gates",
+      "loss-blind materialization and launch manifests for exactly the registered cells",
+      "a separate explicit launch authority created before any v15 loss exists"
+    ],
+    "outcome_aware_changes_forbidden": "No model, horizon, arm, seed, grid, drift correction, band, gate multiplicity rule, or relative/absolute independence rule may change after any v15 endpoint exists."
+  },
+  "measured_drift_calibration": {
+    "source": {
+      "joint_G9_readout_sha256": "4d42a5f133684822f0fc81c69c3348610c7b3824836b1ecf937abb6e9515bcaf",
+      "canonical_location": "/root/g9-joint-readout.json in the original control plane; missing from the CPU evacuation archive",
+      "frozen_analyzer_sha256": "ef140f0a3e6d2a543bf6f422af85ec716dd4b355c65961ad5ba5a100335f1ea1"
+    },
+    "observed_signed_prediction_errors_bits": {
+      "smollm2_1p7b_raw": -0.399360,
+      "smollm2_1p7b_corrected": -0.399316,
+      "qwen2p5_7b_mu0": -0.496872,
+      "qwen2p5_7b_raw": -0.548779,
+      "qwen2p5_7b_raw_minus_mu0": -0.051907
+    },
+    "registered_common_drift_law": {
+      "1p7B_bits": -0.4,
+      "7B_bits": -0.5,
+      "formula": "c(P)=-0.50+[(-0.50)-(-0.40)]/log2(7/1.7)*log2(P_B/7)",
+      "slope_bits_per_log2_parameter_octave": -0.0489759094313876,
+      "27B_extrapolated_bits": -0.5953821792579415
+    },
+    "interpretation": "This is an empirical two-point common-mode calibration, not a universal model-scaling law. The 27B value is explicitly an extrapolation and the LoRA regime may differ."
+  },
+  "bands": {
+    "drift_corrected_absolute_half_width_bits": 0.21,
+    "absolute_derivation": "round outward from 4*abs(-0.548779-(-0.496872))=0.207628 bits after extracting the measured 7B common mode",
+    "arm_relative_half_width_bits": 0.16,
+    "relative_derivation": "round outward from 3*abs(-0.548779-(-0.496872))=0.155721 bits",
+    "separation_rule": "The absolute and arm-relative bands define different gates. Passing or failing either gate cannot alter the other gate's evaluability, arithmetic, or verdict."
+  },
+  "common_outer_protocol": {
+    "learner_count": 4,
+    "H": 512,
+    "sequence_length": 128,
+    "inner_optimizer": "AdamW",
+    "inner_weight_decay": 0.01,
+    "inner_warmup_steps": 10,
+    "outer_optimizer": "production raw Nesterov for mu=.9; identical implementation with mu=0 for reference",
+    "outer_bias_correction": false,
+    "matrix_merge": "RDA",
+    "merge_alpha": 0.5,
+    "fragment_count": 4,
+    "fragment_pattern": "binpack",
+    "barrier_sync": true,
+    "strict_quorum": true,
+    "version_matched_anchor": true,
+    "wire_dtype": "bf16",
+    "development_eval_rows": 1024
+  },
+  "qwen2p5_7b_full_panel": {
+    "role": "PRIMARY_MULTI_SEED_CONFIRMATION",
+    "model": "Qwen/Qwen2.5-7B",
+    "revision": "d149729398750b98c0af14eb82c78cfe92750796",
+    "exact_parameters": 7615616512,
+    "tuning": "full parameter FSDP",
+    "inner_learning_rate": 0.001,
+    "horizons": [
+      {"T": 2, "H": 512, "S": 1024},
+      {"T": 5, "H": 512, "S": 2560},
+      {"T": 20, "H": 512, "S": 10240}
+    ],
+    "arms": [
+      {"id": "mu0", "mu": 0.0},
+      {"id": "raw_mu0p9", "mu": 0.9}
+    ],
+    "fresh_seeds": [1501, 1511, 1523],
+    "training_seed_rule": "decimal concatenation seed||seed",
+    "eta_grid": {
+      "point_count": 6,
+      "offsets_log2_from_center": [-1.25, -0.75, -0.25, 0.25, 0.75, 1.25],
+      "adjacent_ratio": "sqrt(2)",
+      "exact_values": "enumerated under registered_grids.qwen2p5_7b_full in the hash-bound gatesim report"
+    },
+    "registered_corrected_centers": {
+      "T2": {"mu0": 0.01565487295663112, "raw_mu0p9": 0.006946046529055313},
+      "T5": {"mu0": 0.007827013, "raw_mu0p9": 0.00207163},
+      "T20": {"mu0": 0.002742329933990083, "raw_mu0p9": 0.00025623703597136026}
+    },
+    "center_derivation": {
+      "T5": "the G9 fitted values are calibration-only placements; v15 repeats them with three new seeds and a wider six-rung ladder",
+      "mu0_T2_T20": "transport T5 with the frozen 1.7B fixed-H mu0 slope -0.756529843311295 in log eta versus log T",
+      "raw_T2_T20": "transport the measured T5 raw/mu0 ratio by the frozen G6-selected F3 D(T,S=512T) ratio",
+      "claim_boundary": "Because the -0.50 correction and T5 centers use G9, v15 tests prospective fresh-seed replication and horizon transport, not an untouched zero-shot 7B prediction."
+    },
+    "cell_count_identity": "3 T * 2 arms * 6 etas * 3 seeds = 108",
+    "cell_count": 108
+  },
+  "qwen3p6_27b_lora_panel": {
+    "role": "SEPARATELY_LABELED_SCALE_EXTENSION",
+    "model": "Qwen/Qwen3.6-27B",
+    "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
+    "text_parameters": 26895998464,
+    "tuning": "LoRA",
+    "lora": {
+      "rank": 16,
+      "alpha": 32,
+      "resolved_targets": "all-linear",
+      "trainable_parameters": 116727808
+    },
+    "hardware_shape_for_future_execution": {
+      "learner_islands": 2,
+      "gpus_per_island": 4,
+      "gpus_per_cell": 8,
+      "replicated_adapter_gradient_rule": "SUM all-reduce divided by world size before clipping and AdamW"
+    },
+    "inner_learning_rate": 0.0003,
+    "horizons": [
+      {"T": 5, "H": 512, "S": 2560},
+      {"T": 20, "H": 512, "S": 10240}
+    ],
+    "arms": [
+      {"id": "mu0", "mu": 0.0},
+      {"id": "raw_mu0p9", "mu": 0.9}
+    ],
+    "fresh_seeds": [1501, 1511, 1523],
+    "eta_grid": {
+      "point_count": 6,
+      "offsets_log2_from_center": [-1.25, -0.75, -0.25, 0.25, 0.75, 1.25],
+      "adjacent_ratio": "sqrt(2)",
+      "exact_values": "enumerated under registered_grids.qwen3p6_27b_lora in the hash-bound gatesim report"
+    },
+    "uncorrected_v7_placement_centers": {
+      "T5": {"mu0": 0.28, "raw_mu0p9": 0.04876524225940787},
+      "T20": {"mu0": 0.09810286267791088, "raw_mu0p9": 0.012563978169976779}
+    },
+    "drift_corrected_absolute_predictions": {
+      "rule": "uncorrected placement * 2^(-0.5953821792579415)",
+      "T5": {"mu0": 0.1853233475974399, "raw_mu0p9": 0.03227620693540575},
+      "T20": {"mu0": 0.06493125328700854, "raw_mu0p9": 0.008315708905718762}
+    },
+    "cell_count_identity": "2 T * 2 arms * 6 etas * 3 seeds = 72",
+    "cell_count": 72,
+    "claim_boundary": "The 27B common correction extrapolates a two-point full-tuning law into LoRA. Its verdict is secondary and cannot rescue or invalidate either primary 7B gate."
+  },
+  "total_cell_count": 180,
+  "analysis_contract": {
+    "primary_outcome": "finite fixed-development endpoint NLL per supervised token",
+    "curve_estimator": "For each model,T,arm fit loss=a*x^2+b*x+c by OLS to the three-seed mean at all six exact x=log2(eta) rungs.",
+    "curve_acceptance": "a>0 and the unconstrained vertex lies strictly between min(grid)-0.25 and max(grid)+0.25 log2 bits; INTERIOR and accepted NEAR_BRACKETED statuses are both retained; never clip a vertex",
+    "bootstrap": {
+      "method": "shared paired nonparametric training-seed bootstrap across every curve; all six rungs refit",
+      "replicates": 10000,
+      "rng_seed": 2026081501,
+      "minimum_valid_all_curve_refits": 8000,
+      "interval": "equal-tailed 95% percentile intervals; invalid refits counted, never silently dropped"
+    },
+    "absolute_error": "log2(fitted_eta_star/base_prediction)-c(P), equivalently log2(fitted_eta_star/drift_corrected_prediction)",
+    "arm_relative_error": "[log2(eta_raw/eta_mu0)-registered log2 raw/mu0 ratio] at the same model,T; the common c(P) term cancels algebraically",
+    "missing_rule": "Any missing, invalid, nonfinite, or unaccepted required curve makes only the gate requiring that curve NOT_EVALUABLE; it cannot force the other independent gate to FAIL."
+  },
+  "independent_gates": {
+    "G15A_7B_ABSOLUTE": {
+      "closed_vocabulary": ["ABSOLUTE_TRANSPORT_PASS", "ABSOLUTE_TRANSPORT_FAIL", "ABSOLUTE_TRANSPORT_NOT_EVALUABLE"],
+      "pass": "at least 5 of the 6 accepted 7B curve point errors have abs(error)<=0.21 bits and at least 8000 shared bootstrap refits are valid",
+      "fail": "complete accepted evidence with fewer than 5 of 6 in band",
+      "not_evaluable": "any required 7B curve/evidence failure or fewer than 8000 valid shared refits"
+    },
+    "G15R_7B_ARM_RELATIVE": {
+      "closed_vocabulary": ["ARM_RELATIVE_TRANSPORT_PASS", "ARM_RELATIVE_TRANSPORT_FAIL", "ARM_RELATIVE_TRANSPORT_NOT_EVALUABLE"],
+      "pass": "at least 2 of the 3 7B horizon point errors have abs(error)<=0.16 bits and at least 8000 relative bootstrap refits are valid",
+      "fail": "complete accepted relative evidence with fewer than 2 of 3 in band",
+      "not_evaluable": "a ratio-required curve/evidence failure or fewer than 8000 valid relative refits",
+      "independence": "This verdict is computed and published even when G15A fails or is not evaluable."
+    },
+    "G15A_27B_LORA_ABSOLUTE_SECONDARY": {
+      "closed_vocabulary": ["LORA_ABSOLUTE_PASS", "LORA_ABSOLUTE_FAIL", "LORA_ABSOLUTE_NOT_EVALUABLE"],
+      "pass": "at least 3 of 4 accepted 27B-LoRA curve point errors have abs(error)<=0.21 bits"
+    },
+    "G15R_27B_LORA_RELATIVE_SECONDARY": {
+      "closed_vocabulary": ["LORA_ARM_RELATIVE_PASS", "LORA_ARM_RELATIVE_FAIL", "LORA_ARM_RELATIVE_NOT_EVALUABLE"],
+      "pass": "at least 1 of 2 accepted 27B-LoRA horizon relative errors has abs(error)<=0.16 bits"
+    },
+    "no_joint_override": "There is no omnibus verdict that converts one gate's failure into another gate's failure. All four labels and numeric estimates are reported separately."
+  },
+  "gate_feasibility": {
+    "simulator": {
+      "path": "experiment-specs/v2pack-gatesim.py",
+      "sha256": "ec23cf6e762d7b65f8740d770646e34698cc9d1a8ad2cb6a98fcb6a0b4b5c5d5"
+    },
+    "report": {
+      "path": "experiment-specs/outer-mup-v15-multiseed-scale-panel-gatesim.json",
+      "sha256": "81d38fbb11c7b621a82738fc57e5c77f1584163319ea4679c4505ad804cac560"
+    },
+    "replicates": 20000,
+    "rng_seed": 20260815,
+    "P_evaluable": 1.0,
+    "P_7B_ABSOLUTE_TRANSPORT_PASS": 0.9981,
+    "P_7B_ARM_RELATIVE_TRANSPORT_PASS": 0.999,
+    "P_7B_both_pass": 0.9971,
+    "P_7B_relative_pass_while_absolute_fails": 0.0019,
+    "P_27B_ABSOLUTE_TRANSPORT_PASS": 0.98925,
+    "P_27B_ARM_RELATIVE_TRANSPORT_PASS": 0.99315,
+    "mandatory_P_evaluable": 0.8,
+    "status": "PASS",
+    "interpretation": "The simulation preserves a shared common-mode term before arm subtraction and applies 1.5x the measured residual scale to LoRA. It validates decision separation and power under the calibrated alternative, not the scientific transport law."
+  },
+  "retry_contract": {
+    "attempt_limit": 2,
+    "allowed_reasons": [
+      "host_or_gpu failure",
+      "framework or driver failure",
+      "storage or network failure",
+      "registered process timeout without a valid endpoint"
+    ],
+    "retry_unit": "all six eta rungs sharing model,T,arm,seed",
+    "finite_loss_or_bad_fit_retry_forbidden": true,
+    "recenter_or_band_change_forbidden": true
+  }
+}

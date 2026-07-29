@@ -1,0 +1,257 @@
+{
+  "band_derivation": {
+    "absolute_half_width_bits": 0.21,
+    "absolute_rule": "round outward to 0.21 from 4*abs(measured 7B raw-minus-mu0 residual)=0.207628 bits",
+    "arm_relative_half_width_bits": 0.16,
+    "drift_correction_bits": {
+      "qwen2p5_7b_full": -0.5,
+      "qwen3p6_27b_lora": -0.5953821792579415
+    },
+    "drift_slope_bits_per_log2_parameter_octave": -0.04897590943138761,
+    "relative_rule": "round outward to 0.16 from 3*abs(measured 7B raw-minus-mu0 residual)=0.155721 bits"
+  },
+  "noise_model": {
+    "27b_lora": "per horizon, shared common-mode N(0,0.12^2/n) plus independent arm N(0,(1.5*0.063219)^2/n); raw arm shifted by measured -0.051907-bit residual",
+    "7b": "per horizon, shared common-mode N(0,0.10^2/n) plus independent arm N(0,0.063219^2/n); raw arm shifted by measured -0.051907-bit residual",
+    "common_mode_is_shared_before_arm_subtraction": true
+  },
+  "pre_outcome": true,
+  "registered_grids": {
+    "qwen2p5_7b_full": {
+      "T2": {
+        "mu0": {
+          "center": 0.01565487295663112,
+          "etas": [
+            0.006582063275241713,
+            0.009308443152244704,
+            0.013164126550483426,
+            0.01861688630448941,
+            0.026328253100966852,
+            0.03723377260897882
+          ],
+          "offsets_log2": [
+            -1.25,
+            -0.75,
+            -0.25,
+            0.25,
+            0.75,
+            1.25
+          ]
+        },
+        "raw_mu0p9": {
+          "center": 0.006946046529055313,
+          "etas": [
+            0.002920452813234059,
+            0.0041301439767462665,
+            0.005840905626468118,
+            0.008260287953492533,
+            0.011681811252936236,
+            0.016520575906985066
+          ],
+          "offsets_log2": [
+            -1.25,
+            -0.75,
+            -0.25,
+            0.25,
+            0.75,
+            1.25
+          ]
+        }
+      },
+      "T20": {
+        "mu0": {
+          "center": 0.002742329933990083,
+          "etas": [
+            0.0011530077054676083,
+            0.0016305991345929745,
+            0.0023060154109352166,
+            0.003261198269185949,
+            0.004612030821870433,
+            0.006522396538371898
+          ],
+          "offsets_log2": [
+            -1.25,
+            -0.75,
+            -0.25,
+            0.25,
+            0.75,
+            1.25
+          ]
+        },
+        "raw_mu0p9": {
+          "center": 0.00025623703597136026,
+          "etas": [
+            0.00010773440250177697,
+            0.00015235945315217488,
+            0.00021546880500355393,
+            0.00030471890630434976,
+            0.00043093761000710787,
+            0.0006094378126086995
+          ],
+          "offsets_log2": [
+            -1.25,
+            -0.75,
+            -0.25,
+            0.25,
+            0.75,
+            1.25
+          ]
+        }
+      },
+      "T5": {
+        "mu0": {
+          "center": 0.007827013,
+          "etas": [
+            0.003290853586922111,
+            0.004653969774409397,
+            0.006581707173844222,
+            0.009307939548818794,
+            0.013163414347688444,
+            0.018615879097637587
+          ],
+          "offsets_log2": [
+            -1.25,
+            -0.75,
+            -0.25,
+            0.25,
+            0.75,
+            1.25
+          ]
+        },
+        "raw_mu0p9": {
+          "center": 0.00207163,
+          "etas": [
+            0.0008710131203660263,
+            0.0012317985678265435,
+            0.0017420262407320526,
+            0.002463597135653087,
+            0.003484052481464105,
+            0.004927194271306174
+          ],
+          "offsets_log2": [
+            -1.25,
+            -0.75,
+            -0.25,
+            0.25,
+            0.75,
+            1.25
+          ]
+        }
+      }
+    },
+    "qwen3p6_27b_lora": {
+      "T20": {
+        "mu0": {
+          "center": 0.09810286267791088,
+          "etas": [
+            0.04124717277599134,
+            0.05833231114935326,
+            0.08249434555198268,
+            0.11666462229870651,
+            0.16498869110396536,
+            0.23332924459741303
+          ],
+          "offsets_log2": [
+            -1.25,
+            -0.75,
+            -0.25,
+            0.25,
+            0.75,
+            1.25
+          ]
+        },
+        "raw_mu0p9": {
+          "center": 0.012563978169976779,
+          "etas": [
+            0.005282502102229699,
+            0.007470586116237626,
+            0.010565004204459398,
+            0.014941172232475252,
+            0.021130008408918797,
+            0.029882344464950503
+          ],
+          "offsets_log2": [
+            -1.25,
+            -0.75,
+            -0.25,
+            0.25,
+            0.75,
+            1.25
+          ]
+        }
+      },
+      "T5": {
+        "mu0": {
+          "center": 0.28,
+          "etas": [
+            0.11772549813552004,
+            0.16648899610038095,
+            0.23545099627104008,
+            0.3329779922007619,
+            0.47090199254208015,
+            0.6659559844015238
+          ],
+          "offsets_log2": [
+            -1.25,
+            -0.75,
+            -0.25,
+            0.25,
+            0.75,
+            1.25
+          ]
+        },
+        "raw_mu0p9": {
+          "center": 0.04876524225940787,
+          "etas": [
+            0.020503258702457512,
+            0.028995986529859602,
+            0.041006517404915024,
+            0.057991973059719204,
+            0.08201303480983005,
+            0.11598394611943841
+          ],
+          "offsets_log2": [
+            -1.25,
+            -0.75,
+            -0.25,
+            0.25,
+            0.75,
+            1.25
+          ]
+        }
+      }
+    }
+  },
+  "schema": "yeto_outer_mup_v15_multiseed_scale_panel_gatesim_v1",
+  "scope": "bracketing and separate absolute/arm-relative gate feasibility; not evidence that scale transport is true",
+  "simulation": {
+    "P_27B_ABSOLUTE_TRANSPORT_PASS": 0.98925,
+    "P_27B_ARM_RELATIVE_TRANSPORT_PASS": 0.99315,
+    "P_7B_ABSOLUTE_TRANSPORT_PASS": 0.9981,
+    "P_7B_ARM_RELATIVE_TRANSPORT_PASS": 0.999,
+    "P_7B_both_pass": 0.9971,
+    "P_7B_relative_pass_while_absolute_fails": 0.0019,
+    "P_evaluable": 1.0,
+    "mandatory_P_evaluable": 0.8,
+    "replicates": 20000,
+    "rng_seed": 20260815,
+    "seeds": [
+      1501,
+      1511,
+      1523
+    ],
+    "seeds_per_arm": 3
+  },
+  "sources": {
+    "g4c_readout_sha256": "16bab85dce3a83f42c8b1c91be8d91eb1ec1372cfba572f2ffd9b491044b04aa",
+    "g9_joint_readout_sha256": "4d42a5f133684822f0fc81c69c3348610c7b3824836b1ecf937abb6e9515bcaf",
+    "observed_7b_raw_minus_mu0_residual_bits": -0.051907000000000036,
+    "observed_common_mode_drift_bits": {
+      "1p7B": -0.4,
+      "7B": -0.5
+    },
+    "v7_maximum_coordinate_seed_sd": 0.25699220611018175,
+    "v7_pooled_residual_population_sd": 0.0632194750783273
+  },
+  "status": "PASS"
+}
