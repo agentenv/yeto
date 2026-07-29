@@ -2383,6 +2383,19 @@ def _size_conditioning_tensor(
     ).repeat(int(noisy.latents.shape[0]), 1)
 
 
+def _aspect_ratio_conditioning_tensor(
+    noisy: LatentBatch,
+    height: int,
+    width: int,
+) -> torch.Tensor:
+    return torch.full(
+        (int(noisy.latents.shape[0]), 1),
+        float(height) / float(width),
+        device=noisy.latents.device,
+        dtype=noisy.latents.dtype,
+    )
+
+
 def _crop_conditioning_tensor(noisy: LatentBatch) -> torch.Tensor:
     return torch.zeros(
         (int(noisy.latents.shape[0]), 2),
@@ -2579,7 +2592,15 @@ def log_diffusion_parameter_effects(pipe, args, adapter=None) -> None:
         log.warning("diffusion parameter ignored: %s", item)
 
 
-def _auto_fill_denoiser_kwargs(pipe, noisy: LatentBatch, cond: TextConditioning, args, params, kwargs) -> None:
+def _auto_fill_denoiser_kwargs(
+    pipe,
+    model,
+    noisy: LatentBatch,
+    cond: TextConditioning,
+    args,
+    params,
+    kwargs,
+) -> None:
     grid = _latent_token_grid(noisy) or (None, None, None)
     pixel_height, pixel_width = _pixel_shape_from_latents(pipe, noisy, args)
     values = {
@@ -2637,6 +2658,32 @@ def _auto_fill_denoiser_kwargs(pipe, noisy: LatentBatch, cond: TextConditioning,
     if "crops_coords_top_left" in params and "crops_coords_top_left" not in kwargs:
         kwargs["crops_coords_top_left"] = _crop_conditioning_tensor(noisy)
 
+    additional_conditions = getattr(model, "use_additional_conditions", None)
+    if additional_conditions is None:
+        additional_conditions = _config_value(
+            getattr(model, "config", None),
+            "use_additional_conditions",
+        )
+    if (
+        "added_cond_kwargs" in params
+        and "added_cond_kwargs" not in kwargs
+        and additional_conditions
+    ):
+        resolution = _size_conditioning_tensor(noisy, pixel_height, pixel_width)
+        if resolution is None:
+            raise RuntimeError(
+                "denoiser requires additional size conditions, but pixel height/width "
+                "are unavailable; set --height/--width or provide latent shape metadata"
+            )
+        kwargs["added_cond_kwargs"] = {
+            "resolution": resolution,
+            "aspect_ratio": _aspect_ratio_conditioning_tensor(
+                noisy,
+                pixel_height,
+                pixel_width,
+            ),
+        }
+
     if _auto_guidance_enabled(pipe, params) and "guidance" not in kwargs:
         kwargs["guidance"] = _guidance_value(pipe, args, noisy)
 
@@ -2649,6 +2696,10 @@ def _auto_fill_denoiser_kwargs(pipe, noisy: LatentBatch, cond: TextConditioning,
     if "fps" in params and "fps" not in kwargs:
         kwargs["fps"] = frame_rate
 
+    has_encoder_mask = any(
+        name in params
+        for name in ("encoder_attention_mask", "encoder_hidden_states_mask")
+    )
     for name in (
         "attention_mask",
         "encoder_hidden_states_mask",
@@ -2656,6 +2707,8 @@ def _auto_fill_denoiser_kwargs(pipe, noisy: LatentBatch, cond: TextConditioning,
         "prompt_embeds_mask",
         "prompt_attention_mask",
     ):
+        if name == "attention_mask" and has_encoder_mask:
+            continue
         if name in params and name not in kwargs:
             kwargs[name] = cond.attention_mask
 
@@ -2715,7 +2768,7 @@ def _denoise_forward_one(pipe, model, noisy: LatentBatch, timesteps, cond: TextC
         kwargs["width"] = int(noisy.latent_width)
     if "return_dict" in params:
         kwargs["return_dict"] = False
-    _auto_fill_denoiser_kwargs(pipe, noisy, cond, args, params, kwargs)
+    _auto_fill_denoiser_kwargs(pipe, inspect_model, noisy, cond, args, params, kwargs)
     autocast = nullcontext()
     if accel.is_accelerator(noisy.latents.device) and noisy.latents.dtype in (
         torch.float16,
@@ -2854,6 +2907,13 @@ def _align_prediction_and_target(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if tuple(pred.shape) == tuple(target.shape):
         return pred, target
+    if (
+        pred.ndim == target.ndim == 4
+        and pred.shape[0] == target.shape[0]
+        and pred.shape[2:] == target.shape[2:]
+        and pred.shape[1] == 2 * target.shape[1]
+    ):
+        return pred[:, : target.shape[1]], target
     if (
         pred.ndim == target.ndim == 3
         and pred.shape[0] == target.shape[0]

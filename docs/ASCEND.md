@@ -213,13 +213,16 @@ diffusion adapters remain a separate, unverified boundary on this hardware.
 
 ## Validation status
 
-- ✅ Unit and regression tests (2026-07-28): 148 passed in the Ascend container
-  for the diffusion/accelerator/learner-focused suites (8 launcher-only tests
-  deselected because that image does not contain SkyPilot); 726 passed and 4
-  skipped for the complete Python suite on the development host; all 56 Rust
-  syncer tests passed. Coverage includes selected-family backend resolution,
-  explicit-device rank binding, accelerator-aware process-group setup, NPU
-  diffusion dtype/RNG dispatch, and the NPU loss-metric dtype.
+- ✅ Unit and regression tests: 148 passed in the Ascend container on
+  2026-07-28 for the diffusion/accelerator/learner-focused suites (8
+  launcher-only tests deselected because that image does not contain
+  SkyPilot). After the PixArt fixes, 17 focused denoiser/alignment tests passed
+  on Ascend, and the complete development-host suite passed 733 tests with 4
+  skips on 2026-07-29. All 56 Rust syncer tests passed before this Python-only
+  follow-up; the syncer has no new diff. Coverage includes selected-family
+  backend resolution, explicit-device rank binding, accelerator-aware
+  process-group setup, NPU diffusion dtype/RNG dispatch, the NPU loss-metric
+  dtype, and the PixArt conditioning/mask/output contracts.
 - ✅ **Single-card training** on an Ascend 910B4-1:
   - Qwen3-0.6B completed three fixed-micro-batch optimizer steps, and the real
     auto-batch probe selected micro-batch 4 and then completed training. The
@@ -241,6 +244,21 @@ diffusion adapters remain a separate, unverified boundary on this hardware.
   generated a valid 128×128 RGB PNG. A separate two-card HCCL run completed two
   optimizer steps per rank; its saved 256 tensors (797,184 values) were all
   finite.
+- ✅ **PixArt Alpha DiT training and reload:**
+  `CloseGPT/PixArt-XL-2-1024-MS` at commit
+  `9330fbbca134bd66ba7d25f8267213db0451acdd` was downloaded directly from
+  ModelScope to the Ascend server (14 required files, 21,832,184,946 bytes;
+  no workstation transfer). On one 910B4-1 it trained an attention LoRA with
+  rank 4 for two optimizer steps over real Pokemon BLIP image/caption rows at
+  256×256. The artifact contains 448 tensors and 2,064,384 finite values; all
+  224 LoRA-B tensors received nonzero updates. A fresh process loaded the base
+  and adapter and completed a two-step sample, producing a valid 256×256 RGB
+  PNG (pixel standard deviation 60.19, SHA256
+  `5410b6161d3b770e84d129bd92e97385403bf5a37d70f5d3202777c61bb8629e`).
+  The adapter SHA256 is
+  `3dad06945bb9ecafd47d9f8aead55c6a34c136af78abffd32fc8a87ae1504fff`;
+  evidence is retained at `extended-diffusion/pixart-alpha` under the
+  validation root below.
 - ✅ **Diffusion FSDP2:** a fresh two-card SD 1.5 LoRA run completed two
   optimizer steps per rank through FSDP2/HCCL. All 797,184 values in its 256
   adapter tensors were finite and 797,181 were nonzero. The FSDP artifact then
@@ -293,6 +311,18 @@ applies a load-scoped NPU gate and device map. CogVideoX's VAE returns
 channels-first video latents while its pipeline prepares frames-first latents,
 so Yeto now infers the expected layout through the public `prepare_latents()`
 interface and aligns it without model-name switches.
+
+The subsequent PixArt Alpha run exposed three more generic denoiser contracts.
+A transformer that advertises `use_additional_conditions` needs pixel
+`resolution` and `aspect_ratio` inside `added_cond_kwargs`; a prompt mask must
+go to the encoder-specific mask argument instead of also becoming a
+self-attention mask; and a learned-variance denoiser can return twice the
+target channel count, with the prediction in the first half. Yeto now derives
+all three behaviors from the denoiser signature, configuration, and tensor
+shape rather than a model-name branch. Four regression tests cover these
+contracts. The retained `train.log`, `train-fixed.log`, `train-fixed2.log`, and
+`sample-final.log` record the failures that exposed them; `train-final.log` and
+`sample-final-2step.log` record the successful reruns.
 
 The retained hardware logs and artifacts are under
 `/workspace/yeto-ascend-validation-20260728` in the container, with syncer-side
