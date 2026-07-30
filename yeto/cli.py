@@ -31,6 +31,7 @@ import time
 
 from . import runs
 from .losses import LOSS_FUNCTIONS
+from .rl import MILES_IMAGE
 from .status_metrics import render_tape_summary
 
 SUBCOMMANDS = (
@@ -78,6 +79,44 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="training loop selector; auto infers diffusion for diffusion aliases, "
         "otherwise uses the causal-LM learner",
     )
+    rl = p.add_argument_group("Miles RL")
+    rl.add_argument(
+        "--training-mode",
+        choices=["sft", "rl"],
+        default="sft",
+        help="training workflow (default: sft)",
+    )
+    rl.add_argument("--rl-runtime", choices=["miles"], default="miles")
+    rl.add_argument("--rl-image", default=MILES_IMAGE)
+    rl.add_argument(
+        "--reward-function",
+        default=None,
+        help="RL reward callable as package.module:function",
+    )
+    rl.add_argument(
+        "--advantage-estimator", choices=["grpo"], default="grpo"
+    )
+    rl.add_argument("--n-samples-per-prompt", type=int, default=4)
+    rl.add_argument("--rollout-batch-size", type=int, default=32)
+    rl.add_argument("--over-sampling-batch-size", type=int, default=None)
+    rl.add_argument("--rollout-max-response-len", type=int, default=32768)
+    rl.add_argument("--custom-generate-function-path", default=None)
+    rl.add_argument("--use-session-server", action="store_true")
+    rl.add_argument("--session-server-ip", default=None)
+    rl.add_argument("--session-server-port", type=int, nargs="+", default=None)
+    rl.add_argument("--tito-model", default=None)
+    rl.add_argument("--local-rl-rounds-per-sync", type=int, default=1)
+    rl.add_argument(
+        "--rl-sync-preset", choices=["strict-avg"], default="strict-avg"
+    )
+    rl.add_argument(
+        "--rl-policy-version", choices=["strict"], default="strict"
+    )
+    rl.add_argument(
+        "--rl-completed-groups-path",
+        default="~/yeto-rl/island-checkpoint.pt",
+    )
+    rl.add_argument("--experimental-rl-sync", action="store_true")
     p.add_argument(
         "--output",
         default=None,

@@ -81,6 +81,13 @@ struct Args {
     /// JSONL event tape (one record per merge).
     #[arg(long)]
     event_tape: Option<std::path::PathBuf>,
+    /// Maximum admitted lag between a round and a learner's base version.
+    /// Omitted means unbounded (the existing SFT behavior).
+    #[arg(long)]
+    max_base_lag: Option<u64>,
+    /// Learner contribution weighting used by AVG/RDA merges.
+    #[arg(long, default_value = "tokens2-over-steps")]
+    learner_weight: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -98,6 +105,13 @@ fn main() -> anyhow::Result<()> {
         "heloco" => true,
         "none" => false,
         other => anyhow::bail!("--delta-correction must be 'heloco' or 'none', got {other:?}"),
+    };
+    let learner_weight = match args.learner_weight.as_str() {
+        "tokens2-over-steps" => server::LearnerWeight::Tokens2OverSteps,
+        "equal" => server::LearnerWeight::Equal,
+        other => {
+            anyhow::bail!("--learner-weight must be 'tokens2-over-steps' or 'equal', got {other:?}")
+        }
     };
     let cfg = server::Config {
         port: args.port,
@@ -121,6 +135,8 @@ fn main() -> anyhow::Result<()> {
         mark_final_checkpoint: args.mark_final_checkpoint,
         learner_budget_steps: args.learner_budget_steps,
         event_tape: args.event_tape,
+        max_base_lag: args.max_base_lag,
+        learner_weight,
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

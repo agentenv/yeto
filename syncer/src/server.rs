@@ -27,6 +27,12 @@ const MAX_PARTIAL_MESSAGES: usize = 64;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(180);
 const WRITER_QUEUE: usize = 128;
 
+#[derive(Clone, Copy)]
+pub enum LearnerWeight {
+    Tokens2OverSteps,
+    Equal,
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub port: u16,
@@ -80,6 +86,10 @@ pub struct Config {
     pub learner_budget_steps: Option<u64>,
     /// JSONL event tape: one record per merge.
     pub event_tape: Option<std::path::PathBuf>,
+    /// Maximum admitted learner base-version lag; None preserves the
+    /// existing unbounded behavior.
+    pub max_base_lag: Option<u64>,
+    pub learner_weight: LearnerWeight,
 }
 
 struct OutFrame {
@@ -103,6 +113,7 @@ struct Group {
     member: Member,
     dtype: u8,
     layout: Layout,
+    layout_fingerprint: [u8; 32],
     num_streams: u16,
     max_init_payload: u64,
     max_push_payload: u64,
@@ -185,6 +196,10 @@ impl Group {
 }
 
 enum Event {
+    Fatal {
+        metric: &'static str,
+        message: String,
+    },
     Hello {
         group: Arc<Group>,
     },
@@ -377,6 +392,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     let accept_registry = registry.clone();
     let accept_session = session.clone();
     let expected_learners = cfg.learners;
+    let strict_layout = cfg.max_base_lag == Some(0);
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -385,8 +401,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                     let session = accept_session.clone();
                     let tx = event_tx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_connection(stream, reg, session, expected_learners, tx).await
+                        if let Err(e) = handle_connection(
+                            stream,
+                            reg,
+                            session,
+                            expected_learners,
+                            strict_layout,
+                            tx,
+                        )
+                        .await
                         {
                             warn!(%peer, "connection ended: {e:#}");
                         }
@@ -493,6 +516,7 @@ async fn handle_connection(
     registry: Registry,
     session: Session,
     expected_learners: u32,
+    strict_layout: bool,
     event_tx: mpsc::Sender<Event>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
@@ -560,6 +584,15 @@ async fn handle_connection(
             };
             if let Some(message) = mismatch {
                 send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
+                if strict_layout {
+                    event_tx
+                        .send(Event::Fatal {
+                            metric: "layout_hash_mismatch",
+                            message: message.clone(),
+                        })
+                        .await
+                        .ok();
+                }
                 bail!(message);
             }
             let member = Member {
@@ -574,6 +607,7 @@ async fn handle_connection(
                 member,
                 dtype,
                 layout,
+                layout_fingerprint,
                 num_streams,
                 max_init_payload,
                 max_push_payload,
@@ -1025,6 +1059,9 @@ async fn scheduler(
 ) -> Result<()> {
     let mut state: Option<GlobalState> = None;
     let mut budget_reports: HashSet<u32> = HashSet::new();
+    let strict_exact = cfg.max_base_lag == Some(0);
+    let fixed_roster = strict_exact && cfg.quorum == cfg.learners && cfg.grace_ms == 0;
+    let checkpoint_each_round = strict_exact && cfg.checkpoint_every == 1;
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
     // a resumed checkpoint) and all expected learners have connected (late
@@ -1043,6 +1080,10 @@ async fn scheduler(
             }
         }
         match events.recv().await.context("event channel closed")? {
+            Event::Fatal { metric, message } => {
+                append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
+                bail!("RL strict failure {metric}: {message}");
+            }
             Event::Hello { group } => {
                 if state.is_none() {
                     // Layout comes from the HELLO of the first learner.
@@ -1050,7 +1091,27 @@ async fn scheduler(
                     let mut st = new_state_for(&group, &cfg)?;
                     if cfg.resume {
                         if let Some(path) = cfg.checkpoint_path.as_ref().filter(|p| p.exists()) {
-                            st.load_checkpoint(path)?;
+                            if let Err(error) = st.load_checkpoint(path) {
+                                if strict_exact {
+                                    let message = format!("cannot resume RL checkpoint: {error:#}");
+                                    append_strict_failure(
+                                        cfg.event_tape.as_deref(),
+                                        "layout_hash_mismatch",
+                                        &message,
+                                    );
+                                    bail!("RL strict failure layout_hash_mismatch: {message}");
+                                }
+                                return Err(error);
+                            }
+                            if strict_exact && !st.checkpoint_layout_verified {
+                                let message = "RL checkpoint is missing its canonical layout hash";
+                                append_strict_failure(
+                                    cfg.event_tape.as_deref(),
+                                    "layout_hash_mismatch",
+                                    message,
+                                );
+                                bail!("RL strict failure layout_hash_mismatch: {message}");
+                            }
                             info!(step = st.global_step, "resumed from checkpoint");
                         }
                     }
@@ -1116,6 +1177,16 @@ async fn scheduler(
         remove_final_marker(cfg.checkpoint_path.as_ref().unwrap())?;
     }
 
+    // Persist a fresh version zero before its first BCAST. A resumed cut is
+    // already committed and only needs to be rebroadcast.
+    if checkpoint_each_round {
+        if let Some(path) = cfg.checkpoint_path.as_ref() {
+            if !path.exists() {
+                st.save_checkpoint(path)?;
+                info!(step = st.global_step, path = %path.display(), "checkpoint committed");
+            }
+        }
+    }
     // Send everyone the initial (or resumed) global parameters so all
     // learners start bit-identical (also serves recovery for late joiners).
     broadcast_all_fragments(&st, &registry).await;
@@ -1145,7 +1216,7 @@ async fn scheduler(
                 break;
             }
             let groups = current_groups(&registry);
-            if groups.is_empty() {
+            if groups.is_empty() || (fixed_roster && groups.len() < cfg.quorum as usize) {
                 next_launch = Instant::now() + Duration::from_millis(100);
                 break;
             }
@@ -1217,6 +1288,33 @@ async fn scheduler(
                 RoundAction::Restart => {
                     let r = &mut inflight[i];
                     let groups = current_groups(&registry);
+                    if fixed_roster {
+                        if groups.len() < cfg.quorum as usize {
+                            r.quorum_deadline =
+                                Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
+                            i += 1;
+                            continue;
+                        }
+                        warn!(
+                            step = r.t,
+                            responses = r.pushes.len(),
+                            roster = cfg.learners,
+                            "fixed roster incomplete; waiting for missing logical learners"
+                        );
+                        for g in groups {
+                            if !r
+                                .pushes
+                                .keys()
+                                .any(|member| member.learner_id == g.member.learner_id)
+                            {
+                                let _ = g.send_small(MSG_PULL_REQ, r.pull.clone()).await;
+                            }
+                        }
+                        r.quorum_deadline =
+                            Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
+                        i += 1;
+                        continue;
+                    }
                     warn!(
                         step = r.t,
                         attempt = r.attempt,
@@ -1271,15 +1369,36 @@ async fn scheduler(
             Err(_) => continue, // deadline hit; loop re-evaluates
             Ok(None) => bail!("event channel closed"),
             Ok(Some(ev)) => match ev {
+                Event::Fatal { metric, message } => {
+                    append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
+                    bail!("RL strict failure {metric}: {message}");
+                }
                 Event::Push { member, push } => {
                     let learner_id = member.learner_id;
                     let generation = member.generation;
                     let local_step = push.local_step;
                     let global_step = push.global_step;
                     let fragment_id = push.fragment_id;
-                    match route_push(&mut inflight, member, push) {
+                    let disposition =
+                        route_push(&mut inflight, member, push, cfg.max_base_lag, fixed_roster);
+                    match disposition {
                         PushDisposition::Accepted => {
                             step_rates.note(member, local_step, Instant::now());
+                        }
+                        PushDisposition::Duplicate => warn!(
+                            learner_id,
+                            generation,
+                            step = global_step,
+                            fragment = fragment_id,
+                            "duplicate push rejected"
+                        ),
+                        PushDisposition::StaleBase if strict_exact => {
+                            let metric = "rejected_stale_updates";
+                            let message = format!(
+                                "learner {learner_id} generation {generation} step {global_step} fragment {fragment_id}: {disposition:?}"
+                            );
+                            append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
+                            bail!("RL strict failure {metric}: {message}");
                         }
                         disposition => warn!(
                             learner_id,
@@ -1294,6 +1413,21 @@ async fn scheduler(
                 Event::Hello { group } => {
                     // Rejoining learner: catch it up to the current state.
                     send_all_fragments(&st, &group).await;
+                    if fixed_roster && is_current_member(&registry, group.member) {
+                        for round in &inflight {
+                            let belongs = round
+                                .expected_members
+                                .iter()
+                                .any(|member| member.learner_id == group.member.learner_id);
+                            let answered = round
+                                .pushes
+                                .keys()
+                                .any(|member| member.learner_id == group.member.learner_id);
+                            if belongs && !answered {
+                                let _ = group.send_small(MSG_PULL_REQ, round.pull.clone()).await;
+                            }
+                        }
+                    }
                 }
                 Event::Init { .. } => {} // already initialized; ignore
                 Event::FinalAck { member, .. } => {
@@ -1345,20 +1479,21 @@ async fn scheduler(
         return Ok(());
     }
 
-    // The outer loop is now quiescent: every launched round has completed.
-    // Persist this authoritative cut regardless of the periodic checkpoint
-    // interval so a non-divisible total_steps can never leave a stale final
-    // checkpoint behind.
+    // Exact-base runs persist every committed cut before BCAST. Other modes
+    // still need a final save when total_steps is not divisible by the
+    // periodic interval.
     if let Some(path) = &cfg.checkpoint_path {
-        if cfg.mark_final_checkpoint {
-            remove_final_marker(path)?;
+        if !checkpoint_each_round {
+            if cfg.mark_final_checkpoint {
+                remove_final_marker(path)?;
+            }
+            st.save_checkpoint(path)?;
+            info!(
+                step = st.global_step,
+                path = %path.display(),
+                "final checkpoint written"
+            );
         }
-        st.save_checkpoint(path)?;
-        info!(
-            step = st.global_step,
-            path = %path.display(),
-            "final checkpoint written"
-        );
         if cfg.mark_final_checkpoint {
             write_final_marker(path, st.global_step)?;
         }
@@ -1370,10 +1505,14 @@ async fn scheduler(
     // Freeze terminal membership to the live groups at the final cut.
     // Learners already abandoned by fleet recovery are not valid artifact
     // producers and must not prevent surviving learners from finalizing.
-    let final_members: HashSet<u32> = current_groups(&registry)
-        .into_iter()
-        .map(|group| group.member.learner_id)
-        .collect();
+    let final_members: HashSet<u32> = if fixed_roster {
+        (0..cfg.learners).collect()
+    } else {
+        current_groups(&registry)
+            .into_iter()
+            .map(|group| group.member.learner_id)
+            .collect()
+    };
     finalize_learners(&cfg, &st, &mut events, &registry, &final_members).await?;
     info!("training complete after {} outer steps", cfg.total_steps);
     // Give writer tasks a moment to flush the final control frames.
@@ -1421,6 +1560,10 @@ async fn collect_budget_reports(
         .context("learner budget reports require --learner-budget-steps")?;
     while reports.len() < cfg.learners as usize {
         match events.recv().await.context("event channel closed")? {
+            Event::Fatal { metric, message } => {
+                append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
+                bail!("RL strict failure {metric}: {message}");
+            }
             Event::BudgetDone {
                 member,
                 local_steps,
@@ -1467,6 +1610,7 @@ enum PushDisposition {
     Accepted,
     Duplicate,
     UnexpectedMember,
+    StaleBase,
     FutureBase,
     OutOfRound,
 }
@@ -1499,7 +1643,13 @@ fn fragment_available(rounds: &[Round], fragment_id: usize) -> bool {
     !rounds.iter().any(|round| round.p == fragment_id)
 }
 
-fn route_push(rounds: &mut [Round], member: Member, push: Push) -> PushDisposition {
+fn route_push(
+    rounds: &mut [Round],
+    member: Member,
+    push: Push,
+    max_base_lag: Option<u64>,
+    fixed_roster: bool,
+) -> PushDisposition {
     let Some(round) = rounds.iter_mut().find(|round| {
         round.t == push.global_step
             && round.p == push.fragment_id as usize
@@ -1507,13 +1657,32 @@ fn route_push(rounds: &mut [Round], member: Member, push: Push) -> PushDispositi
     }) else {
         return PushDisposition::OutOfRound;
     };
-    if !round.expected_members.contains(&member) {
+    let expected = if fixed_roster {
+        round
+            .expected_members
+            .iter()
+            .any(|expected| expected.learner_id == member.learner_id)
+    } else {
+        round.expected_members.contains(&member)
+    };
+    if !expected {
         return PushDisposition::UnexpectedMember;
     }
     if push.base_version > round.base_version {
         return PushDisposition::FutureBase;
     }
-    if round.pushes.contains_key(&member) {
+    if max_base_lag.is_some_and(|limit| round.base_version - push.base_version > limit) {
+        return PushDisposition::StaleBase;
+    }
+    let duplicate = if fixed_roster {
+        round
+            .pushes
+            .keys()
+            .any(|accepted| accepted.learner_id == member.learner_id)
+    } else {
+        round.pushes.contains_key(&member)
+    };
+    if duplicate {
         return PushDisposition::Duplicate;
     }
     round.pushes.insert(member, push);
@@ -1561,7 +1730,12 @@ async fn complete_round(
             );
         }
         outer_gradients.push(push.outer_gradient.as_slice());
-        weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
+        weights.push(match cfg.learner_weight {
+            LearnerWeight::Tokens2OverSteps => {
+                crate::merge::learner_weight(push.c_tokens, push.c_steps)
+            }
+            LearnerWeight::Equal => 1.0,
+        });
         responders.push(*member);
     }
     let sync_start = Instant::now();
@@ -1572,6 +1746,14 @@ async fn complete_round(
     st.global_step = st.global_step.max(t);
     for push in pushes.values() {
         st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
+    }
+
+    let checkpoint_each_round = cfg.max_base_lag == Some(0) && cfg.checkpoint_every == 1;
+    if checkpoint_each_round {
+        if let Some(path) = cfg.checkpoint_path.as_ref() {
+            st.save_checkpoint(path)?;
+            info!(step = t, path = %path.display(), "checkpoint committed");
+        }
     }
 
     // Broadcast the updated fragment.
@@ -1607,27 +1789,31 @@ async fn complete_round(
             &pushes,
             gnorm,
             ms,
+            &st.layout_fingerprint,
         );
     }
     // Consistent cut: this round is fully applied and broadcast, and every
     // other in-flight round is still gathering (it has not touched state).
     // A crash-resume loses those gathers; their fragments simply merge on
     // a later cycle, which the quorum design already tolerates.
-    if let Some(path) = &cfg.checkpoint_path {
-        if cfg.checkpoint_every > 0 && t % cfg.checkpoint_every == 0 {
-            st.save_checkpoint(path)?;
-            info!(step = t, path = %path.display(), "checkpoint written");
+    if !checkpoint_each_round {
+        if let Some(path) = &cfg.checkpoint_path {
+            if cfg.checkpoint_every > 0 && t % cfg.checkpoint_every == 0 {
+                st.save_checkpoint(path)?;
+                info!(step = t, path = %path.display(), "checkpoint written");
+            }
         }
     }
     Ok(())
 }
 
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
-    let mut st = GlobalState::new(
+    let mut st = GlobalState::new_with_layout_fingerprint(
         group.layout.clone(),
         cfg.outer_lr,
         cfg.outer_momentum,
         group.dtype,
+        group.layout_fingerprint,
     )?;
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
@@ -1768,6 +1954,10 @@ async fn finalize_learners(
             })?
             .context("event channel closed during finalization")?;
         match event {
+            Event::Fatal { metric, message } => {
+                append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
+                bail!("RL strict failure {metric}: {message}");
+            }
             Event::FinalAck {
                 member,
                 global_step,
@@ -1906,6 +2096,26 @@ fn encode_final_fragment(st: &GlobalState, p: usize) -> Result<bytes::Bytes> {
 }
 
 /// One JSONL record per merge: the event tape.
+fn append_strict_failure(path: Option<&std::path::Path>, metric: &str, message: &str) {
+    use std::io::Write;
+
+    let Some(path) = path else {
+        return;
+    };
+    let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+    let line = format!(
+        "{{\"event\":\"rl_strict_failure\",\"metric\":\"{metric}\",\"value\":1,\"error\":\"{escaped}\"}}\n"
+    );
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if let Err(error) = result {
+        warn!("event tape write failed: {error}");
+    }
+}
+
 fn append_tape(
     path: &std::path::Path,
     step: u64,
@@ -1920,6 +2130,7 @@ fn append_tape(
     pushes: &HashMap<Member, Push>,
     gnorm: f64,
     ms: u64,
+    layout_fingerprint: &[u8; 32],
 ) {
     use std::io::Write;
     let mut responded_members: Vec<Member> = pushes.keys().copied().collect();
@@ -1967,8 +2178,14 @@ fn append_tape(
     responders.sort();
     let quorum_ms = json_opt_u64(quorum_ms);
     let grace_ms = json_opt_u64(grace_ms);
+    let layout_hash: String = layout_fingerprint
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let merge_seconds = sync_ms as f64 / 1000.0;
     let line = format!(
-        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"step\":{step},\"fragment\":{fragment},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms},\"responders\":[{}]}}\n",
+        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms},\"responders\":[{}]}}\n",
+        responded.len(),
         json_ids(&expected_learners),
         json_members(expected_members),
         json_ids(&responded),
@@ -2048,6 +2265,7 @@ mod tests {
             layout: Layout {
                 fragments: Vec::new(),
             },
+            layout_fingerprint: [0; 32],
             num_streams: 0,
             max_init_payload: 0,
             max_push_payload: 0,
@@ -2250,16 +2468,16 @@ mod tests {
         let captured = member(0, 10);
         let mut rounds = vec![test_round(vec![captured])];
         assert_eq!(
-            route_push(&mut rounds, member(1, 20), test_push(5)),
+            route_push(&mut rounds, member(1, 20), test_push(5), None, false),
             PushDisposition::UnexpectedMember
         );
         assert_eq!(
-            route_push(&mut rounds, member(0, 11), test_push(5)),
+            route_push(&mut rounds, member(0, 11), test_push(5), None, false),
             PushDisposition::UnexpectedMember
         );
         assert!(rounds[0].pushes.is_empty());
         assert_eq!(
-            route_push(&mut rounds, captured, test_push(5)),
+            route_push(&mut rounds, captured, test_push(5), None, false),
             PushDisposition::Accepted
         );
     }
@@ -2285,22 +2503,67 @@ mod tests {
         let captured = member(0, 10);
         let mut rounds = vec![test_round(vec![captured])];
         assert_eq!(
-            route_push(&mut rounds, captured, test_push(6)),
+            route_push(&mut rounds, captured, test_push(6), None, false),
             PushDisposition::FutureBase
         );
         assert_eq!(
-            route_push(&mut rounds, captured, test_push(4)),
+            route_push(&mut rounds, captured, test_push(4), None, false),
             PushDisposition::Accepted
         );
         assert_eq!(
-            route_push(&mut rounds, captured, test_push(4)),
+            route_push(&mut rounds, captured, test_push(4), None, false),
             PushDisposition::Duplicate
         );
         let mut wrong_round = test_push(4);
         wrong_round.global_step = 99;
         assert_eq!(
-            route_push(&mut rounds, captured, wrong_round),
+            route_push(&mut rounds, captured, wrong_round, None, false),
             PushDisposition::OutOfRound
+        );
+        assert_eq!(rounds[0].pushes.len(), 1);
+    }
+
+    fn test_exact_push(learner_id: u32, base_version: u64) -> Push {
+        Push {
+            learner_id,
+            fragment_id: 1,
+            global_step: 7,
+            round_attempt: 1,
+            base_version,
+            local_step: 7,
+            c_steps: 1,
+            c_tokens: 1,
+            outer_gradient: vec![1.0],
+        }
+    }
+
+    #[test]
+    fn max_base_lag_zero_is_exact_and_unique_per_logical_learner() {
+        let original = member(0, 10);
+        let replacement = member(0, 11);
+        let second = member(1, 20);
+        let mut rounds = vec![test_round(vec![original, second])];
+        assert_eq!(
+            route_push(
+                &mut rounds,
+                replacement,
+                test_exact_push(0, 5),
+                Some(0),
+                true,
+            ),
+            PushDisposition::Accepted
+        );
+        assert_eq!(
+            route_push(&mut rounds, original, test_exact_push(0, 5), Some(0), true,),
+            PushDisposition::Duplicate
+        );
+        assert_eq!(
+            route_push(&mut rounds, second, test_exact_push(1, 4), Some(0), true,),
+            PushDisposition::StaleBase
+        );
+        assert_eq!(
+            route_push(&mut rounds, second, test_exact_push(1, 6), Some(0), true,),
+            PushDisposition::FutureBase
         );
         assert_eq!(rounds[0].pushes.len(), 1);
     }
@@ -2321,7 +2584,7 @@ mod tests {
         round.pushes.clear();
         let mut rounds = vec![round];
         assert_eq!(
-            route_push(&mut rounds, second, test_push(5)),
+            route_push(&mut rounds, second, test_push(5), None, false),
             PushDisposition::OutOfRound
         );
         assert!(rounds[0].pushes.is_empty());
@@ -2366,6 +2629,7 @@ mod tests {
             &pushes,
             0.5,
             44,
+            &[7; 32],
         );
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).ok();
@@ -2379,5 +2643,7 @@ mod tests {
         assert!(text.contains("\"contribution\":1"));
         assert!(text.contains("\"protocol_version\":4"));
         assert!(text.contains("\"delta_semantics\":\"local_minus_raw_anchor\""));
+        assert!(text.contains(&format!("\"sync/layout_hash\":\"{}\"", "07".repeat(32))));
+        assert!(!text.contains("\"layout_hash\":"));
     }
 }

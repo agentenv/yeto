@@ -114,6 +114,10 @@ pub struct LearnerLedger {
 
 pub struct GlobalState {
     pub layout: Layout,
+    /// Semantic tensor identity supplied in HELLO and persisted in checkpoints.
+    pub layout_fingerprint: [u8; 32],
+    /// Whether a loaded checkpoint carried and matched the fingerprint.
+    pub checkpoint_layout_verified: bool,
     /// Θ_p, flat f32 per fragment (concatenated tensors in layout order).
     pub params: Vec<Vec<f32>>,
     /// Nesterov momentum buffers, same shape as params.
@@ -134,7 +138,18 @@ pub struct GlobalState {
 }
 
 impl GlobalState {
+    #[cfg(test)]
     pub fn new(layout: Layout, outer_lr: f32, outer_momentum: f32, wire_dtype: u8) -> Result<Self> {
+        Self::new_with_layout_fingerprint(layout, outer_lr, outer_momentum, wire_dtype, [0; 32])
+    }
+
+    pub fn new_with_layout_fingerprint(
+        layout: Layout,
+        outer_lr: f32,
+        outer_momentum: f32,
+        wire_dtype: u8,
+        layout_fingerprint: [u8; 32],
+    ) -> Result<Self> {
         // Validate declared sizes now, but do not allocate model-sized state
         // from an unauthenticated HELLO. Params arrive in INIT_PARAMS; the
         // matching momentum is allocated only after that exact-sized payload
@@ -165,6 +180,8 @@ impl GlobalState {
         versions.resize(fragment_count, 0);
         Ok(Self {
             layout,
+            layout_fingerprint,
+            checkpoint_layout_verified: false,
             params,
             momentum,
             initialized,
@@ -386,6 +403,7 @@ impl GlobalState {
                 f.write_all(&l.steps.to_le_bytes())?;
                 f.write_all(&l.tokens.to_le_bytes())?;
             }
+            f.write_all(&self.layout_fingerprint)?;
             f.flush()?;
             f.get_ref().sync_all()?;
         }
@@ -442,6 +460,17 @@ impl GlobalState {
             };
             self.ledger.insert(id, l);
         }
+        self.checkpoint_layout_verified = match r.remaining() {
+            0 => false,
+            32 => {
+                let checkpoint_fingerprint: [u8; 32] = r.take(32)?.try_into()?;
+                if checkpoint_fingerprint != self.layout_fingerprint {
+                    bail!("checkpoint layout fingerprint does not match HELLO");
+                }
+                true
+            }
+            remaining => bail!("checkpoint has {remaining} trailing bytes"),
+        };
         Ok(())
     }
 }
@@ -585,8 +614,52 @@ mod tests {
         assert_eq!(st2.versions, vec![7, 0]);
         assert_eq!(st2.params, st.params);
         assert!(st2.all_initialized());
+        assert!(st2.checkpoint_layout_verified);
         assert_eq!(st2.ledger.get(&3).unwrap().tokens, 4096);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn checkpoint_layout_fingerprint_is_verified_and_legacy_is_readable() {
+        let dir = std::env::temp_dir().join(format!("yeto-layout-ckpt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+        let mut state = GlobalState::new_with_layout_fingerprint(
+            layout2(),
+            0.7,
+            0.9,
+            crate::protocol::DTYPE_F32,
+            [1; 32],
+        )
+        .unwrap();
+        state.init_fragment(0, vec![1.0; 4]).unwrap();
+        state.init_fragment(1, vec![2.0; 4]).unwrap();
+        state.save_checkpoint(&path).unwrap();
+
+        let mut mismatched = GlobalState::new_with_layout_fingerprint(
+            layout2(),
+            0.7,
+            0.9,
+            crate::protocol::DTYPE_F32,
+            [2; 32],
+        )
+        .unwrap();
+        assert!(mismatched.load_checkpoint(&path).is_err());
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.truncate(bytes.len() - 32);
+        std::fs::write(&path, bytes).unwrap();
+        let mut legacy = GlobalState::new_with_layout_fingerprint(
+            layout2(),
+            0.7,
+            0.9,
+            crate::protocol::DTYPE_F32,
+            [2; 32],
+        )
+        .unwrap();
+        legacy.load_checkpoint(&path).unwrap();
+        assert!(!legacy.checkpoint_layout_verified);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

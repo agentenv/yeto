@@ -196,6 +196,8 @@ per-seed results for the completed Qwen3.6, LTX-Video, and Wan2.2 benchmarks.
 [docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
 [docs/MEGATRON.md](docs/MEGATRON.md) — the Megatron-Core island backend (EP
 for 1T-class MoE).
+[docs/MILES_RL.md](docs/MILES_RL.md) — fixed-roster Miles RL across causal-LM
+LoRA islands: rollout/training boundaries, recovery, export, and limitations.
 [docs/MLX.md](docs/MLX.md) — the Apple-silicon island backend: Macs as
 learner islands (`yeto launch --external-learners`, cross Mac↔NVIDIA runs).
 

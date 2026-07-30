@@ -20,6 +20,7 @@ Binary layout (all little-endian):
                    numel x f32 momentum
     ledger_count   u32
     per entry:     learner_id u32, merges u64, steps u64, tokens u64
+    optional:      32-byte semantic layout hash (new checkpoints)
 
 The outer momentum is parsed (and validated) but not needed for export; it
 only matters when the syncer itself resumes from the checkpoint.
@@ -49,6 +50,8 @@ class Checkpoint:
     fragments: list[tuple[int, torch.Tensor, torch.Tensor]]
     # learner_id -> (merges, steps, tokens)
     ledger: dict[int, tuple[int, int, int]]
+    # HELLO's semantic layout fingerprint, persisted by current syncers.
+    layout_hash: str | None
     # Digest of the exact byte buffer decoded into this checkpoint.
     sha256: str
 
@@ -94,13 +97,22 @@ def parse_checkpoint(path: str | Path) -> Checkpoint:
         )
         ledger[learner_id] = (merges, steps, tokens)
 
+    layout_hash = None
+    if len(data) - off == 32:
+        layout_hash = take(32, "layout_hash").hex()
     if off != len(data):
         raise ValueError(
             f"{path}: {len(data) - off} trailing bytes after the checkpoint "
             f"payload (parsed {off} of {len(data)}); file corrupt or from an "
             "incompatible syncer version"
         )
-    return Checkpoint(global_step, fragments, ledger, hashlib.sha256(data).hexdigest())
+    return Checkpoint(
+        global_step,
+        fragments,
+        ledger,
+        layout_hash,
+        hashlib.sha256(data).hexdigest(),
+    )
 
 
 def _read_f32(raw: bytes) -> torch.Tensor:
@@ -128,6 +140,14 @@ def validate_against_layout(ckpt: Checkpoint, layout: FragmentLayout) -> None:
             problems.append(
                 f"fragment {fid}: checkpoint numel {params.numel()} "
                 f"!= layout numel {frag.numel}"
+            )
+    if ckpt.layout_hash is not None:
+        from .protocol import layout_fingerprint
+
+        rebuilt = layout_fingerprint(layout).hex()
+        if ckpt.layout_hash != rebuilt:
+            problems.append(
+                f"checkpoint layout hash {ckpt.layout_hash} != rebuilt {rebuilt}"
             )
     if problems:
         raise ValueError(
