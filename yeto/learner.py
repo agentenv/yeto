@@ -162,6 +162,18 @@ def parse_args(argv=None):
         "linear, or auto (attention for MoE models — keeps router and routed "
         "experts frozen and fragments small; all-linear for dense models)",
     )
+    parent = p.add_mutually_exclusive_group()
+    parent.add_argument(
+        "--resume-from",
+        default=None,
+        help="continue the exact recorded Yeto adapter recipe from this directory",
+    )
+    parent.add_argument(
+        "--branch-from",
+        default=None,
+        help="initialize a new run from this PEFT adapter while recording lineage",
+    )
+    p.add_argument("--adapter-sha256", default=None, help=argparse.SUPPRESS)
     p.add_argument("--seq-len", type=int, default=2048)
     p.add_argument(
         "--micro-batch-size",
@@ -470,20 +482,30 @@ def load_model_and_tokenizer(args, device):
     if kernel_application is not None:
         log.info("isolated fused-loss binding: %s", kernel_application)
     if args.tuning == "lora":
-        from peft import LoraConfig, get_peft_model
+        from peft import LoraConfig, PeftModel, get_peft_model
 
         if base_quantization == "nf4":
             _prepare_nf4_base_for_lora(model)
 
-        lora = LoraConfig(
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            target_modules=resolve_lora_targets(
-                getattr(args, "lora_targets", "auto"), model.config
-            ),
-            task_type="CAUSAL_LM",
-        )
-        model = get_peft_model(model, lora)
+        from .adapter_lifecycle import selected_parent
+
+        _parent_mode, parent_source = selected_parent(args)
+        if parent_source is not None:
+            model = PeftModel.from_pretrained(
+                model,
+                parent_source,
+                is_trainable=True,
+            )
+        else:
+            lora = LoraConfig(
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                target_modules=resolve_lora_targets(
+                    getattr(args, "lora_targets", "auto"), model.config
+                ),
+                task_type="CAUSAL_LM",
+            )
+            model = get_peft_model(model, lora)
     if base_quantization == "none":
         model.to(device)
     if kernel_backend == "liger":
@@ -708,6 +730,20 @@ def main(argv=None) -> None:
             world=world,
             artifact=artifact,
         )
+
+    # Capture the requested recipe before auto-batching mutates the runtime
+    # micro-batch and accumulation values. Resume compares user intent, while
+    # the resolved values remain visible in ordinary metrics/logs.
+    from .adapter_lifecycle import (
+        inspect_parent_adapter,
+        training_recipe,
+    )
+
+    args._training_recipe = training_recipe(args)
+    args._adapter_lineage = inspect_parent_adapter(
+        args,
+        expected_sha256=getattr(args, "adapter_sha256", None),
+    )
 
     if args.shard == "fsdp" and device.type != "cuda":
         raise RuntimeError(
@@ -1067,12 +1103,14 @@ def main(argv=None) -> None:
                 target = model.module if world > 1 else model
                 target.save_pretrained(save_dir, safe_serialization=True)
             tokenizer.save_pretrained(save_dir)
+            from .adapter_lifecycle import training_artifact_metadata
             from .provenance import write_provenance_manifest
 
             write_provenance_manifest(
                 save_dir,
                 args,
                 artifact_kind="causal-lm-training-output",
+                extra=training_artifact_metadata(args),
             )
             log.info("saved model to %s", save_dir)
         if client is not None:

@@ -50,6 +50,62 @@ def test_launch_cli_accepts_data_normalization_and_qlora_options():
     assert _args(["--base-quantization", "nf4"]).base_quantization == "nf4"
 
 
+def test_launch_cli_accepts_one_parent_adapter_mode():
+    resumed = _args(["--resume-from", "/tmp/adapter"])
+    assert resumed.resume_from == "/tmp/adapter"
+    assert resumed.branch_from is None
+    branched = _args(["--branch-from", "s3://bucket/adapter"])
+    assert branched.branch_from == "s3://bucket/adapter"
+    with pytest.raises(SystemExit):
+        _args(
+            [
+                "--resume-from",
+                "/tmp/adapter-a",
+                "--branch-from",
+                "/tmp/adapter-b",
+            ]
+        )
+
+
+def test_merge_cli_parses_safe_shard_options():
+    args = cli.build_parser().parse_args(
+        [
+            "merge",
+            "--adapter-dir",
+            "/tmp/adapter",
+            "--output-dir",
+            "/tmp/merged",
+            "--device",
+            "cuda",
+            "--dtype",
+            "bf16",
+            "--max-shard-size",
+            "2GB",
+        ]
+    )
+    assert args.command == "merge"
+    assert args.max_shard_size == "2GB"
+    assert args.dtype == "bf16"
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--branch-from", "/tmp/adapter", "--tuning", "full"], "--tuning lora"),
+        (
+            ["--branch-from", "/tmp/adapter", "--island-backend", "megatron"],
+            "--island-backend torch",
+        ),
+        (
+            ["--branch-from", "/tmp/adapter", "--external-learners", "1"],
+            "external MLX",
+        ),
+    ],
+)
+def test_parent_adapter_invalid_profiles_fail_before_launch(extra, message):
+    assert message in cli._fleet_args_error(_args(["--gpu", "aws:8xa100", *extra]))
+
+
 def test_gpu_with_budget_rejected(capsys):
     assert cli.main(BASE + ["--gpu", "aws:8xa100", "--budget", "10"]) == 1
     assert "drop them or drop --gpu" in capsys.readouterr().err
