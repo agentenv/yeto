@@ -55,6 +55,8 @@ def test_torch_backend_uses_shard_and_torch_learner():
     assert "-m yeto.learner" in task.run
     assert "--shard fsdp" in task.run
     assert "--assistant-mask-mode native" in task.run
+    assert "--data-format auto" in task.run
+    assert "--base-quantization none" in task.run
     assert "--seed 0" in task.run
     assert "--island-backend" not in task.run
     assert "megatron-core" not in task.setup
@@ -132,6 +134,45 @@ def test_launcher_forwards_explicit_legacy_mask_mode():
         _args(assistant_mask_mode="legacy"), _SPEC, 0, 1, "1.2.3.4:29400"
     )
     assert "--assistant-mask-mode legacy" in task.run
+
+
+def test_launcher_forwards_data_format():
+    task = make_learner_task(
+        _args(data_format="sharegpt"), _SPEC, 0, 1, "1.2.3.4:29400"
+    )
+    assert "--data-format sharegpt" in task.run
+
+
+def test_qlora_installs_and_forwards_nf4():
+    task = make_learner_task(
+        _args(base_quantization="nf4", shard="ddp"),
+        _SPEC,
+        0,
+        1,
+        "1.2.3.4:29400",
+    )
+    assert "--base-quantization nf4" in task.run
+    assert "bitsandbytes>=0.46.1" in task.setup
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"tuning": "full", "shard": "ddp"}, "requires --tuning lora"),
+        ({"shard": "fsdp"}, "requires --shard ddp"),
+        ({"shard": "ddp", "kernel_backend": "liger"}, "requires --kernel-backend native"),
+        ({"shard": "ddp", "island_backend": "megatron"}, "torch causal-LM"),
+    ],
+)
+def test_qlora_rejects_unsupported_launch_profiles(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        make_learner_task(
+            _args(base_quantization="nf4", **overrides),
+            _SPEC,
+            0,
+            1,
+            "1.2.3.4:29400",
+        )
 
 
 def test_megatron_backend_swaps_entrypoint_and_runs_in_the_ngc_container():

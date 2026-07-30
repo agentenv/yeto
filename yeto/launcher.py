@@ -628,6 +628,7 @@ ALPHAFOLD3_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.alphafold3:make_adapter"
 def causal_kernel_setup_steps(args) -> list[str]:
     """Pinned remote installs selected explicitly for a causal torch learner."""
     from .kernel_deps import (
+        BITSANDBYTES_MIN_VERSION,
         FLASH_ATTN_VERSION,
         LIGER_KERNEL_VERSION,
         NINJA_VERSION,
@@ -636,6 +637,8 @@ def causal_kernel_setup_steps(args) -> list[str]:
     )
 
     steps: list[str] = []
+    if getattr(args, "base_quantization", "none") == "nf4":
+        steps.append(f"pip install -q 'bitsandbytes>={BITSANDBYTES_MIN_VERSION}'")
     if getattr(args, "kernel_backend", "native") == "liger":
         steps.append(
             f"pip install -q 'liger-kernel=={LIGER_KERNEL_VERSION}' "
@@ -689,6 +692,10 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     backend = getattr(args, "island_backend", "torch")
     attention_backend = getattr(args, "attention_backend", "auto")
     kernel_backend = getattr(args, "kernel_backend", "native")
+    data_format = getattr(args, "data_format", "auto")
+    base_quantization = getattr(args, "base_quantization", "none")
+    if model_kind != "causal-lm" and data_format != "auto":
+        raise ValueError("--data-format applies only to causal-LM models")
     if model_kind != "causal-lm" and (
         attention_backend != "auto" or kernel_backend != "native"
     ):
@@ -700,6 +707,22 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             raise ValueError(
                 "--attention-backend and --kernel-backend are supported only "
                 "by the torch causal-LM island backend"
+            )
+    if base_quantization != "none":
+        if model_kind != "causal-lm":
+            raise ValueError("--base-quantization applies only to causal-LM models")
+        if backend != "torch":
+            raise ValueError(
+                "--base-quantization nf4 is supported only by the torch "
+                "causal-LM island backend"
+            )
+        if args.tuning != "lora":
+            raise ValueError("--base-quantization nf4 requires --tuning lora")
+        if args.shard != "ddp":
+            raise ValueError("--base-quantization nf4 requires --shard ddp")
+        if kernel_backend != "native":
+            raise ValueError(
+                "--base-quantization nf4 requires --kernel-backend native"
             )
     if kernel_backend == "liger" and loss_function != "cross_entropy":
         raise ValueError(
@@ -767,6 +790,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         learner_flags += (
             f" --train-on {args.train_on}"
             f" --assistant-mask-mode {getattr(args, 'assistant_mask_mode', 'native')}"
+            f" --data-format {getattr(args, 'data_format', 'auto')}"
             f" --seed {getattr(args, 'seed', 0)}"
             f" --seq-len {args.seq_len}"
             f" --tokenize {args.tokenize}"
@@ -774,6 +798,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         )
         if backend == "torch":
             learner_flags += (
+                f" --base-quantization {base_quantization}"
                 f" --attention-backend {attention_backend}"
                 f" --kernel-backend {kernel_backend}"
             )
@@ -1888,6 +1913,11 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     f"    python -m yeto.mlx.learner --model {shlex.quote(args.model)} "
                     f"--data {shlex.quote(args.data)} --syncer {shlex.quote(syncer_addr)} "
                     f"--learner-id {len(specs) + x} --num-learners {num_learners} "
+                    f"--data-format {getattr(args, 'data_format', 'auto')} "
+                    f"--train-on {args.train_on} "
+                    f"--assistant-mask-mode "
+                    f"{getattr(args, 'assistant_mask_mode', 'native')} "
+                    f"--seed {getattr(args, 'seed', 0)} "
                     f"--tuning {args.tuning} --lora-r {args.lora_r} "
                     f"--lora-targets {getattr(args, 'lora_targets', 'auto')} "
                     f"--seq-len {args.seq_len} --fragments {args.fragments} "

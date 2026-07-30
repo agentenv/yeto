@@ -52,6 +52,11 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser("yeto.megatron.learner")
     p.add_argument("--model", required=True)
     p.add_argument("--data", required=True)
+    p.add_argument(
+        "--data-format",
+        choices=["auto", "openai", "sharegpt", "alpaca"],
+        default="auto",
+    )
     p.add_argument("--model-revision", default=None)
     p.add_argument("--data-revision", default=None)
     p.add_argument("--trust-remote-code", action="store_true")
@@ -600,6 +605,7 @@ def _packed_blocks(args, tokenizer):
     common = {
         "train_on": args.train_on,
         "assistant_mask_mode": args.assistant_mask_mode,
+        "data_format": getattr(args, "data_format", "auto"),
     }
     if getattr(args, "data_revision", None):
         common["revision"] = args.data_revision

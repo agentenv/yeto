@@ -43,6 +43,14 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
 - `--data`: HF dataset id, local path (jsonl/json/parquet or `save_to_disk`
   dir), or any sky-supported object-store URI — non-HF sources ship to
   learners via SkyPilot file mounts.
+- `--data-format`: normalize OpenAI `messages`, ShareGPT `conversations`, or
+  Alpaca `instruction`/`input`/`output` rows into the same chat representation
+  before tokenization. The default, `auto`, detects the schema per row and
+  reports ambiguous or malformed rows with their row number.
+- QLoRA uses `--tuning lora --base-quantization nf4 --shard ddp`. It stores the
+  frozen base in bitsandbytes NF4 with double quantization and bf16 compute;
+  pass `--gpu` explicitly while the fleet planner's QLoRA memory model is being
+  calibrated.
 - `--output`: any sky-supported store URI or `hf://org/repo` — the head
   fetches the model from the winning learner, uploads it, and **terminates
   itself** (fully self-cleaning run). Local path or omitted: the artifact
