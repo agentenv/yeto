@@ -305,14 +305,40 @@ def _prepare_nf4_base_for_lora(model) -> None:
     PEFT's generic k-bit helper casts every non-quantized bf16 parameter to
     fp32. On large-vocabulary models that doubles several gigabytes of frozen
     embeddings and lm-head weights. Only normalization weights need the fp32
-    stability treatment; checkpointing input gradients are enabled later,
-    after LoRA attachment.
+    stability treatment. A fp32 final norm can promote its output even when
+    the frozen lm head remains bf16, so cast the head input back to its weight
+    dtype at the module boundary. Checkpointing input gradients are enabled
+    later, after LoRA attachment.
     """
     for parameter in model.parameters():
         parameter.requires_grad_(False)
     for module in model.modules():
         if "norm" in module.__class__.__name__.lower():
             module.to(torch.float32)
+
+    get_output_embeddings = getattr(model, "get_output_embeddings", None)
+    output_embeddings = (
+        get_output_embeddings() if callable(get_output_embeddings) else None
+    )
+    if output_embeddings is not None:
+        output_embeddings.register_forward_pre_hook(
+            _cast_floating_inputs_to_weight_dtype
+        )
+
+
+def _cast_floating_inputs_to_weight_dtype(module, args):
+    """Keep a frozen output projection compatible with fp32 norm outputs."""
+    weight = getattr(module, "weight", None)
+    if not isinstance(weight, torch.Tensor) or not weight.is_floating_point():
+        return args
+    return tuple(
+        value.to(dtype=weight.dtype)
+        if isinstance(value, torch.Tensor)
+        and value.is_floating_point()
+        and value.dtype != weight.dtype
+        else value
+        for value in args
+    )
 
 
 def load_model_and_tokenizer(args, device):

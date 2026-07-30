@@ -884,6 +884,39 @@ def test_nf4_preparation_freezes_base_and_only_casts_norms():
     assert model["head"].weight.dtype == torch.bfloat16
 
 
+def test_nf4_preparation_casts_fp32_final_norm_output_for_bf16_head():
+    from yeto.learner import _prepare_nf4_base_for_lora
+
+    class OutputHead(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(4, dtype=torch.bfloat16))
+            self.input_dtype = None
+
+        def forward(self, hidden_states):
+            self.input_dtype = hidden_states.dtype
+            return hidden_states
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = torch.nn.LayerNorm(4, dtype=torch.bfloat16)
+            self.head = OutputHead()
+
+        def get_output_embeddings(self):
+            return self.head
+
+    model = Model()
+    _prepare_nf4_base_for_lora(model)
+
+    output = model.head(torch.ones(2, 4, dtype=torch.float32))
+
+    assert model.norm.weight.dtype == torch.float32
+    assert model.head.weight.dtype == torch.bfloat16
+    assert model.head.input_dtype == torch.bfloat16
+    assert output.dtype == torch.bfloat16
+
+
 def test_benchmark_seed_pairs_matching_global_rank():
     from yeto.learner import _derived_training_seed, _stream_seed
 
