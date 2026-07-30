@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import math
-import re
 import hashlib
 import json
+import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -257,7 +257,7 @@ class LocalRoundStats:
     zero_variance_group_ratio: float
     mean_kl: float | None
     ess_ratio: float | None
-    clip_fraction: float
+    clip_fraction: float | None
     delta_l2_norm: float
     rollout_seconds: float
     train_seconds: float
@@ -283,14 +283,13 @@ class LocalRoundStats:
             "group_p95_seconds",
             "group_p99_seconds",
             "zero_variance_group_ratio",
-            "clip_fraction",
             "delta_l2_norm",
             "rollout_seconds",
             "train_seconds",
         ):
             if not math.isfinite(getattr(self, name)):
                 raise ValueError(f"{name} must be finite")
-        for name in ("mean_kl", "ess_ratio"):
+        for name in ("mean_kl", "ess_ratio", "clip_fraction"):
             value = getattr(self, name)
             if value is not None and not math.isfinite(value):
                 raise ValueError(f"{name} must be finite when present")

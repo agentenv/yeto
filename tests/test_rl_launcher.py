@@ -541,6 +541,11 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
         argv[argv.index("--rollout-all-samples-process-path") + 1]
         == "yeto.rl.miles.queue_completed_groups"
     )
+    assert (
+        argv[argv.index("--external-policy-sync-path") + 1]
+        == "yeto.rl.miles.create_policy_sync"
+    )
+    assert "--custom-megatron-init-path" not in argv
     assert "--use-distributed-optimizer" not in argv
     assert "--no-offload-train" in argv
     assert argv[argv.index("--sglang-mem-fraction-static") + 1] == "0.4"

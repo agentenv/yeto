@@ -8,6 +8,7 @@ import json
 import os
 import statistics
 import subprocess
+import sys
 import time
 from collections.abc import Mapping
 from dataclasses import asdict
@@ -24,8 +25,6 @@ from .core import (
     canonical_state,
     policy_hash,
 )
-
-_CANONICAL_PREFIX = "base_model.model."
 
 
 def verify_miles_revision(root: str | Path) -> Path:
@@ -67,305 +66,6 @@ def verify_miles_revision(root: str | Path) -> Path:
     return root
 
 
-def _adapter_sides(actor) -> list[tuple[str, Any]]:
-    """Return PEFT names paired with Bridge's actual conversion tasks."""
-
-    from megatron.bridge import AutoBridge
-
-    bridge = AutoBridge.from_hf_pretrained(
-        actor.args.hf_checkpoint,
-        trust_remote_code=bool(actor.args.yeto_rl_trust_remote_code),
-    )
-    model_bridge = getattr(bridge, "_model_bridge", None)
-    build_tasks = getattr(model_bridge, "build_adapter_conversion_tasks", None)
-    if build_tasks is None:
-        raise RuntimeError("pinned Megatron-Bridge lacks adapter conversion tasks")
-    tasks_by_base = build_tasks(actor.model)
-    sides: list[tuple[str, Any]] = []
-    for base_name in sorted(tasks_by_base):
-        tasks = sorted(
-            tasks_by_base[base_name],
-            key=lambda task: task.adapter_key or "",
-        )
-        for task in tasks:
-            for side in (task.linear_in_task, task.linear_out_task):
-                parameter = side.param_weight
-                main = getattr(parameter, "main_param", None)
-                if (
-                    main is None
-                    or main.dtype != torch.float32
-                    or main.numel() != parameter.numel()
-                ):
-                    raise RuntimeError(
-                        f"LoRA parameter {side.param_name!r} has no complete "
-                        "FP32 optimizer master"
-                    )
-                converted = side.mapping.megatron_to_hf(
-                    main.view(parameter.shape),
-                    side.megatron_module,
-                )
-                if len(converted) != 1:
-                    raise RuntimeError(
-                        f"ambiguous LoRA mapping for {side.param_name!r}"
-                    )
-                raw_name = next(iter(converted))
-                name = (
-                    raw_name
-                    if raw_name.startswith(_CANONICAL_PREFIX)
-                    else _CANONICAL_PREFIX + raw_name
-                )
-                if not name.endswith((".lora_A.weight", ".lora_B.weight")):
-                    raise RuntimeError(f"non-PEFT LoRA mapping {name!r}")
-                sides.append((name, side))
-    names = [name for name, _ in sides]
-    if not names or len(names) != len(set(names)):
-        raise RuntimeError("Miles produced an empty or duplicate LoRA mapping")
-    mapped = {id(side.param_weight) for _, side in sides}
-    trainable = {
-        id(parameter)
-        for chunk in actor.model
-        for parameter in chunk.parameters()
-        if parameter.requires_grad
-    }
-    if mapped != trainable:
-        raise RuntimeError(
-            "Miles adapter conversion does not cover every trainable parameter"
-        )
-    return sorted(sides)
-
-
-@torch.no_grad()
-def _export_fp32_policy(actor) -> dict[str, torch.Tensor]:
-    tensors = {}
-    for name, side in _adapter_sides(actor):
-        parameter = side.param_weight
-        converted = side.mapping.megatron_to_hf(
-            parameter.main_param.view(parameter.shape),
-            side.megatron_module,
-        )
-        value = next(iter(converted.values()))
-        tensors[name] = value.detach().to(
-            device="cpu", dtype=torch.float32
-        ).contiguous().clone()
-    return tensors
-
-
-def _optimizer_children(optimizer) -> list[Any]:
-    return list(getattr(optimizer, "chained_optimizers", (optimizer,)))
-
-
-def _reset_optimizer_state(actor, parameters: list[torch.Tensor]) -> int:
-    parameter_ids = {id(parameter) for parameter in parameters}
-    for child in _optimizer_children(actor.optimizer):
-        optimizer = getattr(child, "optimizer", child)
-        for parameter in list(optimizer.state):
-            if id(parameter) in parameter_ids:
-                optimizer.state.pop(parameter, None)
-    return len(parameter_ids)
-
-
-@torch.no_grad()
-def _copy_masters_to_model(actor) -> None:
-    for child in _optimizer_children(actor.optimizer):
-        copy = getattr(child, "_copy_main_params_to_model_params", None)
-        if copy is None:
-            raise RuntimeError("pinned Megatron optimizer lacks main-to-model copy")
-        copy()
-
-
-def _restore_scheduler_progress(actor, policy_version: int) -> None:
-    scheduler = actor.opt_param_scheduler
-    batch_size = actor.args.global_batch_size
-    target = policy_version * actor.args.num_steps_per_rollout * batch_size
-    if scheduler is None or batch_size <= 0 or scheduler.num_steps % batch_size:
-        raise RuntimeError("Miles scheduler progress is not an integral optimizer step")
-    if scheduler.num_steps > target:
-        raise RuntimeError("Miles scheduler is ahead of the committed policy")
-    if scheduler.num_steps < target:
-        scheduler.step(increment=target - scheduler.num_steps)
-
-
-def _actor_export_policy(self):
-    if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
-        return None
-    return _export_fp32_policy(self)
-
-
-@torch.no_grad()
-def _actor_apply_policy(
-    self,
-    tensors: Mapping[str, torch.Tensor],
-    policy_version: int,
-):
-    sides = dict(_adapter_sides(self))
-    if set(tensors) != set(sides):
-        missing = sorted(set(sides) - set(tensors))
-        extra = sorted(set(tensors) - set(sides))
-        raise RuntimeError(
-            f"global LoRA mapping mismatch: missing={missing}, extra={extra}"
-        )
-
-    mapped = {}
-    for name, side in sides.items():
-        value = tensors[name].detach().to(
-            device=side.param_weight.device,
-            dtype=torch.float32,
-        )
-        target = side.mapping.hf_to_megatron(value, side.megatron_module)
-        if target.numel() != side.param_weight.numel():
-            raise RuntimeError(f"global LoRA shape mismatch for {name!r}")
-        mapped[name] = target.reshape(side.param_weight.shape).contiguous()
-
-    _restore_scheduler_progress(self, policy_version)
-    reset_parameter_count = _reset_optimizer_state(
-        self,
-        [side.param_weight.main_param for side in sides.values()],
-    )
-    for name, side in sides.items():
-        side.param_weight.main_param.view(side.param_weight.shape).copy_(mapped[name])
-    _copy_masters_to_model(self)
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-    self.weights_backuper.backup("actor")
-    torch.cuda.empty_cache()
-
-    identity = {
-        "base_model_revision": self.args.yeto_rl_base_model_revision,
-        "lora_config_hash": self.args.yeto_rl_lora_config_hash,
-        "layout_hash": self.args.yeto_rl_layout_hash,
-    }
-    applied = canonical_state(policy_version, _export_fp32_policy(self), **identity)
-    canonical_state(
-        policy_version,
-        tensors,
-        expected_specs=applied.specs,
-        **identity,
-    )
-    return reset_parameter_count, policy_hash(applied)
-
-
-def _actor_optimizer_steps(self) -> int:
-    scheduler = self.opt_param_scheduler
-    batch = self.args.global_batch_size
-    if scheduler is None or batch <= 0 or scheduler.num_steps % batch:
-        raise RuntimeError("Miles optimizer step counter is not integral")
-    return int(scheduler.num_steps // batch)
-
-
-def _actor_train_metrics(self):
-    if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
-        return None
-    metrics = getattr(self.args, "_yeto_rl_train_metrics", None)
-    if hasattr(self.args, "_yeto_rl_train_metrics"):
-        del self.args._yeto_rl_train_metrics
-    return metrics
-
-
-def _install_train_metric_capture() -> None:
-    from miles.backends.megatron_utils import model
-
-    original = model.log_train_step
-    if getattr(original, "_yeto_rl_capture", False):
-        return
-
-    def log_train_step(*values, **kwargs):
-        metrics = original(*values, **kwargs)
-        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-            args = kwargs["args"]
-            args._yeto_rl_train_metrics = {
-                key: float(metrics[key])
-                for key in (
-                    "train/train_rollout_kl",
-                    "train/ess_ratio",
-                    "train/pg_clipfrac",
-                )
-                if key in metrics
-            }
-        return metrics
-
-    log_train_step._yeto_rl_capture = True
-    model.log_train_step = log_train_step
-
-
-def _install_colocated_lora_ipc_sync() -> None:
-    """Keep CUDA IPC producers alive until SGLang finishes the transfer."""
-
-    import ray
-    from miles.backends.megatron_utils.update_weight import (
-        update_weight_from_tensor,
-    )
-    from miles.backends.megatron_utils.update_weight.common import (
-        _check_weight_sync_results,
-    )
-
-    original = update_weight_from_tensor._send_to_colocated_engine
-    if getattr(original, "_yeto_rl_synchronized", False):
-        return
-
-    def synchronized_send(*values, **kwargs):
-        refs, long_lived_tensors = original(*values, **kwargs)
-        if kwargs.get("lora_config") is not None:
-            results = ray.get(refs)
-            _check_weight_sync_results(results, is_lora=True)
-            group = kwargs.get("ipc_gather_group")
-            if group is not None:
-                torch.distributed.barrier(group=group)
-        return refs, long_lived_tensors
-
-    synchronized_send._yeto_rl_synchronized = True
-    update_weight_from_tensor._send_to_colocated_engine = synchronized_send
-
-
-def configure_miles_bridge(args) -> None:
-    """Install Yeto actor methods inside each Miles Ray worker."""
-
-    from megatron.bridge import AutoBridge
-    from megatron.bridge.training import config as bridge_config
-
-    original = AutoBridge.to_megatron_provider
-
-    def configured_provider(self, *values, **kwargs):
-        provider = original(self, *values, **kwargs)
-        provider.attention_backend = args.attention_backend
-        return provider
-
-    AutoBridge.to_megatron_provider = configured_provider
-    # The INIT adapter is replicated. Keep complete fp32 masters and Adam
-    # state on every DP/EP rank; no sharded gather path is part of v0.
-    args.use_distributed_optimizer = False
-    original_ddp_config = bridge_config.DistributedDataParallelConfig
-
-    def replicated_lora_ddp_config(*values, **kwargs):
-        kwargs["use_distributed_optimizer"] = False
-        return original_ddp_config(*values, **kwargs)
-
-    bridge_config.DistributedDataParallelConfig = replicated_lora_ddp_config
-    _install_train_metric_capture()
-    _install_colocated_lora_ipc_sync()
-    install_miles_actor_adapter()
-
-
-def install_miles_actor_adapter() -> None:
-    """Install methods in both the driver and each Miles Ray worker."""
-
-    from miles.backends.megatron_utils.actor import MegatronTrainRayActor
-
-    methods = {
-        "yeto_rl_export_policy": _actor_export_policy,
-        "yeto_rl_apply_policy": _actor_apply_policy,
-        "yeto_rl_optimizer_steps": _actor_optimizer_steps,
-        "yeto_rl_train_metrics": _actor_train_metrics,
-    }
-    for name, method in methods.items():
-        existing = getattr(MegatronTrainRayActor, name, None)
-        if existing is not None and (
-            getattr(existing, "__module__", None),
-            getattr(existing, "__qualname__", None),
-        ) != (method.__module__, method.__qualname__):
-            raise RuntimeError(f"Miles actor already defines incompatible {name}")
-        setattr(MegatronTrainRayActor, name, method)
-
-
 def _policy_token(version: int) -> str:
     return f"yeto:{version}"
 
@@ -400,6 +100,52 @@ def _validate_rollout_groups(data: object, groups: int, samples: int) -> None:
             status = getattr(getattr(sample, "status", None), "value", None)
             if isinstance(sample, list) or status not in {"completed", "truncated"}:
                 raise RuntimeError("Miles returned an incomplete trajectory")
+
+
+def _validate_rollout_policy_versions(data: list[list[Any]], rollout_id: int) -> None:
+    expected = _policy_token(rollout_id)
+    for group in data:
+        for sample in group:
+            versions = getattr(sample, "weight_versions", None)
+            if not isinstance(versions, list) or not versions or any(
+                not isinstance(version, str) or version != expected
+                for version in versions
+            ):
+                raise StrictRlInvariantError(
+                    "mixed_version_group_count",
+                    f"Miles rollout did not use only policy {expected}",
+                )
+
+
+def _append_rl_event(args, event: dict[str, Any]) -> None:
+    path = Path(args.yeto_rl_event_tape).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    event = {
+        "island_id": int(args.yeto_rl_learner_id),
+        "time_unix": time.time(),
+        **event,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def _record_strict_failure(args, error: StrictRlInvariantError, bridge=None) -> None:
+    _append_rl_event(
+        args,
+        {
+            "event": "rl_strict_failure",
+            "metric": error.metric,
+            "value": 1,
+            "error": f"{type(error).__name__}: {error}",
+        },
+    )
+    print(
+        f"[yeto-rl-strict-failure] {error.metric}: {error}",
+        file=sys.stderr,
+        flush=True,
+    )
+    if bridge is not None:
+        bridge.client.close()
 
 
 _ISLAND_CHECKPOINT_SCHEMA = 2
@@ -662,6 +408,7 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
                 group, rollout_id, args.n_samples_per_prompt
             )
         ]
+    rollout_started = time.monotonic()
     output, lifecycle = _run_rollout_with_metrics(
         miles_generate,
         args,
@@ -677,6 +424,11 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
             args.rollout_batch_size,
             args.n_samples_per_prompt,
         )
+        try:
+            _validate_rollout_policy_versions(output.samples, rollout_id)
+        except StrictRlInvariantError as error:
+            _record_strict_failure(args, error)
+            raise
         consumed = {_group_indices(group) for group in output.samples}
         data_source.buffer[:] = [
             group
@@ -689,6 +441,7 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
             for sample in samples
         )
         round_metrics = {
+            "rollout_seconds": time.monotonic() - rollout_started,
             "active_groups": lifecycle["peak_active"],
             "cancelled_groups": lifecycle["cancelled"],
             "tool_wait_seconds": tool_wait_seconds,
@@ -706,100 +459,64 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
     return output
 
 
-class MilesIslandRuntime:
-    """Synchronous wrapper over the pinned Miles Ray APIs."""
+class _BridgeRuntime:
+    def __init__(self, initial: CanonicalLoraState, args) -> None:
+        self.initial = initial
+        self.args = args
+
+    def initialize(self) -> CanonicalLoraState:
+        return self.initial
+
+    def apply_global_policy(self, _state: CanonicalLoraState) -> None:
+        pass
+
+    def record_local_round(self, stats: LocalRoundStats) -> None:
+        path = Path(self.args.yeto_rl_completed_groups_path).expanduser()
+        try:
+            payload = torch.load(path, map_location="cpu", weights_only=True)
+        except Exception as error:
+            raise RuntimeError("cannot update Miles island checkpoint") from error
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != _ISLAND_CHECKPOINT_SCHEMA
+            or payload.get("policy_version") != stats.base_policy_version
+            or payload.get("config") != _island_checkpoint_config(self.args)
+        ):
+            raise RuntimeError("Miles island checkpoint changed before round commit")
+        payload["local_round_id"] = stats.local_round_id
+        payload["local_round_stats"] = asdict(stats)
+        _atomic_save_island_checkpoint(path, payload)
+
+    def shutdown(self) -> None:
+        pass
+
+
+class MilesPolicySync:
+    """Yeto synchronization hook called by the Miles training loop."""
 
     def __init__(self, args) -> None:
         self.args = args
-        self.loop = asyncio.new_event_loop()
-        self.rollout_manager = None
         self.actor_model = None
-        self._owns_ray = False
-        self._trainer_awake = False
-        self._rollout_offloaded = True
-        self._policy_version: int | None = None
-        self._rollout_id = 0
-        self._optimizer_reset_count = 0
+        self.rollout_manager = None
+        self.bridge = None
+        self.current = None
+        self.permit = None
+        self.optimizer_reset_count = 0
 
-    async def _onload_trainer(self) -> None:
-        if self._trainer_awake:
-            return
-        await self.actor_model.onload()
-        self._trainer_awake = True
-
-    async def _offload_trainer(self) -> None:
-        if self._trainer_awake and self.args.offload_train:
-            await self.actor_model.offload()
-            self._trainer_awake = False
-
-    def _run(self, coroutine):
-        return self.loop.run_until_complete(coroutine)
-
-    async def _actor_call(self, method: str, *args, rank0: bool = False):
-        results = await self.actor_model._broadcast(method, *args)
-        expected = self.args.actor_num_nodes * self.args.actor_num_gpus_per_node
-        if not isinstance(results, list) or len(results) != expected:
-            raise RuntimeError(
-                f"Miles returned {len(results) if isinstance(results, list) else 0} "
-                f"actor results, expected {expected}"
-            )
-        if rank0:
-            exported = [result for result in results if result is not None]
-            if len(exported) != 1:
-                raise RuntimeError("Miles must export policy only on global rank 0")
-            return exported[0]
-        if not results or any(result != results[0] for result in results[1:]):
-            raise RuntimeError(f"Miles actor ranks disagree on {method}")
-        return results[0]
-
-    async def _initialize(self) -> CanonicalLoraState:
-        import ray
-        from miles.ray.placement_group import (
-            create_placement_groups,
-            create_rollout_manager,
-            create_training_models,
-        )
-
-        install_miles_actor_adapter()
-        if not ray.is_initialized():
-            ray.init(address="auto")
-            self._owns_ray = True
-        expected_gpus = (
-            self.args.actor_num_nodes * self.args.actor_num_gpus_per_node
-        )
-        deadline = time.monotonic() + 300
-        while True:
-            visible_gpus = int(ray.cluster_resources().get("GPU", 0))
-            if visible_gpus >= expected_gpus or time.monotonic() >= deadline:
-                break
-            await asyncio.sleep(2)
-        if visible_gpus != expected_gpus:
-            raise RuntimeError(
-                f"Miles Ray cluster has {visible_gpus} GPUs, expected {expected_gpus}"
-            )
-        groups = create_placement_groups(self.args)
-        self.rollout_manager, _ = create_rollout_manager(
-            self.args, groups["rollout"]
-        )
-        self.actor_model, critic = await create_training_models(
-            self.args, groups, self.rollout_manager
-        )
-        if critic is not None:
-            raise RuntimeError("RL v0 does not support a Miles critic")
-        self._trainer_awake = not self.args.offload_train
-        await self._onload_trainer()
-        tensors = await self._actor_call("yeto_rl_export_policy", rank0=True)
-        await self._offload_trainer()
-        return canonical_state(
-            0,
-            tensors,
+    def _canonical_state(self, state) -> CanonicalLoraState:
+        canonical = canonical_state(
+            state.policy_version,
+            state.tensors,
             base_model_revision=self.args.yeto_rl_base_model_revision,
             lora_config_hash=self.args.yeto_rl_lora_config_hash,
             layout_hash=self.args.yeto_rl_layout_hash,
         )
-
-    def initialize(self) -> CanonicalLoraState:
-        return self._run(self._initialize())
+        if state.layout_hash != canonical.layout_hash:
+            raise StrictRlInvariantError(
+                "layout_hash_mismatch",
+                "Miles and Yeto computed different LoRA layouts",
+            )
+        return canonical
 
     async def _engines(self) -> list[Any]:
         info = await self.rollout_manager.get_updatable_engines_and_lock.remote()
@@ -808,83 +525,42 @@ class MilesIslandRuntime:
             raise RuntimeError("Miles created no updatable SGLang engine")
         return engines
 
-    async def _pause_rollout(self) -> None:
-        engines = await self._engines()
-        # Retracted requests resume after a weight update; abort them so one
-        # trajectory can never cross the global policy boundary.
-        await asyncio.gather(
-            *(engine.pause_generation.remote("abort") for engine in engines)
-        )
-
-    async def _resume_rollout(self) -> None:
-        engines = await self._engines()
-        await asyncio.gather(
-            *(engine.continue_generation.remote() for engine in engines)
-        )
-
     async def _set_rollout_version(self, version: int) -> None:
         token = _policy_token(version)
-        engines = await self._engines()
         await asyncio.gather(
-            *(engine.update_weight_version.remote(token) for engine in engines)
+            *(
+                engine.update_weight_version.remote(token)
+                for engine in await self._engines()
+            )
         )
 
     async def _apply_global_policy(self, state: CanonicalLoraState) -> None:
-        from sglang.srt.constants import (
-            GPU_MEMORY_TYPE_CUDA_GRAPH,
-            GPU_MEMORY_TYPE_KV_CACHE,
-            GPU_MEMORY_TYPE_WEIGHTS,
-        )
+        from miles.backends.megatron_utils.trainable_state import make_trainable_state
 
-        await self._pause_rollout()
-        if not self._rollout_offloaded:
-            await self.rollout_manager.offload.remote(
-                tags=[
-                    GPU_MEMORY_TYPE_CUDA_GRAPH,
-                    GPU_MEMORY_TYPE_KV_CACHE,
-                    GPU_MEMORY_TYPE_WEIGHTS,
-                ]
-            )
-            self._rollout_offloaded = True
-        await self._onload_trainer()
-        reset_parameter_count, applied_hash = await self._actor_call(
-            "yeto_rl_apply_policy",
-            dict(state.tensors),
-            state.policy_version,
+        reset_count = await self.actor_model.apply_trainable_state(
+            make_trainable_state(state.policy_version, state.tensors),
+            reset_optimizer=True,
         )
-        expected_hash = policy_hash(state)
-        if applied_hash != expected_hash:
+        applied = self._canonical_state(await self.actor_model.export_trainable_state())
+        applied_hash = policy_hash(applied)
+        if applied_hash != policy_hash(state):
             raise StrictRlInvariantError(
                 "policy_hash_mismatch_after_apply",
                 "policy hash mismatch after trainer apply",
             )
-        await self._offload_trainer()
-        await self.rollout_manager.onload_weights.remote()
-        await self.actor_model.update_weights()
-        # update_weights resumes generation; close the admission boundary
-        # until KV/weights and the explicit version are all installed.
-        await self._pause_rollout()
-        await self.rollout_manager.onload_kv.remote()
-        self._rollout_offloaded = False
         await self._set_rollout_version(state.policy_version)
-        self._policy_version = state.policy_version
-        self._rollout_id = state.policy_version
-        await self._resume_rollout()
-        self._optimizer_reset_count += 1
+        self.optimizer_reset_count += 1
         self._append_event(
             {
                 "event": "rl_policy_apply",
                 "policy_version": state.policy_version,
-                "optimizer_reset_count": self._optimizer_reset_count,
-                "reset_parameter_count": reset_parameter_count,
+                "optimizer_reset_count": self.optimizer_reset_count,
+                "reset_parameter_count": reset_count,
                 "rl/global_policy_version": state.policy_version,
-                "rl/optimizer_reset_count": self._optimizer_reset_count,
+                "rl/optimizer_reset_count": self.optimizer_reset_count,
                 "sync/global_policy_hash": applied_hash,
             }
         )
-
-    def apply_global_policy(self, state: CanonicalLoraState) -> None:
-        self._run(self._apply_global_policy(state))
 
     def _rollout_batches(self, data_pack) -> list[Mapping[str, Any]]:
         import ray
@@ -892,27 +568,25 @@ class MilesIslandRuntime:
         references = data_pack.get("data_ref")
         if not isinstance(references, list):
             raise RuntimeError("Miles returned an invalid rollout shard list")
-        expected_dp = (
-            self.args.actor_num_nodes * self.args.actor_num_gpus_per_node
-        )
-        if len(references) != expected_dp:
+        expected = self.args.actor_num_nodes * self.args.actor_num_gpus_per_node
+        if len(references) != expected:
             raise RuntimeError(
-                f"Miles returned {len(references)} DP shards, expected {expected_dp}"
+                f"Miles returned {len(references)} DP shards, expected {expected}"
             )
         return [ray.get(reference.inner) for reference in references]
 
     def _rollout_metrics(self, policy_version: int) -> dict[str, float]:
         path = Path(self.args.yeto_rl_completed_groups_path).expanduser()
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != _ISLAND_CHECKPOINT_SCHEMA
+            or payload.get("policy_version") != policy_version
+            or payload.get("config") != _island_checkpoint_config(self.args)
+            or not isinstance(payload.get("rollout_metrics"), Mapping)
+        ):
+            raise RuntimeError("Miles island checkpoint lacks rollout metrics")
         try:
-            payload = torch.load(path, map_location="cpu", weights_only=True)
-            if (
-                not isinstance(payload, dict)
-                or payload.get("schema_version") != _ISLAND_CHECKPOINT_SCHEMA
-                or payload.get("policy_version") != policy_version
-                or payload.get("config") != _island_checkpoint_config(self.args)
-                or not isinstance(payload.get("rollout_metrics"), Mapping)
-            ):
-                raise RuntimeError("Miles island checkpoint lacks rollout metrics")
             return {
                 name: float(value)
                 for name, value in payload["rollout_metrics"].items()
@@ -920,87 +594,9 @@ class MilesIslandRuntime:
         except (TypeError, ValueError) as error:
             raise RuntimeError("Miles returned invalid Yeto group metrics") from error
 
-    async def _run_local_round(
-        self,
-        expected_policy_version: int,
-        groups: int,
-        samples_per_group: int,
-        optimizer_steps: int,
-    ) -> LocalRoundStats:
-        from sglang.srt.constants import (
-            GPU_MEMORY_TYPE_CUDA_GRAPH,
-            GPU_MEMORY_TYPE_KV_CACHE,
-            GPU_MEMORY_TYPE_WEIGHTS,
-        )
-
-        if expected_policy_version != self._policy_version:
-            raise RuntimeError("Miles round requested from an unapplied global policy")
-        rollout_started = time.monotonic()
-        data_pack = await self.rollout_manager.generate.remote(self._rollout_id)
-        rollout_seconds = time.monotonic() - rollout_started
-        await self._pause_rollout()
+    def _round_stats(self, rollout_id: int, data_pack, train_state) -> LocalRoundStats:
         batches = self._rollout_batches(data_pack)
-        versions = [
-            sample_versions
-            for batch in batches
-            for sample_versions in batch.get("weight_versions", [])
-        ]
-        expected_samples = groups * samples_per_group
-        if not isinstance(versions, list) or len(versions) != expected_samples:
-            raise RuntimeError(
-                f"Miles produced {len(versions) if isinstance(versions, list) else 0} "
-                f"versioned samples, expected {expected_samples}"
-            )
-        try:
-            observed = {
-                _version_from_token(token)
-                for sample_versions in versions
-                for token in sample_versions
-            }
-        except RuntimeError as error:
-            raise StrictRlInvariantError(
-                "mixed_version_group_count",
-                str(error),
-            ) from error
-        if any(not sample_versions for sample_versions in versions) or observed != {
-            expected_policy_version
-        }:
-            raise StrictRlInvariantError(
-                "mixed_version_group_count",
-                f"Miles rollout mixed policy versions: {observed}",
-            )
-        rollout_metrics = self._rollout_metrics(expected_policy_version)
-
-        await self.rollout_manager.offload.remote(
-            tags=[
-                GPU_MEMORY_TYPE_CUDA_GRAPH,
-                GPU_MEMORY_TYPE_KV_CACHE,
-                GPU_MEMORY_TYPE_WEIGHTS,
-            ]
-        )
-        self._rollout_offloaded = True
-        before = await self._actor_call("yeto_rl_optimizer_steps")
-        train_started = time.monotonic()
-        await self.actor_model.train(self._rollout_id, data_pack)
-        train_seconds = time.monotonic() - train_started
-        self._trainer_awake = True
-        after = await self._actor_call("yeto_rl_optimizer_steps")
-        if after - before != optimizer_steps:
-            raise RuntimeError(
-                f"Miles performed {after - before} optimizer steps, "
-                f"expected {optimizer_steps}"
-            )
-        train_metrics = await self._actor_call(
-            "yeto_rl_train_metrics",
-            rank0=True,
-        )
-        try:
-            mean_kl = float(train_metrics["train/train_rollout_kl"])
-            ess_ratio = float(train_metrics["train/ess_ratio"])
-            clip_fraction = float(train_metrics["train/pg_clipfrac"])
-        except (KeyError, TypeError, ValueError) as error:
-            raise RuntimeError("Miles did not return required GRPO train metrics") from error
-        self._rollout_id += 1
+        expected_samples = self.args.rollout_batch_size * self.args.n_samples_per_prompt
         response_lengths = [
             int(value)
             for batch in batches
@@ -1026,111 +622,133 @@ class MilesIslandRuntime:
             rewards = [float(value) for value in raw_rewards]
         except (TypeError, ValueError) as error:
             raise RuntimeError("Miles RL v0 requires scalar rewards") from error
+        try:
+            mean_kl = (
+                None
+                if train_state.train_rollout_kl is None
+                else float(train_state.train_rollout_kl)
+            )
+            ess_ratio = (
+                None if train_state.ess_ratio is None else float(train_state.ess_ratio)
+            )
+            clip_fraction = (
+                None
+                if train_state.pg_clipfrac is None
+                else float(train_state.pg_clipfrac)
+            )
+            train_seconds = float(train_state.train_seconds)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise RuntimeError(
+                "Miles did not export valid round train statistics"
+            ) from error
+        if train_seconds < 0:
+            raise RuntimeError("Miles exported a negative train duration")
+        metrics = self._rollout_metrics(rollout_id)
+        group_size = self.args.n_samples_per_prompt
         return LocalRoundStats(
             island_id=int(self.args.yeto_rl_learner_id),
-            local_round_id=expected_policy_version + 1,
-            base_policy_version=expected_policy_version,
-            active_groups=int(rollout_metrics["active_groups"]),
-            completed_groups=groups,
-            cancelled_groups=int(rollout_metrics["cancelled_groups"]),
+            local_round_id=rollout_id + 1,
+            base_policy_version=rollout_id,
+            active_groups=int(metrics["active_groups"]),
+            completed_groups=self.args.rollout_batch_size,
+            cancelled_groups=int(metrics["cancelled_groups"]),
             completed_trajectories=expected_samples,
             action_tokens=sum(response_lengths),
-            tool_wait_seconds=rollout_metrics["tool_wait_seconds"],
-            group_p50_seconds=rollout_metrics["group_p50_seconds"],
-            group_p95_seconds=rollout_metrics["group_p95_seconds"],
-            group_p99_seconds=rollout_metrics["group_p99_seconds"],
+            tool_wait_seconds=metrics["tool_wait_seconds"],
+            group_p50_seconds=metrics["group_p50_seconds"],
+            group_p95_seconds=metrics["group_p95_seconds"],
+            group_p99_seconds=metrics["group_p99_seconds"],
             reward_mean=statistics.fmean(rewards),
             reward_std=statistics.pstdev(rewards),
             zero_variance_group_ratio=sum(
-                len(set(rewards[index : index + samples_per_group])) == 1
-                for index in range(0, expected_samples, samples_per_group)
+                len(set(rewards[index : index + group_size])) == 1
+                for index in range(0, expected_samples, group_size)
             )
-            / groups,
+            / self.args.rollout_batch_size,
             mean_kl=mean_kl,
             ess_ratio=ess_ratio,
             clip_fraction=clip_fraction,
             delta_l2_norm=0.0,
-            rollout_seconds=rollout_seconds,
+            rollout_seconds=metrics["rollout_seconds"],
             train_seconds=train_seconds,
         )
 
-    def run_local_round(
-        self,
-        *,
-        expected_policy_version: int,
-        groups: int,
-        samples_per_group: int,
-        optimizer_steps: int,
-    ) -> LocalRoundStats:
-        return self._run(
-            self._run_local_round(
-                expected_policy_version,
-                groups,
-                samples_per_group,
-                optimizer_steps,
-            )
-        )
+    async def _initialize(self, *, actor_model, rollout_manager) -> None:
+        from .bridge import StrictRlBridge
 
-    async def _export_local_policy(self) -> CanonicalLoraState:
-        if not self._trainer_awake:
-            await self._onload_trainer()
-        tensors = await self._actor_call("yeto_rl_export_policy", rank0=True)
-        await self._offload_trainer()
-        if self._policy_version is None:
-            raise RuntimeError("Miles has no applied global policy")
-        return canonical_state(
-            self._policy_version,
-            tensors,
-            base_model_revision=self.args.yeto_rl_base_model_revision,
-            lora_config_hash=self.args.yeto_rl_lora_config_hash,
-            layout_hash=self.args.yeto_rl_layout_hash,
-        )
+        self.actor_model = actor_model
+        self.rollout_manager = rollout_manager
+        initial = self._canonical_state(await actor_model.export_trainable_state())
+        runtime = _BridgeRuntime(initial, self.args)
+        self.bridge = StrictRlBridge(runtime, self.args.yeto_rl_bridge_config)
+        self.bridge.start()
+        self.current = self.bridge.wait_for_initial_policy()
+        await self._apply_global_policy(self.current)
+        self.args.start_rollout_id = self.current.policy_version
+        if self.current.policy_version < self.args.num_rollout:
+            self.permit = self.bridge.wait_for_round()
 
-    def export_local_policy(self) -> CanonicalLoraState:
-        return self._run(self._export_local_policy())
-
-    def record_local_round(self, stats: LocalRoundStats) -> None:
-        path = Path(self.args.yeto_rl_completed_groups_path).expanduser()
+    async def initialize(self, *, actor_model, rollout_manager) -> None:
         try:
-            payload = torch.load(path, map_location="cpu", weights_only=True)
-        except Exception as error:
-            raise RuntimeError("cannot update Miles island checkpoint") from error
+            await self._initialize(
+                actor_model=actor_model,
+                rollout_manager=rollout_manager,
+            )
+        except StrictRlInvariantError as error:
+            self._record_strict_failure(error)
+            raise
+
+    async def _after_local_train(
+        self, *, rollout_id, actor_model, rollout_data
+    ) -> None:
         if (
-            not isinstance(payload, dict)
-            or payload.get("schema_version") != _ISLAND_CHECKPOINT_SCHEMA
-            or payload.get("policy_version") != stats.base_policy_version
-            or payload.get("config") != _island_checkpoint_config(self.args)
+            actor_model is not self.actor_model
+            or self.current is None
+            or self.permit is None
         ):
-            raise RuntimeError("Miles island checkpoint changed before round commit")
-        payload["local_round_id"] = stats.local_round_id
-        payload["local_round_stats"] = asdict(stats)
-        _atomic_save_island_checkpoint(path, payload)
+            raise RuntimeError(
+                "Miles called policy synchronization outside an active round"
+            )
+        if rollout_id != self.current.policy_version:
+            raise RuntimeError(
+                "Miles rollout ID differs from the global policy version"
+            )
+        train_state = await actor_model.export_trainable_state()
+        local = self._canonical_state(train_state)
+        stats = self._round_stats(rollout_id, rollout_data, train_state)
+        self.bridge.submit_local_state(self.permit, self.current, local, stats)
+        self.current = self.bridge.wait_for_global_policy(rollout_id + 1)
+        await self._apply_global_policy(self.current)
+        if self.current.policy_version < self.args.num_rollout:
+            self.permit = self.bridge.wait_for_round()
+        else:
+            self.permit = None
+
+    async def after_local_train(self, *, rollout_id, actor_model, rollout_data) -> None:
+        try:
+            await self._after_local_train(
+                rollout_id=rollout_id,
+                actor_model=actor_model,
+                rollout_data=rollout_data,
+            )
+        except StrictRlInvariantError as error:
+            self._record_strict_failure(error)
+            raise
+
+    async def finalize(self) -> None:
+        if self.bridge is None or self.current is None:
+            raise RuntimeError("Miles finalized an uninitialized policy synchronizer")
+        final = self.bridge.finalize()
+        if policy_hash(final) != policy_hash(self.current):
+            raise RuntimeError("final policy differs from the committed global policy")
+        self.bridge.client.close()
 
     def _append_event(self, event: dict[str, Any]) -> None:
-        path = Path(self.args.yeto_rl_event_tape).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        event = {
-            "island_id": int(self.args.yeto_rl_learner_id),
-            "time_unix": time.time(),
-            **event,
-        }
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
-            )
+        _append_rl_event(self.args, event)
 
-    async def _shutdown(self) -> None:
-        if self.actor_model is not None:
-            await self._offload_trainer()
-        if self.rollout_manager is not None:
-            await self.rollout_manager.dispose.remote()
+    def _record_strict_failure(self, error: StrictRlInvariantError) -> None:
+        _record_strict_failure(self.args, error, self.bridge)
 
-    def shutdown(self) -> None:
-        try:
-            self._run(self._shutdown())
-        finally:
-            if self._owns_ray:
-                import ray
 
-                ray.shutdown()
-            self.loop.close()
+def create_policy_sync(args) -> MilesPolicySync:
+    return MilesPolicySync(args)

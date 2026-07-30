@@ -2,20 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import socket
 import subprocess
+import sys
 import threading
 import time
+import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from yeto.export import parse_checkpoint
 from yeto.protocol import DTYPE_F32, SyncerClient
-from yeto.rl.core import CanonicalTensorSpec, build_avg_layout
 from yeto.rl.bridge import BridgeConfig, StrictRlBridge
-from yeto.rl.core import LocalRoundStats, canonical_state
+from yeto.rl.core import (
+    CanonicalTensorSpec,
+    LocalRoundStats,
+    build_avg_layout,
+    canonical_state,
+)
+from yeto.rl.miles import MilesPolicySync, _island_checkpoint_config
 from yeto.tensor_io import pack_tensor, unpack_fragment
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -331,6 +341,215 @@ def test_single_island_runs_the_real_syncer_parity_path(syncer_binary, tmp_path)
         assert checkpoint.layout_hash == runtime.current.layout_hash
     finally:
         bridge.client.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+def test_miles_public_hook_runs_against_real_syncer(
+    syncer_binary, tmp_path, monkeypatch
+):
+    checkpoint_path = tmp_path / "state.ckpt"
+    island_checkpoint = tmp_path / "island.pt"
+    event_tape = tmp_path / "island.jsonl"
+    port = _port()
+    process = _start(
+        syncer_binary,
+        port,
+        checkpoint_path,
+        rounds=1,
+        learners=1,
+    )
+    initial = _state(
+        0,
+        {"base_model.model.layer.lora_A.weight": torch.zeros(1, 2)},
+    )
+    trainable_module = types.ModuleType(
+        "miles.backends.megatron_utils.trainable_state"
+    )
+    def make_trainable_state(
+        version,
+        tensors,
+        *,
+        train_rollout_kl=None,
+        ess_ratio=None,
+        pg_clipfrac=None,
+        train_seconds=None,
+    ):
+        return SimpleNamespace(
+            policy_version=version,
+            layout_hash=initial.layout_hash,
+            tensors=tensors,
+            train_rollout_kl=train_rollout_kl,
+            ess_ratio=ess_ratio,
+            pg_clipfrac=pg_clipfrac,
+            train_seconds=train_seconds,
+        )
+
+    trainable_module.make_trainable_state = make_trainable_state
+    for name in ("miles", "miles.backends", "miles.backends.megatron_utils"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(
+        sys.modules,
+        "miles.backends.megatron_utils.trainable_state",
+        trainable_module,
+    )
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(get=lambda value: value))
+
+    class Remote:
+        def __init__(self, function):
+            self.function = function
+
+        async def remote(self, *args, **kwargs):
+            return self.function(*args, **kwargs)
+
+    events = []
+    engine = SimpleNamespace(
+        update_weight_version=Remote(
+            lambda version: events.append(("version", version))
+        )
+    )
+    rollout_manager = SimpleNamespace(
+        get_updatable_engines_and_lock=Remote(
+            lambda: SimpleNamespace(rollout_engines=[engine])
+        )
+    )
+
+    class Actor:
+        def __init__(self):
+            self.state = SimpleNamespace(
+                policy_version=0,
+                layout_hash=initial.layout_hash,
+                tensors=initial.tensors,
+            )
+
+        async def export_trainable_state(self):
+            return self.state
+
+        async def apply_trainable_state(self, state, *, reset_optimizer):
+            assert reset_optimizer
+            self.state = state
+            return len(state.tensors)
+
+    actor = Actor()
+    args = SimpleNamespace(
+        actor_num_gpus_per_node=1,
+        actor_num_nodes=1,
+        advantage_estimator="grpo",
+        yeto_rl_model="org/model",
+        yeto_rl_data="org/data",
+        yeto_rl_base_model_revision=MODEL_REVISION,
+        yeto_rl_data_revision="d" * 40,
+        expert_model_parallel_size=1,
+        yeto_rl_layout_hash=initial.layout_hash,
+        lr=1e-4,
+        yeto_rl_lora_config_hash=LORA_CONFIG_HASH,
+        n_samples_per_prompt=2,
+        num_steps_per_rollout=1,
+        over_sampling_batch_size=1,
+        rollout_batch_size=1,
+        seq_length=128,
+        seed=7,
+        rollout_max_response_len=16,
+        custom_generate_function_path=None,
+        use_session_server=False,
+        tito_model=None,
+        yeto_rl_reward_sha256="e" * 64,
+        yeto_rl_completed_groups_path=str(island_checkpoint),
+        yeto_rl_event_tape=str(event_tape),
+        yeto_rl_learner_id=0,
+        num_rollout=1,
+        start_rollout_id=0,
+    )
+    args.yeto_rl_bridge_config = BridgeConfig(
+        syncer_addr=("127.0.0.1", port),
+        learner_id=0,
+        global_rounds=1,
+        groups_per_round=1,
+        samples_per_group=2,
+        local_optimizer_steps=1,
+        wan_streams=0,
+        expected_specs=initial.specs,
+        base_model_revision=MODEL_REVISION,
+        lora_config_hash=LORA_CONFIG_HASH,
+        layout_hash=initial.layout_hash,
+        event_tape=str(event_tape),
+    )
+
+    async def run_hook():
+        hook = MilesPolicySync(args)
+        await hook.initialize(actor_model=actor, rollout_manager=rollout_manager)
+        actor.state = trainable_module.make_trainable_state(
+            0,
+            {
+                "base_model.model.layer.lora_A.weight": torch.tensor(
+                    [[1.0, 3.0]]
+                )
+            },
+            train_rollout_kl=0.1,
+            ess_ratio=0.8,
+            pg_clipfrac=0.25,
+            train_seconds=1.5,
+        )
+        torch.save(
+            {
+                "schema_version": 2,
+                "config": _island_checkpoint_config(args),
+                "policy_version": 0,
+                "rollout_metrics": {
+                    "active_groups": 1,
+                    "cancelled_groups": 0,
+                    "tool_wait_seconds": 0,
+                    "group_p50_seconds": 1,
+                    "group_p95_seconds": 1,
+                    "group_p99_seconds": 1,
+                    "rollout_seconds": 1,
+                },
+            },
+            island_checkpoint,
+        )
+        rollout_data = {
+            "data_ref": [
+                SimpleNamespace(
+                    inner={
+                        "weight_versions": [["yeto:0"], ["yeto:0"]],
+                        "response_lengths": [2, 3],
+                        "sample_indices": [0, 1],
+                        "raw_reward": [0.0, 1.0],
+                    }
+                )
+            ]
+        }
+        await hook.after_local_train(
+            rollout_id=0,
+            actor_model=actor,
+            rollout_data=rollout_data,
+        )
+        events.append("miles_weight_publish")
+        await hook.finalize()
+
+    try:
+        asyncio.run(run_hook())
+        assert process.wait(timeout=10) == 0
+        assert events == [
+            ("version", "yeto:0"),
+            ("version", "yeto:1"),
+            "miles_weight_publish",
+        ]
+        assert torch.equal(
+            next(iter(actor.state.tensors.values())),
+            torch.tensor([[1.0, 3.0]]),
+        )
+        round_event = next(
+            event
+            for event in map(json.loads, event_tape.read_text().splitlines())
+            if event.get("event") == "rl_local_round"
+        )
+        assert round_event["rl/current_vs_rollout_kl"] == 0.1
+        assert round_event["rl/ess_ratio"] == 0.8
+        assert round_event["rl/clip_fraction"] == 0.25
+        assert round_event["train_seconds"] == 1.5
+    finally:
         if process.poll() is None:
             process.kill()
             process.wait()

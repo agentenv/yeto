@@ -9,8 +9,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import yeto.rl.miles as miles
 from yeto.fragments import MERGE_AVG
+from yeto.protocol import PullRequest
+from yeto.rl import miles
+from yeto.rl.bridge import BridgeConfig, StrictRlBridge
 from yeto.rl.core import (
     CanonicalTensorSpec,
     LocalRoundStats,
@@ -22,10 +24,8 @@ from yeto.rl.core import (
     policy_delta,
     tensors_from_flat,
 )
-from yeto.rl.bridge import BridgeConfig, StrictRlBridge
-from yeto.protocol import PullRequest
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
-from yeto.rl.miles import MilesIslandRuntime
+from yeto.rl.miles import MilesPolicySync
 
 
 def tensors():
@@ -281,187 +281,6 @@ def test_local_round_event_contains_every_init_metric(tmp_path):
     assert event["sync/bytes_sent"] == 48 + len(pushed[0][-1])
 
 
-def test_miles_admission_pause_aborts_inflight_rollouts():
-    modes = []
-
-    class PauseGeneration:
-        async def remote(self, mode):
-            modes.append(mode)
-
-    class Engine:
-        pause_generation = PauseGeneration()
-
-    runtime = object.__new__(MilesIslandRuntime)
-
-    async def engines():
-        return [Engine()]
-
-    runtime._engines = engines
-    asyncio.run(runtime._pause_rollout())
-    assert modes == ["abort"]
-
-
-def test_miles_bridge_propagates_attention_backend(monkeypatch):
-    class AutoBridge:
-        def to_megatron_provider(self):
-            return SimpleNamespace(attention_backend="auto")
-
-    megatron = types.ModuleType("megatron")
-    bridge = types.ModuleType("megatron.bridge")
-    training = types.ModuleType("megatron.bridge.training")
-    config = types.ModuleType("megatron.bridge.training.config")
-
-    class DistributedDataParallelConfig:
-        def __init__(self, **kwargs):
-            self.use_distributed_optimizer = kwargs["use_distributed_optimizer"]
-
-    bridge.AutoBridge = AutoBridge
-    config.DistributedDataParallelConfig = DistributedDataParallelConfig
-    training.config = config
-    monkeypatch.setitem(sys.modules, "megatron", megatron)
-    monkeypatch.setitem(sys.modules, "megatron.bridge", bridge)
-    monkeypatch.setitem(sys.modules, "megatron.bridge.training", training)
-    monkeypatch.setitem(sys.modules, "megatron.bridge.training.config", config)
-    installed = []
-    monkeypatch.setattr(miles, "_install_train_metric_capture", lambda: None)
-    monkeypatch.setattr(miles, "_install_colocated_lora_ipc_sync", lambda: None)
-    monkeypatch.setattr(miles, "install_miles_actor_adapter", lambda: installed.append(True))
-
-    args = SimpleNamespace(
-        attention_backend="unfused", use_distributed_optimizer=True
-    )
-    miles.configure_miles_bridge(args)
-
-    assert AutoBridge().to_megatron_provider().attention_backend == "unfused"
-    assert not args.use_distributed_optimizer
-    assert not config.DistributedDataParallelConfig(
-        use_distributed_optimizer=True
-    ).use_distributed_optimizer
-    assert installed == [True]
-
-
-def test_miles_actor_calls_handle_rank0_export_and_all_rank_results():
-    runtime = object.__new__(MilesIslandRuntime)
-    runtime.args = SimpleNamespace(actor_num_nodes=1, actor_num_gpus_per_node=2)
-
-    class Actors:
-        def __init__(self, results):
-            self.results = results
-
-        async def _broadcast(self, method, *args):
-            return self.results
-
-    runtime.actor_model = Actors([{"policy": 1}, None])
-    assert asyncio.run(runtime._actor_call("export", rank0=True)) == {"policy": 1}
-    runtime.actor_model = Actors([(4, "hash"), (4, "hash")])
-    assert asyncio.run(runtime._actor_call("apply")) == (4, "hash")
-    runtime.actor_model = Actors([3, 4])
-    with pytest.raises(RuntimeError, match="ranks disagree"):
-        asyncio.run(runtime._actor_call("steps"))
-
-
-def test_miles_waits_for_the_complete_multinode_ray_island(monkeypatch):
-    canonical = state(0, tensors())
-    args = SimpleNamespace(
-        actor_num_nodes=2,
-        actor_num_gpus_per_node=4,
-        offload_train=True,
-        yeto_rl_base_model_revision=canonical.base_model_revision,
-        yeto_rl_lora_config_hash=canonical.lora_config_hash,
-        yeto_rl_layout_hash=canonical.layout_hash,
-    )
-    resource_counts = iter((4, 8))
-    ray = types.ModuleType("ray")
-    ray.is_initialized = lambda: True
-    ray.cluster_resources = lambda: {"GPU": next(resource_counts)}
-    actor = SimpleNamespace()
-
-    async def broadcast(method, *values):
-        assert method == "yeto_rl_export_policy"
-        return [canonical.tensors] + [None] * 7
-
-    async def onload():
-        pass
-
-    async def offload():
-        pass
-
-    actor._broadcast = broadcast
-    actor.onload = onload
-    actor.offload = offload
-
-    async def create_training_models(*values):
-        return actor, None
-
-    placement = types.ModuleType("miles.ray.placement_group")
-    placement.create_placement_groups = lambda _args: {"rollout": object()}
-    placement.create_rollout_manager = lambda *values: (object(), None)
-    placement.create_training_models = create_training_models
-    external_miles = types.ModuleType("miles")
-    ray_package = types.ModuleType("miles.ray")
-    ray_package.placement_group = placement
-    external_miles.ray = ray_package
-    monkeypatch.setitem(sys.modules, "ray", ray)
-    monkeypatch.setitem(sys.modules, "miles", external_miles)
-    monkeypatch.setitem(sys.modules, "miles.ray", ray_package)
-    monkeypatch.setitem(sys.modules, "miles.ray.placement_group", placement)
-    monkeypatch.setattr(miles, "install_miles_actor_adapter", lambda: None)
-
-    async def no_wait(_seconds):
-        pass
-
-    monkeypatch.setattr(miles.asyncio, "sleep", no_wait)
-    runtime = MilesIslandRuntime(args)
-    try:
-        initialized = asyncio.run(runtime._initialize())
-    finally:
-        runtime.loop.close()
-
-    assert initialized.layout_hash == canonical.layout_hash
-
-
-def test_miles_keeps_non_offloaded_trainer_resident():
-    calls = []
-
-    async def onload():
-        calls.append("onload")
-
-    async def offload():
-        calls.append("offload")
-
-    runtime = object.__new__(MilesIslandRuntime)
-    runtime.args = SimpleNamespace(offload_train=False)
-    runtime.actor_model = SimpleNamespace(onload=onload, offload=offload)
-    runtime._trainer_awake = True
-
-    asyncio.run(runtime._onload_trainer())
-    asyncio.run(runtime._offload_trainer())
-    assert runtime._trainer_awake
-    assert calls == []
-
-
-def test_miles_collects_every_data_parallel_rollout_shard(monkeypatch):
-    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(get=lambda value: value))
-    runtime = object.__new__(MilesIslandRuntime)
-    runtime.args = SimpleNamespace(
-        actor_num_nodes=1,
-        actor_num_gpus_per_node=4,
-        expert_model_parallel_size=2,
-    )
-    shards = [
-        SimpleNamespace(inner={"sample_indices": [0]}),
-        SimpleNamespace(inner={"sample_indices": [1]}),
-        SimpleNamespace(inner={"sample_indices": [2]}),
-        SimpleNamespace(inner={"sample_indices": [3]}),
-    ]
-    assert runtime._rollout_batches({"data_ref": shards}) == [
-        {"sample_indices": [0]},
-        {"sample_indices": [1]},
-        {"sample_indices": [2]},
-        {"sample_indices": [3]},
-    ]
-
-
 def test_miles_rollout_lifecycle_metrics_use_real_task_completion(monkeypatch):
     class Sample:
         def __init__(self, status):
@@ -508,213 +327,73 @@ def test_miles_rollout_lifecycle_metrics_use_real_task_completion(monkeypatch):
     assert len(lifecycle["durations"]) == 2
 
 
-def test_miles_train_metric_capture_returns_rank_zero_values(monkeypatch):
-    args = SimpleNamespace()
-
-    def log_train_step(*_values, **_kwargs):
-        return {
-            "train/train_rollout_kl": 0.1,
-            "train/ess_ratio": 0.9,
-            "train/pg_clipfrac": 0.2,
-        }
-
-    model = types.ModuleType("miles.backends.megatron_utils.model")
-    model.log_train_step = log_train_step
-    megatron_utils = types.ModuleType("miles.backends.megatron_utils")
-    megatron_utils.model = model
-    backends = types.ModuleType("miles.backends")
-    backends.megatron_utils = megatron_utils
-    package = types.ModuleType("miles")
-    package.backends = backends
-    monkeypatch.setitem(sys.modules, "miles", package)
-    monkeypatch.setitem(sys.modules, "miles.backends", backends)
-    monkeypatch.setitem(sys.modules, "miles.backends.megatron_utils", megatron_utils)
-    monkeypatch.setitem(sys.modules, "miles.backends.megatron_utils.model", model)
-
-    miles._install_train_metric_capture()
-    model.log_train_step(args=args)
-    actor = SimpleNamespace(args=args)
-    assert miles._actor_train_metrics(actor) == {
-        "train/train_rollout_kl": 0.1,
-        "train/ess_ratio": 0.9,
-        "train/pg_clipfrac": 0.2,
-    }
-    assert miles._actor_train_metrics(actor) is None
-
-
-def test_miles_keeps_colocated_lora_ipc_storage_alive_until_transfer(monkeypatch):
-    events = []
-    update = types.ModuleType(
-        "miles.backends.megatron_utils.update_weight.update_weight_from_tensor"
-    )
-
-    def send(*_values, **_kwargs):
-        events.append("send")
-        return ["ref"], "storage"
-
-    update._send_to_colocated_engine = send
-    common = types.ModuleType("miles.backends.megatron_utils.update_weight.common")
-
-    def check(results, *, is_lora):
-        assert results == ["done"] and is_lora
-        events.append("check")
-
-    common._check_weight_sync_results = check
-    weight = types.ModuleType("miles.backends.megatron_utils.update_weight")
-    weight.update_weight_from_tensor = update
-    megatron_utils = types.ModuleType("miles.backends.megatron_utils")
-    megatron_utils.update_weight = weight
-    backends = types.ModuleType("miles.backends")
-    backends.megatron_utils = megatron_utils
-    package = types.ModuleType("miles")
-    package.backends = backends
-    ray = types.ModuleType("ray")
-
-    def get(refs):
-        assert refs == ["ref"]
-        events.append("get")
-        return ["done"]
-
-    ray.get = get
-    for name, module in {
-        "miles": package,
-        "miles.backends": backends,
-        "miles.backends.megatron_utils": megatron_utils,
-        "miles.backends.megatron_utils.update_weight": weight,
-        "miles.backends.megatron_utils.update_weight.update_weight_from_tensor": update,
-        "miles.backends.megatron_utils.update_weight.common": common,
-        "ray": ray,
-    }.items():
-        monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.setattr(
-        torch.distributed,
-        "barrier",
-        lambda *, group: events.append(("barrier", group)),
-    )
-
-    miles._install_colocated_lora_ipc_sync()
-    refs, storage = update._send_to_colocated_engine(
-        [], ipc_gather_group="group", lora_config={}
-    )
-
-    assert refs == ["ref"] and storage == "storage"
-    assert events == ["send", "get", "check", ("barrier", "group")]
-
-
-def test_miles_round_stats_use_checkpoint_rollout_and_train_metrics(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "versions",
+    [
+        ["yeto:2"],
+        ["yeto:3", "yeto:2"],
+        [],
+        ["invalid:3"],
+        3,
+    ],
+    ids=["stale", "mixed", "empty", "invalid", "malformed"],
+)
+def test_generate_rollout_rejects_invalid_policy_versions_before_train(
+    tmp_path, monkeypatch, capsys, versions
 ):
-    constants = types.ModuleType("sglang.srt.constants")
-    constants.GPU_MEMORY_TYPE_CUDA_GRAPH = "graph"
-    constants.GPU_MEMORY_TYPE_KV_CACHE = "kv"
-    constants.GPU_MEMORY_TYPE_WEIGHTS = "weights"
-    sglang = types.ModuleType("sglang")
-    srt = types.ModuleType("sglang.srt")
-    sglang.srt = srt
-    srt.constants = constants
-    monkeypatch.setitem(sys.modules, "sglang", sglang)
-    monkeypatch.setitem(sys.modules, "sglang.srt", srt)
-    monkeypatch.setitem(sys.modules, "sglang.srt.constants", constants)
+    upstream = types.ModuleType("miles.rollout.sglang_rollout")
+    upstream.generate_rollout = object()
+    rollout = types.ModuleType("miles.rollout")
+    rollout.sglang_rollout = upstream
+    package = types.ModuleType("miles")
+    package.rollout = rollout
+    monkeypatch.setitem(sys.modules, "miles", package)
+    monkeypatch.setitem(sys.modules, "miles.rollout", rollout)
+    monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout", upstream)
 
-    checkpoint = tmp_path / "island.pt"
-    args = SimpleNamespace(
-        actor_num_gpus_per_node=1,
-        actor_num_nodes=1,
-        advantage_estimator="grpo",
-        yeto_rl_model="org/model",
-        yeto_rl_data="org/data",
-        yeto_rl_base_model_revision=MODEL_REVISION,
-        yeto_rl_data_revision="d" * 40,
-        expert_model_parallel_size=1,
-        yeto_rl_layout_hash="c" * 64,
-        lr=1e-4,
-        yeto_rl_lora_config_hash=LORA_CONFIG_HASH,
-        n_samples_per_prompt=2,
-        num_steps_per_rollout=1,
-        over_sampling_batch_size=2,
-        yeto_rl_reward_sha256="e" * 64,
-        rollout_batch_size=2,
-        seq_length=128,
-        seed=7,
-        rollout_max_response_len=16,
-        custom_generate_function_path=None,
-        use_session_server=False,
-        tito_model="default",
-        yeto_rl_completed_groups_path=str(checkpoint),
-        yeto_rl_learner_id=0,
-    )
-    torch.save(
-        {
-            "schema_version": miles._ISLAND_CHECKPOINT_SCHEMA,
-            "config": miles._island_checkpoint_config(args),
-            "policy_version": 3,
-            "rollout_metrics": {
-                "active_groups": 3.0,
-                "cancelled_groups": 1.0,
-                "tool_wait_seconds": 4.0,
-                "group_p50_seconds": 5.0,
-                "group_p95_seconds": 6.0,
-                "group_p99_seconds": 7.0,
-            },
-        },
-        checkpoint,
-    )
-
-    class Remote:
-        def __init__(self, result=None):
-            self.result = result
-
-        async def remote(self, *_args, **_kwargs):
-            return self.result
-
-    runtime = object.__new__(MilesIslandRuntime)
-    runtime.args = args
-    runtime._policy_version = 3
-    runtime._rollout_id = 3
-    runtime._rollout_offloaded = False
-    runtime.rollout_manager = SimpleNamespace(
-        generate=Remote(object()),
-        offload=Remote(),
-    )
-
-    async def train(*_args):
-        pass
-
-    runtime.actor_model = SimpleNamespace(train=train)
-
-    async def no_op():
-        pass
-
-    runtime._pause_rollout = no_op
-    runtime._rollout_batches = lambda _pack: [
-        {
-            "weight_versions": [["yeto:3"]] * 4,
-            "response_lengths": [1, 2, 3, 4],
-            "sample_indices": [0, 1, 2, 3],
-            "raw_reward": [1.0, 1.0, 0.0, 2.0],
-        }
+    samples = [
+        SimpleNamespace(
+            status=SimpleNamespace(value="completed"),
+            weight_versions=versions,
+            index=0,
+        ),
+        SimpleNamespace(
+            status=SimpleNamespace(value="completed"),
+            weight_versions=["yeto:3"],
+            index=1,
+        ),
     ]
-    optimizer_steps = iter((10, 11))
+    output = SimpleNamespace(samples=[samples], metrics={})
+    monkeypatch.setattr(
+        miles,
+        "_run_rollout_with_metrics",
+        lambda *_args, **_kwargs: (
+            output,
+            {"active": 0, "peak_active": 0, "cancelled": 0, "durations": []},
+        ),
+    )
+    monkeypatch.setattr(miles, "_save_completed_groups", lambda *_args: None)
+    event_tape = tmp_path / "events.jsonl"
+    args = SimpleNamespace(
+        n_samples_per_prompt=2,
+        rollout_batch_size=1,
+        yeto_rl_completed_groups_path=str(tmp_path / "island.pt"),
+        yeto_rl_event_tape=str(event_tape),
+        yeto_rl_learner_id=7,
+    )
 
-    async def actor_call(method, *_args, **_kwargs):
-        if method == "yeto_rl_optimizer_steps":
-            return next(optimizer_steps)
-        assert method == "yeto_rl_train_metrics"
-        return {
-            "train/train_rollout_kl": 0.1,
-            "train/ess_ratio": 0.8,
-            "train/pg_clipfrac": 0.25,
-        }
+    with pytest.raises(StrictRlInvariantError) as failure:
+        miles.generate_rollout(args, 3, SimpleNamespace(buffer=[]))
 
-    runtime._actor_call = actor_call
-    stats = asyncio.run(runtime._run_local_round(3, 2, 2, 1))
-    assert stats.active_groups == 3
-    assert stats.cancelled_groups == 1
-    assert stats.tool_wait_seconds == 4.0
-    assert stats.zero_variance_group_ratio == 0.5
-    assert stats.mean_kl == 0.1
-    assert stats.ess_ratio == 0.8
-    assert stats.clip_fraction == 0.25
+    assert failure.value.metric == "mixed_version_group_count"
+    assert (
+        "[yeto-rl-strict-failure] mixed_version_group_count"
+        in capsys.readouterr().err
+    )
+    event = json.loads(event_tape.read_text())
+    assert event["event"] == "rl_strict_failure"
+    assert event["metric"] == "mixed_version_group_count"
+    assert event["island_id"] == 7
 
 
 def test_island_checkpoint_restores_only_complete_same_policy_groups(
@@ -851,6 +530,7 @@ def test_island_checkpoint_restores_only_complete_same_policy_groups(
     assert source.buffer == [unused]
     payload = torch.load(checkpoint, weights_only=True)
     assert [sample["index"] for sample in payload["completed_groups"][0]] == [20, 21]
+    assert payload["rollout_metrics"].pop("rollout_seconds") >= 0
     assert payload["rollout_metrics"] == {
         "reward": 2.0,
         "active_groups": 0.0,
@@ -862,213 +542,157 @@ def test_island_checkpoint_restores_only_complete_same_policy_groups(
     }
 
 
-def test_miles_apply_resets_optimizer_and_restores_scheduler_progress(monkeypatch):
-    name = "base_model.model.layer.lora_A.weight"
-    parameter = torch.nn.Parameter(torch.zeros(1, 2))
-    parameter.main_param = torch.zeros(1, 2, dtype=torch.float32)
-
-    class Mapping:
-        def hf_to_megatron(self, value, _module):
-            return value
-
-        def megatron_to_hf(self, value, _module):
-            return {name: value}
-
-    side = SimpleNamespace(
-        mapping=Mapping(),
-        megatron_module=None,
-        param_weight=parameter,
+def test_miles_policy_hook_uses_public_trainable_state_api(tmp_path, monkeypatch):
+    canonical = state(1, tensors())
+    trainable_state = types.ModuleType(
+        "miles.backends.megatron_utils.trainable_state"
     )
-    optimizer_state = {
-        "exp_avg": torch.ones_like(parameter.main_param),
-        "exp_avg_sq": torch.ones_like(parameter.main_param),
-        "step": torch.tensor(9.0),
-    }
-    inner = SimpleNamespace(
-        param_groups=[{"step": 9}],
-        state={parameter.main_param: optimizer_state},
+    trainable_state.make_trainable_state = lambda version, values: SimpleNamespace(
+        policy_version=version,
+        layout_hash=canonical.layout_hash,
+        tensors=values,
     )
-    unrelated = torch.nn.Parameter(torch.ones(1))
-    unrelated_state = {"step": torch.tensor(4.0)}
-    inner.state[unrelated] = unrelated_state
-
-    def copy_main_to_model():
-        parameter.copy_(parameter.main_param)
-
-    child = SimpleNamespace(
-        optimizer=inner,
-        _copy_main_params_to_model_params=copy_main_to_model,
+    for name in (
+        "miles",
+        "miles.backends",
+        "miles.backends.megatron_utils",
+    ):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(
+        sys.modules,
+        "miles.backends.megatron_utils.trainable_state",
+        trainable_state,
     )
-    optimizer = SimpleNamespace(chained_optimizers=[child])
-    scheduler_steps = []
 
-    class Scheduler:
-        num_steps = 0
-
-        def step(self, increment):
-            scheduler_steps.append(increment)
-            self.num_steps += increment
-
-    scheduler = Scheduler()
-    backups = []
-    applied = torch.tensor([[3.0, 4.0]])
-    state_fn = state(2, {name: applied})
-    actor = SimpleNamespace(
-        args=SimpleNamespace(
-            yeto_rl_base_model_revision=MODEL_REVISION,
-            yeto_rl_lora_config_hash=LORA_CONFIG_HASH,
-            yeto_rl_layout_hash=state_fn.layout_hash,
-            global_batch_size=64,
-            num_steps_per_rollout=1,
-        ),
-        model=[SimpleNamespace(start_param_sync=lambda **_kwargs: pytest.fail(
-            "replicated LoRA apply must not start distributed optimizer sync"
-        ))],
-        optimizer=optimizer,
-        opt_param_scheduler=scheduler,
-        weights_backuper=SimpleNamespace(backup=backups.append),
-    )
-    monkeypatch.setattr(miles, "_adapter_sides", lambda _actor: [(name, side)])
-    cache_releases = []
-    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: cache_releases.append(True))
-
-    reset_count, applied_hash = miles._actor_apply_policy(actor, {name: applied}, 2)
-    assert actor.optimizer is optimizer
-    assert actor.opt_param_scheduler is scheduler
-    assert scheduler.num_steps == 128
-    assert scheduler_steps == [128]
-    assert inner.param_groups[0]["step"] == 9
-    assert parameter.main_param not in inner.state
-    assert inner.state[unrelated] is unrelated_state
-    assert reset_count == 1
-    assert applied_hash == miles.policy_hash(state_fn)
-    assert torch.equal(parameter.main_param, applied)
-    assert torch.equal(parameter, applied)
-    assert backups == ["actor"]
-    assert cache_releases == [True]
-
-    scheduler.num_steps = 192
-    with pytest.raises(RuntimeError, match="ahead of the committed policy"):
-        miles._actor_apply_policy(actor, {name: applied}, 2)
-
-
-def test_miles_apply_hash_mismatch_is_a_strict_failure(monkeypatch):
-    constants = types.ModuleType("sglang.srt.constants")
-    constants.GPU_MEMORY_TYPE_CUDA_GRAPH = "graph"
-    constants.GPU_MEMORY_TYPE_KV_CACHE = "kv"
-    constants.GPU_MEMORY_TYPE_WEIGHTS = "weights"
-    sglang = types.ModuleType("sglang")
-    srt = types.ModuleType("sglang.srt")
-    sglang.srt = srt
-    srt.constants = constants
-    monkeypatch.setitem(sys.modules, "sglang", sglang)
-    monkeypatch.setitem(sys.modules, "sglang.srt", srt)
-    monkeypatch.setitem(sys.modules, "sglang.srt.constants", constants)
-
-    runtime = object.__new__(MilesIslandRuntime)
-    runtime._trainer_awake = False
-    runtime._rollout_offloaded = True
-
-    async def no_op(*_args, **_kwargs):
-        pass
-
-    runtime._pause_rollout = no_op
-    runtime.actor_model = SimpleNamespace(onload=no_op)
-
-    async def actor_call(*_args, **_kwargs):
-        return 1, "wrong-policy-hash"
-
-    runtime._actor_call = actor_call
-    with pytest.raises(StrictRlInvariantError) as failure:
-        asyncio.run(runtime._apply_global_policy(state(0, tensors())))
-    assert failure.value.metric == "policy_hash_mismatch_after_apply"
-
-
-def test_miles_policy_apply_event_has_only_namespaced_policy_hash(monkeypatch):
-    constants = types.ModuleType("sglang.srt.constants")
-    constants.GPU_MEMORY_TYPE_CUDA_GRAPH = "graph"
-    constants.GPU_MEMORY_TYPE_KV_CACHE = "kv"
-    constants.GPU_MEMORY_TYPE_WEIGHTS = "weights"
-    sglang = types.ModuleType("sglang")
-    srt = types.ModuleType("sglang.srt")
-    sglang.srt = srt
-    srt.constants = constants
-    monkeypatch.setitem(sys.modules, "sglang", sglang)
-    monkeypatch.setitem(sys.modules, "sglang.srt", srt)
-    monkeypatch.setitem(sys.modules, "sglang.srt.constants", constants)
-
-    async def no_op(*_args, **_kwargs):
-        pass
+    versions = []
 
     class Remote:
-        async def remote(self, *_args, **_kwargs):
-            pass
+        def __init__(self, function):
+            self.function = function
 
-    state_fn = state(1, tensors())
-    events = []
-    runtime = object.__new__(MilesIslandRuntime)
-    runtime.args = SimpleNamespace(yeto_rl_learner_id=0, offload_train=True)
-    runtime._trainer_awake = False
-    runtime._rollout_offloaded = True
-    runtime._optimizer_reset_count = 0
-    runtime._pause_rollout = no_op
-    runtime._resume_rollout = no_op
-    runtime._set_rollout_version = no_op
-    runtime.actor_model = SimpleNamespace(
-        onload=no_op,
-        offload=no_op,
-        update_weights=no_op,
+        async def remote(self, *args, **kwargs):
+            return self.function(*args, **kwargs)
+
+    engine = SimpleNamespace(
+        update_weight_version=Remote(lambda version: versions.append(version))
     )
-    runtime.rollout_manager = SimpleNamespace(
-        onload_weights=Remote(),
-        onload_kv=Remote(),
+    rollout_manager = SimpleNamespace(
+        get_updatable_engines_and_lock=Remote(
+            lambda: SimpleNamespace(rollout_engines=[engine])
+        )
     )
 
-    async def actor_call(*_args, **_kwargs):
-        return 2, miles.policy_hash(state_fn)
+    class Actor:
+        async def apply_trainable_state(self, value, *, reset_optimizer):
+            assert reset_optimizer
+            self.value = value
+            return 2
 
-    runtime._actor_call = actor_call
-    runtime._append_event = events.append
-    asyncio.run(runtime._apply_global_policy(state_fn))
+        async def export_trainable_state(self):
+            return self.value
 
-    assert events[0]["sync/global_policy_hash"] == miles.policy_hash(state_fn)
-    assert "policy_hash" not in events[0]
-    assert "trainer_ranks" not in events[0]
+    actor = Actor()
+    args = SimpleNamespace(
+        yeto_rl_base_model_revision=canonical.base_model_revision,
+        yeto_rl_lora_config_hash=canonical.lora_config_hash,
+        yeto_rl_layout_hash=canonical.layout_hash,
+        yeto_rl_event_tape=str(tmp_path / "events.jsonl"),
+        yeto_rl_learner_id=0,
+    )
+    hook = MilesPolicySync(args)
+    hook.actor_model = actor
+    hook.rollout_manager = rollout_manager
+
+    asyncio.run(hook._apply_global_policy(canonical))
+
+    assert versions == ["yeto:1"]
+    event = json.loads((tmp_path / "events.jsonl").read_text())
+    assert event["reset_parameter_count"] == 2
+    assert event["sync/global_policy_hash"]
 
 
-@pytest.mark.parametrize(
-    "versions",
-    [["not-a-policy-token"], ["yeto:3", "yeto:4"]],
-)
-def test_miles_rejects_invalid_or_mixed_rollout_versions(monkeypatch, versions):
-    constants = types.ModuleType("sglang.srt.constants")
-    constants.GPU_MEMORY_TYPE_CUDA_GRAPH = "graph"
-    constants.GPU_MEMORY_TYPE_KV_CACHE = "kv"
-    constants.GPU_MEMORY_TYPE_WEIGHTS = "weights"
-    sglang = types.ModuleType("sglang")
-    srt = types.ModuleType("sglang.srt")
-    sglang.srt = srt
-    srt.constants = constants
-    monkeypatch.setitem(sys.modules, "sglang", sglang)
-    monkeypatch.setitem(sys.modules, "sglang.srt", srt)
-    monkeypatch.setitem(sys.modules, "sglang.srt.constants", constants)
-
-    class Generate:
-        async def remote(self, _rollout_id):
-            return object()
-
-    runtime = object.__new__(MilesIslandRuntime)
-    runtime._policy_version = 3
-    runtime._rollout_id = 3
-    runtime.rollout_manager = SimpleNamespace(generate=Generate())
-
-    async def no_op():
-        pass
-
-    runtime._pause_rollout = no_op
-    runtime._rollout_batches = lambda _pack: [
-        {"weight_versions": [versions]}
+def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
+    tmp_path, monkeypatch
+):
+    checkpoint = tmp_path / "island.pt"
+    args = SimpleNamespace(
+        actor_num_gpus_per_node=2,
+        actor_num_nodes=1,
+        advantage_estimator="grpo",
+        yeto_rl_model="org/model",
+        yeto_rl_data="org/data",
+        yeto_rl_base_model_revision=MODEL_REVISION,
+        yeto_rl_data_revision="d" * 40,
+        expert_model_parallel_size=1,
+        yeto_rl_layout_hash="c" * 64,
+        lr=1e-4,
+        yeto_rl_lora_config_hash=LORA_CONFIG_HASH,
+        n_samples_per_prompt=2,
+        num_steps_per_rollout=1,
+        over_sampling_batch_size=2,
+        yeto_rl_reward_sha256="e" * 64,
+        rollout_batch_size=2,
+        seq_length=128,
+        seed=7,
+        rollout_max_response_len=16,
+        custom_generate_function_path=None,
+        use_session_server=False,
+        tito_model="default",
+        yeto_rl_completed_groups_path=str(checkpoint),
+        yeto_rl_learner_id=0,
+    )
+    torch.save(
+        {
+            "schema_version": miles._ISLAND_CHECKPOINT_SCHEMA,
+            "config": miles._island_checkpoint_config(args),
+            "policy_version": 3,
+            "rollout_metrics": {
+                "active_groups": 2,
+                "cancelled_groups": 0,
+                "tool_wait_seconds": 1,
+                "group_p50_seconds": 2,
+                "group_p95_seconds": 3,
+                "group_p99_seconds": 4,
+                "rollout_seconds": 5,
+            },
+        },
+        checkpoint,
+    )
+    batches = [
+        {
+            "response_lengths": [1, 2],
+            "sample_indices": [0, 1],
+            "raw_reward": [0.0, 1.0, 2.0, 2.0],
+        },
+        {
+            "response_lengths": [3, 4],
+            "sample_indices": [2, 3],
+            "raw_reward": [0.0, 1.0, 2.0, 2.0],
+        },
     ]
-    with pytest.raises(StrictRlInvariantError) as failure:
-        asyncio.run(runtime._run_local_round(3, 1, 1, 1))
-    assert failure.value.metric == "mixed_version_group_count"
+    monkeypatch.setitem(
+        sys.modules,
+        "ray",
+        SimpleNamespace(get=lambda reference: reference),
+    )
+    hook = MilesPolicySync(args)
+    data_pack = {
+        "data_ref": [SimpleNamespace(inner=batch) for batch in batches]
+    }
+
+    train_state = SimpleNamespace(
+        train_rollout_kl=0.1,
+        ess_ratio=0.8,
+        pg_clipfrac=0.25,
+        train_seconds=1.5,
+    )
+    stats = hook._round_stats(3, data_pack, train_state)
+
+    assert stats.action_tokens == 10
+    assert stats.reward_mean == 1.25
+    assert stats.zero_variance_group_ratio == 0.5
+    assert stats.rollout_seconds == 5
+    assert stats.mean_kl == 0.1
+    assert stats.ess_ratio == 0.8
+    assert stats.clip_fraction == 0.25
+    assert stats.train_seconds == 1.5

@@ -106,15 +106,7 @@ class StrictRlBridge:
 
     def run(self) -> CanonicalLoraState:
         try:
-            self.client.start()
-            if self.config.learner_id == 0:
-                self.client.send_init(
-                    0,
-                    pack_tensor(
-                        flat_tensor(self.initial.tensors, self.specs),
-                        DTYPE_F32,
-                    ),
-                )
+            self.start()
             while True:
                 self.client.check_health()
                 if self.client.finalizing.is_set():
@@ -146,6 +138,46 @@ class StrictRlBridge:
                 self.runtime.shutdown()
             finally:
                 self.client.close()
+
+    def start(self) -> None:
+        self.client.start()
+        if self.config.learner_id == 0:
+            self.client.send_init(
+                0,
+                pack_tensor(
+                    flat_tensor(self.initial.tensors, self.specs),
+                    DTYPE_F32,
+                ),
+            )
+
+    def wait_for_global_policy(self, version: int) -> CanonicalLoraState:
+        while self.current is None or self.current.policy_version < version:
+            self.client.check_health()
+            self._drain_messages()
+            if self.current is None or self.current.policy_version < version:
+                time.sleep(0.05)
+        if self.current.policy_version != version:
+            raise RuntimeError(
+                f"RL policy jumped past expected version {version}"
+            )
+        return self.current
+
+    def wait_for_initial_policy(self) -> CanonicalLoraState:
+        while self.current is None:
+            self.client.check_health()
+            self._drain_messages()
+            if self.current is None:
+                time.sleep(0.05)
+        return self.current
+
+    def wait_for_round(self) -> PullRequest:
+        while True:
+            self.client.check_health()
+            self._drain_messages()
+            permit = self._ready_permit()
+            if permit is not None:
+                return permit
+            time.sleep(0.05)
 
     def _drain_messages(self) -> bool:
         progressed = False
@@ -232,14 +264,36 @@ class StrictRlBridge:
         ):
             raise RuntimeError("Miles returned LocalRoundStats for a different round")
 
+        self.submit_local_state(
+            permit,
+            base,
+            self.runtime.export_local_policy(),
+            stats,
+        )
+
+    def submit_local_state(
+        self,
+        permit: PullRequest,
+        base: CanonicalLoraState,
+        local: CanonicalLoraState,
+        stats: LocalRoundStats,
+    ) -> LocalRoundStats:
+        if self.current is None or base.policy_version != self.current.policy_version:
+            raise RuntimeError("RL attempted to submit without its exact base")
+        if (
+            permit.global_step != base.policy_version + 1
+            or stats.island_id != self.config.learner_id
+            or stats.base_policy_version != base.policy_version
+            or stats.local_round_id != permit.global_step
+        ):
+            raise RuntimeError("Miles returned LocalRoundStats for a different round")
         try:
-            exported = self.runtime.export_local_policy()
             local = canonical_state(
-                exported.policy_version,
-                exported.tensors,
-                base_model_revision=exported.base_model_revision,
-                lora_config_hash=exported.lora_config_hash,
-                layout_hash=exported.layout_hash,
+                local.policy_version,
+                local.tensors,
+                base_model_revision=local.base_model_revision,
+                lora_config_hash=local.lora_config_hash,
+                layout_hash=local.layout_hash,
                 expected_specs=self.specs,
             )
             delta = policy_delta(local, base)
@@ -296,6 +350,15 @@ class StrictRlBridge:
             payload,
         )
         self.pushed_step = permit.global_step
+        return stats
+
+    def finalize(self) -> CanonicalLoraState:
+        while not self.client.finalizing.is_set():
+            self.client.check_health()
+            self._drain_messages()
+            if not self.client.finalizing.is_set():
+                time.sleep(0.05)
+        return self._finalize()
 
     def _finalize(self) -> CanonicalLoraState:
         manifest, fragments = self.client.wait_for_final_fragments()

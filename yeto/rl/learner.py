@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
 from pathlib import Path
 from typing import Any
 
-from .bridge import BridgeConfig, StrictRlBridge
+from .bridge import BridgeConfig
 from .export import adapter_targets, derive_peft_lora_specs
-from .miles import MilesIslandRuntime, verify_miles_revision
+from .miles import verify_miles_revision
 
 
 def parse_args(argv=None):
@@ -206,7 +207,7 @@ def build_miles_argv(
         "--custom-rm-path", _miles_callable(args.reward_function),
         "--advantage-estimator", "grpo",
         "--lr", str(args.inner_lr),
-        "--custom-megatron-init-path", "yeto.rl.miles.configure_miles_bridge",
+        "--external-policy-sync-path", "yeto.rl.miles.create_policy_sync",
         "--accumulate-allreduce-grads-in-fp32",
         "--attention-softmax-in-fp32",
         "--attention-backend", "unfused",
@@ -440,26 +441,24 @@ def main(argv=None) -> None:
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id
 
-    runtime = MilesIslandRuntime(miles_args)
-    bridge = StrictRlBridge(
-        runtime,
-        BridgeConfig(
-            syncer_addr=_syncer_address(args.syncer),
-            learner_id=args.learner_id,
-            global_rounds=args.global_rounds,
-            groups_per_round=args.groups_per_round,
-            samples_per_group=args.samples_per_group,
-            local_optimizer_steps=args.optimizer_steps,
-            wan_streams=args.wan_streams,
-            expected_specs=specs,
-            base_model_revision=args.model_revision,
-            lora_config_hash=lora_config_hash,
-            layout_hash=layout_hash,
-            event_tape=args.event_tape,
-        ),
+    miles_args.yeto_rl_bridge_config = BridgeConfig(
+        syncer_addr=_syncer_address(args.syncer),
+        learner_id=args.learner_id,
+        global_rounds=args.global_rounds,
+        groups_per_round=args.groups_per_round,
+        samples_per_group=args.samples_per_group,
+        local_optimizer_steps=args.optimizer_steps,
+        wan_streams=args.wan_streams,
+        expected_specs=specs,
+        base_model_revision=args.model_revision,
+        lora_config_hash=lora_config_hash,
+        layout_hash=layout_hash,
+        event_tape=args.event_tape,
     )
-    final = bridge.run()
-    print(f"[rl] learner {args.learner_id} finalized policy v{final.policy_version}")
+    from train import train as miles_train
+
+    asyncio.run(miles_train(miles_args))
+    print(f"[rl] learner {args.learner_id} finalized")
 
 
 if __name__ == "__main__":

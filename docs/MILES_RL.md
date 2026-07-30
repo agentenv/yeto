@@ -1,7 +1,7 @@
 # Miles RL v0
 
 Miles RL runs reinforcement learning in several independent
-[Miles](https://github.com/radixark/miles) islands and uses Yeto to turn their
+[Miles](https://github.com/agentenv/miles) islands and uses Yeto to turn their
 complete local LoRA updates into one committed global policy. Miles owns the
 rollout and GRPO loop inside each island; Yeto owns fleet lifecycle, the
 cross-island synchronization boundary, recovery, and the final adapter.
@@ -10,10 +10,12 @@ This mode is not Decoupled DiLoCo. It is synchronous, fixed-roster LoRA
 FedAvg: every global round waits for one exact-base result from every logical
 island and averages them equally.
 
-> **Status:** the core path is implemented and has passed real multi-GPU dense,
-> MoE EP, two-island averaging, recovery, long-task, and 20-merge validation on
-> eight A100 GPUs. The 24-hour soak and the operational gaps listed in
-> [Validation status](#validation-status) remain outside that evidence.
+> **Status:** the core path and the pinned Miles synchronization branch are
+> implemented. The algorithm and model path previously passed real multi-GPU
+> dense, MoE EP, two-island averaging, recovery, long-task, and 20-merge
+> validation on eight A100 GPUs. The thin-branch boundary has automated
+> integration coverage but has not yet repeated that GPU matrix; see
+> [Validation status](#validation-status).
 
 ## Why Miles is the RL runtime
 
@@ -108,17 +110,27 @@ The ordinary Yeto SFT and diffusion modes remain separate. Passing
 
 ## Current integration seams
 
-The Miles checkout remains a clean detached checkout. At process startup the
-current adapter installs Yeto export, apply, optimizer-step, and train-metric
-methods on the pinned `MegatronTrainRayActor`, and invokes them through that
-commit's non-FT `RayTrainGroup._broadcast` path. It also wraps the pinned
-Megatron-Bridge provider/DDP construction, Miles train logging, and colocated
-LoRA IPC completion in process memory. Yeto drives Miles rollout and training
-primitives directly so the island-local result is not published to SGLang
-before the global merge. There is currently no maintained Miles patch or
-upstream train-loop synchronization hook. This private compatibility seam is
-supported only for the pinned commit and must be revalidated if Miles is
-changed.
+Yeto pins the `agentenv/miles` `yeto-sync` branch by commit. That branch adds
+the narrow boundary required by this mode:
+
+- `RayTrainGroup.export_trainable_state()` exports the complete replicated
+  LoRA from Megatron global rank zero in canonical PEFT form;
+- `RayTrainGroup.apply_trainable_state()` validates and writes the complete
+  global LoRA on every trainer rank, clears LoRA optimizer state, preserves LR
+  scheduler progress, and refreshes the actor backup;
+- the native Miles train loop loads one external policy-sync hook, calls it
+  after local training and before the normal trainer-to-SGLang publication,
+  and finalizes it only after the final global policy has been published.
+
+Miles still owns rollout generation, reward and advantage computation, GRPO
+training, offload, checkpoint calls, and SGLang weight transport. Yeto does
+not call private actor-group broadcast methods or replace Miles' local train
+loop. The hook applies the committed global LoRA before Miles publishes
+weights, so an island-local LoRA is never exposed to the next rollout.
+
+The pinned source is checked out as a clean detached commit. The public
+boundary is deliberately limited to the non-FT Megatron actor group used by
+v0; Miles' experimental fault-tolerant trainer is not adapted.
 
 The launcher selects strict RL behavior through the existing syncer's general
 controls: `--max-base-lag 0`, `--learner-weight equal`, `--quorum M`, and
@@ -158,8 +170,8 @@ At committed version `v`, each island follows the same sequence:
 1. Apply the complete global LoRA `theta_v` to the Megatron trainer and
    SGLang, then mark rollout policy version `v` active.
 2. Generate exactly `G` groups of `K` terminal trajectories (completed or
-   truncated at the configured limit). Every recorded rollout weight version
-   must be `v`.
+   truncated at the configured limit). Before training starts, every recorded
+   rollout weight version must be exactly `v`.
 3. Run the one configured Miles GRPO training cycle without publishing the local
    result to SGLang.
 4. Export the complete local LoRA `theta_i_v` and send
@@ -214,15 +226,15 @@ image.
 The Miles source itself is independently pinned to:
 
 ```text
-https://github.com/radixark/miles
-dfc66ff38752bfa2c5d325e0037ebc4b537c06de
+https://github.com/agentenv/miles
+a91bd34e50416aeb1da111f74d52b296e8216b96
 ```
 
 The launcher checks out that commit as a detached HEAD and installs the
 project's pinned PEFT version. At learner startup Yeto verifies the repository
-origin, commit, clean worktree, and imported package path. Runtime
-adaptation uses the compatibility seam described above without modifying the
-checkout.
+origin, commit, clean worktree, and imported package path. The checkout itself
+contains the thin policy-sync boundary described above; Yeto does not modify
+it at process startup.
 
 An illustrative two-island run is:
 
@@ -423,9 +435,11 @@ the syncer writes roster, base-version, layout, merge, and responder metrics to
 `~/yeto-output/yeto-tape.jsonl`. Miles group-task completion supplies peak
 active groups, cancellations, and duration percentiles;
 `Sample.non_generation_time` supplies tool wait; grouped raw rewards supply the
-zero-variance ratio; and Miles' rank-zero train log supplies KL, ESS, and clip
-fraction. The bridge records the actual protocol payload bytes, while each
-canonical global apply records its policy hash.
+zero-variance ratio. The thin Miles branch attaches the rank-zero native train
+log's KL, ESS, and clip fraction, plus the measured optimizer-train duration,
+to the same local-state export consumed by the hook. The bridge records those
+values, the actual protocol payload bytes, and each canonical global apply's
+policy hash.
 The launcher does not currently enable a Miles or Yeto dashboard for these
 records.
 
@@ -438,18 +452,20 @@ recoverable through the committed-checkpoint paths above.
 
 ## Runtime compatibility and diagnostics
 
-The validated Miles/Transformer Engine stack cannot reliably use its
-FlashAttention CUTE GQA kernel on A100. RL islands therefore select unfused
-attention before Transformer Engine imports and propagate that choice into
-the actual Megatron provider. This is a runtime-wide choice, not a model
-family workaround.
+Model loading, attention kernels, LoRA conversion, and trainer-to-SGLang
+transport remain Miles responsibilities. Yeto passes the selected Miles
+arguments and does not patch Megatron providers or transport functions at
+runtime. A change to the pinned Miles, Megatron-Bridge, Transformer Engine, or
+SGLang stack therefore requires a real GPU compatibility run in addition to
+the tensor-contract tests.
 
 Common startup and progress failures have distinct meanings:
 
 - **PEFT import failure:** the learner did not run the current Miles setup,
   which installs the pinned `peft==0.20.0`.
-- **`Operation creation failed` under `flash_attn/cute/pack_gqa.py`:** the
-  process did not receive the RL launch environment or provider backend.
+- **Attention-kernel startup failure:** check the pinned Miles image and its
+  Megatron/Transformer Engine compatibility; do not add a model-name branch in
+  Yeto.
 - **Miles revision/origin/dirty-tree error:** the runtime is not using the
   supported checkout; do not bypass this check or patch that tree in place.
 - **PEFT/Megatron mapping mismatch:** the model is outside the currently
@@ -464,25 +480,24 @@ Common startup and progress failures have distinct meanings:
 
 | INIT plan | Current implementation | Assessment |
 | --- | --- | --- |
-| **Miles integration:** maintain a thin Miles branch with stable policy export, apply, and post-train synchronization hooks. | Keep the pinned upstream Miles checkout unchanged and adapt that exact version at runtime. | The required training and synchronization semantics are implemented and validated. A Miles upgrade still requires explicit compatibility revalidation. |
 | **Global checkpoint recovery:** keep the authoritative policy recoverable across syncer failures, including replacement of its machine or disk. | Automatic recovery works while the syncer's disk is retained; losing that VM or disk also loses the checkpoint. | This does not change the RL algorithm, but it remains a production disaster-recovery gap. |
 | **Monitoring:** connect the planned RL and synchronization metrics to a dashboard. | Emit the metrics to JSONL without enabling a dashboard. | The records are sufficient for validation and offline diagnosis, but not centralized live monitoring. |
 
 ## Validation status
 
-The current source has automated coverage for multi-node task construction,
-multi-rank actor results, DP rollout-shard collection, EP validation,
+The current source has automated coverage for the Miles policy hook and its
+ordering around native SGLang publication, multi-node task construction,
+multi-rank apply/export, DP rollout-shard collection, EP validation,
 single-island and multi-island sync, canonical identity, completed-group
 recovery, strict failures, provenance, checkpoint export, and the unchanged
-SFT/diffusion defaults. The 2026-07-30 regression passed all 73 focused RL
-tests, the full Python suite (`766 passed, 4 skipped`), `cargo fmt --check`, and
-all 58 Rust tests.
+SFT/diffusion defaults. Exact current test counts are recorded in the pull
+request rather than frozen in this document.
 
-Real validation ran on one GCP Spot VM with eight NVIDIA A100-SXM4-40GB GPUs.
-It used the pinned Miles commit, PEFT 0.20.0, immutable model and dataset
-revisions, real model generations, real rewards, and production Yeto learner
-and Rust syncer paths. Observation hooks only captured tensors, tokens,
-metrics, and fault windows.
+The following real validation ran on one GCP Spot VM with eight NVIDIA
+A100-SXM4-40GB GPUs before the integration moved from runtime adaptation to
+the maintained Miles hook. It used the same policy, merge, model, reward,
+learner, and Rust syncer semantics, but it is evidence for the RL algorithm
+and model path rather than GPU validation of the new hook implementation.
 
 - A one-island Qwen3-4B DP=8 run completed two global rounds. Each round
   trained on 16 trajectories and 8192 action tokens with nonconstant rewards.
@@ -525,6 +540,7 @@ metrics, and fault windows.
 
 The following boundaries remain unvalidated or intentionally excluded:
 
+- the maintained Miles hook has not yet repeated the real GPU matrix above;
 - the requested 24-hour soak was not run; the 20 consecutive merges are the
   bounded-duration stability evidence;
 - no physical multi-node island or end-to-end SkyPilot provisioning and Spot
@@ -532,9 +548,6 @@ The following boundaries remain unvalidated or intentionally excluded:
   covered automatically;
 - the syncer checkpoint still has no durable mount for syncer VM or disk loss;
 - metrics remain JSONL-only and the launcher enables no dashboard.
-
-The runtime-injection Miles seam described above remains an implementation
-constraint, not a stable upstream interface.
 
 ## Extending v0 safely
 
@@ -563,10 +576,12 @@ For implementation navigation:
 | area | responsibility |
 | --- | --- |
 | `yeto/rl/core.py` | canonical LoRA state and the single AVG layout |
-| `yeto/rl/miles.py` | pinned Miles runtime, trainer/SGLang policy boundary |
+| `yeto/rl/miles.py` | external sync hook, rollout-version checks, and Yeto bridge adapter |
 | `yeto/rl/bridge.py` | exact-base island loop and protocol interaction |
 | `yeto/rl/export.py` | committed checkpoint to PEFT adapter |
 | `yeto/rl/learner.py` | island entry point and Miles argument mapping |
+| `agentenv/miles:miles/backends/megatron_utils/trainable_state.py` | replicated LoRA export/apply and optimizer reset |
+| `agentenv/miles:train.py` | native post-train, pre-publication hook ordering |
 | `syncer/src/server.rs` | fixed roster and checkpoint-before-broadcast commit |
 
 Run the focused and full regressions before a GPU shakedown:
