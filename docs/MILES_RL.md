@@ -84,6 +84,9 @@ MoE `auto`/`attention` path), not LoRA on sharded expert weights.
 The replicated path disables Megatron's distributed optimizer so every
 trainer rank retains the complete fp32 LoRA masters and optimizer state needed
 by the export/apply contract.
+When `--expert-parallel` is omitted, dense models use EP=1 and MoE models use
+the full island world size. An explicit MoE EP value must divide that world
+size.
 
 The RL path consumes `--lora-r` and `--lora-targets`. Its effective PEFT
 configuration fixes alpha to the rank, dropout to zero, and bias to `none`;
@@ -105,14 +108,16 @@ The ordinary Yeto SFT and diffusion modes remain separate. Passing
 
 ## Current integration seams
 
-The Miles checkout remains a clean detached checkout. The current adapter
-installs Yeto export, apply, and optimizer-step methods on the pinned
-`MegatronTrainRayActor` at process startup and invokes them through that
-commit's non-FT `RayTrainGroup._broadcast` path. Yeto drives Miles rollout and
-training primitives directly so the island-local result is not published to
-SGLang before the global merge. There is currently no maintained Miles patch
-or upstream train-loop synchronization hook. This private compatibility seam
-is supported only for the pinned commit and must be revalidated if Miles is
+The Miles checkout remains a clean detached checkout. At process startup the
+current adapter installs Yeto export, apply, optimizer-step, and train-metric
+methods on the pinned `MegatronTrainRayActor`, and invokes them through that
+commit's non-FT `RayTrainGroup._broadcast` path. It also wraps the pinned
+Megatron-Bridge provider/DDP construction, Miles train logging, and colocated
+LoRA IPC completion in process memory. Yeto drives Miles rollout and training
+primitives directly so the island-local result is not published to SGLang
+before the global merge. There is currently no maintained Miles patch or
+upstream train-loop synchronization hook. This private compatibility seam is
+supported only for the pinned commit and must be revalidated if Miles is
 changed.
 
 The launcher selects strict RL behavior through the existing syncer's general
@@ -134,6 +139,8 @@ The RL flags describe the work at the Miles boundary:
 - `G`: `--rollout-batch-size`, the complete GRPO groups per island round;
 - `K`: `--n-samples-per-prompt`, the trajectories per group;
 - local work: `--local-rl-rounds-per-sync 1` in v0.
+- optimizer work: one Miles optimizer step per island round; v0 exposes no
+  separate optimizer-step control.
 
 `N`, `G`, and `K` must be positive. `G × K` must be divisible by every
 island's Miles data-parallel size. `--over-sampling-batch-size` defaults to
@@ -193,11 +200,16 @@ Ray head and joins the remaining island nodes as workers. A single entry is a
 supported parity path; multiple entries enable fixed-roster averaging.
 External learner slots are not supported.
 
-Use a Miles-compatible learner image. The image used for v0 validation is:
+The default production base image is pinned by digest:
 
 ```text
 docker:radixark/miles@sha256:95b3afa9ee4313f5633e6ed3779c8276353cc8e24a2462e4f54ec0d5978fbae7
 ```
+
+GPU validation used a local derivative of that exact base image with the
+pinned Miles checkout and PEFT version preinstalled. The public launcher
+performs those same source and PEFT setup steps on the digest-pinned base
+image.
 
 The Miles source itself is independently pinned to:
 
@@ -398,11 +410,13 @@ Recovery always starts from the most recent committed global checkpoint:
 | syncer VM or disk is lost | the current launcher has no durable mount for the global checkpoint, so automatic recovery is not available |
 | learner exits while applying a global policy | replacement reapplies the complete committed policy |
 
-A dead syncer connection makes an island process exit rather than silently
-continue local work. The launcher can restart the syncer through its existing
-recovery path and restart affected logical learners individually; it does not
-need to restart every healthy roster member. Duplicate computation is allowed,
-but duplicate merge is not.
+A dead syncer connection makes an island exit at the next bridge health check.
+If it drops while a synchronous Miles rollout/train call is in progress, that
+local round may finish redundant computation, but it cannot begin another
+round or become authoritative after restart. The launcher can restart the
+syncer through its existing recovery path; each learner whose bridge exits is
+restarted under the same logical ID rather than through a roster-wide restart
+command. Duplicate computation is allowed, but duplicate merge is not.
 
 Each island writes policy-apply, optimizer-reset, and `LocalRoundStats` JSONL;
 the syncer writes roster, base-version, layout, merge, and responder metrics to
@@ -445,6 +459,14 @@ Common startup and progress failures have distinct meanings:
   still recovering. Fixed-roster mode never lowers quorum to make progress.
 - **optimizer steps but negligible LoRA change:** first inspect reward
   variance, advantages, and the configured LR schedule.
+
+## Intentional differences from INIT
+
+| INIT plan | Current implementation | Assessment |
+| --- | --- | --- |
+| **Miles integration:** maintain a thin Miles branch with stable policy export, apply, and post-train synchronization hooks. | Keep the pinned upstream Miles checkout unchanged and adapt that exact version at runtime. | The required training and synchronization semantics are implemented and validated. A Miles upgrade still requires explicit compatibility revalidation. |
+| **Global checkpoint recovery:** keep the authoritative policy recoverable across syncer failures, including replacement of its machine or disk. | Automatic recovery works while the syncer's disk is retained; losing that VM or disk also loses the checkpoint. | This does not change the RL algorithm, but it remains a production disaster-recovery gap. |
+| **Monitoring:** connect the planned RL and synchronization metrics to a dashboard. | Emit the metrics to JSONL without enabling a dashboard. | The records are sufficient for validation and offline diagnosis, but not centralized live monitoring. |
 
 ## Validation status
 
