@@ -146,6 +146,13 @@ saved model or adapter. Diffusion artifacts embed the same object under
 - the loss artifact digest and unsafe-pickle state when applicable; and
 - export checkpoint/global-step context where available.
 
+Causal LoRA outputs also record their training recipe and optional parent
+adapter lineage. Strict `--resume-from` verifies the recorded immutable model,
+dataset, trust setting, and recipe; `--branch-from` records the relationship
+while permitting an intentional recipe or dataset change. Merged exports
+record the exact parent directory digest and SafeTensors shard policy. See
+[ADAPTER_LIFECYCLE.md](ADAPTER_LIFECYCLE.md).
+
 Sampling uses the artifact's resolved base-model commit by default. A model
 override is resolved independently. Batch sample manifests keep the original
 artifact provenance and the actual runtime model provenance as separate
