@@ -198,6 +198,8 @@ per-seed results for the completed Qwen3.6, LTX-Video, and Wan2.2 benchmarks.
 for 1T-class MoE).
 [docs/MILES_RL.md](docs/MILES_RL.md) — fixed-roster Miles RL across causal-LM
 LoRA islands: rollout/training boundaries, recovery, export, and limitations.
+[docs/RL_BENCHMARK.md](docs/RL_BENCHMARK.md) — equal-hardware native Miles,
+single-island Yeto, and federated Yeto RL benchmark contract and runner.
 [docs/MLX.md](docs/MLX.md) — the Apple-silicon island backend: Macs as
 learner islands (`yeto launch --external-learners`, cross Mac↔NVIDIA runs).
 
@@ -206,7 +208,7 @@ learner islands (`yeto launch --external-learners`, cross Mac↔NVIDIA runs).
     python3 -m pytest tests/          # includes a real syncer+learner loop
     (cd syncer && cargo test)
 
-Three heavier harnesses (all support `--dry-run`):
+Four heavier harnesses (all support `--dry-run`):
 
     # smoke every supported model with the auto fleet planner, tiered by
     # size; sequential, self-cleaning, writes a pass/fail report
@@ -214,6 +216,9 @@ Three heavier harnesses (all support `--dry-run`):
 
     # causal-LM quality check against equal-hardware synchronous baselines
     python scripts/compare_diloco.py --data <chat.jsonl> --settings all --dry-run
+
+    # Miles RL quality check: native, one Yeto island, and federated Yeto
+    python scripts/benchmark_rl.py <model/data/reward arguments> --dry-run
 
     # diffusion quality check with an explicit, fixed media shape
     python scripts/benchmark_diffusion_diloco.py \

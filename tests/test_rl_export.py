@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from yeto.export import CKPT_MAGIC
+from yeto.rl import export as rl_export
 from yeto.rl.core import (
     canonical_layout_hash,
     canonical_lora_config_hash,
@@ -29,6 +30,58 @@ def _model(tmp_path):
     path = tmp_path / "model"
     config.save_pretrained(path)
     return path, config
+
+
+def test_rl_model_factory_preserves_the_checkpoint_architecture(monkeypatch):
+    transformers = pytest.importorskip("transformers")
+
+    class DeclaredConditionalGeneration:
+        @classmethod
+        def from_config(cls, config, **kwargs):
+            return cls()
+
+    monkeypatch.setattr(
+        transformers,
+        "DeclaredConditionalGeneration",
+        DeclaredConditionalGeneration,
+        raising=False,
+    )
+
+    config = type(
+        "Config",
+        (),
+        {"architectures": ["DeclaredConditionalGeneration"]},
+    )()
+    assert rl_export._rl_model_factory(config) is DeclaredConditionalGeneration
+
+    config.architectures = None
+    assert rl_export._rl_model_factory(config) is transformers.AutoModelForCausalLM
+
+
+def test_declared_rl_architecture_does_not_receive_auto_factory_kwargs(monkeypatch):
+    transformers = pytest.importorskip("transformers")
+
+    class DeclaredConditionalGeneration:
+        @classmethod
+        def _from_config(cls, config):
+            return cls()
+
+    monkeypatch.setattr(
+        transformers,
+        "DeclaredConditionalGeneration",
+        DeclaredConditionalGeneration,
+        raising=False,
+    )
+    config = type(
+        "Config",
+        (),
+        {"architectures": ["DeclaredConditionalGeneration"]},
+    )()
+
+    assert isinstance(
+        rl_export._rl_model_from_config(config, trust_remote_code=True),
+        DeclaredConditionalGeneration,
+    )
 
 
 def test_attention_regex_is_resolved_before_peft_moe_conversion(tmp_path):

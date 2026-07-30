@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import yeto.launcher as launcher
+from yeto import launcher
 from yeto.cli import parse_args
 from yeto.launcher import (
     FleetController,
@@ -15,8 +15,8 @@ from yeto.launcher import (
     make_miles_island_task,
     syncer_command,
 )
-from yeto.rl import MILES_PEFT_VERSION
-from yeto.rl import MILES_COMMIT, MILES_REPOSITORY
+from yeto.rl import MILES_COMMIT, MILES_PEFT_VERSION, MILES_REPOSITORY
+from yeto.rl import learner as rl_learner
 from yeto.rl.learner import build_miles_argv
 from yeto.rl.miles import verify_miles_revision
 
@@ -550,6 +550,7 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
     assert "--no-offload-train" in argv
     assert argv[argv.index("--sglang-mem-fraction-static") + 1] == "0.4"
     assert "--sglang-enable-deterministic-inference" in argv
+    assert argv[argv.index("--rollout-seed") + 1] == "1"
     assert "--pin-rollout-manager-to-head" in argv
     for recipe_flag in (
         "--rollout-shuffle",
@@ -572,6 +573,48 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
     ):
         assert recipe_flag not in argv
 
+    native_argv = build_miles_argv(
+        args,
+        model_path="/model",
+        prompt_path="/prompts.jsonl",
+        provider=provider,
+        target_modules=["qkv_proj", "out_proj"],
+        yeto_policy_sync=False,
+    )
+    assert "--external-policy-sync-path" not in native_argv
+    assert "--rollout-all-samples-process-path" not in native_argv
+    assert native_argv[native_argv.index("--rollout-function-path") + 1] == (
+        "miles.rollout.sglang_rollout.generate_rollout"
+    )
+    assert not any(value.startswith("yeto.rl.") for value in native_argv)
+
+    paired_args = argparse.Namespace(
+        **vars(args),
+        rollout_seed=91,
+        rollout_engine_base_port=22000,
+        sglang_router_port=21900,
+        sglang_router_prometheus_port=21901,
+        train_master_base_port=21902,
+    )
+    paired_argv = build_miles_argv(
+        paired_args,
+        model_path="/model",
+        prompt_path="/prompts.jsonl",
+        provider=provider,
+        target_modules=["qkv_proj", "out_proj"],
+    )
+    assert paired_argv[paired_argv.index("--rollout-seed") + 1] == "91"
+    assert paired_argv[
+        paired_argv.index("--rollout-engine-base-port") + 1
+    ] == "22000"
+    assert paired_argv[paired_argv.index("--sglang-router-port") + 1] == "21900"
+    assert paired_argv[
+        paired_argv.index("--sglang-router-prometheus-port") + 1
+    ] == "21901"
+    assert paired_argv[
+        paired_argv.index("--train-master-base-port") + 1
+    ] == "21902"
+
     dense_values = vars(provider).copy()
     dense_values.pop("num_moe_experts")
     dense_provider = argparse.Namespace(**dense_values)
@@ -585,6 +628,19 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
         target_modules=["qkv_proj", "out_proj"],
     )
     assert dense_argv[dense_argv.index("--expert-model-parallel-size") + 1] == "1"
+    assert "--qkv-format" not in dense_argv
+
+    gdn_values = vars(dense_provider).copy()
+    gdn_values["experimental_attention_variant"] = "gated_delta_net"
+    gdn_argv = build_miles_argv(
+        dense_args,
+        model_path="/model",
+        prompt_path="/prompts.jsonl",
+        provider=argparse.Namespace(**gdn_values),
+        target_modules=["qkv_proj", "out_proj"],
+    )
+    assert gdn_argv[gdn_argv.index("--qkv-format") + 1] == "bshd"
+
     dense_args.expert_parallel = 2
     with pytest.raises(ValueError, match="EP>1 requires a MoE"):
         build_miles_argv(
@@ -605,6 +661,190 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
             provider=provider,
             target_modules=["qkv_proj", "out_proj"],
         )
+
+
+def test_miles_argv_preserves_mrope_provider_configuration():
+    args = argparse.Namespace(
+        seq_len=128,
+        groups_per_round=4,
+        samples_per_group=2,
+        optimizer_steps=1,
+        lora_targets="attention",
+        lora_r=4,
+        seed=1,
+        learner_id=0,
+        global_rounds=1,
+        inner_lr=1e-5,
+        reward_function="pkg.reward:score",
+        over_sampling_batch_size=4,
+        rollout_max_response_len=64,
+        custom_generate_function_path=None,
+        use_session_server=False,
+        actor_num_nodes=1,
+        actor_num_gpus_per_node=2,
+        expert_parallel=None,
+    )
+    provider = argparse.Namespace(
+        hidden_size=16,
+        num_attention_heads=4,
+        num_layers=2,
+        ffn_hidden_size=32,
+        num_query_groups=2,
+        kv_channels=4,
+        seq_length=256,
+        vocab_size=64,
+        layernorm_epsilon=1e-6,
+        position_embedding_type="mrope",
+        rotary_base=1000000,
+        rotary_percent=0.25,
+        mrope_section=[11, 11, 10],
+    )
+
+    argv = build_miles_argv(
+        args,
+        model_path="/model",
+        prompt_path="/prompts.jsonl",
+        provider=provider,
+        target_modules=["q_proj"],
+    )
+
+    assert argv[argv.index("--position-embedding-type") + 1] == "mrope"
+    assert argv[argv.index("--rotary-percent") + 1] == "0.25"
+    section = argv.index("--mrope-section")
+    assert argv[section + 1 : section + 4] == ["11", "11", "10"]
+
+
+def test_megatron_targets_follow_the_exact_peft_bridge_mappings():
+    qkv = types.SimpleNamespace(
+        megatron_param=(
+            "language_model.decoder.layers.3.self_attention.linear_qkv.weight"
+        ),
+        hf_param={
+            "q": "model.language_model.layers.3.self_attn.q_proj.weight",
+            "k": "model.language_model.layers.3.self_attn.k_proj.weight",
+            "v": "model.language_model.layers.3.self_attn.v_proj.weight",
+        },
+    )
+    projection = types.SimpleNamespace(
+        megatron_param=(
+            "language_model.decoder.layers.3.self_attention.linear_proj.weight"
+        ),
+        hf_param="model.language_model.layers.3.self_attn.o_proj.weight",
+    )
+    mappings = {
+        value: qkv for value in qkv.hf_param.values()
+    } | {projection.hf_param: projection}
+    registry = types.SimpleNamespace(
+        hf_to_megatron_lookup=lambda name: mappings.get(name)
+    )
+    bridge = types.SimpleNamespace(
+        _model_bridge=types.SimpleNamespace(mapping_registry=lambda: registry)
+    )
+    specs = tuple(
+        types.SimpleNamespace(name=f"base_model.model.{module}.lora_{side}.weight")
+        for module in (
+            "model.language_model.layers.3.self_attn.q_proj",
+            "model.language_model.layers.3.self_attn.k_proj",
+            "model.language_model.layers.3.self_attn.v_proj",
+            "model.language_model.layers.3.self_attn.o_proj",
+        )
+        for side in ("A", "B")
+    )
+
+    assert rl_learner.megatron_adapter_targets(specs, bridge) == [
+        "language_model.decoder.layers.3.self_attention.linear_k",
+        "language_model.decoder.layers.3.self_attention.linear_proj",
+        "language_model.decoder.layers.3.self_attention.linear_q",
+        "language_model.decoder.layers.3.self_attention.linear_v",
+    ]
+
+
+def test_megatron_targets_reject_a_peft_module_without_a_bridge_mapping():
+    bridge = types.SimpleNamespace(
+        _model_bridge=types.SimpleNamespace(
+            mapping_registry=lambda: types.SimpleNamespace(
+                hf_to_megatron_lookup=lambda _name: None
+            )
+        )
+    )
+    specs = (
+        types.SimpleNamespace(
+            name="base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="has no Megatron-Bridge mapping"):
+        rl_learner.megatron_adapter_targets(specs, bridge)
+
+
+def test_miles_runner_keeps_native_arm_outside_yeto_policy_sync(monkeypatch):
+    captured = {}
+
+    class Provider:
+        def finalize(self):
+            captured["finalized"] = True
+
+    class Bridge:
+        def to_megatron_provider(self, load_weights):
+            assert load_weights is False
+            return Provider()
+
+    class AutoBridge:
+        @staticmethod
+        def from_hf_pretrained(path, trust_remote_code):
+            assert path == "/model"
+            assert trust_remote_code is True
+            return Bridge()
+
+    async def train(args):
+        captured["miles_args"] = args
+
+    def build(*args, **kwargs):
+        captured["policy_sync"] = kwargs["yeto_policy_sync"]
+        return ["train.py"]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "megatron.bridge",
+        types.SimpleNamespace(AutoBridge=AutoBridge),
+    )
+    monkeypatch.setitem(sys.modules, "train", types.SimpleNamespace(train=train))
+    monkeypatch.setattr(rl_learner, "derive_peft_lora_specs", lambda *a, **k: ())
+    monkeypatch.setattr(rl_learner, "adapter_targets", lambda specs: [])
+    monkeypatch.setattr(
+        rl_learner,
+        "megatron_adapter_targets",
+        lambda specs, bridge: [],
+    )
+    monkeypatch.setattr(rl_learner, "build_miles_argv", build)
+    monkeypatch.setattr(
+        rl_learner,
+        "_parse_miles_args",
+        lambda argv: argparse.Namespace(argv=argv),
+    )
+    args = argparse.Namespace(
+        trust_remote_code=True,
+        lora_r=4,
+        lora_targets="auto",
+        learner_id=0,
+    )
+
+    rl_learner.run_miles(
+        args,
+        model_path="/model",
+        prompt_path="/prompts.jsonl",
+        yeto_policy_sync=False,
+        extra_argv=("--save-debug-rollout-data", "/rollouts/{rollout_id}.pt"),
+    )
+
+    assert captured["finalized"]
+    assert captured["policy_sync"] is False
+    assert captured["miles_args"].argv == [
+        "train.py",
+        "--save-debug-rollout-data",
+        "/rollouts/{rollout_id}.pt",
+    ]
+    assert not hasattr(captured["miles_args"], "yeto_rl_bridge_config")
 
 
 class _Status:

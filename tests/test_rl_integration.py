@@ -346,6 +346,76 @@ def test_single_island_runs_the_real_syncer_parity_path(syncer_binary, tmp_path)
             process.wait()
 
 
+def test_terminal_replacement_receives_final_policy(syncer_binary, tmp_path):
+    layout = _layout()
+    checkpoint_path = tmp_path / "state.ckpt"
+    port = _port()
+    process = _start(
+        syncer_binary,
+        port,
+        checkpoint_path,
+        rounds=1,
+        learners=1,
+    )
+    original = _client(port, 0, layout)
+    replacement = None
+    thread = None
+    try:
+        original.send_init(0, pack_tensor(torch.zeros(2), DTYPE_F32))
+        assert _wait_item(original.drain_updates).version == 0
+        assert _wait_item(original.drain_pulls).global_step == 1
+        _push(original, 1, 0, [1, 3])
+        manifest, _ = original.wait_for_final_fragments(timeout=10)
+        assert manifest.global_step == 1
+        original.close()
+
+        runtime = _FakeMiles([0, 0], 0)
+        replacement = StrictRlBridge(
+            runtime,
+            BridgeConfig(
+                syncer_addr=("127.0.0.1", port),
+                learner_id=0,
+                global_rounds=1,
+                groups_per_round=1,
+                samples_per_group=2,
+                local_optimizer_steps=1,
+                wan_streams=0,
+                expected_specs=runtime.current.specs,
+                base_model_revision=runtime.current.base_model_revision,
+                lora_config_hash=runtime.current.lora_config_hash,
+                layout_hash=runtime.current.layout_hash,
+                event_tape=str(tmp_path / "replacement.jsonl"),
+            ),
+        )
+        replacement.start()
+        result = {}
+
+        def receive():
+            result["state"] = replacement.wait_for_initial_policy()
+
+        thread = threading.Thread(target=receive, daemon=True)
+        thread.start()
+        thread.join(timeout=3)
+        assert not thread.is_alive(), "replacement ignored the terminal policy"
+        assert result["state"].policy_version == 1
+        assert process.poll() is None
+
+        final = replacement.finalize()
+        assert final.policy_version == 1
+        assert torch.equal(
+            next(iter(final.tensors.values())),
+            torch.tensor([[1.0, 3.0]]),
+        )
+        assert process.wait(timeout=10) == 0
+    finally:
+        original.close()
+        if replacement is not None:
+            replacement.client.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
 def test_miles_public_hook_runs_against_real_syncer(
     syncer_binary, tmp_path, monkeypatch
 ):

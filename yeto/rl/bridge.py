@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
-from ..protocol import DTYPE_F32, PullRequest, SyncerClient
+from ..protocol import DTYPE_F32, FinalManifest, PullRequest, SyncerClient
 from ..tensor_io import pack_tensor, unpack_fragment
 from .core import (
     CanonicalLoraState,
@@ -165,6 +165,9 @@ class StrictRlBridge:
     def wait_for_initial_policy(self) -> CanonicalLoraState:
         while self.current is None:
             self.client.check_health()
+            if self.client.finalizing.is_set():
+                _, self.current = self._terminal_state()
+                return self.current
             self._drain_messages()
             if self.current is None:
                 time.sleep(0.05)
@@ -361,6 +364,12 @@ class StrictRlBridge:
         return self._finalize()
 
     def _finalize(self) -> CanonicalLoraState:
+        manifest, final = self._terminal_state()
+        self.runtime.apply_global_policy(final)
+        self.client.acknowledge_finalization(manifest)
+        return final
+
+    def _terminal_state(self) -> tuple[FinalManifest, CanonicalLoraState]:
         manifest, fragments = self.client.wait_for_final_fragments()
         if (
             manifest.global_step != self.config.global_rounds
@@ -372,9 +381,7 @@ class StrictRlBridge:
             manifest.global_step,
             fragments[0].data,
         )
-        self.runtime.apply_global_policy(final)
-        self.client.acknowledge_finalization(manifest)
-        return final
+        return manifest, final
 
     def _append_event(self, event: dict) -> None:
         path = Path(self.config.event_tape).expanduser()

@@ -20,6 +20,30 @@ from .core import (
 )
 
 
+def _rl_model_factory(config):
+    """Use the model class declared by the pinned checkpoint when available."""
+
+    import transformers
+
+    for architecture in getattr(config, "architectures", None) or ():
+        factory = getattr(transformers, architecture, None)
+        if factory is not None:
+            return factory
+    return transformers.AutoModelForCausalLM
+
+
+def _rl_model_from_config(config, *, trust_remote_code: bool):
+    import transformers
+
+    factory = _rl_model_factory(config)
+    if factory is transformers.AutoModelForCausalLM:
+        return factory.from_config(
+            config,
+            trust_remote_code=trust_remote_code,
+        )
+    return factory._from_config(config)
+
+
 def target_modules(choice: str, config) -> str:
     """Reuse Yeto's model-driven public LoRA target semantics."""
 
@@ -40,7 +64,7 @@ def derive_peft_lora_specs(
 
     from accelerate import init_empty_weights
     from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
-    from transformers import AutoConfig, AutoModelForCausalLM
+    from transformers import AutoConfig
 
     config = AutoConfig.from_pretrained(
         model,
@@ -54,7 +78,7 @@ def derive_peft_lora_specs(
     }:
         targets = target_modules(targets, config)
     with init_empty_weights():
-        base = AutoModelForCausalLM.from_config(
+        base = _rl_model_from_config(
             config,
             trust_remote_code=trust_remote_code,
         )

@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,51 @@ def _miles_callable(spec: str) -> str:
     return f"{module}.{function}"
 
 
+def megatron_adapter_targets(specs, bridge) -> list[str]:
+    """Map the exact PEFT contract onto Bridge's Megatron module paths."""
+
+    model_bridge = getattr(bridge, "_model_bridge", None)
+    if model_bridge is None:
+        raise ValueError("Megatron-Bridge does not expose its model mapping")
+    registry = model_bridge.mapping_registry()
+    modules = {
+        spec.name.removeprefix("base_model.model.").rsplit(".lora_", 1)[0]
+        for spec in specs
+    }
+    targets = set()
+    for module in modules:
+        hf_weight = f"{module}.weight"
+        mapping = registry.hf_to_megatron_lookup(hf_weight)
+        if mapping is None:
+            raise ValueError(f"PEFT module {module!r} has no Megatron-Bridge mapping")
+        megatron_module = mapping.megatron_param.removesuffix(".weight")
+        prefix, separator, leaf = megatron_module.rpartition(".")
+        if not separator:
+            raise ValueError(f"invalid Megatron adapter module {megatron_module!r}")
+        if leaf in {"linear_qkv", "linear_fc1"}:
+            hf_params = mapping.hf_param
+            component = next(
+                (
+                    name
+                    for name, value in hf_params.items()
+                    if value == hf_weight
+                ),
+                None,
+            ) if isinstance(hf_params, dict) else None
+            allowed = {"q", "k", "v"} if leaf == "linear_qkv" else {"gate", "up"}
+            if component not in allowed:
+                raise ValueError(
+                    f"PEFT module {module!r} cannot use canonical Megatron LoRA"
+                )
+            leaf = (
+                f"linear_{component}"
+                if leaf == "linear_qkv"
+                else f"linear_fc1_{component}"
+            )
+        targets.add(f"{prefix}.{leaf}")
+    return sorted(targets)
+
+
 def build_miles_argv(
     args,
     *,
@@ -92,6 +138,7 @@ def build_miles_argv(
     prompt_path: str | Path,
     provider,
     target_modules: list[str],
+    yeto_policy_sync: bool = True,
 ) -> list[str]:
     """Construct Miles arguments from Bridge's actual model provider."""
 
@@ -123,6 +170,7 @@ def build_miles_argv(
     if position_type == "yarn":
         position_type, rope_type = "rope", "yarn"
     rotary_base = int(getattr(provider, "rotary_base", 10000))
+    rotary_percent = float(getattr(provider, "rotary_percent", 1.0))
     actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
     is_moe = getattr(provider, "num_moe_experts", None) is not None
     expert_parallel = getattr(args, "expert_parallel", None) or (
@@ -167,6 +215,7 @@ def build_miles_argv(
         "--norm-epsilon", str(epsilon),
         "--position-embedding-type", position_type,
         "--rotary-base", str(rotary_base),
+        "--rotary-percent", str(rotary_percent),
         "--vocab-size", str(vocab_size),
         "--lora-rank", str(args.lora_r),
         "--lora-alpha", str(args.lora_r),
@@ -191,7 +240,8 @@ def build_miles_argv(
         "--label-key", "label",
         "--metadata-key", "metadata",
         "--apply-chat-template",
-        "--rollout-seed", str(args.seed + args.learner_id),
+        "--rollout-seed",
+        str(getattr(args, "rollout_seed", args.seed + args.learner_id)),
         "--sglang-enable-deterministic-inference",
         "--num-rollout", str(args.global_rounds),
         "--rollout-batch-size", str(args.groups_per_round),
@@ -202,12 +252,15 @@ def build_miles_argv(
         "--balance-data",
         "--rollout-max-context-len", str(args.seq_len),
         "--rollout-max-response-len", str(args.rollout_max_response_len),
-        "--rollout-function-path", "yeto.rl.miles.generate_rollout",
-        "--rollout-all-samples-process-path", "yeto.rl.miles.queue_completed_groups",
+        "--rollout-function-path",
+        (
+            "yeto.rl.miles.generate_rollout"
+            if yeto_policy_sync
+            else "miles.rollout.sglang_rollout.generate_rollout"
+        ),
         "--custom-rm-path", _miles_callable(args.reward_function),
         "--advantage-estimator", "grpo",
         "--lr", str(args.inner_lr),
-        "--external-policy-sync-path", "yeto.rl.miles.create_policy_sync",
         "--accumulate-allreduce-grads-in-fp32",
         "--attention-softmax-in-fp32",
         "--attention-backend", "unfused",
@@ -222,6 +275,24 @@ def build_miles_argv(
         "--sglang-max-lora-rank", str(args.lora_r),
         "--pin-rollout-manager-to-head",
     ]
+    if yeto_policy_sync:
+        values.extend(
+            (
+                "--rollout-all-samples-process-path",
+                "yeto.rl.miles.queue_completed_groups",
+                "--external-policy-sync-path",
+                "yeto.rl.miles.create_policy_sync",
+            )
+        )
+    for flag, name in (
+        ("--rollout-engine-base-port", "rollout_engine_base_port"),
+        ("--sglang-router-port", "sglang_router_port"),
+        ("--sglang-router-prometheus-port", "sglang_router_prometheus_port"),
+        ("--train-master-base-port", "train_master_base_port"),
+    ):
+        value = getattr(args, name, None)
+        if value is not None:
+            values.extend((flag, str(value)))
     if args.custom_generate_function_path:
         values.extend(
             (
@@ -242,6 +313,10 @@ def build_miles_argv(
         values.append("--group-query-attention")
     if rope_type is not None:
         values.extend(("--rope-type", rope_type))
+    if position_type == "mrope":
+        section = _provider_value(provider, "mrope_section")
+        values.append("--mrope-section")
+        values.extend(str(int(value)) for value in section)
     if bool(getattr(provider, "gated_linear_unit", False)):
         values.append("--swiglu")
     if not bool(getattr(provider, "share_embeddings_and_output_weights", True)):
@@ -252,6 +327,11 @@ def build_miles_argv(
         values.append("--add-qkv-bias")
     if bool(getattr(provider, "qk_layernorm", False)):
         values.append("--qk-layernorm")
+    if (
+        _text(getattr(provider, "experimental_attention_variant", None))
+        == "gated_delta_net"
+    ):
+        values.extend(("--qkv-format", "bshd"))
     if getattr(provider, "num_moe_experts", None) is not None:
         values.extend(
             (
@@ -356,6 +436,84 @@ def _syncer_address(value: str) -> tuple[str, int]:
     return host, int(port)
 
 
+def run_miles(
+    args,
+    *,
+    model_path: str | Path,
+    prompt_path: str | Path,
+    yeto_policy_sync: bool = True,
+    extra_argv: Sequence[str] = (),
+) -> None:
+    """Run one Miles job, optionally with Yeto's external policy boundary."""
+
+    from megatron.bridge import AutoBridge
+
+    model_bridge = AutoBridge.from_hf_pretrained(
+        model_path,
+        trust_remote_code=args.trust_remote_code,
+    )
+    provider = model_bridge.to_megatron_provider(load_weights=False)
+    provider.finalize()
+    specs = derive_peft_lora_specs(
+        model_path,
+        None,
+        rank=args.lora_r,
+        targets=args.lora_targets,
+        trust_remote_code=args.trust_remote_code,
+    )
+    canonical_targets = adapter_targets(specs)
+    miles_targets = megatron_adapter_targets(specs, model_bridge)
+    miles_argv = build_miles_argv(
+        args,
+        model_path=model_path,
+        prompt_path=prompt_path,
+        provider=provider,
+        target_modules=miles_targets,
+        yeto_policy_sync=yeto_policy_sync,
+    )
+    miles_argv.extend(extra_argv)
+    miles_args = _parse_miles_args(miles_argv)
+
+    if yeto_policy_sync:
+        from .core import canonical_layout_hash, canonical_lora_config_hash
+
+        layout_hash = canonical_layout_hash(specs)
+        lora_config_hash = canonical_lora_config_hash(
+            rank=args.lora_r,
+            target_modules=canonical_targets,
+        )
+        miles_args.yeto_rl_trust_remote_code = args.trust_remote_code
+        miles_args.yeto_rl_model = args.model
+        miles_args.yeto_rl_data = args.data
+        miles_args.yeto_rl_base_model_revision = args.model_revision
+        miles_args.yeto_rl_data_revision = args.data_revision
+        miles_args.yeto_rl_lora_config_hash = lora_config_hash
+        miles_args.yeto_rl_layout_hash = layout_hash
+        miles_args.yeto_rl_reward_sha256 = args.reward_sha256
+        miles_args.yeto_rl_completed_groups_path = args.completed_groups_path
+        miles_args.yeto_rl_event_tape = args.event_tape
+        miles_args.yeto_rl_learner_id = args.learner_id
+        miles_args.yeto_rl_bridge_config = BridgeConfig(
+            syncer_addr=_syncer_address(args.syncer),
+            learner_id=args.learner_id,
+            global_rounds=args.global_rounds,
+            groups_per_round=args.groups_per_round,
+            samples_per_group=args.samples_per_group,
+            local_optimizer_steps=args.optimizer_steps,
+            wan_streams=args.wan_streams,
+            expected_specs=specs,
+            base_model_revision=args.model_revision,
+            lora_config_hash=lora_config_hash,
+            layout_hash=layout_hash,
+            event_tape=args.event_tape,
+        )
+
+    from train import train as miles_train
+
+    asyncio.run(miles_train(miles_args))
+    print(f"[rl] learner {args.learner_id} finalized")
+
+
 def main(argv=None) -> None:
     args = parse_args(argv)
     from ..provenance import (
@@ -376,6 +534,9 @@ def main(argv=None) -> None:
             f"got {reward_sha256}"
         )
     verify_miles_revision(args.miles_root)
+    miles_root = str(Path(args.miles_root).expanduser().resolve())
+    if miles_root not in sys.path:
+        sys.path.insert(0, miles_root)
 
     from miles.utils.misc import load_function
 
@@ -383,7 +544,6 @@ def main(argv=None) -> None:
     if args.custom_generate_function_path:
         load_function(args.custom_generate_function_path)
     from huggingface_hub import snapshot_download
-    from megatron.bridge import AutoBridge
 
     from ..models import resolve
     from ..provenance import is_local_reference
@@ -398,67 +558,7 @@ def main(argv=None) -> None:
         args.data_revision,
         "~/yeto-rl/prompts.jsonl",
     )
-
-    model_bridge = AutoBridge.from_hf_pretrained(
-        model_path,
-        trust_remote_code=args.trust_remote_code,
-    )
-    provider = model_bridge.to_megatron_provider(load_weights=False)
-    provider.finalize()
-    specs = derive_peft_lora_specs(
-        model_path,
-        None,
-        rank=args.lora_r,
-        targets=args.lora_targets,
-        trust_remote_code=args.trust_remote_code,
-    )
-    miles_targets = adapter_targets(specs)
-    from .core import canonical_layout_hash, canonical_lora_config_hash
-
-    layout_hash = canonical_layout_hash(specs)
-    lora_config_hash = canonical_lora_config_hash(
-        rank=args.lora_r,
-        target_modules=miles_targets,
-    )
-    miles_args = _parse_miles_args(
-        build_miles_argv(
-            args,
-            model_path=model_path,
-            prompt_path=prompt_path,
-            provider=provider,
-            target_modules=miles_targets,
-        )
-    )
-    miles_args.yeto_rl_trust_remote_code = args.trust_remote_code
-    miles_args.yeto_rl_model = args.model
-    miles_args.yeto_rl_data = args.data
-    miles_args.yeto_rl_base_model_revision = args.model_revision
-    miles_args.yeto_rl_data_revision = args.data_revision
-    miles_args.yeto_rl_lora_config_hash = lora_config_hash
-    miles_args.yeto_rl_layout_hash = layout_hash
-    miles_args.yeto_rl_reward_sha256 = args.reward_sha256
-    miles_args.yeto_rl_completed_groups_path = args.completed_groups_path
-    miles_args.yeto_rl_event_tape = args.event_tape
-    miles_args.yeto_rl_learner_id = args.learner_id
-
-    miles_args.yeto_rl_bridge_config = BridgeConfig(
-        syncer_addr=_syncer_address(args.syncer),
-        learner_id=args.learner_id,
-        global_rounds=args.global_rounds,
-        groups_per_round=args.groups_per_round,
-        samples_per_group=args.samples_per_group,
-        local_optimizer_steps=args.optimizer_steps,
-        wan_streams=args.wan_streams,
-        expected_specs=specs,
-        base_model_revision=args.model_revision,
-        lora_config_hash=lora_config_hash,
-        layout_hash=layout_hash,
-        event_tape=args.event_tape,
-    )
-    from train import train as miles_train
-
-    asyncio.run(miles_train(miles_args))
-    print(f"[rl] learner {args.learner_id} finalized")
+    run_miles(args, model_path=model_path, prompt_path=prompt_path)
 
 
 if __name__ == "__main__":
