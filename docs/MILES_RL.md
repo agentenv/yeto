@@ -11,10 +11,10 @@ FedAvg: every global round waits for one exact-base result from every logical
 island and averages them equally.
 
 > **Status:** the core path and the pinned Miles synchronization branch are
-> implemented. The algorithm and model path previously passed real multi-GPU
-> dense, MoE EP, two-island averaging, recovery, long-task, and 20-merge
-> validation on eight A100 GPUs. The thin-branch boundary has automated
-> integration coverage but has not yet repeated that GPU matrix; see
+> implemented. The current pin completed a real equal-hardware Qwen3.6-27B
+> benchmark across native Miles, one Yeto island, and two Yeto islands on eight
+> H200 GPUs. A separate four-A100 campaign covers multi-GPU dense, MoE EP,
+> recovery, export, parity, session/tool, and 20-merge behavior; see
 > [Validation status](#validation-status).
 
 ## Why Miles is the RL runtime
@@ -121,6 +121,9 @@ the narrow boundary required by this mode:
 - the native Miles train loop loads one external policy-sync hook, calls it
   after local training and before the normal trainer-to-SGLang publication,
   and finalizes it only after the final global policy has been published.
+- its Megatron-Bridge compatibility preserves canonical LoRA query and gate
+  rows for architectures that declare gated attention, while leaving ordinary
+  attention unchanged.
 
 Miles still owns rollout generation, reward and advantage computation, GRPO
 training, offload, checkpoint calls, and SGLang weight transport. Yeto does
@@ -227,7 +230,7 @@ The Miles source itself is independently pinned to:
 
 ```text
 https://github.com/agentenv/miles
-a91bd34e50416aeb1da111f74d52b296e8216b96
+c951c667c2b754cf244e1787845c05b41b50d4df
 ```
 
 The launcher checks out that commit as a detached HEAD and installs the
@@ -476,6 +479,16 @@ Common startup and progress failures have distinct meanings:
 - **optimizer steps but negligible LoRA change:** first inspect reward
   variance, advantages, and the configured LR schedule.
 
+## Benchmark
+
+[`RL_BENCHMARK.md`](RL_BENCHMARK.md) describes the local equal-hardware LM
+benchmark. It compares native Miles, one strict Yeto island, and strict
+federated Yeto with paired prompt budgets and held-out reward/pass@k
+evaluation. The runner uses real Miles generation and training, and evaluates
+Yeto only from the authoritative syncer checkpoint export. All three arms use
+one explicit expert-parallel setting, while same-host federated islands receive
+disjoint Miles port ranges.
+
 ## Intentional differences from INIT
 
 | INIT plan | Current implementation | Assessment |
@@ -490,64 +503,86 @@ ordering around native SGLang publication, multi-node task construction,
 multi-rank apply/export, DP rollout-shard collection, EP validation,
 single-island and multi-island sync, canonical identity, completed-group
 recovery, strict failures, provenance, checkpoint export, and the unchanged
-SFT/diffusion defaults. Exact current test counts are recorded in the pull
-request rather than frozen in this document.
+SFT/diffusion defaults. The current source passed 85 focused Yeto tests,
+the full Yeto suite with 799 passed and 4 skipped, 58 Rust syncer tests, and 10
+focused Miles tests.
 
-The following real validation ran on one GCP Spot VM with eight NVIDIA
-A100-SXM4-40GB GPUs before the integration moved from runtime adaptation to
-the maintained Miles hook. It used the same policy, merge, model, reward,
-learner, and Rust syncer semantics, but it is evidence for the RL algorithm
-and model path rather than GPU validation of the new hook implementation.
+The current Miles pin was exercised with the immutable `Qwen/Qwen3.6-27B`
+revision on one eight-H200 host. The equal-hardware benchmark used three seeds
+and, for each seed, compared native Miles on eight GPUs, one Yeto island on
+eight GPUs, and two four-GPU Yeto islands. Every arm completed eight real RL
+rounds, 64 prompt groups, and 256 trajectories, for 2,304 training trajectories
+in total. The nine resulting adapters were evaluated on 16 held-out prompts
+with four samples each, for 576 evaluation generations. The complete run
+exited successfully in about 11 hours 35 minutes.
 
-- A one-island Qwen3-4B DP=8 run completed two global rounds. Each round
-  trained on 16 trajectories and 8192 action tokens with nonconstant rewards.
-  Local delta norms were `0.22248` and `0.10623`; both M=1 merges matched the
-  saved local policy within `3.64e-12`.
-- Two concurrent Qwen3-4B DP=4 islands used different prompt-token hashes.
-  Their local delta norms were `0.223218` and `0.222651`; the committed f32
-  policy exactly matched the offline mean, and both islands applied identical
-  initial and final policies.
-- `allenai/OLMoE-1B-7B-0125-Instruct` ran one EP=8 island with replicated
-  attention LoRA, 16 trajectories, 4096 action tokens, nonconstant rewards,
-  and a `0.10110` local delta. The merge error was zero. Standard PEFT loaded
-  the exported adapter, produced finite logits with a nonzero adapter effect,
-  and completed real generation.
-- A direct pinned-Miles round and the production Yeto+Miles M=1 path produced
-  identical sampled tokens and rewards; their LoRA tensors had max error
-  `0.0`. The exact trainer-to-SGLang LoRA checksum checker passed throughout.
-  Trainer-versus-rollout KL stayed around `6e-4` to `1.3e-3` before and after
-  global applies rather than showing a material token-path mismatch.
-- A 20-round Qwen run committed versions `1..20` exactly once, completing 160
-  trajectories and 20,480 action tokens. Every round had a nonzero finite
-  local delta, no mixed-version group was observed, and current-versus-rollout
-  KL remained between `0.000329` and `0.001067`.
-- Learners were killed during rollout, after local train, before push, after
-  push, before broadcast, and after global apply. Every replacement completed,
-  and each case produced one committed step. A separate syncer restart resumed
-  the committed version and completed the next round.
-- Completed-group recovery retained one real four-trajectory oversampling
-  group across learner replacement and selected that group after restart. A
-  separately replayed real trained delta was accepted once, while a stale
-  exact-base update caused the strict connection to close.
-- A Qwen3-4B session-server run completed two rounds and 16 real environment
-  tasks. Ten trajectories made actual calculator calls and consumed their
-  returned values; the second round had nonconstant rewards and a `0.10059`
-  local update. Fourteen session traces had exact TITO reconstruction. The two
-  remaining traces reached the 512-token response cap before a terminal token,
-  were correctly marked truncated, and accounted for the reported 25% TITO
-  structural mismatch in that round. Trainer-versus-rollout absolute logprob
-  error remained below `0.01`.
+| arm | mean reward | pass@1 | pass@4 |
+| --- | ---: | ---: | ---: |
+| native Miles | `0.1094 +/- 0.0312` | `0.1094` | `0.2083` |
+| Yeto single island | `0.0938 +/- 0.0541` | `0.0938` | `0.1875` |
+| Yeto two-island federation | `0.1146 +/- 0.0592` | `0.1146` | `0.2500` |
+
+Nearly every response reached the shared 768-token cap. These bounded-run
+quality values therefore show that the real training, synchronization, export,
+and evaluation paths work together; they are not a claim of converged policy
+quality. The small arm differences are also within the variation across three
+seeds.
+
+The broader compatibility and recovery campaign ran on one GCP Spot VM with
+four NVIDIA A100-SXM4-40GB GPUs. It directly exercised the maintained external
+policy hook. Yeto was `9ebd42060414fecfca2cabd89f669e91f93d1041`
+(tested source digest
+`80dfdbb7c2b3d8bc18cee51ac55e63a28b93cc0811c660ac625837b80baeab6e`) and
+Miles `a91bd34e50416aeb1da111f74d52b296e8216b96`, plus propagation of
+`provider.attention_backend` in the bridge model provider. PEFT was `0.20.0`.
+
+- Qwen3-0.6B completed multiple real DeepMath/reward/GRPO updates. Qwen3-4B
+  completed two rounds in one DP=4 island.
+- Two concurrent Qwen3-4B islands, each DP=2 and using different prompts,
+  committed a policy whose maximum error from the offline f32 mean was `0`;
+  both islands finished on the same policy.
+- `allenai/OLMoE-1B-7B-0125-Instruct` completed EP=4 training with attention
+  LoRA. Its local delta norm was `0.1417596`, and the committed policy's maximum
+  error from the expected merge was `0`.
+- Learners were replaced during rollout, before push, after push, and after
+  global apply. Each case recovered and committed exactly once, with no stale
+  update accepted. The after-push and after-apply cases first exposed a final
+  replacement hang; after the fix, both real reruns exited successfully.
+- A syncer restart recovered checkpoint version 1 and committed version 2.
+  Learners observed base versions `[0, 1]`, with no duplicate merge or stale
+  update.
+- A 20-round Qwen run committed versions `1..20` in order and applied versions
+  `0..20`. It completed 160 trajectories and 20,480 action tokens with no
+  mixed-version or stale group; the maximum merge error was `7.28e-12`.
+- Native Miles and the Yeto path produced identical rollout tokens and rewards,
+  with maximum LoRA tensor error `0.0`.
+- The committed version-20 policy exported as standard PEFT, loaded normally,
+  and completed real GPU inference and generation. Its maximum logit difference
+  from the base policy was `0.25`.
+- A Qwen3-4B session/tool run completed two rounds and 16 real tasks, including
+  10 actual calculator calls. Its local delta norms were `0.0001186` and
+  `0.1004914`, with no mixed-version or stale group.
+
+The evidence archive is
+`gs://yeto-exp2-52-model-training-497007/miles-rl-validation/20260730-thin-a100-4g/`
+with SHA-256
+`d0945b0077308bda368ae9cc45d45d1be12b5e6fcafb12cba3dbbbd95128e142`.
 
 The following boundaries remain unvalidated or intentionally excluded:
 
-- the maintained Miles hook has not yet repeated the real GPU matrix above;
+- the H200 benchmark covered the current pin's concurrent same-host drivers
+  and a real gated-attention model; the A100 campaign's MoE EP,
+  fault-injection, and session-server cases have not all been repeated on that
+  pin;
 - the requested 24-hour soak was not run; the 20 consecutive merges are the
   bounded-duration stability evidence;
-- no physical multi-node island or end-to-end SkyPilot provisioning and Spot
-  VM replacement was exercised, although multi-node task construction is
-  covered automatically;
-- the syncer checkpoint still has no durable mount for syncer VM or disk loss;
-- metrics remain JSONL-only and the launcher enables no dashboard.
+- no physical multi-node island was exercised;
+- neither end-to-end SkyPilot provisioning nor a real Spot preemption was
+  exercised; learner recovery used process termination and replacement;
+- syncer restart was verified only with its existing checkpoint disk retained,
+  so syncer VM or disk loss remains unrecovered;
+- metrics remain JSONL-only and the launcher enables no dashboard;
+- Diffusion RL is outside the v0 contract and is therefore not a missing test.
 
 ## Extending v0 safely
 
