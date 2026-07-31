@@ -20,13 +20,12 @@ def run_rl(args):
     # Determine action space size (for discrete actions)
     action_space = env.get_action_space()
     if action_space is None:
-        action_size = None  # will use vocab size
+        action_size = None
     elif hasattr(action_space, "n"):
         action_size = action_space.n
     elif hasattr(action_space, "shape") and action_space.shape is not None:
         action_size = action_space.shape[0]
     elif hasattr(action_space, "max_length"):
-        # For Text space, we'll use vocab size
         action_size = None
     else:
         action_size = None
@@ -35,8 +34,15 @@ def run_rl(args):
     class LLMPolicy(nn.Module):
         def __init__(self, model_name: str, num_actions: int = None):
             super().__init__()
-            self.llm = AutoModelForCausalLM.from_pretrained(model_name)
+            # Load model with float32 to avoid dtype mismatches
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.float32  # <-- force float32
+            )
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            # Set pad token if missing
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
             # If num_actions is None, use tokenizer vocab size
             if num_actions is None:
                 num_actions = self.tokenizer.vocab_size
@@ -46,15 +52,22 @@ def run_rl(args):
             
         def forward(self, obs):
             text = obs.get("observation", str(obs))
-            tokens = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+            tokens = self.tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=512,
+                padding=True
+            )
             outputs = self.llm(**tokens, output_hidden_states=True)
-            hidden = outputs.hidden_states[-1][:, -1, :]  # last token embedding
+            # Take the last token's hidden state
+            hidden = outputs.hidden_states[-1][:, -1, :]
+            # Already float32 because we loaded the model in float32
             return self.policy_head(hidden), self.value_head(hidden)
         
         def get_action(self, obs):
             with torch.no_grad():
                 logits, value = self.forward(obs)
-                # Sample a single token index as action
                 probs = torch.softmax(logits, dim=-1)
                 action = torch.multinomial(probs, 1).item()
                 log_prob = torch.log(probs[0, action])
