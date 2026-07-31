@@ -41,6 +41,7 @@ SUBCOMMANDS = (
     "status",
     "logs",
     "down",
+    "rl",
     "_worker",
     "_head",
 )
@@ -493,6 +494,71 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="fleet-controller health poll interval (seconds)",
     )
 
+def _add_rl_args(p: argparse.ArgumentParser) -> None:
+    """Add arguments for the 'rl' subcommand."""
+    p.add_argument(
+        "--env",
+        default="cybergym",
+        help="environment name (default: cybergym)"
+    )
+    p.add_argument(
+        "--task",
+        default="vulnerability_analysis",
+        help="CyberGym task name (default: vulnerability_analysis)"
+    )
+    p.add_argument(
+        "--model",
+        default="Qwen/Qwen2.5-7B",
+        help="base model name (default: Qwen/Qwen2.5-7B)"
+    )
+    p.add_argument(
+        "--budget",
+        type=float,
+        default=10.0,
+        help="budget in USD for monitoring (default: 10.0)"
+    )
+    p.add_argument(
+        "--output",
+        default=None,
+        help="output directory for trained model"
+    )
+    p.add_argument(
+        "--iterations",
+        type=int,
+        default=10,
+        help="number of training iterations (default: 10)"
+    )
+    p.add_argument(
+        "--steps",
+        type=int,
+        default=2048,
+        help="steps per iteration (default: 2048)"
+    )
+    p.add_argument(
+        "--lr",
+        type=float,
+        default=1e-5,
+        help="learning rate (default: 1e-5)"
+    )
+    p.add_argument(
+        "--gamma",
+        type=float,
+        default=0.99,
+        help="discount factor (default: 0.99)"
+    )
+    p.add_argument(
+        "--epochs",
+        type=int,
+        default=10,
+        help="PPO epochs per update (default: 10)"
+    )
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="batch size (default: 64)"
+    )
+
 
 def parse_args(argv=None):
     """Parse launch flags only (kept for callers that predate subcommands)."""
@@ -726,6 +792,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     down = sub.add_parser("down", help="stop a run's worker and tear down its clusters")
     down.add_argument("run", help="run name (its --cluster-prefix)")
+
+    rl = sub.add_parser(
+        "rl",
+        help="run reinforcement learning with CyberGym",
+        description="Run RL training on CyberGym environments using Yeto",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_rl_args(rl)
 
     # Internal: the detached background worker `launch` spawns.
     worker = sub.add_parser("_worker")
@@ -1541,6 +1615,9 @@ def main(argv=None) -> int:
         return cmd_worker(args.run)
     if args.command == "_head":
         return cmd_head(args.args_json)
+    if args.command == "rl":
+        from scripts import run_rl
+        run_rl(args)
     parser.print_help()
     return 0
 
