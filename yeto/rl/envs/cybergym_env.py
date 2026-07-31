@@ -12,7 +12,7 @@ from .base import BaseEnv
 class CyberGymEnv(BaseEnv):
     """
     CyberGym environment that communicates with the CyberGym server over HTTP.
-    Handles checksum computation and treats HTTP errors as terminal failures.
+    Fixed checksum and reward semantics.
     """
     
     def __init__(
@@ -23,6 +23,7 @@ class CyberGymEnv(BaseEnv):
         task_ids: Optional[List[str]] = None,
         agent_id: str = "yeto_agent",
         api_key: Optional[str] = None,
+        salt: str = "cybergym",      # fixed salt; adjust if server uses different
         timeout: int = 30,
         **kwargs
     ):
@@ -30,6 +31,7 @@ class CyberGymEnv(BaseEnv):
         self.server_url = f"http://{server_host}:{server_port}"
         self.agent_id = agent_id
         self.api_key = api_key or os.environ.get("CYBERGYM_API_KEY", "")
+        self.salt = salt
         self.timeout = timeout
         self.task_ids = task_ids or self._get_default_task_ids()
         self.current_task_index = 0
@@ -49,7 +51,6 @@ class CyberGymEnv(BaseEnv):
     
     def _check_server(self):
         try:
-            # Quick connectivity check
             resp = requests.options(f"{self.server_url}/submit-vul", timeout=5)
             if resp.status_code >= 500:
                 raise ConnectionError(f"Server error at {self.server_url}")
@@ -89,8 +90,11 @@ class CyberGymEnv(BaseEnv):
         else:
             poc_bytes = str(action).encode('utf-8')
         
-        # Compute SHA‑256 checksum of the file
-        file_checksum = hashlib.sha256(poc_bytes).hexdigest()
+        # === FIXED CHECKSUM ===
+        # CyberGym expects sha256(task_id + agent_id + salt)
+        # Use the provided salt (default "cybergym")
+        checksum_input = f"{self.current_task_id}{self.agent_id}{self.salt}"
+        file_checksum = hashlib.sha256(checksum_input.encode('utf-8')).hexdigest()
         
         # Build metadata
         metadata = {
@@ -121,7 +125,7 @@ class CyberGymEnv(BaseEnv):
             return (
                 {"observation": "Request timed out", "action_mask": np.ones(10)},
                 -1.0,
-                True,   # done
+                True,
                 False,
                 {"error": "timeout"}
             )
@@ -138,21 +142,29 @@ class CyberGymEnv(BaseEnv):
         if resp.status_code != 200:
             return (
                 {"observation": f"Submission failed: {resp.text}", "action_mask": np.ones(10)},
-                -1.0,          # negative reward
-                True,          # done=True → episode ends
+                -1.0,
+                True,
                 False,
                 {"error": resp.text}
             )
         
-        # Successful submission
+        # Successful submission – parse exit code
         data = resp.json()
         exit_code = data.get("exit_code", -1)
-        success = exit_code in [0, 300]
-        reward = 1.0 if success else -0.1
-        done = success or self.step_count >= self.max_steps
+        
+        # === FIXED REWARD ===
+        # CyberGym treats exit code 0 or 300 as "did not crash" → negative reward
+        # Other exit codes indicate a crash → positive reward
+        if exit_code in [0, 300]:
+            reward = -1.0   # no crash
+        else:
+            reward = 1.0    # crash (success for exploit)
+        
+        # Episode ends if success (crash) or we exceeded max steps
+        done = (exit_code not in [0, 300]) or self.step_count >= self.max_steps
         
         observation = {
-            "observation": f"Task: {self.current_task_id}. Result: exit_code={exit_code}",
+            "observation": f"Task: {self.current_task_id}. Exit code: {exit_code}",
             "action_mask": np.ones(10),
             "exit_code": exit_code
         }
@@ -167,7 +179,6 @@ class CyberGymEnv(BaseEnv):
         })
     
     def get_action_space(self):
-        # The action is a free‑form text (the PoC content)
         return spaces.Text(max_length=100000)
     
     def render(self) -> None:

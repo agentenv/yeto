@@ -34,7 +34,7 @@ class MockCyberGymEnv:
     
     def get_action_space(self):
         from gymnasium import spaces
-        return spaces.Discrete(10)   # discrete actions for mock
+        return spaces.Text(max_length=1000)   # text action for mock too
     
     def render(self):
         pass
@@ -44,7 +44,7 @@ def run_rl(args):
     # Select environment
     if args.env == "mock":
         env = MockCyberGymEnv()
-        action_size = 10   # discrete actions
+        action_size = None   # use vocab size
         print("Using mock environment (no server required)")
     else:
         from yeto.rl.envs.cybergym_env import CyberGymEnv
@@ -55,14 +55,8 @@ def run_rl(args):
             timeout=30
         )
         action_space = env.get_action_space()
-        # If it's a Text space, we use vocab size; else discrete
-        if hasattr(action_space, "n"):
-            action_size = action_space.n
-        elif hasattr(action_space, "max_length"):
-            # Text space: we'll use tokenizer vocab size (set to None)
-            action_size = None
-        else:
-            action_size = None
+        # Text space → we'll use vocab size
+        action_size = None
         print(f"Using CyberGym server at 0.0.0.0:8666 with task {args.task}")
 
     # Create policy model
@@ -81,7 +75,7 @@ def run_rl(args):
             self.policy_head = nn.Linear(self.llm.config.hidden_size, num_actions)
             self.value_head = nn.Linear(self.llm.config.hidden_size, 1)
             self.num_actions = num_actions
-            self._action_space_is_text = (num_actions == self.tokenizer.vocab_size)
+            self._action_space_is_text = True   # always text for CyberGym
         
         def forward(self, obs):
             text = obs.get("observation", str(obs))
@@ -94,14 +88,14 @@ def run_rl(args):
             with torch.no_grad():
                 logits, value = self.forward(obs)
                 probs = torch.softmax(logits, dim=-1)
-                action_idx = torch.multinomial(probs, 1).item()
-                log_prob = torch.log(probs[0, action_idx])
-                # If the environment expects text, convert token to string
-                if self._action_space_is_text:
-                    action = self.tokenizer.decode([action_idx])
-                else:
-                    action = action_idx
-                return action, log_prob.item(), value.item()
+                # Sample a full sequence of tokens (e.g., 20 tokens) to form a more meaningful action
+                # This mimics generating a PoC text.
+                generated_ids = torch.multinomial(probs, num_samples=20, replacement=True).squeeze(0)
+                # Decode to string
+                action_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+                # Take first token's log prob for policy loss (simplification)
+                log_prob = torch.log(probs[0, generated_ids[0].item()]).item()
+                return action_text, log_prob, value.item()
         
         def get_value(self, obs):
             with torch.no_grad():
@@ -112,18 +106,16 @@ def run_rl(args):
             log_probs_list = []
             values_list = []
             entropies_list = []
-            for obs, action in zip(obs_list, action_list):
+            for obs, action_text in zip(obs_list, action_list):
                 logits, value = self.forward(obs)
                 probs = torch.softmax(logits, dim=-1)
-                # If action is text, we need to convert to token index
-                if isinstance(action, str):
-                    # For simplicity, take first token
-                    action_tokens = self.tokenizer.encode(action, add_special_tokens=False)
-                    if not action_tokens:
-                        action_tokens = [0]
-                    action_idx = action_tokens[0]
+                # For simplicity, take the first token of the action text as the action index
+                # In a proper implementation, you'd compute the log probability of the whole sequence.
+                tokens = self.tokenizer.encode(action_text, add_special_tokens=False)
+                if not tokens:
+                    action_idx = 0
                 else:
-                    action_idx = action
+                    action_idx = tokens[0]
                 log_prob = torch.log(probs[0, action_idx])
                 entropy = -(probs * torch.log(probs + 1e-8)).sum()
                 log_probs_list.append(log_prob)
