@@ -21,6 +21,8 @@ dependencies = [
     "cloudpickle",
     "huggingface-hub>=0.34",
     "safetensors>=0.4",
+    "gymnasium>=0.29.0",
+    "requests>=2.31.0",
 ]
 
 [project.optional-dependencies]

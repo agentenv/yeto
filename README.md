@@ -51,6 +51,10 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
   frozen base in bitsandbytes NF4 with double quantization and bf16 compute;
   pass `--gpu` explicitly while the fleet planner's QLoRA memory model is being
   calibrated.
+- A local CyberGym server can provide execution-grounded rewards to the
+  experimental `yeto rl` loop. See
+  [docs/CYBERGYM_RL.md](docs/CYBERGYM_RL.md) for the safe local setup, smoke
+  command, test evidence, and current limitations.
 - `--output`: any sky-supported store URI or `hf://org/repo` — the head
   fetches the model from the winning learner, uploads it, and **terminates
   itself** (fully self-cleaning run). Local path or omitted: the artifact
@@ -173,6 +177,8 @@ delta correction, q4 wire format, snapshots, resilience.
 [docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
 [docs/PROVENANCE.md](docs/PROVENANCE.md) — source pinning, attestation, and
 artifact provenance.
+[docs/CYBERGYM_RL.md](docs/CYBERGYM_RL.md) — local CyberGym setup and RL
+smoke-run guide.
 [docs/DIFFUSION.md](docs/DIFFUSION.md) — the generic Diffusers image/video
 backend, data and conditioning contracts, external adapters, export, sampling,
 validation, and current limitations.

@@ -40,6 +40,7 @@ SUBCOMMANDS = (
     "status",
     "logs",
     "down",
+    "rl",
     "_worker",
     "_head",
 )
@@ -476,6 +477,27 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_rl_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--env",
+        default="cybergym",
+        choices=["cybergym", "mock"],
+        help="environment name",
+    )
+    p.add_argument("--task", default="vulnerability_analysis")
+    p.add_argument("--model", default="Qwen/Qwen2.5-0.5B")
+    p.add_argument("--budget", type=float, default=10.0)
+    p.add_argument("--output")
+    p.add_argument("--iterations", type=int, default=1)
+    p.add_argument("--steps", type=int, default=64)
+    p.add_argument("--lr", type=float, default=1e-5)
+    p.add_argument("--gamma", type=float, default=0.99)
+    p.add_argument("--epochs", type=int, default=2)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--server-host", default="127.0.0.1")
+    p.add_argument("--server-port", type=int, default=8666)
+
+
 def parse_args(argv=None):
     """Parse launch flags only (kept for callers that predate subcommands)."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -566,7 +588,10 @@ def build_parser() -> argparse.ArgumentParser:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = p.add_subparsers(dest="command", metavar="{launch,shape,sample-diffusion,status,logs,down}")
+    sub = p.add_subparsers(
+        dest="command",
+        metavar="{launch,shape,sample-diffusion,status,logs,down,rl}",
+    )
 
     launch = sub.add_parser(
         "launch",
@@ -684,6 +709,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     down = sub.add_parser("down", help="stop a run's worker and tear down its clusters")
     down.add_argument("run", help="run name (its --cluster-prefix)")
+
+    rl = sub.add_parser(
+        "rl",
+        help="run reinforcement learning with CyberGym",
+        description="Run RL training on CyberGym environments using Yeto",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_rl_args(rl)
 
     # Internal: the detached background worker `launch` spawns.
     worker = sub.add_parser("_worker")
@@ -1476,6 +1509,11 @@ def main(argv=None) -> int:
         return cmd_worker(args.run)
     if args.command == "_head":
         return cmd_head(args.args_json)
+    if args.command == "rl":
+        from .rl.run import run_rl
+
+        run_rl(args)
+        return 0
     parser.print_help()
     return 0
 
