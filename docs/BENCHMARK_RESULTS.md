@@ -1,20 +1,22 @@
 # Benchmark Results
 
-This document is the result archive for Yeto's completed LM and diffusion
-benchmarks. Benchmark definitions, fairness contracts, arm semantics, and
-execution instructions remain in [LM_BENCHMARK.md](LM_BENCHMARK.md) and
+This document is the result archive for Yeto's completed LM, Miles RL, and
+diffusion benchmarks. Benchmark definitions, fairness contracts, arm
+semantics, and execution instructions remain in
+[LM_BENCHMARK.md](LM_BENCHMARK.md), [RL_BENCHMARK.md](RL_BENCHMARK.md), and
 [DIFFUSION_BENCHMARK.md](DIFFUSION_BENCHMARK.md).
 
 Aggregate values are mean +/- sample standard deviation across training
-seeds. Per-seed deltas compare a DiLoCo artifact only with the synchronous
-baseline having the same topology and seed. The per-seed tables enumerate
+seeds. SFT and diffusion per-seed deltas compare a DiLoCo artifact only with
+the synchronous baseline having the same topology and seed. Miles RL deltas
+use the paired native Miles or single-island arm. The per-seed tables enumerate
 every durable result record and its quality, execution, and synchronization
 metrics. Aggregate cost is the mean cost of one result item; explicitly
 reported full-run cost also includes setup and idle overhead.
 
 These runs are historical evidence rather than current release gates. The
-Qwen run predates current resume-manifest validation; the LTX and Wan runs
-predate current logical-rank training-stream pairing.
+first Qwen SFT run predates current resume-manifest validation; the LTX and
+Wan runs predate current logical-rank training-stream pairing.
 
 ## Qwen3.6-27B LM
 
@@ -326,6 +328,119 @@ The earlier single-host simulation reported `m2` +9.91%, `m4` +11.33%, and
 topology because this run also changed to NF4, attention-only LoRA,
 512-token sequences, and gradient checkpointing. The best DiLoCo artifact
 was `m8`, seed 17, at 0.920297 CE/token (-0.21% versus paired sync).
+
+## Qwen3.6-27B Miles RL
+
+### Configuration
+
+| item | value |
+|---|---|
+| completed | 2026-07-31 00:11:20 UTC |
+| model | `Qwen/Qwen3.6-27B` at revision `6a9e13bd6fc8f0983b9b99948120bc37f49c13e9` |
+| data | local MATH-500 JSONL, SHA-256 `af174db82e27aa94b3f492083c30b07282b546104fe9d7a5d184823d35e7daf9`; 484 training candidates and 16 held-out prompts |
+| reward | `benchmark_runtime.rewards:math_score`, SHA-256 `1c9328a9d35d021f6e43fb3c1714d2866a088b16b6013a401c2fec29d0d5ed08` |
+| hardware | one host with 8 x NVIDIA H200 143771 MiB GPUs |
+| runtime | Miles `c951c667c2b754cf244e1787845c05b41b50d4df`; Yeto implementation fingerprint `45020cc2c1842b481f3c674e3bd143034ad6db3e2d2711a873dbb160b33f0c7b` |
+| container | `sha256:95b3afa9ee4313f5633e6ed3779c8276353cc8e24a2462e4f54ec0d5978fbae7` |
+| arms | native Miles: 1 island x 8 GPUs; Yeto single: 1 island x 8 GPUs; Yeto federated: 2 islands x 4 GPUs |
+| training | attention LoRA r16, inner LR `1e-5`, sequence 2048, 8 global rounds, 1 optimizer step per local round, 4 samples per prompt group, 768-token response cap |
+| paired budget | 64 prompt groups and 256 trajectories per arm and seed; all arms used 8 GPUs and identical model, reward, prompt, trajectory, and maximum action-token budgets |
+| evaluation | 16 held-out prompts, 4 samples per prompt, temperature 1, top-p 1, paired generation seeds; pass when reward is greater than 0 |
+| seeds | 17, 29, and 43 |
+| full run | 9 durable records, 2,304 training trajectories, 576 held-out generations, about 11 hours 35 minutes |
+| result archive | `results.jsonl` SHA-256 `1258c857e2e57051ff48784b12fc7d7061eb18baa4a0570d836a15b28b5a4053` |
+
+Native Miles is the equal-hardware RL reference. `yeto-single-m2` adds the
+strict Yeto checkpoint/apply contract and LoRA optimizer reset without
+splitting the island. `yeto-federated-m2` then isolates the two-island split
+and exact equal-weight global average.
+
+### Aggregate Quality Results
+
+| arm | M | runs | reward | pass@1 | pass@4 | delta vs native | delta vs single |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `native-miles-m2` | 2 | 3 | 0.1094 +/- 0.0312 | 0.1094 | 0.2083 | - | - |
+| `yeto-single-m2` | 2 | 3 | 0.0938 +/- 0.0541 | 0.0938 | 0.1875 | -0.0156 | - |
+| `yeto-federated-m2` | 2 | 3 | 0.1146 +/- 0.0592 | 0.1146 | 0.2500 | +0.0052 | +0.0208 |
+
+### Aggregate Systems Results
+
+| arm | GPUs | train s | artifact-ready s | eval s | traj/s | action tok/s | GPU-h | mean sync s | sent MB | mean KL |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `native-miles-m2` | 8 | 1583.9 | 1599.7 | 3096.7 | 0.164 | 125.7 | 4.380 | - | - | - |
+| `yeto-single-m2` | 8 | 1568.6 | 1570.4 | 3071.3 | 0.163 | 125.4 | 4.339 | 150.624 | 612.369 | 0.000152 |
+| `yeto-federated-m2` | 8 | 1456.8 | 1459.8 | 2922.1 | 0.176 | 135.0 | 4.049 | 138.427 | 1224.738 | 0.000155 |
+
+### Per-Seed Quality Results
+
+| arm | seed | reward | pass@1 | pass@4 | delta vs native | delta vs single | eval tokens | capped samples |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `native-miles-m2` | 17 | 0.140625 | 0.140625 | 0.2500 | - | - | 48882 | 63/64 |
+| `yeto-single-m2` | 17 | 0.125000 | 0.125000 | 0.2500 | -0.015625 | - | 48879 | 63/64 |
+| `yeto-federated-m2` | 17 | 0.140625 | 0.140625 | 0.2500 | +0.000000 | +0.015625 | 48880 | 63/64 |
+| `native-miles-m2` | 29 | 0.109375 | 0.109375 | 0.1875 | - | - | 49152 | 64/64 |
+| `yeto-single-m2` | 29 | 0.125000 | 0.125000 | 0.1875 | +0.015625 | - | 49152 | 64/64 |
+| `yeto-federated-m2` | 29 | 0.156250 | 0.156250 | 0.3125 | +0.046875 | +0.031250 | 49152 | 64/64 |
+| `native-miles-m2` | 43 | 0.078125 | 0.078125 | 0.1875 | - | - | 49152 | 64/64 |
+| `yeto-single-m2` | 43 | 0.031250 | 0.031250 | 0.1250 | -0.046875 | - | 49152 | 64/64 |
+| `yeto-federated-m2` | 43 | 0.046875 | 0.046875 | 0.1875 | -0.031250 | +0.015625 | 49152 | 64/64 |
+
+### Per-Seed Execution Results
+
+| arm | seed | topology | groups | trajectories | capped trajectories | action tokens | train s | artifact s | artifact-ready s | eval s | GPU-h |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `native-miles-m2` | 17 | 1 x 8 | 64 | 256 | 255/256 | 196531 | 1843.9 | 45.634 | 1889.5 | 2896.3 | 4.902 |
+| `yeto-single-m2` | 17 | 1 x 8 | 64 | 256 | 255/256 | 196554 | 1624.2 | 2.580 | 1626.8 | 2845.7 | 4.400 |
+| `yeto-federated-m2` | 17 | 2 x 4 | 64 | 256 | 255/256 | 196554 | 1411.0 | 1.421 | 1412.4 | 2914.5 | 3.945 |
+| `native-miles-m2` | 29 | 1 x 8 | 64 | 256 | 256/256 | 196608 | 1443.0 | 0.776 | 1443.7 | 3428.1 | 4.159 |
+| `yeto-single-m2` | 29 | 1 x 8 | 64 | 256 | 256/256 | 196608 | 1506.1 | 1.537 | 1507.6 | 3389.0 | 4.288 |
+| `yeto-federated-m2` | 29 | 2 x 4 | 64 | 256 | 255/256 | 196576 | 1472.9 | 6.281 | 1479.1 | 2936.7 | 4.089 |
+| `native-miles-m2` | 43 | 1 x 8 | 64 | 256 | 255/256 | 196531 | 1464.8 | 0.977 | 1465.8 | 2965.6 | 4.079 |
+| `yeto-single-m2` | 43 | 1 x 8 | 64 | 256 | 255/256 | 196531 | 1575.5 | 1.431 | 1576.9 | 2979.3 | 4.329 |
+| `yeto-federated-m2` | 43 | 2 x 4 | 64 | 256 | 255/256 | 196531 | 1486.5 | 1.448 | 1487.9 | 2915.1 | 4.113 |
+
+### Per-Seed Synchronization Results
+
+| arm | seed | merges | final version | local rounds | policy applies | roster per merge | mean sync s | sent MB | mean KL | ESS | clip fraction |
+|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|
+| `yeto-single-m2` | 17 | 8 | 8 | 8 | 9 | 1/1 | 159.448 | 612.369 | 0.000146 | 1.0 | 0.0 |
+| `yeto-federated-m2` | 17 | 8 | 8 | 16 | 18 | 2/2 | 135.047 | 1224.738 | 0.000149 | 1.0 | 0.0 |
+| `yeto-single-m2` | 29 | 8 | 8 | 8 | 9 | 1/1 | 143.062 | 612.369 | 0.000154 | 1.0 | 0.0 |
+| `yeto-federated-m2` | 29 | 8 | 8 | 16 | 18 | 2/2 | 139.269 | 1224.738 | 0.000156 | 1.0 | 0.0 |
+| `yeto-single-m2` | 43 | 8 | 8 | 8 | 9 | 1/1 | 149.361 | 612.369 | 0.000156 | 1.0 | 0.0 |
+| `yeto-federated-m2` | 43 | 8 | 8 | 16 | 18 | 2/2 | 140.964 | 1224.738 | 0.000159 | 1.0 | 0.0 |
+
+### Interpretation
+
+All nine arms completed the paired workload and evaluation. Every Yeto run
+reached global version 8. Each federated merge received both fixed-roster
+islands, and both islands ended with the same global policy hash. All nine
+standard PEFT adapters contained 224 finite tensors.
+
+Federation had an observed mean reward delta of +0.0052 versus native Miles
+and +0.0208 versus Yeto single, while single-island Yeto was -0.0156 versus
+native. These differences are smaller than the variation across three seeds.
+With only 16 held-out prompts, they do not establish a quality winner.
+
+The response cap dominated this run: 2,297 of 2,304 training trajectories and
+573 of 576 evaluation samples reached the 768-token maximum. The reward and
+pass@k values therefore demonstrate a complete real RL, synchronization,
+export, and held-out evaluation path; they are not evidence of converged
+policy quality. Federated training was about 8% faster than native Miles in
+this single-host run, but one host and three seeds are not a scaling result.
+
+An initial native calibration was discarded after the harness found that
+Miles' native save omitted PEFT's `base_model.model.` key prefix. Before the
+formal nine records, the harness was changed to verify all 224 names, shapes,
+and tensors and to fail on missing adapter keys. The normalization adds only
+the wrapper prefix; all three formal native adapters were bitwise equal to the
+standardized tensors after their bfloat16-to-float32 conversion.
+
+This benchmark evaluates the strict v0 contract rather than a general RL
+algorithm sweep. Native Miles supplies the same-runtime, equal-hardware
+reference; the global Yeto path uses one complete LoRA fragment, full-roster
+synchronization, and exact equal-weight averaging. It does not include a
+separate FSDP2 RL runtime or outer-optimizer ablations.
 
 ## LTX-Video Diffusion
 
@@ -735,16 +850,18 @@ at 0.305034.
 
 ## Cross-Benchmark Summary
 
-Absolute losses are not comparable across LM, LTX, and Wan; only paired
-deltas against each workload's synchronous baseline are comparable. All
-three baselines improved substantially over the untrained model, so the
+Absolute SFT and diffusion losses are not comparable across LM, LTX, and Wan;
+only paired deltas within a workload are comparable. Miles RL reward and
+pass@k are also not comparable with those losses. The three SFT/diffusion
+baselines improved substantially over the untrained model, so those
 benchmarks measured real fine-tuning rather than a failed training recipe.
 
-| workload | default `m2` vs sync | strongest DiLoCo result | main signal |
-|---|---:|---|---|
-| Qwen3.6-27B | +9.91% | `direct-rda` +0.56% | Changing outer update/application fixed most of the gap; slightly faster synchronization did not. |
-| LTX-Video | +1.44% | `m2` seed 17 at parity | The default path was already stable; `q4` cut payload by about 33% with a modest quality tradeoff. |
-| Wan2.2 short / long | +13.77% / +17.07% | `unthrottled` -19.25% / -5.48% | Quality depended strongly on synchronization cadence; short `m2` was seed-stable, while the gain cost 2.9x / 5.0x payload. |
+| workload | primary comparison | strongest observed result | main signal |
+|---|---|---|---|
+| Qwen3.6-27B SFT | default `m2` +9.91% vs sync | `direct-rda` +0.56% | Changing outer update/application fixed most of the gap; slightly faster synchronization did not. |
+| Qwen3.6-27B Miles RL | federated reward +0.0052 vs native | federated pass@4 0.2500 vs native 0.2083 | All paths completed, but the differences were below seed variation and almost every response hit the token cap. |
+| LTX-Video | default `m2` +1.44% vs sync | `m2` seed 17 at parity | The default path was already stable; `q4` cut payload by about 33% with a modest quality tradeoff. |
+| Wan2.2 short / long | default `m2` +13.77% / +17.07% vs sync | `unthrottled` -19.25% / -5.48% | Quality depended strongly on synchronization cadence; short `m2` was seed-stable, while the gain cost 2.9x / 5.0x payload. |
 
 The central result is that one synchronization preset is not optimal for
 every model. Qwen primarily exposed an outer Nesterov/LR/blending problem;
@@ -752,6 +869,11 @@ LTX tolerated delayed synchronization; Wan was cadence-sensitive, with a
 seed-stable short `m2` result but substantial long-run seed variance. `q4`
 reliably reduced bytes, but compression was only useful when the underlying
 optimization recipe was already sound.
+
+The Miles RL run answers a narrower question: native Miles, the Yeto
+single-island contract, and two-island strict averaging all completed the same
+real workload and produced valid adapters. Its limited held-out set and
+response cap do not support selecting one arm on quality.
 
 For LM, `direct-rda` is the strongest production candidate. For LTX, default
 `m2` is acceptable and `q4` is a reasonable bandwidth tradeoff. Wan should
