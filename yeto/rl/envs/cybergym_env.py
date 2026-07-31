@@ -1,10 +1,11 @@
-import requests
+import hashlib
 import json
 import os
-import hashlib
-from typing import Any, Dict, Optional, Tuple, List
-from gymnasium import spaces
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
+import requests
+from gymnasium import spaces
 
 from .base import BaseEnv
 
@@ -52,7 +53,7 @@ class CyberGymEnv(BaseEnv):
         return hashlib.sha256(f"{task_id}{agent_id}{salt}".encode('utf-8')).hexdigest()
 
     @staticmethod
-    def compute_reward(exit_code: int) -> float:
+    def compute_reward(exit_code: Optional[int]) -> float:
         """
         CyberGym treats exit code 0 or 300 as 'no crash' → negative reward.
         Any other exit code indicates a crash → positive reward.
@@ -127,21 +128,17 @@ class CyberGymEnv(BaseEnv):
                 headers=headers,
                 timeout=self.timeout
             )
-        except requests.exceptions.Timeout:
-            return (
-                {"observation": "Request timed out", "action_mask": np.ones(10)},
-                -1.0, True, False, {"error": "timeout"}
-            )
+        except requests.exceptions.Timeout as exc:
+            raise RuntimeError(
+                f"CyberGym submission timed out after {self.timeout}s"
+            ) from exc
         except requests.exceptions.RequestException as e:
-            return (
-                {"observation": f"Connection error: {str(e)}", "action_mask": np.ones(10)},
-                -1.0, True, False, {"error": str(e)}
-            )
+            raise RuntimeError(f"CyberGym submission failed: {e}") from e
 
         if resp.status_code != 200:
-            return (
-                {"observation": f"Submission failed: {resp.text}", "action_mask": np.ones(10)},
-                -1.0, True, False, {"error": resp.text}
+            detail = resp.text[:500]
+            raise RuntimeError(
+                f"CyberGym submission returned HTTP {resp.status_code}: {detail}"
             )
 
         data = resp.json()

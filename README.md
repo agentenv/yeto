@@ -56,6 +56,10 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
   `--branch-from`. `yeto merge --max-shard-size 2GB ...` safely folds an
   adapter into its base and writes deployment-ready SafeTensors shards. See
   [docs/ADAPTER_LIFECYCLE.md](docs/ADAPTER_LIFECYCLE.md).
+- A local CyberGym server can provide execution-grounded rewards to the
+  experimental `yeto rl` loop. See
+  [docs/CYBERGYM_RL.md](docs/CYBERGYM_RL.md) for the safe local setup, smoke
+  command, test evidence, and current limitations.
 - `--output`: any sky-supported store URI or `hf://org/repo` — the head
   fetches the model from the winning learner, uploads it, and **terminates
   itself** (fully self-cleaning run). Local path or omitted: the artifact
@@ -178,6 +182,8 @@ delta correction, q4 wire format, snapshots, resilience.
 [docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
 [docs/PROVENANCE.md](docs/PROVENANCE.md) — source pinning, attestation, and
 artifact provenance.
+[docs/CYBERGYM_RL.md](docs/CYBERGYM_RL.md) — local CyberGym setup and RL
+smoke-run guide.
 [docs/ADAPTER_LIFECYCLE.md](docs/ADAPTER_LIFECYCLE.md) — strict adapter
 resume, intentional branching, safe base-model merge, and export sharding.
 [docs/DIFFUSION.md](docs/DIFFUSION.md) — the generic Diffusers image/video

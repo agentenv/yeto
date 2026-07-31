@@ -1566,8 +1566,10 @@ def main(argv=None) -> int:
     if args.command == "_head":
         return cmd_head(args.args_json)
     if args.command == "rl":
-        from scripts.run_rl import run_rl
+        from .rl.run import run_rl
+
         run_rl(args)
+        return 0
     parser.print_help()
     return 0
 
