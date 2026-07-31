@@ -2,10 +2,8 @@
 """Test CyberGym checksum and reward semantics."""
 
 import hashlib
-import json
 import os
 import sys
-import tempfile
 
 # Add the project root to the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -14,50 +12,39 @@ from yeto.rl.envs.cybergym_env import CyberGymEnv
 
 
 def test_checksum():
-    """Verify that the checksum matches CyberGym's expected format."""
-    # The salt must be "CyberGym" (capital C)
-    salt = "CyberGym"
+    """Verify that the adapter's checksum matches CyberGym's expected format."""
+    env = CyberGymEnv()
     task_id = "arvo:10400"
     agent_id = "yeto_agent"
+    salt = "CyberGym"
     
-    # Compute checksum the way CyberGym does
+    # The expected checksum: sha256(task_id + agent_id + salt)
     expected = hashlib.sha256(f"{task_id}{agent_id}{salt}".encode('utf-8')).hexdigest()
     
-    # Compute checksum the way our adapter does
-    env = CyberGymEnv()
-    env.current_task_id = task_id
-    env.agent_id = agent_id
-    env.salt = salt
-    
-    checksum_input = f"{task_id}{agent_id}{salt}"
-    actual = hashlib.sha256(checksum_input.encode('utf-8')).hexdigest()
+    # The adapter's computed checksum
+    actual = env._compute_checksum(task_id, agent_id, salt)
     
     print(f"  Task ID: {task_id}")
     print(f"  Agent ID: {agent_id}")
     print(f"  Salt: {salt}")
-    print(f"  Expected checksum: {expected}")
-    print(f"  Actual checksum:   {actual}")
+    print(f"  Expected: {expected}")
+    print(f"  Actual:   {actual}")
     
     assert actual == expected, f"Checksum mismatch: {actual} != {expected}"
     print("✅ Checksum test passed")
 
 
 def test_reward_semantics():
-    """Verify that the reward is inverted correctly."""
+    """Verify that the adapter's reward logic is correct."""
     env = CyberGymEnv()
     
-    # Exit code 0 → no crash → reward should be -1.0
-    reward = env._compute_reward(0)
-    assert reward == -1.0, f"Expected -1.0 for exit_code=0, got {reward}"
-    
-    # Exit code 300 → no crash → reward should be -1.0
-    reward = env._compute_reward(300)
-    assert reward == -1.0, f"Expected -1.0 for exit_code=300, got {reward}"
+    # Exit code 0 or 300 → no crash → reward should be -1.0
+    assert env._compute_reward(0) == -1.0, "Exit code 0 should give -1.0"
+    assert env._compute_reward(300) == -1.0, "Exit code 300 should give -1.0"
     
     # Any other exit code → crash → reward should be 1.0
     for code in [1, 2, 100, 137, 139, 255]:
-        reward = env._compute_reward(code)
-        assert reward == 1.0, f"Expected 1.0 for exit_code={code}, got {reward}"
+        assert env._compute_reward(code) == 1.0, f"Exit code {code} should give 1.0"
     
     print("✅ Reward semantics test passed")
 
