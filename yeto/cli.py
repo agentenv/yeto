@@ -495,20 +495,19 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
 
 def _add_rl_args(p: argparse.ArgumentParser) -> None:
-    """Add arguments for the 'rl' subcommand."""
-    p.add_argument("--env", default="cybergym", help="environment name (default: cybergym)")
-    p.add_argument("--task", default="vulnerability_analysis", help="CyberGym task name")
-    p.add_argument("--model", default="Qwen/Qwen2.5-7B", help="base model name")
-    p.add_argument("--budget", type=float, default=10.0, help="budget in USD for monitoring")
-    p.add_argument("--output", help="output directory for trained model")
-    p.add_argument("--iterations", type=int, default=10, help="number of training iterations")
-    p.add_argument("--steps", type=int, default=2048, help="steps per iteration")
-    p.add_argument("--lr", type=float, default=1e-5, help="learning rate")
-    p.add_argument("--gamma", type=float, default=0.99, help="discount factor")
-    p.add_argument("--epochs", type=int, default=10, help="PPO epochs per update")
-    p.add_argument("--batch-size", type=int, default=64, help="batch size")
-    p.add_argument("--server-host", default="127.0.0.1", help="CyberGym server host")
-    p.add_argument("--server-port", type=int, default=8666, help="CyberGym server port")
+    p.add_argument("--env", default="cybergym", choices=["cybergym", "mock"], help="environment name")
+    p.add_argument("--task", default="vulnerability_analysis")
+    p.add_argument("--model", default="Qwen/Qwen2.5-0.5B")
+    p.add_argument("--budget", type=float, default=10.0)
+    p.add_argument("--output")
+    p.add_argument("--iterations", type=int, default=1)
+    p.add_argument("--steps", type=int, default=64)
+    p.add_argument("--lr", type=float, default=1e-5)
+    p.add_argument("--gamma", type=float, default=0.99)
+    p.add_argument("--epochs", type=int, default=2)
+    p.add_argument("--batch-size", type=int, default=32)   # consistent hyphen
+    p.add_argument("--server-host", default="127.0.0.1")
+    p.add_argument("--server-port", type=int, default=8666)
 
 
 def parse_args(argv=None):
