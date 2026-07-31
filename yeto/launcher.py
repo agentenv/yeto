@@ -627,6 +627,21 @@ MEGATRON_SETUP = (
     "|| echo '[yeto-setup] megatron stack install failed; --island-backend megatron unavailable' >&2"
 )
 
+PROTENIX_SETUP = (
+    "pip install -q 'protenix>=2.0.0' "
+    "|| echo '[yeto-setup] protenix install failed; Protenix adapter unavailable' >&2"
+)
+PROTENIX_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.protenix:make_adapter"
+HUNYUAN3D_ROOT = "~/Hunyuan3D-2.1"
+HUNYUAN3D_SETUP = (
+    f"if [ ! -d {HUNYUAN3D_ROOT} ]; then git clone --depth 1 "
+    f"https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git {HUNYUAN3D_ROOT}; fi && "
+    f"pip install -q -r {HUNYUAN3D_ROOT}/requirements.txt && "
+    f"export YETO_HUNYUAN3D_ROOT={HUNYUAN3D_ROOT} "
+    "|| echo '[yeto-setup] Hunyuan3D setup failed; Hunyuan3D adapter unavailable' >&2"
+)
+HUNYUAN3D_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.hunyuan3d:make_adapter"
+ALPHAFOLD3_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.alphafold3:make_adapter"
 
 def causal_kernel_setup_steps(args) -> list[str]:
     """Pinned remote installs selected explicitly for a causal torch learner."""
@@ -659,6 +674,24 @@ def causal_kernel_setup_steps(args) -> list[str]:
 
 DIFFUSION_SAMPLE_ADAPTER_DIR = "~/yeto-adapter"
 DIFFUSION_SAMPLE_OUTPUT_DIR = "~/yeto-output"
+
+
+def _is_protenix_request(args) -> bool:
+    model = getattr(args, "model", "")
+    adapter = getattr(args, "diffusion_adapter", "") or ""
+    return model in {"protenix", "protenix-v2"} or "protenix" in adapter
+
+
+def _is_hunyuan3d_request(args) -> bool:
+    model = getattr(args, "model", "")
+    adapter = getattr(args, "diffusion_adapter", "") or ""
+    return model in {"hunyuan3d-21"} or "hunyuan3d" in adapter
+
+
+def _is_alphafold3_request(args) -> bool:
+    model = getattr(args, "model", "")
+    adapter = getattr(args, "diffusion_adapter", "") or ""
+    return model == "alphafold3" or "alphafold3" in adapter
 
 
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
@@ -833,8 +866,15 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             f" --resize-mode {shlex.quote(getattr(args, 'resize_mode', 'stretch'))}"
             f" --stream-workers {args.stream_workers}"
         )
-        if getattr(args, "diffusion_adapter", None):
-            learner_flags += f" --diffusion-adapter {shlex.quote(args.diffusion_adapter)}"
+        diffusion_adapter = getattr(args, "diffusion_adapter", None)
+        if _is_protenix_request(args) and not diffusion_adapter:
+            diffusion_adapter = PROTENIX_DIFFUSION_ADAPTER
+        if _is_hunyuan3d_request(args) and not diffusion_adapter:
+            diffusion_adapter = HUNYUAN3D_DIFFUSION_ADAPTER
+        if _is_alphafold3_request(args) and not diffusion_adapter:
+            diffusion_adapter = ALPHAFOLD3_DIFFUSION_ADAPTER
+        if diffusion_adapter:
+            learner_flags += f" --diffusion-adapter {shlex.quote(diffusion_adapter)}"
             if getattr(args, "diffusion_adapter_sha256", None):
                 learner_flags += (
                     " --diffusion-adapter-sha256 "
@@ -873,6 +913,10 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             "pip install -q -r requirements.txt",
             "pip install -q 'diffusers>=0.35' safetensors pillow 'imageio[ffmpeg]' 'bitsandbytes>=0.46.1'",
         ]
+        if _is_protenix_request(args):
+            setup_steps.append(PROTENIX_SETUP)
+        if _is_hunyuan3d_request(args):
+            setup_steps.append(HUNYUAN3D_SETUP)
     elif backend == "megatron":
         gpus = spec.num_nodes * spec.gpus_per_node
         tp = max(1, getattr(args, "tensor_parallel", 1))
@@ -925,6 +969,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         # Surface NCCL's chosen transport in the job logs so an EFA-less
         # fallback to TCP sockets is visible, not silent.
         envs["NCCL_DEBUG"] = "INFO"
+    if _is_hunyuan3d_request(args):
+        envs["YETO_HUNYUAN3D_ROOT"] = HUNYUAN3D_ROOT
     # Non-HF --data sources (local paths, s3://, gs://, ...) ride sky's
     # file_mounts onto every learner; see yeto/datasource.py.
     file_mounts = dict(learner_file_mounts(args.data))
@@ -949,11 +995,14 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     # command, which then finds a warm (or warming — hf resumes) cache.
     # hf_transfer multi-streams the download; NVMe absorbs it at GB/s.
     from .models import resolve
-
-    repo = resolve(args.model)
     from .provenance import is_local_reference
 
-    if is_local_reference(repo):
+    repo = resolve(args.model)
+    if _is_protenix_request(args):
+        prefetch = "true  # Protenix uses native model names/checkpoints, not HF prefetch"
+    elif _is_alphafold3_request(args):
+        prefetch = "true  # AlphaFold3 requires local authorized parameters, not HF prefetch"
+    elif is_local_reference(repo):
         prefetch = ": # local model; no Hub prefetch"
     else:
         revision_flag = (
