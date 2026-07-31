@@ -5,38 +5,56 @@ import argparse
 import os
 import sys
 from pathlib import Path
+import torch
+import torch.nn as nn
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# Add Yeto to path if running standalone
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from yeto.rl.envs.cybergym_env import CyberGymEnv
-from yeto.rl.algorithms.ppo import PPOTrainer
-
-
-def get_policy_model(model_name: str, action_space_size: int):
-    """Load or create a policy model (LLM + policy head)."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    import torch.nn as nn
+def run_rl(args):
+    """Run RL training with CyberGym."""
+    from yeto.rl.envs.cybergym_env import CyberGymEnv
+    from yeto.rl.algorithms.ppo import PPOTrainer
     
+    # Create environment
+    env = CyberGymEnv(task_name=args.task, server_host='0.0.0.0', server_port=8666)
+    
+    # Determine action space size (for discrete actions)
+    action_space = env.get_action_space()
+    if action_space is None:
+        action_size = None  # will use vocab size
+    elif hasattr(action_space, "n"):
+        action_size = action_space.n
+    elif hasattr(action_space, "shape") and action_space.shape is not None:
+        action_size = action_space.shape[0]
+    elif hasattr(action_space, "max_length"):
+        # For Text space, we'll use vocab size
+        action_size = None
+    else:
+        action_size = None
+    
+    # Create policy model
     class LLMPolicy(nn.Module):
-        def __init__(self, model_name: str, num_actions: int):
+        def __init__(self, model_name: str, num_actions: int = None):
             super().__init__()
             self.llm = AutoModelForCausalLM.from_pretrained(model_name)
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            # If num_actions is None, use tokenizer vocab size
+            if num_actions is None:
+                num_actions = self.tokenizer.vocab_size
             self.policy_head = nn.Linear(self.llm.config.hidden_size, num_actions)
             self.value_head = nn.Linear(self.llm.config.hidden_size, 1)
+            self.num_actions = num_actions
             
         def forward(self, obs):
-            # Extract text from observation dict
             text = obs.get("observation", str(obs))
             tokens = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
             outputs = self.llm(**tokens, output_hidden_states=True)
-            hidden = outputs.hidden_states[-1][:, -1, :]  # Last token embedding
+            hidden = outputs.hidden_states[-1][:, -1, :]  # last token embedding
             return self.policy_head(hidden), self.value_head(hidden)
         
         def get_action(self, obs):
             with torch.no_grad():
                 logits, value = self.forward(obs)
+                # Sample a single token index as action
                 probs = torch.softmax(logits, dim=-1)
                 action = torch.multinomial(probs, 1).item()
                 log_prob = torch.log(probs[0, action])
@@ -48,7 +66,6 @@ def get_policy_model(model_name: str, action_space_size: int):
                 return value.item()
         
         def evaluate(self, obs_list, action_list):
-            # Batch evaluation for training
             log_probs_list = []
             values_list = []
             entropies_list = []
@@ -68,18 +85,7 @@ def get_policy_model(model_name: str, action_space_size: int):
                 torch.stack(entropies_list).mean()
             )
     
-    return LLMPolicy(model_name, action_space_size)
-
-
-def run_rl(args):
-    """Run RL training with CyberGym."""
-    # Create environment
-    env = CyberGymEnv(task_name=args.task)
-    
-    # Create policy model
-    action_space = env.get_action_space()
-    action_size = action_space.n if hasattr(action_space, "n") else action_space.shape[0]
-    policy = get_policy_model(args.model, action_size)
+    policy = LLMPolicy(args.model, num_actions=action_size)
     
     # Create trainer
     trainer = PPOTrainer(
@@ -91,7 +97,6 @@ def run_rl(args):
         batch_size=args.batch_size,
     )
     
-    # Train
     print(f"Starting RL training on CyberGym task: {args.task}")
     print(f"Model: {args.model}")
     print(f"Budget: ${args.budget} (monitoring only)")
@@ -110,7 +115,6 @@ def run_rl(args):
     
     return results
 
-
 def main():
     parser = argparse.ArgumentParser(description="Run RL training with CyberGym")
     parser.add_argument("--env", default="cybergym", help="Environment name (default: cybergym)")
@@ -127,7 +131,6 @@ def main():
     
     args = parser.parse_args()
     run_rl(args)
-
 
 if __name__ == "__main__":
     main()

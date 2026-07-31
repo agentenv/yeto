@@ -168,8 +168,14 @@ class CyberGymEnv(BaseEnv):
         })
     
     def get_action_space(self):
-        # The action is the PoC content (text or binary)
-        return spaces.Text(max_length=100000)
+        # For text-based actions, we return a Text space
+        # If gymnasium's Text is not available, fallback to Discrete(10)
+        try:
+            from gymnasium.spaces import Text
+            return Text(max_length=100000)
+        except ImportError:
+            # Fallback to discrete for testing
+            return spaces.Discrete(10)
     
     def render(self) -> None:
         pass
