@@ -65,6 +65,9 @@ def build_train_command(args: argparse.Namespace) -> list[str]:
         "--weight-decay", "0",
         "--micro-batch-size", "1",
         "--custom-rm-path", REWARD_PATH,
+        # The pinned Miles image gates its experimental FSDP backend behind
+        # --ci-test. This launcher is intentionally a short smoke comparison.
+        "--ci-test",
         "--sglang-disable-cuda-graph",
         "--update-weight-buffer-size", "536870912",
     ]

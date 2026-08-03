@@ -106,6 +106,7 @@ def test_direct_launcher_builds_valid_grpo_shape():
     command = build_train_command(args)
     assert command[1:3] == ["/workspace/miles/train.py", "--train-backend"]
     assert "--custom-rm-path" in command
+    assert "--ci-test" in command
     assert command[command.index("--rollout-batch-size") + 1] == "2"
     assert command[command.index("--n-samples-per-prompt") + 1] == "2"
     assert "--sglang-rl-on-policy-target" not in command

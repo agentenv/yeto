@@ -128,11 +128,12 @@ the exact `ray job submit` command. Use `--dry-run` to inspect that command
 without starting Ray or contacting CyberGym. `samples-per-prompt` is at least
 two because one sample per GRPO group has no variance signal.
 
-This direct baseline uses Miles' FSDP path. It is a protocol/throughput
-comparison against Yeto's strict distributed LoRA path, not an identical
-optimizer recipe. Keep the model revision, task JSONL, response length,
-temperature, learning rate, number of rollouts, and K fixed when comparing
-the reward traces.
+This direct baseline uses Miles' CI-gated experimental FSDP path; the pinned
+image rejects non-CI FSDP runs because that backend is not actively maintained.
+It is a protocol/throughput comparison against Yeto's strict distributed LoRA
+path, not an identical optimizer recipe. Keep the model revision, task JSONL,
+response length, temperature, learning rate, number of rollouts, and K fixed
+when comparing the reward traces.
 
 ## Run the strict Yeto comparison
 
