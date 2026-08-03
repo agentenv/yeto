@@ -32,7 +32,7 @@ def build_train_command(args: argparse.Namespace) -> list[str]:
     groups = args.samples_per_iteration // args.samples_per_prompt
     return [
         sys.executable,
-        "train.py",
+        str(args.miles_root / "train.py"),
         "--train-backend", "fsdp",
         "--hf-checkpoint", str(args.model),
         "--actor-num-nodes", "1",

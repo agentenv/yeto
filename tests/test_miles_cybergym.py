@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -89,6 +90,7 @@ def test_prompt_rows_are_chat_template_ready_and_keep_task_metadata():
 
 def test_direct_launcher_builds_valid_grpo_shape():
     args = SimpleNamespace(
+        miles_root=Path("/workspace/miles"),
         samples_per_iteration=4,
         samples_per_prompt=2,
         model="Qwen/Qwen2.5-0.5B-Instruct",
@@ -102,7 +104,7 @@ def test_direct_launcher_builds_valid_grpo_shape():
         lr=1e-5,
     )
     command = build_train_command(args)
-    assert command[1:3] == ["train.py", "--train-backend"]
+    assert command[1:3] == ["/workspace/miles/train.py", "--train-backend"]
     assert "--custom-rm-path" in command
     assert command[command.index("--rollout-batch-size") + 1] == "2"
     assert command[command.index("--n-samples-per-prompt") + 1] == "2"
