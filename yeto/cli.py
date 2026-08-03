@@ -95,6 +95,28 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "(s3://, gs://, r2://, ...) — non-HF sources are shipped to learners "
         "via SkyPilot file mounts; rows are messages-format chat traces",
     )
+    p.add_argument(
+        "--data-format",
+        choices=["auto", "openai", "sharegpt", "alpaca"],
+        default="auto",
+        help="causal-LM row schema; auto detects standard OpenAI messages, "
+        "ShareGPT conversations, or Alpaca instruction/input/output rows",
+    )
+    p.add_argument(
+        "--model-revision",
+        default=None,
+        help="HF model branch/tag/commit (resolved to an immutable commit before launch)",
+    )
+    p.add_argument(
+        "--data-revision",
+        default=None,
+        help="HF dataset branch/tag/commit (resolved to an immutable commit before launch)",
+    )
+    p.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="deliberately execute code from the pinned model repository (off by default)",
+    )
     def loss_spec(value: str) -> str:
         if value in LOSS_FUNCTIONS or value.startswith(("custom:", "pickle:")):
             return value
@@ -107,14 +129,29 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         type=loss_spec,
         default="cross_entropy",
         help=f"one of {'|'.join(LOSS_FUNCTIONS)}, or custom:<file.py>[:<fn>] "
-        "defining fn(logits, input_ids, weights) -> (loss, num_tokens). "
+        "defining fn(logits, input_ids, weights) -> (summed_loss, num_tokens). "
+        "num_tokens must count positive shifted target weights. "
         "Diffusion launches default cross_entropy to flow_matching in the "
-        "learner task. Custom callables are pickled by value and shipped to "
-        "all learners",
+        "learner task. Custom callables use legacy by-value pickle transport "
+        "and therefore require --allow-unsafe-pickled-loss",
     )
+    p.add_argument(
+        "--allow-unsafe-pickled-loss",
+        action="store_true",
+        help="allow legacy custom/callable pickle transport (arbitrary code execution)",
+    )
+    p.add_argument("--loss-sha256", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--source-sha256", default=None, help=argparse.SUPPRESS)
 
     tune = p.add_argument_group("fine-tuning")
     tune.add_argument("--tuning", choices=["lora", "full"], default="lora")
+    tune.add_argument(
+        "--base-quantization",
+        choices=["none", "nf4"],
+        default="none",
+        help="frozen-base storage for LoRA; nf4 enables bitsandbytes QLoRA "
+        "on CUDA and requires --shard ddp",
+    )
     tune.add_argument(
         "--shard",
         choices=["ddp", "fsdp"],
@@ -147,6 +184,21 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default="assistant",
         help="which tokens carry loss: assistant-message tokens only (default) or every token",
     )
+    tune.add_argument(
+        "--assistant-mask-mode",
+        choices=["native", "legacy"],
+        default="native",
+        help="assistant-only masking: require the tokenizer's exact native "
+        "assistant mask (default), or explicitly use the legacy synthetic "
+        "<|role|> compatibility format",
+    )
+    tune.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="causal-LM root seed; shared for model/adapter initialization, "
+        "then deterministically separated by learner and rank for training",
+    )
     tune.add_argument("--lora-r", type=int, default=16)
     tune.add_argument(
         "--lora-targets",
@@ -156,6 +208,22 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "(attention for MoE — router and routed experts stay frozen)",
     )
     tune.add_argument("--seq-len", type=int, default=2048)
+    tune.add_argument(
+        "--attention-backend",
+        choices=["auto", "sdpa", "flash-attn-2"],
+        default="auto",
+        help="causal attention implementation: let Transformers choose, "
+        "force PyTorch SDPA, or require pinned FlashAttention 2",
+    )
+    tune.add_argument(
+        "--kernel-backend",
+        choices=["native", "liger"],
+        default="native",
+        help="causal SFT loss kernel: native (default) or the pinned, "
+        "binary-mask-only instance-scoped Liger fused-linear-CE lane; "
+        "model layers remain native; the fused lane currently requires "
+        "--tuning lora --shard ddp",
+    )
 
     def int_or_auto(value: str):
         # duplicated from yeto/autobatch.py: importing it would pull torch
@@ -166,11 +234,17 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--micro-batch-size",
         type=int_or_auto,
         default="auto",
-        help="per-GPU micro batch; 'auto' (default) probes the largest size "
-        "that fits each learner's VRAM at startup and shrinks --grad-accum "
-        "to keep the effective batch constant",
+        help="per-GPU micro batch; with 'auto' (default), --grad-accum is the "
+        "requested per-rank effective sequence batch and the probe chooses "
+        "its largest fitting divisor",
     )
-    tune.add_argument("--grad-accum", type=int, default=4)
+    tune.add_argument(
+        "--grad-accum",
+        type=int,
+        default=4,
+        help="accumulation steps with an explicit micro batch; with 'auto', "
+        "the requested per-rank effective sequence batch",
+    )
     tune.add_argument("--inner-lr", type=float, default=3e-4)
     tune.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
     tune.add_argument(
@@ -193,6 +267,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="diffusion only: optional module:factory or file.py:factory hook "
         "for repos whose training step is not covered by the generic "
         "diffusers denoiser path",
+    )
+    diffusion.add_argument(
+        "--diffusion-adapter-sha256", default=None, help=argparse.SUPPRESS
     )
     diffusion.add_argument(
         "--cache-latents",
@@ -424,9 +501,42 @@ def _add_diffusion_sample_args(p: argparse.ArgumentParser) -> None:
     model = p.add_argument_group("diffusion")
     model.add_argument("--model", default=None, help="optional base model override")
     model.add_argument(
+        "--model-revision",
+        default=None,
+        help="base-model branch/tag/commit (resolved before loading)",
+    )
+    model.add_argument(
+        "--data-revision",
+        default=None,
+        help="prompt-dataset branch/tag/commit (resolved before loading)",
+    )
+    model.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="deliberately execute code from the pinned model repository",
+    )
+    model.add_argument("--source-sha256", default=None, help=argparse.SUPPRESS)
+    for provenance_flag in (
+        "model-requested-identifier",
+        "model-requested-revision",
+        "data-requested-identifier",
+        "data-requested-revision",
+    ):
+        model.add_argument(
+            f"--{provenance_flag}", default=None, help=argparse.SUPPRESS
+        )
+    model.add_argument(
         "--diffusion-adapter",
         default=None,
         help="optional module:factory or file.py:factory hook for non-standard artifacts",
+    )
+    model.add_argument(
+        "--diffusion-adapter-sha256", default=None, help=argparse.SUPPRESS
+    )
+    model.add_argument(
+        "--allow-unattested-legacy-adapter",
+        action="store_true",
+        help="allow reviewed adapter code for a legacy artifact with no recorded digest",
     )
     model.add_argument("--dtype", choices=["auto", "bf16", "fp16", "f32"], default="auto")
     model.add_argument("--num-inference-steps", type=int, default=30)
@@ -659,11 +769,31 @@ def _fleet_args_error(args) -> str | None:
     """Validate the --gpu / --budget / --flops combination."""
     from .models import resolve_model_kind
 
+    model_kind = resolve_model_kind(args.model, args.model_kind)
+    base_quantization = getattr(args, "base_quantization", "none")
+    if base_quantization != "none":
+        if model_kind != "causal-lm":
+            return "--base-quantization applies only to causal-LM models"
+        if getattr(args, "island_backend", "torch") != "torch":
+            return "--base-quantization nf4 requires --island-backend torch"
+        if args.tuning != "lora":
+            return "--base-quantization nf4 requires --tuning lora"
+        if args.shard != "ddp":
+            return "--base-quantization nf4 requires --shard ddp"
+        if getattr(args, "kernel_backend", "native") != "native":
+            return "--base-quantization nf4 requires --kernel-backend native"
+        if getattr(args, "external_learners", 0):
+            return "--base-quantization nf4 does not support external MLX learners"
     if args.gpu is not None and (args.budget is not None or args.flops is not None):
         return "--budget/--flops belong to auto-fleet planning; drop them or drop --gpu"
     if args.gpu is None and args.budget is None and args.flops is None:
         return "pass --gpu, or --budget and/or --flops for an auto-planned fleet"
-    if args.gpu is None and resolve_model_kind(args.model, args.model_kind) == "diffusion":
+    if args.gpu is None and getattr(args, "base_quantization", "none") != "none":
+        return (
+            "QLoRA auto-fleet sizing is not calibrated yet; pass --gpu explicitly "
+            "with --shard ddp"
+        )
+    if args.gpu is None and model_kind == "diffusion":
         return "diffusion launch currently requires --gpu; auto-fleet sizing is causal-LM only"
     return None
 
@@ -730,6 +860,13 @@ def cmd_launch(args) -> int:
             f"--cluster-prefix.",
             file=sys.stderr,
         )
+        return 1
+    try:
+        from .launcher import prepare_launch_args
+
+        prepare_launch_args(args)
+    except (ImportError, OSError, PermissionError, ValueError) as exc:
+        print(f"[yeto] provenance validation failed: {exc}", file=sys.stderr)
         return 1
     if getattr(args, "controller", "local") == "head":
         return cmd_launch_head(args)
@@ -812,11 +949,11 @@ def _make_head_task(args, extra_mounts: dict | None = None):
 
     from .launcher import (
         HF_TOKEN_PATH,
-        PICKLED_LOSS_FILE,
         REPO_ROOT,
         SYNCER_PORT,
         SYNCER_REMOTE_BUILD,
         WAN_TUNING,
+        pickled_loss_path,
     )
 
     file_mounts = dict(extra_mounts or {})
@@ -844,9 +981,8 @@ def _make_head_task(args, extra_mounts: dict | None = None):
         # The pickled loss is gitignored, so the workdir sync skips it;
         # mount it into the head's workdir explicitly (the head re-mounts
         # it onto learners from there).
-        file_mounts[f"~/sky_workdir/{PICKLED_LOSS_FILE}"] = str(
-            REPO_ROOT / PICKLED_LOSS_FILE
-        )
+        loss_path = pickled_loss_path(args.loss_function)
+        file_mounts[f"~/sky_workdir/{loss_path.name}"] = str(loss_path)
     task = sky.Task(
         name="yeto-head",
         setup=(
@@ -934,7 +1070,7 @@ def cmd_launch_head(args) -> int:
     specs = parse_gpu_spec(args.gpu)
     # Resolve the loss BEFORE serializing: a custom:<file.py> spec becomes
     # pickle:<file> here, and the pickle is file-mounted onto the head.
-    args.loss_function = launcher.resolve_loss_function(args.loss_function)
+    launcher.prepare_launch_args(args)
     # Likewise stage a local --data path: it is rsynced onto the head, and
     # the rewritten path makes the head's launcher mount it onto learners.
     from .datasource import head_stage

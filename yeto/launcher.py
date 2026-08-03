@@ -31,6 +31,7 @@ from pathlib import Path
 
 from . import delivery
 from .gpu_spec import ClusterSpec, parse_gpu_spec
+from .models import MODEL_WEIGHT_GB
 
 SYNCER_PORT = 29400
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -211,7 +212,6 @@ fi
 
 # Rough per-GPU training capacity sanity check (bf16 LoRA, GB).
 GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48}
-from .models import MODEL_WEIGHT_GB  # single source; see yeto/models.py
 
 
 def build_syncer_binary() -> Path:
@@ -240,6 +240,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --outer-lr {args.outer_lr}"
         f" --outer-momentum {args.outer_momentum}"
         f" --checkpoint-path ~/yeto-state.ckpt --resume"
+        f" --mark-final-checkpoint"
         f" --event-tape ~/yeto-tape.jsonl"
     )
 
@@ -308,25 +309,174 @@ def make_syncer_task(args, num_learners: int):
 
 
 PICKLED_LOSS_FILE = ".yeto_loss.pkl"
+PICKLED_LOSS_PREFIX = ".yeto_loss."
 
 
-def resolve_loss_function(loss_function) -> str:
+def pickled_loss_path(spec: str) -> Path:
+    """Resolve a pickle spec, including a staged workdir-relative payload."""
+
+    if not spec.startswith("pickle:"):
+        raise ValueError(f"not a pickle loss spec: {spec!r}")
+    source_text = spec.split(":", 1)[1]
+    source_name = Path(source_text).name
+    staged = (
+        source_text == source_name
+        and (
+            source_name == PICKLED_LOSS_FILE
+            or (
+                source_name.startswith(PICKLED_LOSS_PREFIX)
+                and source_name.endswith(".pkl")
+            )
+        )
+    )
+    return REPO_ROOT / source_name if staged else Path(source_text).expanduser()
+
+
+def _stage_pickled_loss(payload: bytes) -> str:
+    """Content-address a legacy executable payload to avoid cross-run races."""
+
+    import hashlib
+
+    digest = hashlib.sha256(payload).hexdigest()
+    filename = f"{PICKLED_LOSS_PREFIX}{digest}.pkl"
+    destination = REPO_ROOT / filename
+    if destination.is_symlink():
+        raise RuntimeError(
+            f"refusing symlink at content-addressed pickle path {destination}"
+        )
+    if destination.exists():
+        if destination.read_bytes() != payload:
+            raise RuntimeError(
+                f"content-addressed pickle collision at {destination}"
+            )
+    else:
+        temporary = destination.with_name(
+            f"{PICKLED_LOSS_PREFIX}{digest}.tmp-{os.getpid()}.pkl"
+        )
+        temporary.write_bytes(payload)
+        os.chmod(temporary, 0o600)
+        try:
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return f"pickle:{filename}"
+
+
+def resolve_loss_function(
+    loss_function,
+    *,
+    allow_unsafe_pickled_loss: bool = False,
+) -> str:
     """Return the --loss-function string to pass to learners.
 
-    A callable or a ``custom:<file.py>`` spec is loaded here (failing fast
-    before any cloud spend), pickled by value into the workdir, and shipped
-    to learners as ``pickle:.yeto_loss.pkl``. Named losses pass through.
+    A callable or a ``custom:<file.py>`` spec can be shipped through the
+    legacy pickle lane only after the explicit unsafe opt-in.  Named losses
+    pass through. All pickle inputs are copied to a content-addressed,
+    shell-neutral workdir path and attested before learner execution.
     """
-    from .losses import dump_pickled_loss, load_custom_loss
+    from .losses import load_custom_loss
 
     if callable(loss_function):
         fn = loss_function
     elif isinstance(loss_function, str) and loss_function.startswith("custom:"):
+        if not allow_unsafe_pickled_loss:
+            raise PermissionError(
+                "custom loss transport uses legacy pickle and requires "
+                "--allow-unsafe-pickled-loss"
+            )
         fn = load_custom_loss(loss_function)
+    elif isinstance(loss_function, str) and loss_function.startswith("pickle:"):
+        if not allow_unsafe_pickled_loss:
+            raise PermissionError(
+                "legacy pickle loss transport requires "
+                "--allow-unsafe-pickled-loss"
+            )
+        source = pickled_loss_path(loss_function)
+        if not source.is_file():
+            raise FileNotFoundError(f"pickled loss {str(source)!r} does not exist")
+        return _stage_pickled_loss(source.read_bytes())
     else:
         return loss_function
-    dump_pickled_loss(fn, REPO_ROOT / PICKLED_LOSS_FILE)
-    return f"pickle:{PICKLED_LOSS_FILE}"
+    if not allow_unsafe_pickled_loss:
+        raise PermissionError(
+            "callable/custom loss transport uses legacy pickle and requires "
+            "--allow-unsafe-pickled-loss"
+        )
+    import cloudpickle
+
+    return _stage_pickled_loss(cloudpickle.dumps(fn))
+
+
+def prepare_launch_args(args) -> None:
+    """Resolve immutable inputs and executable artifacts before cloud spend."""
+
+    from .provenance import (
+        file_sha256,
+        pin_runtime_provenance,
+        python_spec_path,
+        python_spec_sha256,
+        verify_source_tree_sha256,
+    )
+
+    args.source_sha256 = verify_source_tree_sha256(
+        getattr(args, "source_sha256", None)
+    )
+    payload = pin_runtime_provenance(args)
+    args.model_requested_identifier = payload["model"]["requested_identifier"]
+    args.model_requested_revision = payload["model"]["requested_revision"]
+    if "dataset" in payload:
+        args.data_requested_identifier = payload["dataset"]["requested_identifier"]
+        args.data_requested_revision = payload["dataset"]["requested_revision"]
+    expected_loss_sha256 = getattr(args, "loss_sha256", None)
+    args.loss_function = resolve_loss_function(
+        args.loss_function,
+        allow_unsafe_pickled_loss=bool(
+            getattr(args, "allow_unsafe_pickled_loss", False)
+        ),
+    )
+    if args.loss_function.startswith("pickle:"):
+        actual_loss_sha256 = file_sha256(pickled_loss_path(args.loss_function))
+        if (
+            expected_loss_sha256 is not None
+            and actual_loss_sha256 != expected_loss_sha256.lower()
+        ):
+            raise ValueError(
+                "pickled loss SHA256 mismatch: expected "
+                f"{expected_loss_sha256.lower()}, got {actual_loss_sha256}"
+            )
+        args.loss_sha256 = actual_loss_sha256
+    elif args.loss_function.startswith("custom:"):
+        args.loss_sha256 = file_sha256(args.loss_function.split(":", 2)[1])
+    else:
+        args.loss_sha256 = None
+    adapter_spec = getattr(args, "diffusion_adapter", None)
+    if adapter_spec:
+        adapter_path = python_spec_path(adapter_spec, base_dir=REPO_ROOT)
+        try:
+            relative_adapter_path = adapter_path.relative_to(REPO_ROOT.resolve())
+        except ValueError as exc:
+            raise ValueError(
+                f"diffusion adapter source {adapter_path} is outside the synced "
+                "Yeto workdir; copy it into the repository before launch"
+            ) from exc
+        target, separator, factory_name = adapter_spec.partition(":")
+        if target.endswith(".py") or os.path.sep in target:
+            args.diffusion_adapter = (
+                f"{relative_adapter_path.as_posix()}{separator}{factory_name}"
+            )
+            adapter_sha256 = file_sha256(adapter_path)
+        else:
+            adapter_sha256 = python_spec_sha256(adapter_spec)
+        expected_adapter_sha256 = getattr(args, "diffusion_adapter_sha256", None)
+        if (
+            expected_adapter_sha256 is not None
+            and adapter_sha256 != expected_adapter_sha256.lower()
+        ):
+            raise ValueError(
+                "diffusion adapter SHA256 mismatch: expected "
+                f"{expected_adapter_sha256.lower()}, got {adapter_sha256}"
+            )
+        args.diffusion_adapter_sha256 = adapter_sha256
 
 
 # AWS keeps this SSM parameter pointing at the CURRENT Deep Learning Base
@@ -459,8 +609,71 @@ MEGATRON_SETUP = (
     "|| echo '[yeto-setup] megatron stack install failed; --island-backend megatron unavailable' >&2"
 )
 
+PROTENIX_SETUP = (
+    "pip install -q 'protenix>=2.0.0' "
+    "|| echo '[yeto-setup] protenix install failed; Protenix adapter unavailable' >&2"
+)
+PROTENIX_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.protenix:make_adapter"
+HUNYUAN3D_ROOT = "~/Hunyuan3D-2.1"
+HUNYUAN3D_SETUP = (
+    f"if [ ! -d {HUNYUAN3D_ROOT} ]; then git clone --depth 1 "
+    f"https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git {HUNYUAN3D_ROOT}; fi && "
+    f"pip install -q -r {HUNYUAN3D_ROOT}/requirements.txt && "
+    f"export YETO_HUNYUAN3D_ROOT={HUNYUAN3D_ROOT} "
+    "|| echo '[yeto-setup] Hunyuan3D setup failed; Hunyuan3D adapter unavailable' >&2"
+)
+HUNYUAN3D_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.hunyuan3d:make_adapter"
+ALPHAFOLD3_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.alphafold3:make_adapter"
+
+def causal_kernel_setup_steps(args) -> list[str]:
+    """Pinned remote installs selected explicitly for a causal torch learner."""
+    from .kernel_deps import (
+        BITSANDBYTES_MIN_VERSION,
+        FLASH_ATTN_VERSION,
+        LIGER_KERNEL_VERSION,
+        NINJA_VERSION,
+        PACKAGING_VERSION,
+        PEFT_VERSION,
+    )
+
+    steps: list[str] = []
+    if getattr(args, "base_quantization", "none") == "nf4":
+        steps.append(f"pip install -q 'bitsandbytes>={BITSANDBYTES_MIN_VERSION}'")
+    if getattr(args, "kernel_backend", "native") == "liger":
+        steps.append(
+            f"pip install -q 'liger-kernel=={LIGER_KERNEL_VERSION}' "
+            f"'peft=={PEFT_VERSION}'"
+        )
+    if getattr(args, "attention_backend", "auto") == "flash-attn-2":
+        steps.extend(
+            [
+                f"pip install -q 'ninja=={NINJA_VERSION}' 'packaging=={PACKAGING_VERSION}'",
+                f"MAX_JOBS=${{MAX_JOBS:-8}} pip install -q --no-build-isolation "
+                f"'flash-attn=={FLASH_ATTN_VERSION}'",
+            ]
+        )
+    return steps
+
 DIFFUSION_SAMPLE_ADAPTER_DIR = "~/yeto-adapter"
 DIFFUSION_SAMPLE_OUTPUT_DIR = "~/yeto-output"
+
+
+def _is_protenix_request(args) -> bool:
+    model = getattr(args, "model", "")
+    adapter = getattr(args, "diffusion_adapter", "") or ""
+    return model in {"protenix", "protenix-v2"} or "protenix" in adapter
+
+
+def _is_hunyuan3d_request(args) -> bool:
+    model = getattr(args, "model", "")
+    adapter = getattr(args, "diffusion_adapter", "") or ""
+    return model in {"hunyuan3d-21"} or "hunyuan3d" in adapter
+
+
+def _is_alphafold3_request(args) -> bool:
+    model = getattr(args, "model", "")
+    adapter = getattr(args, "diffusion_adapter", "") or ""
+    return model == "alphafold3" or "alphafold3" in adapter
 
 
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
@@ -470,9 +683,62 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     from .models import resolve_model_kind
 
     model_kind = resolve_model_kind(args.model, getattr(args, "model_kind", "auto"))
+    if model_kind != "diffusion" and getattr(args, "diffusion_adapter", None):
+        raise ValueError("--diffusion-adapter applies only to diffusion models")
     loss_function = args.loss_function
     if model_kind == "diffusion" and loss_function == "cross_entropy":
         loss_function = "flow_matching"
+
+    backend = getattr(args, "island_backend", "torch")
+    attention_backend = getattr(args, "attention_backend", "auto")
+    kernel_backend = getattr(args, "kernel_backend", "native")
+    data_format = getattr(args, "data_format", "auto")
+    base_quantization = getattr(args, "base_quantization", "none")
+    if model_kind != "causal-lm" and data_format != "auto":
+        raise ValueError("--data-format applies only to causal-LM models")
+    if model_kind != "causal-lm" and (
+        attention_backend != "auto" or kernel_backend != "native"
+    ):
+        raise ValueError(
+            "--attention-backend and --kernel-backend apply only to causal-LM models"
+        )
+    if model_kind == "causal-lm" and backend != "torch":
+        if attention_backend != "auto" or kernel_backend != "native":
+            raise ValueError(
+                "--attention-backend and --kernel-backend are supported only "
+                "by the torch causal-LM island backend"
+            )
+    if base_quantization != "none":
+        if model_kind != "causal-lm":
+            raise ValueError("--base-quantization applies only to causal-LM models")
+        if backend != "torch":
+            raise ValueError(
+                "--base-quantization nf4 is supported only by the torch "
+                "causal-LM island backend"
+            )
+        if args.tuning != "lora":
+            raise ValueError("--base-quantization nf4 requires --tuning lora")
+        if args.shard != "ddp":
+            raise ValueError("--base-quantization nf4 requires --shard ddp")
+        if kernel_backend != "native":
+            raise ValueError(
+                "--base-quantization nf4 requires --kernel-backend native"
+            )
+    if kernel_backend == "liger" and loss_function != "cross_entropy":
+        raise ValueError(
+            "--kernel-backend liger fused-linear-CE supports only the built-in "
+            "cross_entropy loss"
+        )
+    if kernel_backend == "liger" and args.tuning != "lora":
+        raise ValueError(
+            "--kernel-backend liger fused-linear-CE is production-approved only "
+            "for --tuning lora"
+        )
+    if kernel_backend == "liger" and args.shard != "ddp":
+        raise ValueError(
+            "--kernel-backend liger fused-linear-CE is production-approved only "
+            "for --shard ddp until FSDP has separate CUDA parity evidence"
+        )
 
     # Flags shared by all learners. The DiLoCo sync, LoRA, and data source
     # shape are identical; the per-task forward/loss loop differs.
@@ -482,7 +748,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f" --syncer $SYNCER_ADDR"
         f" --learner-id $LEARNER_ID"
         f" --num-learners {num_learners}"
-        f" --loss-function {loss_function}"
+        f" --loss-function {shlex.quote(loss_function)}"
         f" --tuning {args.tuning}"
         f" --lora-r {args.lora_r}"
         f" --lora-targets {getattr(args, 'lora_targets', 'auto')}"
@@ -496,14 +762,46 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f" --wan-streams {args.wan_streams}"
         f" --output-dir ~/yeto-output"
     )
+    if getattr(args, "model_revision", None):
+        common_flags += f" --model-revision {shlex.quote(args.model_revision)}"
+    if getattr(args, "data_revision", None):
+        common_flags += f" --data-revision {shlex.quote(args.data_revision)}"
+    if getattr(args, "trust_remote_code", False):
+        common_flags += " --trust-remote-code"
+    if getattr(args, "allow_unsafe_pickled_loss", False):
+        common_flags += " --allow-unsafe-pickled-loss"
+    if getattr(args, "loss_sha256", None):
+        common_flags += f" --loss-sha256 {shlex.quote(args.loss_sha256)}"
+    if getattr(args, "source_sha256", None):
+        common_flags += f" --source-sha256 {shlex.quote(args.source_sha256)}"
+    for name in (
+        "model_requested_identifier",
+        "model_requested_revision",
+        "data_requested_identifier",
+        "data_requested_revision",
+    ):
+        value = getattr(args, name, None)
+        if value is not None:
+            common_flags += (
+                f" --{name.replace('_', '-')} {shlex.quote(str(value))}"
+            )
     learner_flags = common_flags
     if model_kind == "causal-lm":
         learner_flags += (
             f" --train-on {args.train_on}"
+            f" --assistant-mask-mode {getattr(args, 'assistant_mask_mode', 'native')}"
+            f" --data-format {getattr(args, 'data_format', 'auto')}"
+            f" --seed {getattr(args, 'seed', 0)}"
             f" --seq-len {args.seq_len}"
             f" --tokenize {args.tokenize}"
             f" --stream-workers {args.stream_workers}"
         )
+        if backend == "torch":
+            learner_flags += (
+                f" --base-quantization {base_quantization}"
+                f" --attention-backend {attention_backend}"
+                f" --kernel-backend {kernel_backend}"
+            )
     else:
         if getattr(args, "island_backend", "torch") != "torch":
             raise ValueError("diffusion model-kind uses the torch island backend, not megatron")
@@ -519,8 +817,20 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             f" --resize-mode {shlex.quote(getattr(args, 'resize_mode', 'stretch'))}"
             f" --stream-workers {args.stream_workers}"
         )
-        if getattr(args, "diffusion_adapter", None):
-            learner_flags += f" --diffusion-adapter {shlex.quote(args.diffusion_adapter)}"
+        diffusion_adapter = getattr(args, "diffusion_adapter", None)
+        if _is_protenix_request(args) and not diffusion_adapter:
+            diffusion_adapter = PROTENIX_DIFFUSION_ADAPTER
+        if _is_hunyuan3d_request(args) and not diffusion_adapter:
+            diffusion_adapter = HUNYUAN3D_DIFFUSION_ADAPTER
+        if _is_alphafold3_request(args) and not diffusion_adapter:
+            diffusion_adapter = ALPHAFOLD3_DIFFUSION_ADAPTER
+        if diffusion_adapter:
+            learner_flags += f" --diffusion-adapter {shlex.quote(diffusion_adapter)}"
+            if getattr(args, "diffusion_adapter_sha256", None):
+                learner_flags += (
+                    " --diffusion-adapter-sha256 "
+                    f"{shlex.quote(args.diffusion_adapter_sha256)}"
+                )
         if getattr(args, "diffusion_seed", None) is not None:
             learner_flags += f" --seed {args.diffusion_seed}"
         if getattr(args, "cache_latents", False):
@@ -543,7 +853,6 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     if args.max_rows:
         learner_flags += f" --max-rows {args.max_rows}"
 
-    backend = getattr(args, "island_backend", "torch")
     if model_kind == "diffusion":
         entrypoint = "yeto.diffusion.learner"
         setup_steps = [
@@ -555,6 +864,10 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             "pip install -q -r requirements.txt",
             "pip install -q 'diffusers>=0.35' safetensors pillow 'imageio[ffmpeg]' 'bitsandbytes>=0.46.1'",
         ]
+        if _is_protenix_request(args):
+            setup_steps.append(PROTENIX_SETUP)
+        if _is_hunyuan3d_request(args):
+            setup_steps.append(HUNYUAN3D_SETUP)
     elif backend == "megatron":
         gpus = spec.num_nodes * spec.gpus_per_node
         tp = max(1, getattr(args, "tensor_parallel", 1))
@@ -585,6 +898,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         entrypoint = "yeto.learner"
         setup_steps = [WAN_TUNING, NVME_SETUP, NVME_ENV, HF_TOKEN_ENV, TORCH_SETUP,
                        "pip install -q -r requirements.txt"]
+        setup_steps.extend(causal_kernel_setup_steps(args))
 
     run = (
         f"{NVME_ENV}\n"
@@ -606,6 +920,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         # Surface NCCL's chosen transport in the job logs so an EFA-less
         # fallback to TCP sockets is visible, not silent.
         envs["NCCL_DEBUG"] = "INFO"
+    if _is_hunyuan3d_request(args):
+        envs["YETO_HUNYUAN3D_ROOT"] = HUNYUAN3D_ROOT
     # Non-HF --data sources (local paths, s3://, gs://, ...) ride sky's
     # file_mounts onto every learner; see yeto/datasource.py.
     file_mounts = dict(learner_file_mounts(args.data)) or None
@@ -613,7 +929,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         # The pickled loss is gitignored, so the workdir sync skips it;
         # mount it into the workdir explicitly.
         file_mounts = file_mounts or {}
-        file_mounts[f"~/sky_workdir/{PICKLED_LOSS_FILE}"] = str(REPO_ROOT / PICKLED_LOSS_FILE)
+        loss_path = pickled_loss_path(args.loss_function)
+        file_mounts[f"~/sky_workdir/{loss_path.name}"] = str(loss_path)
     # Ride the launching machine's HF token onto every learner: anonymous
     # Hub quota is half the authenticated one and shared per-IP, and a
     # gated/private --model needs the token outright. HF_TOKEN_ENV then
@@ -627,12 +944,25 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     # command, which then finds a warm (or warming — hf resumes) cache.
     # hf_transfer multi-streams the download; NVMe absorbs it at GB/s.
     from .models import resolve
+    from .provenance import is_local_reference
 
     repo = resolve(args.model)
-    prefetch = (
-        f"(nohup huggingface-cli download {shlex.quote(repo)} "
-        ">/tmp/hf-prefetch.log 2>&1 &) || true"
-    )
+    if _is_protenix_request(args):
+        prefetch = "true  # Protenix uses native model names/checkpoints, not HF prefetch"
+    elif _is_alphafold3_request(args):
+        prefetch = "true  # AlphaFold3 requires local authorized parameters, not HF prefetch"
+    elif is_local_reference(repo):
+        prefetch = ": # local model; no Hub prefetch"
+    else:
+        revision_flag = (
+            f" --revision {shlex.quote(args.model_revision)}"
+            if getattr(args, "model_revision", None)
+            else ""
+        )
+        prefetch = (
+            f"(nohup huggingface-cli download {shlex.quote(repo)}{revision_flag} "
+            ">/tmp/hf-prefetch.log 2>&1 &) || true"
+        )
     run = (
         f"{NVME_ENV}\n"
         f"{HF_TOKEN_ENV}\n"
@@ -728,7 +1058,14 @@ def make_diffusion_sample_task(args, spec: ClusterSpec):
         )
     for name in (
         "model",
+        "model_revision",
+        "source_sha256",
         "diffusion_adapter",
+        "diffusion_adapter_sha256",
+        "model_requested_identifier",
+        "model_requested_revision",
+        "data_requested_identifier",
+        "data_requested_revision",
         "guidance_scale",
         "height",
         "width",
@@ -736,6 +1073,12 @@ def make_diffusion_sample_task(args, spec: ClusterSpec):
         "seed",
     ):
         sample_cmd = _add_flag(sample_cmd, name.replace("_", "-"), getattr(args, name, None))
+    if getattr(args, "data_revision", None):
+        sample_cmd = _add_flag(sample_cmd, "data-revision", args.data_revision)
+    if getattr(args, "trust_remote_code", False):
+        sample_cmd += " --trust-remote-code"
+    if getattr(args, "allow_unattested_legacy_adapter", False):
+        sample_cmd += " --allow-unattested-legacy-adapter"
 
     local_token = os.path.expanduser(HF_TOKEN_PATH)
     if os.path.isfile(local_token):
@@ -804,6 +1147,77 @@ def _wait_for_terminal_job(cluster: str, job_id: int, poll_interval: int = 30):
 
 
 def run_diffusion_sample(args) -> int:
+    from .datasource import kind as data_kind
+    from .models import resolve
+    from .provenance import (
+        file_sha256,
+        python_spec_path,
+        python_spec_sha256,
+        resolve_reference,
+        verify_source_tree_sha256,
+    )
+
+    args.source_sha256 = verify_source_tree_sha256(
+        getattr(args, "source_sha256", None)
+    )
+    if getattr(args, "diffusion_adapter", None):
+        expected_adapter_sha256 = getattr(
+            args, "diffusion_adapter_sha256", None
+        )
+        adapter_path = python_spec_path(args.diffusion_adapter, base_dir=REPO_ROOT)
+        try:
+            relative_adapter_path = adapter_path.relative_to(REPO_ROOT.resolve())
+        except ValueError as exc:
+            raise ValueError(
+                f"diffusion adapter source {adapter_path} is outside the synced "
+                "Yeto workdir; copy it into the repository before sampling"
+            ) from exc
+        target, separator, factory_name = args.diffusion_adapter.partition(":")
+        if target.endswith(".py") or os.path.sep in target:
+            args.diffusion_adapter = (
+                f"{relative_adapter_path.as_posix()}{separator}{factory_name}"
+            )
+            actual_adapter_sha256 = file_sha256(adapter_path)
+        else:
+            actual_adapter_sha256 = python_spec_sha256(
+                args.diffusion_adapter
+            )
+        if (
+            expected_adapter_sha256 is not None
+            and actual_adapter_sha256 != expected_adapter_sha256.lower()
+        ):
+            raise ValueError(
+                "diffusion adapter SHA256 does not match the expected sampler "
+                "attestation"
+            )
+        args.diffusion_adapter_sha256 = actual_adapter_sha256
+
+    if getattr(args, "model", None):
+        model_record = resolve_reference(
+            resolve(args.model),
+            getattr(args, "model_revision", None),
+            repo_type="model",
+            original_identifier=args.model,
+        )
+        args.model_revision = model_record["resolved_revision"]
+        args.model_requested_identifier = model_record["requested_identifier"]
+        args.model_requested_revision = model_record["requested_revision"]
+    if getattr(args, "data", None):
+        kind = data_kind(args.data)
+        if kind == "hf":
+            data_record = resolve_reference(
+                args.data,
+                getattr(args, "data_revision", None),
+                repo_type="dataset",
+            )
+            args.data_revision = data_record["resolved_revision"]
+            args.data_requested_identifier = data_record["requested_identifier"]
+            args.data_requested_revision = data_record["requested_revision"]
+        elif getattr(args, "data_revision", None) is not None:
+            raise ValueError("--data-revision applies only to a Hugging Face prompt dataset")
+        else:
+            args.data_requested_identifier = args.data
+            args.data_requested_revision = None
     specs = parse_gpu_spec(args.gpu)
     if len(specs) != 1:
         raise ValueError("diffusion sampling expects exactly one --gpu cluster")
@@ -1429,6 +1843,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     """
     import sky
 
+    prepare_launch_args(args)
     head_mode = local_syncer is not None
     specs = parse_gpu_spec(args.gpu)
     # External learners (machines sky cannot provision — e.g. Macs running
@@ -1437,7 +1852,6 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     # simply dial in with the printed join command.
     external = max(0, getattr(args, "external_learners", 0) or 0)
     num_learners = len(specs) + external
-    args.loss_function = resolve_loss_function(args.loss_function)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
     syncer_cluster = None if head_mode else f"{prefix}-syncer"
@@ -1467,16 +1881,49 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
 
         if external:
             for x in range(external):
+                external_provenance_flags = ""
+                if getattr(args, "model_revision", None):
+                    external_provenance_flags += (
+                        f" --model-revision {shlex.quote(args.model_revision)}"
+                    )
+                if getattr(args, "data_revision", None):
+                    external_provenance_flags += (
+                        f" --data-revision {shlex.quote(args.data_revision)}"
+                    )
+                if getattr(args, "trust_remote_code", False):
+                    external_provenance_flags += " --trust-remote-code"
+                if getattr(args, "source_sha256", None):
+                    external_provenance_flags += (
+                        f" --source-sha256 {shlex.quote(args.source_sha256)}"
+                    )
+                for flag_name in (
+                    "model_requested_identifier",
+                    "model_requested_revision",
+                    "data_requested_identifier",
+                    "data_requested_revision",
+                ):
+                    flag_value = getattr(args, flag_name, None)
+                    if flag_value is not None:
+                        external_provenance_flags += (
+                            f" --{flag_name.replace('_', '-')} "
+                            f"{shlex.quote(str(flag_value))}"
+                        )
                 print(
                     f"[launcher] external learner slot {len(specs) + x}: join with\n"
-                    f"    python -m yeto.mlx.learner --model {args.model} "
-                    f"--data {args.data} --syncer {syncer_addr} "
+                    f"    python -m yeto.mlx.learner --model {shlex.quote(args.model)} "
+                    f"--data {shlex.quote(args.data)} --syncer {shlex.quote(syncer_addr)} "
                     f"--learner-id {len(specs) + x} --num-learners {num_learners} "
+                    f"--data-format {getattr(args, 'data_format', 'auto')} "
+                    f"--train-on {args.train_on} "
+                    f"--assistant-mask-mode "
+                    f"{getattr(args, 'assistant_mask_mode', 'native')} "
+                    f"--seed {getattr(args, 'seed', 0)} "
                     f"--tuning {args.tuning} --lora-r {args.lora_r} "
                     f"--lora-targets {getattr(args, 'lora_targets', 'auto')} "
                     f"--seq-len {args.seq_len} --fragments {args.fragments} "
                     f"--fragment-pattern {args.fragment_pattern} "
                     f"--merge-alpha {args.merge_alpha} --wire-dtype {args.wire_dtype}"
+                    f"{external_provenance_flags}"
                 )
             print(
                 f"[launcher] the syncer will wait for all {num_learners} learners "

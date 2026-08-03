@@ -25,6 +25,7 @@ def _args(**overrides):
         "lora_r": 16,
         "lora_alpha": 32,
         "lora_targets": "auto",
+        "base_quantization": "none",
         "seq_len": 512,
         "micro_batch_size": 1,
         "grad_accum": 2,
@@ -32,6 +33,7 @@ def _args(**overrides):
         "weight_decay": 0.01,
         "warmup_steps": 10,
         "train_on": "assistant",
+        "assistant_mask_mode": "native",
         "gradient_checkpointing": "auto",
         "wan_streams": 4,
         "device": "cuda",
@@ -118,8 +120,89 @@ def test_commands_encode_matching_topologies_and_seed():
     assert diloco[diloco.index("--grad-accum") + 1] == "2"
     assert diloco[diloco.index("--tokenize") + 1] == "stream"
     assert diloco[diloco.index("--stream-workers") + 1] == "0"
+    assert diloco[diloco.index("--assistant-mask-mode") + 1] == "native"
     assert diloco[diloco.index("--wire-dtype") + 1] == "q4"
+    assert diloco[diloco.index("--base-quantization") + 1] == "none"
+    assert baseline[baseline.index("--max-local-steps") + 1] == "100"
+    assert diloco[diloco.index("--max-local-steps") + 1] == "100"
+    assert diloco[diloco.index("--learner-budget-steps") + 1] == "100"
+    assert "--learner-budget-steps" not in baseline
     assert "--wire-dtype" not in baseline
+
+
+def test_syncer_commands_split_budget_cutoff_from_final_consolidation(tmp_path):
+    cutoff = benchmark.syncer_command(
+        benchmark.PRESETS["m2"],
+        1234,
+        tmp_path,
+        total_steps=99,
+        learner_budget_steps=20,
+    )
+    final = benchmark.syncer_command(
+        benchmark.PRESETS["m2"],
+        1234,
+        tmp_path,
+        total_steps=107,
+        resume_consolidation=True,
+    )
+
+    assert cutoff[cutoff.index("--learner-budget-steps") + 1] == "20"
+    assert "--mark-final-checkpoint" not in cutoff
+    assert "--resume" not in cutoff
+    assert "--learner-budget-steps" not in final
+    assert "--resume" in final
+    assert "--mark-final-checkpoint" in final
+    assert final[final.index("--pipeline") + 1] == "1"
+    assert final[final.index("--quorum") + 1] == "2"
+    assert final[final.index("--sync-interval-steps") + 1] == "0.0"
+
+
+def test_benchmark_mask_mode_is_fixed_for_training_and_subprocess_eval(monkeypatch, tmp_path):
+    args = _args(
+        assistant_mask_mode="legacy",
+        eval_device="cpu",
+        base_quantization="none",
+    )
+    command = benchmark.learner_command(
+        args,
+        tmp_path / "arm",
+        learner_id=0,
+        num_learners=1,
+        syncer="none",
+        max_steps=1,
+        arm=None,
+    )
+    assert command[command.index("--assistant-mask-mode") + 1] == "legacy"
+
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='EVAL_JSON {"loss_per_token": 1.0}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(benchmark, "wait_for_free_gpus", lambda *args, **kwargs: None)
+    monkeypatch.setattr(benchmark.subprocess, "run", fake_run)
+    result = benchmark.eval_in_subprocess(args, None, tmp_path / "eval.jsonl")
+
+    assert result == {"loss_per_token": 1.0}
+    eval_command = captured["command"]
+    assert eval_command[eval_command.index("--assistant-mask-mode") + 1] == "legacy"
+
+
+def test_benchmark_parser_defaults_to_native_mask_and_accepts_legacy():
+    parser = benchmark.build_parser()
+    assert parser.parse_args(["--data", "rows.jsonl"]).assistant_mask_mode == "native"
+    assert (
+        parser.parse_args(
+            ["--data", "rows.jsonl", "--assistant-mask-mode", "legacy"]
+        ).assistant_mask_mode
+        == "legacy"
+    )
 
 
 @pytest.mark.parametrize("value", ["", "1,1", "1,nope"])
@@ -296,7 +379,7 @@ def test_aggregate_uses_seed_matched_baseline():
     assert m2["target_density_mean"] == 0.4
 
 
-def test_training_log_summary_tracks_lm_target_tokens(tmp_path):
+def test_training_log_summary_reads_legacy_rank_records(tmp_path):
     first = tmp_path / "learner-0.log"
     second = tmp_path / "learner-1.log"
     first.write_text(
@@ -311,11 +394,101 @@ def test_training_log_summary_tracks_lm_target_tokens(tmp_path):
     )
     summary = benchmark.summarize_training_logs([first, second])
     assert summary == {
-        "reported_ranks": 2,
+        "telemetry_version": 1,
+        "telemetry_scope": "rank",
+        "reported_units": 2,
         "processed_tokens": 10_240,
         "processed_target_tokens": 3_584,
         "target_density": 0.35,
     }
+
+
+def test_training_log_summary_does_not_double_count_island_totals(tmp_path):
+    learner = tmp_path / "learner.log"
+    learner.write_text(
+        "inner loop done at local_step=10 global_step=2 "
+        "metrics_version=2 metrics_scope=island "
+        "raw_tokens=10240 target_tokens=3584\n",
+        encoding="utf-8",
+    )
+    summary = benchmark.summarize_training_logs([learner])
+    assert summary == {
+        "telemetry_version": 2,
+        "telemetry_scope": "island",
+        "reported_units": 1,
+        "processed_tokens": 10_240,
+        "processed_target_tokens": 3_584,
+        "target_density": 0.35,
+    }
+
+
+def test_training_log_summary_sums_island_records(tmp_path):
+    logs = [tmp_path / "learner-0.log", tmp_path / "learner-1.log"]
+    for index, path in enumerate(logs):
+        path.write_text(
+            "inner loop done at local_step=10 global_step=2 "
+            "metrics_version=2 metrics_scope=island "
+            f"raw_tokens=5120 target_tokens={2048 - 512 * index}\n",
+            encoding="utf-8",
+        )
+    summary = benchmark.summarize_training_logs(logs)
+    assert summary["reported_units"] == 2
+    assert summary["processed_tokens"] == 10_240
+    assert summary["processed_target_tokens"] == 3_584
+
+
+def test_training_log_summary_rejects_mixed_schemas(tmp_path):
+    legacy = tmp_path / "legacy.log"
+    island = tmp_path / "island.log"
+    legacy.write_text(
+        "inner loop done raw_tokens=5120 target_tokens=2048\n",
+        encoding="utf-8",
+    )
+    island.write_text(
+        "inner loop done metrics_version=2 metrics_scope=island "
+        "raw_tokens=5120 target_tokens=2048\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="mix final token telemetry schemas"):
+        benchmark.summarize_training_logs([legacy, island])
+
+
+@pytest.mark.parametrize(
+    ("scope", "reported_units", "total_ranks", "islands"),
+    [("rank", 4, 4, 2), ("island", 2, 4, 2)],
+)
+def test_training_telemetry_unit_validation_accepts_scope_counts(
+    scope, reported_units, total_ranks, islands
+):
+    telemetry = {
+        "telemetry_scope": scope,
+        "reported_units": reported_units,
+    }
+    benchmark.validate_training_telemetry_units(
+        telemetry,
+        label="m2",
+        total_ranks=total_ranks,
+        islands=islands,
+    )
+
+
+def test_training_telemetry_unit_validation_rejects_missing_island():
+    telemetry = {
+        "telemetry_scope": "island",
+        "reported_units": 1,
+    }
+    with pytest.raises(RuntimeError, match="expected 2 island-scoped"):
+        benchmark.validate_training_telemetry_units(
+            telemetry,
+            label="m2",
+            total_ranks=4,
+            islands=2,
+        )
+
+
+def test_resume_fingerprint_includes_benchmark_driver():
+    implementation_paths = {path.resolve() for path in benchmark._IMPLEMENTATION_PATHS}
+    assert Path(benchmark.__file__).resolve() in implementation_paths
 
 
 def test_lm_fairness_rejects_target_token_mismatch():

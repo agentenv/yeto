@@ -27,6 +27,14 @@ and derives the training contract from public Diffusers interfaces:
 - VAE and pipeline packing/unpacking helpers;
 - latent, mask, id, size, guidance, and temporal-conditioning shapes.
 
+Production loads resolve `--model-revision` and `--data-revision` to immutable
+commits and keep `trust_remote_code=False` unless `--trust-remote-code` is
+explicit. Custom adapter metadata is descriptive only: the sampler never
+imports its Python adapter implicitly, so pass `--diffusion-adapter` again
+after review. Custom remote loaders must follow the pinned-source contract in
+[PROVENANCE.md](PROVENANCE.md). Raw fallback state is saved as safetensors;
+legacy `.pt` tensor state is weights-only on read.
+
 This keeps model aliases as repository shortcuts rather than switches that
 select separate hard-coded trainers. Reusable behavior belongs in the generic
 learner. `--diffusion-adapter module:factory` is reserved for model semantics
@@ -73,9 +81,9 @@ This covers standard UNets, DiTs, and dual-denoiser pipelines such as Wan2.2.
 | `--shard ddp` | Replicate the base inside the island and explicitly all-reduce LoRA gradients. |
 | `--shard fsdp` | Use FSDP2 to shard the frozen base while keeping LoRA tensors replicated and name-stable. |
 
-FSDP2 requires CUDA and a torch build that provides composable
-`fully_shard`. Full-parameter tuning is exposed for experiments, but a
-syncer-connected FSDP full-tuning run is rejected because the trainable
+FSDP2 requires a CUDA or NPU accelerator and a torch build that provides
+composable `fully_shard`. Full-parameter tuning is exposed for experiments,
+but a syncer-connected FSDP full-tuning run is rejected because the trainable
 parameters are sharded. LoRA is the benchmarked asynchronous path.
 
 After wrapping, parameter names are normalized and converted into the same
@@ -148,8 +156,16 @@ The generic inner step is:
 The denoiser dispatcher supplies common fields such as prompt masks, pooled
 embeddings, image/text ids, packed shapes, guidance, crop/size conditioning,
 rotary embeddings, FPS, and LTX-style rope interpolation when the model
-signature requests them. Multi-denoiser pipelines route samples by timestep
-and combine their predictions back into batch order.
+signature requests them. When a signature has a dedicated encoder mask, prompt
+masks are not also sent as self-attention masks: that distinction follows the
+declared encoder-vs-self-attention interface and is model-agnostic.
+
+Family semantics that cannot be inferred safely from a signature live behind
+the adapter boundary. The in-tree PixArt behavior adapter supplies pixel
+resolution and aspect ratio through `added_cond_kwargs` when its transformer
+advertises `use_additional_conditions`, and selects the prediction half of a
+PixArt learned-sigma output before loss computation. Multi-denoiser pipelines
+route samples by timestep and combine their predictions back into batch order.
 
 `flow_matching` is currently the only accepted loss-function name. The
 scheduler may still provide sigma interpolation, epsilon prediction, sample
@@ -208,10 +224,13 @@ not selectable for this learner.
 
 ## Artifacts, export, and sampling
 
-A learner's saved adapter is its local state. The authoritative DiLoCo result
-is the Rust syncer's checkpoint. Rebuild the exact trainable layout and export
-the merged adapter with the same model, LoRA, fragment, and external-adapter
-settings used for training:
+The Rust syncer checkpoint is the durable, exact f32 source of truth. At a
+successful terminal handshake, every surviving connected learner also
+overwrites its trainable parameters from the manifested coordinator cut before
+saving; values are cast only if that learner stores a destination parameter in
+a lower-precision dtype. Rebuild the exact trainable layout and export from the
+coordinator checkpoint with the same model, LoRA, fragment, and
+external-adapter settings used for training:
 
 ```bash
 yeto-diffusion-export \
@@ -248,6 +267,10 @@ yeto sample-diffusion \
 ```
 
 Both samplers also accept a prompt dataset for batch generation.
+Generation arguments are forwarded to the selected pipeline, so its native
+shape rules still apply. For example, the validated Diffusers 0.39 CogVideoX
+VAE decoded a five-frame request to its next eight-frame temporal block; use 8
+when an exact eight-frame small profile is required.
 
 ## External adapter boundary
 
@@ -258,6 +281,7 @@ hook set:
 - pipeline loading or model preparation;
 - trainable module or parameter discovery;
 - latent or text/audio conditioning encoders;
+- model-specific denoiser keyword contributions or output/target alignment;
 - a complete rows-to-loss training step;
 - artifact save/load and generation behavior.
 
@@ -265,8 +289,154 @@ Trainable names must remain deterministic across learners, restarts, and
 checkpoint export. Adapters must not start syncers, launch infrastructure,
 upload artifacts, or communicate between learners. See the
 [adapter guide](../yeto/diffusion/adapters/README.md) and
-`yeto/diffusion/adapters/template.py`. NAVA is the in-tree example that
-requires this boundary.
+`yeto/diffusion/adapters/template.py`. PixArt is the minimal in-tree behavior
+adapter layered over the generic Diffusers path; NAVA is the full-step example.
+
+### Protenix
+
+Protenix is exposed through `yeto.diffusion.adapters.protenix` because its
+AF3-style structure diffusion stack is not an image/video Diffusers pipeline.
+The adapter can construct the native Protenix model/loss stack for prebatched
+Protenix rows, while Yeto owns data distribution, gradient accumulation, and
+DiLoCo synchronization. MSA/template search and Protenix feature construction
+should happen before Yeto training.
+
+Install the optional dependency under Python 3.11+ and point at an optional
+checkpoint:
+
+```bash
+pip install "yeto[diffusion-protenix] @ ."
+export YETO_PROTENIX_MODEL_NAME=protenix_base_default_v1.0.0
+export YETO_PROTENIX_CHECKPOINT=/path/to/protenix/checkpoint
+```
+
+Then launch with the external adapter:
+
+```bash
+yeto launch \
+  --model protenix --model-kind diffusion \
+  --data /path/to/protenix-ready-rows.jsonl \
+  ...
+```
+
+`--model protenix` and `--model protenix-v2` default to
+`yeto.diffusion.adapters.protenix:make_adapter`; pass `--diffusion-adapter`
+only to override the built-in adapter.
+
+Each Yeto row must contain one complete pre-collated Protenix batch via
+`protenix_batch`, the three native keys `input_feature_dict`, `label_dict`, and
+`label_full_dict`, or a `protenix_batch_path` / `batch_path` pointing to a
+`torch.save`d batch. Keep `--micro-batch-size 1` for native prebatched rows
+unless your row already contains a larger Protenix batch.
+
+To produce those rows from a Protenix training environment, run:
+
+```bash
+yeto-protenix-export-batch \
+  --model-name protenix_base_default_v1.0.0 \
+  --output-dir /path/to/yeto-protenix-batches \
+  --batch-count 8 \
+  --arg-str "--dtype bf16 --diffusion_batch_size 1 --train_crop_size 384 --data.train_sets weightedPDB_before2109_wopb_nometalc_0925 --data.test_sets recentPDB_1536_sample384_0925"
+```
+
+The command writes `batches/batch-*.pt` plus `yeto_protenix_rows.jsonl`.
+
+For custom Protenix APIs or on-the-fly feature construction, set
+`YETO_PROTENIX_WRAPPER=my_project.protenix_yeto`. The wrapper must provide
+`load_pipeline(args, device, model_name=None, checkpoint_path=None)` and return
+an object with `model.named_parameters()` or `trainable_params()`, plus
+`training_step(batch, global_step=...)` or `compute_loss(...)`. If the wrapper
+exposes `build_batch(rows, args, device)`, the adapter calls it before the
+training step.
+
+### Hunyuan3D-2.1
+
+Hunyuan3D-2.1 is exposed through `yeto.diffusion.adapters.hunyuan3d` because
+the shape model uses Tencent's custom image-to-3D pipeline, shape VAE,
+conditioner, scheduler, and mesh export path. The upstream repository states
+that Hunyuan3D is governed by Tencent Hunyuan community/non-commercial license
+terms; verify your intended use before running it in a commercial setting.
+
+`--model hunyuan3d-21` defaults to the built-in adapter:
+
+```bash
+yeto launch \
+  --model hunyuan3d-21 --model-kind diffusion \
+  --data /path/to/hunyuan3d-ready-rows.jsonl \
+  --micro-batch-size 1 \
+  ...
+```
+
+Remote learner setup clones `Tencent-Hunyuan/Hunyuan3D-2.1` into
+`~/Hunyuan3D-2.1`, installs its requirements, and sets
+`YETO_HUNYUAN3D_ROOT`. To use an existing checkout, set
+`YETO_HUNYUAN3D_ROOT=/path/to/Hunyuan3D-2.1`.
+
+For sampling a saved adapter artifact, pass the input image path through
+`--prompt` and use a mesh extension:
+
+```bash
+yeto-diffusion-sample \
+  --adapter-dir merged-hunyuan3d \
+  --model hunyuan3d-21 \
+  --diffusion-adapter yeto.diffusion.adapters.hunyuan3d:make_adapter \
+  --prompt /path/to/input.png \
+  --output sample.glb
+```
+
+Native training rows currently need `hunyuan3d_batch` or
+`hunyuan3d_batch_path` prebuilt by a Hunyuan3D training wrapper. For raw
+image/mesh feature construction, provide `YETO_HUNYUAN3D_WRAPPER`; the wrapper
+must expose `load_pipeline(args, device, model_id=None, subfolder=None)` and
+return an object with `model.named_parameters()` plus
+`training_step(batch, global_step=...)` or `compute_loss(...)`.
+
+To export pre-collated batches from the Hunyuan3D shape training datamodule:
+
+```bash
+export YETO_HUNYUAN3D_ROOT=/path/to/Hunyuan3D-2.1
+yeto-hunyuan3d-export-batch \
+  --config "$YETO_HUNYUAN3D_ROOT/hy3dshape/configs/hunyuandit-mini-overfitting-flowmatching-dinog518-bf16-lr1e4-512.yaml" \
+  --output-dir /path/to/yeto-hunyuan3d-batches \
+  --batch-count 8 \
+  --set dataset.params.batch_size=1
+```
+
+The command calls Hunyuan3D's configured Lightning datamodule, writes
+`batches/batch-*.pt`, and emits `yeto_hunyuan3d_rows.jsonl` containing
+`hunyuan3d_batch_path` rows.
+
+### AlphaFold3
+
+Official AlphaFold3 support is intentionally guarded. The adapter does not
+download, package, or redistribute model parameters. Google DeepMind's upstream
+repository states that the source code is CC-BY-NC-SA 4.0, model parameters
+must be received directly from Google, and use is subject to the AlphaFold3
+model-parameter terms. Treat this path as non-commercial and license-gated until
+your organization has explicit permission.
+
+Set local paths after access is granted:
+
+```bash
+export YETO_ALPHAFOLD3_ROOT=/path/to/alphafold3
+export YETO_ALPHAFOLD3_MODEL_PARAMETERS_DIR=/path/to/authorized/model_parameters
+export YETO_ALPHAFOLD3_DATABASES_DIR=/path/to/public_databases
+```
+
+The adapter invokes the official `run_alphafold.py` subprocess for prediction.
+Pass the AlphaFold3 input JSON path through `--prompt`:
+
+```bash
+yeto-diffusion-sample \
+  --adapter-dir alphafold3-notice-artifact \
+  --model alphafold3 \
+  --diffusion-adapter yeto.diffusion.adapters.alphafold3:make_adapter \
+  --prompt /path/to/input.json \
+  --output alphafold3-output
+```
+
+Yeto does not support official AlphaFold3 DiLoCo training. For trainable
+AF3-style structure diffusion, use the Protenix adapter.
 
 ## Validation status
 
@@ -277,6 +447,18 @@ requires this boundary.
 - Raw-video LoRA has been exercised on LTX-Video and Wan2.1; Wan2.1 14B and
   dual-denoiser Wan2.2 have completed 8-GPU FSDP2 validation.
 - The NAVA external adapter has completed GPU train/save/reload validation.
+- Ascend 910B4 validation includes SD 1.5 raw-image LoRA under DDP and two-card
+  FSDP2/HCCL, plus CogVideoX-5b-nf4 raw-MP4 LoRA training, adapter reload, and
+  MP4 generation. The quantized load contained 341 real BnB 4-bit layers; the
+  saved 336-tensor adapter contained 4,128,768 finite values.
+- PixArt Alpha XL-2 at ModelScope commit
+  `9330fbbca134bd66ba7d25f8267213db0451acdd` completed two single-card Ascend
+  optimizer steps over real Pokemon BLIP image/caption rows at 256×256. Its
+  448-tensor attention LoRA contained 2,064,384 finite values, and all 224
+  LoRA-B tensors changed. A separate base-plus-adapter reload completed
+  two-step sampling and wrote a valid 256×256 RGB PNG.
+- External diffusion adapters have not yet completed equivalent Ascend
+  train/save/reload validation.
 - Held-out quality and equal-hardware synchronization are separate concerns;
   use [DIFFUSION_BENCHMARK.md](DIFFUSION_BENCHMARK.md) for that experiment.
 

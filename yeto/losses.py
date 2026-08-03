@@ -10,6 +10,7 @@ Available: cross_entropy | importance_sampling | ppo | cispo | dro | flow_matchi
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 LOSS_FUNCTIONS = ("cross_entropy", "importance_sampling", "ppo", "cispo", "dro", "flow_matching")
 
@@ -89,7 +90,12 @@ def flow_matching_loss(
     return loss, torch.tensor(per_elem.numel(), device=per_elem.device)
 
 
-def load_custom_loss(spec: str):
+def load_custom_loss(
+    spec: str,
+    *,
+    expected_sha256: str | None = None,
+    source_bytes: bytes | None = None,
+):
     """Load a user-supplied loss from a ``custom:<file.py>[:<fn>]`` spec.
 
     The file must define ``<fn>`` (default name: ``loss_fn``) with signature
@@ -98,21 +104,38 @@ def load_custom_loss(spec: str):
     ``input_ids`` (e.g. 1.0 on assistant tokens, 0.0 elsewhere with
     --train-on assistant). Because the learner owns the forward pass, the
     callable receives full logits — no extra forward pass or logprob
-    round-trip is needed. The file must live inside the repo so the workdir
-    sync ships it to every learner.
+    round-trip is needed. ``loss`` must be a token-summed scalar (the learner
+    applies the exact island-global target-token denominator), and
+    ``num_tokens`` must equal the number of positive ``weights[:, 1:]`` after
+    the causal shift. The file must live inside the repo so the workdir sync
+    ships it to every learner.
     """
-    import importlib.util
+    import hashlib
+    import types
     from pathlib import Path
 
     body = spec.split(":", 1)[1]
     path, _, fn_name = body.partition(":")
     fn_name = fn_name or "loss_fn"
     file = Path(path)
-    if not file.exists():
-        raise FileNotFoundError(f"custom loss file {path!r} not found")
-    module_spec = importlib.util.spec_from_file_location("yeto_custom_loss", file)
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    if source_bytes is None:
+        if not file.exists():
+            raise FileNotFoundError(f"custom loss file {path!r} not found")
+        source = file.read_bytes()
+    else:
+        source = source_bytes
+    actual_sha256 = hashlib.sha256(source).hexdigest()
+    if expected_sha256 is not None and actual_sha256 != expected_sha256.lower():
+        raise ValueError(
+            f"custom loss {path!r} SHA256 mismatch: expected "
+            f"{expected_sha256.lower()}, got {actual_sha256}"
+        )
+    # Compile the exact bytes that were hashed.  Reading with an import loader
+    # after hashing would leave a check/use race where the source could change
+    # between attestation and execution.
+    module = types.ModuleType("yeto_custom_loss")
+    module.__file__ = str(file)
+    exec(compile(source, str(file), "exec"), module.__dict__)  # noqa: S102 - explicit custom code
     fn = getattr(module, fn_name, None)
     if fn is None:
         raise AttributeError(f"{path} does not define {fn_name}()")
@@ -129,12 +152,40 @@ def dump_pickled_loss(fn, path) -> None:
         cloudpickle.dump(fn, f)
 
 
-def load_pickled_loss(spec: str):
-    """Load a loss callable from a ``pickle:<file>`` spec."""
+def load_pickled_loss(
+    spec: str,
+    *,
+    allow_unsafe: bool = False,
+    expected_sha256: str | None = None,
+    payload_bytes: bytes | None = None,
+):
+    """Load a legacy pickled callable after an explicit unsafe opt-in.
+
+    Pickle is executable code, not a tensor format.  It is retained only as a
+    compatibility lane for closures that cannot be expressed as a checked-in
+    ``custom:`` source file.
+    """
+    if not allow_unsafe:
+        raise PermissionError(
+            "refusing to load a pickled loss without "
+            "--allow-unsafe-pickled-loss; pickle can execute arbitrary code"
+        )
+    import hashlib
     import pickle
 
-    with open(spec.split(":", 1)[1], "rb") as f:
-        return pickle.load(f)
+    path = spec.split(":", 1)[1]
+    if payload_bytes is None:
+        with open(path, "rb") as f:
+            payload = f.read()
+    else:
+        payload = payload_bytes
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if expected_sha256 is not None and actual_sha256 != expected_sha256.lower():
+        raise ValueError(
+            f"pickled loss {path!r} SHA256 mismatch: expected "
+            f"{expected_sha256.lower()}, got {actual_sha256}"
+        )
+    return pickle.loads(payload)
 
 
 def sft_loss(
@@ -164,12 +215,16 @@ def sft_loss(
     shift_logits = logits[:, :-1].float()
     shift_labels = labels[:, 1:]
     mask = shift_labels != -100
-    safe_labels = shift_labels.masked_fill(~mask, 0)
-    logprobs = torch.log_softmax(shift_logits, dim=-1)
-    target_logprobs = logprobs.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
-    w = mask.to(logprobs.dtype)
+    flat_loss = F.cross_entropy(
+        shift_logits.reshape(-1, shift_logits.shape[-1]),
+        shift_labels.reshape(-1),
+        ignore_index=-100,
+        reduction="none",
+    )
+    per_token_loss = flat_loss.view_as(shift_labels)
+    w = mask.to(per_token_loss.dtype)
     if weights is not None:
-        w = w * weights[:, 1:].to(logprobs.dtype)
+        w = w * weights[:, 1:].to(per_token_loss.dtype)
     n_tokens = (w > 0).sum()
-    loss = cross_entropy(target_logprobs, w)
+    loss = (per_token_loss * w).sum()
     return loss, n_tokens

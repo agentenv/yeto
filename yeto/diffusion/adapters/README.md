@@ -40,14 +40,20 @@ Start from the smallest hook set that solves the model:
   freezing, LoRA attachment, or trainable module discovery;
 - encoding: add `encode_latents()` or `encode_prompt_embeds()` when feature
   construction is custom but scheduler/denoiser/loss remain generic;
+- denoiser contract: add `denoiser_kwargs()` for family-specific forward
+  contributions/overrides and/or `align_prediction_and_target()` for an output
+  layout that cannot be inferred safely from tensor shape alone;
 - full-step: add `training_step()` or `compute_loss()` when the model owns the
   whole batch-to-loss flow;
 - artifact/sampling: add save/load/sample hooks only when generic PEFT/Diffusers
   artifact handling is not enough.
 
 `base.py` documents the supported hook protocol. `template.py` contains
-copyable examples for the modes above. `nava.py` is a real adapter example, but
-it is not the standard shape every future adapter should copy.
+copyable examples for the larger modes above. `pixart.py` is a minimal in-tree
+behavior adapter: Yeto selects it from the loaded pipeline/model's public class
+declarations while keeping generic Diffusers loading and training. `nava.py` is
+a full-step adapter example, but it is not the standard shape every future
+adapter should copy.
 
 Stable requirements:
 

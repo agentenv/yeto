@@ -152,7 +152,25 @@ def test_learner_commands_hold_recipe_fixed_and_only_arm_gets_sync_flags():
     ):
         assert diloco[diloco.index(flag) + 1] == baseline[baseline.index(flag) + 1]
     assert diloco[diloco.index("--wire-dtype") + 1] == "q4"
+    assert baseline[baseline.index("--max-local-steps") + 1] == "20"
+    assert diloco[diloco.index("--max-local-steps") + 1] == "20"
+    assert diloco[diloco.index("--learner-budget-steps") + 1] == "20"
+    assert "--learner-budget-steps" not in baseline
     assert "--wire-dtype" not in baseline
+
+    npu = benchmark.learner_command(
+        _args(device="npu"),
+        train,
+        Path("/tmp/diffusion/npu"),
+        nproc=2,
+        learner_id=0,
+        num_learners=2,
+        syncer="127.0.0.1:1",
+        max_steps=20,
+        seed=17,
+        arm=arm,
+    )
+    assert npu[npu.index("--device") + 1] == "npu"
 
 
 def test_single_rank_learner_still_uses_torchrun_environment():
@@ -162,15 +180,37 @@ def test_single_rank_learner_still_uses_torchrun_environment():
     assert "--nproc_per_node=1" in command
 
 
-def test_syncer_command_uses_all_learner_quorum_and_explicit_h(tmp_path):
+def test_syncer_commands_split_budget_cutoff_from_final_consolidation(tmp_path):
     args = SimpleNamespace(grace_ms=1000)
     arm = benchmark.PRESETS["m4"]
-    command = benchmark.syncer_command(args, arm, 1234, tmp_path, total_steps=99)
+    cutoff = benchmark.syncer_command(
+        args,
+        arm,
+        1234,
+        tmp_path,
+        total_steps=99,
+        learner_budget_steps=20,
+    )
+    final = benchmark.syncer_command(
+        args,
+        arm,
+        1234,
+        tmp_path,
+        total_steps=107,
+        resume_consolidation=True,
+    )
 
-    assert command[command.index("--learners") + 1] == "4"
-    assert command[command.index("--quorum") + 1] == "4"
-    assert command[command.index("--sync-interval-steps") + 1] == "24.0"
-    assert command[command.index("--checkpoint-every") + 1] == "1"
+    assert cutoff[cutoff.index("--learners") + 1] == "4"
+    assert cutoff[cutoff.index("--quorum") + 1] == "4"
+    assert cutoff[cutoff.index("--sync-interval-steps") + 1] == "24.0"
+    assert cutoff[cutoff.index("--checkpoint-every") + 1] == "1"
+    assert cutoff[cutoff.index("--learner-budget-steps") + 1] == "20"
+    assert "--mark-final-checkpoint" not in cutoff
+    assert "--resume" in final
+    assert "--mark-final-checkpoint" in final
+    assert final[final.index("--pipeline") + 1] == "1"
+    assert final[final.index("--quorum") + 1] == "4"
+    assert final[final.index("--sync-interval-steps") + 1] == "0.0"
 
 
 def test_seed_parser_rejects_empty_invalid_and_duplicate_values():
@@ -207,13 +247,24 @@ def test_formal_benchmark_requires_zero_data_workers():
         )
 
 
-def test_cuda_env_respects_parent_visible_device_mapping(monkeypatch):
+def test_accelerator_env_respects_parent_visible_cuda_mapping(monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,7,8,9")
-    env = benchmark.cuda_env(1, 2, "cuda")
+    env = benchmark.accelerator_env(1, 2, "cuda")
     assert env["CUDA_VISIBLE_DEVICES"] == "7,8"
     with pytest.raises(ValueError):
-        benchmark.cuda_env(3, 2, "cuda")
-    assert benchmark.cuda_env(0, 1, "cpu") is None
+        benchmark.accelerator_env(3, 2, "cuda")
+    assert benchmark.accelerator_env(0, 1, "cpu") is None
+
+
+def test_accelerator_env_slices_visible_npus(monkeypatch):
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "2,4,6,7")
+
+    env = benchmark.accelerator_env(1, 2, "npu")
+
+    assert env["ASCEND_RT_VISIBLE_DEVICES"] == "4,6"
+    with pytest.raises(ValueError, match="ASCEND_RT_VISIBLE_DEVICES"):
+        benchmark.accelerator_env(3, 2, "npu")
+    assert benchmark.accelerator_env(0, 1, "cpu") is None
 
 
 def test_wait_for_free_gpus_ignores_processes_on_hidden_devices(monkeypatch):
@@ -230,6 +281,72 @@ def test_wait_for_free_gpus_ignores_processes_on_hidden_devices(monkeypatch):
 
     monkeypatch.setattr(benchmark.subprocess, "run", run)
     benchmark.wait_for_free_gpus("cuda", timeout_s=0)
+
+
+def test_wait_for_free_gpus_ignores_processes_on_hidden_npus(monkeypatch):
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "2")
+    output = """
+| NPU     Chip              | Process id    | Process name             | Process memory(MB)      |
+| 0       0                 | 123           | hidden-python            | 4096                    |
+| 2       0                 | 456           | visible-python           | 0                       |
+"""
+    monkeypatch.setattr(
+        benchmark.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout=output),
+    )
+
+    benchmark.wait_for_free_gpus("npu", timeout_s=0)
+
+
+def test_npu_parser_validation_and_resource_count(monkeypatch, tmp_path):
+    args = benchmark.build_parser().parse_args(
+        [
+            "--model",
+            "stable-diffusion-v1-5",
+            "--data",
+            "rows.jsonl",
+            "--height",
+            "256",
+            "--width",
+            "256",
+            "--device",
+            "npu",
+            "--eval-device",
+            "npu",
+            "--export-device",
+            "npu",
+            "--shard",
+            "ddp",
+            "--learner-gpus",
+            "2",
+        ]
+    )
+    import torch
+
+    from yeto import accel
+
+    monkeypatch.setattr(accel, "register_backends", lambda: None)
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(device_count=lambda: 4),
+        raising=False,
+    )
+    benchmark.validate_args(args, benchmark.select_arms("m2"))
+
+    run_args = _args(
+        device="npu",
+        learner_gpus=2,
+        sample_budget=8,
+        arm_timeout_min=1,
+    )
+    monkeypatch.setattr(benchmark, "wait_for_free_gpus", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(benchmark, "run_logged", lambda *_args, **_kwargs: None)
+    result = benchmark.run_baseline(run_args, 2, 17, tmp_path / "train", tmp_path)
+
+    assert result["total_ranks"] == 4
+    assert result["total_gpus"] == 4
 
 
 def test_materialize_data_source_syncs_s3_prefix(monkeypatch, tmp_path):

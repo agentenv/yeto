@@ -312,6 +312,80 @@ DIFFUSION_CAPABILITIES: dict[str, DiffusionCapability] = {
         adapter_boundary="NAVA training uses package-specific audio/video pipeline behavior outside public Diffusers contracts.",
         evidence=("yeto.diffusion.adapters.nava", "AWS g6e.16xlarge NAVA 33-frame r16/a32 20-step LoRA train/backward/save/reload", "A6000/A100 NAVA adapter validation"),
     ),
+    "protenix": _cap(
+        family="Protenix",
+        pipeline="external adapter",
+        denoisers=("adapter-defined",),
+        modalities=("protein", "rna", "dna", "ligand", "structure"),
+        conditioning=("msa", "template", "sequence", "chemistry", "adapter-defined"),
+        latent_layout="atom/token coordinate diffusion",
+        scheduler="adapter-defined",
+        forward_kwargs=("adapter-defined",),
+        output_alignment="adapter-defined structure coordinates",
+        status="adapter-required",
+        adapter_boundary=(
+            "Protenix owns AF3-style feature construction, MSA/template inputs, "
+            "recycling, coordinate diffusion, confidence heads, and training loss."
+        ),
+        evidence=("yeto.diffusion.adapters.protenix", "Protenix training and inference documentation"),
+    ),
+    "protenix-v2": _cap(
+        family="Protenix",
+        pipeline="external adapter",
+        denoisers=("adapter-defined",),
+        modalities=("protein", "rna", "dna", "ligand", "structure"),
+        conditioning=("msa", "template", "sequence", "chemistry", "adapter-defined"),
+        latent_layout="atom/token coordinate diffusion",
+        scheduler="adapter-defined",
+        forward_kwargs=("adapter-defined",),
+        output_alignment="adapter-defined structure coordinates",
+        status="adapter-required",
+        adapter_boundary=(
+            "Protenix-v2 uses the Protenix native structure-prediction stack; "
+            "Yeto should synchronize only deterministic trainable tensors."
+        ),
+        evidence=("yeto.diffusion.adapters.protenix", "Protenix supported-model documentation"),
+    ),
+    "hunyuan3d-21": _cap(
+        family="Hunyuan3D",
+        pipeline="external adapter",
+        denoisers=("model",),
+        modalities=("image", "3d-shape", "mesh"),
+        conditioning=("image", "adapter-defined"),
+        latent_layout="Hunyuan3D shape VAE latents",
+        scheduler="Hunyuan3D flow matching scheduler",
+        forward_kwargs=("latents", "timestep", "condition", "guidance_cond"),
+        output_alignment="adapter-defined shape latent / mesh export",
+        status="adapter-required",
+        adapter_boundary=(
+            "Hunyuan3D-2.1 uses a custom image-to-3D shape pipeline, VAE, "
+            "conditioner, scheduler, mesh extraction, and optional PBR texture stack."
+        ),
+        evidence=(
+            "yeto.diffusion.adapters.hunyuan3d",
+            "Tencent Hunyuan3D-2.1 README and shape pipeline API",
+        ),
+    ),
+    "alphafold3": _cap(
+        family="AlphaFold3",
+        pipeline="external adapter",
+        denoisers=("inference-only",),
+        modalities=("protein", "rna", "dna", "ligand", "structure"),
+        conditioning=("msa", "template", "sequence", "chemistry", "adapter-defined"),
+        latent_layout="official AlphaFold3 internal structure representation",
+        scheduler="official AlphaFold3 inference pipeline",
+        forward_kwargs=("json_path", "model_dir", "db_dir", "output_dir"),
+        output_alignment="official AlphaFold3 output directory",
+        status="adapter-required",
+        adapter_boundary=(
+            "Official AlphaFold3 is license-gated and inference-only in Yeto; "
+            "the adapter requires a local official checkout and authorized model parameters."
+        ),
+        evidence=(
+            "yeto.diffusion.adapters.alphafold3",
+            "google-deepmind/alphafold3 README, LICENSE, and WEIGHTS_TERMS_OF_USE",
+        ),
+    ),
 }
 
 

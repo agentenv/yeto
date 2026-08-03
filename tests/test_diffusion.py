@@ -2,7 +2,9 @@ import argparse
 import io
 import json
 import random
-from types import SimpleNamespace
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -80,15 +82,19 @@ def test_diffusion_aliases_resolve_and_infer_kind():
     assert {
         "chroma1-base",
         "chroma1-hd",
+        "alphafold3",
         "flux",
         "flux-schnell",
         "flux2-dev",
         "hidream-i1-dev",
         "hidream-i1-full",
+        "hunyuan3d-21",
         "hunyuan-video",
         "ideogram4",
         "ltx-video",
         "nava",
+        "protenix",
+        "protenix-v2",
         "qwen-image",
         "qwen-image-2512",
         "sd35",
@@ -100,10 +106,16 @@ def test_diffusion_aliases_resolve_and_infer_kind():
     assert resolve("ideogram4") == "ideogram-ai/ideogram-4-nf4-diffusers"
     assert resolve("qwen-image") == "Qwen/Qwen-Image"
     assert resolve("hunyuan-video") == "hunyuanvideo-community/HunyuanVideo"
+    assert resolve("hunyuan3d-21") == "tencent/Hunyuan3D-2.1"
+    assert resolve("alphafold3") == "alphafold3"
     assert resolve("nava") == "baidu/NAVA"
+    assert resolve("protenix") == "protenix_base_default_v1.0.0"
     assert resolve_model_kind("flux") == "diffusion"
     assert resolve_model_kind("ideogram4") == "diffusion"
     assert resolve_model_kind("qwen-image") == "diffusion"
+    assert resolve_model_kind("protenix") == "diffusion"
+    assert resolve_model_kind("hunyuan3d-21") == "diffusion"
+    assert resolve_model_kind("alphafold3") == "diffusion"
     assert resolve_model_kind("org/custom", "diffusion") == "diffusion"
     assert resolve_model_kind("org/custom") == "causal-lm"
 
@@ -126,6 +138,9 @@ def test_diffusion_capability_matrix_covers_aliases():
     assert "nava" in aliases_by_status("adapter-required")
     assert aliases_by_status("generic-gap") == ()
     assert "flux" in aliases_by_status("needs-real-validation")
+    assert "protenix" in aliases_by_status("adapter-required")
+    assert "hunyuan3d-21" in aliases_by_status("adapter-required")
+    assert "alphafold3" in aliases_by_status("adapter-required")
     assert "wan21-t2v-14b" in aliases_by_status("generic-covered")
     assert "wan22" in aliases_by_status("generic-covered")
     assert "| `wan22` |" in format_capability_table(("wan22",))
@@ -153,7 +168,7 @@ def test_diffusion_learner_parse_cache_defaults_are_off():
     assert args.seed is None
 
 
-def test_launch_cli_parses_diffusion_seed_without_a_generic_lm_seed():
+def test_launch_cli_keeps_diffusion_and_lm_seeds_separate():
     from yeto.cli import parse_args
 
     args = parse_args(
@@ -172,8 +187,8 @@ def test_launch_cli_parses_diffusion_seed_without_a_generic_lm_seed():
     )
 
     assert args.diffusion_seed == 123
+    assert args.seed == 0
     assert args.resize_mode == "center-crop"
-    assert not hasattr(args, "seed")
 
 
 def test_diffusion_seed_derivation_is_stable_and_separates_eval_rows():
@@ -529,6 +544,48 @@ def test_diffusion_aligns_extra_output_tokens_to_target_tokens():
     assert aligned_target is target
 
 
+def test_diffusion_does_not_align_learned_variance_channels_without_adapter():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    pred = torch.arange(2 * 8 * 3 * 3, dtype=torch.float32).reshape(2, 8, 3, 3)
+    target = torch.zeros(2, 4, 3, 3)
+
+    aligned_pred, aligned_target = learner._align_prediction_and_target(
+        SimpleNamespace(),
+        pred,
+        target,
+        learner.LatentBatch(pred, latent_height=3, latent_width=3),
+        learner.TextConditioning(None),
+    )
+
+    assert aligned_pred is pred
+    assert aligned_target is target
+
+
+def test_pixart_adapter_aligns_learned_variance_image_channels():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class PixArtTransformer2DModel:
+        pass
+
+    pred = torch.arange(2 * 8 * 3 * 3, dtype=torch.float32).reshape(2, 8, 3, 3)
+    target = torch.zeros(2, 4, 3, 3)
+    pipe = SimpleNamespace(transformer=PixArtTransformer2DModel())
+
+    aligned_pred, aligned_target = learner._align_prediction_and_target(
+        pipe,
+        pred,
+        target,
+        learner.LatentBatch(pred, latent_height=3, latent_width=3),
+        learner.TextConditioning(None),
+    )
+
+    assert torch.equal(aligned_pred, pred[:, :4])
+    assert aligned_target is target
+
+
 def test_diffusion_unpack_with_ids_crops_extra_output_tokens():
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
@@ -557,14 +614,22 @@ def test_diffusion_unpack_with_ids_crops_extra_output_tokens():
 
 def test_diffusion_adapter_base_is_marker_not_hook_provider():
     pytest.importorskip("torch")
-    from yeto.diffusion.adapters import DiffusionAdapter, DiffusionAdapterProtocol
+    from yeto.diffusion.adapters import (
+        DiffusionAdapter,
+        DiffusionAdapterProtocol,
+        PixArtAdapter,
+    )
     from yeto.diffusion.adapters.nava import NavaAdapter
 
     marker = DiffusionAdapter()
     assert not hasattr(marker, "load_pipeline")
     assert not hasattr(marker, "training_step")
+    assert not hasattr(marker, "denoiser_kwargs")
     assert hasattr(DiffusionAdapterProtocol, "load_pipeline")
+    assert hasattr(DiffusionAdapterProtocol, "denoiser_kwargs")
+    assert hasattr(DiffusionAdapterProtocol, "align_prediction_and_target")
     assert issubclass(NavaAdapter, DiffusionAdapter)
+    assert issubclass(PixArtAdapter, DiffusionAdapter)
 
 
 def test_diffusion_adapter_template_loads():
@@ -608,6 +673,248 @@ def test_diffusion_dtype_matches_cuda_bf16_support(monkeypatch):
     assert learner.diffusion_torch_dtype(SimpleNamespace(type="cuda")) is torch.float16
     monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: True)
     assert learner.diffusion_torch_dtype(SimpleNamespace(type="cuda")) is torch.bfloat16
+
+
+def test_diffusion_dtype_uses_bfloat16_on_npu():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    assert learner.diffusion_torch_dtype(SimpleNamespace(type="npu")) is torch.bfloat16
+
+
+def test_npu_bitsandbytes_load_uses_npu_device_map_and_restores_vendor_hooks(
+    monkeypatch,
+):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion.quantization import npu_bitsandbytes_load
+
+    class BnB4BitDiffusersQuantizer:
+        def validate_environment(self):
+            return torch.cuda.is_available()
+
+        def update_device_map(self, device_map):
+            return {"vendor": device_map}
+
+    diffusers = ModuleType("diffusers")
+    quantizers = ModuleType("diffusers.quantizers")
+    bnb_quantizers = ModuleType("diffusers.quantizers.bitsandbytes")
+    bnb_quantizers.BnB4BitDiffusersQuantizer = BnB4BitDiffusersQuantizer
+    monkeypatch.setitem(sys.modules, "diffusers", diffusers)
+    monkeypatch.setitem(sys.modules, "diffusers.quantizers", quantizers)
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers.quantizers.bitsandbytes",
+        bnb_quantizers,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "bitsandbytes",
+        SimpleNamespace(supported_torch_devices={"cpu", "cuda", "npu"}),
+    )
+    original_cuda_available = torch.cuda.is_available
+    vendor_validate = BnB4BitDiffusersQuantizer.validate_environment
+    vendor_device_map = BnB4BitDiffusersQuantizer.update_device_map
+    quantizer = object.__new__(BnB4BitDiffusersQuantizer)
+
+    with npu_bitsandbytes_load(SimpleNamespace(type="npu", index=2)):
+        assert quantizer.validate_environment() is True
+        assert torch.cuda.is_available is original_cuda_available
+        assert quantizer.update_device_map(None) == {"": "npu:2"}
+        assert quantizer.update_device_map({"x": "cpu"}) == {
+            "vendor": {"x": "cpu"}
+        }
+
+    assert BnB4BitDiffusersQuantizer.validate_environment is vendor_validate
+    assert BnB4BitDiffusersQuantizer.update_device_map is vendor_device_map
+    assert torch.cuda.is_available is original_cuda_available
+
+
+def test_diffusion_setup_distributed_uses_selected_device(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    device = torch.device("cuda", 2)
+    calls = []
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setattr(learner.accel, "dist_backend", lambda actual: "nccl")
+    monkeypatch.setattr(
+        learner.dist,
+        "init_process_group",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(learner.dist, "get_rank", lambda: 2)
+    monkeypatch.setattr(learner.dist, "get_world_size", lambda: 4)
+
+    assert learner.setup_distributed(device) == (2, 4)
+    assert calls == [{"backend": "nccl", "device_id": device}]
+
+
+def test_diffusion_fsdp_accepts_npu_and_keeps_lora_names(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from torch.distributed import fsdp
+
+    from yeto.diffusion import learner
+
+    module = torch.nn.Linear(2, 2)
+    module.weight.requires_grad_(False)
+    pipe = SimpleNamespace(transformer=module)
+    params = learner.trainable_params(pipe)
+    calls = []
+
+    monkeypatch.setattr(
+        fsdp,
+        "fully_shard",
+        lambda wrapped, **kwargs: calls.append((wrapped, kwargs)),
+    )
+
+    wrapped = learner.maybe_wrap_for_distributed(
+        pipe,
+        SimpleNamespace(shard="fsdp", tuning="lora", syncer="none"),
+        params,
+        rank=0,
+        world=2,
+        device=SimpleNamespace(type="npu"),
+    )
+
+    assert wrapped == params
+    assert calls == [(module, {"ignored_params": set(params.values())})]
+
+
+def test_diffusion_fsdp_rejects_cpu():
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    with pytest.raises(RuntimeError, match="CUDA or NPU accelerator"):
+        learner.maybe_wrap_for_distributed(
+            SimpleNamespace(),
+            SimpleNamespace(shard="fsdp", tuning="lora", syncer="none"),
+            {},
+            rank=0,
+            world=1,
+            device=SimpleNamespace(type="cpu"),
+        )
+
+
+def test_diffusion_seed_dispatches_to_selected_accelerator(monkeypatch):
+    pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    device = SimpleNamespace(type="npu")
+    calls = []
+    monkeypatch.setattr(
+        learner.accel,
+        "manual_seed_all",
+        lambda actual, seed: calls.append((actual, seed)),
+    )
+
+    learner.seed_diffusion_rng(123, device)
+
+    assert calls == [(device, 123)]
+
+
+def test_diffusion_aligns_vae_video_latents_to_pipeline_frames_first_contract():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class Pipe:
+        vae_scale_factor_spatial = 8
+
+        def __init__(self):
+            self.calls = 0
+
+        def prepare_latents(
+            self,
+            batch_size,
+            num_channels_latents,
+            num_frames,
+            height,
+            width,
+            dtype,
+            device,
+            generator,
+            latents=None,
+        ):
+            self.calls += 1
+            return torch.zeros(
+                batch_size,
+                (num_frames - 1) // 4 + 1,
+                num_channels_latents,
+                height // 8,
+                width // 8,
+                dtype=dtype,
+                device=device,
+            )
+
+    pipe = Pipe()
+    latents = torch.arange(1 * 16 * 2 * 8 * 8).reshape(1, 16, 2, 8, 8).float()
+    args = SimpleNamespace(num_frames=5, height=64, width=64, cache_latents=False)
+
+    aligned = learner._align_video_latents_for_pipeline(
+        pipe,
+        latents,
+        [{"video": "clip.mp4"}],
+        args,
+        torch.device("cpu"),
+        torch.float32,
+    )
+    again = learner._align_video_latents_for_pipeline(
+        pipe,
+        latents,
+        [{"video": "clip.mp4"}],
+        args,
+        torch.device("cpu"),
+        torch.float32,
+    )
+
+    assert torch.equal(aligned, latents.permute(0, 2, 1, 3, 4))
+    assert torch.equal(again, aligned)
+    assert pipe.calls == 1
+
+
+def test_diffusion_keeps_vae_video_latents_for_channels_first_pipeline():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class Pipe:
+        vae_scale_factor_spatial = 8
+
+        def prepare_latents(
+            self,
+            batch_size,
+            num_channels_latents,
+            num_frames,
+            height,
+            width,
+            dtype,
+            device,
+            generator,
+            latents=None,
+        ):
+            return torch.zeros(
+                batch_size,
+                num_channels_latents,
+                (num_frames - 1) // 4 + 1,
+                height // 8,
+                width // 8,
+                dtype=dtype,
+                device=device,
+            )
+
+    pipe = Pipe()
+    latents = torch.zeros(1, 16, 2, 8, 8)
+    args = SimpleNamespace(num_frames=5, height=64, width=64, cache_latents=False)
+
+    aligned = learner._align_video_latents_for_pipeline(
+        pipe,
+        latents,
+        [{"video": "clip.mp4"}],
+        args,
+        torch.device("cpu"),
+        torch.float32,
+    )
+
+    assert aligned is latents
+    assert pipe._yeto_video_latent_layout == "channels-first"
 
 
 def test_flow_matching_loss_counts_elements():
@@ -958,6 +1265,55 @@ def test_diffusion_autobatch_doubles_until_oom(monkeypatch):
     assert sizes == [1, 2, 4, 8]
 
 
+def test_diffusion_autobatch_uses_npu_allocator_abstraction(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class NpuOutOfMemory(RuntimeError):
+        pass
+
+    sizes = []
+    cache_clears = []
+
+    def probe(pipe, params, opt, rows, args, device, micro_batch, adapter=None):
+        del pipe, params, opt, rows, args, device, adapter
+        sizes.append(micro_batch)
+        if micro_batch >= 4:
+            raise NpuOutOfMemory("synthetic")
+
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(
+            OutOfMemoryError=NpuOutOfMemory,
+            empty_cache=lambda: cache_clears.append(True),
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(learner, "_probe_diffusion_once", probe)
+    opt = SimpleNamespace(zero_grad=lambda set_to_none=True: None)
+    args = _args(
+        data=[{"latents": [0.0], "prompt_embeds": [[0.0]]}],
+        cache_latents=True,
+        cache_text_embeds=True,
+        micro_batch_size="auto",
+    )
+
+    got = learner.resolve_diffusion_micro_batch_size(
+        args,
+        None,
+        {},
+        opt,
+        SimpleNamespace(type="npu"),
+        rank=0,
+        world=1,
+    )
+
+    assert got == 2
+    assert sizes == [1, 2, 4]
+    assert len(cache_clears) == 3
+
+
 def test_diffusion_autobatch_bucket_by_shape_uses_smallest_fit(monkeypatch):
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
@@ -1083,13 +1439,93 @@ def test_diffusion_adapter_file_factory(tmp_path):
     assert adapter.marker == "loaded"
 
 
+def test_diffusion_adapter_module_executes_exact_attested_bytes(
+    monkeypatch, tmp_path
+):
+    import importlib
+
+    from yeto import provenance
+    from yeto.diffusion import learner
+
+    package = tmp_path / "adapter_package"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    source = package / "hook.py"
+    source.write_text(
+        "class Adapter:\n"
+        "    marker = 'v1'\n"
+        "\n"
+        "def make_adapter():\n"
+        "    return Adapter()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    cached = importlib.import_module("adapter_package.hook")
+    assert cached.make_adapter().marker == "v1"
+
+    source.write_text(
+        "class Adapter:\n"
+        "    marker = 'v2'\n"
+        "\n"
+        "def make_adapter():\n"
+        "    return Adapter()\n",
+        encoding="utf-8",
+    )
+    expected = provenance.file_sha256(source)
+    adapter = learner.load_diffusion_adapter(
+        "adapter_package.hook:make_adapter",
+        expected_sha256=expected,
+    )
+
+    assert adapter.marker == "v2"
+    assert cached.make_adapter().marker == "v1"
+
+
+def test_diffusion_adapter_executes_collectively_attested_buffer(tmp_path):
+    from yeto import provenance
+    from yeto.diffusion import learner
+
+    source = tmp_path / "adapter.py"
+    source.write_text(
+        "class Adapter:\n"
+        "    marker = 'attested'\n"
+        "\n"
+        "def make_adapter():\n"
+        "    return Adapter()\n",
+        encoding="utf-8",
+    )
+    path, payload, digest = provenance.read_distributed_python_spec_bytes(
+        f"{source}:make_adapter",
+        None,
+        rank=0,
+        world=1,
+    )
+    source.write_text(
+        "class Adapter:\n"
+        "    marker = 'replacement'\n"
+        "\n"
+        "def make_adapter():\n"
+        "    return Adapter()\n",
+        encoding="utf-8",
+    )
+
+    adapter = learner.load_diffusion_adapter(
+        f"{source}:make_adapter",
+        expected_sha256=digest,
+        source_bytes=payload,
+        source_path=path,
+    )
+    assert adapter.marker == "attested"
+
+
 def test_nava_adapter_factory_and_row_conversion(tmp_path):
     pytest.importorskip("torch")
     from yeto.diffusion import learner
     from yeto.diffusion.adapters import nava
 
     adapter = learner.load_diffusion_adapter("yeto.diffusion.adapters.nava:make_adapter")
-    assert isinstance(adapter, nava.NavaAdapter)
+    assert type(adapter).__name__ == "NavaAdapter"
+    assert adapter.supports_pinned_model_source is True
 
     args = SimpleNamespace(
         video_column="video",
@@ -1121,6 +1557,69 @@ def test_nava_adapter_factory_and_row_conversion(tmp_path):
         "prompt": "another caption",
     }
     assert nava._nava_json_row(no_duration, args)["video_info"][0]["duration"] == 5.0
+
+
+def test_nava_sample_hook_preserves_pinned_model_provenance(monkeypatch, tmp_path):
+    pytest.importorskip("torch")
+    import huggingface_hub
+
+    from yeto import provenance
+    from yeto.diffusion.adapters.nava import NavaAdapter
+
+    commit = "a" * 40
+    snapshot_calls = []
+
+    def snapshot_download(**kwargs):
+        snapshot_calls.append(kwargs)
+        return str(tmp_path / "snapshot")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+    adapter = NavaAdapter(nava_root=str(tmp_path), config_path=str(tmp_path / "nava.yaml"))
+
+    def load_pipeline(forwarded, device):
+        assert device == "cpu"
+        assert forwarded.model_revision == commit
+        assert forwarded.trust_remote_code is False
+        assert forwarded._provenance["model"]["resolved_revision"] == commit
+        return SimpleNamespace(snapshot=provenance.materialize_pinned_model(forwarded))
+
+    monkeypatch.setattr(adapter, "load_pipeline", load_pipeline)
+    monkeypatch.setattr(adapter, "load_adapters", lambda pipe, *args: pipe)
+    monkeypatch.setattr(
+        adapter,
+        "prepare_sample_pipeline",
+        lambda pipe, *args: pipe,
+    )
+    args = SimpleNamespace(
+        model="baidu/NAVA",
+        model_revision=commit,
+        trust_remote_code=False,
+        _provenance={
+            "schema_version": 1,
+            "model": {
+                "source": "huggingface",
+                "resolved_identifier": "baidu/NAVA",
+                "resolved_revision": commit,
+            },
+            "trust_remote_code": False,
+        },
+    )
+
+    pipe = adapter.load_sample_pipeline(
+        tmp_path,
+        {"model": "nava", "lora": {"r": 4, "alpha": 8}},
+        args,
+        "cpu",
+    )
+
+    assert pipe.snapshot == str(tmp_path / "snapshot")
+    assert snapshot_calls == [
+        {
+            "repo_id": "baidu/NAVA",
+            "revision": commit,
+            "local_files_only": True,
+        }
+    ]
 
 
 def test_nava_adapter_direct_latent_training_step():
@@ -1182,11 +1681,424 @@ def test_nava_adapter_raw_state_save_and_load(tmp_path):
 
     adapter.save_adapters(pipe, tmp_path)
 
-    assert (tmp_path / "model_state.pt").exists()
+    assert (tmp_path / "model_state.safetensors").exists()
     loaded = SimpleNamespace(model=torch.nn.Linear(2, 2))
     adapter.load_adapters(loaded, tmp_path, {}, SimpleNamespace())
     assert torch.allclose(loaded.model.weight, torch.full_like(loaded.model.weight, 3.0))
     assert torch.allclose(loaded.model.bias, torch.full_like(loaded.model.bias, 4.0))
+
+
+def test_protenix_adapter_full_step_contract(tmp_path):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion.adapters.protenix import make_adapter
+
+    class TinyProtenix:
+        def __init__(self):
+            self.model = torch.nn.Linear(1, 1)
+            self.last_batch = None
+
+        def build_batch(self, rows, args, device):
+            del args
+            return {"rows": rows, "device": device}
+
+        def training_step(self, batch, global_step=0):
+            self.last_batch = batch
+            loss = self.model(torch.ones(1, 1)).sum() + global_step
+            return {"loss": loss, "denominator": torch.tensor(2.0)}
+
+    pipe = TinyProtenix()
+    adapter = make_adapter(backend=pipe, model_name="protenix_base_default_v1.0.0")
+    loaded = adapter.load_pipeline(SimpleNamespace(model="protenix"), torch.device("cpu"))
+    assert loaded is pipe
+
+    params = adapter.trainable_params(pipe)
+    assert set(params) == {"protenix.weight", "protenix.bias"}
+
+    loss, denom = adapter.training_step(
+        pipe,
+        [{"sequence": "ACDE"}],
+        SimpleNamespace(model="protenix"),
+        torch.device("cpu"),
+        global_step=3,
+    )
+    assert denom.item() == 2.0
+    assert pipe.last_batch["rows"] == [{"sequence": "ACDE"}]
+    assert loss.requires_grad
+
+    with torch.no_grad():
+        pipe.model.weight.fill_(5.0)
+    adapter.save_adapters(pipe, tmp_path)
+    assert (tmp_path / "trainable_state.pt").exists()
+
+    loaded_pipe = TinyProtenix()
+    adapter.load_adapters(loaded_pipe, tmp_path, {}, SimpleNamespace())
+    assert torch.allclose(
+        loaded_pipe.model.weight,
+        torch.full_like(loaded_pipe.model.weight, 5.0),
+    )
+
+
+def test_native_protenix_pipeline_uses_prebatched_rows(tmp_path):
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion.adapters.protenix import NativeProtenixPipeline
+
+    class TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(2.0))
+            self.last = None
+
+        def forward(
+            self,
+            *,
+            input_feature_dict,
+            label_dict,
+            label_full_dict,
+            mode,
+            current_step,
+            symmetric_permutation,
+            mc_dropout_apply_rate,
+        ):
+            self.last = {
+                "input_feature_dict": input_feature_dict,
+                "label_dict": label_dict,
+                "label_full_dict": label_full_dict,
+                "mode": mode,
+                "current_step": current_step,
+                "symmetric_permutation": symmetric_permutation,
+                "mc_dropout_apply_rate": mc_dropout_apply_rate,
+            }
+            return {"x": self.weight * input_feature_dict["x"].sum()}, label_dict, {}
+
+    class TinyLoss:
+        def __call__(self, *, feat_dict, pred_dict, label_dict, mode):
+            del label_dict
+            return pred_dict["x"] + feat_dict["x"].sum(), {"loss": 1.0}
+
+    pipe = NativeProtenixPipeline(
+        configs=SimpleNamespace(),
+        model=TinyModel(),
+        loss=TinyLoss(),
+        symmetric_permutation="perm",
+        device=torch.device("cpu"),
+    )
+    row = {
+        "input_feature_dict": {"x": [1.0, 2.0]},
+        "label_dict": {"y": [1]},
+        "label_full_dict": {"z": [2]},
+    }
+
+    batch = pipe.build_batch([row], SimpleNamespace(), torch.device("cpu"))
+    assert torch.equal(batch["input_feature_dict"]["x"], torch.tensor([1.0, 2.0]))
+    loss = pipe.training_step(batch, global_step=9)
+    assert torch.equal(loss, torch.tensor(9.0))
+    assert pipe.model.last["current_step"] == 9
+    assert pipe.model.last["symmetric_permutation"] == "perm"
+
+    batch_path = tmp_path / "batch.pt"
+    torch.save(row, batch_path)
+    loaded = pipe.build_batch(
+        [{"protenix_batch_path": "batch.pt", "__yeto_data_root__": str(tmp_path)}],
+        SimpleNamespace(),
+        torch.device("cpu"),
+    )
+    assert torch.equal(loaded["input_feature_dict"]["x"], torch.tensor([1.0, 2.0]))
+
+
+def test_protenix_adapter_alias_model_name_defaults():
+    from yeto.diffusion.adapters.protenix import _model_name_from_alias
+
+    assert _model_name_from_alias("protenix") == "protenix_base_default_v1.0.0"
+    assert _model_name_from_alias("protenix-v2") == "protenix-v2"
+    assert _model_name_from_alias("custom") == "protenix_base_default_v1.0.0"
+
+
+def test_protenix_auto_dtype_resolves_for_device():
+    from yeto.diffusion.adapters.protenix import _dtype_from_args
+
+    assert _dtype_from_args(SimpleNamespace(dtype="auto"), SimpleNamespace(type="cuda")) == "bf16"
+    assert _dtype_from_args(SimpleNamespace(dtype="auto"), SimpleNamespace(type="cpu")) == "f32"
+    assert _dtype_from_args(SimpleNamespace(dtype="fp16"), SimpleNamespace(type="cuda")) == "fp16"
+
+
+def test_protenix_namespace_supports_attributes_and_mapping_unpack():
+    from yeto.diffusion.adapters.protenix import _namespace
+
+    configs = _namespace({"train_noise_sampler": {"p_mean": -1.2}, "model": {"x": 1}})
+    assert configs.model.x == 1
+    assert dict(configs.train_noise_sampler.items()) == {"p_mean": -1.2}
+    assert {**configs.train_noise_sampler} == {"p_mean": -1.2}
+
+
+def test_protenix_native_config_preserves_empty_checkpoint_default(monkeypatch):
+    from yeto.diffusion.adapters.protenix import ProtenixAdapter
+
+    captured = {}
+
+    def fake_import_attr(module_name, attr):
+        if attr == "configs":
+            return {"load_checkpoint_path": "", "dtype": "bf16", "model_name": "protenix"}
+        if attr == "data_configs":
+            return {}
+        if attr == "model_configs":
+            return {"protenix_base_default_v1.0.0": {}}
+        if attr == "parse_configs":
+            def parse_configs(*, configs, arg_str, fill_required_with_null):
+                captured.update(configs)
+                captured["arg_str"] = arg_str
+                captured["fill_required_with_null"] = fill_required_with_null
+                return configs
+
+            return parse_configs
+        raise AssertionError((module_name, attr))
+
+    monkeypatch.setattr("yeto.diffusion.adapters.protenix._import_attr", fake_import_attr)
+    ProtenixAdapter()._build_native_configs(SimpleNamespace(model="protenix"), SimpleNamespace(type="cuda"))
+
+    assert captured["load_checkpoint_path"] == ""
+    assert "--dtype bf16" in captured["arg_str"]
+
+
+def test_protenix_native_pipeline_imports_torch_checkpoint(monkeypatch):
+    from yeto.diffusion.adapters.protenix import ProtenixAdapter
+
+    imported = []
+
+    def fake_import_module(name):
+        imported.append(name)
+        if name == "torch":
+            return SimpleNamespace()
+        if name == "torch.utils.checkpoint":
+            return SimpleNamespace()
+        if name == "protenix":
+            return SimpleNamespace()
+        raise RuntimeError("stop after checkpoint import")
+
+    monkeypatch.setattr("yeto.diffusion.adapters.protenix.importlib.import_module", fake_import_module)
+    with pytest.raises(RuntimeError, match="stop after checkpoint import"):
+        ProtenixAdapter()._load_native_pipeline(SimpleNamespace(model="protenix"), "cpu")
+
+    assert "torch.utils.checkpoint" in imported
+
+
+def test_protenix_export_batch_payload_requires_native_keys():
+    from yeto.diffusion.protenix_export import _batch_payload
+
+    batch = {
+        "input_feature_dict": {"x": 1},
+        "label_dict": {"y": 2},
+        "label_full_dict": {"z": 3},
+        "ignored": "ok",
+    }
+    assert _batch_payload(batch) == {
+        "input_feature_dict": {"x": 1},
+        "label_dict": {"y": 2},
+        "label_full_dict": {"z": 3},
+    }
+
+    with pytest.raises(RuntimeError, match="missing required keys"):
+        _batch_payload({"input_feature_dict": {}})
+
+
+def test_protenix_export_normalizes_dotlist_arg_str():
+    from yeto.diffusion.protenix_export import _normalize_arg_str
+
+    assert _normalize_arg_str("data.train_sets=[] dtype=bf16 --use_wandb false") == (
+        "--data.train_sets [] --dtype bf16 --use_wandb false"
+    )
+    assert _normalize_arg_str("data.eval_sets=[]") == "--data.test_sets []"
+    assert _normalize_arg_str("data.test_sets=") == ""
+    assert _normalize_arg_str("--data.train_sets []") == "--data.train_sets []"
+
+
+def test_protenix_export_clears_empty_test_sets_override():
+    from yeto.diffusion.protenix_export import _clear_disabled_sets
+
+    configs = SimpleNamespace(data=SimpleNamespace(test_sets=["recentPDB"]))
+    _clear_disabled_sets(configs, SimpleNamespace(arg_str="data.test_sets="))
+    assert configs.data.test_sets == []
+
+
+def test_protenix_adapter_missing_wrapper_message(monkeypatch):
+    pytest.importorskip("torch")
+    from yeto.diffusion.adapters.protenix import make_adapter
+
+    adapter = make_adapter()
+    monkeypatch.delenv("YETO_PROTENIX_WRAPPER", raising=False)
+    with pytest.raises(
+        RuntimeError,
+        match="Protenix is not installed|Protenix support needs a wrapper",
+    ):
+        adapter.load_pipeline(SimpleNamespace(model="protenix"), "cpu")
+
+
+def test_hunyuan3d_adapter_sampling_contract():
+    pytest.importorskip("torch")
+    from yeto.diffusion.adapters.hunyuan3d import make_adapter
+
+    class Mesh:
+        pass
+
+    class TinyHunyuanPipe:
+        def __init__(self):
+            self.model = None
+            self.seen = None
+
+        def __call__(self, image=None, **kwargs):
+            self.seen = (image, kwargs)
+            return [Mesh()]
+
+    pipe = TinyHunyuanPipe()
+    adapter = make_adapter(backend=pipe)
+    loaded = adapter.load_pipeline(SimpleNamespace(dtype="auto"), "cpu")
+    assert loaded is pipe
+
+    out = adapter.sample(
+        pipe,
+        SimpleNamespace(prompt="image.png", num_inference_steps=4, guidance_scale=3.0),
+        {},
+    )
+    assert isinstance(out["meshes"][0], Mesh)
+    assert pipe.seen == ("image.png", {"num_inference_steps": 4, "guidance_scale": 3.0})
+
+
+def test_hunyuan3d_training_pipeline_uses_forward_outside_trainer():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion.adapters.hunyuan3d import NativeHunyuan3DTrainingPipeline
+
+    class TinyTrainingModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(2.0))
+            self.last = None
+
+        def forward(self, batch):
+            self.last = ("forward", batch)
+            return self.weight * batch["x"].sum()
+
+        def training_step(self, batch, batch_idx):
+            raise RuntimeError("requires Trainer")
+
+    module = TinyTrainingModule()
+    pipe = NativeHunyuan3DTrainingPipeline(module, Path("cfg.yaml"))
+    batch = pipe.build_batch(
+        [{"hunyuan3d_batch": {"x": [1.0, 2.0]}}],
+        SimpleNamespace(),
+        torch.device("cpu"),
+    )
+    loss = pipe.training_step(batch, global_step=7)
+
+    assert torch.equal(batch["x"], torch.tensor([1.0, 2.0]))
+    assert loss.item() == 6.0
+    assert module.last[0] == "forward"
+
+
+def test_hunyuan3d_export_parse_args_and_loader_selection():
+    from yeto.diffusion import hunyuan3d_export
+
+    args = hunyuan3d_export.parse_args(
+        [
+            "--config",
+            "cfg.yaml",
+            "--output-dir",
+            "out",
+            "--batch-count",
+            "2",
+            "--set",
+            "dataset.params.batch_size=1",
+        ]
+    )
+    assert args.config == Path("cfg.yaml")
+    assert args.batch_count == 2
+    assert args.set == ["dataset.params.batch_size=1"]
+
+    class Data:
+        def train_dataloader(self):
+            return ["train-loader"]
+
+        def val_dataloader(self):
+            return [["val-loader"]]
+
+    assert hunyuan3d_export._loader(Data(), "train") == "train-loader"
+    assert hunyuan3d_export._loader(Data(), "val") == ["val-loader"]
+
+
+def test_hunyuan3d_export_missing_dependency_message(tmp_path):
+    from yeto.diffusion import hunyuan3d_export
+
+    with pytest.raises(RuntimeError, match="Hunyuan3D-2.1 training dependencies"):
+        hunyuan3d_export._import_hunyuan_training_api(tmp_path / "missing")
+
+
+def test_diffusion_sample_saves_mesh_output(tmp_path):
+    from yeto.diffusion import sample
+
+    class Mesh:
+        def export(self, path):
+            path.write_text("mesh", encoding="utf-8")
+
+    saved = sample.save_sample_output({"meshes": [Mesh()]}, tmp_path / "asset")
+    assert saved == [tmp_path / "asset.glb"]
+    assert saved[0].read_text(encoding="utf-8") == "mesh"
+
+
+def test_diffusion_sample_copies_directory_output(tmp_path):
+    from yeto.diffusion import sample
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "result.json").write_text("{}", encoding="utf-8")
+
+    saved = sample.save_sample_output({"paths": [source]}, tmp_path / "copied")
+    assert saved == [tmp_path / "copied" / "source"]
+    assert (saved[0] / "result.json").read_text(encoding="utf-8") == "{}"
+
+
+def test_alphafold3_adapter_is_guarded_and_inference_only(tmp_path):
+    from yeto.diffusion.adapters.alphafold3 import make_adapter
+
+    adapter = make_adapter()
+    with pytest.raises(RuntimeError, match="inference-only"):
+        adapter.load_pipeline(SimpleNamespace(), "cpu")
+    with pytest.raises(RuntimeError, match="YETO_ALPHAFOLD3_ROOT"):
+        adapter.load_sample_pipeline(tmp_path, {}, SimpleNamespace(), "cpu")
+
+
+def test_alphafold3_runtime_builds_official_command(tmp_path):
+    from yeto.diffusion.adapters.alphafold3 import AlphaFold3Runtime
+
+    root = tmp_path / "af3"
+    root.mkdir()
+    runner = root / "run_alphafold.py"
+    runner.write_text(
+        "import argparse, pathlib\n"
+        "p=argparse.ArgumentParser()\n"
+        "p.add_argument('--json_path')\n"
+        "p.add_argument('--model_dir')\n"
+        "p.add_argument('--output_dir')\n"
+        "p.add_argument('--db_dir', default=None)\n"
+        "args=p.parse_args()\n"
+        "out=pathlib.Path(args.output_dir)\n"
+        "out.mkdir(parents=True, exist_ok=True)\n"
+        "(out/'done.txt').write_text(args.json_path)\n",
+        encoding="utf-8",
+    )
+    params = tmp_path / "params"
+    params.mkdir()
+    databases = tmp_path / "db"
+    databases.mkdir()
+    input_json = tmp_path / "input.json"
+    input_json.write_text("{}", encoding="utf-8")
+
+    runtime = AlphaFold3Runtime(
+        root=root,
+        model_parameters_dir=params,
+        databases_dir=databases,
+        output_root=tmp_path / "out",
+    )
+    out = runtime.sample(SimpleNamespace(prompt=str(input_json)))
+    result_dir = Path(out["paths"][0])
+    assert (result_dir / "done.txt").read_text(encoding="utf-8") == str(input_json)
 
 
 def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
@@ -1230,6 +2142,7 @@ def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
         "\n"
         "def make_adapter():\n"
         "    class Adapter:\n"
+        "        supports_pinned_model_source = True\n"
         "        def load_pipeline(self, args, device):\n"
         "            del args, device\n"
         "            return TinyPipe()\n"
@@ -1254,6 +2167,8 @@ def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
     argv = [
         "--model",
         "tiny",
+        "--model-revision",
+        "a" * 40,
         "--data",
         str(data),
         "--syncer",
@@ -1283,7 +2198,9 @@ def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
     ]
     learner.main(argv)
 
-    state = torch.load(out / "trainable_state.pt", map_location="cpu")
+    from safetensors.torch import load_file
+
+    state = load_file(out / "trainable_state.safetensors", device="cpu")
     assert "transformer.proj.weight" in state
     meta = json.loads(
         (out / learner.DIFFUSION_ADAPTER_METADATA_FILE).read_text(encoding="utf-8")
@@ -1304,7 +2221,7 @@ def test_tiny_diffusion_learner_seed_repeats_cached_run(tmp_path):
     second_argv = argv.copy()
     second_argv[second_argv.index("--output-dir") + 1] = str(second_out)
     learner.main(second_argv)
-    second_state = torch.load(second_out / "trainable_state.pt", map_location="cpu")
+    second_state = load_file(second_out / "trainable_state.safetensors", device="cpu")
 
     assert state.keys() == second_state.keys()
     for name in state:
@@ -1603,6 +2520,7 @@ def test_raw_image_lora_adapter_round_trip(monkeypatch, tmp_path):
         "\n"
         "def make_adapter():\n"
         "    class Adapter:\n"
+        "        supports_pinned_model_source = True\n"
         "        def load_pipeline(self, args, device):\n"
         "            del args, device\n"
         "            return TinyPipe()\n"
@@ -1620,6 +2538,8 @@ def test_raw_image_lora_adapter_round_trip(monkeypatch, tmp_path):
         [
             "--model",
             "tiny",
+            "--model-revision",
+            "a" * 40,
             "--data",
             str(data),
             "--syncer",
@@ -1681,10 +2601,24 @@ def test_raw_image_lora_adapter_round_trip(monkeypatch, tmp_path):
             del prompt, kwargs
             return {"images": [Image.new("RGB", (1, 1), color="green")]}
 
-    monkeypatch.setattr(sample, "_load_base_pipeline", lambda model_id, device, dtype: TinySamplePipe())
+    monkeypatch.setattr(
+        sample,
+        "_load_base_pipeline",
+        lambda model_id, device, dtype, **kwargs: TinySamplePipe(),
+    )
+    with pytest.raises(PermissionError, match="pass the same --diffusion-adapter explicitly"):
+        sample.load_artifact_pipeline(
+            out,
+            SimpleNamespace(model=None, diffusion_adapter=None, device="cpu", dtype="auto"),
+        )
     pipe, loaded_meta, adapter = sample.load_artifact_pipeline(
         out,
-        SimpleNamespace(model=None, diffusion_adapter=None, device="cpu", dtype="auto"),
+        SimpleNamespace(
+            model=None,
+            diffusion_adapter=f"{adapter_file}:make_adapter",
+            device="cpu",
+            dtype="auto",
+        ),
     )
 
     assert loaded_meta["model"] == "tiny"
@@ -2291,6 +3225,165 @@ def test_denoise_forward_auto_fills_shape_and_mask_aliases():
     assert pipe.transformer.seen["img_sizes"] == [(2, 2), (2, 2)]
 
 
+def test_denoise_forward_prefers_encoder_mask_over_self_attention_mask():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(
+            self,
+            hidden_states,
+            timestep,
+            encoder_hidden_states=None,
+            attention_mask=None,
+            encoder_attention_mask=None,
+        ):
+            del timestep, encoder_hidden_states
+            self.seen = (attention_mask, encoder_attention_mask)
+            return hidden_states
+
+    pipe = argparse.Namespace(transformer=TinyDenoiser())
+    mask = torch.ones(1, 6, dtype=torch.long)
+    learner.denoise_forward(
+        pipe,
+        learner.LatentBatch(torch.zeros(1, 4, 4, 4)),
+        torch.tensor([1]),
+        learner.TextConditioning(torch.ones(1, 6, 8), attention_mask=mask),
+        argparse.Namespace(),
+    )
+
+    assert pipe.transformer.seen == (None, mask)
+
+
+def test_denoise_forward_auto_fills_additional_size_conditions():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class PixArtTransformer2DModel(torch.nn.Module):
+        use_additional_conditions = True
+
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        def forward(
+            self,
+            hidden_states,
+            timestep,
+            encoder_hidden_states=None,
+            added_cond_kwargs=None,
+            return_dict=False,
+        ):
+            del timestep, encoder_hidden_states
+            if added_cond_kwargs is None:
+                raise ValueError("added_cond_kwargs is required")
+            self.seen = added_cond_kwargs
+            return hidden_states + 1
+
+    pipe = argparse.Namespace(transformer=PixArtTransformer2DModel(), vae_scale_factor=8)
+    noisy = learner.LatentBatch(
+        torch.zeros(2, 4, 32, 48),
+        latent_height=32,
+        latent_width=48,
+    )
+
+    out = learner.denoise_forward(
+        pipe,
+        noisy,
+        torch.tensor([1, 2]),
+        learner.TextConditioning(torch.ones(2, 4, 8)),
+        argparse.Namespace(height=256, width=384),
+    )
+
+    assert torch.equal(out, torch.ones_like(noisy.latents))
+    assert torch.equal(
+        pipe.transformer.seen["resolution"],
+        torch.tensor([[256.0, 384.0], [256.0, 384.0]]),
+    )
+    assert torch.equal(
+        pipe.transformer.seen["aspect_ratio"],
+        torch.full((2, 1), 256 / 384),
+    )
+
+
+def test_denoise_forward_does_not_apply_pixart_contract_by_config_flag_alone():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+
+    class TinyDenoiser(torch.nn.Module):
+        use_additional_conditions = True
+
+        def __init__(self):
+            super().__init__()
+            self.seen = "not-called"
+
+        def forward(self, hidden_states, timestep, added_cond_kwargs=None):
+            del timestep
+            self.seen = added_cond_kwargs
+            return hidden_states
+
+    pipe = argparse.Namespace(transformer=TinyDenoiser(), vae_scale_factor=8)
+    learner.denoise_forward(
+        pipe,
+        learner.LatentBatch(torch.zeros(1, 4, 8, 8), latent_height=8, latent_width=8),
+        torch.tensor([1]),
+        learner.TextConditioning(None),
+        argparse.Namespace(height=64, width=64),
+    )
+
+    assert pipe.transformer.seen is None
+
+
+def test_denoise_forward_adapter_can_override_generic_kwargs():
+    torch = pytest.importorskip("torch")
+    from yeto.diffusion import learner
+    from yeto.diffusion.adapters import DiffusionAdapter
+
+    class TinyDenoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.return_dict = None
+
+        def forward(self, hidden_states, timestep, return_dict=False):
+            del timestep
+            self.return_dict = return_dict
+            return hidden_states
+
+    class OverrideAdapter(DiffusionAdapter):
+        def denoiser_kwargs(
+            self,
+            pipe,
+            model,
+            noisy,
+            cond,
+            args,
+            params,
+            kwargs,
+            *,
+            pixel_height,
+            pixel_width,
+        ):
+            del pipe, model, noisy, cond, args, params, kwargs
+            del pixel_height, pixel_width
+            return {"return_dict": True}
+
+    pipe = argparse.Namespace(transformer=TinyDenoiser())
+    learner.denoise_forward(
+        pipe,
+        learner.LatentBatch(torch.zeros(1, 4, 8, 8)),
+        torch.tensor([1]),
+        learner.TextConditioning(None),
+        argparse.Namespace(),
+        OverrideAdapter(),
+    )
+
+    assert pipe.transformer.return_dict is True
+
+
 def test_denoise_forward_auto_fills_rotary_size_and_fps_signature_fields():
     torch = pytest.importorskip("torch")
     from yeto.diffusion import learner
@@ -2531,6 +3624,7 @@ def test_launcher_routes_diffusion_to_diffusion_learner_and_opt_in_caches():
     assert "--diffusion-loss-weighting" not in task.run
     assert "--diffusion-family" not in task.run
     assert "--train-on" not in task.run and "--seq-len" not in task.run
+    assert "--assistant-mask-mode" not in task.run
     assert "--tokenize" not in task.run
 
 
@@ -2568,7 +3662,7 @@ def test_launcher_passes_diffusion_loss_weighting_only_for_diffusion():
     assert "--train-on assistant" in lm_task.run
 
 
-def test_launcher_passes_seed_only_to_diffusion_learner():
+def test_launcher_passes_the_model_kind_specific_seed():
     task = make_learner_task(
         _args(diffusion_seed=123),
         _SPEC,
@@ -2579,13 +3673,13 @@ def test_launcher_passes_seed_only_to_diffusion_learner():
     assert " --seed 123" in task.run
 
     lm_task = make_learner_task(
-        _args(model="gemma4", diffusion_seed=123),
+        _args(model="gemma4", diffusion_seed=123, seed=29),
         _SPEC,
         0,
         1,
         "a:1",
     )
-    assert " --seed " not in lm_task.run
+    assert " --seed 29" in lm_task.run
 
 
 def test_launcher_routes_video_aliases_without_model_family_flags():
@@ -2605,6 +3699,34 @@ def test_launcher_passes_diffusion_adapter_hook():
     assert "--diffusion-adapter my_adapter:make" in task.run
     assert "--diffusion-family" not in task.run
     assert "libsndfile1" not in task.setup
+
+
+def test_launcher_defaults_protenix_adapter_and_setup():
+    task = make_learner_task(_args(model="protenix"), _SPEC, 0, 1, "a:1")
+
+    assert "--model protenix" in task.run
+    assert "--diffusion-adapter yeto.diffusion.adapters.protenix:make_adapter" in task.run
+    assert "protenix>=2.0.0" in task.setup
+    assert "Protenix uses native model names/checkpoints" in task.setup
+    assert "huggingface-cli download protenix_base_default" not in task.setup
+
+
+def test_launcher_defaults_hunyuan3d_adapter_and_setup():
+    task = make_learner_task(_args(model="hunyuan3d-21"), _SPEC, 0, 1, "a:1")
+
+    assert "--model hunyuan3d-21" in task.run
+    assert "--diffusion-adapter yeto.diffusion.adapters.hunyuan3d:make_adapter" in task.run
+    assert "Tencent-Hunyuan/Hunyuan3D-2.1" in task.setup
+    assert task.envs["YETO_HUNYUAN3D_ROOT"] == "~/Hunyuan3D-2.1"
+
+
+def test_launcher_defaults_alphafold3_adapter_without_prefetch():
+    task = make_learner_task(_args(model="alphafold3"), _SPEC, 0, 1, "a:1")
+
+    assert "--model alphafold3" in task.run
+    assert "--diffusion-adapter yeto.diffusion.adapters.alphafold3:make_adapter" in task.run
+    assert "AlphaFold3 requires local authorized parameters" in task.setup
+    assert "huggingface-cli download alphafold3" not in task.setup
 
 
 def _sample_args(tmp_path, **over):
@@ -2653,6 +3775,7 @@ def test_diffusion_sample_task_uses_yeto_sample_and_mounts_data(tmp_path):
         max_rows=2,
         seed=123,
         diffusion_adapter="hooks:make",
+        allow_unattested_legacy_adapter=True,
     )
 
     task = make_diffusion_sample_task(args, _SPEC)
@@ -2664,6 +3787,7 @@ def test_diffusion_sample_task_uses_yeto_sample_and_mounts_data(tmp_path):
     assert "--max-rows 2" in task.run
     assert "--seed 123" in task.run
     assert "--diffusion-adapter hooks:make" in task.run
+    assert "--allow-unattested-legacy-adapter" in task.run
     assert task.file_mounts["~/yeto-adapter"] == args.adapter_dir
     assert task.file_mounts["~/yeto-data.jsonl"] == str(data)
     assert "diffusers" in task.setup

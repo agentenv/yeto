@@ -48,7 +48,7 @@ struct Args {
     /// Pre-merge learner-delta correction: "heloco" or "none".
     #[arg(long, default_value = "heloco")]
     delta_correction: String,
-    /// Give up waiting for quorum and re-send the pull after this long.
+    /// Give up waiting for quorum (or final learner ACKs) after this long.
     #[arg(long, default_value_t = 900)]
     quorum_timeout_s: u64,
     /// Total number of outer steps T (each syncs one fragment).
@@ -72,6 +72,12 @@ struct Args {
     /// Resume from --checkpoint-path if it exists.
     #[arg(long, default_value_t = false)]
     resume: bool,
+    /// Mark the terminal checkpoint as publishable after all merges finish.
+    #[arg(long, default_value_t = false)]
+    mark_final_checkpoint: bool,
+    /// Exact local optimizer-step budget per learner (benchmark-only).
+    #[arg(long)]
+    learner_budget_steps: Option<u64>,
     /// JSONL event tape (one record per merge).
     #[arg(long)]
     event_tape: Option<std::path::PathBuf>,
@@ -79,9 +85,12 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        // Logs are consumed by launchers, tests, and event collectors. Keep
+        // their field syntax stable even when CI advertises a color-capable
+        // terminal through environment variables.
+        .with_ansi(false)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let args = Args::parse();
@@ -109,6 +118,8 @@ fn main() -> anyhow::Result<()> {
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,
         resume: args.resume,
+        mark_final_checkpoint: args.mark_final_checkpoint,
+        learner_budget_steps: args.learner_budget_steps,
         event_tape: args.event_tape,
     };
     tokio::runtime::Builder::new_multi_thread()
