@@ -94,6 +94,7 @@ def test_direct_launcher_builds_valid_grpo_shape():
         samples_per_iteration=4,
         samples_per_prompt=2,
         model="Qwen/Qwen2.5-0.5B-Instruct",
+        megatron_load=Path("/workspace/qwen05b_megatron"),
         trainer_gpus=1,
         rollout_gpus=1,
         prompt_data="/workspace/yeto/cybergym_prompts.jsonl",
@@ -106,6 +107,7 @@ def test_direct_launcher_builds_valid_grpo_shape():
     command = build_train_command(args)
     assert command[1:3] == ["/workspace/miles/train.py", "--train-backend"]
     assert command[3] == "megatron"
+    assert command[command.index("--load") + 1] == "/workspace/qwen05b_megatron"
     assert "--custom-rm-path" in command
     assert "--ci-test" not in command
     assert command[command.index("--rollout-batch-size") + 1] == "2"

@@ -1,4 +1,4 @@
-"""Run a small, pinned Miles/FSDP CyberGym baseline.
+"""Run a small, pinned Miles/Megatron CyberGym baseline.
 
 This is intentionally a subprocess launcher rather than a second training
 loop.  It starts a local Ray head when needed and submits the documented Miles
@@ -35,6 +35,7 @@ def build_train_command(args: argparse.Namespace) -> list[str]:
         str(args.miles_root / "train.py"),
         "--train-backend", "megatron",
         "--hf-checkpoint", str(args.model),
+        "--load", str(args.megatron_load),
         "--megatron-to-hf-mode", "bridge",
         # Qwen/Qwen2.5-0.5B-Instruct architecture, matching Miles' own
         # scripts/models/qwen2.5-0.5B.sh smoke configuration.
@@ -177,6 +178,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--miles-root", type=Path, default=Path("/workspace/miles"))
     parser.add_argument("--prompt-data", type=Path, required=True)
     parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser.add_argument(
+        "--megatron-load",
+        type=Path,
+        default=Path("/workspace/qwen05b_megatron"),
+        help="local Megatron torch_dist checkpoint visible to every Ray worker",
+    )
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--samples-per-iteration", type=int, default=4)
     parser.add_argument("--samples-per-prompt", type=int, default=2)
@@ -195,10 +202,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.repo_root = repo_root
     args.miles_root = args.miles_root.expanduser().resolve()
     args.prompt_data = args.prompt_data.expanduser().resolve()
+    args.megatron_load = args.megatron_load.expanduser().resolve()
     if args.iterations <= 0 or args.trainer_gpus <= 0 or args.rollout_gpus <= 0:
         parser.error("iterations and GPU counts must be positive")
     if not args.prompt_data.is_file() and not args.dry_run:
         parser.error(f"prompt data does not exist: {args.prompt_data}")
+    if not args.megatron_load.is_dir() and not args.dry_run:
+        parser.error(f"Megatron checkpoint directory does not exist: {args.megatron_load}")
+    if args.megatron_load.is_dir() and not any(args.megatron_load.iterdir()) and not args.dry_run:
+        parser.error(f"Megatron checkpoint directory is empty: {args.megatron_load}")
     if not args.dry_run:
         verify_miles_checkout(args.miles_root)
         runtime_env = build_runtime_env(repo_root, args.miles_root, args)

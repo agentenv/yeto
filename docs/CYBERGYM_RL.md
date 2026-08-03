@@ -98,10 +98,28 @@ git -C ~/miles-clean fetch --depth 1 origin \
 git -C ~/miles-clean checkout --detach \
   dfc66ff38752bfa2c5d325e0037ebc4b537c06de
 
+# Download the matching HF weights and convert them once to Megatron torch_dist.
+hf download Qwen/Qwen2.5-0.5B-Instruct \
+  --local-dir "$HOME/qwen05b_hf"
+mkdir -p "$HOME/qwen05b_megatron"
+docker run --rm --gpus all --ipc host --shm-size=64g \
+  -e HF_TOKEN="$HF_TOKEN" \
+  -v "$HOME/miles-clean":/workspace/miles:ro \
+  -v "$HOME/qwen05b_hf":/workspace/qwen05b_hf:ro \
+  -v "$HOME/qwen05b_megatron":/workspace/qwen05b_megatron \
+  -w /workspace/miles \
+  radixark/miles@sha256:95b3afa9ee4313f5633e6ed3779c8276353cc8e24a2462e4f54ec0d5978fbae7 \
+  bash -lc 'source scripts/models/qwen2.5-0.5B.sh && \
+    python tools/convert_hf_to_torch_dist.py "${MODEL_ARGS[@]}" \
+      --hf-checkpoint /workspace/qwen05b_hf \
+      --save /workspace/qwen05b_megatron'
+
 docker run --rm -it --gpus all --network host --ipc host --shm-size=64g \
   -e HF_TOKEN="$HF_TOKEN" \
   -v "$PWD":/workspace/yeto:ro \
   -v "$HOME/miles-clean":/workspace/miles:ro \
+  -v "$HOME/qwen05b_hf":/workspace/qwen05b_hf:ro \
+  -v "$HOME/qwen05b_megatron":/workspace/qwen05b_megatron:ro \
   -w /workspace/yeto \
   radixark/miles@sha256:95b3afa9ee4313f5633e6ed3779c8276353cc8e24a2462e4f54ec0d5978fbae7 \
   bash
@@ -117,16 +135,19 @@ python -m yeto_miles_cybergym.launcher \
   --miles-root /workspace/miles \
   --prompt-data /tmp/cybergym_prompts.jsonl \
   --model Qwen/Qwen2.5-0.5B-Instruct \
+  --megatron-load /workspace/qwen05b_megatron \
   --iterations 3 \
   --samples-per-iteration 4 \
   --samples-per-prompt 2
 ```
 
-The launcher verifies the Miles commit, checks that `miles` and `sglang` can
-be imported, starts Ray with one Megatron training GPU and one rollout GPU,
-and prints the exact `ray job submit` command. Use `--dry-run` to inspect that
-command without starting Ray or contacting CyberGym. `samples-per-prompt` is
-at least two because one sample per GRPO group has no variance signal.
+The launcher verifies the Miles commit, checks that `miles` and `sglang` can be
+imported, verifies the local Megatron `torch_dist` checkpoint, starts Ray with
+one Megatron training GPU and one rollout GPU, and prints the exact `ray job
+submit` command. Use `--dry-run` to inspect that command without starting Ray
+or contacting CyberGym. `samples-per-prompt` is at least two because one sample
+per GRPO group has no variance signal. The `--megatron-load` path must be
+visible inside every Ray worker; the default is `/workspace/qwen05b_megatron`.
 
 This direct baseline uses the supported pinned Miles Megatron path. It is a
 protocol/throughput comparison against Yeto's strict distributed LoRA path,
