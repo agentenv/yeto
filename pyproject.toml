@@ -45,6 +45,8 @@ yeto-diffusion-export = "yeto.diffusion.export:main"
 yeto-diffusion-sample = "yeto.diffusion.sample:main"
 yeto-protenix-export-batch = "yeto.diffusion.protenix_export:main"
 yeto-hunyuan3d-export-batch = "yeto.diffusion.hunyuan3d_export:main"
+yeto-rl-export = "yeto.rl.export:main"
+yeto-rl-ssh = "yeto.rl.ssh_harness:main"
 
 [tool.setuptools.packages.find]
 include = ["yeto*"]

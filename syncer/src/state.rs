@@ -2,6 +2,8 @@
 //! and outer-optimizer momentum, all in f32.
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
+use std::io::Write;
 
 use crate::merge;
 use crate::protocol::Reader;
@@ -322,12 +324,73 @@ impl GlobalState {
 }
 
 const CKPT_MAGIC: u32 = 0xD170_5A7E;
+const RL_CKPT_MAGIC: u32 = 0xD170_52A1;
+const RL_CKPT_SCHEMA: u16 = 1;
 const FINAL_MARKER_MAGIC: &str = "YETO_FINAL_V1";
+const RL_FINAL_MARKER_MAGIC: &str = "YETO_RL_FINAL_V1";
+const RL_FATAL_MARKER_MAGIC: &str = "YETO_RL_FATAL_V1";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RlCheckpointIdentity {
+    pub run_manifest_sha256: [u8; 32],
+    pub layout_fingerprint: [u8; 32],
+    pub roster_size: u32,
+}
 
 pub fn final_marker_path(path: &std::path::Path) -> std::path::PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(".final");
     value.into()
+}
+
+pub fn rl_fatal_marker_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(".fatal");
+    value.into()
+}
+
+pub fn write_rl_fatal_marker(
+    path: &std::path::Path,
+    run_manifest_sha256: &[u8; 32],
+    message: &str,
+) -> Result<()> {
+    let marker = rl_fatal_marker_path(path);
+    let mut tmp_value = marker.as_os_str().to_os_string();
+    tmp_value.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp_value);
+    {
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        write!(
+            file,
+            "{RL_FATAL_MARKER_MAGIC}\nrun_manifest_sha256={}\n{message}\n",
+            hex(run_manifest_sha256)
+        )?;
+        file.flush()?;
+        file.get_ref().sync_all()?;
+    }
+    std::fs::rename(&tmp, &marker)?;
+    sync_parent(&marker)?;
+    Ok(())
+}
+
+pub fn read_rl_fatal_marker(
+    path: &std::path::Path,
+    run_manifest_sha256: &[u8; 32],
+) -> Result<Option<String>> {
+    let marker = rl_fatal_marker_path(path);
+    let text = match std::fs::read_to_string(&marker) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", marker.display())),
+    };
+    let prefix = format!(
+        "{RL_FATAL_MARKER_MAGIC}\nrun_manifest_sha256={}\n",
+        hex(run_manifest_sha256)
+    );
+    if !text.starts_with(&prefix) {
+        bail!("RL fatal marker identity does not match the configured run");
+    }
+    Ok(Some(text[prefix.len()..].trim_end().to_string()))
 }
 
 pub fn remove_final_marker(path: &std::path::Path) -> Result<()> {
@@ -356,62 +419,127 @@ pub fn write_final_marker(path: &std::path::Path, global_step: u64) -> Result<()
     Ok(())
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn rl_marker_text(
+    identity: &RlCheckpointIdentity,
+    global_step: u64,
+    policy_sha256: &[u8; 32],
+) -> String {
+    format!(
+        "{RL_FINAL_MARKER_MAGIC}\nglobal_step={global_step}\nroster_size={}\nrun_manifest_sha256={}\nlayout_fingerprint={}\npolicy_sha256={}\n",
+        identity.roster_size,
+        hex(&identity.run_manifest_sha256),
+        hex(&identity.layout_fingerprint),
+        hex(policy_sha256),
+    )
+}
+
+pub fn write_rl_final_marker(
+    path: &std::path::Path,
+    identity: &RlCheckpointIdentity,
+    global_step: u64,
+    policy_sha256: &[u8; 32],
+) -> Result<()> {
+    use std::io::Write;
+
+    let marker = final_marker_path(path);
+    let mut tmp_value = marker.as_os_str().to_os_string();
+    tmp_value.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp_value);
+    {
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        file.write_all(rl_marker_text(identity, global_step, policy_sha256).as_bytes())?;
+        file.flush()?;
+        file.get_ref().sync_all()?;
+    }
+    std::fs::rename(&tmp, &marker)?;
+    sync_parent(&marker)?;
+    Ok(())
+}
+
+/// Return false when no marker exists; a present but mismatched marker is fatal.
+pub fn read_rl_final_marker(
+    path: &std::path::Path,
+    identity: &RlCheckpointIdentity,
+    global_step: u64,
+    policy_sha256: &[u8; 32],
+) -> Result<bool> {
+    let marker = final_marker_path(path);
+    let text = match std::fs::read_to_string(&marker) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("read {}", marker.display())),
+    };
+    if text != rl_marker_text(identity, global_step, policy_sha256) {
+        bail!("RL final marker identity does not match the configured run");
+    }
+    Ok(true)
+}
+
+fn sync_parent(path: &std::path::Path) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn atomic_checkpoint(
+    path: &std::path::Path,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<()>,
+    sync_directory: bool,
+) -> Result<()> {
+    use std::io::Write;
+
+    let tmp = path.with_extension("tmp");
+    {
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        write(&mut file)?;
+        file.flush()?;
+        file.get_ref().sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if sync_directory {
+        sync_parent(path)?;
+    }
+    Ok(())
+}
+
 impl GlobalState {
-    /// Persist a consistent snapshot. Called only at the quiescent cut
-    /// between rounds (see docs/PROTOCOL.md "Consistent snapshots").
-    /// Written to `<path>.tmp` then renamed, so a crash mid-write never
-    /// corrupts the previous checkpoint.
-    pub fn save_checkpoint(&self, path: &std::path::Path) -> Result<()> {
-        use std::io::Write;
-        let tmp = path.with_extension("tmp");
-        {
-            let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-            f.write_all(&CKPT_MAGIC.to_le_bytes())?;
-            f.write_all(&self.global_step.to_le_bytes())?;
-            f.write_all(&(self.params.len() as u32).to_le_bytes())?;
-            for p in 0..self.params.len() {
-                f.write_all(&self.versions[p].to_le_bytes())?;
-                f.write_all(&(self.params[p].len() as u64).to_le_bytes())?;
-                for v in &self.params[p] {
-                    f.write_all(&v.to_le_bytes())?;
-                }
-                for v in &self.momentum[p] {
-                    f.write_all(&v.to_le_bytes())?;
-                }
+    fn write_checkpoint_body(&self, f: &mut impl std::io::Write) -> Result<()> {
+        f.write_all(&self.global_step.to_le_bytes())?;
+        f.write_all(&(self.params.len() as u32).to_le_bytes())?;
+        for p in 0..self.params.len() {
+            f.write_all(&self.versions[p].to_le_bytes())?;
+            f.write_all(&(self.params[p].len() as u64).to_le_bytes())?;
+            for value in &self.params[p] {
+                f.write_all(&value.to_le_bytes())?;
             }
-            f.write_all(&(self.ledger.len() as u32).to_le_bytes())?;
-            for (id, l) in &self.ledger {
-                f.write_all(&id.to_le_bytes())?;
-                f.write_all(&l.merges.to_le_bytes())?;
-                f.write_all(&l.steps.to_le_bytes())?;
-                f.write_all(&l.tokens.to_le_bytes())?;
+            for value in &self.momentum[p] {
+                f.write_all(&value.to_le_bytes())?;
             }
-            f.flush()?;
-            f.get_ref().sync_all()?;
         }
-        std::fs::rename(&tmp, path)?;
+        f.write_all(&(self.ledger.len() as u32).to_le_bytes())?;
+        for (id, ledger) in &self.ledger {
+            f.write_all(&id.to_le_bytes())?;
+            f.write_all(&ledger.merges.to_le_bytes())?;
+            f.write_all(&ledger.steps.to_le_bytes())?;
+            f.write_all(&ledger.tokens.to_le_bytes())?;
+        }
         Ok(())
     }
 
-    /// Restore params/momentum/versions/step/ledger from a snapshot.
-    /// The layout (from HELLO) must match the checkpointed fragment shapes.
-    pub fn load_checkpoint(&mut self, path: &std::path::Path) -> Result<()> {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        std::fs::File::open(path)?.read_to_end(&mut buf)?;
-        let mut r = Reader(&buf);
-        if r.u32()? != CKPT_MAGIC {
-            bail!("bad checkpoint magic");
-        }
+    fn read_checkpoint_body(&mut self, r: &mut Reader<'_>) -> Result<()> {
         self.global_step = r.u64()?;
-        let np = r.u32()? as usize;
-        if np != self.params.len() {
+        let fragments = r.u32()? as usize;
+        if fragments != self.params.len() {
             bail!(
-                "checkpoint has {np} fragments, layout has {}",
+                "checkpoint has {fragments} fragments, layout has {}",
                 self.params.len()
             );
         }
-        for p in 0..np {
+        for p in 0..fragments {
             self.versions[p] = r.u64()?;
             let numel = usize::try_from(r.u64()?)
                 .context("checkpoint fragment numel does not fit usize")?;
@@ -425,24 +553,153 @@ impl GlobalState {
                 slot.resize(numel, 0.0);
             }
             for slot in [&mut self.params[p], &mut self.momentum[p]] {
-                for v in slot.iter_mut() {
-                    *v = f32::from_le_bytes(r.take(4)?.try_into()?);
+                for value in slot.iter_mut() {
+                    *value = f32::from_le_bytes(r.take(4)?.try_into()?);
                 }
             }
             self.initialized[p] = true;
         }
-        let nl = r.u32()? as usize;
+        let learners = r.u32()? as usize;
         self.ledger.clear();
-        for _ in 0..nl {
+        for _ in 0..learners {
             let id = r.u32()?;
-            let l = LearnerLedger {
+            let ledger = LearnerLedger {
                 merges: r.u64()?,
                 steps: r.u64()?,
                 tokens: r.u64()?,
             };
-            self.ledger.insert(id, l);
+            if self.ledger.insert(id, ledger).is_some() {
+                bail!("duplicate learner {id} in checkpoint ledger");
+            }
+        }
+        if r.remaining() != 0 {
+            bail!("trailing bytes in checkpoint");
         }
         Ok(())
+    }
+
+    pub fn rl_policy_sha256(&self, layout_fingerprint: &[u8; 32]) -> Result<[u8; 32]> {
+        if !self.all_initialized() {
+            bail!("cannot hash uninitialized RL policy");
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"yeto-rl-policy-v1\0");
+        digest.update(layout_fingerprint);
+        for fragment in &self.params {
+            for value in fragment {
+                if !value.is_finite() {
+                    bail!("cannot hash non-finite RL policy");
+                }
+                digest.update(value.to_le_bytes());
+            }
+        }
+        Ok(digest.finalize().into())
+    }
+
+    /// Persist a consistent snapshot. Called only at the quiescent cut
+    /// between rounds (see docs/PROTOCOL.md "Consistent snapshots").
+    /// Written to `<path>.tmp` then renamed, so a crash mid-write never
+    /// corrupts the previous checkpoint.
+    pub fn save_checkpoint(&self, path: &std::path::Path) -> Result<()> {
+        atomic_checkpoint(
+            path,
+            |f| {
+                f.write_all(&CKPT_MAGIC.to_le_bytes())?;
+                self.write_checkpoint_body(f)
+            },
+            false,
+        )
+    }
+
+    pub fn save_rl_checkpoint(
+        &self,
+        path: &std::path::Path,
+        identity: &RlCheckpointIdentity,
+    ) -> Result<[u8; 32]> {
+        let policy_sha256 = self.rl_policy_sha256(&identity.layout_fingerprint)?;
+        atomic_checkpoint(
+            path,
+            |f| {
+                f.write_all(&RL_CKPT_MAGIC.to_le_bytes())?;
+                f.write_all(&RL_CKPT_SCHEMA.to_le_bytes())?;
+                f.write_all(&identity.run_manifest_sha256)?;
+                f.write_all(&identity.layout_fingerprint)?;
+                f.write_all(&identity.roster_size.to_le_bytes())?;
+                f.write_all(&policy_sha256)?;
+                self.write_checkpoint_body(f)
+            },
+            true,
+        )?;
+        Ok(policy_sha256)
+    }
+
+    /// Restore params/momentum/versions/step/ledger from a snapshot.
+    /// The layout (from HELLO) must match the checkpointed fragment shapes.
+    pub fn load_checkpoint(&mut self, path: &std::path::Path) -> Result<()> {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        std::fs::File::open(path)?.read_to_end(&mut buf)?;
+        let mut r = Reader(&buf);
+        if r.u32()? != CKPT_MAGIC {
+            bail!("bad checkpoint magic");
+        }
+        self.read_checkpoint_body(&mut r)
+    }
+
+    pub fn load_rl_checkpoint(
+        &mut self,
+        path: &std::path::Path,
+        identity: &RlCheckpointIdentity,
+    ) -> Result<[u8; 32]> {
+        use std::io::Read;
+
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?.read_to_end(&mut bytes)?;
+        let mut reader = Reader(&bytes);
+        if reader.u32()? != RL_CKPT_MAGIC {
+            bail!("checkpoint is not an rl-strict-avg checkpoint");
+        }
+        if reader.u16()? != RL_CKPT_SCHEMA {
+            bail!("unsupported rl-strict-avg checkpoint schema");
+        }
+        let manifest: [u8; 32] = reader.take(32)?.try_into()?;
+        let layout: [u8; 32] = reader.take(32)?.try_into()?;
+        let roster = reader.u32()?;
+        let stored_policy: [u8; 32] = reader.take(32)?.try_into()?;
+        if manifest != identity.run_manifest_sha256
+            || layout != identity.layout_fingerprint
+            || roster != identity.roster_size
+        {
+            bail!("rl-strict-avg checkpoint identity mismatch");
+        }
+        self.read_checkpoint_body(&mut reader)?;
+        if self.params.len() != 1
+            || self.versions != [self.global_step]
+            || self
+                .momentum
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+        {
+            bail!("RL checkpoint does not contain one strict finite policy");
+        }
+        for learner_id in 0..identity.roster_size {
+            let ledger = self.ledger.get(&learner_id).cloned().unwrap_or_default();
+            if ledger.merges != self.global_step
+                || ledger.steps != self.global_step
+                || ledger.tokens != self.global_step
+            {
+                bail!("RL checkpoint ledger does not cover the fixed roster");
+            }
+        }
+        if self.ledger.keys().any(|id| *id >= identity.roster_size) {
+            bail!("RL checkpoint ledger contains a learner outside the fixed roster");
+        }
+        let actual_policy = self.rl_policy_sha256(&identity.layout_fingerprint)?;
+        if stored_policy != actual_policy {
+            bail!("RL checkpoint policy SHA256 mismatch");
+        }
+        Ok(actual_policy)
     }
 }
 
@@ -609,6 +866,86 @@ mod tests {
         assert_eq!(restored.global_step, 13);
         assert_eq!(restored.versions, vec![12, 13]);
         assert!(!path.with_extension("tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn rl_identity() -> RlCheckpointIdentity {
+        RlCheckpointIdentity {
+            run_manifest_sha256: [0x11; 32],
+            layout_fingerprint: [0x22; 32],
+            roster_size: 2,
+        }
+    }
+
+    fn rl_state() -> GlobalState {
+        let layout = Layout {
+            fragments: vec![FragmentInfo {
+                merge_mode: MERGE_AVG,
+                tensor_numels: vec![2, 2],
+                tensor_shapes: None,
+            }],
+        };
+        let mut state = GlobalState::new(layout, 1.0, 0.0, crate::protocol::DTYPE_F32).unwrap();
+        state.init_fragment(0, vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        state
+    }
+
+    #[test]
+    fn rl_checkpoint_binds_manifest_layout_roster_and_policy_hash() {
+        let dir = std::env::temp_dir().join(format!("yeto-rl-ckpt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+        let identity = rl_identity();
+        let expected_hash = rl_state().save_rl_checkpoint(&path, &identity).unwrap();
+
+        let mut restored = rl_state();
+        restored.params[0].fill(0.0);
+        assert_eq!(
+            restored.load_rl_checkpoint(&path, &identity).unwrap(),
+            expected_hash
+        );
+        assert_eq!(restored.params[0], vec![1.0, 2.0, 3.0, 4.0]);
+
+        let mut wrong = identity.clone();
+        wrong.roster_size = 3;
+        assert!(rl_state().load_rl_checkpoint(&path, &wrong).is_err());
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        // Header (106 bytes) + body metadata (28 bytes) precedes the first f32.
+        bytes[134] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        assert!(rl_state().load_rl_checkpoint(&path, &identity).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rl_final_marker_is_bound_to_the_acknowledged_policy() {
+        let dir = std::env::temp_dir().join(format!("yeto-rl-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("state.ckpt");
+        let identity = rl_identity();
+        let policy = [0x33; 32];
+        write_rl_final_marker(&checkpoint, &identity, 7, &policy).unwrap();
+        assert!(read_rl_final_marker(&checkpoint, &identity, 7, &policy).unwrap());
+        assert!(read_rl_final_marker(&checkpoint, &identity, 8, &policy).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rl_fatal_marker_is_durable_and_bound_to_the_run_manifest() {
+        let dir = std::env::temp_dir().join(format!("yeto-rl-fatal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("state.ckpt");
+        let manifest = [0x44; 32];
+        write_rl_fatal_marker(&checkpoint, &manifest, "strict round timed out").unwrap();
+        assert_eq!(
+            read_rl_fatal_marker(&checkpoint, &manifest).unwrap(),
+            Some("strict round timed out".to_string())
+        );
+        assert!(read_rl_fatal_marker(&checkpoint, &[0x45; 32]).is_err());
+        assert!(!rl_fatal_marker_path(&checkpoint)
+            .with_extension("fatal.tmp")
+            .exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

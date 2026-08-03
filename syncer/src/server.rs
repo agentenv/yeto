@@ -6,12 +6,14 @@
 //! "two fragments in flight"), so a slow quorum on one fragment never
 //! delays pulling the next.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
@@ -19,7 +21,10 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::protocol::*;
-use crate::state::{remove_final_marker, write_final_marker, GlobalState, Layout};
+use crate::state::{
+    read_rl_fatal_marker, read_rl_final_marker, remove_final_marker, write_final_marker,
+    write_rl_fatal_marker, write_rl_final_marker, GlobalState, Layout, RlCheckpointIdentity,
+};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const CHUNK_HEADER_SIZE: u64 = 24;
@@ -80,6 +85,12 @@ pub struct Config {
     pub learner_budget_steps: Option<u64>,
     /// JSONL event tape: one record per merge.
     pub event_tape: Option<std::path::PathBuf>,
+    /// Fixed-roster synchronous f32 LoRA FedAvg mode.
+    pub rl_strict_avg: bool,
+    /// SHA256 of the canonical run manifest (required in strict mode).
+    pub run_manifest_sha256: Option<String>,
+    /// Optional algorithm-level deadline for one strict round.
+    pub rl_round_timeout_s: u64,
 }
 
 struct OutFrame {
@@ -103,6 +114,7 @@ struct Group {
     member: Member,
     dtype: u8,
     layout: Layout,
+    layout_fingerprint: [u8; 32],
     num_streams: u16,
     max_init_payload: u64,
     max_push_payload: u64,
@@ -222,6 +234,10 @@ struct Push {
     /// Signed outer gradient `raw_anchor - local`, converted exactly once
     /// from the learner's wire delta `local - raw_anchor`.
     outer_gradient: Vec<f32>,
+    /// SHA256 of the exact PUSH_FRAGMENT payload, excluding transport identity.
+    payload_digest: [u8; 32],
+    /// SHA256 of the encoded tensor bytes, matching the learner result cache.
+    delta_digest: [u8; 32],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -345,6 +361,27 @@ impl StepRates {
 type Registry = Arc<Mutex<RegistryState>>;
 type Session = Arc<Mutex<Option<SessionSpec>>>;
 
+#[derive(Debug)]
+struct StrictFatal(String);
+
+impl fmt::Display for StrictFatal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StrictFatal {}
+
+fn strict_fatal(message: impl Into<String>) -> anyhow::Error {
+    StrictFatal(message.into()).into()
+}
+
+macro_rules! strict_bail {
+    ($($arg:tt)*) => {
+        return Err(strict_fatal(format!($($arg)*)))
+    };
+}
+
 pub async fn run(cfg: Config) -> Result<()> {
     if cfg.learners == 0 {
         bail!("--learners must be positive");
@@ -354,6 +391,35 @@ pub async fn run(cfg: Config) -> Result<()> {
     }
     if cfg.mark_final_checkpoint && cfg.checkpoint_path.is_none() {
         bail!("--mark-final-checkpoint requires --checkpoint-path");
+    }
+    if cfg.rl_strict_avg {
+        if cfg.quorum != cfg.learners
+            || cfg.pipeline != 1
+            || cfg.min_round_interval_ms != 0
+            || cfg.sync_interval_steps != 0.0
+            || cfg.delta_correction
+            || cfg.outer_lr != 1.0
+            || cfg.outer_momentum != 0.0
+            || cfg.checkpoint_every != 1
+            || !cfg.mark_final_checkpoint
+            || cfg.checkpoint_path.is_none()
+            || cfg.learner_budget_steps.is_some()
+            || cfg.total_steps == 0
+        {
+            bail!("rl-strict-avg requires quorum=learners, pipeline=1, unthrottled sync, no correction, outer-lr=1, outer-momentum=0, checkpoint-every=1, and a marked checkpoint");
+        }
+        let manifest_sha256 = parse_sha256(
+            cfg.run_manifest_sha256
+                .as_deref()
+                .context("rl-strict-avg requires --run-manifest-sha256")?,
+        )?;
+        if let Some(message) =
+            read_rl_fatal_marker(cfg.checkpoint_path.as_ref().unwrap(), &manifest_sha256)?
+        {
+            bail!("rl-strict-avg run is permanently failed: {message}");
+        }
+    } else if cfg.run_manifest_sha256.is_some() || cfg.rl_round_timeout_s != 0 {
+        bail!("RL manifest and round timeout flags require --rl-strict-avg");
     }
     if let Some(steps) = cfg.learner_budget_steps {
         if !(1..=u32::MAX as u64).contains(&steps) {
@@ -377,6 +443,13 @@ pub async fn run(cfg: Config) -> Result<()> {
     let accept_registry = registry.clone();
     let accept_session = session.clone();
     let expected_learners = cfg.learners;
+    let rl_strict_avg = cfg.rl_strict_avg;
+    let strict_checkpoint = cfg.checkpoint_path.clone();
+    let strict_manifest = cfg
+        .run_manifest_sha256
+        .as_deref()
+        .map(parse_sha256)
+        .transpose()?;
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -385,8 +458,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                     let session = accept_session.clone();
                     let tx = event_tx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_connection(stream, reg, session, expected_learners, tx).await
+                        if let Err(e) = handle_connection(
+                            stream,
+                            reg,
+                            session,
+                            expected_learners,
+                            rl_strict_avg,
+                            tx,
+                        )
+                        .await
                         {
                             warn!(%peer, "connection ended: {e:#}");
                         }
@@ -397,7 +477,42 @@ pub async fn run(cfg: Config) -> Result<()> {
         }
     });
 
-    scheduler(cfg, event_rx, registry).await
+    let result = scheduler(cfg, event_rx, registry.clone()).await;
+    if rl_strict_avg {
+        if let Err(error) = &result {
+            let mut message = format!("rl-strict-avg failed: {error:#}").into_bytes();
+            message.truncate(64 * 1024);
+            if error.downcast_ref::<StrictFatal>().is_some() {
+                if let Err(marker_error) = write_rl_fatal_marker(
+                    strict_checkpoint.as_ref().unwrap(),
+                    strict_manifest.as_ref().unwrap(),
+                    &String::from_utf8_lossy(&message),
+                ) {
+                    warn!(%marker_error, "failed to persist strict fatal marker");
+                }
+            }
+            let payload = bytes::Bytes::from(message);
+            for group in current_groups(&registry) {
+                let _ = group.send_small(MSG_ERROR, payload.clone()).await;
+            }
+            // Let control writers flush the terminal error before the runtime
+            // drops their sockets. Learners then fail the fixed-roster run
+            // instead of reconnecting forever to a deterministically bad cut.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    result
+}
+
+fn parse_sha256(value: &str) -> Result<[u8; 32]> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("SHA256 must be exactly 64 hexadecimal characters");
+    }
+    let mut result = [0u8; 32];
+    for (index, slot) in result.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)?;
+    }
+    Ok(result)
 }
 
 fn negotiated_payload_limits(layout: &Layout, dtype: u8) -> Result<(u64, u64)> {
@@ -424,7 +539,7 @@ fn negotiated_payload_limits(layout: &Layout, dtype: u8) -> Result<(u64, u64)> {
     Ok((max_init, max_push))
 }
 
-fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
+fn parse_hello(payload: &[u8], expected_learners: u32, rl_strict_avg: bool) -> Result<ParsedHello> {
     let mut r = Reader(payload);
     let version = r.u16()?;
     if version != PROTOCOL_VERSION {
@@ -454,6 +569,13 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
     }
     if num_streams > 256 {
         bail!("num_streams {num_streams} exceeds limit 256");
+    }
+    if rl_strict_avg
+        && (dtype != DTYPE_F32
+            || layout.fragments.len() != 1
+            || layout.fragments[0].merge_mode != crate::state::MERGE_AVG)
+    {
+        bail!("rl-strict-avg requires one MERGE_AVG fragment and f32 wire dtype");
     }
     let (max_init_payload, max_push_payload) = negotiated_payload_limits(&layout, dtype)?;
     Ok(ParsedHello {
@@ -493,6 +615,7 @@ async fn handle_connection(
     registry: Registry,
     session: Session,
     expected_learners: u32,
+    rl_strict_avg: bool,
     event_tx: mpsc::Sender<Event>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
@@ -518,7 +641,7 @@ async fn handle_connection(
     };
     match first.msg_type {
         MSG_HELLO => {
-            let parsed = match parse_hello(&first.payload, expected_learners) {
+            let parsed = match parse_hello(&first.payload, expected_learners, rl_strict_avg) {
                 Ok(parsed) => parsed,
                 Err(error) => {
                     let message = format!("invalid HELLO: {error:#}");
@@ -574,6 +697,7 @@ async fn handle_connection(
                 member,
                 dtype,
                 layout,
+                layout_fingerprint,
                 num_streams,
                 max_init_payload,
                 max_push_payload,
@@ -896,6 +1020,7 @@ async fn dispatch_inner(
                 .ok();
         }
         MSG_PUSH_FRAGMENT => {
+            let payload_digest: [u8; 32] = Sha256::digest(payload).into();
             let mut r = Reader(payload);
             let learner_id = r.u32()?;
             if learner_id != group.member.learner_id {
@@ -924,6 +1049,7 @@ async fn dispatch_inner(
                 .with_context(|| format!("PUSH_FRAGMENT for unknown fragment {fragment_id}"))?;
             let numel = fragment.numel()?;
             let bytes = r.rest();
+            let delta_digest: [u8; 32] = Sha256::digest(bytes).into();
             let expected = if group.dtype == DTYPE_Q4 {
                 q4_nbytes(numel)?
             } else {
@@ -960,6 +1086,8 @@ async fn dispatch_inner(
                         c_steps,
                         c_tokens,
                         outer_gradient,
+                        payload_digest,
+                        delta_digest,
                     },
                 })
                 .await
@@ -1024,6 +1152,7 @@ async fn scheduler(
     registry: Registry,
 ) -> Result<()> {
     let mut state: Option<GlobalState> = None;
+    let mut rl_identity: Option<RlCheckpointIdentity> = None;
     let mut budget_reports: HashSet<u32> = HashSet::new();
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
@@ -1038,7 +1167,25 @@ async fn scheduler(
         if let Some(st) = &state {
             let budget_ready =
                 budget_reports.is_empty() || budget_reports.len() == cfg.learners as usize;
-            if st.all_initialized() && connected >= cfg.learners && budget_ready {
+            let already_finalized = if cfg.rl_strict_avg && st.all_initialized() {
+                let identity = rl_identity.as_ref().unwrap();
+                let policy_sha256 = st
+                    .rl_policy_sha256(&identity.layout_fingerprint)
+                    .map_err(|error| strict_fatal(format!("invalid strict policy: {error:#}")))?;
+                read_rl_final_marker(
+                    cfg.checkpoint_path.as_ref().unwrap(),
+                    identity,
+                    st.global_step,
+                    &policy_sha256,
+                )
+                .map_err(|error| strict_fatal(format!("invalid RL final marker: {error:#}")))?
+            } else {
+                false
+            };
+            if st.all_initialized()
+                && (connected >= cfg.learners || already_finalized)
+                && budget_ready
+            {
                 break;
             }
         }
@@ -1048,9 +1195,26 @@ async fn scheduler(
                     // Layout comes from the HELLO of the first learner.
                     // (All learners must build identical layouts.)
                     let mut st = new_state_for(&group, &cfg)?;
+                    if cfg.rl_strict_avg {
+                        rl_identity = Some(RlCheckpointIdentity {
+                            run_manifest_sha256: parse_sha256(
+                                cfg.run_manifest_sha256.as_deref().unwrap(),
+                            )?,
+                            layout_fingerprint: group.layout_fingerprint,
+                            roster_size: cfg.learners,
+                        });
+                    }
                     if cfg.resume {
                         if let Some(path) = cfg.checkpoint_path.as_ref().filter(|p| p.exists()) {
-                            st.load_checkpoint(path)?;
+                            if let Some(identity) = &rl_identity {
+                                st.load_rl_checkpoint(path, identity).map_err(|error| {
+                                    strict_fatal(format!(
+                                        "cannot resume strict checkpoint: {error:#}"
+                                    ))
+                                })?;
+                            } else {
+                                st.load_checkpoint(path)?;
+                            }
                             info!(step = st.global_step, "resumed from checkpoint");
                         }
                     }
@@ -1062,6 +1226,9 @@ async fn scheduler(
                 fragment_id,
                 values,
             } => {
+                if cfg.rl_strict_avg && member.learner_id != 0 {
+                    strict_bail!("rl-strict-avg accepts INIT_PARAMS only from learner 0");
+                }
                 if !is_current_member(&registry, member) {
                     warn!(
                         learner_id = member.learner_id,
@@ -1071,7 +1238,14 @@ async fn scheduler(
                     continue;
                 }
                 let st = state.as_mut().context("INIT before HELLO")?;
-                st.init_fragment(fragment_id as usize, values)?;
+                if let Err(error) = st.init_fragment(fragment_id as usize, values) {
+                    if cfg.rl_strict_avg {
+                        return Err(strict_fatal(format!(
+                            "invalid strict initialization: {error:#}"
+                        )));
+                    }
+                    return Err(error);
+                }
                 if st.all_initialized() {
                     info!("global parameters initialized");
                 }
@@ -1086,6 +1260,9 @@ async fn scheduler(
                 member,
                 local_steps,
             } => {
+                if cfg.rl_strict_avg {
+                    strict_bail!("BUDGET_DONE is invalid in rl-strict-avg mode");
+                }
                 let target = cfg
                     .learner_budget_steps
                     .context("received BUDGET_DONE outside learner-budget mode")?;
@@ -1105,6 +1282,9 @@ async fn scheduler(
     if !budget_reports.is_empty() {
         save_budget_checkpoint(&cfg, &st)?;
         return Ok(());
+    }
+    if let Some(identity) = rl_identity {
+        return strict_scheduler(&cfg, st, events, registry, identity).await;
     }
     let num_fragments = st.layout.fragments.len() as u64;
     let mut step_rates = StepRates::default();
@@ -1374,11 +1554,395 @@ async fn scheduler(
         .into_iter()
         .map(|group| group.member.learner_id)
         .collect();
-    finalize_learners(&cfg, &st, &mut events, &registry, &final_members).await?;
+    let finalized = finalize_learners(
+        &st,
+        &mut events,
+        &registry,
+        &final_members,
+        Some(cfg.quorum_timeout_s),
+    )
+    .await?;
+    shutdown_groups(finalized).await;
     info!("training complete after {} outer steps", cfg.total_steps);
     // Give writer tasks a moment to flush the final control frames.
     tokio::time::sleep(Duration::from_secs(2)).await;
     return Ok(());
+}
+
+struct StrictPush {
+    member: Member,
+    push: Push,
+}
+
+struct StrictRound {
+    step: u64,
+    base_version: u64,
+    pull: bytes::Bytes,
+    started: Instant,
+    permitted: HashMap<u32, HashSet<Member>>,
+    pushes: BTreeMap<u32, StrictPush>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum StrictPushDisposition {
+    Accepted,
+    Duplicate,
+    Late,
+}
+
+fn route_strict_push(
+    round: &mut StrictRound,
+    committed_step: u64,
+    member: Member,
+    push: Push,
+) -> Result<StrictPushDisposition> {
+    if push.global_step <= committed_step {
+        return Ok(StrictPushDisposition::Late);
+    }
+    if push.global_step != round.step
+        || push.fragment_id != 0
+        || push.round_attempt != 1
+        || push.base_version != round.base_version
+        || push.local_step != round.step
+        || push.c_steps != 1
+        || push.c_tokens != 1
+    {
+        strict_bail!(
+            "strict push from learner {} does not match permit step={} base={} counters=(1,1)",
+            member.learner_id,
+            round.step,
+            round.base_version
+        );
+    }
+    if !round
+        .permitted
+        .get(&member.learner_id)
+        .is_some_and(|members| members.contains(&member))
+    {
+        strict_bail!(
+            "strict push from learner {} generation {} has no permit",
+            member.learner_id,
+            member.generation
+        );
+    }
+    if push.outer_gradient.iter().any(|value| !value.is_finite()) {
+        strict_bail!(
+            "strict push from learner {} is non-finite",
+            member.learner_id
+        );
+    }
+    if let Some(previous) = round.pushes.get(&member.learner_id) {
+        if previous.push.payload_digest == push.payload_digest {
+            return Ok(StrictPushDisposition::Duplicate);
+        }
+        strict_bail!(
+            "conflicting duplicate strict push from learner {}",
+            member.learner_id
+        );
+    }
+    round
+        .pushes
+        .insert(member.learner_id, StrictPush { member, push });
+    Ok(StrictPushDisposition::Accepted)
+}
+
+async fn permit_strict_group(round: &mut StrictRound, group: &Arc<Group>) -> Result<()> {
+    group.send_small(MSG_PULL_REQ, round.pull.clone()).await?;
+    round
+        .permitted
+        .entry(group.member.learner_id)
+        .or_default()
+        .insert(group.member);
+    Ok(())
+}
+
+async fn resend_missing_strict_permits(round: &mut StrictRound, registry: &Registry) {
+    for group in current_groups(registry) {
+        if round.pushes.contains_key(&group.member.learner_id) {
+            continue;
+        }
+        if let Err(error) = permit_strict_group(round, &group).await {
+            warn!(
+                learner_id = group.member.learner_id,
+                generation = group.member.generation,
+                step = round.step,
+                %error,
+                "strict PULL resend failed"
+            );
+        }
+    }
+}
+
+async fn strict_scheduler(
+    cfg: &Config,
+    mut st: GlobalState,
+    mut events: mpsc::Receiver<Event>,
+    registry: Registry,
+    identity: RlCheckpointIdentity,
+) -> Result<()> {
+    let checkpoint = cfg.checkpoint_path.as_ref().unwrap();
+    if st.layout.fragments.len() != 1
+        || st.layout.fragments[0].merge_mode != crate::state::MERGE_AVG
+        || st.wire_dtype != DTYPE_F32
+        || st.versions[0] != st.global_step
+        || st.global_step > cfg.total_steps
+    {
+        strict_bail!("invalid state for rl-strict-avg");
+    }
+
+    let mut policy_sha256 = st
+        .rl_policy_sha256(&identity.layout_fingerprint)
+        .map_err(|error| strict_fatal(format!("invalid strict policy: {error:#}")))?;
+    if read_rl_final_marker(checkpoint, &identity, st.global_step, &policy_sha256)
+        .map_err(|error| strict_fatal(format!("invalid RL final marker: {error:#}")))?
+    {
+        if st.global_step != cfg.total_steps {
+            strict_bail!("RL final marker exists before the configured terminal step");
+        }
+        info!(
+            step = st.global_step,
+            "strict run was already finalized; replaying the terminal cut"
+        );
+        return replay_finalized_strict_run(cfg, &st, &mut events, &registry).await;
+    }
+    remove_final_marker(checkpoint)?;
+
+    // The initial/resumed cut is durable before any learner may observe it.
+    policy_sha256 = st.save_rl_checkpoint(checkpoint, &identity)?;
+    info!(
+        step = st.global_step,
+        policy_sha256 = %hex(&policy_sha256),
+        "strict checkpoint written"
+    );
+    broadcast_all_fragments(&st, &registry).await;
+
+    let retry_interval = Duration::from_secs(cfg.quorum_timeout_s.max(1));
+    for step in st.global_step + 1..=cfg.total_steps {
+        let mut round = StrictRound {
+            step,
+            base_version: st.global_step,
+            pull: encode_pull(0, step, 1),
+            started: Instant::now(),
+            permitted: HashMap::new(),
+            pushes: BTreeMap::new(),
+        };
+        resend_missing_strict_permits(&mut round, &registry).await;
+        let mut next_retry = Instant::now() + retry_interval;
+        let deadline = (cfg.rl_round_timeout_s > 0)
+            .then(|| round.started + Duration::from_secs(cfg.rl_round_timeout_s));
+
+        while round.pushes.len() < cfg.learners as usize {
+            let wake = deadline.map_or(next_retry, |limit| limit.min(next_retry));
+            match tokio::time::timeout(
+                wake.saturating_duration_since(Instant::now()),
+                events.recv(),
+            )
+            .await
+            {
+                Err(_) => {
+                    if deadline.is_some_and(|limit| Instant::now() >= limit) {
+                        let missing: Vec<u32> = (0..cfg.learners)
+                            .filter(|id| !round.pushes.contains_key(id))
+                            .collect();
+                        strict_bail!(
+                            "strict round {step} timed out after {}s waiting for {:?}",
+                            cfg.rl_round_timeout_s,
+                            missing
+                        );
+                    }
+                    resend_missing_strict_permits(&mut round, &registry).await;
+                    next_retry = Instant::now() + retry_interval;
+                }
+                Ok(None) => bail!("event channel closed during strict round"),
+                Ok(Some(event)) => match event {
+                    Event::Push { member, push } => {
+                        match route_strict_push(&mut round, st.global_step, member, push)? {
+                            StrictPushDisposition::Accepted => info!(
+                                learner_id = member.learner_id,
+                                generation = member.generation,
+                                step,
+                                remaining = cfg.learners as usize - round.pushes.len(),
+                                "strict push accepted"
+                            ),
+                            StrictPushDisposition::Duplicate => {}
+                            StrictPushDisposition::Late => warn!(
+                                learner_id = member.learner_id,
+                                generation = member.generation,
+                                step,
+                                "late completed-round push dropped"
+                            ),
+                        }
+                    }
+                    Event::Hello { group } => {
+                        send_all_fragments(&st, &group).await;
+                        if is_current_member(&registry, group.member)
+                            && !round.pushes.contains_key(&group.member.learner_id)
+                        {
+                            if let Err(error) = permit_strict_group(&mut round, &group).await {
+                                warn!(
+                                    learner_id = group.member.learner_id,
+                                    generation = group.member.generation,
+                                    step,
+                                    %error,
+                                    "strict reconnect PULL failed"
+                                );
+                            }
+                        }
+                    }
+                    Event::Disconnected { member } => warn!(
+                        learner_id = member.learner_id,
+                        generation = member.generation,
+                        step,
+                        "strict learner disconnected; fixed roster unchanged"
+                    ),
+                    Event::Init { .. } => {}
+                    Event::FinalAck { member, .. } => warn!(
+                        learner_id = member.learner_id,
+                        "premature final acknowledgement dropped"
+                    ),
+                    Event::BudgetDone { .. } => {
+                        strict_bail!("BUDGET_DONE is invalid in rl-strict-avg mode");
+                    }
+                },
+            }
+        }
+
+        let gradients: Vec<&[f32]> = round
+            .pushes
+            .values()
+            .map(|accepted| accepted.push.outer_gradient.as_slice())
+            .collect();
+        let weights = vec![1.0; gradients.len()];
+        let gnorm = st
+            .merge_and_step(0, &gradients, &weights)
+            .map_err(|error| strict_fatal(format!("strict average failed: {error:#}")))?;
+        st.global_step = step;
+        st.versions[0] = step;
+        for accepted in round.pushes.values() {
+            st.record_merge(accepted.push.learner_id, 1, 1);
+        }
+
+        // A failed checkpoint aborts before a BCAST can expose the candidate.
+        policy_sha256 = st.save_rl_checkpoint(checkpoint, &identity)?;
+        let delta_digests = round
+            .pushes
+            .iter()
+            .map(|(learner_id, accepted)| {
+                format!(
+                    "{}@{}:{}",
+                    learner_id,
+                    accepted.member.generation,
+                    hex(&accepted.push.delta_digest)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        info!(
+            step,
+            roster = cfg.learners,
+            delta_digests,
+            policy_sha256 = %hex(&policy_sha256),
+            gnorm = format!("{gnorm:.4}"),
+            "strict checkpoint committed"
+        );
+        let payload = encode_bcast(&st, 0)?;
+        let mut broadcasted = Vec::new();
+        for group in current_groups(&registry) {
+            if group
+                .send_large(MSG_BCAST_FRAGMENT, payload.clone())
+                .await
+                .is_ok()
+            {
+                broadcasted.push(group.member.learner_id);
+            }
+        }
+        broadcasted.sort_unstable();
+        if let Some(tape) = &cfg.event_tape {
+            append_strict_tape(
+                tape,
+                &identity,
+                step,
+                round.base_version,
+                &round.pushes,
+                &broadcasted,
+                &policy_sha256,
+                gnorm,
+                round.started.elapsed().as_millis() as u64,
+            )?;
+        }
+    }
+
+    finish_strict_run(cfg, &st, &mut events, &registry, &identity, &policy_sha256).await
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+async fn replay_finalized_strict_run(
+    cfg: &Config,
+    st: &GlobalState,
+    events: &mut mpsc::Receiver<Event>,
+    registry: &Registry,
+) -> Result<()> {
+    let expected = current_groups(registry)
+        .into_iter()
+        .map(|group| group.member.learner_id)
+        .collect::<HashSet<_>>();
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let timeout = (cfg.rl_round_timeout_s > 0).then_some(cfg.rl_round_timeout_s);
+    let finalized = finalize_learners(st, events, registry, &expected, timeout).await?;
+    shutdown_groups(finalized).await;
+    info!(
+        step = st.global_step,
+        learners = expected.len(),
+        "replayed finalized strict run to residual learners"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    Ok(())
+}
+
+async fn finish_strict_run(
+    cfg: &Config,
+    st: &GlobalState,
+    events: &mut mpsc::Receiver<Event>,
+    registry: &Registry,
+    identity: &RlCheckpointIdentity,
+    policy_sha256: &[u8; 32],
+) -> Result<()> {
+    if st.global_step != cfg.total_steps
+        || st.rl_policy_sha256(&identity.layout_fingerprint)? != *policy_sha256
+    {
+        strict_bail!("strict terminal policy does not match its committed checkpoint");
+    }
+    let expected: HashSet<u32> = (0..cfg.learners).collect();
+    let timeout = (cfg.rl_round_timeout_s > 0).then_some(cfg.rl_round_timeout_s);
+    let finalized = finalize_learners(st, events, registry, &expected, timeout)
+        .await
+        .map_err(|error| strict_fatal(format!("strict finalization failed: {error:#}")))?;
+
+    // This marker means every fixed-roster member applied and verified the cut.
+    write_rl_final_marker(
+        cfg.checkpoint_path.as_ref().unwrap(),
+        identity,
+        st.global_step,
+        policy_sha256,
+    )?;
+    if let Some(path) = &cfg.final_state {
+        dump_state(st, path)?;
+        info!(path = %path.display(), "strict final global state written");
+    }
+    shutdown_groups(finalized).await;
+    info!(
+        step = st.global_step,
+        roster = cfg.learners,
+        policy_sha256 = %hex(policy_sha256),
+        "strict RL run finalized"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    Ok(())
 }
 
 fn record_budget_report(
@@ -1716,12 +2280,12 @@ fn record_final_ack(
 /// legacy escape hatch because that would let an old learner save a locally
 /// blended artifact.
 async fn finalize_learners(
-    cfg: &Config,
     st: &GlobalState,
     events: &mut mpsc::Receiver<Event>,
     registry: &Registry,
     expected: &HashSet<u32>,
-) -> Result<()> {
+    timeout_s: Option<u64>,
+) -> Result<Vec<Arc<Group>>> {
     if expected.is_empty() {
         bail!("cannot finalize: no live learner groups at the final cut");
     }
@@ -1747,11 +2311,14 @@ async fn finalize_learners(
         }
     }
 
-    let deadline = Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
+    let deadline = timeout_s.map(|seconds| Instant::now() + Duration::from_secs(seconds));
     let mut acknowledged: HashMap<u32, Member> = HashMap::new();
     while acknowledged.len() < expected.len() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let event = tokio::time::timeout(remaining, events.recv())
+        let event = if let Some(deadline) = deadline {
+            tokio::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                events.recv(),
+            )
             .await
             .map_err(|_| {
                 let mut missing: Vec<u32> = expected
@@ -1762,11 +2329,14 @@ async fn finalize_learners(
                 missing.sort_unstable();
                 anyhow::anyhow!(
                     "finalization timed out after {}s waiting for learner acknowledgements: {:?}",
-                    cfg.quorum_timeout_s,
+                    timeout_s.unwrap(),
                     missing
                 )
             })?
-            .context("event channel closed during finalization")?;
+        } else {
+            events.recv().await
+        }
+        .context("event channel closed during finalization")?;
         match event {
             Event::FinalAck {
                 member,
@@ -1854,19 +2424,25 @@ async fn finalize_learners(
 
     let acknowledged_groups: Vec<Arc<Group>> = {
         let registry = registry.lock().unwrap();
+        // ACK is permanent for the logical learner. If its transport
+        // generation reconnected after ACK, shut down that current group.
         acknowledged
-            .values()
+            .keys()
+            .filter_map(|learner_id| registry.current.get(learner_id))
             .filter_map(|member| registry.groups.get(member).cloned())
             .collect()
     };
-    for group in acknowledged_groups {
-        let _ = group.send_small(MSG_SHUTDOWN, bytes::Bytes::new()).await;
-    }
     info!(
         learners = acknowledged.len(),
         "all learners acknowledged final cut"
     );
-    Ok(())
+    Ok(acknowledged_groups)
+}
+
+async fn shutdown_groups(groups: Vec<Arc<Group>>) {
+    for group in groups {
+        let _ = group.send_small(MSG_SHUTDOWN, bytes::Bytes::new()).await;
+    }
 }
 
 async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>) {
@@ -1987,6 +2563,52 @@ fn append_tape(
     }
 }
 
+fn append_strict_tape(
+    path: &std::path::Path,
+    identity: &RlCheckpointIdentity,
+    step: u64,
+    base_version: u64,
+    pushes: &BTreeMap<u32, StrictPush>,
+    broadcasted: &[u32],
+    policy_sha256: &[u8; 32],
+    gnorm: f64,
+    ms: u64,
+) -> Result<()> {
+    use std::io::Write;
+
+    let responders = pushes.keys().copied().collect::<Vec<_>>();
+    let digests = pushes
+        .iter()
+        .map(|(learner_id, accepted)| {
+            format!(
+                "{{\"id\":{learner_id},\"generation\":{},\"delta_sha256\":\"{}\"}}",
+                accepted.member.generation,
+                hex(&accepted.push.delta_digest),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let line = format!(
+        "{{\"protocol_version\":{PROTOCOL_VERSION},\"mode\":\"rl-strict-avg\",\"run_manifest_sha256\":\"{}\",\"layout_fingerprint\":\"{}\",\"base_version\":{base_version},\"committed_version\":{step},\"fixed_roster\":{},\"responded\":{},\"delta_digests\":[{digests}],\"policy_sha256\":\"{}\",\"checkpoint_committed\":true,\"broadcast_queued_to\":{},\"gnorm\":{gnorm},\"ms\":{ms}}}\n",
+        hex(&identity.run_manifest_sha256),
+        hex(&identity.layout_fingerprint),
+        identity.roster_size,
+        json_ids(&responders),
+        hex(policy_sha256),
+        json_ids(broadcasted),
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open strict event tape {}", path.display()))?;
+    file.write_all(line.as_bytes())
+        .with_context(|| format!("write strict event tape {}", path.display()))?;
+    file.flush()
+        .with_context(|| format!("flush strict event tape {}", path.display()))?;
+    Ok(())
+}
+
 fn json_ids(ids: &[u32]) -> String {
     let mut ids = ids.to_vec();
     ids.sort_unstable();
@@ -2048,6 +2670,7 @@ mod tests {
             layout: Layout {
                 fragments: Vec::new(),
             },
+            layout_fingerprint: [0; 32],
             num_streams: 0,
             max_init_payload: 0,
             max_push_payload: 0,
@@ -2242,7 +2865,98 @@ mod tests {
             c_steps: 2,
             c_tokens: 20,
             outer_gradient: vec![1.0],
+            payload_digest: [0; 32],
+            delta_digest: [0; 32],
         }
+    }
+
+    fn strict_round(permitted: &[Member]) -> StrictRound {
+        let mut generations: HashMap<u32, HashSet<Member>> = HashMap::new();
+        for member in permitted {
+            generations
+                .entry(member.learner_id)
+                .or_default()
+                .insert(*member);
+        }
+        StrictRound {
+            step: 6,
+            base_version: 5,
+            pull: bytes::Bytes::new(),
+            started: Instant::now(),
+            permitted: generations,
+            pushes: BTreeMap::new(),
+        }
+    }
+
+    fn strict_push(learner_id: u32, digest: u8) -> Push {
+        Push {
+            learner_id,
+            fragment_id: 0,
+            global_step: 6,
+            round_attempt: 1,
+            base_version: 5,
+            local_step: 6,
+            c_steps: 1,
+            c_tokens: 1,
+            outer_gradient: vec![learner_id as f32],
+            payload_digest: [digest; 32],
+            delta_digest: [digest; 32],
+        }
+    }
+
+    #[test]
+    fn strict_round_uses_logical_roster_and_idempotent_payload_digest() {
+        let old = member(0, 10);
+        let reconnected = member(0, 11);
+        let other = member(1, 20);
+        let mut round = strict_round(&[old, reconnected, other]);
+
+        assert_eq!(
+            route_strict_push(&mut round, 5, old, strict_push(0, 7)).unwrap(),
+            StrictPushDisposition::Accepted
+        );
+        assert_eq!(
+            route_strict_push(&mut round, 5, reconnected, strict_push(0, 7)).unwrap(),
+            StrictPushDisposition::Duplicate
+        );
+        assert!(
+            route_strict_push(&mut round, 5, reconnected, strict_push(0, 8))
+                .unwrap_err()
+                .to_string()
+                .contains("conflicting duplicate")
+        );
+        assert_eq!(round.pushes.len(), 1);
+        assert_eq!(
+            route_strict_push(&mut round, 5, other, strict_push(1, 9)).unwrap(),
+            StrictPushDisposition::Accepted
+        );
+        assert_eq!(round.pushes.keys().copied().collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    #[test]
+    fn strict_round_rejects_unpermitted_or_inexact_current_push_and_drops_late() {
+        let permitted = member(0, 10);
+        let mut round = strict_round(&[permitted]);
+
+        assert!(
+            route_strict_push(&mut round, 5, member(0, 11), strict_push(0, 1))
+                .unwrap_err()
+                .to_string()
+                .contains("has no permit")
+        );
+        let mut stale = strict_push(0, 2);
+        stale.base_version = 4;
+        assert!(route_strict_push(&mut round, 5, permitted, stale).is_err());
+        let mut wrong_counter = strict_push(0, 3);
+        wrong_counter.c_tokens = 2;
+        assert!(route_strict_push(&mut round, 5, permitted, wrong_counter).is_err());
+        let mut late = strict_push(0, 4);
+        late.global_step = 5;
+        assert_eq!(
+            route_strict_push(&mut round, 5, permitted, late).unwrap(),
+            StrictPushDisposition::Late
+        );
+        assert!(round.pushes.is_empty());
     }
 
     #[test]
@@ -2350,6 +3064,8 @@ mod tests {
                 c_steps: 4,
                 c_tokens: 40,
                 outer_gradient: vec![1.0],
+                payload_digest: [0; 32],
+                delta_digest: [0; 32],
             },
         );
         append_tape(

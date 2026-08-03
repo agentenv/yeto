@@ -74,6 +74,100 @@ contains the value-head parameters.
 The `$10` budget displayed by this command is monitoring metadata only. This
 path runs locally and does not launch a Yeto SkyPilot fleet.
 
+## Run the direct-Miles comparison
+
+The branch also includes a real Miles reward adapter at
+`yeto_miles_cybergym.reward.score`. It submits the generated response as the
+CyberGym PoC multipart file, computes the documented checksum, and accepts
+both Miles' single-sample and batched async reward contracts. Generate the
+same task roster used by the local smoke loop:
+
+```bash
+python -m yeto_miles_cybergym.prompts \
+  --output ./cybergym_prompts.jsonl
+```
+
+Do not repair the old `miles` conda environment by installing an arbitrary
+SGLang wheel. Miles depends on a patched SGLang/Megatron/CUDA stack. Start a
+clean checkout at the pinned commit inside the immutable Miles image instead:
+
+```bash
+git clone https://github.com/radixark/miles ~/miles-clean
+git -C ~/miles-clean fetch --depth 1 origin \
+  dfc66ff38752bfa2c5d325e0037ebc4b537c06de
+git -C ~/miles-clean checkout --detach \
+  dfc66ff38752bfa2c5d325e0037ebc4b537c06de
+
+docker run --rm -it --gpus all --network host --ipc host --shm-size=64g \
+  -e HF_TOKEN="$HF_TOKEN" \
+  -v "$PWD":/workspace/yeto:ro \
+  -v "$HOME/miles-clean":/workspace/miles:ro \
+  -w /workspace/yeto \
+  radixark/miles@sha256:95b3afa9ee4313f5633e6ed3779c8276353cc8e24a2462e4f54ec0d5978fbae7 \
+  bash
+```
+
+Inside the container, with the CyberGym server still listening on the host's
+`127.0.0.1:8666`, run the three-iteration, four-sample direct-Miles smoke:
+
+```bash
+python -m yeto_miles_cybergym.prompts \
+  --output /tmp/cybergym_prompts.jsonl
+python -m yeto_miles_cybergym.launcher \
+  --miles-root /workspace/miles \
+  --prompt-data /tmp/cybergym_prompts.jsonl \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --iterations 3 \
+  --samples-per-iteration 4 \
+  --samples-per-prompt 2
+```
+
+The launcher verifies the Miles commit, checks that `miles` and `sglang` can
+be imported, starts Ray with one training GPU and one rollout GPU, and prints
+the exact `ray job submit` command. Use `--dry-run` to inspect that command
+without starting Ray or contacting CyberGym. `samples-per-prompt` is at least
+two because one sample per GRPO group has no variance signal.
+
+This direct baseline uses Miles' FSDP path. It is a protocol/throughput
+comparison against Yeto's strict distributed LoRA path, not an identical
+optimizer recipe. Keep the model revision, task JSONL, response length,
+temperature, learning rate, number of rollouts, and K fixed when comparing
+the reward traces.
+
+## Run the strict Yeto comparison
+
+For the Yeto side, use the same JSONL and reward source. The two one-GPU
+islands must be able to reach the CyberGym URL; `localhost` only works when the
+server is on each island. Replace the GPU and model revision placeholders with
+your pinned SkyPilot resources:
+
+```bash
+yeto launch --training-mode rl \
+  --gpu '<cloud>:1xh100@<region-a>,<cloud>:1xh100@<region-b>' \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --model-revision <40-char-model-commit> \
+  --data ./cybergym_prompts.jsonl \
+  --data-format openai \
+  --tuning lora --lora-r 8 --lora-alpha 8 \
+  --seq-len 1024 --inner-lr 1e-5 \
+  --rl-global-rounds 3 \
+  --rl-groups-per-island-round 1 \
+  --rl-samples-per-group 2 \
+  --rl-local-optimizer-steps 1 \
+  --reward-function yeto_miles_cybergym.reward:score \
+  --cybergym-url http://<reachable-cybergym-host>:8666 \
+  --learner-image \
+    radixark/miles@sha256:95b3afa9ee4313f5633e6ed3779c8276353cc8e24a2462e4f54ec0d5978fbae7 \
+  --trust-remote-code \
+  --confirm
+```
+
+Yeto attests the reward source and model/data revisions before launch. A
+CyberGym HTTP error or missing runner image aborts the run; it is not counted
+as a negative reward. With two islands, `G=1, K=2` gives four total
+CyberGym submissions per global round, matching the direct and local-Yeto
+smokes above.
+
 ## Checks performed
 
 The branch was exercised with:

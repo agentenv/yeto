@@ -60,6 +60,13 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
   experimental `yeto rl` loop. See
   [docs/CYBERGYM_RL.md](docs/CYBERGYM_RL.md) for the safe local setup, smoke
   command, test evidence, and current limitations.
+- Distributed RL uses `yeto launch --training-mode rl` to run a fixed roster
+  of pinned Miles islands with strict synchronous LoRA averaging. See
+  [docs/TEMP_Decoupled_DiloCo_RL_Support.md](docs/TEMP_Decoupled_DiloCo_RL_Support.md)
+  for the runtime contract, launch configuration, recovery model, and
+  validation evidence. For two already-provisioned H200s reachable over
+  SSH/Tailscale, use the acceptance harness in
+  [docs/RL_SSH_ACCEPTANCE.md](docs/RL_SSH_ACCEPTANCE.md).
 - `--output`: any sky-supported store URI or `hf://org/repo` — the head
   fetches the model from the winning learner, uploads it, and **terminates
   itself** (fully self-cleaning run). Local path or omitted: the artifact
@@ -184,6 +191,10 @@ delta correction, q4 wire format, snapshots, resilience.
 artifact provenance.
 [docs/CYBERGYM_RL.md](docs/CYBERGYM_RL.md) — local CyberGym setup and RL
 smoke-run guide.
+[docs/TEMP_Decoupled_DiloCo_RL_Support.md](docs/TEMP_Decoupled_DiloCo_RL_Support.md)
+— strict synchronous Miles RL architecture, launch contract, and validation.
+[docs/RL_SSH_ACCEPTANCE.md](docs/RL_SSH_ACCEPTANCE.md) — run and independently
+verify strict RL on two existing H200 hosts over SSH/Tailscale.
 [docs/ADAPTER_LIFECYCLE.md](docs/ADAPTER_LIFECYCLE.md) — strict adapter
 resume, intentional branching, safe base-model merge, and export sharding.
 [docs/DIFFUSION.md](docs/DIFFUSION.md) — the generic Diffusers image/video

@@ -89,7 +89,16 @@ class FakeOps:
         assert self.sleeps < 500, "controller poll loop did not terminate"
 
 
-def make_controller(ops, learners, recover_timeout=100, poll=30, on_relaunch=None):
+def make_controller(
+    ops,
+    learners,
+    recover_timeout=100,
+    poll=30,
+    on_relaunch=None,
+    strict_roster=False,
+    final_probe=None,
+    fatal_probe=None,
+):
     ops.status_seq.setdefault(SYNCER, [RUNNING])
     return FleetController(
         learners={name: (f"task-{name}", job_id) for name, job_id in learners.items()},
@@ -99,6 +108,9 @@ def make_controller(ops, learners, recover_timeout=100, poll=30, on_relaunch=Non
         recover_timeout=recover_timeout,
         on_relaunch=on_relaunch,
         thread_cls=ImmediateThread,
+        strict_roster=strict_roster,
+        syncer_final_probe=final_probe,
+        syncer_fatal_probe=fatal_probe,
     )
 
 
@@ -173,6 +185,61 @@ def test_all_learners_abandoned_raises_and_downs_syncer():
 
     assert sorted(ops.down_calls) == sorted(["l0", "l1", SYNCER])
     assert SYNCER in ctl.downed_clusters
+
+
+def test_strict_roster_fails_the_run_instead_of_abandoning_one_learner():
+    ops = FakeOps()
+    ops.status_seq["l0"] = [FAILED]
+    ops.status_seq["l1"] = [RUNNING]
+    ctl = make_controller(
+        ops,
+        {"l0": 1, "l1": 2},
+        recover_timeout=0,
+        strict_roster=True,
+    )
+
+    with pytest.raises(RuntimeError, match="fixed roster cannot shrink"):
+        ctl.run()
+
+    assert ctl.learners["l0"]["state"] == "failed"
+    assert ops.down_calls == ["l0", SYNCER]
+
+
+def test_strict_final_marker_stops_residual_learners_before_recovery():
+    ops = FakeOps()
+    ops.status_seq["l0"] = [FAILED]
+    ops.status_seq["l1"] = [RUNNING]
+    ctl = make_controller(
+        ops,
+        {"l0": 1, "l1": 2},
+        recover_timeout=0,
+        strict_roster=True,
+        final_probe=lambda: True,
+    )
+
+    exit_codes = ctl.run()
+
+    assert all("SUCCEEDED" in status for status in exit_codes.values())
+    assert ops.relaunch_calls == []
+    assert ops.down_calls == ["l0", "l1"]
+
+
+def test_strict_syncer_fatal_marker_prevents_restart():
+    ops = FakeOps()
+    ops.status_seq[SYNCER] = [FAILED]
+    ops.status_seq["l0"] = [RUNNING]
+    ctl = make_controller(
+        ops,
+        {"l0": 1},
+        strict_roster=True,
+        fatal_probe=lambda: "conflicting duplicate strict push",
+    )
+
+    with pytest.raises(RuntimeError, match="permanently failed"):
+        ctl.run()
+
+    assert ops.relaunch_calls == []
+    assert ops.down_calls == ["l0", SYNCER]
 
 
 def test_syncer_never_abandoned(capsys):
