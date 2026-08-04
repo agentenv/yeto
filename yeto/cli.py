@@ -37,6 +37,7 @@ from .status_metrics import render_tape_summary
 SUBCOMMANDS = (
     "launch",
     "shape",
+    "merge",
     "sample-diffusion",
     "status",
     "logs",
@@ -239,12 +240,29 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "then deterministically separated by learner and rank for training",
     )
     tune.add_argument("--lora-r", type=int, default=16)
+    tune.add_argument("--lora-alpha", type=int, default=32)
     tune.add_argument(
         "--lora-targets",
         choices=["auto", "attention", "all-linear"],
         default="auto",
         help="adapter placement: attention-only, every linear, or auto "
         "(attention for MoE — router and routed experts stay frozen)",
+    )
+    parent = tune.add_mutually_exclusive_group()
+    parent.add_argument(
+        "--resume-from",
+        default=None,
+        help="continue the exact recipe recorded by a local/cloud Yeto LoRA artifact",
+    )
+    parent.add_argument(
+        "--branch-from",
+        default=None,
+        help="start a new run from a local/cloud PEFT adapter and record lineage",
+    )
+    tune.add_argument(
+        "--adapter-sha256",
+        default=None,
+        help="required attestation for a cloud --resume-from/--branch-from artifact",
     )
     tune.add_argument("--seq-len", type=int, default=2048)
     tune.add_argument(
@@ -605,7 +623,10 @@ def build_parser() -> argparse.ArgumentParser:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = p.add_subparsers(dest="command", metavar="{launch,shape,sample-diffusion,status,logs,down}")
+    sub = p.add_subparsers(
+        dest="command",
+        metavar="{launch,shape,merge,sample-diffusion,status,logs,down}",
+    )
 
     launch = sub.add_parser(
         "launch",
@@ -699,6 +720,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="override the model weight size estimate (bf16 GB)",
     )
     shape.add_argument("--no-cache", action="store_true", help="bypass the 1h signal cache")
+
+    merge = sub.add_parser(
+        "merge",
+        help="merge a causal-LM PEFT adapter into its base model for deployment",
+    )
+    merge.add_argument("--adapter-dir", required=True)
+    merge.add_argument("--output-dir", required=True)
+    merge.add_argument("--model", default=None, help="base override; defaults to artifact provenance")
+    merge.add_argument("--model-revision", default=None)
+    merge.add_argument("--trust-remote-code", action="store_true")
+    merge.add_argument("--device", default="cpu")
+    merge.add_argument(
+        "--dtype",
+        choices=["auto", "bf16", "fp16", "f32"],
+        default="auto",
+    )
+    merge.add_argument(
+        "--max-shard-size",
+        default="5GB",
+        help="maximum SafeTensors shard size, e.g. 2GB or 500MB",
+    )
 
     sample = sub.add_parser(
         "sample-diffusion",
@@ -809,6 +851,18 @@ def _fleet_args_error(args) -> str | None:
     from .models import resolve_model_kind
 
     model_kind = resolve_model_kind(args.model, args.model_kind)
+    from .adapter_lifecycle import selected_parent
+
+    _parent_mode, parent_source = selected_parent(args)
+    if parent_source is not None:
+        if model_kind != "causal-lm":
+            return "--resume-from/--branch-from apply only to causal-LM models"
+        if getattr(args, "island_backend", "torch") != "torch":
+            return "--resume-from/--branch-from require --island-backend torch"
+        if args.tuning != "lora":
+            return "--resume-from/--branch-from require --tuning lora"
+        if getattr(args, "external_learners", 0):
+            return "--resume-from/--branch-from do not yet support external MLX learners"
     base_quantization = getattr(args, "base_quantization", "none")
     if base_quantization != "none":
         if model_kind != "causal-lm":
@@ -1112,9 +1166,11 @@ def cmd_launch_head(args) -> int:
     launcher.prepare_launch_args(args)
     # Likewise stage a local --data path: it is rsynced onto the head, and
     # the rewritten path makes the head's launcher mount it onto learners.
+    from .adapter_lifecycle import head_stage_parent
     from .datasource import head_stage
 
     args.data, data_mounts = head_stage(args.data)
+    data_mounts.update(head_stage_parent(args))
     args_dict = _serializable_args(args)
     runs.create_run(name, args_dict)
     learner_names = launcher.learner_cluster_names(name, specs)
@@ -1503,6 +1559,15 @@ def main(argv=None) -> int:
         return cmd_launch(args)
     if args.command == "shape":
         return cmd_shape(args)
+    if args.command == "merge":
+        from .merge import merge_adapter
+
+        try:
+            merge_adapter(args)
+        except (ImportError, OSError, ValueError, RuntimeError) as exc:
+            print(f"[yeto] merge failed: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if args.command == "sample-diffusion":
         return cmd_sample_diffusion(args)
     if args.command == "status":

@@ -116,6 +116,75 @@ def test_isolated_fused_loss_is_bound_before_peft(monkeypatch):
     ]
 
 
+def test_parent_adapter_is_loaded_trainable_instead_of_reinitialized(monkeypatch):
+    import peft
+    import transformers
+    import yeto.learner as learner
+
+    config = SimpleNamespace(model_type="qwen2")
+    tokenizer = object()
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = config
+
+    base_model = Model()
+    loaded = {}
+
+    def fake_from_pretrained(factory, _model_id, **_kwargs):
+        if factory is transformers.AutoTokenizer:
+            return tokenizer
+        assert factory is transformers.AutoModelForCausalLM
+        return base_model
+
+    monkeypatch.setattr(learner, "_from_pretrained_offline_first", fake_from_pretrained)
+    monkeypatch.setattr(
+        learner, "validate_kernel_request", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(learner, "attention_load_kwargs", lambda *args: {})
+    monkeypatch.setattr(
+        learner, "resolved_attention_backend", lambda model, requested: requested
+    )
+    monkeypatch.setattr(
+        peft.PeftModel,
+        "from_pretrained",
+        lambda model, source, **kwargs: loaded.update(
+            model=model, source=source, kwargs=kwargs
+        )
+        or model,
+    )
+    monkeypatch.setattr(
+        peft,
+        "get_peft_model",
+        lambda *_args, **_kwargs: pytest.fail("new adapter must not be initialized"),
+    )
+    args = SimpleNamespace(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        base_quantization="none",
+        tuning="lora",
+        shard="ddp",
+        kernel_backend="native",
+        attention_backend="auto",
+        loss_function="cross_entropy",
+        lora_r=16,
+        lora_alpha=32,
+        lora_targets="auto",
+        resume_from=None,
+        branch_from="/tmp/parent-adapter",
+    )
+
+    model, loaded_tokenizer = load_model_and_tokenizer(args, torch.device("cpu"))
+
+    assert model is base_model
+    assert loaded_tokenizer is tokenizer
+    assert loaded == {
+        "model": base_model,
+        "source": "/tmp/parent-adapter",
+        "kwargs": {"is_trainable": True},
+    }
+
+
 @pytest.mark.parametrize(
     ("kernel_backend", "should_reject"),
     [("liger", True), ("native", False)],

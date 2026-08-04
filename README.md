@@ -51,6 +51,11 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
   frozen base in bitsandbytes NF4 with double quantization and bf16 compute;
   pass `--gpu` explicitly while the fleet planner's QLoRA memory model is being
   calibrated.
+- Existing causal LoRA artifacts can be continued with `--resume-from` when
+  the recorded model, data, and recipe match, or used as a new lineage with
+  `--branch-from`. `yeto merge --max-shard-size 2GB ...` safely folds an
+  adapter into its base and writes deployment-ready SafeTensors shards. See
+  [docs/ADAPTER_LIFECYCLE.md](docs/ADAPTER_LIFECYCLE.md).
 - `--output`: any sky-supported store URI or `hf://org/repo` — the head
   fetches the model from the winning learner, uploads it, and **terminates
   itself** (fully self-cleaning run). Local path or omitted: the artifact
@@ -173,6 +178,8 @@ delta correction, q4 wire format, snapshots, resilience.
 [docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
 [docs/PROVENANCE.md](docs/PROVENANCE.md) — source pinning, attestation, and
 artifact provenance.
+[docs/ADAPTER_LIFECYCLE.md](docs/ADAPTER_LIFECYCLE.md) — strict adapter
+resume, intentional branching, safe base-model merge, and export sharding.
 [docs/DIFFUSION.md](docs/DIFFUSION.md) — the generic Diffusers image/video
 backend, data and conditioning contracts, external adapters, export, sampling,
 validation, and current limitations.

@@ -155,6 +155,53 @@ def test_qlora_installs_and_forwards_nf4():
     assert "bitsandbytes>=0.46.1" in task.setup
 
 
+def test_launcher_mounts_and_forwards_parent_adapter(tmp_path):
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    digest = "a" * 64
+    task = make_learner_task(
+        _args(branch_from=str(adapter), adapter_sha256=digest, lora_alpha=48),
+        _SPEC,
+        0,
+        1,
+        "1.2.3.4:29400",
+    )
+
+    assert "--branch-from '~/yeto-parent-adapter'" in task.run
+    assert f"--adapter-sha256 {digest}" in task.run
+    assert "--lora-alpha 48" in task.run
+    assert task.file_mounts["~/yeto-parent-adapter"] == str(adapter)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"model_kind": "diffusion"}, "only to causal-LM"),
+        ({"island_backend": "megatron"}, "require --island-backend torch"),
+        ({"tuning": "full"}, "require --tuning lora"),
+        ({"adapter_sha256": None}, "must be attested"),
+    ],
+)
+def test_launcher_rejects_invalid_parent_adapter_profiles(
+    tmp_path, overrides, message
+):
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    values = {
+        "branch_from": str(adapter),
+        "adapter_sha256": "a" * 64,
+        **overrides,
+    }
+    with pytest.raises(ValueError, match=message):
+        make_learner_task(
+            _args(**values),
+            _SPEC,
+            0,
+            1,
+            "1.2.3.4:29400",
+        )
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
