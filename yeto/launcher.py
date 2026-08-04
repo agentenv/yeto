@@ -427,6 +427,13 @@ def prepare_launch_args(args) -> None:
     if "dataset" in payload:
         args.data_requested_identifier = payload["dataset"]["requested_identifier"]
         args.data_requested_revision = payload["dataset"]["requested_revision"]
+    from .adapter_lifecycle import (
+        inspect_parent_adapter,
+        prepare_parent_source,
+        selected_parent,
+    )
+
+    prepare_parent_source(args)
     expected_loss_sha256 = getattr(args, "loss_sha256", None)
     args.loss_function = resolve_loss_function(
         args.loss_function,
@@ -449,6 +456,17 @@ def prepare_launch_args(args) -> None:
         args.loss_sha256 = file_sha256(args.loss_function.split(":", 2)[1])
     else:
         args.loss_sha256 = None
+    _parent_mode, parent_source = selected_parent(args)
+    if parent_source is not None:
+        from .datasource import kind
+
+        if kind(parent_source) == "local":
+            # Fail on malformed artifacts and recipe drift on the submitter
+            # (and again on every learner), before provisioning GPU capacity.
+            inspect_parent_adapter(
+                args,
+                expected_sha256=args.adapter_sha256,
+            )
     adapter_spec = getattr(args, "diffusion_adapter", None)
     if adapter_spec:
         adapter_path = python_spec_path(adapter_spec, base_dir=REPO_ROOT)
@@ -679,6 +697,11 @@ def _is_alphafold3_request(args) -> bool:
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
     import sky
 
+    from .adapter_lifecycle import (
+        learner_parent_arg,
+        learner_parent_mounts,
+        selected_parent,
+    )
     from .datasource import learner_data_arg, learner_file_mounts
     from .models import resolve_model_kind
 
@@ -694,6 +717,24 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     kernel_backend = getattr(args, "kernel_backend", "native")
     data_format = getattr(args, "data_format", "auto")
     base_quantization = getattr(args, "base_quantization", "none")
+    parent_mode, parent_source = selected_parent(args)
+    if parent_source is not None:
+        if model_kind != "causal-lm":
+            raise ValueError(
+                "--resume-from/--branch-from apply only to causal-LM models"
+            )
+        if backend != "torch":
+            raise ValueError(
+                "--resume-from/--branch-from require --island-backend torch"
+            )
+        if args.tuning != "lora":
+            raise ValueError(
+                "--resume-from/--branch-from require --tuning lora"
+            )
+        if not getattr(args, "adapter_sha256", None):
+            raise ValueError(
+                "--resume-from/--branch-from must be attested before learner launch"
+            )
     if model_kind != "causal-lm" and data_format != "auto":
         raise ValueError("--data-format applies only to causal-LM models")
     if model_kind != "causal-lm" and (
@@ -751,17 +792,25 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f" --loss-function {shlex.quote(loss_function)}"
         f" --tuning {args.tuning}"
         f" --lora-r {args.lora_r}"
+        f" --lora-alpha {getattr(args, 'lora_alpha', 32)}"
         f" --lora-targets {getattr(args, 'lora_targets', 'auto')}"
         f" --micro-batch-size {args.micro_batch_size}"
         f" --grad-accum {args.grad_accum}"
         f" --inner-lr {args.inner_lr}"
         f" --fragments {args.fragments}"
         f" --fragment-pattern {args.fragment_pattern}"
+        f" --matrix-merge {getattr(args, 'matrix_merge', 'rda')}"
         f" --merge-alpha {args.merge_alpha}"
         f" --wire-dtype {args.wire_dtype}"
         f" --wan-streams {args.wan_streams}"
         f" --output-dir ~/yeto-output"
     )
+    parent_arg = learner_parent_arg(args)
+    if parent_mode is not None and parent_arg is not None:
+        common_flags += f" --{parent_mode}-from {shlex.quote(parent_arg)}"
+        common_flags += (
+            f" --adapter-sha256 {shlex.quote(args.adapter_sha256)}"
+        )
     if getattr(args, "model_revision", None):
         common_flags += f" --model-revision {shlex.quote(args.model_revision)}"
     if getattr(args, "data_revision", None):
@@ -924,7 +973,9 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         envs["YETO_HUNYUAN3D_ROOT"] = HUNYUAN3D_ROOT
     # Non-HF --data sources (local paths, s3://, gs://, ...) ride sky's
     # file_mounts onto every learner; see yeto/datasource.py.
-    file_mounts = dict(learner_file_mounts(args.data)) or None
+    file_mounts = dict(learner_file_mounts(args.data))
+    file_mounts.update(learner_parent_mounts(args))
+    file_mounts = file_mounts or None
     if args.loss_function.startswith("pickle:"):
         # The pickled loss is gitignored, so the workdir sync skips it;
         # mount it into the workdir explicitly.
