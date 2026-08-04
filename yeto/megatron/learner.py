@@ -52,6 +52,11 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser("yeto.megatron.learner")
     p.add_argument("--model", required=True)
     p.add_argument("--data", required=True)
+    p.add_argument(
+        "--data-format",
+        choices=["auto", "openai", "sharegpt", "alpaca"],
+        default="auto",
+    )
     p.add_argument("--model-revision", default=None)
     p.add_argument("--data-revision", default=None)
     p.add_argument("--trust-remote-code", action="store_true")
@@ -173,16 +178,45 @@ def _build_model(args, device):
         lora_kwargs["share_expert_adapters"] = True
     peft = LoRA(**lora_kwargs)
     model = peft(model, training=True)  # freezes base, attaches + trains adapters
+
+    # Bridge attaches the adapter modules but defers weight init to its own
+    # training harness / checkpoint load, neither of which runs here — H200
+    # validation found raw uninitialized memory (absmax ~7e34) in the fresh
+    # adapters. Apply the LoRA contract explicitly: kaiming-uniform A so the
+    # low-rank basis is trainable, zero B so the adapter starts as a no-op.
+    import math
+
+    import torch
+
+    with torch.no_grad():
+        for name, p in _adapter_params(model).items():
+            if "linear_in" in name:
+                torch.nn.init.kaiming_uniform_(p, a=math.sqrt(5))
+            elif "linear_out" in name:
+                p.zero_()
+            else:
+                raise RuntimeError(
+                    f"adapter tensor {name} is neither linear_in nor linear_out; "
+                    "add an explicit init rule before training with it"
+                )
     return model, bridge
 
 
 def _adapter_params(model):
     """Canonical {name: tensor} of the trainable LoRA adapters. Bridge names
     them linear_in (A) / linear_out (B); with TP=1/PP=1 they are replicated on
-    every rank, so the local view IS the canonical value."""
+    every rank, so the local view IS the canonical value.
+
+    Unwraps recursively: mcore stacks wrappers (DDP over Float16Module over
+    the MegatronModule), and the wrapper depth depends on when this is called.
+    A single-level unwrap yields capture-point-dependent parameter names
+    (`module.decoder...` vs `decoder...`), which breaks the sync layout's
+    name-stability contract."""
     out = {}
     for chunk in model:
-        module = getattr(chunk, "module", chunk)  # unwrap mcore DDP
+        module = chunk
+        while hasattr(module, "module"):  # unwrap DDP / Float16Module stack
+            module = module.module
         for name, p in module.named_parameters():
             if p.requires_grad and (
                 ".adapter" in name or name.endswith((".linear_in.weight", ".linear_out.weight"))
@@ -316,11 +350,7 @@ def main(argv=None):
     from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
     from ..tensor_io import (
         apply_fragment,
-        fragment_flat,
         pack_fragment,
-        pack_tensor,
-        quantize_q4,
-        unpack_fragment,
     )
 
     args = parse_args(argv)
@@ -340,14 +370,15 @@ def main(argv=None):
     device = torch.device("cuda", local_rank)
 
     model, bridge = _build_model(args, device)
-    params = _adapter_params(model)
-    layout = build_layout(
-        [(n, p.numel()) for n, p in params.items()],
-        args.fragments,
-        args.fragment_pattern,
-        named_shapes={n: tuple(p.shape) for n, p in params.items()},
-    )
-    log.info("%d adapter tensors -> %d fragments", len(params), layout.num_fragments)
+
+    # mcore DDP re-buckets TRAINABLE params into freshly-allocated buffers
+    # without copying their values (Megatron's own flow loads checkpoints
+    # after the wrap, so upstream never needs the copy). Frozen base weights
+    # keep their storage, but the LoRA init would be lost to uninitialized
+    # bucket memory — H200 validation saw garbage-magnitude adapters and
+    # loss=NaN on the first step. Snapshot the init here and restore after
+    # the wrap, before the optimizer clones its fp32 main params.
+    adapter_init = {n: p.detach().clone() for n, p in _adapter_params(model).items()}
 
     # mcore DDP wrap so grads land in the distributed optimizer's buckets.
     ddp_cfg = DistributedDataParallelConfig(
@@ -356,6 +387,16 @@ def main(argv=None):
     cfg = getattr(model[0], "config", None) or getattr(getattr(model[0], "module", None), "config")
     cfg.finalize_model_grads_func = finalize_model_grads
     model = [DDP(config=cfg, ddp_config=ddp_cfg, module=m) for m in model]
+    with torch.no_grad():
+        restored = _adapter_params(model)
+        if set(restored) != set(adapter_init):
+            raise RuntimeError(
+                "adapter tensor names changed across the DDP wrap: "
+                f"{set(restored) ^ set(adapter_init)}"
+            )
+        for name, p in restored.items():
+            p.copy_(adapter_init[name])
+    del adapter_init, restored
     opt = get_megatron_optimizer(
         config=OptimizerConfig(
             optimizer="adam",
@@ -369,6 +410,20 @@ def main(argv=None):
     )
     forward_backward = get_forward_backward_func()
 
+    # Capture the adapter dict only AFTER the DDP wrap + optimizer exist: the
+    # distributed-optimizer wrap rebuckets parameter storage, so tensors
+    # captured before it reference memory the wrap abandons. A pre-wrap dict
+    # stays silently disconnected from training — H200 validation saw its
+    # storage reused and every synced/saved tensor come out non-finite.
+    params = _adapter_params(model)
+    layout = build_layout(
+        [(n, p.numel()) for n, p in params.items()],
+        args.fragments,
+        args.fragment_pattern,
+        named_shapes={n: tuple(p.shape) for n, p in params.items()},
+    )
+    log.info("%d adapter tensors -> %d fragments", len(params), layout.num_fragments)
+
     # DiLoCo sync setup — identical to the torch learner: rank 0 drives the
     # syncer, sends INIT, and the fragment protocol reuses yeto primitives.
     wire_dtype = {"bf16": DTYPE_BF16, "f32": DTYPE_F32, "q4": DTYPE_Q4}[args.wire_dtype]
@@ -379,15 +434,20 @@ def main(argv=None):
         client.start()
         log.info("connected to syncer at %s", args.syncer)
         if args.learner_id == 0:
+            for name, p in params.items():
+                if not torch.isfinite(p).all():
+                    raise RuntimeError(
+                        f"adapter tensor {name} is non-finite before INIT; "
+                        "refusing to seed the syncer with a corrupt snapshot "
+                        "(was the params dict captured before the DDP wrap?)"
+                    )
             for fid, frag in enumerate(layout.fragments):
                 client.send_init(fid, pack_fragment(frag, params, bulk_dtype(wire_dtype)))
             log.info("sent INIT_PARAMS for %d fragments", layout.num_fragments)
 
     _run_inner_loop(
         args, model, params, layout, opt, forward_backward, client, rank, world, device,
-        fragment_flat=fragment_flat, pack_tensor=pack_tensor, quantize_q4=quantize_q4,
-        unpack_fragment=unpack_fragment, apply_fragment=apply_fragment,
-        bulk_dtype=bulk_dtype, DTYPE_Q4=DTYPE_Q4,
+        apply_fragment=apply_fragment,
     )
 
     # Avoid collectives in the shutdown/save path. Megatron's distributed
@@ -411,16 +471,15 @@ def main(argv=None):
 
 def _run_inner_loop(
     args, model, params, layout, opt, forward_backward, client, rank, world, device,
-    *, fragment_flat, pack_tensor, quantize_q4, unpack_fragment, apply_fragment,
-    bulk_dtype, DTYPE_Q4,
+    *, apply_fragment,
 ):
     """N inner Megatron steps, pausing at each step boundary to run the DiLoCo
     fragment sync. The inner step differs from the torch learner (Megatron's
     forward_backward schedule vs a manual loop), but the sync half mirrors
     yeto.learner.run_inner_loop's protocol and counter semantics exactly."""
     import torch
-    import torch.distributed as dist
 
+    from ..diloco_sync import DiLoCoSyncState, sync_diloco_boundary
     from ..finalization import finalize_torch_island
     mbs = 1 if args.micro_batch_size == "auto" else int(args.micro_batch_size)
     tokenizer = _load_tokenizer(args)
@@ -450,16 +509,29 @@ def _run_inner_loop(
 
     # Counters (Alg. 1): global totals + per-fragment snapshots reset on receipt.
     steps_total = tokens_total = 0
-    steps_at_reset = [0] * layout.num_fragments
-    tokens_at_reset = [0] * layout.num_fragments
-    fragment_versions = [0] * layout.num_fragments
-    pending_pulls: list = []
-    global_step = 0
     tokens_per_inner_step = world * mbs * args.grad_accum * args.seq_len
-    anchors = [None] * layout.num_fragments if rank == 0 and client is not None else None
-    shutdown = False
+    sync_state = DiLoCoSyncState.create(
+        layout.num_fragments,
+        track_anchors=rank == 0 and client is not None,
+    )
 
-    while not shutdown and steps_total < args.max_local_steps:
+    def snapshot_sync_params():
+        return params
+
+    def apply_sync_flat(fragment, flat):
+        apply_fragment(fragment, flat, params)
+
+    def finalize_sync():
+        return finalize_torch_island(
+            client,
+            layout,
+            params,
+            rank=rank,
+            world=world,
+            device=device,
+        )
+
+    while not sync_state.shutdown and steps_total < args.max_local_steps:
         for m in model:
             m.zero_grad_buffer()
         opt.zero_grad()
@@ -477,87 +549,32 @@ def _run_inner_loop(
         tokens_total += tokens_per_inner_step
 
         # --- fragment sync at the step boundary (never blocks) ---
-        # Broadcasts apply BEFORE pulls are answered (see yeto/learner.py:
-        # a pipelined syncer's next pull can overtake the previous round's
-        # broadcast; answering first would push a stale base_version).
-        actions = []
-        finalizing = False
-        if rank == 0 and client is not None:
-            client.check_health()
-            finalizing = client.finalizing.is_set()
-            if not finalizing:
-                for bc in client.drain_updates():
-                    flat = unpack_fragment(
-                        layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
-                    )
-                    if anchors is not None:
-                        anchors[bc.fragment_id] = flat.clone()
-                    actions.append((bc.fragment_id, bc.version, flat))
-            shutdown = client.shutdown.is_set()
-
-        if world > 1:
-            meta = [(f, v) for f, v, _ in actions] if rank == 0 else None
-            box = [meta, shutdown, finalizing]
-            dist.broadcast_object_list(box, src=0)
-            meta, shutdown, finalizing = box
-            if rank != 0:
-                actions = [(f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta]
-        if finalizing:
-            manifest = finalize_torch_island(
-                client,
-                layout,
-                params,
-                rank=rank,
-                world=world,
-                device=device,
-            )
-            global_step = max(global_step, manifest.global_step)
-            shutdown = True
+        if sync_diloco_boundary(
+            client,
+            layout,
+            sync_state,
+            steps_total=steps_total,
+            units_total=tokens_total,
+            merge_alpha=args.merge_alpha,
+            snapshot_params=snapshot_sync_params,
+            apply_flat=apply_sync_flat,
+            finalize=finalize_sync,
+            rank=rank,
+            world=world,
+            device=device,
+            reset_counters_on_replicas=True,
+        ):
             break
-        for fid, version, flat in actions:
-            flat = flat.to(device)
-            if world > 1:
-                dist.broadcast(flat, src=0)
-            if args.merge_alpha > 0:
-                local = fragment_flat(layout.fragments[fid], params)
-                flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
-            apply_fragment(layout.fragments[fid], flat, params)
-            steps_at_reset[fid] = steps_total
-            tokens_at_reset[fid] = tokens_total
-            fragment_versions[fid] = version
-            global_step = max(global_step, version)
-
-        if rank == 0 and client is not None:
-            pending_pulls.extend(client.drain_pulls())
-            still_pending = []
-            for pull in pending_pulls:
-                fid = pull.fragment_id
-                c_steps = steps_total - steps_at_reset[fid]
-                if c_steps < 1:
-                    still_pending.append(pull)
-                    continue
-                c_tokens = tokens_total - tokens_at_reset[fid]
-                anchor = anchors[fid] if anchors is not None else None
-                if anchor is None:
-                    still_pending.append(pull)
-                    continue
-                delta = fragment_flat(layout.fragments[fid], params).cpu() - anchor
-                if client.dtype == DTYPE_Q4:
-                    payload = quantize_q4(delta)
-                else:
-                    payload = pack_tensor(delta, client.dtype)
-                client.push_fragment(
-                    fid, pull.global_step, pull.round_attempt,
-                    fragment_versions[fid], steps_total,
-                    c_steps, c_tokens, payload,
-                )
-            pending_pulls = still_pending
     if rank == 0 and client is not None and not client.finalized.is_set():
         raise RuntimeError(
             "Megatron learner stopped before authoritative finalization; "
             "refusing to save local parameters"
         )
-    log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
+    log.info(
+        "inner loop done at local_step=%d global_step=%d",
+        steps_total,
+        sync_state.global_step,
+    )
 
 
 def _load_tokenizer(args):
@@ -588,6 +605,7 @@ def _packed_blocks(args, tokenizer):
     common = {
         "train_on": args.train_on,
         "assistant_mask_mode": args.assistant_mask_mode,
+        "data_format": getattr(args, "data_format", "auto"),
     }
     if getattr(args, "data_revision", None):
         common["revision"] = args.data_revision

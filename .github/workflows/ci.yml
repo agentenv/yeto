@@ -33,3 +33,20 @@ jobs:
           pip install pytest pytest-timeout transformers==4.57.1 datasets peft cloudpickle "skypilot[aws]"
       - name: Tests (includes live syncer+learner integration loop)
         run: python -m pytest tests/ -q
+
+  gpu:
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Ensure CI venv (persisted outside the workspace; checkout cleans the tree)
+        run: |
+          VENV="$HOME/.cache/yeto-ci-venv"
+          if [ ! -x "$VENV/bin/python" ]; then
+            python3 -m venv "$VENV"
+            "$VENV/bin/pip" install --upgrade pip
+          fi
+          "$VENV/bin/pip" install --quiet torch pytest pytest-timeout transformers==4.57.1 datasets peft cloudpickle
+          echo "$VENV/bin" >> "$GITHUB_PATH"
+      - name: GPU smoke test (SmolLM2-135M, real syncer + real learners on CUDA)
+        run: python -m pytest tests/test_gpu_smollm.py -q

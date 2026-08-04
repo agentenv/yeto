@@ -35,6 +35,8 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset, IterableDataset
 
+from .data_formats import normalize_sft_row, validate_data_format
+
 
 def _fallback_segments(messages: list[dict], tools: list | None) -> list[tuple[str, float]]:
     """The legacy rendering as (text, weight) segments, one per message
@@ -315,6 +317,8 @@ def _row_tokens(
     row: dict,
     train_on: str = "assistant",
     assistant_mask_mode: str = "native",
+    data_format: str = "auto",
+    row_index: int | None = None,
 ) -> tuple[list[int], list[float]]:
     """Tokenize one row into (ids, per-token loss weights).
 
@@ -333,20 +337,20 @@ def _row_tokens(
             f"assistant_mask_mode must be one of {ASSISTANT_MASK_MODES}, "
             f"got {assistant_mask_mode!r}"
         )
-    messages = row.get("messages")
-    if not messages:
-        return [], []
+    example = normalize_sft_row(row, data_format, row_index=row_index)
+    messages = example.messages
+    tools = example.tools
     ids: list[int] = []
     weights: list[float] = []
     if train_on == "assistant":
         if assistant_mask_mode == "native":
-            return _native_assistant_tokens(tokenizer, messages, row.get("tools"))
-        for text, weight in _fallback_segments(messages, row.get("tools")):
+            return _native_assistant_tokens(tokenizer, messages, tools)
+        for text, weight in _fallback_segments(messages, tools):
             segment_ids = list(tokenizer(text, add_special_tokens=False)["input_ids"])
             ids.extend(segment_ids)
             weights.extend([weight] * len(segment_ids))
     else:
-        text = render_conversation(tokenizer, messages, row.get("tools"))
+        text = render_conversation(tokenizer, messages, tools)
         ids = list(tokenizer(text, add_special_tokens=False)["input_ids"])
         weights = [1.0] * len(ids)
     if tokenizer.bos_token_id is not None:
@@ -398,6 +402,7 @@ def _target_packed_blocks(
     seq_len: int,
     train_on: str,
     assistant_mask_mode: str,
+    data_format: str,
 ):
     block_ids: list[list[int]] = []
     block_weights: list[list[float]] = []
@@ -409,6 +414,8 @@ def _target_packed_blocks(
             rows[index],
             train_on,
             assistant_mask_mode,
+            data_format,
+            index,
         )
         if train_on == "assistant":
             _append_target_blocks(
@@ -457,6 +464,7 @@ class StreamingPackedBlocks(IterableDataset):
         split: str = "train",
         train_on: str = "assistant",
         assistant_mask_mode: str = "native",
+        data_format: str = "auto",
         revision: str | None = None,
     ):
         if train_on not in TRAIN_ON_CHOICES:
@@ -466,6 +474,7 @@ class StreamingPackedBlocks(IterableDataset):
                 f"assistant_mask_mode must be one of {ASSISTANT_MASK_MODES}, "
                 f"got {assistant_mask_mode!r}"
             )
+        validate_data_format(data_format)
         self.dataset_name = dataset_name
         self.tokenizer = tokenizer
         self.learner_id = learner_id
@@ -478,6 +487,7 @@ class StreamingPackedBlocks(IterableDataset):
         self.split = split
         self.train_on = train_on
         self.assistant_mask_mode = assistant_mask_mode
+        self.data_format = data_format
         self.revision = revision
 
     def __iter__(self):
@@ -506,6 +516,7 @@ class StreamingPackedBlocks(IterableDataset):
                 self.seq_len,
                 self.train_on,
                 self.assistant_mask_mode,
+                self.data_format,
             )
             if not block_ids:
                 raise ValueError(
@@ -544,8 +555,10 @@ def build_packed_dataset(
     split: str = "train",
     train_on: str = "assistant",
     assistant_mask_mode: str = "native",
+    data_format: str = "auto",
     revision: str | None = None,
 ) -> PackedDataset:
+    validate_data_format(data_format)
     ds = load_rows(dataset_name, split, revision)
     block_ids, block_weights = _target_packed_blocks(
         ds,
@@ -554,6 +567,7 @@ def build_packed_dataset(
         seq_len,
         train_on,
         assistant_mask_mode,
+        data_format,
     )
     if not block_ids:
         raise ValueError(

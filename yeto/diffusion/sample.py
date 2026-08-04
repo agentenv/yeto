@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from .. import accel
 from ..models import resolve
 
 DIFFUSION_ADAPTER_METADATA_FILE = "yeto_diffusion_adapter.json"
@@ -122,11 +123,7 @@ def _load_external_adapter(spec: str | None, expected_sha256: str | None = None)
 
 
 def _select_device(device: str | None):
-    import torch
-
-    if device:
-        return torch.device(device)
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return accel.detect(device)
 
 
 def _torch_dtype(dtype: str, device):
@@ -190,6 +187,7 @@ def _load_base_pipeline(
     trust_remote_code: bool = False,
 ):
     from diffusers import DiffusionPipeline
+    from .quantization import npu_bitsandbytes_load
 
     kwargs = {
         "torch_dtype": dtype,
@@ -198,10 +196,11 @@ def _load_base_pipeline(
     }
     if revision:
         kwargs["revision"] = revision
-    try:
-        pipe = DiffusionPipeline.from_pretrained(model_id, local_files_only=True, **kwargs)
-    except OSError:
-        pipe = DiffusionPipeline.from_pretrained(model_id, **kwargs)
+    with npu_bitsandbytes_load(device):
+        try:
+            pipe = DiffusionPipeline.from_pretrained(model_id, local_files_only=True, **kwargs)
+        except OSError:
+            pipe = DiffusionPipeline.from_pretrained(model_id, **kwargs)
     return pipe.to(device) if hasattr(pipe, "to") else pipe
 
 
@@ -409,7 +408,7 @@ def _pipeline_kwargs(pipe, args):
     if getattr(args, "seed", None) is not None and _accepts(params, "generator"):
         import torch
 
-        device = getattr(args, "device", None) or ("cuda" if torch.cuda.is_available() else "cpu")
+        device = _select_device(getattr(args, "device", None))
         kwargs["generator"] = torch.Generator(device=device).manual_seed(args.seed)
     return kwargs
 
@@ -525,10 +524,10 @@ def runtime_adapter_summary(args, meta: dict) -> dict:
 
 def _primary_output(value: Any):
     if isinstance(value, dict):
-        for key in ("images", "frames", "videos"):
+        for key in ("images", "frames", "videos", "meshes", "mesh", "paths"):
             if key in value:
                 return value[key]
-    for attr in ("images", "frames", "videos"):
+    for attr in ("images", "frames", "videos", "meshes", "mesh", "paths"):
         out = getattr(value, attr, None)
         if out is not None:
             return out
@@ -586,6 +585,62 @@ def _array_frames(value):
 def save_sample_output(sample, output_path: str | Path, *, fps: int = 8) -> list[Path]:
     value = _primary_output(sample)
     path = Path(os.path.expanduser(str(output_path)))
+    if isinstance(value, (str, os.PathLike, Path)):
+        source = Path(os.path.expanduser(str(value)))
+        if source.exists():
+            if source.is_dir():
+                dest = path if not path.suffix else path.with_suffix("")
+                if dest.exists():
+                    import shutil
+
+                    shutil.rmtree(dest)
+                import shutil
+
+                shutil.copytree(source, dest)
+                return [dest]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.is_dir() or not path.suffix:
+                path.mkdir(parents=True, exist_ok=True)
+                dest = path / source.name
+            else:
+                dest = path
+            import shutil
+
+            shutil.copyfile(source, dest)
+            return [dest]
+
+    if isinstance(value, (list, tuple)) and value and all(
+        isinstance(item, (str, os.PathLike, Path)) for item in value
+    ):
+        root = path if not path.suffix else path.with_suffix("")
+        root.mkdir(parents=True, exist_ok=True)
+        saved = []
+        import shutil
+
+        for index, item in enumerate(value):
+            source = Path(os.path.expanduser(str(item)))
+            if source.exists():
+                dest = root / source.name
+                if source.is_dir():
+                    if dest.exists():
+                        shutil.rmtree(dest)
+                    shutil.copytree(source, dest)
+                else:
+                    shutil.copyfile(source, dest)
+            else:
+                dest = root / f"asset_{index:06d}"
+                dest.write_text(str(item), encoding="utf-8")
+            saved.append(dest)
+        return saved
+
+    mesh = value[0] if isinstance(value, (list, tuple)) and len(value) == 1 else value
+    if hasattr(mesh, "export"):
+        if not path.suffix:
+            path = path.with_suffix(".glb")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mesh.export(path)
+        return [path]
+
     if _is_pil_image(value):
         if not path.suffix:
             path = path.with_suffix(".png")

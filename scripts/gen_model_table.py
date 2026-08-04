@@ -11,15 +11,16 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from yeto.models import MODEL_ALIASES, MODEL_WEIGHT_GB  # noqa: E402
+from yeto.models import MODEL_ALIASES, MODEL_WEIGHT_GB, TESTED_ALIASES  # noqa: E402
 
 SECTION_START = "## Supported models"
 SECTION_END = "## Docs"
 
 
-def table() -> str:
+def table(aliases) -> str:
     rows = ["| alias | Hugging Face id | min island VRAM (GB) |", "|---|---|---|"]
-    for alias, hf in MODEL_ALIASES.items():
+    for alias in aliases:
+        hf = MODEL_ALIASES[alias]
         gb = MODEL_WEIGHT_GB.get(alias)
         size = f"{gb:g}" if gb is not None else "(Hub)"
         rows.append(f"| `{alias}` | `{hf}` | {size} |")
@@ -35,7 +36,16 @@ is the frozen-base footprint an island's GPUs must jointly hold (bf16 base,
 LoRA) — add ~8 GB per GPU for activations/overhead, ×8 for full tuning;
 "(Hub)" means the size is resolved from safetensors metadata at plan time.
 
-{table()}
+Tested — a completed Yeto fine-tuning run on real hardware:
+
+{table(a for a in MODEL_ALIASES if a in TESTED_ALIASES)}
+
+<details>
+<summary>All other supported aliases (untested)</summary>
+
+{table(a for a in MODEL_ALIASES if a not in TESTED_ALIASES)}
+
+</details>
 
 """
 

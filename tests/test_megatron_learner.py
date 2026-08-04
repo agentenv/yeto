@@ -38,6 +38,8 @@ def test_parse_args_defaults_to_native_mask_and_accepts_explicit_legacy():
         ml.parse_args(base + ["--assistant-mask-mode", "legacy"]).assistant_mask_mode
         == "legacy"
     )
+    assert ml.parse_args(base).data_format == "auto"
+    assert ml.parse_args(base + ["--data-format", "alpaca"]).data_format == "alpaca"
 
 
 def test_attention_targets_are_megatron_names_not_hf():
@@ -63,7 +65,13 @@ def test_build_model_disables_bridge_ddp_and_uses_lora_signature(monkeypatch):
                 "load_weights": load_weights,
                 "wrap_with_ddp": wrap_with_ddp,
             }
-            return ["chunk"]
+            return [FakeChunk()]
+
+    class FakeChunk:
+        # _build_model now initializes adapter weights in place; a fresh
+        # bridge model with no adapters is a valid (empty) case.
+        def named_parameters(self):
+            return iter(())
 
     class FakeLoRA:
         def __init__(self, dim, alpha, target_modules):
@@ -102,7 +110,7 @@ def test_build_model_disables_bridge_ddp_and_uses_lora_signature(monkeypatch):
     )
     model, _bridge = ml._build_model(args, device=None)
 
-    assert model == ["chunk"]
+    assert len(model) == 1 and isinstance(model[0], FakeChunk)
     assert seen["model_id"] == "resolved/m"
     assert seen["from_hf"] == {"use_safetensors": True, "trust_remote_code": True}
     assert seen["to_megatron"] == {"load_weights": True, "wrap_with_ddp": False}
@@ -242,13 +250,18 @@ def test_packed_data_path_propagates_mask_mode(monkeypatch):
         max_rows=50,
         train_on="assistant",
         assistant_mask_mode="legacy",
+        data_format="sharegpt",
         tokenize="preload",
     )
 
     assert ml._packed_blocks(args, tokenizer="tok") == "packed"
     positional, keywords = calls[0]
     assert positional == ("rows.jsonl", "tok", 2, 4, 1024, 50)
-    assert keywords == {"train_on": "assistant", "assistant_mask_mode": "legacy"}
+    assert keywords == {
+        "train_on": "assistant",
+        "assistant_mask_mode": "legacy",
+        "data_format": "sharegpt",
+    }
 
 
 def test_streaming_data_path_keeps_ep_ranks_on_the_same_tokens(monkeypatch):
@@ -267,6 +280,7 @@ def test_streaming_data_path_keeps_ep_ranks_on_the_same_tokens(monkeypatch):
         max_rows=None,
         train_on="assistant",
         assistant_mask_mode="native",
+        data_format="openai",
         tokenize="stream",
     )
 
@@ -277,4 +291,5 @@ def test_streaming_data_path_keeps_ep_ranks_on_the_same_tokens(monkeypatch):
         "world": 1,
         "train_on": "assistant",
         "assistant_mask_mode": "native",
+        "data_format": "openai",
     }

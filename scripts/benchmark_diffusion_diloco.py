@@ -15,8 +15,8 @@ Each DiLoCo result is evaluated from the syncer's checkpoint exported through
 as the result.  Matching logical ranks use the same training rows and RNG
 streams, and held-out loss pairs rows, timesteps, and noise draws across arms.
 
-This is a local execution harness.  It partitions the visible CUDA devices
-between learner processes but does not provision cloud machines.
+This is a local execution harness.  It partitions the visible accelerator
+devices between learner processes but does not provision cloud machines.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from types import SimpleNamespace
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from yeto import accel  # noqa: E402
 from yeto.benchmark_resume import (  # noqa: E402
     build_data_manifest,
     implementation_fingerprint,
@@ -358,33 +359,44 @@ def syncer_command(
     return command
 
 
-def _visible_cuda_devices() -> list[str] | None:
-    raw = os.environ.get("CUDA_VISIBLE_DEVICES")
+def _accelerator_type(device: str) -> str | None:
+    device_type = device.partition(":")[0]
+    return device_type if accel.visible_devices_env(device_type) is not None else None
+
+
+def _visible_accelerator_devices(device_type: str) -> list[str] | None:
+    variable = accel.visible_devices_env(device_type)
+    if variable is None:
+        return None
+    raw = os.environ.get(variable)
     if raw is None or not raw.strip():
         return None
     return [value.strip() for value in raw.split(",") if value.strip()]
 
 
-def cuda_env(start: int, count: int, device: str) -> dict[str, str] | None:
-    if not device.startswith("cuda"):
+def accelerator_env(start: int, count: int, device: str) -> dict[str, str] | None:
+    device_type = _accelerator_type(device)
+    if device_type is None:
         return None
-    visible = _visible_cuda_devices()
+    variable = accel.visible_devices_env(device_type)
+    assert variable is not None
+    visible = _visible_accelerator_devices(device_type)
     if visible is None:
         chosen = [str(index) for index in range(start, start + count)]
     else:
         chosen = visible[start : start + count]
         if len(chosen) != count:
             raise ValueError(
-                f"need CUDA device slice [{start}:{start + count}], but "
-                f"CUDA_VISIBLE_DEVICES exposes only {visible}"
+                f"need {device_type.upper()} device slice "
+                f"[{start}:{start + count}], but {variable} exposes only {visible}"
             )
     env = dict(os.environ)
-    env["CUDA_VISIBLE_DEVICES"] = ",".join(chosen)
+    env[variable] = ",".join(chosen)
     return env
 
 
-def _visible_gpu_uuids() -> set[str] | None:
-    visible = _visible_cuda_devices()
+def _visible_cuda_uuids() -> set[str] | None:
+    visible = _visible_accelerator_devices("cuda")
     if visible is None:
         return None
     result = subprocess.run(
@@ -405,39 +417,74 @@ def _visible_gpu_uuids() -> set[str] | None:
 
 
 def wait_for_free_gpus(device: str, limit_mb: int = 2000, timeout_s: int = 300) -> None:
-    if not device.startswith("cuda"):
+    device_type = _accelerator_type(device)
+    if device_type is None:
         return
-    visible_uuids = _visible_gpu_uuids()
+    visible_uuids = _visible_cuda_uuids() if device_type == "cuda" else None
+    visible_npus = (
+        set(_visible_accelerator_devices("npu") or [])
+        if device_type == "npu"
+        else None
+    )
     deadline = time.monotonic() + timeout_s
     last = ""
     while True:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-        )
         holders = []
-        for line in result.stdout.splitlines():
-            parts = [value.strip() for value in line.split(",")]
-            if len(parts) < 4:
-                continue
-            gpu_uuid, pid, name, memory = parts[0], parts[1], parts[2], parts[-1]
-            if visible_uuids is not None and gpu_uuid not in visible_uuids:
-                continue
-            if not memory.isdigit() or int(memory) > limit_mb:
-                holders.append(f"pid {pid} ({name}): {memory} MiB")
+        if device_type == "cuda":
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            for line in result.stdout.splitlines():
+                parts = [value.strip() for value in line.split(",")]
+                if len(parts) < 4:
+                    continue
+                gpu_uuid, pid, name, memory = parts[0], parts[1], parts[2], parts[-1]
+                if visible_uuids is not None and gpu_uuid not in visible_uuids:
+                    continue
+                if not memory.isdigit() or int(memory) > limit_mb:
+                    holders.append(f"pid {pid} ({name}): {memory} MiB")
+        else:
+            result = subprocess.run(
+                ["npu-smi", "info"],
+                capture_output=True,
+                text=True,
+            )
+            for line in result.stdout.splitlines():
+                parts = [value.strip() for value in line.split("|")[1:-1]]
+                if len(parts) != 4:
+                    continue
+                npu_fields = parts[0].split()
+                pid = parts[1]
+                if not npu_fields or not npu_fields[0].isdigit() or not pid.isdigit():
+                    continue
+                npu = npu_fields[0]
+                if visible_npus and npu not in visible_npus:
+                    continue
+                name = parts[2]
+                memory = parts[3].split()[0]
+                if not memory.isdigit() or int(memory) > limit_mb:
+                    holders.append(f"NPU {npu} pid {pid} ({name}): {memory} MiB")
         if not holders:
             return
         current = "; ".join(holders)
         if current != last:
-            print(f"[diffusion-benchmark] waiting for GPUs: {current}", flush=True)
+            print(
+                f"[diffusion-benchmark] waiting for {device_type.upper()} devices: "
+                f"{current}",
+                flush=True,
+            )
             last = current
         if time.monotonic() >= deadline:
-            raise RuntimeError(f"GPUs still occupied after {timeout_s}s: {current}")
+            raise RuntimeError(
+                f"{device_type.upper()} devices still occupied after "
+                f"{timeout_s}s: {current}"
+            )
         time.sleep(3)
 
 
@@ -708,10 +755,11 @@ def evaluate_loss(args, adapter_dir: Path | None, eval_data: Path) -> dict:
     """Paired held-out flow-matching loss per predicted element."""
     import torch
 
+    from yeto import accel
     from yeto.data import load_rows
     from yeto.diffusion import learner, sample
 
-    device = torch.device(args.eval_device)
+    device = accel.detect(args.eval_device)
     eval_args = SimpleNamespace(**vars(args))
     eval_args.device = args.eval_device
     eval_args.seed = parse_seeds(args.seeds)[0]
@@ -785,7 +833,7 @@ def evaluate_in_subprocess(
         json.dumps(payload, separators=(",", ":")),
     ]
     wait_for_free_gpus(args.eval_device)
-    env = cuda_env(0, 1, args.eval_device)
+    env = accelerator_env(0, 1, args.eval_device)
     result = subprocess.run(
         command,
         cwd=REPO_ROOT,
@@ -914,7 +962,7 @@ def run_baseline(args, m: int, seed: int, train_data: Path, seed_dir: Path) -> d
     run_logged(
         command,
         run_dir / "learner.log",
-        env=cuda_env(0, total_ranks, args.device),
+        env=accelerator_env(0, total_ranks, args.device),
         timeout_s=args.arm_timeout_min * 60,
     )
     wall = time.monotonic() - started
@@ -929,7 +977,7 @@ def run_baseline(args, m: int, seed: int, train_data: Path, seed_dir: Path) -> d
             total_ranks,
         ),
         "total_ranks": total_ranks,
-        "total_gpus": total_ranks if args.device.startswith("cuda") else 0,
+        "total_gpus": total_ranks if _accelerator_type(args.device) else 0,
     }
 
 
@@ -1060,7 +1108,7 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
                     cwd=REPO_ROOT,
                     stdout=handle,
                     stderr=subprocess.STDOUT,
-                    env=cuda_env(
+                    env=accelerator_env(
                         learner_id * args.learner_gpus,
                         args.learner_gpus,
                         args.device,
@@ -1133,6 +1181,7 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
     run_logged(
         _export_command(args, arm, checkpoint, export_dir),
         run_dir / "export.log",
+        env=accelerator_env(0, 1, args.export_device),
         timeout_s=args.arm_timeout_min * 60,
     )
     export_s = time.monotonic() - export_started
@@ -1161,7 +1210,7 @@ def run_diloco(args, arm: Arm, seed: int, train_data: Path, seed_dir: Path) -> d
             total_ranks,
         ),
         "total_ranks": total_ranks,
-        "total_gpus": total_ranks if args.device.startswith("cuda") else 0,
+        "total_gpus": total_ranks if _accelerator_type(args.device) else 0,
         "global_step": parsed.global_step,
         "fragment_versions": [version for version, _, _ in parsed.fragments],
         "tape": tape,
@@ -1493,14 +1542,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--diffusion-min-snr-gamma", type=float, default=5.0)
 
-    parser.add_argument("--device", choices=["cpu", "cuda"], default="cuda")
-    parser.add_argument("--eval-device", choices=["cpu", "cuda"], default=None)
+    parser.add_argument("--device", choices=["cpu", "cuda", "npu"], default="cuda")
+    parser.add_argument(
+        "--eval-device", choices=["cpu", "cuda", "npu"], default=None
+    )
     parser.add_argument(
         "--eval-dtype",
         choices=["auto", "bf16", "fp16", "f32"],
         default="auto",
     )
-    parser.add_argument("--export-device", choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument(
+        "--export-device", choices=["cpu", "cuda", "npu"], default="cpu"
+    )
     parser.add_argument("--gpu-hour-cost", type=float, default=None)
     parser.add_argument("--arm-timeout-min", type=int, default=240)
     parser.add_argument("--drain-seconds", type=float, default=3.0)
@@ -1556,14 +1609,20 @@ def validate_args(args, arms: list[Arm], *, check_devices: bool = True) -> None:
         raise ValueError("CPU benchmarks require --shard ddp")
     if args.eval_device is None:
         args.eval_device = args.device
-    if check_devices and args.device.startswith("cuda"):
+    if check_devices and _accelerator_type(args.device):
         import torch
 
+        from yeto import accel
+
         required = max(arm.learners for arm in arms) * args.learner_gpus
-        available = torch.cuda.device_count()
+        device_type = _accelerator_type(args.device)
+        accel.register_backends()
+        device_module = getattr(torch, device_type, None)
+        available = 0 if device_module is None else device_module.device_count()
         if available < required:
             raise ValueError(
-                f"largest arm needs {required} GPUs, but torch sees {available}"
+                f"largest arm needs {required} {device_type.upper()} devices, "
+                f"but torch sees {available}"
             )
 
 

@@ -35,6 +35,11 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser("yeto.mlx.learner")
     p.add_argument("--model", required=True, help="HF id or yeto/models.py alias")
     p.add_argument("--data", required=True)
+    p.add_argument(
+        "--data-format",
+        choices=["auto", "openai", "sharegpt", "alpaca"],
+        default="auto",
+    )
     p.add_argument("--model-revision", default=None)
     p.add_argument("--data-revision", default=None)
     p.add_argument("--trust-remote-code", action="store_true")
@@ -224,6 +229,7 @@ def _micro_batches(args, tokenizer):
             args.max_rows,
             train_on=args.train_on,
             assistant_mask_mode=args.assistant_mask_mode,
+            data_format=getattr(args, "data_format", "auto"),
             revision=getattr(args, "data_revision", None),
         )
 
@@ -247,6 +253,7 @@ def _micro_batches(args, tokenizer):
         args.max_rows,
         train_on=args.train_on,
         assistant_mask_mode=args.assistant_mask_mode,
+        data_format=getattr(args, "data_format", "auto"),
         revision=getattr(args, "data_revision", None),
     )
     log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)
@@ -303,13 +310,7 @@ def main(argv=None) -> None:
 
     from ..fragments import build_layout
     from ..protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
-    from ..tensor_io import (
-        fragment_flat,
-        pack_fragment,
-        pack_tensor,
-        quantize_q4,
-        unpack_fragment,
-    )
+    from ..tensor_io import pack_fragment
 
     layout = build_layout(
         [(n, int(np.prod(i.shape))) for n, i in registry.items()],
@@ -340,13 +341,7 @@ def main(argv=None) -> None:
                 client.send_init(fid, pack_fragment(frag, snap, bulk_dtype(wire_dtype)))
             log.info("sent INIT_PARAMS for %d fragments", layout.num_fragments)
 
-    run_inner_loop(
-        args, model, registry, layout, tokenizer, client,
-        fragment_flat=fragment_flat, pack_tensor=pack_tensor,
-        quantize_q4=quantize_q4,
-        unpack_fragment=unpack_fragment,
-        bulk_dtype=bulk_dtype, dtype_q4=DTYPE_Q4,
-    )
+    run_inner_loop(args, model, registry, layout, tokenizer, client)
 
     save_adapters(args, model, registry, tokenizer)
     if client is not None:
@@ -355,8 +350,6 @@ def main(argv=None) -> None:
 
 def run_inner_loop(
     args, model, registry, layout, tokenizer, client,
-    *, fragment_flat, pack_tensor, quantize_q4, unpack_fragment,
-    bulk_dtype, dtype_q4,
 ):
     """MLX inner AdamW steps + the torch learner's exact sync semantics:
     counters advance every step, pulls are answered once c_steps >= 1,
@@ -366,7 +359,9 @@ def run_inner_loop(
     import mlx.optimizers as optim
     from mlx.utils import tree_map
 
+    from ..diloco_sync import DiLoCoSyncState, sync_diloco_boundary
     from ..protocol import DTYPE_F32
+    from ..tensor_io import unpack_fragment
 
     def loss_fn(mdl, ids, weights):
         # Same math as yeto.losses.sft_loss: next-token logprobs, weighted
@@ -386,19 +381,37 @@ def run_inner_loop(
 
     steps_total = 0
     tokens_total = 0
-    steps_at_reset = [0] * layout.num_fragments
-    tokens_at_reset = [0] * layout.num_fragments
-    fragment_versions = [0] * layout.num_fragments
-    pending_pulls: list = []
-    global_step = 0
     tokens_per_inner_step = args.micro_batch_size * args.grad_accum * args.seq_len
-    anchors: list[torch.Tensor | None] | None = None
-    if client is not None:
-        anchors = [None] * layout.num_fragments
+    sync_state = DiLoCoSyncState.create(
+        layout.num_fragments,
+        track_anchors=client is not None,
+    )
 
-    shutdown = False
+    def snapshot_sync_params():
+        return torch_adapters(model, registry)
+
+    def apply_sync_flat(fragment, flat):
+        write_fragment(model, fragment, flat, registry)
+
+    def finalize_sync():
+        assert client is not None
+        manifest, broadcasts = client.wait_for_final_fragments()
+        for update in broadcasts:
+            fid = update.fragment_id
+            flat = unpack_fragment(
+                layout.fragments[fid],
+                update.data,
+                DTYPE_F32,
+            )
+            # Finalization is a raw overwrite: normal delayed-application
+            # blending must not leak into the saved adapter.
+            write_fragment(model, layout.fragments[fid], flat, registry)
+        mx.eval(model.parameters())
+        client.acknowledge_finalization(manifest)
+        return manifest
+
     t_last = time.monotonic()
-    while not shutdown and steps_total < args.max_local_steps:
+    while not sync_state.shutdown and steps_total < args.max_local_steps:
         grads_acc = None
         loss_val = 0.0
         for _ in range(args.grad_accum):
@@ -426,93 +439,37 @@ def run_inner_loop(
             log.info(
                 "local_step=%d global_step=%d loss/token=%.4f (%.2f s/step, %.0f tok/s)",
                 steps_total,
-                global_step,
+                sync_state.global_step,
                 loss_val,  # loss_fn already normalizes per trained token
                 dt / 10,
                 10 * tokens_per_inner_step / max(dt, 1e-9),
             )
 
         # --- fragment sync at the step boundary (never blocks) ---
-        # Broadcasts apply BEFORE pulls are answered (same ordering as
-        # yeto.learner): the pipelined syncer's pull opening a fragment's
-        # next round (control stream) can overtake the broadcast that
-        # closed its previous one (data streams); answering first would
-        # push a stale base_version. Applying first resets the fragment's
-        # counters, so the self-clock defers the answer one step.
-        if client is None:
-            continue
-        client.check_health()
-        if client.finalizing.is_set():
-            manifest, broadcasts = client.wait_for_final_fragments()
-            for update in broadcasts:
-                fid = update.fragment_id
-                flat = unpack_fragment(
-                    layout.fragments[fid],
-                    update.data,
-                    DTYPE_F32,
-                )
-                # Finalization is a raw overwrite: normal delayed-application
-                # blending must not leak into the saved adapter.
-                write_fragment(model, layout.fragments[fid], flat, registry)
-            mx.eval(model.parameters())
-            client.acknowledge_finalization(manifest)
-            global_step = max(global_step, manifest.global_step)
-            shutdown = True
+        if sync_diloco_boundary(
+            client,
+            layout,
+            sync_state,
+            steps_total=steps_total,
+            units_total=tokens_total,
+            merge_alpha=args.merge_alpha,
+            snapshot_params=snapshot_sync_params,
+            apply_flat=apply_sync_flat,
+            finalize=finalize_sync,
+            shutdown_after_pulls=True,
+        ):
             break
-        snap = None  # torch view of the adapters, built lazily per boundary
-        for bc in client.drain_updates():
-            fid = bc.fragment_id
-            flat = unpack_fragment(layout.fragments[fid], bc.data, bulk_dtype(client.dtype))
-            if anchors is not None:
-                anchors[fid] = flat.clone()
-            if args.merge_alpha > 0:
-                snap = snap if snap is not None else torch_adapters(model, registry)
-                local = fragment_flat(layout.fragments[fid], snap)
-                flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
-            write_fragment(model, layout.fragments[fid], flat, registry)
-            steps_at_reset[fid] = steps_total
-            tokens_at_reset[fid] = tokens_total
-            fragment_versions[fid] = bc.version
-            global_step = max(global_step, bc.version)
-        snap = None  # writes above invalidate the lazy snapshot
-        pending_pulls.extend(client.drain_pulls())
-        still_pending = []
-        for pull in pending_pulls:
-            fid = pull.fragment_id
-            c_steps = steps_total - steps_at_reset[fid]
-            if c_steps < 1:
-                still_pending.append(pull)
-                continue
-            c_tokens = tokens_total - tokens_at_reset[fid]
-            snap = snap if snap is not None else torch_adapters(model, registry)
-            anchor = anchors[fid] if anchors is not None else None
-            if anchor is None:
-                still_pending.append(pull)
-                continue
-            delta = fragment_flat(layout.fragments[fid], snap) - anchor
-            if client.dtype == dtype_q4:
-                payload = quantize_q4(delta)
-            else:
-                payload = pack_tensor(delta, client.dtype)
-            client.push_fragment(
-                fid,
-                pull.global_step,
-                pull.round_attempt,
-                fragment_versions[fid],
-                steps_total,
-                c_steps,
-                c_tokens,
-                payload,
-            )
-        pending_pulls = still_pending
-        shutdown = client.shutdown.is_set()
     if client is not None and not client.finalized.is_set():
         raise RuntimeError(
             "MLX learner stopped before authoritative finalization; "
             "refusing to save local parameters"
         )
     mx.eval(model.parameters())
-    log.info("inner loop done at local_step=%d global_step=%d", steps_total, global_step)
+    log.info(
+        "inner loop done at local_step=%d global_step=%d",
+        steps_total,
+        sync_state.global_step,
+    )
 
 
 def save_adapters(args, model, registry, tokenizer) -> None:

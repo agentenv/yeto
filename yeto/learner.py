@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 
+from . import accel
 from .autobatch import exact_grad_accum, int_or_auto, resolve_micro_batch_size
 from .causal_kernels import (
     ATTENTION_BACKENDS,
@@ -43,6 +44,7 @@ from .causal_kernels import (
     validate_lora_production_envelope,
 )
 from .data import StreamingPackedBlocks, build_packed_dataset
+from .diloco_sync import DiLoCoSyncState, sync_diloco_boundary
 from .finalization import finalize_torch_island
 from .fragments import build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
@@ -50,11 +52,7 @@ from .models import MODEL_ALIASES as MODEL_ALIASES
 from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
 from .tensor_io import (
     apply_fragment,
-    fragment_flat,
     pack_fragment,
-    pack_tensor,
-    quantize_q4,
-    unpack_fragment,
 )
 
 log = logging.getLogger("learner")
@@ -64,6 +62,12 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Yeto learner")
     p.add_argument("--model", required=True, help="HF model id or an alias from yeto/models.py (gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...)")
     p.add_argument("--data", required=True, help="HF dataset id")
+    p.add_argument(
+        "--data-format",
+        choices=["auto", "openai", "sharegpt", "alpaca"],
+        default="auto",
+        help="raw SFT row schema normalized before tokenization",
+    )
     p.add_argument(
         "--model-revision",
         default=None,
@@ -251,9 +255,12 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def setup_distributed() -> tuple[int, int]:
+def setup_distributed(device: torch.device) -> tuple[int, int]:
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
+        kwargs = {"backend": accel.dist_backend(device)}
+        if accel.is_accelerator(device):
+            kwargs["device_id"] = device
+        dist.init_process_group(**kwargs)
         return dist.get_rank(), dist.get_world_size()
     return 0, 1
 
@@ -278,10 +285,17 @@ def _from_pretrained_offline_first(factory, model_id: str, **kwargs):
     revalidate every config/tokenizer file per crash-loop cycle, which adds
     up against the Hub's per-IP rate limit. A cold cache (fresh spot node)
     falls back to a normal online load.
+
+    The fallback catches broadly, not just OSError: a PARTIAL cache (another
+    loader fetched the config but not every tokenizer file) fails offline
+    load in arbitrary ways — observed on the megatron island as sentencepiece
+    `TypeError: not a string` when tokenizer_config.json resolved without its
+    vocab file. Any offline failure means "the cache cannot serve this";
+    the online retry either completes the cache or raises the real error.
     """
     try:
         return factory.from_pretrained(model_id, local_files_only=True, **kwargs)
-    except OSError:
+    except Exception:
         return factory.from_pretrained(model_id, **kwargs)
 
 
@@ -291,14 +305,40 @@ def _prepare_nf4_base_for_lora(model) -> None:
     PEFT's generic k-bit helper casts every non-quantized bf16 parameter to
     fp32. On large-vocabulary models that doubles several gigabytes of frozen
     embeddings and lm-head weights. Only normalization weights need the fp32
-    stability treatment; checkpointing input gradients are enabled later,
-    after LoRA attachment.
+    stability treatment. A fp32 final norm can promote its output even when
+    the frozen lm head remains bf16, so cast the head input back to its weight
+    dtype at the module boundary. Checkpointing input gradients are enabled
+    later, after LoRA attachment.
     """
     for parameter in model.parameters():
         parameter.requires_grad_(False)
     for module in model.modules():
         if "norm" in module.__class__.__name__.lower():
             module.to(torch.float32)
+
+    get_output_embeddings = getattr(model, "get_output_embeddings", None)
+    output_embeddings = (
+        get_output_embeddings() if callable(get_output_embeddings) else None
+    )
+    if output_embeddings is not None:
+        output_embeddings.register_forward_pre_hook(
+            _cast_floating_inputs_to_weight_dtype
+        )
+
+
+def _cast_floating_inputs_to_weight_dtype(module, args):
+    """Keep a frozen output projection compatible with fp32 norm outputs."""
+    weight = getattr(module, "weight", None)
+    if not isinstance(weight, torch.Tensor) or not weight.is_floating_point():
+        return args
+    return tuple(
+        value.to(dtype=weight.dtype)
+        if isinstance(value, torch.Tensor)
+        and value.is_floating_point()
+        and value.dtype != weight.dtype
+        else value
+        for value in args
+    )
 
 
 def load_model_and_tokenizer(args, device):
@@ -330,7 +370,7 @@ def load_model_and_tokenizer(args, device):
     # adapters in fp32, which keeps AdamW's exp_avg_sq in fp32 — a bf16
     # second moment is too noisy. Wire packing casts to the wire dtype
     # either way.
-    if (args.shard == "fsdp" and args.tuning == "full") or device.type != "cuda":
+    if (args.shard == "fsdp" and args.tuning == "full") or not accel.is_accelerator(device):
         dtype = torch.float32
     else:
         dtype = torch.bfloat16
@@ -602,8 +642,13 @@ def _all_ranks_true(value: bool, device, world: int) -> bool:
     return bool(flag.item())
 
 
+def _loss_metric_dtype(device) -> torch.dtype:
+    """Highest-precision loss telemetry dtype supported by the collective."""
+    return accel.loss_metric_dtype(device)
+
+
 def _global_loss_sum(local_loss: torch.Tensor, world: int) -> float:
-    total = local_loss.detach().to(dtype=torch.float64).clone()
+    total = local_loss.detach().to(dtype=_loss_metric_dtype(local_loss.device)).clone()
     if world > 1:
         dist.all_reduce(total, op=dist.ReduceOp.SUM)
     return float(total.item())
@@ -615,7 +660,8 @@ def main(argv=None) -> None:
         from .budget_finalization import validate_learner_budget_args
 
         validate_learner_budget_args(args)
-    rank, world = setup_distributed()
+    device = accel.detect(args.device)
+    rank, world = setup_distributed(device)
     logging.basicConfig(
         level=logging.INFO,
         format=f"%(asctime)s learner{args.learner_id}.r{rank} %(levelname)s %(message)s",
@@ -626,19 +672,16 @@ def main(argv=None) -> None:
         verify_distributed_source_tree_sha256,
     )
 
-    if args.device:
-        device = torch.device(args.device)
-    elif torch.cuda.is_available():
-        device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", 0)))
-        torch.cuda.set_device(device)
-    else:
-        if os.environ.get("SKYPILOT_NUM_GPUS_PER_NODE", "0") != "0":
-            raise RuntimeError(
-                "GPUs were provisioned but torch.cuda.is_available() is False "
-                f"(torch {torch.__version__}); check the torch wheel's CUDA "
-                "version against the node's driver instead of training on CPU"
-            )
-        device = torch.device("cpu")
+    if (
+        args.device is None  # an explicit --device cpu is the caller's choice
+        and device.type == "cpu"
+        and os.environ.get("SKYPILOT_NUM_GPUS_PER_NODE", "0") != "0"
+    ):
+        raise RuntimeError(
+            "GPUs were provisioned but no accelerator is visible to torch "
+            f"(torch {torch.__version__}); check the torch wheel's CUDA "
+            "version against the node's driver instead of training on CPU"
+        )
 
     verify_distributed_source_tree_sha256(
         args.source_sha256,
@@ -668,8 +711,8 @@ def main(argv=None) -> None:
 
     if args.shard == "fsdp" and device.type != "cuda":
         raise RuntimeError(
-            "--shard fsdp requires a CUDA accelerator (torch FSDP cannot "
-            "shard on cpu); use --shard ddp or run on GPUs"
+            f"--shard fsdp requires a CUDA accelerator, not {device.type!r} "
+            "(no other family has validated sharding evidence); use --shard ddp"
         )
 
     if not 0.0 <= args.merge_alpha < 1.0:
@@ -681,8 +724,7 @@ def main(argv=None) -> None:
     # separated by learner/rank only after model construction below.
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    accel.manual_seed_all(device, args.seed)
 
     log.info("loading model %s (%s)", args.model, args.tuning)
     model, tokenizer = load_model_and_tokenizer(args, device)
@@ -697,15 +739,14 @@ def main(argv=None) -> None:
     )
     random.seed(training_seed)
     torch.manual_seed(training_seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(training_seed)
+    accel.manual_seed_all(device, training_seed)
 
     grad_ckpt = args.gradient_checkpointing == "on"
-    if args.gradient_checkpointing == "auto" and device.type == "cuda":
+    if args.gradient_checkpointing == "auto":
         # The base is fully on-device here (load ends with model.to(device)),
         # so free memory directly reflects what activations must fit into.
-        free, total = torch.cuda.mem_get_info(device)
-        grad_ckpt = free < total / 2
+        memory = accel.mem_get_info(device)
+        grad_ckpt = memory is not None and memory[0] < memory[1] / 2
     if grad_ckpt:
         # Non-reentrant checkpointing composes with FSDP and peft; the input
         # grad hook keeps the graph alive from the embeddings down to the
@@ -919,6 +960,7 @@ def main(argv=None) -> None:
             world=world,
             train_on=args.train_on,
             assistant_mask_mode=args.assistant_mask_mode,
+            data_format=args.data_format,
             revision=args.data_revision,
             **stream_kwargs,
         )
@@ -944,6 +986,7 @@ def main(argv=None) -> None:
             args.max_rows,
             train_on=args.train_on,
             assistant_mask_mode=args.assistant_mask_mode,
+            data_format=args.data_format,
             revision=args.data_revision,
         )
         sampler = None
@@ -1059,18 +1102,30 @@ def run_inner_loop(
     steps_total = 0
     tokens_total = 0
     target_tokens_total = 0
-    steps_at_reset = [0] * layout.num_fragments
-    tokens_at_reset = [0] * layout.num_fragments
-    fragment_versions = [0] * layout.num_fragments  # last applied version per fragment
-    pending_pulls: list = []  # pulls deferred until c_steps >= 1
-    global_step = 0
     # Every PUSH carries local − raw_anchor, where raw_anchor is the exact
     # global fragment from the last accepted broadcast, before alpha blending.
     # A pull that overtakes the initial broadcast waits instead of inventing
     # an anchor from local initialization.
-    anchors: list[torch.Tensor | None] | None = None
-    if rank == 0 and client is not None:
-        anchors = [None] * layout.num_fragments
+    sync_state = DiLoCoSyncState.create(
+        layout.num_fragments,
+        track_anchors=rank == 0 and client is not None,
+    )
+
+    def snapshot_sync_params():
+        return params
+
+    def apply_sync_flat(fragment, flat):
+        apply_fragment(fragment, flat, params)
+
+    def finalize_sync():
+        return finalize_torch_island(
+            client,
+            layout,
+            params,
+            rank=rank,
+            world=world,
+            device=device,
+        )
 
     # c_tokens uses tokens_total, which advances by the exact island-global
     # raw-token count accepted into each optimizer step.
@@ -1093,16 +1148,15 @@ def run_inner_loop(
     else:
         compute_loss = lambda logits, ids, w: sft_loss(logits, ids, args.loss_function, w)  # noqa: E731
 
-    shutdown = False
     epoch = 0
     t_last = time.monotonic()
-    while not shutdown and steps_total < args.max_local_steps:
+    while not sync_state.shutdown and steps_total < args.max_local_steps:
         steps_at_epoch_start = steps_total
         sampler = getattr(loader, "sampler", None)
         if hasattr(sampler, "set_epoch"):
             sampler.set_epoch(epoch)
         iterator = iter(loader)
-        while not shutdown and steps_total < args.max_local_steps:
+        while not sync_state.shutdown and steps_total < args.max_local_steps:
             group = _next_accumulation_group(iterator, args.grad_accum)
             common_size = _common_group_size(len(group), device, world)
             # Preserve the configured optimizer batch: a finite-loader tail is
@@ -1126,7 +1180,8 @@ def run_inner_loop(
             # yields SUM_r grad(loss_r) / SUM_r target_tokens exactly.
             loss_scale = world / global_targets
             observed_targets = torch.zeros((), dtype=torch.long, device=device)
-            step_loss_local = torch.zeros((), dtype=torch.float64, device=device)
+            metric_dtype = _loss_metric_dtype(device)
+            step_loss_local = torch.zeros((), dtype=metric_dtype, device=device)
             opt.zero_grad(set_to_none=True)
             for input_ids, weights in group:
                 input_ids = input_ids.to(device, non_blocking=True)
@@ -1145,7 +1200,7 @@ def run_inner_loop(
                     .detach()
                     .sum()
                 )
-                step_loss_local.add_(loss.detach().to(dtype=torch.float64))
+                step_loss_local.add_(loss.detach().to(dtype=metric_dtype))
                 (loss * loss_scale).backward()
 
             local_count_matches = int(observed_targets.item()) == local_targets
@@ -1187,122 +1242,33 @@ def run_inner_loop(
                         "local_step=%d global_step=%d loss/token=%.4f "
                         "target_tokens=%d (%.2f s/step)",
                         steps_total,
-                        global_step,
+                        sync_state.global_step,
                         loss_sum / global_targets,
                         target_tokens_total,
                         dt / 10,
                     )
 
             # --- fragment sync at the step boundary (never blocks) ---
-            # Broadcasts are applied BEFORE pulls are answered: with the
-            # syncer's pipelined rounds, the pull for a fragment's next
-            # round (control stream) can overtake the broadcast that closed
-            # its previous round (data streams). Answering first would push
-            # a stale base_version; applying first resets the fragment's
-            # counters, so the self-clock defers the answer one step and it
-            # then carries the fresh anchor.
-            actions = []  # (fid, version, flat_f32) applied this boundary
-            finalizing = False
-            if rank == 0 and client is not None:
-                client.check_health()
-                finalizing = client.finalizing.is_set()
-                if not finalizing:
-                    # 1. collect received global fragments
-                    for bc in client.drain_updates():
-                        flat = unpack_fragment(
-                            layout.fragments[bc.fragment_id], bc.data, bulk_dtype(client.dtype)
-                        )
-                        if anchors is not None:
-                            # Keep the exact raw global value before normal
-                            # delayed-application blending.
-                            anchors[bc.fragment_id] = flat.clone()
-                        actions.append((bc.fragment_id, bc.version, flat))
-                shutdown = client.shutdown.is_set()
-
-            if world > 1:
-                meta = [(f, v) for f, v, _ in actions] if rank == 0 else None
-                box = [meta, shutdown, finalizing]
-                dist.broadcast_object_list(box, src=0)
-                meta, shutdown, finalizing = box
-                if rank != 0:
-                    actions = [(f, v, torch.empty(layout.fragments[f].numel)) for f, v in meta]
-            if finalizing:
-                manifest = finalize_torch_island(
-                    client,
-                    layout,
-                    params,
-                    rank=rank,
-                    world=world,
-                    device=device,
-                )
-                global_step = max(global_step, manifest.global_step)
-                shutdown = True
+            if sync_diloco_boundary(
+                client,
+                layout,
+                sync_state,
+                steps_total=steps_total,
+                units_total=tokens_total,
+                merge_alpha=args.merge_alpha,
+                snapshot_params=snapshot_sync_params,
+                apply_flat=apply_sync_flat,
+                finalize=finalize_sync,
+                rank=rank,
+                world=world,
+                device=device,
+            ):
                 break
-            if world > 1:
-                for fid, version, flat in actions:
-                    flat = flat.to(device)
-                    dist.broadcast(flat, src=0)
-                    # α-blend: keep a share of the inner steps taken while the
-                    # merge was in flight. Ranks hold identical params, so
-                    # blending after the broadcast stays consistent.
-                    if args.merge_alpha > 0:
-                        local = fragment_flat(layout.fragments[fid], params)
-                        flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
-                    apply_fragment(layout.fragments[fid], flat, params)
-                    if rank == 0:
-                        steps_at_reset[fid] = steps_total
-                        tokens_at_reset[fid] = tokens_total
-                        fragment_versions[fid] = version
-                    global_step = max(global_step, version)
-            else:
-                for fid, version, flat in actions:
-                    flat = flat.to(device)
-                    if args.merge_alpha > 0:
-                        local = fragment_flat(layout.fragments[fid], params)
-                        flat = args.merge_alpha * local + (1.0 - args.merge_alpha) * flat
-                    apply_fragment(layout.fragments[fid], flat, params)
-                    steps_at_reset[fid] = steps_total
-                    tokens_at_reset[fid] = tokens_total
-                    fragment_versions[fid] = version
-                    global_step = max(global_step, version)
 
-            # 2. answer pulls whose fragment has made progress since the
-            # (just-applied) broadcasts.
-            if rank == 0 and client is not None:
-                pending_pulls.extend(client.drain_pulls())
-                still_pending = []
-                for pull in pending_pulls:
-                    fid = pull.fragment_id
-                    c_steps = steps_total - steps_at_reset[fid]
-                    if c_steps < 1:
-                        still_pending.append(pull)
-                        continue
-                    c_tokens = tokens_total - tokens_at_reset[fid]
-                    anchor = anchors[fid] if anchors is not None else None
-                    if anchor is None:
-                        still_pending.append(pull)
-                        continue
-                    delta = fragment_flat(layout.fragments[fid], params).cpu() - anchor
-                    if client.dtype == DTYPE_Q4:
-                        payload = quantize_q4(delta)
-                    else:
-                        payload = pack_tensor(delta, client.dtype)
-                    client.push_fragment(
-                        fid,
-                        pull.global_step,
-                        pull.round_attempt,
-                        fragment_versions[fid],
-                        steps_total,
-                        c_steps,
-                        c_tokens,
-                        payload,
-                    )
-                pending_pulls = still_pending
-
-            if shutdown or steps_total >= args.max_local_steps:
+            if sync_state.shutdown or steps_total >= args.max_local_steps:
                 break
         if (
-            not shutdown
+            not sync_state.shutdown
             and steps_total < args.max_local_steps
             and steps_total == steps_at_epoch_start
         ):
@@ -1316,7 +1282,7 @@ def run_inner_loop(
     if (
         learner_budget_steps is not None
         and steps_total == learner_budget_steps
-        and not shutdown
+        and not sync_state.shutdown
     ):
         from .budget_finalization import finalize_learner_budget
 
@@ -1330,14 +1296,14 @@ def run_inner_loop(
             target_steps=learner_budget_steps,
             units=tokens_total,
         )
-        global_step = max(global_step, manifest.global_step)
+        sync_state.global_step = max(sync_state.global_step, manifest.global_step)
     if rank == 0 and client is not None and not client.finalized.is_set():
         raise RuntimeError(
             "learner stopped before authoritative finalization; refusing to save local parameters"
         )
     counters = TrainingCounters(
         local_steps=steps_total,
-        global_step=global_step,
+        global_step=sync_state.global_step,
         raw_tokens=tokens_total,
         target_tokens=target_tokens_total,
     )

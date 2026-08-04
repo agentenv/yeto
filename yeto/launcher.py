@@ -790,10 +790,26 @@ MEGATRON_SETUP = (
     "|| echo '[yeto-setup] megatron stack install failed; --island-backend megatron unavailable' >&2"
 )
 
+PROTENIX_SETUP = (
+    "pip install -q 'protenix>=2.0.0' "
+    "|| echo '[yeto-setup] protenix install failed; Protenix adapter unavailable' >&2"
+)
+PROTENIX_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.protenix:make_adapter"
+HUNYUAN3D_ROOT = "~/Hunyuan3D-2.1"
+HUNYUAN3D_SETUP = (
+    f"if [ ! -d {HUNYUAN3D_ROOT} ]; then git clone --depth 1 "
+    f"https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git {HUNYUAN3D_ROOT}; fi && "
+    f"pip install -q -r {HUNYUAN3D_ROOT}/requirements.txt && "
+    f"export YETO_HUNYUAN3D_ROOT={HUNYUAN3D_ROOT} "
+    "|| echo '[yeto-setup] Hunyuan3D setup failed; Hunyuan3D adapter unavailable' >&2"
+)
+HUNYUAN3D_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.hunyuan3d:make_adapter"
+ALPHAFOLD3_DIFFUSION_ADAPTER = "yeto.diffusion.adapters.alphafold3:make_adapter"
 
 def causal_kernel_setup_steps(args) -> list[str]:
     """Pinned remote installs selected explicitly for a causal torch learner."""
     from .kernel_deps import (
+        BITSANDBYTES_MIN_VERSION,
         FLASH_ATTN_VERSION,
         LIGER_KERNEL_VERSION,
         NINJA_VERSION,
@@ -802,6 +818,8 @@ def causal_kernel_setup_steps(args) -> list[str]:
     )
 
     steps: list[str] = []
+    if getattr(args, "base_quantization", "none") == "nf4":
+        steps.append(f"pip install -q 'bitsandbytes>={BITSANDBYTES_MIN_VERSION}'")
     if getattr(args, "kernel_backend", "native") == "liger":
         steps.append(
             f"pip install -q 'liger-kernel=={LIGER_KERNEL_VERSION}' "
@@ -1000,6 +1018,24 @@ def make_miles_island_task(
     return task
 
 
+def _is_protenix_request(args) -> bool:
+    model = getattr(args, "model", "")
+    adapter = getattr(args, "diffusion_adapter", "") or ""
+    return model in {"protenix", "protenix-v2"} or "protenix" in adapter
+
+
+def _is_hunyuan3d_request(args) -> bool:
+    model = getattr(args, "model", "")
+    adapter = getattr(args, "diffusion_adapter", "") or ""
+    return model in {"hunyuan3d-21"} or "hunyuan3d" in adapter
+
+
+def _is_alphafold3_request(args) -> bool:
+    model = getattr(args, "model", "")
+    adapter = getattr(args, "diffusion_adapter", "") or ""
+    return model == "alphafold3" or "alphafold3" in adapter
+
+
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
     import sky
 
@@ -1016,6 +1052,10 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     backend = getattr(args, "island_backend", "torch")
     attention_backend = getattr(args, "attention_backend", "auto")
     kernel_backend = getattr(args, "kernel_backend", "native")
+    data_format = getattr(args, "data_format", "auto")
+    base_quantization = getattr(args, "base_quantization", "none")
+    if model_kind != "causal-lm" and data_format != "auto":
+        raise ValueError("--data-format applies only to causal-LM models")
     if model_kind != "causal-lm" and (
         attention_backend != "auto" or kernel_backend != "native"
     ):
@@ -1027,6 +1067,22 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             raise ValueError(
                 "--attention-backend and --kernel-backend are supported only "
                 "by the torch causal-LM island backend"
+            )
+    if base_quantization != "none":
+        if model_kind != "causal-lm":
+            raise ValueError("--base-quantization applies only to causal-LM models")
+        if backend != "torch":
+            raise ValueError(
+                "--base-quantization nf4 is supported only by the torch "
+                "causal-LM island backend"
+            )
+        if args.tuning != "lora":
+            raise ValueError("--base-quantization nf4 requires --tuning lora")
+        if args.shard != "ddp":
+            raise ValueError("--base-quantization nf4 requires --shard ddp")
+        if kernel_backend != "native":
+            raise ValueError(
+                "--base-quantization nf4 requires --kernel-backend native"
             )
     if kernel_backend == "liger" and loss_function != "cross_entropy":
         raise ValueError(
@@ -1094,6 +1150,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         learner_flags += (
             f" --train-on {args.train_on}"
             f" --assistant-mask-mode {getattr(args, 'assistant_mask_mode', 'native')}"
+            f" --data-format {getattr(args, 'data_format', 'auto')}"
             f" --seed {getattr(args, 'seed', 0)}"
             f" --seq-len {args.seq_len}"
             f" --tokenize {args.tokenize}"
@@ -1101,6 +1158,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         )
         if backend == "torch":
             learner_flags += (
+                f" --base-quantization {base_quantization}"
                 f" --attention-backend {attention_backend}"
                 f" --kernel-backend {kernel_backend}"
             )
@@ -1119,8 +1177,15 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             f" --resize-mode {shlex.quote(getattr(args, 'resize_mode', 'stretch'))}"
             f" --stream-workers {args.stream_workers}"
         )
-        if getattr(args, "diffusion_adapter", None):
-            learner_flags += f" --diffusion-adapter {shlex.quote(args.diffusion_adapter)}"
+        diffusion_adapter = getattr(args, "diffusion_adapter", None)
+        if _is_protenix_request(args) and not diffusion_adapter:
+            diffusion_adapter = PROTENIX_DIFFUSION_ADAPTER
+        if _is_hunyuan3d_request(args) and not diffusion_adapter:
+            diffusion_adapter = HUNYUAN3D_DIFFUSION_ADAPTER
+        if _is_alphafold3_request(args) and not diffusion_adapter:
+            diffusion_adapter = ALPHAFOLD3_DIFFUSION_ADAPTER
+        if diffusion_adapter:
+            learner_flags += f" --diffusion-adapter {shlex.quote(diffusion_adapter)}"
             if getattr(args, "diffusion_adapter_sha256", None):
                 learner_flags += (
                     " --diffusion-adapter-sha256 "
@@ -1159,6 +1224,10 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
             "pip install -q -r requirements.txt",
             "pip install -q 'diffusers>=0.35' safetensors pillow 'imageio[ffmpeg]' 'bitsandbytes>=0.46.1'",
         ]
+        if _is_protenix_request(args):
+            setup_steps.append(PROTENIX_SETUP)
+        if _is_hunyuan3d_request(args):
+            setup_steps.append(HUNYUAN3D_SETUP)
     elif backend == "megatron":
         gpus = spec.num_nodes * spec.gpus_per_node
         tp = max(1, getattr(args, "tensor_parallel", 1))
@@ -1211,6 +1280,8 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         # Surface NCCL's chosen transport in the job logs so an EFA-less
         # fallback to TCP sockets is visible, not silent.
         envs["NCCL_DEBUG"] = "INFO"
+    if _is_hunyuan3d_request(args):
+        envs["YETO_HUNYUAN3D_ROOT"] = HUNYUAN3D_ROOT
     # Non-HF --data sources (local paths, s3://, gs://, ...) ride sky's
     # file_mounts onto every learner; see yeto/datasource.py.
     file_mounts = dict(learner_file_mounts(args.data)) or None
@@ -1233,11 +1304,14 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     # command, which then finds a warm (or warming — hf resumes) cache.
     # hf_transfer multi-streams the download; NVMe absorbs it at GB/s.
     from .models import resolve
-
-    repo = resolve(args.model)
     from .provenance import is_local_reference
 
-    if is_local_reference(repo):
+    repo = resolve(args.model)
+    if _is_protenix_request(args):
+        prefetch = "true  # Protenix uses native model names/checkpoints, not HF prefetch"
+    elif _is_alphafold3_request(args):
+        prefetch = "true  # AlphaFold3 requires local authorized parameters, not HF prefetch"
+    elif is_local_reference(repo):
         prefetch = ": # local model; no Hub prefetch"
     else:
         revision_flag = (
@@ -2274,6 +2348,11 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     f"    python -m yeto.mlx.learner --model {shlex.quote(args.model)} "
                     f"--data {shlex.quote(args.data)} --syncer {shlex.quote(syncer_addr)} "
                     f"--learner-id {len(specs) + x} --num-learners {num_learners} "
+                    f"--data-format {getattr(args, 'data_format', 'auto')} "
+                    f"--train-on {args.train_on} "
+                    f"--assistant-mask-mode "
+                    f"{getattr(args, 'assistant_mask_mode', 'native')} "
+                    f"--seed {getattr(args, 'seed', 0)} "
                     f"--tuning {args.tuning} --lora-r {args.lora_r} "
                     f"--lora-targets {getattr(args, 'lora_targets', 'auto')} "
                     f"--seq-len {args.seq_len} --fragments {args.fragments} "

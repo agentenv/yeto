@@ -28,6 +28,7 @@ MODEL_ALIASES = {
     "gemma4": "google/gemma-4-12B-it",
     "deepseek4flash": "deepseek-ai/DeepSeek-V4-Flash",
     # Qwen dense + MoE
+    "qwen3-0.6b": "Qwen/Qwen3-0.6B",
     "qwen3-8b": "Qwen/Qwen3-8B",
     "qwen35-4b": "Qwen/Qwen3.5-4B",
     "qwen35-9b": "Qwen/Qwen3.5-9B",
@@ -50,6 +51,7 @@ MODEL_ALIASES = {
     "kimi-k2-thinking": "moonshotai/Kimi-K2-Thinking",
     "kimi-k25": "moonshotai/Kimi-K2.5",
     "kimi-k26": "moonshotai/Kimi-K2.6",
+    "kimi-k3": "moonshotai/Kimi-K3",  # size via Hub metadata
     # DeepSeek
     "deepseek31": "deepseek-ai/DeepSeek-V3.1",
     "deepseek-r1": "deepseek-ai/DeepSeek-R1",
@@ -71,6 +73,7 @@ MODEL_ALIASES = {
     "minimax-m3": "MiniMaxAI/MiniMax-M3",  # size via Hub metadata
     "kimi-k27-code": "moonshotai/Kimi-K2.7-Code",  # size via Hub metadata
     "mistral-small3": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+    "laguna-s-2.1": "poolside/Laguna-S-2.1",  # 118B-A8B agentic coding; size via Hub metadata
     # Ornith (DeepReinforce agentic-coding family, MIT)
     "ornith-9b": "deepreinforce-ai/Ornith-1.0-9B",
     "ornith-31b": "deepreinforce-ai/Ornith-1.0-31B",
@@ -105,6 +108,17 @@ MODEL_ALIASES = {
     # fp8 repo yourself and pass the path via --model.
 }
 
+# Aliases with a completed Yeto fine-tuning run on real hardware. The
+# README surfaces these first; everything else is supported but untested.
+TESTED_ALIASES = {
+    "qwen36-27b",
+    "deepseek4flash",
+    "qwen3-0.6b",
+    "glm52",
+    "kimi-k3",
+    "laguna-s-2.1",
+}
+
 DIFFUSION_MODEL_ALIASES = {
     "flux": "black-forest-labs/FLUX.1-dev",
     "flux-schnell": "black-forest-labs/FLUX.1-schnell",
@@ -123,6 +137,10 @@ DIFFUSION_MODEL_ALIASES = {
     "wan21-t2v-14b": "Wan-AI/Wan2.1-T2V-14B-Diffusers",
     "wan22": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
     "nava": "baidu/NAVA",
+    "protenix": "protenix_base_default_v1.0.0",
+    "protenix-v2": "protenix-v2",
+    "hunyuan3d-21": "tencent/Hunyuan3D-2.1",
+    "alphafold3": "alphafold3",
 }
 
 MODEL_KINDS = {

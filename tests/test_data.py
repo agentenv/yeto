@@ -400,6 +400,30 @@ def test_train_on_all_gives_all_ones():
     assert torch.equal(weights, torch.ones(7))
 
 
+def test_common_formats_produce_identical_tokens_and_loss_masks():
+    openai = {
+        "messages": [
+            {"role": "user", "content": "u1 u2"},
+            {"role": "assistant", "content": "a1 a2"},
+        ]
+    }
+    sharegpt = {
+        "conversations": [
+            {"from": "human", "value": "u1 u2"},
+            {"from": "gpt", "value": "a1 a2"},
+        ]
+    }
+    alpaca = {"instruction": "u1 u2", "input": "", "output": "a1 a2"}
+
+    outputs = [
+        _row_tokens(FakeTokenizer(), openai, data_format="openai"),
+        _row_tokens(FakeTokenizer(), sharegpt, data_format="sharegpt"),
+        _row_tokens(FakeTokenizer(), alpaca, data_format="alpaca"),
+    ]
+
+    assert outputs[0] == outputs[1] == outputs[2]
+
+
 def test_train_on_rejects_unknown_mode():
     with pytest.raises(ValueError):
         StreamingPackedBlocks([CHAT_ROW], FakeTokenizer(), 0, 1, seq_len=7, train_on="user")

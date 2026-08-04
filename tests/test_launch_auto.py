@@ -43,6 +43,13 @@ def test_launch_cli_defaults_to_native_mask_and_accepts_explicit_legacy():
     assert _args(["--assistant-mask-mode", "legacy"]).assistant_mask_mode == "legacy"
 
 
+def test_launch_cli_accepts_data_normalization_and_qlora_options():
+    assert _args([]).data_format == "auto"
+    assert _args(["--data-format", "alpaca"]).data_format == "alpaca"
+    assert _args([]).base_quantization == "none"
+    assert _args(["--base-quantization", "nf4"]).base_quantization == "nf4"
+
+
 def test_gpu_with_budget_rejected(capsys):
     assert cli.main(BASE + ["--gpu", "aws:8xa100", "--budget", "10"]) == 1
     assert "drop them or drop --gpu" in capsys.readouterr().err
@@ -51,6 +58,23 @@ def test_gpu_with_budget_rejected(capsys):
 def test_neither_gpu_nor_objective_rejected(capsys):
     assert cli.main(list(BASE)) == 1
     assert "auto-planned fleet" in capsys.readouterr().err
+
+
+def test_qlora_auto_fleet_is_rejected_until_memory_model_is_calibrated(capsys):
+    assert cli.main(BASE + ["--budget", "40", "--base-quantization", "nf4"]) == 1
+    assert "not calibrated" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--gpu", "aws:8xa100", "--base-quantization", "nf4", "--shard", "fsdp"], "--shard ddp"),
+        (["--gpu", "aws:8xa100", "--base-quantization", "nf4", "--tuning", "full"], "--tuning lora"),
+        (["--gpu", "aws:8xa100", "--base-quantization", "nf4", "--external-learners", "1"], "external MLX"),
+    ],
+)
+def test_qlora_invalid_profiles_fail_before_launch(extra, message):
+    assert message in cli._fleet_args_error(_args(extra))
 
 
 def test_auto_fleet_fills_args_and_skips_prompt_with_confirm(monkeypatch):
