@@ -276,6 +276,14 @@ def build_miles_argv(
         "--sglang-max-lora-rank", str(args.lora_r),
         "--pin-rollout-manager-to-head",
     ]
+    chat_template_kwargs = getattr(args, "apply_chat_template_kwargs", None)
+    if chat_template_kwargs:
+        values.extend(
+            (
+                "--apply-chat-template-kwargs",
+                json.dumps(chat_template_kwargs, sort_keys=True, separators=(",", ":")),
+            )
+        )
     if yeto_policy_sync:
         values.extend(
             (

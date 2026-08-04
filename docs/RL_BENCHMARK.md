@@ -79,6 +79,10 @@ python scripts/benchmark_rl.py \
   --trust-remote-code
 ```
 
+`--arms` selects a comma-separated subset of `native`, `single`, and
+`federated`. For example, `--arms native` runs the direct Miles reference
+without building or starting the Yeto syncer.
+
 With `G=2`, this example uses `4` total GPUs for every `M=2` arm and `8`
 total GPUs for every `M=4` arm. Use `--dry-run` to inspect every topology and
 work budget without importing Ray, loading data, or touching a model:

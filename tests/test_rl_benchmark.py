@@ -69,6 +69,24 @@ def test_arm_selection_rejects_duplicates_and_nonpositive_values():
         benchmark.select_arms("0", 1, 1)
 
 
+def test_native_only_selection_keeps_the_direct_miles_arm():
+    arms = benchmark.select_arms(
+        "2",
+        gpus_per_island=2,
+        groups_per_island=4,
+        kinds=benchmark.parse_arm_kinds("native"),
+    )
+
+    assert [arm.name for arm in arms] == ["native-miles-m2"]
+
+
+def test_arm_kind_selection_rejects_unknown_or_duplicate_values():
+    with pytest.raises(ValueError, match="unknown"):
+        benchmark.parse_arm_kinds("native,old-direct")
+    with pytest.raises(ValueError, match="duplicates"):
+        benchmark.parse_arm_kinds("native,native")
+
+
 def test_workload_validation_requires_equal_per_rank_batch():
     benchmark.validate_workload(_args())
     with pytest.raises(ValueError, match="divisible"):
@@ -115,6 +133,42 @@ def test_expert_parallel_default_is_fixed_across_all_arms():
     )
 
     assert args.expert_parallel == 1
+
+
+def test_chat_template_kwargs_are_forwarded_to_training_workers(tmp_path):
+    args = benchmark.build_parser().parse_args(
+        [
+            "--model",
+            "org/model",
+            "--model-revision",
+            "a" * 40,
+            "--data",
+            "org/data",
+            "--data-revision",
+            "b" * 40,
+            "--reward-function",
+            "pkg.reward:score",
+            "--apply-chat-template-kwargs",
+            '{"enable_thinking": false}',
+        ]
+    )
+    args._active_seed = 17
+    prompt = tmp_path / "prompts.jsonl"
+    prompt.write_text("{}\n", encoding="utf-8")
+    worker = benchmark.WorkerSpec(0, 1, 1, prompt, False)
+
+    payload = benchmark.worker_payload(
+        args,
+        worker,
+        run_dir=tmp_path,
+        model_path=tmp_path / "model",
+        syncer=None,
+        reward_sha256="c" * 64,
+    )
+
+    assert payload["arguments"]["apply_chat_template_kwargs"] == {
+        "enable_thinking": False
+    }
 
 
 def test_prompt_streams_are_round_major_and_exactly_paired():
@@ -443,6 +497,33 @@ def test_dry_run_does_not_import_ray_or_materialize_data(monkeypatch, capsys):
     assert plan["expert_parallel"] == 1
 
 
+def test_dry_run_can_select_only_the_current_native_miles_arm(capsys):
+    assert benchmark.main(
+        [
+            "--model",
+            "org/model",
+            "--model-revision",
+            "a" * 40,
+            "--data",
+            "org/data",
+            "--data-revision",
+            "b" * 40,
+            "--reward-function",
+            "yeto_miles_cybergym.reward:score",
+            "--arms",
+            "native",
+            "--islands",
+            "2",
+            "--dry-run",
+        ]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "native-miles-m2" in output
+    assert "yeto-single-m2" not in output
+    assert "yeto-federated-m2" not in output
+
+
 def test_dry_run_works_when_script_is_invoked_outside_repo(tmp_path):
     command = [
         sys.executable,
@@ -749,13 +830,22 @@ def test_evaluation_prompt_matches_miles_rendering_and_truncates_all_token_field
 ):
     calls = {}
 
-    def render(messages, *, tokenizer, tools, tokenize, add_generation_prompt):
+    def render(
+        messages,
+        *,
+        tokenizer,
+        tools,
+        tokenize,
+        add_generation_prompt,
+        enable_thinking,
+    ):
         calls.update(
             messages=messages,
             tokenizer=tokenizer,
             tools=tools,
             tokenize=tokenize,
             add_generation_prompt=add_generation_prompt,
+            enable_thinking=enable_thinking,
         )
         return "rendered prompt"
 
@@ -787,6 +877,7 @@ def test_evaluation_prompt_matches_miles_rendering_and_truncates_all_token_field
         row,
         max_prompt_tokens=3,
         device="cpu",
+        chat_template_kwargs={"enable_thinking": False},
     )
 
     assert prompt == "rendered prompt"
@@ -799,7 +890,53 @@ def test_evaluation_prompt_matches_miles_rendering_and_truncates_all_token_field
         "tools": row["tools"],
         "tokenize": False,
         "add_generation_prompt": True,
+        "enable_thinking": False,
     }
+
+
+def test_evaluation_worker_receives_the_same_chat_template_kwargs(
+    tmp_path,
+    monkeypatch,
+):
+    eval_path = tmp_path / "eval.jsonl"
+    eval_path.write_text("{}\n", encoding="utf-8")
+    args = SimpleNamespace(
+        reward_function="pkg.reward:score",
+        samples_per_group=4,
+        groups_per_island=4,
+        rollout_max_response_len=768,
+        seq_len=2048,
+        eval_samples_per_prompt=4,
+        _pass_ks=(1, 4),
+        pass_threshold=0.0,
+        eval_temperature=1.0,
+        eval_top_p=1.0,
+        eval_seed=100000,
+        eval_device="cpu",
+        trust_remote_code=True,
+        miles_root=tmp_path,
+        arm_timeout_min=1,
+        apply_chat_template_kwargs={"enable_thinking": False},
+    )
+
+    def run(command, _log, **_kwargs):
+        payload = json.loads(Path(command[-1]).read_text(encoding="utf-8"))
+        assert payload["apply_chat_template_kwargs"] == {
+            "enable_thinking": False
+        }
+        Path(payload["result_path"]).write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(benchmark, "_run_checked", run)
+
+    assert benchmark.evaluate_artifact(
+        args,
+        adapter_path=tmp_path / "adapter",
+        model_path=tmp_path / "model",
+        eval_path=eval_path,
+        reward_sha256="c" * 64,
+        run_dir=tmp_path / "run",
+        seed=17,
+    ) == {}
 
 
 def test_evaluation_rewards_use_miles_single_sample_contract(monkeypatch):

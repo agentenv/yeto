@@ -34,6 +34,7 @@ from yeto.provenance import file_sha256
 
 SYNCER_BIN = REPO_ROOT / "syncer/target/release/yeto-syncer"
 _MILES_PORT_STRIDE = 1000
+_ARM_KINDS = ("native", "single", "federated")
 _RESUME_EXCLUDES = {
     "_active_seed",
     "_pass_ks",
@@ -94,17 +95,34 @@ def _positive_csv(spec: str, flag: str) -> list[int]:
     return values
 
 
+def parse_arm_kinds(spec: str) -> tuple[str, ...]:
+    values = tuple(value.strip() for value in spec.split(",") if value.strip())
+    if not values:
+        raise ValueError("--arms must contain at least one arm")
+    if len(values) != len(set(values)):
+        raise ValueError("--arms contains duplicates")
+    unknown = sorted(set(values) - set(_ARM_KINDS))
+    if unknown:
+        raise ValueError(f"--arms contains unknown arm(s): {', '.join(unknown)}")
+    return values
+
+
 def select_arms(
     spec: str,
     gpus_per_island: int,
     groups_per_island: int,
+    kinds: tuple[str, ...] = _ARM_KINDS,
 ) -> list[Arm]:
+    selected = set(kinds)
+    if not selected or selected - set(_ARM_KINDS):
+        raise ValueError("arm kinds must be selected from native,single,federated")
     arms = []
     for islands in _positive_csv(spec, "--islands"):
         total_gpus = islands * gpus_per_island
         total_groups = islands * groups_per_island
         arms.extend(
-            (
+            arm
+            for arm in (
                 Arm(
                     f"native-miles-m{islands}",
                     "native",
@@ -130,6 +148,7 @@ def select_arms(
                     groups_per_island,
                 ),
             )
+            if arm.kind in selected
         )
     return arms
 
@@ -466,6 +485,7 @@ def worker_payload(
         "over_sampling_batch_size": worker.groups_per_round,
         "optimizer_steps": args.optimizer_steps,
         "rollout_max_response_len": args.rollout_max_response_len,
+        "apply_chat_template_kwargs": args.apply_chat_template_kwargs,
         "custom_generate_function_path": None,
         "use_session_server": False,
         "session_server_ip": None,
@@ -614,6 +634,7 @@ def prepare_evaluation_prompt(
     *,
     max_prompt_tokens: int,
     device: str,
+    chat_template_kwargs: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     import torch
     from miles.utils.chat_template_utils import apply_chat_template
@@ -624,6 +645,7 @@ def prepare_evaluation_prompt(
         tools=row.get("tools"),
         tokenize=False,
         add_generation_prompt=True,
+        **(chat_template_kwargs or {}),
     )
     encoded = dict(
         tokenizer(
@@ -740,6 +762,7 @@ def run_evaluation_worker(config_path: Path) -> int:
                 row,
                 max_prompt_tokens=max_prompt,
                 device=device,
+                chat_template_kwargs=payload["apply_chat_template_kwargs"],
             )
             prompt_tokens = encoded["input_ids"][0].tolist()
             for sample_index in range(payload["samples_per_prompt"]):
@@ -1259,6 +1282,7 @@ def evaluate_artifact(
         },
         "seq_len": args.seq_len,
         "max_response_len": args.rollout_max_response_len,
+        "apply_chat_template_kwargs": args.apply_chat_template_kwargs,
         "samples_per_prompt": args.eval_samples_per_prompt,
         "pass_ks": list(args._pass_ks),
         "pass_threshold": args.pass_threshold,
@@ -1890,6 +1914,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data", required=True)
     parser.add_argument("--data-revision", default=None)
     parser.add_argument("--reward-function", required=True)
+    parser.add_argument(
+        "--arms",
+        default=",".join(_ARM_KINDS),
+        help="comma-separated benchmark arms: native,single,federated",
+    )
     parser.add_argument("--islands", default="2")
     parser.add_argument("--seeds", default="17,29,43")
     parser.add_argument("--global-rounds", type=int, default=8)
@@ -1900,6 +1929,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expert-parallel", type=int, default=1)
     parser.add_argument("--miles-port-base", type=int, default=21000)
     parser.add_argument("--rollout-max-response-len", type=int, default=256)
+    parser.add_argument(
+        "--apply-chat-template-kwargs",
+        type=json.loads,
+        default={},
+        help="JSON object forwarded to Miles and held-out chat-template rendering",
+    )
     parser.add_argument("--seq-len", type=int, default=1024)
     parser.add_argument("--inner-lr", type=float, default=1e-4)
     parser.add_argument("--lora-r", type=int, default=16)
@@ -1997,6 +2032,7 @@ def main(argv=None) -> int:
             args.islands,
             args.gpus_per_island,
             args.groups_per_island,
+            parse_arm_kinds(args.arms),
         )
         validate_args(args, arms, check_runtime=not args.dry_run)
     except ValueError as exc:
@@ -2019,7 +2055,8 @@ def main(argv=None) -> int:
     reward_sha256 = python_spec_sha256(args.reward_function, base_dir=REPO_ROOT)
     args.reward_sha256 = reward_sha256
     verify_miles_revision(args.miles_root)
-    ensure_syncer()
+    if any(arm.kind != "native" for arm in arms):
+        ensure_syncer()
     model_path = resolve_model_path(args)
     distinct_m = tuple(sorted({arm.benchmark_islands for arm in arms}))
 

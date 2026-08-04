@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import types
 from pathlib import Path
@@ -514,6 +515,7 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
         actor_num_nodes=1,
         actor_num_gpus_per_node=8,
         expert_parallel=None,
+        apply_chat_template_kwargs={"enable_thinking": False},
     )
     provider = argparse.Namespace(
         hidden_size=16,
@@ -576,6 +578,9 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
     assert argv[argv.index("--expert-model-parallel-size") + 1] == "8"
     assert argv[argv.index("--over-sampling-batch-size") + 1] == "6"
     assert "--balance-data" in argv
+    assert json.loads(argv[argv.index("--apply-chat-template-kwargs") + 1]) == {
+        "enable_thinking": False
+    }
     assert argv[argv.index("--rollout-max-response-len") + 1] == "64"
     assert (
         argv[argv.index("--custom-generate-function-path") + 1]
