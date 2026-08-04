@@ -493,6 +493,7 @@ def worker_payload(
         "tito_model": None,
         "completed_groups_path": str(worker_dir / "completed-groups.pt"),
         "event_tape": str(worker_dir / "events.jsonl"),
+        "audit_dir": str(worker_dir / "audit"),
         "actor_num_nodes": 1,
         "actor_num_gpus_per_node": worker.gpus,
         "expert_parallel": args.expert_parallel,
