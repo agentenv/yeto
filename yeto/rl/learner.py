@@ -21,7 +21,7 @@ def parse_args(argv=None):
     parser.add_argument("--model", required=True)
     parser.add_argument("--model-revision", required=True)
     parser.add_argument("--data", required=True)
-    parser.add_argument("--data-revision", required=True)
+    parser.add_argument("--data-revision", default=None)
     parser.add_argument("--syncer", required=True)
     parser.add_argument("--learner-id", type=int, required=True)
     parser.add_argument("--reward-function", required=True)
@@ -40,6 +40,7 @@ def parse_args(argv=None):
     parser.add_argument("--tito-model", default=None)
     parser.add_argument("--completed-groups-path", required=True)
     parser.add_argument("--event-tape", required=True)
+    parser.add_argument("--audit-dir", default=None)
     parser.add_argument("--actor-num-nodes", type=int, required=True)
     parser.add_argument("--actor-num-gpus-per-node", type=int, required=True)
     parser.add_argument("--expert-parallel", type=int, default=None)
@@ -512,6 +513,7 @@ def run_miles(
             lora_config_hash=lora_config_hash,
             layout_hash=layout_hash,
             event_tape=args.event_tape,
+            audit_dir=args.audit_dir,
         )
 
     from train import train as miles_train
@@ -524,15 +526,18 @@ def main(argv=None) -> None:
     args = parse_args(argv)
     from ..provenance import (
         is_immutable_commit,
+        is_local_reference,
         python_spec_sha256,
         verify_source_tree_sha256,
     )
 
     verify_source_tree_sha256(args.source_sha256)
-    if not is_immutable_commit(args.model_revision) or not is_immutable_commit(
+    if not is_immutable_commit(args.model_revision):
+        raise ValueError("RL model revision must be an immutable commit")
+    if not is_local_reference(args.data) and not is_immutable_commit(
         args.data_revision
     ):
-        raise ValueError("RL model and dataset revisions must be immutable commits")
+        raise ValueError("RL remote dataset revision must be an immutable commit")
     reward_sha256 = python_spec_sha256(args.reward_function)
     if reward_sha256 != args.reward_sha256.lower():
         raise ValueError(
@@ -552,8 +557,6 @@ def main(argv=None) -> None:
     from huggingface_hub import snapshot_download
 
     from ..models import resolve
-    from ..provenance import is_local_reference
-
     model = resolve(args.model)
     if is_local_reference(model):
         model_path = str(Path(model).expanduser().resolve())

@@ -432,7 +432,7 @@ def resolve_loss_function(
     return _stage_pickled_loss(cloudpickle.dumps(fn))
 
 
-def prepare_launch_args(args) -> None:
+def prepare_launch_args(args, *, allow_local_rl_data: bool = False) -> None:
     """Resolve immutable inputs and executable artifacts before cloud spend."""
 
     from .provenance import (
@@ -520,7 +520,7 @@ def prepare_launch_args(args) -> None:
                 f"{expected_adapter_sha256.lower()}, got {adapter_sha256}"
             )
         args.diffusion_adapter_sha256 = adapter_sha256
-    _prepare_rl_args(args)
+    _prepare_rl_args(args, allow_local_data=allow_local_rl_data)
 
 
 def _rl_callable(value: str | None, flag: str, *, required: bool) -> None:
@@ -546,7 +546,7 @@ def _rl_miles_function(value: str | None) -> None:
         )
 
 
-def _prepare_rl_args(args) -> None:
+def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
     if getattr(args, "training_mode", "sft") != "rl":
         return
 
@@ -662,6 +662,13 @@ def _prepare_rl_args(args) -> None:
     if provenance:
         for name in ("model", "dataset"):
             source = provenance.get(name) or {}
+            if (
+                name == "dataset"
+                and allow_local_data
+                and source.get("source") == "local"
+                and source.get("resolved_revision") is None
+            ):
+                continue
             if source.get("source") != "huggingface" or not source.get(
                 "resolved_revision"
             ):

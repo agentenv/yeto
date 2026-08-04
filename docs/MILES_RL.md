@@ -134,6 +134,8 @@ weights, so an island-local LoRA is never exposed to the next rollout.
 The pinned source is checked out as a clean detached commit. The public
 boundary is deliberately limited to the non-FT Megatron actor group used by
 v0; Miles' experimental fault-tolerant trainer is not adapted.
+Before its remote Cargo build, `yeto-rl-ssh` independently recomputes the
+deployed Rust syncer-source digest and compares it with the prepared plan.
 
 The launcher selects strict RL behavior through the existing syncer's general
 controls: `--max-base-lag 0`, `--learner-weight equal`, `--quorum M`, and
@@ -316,8 +318,11 @@ Miles and the reward implementation.
 {"messages":[{"role":"user","content":"Give a short proof."}],"label":"proof"}
 ```
 
-RL v0 accepts revision-pinned Hugging Face dataset references. The prepared
-prompt file is private to each island.
+The public RL launcher accepts revision-pinned Hugging Face dataset references.
+The explicit `yeto-rl-ssh` acceptance harness additionally accepts a local
+file or directory without `--data-revision`: it content-hashes the input,
+copies it to every island node, and mounts it read-only. The prepared prompt
+file remains private to each island.
 
 Without extra flags the learner uses Miles' default SGLang generation path, in
 which one completion produces one trajectory. For environment-driven,

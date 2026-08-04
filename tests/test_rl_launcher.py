@@ -209,6 +209,25 @@ def test_rl_provenance_rejects_unpinned_local_dataset():
         _prepare_rl_args(args)
 
 
+def test_rl_provenance_allows_local_dataset_only_for_explicit_harness(
+    monkeypatch,
+):
+    args = _args()
+    args._provenance = {
+        "model": {"source": "huggingface", "resolved_revision": "a" * 40},
+        "dataset": {"source": "local", "resolved_revision": None},
+    }
+    reward_path = Path(__file__).resolve()
+    monkeypatch.setattr("yeto.provenance.python_spec_path", lambda *a, **k: reward_path)
+    monkeypatch.setattr(
+        "yeto.provenance.python_spec_sha256", lambda *a, **k: "c" * 64
+    )
+
+    _prepare_rl_args(args, allow_local_data=True)
+
+    assert args.reward_sha256 == "c" * 64
+
+
 def test_syncer_command_uses_init_exact_base_and_equal_weight_controls():
     args = _args()
     _prepare_rl_args(args)

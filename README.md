@@ -206,6 +206,8 @@ LoRA islands: rollout/training boundaries, recovery, export, and limitations.
 CyberGym reward integration used for real environment evaluation.
 [docs/RL_BENCHMARK.md](docs/RL_BENCHMARK.md) — equal-hardware native Miles,
 single-island Yeto, and federated Yeto RL benchmark contract and runner.
+[docs/RL_SSH_ACCEPTANCE.md](docs/RL_SSH_ACCEPTANCE.md) — direct existing-host
+deployment, failure injection, artifact collection, and f32 AVG verification.
 
 ## Testing and CI
 

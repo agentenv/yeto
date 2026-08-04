@@ -43,6 +43,7 @@ yeto-codex-traces = "yeto.codex_traces:main"
 yeto-diffusion-export = "yeto.diffusion.export:main"
 yeto-diffusion-sample = "yeto.diffusion.sample:main"
 yeto-rl-export = "yeto.rl.export:main"
+yeto-rl-ssh = "yeto.rl.ssh_harness:main"
 yeto-protenix-export-batch = "yeto.diffusion.protenix_export:main"
 yeto-hunyuan3d-export-batch = "yeto.diffusion.hunyuan3d_export:main"
 

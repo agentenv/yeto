@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sys
 import time
 from dataclasses import asdict, dataclass, replace
@@ -58,7 +60,54 @@ class BridgeConfig:
     lora_config_hash: str
     layout_hash: str
     event_tape: str
+    audit_dir: str | None = None
     wan_streams: int = 4
+
+
+def _write_round_audit(
+    directory: str | Path,
+    *,
+    learner_id: int,
+    target_step: int,
+    base: CanonicalLoraState,
+    delta,
+) -> None:
+    """Atomically retain the f32 inputs needed by the SSH acceptance oracle."""
+
+    root = Path(directory).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    stem = f"round-{target_step:08d}"
+    base_bytes = flat_tensor(base.tensors, base.specs).numpy().astype(
+        "<f4", copy=False
+    ).tobytes()
+    delta_bytes = delta.numpy().astype("<f4", copy=False).tobytes()
+    metadata = {
+        "schema": 1,
+        "learner_id": learner_id,
+        "base_version": base.policy_version,
+        "target_step": target_step,
+        "base_model_revision": base.base_model_revision,
+        "lora_config_hash": base.lora_config_hash,
+        "layout_hash": base.layout_hash,
+        "specs": [asdict(spec) for spec in base.specs],
+        "base_f32_sha256": hashlib.sha256(base_bytes).hexdigest(),
+        "delta_f32_sha256": hashlib.sha256(delta_bytes).hexdigest(),
+    }
+    values = (
+        (root / f"{stem}.base.f32", base_bytes),
+        (root / f"{stem}.delta.f32", delta_bytes),
+        (
+            root / f"{stem}.json",
+            (json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+        ),
+    )
+    for path, payload in values:
+        temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        try:
+            temporary.write_bytes(payload)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 class StrictRlBridge:
@@ -313,6 +362,14 @@ class StrictRlBridge:
                 raise
             raise StrictRlInvariantError(metric, message) from error
         stats = replace(stats, delta_l2_norm=float(delta.norm().item()))
+        if self.config.audit_dir is not None:
+            _write_round_audit(
+                self.config.audit_dir,
+                learner_id=self.config.learner_id,
+                target_step=permit.global_step,
+                base=base,
+                delta=delta,
+            )
         self.runtime.record_local_round(stats)
         payload = pack_tensor(delta, DTYPE_F32)
         self._append_event(
