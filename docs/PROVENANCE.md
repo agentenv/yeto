@@ -146,7 +146,7 @@ saved model or adapter. Diffusion artifacts embed the same object under
 - the loss artifact digest and unsafe-pickle state when applicable; and
 - export checkpoint/global-step context where available.
 
-Causal LoRA outputs also record their training recipe and optional parent
+Causal LoRA SFT outputs also record their training recipe and optional parent
 adapter lineage. Strict `--resume-from` verifies the recorded immutable model,
 dataset, trust setting, and recipe; `--branch-from` records the relationship
 while permitting an intentional recipe or dataset change. Merged exports

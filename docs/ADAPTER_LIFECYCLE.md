@@ -15,6 +15,9 @@ adapter, followed by a safe deployment export:
 Both training modes load the adapter as trainable. They do not merge it into
 the base before training.
 
+This lifecycle currently applies to the causal-LM SFT path. Miles RL rejects
+these flags rather than silently ignoring a parent adapter.
+
 ## Resume versus checkpoint recovery
 
 Adapter resume and distributed checkpoint recovery solve different problems.

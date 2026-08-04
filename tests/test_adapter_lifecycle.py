@@ -12,7 +12,6 @@ from yeto.adapter_lifecycle import (
     training_recipe,
 )
 
-
 MODEL_RECORD = {
     "source": "huggingface",
     "requested_identifier": "org/model",
@@ -198,3 +197,19 @@ def test_local_launch_source_is_attested_and_cloud_requires_digest(tmp_path):
                 adapter_sha256="not-a-digest",
             )
         )
+
+
+def test_training_recipe_normalizes_learner_only_defaults():
+    run_args = args()
+    for name in (
+        "gradient_checkpointing",
+        "weight_decay",
+        "warmup_steps",
+    ):
+        assert not hasattr(run_args, name)
+
+    recipe = training_recipe(run_args)
+
+    assert recipe["gradient_checkpointing"] == "auto"
+    assert recipe["weight_decay"] == 0.01
+    assert recipe["warmup_steps"] == 10
