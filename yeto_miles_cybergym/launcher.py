@@ -13,9 +13,8 @@ import os
 import shlex
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
-
 
 MILES_COMMIT = "dfc66ff38752bfa2c5d325e0037ebc4b537c06de"
 MILES_REPOSITORY = "https://github.com/radixark/miles"
@@ -30,7 +29,7 @@ def build_train_command(args: argparse.Namespace) -> list[str]:
     if args.samples_per_prompt < 2:
         raise ValueError("samples_per_prompt must be at least 2 for GRPO")
     groups = args.samples_per_iteration // args.samples_per_prompt
-    return [
+    command = [
         sys.executable,
         str(args.miles_root / "train.py"),
         "--train-backend", "megatron",
@@ -85,9 +84,11 @@ def build_train_command(args: argparse.Namespace) -> list[str]:
         "--weight-decay", "0",
         "--attention-dropout", "0",
         "--hidden-dropout", "0",
-        "--attention-backend", "flash",
+        "--attention-backend", getattr(args, "attention_backend", "unfused"),
+        "--custom-megatron-init-path", "yeto_miles_cybergym.bridge.configure_miles_bridge",
         "--accumulate-allreduce-grads-in-fp32",
         "--attention-softmax-in-fp32",
+        "--no-gradient-accumulation-fusion",
         "--micro-batch-size", "1",
         "--bf16",
         "--use-distributed-optimizer",
@@ -99,6 +100,13 @@ def build_train_command(args: argparse.Namespace) -> list[str]:
         "--sglang-mem-fraction-static", "0.5",
         "--update-weight-buffer-size", "536870912",
     ]
+    if getattr(args, "attention_backend", "unfused") == "unfused":
+        # Megatron-Core's portable attention implementation expects the
+        # batch/sequence/head-dimension layout.  This bypasses TE cuDNN
+        # fused-attention kernels, which are unreliable for this short
+        # Qwen2.5 LoRA workload on the pinned image.
+        command.extend(("--qkv-format", "bshd"))
+    return command
 
 
 def build_runtime_env(repo_root: Path, miles_root: Path, args: argparse.Namespace) -> dict[str, str]:
@@ -190,6 +198,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--trainer-gpus", type=int, default=1)
     parser.add_argument("--rollout-gpus", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument(
+        "--attention-backend",
+        choices=("unfused", "flash"),
+        default="unfused",
+        help="Megatron trainer attention backend; unfused avoids TE cuDNN fused attention",
+    )
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--max-context-len", type=int, default=1024)
     parser.add_argument("--max-response-len", type=int, default=128)
