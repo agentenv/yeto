@@ -29,6 +29,7 @@ launcher = ["skypilot[aws]>=0.12"]
 # the wire/data path is shared with the CUDA learners.
 mlx = ["mlx>=0.31", "mlx-lm>=0.29"]
 qlora = ["bitsandbytes>=0.46.1"]
+local-rl = ["gymnasium>=0.29.0", "requests>=2.31.0", "numpy>=1.24"]
 diffusion = ["diffusers>=0.35", "safetensors", "pillow", "imageio[ffmpeg]", "bitsandbytes>=0.46.1"]
 diffusion-protenix = ["protenix; python_version >= '3.11'"]
 a100-liger = ["liger-kernel==0.8.0", "peft==0.19.1"]

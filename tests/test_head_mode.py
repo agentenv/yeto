@@ -205,6 +205,33 @@ def test_launch_head_records_registry(fake_sky, monkeypatch, capsys):
     assert "yeto down h1" in out
 
 
+def test_rl_head_forwards_cybergym_secret_without_serializing_it(
+    fake_sky, monkeypatch
+):
+    monkeypatch.setenv("CYBERGYM_API_KEY", "test-secret")
+    monkeypatch.setattr(launcher, "prepare_launch_args", lambda args: None)
+    args = cli.parse_args(
+        LAUNCH_ARGS
+        + [
+            "--cluster-prefix",
+            "rlh",
+            "--training-mode",
+            "rl",
+            "--reward-function",
+            "yeto_miles_cybergym.reward:score",
+        ]
+    )
+
+    assert cli.cmd_launch_head(args) == 0
+
+    (_, head_task), = fake_sky["launches"]
+    (_, job_task), = fake_sky["execs"]
+    assert head_task.envs is None
+    assert job_task.envs["CYBERGYM_API_KEY"] == "test-secret"
+    assert "test-secret" not in job_task.run
+    assert "test-secret" not in json.dumps(runs.load_run("rlh")["args"])
+
+
 def test_launch_head_mounts_aws_credentials_when_present(
     fake_sky, monkeypatch, tmp_path
 ):

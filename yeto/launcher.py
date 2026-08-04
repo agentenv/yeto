@@ -550,6 +550,13 @@ def _prepare_rl_args(args) -> None:
     if getattr(args, "training_mode", "sft") != "rl":
         return
 
+    from .adapter_lifecycle import selected_parent
+
+    if selected_parent(args)[1] is not None:
+        raise ValueError(
+            "--resume-from/--branch-from are not supported with --training-mode rl"
+        )
+
     from .models import resolve_model_kind
 
     if resolve_model_kind(args.model, args.model_kind) != "causal-lm":
@@ -564,6 +571,8 @@ def _prepare_rl_args(args) -> None:
         raise ValueError("RL v0 requires positive rollout batch and sample counts")
     if args.rollout_max_response_len <= 0:
         raise ValueError("RL v0 requires --rollout-max-response-len > 0")
+    if args.cybergym_timeout <= 0:
+        raise ValueError("RL v0 requires a positive CyberGym timeout")
     if args.local_rl_rounds_per_sync != 1:
         raise ValueError("RL v0 requires --local-rl-rounds-per-sync 1")
     if args.seq_len < 2:
@@ -980,9 +989,14 @@ def make_miles_island_task(
         "NVTE_FLASH_ATTN": "0",
         "NVTE_FUSED_ATTN": "0",
         "NVTE_UNFUSED_ATTN": "1",
+        "CYBERGYM_URL": args.cybergym_url,
+        "CYBERGYM_AGENT_ID": args.cybergym_agent_id,
+        "CYBERGYM_TIMEOUT": str(args.cybergym_timeout),
     }
     if os.environ.get("HF_TOKEN"):
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    if os.environ.get("CYBERGYM_API_KEY"):
+        envs["CYBERGYM_API_KEY"] = os.environ["CYBERGYM_API_KEY"]
     task = sky.Task(
         name=f"yeto-rl-island-{learner_id}",
         setup="\n".join((WAN_TUNING, HF_TOKEN_ENV, miles_setup, prefetch)),

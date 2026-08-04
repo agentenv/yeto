@@ -101,6 +101,24 @@ def test_rl_maps_long_task_and_oversampling_options_to_miles():
     assert args.tito_model == "qwen3"
 
 
+def test_rl_parses_cybergym_worker_configuration():
+    args = _args(
+        (
+            "--cybergym-url",
+            "http://10.0.0.8:8666",
+            "--cybergym-agent-id",
+            "benchmark-agent",
+            "--cybergym-timeout",
+            "90",
+        )
+    )
+
+    assert args.cybergym_url == "http://10.0.0.8:8666"
+    assert args.cybergym_agent_id == "benchmark-agent"
+    assert args.cybergym_timeout == 90
+    assert not hasattr(args, "cybergym_api_key")
+
+
 def test_default_sft_parse_is_unchanged():
     args = parse_args(
         ["--gpu", "aws:1xa100", "--model", "org/model", "--data", "org/data"]
@@ -138,6 +156,7 @@ def test_default_sft_parse_is_unchanged():
             ),
             "increasing range",
         ),
+        (("--cybergym-timeout", "0"), "CyberGym timeout"),
     ],
 )
 def test_rl_validation_rejects_out_of_contract_topology(extra, match):
@@ -320,6 +339,7 @@ class _StorageMode:
 
 
 def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch):
+    monkeypatch.setenv("CYBERGYM_API_KEY", "test-secret")
     monkeypatch.setitem(
         sys.modules,
         "sky",
@@ -345,6 +365,12 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
             "31000",
             "--tito-model",
             "qwen3",
+            "--cybergym-url",
+            "http://10.0.0.8:8666",
+            "--cybergym-agent-id",
+            "benchmark-agent",
+            "--cybergym-timeout",
+            "90",
         )
     )
     args.model_revision = "a" * 40
@@ -379,6 +405,10 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert task.envs["NVTE_FLASH_ATTN"] == "0"
     assert task.envs["NVTE_FUSED_ATTN"] == "0"
     assert task.envs["NVTE_UNFUSED_ATTN"] == "1"
+    assert task.envs["CYBERGYM_URL"] == "http://10.0.0.8:8666"
+    assert task.envs["CYBERGYM_AGENT_ID"] == "benchmark-agent"
+    assert task.envs["CYBERGYM_TIMEOUT"] == "90.0"
+    assert task.envs["CYBERGYM_API_KEY"] == "test-secret"
     assert "python3 -m yeto.rl.learner" in task.run
     assert "--num-learners" not in task.run
     assert "ray start --head" in task.run

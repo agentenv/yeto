@@ -393,12 +393,18 @@ def prepare_prompt_data(
     with temporary.open("w", encoding="utf-8") as handle:
         for raw in rows:
             row = dict(raw)
+            metadata = dict(row.get("metadata") or {})
+            metadata.update(
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key not in {"messages", "metadata"}
+                }
+            )
             normalized = {
                 "messages": _messages(row),
                 "label": row.get("label"),
-                "metadata": {
-                    key: value for key, value in row.items() if key != "messages"
-                },
+                "metadata": metadata,
             }
             if "tools" in row:
                 normalized["tools"] = row["tools"]

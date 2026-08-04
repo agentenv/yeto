@@ -38,6 +38,7 @@ SUBCOMMANDS = (
     "launch",
     "shape",
     "merge",
+    "rl",
     "sample-diffusion",
     "status",
     "logs",
@@ -93,6 +94,19 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--reward-function",
         default=None,
         help="RL reward callable as package.module:function",
+    )
+    rl.add_argument(
+        "--cybergym-url",
+        default=os.environ.get("CYBERGYM_URL", "http://127.0.0.1:8666"),
+    )
+    rl.add_argument(
+        "--cybergym-agent-id",
+        default=os.environ.get("CYBERGYM_AGENT_ID", "yeto_agent"),
+    )
+    rl.add_argument(
+        "--cybergym-timeout",
+        type=float,
+        default=float(os.environ.get("CYBERGYM_TIMEOUT", "60")),
     )
     rl.add_argument(
         "--advantage-estimator", choices=["grpo"], default="grpo"
@@ -617,6 +631,22 @@ def _add_diffusion_sample_args(p: argparse.ArgumentParser) -> None:
     infra.add_argument("--controller-poll", type=int, default=30, help="job status poll interval (seconds)")
 
 
+def _add_local_rl_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--env", default="cybergym", choices=["cybergym", "mock"])
+    p.add_argument("--task", default="vulnerability_analysis")
+    p.add_argument("--model", default="Qwen/Qwen2.5-0.5B")
+    p.add_argument("--budget", type=float, default=10.0)
+    p.add_argument("--output")
+    p.add_argument("--iterations", type=int, default=1)
+    p.add_argument("--steps", type=int, default=64)
+    p.add_argument("--lr", type=float, default=1e-5)
+    p.add_argument("--gamma", type=float, default=0.99)
+    p.add_argument("--epochs", type=int, default=2)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--server-host", default="127.0.0.1")
+    p.add_argument("--server-port", type=int, default=8666)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="yeto",
@@ -625,7 +655,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(
         dest="command",
-        metavar="{launch,shape,merge,sample-diffusion,status,logs,down}",
+        metavar="{launch,shape,merge,rl,sample-diffusion,status,logs,down}",
     )
 
     launch = sub.add_parser(
@@ -742,6 +772,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum SafeTensors shard size, e.g. 2GB or 500MB",
     )
 
+    local_rl = sub.add_parser(
+        "rl",
+        help="run the experimental single-process CyberGym PPO path",
+    )
+    _add_local_rl_args(local_rl)
+
     sample = sub.add_parser(
         "sample-diffusion",
         help="run diffusion adapter sampling on a SkyPilot GPU task",
@@ -855,6 +891,8 @@ def _fleet_args_error(args) -> str | None:
 
     _parent_mode, parent_source = selected_parent(args)
     if parent_source is not None:
+        if getattr(args, "training_mode", "sft") == "rl":
+            return "--resume-from/--branch-from are not supported with --training-mode rl"
         if model_kind != "causal-lm":
             return "--resume-from/--branch-from apply only to causal-LM models"
         if getattr(args, "island_backend", "torch") != "torch":
@@ -1189,6 +1227,8 @@ def cmd_launch_head(args) -> int:
     envs = {"SYNCER_PUBLIC_IP": str(head_ip)}
     if os.environ.get("HF_TOKEN"):
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    if args.training_mode == "rl" and os.environ.get("CYBERGYM_API_KEY"):
+        envs["CYBERGYM_API_KEY"] = os.environ["CYBERGYM_API_KEY"]
     job_task = sky.Task(
         name="yeto-head-job",
         run=(
@@ -1567,6 +1607,11 @@ def main(argv=None) -> int:
         except (ImportError, OSError, ValueError, RuntimeError) as exc:
             print(f"[yeto] merge failed: {exc}", file=sys.stderr)
             return 1
+        return 0
+    if args.command == "rl":
+        from .rl.run import run_rl
+
+        run_rl(args)
         return 0
     if args.command == "sample-diffusion":
         return cmd_sample_diffusion(args)
