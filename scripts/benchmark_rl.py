@@ -19,6 +19,7 @@ import socket
 import statistics
 import subprocess
 import sys
+import threading
 import time
 import warnings
 from contextlib import contextmanager
@@ -30,11 +31,11 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 from yeto.benchmark_resume import write_json_atomic
-from yeto.provenance import file_sha256
+from yeto.provenance import file_sha256, source_tree_sha256
 
 SYNCER_BIN = REPO_ROOT / "syncer/target/release/yeto-syncer"
 _MILES_PORT_STRIDE = 1000
-_ARM_KINDS = ("native", "single", "federated")
+_ARM_KINDS = ("native", "single", "federated", "decoupled")
 _RESUME_EXCLUDES = {
     "_active_seed",
     "_pass_ks",
@@ -62,6 +63,9 @@ class Arm:
     islands: int
     gpus_per_island: int
     groups_per_round: int
+    fragments: int = 1
+    pipeline: int = 1
+    local_horizon: int = 1
 
 
 @dataclass(frozen=True)
@@ -112,10 +116,23 @@ def select_arms(
     gpus_per_island: int,
     groups_per_island: int,
     kinds: tuple[str, ...] = _ARM_KINDS,
+    *,
+    fragments: int = 8,
+    pipeline: int = 2,
+    local_horizon: int = 4,
 ) -> list[Arm]:
     selected = set(kinds)
     if not selected or selected - set(_ARM_KINDS):
-        raise ValueError("arm kinds must be selected from native,single,federated")
+        raise ValueError(
+            "arm kinds must be selected from native,single,federated,decoupled"
+        )
+    if "decoupled" in selected:
+        if fragments < 2:
+            raise ValueError("decoupled benchmark requires at least 2 fragments")
+        if not 1 <= pipeline <= fragments:
+            raise ValueError("decoupled benchmark pipeline must be between 1 and fragments")
+        if local_horizon < 2:
+            raise ValueError("decoupled benchmark local horizon must be at least 2")
     arms = []
     for islands in _positive_csv(spec, "--islands"):
         total_gpus = islands * gpus_per_island
@@ -147,6 +164,17 @@ def select_arms(
                     gpus_per_island,
                     groups_per_island,
                 ),
+                Arm(
+                    f"yeto-decoupled-m{islands}",
+                    "decoupled",
+                    islands,
+                    islands,
+                    gpus_per_island,
+                    groups_per_island,
+                    fragments,
+                    pipeline,
+                    local_horizon,
+                ),
             )
             if arm.kind in selected
         )
@@ -176,6 +204,8 @@ def validate_workload(args) -> None:
     ):
         if getattr(args, name) <= 0:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
+    if args.optimizer_steps != 1:
+        raise ValueError("Miles RL benchmark requires one optimizer step per rollout")
     samples = args.groups_per_island * args.samples_per_group
     divisor = args.optimizer_steps * args.gpus_per_island
     if samples % divisor:
@@ -314,7 +344,7 @@ def worker_specs(
     combined_prompt_path: Path,
     island_prompt_paths: tuple[Path, ...],
 ) -> list[WorkerSpec]:
-    if arm.kind != "federated":
+    if arm.kind not in {"federated", "decoupled"}:
         return [
             WorkerSpec(
                 0,
@@ -338,8 +368,23 @@ def worker_specs(
     ]
 
 
-def syncer_command(arm: Arm, port: int, run_dir: Path, *, rounds: int) -> list[str]:
-    return [
+def syncer_command(
+    arm: Arm,
+    port: int,
+    run_dir: Path,
+    *,
+    rounds: int,
+    resume_from_step: int | None = None,
+) -> list[str]:
+    if resume_from_step is not None and arm.kind != "decoupled":
+        raise ValueError("only decoupled benchmark consolidation can resume")
+    consolidation = resume_from_step is not None
+    total_steps = (
+        resume_from_step + arm.fragments
+        if consolidation
+        else rounds * arm.fragments
+    )
+    command = [
         str(SYNCER_BIN),
         "--port",
         str(port),
@@ -350,17 +395,21 @@ def syncer_command(arm: Arm, port: int, run_dir: Path, *, rounds: int) -> list[s
         "--grace-ms",
         "0",
         "--pipeline",
-        "1",
+        str(1 if consolidation else arm.pipeline),
         "--sync-interval-steps",
-        "0",
+        str(
+            0
+            if consolidation or arm.kind != "decoupled"
+            else arm.local_horizon
+        ),
         "--delta-correction",
         "none",
         "--total-steps",
-        str(rounds),
+        str(total_steps),
         "--outer-lr",
-        "1",
+        "0.7" if arm.kind == "decoupled" else "1",
         "--outer-momentum",
-        "0",
+        "0.9" if arm.kind == "decoupled" else "0",
         "--max-base-lag",
         "0",
         "--learner-weight",
@@ -369,10 +418,17 @@ def syncer_command(arm: Arm, port: int, run_dir: Path, *, rounds: int) -> list[s
         str(run_dir / "state.ckpt"),
         "--checkpoint-every",
         "1",
-        "--resume",
         "--event-tape",
         str(run_dir / "syncer.jsonl"),
     ]
+    if arm.kind == "decoupled":
+        if consolidation:
+            command.extend(("--resume", "--mark-final-checkpoint"))
+        else:
+            command.extend(("--learner-budget-steps", str(rounds)))
+    else:
+        command.append("--resume")
+    return command
 
 
 def miles_extra_argv(worker: WorkerSpec, run_dir: Path, rounds: int) -> list[str]:
@@ -463,6 +519,7 @@ def worker_payload(
     args,
     worker: WorkerSpec,
     *,
+    arm: Arm,
     run_dir: Path,
     model_path: Path,
     syncer: str | None,
@@ -479,6 +536,8 @@ def worker_payload(
         "learner_id": worker.learner_id,
         "reward_function": args.reward_function,
         "reward_sha256": reward_sha256,
+        "source_sha256": getattr(args, "source_sha256", None)
+        or source_tree_sha256(),
         "global_rounds": args.global_rounds,
         "groups_per_round": worker.groups_per_round,
         "samples_per_group": args.samples_per_group,
@@ -511,6 +570,15 @@ def worker_payload(
         "miles_root": str(args.miles_root.expanduser().resolve()),
         "trust_remote_code": args.trust_remote_code,
     }
+    if arm.kind == "decoupled":
+        values.update(
+            sync_preset="decoupled",
+            fragments=arm.fragments,
+            pipeline=arm.pipeline,
+            local_horizon=arm.local_horizon,
+            total_fragment_steps=args.global_rounds * arm.fragments,
+            learner_budget_steps=args.global_rounds,
+        )
     return {
         "arguments": values,
         "model_path": str(model_path),
@@ -932,6 +1000,95 @@ def _visible_gpu_uuids() -> set[str] | None:
     return {index_to_uuid.get(value, value) for value in visible}
 
 
+def summarize_gpu_samples(
+    samples: list[tuple[float, dict[str, float]]],
+    *,
+    started: float,
+    ended: float,
+    expected_gpus: int,
+) -> dict[str, float]:
+    if ended <= started or expected_gpus < 1 or not samples:
+        raise RuntimeError("GPU activity sampling produced no usable interval")
+    gpu_ids = tuple(samples[0][1])
+    if len(gpu_ids) != expected_gpus or any(
+        tuple(values) != gpu_ids for _, values in samples
+    ):
+        raise RuntimeError("GPU activity samples do not match the benchmark allocation")
+    active = {gpu_id: 0.0 for gpu_id in gpu_ids}
+    utilization = {gpu_id: 0.0 for gpu_id in gpu_ids}
+    for index, (timestamp, values) in enumerate(samples):
+        interval_start = started if index == 0 else timestamp
+        interval_end = samples[index + 1][0] if index + 1 < len(samples) else ended
+        seconds = max(0.0, min(ended, interval_end) - max(started, interval_start))
+        for gpu_id, value in values.items():
+            if not math.isfinite(value) or not 0 <= value <= 100:
+                raise RuntimeError("nvidia-smi returned invalid GPU utilization")
+            utilization[gpu_id] += seconds * value
+            if value > 0:
+                active[gpu_id] += seconds
+    wall = ended - started
+    means = [utilization[gpu_id] / wall for gpu_id in gpu_ids]
+    active_seconds = sum(active.values())
+    return {
+        "gpu_active_seconds": active_seconds,
+        "gpu_active_fraction": active_seconds / (wall * expected_gpus),
+        "mean_gpu_utilization": statistics.fmean(means),
+        "min_gpu_utilization": min(means),
+    }
+
+
+class _GpuSampler:
+    def __init__(self, expected_gpus: int, interval_s: float = 1.0) -> None:
+        self.expected_gpus = expected_gpus
+        self.interval_s = interval_s
+        self.visible = _visible_gpu_uuids()
+        self.samples: list[tuple[float, dict[str, float]]] = []
+        self.error: BaseException | None = None
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def _sample(self) -> None:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=uuid,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"nvidia-smi failed: {result.stderr.strip()}")
+        values = []
+        for line in result.stdout.splitlines():
+            parts = [value.strip() for value in line.split(",")]
+            if len(parts) != 2 or (self.visible is not None and parts[0] not in self.visible):
+                continue
+            values.append((parts[0], float(parts[1])))
+        if len(values) < self.expected_gpus:
+            raise RuntimeError("nvidia-smi exposed fewer GPUs than the benchmark arm")
+        self.samples.append((time.monotonic(), dict(values[: self.expected_gpus])))
+
+    def _run(self) -> None:
+        while not self.stop_event.wait(self.interval_s):
+            try:
+                self._sample()
+            except (OSError, RuntimeError, ValueError) as error:
+                self.error = error
+                return
+
+    def start(self) -> None:
+        self._sample()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join()
+
+
 def wait_for_free_gpus(limit_mb: int = 2000, timeout_s: int = 300) -> None:
     visible_uuids = _visible_gpu_uuids()
     deadline = time.monotonic() + timeout_s
@@ -1047,6 +1204,36 @@ def _wait_for_training(
             )
 
 
+def _wait_for_budget_cutoff(
+    syncer: subprocess.Popen,
+    syncer_log: Path,
+    learners: list[subprocess.Popen],
+    learner_logs: list[Path],
+    *,
+    timeout_s: int,
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    while syncer.poll() is None:
+        for index, learner in enumerate(learners):
+            returncode = learner.poll()
+            if returncode is not None:
+                raise RuntimeError(
+                    f"Miles island {index} exited before the budget cutoff with code "
+                    f"{returncode}:\n{_tail(learner_logs[index])}"
+                )
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"RL benchmark budget cutoff timed out after {timeout_s}s:\n"
+                f"{_tail(syncer_log)}"
+            )
+        time.sleep(1)
+    if syncer.returncode != 0:
+        raise RuntimeError(
+            f"syncer failed during budget cutoff with code {syncer.returncode}:\n"
+            f"{_tail(syncer_log)}"
+        )
+
+
 def _training_environment(ray_address: str, miles_root: Path) -> dict[str, str]:
     env = dict(os.environ)
     env["RAY_ADDRESS"] = ray_address
@@ -1069,7 +1256,7 @@ def _run_training_processes(
     run_dir: Path,
     model_path: Path,
     reward_sha256: str,
-) -> float:
+) -> tuple[float, dict[str, float]]:
     port = _free_port() if arm.kind != "native" else None
     syncer_address = f"127.0.0.1:{port}" if port is not None else None
     payload_paths = []
@@ -1080,6 +1267,7 @@ def _run_training_processes(
             worker_payload(
                 args,
                 worker,
+                arm=arm,
                 run_dir=run_dir,
                 model_path=model_path,
                 syncer=syncer_address,
@@ -1095,6 +1283,8 @@ def _run_training_processes(
     handles = []
     logs = []
     started = time.monotonic()
+    sampler = _GpuSampler(arm.islands * arm.gpus_per_island)
+    sampler.start()
     try:
         with local_ray_cluster(
             arm.islands * arm.gpus_per_island,
@@ -1136,13 +1326,56 @@ def _run_training_processes(
                         start_new_session=True,
                     )
                 )
-            _wait_for_training(
-                processes,
-                logs,
-                syncer=syncer,
-                syncer_log=syncer_log,
-                timeout_s=args.arm_timeout_min * 60,
-            )
+            timeout_s = args.arm_timeout_min * 60
+            if arm.kind == "decoupled":
+                _wait_for_budget_cutoff(
+                    syncer,
+                    syncer_log,
+                    processes,
+                    logs,
+                    timeout_s=timeout_s,
+                )
+                from yeto.final_marker import read_checkpoint_global_step
+
+                cutoff_step = read_checkpoint_global_step(run_dir / "state.ckpt")
+                syncer = subprocess.Popen(
+                    syncer_command(
+                        arm,
+                        port,
+                        run_dir,
+                        rounds=args.global_rounds,
+                        resume_from_step=cutoff_step,
+                    ),
+                    cwd=REPO_ROOT,
+                    stdout=syncer_handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                _wait_for_port(port, syncer, syncer_log)
+                _wait_for_training(
+                    processes,
+                    logs,
+                    syncer=syncer,
+                    syncer_log=syncer_log,
+                    timeout_s=timeout_s,
+                )
+                from yeto.budget_finalization import validate_consolidation_tape
+
+                validate_consolidation_tape(
+                    run_dir / "syncer.jsonl",
+                    cutoff_step=cutoff_step,
+                    fragments=arm.fragments,
+                    learners=arm.islands,
+                    budget_steps=args.global_rounds,
+                )
+            else:
+                _wait_for_training(
+                    processes,
+                    logs,
+                    syncer=syncer,
+                    syncer_log=syncer_log,
+                    timeout_s=timeout_s,
+                )
     finally:
         for process in processes:
             _stop_process(process)
@@ -1152,7 +1385,16 @@ def _run_training_processes(
             handle.close()
         if syncer_handle is not None:
             syncer_handle.close()
-    return time.monotonic() - started
+        sampler.stop()
+    ended = time.monotonic()
+    if sampler.error is not None:
+        raise RuntimeError("GPU activity sampling failed") from sampler.error
+    return ended - started, summarize_gpu_samples(
+        sampler.samples,
+        started=started,
+        ended=ended,
+        expected_gpus=arm.islands * arm.gpus_per_island,
+    )
 
 
 def _mean(values: list[float]) -> float | None:
@@ -1162,6 +1404,11 @@ def _mean(values: list[float]) -> float | None:
 def summarize_yeto_events(run_dir: Path, islands: int) -> dict[str, Any]:
     local_rounds = []
     apply_events = []
+    fragment_pushes = []
+    fragment_broadcasts = []
+    final_cuts = []
+    hook_events = []
+    policy_snapshots = []
     for island_id in range(islands):
         path = run_dir / f"island-{island_id}" / "events.jsonl"
         if not path.exists():
@@ -1171,6 +1418,16 @@ def summarize_yeto_events(run_dir: Path, islands: int) -> dict[str, Any]:
                 local_rounds.append(event)
             elif event.get("event") == "rl_policy_apply":
                 apply_events.append(event)
+            elif event.get("event") == "rl_fragment_push":
+                fragment_pushes.append(event)
+            elif event.get("event") == "rl_fragment_bcast":
+                fragment_broadcasts.append(event)
+            elif event.get("event") == "rl_final_cut":
+                final_cuts.append(event)
+            elif event.get("event") == "rl_sync_hook":
+                hook_events.append(event)
+            elif event.get("event") == "rl_policy_snapshot":
+                policy_snapshots.append(event)
     sync_records = (
         _read_jsonl(run_dir / "syncer.jsonl")
         if (run_dir / "syncer.jsonl").exists()
@@ -1182,15 +1439,66 @@ def summarize_yeto_events(run_dir: Path, islands: int) -> dict[str, Any]:
             float(event[name]) for event in local_rounds if event.get(name) is not None
         ]
 
+    def event_values(events: list[dict[str, Any]], name: str) -> list[float]:
+        return [float(event[name]) for event in events if event.get(name) is not None]
+
+    sent_values = values("sync/fragment_payload_bytes_sent")
+    received_values = values("sync/fragment_payload_bytes_received") + event_values(
+        final_cuts, "sync/fragment_payload_bytes_received"
+    )
+    sent = int(sum(sent_values)) if sent_values else None
+    received = int(sum(received_values)) if received_values else None
+    legacy_sent = int(sum(values("sync/bytes_sent")))
+    legacy_received = int(sum(values("sync/bytes_received")))
+    hook_seconds = event_values(hook_events, "sync/hook_seconds")
+    finalization_seconds = event_values(
+        [event for event in hook_events if event.get("sync/finalization")],
+        "sync/hook_seconds",
+    )
+    responders = [len(record.get("responders", [])) for record in sync_records]
+
     return {
         "local_rounds": len(local_rounds),
         "policy_applies": len(apply_events),
+        "policy_snapshots": len(policy_snapshots),
+        "in_process_applies": sum(
+            bool(event.get("partial_fragment_apply")) for event in apply_events
+        ),
         "rollout_s": sum(values("rollout_seconds")),
         "optimizer_train_s": sum(values("train_seconds")),
+        "hook_s": sum(hook_seconds),
+        "finalization_s": sum(finalization_seconds),
+        "remote_quorum_wait_s": sum(
+            event_values(hook_events, "sync/remote_quorum_wait_seconds")
+        ),
         "mean_kl": _mean(values("mean_kl")),
         "mean_ess_ratio": _mean(values("ess_ratio")),
         "mean_clip_fraction": _mean(values("clip_fraction")),
-        "sync_bytes_sent": int(sum(values("sync/bytes_sent"))),
+        "sync_bytes_sent": legacy_sent,
+        "sync_bytes_received": legacy_received,
+        "fragment_payload_bytes_sent": sent,
+        "fragment_payload_bytes_received": received,
+        "fragment_payload_traffic_bytes": (
+            None if sent is None and received is None else (sent or 0) + (received or 0)
+        ),
+        "mean_realized_h": _mean(event_values(fragment_pushes, "realized_h")),
+        "mean_pull_to_push_s": _mean(
+            event_values(fragment_pushes, "pull_to_push_seconds")
+        ),
+        "mean_bcast_queue_s": _mean(
+            event_values(fragment_broadcasts, "queue_seconds")
+        ),
+        "mean_bcast_apply_s": _mean(
+            event_values(
+                [
+                    event
+                    for event in apply_events
+                    if event.get("partial_fragment_apply")
+                ],
+                "sync/apply_seconds",
+            )
+        ),
+        "mean_responders": _mean([float(value) for value in responders]),
         "mean_sync_ms": _mean(
             [
                 float(event["ms"])
@@ -1340,7 +1648,7 @@ def run_arm(
     workers = worker_specs(arm, combined_path, island_paths)
     args._active_seed = seed
     wait_for_free_gpus()
-    train_wall_s = _run_training_processes(
+    train_wall_s, gpu_activity = _run_training_processes(
         args,
         arm,
         workers,
@@ -1370,6 +1678,11 @@ def run_arm(
         export_started = time.monotonic()
         from yeto.rl.export import export_rl_checkpoint
 
+        expected_version = args.global_rounds
+        if arm.kind == "decoupled":
+            from yeto.final_marker import validate_final_checkpoint
+
+            expected_version = validate_final_checkpoint(checkpoint)
         state = export_rl_checkpoint(
             checkpoint,
             adapter_path,
@@ -1378,12 +1691,21 @@ def run_arm(
             rank=args.lora_r,
             lora_targets=args.lora_targets,
             trust_remote_code=args.trust_remote_code,
+            sync_preset=(
+                "decoupled" if arm.kind == "decoupled" else "strict-avg"
+            ),
+            fragments=arm.fragments,
+            pipeline=arm.pipeline,
+            local_horizon=arm.local_horizon,
+            benchmark_learner_budget_steps=(
+                args.global_rounds if arm.kind == "decoupled" else None
+            ),
         )
         artifact_s = time.monotonic() - export_started
-        if state.policy_version != args.global_rounds:
+        if state.policy_version != expected_version:
             raise RuntimeError(
                 f"authoritative RL checkpoint ended at v{state.policy_version}, "
-                f"expected v{args.global_rounds}"
+                f"expected v{expected_version}"
             )
     if not (adapter_path / "adapter_config.json").is_file() or not any(
         (adapter_path / name).is_file()
@@ -1399,7 +1721,9 @@ def run_arm(
         for worker in workers
     )
     expected_ids = (
-        streams.island_ids if arm.kind == "federated" else (streams.combined_ids,)
+        streams.island_ids
+        if arm.kind in {"federated", "decoupled"}
+        else (streams.combined_ids,)
     )
     training = summarize_rollouts(
         rollout_paths,
@@ -1447,6 +1771,7 @@ def run_arm(
         "artifact_s": artifact_s,
         "artifact_ready_s": train_wall_s + (artifact_s or 0.0),
         "gpu_hours": gpu_hours,
+        "gpu_activity": gpu_activity,
         "estimated_cost": (
             gpu_hours * args.gpu_hour_cost if args.gpu_hour_cost is not None else None
         ),
@@ -1518,6 +1843,7 @@ def annotate_deltas(records: list[dict]) -> list[dict]:
         reward = record["eval"]["reward_mean"]
         native = rewards.get((m, seed, f"native-miles-m{m}"))
         single = rewards.get((m, seed, f"yeto-single-m{m}"))
+        strict = rewards.get((m, seed, f"yeto-federated-m{m}"))
         row = dict(record)
         row["delta_vs_native"] = (
             None
@@ -1527,6 +1853,11 @@ def annotate_deltas(records: list[dict]) -> list[dict]:
         row["delta_vs_single"] = (
             reward - single
             if record["arm"].startswith("yeto-federated-") and single is not None
+            else None
+        )
+        row["delta_vs_strict"] = (
+            reward - strict
+            if record["arm"].startswith("yeto-decoupled-") and strict is not None
             else None
         )
         output.append(row)
@@ -1783,6 +2114,13 @@ def aggregate_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         if record["delta_vs_single"] is not None
                     ]
                 ),
+                "delta_vs_strict": _mean(
+                    [
+                        record["delta_vs_strict"]
+                        for record in group
+                        if record["delta_vs_strict"] is not None
+                    ]
+                ),
                 "train_wall_s": statistics.fmean(
                     record["train_wall_s"] for record in group
                 ),
@@ -1808,6 +2146,34 @@ def aggregate_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     for record in group
                 ),
                 "gpu_hours": statistics.fmean(record["gpu_hours"] for record in group),
+                "gpu_active_seconds": _mean(
+                    [
+                        record["gpu_activity"]["gpu_active_seconds"]
+                        for record in group
+                        if record.get("gpu_activity")
+                    ]
+                ),
+                "gpu_active_fraction": _mean(
+                    [
+                        record["gpu_activity"]["gpu_active_fraction"]
+                        for record in group
+                        if record.get("gpu_activity")
+                    ]
+                ),
+                "mean_gpu_utilization": _mean(
+                    [
+                        record["gpu_activity"]["mean_gpu_utilization"]
+                        for record in group
+                        if record.get("gpu_activity")
+                    ]
+                ),
+                "min_gpu_utilization": _mean(
+                    [
+                        record["gpu_activity"]["min_gpu_utilization"]
+                        for record in group
+                        if record.get("gpu_activity")
+                    ]
+                ),
                 "estimated_cost": _mean(
                     [
                         record["estimated_cost"]
@@ -1832,9 +2198,70 @@ def aggregate_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "sync_bytes_sent": _mean(
                     [float(record["sync_bytes_sent"]) for record in sync_records]
                 ),
+                "fragment_payload_bytes_sent": _mean(
+                    [
+                        float(record["fragment_payload_bytes_sent"])
+                        for record in sync_records
+                        if record.get("fragment_payload_bytes_sent") is not None
+                    ]
+                ),
+                "fragment_payload_bytes_received": _mean(
+                    [
+                        float(record["fragment_payload_bytes_received"])
+                        for record in sync_records
+                        if record.get("fragment_payload_bytes_received") is not None
+                    ]
+                ),
+                "fragment_payload_traffic_bytes": _mean(
+                    [
+                        float(record["fragment_payload_traffic_bytes"])
+                        for record in sync_records
+                        if record.get("fragment_payload_traffic_bytes") is not None
+                    ]
+                ),
+                "hook_s": _mean(
+                    [
+                        float(record["hook_s"])
+                        for record in sync_records
+                        if record.get("hook_s") is not None
+                    ]
+                ),
+                "finalization_s": _mean(
+                    [
+                        float(record["finalization_s"])
+                        for record in sync_records
+                        if record.get("finalization_s") is not None
+                    ]
+                ),
+                "mean_realized_h": _mean(
+                    [
+                        float(record["mean_realized_h"])
+                        for record in sync_records
+                        if record.get("mean_realized_h") is not None
+                    ]
+                ),
+                "mean_pull_to_push_s": _mean(
+                    [
+                        float(record["mean_pull_to_push_s"])
+                        for record in sync_records
+                        if record.get("mean_pull_to_push_s") is not None
+                    ]
+                ),
+                "mean_bcast_queue_s": _mean(
+                    [
+                        float(record["mean_bcast_queue_s"])
+                        for record in sync_records
+                        if record.get("mean_bcast_queue_s") is not None
+                    ]
+                ),
             }
         )
-    order = {"native-miles": 0, "yeto-single": 1, "yeto-federated": 2}
+    order = {
+        "native-miles": 0,
+        "yeto-single": 1,
+        "yeto-federated": 2,
+        "yeto-decoupled": 3,
+    }
     return sorted(
         output,
         key=lambda row: (
@@ -1869,36 +2296,46 @@ def write_report(args, records: list[dict[str, Any]]) -> None:
         "",
         "| arm | M | runs | reward | "
         + " | ".join(f"pass@{key}" for key in pass_keys)
-        + " | delta vs native | delta vs single |",
-        "|---|---:|---:|---:|" + "---:|" * len(pass_keys) + "---:|---:|",
+        + " | delta vs native | delta vs single | delta vs strict |",
+        "|---|---:|---:|---:|" + "---:|" * len(pass_keys) + "---:|---:|---:|",
     ]
     for row in aggregates:
         reward = f"{row['reward_mean']:.4f} +/- {row['reward_std']:.4f}"
         passes = " | ".join(fmt(row["pass_at_k"].get(key), 4) for key in pass_keys)
         lines.append(
             f"| {row['arm']} | {row['m']} | {row['runs']} | {reward} | {passes} | "
-            f"{fmt(row['delta_vs_native'], 4)} | {fmt(row['delta_vs_single'], 4)} |"
+            f"{fmt(row['delta_vs_native'], 4)} | {fmt(row['delta_vs_single'], 4)} | "
+            f"{fmt(row['delta_vs_strict'], 4)} |"
         )
     lines.extend(
         [
             "",
             "## Systems",
             "",
-            "| arm | GPUs | train s | artifact-ready s | eval s | traj/s | action tok/s | GPU-h | cost | sync ms | sent MB | KL |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| arm | GPUs | train s | artifact-ready s | eval s | traj/s | action tok/s | active GPU-s | active % | util avg/min % | GPU-h | cost | hook s | final s | H | PULL-to-PUSH s | BCAST queue s | sync ms | fragment payload MB | KL |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for row in aggregates:
-        sent_mb = (
-            None if row["sync_bytes_sent"] is None else row["sync_bytes_sent"] / 1e6
+        traffic_mb = (
+            None
+            if row["fragment_payload_traffic_bytes"] is None
+            else row["fragment_payload_traffic_bytes"] / 1e6
         )
         lines.append(
             f"| {row['arm']} | {row['total_gpus']} | {row['train_wall_s']:.1f} | "
             f"{row['artifact_ready_s']:.1f} | {row['eval_wall_s']:.1f} | "
             f"{row['trajectories_per_s']:.2f} | "
-            f"{row['action_tokens_per_s']:.1f} | {row['gpu_hours']:.3f} | "
-            f"{fmt(row['estimated_cost'], 2)} | {fmt(row['mean_sync_ms'], 2)} | "
-            f"{fmt(sent_mb, 3)} | {fmt(row['mean_kl'], 5)} |"
+            f"{row['action_tokens_per_s']:.1f} | {fmt(row['gpu_active_seconds'], 1)} | "
+            f"{fmt(row['gpu_active_fraction'], 3)} | "
+            f"{fmt(row['mean_gpu_utilization'], 1)}/{fmt(row['min_gpu_utilization'], 1)} | "
+            f"{row['gpu_hours']:.3f} | "
+            f"{fmt(row['estimated_cost'], 2)} | {fmt(row['hook_s'], 2)} | "
+            f"{fmt(row['finalization_s'], 2)} | "
+            f"{fmt(row['mean_realized_h'], 2)} | "
+            f"{fmt(row.get('mean_pull_to_push_s'), 3)} | "
+            f"{fmt(row['mean_bcast_queue_s'], 3)} | {fmt(row['mean_sync_ms'], 2)} | "
+            f"{fmt(traffic_mb, 3)} | {fmt(row['mean_kl'], 5)} |"
         )
     report = "\n".join(lines) + "\n"
     (args.report_dir / "report.md").write_text(report, encoding="utf-8")
@@ -1918,7 +2355,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--arms",
         default=",".join(_ARM_KINDS),
-        help="comma-separated benchmark arms: native,single,federated",
+        help="comma-separated benchmark arms: native,single,federated,decoupled",
     )
     parser.add_argument("--islands", default="2")
     parser.add_argument("--seeds", default="17,29,43")
@@ -1927,6 +2364,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--samples-per-group", type=int, default=4)
     parser.add_argument("--optimizer-steps", type=int, default=1)
     parser.add_argument("--gpus-per-island", type=int, default=1)
+    parser.add_argument("--fragments", type=int, default=8)
+    parser.add_argument("--pipeline", type=int, default=2)
+    parser.add_argument("--local-horizon", type=int, default=4)
     parser.add_argument("--expert-parallel", type=int, default=1)
     parser.add_argument("--miles-port-base", type=int, default=21000)
     parser.add_argument("--rollout-max-response-len", type=int, default=256)
@@ -2034,6 +2474,9 @@ def main(argv=None) -> int:
             args.gpus_per_island,
             args.groups_per_island,
             parse_arm_kinds(args.arms),
+            fragments=args.fragments,
+            pipeline=args.pipeline,
+            local_horizon=args.local_horizon,
         )
         validate_args(args, arms, check_runtime=not args.dry_run)
     except ValueError as exc:
@@ -2055,6 +2498,7 @@ def main(argv=None) -> int:
         sys.path.insert(0, miles_root)
     reward_sha256 = python_spec_sha256(args.reward_function, base_dir=REPO_ROOT)
     args.reward_sha256 = reward_sha256
+    args.source_sha256 = source_tree_sha256()
     verify_miles_revision(args.miles_root)
     if any(arm.kind != "native" for arm in arms):
         ensure_syncer()

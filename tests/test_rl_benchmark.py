@@ -37,19 +37,21 @@ def _args(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_three_arms_have_equal_hardware_and_trajectory_budgets():
+def test_four_arms_have_equal_hardware_and_trajectory_budgets():
     arms = benchmark.select_arms("2", gpus_per_island=2, groups_per_island=4)
 
     assert [arm.name for arm in arms] == [
         "native-miles-m2",
         "yeto-single-m2",
         "yeto-federated-m2",
+        "yeto-decoupled-m2",
     ]
     assert [
         (arm.islands, arm.gpus_per_island, arm.groups_per_round) for arm in arms
     ] == [
         (1, 4, 8),
         (1, 4, 8),
+        (2, 2, 4),
         (2, 2, 4),
     ]
 
@@ -87,8 +89,23 @@ def test_arm_kind_selection_rejects_unknown_or_duplicate_values():
         benchmark.parse_arm_kinds("native,native")
 
 
+def test_decoupled_arm_requires_the_fixed_fragment_contract():
+    with pytest.raises(ValueError, match="at least 2 fragments"):
+        benchmark.select_arms("2", 1, 1, kinds=("decoupled",), fragments=1)
+    with pytest.raises(ValueError, match="pipeline"):
+        benchmark.select_arms(
+            "2", 1, 1, kinds=("decoupled",), fragments=4, pipeline=5
+        )
+    with pytest.raises(ValueError, match="local horizon"):
+        benchmark.select_arms(
+            "2", 1, 1, kinds=("decoupled",), fragments=4, local_horizon=1
+        )
+
+
 def test_workload_validation_requires_equal_per_rank_batch():
     benchmark.validate_workload(_args())
+    with pytest.raises(ValueError, match="one optimizer step"):
+        benchmark.validate_workload(_args(optimizer_steps=2))
     with pytest.raises(ValueError, match="divisible"):
         benchmark.validate_workload(_args(groups_per_island=3, samples_per_group=3))
 
@@ -114,6 +131,23 @@ def test_local_ray_cluster_uses_rays_short_default_temp_root(monkeypatch):
     assert "_temp_dir" not in calls["init"]
     assert calls["init"]["include_dashboard"] is True
     assert calls["shutdown"] is True
+
+
+def test_gpu_samples_report_time_weighted_activity_and_utilization():
+    summary = benchmark.summarize_gpu_samples(
+        [
+            (10.0, {"gpu-a": 50.0, "gpu-b": 0.0}),
+            (12.0, {"gpu-a": 100.0, "gpu-b": 50.0}),
+        ],
+        started=10.0,
+        ended=14.0,
+        expected_gpus=2,
+    )
+
+    assert summary["gpu_active_seconds"] == pytest.approx(6.0)
+    assert summary["gpu_active_fraction"] == pytest.approx(0.75)
+    assert summary["mean_gpu_utilization"] == pytest.approx(50.0)
+    assert summary["min_gpu_utilization"] == pytest.approx(25.0)
 
 
 def test_expert_parallel_default_is_fixed_across_all_arms():
@@ -160,6 +194,7 @@ def test_chat_template_kwargs_are_forwarded_to_training_workers(tmp_path):
     payload = benchmark.worker_payload(
         args,
         worker,
+        arm=benchmark.select_arms("1", 1, 1, kinds=("native",))[0],
         run_dir=tmp_path,
         model_path=tmp_path / "model",
         syncer=None,
@@ -205,13 +240,14 @@ def test_prompt_streams_cycle_deterministically_without_touching_eval_rows():
 def test_worker_specs_keep_native_outside_yeto_and_partition_federated_prompts(
     tmp_path,
 ):
-    native, single, federated = benchmark.select_arms("2", 2, 4)
+    native, single, federated, decoupled = benchmark.select_arms("2", 2, 4)
     combined = tmp_path / "combined.jsonl"
     islands = (tmp_path / "island-0.jsonl", tmp_path / "island-1.jsonl")
 
     native_specs = benchmark.worker_specs(native, combined, islands)
     single_specs = benchmark.worker_specs(single, combined, islands)
     federated_specs = benchmark.worker_specs(federated, combined, islands)
+    decoupled_specs = benchmark.worker_specs(decoupled, combined, islands)
 
     assert len(native_specs) == len(single_specs) == 1
     assert native_specs[0].policy_sync is False
@@ -224,6 +260,7 @@ def test_worker_specs_keep_native_outside_yeto_and_partition_federated_prompts(
     assert all(
         spec.gpus == 2 and spec.groups_per_round == 4 for spec in federated_specs
     )
+    assert decoupled_specs == federated_specs
 
 
 def test_federated_workers_use_disjoint_miles_host_ports(tmp_path):
@@ -253,6 +290,7 @@ def test_federated_workers_use_disjoint_miles_host_ports(tmp_path):
         benchmark.worker_payload(
             args,
             worker,
+            arm=arm,
             run_dir=tmp_path,
             model_path=tmp_path / "model",
             syncer="127.0.0.1:30000",
@@ -295,9 +333,10 @@ def test_resume_keys_cover_every_seed_m_and_arm():
     arms = benchmark.select_arms("2,4", 1, 2)
     keys = benchmark.expected_record_keys((17, 29), arms)
 
-    assert len(keys) == 12
+    assert len(keys) == 16
     assert ("native-miles-m2", 2, 17) in keys
     assert ("yeto-federated-m4", 4, 29) in keys
+    assert ("yeto-decoupled-m4", 4, 29) in keys
     benchmark.validate_result_records(
         [
             {"arm": name, "m": m, "seed": seed}
@@ -391,6 +430,7 @@ def test_report_deltas_distinguish_yeto_contract_from_federation():
         {"arm": "native-miles-m2", "m": 2, "seed": 17, "eval": {"reward_mean": 0.5}},
         {"arm": "yeto-single-m2", "m": 2, "seed": 17, "eval": {"reward_mean": 0.4}},
         {"arm": "yeto-federated-m2", "m": 2, "seed": 17, "eval": {"reward_mean": 0.3}},
+        {"arm": "yeto-decoupled-m2", "m": 2, "seed": 17, "eval": {"reward_mean": 0.35}},
     ]
 
     annotated = {row["arm"]: row for row in benchmark.annotate_deltas(records)}
@@ -399,6 +439,8 @@ def test_report_deltas_distinguish_yeto_contract_from_federation():
     assert annotated["yeto-single-m2"]["delta_vs_native"] == pytest.approx(-0.1)
     assert annotated["yeto-federated-m2"]["delta_vs_native"] == pytest.approx(-0.2)
     assert annotated["yeto-federated-m2"]["delta_vs_single"] == pytest.approx(-0.1)
+    assert annotated["yeto-decoupled-m2"]["delta_vs_native"] == pytest.approx(-0.15)
+    assert annotated["yeto-decoupled-m2"]["delta_vs_strict"] == pytest.approx(0.05)
 
 
 def test_aggregate_report_keeps_the_three_comparisons_in_order(tmp_path):
@@ -415,7 +457,13 @@ def test_aggregate_report_keeps_the_three_comparisons_in_order(tmp_path):
             "yeto-federated-m2",
             "federated",
             0.3,
-            {"mean_kl": 0.2, "mean_sync_ms": 3.0, "sync_bytes_sent": 200},
+            {
+                "mean_kl": 0.2,
+                "mean_sync_ms": 3.0,
+                "sync_bytes_sent": 200,
+                "mean_pull_to_push_s": 0.5,
+                "mean_bcast_queue_s": 1.5,
+            },
         ),
     ):
         records.append(
@@ -451,6 +499,7 @@ def test_aggregate_report_keeps_the_three_comparisons_in_order(tmp_path):
     assert aggregates[2]["delta_vs_single"] == pytest.approx(-0.1)
     assert aggregates[0]["artifact_ready_s"] == 10.0
     assert aggregates[1]["artifact_ready_s"] == 12.0
+    assert aggregates[2]["mean_pull_to_push_s"] == pytest.approx(0.5)
 
     args = SimpleNamespace(
         model="org/model",
@@ -664,8 +713,193 @@ def test_strict_syncer_command_is_one_fragment_exact_base_avg(tmp_path):
     assert "--mark-final-checkpoint" not in command
 
 
+def test_decoupled_syncer_commands_split_budget_cutoff_and_consolidation(tmp_path):
+    arm = benchmark.select_arms(
+        "2",
+        2,
+        4,
+        kinds=("decoupled",),
+        fragments=8,
+        pipeline=2,
+        local_horizon=4,
+    )[0]
+
+    cutoff = benchmark.syncer_command(arm, 29400, tmp_path, rounds=6)
+    final = benchmark.syncer_command(
+        arm,
+        29400,
+        tmp_path,
+        rounds=6,
+        resume_from_step=11,
+    )
+
+    assert cutoff[cutoff.index("--total-steps") + 1] == "48"
+    assert cutoff[cutoff.index("--learner-budget-steps") + 1] == "6"
+    assert cutoff[cutoff.index("--pipeline") + 1] == "2"
+    assert cutoff[cutoff.index("--sync-interval-steps") + 1] == "4"
+    assert cutoff[cutoff.index("--outer-lr") + 1] == "0.7"
+    assert cutoff[cutoff.index("--outer-momentum") + 1] == "0.9"
+    assert "--resume" not in cutoff
+
+    assert final[final.index("--total-steps") + 1] == "19"
+    assert final[final.index("--pipeline") + 1] == "1"
+    assert final[final.index("--sync-interval-steps") + 1] == "0"
+    assert "--learner-budget-steps" not in final
+    assert "--resume" in final
+    assert "--mark-final-checkpoint" in final
+
+
+def test_decoupled_worker_receives_budget_and_fragment_contract(tmp_path):
+    args = benchmark.build_parser().parse_args(
+        [
+            "--model",
+            "org/model",
+            "--model-revision",
+            "a" * 40,
+            "--data",
+            "org/data",
+            "--data-revision",
+            "b" * 40,
+            "--reward-function",
+            "pkg.reward:score",
+            "--global-rounds",
+            "6",
+            "--fragments",
+            "8",
+            "--pipeline",
+            "2",
+            "--local-horizon",
+            "4",
+        ]
+    )
+    args._active_seed = 17
+    prompt = tmp_path / "prompts.jsonl"
+    prompt.write_text("{}\n", encoding="utf-8")
+    arm = benchmark.select_arms(
+        "2",
+        1,
+        1,
+        kinds=("decoupled",),
+        fragments=8,
+        pipeline=2,
+        local_horizon=4,
+    )[0]
+    worker = benchmark.worker_specs(arm, prompt, (prompt, prompt))[0]
+
+    payload = benchmark.worker_payload(
+        args,
+        worker,
+        arm=arm,
+        run_dir=tmp_path,
+        model_path=tmp_path / "model",
+        syncer="127.0.0.1:29400",
+        reward_sha256="c" * 64,
+    )
+
+    values = payload["arguments"]
+    assert values["sync_preset"] == "decoupled"
+    assert values["fragments"] == 8
+    assert values["pipeline"] == 2
+    assert values["local_horizon"] == 4
+    assert values["total_fragment_steps"] == 48
+    assert values["learner_budget_steps"] == 6
+
+
+def test_decoupled_training_restarts_syncer_for_terminal_consolidation(
+    tmp_path, monkeypatch
+):
+    args = benchmark.build_parser().parse_args(
+        [
+            "--model",
+            "org/model",
+            "--model-revision",
+            "a" * 40,
+            "--data",
+            "org/data",
+            "--data-revision",
+            "b" * 40,
+            "--reward-function",
+            "pkg.reward:score",
+            "--global-rounds",
+            "6",
+        ]
+    )
+    args._active_seed = 17
+    args.miles_root = tmp_path
+    prompt = tmp_path / "prompts.jsonl"
+    prompt.write_text("{}\n", encoding="utf-8")
+    arm = benchmark.select_arms("2", 1, 1, kinds=("decoupled",))[0]
+    workers = benchmark.worker_specs(arm, prompt, (prompt, prompt))
+    commands = []
+
+    class Process:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    def popen(command, **_kwargs):
+        commands.append(command)
+        return Process()
+
+    @benchmark.contextmanager
+    def ray_cluster(_gpus):
+        yield "ray"
+
+    monkeypatch.setattr(benchmark.subprocess, "Popen", popen)
+    monkeypatch.setattr(benchmark, "local_ray_cluster", ray_cluster)
+    monkeypatch.setattr(benchmark, "_wait_for_port", lambda *_args: None)
+    monkeypatch.setattr(benchmark, "_wait_for_training", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(benchmark, "_stop_process", lambda *_args: None)
+
+    class Sampler:
+        def __init__(self, expected_gpus):
+            self.samples = [
+                (
+                    benchmark.time.monotonic(),
+                    {f"gpu-{index}": 50.0 for index in range(expected_gpus)},
+                )
+            ]
+            self.error = None
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(benchmark, "_GpuSampler", Sampler)
+    monkeypatch.setattr("yeto.final_marker.read_checkpoint_global_step", lambda _path: 11)
+    validated = {}
+    monkeypatch.setattr(
+        "yeto.budget_finalization.validate_consolidation_tape",
+        lambda path, **kwargs: validated.update(path=path, **kwargs),
+    )
+
+    benchmark._run_training_processes(
+        args,
+        arm,
+        workers,
+        run_dir=tmp_path / "run",
+        model_path=tmp_path / "model",
+        reward_sha256="c" * 64,
+    )
+
+    syncers = [command for command in commands if command[0] == str(benchmark.SYNCER_BIN)]
+    assert len(syncers) == 2
+    assert "--learner-budget-steps" in syncers[0]
+    assert syncers[1][syncers[1].index("--total-steps") + 1] == "19"
+    assert validated == {
+        "path": tmp_path / "run" / "syncer.jsonl",
+        "cutoff_step": 11,
+        "fragments": 8,
+        "learners": 2,
+        "budget_steps": 6,
+    }
+
+
 def test_worker_miles_extras_capture_real_rollouts_and_only_native_saves(tmp_path):
-    native, single, _ = benchmark.select_arms("2", 2, 4)
+    native, single, _, _ = benchmark.select_arms("2", 2, 4)
     native_worker = benchmark.worker_specs(native, tmp_path / "all", ())[0]
     single_worker = benchmark.worker_specs(single, tmp_path / "all", ())[0]
 
@@ -823,6 +1057,98 @@ def test_rollout_summary_verifies_prompt_pairing_and_counts_real_work(tmp_path):
             expected_prompt_ids=((0, 1), (2, 3)),
             samples_per_group=2,
         )
+
+
+def test_yeto_event_summary_reports_decoupled_overlap_metrics(tmp_path):
+    island = tmp_path / "island-0"
+    island.mkdir()
+    events = [
+        {
+            "event": "rl_local_round",
+            "rollout_seconds": 2.0,
+            "train_seconds": 3.0,
+            "mean_kl": 0.1,
+            "ess_ratio": 0.9,
+            "clip_fraction": 0.2,
+            "sync/fragment_payload_bytes_sent": 10,
+            "sync/fragment_payload_bytes_received": 20,
+        },
+        {
+            "event": "rl_fragment_push",
+            "realized_h": 4,
+            "pull_to_push_seconds": 0.5,
+        },
+        {"event": "rl_policy_snapshot"},
+        {
+            "event": "rl_policy_apply",
+            "partial_fragment_apply": True,
+            "sync/apply_seconds": 0.25,
+        },
+        {
+            "event": "rl_fragment_bcast",
+            "queue_seconds": 1.5,
+        },
+        {
+            "event": "rl_sync_hook",
+            "sync/hook_seconds": 0.75,
+            "sync/remote_quorum_wait_seconds": 0.0,
+            "sync/finalization": False,
+        },
+        {
+            "event": "rl_sync_hook",
+            "sync/hook_seconds": 1.25,
+            "sync/remote_quorum_wait_seconds": 0.0,
+            "sync/finalization": True,
+        },
+        {
+            "event": "rl_final_cut",
+            "sync/fragment_payload_bytes_received": 4,
+        },
+    ]
+    (island / "events.jsonl").write_text(
+        "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+    )
+    (tmp_path / "syncer.jsonl").write_text(
+        json.dumps({"ms": 3.0, "responders": [{"id": 0}]}) + "\n",
+        encoding="utf-8",
+    )
+
+    summary = benchmark.summarize_yeto_events(tmp_path, islands=1)
+
+    assert summary["policy_snapshots"] == 1
+    assert summary["in_process_applies"] == 1
+    assert summary["hook_s"] == pytest.approx(2.0)
+    assert summary["finalization_s"] == pytest.approx(1.25)
+    assert summary["remote_quorum_wait_s"] == 0
+    assert summary["fragment_payload_bytes_received"] == 24
+    assert summary["fragment_payload_traffic_bytes"] == 34
+    assert summary["mean_realized_h"] == 4
+    assert summary["mean_pull_to_push_s"] == pytest.approx(0.5)
+    assert summary["mean_bcast_queue_s"] == pytest.approx(1.5)
+    assert summary["mean_bcast_apply_s"] == pytest.approx(0.25)
+    assert summary["mean_responders"] == 1
+
+
+def test_yeto_event_summary_keeps_legacy_bytes_out_of_fragment_payload(tmp_path):
+    island = tmp_path / "island-0"
+    island.mkdir()
+    (island / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "rl_local_round",
+                "sync/bytes_sent": 128,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = benchmark.summarize_yeto_events(tmp_path, islands=1)
+
+    assert summary["sync_bytes_sent"] == 128
+    assert summary["fragment_payload_bytes_sent"] is None
+    assert summary["fragment_payload_bytes_received"] is None
+    assert summary["fragment_payload_traffic_bytes"] is None
 
 
 def test_evaluation_prompt_matches_miles_rendering_and_truncates_all_token_fields(
