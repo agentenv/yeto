@@ -1415,15 +1415,7 @@ async fn scheduler(
                     send_all_fragments(&st, &group).await;
                     if fixed_roster && is_current_member(&registry, group.member) {
                         for round in &inflight {
-                            let belongs = round
-                                .expected_members
-                                .iter()
-                                .any(|member| member.learner_id == group.member.learner_id);
-                            let answered = round
-                                .pushes
-                                .keys()
-                                .any(|member| member.learner_id == group.member.learner_id);
-                            if belongs && !answered {
+                            if should_replay_pull(round, group.member) {
                                 let _ = group.send_small(MSG_PULL_REQ, round.pull.clone()).await;
                             }
                         }
@@ -1641,6 +1633,15 @@ fn round_action(round: &Round, now: Instant) -> RoundAction {
 
 fn fragment_available(rounds: &[Round], fragment_id: usize) -> bool {
     !rounds.iter().any(|round| round.p == fragment_id)
+}
+
+fn should_replay_pull(round: &Round, member: Member) -> bool {
+    round.expected_members.iter().any(|expected| {
+        expected.learner_id == member.learner_id && *expected != member
+    }) && !round
+        .pushes
+        .keys()
+        .any(|accepted| accepted.learner_id == member.learner_id)
 }
 
 fn route_push(
@@ -2480,6 +2481,16 @@ mod tests {
             route_push(&mut rounds, captured, test_push(5), None, false),
             PushDisposition::Accepted
         );
+    }
+
+    #[test]
+    fn pull_replay_only_targets_a_reconnected_generation() {
+        let captured = member(0, 10);
+        let round = test_round(vec![captured]);
+
+        assert!(!should_replay_pull(&round, captured));
+        assert!(should_replay_pull(&round, member(0, 11)));
+        assert!(!should_replay_pull(&round, member(1, 20)));
     }
 
     #[test]
