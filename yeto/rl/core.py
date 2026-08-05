@@ -350,6 +350,9 @@ class LocalRoundStats:
     delta_l2_norm: float
     rollout_seconds: float
     train_seconds: float
+    dynamic_filter_generated_groups: int = 0
+    dynamic_filter_dropped_groups: int = 0
+    dynamic_filter_replacement_attempts: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -361,6 +364,9 @@ class LocalRoundStats:
             "cancelled_groups",
             "completed_trajectories",
             "action_tokens",
+            "dynamic_filter_generated_groups",
+            "dynamic_filter_dropped_groups",
+            "dynamic_filter_replacement_attempts",
         ):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be non-negative")

@@ -243,9 +243,52 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     ):
         if not isinstance(learner.get(name), int) or learner[name] <= 0:
             raise HarnessError(f"plan has an invalid learner {name}")
+    sync_preset = learner.get("sync_preset", "strict-avg")
+    if sync_preset not in {"strict-avg", "decoupled"}:
+        raise HarnessError("plan has an invalid learner sync_preset")
+    fragments = learner.get("fragments", 1)
+    pipeline = learner.get("pipeline", 1)
+    local_horizon = learner.get("local_horizon", 1)
+    total_fragment_steps = learner.get(
+        "total_fragment_steps", learner["global_rounds"]
+    )
+    for name, value in (
+        ("fragments", fragments),
+        ("pipeline", pipeline),
+        ("local_horizon", local_horizon),
+        ("total_fragment_steps", total_fragment_steps),
+    ):
+        if not isinstance(value, int) or value <= 0:
+            raise HarnessError(f"plan has an invalid learner {name}")
+    if sync_preset == "strict-avg":
+        if (fragments, pipeline, local_horizon, total_fragment_steps) != (
+            1,
+            1,
+            1,
+            learner["global_rounds"],
+        ):
+            raise HarnessError("strict-avg plan has decoupled settings")
+    elif (
+        fragments < 2
+        or pipeline > fragments
+        or local_horizon < 2
+        or total_fragment_steps != learner["global_rounds"] * fragments
+    ):
+        raise HarnessError("invalid decoupled learner settings")
     world = len(islands[0]["hosts"]) * islands[0]["gpus_per_node"]
     if learner["groups_per_round"] * learner["samples_per_group"] % world:
         raise HarnessError("plan Miles batch does not divide across island GPUs")
+    dynamic_filter = learner.get("dynamic_sampling_filter_path")
+    if dynamic_filter:
+        parts = str(dynamic_filter).split(".")
+        if len(parts) < 2 or any(not part.isidentifier() for part in parts):
+            raise HarnessError(
+                "plan has an invalid dynamic_sampling_filter_path"
+            )
+        if learner["over_sampling_batch_size"] <= learner["groups_per_round"]:
+            raise HarnessError(
+                "variance-aware filtering requires oversampling beyond the training batch"
+            )
 
 
 def load_plan(path: str | Path) -> tuple[Path, dict[str, Any]]:
@@ -386,9 +429,19 @@ def prepare(namespace) -> Path:
             "data_sha256": data_sha256,
             "reward_function": args.reward_function,
             "global_rounds": args.total_steps,
+            "sync_preset": getattr(args, "rl_sync_preset", "strict-avg"),
+            "fragments": getattr(args, "fragments", 1),
+            "pipeline": getattr(args, "pipeline", 1),
+            "local_horizon": getattr(args, "local_rl_rounds_per_sync", 1),
+            "total_fragment_steps": getattr(
+                args, "rl_total_fragment_steps", args.total_steps
+            ),
             "groups_per_round": args.rollout_batch_size,
             "samples_per_group": args.n_samples_per_prompt,
             "over_sampling_batch_size": args.over_sampling_batch_size,
+            "dynamic_sampling_filter_path": getattr(
+                args, "dynamic_sampling_filter_path", None
+            ),
             "optimizer_steps": 1,
             "rollout_max_response_len": args.rollout_max_response_len,
             "custom_generate_function_path": args.custom_generate_function_path,
@@ -640,18 +693,29 @@ def _argv(command: Sequence[str], *options: tuple[str, Any]) -> list[str]:
 
 
 def _syncer_argv(plan: dict[str, Any]) -> list[str]:
+    learner = plan["learner"]
+    sync_preset = learner.get("sync_preset", "strict-avg")
+    decoupled = sync_preset == "decoupled"
     return _argv(
         ["$RUN/state/yeto-syncer"],
         ("--port", plan["syncer_port"]),
         ("--learners", LEARNERS),
         ("--quorum", LEARNERS),
         ("--grace-ms", 0),
-        ("--pipeline", 1),
-        ("--sync-interval-steps", 0),
+        ("--pipeline", learner.get("pipeline", 1) if decoupled else 1),
+        (
+            "--sync-interval-steps",
+            learner.get("local_horizon", 1) if decoupled else 0,
+        ),
         ("--delta-correction", "none"),
-        ("--total-steps", plan["learner"]["global_rounds"]),
-        ("--outer-lr", 1),
-        ("--outer-momentum", 0),
+        (
+            "--total-steps",
+            learner.get("total_fragment_steps", learner["global_rounds"])
+            if decoupled
+            else learner["global_rounds"],
+        ),
+        ("--outer-lr", 0.7 if decoupled else 1),
+        ("--outer-momentum", 0.9 if decoupled else 0),
         ("--max-base-lag", 0),
         ("--learner-weight", "equal"),
         ("--checkpoint-path", "$RUN/state/state.ckpt"),
@@ -717,6 +781,14 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         ("--reward-sha256", plan["reward_sha256"]),
         ("--source-sha256", plan["source_sha256"]),
         ("--global-rounds", learner["global_rounds"]),
+        ("--sync-preset", learner.get("sync_preset", "strict-avg")),
+        ("--fragments", learner.get("fragments", 1)),
+        ("--pipeline", learner.get("pipeline", 1)),
+        ("--local-horizon", learner.get("local_horizon", 1)),
+        (
+            "--total-fragment-steps",
+            learner.get("total_fragment_steps", learner["global_rounds"]),
+        ),
         ("--groups-per-round", learner["groups_per_round"]),
         ("--samples-per-group", learner["samples_per_group"]),
         ("--over-sampling-batch-size", learner["over_sampling_batch_size"]),
@@ -735,6 +807,13 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         ("--wan-streams", learner["wan_streams"]),
         ("--miles-root", "/workspace/miles"),
     )
+    if learner.get("dynamic_sampling_filter_path"):
+        values.extend(
+            (
+                "--dynamic-sampling-filter-path",
+                learner["dynamic_sampling_filter_path"],
+            )
+        )
     if learner.get("data_revision") is not None:
         values.extend(("--data-revision", learner["data_revision"]))
     if learner.get("expert_parallel") is not None:

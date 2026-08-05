@@ -43,6 +43,7 @@ def parse_args(argv=None):
     parser.add_argument("--groups-per-round", type=int, required=True)
     parser.add_argument("--samples-per-group", type=int, required=True)
     parser.add_argument("--over-sampling-batch-size", type=int, required=True)
+    parser.add_argument("--dynamic-sampling-filter-path", default=None)
     parser.add_argument("--optimizer-steps", type=int, required=True)
     parser.add_argument("--rollout-max-response-len", type=int, required=True)
     parser.add_argument("--custom-generate-function-path", default=None)
@@ -319,6 +320,14 @@ def build_miles_argv(
             (
                 "--custom-generate-function-path",
                 args.custom_generate_function_path,
+            )
+        )
+    dynamic_filter = getattr(args, "dynamic_sampling_filter_path", None)
+    if dynamic_filter:
+        values.extend(
+            (
+                "--dynamic-sampling-filter-path",
+                dynamic_filter,
             )
         )
     if args.use_session_server:

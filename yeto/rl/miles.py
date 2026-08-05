@@ -190,6 +190,9 @@ def _island_checkpoint_config(args) -> dict[str, Any]:
         "n_samples_per_prompt": args.n_samples_per_prompt,
         "num_steps_per_rollout": args.num_steps_per_rollout,
         "over_sampling_batch_size": args.over_sampling_batch_size,
+        "dynamic_sampling_filter_path": getattr(
+            args, "dynamic_sampling_filter_path", None
+        ),
         "reward_sha256": args.yeto_rl_reward_sha256,
         "rollout_batch_size": args.rollout_batch_size,
         "rollout_max_response_len": args.rollout_max_response_len,
@@ -254,26 +257,67 @@ def _group_indices(group: object) -> tuple[int, ...] | None:
         return None
 
 
+def _dynamic_sampling_filter(args):
+    """Load the optional Miles group filter once per learner process."""
+
+    path = getattr(args, "dynamic_sampling_filter_path", None)
+    if not path:
+        return None
+    cached = getattr(args, "_yeto_dynamic_sampling_filter", None)
+    if cached is None:
+        from miles.utils.misc import load_function
+
+        cached = load_function(path)
+        args._yeto_dynamic_sampling_filter = cached
+    return cached
+
+
+def _dynamic_sampling_keep(args, group: object) -> tuple[bool, str | None]:
+    filter_fn = _dynamic_sampling_filter(args)
+    if filter_fn is None:
+        return True, None
+    result = filter_fn(args, group)
+    keep = bool(getattr(result, "keep", result))
+    reason = getattr(result, "reason", None)
+    return keep, None if reason is None else str(reason)
+
+
 def queue_completed_groups(args, all_samples, data_source) -> None:
     """Retain complete oversampling results until this round selects its batch."""
 
     source = getattr(data_source, "__self__", None)
     if source is None or not callable(getattr(source, "add_samples", None)):
         raise RuntimeError("pinned Miles did not provide a bound data source method")
-    source.add_samples(
-        [
-            group
-            for group in all_samples
-            if _complete_group_for_policy(
-                group,
-                _policy_token_for_rollout(
-                    args,
-                    args.yeto_rl_policy_version,
-                ),
-                args.n_samples_per_prompt,
-            )
-        ]
-    )
+    complete = [
+        group
+        for group in all_samples
+        if _complete_group_for_policy(
+            group,
+            _policy_token_for_rollout(
+                args,
+                args.yeto_rl_policy_version,
+            ),
+            args.n_samples_per_prompt,
+        )
+    ]
+    kept = []
+    dropped = 0
+    drop_reasons: dict[str, int] = {}
+    for group in complete:
+        keep, reason = _dynamic_sampling_keep(args, group)
+        if keep:
+            kept.append(group)
+            continue
+        dropped += 1
+        if reason:
+            drop_reasons[reason] = drop_reasons.get(reason, 0) + 1
+    args._yeto_dynamic_sampling_stats = {
+        "generated_groups": len(complete),
+        "accepted_groups": len(kept),
+        "dropped_groups": dropped,
+        "drop_reasons": drop_reasons,
+    }
+    source.add_samples(kept)
 
 
 def _atomic_save_island_checkpoint(path: Path, payload: dict[str, Any]) -> None:
@@ -587,6 +631,7 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
 
     if not evaluation:
         args.yeto_rl_policy_version = rollout_id
+        args._yeto_dynamic_sampling_stats = None
         expected_policy_token = _policy_token_for_rollout(args, rollout_id)
         _restore_completed_groups(args, rollout_id, data_source)
         buffer = getattr(data_source, "buffer", None)
@@ -640,6 +685,30 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
             "group_p95_seconds": _percentile(lifecycle["durations"], 0.95),
             "group_p99_seconds": _percentile(lifecycle["durations"], 0.99),
         }
+        dynamic_stats = getattr(args, "_yeto_dynamic_sampling_stats", None) or {}
+        generated_groups = int(
+            dynamic_stats.get("generated_groups", args.rollout_batch_size)
+        )
+        dropped_groups = int(dynamic_stats.get("dropped_groups", 0))
+        round_metrics.update(
+            {
+                "rl/dynamic_filter/enabled": float(
+                    getattr(args, "dynamic_sampling_filter_path", None) is not None
+                ),
+                "rl/dynamic_filter/generated_groups": float(generated_groups),
+                "rl/dynamic_filter/accepted_groups": float(
+                    dynamic_stats.get("accepted_groups", args.rollout_batch_size)
+                ),
+                "rl/dynamic_filter/dropped_groups": float(dropped_groups),
+                "rl/dynamic_filter/replacement_attempts": float(
+                    max(0, generated_groups - args.rollout_batch_size)
+                ),
+            }
+        )
+        if dynamic_stats.get("drop_reasons"):
+            round_metrics["rl/dynamic_filter/drop_reasons"] = json.dumps(
+                dynamic_stats["drop_reasons"], sort_keys=True
+            )
         _save_completed_groups(
             args,
             rollout_id,
@@ -878,6 +947,15 @@ class MilesPolicySync:
             delta_l2_norm=0.0,
             rollout_seconds=metrics["rollout_seconds"],
             train_seconds=train_seconds,
+            dynamic_filter_generated_groups=int(
+                metrics.get("rl/dynamic_filter/generated_groups", 0)
+            ),
+            dynamic_filter_dropped_groups=int(
+                metrics.get("rl/dynamic_filter/dropped_groups", 0)
+            ),
+            dynamic_filter_replacement_attempts=int(
+                metrics.get("rl/dynamic_filter/replacement_attempts", 0)
+            ),
         )
 
     async def _initialize(self, *, actor_model, rollout_manager) -> None:

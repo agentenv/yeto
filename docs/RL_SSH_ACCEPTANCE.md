@@ -89,6 +89,29 @@ same plan. This local-data option belongs to the explicit SSH harness; the
 public SkyPilot RL launcher continues to require a revision-pinned Hugging
 Face dataset.
 
+For a decoupled, variance-aware run, add these options to the learner
+arguments. They preserve the optimizer budget while rejecting zero-variance
+GRPO groups and generating replacements:
+
+```bash
+--rl-sync-preset decoupled \
+--fragments 8 \
+--pipeline 2 \
+--local-rl-rounds-per-sync 4 \
+--rollout-batch-size 4 \
+--n-samples-per-prompt 8 \
+--over-sampling-batch-size 16 \
+--dynamic-sampling-filter-path \
+  miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
+```
+
+The harness records these settings in the content-bound plan and forwards
+them to both learners and the syncer. With `--total-steps 55`, decoupled
+execution uses `8 * 55 = 440` fragment steps, while still applying one local
+optimizer step per rollout. Use the exact `--seq-len`, model revision, Miles
+digest, and dataset manifest from the reference run when making a matched
+comparison.
+
 ```bash
 PLAN="$HOME/.yeto/ssh-runs/miles-rl-acceptance/plan.json"
 yeto-rl-ssh start --plan "$PLAN"

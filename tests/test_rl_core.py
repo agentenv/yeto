@@ -650,6 +650,61 @@ def test_island_checkpoint_restores_only_complete_same_policy_groups(
         "group_p50_seconds": 0.0,
         "group_p95_seconds": 0.0,
         "group_p99_seconds": 0.0,
+        "rl/dynamic_filter/enabled": 0.0,
+        "rl/dynamic_filter/generated_groups": 2.0,
+        "rl/dynamic_filter/accepted_groups": 2.0,
+        "rl/dynamic_filter/dropped_groups": 0.0,
+        "rl/dynamic_filter/replacement_attempts": 1.0,
+    }
+
+
+def test_queue_completed_groups_filters_zero_variance_groups_and_records_replacements(
+    tmp_path, monkeypatch
+):
+    def sample(index, reward):
+        return SimpleNamespace(
+            status=SimpleNamespace(value="completed"),
+            weight_versions=["yeto:3"],
+            index=index,
+            reward=reward,
+        )
+
+    kept = [sample(0, -1.0), sample(1, 1.0)]
+    dropped = [sample(2, -1.0), sample(3, -1.0)]
+
+    class DataSource:
+        def __init__(self):
+            self.buffer = []
+
+        def get_samples(self, _count):
+            return []
+
+        def add_samples(self, groups):
+            self.buffer.extend(groups)
+
+    args = SimpleNamespace(
+        yeto_rl_policy_version=3,
+        n_samples_per_prompt=2,
+        dynamic_sampling_filter_path="test.filter",
+    )
+    monkeypatch.setattr(
+        miles,
+        "_dynamic_sampling_filter",
+        lambda _args: lambda _args, group: SimpleNamespace(
+            keep=len({sample.reward for sample in group}) > 1,
+            reason="zero_std" if len({sample.reward for sample in group}) == 1 else None,
+        ),
+    )
+    source = DataSource()
+
+    miles.queue_completed_groups(args, [kept, dropped], source.get_samples)
+
+    assert source.buffer == [kept]
+    assert args._yeto_dynamic_sampling_stats == {
+        "generated_groups": 2,
+        "accepted_groups": 1,
+        "dropped_groups": 1,
+        "drop_reasons": {"zero_std": 1},
     }
 
 

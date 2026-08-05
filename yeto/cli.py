@@ -114,6 +114,12 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--n-samples-per-prompt", type=int, default=4)
     rl.add_argument("--rollout-batch-size", type=int, default=32)
     rl.add_argument("--over-sampling-batch-size", type=int, default=None)
+    rl.add_argument(
+        "--dynamic-sampling-filter-path",
+        default=None,
+        help="optional Miles group filter; use the nonzero-reward-variance "
+        "filter with oversampling for variance-aware GRPO",
+    )
     rl.add_argument("--rollout-max-response-len", type=int, default=32768)
     rl.add_argument("--custom-generate-function-path", default=None)
     rl.add_argument("--use-session-server", action="store_true")

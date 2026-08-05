@@ -55,4 +55,33 @@ without recording it in the launch arguments.
 
 The LM benchmark accepts this prompt file and reward callable unchanged. Use
 `--arms native` to run only the direct Miles reference, or select any
-comma-separated combination of `native`, `single`, and `federated`.
+comma-separated combination of `native`, `single`, `federated`, and
+`decoupled`.
+
+For a baseline-informed curriculum, keep the historical baseline-selection
+manifest and prompt rows together, then generate separate train and held-out
+files:
+
+```bash
+python scripts/select_cybergym_curriculum.py \
+  --prompts ./cybergym_all_prompts.jsonl \
+  --selection-manifest ./baseline-selection/manifest.json \
+  --train-output ./train-110-curriculum.jsonl \
+  --eval-output ./heldout-10.jsonl \
+  --manifest-output ./curriculum-manifest.json
+```
+
+To reduce zero-advantage GRPO groups, add Miles oversampling and its shipped
+nonzero-reward-variance filter to the RL launch:
+
+```bash
+--rollout-batch-size 4 \
+--n-samples-per-prompt 8 \
+--over-sampling-batch-size 16 \
+--dynamic-sampling-filter-path \
+  miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
+```
+
+The filter is an intervention, not a new control: compare it against the
+archived teammate baseline using the same model, task manifest, seed schedule,
+reward contract, and optimizer budget.

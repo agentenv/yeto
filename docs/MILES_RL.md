@@ -296,6 +296,26 @@ Add the following for decoupled synchronization:
 The initial validation configuration is `P=8`, `tau=2`, `H=4`; it is not
 claimed to be optimal for every model.
 
+### Variance-aware GRPO sampling
+
+CyberGym rewards can be identical across every sample in a group. Such a
+zero-variance group has zero GRPO advantage and contributes no useful update.
+Enable Miles' DAPO-style filter together with oversampling to replace those
+groups before the training batch is formed:
+
+```bash
+  --rollout-batch-size 4 \
+  --over-sampling-batch-size 16 \
+  --dynamic-sampling-filter-path \
+    miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
+```
+
+`--over-sampling-batch-size` must be greater than the training batch when the
+filter is enabled. Miles keeps generating replacement waves until four
+non-zero-variance groups are available. Yeto records generated, accepted,
+dropped, replacement, and drop-reason metrics in the round evidence, so the
+extra rollout work is visible in the benchmark report.
+
 `--trust-remote-code` is required by the pinned Miles model-loading path. Keep
 model and dataset revisions immutable and enable it only for trusted sources.
 The reward callable uses `package.module:function`; Yeto hashes its source

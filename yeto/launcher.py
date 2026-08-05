@@ -535,14 +535,14 @@ def _rl_callable(value: str | None, flag: str, *, required: bool) -> None:
         raise ValueError(f"{flag} must be package.module:function")
 
 
-def _rl_miles_function(value: str | None) -> None:
+def _rl_miles_function(
+    value: str | None, flag: str = "--custom-generate-function-path"
+) -> None:
     if value is None:
         return
     parts = value.split(".")
     if len(parts) < 2 or any(not part.isidentifier() for part in parts):
-        raise ValueError(
-            "--custom-generate-function-path must be package.module.function"
-        )
+        raise ValueError(f"{flag} must be package.module.function")
 
 
 def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
@@ -617,6 +617,19 @@ def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
             "RL --over-sampling-batch-size must be at least --rollout-batch-size"
         )
     _rl_miles_function(args.custom_generate_function_path)
+    dynamic_filter = getattr(args, "dynamic_sampling_filter_path", None)
+    _rl_miles_function(
+        dynamic_filter,
+        "--dynamic-sampling-filter-path",
+    )
+    if (
+        dynamic_filter is not None
+        and args.over_sampling_batch_size <= args.rollout_batch_size
+    ):
+        raise ValueError(
+            "variance-aware RL filtering requires --over-sampling-batch-size "
+            "greater than --rollout-batch-size"
+        )
     if not args.use_session_server and (
         args.session_server_ip is not None
         or args.session_server_port is not None
@@ -999,6 +1012,12 @@ def make_miles_island_task(
         f" --wan-streams {args.wan_streams}"
         " --miles-root ~/miles"
     )
+    dynamic_filter = getattr(args, "dynamic_sampling_filter_path", None)
+    if dynamic_filter:
+        flags += (
+            " --dynamic-sampling-filter-path "
+            f"{shlex.quote(dynamic_filter)}"
+        )
     if args.expert_parallel is not None:
         flags += f" --expert-parallel {args.expert_parallel}"
     if args.custom_generate_function_path:

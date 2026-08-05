@@ -79,6 +79,29 @@ def test_init_rl_cli_and_strict_preset_are_the_public_contract():
     assert not hasattr(args, "rl_global_rounds")
 
 
+def test_variance_aware_filter_requires_and_forwards_oversampling():
+    args = _args(
+        [
+            "--over-sampling-batch-size",
+            "8",
+            "--dynamic-sampling-filter-path",
+            "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std",
+        ]
+    )
+    _prepare_rl_args(args)
+    assert args.over_sampling_batch_size == 8
+    assert args.dynamic_sampling_filter_path.endswith("check_reward_nonzero_std")
+
+    invalid = _args(
+        [
+            "--dynamic-sampling-filter-path",
+            "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std",
+        ]
+    )
+    with pytest.raises(ValueError, match="greater than"):
+        _prepare_rl_args(invalid)
+
+
 def test_decoupled_rl_preset_fixes_the_fragment_outer_contract():
     args = _args(
         (

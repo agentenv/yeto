@@ -512,6 +512,44 @@ def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     )
 
 
+def test_decoupled_plan_propagates_fragment_and_variance_filter_settings():
+    plan = _plan()
+    plan["learner"].update(
+        {
+            "global_rounds": 55,
+            "sync_preset": "decoupled",
+            "fragments": 8,
+            "pipeline": 2,
+            "local_horizon": 4,
+            "total_fragment_steps": 440,
+            "groups_per_round": 4,
+            "over_sampling_batch_size": 16,
+            "dynamic_sampling_filter_path": (
+                "miles.rollout.filter_hub.dynamic_sampling_filters."
+                "check_reward_nonzero_std"
+            ),
+        }
+    )
+    ssh_harness._validate_plan(plan)
+
+    syncer = _syncer_argv(plan)
+    assert syncer[syncer.index("--pipeline") + 1] == "2"
+    assert syncer[syncer.index("--sync-interval-steps") + 1] == "4"
+    assert syncer[syncer.index("--total-steps") + 1] == "440"
+    assert syncer[syncer.index("--outer-lr") + 1] == "0.7"
+    assert syncer[syncer.index("--outer-momentum") + 1] == "0.9"
+
+    learner = _learner_argv(plan, 0)
+    assert learner[learner.index("--sync-preset") + 1] == "decoupled"
+    assert learner[learner.index("--fragments") + 1] == "8"
+    assert learner[learner.index("--pipeline") + 1] == "2"
+    assert learner[learner.index("--local-horizon") + 1] == "4"
+    assert learner[learner.index("--total-fragment-steps") + 1] == "440"
+    assert learner[learner.index("--dynamic-sampling-filter-path") + 1].endswith(
+        "check_reward_nonzero_std"
+    )
+
+
 def test_verification_requires_an_exited_zero_status_container():
     assert _container_succeeded([{"State": {"Status": "exited", "ExitCode": 0}}])
     assert not _container_succeeded(

@@ -541,7 +541,12 @@ def worker_payload(
         "global_rounds": args.global_rounds,
         "groups_per_round": worker.groups_per_round,
         "samples_per_group": args.samples_per_group,
-        "over_sampling_batch_size": worker.groups_per_round,
+        "over_sampling_batch_size": (
+            args.over_sampling_batch_size
+            if args.over_sampling_batch_size is not None
+            else worker.groups_per_round
+        ),
+        "dynamic_sampling_filter_path": args.dynamic_sampling_filter_path,
         "optimizer_steps": args.optimizer_steps,
         "rollout_max_response_len": args.rollout_max_response_len,
         "apply_chat_template_kwargs": args.apply_chat_template_kwargs,
@@ -1471,6 +1476,15 @@ def summarize_yeto_events(run_dir: Path, islands: int) -> dict[str, Any]:
         "remote_quorum_wait_s": sum(
             event_values(hook_events, "sync/remote_quorum_wait_seconds")
         ),
+        "dynamic_filter_generated_groups": sum(
+            values("dynamic_filter_generated_groups")
+        ),
+        "dynamic_filter_dropped_groups": sum(
+            values("dynamic_filter_dropped_groups")
+        ),
+        "dynamic_filter_replacement_attempts": sum(
+            values("dynamic_filter_replacement_attempts")
+        ),
         "mean_kl": _mean(values("mean_kl")),
         "mean_ess_ratio": _mean(values("ess_ratio")),
         "mean_clip_fraction": _mean(values("clip_fraction")),
@@ -1899,6 +1913,29 @@ def validate_args(args, arms: list[Arm], *, check_runtime: bool) -> None:
         raise ValueError("evaluation prompt and sample counts must be positive")
     if args.seq_len <= args.rollout_max_response_len:
         raise ValueError("--seq-len must exceed --rollout-max-response-len")
+    required_groups = max(arm.groups_per_round for arm in arms)
+    if (
+        args.over_sampling_batch_size is not None
+        and args.over_sampling_batch_size < required_groups
+    ):
+        raise ValueError(
+            "--over-sampling-batch-size must be at least the largest arm "
+            f"rollout batch ({required_groups})"
+        )
+    if args.dynamic_sampling_filter_path:
+        parts = args.dynamic_sampling_filter_path.split(".")
+        if len(parts) < 2 or any(not part.isidentifier() for part in parts):
+            raise ValueError(
+                "--dynamic-sampling-filter-path must be package.module.function"
+            )
+        if (
+            args.over_sampling_batch_size is None
+            or args.over_sampling_batch_size <= required_groups
+        ):
+            raise ValueError(
+                "variance-aware filtering requires oversampling beyond the "
+                "training batch"
+            )
     if not 0 <= args.eval_temperature or not 0 < args.eval_top_p <= 1:
         raise ValueError(
             "evaluation temperature must be non-negative and top-p in (0, 1]"
@@ -2188,6 +2225,27 @@ def aggregate_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         if record["mean_kl"] is not None
                     ]
                 ),
+                "dynamic_filter_generated_groups": _mean(
+                    [
+                        float(record["dynamic_filter_generated_groups"])
+                        for record in sync_records
+                        if record.get("dynamic_filter_generated_groups") is not None
+                    ]
+                ),
+                "dynamic_filter_dropped_groups": _mean(
+                    [
+                        float(record["dynamic_filter_dropped_groups"])
+                        for record in sync_records
+                        if record.get("dynamic_filter_dropped_groups") is not None
+                    ]
+                ),
+                "dynamic_filter_replacement_attempts": _mean(
+                    [
+                        float(record["dynamic_filter_replacement_attempts"])
+                        for record in sync_records
+                        if record.get("dynamic_filter_replacement_attempts") is not None
+                    ]
+                ),
                 "mean_sync_ms": _mean(
                     [
                         record["mean_sync_ms"]
@@ -2312,8 +2370,8 @@ def write_report(args, records: list[dict[str, Any]]) -> None:
             "",
             "## Systems",
             "",
-            "| arm | GPUs | train s | artifact-ready s | eval s | traj/s | action tok/s | active GPU-s | active % | util avg/min % | GPU-h | cost | hook s | final s | H | PULL-to-PUSH s | BCAST queue s | sync ms | fragment payload MB | KL |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| arm | GPUs | train s | artifact-ready s | eval s | traj/s | action tok/s | active GPU-s | active % | util avg/min % | GPU-h | cost | hook s | final s | H | PULL-to-PUSH s | BCAST queue s | sync ms | filter generated | filter dropped | replacements | fragment payload MB | KL |",
+            "|---|" + "---:|" * 22,
         ]
     )
     for row in aggregates:
@@ -2335,6 +2393,9 @@ def write_report(args, records: list[dict[str, Any]]) -> None:
             f"{fmt(row['mean_realized_h'], 2)} | "
             f"{fmt(row.get('mean_pull_to_push_s'), 3)} | "
             f"{fmt(row['mean_bcast_queue_s'], 3)} | {fmt(row['mean_sync_ms'], 2)} | "
+            f"{fmt(row['dynamic_filter_generated_groups'], 1)} | "
+            f"{fmt(row['dynamic_filter_dropped_groups'], 1)} | "
+            f"{fmt(row['dynamic_filter_replacement_attempts'], 1)} | "
             f"{fmt(traffic_mb, 3)} | {fmt(row['mean_kl'], 5)} |"
         )
     report = "\n".join(lines) + "\n"
@@ -2362,6 +2423,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--global-rounds", type=int, default=8)
     parser.add_argument("--groups-per-island", type=int, default=4)
     parser.add_argument("--samples-per-group", type=int, default=4)
+    parser.add_argument("--over-sampling-batch-size", type=int, default=None)
+    parser.add_argument("--dynamic-sampling-filter-path", default=None)
     parser.add_argument("--optimizer-steps", type=int, default=1)
     parser.add_argument("--gpus-per-island", type=int, default=1)
     parser.add_argument("--fragments", type=int, default=8)
