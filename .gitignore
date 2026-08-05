@@ -20,3 +20,5 @@ compare-report/
 smoke-report/
 lm-benchmark-probes/
 .claude/
+docs/MILES_RL_ZH.md
+docs/INIT_Decoupled_DiLoCo_RL_Support.md

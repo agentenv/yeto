@@ -19,10 +19,10 @@ model, island count, or generic DiLoCo flags.
 
 > **Status:** `strict-avg` has real-model GPU and recovery evidence. The
 > `decoupled` source implementation and automated protocol/oracle coverage are
-> present in this working tree. Release use additionally requires the reviewed
-> Miles stop-signal change to be committed, `MILES_COMMIT` to be advanced to
-> that clean commit, and the real GPU matrix in the design to pass. The runtime
-> verifier deliberately rejects a dirty or mismatched Miles checkout.
+> present, and `MILES_COMMIT` pins the reviewed stop-capable Miles commit.
+> Release use additionally requires that commit to be available from the
+> configured Miles repository and the real GPU matrix in the design to pass.
+> The runtime verifier deliberately rejects a dirty or mismatched checkout.
 
 ## Supported Boundary
 
