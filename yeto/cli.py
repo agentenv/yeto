@@ -122,7 +122,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--tito-model", default=None)
     rl.add_argument("--local-rl-rounds-per-sync", type=int, default=1)
     rl.add_argument(
-        "--rl-sync-preset", choices=["strict-avg"], default="strict-avg"
+        "--rl-sync-preset",
+        choices=["strict-avg", "decoupled"],
+        default="strict-avg",
     )
     rl.add_argument(
         "--rl-policy-version", choices=["strict"], default="strict"

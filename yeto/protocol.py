@@ -35,7 +35,7 @@ import struct
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .fragments import MERGE_ISO, FragmentLayout
 
@@ -236,6 +236,7 @@ class PullRequest:
     fragment_id: int
     global_step: int
     round_attempt: int
+    received_at: float = field(default_factory=time.monotonic, compare=False)
 
 
 @dataclass
@@ -243,6 +244,7 @@ class BcastFragment:
     fragment_id: int
     version: int
     data: bytes  # raw tensor bytes in the session dtype
+    received_at: float = field(default_factory=time.monotonic, compare=False)
 
 
 @dataclass

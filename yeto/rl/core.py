@@ -101,6 +101,38 @@ def build_avg_layout(specs: Sequence[CanonicalTensorSpec]) -> FragmentLayout:
     )
 
 
+def build_rl_fragment_layout(
+    specs: Sequence[CanonicalTensorSpec],
+    num_fragments: int,
+) -> FragmentLayout:
+    """Build the deterministic all-AVG binpack used by decoupled RL."""
+
+    ordered = tuple(sorted(specs, key=lambda spec: (-spec.numel, spec.name)))
+    if num_fragments < 2:
+        raise ValueError("decoupled RL requires at least 2 fragments")
+    if num_fragments > len(ordered):
+        raise ValueError("decoupled RL fragments exceed canonical tensor count")
+    if len({spec.name for spec in ordered}) != len(ordered):
+        raise ValueError("canonical LoRA tensor names must be unique")
+
+    bins: list[list[CanonicalTensorSpec]] = [[] for _ in range(num_fragments)]
+    sizes = [0] * num_fragments
+    for spec in ordered:
+        fragment_id = min(range(num_fragments), key=lambda index: sizes[index])
+        bins[fragment_id].append(spec)
+        sizes[fragment_id] += spec.numel
+    return FragmentLayout(
+        [
+            Fragment(
+                merge_mode=MERGE_AVG,
+                tensors=[(spec.name, spec.numel) for spec in members],
+                identity_shapes={spec.name: spec.shape for spec in members},
+            )
+            for members in bins
+        ]
+    )
+
+
 def canonical_layout_hash(specs: Sequence[CanonicalTensorSpec]) -> str:
     """Semantic hash persisted by the syncer and rebuilt by the exporter."""
 
@@ -236,6 +268,63 @@ def policy_hash(state: CanonicalLoraState) -> str:
         digest.update(spec.name.encode("utf-8"))
         digest.update(_canonical_tensor(state.tensors[spec.name], spec.name).numpy().tobytes())
     return digest.hexdigest()
+
+
+def policy_tensor_hash(state: CanonicalLoraState) -> str:
+    """Hash a complete canonical LoRA policy independently of local progress."""
+
+    digest = hashlib.sha256()
+    digest.update(b"yeto-rl-policy-tensors-v1\0")
+    digest.update(state.base_model_revision.encode("ascii"))
+    digest.update(state.lora_config_hash.encode("ascii"))
+    digest.update(state.layout_hash.encode("ascii"))
+    for spec in state.specs:
+        digest.update(spec.name.encode("utf-8"))
+        digest.update(
+            _canonical_tensor(state.tensors[spec.name], spec.name).numpy().tobytes()
+        )
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class PolicySnapshot:
+    rollout_id: int
+    fragment_versions: tuple[int, ...]
+    policy_hash: str
+
+    def __post_init__(self) -> None:
+        if self.rollout_id < 0:
+            raise ValueError("rollout id must be non-negative")
+        if len(self.fragment_versions) < 2 or any(
+            version < 0 for version in self.fragment_versions
+        ):
+            raise ValueError("policy snapshot requires non-negative fragment versions")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.policy_hash):
+            raise ValueError("policy snapshot hash must be a lowercase SHA256")
+
+    @classmethod
+    def create(
+        cls,
+        rollout_id: int,
+        state: CanonicalLoraState,
+        fragment_versions: Sequence[int],
+    ) -> PolicySnapshot:
+        return cls(
+            rollout_id,
+            tuple(fragment_versions),
+            policy_tensor_hash(state),
+        )
+
+    @property
+    def token(self) -> str:
+        return f"yeto:{self.rollout_id}:{self.policy_hash}"
+
+
+def parse_policy_snapshot_token(token: object) -> tuple[int, str]:
+    match = re.fullmatch(r"yeto:(0|[1-9][0-9]*):([0-9a-f]{64})", str(token))
+    if match is None:
+        raise ValueError(f"invalid policy snapshot token {token!r}")
+    return int(match.group(1)), match.group(2)
 
 
 @dataclass(frozen=True)

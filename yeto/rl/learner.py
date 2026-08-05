@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .bridge import BridgeConfig
+from .decoupled import DecoupledBridgeConfig
 from .export import adapter_targets, derive_peft_lora_specs
 from .miles import verify_miles_revision
 
@@ -28,6 +29,15 @@ def parse_args(argv=None):
     parser.add_argument("--reward-sha256", required=True)
     parser.add_argument("--source-sha256", required=True)
     parser.add_argument("--global-rounds", type=int, required=True)
+    parser.add_argument(
+        "--sync-preset",
+        choices=["strict-avg", "decoupled"],
+        default="strict-avg",
+    )
+    parser.add_argument("--fragments", type=int, default=1)
+    parser.add_argument("--pipeline", type=int, default=1)
+    parser.add_argument("--local-horizon", type=int, default=1)
+    parser.add_argument("--total-fragment-steps", type=int, default=None)
     parser.add_argument("--groups-per-round", type=int, required=True)
     parser.add_argument("--samples-per-group", type=int, required=True)
     parser.add_argument("--over-sampling-batch-size", type=int, required=True)
@@ -461,6 +471,13 @@ def run_miles(
 ) -> None:
     """Run one Miles job, optionally with Yeto's external policy boundary."""
 
+    if (
+        yeto_policy_sync
+        and getattr(args, "sync_preset", "strict-avg") == "decoupled"
+        and args.optimizer_steps != 1
+    ):
+        raise ValueError("decoupled RL requires one optimizer step per rollout")
+
     from megatron.bridge import AutoBridge
 
     model_bridge = AutoBridge.from_hf_pretrained(
@@ -490,7 +507,12 @@ def run_miles(
     miles_args = _parse_miles_args(miles_argv)
 
     if yeto_policy_sync:
-        from .core import canonical_layout_hash, canonical_lora_config_hash
+        from ..protocol import layout_fingerprint
+        from .core import (
+            build_rl_fragment_layout,
+            canonical_layout_hash,
+            canonical_lora_config_hash,
+        )
 
         layout_hash = canonical_layout_hash(specs)
         lora_config_hash = canonical_lora_config_hash(
@@ -508,21 +530,59 @@ def run_miles(
         miles_args.yeto_rl_completed_groups_path = args.completed_groups_path
         miles_args.yeto_rl_event_tape = args.event_tape
         miles_args.yeto_rl_learner_id = args.learner_id
-        miles_args.yeto_rl_bridge_config = BridgeConfig(
-            syncer_addr=_syncer_address(args.syncer),
-            learner_id=args.learner_id,
-            global_rounds=args.global_rounds,
-            groups_per_round=args.groups_per_round,
-            samples_per_group=args.samples_per_group,
-            local_optimizer_steps=args.optimizer_steps,
-            wan_streams=args.wan_streams,
-            expected_specs=specs,
-            base_model_revision=args.model_revision,
-            lora_config_hash=lora_config_hash,
-            layout_hash=layout_hash,
-            event_tape=args.event_tape,
-            audit_dir=args.audit_dir,
-        )
+        sync_preset = getattr(args, "sync_preset", "strict-avg")
+        miles_args.yeto_rl_sync_preset = sync_preset
+        miles_args.external_policy_sync_run_until_stop = sync_preset == "decoupled"
+        if sync_preset == "decoupled":
+            miles_args.yeto_rl_source_sha256 = args.source_sha256
+            total_fragment_steps = args.total_fragment_steps
+            if total_fragment_steps != args.global_rounds * args.fragments:
+                raise ValueError(
+                    "decoupled RL total fragment steps must equal sweeps*fragments"
+                )
+            layout = build_rl_fragment_layout(specs, args.fragments)
+            sync_fingerprint = layout_fingerprint(layout).hex()
+            miles_args.yeto_rl_num_fragments = args.fragments
+            miles_args.yeto_rl_pipeline = args.pipeline
+            miles_args.yeto_rl_local_horizon = args.local_horizon
+            miles_args.yeto_rl_total_sweeps = args.global_rounds
+            miles_args.yeto_rl_total_fragment_steps = total_fragment_steps
+            miles_args.yeto_rl_sync_layout_fingerprint = sync_fingerprint
+            miles_args.yeto_rl_learner_budget_steps = getattr(
+                args,
+                "learner_budget_steps",
+                None,
+            )
+            miles_args.yeto_rl_bridge_config = DecoupledBridgeConfig(
+                syncer_addr=_syncer_address(args.syncer),
+                learner_id=args.learner_id,
+                total_fragment_steps=total_fragment_steps,
+                num_fragments=args.fragments,
+                pipeline=args.pipeline,
+                local_horizon=args.local_horizon,
+                expected_specs=specs,
+                base_model_revision=args.model_revision,
+                lora_config_hash=lora_config_hash,
+                canonical_layout_hash=layout_hash,
+                wan_streams=args.wan_streams,
+                learner_budget_steps=miles_args.yeto_rl_learner_budget_steps,
+            )
+        else:
+            miles_args.yeto_rl_bridge_config = BridgeConfig(
+                syncer_addr=_syncer_address(args.syncer),
+                learner_id=args.learner_id,
+                global_rounds=args.global_rounds,
+                groups_per_round=args.groups_per_round,
+                samples_per_group=args.samples_per_group,
+                local_optimizer_steps=args.optimizer_steps,
+                wan_streams=args.wan_streams,
+                expected_specs=specs,
+                base_model_revision=args.model_revision,
+                lora_config_hash=lora_config_hash,
+                layout_hash=layout_hash,
+                event_tape=args.event_tape,
+                audit_dir=args.audit_dir,
+            )
 
     from train import train as miles_train
 

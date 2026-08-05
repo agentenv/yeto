@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import math
 import os
 import statistics
 import subprocess
 import sys
 import time
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -21,10 +22,14 @@ from . import MILES_COMMIT, MILES_REPOSITORY
 from .core import (
     CanonicalLoraState,
     LocalRoundStats,
+    PolicySnapshot,
     StrictRlInvariantError,
     canonical_state,
+    parse_policy_snapshot_token,
     policy_hash,
+    policy_tensor_hash,
 )
+from .decoupled import BroadcastBatch, BudgetConsolidation, FragmentSubmission
 
 
 def verify_miles_revision(root: str | Path) -> Path:
@@ -102,8 +107,20 @@ def _validate_rollout_groups(data: object, groups: int, samples: int) -> None:
                 raise RuntimeError("Miles returned an incomplete trajectory")
 
 
-def _validate_rollout_policy_versions(data: list[list[Any]], rollout_id: int) -> None:
-    expected = _policy_token(rollout_id)
+def _policy_token_for_rollout(args, rollout_id: int) -> str:
+    if getattr(args, "yeto_rl_sync_preset", "strict-avg") != "decoupled":
+        return _policy_token(rollout_id)
+    token = getattr(args, "yeto_rl_policy_token", None)
+    try:
+        token_rollout_id, _ = parse_policy_snapshot_token(token)
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+    if token_rollout_id != rollout_id:
+        raise RuntimeError("decoupled rollout ID differs from its policy snapshot")
+    return str(token)
+
+
+def _validate_rollout_policy_versions(data: list[list[Any]], expected: str) -> None:
     for group in data:
         for sample in group:
             versions = getattr(sample, "weight_versions", None)
@@ -149,6 +166,7 @@ def _record_strict_failure(args, error: StrictRlInvariantError, bridge=None) -> 
 
 
 _ISLAND_CHECKPOINT_SCHEMA = 2
+_DECOUPLED_CHECKPOINT_SCHEMA = 3
 
 
 def _island_checkpoint_config(args) -> dict[str, Any]:
@@ -178,7 +196,32 @@ def _island_checkpoint_config(args) -> dict[str, Any]:
     }
 
 
-def _complete_group_for_policy(group: object, policy_version: int, size: int) -> bool:
+def _decoupled_checkpoint_config(args) -> dict[str, Any]:
+    return {
+        **_island_checkpoint_config(args),
+        "sync_preset": "decoupled",
+        "learner_id": args.yeto_rl_learner_id,
+        "source_sha256": args.yeto_rl_source_sha256,
+        "num_fragments": args.yeto_rl_num_fragments,
+        "pipeline": args.yeto_rl_pipeline,
+        "local_horizon": args.yeto_rl_local_horizon,
+        "total_sweeps": args.yeto_rl_total_sweeps,
+        "total_fragment_steps": args.yeto_rl_total_fragment_steps,
+        "sync_layout_fingerprint": args.yeto_rl_sync_layout_fingerprint,
+        "learner_budget_steps": getattr(
+            args,
+            "yeto_rl_learner_budget_steps",
+            None,
+        ),
+    }
+
+
+def _complete_group_for_policy(
+    group: object,
+    policy: int | str,
+    size: int,
+) -> bool:
+    expected = _policy_token(policy) if isinstance(policy, int) else policy
     if not isinstance(group, list) or len(group) != size:
         return False
     for sample in group:
@@ -186,11 +229,7 @@ def _complete_group_for_policy(group: object, policy_version: int, size: int) ->
         versions = getattr(sample, "weight_versions", None)
         if status not in {"completed", "truncated"} or not versions:
             return False
-        try:
-            observed = {_version_from_token(token) for token in versions}
-        except RuntimeError:
-            return False
-        if observed != {policy_version}:
+        if any(not isinstance(token, str) or token != expected for token in versions):
             return False
     return True
 
@@ -216,7 +255,10 @@ def queue_completed_groups(args, all_samples, data_source) -> None:
             for group in all_samples
             if _complete_group_for_policy(
                 group,
-                args.yeto_rl_policy_version,
+                _policy_token_for_rollout(
+                    args,
+                    args.yeto_rl_policy_version,
+                ),
                 args.n_samples_per_prompt,
             )
         ]
@@ -231,6 +273,97 @@ def _atomic_save_island_checkpoint(path: Path, payload: dict[str, Any]) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _load_decoupled_checkpoint(args) -> dict[str, Any] | None:
+    path = Path(args.yeto_rl_completed_groups_path).expanduser()
+    if not path.is_file():
+        return None
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as error:
+        raise RuntimeError("cannot read decoupled RL island checkpoint") from error
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != _DECOUPLED_CHECKPOINT_SCHEMA
+        or payload.get("config") != _decoupled_checkpoint_config(args)
+    ):
+        raise RuntimeError("decoupled RL island checkpoint configuration changed")
+    next_rollout_id = payload.get("next_rollout_id")
+    optimizer_steps = payload.get("optimizer_steps")
+    action_tokens = payload.get("action_tokens")
+    versions = payload.get("fragment_versions")
+    token = payload.get("policy_token")
+    policy_digest = payload.get("policy_hash")
+    try:
+        token_rollout_id, token_digest = parse_policy_snapshot_token(token)
+    except ValueError as error:
+        raise RuntimeError("invalid decoupled RL island checkpoint token") from error
+    if (
+        not isinstance(next_rollout_id, int)
+        or next_rollout_id < 0
+        or optimizer_steps != next_rollout_id
+        or not isinstance(action_tokens, int)
+        or action_tokens < 0
+        or token_rollout_id != next_rollout_id
+        or token_digest != policy_digest
+        or not isinstance(versions, list)
+        or len(versions) != args.yeto_rl_num_fragments
+        or any(
+            not isinstance(version, int)
+            or version < 0
+            or version > args.yeto_rl_total_fragment_steps
+            or (
+                version > 0
+                and (version - 1) % args.yeto_rl_num_fragments != fragment_id
+            )
+            for fragment_id, version in enumerate(versions)
+        )
+        or not isinstance(payload.get("completed_groups"), list)
+        or not isinstance(payload.get("rollout_metrics"), Mapping)
+        or not isinstance(payload.get("local_round_stats"), Mapping)
+    ):
+        raise RuntimeError("invalid decoupled RL island checkpoint progress")
+    return payload
+
+
+def _save_decoupled_checkpoint(
+    args,
+    *,
+    snapshot: PolicySnapshot,
+    optimizer_steps: int,
+    action_tokens: int,
+    rollout_metrics: Mapping[str, Any],
+    local_round_stats: Mapping[str, Any] | None,
+    completed_groups: list[list[dict[str, Any]]],
+) -> None:
+    if (
+        optimizer_steps != snapshot.rollout_id
+        or action_tokens < 0
+        or len(snapshot.fragment_versions) != args.yeto_rl_num_fragments
+    ):
+        raise ValueError("decoupled RL checkpoint progress is inconsistent")
+    numeric_metrics = {
+        str(name): float(value)
+        for name, value in rollout_metrics.items()
+        if isinstance(value, (int, float))
+    }
+    _atomic_save_island_checkpoint(
+        Path(args.yeto_rl_completed_groups_path).expanduser(),
+        {
+            "schema_version": _DECOUPLED_CHECKPOINT_SCHEMA,
+            "config": _decoupled_checkpoint_config(args),
+            "next_rollout_id": snapshot.rollout_id,
+            "optimizer_steps": optimizer_steps,
+            "action_tokens": action_tokens,
+            "policy_token": snapshot.token,
+            "policy_hash": snapshot.policy_hash,
+            "fragment_versions": list(snapshot.fragment_versions),
+            "rollout_metrics": numeric_metrics,
+            "local_round_stats": dict(local_round_stats or {}),
+            "completed_groups": completed_groups,
+        },
+    )
 
 
 def _serialize_completed_groups(groups: list[list[Any]]) -> list[list[dict[str, Any]]]:
@@ -265,6 +398,29 @@ def _restore_completed_groups(args, policy_version: int, data_source) -> None:
     if getattr(data_source, "_yeto_rl_checkpoint_loaded", False):
         return
     data_source._yeto_rl_checkpoint_loaded = True
+    if getattr(args, "yeto_rl_sync_preset", "strict-avg") == "decoupled":
+        try:
+            payload = _load_decoupled_checkpoint(args)
+        except RuntimeError as error:
+            print(f"[rl] discarded unreadable decoupled island checkpoint: {error}")
+            return
+        expected_token = _policy_token_for_rollout(args, policy_version)
+        if payload is None or payload.get("policy_token") != expected_token:
+            return
+        groups = [
+            group
+            for group in _deserialize_completed_groups(
+                payload.get("completed_groups")
+            )
+            if _complete_group_for_policy(
+                group,
+                expected_token,
+                args.n_samples_per_prompt,
+            )
+        ]
+        if groups:
+            data_source.add_samples(groups)
+        return
     path = Path(args.yeto_rl_completed_groups_path).expanduser()
     if not path.is_file():
         return
@@ -303,11 +459,12 @@ def _save_completed_groups(
     buffer = getattr(data_source, "buffer", None)
     if not isinstance(buffer, list):
         raise RuntimeError("Miles data source lacks a completed-group queue")
+    policy_token = _policy_token_for_rollout(args, policy_version)
     completed = [
         group
         for group in buffer
         if _complete_group_for_policy(
-            group, policy_version, args.n_samples_per_prompt
+            group, policy_token, args.n_samples_per_prompt
         )
     ]
     buffer[:] = completed
@@ -316,6 +473,28 @@ def _save_completed_groups(
         for name, value in (metrics or {}).items()
         if isinstance(value, (int, float))
     }
+    if getattr(args, "yeto_rl_sync_preset", "strict-avg") == "decoupled":
+        payload = _load_decoupled_checkpoint(args)
+        if (
+            payload is None
+            or payload.get("next_rollout_id") != policy_version
+            or payload.get("policy_token") != policy_token
+        ):
+            raise RuntimeError("decoupled RL progress changed during rollout")
+        _save_decoupled_checkpoint(
+            args,
+            snapshot=PolicySnapshot(
+                policy_version,
+                tuple(payload["fragment_versions"]),
+                payload["policy_hash"],
+            ),
+            optimizer_steps=payload["optimizer_steps"],
+            action_tokens=payload["action_tokens"],
+            rollout_metrics=numeric_metrics,
+            local_round_stats=payload.get("local_round_stats"),
+            completed_groups=_serialize_completed_groups(completed),
+        )
+        return
     _atomic_save_island_checkpoint(
         Path(args.yeto_rl_completed_groups_path).expanduser(),
         {
@@ -397,6 +576,7 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
 
     if not evaluation:
         args.yeto_rl_policy_version = rollout_id
+        expected_policy_token = _policy_token_for_rollout(args, rollout_id)
         _restore_completed_groups(args, rollout_id, data_source)
         buffer = getattr(data_source, "buffer", None)
         if not isinstance(buffer, list):
@@ -405,7 +585,7 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
             group
             for group in buffer
             if _complete_group_for_policy(
-                group, rollout_id, args.n_samples_per_prompt
+                group, expected_policy_token, args.n_samples_per_prompt
             )
         ]
     rollout_started = time.monotonic()
@@ -425,7 +605,7 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
             args.n_samples_per_prompt,
         )
         try:
-            _validate_rollout_policy_versions(output.samples, rollout_id)
+            _validate_rollout_policy_versions(output.samples, expected_policy_token)
         except StrictRlInvariantError as error:
             _record_strict_failure(args, error)
             raise
@@ -525,14 +705,16 @@ class MilesPolicySync:
             raise RuntimeError("Miles created no updatable SGLang engine")
         return engines
 
-    async def _set_rollout_version(self, version: int) -> None:
-        token = _policy_token(version)
+    async def _set_rollout_token(self, token: str) -> None:
         await asyncio.gather(
             *(
                 engine.update_weight_version.remote(token)
                 for engine in await self._engines()
             )
         )
+
+    async def _set_rollout_version(self, version: int) -> None:
+        await self._set_rollout_token(_policy_token(version))
 
     async def _apply_global_policy(self, state: CanonicalLoraState) -> None:
         from miles.backends.megatron_utils.trainable_state import make_trainable_state
@@ -576,6 +758,20 @@ class MilesPolicySync:
         return [ray.get(reference.inner) for reference in references]
 
     def _rollout_metrics(self, policy_version: int) -> dict[str, float]:
+        if getattr(self.args, "yeto_rl_sync_preset", "strict-avg") == "decoupled":
+            payload = _load_decoupled_checkpoint(self.args)
+            if (
+                payload is None
+                or payload.get("next_rollout_id") != policy_version
+                or payload.get("policy_token")
+                != _policy_token_for_rollout(self.args, policy_version)
+                or not isinstance(payload.get("rollout_metrics"), Mapping)
+            ):
+                raise RuntimeError("Miles island checkpoint lacks rollout metrics")
+            return {
+                name: float(value)
+                for name, value in payload["rollout_metrics"].items()
+            }
         path = Path(self.args.yeto_rl_completed_groups_path).expanduser()
         payload = torch.load(path, map_location="cpu", weights_only=True)
         if (
@@ -750,5 +946,446 @@ class MilesPolicySync:
         _record_strict_failure(self.args, error, self.bridge)
 
 
+class DecoupledMilesPolicySync(MilesPolicySync):
+    """Miles hook for full-snapshot RL with pipelined fragment rounds."""
+
+    def __init__(self, args) -> None:
+        super().__init__(args)
+        self.snapshot: PolicySnapshot | None = None
+        self.optimizer_steps = 0
+        self.action_tokens = 0
+        self.finished = False
+
+    def _canonical_at_progress(self, state, policy_version: int) -> CanonicalLoraState:
+        canonical = self._canonical_state(state)
+        return canonical_state(
+            policy_version,
+            canonical.tensors,
+            base_model_revision=canonical.base_model_revision,
+            lora_config_hash=canonical.lora_config_hash,
+            layout_hash=canonical.layout_hash,
+            expected_specs=canonical.specs,
+        )
+
+    async def _apply_decoupled_policy(
+        self,
+        state: CanonicalLoraState,
+        *,
+        reset_optimizer: bool,
+    ) -> CanonicalLoraState:
+        from miles.backends.megatron_utils.trainable_state import make_trainable_state
+
+        apply_started = time.monotonic()
+        reset_count = await self.actor_model.apply_trainable_state(
+            make_trainable_state(state.policy_version, state.tensors),
+            reset_optimizer=reset_optimizer,
+        )
+        if not reset_optimizer and reset_count != 0:
+            raise RuntimeError("Miles reset optimizer state during fragment apply")
+        applied = self._canonical_at_progress(
+            await self.actor_model.export_trainable_state(),
+            state.policy_version,
+        )
+        applied_hash = policy_tensor_hash(applied)
+        if applied_hash != policy_tensor_hash(state):
+            raise StrictRlInvariantError(
+                "policy_hash_mismatch_after_apply",
+                "policy hash mismatch after trainer apply",
+            )
+        if reset_optimizer:
+            self.optimizer_reset_count += 1
+        self._append_event(
+            {
+                "event": "rl_policy_apply",
+                "policy_version": state.policy_version,
+                "partial_fragment_apply": not reset_optimizer,
+                "optimizer_reset_count": self.optimizer_reset_count,
+                "reset_parameter_count": reset_count,
+                "rl/optimizer_reset_count": self.optimizer_reset_count,
+                "sync/global_policy_hash": applied_hash,
+                "sync/apply_seconds": time.monotonic() - apply_started,
+            }
+        )
+        return applied
+
+    def _save_progress(
+        self,
+        snapshot: PolicySnapshot,
+        *,
+        stats: LocalRoundStats | None,
+    ) -> None:
+        previous = _load_decoupled_checkpoint(self.args)
+        metrics = {} if previous is None else previous.get("rollout_metrics", {})
+        completed_groups = []
+        if (
+            previous is not None
+            and previous.get("policy_token") == snapshot.token
+            and previous.get("policy_hash") == snapshot.policy_hash
+            and previous.get("fragment_versions") == list(snapshot.fragment_versions)
+        ):
+            completed_groups = previous["completed_groups"]
+        _save_decoupled_checkpoint(
+            self.args,
+            snapshot=snapshot,
+            optimizer_steps=self.optimizer_steps,
+            action_tokens=self.action_tokens,
+            rollout_metrics=metrics,
+            local_round_stats=None if stats is None else asdict(stats),
+            completed_groups=completed_groups,
+        )
+
+    async def _publish_snapshot(self, snapshot: PolicySnapshot) -> None:
+        self.args.yeto_rl_policy_token = snapshot.token
+        await self._set_rollout_token(snapshot.token)
+        self._append_event(
+            {
+                "event": "rl_policy_snapshot",
+                "rl/rollout_id": snapshot.rollout_id,
+                "rl/policy_token": snapshot.token,
+                "rl/policy_hash": snapshot.policy_hash,
+                "rl/fragment_versions": list(snapshot.fragment_versions),
+                "rl/canonical_layout_hash": self.current.layout_hash,
+                "rl/sync_layout_fingerprint": (
+                    self.args.yeto_rl_sync_layout_fingerprint
+                ),
+                "rl/mixed_version_group_count": 0,
+            }
+        )
+
+    def _record_local_round(
+        self,
+        stats: LocalRoundStats,
+        *,
+        rollout_id: int,
+        batch: BroadcastBatch | None = None,
+        submissions: tuple[FragmentSubmission, ...] = (),
+        additional_payload_bytes_received: int = 0,
+    ) -> None:
+        self._append_event(
+            {
+                "event": "rl_local_round",
+                **asdict(stats),
+                "rl/rollout_id": rollout_id,
+                "rl/policy_hash": self.snapshot.policy_hash,
+                "rl/fragment_versions": list(self.snapshot.fragment_versions),
+                "rl/active_groups": stats.active_groups,
+                "rl/completed_groups": stats.completed_groups,
+                "rl/cancelled_groups": stats.cancelled_groups,
+                "rl/completed_trajectories": stats.completed_trajectories,
+                "rl/action_tokens": stats.action_tokens,
+                "rl/tool_wait_seconds": stats.tool_wait_seconds,
+                "rl/reward_mean": stats.reward_mean,
+                "rl/reward_std": stats.reward_std,
+                "rl/rollout_seconds": stats.rollout_seconds,
+                "rl/group_p50_seconds": stats.group_p50_seconds,
+                "rl/group_p95_seconds": stats.group_p95_seconds,
+                "rl/group_p99_seconds": stats.group_p99_seconds,
+                "rl/zero_variance_group_ratio": stats.zero_variance_group_ratio,
+                "rl/mixed_version_group_count": 0,
+                "rl/local_delta_norm": stats.delta_l2_norm,
+                "rl/current_vs_rollout_kl": stats.mean_kl,
+                "rl/ess_ratio": stats.ess_ratio,
+                "rl/clip_fraction": stats.clip_fraction,
+                "sync/applied_fragments": list(
+                    () if batch is None else batch.fragment_ids
+                ),
+                "sync/fragment_payload_bytes_received": additional_payload_bytes_received
+                + (0 if batch is None else batch.bytes_received),
+                "sync/submitted_fragments": [
+                    submission.fragment_id for submission in submissions
+                ],
+                "sync/fragment_payload_bytes_sent": sum(
+                    submission.payload_bytes for submission in submissions
+                ),
+            }
+        )
+        for broadcast in () if batch is None else batch.broadcasts:
+            self._append_event(
+                {
+                    "event": "rl_fragment_bcast",
+                    "fragment_id": broadcast.fragment_id,
+                    "version": broadcast.version,
+                    "payload_bytes": broadcast.payload_bytes,
+                    "queue_seconds": broadcast.queue_seconds,
+                }
+            )
+        for submission in submissions:
+            self._append_event(
+                {
+                    "event": "rl_fragment_push",
+                    **asdict(submission),
+                    "realized_h": submission.c_steps,
+                }
+            )
+
+    async def _initialize(self, *, actor_model, rollout_manager) -> None:
+        from .decoupled import DecoupledRlBridge
+
+        self.actor_model = actor_model
+        self.rollout_manager = rollout_manager
+        initial = self._canonical_state(await actor_model.export_trainable_state())
+        checkpoint_error = None
+        try:
+            checkpoint = _load_decoupled_checkpoint(self.args)
+        except RuntimeError as error:
+            checkpoint = None
+            checkpoint_error = error
+        if checkpoint is not None:
+            self.optimizer_steps = checkpoint["optimizer_steps"]
+            self.action_tokens = checkpoint["action_tokens"]
+
+        self.bridge = DecoupledRlBridge(
+            initial,
+            self.args.yeto_rl_bridge_config,
+        )
+        self.bridge.start()
+        cut = self.bridge.wait_for_initial_cut(
+            optimizer_steps=self.optimizer_steps,
+            action_tokens=self.action_tokens,
+        )
+        versions = cut.fragment_versions
+        if any(versions) and checkpoint is None:
+            detail = "missing" if checkpoint_error is None else str(checkpoint_error)
+            raise RuntimeError(
+                f"nonzero decoupled RL cut has no valid island checkpoint: {detail}"
+            )
+        if checkpoint is not None and any(
+            current < saved
+            for current, saved in zip(
+                versions,
+                checkpoint["fragment_versions"],
+            )
+        ):
+            raise RuntimeError("decoupled RL syncer cut predates island checkpoint")
+
+        self.current = canonical_state(
+            self.optimizer_steps,
+            cut.state.tensors,
+            base_model_revision=cut.state.base_model_revision,
+            lora_config_hash=cut.state.lora_config_hash,
+            layout_hash=cut.state.layout_hash,
+            expected_specs=cut.state.specs,
+        )
+        self.current = await self._apply_decoupled_policy(
+            self.current,
+            reset_optimizer=True,
+        )
+        self.bridge.commit_initial_cut(
+            cut,
+            optimizer_steps=self.optimizer_steps,
+            action_tokens=self.action_tokens,
+        )
+        self.snapshot = PolicySnapshot.create(
+            self.optimizer_steps,
+            self.current,
+            versions,
+        )
+        self._save_progress(self.snapshot, stats=None)
+        startup_manifest = getattr(self.bridge, "startup_final_manifest", None)
+        if startup_manifest is not None:
+            self.bridge.acknowledge_finalization(startup_manifest)
+        await self._publish_snapshot(self.snapshot)
+        self.args.start_rollout_id = self.snapshot.rollout_id
+        if startup_manifest is not None:
+            self._record_final_payload(self.bridge.final_payload_bytes_received)
+            self.finished = True
+            self.args.external_policy_sync_run_until_stop = False
+            self.args.num_rollout = self.args.start_rollout_id
+
+    async def _finish(
+        self,
+        *,
+        policy_version: int,
+        stats: LocalRoundStats,
+    ) -> bool:
+        manifest, final = self.bridge.wait_for_final_cut(
+            policy_version=policy_version,
+        )
+        return await self._commit_final_cut(
+            manifest,
+            final,
+            stats=stats,
+            final_payload_bytes_received=self.bridge.final_payload_bytes_received,
+        )
+
+    async def _commit_final_cut(
+        self,
+        manifest,
+        final: CanonicalLoraState,
+        *,
+        stats: LocalRoundStats,
+        final_payload_bytes_received: int = 0,
+    ) -> bool:
+        self.current = await self._apply_decoupled_policy(
+            final,
+            reset_optimizer=False,
+        )
+        self.snapshot = PolicySnapshot.create(
+            final.policy_version,
+            self.current,
+            manifest.versions,
+        )
+        self._save_progress(self.snapshot, stats=stats)
+        self.bridge.acknowledge_finalization(manifest)
+        await self._publish_snapshot(self.snapshot)
+        if final_payload_bytes_received:
+            self._record_final_payload(final_payload_bytes_received)
+        self.finished = True
+        return True
+
+    def _record_final_payload(self, payload_bytes_received: int) -> None:
+        self._append_event(
+            {
+                "event": "rl_final_cut",
+                "sync/fragment_payload_bytes_received": payload_bytes_received,
+            }
+        )
+
+    async def _after_local_train(
+        self,
+        *,
+        rollout_id,
+        actor_model,
+        rollout_data,
+    ) -> bool:
+        if (
+            actor_model is not self.actor_model
+            or self.current is None
+            or self.snapshot is None
+            or rollout_id != self.snapshot.rollout_id
+            or self.args.yeto_rl_policy_token != self.snapshot.token
+        ):
+            raise RuntimeError(
+                "Miles called decoupled synchronization outside its policy snapshot"
+            )
+        next_rollout_id = rollout_id + 1
+        exported = await actor_model.export_trainable_state()
+        local = self._canonical_at_progress(exported, next_rollout_id)
+        stats = self._round_stats(rollout_id, rollout_data, exported)
+        self.optimizer_steps += 1
+        self.action_tokens += stats.action_tokens
+        if self.optimizer_steps != next_rollout_id:
+            raise RuntimeError("decoupled RL optimizer progress diverged from rollout ID")
+        if self.bridge.finalizing:
+            self._record_local_round(stats, rollout_id=rollout_id)
+            return await self._finish(
+                policy_version=next_rollout_id,
+                stats=stats,
+            )
+        if (
+            getattr(self.args, "yeto_rl_learner_budget_steps", None)
+            == self.optimizer_steps
+        ):
+            consolidation: BudgetConsolidation = self.bridge.consolidate_budget(
+                local,
+                optimizer_steps=self.optimizer_steps,
+                action_tokens=self.action_tokens,
+            )
+            stats = replace(
+                stats,
+                delta_l2_norm=math.sqrt(
+                    sum(
+                        submission.delta_l2_norm**2
+                        for submission in consolidation.submissions
+                    )
+                ),
+            )
+            self._record_local_round(
+                stats,
+                rollout_id=rollout_id,
+                submissions=consolidation.submissions,
+                additional_payload_bytes_received=consolidation.bytes_received,
+            )
+            return await self._commit_final_cut(
+                consolidation.manifest,
+                consolidation.state,
+                stats=stats,
+            )
+
+        batch = self.bridge.drain_broadcasts(
+            local,
+            optimizer_steps=self.optimizer_steps,
+            action_tokens=self.action_tokens,
+        )
+        current = batch.state
+        if batch.fragment_ids:
+            current = await self._apply_decoupled_policy(
+                current,
+                reset_optimizer=False,
+            )
+            self.bridge.commit_broadcasts(
+                batch,
+                optimizer_steps=self.optimizer_steps,
+                action_tokens=self.action_tokens,
+            )
+        submissions = self.bridge.submit_ready(
+            current,
+            optimizer_steps=self.optimizer_steps,
+            action_tokens=self.action_tokens,
+        )
+        stats = replace(
+            stats,
+            delta_l2_norm=math.sqrt(
+                sum(submission.delta_l2_norm**2 for submission in submissions)
+            ),
+        )
+        self._record_local_round(
+            stats,
+            rollout_id=rollout_id,
+            batch=batch,
+            submissions=submissions,
+        )
+        if self.bridge.finalizing:
+            return await self._finish(
+                policy_version=next_rollout_id,
+                stats=stats,
+            )
+
+        self.current = current
+        self.snapshot = PolicySnapshot.create(
+            next_rollout_id,
+            current,
+            self.bridge.fragment_versions,
+        )
+        self._save_progress(self.snapshot, stats=stats)
+        await self._publish_snapshot(self.snapshot)
+        return False
+
+    async def after_local_train(
+        self,
+        *,
+        rollout_id,
+        actor_model,
+        rollout_data,
+    ) -> bool:
+        hook_started = time.monotonic()
+        try:
+            should_stop = await self._after_local_train(
+                rollout_id=rollout_id,
+                actor_model=actor_model,
+                rollout_data=rollout_data,
+            )
+        except StrictRlInvariantError as error:
+            self._record_strict_failure(error)
+            raise
+        self._append_event(
+            {
+                "event": "rl_sync_hook",
+                "rl/rollout_id": rollout_id,
+                "sync/hook_seconds": time.monotonic() - hook_started,
+                "sync/remote_quorum_wait_seconds": 0.0,
+                "sync/finalization": should_stop,
+            }
+        )
+        return should_stop
+
+    async def finalize(self) -> None:
+        if not self.finished:
+            raise RuntimeError("Miles stopped before decoupled RL finalization")
+        self.bridge.close()
+
+
 def create_policy_sync(args) -> MilesPolicySync:
+    if getattr(args, "yeto_rl_sync_preset", "strict-avg") == "decoupled":
+        return DecoupledMilesPolicySync(args)
     return MilesPolicySync(args)

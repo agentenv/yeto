@@ -230,6 +230,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
     controller mode) and the head-node subprocess (head controller mode).
     --resume makes any restart pick up from the on-disk checkpoint."""
     if getattr(args, "training_mode", "sft") == "rl":
+        total_steps = getattr(args, "rl_total_fragment_steps", args.total_steps)
         return (
             "mkdir -p ~/yeto-output && "
             f"{binary}"
@@ -242,7 +243,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
             f" --pipeline {args.pipeline}"
             f" --sync-interval-steps {args.sync_interval_steps}"
             f" --delta-correction {args.delta_correction}"
-            f" --total-steps {args.total_steps}"
+            f" --total-steps {total_steps}"
             f" --outer-lr {args.outer_lr}"
             f" --outer-momentum {args.outer_momentum}"
             " --max-base-lag 0 --learner-weight equal"
@@ -571,8 +572,11 @@ def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
         raise ValueError("RL v0 requires --rollout-max-response-len > 0")
     if args.cybergym_timeout <= 0:
         raise ValueError("RL v0 requires a positive CyberGym timeout")
-    if args.local_rl_rounds_per_sync != 1:
-        raise ValueError("RL v0 requires --local-rl-rounds-per-sync 1")
+    if args.rl_sync_preset == "strict-avg":
+        if args.local_rl_rounds_per_sync != 1:
+            raise ValueError("RL v0 requires --local-rl-rounds-per-sync 1")
+    elif args.local_rl_rounds_per_sync < 2:
+        raise ValueError("decoupled RL requires at least 2 local RL rounds per sync")
     if args.seq_len < 2:
         raise ValueError("RL v0 requires --seq-len >= 2")
     args.seq_len = max(args.seq_len, args.rollout_max_response_len)
@@ -631,7 +635,26 @@ def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
         )
     if getattr(args, "learner_image", None) is not None:
         raise ValueError("RL uses digest-pinned --rl-image, not --learner-image")
-    if not args.experimental_rl_sync:
+    args.rl_total_fragment_steps = args.total_steps
+    if args.rl_sync_preset == "decoupled":
+        if args.experimental_rl_sync:
+            raise ValueError("decoupled RL does not accept --experimental-rl-sync")
+        if args.fragments < 2:
+            raise ValueError("decoupled RL requires at least 2 fragments")
+        if not 1 <= args.pipeline <= args.fragments:
+            raise ValueError("decoupled RL pipeline must be between 1 and fragments")
+        if args.fragment_pattern != "binpack":
+            raise ValueError("decoupled RL requires --fragment-pattern binpack")
+        args.quorum = len(specs)
+        args.grace_ms = 0
+        args.sync_interval_steps = float(args.local_rl_rounds_per_sync)
+        args.delta_correction = "none"
+        args.outer_lr = 0.7
+        args.outer_momentum = 0.9
+        args.merge_alpha = 0.0
+        args.wire_dtype = "f32"
+        args.rl_total_fragment_steps = args.total_steps * args.fragments
+    elif not args.experimental_rl_sync:
         args.fragments = 1
         args.quorum = len(specs)
         args.grace_ms = 0
@@ -922,6 +945,11 @@ def make_miles_island_task(
         f" --reward-sha256 {shlex.quote(args.reward_sha256)}"
         f" --source-sha256 {shlex.quote(args.source_sha256)}"
         f" --global-rounds {args.total_steps}"
+        f" --sync-preset {args.rl_sync_preset}"
+        f" --fragments {args.fragments}"
+        f" --pipeline {args.pipeline}"
+        f" --local-horizon {args.local_rl_rounds_per_sync}"
+        f" --total-fragment-steps {args.rl_total_fragment_steps}"
         f" --groups-per-round {args.rollout_batch_size}"
         f" --samples-per-group {args.n_samples_per_prompt}"
         f" --over-sampling-batch-size {args.over_sampling_batch_size}"
