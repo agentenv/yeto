@@ -232,6 +232,45 @@ def test_rl_head_forwards_cybergym_secret_without_serializing_it(
     assert "test-secret" not in json.dumps(runs.load_run("rlh")["args"])
 
 
+def test_rl_head_stages_the_initial_adapter_for_learner_mounts(
+    fake_sky, monkeypatch, tmp_path
+):
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+
+    def prepare(args):
+        args.rl_initial_adapter_sha256 = "a" * 64
+
+    monkeypatch.setattr(launcher, "prepare_launch_args", prepare)
+    args = cli.parse_args(
+        LAUNCH_ARGS
+        + [
+            "--cluster-prefix",
+            "rl-parent",
+            "--training-mode",
+            "rl",
+            "--reward-function",
+            "yeto_miles_cybergym.reward:score",
+            "--rl-sync-preset",
+            "decoupled",
+            "--rl-initial-adapter",
+            str(adapter),
+        ]
+    )
+
+    assert cli.cmd_launch_head(args) == 0
+
+    (_, head_task), = fake_sky["launches"]
+    (_, job_task), = fake_sky["execs"]
+    assert (
+        head_task.file_mounts["~/yeto-rl-initial-adapter-src"]
+        == str(adapter)
+    )
+    assert '"rl_initial_adapter": "~/yeto-rl-initial-adapter-src"' in job_task.run
+    assert '"rl_initial_adapter_sha256": "' + "a" * 64 + '"' in job_task.run
+
+
 def test_launch_head_mounts_aws_credentials_when_present(
     fake_sky, monkeypatch, tmp_path
 ):

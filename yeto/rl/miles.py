@@ -173,7 +173,7 @@ _DECOUPLED_CHECKPOINT_SCHEMA = 3
 
 
 def _island_checkpoint_config(args) -> dict[str, Any]:
-    return {
+    config = {
         "actor_num_gpus_per_node": args.actor_num_gpus_per_node,
         "actor_num_nodes": args.actor_num_nodes,
         "advantage_estimator": args.advantage_estimator,
@@ -197,6 +197,14 @@ def _island_checkpoint_config(args) -> dict[str, Any]:
         "use_session_server": args.use_session_server,
         "tito_model": args.tito_model,
     }
+    initial_adapter_sha256 = getattr(
+        args,
+        "yeto_rl_initial_adapter_sha256",
+        None,
+    )
+    if initial_adapter_sha256 is not None:
+        config["initial_adapter_sha256"] = initial_adapter_sha256
+    return config
 
 
 def _decoupled_checkpoint_config(args) -> dict[str, Any]:
@@ -1127,6 +1135,27 @@ class DecoupledMilesPolicySync(MilesPolicySync):
         self.actor_model = actor_model
         self.rollout_manager = rollout_manager
         initial = self._canonical_state(await actor_model.export_trainable_state())
+        initial_adapter = getattr(self.args, "yeto_rl_initial_adapter", None)
+        initial_adapter_sha256 = getattr(
+            self.args,
+            "yeto_rl_initial_adapter_sha256",
+            None,
+        )
+        if (initial_adapter is None) != (initial_adapter_sha256 is None):
+            raise ValueError(
+                "decoupled RL initial adapter path and SHA256 must be set together"
+            )
+        parent_policy_hash = None
+        if initial_adapter is not None:
+            from .initial_adapter import load_initial_adapter
+
+            initial = load_initial_adapter(
+                initial_adapter,
+                initial_adapter_sha256,
+                model=self.args.yeto_rl_model,
+                expected=initial,
+            )
+            parent_policy_hash = policy_tensor_hash(initial)
         checkpoint_error = None
         try:
             checkpoint = _load_decoupled_checkpoint(self.args)
@@ -1151,6 +1180,22 @@ class DecoupledMilesPolicySync(MilesPolicySync):
             detail = "missing" if checkpoint_error is None else str(checkpoint_error)
             raise RuntimeError(
                 f"nonzero decoupled RL cut has no valid island checkpoint: {detail}"
+            )
+        if (
+            parent_policy_hash is not None
+            and not any(versions)
+            and policy_tensor_hash(cut.state) != parent_policy_hash
+        ):
+            raise RuntimeError(
+                "decoupled RL initial adapter policy differs from version-zero cut"
+            )
+        if parent_policy_hash is not None and checkpoint is None:
+            self._append_event(
+                {
+                    "event": "rl_initial_adapter",
+                    "parent_adapter_sha256": initial_adapter_sha256,
+                    "parent_policy_hash": parent_policy_hash,
+                }
             )
         if checkpoint is not None and any(
             current < saved

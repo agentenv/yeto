@@ -386,6 +386,39 @@ mismatched tensors, and writes standard `adapter_model.safetensors` and
 `yeto_rl_provenance.json` with `P/tau/H/N/T`, outer optimizer settings, final
 fragment versions, both layout hashes, full-policy hash, and checkpoint SHA256.
 
+### Starting a fresh phase
+
+A completed Decoupled adapter can seed policy version zero of another
+Decoupled run:
+
+```bash
+yeto launch \
+  --training-mode rl \
+  --rl-sync-preset decoupled \
+  --rl-initial-adapter ./adapter \
+  --rl-initial-adapter-sha256 <optional-expected-sha256> \
+  ...
+```
+
+`--rl-initial-adapter` accepts only a local directory. The launcher hashes the
+directory before provisioning, rejects a supplied digest that differs, and
+mounts the attested directory read-only at the same path on every island. The
+learner rehashes it before rollout zero and requires a standard causal-LM LoRA
+adapter whose base model, immutable revision, rank, targets, exact tensor
+names and shapes, and finite values match the new run. RS-LoRA, DoRA,
+fan-in/fan-out, and per-module rank or alpha modifiers are rejected. Its
+Decoupled export provenance and recorded full-policy hash must also match the
+loaded tensors.
+
+This starts a new phase rather than extending the terminal phase in place.
+The parent policy tensors are preserved exactly, while the Miles inner
+optimizer and scheduler, Yeto outer optimizer and syncer, rollout IDs,
+fragment versions, and checkpoints all start fresh. Runtime budget changes,
+reopening a finalized syncer, and exact optimizer-state continuation are not
+provided. Normal checkpoint recovery within the new phase remains unchanged.
+Use a new `--cluster-prefix` for each fresh phase; reusing an existing run
+identity keeps the normal in-phase recovery behavior instead.
+
 ## Benchmark
 
 [`scripts/benchmark_rl.py`](../scripts/benchmark_rl.py) runs four local,
@@ -444,7 +477,8 @@ staged BCAST commit, duplicate and invalid protocol messages, multi-fragment
 deltas, optimizer preservation, scheduler and exact-snapshot group recovery,
 unequal fragment cuts, terminal replacement, budget consolidation, f32
 two-island Nesterov oracle behavior, terminal export, standard PEFT reload,
-benchmark fairness, and Miles stop-after-publication ordering.
+fresh-phase adapter validation and initialization, benchmark fairness, and
+Miles stop-after-publication ordering.
 
 Existing strict-avg evidence includes real dense and MoE LoRA GRPO runs,
 multi-island f32 parity, process and retained-disk syncer recovery, session/tool
@@ -467,6 +501,7 @@ The implementation is intentionally confined to the RL boundary:
 | `yeto/rl/miles.py` | rollout-token validation, safe-boundary hook, island checkpoint |
 | `yeto/rl/learner.py` | Miles argument mapping and runtime configuration |
 | `yeto/rl/export.py` | authoritative checkpoint to standard PEFT |
+| `yeto/rl/initial_adapter.py` | validated Decoupled PEFT policy warm start |
 | `scripts/benchmark_rl.py` | equal-work native/strict/decoupled comparison |
 | `agentenv/miles:train.py` | optional run-until-stop and stop-after-publication ordering |
 | `syncer/src/**` | unchanged general fragment scheduler and outer optimizer |
@@ -479,7 +514,9 @@ Preserve these invariants when extending the path:
 4. In-process fragment apply preserves inner optimizer moments and scheduler
    progress.
 5. Only the exact final syncer cut may become the exported adapter.
-6. Rust, SFT, diffusion, local PPO, and generic recovery behavior do not change
+6. A new phase may reuse policy tensors, but never prior optimizer or progress
+   state.
+7. Rust, SFT, diffusion, local PPO, and generic recovery behavior do not change
    without a separately reviewed design.
 
 Focused verification:
@@ -487,7 +524,8 @@ Focused verification:
 ```bash
 python -m pytest -q \
   tests/test_rl_core.py tests/test_rl_decoupled.py \
-  tests/test_rl_export.py tests/test_rl_launcher.py \
+  tests/test_rl_export.py tests/test_rl_initial_adapter.py \
+  tests/test_rl_launcher.py \
   tests/test_rl_integration.py tests/test_rl_benchmark.py
 
 (cd ../miles && python -m pytest -q \

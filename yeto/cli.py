@@ -127,6 +127,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default="strict-avg",
     )
     rl.add_argument(
+        "--rl-initial-adapter",
+        default=None,
+        help="local final PEFT adapter for a fresh Decoupled RL phase",
+    )
+    rl.add_argument(
+        "--rl-initial-adapter-sha256",
+        default=None,
+        help="optional expected SHA256 for --rl-initial-adapter",
+    )
+    rl.add_argument(
         "--rl-policy-version", choices=["strict"], default="strict"
     )
     rl.add_argument(
@@ -1211,6 +1221,11 @@ def cmd_launch_head(args) -> int:
 
     args.data, data_mounts = head_stage(args.data)
     data_mounts.update(head_stage_parent(args))
+    if getattr(args, "rl_initial_adapter", None) is not None:
+        data_mounts[launcher.RL_HEAD_INITIAL_ADAPTER_PATH] = os.path.expanduser(
+            args.rl_initial_adapter
+        )
+        args.rl_initial_adapter = launcher.RL_HEAD_INITIAL_ADAPTER_PATH
     args_dict = _serializable_args(args)
     runs.create_run(name, args_dict)
     learner_names = launcher.learner_cluster_names(name, specs)

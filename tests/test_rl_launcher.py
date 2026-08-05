@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from yeto import launcher
+from yeto.adapter_lifecycle import directory_sha256
 from yeto.cli import parse_args
 from yeto.launcher import (
     FleetController,
@@ -111,6 +112,112 @@ def test_decoupled_rl_preset_fixes_the_fragment_outer_contract():
     ) == (4, 2, 0, 2, 3.0, "none", 0.7, 0.9, 0.0, "f32", "binpack")
     command = syncer_command(args, 2, binary="syncer")
     assert "--total-steps 12" in command
+
+
+def test_decoupled_rl_attests_a_local_initial_adapter(tmp_path):
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+    digest = directory_sha256(adapter)
+    args = _args(
+        (
+            "--rl-sync-preset",
+            "decoupled",
+            "--fragments",
+            "2",
+            "--local-rl-rounds-per-sync",
+            "2",
+            "--rl-initial-adapter",
+            str(adapter),
+            "--rl-initial-adapter-sha256",
+            digest.upper(),
+        )
+    )
+
+    _prepare_rl_args(args)
+
+    assert args.rl_initial_adapter == str(adapter)
+    assert args.rl_initial_adapter_sha256 == digest
+
+
+def test_rl_initial_adapter_rejects_a_supplied_digest_mismatch(tmp_path):
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+    args = _args(
+        (
+            "--rl-sync-preset",
+            "decoupled",
+            "--fragments",
+            "2",
+            "--local-rl-rounds-per-sync",
+            "2",
+            "--rl-initial-adapter",
+            str(adapter),
+            "--rl-initial-adapter-sha256",
+            "0" * 64,
+        )
+    )
+
+    with pytest.raises(ValueError, match="initial adapter SHA256 mismatch"):
+        _prepare_rl_args(args)
+
+
+@pytest.mark.parametrize(
+    "extra,match",
+    [
+        (("--rl-initial-adapter-sha256", "0" * 64), "requires --rl-initial-adapter"),
+        (
+            (
+                "--rl-sync-preset",
+                "decoupled",
+                "--local-rl-rounds-per-sync",
+                "2",
+                "--rl-initial-adapter",
+                "/does/not/exist",
+            ),
+            "local directory",
+        ),
+    ],
+)
+def test_rl_initial_adapter_rejects_incomplete_or_nonlocal_input(extra, match):
+    args = _args(extra)
+
+    with pytest.raises(ValueError, match=match):
+        _prepare_rl_args(args)
+
+
+def test_rl_initial_adapter_is_decoupled_only(tmp_path):
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+    args = _args(("--rl-initial-adapter", str(adapter)))
+
+    with pytest.raises(ValueError, match="only supported with --rl-sync-preset decoupled"):
+        _prepare_rl_args(args)
+
+
+def test_rl_initial_adapter_is_rejected_by_sft(tmp_path):
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+    args = parse_args(
+        [
+            "--gpu",
+            "aws:1xa100",
+            "--model",
+            "org/model",
+            "--data",
+            "org/data",
+            "--rl-sync-preset",
+            "decoupled",
+            "--rl-initial-adapter",
+            str(adapter),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="requires --training-mode rl"):
+        _prepare_rl_args(args)
 
 
 @pytest.mark.parametrize(
@@ -419,6 +526,55 @@ class _StorageMode:
     MOUNT = "mount"
 
 
+def test_miles_tasks_mount_the_same_attested_initial_adapter(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setitem(
+        sys.modules,
+        "sky",
+        types.SimpleNamespace(
+            Task=_Task,
+            Resources=_Resources,
+            Storage=_Storage,
+            StorageMode=_StorageMode,
+        ),
+    )
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+    args = _args(
+        (
+            "--rl-sync-preset",
+            "decoupled",
+            "--fragments",
+            "2",
+            "--local-rl-rounds-per-sync",
+            "2",
+            "--rl-initial-adapter",
+            str(adapter),
+        )
+    )
+    args.model_revision = "a" * 40
+    args.data_revision = "b" * 40
+    args.source_sha256 = "c" * 64
+    args.reward_sha256 = "d" * 64
+    _prepare_rl_args(args)
+    from yeto.gpu_spec import parse_gpu_spec
+
+    tasks = [
+        make_miles_island_task(args, spec, learner_id, 2, "127.0.0.1:29400")
+        for learner_id, spec in enumerate(parse_gpu_spec(args.gpu))
+    ]
+
+    for task in tasks:
+        assert task.file_mounts["~/yeto-rl-initial-adapter"] == str(adapter)
+        assert "chmod -R a-w ~/yeto-rl-initial-adapter" in task.setup
+        assert "--initial-adapter ~/yeto-rl-initial-adapter" in task.run
+        assert (
+            f"--initial-adapter-sha256 {directory_sha256(adapter)}" in task.run
+        )
+
+
 def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch):
     monkeypatch.setenv("CYBERGYM_API_KEY", "test-secret")
     monkeypatch.setitem(
@@ -491,6 +647,7 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert task.envs["CYBERGYM_TIMEOUT"] == "90.0"
     assert task.envs["CYBERGYM_API_KEY"] == "test-secret"
     assert "python3 -m yeto.rl.learner" in task.run
+    assert "--initial-adapter" not in task.run
     assert "--num-learners" not in task.run
     assert "ray start --head" in task.run
     assert 'ray start --address="$MASTER_ADDR:6379"' in task.run
@@ -1069,6 +1226,8 @@ def test_miles_runner_builds_the_decoupled_runtime_contract(monkeypatch, tmp_pat
         optimizer_steps=1,
         wan_streams=0,
         audit_dir=None,
+        initial_adapter="/parent-adapter",
+        initial_adapter_sha256="9" * 64,
     )
 
     rl_learner.run_miles(
@@ -1088,6 +1247,8 @@ def test_miles_runner_builds_the_decoupled_runtime_contract(monkeypatch, tmp_pat
     assert miles_args.yeto_rl_pipeline == 2
     assert miles_args.external_policy_sync_run_until_stop is True
     assert len(miles_args.yeto_rl_sync_layout_fingerprint) == 64
+    assert miles_args.yeto_rl_initial_adapter == "/parent-adapter"
+    assert miles_args.yeto_rl_initial_adapter_sha256 == "9" * 64
 
 
 def test_decoupled_runner_rejects_multiple_optimizer_steps_per_rollout(tmp_path):

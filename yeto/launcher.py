@@ -547,14 +547,44 @@ def _rl_miles_function(value: str | None) -> None:
 
 def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
     if getattr(args, "training_mode", "sft") != "rl":
+        if getattr(args, "rl_initial_adapter", None) is not None or getattr(
+            args, "rl_initial_adapter_sha256", None
+        ) is not None:
+            raise ValueError("--rl-initial-adapter requires --training-mode rl")
         return
 
-    from .adapter_lifecycle import selected_parent
+    from .adapter_lifecycle import directory_sha256, selected_parent
 
     if selected_parent(args)[1] is not None:
         raise ValueError(
             "--resume-from/--branch-from are not supported with --training-mode rl"
         )
+    initial_adapter = getattr(args, "rl_initial_adapter", None)
+    expected_initial_sha256 = getattr(args, "rl_initial_adapter_sha256", None)
+    if initial_adapter is None and expected_initial_sha256 is not None:
+        raise ValueError(
+            "--rl-initial-adapter-sha256 requires --rl-initial-adapter"
+        )
+    if initial_adapter is not None:
+        if args.rl_sync_preset != "decoupled":
+            raise ValueError(
+                "--rl-initial-adapter is only supported with "
+                "--rl-sync-preset decoupled"
+            )
+        root = Path(initial_adapter).expanduser()
+        if not root.is_dir():
+            raise ValueError("--rl-initial-adapter must be a local directory")
+        actual_initial_sha256 = directory_sha256(root)
+        if (
+            expected_initial_sha256 is not None
+            and actual_initial_sha256 != expected_initial_sha256.lower()
+        ):
+            raise ValueError(
+                "RL initial adapter SHA256 mismatch: expected "
+                f"{expected_initial_sha256.lower()}, got {actual_initial_sha256}"
+            )
+        args.rl_initial_adapter = str(root.resolve())
+        args.rl_initial_adapter_sha256 = actual_initial_sha256
 
     from .models import resolve_model_kind
 
@@ -892,6 +922,8 @@ def causal_kernel_setup_steps(args) -> list[str]:
 
 DIFFUSION_SAMPLE_ADAPTER_DIR = "~/yeto-adapter"
 DIFFUSION_SAMPLE_OUTPUT_DIR = "~/yeto-output"
+RL_INITIAL_ADAPTER_PATH = "~/yeto-rl-initial-adapter"
+RL_HEAD_INITIAL_ADAPTER_PATH = "~/yeto-rl-initial-adapter-src"
 
 
 def _rl_checkpoint_mount(value: str) -> str:
@@ -989,6 +1021,12 @@ def make_miles_island_task(
         flags += f" --data-revision {shlex.quote(args.data_revision)}"
     if args.trust_remote_code:
         flags += " --trust-remote-code"
+    if getattr(args, "rl_initial_adapter", None) is not None:
+        flags += (
+            f" --initial-adapter {RL_INITIAL_ADAPTER_PATH}"
+            " --initial-adapter-sha256 "
+            f"{shlex.quote(args.rl_initial_adapter_sha256)}"
+        )
     miles_setup = (
         "set -e\n"
         f"if [ ! -d ~/miles/.git ]; then git clone --no-checkout "
@@ -1012,6 +1050,10 @@ def make_miles_island_task(
             ">/tmp/hf-prefetch.log 2>&1 &) || true"
         )
     file_mounts = dict(learner_file_mounts(args.data))
+    if getattr(args, "rl_initial_adapter", None) is not None:
+        file_mounts[RL_INITIAL_ADAPTER_PATH] = os.path.expanduser(
+            args.rl_initial_adapter
+        )
     local_token = os.path.expanduser(HF_TOKEN_PATH)
     if os.path.isfile(local_token):
         file_mounts[HF_TOKEN_PATH] = local_token
@@ -1030,9 +1072,13 @@ def make_miles_island_task(
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
     if os.environ.get("CYBERGYM_API_KEY"):
         envs["CYBERGYM_API_KEY"] = os.environ["CYBERGYM_API_KEY"]
+    setup_steps = [WAN_TUNING, HF_TOKEN_ENV, miles_setup]
+    if getattr(args, "rl_initial_adapter", None) is not None:
+        setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")
+    setup_steps.append(prefetch)
     task = sky.Task(
         name=f"yeto-rl-island-{learner_id}",
-        setup="\n".join((WAN_TUNING, HF_TOKEN_ENV, miles_setup, prefetch)),
+        setup="\n".join(setup_steps),
         run=(
             f"{HF_TOKEN_ENV}\n"
             "set -e\n"

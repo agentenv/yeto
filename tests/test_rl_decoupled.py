@@ -18,7 +18,12 @@ from yeto.protocol import (
     PullRequest,
 )
 from yeto.rl import miles
-from yeto.rl.core import LocalRoundStats, PolicySnapshot, canonical_state
+from yeto.rl.core import (
+    LocalRoundStats,
+    PolicySnapshot,
+    canonical_state,
+    policy_tensor_hash,
+)
 from yeto.rl.decoupled import (
     BroadcastBatch,
     BudgetConsolidation,
@@ -516,6 +521,7 @@ def test_decoupled_checkpoint_round_trips_progress_without_local_lora(tmp_path):
     assert payload["action_tokens"] == 41
     assert payload["policy_token"] == snapshot.token
     assert payload["fragment_versions"] == [1, 2]
+    assert "initial_adapter_sha256" not in payload["config"]
     assert "tensors" not in payload and "local_lora" not in payload
 
 
@@ -543,6 +549,7 @@ def test_decoupled_rollout_reads_snapshot_token_from_island_checkpoint(tmp_path)
         ("yeto_rl_pipeline", 1),
         ("yeto_rl_local_horizon", 3),
         ("yeto_rl_source_sha256", "0" * 64),
+        ("yeto_rl_initial_adapter_sha256", "9" * 64),
     ],
 )
 def test_decoupled_checkpoint_rejects_immutable_config_drift(tmp_path, name, value):
@@ -615,6 +622,141 @@ def test_decoupled_initialize_rejects_nonzero_cut_without_island_progress(
     hook = DecoupledMilesPolicySync(args)
 
     with pytest.raises(RuntimeError, match="no valid island checkpoint"):
+        asyncio.run(hook._initialize(actor_model=Actor(), rollout_manager=object()))
+
+
+def test_decoupled_initialize_seeds_a_fresh_phase_from_final_adapter(
+    tmp_path, monkeypatch
+):
+    args = _checkpoint_args(tmp_path)
+    args.yeto_rl_event_tape = str(tmp_path / "events.jsonl")
+    args.yeto_rl_initial_adapter = "/parent-adapter"
+    args.yeto_rl_initial_adapter_sha256 = "9" * 64
+    fresh = _state(0)
+    parent = _state(0, 4.0)
+    calls = []
+
+    def load(path, digest, *, model, expected):
+        calls.append((path, digest, model, policy_tensor_hash(expected)))
+        assert policy_tensor_hash(expected) == policy_tensor_hash(fresh)
+        return parent
+
+    class Actor:
+        async def export_trainable_state(self):
+            return SimpleNamespace(
+                policy_version=0,
+                layout_hash=fresh.layout_hash,
+                tensors=fresh.tensors,
+            )
+
+    class Bridge:
+        fragment_versions = (0, 0)
+        startup_final_manifest = None
+
+        def __init__(self, initial, _config):
+            assert policy_tensor_hash(initial) == policy_tensor_hash(parent)
+
+        def start(self):
+            pass
+
+        def wait_for_initial_cut(self, **progress):
+            assert progress == {"optimizer_steps": 0, "action_tokens": 0}
+            return InitialCut(parent, self.fragment_versions)
+
+        def commit_initial_cut(self, cut, **progress):
+            assert policy_tensor_hash(cut.state) == policy_tensor_hash(parent)
+            assert progress == {"optimizer_steps": 0, "action_tokens": 0}
+
+    monkeypatch.setattr("yeto.rl.initial_adapter.load_initial_adapter", load)
+    monkeypatch.setattr("yeto.rl.decoupled.DecoupledRlBridge", Bridge)
+    hook = DecoupledMilesPolicySync(args)
+
+    async def apply(state, *, reset_optimizer):
+        assert reset_optimizer is True
+        return state
+
+    async def publish(snapshot):
+        args.yeto_rl_policy_token = snapshot.token
+
+    hook._apply_decoupled_policy = apply
+    hook._publish_snapshot = publish
+    asyncio.run(hook._initialize(actor_model=Actor(), rollout_manager=object()))
+
+    assert calls == [
+        (
+            "/parent-adapter",
+            "9" * 64,
+            "org/model",
+            policy_tensor_hash(fresh),
+        )
+    ]
+    recovered = DecoupledMilesPolicySync(args)
+    recovered._apply_decoupled_policy = apply
+    recovered._publish_snapshot = publish
+    asyncio.run(recovered._initialize(actor_model=Actor(), rollout_manager=object()))
+
+    payload = miles._load_decoupled_checkpoint(args)
+    assert payload["config"]["initial_adapter_sha256"] == "9" * 64
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "events.jsonl").read_text().splitlines()
+    ]
+    initial_events = [event for event in events if event["event"] == "rl_initial_adapter"]
+    assert len(initial_events) == 1
+    initial_event = initial_events[0]
+    assert initial_event["parent_adapter_sha256"] == "9" * 64
+    assert initial_event["parent_policy_hash"] == policy_tensor_hash(parent)
+
+
+@pytest.mark.parametrize("with_checkpoint", [False, True])
+def test_decoupled_initialize_rejects_a_different_parent_version_zero_cut(
+    tmp_path, monkeypatch, with_checkpoint
+):
+    args = _checkpoint_args(tmp_path)
+    args.yeto_rl_event_tape = str(tmp_path / "events.jsonl")
+    args.yeto_rl_initial_adapter = "/parent-adapter"
+    args.yeto_rl_initial_adapter_sha256 = "9" * 64
+    fresh = _state(0)
+    parent = _state(0, 4.0)
+    if with_checkpoint:
+        miles._save_decoupled_checkpoint(
+            args,
+            snapshot=PolicySnapshot.create(0, parent, (0, 0)),
+            optimizer_steps=0,
+            action_tokens=0,
+            rollout_metrics={},
+            local_round_stats=None,
+            completed_groups=[],
+        )
+
+    class Actor:
+        async def export_trainable_state(self):
+            return SimpleNamespace(
+                policy_version=0,
+                layout_hash=fresh.layout_hash,
+                tensors=fresh.tensors,
+            )
+
+    class Bridge:
+        fragment_versions = (0, 0)
+
+        def __init__(self, *_args):
+            pass
+
+        def start(self):
+            pass
+
+        def wait_for_initial_cut(self, **_progress):
+            return InitialCut(_state(0, 5.0), self.fragment_versions)
+
+    monkeypatch.setattr(
+        "yeto.rl.initial_adapter.load_initial_adapter",
+        lambda *_args, **_kwargs: parent,
+    )
+    monkeypatch.setattr("yeto.rl.decoupled.DecoupledRlBridge", Bridge)
+    hook = DecoupledMilesPolicySync(args)
+
+    with pytest.raises(RuntimeError, match="initial adapter policy"):
         asyncio.run(hook._initialize(actor_model=Actor(), rollout_manager=object()))
 
 

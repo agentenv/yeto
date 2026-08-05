@@ -38,6 +38,8 @@ def parse_args(argv=None):
     parser.add_argument("--pipeline", type=int, default=1)
     parser.add_argument("--local-horizon", type=int, default=1)
     parser.add_argument("--total-fragment-steps", type=int, default=None)
+    parser.add_argument("--initial-adapter", default=None)
+    parser.add_argument("--initial-adapter-sha256", default=None)
     parser.add_argument("--groups-per-round", type=int, required=True)
     parser.add_argument("--samples-per-group", type=int, required=True)
     parser.add_argument("--over-sampling-batch-size", type=int, required=True)
@@ -535,6 +537,12 @@ def run_miles(
         miles_args.external_policy_sync_run_until_stop = sync_preset == "decoupled"
         if sync_preset == "decoupled":
             miles_args.yeto_rl_source_sha256 = args.source_sha256
+            miles_args.yeto_rl_initial_adapter = getattr(
+                args, "initial_adapter", None
+            )
+            miles_args.yeto_rl_initial_adapter_sha256 = getattr(
+                args, "initial_adapter_sha256", None
+            )
             total_fragment_steps = args.total_fragment_steps
             if total_fragment_steps != args.global_rounds * args.fragments:
                 raise ValueError(
