@@ -29,7 +29,7 @@ from yeto.rl.core import (
     tensors_from_flat,
 )
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
-from yeto.rl.miles import MilesPolicySync
+from yeto.rl.miles import MilesPolicySync, _ensure_actor_awake_for_export
 from yeto.rl.filters import bounded_nonzero_reward_std
 
 
@@ -729,6 +729,23 @@ def test_bounded_variance_filter_forces_progress_after_replacement_budget():
         True,
     )
     assert args._yeto_bounded_filter_state["forced"] == 1
+
+
+def test_offload_train_wakes_actor_before_adapter_export():
+    calls = []
+
+    class Actor:
+        async def wake_up(self):
+            calls.append("wake")
+
+    asyncio.run(
+        _ensure_actor_awake_for_export(
+            SimpleNamespace(offload_train=True),
+            Actor(),
+        )
+    )
+
+    assert calls == ["wake"]
 
 
 def test_miles_policy_hook_uses_public_trainable_state_api(tmp_path, monkeypatch):

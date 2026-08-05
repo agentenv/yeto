@@ -329,9 +329,10 @@ accepted, dropped, replacement, and drop-reason metrics in the round evidence,
 so the extra rollout work is visible in the benchmark report.
 
 `--rl-offload-train` rebuilds the colocated training/rollout process groups
-before publishing updated weights; this is the safer setting for a large model
-when the first post-training `update_weights` call has timed out. The timeout
-is a fail-fast bound for the distributed barrier, not a quality setting.
+before adapter export and weight publication; this is the safer setting for a
+large model when the first post-training `update_weights` call has timed out.
+The timeout is a fail-fast bound for the distributed barrier, not a quality
+setting.
 
 `--trust-remote-code` is required by the pinned Miles model-loading path. Keep
 model and dataset revisions immutable and enable it only for trusted sources.

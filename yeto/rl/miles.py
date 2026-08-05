@@ -289,6 +289,25 @@ def _dynamic_sampling_keep(args, group: object) -> tuple[bool, str | None]:
     return keep, None if reason is None else str(reason)
 
 
+async def _ensure_actor_awake_for_export(args, actor_model) -> None:
+    """Rebuild Miles process groups before Yeto exports an offloaded actor.
+
+    Miles' colocated ``--offload-train`` mode sleeps the actor at construction
+    time and destroys its process groups.  Adapter export uses Megatron
+    collectives, so the initial Yeto export must explicitly wake the actor
+    first.  Later train hooks already run after Miles wakes the actor.
+    """
+
+    if not getattr(args, "offload_train", False):
+        return
+    wake_up = getattr(actor_model, "wake_up", None)
+    if not callable(wake_up):
+        raise RuntimeError(
+            "Miles offload_train actor does not expose wake_up before adapter export"
+        )
+    await wake_up()
+
+
 def queue_completed_groups(args, all_samples, data_source) -> None:
     """Retain complete oversampling results until this round selects its batch."""
 
@@ -975,6 +994,7 @@ class MilesPolicySync:
 
         self.actor_model = actor_model
         self.rollout_manager = rollout_manager
+        await _ensure_actor_awake_for_export(self.args, actor_model)
         initial = self._canonical_state(await actor_model.export_trainable_state())
         runtime = _BridgeRuntime(initial, self.args)
         self.bridge = StrictRlBridge(runtime, self.args.yeto_rl_bridge_config)
@@ -1224,6 +1244,7 @@ class DecoupledMilesPolicySync(MilesPolicySync):
 
         self.actor_model = actor_model
         self.rollout_manager = rollout_manager
+        await _ensure_actor_awake_for_export(self.args, actor_model)
         initial = self._canonical_state(await actor_model.export_trainable_state())
         initial_adapter = getattr(self.args, "yeto_rl_initial_adapter", None)
         initial_adapter_sha256 = getattr(
