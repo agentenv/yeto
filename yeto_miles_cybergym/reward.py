@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import os
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -23,6 +24,9 @@ DEFAULT_SERVER_URL = "http://127.0.0.1:8666"
 DEFAULT_AGENT_ID = "yeto_agent"
 DEFAULT_SALT = "CyberGym"
 DEFAULT_TIMEOUT = 60.0
+
+_SUBMISSION_LOCKS: dict[tuple[str, str, str, bytes], threading.Lock] = {}
+_SUBMISSION_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,23 @@ def _response_bytes(sample: Any) -> bytes:
     return str(response).encode("utf-8")
 
 
+def _submission_lock(
+    config: CyberGymConfig, task_id: str, poc_bytes: bytes
+) -> threading.Lock:
+    key = (
+        config.server_url,
+        config.agent_id,
+        task_id,
+        hashlib.sha256(poc_bytes).digest(),
+    )
+    with _SUBMISSION_LOCKS_GUARD:
+        lock = _SUBMISSION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _SUBMISSION_LOCKS[key] = lock
+        return lock
+
+
 def _submit_one(sample: Any, config: CyberGymConfig) -> float:
     metadata = _metadata(sample)
     task_id = metadata.get("task_id")
@@ -105,18 +126,20 @@ def _submit_one(sample: Any, config: CyberGymConfig) -> float:
         "checksum": compute_checksum(task_id, config.agent_id, config.salt),
         "require_flag": bool(metadata.get("require_flag", False)),
     }
+    poc_bytes = _response_bytes(sample)
     files = {
         "metadata": (None, json.dumps(submission_metadata), "application/json"),
-        "file": ("poc", _response_bytes(sample), "application/octet-stream"),
+        "file": ("poc", poc_bytes, "application/octet-stream"),
     }
     headers = {"X-API-Key": config.api_key} if config.api_key else {}
     try:
-        response = requests.post(
-            f"{config.server_url}/submit-vul",
-            files=files,
-            headers=headers,
-            timeout=config.timeout,
-        )
+        with _submission_lock(config, task_id, poc_bytes):
+            response = requests.post(
+                f"{config.server_url}/submit-vul",
+                files=files,
+                headers=headers,
+                timeout=config.timeout,
+            )
     except requests.exceptions.RequestException as exc:
         raise RuntimeError(f"CyberGym submission failed: {exc}") from exc
 

@@ -3,6 +3,8 @@
 import asyncio
 import hashlib
 import json
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -72,6 +74,34 @@ def test_score_supports_miles_batch_and_does_not_hide_http_errors(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="HTTP 500.*No such image"):
         asyncio.run(reward.score(None, samples[0]))
+
+
+def test_score_serializes_identical_concurrent_submissions(monkeypatch):
+    active = 0
+    peak_active = 0
+    state_lock = threading.Lock()
+
+    def post(*args, **kwargs):
+        nonlocal active, peak_active
+        with state_lock:
+            active += 1
+            peak_active = max(peak_active, active)
+        time.sleep(0.05)
+        with state_lock:
+            active -= 1
+        return Response()
+
+    monkeypatch.setattr(reward.requests, "post", post)
+    samples = [
+        SimpleNamespace(response="same", metadata={"task_id": "arvo:1"}),
+        SimpleNamespace(response="same", metadata={"task_id": "arvo:1"}),
+    ]
+
+    async def score_both():
+        return await asyncio.gather(*(reward.score(None, sample) for sample in samples))
+
+    assert asyncio.run(score_both()) == [1.0, 1.0]
+    assert peak_active == 1
 
 
 def test_prompt_rows_are_chat_template_ready_and_keep_task_metadata():
