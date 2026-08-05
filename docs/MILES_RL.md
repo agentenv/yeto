@@ -1,635 +1,495 @@
-# Miles RL v0
+# Miles RL
 
-Miles RL runs reinforcement learning in several independent
-[Miles](https://github.com/agentenv/miles) islands and uses Yeto to turn their
-complete local LoRA updates into one committed global policy. Miles owns the
-rollout and GRPO loop inside each island; Yeto owns fleet lifecycle, the
-cross-island synchronization boundary, recovery, and the final adapter.
+Miles RL runs causal-language-model reinforcement learning inside independent
+[Miles](https://github.com/agentenv/miles) islands and uses Yeto to synchronize
+their complete LoRA policies. Miles owns SGLang rollout, reward evaluation,
+GRPO, and Megatron local training. Yeto owns the cross-island LoRA boundary,
+the authoritative global checkpoint, recovery identity, finalization, and PEFT
+export.
 
-This mode is not Decoupled DiLoCo. It is synchronous, fixed-roster LoRA
-FedAvg: every global round waits for one exact-base result from every logical
-island and averages them equally.
+Two explicit synchronization presets are available:
 
-> **Status:** the core path and the pinned Miles synchronization branch are
-> implemented. The current pin completed a real equal-hardware Qwen3.6-27B
-> benchmark across native Miles, one Yeto island, and two Yeto islands on eight
-> H200 GPUs. A separate four-A100 campaign covers multi-GPU dense, MoE EP,
-> recovery, export, parity, session/tool, and 20-merge behavior; see
-> [Validation status](#validation-status).
+| preset | role | global synchronization |
+| --- | --- | --- |
+| `strict-avg` | default correctness baseline | one complete LoRA fragment; every island waits for full-roster equal-weight FedAvg after every local round |
+| `decoupled` | Decoupled DiLoCo RL | deterministic multi-fragment LoRA; local RL continues while exact-base fragment rounds are in flight |
 
-## Why Miles is the RL runtime
+Selecting `decoupled` is intentional. The launcher never infers it from the
+model, island count, or generic DiLoCo flags.
 
-An RL learner needs much more than a different loss function. It must keep a
-rollout server and trainer coherent while it generates grouped trajectories,
-scores responses, computes advantages, and updates the policy. Miles owns
-those contracts around colocated SGLang and Megatron-Core. Yeto forwards
-Miles' custom-generate and session-server entry points rather than implementing
-a second agent or environment runtime.
+> **Status:** `strict-avg` has real-model GPU and recovery evidence. The
+> `decoupled` source implementation and automated protocol/oracle coverage are
+> present in this working tree. Release use additionally requires the reviewed
+> Miles stop-signal change to be committed, `MILES_COMMIT` to be advanced to
+> that clean commit, and the real GPU matrix in the design to pass. The runtime
+> verifier deliberately rejects a dirty or mismatched Miles checkout.
 
-Yeto therefore does not reproduce rollout, reward, or GRPO machinery in its
-ordinary causal-LM learner. It adds one boundary around a pinned Miles local
-round:
+## Supported Boundary
 
-```text
-                         committed global LoRA
-                                  │
-                    ┌─────────────┴─────────────┐
-                    ▼                           ▼
-             Miles island 0              Miles island 1       … M islands
-             SGLang rollout               SGLang rollout
-             reward + GRPO                reward + GRPO
-             Megatron step                Megatron step
-                    │ complete local LoRA         │
-                    └─────────────┬───────────────┘
-                                  ▼
-                         Yeto Rust syncer
-                    fixed roster · f32 mean
-                    checkpoint before broadcast
-```
-
-This division keeps Miles responsible for policy optimization and Yeto
-responsible for distributed policy agreement.
-
-## Supported contract
-
-v0 deliberately supports one narrow model-parallel contract while allowing a
-Miles island to use its full multi-node GPU allocation:
+The supported model and runtime contract is deliberately narrow:
 
 | dimension | supported value |
 | --- | --- |
 | model | causal language model |
-| tuning | LoRA |
-| local trainer | pinned Miles with Megatron-Core |
+| tuning | LoRA only |
+| learner | pinned Miles with Megatron-Core |
 | rollout | colocated SGLang |
-| island size | one or more nodes, one or more GPUs per node |
-| parallelism | TP = PP = CP = 1; dense models use EP = 1; MoE EP is 1 or a divisor of the island world size; Miles supplies the DP layout |
-| global state | one complete LoRA fragment |
-| wire and merge math | f32, equal-weight AVG |
+| optimization | GRPO; one optimizer step per rollout/train cycle |
+| island size | one or more nodes and one or more GPUs per node |
+| parallelism | TP = PP = CP = 1; dense EP = 1; MoE EP may divide the island world size when LoRA tensors remain replicated |
 | membership | fixed logical island IDs `0..M-1`, `M >= 1` |
+| wire format | f32 |
+| global weighting | complete roster, equal learner weight |
 
-Model support is determined by the runtime tensor contract, not a Yeto model
-family list. A model is usable when the pinned Miles/Megatron-Bridge stack can
-load it, create LoRA, convert every trainable adapter tensor to standard PEFT
-names and shapes, and apply the converted values without changing them.
-Incompatibility fails during initialization instead of selecting a
-model-specific fallback.
+Model support follows the tensor contract rather than a Yeto model-name list.
+The pinned Miles/Megatron-Bridge/PEFT stack must be able to load the model,
+create canonical LoRA, map every trainable adapter tensor to standard PEFT
+names and shapes, and apply those tensors on every trainer rank. Unsupported
+models fail during initialization instead of selecting a model-specific
+fallback.
 
-Every canonical policy carries the immutable base-model revision, a hash of
-the effective LoRA configuration, the semantic tensor-layout hash, and its
-policy version. Tensor specs include name, shape, fp32 dtype, and numel. The
-runtime checks the complete identity between base, local, applied, and
-broadcast states. The syncer checkpoint persists the layout hash, but not the
-base revision or LoRA-config hash; export reconstructs those values from its
-required explicit arguments and rejects a layout mismatch.
-With EP>1, v0 therefore permits only replicated adapter targets (the normal
-MoE `auto`/`attention` path), not LoRA on sharded expert weights.
-The replicated path disables Megatron's distributed optimizer so every
-trainer rank retains the complete fp32 LoRA masters and optimizer state needed
-by the export/apply contract.
-When `--expert-parallel` is omitted, dense models use EP=1 and MoE models use
-the full island world size. An explicit MoE EP value must divide that world
-size.
+The following remain outside this boundary:
 
-The RL path consumes `--lora-r` and `--lora-targets`. Its effective PEFT
-configuration fixes alpha to the rank, dropout to zero, and bias to `none`;
-the public RL launcher does not expose a separate alpha setting.
+- full-parameter, actor/critic, or diffusion RL;
+- TP>1 or PP>1 LoRA gather/scatter;
+- expert-sharded LoRA tensors;
+- trajectory migration across policy snapshots;
+- same-fragment stale updates, dynamic quorum, or learner weighting;
+- RDA, IsoLoCo, HeLoCo, delta correction, or broadcast blending;
+- optimizer-moment federation;
+- Miles' experimental fault-tolerant actor path;
+- a new dashboard, controller, storage system, or generic recovery framework.
 
-Not supported in v0:
+Local PPO and CyberGym-specific features are separate from this integration.
+Miles custom generation and reward callables can still use existing tool or
+environment runtimes without Yeto defining another trajectory format.
 
-- diffusion RL or full-parameter RL;
-- stale, asynchronous, or partial-quorum global updates;
-- multi-fragment synchronization, server momentum, RDA, HeLoCo, or blending;
-- TP>1, PP>1, CP>1, or expert-sharded LoRA adapters;
-- cross-island optimizer-state merging;
-- Miles' experimental fault-tolerant trainer path;
-- recovery of an unfinished trajectory or an unmerged local LoRA;
-- RL-specific manifests, attestations, terminal markers, or wire messages.
+## Runtime Ownership
 
-The ordinary Yeto SFT and diffusion modes remain separate. Passing
-`--training-mode rl` with a diffusion model is rejected.
+```text
+                  complete policy snapshot
+                           |
+              +------------+------------+
+              |                         |
+       Miles island 0             Miles island 1       ... M
+       SGLang rollout              SGLang rollout
+       reward + GRPO               reward + GRPO
+       Megatron train              Megatron train
+              | canonical LoRA delta      |
+              +------------+------------+
+                           |
+                    Yeto Rust syncer
+             exact base, full roster, checkpoint
+```
 
-## Current integration seams
+Miles remains responsible for rollout generation, complete GRPO groups,
+reward and advantage computation, the local optimizer and scheduler, and the
+normal trainer-to-SGLang weight publication. Yeto never implements a second
+rollout or reward engine.
 
-Yeto pins the `agentenv/miles` `yeto-sync` branch by commit. That branch adds
-the narrow boundary required by this mode:
+The Miles boundary provides:
 
-- `RayTrainGroup.export_trainable_state()` exports the complete replicated
-  LoRA from Megatron global rank zero in canonical PEFT form;
-- `RayTrainGroup.apply_trainable_state()` validates and writes the complete
-  global LoRA on every trainer rank, clears LoRA optimizer state, preserves LR
-  scheduler progress, and refreshes the actor backup;
-- the native Miles train loop loads one external policy-sync hook, calls it
-  after local training and before the normal trainer-to-SGLang publication,
-  and finalizes it only after the final global policy has been published.
-- its Megatron-Bridge compatibility preserves canonical LoRA query and gate
-  rows for architectures that declare gated attention, while leaving ordinary
-  attention unchanged.
+- canonical replicated-LoRA export and apply on every Megatron rank;
+- a post-train, pre-SGLang-publication external synchronization hook;
+- preservation or reset of LoRA optimizer state as requested by that hook;
+- a stop result from the hook that takes effect only after Miles completes one
+  full `update_weights()` publication;
+- normal final hook cleanup after the loop exits.
 
-Miles still owns rollout generation, reward and advantage computation, GRPO
-training, offload, checkpoint calls, and SGLang weight transport. Yeto does
-not call private actor-group broadcast methods or replace Miles' local train
-loop. The hook applies the committed global LoRA before Miles publishes
-weights, so an island-local LoRA is never exposed to the next rollout.
+Native Miles and `strict-avg` keep their bounded rollout loops. Only the
+`decoupled` external-sync path runs until the authoritative final cut asks it
+to stop.
 
-The pinned source is checked out as a clean detached commit. The public
-boundary is deliberately limited to the non-FT Megatron actor group used by
-v0; Miles' experimental fault-tolerant trainer is not adapted.
-Before its remote Cargo build, `yeto-rl-ssh` independently recomputes the
-deployed Rust syncer-source digest and compares it with the prepared plan.
+## Canonical LoRA Identity
 
-The launcher selects strict RL behavior through the existing syncer's general
-controls: `--max-base-lag 0`, `--learner-weight equal`, `--quorum M`, and
-`--grace-ms 0`. It also supplies the one-fragment, unthrottled AVG settings
-listed above and uses the existing `--checkpoint-every 1` control for a
-durable cut before each broadcast. There is no RL-specific syncer mode or
-wire message. Learners
-send `c_steps=1` and `c_tokens=1`; `--learner-weight equal` independently
-defines their global contribution. Protocol v4 is unchanged, and omitting the
-two exact-base/equal-weight controls preserves SFT behavior.
+Every trainable LoRA tensor is represented as contiguous CPU f32 in
+deterministic PEFT name order. A canonical tensor spec contains name, shape,
+dtype, and numel. Base-model revision, effective LoRA-config hash, and the
+canonical layout hash bind the state to one model contract.
 
-## Global-round semantics
+Multi-fragment RL separates two identities:
 
-The RL flags describe the work at the Miles boundary:
+- `canonical_layout_hash` identifies the complete Miles/Yeto tensor schema and
+  does not change with the fragment count;
+- `sync_layout_fingerprint` identifies fragment membership, order, shapes,
+  numel, and AVG merge modes, and is used by protocol HELLO and the syncer
+  checkpoint.
 
-- `M`: number of `--gpu` entries and therefore logical islands;
-- `N`: Yeto's existing `--total-steps`;
-- `G`: `--rollout-batch-size`, the complete GRPO groups per island round;
-- `K`: `--n-samples-per-prompt`, the trajectories per group;
-- local work: `--local-rl-rounds-per-sync 1` in v0.
-- optimizer work: one Miles optimizer step per island round; v0 exposes no
-  separate optimizer-step control.
+For `decoupled`, tensors are sorted by `(-numel, name)` and placed into the
+currently smallest of `P` bins, with fragment ID breaking ties. Every tensor
+appears exactly once and every fragment uses AVG. The learner and exporter use
+the same builder, so an altered order or membership fails by fingerprint.
 
-`N`, `G`, and `K` must be positive. `G × K` must be divisible by every
-island's Miles data-parallel size. `--over-sampling-batch-size` defaults to
-`G` and may be raised to generate extra complete groups; it cannot be smaller
-than `G`. Complete extras remain in the same-version queue after the selected
-`G` groups are consumed.
+## Strict-AVG
 
-The Miles argument mapping enables `--balance-data`. Multi-rank islands use
-Miles' sequence-length partitioner to keep the total token count similar
-across DP ranks while preserving equal sample counts. Yeto requires the
-sample count to divide evenly across those ranks.
+At committed policy version `v`, every island performs:
 
-At committed version `v`, each island follows the same sequence:
+1. Apply the complete global LoRA to Megatron and SGLang.
+2. Generate complete groups whose recorded weight version is exactly `v`.
+3. Execute one Miles GRPO optimizer step.
+4. Export the complete local LoRA and send `local - global` at base `v`.
+5. Wait for every logical island and committed version `v + 1`.
 
-1. Apply the complete global LoRA `theta_v` to the Megatron trainer and
-   SGLang, then mark rollout policy version `v` active.
-2. Generate exactly `G` groups of `K` terminal trajectories (completed or
-   truncated at the configured limit). Before training starts, every recorded
-   rollout weight version must be exactly `v`.
-3. Run the one configured Miles GRPO training cycle without publishing the local
-   result to SGLang.
-4. Export the complete local LoRA `theta_i_v` and send
-   `theta_i_v - theta_v` with base version `v`.
-5. Wait for committed version `v + 1` before starting another local round.
-
-The syncer accepts at most one result per logical island and waits for all
-`M` results:
+The syncer uses f32, full roster, equal weight, outer LR 1, and momentum 0:
 
 ```text
 theta_(v+1) = theta_v + mean(theta_i_v - theta_v)
-            = mean(theta_i_v),  i = 0 .. M-1
+            = mean(theta_i_v)
 ```
 
-All merge inputs have unit weight. Prompt counts, response lengths, and token
-counts do not change an island's global weight.
+Applying a committed strict policy clears only LoRA optimizer state, preserves
+the optimizer object, aligns scheduler progress, and refreshes the actor
+backup. No island-local LoRA is published to the next rollout.
 
-Applying a new global policy removes the existing optimizer state for LoRA
-parameters, including their moments and parameter step, then replaces its fp32
-master parameters. It does not rebuild the optimizer or LR scheduler. Applying
-committed policy `v` aligns the existing scheduler to
-`v * num_steps_per_rollout * global_batch_size`: a replacement advances its
-fresh scheduler to the committed progress, an in-process scheduler is already
-there, and a scheduler ahead of the committed policy is rejected. This avoids
-another warmup while preventing local Adam history from leaking across an
-averaging boundary.
+## Decoupled Preset
 
-There is no fleet-wide "every island has applied" barrier. Each island has an
-exact-base gate of its own, while the next merge still waits for the entire
-fixed roster. A faster island may begin first, but it cannot commit without all
-other islands at that same base version.
+The public parameters are:
 
-## Running a fleet
+| symbol | flag | meaning |
+| --- | --- | --- |
+| `P` | `--fragments` | deterministic LoRA fragment count, at least 2 |
+| `tau` | `--pipeline` | distinct fragment rounds allowed in flight, `1 <= tau <= P` |
+| `H` | `--local-rl-rounds-per-sync` | minimum local optimizer steps between valid pushes for the same fragment, at least 2 |
+| `N` | `--total-steps` | complete fragment sweeps |
+| `T` | internal | outer fragment steps, exactly `N * P` |
 
-The launcher creates one Miles island for every `--gpu` entry. An entry may
-describe multiple nodes and multiple GPUs per node. The launcher starts one
-Ray head and joins the remaining island nodes as workers. A single entry is a
-supported parity path; multiple entries enable fixed-roster averaging.
-External learner slots are not supported.
-
-The default production base image is pinned by digest:
+The launcher fixes the rest of the algorithm:
 
 ```text
-docker:radixark/miles@sha256:95b3afa9ee4313f5633e6ed3779c8276353cc8e24a2462e4f54ec0d5978fbae7
+quorum                 = M
+grace_ms                = 0
+max_base_lag            = 0
+learner_weight          = equal
+fragment_pattern        = binpack
+merge_mode              = AVG for every fragment
+outer_lr                = 0.7
+outer_momentum          = 0.9
+delta_correction        = none
+merge_alpha             = 0
+wire_dtype              = f32
+checkpoint_every        = 1
+optimizer_steps/rollout = 1
 ```
 
-GPU validation used a local derivative of that exact base image with the
-pinned Miles checkout and PEFT version preinstalled. The public launcher
-performs those same source and PEFT setup steps on the digest-pinned base
-image.
+`--experimental-rl-sync` cannot be combined with this preset.
 
-The Miles source itself is independently pinned to:
+### Policy snapshots
+
+A rollout uses one complete, immutable snapshot:
 
 ```text
-https://github.com/agentenv/miles
-c951c667c2b754cf244e1787845c05b41b50d4df
+PolicySnapshot {
+    rollout_id
+    fragment_versions[P]
+    policy_hash = sha256(complete canonical f32 LoRA)
+}
+
+SGLang token = yeto:<rollout_id>:<policy_hash>
 ```
 
-The launcher checks out that commit as a detached HEAD and installs the
-project's pinned PEFT version. At learner startup Yeto verifies the repository
-origin, commit, clean worktree, and imported package path. The checkout itself
-contains the thin policy-sync boundary described above; Yeto does not modify
-it at process startup.
+The event tape maps the token to the full fragment-version vector and both
+layout identities. Missing, stale, malformed, or mixed trajectory tokens fail
+before training. Complete oversampled groups are reusable only while their
+token equals the current snapshot.
 
-An illustrative two-island run is:
+Different fragments may have different committed versions. That is the
+expected Decoupled DiLoCo cut; it is not a mixed-policy trajectory because a
+rollout sees the resulting complete LoRA atomically.
+
+### Safe-boundary state machine
+
+SGLang generation and Megatron training remain sequential inside an island.
+Network receive threads may queue BCAST and PULL messages while they run, but
+Yeto changes trainer weights only in the post-train hook:
+
+1. Validate the completed rollout snapshot and collect real RL statistics.
+2. Export the complete post-train canonical LoRA.
+3. Drain monotonic BCASTs in fragment order and stage them in that full state
+   without changing committed bridge anchors or versions.
+4. If any fragment changed, apply the full state once with
+   `reset_optimizer=False`, then re-export and verify its full-policy hash;
+   only then commit the staged anchors, versions, and counters.
+5. Drain PULL permits only after BCAST application.
+6. For each permit whose exact raw anchor has accumulated at least `H` local
+   steps, send `local_fragment - raw_anchor` without waiting for merge or
+   quorum.
+7. Atomically checkpoint island progress, create the next complete snapshot,
+   set its SGLang token, and return to Miles.
+8. Miles publishes the complete trainer LoRA before starting another rollout.
+
+Only a committed BCAST replaces a raw anchor and resets its local step/token
+counters. Duplicate messages are ignored, conflicting permits fail, and
+invalid fragment/version identities fail. Ordinary hooks report zero remote
+quorum wait because no hook waits for its own PUSH to merge.
+
+Initial fragments use the same ordering: assemble a staged cut, apply and
+hash-check it, then commit its bridge state. The protocol wire is unchanged;
+the Python receiver records only a local monotonic arrival time. PULL-to-PUSH
+is measured from local PULL receipt to PUSH enqueue, while BCAST queue time is
+measured from local receipt to safe-boundary drain.
+
+### Outer update
+
+For fragment `p` and island `i`:
+
+```text
+d_i,p = theta_i,p - anchor_i,p
+g_i,p = -d_i,p
+g_p   = mean_i(g_i,p)
+
+m_p     = 0.9 * m_p + g_p
+Theta_p = Theta_p - 0.7 * (g_p + 0.9 * m_p)
+```
+
+The existing Rust syncer owns this f32 Nesterov update, fragment versions,
+checkpoint-before-broadcast ordering, and exact full-roster validation. Yeto
+adds no RL wire message and does not modify the Rust syncer.
+
+### Inner optimizer and scheduler
+
+An in-process fragment BCAST replaces LoRA masters and model parameters while
+preserving Adam moments. It refreshes the actor backup and keeps scheduler
+progress at the island-local rollout count. A new process instead applies the
+authoritative cut with `reset_optimizer=True`; no unavailable local Adam
+history is reconstructed, while the scheduler advances to checkpointed local
+progress.
+
+Syncer fragment step and island rollout progress are separate identities.
+Miles `TrainableState.policy_version` carries only the latter in decoupled
+applies.
+
+## Launching
+
+A strict two-island run uses the default preset:
 
 ```bash
 yeto launch \
   --training-mode rl \
   --gpu aws:8xa100@us-east-1,aws:8xa100@us-west-2 \
-  --rl-runtime miles \
-  --rl-image docker:radixark/miles@sha256:95b3afa9ee4313f5633e6ed3779c8276353cc8e24a2462e4f54ec0d5978fbae7 \
-  --model HuggingFaceTB/SmolLM2-135M-Instruct \
-  --model-revision 12fd25f77366fa6b3b4b768ec3050bf629380bac \
-  --data org/long-task-prompts \
-  --data-revision 0123456789abcdef0123456789abcdef01234567 \
+  --model org/model \
+  --model-revision <immutable-commit> \
+  --data org/prompts \
+  --data-revision <immutable-commit> \
   --tuning lora \
-  --lora-r 4 \
+  --lora-r 8 \
   --lora-targets attention \
-  --total-steps 2 \
-  --advantage-estimator grpo \
+  --total-steps 8 \
   --rollout-batch-size 16 \
-  --over-sampling-batch-size 24 \
   --n-samples-per-prompt 4 \
   --rollout-max-response-len 512 \
-  --local-rl-rounds-per-sync 1 \
-  --rl-sync-preset strict-avg \
-  --rl-policy-version strict \
-  --rl-completed-groups-path ~/yeto-rl/island-checkpoint.pt \
   --reward-function project.rewards:score \
   --seq-len 2048 \
-  --inner-lr 1e-4 \
-  --seed 321 \
-  --trust-remote-code \
-  --controller local \
-  --output ./rl-output
+  --inner-lr 1e-5 \
+  --seed 17 \
+  --trust-remote-code
 ```
 
-`--trust-remote-code` is required because the pinned Miles stack enables
-remote-code loading in its internal model paths. Continue to pin model and
-dataset revisions and enable it only for repositories you trust.
+Add the following for decoupled synchronization:
 
-The example uses a local controller so `./rl-output` is fetched to the
-submitting machine, which must remain available for the run. With the default
-head controller, use a remote `--output` URI for automatic delivery or
-retrieve the retained checkpoint from the head.
-
-RL uses the public CLI above. `--total-steps` selects the global round count.
-Generic DiLoCo controls such as `--fragments`, `--quorum`, `--pipeline`,
-`--sync-interval-steps`, `--outer-lr`, `--outer-momentum`, and
-`--wire-dtype` are not RL algorithm knobs; the launcher fixes their internal
-values to the contract above.
-
-`--rl-runtime`, `--advantage-estimator`, `--rl-sync-preset`, and
-`--rl-policy-version` currently accept only `miles`, `grpo`, `strict-avg`, and
-`strict`, respectively. Without `--experimental-rl-sync`, the strict preset
-normalizes all generic sync values above. With the flag, the launcher preserves
-and forwards working syncer controls such as quorum, grace, pacing, correction,
-and outer LR/momentum. The bridge still requires `--fragments 1`,
-`--pipeline 1`, `--merge-alpha 0`, and `--wire-dtype f32`; unsupported values
-are rejected rather than accepted as ineffective overrides. Exact-base and
-equal learner weighting remain explicit.
-
-For RL, the launcher raises the effective `--seq-len` to at least
-`--rollout-max-response-len`; this keeps the RL response default from being
-silently clamped by the smaller generic SFT sequence default. Miles deducts the
-tokenized prompt from that total rollout/trainer context, so the response value
-is still a cap rather than a guaranteed length. At learner startup the actual
-Megatron-Bridge provider must advertise a model context limit at least as large
-as the effective sequence length.
-
-### Prompt data
-
-Each row must provide `messages`, or a string `prompt`/`input` that Yeto can
-turn into a user message. `label`, `metadata`, and `tools` are preserved for
-Miles and the reward implementation.
-
-```json
-{"messages":[{"role":"user","content":"Give a short proof."}],"label":"proof"}
+```bash
+  --rl-sync-preset decoupled \
+  --fragments 8 \
+  --pipeline 2 \
+  --local-rl-rounds-per-sync 4
 ```
 
-The public RL launcher accepts revision-pinned Hugging Face dataset references.
-The explicit `yeto-rl-ssh` acceptance harness additionally accepts a local
-file or directory without `--data-revision`: it content-hashes the input,
-copies it to every island node, and mounts it read-only. The prepared prompt
-file remains private to each island.
+The initial validation configuration is `P=8`, `tau=2`, `H=4`; it is not
+claimed to be optimal for every model.
 
-Without extra flags the learner uses Miles' default SGLang generation path, in
-which one completion produces one trajectory. For environment-driven,
-multi-turn or tool-use trajectories, pass an importable Miles generate callable
-through `--custom-generate-function-path package.module.function`. Yeto also
-forwards `--use-session-server`, optional `--session-server-ip`, and one port or
-port range through `--session-server-port`. For a model that needs one of
-Miles' model-specific incremental tokenizers, `--tito-model` is forwarded
-unchanged and requires the session server. Yeto deliberately does not infer
-this value from a model name. Miles continues to own session assembly,
-tool/environment calls, terminal status, and weight-version records; Yeto does
-not define a second trajectory format. Dataset `tools` and metadata are
-preserved for that callable.
+`--trust-remote-code` is required by the pinned Miles model-loading path. Keep
+model and dataset revisions immutable and enable it only for trusted sources.
+The reward callable uses `package.module:function`; Yeto hashes its source
+before provisioning and the learner verifies that digest before import.
 
-### Reward callable
+Prompt rows provide `messages`, or a string `prompt`/`input` that Yeto converts
+to a user message. `label`, `metadata`, and `tools` remain available to Miles
+and the reward callable. Existing custom generation, session-server, and TITO
+arguments are forwarded unchanged.
 
-`--reward-function` uses `package.module:function` syntax. The module must be
-importable in the learner workdir. Its callable follows the pinned Miles
-custom-reward API; a minimal implementation is:
+## Checkpoint and Recovery
 
-```python
-async def score(args, sample, **kwargs) -> float:
-    del args, kwargs
-    return 1.0 if "expected phrase" in sample.response else 0.0
-```
+The syncer checkpoint is the only authoritative global LoRA. In exact-base RL
+it is written before every corresponding BCAST and contains f32 parameters,
+outer momentum, per-fragment versions, layout fingerprint, and learner ledger.
 
-GRPO needs reward variation within a group to produce a useful advantage.
-A run can complete optimizer steps with constant rewards while learning
-nothing, so inspect raw reward and advantage metrics during a shakedown.
+Each island atomically stores only reconstruction progress:
 
-Before provisioning, the launcher hashes the selected reward module source.
-The learner verifies that digest before importing it. The source must be
-inside the Yeto workdir synchronized by SkyPilot.
+- immutable model, data, reward, source, topology, LoRA, preset, `P/tau/H/N/T`,
+  and logical learner identity;
+- next rollout ID, optimizer-step count, and action-token count;
+- latest snapshot token, full-policy hash, and fragment-version vector;
+- rollout statistics and complete same-token groups.
 
-## Checkpoints, completion, and export
+It does not store local LoRA or optimizer moments. On restart, the island
+receives the current authoritative fragment cut, restores scheduler progress,
+and applies the full cut with optimizer reset. Completed groups survive only
+when the rebuilt token, full-policy hash, and fragment-version vector exactly
+match the checkpoint; otherwise they are discarded. A nonzero syncer cut
+without a valid island checkpoint fails instead of guessing local scheduler
+progress.
 
-Version 0 and every successful global merge are atomically written to the
-syncer's checkpoint before the new LoRA is broadcast. That file is the only
-authoritative global RL state and includes the canonical layout hash.
+Production clients keep `max_reconnects=0`: connection loss exits the island
+and relies on the existing launcher/provider task recovery. The feature does
+not add roster shrinking or a new fleet restart controller. Syncer restart can
+resume when its checkpoint disk survives; losing that VM and disk remains a
+deployment-level durability gap.
 
-Each Miles island also atomically stores its compatibility configuration,
-local round, current policy version, rollout/reward statistics, and complete
-unused group queue at `--rl-completed-groups-path`. The compatibility fields
-cover model and dataset identifiers/revisions, topology, LoRA identity,
-learning rate, sequence length, seed, group and oversampling sizes, optimizer
-steps, reward digest, response limit, custom-generate/session mode, and the
-selected TITO model. A process restart restores only complete groups whose
-policy version and all persisted compatibility fields still match. For Spot RL tasks,
-the launcher mounts that file's parent directory from a SkyPilot storage named
-for `cluster_prefix + logical island ID`, with reconstruction sync enabled.
-The stable per-island name survives a replacement VM without sharing queues
-between islands; the non-persistent storage is removed when the task is finally
-torn down. Spot paths must name a file inside an absolute or `~/` subdirectory.
-On-demand tasks keep the ordinary local path. Groups selected for the current
-training batch are removed from the queue; complete oversampling groups that
-were not selected remain reusable only while that same global policy is
-current. Unfinished groups, cross-version groups, and unmerged local LoRA
-values are discarded.
+## Finalization and Export
 
-With the local-controller example above, the launcher fetches the checkpoint
-as:
+At `T=N*P`, the syncer stops ordinary pulls, persists the quiescent cut, and
+sends all f32 final fragments plus an exact manifest. At the next safe
+boundary, each island:
 
-```text
-./rl-output/yeto-state.ckpt
-```
+1. stops ordinary fragment submission;
+2. assembles and applies the complete final cut;
+3. verifies the trainer's full-policy hash;
+4. writes its final progress checkpoint;
+5. acknowledges the exact manifest;
+6. asks Miles to stop only after one complete SGLang weight publication.
 
-The default head controller first retains the same file at
-`~/yeto-output/yeto-state.ckpt` on the head, then delivers it when `--output`
-is a remote URI.
+A replacement island that joins while finalization is pending consumes the
+terminal manifest directly, applies it with recovery optimizer reset,
+acknowledges it, publishes it once, and exits without an extra rollout.
 
-When global version `N` is committed, the syncer sends its existing final
-fragment protocol to every logical learner. Each learner applies the final
-LoRA and acknowledges the cut before exiting normally.
-
-Export the checkpoint with the same base model revision, rank, and target
-selection used for training:
+Strict export needs the original model contract:
 
 ```bash
 yeto-rl-export \
   --checkpoint ./rl-output/yeto-state.ckpt \
-  --model HuggingFaceTB/SmolLM2-135M-Instruct \
-  --model-revision 12fd25f77366fa6b3b4b768ec3050bf629380bac \
-  --lora-r 4 \
+  --model org/model \
+  --model-revision <immutable-commit> \
+  --lora-r 8 \
   --lora-targets attention \
   --output-dir ./adapter
 ```
 
-The result contains standard `adapter_model.safetensors` and
-`adapter_config.json` files and can be loaded with ordinary PEFT tooling. The
-exporter reconstructs the expected tensor contract from the explicit model
-arguments and requires its layout hash to match the checkpoint. It does not
-infer configuration or roster membership from the syncer ledger.
+Decoupled export additionally receives the training layout:
 
-## Failure and recovery
+```bash
+yeto-rl-export \
+  --checkpoint ./rl-output/yeto-state.ckpt \
+  --model org/model \
+  --model-revision <immutable-commit> \
+  --lora-r 8 \
+  --lora-targets attention \
+  --sync-preset decoupled \
+  --fragments 8 \
+  --pipeline 2 \
+  --local-horizon 4 \
+  --output-dir ./adapter
+```
 
-Recovery always starts from the most recent committed global checkpoint:
-
-| failure | behavior |
-| --- | --- |
-| learner exits before its push is accepted | launcher restarts the same logical ID; it reapplies the committed policy and recomputes the round |
-| learner exits after its push is accepted | syncer retains that logical learner's result and waits for the missing IDs |
-| learner cannot recover | the run fails; the roster is never reduced |
-| syncer process exits before checkpoint commit, with its disk retained | partial results are discarded; restart resumes the previous version and learners redo the round |
-| syncer process exits after checkpoint commit but before broadcast, with its disk retained | restart loads and broadcasts the newly committed version |
-| syncer VM or disk is lost | the current launcher has no durable mount for the global checkpoint, so automatic recovery is not available |
-| learner exits while applying a global policy | replacement reapplies the complete committed policy |
-
-A dead syncer connection makes an island exit at the next bridge health check.
-If it drops while a synchronous Miles rollout/train call is in progress, that
-local round may finish redundant computation, but it cannot begin another
-round or become authoritative after restart. The launcher can restart the
-syncer through its existing recovery path; each learner whose bridge exits is
-restarted under the same logical ID rather than through a roster-wide restart
-command. Duplicate computation is allowed, but duplicate merge is not.
-
-Each island writes policy-apply, optimizer-reset, and `LocalRoundStats` JSONL;
-the syncer writes roster, base-version, layout, merge, and responder metrics to
-`~/yeto-output/yeto-tape.jsonl`. Miles group-task completion supplies peak
-active groups, cancellations, and duration percentiles;
-`Sample.non_generation_time` supplies tool wait; grouped raw rewards supply the
-zero-variance ratio. The thin Miles branch attaches the rank-zero native train
-log's KL, ESS, and clip fraction, plus the measured optimizer-train duration,
-to the same local-state export consumed by the hook. The bridge records those
-values, the actual protocol payload bytes, and each canonical global apply's
-policy hash.
-The launcher does not currently enable a Miles or Yeto dashboard for these
-records.
-
-Mixed-version groups, rejected stale updates, layout mismatch, non-finite
-deltas, or a policy hash mismatch after apply are deterministic strict
-failures. The affected learner or syncer exits nonzero, and the fleet
-controller terminates the whole run instead of relaunching the same
-deterministic violation. Ordinary process, network, or spot failures remain
-recoverable through the committed-checkpoint paths above.
-
-## Runtime compatibility and diagnostics
-
-Model loading, attention kernels, LoRA conversion, and trainer-to-SGLang
-transport remain Miles responsibilities. Yeto passes the selected Miles
-arguments and does not patch Megatron providers or transport functions at
-runtime. A change to the pinned Miles, Megatron-Bridge, Transformer Engine, or
-SGLang stack therefore requires a real GPU compatibility run in addition to
-the tensor-contract tests.
-
-Common startup and progress failures have distinct meanings:
-
-- **PEFT import failure:** the learner did not run the current Miles setup,
-  which installs the pinned `peft==0.20.0`.
-- **Attention-kernel startup failure:** check the pinned Miles image and its
-  Megatron/Transformer Engine compatibility; do not add a model-name branch in
-  Yeto.
-- **Miles revision/origin/dirty-tree error:** the runtime is not using the
-  supported checkout; do not bypass this check or patch that tree in place.
-- **PEFT/Megatron mapping mismatch:** the model is outside the currently
-  supported tensor contract. Extend the generic upstream conversion path
-  rather than adding a model-name branch in Yeto.
-- **syncer waits with an incomplete roster:** a logical island is absent or
-  still recovering. Fixed-roster mode never lowers quorum to make progress.
-- **optimizer steps but negligible LoRA change:** first inspect reward
-  variance, advantages, and the configured LR schedule.
+The exporter reconstructs the canonical specs and fragment layout, verifies
+the sync fingerprint and terminal version sweep, rejects non-finite or
+mismatched tensors, and writes standard `adapter_model.safetensors` and
+`adapter_config.json`. Decoupled export also writes
+`yeto_rl_provenance.json` with `P/tau/H/N/T`, outer optimizer settings, final
+fragment versions, both layout hashes, full-policy hash, and checkpoint SHA256.
 
 ## Benchmark
 
-[`RL_BENCHMARK.md`](RL_BENCHMARK.md) describes the local equal-hardware LM
-benchmark. It compares native Miles, one strict Yeto island, and strict
-federated Yeto with paired prompt budgets and held-out reward/pass@k
-evaluation. The runner uses real Miles generation and training, and evaluates
-Yeto only from the authoritative syncer checkpoint export. All three arms use
-one explicit expert-parallel setting, while same-host federated islands receive
-disjoint Miles port ranges.
+[`scripts/benchmark_rl.py`](../scripts/benchmark_rl.py) runs four local,
+equal-hardware real-Miles arms:
 
-## Intentional differences from INIT
+| arm | purpose |
+| --- | --- |
+| `native-miles-mM` | native Miles with no Yeto synchronization |
+| `yeto-single-mM` | one strict Yeto island using all `M*G` GPUs |
+| `yeto-federated-mM` | strict full-roster FedAvg across `M` islands |
+| `yeto-decoupled-mM` | decoupled fragment synchronization across `M` islands |
 
-| INIT plan | Current implementation | Assessment |
-| --- | --- | --- |
-| **Global checkpoint recovery:** keep the authoritative policy recoverable across syncer failures, including replacement of its machine or disk. | Automatic recovery works while the syncer's disk is retained; losing that VM or disk also loses the checkpoint. | This does not change the RL algorithm, but it remains a production disaster-recovery gap. |
-| **Monitoring:** connect the planned RL and synchronization metrics to a dashboard. | Emit the metrics to JSONL without enabling a dashboard. | The records are sufficient for validation and offline diagnosis, but not centralized live monitoring. |
+All arms match model/revision, LoRA, prompt stream, reward, seed, total GPUs,
+optimizer steps, groups, trajectories, and action-token limits. Decoupled
+learners freeze after the same local step budget `R`. The syncer writes an
+unmarked cutoff checkpoint, restarts with pipeline 1, performs exactly one
+ordinary full-fragment consolidation sweep from the frozen policies, and only
+then marks and exports the final artifact. This avoids comparing a
+network-dependent amount of local work.
 
-## Validation status
+The report includes held-out reward and pass@k, KL/ESS/clip fraction, rollout,
+train, hook and finalization time, artifact-ready time, trajectories and action
+tokens per second, GPU-hours, time-weighted GPU activity/utilization, realized
+`H`, PULL-to-PUSH latency, BCAST queue time, fragment payload traffic,
+responder count, and deltas versus native, single-island, and strict federation
+controls.
 
-The current source has automated coverage for the Miles policy hook and its
-ordering around native SGLang publication, multi-node task construction,
-multi-rank apply/export, DP rollout-shard collection, EP validation,
-single-island and multi-island sync, canonical identity, completed-group
-recovery, strict failures, provenance, checkpoint export, and the unchanged
-SFT/diffusion defaults. The current source passed 85 focused Yeto tests,
-the full Yeto suite with 799 passed and 4 skipped, 58 Rust syncer tests, and 10
-focused Miles tests.
+The harness uses real SGLang generation, the selected real reward callable,
+and real GRPO training. It does not accept injected rollouts, synthetic
+optimizer steps, or fake rewards as benchmark evidence.
 
-The current Miles pin was exercised with the immutable `Qwen/Qwen3.6-27B`
-revision on one eight-H200 host. The equal-hardware benchmark used three seeds
-and, for each seed, compared native Miles on eight GPUs, one Yeto island on
-eight GPUs, and two four-GPU Yeto islands. Every arm completed eight real RL
-rounds, 64 prompt groups, and 256 trajectories, for 2,304 training trajectories
-in total. The nine resulting adapters were evaluated on 16 held-out prompts
-with four samples each, for 576 evaluation generations. The complete run
-exited successfully in about 11 hours 35 minutes.
+## Observability
 
-| arm | mean reward | pass@1 | pass@4 |
-| --- | ---: | ---: | ---: |
-| native Miles | `0.1094 +/- 0.0312` | `0.1094` | `0.2083` |
-| Yeto single island | `0.0938 +/- 0.0541` | `0.0938` | `0.1875` |
-| Yeto two-island federation | `0.1146 +/- 0.0592` | `0.1146` | `0.2500` |
+Island JSONL records include:
 
-Nearly every response reached the shared 768-token cap. These bounded-run
-quality values therefore show that the real training, synchronization, export,
-and evaluation paths work together; they are not a claim of converged policy
-quality. The small arm differences are also within the variation across three
-seeds.
+- rollout ID, exact policy token/hash, and full fragment-version vector;
+- group, trajectory, action-token, reward, KL, ESS, clip, and timing metrics;
+- applied and submitted fragment IDs, fragment tensor payload bytes, delta
+  norm, realized `H`, PULL-to-PUSH time, and BCAST queue time;
+- full-policy apply time, snapshot publications, and optimizer-reset count;
+- hook duration and whether the hook performed finalization.
 
-The broader compatibility and recovery campaign ran on one GCP Spot VM with
-four NVIDIA A100-SXM4-40GB GPUs. It directly exercised the maintained external
-policy hook. Yeto was `9ebd42060414fecfca2cabd89f669e91f93d1041`
-(tested source digest
-`80dfdbb7c2b3d8bc18cee51ac55e63a28b93cc0811c660ac625837b80baeab6e`) and
-Miles `a91bd34e50416aeb1da111f74d52b296e8216b96`, plus propagation of
-`provider.attention_backend` in the bridge model provider. PEFT was `0.20.0`.
+The syncer tape remains authoritative for outer step, fragment, exact base,
+round attempt, full responder roster, Nesterov update norm, merge time, and
+layout fingerprint. No dashboard is enabled by this feature.
 
-- Qwen3-0.6B completed multiple real DeepMath/reward/GRPO updates. Qwen3-4B
-  completed two rounds in one DP=4 island.
-- Two concurrent Qwen3-4B islands, each DP=2 and using different prompts,
-  committed a policy whose maximum error from the offline f32 mean was `0`;
-  both islands finished on the same policy.
-- `allenai/OLMoE-1B-7B-0125-Instruct` completed EP=4 training with attention
-  LoRA. Its local delta norm was `0.1417596`, and the committed policy's maximum
-  error from the expected merge was `0`.
-- Learners were replaced during rollout, before push, after push, and after
-  global apply. Each case recovered and committed exactly once, with no stale
-  update accepted. The after-push and after-apply cases first exposed a final
-  replacement hang; after the fix, both real reruns exited successfully.
-- A syncer restart recovered checkpoint version 1 and committed version 2.
-  Learners observed base versions `[0, 1]`, with no duplicate merge or stale
-  update.
-- A 20-round Qwen run committed versions `1..20` in order and applied versions
-  `0..20`. It completed 160 trajectories and 20,480 action tokens with no
-  mixed-version or stale group; the maximum merge error was `7.28e-12`.
-- Native Miles and the Yeto path produced identical rollout tokens and rewards,
-  with maximum LoRA tensor error `0.0`.
-- The committed version-20 policy exported as standard PEFT, loaded normally,
-  and completed real GPU inference and generation. Its maximum logit difference
-  from the base policy was `0.25`.
-- A Qwen3-4B session/tool run completed two rounds and 16 real tasks, including
-  10 actual calculator calls. Its local delta norms were `0.0001186` and
-  `0.1004914`, with no mixed-version or stale group.
+Payload traffic counts PUSH, ordinary BCAST, and ordinary final-cut fragment
+tensors. It intentionally excludes message headers, framing, chunks, and
+control messages.
 
-The evidence archive is
-`gs://yeto-exp2-52-model-training-497007/miles-rl-validation/20260730-thin-a100-4g/`
-with SHA-256
-`d0945b0077308bda368ae9cc45d45d1be12b5e6fcafb12cba3dbbbd95128e142`.
+## Validation
 
-The following boundaries remain unvalidated or intentionally excluded:
+Automated coverage exercises deterministic binpacking, policy snapshot
+identity, mixed-token rejection, BCAST-before-PULL ordering, horizon gating,
+staged BCAST commit, duplicate and invalid protocol messages, multi-fragment
+deltas, optimizer preservation, scheduler and exact-snapshot group recovery,
+unequal fragment cuts, terminal replacement, budget consolidation, f32
+two-island Nesterov oracle behavior, terminal export, standard PEFT reload,
+benchmark fairness, and Miles stop-after-publication ordering.
 
-- the H200 benchmark covered the current pin's concurrent same-host drivers
-  and a real gated-attention model; the A100 campaign's MoE EP,
-  fault-injection, and session-server cases have not all been repeated on that
-  pin;
-- the requested 24-hour soak was not run; the 20 consecutive merges are the
-  bounded-duration stability evidence;
-- no physical multi-node island was exercised;
-- neither end-to-end SkyPilot provisioning nor a real Spot preemption was
-  exercised; learner recovery used process termination and replacement;
-- syncer restart was verified only with its existing checkpoint disk retained,
-  so syncer VM or disk loss remains unrecovered;
-- metrics remain JSONL-only and the launcher enables no dashboard;
-- Diffusion RL is outside the v0 contract and is therefore not a missing test.
+Existing strict-avg evidence includes real dense and MoE LoRA GRPO runs,
+multi-island f32 parity, process and retained-disk syncer recovery, session/tool
+rollouts, standard PEFT load/generation, and the Qwen3.6-27B equal-hardware H200
+benchmark summarized in [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md).
 
-## Extending v0 safely
+The decoupled preset must not be described as release-usable until its pinned
+Miles commit and required real causal-LM GPU matrix, including a cross-machine
+run and failure run, have completed. Diffusion RL is outside the contract and
+is not part of that matrix.
 
-The useful extension boundary is the observable contract, not a model-name
-matrix. Preserve these invariants when changing the implementation:
+## Development Guide
 
-1. The synchronized state is every trainable LoRA tensor, in standard PEFT
-   naming and deterministic order, represented as contiguous CPU f32.
-2. Every trajectory group records one actual global rollout version.
-3. A local result is accepted only for its exact committed base and at most
-   once per logical island.
-4. A merge waits for all fixed logical IDs and uses equal weights.
-5. The checkpoint is durable before any corresponding broadcast.
-6. Applying global LoRA resets local optimizer history without rebuilding the
-   optimizer or resetting scheduler progress.
-7. Local trainer weights are not published to SGLang between global commits.
-
-Adding a model should normally require no Yeto change: improve or select the
-appropriate Miles/Megatron-Bridge/PEFT conversion and let the existing tensor
-checks decide compatibility. Adding TP/PP, expert-sharded LoRA, multiple fragments, a
-different aggregation algorithm, Miles FT actors, or Diffusion RL changes the
-contract and requires a separate design rather than a compatibility branch.
-
-For implementation navigation:
+The implementation is intentionally confined to the RL boundary:
 
 | area | responsibility |
 | --- | --- |
-| `yeto/rl/core.py` | canonical LoRA state and the single AVG layout |
-| `yeto/rl/miles.py` | external sync hook, rollout-version checks, and Yeto bridge adapter |
-| `yeto/rl/bridge.py` | exact-base island loop and protocol interaction |
-| `yeto/rl/export.py` | committed checkpoint to PEFT adapter |
-| `yeto/rl/learner.py` | island entry point and Miles argument mapping |
-| `agentenv/miles:miles/backends/megatron_utils/trainable_state.py` | replicated LoRA export/apply and optimizer reset |
-| `agentenv/miles:train.py` | native post-train, pre-publication hook ordering |
-| `syncer/src/server.rs` | fixed roster and checkpoint-before-broadcast commit |
+| `yeto/rl/core.py` | canonical LoRA, deterministic RL fragments, policy snapshots |
+| `yeto/rl/decoupled.py` | raw anchors, BCAST/PULL/PUSH state, final cut and benchmark consolidation |
+| `yeto/rl/miles.py` | rollout-token validation, safe-boundary hook, island checkpoint |
+| `yeto/rl/learner.py` | Miles argument mapping and runtime configuration |
+| `yeto/rl/export.py` | authoritative checkpoint to standard PEFT |
+| `scripts/benchmark_rl.py` | equal-work native/strict/decoupled comparison |
+| `agentenv/miles:train.py` | optional run-until-stop and stop-after-publication ordering |
+| `syncer/src/**` | unchanged general fragment scheduler and outer optimizer |
 
-Run the focused and full regressions before a GPU shakedown:
+Preserve these invariants when extending the path:
+
+1. A trajectory group uses one real complete policy snapshot.
+2. A fragment update uses its exact raw anchor and complete fixed roster.
+3. Ordinary local hooks never wait for remote quorum or merge.
+4. In-process fragment apply preserves inner optimizer moments and scheduler
+   progress.
+5. Only the exact final syncer cut may become the exported adapter.
+6. Rust, SFT, diffusion, local PPO, and generic recovery behavior do not change
+   without a separately reviewed design.
+
+Focused verification:
 
 ```bash
 python -m pytest -q \
-  tests/test_rl_core.py tests/test_rl_export.py \
-  tests/test_rl_integration.py tests/test_rl_launcher.py
-python -m pytest -q
-(cd syncer && cargo fmt --check && cargo test)
+  tests/test_rl_core.py tests/test_rl_decoupled.py \
+  tests/test_rl_export.py tests/test_rl_launcher.py \
+  tests/test_rl_integration.py tests/test_rl_benchmark.py
+
+(cd ../miles && python -m pytest -q \
+  --confcutdir=tests/fast tests/fast/test_external_policy_sync.py)
 ```
