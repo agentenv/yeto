@@ -25,6 +25,7 @@ from yeto.rl.core import (
     build_avg_layout,
     canonical_state,
 )
+from yeto.rl.decoupled import DecoupledBridgeConfig, DecoupledRlBridge
 from yeto.rl.miles import MilesPolicySync, _island_checkpoint_config
 from yeto.tensor_io import pack_tensor, unpack_fragment
 
@@ -105,6 +106,63 @@ def _start(binary, port, checkpoint, rounds, *, learners=2, event_tape=None):
             *(
                 ["--event-tape", str(event_tape)]
                 if event_tape is not None
+                else []
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+
+def _start_decoupled(
+    binary,
+    port,
+    checkpoint,
+    rounds,
+    *,
+    learners=2,
+    pipeline=2,
+    learner_budget_steps=None,
+    resume=True,
+):
+    return subprocess.Popen(
+        [
+            str(binary),
+            "--port",
+            str(port),
+            "--learners",
+            str(learners),
+            "--quorum",
+            str(learners),
+            "--grace-ms",
+            "0",
+            "--pipeline",
+            str(pipeline),
+            "--sync-interval-steps",
+            "2",
+            "--delta-correction",
+            "none",
+            "--total-steps",
+            str(rounds),
+            "--outer-lr",
+            "0.7",
+            "--outer-momentum",
+            "0.9",
+            "--quorum-timeout-s",
+            "10",
+            "--checkpoint-path",
+            str(checkpoint),
+            "--checkpoint-every",
+            "1",
+            *(["--resume"] if resume else []),
+            "--max-base-lag",
+            "0",
+            "--learner-weight",
+            "equal",
+            *(
+                ["--learner-budget-steps", str(learner_budget_steps)]
+                if learner_budget_steps is not None
                 else []
             ),
         ],
@@ -344,6 +402,182 @@ def test_single_island_runs_the_real_syncer_parity_path(syncer_binary, tmp_path)
         if process.poll() is None:
             process.kill()
             process.wait()
+
+
+def test_decoupled_bridge_matches_two_fragment_nesterov_oracle(
+    syncer_binary, tmp_path
+):
+    tensors = {
+        f"base_model.model.layer{index}.lora_A.weight": torch.zeros(1, index + 1)
+        for index in range(4)
+    }
+    initial = _state(0, tensors)
+    checkpoint_path = tmp_path / "decoupled.ckpt"
+    port = _port()
+    process = _start_decoupled(
+        syncer_binary,
+        port,
+        checkpoint_path,
+        rounds=2,
+    )
+    bridges = [
+        DecoupledRlBridge(
+            initial,
+            DecoupledBridgeConfig(
+                syncer_addr=("127.0.0.1", port),
+                learner_id=learner_id,
+                total_fragment_steps=2,
+                num_fragments=2,
+                pipeline=2,
+                local_horizon=2,
+                expected_specs=initial.specs,
+                base_model_revision=MODEL_REVISION,
+                lora_config_hash=LORA_CONFIG_HASH,
+                canonical_layout_hash=initial.layout_hash,
+                wan_streams=0,
+            ),
+        )
+        for learner_id in range(2)
+    ]
+    try:
+        for bridge in bridges:
+            bridge.start()
+        cuts = [
+            bridge.wait_for_initial_cut(optimizer_steps=0, action_tokens=0)
+            for bridge in bridges
+        ]
+        for bridge, cut in zip(bridges, cuts):
+            bridge.commit_initial_cut(cut, optimizer_steps=0, action_tokens=0)
+        for learner_id, (bridge, cut) in enumerate(zip(bridges, cuts)):
+            offset = float(1 + learner_id * 2)
+            local = _state(
+                1,
+                {name: value + offset for name, value in cut.state.tensors.items()},
+            )
+            assert bridge.submit_ready(
+                local,
+                optimizer_steps=1,
+                action_tokens=10,
+            ) == ()
+            submissions = bridge.submit_ready(
+                local,
+                optimizer_steps=2,
+                action_tokens=20,
+            )
+            assert {submission.fragment_id for submission in submissions} == {0, 1}
+
+        finals = []
+        for bridge in bridges:
+            manifest, final = bridge.wait_for_final_cut(policy_version=2)
+            bridge.acknowledge_finalization(manifest)
+            finals.append(final)
+        assert process.wait(timeout=10) == 0
+        for final in finals:
+            assert all(
+                torch.allclose(value, torch.full_like(value, 2.66), atol=1e-6)
+                for value in final.tensors.values()
+            )
+        checkpoint = parse_checkpoint(checkpoint_path)
+        assert checkpoint.global_step == 2
+        assert [version for version, _, _ in checkpoint.fragments] == [1, 2]
+        assert checkpoint.ledger == {0: (2, 4, 40), 1: (2, 4, 40)}
+    finally:
+        for bridge in bridges:
+            bridge.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+def test_decoupled_budget_freezes_then_consolidates_every_fragment(
+    syncer_binary, tmp_path
+):
+    tensors = {
+        f"base_model.model.layer{index}.lora_A.weight": torch.zeros(1, index + 1)
+        for index in range(4)
+    }
+    initial = _state(0, tensors)
+    frozen = _state(
+        2,
+        {name: value + 1.0 for name, value in tensors.items()},
+    )
+    checkpoint_path = tmp_path / "budget.ckpt"
+    port = _port()
+    cutoff = _start_decoupled(
+        syncer_binary,
+        port,
+        checkpoint_path,
+        rounds=8,
+        learners=1,
+        learner_budget_steps=2,
+        resume=False,
+    )
+    bridge = DecoupledRlBridge(
+        initial,
+        DecoupledBridgeConfig(
+            syncer_addr=("127.0.0.1", port),
+            learner_id=0,
+            total_fragment_steps=8,
+            num_fragments=2,
+            pipeline=2,
+            local_horizon=2,
+            expected_specs=initial.specs,
+            base_model_revision=MODEL_REVISION,
+            lora_config_hash=LORA_CONFIG_HASH,
+            canonical_layout_hash=initial.layout_hash,
+            wan_streams=0,
+            learner_budget_steps=2,
+        ),
+    )
+    result = {}
+    thread = None
+    consolidation = None
+    try:
+        bridge.start()
+        cut = bridge.wait_for_initial_cut(optimizer_steps=0, action_tokens=0)
+        bridge.commit_initial_cut(cut, optimizer_steps=0, action_tokens=0)
+
+        def freeze():
+            result["value"] = bridge.consolidate_budget(
+                frozen,
+                optimizer_steps=2,
+                action_tokens=20,
+            )
+
+        thread = threading.Thread(target=freeze, daemon=True)
+        thread.start()
+        assert cutoff.wait(timeout=10) == 0
+        committed = parse_checkpoint(checkpoint_path).global_step
+        consolidation = _start_decoupled(
+            syncer_binary,
+            port,
+            checkpoint_path,
+            rounds=committed + 2,
+            learners=1,
+            pipeline=1,
+        )
+        thread.join(timeout=15)
+        assert not thread.is_alive()
+        result_value = result["value"]
+        manifest, final = result_value.manifest, result_value.state
+        assert len(result_value.submissions) == 2
+        assert result_value.bytes_received > 0
+        bridge.acknowledge_finalization(manifest)
+        assert consolidation.wait(timeout=10) == 0
+        assert manifest.global_step == committed + 2
+        assert set(manifest.versions) == set(
+            range(committed + 1, committed + 3)
+        )
+        assert all(
+            torch.allclose(value, torch.full_like(value, 1.33), atol=1e-6)
+            for value in final.tensors.values()
+        )
+    finally:
+        bridge.close()
+        for process in (cutoff, consolidation):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
 
 
 def test_terminal_replacement_receives_final_policy(syncer_binary, tmp_path):

@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+import json
 import struct
 
 import pytest
 import torch
 
 from yeto.export import CKPT_MAGIC
+from yeto.protocol import layout_fingerprint
 from yeto.rl import export as rl_export
 from yeto.rl.core import (
+    build_rl_fragment_layout,
     canonical_layout_hash,
     canonical_lora_config_hash,
     canonical_state,
     flat_tensor,
+    policy_tensor_hash,
     tensors_from_flat,
 )
 from yeto.rl.export import derive_peft_lora_specs, export_rl_checkpoint
+from yeto.tensor_io import fragment_flat
 
 
 def _model(tmp_path):
@@ -124,6 +129,17 @@ def _write_checkpoint(
     path.write_bytes(body)
 
 
+def _write_fragment_checkpoint(path, fragments, layout_hash, global_step):
+    body = bytearray(struct.pack("<IQI", CKPT_MAGIC, global_step, len(fragments)))
+    for version, values in fragments:
+        body += struct.pack("<QQ", version, values.numel())
+        body += values.float().numpy().tobytes()
+        body += torch.zeros_like(values).float().numpy().tobytes()
+    body += struct.pack("<I", 0)
+    body += bytes.fromhex(layout_hash)
+    path.write_bytes(body)
+
+
 def test_committed_checkpoint_exports_and_standard_peft_reloads(tmp_path):
     peft = pytest.importorskip("peft")
     transformers = pytest.importorskip("transformers")
@@ -222,3 +238,164 @@ def test_export_ignores_ledger_and_rejects_tensor_mismatch(tmp_path):
             model_revision=MODEL_REVISION,
             rank=2,
         )
+
+
+def test_decoupled_checkpoint_exports_all_fragments_and_provenance(tmp_path):
+    model_path, _ = _model(tmp_path)
+    specs = derive_peft_lora_specs(
+        str(model_path), None, rank=2, targets="all-linear"
+    )
+    layout = build_rl_fragment_layout(specs, 2)
+    expected = tensors_from_flat(
+        torch.arange(sum(spec.numel for spec in specs), dtype=torch.float32),
+        specs,
+    )
+    checkpoint = tmp_path / "decoupled.ckpt"
+    _write_fragment_checkpoint(
+        checkpoint,
+        [
+            (version, fragment_flat(fragment, expected))
+            for version, fragment in zip((3, 4), layout.fragments)
+        ],
+        layout_fingerprint(layout).hex(),
+        global_step=4,
+    )
+
+    output = tmp_path / "adapter"
+    state = export_rl_checkpoint(
+        checkpoint,
+        output,
+        model=str(model_path),
+        model_revision=MODEL_REVISION,
+        rank=2,
+        sync_preset="decoupled",
+        fragments=2,
+        pipeline=2,
+        local_horizon=2,
+    )
+
+    assert all(
+        torch.equal(state.tensors[name], expected[name]) for name in expected
+    )
+    provenance = json.loads((output / "yeto_rl_provenance.json").read_text())
+    assert provenance["sync_preset"] == "decoupled"
+    assert provenance["fragments"] == 2
+    assert provenance["pipeline"] == 2
+    assert provenance["local_horizon"] == 2
+    assert provenance["total_sweeps"] == 2
+    assert provenance["total_fragment_steps"] == 4
+    assert provenance["final_fragment_versions"] == [3, 4]
+    assert provenance["policy_hash"] == policy_tensor_hash(state)
+    assert provenance["sync_layout_fingerprint"] == layout_fingerprint(layout).hex()
+    assert provenance["checkpoint_sha256"]
+
+
+def test_benchmark_consolidation_accepts_only_a_rotated_terminal_sweep(tmp_path):
+    model_path, _ = _model(tmp_path)
+    specs = derive_peft_lora_specs(
+        str(model_path), None, rank=2, targets="all-linear"
+    )
+    layout = build_rl_fragment_layout(specs, 2)
+    expected = tensors_from_flat(
+        torch.arange(sum(spec.numel for spec in specs), dtype=torch.float32),
+        specs,
+    )
+    checkpoint = tmp_path / "budget.ckpt"
+    _write_fragment_checkpoint(
+        checkpoint,
+        [
+            (version, fragment_flat(fragment, expected))
+            for version, fragment in zip((7, 6), layout.fragments)
+        ],
+        layout_fingerprint(layout).hex(),
+        global_step=7,
+    )
+
+    with pytest.raises(ValueError, match="complete fragment sweep"):
+        export_rl_checkpoint(
+            checkpoint,
+            tmp_path / "production",
+            model=str(model_path),
+            model_revision=MODEL_REVISION,
+            rank=2,
+            sync_preset="decoupled",
+            fragments=2,
+            pipeline=2,
+            local_horizon=2,
+        )
+
+    output = tmp_path / "benchmark"
+    state = export_rl_checkpoint(
+        checkpoint,
+        output,
+        model=str(model_path),
+        model_revision=MODEL_REVISION,
+        rank=2,
+        sync_preset="decoupled",
+        fragments=2,
+        pipeline=2,
+        local_horizon=2,
+        benchmark_learner_budget_steps=6,
+    )
+
+    assert state.policy_version == 7
+    assert all(torch.equal(state.tensors[name], expected[name]) for name in expected)
+    provenance = json.loads((output / "yeto_rl_provenance.json").read_text())
+    assert provenance["benchmark_learner_budget_steps"] == 6
+    assert provenance["final_fragment_versions"] == [7, 6]
+
+    _write_fragment_checkpoint(
+        checkpoint,
+        [
+            (version, fragment_flat(fragment, expected))
+            for version, fragment in zip((6, 7), layout.fragments)
+        ],
+        layout_fingerprint(layout).hex(),
+        global_step=7,
+    )
+    with pytest.raises(ValueError, match="fragment versions"):
+        export_rl_checkpoint(
+            checkpoint,
+            tmp_path / "invalid",
+            model=str(model_path),
+            model_revision=MODEL_REVISION,
+            rank=2,
+            sync_preset="decoupled",
+            fragments=2,
+            pipeline=2,
+            local_horizon=2,
+            benchmark_learner_budget_steps=6,
+        )
+
+
+def test_decoupled_export_cli_reports_an_outer_fragment_step(monkeypatch, capsys):
+    monkeypatch.setattr(
+        rl_export,
+        "export_rl_checkpoint",
+        lambda *_args, **_kwargs: type("State", (), {"policy_version": 8})(),
+    )
+
+    rl_export.main(
+        [
+            "--checkpoint",
+            "state.ckpt",
+            "--model",
+            "org/model",
+            "--model-revision",
+            MODEL_REVISION,
+            "--lora-r",
+            "2",
+            "--sync-preset",
+            "decoupled",
+            "--fragments",
+            "2",
+            "--pipeline",
+            "2",
+            "--local-horizon",
+            "2",
+            "--output-dir",
+            "adapter",
+        ]
+    )
+
+    assert "outer fragment step 8" in capsys.readouterr().out

@@ -16,12 +16,16 @@ from yeto.rl.bridge import BridgeConfig, StrictRlBridge
 from yeto.rl.core import (
     CanonicalTensorSpec,
     LocalRoundStats,
+    PolicySnapshot,
     StrictRlInvariantError,
     build_avg_layout,
+    build_rl_fragment_layout,
     canonical_layout_hash,
     canonical_state,
     flat_tensor,
+    parse_policy_snapshot_token,
     policy_delta,
+    policy_tensor_hash,
     tensors_from_flat,
 )
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
@@ -106,6 +110,66 @@ def test_avg_layout_rejects_duplicate_names():
     )
     with pytest.raises(ValueError, match="unique"):
         build_avg_layout((spec, spec))
+
+
+def test_rl_fragment_layout_is_deterministic_all_avg_binpack():
+    specs = (
+        CanonicalTensorSpec(
+            "base_model.model.large.lora_A.weight", (1, 8), "float32", 8
+        ),
+        CanonicalTensorSpec(
+            "base_model.model.medium.lora_A.weight", (1, 5), "float32", 5
+        ),
+        CanonicalTensorSpec(
+            "base_model.model.small.lora_A.weight", (1, 3), "float32", 3
+        ),
+        CanonicalTensorSpec(
+            "base_model.model.tiny.lora_A.weight", (1, 2), "float32", 2
+        ),
+    )
+
+    first = build_rl_fragment_layout(specs, 2)
+    second = build_rl_fragment_layout(tuple(reversed(specs)), 2)
+
+    assert first == second
+    assert [fragment.numel for fragment in first.fragments] == [10, 8]
+    assert all(fragment.merge_mode == MERGE_AVG for fragment in first.fragments)
+    assert first.tensor_names() == [
+        "base_model.model.large.lora_A.weight",
+        "base_model.model.tiny.lora_A.weight",
+        "base_model.model.medium.lora_A.weight",
+        "base_model.model.small.lora_A.weight",
+    ]
+
+
+@pytest.mark.parametrize("fragments", [0, 1, 5])
+def test_rl_fragment_layout_requires_multiple_nonempty_fragments(fragments):
+    specs = tuple(state(0, tensors()).specs)
+    with pytest.raises(ValueError, match="fragments"):
+        build_rl_fragment_layout(specs, fragments)
+
+
+def test_policy_snapshot_token_binds_rollout_to_full_tensor_hash():
+    first = state(3, tensors())
+    same_tensors_new_progress = state(9, tensors())
+
+    snapshot = PolicySnapshot.create(7, first, (1, 6))
+
+    assert snapshot.policy_hash == policy_tensor_hash(same_tensors_new_progress)
+    assert snapshot.token == f"yeto:7:{snapshot.policy_hash}"
+    assert parse_policy_snapshot_token(snapshot.token) == (
+        snapshot.rollout_id,
+        snapshot.policy_hash,
+    )
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["yeto:1", "yeto:-1:" + "a" * 64, "yeto:1:not-a-hash", "other:1:" + "a" * 64],
+)
+def test_policy_snapshot_token_rejects_values_outside_contract(token):
+    with pytest.raises(ValueError, match="policy snapshot token"):
+        parse_policy_snapshot_token(token)
 
 
 def test_two_model_configs_use_the_same_generic_peft_path(tmp_path):
@@ -394,6 +458,53 @@ def test_generate_rollout_rejects_invalid_policy_versions_before_train(
     assert event["event"] == "rl_strict_failure"
     assert event["metric"] == "mixed_version_group_count"
     assert event["island_id"] == 7
+
+
+def test_generate_rollout_accepts_the_exact_decoupled_snapshot_token(
+    tmp_path, monkeypatch
+):
+    policy_hash = "a" * 64
+    token = f"yeto:3:{policy_hash}"
+    upstream = types.ModuleType("miles.rollout.sglang_rollout")
+    upstream.generate_rollout = object()
+    rollout = types.ModuleType("miles.rollout")
+    rollout.sglang_rollout = upstream
+    package = types.ModuleType("miles")
+    package.rollout = rollout
+    monkeypatch.setitem(sys.modules, "miles", package)
+    monkeypatch.setitem(sys.modules, "miles.rollout", rollout)
+    monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout", upstream)
+    samples = [
+        SimpleNamespace(
+            status=SimpleNamespace(value="completed"),
+            weight_versions=[token],
+            index=index,
+        )
+        for index in range(2)
+    ]
+    output = SimpleNamespace(samples=[samples], metrics={})
+    monkeypatch.setattr(
+        miles,
+        "_run_rollout_with_metrics",
+        lambda *_args, **_kwargs: (
+            output,
+            {"active": 0, "peak_active": 0, "cancelled": 0, "durations": []},
+        ),
+    )
+    monkeypatch.setattr(miles, "_save_completed_groups", lambda *_args: None)
+    args = SimpleNamespace(
+        n_samples_per_prompt=2,
+        rollout_batch_size=1,
+        yeto_rl_sync_preset="decoupled",
+        yeto_rl_policy_token=token,
+        yeto_rl_completed_groups_path=str(tmp_path / "island.pt"),
+        yeto_rl_event_tape=str(tmp_path / "events.jsonl"),
+        yeto_rl_learner_id=0,
+    )
+
+    result = miles.generate_rollout(args, 3, SimpleNamespace(buffer=[]))
+
+    assert result is output
 
 
 def test_island_checkpoint_restores_only_complete_same_policy_groups(

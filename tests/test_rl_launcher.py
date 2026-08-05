@@ -18,6 +18,8 @@ from yeto.launcher import (
 )
 from yeto.rl import MILES_COMMIT, MILES_PEFT_VERSION, MILES_REPOSITORY
 from yeto.rl import learner as rl_learner
+from yeto.rl.core import CanonicalTensorSpec
+from yeto.rl.decoupled import DecoupledBridgeConfig
 from yeto.rl.learner import build_miles_argv
 from yeto.rl.miles import verify_miles_revision
 
@@ -74,6 +76,65 @@ def test_init_rl_cli_and_strict_preset_are_the_public_contract():
         args.wire_dtype,
     ) == (1, 2, 0, 1, 0.0, "none", 1.0, 0.0, 0.0, "f32")
     assert not hasattr(args, "rl_global_rounds")
+
+
+def test_decoupled_rl_preset_fixes_the_fragment_outer_contract():
+    args = _args(
+        (
+            "--rl-sync-preset",
+            "decoupled",
+            "--fragments",
+            "4",
+            "--pipeline",
+            "2",
+            "--local-rl-rounds-per-sync",
+            "3",
+        )
+    )
+
+    _prepare_rl_args(args)
+
+    assert args.total_steps == 3
+    assert args.rl_total_fragment_steps == 12
+    assert (
+        args.fragments,
+        args.quorum,
+        args.grace_ms,
+        args.pipeline,
+        args.sync_interval_steps,
+        args.delta_correction,
+        args.outer_lr,
+        args.outer_momentum,
+        args.merge_alpha,
+        args.wire_dtype,
+        args.fragment_pattern,
+    ) == (4, 2, 0, 2, 3.0, "none", 0.7, 0.9, 0.0, "f32", "binpack")
+    command = syncer_command(args, 2, binary="syncer")
+    assert "--total-steps 12" in command
+
+
+@pytest.mark.parametrize(
+    "extra,match",
+    [
+        (("--fragments", "1"), "at least 2 fragments"),
+        (("--fragments", "4", "--pipeline", "5"), "pipeline"),
+        (("--fragments", "4", "--local-rl-rounds-per-sync", "1"), "at least 2"),
+        (("--fragments", "4", "--fragment-pattern", "strided"), "binpack"),
+        (("--fragments", "4", "--experimental-rl-sync"), "experimental"),
+    ],
+)
+def test_decoupled_rl_rejects_values_outside_its_fixed_contract(extra, match):
+    args = _args(
+        (
+            "--rl-sync-preset",
+            "decoupled",
+            "--local-rl-rounds-per-sync",
+            "3",
+            *extra,
+        )
+    )
+    with pytest.raises(ValueError, match=match):
+        _prepare_rl_args(args)
 
 
 def test_rl_maps_long_task_and_oversampling_options_to_miles():
@@ -451,6 +512,42 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert storage.mode == _StorageMode.MOUNT
     assert storage.name.endswith("-rl-0")
     assert task.calls == ["resources", "storage"]
+
+    decoupled = _args(
+        (
+            "--gpu",
+            "aws:2x4xa100@us-east-1",
+            "--rl-sync-preset",
+            "decoupled",
+            "--fragments",
+            "4",
+            "--pipeline",
+            "2",
+            "--local-rl-rounds-per-sync",
+            "3",
+        )
+    )
+    decoupled.model_revision = "a" * 40
+    decoupled.data_revision = "b" * 40
+    decoupled.source_sha256 = "c" * 64
+    decoupled.reward_sha256 = "d" * 64
+    _prepare_rl_args(decoupled)
+    decoupled_task = make_miles_island_task(
+        decoupled,
+        parse_gpu_spec(decoupled.gpu)[0],
+        0,
+        1,
+        "127.0.0.1:29400",
+    )
+    for value in (
+        "--sync-preset decoupled",
+        "--fragments 4",
+        "--pipeline 2",
+        "--local-horizon 3",
+        "--global-rounds 3",
+        "--total-fragment-steps 12",
+    ):
+        assert value in decoupled_task.run
 
     args.spot = False
     on_demand = make_miles_island_task(
@@ -899,6 +996,107 @@ def test_miles_runner_keeps_native_arm_outside_yeto_policy_sync(monkeypatch):
         "/rollouts/{rollout_id}.pt",
     ]
     assert not hasattr(captured["miles_args"], "yeto_rl_bridge_config")
+
+
+def test_miles_runner_builds_the_decoupled_runtime_contract(monkeypatch, tmp_path):
+    captured = {}
+
+    class Provider:
+        def finalize(self):
+            pass
+
+    class Bridge:
+        def to_megatron_provider(self, load_weights):
+            assert load_weights is False
+            return Provider()
+
+    class AutoBridge:
+        @staticmethod
+        def from_hf_pretrained(*_args, **_kwargs):
+            return Bridge()
+
+    async def train(args):
+        captured["miles_args"] = args
+
+    specs = tuple(
+        CanonicalTensorSpec(
+            f"base_model.model.layer{index}.lora_A.weight",
+            (1, index + 1),
+            "float32",
+            index + 1,
+        )
+        for index in range(4)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "megatron.bridge",
+        types.SimpleNamespace(AutoBridge=AutoBridge),
+    )
+    monkeypatch.setitem(sys.modules, "train", types.SimpleNamespace(train=train))
+    monkeypatch.setattr(rl_learner, "derive_peft_lora_specs", lambda *a, **k: specs)
+    monkeypatch.setattr(
+        rl_learner,
+        "megatron_adapter_targets",
+        lambda *_args: ["layer"],
+    )
+    monkeypatch.setattr(rl_learner, "build_miles_argv", lambda *a, **k: ["train.py"])
+    monkeypatch.setattr(
+        rl_learner,
+        "_parse_miles_args",
+        lambda argv: argparse.Namespace(argv=argv),
+    )
+    args = argparse.Namespace(
+        trust_remote_code=True,
+        lora_r=4,
+        lora_targets="all-linear",
+        learner_id=0,
+        model="org/model",
+        data="org/data",
+        model_revision="a" * 40,
+        data_revision="b" * 40,
+        reward_sha256="c" * 64,
+        source_sha256="d" * 64,
+        completed_groups_path=str(tmp_path / "island.pt"),
+        event_tape=str(tmp_path / "events.jsonl"),
+        syncer="127.0.0.1:29400",
+        global_rounds=3,
+        sync_preset="decoupled",
+        fragments=2,
+        pipeline=2,
+        local_horizon=4,
+        total_fragment_steps=6,
+        learner_budget_steps=3,
+        optimizer_steps=1,
+        wan_streams=0,
+        audit_dir=None,
+    )
+
+    rl_learner.run_miles(
+        args,
+        model_path="/model",
+        prompt_path="/prompts.jsonl",
+    )
+
+    miles_args = captured["miles_args"]
+    assert isinstance(miles_args.yeto_rl_bridge_config, DecoupledBridgeConfig)
+    assert miles_args.yeto_rl_bridge_config.num_fragments == 2
+    assert miles_args.yeto_rl_bridge_config.pipeline == 2
+    assert miles_args.yeto_rl_bridge_config.local_horizon == 4
+    assert miles_args.yeto_rl_bridge_config.total_fragment_steps == 6
+    assert miles_args.yeto_rl_bridge_config.learner_budget_steps == 3
+    assert miles_args.yeto_rl_sync_preset == "decoupled"
+    assert miles_args.yeto_rl_pipeline == 2
+    assert miles_args.external_policy_sync_run_until_stop is True
+    assert len(miles_args.yeto_rl_sync_layout_fingerprint) == 64
+
+
+def test_decoupled_runner_rejects_multiple_optimizer_steps_per_rollout(tmp_path):
+    with pytest.raises(ValueError, match="one optimizer step"):
+        rl_learner.run_miles(
+            argparse.Namespace(sync_preset="decoupled", optimizer_steps=2),
+            model_path=tmp_path,
+            prompt_path=tmp_path / "prompts.jsonl",
+        )
 
 
 class _Status:
