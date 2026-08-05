@@ -519,6 +519,23 @@ def test_decoupled_checkpoint_round_trips_progress_without_local_lora(tmp_path):
     assert "tensors" not in payload and "local_lora" not in payload
 
 
+def test_decoupled_rollout_reads_snapshot_token_from_island_checkpoint(tmp_path):
+    hook_args = _checkpoint_args(tmp_path)
+    rollout_args = SimpleNamespace(**vars(hook_args))
+    snapshot = PolicySnapshot.create(3, _state(3), (1, 2))
+    miles._save_decoupled_checkpoint(
+        hook_args,
+        snapshot=snapshot,
+        optimizer_steps=3,
+        action_tokens=41,
+        rollout_metrics={},
+        local_round_stats=None,
+        completed_groups=[],
+    )
+
+    assert miles._policy_token_for_rollout(rollout_args, 3) == snapshot.token
+
+
 @pytest.mark.parametrize(
     "name,value",
     [

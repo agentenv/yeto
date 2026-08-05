@@ -494,6 +494,7 @@ def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     head = _node_start_script(plan, 0, 0)
     worker = _node_start_script(plan, 0, 1)
     assert "ray start --head" in head
+    assert "--include-dashboard=true" in head
     assert "HEAD_IP=$(getent ahostsv4 a0" in head
     assert '--node-ip-address="$HEAD_IP"' in head
     assert "python3 -m yeto.rl.learner" in head

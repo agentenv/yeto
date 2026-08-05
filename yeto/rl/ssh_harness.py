@@ -807,7 +807,7 @@ PY
             + f"HEAD_IP=$(getent ahostsv4 {shlex.quote(head)} | awk 'NR == 1 {{print $1}}'); "
             + "test -n \"$HEAD_IP\"; "
             + "ray start --head --node-ip-address=\"$HEAD_IP\" "
-            f"--port={RAY_PORT} --include-dashboard=false; "
+            f"--port={RAY_PORT} --include-dashboard=true; "
             + wait
             + "exec " + shlex.join(_learner_argv(plan, learner_id))
         )

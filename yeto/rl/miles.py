@@ -111,6 +111,9 @@ def _policy_token_for_rollout(args, rollout_id: int) -> str:
     if getattr(args, "yeto_rl_sync_preset", "strict-avg") != "decoupled":
         return _policy_token(rollout_id)
     token = getattr(args, "yeto_rl_policy_token", None)
+    if token is None:
+        checkpoint = _load_decoupled_checkpoint(args)
+        token = None if checkpoint is None else checkpoint["policy_token"]
     try:
         token_rollout_id, _ = parse_policy_snapshot_token(token)
     except ValueError as error:
