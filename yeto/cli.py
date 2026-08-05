@@ -120,6 +120,30 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="optional Miles group filter; use the nonzero-reward-variance "
         "filter with oversampling for variance-aware GRPO",
     )
+    rl.add_argument(
+        "--dynamic-sampling-max-replacements",
+        type=int,
+        default=None,
+        help=(
+            "bound zero-variance rollout replacements; with the stock "
+            "nonzero-variance filter, automatically use Yeto's bounded "
+            "fallback after this many rejected groups"
+        ),
+    )
+    rl.add_argument(
+        "--rl-offload-train",
+        action="store_true",
+        help=(
+            "offload the trainer between colocated rollout steps; recommended "
+            "for large multi-GPU LoRA runs"
+        ),
+    )
+    rl.add_argument(
+        "--rl-distributed-timeout-minutes",
+        type=int,
+        default=10,
+        help="bounded Miles distributed/Gloo timeout (default: 10 minutes)",
+    )
     rl.add_argument("--rollout-max-response-len", type=int, default=32768)
     rl.add_argument("--custom-generate-function-path", default=None)
     rl.add_argument("--use-session-server", action="store_true")

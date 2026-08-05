@@ -30,6 +30,7 @@ from yeto.rl.core import (
 )
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 from yeto.rl.miles import MilesPolicySync
+from yeto.rl.filters import bounded_nonzero_reward_std
 
 
 def tensors():
@@ -706,6 +707,28 @@ def test_queue_completed_groups_filters_zero_variance_groups_and_records_replace
         "dropped_groups": 1,
         "drop_reasons": {"zero_std": 1},
     }
+
+
+def test_bounded_variance_filter_forces_progress_after_replacement_budget():
+    def sample(index, reward):
+        return SimpleNamespace(index=index, reward=reward)
+
+    args = SimpleNamespace(
+        yeto_rl_policy_version=0,
+        yeto_rl_dynamic_sampling_max_replacements=1,
+    )
+    first = bounded_nonzero_reward_std(args, [sample(1, 0.0), sample(2, 0.0)])
+    second = bounded_nonzero_reward_std(args, [sample(3, 0.0), sample(4, 0.0)])
+    mixed = bounded_nonzero_reward_std(args, [sample(5, 0.0), sample(6, 1.0)])
+    repeated = bounded_nonzero_reward_std(args, [sample(3, 0.0), sample(4, 0.0)])
+
+    assert (first.keep, second.keep, mixed.keep, repeated.keep) == (
+        False,
+        True,
+        True,
+        True,
+    )
+    assert args._yeto_bounded_filter_state["forced"] == 1
 
 
 def test_miles_policy_hook_uses_public_trainable_state_api(tmp_path, monkeypatch):

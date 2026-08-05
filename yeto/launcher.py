@@ -602,6 +602,16 @@ def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
         raise ValueError("RL v0 requires --rollout-max-response-len > 0")
     if args.cybergym_timeout <= 0:
         raise ValueError("RL v0 requires a positive CyberGym timeout")
+    if args.rl_distributed_timeout_minutes <= 0:
+        raise ValueError(
+            "RL v0 requires --rl-distributed-timeout-minutes > 0"
+        )
+    if args.dynamic_sampling_max_replacements is not None and (
+        args.dynamic_sampling_max_replacements < 0
+    ):
+        raise ValueError(
+            "RL --dynamic-sampling-max-replacements must be non-negative"
+        )
     if args.rl_sync_preset == "strict-avg":
         if args.local_rl_rounds_per_sync != 1:
             raise ValueError("RL v0 requires --local-rl-rounds-per-sync 1")
@@ -630,6 +640,25 @@ def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
             "variance-aware RL filtering requires --over-sampling-batch-size "
             "greater than --rollout-batch-size"
         )
+    if args.dynamic_sampling_max_replacements is not None:
+        if dynamic_filter is None:
+            raise ValueError(
+                "--dynamic-sampling-max-replacements requires "
+                "--dynamic-sampling-filter-path"
+            )
+        stock_filter = (
+            "miles.rollout.filter_hub.dynamic_sampling_filters."
+            "check_reward_nonzero_std"
+        )
+        bounded_filter = "yeto.rl.filters.bounded_nonzero_reward_std"
+        if dynamic_filter == stock_filter:
+            args.dynamic_sampling_filter_path = bounded_filter
+        elif dynamic_filter != bounded_filter:
+            raise ValueError(
+                "--dynamic-sampling-max-replacements is only supported with "
+                "the stock nonzero-variance filter or "
+                "yeto.rl.filters.bounded_nonzero_reward_std"
+            )
     if not args.use_session_server and (
         args.session_server_ip is not None
         or args.session_server_port is not None
@@ -998,6 +1027,7 @@ def make_miles_island_task(
         f" --groups-per-round {args.rollout_batch_size}"
         f" --samples-per-group {args.n_samples_per_prompt}"
         f" --over-sampling-batch-size {args.over_sampling_batch_size}"
+        f" --rl-distributed-timeout-minutes {args.rl_distributed_timeout_minutes}"
         " --optimizer-steps 1"
         f" --rollout-max-response-len {args.rollout_max_response_len}"
         f" --completed-groups-path {shlex.quote(args.rl_completed_groups_path)}"
@@ -1018,6 +1048,13 @@ def make_miles_island_task(
             " --dynamic-sampling-filter-path "
             f"{shlex.quote(dynamic_filter)}"
         )
+    if args.dynamic_sampling_max_replacements is not None:
+        flags += (
+            " --dynamic-sampling-max-replacements "
+            f"{args.dynamic_sampling_max_replacements}"
+        )
+    if args.rl_offload_train:
+        flags += " --rl-offload-train"
     if args.expert_parallel is not None:
         flags += f" --expert-parallel {args.expert_parallel}"
     if args.custom_generate_function_path:

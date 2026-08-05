@@ -105,6 +105,22 @@ GRPO groups and generating replacements:
   miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
 ```
 
+For CyberGym, also bound replacement sampling and use the safer large-model
+weight-publication path:
+
+```bash
+--dynamic-sampling-max-replacements 8 \
+--rl-offload-train \
+--rl-distributed-timeout-minutes 10
+```
+
+The stock Miles filter path is rewritten to Yeto's bounded filter. It prefers
+non-zero-variance groups, rejects at most eight zero-variance groups, then
+accepts a bounded fallback and records `rl/dynamic_filter/forced_groups`.
+This avoids an unbounded replacement loop while retaining the variance
+preference. `--rl-offload-train` rebuilds process groups before the external
+weight update, and the distributed timeout makes a stuck barrier fail fast.
+
 The harness records these settings in the content-bound plan and forwards
 them to both learners and the syncer. With `--total-steps 55`, decoupled
 execution uses `8 * 55 = 440` fragment steps, while still applying one local

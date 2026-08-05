@@ -289,6 +289,18 @@ def _validate_plan(plan: dict[str, Any]) -> None:
             raise HarnessError(
                 "variance-aware filtering requires oversampling beyond the training batch"
             )
+    max_replacements = learner.get("dynamic_sampling_max_replacements")
+    if max_replacements is not None and (
+        not isinstance(max_replacements, int) or max_replacements < 0
+    ):
+        raise HarnessError(
+            "plan has an invalid dynamic_sampling_max_replacements"
+        )
+    timeout_minutes = learner.get("rl_distributed_timeout_minutes", 10)
+    if not isinstance(timeout_minutes, int) or timeout_minutes <= 0:
+        raise HarnessError(
+            "plan has an invalid rl_distributed_timeout_minutes"
+        )
 
 
 def load_plan(path: str | Path) -> tuple[Path, dict[str, Any]]:
@@ -441,6 +453,13 @@ def prepare(namespace) -> Path:
             "over_sampling_batch_size": args.over_sampling_batch_size,
             "dynamic_sampling_filter_path": getattr(
                 args, "dynamic_sampling_filter_path", None
+            ),
+            "dynamic_sampling_max_replacements": getattr(
+                args, "dynamic_sampling_max_replacements", None
+            ),
+            "rl_offload_train": bool(getattr(args, "rl_offload_train", False)),
+            "rl_distributed_timeout_minutes": getattr(
+                args, "rl_distributed_timeout_minutes", 10
             ),
             "optimizer_steps": 1,
             "rollout_max_response_len": args.rollout_max_response_len,
@@ -792,6 +811,10 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         ("--groups-per-round", learner["groups_per_round"]),
         ("--samples-per-group", learner["samples_per_group"]),
         ("--over-sampling-batch-size", learner["over_sampling_batch_size"]),
+        (
+            "--rl-distributed-timeout-minutes",
+            learner.get("rl_distributed_timeout_minutes", 10),
+        ),
         ("--optimizer-steps", learner["optimizer_steps"]),
         ("--rollout-max-response-len", learner["rollout_max_response_len"]),
         ("--completed-groups-path", "/workspace/state/island-checkpoint.pt"),
@@ -807,6 +830,13 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         ("--wan-streams", learner["wan_streams"]),
         ("--miles-root", "/workspace/miles"),
     )
+    if learner.get("dynamic_sampling_max_replacements") is not None:
+        values.extend(
+            (
+                "--dynamic-sampling-max-replacements",
+                str(learner["dynamic_sampling_max_replacements"]),
+            )
+        )
     if learner.get("dynamic_sampling_filter_path"):
         values.extend(
             (
@@ -814,6 +844,8 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
                 learner["dynamic_sampling_filter_path"],
             )
         )
+    if learner.get("rl_offload_train"):
+        values.append("--rl-offload-train")
     if learner.get("data_revision") is not None:
         values.extend(("--data-revision", learner["data_revision"]))
     if learner.get("expert_parallel") is not None:

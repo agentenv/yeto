@@ -193,6 +193,13 @@ def _island_checkpoint_config(args) -> dict[str, Any]:
         "dynamic_sampling_filter_path": getattr(
             args, "dynamic_sampling_filter_path", None
         ),
+        "dynamic_sampling_max_replacements": getattr(
+            args, "dynamic_sampling_max_replacements", None
+        ),
+        "rl_offload_train": bool(getattr(args, "rl_offload_train", False)),
+        "rl_distributed_timeout_minutes": getattr(
+            args, "rl_distributed_timeout_minutes", 10
+        ),
         "reward_sha256": args.yeto_rl_reward_sha256,
         "rollout_batch_size": args.rollout_batch_size,
         "rollout_max_response_len": args.rollout_max_response_len,
@@ -705,6 +712,11 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
                 ),
             }
         )
+        bounded_state = getattr(args, "_yeto_bounded_filter_state", None)
+        if isinstance(bounded_state, Mapping):
+            round_metrics["rl/dynamic_filter/forced_groups"] = float(
+                bounded_state.get("forced", 0)
+            )
         if dynamic_stats.get("drop_reasons"):
             round_metrics["rl/dynamic_filter/drop_reasons"] = json.dumps(
                 dynamic_stats["drop_reasons"], sort_keys=True

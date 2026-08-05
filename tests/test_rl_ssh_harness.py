@@ -528,6 +528,9 @@ def test_decoupled_plan_propagates_fragment_and_variance_filter_settings():
                 "miles.rollout.filter_hub.dynamic_sampling_filters."
                 "check_reward_nonzero_std"
             ),
+            "dynamic_sampling_max_replacements": 8,
+            "rl_offload_train": True,
+            "rl_distributed_timeout_minutes": 7,
         }
     )
     ssh_harness._validate_plan(plan)
@@ -548,6 +551,9 @@ def test_decoupled_plan_propagates_fragment_and_variance_filter_settings():
     assert learner[learner.index("--dynamic-sampling-filter-path") + 1].endswith(
         "check_reward_nonzero_std"
     )
+    assert learner[learner.index("--dynamic-sampling-max-replacements") + 1] == "8"
+    assert "--rl-offload-train" in learner
+    assert learner[learner.index("--rl-distributed-timeout-minutes") + 1] == "7"
 
 
 def test_verification_requires_an_exited_zero_status_container():

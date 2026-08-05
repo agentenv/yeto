@@ -102,6 +102,28 @@ def test_variance_aware_filter_requires_and_forwards_oversampling():
         _prepare_rl_args(invalid)
 
 
+def test_bounded_variance_filter_and_large_run_safety_options():
+    args = _args(
+        [
+            "--over-sampling-batch-size",
+            "8",
+            "--dynamic-sampling-filter-path",
+            "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std",
+            "--dynamic-sampling-max-replacements",
+            "4",
+            "--rl-offload-train",
+            "--rl-distributed-timeout-minutes",
+            "7",
+        ]
+    )
+    _prepare_rl_args(args)
+    assert args.dynamic_sampling_filter_path == (
+        "yeto.rl.filters.bounded_nonzero_reward_std"
+    )
+    assert args.rl_offload_train is True
+    assert args.rl_distributed_timeout_minutes == 7
+
+
 def test_decoupled_rl_preset_fixes_the_fragment_outer_contract():
     args = _args(
         (
@@ -616,6 +638,13 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
             "aws:2x4xa100@us-east-1",
             "--over-sampling-batch-size",
             "6",
+            "--dynamic-sampling-filter-path",
+            "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std",
+            "--dynamic-sampling-max-replacements",
+            "8",
+            "--rl-offload-train",
+            "--rl-distributed-timeout-minutes",
+            "7",
             "--custom-generate-function-path",
             "pkg.agent.generate",
             "--use-session-server",
@@ -677,6 +706,10 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert "--actor-num-nodes 2" in task.run
     assert "--actor-num-gpus-per-node 4" in task.run
     assert "--over-sampling-batch-size 6" in task.run
+    assert "--dynamic-sampling-filter-path yeto.rl.filters.bounded_nonzero_reward_std" in task.run
+    assert "--dynamic-sampling-max-replacements 8" in task.run
+    assert "--rl-offload-train" in task.run
+    assert "--rl-distributed-timeout-minutes 7" in task.run
     assert "--custom-generate-function-path pkg.agent.generate" in task.run
     assert "--use-session-server" in task.run
     assert "--session-server-ip 127.0.0.1" in task.run

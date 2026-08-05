@@ -44,6 +44,9 @@ def parse_args(argv=None):
     parser.add_argument("--samples-per-group", type=int, required=True)
     parser.add_argument("--over-sampling-batch-size", type=int, required=True)
     parser.add_argument("--dynamic-sampling-filter-path", default=None)
+    parser.add_argument("--dynamic-sampling-max-replacements", type=int, default=None)
+    parser.add_argument("--rl-offload-train", action="store_true")
+    parser.add_argument("--rl-distributed-timeout-minutes", type=int, default=10)
     parser.add_argument("--optimizer-steps", type=int, required=True)
     parser.add_argument("--rollout-max-response-len", type=int, required=True)
     parser.add_argument("--custom-generate-function-path", default=None)
@@ -242,7 +245,11 @@ def build_miles_argv(
         "--num-gpus-per-node", str(args.actor_num_gpus_per_node),
         "--rollout-num-gpus-per-engine", "1",
         "--colocate",
-        "--no-offload-train",
+        (
+            "--offload-train"
+            if getattr(args, "rl_offload_train", False)
+            else "--no-offload-train"
+        ),
         "--sglang-mem-fraction-static", "0.4",
         "--tensor-model-parallel-size", "1",
         "--pipeline-model-parallel-size", "1",
@@ -289,6 +296,12 @@ def build_miles_argv(
         "--sglang-max-lora-rank", str(args.lora_r),
         "--pin-rollout-manager-to-head",
     ]
+    values.extend(
+        (
+            "--distributed-timeout-minutes",
+            str(getattr(args, "rl_distributed_timeout_minutes", 10)),
+        )
+    )
     chat_template_kwargs = getattr(args, "apply_chat_template_kwargs", None)
     if chat_template_kwargs:
         values.extend(
@@ -538,6 +551,9 @@ def run_miles(
         miles_args.yeto_rl_lora_config_hash = lora_config_hash
         miles_args.yeto_rl_layout_hash = layout_hash
         miles_args.yeto_rl_reward_sha256 = args.reward_sha256
+        miles_args.yeto_rl_dynamic_sampling_max_replacements = getattr(
+            args, "dynamic_sampling_max_replacements", None
+        )
         miles_args.yeto_rl_completed_groups_path = args.completed_groups_path
         miles_args.yeto_rl_event_tape = args.event_tape
         miles_args.yeto_rl_learner_id = args.learner_id

@@ -311,10 +311,27 @@ groups before the training batch is formed:
 ```
 
 `--over-sampling-batch-size` must be greater than the training batch when the
-filter is enabled. Miles keeps generating replacement waves until four
-non-zero-variance groups are available. Yeto records generated, accepted,
-dropped, replacement, and drop-reason metrics in the round evidence, so the
-extra rollout work is visible in the benchmark report.
+filter is enabled. For external rewards such as CyberGym, bound the replacement
+work and use the colocated weight-sync safety settings:
+
+```bash
+  --dynamic-sampling-max-replacements 8 \
+  --rl-offload-train \
+  --rl-distributed-timeout-minutes 10
+```
+
+When the stock Miles filter path is selected, Yeto automatically uses its
+bounded equivalent. It prefers non-zero-variance groups, rejects at most the
+configured number of zero-variance groups, then accepts one bounded fallback so
+the run cannot spend an unbounded time searching for signal. The fallback is
+reported as `rl/dynamic_filter/forced_groups`. Yeto also records generated,
+accepted, dropped, replacement, and drop-reason metrics in the round evidence,
+so the extra rollout work is visible in the benchmark report.
+
+`--rl-offload-train` rebuilds the colocated training/rollout process groups
+before publishing updated weights; this is the safer setting for a large model
+when the first post-training `update_weights` call has timed out. The timeout
+is a fail-fast bound for the distributed barrier, not a quality setting.
 
 `--trust-remote-code` is required by the pinned Miles model-loading path. Keep
 model and dataset revisions immutable and enable it only for trusted sources.
