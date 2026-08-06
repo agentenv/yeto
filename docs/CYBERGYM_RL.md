@@ -47,7 +47,54 @@ python -m yeto_miles_cybergym.prompts \
   --output ./cybergym_prompts.jsonl
 ```
 
-Pass that file and reward callable to `yeto launch --training-mode rl`.
+### Text-only Level 1 approximation
+
+The Miles rollout remains a one-shot text generation rather than a CyberGym
+agent with a source workspace and shell. To give that rollout the information
+available at Level 1, materialize source-enriched prompt rows before training
+or evaluation:
+
+```bash
+python -m yeto_miles_cybergym.text_level1 \
+  --prompts ./train-110-curriculum.jsonl \
+  --tasks /path/to/cybergym-data/tasks.json \
+  --data-root /path/to/cybergym-data \
+  --output ./train-110-text-level1.jsonl \
+  --max-source-chars 12000 \
+  --chunk-lines 80 \
+  --max-snippets 6
+```
+
+`--data-root` may be either the dataset checkout containing `data/` or the
+`data/` directory itself. Run the same command for the held-out prompt file.
+The builder reads only the `repo-vul.tar.gz` and `description.txt` declared by
+`task_difficulty.level1`. It ignores generated/build/vendor trees, divides
+recognized source files into bounded chunks, ranks them deterministically by
+token overlap with the description, and places the highest-ranked excerpts in
+the final user message. Archive links are ignored without being followed. It
+does not use `error.txt`, `patch.diff`, or the fixed repository.
+
+Every output row retains its original label, tools, system messages, task
+instruction, and task metadata. It also records the description/archive
+SHA-256 values, selected file and line ranges, excerpt hashes, and these
+explicit labels:
+
+```json
+{
+  "cybergym_prompt_level": "text_level1",
+  "cybergym_official_level1": false
+}
+```
+
+This is a **text-only approximation of Level 1**, not an official complete
+Level 1 run: the model cannot browse the repository, invoke tools, iterate on a
+PoC, or validate against the fixed runner. GRPO, rollout grouping, and the
+existing CyberGym reward callable are unchanged. Set the source-character
+budget and RL context length together so the chat template does not truncate
+the excerpts.
+
+Pass the enriched file and reward callable to
+`yeto launch --training-mode rl`.
 `--cybergym-url`, `--cybergym-agent-id`, and `--cybergym-timeout` are forwarded
 to every Miles island. Set `CYBERGYM_API_KEY` in the submitting environment
 when authentication is required; Yeto forwards it through the job environment
