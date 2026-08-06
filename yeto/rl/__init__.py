@@ -1,7 +1,7 @@
 """Pinned Miles reinforcement-learning integration."""
 
 MILES_REPOSITORY = "https://github.com/agentenv/miles"
-MILES_COMMIT = "f8c0726dc33e8e516477129c964b2e39eaccbc02"
+MILES_COMMIT = "ad5ba5a7c98ad1f13d313618ac8d8106e9b355d7"
 MILES_PEFT_VERSION = "0.20.0"
 MILES_IMAGE = (
     "docker:radixark/miles@sha256:"

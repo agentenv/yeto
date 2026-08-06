@@ -1471,7 +1471,10 @@ class DecoupledMilesPolicySync(MilesPolicySync):
             batch=batch,
             submissions=submissions,
         )
-        if self.bridge.finalizing:
+        if self.bridge.finalizing or any(
+            submission.global_step == self.args.yeto_rl_total_fragment_steps
+            for submission in submissions
+        ):
             return await self._finish(
                 policy_version=next_rollout_id,
                 stats=stats,

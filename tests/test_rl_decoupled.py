@@ -1315,6 +1315,64 @@ def test_decoupled_hook_records_local_work_when_finalization_is_already_pending(
     assert final["sync/fragment_payload_bytes_received"] == 16
 
 
+def test_decoupled_hook_waits_after_submitting_the_last_fragment_step(tmp_path):
+    args = _checkpoint_args(tmp_path)
+    args.yeto_rl_total_fragment_steps = 2
+    current = _state(0)
+    snapshot = PolicySnapshot.create(0, current, (0, 0))
+    args.yeto_rl_policy_token = snapshot.token
+
+    class Actor:
+        async def export_trainable_state(self):
+            return object()
+
+    class Bridge:
+        finalizing = False
+        fragment_versions = (0, 0)
+
+        def drain_broadcasts(self, local, **_progress):
+            return BroadcastBatch(local, ())
+
+        def submit_ready(self, _local, **_progress):
+            return (FragmentSubmission(1, 2, 1, 0, 2, 5, 0.5, 8, 0.1),)
+
+    actor = Actor()
+    hook = DecoupledMilesPolicySync(args)
+    hook.actor_model = actor
+    hook.bridge = Bridge()
+    hook.current = current
+    hook.snapshot = snapshot
+    hook._canonical_at_progress = lambda _exported, version: _state(version)
+    hook._round_stats = lambda *_args, **_kwargs: _stats(0)
+    hook._record_local_round = lambda *_args, **_kwargs: None
+    hook._save_progress = lambda *_args, **_kwargs: None
+
+    async def publish(_snapshot):
+        pass
+
+    hook._publish_snapshot = publish
+    finalization = []
+
+    async def finish(*, policy_version, stats):
+        finalization.append((policy_version, stats))
+        return True
+
+    hook._finish = finish
+
+    should_stop = asyncio.run(
+        hook._after_local_train(
+            rollout_id=0,
+            actor_model=actor,
+            rollout_data=object(),
+        )
+    )
+
+    assert should_stop
+    assert len(finalization) == 1
+    assert finalization[0][0] == 1
+    assert finalization[0][1].delta_l2_norm == 0.5
+
+
 def test_decoupled_hook_freezes_at_benchmark_budget_and_stops_after_final_cut(tmp_path):
     args = _checkpoint_args(tmp_path)
     args.yeto_rl_event_tape = str(tmp_path / "events.jsonl")
