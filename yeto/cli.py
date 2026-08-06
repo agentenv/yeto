@@ -1276,6 +1276,10 @@ def cmd_launch_head(args) -> int:
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
     if args.training_mode == "rl" and os.environ.get("CYBERGYM_API_KEY"):
         envs["CYBERGYM_API_KEY"] = os.environ["CYBERGYM_API_KEY"]
+    if args.training_mode == "rl":
+        for name in ("CYBERGYM_REWARD_SCHEME", "CYBERGYM_REWARD_VIEW"):
+            if os.environ.get(name):
+                envs[name] = os.environ[name]
     job_task = sky.Task(
         name="yeto-head-job",
         run=(

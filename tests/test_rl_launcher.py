@@ -622,6 +622,8 @@ def test_miles_tasks_mount_the_same_attested_initial_adapter(
 
 def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch):
     monkeypatch.setenv("CYBERGYM_API_KEY", "test-secret")
+    monkeypatch.setenv("CYBERGYM_REWARD_SCHEME", "shaped_v1")
+    monkeypatch.setenv("CYBERGYM_REWARD_VIEW", "train")
     monkeypatch.setitem(
         sys.modules,
         "sky",
@@ -698,6 +700,8 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert task.envs["CYBERGYM_AGENT_ID"] == "benchmark-agent"
     assert task.envs["CYBERGYM_TIMEOUT"] == "90.0"
     assert task.envs["CYBERGYM_API_KEY"] == "test-secret"
+    assert task.envs["CYBERGYM_REWARD_SCHEME"] == "shaped_v1"
+    assert task.envs["CYBERGYM_REWARD_VIEW"] == "train"
     assert "python3 -m yeto.rl.learner" in task.run
     assert "--initial-adapter" not in task.run
     assert "--num-learners" not in task.run

@@ -1128,6 +1128,9 @@ def make_miles_island_task(
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
     if os.environ.get("CYBERGYM_API_KEY"):
         envs["CYBERGYM_API_KEY"] = os.environ["CYBERGYM_API_KEY"]
+    for name in ("CYBERGYM_REWARD_SCHEME", "CYBERGYM_REWARD_VIEW"):
+        if os.environ.get(name):
+            envs[name] = os.environ[name]
     setup_steps = [WAN_TUNING, HF_TOKEN_ENV, miles_setup]
     if getattr(args, "rl_initial_adapter", None) is not None:
         setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")

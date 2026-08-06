@@ -24,6 +24,8 @@ DEFAULT_SERVER_URL = "http://127.0.0.1:8666"
 DEFAULT_AGENT_ID = "yeto_agent"
 DEFAULT_SALT = "CyberGym"
 DEFAULT_TIMEOUT = 60.0
+DEFAULT_REWARD_SCHEME = "binary"
+DEFAULT_REWARD_VIEW = "train"
 
 _SUBMISSION_LOCKS: dict[tuple[str, str, str, bytes], threading.Lock] = {}
 _SUBMISSION_LOCKS_GUARD = threading.Lock()
@@ -38,6 +40,8 @@ class CyberGymConfig:
     salt: str = DEFAULT_SALT
     api_key: str = ""
     timeout: float = DEFAULT_TIMEOUT
+    reward_scheme: str = DEFAULT_REWARD_SCHEME
+    reward_view: str = DEFAULT_REWARD_VIEW
 
     @classmethod
     def from_env(cls) -> "CyberGymConfig":
@@ -48,12 +52,20 @@ class CyberGymConfig:
             raise ValueError("CYBERGYM_TIMEOUT must be a positive number") from exc
         if timeout <= 0:
             raise ValueError("CYBERGYM_TIMEOUT must be a positive number")
+        reward_scheme = os.environ.get("CYBERGYM_REWARD_SCHEME", DEFAULT_REWARD_SCHEME)
+        if reward_scheme not in ("binary", "shaped_v1"):
+            raise ValueError("CYBERGYM_REWARD_SCHEME must be binary or shaped_v1")
+        reward_view = os.environ.get("CYBERGYM_REWARD_VIEW", DEFAULT_REWARD_VIEW)
+        if reward_view not in ("train", "final"):
+            raise ValueError("CYBERGYM_REWARD_VIEW must be train or final")
         return cls(
             server_url=os.environ.get("CYBERGYM_URL", DEFAULT_SERVER_URL).rstrip("/"),
             agent_id=os.environ.get("CYBERGYM_AGENT_ID", DEFAULT_AGENT_ID),
             salt=os.environ.get("CYBERGYM_SALT", DEFAULT_SALT),
             api_key=os.environ.get("CYBERGYM_API_KEY", ""),
             timeout=timeout,
+            reward_scheme=reward_scheme,
+            reward_view=reward_view,
         )
 
 
@@ -132,10 +144,11 @@ def _submit_one(sample: Any, config: CyberGymConfig) -> float:
         "file": ("poc", poc_bytes, "application/octet-stream"),
     }
     headers = {"X-API-Key": config.api_key} if config.api_key else {}
+    endpoint = "/score-poc" if config.reward_scheme == "shaped_v1" else "/submit-vul"
     try:
         with _submission_lock(config, task_id, poc_bytes):
             response = requests.post(
-                f"{config.server_url}/submit-vul",
+                f"{config.server_url}{endpoint}",
                 files=files,
                 headers=headers,
                 timeout=config.timeout,
@@ -154,6 +167,13 @@ def _submit_one(sample: Any, config: CyberGymConfig) -> float:
         raise RuntimeError("CyberGym returned a non-JSON success response") from exc
     if not isinstance(result, Mapping):
         raise RuntimeError("CyberGym returned a JSON value instead of an object")
+    if config.reward_scheme == "shaped_v1":
+        reward_value = result.get(f"{config.reward_view}_reward")
+        if isinstance(reward_value, bool) or not isinstance(reward_value, (int, float)):
+            raise RuntimeError(
+                "CyberGym shaped reward response is missing the selected reward"
+            )
+        return float(reward_value)
     return compute_reward(result.get("exit_code", -1))
 
 

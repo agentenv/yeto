@@ -301,6 +301,13 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise HarnessError(
             "plan has an invalid rl_distributed_timeout_minutes"
         )
+    if learner.get("cybergym_reward_scheme", "binary") not in {
+        "binary",
+        "shaped_v1",
+    }:
+        raise HarnessError("plan has an invalid cybergym_reward_scheme")
+    if learner.get("cybergym_reward_view", "train") not in {"train", "final"}:
+        raise HarnessError("plan has an invalid cybergym_reward_view")
 
 
 def load_plan(path: str | Path) -> tuple[Path, dict[str, Any]]:
@@ -479,6 +486,10 @@ def prepare(namespace) -> Path:
             "cybergym_url": args.cybergym_url,
             "cybergym_agent_id": args.cybergym_agent_id,
             "cybergym_timeout": args.cybergym_timeout,
+            "cybergym_reward_scheme": os.environ.get(
+                "CYBERGYM_REWARD_SCHEME", "binary"
+            ),
+            "cybergym_reward_view": os.environ.get("CYBERGYM_REWARD_VIEW", "train"),
         },
     }
     _validate_plan(plan)
@@ -891,6 +902,8 @@ def _node_start_script(
         else ""
     )
     learner = plan["learner"]
+    reward_scheme = shlex.quote(learner.get("cybergym_reward_scheme", "binary"))
+    reward_view = shlex.quote(learner.get("cybergym_reward_view", "train"))
     data_volume = (
         '  --volume "$RUN/data:/workspace/data:ro" \\\n'
         if learner.get("data_local_path") is not None
@@ -950,6 +963,8 @@ docker run --detach \
   --env CYBERGYM_URL={shlex.quote(learner['cybergym_url'])} \
   --env CYBERGYM_AGENT_ID={shlex.quote(learner['cybergym_agent_id'])} \
   --env CYBERGYM_TIMEOUT={shlex.quote(str(learner['cybergym_timeout']))} \
+  --env CYBERGYM_REWARD_SCHEME={reward_scheme} \
+  --env CYBERGYM_REWARD_VIEW={reward_view} \
 {data_volume}  --volume "$RUN/source:/workspace/yeto:ro" \
   --volume "$RUN/miles:/workspace/miles" \
   --volume "$RUN/island-{learner_id}/state:/workspace/state" \

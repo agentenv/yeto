@@ -613,6 +613,9 @@ def test_learner_command_uses_current_multinode_miles_contract():
 
 def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     plan = _plan()
+    plan["learner"].update(
+        {"cybergym_reward_scheme": "shaped_v1", "cybergym_reward_view": "train"}
+    )
     syncer = _syncer_argv(plan)
     assert syncer[syncer.index("--learners") + 1] == "2"
     assert syncer[syncer.index("--quorum") + 1] == "2"
@@ -630,6 +633,8 @@ def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     assert "ray start --address=a0:6379" in worker
     assert "python3 -m yeto.rl.learner" not in worker
     for script in (head, worker):
+        assert "--env CYBERGYM_REWARD_SCHEME=shaped_v1" in script
+        assert "--env CYBERGYM_REWARD_VIEW=train" in script
         assert "export PYTHONPATH=/workspace/yeto:/workspace/miles" in script
         assert script.index("export PYTHONPATH=") < script.index("ray start")
 

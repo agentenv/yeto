@@ -76,6 +76,27 @@ def test_score_supports_miles_batch_and_does_not_hide_http_errors(monkeypatch):
         asyncio.run(reward.score(None, samples[0]))
 
 
+def test_score_uses_shaped_reward_endpoint_and_selected_view(monkeypatch):
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response(payload={"train_reward": -0.1, "final_reward": 1.0})
+
+    monkeypatch.setenv("CYBERGYM_REWARD_SCHEME", "shaped_v1")
+    monkeypatch.setenv("CYBERGYM_REWARD_VIEW", "train")
+    monkeypatch.setenv("CYBERGYM_API_KEY", "private-key")
+    monkeypatch.setattr(reward.requests, "post", post)
+    sample = SimpleNamespace(response="poc", metadata={"task_id": "arvo:1"})
+
+    assert asyncio.run(reward.score(None, sample)) == -0.1
+    assert calls[0][0] == "http://127.0.0.1:8666/score-poc"
+    assert calls[0][1]["headers"] == {"X-API-Key": "private-key"}
+
+    monkeypatch.setenv("CYBERGYM_REWARD_VIEW", "final")
+    assert asyncio.run(reward.score(None, sample)) == 1.0
+
+
 def test_score_serializes_identical_concurrent_submissions(monkeypatch):
     active = 0
     peak_active = 0

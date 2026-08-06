@@ -209,6 +209,8 @@ def test_rl_head_forwards_cybergym_secret_without_serializing_it(
     fake_sky, monkeypatch
 ):
     monkeypatch.setenv("CYBERGYM_API_KEY", "test-secret")
+    monkeypatch.setenv("CYBERGYM_REWARD_SCHEME", "shaped_v1")
+    monkeypatch.setenv("CYBERGYM_REWARD_VIEW", "train")
     monkeypatch.setattr(launcher, "prepare_launch_args", lambda args: None)
     args = cli.parse_args(
         LAUNCH_ARGS
@@ -228,6 +230,8 @@ def test_rl_head_forwards_cybergym_secret_without_serializing_it(
     (_, job_task), = fake_sky["execs"]
     assert head_task.envs is None
     assert job_task.envs["CYBERGYM_API_KEY"] == "test-secret"
+    assert job_task.envs["CYBERGYM_REWARD_SCHEME"] == "shaped_v1"
+    assert job_task.envs["CYBERGYM_REWARD_VIEW"] == "train"
     assert "test-secret" not in job_task.run
     assert "test-secret" not in json.dumps(runs.load_run("rlh")["args"])
 

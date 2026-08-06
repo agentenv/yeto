@@ -47,6 +47,20 @@ python -m yeto_miles_cybergym.prompts \
   --output ./cybergym_prompts.jsonl
 ```
 
+The default reward mode remains the vulnerable-runner binary reward. To use
+the private shaped scorer, configure the Miles workers with:
+
+```bash
+export CYBERGYM_REWARD_SCHEME=shaped_v1
+export CYBERGYM_REWARD_VIEW=train  # use final for binary benchmark reporting
+export CYBERGYM_API_KEY=...
+```
+
+`shaped_v1` calls CyberGym's authenticated `/score-poc` endpoint. The server
+must have its private reward schemas and `vul-cov` runners installed. `train`
+uses `2 * shaped_score - 1`; `final` uses the vulnerable crash plus fixed
+non-crash result only.
+
 ### Text-only Level 1 approximation
 
 The Miles rollout remains a one-shot text generation rather than a CyberGym
