@@ -735,8 +735,8 @@ def test_offload_train_wakes_actor_before_adapter_export():
     calls = []
 
     class Actor:
-        async def wake_up(self):
-            calls.append("wake")
+        async def onload(self):
+            calls.append("onload")
 
     asyncio.run(
         _ensure_actor_awake_for_export(
@@ -745,7 +745,7 @@ def test_offload_train_wakes_actor_before_adapter_export():
         )
     )
 
-    assert calls == ["wake"]
+    assert calls == ["onload"]
 
 
 def test_miles_policy_hook_uses_public_trainable_state_api(tmp_path, monkeypatch):

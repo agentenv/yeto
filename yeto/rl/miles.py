@@ -300,10 +300,16 @@ async def _ensure_actor_awake_for_export(args, actor_model) -> None:
 
     if not getattr(args, "offload_train", False):
         return
-    wake_up = getattr(actor_model, "wake_up", None)
+    # The Ray actor-group facade calls this ``onload``; the underlying
+    # Megatron actor method is named ``wake_up``.  Support both APIs because
+    # pinned Miles revisions expose different layers here.
+    wake_up = getattr(actor_model, "onload", None)
+    if not callable(wake_up):
+        wake_up = getattr(actor_model, "wake_up", None)
     if not callable(wake_up):
         raise RuntimeError(
-            "Miles offload_train actor does not expose wake_up before adapter export"
+            "Miles offload_train actor group does not expose onload/wake_up "
+            "before adapter export"
         )
     await wake_up()
 
