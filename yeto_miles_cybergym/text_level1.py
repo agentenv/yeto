@@ -239,6 +239,8 @@ def _safe_member(member: tarfile.TarInfo) -> PurePosixPath | None:
     """
 
     path = PurePosixPath(member.name)
+    if member.isdir() and path == PurePosixPath("."):
+        return path
     if (
         path.is_absolute()
         or not path.parts
@@ -294,13 +296,13 @@ def _source_chunks(
             if path is None or member.isdir() or not _is_source(path):
                 continue
             if member.size < 0 or member.size > _MAX_SOURCE_FILE_BYTES:
-                raise ValueError(f"source file is too large: {member.name}")
+                continue
             handle = archive.extractfile(member)
             if handle is None:
                 raise ValueError(f"cannot read source file: {member.name}")
             payload = handle.read(_MAX_SOURCE_FILE_BYTES + 1)
             if len(payload) > _MAX_SOURCE_FILE_BYTES:
-                raise ValueError(f"source file is too large: {member.name}")
+                continue
             if b"\0" in payload:
                 continue
             lines = payload.decode("utf-8", errors="replace").splitlines(keepends=True)
